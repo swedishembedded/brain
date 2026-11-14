@@ -52,6 +52,11 @@ def _int(n):
     return f"{n:,}"
 
 
+def _noise(x):
+    """A difference that is exact arithmetic zero prints as a bound: its digits are rounding noise that depends on summation order."""
+    return "below 1e-15" if x < 1e-15 else f"{x:.1e}"
+
+
 def _w(ids):
     return " ".join(lm.TOKENS[i] for i in ids) if ids else "(none)"
 
@@ -225,7 +230,9 @@ def draft_orders():
     plain_tokens = sum(len(plain_greedy(list(p))) for p in ps)
     return (f"The {len(ps)} prompts are the distinct prefixes of 1, 2 and 3 tokens of the 30 test sentences of Volume V, Chapter 4, in order "
             "of first appearance: " + "; ".join(f"`{_w(p)}`" for p in ps) + f". Plain greedy decoding of the target generates {plain_tokens} "
-            f"tokens for them in {plain_tokens} passes. Each generation follows the rules of the previous example with the draft order and "
+            f"tokens for them in {plain_tokens} passes. The models are those of the previous example, with the interpolation ratios of Volume V, "
+            "Chapter 4 for the orders 1, 2, 3 and 4 of " + ", ".join(f"{dec._ratio(o):g}" for o in (1, 2, 3, 4))
+            + f" and its uniform floor of {lm.EPS_UNIFORM}. Each generation follows the rules of the previous example with the draft order and "
             "the k of the row. 'rejections' counts the rounds in which some proposal was not accepted; 'accepted / proposed' is the share of "
             "proposals accepted; the per-position estimate is accepted / (accepted + rejections); 'tokens per pass' is tokens / passes.\n\n"
             + _table(["draft", "k", "target passes", "tokens", "proposed", "accepted", "rejections", "accepted / proposed",
@@ -373,7 +380,9 @@ def estimator_trace():
         plain.append(best(TARGET, ctxs + plain))
     return ("One sequence generated greedily for 40 tokens after `the`, without stopping at the full stop, by the order-4 target with "
             f"the order-2 draft. Before each round the estimate is a = A / (A + R), with A and R starting at {PRIOR}; the round asks for "
-            f"the marginal window at a with c = {cost} (the previous table's rule, at most 7, and at most 40 - generated - 1). After a round "
+            f"the marginal window at a with c = {cost} (the previous table's rule, at most 7; the 'window' column is that rule's value), and "
+            "proposes the smaller of the window and 40 - generated - 1 tokens (the 'proposed' column, which is why the last round has window 7 "
+            "and 3 proposals). After a round "
             f"with proposals, A becomes {DECAY} A + (accepted) and R becomes {DECAY} R + 1 if some proposal was rejected, else {DECAY} R; "
             "a round with no proposals changes neither. The draft proposes greedily and the target verifies as before.\n\n"
             + _table(["round", "estimate before", "window", "proposed", "accepted", "emitted", "A after", "R after"], rows, "rrrrrlrr")
@@ -421,10 +430,10 @@ def four_tokens():
             "q(t) min(1, p(t) / q(t)) + (1 - sum of min(p, q)) residual(t).\n\n"
             + _table(["token", "logit", "p", "q", "kept if proposed", "min(p, q)", "residual", "emitted"], rows1)
             + f"\n\nProbability that the proposal is kept: {_f(acc)} (the sum of min(p, q)). Largest difference between 'emitted' and p: "
-            f"{max(abs(a - b) for a, b in zip(out, p)):.1e}.\n\n"
+            f"{_noise(max(abs(a - b) for a, b in zip(out, p)))}.\n\n"
             + _table(["token", "p", "q (always t1)", "residual", "emitted"], rows2)
             + f"\n\nProbability that t1 is kept: {_f(acc2)}, which is p(t1). The residual is p with t1 removed and renormalised. Largest "
-            f"difference between 'emitted' and p: {max(abs(a - b) for a, b in zip(out2, p)):.1e}.")
+            f"difference between 'emitted' and p: {_noise(max(abs(a - b) for a, b in zip(out2, p)))}.")
 
 
 def _nucleus(p, top_p):
@@ -451,13 +460,14 @@ def sampled_contexts():
             tv = 0.5 * sum(abs(a - b) for a, b in zip(p, q))
             kept_p = sum(1 for x in p if x > 0)
             rows.append((_w(ctx), "none" if top_p >= 1 else _f(top_p, 1), kept_p, _f(acc, 4), _f(1 - tv, 4), _w([d]), _f(acc2, 4),
-                         f"{max(max(abs(a - b) for a, b in zip(out, p)), max(abs(a - b) for a, b in zip(out2, p))):.1e}"))
+                         _noise(max(max(abs(a - b) for a, b in zip(out, p)), max(abs(a - b) for a, b in zip(out2, p))))))
     return ("Target p: the order-4 model's distribution after the context at temperature 1; draft q: the order-2 model's. With a "
             "top-p of 0.9 both are cut to their own nucleus (the shortest prefix in order of decreasing probability, ties to the lower id, "
             "whose cumulative probability reaches 0.9) and renormalised, as Volume V, Chapter 11 defines it; 'tokens in p' counts the "
             "tokens the target can emit. 'kept, sampled draft' is the sum of min(p, q), the probability that a proposal drawn from q is "
             "kept, beside 1 - TV(p, q) (TV is half the sum of |p - q|); 'kept, greedy draft' is p(d) for the draft's greedy token d. The "
-            "last column is the largest difference between the exact distribution of the emitted token and p, over both drafts.\n\n"
+            "last column is the largest difference between the exact distribution of the emitted token and p, over both drafts; it is zero "
+            "in exact arithmetic and printed as the bound below which the floating-point sums leave it.\n\n"
             + _table(["context", "top-p", "tokens in p", "kept, sampled draft", "1 - TV(p, q)", "greedy draft proposes", "kept, greedy draft",
                       "largest error"], rows, "llrrrlrr"))
 
@@ -496,11 +506,12 @@ def two_token_joint():
     return ("Rounds of k = 2 sampled proposals after `the`: the draft draws d1 from its order-2 distribution and d2 from its distribution "
             "after d1; the target keeps d1 with probability min(1, p(d1) / q(d1)) and, if it did, d2 with min(1, p(d2 given d1) / q(d2 given d1)); a "
             "rejection is replaced from the residual and ends the round, whose next round starts after the emitted token. The joint "
-            f"distribution of the first two emitted tokens over the 18 x 18 pairs is computed exactly.\n\n"
+            f"distribution of the first two emitted tokens over the 18 x 18 pairs is computed exactly. The two differences that are zero in exact arithmetic are printed as the bound below which the floating-point sums "
+            "leave them.\n\n"
             + _table(["quantity", "value"], [
                 ("probability that both proposals are kept", _f(both_kept, 4)),
-                ("largest difference, emitted pairs against the target's p(t1) p(t2 given t1)", f"{err:.1e}"),
-                ("total variation, emitted pairs against the target", f"{tv_spec:.1e}"),
+                ("largest difference, emitted pairs against the target's p(t1) p(t2 given t1)", _noise(err)),
+                ("total variation, emitted pairs against the target", _noise(tv_spec)),
                 ("total variation, the draft's own pairs against the target", _f(tv_draft, 4)),
             ], "lr"))
 
@@ -584,5 +595,7 @@ def dflash2_inventory():
             + _table(["tensor", "shape", "parameters"], rows, "llr")
             + f"\n\nIn all {_int(total)} parameters ({total * 2 / 1e9:.2f} GB in bf16), of which {_int(linear)} are in the matrices a pass "
             "multiplies on the device. A draft cache row of one layer holds the keys and values of one position, "
-            f"2 x {cfg['kv_heads']} x {cfg['head_dim']} values of 4 bytes = {_int(kv_row)} bytes; one sequence's cache holds:\n\n"
+            f"2 x {cfg['kv_heads']} x {cfg['head_dim']} values of 4 bytes = {_int(kv_row)} bytes. A sliding layer keeps min(positions, {_int(cfg['window'])}) + {cfg['block']} rows and the "
+            f"full layer positions + {cfg['block']} rows, so a sequence shorter than the window fills its sliding layers as well; "
+            "one sequence's cache holds:\n\n"
             + _table(["positions in the sequence", "rows of a sliding layer", "rows of the full layer", "bytes, all five layers"], crow))

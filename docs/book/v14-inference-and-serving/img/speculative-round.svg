@@ -1,4 +1,4 @@
-<!-- source-sha256: 288b6b48e83c4082179853e7000416f4165db29e213eba9e690e05599a71cc33 -->
+<!-- source-sha256: c366ab2130bff7596300ddbda4ebcfe9ee803d6fd6e6db19dccc5f634726536c -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 940 420" width="940" height="420"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="940" height="420" fill="#ffffff"/>
 <text x="110" y="64.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#4a5568" text-anchor="middle">draft proposes</text>
 <text x="110" y="171.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#4a5568" text-anchor="middle">rows of one</text>

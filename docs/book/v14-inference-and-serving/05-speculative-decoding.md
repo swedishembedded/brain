@@ -95,7 +95,7 @@ function speculative_greedy(prompt: list<int>, k: int, max_new: int, stop: int,
     return out
 ```
 
-Here `draft(c)` and `target(c)` return each model's greedy token after the context `c` (the largest probability, the lowest id on a tie), `copy` is an independent copy of a list and the list comprehension that builds `best` stands for the rows of one target pass. The window is shortened to `max_new - len(out) - 1` because a round emits at most $k + 1$ tokens and more proposals could never all be used. brain's scheduler applies the same bound, `remaining.saturating_sub(1)`, in `draft_windows` of `crates/model/src/serve/speculate.rs`.
+Here `draft(c)` and `target(c)` return each model's greedy token after the context `c` (the largest probability, the lowest id on a tie), `copy` is an independent copy of a list and the list comprehension that builds `best` stands for the rows of one target pass. The window, the number $k$ of proposals a round asks for, is shortened to `max_new - len(out) - 1` because a round emits at most $k + 1$ tokens and more proposals could never all be used. brain's scheduler applies the same bound, `remaining.saturating_sub(1)`, in `draft_windows` of `crates/model/src/serve/speculate.rs`.
 
 The models of the example are small enough to follow by hand. The target is the order-4 interpolated counting model of Volume V, Chapter 4 ("Language Modeling"), over its 18 tokens and 40 training sentences; the draft is the order-2 model of the same chapter, trained on the same sentences. The order-2 model reads one token of context where the target reads three, so it is cheaper and wrong more often, which is all a draft has to be.
 
@@ -127,7 +127,7 @@ The proof leaned on one assumption that a real engine has to earn: that row $j$ 
 The work a round saves is decided by how many proposals it keeps. Run the same loop over many prompts and three drafts of different strength: the order-1 model (no context at all), the order-2 model of the trace and the order-3 model, each against the order-4 target.
 
 <!-- worked: speculative_decoding.draft_orders -->
-The 21 prompts are the distinct prefixes of 1, 2 and 3 tokens of the 30 test sentences of Volume V, Chapter 4, in order of first appearance: `the`; `the dog`; `the dog chases`; `the cat`; `the cat sees`; `the cat near`; `the fox`; `the fox near`; `the dog near`; `the dogs`; `the dogs chase`; `the cats`; `the cats see`; `the foxes`; `the foxes see`; `the dog sees`; `the cats chase`; `the cats near`; `the cat chases`; `the foxes near`; `the dogs near`. Plain greedy decoding of the target generates 98 tokens for them in 98 passes. Each generation follows the rules of the previous example with the draft order and the k of the row. 'rejections' counts the rounds in which some proposal was not accepted; 'accepted / proposed' is the share of proposals accepted; the per-position estimate is accepted / (accepted + rejections); 'tokens per pass' is tokens / passes.
+The 21 prompts are the distinct prefixes of 1, 2 and 3 tokens of the 30 test sentences of Volume V, Chapter 4, in order of first appearance: `the`; `the dog`; `the dog chases`; `the cat`; `the cat sees`; `the cat near`; `the fox`; `the fox near`; `the dog near`; `the dogs`; `the dogs chase`; `the cats`; `the cats see`; `the foxes`; `the foxes see`; `the dog sees`; `the cats chase`; `the cats near`; `the cat chases`; `the foxes near`; `the dogs near`. Plain greedy decoding of the target generates 98 tokens for them in 98 passes. The models are those of the previous example, with the interpolation ratios of Volume V, Chapter 4 for the orders 1, 2, 3 and 4 of 1, 8, 4, 2 and its uniform floor of 0.01. Each generation follows the rules of the previous example with the draft order and the k of the row. 'rejections' counts the rounds in which some proposal was not accepted; 'accepted / proposed' is the share of proposals accepted; the per-position estimate is accepted / (accepted + rejections); 'tokens per pass' is tokens / passes.
 
 | draft | k | target passes | tokens | proposed | accepted | rejections | accepted / proposed | per-position estimate | tokens per pass | same text as plain greedy |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
@@ -150,7 +150,7 @@ The per-position estimate does not depend on $k$ in that way. Suppose that each 
 
 $$\hat\alpha = \frac{\sum a}{\sum a + n_{\mathrm{rej}}}.$$
 
-That is the table's per-position estimate: for the order-3 draft 0.869, 0.857 and 0.862 at the three windows, nearly constant, while the share accepted moved from 0.869 to 0.614. The **acceptance rate** of a draft against a target is this conditional probability: the chance that a proposal is kept by verification given that the proposals before it in the same round were kept. It is the number to compare drafts by, and the one from which the window is chosen. The order-1 draft has 0.122 to 0.140, the order-2 draft about 0.68 and the order-3 draft about 0.86.
+That is the table's per-position estimate: for the order-3 draft 0.869, 0.857 and 0.862 at the three windows, nearly constant (the order-2 draft's 0.758, 0.681 and 0.673 drift more, since the order-2 draft is the one that misses most at the first proposal), while the share accepted moved from 0.869 to 0.614. The **acceptance rate** of a draft against a target is this conditional probability: the chance that a proposal is kept by verification given that the proposals before it in the same round were kept. It is the number to compare drafts by, and the one from which the window is chosen. The order-1 draft has 0.122 to 0.140, the order-2 draft 0.67 to 0.76 (0.681 at the middle window) and the order-3 draft about 0.86.
 
 ## Expected tokens of a round
 
@@ -207,7 +207,7 @@ Tokens per sequence per unit of work, the unit being one plain decode step of th
 
 ![Tokens per unit of work against the number of proposals per round for a small draft decoder of a tenth of the target's work, at acceptance rates 0.5, 0.7 and 0.9, for one sequence (solid) and 32 sequences (dashed), with a horizontal line at 1.](img/tokens-per-work.svg)
 
-At one sequence the target's rows are free, so a free drafter should propose as many tokens as it can, and the value approaches $1/(1 - \alpha)$; in the model of the table a small decoder pays $r_{\mathrm{d}} = 0.1$ of a plain step for each proposal (an assumed ratio, not a measurement of any drafter), and its value has a peak: $k = 2$ at $\alpha = 0.5$ (1.458 tokens per unit), $k = 4$ at $\alpha = 0.7$ (1.981) and $k = 10$ at $\alpha = 0.9$ (3.431). A modelled block drafter pays one 16-row pass of the same 0.1-scaled model for 15 proposals, so at one sequence it asks for all of them and, at $\alpha = 0.9$, reaches 7.406 against the small decoder's 3.431. At 32 sequences the picture turns over, as the dashed curves of the figure show. The target's extra rows now cost almost their full share, the best window is 1 or 2 for every drafter, and the block drafter, whose 16-row pass is itself no longer free, loses to plain decoding at $\alpha = 0.5$ and $0.7$ (0.808 and 0.924 tokens per unit). Speculation is a way to spend bandwidth that would otherwise idle, and how much idles depends on how many sequences share the pass.
+At one sequence the target's rows are free, so a free drafter should propose as many tokens as it can, and the value approaches $1/(1 - \alpha)$; in the model of the table a small decoder pays $r_{\mathrm{d}} = 0.1$ of a plain step for each proposal (an assumed ratio, not a measurement of any drafter), and its value has a peak: $k = 2$ at $\alpha = 0.5$ (1.458 tokens per unit), $k = 4$ at $\alpha = 0.7$ (1.981) and $k = 10$ at $\alpha = 0.9$ (3.431). A modelled block drafter pays one 16-row pass of the same 0.1-scaled model for 15 proposals, so at one sequence it asks for all of them and, at $\alpha = 0.9$, reaches 7.406 against the small decoder's 3.431. At 32 sequences the picture turns over, as the dashed curves of the figure show. The target's extra rows now cost almost their full share, the best window is 1 for the free and the small decoder drafters at every $\alpha$ (the table's best $k$ column), 1 to 4 for the block drafter, and the block drafter, whose 16-row pass is itself no longer free, loses to plain decoding at $\alpha = 0.5$ and $0.7$ (0.808 and 0.924 tokens per unit). Speculation is a way to spend bandwidth that would otherwise idle, and how much idles depends on how many sequences share the pass.
 
 ## Choosing the window one proposal at a time
 
@@ -256,7 +256,7 @@ The marginal rule asks for more than the ratio's optimum when $\alpha$ is modera
 Run the whole loop: estimate, window, draft, verify, update, on one sequence of 40 tokens after `the`, generated without stopping at the full stop so that the text repeats.
 
 <!-- worked: speculative_decoding.estimator_trace -->
-One sequence generated greedily for 40 tokens after `the`, without stopping at the full stop, by the order-4 target with the order-2 draft. Before each round the estimate is a = A / (A + R), with A and R starting at 1.0; the round asks for the marginal window at a with c = 0.1 (the previous table's rule, at most 7, and at most 40 - generated - 1). After a round with proposals, A becomes 0.75 A + (accepted) and R becomes 0.75 R + 1 if some proposal was rejected, else 0.75 R; a round with no proposals changes neither. The draft proposes greedily and the target verifies as before.
+One sequence generated greedily for 40 tokens after `the`, without stopping at the full stop, by the order-4 target with the order-2 draft. Before each round the estimate is a = A / (A + R), with A and R starting at 1.0; the round asks for the marginal window at a with c = 0.1 (the previous table's rule, at most 7; the 'window' column is that rule's value), and proposes the smaller of the window and 40 - generated - 1 tokens (the 'proposed' column, which is why the last round has window 7 and 3 proposals). After a round with proposals, A becomes 0.75 A + (accepted) and R becomes 0.75 R + 1 if some proposal was rejected, else 0.75 R; a round with no proposals changes neither. The draft proposes greedily and the target verifies as before.
 
 | round | estimate before | window | proposed | accepted | emitted | A after | R after |
 |---:|---:|---:|---:|---:|---|---:|---:|
@@ -302,7 +302,7 @@ Four tokens t0 to t3 with logits 1.2, 0.7, 0.1 and -0.4; the target's distributi
 | t2 | 0.1 | 0.1555 | 0.2500 | 0.6218 | 0.1555 | 0.0000 | 0.1555 |
 | t3 | -0.4 | 0.0943 | 0.2500 | 0.3771 | 0.0943 | 0.0000 | 0.0943 |
 
-Probability that the proposal is kept: 0.7497 (the sum of min(p, q)). Largest difference between 'emitted' and p: 0.0e+00.
+Probability that the proposal is kept: 0.7497 (the sum of min(p, q)). Largest difference between 'emitted' and p: below 1e-15.
 
 | token | p | q (always t1) | residual | emitted |
 |---|---:|---:|---:|---:|
@@ -311,10 +311,10 @@ Probability that the proposal is kept: 0.7497 (the sum of min(p, q)). Largest di
 | t2 | 0.1555 | 0 | 0.2169 | 0.1555 |
 | t3 | 0.0943 | 0 | 0.1315 | 0.0943 |
 
-Probability that t1 is kept: 0.2833, which is p(t1). The residual is p with t1 removed and renormalised. Largest difference between 'emitted' and p: 5.6e-17.
+Probability that t1 is kept: 0.2833, which is p(t1). The residual is p with t1 removed and renormalised. Largest difference between 'emitted' and p: below 1e-15.
 <!-- /worked -->
 
-Read the first table row by row. A uniform draft under-proposes t0 and t1 (0.25 against 0.4670 and 0.2833), so those are always kept, and over-proposes t2 and t3, which are kept with probabilities 0.6218 and 0.3771. The missing mass, $0.4670 - 0.25 = 0.2170$ for t0 and $0.0333$ for t1, is the residual, renormalised to 0.8671 and 0.1329; the emitted column equals $p$ to the printed digits and to $10^{-16}$ beyond them.
+Read the first table row by row. A uniform draft under-proposes t0 and t1 (0.25 against 0.4670 and 0.2833), so those are always kept, and over-proposes t2 and t3, which are kept with probabilities 0.6218 and 0.3771. The missing mass, $0.4670 - 0.25 = 0.2170$ for t0 and $0.0333$ for t1, is the residual, renormalised to 0.8671 and 0.1329; the emitted column equals $p$ to the printed digits, and the largest difference is below $10^{-15}$, which is rounding.
 
 The second table is the case brain uses. A draft that proposes deterministically, as every drafter in this chapter does, is a point mass: $q(d) = 1$ for its proposal and 0 for every other token. The test then keeps $d$ with probability $p(d)$, and the residual is $p$ with $d$ removed and renormalised. That is the rule `verify_proposals` in `crates/model/src/serve/speculate.rs` states in its documentation, "the standard speculative-sampling test reduces to accepting a proposal `d` with probability `p(d)` ... and on rejection drawing from that distribution with `d` removed and renormalised", and its body does it with unnormalised weights: it draws a uniform number, keeps the proposal when the number times the sum of the kept weights is below the proposal's weight, and otherwise draws again over the weights with the proposal's taken out (`verify_survivors`). Several proposals are tested in order, and the first rejection ends the round:
 
@@ -323,7 +323,7 @@ function residual(p: array<real>[V], q: array<real>[V]) -> array<real>[V]:
     r = [max(0.0, p[i] - q[i]) for i in 0 .. V]
     s = sum(r)
     require s > 0, "a rejection is possible only where q exceeds p somewhere"
-    return [r[i] / s for i in 0 .. V]
+    return [r[i] / s for i in 0 .. V]   # called only after a rejection, which needs s > 0
 
 function verify_sampled(props: list<int>, p: list<array<real>[V]>, q: list<array<real>[V]>,
         rng: inout Generator) -> (int, int):
@@ -336,40 +336,40 @@ function verify_sampled(props: list<int>, p: list<array<real>[V]>, q: list<array
     return (len(props), draw(p[len(props)], rng))  # every proposal kept: a bonus token
 ```
 
-`draw` is the routine of Volume V, Chapter 11; `p[j]` is the distribution the target samples from at row `j` (after its temperature and cuts) and `q[j]` the one the proposal was drawn from, a one-hot row for a deterministic draft. A kept proposal costs one uniform number and a rejection two.
+`residual` is called only after a rejection. When $p = q$ exactly, as after a context where both toy models fall back to the same unigram, the sum $s$ is 0, but then the test keeps every proposal, since $u\,q(d) < p(d)$ holds for every uniform $u$ below 1, so no rejection occurs and no residual is needed (the worked module's enumeration gives such a residual the value 0, which is multiplied by a rejection probability of 0). `draw` is the routine of Volume V, Chapter 11; `p[j]` is the distribution the target samples from at row `j` (after its temperature and cuts) and `q[j]` the one the proposal was drawn from, a one-hot row for a deterministic draft. A kept proposal costs one uniform number and a rejection two.
 
 One position is the easy half of the argument; a round tests several positions, and the second is tested only when the first was kept, with distributions that depend on the first token. The next example checks the whole round by enumeration on the toy models: the draft samples two proposals from the order-2 model, the target tests them against the order-4 model, and the joint distribution of the first two emitted tokens is computed over all $18 \times 18$ pairs, including the pairs whose second token comes from the next round.
 
 <!-- worked: speculative_decoding.two_token_joint -->
-Rounds of k = 2 sampled proposals after `the`: the draft draws d1 from its order-2 distribution and d2 from its distribution after d1; the target keeps d1 with probability min(1, p(d1) / q(d1)) and, if it did, d2 with min(1, p(d2 given d1) / q(d2 given d1)); a rejection is replaced from the residual and ends the round, whose next round starts after the emitted token. The joint distribution of the first two emitted tokens over the 18 x 18 pairs is computed exactly.
+Rounds of k = 2 sampled proposals after `the`: the draft draws d1 from its order-2 distribution and d2 from its distribution after d1; the target keeps d1 with probability min(1, p(d1) / q(d1)) and, if it did, d2 with min(1, p(d2 given d1) / q(d2 given d1)); a rejection is replaced from the residual and ends the round, whose next round starts after the emitted token. The joint distribution of the first two emitted tokens over the 18 x 18 pairs is computed exactly. The two differences that are zero in exact arithmetic are printed as the bound below which the floating-point sums leave them.
 
 | quantity | value |
 |---|---:|
 | probability that both proposals are kept | 0.7469 |
-| largest difference, emitted pairs against the target's p(t1) p(t2 given t1) | 2.8e-17 |
-| total variation, emitted pairs against the target | 7.6e-17 |
+| largest difference, emitted pairs against the target's p(t1) p(t2 given t1) | below 1e-15 |
+| total variation, emitted pairs against the target | below 1e-15 |
 | total variation, the draft's own pairs against the target | 0.2114 |
 <!-- /worked -->
 
-The draft's own pairs are 0.2114 away from the target's in total variation; after verification the distance is $7.6 \times 10^{-17}$, rounding error. The induction behind it is the greedy one with distributions in place of tokens: if the first emitted token has distribution $p(t_1)$, then given $t_1$ the next token is either the second proposal tested against $p(\cdot \mid t_1)$ or the first token of a fresh round after $t_1$, and both have distribution $p(t_2 \mid t_1)$ by the one-position result. brain tests the same property statistically: `rejection_sampling_preserves_the_target_distribution` in `crates/model/tests/it/serve_speculative.rs` proposes the second most likely of the four tokens above 60,000 times and requires every emitted frequency within 0.01 of $p$, and `sampled_speculation_matches_the_sampled_distribution_end_to_end` compares the texts of 3,000 seeded runs with and without a drafter, requiring a total variation below 0.05.
+The draft's own pairs are 0.2114 away from the target's in total variation; after verification the distance is below $10^{-15}$, rounding error. The induction behind it is the greedy one with distributions in place of tokens: if the first emitted token has distribution $p(t_1)$, then given $t_1$ the next token is either the second proposal tested against $p(\cdot \mid t_1)$ or the first token of a fresh round after $t_1$, and both have distribution $p(t_2 \mid t_1)$ by the one-position result. brain tests the same property statistically: `rejection_sampling_preserves_the_target_distribution` in `crates/model/tests/it/serve_speculative.rs` proposes the second most likely of the four tokens above 60,000 times and requires every emitted frequency within 0.01 of $p$, and `sampled_speculation_matches_the_sampled_distribution_end_to_end` compares the texts of 3,000 seeded runs with and without a drafter, requiring a total variation below 0.05.
 
 ## The nucleus, and a drafter that never samples
 
 A served request rarely samples from the model's whole distribution. With a temperature, a top-k or a top-p, the target's $p$ is the truncated and renormalised distribution, and the proof above holds for any $p$, so the verifier must test against exactly the distribution plain sampling would draw from, cuts included. A token outside the nucleus has $p(d) = 0$, so it is never kept, however confident the draft was. The next table runs the four-token arithmetic on four contexts of the toy, with and without a top-p of 0.9, for a draft that samples from the order-2 model and for one that proposes the order-2 model's greedy token.
 
 <!-- worked: speculative_decoding.sampled_contexts -->
-Target p: the order-4 model's distribution after the context at temperature 1; draft q: the order-2 model's. With a top-p of 0.9 both are cut to their own nucleus (the shortest prefix in order of decreasing probability, ties to the lower id, whose cumulative probability reaches 0.9) and renormalised, as Volume V, Chapter 11 defines it; 'tokens in p' counts the tokens the target can emit. 'kept, sampled draft' is the sum of min(p, q), the probability that a proposal drawn from q is kept, beside 1 - TV(p, q) (TV is half the sum of |p - q|); 'kept, greedy draft' is p(d) for the draft's greedy token d. The last column is the largest difference between the exact distribution of the emitted token and p, over both drafts.
+Target p: the order-4 model's distribution after the context at temperature 1; draft q: the order-2 model's. With a top-p of 0.9 both are cut to their own nucleus (the shortest prefix in order of decreasing probability, ties to the lower id, whose cumulative probability reaches 0.9) and renormalised, as Volume V, Chapter 11 defines it; 'tokens in p' counts the tokens the target can emit. 'kept, sampled draft' is the sum of min(p, q), the probability that a proposal drawn from q is kept, beside 1 - TV(p, q) (TV is half the sum of |p - q|); 'kept, greedy draft' is p(d) for the draft's greedy token d. The last column is the largest difference between the exact distribution of the emitted token and p, over both drafts; it is zero in exact arithmetic and printed as the bound below which the floating-point sums leave it.
 
 | context | top-p | tokens in p | kept, sampled draft | 1 - TV(p, q) | greedy draft proposes | kept, greedy draft | largest error |
 |---|---|---:|---:|---:|---|---:|---:|
-| the | none | 18 | 0.8929 | 0.8929 | fox | 0.1721 | 2.8e-17 |
-| the | 0.9 | 6 | 0.9071 | 0.9071 | fox | 0.1829 | 2.8e-17 |
-| the cat | none | 18 | 0.8294 | 0.8294 | near | 0.5155 | 5.6e-17 |
-| the cat | 0.9 | 3 | 0.8087 | 0.8087 | near | 0.5726 | 5.6e-17 |
-| the dogs chase | none | 18 | 0.4143 | 0.4143 | fish | 0.8319 | 2.2e-16 |
-| the dogs chase | 0.9 | 3 | 0.3469 | 0.3469 | fish | 0.9243 | 1.1e-16 |
-| the fox near | none | 18 | 0.9653 | 0.9653 | the | 0.9386 | 6.9e-18 |
-| the fox near | 0.9 | 1 | 1.0000 | 1.0000 | the | 1.0000 | 0.0e+00 |
+| the | none | 18 | 0.8929 | 0.8929 | fox | 0.1721 | below 1e-15 |
+| the | 0.9 | 6 | 0.9071 | 0.9071 | fox | 0.1829 | below 1e-15 |
+| the cat | none | 18 | 0.8294 | 0.8294 | near | 0.5155 | below 1e-15 |
+| the cat | 0.9 | 3 | 0.8087 | 0.8087 | near | 0.5726 | below 1e-15 |
+| the dogs chase | none | 18 | 0.4143 | 0.4143 | fish | 0.8319 | below 1e-15 |
+| the dogs chase | 0.9 | 3 | 0.3469 | 0.3469 | fish | 0.9243 | below 1e-15 |
+| the fox near | none | 18 | 0.9653 | 0.9653 | the | 0.9386 | below 1e-15 |
+| the fox near | 0.9 | 1 | 1.0000 | 1.0000 | the | 1.0000 | below 1e-15 |
 <!-- /worked -->
 
 The two kinds of draft fail in opposite places. After `the` the target's distribution is spread over six nouns; a sampled draft, spread the same way, is kept 0.8929 of the time, while the draft's single best guess `fox` is kept only with the target's own probability of `fox`, 0.1721. After `the dogs chase` the target is nearly sure of `fish` (0.8319), and the greedy guess is kept at that rate, while the sampled draft, which puts more weight elsewhere, is kept 0.4143 of the time. A point-mass drafter is right as often as the target is sure, which is a good bargain for the confident stretches of a text and a poor one where the target is undecided. With the nucleus, the target's set of possible tokens shrinks to 6, 3, 3 and 1, the acceptance moves with it, and the last column stays at rounding error throughout.
@@ -458,7 +458,7 @@ The draft has 5 layers of width 5120 (feed-forward width 40,960, 80 query heads 
 | selector predecessor codebook | 100352 x 256 | 25,690,112 |
 | selector successor codebook | 100352 x 256 | 25,690,112 |
 
-In all 4,037,752,064 parameters (8.08 GB in bf16), of which 3,984,588,800 are in the matrices a pass multiplies on the device. A draft cache row of one layer holds the keys and values of one position, 2 x 8 x 128 values of 4 bytes = 8,192 bytes; one sequence's cache holds:
+In all 4,037,752,064 parameters (8.08 GB in bf16), of which 3,984,588,800 are in the matrices a pass multiplies on the device. A draft cache row of one layer holds the keys and values of one position, 2 x 8 x 128 values of 4 bytes = 8,192 bytes. A sliding layer keeps min(positions, 4,096) + 16 rows and the full layer positions + 16 rows, so a sequence shorter than the window fills its sliding layers as well; one sequence's cache holds:
 
 | positions in the sequence | rows of a sliding layer | rows of the full layer | bytes, all five layers |
 |---|---:|---:|---:|
@@ -552,7 +552,7 @@ The limits are the model's. The work counts are roofline lower bounds, and a ver
 
 1. At 16 sequences a plain step does about $16 \times 15.55 \times 10^9$ FLOPs against about $15.0 \times 10^9 + 16 \times 134{,}217{,}728$ bytes, 248,747,393,024 FLOPs against 17,156,800,512 bytes, 14.50 FLOPs per byte; $n$ rows multiply the FLOPs by about $n$, so the pass stays below the ridge of 50 while $14.5\,n \le 50$, $n \le 3$: $k = 2$ (with $k = 3$ the pass costs 1.160 plain steps). (The first table's rows at 8 and 32 sequences bracket this: 4 rows free at 8, 2 rows almost free at 32.)
 2. $E = 1.8$, $2.952$, $4.161$. Tokens per unit $E/(1 + 0.05k)$: 1.714, 2.567, 3.082 at $k = 1, 3, 7$; for all $k$ in 1 to 7 the values are 1.714, 2.218, 2.567, 2.801, 2.951, 3.040, 3.082, so $k = 7$ is best.
-3. Proposed 24, accepted 15: share 0.625. Rejecting rounds: three (1, 0 and 2 kept), so $\hat\alpha = 15/18 = 0.833$. The decayed counts: $A$ = 1.75 + ... Following the update, $A$: 4.75, 4.5625, 3.421875, 6.56640625, 6.9248046875, 9.193603515625; $R$: 0.75, 1.5625, 2.171875, 1.62890625, 2.2216796875, 1.666259765625; estimate $9.1936/(9.1936 + 1.6663) = 0.847$.
+3. Proposed 24, accepted 15: share 0.625. Rejecting rounds: three (1, 0 and 2 kept), so $\hat\alpha = 15/18 = 0.833$. The decayed counts after each of the six rounds are, $A$: 4.75, 4.5625, 3.421875, 6.56640625, 6.9248046875, 9.193603515625; $R$: 0.75, 1.5625, 2.171875, 1.62890625, 2.2216796875, 1.666259765625; estimate $9.1936/(9.1936 + 1.6663) = 0.847$.
 4. $\sum \min = 0.2 + 0.2 + 0.2 = 0.6$. Residual: $\max(0, p - q) = (0.3, 0.1, 0)$, renormalised $(0.75, 0.25, 0)$. Emitted: $(0.2 + 0.4 \times 0.75,\ 0.2 + 0.4 \times 0.25,\ 0.2) = (0.5, 0.3, 0.2)$.
 5. Cumulative 0.5, then 0.8 reaches 0.7: tokens 0 and 1 survive, renormalised to $(0.625, 0.375, 0)$. Token 2 is outside the nucleus, so a proposal of it is kept with probability 0.
 6. Implementation: the printed tables are the check.

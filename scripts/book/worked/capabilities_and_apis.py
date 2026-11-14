@@ -162,8 +162,9 @@ def spec_table():
                      rng, host, served])
     return ("The action `paint` of a hypothetical model. Ranges are inclusive. A param marked `from $VAR` is filled from that "
             "environment variable of the machine that runs the action when the caller gives none; a host-resolved param "
-            "is answered by the host in some other way. Input blobs: `init` (image, optional). Output blobs: `image` "
-            "(image).\n\n"
+            "is answered by the host in some other way. The last column says whether a remote caller is shown the param: the served "
+            "view of an action is its spec without the params marked no, which the section on answers only the serving machine can give "
+            "explains. Input blobs: `init` (image, optional). Output blobs: `image` (image).\n\n"
             + _table(["param", "type", "required", "default", "range", "host", "in the served view"], rows, "lllllll"))
 
 
@@ -244,13 +245,15 @@ def cancel_work():
         rows.append([name, f"{_sci(c)} FLOPs", str(n), f"{_sci(w)} FLOPs", str(done), f"{_sci(after)} FLOPs", note])
     load = 16 * 10**9
     w = 10**9
-    rows.append(["first call: load a checkpoint", f"{_sci(load)} bytes read", "512", f"{_sci(w)} bytes read", "0",
+    rows.append(["first call: load a checkpoint", "none (one read of the whole file)", "none before it", f"{_sci(w)} bytes read", "0",
                  f"{_sci(load - w)} bytes read", "the load has no poll; the poll before step 0 stops it"])
     return ("An action polls its cancellation flag before each of its n steps and once after the last. Each step costs "
             "c FLOPs (floating-point operations); a decode step of a model of 8 x 10^9 parameters is counted as 2 FLOPs "
             "per parameter, one multiply and one add. The request arrives after w FLOPs of steps (or w bytes of a load) "
             "have been done; the steps completed are ceil(w / c), at most n, and the work after the request is the "
-            "completed steps' work minus w.\n\n"
+            "completed steps' work minus w. A load is not a loop of steps: it reads the whole checkpoint of "
+            f"{_sci(load)} bytes with no poll inside it, so its row has no step cost and no step count, the first poll (before step 0) "
+            "comes only after the load, and the work after the request is what is left to read.\n\n"
             + _table(["work", "per step c", "steps n", "request at w", "steps completed", "work after the request", "outcome"],
                      rows, "lrrrrrl"))
 
@@ -323,13 +326,15 @@ def api_capabilities():
             if a["name"] == "generate" and "max_new" in a["maxes"]:
                 mo = f"{a['maxes']['max_new']:,}"
         desc = "; ".join(
-            f"`{a['name']}`" + (" (streaming)" if a["streaming"] else "") + ": params " + (", ".join(a["params"]) or "none")
+            f"`{a['name']}`" + (" (streaming)" if a["streaming"] else "") + ": params "
+            + (", ".join(p + (f" (at most {a['maxes'][p]:,})" if p in a["maxes"] else "") for p in a["params"]) or "none")
             + "; inputs " + (", ".join(f"{n} {m}" + (" required" if r else "") for n, m, r in a["inputs"]) or "none")
             + "; outputs " + ", ".join(f"{n} {m}" for n, m in a["outputs"]) for a in actions)
         rows.append([f"`{model}`", desc, ", ".join(names) or "none", "yes" if caps["chat"] else "no", "yes" if anyc else "no",
                      mo or "not stated"])
     return ("Nine one-action manifests and what the shape rules read from them. The chat dialect lists a model only for "
-            "chat; the other dialects list it for any capability.\n\n"
+            "chat; the other dialects list it for any capability. A param written 'at most n' declares that inclusive upper bound in its range; "
+            "the last column is the bound of `max_new` on a `generate` that declares one.\n\n"
             + _table(["model", "action", "capabilities", "listed by the chat-only dialect", "listed by the others",
                       "most new tokens per request"], rows, "llllll"))
 
@@ -379,8 +384,9 @@ def model_candidates():
         rows.append([d, _jsp(b), ", ".join(f"`{i}`" for i in c), f"`{hit}`" if hit else "none: model not found"])
     return ("The served models are `brain/mock`, `brain/qwen3` and `Qwen/Qwen3-0.6B`; the alias table maps `mock` to "
             "`brain/mock` and `qwen` to `brain/qwen3`. Each name a request gives is tried as written, then its alias, "
-            "and, for the routing dialect only, without its first path segment; the first candidate that is served "
-            "wins.\n\n"
+            "and, for the routing dialect only, without its first path segment (a name with no '/' has none); the alias is looked up "
+            "for a name as written and never for its stripped form, and the routing dialect's `models` list is tried after `model`, each "
+            "of its names in the same way; the first candidate that is served wins.\n\n"
             + _table(["dialect", "request body", "candidates in order", "answers"], rows, "llll"))
 
 
@@ -465,7 +471,13 @@ def failure_replies():
         rows.append([e, kind, msg or "(empty)", "yes" if hides else "no", str(status), bus])
     return ("What one action error becomes on each surface, for a request to the model named in the second column of each "
             "error (`x/z` for the sixth, `x/y` otherwise). The rules are tried in the order of the chapter; an error that "
-            "hides detail is written to the server's log and never sent.\n\n"
+            "hides detail is written to the server's log and never sent. A tagged failure's message to the caller is the text after its tag "
+            "(empty for a bare tag) and its status is the one of its class in the list above; the other sorts have fixed texts and statuses: "
+            "faulted 'the model faulted while running the request', 500; cancelled 'the request was cancelled', 503, and 'cancelled' on the "
+            "bus; no model 'no model' followed by the requested name in quotes, 404; capacity 'the request needs N tokens but this "
+            "model's serving capacity is M tokens; reduce the prompt or lower max_tokens' with the two numbers of the error, 400; every "
+            "other error 'the model failed to process the request', 400. The bus reply is the message, except that a classified failure "
+            "keeps its tag in front.\n\n"
             + _table(["error text the action returned", "sorted as", "message to the caller", "detail logged only",
                       "HTTP status", "bus reply"], rows, "llllrl"))
 
@@ -493,7 +505,8 @@ def transport_bytes():
             "4 x ceil(n / 3). A text transport carries the base64; the bus carries a file descriptor and the receiver "
             "reads the raw bytes from it. The limits are 8,388,608 bytes for a dialect's request body, 67,108,864 bytes "
             "for one event line and for a `/v1/run` body, and 268,435,456 bytes for one descriptor. 'Fits' compares the "
-            "payload alone; the JSON around it needs a few bytes more.\n\n"
+            "base64 text alone, up to and including the limit; the JSON around it needs a few bytes more, so a payload whose base64 lies within "
+            "those few bytes of a limit would be refused in practice.\n\n"
             + _table(["payload", "raw bytes", "base64 bytes", "fits a dialect body", "fits an event line or /v1/run",
                       "fits one bus descriptor"], rows, "lrrlll"))
 
@@ -667,7 +680,12 @@ def flags_from_spec():
     return ("The action `sketch` declares six params, one required input blob `image` and one output blob `result`. "
             "Every param becomes a flag of its own; an input blob becomes `--image PATH` (or `--in image=PATH`) and an "
             "output `--out result=PATH`. A flag left out sets nothing, so the action's own default applies when it "
-            "validates. A refusal is printed as `--flag: reason`, a simplified framing of the longer message the flag-parsing library prints; the reason is the program's own wording for a number out of bounds and for an unknown output, and the refusal of a missing required flag is paraphrased.\n\n" + t1 + "\n\n" + t2)
+            "validates. The help line is the param's help text followed by ' [default: D]' when it has a default, D written as JSON; a required flag "
+            "is a param that is required and has no default (a BOOL is never required). A `BOOL` flag reads the token after it as its value "
+            "only when that token is one of true, false, 1 and 0, and otherwise means true. The refusal texts are `--<flag>: <n> is above "
+            "the most allowed, <hi>`, `--<flag>: <n> is below the least allowed, <lo>`, `the flag --<flag> is required` and "
+            "`--out \"<name>=<path>\": the action has no output '<name>' (it has: <outputs>)`. "
+            "A refusal is printed as `--flag: reason`, a simplified framing of the longer message the flag-parsing library prints; the reason is the program's own wording for a number out of bounds and for an unknown output, and the refusal of a missing required flag is paraphrased.\n\n" + t1 + "\n\n" + t2)
 
 
 # ------------------------------------------------------------------ the consuming flag grammar
