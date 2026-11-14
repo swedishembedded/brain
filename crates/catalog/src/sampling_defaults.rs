@@ -43,7 +43,7 @@ impl ResidentModel for CheckpointSampling {
         let mut manifest = self.inner.manifest();
         let label = manifest.model.clone();
         for action in manifest.actions.iter_mut().filter(|a| a.name == "generate") {
-            *action = llmserve::with_sampling_defaults(std::mem::replace(action, capability::ActionSpec::new("", "")), &label, &self.defaults);
+            *action = llmserve::with_sampling_defaults(action.clone(), &label, &self.defaults);
         }
         manifest
     }

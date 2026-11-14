@@ -62,6 +62,7 @@ impl Action for Stateless {
         self.spec.clone()
     }
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         (self.run)(&self.resolved, inv, progress)
     }
 }

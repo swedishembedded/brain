@@ -29,6 +29,7 @@ pub(crate) fn import_spec() -> ActionSpec {
         "import",
         "convert a Qwen3.8-27B release into the form the trainers and servers read: a GGUF into a brain checkpoint (MTP head included), or a Hugging Face release directory into a base re-encoded once at a narrow format",
     )
+    .cancellable()
     .from_scratch()
     .param(ParamSpec::new("source", ParamType::Str, "path to the release: a .gguf file, or a Hugging Face directory (config.json and its safetensors)").host_resolved().required())
     .param(ParamSpec::new("dest", ParamType::Str, "path to write: the brain checkpoint (.safetensors) for a GGUF, a new directory for a Hugging Face release").host_resolved().required())

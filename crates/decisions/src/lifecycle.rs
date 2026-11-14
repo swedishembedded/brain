@@ -56,6 +56,7 @@ pub fn train_spec() -> ActionSpec {
     )
     .training()
     .streaming()
+    .cancellable()
     .param(data())
     .param(host_path("base", "the base model: a model-store id, or a checkpoint directory").required())
     .param(host_path("out", "the checkpoint directory to create; it must not exist yet").required())
@@ -75,6 +76,7 @@ pub fn eval_spec() -> ActionSpec {
         "eval",
         "Measure a checkpoint on one split: accuracy against the majority and chance baselines, NLL, Brier, ECE/AdaECE with reliability bins, coverage versus accuracy, option-order instability under a seeded permutation, cost-weighted regret when `costs` is given, and a per-family breakdown.",
     )
+    .cancellable()
     .param(host_path("model", "the checkpoint: a model-store id, or a checkpoint directory").required())
     .param(data())
     .param(ParamSpec::new("split", ParamType::Enum(vec!["validation".into(), "test".into()]), "the held-out split to measure (the train split is not held out)").required())
@@ -87,6 +89,7 @@ pub fn promote_spec() -> ActionSpec {
         "promote",
         "Re-evaluate a checkpoint on the `test` split under a policy and, only if every gate passes, mark it validated for the policy's profile: the manifest gains the validation and weights digest the `auto` selector requires, the evaluation record is stored beside it, and the checkpoint it supersedes becomes the last-known-good. A failed gate fails the action with how far it was missed and changes nothing. Numbers in the manifest are never trusted.",
     )
+    .cancellable()
     .param(host_path("model", "the checkpoint to promote: a model-store id, or a checkpoint directory").required())
     .param(data())
     .param(host_path("policy", "the promotion policy: a JSON file naming the profile and its gates").required())
@@ -94,11 +97,13 @@ pub fn promote_spec() -> ActionSpec {
 
 pub fn rollback_spec() -> ActionSpec {
     ActionSpec::new("rollback", "Make the last-known-good checkpoint the validated one again. `model` must be the profile's current checkpoint.")
+        .cancellable()
         .param(host_path("model", "the profile's current checkpoint: a model-store id, or a checkpoint directory").required())
 }
 
 pub fn inspect_spec() -> ActionSpec {
     ActionSpec::new("inspect", "Validate a JSONL file of decision examples (schema, duplicate ids, leakage across splits) and summarize it: counts, label entropy and the majority-label baseline.")
+        .cancellable()
         .param(data())
 }
 

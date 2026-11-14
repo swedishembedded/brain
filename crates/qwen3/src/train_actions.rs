@@ -65,7 +65,7 @@ fn shared_params(spec: ActionSpec, d: &Defaults) -> ActionSpec {
 
 pub(crate) fn train_spec() -> ActionSpec {
     let shape = |name: &str, help: &str, default: u32| ParamSpec::new(name, ParamType::Int, help).default(json!(default)).min(1.0).max(MAX_DIM);
-    shared_params(ActionSpec::new("train", "train a small Qwen3 decoder from scratch on a tokenized dataset (train.bin, val.bin, meta.json)").from_scratch(), &TRAIN)
+    shared_params(ActionSpec::new("train", "train a small Qwen3 decoder from scratch on a tokenized dataset (train.bin, val.bin, meta.json)").cancellable().from_scratch(), &TRAIN)
         .param(shape("layers", "transformer layers", 6))
         .param(shape("d_model", "model width", 384))
         .param(shape("heads", "attention heads", 6))
@@ -75,7 +75,7 @@ pub(crate) fn train_spec() -> ActionSpec {
 }
 
 pub(crate) fn finetune_spec() -> ActionSpec {
-    shared_params(ActionSpec::new("finetune", "continue training the resolved checkpoint (a brain checkpoint, a GGUF or a Hugging Face release) on a tokenized dataset, every weight, into a new checkpoint"), &FINETUNE)
+    shared_params(ActionSpec::new("finetune", "continue training the resolved checkpoint (a brain checkpoint, a GGUF or a Hugging Face release) on a tokenized dataset, every weight, into a new checkpoint").cancellable(), &FINETUNE)
         .param(ParamSpec::new("weights", ParamType::Str, "the base checkpoint (.safetensors, .gguf or a Hugging Face release); overrides the model store's own pick when set").host_resolved())
         .param(ParamSpec::new(
             "train_precision",

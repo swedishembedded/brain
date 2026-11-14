@@ -86,19 +86,19 @@ pub fn manifest() -> Manifest {
     let prompt = || ParamSpec::new("prompt", ParamType::Str, "text description of the desired image").required();
     let image_out = || BlobSpec::new("image", Media::Image, "the generated image");
 
-    let text2image = encoder_params(gen_params(ActionSpec::new("text2image", "generate an image from a text prompt (posters, photos, art; strong at English/Chinese typography)").streaming()))
+    let text2image = encoder_params(gen_params(ActionSpec::new("text2image", "generate an image from a text prompt (posters, photos, art; strong at English/Chinese typography)").streaming().cancellable()))
         .param(prompt())
         .param(cap_len_param())
         .param(ParamSpec::new("adapter", ParamType::Str, "path to a trained LoRA adapter (from lora_train) to apply").host_resolved())
         .output(image_out());
 
-    let image2image = gen_params(ActionSpec::new("image2image", "regenerate an input image toward a prompt (style/lighting/weather changes, sketch→image)").streaming())
+    let image2image = gen_params(ActionSpec::new("image2image", "regenerate an input image toward a prompt (style/lighting/weather changes, sketch→image)").streaming().cancellable())
         .param(prompt())
         .param(ParamSpec::new("strength", ParamType::Float, "0=keep input, 1=ignore it; how much to change").default(json!(0.55)).min(0.0).max(1.0).step(0.01))
         .input(BlobSpec::new("image", Media::Image, "the starting image").required())
         .output(image_out());
 
-    let inpaint = gen_params(ActionSpec::new("inpaint", "regenerate only the masked region of an image (object removal/replacement, sign-text change)").streaming())
+    let inpaint = gen_params(ActionSpec::new("inpaint", "regenerate only the masked region of an image (object removal/replacement, sign-text change)").streaming().cancellable())
         .param(prompt())
         .param(ParamSpec::new("strength", ParamType::Float, "how strongly to regenerate the masked region").default(json!(0.85)).min(0.0).max(1.0).step(0.01))
         .param(ParamSpec::new("feather", ParamType::Int, "mask-edge feather radius in latent cells (0 = hard edge)").default(json!(2)).min(0.0).max(64.0).step(1.0))
@@ -106,7 +106,7 @@ pub fn manifest() -> Manifest {
         .input(BlobSpec::new("mask", Media::Mask, "white = regenerate, black = keep").required())
         .output(image_out());
 
-    let outpaint = gen_params(ActionSpec::new("outpaint", "extend an image beyond its borders (canvas expand + inpaint of the new area)").streaming())
+    let outpaint = gen_params(ActionSpec::new("outpaint", "extend an image beyond its borders (canvas expand + inpaint of the new area)").streaming().cancellable())
         .param(prompt())
         .param(ParamSpec::new("left", ParamType::Int, "pixels to add on the left").min(0.0).max(capability::bounds::SIZE_PX).default(json!(0)))
         .param(ParamSpec::new("right", ParamType::Int, "pixels to add on the right").min(0.0).max(capability::bounds::SIZE_PX).default(json!(0)))
@@ -119,6 +119,7 @@ pub fn manifest() -> Manifest {
     let lora_train = ActionSpec::new("lora_train", "fine-tune a LoRA adapter on a folder of captioned images (personalise a person/object/style)")
         .training()
         .streaming()
+        .cancellable()
         .param(ParamSpec::new("data", ParamType::Str, "folder with images + a captions.yaml (`filename: prompt`) and/or captions.jsonl").required().host_resolved())
         .param(ParamSpec::new("save", ParamType::Str, "output path for the trained adapter").required().host_resolved())
         .param(ParamSpec::new("rank", ParamType::Int, "LoRA rank (capacity/size tradeoff)").min(0.0).max(capability::bounds::LORA_RANK).default(json!(16)))

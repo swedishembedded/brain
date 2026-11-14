@@ -31,6 +31,7 @@ use crate::{placement_for_process, DecoderDevice, OcrModel, DEFAULT_INSTRUCTION,
 pub fn generate_spec<M: OcrModel>() -> ActionSpec {
     llmserve::with_token_capture(ActionSpec::new("generate", &format!("{}: a document image + an instruction in, decoded text out (greedy, streamed per token)", M::ID))
         .streaming()
+        .cancellable()
         .param(ParamSpec::new("messages", ParamType::Str, "flattened chat messages (JSON array string)"))
         .param(
             ParamSpec::new(

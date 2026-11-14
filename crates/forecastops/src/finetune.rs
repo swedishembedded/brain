@@ -40,6 +40,7 @@ pub fn finetune_spec(summary: &str, default_save: &str) -> ActionSpec {
     ActionSpec::new("finetune", summary)
         .training()
         .streaming()
+        .cancellable()
         .param(ParamSpec::new("data", ParamType::Str, "the universe: a directory of <TICKER>.csv files (Date,open,high,low,close,volume), every one validated before anything loads").required().host_resolved())
         .param(ParamSpec::new("holdout_data", ParamType::Str, "a second directory of names never trained on, to measure whether the fine-tune generalizes to unseen instruments").host_resolved())
         .param(ParamSpec::new("save", ParamType::Str, "where to write the promoted checkpoint (.safetensors); nothing is written when the gate keeps the base").default(json!(default_save)).host_resolved())

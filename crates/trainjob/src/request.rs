@@ -45,6 +45,7 @@ pub fn action_spec() -> ActionSpec {
     let mut spec = ActionSpec::new(ACTION, "fine-tune a chat model's LoRA adapter on a chat dataset, by supervised imitation, by the clipped policy gradient on rollouts, or by direct preference optimization on chosen/rejected pairs (datasets in by blob or artifact digest, the adapter out by digest or blob)")
         .training()
         .streaming()
+        .cancellable()
         .param(ParamSpec::new("base", ParamType::Str, "the base model, `<vendor>/<repo>` in the server's model store").required())
         .param(ParamSpec::new("data", ParamType::Str, "JSON document naming the datasets: {\"train\": SRC, \"held_out\"?, \"held_out_text\"?, \"monitor\"?, \"start_adapter\"?, \"replay\"?: [SRC], \"weighted_replay\"?: [{SRC fields, \"share\"}]} where SRC is {\"digest\": \"<blake3 hex>\"} (an artifact of the server's store) or {\"blob\": \"<input name>\"} (an input blob of this call)").required())
         .param(ParamSpec::new("objective", ParamType::Enum(vec!["sft".into(), "policy_gradient".into(), "dpo".into()]), "supervised imitation; the clipped policy gradient on rollout records that carry an advantage or a teacher context; or direct preference optimization on `generic-preference-v1` pairs (`dataset` and `held_out` hold pairs)").default(json!("sft")))

@@ -91,6 +91,7 @@ pub const DEFAULT_MAX_NEW: i64 = 32;
 pub fn caption_spec() -> ActionSpec {
     ActionSpec::new("caption", "Moondream 3: an image + an instruction in, generated text out (greedy, streamed per token)")
         .streaming()
+        .cancellable()
         .param(ParamSpec::new("messages", ParamType::Str, "flattened chat messages (JSON array string)"))
         .param(ParamSpec::new("prompt", ParamType::Str, "a raw instruction (alternative to messages)").default(json!(DEFAULT_PROMPT)))
         .param(ParamSpec::new("max_new", ParamType::Int, "max tokens to generate").min(0.0).max(capability::bounds::TOKENS).default(json!(DEFAULT_MAX_NEW)))

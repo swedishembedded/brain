@@ -42,6 +42,7 @@ pub const MAX_ANSWERS_PER_RECORD: usize = 64;
 /// What `score` is, for every scheduler-backed chat manifest.
 pub fn score_spec() -> ActionSpec {
     ActionSpec::new(SCORE_ACTION, "teacher-forced log-likelihood of the supervised answers of chat records under this model (and the adapter its id names): per answer, per record and in total, optionally per token; nothing is generated")
+        .cancellable()
         .param(ParamSpec::new("per_token", ParamType::Bool, "also return each answer's token ids and their log-probabilities").default(json!(false)))
         .param(ParamSpec::new("include_stop", ParamType::Bool, "score the end-of-turn token that closes each answer too, as a trainer that trains the stop does").default(json!(true)))
         .param(ParamSpec::new("enable_thinking", ParamType::Bool, "render the prompts as a request that allows reasoning would").default(json!(true)))

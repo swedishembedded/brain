@@ -45,6 +45,7 @@ fn activations_param() -> ParamSpec {
 /// checkpoint resolved.
 pub fn import_spec(summary: &str) -> ActionSpec {
     ActionSpec::new("import", summary)
+        .cancellable()
         .from_scratch()
         .param(ParamSpec::new("source", ParamType::Str, "the released checkpoint to convert: a Hugging Face directory or a .safetensors file").required().host_resolved())
         .param(ParamSpec::new("dest", ParamType::Str, "where to write the brain checkpoint (.safetensors)").required().host_resolved())
@@ -62,6 +63,7 @@ impl Action for ImportAction {
         import_spec(self.summary)
     }
     fn run(&self, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         let source = inv.get_str("source").ok_or_else(|| format!("{} import: missing required param 'source'", self.model))?;
         let dest = inv.get_str("dest").ok_or_else(|| format!("{} import: missing required param 'dest'", self.model))?;
         (self.convert)(&source, &dest).map_err(|e| format!("{} import: {e}", self.model))?;
@@ -193,6 +195,7 @@ impl Action for KronosFinetune {
     }
 
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         let req = FinetuneRequest::parse(inv, KRONOS_SAVE).map_err(|e| format!("kronos {e}"))?;
         let saved = req.activations.as_deref().map(model::saved::SavedPolicy::parse_activations).transpose()?;
         let universes = load_universes(&req)?;
@@ -241,6 +244,7 @@ impl Action for Timesfm3Finetune {
     }
 
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         // Said before anything else, and before any work: an operator about to
         // spend hours producing an artifact they may not redistribute should
         // learn that first, not from the model card afterwards.

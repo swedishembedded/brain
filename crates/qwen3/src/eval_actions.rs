@@ -42,7 +42,7 @@ pub(crate) fn eval_spec() -> ActionSpec {
     role_params(ActionSpec::new(
         "eval",
         "teacher-forced held-out loss and token accuracy of the checkpoint on chat JSONL, and with `adapter_name` of that adapter folded in beside it",
-    ))
+    ).cancellable())
     .param(ParamSpec::new("block", ParamType::Int, "scoring context, tokens; a sample longer than it is skipped and counted").default(json!(1024)).min(1.0).max(capability::bounds::CONTEXT_TOKENS))
     .param(ParamSpec::new("adapter_name", ParamType::Str, "a named adapter of this base in the model store, OWNER/NAME[:TAG]; scored beside the base with the verdict on whether it beats it"))
     .param(ParamSpec::new("kv", ParamType::Str, "also score through the paged serving engine at each of these KV representations, comma-separated: fp32, int8, int8-calib"))
@@ -54,7 +54,7 @@ pub(crate) fn calib_spec() -> ActionSpec {
     role_params(ActionSpec::new(
         "calib",
         "measure the INT8 KV-cache outlier statistics of the checkpoint on chat JSONL: a per-stream report and the usable clip table",
-    ))
+    ).cancellable())
     .param(ParamSpec::new("percentile", ParamType::Float, "the quantile of each stream's magnitudes the clip table keeps").default(json!(0.999)).min(0.0).max(1.0))
     .input(BlobSpec::new("samples", Media::Bytes, "the calibration prompts: data::chat 'generic-messages-v2' JSONL, one sample per line").required())
     .output(BlobSpec::new("report", Media::Text, "per (layer, K|V, kv head): absmax, p99, p99.99 and outlier ratio, most quantization-hostile first, as JSON"))
@@ -63,6 +63,7 @@ pub(crate) fn calib_spec() -> ActionSpec {
 
 pub(crate) fn toolcall_gen_spec() -> ActionSpec {
     ActionSpec::new("toolcall_gen", "write a masked tool-call fine-tuning set (train and held-out validation) rendered through the checkpoint's chat template")
+        .cancellable()
         .from_scratch()
         .param(ParamSpec::new("tokenizer", ParamType::Str, "the tokenizer.json whose directory also supplies the chat template; omit to use the model store's own pick").host_resolved())
         .param(ParamSpec::new("out", ParamType::Str, "the dataset directory to write").host_resolved().required())
@@ -74,7 +75,7 @@ pub(crate) fn toolcall_gen_spec() -> ActionSpec {
 }
 
 pub(crate) fn toolcall_eval_spec() -> ActionSpec {
-    role_params(ActionSpec::new("toolcall_eval", "score the checkpoint's exact-match and token accuracy on held-out tool-call cases (teacher-forced greedy)"))
+    role_params(ActionSpec::new("toolcall_eval", "score the checkpoint's exact-match and token accuracy on held-out tool-call cases (teacher-forced greedy)").cancellable())
         .param(ParamSpec::new("n", ParamType::Int, "held-out cases").default(json!(40)).min(1.0).max(MAX_CASES))
         .param(ParamSpec::new("tools", ParamType::Int, "candidate tools presented in each case").default(json!(3)).min(1.0).max(MAX_TOOLS))
         .param(ParamSpec::new("seq", ParamType::Int, "scoring context, tokens").default(json!(512)).min(1.0).max(capability::bounds::CONTEXT_TOKENS))

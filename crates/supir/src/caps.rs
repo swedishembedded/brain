@@ -67,6 +67,7 @@ fn restore_spec() -> ActionSpec {
         "photo-realistic blind image restoration: a frozen SDXL 1.0 base UNet, a 1.24B GLVControl trunk and 12 ZeroSFT/ZeroCrossAttn adaptors, RestoreEDMSampler",
     )
     .streaming()
+    .cancellable()
     .param(ParamSpec::new("caption", ParamType::Str, "image caption; empty auto-captions via a registered brain/llava when one is available, else stays empty (upstream's --no_llava behaviour)"))
     .param(ParamSpec::new("positive_suffix", ParamType::Str, "appended to the caption with no separator").default(json!(d.positive_suffix)))
     .param(ParamSpec::new("negative_prompt", ParamType::Str, "the negative prompt, used alone").default(json!(d.negative_prompt)))

@@ -30,6 +30,7 @@ pub const DEFAULT_TEMPERATURE: f64 = 1.0;
 pub fn text2image_spec() -> ActionSpec {
     ActionSpec::new("text2image", "Janus-Pro: a prompt in, a 384x384 image out (classifier-free-guided sampling of 576 VQ-16 tokens)")
         .streaming()
+        .cancellable()
         .param(ParamSpec::new("prompt", ParamType::Str, "what the image shows").required())
         .param(ParamSpec::new("width", ParamType::Int, "must be 384, the only size Janus-Pro generates").default(json!(IMAGE_SIZE)).min(IMAGE_SIZE as f64).max(IMAGE_SIZE as f64))
         .param(ParamSpec::new("height", ParamType::Int, "must be 384, the only size Janus-Pro generates").default(json!(IMAGE_SIZE)).min(IMAGE_SIZE as f64).max(IMAGE_SIZE as f64))
@@ -235,6 +236,7 @@ impl Action for FinetuneAction {
     }
 
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         use deepseekvl::caps::{finetune_options, step_progress, trained};
         let dir = std::path::PathBuf::from(self.dir.clone().ok_or("januspro finetune: no Janus-Pro checkpoint (pull one, or name its directory with --dir)")?);
         let (options, dataset, save) = finetune_options(inv, "januspro finetune")?;
@@ -270,6 +272,7 @@ impl Action for JanusAction {
     }
 
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         let dir = inv
             .get_str("weights")
             .filter(|s| !s.is_empty())

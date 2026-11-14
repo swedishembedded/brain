@@ -58,7 +58,8 @@ pub fn manifest() -> Manifest {
         )
         .input(BlobSpec::new("image", Media::Image, "raw HWC f32 pixels in [0,1], meta {w,h}").required())
         .output(BlobSpec::new("text", Media::Text, "the caption"))
-        .streaming();
+        .streaming()
+        .cancellable();
     Manifest::new(MODEL, "LLaVA-1.5-13B image captioning - CLIP-L336 tower + Vicuna-1.5-13B decoder.", vec![caption])
 }
 

@@ -91,7 +91,7 @@ fn training_params(spec: ActionSpec, lr: f64) -> ActionSpec {
 }
 
 pub fn train_spec() -> ActionSpec {
-    training_params(ActionSpec::new("train", "train the GLM decoder from scratch on a tokenized dataset (train.bin, val.bin, meta.json)"), LR)
+    training_params(ActionSpec::new("train", "train the GLM decoder from scratch on a tokenized dataset (train.bin, val.bin, meta.json)").cancellable(), LR)
         .from_scratch()
         .param(host_path("save", "where to write the checkpoint (.safetensors); omit to train without keeping it"))
         .param(ParamSpec::new("size", ParamType::Enum(SIZES.map(String::from).to_vec()), "the shape preset the sizes below override").default(json!("small")))
@@ -103,13 +103,14 @@ pub fn train_spec() -> ActionSpec {
 }
 
 pub fn finetune_spec() -> ActionSpec {
-    training_params(ActionSpec::new("finetune", "continue training the resolved brain checkpoint on a tokenized dataset, into a new checkpoint"), FINETUNE_LR)
+    training_params(ActionSpec::new("finetune", "continue training the resolved brain checkpoint on a tokenized dataset, into a new checkpoint").cancellable(), FINETUNE_LR)
         .param(host_path("save", "where to write the fine-tuned checkpoint (.safetensors); seeded from the base checkpoint when absent, resumed when present").required())
         .param(seed_param("seeds the batches (omit for random; the outcome echoes it)"))
 }
 
 pub fn eval_spec() -> ActionSpec {
     ActionSpec::new("eval", "validation cross-entropy and perplexity of the resolved brain checkpoint on a dataset's val split")
+        .cancellable()
         .param(host_path("data", "the dataset directory").required())
         .param(ParamSpec::new("batches", ParamType::Int, "windows scored").default(json!(20)).min(1.0).max(MAX_EVAL_BATCHES))
         .param(ParamSpec::new("block", ParamType::Int, "tokens per window; 0 = the checkpoint's own context").default(json!(0)).min(0.0).max(capability::bounds::CONTEXT_TOKENS))
@@ -118,6 +119,7 @@ pub fn eval_spec() -> ActionSpec {
 
 pub fn generate_spec() -> ActionSpec {
     ActionSpec::new("generate", "generate text continuing a prompt (GLM MLA + MoE decoder, KV-cached decoding)")
+        .cancellable()
         .param(host_path("data", "a dataset directory whose meta.json holds the vocabulary, for a checkpoint that does not embed one"))
         .param(ParamSpec::new("prompt", ParamType::Str, "the prompt to continue (empty: a newline)"))
         .param(ParamSpec::new("max_new", ParamType::Int, "number of new tokens to generate").min(0.0).max(capability::bounds::TOKENS).default(json!(DEFAULT_MAX_NEW)))
@@ -129,6 +131,7 @@ pub fn generate_spec() -> ActionSpec {
 
 pub fn import_spec() -> ActionSpec {
     ActionSpec::new("import", "convert a Hugging Face GLM-5.2 checkpoint into a brain checkpoint, carded for the model store")
+        .cancellable()
         .from_scratch()
         .param(host_path("source", "the Hugging Face checkpoint directory").required())
         .param(host_path("dest", "where to write the .safetensors").required())
@@ -274,6 +277,7 @@ impl Action for GlmAction {
     }
 
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         match self.kind {
             Kind::Train => train(inv, None, progress),
             Kind::Finetune => train(inv, Some(self.need_weights("finetune")?), progress),

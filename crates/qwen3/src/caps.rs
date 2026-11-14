@@ -142,6 +142,7 @@ const STEP_CACHE_ENTRIES: usize = 65536;
 pub fn manifest() -> Manifest {
     let generate = ActionSpec::new("generate", "generate tokens continuing a prompt (KV-cache decode, one Progress per token)")
         .streaming()
+        .cancellable()
         .param(
             ParamSpec::new("weights", ParamType::Str, "path to a brain-format Qwen checkpoint (.safetensors); overrides the model-store resolver's own pick when set")
                 .host_resolved(),
@@ -197,6 +198,7 @@ pub fn manifest() -> Manifest {
     let lora_train = ActionSpec::new("lora_train", "train a LoRA adapter on a masked chat dataset (JSONL blob in, adapter checkpoint blob out)")
         .training()
         .streaming()
+        .cancellable()
         .param(
             ParamSpec::new("weights", ParamType::Str, "path to the base brain-format Qwen checkpoint (.safetensors); overrides the model-store resolver's own pick when set")
                 .host_resolved(),
@@ -243,6 +245,7 @@ pub fn manifest() -> Manifest {
         "gate a candidate LoRA adapter against a frozen probe set (adapter + probes in, a GateReport and a promote/reject decision out)",
     )
     .streaming()
+    .cancellable()
     .param(
         ParamSpec::new(
             "weights",
@@ -286,6 +289,7 @@ pub fn manifest() -> Manifest {
         "embed",
         "last-token pooled, L2-normalized text embedding (KV-cache decode path, bounded by the checkpoint's configured context)",
     )
+    .cancellable()
     .param(
         ParamSpec::new("weights", ParamType::Str, "path to a brain-format Qwen3-Embedding checkpoint (.safetensors); overrides the model-store resolver's own pick when set")
             .host_resolved(),
@@ -430,6 +434,7 @@ impl Action for GenerateAction {
     }
 
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         let weights = inv
             .get_str("weights")
             .filter(|s| !s.is_empty())
@@ -612,6 +617,7 @@ impl Action for LoraTrainAction {
     }
 
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         train_lora(&with_resolved_defaults(inv, &self.default_weights, &self.default_tokenizer), progress)
     }
 }
@@ -860,6 +866,7 @@ impl Action for LoraGateAction {
     }
 
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         gate_lora(&with_resolved_defaults(inv, &self.default_weights, &self.default_tokenizer), progress)
     }
 }
@@ -1200,6 +1207,7 @@ impl Action for EmbedAction {
     }
 
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         let weights = inv
             .get_str("weights")
             .filter(|s| !s.is_empty())

@@ -128,6 +128,7 @@ fn place_and_build<R>(bytes: u64, f: impl FnOnce() -> Result<R, String>) -> Resu
 pub fn manifest() -> Manifest {
     let generate = ActionSpec::new("generate", "generate tokens continuing a prompt (Qwen3.8-27B dense hybrid GDN/GQA decoder, KV-cache decode, one Progress per token)")
         .streaming()
+        .cancellable()
         .param(
             ParamSpec::new(
                 "weights",
@@ -292,6 +293,7 @@ impl Action for StatelessAction {
     }
 
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         let (weights, tokenizer) = (self.default_weights.as_deref(), self.default_tokenizer.as_deref());
         match self.name.as_str() {
             "finetune" => crate::train_actions::finetune(weights, tokenizer, inv, progress),
@@ -313,6 +315,7 @@ impl Action for GenerateAction {
     }
 
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         let weights = inv
             .get_str("weights")
             .filter(|s| !s.is_empty())

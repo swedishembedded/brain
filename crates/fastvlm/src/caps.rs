@@ -53,7 +53,8 @@ pub fn manifest() -> Manifest {
         )
         .input(BlobSpec::new("image", Media::Image, "raw HWC f32 pixels in [0,1], meta {w,h}").required())
         .output(BlobSpec::new("text", Media::Text, "the caption"))
-        .streaming();
+        .streaming()
+        .cancellable();
     Manifest::new(MODEL, "FastVLM image captioning — fully in brain, parity-gated against HF.", vec![caption])
 }
 

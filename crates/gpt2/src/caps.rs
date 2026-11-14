@@ -50,6 +50,7 @@ pub fn train_spec() -> ActionSpec {
     ActionSpec::new("train", "train the GPT on a tokenized dataset (train.bin, val.bin, meta.json), alone or as one rank of a distributed job")
         .training()
         .streaming()
+        .cancellable()
         .from_scratch()
         .param(host_path("data", "the dataset directory (`brain data` prepares one)").required())
         .param(host_path("save", "where to write the checkpoint (.safetensors); omit to train without keeping it"))
@@ -76,6 +77,7 @@ pub fn train_spec() -> ActionSpec {
 
 pub fn generate_spec() -> ActionSpec {
     ActionSpec::new("generate", "sample text from a checkpoint (character vocabulary, KV-cached decoding)")
+        .cancellable()
         .param(host_path("weights", "the checkpoint (.safetensors) `train` wrote").required())
         .param(host_path("data", "a dataset directory whose meta.json holds the vocabulary, for a checkpoint that does not embed one"))
         .param(ParamSpec::new("prompt", ParamType::Str, "the text to continue").default(json!("\n")))
@@ -87,6 +89,7 @@ pub fn generate_spec() -> ActionSpec {
 
 pub fn eval_spec() -> ActionSpec {
     ActionSpec::new("eval", "validation perplexity, and exact-match accuracy on the held-out tail of an LHS=RHS dataset")
+        .cancellable()
         .param(host_path("weights", "the checkpoint (.safetensors)").required())
         .param(host_path("data", "the dataset directory").required())
         .param(ParamSpec::new("batches", ParamType::Int, "validation batches for the perplexity").default(json!(EVAL_BATCHES)).min(1.0).max(MAX_EVAL))
@@ -230,6 +233,7 @@ impl Action for Gpt2Action {
     }
 
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         match self.spec.name.as_str() {
             "train" => train(inv, progress),
             "generate" => generate(inv, progress),

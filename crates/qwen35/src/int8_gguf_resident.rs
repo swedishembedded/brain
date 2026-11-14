@@ -4476,6 +4476,7 @@ impl ResidentModel for Qwen35GgufResident {
             "generate text (Qwen3.8-27B dense hybrid Gated-DeltaNet/GQA decoder, INT8 weights loaded straight from a released GGUF, layer-sharded and resident across as many GPUs as its real per-layer bytes need; fp32 GDN state and a KV cache in f32, bf16, int8 or fp8 E4M3 (`--kv-cache`); up to --max-batch sequences per batched dispatch)",
         )
         .streaming()
+        .cancellable()
         .param(ParamSpec::new("prompt", ParamType::Str, "the prompt to continue (or chat message)"))
         .param(ParamSpec::new("messages", ParamType::Str, "JSON array of {role,content,...} chat turns (overrides prompt)"))
         .param(ParamSpec::new("system", ParamType::Str, "optional system prompt prepended to the chat"))

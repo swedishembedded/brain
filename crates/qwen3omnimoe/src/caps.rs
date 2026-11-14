@@ -93,6 +93,7 @@ pub const MODEL: &str = "brain/qwen3omnimoe";
 pub fn chat_generate_spec(desc: &str) -> ActionSpec {
     ActionSpec::new("generate", desc)
         .streaming()
+        .cancellable()
         .param(ParamSpec::new("messages", ParamType::Str, "flattened chat messages (JSON array string)"))
         .param(ParamSpec::new("prompt", ParamType::Str, "a raw prompt (alternative to messages; no chat template applied)"))
         .param(ParamSpec::new("system", ParamType::Str, "system prompt, placed before the messages"))
@@ -141,6 +142,7 @@ pub fn generate_spec() -> ActionSpec {
 pub fn speak_spec() -> ActionSpec {
     ActionSpec::new("speak", "Qwen3-Omni: text response + spoken waveform (Thinker -> Talker -> MTP -> Code2Wav)")
         .streaming()
+        .cancellable()
         .param(ParamSpec::new("messages", ParamType::Str, "flattened chat messages (JSON array string)"))
         .param(ParamSpec::new("prompt", ParamType::Str, "a raw prompt (alternative to messages)"))
         .param(ParamSpec::new("max_new", ParamType::Int, "max TEXT tokens to generate").min(0.0).max(capability::bounds::TOKENS).default(json!(32)))
@@ -159,6 +161,7 @@ pub fn speak_spec() -> ActionSpec {
 pub fn converse_spec() -> ActionSpec {
     ActionSpec::new("converse", "Qwen3-Omni: real audio/image/video input, text response + spoken waveform out (Thinker -> Talker -> MTP -> Code2Wav, media-aware user segment). D-Bus/CLI only.")
         .streaming()
+        .cancellable()
         .param(ParamSpec::new("messages", ParamType::Str, "flattened chat messages (JSON array string)"))
         .param(ParamSpec::new("prompt", ParamType::Str, "a raw prompt (alternative to messages)"))
         .param(ParamSpec::new("max_new", ParamType::Int, "max TEXT tokens to generate").min(0.0).max(capability::bounds::TOKENS).default(json!(32)))
@@ -185,6 +188,7 @@ pub fn manifest() -> Manifest {
 /// a time. It needs no resolved checkpoint of its own.
 pub fn import_spec() -> ActionSpec {
     ActionSpec::new("import", "convert the published checkpoint directory into the brain-native W8A16 (int8 MoE experts) checkpoint the GPU-sharded Thinker serves")
+        .cancellable()
         .from_scratch()
         .param(ParamSpec::new("source", ParamType::Str, "the downloaded Hugging Face checkpoint directory").required().host_resolved())
         .param(ParamSpec::new("dest", ParamType::Str, "where to write the .safetensors").required().host_resolved())
@@ -744,6 +748,7 @@ impl Action for GenerateAction {
         generate_spec()
     }
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         crate::chat::serve_chat(&*self.inner, inv, progress)
     }
 }

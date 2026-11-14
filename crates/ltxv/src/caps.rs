@@ -42,6 +42,7 @@ pub fn manifest() -> Manifest {
         "generate a video clip from a text prompt (rectified-flow ancestral Euler denoise over the LTX-2.5 video DiT with CFG, causal 3D VAE decode). With the real checkpoint in the model store it runs the real 22B int8 DiT and Gemma-4 text encoder at the reference's defaults; without it, dit_config=tiny's random-weight smoke test with a stub text context - see crate::pipeline's module doc.",
     )
     .streaming()
+    .cancellable()
     .param(ParamSpec::new("prompt", ParamType::Str, "what the clip shows (required unless scenes gives one prompt per scene)"))
     .params(guidance_params())
     .param(ParamSpec::new("start_frame", ParamType::Str, "optional path to a PNG/JPEG still: encoded through the real video VAE and used as frame-0 conditioning while the rest of the clip denoises around it (VideoConditionByLatentIndex on its own, VideoConditionByKeyframeIndex when end_frame is also given - see crate::pipeline::conditioned_latent). Needs dit_config=ltx25_22b (the real VAE). Runs under either sampler: eta>0 follows the reference's ancestral loop (LTX-2.5 distilled's own stage-1 sampler), eta=0 the deterministic one.").host_resolved())
@@ -125,6 +126,7 @@ pub fn manifest() -> Manifest {
         "generate a sound clip from a text prompt (ltx_pipelines.t2a_one_stage): the LTX-2.5 checkpoint's audio stream denoised alone - the video half is never read - then the audio VAE and vocoder with bandwidth extension. Needs the real checkpoint, text encoder and audio VAE in the model store.",
     )
     .streaming()
+    .cancellable()
     .param(ParamSpec::new("prompt", ParamType::Str, "what the clip should sound like").required())
     // perf-number: duration-head range and default length, a model contract
     .param(ParamSpec::new("seconds", ParamType::Float, "clip length in seconds; unset, the duration head predicts it from the prompt (1-20 s), or 5 s without one").max(capability::bounds::SECONDS).min(0.04))
@@ -162,7 +164,7 @@ pub fn manifest() -> Manifest {
     let v2v = clip_in(ActionSpec::new(
         "v2v",
         "retake part of a clip (ltx_pipelines.retake): a time window is regenerated against the prompt while the rest is held, the picture, the sound or both",
-    ))
+    ).cancellable())
     .param(ParamSpec::new("start", ParamType::Float, "the retake window's start, seconds (with end; or give mask instead)").min(0.0).max(3600.0))
     .param(ParamSpec::new("end", ParamType::Float, "the retake window's end, seconds").min(0.0).max(3600.0))
     .input(BlobSpec::new("mask", Media::Video, "instead of a window: the region to regenerate on every frame, a mask sequence (`sam2 track`)"))
@@ -175,7 +177,7 @@ pub fn manifest() -> Manifest {
     let extend = clip_in(ActionSpec::new(
         "extend",
         "continue a clip (video_extend_lora's forward extension): its last frames held as a clean prefix while new frames after them denoise; returns the clip followed by the new frames",
-    ))
+    ).cancellable())
     .param(ParamSpec::new("frames", ParamType::Int, "frames to add, rounded up to a multiple of 8").max(capability::bounds::VIDEO_FRAMES).default(json!(crate::pipeline::ExtendOpts::default().frames)).min(1.0))
     .param(ParamSpec::new("context_frames", ParamType::Int, "how much of the clip's end the continuation sees").max(capability::bounds::VIDEO_FRAMES).default(json!(crate::longform::CONTEXT_FRAMES)).min(1.0))
     .param(ParamSpec::new("seconds", ParamType::Float, "instead of frames: the time to add, at the clip's frame rate").min(0.04).max(capability::bounds::SECONDS))
@@ -183,7 +185,7 @@ pub fn manifest() -> Manifest {
     let upscale = clip_in(ActionSpec::new(
         "upscale",
         "re-render a finished clip at twice its resolution: the real latent x2 upscaler, then the distilled refinement pass against the prompt",
-    ))
+    ).cancellable())
     .param(ParamSpec::new("context_frames", ParamType::Int, "clean frames each refinement pass carries into the next (1 + 8k); fewer buys passes at the cost of continuity").min(1.0).max(capability::bounds::VIDEO_FRAMES).default(json!(crate::longform::CONTEXT_FRAMES)))
     .param(ParamSpec::new("refine_steps", ParamType::Int, "refinement steps, a suffix of the distilled stage-2 schedule").max(capability::bounds::DENOISE_STEPS).default(json!(crate::pipeline::UpscaleOpts::default().refine_steps)).min(1.0));
 
@@ -205,6 +207,7 @@ fn replace_spec() -> ActionSpec {
         "replace a person in a clip with the character from a sheet, keeping their path, timing and the whole background: SAM 2.1 tracks the person, FLUX.2 paints the character over them on frame 0 and on guide frames, LTX-2.5 regenerates their region guided by those stills, and the result is composited over the source",
     )
     .streaming()
+    .cancellable()
     .input(BlobSpec::new("video", Media::Video, "the source clip, any size and length: trimmed at its end to 1 + 8k frames and centre-cropped to multiples of 32 unless conform=false").required().clip())
     .input(BlobSpec::new("character", Media::Image, "the character sheet: who the person becomes").required())
     .input(BlobSpec::new("actor_mask", Media::Video, "the person's track as a mask sequence (`sam2 track`), instead of clicks"))
@@ -765,6 +768,7 @@ impl Action for LtxvAction {
     }
     #[tracing::instrument(level = "info", name = "ltxv_action", skip_all, fields(action = %self.name))]
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         // The SERVED entry point (D-Bus/HTTP/`brain do`), as opposed to the
         // `brain ltxv` CLI: a served request has no terminal to print to, so
         // its start/finish/failure only exist anywhere if they are traced.

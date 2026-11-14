@@ -1022,7 +1022,7 @@ impl ResidentModel for Int8ThinkerResident {
             MODEL,
             "Qwen3-Omni Thinker, int8 MoE experts, layer-sharded and GPU-RESIDENT across as many GPUs as its real per-layer bytes need (capacity-aware placement via model::shard). Same chat request contract as brain/qwen3omnimoe, including real audio/image/video input (splice via crate::mm::build_multimodal_prompt, the same code brain/qwen3omnimoe uses -- see this module's doc for the vision/audio tower weight source), but the weights stay on the cards instead of streaming from the checkpoint per token, and decode runs against a real per-layer KV cache. Still no speak (see this module's doc).",
             vec![
-                ActionSpec::new("forward", "internal: run the sharded MoE-bearing layers on a raw hidden-state blob"),
+                ActionSpec::new("forward", "internal: run the sharded MoE-bearing layers on a raw hidden-state blob").cancellable(),
                 // The SAME builder brain/qwen3omnimoe's generate uses (chat params +
                 // the three media inputs) -- what makes this model reachable
                 // over /v1/chat/completions and /v1/messages with the SAME

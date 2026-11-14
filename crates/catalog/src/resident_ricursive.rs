@@ -564,6 +564,7 @@ impl Action for GenerateAction {
         generate_action()
     }
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         let mut live = self.state.live.lock().map_err(|_| "ricursive: an earlier request panicked while holding the model".to_string())?;
         if live.is_none() {
             let dir = self.state.weights.as_ref().ok_or("ricursive: no model on this machine (brain pull ricursiveAI/Ripple-65B-Preview-NVFP4)")?;

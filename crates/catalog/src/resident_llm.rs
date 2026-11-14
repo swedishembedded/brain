@@ -49,6 +49,7 @@ use qwen3::chat::{parse_request_as, sampling_params, text_outcome, ChatFormat};
 /// than duplicated a third time.
 pub fn generate_spec(summary: &str, chat: bool) -> ActionSpec {
     let mut s = ActionSpec::new("generate", summary)
+        .cancellable()
         .param(ParamSpec::new("prompt", ParamType::Str, "the prompt to continue (or chat message)"))
         .param(ParamSpec::new("max_new", ParamType::Int, "number of new tokens to generate; omitted, the reply runs to its end of turn or to the end of the context").min(0.0).max(capability::bounds::TOKENS))
         .param(ParamSpec::new("temp", ParamType::Float, "sampling temperature (<= 0 = greedy)").default(json!(0.8)))

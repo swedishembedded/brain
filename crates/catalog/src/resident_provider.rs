@@ -126,6 +126,7 @@ pub fn kv_sizing_params(default_ctx: u32, default_block: u32) -> Vec<ParamSpec> 
 /// into brain's: a host-side conversion that needs no checkpoint resolved.
 pub fn import_spec(summary: &str) -> ActionSpec {
     ActionSpec::new("import", summary)
+        .cancellable()
         .from_scratch()
         .param(ParamSpec::new("source", ParamType::Str, "the Hugging Face checkpoint directory").required().host_resolved())
         .param(ParamSpec::new("dest", ParamType::Str, "where to write the .safetensors").required().host_resolved())

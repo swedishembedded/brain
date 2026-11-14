@@ -44,6 +44,7 @@ pub fn fit_spec() -> ActionSpec {
     ActionSpec::new("fit", "optimize a Gaussian-splat scene against N posed target views (Adam on log-scale / logit gaussian parameters, ray-evaluated rasterizer backward)")
         .training()
         .streaming()
+        .cancellable()
         .param(ParamSpec::new(
             "views",
             ParamType::Str,

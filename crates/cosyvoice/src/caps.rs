@@ -102,6 +102,7 @@ fn synth_spec() -> ActionSpec {
         "zero-shot voice cloning: target text + a reference audio clip and its transcript -> a real 24 kHz WAV (non-streaming, either generation)",
     )
     .streaming()
+    .cancellable()
     .param(ParamSpec::new("text", ParamType::Str, "the target text to synthesize").required())
     .param(ParamSpec::new("ref_text", ParamType::Str, "the reference clip's own transcript").required())
     .param(ParamSpec::new("variant", ParamType::Str, "cosyvoice2 or cosyvoice3 (the resolved checkpoints must be that generation's)").default(json!("cosyvoice2")))
@@ -262,6 +263,7 @@ impl Action for SynthAction {
         synth_spec()
     }
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         synth_action(&self.paths, inv, progress)
     }
 }

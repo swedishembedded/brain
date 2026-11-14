@@ -65,6 +65,7 @@ pub(crate) fn finetune_spec() -> ActionSpec {
     )
     .training()
     .streaming()
+    .cancellable()
     .param(
         ParamSpec::new("weights", ParamType::Str, "path to the base: a brain checkpoint (.safetensors) or a Hugging Face release directory (FP8 included); overrides the model store's own pick when set")
             .host_resolved(),

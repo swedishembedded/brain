@@ -199,6 +199,7 @@ impl Action for GenerateAction {
         manifest().actions.into_iter().find(|a| a.name == "generate").expect("known action")
     }
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         let mut live = self.state.live.lock().map_err(|_| "edgerock: an earlier request panicked while holding the model".to_string())?;
         if live.is_none() {
             let dir = self.state.weights.as_ref().ok_or("edgerock: no model on this machine (brain pull rockmatrix-ai/EdgeRock)")?;

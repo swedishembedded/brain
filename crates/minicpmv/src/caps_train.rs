@@ -43,6 +43,7 @@ pub fn finetune_spec() -> ActionSpec {
     ActionSpec::new("finetune", "fine-tune MiniCPM-V on conversations with images and video, each part trained or frozen on its own; by default a LoRA on the decoder with the connector trained and the tower frozen")
         .training()
         .streaming()
+        .cancellable()
         .param(ParamSpec::new("dataset", ParamType::Str, "the generic-messages-v2 JSONL training file; a message part {\"type\": \"image\"|\"video\", \"path\": ...} names a file relative to it").required().host_resolved())
         .param(ParamSpec::new("held_out", ParamType::Str, "a JSONL file of the same shape, scored before training and after every epoch").host_resolved())
         .param(ParamSpec::new("save", ParamType::Str, "the tune directory; omit to keep the tune beside the checkpoint in the model store, where serving offers it under its label").host_resolved())
@@ -76,6 +77,7 @@ pub fn finetune_spec() -> ActionSpec {
 
 pub fn export_peft_spec() -> ActionSpec {
     ActionSpec::new("export_peft", "write a tune as one PEFT adapter over the Hugging Face checkpoint, for transformers + peft")
+        .cancellable()
         .param(ParamSpec::new("tune", ParamType::Str, "the tune: its directory, or the owner:name:tag label of one kept beside the checkpoint").required().host_resolved())
         .param(ParamSpec::new("save", ParamType::Str, "the directory the PEFT adapter is written to").required().host_resolved())
 }
@@ -128,6 +130,7 @@ impl Action for FinetuneAction {
     }
 
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         let dir = checkpoint(&self.dir, "finetune")?;
         let o = options(inv)?;
         let label = inv.get_str("label").unwrap_or_else(|| DEFAULT_LABEL.to_string());
@@ -173,6 +176,7 @@ impl Action for ExportPeftAction {
     }
 
     fn run(&self, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         let dir = checkpoint(&self.dir, "export_peft")?;
         let tune = inv.get_str("tune").ok_or("minicpmv export_peft: missing required param 'tune'")?;
         let save = PathBuf::from(inv.get_str("save").ok_or("minicpmv export_peft: missing required param 'save'")?);

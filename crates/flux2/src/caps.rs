@@ -85,10 +85,10 @@ fn ref_params(spec: ActionSpec) -> ActionSpec {
 pub fn manifest() -> Manifest {
     let image_out = || BlobSpec::new("image", Media::Image, "the generated image");
 
-    let text2image = gen_params(ActionSpec::new("text2image", "generate an image from a text prompt (4-step distilled rectified flow; base variants add CFG)").streaming())
+    let text2image = gen_params(ActionSpec::new("text2image", "generate an image from a text prompt (4-step distilled rectified flow; base variants add CFG)").streaming().cancellable())
         .output(image_out());
 
-    let edit = gen_params(ActionSpec::new("edit", "regenerate toward a prompt conditioned on reference image(s) (token-concatenation editing)").streaming())
+    let edit = gen_params(ActionSpec::new("edit", "regenerate toward a prompt conditioned on reference image(s) (token-concatenation editing)").streaming().cancellable())
         // `strength` belongs to `edit` alone: it seeds the trajectory from the
         // FIRST input image's latent, so it is meaningless without one.
         .param(ParamSpec::new(
@@ -107,6 +107,7 @@ pub fn manifest() -> Manifest {
     let lora_train = ActionSpec::new("lora_train", "fine-tune a LoRA adapter on a folder of captioned images (personalise a person/object/style)")
         .training()
         .streaming()
+        .cancellable()
         .param(ParamSpec::new("data", ParamType::Str, "server-side folder with images + captions (see data::imageset)").required().host_resolved())
         .param(ParamSpec::new("save", ParamType::Str, "server-side output path for the trained adapter").required().host_resolved())
         .param(ParamSpec::new("rank", ParamType::Int, "LoRA rank (capacity/size tradeoff)").min(0.0).max(capability::bounds::LORA_RANK).default(json!(16)))
@@ -375,6 +376,7 @@ impl Action for Flux2Action {
         manifest().actions.into_iter().find(|a| a.name == self.name).expect("known action")
     }
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         match self.name.as_str() {
             "text2image" | "edit" => {
                 // The plan before the license gate: a malformed request must

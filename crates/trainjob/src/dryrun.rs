@@ -27,6 +27,7 @@ pub const ACTION: &str = "check_dataset";
 /// What `check_dataset` is.
 pub fn spec() -> ActionSpec {
     ActionSpec::new(ACTION, "dry-run a training dataset against a base's tokenizer and chat template: records, examples, tokens and supervised tokens per example, examples longer than the training row, every refused record by line; nothing is trained")
+        .cancellable()
         .training()
         .param(ParamSpec::new("base", ParamType::Str, "the base model whose tokenizer and chat template read the dataset, `<vendor>/<repo>` in the server's model store (needed for `chat` and `preference`; a `timeline` dataset has no base)"))
         .param(ParamSpec::new("kind", ParamType::Enum(vec!["chat".into(), "preference".into(), "timeline".into()]), "`chat` (`generic-messages-v2` records, for sft, policy_gradient and full_train), `preference` (`generic-preference-v1` pairs, for dpo) or `timeline` (`timeline-v1` subjects, for timeline_train: each line validated, no tokens counted)").default(json!("chat")))
@@ -109,6 +110,7 @@ pub fn report_json(report: &brain::dataset_report::DatasetReport, kind: &str, ma
 
 /// Runs the dry run `inv` describes. It is host work and takes no card.
 pub fn run(env: &JobEnv, inv: &Invocation) -> ActionResult {
+    inv.cancel.check()?;
     let request = Request::from_invocation(inv)?;
     let p = &request.params;
     let work = Workdir::create(env)?;

@@ -41,6 +41,7 @@ pub(crate) fn sample_adapter_spec() -> ActionSpec {
         "greedy answers of a streamed base (nf4, bf16, fp8 or fp32) with a trained LoRA adapter overlaid: the adapter's, the base's, or both side by side (full forwards at a fixed length, no KV cache)",
     )
     .streaming()
+    .cancellable()
     .param(
         ParamSpec::new("weights", ParamType::Str, "path to the base: a Hugging Face release directory (FP8 included) or a brain checkpoint (.safetensors); overrides the model store's own pick when set")
             .host_resolved(),

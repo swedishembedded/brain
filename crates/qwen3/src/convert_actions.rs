@@ -28,6 +28,7 @@ const DTYPES: [&str; 3] = ["f32", "bf16", "f16"];
 
 pub(crate) fn import_spec() -> ActionSpec {
     ActionSpec::new("import", "convert a Hugging Face Qwen3 checkpoint into a brain checkpoint, carded for the model store")
+        .cancellable()
         .from_scratch()
         .param(ParamSpec::new("source", ParamType::Str, "the Hugging Face release directory (config.json and its safetensors)").host_resolved().required())
         .param(ParamSpec::new("dest", ParamType::Str, "where to write the brain checkpoint (.safetensors)").host_resolved().required())
@@ -37,6 +38,7 @@ pub(crate) fn import_spec() -> ActionSpec {
 
 pub(crate) fn export_spec() -> ActionSpec {
     ActionSpec::new("export", "write the resolved checkpoint as a Hugging Face `transformers` directory or a llama.cpp GGUF")
+        .cancellable()
         .param(ParamSpec::new("weights", ParamType::Str, "the checkpoint to export (.safetensors, .gguf or a Hugging Face release); overrides the model store's own pick when set").host_resolved())
         .param(ParamSpec::new("out", ParamType::Str, "where to write: a directory for `hf`, a .gguf file for `gguf`").host_resolved().required())
         .param(ParamSpec::new("format", ParamType::Enum(FORMATS.map(String::from).to_vec()), "hf: a `transformers` directory; gguf: a llama.cpp file embedding the tokenizer").default(json!("hf")))
@@ -47,6 +49,7 @@ pub(crate) fn export_spec() -> ActionSpec {
 
 pub(crate) fn export_peft_spec() -> ActionSpec {
     ActionSpec::new("export_peft", "write a LoRA adapter as a PEFT adapter directory")
+        .cancellable()
         .from_scratch()
         .param(ParamSpec::new("adapter", ParamType::Str, "the adapter to convert (.safetensors, `lora_train`'s output)").host_resolved().required())
         .param(ParamSpec::new("out", ParamType::Str, "the PEFT adapter directory to write").host_resolved().required())

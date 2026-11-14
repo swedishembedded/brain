@@ -61,11 +61,12 @@ fn family_decide_spec() -> ActionSpec {
 }
 
 fn models_spec() -> ActionSpec {
-    ActionSpec::new("models", "List the decision models this host knows, each with its state, manifest and validation. Loads nothing.")
+    ActionSpec::new("models", "List the decision models this host knows, each with its state, manifest and validation. Loads nothing.").cancellable()
 }
 
 fn select_spec() -> ActionSpec {
     ActionSpec::new("select", "Say which decision model `auto` (or a named id) resolves to, and why. Loads nothing.")
+        .cancellable()
         .param(ParamSpec::new("model", ParamType::Str, "\"auto\" or a model id").default(json!("auto")))
 }
 
@@ -168,6 +169,7 @@ impl Action for FamilyAction {
         self.spec.clone()
     }
     fn run(&self, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         let model = inv.get_str("model").unwrap_or_else(|| "auto".into());
         match self.spec.name.as_str() {
             "models" => Ok(models_outcome(&self.provider.catalog)),

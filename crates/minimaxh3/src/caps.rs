@@ -184,13 +184,13 @@ pub fn manifest() -> Manifest {
     let t2va = common(ActionSpec::new(
         TASKS[0],
         "generate a video clip AND its own soundtrack from a text prompt (Qwen3-VL text conditioning, one packed self-attention DiT denoising video and audio rows together under two independent shifted-sigma Euler schedules in the SAME forward, causal 3D video VAE + DAC/BigVGAN audio VAE decode)",
-    ))
+    ).cancellable())
     .video(contract.clone());
 
     let fl2va = common(ActionSpec::new(
         TASKS[1],
         "t2va, plus the clip anchored to still images at its first frame, its last frame and/or interior frames: the given stills are VAE-encoded, lightly noised, and prepended to the packed sequence as extra conditioning rows, each at its own frame's rotary time, that the denoise loop never resamples - the generated clip is guided through every one of them",
-    ))
+    ).cancellable())
     // `host_resolved`: these name still files on the machine that holds the
     // weights - `ltxv::caps`' `start_frame`/`end_frame`/`mid_frame` pattern.
     // A caller standing on the host (`brain do`) sets them; every off-machine
@@ -204,7 +204,7 @@ pub fn manifest() -> Manifest {
     let ref2va = common(ActionSpec::new(
         TASKS[2],
         "t2va conditioned on reference media - images, videos and soundtracks the clip should draw its subjects, look and sound from (MiniMax-H3's separately trained transformer_ref). Each reference is labelled in the Qwen3-VL presentation and packed, at its own resolution, ahead of the generated rows; the prompt can name them as <Picture i>, <Video k> and <Audio j>",
-    ))
+    ).cancellable())
     .param(
         ParamSpec::new(
             "references",
@@ -1102,6 +1102,7 @@ impl Action for MiniMaxH3Action {
         manifest().actions.into_iter().find(|a| a.name == self.name).expect("known action")
     }
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         run_request(&self.paths, &self.name, inv, None, progress)
     }
 }

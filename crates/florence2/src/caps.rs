@@ -78,6 +78,7 @@ const fn serving_set() -> [(&'static str, &'static str); N_MODEL + 2] {
 
 pub fn ground_spec() -> ActionSpec {
     ActionSpec::new("ground", "locate a UI element or phrase in an image: normalized bounding box(es)")
+        .cancellable()
         .param(ParamSpec::new("target", ParamType::Str, "the phrase or UI element to locate, e.g. \"the Login button\"").required())
         .param(ParamSpec::new("max_new_tokens", ParamType::Int, "cap on generated tokens (0 = default)").min(0.0).max(capability::bounds::TOKENS).default(json!(0)))
         .input(BlobSpec::new("image", Media::Image, "the screenshot to search").required())

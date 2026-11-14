@@ -78,6 +78,7 @@ pub const DEFAULT_MAX_NEW: i64 = 128;
 pub fn manifest() -> Manifest {
     let generate = ActionSpec::new("generate", "generate tokens continuing a prompt (Qwen3.5-35B-A3B hybrid GDN/GQA MoE decoder, KV-cache decode, one Progress per token)")
         .streaming()
+        .cancellable()
         .param(ParamSpec::new(
             "prompt",
             ParamType::Str,
@@ -188,6 +189,7 @@ impl Action for GenerateAction {
     }
 
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         let weights = self.weights.clone();
         if !Path::new(&weights).exists() {
             return Err(format!("qwen35moe generate: weights not found at '{weights}'"));

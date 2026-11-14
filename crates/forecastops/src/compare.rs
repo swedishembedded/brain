@@ -30,6 +30,7 @@ const MAX_WINDOWS: f64 = 10_000.0;
 /// The action's schema.
 pub fn compare_spec(summary: &str) -> ActionSpec {
     ActionSpec::new("compare", summary)
+        .cancellable()
         .from_scratch()
         .param(ParamSpec::new("windows", ParamType::Int, "seeded windows scored per scenario and model; a foundation model is slow on a CPU, so keep it small there").min(1.0).max(MAX_WINDOWS).default(json!(DEFAULT_WINDOWS)))
         .param(ParamSpec::new("seed", ParamType::Int, "seeds the scenario windows (omit for random; the outcome echoes it)").min(0.0))
@@ -40,6 +41,7 @@ pub fn compare_spec(summary: &str) -> ActionSpec {
 /// Run the battery for `models` (the baselines are always in) and fail if a
 /// model falsely beats naive on the random walk.
 pub fn run_compare(models: Vec<Box<dyn ForecastModel>>, inv: &Invocation) -> ActionResult {
+    inv.cancel.check()?;
     let windows = inv.get_i64("windows").unwrap_or(DEFAULT_WINDOWS).max(1) as usize;
     let seed = inv.seed()?.unwrap_or_else(seed::random_seed);
     let mut all = fcbench::baselines::default_set();

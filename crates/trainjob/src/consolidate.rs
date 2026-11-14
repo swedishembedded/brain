@@ -61,6 +61,7 @@ pub fn full_spec() -> ActionSpec {
     let mut spec = ActionSpec::new(FULL_ACTION, "fine-tune every weight of a chat model on a chat dataset: the checkpoint leaves by manifest digest in the artifact store (and optionally into the model store)")
         .training()
         .streaming()
+        .cancellable()
         .param(ParamSpec::new("base", ParamType::Str, "the base model, `<vendor>/<repo>` in the server's model store").required())
         .param(ParamSpec::new("data", ParamType::Str, "JSON document naming the datasets: {\"train\": SRC, \"replay\"?: [SRC], \"weighted_replay\"?: [{SRC fields, \"share\"}]} where SRC is {\"digest\": \"<blake3 hex>\"} or {\"blob\": \"<input name>\"}").required())
         .param(ParamSpec::new("steps", ParamType::Int, "optimiser steps").default(json!(100)).min(1.0).max(1_000_000.0).step(1.0))
@@ -85,6 +86,7 @@ pub fn full_spec() -> ActionSpec {
 /// What `merge` is.
 pub fn merge_spec() -> ActionSpec {
     ActionSpec::new(MERGE_ACTION, "fold a LoRA adapter into the weights of its base: the merged checkpoint leaves by manifest digest in the artifact store (and optionally into the model store)")
+        .cancellable()
         .training()
         .param(ParamSpec::new("base", ParamType::Str, "the base model the adapter was trained on, `<vendor>/<repo>` in the server's model store").required())
         .param(ParamSpec::new("adapter_digest", ParamType::Str, "the adapter, as a blake3 digest of the server's artifact store (or attach it as the input blob `adapter`; exactly one of the two)"))
@@ -282,6 +284,7 @@ pub(crate) fn checkpoint_outcome(env: &JobEnv, dir: &Path, install_as: Option<&s
 
 /// Runs the `full_train` job `inv` on the device this thread is scoped to.
 pub fn run_full(env: &JobEnv, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+    inv.cancel.check()?;
     let request = FullRequest::from_invocation(inv)?;
     let p = &request.params;
     let base_dir = job::resolve_base(env.models_dir.as_deref(), &p.base)?;
@@ -359,6 +362,7 @@ pub fn run_full(env: &JobEnv, inv: &Invocation, progress: &mut dyn FnMut(Progres
 
 /// Runs the `merge` job `inv`. Folding is host work: it takes no card.
 pub fn run_merge(env: &JobEnv, inv: &Invocation) -> ActionResult {
+    inv.cancel.check()?;
     let request = MergeRequest::from_invocation(inv)?;
     let p = &request.params;
     let base_dir = job::resolve_base(env.models_dir.as_deref(), &p.base)?;

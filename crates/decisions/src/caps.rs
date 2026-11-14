@@ -90,6 +90,7 @@ pub const MAX_DEADLINE_MS: i64 = 600_000;
 /// The `decide` action's schema.
 pub fn decide_spec() -> ActionSpec {
     ActionSpec::new(ACTION, "Answer typed questions (choice, score, noul) about one state with a calibrated distribution over options the caller supplies.")
+        .cancellable()
         .param(ParamSpec::new("state", ParamType::Str, "the situation: text, or a JSON document (structured state keeps its key order)").required())
         .param(
             ParamSpec::new("state_format", ParamType::Enum(vec!["text".into(), "json".into()]), "text: taken verbatim; json: a JSON document, where a JSON string is text and anything else is structured state in the caller's key order")
@@ -179,6 +180,7 @@ impl Session {
 
     /// Run one `decide` call.
     pub fn run(&mut self, inv: &Invocation) -> ActionResult {
+        inv.cancel.check()?;
         self.run_started(inv, Instant::now())
     }
 

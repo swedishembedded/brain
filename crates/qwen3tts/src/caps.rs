@@ -168,19 +168,19 @@ pub fn audio_outcome(wav: Vec<f32>, seed: u64) -> ActionResult {
 }
 
 pub fn synth_spec() -> ActionSpec {
-    speech_params(ActionSpec::new("synth", "speaker-free text-to-speech (Talker + MTP + codec, 24 kHz wav)"))
+    speech_params(ActionSpec::new("synth", "speaker-free text-to-speech (Talker + MTP + codec, 24 kHz wav)").cancellable())
         .output(BlobSpec::new("audio", Media::Audio, "the synthesized speech as a 24 kHz mono WAV"))
 }
 
 pub fn clone_spec() -> ActionSpec {
-    reference_inputs(speech_params(ActionSpec::new("clone", "voice cloning from a reference wav (x-vector-only, or in-context when ref_text is given)")))
+    reference_inputs(speech_params(ActionSpec::new("clone", "voice cloning from a reference wav (x-vector-only, or in-context when ref_text is given)").cancellable()))
         .param(ref_text_param())
         .input(BlobSpec::new("ref_codes", Media::Bytes, "the reference's [frames,16] codec codes, encoded elsewhere (an 8-byte little-endian count, then u32 little-endian codes); overrides the in-tree encode of the reference"))
         .output(BlobSpec::new("audio", Media::Audio, "the cloned-voice speech as a 24 kHz mono WAV"))
 }
 
 pub fn design_spec() -> ActionSpec {
-    instruct_params(speech_params(ActionSpec::new("design", "VoiceDesign (instruct) and/or CustomVoice preset speakers - needs a CustomVoice/VoiceDesign checkpoint")))
+    instruct_params(speech_params(ActionSpec::new("design", "VoiceDesign (instruct) and/or CustomVoice preset speakers - needs a CustomVoice/VoiceDesign checkpoint").cancellable()))
         .output(BlobSpec::new("audio", Media::Audio, "the designed-voice speech as a 24 kHz mono WAV"))
 }
 
@@ -200,7 +200,7 @@ pub fn batch_spec() -> ActionSpec {
     generation_params(ActionSpec::new(
         "batch",
         "synthesize N texts in one interleaved (ragged) batch - one 24 kHz WAV per request, in request order",
-    ))
+    ).cancellable())
     .streaming()
     .param(
         ParamSpec::new(
@@ -215,6 +215,7 @@ pub fn batch_spec() -> ActionSpec {
 
 pub fn import_spec() -> ActionSpec {
     ActionSpec::new("import", "convert the Hugging Face release into brain's four component checkpoints (talker, mtp, codec, speaker); a release with no speaker encoder (CustomVoice, VoiceDesign) skips it")
+        .cancellable()
         .from_scratch()
         .param(ParamSpec::new("source", ParamType::Str, "the Hugging Face checkpoint directory (the Talker, the MTP and the speaker encoder), on the serving machine").required().host_resolved())
         .param(ParamSpec::new("codec_source", ParamType::Str, "the speech tokenizer's directory, on the serving machine; omit for the release's speech_tokenizer subdirectory").host_resolved())
@@ -227,6 +228,7 @@ pub fn finetune_spec() -> ActionSpec {
     ActionSpec::new("finetune", "single-speaker SFT of the Talker on a text -> codes dataset: LoRA adapters over a frozen base, or every weight with `full`")
         .training()
         .streaming()
+        .cancellable()
         .param(ParamSpec::new("data", ParamType::Str, "the dataset folder holding train.u32.bin and val.u32.bin, on the serving machine").required().host_resolved())
         .param(ParamSpec::new("save", ParamType::Str, "where to write the fine-tuned checkpoint (.safetensors) on the serving machine").required().host_resolved())
         .param(ParamSpec::new("full", ParamType::Bool, "train every Talker weight (Qwen's documented single-speaker fine-tuning) instead of the LoRA attention adapters").default(json!(false)))
@@ -242,6 +244,7 @@ pub fn finetune_spec() -> ActionSpec {
 
 pub fn sim_spec() -> ActionSpec {
     ActionSpec::new("sim", "speaker-embedding cosine similarity of two utterances (ECAPA x-vectors): the timbre-preservation metric, e.g. a quantized Talker's clone against its reference")
+        .cancellable()
         .input(BlobSpec::new("a", Media::Bytes, "the first utterance: a WAV recording").required())
         .input(BlobSpec::new("b", Media::Bytes, "the second utterance: a WAV recording").required())
 }
@@ -357,6 +360,7 @@ impl Action for SynthAction {
     }
 
     fn run(&self, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         let (paths, text, lang, opts) = speech_request(&self.paths, inv, "synth", false)?;
         let wav = crate::pipeline::synth(&paths, &opts, &text, &lang, &inv.cancel)?;
         audio_outcome(wav, opts.seed)
@@ -373,6 +377,7 @@ impl Action for CloneAction {
     }
 
     fn run(&self, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         let (paths, text, lang, opts) = speech_request(&self.paths, inv, "clone", true)?;
         let (reference, ref_codes) = reference_from(inv, "clone")?;
         let ref_text = inv.get_str("ref_text").unwrap_or_default();
@@ -391,6 +396,7 @@ impl Action for DesignAction {
     }
 
     fn run(&self, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         let (paths, text, lang, opts) = speech_request(&self.paths, inv, "design", false)?;
         let instruct = inv.get_str("instruct").unwrap_or_default();
         let speaker = inv.get_str("speaker").filter(|s| !s.is_empty());
@@ -409,6 +415,7 @@ impl Action for BatchAction {
     }
 
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         let raw = inv.get_str("requests").ok_or("tts batch: missing required param 'requests'")?;
         let items: Vec<serde_json::Value> =
             serde_json::from_str(&raw).map_err(|e| format!("tts batch: 'requests' must be a JSON array of objects: {e}"))?;
@@ -485,6 +492,7 @@ impl Action for ImportAction {
     }
 
     fn run(&self, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         let source = inv.get_str("source").ok_or("tts import: missing required param 'source'")?;
         let dest = inv.get_str("dest").ok_or("tts import: missing required param 'dest'")?;
         let sources = crate::import::Sources::new(&source, inv.get_str("codec_source").as_deref(), inv.get_str("speaker_source").as_deref());
@@ -503,6 +511,7 @@ impl Action for FinetuneAction {
     }
 
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         let base = checkpoint(&self.paths, "finetune", false)?.talker;
         let data = inv.get_str("data").ok_or("tts finetune: missing required param 'data'")?;
         let save = inv.get_str("save").ok_or("tts finetune: missing required param 'save'")?;
@@ -551,6 +560,7 @@ impl Action for SimAction {
     }
 
     fn run(&self, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         let paths = checkpoint(&self.paths, "sim", true)?;
         let utterance = |name: &str| {
             let blob = inv.get_blob(name).ok_or_else(|| format!("tts sim: missing required input '{name}'"))?;

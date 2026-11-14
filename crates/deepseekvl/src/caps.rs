@@ -44,6 +44,7 @@ pub const DEFAULT_MAX_NEW: i64 = 512;
 pub fn generate_spec(model_desc: &str) -> ActionSpec {
     let mut spec = ActionSpec::new("generate", model_desc)
         .streaming()
+        .cancellable()
         .param(ParamSpec::new("messages", ParamType::Str, "flattened chat messages (JSON array string); image parts mark where each image goes"))
         .param(ParamSpec::new("prompt", ParamType::Str, "a single user message (alternative to messages)"))
         .param(ParamSpec::new("max_new", ParamType::Int, "max tokens to generate").default(json!(DEFAULT_MAX_NEW)).min(1.0).max(MAX_CONTEXT as f64))
@@ -87,6 +88,7 @@ pub fn finetune_spec(name: &str, summary: &str) -> ActionSpec {
     ActionSpec::new(name, summary)
         .training()
         .streaming()
+        .cancellable()
         .param(ParamSpec::new("dataset", ParamType::Str, "folder holding train.jsonl: one example a line, {\"image\": \"cat.png\", \"messages\": [...]}, image paths relative to the folder").required().host_resolved())
         .param(ParamSpec::new("save", ParamType::Str, "folder the adapter and the aligner are written to; nothing is written beside the checkpoint").required().host_resolved())
         .params(qwen3::lora_params::specs(&LORA_DEFAULTS))
@@ -392,6 +394,7 @@ impl Action for FinetuneAction {
     }
 
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         let dir = std::path::PathBuf::from(self.dir.clone().ok_or("deepseekvl finetune: no DeepSeek-VL checkpoint (pull one, or name its directory with --dir)")?);
         let (options, dataset, save) = finetune_options(inv, "deepseekvl finetune")?;
         let base = brain_modelstore::repo_id(&dir);
@@ -438,6 +441,7 @@ impl Action for GenerateAction {
     }
 
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         let dir = inv
             .get_str("weights")
             .filter(|s| !s.is_empty())

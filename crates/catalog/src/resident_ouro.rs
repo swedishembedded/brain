@@ -57,6 +57,7 @@ fn train_spec() -> ActionSpec {
     ActionSpec::new("train", "a short causal-LM run on the checkpoint itself (the released exit-probability-weighted objective, AdamW), on text or raw token ids")
         .training()
         .streaming()
+        .cancellable()
         .param(ParamSpec::new("text", ParamType::Str, "the training text, tokenized with the checkpoint's tokenizer (default: a short passage of prose)"))
         .param(ParamSpec::new("ids", ParamType::Str, "comma-separated token ids instead of text, for a vocabulary no tokenizer produces"))
         .param(ParamSpec::new("steps", ParamType::Int, "optimizer steps").default(json!(d.steps)).min(1.0).max(capability::bounds::TRAIN_STEPS))
@@ -101,6 +102,7 @@ impl capability::Action for ImportAction {
         direct_manifest().actions.into_iter().find(|a| a.name == "import").expect("declared")
     }
     fn run(&self, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         let source = inv.get_str("source").ok_or("ouro import: missing required param 'source'")?;
         let dest = inv.get_str("dest").ok_or("ouro import: missing required param 'dest'")?;
         ouro::import::import(&source, &dest)?;

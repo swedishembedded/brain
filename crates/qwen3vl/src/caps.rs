@@ -234,6 +234,7 @@ fn decode_images(inv: &Invocation) -> Result<Vec<(Vec<f32>, u32, u32)>, String> 
 pub fn generate_spec() -> ActionSpec {
     let mut spec = ActionSpec::new("generate", "Qwen3-VL: 1-8 images + text in, greedy text completion (validation-tier -- see this module's doc)")
         .streaming()
+        .cancellable()
         .param(ParamSpec::new("messages", ParamType::Str, "flattened chat messages (JSON array string)"))
         .param(ParamSpec::new("prompt", ParamType::Str, "a raw prompt (alternative to messages)"))
         .param(ParamSpec::new("max_new", ParamType::Int, "max tokens to generate").min(0.0).max(capability::bounds::TOKENS).default(json!(64)))
@@ -311,6 +312,7 @@ pub fn lora_train_spec() -> ActionSpec {
     ActionSpec::new("lora_train", "fine-tune a LoRA adapter for the decoder on a folder of captioned images (data::imageset's captions.yaml/.jsonl - the format `brain label` writes)")
         .training()
         .streaming()
+        .cancellable()
         .param(ParamSpec::new("data", ParamType::Str, "folder with images + a captions.yaml (`filename: prompt`) and/or captions.jsonl").required().host_resolved())
         .param(ParamSpec::new("save", ParamType::Str, "output path for the trained adapter").required().host_resolved())
         .param(
@@ -617,6 +619,7 @@ impl Action for GenerateAction {
     }
 
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         // Checked before ANY checkpoint I/O, per
         // `empty_prompt_is_a_clean_error_before_touching_weights` below.
         if last_user_text(inv).trim().is_empty() {
@@ -646,6 +649,7 @@ impl Action for LoraTrainAction {
     }
 
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         let dir = inv
             .get_str("weights")
             .filter(|s| !s.is_empty())

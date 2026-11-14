@@ -74,6 +74,7 @@ pub fn manifest() -> Manifest {
         "generate a video clip from a text prompt (umT5-XXL conditioning, flow-matching denoise over a 3D latent volume with CFG, causal 3D VAE decode)",
     )
     .streaming()
+    .cancellable()
     .param(ParamSpec::new("prompt", ParamType::Str, "text description of the desired clip").required())
     .param(ParamSpec::new("negative_prompt", ParamType::Str, "what to avoid; omit for upstream's own sample_neg_prompt, pass \"\" for none"))
     .param(ParamSpec::new("frames", ParamType::Int, "video frames; must be of the form 1 + 4k (the causal VAE gives the first frame its own latent frame)").min(0.0).max(capability::bounds::VIDEO_FRAMES).default(json!(d.frames)))
@@ -100,6 +101,7 @@ pub fn manifest() -> Manifest {
     let lora_train = ActionSpec::new("lora_train", "fine-tune a LoRA adapter on a folder of captioned video clips (a data::episode dataset plus captions.json; GPU-resident DiT trainer where a device is available, host f32 otherwise)")
         .training()
         .streaming()
+        .cancellable()
         .param(ParamSpec::new("data", ParamType::Str, "server-side folder holding a data::episode dataset plus captions.json").required().host_resolved())
         .param(ParamSpec::new("save", ParamType::Str, "server-side output path for the trained adapter").required().host_resolved())
         .param(ParamSpec::new("rank", ParamType::Int, "LoRA rank (capacity/size tradeoff)").min(0.0).max(capability::bounds::LORA_RANK).default(json!(16)))
@@ -348,6 +350,7 @@ impl Action for WanAction {
         manifest().actions.into_iter().find(|a| a.name == self.name).expect("known action")
     }
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         match self.name.as_str() {
             "t2v" => {
                 let p = gen_params_from(inv)?;

@@ -51,6 +51,7 @@ pub const DEFAULT_MAX_NEW: i64 = 512;
 pub fn generate_spec() -> ActionSpec {
     let mut spec = ActionSpec::new("generate", "MiniCPM-V 4.6: up to 8 images and a video + a conversation in, text out (streamed per token)")
         .streaming()
+        .cancellable()
         .param(ParamSpec::new("messages", ParamType::Str, "flattened chat messages (JSON array string); image parts mark where each image goes"))
         .param(ParamSpec::new("prompt", ParamType::Str, "a single user message (alternative to messages)"))
         .param(ParamSpec::new("system", ParamType::Str, "optional system prompt"))
@@ -348,6 +349,7 @@ impl Action for GenerateAction {
     }
 
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         let dir = inv
             .get_str("weights")
             .filter(|s| !s.is_empty())
