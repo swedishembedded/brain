@@ -1,4 +1,4 @@
-<!-- source-sha256: 3be5d5c885a9b468d918b1b551d1a72db7cdb9da3db28493e52b827a15515a7b -->
+<!-- source-sha256: de4048aa63a5fcfef10b1f44b8ae45f01d38bf07ed92aa07ad678ed58cfa12b4 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 380" width="880" height="380"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="880" height="380" fill="#ffffff"/>
 <rect x="20" y="16" width="840" height="140" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
 <text x="34" y="38" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">Listening: a waveform becomes text</text>
