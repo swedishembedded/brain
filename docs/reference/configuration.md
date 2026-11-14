@@ -138,6 +138,8 @@ model is not served.
 The two admission deadlines are `brain serve` flags, not variables: `--admit-deadline-ms` and
 `--cold-build-admit-deadline-ms` (defaults and meaning in
 [`serving.md`](../guides/serving/serving.md#admission-and-backpressure)). So
+are the scheduler's own queue deadline, `--queue-deadline-ms` (default 1860000), and the wait
+after which a training job is guaranteed a card, `--train-max-wait-ms` (default 60000). So
 are the scheduler's weights: `--sched-max-wait-ms` (default 30000),
 `--sched-age-weight` (0.05), `--sched-batch-weight` (200), with `--max-batch`
 capping the jobs one run takes (8 when unset).

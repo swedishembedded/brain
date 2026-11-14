@@ -25,6 +25,7 @@ use capability::{ActionResult, Invocation, Manifest, Progress};
 use gpu_supervisor::Health;
 
 use crate::adapter::{AdapterIdentity, ServedAdapters};
+use crate::contract::{Class, DeadlineSource, Decision, HoldChange, Holds, Waiting};
 use crate::affinity::{choose_replica, PrefixDirectory, ReplicaView};
 use crate::manager::{Abandoned, ClaimError, Claimed, ClaimedMulti, InstanceHandle};
 use crate::scheduler::{choose_next, Group, Policy};
@@ -43,12 +44,16 @@ pub struct Job {
     /// Fired exactly once, at the moment the dispatcher CLAIMS this job onto a lane
     /// (work is about to start) - the admission signal an HTTP layer gates on.
     pub on_admit: Option<Box<dyn FnOnce() + Send>>,
+    /// The latest moment this job may still be admitted, when its caller has
+    /// one; the operator's queue deadline applies when it is later or absent
+    /// ([`crate::contract::Contract::deadline`]).
+    pub deadline: Option<Instant>,
 }
 
 impl Job {
     /// A job with no-op callbacks; attach them with `.on_progress`/`.reply`/`.on_admit`.
     pub fn new(model: impl Into<String>, action: impl Into<String>, inv: Invocation) -> Job {
-        Job { model: model.into(), action: action.into(), inv, on_progress: Box::new(|_| {}), reply: Box::new(|_| {}), on_admit: None }
+        Job { model: model.into(), action: action.into(), inv, on_progress: Box::new(|_| {}), reply: Box::new(|_| {}), on_admit: None, deadline: None }
     }
     pub fn on_progress(mut self, f: impl FnMut(Progress) + Send + 'static) -> Job {
         self.on_progress = Box::new(f);
@@ -60,6 +65,11 @@ impl Job {
     }
     pub fn on_admit(mut self, f: impl FnOnce() + Send + 'static) -> Job {
         self.on_admit = Some(Box::new(f));
+        self
+    }
+    /// Answer this job with a timeout if it has not been admitted by `at`.
+    pub fn deadline(mut self, at: Instant) -> Job {
+        self.deadline = Some(at);
         self
     }
 }
@@ -83,6 +93,18 @@ struct Pending {
     /// The group this job is waiting to join has already asked whether it can
     /// ever run ([`crate::model::JobFeed::screen`]).
     screened: bool,
+    /// The latest moment it may still be admitted ([`crate::contract`]).
+    deadline: Instant,
+    deadline_source: DeadlineSource,
+    /// Which promise it is owed: a request, or a workload's guaranteed slot.
+    class: Class,
+}
+
+impl Pending {
+    /// This job as the admission contract sees it.
+    fn waiting(&self) -> Waiting {
+        Waiting { id: self.id, class: self.class, enqueued: self.enqueued, deadline: self.deadline, source: self.deadline_source }
+    }
 }
 
 /// One job the executor currently holds - either still in the pending `queue`
@@ -163,6 +185,9 @@ pub struct Stats {
     /// servable. An entry is logged when it appears and again when it clears, and
     /// goes when a later claim for the key succeeds.
     pub unservable: HashMap<InstanceKey, String>,
+    /// Jobs answered because they were not admitted by their queue deadline
+    /// ([`crate::contract`]).
+    pub expired: u64,
 }
 
 /// The work one instance holds: jobs waiting for it and jobs running on it.
@@ -320,6 +345,9 @@ impl Inbox {
 struct OpenGroup {
     action: String,
     inbox: Arc<Inbox>,
+    /// The devices the group occupies: it takes no late job while one of them
+    /// is held for a workload ([`crate::contract::Contract::late_joins`]).
+    devices: Vec<Device>,
 }
 
 /// Cheap-to-clone submission handle (many front-ends can submit concurrently).
@@ -778,6 +806,8 @@ struct Dispatcher {
     open_groups: HashMap<InstanceKey, OpenGroup>,
     /// What was routed to each replica of the models that run several: the dispatcher's record of their prefix caches.
     replica_routes: ReplicaRoutes,
+    /// Devices held for workloads that have waited their guaranteed time ([`crate::contract`]).
+    holds: Holds,
     /// Monotonic job-id source; each submitted job gets the next value.
     next_id: u64,
 }
@@ -797,8 +827,86 @@ impl Dispatcher {
             running_jobs: Vec::new(),
             open_groups: HashMap::new(),
             replica_routes: ReplicaRoutes::default(),
+            holds: Holds::default(),
             next_id: 0,
         }
+    }
+
+    /// The admission contract's share of a round, before anything is assigned:
+    /// answer every job whose queue deadline has passed, in the queue or in a
+    /// running group's inbox, and hold devices for each workload that has
+    /// waited its guaranteed time (releasing the hold of any that left).
+    fn enforce_contract(&mut self, now: Instant) {
+        let contract = self.policy.admission;
+        let Dispatcher { queue, mgr, stats, running_jobs, open_groups, holds, health, .. } = self;
+        let refusal = |p: &Pending, holds: &Holds| match contract.decide(&p.waiting(), now, holds) {
+            Decision::Refuse(why) => Some(why.message(&p.model, &p.action)),
+            _ => None,
+        };
+        let mut expired: Vec<(Pending, String)> = Vec::new();
+        let mut i = 0;
+        while i < queue.len() {
+            match refusal(&queue[i], holds) {
+                Some(why) => expired.push((queue.remove(i), why)),
+                None => i += 1,
+            }
+        }
+        // A job in an inbox has not been taken by its group: it holds no slot,
+        // so it is answered at its deadline like one in the queue.
+        for group in open_groups.values() {
+            let mut st = group.inbox.lock();
+            let mut j = 0;
+            while j < st.jobs.len() {
+                match refusal(&st.jobs[j], holds) {
+                    Some(why) => {
+                        let p = st.jobs.remove(j);
+                        running_jobs.retain(|r| r.id != p.id);
+                        expired.push((p, why));
+                    }
+                    None => j += 1,
+                }
+            }
+        }
+        if !expired.is_empty() {
+            if let Ok(mut s) = stats.lock() {
+                s.expired += expired.len() as u64;
+                s.queue_depth = queue.len();
+            }
+            for (p, why) in expired {
+                crate::log::warn(&why);
+                (p.reply)(Err(why));
+            }
+        }
+        let quarantined: HashSet<Device> = health.as_deref().map(|h| h.quarantined().into_iter().collect()).unwrap_or_default();
+        let waiting: Vec<Waiting> = queue.iter().map(Pending::waiting).collect();
+        let changes = holds.reconcile(&contract, &waiting, now, |id| {
+            queue.iter().find(|p| p.id == id).map(|p| mgr.fit_devices(&p.key, &p.model, &quarantined)).unwrap_or_default()
+        });
+        for change in changes {
+            note_hold(&change, queue);
+        }
+    }
+
+    /// When the next round must run even if no message arrives: the nearest
+    /// queue deadline, or the moment a workload is owed its slot.
+    fn next_wake(&self, now: Instant) -> Option<Instant> {
+        let mut waiting: Vec<Waiting> = self.queue.iter().map(Pending::waiting).collect();
+        for group in self.open_groups.values() {
+            waiting.extend(group.inbox.lock().jobs.iter().map(Pending::waiting));
+        }
+        self.policy.admission.next_change(&waiting, now)
+    }
+}
+
+/// Log a hold taken or released, naming the workload it is for.
+fn note_hold(change: &HoldChange, queue: &[Pending]) {
+    match change {
+        HoldChange::Taken { job, devices } => {
+            let what = queue.iter().find(|p| p.id == *job).map_or_else(|| format!("job {job}"), |p| format!("{}/{} (job {job})", p.model, p.action));
+            let cards: Vec<String> = devices.iter().map(|d| crate::plan::device_name(*d)).collect();
+            crate::log::info(&format!("{what} has waited its guaranteed time: serving admission on {} is held for it until it starts", cards.join(", ")));
+        }
+        HoldChange::Released { job } => crate::log::info(&format!("the devices held for job {job} are released")),
     }
 }
 
@@ -823,7 +931,9 @@ fn dispatch_loop(rx: Receiver<Msg>, mut d: Dispatcher, capacity: Option<Capacity
         // message - it re-probes capacity and re-runs `assign`, which is
         // exactly what a group stalled on `NoCapacity` needs.
         let mut msgs = Vec::new();
-        match rx.recv_timeout(IDLE_TICK) {
+        let now = Instant::now();
+        let wait = d.next_wake(now).map_or(IDLE_TICK, |t| t.saturating_duration_since(now).min(IDLE_TICK));
+        match rx.recv_timeout(wait) {
             Ok(msg) => msgs.push(msg),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
             // A closed channel (every sender gone, i.e. every Executor handle
@@ -876,7 +986,10 @@ fn dispatch_loop(rx: Receiver<Msg>, mut d: Dispatcher, capacity: Option<Capacity
         // because scheduling stalled. Own catch_unwind too: `assign`'s
         // eviction fallback can ALSO drop a Hot instance.
         shed_cancelled(&mut d.queue, &d.stats);
-        refill_open_groups(&mut d.queue, &d.open_groups, &d.running, &mut d.running_jobs, &d.stats);
+        if let Err(p) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| d.enforce_contract(Instant::now()))) {
+            eprintln!("[residency] dispatcher: panic enforcing the admission contract: {} -- continuing", panic_message(p.as_ref()));
+        }
+        refill_open_groups(&mut d.queue, &d.open_groups, &d.running, &mut d.running_jobs, &d.stats, &d.policy.admission, &d.holds);
         if let Err(p) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| d.assign())) {
             eprintln!("[residency] dispatcher: panic during assign: {} -- continuing", panic_message(p.as_ref()));
         }
@@ -921,7 +1034,7 @@ fn dispatch_loop(rx: Receiver<Msg>, mut d: Dispatcher, capacity: Option<Capacity
 impl Dispatcher {
     /// Apply one message to the dispatcher's state.
     fn on_msg(&mut self, msg: Msg) {
-        let Dispatcher { queue, mgr, running, busy, stats, running_jobs, open_groups, replica_routes, next_id, done, .. } = self;
+        let Dispatcher { queue, mgr, policy, running, busy, stats, running_jobs, open_groups, replica_routes, next_id, done, .. } = self;
         match msg {
             Msg::Submit(mut job) => match mgr.instance_key_for(&job.model, &job.action, &job.inv) {
                 Some(key) => {
@@ -933,17 +1046,23 @@ impl Dispatcher {
                     let key = replica_routes.route(mgr, &job.model, &job.inv, key, queue, running_jobs);
                     let id = *next_id;
                     *next_id += 1;
+                    let enqueued = Instant::now();
+                    let (deadline, deadline_source) = policy.admission.deadline(enqueued, job.deadline);
+                    let class = if mgr.is_transient(&job.model) { Class::Workload } else { Class::Serving };
                     queue.push(Pending {
                         id,
                         model: job.model,
                         action: job.action,
                         inv: job.inv,
                         key,
-                        enqueued: Instant::now(),
+                        enqueued,
                         on_progress: job.on_progress,
                         reply: job.reply,
                         on_admit: job.on_admit,
                         screened: false,
+                        deadline,
+                        deadline_source,
+                        class,
                     });
                     let mut s = stats.lock().unwrap();
                     s.queue_peak = s.queue_peak.max(queue.len());
@@ -1198,8 +1317,9 @@ fn note_unservable(stats: &Arc<Mutex<Stats>>, key: &InstanceKey, reason: Option<
 impl Dispatcher {
     /// Assign as many runnable groups as there are free device lanes.
     fn assign(&mut self) {
-        let Dispatcher { queue, mgr, policy, lanes, done, running, busy, stats, running_jobs, open_groups, health, .. } = self;
+        let Dispatcher { queue, mgr, policy, lanes, done, running, busy, stats, running_jobs, open_groups, health, holds, .. } = self;
         let health = health.as_deref();
+        let contract = policy.admission;
         // Quarantined devices are excluded exactly like busy ones, so a group is
         // placed on a healthy device when one can take it; what no healthy device
         // could ever take is refused once the quarantine is a long one.
@@ -1226,15 +1346,29 @@ impl Dispatcher {
             let now = Instant::now();
             let exclude: HashSet<Device> = busy.union(&quarantined).copied().collect();
             let rows = group_rows(queue, now, running);
+            // The contract's word on each group: where it may be claimed (a
+            // serving group avoids the devices held for a workload), or not at
+            // all this round (a deadline that passed since the round began is
+            // answered at the next one, which is due at once).
+            let excludes: Vec<Option<HashSet<Device>>> = rows
+                .iter()
+                .map(|r| match contract.decide(&r.oldest, now, holds) {
+                    Decision::Admit => Some(exclude.clone()),
+                    Decision::Elsewhere { avoid } => Some(exclude.iter().copied().chain(avoid).collect()),
+                    Decision::Wait { .. } | Decision::Shrink | Decision::Refuse(_) => None,
+                })
+                .collect();
             // Multi-device groups need `placeable_multi` (checks EVERY named device),
             // never plain `placeable` - a model registered ONLY via `register_multi`
             // is never in `self.models` at all, so `placeable` would always return
             // `false` for it and its jobs would sit in the queue forever, silently.
             let placeable: Vec<Group> = rows
                 .iter()
-                .filter(|r| !stalled.contains(&r.key))
-                .filter(|r| if mgr.is_multi(&r.model) { mgr.placeable_multi(&r.key, &r.model, &exclude) } else { mgr.placeable(&r.key, &r.model, &exclude) })
-                .map(|r| r.summary.clone())
+                .zip(&excludes)
+                .filter(|(r, _)| !stalled.contains(&r.key))
+                .filter_map(|(r, ex)| ex.as_ref().map(|ex| (r, ex)))
+                .filter(|(r, ex)| if mgr.is_multi(&r.model) { mgr.placeable_multi(&r.key, &r.model, ex) } else { mgr.placeable(&r.key, &r.model, ex) })
+                .map(|(r, _)| r.summary.clone())
                 .collect();
             let (gid, batch) = match choose_next(&placeable, policy) {
                 Some(x) => x,
@@ -1247,6 +1381,7 @@ impl Dispatcher {
             // out as unplaceable, killing scheduling for the whole server.)
             let chosen = gid; // == the row index in `rows`
             let (key, model, action) = (rows[chosen].key.clone(), rows[chosen].model.clone(), rows[chosen].action.clone());
+            let exclude = excludes[chosen].clone().unwrap_or(exclude);
             // A model that batches wider than the policy's default says so; give
             // it everything queued up to its own limit.
             let batch = match mgr.batch_limit(&model) {
@@ -1305,6 +1440,7 @@ impl Dispatcher {
                     while i < queue.len() {
                         if queue[i].key == key && queue[i].action == action {
                             let p = queue.remove(i);
+                            holds.release(p.id);
                             (p.reply)(Err(msg.clone()));
                         } else {
                             i += 1;
@@ -1341,6 +1477,7 @@ impl Dispatcher {
                 while i < queue.len() {
                     if queue[i].key == key && queue[i].action == action {
                         let p = queue.remove(i);
+                        holds.release(p.id);
                         (p.reply)(Err(msg.clone()));
                     } else {
                         i += 1;
@@ -1350,6 +1487,10 @@ impl Dispatcher {
             }
 
             running.insert(ckey.clone());
+            let group_devices: Vec<Device> = match &outcome {
+                ClaimOutcome::Single(_, device) => vec![*device],
+                ClaimOutcome::Multi(_, devices) => devices.clone(),
+            };
             let target = match outcome {
                 ClaimOutcome::Single(work, device) => {
                     busy.insert(device);
@@ -1373,7 +1514,11 @@ impl Dispatcher {
 
             // The group is now CLAIMED onto a lane - work is about to start. Fire each
             // job's admission signal exactly once (an HTTP layer gates streaming on it).
+            // A workload that held devices holds its slot now: the hold ends.
             for j in jobs.iter_mut() {
+                if holds.release(j.id) {
+                    note_hold(&HoldChange::Released { job: j.id }, &[]);
+                }
                 if let Some(f) = j.on_admit.take() {
                     f();
                 }
@@ -1414,7 +1559,7 @@ impl Dispatcher {
             let limit = mgr.batch_limit(&model);
             let inbox = Inbox::new(limit.is_some(), limit.map_or(0, |l| l.saturating_sub(jobs.len())));
             if limit.is_some() {
-                open_groups.insert(ckey.clone(), OpenGroup { action: action.clone(), inbox: inbox.clone() });
+                open_groups.insert(ckey.clone(), OpenGroup { action: action.clone(), inbox: inbox.clone(), devices: group_devices });
             }
             // Hand to the home lane (which builds the instance first when cold).
             let _ = lanes[&home].send(LaneMsg::Run(RunReq { target, action, jobs, key: ckey, inbox }));
@@ -1555,9 +1700,13 @@ fn shed_cancelled(queue: &mut Vec<Pending>, stats: &Arc<Mutex<Stats>>) {
     }
 }
 
-fn refill_open_groups(queue: &mut Vec<Pending>, open_groups: &HashMap<InstanceKey, OpenGroup>, running: &HashSet<InstanceKey>, running_jobs: &mut Vec<RunningJob>, stats: &Arc<Mutex<Stats>>) {
+fn refill_open_groups(queue: &mut Vec<Pending>, open_groups: &HashMap<InstanceKey, OpenGroup>, running: &HashSet<InstanceKey>, running_jobs: &mut Vec<RunningJob>, stats: &Arc<Mutex<Stats>>, contract: &crate::contract::Contract, holds: &Holds) {
     for (key, group) in open_groups {
         if !queue.iter().any(|p| &p.key == key && p.action == group.action) {
+            continue;
+        }
+        if contract.late_joins(&group.devices, holds) == Decision::Shrink {
+            crate::log::debug(&format!("group {key} takes no late job: its device is held for a workload"));
             continue;
         }
         if let Some(other) = queue.iter().find(|p| &p.key != key && !running.contains(&p.key)) {
@@ -1605,6 +1754,9 @@ struct GroupRow {
     model: String,
     action: String,
     summary: Group,
+    /// The group's oldest job, as the admission contract sees it: its jobs
+    /// share a model, so they share a class.
+    oldest: Waiting,
 }
 
 fn group_rows(queue: &[Pending], now: Instant, running: &HashSet<InstanceKey>) -> Vec<GroupRow> {
@@ -1618,10 +1770,13 @@ fn group_rows(queue: &[Pending], now: Instant, running: &HashSet<InstanceKey>) -
             Some(r) => {
                 r.summary.size += 1;
                 r.summary.oldest_age_ms = r.summary.oldest_age_ms.max(age);
+                if p.enqueued < r.oldest.enqueued {
+                    r.oldest = p.waiting();
+                }
             }
             None => {
                 let id = rows.len();
-                rows.push(GroupRow { key: p.key.clone(), model: p.model.clone(), action: p.action.clone(), summary: Group { id, oldest_age_ms: age, size: 1 } });
+                rows.push(GroupRow { key: p.key.clone(), model: p.model.clone(), action: p.action.clone(), summary: Group { id, oldest_age_ms: age, size: 1 }, oldest: p.waiting() });
             }
         }
     }
@@ -2748,6 +2903,9 @@ mod tests {
                 reply: Box::new(|_| {}),
                 on_admit: None,
                 screened: false,
+                deadline: Instant::now() + crate::contract::DEFAULT_QUEUE_DEADLINE,
+                deadline_source: DeadlineSource::Operator,
+                class: Class::Serving,
             });
         }
 

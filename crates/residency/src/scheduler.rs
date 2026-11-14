@@ -36,11 +36,15 @@ pub struct Policy {
     pub batch_weight: f64,
     /// Hard latency ceiling: any job older than this is force-picked first.
     pub max_wait_ms: u64,
+    /// The admission contract every queued job is held to: its queue
+    /// deadline, and the wait after which a workload is guaranteed a device
+    /// ([`crate::contract`]).
+    pub admission: crate::contract::Contract,
 }
 
 impl Default for Policy {
     fn default() -> Policy {
-        Policy { max_batch: 8, age_weight_per_ms: 1.0, batch_weight: 200.0, max_wait_ms: 2000 }
+        Policy { max_batch: 8, age_weight_per_ms: 1.0, batch_weight: 200.0, max_wait_ms: 2000, admission: crate::contract::Contract::default() }
     }
 }
 

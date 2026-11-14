@@ -211,9 +211,16 @@ and gives them back:
   candidate card, whole instances at a time. A replica evicted this way is
   rebuilt by the next request for it, on a card with room.
 - It never takes memory from an instance a request is running on. While serving
-  is busy on every card that could hold the run, the run waits; past the
-  admission deadline (`--admit-deadline-ms`) it is refused (HTTP 429, a bus
-  `error` frame), and the client retries.
+  is busy on every card that could hold the run, the run waits, but not
+  indefinitely: once it has waited `--train-max-wait-ms` (default 60000) the
+  cards it could use are held for it. New requests then go to other cards (or
+  wait), and the batches on the held cards take no new requests, so the first
+  held card whose running requests finish goes to the run. The run therefore
+  starts within that wait plus the longest request already running on a held
+  card, under any request traffic. Should it still not start by the admission
+  deadline (`--admit-deadline-ms`; a card another process filled, say) it is
+  refused (HTTP 429, a bus `error` frame), the hold ends, and the client
+  retries.
 - One run holds one card at a time, and several runs use several cards. The
   trainer is one card per run; a run that needs more than the largest card
   holds is refused at once, with what it needs.

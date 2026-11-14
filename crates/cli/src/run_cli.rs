@@ -245,6 +245,12 @@ SERVING OPTIONS
   --cold-build-admit-deadline-ms N
                          the longer wait that applies instead while the request's
                          own model is still cold-building (default 1800000)
+  --queue-deadline-ms N  the longest any job waits inside the scheduler to start,
+                         whatever its transport; it is then answered with a
+                         timeout (default 1860000)
+  --train-max-wait-ms N  (with --training) once a training job has waited N ms for
+                         a card, serving requests stop taking the cards it could
+                         use until it starts (default 60000)
   --watch-adapters DIR   watch DIR for promoted LoRA adapters and offer the
                          newest as a model of its own, with no restart. OFF
                          unless given. The newest is the highest-versioned
@@ -1014,6 +1020,8 @@ pub fn run_serve(args: &[String]) {
             "--tokenizer" => qwen_cfg.tokenizer = Some(val(args, &mut i, "--tokenizer")),
             "--ready-file" => ready_file = Some(val(args, &mut i, "--ready-file")),
             "--admit-deadline-ms" => deadlines.admit = positive_ms(args, &mut i, "--admit-deadline-ms"),
+            "--queue-deadline-ms" => scheduler.admission.queue_deadline = positive_ms(args, &mut i, "--queue-deadline-ms"),
+            "--train-max-wait-ms" => scheduler.admission.workload_max_wait = positive_ms(args, &mut i, "--train-max-wait-ms"),
             "--cold-build-admit-deadline-ms" => deadlines.cold_build = positive_ms(args, &mut i, "--cold-build-admit-deadline-ms"),
             "--help" | "-h" => {
                 print!("{HELP}");
@@ -1884,10 +1892,21 @@ mod tests {
         for f in [
             "--gpt", "--yolo", "--max-new", "--temp", "--top-k", "--seed", "--conf", "--dbus", "--dbus-system", "--dbus-name",
             "--reserve-gb", "--models-dir", "--pin", "--autofetch", "--mock", "--mock-delay-ms", "--anthropic", "--openai", "--openrouter", "--api-keys-out", "--ready-file",
-            "--admit-deadline-ms", "--cold-build-admit-deadline-ms", "--video-jobs-dir", "--video-spool-gb", "--sched-max-wait-ms", "--sched-age-weight", "--sched-batch-weight",
+            "--admit-deadline-ms", "--cold-build-admit-deadline-ms", "--queue-deadline-ms", "--train-max-wait-ms", "--video-jobs-dir", "--video-spool-gb", "--sched-max-wait-ms", "--sched-age-weight", "--sched-batch-weight",
             "--worker-hosted", "--worker-deadline-s",
         ] {
             assert!(HELP.contains(f), "{f} is parsed by run_serve but not documented in HELP");
+        }
+    }
+
+    /// The admission contract's flags state the defaults the scheduler runs with.
+    #[test]
+    fn help_states_the_admission_contract_defaults() {
+        let contract = residency::contract::Contract::default();
+        for (flag, default) in [(residency::contract::QUEUE_DEADLINE_FLAG, contract.queue_deadline), (residency::contract::WORKLOAD_MAX_WAIT_FLAG, contract.workload_max_wait)] {
+            let line = HELP.split(flag).nth(1).unwrap_or_default();
+            let stated = line.split("(default ").nth(1).and_then(|rest| rest.split(')').next()).unwrap_or_default();
+            assert_eq!(stated, default.as_millis().to_string(), "{flag} documents a default the scheduler does not use");
         }
     }
 

@@ -30,6 +30,7 @@ pub mod affinity;
 pub mod admission;
 pub mod bridge;
 pub mod budget;
+pub mod contract;
 pub mod devices;
 pub mod devpool;
 pub mod executor;

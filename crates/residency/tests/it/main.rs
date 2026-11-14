@@ -7,6 +7,8 @@
 //! process-wide state (the current directory, environment variables): the
 //! others run beside it.
 
+mod admission;
+mod fairness_model;
 mod host_exchange_model;
 mod late_join_model;
 mod plan;

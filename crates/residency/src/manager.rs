@@ -473,6 +473,32 @@ impl ResidencyManager {
         self.multi_models.contains_key(model)
     }
 
+    /// Whether `model` is a workload ([`ResidentModel::transient`]): the
+    /// admission contract owes it a guaranteed slot.
+    pub fn is_transient(&self, model: &str) -> bool {
+        self.models.get(model).is_some_and(|m| m.transient())
+    }
+
+    /// The devices outside `exclude` that could hold `key` once they were
+    /// empty: the accelerators of the class its cost names, else the host
+    /// tier. What a workload waiting for room has its holds taken on
+    /// ([`crate::contract::Holds`]); empty when no device ever could.
+    pub fn fit_devices(&self, key: &InstanceKey, model: &str, exclude: &HashSet<Device>) -> Vec<Device> {
+        let Some(m) = self.models.get(model) else { return Vec::new() };
+        let cost = m.estimate(key);
+        let mut out: Vec<Device> = Vec::new();
+        for (devices, need) in [(self.budgets.npus(), cost.npu), (self.budgets.gpus(), cost.vram)] {
+            if need > 0 {
+                out.extend(devices.into_iter().filter(|d| !exclude.contains(d) && self.budgets.usable_on(*d) >= need));
+            }
+        }
+        let host = crate::place::host_need(&cost);
+        if out.is_empty() && host > 0 && !exclude.contains(&Device::Cpu) && self.budgets.get(Device::Cpu).is_some() && self.budgets.usable_on(Device::Cpu) >= host {
+            out.push(Device::Cpu);
+        }
+        out
+    }
+
     /// The batch size `model` asks for ([`ResidentModel::batch_limit`]), under
     /// either registry; `None` when it declares none or is unknown.
     pub fn batch_limit(&self, model: &str) -> Option<usize> {

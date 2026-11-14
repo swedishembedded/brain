@@ -439,6 +439,28 @@ line naming the model, the queue depth, the deadline that applied and the
 time waited. The 429 body repeats the wait and the limit and names the flag
 that raises it.
 
+Behind the transports, the scheduler holds every job it has not started to the
+same contract, whoever submitted it (HTTP, D-Bus, the CLI, an embedding
+application). Each round, each waiting job is admitted to a device, admitted
+only to devices not held for a training run, kept waiting, or refused:
+
+- **Queue deadline.** No job waits longer than `--queue-deadline-ms N` (default
+  1860000, a minute past the cold-build deadline, so a transport's own refusal
+  normally answers first). A job still waiting then, in the queue or in a
+  running batch's queue of late joiners, is answered with a `timeout` error that
+  names the flag. A caller embedding the scheduler can give a job an earlier
+  deadline of its own.
+- **A guaranteed slot for training.** A training job (`brain serve --training`)
+  needs a whole card, which continuous request traffic would never leave idle.
+  Once it has waited `--train-max-wait-ms N` (default 60000), the cards it could
+  run on are held for it: new requests are admitted only to other cards, and
+  the batches running on the held cards stop taking new requests, so the first
+  of them to finish its running requests goes to the training job. The hold
+  ends the moment the job starts, is cancelled or is refused. A training job is
+  therefore started within that wait plus the longest request already running
+  on a held card; requests queued meanwhile wait at most that long, and the log
+  says when a hold is taken and released.
+
 Genuine overload - the server has more concurrent work than it can ever get
 to, not just a momentary queue - sheds requests as HTTP 503.
 
