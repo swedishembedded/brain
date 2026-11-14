@@ -215,6 +215,6 @@ The chapters teach in the order a reader needs the ideas. This page shows the or
 | 2026-11-07, commit `ae9370878` | `ricursive` | [Attention Variants: Sharing and Compressing Keys](../v06-language-models/03-attention-variants.md) |
 | 2026-11-08, commit `e46df139d` | `dflash2` | Speculative Decoding |
 | 2026-11-10, commit `fcc137c65` | `mirage` | [Vision-Language Models](../v07-vision/09-vlms.md) |
-| 2026-11-12, commit `97d6421cc` | `headpose` | [Cameras and Projective Geometry](../v10-video-and-3d/03-camera-geometry.md) |
-| 2026-11-12, commit `a2b9484b1` | `openseeface` | [Faces: Detection, Identity and Parsing](../v07-vision/11-faces.md) |
-| 2026-11-12, commit `787401ac1` | `openvino-rt` | [Neural Processing Units and Graph Compilers](../v04-computation/13-npu.md) |
+| 2026-11-12, commit `839ba9d50` | `headpose` | [Cameras and Projective Geometry](../v10-video-and-3d/03-camera-geometry.md) |
+| 2026-11-12, commit `75d9166c9` | `openseeface` | [Faces: Detection, Identity and Parsing](../v07-vision/11-faces.md) |
+| 2026-11-12, commit `efeaf45d6` | `openvino-rt` | [Neural Processing Units and Graph Compilers](../v04-computation/13-npu.md) |

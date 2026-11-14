@@ -99,7 +99,7 @@ Forecasting and decisions:
       accuracy table, angles kept inside `[-pi, pi]`), `matmul_kq::dyn_matches_host_oracle_both_code_bits` (per-element
       `gamma_{ng+4} * S` bound from `testutil::rounding`) and `moe_compact_parity::compact_layer_submit_count_*`
       (`stats().submits` counted the Intel sliced-binding workaround's one-queue-submit-per-step; now one per batch,
-      `queue_submits` is the physical count). Knowledge #437.
+      `queue_submits` is the physical count). Knowledge #451.
 - [x] Flaky: moondream3 `geglu_shift_grads_match_finite_differences` (tolerance scaled by a cancelling derivative; now
       derived from the absolute sum of the terms), backend-wgpu `kernel_timing::dropping_a_shared_handle_does_not_wait_for_the_device`
       (`submit` drained the device through the unsynchronised-workgroup valve before the test looked; now one naive matmul).
@@ -114,8 +114,8 @@ Forecasting and decisions:
       needs a CUDA device to confirm no provider passes an unaligned offset.
 - [x] gemma4 and minimaxh3 `measure` landed (`modelcost`: held/peak bytes; gemma4 is the peak of one forward under its
       layer stream); `brain models profile --measure` prints both, or "not measured" (CLI; compiled in CI).
-- [x] Commit d9da9049b (gradcheck tied GPT-2 check) landed before 961487746 (the gpt2 tie) and does not build alone. Both
-      are published, so history is not rewritten; every commit from 961487746 on builds, and no chapter cites d9da9049b.
+- [x] Commit 061f5d930 (gradcheck tied GPT-2 check) landed before f352eceb8 (the gpt2 tie) and does not build alone. Both
+      are published, so history is not rewritten; every commit from f352eceb8 on builds, and no chapter cites 061f5d930.
 
 - [x] mimi `recon::tests::decoder_weight_grad_is_taken_at_the_quantized_latent` checks with a relative `2e-2`: its
       weights (seed 42) and input are fixed, so the comparison is one deterministic number, not a random draw that can
