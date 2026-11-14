@@ -358,10 +358,10 @@ impl Bundle {
         Ok(self.idformer.read_id_embedding())
     }
 
-    fn generate(&self, req: &Req, id: &[f32]) -> Result<Vec<f32>, String> {
+    fn generate(&self, req: &Req, id: &[f32], cancel: &capability::CancelToken) -> Result<Vec<f32>, String> {
         self.adapter.set_id(id);
         self.adapter.set_id_weight(req.id_weight);
-        self.flux1.generate_injected(&req.prompt, req.negative_prompt.as_deref(), &req.opts, req.max_len, Some(&self.adapter))
+        self.flux1.generate_injected(&req.prompt, req.negative_prompt.as_deref(), &req.opts, req.max_len, Some(&self.adapter), cancel)
     }
 }
 
@@ -403,6 +403,7 @@ impl Session {
     }
 
     fn text2image(&self, inv: &Invocation) -> ActionResult {
+        inv.cancel.check()?;
         let req = req_from(inv)?;
         let (h, w) = (req.opts.height, req.opts.width);
         let mut faces = Vec::new();
@@ -434,7 +435,7 @@ impl Session {
             )?),
         };
         let id = b.id_tokens(&faces)?;
-        let hwc_out = b.generate(&req, &id)?;
+        let hwc_out = b.generate(&req, &id, &inv.cancel)?;
         Ok(Outcome::new().set("seed", json!(req.opts.seed)).blob("image", capability::blob::image_blob(&hwc_out, w, h, 3)))
     }
 }
@@ -492,6 +493,26 @@ impl Action for PulidAction {
 #[cfg(test)]
 mod caps_tests {
     use super::*;
+
+    /// A token fired before the call stops the action before it opens a
+    /// weight file or decodes a face: every root below is absent, so any work
+    /// past the entry check would fail with a file or input error instead of
+    /// `cancelled`.
+    #[test]
+    fn a_token_fired_before_the_call_stops_text2image_before_loading_weights() {
+        let nowhere = |name: &str| format!("/nonexistent/pulid-cancel/{name}");
+        let provider = PulidProvider::new(nowhere("flux1"), nowhere("pulid"), nowhere("arcface"), nowhere("clip"), nowhere("bisenet"));
+        let action = provider.action("text2image").expect("declared action");
+        capability_mock::cancellation::admission("pulid text2image", Invocation::new().set("prompt", json!("a portrait")), &|inv, p| action.run(inv, p));
+    }
+
+    /// The denoise loop is `flux1::Flux1::generate_injected`'s, which needs
+    /// the FLUX.1 checkpoint plus the PuLID, ArcFace, EVA-CLIP and BiSeNet
+    /// weights; none has a weight-free configuration to certify against.
+    #[test]
+    fn a_token_fired_mid_run_stops_the_denoise_loop() {
+        brain_testutil::skip("mid-run cancel of pulid needs the FLUX.1, PuLID, ArcFace, EVA-CLIP and BiSeNet checkpoints: Bundle::load has no weight-free configuration");
+    }
 
     /// An unseeded request draws its own seed (a different one each time), a
     /// given seed is kept, and a seed that is not a non-negative integer is

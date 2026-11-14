@@ -538,9 +538,10 @@ impl Flux1 {
         Ok((pooled, ctx))
     }
 
-    /// Generate one image. Returns HWC RGB in `[0,1]`.
-    pub fn generate(&self, prompt: &str, o: &GenerateOptions, max_len: usize) -> Result<Vec<f32>, String> {
-        self.generate_injected(prompt, None, o, max_len, None)
+    /// Generate one image. Returns HWC RGB in `[0,1]`. `cancel` is checked on
+    /// entry and polled once per denoise step (see [`Flux1::generate_injected`]).
+    pub fn generate(&self, prompt: &str, o: &GenerateOptions, max_len: usize, cancel: &capability::CancelToken) -> Result<Vec<f32>, String> {
+        self.generate_injected(prompt, None, o, max_len, None, cancel)
     }
 
     /// [`Flux1::generate`] with every DiT step routed through
@@ -553,6 +554,9 @@ impl Flux1 {
     /// `Some` (see [`GenerateOptions::true_cfg`]'s doc) - passing one without
     /// the other is accepted, not an error, and behaves as if neither were
     /// given (today's single-forward-per-step cost).
+    ///
+    /// `cancel` is checked before any text tower runs and once before every
+    /// denoise step; a fired token ends the run with `Err("cancelled")`.
     pub fn generate_injected(
         &self,
         prompt: &str,
@@ -560,7 +564,9 @@ impl Flux1 {
         o: &GenerateOptions,
         max_len: usize,
         inject: Option<&dyn crate::inject::BlockInject>,
+        cancel: &capability::CancelToken,
     ) -> Result<Vec<f32>, String> {
+        cancel.check()?;
         let (h, w) = self.hw;
         let (lh, lw) = ((h / 16) as usize, (w / 16) as usize);
         let n_gen = lh * lw;
@@ -581,6 +587,7 @@ impl Flux1 {
         let mut lat = model::hostmath::gaussian(n_gen * self.cfg.in_channels, o.seed);
 
         for i in 0..steps {
+            cancel.check()?;
             let t = sigmas[i];
             let pos_pred = match inject {
                 Some(inj) if i >= o.start_step => self.dit.forward_injected(&lat, &ctx, &pooled, t, o.guidance, &ids, n_gen, inj),

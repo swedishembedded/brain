@@ -1576,6 +1576,7 @@ name = "brain-flux1"
 version = "5.1.0"
 dependencies = [
  "brain-capability",
+ "brain-capability-mock",
  "brain-checkpoint",
  "brain-clip",
  "brain-data",
@@ -2574,6 +2575,7 @@ dependencies = [
  "brain-arcface",
  "brain-bisenet",
  "brain-capability",
+ "brain-capability-mock",
  "brain-checkpoint",
  "brain-clip",
  "brain-data",

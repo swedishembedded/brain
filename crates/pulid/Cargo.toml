@@ -48,4 +48,5 @@ brain-modelstore.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
-brain-testutil.workspace = true   # testdata() + the skip()/skip_unavailable() split
+brain-testutil.workspace = true
+brain-capability-mock.workspace = true   # testdata() + the skip()/skip_unavailable() split

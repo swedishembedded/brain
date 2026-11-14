@@ -142,6 +142,7 @@ impl Session {
     }
 
     fn text2image(&self, inv: &Invocation) -> ActionResult {
+        inv.cancel.check()?;
         let req = req_from(inv)?;
         let (h, w) = (req.opts.height, req.opts.width);
         let key = (req.variant.clone(), h, w, req.precision.name());
@@ -152,7 +153,7 @@ impl Session {
                 e.insert(Flux1::load_with(&self.root, &req.variant, h, w, req.precision)?)
             }
         };
-        let hwc = p.generate_injected(&req.prompt, req.negative_prompt.as_deref(), &req.opts, req.max_len, None)?;
+        let hwc = p.generate_injected(&req.prompt, req.negative_prompt.as_deref(), &req.opts, req.max_len, None, &inv.cancel)?;
         Ok(Outcome::new().set("seed", json!(req.opts.seed)).blob("image", capability::blob::image_blob(&hwc, w, h, 3)))
     }
 }
@@ -202,6 +203,25 @@ impl Action for Flux1Action {
 #[cfg(test)]
 mod caps_tests {
     use super::*;
+
+    /// A token fired before the call stops the action before it opens a
+    /// weight file: the checkpoint root does not exist, so any work past the
+    /// entry check would fail with a file error instead of `cancelled`.
+    #[test]
+    fn a_token_fired_before_the_call_stops_text2image_before_loading_weights() {
+        let provider = Flux1Provider::new("/nonexistent/flux1-cancel");
+        let action = provider.action("text2image").expect("declared action");
+        capability_mock::cancellation::admission("flux1 text2image", Invocation::new().set("prompt", json!("a lighthouse")), &|inv, p| action.run(inv, p));
+    }
+
+    /// The per-step poll in `Flux1::generate_injected` needs a built pipeline
+    /// (T5-XXL, CLIP, the DiT and the VAE from a diffusers checkpoint); no
+    /// tiny configuration of it exists, so the mid-run certification states
+    /// what it lacks rather than passing vacuously.
+    #[test]
+    fn a_token_fired_mid_run_stops_the_denoise_loop() {
+        brain_testutil::skip("mid-run cancel of flux1 needs a real FLUX.1 diffusers checkpoint: Flux1::load has no weight-free configuration");
+    }
 
     /// An unseeded request draws its own seed (a different one each time), a
     /// given seed is kept, and a seed that is not a non-negative integer is
