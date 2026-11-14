@@ -93,7 +93,6 @@ impl Shutdown {
     }
 }
 
-/// A fresh, unfired shutdown channel.
 /// End the process **now**, with `code`, running no `atexit` handler and no
 /// shared-library finalizer - only the standard streams are flushed first.
 ///
@@ -147,6 +146,7 @@ pub fn bound_drain(shutdown: Shutdown, drain: std::time::Duration, expire: impl 
     });
 }
 
+/// A fresh, unfired shutdown channel.
 pub fn channel() -> (Trigger, Shutdown) {
     let (tx, rx) = watch::channel(false);
     (Trigger { tx }, Shutdown { rx })
@@ -249,7 +249,7 @@ async fn signal_loop(trigger: Trigger, ready: std::sync::mpsc::Sender<()>) {
 
 /// Best-effort line on stderr for the shutdown path: a failed write (a closed
 /// pipe, a full terminal) is dropped rather than turned into a panic.
-fn note(line: &str) {
+pub(crate) fn note(line: &str) {
     use std::io::Write;
     let _ = writeln!(std::io::stderr(), "{line}");
 }

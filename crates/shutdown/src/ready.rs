@@ -90,7 +90,8 @@ impl Gate {
     /// Exactly one caller — the one whose increment reaches `expected` — creates
     /// the file, via `create_new`, so "exactly once" is enforced by the OS as
     /// well as by the counter. Safe to call from any thread or runtime; never
-    /// blocks on anything but a local file create, never panics, and harmless if
+    /// blocks on anything but a local file create, never panics (its log lines are
+    /// best effort: a dead stderr is ignored), and harmless if
     /// called more than `expected` times (a surface that somehow binds twice).
     pub fn bound(&self, what: &str) {
         let Some(inner) = &self.0 else { return };
@@ -100,12 +101,12 @@ impl Gate {
         match std::fs::OpenOptions::new().write(true).create_new(true).open(&inner.path) {
             Ok(_) => {
                 inner.fired.store(true, Ordering::SeqCst);
-                eprintln!("brain serve: ready — all {} surface(s) bound ({what} last); touched {}", inner.expected, inner.path.display());
+                crate::note(&format!("brain serve: ready — all {} surface(s) bound ({what} last); touched {}", inner.expected, inner.path.display()));
             }
-            Err(e) => eprintln!(
+            Err(e) => crate::note(&format!(
                 "brain serve: every requested surface is bound but --ready-file {} could not be created ({e}); readiness will never be signalled",
                 inner.path.display()
-            ),
+            )),
         }
     }
 
