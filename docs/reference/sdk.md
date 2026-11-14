@@ -45,6 +45,30 @@ let image = pipe.generate_with_progress(
 )?;
 ```
 
+## Cancellation
+
+Every long-running call has one form that takes the caller's
+`brain::CancelToken` (`CancelToken::armed()`; a `default()` token never
+fires), and its shorter forms call that one with an unarmed token:
+
+| Pipeline | Cancellable form | Polled |
+|---|---|---|
+| `ImagePipeline` | `generate_with_progress(prompt, opts, &cancel, on_progress)` | per denoise step |
+| `VideoPipeline` | `generate_with_progress(prompt, opts, &cancel, on_progress)` | per denoise step |
+| `TextGenerationPipeline` | `generate_stream(prompt, opts, &cancel, on_piece)` | per prefill chunk and per token |
+| `ChatPipeline` | `generate_stream(&request, &cancel, on_delta)` | per prefill chunk and per token |
+| `VisionLanguagePipeline` | `ask_stream(images, prompt, opts, &cancel, on_piece)` | per token |
+| `TtsPipeline` | `speak_with`, `clone_voice_with`, `design_with` (last argument `&cancel`) | per codec frame; CosyVoice per speech token and flow step |
+| `ResidentTts` | `speak_stream(text, opts, &cancel, on_audio)` | per codec frame |
+| `ChatFineTune`, `ChatFullFineTune`, preference fine-tunes | `run_with(&cancel, on_progress)` | per optimizer step |
+
+A token that has fired before the call returns `Error::Cancelled` with
+nothing run. One that fires mid-call is noticed at the next poll, never
+inside a device call: a streaming text call then returns the partial text
+with `finish_reason` `"cancelled"` (never `"stop"`), and every other call
+returns `Error::Cancelled`. Either way what the call held is released and the
+pipeline stays usable.
+
 ## Embodied simulation
 
 `brain::Creature` runs a connectome driving a physics body - a different
@@ -115,6 +139,9 @@ int8 linears when the largest card cannot hold its fp32 weights plus 8 GiB
 layers on the common knobs; the result's `prompt_tokens`/`completion_tokens`/
 `finish_reason` mirror what the served `/v1/chat/completions` endpoint
 reports, since both run through the same chat-templating and sampling code.
+`pipe.generate_stream(prompt, opts, &cancel, &mut |piece| ..)` hands each
+piece of the completion over as it is produced and stops when `cancel`
+fires: see [Cancellation](#cancellation).
 
 ### Chat with tools
 

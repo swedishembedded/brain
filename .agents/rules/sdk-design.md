@@ -210,7 +210,13 @@ parallel mechanism: `capability::CancelToken` is already threaded through
 (`|_step, _total, _msg| {}` is the callback shape - a real pipeline wires it
 to a caller-supplied closure instead of discarding it). A long-running SDK
 call (training, multi-step generation, a download) exposes progress and
-cancellation through that SAME mechanism, not a bespoke channel per model.
+cancellation through that SAME mechanism, not a bespoke channel per model:
+one form takes `cancel: &CancelToken` (and the progress or stream callback,
+where the call has one), its shorter forms call it with
+`CancelToken::default()`, a token fired before the call returns
+`Error::Cancelled` with nothing run, and a model's cancelled literal becomes
+`Error::Cancelled` through `error::backend_or_cancelled`, nowhere else. The
+table in `docs/reference/sdk.md` (Cancellation) lists every such form.
 
 ## 9. Training obeys the same rules as inference
 

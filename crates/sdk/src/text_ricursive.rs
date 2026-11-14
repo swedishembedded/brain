@@ -86,12 +86,12 @@ impl RippleText {
     }
 
     /// One generation of `inv`, under the adapter in use.
-    pub(crate) fn run(&self, inv: capability::Invocation) -> Result<capability::Outcome> {
+    pub(crate) fn run(&self, inv: capability::Invocation, progress: &mut dyn FnMut(capability::Progress)) -> Result<capability::Outcome> {
         let inv = match &self.view {
             Some(view) => inv.set(ADAPTER_PARAM, serde_json::json!(view.id())),
             None => inv,
         };
         let mut instance = self.instance.lock().map_err(|_| Error::Backend("ricursive: an earlier generation panicked while holding the model".to_string()))?;
-        instance.run("generate", &inv, &mut |_| {}).map_err(Error::Backend)
+        instance.run("generate", &inv, progress).map_err(crate::error::backend_or_cancelled)
     }
 }

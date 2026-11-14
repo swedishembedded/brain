@@ -65,7 +65,7 @@ impl ResidentTts {
             }
             None => engine.speak_streaming(text, &opts.lang, &gen_opts, cancel, &mut |pcm, _seq| on_audio(pcm)),
         }
-        .map_err(|e| if e == "cancelled" { Error::Cancelled } else { Error::Backend(e) })?;
+        .map_err(crate::error::backend_or_cancelled)?;
         Ok(Audio::new(samples, SAMPLE_RATE))
     }
 

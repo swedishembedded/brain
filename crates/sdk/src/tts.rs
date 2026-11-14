@@ -310,22 +310,24 @@ impl TtsPipeline {
     /// Speaker-free text-to-speech, at [`TtsOptions`]'s defaults. Qwen3-TTS
     /// only - see [`TtsPipeline::speak_with`].
     pub fn speak(&self, text: &str) -> Result<Audio> {
-        self.speak_with(text, TtsOptions::default())
+        self.speak_with(text, TtsOptions::default(), &CancelToken::default())
     }
 
-    /// [`TtsPipeline::speak`] plus [`TtsOptions`]. Qwen3-TTS only:
+    /// [`TtsPipeline::speak`] plus [`TtsOptions`] and the caller's `cancel`
+    /// (see [`TtsPipeline::clone_voice_with`] for when it is noticed). Qwen3-TTS only:
     /// CosyVoice's one `synth` action always requires a reference clip and
     /// its transcript (see this module's own doc), so a CosyVoice-resolved
     /// pipeline returns [`Error::MissingArgument`] here rather than
     /// attempting a call CosyVoice cannot serve - knowable before any
     /// backend call, the same class of error
     /// [`crate::CreatureBuilder::build`]'s own required-field checks use.
-    pub fn speak_with(&self, text: &str, opts: TtsOptions) -> Result<Audio> {
+    pub fn speak_with(&self, text: &str, opts: TtsOptions, cancel: &CancelToken) -> Result<Audio> {
         let Backend::Qwen3Tts(paths) = &self.backend else {
             return Err(missing_argument("has no speaker-free synth; call clone_voice with a reference clip and its transcript instead"));
         };
+        cancel.check().map_err(crate::error::backend_or_cancelled)?;
         let gen_opts = opts.to_gen_opts();
-        let samples = qwen3tts::pipeline::synth(paths, &gen_opts, text, &opts.lang, &CancelToken::default()).map_err(Error::Backend)?;
+        let samples = qwen3tts::pipeline::synth(paths, &gen_opts, text, &opts.lang, cancel).map_err(crate::error::backend_or_cancelled)?;
         Ok(Audio { samples, sample_rate: SAMPLE_RATE })
     }
 
@@ -343,24 +345,29 @@ impl TtsPipeline {
     /// target text + a reference audio clip and its transcript"). `None`
     /// here returns [`Error::MissingArgument`].
     pub fn clone_voice(&self, text: &str, reference: impl AsRef<Path>, ref_text: Option<&str>) -> Result<Audio> {
-        self.clone_voice_with(text, reference, ref_text, TtsOptions::default())
+        self.clone_voice_with(text, reference, ref_text, TtsOptions::default(), &CancelToken::default())
     }
 
-    /// [`TtsPipeline::clone_voice`] plus [`TtsOptions`].
-    pub fn clone_voice_with(&self, text: &str, reference: impl AsRef<Path>, ref_text: Option<&str>, opts: TtsOptions) -> Result<Audio> {
+    /// [`TtsPipeline::clone_voice`] plus [`TtsOptions`] and the caller's
+    /// `cancel`. A token fired before the call returns [`Error::Cancelled`]
+    /// before any checkpoint is read; one fired mid-utterance is noticed
+    /// after the next generated codec frame (Qwen3-TTS) or decoded speech
+    /// token and flow step (CosyVoice), and also returns [`Error::Cancelled`].
+    pub fn clone_voice_with(&self, text: &str, reference: impl AsRef<Path>, ref_text: Option<&str>, opts: TtsOptions, cancel: &CancelToken) -> Result<Audio> {
+        cancel.check().map_err(crate::error::backend_or_cancelled)?;
         let refw = reference.as_ref().to_string_lossy();
         match &self.backend {
             Backend::Qwen3Tts(paths) => {
                 let gen_opts = opts.to_gen_opts();
                 let reference = qwen3tts::reference::Reference::from_path(reference.as_ref()).map_err(Error::Backend)?;
                 let samples =
-                    qwen3tts::pipeline::clone(paths, &gen_opts, text, &reference, ref_text.unwrap_or(""), &opts.lang, None, &CancelToken::default()).map_err(Error::Backend)?;
+                    qwen3tts::pipeline::clone(paths, &gen_opts, text, &reference, ref_text.unwrap_or(""), &opts.lang, None, cancel).map_err(crate::error::backend_or_cancelled)?;
                 Ok(Audio { samples, sample_rate: SAMPLE_RATE })
             }
             Backend::CosyVoice(paths) => {
                 let ref_text = ref_text.ok_or_else(|| missing_argument("clone_voice requires ref_text (its zero-shot cloning has no x-vector-only mode)"))?;
                 let gen_opts = opts.to_cosyvoice_gen_opts()?;
-                let out = cosyvoice::pipeline::generate(paths, &gen_opts, text, &refw, ref_text).map_err(Error::Backend)?;
+                let out = cosyvoice::pipeline::generate(paths, &gen_opts, text, &refw, ref_text, cancel, &mut |_, _, _| {}).map_err(crate::error::backend_or_cancelled)?;
                 Ok(Audio { samples: out.samples, sample_rate: out.sample_rate })
             }
         }
@@ -372,19 +379,21 @@ impl TtsPipeline {
     /// VoiceDesign checkpoint - the released 0.6B Base model has no instruct
     /// control.
     pub fn design(&self, text: &str, instruct: &str, speaker: Option<&str>) -> Result<Audio> {
-        self.design_with(text, instruct, speaker, TtsOptions::default())
+        self.design_with(text, instruct, speaker, TtsOptions::default(), &CancelToken::default())
     }
 
-    /// [`TtsPipeline::design`] plus [`TtsOptions`]. Qwen3-TTS only:
+    /// [`TtsPipeline::design`] plus [`TtsOptions`] and the caller's `cancel`
+    /// (see [`TtsPipeline::clone_voice_with`] for when it is noticed). Qwen3-TTS only:
     /// CosyVoice has no VoiceDesign/CustomVoice action at all, so a
     /// CosyVoice-resolved pipeline returns [`Error::MissingArgument`] here,
     /// the same reasoning [`TtsPipeline::speak_with`] documents.
-    pub fn design_with(&self, text: &str, instruct: &str, speaker: Option<&str>, opts: TtsOptions) -> Result<Audio> {
+    pub fn design_with(&self, text: &str, instruct: &str, speaker: Option<&str>, opts: TtsOptions, cancel: &CancelToken) -> Result<Audio> {
         let Backend::Qwen3Tts(paths) = &self.backend else {
             return Err(missing_argument("has no VoiceDesign/CustomVoice action"));
         };
+        cancel.check().map_err(crate::error::backend_or_cancelled)?;
         let gen_opts = opts.to_gen_opts();
-        let samples = qwen3tts::pipeline::design(paths, &gen_opts, text, &opts.lang, instruct, speaker, &CancelToken::default()).map_err(Error::Backend)?;
+        let samples = qwen3tts::pipeline::design(paths, &gen_opts, text, &opts.lang, instruct, speaker, cancel).map_err(crate::error::backend_or_cancelled)?;
         Ok(Audio { samples, sample_rate: SAMPLE_RATE })
     }
 }

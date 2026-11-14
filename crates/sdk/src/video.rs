@@ -222,11 +222,23 @@ impl VideoPipeline {
         self.generate_with(prompt, VideoOptions::default())
     }
 
-    /// [`VideoPipeline::generate`] plus [`VideoOptions`].
+    /// [`VideoPipeline::generate`] plus [`VideoOptions`], with no progress
+    /// reporting and no way to cancel: see
+    /// [`VideoPipeline::generate_with_progress`].
     pub fn generate_with(&self, prompt: &str, opts: VideoOptions) -> Result<Video> {
+        self.generate_with_progress(prompt, opts, &CancelToken::default(), &mut |_step, _total, _msg| {})
+    }
+
+    /// The full form the other two call at their defaults, the same shape as
+    /// [`crate::ImagePipeline::generate_with_progress`]: `cancel` is polled
+    /// once per denoise step (a fired token returns [`Error::Cancelled`] at the
+    /// next step boundary, and one fired before the call returns it before any
+    /// weights are touched), and `on_progress` sees `(step, total, message)`.
+    pub fn generate_with_progress(&self, prompt: &str, opts: VideoOptions, cancel: &CancelToken, on_progress: &mut dyn FnMut(u32, u32, &str)) -> Result<Video> {
+        cancel.check().map_err(crate::error::backend_or_cancelled)?;
         let gen_opts = opts.to_gen_opts(&self.cfg);
-        let (video, _timings) =
-            wan::pipeline::generate_hot(&self.cfg, &self.paths, prompt, &gen_opts, &CancelToken::default(), &self.hot, |_, _, _| {}).map_err(Error::Backend)?;
+        let (video, _timings) = wan::pipeline::generate_hot(&self.cfg, &self.paths, prompt, &gen_opts, cancel, &self.hot, |step, total, msg| on_progress(step, total, msg))
+            .map_err(crate::error::backend_or_cancelled)?;
         Ok(Video { width: video.width, height: video.height, fps: video.fps, frames: video.frames })
     }
 }

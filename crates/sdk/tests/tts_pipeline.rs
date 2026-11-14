@@ -272,6 +272,16 @@ fn from_pretrained_resolves_qwen3tts_from_a_real_local_fixture_with_no_network_a
         brain::Error::Backend(msg) => assert!(!msg.is_empty(), "must name what went wrong"),
         other => panic!("expected a clean Error::Backend from the fake tokenizer/checkpoint content, got {other:?}"),
     }
+
+    // A token fired before the call is refused as cancelled by every call
+    // shape, before the (fake) checkpoint is read: otherwise the same calls
+    // would fail on its content as above.
+    let fired = brain::CancelToken::armed();
+    fired.cancel();
+    let opts = brain::TtsOptions::new;
+    assert!(matches!(pipe.speak_with("hello", opts(), &fired), Err(brain::Error::Cancelled)));
+    assert!(matches!(pipe.design_with("hello", "cheerful", None, opts(), &fired), Err(brain::Error::Cancelled)));
+    assert!(matches!(pipe.clone_voice_with("hello", "/nonexistent.wav", Some("hi"), opts(), &fired), Err(brain::Error::Cancelled)));
 }
 
 /// A locally-present repo whose OWN `brain.manifest.json` declares neither
@@ -399,7 +409,7 @@ fn from_pretrained_resolves_cosyvoice3_from_a_real_local_fixture_with_no_network
     let pipe = pipe.expect("a content-classifiable CosyVoice 3 checkpoint (fake tensor content, real shapes) must resolve and pass the existence check");
 
     let opts = brain::TtsOptions::new().variant("cosyvoice3");
-    let err = pipe.clone_voice_with("hello from a fixture", &voice, Some("the reference transcript"), opts).unwrap_err();
+    let err = pipe.clone_voice_with("hello from a fixture", &voice, Some("the reference transcript"), opts, &brain::CancelToken::default()).unwrap_err();
     match err {
         brain::Error::Backend(msg) => assert!(!msg.is_empty(), "must name what went wrong"),
         other => panic!("expected a clean Error::Backend from the fake CAM++/S3Tokenizer content, got {other:?}"),

@@ -218,6 +218,36 @@ fn a_fully_synthetic_checkpoint_and_tokenizer_reach_a_real_generate() {
     assert!(out.text.chars().all(|c| VOCAB_LETTERS.clone().any(|b| b as char == c)), "every decoded char must come from the fixture's own vocab, got {:?}", out.text);
 }
 
+/// `generate_stream` honours the caller's token: one fired before the call
+/// runs nothing, and one fired on the first streamed piece stops the decode
+/// at the next token, returning the partial text marked `"cancelled"`.
+#[test]
+fn a_streamed_generation_stops_when_its_token_fires() {
+    let ckpt = tiny_qwen3_checkpoint("text-pipeline-cancel");
+    let tok_path = tiny_tokenizer("text-pipeline-cancel");
+    let pipe = brain::TextGenerationPipeline::builder(ckpt.to_str().unwrap()).tokenizer(tok_path.to_str().unwrap()).load().unwrap();
+    let opts = || brain::TextGenerationOptions::new().chat(false).max_new_tokens(12);
+
+    let fired = brain::CancelToken::armed();
+    fired.cancel();
+    let mut pieces = 0;
+    let err = pipe.generate_stream(PROMPT_WITHIN_VOCAB, opts(), &fired, &mut |_| pieces += 1).unwrap_err();
+    assert!(matches!(err, brain::Error::Cancelled), "{err:?}");
+    assert_eq!(pieces, 0);
+
+    let token = brain::CancelToken::armed();
+    let mut pieces = 0;
+    let out = pipe
+        .generate_stream(PROMPT_WITHIN_VOCAB, opts(), &token, &mut |_| {
+            pieces += 1;
+            token.cancel();
+        })
+        .unwrap();
+    assert_eq!(out.finish_reason, "cancelled");
+    assert!(out.completion_tokens < 12, "the decode must stop at the cancel, got {} tokens", out.completion_tokens);
+    assert!(pieces <= 2, "at most the piece in flight follows the cancel, got {pieces}");
+}
+
 /// The footprint of a chat load is read from a checkpoint's `config.json`
 /// alone: a bigger model and a longer context hold more, and a directory
 /// whose config is not a Qwen3 is no answer, not a guess.

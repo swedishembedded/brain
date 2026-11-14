@@ -28,7 +28,7 @@ fn a_resident_synthesizer_speaks_what_the_one_shot_pipeline_speaks() {
     let seed = brain::random_seed();
     let opts = || TtsOptions::new().seed(seed);
 
-    let one_shot = pipe.speak_with(TEXT, opts()).unwrap();
+    let one_shot = pipe.speak_with(TEXT, opts(), &brain::CancelToken::default()).unwrap();
     let resident = pipe.resident().unwrap().speak_with(TEXT, opts()).unwrap();
 
     assert_eq!(resident.sample_rate(), one_shot.sample_rate());

@@ -116,20 +116,6 @@ impl ImageGenerationOptions {
     }
 }
 
-/// Both backends' `generate` return `Result<_, String>` and signal a caller's
-/// cancel token firing with the literal string `"cancelled"` (there is no
-/// richer shared error type to carry it as anything else) -- this is the one
-/// place that string is turned into [`Error::Cancelled`] rather than an
-/// indistinguishable [`Error::Backend`], factored out so the mapping is
-/// testable with no real pipeline in hand.
-fn backend_err_or_cancelled(e: String) -> Error {
-    if e == "cancelled" {
-        Error::Cancelled
-    } else {
-        Error::Backend(e)
-    }
-}
-
 /// [`ImagePipeline::load_lora`]'s gate, factored out so it is testable with
 /// no real pipeline in hand: a literal filesystem path is accepted verbatim
 /// (mirroring today's real `flux2::AdapterSpec { path, scale: 1.0 }`);
@@ -444,7 +430,7 @@ impl ImagePipeline {
                 let (rgb, w, h) = b
                     .pipe
                     .generate(prompt, &[], &o, cancel, on_progress)
-                    .map_err(backend_err_or_cancelled)?;
+                    .map_err(crate::error::backend_or_cancelled)?;
                 Image::from_rgb8(w, h, rgb)?
             }
             Backend::S3dit(b) => {
@@ -453,7 +439,7 @@ impl ImagePipeline {
                 let img = b
                     .pipe
                     .generate(prompt, seed, steps, cancel, on_progress)
-                    .map_err(backend_err_or_cancelled)?;
+                    .map_err(crate::error::backend_or_cancelled)?;
                 Image::from_hwc_unit(img.w as u32, img.h as u32, &img.hwc)?
             }
         };
@@ -767,22 +753,6 @@ impl ImagePipelineBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The whole point of routing `generate_with_progress` through a
-    /// caller-supplied [`capability::CancelToken`]: the one string either
-    /// backend uses to signal it firing turns into [`Error::Cancelled`], not
-    /// an indistinguishable [`Error::Backend`].
-    #[test]
-    fn backend_err_or_cancelled_recognizes_the_cancellation_sentinel() {
-        assert!(matches!(backend_err_or_cancelled("cancelled".to_string()), Error::Cancelled));
-    }
-
-    /// Every other backend failure stays a named `Error::Backend`, verbatim.
-    #[test]
-    fn backend_err_or_cancelled_passes_every_other_message_through() {
-        let err = backend_err_or_cancelled("flux2: assemble: no dit chosen".to_string());
-        assert!(matches!(err, Error::Backend(ref m) if m == "flux2: assemble: no dit chosen"));
-    }
 
     /// TDD anchor for [`ImagePipeline::load_lora`]'s dispatch: a literal
     /// path that exists on disk is accepted, at the reference-default

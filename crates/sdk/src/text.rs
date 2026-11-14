@@ -94,12 +94,8 @@ pub struct GeneratedText {
     /// [`capability::CancelToken`] fired mid-generation - the text is then
     /// PARTIAL, and this field is the only thing that says so) - the exact
     /// vocabulary `qwen3::chat::SeqState::finish` reports on the served path
-    /// too. `"cancelled"` cannot occur through THIS pipeline:
-    /// [`TextGenerationPipeline::generate_with`] runs with an unarmed token
-    /// because it exposes no way to pass one, so a generation started here
-    /// runs to its own stop condition. It is listed because the value is part
-    /// of the shared vocabulary, and a caller matching on this field should
-    /// handle it rather than assume the set is closed.
+    /// too. `"cancelled"` occurs only through
+    /// [`TextGenerationPipeline::generate_stream`] with a token that fired.
     pub finish_reason: String,
 }
 
@@ -273,11 +269,28 @@ impl TextGenerationPipeline {
     /// KV-cached sampler sequence the served path does - see this module's
     /// doc.
     pub fn generate_with(&self, prompt: &str, opts: TextGenerationOptions) -> Result<GeneratedText> {
-        let inv = opts.into_invocation(prompt)?;
+        self.generate_stream(prompt, opts, &capability::CancelToken::default(), &mut |_| {})
+    }
+
+    /// [`TextGenerationPipeline::generate_with`], handing each piece of the
+    /// completion to `on_delta` as it is produced and stopping when `cancel`
+    /// fires. A token fired before the call returns [`Error::Cancelled`] with
+    /// nothing run; one fired mid-generation is noticed between prefill chunks
+    /// and after each generated token, and the call returns the partial text
+    /// with [`GeneratedText::finish_reason`] `"cancelled"`.
+    pub fn generate_stream(&self, prompt: &str, opts: TextGenerationOptions, cancel: &capability::CancelToken, on_delta: &mut dyn FnMut(&str)) -> Result<GeneratedText> {
+        let mut inv = opts.into_invocation(prompt)?;
+        cancel.check().map_err(crate::error::backend_or_cancelled)?;
+        inv.cancel = cancel.clone();
+        let mut forward = |p: capability::Progress| {
+            if let Some(text) = &p.delta {
+                on_delta(text);
+            }
+        };
         let engine = match &self.engine {
             Backend::Qwen(engine) => engine,
             // The resident parses the request, checks it against its context and runs it under the adapter in use.
-            Backend::Ripple(ripple) => return generated_text_from_outcome(ripple.run(inv)?),
+            Backend::Ripple(ripple) => return generated_text_from_outcome(ripple.run(inv, &mut forward)?),
         };
         let mut req = qwen3::chat::parse_request_as(&engine.tok, &engine.format, &inv).map_err(Error::Backend)?;
 
@@ -289,9 +302,7 @@ impl TextGenerationPipeline {
             )));
         }
 
-        // Nothing here can cancel, so the whole prompt is one prefill chunk:
-        // the single prefill call, with no per-chunk readback to pay for.
-        let outcome = engine.run(&req, &capability::CancelToken::default(), req.ids.len(), &mut |_| {});
+        let outcome = engine.run(&req, cancel, PREFILL_CHUNK, &mut forward);
         generated_text_from_outcome(outcome)
     }
 
@@ -549,6 +560,12 @@ pub(crate) fn generated_text_from_outcome(o: capability::Outcome) -> Result<Gene
     let finish_reason = o.outputs.get("finish_reason").and_then(|v| v.as_str()).unwrap_or("").to_string();
     Ok(GeneratedText { text, prompt_tokens, completion_tokens, finish_reason })
 }
+
+/// Prompt tokens per prefill chunk. Cancellation is polled between chunks,
+/// so this bounds how long a fired [`capability::CancelToken`] can wait on a
+/// long prompt; each chunk costs one extra device readback, which is noise at
+/// this size.
+pub(crate) const PREFILL_CHUNK: usize = 512;
 
 /// The context budget a pipeline gets when [`TextGenerationPipelineBuilder::capacity`]
 /// is never called - generous enough for a real conversation, small enough

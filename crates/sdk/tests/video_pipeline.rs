@@ -208,6 +208,13 @@ fn from_pretrained_resolves_wan_from_a_real_local_fixture_with_no_network_access
         brain::Error::Backend(msg) => assert!(!msg.is_empty(), "must name what went wrong"),
         other => panic!("expected a clean Error::Backend from the incomplete DiT tensor set, got {other:?}"),
     }
+
+    // The same call with a token fired before it is refused as cancelled,
+    // before the incomplete DiT is touched.
+    let fired = brain::CancelToken::armed();
+    fired.cancel();
+    let err = pipe.generate_with_progress("a whale submarine", brain::VideoOptions::new(), &fired, &mut |_, _, _| {}).unwrap_err();
+    assert!(matches!(err, brain::Error::Cancelled), "expected Error::Cancelled, got {err:?}");
 }
 
 /// `DownloadPolicy::Offline` never reaches the network -- same proof shape

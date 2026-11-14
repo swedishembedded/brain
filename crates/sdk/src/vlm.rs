@@ -211,20 +211,38 @@ impl VisionLanguagePipeline {
     /// `lora_train`/progress gaps already document), not silently
     /// unsupported.
     pub fn ask_multi_with(&self, images: &[Image], prompt: &str, opts: VlmOptions) -> Result<GeneratedText> {
+        self.ask_stream(images, prompt, opts, &CancelToken::default(), &mut |_| {})
+    }
+
+    /// [`VisionLanguagePipeline::ask_multi_with`], handing each piece of the
+    /// answer to `on_delta` as it is decoded and stopping when `cancel`
+    /// fires. A token fired before the call returns [`Error::Cancelled`]
+    /// before the images are encoded; one fired mid-answer stops at the next
+    /// decoded token and returns the partial text with `finish_reason`
+    /// `"cancelled"`, the served `generate` action's own contract.
+    pub fn ask_stream(&self, images: &[Image], prompt: &str, opts: VlmOptions, cancel: &CancelToken, on_delta: &mut dyn FnMut(&str)) -> Result<GeneratedText> {
         check_image_count(images.len())?;
+        cancel.check().map_err(crate::error::backend_or_cancelled)?;
 
         let mut inv = opts.into_invocation(prompt);
         for (i, image) in images.iter().enumerate() {
             inv = inv.blob(&image_key(i), image_blob(image));
         }
-        inv.cancel = CancelToken::default();
+        inv.cancel = cancel.clone();
 
         let seed = match inv.seed() {
             Ok(Some(seed)) => seed,
             Ok(None) => crate::random_seed(),
             Err(message) => return Err(Error::MissingArgument(message)),
         };
-        let outcome = self.resident.generate(&inv, None, qwen3::chat::ToolChoice::Auto, &[], seed, &mut |_| {}).map_err(Error::Backend)?;
+        let outcome = self
+            .resident
+            .generate(&inv, None, qwen3::chat::ToolChoice::Auto, &[], seed, &mut |p| {
+                if let Some(text) = &p.delta {
+                    on_delta(text);
+                }
+            })
+            .map_err(crate::error::backend_or_cancelled)?;
         crate::text::generated_text_from_outcome(outcome)
     }
 }

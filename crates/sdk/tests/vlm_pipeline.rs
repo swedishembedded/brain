@@ -146,3 +146,33 @@ fn download_policy_offline_never_touches_the_network() {
 
     assert!(matches!(err, brain::Error::Missing(_)), "Offline must never attempt a fetch, got {err:?}");
 }
+
+/// `ask_stream` honours the caller's token: one fired before the call is
+/// refused before the images are encoded, and one fired on the first decoded
+/// piece stops the answer at the next token, marked `"cancelled"`. Needs the
+/// real Qwen3-VL-4B-Instruct checkpoint in the model store.
+#[test]
+fn a_streamed_answer_stops_when_its_token_fires() {
+    let Ok(vlm) = brain::VisionLanguagePipeline::builder("Qwen/Qwen3-VL-4B-Instruct").download_policy(brain::DownloadPolicy::Offline).load() else {
+        brain_testutil::skip("VisionLanguagePipeline::ask_stream cancellation needs the Qwen/Qwen3-VL-4B-Instruct checkpoint in the model store");
+        return;
+    };
+    let image = brain::Image::from_rgb8(32, 32, vec![128u8; 32 * 32 * 3]).unwrap();
+    let opts = || brain::VlmOptions::new().max_new_tokens(32);
+
+    let fired = brain::CancelToken::armed();
+    fired.cancel();
+    let err = vlm.ask_stream(std::slice::from_ref(&image), "Describe this image.", opts(), &fired, &mut |_| {}).unwrap_err();
+    assert!(matches!(err, brain::Error::Cancelled), "{err:?}");
+
+    let token = brain::CancelToken::armed();
+    let mut pieces = 0;
+    let out = vlm
+        .ask_stream(std::slice::from_ref(&image), "Describe this image.", opts(), &token, &mut |_| {
+            pieces += 1;
+            token.cancel();
+        })
+        .unwrap();
+    assert_eq!(out.finish_reason, "cancelled");
+    assert!(pieces <= 2, "at most the piece in flight follows the cancel, got {pieces}");
+}

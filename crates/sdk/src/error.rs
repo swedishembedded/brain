@@ -127,8 +127,23 @@ pub enum Error {
     /// or with the card's other tenants gone can succeed. `bytes` is what the refused allocation asked for (0 when the
     /// driver did not say) and `what` what it was for.
     DeviceOutOfMemory { bytes: u64, what: String, detail: String },
-    /// The caller's [`capability::CancelToken`] fired mid-generation.
+    /// The caller's [`capability::CancelToken`] fired before the call produced
+    /// a result.
     Cancelled,
+}
+
+/// A model's `Result<_, String>` error as an [`Error`]: the contract's
+/// cancellation literal ([`capability::failure::CANCELLED`]) becomes
+/// [`Error::Cancelled`], everything else [`Error::Backend`] verbatim. The one
+/// place that mapping lives, for every surface that passes a caller's
+/// [`capability::CancelToken`] down to a model.
+#[cfg(any(feature = "image", feature = "text", feature = "audio", feature = "video", feature = "multimodal"))]
+pub(crate) fn backend_or_cancelled(e: String) -> Error {
+    if e == capability::failure::CANCELLED {
+        Error::Cancelled
+    } else {
+        Error::Backend(e)
+    }
 }
 
 /// Run `f`; a device out-of-memory unwind (the payload a backend raises when an allocation is refused,
@@ -218,6 +233,15 @@ mod tests {
     use brain_modelstore::resolve::{ModelCandidate, Question};
     use capability::Assembly;
     use std::collections::BTreeMap;
+
+    /// The cancellation literal a model answers with reaches the caller as
+    /// [`Error::Cancelled`]; every other message stays [`Error::Backend`] verbatim.
+    #[cfg(any(feature = "image", feature = "text", feature = "audio", feature = "video", feature = "multimodal"))]
+    #[test]
+    fn a_model_error_is_cancelled_only_for_the_contract_literal() {
+        assert!(matches!(backend_or_cancelled(capability::failure::CANCELLED.to_string()), Error::Cancelled));
+        assert!(matches!(backend_or_cancelled("flux2: assemble: no dit chosen".to_string()), Error::Backend(ref m) if m == "flux2: assemble: no dit chosen"));
+    }
 
     fn candidate(id: &str) -> ModelCandidate {
         ModelCandidate {

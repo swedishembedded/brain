@@ -72,10 +72,8 @@ use crate::text::{Engine, Sampling, TextGenerationPipeline};
 use crate::{CancelToken, Error, Result};
 
 /// Prompt tokens per prefill chunk when [`ChatPipeline::prefill_chunk`] is
-/// never called. Cancellation is polled between chunks, so this bounds how
-/// long a fired [`CancelToken`] can wait on a long prompt; each chunk costs
-/// one extra device readback, which is noise at this size.
-const DEFAULT_PREFILL_CHUNK: usize = 512;
+/// never called: the text surface's own chunk.
+const DEFAULT_PREFILL_CHUNK: usize = crate::text::PREFILL_CHUNK;
 
 /// Who a [`ChatMessage`] is from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
