@@ -41,6 +41,8 @@
 //! architecture starts by adding its row here, before any other code.
 
 pub mod caps;
+pub mod support;
+mod support_table;
 
 pub use caps::{BaseTier, Caps};
 

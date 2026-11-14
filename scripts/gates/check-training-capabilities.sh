@@ -8,13 +8,15 @@
 # our services by sending an email to info@swedishembedded.com.
 #
 # The training and serving capability matrix (docs/reference/training-capabilities.md)
-# is generated from scripts/gates/training-capabilities.tsv. This gate fails
-# when the page and the declaration disagree, when a declared test does not
+# and the serving support table compiled into brain_arch
+# (crates/arch/src/support_table.rs) are generated from
+# scripts/gates/training-capabilities.tsv. This gate fails when the page or
+# the table and the declaration disagree, when a declared test does not
 # exist (or is not a #[test], or is #[ignore]d without a (real)/(cuda) flag), or
 # when a registration (conformance tiers, SDK chat fine-tuner declarations) has
 # no row, when a catalog entry resolves to no architecture, when a serving
 # certification cell names an architecture the catalog does not serve, or when
-# a test in a `real` cell carries no (real)/(cuda) flag. Regenerate the page with scripts/gates/training-capabilities.py --write.
+# a test in a `real` cell carries no (real)/(cuda) flag. Regenerate both with scripts/gates/training-capabilities.py --write.
 #
 # Usage: scripts/gates/check-training-capabilities.sh [--root DIR] [--decl FILE]
 set -u

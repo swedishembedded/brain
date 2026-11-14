@@ -10,7 +10,8 @@
 # Spec for scripts/gates/check-training-capabilities.sh: the capability page is
 # generated from the declaration; a missing or ignored test, a registration with
 # no row and a drifted page all fail; every served architecture is a
-# serving-certification row with a support level derived from its cells. Runs
+# serving-certification row with a support level derived from its cells, and
+# the support table compiled into brain_arch carries the same levels. Runs
 # against a synthetic tree.
 
 setup() {
@@ -112,6 +113,22 @@ regenerate() { python3 "$REPO/scripts/gates/training-capabilities.py" --root "$T
   grep -qE '^\| `qwen3` \|.*\| production \|$' "$page"
   grep -qE '^\| `lpips` \|.*\| preview \|$' "$page"
   ! grep -qE '^\| `toyx` \|' "$page"
+  table="$T/crates/arch/src/support_table.rs"
+  grep -qF '("qwen3", Support::Production),' "$table"
+  grep -qF '("lpips", Support::Preview),' "$table"
+  ! grep -qF '"toyx"' "$table"
+}
+
+@test "a support table that differs from the matrix fails and --write repairs it" {
+  serving_tree
+  regenerate
+  sed -i 's/("lpips", Support::Preview)/("lpips", Support::Production)/' "$T/crates/arch/src/support_table.rs"
+  gate
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"DRIFT"*"support_table.rs"* ]]
+  regenerate
+  gate
+  [ "$status" -eq 0 ]
 }
 
 @test "a serving cell for an architecture the catalog does not serve fails" {

@@ -845,7 +845,7 @@ test/gates/adapter-naming:
 test/gates/placement-accounting:
 	bats tests/gates/placement_accounting.bats
 
-## test/gates/training-capabilities - the capability page is generated from its declaration; a missing or ignored test, an unregistered tier and a drifted page fail
+## test/gates/training-capabilities - the capability page and the serving support table are generated from its declaration; a missing or ignored test, an unregistered tier and a drifted page or table fail
 test/gates/training-capabilities:
 	bats tests/gates/training_capabilities.bats
 
