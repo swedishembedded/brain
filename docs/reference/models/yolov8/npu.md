@@ -69,6 +69,14 @@ $Y npu-run      --weights out/yolo.safetensors --image sample.png
 
 ## Constraints
 
+- **INT8 on OpenVINO's CPU plugin needs VNNI.** The INT8 graph follows the
+  ONNX Q/DQ semantics (onnxruntime runs it within a cosine of 0.98 of fp32 on a
+  real photo), but OpenVINO's CPU plugin on an x86 CPU without VNNI (Haswell,
+  for one) multiplies unsigned activations by signed weights in saturating
+  16-bit pairs, and requantizes a concatenation differently: the INT8 graph
+  then detects little or nothing. The fp32 graph matches brain's own detector
+  there to about 1e-5. To check INT8 off the NPU, use `npu-sim`, or a CPU with
+  VNNI (`avx512_vnni` or `avx_vnni` in `/proc/cpuinfo`).
 - **Static shapes.** The NPU plugin requires fixed dims; export is a static
   `[1,3,S,S]` graph. Letterboxing absorbs arbitrary input sizes; `run`
   validates the input against the compiled model's shape.
