@@ -487,11 +487,7 @@ pub fn models() -> Vec<ModelEntry> {
         // the serving executor.
         ModelEntry {
             manifest: qwen35::caps::manifest,
-            provider: |assembly: &Assembly| {
-                let weights = assembly.roles.get("weights").map(|p| p.to_string_lossy().into_owned());
-                let tokenizer = assembly.roles.get("tokenizer").map(|p| p.to_string_lossy().into_owned());
-                Ok(Arc::new(qwen35::caps::Qwen35Provider::new().with_defaults(weights, tokenizer)) as Arc<dyn Provider>)
-            },
+            provider: qwen35::caps::provider,
             spec: Some(("qwen35", &qwen35::spec::Qwen35Spec)),
             resident: None,
         },

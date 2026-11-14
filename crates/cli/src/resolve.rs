@@ -12,17 +12,12 @@
 //! handler (`gpt_cli::run_gpt`, …) already expects, so
 //! nothing about their own verb parsing changes.
 //!
-//! An architecture reaches the CLI one of two ways:
-//! - a dedicated handler in [`ARCH_HANDLERS`], for architectures with their
-//!   own `_cli.rs` module and verb vocabulary (`train`/`infer`/`import`/…,
-//!   including whatever long-tail verbs that module already supports -- this
-//!   resolver does not enumerate or restrict them);
-//! - the generic [`capability::Provider`] dispatch in [`ARCH_TO_MODEL`], for
-//!   architectures with no dedicated CLI module: `rest[0]` becomes the
-//!   capability ACTION name directly, and the rest of `rest` is handed to
-//!   [`crate::caps_cli::run_do`] verbatim -- the exact machinery that used to
-//!   sit behind `brain do <model> <action>`, just reached by architecture id
-//!   instead of by typing the canonical model id.
+//! An architecture reaches the CLI through the generic
+//! [`capability::Provider`] dispatch in [`ARCH_TO_MODEL`]: `rest[0]` becomes
+//! the capability ACTION name directly, and the rest of `rest` is handed to
+//! [`crate::caps_cli::run_do`] verbatim -- the exact machinery that used to
+//! sit behind `brain do <model> <action>`, just reached by architecture id
+//! instead of by typing the canonical model id.
 //!
 //! `brain import <FILE>` (no architecture token) is the one standing
 //! exception: when the second token isn't a recognized architecture id,
@@ -32,23 +27,8 @@
 
 use crate::{caps_cli, optimize_cli, prune_cli, quantize_cli};
 
-type Handler = fn(&[String]);
-
-/// Architectures reachable through their own dedicated CLI module. Order
-/// matches `AGENTS.md`'s model grouping; add a row here when a new
-/// architecture gets its own `_cli.rs`.
-const ARCH_HANDLERS: &[(&str, Handler)] = &[
-    ("qwen35", crate::qwen35_cli::run_qwen35),
-];
-
-/// The catalog model id an [`ARCH_HANDLERS`] architecture ALSO registers under
-/// (for `brain caps`/discovery): `brain/<id>`.
-pub(crate) fn catalog_id_for_arch_handler(id: &str) -> String {
-    format!("brain/{id}")
-}
-
-/// Architectures with no dedicated CLI module, reached generically through
-/// their [`capability::Provider`] instead: `<arch id>, <canonical model id>`.
+/// Architectures reached generically through their
+/// [`capability::Provider`]: `<arch id>, <canonical model id>`.
 /// One row per architecture, each naming its own served model: the face pair
 /// (`scrfd` detection, `arcface` identity embedding) are two crates and two
 /// models, and `arcface embed`'s default path reaches the detector itself.
@@ -126,6 +106,7 @@ const ARCH_TO_MODEL: &[(&str, &str)] = &[
     ("toymoe", "brain/toymoe"),
     ("huginn", "brain/huginn"),
     ("ouro", "brain/ouro"),
+    ("qwen35", "brain/qwen35"),
     ("qwen35moe", "brain/qwen35moe"),
     ("qwen3omnimoe", "brain/qwen3omnimoe"),
     ("qwen3tts", "brain/qwen3tts"),
@@ -173,7 +154,7 @@ enum Resolved {
 /// Every id [`dispatch_arch`] can actually route, from any of the three
 /// tables this resolver draws on. `brain_arch::ARCHS` covers the common case
 /// (real architectures with a crate, an HF/GGUF fetch story); this resolver's
-/// OWN [`ARCH_HANDLERS`]/[`ARCH_TO_MODEL`] additionally list a couple of
+/// OWN [`ARCH_TO_MODEL`] additionally lists a couple of
 /// no-weights utility models (`imageops`, `demo`) that intentionally have no
 /// `brain_arch::Arch` row at all - no crate, nothing to fetch - so gating on
 /// `by_id` alone made them silently unreachable: `dispatch_arch` already
@@ -184,9 +165,6 @@ enum Resolved {
 fn known_arch_id(s: &str) -> Option<&'static str> {
     if let Some(a) = brain_arch::by_id(s) {
         return Some(a.id);
-    }
-    if let Some((id, _)) = ARCH_HANDLERS.iter().find(|(id, _)| *id == s) {
-        return Some(id);
     }
     if let Some((id, _)) = ARCH_TO_MODEL.iter().find(|(id, _)| *id == s) {
         return Some(id);
@@ -308,17 +286,13 @@ fn wants_weight_acquisition(arch: &str, rest: &[String]) -> bool {
 
 /// Architectures whose weight resolution has fully moved to
 /// `brain_modelstore::resolve` (a `--model`/per-role-flag/store-inventory
-/// based resolver, wired into that architecture's own handler) and must
-/// never again go through EITHER legacy env-var mechanism below --
-/// `ensure_env_weights` (keyed on `Arch::weights_env`, already a no-op once
-/// that's empty) AND, independently, `maybe_inject_default_weights` (keyed
-/// only on the verb being infer-shaped, so it still fires for an arch with
-/// an EMPTY `weights_env` too -- that's the whole point of it for
-/// `weights_env`-free architectures like `zipdepth`/`gpt2`, which is exactly
-/// why emptying `weights_env` alone does not opt an architecture out: the
-/// resolver-migrated case needs an explicit marker, not an overload of a
-/// field whose "empty" already means something else for those others).
-/// Grown by one entry per architecture as it migrates.
+/// based resolver) and must never again go through the legacy env-var
+/// mechanism, `ensure_env_weights` (keyed on `Arch::weights_env`, already a
+/// no-op once that's empty). Emptying `weights_env` alone does not opt an
+/// architecture out of the auto-fetch gate: the resolver-migrated case needs
+/// an explicit marker, not an overload of a field whose "empty" already means
+/// something else for the others. Grown by one entry per architecture as it
+/// migrates.
 const RESOLVER_MIGRATED_ARCHS: &[&str] = &[
     "flux2",
     "wan",
@@ -383,19 +357,14 @@ fn dispatch_arch(arch: &str, rest: Vec<String>) {
         crate::load_line::install(arch);
     }
     let resolver_migrated = RESOLVER_MIGRATED_ARCHS.contains(&arch);
-    // Unconditional (past the gates above) and first: covers BOTH halves of
-    // this resolver. `ARCH_TO_MODEL` architectures have no `--weights` flag
+    // Unconditional (past the gates above) and first.
+    // `ARCH_TO_MODEL` architectures have no `--weights` flag
     // at all (`run_do`'s params are the action's own schema) and always
-    // need this, and `ARCH_HANDLERS` architectures reach it too, so this
-    // can't be scoped to just the `ARCH_TO_MODEL` branch. No-ops instantly for every
-    // architecture with an empty `weights_env` (everything else today).
+    // need this. No-ops instantly for every architecture with an empty
+    // `weights_env` (everything else today).
     let attempt_fetch = !resolver_migrated && wants_weight_acquisition(arch, &rest);
     if attempt_fetch && !weights_already_named(arch, &rest) {
         crate::supply::ensure_env_weights(arch);
-    }
-    if let Some((_, handler)) = ARCH_HANDLERS.iter().find(|(id, _)| *id == arch) {
-        let rest = if attempt_fetch { maybe_inject_default_weights(arch, rest) } else { rest };
-        return handler(&rest);
     }
     // `brain ricursive finetune ...` is `brain finetune --arch ricursive ...`: the generic trainers serve this
     // architecture, which has no dedicated CLI module of its own.
@@ -455,7 +424,7 @@ fn weights_already_named(arch: &str, rest: &[String]) -> bool {
 }
 
 /// [`weights_already_named`]'s logic, taking an already-looked-up `Arch` -
-/// see [`wants_default_weights_with`] for why a test needs this seam.
+/// the seam a test uses to exercise the decision against a hand-built fixture.
 fn weights_already_named_with(arch: &str, a: Option<&brain_arch::Arch>, rest: &[String]) -> bool {
     let Some(a) = a else { return false };
     if a.weights_env.is_empty() {
@@ -483,91 +452,6 @@ fn weights_already_named_with(arch: &str, a: Option<&brain_arch::Arch>, rest: &[
     })
 }
 
-/// For an `infer`-shaped verb with no `--weights` already given, auto-fetch
-/// the architecture's default checkpoint
-/// ([`brain_arch::Arch::default_ref`], via
-/// [`crate::supply::ensure_default_weights`]; fetching is opt-in, so with it
-/// off an unpulled default errors instead) and inject `--weights <path>`
-/// (plus `--tokenizer <path>`, when the fetched checkpoint has one and
-/// `--tokenizer` was not already given) -- what makes `brain infer zipdepth
-/// --in image=x.jpg` (no flags beyond the input) resolve a real checkpoint on
-/// its own. Passes `rest` through completely unchanged for every other verb,
-/// for an architecture with no `default_ref`, or when `--weights` is already
-/// present -- this never silently overrides an explicit flag with a fetched
-/// one.
-fn wants_default_weights(arch: &str, verb: Option<&str>) -> bool {
-    wants_default_weights_with(brain_arch::by_id(arch), verb)
-}
-
-/// [`wants_default_weights`]'s logic, taking an already-looked-up `Arch`
-/// instead of resolving one itself - so a test can exercise the decision
-/// against a hand-built fixture instead of a real, live registry row, which a
-/// registry-wide migration (every `weights_env` row moving to the resolver,
-/// as one eventually will) would otherwise leave with no real example left
-/// to test against at all.
-fn wants_default_weights_with(a: Option<&brain_arch::Arch>, verb: Option<&str>) -> bool {
-    // A `Arch::weights_env` architecture whose vars the caller has ALREADY
-    // exported has fully specified its weights, so there is nothing to fetch
-    // and nothing to inject. `supply::ensure_default_weights` below would
-    // still resolve the whole `default_ref` regardless: unlike
-    // `supply::ensure_env_weights`, it consults none of those vars.
-    // `brain flux2 generate` hit exactly that -- `canon_verb`
-    // maps `generate` to `infer`, so a klein-9b run with all four
-    // `BRAIN_FLUX2_*` paths exported still fetched the 4B `default_ref` it can
-    // never use, then appended a `--weights` flag `flux2_cli` rejects.
-    //
-    // Keyed on "every var is set", NOT on "declares weights_env": those two are
-    // NOT disjoint. Several rows declare `weights_env` and still depend on
-    // this injection when the vars are unset, so skipping for every
-    // `weights_env` row would break them. This mirrors
-    // `ensure_env_weights`'s own "every var the caller needs is already set"
-    // early return, keeping one rule in both entry points.
-    if a.is_some_and(|a| {
-        !a.weights_env.is_empty()
-            && a.weights_env.iter().all(|(var, _)| std::env::var_os(var).is_some_and(|v| !v.is_empty()))
-    }) {
-        return false;
-    }
-    let verb = verb.map(crate::args::canon_verb);
-    verb.is_some_and(|v| v == "infer")
-}
-
-fn maybe_inject_default_weights(arch: &str, rest: Vec<String>) -> Vec<String> {
-    let is_infer = wants_default_weights(arch, rest.first().map(String::as_str));
-    // `--model` names the weights the way `--weights` does (the generic
-    // resolver, `model_flag`): an invocation that carries it has already said
-    // what to load, and the injected flag would only be rejected by a parser
-    // that does not take `--weights` at all. Help is not an inference
-    // invocation at all, whatever the verb says (`canon_verb("generate")` is
-    // "infer"): usage must never block on a fetch, the same rule
-    // `dispatch_arch` applies to `ensure_env_weights`.
-    if !is_infer
-        || rest.iter().any(|a| a == "--weights")
-        || rest.iter().any(|a| a == "--model")
-        || rest.iter().any(|a| a == "-h" || a == "--help")
-    {
-        return rest;
-    }
-    match crate::supply::ensure_default_weights(arch) {
-        Ok(got) => {
-            let mut rest = rest;
-            rest.push("--weights".to_string());
-            rest.push(got.weights);
-            if !rest.iter().any(|a| a == "--tokenizer") {
-                if let Some(tokenizer) = got.tokenizer {
-                    rest.push("--tokenizer".to_string());
-                    rest.push(tokenizer);
-                }
-            }
-            rest
-        }
-        Err(e) => {
-            eprintln!("brain: {e}");
-            std::process::exit(1);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -588,16 +472,11 @@ mod tests {
     /// and auto-fetch is already disabled - so it fails asking for a
     /// `BRAIN_*` variable on a checkpoint sitting in the model store.
     ///
-    /// Only the [`ARCH_TO_MODEL`] half is constrained: an architecture with
-    /// its own [`ARCH_HANDLERS`] entry returns from that branch before
-    /// `run_generic_migrated` is ever reached, and resolves through its own
-    /// `_cli.rs` instead.
     #[test]
     fn every_generically_dispatched_migrated_arch_has_a_spec() {
         let generic: Vec<&str> = RESOLVER_MIGRATED_ARCHS
             .iter()
             .copied()
-            .filter(|a| !ARCH_HANDLERS.iter().any(|(id, _)| id == a))
             .filter(|a| ARCH_TO_MODEL.iter().any(|(id, _)| id == a))
             .collect();
         let missing: Vec<&str> = generic.iter().copied().filter(|a| !crate::resolver_cli::has_arch_spec(a)).collect();
@@ -633,7 +512,6 @@ mod tests {
         let stranded: Vec<&str> = ARCH_TO_MODEL
             .iter()
             .map(|(id, _)| *id)
-            .filter(|a| !ARCH_HANDLERS.iter().any(|(id, _)| id == a))
             .filter(|a| crate::resolver_cli::has_arch_spec(a))
             .filter(|a| !RESOLVER_MIGRATED_ARCHS.contains(a))
             // An architecture whose action already declares a `host_env`
@@ -665,17 +543,9 @@ mod tests {
         assert_eq!(rest_a, s(&["train", "data/calculator"]));
     }
 
-    #[test]
-    fn wants_default_weights_still_recognizes_the_generic_infer_mapping() {
-        assert!(wants_default_weights("zipdepth", Some("infer")));
-        assert!(wants_default_weights("qwen3vl", Some("generate")));
-        assert!(wants_default_weights("moondream3", Some("gen")));
-        assert!(!wants_default_weights("qwen3", Some("train")));
-    }
-
     /// A synthetic multi-role `Arch`, for the tests below that need to
-    /// exercise `wants_default_weights`/`weights_already_named` against a
-    /// declared `weights_env` + `default_ref` pair. This registry migrated
+    /// exercise `weights_already_named` against a declared `weights_env` +
+    /// `default_ref` pair. This registry migrated
     /// one real architecture at a time onto the resolver until none was left
     /// that still paired the two (every `weights_env` row that ALSO carried a
     /// `default_ref` moved to the resolver over the course of this
@@ -700,89 +570,6 @@ mod tests {
             variants: &[],
             families: &[],
             caps: brain_arch::Caps::NONE,
-        }
-    }
-
-    /// A caller who has exported every `Arch::weights_env` path has fully
-    /// specified its weights, so no `default_ref` may be fetched and no
-    /// `--weights` injected. `brain flux2 generate` downloaded the 4B
-    /// `default_ref` with all four `BRAIN_FLUX2_*` paths set, because
-    /// `canon_verb` maps `generate` to `infer` and `ensure_default_weights`
-    /// (unlike `ensure_env_weights`) consults none of those vars.
-    ///
-    /// The partially-configured and unset cases must still fetch: a
-    /// `weights_env` row can still depend on default fetching, which is why
-    /// the rule keys on "every var set" rather than on "declares
-    /// weights_env" - see [`multi_role_fixture`].
-    #[test]
-    fn a_fully_configured_weights_env_architecture_skips_the_default_fetch() {
-        let _serial = env_lock();
-        let fixture = multi_role_fixture();
-        let vars: Vec<&str> = fixture.weights_env.iter().map(|(v, _)| *v).collect();
-        assert!(vars.len() >= 2, "the fixture should declare several roles");
-
-        // Nothing exported: the default-fetch path stays available.
-        for v in &vars {
-            std::env::remove_var(v);
-        }
-        assert!(wants_default_weights_with(Some(&fixture), Some("generate")), "unset env must still fetch");
-
-        // Every path exported: nothing to fetch, nothing to inject.
-        for v in &vars {
-            std::env::set_var(v, "/nonexistent/for-test");
-        }
-        assert!(!wants_default_weights_with(Some(&fixture), Some("generate")), "fully configured must not fetch");
-        assert!(!wants_default_weights_with(Some(&fixture), Some("infer")));
-
-        // Partially configured is NOT fully specified, so it still fetches.
-        std::env::remove_var(vars[0]);
-        assert!(wants_default_weights_with(Some(&fixture), Some("generate")), "partial env must still fetch");
-
-        for v in &vars {
-            std::env::remove_var(v);
-        }
-    }
-
-    /// `weights_env` and a `--weights` flag are NOT mutually exclusive, so the
-    /// rule above cannot be simplified to "declares weights_env => never
-    /// fetch": that regresses every row which declares both and relies on
-    /// default fetching. Recorded because assuming disjointness here looked
-    /// obviously right and is simply false.
-    #[test]
-    fn weights_env_and_the_weights_flag_are_not_mutually_exclusive() {
-        let fixture = multi_role_fixture();
-        assert!(!fixture.weights_env.is_empty() && fixture.default_ref.is_some(), "the fixture should declare both");
-        assert!(wants_default_weights_with(Some(&fixture), Some("infer")), "default fetch must survive when unset");
-    }
-
-    #[test]
-    fn maybe_inject_default_weights_leaves_an_explicit_weights_flag_untouched() {
-        // `--weights` already present must short-circuit BEFORE the
-        // network-dependent `ensure_default_weights` call, for both the
-        // generic "infer" path - never silently override an explicit flag
-        // with a fetched one.
-        let rest = s(&["infer", "--weights", "explicit.safetensors"]);
-        assert_eq!(maybe_inject_default_weights("zipdepth", rest.clone()), rest);
-    }
-
-    /// `--model` names the weights too (the generic resolver): an invocation
-    /// carrying it must short-circuit the same way `--weights` does -- before
-    /// the network-dependent `ensure_default_weights` call -- rather than
-    /// have a fetched default injected beside it.
-    #[test]
-    fn maybe_inject_default_weights_leaves_a_model_flag_untouched() {
-        let rest = s(&["infer", "--model", "black-forest-labs/FLUX.2-klein-4B"]);
-        assert_eq!(maybe_inject_default_weights("zipdepth", rest.clone()), rest);
-    }
-
-    /// Help is not an inference invocation, even when the verb is
-    /// (`canon_verb("generate")` is "infer"): `brain flux2 generate --help`
-    /// fetched the default ref over the network just to print usage, the
-    /// same way `ensure_env_weights`'s own help gate exists to prevent.
-    #[test]
-    fn maybe_inject_default_weights_ignores_a_help_request() {
-        for rest in [s(&["text2image", "--help"]), s(&["text2image", "-h"]), s(&["--help"])] {
-            assert_eq!(maybe_inject_default_weights("flux2", rest.clone()), rest);
         }
     }
 
@@ -847,9 +634,7 @@ mod tests {
     /// Every architecture this migration moved onto the resolver has an
     /// empty `weights_env` (so `ensure_env_weights` is already a no-op for
     /// it) AND is listed in [`RESOLVER_MIGRATED_ARCHS`] - so the two can
-    /// never drift apart as more architectures migrate (and so the
-    /// `ARCH_HANDLERS` branch's `maybe_inject_default_weights` never runs for
-    /// one either).
+    /// never drift apart as more architectures migrate.
     #[test]
     fn resolver_migrated_archs_declare_no_weights_env() {
         for id in RESOLVER_MIGRATED_ARCHS {
@@ -893,12 +678,13 @@ mod tests {
     }
 
     #[test]
-    fn import_with_a_real_arch_id_routes_to_that_archs_own_import_verb() {
-        let Resolved::Arch { arch, rest } = resolve(&s(&["import", "qwen35", "--hf", "dir", "--out", "f"])) else {
-            panic!("expected Resolved::Arch (qwen35 has a dedicated handler with its own import verb)");
+    fn import_with_a_real_arch_id_routes_to_that_archs_own_import_action() {
+        let Resolved::Arch { arch, rest } = resolve(&s(&["import", "qwen35", "--source", "dir", "--dest", "f"])) else {
+            panic!("expected Resolved::Arch (qwen35 serves its own import action)");
         };
         assert_eq!(arch, "qwen35");
-        assert_eq!(rest, s(&["import", "--hf", "dir", "--out", "f"]));
+        assert_eq!(rest, s(&["import", "--source", "dir", "--dest", "f"]));
+        assert_eq!(verb_is_known("qwen35", "import"), Some(true));
     }
 
     #[test]
@@ -977,10 +763,9 @@ mod tests {
 
     /// `kronos` moved to the resolver too - see
     /// `qwen3tts_no_longer_wants_env_based_weight_acquisition`'s own doc.
-    /// kronos has no `ARCH_HANDLERS` entry of its own (it dispatches
-    /// generically via `ARCH_TO_MODEL`), but the same env-var auto-fetch
-    /// gate this row exempts it from would otherwise still apply to `brain
-    /// kronos ...`/`brain <verb> kronos` invocations.
+    /// kronos dispatches generically via `ARCH_TO_MODEL`, and the env-var
+    /// auto-fetch gate this row exempts it from would otherwise still apply
+    /// to `brain kronos ...`/`brain <verb> kronos` invocations.
     #[test]
     fn kronos_no_longer_wants_env_based_weight_acquisition() {
         let _serial = env_lock();
@@ -1008,17 +793,10 @@ mod tests {
             .iter()
             .filter_map(|m| m.spec.map(|(arch, _)| arch))
             .filter(|arch| brain_arch::by_id(arch).is_some())
-            .filter(|arch| !ARCH_HANDLERS.iter().any(|(id, _)| id == arch) && !ARCH_TO_MODEL.iter().any(|(id, _)| id == arch))
+            .filter(|arch| !ARCH_TO_MODEL.iter().any(|(id, _)| id == arch))
             .map(str::to_string)
             .collect();
         assert!(unreachable.is_empty(), "served with a resolver spec but unreachable as `brain <arch> <verb>`: {unreachable:?}");
-    }
-
-    #[test]
-    fn every_arch_handlers_id_is_a_real_registry_entry() {
-        for (id, _) in ARCH_HANDLERS {
-            assert!(brain_arch::by_id(id).is_some(), "{id:?} in ARCH_HANDLERS has no brain_arch row");
-        }
     }
 
     #[test]
@@ -1031,17 +809,6 @@ mod tests {
                 continue;
             }
             assert!(brain_arch::by_id(id).is_some(), "{id:?} in ARCH_TO_MODEL has no brain_arch row (if intentional, add it to NO_ARCH_ROW above)");
-        }
-    }
-
-    /// ARCH_HANDLERS and ARCH_TO_MODEL partition disjointly -- an id in both
-    /// would mean the generic capability path is silently unreachable for it
-    /// (ARCH_HANDLERS is checked first), which is exactly the kind of
-    /// drift a table like this is supposed to make impossible to miss.
-    #[test]
-    fn arch_handlers_and_arch_to_model_do_not_overlap() {
-        for (id, _) in ARCH_HANDLERS {
-            assert!(!ARCH_TO_MODEL.iter().any(|(m, _)| m == id), "{id:?} is in both ARCH_HANDLERS and ARCH_TO_MODEL");
         }
     }
 
@@ -1081,15 +848,28 @@ mod tests {
         assert_eq!(verb_is_known("wan", "generate"), Some(false));
     }
 
-    /// An architecture this gate has no opinion about (no `weights_env`, so
-    /// `ensure_env_weights` is already a guaranteed instant no-op -- nothing
-    /// expensive to guard) is untouched: `None`, not `Some(false)`, so
+    /// An architecture this gate has no opinion about (not served through
+    /// `ARCH_TO_MODEL`) is untouched: `None`, not `Some(false)`, so
     /// `wants_weight_acquisition` treats it exactly as before this gate
     /// existed.
     #[test]
-    fn verb_is_known_has_no_opinion_on_an_ungated_handler() {
-        assert_eq!(verb_is_known("qwen35", "t2i"), None);
-        assert_eq!(verb_is_known("qwen35", "infer"), None);
+    fn verb_is_known_has_no_opinion_on_an_arch_without_a_served_model() {
+        assert_eq!(verb_is_known("not-an-arch", "infer"), None);
+        assert!(wants_weight_acquisition("not-an-arch", &s(&["infer"])));
+    }
+
+    /// qwen35's verbs are its served actions, reached generically: the
+    /// removed `infer`/`sample-adapter` spellings are not among them.
+    #[test]
+    fn qwen35_verbs_are_its_served_actions() {
+        assert_eq!(model_for_arch("qwen35"), Some(qwen35::caps::MODEL));
+        assert_eq!(arch_for_model(qwen35::caps::MODEL), Some("qwen35"));
+        for v in ["generate", "finetune", "sample_adapter", "import"] {
+            assert_eq!(verb_is_known("qwen35", v), Some(true), "qwen35 should accept {v:?}");
+        }
+        for v in ["infer", "sample-adapter", "t2i"] {
+            assert_eq!(verb_is_known("qwen35", v), Some(false), "qwen35 has no {v:?} action");
+        }
     }
 
     /// The actual gate `dispatch_arch` consults before calling
@@ -1113,10 +893,9 @@ mod tests {
     /// change.
     #[test]
     fn wants_weight_acquisition_still_proceeds_for_every_real_verb() {
-        // An arch with no verb table entry is unaffected: unchanged
-        // (pre-existing) behavior, gated only by help/no-verb.
-        assert!(wants_weight_acquisition("qwen35", &s(&["t2i"])));
-        assert!(wants_weight_acquisition("qwen35", &s(&["infer"])));
+        assert!(wants_weight_acquisition("qwen35", &s(&["generate"])));
+        assert!(wants_weight_acquisition("qwen35", &s(&["finetune"])));
+        assert!(!wants_weight_acquisition("qwen35", &s(&["infer"])), "a verb the model does not serve never reaches the fetch gate");
     }
 
     /// `ARCH_TO_MODEL` architectures validate against their own capability

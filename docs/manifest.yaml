@@ -203,6 +203,8 @@ navigation:
         path: examples/models/ltxv.md
       - source: samples/models/qwen3/README.md
         path: examples/models/qwen3.md
+      - source: samples/models/qwen35/README.md
+        path: examples/models/qwen35.md
       - source: samples/models/qwen35moe/README.md
         path: examples/models/qwen35moe.md
       - source: samples/models/qwen3tts/README.md

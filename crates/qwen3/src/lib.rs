@@ -21,7 +21,7 @@ pub mod q8;
 pub mod rollout;
 pub mod sample;
 pub mod serve;
-mod served;
+pub mod served;
 mod train_actions;
 mod eval_actions;
 mod convert_actions;

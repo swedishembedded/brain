@@ -142,6 +142,7 @@ brain/qwen3	toolcall_eval	seed
 brain/qwen3	toolcall_gen	seed
 brain/qwen3	toy	seed
 brain/qwen3	train	seed
+brain/qwen35	finetune	seed
 brain/qwen35	generate	eos
 brain/qwen35	generate	seed
 brain/qwen35	generate	temp

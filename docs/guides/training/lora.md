@@ -48,24 +48,32 @@ ADAPTER=<owner/name[:tag]>`, which builds the release binary first.
 ## Qwen3.8-27B (`brain qwen35 finetune`)
 
 ```
-brain qwen35 finetune DATA_DIR --base BASE --out OUT --mode lora [--base-format f32|bf16|nf4|fp8]
-    [--lora-rank R] [--lora-alpha A] [--seq-len T] [--recompute on|off] [--steps N] [--lr X]
-    [--gdn-segment N] [--bf16-residuals on|off] [--mlp-rows N] [--eval-interval N] ...
+brain qwen35 finetune --weights BASE --data DATA_DIR --save OUT --mode lora [--base-format f32|bf16|nf4|fp8]
+    [--rank R] [--alpha A] [--block T] [--recompute true|false] [--steps N] [--lr X] [--seed $RANDOM]
+    [--gdn-segment N] [--bf16-residuals true|false] [--mlp-rows N] [--eval-interval N] ...
 ```
 
-- `--base BASE` - a brain-native `.safetensors` checkpoint, or (with
+`finetune` is an action of the `brain/qwen35` model (served by `brain serve` with
+training enabled, and the sample `samples/models/qwen35`); `brain qwen35
+finetune --help` lists every parameter with its default.
+
+- `--weights BASE` - a brain-native `.safetensors` checkpoint, or (with
   `--base-format bf16`, `nf4` or `fp8`) a HuggingFace checkpoint directory such as
   `Qwen/Qwen3.8-27B-FP8`, which is streamed from disk one tensor at a time
-  (about 1 GiB of host memory) and never held whole on the host.
-- `--base-format` - how the frozen base is held on the device (earlier
-  spelling `--base-dtype`; one flag for every model, an unsupported format is
-  refused naming the model and its supported set). `f32` (the default) keeps
-  the whole model resident in fp32 and can train in `--mode full` or
-  `--mode lora`, but the 27B does not fit; `bf16`, `nf4` (4-bit, QLoRA) and
-  `fp8` (block-scaled E4M3) shrink the base and train LoRA adapters only, so
-  combining them with `--mode full` is refused.
-- `--lora-rank`, `--lora-alpha` - adapter shape (aliases `--rank`, `--alpha`;
-  alpha defaults to twice the rank).
+  (about 1 GiB of host memory) and never held whole on the host. Omitted, the
+  model store's own pick is used.
+- `--data DATA_DIR` - the tokenized dataset folder; or give chat JSONL as the
+  `--dataset` input (and `--validation`), which the run tokenizes with the
+  base's tokenizer and chat template, fitting the block to the longest example.
+- `--base-format` - how the frozen base is held on the device (one parameter
+  for every model, an unsupported format is refused naming the model and its
+  supported set). `f32` (the default) keeps the whole model resident in fp32
+  and can train in `--mode full` or `--mode lora`, but the 27B does not fit;
+  `bf16`, `nf4` (4-bit, QLoRA) and `fp8` (block-scaled E4M3) shrink the base
+  and train LoRA adapters only, so combining them with `--mode full` is refused.
+- `--rank`, `--alpha` - adapter shape (alpha defaults to twice the rank).
+- `--adapter-kind lora|ia3|lokr|dora` - the adapter method (`dora` needs an
+  `f32` base).
 - `--lora-variant V`, `--lora-plus-ratio X` - model-agnostic adapter variants,
   the same for every LoRA-capable verb: `V` is a comma list of `rs` (rsLoRA:
   the update is scaled by `alpha / sqrt(rank)`) and `fa` (LoRA-FA: the `A`
@@ -73,48 +81,55 @@ brain qwen35 finetune DATA_DIR --base BASE --out OUT --mode lora [--base-format 
   matrices train at `X` times the learning rate (LoRA+). Continue an adapter
   with the same options. The SDK's `ChatFineTune` exposes `rank_stabilized`,
   `lora_plus` and `freeze_a`.
-- `--seq-len` - training sequence length (alias `--block`).
+- `--block` - training sequence length.
 - `--recompute` - recompute layer activations in the backward pass instead of
-  keeping them; the default for `bf16` and `nf4`. The `f32` resident trainer
-  keeps all activations, so `--recompute on` is refused there.
-- `--activations keep|recompute` - the same choice as `--recompute off|on` for a
-  `--mode lora` run (naming both with different values is refused), and the
-  `activations=` key of `--train-precision` for a `--mode full` run.
-- `--backend cuda|cpu|vulkan` is the global backend flag, as for every command.
-
+  keeping them; the default for `bf16`, `nf4` and `fp8`. The `f32` resident
+  trainer keeps all activations, so `--recompute true` is refused there.
+- `--activations keep|recompute` - the same choice as `--recompute false|true`
+  for a `--mode lora` run (naming both with different values is refused), and
+  the `activations=` key of `--train-precision` for a `--mode full` run.
+- `--adapter-id`, `--adapter-name` - what a streamed run's adapter calls
+  itself: a whole card id `<vendor>/<repo>[-QUANT]:<owner>:<name>:<tag>`, or
+  only the name (`<base release>:local:<name>:latest`). A named adapter is kept
+  in the model store, where `brain serve` lists it and a later run of the same
+  name continues it (`--fresh` starts over); unnamed, it is written to `--save`
+  or returned as the `adapter` output.
 - `--gdn-segment`, `--bf16-residuals`, `--mlp-rows` - the long-sequence
-  settings of a `bf16`/`nf4` base: segmented Gated-DeltaNet layers (tokens per
-  segment), a bf16 residual stream, the MLP run in token chunks. Rows of 2048
-  tokens or more at batch 1 get 2048 / on / 2048 by themselves; naming a flag
-  replaces that choice, and `0` turns `--gdn-segment` and `--mlp-rows` off.
-  A segment needs a batch of one.
+  settings of a `bf16`/`nf4`/`fp8` base: segmented Gated-DeltaNet layers
+  (tokens per segment), a bf16 residual stream, the MLP run in token chunks.
+  Rows of 2048 tokens or more at batch 1 get 2048 / on / 2048 by themselves;
+  naming one replaces that choice, and `0` turns `--gdn-segment` and
+  `--mlp-rows` off. A segment needs a batch of one.
 - `--eval-interval`, `--eval-batches` - evaluate on the held-out split every N
   steps (`0` never) on that many batches.
-- Every optimizer step prints its loss, learning rate and wall time to stderr,
-  and the base load prints its duration and the settings in force.
+- `--seed N` - omit for a random seed, echoed in the outcome.
+- Every optimizer step is reported (loss, learning rate, wall time), the run
+  stops between steps when cancelled, and the base load prints its duration and
+  the settings in force.
 
 A batch wider than one with more than 8192 tokens per micro-step is refused
 with the equivalent `--batch 1 --grad-accum G`.
 
-Conversations with images train on this verb too, when the base is a release with its vision tower: a prepared
-dataset that holds images (`ChatFineTune` writes one) is read with the tower of `--base`, which stays frozen. A dataset
+Conversations with images train on this action too, when the base is a release with its vision tower: a prepared
+dataset that holds images (`ChatFineTune` writes one) is read with the tower of `--weights`, which stays frozen. A dataset
 with images over a base without one is refused. See
 [Qwen3.8-27B: fine-tuning on conversations with images](../../reference/models/qwen35.md#fine-tuning-on-conversations-with-images).
 
-### Using the adapter on the quantised base: `brain qwen35 sample-adapter`
+### Using the adapter on the quantised base: `brain qwen35 sample_adapter`
 
 ```
-brain qwen35 sample-adapter --base DIR --prompt TEXT [--prompt TEXT ...] [--adapter FILE]
-    [--base-format nf4|bf16|fp8|f32] [--max-new N] [--chat] [--no-adapter | --compare]
+brain qwen35 sample_adapter --weights DIR --adapter FILE --prompt TEXT [--prompts '["TEXT", ...]']
+    [--base-format nf4|bf16|fp8|f32] [--max-new N] [--chat] [--mode adapter|base|compare]
 ```
 
 Streams the base onto the device at `--base-format` with the adapter overlaid
 (no fold into a host copy, which the 27B does not fit) and decodes greedily by
 repeated full forwards at a fixed length, without a KV cache: slow, but exactly
-the forward the adapter was trained through. `--no-adapter` decodes the base
-alone and `--compare` prints the adapter's and the base's answer for each
-prompt. The tokenizer is `tokenizer.json` in the base directory unless
-`--tokenizer` names one.
+the forward the adapter was trained through. `--mode base` decodes the base
+alone (the overlay switched off) and `--mode compare` prints the adapter's and
+the base's answer for each prompt. The tokenizer is `tokenizer.json` in the
+base directory unless `--tokenizer` names one. `brain qwen35 generate --adapter
+FILE` folds the same adapter into the weights for KV-cache decoding.
 
 The `f32` tier is the existing trainer for small and merged checkpoints.
 

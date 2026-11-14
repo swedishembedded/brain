@@ -1646,7 +1646,7 @@ qwen35/train/probe: _train/need-wrapper
 	cargo build --release -p brain-qwen35 --bin qwen35_train_probe
 	$(call train_run,target/release/qwen35_train_probe --profile $(ARGS),probe)
 
-## qwen35/train/step - the same through `brain qwen35 finetune` (GPU_WRAPPER=..., ARGS='<data_dir> --base DIR --out F ...')
+## qwen35/train/step - the same through `brain qwen35 finetune` (GPU_WRAPPER=..., ARGS='--data DIR --weights BASE --save F ...')
 qwen35/train/step: _train/need-wrapper build/release
 	$(call train_run,$(BRAIN) qwen35 finetune $(ARGS),step)
 

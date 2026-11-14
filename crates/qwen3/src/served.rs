@@ -123,7 +123,7 @@ pub(crate) fn parse_adapter_spec(spec: &str) -> Result<(String, String, String),
 }
 
 /// A named adapter of the base `weights` as the model store files it.
-pub(crate) struct StoredAdapter {
+pub struct StoredAdapter {
     /// `<base>:<owner>:<name>:<tag>`, the id on the adapter's card.
     pub reference: String,
     /// Where the store keeps (or will keep) the adapter's weights.

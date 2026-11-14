@@ -9,9 +9,8 @@
 //! the override map this expects is still each `<arch>_cli.rs`'s own job -
 //! its flags are interleaved with plenty that aren't roles at all.
 //!
-//! [`resolve_or_exit`]/[`extract_role_overrides`] are the two primitives a
-//! dedicated command (`flux2_cli`) calls directly.
-//! [`run_generic_migrated`] is the third: an architecture with NO dedicated
+//! [`resolve_or_exit`] is the primitive a dedicated command (`flux2_cli`)
+//! calls directly. [`run_generic_migrated`] is the other: an architecture with NO dedicated
 //! command, reached through `crate::resolve::dispatch_arch`'s generic
 //! `ARCH_TO_MODEL` dispatch, runs its served action through
 //! `crate::caps_cli::run_do`, which resolves the weights through the spec its
@@ -60,18 +59,11 @@ pub fn resolve_or_exit(arch: &str, spec: &dyn ArchSpec, overrides: &BTreeMap<Str
     }
 }
 
-/// Split `args` into the role overrides `spec` declares and the rest
-/// (`invoke::resolve::role_overrides`).
-pub fn extract_role_overrides(spec: &dyn ArchSpec, args: &[String]) -> (BTreeMap<String, String>, Vec<String>) {
-    invoke::resolve::role_overrides(spec, args)
-}
-
 /// Whether `arch`'s served model resolves its weights from the model store
 /// (its catalog entry names an [`ArchSpec`]).
 #[cfg(test)]
 pub fn has_arch_spec(arch: &str) -> bool {
-    let model = crate::resolve::model_for_arch(arch).map(str::to_string).unwrap_or_else(|| crate::resolve::catalog_id_for_arch_handler(arch));
-    catalog::resolver_spec_for(&model).is_some()
+    crate::resolve::model_for_arch(arch).is_some_and(|model| catalog::resolver_spec_for(model).is_some())
 }
 
 /// Run `rest` (`<action> [flags]`) on `model`, whose catalog entry resolves

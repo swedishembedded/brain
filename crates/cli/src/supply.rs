@@ -156,40 +156,17 @@ fn heal_all(models_dir: &Path, supplier: &dyn ModelSupplier, exec: &Executor) {
     }
 }
 
-/// Auto-fetch `arch`'s [`brain_arch::Arch::default_ref`] checkpoint into the
-/// model store (fetching + converting exactly as [`StoreSupplier::ensure`]
-/// does for a server request), and return the path to its
-/// `model.brain.safetensors` -- the one thing every dedicated `_cli.rs`
-/// handler's `--weights F` flag already expects. `crate::resolve` calls this
-/// to inject `--weights <path>` into an `infer` invocation that named none,
-/// so `brain infer zipdepth --in image=x.jpg` (no `--weights`) resolves a
-/// concrete checkpoint on its own.
-///
-/// A thin wrapper over `loader::supply::ensure_default_weights`,
-/// translating this CLI's own [`auto_fetch_enabled`] environment gate into
-/// the library's explicit [`loader::DownloadPolicy`] -- `Offline`
-/// when fetching is not opted in (a pulled checkpoint still resolves
-/// locally; a missing one is the remedy-naming error, never a download) and
-/// `AlwaysCheck` when it is (the historical `BRAIN_AUTO_FETCH=1` behavior:
-/// always run the fetch/plan/execute sequence). Preserves this CLI's exact
-/// prior behavior byte for byte.
-pub fn ensure_default_weights(arch: &str) -> Result<loader::DefaultWeights, String> {
-    let policy = if auto_fetch_enabled() { loader::DownloadPolicy::AlwaysCheck } else { loader::DownloadPolicy::Offline };
-    loader::ensure_default_weights(arch, policy)
-}
-
-/// The env-path counterpart to [`ensure_default_weights`]: for each
+/// Auto-fetch the default checkpoint of `arch` for the env path: for each
 /// `(env var, role)` pair `arch`'s [`brain_arch::Arch::weights_env`] lists, if
 /// that variable is unset, fetch `default_ref` (plus each of
 /// [`brain_arch::Arch::extra_refs`], for a model upstream publishes as several
 /// repos) and set every listed var from the merged roles of what was fetched.
 /// Never overrides a variable already
-/// set -- the same rule [`crate::resolve::maybe_inject_default_weights`]
-/// follows for `--weights`. Called from [`crate::resolve::dispatch_arch`] and
+/// set. Called from [`crate::resolve::dispatch_arch`] and
 /// the verbs with their own explicit call (`label_cli.rs`, `forecast_cli.rs`),
 /// so `brain wan t2v ...` with no env exported becomes a real one-liner.
 ///
-/// CLI-process-only, matching [`ensure_default_weights`]'s own scope note:
+/// CLI-process-only:
 /// `brain serve`'s `StoreSupplier` fetch path is untouched, since
 /// mutating process env from a server-lifetime resident is exactly what
 /// `AGENTS.md` forbids -- a short-lived CLI invocation setting its OWN env

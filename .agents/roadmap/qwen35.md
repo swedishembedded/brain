@@ -68,7 +68,7 @@ structurally and never parity-claimed here.
   batch takes them out again. `Batch::LmExamples` (sent by `model::causal_lm_examples`, which Qwen3.8's trainer always uses) names
   the example of every row, probe and held-out draws included. The tower is frozen: no gradient kept for its rows, no adapter, loss
   on the supervised tokens only. Entry points unchanged: `ChatFineTune` (`.arch("qwen35")`), `finetune_streamed*`,
-  `brain qwen35 finetune <prepared dir>`; no new flag.
+  `brain qwen35 finetune --data <prepared dir>`; no new flag.
   Gates (CPU, tiny config `Qwen35Config::tiny()` + a 2-block tower with random weights, `tests/vision_train.rs`): the training
   forward's last-position logits equal `prefill_embeds_rotary` (the inference build's chunked prefill over the same rows and
   `PromptRope`) to 0 (bitwise: same kernels), while plain row positions move them by 1.5e-4 and another picture by 5.4e-4, so the

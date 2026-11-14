@@ -27,12 +27,16 @@
 //!   `data::qwen_chat::render` as a system-turn instruction ahead of the
 //!   system content / tools preamble, matching the upstream Qwen3.8 chat
 //!   template's own convention.
-//! - No LoRA, no multi-GPU sharding wired into this action (the underlying
-//!   capabilities exist - `crate::model`'s LoRA branch, `crate::shard` - but
-//!   this streaming `generate` action, like `qwen35moe::caps`'s own, only
-//!   ever builds a plain full-parameter fp32 `Qwen35`). See
-//!   `crates/qwen35/src/serve.rs`'s own module doc for the complete
-//!   "deliberately deferred" list this action does not attempt.
+//! - A LoRA adapter (`adapter`) is folded into the loaded base tensors once,
+//!   before the model is built (`crate::lora::fold_adapter_into`), so decoding
+//!   is a plain adapted model at no per-token cost. No multi-GPU sharding is
+//!   wired into this action (`crate::shard` exists), and the streaming path
+//!   takes no adapter. See `crates/qwen35/src/serve.rs`'s own module doc for the
+//!   complete "deliberately deferred" list this action does not attempt.
+//!
+//! The model's other actions live beside this one: [`crate::train_actions`]
+//! (`finetune`), [`crate::sample_actions`] (`sample_adapter`) and
+//! [`crate::convert_actions`] (`import`).
 
 use std::path::Path;
 use std::sync::Arc;
@@ -108,9 +112,8 @@ pub const DEFAULT_MAX_NEW: i64 = 128;
 /// `--device`, so this cannot second-guess an operator's own choice.
 ///
 /// No multi-GPU sharding exists on this action today (`crate::shard`'s
-/// `Shardable` impl is real but not wired into `brain qwen35 infer` - see
-/// this module's own doc's "No LoRA, no multi-GPU sharding wired into this
-/// action" note), so a checkpoint that needs more than one card's free VRAM
+/// `Shardable` impl is real but not wired into `brain qwen35 generate` - see
+/// this module's own doc's note on multi-GPU sharding), so a checkpoint that needs more than one card's free VRAM
 /// is refused here rather than spread across cards - an honest "does not fit
 /// on ONE card" answer, not a claim that it cannot fit the machine at all.
 fn place_and_build<R>(bytes: u64, f: impl FnOnce() -> Result<R, String>) -> Result<R, String> {
@@ -133,6 +136,14 @@ pub fn manifest() -> Manifest {
             )
             .host_resolved(),
         )
+        .param(
+            ParamSpec::new(
+                "adapter",
+                ParamType::Str,
+                "path to a LoRA adapter (.safetensors, `finetune`'s output) folded into the weights before the model is built; the streaming path takes none",
+            )
+            .host_resolved(),
+        )
         .param(ParamSpec::new(
             "prompt",
             ParamType::Str,
@@ -142,7 +153,7 @@ pub fn manifest() -> Manifest {
             ParamSpec::new(
                 "tokenizer",
                 ParamType::Str,
-                "path to tokenizer.json; omit to use the model-store resolver's own pick, or an empty string to force the raw token-id path even when one is configured",
+                "path to tokenizer.json, or to a GGUF release whose embedded tokenizer is used; omit to use the model-store resolver's own pick, or an empty string to force the raw token-id path even when one is configured",
             )
             .host_resolved(),
         )
@@ -184,7 +195,11 @@ pub fn manifest() -> Manifest {
         )
         .default(json!(false)))
         .output(BlobSpec::new("text", Media::Text, "the generated text (space-separated token ids when no tokenizer is given)"));
-    Manifest::new(MODEL, "Qwen3.8-27B dense hybrid Gated-DeltaNet/GQA decoder - autoregressive text generation with per-token streaming.", vec![generate])
+    Manifest::new(
+        MODEL,
+        "Qwen3.8-27B dense hybrid Gated-DeltaNet/GQA decoder - autoregressive text generation with per-token streaming and an optional LoRA adapter; full and LoRA fine-tuning (fp32, bf16, nf4 and fp8 bases); adapter sampling on a streamed base; GGUF and Hugging Face import.",
+        vec![generate, crate::train_actions::finetune_spec(), crate::sample_actions::sample_adapter_spec(), crate::convert_actions::import_spec()],
+    )
 }
 
 /// The resident (hot) model: the loaded inference graph; the key that fixes
@@ -199,10 +214,17 @@ struct QwenResident {
     head: Vec<f32>,
 }
 
-/// What a built [`QwenResident`] is reused for: its checkpoint, the context it
-/// was built with, and the precision. A request needing less context hits the
-/// same resident (the acceptance rule, not equality, decides).
-type HotKey = (String, u32, String);
+/// What a built [`QwenResident`] is reused for: its checkpoint, the adapter
+/// folded into it (empty for none), the context it was built with, and the
+/// precision. A request needing less context hits the same resident (the
+/// acceptance rule, not equality, decides).
+#[derive(PartialEq)]
+struct HotKey {
+    weights: String,
+    adapter: String,
+    ctx: u32,
+    precision: String,
+}
 
 /// The executable Qwen3.8-27B model behind the manifest. Construction is
 /// free - the checkpoint loads lazily on the first `generate` and stays
@@ -234,14 +256,48 @@ impl Qwen35Provider {
     }
 }
 
+/// Qwen3.8-27B over `assembly`'s `weights` and `tokenizer` roles, either of
+/// which a request may override (neither is needed by `import`).
+pub fn provider(assembly: &capability::Assembly) -> Result<Arc<dyn Provider>, String> {
+    Ok(Arc::new(Qwen35Provider::new().with_defaults(assembly.role_path("weights").ok(), assembly.role_path("tokenizer").ok())))
+}
+
 impl Provider for Qwen35Provider {
     fn manifest(&self) -> Manifest {
         manifest()
     }
     fn action(&self, name: &str) -> Option<Arc<dyn Action>> {
-        (name == "generate").then(|| {
-            Arc::new(GenerateAction { hot: self.hot.clone(), default_weights: self.default_weights.clone(), default_tokenizer: self.default_tokenizer.clone() }) as Arc<dyn Action>
-        })
+        let (default_weights, default_tokenizer) = (self.default_weights.clone(), self.default_tokenizer.clone());
+        match name {
+            "generate" => Some(Arc::new(GenerateAction { hot: self.hot.clone(), default_weights, default_tokenizer }) as Arc<dyn Action>),
+            // The rest hold no resident state: each builds what it needs from
+            // the base on disk and drops it.
+            "finetune" | "sample_adapter" | "import" => Some(Arc::new(StatelessAction { name: name.to_string(), default_weights, default_tokenizer }) as Arc<dyn Action>),
+            _ => None,
+        }
+    }
+}
+
+/// An action with no resident model: a function of the store-resolved
+/// `weights`/`tokenizer` defaults and the invocation.
+struct StatelessAction {
+    name: String,
+    default_weights: Option<String>,
+    default_tokenizer: Option<String>,
+}
+
+impl Action for StatelessAction {
+    fn spec(&self) -> ActionSpec {
+        manifest().actions.into_iter().find(|a| a.name == self.name).expect("known action")
+    }
+
+    fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        let (weights, tokenizer) = (self.default_weights.as_deref(), self.default_tokenizer.as_deref());
+        match self.name.as_str() {
+            "finetune" => crate::train_actions::finetune(weights, tokenizer, inv, progress),
+            "sample_adapter" => crate::sample_actions::sample_adapter(weights, tokenizer, inv, progress),
+            _ => crate::convert_actions::import(inv, progress),
+        }
     }
 }
 
@@ -286,6 +342,10 @@ impl Action for GenerateAction {
         if precision != "fp32" && precision != "int8" {
             return Err(format!("qwen35 generate: precision must be fp32 or int8, got {precision:?}"));
         }
+        let adapter = inv.get_str("adapter").filter(|a| !a.is_empty()).unwrap_or_default();
+        if !adapter.is_empty() && !Path::new(&adapter).is_file() {
+            return Err(format!("qwen35 generate: adapter not found at '{adapter}'"));
+        }
 
         // Tokenizer is optional: without one the prompt is raw token ids and the
         // result is returned as ids. With one, requests go through the same
@@ -296,7 +356,7 @@ impl Action for GenerateAction {
         // `weights` above does, for a caller that genuinely wants the raw
         // token-id path despite a resolved tokenizer being configured.
         let tok = match inv.get_str("tokenizer").filter(|p| !p.is_empty()).or_else(|| self.default_tokenizer.clone()) {
-            Some(p) => Some(QwenBpe::from_file(&p)?),
+            Some(p) => Some(load_tokenizer(&p)?),
             None => None,
         };
         let plan = match &tok {
@@ -344,11 +404,11 @@ impl Action for GenerateAction {
             Plan::Chat { req, .. } => (req.ids.len() + req.max_new.unwrap_or(DEFAULT_MAX_NEW as usize)) as u32,
             Plan::Raw { ids, max_new, .. } => (ids.len() + max_new) as u32,
         };
-        let key: HotKey = (weights.clone(), need.max(64), precision.clone());
+        let key = HotKey { weights: weights.clone(), adapter: adapter.clone(), ctx: need.max(64), precision: precision.clone() };
         // Reuse is a RELATION, not equality: a resident built for at least
         // this request's context serves it too.
         self.hot.try_get_with_mut(
-            |k: &HotKey| k.0 == weights && k.1 >= need && k.2 == precision,
+            |k: &HotKey| k.weights == weights && k.adapter == adapter && k.ctx >= need && k.precision == precision,
             key,
             || {
                 let cap = need.max(64);
@@ -364,7 +424,10 @@ impl Action for GenerateAction {
                 let bytes = cfg.infer_footprint_bytes(&tier, cap);
                 let model = place_and_build(bytes, || {
                     let container = checkpoint::load(&weights);
-                    let init = container.by_role("");
+                    let mut init = container.by_role("");
+                    if !adapter.is_empty() {
+                        crate::lora::fold_adapter_into(&mut init, &adapter).map_err(|e| format!("qwen35 generate: adapter {adapter:?}: {e}"))?;
+                    }
                     Ok(if precision == "int8" {
                         Qwen35::new_i8(cfg.clone(), 1, cap, &init)
                     } else {
@@ -433,7 +496,7 @@ impl GenerateAction {
     ///
     /// Deliberately narrower than the non-streaming path above: `weights`
     /// here is the CHECKPOINT DIRECTORY (`layers-N.safetensors` +
-    /// `outside.safetensors`, `BRAIN_QWEN35_DIR`'s own layout), a tokenizer
+    /// `outside.safetensors`, the layout `crate::stream` reads), a tokenizer
     /// is required (no raw-token-id path), and `messages`/`chat`/`tools`/
     /// `stop` (the shared `qwen3::chat` machinery the non-streaming path
     /// reuses) are not wired here - `crate::stream::generate` itself takes a
@@ -464,7 +527,7 @@ impl GenerateAction {
         if !dir.is_dir() {
             return Err(format!("qwen35 generate: streaming=true requires 'weights' to be a checkpoint DIRECTORY (layers-N.safetensors + outside.safetensors), got a non-directory path '{weights}'"));
         }
-        // These six params have NO manifest default, so `ActionSpec::validate`
+        // These params have NO manifest default, so `ActionSpec::validate`
         // never fills them in - `get_str`/`get_i64` returning `Some` here can
         // only mean the CALLER explicitly set it, not that a default landed.
         // `crate::stream::generate` has no chat-rendering, EOS-override or
@@ -481,6 +544,7 @@ impl GenerateAction {
             ("tools", inv.get_str("tools").is_some()),
             ("tool_choice", inv.get_str("tool_choice").is_some()),
             ("eos", inv.get_i64("eos").is_some()),
+            ("adapter", inv.get_str("adapter").is_some_and(|a| !a.is_empty())),
         ] {
             if set {
                 return Err(format!(
@@ -512,6 +576,17 @@ impl GenerateAction {
         let text = crate::stream::generate(dir, &cfg, Path::new(&tokenizer), &prompt, max_new, temp, top_k, top_p, WINDOW_BUDGET, seed, use_mtp)?;
         Ok(Outcome::new().set("text", json!(text.clone())).set("seed", json!(seed)).blob("text", Blob::new(Media::Text, text.into_bytes())))
     }
+}
+
+/// The tokenizer at `path`: a `tokenizer.json`, or a GGUF release whose
+/// embedded tokenizer is used.
+fn load_tokenizer(path: &str) -> Result<QwenBpe, String> {
+    if !path.ends_with(".gguf") {
+        return QwenBpe::from_file(path);
+    }
+    let gguf = checkpoint::gguf::MmapGguf::open(path).map_err(|e| format!("open {path}: {e}"))?;
+    let embedded = gguf.tokenizer().ok_or_else(|| format!("{path}: no embedded tokenizer"))?;
+    QwenBpe::from_gguf(&embedded)
 }
 
 /// The two request shapes `generate` accepts: with a tokenizer, the shared
@@ -559,7 +634,8 @@ mod tests {
     fn manifest_declares_generate() {
         let m = manifest();
         assert_eq!(m.model, MODEL);
-        assert_eq!(m.actions.len(), 1);
+        let names: Vec<&str> = m.actions.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(names, ["generate", "finetune", "sample_adapter", "import"]);
         let g = &m.actions[0];
         assert_eq!(g.name, "generate");
         assert!(g.streaming, "generate must stream (one Progress per token)");
@@ -613,13 +689,14 @@ mod tests {
             ("tools", json!("[]")),
             ("tool_choice", json!("auto")),
             ("eos", json!(0)),
+            ("adapter", json!("a.safetensors")),
         ] {
             let err = reg.run(MODEL, "generate", base().set(name, value), &mut |_| {}).unwrap_err();
             assert!(err.contains(name) && err.contains("streaming=true does not support"), "setting {name:?} in streaming mode must be rejected by name, got: {err}");
         }
-        // The baseline (none of the six set) must clear this check and fail
+        // The baseline (none of the seven set) must clear this check and fail
         // LATER, on the nonexistent tokenizer - proving the rejection is
-        // scoped to the six params, not an over-broad refusal.
+        // scoped to the seven params, not an over-broad refusal.
         let err = reg.run(MODEL, "generate", base(), &mut |_| {}).unwrap_err();
         assert!(!err.contains("does not support"), "the baseline request must not be rejected for a param it never set: {err}");
     }
@@ -678,7 +755,7 @@ mod tests {
 
     /// The resolved-default path: a provider bound via `with_defaults` serves
     /// a request that names no `weights` at all, using the bound path - the
-    /// whole point of moving this off `BRAIN_QWEN35_WEIGHTS`.
+    /// whole point of binding the resolved pick.
     #[test]
     fn a_bound_default_weights_path_is_used_when_the_request_omits_one() {
         let cfg = Qwen35Config::tiny();

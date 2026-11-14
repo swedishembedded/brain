@@ -1,0 +1,19 @@
+[package]
+# Package names under samples/ are derived from the path:
+# `samples/models/qwen35` -> `sample-models-qwen35`.
+name = "sample-models-qwen35"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Sample application: the Qwen3.8-27B dense hybrid decoder from the command line - generate with an adapter, fine-tune in full or as LoRA on an fp32, bf16, nf4 or fp8 base, sample an adapter against the base, and import a GGUF or Hugging Face release, with every parameter."
+publish = false
+
+[dependencies]
+# A per-model program links the model it drives and the shared action runner
+# directly (samples/README.md rule 1).
+brain-qwen35.workspace = true
+brain-invoke.workspace = true
+
+[package.metadata.brain]
+# `make check/samples` fails if the real `cargo tree` closure exceeds this.
+max-brain-crates = 44

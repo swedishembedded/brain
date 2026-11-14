@@ -31,21 +31,17 @@ use serde_json::Value;
 pub fn run_caps(argv: &[String]) -> i32 {
     let json_out = argv.iter().any(|a| a == "--json");
     // A `brain_arch` id (e.g. "scrfd") resolves through the same table
-    // `brain <arch id> <action>` uses, so discovery and dispatch agree on
-    // what names an architecture. Architectures dispatched through their own
-    // `_cli.rs` module (`crate::resolve::ARCH_HANDLERS`, not
-    // `model_for_arch`'s `ARCH_TO_MODEL`) still register a real catalog
-    // entry for a handful of cases (qwen3, qwen35moe, qwen3omnimoe, lfm2,
-    // qwen3tts, yolov8, zipdepth) -- their catalog id is exactly
-    // `brain/<arch id>`, so that is the second candidate tried when the
-    // first two miss. A filter that is neither is tried as a literal model
-    // id unchanged.
+    // `brain <arch id> <action>` uses (`model_for_arch`'s `ARCH_TO_MODEL`), so
+    // discovery and dispatch agree on what names an architecture. An id that
+    // table lacks may still register a catalog entry named `brain/<arch id>`,
+    // so that is the second candidate tried when the first misses. A filter
+    // that is neither is tried as a literal model id unchanged.
     let filter = argv.iter().find(|a| !a.starts_with("--"));
     let candidates: Vec<String> = match filter {
         Some(m) => {
             let mut c = vec![crate::resolve::model_for_arch(m).map(str::to_string).unwrap_or_else(|| m.clone())];
             if brain_arch::by_id(m).is_some() {
-                c.push(crate::resolve::catalog_id_for_arch_handler(m));
+                c.push(format!("brain/{m}"));
             }
             c
         }

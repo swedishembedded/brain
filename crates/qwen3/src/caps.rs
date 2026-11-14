@@ -710,11 +710,11 @@ fn train_in(scratch: &Path, weights: &str, inv: &Invocation, progress: &mut dyn 
     // The dataset is UNTRUSTED caller input: decoded through the one strict,
     // `deny_unknown_fields` parse (`ChatSample::from_jsonl`) every other
     // caller of this format uses, never a permissive re-read here.
-    let train = read_jsonl_blob(inv, "dataset", scratch)?.ok_or("qwen lora_train: missing required input 'dataset'")?;
+    let train = read_jsonl_blob(inv, "dataset", scratch, "qwen lora_train")?.ok_or("qwen lora_train: missing required input 'dataset'")?;
     if train.is_empty() {
         return Err("qwen lora_train: 'dataset' contains no samples".to_string());
     }
-    let val = read_jsonl_blob(inv, "validation", scratch)?.unwrap_or_default();
+    let val = read_jsonl_blob(inv, "validation", scratch, "qwen lora_train")?.unwrap_or_default();
 
     // The MODEL's vocab (not the tokenizer's): it must match the checkpoint's
     // own embedding/lm_head row count, which is what `prepare_chat_samples`
@@ -834,14 +834,15 @@ fn scratch_dir(tag: &str) -> Result<PathBuf, String> {
 /// Decode one optional JSONL blob into packed [`ChatSample`]s. The bytes are
 /// staged under `scratch` first so parsing goes through the SAME
 /// `ChatSample::from_jsonl` the CLI and bench exports use - one strict
-/// schema, one set of error messages naming the offending line.
-fn read_jsonl_blob(inv: &Invocation, name: &str, scratch: &Path) -> Result<Option<Vec<ChatSample>>, String> {
+/// schema, one set of error messages naming the offending line. `action`
+/// names the caller in an error.
+pub fn read_jsonl_blob(inv: &Invocation, name: &str, scratch: &Path, action: &str) -> Result<Option<Vec<ChatSample>>, String> {
     let Some(blob) = inv.get_blob(name) else {
         return Ok(None);
     };
     let path = scratch.join(format!("{name}.jsonl"));
-    std::fs::write(&path, &blob.bytes).map_err(|e| format!("qwen lora_train: staging '{name}': {e}"))?;
-    let samples = ChatSample::from_jsonl(&path).map_err(|e| format!("qwen lora_train: '{name}': {e}"))?;
+    std::fs::write(&path, &blob.bytes).map_err(|e| format!("{action}: staging '{name}': {e}"))?;
+    let samples = ChatSample::from_jsonl(&path).map_err(|e| format!("{action}: '{name}': {e}"))?;
     Ok(Some(samples))
 }
 

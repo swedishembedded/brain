@@ -43,7 +43,6 @@ mod finetune_cli;
 mod optimize_cli;
 mod prune_cli;
 mod quantize_cli;
-mod qwen35_cli;
 mod resolver_cli;
 mod adapter_directory;
 mod continuous_train;
@@ -386,6 +385,15 @@ GLM-5.2 (MLA + sigmoid noaux_tc MoE)
   brain glmdsa generate --prompt \"...\" [--weights F --max-new N --temp X --top-k K]
   brain glmdsa import --source <hf_dir> --dest glm.safetensors
       # the OpenVINO export and NPU decode are actions of samples/models/glmdsa
+
+QWEN3.8-27B (brain/qwen35: dense hybrid Gated-DeltaNet/GQA decoder; paged serving through `brain serve`)
+  brain import-gguf Qwen3.8-27B-Q8_0.gguf             # a brain checkpoint the store finds, MTP head included
+  brain qwen35 generate --prompt \"...\" [--adapter A --chat true --precision int8 --seed $RANDOM]
+  brain qwen35 finetune --data <dir> --save F [--mode lora --rank N --base-format f32|bf16|nf4|fp8 --activations keep|recompute
+                    --adapter-name NAME --train-precision SPEC --steps N --lr X --seed $RANDOM]
+  brain qwen35 sample_adapter --adapter A --prompt \"...\" [--mode adapter|base|compare --base-format nf4|bf16|fp8|f32]
+  brain qwen35 import --source <hf_dir|f.gguf> --dest F [--weight-format nf4]
+      every parameter: brain qwen35 <action> --help; --weights/--tokenizer name a role
 
 QWEN3.5-35B-A3B (brain/qwen35moe: hybrid Gated-DeltaNet/GQA sparse-MoE decoder)
   brain import-gguf Qwen3.5-35B-A3B-Q8_0.gguf             # a brain checkpoint the store finds

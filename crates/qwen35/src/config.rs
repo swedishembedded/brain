@@ -1303,7 +1303,7 @@ mod tests {
         assert_eq!(gdn(KvTier::INT8), gdn(KvTier::F32));
     }
 
-    /// THE regression this pair of functions exists for: `brain qwen35 infer`
+    /// THE regression this pair of functions exists for: `brain qwen35 generate`
     /// on the fp32 path used to build a completely UNSIZED `Gpu::new(...)`
     /// with no capacity check at all - a real ~108 GB checkpoint would stream
     /// in full and then dispatch a doomed device allocation. Sanity-check

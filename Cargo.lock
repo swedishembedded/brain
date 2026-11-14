@@ -6943,6 +6943,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "sample-models-qwen35"
+version = "5.1.0"
+dependencies = [
+ "brain-invoke",
+ "brain-qwen35",
+]
+
+[[package]]
 name = "sample-models-qwen35moe"
 version = "5.1.0"
 dependencies = [

@@ -48,8 +48,15 @@ closely as one calibrated scale.
 ## Running it
 
 ```bash
-brain qwen35 infer --weights qwen35.safetensors --tokenizer tokenizer.json --prompt "..."
+brain qwen35 generate --weights qwen35.safetensors --tokenizer tokenizer.json --prompt "..." --seed $RANDOM
 ```
+
+The model's actions are `generate` (KV-cache decode; `--adapter FILE` folds a trained LoRA adapter into the weights
+once, `--tokenizer` may also name a GGUF whose embedded tokenizer is used), `finetune` (full or LoRA, see
+[LoRA training](#lora-training)), `sample_adapter` (greedy answers of a streamed base with an adapter overlaid, or
+the base alone, or both) and `import` (a GGUF into a brain checkpoint, MTP head included, or a Hugging Face release
+re-encoded once at a narrow format); `brain qwen35 <action> --help` lists every parameter. The same actions are
+the standalone program `sample-models-qwen35` (`samples/models/qwen35`).
 
 Serving (HTTP/D-Bus, paged continuous batching): drop the checkpoint (and its
 sibling `tokenizer.json`) under the models directory and `brain serve` finds
@@ -60,7 +67,7 @@ server's own brain-checkpoint resident takes the `.safetensors` side only, throu
 `Qwen35Fp32Spec`, because each released GGUF is a model of its own; it holds the
 weights as the file stores them, f32, bf16 or packed int8, and a demoted
 instance keeps only the mapped file). A
-`--weights`/`--tokenizer` flag on `brain qwen35 infer` still names either
+`--weights`/`--tokenizer` flag on `brain qwen35 generate` still names either
 file outright, and prints every real candidate (with the flag to pick it) if
 the models directory holds more than one.
 
@@ -392,18 +399,18 @@ code (`vision_frontend::prompt_embeds`), so the model is trained on the inputs i
 * **Batching.** Rows with and without images may share a batch.
 
 The prepared dataset (`out_dir/prepared`) keeps the images as a sidecar of its token files, and `brain qwen35 finetune
-<prepared dir>` trains from it directly.
+--data <prepared dir>` trains from it directly.
 
 ## LoRA training
 
 Three LoRA paths exist, at very different scales:
 
 - **Frozen bf16 / NF4 base (the 27B on one GPU)** - `brain qwen35 finetune
-  --base-format bf16|nf4|fp8` streams the FP8 checkpoint directory tensor by tensor
+  --mode lora --base-format bf16|nf4|fp8` streams the FP8 checkpoint directory tensor by tensor
   (`crate::fp8_source`, bit-identical to the eager importers, about 1 GiB of host
   memory for the whole 27B) into a frozen device base; the flags and tier limits
   are in [`docs/guides/training/lora.md`](../../guides/training/lora.md#qwen38-27b-brain-qwen35-finetune),
-  and `brain qwen35 sample-adapter` decodes the trained adapter on the same frozen base.
+  and `brain qwen35 sample_adapter` decodes the trained adapter on the same frozen base.
 - **Resident (small/merged checkpoints)** - `crate::finetune::finetune`
   builds a fully resident `Qwen35` with every weight in one host `HashMap`,
   so the checkpoint must fit in RAM as fp32 - not the real 27B checkpoint on

@@ -50,6 +50,15 @@ pub fn finetune(base: &str, dir: &Path, opts: &FitOpts, mode: &Mode, out: &str) 
 /// `resume` with `out` missing (the very first cycle) falls back to the
 /// fresh-start path unchanged.
 pub fn finetune_from(base: &str, dir: &Path, opts: &FitOpts, mode: &Mode, out: &str, resume: bool) -> std::io::Result<(f32, f32)> {
+    let report = finetune_from_watched(base, dir, opts, mode, out, resume, &mut step_progress())?;
+    Ok((report.initial_loss, report.final_loss.unwrap_or(report.initial_loss)))
+}
+
+/// [`finetune_from`] with `on_step` seeing every completed step; it returns
+/// false to stop the run at that step boundary (a served action's
+/// cancellation). The checkpoint at `out` is written either way, with the
+/// steps that ran.
+pub fn finetune_from_watched(base: &str, dir: &Path, opts: &FitOpts, mode: &Mode, out: &str, resume: bool, on_step: &mut dyn FnMut(&model::StepReport) -> bool) -> std::io::Result<model::FitReport> {
     // Every start streams its tensors from the file through the bounded reader: the host never holds the model.
     let (cfg, init): (Qwen35Config, Box<dyn checkpoint::TensorSource>) = if resume && Path::new(out).exists() {
         // Resume: architecture + weights come from the checkpoint being
@@ -87,8 +96,8 @@ pub fn finetune_from(base: &str, dir: &Path, opts: &FitOpts, mode: &Mode, out: &
     let (train, val, bcfg, _vocab, itos) = model::load_dataset_with_images(dir, opts)?;
     crate::vision_sft::attach_for_dataset(&m, Path::new(base), dir)?;
     let obj = model::causal_lm_examples::<Qwen35>(train, val, bcfg, itos);
-    let (report, _) = model::fit_controlled(m, obj, opts, Some(Path::new(out)), step_progress_control(&mut step_progress()))?;
-    Ok((report.initial_loss, report.final_loss.unwrap_or(report.initial_loss)))
+    let (report, _) = model::fit_controlled(m, obj, opts, Some(Path::new(out)), step_progress_control(on_step))?;
+    Ok(report)
 }
 
 fn unsupported_precision(why: String) -> std::io::Error {
@@ -257,7 +266,7 @@ pub fn adapter_card(base: &Path, naming: &AdapterNaming) -> Result<(String, Stri
     let base_id = release.clone().unwrap_or(file);
     let is_adapter_ref = |id: &str| brain_modelref::ModelRef::parse(id).is_ok_and(|r| r.adapter().is_some());
     let id = match (&naming.id, &naming.name) {
-        (Some(_), Some(_)) => return Err("--adapter-id and --name name the same thing; give one".to_string()),
+        (Some(_), Some(_)) => return Err("adapter_id and adapter_name name the same thing; give one".to_string()),
         (Some(id), None) => {
             if !is_adapter_ref(id) {
                 return Err(format!("adapter id {id:?} is not an adapter reference: <vendor>/<repo>[-QUANT]:<owner>:<name>:<tag>"));
@@ -273,7 +282,7 @@ pub fn adapter_card(base: &Path, naming: &AdapterNaming) -> Result<(String, Stri
                 id
             }
             None if name.is_none() => "brain/qwen35-lora".to_string(),
-            None => return Err(format!("base {base:?} has no <vendor>/<repo> release id to derive the adapter's id from: name it with --adapter-id <vendor>/<repo>:<owner>:<name>:<tag>")),
+            None => return Err(format!("base {base:?} has no <vendor>/<repo> release id to derive the adapter's id from: name it with adapter_id <vendor>/<repo>:<owner>:<name>:<tag>")),
         },
     };
     Ok((id, base_id))
@@ -308,7 +317,7 @@ fn streamed_train_opts(run: &StreamedRun, batch: u32, block: u32, mtp: bool) -> 
         return Err("a bf16 residual stream is not available on an MTP build".into());
     }
     if (bf16_residuals || mlp_rows.is_some()) && !run.recompute {
-        return Err("a bf16 residual stream and chunked MLP rows need --recompute on".into());
+        return Err("a bf16 residual stream and chunked MLP rows need recompute on".into());
     }
     let saved = match (run.recompute, bf16_residuals) {
         (false, _) => SavedPolicy::Keep,
@@ -331,24 +340,44 @@ fn streamed_train_opts(run: &StreamedRun, batch: u32, block: u32, mtp: bool) -> 
 /// as fp32 optimiser state on the device, which is what the resident
 /// [`finetune`] path is for.
 pub fn finetune_streamed(base: &Path, dir: &Path, opts: &FitOpts, mode: &Mode, out: &str, resume: bool, run: &StreamedRun) -> std::io::Result<(f32, f32)> {
-    finetune_streamed_named(base, dir, opts, mode, out, resume, run, &AdapterNaming::default())
+    let (card_id, base_id) = adapter_card(base, &AdapterNaming::default()).map_err(|why| std::io::Error::new(std::io::ErrorKind::InvalidInput, why))?;
+    let job = StreamedFinetune { base, dir, opts, mode, out, resume, run, card_id: &card_id, base_id: &base_id };
+    let report = job.run_watched(&mut step_progress())?;
+    Ok((report.initial_loss, report.final_loss.unwrap_or(report.initial_loss)))
 }
 
-/// [`finetune_streamed`] writing the adapter's card under `naming`
-/// ([`adapter_card`]); a naming that cannot make a card is refused before the
-/// base is loaded.
-#[allow(clippy::too_many_arguments)]
-pub fn finetune_streamed_named(base: &Path, dir: &Path, opts: &FitOpts, mode: &Mode, out: &str, resume: bool, run: &StreamedRun, naming: &AdapterNaming) -> std::io::Result<(f32, f32)> {
-    let (card_id, base_id) = adapter_card(base, naming).map_err(|why| std::io::Error::new(std::io::ErrorKind::InvalidInput, why))?;
-    let Mode::Lora { rank, alpha, tuning } = mode else {
-        return Err(unsupported(format!("a {} base is frozen: only LoRA trains on it", model::policy::format_name(run.dtype()))));
-    };
-    let resume_from = resume.then(|| Path::new(out)).filter(|p| p.exists());
-    let mut progress = step_progress();
-    let (report, m) = finetune_lora_tuned(base, dir, opts, *rank, *alpha, *tuning, resume_from, run, step_progress_control(&mut progress))?;
-    let provenance = checkpoint::st::TrainingProvenance::on_base("sft_lora", opts.seed, gpu_core::backend_name(), brain_modelstore::fetch::base_digest_sidecar(base)?);
-    crate::lora::save_adapter_with_lineage(out, &m, &card_id, &base_id, None, Some(provenance))?;
-    Ok((report.initial_loss, report.final_loss.unwrap_or(report.initial_loss)))
+/// One streamed-base LoRA run: the frozen base at `base`, the prepared
+/// dataset at `dir`, the adapter written to `out` under the card `card_id`
+/// that records `base_id` as its base ([`adapter_card`] derives both from a
+/// base path and an [`AdapterNaming`]; a caller that files the adapter in the
+/// model store supplies the store's own).
+pub struct StreamedFinetune<'a> {
+    pub base: &'a Path,
+    pub dir: &'a Path,
+    pub opts: &'a FitOpts,
+    pub mode: &'a Mode,
+    pub out: &'a str,
+    /// Continue the adapter already at `out`, when there is one.
+    pub resume: bool,
+    pub run: &'a StreamedRun,
+    pub card_id: &'a str,
+    pub base_id: &'a str,
+}
+
+impl StreamedFinetune<'_> {
+    /// Train, calling `on_step` after every optimizer step; it returns false to
+    /// stop at that step boundary. The adapter is written either way, with the
+    /// steps that ran.
+    pub fn run_watched(&self, on_step: &mut dyn FnMut(&model::StepReport) -> bool) -> std::io::Result<model::FitReport> {
+        let Mode::Lora { rank, alpha, tuning } = self.mode else {
+            return Err(unsupported(format!("a {} base is frozen: only LoRA trains on it", model::policy::format_name(self.run.dtype()))));
+        };
+        let resume_from = self.resume.then(|| Path::new(self.out)).filter(|p| p.exists());
+        let (report, m) = finetune_lora_tuned(self.base, self.dir, self.opts, *rank, *alpha, *tuning, resume_from, self.run, step_progress_control(on_step))?;
+        let provenance = checkpoint::st::TrainingProvenance::on_base("sft_lora", self.opts.seed, gpu_core::backend_name(), brain_modelstore::fetch::base_digest_sidecar(self.base)?);
+        crate::lora::save_adapter_with_lineage(self.out, &m, self.card_id, self.base_id, None, Some(provenance))?;
+        Ok(report)
+    }
 }
 
 fn unsupported(why: String) -> std::io::Error {
@@ -404,7 +433,7 @@ fn build_lora_model(base: &Path, opts: &FitOpts, rank: u32, alpha: f32, tuning: 
     let tokens = opts.batch_size as u64 * opts.block_size as u64;
     if recompute && opts.batch_size > 1 && tokens > LONG_STEP_TOKENS as u64 {
         return Err(unsupported(format!(
-            "batch {} x seq-len {} is {tokens} tokens per micro-step; a {} base trains up to {LONG_STEP_TOKENS} tokens per micro-step in a batch wider than one. Use --batch 1 with --grad-accum {} for the same effective batch",
+            "batch {} x block {} is {tokens} tokens per micro-step; a {} base trains up to {LONG_STEP_TOKENS} tokens per micro-step in a batch wider than one. Use --batch 1 with --grad-accum {} for the same effective batch",
             opts.batch_size,
             opts.block_size,
             model::policy::format_name(dtype),
@@ -671,7 +700,7 @@ mod tests {
         assert!(streamed_train_opts(&run(true, seg), 2, 128, false).unwrap_err().contains("batch of one"));
         let res = LongSeqOverrides { bf16_residuals: Some(true), ..Default::default() };
         assert!(streamed_train_opts(&run(true, res), 1, 128, true).unwrap_err().contains("MTP"));
-        assert!(streamed_train_opts(&run(false, res), 1, 128, false).unwrap_err().contains("--recompute on"));
+        assert!(streamed_train_opts(&run(false, res), 1, 128, false).unwrap_err().contains("recompute on"));
     }
 
     /// A fresh adapter must be servable as written: its card id is an adapter
@@ -701,7 +730,7 @@ mod tests {
             assert!(why.contains(bad) && why.contains("<vendor>/<repo>"), "{why}");
         }
         let both = AdapterNaming { id: Some("a/b:o:n:t".into()), name: Some("x".into()) };
-        assert!(adapter_card(base, &both).unwrap_err().contains("--adapter-id and --name"));
+        assert!(adapter_card(base, &both).unwrap_err().contains("adapter_id and adapter_name"));
     }
 
     /// A base that is a bare file has no release id to derive from: an adapter
@@ -710,7 +739,7 @@ mod tests {
     fn a_base_without_a_release_id_needs_an_explicit_name_to_be_servable() {
         let base = Path::new("base.safetensors");
         assert_eq!(adapter_card(base, &AdapterNaming::default()).unwrap(), ("brain/qwen35-lora".to_string(), "base.safetensors".to_string()));
-        assert!(adapter_card(base, &AdapterNaming { name: Some("facts".into()), ..Default::default() }).unwrap_err().contains("--adapter-id"));
+        assert!(adapter_card(base, &AdapterNaming { name: Some("facts".into()), ..Default::default() }).unwrap_err().contains("adapter_id"));
         assert!(adapter_card(base, &AdapterNaming { id: Some("local/base:lab:facts:v1".into()), ..Default::default() }).is_ok());
     }
 

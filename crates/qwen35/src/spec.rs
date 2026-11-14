@@ -32,8 +32,8 @@
 //!
 //! A resolved `weights` is not interchangeable at the CONSUMING end just
 //! because it is one role: `crate::caps::Qwen35Provider`'s in-process
-//! resident and `crates/cli/src/qwen35_cli.rs::infer` only ever call
-//! `checkpoint::load` (safetensors-only, panics on a GGUF), so both refuse a
+//! resident (its `generate` action) only ever calls
+//! `checkpoint::load` (safetensors-only, panics on a GGUF), so it refuses a
 //! resolved `.gguf` path cleanly before reaching that call rather than crash;
 //! `crates/catalog/src/resident_qwen35.rs::Qwen35Resident::from_assembly` and
 //! `crate::int8_gguf_resident::Qwen35GgufResident` are the two consumers that

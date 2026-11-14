@@ -88,7 +88,7 @@ its definition, the on-policy first step and the supervised parity of a record w
       is what decides whether `clip_eps` 0.2 is loose enough for them), (2) show the mean log-probability of positive-
       and negative-advantage actions moving apart over 20-40 steps on `score_tokens_qwen35`, and (3) record the
       peak device memory and the seconds of the start-of-run pass per 1000 tokens.
-- [x] `brain finetune --lora RANK --policy-gradient` reads the advantage and behaviour log-probabilities of the records (CLI and SDK are one entry point).
+- [ ] `brain qwen35 finetune` (the served action) reads no advantage sidecar; the SDK is the one entry point.
 - [x] Every trainer that declares `ChatTrainer::POLICY_GRADIENT` takes it: `qwen35`, `qwen3` (95c1a48d4) and `ricursive`; an architecture that does not is refused by name. Held-out and monitoring selection are refused for these runs.
 - [x] Lazy, cached preparation: the start-of-run pass, the reference (KL) pass and the teacher pass used to be one
       forward per example over the whole dataset before step 1 (a 5890-record, 265 MB agent-call set sat over an hour

@@ -27,7 +27,7 @@ changes an item. Dated measurements live in `.agents/knowledge/` (240, 250-252, 
 - Streamed FP8 checkpoint source for qwen35 (`fp8_source`, `base_source`): host peak
   about 1.1-1.5 GiB for the whole 27B (851 tensors, 107.6 GB of f32 streamed in
   82-184 s). CLI flags `--base-dtype f32|bf16|nf4`, `--lora-rank`, `--lora-alpha`,
-  `--seq-len`, `--recompute on|off` on `brain qwen35 finetune` (training on a bf16/nf4
+  `--seq-len`, `--recompute true|false` on `brain qwen35 finetune` (training on a bf16/nf4
   base returns an explicit unsupported error until the trainer tier below lands).
 - Flash attention trio trains at head_dim 256 (parameterised, qwen3 behaviour
   unchanged); the GQA mixer saves LSE instead of T x T probabilities.
@@ -42,7 +42,7 @@ changes an item. Dated measurements live in `.agents/knowledge/` (240, 250-252, 
 - Frozen-base tiers for the qwen35 trainer: bf16 and NF4 bases train LoRA with
   per-layer recompute, the chunked LM head, a bf16 embedding table and head,
   flash attention, segmented Gated-DeltaNet layers, a bf16 residual stream and an MLP in
-  token chunks (`TrainOpts`); `brain qwen35 finetune --base-dtype bf16|nf4` streams the
+  token chunks (`TrainOpts`); `brain qwen35 finetune --mode lora --base-format bf16|nf4` streams the
   FP8 checkpoint (host peak below 7 GiB). Real 27B steps ran on one card for both tiers.
 - The shared NF4 weight type and the shared chunked head loss; the generic training
   capability layer (`TokenObjectives`, `LoraSites`, architecture-table dispatch,
@@ -50,7 +50,7 @@ changes an item. Dated measurements live in `.agents/knowledge/` (240, 250-252, 
 
 ## Next (dependency order)
 
-- Adapter on the real 27B in serving: `brain qwen35 sample-adapter` shows a trained adapter changing
+- Adapter on the real 27B in serving: `brain qwen35 sample_adapter` shows a trained adapter changing
   the greedy answer on the NF4 base (knowledge 280, Q6 is partial: the facts change, but nothing was served and
   the control question was overwritten, so retention is not shown); serving it still needs a LoRA bank or an on-device fold on the resident engine, and the
   decode is repeated full forwards (no KV cache).

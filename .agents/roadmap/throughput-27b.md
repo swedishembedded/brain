@@ -647,7 +647,7 @@ These run in the same commit as each item. Build through the Makefile; never run
   `--gdn-segment 128 --mlp-rows 512` for continuity with section 1.2).
 - **W8K (headline):** `--layers 64 --tokens 8192` with the same flags.
 - **W32K:** `--layers 64 --tokens 32768 --base nf4` (bf16 does not fit 32K).
-- **Real:** `brain qwen35 finetune <8 rows of 8192 tokens> --base-dtype nf4|bf16 --batch 1
+- **Real:** `brain qwen35 finetune <8 rows of 8192 tokens> --base-format nf4|bf16 --batch 1
   --seq-len 8192 --steps 4 --lora-rank 16`, counting tokens/s over steps 2-4 (excluding the
   161 s load).
 

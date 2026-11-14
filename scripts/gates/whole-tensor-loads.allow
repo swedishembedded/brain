@@ -10,7 +10,6 @@
 crates/chronos2/src/model.rs	2	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/cli/src/flops_cli.rs	2	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/cli/src/pid_cli.rs	4	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
-crates/cli/src/qwen35_cli.rs	2	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/cli/src/qwen35moe_cli.rs	2	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/clip/src/import.rs	1	offline importer: one whole tensor per call into a writer sink (knowledge 337 class T); the bounded form is the packed reader
 crates/diamond/src/import.rs	1	offline importer: one whole tensor per call into a writer sink (knowledge 337 class T); the bounded form is the packed reader

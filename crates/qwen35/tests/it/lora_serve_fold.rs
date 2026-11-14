@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! The path `brain qwen35 infer --adapter FILE` takes to serve a LoRA
+//! The path `brain qwen35 generate --adapter FILE` takes to serve a LoRA
 //! adapter: fold it into the base tensors (`qwen35::lora::fold_adapter_into`,
 //! already proven exact against the live unfolded forward by
 //! `crates/qwen35/tests/it/lora_adapter_file.rs`), then build the SAME
-//! `Qwen35::new_on` KV-cache-capable model `brain qwen35 infer` already uses
+//! `Qwen35::new_on` KV-cache-capable model `brain qwen35 generate` already uses
 //! for a plain (non-adapted) checkpoint -- no separate decode-only
 //! constructor exists for this crate the way `qwen3::Qwen::from_tensors_
 //! decode` does, because `new_on` already IS the decode/KV-cache path here.
@@ -68,7 +68,7 @@ fn folded_serve_matches_live_training_and_diverges_from_the_unadapted_base() {
     qwen35::lora::save_adapter(adapter_path.to_str().unwrap(), &trained, "test/adapter", "test/base", None).unwrap();
 
     // Exactly what `checkpoint::load(weights).by_role("")` returns, feeding
-    // `crates/cli/src/qwen35_cli.rs`'s `infer` -- the real serving load path.
+    // `qwen35::caps`'s `generate` -- the real serving load path.
     let mut base_tensors: HashMap<String, Vec<f32>> = HashMap::new();
     for (name, _) in trained.cfg.param_list() {
         if !name.ends_with(".lora_a") && !name.ends_with(".lora_b") {
@@ -83,7 +83,7 @@ fn folded_serve_matches_live_training_and_diverges_from_the_unadapted_base() {
     let live_greedy = qwen35::sample::generate_kv(&trained, prompt, 6, 0.0, 0, 1.0, &[], &mut Rng::new(data::rng::random_seed()));
 
     // The folded-serve path -- `Qwen35::new_on` over the folded tensor map,
-    // same constructor `brain qwen35 infer` uses for a plain checkpoint.
+    // same constructor `brain qwen35 generate` uses for a plain checkpoint.
     let served_cfg = Qwen35Config::tiny(); // lora: None -- a plain, folded inference model
     let served = Qwen35::new_on(Gpu::new(pipelines()), served_cfg, 1, t, &base_tensors);
     let served_greedy = qwen35::sample::generate_kv(&served, prompt, 6, 0.0, 0, 1.0, &[], &mut Rng::new(data::rng::random_seed()));
