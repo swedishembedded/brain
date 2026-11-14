@@ -91,7 +91,7 @@ Rank r = 3 and scale s = 2/3 (alpha = 2). One generator seeded 34501613706254114
 | quantity | value |
 |---|---:|
 | largest deviation over all 144 entries | passes (below 1e-6) |
-| |dA| and |dB| (Frobenius) at B = 0, A from the rank-3 start of the sweep | 0 and 0.115 |
+| |dA| and |dB| (Frobenius) at B = 0 with s = 2/3 (alpha = 2, r = 3), A the rank-3 start of the sweep | 0 and 0.115 |
 <!-- /worked -->
 
 The deviation passes its criterion at all 144 entries. The second row shows the start described above: with $\mathbf{B} = \mathbf{0}$ the gradient of $\mathbf{A}$ is exactly zero and that of $\mathbf{B}$ is not, and the first Adam step (about the rate times the sign of the gradient, as in Chapter 3) therefore moves only $\mathbf{B}$.
@@ -110,7 +110,7 @@ The task of the first table, 300 Adam steps (beta1 0.9, beta2 0.999, epsilon 1e-
 | every weight | 512 | 100.00 | below 1e-9 | - |
 <!-- /worked -->
 
-The adapters sit on the floors of the first table, rank 1 at 0.04716, rank 2 at 0.003753, rank 4 at 0.002601 and rank 8 at 0.001037. The trained values are a little under the Frobenius floors at ranks 1, 2 and 8 and level with it at rank 4 (0.002601 against 0.0026), for the reason given above. The full run goes to zero, which an adapter cannot: its rank-8 pair is 75 percent as large as the weight and is still short of it. What the table is for is the second row. Rank 2, 96 numbers, reaches 0.003753 where the weight's 512 numbers reach 0 (below 1e-9), and what is lost between them is the small unstructured part of the change, which no rank below 16 can hold. Whether that part matters is a question about the task and not about the method.
+The adapters sit on the floors of the first table, rank 1 at 0.04716, rank 2 at 0.003753, rank 4 at 0.002601 and rank 8 at 0.001037. The trained values are a little under the Frobenius floors at ranks 1, 2 and 8 and a hair above it at rank 4 (0.002601 against 0.0026, 0.04 percent more), for the reason given above. The full run goes to zero, which an adapter cannot: its rank-8 pair is 75 percent as large as the weight and is still short of it. What the table is for is the second row. Rank 2, 96 numbers, reaches 0.003753 where the weight's 512 numbers reach 0 (below 1e-9), and what is lost between them is the small unstructured part of the change, which no rank below 16 can hold. Whether that part matters is a question about the task and not about the method.
 
 ![The loss reached by an adapter against its rank, beside the floor of the best change of that rank: the two curves nearly coincide, and the loss falls sharply to rank 2 and slowly after.](img/rank-sweep.svg)
 
@@ -201,7 +201,7 @@ The sum and the concatenated form agree to float64 rounding and do not depend on
 Merging is exact in a dense base, and it can silently fail in a quantized one. The sum $\mathbf{W}_0 + s\mathbf{B}\mathbf{A}$ must be stored in whatever format the base has, and a quantized format rounds. The delta of a trained adapter is small: in an 8-bit group the step is the group's largest magnitude over 127, and a delta much below one step does not survive rounding. (In a dense fp32 base the sum is rounded to the fp32 grid, far finer than any delta that matters; in a narrow float such as bf16 the argument of Chapter 2 applies, and an update below half a gap is lost in the same way.) The worked layer has an 8-bit base, groups of 32, one group per row, and the rank-2 adapter trained on it. The adapter is multiplied by a strength so that its entries are a stated fraction of one step.
 
 <!-- worked: peft.fold_into_quantized -->
-The int8 base of the task (groups of 32, one per row, scale = largest magnitude / 127) and the rank-2 adapter trained on it with the rank-sweep recipe (s = 1), multiplied by a strength. 'Delta in steps' is the root mean square of one entry of strength x B A divided by the mean step of the base's groups. The fold re-encodes W + strength x B A with the same rule and subtracts the decoded base; 'same code' is the percent of the 512 weights whose integer code is the old one, and the next column the Frobenius norm of (what survived - what was intended) over the norm of what was intended. The runtime route computes y = W x + strength B (A x) with W the decoded base; its last column is the largest difference from (W + strength B A) x over the first 16 inputs, in float64. The strengths multiply the adapter, which makes the 'delta in steps' column the dial.
+The int8 base Q of the task (W0 quantized in groups of 32, one group per row, scale = largest magnitude / 127, so Q is the decoded matrix) and the rank-2 adapter trained on it with the rank-sweep recipe (s = 1, the task's original target W*, not Q + the change), multiplied by a strength. 'Delta in steps' is the root mean square of one entry of strength x B A divided by the mean step of the base, the mean over the 16 rows of their scale. The fold re-encodes Q + strength x B A (the W of the next sentence is Q) with the same rule and subtracts the decoded base; 'same code' is the percent of the 512 weights whose integer code is the old one, and the next column the Frobenius norm of (what survived - what was intended) over the norm of what was intended. The runtime route computes y = W x + strength B (A x) with W the decoded base; its last column is the largest difference from (W + strength B A) x over the first 16 inputs, in float64. The strengths multiply the adapter, which makes the 'delta in steps' column the dial.
 
 | strength | delta in steps | weights with the same code (percent) | relative error of the fold | largest output difference of the runtime route |
 |---|---:|---:|---:|---:|
@@ -232,7 +232,7 @@ function bank_forward(W0: array<real>[m, n],
                       X: array<real>[R, n]) -> array<real>[R, m]:
     require len(A_bank) == len(ranks) and len(slots) == R
     Y = matmul(X, transpose(W0))
-    for i in 0 .. R - 1:
+    for i in 0 .. R:
         z = slots[i]
         if z < len(ranks):                    # a slot outside the bank: no adapter
             r = ranks[z]
@@ -244,7 +244,7 @@ function bank_forward(W0: array<real>[m, n],
 The example has a bank of three adapters of ranks 2, 4 and 1 padded to $r_{\max} = 4$, scales $\alpha/r_k$ with $\alpha = 4$, and a batch of six rows with slots 0, 2, none, 1, 0, 2.
 
 <!-- worked: peft.bank_semantics -->
-The 16 x 32 layer W0 and a bank of three adapters whose ranks are 2, 4 and 1, padded to r_max = 4 rows. One generator seeded 5884249008025941678 (seed_of 'peft.bank') draws, for slot 0, 1, 2 in turn, A_k (r_k x 32, row-major) and then B_k (16 x r_k, row-major), every entry 0.2 times normal(), and after the three slots draws the six input rows (32 numbers each, row-major). The bank stores A_k padded to r_max rows and the transposed (alpha / r_k) B_k, alpha = 4, padded the same way; in the 'poisoned' copy every padding row holds 1e6 instead of zero. A batch of six rows carries the slot vector [0, 2] + [none] + [1, 0, 2]; row i computes t = A_k x_i over the first r_k rows of its slot and adds t B_k^T (scaled) to W0 x_i, and a row whose slot is outside the bank adds nothing. The 'difference' column is the largest entry of |bank row - (merged weight) x_i| in float64, where the merged weight is W0 + (alpha / r_k) B_k A_k (W0 for a row with no adapter); the last column asks whether the poisoned padding changes any bit of the row.
+The 16 x 32 layer W0 of the task (the first 512 draws of the generator seeded seed_of 'peft.task', each normal() times 0.5, row-major) and a bank of three adapters whose ranks are 2, 4 and 1, padded to r_max = 4 rows. One generator seeded 5884249008025941678 (seed_of 'peft.bank') draws, for slot 0, 1, 2 in turn, A_k (r_k x 32, row-major) and then B_k (16 x r_k, row-major), every entry 0.2 times normal(), and after the three slots draws the six input rows (32 numbers each, row-major, each normal() with no factor). The bank stores A_k padded to r_max rows and the transposed (alpha / r_k) B_k, alpha = 4, padded the same way; in the 'poisoned' copy every padding row holds 1e6 instead of zero. A batch of six rows carries the slot vector [0, 2] + [none] + [1, 0, 2]; row i computes t = A_k x_i over the first r_k rows of its slot and adds t B_k^T (scaled) to W0 x_i, and a row whose slot is outside the bank adds nothing. The 'difference' column is the largest entry of |bank row - (merged weight) x_i| in float64, where the merged weight is W0 + (alpha / r_k) B_k A_k (W0 for a row with no adapter); the last column asks whether the poisoned padding changes any bit of the row.
 
 | row | slot | rank used | difference from the merged weight | same bits with poisoned padding |
 |---:|---:|---:|---:|---:|
@@ -261,7 +261,7 @@ Each row matches the product with its own merged weight, and the row with no ada
 One more thing depends on which adapter a row used. A language model keeps, for the tokens it has already read, the keys and values that its attention layers computed, so that a new request that begins with the same prompt can reuse them (a prefix cache). Those keys and values are products of the weights. A token's key is $\mathbf{W}_k\mathbf{x}$ with whichever $\mathbf{W}_k$ the row's adapter makes, and the cache entry of one adapter is wrong under another.
 
 <!-- worked: peft.kv_difference -->
-The key a token gets from a layer, y = W x, with the first input row of the bank example as x and the 16 x 32 layer as the key projection of one position, once without an adapter and once with each adapter of the bank merged in. The table gives |key with the adapter - key of the base| over |key of the base| (Euclidean norms).
+The key a token gets from a layer, y = W x, with the first input row of the bank example (as drawn there, entries normal()) as x and the 16 x 32 layer W0 of the task (as in the bank example) as the key projection of one position, once without an adapter and once with each adapter of the bank merged in. The table gives |key with the adapter - key of the base| over |key of the base| (Euclidean norms).
 
 | adapter | relative change of the cached key |
 |---|---:|

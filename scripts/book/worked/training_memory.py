@@ -301,7 +301,7 @@ def recompute_exact():
             "of both weight matrices of every block, whose 64-bit pattern differs from the keep run.\n\n")
     t1 = _table(["policy", "caches alive", "bit-identical loss", "gradient entries that differ"], rows, "lrrr")
     mid = ("\n\nThe same stack when an update has already changed one weight (W1 of block 3, entry [1][2], by +0.05) after the forward "
-           "and before the backward: the relative distance, in the Euclidean norm of all gradient entries, of the resulting gradient "
+           "and before the backward, in both rows with recompute in segments of k = 1 (the keep row holds every block's X and A): the relative distance, in the Euclidean norm of all gradient entries, of the resulting gradient "
            "from the gradient of the unchanged weights, and from the gradient a fresh forward and backward at the changed weights "
            "would give.\n\n")
     t2 = _table(["backward after the early update", "distance from the old point's gradient", "distance from the new point's gradient"],
@@ -422,13 +422,14 @@ def boundary_rounding():
         mincos = min(cos([v for r in a for v in r], [v for r in b for v in r]) for a, b in mats)
         t2rows.append([kind, f"{abs(loss - loss0) / abs(loss0):.3g}", f"{cos(_flat(g), v0):.6f}", f"{mincos:.6f}"])
     head = (f"Three rows of 8 numbers, drawn from the generator seeded {bookrng.seed_of(name)} (seed_of '{name}') as normal() in order, row "
-            "by row; entry 3 of row 2 is then multiplied by 20 (an outlier). Each row is stored in bf16 (nearest even) or fp8 (the "
-            "row's own scale s = amax / 448, E4M3 saturating) and read back. 'relative error' is the largest |error| / |x| over the "
+            "by row; entry 3 of row 2 (counting from 0) is then multiplied by 20, so it is the largest entry of its row. Each row is stored "
+            "in bf16 (nearest even) or fp8 (the row's own scale s = amax / 448, then E4M3 rounding to nearest even with a subnormal "
+            "step of 2^-9 and saturation at 448, then multiplication by s) and read back. 'relative error' is the largest |error| / |x| over the "
             "row; 'error / row max' is the largest |error| / amax.\n\n")
     t1 = _table(["row", "amax", "bf16, relative error", "bf16, error / row max", "fp8, relative error", "fp8, error / row max"],
                 t1rows, "lrrrrr")
     mid = (f"\n\nA stack of {blocks} blocks (D = {d}, F = {f}, n = {n}), drawn as in the first table from the generator seeded "
-           f"{bookrng.seed_of(name + '.stack')} (seed_of '{name}.stack') with entries of W1 and W2 scaled by 0.25 in place of 0.5, run with recompute in segments of 1. Each block's input is "
+           f"{bookrng.seed_of(name + '.stack')} (seed_of '{name}.stack') with entries of W1 and W2 scaled by 0.25 in place of 0.5 (each entry normal() times 0.25, W1 then W2 of block 0, then of block 1, and so on, then the {n} x {d} entries of X as normal() times 1 in row-major order), run with recompute in segments of 1. Each block's input is "
            "stored in the format and the block reads it back, in the forward and in the rebuild, so the forward continues from the "
            "rounded value. Compared with the fp32 boundaries: the relative change of the loss, the cosine between the two complete "
            "gradients, and the smallest cosine over the 12 weight matrices.\n\n")
@@ -664,8 +665,10 @@ def state_maps():
     head = ("The largest relative error, in percent, of encoding a value x with ratio rho = x / (block maximum) to nearest and "
             "decoding it, searched over 400 values evenly spaced in the logarithm from rho to 2 rho. A block's scale is its maximum, "
             "so rho <= 1. 'zero' marks a value that decodes as 0 (error 100 percent); 'raised' marks a value below the smallest level "
-            "that the encoder raises to it. Non-negative slots have 255 positive levels (codes 1 to 255; the encoder clamps a positive "
-            "value up to code 1, so a decode is never zero); signed slots have a sign and 127 magnitude levels (code 0 is zero). "
+            "that the encoder raises to it. A value above the scale is capped at it, and the 400 values include both ends, x = rho 2^(j / 399) for j = 0 .. 399. "
+            "The fourth-root and log maps of the non-negative slots have 255 positive levels (codes 1 to 255; their encoder clamps a "
+            "positive value up to code 1, so a decode is never zero); the linear map is the unclamped baseline, whose code 0 decodes as "
+            "zero, so a value below half a level is lost; signed slots have a sign and 127 magnitude levels (code 0 is zero). "
             "'linear' puts level q at q / 255 (or q / 127) of the scale; 'fourth-root' puts it at (q / 255)^4, 'sqrt' at (q / 127)^2, "
             "and 'log' at 2^((q - 255) / 16) (16 levels an octave; signed: 2^((q - 127) / 8), 8 levels an octave).\n\n")
     return (head + "Second-moment slots (non-negative):\n\n" + _table(["rho", "linear", "fourth-root", "log"], non, "lrrr")
@@ -706,7 +709,8 @@ def block_codes():
             f"{bookrng.seed_of(name)} (seed_of '{name}'), in the order a_0, b_0, a_1, b_1, ...; they span |g| from {gmin:.3g} to {gmax:.3g}. "
             "After one Adam step from zero (bias-corrected) the first moment is m = g and the second moment v = g^2, so the exact update "
             "m / (sqrt(v) + epsilon) is sign(g), of size 1 (epsilon = 1e-8). Each slot is encoded to nearest with its own block scale "
-            "(the block maximum) and decoded, and the update is formed from the decoded values.\n\n")
+            "(the block maximum) and decoded, and the update is formed from the decoded values. The linear rows are the unclamped baseline of the previous table: a value that "
+            "rounds to code 0 decodes as 0, while the fourth-root and log maps raise a positive value to code 1.\n\n")
     return head + _table(["codes", "m decoded as 0", "v decoded as 0", "updates farther than 0.1 from sign(g)",
                           "largest |update|"], rows, "lrrrr")
 
@@ -807,10 +811,10 @@ def int8_training():
             "the counter draw of Chapter 2, u = counter_uniform(key, i) for weight i, with key = mix32(2 t + slot) at step t = 1, 2, ... and "
             "slot 0 for the first moment, 1 for the second. The cells are the loss after steps 10, 50, 100 and 300. "
             + stable.RULE + " In the nudged runs weight 0 starts at the stated tiny amount instead of 0.\n\n")
-    start = 0.5 * sum((10.0 ** (-1.0 + 2.0 * i / (Q_N - 1))) * t * t for i, t in enumerate(
-        [bookrng.generator("training_memory.int8_training").normal() for _ in range(Q_N)]))
+    g0 = bookrng.generator("training_memory.int8_training")
+    start = 0.5 * sum((10.0 ** (-1.0 + 2.0 * i / (Q_N - 1))) * g0.normal() ** 2 for i in range(Q_N))
     return head + _table(["moments", "loss after step 10", "after step 50", "after step 100", "after step 300"], rows, "lrrrr") + \
-        f"\n\nThe loss at w = 0 is {start:.2f}."
+        f"\n\nThe loss at w = 0, sum_i h_i t_i^2 / 2, is {start:.2f}."
 
 
 # ------------------------------------------------------------------ 10. the update in tiles

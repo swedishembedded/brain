@@ -158,7 +158,7 @@ A stack of 6 blocks (D = 4, F = 8, n = 3) drawn as in the first table from the g
 | recompute, segments of 2 | 2 | yes | 0 of 384 |
 | recompute, segments of 3 | 3 | yes | 0 of 384 |
 
-The same stack when an update has already changed one weight (W1 of block 3, entry [1][2], by +0.05) after the forward and before the backward: the relative distance, in the Euclidean norm of all gradient entries, of the resulting gradient from the gradient of the unchanged weights, and from the gradient a fresh forward and backward at the changed weights would give.
+The same stack when an update has already changed one weight (W1 of block 3, entry [1][2], by +0.05) after the forward and before the backward, in both rows with recompute in segments of k = 1 (the keep row holds every block's X and A): the relative distance, in the Euclidean norm of all gradient entries, of the resulting gradient from the gradient of the unchanged weights, and from the gradient a fresh forward and backward at the changed weights would give.
 
 | backward after the early update | distance from the old point's gradient | distance from the new point's gradient |
 |---|---:|---:|
@@ -216,7 +216,7 @@ With 32 boundaries every rung is smaller than the one before: bf16 halves the bo
 The rounding itself is measured on two things, the rounding of one row and the effect on a whole step.
 
 <!-- worked: training_memory.boundary_rounding -->
-Three rows of 8 numbers, drawn from the generator seeded 15352669940719103639 (seed_of 'training_memory.boundary_rounding') as normal() in order, row by row; entry 3 of row 2 is then multiplied by 20 (an outlier). Each row is stored in bf16 (nearest even) or fp8 (the row's own scale s = amax / 448, E4M3 saturating) and read back. 'relative error' is the largest |error| / |x| over the row; 'error / row max' is the largest |error| / amax.
+Three rows of 8 numbers, drawn from the generator seeded 15352669940719103639 (seed_of 'training_memory.boundary_rounding') as normal() in order, row by row; entry 3 of row 2 (counting from 0) is then multiplied by 20, so it is the largest entry of its row. Each row is stored in bf16 (nearest even) or fp8 (the row's own scale s = amax / 448, then E4M3 rounding to nearest even with a subnormal step of 2^-9 and saturation at 448, then multiplication by s) and read back. 'relative error' is the largest |error| / |x| over the row; 'error / row max' is the largest |error| / amax.
 
 | row | amax | bf16, relative error | bf16, error / row max | fp8, relative error | fp8, error / row max |
 |---|---:|---:|---:|---:|---:|
@@ -224,7 +224,7 @@ Three rows of 8 numbers, drawn from the generator seeded 15352669940719103639 (s
 | 1 | 2.087 | 0.00346 | 0.00346 | 0.0534 | 0.0161 |
 | 2 | 1.476 | 0.00257 | 0.00252 | 0.0486 | 0.0356 |
 
-A stack of 6 blocks (D = 16, F = 32, n = 64), drawn as in the first table from the generator seeded 5641694077207603615 (seed_of 'training_memory.boundary_rounding.stack') with entries of W1 and W2 scaled by 0.25 in place of 0.5, run with recompute in segments of 1. Each block's input is stored in the format and the block reads it back, in the forward and in the rebuild, so the forward continues from the rounded value. Compared with the fp32 boundaries: the relative change of the loss, the cosine between the two complete gradients, and the smallest cosine over the 12 weight matrices.
+A stack of 6 blocks (D = 16, F = 32, n = 64), drawn as in the first table from the generator seeded 5641694077207603615 (seed_of 'training_memory.boundary_rounding.stack') with entries of W1 and W2 scaled by 0.25 in place of 0.5 (each entry normal() times 0.25, W1 then W2 of block 0, then of block 1, and so on, then the 64 x 16 entries of X as normal() times 1 in row-major order), run with recompute in segments of 1. Each block's input is stored in the format and the block reads it back, in the forward and in the rebuild, so the forward continues from the rounded value. Compared with the fp32 boundaries: the relative change of the loss, the cosine between the two complete gradients, and the smallest cosine over the 12 weight matrices.
 
 | boundary format | relative change of the loss | cosine of the whole gradient | smallest cosine of a matrix |
 |---|---:|---:|---:|
@@ -232,7 +232,7 @@ A stack of 6 blocks (D = 16, F = 32, n = 64), drawn as in the first table from t
 | fp8 | 0.00426 | 0.997819 | 0.996808 |
 <!-- /worked -->
 
-Both formats stay inside their stated bounds on the three rows: bf16 within $2^{-8} = 0.0039$ of each element and FP8 within $2^{-4} = 0.0625$. Row 2, in which one entry was multiplied by 20, shows what a per-row scale does with an outlier: the outlier sets the scale, and because E4M3 has 4 exponent bits the other seven entries still sit inside its normal range, so the errors of that row are of the same size as those of the others. On the six-block stack the change of the loss is 0.0228 percent for bf16 and 0.426 percent for FP8, and the gradient of every matrix keeps its direction (cosines above 0.9968). Brain's shared test for narrow boundaries asks for the loss to move by less than 2 percent for bf16 and 15 percent for FP8 (of the loss, or of 1 when the loss is smaller), and every gradient to keep a cosine of more than 0.99 and 0.95 with the full-precision one; it adds that the batch must hold enough tokens for the per-element errors to average out, and the stack here has 64 tokens. A step on a handful of tokens would not show agreement this tight.
+Both formats stay inside their stated bounds on the three rows: bf16 within $2^{-8} = 0.0039$ of each element and FP8 within $2^{-4} = 0.0625$. Row 2, in which one entry was multiplied by 20, shows what a per-row scale does with one large entry: it sets the scale, and because E4M3 has 4 exponent bits the other seven entries, several times smaller, still sit inside its normal range, so the errors of that row are of the same size as those of the others. On the six-block stack the change of the loss is 0.0228 percent for bf16 and 0.426 percent for FP8, and the gradient of every matrix keeps its direction (cosines above 0.9968). Brain's shared test for narrow boundaries asks for the loss to move by less than 2 percent for bf16 and 15 percent for FP8 (of the loss, or of 1 when the loss is smaller), and every gradient to keep a cosine of more than 0.99 and 0.95 with the full-precision one; it adds that the batch must hold enough tokens for the per-element errors to average out, and the stack here has 64 tokens. A step on a handful of tokens would not show agreement this tight.
 
 Of everything the forward holds, only the boundary stream is narrowed. Recurrent state, normalisation statistics and softmax statistics stay in full precision wherever the trainer keeps them, as the header of brain's saved-activation module states. And because accuracy for FP8 boundaries has not been measured on a real model, the module marks that format as one the planner may not choose unasked: a caller can name it, and the planner picks only formats flagged as validated.
 
@@ -261,7 +261,7 @@ At 96 GiB the step fits as it is (84 GiB). At 80 the planner needs 4 GiB back an
 
 ## What the optimizer owns for each weight
 
-The second group of the bill, per parameter, has its own name: **optimizer-state memory** is the bytes an optimizer holds for each parameter beyond the weight and its gradient, the moments (one **slot** of the size of the weight for each moment), a master copy of the weight when the value is narrower, and any scales or statistics that go with them. Under Adam there are two slots; Lion and stochastic gradient descent (SGD) with momentum have one. The size of a slot depends on its format: 4 bytes an element in fp32, 2 in bf16, 1 plus a share of a scale in 8-bit blocks.
+The second group of the bill, per parameter, has its own name: **optimizer-state memory** is the bytes an optimizer holds for each parameter beyond the weight and its gradient, the moments (one **slot** of the size of the weight for each moment), a master copy of the weight when the value is narrower, and any scales or statistics that go with them. Under Adam there are two slots, a running average of the gradient (the first moment) and one of its square (the second moment). Stochastic gradient descent (SGD) with momentum has one, a running average of the gradients, and so has Lion, an optimizer that keeps one such average and applies only its sign scaled by the rate. Adafactor, which the last row of the table below prices, keeps no slot of the weight's size at all, only statistics of rows and columns. The size of a slot depends on its format: 4 bytes an element in fp32, 2 in bf16, 1 plus a share of a scale in 8-bit blocks.
 
 <!-- worked: training_memory.optimizer_bytes -->
 The optimizer state of the stack of the chapter, P = 4,294,967,296 numbers, counted physically: an fp32 slot is 4 bytes a number, a bf16 slot 2, an int8 slot 1 byte a number plus one fp32 scale (4 bytes) per block (the last block counted whole, here P divides evenly). Adafactor keeps, for each of the 2 L matrices of shape [F, D] and [D, F], one fp32 number per row and one per column.
@@ -364,7 +364,7 @@ $$
 An even spacing ($p = 1$) gives $1/(2Q\rho)$, which exceeds 100 percent for $\rho$ below $1/(2Q)$: the value is rounded to zero. The fourth-root map has $p = 4$ and the error grows only as $\rho^{-1/4}$: a value $10^{-4}$ of the maximum is stored to about 8 percent. The table measures the error directly, by encoding values on a fine grid of ratios, for the even map, the power maps of brain and a logarithmic map that has a constant relative step (16 levels an octave for a second moment, 8 for a first moment), which brain also provides.
 
 <!-- worked: training_memory.state_maps -->
-The largest relative error, in percent, of encoding a value x with ratio rho = x / (block maximum) to nearest and decoding it, searched over 400 values evenly spaced in the logarithm from rho to 2 rho. A block's scale is its maximum, so rho <= 1. 'zero' marks a value that decodes as 0 (error 100 percent); 'raised' marks a value below the smallest level that the encoder raises to it. Non-negative slots have 255 positive levels (codes 1 to 255; the encoder clamps a positive value up to code 1, so a decode is never zero); signed slots have a sign and 127 magnitude levels (code 0 is zero). 'linear' puts level q at q / 255 (or q / 127) of the scale; 'fourth-root' puts it at (q / 255)^4, 'sqrt' at (q / 127)^2, and 'log' at 2^((q - 255) / 16) (16 levels an octave; signed: 2^((q - 127) / 8), 8 levels an octave).
+The largest relative error, in percent, of encoding a value x with ratio rho = x / (block maximum) to nearest and decoding it, searched over 400 values evenly spaced in the logarithm from rho to 2 rho. A block's scale is its maximum, so rho <= 1. 'zero' marks a value that decodes as 0 (error 100 percent); 'raised' marks a value below the smallest level that the encoder raises to it. A value above the scale is capped at it, and the 400 values include both ends, x = rho 2^(j / 399) for j = 0 .. 399. The fourth-root and log maps of the non-negative slots have 255 positive levels (codes 1 to 255; their encoder clamps a positive value up to code 1, so a decode is never zero); the linear map is the unclamped baseline, whose code 0 decodes as zero, so a value below half a level is lost; signed slots have a sign and 127 magnitude levels (code 0 is zero). 'linear' puts level q at q / 255 (or q / 127) of the scale; 'fourth-root' puts it at (q / 255)^4, 'sqrt' at (q / 127)^2, and 'log' at 2^((q - 255) / 16) (16 levels an octave; signed: 2^((q - 127) / 8), 8 levels an octave).
 
 Second-moment slots (non-negative):
 
@@ -398,7 +398,7 @@ The three maps trade range against precision. The even map is best at the top an
 The effect on Adam's step is the next measurement. A block of 64 gradients $g_i = a_i e^{2 b_i}$ spans nearly four decades; after the first bias-corrected step from zero the moments are $m = g$ and $v = g^2$, so the exact step is $\mathrm{sign}(g)$, of size 1 for every entry, and the table forms the step from decoded moments.
 
 <!-- worked: training_memory.block_codes -->
-One block of 64 gradients g_i = a_i exp(2 b_i), a_i and b_i from normal() of the generator seeded 15093790500771295116 (seed_of 'training_memory.block_codes'), in the order a_0, b_0, a_1, b_1, ...; they span |g| from 0.0054 to 33.4. After one Adam step from zero (bias-corrected) the first moment is m = g and the second moment v = g^2, so the exact update m / (sqrt(v) + epsilon) is sign(g), of size 1 (epsilon = 1e-8). Each slot is encoded to nearest with its own block scale (the block maximum) and decoded, and the update is formed from the decoded values.
+One block of 64 gradients g_i = a_i exp(2 b_i), a_i and b_i from normal() of the generator seeded 15093790500771295116 (seed_of 'training_memory.block_codes'), in the order a_0, b_0, a_1, b_1, ...; they span |g| from 0.0054 to 33.4. After one Adam step from zero (bias-corrected) the first moment is m = g and the second moment v = g^2, so the exact update m / (sqrt(v) + epsilon) is sign(g), of size 1 (epsilon = 1e-8). Each slot is encoded to nearest with its own block scale (the block maximum) and decoded, and the update is formed from the decoded values. The linear rows are the unclamped baseline of the previous table: a value that rounds to code 0 decodes as 0, while the fourth-root and log maps raise a positive value to code 1.
 
 | codes | m decoded as 0 | v decoded as 0 | updates farther than 0.1 from sign(g) | largest |update| |
 |---|---:|---:|---:|---:|
@@ -436,10 +436,10 @@ AdamW (beta1 = 0.9, beta2 = 0.999, epsilon = 1e-08, rate 0.02, no weight decay, 
 | 8-bit blocks of 64, stochastic rounding | 220.9 | 49.78 | 5.526 | 2.779e-05 |
 | 8-bit blocks of 64, nearest | 220.7 | 50.23 | 5.457 | 1.32e-05 |
 
-The loss at w = 0 is 241.81.
+The loss at w = 0, sum_i h_i t_i^2 / 2, is 307.07.
 <!-- /worked -->
 
-The three runs fall together, from 241.81 at $w = 0$ to about 220 after 10 steps, 50 after 50, 5.5 after 100 and between $10^{-5}$ and $3 \times 10^{-5}$ after 300. Nothing in this run separates stochastic rounding from nearest rounding at the end, and the table does not claim they differ: the reason to prefer stochastic rounding is the decay of the previous table, a failure that needs a block with one large element and many slowly decaying ones.
+No cell needed the reduced form of the rule: the plain run and the four nudged copies of each row agree on every digit printed, so these runs are not chaotic at this rate. The three runs fall together, from 307.07 at $w = 0$ to about 220 after 10 steps, 50 after 50, 5.5 after 100 and between $10^{-5}$ and $3 \times 10^{-5}$ after 300. Nothing in this run separates stochastic rounding from nearest rounding at the end, and the table does not claim they differ: the reason to prefer stochastic rounding is the decay of the previous table, a failure that needs a block with one large element and many slowly decaying ones.
 
 ## Updating through a window of tiles
 
@@ -457,7 +457,7 @@ record State8:
 function streamed_adamw_step(w: inout array<real>[n], g: array<real>[n],
                              state: inout State8, t: int, tile: int,
                              lr: real) -> none:
-    require tile mod 64 == 0 and t >= 1
+    require tile >= 1 and t >= 1
     b1 = 0.9; b2 = 0.999; eps = 1.0e-8
     for c in 0 .. (n + tile - 1) // tile:
         a = c * tile
@@ -473,8 +473,8 @@ function streamed_adamw_step(w: inout array<real>[n], g: array<real>[n],
         for slot in 0 .. 2:           # 0: first moment, 1: second moment
             key = mix32(2 * t + slot)
             for bk in a // 64 .. (e + 63) // 64:
-                lo = bk * 64
-                hi = min(lo + 64, n)
+                lo = max(bk * 64, a)       # the part of block bk inside this tile
+                hi = min(bk * 64 + 64, e)
                 u = [counter_uniform(key, i) for i in lo .. hi]
                 if slot == 0:
                     (q, s) = encode_first_moment(m[lo - a : hi - a], u)
@@ -486,7 +486,7 @@ function streamed_adamw_step(w: inout array<real>[n], g: array<real>[n],
                     state.vs[bk] = s
 ```
 
-`dec_first(q, s)` and `dec_second(q, s)` are the one-element forms of the decoders above, and `mix32` and `counter_uniform` are those of Chapter 2 (a state of zero codes and zero scales decodes to zeros). A step with the tile equal to the whole tensor is exactly the update used by the run of the previous table. The table below cuts the same step into tiles. A tile that is a multiple of 64 must give the same weights as the whole tensor, bit for bit, and a tile of 100 that was used as asked, cutting a block in two, must not.
+`dec_first(q, s)` and `dec_second(q, s)` are the one-element forms of the decoders above, and `mix32` and `counter_uniform` are those of Chapter 2 (a state of zero codes and zero scales decodes to zeros). A step with the tile equal to the whole tensor is exactly the update used by the run of the previous table. The table below cuts the same step into tiles. A tile that is a multiple of 64 must give the same weights as the whole tensor, bit for bit, and a tile of 100 that was used as asked, cutting a block in two, must not. In the routine `lo` and `hi` clip each block to the tile: for a tile that is a multiple of 64 every segment is a whole block (the last of the tensor possibly shorter), while a tile that cuts a block encodes each piece of it on its own and writes the scale of the piece, the later piece replacing the earlier one's scale, which is what the last row of the table counts.
 
 <!-- worked: training_memory.tile_independence -->
 5 AdamW steps (beta1 = 0.9, beta2 = 0.999, epsilon = 1e-8, rate 0.05, no weight decay, bias-corrected) over 1000 weights from w = 0 on L = sum_i h_i (w_i - t_i)^2 / 2 with h_i = 1 + (i mod 7) and t_i = normal() in order from the generator seeded 17673242449925187733 (seed_of 'training_memory.tile_independence'). Both moments are held in 8-bit blocks of 64 (square-root map for the first, fourth-root map for the second) with stochastic rounding by the counter draw, u = counter_uniform(key, i) with i the absolute index and key = mix32(2 t + slot) (t the step from 1, slot 0 or 1). The update walks the weights in tiles: decode the tile's moments, apply the rule, encode them. The requested tile is rounded up to the next multiple of the block, which is the tile used; the staging column is 5 fp32 tiles, 20 bytes an element of the tile. The last column counts weights after step 5 whose 64-bit pattern differs from the run that takes the whole tensor as one tile.

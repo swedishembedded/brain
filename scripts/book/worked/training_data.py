@@ -236,7 +236,9 @@ def layouts():
     stream = sum(len(r["ids"]) for r in recs)
     lines = [f"28 validation records from `{FACT_VAL}` (seed {_seed(FACT_VAL)}); for each, in order, `integer(12)` picks the fact "
              f"and then `integer(3)` the wording of the question; the user message is the question and the assistant message is "
-             f"`<name> lives in <city>.`, with the 12 names and 12 cities of the lists in the module (name i lives in city i). "
+             f"`<name> lives in <city>.`, name i living in city i, the names being {', '.join(NAMES)} and the cities "
+             f"{', '.join(CITIES)}, and the three wordings of the question (index 0, 1, 2) being "
+             f"{'; '.join('`' + q + '`' for q in QUESTIONS)} with `{{n}}` the name. "
              f"The 28 records hold {_int(stream)} tokens (mean {stream / 28:.2f}, "
              f"longest {max(len(r['ids']) for r in recs)}), of which "
              f"{_int(sum(sum(r['mask']) for r in recs))} are supervised under the as-asked mask. "
@@ -309,13 +311,15 @@ def length_batches():
     L = record_lengths()
     useful = sum(L)
     lmax = max(L)
-    lines = [f"{N_RECORDS} record lengths from `{LENGTHS}` (seed {_seed(LENGTHS)}), drawn as the generator's rule states: "
-             f"{sum(1 for x in L if x >= 96)} are long, the longest is {lmax}, the shortest {min(L)}, together {_int(useful)} tokens "
+    lines = [f"{N_RECORDS} record lengths from `{LENGTHS}` (seed {_seed(LENGTHS)}), drawn in order, each record by one `uniform()` and then one `integer`: "
+             f"when the uniform is below 0.2 the record is long and its length is 96 + `integer(129)`, otherwise it is short and its "
+             f"length is 16 + `integer(33)`; {sum(1 for x in L if x >= 96)} are long, the longest is {lmax}, the shortest {min(L)}, together {_int(useful)} tokens "
              f"(mean {useful / len(L):.2f}). Batches of {BATCH} records, so {N_RECORDS // BATCH} batches; each batch is computed at the "
              f"length of its longest record, and a position is one token of one row. For every pool size the generator "
              f"`{BATCHES}` (seed {_seed(BATCHES)}) starts again: first the shuffle of the {N_RECORDS} indices, then, after the sorting "
              f"and cutting, the shuffle of the list of batches. The weight of a supervised token is 1 divided by the supervised tokens "
-             f"of its batch, since the loss of a batch is a per-token mean.", ""]
+             f"of its batch, since the loss of a batch is a per-token mean; a record of length L has L // 2 (integer division) supervised "
+             f"tokens.", ""]
     rows = [("every row at the longest record", "-", _int(N_RECORDS * lmax), _pct(1 - useful / (N_RECORDS * lmax)), "-", "-")]
     for p in POOLS:
         batches, computed, sup = _batch_numbers(p)
@@ -529,9 +533,16 @@ def duplicates():
     n = len(texts)
     planted = [i for i in range(n) if source[i] >= 0]
     lines = [f"{N_ORIGINAL} originals of {DOC_WORDS} words from `{DOCS}` (seed {_seed(DOCS)}), planted copies from `{PLANT}` "
-             f"(seed {_seed(PLANT)}) as the generator's rule states: {n} documents, {len(planted)} of them planted. "
-             f"A document is its words `w000` to `w149` joined by single spaces; a shingle is three consecutive words of the normalised "
-             f"text; a document has {DOC_WORDS - SHINGLE + 1} shingles at most.", ""]
+             f"(seed {_seed(PLANT)}) in this way: {n} documents, {len(planted)} of them planted. "
+             f"An original is {DOC_WORDS} draws `integer({VOCAB})` of `{DOCS}`, document after document, word k written `w` and its "
+             f"three digits (`w007`) and the words joined by single spaces. The generator `{PLANT}` shuffles the list 0 .. "
+             f"{N_ORIGINAL - 1} once (the Fisher-Yates shuffle of the randomness chapter), so the originals are chosen without repeats; "
+             f"its first 30 entries name the "
+             f"originals copied exactly, the next 30 the originals copied in capitals (`W007`) with two spaces between words, and "
+             f"the next three runs of 20 the originals corrupted at the rates 0.1, 0.2 and 0.3. A corrupted copy takes its words in "
+             f"turn: one `uniform()` from `{PLANT}`, and when it is below the rate one `integer({VOCAB})` from the same generator "
+             f"gives the new word (the copies and the format variants use no draws). A shingle is three consecutive words of the "
+             f"normalised text joined by single spaces (`w007 w101 w044`); a document has {DOC_WORDS - SHINGLE + 1} shingles at most.", ""]
     raw = [hashlib.sha256(t.encode("utf-8")).hexdigest() for t in texts]
     norm = [hashlib.sha256(normalise(t).encode("utf-8")).hexdigest() for t in texts]
     lines.append(_table(["rule for calling a document a duplicate of an earlier one", "documents dropped", "of the planted"],
@@ -587,7 +598,8 @@ def banding():
     settings = ((32, 2), (16, 4), (8, 8))
     lines = [f"A signature of {K_HASHES} entries is cut into b bands of r consecutive entries (b r = {K_HASHES}); two documents are a "
              f"candidate pair when all r entries of at least one band are equal. A pair of Jaccard similarity J is a candidate with "
-             f"probability 1 - (1 - J^r)^b.", ""]
+             f"probability 1 - (1 - J^r)^b. The {K_HASHES} seeds of the signatures are the first {K_HASHES} raw values (`next`) of "
+             f"the generator `{MINHASH}` (seed {_seed(MINHASH)}); band k holds entries k r to k r + r - 1.", ""]
     rows = []
     for J in (0.1, 0.2, 0.3, 0.5, 0.7, 0.9):
         rows.append([_fx(J, 1)] + [_fx(1 - (1 - J ** r) ** b, 4) for b, r in settings])
@@ -647,7 +659,8 @@ def contamination():
     after = [max(jaccard(v, t) for i, t in enumerate(train_sets) if i not in drop) for v in val_sets]
     lines = [f"A validation set of 30 documents from `{FRESH}` (seed {_seed(FRESH)}) against the {N_ORIGINAL} original documents as "
              f"the training set. The generator first shuffles 0 .. {N_ORIGINAL - 1}; for the first 6 entries, in order, the training "
-             f"document of that index is corrupted at rate 0.1 (as above) to give validation documents 0 to 5; then 24 fresh documents "
+             f"document of that index is corrupted at rate 0.1 to give validation documents 0 to 5 (each word in turn: one `uniform()` from `{FRESH}`, and below 0.1 "
+             f"one `integer({VOCAB})` from the same generator gives the new word); then 24 fresh documents "
              f"of {DOC_WORDS} `integer(150)` draws each follow.", ""]
     lines.append(_table(["check", "validation documents flagged"],
                         [("an exact SHA-256 match with a training text", sum(1 for t in val_texts if hashlib.sha256(t.encode("utf-8")).hexdigest() in raw_train)),

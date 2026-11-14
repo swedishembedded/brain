@@ -242,7 +242,7 @@ def lora_gradient_check():
             "|numeric - analytic| / max(1, |analytic|), and the criterion is that its largest value is below 1e-6.\n\n")
     ok = "passes" if worst < 1e-6 else "FAILS"
     rows = [[f"largest deviation over all {r * INN + OUT * r} entries", f"{ok} (below 1e-6)"],
-            ["|dA| and |dB| (Frobenius) at B = 0, A from the rank-3 start of the sweep",
+            ["|dA| and |dB| (Frobenius) at B = 0 with s = 2/3 (alpha = 2, r = 3), A the rank-3 start of the sweep",
              f"{_num(_fro(dA0), 4)} and {_num(_fro(dB0), 4)}"]]
     return head + _table(["quantity", "value"], rows, "lr")
 
@@ -443,9 +443,11 @@ def fold_into_quantized():
             run = [sum(Wq[o][i] * x[i] for i in range(INN)) + strength * sum(B[o][k] * ax[k] for k in range(2)) for o in range(OUT)]
             worst = max(worst, max(abs(a - b) for a, b in zip(exact, run)))
         rows.append([f"{strength:g}", f"{rms / step:.3f}", f"{100 * unchanged / (OUT * INN):.1f}", f"{rel:.3f}", "below 1e-12" if worst < 1e-12 else f"{worst:.1e}"])
-    head = ("The int8 base of the task (groups of 32, one per row, scale = largest magnitude / 127) and the rank-2 adapter trained on it "
-            "with the rank-sweep recipe (s = 1), multiplied by a strength. 'Delta in steps' is the root mean square of one entry of "
-            "strength x B A divided by the mean step of the base's groups. The fold re-encodes W + strength x B A with the same rule "
+    head = ("The int8 base Q of the task (W0 quantized in groups of 32, one group per row, scale = largest magnitude / 127, so Q is the "
+            "decoded matrix) and the rank-2 adapter trained on it with the rank-sweep recipe (s = 1, the task's original target W*, "
+            "not Q + the change), multiplied by a strength. 'Delta in steps' is the root mean square of one entry of "
+            "strength x B A divided by the mean step of the base, the mean over the 16 rows of their scale. The fold re-encodes "
+            "Q + strength x B A (the W of the next sentence is Q) with the same rule "
             "and subtracts the decoded base; 'same code' is the percent of the 512 weights whose integer code is the old one, and the next "
             "column the Frobenius norm of (what survived - what was intended) over the norm of what was intended. The runtime route "
             "computes y = W x + strength B (A x) with W the decoded base; its last column is the largest difference from "
@@ -543,10 +545,11 @@ def bank_semantics():
         rows.append([i, "none (4294967295)" if z == NONE else z, "-" if z == NONE else BANK_RANKS[z],
                      "below 1e-12" if diff < 1e-12 else f"{diff:.1e}", "yes" if same else "no"])
     seed = bookrng.seed_of("peft.bank")
-    head = (f"The 16 x 32 layer W0 and a bank of three adapters whose ranks are {BANK_RANKS[0]}, {BANK_RANKS[1]} and {BANK_RANKS[2]}, padded to "
+    head = (f"The 16 x 32 layer W0 of the task (the first 512 draws of the generator seeded seed_of 'peft.task', each normal() times 0.5, "
+            f"row-major) and a bank of three adapters whose ranks are {BANK_RANKS[0]}, {BANK_RANKS[1]} and {BANK_RANKS[2]}, padded to "
             f"r_max = {R_MAX} rows. One generator seeded {seed} (seed_of 'peft.bank') draws, for slot 0, 1, 2 in turn, A_k (r_k x 32, row-major) "
             "and then B_k (16 x r_k, row-major), every entry 0.2 times normal(), and after the three slots draws the six input rows "
-            "(32 numbers each, row-major). The bank stores A_k padded to r_max rows and the transposed (alpha / r_k) B_k, alpha = 4, "
+            "(32 numbers each, row-major, each normal() with no factor). The bank stores A_k padded to r_max rows and the transposed (alpha / r_k) B_k, alpha = 4, "
             "padded the same way; in the 'poisoned' copy every padding row holds 1e6 instead of zero. A batch of six rows carries the slot vector "
             f"{list(BANK_SLOTS[:2])} + [none] + {list(BANK_SLOTS[3:])}; row i computes t = A_k x_i over the first r_k rows of its slot and adds "
             "t B_k^T (scaled) to W0 x_i, and a row whose slot is outside the bank adds nothing. The 'difference' column is the largest "
@@ -566,7 +569,8 @@ def kv_difference():
         key = [sum(Wm[o][j] * x[j] for j in range(INN)) for o in range(OUT)]
         rel = math.sqrt(sum((a - b) ** 2 for a, b in zip(key, base))) / math.sqrt(sum(b * b for b in base))
         rows.append([f"adapter {k}", f"{rel:.4f}"])
-    head = ("The key a token gets from a layer, y = W x, with the first input row of the bank example as x and the 16 x 32 layer as the key "
+    head = ("The key a token gets from a layer, y = W x, with the first input row of the bank example (as drawn there, entries normal()) as x and "
+            "the 16 x 32 layer W0 of the task (as in the bank example) as the key "
             "projection of one position, once without an adapter and once with each adapter of the bank merged in. The table gives "
             "|key with the adapter - key of the base| over |key of the base| (Euclidean norms).\n\n")
     return head + _table(["adapter", "relative change of the cached key"], rows, "lr")

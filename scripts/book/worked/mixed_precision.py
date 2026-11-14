@@ -265,7 +265,11 @@ def loss_scale_adam():
             "S g_i is rounded once to fp16 (ties to even; a value of 65520 or more is infinity), divided by S, and fed to the update in "
             "float64. A step whose scaled gradient has a non-finite entry is skipped whole. The dynamic scale starts at 2^16, halves on "
             f"a skipped step and doubles after {GROW_AFTER} applied steps in a row. The cells are |w_i - 1| after the last step. "
-            + stable.RULE + " In the nudged runs the first weight starts at the stated tiny amount instead of 0.\n\n")
+            + stable.RULE + " In a nudged run only weight 0 starts at the tiny amount instead of 0; the weights do not feed one another, so "
+            "weights 1 to 5 are bit-identical in all five runs and are always printed in full, and only the cell of weight 0 can lose "
+            "digits. 'In full' means three significant digits (scientific notation below 0.001), and the five values agree on them "
+            "when they round to the same text and lie within half a unit of its last digit of one another: the stuck run at "
+            "S = 2^16 leaves weight 0 at 1 - 1e-12, 1 or 1 + 1e-12, which all print as 1.\n\n")
     return head + _table(["i", "d_i"] + [n for n, _ in _ADAM_CASES], rows)
 
 
@@ -308,8 +312,8 @@ def sr_bit_rule():
             total += Fraction(_bf16_bits_value(h))
         mean = total / 65536
         exact = Fraction(xf)
-        rows.append([f"{x:g}", f"0x{b:08X}", f"0x{low:04X} = {low}", carries, f"{low}/65536 = {low / 65536:.6f}", "yes" if mean == exact else "no"])
-    head = ("Each value is first rounded to fp32 (ties to even), then written as its 32-bit pattern. All 65536 values r = 0 .. 65535 are "
+        rows.append([f"{x:.9g}", f"0x{b:08X}", f"0x{low:04X} = {low}", carries, f"{low}/65536 = {low / 65536:.6f}", "yes" if mean == exact else "no"])
+    head = ("Each value is written to nine significant digits (the second is exactly 1 + 2^-8); it is first rounded to fp32 (ties to even), then written as its 32-bit pattern. All 65536 values r = 0 .. 65535 are "
             "added to the pattern as an unsigned integer, the top 16 bits are kept as the bf16 pattern, and the result is compared with "
             "the pattern without the addition. 'carried' counts the r for which the bf16 pattern changed. 'mean equals x' compares "
             "the exact mean of the 65536 bf16 results with the fp32 value, in exact rational arithmetic.\n\n")
@@ -535,8 +539,9 @@ def delayed_scale():
             "and at step 10 it is multiplied by a further 4. The current scale divides amax of this step's tensor by 448; the "
             f"delayed scale divides the largest amax of the previous {DELAY_WINDOW} steps by 448 (step 0 uses its own amax). 'clipped' "
             "counts the entries with |x| / s >= 464 (the midpoint between 448 and the next code, so a saturating conversion changes "
-            "them); 'rms error' is the root of the sum of squared errors over the sum of squares of the entries after rounding to E4M3 "
-            "(nearest even, saturating) and scaling back.\n\n")
+            "them); 'rms error' is sqrt(sum_i (x_i - q_i)^2 / sum_i x_i^2), where x_i are the original unrounded entries (the denominator "
+            "uses them, not q) and q_i is x_i after dividing by the scale, rounding to E4M3 (nearest even, saturating) and "
+            "multiplying back. The factor 4 at step 10 stays in sigma for every later step (1.05 times it at step 11, and so on).\n\n")
     return head + _table(["step", "sigma", "amax of this step", "amax the delayed scale uses", "clipped, delayed", "rms error, delayed",
                           "clipped, current", "rms error, current"], rows)
 
