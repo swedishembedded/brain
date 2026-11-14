@@ -446,7 +446,9 @@ fn canonical_header(mut out: Vec<u8>) -> io::Result<Vec<u8>> {
 
 /// Write tensors as F32 safetensors. `config` is stored under `brain.config`
 /// and `card` (if any) via [`ModelCard::to_metadata`]. The write is atomic
-/// (tmp + rename), mirroring the custom-format `save`.
+/// and durable: a temporary file is written and fsynced, renamed over `path`,
+/// and the directory is fsynced where the platform allows (see
+/// [`write_durable`]), mirroring the custom-format `save`.
 pub fn save_safetensors(
     path: &str,
     tensors: &[(String, Vec<u64>, Vec<f32>)],
