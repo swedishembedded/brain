@@ -304,8 +304,8 @@ impl VisionLanguagePipelineBuilder {
     ///    consulting `Store::local`/`plan` - the same fix
     ///    `crate::tts::TtsPipelineBuilder::load`/`crate::text::
     ///    resolve_hub_weights` both needed: a real, already-downloaded
-    ///    qwen3vl checkpoint directory (`config.json` + `model.safetensors`
-    ///    shards + `tokenizer.json`, the standard HF layout) is neither a
+    ///    qwen3vl checkpoint (an HF directory, or a llama.cpp language-half
+    ///    GGUF beside its `mmproj-*.gguf`; see `qwen3vl::spec`) is neither a
     ///    compound `brain.manifest.json` nor a bare `model.brain.safetensors`,
     ///    so `Store::local` would never recognize it and `plan()` would fall
     ///    through to `TransformersRecipe`'s catch-all - which, unlike a

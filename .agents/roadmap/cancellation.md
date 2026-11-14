@@ -70,6 +70,7 @@ release on the early return, and the bit declared.
 | llava, fastvlm | caption | entry, after the vision tower, per decoded token | `admission` weight-free; `mid_run` with the real checkpoint (fastvlm passed; llava skips by name: no `liuhaotian/llava-v1.5-13b`, so its mid-run proof is open) |
 | cosyvoice | synth (provider, resident, SDK) | entry, per speech token, per flow Euler step | `admission` weight-free; `mid_run` over the LM decode on a tiny random config |
 | moondream3 | caption | entry, per decoded token, live progress | `admission` weight-free; tiny-model stop test |
+| qwen3vl | generate (provider, resident, SDK `ask_stream`) | entry, per decoded token: `SeqState::advance` breaks the decode loop at the token it notices the cancel on | `admission` weight-free; a breaking callback ends the tiny-model decode (`model.rs`, video test); real-weight `a_streamed_answer_stops_when_its_token_fires` on `unsloth/Qwen3-VL-4B-Instruct-GGUF` (skips by name without it) |
 | glmdsa, gpt2 | generate, train, finetune | entry, per token, per optimizer step | `certify` with tiny trained checkpoints |
 | florence2 | ground | entry, per decoded token | `admission` weight-free |
 | qwen3, ouro, decisions | train, finetune, lora_train | entry, per optimizer step | tiny train tests assert the literal |
@@ -108,12 +109,8 @@ release on the early return, and the bit declared.
 - minicpmv `export_peft`'s stop is proved only with the real checkpoint
   (`peft_export.rs`); a tiny MiniCPM-V fixture would prove it everywhere.
 - Real-weight mid-run proofs still open, for want of a checkpoint: llava
-  caption (no `liuhaotian/llava-v1.5-13b`), cosyvoice's flow loop (no
-  CosyVoice checkpoint), and the SDK's `ask_stream`
-  (`crates/sdk/tests/vlm_pipeline.rs`, which needs the Hugging Face
-  `Qwen/Qwen3-VL-4B-Instruct` directory: the store holds only GGUF Qwen3-VL
-  files, and `qwen3vl::spec::Qwen3VlSpec` resolves a directory with
-  `config.json` and `tokenizer.json`, not a GGUF).
+  caption (no `liuhaotian/llava-v1.5-13b`) and cosyvoice's flow loop (no
+  CosyVoice checkpoint).
 - s3dit's `text2image` mid-run proof (the resident pipeline path) is not
   covered by the edit-action test.
 - The C2 test proves admission only for providers that build without

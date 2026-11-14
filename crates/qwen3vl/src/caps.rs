@@ -247,7 +247,7 @@ pub fn generate_spec() -> ActionSpec {
             ParamSpec::new(
                 "weights",
                 ParamType::Str,
-                "Qwen3-VL checkpoint DIRECTORY (config.json + model.safetensors[.index.json] + tokenizer.json); overrides the model-store resolver's own pick when set",
+                "Qwen3-VL checkpoint: a DIRECTORY (config.json + model.safetensors[.index.json] + tokenizer.json), or a GGUF language half (or its directory) with its mmproj-*.gguf beside it; overrides the model-store resolver's own pick when set",
             )
             .host_resolved(),
         )
@@ -1101,7 +1101,7 @@ fn preprocess_min_pixels() -> u32 {
 /// already knows. A GGUF is recognized by its own leading magic (and, for a
 /// directory, by a GGUF being what is in it), then routed by the
 /// `general.architecture` in its metadata.
-enum Source {
+pub(crate) enum Source {
     /// A HuggingFace directory: `config.json` + `model.safetensors[.index.json]`
     /// + `tokenizer.json`.
     HfDir(String),
@@ -1110,7 +1110,7 @@ enum Source {
     Gguf(crate::gguf_import::GgufFiles),
 }
 
-fn classify_source(weights: &str) -> Result<Source, String> {
+pub(crate) fn classify_source(weights: &str) -> Result<Source, String> {
     let p = std::path::Path::new(weights);
     let is_gguf = if p.is_dir() {
         std::fs::read_dir(p)

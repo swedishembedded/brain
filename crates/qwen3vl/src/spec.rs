@@ -1,12 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Qwen3-VL's [`ArchSpec`]: which on-disk checkpoint directory satisfies its
-//! one `weights` role - a directory holding `config.json` (declaring
-//! `architectures[0] == "Qwen3VLForConditionalGeneration"`), its
-//! safetensors shards, and a sibling `tokenizer.json`. Header/config-only,
-//! the same contract `flux2::spec::Flux2Spec`/`fastvlm::spec::FastvlmSpec`
-//! already follow.
+//! Qwen3-VL's [`ArchSpec`]: which on-disk checkpoint satisfies its one
+//! `weights` role. Two release layouts, both read by content, never by name:
+//!
+//! * a Hugging Face directory: `config.json` declaring
+//!   `architectures[0] == "Qwen3VLForConditionalGeneration"`, its safetensors
+//!   shards, and a sibling `tokenizer.json`;
+//! * a llama.cpp release: the language-half GGUF
+//!   (`general.architecture == "qwen3vl"`) beside its `mmproj-*.gguf` vision
+//!   tower. The role names the language-half file.
+//!
+//! [`ArchSpec::validate`] asks `crate::caps::classify_source`, the function
+//! the loader itself dispatches on, which layout the resolved path is, so a
+//! checkpoint this resolves is one `caps::Resident::load_on` opens: a GGUF
+//! with no matching projector fails here with the loader's own reason.
 //!
 //! Swedish Embedded AB implements resolver-based checkpoint discovery like
 //! this for clients running mixed fleets of hand-placed and fetched weights.
@@ -20,6 +28,9 @@ use brain_modelstore::inventory::{ArtifactKind, ArtifactRecord};
 use brain_modelstore::plan::declared_architecture;
 use brain_modelstore::resolve::{ArchSpec, AssembleOutcome, AssembledVariant, Confidence};
 use capability::Assembly;
+use checkpoint::gguf::MmapGguf;
+
+use crate::caps::{classify_source, Source};
 
 pub struct Qwen3VlSpec;
 
@@ -28,6 +39,19 @@ const ROLES: &[&str] = &["weights"];
 /// The `architectures[0]` value Qwen3-VL's own released `config.json`
 /// declares (`crates/arch/src/lib.rs`'s `hf:` list for this row).
 const HF_ARCHITECTURE: &str = "Qwen3VLForConditionalGeneration";
+
+fn is_hf_checkpoint(rec: &ArtifactRecord) -> bool {
+    let Ok(bytes) = std::fs::read(rec.path.join("config.json")) else { return false };
+    let Ok(config) = serde_json::from_slice::<serde_json::Value>(&bytes) else { return false };
+    declared_architecture(&config).as_deref() == Some(HF_ARCHITECTURE)
+}
+
+/// The language half of a llama.cpp release. Its projector declares
+/// `general.architecture = "clip"`, so it never matches here.
+fn is_gguf_language_half(rec: &ArtifactRecord) -> bool {
+    let Ok(g) = MmapGguf::open(&rec.path.to_string_lossy()) else { return false };
+    g.kv().get("general.architecture").and_then(|v| v.as_str()) == Some(crate::gguf_import::GGUF_ARCHITECTURE)
+}
 
 impl ArchSpec for Qwen3VlSpec {
     fn arch(&self) -> &'static str {
@@ -41,12 +65,13 @@ impl ArchSpec for Qwen3VlSpec {
     fn classify(&self, records: &[ArtifactRecord], _inventory_root: &Path) -> Vec<(usize, String, Confidence)> {
         let mut out = Vec::new();
         for (idx, rec) in records.iter().enumerate() {
-            if !rec.usable() || rec.kind != ArtifactKind::HfDir {
-                continue;
-            }
-            let Ok(bytes) = std::fs::read(rec.path.join("config.json")) else { continue };
-            let Ok(config) = serde_json::from_slice::<serde_json::Value>(&bytes) else { continue };
-            if declared_architecture(&config).as_deref() == Some(HF_ARCHITECTURE) {
+            let matches = rec.usable()
+                && match rec.kind {
+                    ArtifactKind::HfDir => is_hf_checkpoint(rec),
+                    ArtifactKind::Gguf => is_gguf_language_half(rec),
+                    _ => false,
+                };
+            if matches {
                 out.push((idx, "weights".to_string(), Confidence::Declared));
             }
         }
@@ -60,10 +85,12 @@ impl ArchSpec for Qwen3VlSpec {
 
     fn validate(&self, assembly: &Assembly) -> Result<(), String> {
         let weights = assembly.roles.get("weights").ok_or("qwen3vl validate: assembly has no weights role")?;
-        if !weights.join("tokenizer.json").is_file() {
-            return Err(format!("qwen3vl validate: {} has no sibling tokenizer.json", weights.display()));
+        let path = weights.to_str().ok_or_else(|| format!("qwen3vl validate: {} is not valid UTF-8", weights.display()))?;
+        match classify_source(path).map_err(|e| format!("qwen3vl validate: {e}"))? {
+            Source::Gguf(_) => Ok(()),
+            Source::HfDir(_) if weights.join("tokenizer.json").is_file() => Ok(()),
+            Source::HfDir(_) => Err(format!("qwen3vl validate: {} has no sibling tokenizer.json", weights.display())),
         }
-        Ok(())
     }
 }
 
@@ -134,6 +161,50 @@ mod tests {
         match resolve("qwen3vl", &records, &specs, &BTreeMap::new()) {
             Resolution::Missing(m) => assert!(m.roles.iter().any(|r| r.doc.contains("tokenizer.json")), "{m:?}"),
             other => panic!("expected Missing (validate should reject a checkpoint with no tokenizer), got {other:?}"),
+        }
+    }
+
+    fn write_gguf(path: &Path, kv: &[(&str, &str)]) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let tensor = checkpoint::gguf_write::TensorOut { name: "w".to_string(), shape: vec![1], ty: checkpoint::gguf::GgmlType::F32.id(), data: vec![0u8; 4] };
+        let kv: Vec<_> = kv.iter().map(|(k, v)| (k.to_string(), checkpoint::gguf::GgufValue::String(v.to_string()))).collect();
+        checkpoint::gguf_write::write(path.to_str().unwrap(), &kv, &[tensor], 32).unwrap();
+    }
+
+    fn resolve_in(dir: &Path) -> Resolution {
+        let records = brain_modelstore::inventory::scan(dir);
+        let spec = Qwen3VlSpec;
+        let specs: Vec<&dyn ArchSpec> = vec![&spec];
+        resolve("qwen3vl", &records, &specs, &BTreeMap::new())
+    }
+
+    const LM_KV: [(&str, &str); 1] = [("general.architecture", crate::gguf_import::GGUF_ARCHITECTURE)];
+    const MMPROJ_KV: [(&str, &str); 2] = [("general.architecture", "clip"), ("clip.projector_type", crate::gguf_import::PROJECTOR_TYPE)];
+
+    /// A llama.cpp release (the language half beside its `mmproj-*.gguf`)
+    /// resolves to the language-half file, the path `caps::Resident::load_on`
+    /// takes; the projector itself is never a `weights` candidate.
+    #[test]
+    fn resolves_a_gguf_pair_to_its_language_half() {
+        let dir = tmp("gguf-pair");
+        let repo = dir.join("unsloth").join("Qwen3-VL-4B-Instruct-GGUF");
+        write_gguf(&repo.join("Q8_0.gguf"), &LM_KV);
+        write_gguf(&repo.join("mmproj-F16.gguf"), &MMPROJ_KV);
+        match resolve_in(&dir) {
+            Resolution::Resolved(assembly) => assert_eq!(assembly.roles["weights"], repo.join("Q8_0.gguf")),
+            other => panic!("expected Resolved, got {other:?}"),
+        }
+    }
+
+    /// The language half alone would caption an image it never saw, so it is
+    /// `Missing` with the loader's own reason, never a resolve.
+    #[test]
+    fn a_gguf_language_half_with_no_projector_is_missing_naming_the_mmproj() {
+        let dir = tmp("gguf-no-mmproj");
+        write_gguf(&dir.join("unsloth").join("Qwen3-VL-4B-Instruct-GGUF").join("Q8_0.gguf"), &LM_KV);
+        match resolve_in(&dir) {
+            Resolution::Missing(m) => assert!(m.roles.iter().any(|r| r.doc.contains("mmproj")), "{m:?}"),
+            other => panic!("expected Missing, got {other:?}"),
         }
     }
 

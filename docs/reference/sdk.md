@@ -748,6 +748,24 @@ tuner.save("/models/lfm2-encoder-finetuned.safetensors");
 `samples/text/encoder-finetune` runs this end to end, reporting recall@1
 before and after against `EmbeddingPipeline`.
 
+## Vision-language
+
+```rust
+let pipe = brain::VisionLanguagePipeline::from_pretrained("Qwen/Qwen3-VL-4B-Instruct")?;
+let out = pipe.ask(&brain::Image::open("lighthouse.png")?, "What is in this image?")?;
+println!("{}", out.text);
+```
+
+The id names a Qwen3-VL checkpoint in either release layout, the same ones
+`brain serve` serves: a Hugging Face directory (`Qwen/Qwen3-VL-4B-Instruct`)
+or a llama.cpp GGUF release, the language half beside its `mmproj-*.gguf`
+vision tower (`unsloth/Qwen3-VL-4B-Instruct-GGUF`). A GGUF with no projector
+beside it is never loaded: resolution names the missing projector, because a
+decoder without its vision tower answers about an image it never saw.
+`ask_multi` takes 1 to 8 images; `.builder(id).precision("int8")` stores the
+decoder at the lossy int8 tier, and `.max_pixels(n)`/`.ctx(n)` size the
+resident for larger images or longer conversations.
+
 ## Speech-to-text
 
 ```rust
@@ -775,6 +793,7 @@ Name the surfaces you use and you get their dependencies and nothing else:
 | `text` | `TextGenerationPipeline` - text generation, from a local checkpoint path or a hub id; `ChatPipeline` - multi-turn chat with tool calling, streaming and cancellation; also the Qwen3/LFM2.5-Encoder backbones of `EmbeddingPipeline` (32768-token context), `EmbeddingTrainer` (contrastive fine-tuning over frozen embeddings), and `EncoderFineTuner` (full-encoder contrastive fine-tuning, LFM2 only) |
 | `study` | `ChatFineTune`, `score_chat`, `score_tokens`, `score_tokens_qwen35` (per-position log-probability and argmax from the 27B trainer's own forward, for train-serve agreement), `emit_held_out_records` (a dataset's held-out split as the ids and masks the trainer encodes) - LoRA fine-tuning of a Qwen3 chat model and its held-out score; `ChatFullFineTune`, `merge_adapter` - full-parameter fine-tuning into a checkpoint directory, and folding an adapter into the weights; `PreferenceFineTune`, `score_preference` - its DPO counterpart; `DocumentStudy` - teaching a model documents behind a gate; `promote` - the promotion gate and its paired sign test (`promote::stats::sign_test`) for deciding whether a trained model replaces the one before |
 | `vision` | `EmbeddingPipeline` - CLIP text embedding (named for CLIP's registered domain, not the capability) |
+| `multimodal` | `VisionLanguagePipeline` - Qwen3-VL, images and text in, text out, from a Hugging Face directory or a GGUF release |
 | `audio` | `ResidentTts` - Qwen3-TTS loaded once for many short pieces, on the device when there is one (the host otherwise), with chunks handed out as the utterance grows (the first after 8 frames, 0.64 s of speech) and cancellation; `TranscribePipeline` - speech-to-text (qwen3-asr, offline; or nemotron-asr, one-shot): the checkpoint asked for selects the model; `TranscribePipeline::features` - Qwen3-ASR's encoder features of a clip of any length; with `study`, `SpeechIngress` (teach a language model to listen by training a projector alone, the model and its adapter frozen), `SpeechProjector` (the trained projector on the host) and `ChatPipeline::generate_with_rows` (answer a prompt in which a run of positions is embedding rows) | <!-- perf-number: arithmetic from the audio frame rate (8 frames), not a timing result -->
 | `full` | every surface; this is the default |
 

@@ -206,7 +206,7 @@ llava	cancel	caption cancelled before admission reads nothing	llava/src/caps.rs:
 qwen3vl	import	tower missing a tensor or wrong sized one refused by name	qwen3vl/src/import.rs::a_tower_missing_a_tensor_or_holding_a_wrong_sized_one_is_refused_by_name
 qwen3vl	parity	partial depth decoder vs HF reference dump	qwen3vl/src/parity.rs::qwenvl_decoder_partial_depth_matches_hf
 qwen3vl	serve	served generate action path on a loaded checkpoint	qwen3vl/src/caps.rs::served_generate_path_runs_on_real_weights
-qwen3vl	cancel		catalog/tests/it/cancellation.rs::every_action_built_without_weights_refuses_a_token_fired_before_the_call
+qwen3vl	cancel	a fired token ends the decode at its next token, through the SDK on the real 4B GGUF	qwen3vl/src/model.rs::generate_video_is_deterministic_and_runs_end_to_end;sdk/tests/vlm_pipeline.rs::a_streamed_answer_stops_when_its_token_fires (real);catalog/tests/it/cancellation.rs::every_action_built_without_weights_refuses_a_token_fired_before_the_call
 yolov8	import	remap covers yolov8n one to one; fine-tune names tensors it could not fill	yolov8/src/import.rs::the_remap_covers_yoloconfig_yolov8n_exactly_one_to_one;yolov8/src/train.rs::a_fine_tune_names_the_tensors_the_checkpoint_could_not_fill
 yolov8	parity	head logits vs PyTorch dumped activations from exported yolov8n	yolov8/tests/it/parity.rs::yolov8n_reference_parity
 yolov8	serve	detect and train, eval, finetune chain through the provider registry	yolov8/src/caps.rs::tiny_checkpoint_detects_end_to_end;yolov8/src/caps.rs::train_eval_finetune_and_detect_chain_through_the_registry

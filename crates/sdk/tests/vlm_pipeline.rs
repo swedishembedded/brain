@@ -150,12 +150,22 @@ fn download_policy_offline_never_touches_the_network() {
 /// `ask_stream` honours the caller's token: one fired before the call is
 /// refused before the images are encoded, and one fired on the first decoded
 /// piece stops the answer at the next token, marked `"cancelled"`. Needs the
-/// real Qwen3-VL-4B-Instruct checkpoint in the model store.
+/// llama.cpp Qwen3-VL-4B-Instruct release (its language half and
+/// `mmproj-*.gguf`) in the model store.
 #[test]
 fn a_streamed_answer_stops_when_its_token_fires() {
-    let Ok(vlm) = brain::VisionLanguagePipeline::builder("Qwen/Qwen3-VL-4B-Instruct").download_policy(brain::DownloadPolicy::Offline).load() else {
-        brain_testutil::skip("VisionLanguagePipeline::ask_stream cancellation needs the Qwen/Qwen3-VL-4B-Instruct checkpoint in the model store");
-        return;
+    // Only an absent checkpoint skips: a store that holds it and still fails
+    // to load is this test's failure, not an unavailable fixture.
+    // The int8 decoder tier keeps the 4B within one 24 GiB card; at fp32 its
+    // footprint is about a whole card, and placement falls back to the host.
+    let builder = brain::VisionLanguagePipeline::builder("unsloth/Qwen3-VL-4B-Instruct-GGUF").download_policy(brain::DownloadPolicy::Offline).precision("int8").unwrap();
+    let vlm = match builder.load() {
+        Ok(vlm) => vlm,
+        Err(brain::Error::Missing(_)) => {
+            brain_testutil::skip("VisionLanguagePipeline::ask_stream cancellation needs the unsloth/Qwen3-VL-4B-Instruct-GGUF checkpoint in the model store");
+            return;
+        }
+        Err(other) => panic!("the checkpoint resolved but did not load: {other}"),
     };
     let image = brain::Image::from_rgb8(32, 32, vec![128u8; 32 * 32 * 3]).unwrap();
     let opts = || brain::VlmOptions::new().max_new_tokens(32);

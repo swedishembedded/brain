@@ -24,13 +24,15 @@ single image. For dedicated single-purpose captioning instead, see
 
 Model id: `brain/qwen3vl` (the served id itself is never fetched, per this
 project's naming grammar) - but `Qwen/Qwen3-VL-4B-Instruct` auto-fetches (⤓, opt-in
-`--autofetch`) on first CLI use, no env var needed. A HuggingFace-layout
-checkpoint dropped anywhere under the models directory is discovered
-automatically (`architectures[0] == "Qwen3VLForConditionalGeneration"`,
-resolved through `qwen3vl::spec::Qwen3VlSpec`); the `weights` param still
-names either checkpoint layout below outright, which is required for the
-GGUF pair (not yet resolver-discoverable). Which one a path is, is
-sniffed, never declared:
+`--autofetch`) on first CLI use, no env var needed. Either checkpoint layout
+below, dropped anywhere under the models directory, is discovered
+automatically through `qwen3vl::spec::Qwen3VlSpec`: a HuggingFace directory by
+its `architectures[0] == "Qwen3VLForConditionalGeneration"`, a GGUF pair by
+its language half's `general.architecture = "qwen3vl"`. The same resolution
+backs `brain serve`, `brain do qwen3vl generate` and the SDK's
+`VisionLanguagePipeline`, and all three build the model through the same
+loader (`qwen3vl::caps::Resident`). The `weights` param can also name either
+layout outright. Which one a path is, is sniffed, never declared:
 
 **HuggingFace safetensors** - a directory holding `config.json` +
 `model.safetensors[.index.json]` + `tokenizer.json`.
