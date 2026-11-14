@@ -82,23 +82,31 @@ release on the early return, and the bit declared.
 | rrdbnet | upscale | entry, per window of a tiled sweep | `certify` on synthetic weights |
 | minimaxmusic3 | generate | entry, per AR frame, per Euler step, per vocoded chunk | `admission` weight-free; `certify` over the Euler loop on a tiny DiT; AR and vocoder by reading |
 | qwen3omnimoe | generate (bf16 and int8), speak, converse, int8 raw generate | entry (the checkpoint now loads on first run, not on lookup), per token (`SeqState`), Talker and Code2Wav as before | `certify` over `serve_chat` with a canned Thinker |
+| lfm2 | eval, import | per validation batch; per tensor | `certify` on a tiny model; fixture import |
+| diamond | bench, replay verify | per frame | `certify` on the fake world model |
+| horizon | eval, calibrate | per (code, horizon) cell | `certify` on a trained tiny model |
+| toypid, toymoe | rollout, profile, eval, generate | per forward | `certify` on tiny trained checkpoints |
+| zipdepth | calib, train | per image; per step, answering the cancelled error | `certify` on the library loops |
+| yolov8 | train, finetune | per step; a stopped run saves, answers the cancelled error, last progress event is the step count | `certify` through the action |
+| splat | merge, prune | per chunk, stage and 4096 gaussians | `certify` on synthetic scenes |
+| forecast | compare | per scored window | `certify` |
+| chronos2, fincast, timesfm3, glmdsa, lfm2, qwen3, qwen3omnimoe, qwen3tts | import | per source tensor; a stopped import leaves no file | `certify` on tiny fixtures |
 | one-shots | lfm2 embed/fill_mask, sam2 segment, yolov8 detect, scrfd, arcface, clip, zipdepth infer, codeformer, t5encoder, vqgan, worldmirror2, splat render, imageops, demo, the mocks | entry | the catalog C2 test where the provider builds without weights |
 | already polling | the `SeqState` models, qwen3vl lora_train, flux2, wan, ltxv, qwen3tts synth/clone/design, supir, splat fit, deepseekvl, januspro, sam2 track, recon | entry check added where it was missing | their existing tests; C2 for admission |
 
 ## Open
 
-- **Entry check only, loop without a stop hook** (declared, but a fired token
-  is seen only on entry): lfm2 `eval` (`train::evaluate`), diamond `bench` and
-  `replay --verify` (`worldrun`), horizon `eval` and `calibrate`, toypid
-  `rollout`/`profile`, toymoe `eval`/`generate`, zipdepth `calib`
-  (activation statistics; image loading polls), splat `merge`/`prune`, the
-  `import`/`export`/`convert` actions (qwen3, qwen35, qwen3tts, glmdsa,
-  qwen3omnimoe, the forecasters, `resident_provider::import_spec`), qwen3
-  eval actions, forecast `compare`, trainjob `dryrun`/`consolidate`. Each
-  needs its library loop to take a keep-going callback, as florence2 and
-  rrdbnet did.
-- yolov8 and zipdepth `train` stop through their step callback but answer
-  `Ok` with the partial run, not `"cancelled"`.
+- **Entry check only, loop without a stop hook**: the `export` actions
+  (qwen3 `export_hf`/`export_gguf`/`export_peft`), qwen35's `import` and
+  `convert` (`gguf_import`, `fp8_source::write_converted_base`), huginn, ouro
+  and diamond `import`, qwen3's eval actions (`eval_actions.rs`), and trainjob
+  `check_dataset` (the per-record loop of `brain::check_dataset`) and `merge`
+  (`brain::merge_adapter` reaches each architecture's `export_checkpoint`
+  through `ChatEntry::export`). Each needs its library loop to take a
+  keep-going callback: `Invocation::keep_going` builds one that reports a
+  progress step per ask and answers whether the token is unfired,
+  `WeightReader::for_each_while` and `save_while` ask before each tensor, and
+  `StWriter::abandon` removes the unfinished file.
 - Real-weight mid-run proofs to run on a box with the checkpoints: llava
   caption, the SDK's `ask_stream`, flux1 and pulid, s3dit's edit actions,
   cosyvoice's flow loop, qwen3asr (the test above, with the LibriSpeech clip).
