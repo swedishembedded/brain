@@ -24,9 +24,6 @@ yanked = "deny"
 # entries below are crates reported unmaintained, with no maintained release
 # their dependents can take yet; each names who pulls it in and what retires it.
 ignore = [
-    { id = "RUSTSEC-2026-0370", reason = "zvariant: zbus 5 (brain-dbus, braintop); retired by moving to zbus 6, which carries it" },
-    { id = "RUSTSEC-2026-0371", reason = "zbus_names: zbus 5 (brain-dbus, braintop); retired by moving to zbus 6" },
-    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive: zbus 5 (brain-dbus, braintop); retired by moving to zbus 6" },
     { id = "RUSTSEC-2026-0192", reason = "ttf-parser: winit 0.30's Wayland client-side title bar (sctk-adwaita's ab_glyph) in sample-vision-fishtank; winit's other title-bar options drop the title text or link system FreeType and fontconfig, and its first release past 0.30 is a beta" },
     { id = "RUSTSEC-2024-0436", reason = "paste: a proc macro of rav1d 1.1 (brain-videocodec), its latest release; build-time only, no runtime code" },
 ]

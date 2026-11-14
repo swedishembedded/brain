@@ -11,7 +11,7 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 
 use nix::sys::socket::{recvmsg, ControlMessageOwned, MsgFlags};
 use serde_json::{json, Value};
-use zbus::zvariant::OwnedFd as ZOwnedFd;
+use zbus::OwnedFd as ZOwnedFd;
 
 use crate::support::{plain, rig, rollouts, work_is_clean, BASE};
 
@@ -63,7 +63,7 @@ fn a_job_over_the_bus_takes_its_dataset_as_a_descriptor_streams_its_steps_return
     rt.block_on(async {
         let manager = brain_dbus::service::Manager::new(rig.exec.clone()).with_training(true);
         let name = format!("com.swedishembedded.Brain1.traintest{}", std::process::id());
-        let _conn = zbus::connection::Builder::session().unwrap().name(name.as_str()).unwrap().serve_at(brain_dbus::OBJECT_PATH, manager).unwrap().build().await.unwrap();
+        let _conn = zbus::connection::Builder::session().name(name.as_str()).serve_at(brain_dbus::OBJECT_PATH, manager).build().await.unwrap();
         let client = zbus::Connection::session().await.unwrap();
         let proxy = zbus::Proxy::new(&client, name.as_str(), brain_dbus::OBJECT_PATH, "com.swedishembedded.Brain1.Manager").await.unwrap();
 
@@ -143,7 +143,7 @@ fn the_bus_refuses_a_job_that_names_what_only_the_host_may_choose() {
     rt.block_on(async {
         let manager = brain_dbus::service::Manager::new(rig.exec.clone()).with_training(true);
         let name = format!("com.swedishembedded.Brain1.trainrefuse{}", std::process::id());
-        let _conn = zbus::connection::Builder::session().unwrap().name(name.as_str()).unwrap().serve_at(brain_dbus::OBJECT_PATH, manager).unwrap().build().await.unwrap();
+        let _conn = zbus::connection::Builder::session().name(name.as_str()).serve_at(brain_dbus::OBJECT_PATH, manager).build().await.unwrap();
         let client = zbus::Connection::session().await.unwrap();
         let proxy = zbus::Proxy::new(&client, name.as_str(), brain_dbus::OBJECT_PATH, "com.swedishembedded.Brain1.Manager").await.unwrap();
         for extra in ["out_dir", "weights", "path"] {

@@ -173,13 +173,13 @@ pub fn serve(executor: Executor, opts: DbusOpts, serve_opts: ServeOpts) -> anyho
         let stats_executor = executor.clone();
         let manager = service::Manager::new(executor).with_supplier(supplier).with_admit_deadline(deadlines.admit).with_cold_build_admit_deadline(deadlines.cold_build).with_training(training).with_devices(devices);
         let builder = match &opts.bus {
-            BusKind::Session => zbus::connection::Builder::session()?,
-            BusKind::System => zbus::connection::Builder::system()?,
-            BusKind::Address(addr) => zbus::connection::Builder::address(addr.as_str())?,
+            BusKind::Session => zbus::connection::Builder::session(),
+            BusKind::System => zbus::connection::Builder::system(),
+            BusKind::Address(addr) => zbus::connection::Builder::address(addr.as_str()),
         };
         let conn = builder
-            .name(opts.name.as_str())?
-            .serve_at(OBJECT_PATH, manager)?
+            .name(opts.name.as_str())
+            .serve_at(OBJECT_PATH, manager)
             .build()
             .await?;
         eprintln!("brain: serving {} on the {:?} bus at {OBJECT_PATH}", opts.name, opts.bus);
@@ -202,7 +202,7 @@ pub fn serve(executor: Executor, opts: DbusOpts, serve_opts: ServeOpts) -> anyho
             BusKind::Address(addr) => eprintln!("brain: connect with: braintop --address \"{addr}\" --name {}", opts.name),
         }
         // The well-known name is owned and the object is served: this is a true
-        // "up" point. zbus 5's `Builder::name` acquires the name during `build()`
+        // "up" point. zbus's `Builder::name` acquires the name during `build()`
         // and errors above if it cannot, so reaching here means both succeeded.
         ready.bound("dbus");
         // Push the self-describing stats snapshot as the `StatsStream` signal at

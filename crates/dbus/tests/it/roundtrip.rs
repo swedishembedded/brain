@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use capability::{Action, ActionResult, ActionSpec, Blob, Invocation, Manifest, Media, Outcome, Progress, Provider};
 use serde_json::json;
-use zbus::zvariant::OwnedFd as ZOwnedFd;
+use zbus::OwnedFd as ZOwnedFd;
 
 /// Whether a session bus answers a connection. The address variable alone is
 /// not evidence: a container or a login that has ended can keep exporting it
@@ -146,11 +146,8 @@ fn run_roundtrips_a_result_over_an_fd() {
         // Unique name so parallel test runs don't collide.
         let name = format!("com.swedishembedded.Brain1.test{}", std::process::id());
         let _conn = zbus::connection::Builder::session()
-            .unwrap()
             .name(name.as_str())
-            .unwrap()
             .serve_at(brain_dbus::OBJECT_PATH, manager)
-            .unwrap()
             .build()
             .await
             .unwrap();
@@ -317,11 +314,8 @@ fn admit_deadline_sheds_a_saturated_lane() {
         let manager = brain_dbus::service::Manager::new(executor).with_admit_deadline(std::time::Duration::from_millis(300));
         let name = format!("com.swedishembedded.Brain1.admittest{}", std::process::id());
         let _conn = zbus::connection::Builder::session()
-            .unwrap()
             .name(name.as_str())
-            .unwrap()
             .serve_at(brain_dbus::OBJECT_PATH, manager)
-            .unwrap()
             .build()
             .await
             .unwrap();
@@ -376,10 +370,10 @@ fn plan_answers_over_the_bus_without_making_anything_resident() {
         let executor = residency::Executor::start(vec![rev], budgets, residency::Policy::default());
         let manager = brain_dbus::service::Manager::new(executor);
         let name = format!("com.swedishembedded.Brain1.plantest{}", std::process::id());
-        let _conn = zbus::connection::Builder::session().unwrap().name(name.as_str()).unwrap().serve_at(brain_dbus::OBJECT_PATH, manager).unwrap().build().await.unwrap();
+        let _conn = zbus::connection::Builder::session().name(name.as_str()).serve_at(brain_dbus::OBJECT_PATH, manager).build().await.unwrap();
 
         let client = zbus::Connection::session().await.unwrap();
-        let proxy = brain_dbus::client::ManagerProxy::builder(&client).destination(name.as_str()).unwrap().path(brain_dbus::OBJECT_PATH).unwrap().build().await.unwrap();
+        let proxy = brain_dbus::client::ManagerProxy::builder(&client).destination(name.as_str()).path(brain_dbus::OBJECT_PATH).build().await.unwrap();
 
         let json = proxy.plan("rev", "reverse", r#"{"text":"brain"}"#).await.expect("Plan must answer over the bus");
         let plan: serde_json::Value = serde_json::from_str(&json).expect("Plan returns RunPlan JSON");

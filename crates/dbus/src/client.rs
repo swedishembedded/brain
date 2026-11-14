@@ -94,14 +94,14 @@ pub async fn connect(opts: &DbusOpts) -> zbus::Result<ManagerProxy<'static>> {
         BusKind::Session => zbus::Connection::session().await?,
         BusKind::System => zbus::Connection::system().await?,
         BusKind::Address(addr) => {
-            zbus::connection::Builder::address(addr.as_str())?
+            zbus::connection::Builder::address(addr.as_str())
                 .build()
                 .await?
         }
     };
     ManagerProxy::builder(&conn)
-        .destination(opts.name.clone())?
-        .path(OBJECT_PATH)?
+        .destination(opts.name.clone())
+        .path(OBJECT_PATH)
         .build()
         .await
 }

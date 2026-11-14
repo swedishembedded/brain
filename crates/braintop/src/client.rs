@@ -120,15 +120,15 @@ async fn connect(opts: &ConnOpts) -> Result<zbus::Connection> {
     let conn = match &opts.bus {
         Bus::Session => zbus::Connection::session().await.context("session bus")?,
         Bus::System => zbus::Connection::system().await.context("system bus")?,
-        Bus::Address(addr) => zbus::connection::Builder::address(addr.as_str())?.build().await.context("address")?,
+        Bus::Address(addr) => zbus::connection::Builder::address(addr.as_str()).build().await.context("address")?,
     };
     Ok(conn)
 }
 
 async fn build_proxy<'a>(conn: &zbus::Connection, opts: &ConnOpts) -> Result<ManagerProxy<'a>> {
     let proxy = ManagerProxy::builder(conn)
-        .destination(opts.name.clone())?
-        .path(opts.path.clone())?
+        .destination(opts.name.clone())
+        .path(opts.path.clone())
         .build()
         .await
         .context("building Manager proxy")?;

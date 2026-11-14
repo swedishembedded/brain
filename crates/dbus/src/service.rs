@@ -21,7 +21,7 @@ use residency::{Executor, Job, ModelSupplier, Supply};
 use serde_json::{json, Value};
 use zbus::fdo;
 use zbus::object_server::SignalEmitter;
-use zbus::zvariant::OwnedFd as ZOwnedFd;
+use zbus::OwnedFd as ZOwnedFd;
 
 use crate::fd::{bytes_to_fd, read_fd_to_vec};
 use crate::stream::StreamTx;
