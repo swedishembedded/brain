@@ -553,7 +553,8 @@ def _ft_eval(base, ad):
 
 def _job(job):
     """One process of the parallel runs. ('runs', nudge): both stages straight (no kill), evaluated, and the server run on the
-    result. ('kill_pre',): the base run killed after PRE_KILL updates and resumed (correctly, and without its moments).
+    result. ('kill_pre',): the base run killed after PRE_KILL updates and resumed. Each 'runs' job also resumes its own base run from
+    the same generation with the moments set to zero.
     ('kill_ft', base, owner): the adapter run on `base` killed after FT_KILL updates and resumed."""
     kind = job[0]
     if kind == "runs":
@@ -564,7 +565,11 @@ def _job(job):
         for stop in range(PRE_EVERY, PRE_STEPS + 1, PRE_EVERY):
             _advance(cfg, st, stop)
             evals[stop] = _pre_eval(st["p"])
+            if stop == PRE_KILL // PRE_EVERY * PRE_EVERY:
+                restart = _copy(st)                                 # the generation a kill after PRE_KILL updates resumes from
         base = list(st["p"])
+        restart["m"], restart["v"] = [0.0] * len(base), [0.0] * len(base)
+        no_moments = _advance(cfg, restart, PRE_STEPS)
         ft = pst._fresh(_init_adapters())
         fevals = {0: _ft_eval(base, ft["p"])}
         fcfg = _ft_cfg(base)
@@ -573,7 +578,8 @@ def _job(job):
             fevals[stop] = _ft_eval(base, ft["p"])
         served = _serve_summary(_merged(base, ft["p"]))
         out = {"nudge": nudge, "pre": evals, "base": base, "ft": fevals, "ad": list(ft["p"]), "served": served,
-               "base_after": list(fcfg["base"])}
+               "base_after": list(fcfg["base"]),
+               "no_moments": {"p": no_moments["p"], "right": _pre_eval(no_moments["p"])["right"]}}
         if nudge == 0.0:
             out["kill_ft"] = _job(("kill_ft", base, _hex(_f64(base))))
         return out
@@ -583,11 +589,8 @@ def _job(job):
         st = None                                                   # the process is gone; only the disk is left
         on_disk = pst._generations(disk)
         got, gen = pst._restore(disk, owner)
-        bare = _copy(got)
-        bare["m"], bare["v"] = [0.0] * len(bare["p"]), [0.0] * len(bare["p"])
-        resumed = _advance(_pre_cfg(), _copy(got), PRE_STEPS)
-        no_moments = _advance(_pre_cfg(), bare, PRE_STEPS)
-        return {"on_disk": on_disk, "gen": gen, "resumed": resumed, "no_moments": no_moments}
+        resumed = _advance(_pre_cfg(), got, PRE_STEPS)
+        return {"on_disk": on_disk, "gen": gen, "resumed": resumed}
     if kind == "kill_ft":
         base, owner = job[1], job[2]
         disk = {}
@@ -644,14 +647,16 @@ def training_stages():
     frozen = all(_bits(r["base"], r["base_after"]) for r in runs.values())
     t1 = _table(["updates", "held-out loss (nats per target token)", "held-out answers right"], pre, "rrr")
     t2 = _table(["updates", "held-out loss on the new form", "new-form answers right", "old-form answers right"], ft, "rrrr")
-    nm = kp["no_moments"]["p"]
+    dev = [_maxdev(r["no_moments"]["p"], r["base"]) for r in (runs[0.0], *(runs[n] for n in stable.NUDGES))]
+    assert min(dev) > 1e-9, dev
+    deviation = stable.text(dev[0], dev[1:], lambda x: f"{x:.2g}")
     restored = (f"The base run with a generation every {PRE_EVERY} updates (the commit of the Volume XIII project: `values.bin`, "
                 f"`state.bin`, `meta.json` last, then the rename; two newest generations kept; the meta's owner field is the digest of "
                 f"`tokenizer.bin`), killed after {PRE_KILL} updates, leaves {', '.join(kp['on_disk'])}; the reader accepts {kp['gen']}, "
                 f"and the second process repeats the updates from there to {PRE_STEPS}: its {_int(len(ref['base']))} numbers are "
                 f"{'the same 64-bit patterns as' if _bits(kp['resumed']['p'], ref['base']) else 'NOT the same bits as'} the run that was "
-                f"never killed. Resumed with the moments set to zero, it ends {_maxdev(nm, ref['base']):.2g} from it at the largest entry "
-                f"(FAILS against 1e-9) and answers {_pre_eval(nm)['right']} of {n_val} held-out prompts right. The adapter run with a "
+                f"never killed. Resumed with the moments set to zero, it ends {deviation} from it at the largest entry "
+                f"(FAILS against 1e-9) and answers {_same(lambda r: r['no_moments']['right'])} of {n_val} held-out prompts right. The adapter run with a "
                 f"generation every {FT_EVERY} updates (owner field: the digest of the base), killed after {FT_KILL} updates, leaves "
                 f"{', '.join(kf['on_disk'])}; the reader accepts {kf['gen']}, and the resumed adapter numbers are "
                 f"{'the same 64-bit patterns as' if _bits(kf['resumed']['p'], ref['ad']) else 'NOT the same bits as'} the straight run's.")
@@ -664,7 +669,7 @@ def training_stages():
             f"pooled mean over the {len(rows()['pre_val'])} held-out rows; an answer is right when the greedy continuation of the first "
             f"sentence and its full stop (the reference rule: the whole context through the network at every token, the largest "
             f"logit, the lowest id on a tie, stopping at EOT or after {T} tokens or a full row) decodes to the held-out second "
-            f"sentence. {stable.RULE} All five runs agree on every count of answers.\n\n" + t1
+            f"sentence. {stable.RULE} All five runs agree on every count of answers (the resume without moments included: each run is also resumed without its moments from its own generation 100).\n\n" + t1
             + f"\n\nThe adapter run on the frozen base after {PRE_STEPS} updates: {FT_STEPS} updates of {B} draws from the "
             f"{len(rows()['ft'])} fine-tuning rows (seed {_seed(NAME_ORDER_FT)}), the forward pass with every adapted matrix merged "
             f"as W0 + s (B A)^T, the adapter gradient (dA, dB) = (s B^T G^T, s G^T A^T) from the gradient G of the stored matrix, Adam "
@@ -935,7 +940,7 @@ def artifacts():
     swapped = dict(files)
     swapped["tokenizer.bin"] = tokenizer_bytes(every)
     cases.append(("tokenizer.bin rebuilt from training and held-out documents", load(swapped)))
-    other = package(kp["no_moments"]["p"], kf["resumed"]["p"], trained_on=_hex(_f64(kp["resumed"]["p"])))
+    other = package(runs[0.0]["no_moments"]["p"], kf["resumed"]["p"], trained_on=_hex(_f64(kp["resumed"]["p"])))
     cases.append(("base.bin from the run resumed without its moments, manifest rewritten for it", load(other)))
     flipped = dict(files)
     blob = bytearray(files["adapter.bin"])
@@ -959,7 +964,7 @@ def artifacts():
             + _table(["what the server is given", "loader"], lines, "ll"))
 
 
-def _path_counts(base, ad, reqs, every):
+def _path_counts(base, ad, reqs, every, no_moments):
     """The counts of the whole-path table that depend only on the trained numbers: for each build, the answers equal to the
     reference's offline answers and the answers that are the held-out second sentence (requests allowed 6 tokens)."""
     tk = tokenizer()
@@ -977,7 +982,8 @@ def _path_counts(base, ad, reqs, every):
     swapped["tokenizer.bin"] = tokenizer_bytes(every)
     tk_x, p_x = load(swapped, check=False)
     tk_n, p_n = load(files, apply_adapter=False)
-    return {"system": counts(p_s, tk_s), "tokenizer": counts(p_x, tk_x),
+    tk_o, p_o = load(package(no_moments, ad, trained_on=_hex(_f64(base))), check=False)
+    return {"no moments": counts(p_o, tk_o), "system": counts(p_s, tk_s), "tokenizer": counts(p_x, tk_x),
             "unmerged": counts(p_n, tk_n), "eight-bit": counts(quantized(p_s), tk_s),
             "position": counts(p_s, tk_s, "batch position")}
 
@@ -988,18 +994,13 @@ def whole_path():
     reqs = requests()
     c = corpora()
     every = tokenizer_from_bytes(tokenizer_bytes(tg.Tokenizer(c["base"][0] + c["base"][1], MERGES)))
-    per_run = [_path_counts(runs[n]["base"], runs[n]["ad"], reqs, every) for n in (0.0, *stable.NUDGES)]
+    per_run = [_path_counts(runs[n]["base"], runs[n]["ad"], reqs, every, runs[n]["no_moments"]["p"])
+               for n in (0.0, *stable.NUDGES)]
     assert all(x == per_run[0] for x in per_run), per_run
     k = per_run[0]
     resumed = (kp["resumed"]["p"], kf["resumed"]["p"])
     same_numbers = _bits(resumed[0], ref["base"]) and _bits(resumed[1], ref["ad"])
-    sys_counts = _path_counts(resumed[0], resumed[1], reqs, every)["system"]
-    other = package(kp["no_moments"]["p"], kf["resumed"]["p"], trained_on=_hex(_f64(kp["resumed"]["p"])))
-    tk_o, p_o = load(other, check=False)
-    offline = _offline(_merged(ref["base"], ref["ad"]), tokenizer(), reqs)
-    r_o = serve(p_o, tk_o, reqs)
-    o_same = sum(1 for j in offline if r_o["done"][j]["tokens"] == offline[j])
-    o_right = sum(1 for j, _, _, mx, exp in reqs if mx == 6 and tk_o.decode(r_o["done"][j]["tokens"]) == exp)
+    sys_counts = _path_counts(resumed[0], resumed[1], reqs, every, ref["no_moments"]["p"])["system"]
     n, n_full = len(reqs), sum(1 for m in MAX_NEW if m == 6)
     pair = lambda xy: (f"{xy[0]} of {n}", f"{xy[1]} of {n_full}")
     rows_ = [("the reference: straight runs, the answers computed offline one request at a time", "-", "-", f"{n} of {n}",
@@ -1009,7 +1010,7 @@ def whole_path():
              ("tokenizer rebuilt by the server from training and held-out documents", "same bits", "refused (tokenizer.bin)",
               *pair(k["tokenizer"])),
              ("base resumed without its moments, served with the adapter of the right base", "FAILS (base)",
-              "refused (trained on another base)", f"{o_same} of {n}", f"{o_right} of {n_full}"),
+              "refused (trained on another base)", *pair(k["no moments"])),
              ("the adapter not merged by the server", "same bits", "accepted", *pair(k["unmerged"])),
              ("the system serving 8-bit weights (a tolerance, not a mistake)", "same bits", "accepted", *pair(k["eight-bit"])),
              ("one position for every decode row of an iteration", "same bits", "accepted", f"{k['position'][0]} of {n}", "-")]
@@ -1020,8 +1021,8 @@ def whole_path():
             "is given with the reference's (the bits, or the criterion 1e-9 at the largest entry); 'loader' is what the loader with "
             "its checks says; the last two columns are what the server answers when the files are loaded without the checks: answers "
             f"equal to the reference's offline answers, and answers that are the held-out second sentence, among the {n_full} requests "
-            "allowed 6 tokens. The five runs of the stable-digits rule give the same counts in every row but that of the resume "
-            "without moments, which is computed for the un-nudged run alone.\n\n"
+            "allowed 6 tokens. The five runs of the stable-digits rule give the same counts in every row (the resume without moments is "
+            "taken from each run's own generation 100).\n\n"
             + _table(["build", "trained numbers", "loader", "same as the reference", "right answers"], rows_, "lllrr"))
 
 
