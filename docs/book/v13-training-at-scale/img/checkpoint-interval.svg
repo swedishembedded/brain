@@ -1,0 +1,31 @@
+<!-- source-sha256: 7c2c053265372d152d38cf8eddc7b4667232cafb1d066b6a768f1fff70c9d15b -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 620 405" width="620" height="405">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="620" height="405" fill="#ffffff"/>
+<line x1="172.83" y1="334" x2="172.83" y2="30" stroke="#edf2f7"/>
+<text x="172.83" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">10</text>
+<line x1="337.11" y1="334" x2="337.11" y2="30" stroke="#edf2f7"/>
+<text x="337.11" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">100</text>
+<line x1="501.4" y1="334" x2="501.4" y2="30" stroke="#edf2f7"/>
+<text x="501.4" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">1,000</text>
+<line x1="58" y1="334" x2="602" y2="334" stroke="#edf2f7"/>
+<text x="52" y="338" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">1</text>
+<line x1="58" y1="258" x2="602" y2="258" stroke="#edf2f7"/>
+<text x="52" y="262" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">1.5</text>
+<line x1="58" y1="182" x2="602" y2="182" stroke="#edf2f7"/>
+<text x="52" y="186" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">2</text>
+<line x1="58" y1="106" x2="602" y2="106" stroke="#edf2f7"/>
+<text x="52" y="110" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">2.5</text>
+<line x1="58" y1="30" x2="602" y2="30" stroke="#edf2f7"/>
+<text x="52" y="34" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">3</text>
+<rect x="58" y="30" width="544" height="304" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="544" height="304"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#2b6cb0" stroke-width="2.0" points="119.82,77.55 132.18,118.26 144.55,152.47 156.91,181.24 169.27,205.42 181.64,225.74 194,242.81 206.36,257.14 218.73,269.18 231.09,279.27 243.45,287.73 255.82,294.81 268.18,300.72 280.55,305.63 292.91,309.71 305.27,313.06 317.64,315.8 330,317.99 342.36,319.72 354.73,321.02 367.09,321.94 379.45,322.5 391.82,322.72 404.18,322.6 416.55,322.14 428.91,321.3 441.27,320.07 453.64,318.37 466,316.16 478.36,313.32 490.73,309.73 503.09,305.23 515.45,299.57 527.82,292.45 540.18,283.45 552.55,271.96 564.91,257.13 577.27,237.73 589.64,211.85 602,176.58"/><circle cx="395.29" cy="322.72" r="5" fill="#2b6cb0"/><text x="405.26" y="304.48" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="start">tau* = 226</text><polyline fill="none" stroke="#c05621" stroke-width="2.0" points="119.82,65.09 132.18,106.22 144.55,140.68 156.91,169.51 169.27,193.57 181.64,213.58 194,230.14 206.36,243.76 218.73,254.82 231.09,263.67 243.45,270.55 255.82,275.67 268.18,279.14 280.55,281.05 292.91,281.41 305.27,280.17 317.64,277.18 330,272.22 342.36,264.91 354.73,254.7 367.09,240.76 379.45,221.82 391.82,195.98 404.18,160.22 416.55,109.62 428.91,35.84"/><circle cx="297.01" cy="281.18" r="5" fill="#c05621"/><text x="306.98" y="302.46" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="start">tau* = 57</text></g>
+<text x="330" y="370" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">steps between checkpoints (logarithmic axis)</text>
+<text x="14" y="182" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 182)">steps of work per step of progress</text>
+<text x="330" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Checkpoint interval, c = 8 steps</text>
+<line x1="123.23" y1="393" x2="143.23" y2="393" stroke="#2b6cb0" stroke-width="2"/>
+<text x="149.23" y="397" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">64 devices, M = 3200 steps</text>
+<line x1="313.7" y1="393" x2="333.7" y2="393" stroke="#c05621" stroke-width="2"/>
+<text x="339.7" y="397" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">1,024 devices, M = 200 steps</text>
+</svg>

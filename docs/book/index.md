@@ -208,4 +208,5 @@ historical sections draw on in the [Chronology](history/chronology.md).
 4. [Parameter-Efficient Fine-Tuning](v13-training-at-scale/04-peft.md): How can we adapt a billion-parameter model by training only a few million numbers?
 5. [Parallel and Distributed Training](v13-training-at-scale/05-parallelism.md): How is one training run spread across many devices without changing its result?
 6. [Distillation](v13-training-at-scale/06-distillation.md): How does a small model learn from a large one?
+7. [Checkpoints, Determinism and Recovery](v13-training-at-scale/07-checkpoints-and-recovery.md): How does a long training run survive a crash and still produce the same model?
 <!-- /contents -->

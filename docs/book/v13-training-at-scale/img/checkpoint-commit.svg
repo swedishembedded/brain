@@ -1,0 +1,38 @@
+<!-- source-sha256: 59d1788619ac23c3c670b0b19ed3734503cd29f9f07a2b7239eec40483afce35 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 340" width="1000" height="340"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker><marker id="head-c53030" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#c53030"/></marker></defs><rect width="1000" height="340" fill="#ffffff"/>
+<rect x="25" y="40" width="170" height="60" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="110" y="66.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">values.bin</text>
+<text x="110" y="82.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">write, fsync</text>
+<rect x="255" y="40" width="170" height="60" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="340" y="66.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">state.bin</text>
+<text x="340" y="82.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">write, fsync</text>
+<rect x="485" y="40" width="170" height="60" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="570" y="66.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">meta.json, last</text>
+<text x="570" y="82.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">lengths, digests, step</text>
+<rect x="715" y="40" width="170" height="60" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="800" y="66.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">rename to gen-N</text>
+<text x="800" y="82.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">fsync of the root</text>
+<line x1="198" y1="70" x2="252" y2="70" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="428" y1="70" x2="482" y2="70" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="658" y1="70" x2="712" y2="70" stroke="#c53030" stroke-width="1.4" marker-end="url(#head-c53030)"/>
+<text x="685" y="61.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#c53030" text-anchor="middle">commit</text>
+<text x="340" y="22.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">written inside tmp-N-pid, a name no reader looks for</text>
+<ellipse cx="340" cy="250" rx="85" ry="30" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="340" y="246.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">restore</text>
+<text x="340" y="262.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">newest that verifies</text>
+<rect x="485" y="220" width="170" height="60" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="570" y="246.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">gen-(N-1)</text>
+<text x="570" y="262.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">kept, digests recomputed</text>
+<rect x="715" y="220" width="170" height="60" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="800" y="246.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">gen-N</text>
+<text x="800" y="262.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">digests recomputed</text>
+<line x1="800" y1="103" x2="800" y2="217" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="809" y="164.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">publishes</text>
+<line x1="482" y1="250" x2="428" y2="250" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="455" y="241.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">second</text>
+<path d="M800,280 L800,302 Q800,312 790,312 L350,312 Q340,312 340,302 L340,283" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="685" y="332.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">first: gen-N, and gen-(N-1) when gen-N fails its digests</text>
+<text x="110" y="238.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">a crash before</text>
+<text x="110" y="254.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">the rename leaves</text>
+<text x="110" y="270.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">these as they were</text>
+</svg>

@@ -19,5 +19,5 @@ You can write the records of a fine-tuning set as ids, a mask and start offsets,
 4. [Parameter-Efficient Fine-Tuning](04-peft.md): how can we adapt a billion-parameter model by training only a few million numbers?
 5. [Parallel and Distributed Training](05-parallelism.md): how is one training run spread across many devices without changing its result?
 6. [Distillation](06-distillation.md): how does a small model learn from a large one?
-7. Checkpoints, Determinism and Recovery: how does a long training run survive a crash and still produce the same model?
+7. [Checkpoints, Determinism and Recovery](07-checkpoints-and-recovery.md): how does a long training run survive a crash and still produce the same model?
 8. Project: Scaling a Training Run: can you move a training run from one device to several without changing what it learns?
