@@ -126,6 +126,15 @@ pub struct GrpoStats {
     /// k3 KL to the reference, summed over supervised tokens and their count.
     pub kl_sum: f64,
     pub kl_tokens: usize,
+    /// Trained tokens with a non-zero advantage, and of those the ones the clipped surrogate left without gradient:
+    /// a positive advantage whose ratio passed the upper edge of the band, a negative one whose ratio fell under the
+    /// lower edge.
+    #[serde(default)]
+    pub signed_tokens: usize,
+    #[serde(default)]
+    pub clipped_high: usize,
+    #[serde(default)]
+    pub clipped_low: usize,
 }
 
 impl GrpoStats {
@@ -156,6 +165,12 @@ impl GrpoStats {
         }
     }
 
+    pub(crate) fn record_clipping(&mut self, terms: &super::pg_batch::BatchTerms) {
+        self.signed_tokens += terms.signed_tokens;
+        self.clipped_high += terms.clipped_high;
+        self.clipped_low += terms.clipped_low;
+    }
+
     pub(crate) fn refuse(&mut self, why: RowRefusal) {
         self.rows_refused += 1;
         self.last_refusal = Some(why);
@@ -164,6 +179,11 @@ impl GrpoStats {
     /// Mean k3 KL to the reference over every trained token, when one was measured.
     pub fn mean_kl(&self) -> Option<f32> {
         (self.kl_tokens > 0).then(|| (self.kl_sum / self.kl_tokens as f64) as f32)
+    }
+
+    /// Share of the signed tokens trained so far that the clipped surrogate left without gradient, when any was trained.
+    pub fn clip_fraction(&self) -> Option<f32> {
+        (self.signed_tokens > 0).then(|| (self.clipped_high + self.clipped_low) as f32 / self.signed_tokens as f32)
     }
 
     /// Fraction of sampled groups that carried no signal.
@@ -189,6 +209,10 @@ impl GrpoStats {
         ];
         if let Some(kl) = self.mean_kl() {
             m.push(("grpo_kl_ref", kl));
+        }
+        if let Some(clipped) = self.clip_fraction() {
+            let share = |n: usize| n as f32 / self.signed_tokens as f32;
+            m.extend([("grpo_clip_frac", clipped), ("grpo_clip_frac_high", share(self.clipped_high)), ("grpo_clip_frac_low", share(self.clipped_low))]);
         }
         m
     }

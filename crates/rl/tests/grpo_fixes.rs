@@ -335,6 +335,52 @@ fn the_logged_kl_is_the_analytic_one() {
     assert!((got - want).abs() < 1e-4, "logged {got}, analytic {want}");
 }
 
+/// The logged clip fraction is the share of signed tokens a step's clipped surrogate leaves without gradient,
+/// counted from an independent forward and the band's definition. On the sampler's ratio basis the behaviour
+/// log-probabilities are the scripted ones, chosen far from the policy's own (about `-ln 23`): a token scripted at
+/// `-12` has a ratio far above the upper edge and one scripted at `-0.1` far below the lower edge, so both edges are
+/// reached and so is the inside of the band, for either sign of the advantage.
+#[test]
+fn the_logged_clip_fraction_is_the_one_the_band_gives() {
+    let s = seed();
+    let (mut m, _, _) = lora_model(s);
+    let (judge, _) = Judge::new(first_wins);
+    let scripted_lp = |tokens: &[u32], lp: &[f32]| Completion { logprobs: lp.to_vec(), ..completion(tokens) };
+    let rewarded = (vec![4u32, 5, 6], vec![-12.0f32, -0.1, -3.0]);
+    let punished = (vec![6u32, 6, 5, 4], vec![-0.1f32, -12.0, -0.1, -3.0]);
+    let group = vec![scripted_lp(&rewarded.0, &rewarded.1), scripted_lp(&punished.0, &punished.1)];
+    let options = GrpoOptions { ratio_basis: RatioBasis::Sampler, ..GrpoOptions::default() };
+    let cfg = config(2, 1.0, options);
+    let (low, high) = (cfg.clip_eps, cfg.options.clip_eps_high);
+    let mut obj = scripted(Env { variable: always_variable }, judge, cfg, group);
+    obj.prepare(&mut m).unwrap();
+    obj.micro_steps(&m, &mut Rng::new(s), 2);
+    assert!(matches!(verdict(&mut obj), StepVerdict::Apply));
+
+    // The weights did not move, so this forward is the policy the step scored.
+    let (mut signed, mut clipped_high, mut clipped_low) = (0usize, 0usize, 0usize);
+    for ((tokens, behaviour), advantage_sign) in [(&rewarded, 1.0f64), (&punished, -1.0)] {
+        let row: Vec<u32> = grpo_common::PROMPT.iter().chain(tokens.iter()).copied().collect();
+        let targets: Vec<u32> = (0..row.len()).map(|i| if i + 1 >= grpo_common::PROMPT.len() && i + 1 < row.len() { row[i + 1] } else { IGNORE }).collect();
+        let lp = model::logprobs::token_logprobs(&m, &row, &targets).expect("logits");
+        for (k, &old) in behaviour.iter().enumerate() {
+            let ratio = (f64::from(lp[grpo_common::PROMPT.len() - 1 + k]) - f64::from(old)).exp();
+            signed += 1;
+            clipped_high += usize::from(advantage_sign > 0.0 && ratio > 1.0 + f64::from(high));
+            clipped_low += usize::from(advantage_sign < 0.0 && ratio < 1.0 - f64::from(low));
+        }
+    }
+    assert!(clipped_high > 0 && clipped_low > 0 && clipped_high + clipped_low < signed, "the script reaches both edges and the inside: {clipped_high} high, {clipped_low} low of {signed}");
+    let st = obj.stats();
+    assert_eq!((st.signed_tokens, st.clipped_high, st.clipped_low), (signed, clipped_high, clipped_low), "the step's clip counts");
+    let want = (clipped_high + clipped_low) as f32 / signed as f32;
+    assert_eq!(st.clip_fraction(), Some(want));
+    let logged: std::collections::HashMap<_, _> = Objective::<Qwen>::metrics(&obj).into_iter().collect();
+    assert_eq!(logged.get("grpo_clip_frac"), Some(&want), "the logged clip fraction: {logged:?}");
+    assert_eq!(logged.get("grpo_clip_frac_high"), Some(&(clipped_high as f32 / signed as f32)));
+    assert_eq!(logged.get("grpo_clip_frac_low"), Some(&(clipped_low as f32 / signed as f32)));
+}
+
 /// A loss probe samples and scores a group without queuing, logging or counting it.
 #[test]
 fn a_loss_probe_leaves_the_objective_untouched() {

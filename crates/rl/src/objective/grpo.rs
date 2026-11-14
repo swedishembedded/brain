@@ -698,6 +698,7 @@ impl<E: Environment, V: Verifier> Grpo<E, V> {
         let terms = backward_weighted(model, &batch, &spec, denominator);
         let ratio_dev = if row.version == self.version { terms.max_ratio_dev } else { 0.0 };
         self.stats.record_row(ratio_dev, row.has_ref.then_some((terms.kl_sum, row.supervised)));
+        self.stats.record_clipping(&terms);
         (terms.loss / denominator.unwrap_or(row.supervised as f32), terms.finite)
     }
 }
