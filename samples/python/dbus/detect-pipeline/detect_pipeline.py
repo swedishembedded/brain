@@ -82,7 +82,7 @@ def main() -> int:
         print("models:", models)
         for need in ("brain/s3dit", "brain/yolov8"):
             if need not in models:
-                skip(f"'{need}' not served (set its weights env)")
+                skip(f"'{need}' not served (no checkpoint for it in the server's model store)")
 
         # Step 1 - generate. Save the raw z-image output.
         print(f"[1/3 generate] z-image {SIZE}x{SIZE}: {PROMPT!r}")

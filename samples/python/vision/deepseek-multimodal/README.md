@@ -35,7 +35,7 @@ you already launched instead with `--base-url` and `--keys-file`.
 |---|---|
 | `chat` / `draw` | required |
 | `--model ID` | `brain/deepseekvl` (chat), `brain/januspro` (draw) |
-| `--image PATH` | the quickstart's seed image |
+| `--image PATH` | the getting-started guide's seed image |
 | `--question TEXT` | `What is in this image? Answer in one sentence.` |
 | `--max-tokens N` | `128` |
 | `--prompt TEXT` | `A red apple on a wooden table.` |

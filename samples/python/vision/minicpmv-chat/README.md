@@ -32,7 +32,7 @@ you already launched instead with `--base-url` and `--keys-file`.
 | flag | default |
 |---|---|
 | `--model ID` | `brain/minicpmv` |
-| `--image PATH` (repeatable) | the quickstart's seed image |
+| `--image PATH` (repeatable) | the getting-started guide's seed image |
 | `--question TEXT` | `What is in this image? Answer in one sentence.` |
 | `--tool` | off |
 | `--max-tokens N` | `128` |

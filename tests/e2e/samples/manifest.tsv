@@ -5,28 +5,28 @@ samples/python/api/deepseek-chat/deepseek_chat.py	run	--model brain/mock exercis
 samples/python/api/fim-completion/fim_completion.py	skip	needs a checkpoint with fill-in-the-middle tokens (deepseek-coder base); real run in tests/e2e/deepseek_chat.bats
 samples/python/asr/bench-streams/bench_streams.py	skip	needs real ASR weights (nemotron/qwen-asr); mock ASR streaming is a deferred follow-up
 samples/python/asr/transcribe-mic/transcribe_mic.py	skip	needs real ASR weights; mock ASR streaming is a deferred follow-up
-samples/python/dbus/brain-dbus/brain_dbus.py	run	imageops path always runs against the mock; the z-image path self-skips without BRAIN_S3DIT_*
-samples/shell/dbus/busctl-smoke/busctl_smoke.sh	run	BRAIN_DBUS_EXTERNAL=1 reuses the harness's own server (two servers can't share one bus name)
+samples/python/dbus/brain-dbus/brain_dbus.py	run	imageops path always runs against the mock; the z-image path self-skips with no Z-Image checkpoint in the model store
+samples/shell/dbus/busctl-smoke/busctl_smoke.sh	run	--external reuses the harness's own server (two servers can't share one bus name)
 samples/python/dbus/detect-pipeline/detect_pipeline.py	skip	needs real z-image + yolo weights; the mock model has no detect action
-samples/python/embedding/clip-embed/clip_embed.py	skip	hardcodes brain/clip (no --model override); needs BRAIN_CLIP_DIR
+samples/python/embedding/clip-embed/clip_embed.py	skip	hardcodes brain/clip (no --model override); needs a CLIP checkpoint in the model store (or --pin clip.towers=DIR)
 samples/python/embedding/embed-document/embed_document.py	run	--model mock exercises the fd-in/fd-out embed contract for real
-samples/python/embedding/lfm2-embed/lfm2_embed.py	skip	hardcodes brain/lfm2 (no --model override); needs BRAIN_LFM2 + BRAIN_LFM2_TOKENIZER
-samples/python/embedding/t5-embed/t5_embed.py	skip	hardcodes brain/t5encoder (no --model override); needs BRAIN_T5ENCODER_DIR
+samples/python/embedding/lfm2-embed/lfm2_embed.py	skip	hardcodes brain/lfm2 (no --model override); needs an LFM2 checkpoint in the model store
+samples/python/embedding/t5-embed/t5_embed.py	skip	hardcodes brain/t5encoder (no --model override); needs a T5 encoder in the model store
 samples/python/forecast/forecast-client/forecast_client.py	run	--model mock exercises the forecast wire contract for real
-samples/python/imagegen/controlnet/controlnet_generate.py	skip	hardcodes brain/sdxl-controlnet (no --model override); needs BRAIN_SDXL_DIR + BRAIN_CONTROLNET_DIR
-samples/python/imagegen/flux1/flux1_generate.py	skip	hardcodes brain/flux1 (no --model override); needs BRAIN_FLUX1_DIR
+samples/python/imagegen/controlnet/controlnet_generate.py	skip	hardcodes brain/sdxl-controlnet (no --model override); needs SDXL and ControlNet checkpoints in the model store
+samples/python/imagegen/flux1/flux1_generate.py	skip	hardcodes brain/flux1 (no --model override); needs a FLUX.1 checkpoint in the model store
 samples/python/imagegen/flux2-klein/cancel_generation.py	run	--model mock with --mock-delay-ms on the server so the cancel race is observable
 samples/python/imagegen/flux2-klein/edit_image.py	skip	needs real FLUX.2 weights; the mock model has no edit action
 samples/python/imagegen/flux2-klein/generate.py	run	--model mock streams real denoise ticks and returns a real image blob
-samples/python/imagegen/pulid/pulid_generate.py	skip	hardcodes brain/flux1-pulid (no --model override); needs BRAIN_FLUX1_DIR + BRAIN_PULID_DIR + BRAIN_ARCFACE_DIR + BRAIN_CLIP_DIR
+samples/python/imagegen/pulid/pulid_generate.py	skip	hardcodes brain/flux1-pulid (no --model override); needs FLUX.1, PuLID, ArcFace and CLIP checkpoints in the model store
 samples/python/imagegen/sdxl/sdxl_generate.py	skip	hardcodes brain/sdxl (no --model override); needs SDXL in the model store
 samples/shell/imagegen/face-swap/face_swap.sh	skip	direct-CLI (no D-Bus); needs real FLUX.2 + segmentation weights
 samples/shell/imagegen/face-swap/head_mask.py	skip	internal helper of face_swap.sh, not an independent entry point; not run standalone here
-samples/shell/imagegen/identity-score/identity_score.sh	skip	direct-CLI (no D-Bus); needs BRAIN_ARCFACE_DIR and generated photos to score
+samples/shell/imagegen/identity-score/identity_score.sh	skip	direct-CLI (no D-Bus); needs the antelopev2 pack in the model store (or --weights DIR) and generated photos to score
 samples/shell/imagegen/identity-yolo-pipeline/identity_yolo_gen.py	skip	internal helper of identity_yolo_pipeline.sh, not an independent entry point; not run standalone here
 samples/shell/imagegen/identity-yolo-pipeline/identity_yolo_pipeline.sh	skip	needs real FLUX.1/PuLID/YOLOv8-COCO weights and hours of GPU time; the mock model has no identity-conditioned generate or a trainable detector
 samples/shell/imagegen/lora/run_lora.sh	skip	direct-CLI (no D-Bus); needs a real FLUX.2 LoRA adapter that train_lora.sh produced
-samples/shell/imagegen/lora/train_identity_lora.sh	skip	direct-CLI (no D-Bus); needs BRAIN_SCRFD_DIR + real FLUX.2 weights and hours of GPU time
+samples/shell/imagegen/lora/train_identity_lora.sh	skip	direct-CLI (no D-Bus); needs SCRFD and real FLUX.2 weights in the model store and hours of GPU time
 samples/shell/imagegen/lora/train_lora.sh	skip	direct-CLI (no D-Bus); needs real FLUX.2 weights and a captioner, and takes real training time
 samples/shell/imagegen/portrait-from-refs/portrait_from_refs.sh	skip	needs real FLUX.2 weights and a folder of photographs; the mock model has no reference-conditioned generate
 samples/python/imaging/edit-pipeline/edit_pipeline.py	skip	needs sam2 + restore (+ esrgan for the tail) weights; the mock model serves no imgpipe stage
@@ -34,30 +34,30 @@ samples/python/llm/glmdsa/glmdsa.py	run	--model mock exercises the generate wire
 samples/python/llm/qwen35moe/qwen35moe.py	run	--model mock exercises the generate wire contract for real over all three transports (D-Bus, OpenAI, Anthropic); real Qwen3.5-35B-A3B generation is verified by hand (see docs/reference/models/qwen35/status.md) -- not in this harness's shared server
 samples/python/musicgen/generate-song/generate_song.py	skip	hardcodes brain/minimaxmusic3 (no --model override); needs the full MiniMax Music 3 checkpoint set
 samples/python/qwen3omnimoe/omni/omni.py	run	--model mock exercises the generate wire contract for real over all three transports (D-Bus, OpenAI, Anthropic); multimodal blob in / speech out are verified by hand (see docs/reference/models/qwen3omnimoe/status.md M13/M14) -- not in this harness's shared server
-samples/python/restore/restore-face/restore_face.py	skip	needs BRAIN_CODEFORMER_WEIGHTS (codeformer.pth); the mock model serves no restore_face
+samples/python/restore/restore-face/restore_face.py	skip	needs a CodeFormer checkpoint in the model store; the mock model serves no restore_face
 samples/python/restore/supir-restore/supir_restore.py	skip	needs the full SUPIR checkpoint set; the mock model serves no restore action
-samples/python/restore/vq-roundtrip/vq_roundtrip.py	skip	needs BRAIN_VQGAN_WEIGHTS (a VQGAN checkpoint); the mock model serves no encode/decode
+samples/python/restore/vq-roundtrip/vq_roundtrip.py	skip	needs a VQGAN checkpoint in the model store; the mock model serves no encode/decode
 samples/python/tts/cosyvoice-synth/cosyvoice_synth.py	skip	hardcodes brain/cosyvoice (no --model override); needs the full CosyVoice checkpoint set
-samples/python/tts/qwen3tts-speak/qwen3tts_speak.py	skip	hardcodes brain/qwen3tts (no --model override); needs BRAIN_QWEN3TTS_WEIGHTS + BRAIN_QWEN3TTS_CKPT
-samples/python/videogen/wan/cancel_generation.py	skip	needs real Wan weights (BRAIN_WAN_DIT/_VAE/_T5/_TOKENIZER); the mock model has no t2v action
+samples/python/tts/qwen3tts-speak/qwen3tts_speak.py	skip	needs Qwen3-TTS weights in the model store; the mock model serves no synth
+samples/python/videogen/wan/cancel_generation.py	skip	needs real Wan weights in the model store (or --pin wan.dit/vae/text_encoder/tokenizer); the mock model has no t2v action
 samples/python/videogen/wan/generate_video.py	skip	needs real Wan weights; the mock model has no t2v action, and a real run is tens of minutes
-samples/python/vision/deepseek-ocr/ocr_document.py	skip	needs BRAIN_DEEPSEEK_OCR_DIR (both shipped GGUFs); the mock model serves no deepseek-ai/DeepSeek-OCR generate, and a real run is minutes per token (see this sample's README)
-samples/python/vision/face-id/face_id.py	skip	needs BRAIN_SCRFD_DIR + BRAIN_ARCFACE_DIR (antelopev2 scrfd + glintr100); the mock model serves no detect/embed
+samples/python/vision/deepseek-ocr/ocr_document.py	skip	needs ggml-org/DeepSeek-OCR-GGUF pulled into the model store (both shipped GGUFs); the mock model serves no deepseek-ai/DeepSeek-OCR generate, and a real run is minutes per token (see this sample's README)
+samples/python/vision/face-id/face_id.py	skip	needs the antelopev2 pack (SCRFD + ArcFace) in the model store; the mock model serves no detect/embed
 samples/python/vision/deepseek-multimodal/deepseek_multimodal.py	run	--model brain/mock exercises chat with an image and images.generations at 384x384 against the shared harness server
 samples/python/vision/minicpmv-chat/minicpmv_chat.py	run	--model brain/mock exercises chat with an image against the shared harness server
 samples/python/vision/mirage-perception/mirage_perception.py	skip	hardcodes Cactus-Compute/mirage (no --model override); needs the pulled checkpoint, real run in tests/e2e/mirage.bats
-samples/python/vision/moondream3-caption/moondream3_caption.py	skip	hardcodes brain/moondream3 (no --model override); needs BRAIN_MOONDREAM3_WEIGHTS
-samples/python/vision/qwen3vl-caption/qwen3vl_caption.py	skip	hardcodes brain/qwen3vl (no --model override); needs BRAIN_QWEN3VL_WEIGHTS
-samples/python/vision/segment-image/segment_image.py	skip	needs BRAIN_SAM2_WEIGHTS (sam2.1_hiera_*.pt); the mock model serves no segment
+samples/python/vision/moondream3-caption/moondream3_caption.py	skip	hardcodes brain/moondream3 (no --model override); needs a Moondream 3 checkpoint in the model store
+samples/python/vision/qwen3vl-caption/qwen3vl_caption.py	skip	hardcodes brain/qwen3vl (no --model override); needs a Qwen3-VL checkpoint in the model store
+samples/python/vision/segment-image/segment_image.py	skip	needs a SAM 2.1 checkpoint in the model store; the mock model serves no segment
 samples/python/vision/splat/splat_fit.py	skip	brain/splat itself needs no weights, but needs real posed-view PPMs + a cameras.json the harness doesn't have on hand
 samples/python/vision/splat/splat_render.py	skip	brain/splat itself needs no weights, but needs a real fitted .ply scene the harness doesn't have on hand
-samples/python/vision/worldmirror2-reconstruct/worldmirror2_reconstruct.py	skip	hardcodes brain/worldmirror2 (no --model override); needs BRAIN_WORLDMIRROR2_WEIGHTS
+samples/python/vision/worldmirror2-reconstruct/worldmirror2_reconstruct.py	skip	hardcodes brain/worldmirror2 (no --model override); needs a WorldMirror 2 checkpoint in the model store
 samples/shell/forecast/cooling-loop/cooling_loop.py	skip	needs timesfm3 weights (timesfm-non-commercial license, never redistributed); the mock model has no forecast covariate wire yet
 samples/shell/forecast/cooling-loop/cooling_loop.sh	skip	direct Rust cargo-example path (no D-Bus); needs a real TimesFM-3 checkpoint
-samples/shell/restore/upscale/upscale.sh	skip	direct-CLI (no D-Bus); needs BRAIN_ESRGAN_WEIGHTS (RealESRGAN_x4plus.pth)
+samples/shell/restore/upscale/upscale.sh	skip	direct-CLI (no D-Bus); needs a Real-ESRGAN checkpoint in the model store (or --weights FILE)
 samples/python/tts/voice-server/brain_tts_client.py	skip	internal helper (socket client) shared by voice-clone.py and voice-design.py, not an independent entry point; not run standalone here
-samples/python/tts/voice-server/voice-clone.py	skip	needs a running `brain qwen3tts serve` with BRAIN_QWEN3TTS_REF/_REF_TEXT set; not a D-Bus client, out of this harness's scope
-samples/python/tts/voice-server/voice-design.py	skip	needs a running `brain qwen3tts serve`; not a D-Bus client, out of this harness's scope
+samples/python/tts/voice-server/voice-clone.py	skip	needs a running `sample-models-qwen3tts npu-serve` started with --clone-ref/--clone-ref-text; not a D-Bus client, out of this harness's scope
+samples/python/tts/voice-server/voice-design.py	skip	needs a running `sample-models-qwen3tts npu-serve` with a VoiceDesign checkpoint; not a D-Bus client, out of this harness's scope
 samples/shell/imagegen/rgb-to-ir/rir_data.py	skip	internal helper module of the rgb-to-ir stages, not an entry point
 samples/shell/imagegen/rgb-to-ir/rir_manifest.py	skip	validates a user-supplied pairs manifest; needs data, covered by the sample unit tests
 samples/shell/imagegen/rgb-to-ir/rir_readers.py	skip	builds a pairs manifest from a user-supplied dataset layout; needs data, covered by the sample unit tests
@@ -95,3 +95,10 @@ samples/shell/imagegen/rgb-to-ir/tests/test_sam2.py	skip	unit tests of the sampl
 samples/shell/imagegen/rgb-to-ir/tests/test_sheet.py	skip	unit tests of the sample, run by make check/samples
 samples/shell/imagegen/rgb-to-ir/tests/test_synth.py	skip	unit tests of the sample, run by make check/samples
 samples/shell/imagegen/rgb-to-ir/tests/test_tiles.py	skip	unit tests of the sample, run by make check/samples
+samples/python/decision/served-decide/decide_client.py	skip	plain-HTTP client of a running brain serve; needs a decision model (its encoder) in the server's model store
+samples/python/llm/edgerock/edgerock.py	skip	needs EdgeRock weights in the model store; the mock model has no long-context generate of its own
+samples/shell/imagegen/rgb-to-ir/rir_seed.py	skip	internal helper module of the rgb-to-ir stages, not an entry point
+samples/shell/imagegen/rgb-to-ir/tests/test_seed.py	skip	unit tests of the sample, run by make check/samples
+samples/shell/timeline/lifecycle/lifecycle.sh	skip	direct-CLI (no D-Bus); trains, checks and serves a timeline model on user-supplied records
+samples/shell/timeline/predict/history.sh	skip	direct-CLI (no D-Bus); needs a saved timeline model (lifecycle.sh writes one)
+samples/shell/timeline/predict/predict.sh	skip	direct-CLI (no D-Bus); needs a saved timeline model and subjects to score

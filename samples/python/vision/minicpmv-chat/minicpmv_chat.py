@@ -78,7 +78,7 @@ def main() -> None:
     p.add_argument("--brain", default=os.environ.get("BRAIN", "./target/release/brain"), help="brain binary (self-launch mode only)")
     p.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8789")), help="port to launch on (self-launch mode only)")
     args = p.parse_args()
-    images = args.image or [Path(__file__).resolve().parents[4] / "docs" / "quickstart" / "img" / "seed.png"]
+    images = args.image or [Path(__file__).resolve().parents[4] / "docs" / "getting-started" / "img" / "seed.png"]
     if args.tool and args.question == p.get_default("question"):
         args.question = "What is the weather in Paris right now? Use the tool."
         images = []

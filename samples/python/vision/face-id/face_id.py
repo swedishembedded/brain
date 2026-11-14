@@ -16,9 +16,10 @@ and then prints the full cosine similarity matrix over the embeddings. Because
 the vectors are already unit-norm, the cosine is a plain dot product - same
 faces land near 1.0, different faces near 0.
 
-    tools/dbus-session.sh --serve "--dbus \\
-        --pin scrfd.weights=$BRAIN_TESTDATA/face/antelopev2/scrfd_10g_bnkps.onnx \\
-        --pin arcface.weights=$BRAIN_TESTDATA/face/antelopev2/glintr100.onnx" -- \
+With the antelopev2 pack (SCRFD and ArcFace) in the model store - or pinned
+with `--pin scrfd.weights=FILE --pin arcface.weights=FILE`:
+
+    tools/dbus-session.sh --serve "--dbus" -- \
         python3 samples/python/vision/face-id/face_id.py a.ppm b.ppm c.ppm
 """
 from __future__ import annotations

@@ -64,7 +64,7 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("mode", choices=["chat", "draw"])
     p.add_argument("--model", help="model id (default: brain/deepseekvl for chat, brain/januspro for draw)")
-    p.add_argument("--image", type=Path, default=Path(__file__).resolve().parents[4] / "docs" / "quickstart" / "img" / "seed.png", help="chat: the image to ask about (PNG)")
+    p.add_argument("--image", type=Path, default=Path(__file__).resolve().parents[4] / "docs" / "getting-started" / "img" / "seed.png", help="chat: the image to ask about (PNG)")
     p.add_argument("--question", default="What is in this image? Answer in one sentence.")
     p.add_argument("--max-tokens", type=int, default=128)
     p.add_argument("--prompt", default="A red apple on a wooden table.", help="draw: what the image shows")
