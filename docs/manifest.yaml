@@ -381,8 +381,6 @@ navigation:
       - docs/book/index.md
       - docs/book/preface.md
       - docs/book/how-to-read.md
-      - docs/book/notation.md
-      - docs/book/pseudocode.md
       - title: "Volume I: Thinking in Mathematics"
         pages:
           - docs/book/v01-mathematics/index.md
@@ -596,6 +594,8 @@ navigation:
           - docs/book/v16-systems/01-engine-architecture.md
           - docs/book/v16-systems/02-capstone.md
           - docs/book/v16-systems/03-evolution.md
+      - docs/book/notation.md
+      - docs/book/pseudocode.md
       - docs/book/glossary.md
       - docs/book/history/chronology.md
       - docs/book/about-the-author.md

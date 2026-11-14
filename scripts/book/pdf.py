@@ -18,7 +18,8 @@ implementation; the book adds the book class and docs/pandoc/book.tex.
 
     scripts/book/pdf.py               # the whole book and every written volume
     scripts/book/pdf.py --whole       # -> build/book/brain-book.{md,pdf}
-    scripts/book/pdf.py --volumes     # every written volume, each on its own
+    scripts/book/pdf.py --volumes     # every written volume, each on its own, and the reference PDF
+    scripts/book/pdf.py --reference   # notation and pseudocode alone -> build/book/volumes/FFPIM-Appendix-...
     scripts/book/pdf.py --volume v05  # -> build/book/volumes/FFPIM-Volume-05-<Title>.{md,pdf}
     scripts/book/pdf.py -j 3          # how many PDFs typeset at once (default 2)
 
@@ -169,8 +170,17 @@ def volume_title_page(volume) -> str:
         rf"\addcontentsline{{toc}}{{chapter}}{{{title}}}\markboth{{{title}}}{{}}\cleardoublepage")
 
 
+# The reference pages every volume relies on. The whole book carries them as
+# appendices; the volumes leave them to one appendix PDF of their own
+# (REFERENCE) instead of repeating them in each file.
+SHARED_REFERENCE = ("notation.md", "pseudocode.md")
+REFERENCE = "reference"
+
+
 def build_markdown(book, out: Path, title: str, subtitle: str, volume=None) -> Path:
-    """The markdown of one PDF: the whole book, or `volume` alone."""
+    """The markdown of one PDF: the whole book, `volume` alone, or the shared
+    reference pages when `volume` is REFERENCE."""
+    reference = volume == REFERENCE
     parts = [f"""---
 title: "{title}"
 subtitle: "{subtitle}"
@@ -183,12 +193,12 @@ toc-title: "Contents"
     # Front-matter sections are unnumbered; numbering resumes with Volume I
     # (or with the volume's first chapter).
     parts.append(latex("\\frontmatter\\setcounter{secnumdepth}{-2}"))
-    parts += [page(rel, unnumbered=True) for rel in book.front]
-    if volume is not None:
+    parts += [page(rel, unnumbered=True) for rel in ([] if reference else book.front)]
+    if volume is not None and not reference:
         parts.append(volume_title_page(volume))
         parts.append(page(volume.intro_rel, drop_title=True))
     parts.append(latex("\\mainmatter\\setcounter{secnumdepth}{3}"))
-    for v in [volume] if volume is not None else book.volumes:
+    for v in [] if reference else [volume] if volume is not None else book.volumes:
         written = [ch for ch in v.chapters if ch.written]
         if not written:
             continue
@@ -198,8 +208,14 @@ toc-title: "Contents"
         parts += [page(ch.rel) for ch in written]
     # Reference material becomes lettered appendices; the author page closes
     # the book unnumbered. The chronology covers the whole engine, so only the
-    # whole book carries it.
-    back = [rel for rel in book.back if volume is None or rel != "history/chronology.md"]
+    # whole book carries it; a volume leaves the shared reference pages to the
+    # reference PDF, which carries those alone.
+    if reference:
+        back = [rel for rel in book.back if rel in SHARED_REFERENCE or rel == ABOUT]
+    elif volume is not None:
+        back = [rel for rel in book.back if rel != "history/chronology.md" and rel not in SHARED_REFERENCE]
+    else:
+        back = list(book.back)
     parts.append(latex("\\appendix"))
     parts += [page(rel) for rel in back if rel != ABOUT]
     parts.append(latex("\\backmatter"))
@@ -282,29 +298,34 @@ def jobs(args: list[str]) -> list[tuple]:
     def of(v):
         n = book.volumes.index(v)
         return (f"volumes/{volume_file(book, n)}", f"Volume {ROMAN[n]}: {v.title}", book.title, v)
+    acronym = volume_file(book, 0).split("-")[0]
+    reference = (f"volumes/{acronym}-Appendix-Notation-And-Pseudocode-Conventions",
+                 "Appendix: Notation and Pseudocode Conventions", book.title, REFERENCE)
     if "--whole" in args:
         return [whole]
+    if "--reference" in args:
+        return [reference]
     if "--volumes" in args:
-        return [of(v) for v in written]
+        return [of(v) for v in written] + [reference]
     if "--volume" in args:
         want = args[args.index("--volume") + 1]
         hit = [v for v in written if v.id == want or v.dir == want]
         if not hit:
             sys.exit(f"no written volume {want!r}; written: {', '.join(v.id for v in written)}")
         return [of(hit[0])]
-    return [whole] + [of(v) for v in written]
+    return [whole] + [of(v) for v in written] + [reference]
 
 
 def main() -> int:
     args = sys.argv[1:]
     # A mistyped option must not fall through to building the whole book.
     valued = {"--volume", "-j"}
-    known = {"--whole", "--volumes"} | valued
+    known = {"--whole", "--volumes", "--reference"} | valued
     i = 0
     while i < len(args):
         if args[i] not in known:
             print(f"pdf.py: unknown argument {args[i]}", file=sys.stderr)
-            print("usage: pdf.py [--whole | --volumes | --volume ID] [-j N]", file=sys.stderr)
+            print("usage: pdf.py [--whole | --volumes | --volume ID | --reference] [-j N]", file=sys.stderr)
             return 2
         i += 2 if args[i] in valued else 1
     # Each PDF is one single-threaded xelatex chain; a few run side by side.

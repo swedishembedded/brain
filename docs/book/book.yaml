@@ -33,10 +33,10 @@ author_email: "martin.schroder@swedishembedded.com"
 front:
   - preface.md
   - how-to-read.md
-  - notation.md
-  - pseudocode.md
 
 back:
+  - notation.md
+  - pseudocode.md
   - glossary.md
   - history/chronology.md
   - about-the-author.md

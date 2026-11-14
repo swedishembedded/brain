@@ -102,7 +102,9 @@ Definitions are set apart and named in **bold** the first time they appear.
 Every term is defined before it is used; if a chapter needs an idea from an
 earlier chapter it says where. The glossary of symbols is in
 [Notation](notation.md), and the conventions every algorithm follows are in
-[Pseudocode Conventions](pseudocode.md). Read both before Volume III.
+[Pseudocode Conventions](pseudocode.md); both are appendices at the end of
+the book, and a volume printed on its own leaves them to a separate appendix
+volume that all the volumes share. Read both before Volume III.
 
 Worked examples show real numbers. They are not illustrative: each was
 computed by a reference program and is checked whenever the book is built.
