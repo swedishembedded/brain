@@ -33,4 +33,4 @@ brain-testutil.workspace = true
 # random-weight checkpoint, proving the capability registry carries it with no
 # decision-specific plumbing in this crate.
 brain-catalog.workspace = true
-brain-decisions.workspace = true
+brain-decisions = { workspace = true, features = ["resident"] }

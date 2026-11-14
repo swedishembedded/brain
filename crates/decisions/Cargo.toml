@@ -17,10 +17,15 @@ brain-decide.workspace = true
 brain-gpu-core.workspace = true
 brain-modelstore.workspace = true
 brain-modernbert.workspace = true
-# `resident`: each checkpoint behind the residency scheduler, in process or in a supervised worker.
-brain-residency.workspace = true
+# The `resident` feature: each checkpoint behind the residency scheduler, in
+# process or in a supervised worker. Only serving crates enable it, so the SDK's
+# decision surface does not link the scheduler.
+brain-residency = { workspace = true, optional = true }
 brain-rlcd.workspace = true
 serde_json.workspace = true
+
+[features]
+resident = ["dep:brain-residency"]
 
 [dev-dependencies]
 brain-testutil.workspace = true

@@ -115,7 +115,7 @@ brain-ocrserve.workspace = true
 # `brain decide train|eval|promote|rollback|inspect`: the decision-model lifecycle over
 # outcome-labelled examples, driven through the SDK's `decision` surface.
 brain = { workspace = true, features = ["decision", "study"] }
-brain-decisions.workspace = true
+brain-decisions = { workspace = true, features = ["resident"] }
 brain-serving.workspace = true
 # The resolver core, models-directory lookup, GPU/CPU placement, and
 # default-checkpoint auto-fetch -- library pieces this binary now calls into

@@ -46,6 +46,7 @@ pub mod load;
 pub mod manifest;
 pub mod promotion;
 pub mod provider;
+#[cfg(feature = "resident")]
 pub mod resident;
 pub mod select;
 pub mod store;

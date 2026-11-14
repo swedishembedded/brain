@@ -13,7 +13,7 @@ path = "src/lib.rs"
 brain-capability.workspace = true
 brain-catalog.workspace = true
 # `resident`: the decision models a serving process schedules.
-brain-decisions.workspace = true
+brain-decisions = { workspace = true, features = ["resident"] }
 # The adapter registry and releases a served base offers, and Ripple's resident.
 brain-llmserve.workspace = true
 brain-ricursive.workspace = true
