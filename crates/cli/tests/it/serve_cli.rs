@@ -536,3 +536,45 @@ fn a_malformed_caller_is_refused_before_serving() {
     }
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// A `--pin` no served model reads (an architecture nothing resolves through
+/// pins, or a role its architecture lacks) stops the server before any
+/// surface binds, naming each pin, instead of serving the store's pick in its
+/// place. Without the check the server comes up, so the child is killed at a
+/// deadline rather than hanging the suite.
+#[test]
+fn a_pin_no_served_model_reads_is_refused_at_startup() {
+    let dir = std::env::temp_dir().join(format!("brain-serve-unread-pin-{}", std::process::id()));
+    let (models, runtime) = (dir.join("models"), dir.join("run"));
+    std::fs::create_dir_all(&models).unwrap();
+    std::fs::create_dir_all(&runtime).unwrap();
+    let port = format!("127.0.0.1:{}", 20000 + std::process::id() % 20000);
+    let mut child = Command::new(bin())
+        .args(["serve", "--models-dir", models.to_str().unwrap(), "--runtime-dir", runtime.to_str().unwrap(), "--openai", &port])
+        .args(["--pin", "qwen3.weights=/nowhere", "--pin", "wan.dti=/nowhere", "--pin", "wan.dit=/nowhere", "--device", "cpu"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .env_remove("BRAIN_BACKEND")
+        .spawn()
+        .expect("spawn brain serve");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break Some(status);
+        }
+        if std::time::Instant::now() > deadline {
+            child.kill().ok();
+            child.wait().ok();
+            break None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    };
+    let mut stderr = String::new();
+    std::io::Read::read_to_string(&mut child.stderr.take().unwrap(), &mut stderr).ok();
+    std::fs::remove_dir_all(&dir).ok();
+    assert_eq!(status.and_then(|s| s.code()), Some(2), "stderr: {stderr}");
+    assert!(stderr.contains("--pin qwen3.weights: no served model reads pins for 'qwen3'"), "stderr: {stderr}");
+    assert!(stderr.contains("--pin wan.dti: wan has no role 'dti'"), "stderr: {stderr}");
+    assert!(!stderr.contains("--pin wan.dit:"), "a role wan reads is not refused: {stderr}");
+}

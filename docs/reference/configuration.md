@@ -121,7 +121,8 @@ than the sole trigger for ever using it.
 
 `brain serve` resolves each model's weights from the model store
 (`--models-dir`); `--pin ARCH.ROLE=PATH` serves one role from an explicit path
-instead, and settles a store that holds two candidates for it. A model whose
+instead, and settles a store that holds two candidates for it; a pin no
+served model reads is a startup error. A model whose
 weights resolve to nothing is not served, with no error. The variables below
 are still read by the models that have not moved onto the store; unset, such a
 model is not served.

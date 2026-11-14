@@ -17,8 +17,9 @@
 //! distribution and serving then you can procure our services by sending an
 //! email to info@swedishembedded.com.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use brain_modelstore::resolve::{describe_ambiguity, Ambiguity, ArchSpec, Question, Resolution};
 use capability::Assembly;
@@ -27,16 +28,24 @@ use crate::resolver::{resolve_structured, try_resolve, ResolveFailure};
 
 /// Where a serving process's models come from: the model store it scans and
 /// the roles its operator pinned to explicit paths.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default)]
 pub struct ServedStore {
     models_dir: Option<PathBuf>,
     /// `arch -> role -> path`.
     pins: BTreeMap<String, BTreeMap<String, String>>,
+    /// `arch -> roles` some served model read pins under, shared by every
+    /// clone so the serving process can check, once its models are built,
+    /// that no pin went unread (see [`ServedStore::unread_pins`]).
+    read: Arc<Mutex<BTreeMap<String, BTreeSet<String>>>>,
 }
+
+/// The override key a spec's `assemble` reads besides its roles: which named
+/// variant of the architecture to serve (`--pin flux2.variant=klein-4b`).
+const VARIANT: &str = "variant";
 
 impl ServedStore {
     pub fn new(models_dir: Option<PathBuf>) -> ServedStore {
-        ServedStore { models_dir, pins: BTreeMap::new() }
+        ServedStore { models_dir, ..ServedStore::default() }
     }
 
     /// The same pins over the model store at `models_dir`.
@@ -61,16 +70,50 @@ impl ServedStore {
         Ok(())
     }
 
-    /// The roles of `arch` pinned to paths.
-    pub fn pins(&self, arch: &str) -> BTreeMap<String, String> {
-        self.pins.get(arch).cloned().unwrap_or_default()
+    /// The pins of `arch` among `roles`, the roles the caller reads; reading
+    /// them is what makes a pin of one of them a pin some model honours.
+    pub fn pins(&self, arch: &str, roles: &[&str]) -> BTreeMap<String, String> {
+        self.read.lock().unwrap_or_else(|p| p.into_inner()).entry(arch.to_string()).or_default().extend(roles.iter().map(|r| r.to_string()));
+        let pinned = self.pins.get(arch);
+        roles.iter().filter_map(|r| Some((r.to_string(), pinned?.get(*r)?.clone()))).collect()
+    }
+
+    /// The pins `spec` reads: each of its roles and the variant override.
+    fn spec_pins(&self, arch: &str, spec: &dyn ArchSpec) -> BTreeMap<String, String> {
+        self.pins(arch, &spec.roles().iter().copied().chain([VARIANT]).collect::<Vec<_>>())
+    }
+
+    /// Every pin no served model has read, each as the message refusing it:
+    /// an architecture nothing resolves names the ones that take pins, and a
+    /// role its architecture lacks names the roles it has. The serving
+    /// process asks once every model is built, so a mistyped `--pin` is an
+    /// error at startup rather than the store's pick served in its place.
+    pub fn unread_pins(&self) -> Vec<String> {
+        let read = self.read.lock().unwrap_or_else(|p| p.into_inner());
+        let mut unread = Vec::new();
+        for (arch, roles) in &self.pins {
+            for role in roles.keys() {
+                match read.get(arch) {
+                    Some(known) if known.contains(role) => {}
+                    Some(known) => unread.push(format!(
+                        "--pin {arch}.{role}: {arch} has no role '{role}' (it reads {})",
+                        known.iter().map(String::as_str).collect::<Vec<_>>().join(", ")
+                    )),
+                    None => unread.push(format!(
+                        "--pin {arch}.{role}: no served model reads pins for '{arch}' (pins are read for {})",
+                        read.keys().map(String::as_str).collect::<Vec<_>>().join(", ")
+                    )),
+                }
+            }
+        }
+        unread
     }
 
     /// `arch`'s [`Assembly`] with its pins applied, or why it has none: the
     /// resolver every caller of the CLI uses, for an adapter that reports its
     /// own failure.
     pub fn resolve(&self, arch: &str, spec: &dyn ArchSpec) -> Result<Assembly, ResolveFailure> {
-        try_resolve(self.models_dir(), arch, spec, &self.pins(arch))
+        try_resolve(self.models_dir(), arch, spec, &self.spec_pins(arch, spec))
     }
 }
 
@@ -80,9 +123,10 @@ fn fully_named(named: &BTreeMap<String, String>, arch: &str, spec: &dyn ArchSpec
     if !spec.roles().iter().filter(|r| !spec.optional_roles().contains(r)).all(|r| named.contains_key(*r)) {
         return None;
     }
-    let roles = named.iter().map(|(role, path)| (role.clone(), PathBuf::from(path))).collect();
-    let provenance = named.iter().map(|(role, path)| format!("{role}: {path} (pinned)")).collect();
-    Some(Assembly { id, arch: arch.to_string(), variant: None, roles, provenance })
+    let pinned_roles = || named.iter().filter(|(role, _)| role.as_str() != VARIANT);
+    let roles = pinned_roles().map(|(role, path)| (role.clone(), PathBuf::from(path))).collect();
+    let provenance = pinned_roles().map(|(role, path)| format!("{role}: {path} (pinned)")).collect();
+    Some(Assembly { id, arch: arch.to_string(), variant: named.get(VARIANT).cloned(), roles, provenance })
 }
 
 /// The DIRECTORY an artifact lives in, as the `String` every resident's own
@@ -141,7 +185,7 @@ fn describe_served_ambiguity(a: &Ambiguity, arch: &str) -> String {
 /// using, and must not be refused because the paths they named happen to live
 /// outside the store the scan covers.
 pub fn served_assembly(store: &ServedStore, arch: &str, spec: &dyn ArchSpec) -> Option<Assembly> {
-    let named = store.pins(arch);
+    let named = store.spec_pins(arch, spec);
     if let Some(assembly) = fully_named(&named, arch, spec, format!("local/{arch}")) {
         return Some(assembly);
     }
@@ -184,7 +228,7 @@ pub fn served_assembly(store: &ServedStore, arch: &str, spec: &dyn ArchSpec) -> 
 /// dropped - it never takes every other real, independently-servable
 /// candidate down with it.
 pub fn served_assemblies(store: &ServedStore, arch: &str, spec: &dyn ArchSpec, default_id: &str) -> Vec<Assembly> {
-    let named = store.pins(arch);
+    let named = store.spec_pins(arch, spec);
     if let Some(assembly) = fully_named(&named, arch, spec, default_id.to_string()) {
         return vec![assembly];
     }
@@ -476,10 +520,31 @@ mod tests {
         store.pin("flux2.dit=/a").unwrap();
         store.pin("flux2.dit=/b").unwrap();
         store.pin("flux2.vae=/c=d").unwrap();
-        assert_eq!(store.pins("flux2"), BTreeMap::from([("dit".to_string(), "/b".to_string()), ("vae".to_string(), "/c=d".to_string())]));
-        assert!(store.pins("wan").is_empty());
+        assert_eq!(store.pins("flux2", &["dit", "vae"]), BTreeMap::from([("dit".to_string(), "/b".to_string()), ("vae".to_string(), "/c=d".to_string())]));
+        assert!(store.pins("wan", &["dit"]).is_empty());
         for bad in ["flux2.dit", "flux2=/a", ".dit=/a", "flux2.=/a", "flux2.dit="] {
             assert!(store.pin(bad).unwrap_err().contains(bad), "{bad}");
         }
+    }
+
+    /// A pin no served model reads is refused by name instead of silently
+    /// serving the store's pick: an unknown architecture names the ones that
+    /// take pins, an unknown role names the roles its architecture has, and a
+    /// clone of the store shares what was read.
+    #[test]
+    fn a_pin_nothing_reads_is_reported_with_what_would_be_read() {
+        let root = store("unread-pins");
+        let mut store = unpinned(&root);
+        for spec in ["servedtest.weights=/w", "servedtest.variant=v", "servedtest.wieghts=/typo", "qwen3.weights=/q", "horizon.train=/t"] {
+            store.pin(spec).unwrap();
+        }
+        assert_eq!(store.unread_pins().len(), 5, "nothing has been resolved yet");
+        let _ = served_assembly(&store.clone(), "servedtest", &ServedSpec);
+        let _ = store.pins("horizon", &["weights", "train"]);
+        let unread = store.unread_pins();
+        assert_eq!(unread.len(), 2, "{unread:?}");
+        assert!(unread[0].contains("--pin qwen3.weights") && unread[0].contains("horizon, servedtest"), "{}", unread[0]);
+        assert!(unread[1].contains("--pin servedtest.wieghts") && unread[1].contains("variant, weights"), "{}", unread[1]);
+        std::fs::remove_dir_all(&root).ok();
     }
 }

@@ -88,7 +88,9 @@ precedence ladder.
 holds two candidates for one role (two DiTs, two tokenizers) and nothing says
 which, that model is not served and the startup log names a
 `--pin ARCH.ROLE=PATH` for each; giving one serves it. A pin also serves a
-role from a path outside the store.
+role from a path outside the store. A pin no served model reads (a mistyped
+architecture or role) stops `brain serve` at startup, naming the pin and the
+roles that architecture has, rather than serving the store's pick in its place.
 
 ## Seeing what you have
 

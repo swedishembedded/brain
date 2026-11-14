@@ -39,7 +39,7 @@ impl WanResident {
     /// checkpoint is served by the model-dir scan instead). `None` unless all
     /// four are pinned.
     pub fn from_pins(store: &loader::served::ServedStore) -> Option<WanResident> {
-        let pins = store.pins("wan");
+        let pins = store.pins("wan", &["dit", "vae", "text_encoder", "tokenizer"]);
         let role = |name: &str| pins.get(name).cloned();
         let paths = wan::Paths { dit: role("dit")?, vae: role("vae")?, t5: role("text_encoder")?, tokenizer: role("tokenizer")? };
         Some(WanResident { id: wan::caps::MODEL.to_string(), paths })

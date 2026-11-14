@@ -178,7 +178,9 @@ SERVING OPTIONS
   --pin ARCH.ROLE=PATH   serve that role of that architecture from PATH instead of
                          what the store holds (repeatable; e.g. --pin flux2.dit=F).
                          It also settles a store holding two candidates for a role:
-                         the startup log names the --pin for each.
+                         the startup log names the --pin for each. A pin no served
+                         model reads (an unknown architecture or role) stops the
+                         server at startup, naming it and what would be read.
   --autofetch            fetch a requested model that is not pulled (and repair what
                          the startup scan found incomplete); off by default, so a
                          request for an unpulled model is an error with no network I/O
@@ -1156,7 +1158,9 @@ pub fn run_serve(args: &[String]) {
     };
 
     let mut registry = Registry::with_models(infer, detect);
-    register_synth(&mut registry, &pins.with_models_dir(loader::model_dir::resolve(models_dir.as_deref())));
+    let store = pins.with_models_dir(loader::model_dir::resolve(models_dir.as_deref()));
+    register_synth(&mut registry, &store);
+    refuse_unread_pins(&store);
     // The statistical baselines, so a forecast, a backtest and a capability
     // listing work over this loop with no model loaded. Foundation forecasters
     // run through their own served actions (`brain <model> forecast`).
@@ -1242,6 +1246,20 @@ fn widest_batch(knobs: &serving::ServeKnobs) -> u32 {
 /// the batching residents apply inside their own forward.
 fn scheduler_policy(scheduler: residency::Policy, max_batch: Option<u32>) -> residency::Policy {
     residency::Policy { max_batch: max_batch.map_or(scheduler.max_batch, |n| n as usize), ..scheduler }
+}
+
+/// End the process, naming each `--pin` no served model read, once every
+/// model has been built: a mistyped pin is an error before any surface binds,
+/// never the store's pick served in its place.
+fn refuse_unread_pins(store: &loader::served::ServedStore) {
+    let unread = store.unread_pins();
+    if unread.is_empty() {
+        return;
+    }
+    for pin in &unread {
+        eprintln!("brain serve: {pin}");
+    }
+    std::process::exit(2);
 }
 
 fn build_serving_executor(reserve_gb: u64, store: &loader::served::ServedStore, scheduler: residency::Policy, knobs: serving::ServeKnobs) -> serving::Serving {
@@ -1431,6 +1449,7 @@ fn run_apis(a: RunApis) {
         eprintln!("brain serve: --max-batch {widest} keeps {reserve_gb} GB free per card for the decode batch's activations and graph launches (--reserve-gb to change it)");
     }
     let serving::Serving { executor, qwen, qwen35, ricursive } = build_serving_executor(reserve_gb, &store, a.scheduler, a.knobs);
+    refuse_unread_pins(&store);
     let manifests = executor.manifests();
     let served: Vec<&str> = manifests.iter().map(|m| m.model.as_str()).collect();
     eprintln!("{}", served_models_line(&served, models_dir.as_deref()));
