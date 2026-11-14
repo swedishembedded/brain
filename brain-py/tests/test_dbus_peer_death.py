@@ -41,9 +41,12 @@ pytestmark = [
 ]
 
 
-def test_killing_brain_mid_stream_raises_instead_of_returning_empty():
-    proc = subprocess.Popen([str(BRAIN_BIN), "serve", "--dbus", "--mock", "--mock-delay-ms", "5000"],
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+def test_killing_brain_mid_stream_raises_instead_of_returning_empty(tmp_path):
+    # An empty model store: the mock models need no weights, and scanning the
+    # user's real store would make startup time depend on what it holds.
+    proc = subprocess.Popen([str(BRAIN_BIN), "serve", "--dbus", "--mock", "--mock-delay-ms", "5000",
+                             "--models-dir", str(tmp_path)],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         deadline = time.monotonic() + 10
         conn = None
@@ -68,7 +71,8 @@ def test_killing_brain_mid_stream_raises_instead_of_returning_empty():
         # (BrainError with name=None) without parsing the message text.
         assert exc_info.value.name == "brain_py.stream_disconnected"
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
         try:
             proc.kill()
         except Exception:

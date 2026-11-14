@@ -39,8 +39,11 @@ pytestmark = [
 
 
 @pytest.fixture
-def brain_server():
-    proc = subprocess.Popen([str(BRAIN_BIN), "serve", "--dbus", "--mock", "--mock-delay-ms", "2000"])
+def brain_server(tmp_path):
+    # An empty model store: the mock models need no weights, and scanning the
+    # user's real store would make startup time depend on what it holds.
+    proc = subprocess.Popen([str(BRAIN_BIN), "serve", "--dbus", "--mock", "--mock-delay-ms", "2000",
+                             "--models-dir", str(tmp_path)])
     try:
         deadline = time.monotonic() + 10
         up = False
