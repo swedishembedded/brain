@@ -32,6 +32,14 @@ use t5encoder::model::{T5Encoder, Tap};
 
 const GATE: f64 = 0.9999;
 
+/// The magnitude ceiling on relative L2, because cosine is blind to scale: a
+/// dropped or doubled factor (the missing `1/sqrt(d_kv)` T5 relies on, a norm
+/// gain applied twice) keeps cosine at 1.0. With the norms equal, relative L2
+/// is `sqrt(2 * (1 - cosine))`, so the cosine gate alone already admits 0.0141;
+/// 0.02 adds room for a norm ratio about 1.4% off and nothing more, where a
+/// scale error of 2x is a relative L2 of 0.5 or more.
+const REL_L2_CEILING: f64 = 0.02;
+
 fn testdata(rel: &str) -> PathBuf {
     let root = std::env::var("BRAIN_TESTDATA")
         .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata").to_string());
@@ -49,6 +57,19 @@ fn cosine(a: &[f32], b: &[f32]) -> f64 {
         return 1.0;
     }
     dot / (na.sqrt() * nb.sqrt())
+}
+
+/// `||a - b|| / ||b||`, and 0 when both are all zero.
+fn rel_l2(a: &[f32], b: &[f32]) -> f64 {
+    let (mut num, mut den) = (0.0f64, 0.0f64);
+    for (&x, &y) in a.iter().zip(b) {
+        num += (x as f64 - y as f64).powi(2);
+        den += (y as f64).powi(2);
+    }
+    if den == 0.0 {
+        return if num == 0.0 { 0.0 } else { f64::INFINITY };
+    }
+    (num / den).sqrt()
 }
 
 fn max_abs(a: &[f32], b: &[f32]) -> f64 {
@@ -112,11 +133,14 @@ fn tiny_reference_stage_parity_with_distinct_dims() {
     let mut worst = f64::INFINITY;
     let mut check = |stage: &str, got: &[f32], want: &[f32]| {
         assert_eq!(got.len(), want.len(), "{stage}: len {} != golden {}", got.len(), want.len());
-        let (c, e) = (cosine(got, want), max_abs(got, want));
-        eprintln!("  {stage:<20} cosine={c:.10}  max_abs={e:.3e}");
+        let (c, e, r) = (cosine(got, want), max_abs(got, want), rel_l2(got, want));
+        eprintln!("  {stage:<20} cosine={c:.10}  rel_l2={r:.3e}  max_abs={e:.3e}");
         worst = worst.min(c);
         if c.is_nan() || c < GATE {
             failures.push(format!("{stage}: cosine {c:.10} < {GATE}"));
+        }
+        if r.is_nan() || r > REL_L2_CEILING {
+            failures.push(format!("{stage}: rel_l2 {r:.3e} > {REL_L2_CEILING} (max_abs {e:.3e})"));
         }
     };
     eprintln!("t5 tiny reference (B={b}, T={t}, heads={} d_kv={} inner={} d_model={}):",
