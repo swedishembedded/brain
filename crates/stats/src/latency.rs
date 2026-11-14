@@ -55,8 +55,14 @@ impl Dist {
         }
         self.sort();
         let n = self.samples.len();
-        // Nearest-rank: rank = ceil(q*n), clamped to 1..=n.
-        let rank = (q * n as f64).ceil().max(1.0).min(n as f64) as usize;
+        // Nearest-rank: rank = ceil(q*n), clamped to 1..=n. A q such as 0.07
+        // has no exact binary form, so q*n can land a few ulps above a whole
+        // number (7.000000000000001) and ceil would skip a rank; a product
+        // within rounding error of a whole number is taken as that number.
+        let x = q * n as f64;
+        let whole = x.round();
+        let x = if (x - whole).abs() <= 4.0 * f64::EPSILON * whole.abs().max(1.0) { whole } else { x };
+        let rank = x.ceil().max(1.0).min(n as f64) as usize;
         Some(self.samples[rank - 1])
     }
 
@@ -190,6 +196,16 @@ mod tests {
         assert_eq!(d.percentile(0.99), Some(99.0));
         assert_eq!(d.min(), Some(1.0));
         assert_eq!(d.max(), Some(100.0));
+    }
+
+    #[test]
+    fn a_rank_that_is_whole_in_exact_arithmetic_is_not_rounded_up() {
+        // 0.07 * 100 is 7.000000000000001 in binary floating point; the
+        // nearest rank of p7 over 100 samples is 7, not 8.
+        let mut d = Dist::from_millis((1..=100).map(|i| i as f64).collect());
+        for k in 1..=100u32 {
+            assert_eq!(d.percentile(f64::from(k) / 100.0), Some(f64::from(k)), "p{k}");
+        }
     }
 
     #[test]
