@@ -96,6 +96,7 @@ impl Session {
     }
 
     fn text2image(&self, inv: &Invocation) -> ActionResult {
+        inv.cancel.check()?;
         let (prompt, o) = opts_from(inv)?;
         let (h, w) = (o.height, o.width);
         let mut guard = self.built.lock().map_err(|_| "sdxl: pipeline lock poisoned")?;
@@ -103,7 +104,7 @@ impl Session {
             std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
             std::collections::hash_map::Entry::Vacant(e) => e.insert(Sdxl::load(&self.root, h, w)?),
         };
-        let hwc = p.generate(&prompt, &o)?;
+        let hwc = p.generate(&prompt, &o, &inv.cancel)?;
         Ok(Outcome::new().set("seed", json!(o.seed)).blob("image", capability::blob::image_blob(&hwc, w, h, 3)))
     }
 }
@@ -154,6 +155,16 @@ impl Action for SdxlAction {
 #[cfg(test)]
 mod caps_tests {
     use super::*;
+
+    /// A token fired before the call stops the action before it opens a
+    /// weight file: the checkpoint root does not exist, so any work past the
+    /// entry check would fail with a file error instead of `cancelled`.
+    #[test]
+    fn a_token_fired_before_the_call_stops_text2image_before_loading_weights() {
+        let provider = SdxlProvider::new("/nonexistent/sdxl-cancel");
+        let action = provider.action("text2image").expect("declared action");
+        capability_mock::cancellation::admission("sdxl text2image", Invocation::new().set("prompt", json!("a lighthouse")), &|inv, p| action.run(inv, p));
+    }
 
     #[test]
     fn manifest_declares_text2image() {

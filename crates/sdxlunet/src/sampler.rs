@@ -72,13 +72,19 @@ pub struct SamplerOptions {
 /// `n_latent` is `in_channels * lh * lw`; `uncond` is `None` to skip CFG
 /// entirely (matching `guidance <= 1.0`'s existing meaning at both call
 /// sites).
+///
+/// `cancel` is checked on entry and before every step, so a fired token ends
+/// the run with `Err("cancelled")` before the next forward starts; the step
+/// in flight when it fires is the only one that completes.
 pub fn sample(
     d: &dyn Denoiser,
     n_latent: usize,
     cond: &Conditioning,
     uncond: Option<&Conditioning>,
     o: &SamplerOptions,
+    cancel: &capability::CancelToken,
 ) -> Result<Vec<f32>, String> {
+    cancel.check()?;
     let mut sched = EulerScheduler::new(DiscreteConfig::sdxl());
     sched.set_timesteps(o.steps);
 
@@ -94,6 +100,7 @@ pub fn sample(
 
     let timesteps: Vec<f32> = sched.timesteps().to_vec();
     for (i, &t) in timesteps.iter().enumerate() {
+        cancel.check()?;
         let scaled = sched.scale_model_input(&lat);
         let ctx = StepCtx { step: i, n_steps: timesteps.len(), sigma: sched.sigmas()[i], timestep: t, scaled: &scaled };
 
@@ -113,4 +120,39 @@ pub fn sample(
     }
 
     Ok(lat)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use capability::{Invocation, Outcome, Progress};
+    use capability_mock::cancellation::{certify, Bound};
+    use std::cell::RefCell;
+
+    /// A backbone that returns zeros and reports each forward as one progress
+    /// event, so the real loop runs without a checkpoint.
+    struct Counting<'a, 'b> {
+        progress: &'a RefCell<&'b mut dyn FnMut(Progress)>,
+        steps: usize,
+    }
+
+    impl Denoiser for Counting<'_, '_> {
+        fn eval(&self, ctx: &StepCtx<'_>, _enc: &[f32], _pooled: &[f32], _time_ids: &[f32]) -> Result<Vec<f32>, String> {
+            (self.progress.borrow_mut())(Progress::step(ctx.step as u32, self.steps as u32, ""));
+            Ok(vec![0.0; ctx.scaled.len()])
+        }
+    }
+
+    #[test]
+    fn sample_stops_within_one_step_of_its_token_firing() {
+        const STEPS: usize = 12;
+        let run = |inv: &Invocation, progress: &mut dyn FnMut(Progress)| {
+            let sink = RefCell::new(progress);
+            let denoiser = Counting { progress: &sink, steps: STEPS };
+            let cond = (vec![0.0; 4], vec![0.0; 2]);
+            let so = SamplerOptions { steps: STEPS, guidance: 1.0, seed: 1, height: 16, width: 16 };
+            sample(&denoiser, 8, &cond, None, &so, &inv.cancel).map(|_| Outcome::new())
+        };
+        certify("sdxl sampler", &Invocation::new, &run, Bound::ONE_STEP);
+    }
 }

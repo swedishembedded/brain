@@ -34,3 +34,4 @@ serde_json.workspace = true
 # `testutil::parity::Table` - the one implementation of the cosine/rel_l2 stage
 # table the parity test gates on.
 brain-testutil.workspace = true
+brain-capability-mock.workspace = true

@@ -1199,6 +1199,7 @@ name = "brain-controlnet"
 version = "5.1.0"
 dependencies = [
  "brain-capability",
+ "brain-capability-mock",
  "brain-checkpoint",
  "brain-data",
  "brain-gpu-core",
@@ -3002,6 +3003,7 @@ name = "brain-sdxlunet"
 version = "5.1.0"
 dependencies = [
  "brain-capability",
+ "brain-capability-mock",
  "brain-checkpoint",
  "brain-clip",
  "brain-data",

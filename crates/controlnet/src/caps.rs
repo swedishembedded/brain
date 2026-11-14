@@ -132,7 +132,10 @@ impl Controlled {
     }
 
     /// `cond_chw` is `[3, h, w]`, `[0,1]` - already at this pipeline's `(h, w)`.
-    fn generate(&self, req: &Req, cond_chw: &[f32]) -> Result<Vec<f32>, String> {
+    /// `cancel` is checked before the text encoders load and before every
+    /// denoise step.
+    fn generate(&self, req: &Req, cond_chw: &[f32], cancel: &capability::CancelToken) -> Result<Vec<f32>, String> {
+        cancel.check()?;
         let (h, w) = self.hw;
         let (lh, lw) = (h / 8, w / 8);
         let n = (self.ucfg.in_channels * lh * lw) as usize;
@@ -146,7 +149,7 @@ impl Controlled {
 
         let denoiser = ControlledDenoiser { unet: &self.unet, control: &self.control, cond_chw, conditioning_scale: req.conditioning_scale };
         let so = SamplerOptions { steps: req.steps, guidance: req.guidance, seed: req.seed, height: h, width: w };
-        let lat = sample(&denoiser, n, &cond, uncond.as_ref(), &so)?;
+        let lat = sample(&denoiser, n, &cond, uncond.as_ref(), &so, cancel)?;
 
         let sf = self.vae_cfg.scaling_factor;
         let z: Vec<f32> = lat.iter().map(|v| v / sf).collect();
@@ -199,6 +202,7 @@ impl Session {
     }
 
     fn text2image(&self, inv: &Invocation) -> ActionResult {
+        inv.cancel.check()?;
         let req = req_from(inv)?;
         let (h, w) = (req.height, req.width);
         let (hwc, cw, ch, c) = capability::blob::decode_hwc(inv, "control_image")?;
@@ -235,7 +239,7 @@ impl Session {
             ctx.download(&dst, 3 * h * w)
         };
 
-        let hwc_out = p.generate(&req, &cond_chw)?;
+        let hwc_out = p.generate(&req, &cond_chw, &inv.cancel)?;
         Ok(Outcome::new().set("seed", json!(req.seed)).blob("image", capability::blob::image_blob(&hwc_out, w, h, 3)))
     }
 }
@@ -290,6 +294,17 @@ impl Action for ControlnetAction {
 #[cfg(test)]
 mod caps_tests {
     use super::*;
+
+    /// A token fired before the call stops the action before it decodes the
+    /// control image or opens a weight file: both roots are absent, so any
+    /// work past the entry check would fail with a file or input error
+    /// instead of `cancelled`.
+    #[test]
+    fn a_token_fired_before_the_call_stops_text2image_before_loading_weights() {
+        let provider = ControlnetProvider::new("/nonexistent/sdxl-cancel", "/nonexistent/control-cancel");
+        let action = provider.action("text2image").expect("declared action");
+        capability_mock::cancellation::admission("controlnet text2image", Invocation::new().set("prompt", json!("a lighthouse")), &|inv, p| action.run(inv, p));
+    }
 
     /// An unseeded request draws its own seed (a different one each time), a
     /// given seed is kept, and a seed that is not a non-negative integer is

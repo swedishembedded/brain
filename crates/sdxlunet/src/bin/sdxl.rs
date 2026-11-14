@@ -62,7 +62,7 @@ fn main() {
     eprintln!("sdxl: loaded in {:.1}s", t0.elapsed().as_secs_f32());
 
     let t1 = std::time::Instant::now();
-    let img = match p.generate(&prompt, &o) {
+    let img = match p.generate(&prompt, &o, &capability::CancelToken::default()) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("sdxl: {e}");
