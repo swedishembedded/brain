@@ -3,12 +3,12 @@
 
 //! `brain` -- the public, embeddable SDK facade over brain's model backends.
 //!
-//! This first slice covers [`ImagePipeline`]: resolve a model through
-//! `crates/loader` (the same resolver `brain flux2 generate`/`brain do
-//! z-image text2image` uses, never a parallel path), build a real,
-//! resident flux2- or s3dit-backed pipeline, and generate + save images --
-//! with no CLI binary, no capability-dispatch machinery, and no environment
-//! variable required in the loop.
+//! One pipeline per capability (image, text, vision, audio, video, forecast,
+//! and the rest listed under Features below). Each resolves its model through
+//! `crates/loader` (the same resolver the per-model programs use, never a
+//! parallel path) and builds a real, resident pipeline, with no CLI binary,
+//! no capability-dispatch machinery, and no environment variable required in
+//! the loop. [`ImagePipeline`] is the example:
 //!
 //! ```no_run
 //! let mut pipe = brain::ImagePipeline::from_pretrained("black-forest-labs/FLUX.2-klein-9B")?;
