@@ -20,8 +20,9 @@ use sha2::{Digest, Sha256};
 /// weight loading follows). `progress(got, total)` is called after each chunk;
 /// `total` is `None` when the caller does not know the expected size.
 ///
-/// **No byte-level resume.** The `.part` is `File::create`d, so a retry after
-/// an interrupted transfer starts that file over rather than continuing it.
+/// **No byte-level resume.** Each transfer creates its own `.part` afresh, so a
+/// retry after an interrupted transfer starts that file over rather than
+/// continuing it.
 /// Resume is per FILE, one level up (`crate::plan`'s already-on-disk skip).
 /// That was a fair trade while every large checkpoint arrived as a shard set:
 /// an interrupted pull lost at most one shard. A GGUF release repo breaks the
