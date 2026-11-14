@@ -33,10 +33,10 @@
 //! binding) or a [`Denied`] that distinguishes "try again later" from "this
 //! can never fit, don't bother planning eviction for it".
 //!
-//! This is a leaf crate (`std` only, no GPU, no model code) precisely so both
-//! `crates/residency` (cross-instance placement) and `crates/weightset`
-//! (within-instance weight residency, checked mid-generation) can depend on
-//! it without depending on each other.
+//! This is a leaf crate (`std` only, no GPU, no model code) so that
+//! `crates/residency` (cross-instance placement), and any within-instance
+//! weight-residency layer, can depend on it without pulling in GPU or model
+//! code or depending on each other.
 //!
 //! # Wiring status - read before trusting the name
 //!
