@@ -280,7 +280,7 @@ The library is organised by task, not by model. Text-to-image generation is one 
 ```rust
 let model = "black-forest-labs/FLUX.2-klein-9B";
 let mut pipe = brain::ImagePipeline::from_pretrained(model)?;
-pipe.generate("a whale submarine")?.save("out.png")?;
+pipe.generate("a lighthouse at dusk")?.save("out.png")?;
 ```
 
 Behind `ImagePipeline` two architectures serve the same task, and the choice between them is made once, internally: `resolve_arch` in `crates/sdk/src/pipeline.rs` asks the model store to resolve the first architecture, and only if that fails the second, and every call after that point is uniform. `AutoPipeline` (`crates/sdk/src/auto.rs`) goes one step further and returns, for any supported model name, whichever task type it resolves to, as one variant of an enumeration. Its module documentation explains why it is an enumeration and not one common interface: the tasks have genuinely different calls and results, and a single interface would either lose them or force every method onto every task.
