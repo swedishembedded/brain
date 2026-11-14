@@ -237,65 +237,6 @@ pub(crate) fn arch_for_model(model: &str) -> Option<&'static str> {
 /// Architectures without a dedicated CLI module that `brain finetune` trains through the SDK's generic trainers.
 const GENERIC_FINETUNE_ARCHS: &[&str] = &["ricursive"];
 
-/// Architectures whose weight resolution has fully moved to
-/// `brain_modelstore::resolve` (a `--model`/per-role-flag/store-inventory
-/// based resolver).
-const RESOLVER_MIGRATED_ARCHS: &[&str] = &[
-    "flux2",
-    "wan",
-    "qwen3tts",
-    "kronos",
-    "chronos2",
-    "fincast",
-    "ltxv",
-    "qwen35",
-    "qwen3",
-    "qwen3vl",
-    "minicpmv",
-    "fastvlm",
-    "llava",
-    "moondream3",
-    "deepseekvl",
-    "januspro",
-    "deepseek2ocr",
-    "deepseekocr2",
-    "qwen3asr",
-    "nemotronasr",
-    "sam2",
-    "zipdepth",
-    "diamond",
-    "worldmirror2",
-    "lfm2",
-    "yolov8",
-    "glmdsa",
-    "lpips",
-    "rrdbnet",
-    "timesfm3",
-    "s3dit",
-    "codeformer",
-    "scrfd",
-    "arcface",
-    "clip",
-    "florence2",
-    "mirage",
-    "flux1",
-    "pulid",
-    "vqgan",
-    "sdxlunet",
-    "controlnet",
-    "t5encoder",
-    "cosyvoice",
-    "minimaxmusic3",
-    "minimaxh3",
-    "ouro",
-    "huginn",
-    "qwen35moe",
-    "qwen3omnimoe",
-    "supir",
-    "edgerock",
-    "ricursive",
-];
-
 fn dispatch_arch(arch: &str, rest: Vec<String>) {
     // Skipped for `-h`/`--help`: help text must never block on a network
     // fetch (or hang, if `BRAIN_MODELS_DIR` points somewhere with no local
@@ -306,7 +247,6 @@ fn dispatch_arch(arch: &str, rest: Vec<String>) {
         // architecture (`ltxv load ...`). Infra verbs keep their own output.
         crate::load_line::install(arch);
     }
-    let resolver_migrated = RESOLVER_MIGRATED_ARCHS.contains(&arch);
     // `brain ricursive finetune ...` is `brain finetune --arch ricursive ...`: the generic trainers serve this
     // architecture, which has no dedicated CLI module of its own.
     if GENERIC_FINETUNE_ARCHS.contains(&arch) && rest.first().is_some_and(|v| crate::args::canon_verb(v) == "finetune") {
@@ -315,17 +255,8 @@ fn dispatch_arch(arch: &str, rest: Vec<String>) {
         crate::finetune_cli::run_finetune(&args);
     }
     if let Some((_, model)) = ARCH_TO_MODEL.iter().find(|(id, _)| *id == arch) {
-        // A resolver-migrated architecture resolves its own `--<role>`
-        // override flags and its `Assembly` first (`resolver_migrated` is
-        // exactly this table's membership, so the two can never disagree);
-        // everything else still goes through the pre-existing env-based
-        // provider construction unchanged.
-        if resolver_migrated {
-            if let Some(code) = crate::resolver_cli::run_generic_migrated(arch, model, &rest) {
-                crate::drain_before_exit(code);
-            }
-        }
-        // `run_do` expects `[model, action, ...flags]`; `rest` is already
+        // `run_do` resolves the model's `--<role>` override flags and its
+        // `Assembly` through the catalog's spec. It expects `[model, action, ...flags]`; `rest` is already
         // `[verb, ...flags]` with the verb doubling as the action name, so
         // prepending the model id is the whole translation.
         let mut do_args = vec![model.to_string()];
@@ -347,75 +278,6 @@ mod tests {
 
     fn s(args: &[&str]) -> Vec<String> {
         args.iter().map(|s| s.to_string()).collect()
-    }
-
-    /// Declaring an architecture resolver-migrated is TWO edits, and making
-    /// only the first is worse than making neither.
-    ///
-    /// [`RESOLVER_MIGRATED_ARCHS`] suppresses the env-based auto-fetch
-    /// (`attempt_fetch`), and `resolver_cli::with_arch_spec` is what supplies
-    /// the `ArchSpec` that is supposed to replace it. An architecture listed
-    /// here but absent there gets neither: `run_generic_migrated` returns
-    /// `None`, dispatch falls through to the env path it was migrated off,
-    /// and auto-fetch is already disabled - so it fails asking for a
-    /// `BRAIN_*` variable on a checkpoint sitting in the model store.
-    ///
-    #[test]
-    fn every_generically_dispatched_migrated_arch_has_a_spec() {
-        let generic: Vec<&str> = RESOLVER_MIGRATED_ARCHS
-            .iter()
-            .copied()
-            .filter(|a| ARCH_TO_MODEL.iter().any(|(id, _)| id == a))
-            .collect();
-        let missing: Vec<&str> = generic.iter().copied().filter(|a| !crate::resolver_cli::has_arch_spec(a)).collect();
-        assert!(missing.is_empty(), "declared resolver-migrated but resolver_cli cannot build their ArchSpec: {missing:?}");
-    }
-
-    /// Whether `arch`'s served model declares a host-side weights param -
-    /// `capability`'s own marker for "this names something only the machine
-    /// running the action can know".
-    fn declares_host_env_weights(arch: &str) -> bool {
-        let Some((_, model)) = ARCH_TO_MODEL.iter().find(|(id, _)| *id == arch) else { return false };
-        catalog::manifests()
-            .into_iter()
-            .find(|m| m.model == *model)
-            .is_some_and(|m| m.actions.iter().any(|a| a.params.iter().any(|p| p.host_env.is_some())))
-    }
-
-    /// The CONVERSE of the test above, and the one that catches work that
-    /// was done and then not switched on.
-    ///
-    /// An architecture reachable through the generic dispatch, for which
-    /// `resolver_cli` can already build an `ArchSpec`, has everything it
-    /// needs to resolve its weights from the model store - so leaving it OFF
-    /// `RESOLVER_MIGRATED_ARCHS` means a user sets a `BRAIN_*` variable for a
-    /// checkpoint brain could have found, and nothing anywhere says so. That
-    /// is precisely how `kronos`, `qwen3vl`, `fastvlm` and `deepseek2ocr`
-    /// sat half-wired.
-    ///
-    /// Adding a spec is therefore the same edit as turning it on, and this
-    /// fails if the two are ever separated again.
-    #[test]
-    fn every_generic_arch_with_a_spec_is_declared_migrated() {
-        let stranded: Vec<&str> = ARCH_TO_MODEL
-            .iter()
-            .map(|(id, _)| *id)
-            .filter(|a| crate::resolver_cli::has_arch_spec(a))
-            .filter(|a| !RESOLVER_MIGRATED_ARCHS.contains(a))
-            // An architecture whose action already declares a `host_env`
-            // weights param is in a working, declared state (state 2 of
-            // `catalog::tests::every_model_declares_how_it_finds_its_weights`).
-            // Declaring it migrated WITHOUT also making its provider read the
-            // Assembly would suppress auto-fetch while changing nothing else -
-            // the exact half-wired state this pair of tests exists to prevent.
-            // So it is migrated when its provider is, not before.
-            .filter(|a| !declares_host_env_weights(a))
-            .collect();
-        assert!(
-            stranded.is_empty(),
-            "these architectures have a usable ArchSpec but are not declared resolver-migrated, so they \
-             still demand a BRAIN_* variable for weights the model store can find: {stranded:?}"
-        );
     }
 
     #[test]

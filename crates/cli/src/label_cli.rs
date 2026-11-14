@@ -145,7 +145,7 @@ fn resolved_default_weights(model: &str) -> Option<String> {
         _ => return None,
     };
     // `brain label` takes no `--models-dir`: the resolver's flagless store.
-    match crate::resolver_cli::try_resolve(loader::model_dir::resolve(None).as_deref(), arch, spec, &Default::default()) {
+    match loader::resolver::try_resolve(loader::model_dir::resolve(None).as_deref(), arch, spec, &Default::default()) {
         Ok(assembly) => assembly.roles.get("weights").map(|p| p.to_string_lossy().into_owned()),
         Err(e) => {
             eprintln!("label: {arch}'s default checkpoint did not resolve ({e})");

@@ -41,7 +41,6 @@ mod finetune_cli;
 mod optimize_cli;
 mod prune_cli;
 mod quantize_cli;
-mod resolver_cli;
 mod adapter_directory;
 mod continuous_train;
 mod resolve;
