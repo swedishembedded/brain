@@ -20,6 +20,16 @@ all-features = false
 [advisories]
 version = 2
 yanked = "deny"
+# Every vulnerability, unsound and notice advisory fails the audit. The
+# entries below are crates reported unmaintained, with no maintained release
+# their dependents can take yet; each names who pulls it in and what retires it.
+ignore = [
+    { id = "RUSTSEC-2026-0370", reason = "zvariant: zbus 5 (brain-dbus, braintop); retired by moving to zbus 6, which carries it" },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names: zbus 5 (brain-dbus, braintop); retired by moving to zbus 6" },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive: zbus 5 (brain-dbus, braintop); retired by moving to zbus 6" },
+    { id = "RUSTSEC-2026-0192", reason = "ttf-parser: imageproc's ab_glyph text drawing (brain-data); no maintained release of imageproc drops it" },
+    { id = "RUSTSEC-2024-0436", reason = "paste: a proc macro of ratatui 0.29 and rav1d; build-time only, no runtime code" },
+]
 
 [sources]
 unknown-registry = "deny"

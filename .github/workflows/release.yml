@@ -80,7 +80,7 @@ jobs:
         with:
           key: audit
       - name: Install cargo-deny
-        run: cargo install cargo-deny --locked --version 0.18.3
+        run: cargo install cargo-deny --locked --version 0.20.2
       - run: cargo deny --locked check advisories sources
 
   # The software bill of materials of the `brain` executable, from the lockfile's resolved graph.
