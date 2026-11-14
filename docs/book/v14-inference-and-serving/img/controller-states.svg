@@ -1,0 +1,88 @@
+<!-- source-sha256: 4b6755b30311c8c93473a0b5b6c82d78ed71a5733ad239e673e4abbfd30be4db -->
+<svg width="594pt" height="418pt"
+viewBox="0.00 0.00 594.00 418.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(10.8 406.8)">
+<polygon fill="white" stroke="none" points="-10.8,10.8 -10.8,-406.8 583.05,-406.8 583.05,10.8 -10.8,10.8"/>
+<g id="clust1" class="cluster">
+<path fill="white" stroke="#a0aec0" d="M20,-8C20,-8 552.25,-8 552.25,-8 558.25,-8 564.25,-14 564.25,-20 564.25,-20 564.25,-376 564.25,-376 564.25,-382 558.25,-388 552.25,-388 552.25,-388 20,-388 20,-388 14,-388 8,-382 8,-376 8,-376 8,-20 8,-20 8,-14 14,-8 20,-8"/>
+<text xml:space="preserve" text-anchor="middle" x="28.38" y="-372.6" font-family="Helvetica,sans-Serif" font-size="12.00">Root</text>
+</g>
+<g id="clust2" class="cluster">
+<path fill="white" stroke="#a0aec0" d="M28,-16C28,-16 544.25,-16 544.25,-16 550.25,-16 556.25,-22 556.25,-28 556.25,-28 556.25,-303 556.25,-303 556.25,-309 550.25,-315 544.25,-315 544.25,-315 28,-315 28,-315 22,-315 16,-309 16,-303 16,-303 16,-28 16,-28 16,-22 22,-16 28,-16"/>
+<text xml:space="preserve" text-anchor="middle" x="55.12" y="-299.6" font-family="Helvetica,sans-Serif" font-size="12.00">Operational</text>
+</g>
+<g id="node1" class="node">
+<path fill="#fefcbf" stroke="#4a5568" d="M66,-187C66,-187 36,-187 36,-187 30,-187 24,-181 24,-175 24,-175 24,-163 24,-163 24,-157 30,-151 36,-151 36,-151 66,-151 66,-151 72,-151 78,-157 78,-163 78,-163 78,-175 78,-175 78,-181 72,-187 66,-187"/>
+<text xml:space="preserve" text-anchor="middle" x="51" y="-164.18" font-family="Helvetica,sans-Serif" font-size="11.00">Idle</text>
+</g>
+<g id="node2" class="node">
+<path fill="#e2e8f0" stroke="#4a5568" d="M262.12,-60C262.12,-60 229.62,-60 229.62,-60 223.62,-60 217.62,-54 217.62,-48 217.62,-48 217.62,-36 217.62,-36 217.62,-30 223.62,-24 229.62,-24 229.62,-24 262.12,-24 262.12,-24 268.12,-24 274.12,-30 274.12,-36 274.12,-36 274.12,-48 274.12,-48 274.12,-54 268.12,-60 262.12,-60"/>
+<text xml:space="preserve" text-anchor="middle" x="245.88" y="-37.17" font-family="Helvetica,sans-Serif" font-size="11.00">Chatting</text>
+</g>
+<g id="edge1" class="edge">
+<path fill="none" stroke="#1a202c" d="M59.9,-150.57C68.24,-133.13 82.98,-107.36 103,-91.75 134.23,-67.4 178.28,-54.43 208.98,-47.92"/>
+<polygon fill="#1a202c" stroke="#1a202c" points="209.41,-50.33 215.78,-46.54 208.44,-45.53 209.41,-50.33"/>
+<text xml:space="preserve" text-anchor="middle" x="142.75" y="-92.55" font-family="Helvetica,sans-Serif" font-size="11.00">user_text</text>
+</g>
+<g id="node3" class="node">
+<path fill="#e2e8f0" stroke="#4a5568" d="M264.75,-112C264.75,-112 227,-112 227,-112 221,-112 215,-106 215,-100 215,-100 215,-88 215,-88 215,-82 221,-76 227,-76 227,-76 264.75,-76 264.75,-76 270.75,-76 276.75,-82 276.75,-88 276.75,-88 276.75,-100 276.75,-100 276.75,-106 270.75,-112 264.75,-112"/>
+<text xml:space="preserve" text-anchor="middle" x="245.88" y="-89.17" font-family="Helvetica,sans-Serif" font-size="11.00">Detecting</text>
+</g>
+<g id="edge2" class="edge">
+<path fill="none" stroke="#1a202c" d="M75.13,-150.6C83.54,-144.58 93.35,-138.28 103,-133.75 136.3,-118.12 176.95,-107.5 206.2,-101.2"/>
+<polygon fill="#1a202c" stroke="#1a202c" points="206.67,-103.61 213.02,-99.77 205.67,-98.81 206.67,-103.61"/>
+<text xml:space="preserve" text-anchor="middle" x="142.75" y="-134.55" font-family="Helvetica,sans-Serif" font-size="11.00">camera_frame</text>
+</g>
+<g id="node4" class="node">
+<path fill="#e2e8f0" stroke="#4a5568" d="M272.25,-164C272.25,-164 219.5,-164 219.5,-164 213.5,-164 207.5,-158 207.5,-152 207.5,-152 207.5,-140 207.5,-140 207.5,-134 213.5,-128 219.5,-128 219.5,-128 272.25,-128 272.25,-128 278.25,-128 284.25,-134 284.25,-140 284.25,-140 284.25,-152 284.25,-152 284.25,-158 278.25,-164 272.25,-164"/>
+<text xml:space="preserve" text-anchor="middle" x="245.88" y="-141.18" font-family="Helvetica,sans-Serif" font-size="11.00">Synthesizing</text>
+</g>
+<g id="edge3" class="edge">
+<path fill="none" stroke="#1a202c" d="M78.31,-161.83C86.2,-159.91 94.9,-158.02 103,-156.75 134.74,-151.77 170.84,-149.07 198.69,-147.63"/>
+<polygon fill="#1a202c" stroke="#1a202c" points="198.66,-150.08 205.54,-147.29 198.42,-145.19 198.66,-150.08"/>
+<text xml:space="preserve" text-anchor="middle" x="142.75" y="-157.55" font-family="Helvetica,sans-Serif" font-size="11.00">synth request</text>
+</g>
+<g id="node5" class="node">
+<path fill="#e2e8f0" stroke="#4a5568" d="M270,-216C270,-216 221.75,-216 221.75,-216 215.75,-216 209.75,-210 209.75,-204 209.75,-204 209.75,-192 209.75,-192 209.75,-186 215.75,-180 221.75,-180 221.75,-180 270,-180 270,-180 276,-180 282,-186 282,-192 282,-192 282,-204 282,-204 282,-210 276,-216 270,-216"/>
+<text xml:space="preserve" text-anchor="middle" x="245.88" y="-193.18" font-family="Helvetica,sans-Serif" font-size="11.00">Forecasting</text>
+</g>
+<g id="edge4" class="edge">
+<path fill="none" stroke="#1a202c" d="M78.41,-172.97C109.97,-177.72 163.23,-185.72 201,-191.4"/>
+<polygon fill="#1a202c" stroke="#1a202c" points="200.51,-193.81 207.79,-192.42 201.23,-188.96 200.51,-193.81"/>
+<text xml:space="preserve" text-anchor="middle" x="142.75" y="-189.42" font-family="Helvetica,sans-Serif" font-size="11.00">forecast request</text>
+</g>
+<g id="node6" class="node">
+<path fill="#e2e8f0" stroke="#4a5568" d="M270,-286C270,-286 221.75,-286 221.75,-286 215.75,-286 209.75,-280 209.75,-274 209.75,-274 209.75,-262 209.75,-262 209.75,-256 215.75,-250 221.75,-250 221.75,-250 270,-250 270,-250 276,-250 282,-256 282,-262 282,-262 282,-274 282,-274 282,-280 276,-286 270,-286"/>
+<text xml:space="preserve" text-anchor="middle" x="245.88" y="-263.18" font-family="Helvetica,sans-Serif" font-size="11.00">Backtesting</text>
+</g>
+<g id="edge5" class="edge">
+<path fill="none" stroke="#1a202c" d="M60.65,-187.22C69.17,-203.15 83.7,-225.59 103,-238 132.33,-256.85 171.44,-264.09 201.17,-266.76"/>
+<polygon fill="#1a202c" stroke="#1a202c" points="200.61,-269.17 207.78,-267.28 201,-264.29 200.61,-269.17"/>
+<text xml:space="preserve" text-anchor="middle" x="142.75" y="-265" font-family="Helvetica,sans-Serif" font-size="11.00">backtest request</text>
+</g>
+<g id="node7" class="node">
+<path fill="#ebf4ff" stroke="#4a5568" d="M536.25,-155C536.25,-155 497,-155 497,-155 491,-155 485,-149 485,-143 485,-143 485,-131 485,-131 485,-125 491,-119 497,-119 497,-119 536.25,-119 536.25,-119 542.25,-119 548.25,-125 548.25,-131 548.25,-131 548.25,-143 548.25,-143 548.25,-149 542.25,-155 536.25,-155"/>
+<text xml:space="preserve" text-anchor="middle" x="516.62" y="-132.18" font-family="Helvetica,sans-Serif" font-size="11.00">Cancelled</text>
+</g>
+<g id="edge6" class="edge">
+<path fill="none" stroke="#c53030" d="M274.62,-51.81C322.81,-68.84 422.07,-103.93 476.97,-123.34"/>
+<polygon fill="#c53030" stroke="#c53030" points="475.9,-125.56 483.31,-125.58 477.53,-120.94 475.9,-125.56"/>
+<text xml:space="preserve" text-anchor="middle" x="384.62" y="-128.53" font-family="Helvetica,sans-Serif" font-size="11.00" fill="#c53030">cancel: handled by Operational,</text>
+<text xml:space="preserve" text-anchor="middle" x="384.62" y="-117.28" font-family="Helvetica,sans-Serif" font-size="11.00" fill="#c53030">so from every substate</text>
+</g>
+<g id="node8" class="node">
+<path fill="#ebf4ff" stroke="#4a5568" d="M531.62,-359C531.62,-359 501.62,-359 501.62,-359 495.62,-359 489.62,-353 489.62,-347 489.62,-347 489.62,-335 489.62,-335 489.62,-329 495.62,-323 501.62,-323 501.62,-323 531.62,-323 531.62,-323 537.62,-323 543.62,-329 543.62,-335 543.62,-335 543.62,-347 543.62,-347 543.62,-353 537.62,-359 531.62,-359"/>
+<text xml:space="preserve" text-anchor="middle" x="516.62" y="-336.18" font-family="Helvetica,sans-Serif" font-size="11.00">Faulted</text>
+</g>
+<g id="edge8" class="edge">
+<path fill="none" stroke="#c53030" d="M419.89,-315C443.07,-321.29 464.57,-327.13 481.31,-331.68"/>
+<polygon fill="#c53030" stroke="#c53030" points="480.57,-334.02 487.97,-333.49 481.85,-329.29 480.57,-334.02"/>
+<text xml:space="preserve" text-anchor="middle" x="384.62" y="-326.03" font-family="Helvetica,sans-Serif" font-size="11.00" fill="#c53030">error: handled by Operational</text>
+</g>
+<g id="edge7" class="edge">
+<path fill="none" stroke="#1a202c" stroke-dasharray="5,2" d="M484.84,-152.68C441.45,-173.82 359.2,-210.38 284.25,-224 204.51,-238.5 177.8,-235.21 103,-204 95.49,-200.87 87.96,-196.52 81.08,-191.96"/>
+<polygon fill="#1a202c" stroke="#1a202c" points="82.83,-190.2 75.68,-188.22 80.04,-194.22 82.83,-190.2"/>
+<text xml:space="preserve" text-anchor="middle" x="456.26" y="-182.62" font-family="Helvetica,sans-Serif" font-size="11.00">GoIdle</text>
+</g>
+</g>
+</svg>
