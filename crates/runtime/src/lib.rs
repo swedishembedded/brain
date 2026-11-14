@@ -554,7 +554,7 @@ struct Brain {
 impl Brain {
     /// Run a generic [`Event::ActionRequest`] through the [`capability::Registry`]:
     /// build a validated invocation from the wire params + base64 blobs, execute
-    /// the action (streaming `ActionProgress` inline), and emit `ActionResult`
+    /// the action (progress is collected while it runs and emitted as `ActionProgress` events once it returns), and emit `ActionResult`
     /// (or a structured `Error`). Model-agnostic — every model's actions flow here.
     fn run_action(&mut self, model: &str, action: &str, params: &serde_json::Value, blobs: &[events::WireBlob]) {
         let Some(act) = self.caps.find(model, action) else {
@@ -581,8 +581,8 @@ impl Brain {
                 return;
             }
         };
-        // run — progress streams inline (act is an owned Arc, so the closure may
-        // borrow self mutably).
+        // run - progress is buffered, not streamed: the closure cannot borrow self
+        // to emit while `act` runs, so the events go out after it returns.
         let mut progress = Vec::new();
         let res = act.run(&inv, &mut |p: capability::Progress| progress.push(p));
         for p in progress {
