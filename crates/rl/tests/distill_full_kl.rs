@@ -53,7 +53,11 @@ fn distill_topk_at_k_equals_vocab_reproduces_exact_kl() {
     // per position (`K = vocab`, `ids` the identity permutation) - the
     // `Σ_k q_k = 1` requirement the keystone identity leans on, satisfied by
     // construction here via normalization.
-    let mut rng = Rng::new(random_seed());
+    // Any strictly positive teacher must satisfy the identity, so the draw is
+    // fresh each run; the seed is printed so a failure can be replayed.
+    let seed = random_seed();
+    eprintln!("teacher seed {seed}");
+    let mut rng = Rng::new(seed);
     let mut teacher = Vec::with_capacity(SEQ_LEN);
     for _ in 0..SEQ_LEN {
         let raw: Vec<f32> = (0..vocab).map(|_| rng.next_f32() + 0.05).collect();
@@ -86,5 +90,5 @@ fn distill_topk_at_k_equals_vocab_reproduces_exact_kl() {
     }
     let realized = mean_kl(total, &teacher);
 
-    assert!((realized - reference).abs() < 1e-2, "K=vocab realized KL {realized} != reference KL {reference}");
+    assert!((realized - reference).abs() < 1e-2, "K=vocab realized KL {realized} != reference KL {reference} (teacher seed {seed})");
 }
