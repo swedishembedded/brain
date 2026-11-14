@@ -19,5 +19,6 @@ You can state how many copies of a model's weights a loader holds and why, read 
 4. [Batching and Scheduling Requests](04-batching.md): how does a server keep the device busy while answering many users at once?
 5. [Speculative Decoding](05-speculative-decoding.md): how can a small model's guesses make a large model generate faster without changing its output?
 6. [Capabilities, Providers and APIs](06-capabilities-and-apis.md): how does an engine present hundreds of models through a few stable interfaces?
+7. [Security of Machine Learning Services](07-security.md): what can a hostile request or a malicious model file do to a server, and how do we stop it?
 8. [Running and Observing an Engine](08-operations.md): how do we see what a running engine is doing, control it, and shut it down cleanly?
 9. [Project: A Multi-Client Inference Server](09-project-inference-server.md): can you build a server that answers many clients at once within fixed memory and stays safe under hostile input?

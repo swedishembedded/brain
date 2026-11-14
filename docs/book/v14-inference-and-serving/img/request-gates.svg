@@ -1,0 +1,59 @@
+<!-- source-sha256: dbbb50df8b4ec674e5fda2b33ddc24c8d6c2127d42f05bd2620f9b33e4a09aa0 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 530" width="1000" height="530"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="1000" height="530" fill="#ffffff"/>
+<text x="144" y="55.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">refused here without a key</text>
+<text x="144" y="215.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">keyed: the request is someone&#x27;s</text>
+<text x="144" y="375.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">dispatch: the call is about to cost a device</text>
+<rect x="30" y="65" width="200" height="70" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="130" y="88.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">accept</text>
+<text x="130" y="104.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">at most 1,024 held,</text>
+<text x="130" y="120.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">the rest closed</text>
+<rect x="275" y="65" width="200" height="70" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="375" y="88.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">TLS handshake</text>
+<text x="375" y="104.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">within 10 seconds</text>
+<text x="375" y="120.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">(when configured)</text>
+<rect x="520" y="65" width="200" height="70" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="620" y="96.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">request head</text>
+<text x="620" y="112.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">within 10 seconds</text>
+<rect x="765" y="65" width="200" height="70" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="865" y="88.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">key check</text>
+<text x="865" y="104.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">every route, unknown</text>
+<text x="865" y="120.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">ones too: 401</text>
+<rect x="30" y="225" width="200" height="70" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="130" y="248.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">edge permit</text>
+<text x="130" y="264.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">256 in flight,</text>
+<text x="130" y="280.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">else 503 at once</text>
+<rect x="275" y="225" width="200" height="70" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="375" y="248.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">body</text>
+<text x="375" y="264.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">8 MiB (64 MiB uploads): 413,</text>
+<text x="375" y="280.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">whole within 300 seconds</text>
+<rect x="520" y="225" width="200" height="70" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="620" y="248.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">parse and bounds</text>
+<text x="620" y="264.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">ranges, counts, no host</text>
+<text x="620" y="280.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">path: 400</text>
+<rect x="765" y="225" width="200" height="70" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="865" y="248.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">media decode</text>
+<text x="865" y="264.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">4 at once, pixels from</text>
+<text x="865" y="280.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">the header: 400 or 503</text>
+<rect x="30" y="385" width="200" height="70" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="130" y="408.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">dispatch gate</text>
+<text x="130" y="424.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">training 403, caller&#x27;s</text>
+<text x="130" y="440.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">budget 429</text>
+<rect x="275" y="385" width="200" height="70" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="375" y="408.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">admission</text>
+<text x="375" y="424.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">a lane within the</text>
+<text x="375" y="440.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">deadline, else 429</text>
+<rect x="520" y="385" width="200" height="70" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="620" y="416.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">executor lane</text>
+<text x="620" y="432.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">the model runs</text>
+<line x1="233" y1="100" x2="272" y2="100" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="478" y1="100" x2="517" y2="100" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="723" y1="100" x2="762" y2="100" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="233" y1="260" x2="272" y2="260" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="478" y1="260" x2="517" y2="260" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="723" y1="260" x2="762" y2="260" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="233" y1="420" x2="272" y2="420" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="478" y1="420" x2="517" y2="420" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M865,135 L865,170 Q865,180 855,180 L140,180 Q130,180 130,190 L130,222" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M865,295 L865,330 Q865,340 855,340 L140,340 Q130,340 130,350 L130,382" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="500" y="509.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">cheap checks first: a peer is refused before it costs a body, a decode or a device</text>
+</svg>
