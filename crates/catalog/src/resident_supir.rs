@@ -109,6 +109,6 @@ struct SupirInstance {
 impl Instance for SupirInstance {
     fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         let registry = self.registry.clone();
-        crate::resident_llm::on_device(self.device, || self.session.run(action, inv, Some(&registry), progress))?
+        residency::on_device(self.device, || self.session.run(action, inv, Some(&registry), progress))?
     }
 }

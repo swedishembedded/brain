@@ -133,7 +133,7 @@ impl ResidentModel for DecisionResident {
     fn activate(&self, _key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
         // Built on the card the scheduler assigned, by scoped selection and
         // never by mutating the environment.
-        let loaded = crate::resident_llm::on_device(device, || {
+        let loaded = residency::on_device(device, || {
             decisions::load::load(&self.id, &self.dir, |backend| Ok(gpu_core::Gpu::new(decisions::load::pipelines(backend))))
         })??;
         Ok(Box::new(DecisionInstance { session: loaded.session }))

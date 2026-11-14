@@ -98,7 +98,7 @@ impl ResidentModel for ClipResident {
     fn activate(&self, _key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
         // Build on the card the manager assigned (scoped registry selection —
         // never env mutation).
-        let gpu = crate::resident_llm::on_device(device, || gpu_core::Gpu::new(clip::model::TEXT_PIPELINES))?;
+        let gpu = residency::on_device(device, || gpu_core::Gpu::new(clip::model::TEXT_PIPELINES))?;
         Ok(Box::new(ClipInstance { session: Session::load(&self.dir, gpu)? }))
     }
 }

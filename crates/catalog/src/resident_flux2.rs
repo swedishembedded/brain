@@ -298,7 +298,7 @@ impl ResidentModel for Flux2Resident {
         // explicit misuse the way the CLI/SDK paths do. Place the pipeline on
         // the assigned card (scoped registry selection; the TE card is
         // the tuning's own `te_device` and left as configured).
-        let (pipe, ..) = crate::resident_llm::on_device(device, || {
+        let (pipe, ..) = residency::on_device(device, || {
             flux2::build_resolved(
                 &self.paths,
                 flux2::BuildRequest {

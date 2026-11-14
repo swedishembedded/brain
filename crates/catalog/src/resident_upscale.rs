@@ -110,7 +110,7 @@ impl ResidentModel for UpscaleResident {
     }
 
     fn activate(&self, _key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
-        let gpu = crate::resident_llm::on_device(device, || gpu_core::Gpu::new(&rrdbnet::KERNELS))?;
+        let gpu = residency::on_device(device, || gpu_core::Gpu::new(&rrdbnet::KERNELS))?;
         Ok(Box::new(UpscaleInstance { session: rrdbnet::caps::load(&self.path, gpu)? }))
     }
 }

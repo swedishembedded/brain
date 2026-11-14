@@ -181,10 +181,10 @@ impl ResidentModel for ZImageResident {
         // encoder card is the tuning's own (`encoder_gpu`) and left as
         // configured.
         let (pipe, dit_cache) = if shape.retains_int8_cache() {
-            let (pipe, cache) = crate::resident_llm::on_device(device, || HotPipeline::build_adapted_with_cache(&self.paths, &shape.build_spec(), |_| {}))??;
+            let (pipe, cache) = residency::on_device(device, || HotPipeline::build_adapted_with_cache(&self.paths, &shape.build_spec(), |_| {}))??;
             (pipe, Some(cache))
         } else {
-            let pipe = crate::resident_llm::on_device(device, || HotPipeline::build_adapted(&self.paths, &shape.build_spec(), |_| {}))??;
+            let pipe = residency::on_device(device, || HotPipeline::build_adapted(&self.paths, &shape.build_spec(), |_| {}))??;
             (pipe, None)
         };
         Ok(Box::new(ZImageInstance { pipe: Some(pipe), dit_cache, provider: self.provider.clone(), paths: self.paths.clone(), shape: Some(shape) }))
@@ -253,7 +253,7 @@ impl Instance for ZImageInstance {
     fn promote(&mut self, device: Device) -> Result<(), String> {
         let cache = self.dit_cache.as_ref().ok_or("z-image: promote called on an instance with no retained cache")?;
         let shape = self.shape.as_ref().ok_or("z-image: promote called on an instance with no build shape")?;
-        let pipe = crate::resident_llm::on_device(device, || HotPipeline::build_from_dit_cache(&self.paths, &shape.build_spec(), cache, |_| {}))??;
+        let pipe = residency::on_device(device, || HotPipeline::build_from_dit_cache(&self.paths, &shape.build_spec(), cache, |_| {}))??;
         self.pipe = Some(pipe);
         Ok(())
     }

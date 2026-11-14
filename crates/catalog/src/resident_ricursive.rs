@@ -56,7 +56,8 @@ use ricursive::{DraftSizing, LsaCharge, RicursiveConfig, RicursiveEngine, ServeC
 
 use crate::adapter_registry::{AdaptedInstance, AdapterBankSettings, AdapterHost, AdapterRegistry};
 use crate::adapter_release::{LoadedAdapter, ServedBase, RICURSIVE_FAMILY};
-use crate::resident_llm::{generate_spec, on_device};
+use crate::resident_llm::generate_spec;
+use residency::on_device;
 
 /// Rows per global KV block.
 const BLOCK_SIZE: u32 = 16;

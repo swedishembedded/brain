@@ -80,7 +80,7 @@ impl ResidentModel for Florence2Resident {
     }
 
     fn activate(&self, _key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
-        let gpu = crate::resident_llm::on_device(device, || gpu_core::Gpu::new(&florence2::caps::SERVING_PIPELINES))?;
+        let gpu = residency::on_device(device, || gpu_core::Gpu::new(&florence2::caps::SERVING_PIPELINES))?;
         Ok(Box::new(Florence2Instance { session: FlorenceSession::load(&self.dir, gpu)? }))
     }
 }

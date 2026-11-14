@@ -37,7 +37,8 @@ use qwen35::serve_ring::{ring_slots, RingEngine, PREFILL_ROUND_TOKENS};
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel, Tier};
 
 use crate::parkable::{Build, HostWeights, ParkableInstance};
-use crate::resident_llm::{generate_spec, on_device};
+use crate::resident_llm::generate_spec;
+use residency::on_device;
 use crate::resident_qwen35::Qwen35Sizing;
 use model::serve::Scheduler;
 

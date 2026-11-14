@@ -106,7 +106,7 @@ impl ResidentModel for MirageResident {
     }
 
     fn activate(&self, key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
-        let gpu = crate::resident_llm::on_device(device, || gpu_core::Gpu::new(&MirageSession::kernels()))?;
+        let gpu = residency::on_device(device, || gpu_core::Gpu::new(&MirageSession::kernels()))?;
         let session = match precision_of(&key.config) {
             Some(precision) => MirageSession::load_with(&self.dir, gpu, precision)?,
             None => MirageSession::load(&self.dir, gpu)?,

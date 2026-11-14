@@ -16,7 +16,7 @@
 //! So this adapter always serves one shared instance (like
 //! `residency::bridge::ProviderResident`'s stateless case), but as a bespoke
 //! type rather than that generic bridge: `render`'s GPU build must land on
-//! the scheduler's ASSIGNED device (`resident_llm::on_device`), which the
+//! the scheduler's ASSIGNED device (`residency::on_device`), which the
 //! stateless bridge has no hook for.
 
 use capability::{ActionResult, Invocation, Manifest, Progress, Provider};
@@ -73,6 +73,6 @@ struct SplatInstance {
 impl Instance for SplatInstance {
     fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         let act = self.provider.action(action).ok_or_else(|| format!("splat: unknown action '{action}'"))?;
-        crate::resident_llm::on_device(self.device, || act.run(inv, progress))?
+        residency::on_device(self.device, || act.run(inv, progress))?
     }
 }

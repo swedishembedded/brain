@@ -148,10 +148,10 @@ impl ResidentModel for LfmResident {
         // A downloaded directory is read as it is, through its renaming source.
         let model = if std::path::Path::new(&self.weights).is_dir() {
             let (cfg, src) = lfm2::import::open_dir(std::path::Path::new(&self.weights)).map_err(|e| format!("lfm: {e}"))?;
-            crate::resident_llm::on_device(device, || Lfm::new_chunked(cfg, self.batch, t, &src, SLAB_BUDGET, PROBE_CAP))?
+            residency::on_device(device, || Lfm::new_chunked(cfg, self.batch, t, &src, SLAB_BUDGET, PROBE_CAP))?
         } else {
             let reader = checkpoint::weightio::WeightReader::open(&self.weights).map_err(|e| format!("lfm: {e}"))?;
-            crate::resident_llm::on_device(device, || Lfm::from_reader_chunked(&reader, self.batch, t, SLAB_BUDGET, PROBE_CAP))?
+            residency::on_device(device, || Lfm::from_reader_chunked(&reader, self.batch, t, SLAB_BUDGET, PROBE_CAP))?
         };
         Ok(Box::new(LfmInstance { model, tok: self.tok.clone(), tokenizer_path: self.tokenizer_path.clone(), t, batch: self.batch as usize }))
     }
@@ -171,7 +171,7 @@ impl Instance for WorkflowInstance {
     fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         use capability::Provider;
         let act = self.provider.action(action).ok_or_else(|| format!("lfm: unknown action '{action}'"))?;
-        crate::resident_llm::on_device(self.device, || act.run(inv, progress))?
+        residency::on_device(self.device, || act.run(inv, progress))?
     }
 }
 

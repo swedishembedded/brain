@@ -353,29 +353,29 @@ impl LtxvInstance {
                 let mut p = ltxv::caps::gen_params_from(inv)?;
                 p.opts.device = device_name(device);
                 p.opts.devices = plan;
-                crate::resident_llm::on_device(device, || ltxv::caps::generate_on(paths, inv, &p, progress))?
+                residency::on_device(device, || ltxv::caps::generate_on(paths, inv, &p, progress))?
             }
             "dfr" => {
                 let mut p = ltxv::caps::dfr_params_from(inv)?;
                 p.gen.opts.device = device_name(device);
                 p.gen.opts.devices = plan;
-                crate::resident_llm::on_device(device, || ltxv::caps::dfr_on(paths, inv, &p, progress))?
+                residency::on_device(device, || ltxv::caps::dfr_on(paths, inv, &p, progress))?
             }
             action @ ("v2v" | "extend" | "upscale") => {
                 let place = |o: &mut ltxv::pipeline::GenOpts| {
                     o.device = device_name(device);
                     o.devices = plan;
                 };
-                crate::resident_llm::on_device(device, || ltxv::caps::clip_action_on(action, paths, inv, &place, progress))?
+                residency::on_device(device, || ltxv::caps::clip_action_on(action, paths, inv, &place, progress))?
             }
             // The other models it runs (SAM 2, FLUX.2, ArcFace) are loaded
             // for the call and dropped before the video pass.
-            "replace" => crate::resident_llm::on_device(device, || ltxv::caps::replace_on(paths, crate::components().as_ref(), inv, progress))?,
+            "replace" => residency::on_device(device, || ltxv::caps::replace_on(paths, crate::components().as_ref(), inv, progress))?,
             "t2a" => {
                 let mut opts = ltxv::caps::t2a_params_from(inv)?;
                 opts.base.device = device_name(device);
                 opts.base.devices = plan;
-                crate::resident_llm::on_device(device, || ltxv::caps::t2a_on(paths, inv, &opts, progress))?
+                residency::on_device(device, || ltxv::caps::t2a_on(paths, inv, &opts, progress))?
             }
             other => Err(format!("ltxv: unknown action '{other}'")),
         }

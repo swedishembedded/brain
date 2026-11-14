@@ -238,7 +238,7 @@ impl Instance for MinimaxMusic3Instance {
         // conditional branch's. `on_device` is the shared helper for this;
         // never an env mutation, which AGENTS.md forbids from a
         // server-lifetime resident.
-        crate::resident_llm::on_device(self.device, || minimaxmusic3::caps::generate_action(&self.paths, inv, progress))?
+        residency::on_device(self.device, || minimaxmusic3::caps::generate_action(&self.paths, inv, progress))?
     }
 
     /// **Serial, and here is the reason** - which AGENTS.md requires

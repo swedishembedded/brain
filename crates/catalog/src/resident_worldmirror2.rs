@@ -89,7 +89,7 @@ impl ResidentModel for WorldMirror2Resident {
     }
 
     fn activate(&self, _key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
-        let gpu = crate::resident_llm::on_device(device, || gpu_core::Gpu::new(worldmirror2::model::PIPELINES))?;
+        let gpu = residency::on_device(device, || gpu_core::Gpu::new(worldmirror2::model::PIPELINES))?;
         let session = worldmirror2::caps::load(&self.path, gpu)?;
         Ok(Box::new(WorldMirror2Instance { session, device }))
     }
@@ -109,6 +109,6 @@ impl Instance for WorldMirror2Instance {
             return Err(format!("worldmirror2: unknown action '{action}'"));
         }
         let session = &mut self.session;
-        crate::resident_llm::on_device(self.device, || worldmirror2::caps::run_reconstruct(session, inv, progress))?
+        residency::on_device(self.device, || worldmirror2::caps::run_reconstruct(session, inv, progress))?
     }
 }

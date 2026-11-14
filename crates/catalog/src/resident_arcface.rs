@@ -131,7 +131,7 @@ impl ResidentModel for ArcFaceResident {
         // selection - never env mutation), then import once. The detector rides
         // on the SAME device with its own kernel set (`Gpu::new_like`, inside
         // `ArcFaceSession::load`).
-        let gpu = crate::resident_llm::on_device(device, || gpu_core::Gpu::new(&arcface::caps::SERVING_PIPELINES))?;
+        let gpu = residency::on_device(device, || gpu_core::Gpu::new(&arcface::caps::SERVING_PIPELINES))?;
         Ok(Box::new(ArcFaceInstance { session: ArcFaceSession::load(&self.dir, gpu)? }))
     }
 }

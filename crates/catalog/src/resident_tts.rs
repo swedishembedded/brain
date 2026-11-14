@@ -126,7 +126,7 @@ struct ProviderInstance {
 impl Instance for ProviderInstance {
     fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         let act = self.provider.action(action).ok_or_else(|| format!("tts: unknown action '{action}'"))?;
-        crate::resident_llm::on_device(self.device, || act.run(inv, progress))?
+        residency::on_device(self.device, || act.run(inv, progress))?
     }
 }
 

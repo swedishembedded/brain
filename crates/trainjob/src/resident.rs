@@ -285,7 +285,7 @@ impl Instance for TrainInstance {
         };
         // The trainer reports a device failure (an allocation the card cannot hold) as a panic. One run's failure is
         // that run's error, not the server's.
-        let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| catalog::resident_llm::on_device(self.device, work)));
+        let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| residency::on_device(self.device, work)));
         match run {
             Ok(placed) => placed?,
             Err(panic) => {

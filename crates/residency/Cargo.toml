@@ -16,4 +16,7 @@ brain-memauth.workspace = true
 brain-gpu-supervisor.workspace = true
 # `hardware::is_wait_timeout`: how an in-process driver wait that ran past its bound is recognised.
 brain-backend-api.workspace = true
+# `on_device`: the scoped device selection an activation builds on its assigned card through.
+brain-gpu-core.workspace = true
 serde_json.workspace = true
+

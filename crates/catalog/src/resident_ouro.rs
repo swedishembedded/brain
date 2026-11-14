@@ -29,7 +29,8 @@ use llmserve::{ScheduledInstance, TextFrontend};
 use model::serve::Scheduler;
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 
-use crate::resident_llm::{est_vram, generate_spec, on_device};
+use crate::resident_llm::{est_vram, generate_spec};
+use residency::on_device;
 
 /// Default shared KV capacity (tokens) and page size.
 pub const DEFAULT_CTX: u32 = 4096;

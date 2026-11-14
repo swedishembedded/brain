@@ -77,7 +77,7 @@ impl ResidentModel for RestoreResident {
     }
 
     fn activate(&self, _key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
-        let gpu = crate::resident_llm::on_device(device, || gpu_core::Gpu::new(&codeformer::caps::SERVING_PIPELINES))?;
+        let gpu = residency::on_device(device, || gpu_core::Gpu::new(&codeformer::caps::SERVING_PIPELINES))?;
         Ok(Box::new(RestoreInstance { session: codeformer::caps::Session::new(codeformer::caps::load(&self.path, gpu)?) }))
     }
 }
@@ -144,7 +144,7 @@ impl ResidentModel for VqganResident {
     fn activate(&self, key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
         let size: u32 = key.config.parse().map_err(|_| format!("vqgan: bad instance size '{}'", key.config))?;
         vqgan::caps::check_size(size)?;
-        let gpu = crate::resident_llm::on_device(device, || gpu_core::Gpu::new(&vqgan::caps::SERVING_PIPELINES))?;
+        let gpu = residency::on_device(device, || gpu_core::Gpu::new(&vqgan::caps::SERVING_PIPELINES))?;
         Ok(Box::new(VqganInstance { session: vqgan::caps::Session::new(vqgan::caps::load(&self.path, size, gpu)?) }))
     }
 }

@@ -12,7 +12,7 @@
 //! the process-default backend - **wgpu (GPU) unless `BRAIN_DEVICE=cpu`**. So the
 //! resident instance holds the model on a GPU (VRAM); dropping it frees the card.
 //! `activate` places the build on the assigned card via a scoped device-registry
-//! selection ([`on_device`]), exactly like z-image.
+//! selection ([`residency::on_device`]), exactly like z-image.
 //!
 //! Model SELECTION: `--checkpoint` (+ `--tokenizer`) names the Qwen3
 //! checkpoint to serve; the model-dir scan serves each GPT-2 and GLM checkpoint
@@ -25,7 +25,7 @@
 
 use capability::{ActionResult, ActionSpec, BlobSpec, Invocation, Manifest, Media, ParamSpec, ParamType, Progress, Provider};
 use checkpoint::st::ModelCard;
-use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
+use residency::{on_device, Device, Instance, InstanceKey, MemCost, ResidentModel};
 use serde_json::json;
 
 use crate::adapter_registry::{AdapterBankSettings, AdapterHost, AdapterRegistry, AdapterSync, QwenAdapterView, ADAPTER_PARAM};
@@ -237,40 +237,6 @@ const MAX_FP32_KV_POOL_BYTES: u64 = 8 << 30;
 /// accept this binding - is answered against the device's own queried limit
 /// where the device exists, in `qwen3::serve::check_kv_bindings_fit`.
 const WGPU_MAX_REPORTABLE_BINDING_BYTES: u64 = 2047 * (1 << 20);
-
-/// Run `f` placed on the residency-assigned device: a GPU assignment becomes a
-/// scoped (thread-local) selection in the canonical device registry, so every
-/// `Gpu::new` inside `f` binds that physical card - race-free across the
-/// executor's concurrent activation lanes. Shared by the resident adapters.
-///
-/// `f` always builds a wgpu (GPU/CPU backend) engine, so a `Device::Npu`
-/// assignment must never reach here silently -- a resident that wants NPU
-/// placement (`MemCost::with_npu`) must branch on `Device::Npu` in its own
-/// `activate` *before* calling this (see `resident_depth.rs`), the same way
-/// every other NPU-capable resident already does.
-///
-/// `Device::Cpu` scopes with [`gpu_core::devices::with_host_tier`], not a
-/// bare `f()`: an unscoped `f()` leaves every `Gpu::new` inside bound to
-/// whatever card is ambient (the memoized `auto_home()` answer from server
-/// startup, still resolving to the SAME GPU residency just decided this part
-/// could not have) - the exact "`Home::Cpu` was a label, not a placement"
-/// defect `gpu_core::devices::Homes::run` was already fixed for (see that
-/// function's own doc and `crates/gpu-core/tests/it/host_tier.rs`). This
-/// resident path had never adopted the fix, so a residency fallback to the
-/// host tier double-booked the GPU it was falling back FROM instead of
-/// relieving it, and panicked with a `wgpu` OOM on a thread literally named
-/// `brain-lane-Cpu`.
-pub fn on_device<R>(device: Device, f: impl FnOnce() -> R) -> Result<R, String> {
-    match device {
-        Device::Gpu(i) => gpu_core::devices::with_gpu(i, f),
-        Device::Cpu => Ok(gpu_core::devices::with_host_tier(f)),
-        Device::Npu(i) => Err(format!(
-            "on_device: got Device::Npu({i}) but this resident has no NPU activation path -- \
-             a resident declaring MemCost::with_npu must branch on Device::Npu in its own \
-             activate() before calling on_device, not fall through to the wgpu build"
-        )),
-    }
-}
 
 /// A brain safetensors checkpoint opened for serving: its config and a source that serves every tensor in the
 /// encoding it is stored in ([`checkpoint::packed::stored_source`]), so a bf16 or int8 checkpoint reaches the
@@ -1709,27 +1675,6 @@ mod tests {
         let missing = root.join("absent");
         assert_eq!(resolve_served_base(missing.to_str().unwrap()), (missing.to_str().unwrap().to_string(), None, None));
         std::fs::remove_dir_all(&root).unwrap();
-    }
-
-    /// REGRESSION: `on_device(Device::Cpu, f)` used to run `f` completely
-    /// unscoped, so a residency fallback to the host tier left every
-    /// `Gpu::new` inside `f` bound to whatever card was ambient - the same
-    /// "`Home::Cpu` was a label, not a placement" defect
-    /// `gpu_core::devices::Homes::run` was already fixed for (see
-    /// `crates/gpu-core/tests/it/host_tier.rs`). `Device::Gpu`/`Device::Npu`
-    /// must be unaffected: a GPU assignment still scopes to that card, and
-    /// NPU is still refused here (never silently built as wgpu).
-    #[test]
-    fn on_device_cpu_scopes_to_the_real_host_tier_not_an_unscoped_call() {
-        assert!(!gpu_core::devices::on_host_tier(), "no scope must be active before this test starts");
-        let was_host_tier = on_device(Device::Cpu, gpu_core::devices::on_host_tier).unwrap();
-        assert!(was_host_tier, "Device::Cpu must build f() inside with_host_tier, not bare");
-        assert!(!gpu_core::devices::on_host_tier(), "the scope must not outlive the call");
-
-        let was_host_tier = on_device(Device::Gpu(0), gpu_core::devices::on_host_tier).unwrap();
-        assert!(!was_host_tier, "Device::Gpu must not be dragged onto the host tier");
-
-        assert!(on_device(Device::Npu(0), || ()).is_err(), "Device::Npu must be refused here, never silently built as wgpu");
     }
 
     /// `QwenServeConfig::default()` reproduces every historical env-var

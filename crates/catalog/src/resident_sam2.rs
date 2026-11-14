@@ -83,7 +83,7 @@ impl ResidentModel for Sam2Resident {
         let cfg = sam2::caps::variant_config(&key.config)?;
         // Build the engine on the card the manager assigned (scoped registry
         // selection — never env mutation), then import once.
-        let gpu = crate::resident_llm::on_device(device, || gpu_core::Gpu::new(sam2::PIPELINES))?;
+        let gpu = residency::on_device(device, || gpu_core::Gpu::new(sam2::PIPELINES))?;
         let model = sam2::caps::load(&self.path, cfg, gpu)?;
         Ok(Box::new(Sam2Instance { session: Session::new(model) }))
     }

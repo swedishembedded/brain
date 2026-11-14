@@ -60,7 +60,8 @@ use crate::adapter_registry::{AdapterBankSettings, AdapterHost, AdapterRegistry,
 use crate::adapter_release::{LoadedAdapter, ServedBase, QWEN35_FAMILY};
 
 use crate::parkable::{Build, HostWeights, ParkableInstance};
-use crate::resident_llm::{est_vram, generate_spec, on_device, open_stored_checkpoint};
+use crate::resident_llm::{est_vram, generate_spec, open_stored_checkpoint};
+use residency::on_device;
 use llmserve::{ScheduledInstance, TextFrontend};
 
 // Re-exported tier types the config struct speaks in, so a CLI builder (or

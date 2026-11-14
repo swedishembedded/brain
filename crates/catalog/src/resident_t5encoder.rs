@@ -74,7 +74,7 @@ impl ResidentModel for T5encoderResident {
     }
 
     fn activate(&self, _key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
-        let gpu = crate::resident_llm::on_device(device, || gpu_core::Gpu::new(t5encoder::model::PIPELINES))?;
+        let gpu = residency::on_device(device, || gpu_core::Gpu::new(t5encoder::model::PIPELINES))?;
         Ok(Box::new(T5encoderInstance { session: Session::load(&self.dir, gpu)? }))
     }
 }

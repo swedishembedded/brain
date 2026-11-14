@@ -247,7 +247,7 @@ impl Instance for WanInstance {
             "t2v" => {
                 let mut p = wan::caps::gen_params_from(inv)?;
                 p.opts.device = self.device_name();
-                crate::resident_llm::on_device(self.device, || wan::caps::generate_on(&self.paths, &self.hot, inv, &p, progress))?
+                residency::on_device(self.device, || wan::caps::generate_on(&self.paths, &self.hot, inv, &p, progress))?
             }
             "lora_train" => wan::caps::train_action(&self.paths, inv, progress),
             other => Err(format!("wan: unknown action '{other}'")),

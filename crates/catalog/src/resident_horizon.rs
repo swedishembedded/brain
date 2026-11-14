@@ -74,7 +74,7 @@ impl ResidentModel for HorizonResident {
     }
 
     fn activate(&self, _key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
-        let loaded = crate::resident_llm::on_device(device, || Loaded::load(&self.dir))??;
+        let loaded = residency::on_device(device, || Loaded::load(&self.dir))??;
         Ok(Box::new(HorizonInstance { loaded }))
     }
 }
