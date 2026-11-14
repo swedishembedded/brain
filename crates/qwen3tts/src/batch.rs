@@ -232,6 +232,7 @@ pub struct BatchRequest {
 /// itself can actually schedule (see the module doc: this is not a batched
 /// GPU matmul), rather than mixing in a device the scheduler cannot use.
 pub fn synth_batch(paths: &TtsPaths, reqs: &[BatchRequest], cancel: &CancelToken) -> Result<Vec<Vec<f32>>, String> {
+    cancel.check()?;
     if reqs.is_empty() {
         return Err("tts batch: needs at least one request".to_string());
     }
@@ -268,12 +269,12 @@ pub fn synth_batch(paths: &TtsPaths, reqs: &[BatchRequest], cancel: &CancelToken
     };
 
     let coded = run_batch(&paths.talker, &paths.mtp, &sp, sessions);
-    if cancel.is_cancelled() {
-        return Err("cancelled".to_string());
-    }
+    cancel.check()?;
     let codec = mimi::decode_stream::StreamingCodecDecoder::load(&paths.codec);
     let mut wavs = Vec::with_capacity(coded.len());
     for (i, codes) in coded.iter().enumerate() {
+        // One clip of vocoding per poll.
+        cancel.check()?;
         if codes.is_empty() {
             return Err(format!("tts batch: request {i} generated no codec frames"));
         }
@@ -397,11 +398,15 @@ mod tests {
         eprintln!("synth_batch: {} + {} samples in {:.1}s", wavs[0].len(), wavs[1].len(), t0.elapsed().as_secs_f64());
     }
 
-    /// An empty batch is a caller error, not a silent empty result.
+    /// An empty batch is a caller error, not a silent empty result; a token
+    /// fired before the call is refused first, before anything is read.
     #[test]
     fn an_empty_batch_is_rejected() {
         let paths = TtsPaths { talker: String::new(), mtp: String::new(), codec: String::new(), speaker: String::new(), ckpt_dir: String::new() };
         assert!(synth_batch(&paths, &[], &CancelToken::default()).unwrap_err().contains("at least one"));
+        let fired = CancelToken::armed();
+        fired.cancel();
+        assert_eq!(synth_batch(&paths, &[], &fired).unwrap_err(), capability::failure::CANCELLED, "a fired token is refused before anything is read");
     }
 
     /// A short request must actually stop consuming rounds once it finishes,
