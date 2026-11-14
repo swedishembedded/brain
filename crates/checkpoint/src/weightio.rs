@@ -918,7 +918,7 @@ impl StWriter {
         self.written_count.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
     }
 
-    /// Flush and atomically rename tmp → path. Errors if the plan was not fully
+    /// Sync and atomically rename tmp → path. Errors if the plan was not fully
     /// written (the file would have holes).
     pub fn finish(self) -> io::Result<()> {
         use std::sync::atomic::Ordering;
@@ -933,8 +933,9 @@ impl StWriter {
                 .collect();
             return Err(inval(format!("st: wrote {}/{} planned tensors (missing: {missing:?})", written, self.plan.len())));
         }
+        self.file.sync_all()?;
         drop(self.file);
-        std::fs::rename(&self.tmp, &self.path)
+        crate::st::durable_rename(std::path::Path::new(&self.tmp), std::path::Path::new(&self.path))
     }
 }
 

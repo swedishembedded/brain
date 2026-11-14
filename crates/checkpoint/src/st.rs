@@ -504,9 +504,25 @@ pub fn save_safetensors_with_metadata(
     {
         let mut file = std::io::BufWriter::new(std::fs::File::create(&tmp)?);
         file.write_all(&out)?;
-        file.flush()?;
+        file.into_inner().map_err(std::io::IntoInnerError::into_error)?.sync_all()?;
     }
-    std::fs::rename(&tmp, path)
+    durable_rename(std::path::Path::new(&tmp), std::path::Path::new(path))
+}
+
+/// Rename a fully written and synced temporary into place, then sync the
+/// directory so the rename itself survives a power loss: before it, a crash
+/// leaves the previous file; after it, the new one, never a short file under
+/// the final name. The caller syncs the temporary's data first. The directory
+/// sync is best-effort (not every platform or file system can open one).
+pub(crate) fn durable_rename(tmp: &std::path::Path, path: &std::path::Path) -> io::Result<()> {
+    std::fs::rename(tmp, path)?;
+    if let Some(parent) = path.parent() {
+        let dir = if parent.as_os_str().is_empty() { std::path::Path::new(".") } else { parent };
+        if let Ok(d) = std::fs::File::open(dir) {
+            d.sync_all().ok();
+        }
+    }
+    Ok(())
 }
 
 /// Read only the leading `[u64 len][JSON header]` of a safetensors file, never
