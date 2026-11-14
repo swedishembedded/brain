@@ -9,6 +9,7 @@
 
 mod api;
 mod audio;
+mod backpressure;
 mod callers;
 mod connections;
 mod seams;

@@ -32,6 +32,8 @@
 //! - [`models`] — the `/models` catalog handlers.
 //! - [`bridge`] — the async→sync seam to the shared executor (submit/stream + the
 //!   cancel-on-disconnect guard) that the chat handlers dispatch through.
+//! - `stream_queue` - the bounded queue between a streamed generation and its
+//!   response body: backpressure, delta coalescing and the stall policy.
 //! - [`png`] — a minimal dependency-free PNG encoder for `images/generations`.
 //! - [`anthropic`]/[`openai`]/[`openrouter`] — the per-dialect routes: real chat
 //!   (non-stream + SSE token streaming), embeddings, and image generation.
@@ -59,6 +61,7 @@ pub mod preprocess;
 pub mod sampling;
 pub mod speech;
 pub mod state;
+mod stream_queue;
 pub mod surface;
 pub mod systemone;
 pub mod tls;
@@ -342,6 +345,7 @@ pub fn serve_all(exec: Executor, surfaces: Vec<Surface>, opts: ServeOpts) -> any
             let state = state
                 .with_admit_deadline(deadlines.admit)
                 .with_cold_build_admit_deadline(deadlines.cold_build)
+                .with_stream_stall(limits.stream_stall)
                 .with_supplier(supplier.clone())
                 .with_training(training)
                 .with_devices(devices.clone());

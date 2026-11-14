@@ -25,8 +25,10 @@
 //!
 //! Only HTTP/1.1 is served: HTTP/2 has no header deadline, so an h2 peer that
 //! answers keep-alive pings could hold a connection without ever sending a
-//! request. Response streams (SSE) stay open as long as their job runs; the
-//! connection cap bounds them.
+//! request. Response streams (SSE) stay open as long as their job runs and
+//! the client keeps reading: a stream whose client reads nothing for
+//! [`ConnectionLimits::stream_stall`] has its generation cancelled
+//! (`crate::stream_queue`). The connection cap bounds them.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -55,6 +57,9 @@ pub struct ConnectionLimits {
     pub body: Duration,
     /// How many connections the surface holds at once.
     pub max_connections: usize,
+    /// How long a streamed response may go unread while its generation waits
+    /// for the client before the generation is cancelled.
+    pub stream_stall: Duration,
 }
 
 impl Default for ConnectionLimits {
@@ -62,7 +67,7 @@ impl Default for ConnectionLimits {
     /// request. Five minutes for a body covers the largest accepted body
     /// (`MAX_BODY_BYTES` on the upload routes, 64 MiB) at under 2 Mbit/s.
     fn default() -> ConnectionLimits {
-        ConnectionLimits { header_read: Duration::from_secs(10), body: Duration::from_secs(300), max_connections: 1024 }
+        ConnectionLimits { header_read: Duration::from_secs(10), body: Duration::from_secs(300), max_connections: 1024, stream_stall: crate::bridge::DEFAULT_STREAM_STALL }
     }
 }
 

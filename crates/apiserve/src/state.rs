@@ -60,6 +60,10 @@ pub struct AppState {
     /// see that function's doc. Genuine cross-model contention still sheds at
     /// `admit_deadline`.
     pub cold_build_admit_deadline: Duration,
+    /// How long a streamed response may go unread while its generation waits on
+    /// a full queue before the generation is cancelled and the stream ends with
+    /// a timeout error event ([`crate::bridge`]'s stall policy).
+    pub stream_stall: Duration,
     /// Classifies/fetches a `model` string that isn't already resident (transparent
     /// auto-fetch). `None` — the default, and every test's `AppState::new` — means
     /// an unresolved model is a plain 404 with zero I/O, exactly today's behavior.
@@ -88,6 +92,7 @@ impl AppState {
             provider,
             admit_deadline: DEFAULT_ADMIT_DEADLINE,
             cold_build_admit_deadline: DEFAULT_COLD_BUILD_ADMIT_DEADLINE,
+            stream_stall: crate::bridge::DEFAULT_STREAM_STALL,
             supplier: None,
             training: false,
             devices: None,
@@ -179,6 +184,13 @@ impl AppState {
     /// doc. Used by tests to force fast shedding without slow real-time waits.
     pub fn with_cold_build_admit_deadline(mut self, deadline: Duration) -> AppState {
         self.cold_build_admit_deadline = deadline;
+        self
+    }
+
+    /// Override the stall deadline of a streamed response (builder-style); see
+    /// [`Self::stream_stall`].
+    pub fn with_stream_stall(mut self, stall: Duration) -> AppState {
+        self.stream_stall = stall;
         self
     }
 

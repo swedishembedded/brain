@@ -57,7 +57,7 @@ fn closed_after(stream: &mut TcpStream, within: Duration) -> Option<Duration> {
 }
 
 fn limits(header_read: Duration, body: Duration, max_connections: usize) -> ConnectionLimits {
-    ConnectionLimits { header_read, body, max_connections }
+    ConnectionLimits { header_read, body, max_connections, ..ConnectionLimits::default() }
 }
 
 #[test]

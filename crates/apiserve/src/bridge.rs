@@ -10,10 +10,13 @@
 //! - [`submit`] — one-shot: arm a cancel token, submit, await the single reply
 //!   (non-streaming chat).
 //! - [`stream`] — streaming: the job's `on_progress`/`reply` callbacks push
-//!   [`StreamMsg`]s onto an unbounded channel, returned as a [`futures::Stream`].
-//!   The closures only ever touch the channel (`Send`), NEVER the model/GPU. A
-//!   [`CancelGuard`] rides inside the returned stream so a dropped SSE response
-//!   (client disconnect) cancels the running generation and clears the registry.
+//!   [`StreamMsg`]s into a bounded queue ([`crate::stream_queue`]), returned as a
+//!   [`futures::Stream`]. A full queue holds the generation back until the client
+//!   reads, and a client that reads nothing for [`AppState::stream_stall`] has its
+//!   generation cancelled and its stream ended with a timeout error. The closures
+//!   only ever touch the queue, NEVER the model/GPU. A [`CancelGuard`] rides inside
+//!   the returned stream so a dropped SSE response (client disconnect) cancels the
+//!   running generation and clears the registry.
 
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -21,12 +24,14 @@ use std::task::{Context, Poll};
 use capability::{Invocation, Outcome};
 use futures::Stream;
 use residency::{Job, Supply};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
 use uuid::Uuid;
 
 use crate::error::ApiError;
 use crate::hooks::{Call, CallResult, Ticket};
 use crate::state::{AppState, JobRegistry};
+use crate::stream_queue::{self, StreamReceiver, StreamSender};
+pub use crate::stream_queue::{DEFAULT_STREAM_STALL, STREAM_COALESCE_BYTES, STREAM_QUEUE_MESSAGES};
 use crate::surface::Provider;
 
 /// Refuse a training action on a surface that does not train. Every dispatch
@@ -552,7 +557,7 @@ impl Drop for CancelGuard {
 /// The receiver side of a streaming generation plus its [`CancelGuard`]. Yields
 /// [`StreamMsg`]s until the reply's `Done`/`Err`; dropping it cancels the job.
 pub struct EventStream {
-    rx: mpsc::UnboundedReceiver<StreamMsg>,
+    rx: StreamReceiver,
     _guard: CancelGuard,
     /// The first message, when [`EventStream::settle_start`] read it to see whether the
     /// request had already failed; handed out before anything else.
@@ -593,7 +598,7 @@ impl EventStream {
     }
 }
 
-/// Submit one `generate` job whose progress/reply fan into a channel, running the
+/// Submit one `generate` job whose progress/reply fan into a bounded queue, running the
 /// same **admission race** as [`submit`] BEFORE returning the stream: a bounded wait
 /// (`state.admit_deadline`) for the job to be claimed onto a lane. If it is not
 /// admitted in time the job is cancelled + unregistered and a 429 [`ApiError`] is
@@ -601,8 +606,7 @@ impl EventStream {
 /// errors. Once admitted, the returned [`EventStream`] yields a [`StreamMsg::Delta`]
 /// per generated token (progress updates whose `delta` is set — coarse step-only
 /// progress is ignored), then one terminal [`StreamMsg::Done`]/[`StreamMsg::Err`].
-/// The `on_progress`/`reply` closures only touch the (`Send`) channel — never the
-/// model.
+/// The `on_progress`/`reply` closures only touch the queue, never the model.
 pub async fn stream(state: &AppState, model: &str, action: &str, inv: Invocation) -> Result<EventStream, ApiError> {
     stream_inner(state, model, action, inv, false).await?.settle_start().await
 }
@@ -614,55 +618,77 @@ pub async fn stream_progress(state: &AppState, model: &str, action: &str, inv: I
     stream_inner(state, model, action, inv, true).await
 }
 
-/// Shared implementation of [`stream`]/[`stream_progress`]. `forward_steps` decides
-/// whether a `delta`-less progress update becomes a [`StreamMsg::Progress`] tick
-/// (image denoise) or is dropped (chat, which streams only token deltas).
+/// What a streamed job runs and how it reports progress.
+struct StreamedJob<'a> {
+    exec: &'a residency::Executor,
+    provider: Provider,
+    model: &'a str,
+    action: &'a str,
+    /// Whether a `delta`-less progress update becomes a [`StreamMsg::Progress`]
+    /// tick (image denoise) or is dropped (chat, which streams only token deltas).
+    forward_steps: bool,
+}
+
+impl StreamedJob<'_> {
+    /// The job, its progress and reply feeding `tx`, plus the signal that it was
+    /// admitted onto a lane.
+    ///
+    /// The progress callback waits while the queue is full ([`StreamSender::send`]); the
+    /// reply never waits and settles `pending` itself, on the job's own thread, so the
+    /// call is settled exactly once whether or not the client is still reading.
+    fn build(&self, inv: Invocation, pending: Pending, tx: StreamSender) -> (Job, oneshot::Receiver<()>) {
+        let (admit_tx, admit_rx) = oneshot::channel::<()>();
+        let tx_progress = tx.clone();
+        let exec_for_log = self.exec.clone();
+        let (provider, forward_steps, model) = (self.provider, self.forward_steps, self.model.to_string());
+        let job = Job::new(self.model.to_string(), self.action.to_string(), inv)
+            .on_progress(move |p| {
+                // A refused message means the stream is over (the reader went or stalled, or the request was
+                // cancelled); the cancel token the model polls says the same, so nothing more is done here.
+                if let Some(piece) = p.delta {
+                    tx_progress.send(StreamMsg::Delta(piece));
+                } else if let Some(ev) = p.event {
+                    tx_progress.send(StreamMsg::Event(ev));
+                } else if forward_steps {
+                    tx_progress.send(StreamMsg::Progress(p.step, p.total));
+                }
+            })
+            .on_admit(move || {
+                let _ = admit_tx.send(());
+            })
+            .reply(move |r| {
+                let msg = match r {
+                    Ok(outcome) => {
+                        log_request_tokens(&exec_for_log, &model, &outcome);
+                        match pending.settle(CallResult::Done(&outcome)) {
+                            Ok(()) => StreamMsg::Done(outcome),
+                            Err(refusal) => StreamMsg::Err(refusal),
+                        }
+                    }
+                    Err(e) => {
+                        let _ = pending.settle(CallResult::Failed(&e));
+                        StreamMsg::Err(map_reply_err(provider, &model, &e))
+                    }
+                };
+                tx.finish(msg);
+            });
+        (job, admit_rx)
+    }
+}
+
+/// Shared implementation of [`stream`]/[`stream_progress`].
 async fn stream_inner(state: &AppState, model: &str, action: &str, mut inv: Invocation, forward_steps: bool) -> Result<EventStream, ApiError> {
     let provider = state.provider;
     inv.scope = state.scope();
     let pending = Pending::begin(state, model, action, &inv)?;
     residency::log::info(&format!("{provider:?} request: {action} {model} (stream)"));
-    let model_owned = model.to_string();
     let (id, token) = state.register();
     inv.cancel = token.clone();
     // Held from here, not from admission: a client that hangs up while its job is still waiting for a lane
     // drops this future, and the guard then cancels the queued job instead of leaving it to run, later, for nobody.
     let guard = CancelGuard { token: token.clone(), jobs: state.jobs.clone(), id };
-    let (tx, rx) = mpsc::unbounded_channel::<StreamMsg>();
-    let (admit_tx, mut admit_rx) = oneshot::channel::<()>();
-    let tx_progress = tx.clone();
-    let exec_for_log = state.exec.clone();
-    let job = Job::new(model.to_string(), action.to_string(), inv)
-        .on_progress(move |p| {
-            if let Some(piece) = p.delta {
-                let _ = tx_progress.send(StreamMsg::Delta(piece));
-            } else if let Some(ev) = p.event {
-                let _ = tx_progress.send(StreamMsg::Event(ev));
-            } else if forward_steps {
-                let _ = tx_progress.send(StreamMsg::Progress(p.step, p.total));
-            }
-        })
-        .on_admit(move || {
-            let _ = admit_tx.send(());
-        })
-        .reply(move |r| {
-            let msg = match r {
-                Ok(outcome) => {
-                    log_request_tokens(&exec_for_log, &model_owned, &outcome);
-                    // Settled here, on the job's own reply, so it happens once
-                    // whether or not the client is still reading.
-                    match pending.settle(CallResult::Done(&outcome)) {
-                        Ok(()) => StreamMsg::Done(outcome),
-                        Err(refusal) => StreamMsg::Err(refusal),
-                    }
-                }
-                Err(e) => {
-                    let _ = pending.settle(CallResult::Failed(&e));
-                    StreamMsg::Err(map_reply_err(provider, &model_owned, &e))
-                }
-            };
-            let _ = tx.send(msg);
-        });
+    let (tx, rx) = stream_queue::channel(provider, token, state.stream_stall);
+    let (job, mut admit_rx) = StreamedJob { exec: &state.exec, provider, model, action, forward_steps }.build(inv, pending, tx);
     state.exec.submit(job);
 
     // Admission race BEFORE returning the SSE body: a shed request yields a plain
@@ -699,15 +725,14 @@ pub fn stream_with_autofetch(state: &AppState, supplier: std::sync::Arc<dyn resi
     let pending = Pending::begin(state, model, action, &inv)?;
     residency::log::info(&format!("{provider:?} request: {action} {model} (stream, not yet resident -- auto-fetching)"));
     let (id, token) = state.register();
-    let (tx, rx) = mpsc::unbounded_channel::<StreamMsg>();
+    let (tx, rx) = stream_queue::channel(provider, token.clone(), state.stream_stall);
     let exec = state.exec.clone();
     let jobs = state.jobs.clone();
     let deadlines = state.deadlines();
     let model_owned = model.to_string();
     let action_owned = action.to_string();
-    let mut inv = inv;
     inv.cancel = token.clone();
-    let guard_token = token.clone();
+    let guard = CancelGuard { token: token.clone(), jobs: state.jobs.clone(), id };
 
     tokio::spawn(async move {
         let tx_fetch = tx.clone();
@@ -715,7 +740,8 @@ pub fn stream_with_autofetch(state: &AppState, supplier: std::sync::Arc<dyn resi
         let fetch_exec = exec.clone();
         let outcome = tokio::task::spawn_blocking(move || {
             fetch_exec.ensure_model(&fetch_model, supplier.as_ref(), &mut |name, got, total| {
-                let _ = tx_fetch.send(StreamMsg::Fetching(FetchProgress {
+                // A tick the next one supersedes: dropped rather than waited for when the reader is behind.
+                tx_fetch.offer(StreamMsg::Fetching(FetchProgress {
                     message: format!("fetching {fetch_model}: {name}").replace(['\n', '\r'], " "),
                     got: got as u64,
                     total: if total == 0 { None } else { Some(total as u64) },
@@ -723,79 +749,40 @@ pub fn stream_with_autofetch(state: &AppState, supplier: std::sync::Arc<dyn resi
             })
         })
         .await;
-        match outcome {
-            Ok(Ok(())) => {}
-            Ok(Err(reason)) => {
-                eprintln!("apiserve: auto-fetch {model_owned}: {reason}");
-                let _ = tx.send(StreamMsg::Err(ApiError::model_not_found(provider, &model_owned)));
-                jobs.remove(&id);
-                return;
-            }
-            Err(join_err) => {
-                eprintln!("apiserve: auto-fetch {model_owned}: blocking task failed: {join_err}");
-                let _ = tx.send(StreamMsg::Err(ApiError::model_not_found(provider, &model_owned)));
-                jobs.remove(&id);
-                return;
-            }
+        let fetched = match outcome {
+            Ok(fetched) => fetched,
+            Err(join_err) => Err(format!("blocking task failed: {join_err}")),
+        };
+        if let Err(reason) = fetched {
+            eprintln!("apiserve: auto-fetch {model_owned}: {reason}");
+            tx.finish(StreamMsg::Err(ApiError::model_not_found(provider, &model_owned)));
+            jobs.remove(&id);
+            return;
         }
-        // The fetched model's manifest is known now: images it cannot read are refused before the job is queued.
+        // The fetched model's manifest is known now: media it cannot read is refused before the job is queued.
         if let Err(e) = refuse_unread_media(&exec, provider, &model_owned, &action_owned, &inv) {
-            let _ = tx.send(StreamMsg::Err(e));
+            tx.finish(StreamMsg::Err(e));
             jobs.remove(&id);
             return;
         }
 
-        // Model is ready -- submit the real job, forwarding into the SAME
-        // channel the fetch ticks just used, so the client sees one
-        // continuous stream (fetch progress, then generation deltas). A
-        // dedicated clone for the admission-timeout branch below: the other
-        // two are moved into the job's closures and won't be available if
-        // admission times out before either ever fires.
+        // Model is ready -- submit the real job into the SAME queue the fetch
+        // ticks just used, so the client sees one continuous stream (fetch
+        // progress, then generation deltas). One sender is kept for the
+        // admission-timeout branch below: the job's own are dropped unfired if
+        // admission times out before the job ever runs.
         let tx_timeout = tx.clone();
-        let (admit_tx, mut admit_rx) = oneshot::channel::<()>();
-        let tx_progress = tx.clone();
-        let tx_reply = tx;
-        let model_for_admit = model_owned.clone();
-        let exec_for_log = exec.clone();
-        let job = Job::new(model_owned.clone(), action_owned, inv)
-            .on_progress(move |p| {
-                if let Some(piece) = p.delta {
-                    let _ = tx_progress.send(StreamMsg::Delta(piece));
-                } else if let Some(ev) = p.event {
-                    let _ = tx_progress.send(StreamMsg::Event(ev));
-                } else if forward_steps {
-                    let _ = tx_progress.send(StreamMsg::Progress(p.step, p.total));
-                }
-            })
-            .on_admit(move || {
-                let _ = admit_tx.send(());
-            })
-            .reply(move |r| {
-                let msg = match r {
-                    Ok(outcome) => {
-                        log_request_tokens(&exec_for_log, &model_owned, &outcome);
-                        match pending.settle(CallResult::Done(&outcome)) {
-                            Ok(()) => StreamMsg::Done(outcome),
-                            Err(refusal) => StreamMsg::Err(refusal),
-                        }
-                    }
-                    Err(e) => {
-                        let _ = pending.settle(CallResult::Failed(&e));
-                        StreamMsg::Err(map_reply_err(provider, &model_owned, &e))
-                    }
-                };
-                let _ = tx_reply.send(msg);
-            });
+        let (job, mut admit_rx) = StreamedJob { exec: &exec, provider, model: &model_owned, action: &action_owned, forward_steps }.build(inv, pending, tx);
         exec.submit(job);
 
-        if let Err(refusal) = wait_for_admission(&exec, deadlines, &model_for_admit, &mut admit_rx).await {
+        if let Err(refusal) = wait_for_admission(&exec, deadlines, &model_owned, &mut admit_rx).await {
             token.cancel();
             jobs.remove(&id);
-            let _ = tx_timeout.send(StreamMsg::Err(refused(provider, &refusal)));
+            tx_timeout.finish(StreamMsg::Err(refused(provider, &refusal)));
         }
     });
 
-    Ok(EventStream { rx, _guard: CancelGuard { token: guard_token, jobs: state.jobs.clone(), id }, head: None })
+    Ok(EventStream { rx, _guard: guard, head: None })
 }
 
 // ─── Unit tests ──────────────────────────────────────────────────────────────

@@ -111,6 +111,12 @@ them, so treat all request input as hostile.
 - [ ] Cancel-on-disconnect actually frees compute: a dropped SSE/response cancels the
       job (the `CancelGuard`/`CancelToken` reaches the running action, which polls it).
       Verify a disconnected client's generation stops within ~one step.
+- [ ] No stream buffers without bound for a slow reader: every SSE route reads its
+      job through `crate::stream_queue` (bounded, delta coalescing, the stall policy
+      cancelling a generation whose client reads nothing for
+      `ConnectionLimits::stream_stall`), never an unbounded channel, and a fetch
+      progress tick is dropped rather than queued past it.
+      `crates/apiserve/tests/it/backpressure.rs` pins each.
 - [ ] Per-connection / per-stream limits exist where relevant; no route holds a lane
       while doing unbounded host allocation (see the streaming/mmap OOM invariant).
 
