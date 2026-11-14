@@ -66,6 +66,8 @@ fn run_spec() -> ActionSpec {
         Media::Mask,
         "the mask actually composited with — the record of which pixels were authorised to move",
     ))
+    .streaming()
+    .cancellable()
 }
 
 /// The full, static capability manifest — safe to build with no models loaded.
@@ -109,7 +111,8 @@ impl Action for PipelineAction {
         run_spec()
     }
 
-    fn run(&self, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
+    fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         let stages = inv.get_str("stages").ok_or("imgpipe: 'stages' is required")?;
         let spec = Spec::parse(&stages)?;
         let (hwc, w, h) = capability::blob::decode_image(inv, "image")?;
@@ -118,7 +121,7 @@ impl Action for PipelineAction {
         // One device for the whole pipeline. Every stage's intermediate stays
         // here; only the final image and its mask leave.
         let gpu = Gpu::new(PIPELINES);
-        let out = Pipeline::new(&gpu, &self.models).run(&spec, &chw, w, h)?;
+        let out = Pipeline::new(&gpu, &self.models).run(&spec, &chw, w, h, &inv.cancel, progress)?;
 
         let hwc_out = imaging::pixels::chw_to_hwc(&out.image, 3, h as usize, w as usize);
         Ok(Outcome::new()

@@ -41,7 +41,7 @@
 
 pub mod caps;
 
-use capability::{Blob, Invocation, Media, Registry};
+use capability::{Blob, CancelToken, Invocation, Media, Progress, Registry};
 use gpu_core::Gpu;
 use imaging::{Ctx, Shape};
 use serde_json::Value;
@@ -287,7 +287,12 @@ impl<'a> Pipeline<'a> {
     /// The working mask starts all-ones: with nothing segmented yet, an edit
     /// applies everywhere, which is the least surprising reading of a stage list
     /// that never segments.
-    pub fn run(&self, spec: &Spec, chw: &[f32], w: u32, h: u32) -> Result<Outcome, String> {
+    ///
+    /// `cancel` is checked before the first stage and between stages, and
+    /// rides into every model stage's own invocation, so a long model stage
+    /// stops at its own next step; `progress` reports one step per stage
+    /// finished.
+    pub fn run(&self, spec: &Spec, chw: &[f32], w: u32, h: u32, cancel: &CancelToken, progress: &mut dyn FnMut(Progress)) -> Result<Outcome, String> {
         let img_shape = Shape::new(1, 3, h, w);
         let m_shape = Shape::new(1, 1, h, w);
         if chw.len() != img_shape.numel() as usize {
@@ -296,11 +301,13 @@ impl<'a> Pipeline<'a> {
         let ctx = Ctx::new(self.gpu);
         let mut mask_host = vec![1.0f32; m_shape.numel() as usize];
         let mut cur_host = chw.to_vec();
+        let total = spec.stages.len() as u32;
 
         for (i, st) in spec.stages.iter().enumerate() {
+            cancel.check()?;
             match st {
                 Stage::Segment { points, boxes } => {
-                    mask_host = self.segment(&cur_host, w, h, points, boxes).map_err(|e| format!("stage {i}: {e}"))?;
+                    mask_host = self.segment(&cur_host, w, h, points, boxes, cancel).map_err(|e| staged(i, e))?;
                     if mask_host.len() != m_shape.numel() as usize {
                         return Err(format!(
                             "stage {i}: segment returned {} floats, expected {}",
@@ -323,10 +330,10 @@ impl<'a> Pipeline<'a> {
                     let out = imaging::mask::invert(&ctx, &m, m_shape);
                     mask_host = ctx.download(&out, m_shape.numel());
                 }
-                // Both tails run after the composite; the loop skips them.
-                Stage::Upscale { .. } | Stage::SupirRestore { .. } => {}
+                // Both tails run after the composite, and report there.
+                Stage::Upscale { .. } | Stage::SupirRestore { .. } => continue,
                 Stage::Restore { w: dial } => {
-                    cur_host = self.restore(&cur_host, w, h, *dial).map_err(|e| format!("stage {i}: {e}"))?;
+                    cur_host = self.restore(&cur_host, w, h, *dial, cancel).map_err(|e| staged(i, e))?;
                     if cur_host.len() != img_shape.numel() as usize {
                         return Err(format!(
                             "stage {i}: restore returned {} floats, expected {}",
@@ -336,7 +343,9 @@ impl<'a> Pipeline<'a> {
                     }
                 }
             }
+            progress(Progress::step(i as u32 + 1, total, "stage"));
         }
+        cancel.check()?;
 
         // Composite ONCE, at the end: `old + mask*(new - old)`. Where the mask is
         // exactly 0 that returns `old`'s exact bits — the contract.
@@ -356,7 +365,7 @@ impl<'a> Pipeline<'a> {
         // on one grid. `Spec::parse` has already guaranteed there is at most one
         // and that it is last.
         if let Some(Stage::Upscale { tile }) = spec.stages.last() {
-            let (up, ow, oh) = self.upscale(&image, w, h, *tile)?;
+            let (up, ow, oh) = self.upscale(&image, w, h, *tile, cancel)?;
             // Resize the mask to match, so the returned mask still describes the
             // returned image. NEAREST, not bilinear: the mask is the record of
             // which pixels were allowed to move, and interpolating it would
@@ -370,23 +379,25 @@ impl<'a> Pipeline<'a> {
                 imaging::Filter::Nearest,
                 imaging::AlignCorners::HalfPixel,
             );
+            progress(Progress::step(total, total, "upscale"));
             return Ok(Outcome { image: up, mask: ctx.download(&mup, mshape.numel()), w: ow, h: oh });
         }
         // The `supir_restore` tail, same shape as `upscale`'s above: it may
         // change the resolution (SUPIR's own resize/snap), so it runs on the
         // already-composited image and the returned mask is resized to match.
         if let Some(Stage::SupirRestore { control_scale }) = spec.stages.last() {
-            let (restored, ow, oh) = self.supir_restore(&image, w, h, *control_scale)?;
+            let (restored, ow, oh) = self.supir_restore(&image, w, h, *control_scale, cancel)?;
             let m = ctx.upload("imgpipe.mask", &mask_host);
             let (mup, mshape) = ctx.resize(&m, m_shape, oh, ow, imaging::Filter::Nearest, imaging::AlignCorners::HalfPixel);
+            progress(Progress::step(total, total, "supir_restore"));
             return Ok(Outcome { image: restored, mask: ctx.download(&mup, mshape.numel()), w: ow, h: oh });
         }
         Ok(Outcome { image, mask: mask_host, w, h })
     }
 
-    fn segment(&self, chw: &[f32], w: u32, h: u32, points: &[[f32; 2]], boxes: &[[f32; 4]]) -> Result<Vec<f32>, String> {
+    fn segment(&self, chw: &[f32], w: u32, h: u32, points: &[[f32; 2]], boxes: &[[f32; 4]], cancel: &CancelToken) -> Result<Vec<f32>, String> {
         let hwc = imaging::pixels::chw_to_hwc(chw, 3, h as usize, w as usize);
-        let mut inv = Invocation::new().blob("image", capability::blob::image_blob(&hwc, w, h, 3));
+        let mut inv = stage_invocation(cancel).blob("image", capability::blob::image_blob(&hwc, w, h, 3));
         if !points.is_empty() {
             inv = inv.set("points", serde_json::json!(points));
         }
@@ -400,9 +411,9 @@ impl<'a> Pipeline<'a> {
 
     /// Run the upscale tail through the capability layer, like every other
     /// stage — the pipeline never links a model crate directly.
-    fn upscale(&self, chw: &[f32], w: u32, h: u32, tile: u32) -> Result<(Vec<f32>, u32, u32), String> {
+    fn upscale(&self, chw: &[f32], w: u32, h: u32, tile: u32, cancel: &CancelToken) -> Result<(Vec<f32>, u32, u32), String> {
         let hwc = imaging::pixels::chw_to_hwc(chw, 3, h as usize, w as usize);
-        let inv = Invocation::new()
+        let inv = stage_invocation(cancel)
             .set("tile", serde_json::json!(tile))
             .blob("image", capability::blob::image_blob(&hwc, w, h, 3));
         let out = self.registry.run(UPSCALE_MODEL, "upscale", inv, &mut |_| {})?;
@@ -414,9 +425,9 @@ impl<'a> Pipeline<'a> {
         Ok((imaging::pixels::hwc_to_chw(&hwc, 3, oh as usize, ow as usize), ow, oh))
     }
 
-    fn restore(&self, chw: &[f32], w: u32, h: u32, dial: f32) -> Result<Vec<f32>, String> {
+    fn restore(&self, chw: &[f32], w: u32, h: u32, dial: f32, cancel: &CancelToken) -> Result<Vec<f32>, String> {
         let hwc = imaging::pixels::chw_to_hwc(chw, 3, h as usize, w as usize);
-        let inv = Invocation::new()
+        let inv = stage_invocation(cancel)
             .set("w", serde_json::json!(dial))
             .blob("image", capability::blob::image_blob(&hwc, w, h, 3));
         let out = self.registry.run(RESTORE_MODEL, "restore_face", inv, &mut |_| {})?;
@@ -430,9 +441,9 @@ impl<'a> Pipeline<'a> {
     /// (its own resize/snap rule, not this crate's), so it is read back from
     /// the outcome rather than assumed - the same discipline `upscale`'s own
     /// comment states.
-    fn supir_restore(&self, chw: &[f32], w: u32, h: u32, control_scale: f32) -> Result<(Vec<f32>, u32, u32), String> {
+    fn supir_restore(&self, chw: &[f32], w: u32, h: u32, control_scale: f32, cancel: &CancelToken) -> Result<(Vec<f32>, u32, u32), String> {
         let hwc = imaging::pixels::chw_to_hwc(chw, 3, h as usize, w as usize);
-        let inv = Invocation::new()
+        let inv = stage_invocation(cancel)
             .set("control_scale", serde_json::json!(control_scale))
             .blob("image", capability::blob::image_blob(&hwc, w, h, 3));
         let out = self.registry.run(SUPIR_RESTORE_MODEL, "restore", inv, &mut |_| {})?;
@@ -440,6 +451,22 @@ impl<'a> Pipeline<'a> {
         let (ow, oh) = blob_wh(b).ok_or("supir restore's image blob carries no w/h meta")?;
         let hwc = decode_rgb(b, ow, oh)?;
         Ok((imaging::pixels::hwc_to_chw(&hwc, 3, oh as usize, ow as usize), ow, oh))
+    }
+}
+
+/// A model stage's invocation, carrying the pipeline caller's token so the
+/// stage's own action stops at its next step.
+fn stage_invocation(cancel: &CancelToken) -> Invocation {
+    Invocation { cancel: cancel.clone(), ..Invocation::new() }
+}
+
+/// A stage's failure, named by its position; the cancellation literal passes
+/// through unchanged so the caller still recognises it.
+fn staged(i: usize, e: String) -> String {
+    if e == capability::failure::CANCELLED {
+        e
+    } else {
+        format!("stage {i}: {e}")
     }
 }
 
@@ -478,7 +505,7 @@ pub const MASK_MEDIA: Media = Media::Mask;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use capability::{Action, ActionResult, ActionSpec, BlobSpec, Manifest, Outcome as CapOutcome, Progress, Provider};
+    use capability::{Action, ActionResult, ActionSpec, BlobSpec, CancelToken, Manifest, Outcome as CapOutcome, Progress, Provider};
     use std::sync::Arc;
 
     /// A segmenter selecting a fixed rectangle, and a "restorer" that paints the
@@ -595,7 +622,7 @@ mod tests {
         let gpu = gpu_core::testgpu::dev(imaging::PIPELINES);
         let reg = registry(StubSeg { x0: 8, y0: 6, x1: 20, y1: 18 });
         let spec = Spec { stages: vec![Stage::Segment { points: vec![], boxes: vec![] }, Stage::Restore { w: 0.5 }] };
-        let out = Pipeline::new(&gpu, &reg).run(&spec, &src, w, h).expect("run");
+        let out = Pipeline::new(&gpu, &reg).run(&spec, &src, w, h, &CancelToken::default(), &mut |_| {}).expect("run");
 
         let mut changed = 0usize;
         for c in 0..3usize {
@@ -632,7 +659,7 @@ mod tests {
         let gpu = gpu_core::testgpu::dev(imaging::PIPELINES);
         let reg = registry(StubSeg { x0: 2, y0: 2, x1: 10, y1: 10 });
         let spec = Spec { stages: vec![Stage::Segment { points: vec![], boxes: vec![] }, Stage::Dilate { radius: 2 }] };
-        let out = Pipeline::new(&gpu, &reg).run(&spec, &src, w, h).expect("run");
+        let out = Pipeline::new(&gpu, &reg).run(&spec, &src, w, h, &CancelToken::default(), &mut |_| {}).expect("run");
         assert!(out.image.iter().zip(&src).all(|(a, b)| a.to_bits() == b.to_bits()));
     }
 
@@ -706,7 +733,7 @@ mod tests {
         let src = ramp(w, h);
 
         let spec = Spec::parse(r#"{"stages":[{"op":"segment"},{"op":"restore"},{"op":"upscale"}]}"#).unwrap();
-        let out = p.run(&spec, &src, w, h).expect("run");
+        let out = p.run(&spec, &src, w, h, &CancelToken::default(), &mut |_| {}).expect("run");
 
         assert_eq!((out.w, out.h), (w * 2, h * 2), "the tail's size is reported");
         assert_eq!(out.image.len(), (3 * out.w * out.h) as usize);
@@ -715,7 +742,7 @@ mod tests {
         // The stub doubles by replication, so every 2x2 output block must equal
         // the source pixel it came from — which pins that the tail ran on the
         // COMPOSITED image, not on the pre-composite one.
-        let base = p.run(&Spec::parse(r#"{"stages":[{"op":"segment"},{"op":"restore"}]}"#).unwrap(), &src, w, h).unwrap();
+        let base = p.run(&Spec::parse(r#"{"stages":[{"op":"segment"},{"op":"restore"}]}"#).unwrap(), &src, w, h, &CancelToken::default(), &mut |_| {}).unwrap();
         for y in 0..out.h as usize {
             for x in 0..out.w as usize {
                 for c in 0..3usize {
@@ -737,7 +764,7 @@ mod tests {
         let p = Pipeline::new(&gpu, &reg);
         let src = ramp(w, h);
         let spec = Spec::parse(r#"{"stages":[{"op":"segment"},{"op":"upscale"}]}"#).unwrap();
-        let out = p.run(&spec, &src, w, h).expect("run");
+        let out = p.run(&spec, &src, w, h, &CancelToken::default(), &mut |_| {}).expect("run");
         assert_eq!((out.w, out.h), (8, 8));
         for y in 0..8usize {
             for x in 0..8usize {
@@ -750,5 +777,23 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A token fired before the run refuses it before any stage runs, and one
+    /// fired at a stage boundary stops the list there: the stub stages would
+    /// otherwise each run, and each reports one progress event. The token
+    /// also reaches the stage's own model call.
+    #[test]
+    fn a_cancelled_run_stops_at_the_next_stage() {
+        let (w, h) = (8u32, 8u32);
+        let gpu = gpu_core::testgpu::dev(imaging::PIPELINES);
+        let reg = registry(StubSeg { x0: 1, y0: 1, x1: 5, y1: 5 });
+        let p = Pipeline::new(&gpu, &reg);
+        let src = ramp(w, h);
+        let spec = Spec::parse(r#"{"stages":[{"op":"segment"},{"op":"dilate","radius":1},{"op":"erode","radius":1},{"op":"invert"},{"op":"restore"},{"op":"upscale"}]}"#).unwrap();
+        let run = |inv: &Invocation, progress: &mut dyn FnMut(Progress)| -> ActionResult {
+            p.run(&spec, &src, w, h, &inv.cancel, progress).map(|_| CapOutcome::new())
+        };
+        capability_mock::cancellation::certify("imgpipe run", &Invocation::new, &run, capability_mock::cancellation::Bound::ONE_STEP);
     }
 }

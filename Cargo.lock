@@ -1925,6 +1925,7 @@ name = "brain-imgpipe"
 version = "5.1.0"
 dependencies = [
  "brain-capability",
+ "brain-capability-mock",
  "brain-checkpoint",
  "brain-gpu-core",
  "brain-imaging",

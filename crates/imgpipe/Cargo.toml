@@ -17,3 +17,6 @@ brain-checkpoint.workspace = true
 brain-capability.workspace = true
 brain-imaging.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+brain-capability-mock.workspace = true
