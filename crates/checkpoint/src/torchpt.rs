@@ -743,7 +743,10 @@ impl<'a> Archive<'a> {
             .entries
             .get(&name)
             .ok_or_else(|| format!("torchpt: storage entry '{name}' missing from archive"))?;
-        let raw = &self.bytes[off..off + len];
+        let raw = off
+            .checked_add(len)
+            .and_then(|end| self.bytes.get(off..end))
+            .ok_or_else(|| format!("torchpt: storage '{name}' range extends past end of archive"))?;
         let esz = r.dtype.elem_size();
         if len % esz != 0 {
             return Err(format!(
@@ -913,7 +916,11 @@ fn index(bytes: &[u8]) -> Result<Index, String> {
         }
     }
     let (root, off, len) = pkl.ok_or("torchpt: no data.pkl entry - not a torch >= 1.6 zip checkpoint")?;
-    let mut u = Unpickler { b: &bytes[off..off + len], pos: 0, stack: Vec::new(), memo: HashMap::new() };
+    let pkl_bytes = off
+        .checked_add(len)
+        .and_then(|end| bytes.get(off..end))
+        .ok_or("torchpt: data.pkl range extends past end of archive")?;
+    let mut u = Unpickler { b: pkl_bytes, pos: 0, stack: Vec::new(), memo: HashMap::new() };
     let tree = u.run()?;
     let mut tensors = Vec::new();
     let mut skipped = 0usize;

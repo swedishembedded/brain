@@ -33,8 +33,8 @@ pub struct ZipEntry {
 
 /// Read `len` bytes at `at`, erroring (never panicking) on truncation.
 fn take<'a>(bytes: &'a [u8], at: usize, len: usize, what: &str) -> Result<&'a [u8], String> {
-    bytes
-        .get(at..at + len)
+    at.checked_add(len)
+        .and_then(|end| bytes.get(at..end))
         .ok_or_else(|| format!("zip: truncated file reading {what} at offset {at}"))
 }
 
@@ -187,10 +187,12 @@ pub fn parse(bytes: &[u8]) -> Result<Vec<ZipEntry>, String> {
         if take(bytes, local_off, 4, "local header signature")? != b"PK\x03\x04" {
             return Err(format!("zip: bad local header signature for entry '{name}'"));
         }
-        let l_name_len = rd16(bytes, local_off + 26, "local name length")? as usize;
-        let l_extra_len = rd16(bytes, local_off + 28, "local extra length")? as usize;
-        let data_off = local_off + 30 + l_name_len + l_extra_len;
-        if data_off + comp_size > bytes.len() {
+        // `local_off` and the sizes may come from zip64 fields up to 2^64, so every
+        // sum is checked: a crafted container must error, not wrap or panic.
+        let l_name_len = rd16(bytes, local_off.saturating_add(26), "local name length")? as usize;
+        let l_extra_len = rd16(bytes, local_off.saturating_add(28), "local extra length")? as usize;
+        let data_off = local_off.saturating_add(30 + l_name_len + l_extra_len);
+        if data_off.checked_add(comp_size).is_none_or(|end| end > bytes.len()) {
             return Err(format!("zip: entry '{name}' data range extends past end of file"));
         }
         out.push(ZipEntry { name, offset: data_off, len: comp_size });
@@ -325,5 +327,37 @@ mod tests {
         a[at + 30] = 0; // extra length low byte -> 0
         let err = parse(&a).unwrap_err();
         assert!(err.contains("0x0001"), "{err}");
+    }
+
+    /// Zip64 sizes near 2^64 must be an error, not an overflow panic or a wrapped
+    /// (and so in-bounds) data range.
+    #[test]
+    fn zip64_sizes_near_u64_max_error_instead_of_overflowing() {
+        for size in [u64::MAX, u64::MAX - 10] {
+            let mut a = archive("archive/data/0", b"xy", false);
+            let at = a.windows(4).position(|w| w == b"PK\x01\x02").expect("central directory");
+            a[at + 20..at + 24].copy_from_slice(&le32(Z64));
+            a[at + 24..at + 28].copy_from_slice(&le32(Z64));
+            a[at + 30..at + 32].copy_from_slice(&le16(20));
+            let mut extra = Vec::new();
+            extra.extend_from_slice(&le16(0x0001));
+            extra.extend_from_slice(&le16(16));
+            extra.extend_from_slice(&le64(size));
+            extra.extend_from_slice(&le64(size));
+            let name_end = at + 46 + "archive/data/0".len();
+            a.splice(name_end..name_end, extra);
+            let err = parse(&a).unwrap_err();
+            assert!(err.contains("past end of file"), "size {size}: {err}");
+        }
+    }
+
+    /// A zip64 local-header offset near 2^64 must not overflow the bounds check.
+    #[test]
+    fn zip64_local_offset_near_u64_max_errors() {
+        let mut a = archive("archive/data/0", b"xy", true);
+        let at = a.windows(4).position(|w| w == b"PK\x01\x02").expect("central directory");
+        let name_end = at + 46 + "archive/data/0".len();
+        a[name_end + 4..name_end + 12].copy_from_slice(&le64(u64::MAX - 1));
+        assert!(parse(&a).is_err());
     }
 }
