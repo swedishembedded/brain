@@ -61,10 +61,16 @@ impl TtsResident {
         TtsResident { paths: TtsPaths::new(weights_dir.into(), ckpt_dir) }
     }
 
-    /// Host RAM the f32 weights of every component occupy, with a third on top
-    /// for the working set; a conservative 4 GiB when they cannot be read yet.
+    /// The bytes every component's weights occupy as f32, the size both the
+    /// host engine and fine-tuning hold them at; 0 when they cannot be read yet.
+    fn f32_weights(&self) -> u64 {
+        self.paths.f32_weight_bytes()
+    }
+
+    /// Host RAM the f32 weights occupy, with a third on top for the working
+    /// set; a conservative 4 GiB when they cannot be read yet.
     fn ram(&self) -> u64 {
-        let sum = self.paths.f32_weight_bytes();
+        let sum = self.f32_weights();
         if sum > 0 { sum + sum / 3 } else { 4 << 30 }
     }
 }
@@ -89,7 +95,7 @@ impl ResidentModel for TtsResident {
         match key.config.as_str() {
             // Fine-tuning holds the Talker's weights, their gradients and
             // AdamW's two moments: four copies, the dominant term at any batch.
-            TRAIN_KEY => MemCost::new(self.paths.f32_weight_bytes().max(1 << 30) * 4, self.ram()),
+            TRAIN_KEY => MemCost::new(self.f32_weights().max(1 << 30) * 4, self.ram()),
             // `batch` gives each request its own host decoder copy.
             HOST_KEY => MemCost::new(0, self.ram() * 2),
             _ => MemCost::new(0, self.ram()),

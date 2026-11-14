@@ -162,7 +162,7 @@ impl Lib {
         }
         Err(format!(
             "MuJoCo not found. Tried: {}. Last error: {last}. \
-             Install MuJoCo and name the directory holding lib/libmujoco.so (e.g. --mujoco-dir).",
+             Install MuJoCo and name its install root, the directory holding lib/libmujoco.so.",
             tried.join(", ")
         ))
     }

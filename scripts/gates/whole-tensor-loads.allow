@@ -9,8 +9,6 @@
 # loader inventory in the knowledge base (entry 337).
 crates/chronos2/src/model.rs	2	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/cli/src/flops_cli.rs	2	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
-crates/cli/src/pid_cli.rs	4	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
-crates/cli/src/qwen35moe_cli.rs	2	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/clip/src/import.rs	1	offline importer: one whole tensor per call into a writer sink (knowledge 337 class T); the bounded form is the packed reader
 crates/diamond/src/import.rs	1	offline importer: one whole tensor per call into a writer sink (knowledge 337 class T); the bounded form is the packed reader
 crates/ecapatdnn/src/import.rs	1	offline importer: one whole tensor per call into a writer sink (knowledge 337 class T); the bounded form is the packed reader
@@ -46,7 +44,7 @@ crates/model/src/train.rs	2	class T: one whole tensor as fp32 on the host, then 
 crates/moondream3/src/import.rs	1	offline importer: one whole tensor per call into a writer sink (knowledge 337 class T); the bounded form is the packed reader
 crates/nemotronasr/src/import.rs	1	offline importer: one whole tensor per call into a writer sink (knowledge 337 class T); the bounded form is the packed reader
 crates/npu/src/bin/qwen_kv_bench.rs	1	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
-crates/qwen3/src/caps.rs	4	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
+crates/qwen3/src/caps.rs	2	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/qwen3/src/export.rs	3	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/qwen3/src/finetune.rs	1	delegating TensorSource wrapper: forwards the call to the wrapped source (knowledge 337 section 1)
 crates/qwen3/src/gguf_import.rs	1	offline importer: one whole tensor per call into a writer sink (knowledge 337 class T); the bounded form is the packed reader
@@ -81,6 +79,7 @@ crates/timesfm3/src/finetune.rs	2	delegating TensorSource wrapper: forwards the 
 crates/timesfm3/src/model.rs	2	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/toyautoencoder/src/model.rs	2	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/toymoe/src/train.rs	2	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
+crates/toypid/src/train.rs	2	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/toyseq2seq/src/model.rs	2	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/wan/src/block.rs	2	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/wan/src/lora.rs	1	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
