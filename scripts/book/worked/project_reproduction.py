@@ -920,7 +920,7 @@ def _gate_run(reg):
 FAST_BOUND = (2 * D1 + F1 + 12) * U64
 
 REGRESSIONS = (("none (the specified system)", None, ""),
-               ("codes dequantized into a 32-bit copy of each matrix", "buffer", "work"),
+               ("codes dequantized into a full-width copy of each matrix", "buffer", "work"),
                ("gate and up cut in the wrong order", "swap", "layout"),
                ("eps added after the square root", "eps_out", "constant"),
                ("mean of the squares replaced by their sum", "sum", "scale"),
