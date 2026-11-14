@@ -14,8 +14,9 @@
 //! num_attention_heads or attention_head_dim`, and SDXL ships
 //! `num_attention_heads: null`. So those are HEAD COUNTS, and the real head
 //! dim is `block_out_channels[i] / heads[i]` = 64 at every level. Reading the
-//! field literally gives 5 heads of dim 5 and a forward that runs, produces the
-//! right shapes, and is wrong everywhere.
+//! field literally as widths gives heads 5, 10 and 20 wide (64 of them at every
+//! level) and a forward that runs, produces the right shapes, and is wrong
+//! everywhere.
 
 /// What a down block does with the text conditioning.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
