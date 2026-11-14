@@ -200,6 +200,7 @@ impl Action for ZAction {
         manifest().actions.into_iter().find(|a| a.name == self.name).expect("known action")
     }
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         let paths = &self.paths;
         let prompt = inv.get_str("prompt").unwrap_or_default();
         let seed = seed_of(inv)?;
@@ -239,7 +240,7 @@ impl Action for ZAction {
                 let (image, w, h) = capability::blob::decode_image(inv, "image")?;
                 let opts = opts_from(inv, w, h, seed)?; // output matches the input image
                 let init = crate::pipeline::Init { image: &image, strength: inv.get_f64("strength").unwrap_or(0.55) as f32, mask: None, feather: 0, outpaint: None };
-                emit(crate::pipeline::generate_img(&prompt, &opts, paths, init, &mut on)?, seed)
+                emit(crate::pipeline::generate_img(&prompt, &opts, paths, init, &inv.cancel, &mut on)?, seed)
             }
             "inpaint" => {
                 let (image, w, h) = capability::blob::decode_image(inv, "image")?;
@@ -249,7 +250,7 @@ impl Action for ZAction {
                 }
                 let opts = opts_from(inv, w, h, seed)?;
                 let init = crate::pipeline::Init { image: &image, strength: inv.get_f64("strength").unwrap_or(0.85) as f32, mask: Some(&mask), feather: inv.get_i64("feather").unwrap_or(2).max(0) as u32, outpaint: None };
-                emit(crate::pipeline::generate_img(&prompt, &opts, paths, init, &mut on)?, seed)
+                emit(crate::pipeline::generate_img(&prompt, &opts, paths, init, &inv.cancel, &mut on)?, seed)
             }
             "outpaint" => {
                 let (image, w, h) = capability::blob::decode_image(inv, "image")?;
@@ -266,7 +267,7 @@ impl Action for ZAction {
                 // its VAE device and re-anchors the original region every step.
                 let outpaint = crate::pipeline::Outpaint { src_w: w as usize, src_h: h as usize, border };
                 let init = crate::pipeline::Init { image: &image, strength: 1.0, mask: None, feather: inv.get_i64("feather").unwrap_or(3).max(0) as u32, outpaint: Some(outpaint) };
-                emit(crate::pipeline::generate_img(&prompt, &opts, paths, init, &mut on)?, seed)
+                emit(crate::pipeline::generate_img(&prompt, &opts, paths, init, &inv.cancel, &mut on)?, seed)
             }
             "lora_train" => {
                 let dir = inv.get_str("data").ok_or("lora_train: 'data' folder is required")?;
@@ -392,6 +393,19 @@ fn emit(img: crate::pipeline::Image, seed: u64) -> ActionResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A token fired before the call stops every served action before it
+    /// opens a weight file: the paths below do not exist, so any work past the
+    /// entry check would fail with a file error instead of `cancelled`.
+    #[test]
+    fn a_token_fired_before_the_call_stops_every_action_before_loading_weights() {
+        let nowhere = |name: &str| format!("/nonexistent/s3dit-cancel/{name}");
+        let provider = ZImageProvider::from_paths(crate::pipeline::Paths { dit: nowhere("dit"), vae: nowhere("vae"), qwen: nowhere("qwen"), tokenizer: nowhere("tokenizer") });
+        for name in ["text2image", "image2image", "inpaint", "outpaint", "lora_train"] {
+            let action = provider.action(name).expect("declared action");
+            capability_mock::cancellation::admission(name, Invocation::new().set("prompt", json!("a lighthouse")), &|inv, p| action.run(inv, p));
+        }
+    }
 
     #[test]
     fn manifest_declares_the_full_surface() {

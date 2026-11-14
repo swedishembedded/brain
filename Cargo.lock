@@ -2913,6 +2913,7 @@ name = "brain-s3dit"
 version = "5.1.0"
 dependencies = [
  "brain-capability",
+ "brain-capability-mock",
  "brain-checkpoint",
  "brain-data",
  "brain-diffusion",

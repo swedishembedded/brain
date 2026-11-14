@@ -1084,9 +1084,7 @@ impl HotPipeline {
 
         // 3. flow-match sampling on the resident DiT.
         for i in 0..steps as usize {
-            if cancel.is_cancelled() {
-                return Err("cancelled".into());
-            }
+            cancel.check()?;
             progress(2 + i as u32, total, if self.hifi { "sampling (fp32, 2×GPU)" } else { "sampling" });
             let t_dit = (1000.0 - ts[i]) / 1000.0;
             let v: Vec<f32> = self.dit.forward(&lat, &cap, t_dit).iter().map(|&x| -x).collect();
@@ -1261,22 +1259,26 @@ fn latent_mask(ctx: &imaging::Ctx, mask: &[f32], w: usize, h: usize, lw: usize, 
 }
 
 /// Generate an image from `prompt` (text-to-image). `progress(step, total, msg)`
-/// streams updates.
-pub fn generate(prompt: &str, opts: &Opts, paths: &Paths, progress: impl FnMut(u32, u32, &str)) -> Result<Image, String> {
-    generate_core(prompt, opts, paths, None, progress)
+/// streams updates. `cancel` is checked on entry and polled once per sampling
+/// step; a fired token ends the run with `Err("cancelled")`.
+pub fn generate(prompt: &str, opts: &Opts, paths: &Paths, cancel: &capability::CancelToken, progress: impl FnMut(u32, u32, &str)) -> Result<Image, String> {
+    generate_core(prompt, opts, paths, None, cancel, progress)
 }
 
 /// Image-to-image / inpaint / outpaint: regenerate `init.image` toward `prompt`.
 /// A mask (`init.mask`) restricts changes to the masked region (inpaint/outpaint).
-pub fn generate_img(prompt: &str, opts: &Opts, paths: &Paths, init: Init, progress: impl FnMut(u32, u32, &str)) -> Result<Image, String> {
-    generate_core(prompt, opts, paths, Some(init), progress)
+/// `cancel` is checked on entry and polled once per sampling step; a fired
+/// token ends the run with `Err("cancelled")`.
+pub fn generate_img(prompt: &str, opts: &Opts, paths: &Paths, init: Init, cancel: &capability::CancelToken, progress: impl FnMut(u32, u32, &str)) -> Result<Image, String> {
+    generate_core(prompt, opts, paths, Some(init), cancel, progress)
 }
 
 /// Shared pipeline for all four actions. With `init = None` it starts from pure
 /// noise (text2image); with an init image it VAE-encodes it, re-noises to the
 /// `strength`-determined step, and (for inpaint) re-anchors the kept region each
 /// step.
-fn generate_core(prompt: &str, opts: &Opts, paths: &Paths, init: Option<Init>, mut progress: impl FnMut(u32, u32, &str)) -> Result<Image, String> {
+fn generate_core(prompt: &str, opts: &Opts, paths: &Paths, init: Option<Init>, cancel: &capability::CancelToken, mut progress: impl FnMut(u32, u32, &str)) -> Result<Image, String> {
+    cancel.check()?;
     let total = opts.steps + 2; // encode + N sampling + decode
     let zcfg = dit_config(&paths.dit, &opts.tuning);
     check_image_size(&zcfg, opts.width, opts.height)?;
@@ -1410,6 +1412,7 @@ fn generate_core(prompt: &str, opts: &Opts, paths: &Paths, init: Option<Init>, m
     {
         let dit = DitEngine::build_from_source(opts.hifi, zcfg, &dsrc, &paths.dit, lh, lw, cap_len, opts.tuning.window_blocks);
         for i in start_step..opts.steps as usize {
+            cancel.check()?;
             progress(2 + i as u32, total, if opts.hifi { "sampling (fp32, 2×GPU)" } else { "sampling" });
             let t_dit = (1000.0 - ts[i]) / 1000.0;
             // The reference negates the DiT output before the Euler step
