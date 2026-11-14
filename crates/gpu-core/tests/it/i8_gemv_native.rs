@@ -397,7 +397,8 @@ fn exact_decode_groups_make_every_batch_row_bit_identical_to_the_same_row_alone(
     }
     let (kg, n) = (1280u32, 1024u32);
     let ng = kg / WPG as u32;
-    let rows = 8u32;
+    // A whole decode regime, so a group as wide as the regime is checked row by row too.
+    let rows = NATIVE_ROWS;
     let step = backend_api::select::exact_decode_group_rows(&gpu.caps(), Dtype::I8);
     assert!((1..=rows).contains(&step), "the exact group size {step} is outside the decode batch");
     let x = Windowed::new(&gpu, &packed((rows * kg) as usize, 0x51ed), 0);
@@ -440,7 +441,7 @@ fn exact_decode_groups_make_every_batch_row_bit_identical_to_the_same_row_alone(
     // tensor-core block serves to f32 rounding rather than bit for bit.
     dispatch(&gpu, 0, rows);
     let batched = out.window(&out.read_bits(&gpu));
-    assert_native_agrees(&gpu, rows, &batched, &alone, "the default 8-row step against each row decoded alone");
+    assert_native_agrees(&gpu, rows, &batched, &alone, "the default whole-batch step against each row decoded alone");
 
     // The exact regime: groups of at most `step`, each the same kernel instance
     // a single row runs, so the bits match at every row count.

@@ -620,7 +620,8 @@ pub fn i8_gemv_max_rows_at(compute_capability: Option<(u32, u32)>) -> u32 {
 /// the weights per group beyond the first in exchange.
 ///
 /// For the int8-activation tiers: one fewer than the tensor-core block's first row count where the device has it (4
-/// on a GH200, so eight rows are two groups and double the weight traffic); the GEMV's whole row range on a device
+/// on a GH200, so eight rows are two groups and double the weight traffic); the GEMV's whole row range
+/// ([`i8_gemv_max_rows`]: the decode regime where the native GEMV serves, its portable crossover elsewhere) on a device
 /// without int8 tensor cores, where every row count is already bit for bit the reference. The float tiers' GEMV keeps
 /// its fold at every row count of the decode regime, so their group is the regime itself.
 pub fn exact_decode_group_rows(caps: &DeviceCaps, dtype: Dtype) -> u32 {
@@ -630,7 +631,7 @@ pub fn exact_decode_group_rows(caps: &DeviceCaps, dtype: Dtype) -> u32 {
             if tensor_core {
                 (I8_GEMV_MMA_MIN_ROWS - 1).min(I8_GEMV_MAX_ROWS)
             } else {
-                I8_GEMV_MAX_ROWS
+                i8_gemv_max_rows(caps)
             }
         }
         _ => DECODE_REGIME_MAX_ROWS,
@@ -2787,7 +2788,8 @@ mod tests {
         let mut pascal = gpu_caps();
         pascal.arch.compute_capability = Some((6, 1));
         assert_eq!(exact_decode_group_rows(&hopper, Dtype::I8), I8_GEMV_MMA_MIN_ROWS - 1);
-        assert_eq!(exact_decode_group_rows(&pascal, Dtype::I8), I8_GEMV_MAX_ROWS);
+        assert_eq!(exact_decode_group_rows(&pascal, Dtype::I8), DECODE_REGIME_MAX_ROWS, "the native dp4a GEMV serves the regime");
+        assert_eq!(exact_decode_group_rows(&gpu_caps(), Dtype::I8), I8_GEMV_MAX_ROWS, "a portable device keeps its crossover");
         assert_eq!(exact_decode_group_rows(&hopper, Dtype::F32), DECODE_REGIME_MAX_ROWS);
     }
 
