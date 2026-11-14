@@ -44,4 +44,4 @@ $M assemble --base shards/ --overlays exp0/,exp1/ --dest final.safetensors
 $M verify --dir shards/
 ```
 
-See [federated-experts](../../../docs/guides/training/federated-experts.md).
+Federated experts are covered in the federated-experts training guide.

@@ -493,7 +493,7 @@ mod caps_tests {
 
     #[test]
     fn training_refuses_a_size_the_net_cannot_take() {
-        let inv = train_spec().validate(Invocation::new().set("save", json!("/tmp/x.safetensors")).set("width", json!(50))).unwrap();
+        let inv = train_spec().validate(Invocation::new().set("save", json!(std::env::temp_dir().join("x.safetensors").to_string_lossy())).set("width", json!(50))).unwrap();
         let err = TrainAction { weights: None }.run(&inv, &mut |_| {}).unwrap_err();
         assert!(err.contains("multiples of 32"), "{err}");
     }
