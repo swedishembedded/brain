@@ -381,9 +381,11 @@ pub fn parse_safetensors(bytes: &[u8]) -> Result<StModel, String> {
 ///   live at the same time as every decoded tensor. On a box with no swap,
 ///   anonymous memory is the copy that cannot be reclaimed under pressure.
 /// - Mapping alone does not fix the process's **resident** size, because
-///   touching a mapping faults its pages in and they count. Releasing each
-///   tensor's range once it has been decoded keeps the mapping's resident
-///   footprint at roughly one tensor instead of the whole file.
+///   touching a mapping faults its pages in and they count. The mapping is
+///   pre-faulted whole ([`crate::mmap::MmapSafetensors::open_populated`]), and
+///   releasing each tensor's range once it has been decoded shrinks it as the
+///   decoded copy grows, so the file and its decoded tensors are never both
+///   fully resident.
 ///
 /// Byte-identical to the eager route: [`crate::mmap::MmapSafetensors`]
 /// decodes the same dtypes from the same bytes, `MADV_DONTNEED` on a
