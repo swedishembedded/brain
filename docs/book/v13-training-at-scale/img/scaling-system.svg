@@ -1,4 +1,4 @@
-<!-- source-sha256: d95b94fef22c10cc032db5304c4b984b30fb99f80d5aedc8491290d1737aed4f -->
+<!-- source-sha256: 72397463be0a510f39465373ce29f3e575e573609518130d0b28fc288a870962 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 430" width="1000" height="430"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="1000" height="430" fill="#ffffff"/>
 <rect x="25" y="182" width="170" height="64" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
 <text x="110" y="202.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">draws of update t</text>

@@ -204,6 +204,18 @@ def _tally(ops, reader, power_loss):
     return total, counts
 
 
+def _op_text(o):
+    if o[0] == "create":
+        return f"create {o[1]} (a name operation; for T it creates or truncates it)" if o[1] == "T" else f"create {o[1]}"
+    if o[0] == "write":
+        return f"write {o[3].split('_')[-1] if '_' in o[3] else 'part ' + str(o[2])}"
+    if o[0] == "fsync":
+        return "fsync the file"
+    if o[0] == "rename":
+        return f"rename {o[1]} to {o[2]}"
+    return "syncdir"
+
+
 def crash_states():
     rows = []
     lost = 0
@@ -220,7 +232,11 @@ def crash_states():
             "`syncdir`, and any subset of the writes survives that includes those before a completed `fsync` (a write that did "
             "not survive leaves its part empty). The reader of the first three protocols trusts the file `T`; the reader of the "
             "generations takes the newest whose three parts are all present, else the one before it. Every crash state of every "
-            f"prefix is counted once. The number of states in which the reader finds no file at all is {lost} in every row.\n\n")
+            f"prefix is counted once, including the empty prefix and the full list. The disk before the first operation holds the old "
+            "file A under the name `T` (first three protocols) or the old generation `gen-1` (last two); creating a name gives a file "
+            "whose three parts are empty. The operations are, in issue order: "
+            + "; ".join(f"{name}: " + ", ".join(_op_text(o) for o in ops) for name, _, ops in _PROTOCOLS)
+            + f". The number of states in which the reader finds no file at all is {lost} in every row.\n\n")
     heads = ["protocol", "crash", "states", "old", "new", "old, damage found", "torn, accepted"]
     return head + _table(heads, rows, "llrrrrr")
 
@@ -476,10 +492,11 @@ def omitted_state():
             "= v / (1 - beta2^t) (the powers by repeated multiplication from 1.0), candidate = (w - (lr wd) w) - (lr mhat) / "
             "(sqrt(vhat) + eps). The candidate is rounded to bf16 stochastically with the draw counter_uniform(key, j) of "
             f"coordinate j, key = mix32(seed32 xor mix32(t)), seed32 = {_rounding_seed32():#x} (the low 32 bits of seed_of "
-            "'checkpoints_and_recovery.rounding'). The run has 12 updates; it is stopped after "
+            "'checkpoints_and_recovery.rounding'; the row that replaces the seed uses the low 32 bits of seed_of "
+            f"'checkpoints_and_recovery.other', {bookrng.seed_of('checkpoints_and_recovery.other') & M32:#x}). The run has 12 updates; it is stopped after "
             f"{STOP}, its state is saved, and a second process loads the saved state, with the part named in the first column "
             f"changed, and does the remaining {STEPS - STOP}. After 5 updates w = {_wtext(st5.w)}; after 12 in the uninterrupted "
-            f"run w = {_wtext(ref.w)} with mean squared error {_g(ref.loss(), 4)} over the 8 examples. 'Largest deviation' is the "
+            f"run w = {_wtext(ref.w)} with mean squared error {_g(ref.loss(), 4)}, the plain mean over the 8 examples of (x_i . w - y_i)^2, without a factor 1/2. 'Largest deviation' is the "
             "largest difference of a weight from the uninterrupted run after 12 updates.\n\n")
     return head + _table(["what the second process is given", "same weights as the uninterrupted run", "largest deviation",
                           "mean squared error"], rows, "lrrr")

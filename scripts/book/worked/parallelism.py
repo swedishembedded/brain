@@ -249,7 +249,7 @@ def summation_order():
     rows = []
     for R in (2, 3, 4, 8):
         r, n, diff, worst = _order_row(R)
-        rows.append((r, n, diff, f"{100 * diff / n:.1f}", _g(worst, 3)))
+        rows.append((r, n, diff, f"{100 * diff / n:.1f}", f"{worst:.0f}"))
     head = (f"{bookrng.seed_of('parallelism.order')} is seed_of 'parallelism.order'; each row starts this generator afresh and draws "
             "R x 840 values by normal(), rank 0's 840 first, then rank 1's, and so on; every draw is rounded to the nearest float32, "
             "and every addition is done in float64 and rounded to the nearest float32 (ties to even). Element i is summed in "
@@ -354,8 +354,9 @@ def sharded_equivalence():
     head = (f"{bookrng.seed_of('parallelism.sharded')} is seed_of 'parallelism.sharded'. One generator draws, by normal(), the 8 starting "
             "weights (each times 0.5) and then, for each of the 5 steps in turn, the gradients of the 4 ranks (rank 0's 8 numbers first), "
             "so the gradients are given and do not depend on the weights. Each step sums the four gradients in rank order from 0.0 and "
-            "divides by 4. Adam is the one of Volume III, Chapter 7 (rate 0.01, beta1 0.9, beta2 0.999, epsilon 1e-8, bias-corrected, no weight decay, "
-            "steps counted from 1), in float64. The replicated run gives every rank all 8 weights and 16 moments; the sharded run gives rank "
+            "divides by 4. Adam is the adam_update of Volume XIII, Chapter 4 (rate 0.01, beta1 0.9, beta2 0.999, epsilon 1e-8, bias-corrected, no weight decay, "
+            "steps counted from 1), in float64, with 1 - beta1 and 1 - beta2 evaluated in float64, the second moment updated as ((1 - beta2) g) g, and the powers "
+            "beta ^ t formed by exponentiation, not by repeated multiplication. The replicated run gives every rank all 8 weights and 16 moments; the sharded run gives rank "
             "r the elements 2 r and 2 r + 1 and their 4 moments, and all-gathers the updated pairs.\n\n")
     tail = (f"\n\nThe four replicated ranks end with identical weights ({'yes' if same_ranks else 'NO'}). The sharded run ends with "
             f"{differ} of the 8 weights different from them (bit patterns compared). A rank holds {8 + 16} numbers of state in the "
@@ -654,9 +655,13 @@ def pipeline_accumulation():
             "The loss is 0.5 sum(Y^2) over all 8 rows of the last block's output, so micro-batch gradients add with no scale. The 8 rows are cut "
             "into 4 micro-batches of 2 consecutive rows. The pipeline has 2 stages (blocks 0 and 1, then blocks 2 and 3); each stage keeps only the "
             "input of each micro-batch and rebuilds its activations before its backward; the gradient of the cut's activations crosses the cut. "
+            "The gradient of one micro-batch is the matrix products of the backward (each entry a sum over the 2 rows, or over the 6 hidden units, "
+            "taken with compensated (Neumaier) summation in float64, as Python's sum does from version 3.12) and tanh is the C library's double tanh; "
+            "the buffers receive whole micro-batch gradients, entry by entry. "
             "Gradients are added into zeroed buffers in the order stated. The criterion compares every entry with the gradient of one backward over "
             "the whole batch (below 1e-12); the third column counts the entries (out of 4 blocks x 2 matrices x 24 = 192) whose 64-bit patterns differ "
-            "from the first row.\n\n")
+            "from the first row (the zero of the third row and the pass of every row do not depend on the summation or the tanh; the count of the second row does, "
+            "and is 68 with plain left-to-right summation).\n\n")
     return head + _table(["run", "gradient entries", "bit patterns differing from the first row", "against one backward over the whole batch"], rows, "lrrl")
 
 

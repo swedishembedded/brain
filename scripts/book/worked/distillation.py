@@ -238,11 +238,12 @@ def soft_versus_hard():
             f"uniform value (the last class if none does). The three targets are that one-hot label, the teacher's top 2 "
             f"classes renormalised, and the full teacher distribution. The student has no bias and starts at zero; it minimises "
             f"the mean cross-entropy against its targets plus {LAMBDA}/2 times the sum of its squared weights by {STEPS} steps "
-            f"of gradient descent with rate {LR}, to a largest gradient component below 1e-12. The score is the mean over "
+            f"of gradient descent with rate {LR}, from which every run ends with a largest gradient component below 1e-12 (checked). The score is the mean over "
             f"{N_TEST} test contexts (generator 'distillation.test', seed {bookrng.seed_of('distillation.test')}, {D_T} normal() each) "
             f"of KL(q || p), q the teacher's and p the student's distribution, averaged over the {RUNS} runs. "
             f"The student fitted to the full teacher distribution of {N_FLOOR} other contexts (generator 'distillation.floor', "
-            f"seed {bookrng.seed_of('distillation.floor')}) scores {_f(_floor())} on the same test set. " + stable.RULE + "\n\n")
+            f"seed {bookrng.seed_of('distillation.floor')}) scores {_f(_floor())} on the same test set. " + stable.RULE
+            + " The problem is convex and the runs converge, so every number below is printed in full.\n\n")
     return head + _table(["training contexts", "one-hot label sampled from the teacher", "top 2 of the teacher", "full teacher distribution"],
                          rows, "rrrr")
 
@@ -433,6 +434,7 @@ def normalisation():
 POINTS = 10
 MUS = [i * 0.25 for i in range(0, 37)]          # 0 to 9 in steps of 0.25
 SIGMAS = [0.25 * i for i in range(1, 25)]       # 0.25 to 6 in steps of 0.25
+TIE = 1e-9                                      # the teacher is symmetric about 4.5, so mu and 9 - mu tie up to rounding
 
 
 def _bimodal(floor=0.005):
@@ -455,16 +457,16 @@ def fits():
 @functools.lru_cache(maxsize=None)
 def _fits(floor):
     """(teacher, forward-KL best (mu, sigma, KL, p), reverse-KL best (mu, sigma, KL, p)) by exhaustive grid search; the
-    first of equal values in the order mu ascending, then sigma ascending wins."""
+    first of the values that agree to within TIE in the order mu ascending, then sigma ascending wins."""
     q = _bimodal(floor)
     best_f = best_r = None
     for mu in MUS:
         for sigma in SIGMAS:
             p = _gauss(mu, sigma)
             f, r = kl(q, p), kl(p, q)
-            if best_f is None or f < best_f[2]:
+            if best_f is None or f < best_f[2] - TIE:
                 best_f = (mu, sigma, f, p)
-            if best_r is None or r < best_r[2]:
+            if best_r is None or r < best_r[2] - TIE:
                 best_r = (mu, sigma, r, p)
     return q, best_f, best_r
 
@@ -487,7 +489,9 @@ def forward_versus_reverse():
             "exp(-(v - 7)^2 / (2 x 0.36)), normalised to sum 1. The student is a discretised Gaussian, p_v proportional to "
             "exp(-(v - mu)^2 / (2 sigma^2)), with two numbers to choose: mu from 0 to 9 in steps of 0.25 and sigma from 0.25 to 6 "
             "in steps of 0.25 (37 x 24 = 888 students). Each objective is minimised by trying every student, mu ascending "
-            "then sigma ascending, and keeping the first strictly smaller value. 'Forward' minimises KL(q || p), 'reverse' "
+            "then sigma ascending, and keeping the first student whose value is smaller than the best so far by more than 1e-9 "
+            "(the teacher is symmetric about 4.5, so a student with mean mu and the one with mean 9 - mu tie up to rounding, "
+            "and the smaller mu is kept). 'Forward' minimises KL(q || p), 'reverse' "
             "KL(p || q). Natural logarithms, four decimals.\n\n")
     return (head + _table(["token", "teacher q", "forward-KL student", "reverse-KL student"], rows, "rrrr") + "\n\n"
             + _table(["quantity", "forward-KL student", "reverse-KL student"], summary, "lrr"))
@@ -650,6 +654,6 @@ def answer_floor():
         rows.append([floor, f"{bf[0]}, {bf[1]}", f"{br[0]}, {br[1]}", _f(bf[2]), _f(br[2])])
     return ("The grid search of the table 'forward versus reverse' with the teacher's floor (the constant added to each raw "
             "weight before normalising) changed. mu, sigma are the best student's mean and spread; the divergences are those "
-            "of the student chosen by that objective.\n\n"
+            "of the student chosen by that objective, with the same tie rule.\n\n"
             + _table(["floor", "forward best mu, sigma", "reverse best mu, sigma", "forward KL(q \\|\\| p)", "reverse KL(p \\|\\| q)"],
                      rows, "rrrrr"))

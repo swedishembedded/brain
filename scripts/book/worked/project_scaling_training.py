@@ -30,6 +30,14 @@ import parallelism as par
 import stable
 import training_data as td
 
+_MISTAKES = ("The mistakes are: 'mean of the shard means', each rank's sum divided by its own number of rows, the four means added in "
+             "rank order and the total divided by 4; 'sum, not divided by the batch', the correct total left undivided; 'every rank "
+             "reads the shard of rank 0', every rank summing the gradients of the rows of rank 0 (draws 0, 4 and 8 of the step), "
+             "the four equal sums added in rank order and the total divided by 10.")
+
+_RULE = (stable.RULE + " Nothing in this project is chaotic: all five runs agree on every digit printed below, so no number is marked "
+         "'about' or 'unstable'.")
+
 _table = nf._table
 
 # ------------------------------------------------------------------ the task, the network and its initialisation
@@ -493,9 +501,10 @@ def reference_run():
             f"order of `training_data.epoch_order` with the seed {_seed('order')} (seed_of '{NAMES['order']}'), computed afresh "
             "from the epoch of each draw; the gradient is the sum over the 10 rows in draw order, from 0.0, divided by 10, and the "
             "update is `adam_update` of Chapter 4 with rate 0.01 and step count t (the bias corrections by repeated "
-            "multiplication from 1.0). The losses are the mean over all 40 examples, summed in example order from 0.0, of half "
+            "multiplication from 1.0; the second moment is v = 0.999 v + 0.001 g g evaluated left to right, as (0.001 g) g, with the "
+            "literal 0.001 and 0.1 and not 1 - beta, which differs in the last bit from the 0.001 (g g) that is another association). The losses are the mean over all 40 examples, summed in example order from 0.0, of half "
             "the squared error of the network after t updates, against T0 (what this run trains on) and T1 (what the adapters of "
-            "milestone 5 will be asked for). " + stable.RULE + "\n\n")
+            "milestone 5 will be asked for). " + _RULE + "\n\n")
     return head + _table(["updates t", "loss against T0", "loss against T1"], rows, "rrr")
 
 
@@ -546,7 +555,7 @@ def recomputation():
             cells.append(f"{_rel_dist(acc, ref):.4g}")
         rows2.append((name, *cells))
     mid = ("\n\nThe same batch when a pending update adds 0.3 to one weight after the forward pass of every example and before its "
-           "backward pass: W[0][1] of layer 0 (flat index 1) or W[0][1] of layer 1 (flat index 41). The distance is the Euclidean "
+           "backward pass, the weight being restored before the next example (so each example sees the change once): W[0][1] of layer 0 (flat index 1) or W[0][1] of layer 1 (flat index 41). The distance is the Euclidean "
            "norm of the difference from the keep gradient of the unchanged weights, divided by the norm of that gradient.\n\n")
     return (head + _table(["policy", "numbers alive at the peak (one example)", "FLOPs, one example", "gradient entries that differ"],
                           out, "lrrr")
@@ -581,7 +590,7 @@ def shard_layouts():
             "the sum is divided by 10. The deviation is the largest absolute difference of an entry from the gradient of one "
             "rank, and the criterion is that it is below 1e-12.\n\n")
     mid = ("\n\nThe same step on 4 ranks (shards of 3, 3, 2 and 2 rows) with three mistakes; the distance is the Euclidean norm of "
-           "the difference from the one-rank gradient divided by the norm of that gradient.\n\n")
+           "the difference from the one-rank gradient divided by the norm of that gradient. " + _MISTAKES + "\n\n")
     return (head + _table(["ranks R", "rows of each rank", "coordinator", "ring"], out, "rlll")
             + mid + _table(["build", "relative distance"], bad, "lr"))
 
@@ -615,8 +624,9 @@ def parallel_runs():
             "337 numbers after 120 updates, from the one-rank run started from the same (nudged) initial vector, and the criterion "
             "is that it is below 1e-9 for the run and its four nudged copies. 'Ranks hold the same bits' is whether, after the "
             "last reduction, every rank's copy of the summed gradient is the same list of 64-bit patterns (checked at the final weights, "
-            "on the rows of the last step). " + stable.RULE + "\n\n")
-    mid = "\n\nThe same run on 4 ranks with three planted mistakes. The deviation is the largest absolute difference from the one-rank run.\n\n"
+            "on the rows of the last step). " + _RULE + "\n\n")
+    mid = ("\n\nThe same run on 4 ranks with three planted mistakes. The deviation is the largest absolute difference from the one-rank run. "
+           + _MISTAKES + "\n\n")
     return (head + _table(["build", "deviation from the 1-rank run", "loss against T0 after 120 updates", "ranks hold the same bits"],
                           rows, "lllr")
             + mid + _table(["build", "deviation from the 1-rank run", "loss against T0 after 120 updates"], bad, "lrr"))
@@ -714,7 +724,7 @@ def adapter_layout():
            f"{zero0:.10g} with the adapters at their start (a difference of {abs(base0 - zero0):g}); with a nonzero B (every entry "
            f"drawn as (2u - 1) x 0.5) it is {rnd0:.6g}. A gradient check on the 10 rows of milestone 1 with B drawn that way "
            f"compares all {P_AD} analytic entries with central differences of step 1e-6: it {_crit(worst, 1e-6)}. At B = 0 "
-           f"the gradient of the same rows has {a_nonzero} nonzero entries among the {RANK * 8 * 4} of A and {b_nonzero} among the "
+           f"the gradient of the same rows against T1 on the trained base of milestone 2 has {a_nonzero} nonzero entries among the {RANK * 8 * 4} of A and {b_nonzero} among the "
            f"{8 * RANK * 4} of B.\n")
     return head + t1 + mid
 
@@ -747,7 +757,7 @@ def adapter_runs():
             f"draws from the order of `{NAMES['order_ft']}` (seed {_seed('order_ft')}), batches of 10 as before. The deviation is "
             "the largest absolute difference of the 128 adapter numbers from those of the one-rank run, and the criterion is "
             "that it is below 1e-9 for the run and its four nudged copies. After the 60 updates the digest of the base, written as "
-            f"64-bit floats, is {'unchanged' if frozen else 'CHANGED'}. " + stable.RULE + "\n\n")
+            f"64-bit floats, is {'unchanged' if frozen else 'CHANGED'}. " + _RULE + "\n\n")
     t1 = _table(["run", "deviation of the adapters", "loss against T1", "loss against T0"], rows, "llrr")
     mid = ("\n\nThree planted mistakes on one rank. 'After 60 updates' is the largest absolute adapter number for the first row, "
            "the loss against T1 before the first update for the second and the largest absolute change of a base number for the "
@@ -934,7 +944,7 @@ def resume_runs():
             "column, and carries on to update 60 with the same step function. 'Same bits' compares the 128 adapter numbers, as 64-bit "
             "patterns, with the uninterrupted 4-rank run; the deviation is the largest absolute difference from it. The last "
             "column compares with the one-rank run of milestone 5 (criterion below 1e-9, for the run and its four nudged copies). "
-            "The damage is that a power loss left the last 16 bytes of the newest `values.bin` as zeros. " + stable.RULE + "\n\n")
+            "The damage is that a power loss left the last 16 bytes of the newest `values.bin` as zeros. " + _RULE + "\n\n")
     return head + _table(["what the second process does", "generation restored", "same bits as the uninterrupted run",
                           "deviation from it", "against the 1-rank run"], rows, "llrrl")
 
@@ -1012,7 +1022,7 @@ def whole_run():
             "in milestone 6; each planted mistake is made in the adapter stage, after a correct 4-rank base. The deviation is the largest absolute difference, over the 337 base numbers and the 128 adapter numbers, "
             "from the reference run started from the same (nudged) initial vector, and the criterion is that it is below 1e-9 for "
             "the run and its four nudged copies. The loss is the mean over the 40 examples against T1 of the final network. " +
-            stable.RULE + "\n\n")
+            _RULE + "\n\n")
     return head + _table(["build", "largest deviation from the reference", "loss against T1"], rows, "lrr")
 
 
@@ -1027,10 +1037,10 @@ def opening():
         dev = _stable(lambda n, kw=kw: _dev_final(kw, {}, n), lambda x: f"{x:.3g}") if kw.get("combine") else \
             ("0" if not kw else "below 1e-9")
         rows.append((name, loss, dev))
-    head = ("The base run of milestone 2 (the network of milestone 1, 120 updates of 10 draws, Adam with rate 0.01) trained three "
+    head = ("The base run of milestone 2 (the network and the examples are specified below, as milestone 1; 120 updates of 10 draws, Adam with rate 0.01) trained three "
             "ways from the same initial vector and the same draws. 'Loss' is the mean over the 40 examples of half the squared "
-            "error against T0 of the network after the 120 updates; 'deviation' is the largest absolute difference, over the "
-            "337 numbers, from the one-rank run. " + stable.RULE + "\n\n")
+            "error against T0 (the first of the two targets of each example, defined with the network below) of the network after the 120 updates; 'deviation' is the largest absolute difference, over the "
+            "337 numbers, from the one-rank run. " + _RULE + "\n\n")
     return head + _table(["build", "loss against T0 after 120 updates", "deviation from the one-rank run"], rows, "lrr")
 
 
@@ -1079,10 +1089,10 @@ def deviation_table():
                 cells.append(stable.text(vals[0], vals[1:], lambda x: f"{x:.3g}"))
         rows.append((name, *cells))
     head = ("The adapter run of milestone 5 on 4 ranks (ring, segments of 2 layers) from the reference base, and three planted mistakes "
-            "(the mean of the shard means from the first update; the moments set to zero after update 30; the last two numbers of the "
+            "(the mean of the shard means of milestone 4 from the first update; the moments set to zero after update 30; the last two numbers of the "
             "adapter vector set to zero after update 40, which is what accepting a generation whose `values.bin` ends in zeros does). "
             "Each cell is the largest absolute difference of the 128 adapter numbers after the update named in the column head from "
-            "the one-rank run after the same update. " + stable.RULE + "\n\n")
+            "the one-rank run after the same update. " + _RULE + "\n\n")
     return head + _table(["build"] + [f"update {t}" for t in marks], rows, "l" + "r" * len(marks))
 
 
@@ -1098,6 +1108,6 @@ def blind_mistake():
         rows.append((f"{eps:g}", dev, loss, ref))
     head = ("The base run of milestone 2 on 4 ranks with the gradient left as the sum of the ten rows (not divided by 10), against "
             "the one-rank run with the same epsilon in the denominator of Adam. The deviation is the largest absolute difference "
-            "over the 337 numbers after 120 updates. " + stable.RULE + "\n\n")
+            "over the 337 numbers after 120 updates. " + _RULE + "\n\n")
     return head + _table(["epsilon of Adam", "deviation of the undivided sum", "its loss against T0", "loss against T0 of the one-rank run"],
                          rows, "lrrr")
