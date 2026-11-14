@@ -487,15 +487,14 @@ impl CollectiveProfile {
     }
 
     /// Write this rank's document beside `base` (see [`Self::path_for`]),
-    /// returning the path written. A temporary file and a rename mean a reader
-    /// sees the whole document or none of it.
+    /// returning the path written. Written durably
+    /// ([`checkpoint::st::write_durable`]): a reader sees the whole document or
+    /// none of it.
     pub fn write(&self, base: &Path) -> io::Result<PathBuf> {
         let path = Self::path_for(base, self.rank);
         let mut body = serde_json::to_vec_pretty(&self.to_json()).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         body.push(b'\n');
-        let temporary = path.with_extension("json.tmp");
-        std::fs::write(&temporary, &body)?;
-        std::fs::rename(&temporary, &path)?;
+        checkpoint::st::write_durable(&path, &body)?;
         Ok(path)
     }
 }

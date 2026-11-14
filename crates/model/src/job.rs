@@ -133,16 +133,14 @@ impl JobPlan {
         Ok(plan)
     }
 
-    /// Write a plan so a launcher can hand the same bytes to every rank: a
-    /// temporary file beside it, then a rename. A reader sees the whole file or
-    /// none of it.
+    /// Write a plan so a launcher can hand the same bytes to every rank,
+    /// durably ([`checkpoint::st::write_durable`]): a reader sees the whole
+    /// file or none of it, after a process kill or a power loss alike.
     pub fn write(&self, path: &Path) -> Result<(), String> {
         self.validate()?;
         let mut body = serde_json::to_vec_pretty(self).map_err(|e| format!("serialising the job plan: {e}"))?;
         body.push(b'\n');
-        let temporary = path.with_extension("json.tmp");
-        std::fs::write(&temporary, &body).map_err(|e| format!("writing {}: {e}", temporary.display()))?;
-        std::fs::rename(&temporary, path).map_err(|e| format!("renaming {}: {e}", temporary.display()))
+        checkpoint::st::write_durable(path, &body).map_err(|e| format!("writing {}: {e}", path.display()))
     }
 
     fn handshake_timeout(&self) -> Duration {
@@ -275,22 +273,12 @@ impl CheckpointCommit {
     }
 
     /// Write the manifest as `commit-<step>.json`, durable before its name
-    /// exists: a temporary file, fsync, then a rename.
+    /// exists ([`checkpoint::st::write_durable`]).
     pub fn write(&self, dir: &Path) -> io::Result<PathBuf> {
         let path = dir.join(format!("commit-{:08}.json", self.step));
-        let temporary = dir.join(format!("commit-{:08}.json.tmp", self.step));
         let mut body = serde_json::to_vec_pretty(self).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         body.push(b'\n');
-        {
-            use std::io::Write as _;
-            let mut file = std::fs::File::create(&temporary)?;
-            file.write_all(&body)?;
-            file.sync_all()?;
-        }
-        std::fs::rename(&temporary, &path)?;
-        if let Ok(root) = std::fs::File::open(dir) {
-            root.sync_all().ok();
-        }
+        checkpoint::st::write_durable(&path, &body)?;
         Ok(path)
     }
 
