@@ -57,13 +57,15 @@ pub fn flatten_snapshot(s: &StatsSnapshot) -> Vec<String> {
     out.push(format!("executor.evictions={}", e.evictions));
     out.push(format!("executor.batches={}", e.batches));
     out.push(format!("executor.jobs={}", e.jobs));
+    out.push(format!("executor.admitted={}", e.admitted));
+    out.push(format!("executor.queue_depth={}", e.queue_depth));
     out.push(format!("executor.resident={}", e.resident));
     out.push(format!("executor.queue_peak={}", e.queue_peak));
     out.push(format!("executor.max_batch={}", e.max_batch));
     out.push(format!("executor.max_parallel={}", e.max_parallel));
     flatten_extra("executor.extra", &e.extra, &mut out);
 
-    // Requests — keyed by id (empty for now; populates automatically later).
+    // Requests — keyed by id (the live queued/running jobs; empty when idle).
     for r in &s.requests {
         let p = format!("request.{}", r.id);
         if let Some(v) = &r.provider {
@@ -152,6 +154,16 @@ mod tests {
 
         // A non-resident model still emits its typed leaves.
         assert!(lines.contains(&"model.tts.resident=false".to_string()));
+    }
+
+    #[test]
+    fn executor_admission_counters_are_printed() {
+        let mut snap = sample_snapshot();
+        snap.executor.admitted = 37;
+        snap.executor.queue_depth = 2;
+        let lines = flatten_snapshot(&snap);
+        assert!(lines.contains(&"executor.admitted=37".to_string()));
+        assert!(lines.contains(&"executor.queue_depth=2".to_string()));
     }
 
     #[test]
