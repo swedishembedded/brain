@@ -25,4 +25,8 @@ serde_json.workspace = true
 # pulls in the whole qwen3 engine stack once, shared by both pipelines this
 # sample builds, plus `brain-lfm2` (the LFM2.5-Encoder backend
 # `EmbeddingPipeline` also resolves through).
-max-brain-crates = 32
+# 32 -> 35: the text surface no longer links the catalog (129 crates before),
+# and serves Ripple through its own resident: brain-ricursive, its brain-
+# dflash2 drafter and brain-llmserve; residency links the leaf brain-gpu-
+# supervisor.
+max-brain-crates = 35

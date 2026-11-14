@@ -43,4 +43,7 @@ brain-modelref.workspace = true
 fetch-on-build = true
 # `make check/samples` fails if the real `cargo tree` closure exceeds this.
 # 28 -> 34: webcam tracking (capture, openseeface, its vision blocks, the model store).
-max-brain-crates = 34
+# 34 -> 38: the budget sat below the real 37 when it was set; openvino-rt's
+# stats reads the residency executor, and residency links the leaf brain-gpu-
+# supervisor.
+max-brain-crates = 38

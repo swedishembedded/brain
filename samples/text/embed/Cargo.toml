@@ -22,4 +22,8 @@ brain = { workspace = true, features = ["text"] }
 # kernels, gpu-core, model, checkpoint, data - not a lightweight surface;
 # `brain-lfm2`, the `EmbeddingPipeline`/`EmbeddingTrainer` LFM2.5-Encoder
 # backend, is the same `text`-feature closure's other one crate).
-max-brain-crates = 32
+# 32 -> 35: the text surface no longer links the catalog (129 crates before),
+# and serves Ripple through its own resident: brain-ricursive, its brain-
+# dflash2 drafter and brain-llmserve; residency links the leaf brain-gpu-
+# supervisor.
+max-brain-crates = 35

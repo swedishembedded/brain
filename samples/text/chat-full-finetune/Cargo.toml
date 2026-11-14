@@ -19,4 +19,7 @@ brain = { workspace = true, features = ["text", "study"] }
 # `make check/samples` fails if the real `cargo tree` closure exceeds this.
 # `study` links the trainer of every chat-trainable architecture (qwen3,
 # qwen35, qwen35moe, ...) beside the `text` stack.
-max-brain-crates = 56
+# 56 -> 61: as the text surface (brain-ricursive, brain-dflash2, brain-
+# llmserve, the leaf brain-gpu-supervisor under residency) plus brain-modelopt
+# for the ModelOptimizer surface.
+max-brain-crates = 61
