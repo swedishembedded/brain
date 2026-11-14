@@ -39,8 +39,9 @@ being told it is one, and the forecast carries the members' mean and the range
 they span. A forecast is a statistical estimate for the population the model
 was trained on; it is not a diagnosis and not a treatment recommendation.
 
-The same actions are served on HTTP and D-Bus by `brain serve` when
-`BRAIN_HORIZON_DIR` names a model directory (`BRAIN_HORIZON_TRAIN_DIR` is where
-a served `train` writes); there the datasets travel as the request's blobs.
+`predict`, `eval` and `calibrate` are served on HTTP and D-Bus by `brain serve`
+for a saved model installed in its model store as `local/<name>`; training is
+the training service's `timeline_train` action, with the datasets as the
+request's blobs.
 
 Needs the `brain` CLI on `PATH` and `python3` for the printout.

@@ -15,7 +15,8 @@ samples/shell/timeline/predict/predict.sh /tmp/timeline/model /tmp/timeline/subj
 It runs `brain horizon predict`, the `predict` action of `brain/horizon`,
 and prints one line per subject. A time past the model's last knot is
 refused rather than extrapolated. The same action is served on HTTP and
-D-Bus by `brain serve` when `BRAIN_HORIZON_DIR` names the model directory.
+D-Bus by `brain serve` when the model directory is installed in its model
+store as `local/<name>`.
 
 Needs the `brain` CLI on `PATH` and `python3` for the printout.
 

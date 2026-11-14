@@ -1377,6 +1377,8 @@ const RETIRED_VARIABLES: &[Retired] = &[
     Retired { name: "BRAIN_GPT2_WEIGHTS", replacement: "serve: {models-dir: DIR} (the model-dir scan serves every GPT checkpoint)" },
     Retired { name: "BRAIN_MOCK", replacement: "serve: {mock: true}" },
     Retired { name: "BRAIN_MOCK_DELAY_MS", replacement: "serve: {mock-delay-ms: MS}" },
+    Retired { name: "BRAIN_HORIZON_DIR", replacement: "a saved model installed in the model store as local/<name> (serve: {models-dir: DIR})" },
+    Retired { name: "BRAIN_HORIZON_TRAIN_DIR", replacement: "the training service's timeline_train action (serve: {training: true, artifact-store: DIR})" },
     Retired { name: "BRAIN_WM_RENDERER", replacement: "diamond play: {renderer: auto|software|accelerated}" },
 ];
 
