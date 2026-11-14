@@ -163,7 +163,9 @@ def pixel_budget():
            "'Check after' decodes an image within the per-image limit, adds it and refuses the request when the total is "
            "over the budget; 'check before' reads each image's declared size from its header and refuses it, before "
            "decoding, when it is over the smaller of the per-image limit and the budget left. 'Decoded' counts the "
-           "images whose pixels were decoded before the outcome.",
+           "images whose pixels were decoded before the outcome. The count of images is checked first, before the size of the "
+           f"image, so image {MAX_IMAGES + 1} is refused whatever it declares; under 'check after' an image over the per-image limit "
+           "is also refused from its header without being decoded, so only the budget is checked late.",
            "",
            _table(["images declared (pixels)", "rule", "decoded", "pixels decoded", "f32 bytes held", "outcome"], rows,
                   "llrrrl")]
@@ -222,7 +224,8 @@ def count_reservation():
            "minus the position where the declared items begin (byte 24 for the tensor records of a GGUF file with no metadata entries, after its 4-byte magic, "
            "4-byte version and two 8-byte counts; byte 4,096 for the array); every declared item takes at least the given number of bytes of the file (a "
            "tensor record of a GGUF file at least 24: an 8-byte name length, a 4-byte dimension count, a 4-byte type and "
-           "an 8-byte offset; a metadata array item at least 1). The naive reservation is n records of 24 bytes; the "
+           "an 8-byte offset; a metadata array item at least 1). The naive reservation is n records of 24 bytes each, the "
+           "size a reader gives every item it reserves, whatever the item occupies in the file (so the array row is priced as 2^62 records); the "
            "bounded one is min(n, floor(bytes left / least bytes per item)) records.",
            "",
            _table(["header", "bytes left", "least bytes per item", "items declared", "naive reservation (bytes)",
@@ -436,7 +439,9 @@ def key_guessing():
            "",
            f"With a perfect timing oracle (the comparison count is observed exactly) the digits are found one at a time: "
            f"at most 16 guesses per digit, {worst} in all, and {expected:g} on average when the right digit is equally "
-           f"likely to be any of the 16 tried in a fixed order. Without the oracle a guess is one of 16^{KEY_HEX} = 2^"
+           f"likely to be any of the 16 tried in a fixed order: a digit costs 1 to 16 guesses, counting the guess that matches, "
+           f"which is (1 + 2 + ... + 16) / 16 = 8.5 on average, times {KEY_HEX} digits (the 16th guess of a digit could be "
+           f"deduced untested; the maximum counts it). Without the oracle a guess is one of 16^{KEY_HEX} = 2^"
            f"{4 * KEY_HEX} = {16 ** KEY_HEX:,} keys, and {16 ** KEY_HEX // 2:,} guesses are needed on average."]
     return "\n".join(out)
 
