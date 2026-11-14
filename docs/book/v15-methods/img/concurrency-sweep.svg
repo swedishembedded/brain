@@ -1,0 +1,40 @@
+<!-- source-sha256: 23dd01284d1645df6c9234e4041217332a680a5a35e0bb7a1a9b3a5cf827ee61 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 620 380" width="620" height="380">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="620" height="380" fill="#ffffff"/>
+<line x1="58" y1="334" x2="58" y2="30" stroke="#edf2f7"/>
+<text x="58" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">1</text>
+<line x1="154.39" y1="334" x2="154.39" y2="30" stroke="#edf2f7"/>
+<text x="154.39" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">2</text>
+<line x1="281.81" y1="334" x2="281.81" y2="30" stroke="#edf2f7"/>
+<text x="281.81" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">5</text>
+<line x1="378.19" y1="334" x2="378.19" y2="30" stroke="#edf2f7"/>
+<text x="378.19" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">10</text>
+<line x1="474.58" y1="334" x2="474.58" y2="30" stroke="#edf2f7"/>
+<text x="474.58" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">20</text>
+<line x1="602" y1="334" x2="602" y2="30" stroke="#edf2f7"/>
+<text x="602" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">50</text>
+<line x1="58" y1="334" x2="602" y2="334" stroke="#edf2f7"/>
+<text x="52" y="338" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
+<line x1="58" y1="275.54" x2="602" y2="275.54" stroke="#edf2f7"/>
+<text x="52" y="279.54" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">250</text>
+<line x1="58" y1="217.08" x2="602" y2="217.08" stroke="#edf2f7"/>
+<text x="52" y="221.08" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">500</text>
+<line x1="58" y1="158.62" x2="602" y2="158.62" stroke="#edf2f7"/>
+<text x="52" y="162.62" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">750</text>
+<line x1="58" y1="100.15" x2="602" y2="100.15" stroke="#edf2f7"/>
+<text x="52" y="104.15" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">1000</text>
+<line x1="58" y1="41.69" x2="602" y2="41.69" stroke="#edf2f7"/>
+<text x="52" y="45.69" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">1250</text>
+<rect x="58" y="30" width="544" height="304" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="544" height="304"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#2b6cb0" stroke-width="2.0" points="58,297.75 154.39,266.82 250.78,213.56 347.16,154.55 403.55,109.49 443.55,78.08 474.58,78.08 499.94,78.08 539.94,78.08 596.32,78.08"/><circle cx="58" cy="297.75" r="3.5" fill="#2b6cb0"/><circle cx="154.39" cy="266.82" r="3.5" fill="#2b6cb0"/><circle cx="250.78" cy="213.56" r="3.5" fill="#2b6cb0"/><circle cx="347.16" cy="154.55" r="3.5" fill="#2b6cb0"/><circle cx="403.55" cy="109.49" r="3.5" fill="#2b6cb0"/><circle cx="443.55" cy="78.08" r="3.5" fill="#2b6cb0"/><circle cx="474.58" cy="78.08" r="3.5" fill="#2b6cb0"/><circle cx="499.94" cy="78.08" r="3.5" fill="#2b6cb0"/><circle cx="539.94" cy="78.08" r="3.5" fill="#2b6cb0"/><circle cx="596.32" cy="78.08" r="3.5" fill="#2b6cb0"/><polyline fill="none" stroke="#c05621" stroke-width="2.0" stroke-dasharray="6 4" points="58,297.75 154.39,266.82 250.78,213.56 347.16,154.55 403.55,118.46 443.55,104.21 474.58,122.35 499.94,160.73 539.94,315.77 596.32,315.77"/><circle cx="58" cy="297.75" r="3.5" fill="#c05621"/><circle cx="154.39" cy="266.82" r="3.5" fill="#c05621"/><circle cx="250.78" cy="213.56" r="3.5" fill="#c05621"/><circle cx="347.16" cy="154.55" r="3.5" fill="#c05621"/><circle cx="403.55" cy="118.46" r="3.5" fill="#c05621"/><circle cx="443.55" cy="104.21" r="3.5" fill="#c05621"/><circle cx="474.58" cy="122.35" r="3.5" fill="#c05621"/><circle cx="499.94" cy="160.73" r="3.5" fill="#c05621"/><circle cx="539.94" cy="315.77" r="3.5" fill="#c05621"/><circle cx="596.32" cy="315.77" r="3.5" fill="#c05621"/><circle cx="347.16" cy="154.55" r="6" fill="#2f855a"/><text x="71.25" y="123.54" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="start">highest goodput with the objective held: 767 at 8</text><line x1="281.81" y1="128.22" x2="340.03" y2="148.71" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arrow)"/><text x="443.55" y="64.04" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="middle">peak output: 1,094 at 16</text></g>
+<text x="330" y="370" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">requests in flight (closed loop)</text>
+<text x="14" y="182" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 182)">tokens per second (model)</text>
+<text x="330" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Peak output rate and goodput under the objective</text>
+<rect x="66" y="38" width="304.85" height="44" rx="3" fill="#ffffff" fill-opacity="0.92" stroke="#cbd5e0"/>
+<line x1="74" y1="53" x2="94" y2="53" stroke="#2b6cb0" stroke-width="2"/>
+<text x="100" y="57" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">output tokens per second</text>
+<line x1="74" y1="70" x2="94" y2="70" stroke="#c05621" stroke-width="2" stroke-dasharray="6 4"/>
+<text x="100" y="74" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">goodput: tokens of requests that met the objective</text>
+</svg>
