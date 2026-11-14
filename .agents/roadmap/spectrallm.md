@@ -46,7 +46,7 @@ why the scope is what it is.
 | Learning-rate selection, primary comparison (3 seeds), pilots | done |
 | Qwen3-0.6B: zero-shot BPB, fine-tuned BPB, residual-stream spectrum study | done |
 | Transform cost table (dense vs FFT mixer) for the paper | done |
-| Paper (`papers/spectral-lm`, `status.txt` final) | done |
+| Paper (`papers/spectral-lm`; `status.txt` is `draft` until the post hoc extension's records exist, then final) | draft |
 
 ## Outcome
 

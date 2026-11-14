@@ -286,22 +286,18 @@ def extension(data, groups, m):
     q = [r["eval"]["bits_per_byte"] for r in groups.get("Q-256-24", []) + more.get("Q-256-24", [])]
     done = len(s) >= 6 and len(q) >= 6 and alt
     if not done:
-        for k in ("ExtN", "ExtBpbS", "ExtBpbQ", "ExtDiff", "ExtCI", "ExtP", "ExtVerdict", "AltBpb", "AltDiff"):
-            m(k, "--")
+        m("ExtProse", "The records of this extension are not measured yet.")
         return not_measured("Post hoc extension"), False
     diff, lo, hi, p, df = welch(s, q)
-    m("ExtN", str(min(len(s), len(q))))
-    m("ExtBpbS", f"{mean(s):.4f}")
-    m("ExtBpbQ", f"{mean(q):.4f}")
-    m("ExtDiff", f"${diff:+.4f}$")
-    m("ExtCI", f"$[{lo:+.4f}, {hi:+.4f}]$")
-    m("ExtP", f"{p:.4f}" if p >= 1e-4 else f"{p:.1e}")
-    m("ExtVerdict", "excludes zero, so SpectralLM is better than the control with its parameter count"
-      if hi < 0 else "reaches zero, so six seeds still do not establish that SpectralLM is better")
+    p_text = f"{p:.4f}" if p >= 1e-4 else f"{p:.1e}"
+    verdict = ("excludes zero, so SpectralLM is better than the control with its parameter count"
+               if hi < 0 else "reaches zero, so six seeds still do not establish that SpectralLM is better")
     a = alt[0]["eval"]["bits_per_byte"]
     sel = mean([r["eval"]["bits_per_byte"] for r in groups["S-256-512-24"]])
-    m("AltBpb", f"{a:.4f}")
-    m("AltDiff", f"${a - sel:+.4f}$")
+    m("ExtProse", f"Over {min(len(s), len(q))} seeds each, SpectralLM scores {mean(s):.4f} and the control "
+      f"{mean(q):.4f}, a difference of ${diff:+.4f}$ bits per byte (Welch 95\\% interval "
+      f"$[{lo:+.4f}, {hi:+.4f}]$, $p={p_text}$); the interval {verdict}. At $3\\times10^{{-3}}$ "
+      f"SpectralLM scores {a:.4f}, ${a - sel:+.4f}$ against its mean at the selected rate.")
     rows = [[LABELS["S-256-512-24"] + r", $10^{-3}$", str(len(s)), f"{mean(s):.4f} $\\pm$ {sd(s):.4f}", f"[{min(s):.4f}, {max(s):.4f}]"],
             [LABELS["Q-256-24"] + r", $3\\times10^{-3}$", str(len(q)), f"{mean(q):.4f} $\\pm$ {sd(q):.4f}", f"[{min(q):.4f}, {max(q):.4f}]"],
             [LABELS["S-256-512-24"] + r", $3\\times10^{-3}$", "1", f"{a:.4f}", "--"]]

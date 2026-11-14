@@ -18,8 +18,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
 COMMANDS = [
-    ["cargo", "test", "--release", "--offline", "-p", "brain-gradcheck", "--test", "spectrallm_fd", "--", "--nocapture", "--test-threads=1"],
-    ["cargo", "test", "--release", "--offline", "-p", "brain-spectrallm", "--test", "model", "--", "--nocapture", "--test-threads=1"],
+    ["cargo", "test", "--release", "--offline", "-p", "brain-gradcheck", "--test", "it", "--", "spectrallm_fd::", "--nocapture", "--test-threads=1"],
+    ["cargo", "test", "--release", "--offline", "-p", "brain-spectrallm", "--test", "it", "--", "model::", "--nocapture", "--test-threads=1"],
 ]
 
 
