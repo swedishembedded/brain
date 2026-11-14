@@ -271,8 +271,8 @@ def import_checks():
         rows.append([label, "loads", _sci(im.rel_l2(port["y"], ref["y"]))])
     head = ("The mapping of the published tensors onto the port, at the 6 x 10 component and at a square 8 x 8 one (weights "
             f"from {_seed_line('project_reproduction.square')}, inputs from {_seed_line('project_reproduction.square_inputs')}, "
-            "5 positions, the same rules and draw order). rel_l2 compares the port's y with the 64-bit reference of the same "
-            "weights.\n\n")
+            "5 positions, the same rules and draw order). rel_l2 compares the port's y with the unrounded 64-bit reference of the same "
+            "weights (not with the golden, whose y is rounded to 32 bits).\n\n")
     return head + _table(["configuration and mapping", "shape check", "rel_l2 of y"], rows, "llr")
 
 
@@ -942,11 +942,19 @@ def gate_table():
             "8-bit block of draw 0 against the 64-bit block with the dequantized weights s q, rel_l2 of f at most "
             f"(2D + F + 12) 2^-53 = {_sci(FAST_BOUND)} with D = {D1}, F = {F1}; quality: the upper end of the 95% interval of "
             f"the quality table below {QUALITY_MARGIN}; bytes: the counted bytes of one decoding step at context "
-            f"{STEP_EXPECTED_S} equal to {step_bytes('group', STEP_EXPECTED_S):,} exactly. The weak gate skips (and reports a "
+            f"{STEP_EXPECTED_S} equal to {step_bytes('group', STEP_EXPECTED_S):,} exactly (the copy of the full-width regression is counted as 4 bytes written and 4 bytes "
+            "read per weight). The weak gate skips (and reports a "
             "pass) when the golden is missing, and otherwise passes when 1 - cosine of y on the unit inputs is at most "
             "1e-4.\n\n")
+    fast = im.rel_l2(_int8_run(0, "group")[0], _dequant_reference(0, "group")[0])
+    one_way = L1 * 4 * 3 * F1 * D1
+    tail = (f"\n\nThe fast check of draw 0 measures {_sci(fast)} against its bound of {_sci(FAST_BOUND)}. Counted per decoding "
+            f"step at context {STEP_EXPECTED_S}: the full-width copy adds {step_bytes('buffer', STEP_EXPECTED_S) - step_bytes('group', STEP_EXPECTED_S):,} "
+            f"bytes to the specified {step_bytes('group', STEP_EXPECTED_S):,} ({one_way:,} written and {one_way:,} read back), "
+            f"while the 8-bit codes save {step_bytes('f32', STEP_EXPECTED_S) - step_bytes('group', STEP_EXPECTED_S):,} bytes against "
+            f"the 32-bit weights' {step_bytes('f32', STEP_EXPECTED_S):,}.")
     return head + _table(["regression", "defect class", "golden", "unit", "probe", "grad", "fast", "quality", "bytes",
-                          "weak gate"], rows, "llllllllll")
+                          "weak gate"], rows, "llllllllll") + tail
 
 
 # ------------------------------------------------------------------ figure data

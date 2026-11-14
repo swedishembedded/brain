@@ -322,7 +322,8 @@ def arrival_processes():
     return ("The 68 requests of `benchmarking.opening_claims` under six arrival processes. The open-loop rows draw "
             "their arrival times from a second generator: " + _seed_line("benchmarking.arrivals")
             + " Draw order: 68 gaps for the rate of 8 per second, then 68 for the rate of 20; a gap is "
-            "-ln(1 - u) / rate seconds with u = rng.uniform() and ln the library natural logarithm, and request j "
+            "-ln(1 - u) / rate seconds with u = rng.uniform() and ln the library natural logarithm, multiplied by 1000 "
+            "to the model milliseconds that serve_run uses, and request j "
             "arrives at the sum of the first j + 1 gaps. Rates per second and times in milliseconds of the model engine, whose rates the author chose (no number here is a measurement).\n\n"
             + _table(["arrival process", "requests per second", "output tokens per second", "goodput (tokens per second)",
                       "share meeting the objective", "first token, median (milliseconds)", "first token, 99th percentile",
@@ -376,7 +377,7 @@ def amdahl_request():
         rows.append((c, f"{tot['host'] / busy:.3f}", f"{tot['prefill'] / busy:.3f}", f"{p_dec:.3f}", f"{g:.3f}",
                      f"{pr.amdahl(p_dec, g):.3f}", f"{ratio:.3f}", f"{1.0 / (1.0 - p_dec):.3f}"))
     return ("The engine's busy time (the model engine of `benchmarking.request_timeline`, whose rates the author chose; no number here is a measurement) for all 68 requests split into the host's 0.4 model milliseconds per iteration, the "
-            "prefill work and the decode work (the cold start left out), for the closed-loop runs with 1 and with 16 in "
+            "prefill work and the decode work (the larger of its FLOP time and byte time, without the host's 0.4; the cold start left out), for the closed-loop runs with 1 and with 16 in "
             "flight of `benchmarking.concurrency_sweep`. The change: weights stored in 8-bit numbers and nothing else, so a "
             "decode step reads 1.5e9 bytes of weights in place of 3.0e9 (a prefill is compute-bound and its count is "
             "unchanged). g is the decode work before over after, from a rerun of the changed engine; A(p, g) = "
@@ -511,7 +512,9 @@ def fidelity_gate():
             "rounds every weight to a multiple of 1/64, halves away from zero. Weights read per generated token: one "
             "row of E (8), A (64) and U (128); stored in 2 bytes each (they are multiples of 1/256 in [-1, 1)) or 1 byte "
             "in the 8-bit form. FLOPs per generated token, a multiply-add counted as 2 and the clamp's comparisons not "
-            "counted: 128 for A h, 8 for adding E[x], 256 for U h. Agreement counts positions over the longer of each "
+            "counted: 128 for A h, 8 for adding E[x], 256 for U h. The descending form reverses only the order of the "
+            "sum over j in A h. Token numbers in the first-divergence column count the generated tokens from 0 (token 5 "
+            "is the sixth). Agreement counts positions over the longer of each "
             "pair of streams; the gate passes only on exact agreement with at least one position compared. 'Common "
             "prefix' scores only the positions both streams have.\n\n"
             + _table(["form", "bytes of weights per token", "FLOPs per token", "tokens agreeing / positions compared",

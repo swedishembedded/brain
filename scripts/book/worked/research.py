@@ -319,13 +319,15 @@ def record_runs():
             e = r["eval"]
             again = _bpb(r)
             rows.append([label, str(r["seed"]), r["commit"][:9], r["device"], f"{e['nats']:.3f}", f"{e['bytes']:,}",
-                         _fx(again, 9), "yes" if abs(again - e["bits_per_byte"]) < 1e-12 else "no"])
+                         _fx(again, 9), _fx(e["bits_per_byte"], 9)])
+            assert abs(again - e["bits_per_byte"]) < 1e-12
     head = ("The nine records of papers/spectral-lm/data/primary/, one per trained model, in the paper's order and by seed "
             "within a model. Bits per byte recomputed = summed next-token loss in nats / ln 2 / UTF-8 bytes of the scored "
             "text, from the two fields the record holds; every record scored the same 26,439 documents (4,935,406 tokens). "
-            "The last column compares it with the bits_per_byte field the record also holds, to 1e-12.\n\n")
+            "The last column prints the bits_per_byte field the record also holds; the two agree to 1e-12 in "
+            "every row.\n\n")
     return head + _table(["model", "seed", "commit", "device", "summed loss (nats)", "bytes scored", "bits per byte",
-                          "equals the record"], rows)
+                          "field in the record"], rows)
 
 
 def record_counts():
@@ -338,7 +340,8 @@ def record_counts():
         rows.append([label, f"{p:,}", f"{tr['params_nonembed']:,}", f"{f:,}", f"{tr['flops_per_token']:,}",
                      "yes" if (p, f) == (tr["params_nonembed"], tr["flops_per_token"]) else "no"])
     head = ("Counts re-derived from the configuration each record names (6 blocks, residual width m = 256, 8 query heads and 4 "
-            "key-value heads of dimension 32, vocabulary 4,096, context t = 512) and compared with the counts the training "
+            "key-value heads of dimension 32, vocabulary 4,096, context t = 512, and for the spectral mixer a transform "
+            "length D = 512, the signal_len of its record) and compared with the counts the training "
             "program wrote into the same record; the three runs of a model hold identical counts.\n\n")
     return head + _table(["model", "non-embedding parameters, re-derived", "in the record", "forward FLOPs per token, "
                           "re-derived", "in the record", "equal"], rows)
