@@ -87,7 +87,7 @@ make test                            # suite; BRAIN_DEVICE=cpu runs it GPU-free
 make test/full                       # suite + every gate (run before calling work done)
 make test/gradcheck                  # backprop gate
 make test/parity                     # cross-backend parity (CPU == Vulkan == NPU == CUDA)
-make test/one P=<crate> T=<test> ARGS=...  # the edit-test loop: one target, seconds per rebuild
+make test/one P=<crate> T=<test> [F=<features>] ARGS=...  # the edit-test loop: one target, seconds per rebuild
 make check                           # lists the individual gates
 make generate                        # lists the generators (kernel registry and catalogue, indexes)
 make samples/<category>/<name>/run   # one standalone sample
