@@ -1,0 +1,117 @@
+<!-- source-sha256: b5c9183d8ed2cac1973e7ff6b3919aeed96df14691b94b32407b0ce3dc5f6f7c -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 840 364" width="840" height="364"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="840" height="364" fill="#ffffff"/>
+<text x="420" y="28.9" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="bold" fill="#1a202c" text-anchor="middle">Pipeline of 4 stages, 4 micro-batches: the step lasts 25 units</text>
+<text x="96" y="97.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="end">stage 0</text>
+<rect x="111" y="75" width="26" height="36" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="124" y="97.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">F0</text>
+<rect x="139" y="75" width="26" height="36" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="152" y="97.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">F1</text>
+<rect x="167" y="75" width="26" height="36" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="180" y="97.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">F2</text>
+<rect x="195" y="75" width="26" height="36" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="208" y="97.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">F3</text>
+<rect x="223" y="75" width="26" height="36" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="236" y="97.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">r3</text>
+<rect x="503" y="75" width="54" height="36" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="530" y="97.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">B3</text>
+<rect x="559" y="75" width="26" height="36" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="572" y="97.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">r2</text>
+<rect x="587" y="75" width="54" height="36" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="614" y="97.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">B2</text>
+<rect x="643" y="75" width="26" height="36" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="656" y="97.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">r1</text>
+<rect x="671" y="75" width="54" height="36" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="698" y="97.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">B1</text>
+<rect x="727" y="75" width="26" height="36" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="740" y="97.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">r0</text>
+<rect x="755" y="75" width="54" height="36" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="782" y="97.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">B0</text>
+<text x="96" y="143.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="end">stage 1</text>
+<rect x="139" y="121" width="26" height="36" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="152" y="143.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">F0</text>
+<rect x="167" y="121" width="26" height="36" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="180" y="143.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">F1</text>
+<rect x="195" y="121" width="26" height="36" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="208" y="143.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">F2</text>
+<rect x="223" y="121" width="26" height="36" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="236" y="143.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">F3</text>
+<rect x="251" y="121" width="26" height="36" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="264" y="143.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">r3</text>
+<rect x="447" y="121" width="54" height="36" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="474" y="143.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">B3</text>
+<rect x="503" y="121" width="26" height="36" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="516" y="143.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">r2</text>
+<rect x="531" y="121" width="54" height="36" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="558" y="143.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">B2</text>
+<rect x="587" y="121" width="26" height="36" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="600" y="143.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">r1</text>
+<rect x="615" y="121" width="54" height="36" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="642" y="143.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">B1</text>
+<rect x="671" y="121" width="26" height="36" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="684" y="143.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">r0</text>
+<rect x="699" y="121" width="54" height="36" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="726" y="143.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">B0</text>
+<text x="96" y="189.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="end">stage 2</text>
+<rect x="167" y="167" width="26" height="36" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="180" y="189.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">F0</text>
+<rect x="195" y="167" width="26" height="36" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="208" y="189.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">F1</text>
+<rect x="223" y="167" width="26" height="36" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="236" y="189.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">F2</text>
+<rect x="251" y="167" width="26" height="36" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="264" y="189.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">F3</text>
+<rect x="279" y="167" width="26" height="36" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="292" y="189.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">r3</text>
+<rect x="391" y="167" width="54" height="36" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="418" y="189.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">B3</text>
+<rect x="447" y="167" width="26" height="36" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="460" y="189.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">r2</text>
+<rect x="475" y="167" width="54" height="36" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="502" y="189.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">B2</text>
+<rect x="531" y="167" width="26" height="36" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="544" y="189.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">r1</text>
+<rect x="559" y="167" width="54" height="36" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="586" y="189.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">B1</text>
+<rect x="615" y="167" width="26" height="36" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="628" y="189.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">r0</text>
+<rect x="643" y="167" width="54" height="36" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="670" y="189.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">B0</text>
+<text x="96" y="235.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="end">stage 3</text>
+<rect x="195" y="213" width="26" height="36" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="208" y="235.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">F0</text>
+<rect x="223" y="213" width="26" height="36" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="236" y="235.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">F1</text>
+<rect x="251" y="213" width="26" height="36" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="264" y="235.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">F2</text>
+<rect x="279" y="213" width="26" height="36" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="292" y="235.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">F3</text>
+<rect x="307" y="213" width="26" height="36" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="320" y="235.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">r3</text>
+<rect x="335" y="213" width="54" height="36" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="362" y="235.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">B3</text>
+<rect x="391" y="213" width="26" height="36" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="404" y="235.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">r2</text>
+<rect x="419" y="213" width="54" height="36" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="446" y="235.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">B2</text>
+<rect x="475" y="213" width="26" height="36" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="488" y="235.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">r1</text>
+<rect x="503" y="213" width="54" height="36" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="530" y="235.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">B1</text>
+<rect x="559" y="213" width="26" height="36" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="572" y="235.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">r0</text>
+<rect x="587" y="213" width="54" height="36" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="614" y="235.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">B0</text>
+<text x="110" y="276.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">0</text>
+<text x="250" y="276.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">5</text>
+<text x="390" y="276.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">10</text>
+<text x="530" y="276.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">15</text>
+<text x="670" y="276.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">20</text>
+<text x="810" y="276.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">25</text>
+<text x="460" y="300.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">time in units of one stage&#x27;s forward work</text>
+<rect x="110" y="316" width="18" height="16" rx="3" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="136" y="328.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="start">forward of micro-batch k</text>
+<rect x="330" y="316" width="18" height="16" rx="3" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="356" y="328.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="start">rebuild of the forward</text>
+<rect x="550" y="316" width="18" height="16" rx="3" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="576" y="328.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="start">backward</text>
+</svg>

@@ -1,0 +1,40 @@
+<!-- source-sha256: a02ca9344ddf986470bf124475618e9cdca056bf9c55dbc3745e60d8a56cac1b -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1020 340" width="1020" height="340"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="1020" height="340" fill="#ffffff"/>
+<rect x="35" y="137" width="120" height="66" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="95" y="166.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">input X</text>
+<text x="95" y="182.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">[n, D]</text>
+<rect x="215" y="57" width="150" height="66" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="290" y="86.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">rows of W1, rank 0</text>
+<text x="290" y="102.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">[F/2, D]</text>
+<rect x="410" y="57" width="120" height="66" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="470" y="86.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">tanh</text>
+<text x="470" y="102.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">[n, F/2]</text>
+<rect x="575" y="57" width="150" height="66" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="650" y="86.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">columns of W2, rank 0</text>
+<text x="650" y="102.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">[D, F/2]</text>
+<line x1="368" y1="90" x2="407" y2="90" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="533" y1="90" x2="572" y2="90" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="215" y="217" width="150" height="66" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="290" y="246.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">rows of W1, rank 1</text>
+<text x="290" y="262.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">[F/2, D]</text>
+<rect x="410" y="217" width="120" height="66" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="470" y="246.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">tanh</text>
+<text x="470" y="262.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">[n, F/2]</text>
+<rect x="575" y="217" width="150" height="66" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="650" y="246.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">columns of W2, rank 1</text>
+<text x="650" y="262.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">[D, F/2]</text>
+<line x1="368" y1="250" x2="407" y2="250" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="533" y1="250" x2="572" y2="250" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="770" y="137" width="120" height="66" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="830" y="166.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">all-reduce</text>
+<text x="830" y="182.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">adds the partials</text>
+<rect x="920" y="137" width="80" height="66" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="960" y="166.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">+ X</text>
+<text x="960" y="182.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">= Y</text>
+<line x1="156.8" y1="167.6" x2="213.2" y2="92.4" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="727.34" y1="91.87" x2="767.66" y2="124.13" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="156.8" y1="172.4" x2="213.2" y2="247.6" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="727.34" y1="248.13" x2="767.66" y2="215.87" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="893" y1="170" x2="917" y2="170" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="650" y="320.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">no message between the two matrices; one all-reduce of [n, D] numbers per block in the forward pass</text>
+</svg>
