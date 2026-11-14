@@ -8,7 +8,7 @@ the previous chapter (`mdps`, imported, never copied): its exact values are the 
 is measured against. The chapter takes the tables away and lets the learner see sampled days only: a ten-day ledger turned
 into estimates, the exact mean and spread of the Monte Carlo and the temporal-difference targets, learning curves of both
 on the same sampled episodes, the conditions on a step-size schedule, first-visit against every-visit Monte Carlo, greedy-only learning that locks onto the worst
-policy, the two ways out of it and the starting values of the optimistic one, SARSA and Q-learning against their exact fixed points, the maximisation bias of
+policy, the two ways out of it and the starting values of the optimistic one, SARSA and Q-learning against their exact fixed points, the maximization bias of
 Q-learning on a small example and the double estimator that removes it, linear temporal-difference learning against its
 exact fixed point, a two-state example in which the weights grow without bound, and the work of an update. Each public
 function without a leading underscore that takes no arguments returns a markdown string that the chapter embeds between
@@ -635,7 +635,7 @@ def sarsa_and_q_learning():
     return "\n".join(out)
 
 
-# ------------------------------------------------------------------ maximisation bias
+# ------------------------------------------------------------------ maximization bias
 
 
 def _expected_max_normal(k):
@@ -791,7 +791,7 @@ def _td_fixed_point(X, d, policy, gamma=GAMMA):
 
 
 def _best_fit(X, d, V):
-    """The weights minimising sum_s mu(s) (x(s)^T w - V(s))^2, by the normal equations."""
+    """The weights minimizing sum_s mu(s) (x(s)^T w - V(s))^2, by the normal equations."""
     k = len(X[0])
     A = [[sum(d[s] * X[s][i] * X[s][j] for s in range(N)) for j in range(k)] for i in range(k)]
     b = [sum(d[s] * X[s][i] * V[s] for s in range(N)) for i in range(k)]
@@ -868,7 +868,7 @@ def linear_td():
         "",
         f"For each table: the TD fixed point, the weights at which the average of the semi-gradient update over the days, "
         f"sum_s mu(s) x(s) (r(s) + gamma x(s')^T w - x(s)^T w) with r(s) = R(s, pi(s)) and the average over s' taken with P, is zero "
-        f"(one linear system); the weights that minimise the mu-weighted squared error sum_s mu(s) (x(s)^T w - V(s))^2 (the normal "
+        f"(one linear system); the weights that minimize the mu-weighted squared error sum_s mu(s) (x(s)^T w - V(s))^2 (the normal "
         f"equations); and the weights that semi-gradient TD(0) reaches. 'weighted error' is sum_s mu(s) (V_hat(s) - V(s))^2. "
         f"Sampled runs: {FA_RUNS} runs of {FA_DAYS} days from the shelf 0, run i of table f with the generator named "
         f"value_learning.linear.<f>.run<i> with f one-hot, linear or quadratic (for example one-hot run 0 has seed "
@@ -972,8 +972,8 @@ def work_of_updates():
         per_ep = day_mc + visit_mc if m == "MC" else 6 * EVAL_DAYS
         rows_cost.append([label, e, f"{e * EVAL_DAYS:,}", f"{e * per_ep:,} (at most)" if m == "MC" else f"{e * per_ep:,}"])
     out = [
-        "One operation is a multiply, an add, a subtract or a divide; a power and a comparison count as above (a power for the "
-        "schedule counts one operation, a comparison none). Per update:",
+        "One operation is a multiply, an add, a subtract or a divide; a power for the schedule counts as one operation and a "
+        "comparison as none. Per update:",
         "",
         _table(["update", "count", "FLOPs"], rows, align="llr"),
         "",

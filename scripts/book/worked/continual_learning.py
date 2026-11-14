@@ -14,7 +14,7 @@ descent on the mean binary cross-entropy.
   (replay), a quadratic anchor on the old weights (an L2 anchor, and elastic weight consolidation with the exact Fisher diagonal of
   the old task), and a rank-one adapter on one weight matrix with the base frozen.
 * The probe bank, the paired comparison of a candidate with the incumbent on it, the arithmetic of why a pooled mean goes blind,
-  a simulation of many blocks and of the margin of non-inferiority, and a continual reader on four episodes in four arms (the loop
+  a simulation of many blocks and of the margin of non-inferiority, and a continual reader on four episodes in five arms (the loop
   of brain's `audit` crate, with the gate of its `promote` crate, in miniature).
 
 Every number that comes from training goes through `stable` (the rule of `value_learning`): the whole experiment is repeated with the
@@ -473,7 +473,7 @@ def world_rule():
                f"(a logit of exactly 0 is class 0). The 67 numbers are stored in the order W1 (row-major, 12), b1 (6), W2 (row-major, 36), "
                f"b2 (6), w3 (6), b3 (1); a gradient is the gradient of the mean loss, the rows' gradients added in row order and then divided by n.")
     out.append("")
-    out.append(f"Initialisation: generator {_seed_line(INIT, True)} The 12 numbers of W1 are 0.5 times 12 successive `normal()` calls, "
+    out.append(f"Initialization: generator {_seed_line(INIT, True)} The 12 numbers of W1 are 0.5 times 12 successive `normal()` calls, "
                f"then the 36 numbers of W2 are 0.5 times 36 more, both row-major (48 calls, 24 pairs, nothing is left held); every bias and "
                f"w3 and b3 are 0. Because w3 is 0 the starting network outputs the logit 0 on every input, so it answers class 0 everywhere.")
     out.append("")
@@ -774,7 +774,7 @@ def many_blocks():
     for delta in MARGINS:
         rules.append((f"non-inferiority: some block's lower bound at or below -{delta:.2f}", noninferior(delta)))
     rows = [[name, f"{blocked(rule, pops['equal']):.4f}", f"{blocked(rule, pops['regressed']):.4f}"] for name, rule in rules]
-    out = [f"{M_BLOCKS} earlier blocks of {N_BLOCK} probes each. Generator {_seed_line(BLOCKS)} One generator; the 400 repeats of the first population "
+    out = [f"{M_BLOCKS} earlier blocks of {N_BLOCK} probes each. Generator {_seed_line(BLOCKS)} draws everything: the 400 repeats of the first population "
            f"(candidate equal to the incumbent) are drawn first, then the 400 of the second (block 0 truly worse); a repeat draws its 20 blocks in order and a block its 48 "
            f"probes in order, one `uniform()` per probe. A probe is 'both right' if u < 0.70, 'both wrong' if u < 0.90, 'only the candidate right' (a win) if u < 0.95 "
            f"and otherwise 'only the incumbent right' (a loss); in the second population the thresholds of block 0 are 0.55, 0.65 and 0.70 "
@@ -908,7 +908,7 @@ def reader_arms():
             labels = {r["log"][k][0] for r in rs}
             lab = rs[0]["log"][k][0] if len(labels) == 1 else "unstable"
             rows.append([arm if k == 0 else "", str(k), lab])
-    out = [f"The four arms on the stream of the previous block. Every arm starts from the same initial numbers and restarts the generator {_seed_line(REPLAY)}; a candidate is trained from the incumbent for {EP_STEPS} steps of size {EP_RATE} on the episode's own rows and, in the replay arms, "
+    out = [f"The five arms on the stream of the previous block. Every arm starts from the same initial numbers and restarts the generator {_seed_line(REPLAY)}; a candidate is trained from the incumbent for {EP_STEPS} steps of size {EP_RATE} on the episode's own rows and, in the replay arms, "
            f"as many rows drawn without replacement from the rows of the promoted episodes (ratio 1.0, 60 rows: a partial Fisher-Yates, `rng.integer(len - i)` for i = 0 .. 59, "
            f"in the order drawn; a pool of exactly 60 still does the shuffle, and a pool is never smaller since an episode is held only after it is promoted). Before training, triage drops an episode whose mean loss under the incumbent on its own rows is at most {KNOWN_BELOW} ('already known'). "
            f"The gate is the one of the previous block: the sign test at {ALPHA} on the 48 own probes, effect at least {MIN_EFFECT}, the pooled anchor drop over all promoted episodes' "

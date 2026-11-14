@@ -12,8 +12,8 @@ the masked cross-entropy of supervised fine-tuning, the three conventions for it
 The second is one prompt with five complete answers. A policy is a softmax over the five answers (a language model's
 distribution over completions, collapsed to the few that matter), the reference policy is the model that supervised
 fine-tuning left behind, and a labeller has a reward for every answer. Everything the chapter says about preference data,
-the Bradley-Terry model, a reward model, the KL-regularised objective and its closed-form optimum, direct preference
-optimisation, group-relative advantages, verifiable rewards and their failure is computed exactly on those five numbers or
+the Bradley-Terry model, a reward model, the KL-regularized objective and its closed-form optimum, direct preference
+optimization, group-relative advantages, verifiable rewards and their failure is computed exactly on those five numbers or
 sampled from them with the book's generator, so that a result can be compared with the exact answer.
 
 Each public function without a leading underscore that takes no arguments returns a markdown string that the chapter embeds
@@ -23,7 +23,7 @@ of `value_learning`): the run is repeated with the first logit of the reference 
 `stable.py`, and a digit is printed only if the run and its four copies share it.
 
 Swedish Embedded AB implements solutions for aligning language models with human preferences and with checkers that cannot be
-argued with. If your team needs expertise in preference optimisation and reinforcement learning from verifiable rewards, you
+argued with. If your team needs expertise in preference optimization and reinforcement learning from verifiable rewards, you
 can procure our services by sending an email to info@swedishembedded.com.
 """
 import math
@@ -129,7 +129,7 @@ RULE_TEXT = ("Every number learned from samples is printed with the digits that 
 
 
 def _pi_star(r, beta):
-    """The closed-form optimum of the KL-regularised objective: pi_ref(y) exp(r(y) / beta) / Z, as a stable softmax."""
+    """The closed-form optimum of the KL-regularized objective: pi_ref(y) exp(r(y) / beta) / Z, as a stable softmax."""
     return _softmax([t + x / beta for t, x in zip(THETA_REF, r)])
 
 
@@ -295,7 +295,7 @@ def sft_step():
         f"Gradient descent on the logit table with the step {SFT_LR}: every step computes the gradient of the masked mean over "
         f"all {n} targets from the table as it stands (the rows of the table that no supervised position reads, "
         f"{'all of them' if untouched else 'not all'} unchanged after 20 steps, get no gradient), and subtracts {SFT_LR} times it. "
-        f"'Supervised' is the loss being minimised; 'other targets' is the mean -ln p over the {len(rest)} targets the mask "
+        f"'Supervised' is the loss being minimized; 'other targets' is the mean -ln p over the {len(rest)} targets the mask "
         f"leaves out, computed by the same model and never trained on; 'p(END after the last word)' is the probability of the closing id after the "
         f"last word of the answer.\n\n"
         + _table(["steps", "supervised loss", "other targets", "p(END after the last word)"], rows, "rrrr"))
@@ -397,7 +397,7 @@ def reward_model():
         f"model learned is a{' > a'.join(str(k) for k in order)}; the labeller's own is a{' > a'.join(str(k) for k in sorted(range(K), key=lambda k: (-R_TRUE[k], k)))} (rewards {', '.join(f'{x:g}' for x in sorted(R_TRUE, reverse=True))}).")
 
 
-# ------------------------------------------------------------------ the KL-regularised objective and its optimum
+# ------------------------------------------------------------------ the KL-regularized objective and its optimum
 
 ASCENT_LR, ASCENT_STEPS = 1.0, 20000
 
@@ -475,7 +475,7 @@ def learned_reward_cost():
         rows.append([f"{beta:g}", _row(pi, 3), _fmt(kl, 3), _fmt(_dot(pi, s), 3), _fmt(got, 3), _fmt(best, 3), _fmt(best - got, 3)])
     return (
         f"The reward model of the previous blocks, s = {_row(s, 3)} (a table of scores after {RM_STEPS} steps), used as the reward "
-        f"of the KL-regularised objective: for each beta the optimum pi*_s(y) = pi_ref(y) exp(s(y) / beta) / Z. 'E s' is the "
+        f"of the KL-regularized objective: for each beta the optimum pi*_s(y) = pi_ref(y) exp(s(y) / beta) / Z. 'E s' is the "
         f"reward the model believes the policy earns, 'E r' the reward the labeller's r = {_row(R_TRUE, 1)} gives it, and 'best "
         f"E r at that KL' is the largest E r among the optima of r itself (beta found by bisection on ln beta over [ln 0.001, ln 10000], 200 halvings: the KL of the optimum falls as beta rises, so a midpoint whose KL exceeds the target becomes the new lower end and any other midpoint the new upper end, and beta is the final midpoint) "
         f"that spend the same KL(pi || pi_ref); the last column is the shortfall, the price of the reward model's errors at that "
@@ -483,7 +483,7 @@ def learned_reward_cost():
         + _table(["beta", "pi*_s", "KL of pi from pi_ref", "E s", "E r", "best E r at that KL", "shortfall"], rows, "rlrrrrr"))
 
 
-# ------------------------------------------------------------------ direct preference optimisation
+# ------------------------------------------------------------------ direct preference optimization
 
 
 def _implicit_reward(theta, beta):
@@ -503,7 +503,7 @@ def _dpo_loss(theta, pairs, beta):
 
 def _dpo_gradient(theta, pairs, beta):
     """d loss / d theta: per pair -sigmoid(-u) beta (e_chosen - e_rejected), summed and divided by the number of pairs. The
-    log-normaliser of the softmax cancels inside u, so the gradient has no term for it."""
+    log-normalizer of the softmax cancels inside u, so the gradient has no term for it."""
     rew = _implicit_reward(theta, beta)
     g = [0.0] * K
     for (c, r, *_rest) in pairs:
@@ -522,7 +522,7 @@ def dpo_implicit_reward():
     log_z = max(R_TRUE) / beta + math.log(z)
     rows = [[f"a{k}", _fmt(R_TRUE[k], 1), _fmt(PI_REF[k], 3), _fmt(pi[k], 4), _fmt(rew[k], 4), _fmt(shift[k], 4)] for k in range(K)]
     return (
-        f"The optimum pi* of the KL-regularised objective for beta = {beta:g} and the labeller's reward r, with pi_ref = {_row(PI_REF, 2)}. "
+        f"The optimum pi* of the KL-regularized objective for beta = {beta:g} and the labeller's reward r, with pi_ref = {_row(PI_REF, 2)}. "
         f"The implicit reward of a policy is beta ln(pi(y) / pi_ref(y)); at pi* it differs from r(y) by the same number for every "
         f"answer, which the derivation says is beta ln Z = {beta * log_z:.4f}.\n\n"
         + _table(["answer", "r", "pi_ref", "pi*", "beta ln(pi*/pi_ref)", "r minus the implicit reward"], rows, "lrrrrr"))
@@ -614,7 +614,7 @@ def dpo_population():
         f"The population version of the preference data: every ordered pair (i, j) with i different from j of the five answers "
         f"(20 of them), with the weight 1/20 times the probability sigmoid(r_i - r_j) that the labeller chooses i over j, "
         f"r = {_row(R_TRUE, 1)}; the loss is the weighted sum of softplus(-u) over the 20 pairs (u as before, beta = {beta:g}). "
-        f"Gradient descent from theta_ref with the step {POP_LR:g}. The target is the optimum pi* of the KL-regularised objective "
+        f"Gradient descent from theta_ref with the step {POP_LR:g}. The target is the optimum pi* of the KL-regularized objective "
         f"for the same beta and the reward r, pi* = {_row(star, 4)}.\n\n"
         + _table(["step", "pi_theta", "largest abs(pi - pi*)", "KL of pi* from pi_theta"], rows, "rlrr"))
 
@@ -719,7 +719,7 @@ def kl_gradient_direction():
     rows2 = [["pi* (KL in the reward; the closed form)", *(_fmt(x, 3) for x in star), _fmt(_dot(star, R_TRUE), 3), _fmt(_kl(star, PI_REF), 3)],
              ["where ascent with the k3 term settles", *(_fmt(x, 3) for x in settled), _fmt(_dot(settled, R_TRUE), 3), _fmt(_kl(settled, PI_REF), 3)]]
     return (
-        f"The five answers of the KL-regularised objective, pi_ref = {_row(PI_REF, 2)}, at theta = theta_ref + {_row(KLD_OFFSET, 1)}, "
+        f"The five answers of the KL-regularized objective, pi_ref = {_row(PI_REF, 2)}, at theta = theta_ref + {_row(KLD_OFFSET, 1)}, "
         f"where pi = {_row(pi, 4)}. The rows are gradients with respect to the five logits. The finite differences use the step "
         f"{FD_STEP:g} on the exact KLs (nats, summed in answer order). For the sampled-answer rows, the gradient of the per-sample "
         f"term with y held fixed is written with the score e_y - pi (the gradient of ln pi(y)): the k1 term ln(pi(y)/pi_ref(y)) has "
@@ -1088,7 +1088,16 @@ def grpo_checker_runs():
         f"the {GRPO_RUNS} runs of three exact properties of the policy at the start of the step (not of the sampled group): "
         f"'weak reward' = pi(a0) + pi(a1) + pi(a4), 'exact accuracy' = pi(a0) + pi(a1), and pi(a4), the probability of the answer "
         f"that lists many numbers (summed in answer order).\n\n"
-        + _table(headers, rows, "r" * len(headers)) + f"\n\n{RULE_TEXT}\n\n{seeds}")
+        + _table(headers, rows, "r" * len(headers)) + f"\n\n{_grpo_weak_peak()}\n\n{RULE_TEXT}\n\n{seeds}")
+
+
+def _grpo_weak_peak():
+    """Where the exact accuracy of the policy trained on the weak checker peaks, and where it first falls below its start."""
+    acc = [_grpo_mean("weak", s, 1) for s in range(GRPO_STEPS + 1)]
+    peak = max(range(len(acc)), key=lambda s: (acc[s], -s))
+    below = next((s for s in range(1, len(acc)) if acc[s] < acc[0]), None)
+    return (f"Trained on the weak checker, the mean exact accuracy over the steps 0 .. {GRPO_STEPS} is largest at step {peak}, "
+            f"{acc[peak]:.3f}, and first falls below its starting value {acc[0]:.3f} at step {below}.")
 
 
 # ------------------------------------------------------------------ the KL penalty, token by token
@@ -1201,5 +1210,5 @@ def alignment_costs():
         + _table(["piece", "FLOPs", "value for the setting"], rows, "llr")
         + "\n\nSums for one prompt with its G completions (or G pairs for DPO):\n\n"
         + _table(["method", "FLOPs"], totals, "lr")
-        + f"\n\nBytes of weights held, two bytes per parameter (bf16), optimiser state and activations not counted:\n\n"
+        + f"\n\nBytes of weights held, two bytes per parameter (bf16), optimizer state and activations not counted:\n\n"
         + _table(["method", "models held", "bytes"], [[a, b, f"{c:.1e}"] for a, b, c in mem], "llr"))

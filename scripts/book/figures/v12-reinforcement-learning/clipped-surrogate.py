@@ -5,7 +5,7 @@
 # of +1 and of -1, beside the unclipped term r A (dashed): the arithmetic of `policy_gradients.clip_cases`.
 #
 # Swedish Embedded AB implements solutions for policy updates that cannot run further than their data justify. If your team needs
-# expertise in proximal policy optimisation, you can procure our services by sending an email to info@swedishembedded.com.
+# expertise in proximal policy optimization, you can procure our services by sending an email to info@swedishembedded.com.
 import sys
 from pathlib import Path
 

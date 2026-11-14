@@ -592,7 +592,7 @@ def uct_trace():
         f"c = sqrt(2) = {UCT_C:.6f}. Player 0 moves at the root. Generator: the book's SplitMix64, "
         f"`{UCT_NAME}` {mdps._seed_text(UCT_NAME)}; the only draws are the playouts, one rng.integer(k) for each move, "
         "k = min(3, stones left), the move being 1 + the draw, consumed in iteration order. Selection: from the root, "
-        "while every move of the node has a child, go to the child that maximises W/N + c sqrt(ln N_parent / N) (a tie "
+        "while every move of the node has a child, go to the child that maximizes W/N + c sqrt(ln N_parent / N) (a tie "
         "to the smaller move), where N is a node's visit count and W its number of visits whose playout was won by the "
         "player who moved into it. Expansion: the smallest move without a child gets one. Playout: random moves to the "
         "end from the new node. Backup: N + 1 on every node of the path, W + 1 on those whose mover won. "
@@ -723,7 +723,7 @@ def _rollout_policy(theta, pile, depth, rng):
 
 def _puct(theta, n0, iters, cpuct, rng):
     """Search that is guided by a policy: every node's children are created the first time the node is selected from, with
-    the policy's probabilities as priors; the child maximising q + cpuct * P * sqrt(max(N_parent, 1)) / (1 + N_child),
+    the policy's probabilities as priors; the child maximizing q + cpuct * P * sqrt(max(N_parent, 1)) / (1 + N_child),
     q = W / N (0 when N = 0), is followed (a tie to the smaller move), and a child never visited before is the leaf: it is
     evaluated by a playout in which both players draw moves from the policy."""
     t = _Tree(n0)

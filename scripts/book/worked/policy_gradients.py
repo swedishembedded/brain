@@ -9,7 +9,7 @@ of the empty shelf (four orders, each paying the day's reward plus the discounte
 the exact gradient of the expected return, the single-sample estimators of it and their exact variance can all be printed.
 It then checks the policy gradient theorem on the whole shop by comparing the formula with finite differences of the exact
 return, runs REINFORCE with and without a learned baseline against a one-step actor-critic on sampled episodes, shows how
-generalised advantage estimation trades variance against the bias of a critic, tabulates the clipped surrogate and runs the
+generalized advantage estimation trades variance against the bias of a critic, tabulates the clipped surrogate and runs the
 clipped and the unclipped objective for many epochs on one batch. Each public function without a leading underscore that takes
 no arguments returns a markdown string that the chapter embeds between `<!-- worked: policy_gradients.<name> -->` markers.
 Underscore functions and the constants are shared with the chapter's figures, so a picture and the table beside it cannot
@@ -144,7 +144,7 @@ def _outcome_probs(pi):
 
 
 def _baselines():
-    """The five baselines of the moments table: 0, 3, J, the variance-minimising constant b* and 12."""
+    """The five baselines of the moments table: 0, 3, J, the variance-minimizing constant b* and 12."""
     g, pi, j = _bandit_gradient(THETA_B)
     w = _score_norms(pi)
     pr = _outcome_probs(pi)
@@ -199,13 +199,13 @@ def one_day_bandit():
     top = (
         "The empty shelf (s = 0) as a one-day decision. The action a is the number of units ordered, a = 0 .. 3. The demand D is "
         "0, 1 or 2 with probabilities 0.3, 0.4, 0.3. The outcome y(a, d) is the reward of the day plus gamma = 0.9 times the "
-        "optimal value V*(s') of the shelf that is left, where V* is the exact solution of the previous chapter's system for the "
+        "optimal value V*(s') of the shelf that is left, where V* is the exact solution of Chapter 1's system for the "
         "policy (1, 0, 0, 0) (6.7500, 9.2500, 11.1678, 11.6684 to four decimals) and the reward and the next shelf come from the "
-        "rules of chapter 1. q(a) is the mean of y(a, d) over d = 0, 1, 2 in order. The policy is the softmax of four preferences "
+        "rules of Chapter 1. q(a) is the mean of y(a, d) over d = 0, 1, 2 in order. The policy is the softmax of four preferences "
         "theta, pi(a) = exp(theta_a) / sum_b exp(theta_b), computed in the stable form. J(theta) = sum_a pi(a) q(a), and the "
         "exact gradient is the vector with entries pi(k) (q(k) - J). Two preference vectors: theta = (0, 0, 0, 0) and "
-        f"theta_B = (0, 1, 0, -1), the one the estimators of the chapter are analysed at; at theta = 0 the policy is uniform "
-        f"and J = {_fmt(j0, 4)}."
+        f"theta_B = (0, 1, 0, -1), the one at which the estimators below are analysed; at theta = 0 the policy is uniform "
+        f"and J = {_fmt(j0, 4)}. The last two columns are taken at theta_B."
     )
     table = vl._table(["a", "y(a, 0)", "y(a, 1)", "y(a, 2)", "q(a)", "pi(a) at 0", "pi(a) at theta_B", "q(a) - J", "dJ/dtheta_a"],
                       rows)
@@ -562,7 +562,7 @@ def _mean_curve(method):
     return [sum(c[e] for c in curves) / len(curves) for e in range(RUN_EPISODES)]
 
 
-# ------------------------------------------------------------------ generalised advantage estimation
+# ------------------------------------------------------------------ generalized advantage estimation
 
 
 def gae_by_hand():

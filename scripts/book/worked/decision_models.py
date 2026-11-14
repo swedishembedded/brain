@@ -209,7 +209,7 @@ def _train(head, nudge):
 
 
 def _fit_temperature(z_rows, ys):
-    """The scale a = 1/T minimising the mean cross-entropy of softmax(a z): double an upper end (at most 60 times) until the slope is
+    """The scale a = 1/T minimizing the mean cross-entropy of softmax(a z): double an upper end (at most 60 times) until the slope is
     positive, then halve the bracket 80 times (Volume II, Chapter 6, on the multiclass logit vector)."""
     def slope(a):
         s = 0.0
@@ -449,7 +449,7 @@ def calibration():
     runs = _runs("both")
     val_before = _st("both", lambda r: _nll(r["raw"]["validation"], w["validation"]), _f4)
     val_after = _st("both", lambda r: _nll(r["cal"]["validation"], w["validation"]), _f4)
-    return (f"The temperature is fitted on the 500 validation requests by minimising the mean cross-entropy of softmax(z / T): T = {t}; "
+    return (f"The temperature is fitted on the 500 validation requests by minimizing the mean cross-entropy of softmax(z / T): T = {t}; "
             f"on the validation split the mean cross-entropy goes from {val_before} to {val_after}. The scores below are on the 1000 test requests "
             "(natural logarithms; Brier is the mean over requests of the sum over the four routes of the squared difference to the one-hot "
             "label; ECE takes the pair (largest probability, whether the argmax is right) through 10 equal-width bins, bin i holding "
@@ -635,7 +635,7 @@ def _block_stats(run, key, target="head"):
 def logged_outcomes():
     n_all = len(_world()[2]["log"])
     names = (("old policy (mean logged outcome)", "old"), ("true value", "truth"), ("inverse propensity", "ipw"),
-             ("self-normalised inverse propensity", "snips"), ("logged agreements only, no weights", "naive"))
+             ("self-normalized inverse propensity", "snips"), ("logged agreements only, no weights", "naive"))
     rows = []
     for target, tlabel in (("head", "new policy = the head's argmax"), ("dispute", "new policy = always route to dispute")):
         for label, key in names[1:]:
@@ -651,7 +651,7 @@ def logged_outcomes():
             "to dispute. The true value of a policy is the share of the requests it would route right, which only a simulation that keeps "
             "the labels can print. With w = outcome / propensity on the requests "
             "where the new policy's route is the logged one (and nothing elsewhere), 'inverse propensity' is the sum of w over all n requests "
-            "divided by n, the self-normalised form divides the sum of w by the sum of 1 / propensity over the same requests, and the last "
+            "divided by n, the self-normalized form divides the sum of w by the sum of 1 / propensity over the same requests, and the last "
             f"row is the mean outcome over those requests alone. The first column uses all {n_all} requests; the other two split the log into "
             f"{n_all // BLOCK} blocks of {BLOCK} consecutive requests, compute each estimate on every block, and give the mean and the "
             f"standard deviation (divisor {n_all // BLOCK}) of the {n_all // BLOCK} values. Four decimals.\n\n"

@@ -462,7 +462,7 @@ def policy():
         draws.append(0 if u < 1 / 3 else (1 if u < 2 / 3 else 2))
     p = probs(zero, x, 0)
     return (
-        f"The policy has {N_PARAM} = {LEVELS} positions x {RADIX} digits x {FEAT} features numbers, all {N_PARAM} initialised to 0.0: "
+        f"The policy has {N_PARAM} = {LEVELS} positions x {RADIX} digits x {FEAT} features numbers, all {N_PARAM} initialized to 0.0: "
         f"theta[(j * 3 + c) * 16 + f] is the weight of feature f for digit c at output position j, and the logit of digit c at position j "
         f"is theta[(j*3+c)*16] + sum over i = 0 .. 4 of theta[(j*3+c)*16 + 1 + 3i + x_i] (the sum accumulated in increasing i, the constant first). "
         f"The distribution of position j is the stable softmax of its three logits. At theta = 0 every position is uniform over the "
@@ -731,14 +731,14 @@ def rollback():
     return (
         f"The faulty candidate. Take the trainer's state at step {BUG_AT} (the snapshot of milestone 6, at level {_int_cell([o['level'] for o in out])}) and train it for "
         f"{BUG_STEPS} more steps with the loop of milestone 5 at that level, but with a sign error in the update: theta - eta x grad in place of theta + eta x grad "
-        f"in both epochs of every step (the sampling, the advantages and the clipping are unchanged). The generator is {_seed_line(BUG)} "
-        f"(restarted for this candidate). It is judged against the version served when the snapshot of step {BUG_AT} was judged.\n\n"
+        f"in both epochs of every step (the sampling, the advantages and the clipping are unchanged). The generator is {_seed_line(BUG)}, "
+        f"restarted for this candidate. It is judged against the version served when the snapshot of step {BUG_AT} was judged.\n\n"
         + _table(["", "level 1", "level 2", "level 3", "level 4", "level 5"], rows, "lrrrrr")
-        + f"\n\nThe paired gate says: {_text_cell([fmt(o['g_paired']) for o in out])}. The unpaired gate says: {_text_cell([fmt(o['g_unpaired']) for o in out])}. "
+        + f"\n\nThe decision of the paired gate is '{_text_cell([fmt(o['g_paired']) for o in out])}', and that of the unpaired gate '{_text_cell([fmt(o['g_unpaired']) for o in out])}'. "
         f"If the candidate is served anyway (a hot fix that bypasses the gate), the audit, which applies the non-inferiority bars of the gate to the audit bank "
-        f"against the previous version, first finds level {_int_cell([o['audit'] for o in out])} regressed (0 would mean none), and the rollback moves "
+        f"against the previous version, names level {_int_cell([o['audit'] for o in out])} as the first that regressed, and the rollback moves "
         f"the served pointer back to version {_int_cell([o['pointer'] for o in out])}; the parameters and the stored probe scores of that version are "
-        f"identical to what they were before the candidate arrived: {_text_cell([str(o['same']) for o in out])}.\n\n" + RULE_TEXT)
+        f"identical to what they were before the candidate arrived: {_text_cell(['yes' if o['same'] else 'no' for o in out])}.\n\n" + RULE_TEXT)
 
 
 # ------------------------------------------------------------------ milestone 8: three planted mistakes
