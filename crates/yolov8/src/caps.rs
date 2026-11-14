@@ -291,6 +291,12 @@ impl Action for TrainAction {
             !inv.cancel.is_cancelled()
         })
         .map_err(|e| format!("yolov8 {verb}: {e}"))?;
+        // The weights so far are saved either way; a stopped run answers the contract's cancelled error, and how
+        // far it got is the last progress event.
+        if report.steps_run < opts.steps {
+            progress(Progress::step(report.steps_run, opts.steps, format!("cancelled after step {} (the checkpoint at {save} holds the steps that ran)", report.steps_run)));
+            return Err(capability::failure::CANCELLED.to_string());
+        }
         Ok(Outcome::new()
             .set("first_loss", json!(report.first_loss))
             .set("last_loss", json!(report.last_loss))
@@ -480,20 +486,38 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A cancelled `train` stops after the step in flight, still saves what it learned, answers the cancelled error
+    /// and reports the step count as its last progress event.
     #[test]
-    fn a_finetune_needs_a_checkpoint_and_a_cancelled_training_stops_early() {
+    fn a_cancelled_training_stops_at_the_next_step_and_saves() {
+        use capability_mock::cancellation::{certify, Bound};
+        let dir = std::env::temp_dir().join(format!("yolo-caps-cancel-train-{}", std::process::id()));
+        write_dataset(&dir, Preset::MultiObject, 10, 64, 64, 1, 5).unwrap();
+        let save = dir.join("w.safetensors");
+        let make = || Invocation::new().set("data", json!(dir.to_string_lossy())).set("save", json!(save.to_string_lossy())).set("batch", json!(2)).set("steps", json!(6));
+        let train = TrainAction { weights: None, finetune: false };
+        let last = std::cell::RefCell::new(None);
+        let run = |inv: &Invocation, progress: &mut dyn FnMut(Progress)| train.run(inv, &mut |p| {
+            *last.borrow_mut() = Some((p.step, p.total, p.message.clone()));
+            progress(p);
+        });
+        let report = certify("yolov8 train", &make, &run, Bound::ONE_STEP);
+        assert_eq!(report.events_after_cancel, 1, "the cancelled run reports where it stopped");
+        let (step, total, message) = last.borrow().clone().expect("progress");
+        assert_eq!((step, total), (1, 6), "the last progress event carries the step count");
+        assert!(message.starts_with("cancelled after step 1"), "{message}");
+        assert!(save.exists(), "a cancelled run still saves");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_finetune_needs_a_checkpoint() {
         let dir = std::env::temp_dir().join(format!("yolo-caps-cancel-{}", std::process::id()));
         write_dataset(&dir, Preset::MultiObject, 10, 64, 64, 1, 5).unwrap();
         let (data, save) = (dir.to_string_lossy().into_owned(), dir.join("w.safetensors").to_string_lossy().into_owned());
         let base = Invocation::new().set("data", json!(data)).set("save", json!(save)).set("batch", json!(2)).set("steps", json!(50));
         let err = registry(None).run(MODEL, "finetune", base.clone(), &mut |_| {}).unwrap_err();
         assert!(err.contains("no YOLOv8 checkpoint"), "{err}");
-        let mut inv = base;
-        inv.cancel = capability::CancelToken::armed();
-        inv.cancel.cancel();
-        let out = registry(None).run(MODEL, "train", inv, &mut |_| {}).unwrap();
-        assert_eq!(out.outputs["steps_run"], 1, "a cancelled run stops after the step in flight and still saves");
-        assert!(Path::new(&save).exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
