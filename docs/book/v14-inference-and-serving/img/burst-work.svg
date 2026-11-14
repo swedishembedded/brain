@@ -1,0 +1,38 @@
+<!-- source-sha256: caaa8a554716adb827ea77605456a516666f74b2c7bcf3b7ef96b7556bec129f -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 400" width="640" height="400">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="640" height="400" fill="#ffffff"/>
+<line x1="58" y1="354" x2="58" y2="30" stroke="#edf2f7"/>
+<text x="58" y="370" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0</text>
+<line x1="175.5" y1="354" x2="175.5" y2="30" stroke="#edf2f7"/>
+<text x="175.5" y="370" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">20</text>
+<line x1="293" y1="354" x2="293" y2="30" stroke="#edf2f7"/>
+<text x="293" y="370" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">40</text>
+<line x1="410.5" y1="354" x2="410.5" y2="30" stroke="#edf2f7"/>
+<text x="410.5" y="370" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">60</text>
+<line x1="528" y1="354" x2="528" y2="30" stroke="#edf2f7"/>
+<text x="528" y="370" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">80</text>
+<line x1="58" y1="354" x2="622" y2="354" stroke="#edf2f7"/>
+<text x="52" y="358" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
+<line x1="58" y1="255.82" x2="622" y2="255.82" stroke="#edf2f7"/>
+<text x="52" y="259.82" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">2</text>
+<line x1="58" y1="157.64" x2="622" y2="157.64" stroke="#edf2f7"/>
+<text x="52" y="161.64" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">4</text>
+<line x1="58" y1="59.45" x2="622" y2="59.45" stroke="#edf2f7"/>
+<text x="52" y="63.45" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">6</text>
+<rect x="58" y="30" width="564" height="324" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="564" height="324"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#2b6cb0" stroke-width="2.0" points="58,354 63.88,119.97 69.75,119.12 75.62,118.27 81.5,117.43 87.38,116.58 93.25,115.74 99.12,114.89 105,114.05 110.88,113.2 116.75,112.35 122.62,111.51 128.5,110.66 134.38,109.81 140.25,108.97 146.12,108.12 152,107.28 157.88,106.43 163.75,105.58 169.62,104.74 175.5,103.89 181.38,103.04 187.25,102.2 193.12,101.35 199,100.5 204.88,99.66 210.75,98.81 216.62,97.96 222.5,97.11 228.38,96.27 234.25,95.42 240.12,94.57"/><polyline fill="none" stroke="#c05621" stroke-width="2.0" points="58,354 63.88,324.1 69.75,294.18 75.62,264.25 81.5,234.31 87.38,204.36 93.25,174.39 99.12,144.41 105,114.42 110.88,113.57 116.75,112.72 122.62,111.88 128.5,111.03 134.38,110.19 140.25,109.34 146.12,108.49 152,107.65 157.88,106.8 163.75,105.95 169.62,105.11 175.5,104.26 181.38,103.41 187.25,102.57 193.12,101.72 199,100.87 204.88,100.03 210.75,99.18 216.62,98.33 222.5,97.49 228.38,96.64 234.25,95.79 240.12,94.95 246,94.11 251.88,93.29 257.75,92.49 263.62,91.69 269.5,90.91 275.38,90.14 281.25,89.39"/><polyline fill="none" stroke="#2f855a" stroke-width="2.0" stroke-dasharray="6 4" points="58,354 63.88,349.73 69.75,345.44 75.62,341.1 81.5,336.74 87.38,332.34 93.25,327.9 99.12,323.43 105,318.92 110.88,314.64 116.75,310.33 122.62,305.98 128.5,301.6 134.38,297.19 140.25,292.74 146.12,288.26 152,283.73 157.88,279.44 163.75,275.11 169.62,270.75 175.5,266.36 181.38,261.93 187.25,257.47 193.12,252.98 199,248.43 204.88,244.13 210.75,239.79 216.62,235.42 222.5,231.01 228.38,226.57 234.25,222.09 240.12,217.59 246,213.03 251.88,208.71 257.75,204.36 263.62,199.97 269.5,195.55 275.38,191.1 281.25,186.61 287.12,182.1 293,177.55 298.88,173.23 304.75,168.88 310.62,164.49 316.5,160.07 322.38,155.62 328.25,151.13 334.12,146.62 340,142.06 345.88,137.75 351.75,133.39 357.62,129.01 363.5,124.59 369.38,120.13 375.25,115.64 381.12,111.14 387,106.58 392.88,102.26 398.75,97.91 404.62,93.52 410.5,89.1 416.38,84.65 422.25,80.16 428.12,75.65 434,71.1 439.88,70.3 445.75,69.51 451.62,68.72 457.5,67.92 463.38,67.13 469.25,66.33 475.12,65.55 481,64.77 486.88,63.99 492.75,63.21 498.62,62.43 504.5,61.65 510.38,60.87 516.25,60.09 522.12,59.32 528,58.56 533.88,57.79 539.75,57.02 545.62,56.25 551.5,55.49 557.38,54.72 563.25,53.95 569.12,53.2 575,52.44 580.88,51.69 586.75,50.94 592.62,50.18 598.5,49.43 604.38,48.67 610.25,47.92"/><polyline fill="none" stroke="#9b2c2c" stroke-width="2.0" points="58,354 63.88,350.46 69.75,346.89 75.62,343.28 81.5,339.64 87.38,335.96 93.25,332.25 99.12,328.51 105,324.73 110.88,321.18 116.75,317.59 122.62,313.96 128.5,310.3 134.38,306.61 140.25,302.89 146.12,299.13 152,295.34 157.88,291.76 163.75,288.16 169.62,284.52 175.5,280.85 181.38,277.14 187.25,273.4 193.12,269.62 199,265.81 204.88,262.23 210.75,258.61 216.62,254.95 222.5,251.26 228.38,247.54 234.25,243.78 240.12,239.99 246,236.17 251.88,232.56 257.75,228.93 263.62,225.26 269.5,221.55 275.38,217.81 281.25,214.04 287.12,210.23 293,206.41 298.88,202.8 304.75,199.17 310.62,195.5 316.5,191.79 322.38,188.05 328.25,184.28 334.12,180.47 340,176.65 345.88,173.05 351.75,169.41 357.62,165.74 363.5,162.03 369.38,158.29 375.25,154.52 381.12,150.72 387,146.89 392.88,143.29 398.75,139.65 404.62,135.98 410.5,132.27 416.38,128.54 422.25,124.76 428.12,120.96 434,117.13 439.88,116.34 445.75,115.55 451.62,114.75 457.5,113.96 463.38,113.16 469.25,112.37 475.12,111.58 481,110.8 486.88,110.02 492.75,109.24 498.62,108.46 504.5,107.68 510.38,106.89 516.25,106.11 522.12,105.33 528,104.57 533.88,103.8 539.75,103.03 545.62,102.26 551.5,101.5 557.38,100.73 563.25,99.96 569.12,99.2 575,98.44 580.88,97.69 586.75,96.93 592.62,96.18 598.5,95.42 604.38,94.67 610.25,93.92 616.12,93.16"/></g>
+<text x="340" y="390" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">tokens of the sequence already decoding (one an iteration)</text>
+<text x="14" y="192" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 192)">work so far (10^12 equivalent bytes)</text>
+<text x="340" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Eight prompts of 2,048 tokens arrive beside a running sequence</text>
+<rect x="428.83" y="268" width="185.17" height="78" rx="3" fill="#ffffff" fill-opacity="0.92" stroke="#cbd5e0"/>
+<line x1="436.83" y1="283" x2="456.83" y2="283" stroke="#2b6cb0" stroke-width="2"/>
+<text x="462.83" y="287" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">whole prompts, no budget</text>
+<line x1="436.83" y1="300" x2="456.83" y2="300" stroke="#c05621" stroke-width="2"/>
+<text x="462.83" y="304" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">one prompt an iteration</text>
+<line x1="436.83" y1="317" x2="456.83" y2="317" stroke="#2f855a" stroke-width="2" stroke-dasharray="6 4"/>
+<text x="462.83" y="321" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">chunks of 256, own pass</text>
+<line x1="436.83" y1="334" x2="456.83" y2="334" stroke="#9b2c2c" stroke-width="2"/>
+<text x="462.83" y="338" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">chunks of 256, mixed pass</text>
+</svg>

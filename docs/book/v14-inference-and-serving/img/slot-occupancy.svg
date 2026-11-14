@@ -1,0 +1,95 @@
+<!-- source-sha256: 391656288e3a6bb53d72ebef085168aaf5bab42d038e50325c0d9908a538f4d3 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 450" width="1000" height="450"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="1000" height="450" fill="#ffffff"/>
+<rect x="20" y="20" width="960" height="182" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="34" y="42" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">static batching: 85 iterations for 178 tokens on 4 slots</text>
+<text x="106" y="80.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="end">slot 0</text>
+<text x="106" y="108.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="end">slot 1</text>
+<text x="106" y="136.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="end">slot 2</text>
+<text x="106" y="164.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="end">slot 3</text>
+<rect x="180" y="93" width="340" height="22" fill="none" stroke="#a0aec0" stroke-width="1.2" stroke-dasharray="4 3"/>
+<rect x="210" y="121" width="310" height="22" fill="none" stroke="#a0aec0" stroke-width="1.2" stroke-dasharray="4 3"/>
+<rect x="420" y="149" width="100" height="22" fill="none" stroke="#a0aec0" stroke-width="1.2" stroke-dasharray="4 3"/>
+<rect x="570" y="65" width="200" height="22" fill="none" stroke="#a0aec0" stroke-width="1.2" stroke-dasharray="4 3"/>
+<rect x="640" y="93" width="130" height="22" fill="none" stroke="#a0aec0" stroke-width="1.2" stroke-dasharray="4 3"/>
+<rect x="600" y="121" width="170" height="22" fill="none" stroke="#a0aec0" stroke-width="1.2" stroke-dasharray="4 3"/>
+<rect x="840" y="65" width="130" height="22" fill="none" stroke="#a0aec0" stroke-width="1.2" stroke-dasharray="4 3"/>
+<rect x="870" y="93" width="100" height="22" fill="none" stroke="#a0aec0" stroke-width="1.2" stroke-dasharray="4 3"/>
+<rect x="830" y="121" width="140" height="22" fill="none" stroke="#a0aec0" stroke-width="1.2" stroke-dasharray="4 3"/>
+<rect x="121" y="65" width="398" height="22" rx="4" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.1"/>
+<text x="320" y="80.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">0</text>
+<rect x="121" y="93" width="58" height="22" rx="4" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.1"/>
+<text x="150" y="108.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">1</text>
+<rect x="121" y="121" width="88" height="22" rx="4" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.1"/>
+<text x="165" y="136.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">2</text>
+<rect x="121" y="149" width="298" height="22" rx="4" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.1"/>
+<text x="270" y="164.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">3</text>
+<rect x="521" y="65" width="48" height="22" rx="4" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.1"/>
+<text x="545" y="80.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">4</text>
+<rect x="521" y="93" width="118" height="22" rx="4" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.1"/>
+<text x="580" y="108.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">5</text>
+<rect x="521" y="121" width="78" height="22" rx="4" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.1"/>
+<text x="560" y="136.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">6</text>
+<rect x="521" y="149" width="248" height="22" rx="4" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.1"/>
+<text x="645" y="164.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">7</text>
+<rect x="771" y="65" width="68" height="22" rx="4" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.1"/>
+<text x="805" y="80.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">8</text>
+<rect x="771" y="93" width="98" height="22" rx="4" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.1"/>
+<text x="820" y="108.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">9</text>
+<rect x="771" y="121" width="58" height="22" rx="4" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.1"/>
+<text x="800" y="136.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">10</text>
+<rect x="771" y="149" width="198" height="22" rx="4" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.1"/>
+<text x="870" y="164.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">11</text>
+<line x1="120" y1="180" x2="970" y2="180" stroke="#4a5568" stroke-width="1"/>
+<line x1="125" y1="180" x2="125" y2="184" stroke="#4a5568" stroke-width="1"/>
+<text x="125" y="196.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">1</text>
+<line x1="315" y1="180" x2="315" y2="184" stroke="#4a5568" stroke-width="1"/>
+<text x="315" y="196.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">20</text>
+<line x1="515" y1="180" x2="515" y2="184" stroke="#4a5568" stroke-width="1"/>
+<text x="515" y="196.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">40</text>
+<line x1="715" y1="180" x2="715" y2="184" stroke="#4a5568" stroke-width="1"/>
+<text x="715" y="196.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">60</text>
+<line x1="915" y1="180" x2="915" y2="184" stroke="#4a5568" stroke-width="1"/>
+<text x="915" y="196.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">80</text>
+<rect x="20" y="220" width="960" height="182" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="34" y="242" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">continuous batching: 56 iterations for 178 tokens on 4 slots</text>
+<text x="106" y="280.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="end">slot 0</text>
+<text x="106" y="308.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="end">slot 1</text>
+<text x="106" y="336.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="end">slot 2</text>
+<text x="106" y="364.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="end">slot 3</text>
+<rect x="121" y="265" width="398" height="22" rx="4" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.1"/>
+<text x="320" y="280.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">0</text>
+<rect x="121" y="293" width="58" height="22" rx="4" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.1"/>
+<text x="150" y="308.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">1</text>
+<rect x="121" y="321" width="88" height="22" rx="4" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.1"/>
+<text x="165" y="336.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">2</text>
+<rect x="121" y="349" width="298" height="22" rx="4" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.1"/>
+<text x="270" y="364.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">3</text>
+<rect x="181" y="293" width="48" height="22" rx="4" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.1"/>
+<text x="205" y="308.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">4</text>
+<rect x="211" y="321" width="118" height="22" rx="4" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.1"/>
+<text x="270" y="336.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">5</text>
+<rect x="231" y="293" width="78" height="22" rx="4" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.1"/>
+<text x="270" y="308.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">6</text>
+<rect x="311" y="293" width="248" height="22" rx="4" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.1"/>
+<text x="435" y="308.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">7</text>
+<rect x="331" y="321" width="68" height="22" rx="4" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.1"/>
+<text x="365" y="336.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">8</text>
+<rect x="401" y="321" width="98" height="22" rx="4" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.1"/>
+<text x="450" y="336.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">9</text>
+<rect x="421" y="349" width="58" height="22" rx="4" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.1"/>
+<text x="450" y="364.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">10</text>
+<rect x="481" y="349" width="198" height="22" rx="4" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.1"/>
+<text x="580" y="364.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">11</text>
+<line x1="120" y1="380" x2="970" y2="380" stroke="#4a5568" stroke-width="1"/>
+<line x1="125" y1="380" x2="125" y2="384" stroke="#4a5568" stroke-width="1"/>
+<text x="125" y="396.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">1</text>
+<line x1="315" y1="380" x2="315" y2="384" stroke="#4a5568" stroke-width="1"/>
+<text x="315" y="396.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">20</text>
+<line x1="515" y1="380" x2="515" y2="384" stroke="#4a5568" stroke-width="1"/>
+<text x="515" y="396.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">40</text>
+<line x1="715" y1="380" x2="715" y2="384" stroke="#4a5568" stroke-width="1"/>
+<text x="715" y="396.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">60</text>
+<line x1="915" y1="380" x2="915" y2="384" stroke="#4a5568" stroke-width="1"/>
+<text x="915" y="396.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">80</text>
+<text x="545" y="442.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">iteration (each box is one request, labelled by its number; dashed: a slot held idle)</text>
+</svg>
