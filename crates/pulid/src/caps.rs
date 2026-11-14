@@ -107,6 +107,7 @@ const EXTRA_FACE_REFS: [&str; 3] = ["face_image1", "face_image2", "face_image3"]
 
 fn text2image_spec() -> ActionSpec {
     let mut spec = ActionSpec::new("text2image", "Generate an image from a text prompt, conditioned on a face's identity (PuLID + FLUX.1).")
+        .cancellable()
         .param(ParamSpec::new("prompt", ParamType::Str, "text description of the desired image").required())
         .param(ParamSpec::new("width", ParamType::Int, "output width, px (multiple of 16)").default(json!(1024)).min(256.0).max(2048.0).step(16.0))
         .param(ParamSpec::new("height", ParamType::Int, "output height, px (multiple of 16)").default(json!(1024)).min(256.0).max(2048.0).step(16.0))
@@ -358,10 +359,10 @@ impl Bundle {
         Ok(self.idformer.read_id_embedding())
     }
 
-    fn generate(&self, req: &Req, id: &[f32], cancel: &capability::CancelToken) -> Result<Vec<f32>, String> {
+    fn generate(&self, req: &Req, id: &[f32], steer: &mut flux1::pipeline::Steer<'_>) -> Result<Vec<f32>, String> {
         self.adapter.set_id(id);
         self.adapter.set_id_weight(req.id_weight);
-        self.flux1.generate_injected(&req.prompt, req.negative_prompt.as_deref(), &req.opts, req.max_len, Some(&self.adapter), cancel)
+        self.flux1.generate_injected(&req.prompt, req.negative_prompt.as_deref(), &req.opts, req.max_len, Some(&self.adapter), steer)
     }
 }
 
@@ -395,14 +396,15 @@ impl Session {
         }
     }
 
-    pub fn run(&self, action: &str, inv: &Invocation) -> ActionResult {
+    pub fn run(&self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         match action {
-            "text2image" => self.text2image(inv),
+            "text2image" => self.text2image(inv, progress),
             other => Err(format!("pulid: unknown action '{other}'")),
         }
     }
 
-    fn text2image(&self, inv: &Invocation) -> ActionResult {
+    /// Reports one progress step per denoise step, as every diffusion model does.
+    fn text2image(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         inv.cancel.check()?;
         let req = req_from(inv)?;
         let (h, w) = (req.opts.height, req.opts.width);
@@ -435,7 +437,8 @@ impl Session {
             )?),
         };
         let id = b.id_tokens(&faces)?;
-        let hwc_out = b.generate(&req, &id, &inv.cancel)?;
+        let mut on_step = |done: u32, total: u32| progress(Progress::step(done, total, "denoise"));
+        let hwc_out = b.generate(&req, &id, &mut flux1::pipeline::Steer { cancel: &inv.cancel, on_step: &mut on_step })?;
         Ok(Outcome::new().set("seed", json!(req.opts.seed)).blob("image", capability::blob::image_blob(&hwc_out, w, h, 3)))
     }
 }
@@ -481,12 +484,13 @@ impl Action for PulidAction {
     fn spec(&self) -> ActionSpec {
         text2image_spec()
     }
-    fn run(&self, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
+    fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         let session = self.hot.get_cloned(self.roots.clone(), || {
             let (a, b, c, d, e) = self.roots.clone();
             Ok(Arc::new(Session::new(a, b, c, d, e)))
         })?;
-        session.run("text2image", inv)
+        session.run("text2image", inv, progress)
     }
 }
 

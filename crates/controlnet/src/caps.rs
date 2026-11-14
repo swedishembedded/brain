@@ -43,6 +43,7 @@ pub const MODEL: &str = "brain/sdxl-controlnet";
 
 fn text2image_spec() -> ActionSpec {
     ActionSpec::new("text2image", "Generate an image from a text prompt, conditioned on a control image (SDXL ControlNet).")
+        .cancellable()
         .param(ParamSpec::new("prompt", ParamType::Str, "text description of the desired image").required())
         .param(ParamSpec::new("negative", ParamType::Str, "negative prompt (only used when guidance > 1.0)").default(json!("")))
         .param(ParamSpec::new("width", ParamType::Int, "output width, px (multiple of 8)").default(json!(1024)).min(256.0).max(2048.0).step(8.0))
@@ -134,7 +135,7 @@ impl Controlled {
     /// `cond_chw` is `[3, h, w]`, `[0,1]` - already at this pipeline's `(h, w)`.
     /// `cancel` is checked before the text encoders load and before every
     /// denoise step.
-    fn generate(&self, req: &Req, cond_chw: &[f32], cancel: &capability::CancelToken) -> Result<Vec<f32>, String> {
+    fn generate(&self, req: &Req, cond_chw: &[f32], cancel: &capability::CancelToken, on_step: &mut dyn FnMut(u32, u32)) -> Result<Vec<f32>, String> {
         cancel.check()?;
         let (h, w) = self.hw;
         let (lh, lw) = (h / 8, w / 8);
@@ -149,7 +150,7 @@ impl Controlled {
 
         let denoiser = ControlledDenoiser { unet: &self.unet, control: &self.control, cond_chw, conditioning_scale: req.conditioning_scale };
         let so = SamplerOptions { steps: req.steps, guidance: req.guidance, seed: req.seed, height: h, width: w };
-        let lat = sample(&denoiser, n, &cond, uncond.as_ref(), &so, cancel)?;
+        let lat = sample(&denoiser, n, &cond, uncond.as_ref(), &so, cancel, on_step)?;
 
         let sf = self.vae_cfg.scaling_factor;
         let z: Vec<f32> = lat.iter().map(|v| v / sf).collect();
@@ -194,14 +195,14 @@ impl Session {
         Session { sdxl_root: sdxl_root.into(), control_root: control_root.into(), built: Mutex::new(std::collections::HashMap::new()) }
     }
 
-    pub fn run(&self, action: &str, inv: &Invocation) -> ActionResult {
+    pub fn run(&self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         match action {
-            "text2image" => self.text2image(inv),
+            "text2image" => self.text2image(inv, progress),
             other => Err(format!("controlnet: unknown action '{other}'")),
         }
     }
 
-    fn text2image(&self, inv: &Invocation) -> ActionResult {
+    fn text2image(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         inv.cancel.check()?;
         let req = req_from(inv)?;
         let (h, w) = (req.height, req.width);
@@ -239,7 +240,7 @@ impl Session {
             ctx.download(&dst, 3 * h * w)
         };
 
-        let hwc_out = p.generate(&req, &cond_chw, &inv.cancel)?;
+        let hwc_out = p.generate(&req, &cond_chw, &inv.cancel, &mut |done, total| progress(Progress::step(done, total, "denoise")))?;
         Ok(Outcome::new().set("seed", json!(req.seed)).blob("image", capability::blob::image_blob(&hwc_out, w, h, 3)))
     }
 }
@@ -284,10 +285,11 @@ impl Action for ControlnetAction {
     fn spec(&self) -> ActionSpec {
         text2image_spec()
     }
-    fn run(&self, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
+    fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         let key = (self.sdxl_root.clone(), self.control_root.clone());
         let session = self.hot.get_cloned(key.clone(), || Ok(Arc::new(Session::new(key.0.clone(), key.1.clone()))))?;
-        session.run("text2image", inv)
+        session.run("text2image", inv, progress)
     }
 }
 

@@ -383,6 +383,14 @@ fn read_dit_tensors(path: &str, cfg: &Flux1Config) -> Result<crate::import::Tens
     }
 }
 
+/// How a caller steers one generation: the token it polls (before the text
+/// towers and before every denoise step) and the report it sends after every
+/// step, `(done, total)`.
+pub struct Steer<'a> {
+    pub cancel: &'a capability::CancelToken,
+    pub on_step: &'a mut dyn FnMut(u32, u32),
+}
+
 impl Flux1 {
     /// Load from a released FLUX.1 directory (the HF `black-forest-labs/
     /// FLUX.1-*` layout: `transformer/`, `vae/`, `text_encoder/`+`tokenizer/`
@@ -538,10 +546,11 @@ impl Flux1 {
         Ok((pooled, ctx))
     }
 
-    /// Generate one image. Returns HWC RGB in `[0,1]`. `cancel` is checked on
-    /// entry and polled once per denoise step (see [`Flux1::generate_injected`]).
-    pub fn generate(&self, prompt: &str, o: &GenerateOptions, max_len: usize, cancel: &capability::CancelToken) -> Result<Vec<f32>, String> {
-        self.generate_injected(prompt, None, o, max_len, None, cancel)
+    /// Generate one image. Returns HWC RGB in `[0,1]`. `steer`'s token is
+    /// checked on entry and polled once per denoise step, and every step is
+    /// reported (see [`Flux1::generate_injected`]).
+    pub fn generate(&self, prompt: &str, o: &GenerateOptions, max_len: usize, steer: &mut Steer<'_>) -> Result<Vec<f32>, String> {
+        self.generate_injected(prompt, None, o, max_len, None, steer)
     }
 
     /// [`Flux1::generate`] with every DiT step routed through
@@ -555,8 +564,9 @@ impl Flux1 {
     /// the other is accepted, not an error, and behaves as if neither were
     /// given (today's single-forward-per-step cost).
     ///
-    /// `cancel` is checked before any text tower runs and once before every
-    /// denoise step; a fired token ends the run with `Err("cancelled")`.
+    /// `steer.cancel` is checked before any text tower runs and once before
+    /// every denoise step; a fired token ends the run with `Err("cancelled")`.
+    /// `steer.on_step(done, total)` is called after every denoise step.
     pub fn generate_injected(
         &self,
         prompt: &str,
@@ -564,8 +574,9 @@ impl Flux1 {
         o: &GenerateOptions,
         max_len: usize,
         inject: Option<&dyn crate::inject::BlockInject>,
-        cancel: &capability::CancelToken,
+        steer: &mut Steer<'_>,
     ) -> Result<Vec<f32>, String> {
+        let cancel = steer.cancel;
         cancel.check()?;
         let (h, w) = self.hw;
         let (lh, lw) = ((h / 16) as usize, (w / 16) as usize);
@@ -610,6 +621,7 @@ impl Flux1 {
             for (x, v) in lat.iter_mut().zip(&pred) {
                 *x += dt * v;
             }
+            (steer.on_step)(i as u32 + 1, steps as u32);
         }
 
         // `in_channels = 16*2*2`; unpack back to the VAE's [16, h_lat, w_lat]

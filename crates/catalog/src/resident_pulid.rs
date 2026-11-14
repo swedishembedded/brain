@@ -181,8 +181,8 @@ struct PulidInstance {
 }
 
 impl Instance for PulidInstance {
-    fn run(&mut self, action: &str, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        crate::resident_llm::on_device(self.device, || self.session.run(action, inv))?
+    fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        crate::resident_llm::on_device(self.device, || self.session.run(action, inv, progress))?
     }
 }
 

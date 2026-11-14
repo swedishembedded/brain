@@ -40,6 +40,7 @@ pub const MODEL: &str = "brain/sdxl";
 
 fn text2image_spec() -> ActionSpec {
     ActionSpec::new("text2image", "Generate an image from a text prompt (SDXL base, classifier-free guidance).")
+        .cancellable()
         .param(ParamSpec::new("prompt", ParamType::Str, "text description of the desired image").required())
         .param(ParamSpec::new("negative", ParamType::Str, "negative prompt (only used when guidance > 1.0)").default(json!("")))
         .param(ParamSpec::new("width", ParamType::Int, "output width, px (multiple of 8)").default(json!(1024)).min(256.0).max(2048.0).step(8.0))
@@ -88,14 +89,14 @@ impl Session {
         Session { root: root.into(), built: Mutex::new(std::collections::HashMap::new()) }
     }
 
-    pub fn run(&self, action: &str, inv: &Invocation) -> ActionResult {
+    pub fn run(&self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         match action {
-            "text2image" => self.text2image(inv),
+            "text2image" => self.text2image(inv, progress),
             other => Err(format!("sdxl: unknown action '{other}'")),
         }
     }
 
-    fn text2image(&self, inv: &Invocation) -> ActionResult {
+    fn text2image(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         inv.cancel.check()?;
         let (prompt, o) = opts_from(inv)?;
         let (h, w) = (o.height, o.width);
@@ -104,7 +105,7 @@ impl Session {
             std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
             std::collections::hash_map::Entry::Vacant(e) => e.insert(Sdxl::load(&self.root, h, w)?),
         };
-        let hwc = p.generate(&prompt, &o, &inv.cancel)?;
+        let hwc = p.generate(&prompt, &o, &inv.cancel, &mut |done, total| progress(Progress::step(done, total, "denoise")))?;
         Ok(Outcome::new().set("seed", json!(o.seed)).blob("image", capability::blob::image_blob(&hwc, w, h, 3)))
     }
 }
@@ -146,9 +147,10 @@ impl Action for SdxlAction {
     fn spec(&self) -> ActionSpec {
         text2image_spec()
     }
-    fn run(&self, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
+    fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         let session = self.hot.get_cloned(self.root.clone(), || Ok(Arc::new(Session::new(self.root.clone()))))?;
-        session.run("text2image", inv)
+        session.run("text2image", inv, progress)
     }
 }
 

@@ -30,7 +30,7 @@ use std::sync::{Arc, Mutex};
 use capability::{hot::Hot, Action, ActionResult, ActionSpec, Invocation, Manifest, Outcome, ParamSpec, ParamType, Progress, Provider};
 use serde_json::json;
 
-use crate::pipeline::{Flux1, GenerateOptions, TrueCfg};
+use crate::pipeline::{Flux1, GenerateOptions, Steer, TrueCfg};
 
 /// The model id used on the CLI (`brain do flux1 ...`), over D-Bus and in the
 /// residency manifest.
@@ -51,6 +51,7 @@ const DEFAULT_MAX_LEN: u32 = crate::pipeline::MAX_TXT_LEN;
 
 fn text2image_spec() -> ActionSpec {
     ActionSpec::new("text2image", "Generate an image from a text prompt (FLUX.1 dev/kontext-dev/krea-dev/schnell).")
+        .cancellable()
         .param(ParamSpec::new("prompt", ParamType::Str, "text description of the desired image").required())
         .param(ParamSpec::new("width", ParamType::Int, "output width, px (multiple of 16)").default(json!(1024)).min(256.0).max(2048.0).step(16.0))
         .param(ParamSpec::new("height", ParamType::Int, "output height, px (multiple of 16)").default(json!(1024)).min(256.0).max(2048.0).step(16.0))
@@ -134,14 +135,15 @@ impl Session {
         Session { root: root.into(), built: Mutex::new(std::collections::HashMap::new()) }
     }
 
-    pub fn run(&self, action: &str, inv: &Invocation) -> ActionResult {
+    pub fn run(&self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         match action {
-            "text2image" => self.text2image(inv),
+            "text2image" => self.text2image(inv, progress),
             other => Err(format!("flux1: unknown action '{other}'")),
         }
     }
 
-    fn text2image(&self, inv: &Invocation) -> ActionResult {
+    /// Reports one progress step per denoise step, as every diffusion model does.
+    fn text2image(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         inv.cancel.check()?;
         let req = req_from(inv)?;
         let (h, w) = (req.opts.height, req.opts.width);
@@ -153,7 +155,8 @@ impl Session {
                 e.insert(Flux1::load_with(&self.root, &req.variant, h, w, req.precision)?)
             }
         };
-        let hwc = p.generate_injected(&req.prompt, req.negative_prompt.as_deref(), &req.opts, req.max_len, None, &inv.cancel)?;
+        let mut on_step = |done: u32, total: u32| progress(Progress::step(done, total, "denoise"));
+        let hwc = p.generate_injected(&req.prompt, req.negative_prompt.as_deref(), &req.opts, req.max_len, None, &mut Steer { cancel: &inv.cancel, on_step: &mut on_step })?;
         Ok(Outcome::new().set("seed", json!(req.opts.seed)).blob("image", capability::blob::image_blob(&hwc, w, h, 3)))
     }
 }
@@ -194,9 +197,10 @@ impl Action for Flux1Action {
     fn spec(&self) -> ActionSpec {
         text2image_spec()
     }
-    fn run(&self, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
+    fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         let session = self.hot.get_cloned(self.root.clone(), || Ok(Arc::new(Session::new(self.root.clone()))))?;
-        session.run("text2image", inv)
+        session.run("text2image", inv, progress)
     }
 }
 

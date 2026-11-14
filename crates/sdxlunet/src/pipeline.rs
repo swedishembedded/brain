@@ -112,8 +112,9 @@ impl Sdxl {
     }
 
     /// Generate one image. Returns HWC RGB in `[0,1]`. `cancel` is checked
-    /// before the text encoders load and before every denoise step.
-    pub fn generate(&mut self, prompt: &str, o: &GenerateOptions, cancel: &capability::CancelToken) -> Result<Vec<f32>, String> {
+    /// before the text encoders load and before every denoise step;
+    /// `on_step(done, total)` is called after every step.
+    pub fn generate(&mut self, prompt: &str, o: &GenerateOptions, cancel: &capability::CancelToken, on_step: &mut dyn FnMut(u32, u32)) -> Result<Vec<f32>, String> {
         cancel.check()?;
         let (h, w) = self.hw;
         let (lh, lw) = (h / 8, w / 8);
@@ -129,7 +130,7 @@ impl Sdxl {
 
         let denoiser = SdxlDenoiser { unet: &self.unet };
         let so = SamplerOptions { steps: o.steps, guidance: o.guidance, seed: o.seed, height: h, width: w };
-        let lat = sample(&denoiser, n, &cond, uncond.as_ref(), &so, cancel)?;
+        let lat = sample(&denoiser, n, &cond, uncond.as_ref(), &so, cancel, on_step)?;
 
         // The VAE decodes the UNSCALED latent. Built here and dropped on return,
         // so it never shares the card with the encoders.

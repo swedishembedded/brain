@@ -83,6 +83,7 @@ pub fn sample(
     uncond: Option<&Conditioning>,
     o: &SamplerOptions,
     cancel: &capability::CancelToken,
+    on_step: &mut dyn FnMut(u32, u32),
 ) -> Result<Vec<f32>, String> {
     cancel.check()?;
     let mut sched = EulerScheduler::new(DiscreteConfig::sdxl());
@@ -114,9 +115,7 @@ pub fn sample(
             }
         };
         lat = sched.step(&eps, &lat);
-        if i % 5 == 0 || i + 1 == timesteps.len() {
-            eprintln!("  step {}/{}  sigma {:.4}", i + 1, timesteps.len(), sched.sigmas()[i]);
-        }
+        on_step(i as u32 + 1, timesteps.len() as u32);
     }
 
     Ok(lat)
@@ -151,8 +150,23 @@ mod tests {
             let denoiser = Counting { progress: &sink, steps: STEPS };
             let cond = (vec![0.0; 4], vec![0.0; 2]);
             let so = SamplerOptions { steps: STEPS, guidance: 1.0, seed: 1, height: 16, width: 16 };
-            sample(&denoiser, 8, &cond, None, &so, &inv.cancel).map(|_| Outcome::new())
+            sample(&denoiser, 8, &cond, None, &so, &inv.cancel, &mut |_, _| {}).map(|_| Outcome::new())
         };
         certify("sdxl sampler", &Invocation::new, &run, Bound::ONE_STEP);
+    }
+
+    /// Every denoise step is reported once, in order, ending at the total:
+    /// the per-step progress `Session::run` and the residents forward.
+    #[test]
+    fn every_denoise_step_is_reported() {
+        const STEPS: usize = 6;
+        let mut quiet = |_: Progress| {};
+        let sink: RefCell<&mut dyn FnMut(Progress)> = RefCell::new(&mut quiet);
+        let denoiser = Counting { progress: &sink, steps: STEPS };
+        let cond = (vec![0.0; 4], vec![0.0; 2]);
+        let so = SamplerOptions { steps: STEPS, guidance: 1.0, seed: 1, height: 16, width: 16 };
+        let mut seen = Vec::new();
+        sample(&denoiser, 8, &cond, None, &so, &capability::CancelToken::default(), &mut |done, total| seen.push((done, total))).expect("sample");
+        assert_eq!(seen, (1..=STEPS as u32).map(|d| (d, STEPS as u32)).collect::<Vec<_>>());
     }
 }
