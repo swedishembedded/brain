@@ -91,7 +91,10 @@ use residency::Executor;
 /// with `crates/dbus` so both transports gate identically).
 pub use residency::admission::EDGE_CONCURRENCY;
 
-/// The maximum accepted request-body size (8 MiB). Sized well above the largest
+/// The default maximum request-body size (8 MiB), applied to the whole router. The
+/// video routes and the generic `/v1/run` routes override it with their own 64 MiB
+/// limit (media travels inline as base64) and `/v1/systemone` with a tighter 2 MiB
+/// one. Sized well above the largest
 /// legitimate body (a chat/embeddings request, or a batch of `input` strings) yet
 /// bounded so a single huge body cannot be buffered into an OOM. A body over this
 /// limit is rejected with `413 Payload Too Large` before any handler runs. This is

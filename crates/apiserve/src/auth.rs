@@ -17,6 +17,7 @@ use axum::http::HeaderMap;
 use axum::middleware::Next;
 use axum::response::Response;
 use subtle::ConstantTimeEq;
+use sha2::{Digest, Sha256};
 
 use crate::error::ApiError;
 use crate::state::AppState;
@@ -56,13 +57,28 @@ impl StaticKey {
 }
 
 /// Constant-time key check: `true` only when the presented key equals the surface's
-/// key. Uses [`subtle::ConstantTimeEq`] so acceptance/rejection time does not depend
-/// on how many leading bytes matched — closing the timing side channel a plain `==`
-/// (which short-circuits at the first differing byte) would open. The keys are a
-/// fixed-length `sk-brain-<hex>` format, so the length is not itself a secret; the
-/// length-mismatch fast path in `ct_eq` therefore leaks nothing meaningful.
+/// key. Both keys are hashed to fixed-size SHA-256 digests first and the digests are
+/// compared with [`subtle::ConstantTimeEq`], so neither the matching prefix length
+/// nor the key length changes the time taken. Key files and `--caller` accept any
+/// one-word key, so the length cannot be assumed public.
 fn key_matches(presented: &str, expected: &str) -> bool {
-    presented.as_bytes().ct_eq(expected.as_bytes()).into()
+    let a = Sha256::digest(presented.as_bytes());
+    let b = Sha256::digest(expected.as_bytes());
+    a.ct_eq(&b).into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::key_matches;
+
+    #[test]
+    fn keys_match_only_when_equal_whatever_their_length() {
+        assert!(key_matches("sk-brain-abc", "sk-brain-abc"));
+        assert!(!key_matches("sk-brain-abd", "sk-brain-abc"));
+        assert!(!key_matches("sk-brain-ab", "sk-brain-abc"));
+        assert!(!key_matches("sk-brain-abcd", "sk-brain-abc"));
+        assert!(!key_matches("", "k"));
+    }
 }
 
 /// Pull the presented key out of the request headers in this provider's scheme.

@@ -54,7 +54,7 @@ pub enum Kind {
     /// `Retry-After`.
     Saturated,
     /// A model reported a [`capability::FailureClass`] in its own error: the
-    /// status and `code` say which of the six it was, so a client can tell an
+    /// status and `code` say which of the seven it was, so a client can tell an
     /// uninstalled model from a malformed request from a passed deadline
     /// without reading prose. A semantic refusal (`InvalidRequest`,
     /// `UnsupportedCapability`) is a 422: the body parsed, the request cannot

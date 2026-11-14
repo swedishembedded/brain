@@ -37,8 +37,8 @@
 //! - **Video**: a sellable action declaring a `VideoContract` with no input clip
 //!   (`capability::video`), which `/videos` renders.
 //!
-//! OpenAI/OpenRouter expose Chat ∪ Embeddings ∪ ImageGen ∪ Transcription ∪ Video;
-//! Anthropic exposes Chat.
+//! OpenAI/OpenRouter expose Chat ∪ Embeddings ∪ ImageGen ∪ Transcription ∪ Speech ∪
+//! Video (any capability in [`CapSet::any`]); Anthropic exposes Chat only.
 
 use capability::{Manifest, Media};
 use residency::Executor;

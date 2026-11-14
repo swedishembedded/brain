@@ -450,15 +450,14 @@ async fn handle_generate(state: AppState, body: Bytes, surface: TextSurface) -> 
     }
 }
 
-/// Bounds enforced on `tools`/`tool_choice` before they ever reach the resident
-/// model: a request
-/// body is otherwise unbounded attacker-controlled JSON, and `tools` feeds
-/// straight into prompt construction (the `<tools>` block's byte length is
-/// unbounded input to the tokenizer/model if left unchecked).
 /// Most local tiles a request may ask an image-tiling model for.
 const MAX_TILES: i64 = 64;
 /// The most strings one embeddings request embeds.
 const MAX_EMBEDDING_INPUTS: usize = 2048;
+/// Bounds enforced on `tools`/`tool_choice` before they ever reach the resident
+/// model: a request body is otherwise unbounded attacker-controlled JSON, and
+/// `tools` feeds straight into prompt construction (the `<tools>` block's byte
+/// length is unbounded input to the tokenizer/model if left unchecked).
 const MAX_TOOLS: usize = 128;
 const MAX_TOOLS_BYTES: usize = 256 * 1024;
 const MAX_TOOL_NAME_LEN: usize = 64;
