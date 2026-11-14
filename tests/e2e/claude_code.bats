@@ -64,12 +64,16 @@ teardown_file() {
   [ -n "$E2E_DIR" ] && rm -rf "$E2E_DIR"
 }
 
-# Drive `claude` in a clean env: our key only, all model aliases -> the local mock,
-# telemetry off, a throwaway HOME (no logged-in account), and a hard timeout so it can
-# never hang.
+# Drive `claude` in an EMPTY environment (`env -i`): nothing the caller's shell holds
+# (an API key, an OAuth token, a running session's variables) can reach it. It gets our
+# per-launch key only, every model alias -> the local mock, telemetry off, a throwaway
+# HOME and config directory (no logged-in account), and a hard timeout so it can never
+# hang.
 run_claude() {
-  timeout "$CLAUDE_TIMEOUT" env -u ANTHROPIC_AUTH_TOKEN \
+  mkdir -p "$E2E_DIR/home" "$E2E_DIR/claude-config"
+  timeout "$CLAUDE_TIMEOUT" env -i \
     HOME="$E2E_DIR/home" \
+    CLAUDE_CONFIG_DIR="$E2E_DIR/claude-config" \
     ANTHROPIC_BASE_URL="http://127.0.0.1:$E2E_PORT" \
     ANTHROPIC_API_KEY="$E2E_KEY" \
     ANTHROPIC_MODEL="brain/mock" \
