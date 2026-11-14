@@ -997,7 +997,7 @@ pub fn generate_on(ckpt: &pipeline::H3Checkpoint, req: &Request, paths: &Paths, 
             pipeline::ref2va(ckpt, &text, &encoded, opts, cancel, report)?
         }
     };
-    Ok(av_outcome(&av, opts.seed))
+    Ok(av_outcome(&av, av.seed))
 }
 
 /// Run `action` for `inv` on `device` (`None`: every schedulable card): the
@@ -1507,6 +1507,7 @@ mod tests {
             width: 2,
             audio: vec![vec![0.1, -0.2, 0.3], vec![-0.1, 0.2, -0.3]],
             sample_rate: 32000,
+            seed: 0,
         };
         let out = av_outcome(&av, 17);
         assert_eq!(out.outputs["seed"], json!(17), "the outcome reports the seed the clip was drawn with");

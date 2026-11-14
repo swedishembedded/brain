@@ -1,1 +1,2 @@
 crates/minimaxh3/examples/decode_audio_sample.rs	main:Lcg::new(7)	rng	bench-input: synthetic latent whose decode is what the example demonstrates
+crates/minimaxh3/src/pipeline.rs	-:CUT_RETRY_SEED_SALT=0x4355_5452_4554_5259	const	salt: mixed into the caller seed to derive an independent stream

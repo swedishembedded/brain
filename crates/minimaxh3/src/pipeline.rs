@@ -920,6 +920,9 @@ pub struct GeneratedAv {
     /// each already clamped to `[-1, 1]` by [`crate::vocoder::decode`].
     pub audio: Vec<Vec<f32>>,
     pub sample_rate: u32,
+    /// The noise seed this clip was generated from - the request's own, or
+    /// the one [`fl2va`] retried at ([`CUT_RETRIES`]).
+    pub seed: u64,
 }
 
 // ============================================================================
@@ -944,11 +947,80 @@ pub fn t2va(ckpt: &H3Checkpoint, text: &TextConditioning, opts: &GenOpts, cancel
 /// [`encode_keyframe_condition`] in packed order - the released pipeline's
 /// `"first"` and/or `"last"` anchors, and any interior ones between them
 /// ([`Anchor`], ordered as [`check_anchors`] requires).
-pub fn fl2va(ckpt: &H3Checkpoint, text: &TextConditioning, keyframes: &[KeyframeCondition], opts: &GenOpts, cancel: &capability::CancelToken, progress: impl FnMut(u32, u32, &str)) -> Result<GeneratedAv, String> {
+///
+/// **A clip that cuts is generated again.** Stills no continuous motion
+/// connects - an interior keyframe from another composition than the ends -
+/// are dissolved between at some seeds and CUT between at others: measured
+/// on the real weights, the same request dissolved at seed 11 (worst frame
+/// step 1.68x its neighbours) and cut at seed 12 (15.5x), and holding the
+/// interior keyframe weaker (t = 0.8, 0.5) cut at the same frame. A cut is
+/// unmistakable in the decoded clip ([`worst_frame_step`]), so a clip with a
+/// step above [`CUT_STEP`] is regenerated from fresh noise, up to
+/// [`CUT_RETRIES`] times; the seed it came from is [`GeneratedAv::seed`].
+pub fn fl2va(ckpt: &H3Checkpoint, text: &TextConditioning, keyframes: &[KeyframeCondition], opts: &GenOpts, cancel: &capability::CancelToken, mut progress: impl FnMut(u32, u32, &str)) -> Result<GeneratedAv, String> {
     if keyframes.is_empty() {
         return Err("fl2va: at least one keyframe is required - use t2va for a text-only request".to_string());
     }
-    generate(ckpt, text, Conditioning::Keyframes(keyframes), opts, cancel, progress)
+    let mut attempt = 0u64;
+    loop {
+        let try_opts = GenOpts { seed: opts.seed ^ CUT_RETRY_SEED_SALT.wrapping_mul(attempt), ..opts.clone() };
+        let av = generate(ckpt, text, Conditioning::Keyframes(keyframes), &try_opts, cancel, &mut progress)?;
+        let (at, step) = worst_frame_step(&av.video, av.num_video_frames as usize, av.height as usize, av.width as usize);
+        if step <= CUT_STEP || attempt == CUT_RETRIES {
+            if step > CUT_STEP {
+                tracing::warn!(frame = at, step, attempts = attempt + 1, "fl2va: the clip still cuts after every retry");
+            }
+            return Ok(av);
+        }
+        tracing::warn!(frame = at, step, seed = try_opts.seed, "fl2va: the clip cuts between its keyframes; generating it again from fresh noise");
+        attempt += 1;
+    }
+}
+
+/// How many times [`fl2va`] regenerates a clip that cuts.
+pub const CUT_RETRIES: u64 = 2;
+/// A frame step this many times the steps around it is a cut: measured,
+/// H3 cuts sit at 13.6-15.5x and its smooth and dissolving clips at most
+/// 1.7x.
+pub const CUT_STEP: f32 = 4.0;
+/// Mixed into the request's seed for each retry's noise.
+const CUT_RETRY_SEED_SALT: u64 = 0x4355_5452_4554_5259; // "CUTRETRY"
+
+/// The decoded clip's sharpest frame-to-frame change, `(frame, ratio)`: the
+/// mean absolute change from frame `i - 1` to `i`, on a 64x64 box average of
+/// each frame, over the median of the six changes either side of it. Steady
+/// motion stays near 1 however fast it is; a cut is many times its
+/// neighbours. `video` is `[3, frames, height, width]` in `[0, 1]`.
+pub fn worst_frame_step(video: &[f32], frames: usize, height: usize, width: usize) -> (usize, f32) {
+    const PROBE: usize = 64;
+    if frames < 3 || height == 0 || width == 0 {
+        return (0, 1.0);
+    }
+    let plane = height * width;
+    let probe = |f: usize| -> Vec<f32> {
+        let mut out = vec![0f32; 3 * PROBE * PROBE];
+        for c in 0..3 {
+            let src = &video[(c * frames + f) * plane..(c * frames + f + 1) * plane];
+            for py in 0..PROBE {
+                let (y0, y1) = (py * height / PROBE, ((py + 1) * height / PROBE).max(py * height / PROBE + 1));
+                for px in 0..PROBE {
+                    let (x0, x1) = (px * width / PROBE, ((px + 1) * width / PROBE).max(px * width / PROBE + 1));
+                    let sum: f32 = (y0..y1).flat_map(|y| src[y * width + x0..y * width + x1].iter()).sum();
+                    out[(c * PROBE + py) * PROBE + px] = sum / ((y1 - y0) * (x1 - x0)) as f32;
+                }
+            }
+        }
+        out
+    };
+    let probes: Vec<Vec<f32>> = (0..frames).map(probe).collect();
+    let steps: Vec<f32> = probes.windows(2).map(|w| w[0].iter().zip(&w[1]).map(|(a, b)| (a - b).abs()).sum::<f32>() / w[0].len() as f32).collect();
+    (0..steps.len())
+        .map(|i| {
+            let mut ctx: Vec<f32> = steps[i.saturating_sub(6)..i].iter().chain(&steps[i + 1..(i + 7).min(steps.len())]).copied().collect();
+            ctx.sort_by(f32::total_cmp);
+            (i + 1, steps[i] / ctx[ctx.len() / 2].max(1e-4))
+        })
+        .fold((0, 0.0), |a, b| if b.1 > a.1 { b } else { a })
 }
 
 /// `ref2va`: text plus 1..=12 references ([`EncodedReference`], in the
@@ -1258,7 +1330,7 @@ fn generate(ckpt: &H3Checkpoint, text: &TextConditioning, conditioning: Conditio
 
     progress(total, total, "audio decode");
 
-    Ok(GeneratedAv { video: pixels, num_video_frames: out_t, height: out_h, width: out_w, audio: audio_channels_out, sample_rate: AUDIO_SAMPLE_RATE })
+    Ok(GeneratedAv { video: pixels, num_video_frames: out_t, height: out_h, width: out_w, audio: audio_channels_out, sample_rate: AUDIO_SAMPLE_RATE, seed: opts.seed })
 }
 
 #[cfg(test)]
@@ -1403,6 +1475,35 @@ pub(crate) mod tests {
         // One row per latent frame on a 2x2 latent grid patched 2x2.
         let latent2_row = packed.video_indices[packed.num_condition_video_rows + 2] as usize;
         assert_eq!(packed.position_ids[latent2_row * 3], time_of(Anchor::At(5)));
+    }
+
+    /// Steady motion, however fast, is no cut; one frame of different
+    /// content is, at the frame it starts.
+    #[test]
+    fn a_cut_stands_out_of_steady_motion_and_steady_motion_does_not() {
+        let (frames, h, w) = (40usize, 32usize, 48usize);
+        let clip = |cut: Option<usize>| -> Vec<f32> {
+            let mut v = vec![0f32; 3 * frames * h * w];
+            for c in 0..3 {
+                for f in 0..frames {
+                    let after = cut.is_some_and(|k| f >= k);
+                    for y in 0..h {
+                        for x in 0..w {
+                            // A pattern panning a pixel a frame; past the cut,
+                            // another scene panning the same way.
+                            let (fx, fy) = (x as f32 + f as f32, y as f32);
+                            let value = if after { 0.5 + 0.4 * (fy * 0.3 + fx * 0.05 + c as f32).cos() } else { 0.5 + 0.4 * (fx * 0.08 + c as f32).sin() };
+                            v[((c * frames + f) * h + y) * w + x] = value;
+                        }
+                    }
+                }
+            }
+            v
+        };
+        let (_, steady) = worst_frame_step(&clip(None), frames, h, w);
+        assert!(steady < 1.5, "steady motion scored {steady}");
+        let (at, cut) = worst_frame_step(&clip(Some(25)), frames, h, w);
+        assert!(cut > CUT_STEP && at == 25, "a cut at frame 25 scored {cut} at frame {at}");
     }
 
     #[test]
