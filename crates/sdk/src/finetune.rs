@@ -2544,6 +2544,53 @@ mod tests {
         assert!(err.contains("no vision tower") && err.contains(":1:"), "{err}");
     }
 
+    /// An image's placeholder rows carry no target on the way from a record to the trainer's batch: the record is
+    /// read and encoded as a fine-tune reads it, prepared to disk, loaded by the loader a vision trainer reads, and
+    /// every example is laid out as a training row. No row at a placeholder position is supervised, no target is a
+    /// placeholder, and the answers still are, in every shape a record is trained in (whole, packed, per answer,
+    /// thinking or not).
+    #[test]
+    fn image_placeholder_positions_carry_no_target_through_the_dataset_path() {
+        let image = |name: &str| format!(r#"{{"type":"image_url","image_url":{{"url":"fake:{name}"}}}}"#);
+        let one = format!(r#"{{"messages":[{{"role":"user","content":[{{"type":"text","text":"see "}},{}],"train":false}},{{"role":"assistant","content":"a cat","train":true}}]}}"#, image("one"));
+        let two = format!(
+            r#"{{"messages":[{{"role":"user","content":[{}],"train":false}},{{"role":"assistant","content":"a1","train":true}},{{"role":"user","content":[{{"type":"text","text":"and "}},{}],"train":false}},{{"role":"assistant","content":"a2","train":true}}]}}"#,
+            image("two"),
+            image("three")
+        );
+        let placeholder = data::chat::ImageReader::placeholder_token(&Pictures).unwrap();
+        let tmpl = ChatTemplate::compile(&std::fs::read_to_string(brain_testutil::testdata("qwen3/chat_template.jinja")).unwrap()).unwrap();
+        let chars: String = (32u8..127).map(char::from).chain(['\n']).collect();
+        let tok = data::tokenizer::CharTokenizer::from_corpus(&chars);
+        // A thinking-mode dialogue trains packed only: unpacked, its earlier answers are not prefix-stable.
+        for (no_think, pack, records, images) in [(false, false, vec![&one], 1), (false, true, vec![&one, &two], 3), (true, false, vec![&one, &two], 3), (true, true, vec![&one, &two], 3)] {
+            let records: Vec<&str> = records.into_iter().map(String::as_str).collect();
+            let samples = read_lines_with(&records, no_think, pack, &Pictures).unwrap();
+            let dir = std::env::temp_dir().join(format!("brain-placeholder-targets-{}-{no_think}-{pack}", std::process::id()));
+            let render = data::chat::RenderOpts { keep_reasoning: no_think };
+            let prepared = data::chat::prepare_chat_samples(&samples, &samples, &tok, &tmpl, render, chars.len() + 1, &dir).unwrap();
+            let opts = model::train::FitOpts { batch_size: 1, block_size: prepared.longest_example as u32, ..Default::default() };
+            let (train, _, cfg, _, _) = model::train::load_dataset_with_images(&dir, &opts).unwrap();
+            let (mut placeholders, mut supervised) = (0usize, 0usize);
+            for example in 0..train.example_count().unwrap() {
+                let (x, y) = train.example_batch(&cfg, &[Some(example)]).unwrap();
+                for (t, (&input, &target)) in x.iter().zip(&y).enumerate() {
+                    if input == placeholder {
+                        placeholders += 1;
+                        assert_eq!(target, data::loader::IGNORE, "no_think={no_think} pack={pack}: example {example} supervises the logits of image row {t}");
+                    }
+                    if target != data::loader::IGNORE {
+                        supervised += 1;
+                        assert_ne!(target as u32, placeholder, "no_think={no_think} pack={pack}: example {example} is trained to write an image row at {t}");
+                    }
+                }
+            }
+            std::fs::remove_dir_all(&dir).unwrap();
+            assert!(placeholders >= 3 * images, "no_think={no_think} pack={pack}: every image reaches the rows ({placeholders} placeholder rows)");
+            assert!(supervised > 0, "no_think={no_think} pack={pack}: the answers are still supervised");
+        }
+    }
+
     const ANSWER: &str = r#"{"messages":[{"role":"user","content":"q","train":false},{"role":"assistant","content":"a","train":true}]}"#;
     const DIALOGUE: &str = r#"{"messages":[{"role":"user","content":"q1","train":false},{"role":"assistant","content":"a1","train":true},{"role":"user","content":"q2","train":false},{"role":"assistant","content":"a2","train":true}]}"#;
     const TOOL_CONTEXT_FINAL_ANSWER: &str = r#"{"messages":[{"role":"user","content":"w","train":false},{"role":"assistant","content":"","train":false,"tool_calls":[{"id":"c1","type":"function","function":{"name":"f","arguments":"{}"}}]},{"role":"tool","content":"r","tool_call_id":"c1","train":false},{"role":"assistant","content":"done","train":true}]}"#;
