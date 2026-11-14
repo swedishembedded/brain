@@ -148,6 +148,7 @@ impl Action for CaptionAction {
     }
 
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         let dir = inv
             .get_str("weights")
             .filter(|s| !s.is_empty())
@@ -204,6 +205,10 @@ impl Action for CaptionAction {
         };
         stage_time("vision+projector", t_tower);
 
+        // The tower is one bounded unit: a token fired while it ran stops here,
+        // before the decoder is loaded or locked.
+        inv.cancel.check()?;
+
         // ---- decode stage: its own lock; the vision lock is already free ----
         let mut dguard = DECODE.lock().map_err(|_| "fastvlm: decode lock poisoned")?;
         if !matches!(&*dguard, Some(d) if d.weights == dir && d.precision == precision) {
@@ -237,6 +242,9 @@ impl Action for CaptionAction {
             |hidden: &[f32]| -> Vec<f32> { model::hostmath::matvec_par(&hot.head, hidden, vocab, d) };
         let mut out_ids = Vec::new();
         for i in 0..max_new {
+            // Once per decoded token; returning drops the decode guard, so the
+            // stage is free for the next request.
+            inv.cancel.check()?;
             let lg = logits_of(&hidden);
             let next = lg
                 .iter()
@@ -357,6 +365,34 @@ fn pad_resize_chw(hwc: &[f32], w: u32, h: u32, side: u32) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use capability_mock::cancellation;
+
+    fn caption_request(weights: &str, max_new: u32) -> Invocation {
+        Invocation::new()
+            .set("weights", serde_json::json!(weights))
+            .set("max_new", serde_json::json!(max_new))
+            .blob("image", Blob::new(Media::Image, [0.5f32; 64 * 64 * 3].iter().flat_map(|v| v.to_le_bytes()).collect()).with_meta(serde_json::json!({"w": 64, "h": 64})))
+    }
+
+    /// A token fired before the call refuses it before a checkpoint is read
+    /// (the path does not exist, so any read would fail differently).
+    #[test]
+    fn a_caption_cancelled_before_admission_reads_nothing() {
+        let action = CaptionAction { default_weights: None };
+        cancellation::admission("fastvlm caption", caption_request("/nonexistent/fastvlm", 8), &|inv, p| action.run(inv, p));
+    }
+
+    /// A token fired after the first decoded token stops the decode at the
+    /// next one. Needs the real FastVLM-0.5B checkpoint in the model store.
+    #[test]
+    fn a_caption_cancelled_mid_decode_stops_at_the_next_token() {
+        let Some(dir) = brain_testutil::model_dir("apple/FastVLM-0.5B").filter(|d| std::path::Path::new(d).join("config.json").exists()) else {
+            brain_testutil::skip("fastvlm caption mid-run cancellation needs the apple/FastVLM-0.5B checkpoint in the model store");
+            return;
+        };
+        let action = CaptionAction { default_weights: None };
+        cancellation::mid_run("fastvlm caption", &|| caption_request(&dir, 64), &|inv, p| action.run(inv, p), cancellation::Bound::ONE_STEP);
+    }
 
     #[test]
     fn manifest_validates_without_weights() {

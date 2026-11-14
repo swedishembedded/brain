@@ -1503,6 +1503,7 @@ name = "brain-fastvlm"
 version = "5.1.0"
 dependencies = [
  "brain-capability",
+ "brain-capability-mock",
  "brain-captioner",
  "brain-checkpoint",
  "brain-data",
@@ -2027,6 +2028,7 @@ name = "brain-llava"
 version = "5.1.0"
 dependencies = [
  "brain-capability",
+ "brain-capability-mock",
  "brain-captioner",
  "brain-checkpoint",
  "brain-clip",

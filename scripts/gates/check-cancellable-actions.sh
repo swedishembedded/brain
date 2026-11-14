@@ -27,8 +27,6 @@ cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 KNOWN="
 deepseek2ocr
 deepseekocr2
-fastvlm
-llava
 minimaxmusic3
 moondream3
 "

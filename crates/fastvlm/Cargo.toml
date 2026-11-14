@@ -30,4 +30,5 @@ brain-checkpoint.workspace = true
 brain-modelstore.workspace = true
 
 [dev-dependencies]
+brain-capability-mock.workspace = true
 brain-testutil.workspace = true
