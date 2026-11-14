@@ -2451,6 +2451,7 @@ name = "brain-ocrserve"
 version = "5.1.0"
 dependencies = [
  "brain-capability",
+ "brain-capability-mock",
  "brain-checkpoint",
  "brain-data",
  "brain-deepseek2",

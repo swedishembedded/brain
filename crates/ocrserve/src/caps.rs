@@ -145,6 +145,10 @@ impl<M: OcrModel> Action for GenerateAction<M> {
     }
 
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        // Before the resident lock: a cancelled request neither waits on nor
+        // builds a composite of tens of GiB. Past this, the decode is the
+        // scheduler's, which stops a request at its next token.
+        inv.cancel.check()?;
         let dir = inv.get_str("weights").filter(|s| !s.is_empty()).unwrap_or_else(|| self.dir.clone());
         if dir.is_empty() {
             return Err(format!("{} generate: no checkpoint directory (pass 'weights', or configure one through the models directory)", M::ID));
@@ -181,6 +185,15 @@ mod tests {
         fn load(_dir: &str, _placement: DecoderDevice) -> Result<Box<dyn Instance>, String> {
             Err("no checkpoint".into())
         }
+    }
+
+    /// A request whose token fired before admission is refused before the
+    /// resident lock and the checkpoint load (the toy's load would fail).
+    #[test]
+    fn a_request_cancelled_before_admission_loads_nothing() {
+        let action = GenerateAction::<Toy> { dir: "/nonexistent/toy".to_string(), _model: std::marker::PhantomData };
+        let inv = Invocation::new().blob("image", capability::Blob::new(Media::Image, vec![0u8; 12]).with_meta(serde_json::json!({"w": 1, "h": 1})));
+        capability_mock::cancellation::admission("ocr generate", inv, &|inv, p| action.run(inv, p));
     }
 
     /// The exact shape `apiserve::catalog::api_caps` classifies as chat-capable.

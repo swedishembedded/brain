@@ -20,3 +20,6 @@ brain-model.workspace = true
 brain-qwen3.workspace = true
 brain-residency.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+brain-capability-mock.workspace = true
