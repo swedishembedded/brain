@@ -25,9 +25,9 @@ use qwen35::model::{pipelines, Qwen35, TrainOpts};
 
 #[test]
 fn the_cuda_fp32_tier_trains_like_the_cpu_backend() {
-    let Ok(cuda) = Gpu::try_new_cuda(pipelines()) else {
-        eprintln!("lora_cuda_matches_cpu: no CUDA device on this box - nothing to run");
-        return;
+    let cuda = match Gpu::try_new_cuda(pipelines()) {
+        Ok(cuda) => cuda,
+        Err(why) => return brain_testutil::skip_unavailable(&format!("lora_cuda_matches_cpu: no CUDA device opens ({why}); nothing was compared")),
     };
     let cfg = lora_config();
     let init = weights(&cfg, 0.3);

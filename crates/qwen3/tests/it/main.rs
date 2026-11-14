@@ -79,3 +79,4 @@ mod shard_parity;
 mod slice;
 mod split_encode;
 mod step_timing;
+mod train_cuda_matches_cpu;

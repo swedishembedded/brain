@@ -655,6 +655,62 @@ pub mod testgpu {
         g
     }
 
+    /// Run `work` on a worker thread placed on the first card of the device registry
+    /// ([`crate::devices::with_gpu`]), once a CUDA device has opened there, so every ambient `Gpu::new` inside it
+    /// builds on that card through CUDA: what a cross-backend test compares the CPU backend against.
+    ///
+    /// `Err` names why nothing ran, for the caller to skip with: the registry lists no card, no CUDA device opens on
+    /// it, opening one took longer than `open_deadline` (a card loaded by other work, where creation can take tens of
+    /// seconds), or the process's ambient backend is not CUDA. A panic inside `work` is re-raised on the caller's
+    /// thread. The device opened to time the deadline stays open while `work` runs; after a missed deadline the
+    /// worker finishes opening it and ends without running `work`.
+    pub fn on_cuda<R: Send + 'static>(kernels: &'static [(&'static str, &'static str)], open_deadline: std::time::Duration, work: impl FnOnce() -> R + Send + 'static) -> Result<R, String> {
+        enum FromCard<R> {
+            Opened(Result<(), String>),
+            Ran(R),
+        }
+        let card = crate::devices::gpus().first().map(|d| d.index).ok_or("the device registry lists no GPU")?;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let placed = crate::devices::with_gpu(card, || {
+                let probe = match Gpu::try_new_cuda(kernels) {
+                    Ok(probe) => probe,
+                    Err(e) => return tx.send(FromCard::Opened(Err(format!("no CUDA device opens on gpu{card}: {e}")))).unwrap_or(()),
+                };
+                let backend = crate::backend_name();
+                let ready = match backend {
+                    "cuda" => Ok(()),
+                    other => Err(format!("the process's ambient backend is {other}, not cuda")),
+                };
+                let run = ready.is_ok();
+                if tx.send(FromCard::Opened(ready)).is_err() || !run {
+                    return; // the deadline passed, or there is nothing to run on
+                }
+                let ran = work();
+                drop(probe);
+                let _ = tx.send(FromCard::Ran(ran));
+            });
+            placed.unwrap_or_else(|e| panic!("gpu{card}: {e}"));
+        });
+        let rethrow = |worker: std::thread::JoinHandle<()>| -> ! {
+            match worker.join() {
+                Err(panic) => std::panic::resume_unwind(panic),
+                Ok(()) => panic!("testgpu::on_cuda: the worker on gpu{card} ended without a result"),
+            }
+        };
+        match rx.recv_timeout(open_deadline) {
+            Ok(FromCard::Opened(Ok(()))) => {}
+            Ok(FromCard::Opened(Err(why))) => return Err(why),
+            Ok(FromCard::Ran(_)) => unreachable!("the worker reports the device before it runs"),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => return Err(format!("opening the CUDA device on gpu{card} took longer than {open_deadline:?} (the card is loaded)")),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => rethrow(worker),
+        }
+        match rx.recv() {
+            Ok(FromCard::Ran(ran)) => Ok(ran),
+            _ => rethrow(worker),
+        }
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;

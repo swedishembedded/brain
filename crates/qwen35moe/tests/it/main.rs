@@ -30,4 +30,5 @@ mod serve;
 mod serve_conformance;
 mod shard_parity;
 mod streamed_construction;
+mod train_cuda_matches_cpu;
 mod vl;
