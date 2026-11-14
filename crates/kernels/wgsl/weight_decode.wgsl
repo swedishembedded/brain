@@ -158,7 +158,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
             let sh = bit & 31u;
             var q = w[gw + word] >> sh;
             if (sh + bits > 32u) { q = q | (w[gw + word + 1u] << (32u - sh)); }
-            let level = bitcast<f32>(wsm[q & ((1u << bits) - 1u)]);
+            // `bits & 31u`: FMT is a constant, so the compiler evaluates this shift in every
+            // specialization, including the ones where this branch is dead and `bits` wraps.
+            let level = bitcast<f32>(wsm[q & ((1u << (bits & 31u)) - 1u)]);
             var par = j & l;
             par = par ^ (par >> 4u);
             par = par ^ (par >> 2u);
