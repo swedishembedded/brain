@@ -1,0 +1,57 @@
+<!-- source-sha256: 37b4bd4f0cc43f9d9754093a80ed38b69c6fc51d2f58eaa6652dd348f9079682 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 300" width="980" height="300"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker><marker id="head-4a5568" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs><rect width="980" height="300" fill="#ffffff"/>
+<ellipse cx="60" cy="150" rx="40" ry="20" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="60" y="146.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">x</text>
+<text x="60" y="162.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">[6]</text>
+<rect x="120" y="122" width="110" height="56" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="175" y="146.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">RMS norm</text>
+<text x="175" y="162.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">gain g</text>
+<ellipse cx="290" cy="150" rx="38" ry="20" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="290" y="146.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">n</text>
+<text x="290" y="162.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">[6]</text>
+<rect x="350" y="46" width="110" height="48" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="405" y="66.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">W_gate</text>
+<text x="405" y="82.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">10 x 6</text>
+<rect x="350" y="206" width="110" height="48" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="405" y="226.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">W_up</text>
+<text x="405" y="242.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">10 x 6</text>
+<ellipse cx="520" cy="70" rx="38" ry="20" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="520" y="66.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">gate</text>
+<text x="520" y="82.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">[10]</text>
+<ellipse cx="520" cy="230" rx="38" ry="20" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="520" y="226.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">up</text>
+<text x="520" y="242.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">[10]</text>
+<rect x="570" y="122" width="100" height="56" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="620" y="146.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">SiLU(gate)</text>
+<text x="620" y="162.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">times up</text>
+<ellipse cx="722" cy="150" rx="32" ry="20" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="722" y="146.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">h</text>
+<text x="722" y="162.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">[10]</text>
+<rect x="776" y="122" width="84" height="56" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="818" y="146.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">W_down</text>
+<text x="818" y="162.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">6 x 10</text>
+<ellipse cx="818" cy="260" rx="32" ry="20" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="818" y="256.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">f</text>
+<text x="818" y="272.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">[6]</text>
+<rect x="890" y="240" width="60" height="40" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="920" y="264.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">+ x</text>
+<ellipse cx="920" cy="70" rx="32" ry="20" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="920" y="66.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">y</text>
+<text x="920" y="82.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">[6]</text>
+<line x1="103" y1="150" x2="117" y2="150" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="233" y1="150" x2="249" y2="150" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M290,130 L290,80 Q290,70 300,70 L347,70" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M290,170 L290,220 Q290,230 300,230 L347,230" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="463" y1="70" x2="479" y2="70" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="463" y1="230" x2="479" y2="230" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M558,70 L610,70 Q620,70 620,80 L620,119" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M558,230 L610,230 Q620,230 620,220 L620,181" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="673" y1="150" x2="687" y2="150" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="757" y1="150" x2="773" y2="150" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="818" y1="181" x2="818" y2="237" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="853" y1="260" x2="887" y2="260" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="920" y1="237" x2="920" y2="93" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M60,170 L60,278 Q60,288 70,288 L915,288 Q920,288 920,283 L920,283" fill="none" stroke="#4a5568" stroke-width="1.4" stroke-dasharray="5 3" marker-end="url(#head-4a5568)"/>
+<text x="470" y="280.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">the residual: x is added to f</text>
+<text x="160" y="28.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">shaded ovals: the six taps of the golden</text>
+</svg>
