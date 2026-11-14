@@ -105,10 +105,9 @@ pub fn training_sigmas(fc: &Flux2Config, size: u32) -> Vec<f32> {
 /// schedule entry is used verbatim rather than jittered - the point is that
 /// the training σ IS an inference σ. What changes is only the variance.
 ///
-/// **Why not an i.i.d. draw.** klein at 512 px evaluates four σ, and the loss
-/// at the largest of them is close to twice the loss at the smallest (the
-/// velocity target `ε − x₀` is far harder to predict when the input still
-/// carries some `x₀` to separate out). With one sample per step, the σ mix
+/// **Why not an i.i.d. draw.** klein at 512 px evaluates four σ, and the
+/// velocity target `ε − x₀` is not equally hard to predict across them, so
+/// the loss of a step depends on which σ it drew. With one sample per step, the σ mix
 /// inside any short window is therefore the single biggest term in what a
 /// window of reported losses - or a window of gradients - actually averages
 /// to. Drawn i.i.d. that mix is binomial and swings by ±1 count in every
