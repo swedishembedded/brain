@@ -1461,7 +1461,6 @@ mod tests {
         }
     }
 
-    /// An unknown name must still be an error, not a panic or a default.
     /// A declared range is enforced on every caller's value, so a default
     /// outside it would be refused the moment a UI sent it back.
     #[test]
@@ -1476,6 +1475,7 @@ mod tests {
         }
     }
 
+    /// An unknown name must still be an error, not a panic or a default.
     #[test]
     fn an_unknown_model_is_an_error() {
         let e = match provider("definitely/not-a-model") {
