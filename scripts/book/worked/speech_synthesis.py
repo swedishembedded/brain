@@ -987,20 +987,19 @@ def stream_schedule():
             if f >= nxt:
                 calls.append(f)
                 nxt *= 3
-        final_repeats = bool(calls) and calls[-1] == n
-        calls.append(n)
+        if not calls or calls[-1] != n:
+            calls.append(n)
         total = sum(calls)
-        new = [calls[0]] + [b - a for a, b in zip(calls, calls[1:])]
         rows.append((n, f"{n / FRAME_RATE:.2f}", ", ".join(str(c) for c in calls), len(calls), total, f"{total / n:.2f}",
-                     f"{(calls[0] / FRAME_RATE):.2f}", "yes" if final_repeats else "no"))
+                     f"{(calls[0] / FRAME_RATE):.2f}"))
     per = _decode_frame_macs()
     return ("The streaming schedule of the device engine: the codec decodes the codes so far when the first 8 frames exist, "
-            "then each time the frame count reaches 3 times the last trigger (8, 24, 72, 216), and once more on the finished clip; "
-            "every decode restarts at frame 0 and only the samples not yet sent are handed out. A clip shorter than 8 frames "
-            "is decoded once. One decode of n frames costs n x "
+            "then each time the frame count reaches 3 times the last trigger (8, 24, 72, 216), and once more on the finished clip "
+            "unless the last trigger already decoded all of it; every decode restarts at frame 0 and only the samples not yet "
+            "sent are handed out. A clip shorter than 8 frames is decoded once. One decode of n frames costs n x "
             f"{_m(per)} million multiply-adds (the decoder of Chapter 3).\n\n"
             + _table(["frames n", "seconds", "frames decoded in each call", "calls", "frames decoded in all", "ratio to n",
-                      "seconds of speech before the first sound", "last call repeats the one before"], rows, "rrlrrrrl"))
+                      "seconds of speech before the first sound"], rows, "rrlrrrr"))
 
 
 def first_sound():

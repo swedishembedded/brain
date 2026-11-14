@@ -724,19 +724,19 @@ A listener wants the first word while the third is still being written. What mus
 The Qwen3-TTS engine that keeps its weights on a device (`ResidentEngine` in `crates/qwen3tts/src/engine.rs`) hands out its first sound once 8 frames exist, 0.64 seconds of speech. It uses a fact about the codec: the decoder is causal throughout, so the samples of a prefix of the codes are the first samples of the whole. The engine decodes the codes so far at 8 frames, at 24, at 72, and at every time the count reaches three times the last trigger, then once more on the finished clip, and each decode starts at frame zero and sends only the samples not yet sent. The repeated work is the price of not having a streaming decoder on this path, and it is bounded by the geometric spacing.
 
 <!-- worked: speech_synthesis.stream_schedule -->
-The streaming schedule of the device engine: the codec decodes the codes so far when the first 8 frames exist, then each time the frame count reaches 3 times the last trigger (8, 24, 72, 216), and once more on the finished clip; every decode restarts at frame 0 and only the samples not yet sent are handed out. A clip shorter than 8 frames is decoded once. One decode of n frames costs n x 2,479.4 million multiply-adds (the decoder of Chapter 3).
+The streaming schedule of the device engine: the codec decodes the codes so far when the first 8 frames exist, then each time the frame count reaches 3 times the last trigger (8, 24, 72, 216), and once more on the finished clip unless the last trigger already decoded all of it; every decode restarts at frame 0 and only the samples not yet sent are handed out. A clip shorter than 8 frames is decoded once. One decode of n frames costs n x 2,479.4 million multiply-adds (the decoder of Chapter 3).
 
-| frames n | seconds | frames decoded in each call | calls | frames decoded in all | ratio to n | seconds of speech before the first sound | last call repeats the one before |
-|---:|---:|---|---:|---:|---:|---:|---|
-| 6 | 0.48 | 6 | 1 | 6 | 1.00 | 0.48 | no |
-| 20 | 1.60 | 8, 20 | 2 | 28 | 1.40 | 0.64 | no |
-| 24 | 1.92 | 8, 24, 24 | 3 | 56 | 2.33 | 0.64 | yes |
-| 38 | 3.04 | 8, 24, 38 | 3 | 70 | 1.84 | 0.64 | no |
-| 125 | 10.00 | 8, 24, 72, 125 | 4 | 229 | 1.83 | 0.64 | no |
-| 250 | 20.00 | 8, 24, 72, 216, 250 | 5 | 570 | 2.28 | 0.64 | no |
+| frames n | seconds | frames decoded in each call | calls | frames decoded in all | ratio to n | seconds of speech before the first sound |
+|---:|---:|---|---:|---:|---:|---:|
+| 6 | 0.48 | 6 | 1 | 6 | 1.00 | 0.48 |
+| 20 | 1.60 | 8, 20 | 2 | 28 | 1.40 | 0.64 |
+| 24 | 1.92 | 8, 24 | 2 | 32 | 1.33 | 0.64 |
+| 38 | 3.04 | 8, 24, 38 | 3 | 70 | 1.84 | 0.64 |
+| 125 | 10.00 | 8, 24, 72, 125 | 4 | 229 | 1.83 | 0.64 |
+| 250 | 20.00 | 8, 24, 72, 216, 250 | 5 | 570 | 2.28 | 0.64 |
 <!-- /worked -->
 
-A clip of 38 frames, the healthy length of the nine-word sentence, is decoded in three calls of 8, 24 and 38 frames, 70 frames in all, 1.84 times a single decode, and its first sound goes out when 0.64 seconds of speech exist. The row for 24 frames can be run by hand: a clip of 24 frames is decoded at 8, at 24, and a third time at 24 on the finished clip, which sends nothing new. The finishing decode runs whatever the last trigger was, so a clip whose length equals a trigger is decoded twice at that length. The commit that introduced the scheme (`a1da5a2d6`) says the streamed audio equals the whole decode; its test (`crates/qwen3tts/tests/it/resident_device.rs`) asserts that the relative root-mean-square difference is below $10^{-3}$, which is a bound of closeness and not equality.
+A clip of 38 frames, the healthy length of the nine-word sentence, is decoded in three calls of 8, 24 and 38 frames, 70 frames in all, 1.84 times a single decode, and its first sound goes out when 0.64 seconds of speech exist. The row for 24 frames can be run by hand: a clip of 24 frames is decoded at 8 and at 24, and the trigger at 24 has already decoded the finished clip, so no third call is made. Until commit `c9b4af7e1` the finishing decode ran whatever the last trigger was, and a clip whose length equalled a trigger was decoded twice at that length, the second time sending nothing. The commit that introduced the scheme (`a1da5a2d6`) says the streamed audio equals the whole decode; its test (`crates/qwen3tts/tests/it/resident_device.rs`) asserts that the relative root-mean-square difference is below $10^{-3}$, which is a bound of closeness and not equality.
 
 The host placement of the same engine streams only its codec. It generates every code first, then decodes them 16 frames, 1.28 seconds, at a time with the convolution state carried between chunks, so nothing is heard before the whole sentence is written. What the first sound costs on the device path is a sum that the table below makes explicit.
 
@@ -797,7 +797,7 @@ The s3tokenizer crate shows the value of a gate that cannot be approximated. The
 4. A reimplementation applies the penalty once for each occurrence. After a token has been seen 50 times, by what factor is its positive logit divided, and why would a test of sampled output at small sample sizes miss this?
 5. Two tokens of the speech tokenizer differ only in their last coordinate. By how much do they differ as integers, and why does the model that reads them never use that difference?
 6. In the toy, guidance moved the centre of the end points from 1.5 to 1.73 and shrank their spread from 0.3 to 0.129. What would you expect the guided mel of a real decoder to sound like compared with an unguided one, and what is the cost of getting more of it?
-7. A clip is exactly 72 frames. How many times is the codec decoder called by the device engine, on how many frames, and which call is wasted?
+7. A clip is exactly 72 frames. How many times is the codec decoder called by the device engine, on how many frames, and how many frames of decoding did the rule before commit `c9b4af7e1` add?
 8. The flow decoder of the third generation needs 28 tokens before it can emit the first chunk of a stream, but the first chunk costs about 820 billion multiply-adds. Name two things that make that number so much larger than the language model's share.
 
 ## Summary
@@ -861,7 +861,7 @@ The next chapter keeps the codec language model and changes the target: minutes 
 4. By $1.05^{50} = 11.47$, so 5.0 becomes 0.436 (and 131.5 after a hundred repeats). A short clip repeats a token only a few times, where the two rules give factors of 1.05 and $1.05^3 = 1.16$, so a test on short clips cannot tell them apart; only long runs do.
 5. The last coordinate has the place value $3^7 = 2187$, so the integers differ by 2187 or 4374 while the vectors differ in one digit. The model reads a token through an embedding table, one row per id, so the integer's size is never used and no ordering of the ids carries meaning.
 6. Guided speech follows its conditions harder (the words, the voice) and varies less from run to run, and with too much guidance sounds over-articulated or monotone, because the end points are pushed past what the data contain. The cost is a second evaluation of the network at every step, twice the work.
-7. The calls decode 8, 24, 72 and 72 frames, four calls and 176 frames in all; the last call is wasted, since the trigger at 72 had already decoded those same codes.
+7. The calls decode 8, 24 and 72 frames, three calls and 104 frames in all; the trigger at 72 has already decoded the finished clip. The earlier rule decoded the finished clip again, a fourth call of 72 frames (176 in all) that sent nothing.
 8. The flow decoder runs 20 evaluations (10 steps with guidance), each over every frame, and the reference's frames are part of the sequence: the first chunk's T is 206 frames, the reference's 150 and the tokens' 56, so most of the work is spent on the reference, which a language model step pays only once in its prefix.
 
 **Exercises.**
