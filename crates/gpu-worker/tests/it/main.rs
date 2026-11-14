@@ -82,3 +82,45 @@ fn a_quarantined_real_card_is_readmitted_by_a_real_probe() {
     health.run_probe(&Device::Gpu(0), &worker(), "probe gpu0", DEADLINE).expect("a healthy card passes its probe");
     assert_eq!(health.status(&Device::Gpu(0)).state, BreakerState::Closed);
 }
+
+/// The median of `n` timed calls of `f`.
+fn median(n: usize, mut f: impl FnMut()) -> Duration {
+    let mut took: Vec<Duration> = (0..n)
+        .map(|_| {
+            let started = Instant::now();
+            f();
+            started.elapsed()
+        })
+        .collect();
+    took.sort();
+    took[n / 2]
+}
+
+/// What one supervised request costs on top of the work it carries: the
+/// socket round trip and line framing alone (a request the worker answers
+/// without touching a device), against the same round trip carrying one
+/// dispatch on a real card and its read back. This is the overhead a model
+/// run inside the worker pays per request.
+#[test]
+fn a_supervised_request_costs_a_socket_round_trip_on_top_of_its_dispatch() {
+    let mut w = Worker::spawn_with(&worker(), REAP).expect("start brain-gpu-worker");
+    let unanswerable = |w: &mut Worker| {
+        let answer = w.request("ping", DEADLINE).expect("the worker answers");
+        assert!(answer.is_err(), "ping is not a request the worker serves: {answer:?}");
+    };
+    unanswerable(&mut w);
+    let round_trip = median(2000, || unanswerable(&mut w));
+    eprintln!("supervised request round trip (no device work): median {round_trip:?}");
+    assert!(round_trip < Duration::from_millis(5), "a request round trip took {round_trip:?}");
+    if !gpu0_available() {
+        return;
+    }
+    w.request("open gpu0", DEADLINE).expect("the worker answers").expect("gpu0 opens");
+    let dispatch = |w: &mut Worker| {
+        w.request("run probe {}", DEADLINE).expect("the worker answers").expect("the probe dispatch runs");
+    };
+    dispatch(&mut w);
+    let with_dispatch = median(200, || dispatch(&mut w));
+    eprintln!("supervised request carrying one dispatch and read back on gpu0: median {with_dispatch:?}");
+    assert!(with_dispatch > round_trip, "a dispatch cannot cost less than the empty round trip");
+}

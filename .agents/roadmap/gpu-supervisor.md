@@ -123,10 +123,10 @@ Choices the design above left open, and what was chosen:
   wedge (about 1.4 million states); nine deliberate bugs are each caught,
   among them never moving the resident, releasing its memory before its
   teardown ends, and tearing it down on the dispatcher.
-* `cargo test -p brain-gpu-worker` (2 tests, real card, skip with a printed
+* `cargo test -p brain-gpu-worker` (3 tests, real card, skip with a printed
   reason where no card opens): a job through the executor and a supervised
   worker dispatches on gpu0 and returns the checked sum; a quarantined card
-  is readmitted by a real probe.
+  is readmitted by a real probe; the per-request cost (below).
 
 ## Milestones
 
@@ -136,9 +136,72 @@ Choices the design above left open, and what was chosen:
 | executor lanes honour health; stuck activation or run frees the lane and unwinds the claim | done and verified for supervised instances |
 | in-process `bounded` wedges quarantine the card until a supervised probe passes | done (`note_in_process_wedge`); the abandoned thread itself is still not reclaimed, which is what M2 removes |
 | the serving process starts its executor with `Supervision` | done: see "`brain serve` supervision" above. Served models still run in process, so what a probe readmits is a card whose in-process waits timed out; the wedged thread itself is reclaimed only by M2 |
-| **M2** buffers and dispatch behind the protocol for `backend-wgpu` (`Alloc`/`Write`/`Dispatch`/`Read` with a `memfd` mapping for bulk tensors), selected by a flag | open: no model runs in a worker yet; `brain-gpu-worker` serves the probe kernel only |
-| **M3** measure the per-dispatch round trip against a real dispatch batch on the target cards | open: gated on M2 |
-| **M4** make it the default; delete the abandon-the-thread path from `bounded` | open: gated on M3 |
+| **M2** a served model executing inside the worker | open, redesigned below (request-level hosting); not started, because the first step is a decision about which program hosts model code |
+| **M3** measure the per-request round trip against real device work | measured for the protocol (below); per-request hosting passes, per-dispatch proxying does not |
+| **M4** make it the default; delete the abandon-the-thread path from `bounded` | open: gated on every served model hosting in a worker |
+
+## Models executing inside the worker
+
+### What the round trip costs
+
+`a_supervised_request_costs_a_socket_round_trip_on_top_of_its_dispatch`
+(`crates/gpu-worker/tests/it/main.rs`), on a P40 under a host load of about
+130 on 48 cores: a request the worker answers without device work has a
+median round trip of 18 us (2000 requests); one carrying a dispatch of the
+probe kernel, its buffer creation and a 16-byte read back takes 148 us
+(200 requests). The test prints both and bounds the empty round trip at
+5 ms.
+
+### Request-level hosting, not a proxied backend
+
+The design above put `Alloc`/`Write`/`Dispatch`/`Read` behind the protocol,
+one round trip per dispatch. A decode step is hundreds of dispatches, so
+at 18 us each that adds milliseconds per token: per-dispatch proxying fails
+its own M3 gate. The worker instead hosts the whole model, and the protocol
+carries jobs, as `SupervisedModel` already does (`open`, `run <action>
+<params>`): one round trip per job instead of one per dispatch, which
+against a job of milliseconds of device work is noise. Device memory then never crosses the boundary; only a job's
+inputs and outputs do, and those are JSON except for blobs.
+
+### The first real model, and what blocks it
+
+The smallest real served path is the decision models
+(`catalog::resident_decision`): JSON in and out, no blobs, no streaming,
+serial batches, small checkpoints. Moving them needs, in
+order:
+
+1. **Which program hosts model code.** The worker must link the model.
+   `brain-gpu-worker` is a layer-2 crate that links one backend; linking a
+   model family makes it a model-layer binary, and linking the catalog makes
+   it a second copy of `brain` (about 160 MB in the fast profile). The
+   options are `brain` re-executing itself in a worker mode (one binary
+   holds every model; it needs an internal entry point that is not a
+   capability, which the CLI rules do not cover yet), a model-linking worker
+   shipped beside `brain`, or one worker per family. Choosing is the first
+   step; the recommendation is the first, since M4 ends with every model in
+   a worker.
+2. **A generic host loop** (`residency::supervised`, the worker side of the
+   protocol over any `ResidentModel`): `open <device>` activates on that
+   device, `run` calls `Instance::run`, `probe` opens and checks the device.
+3. **Activation outside the catalog.** `DecisionResident` and the
+   `on_device` scoped device selection it activates through live in
+   `crates/catalog`; the host needs them below the catalog (`on_device` in
+   `residency`, the resident beside the decisions crate).
+4. **A serve flag** choosing worker hosting for a family, and the parent's
+   `SupervisedModel` carrying that family's manifest, instance key, estimate
+   and `check_job` unchanged.
+
+What a decision model does not need but every other family does, and so
+blocks M4: progress frames (streaming tokens: an `<id> progress <json>`
+line the parent forwards while the answer is pending), cancellation (a
+request is in flight alone, so a cancel needs a signal or a second socket),
+late admission into a running group (`run_open`'s `JobFeed` across the
+socket), blobs (images, audio: the `memfd` mapping above, now per job
+rather than per buffer), adapters attached while serving (the adapter
+registry lives in the parent), multi-device instances (several cards in one
+worker), and memory: each worker holds its own device context and its own
+host copy of converted weights, which in-process instances share; that cost
+per card has to be measured before more than one family moves.
 | moving a resident off a quarantined card | done: once the card's breaker trips (before that the restart probe is due at once, cheaper than a rebuild), an idle resident a queued job needs is abandoned when a healthy device could hold it (`move_off_quarantined`, `ResidencyManager::abandon_resident`): it leaves residency at once, so the claim builds it afresh on the healthy card, and it is dropped on a thread of its own (`drop_elsewhere`), keeping its memory charged until the drop reports back (`Msg::Dropped`, `release_abandoned`). A failed group's instance (`unwind_failed`, `unwind_failed_multi`) goes the same way, so no teardown through a suspect driver runs on the dispatcher. A teardown that never returns holds one thread and its memory, nothing else. A resident no healthy card can hold is refused while the trip lasts |
 | multi-device models under quarantine | done: a multi-device model has one placement (its resident devices, else the ones `estimate_multi` names; `ResidencyManager::multi_placement`), and `refuse_quarantined` refuses its jobs once any device of it is quarantined with a tripped breaker; before a trip they wait for the restart probe like single-device work |
 | Windows | open: no `SIGKILL` or process groups; `Worker::spawn` reports unsupported off Unix. `TerminateProcess` and a job object are the equivalent and need a platform seam |
