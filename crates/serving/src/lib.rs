@@ -24,6 +24,8 @@ pub mod executor;
 pub mod gguf_import;
 pub mod machine;
 pub mod model_dir;
+pub mod supervision;
 
 pub use executor::{build_executor, ServeKnobs, Serving, TrainKnobs};
 pub use machine::Machine;
+pub use supervision::{serve_supervision, ServeSupervision};

@@ -49,10 +49,12 @@ setup_file() {
   [ "$output" -gt 0 ]
 }
 
-@test "deb: payload ships the binary and the D-Bus system-bus policy" {
+@test "deb: payload ships the binary, its device worker beside it, and the D-Bus system-bus policy" {
   run dpkg-deb -c "$DEB"
   [ "$status" -eq 0 ]
   echo "$output" | grep -qE '\./usr/bin/brain$'
+  # `brain serve` looks for its health-probe worker in its own directory.
+  echo "$output" | grep -qE '^-rwxr-xr-x .* \./usr/bin/brain-gpu-worker$'
   echo "$output" | grep -qE '\./usr/share/dbus-1/system\.d/com\.swedishembedded\.Brain1\.conf$'
 }
 

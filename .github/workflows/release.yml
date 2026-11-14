@@ -7,7 +7,8 @@
 # only pushes main and the tag: no release build runs on a developer's
 # machine.
 #
-#   Linux   x86_64, aarch64   brain-linux-<arch>, brain-linux-<arch>.deb
+#   Linux   x86_64, aarch64   brain-linux-<arch>, brain-gpu-worker-linux-<arch>,
+#                             brain-linux-<arch>.deb (both programs)
 #   macOS   universal         brain-darwin-universal (x86_64 + Apple silicon)
 #   Windows x86_64            brain-windows-x86_64.exe
 #
@@ -18,7 +19,10 @@
 # published without the accelerated tier. The release carries a CycloneDX
 # SBOM and a build provenance attestation for every binary. Linux
 # builds link glibc, not musl: brain loads the GPU driver (Vulkan) at run
-# time, which a static musl binary cannot.
+# time, which a static musl binary cannot. `brain-gpu-worker` is the
+# supervised device worker `brain serve` probes a quarantined card in; it is
+# found beside `brain` under that exact name, and is Linux-only (it relies on
+# process groups and a parent-death signal).
 name: Release
 run-name: >-
   ${{ github.event_name == 'workflow_dispatch'
@@ -135,18 +139,19 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends cmake mold dpkg-dev
 
       - name: Release build
-        run: cargo build --release --locked -p brain-cli
+        run: cargo build --release --locked -p brain-cli -p brain-gpu-worker
 
       - name: It runs
         run: target/release/brain --version
 
       - name: Debian package
-        run: bash scripts/build/build-deb.sh --binary target/release/brain --arch ${{ matrix.deb_arch }} --out-dir target/debian
+        run: bash scripts/build/build-deb.sh --binary target/release/brain --worker target/release/brain-gpu-worker --arch ${{ matrix.deb_arch }} --out-dir target/debian
 
       - name: Stage artifacts
         run: |
           mkdir -p dist
           cp target/release/brain dist/brain-linux-${{ matrix.arch }}
+          cp target/release/brain-gpu-worker dist/brain-gpu-worker-linux-${{ matrix.arch }}
           cp target/debian/brain_*_${{ matrix.deb_arch }}.deb dist/brain-linux-${{ matrix.arch }}.deb
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

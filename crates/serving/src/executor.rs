@@ -108,6 +108,10 @@ pub struct ServeKnobs {
     /// Serve the deterministic, weight-free mock models (`--mock`), each call
     /// taking this many milliseconds (`--mock-delay-ms`); `None` serves none.
     pub mock_delay_ms: Option<u64>,
+    /// Device health: quarantine a card whose device work wedged or crashed,
+    /// and readmit it once a health probe passes ([`crate::serve_supervision`]).
+    /// `None` treats every card as always healthy.
+    pub supervision: Option<residency::supervised::Supervision>,
 }
 
 /// What `brain serve --training` decides about the training workload.
@@ -155,7 +159,7 @@ pub struct TrainKnobs {
 /// resident, and `knobs.decision` naming the decision models served beyond
 /// those the store holds.
 pub fn build_executor(machine: &Machine, reserved: u64, store: &catalog::ServedStore, policy: Policy, knobs: ServeKnobs) -> Serving {
-    let ServeKnobs { qwen: qwen_cfg, qwen35, ricursive, decision, ocr, max_batch, train, mock_delay_ms } = knobs;
+    let ServeKnobs { qwen: qwen_cfg, qwen35, ricursive, decision, ocr, max_batch, train, mock_delay_ms, supervision } = knobs;
     // Process-wide, before any OCR model is built: the models read it when they load.
     ocrserve::configure(ocr);
     let (gpus, npus, unified_gpus) = (&machine.gpus, &machine.npus, &machine.unified_gpus);
@@ -440,13 +444,14 @@ pub fn build_executor(machine: &Machine, reserved: u64, store: &catalog::ServedS
     // frees up is used again without a restart. Same `gpu_core::capacity` probe
     // the one-shot placer uses, which is what stops the two halves of this
     // process disagreeing about the same card.
-    let exec = Executor::start_with_probe(
+    let exec = Executor::start_supervised(
         models,
         budgets,
         policy,
         Some(std::sync::Arc::new(|| {
             gpu_core::capacity::available_gpus().into_iter().map(|(i, free)| (Device::Gpu(i), free)).collect()
         })),
+        supervision,
     );
     // Multi-device models the catalog owns (today: DeepSeek-OCR, whose vision
     // tower is on wgpu while its decoder is on the CPU backend). They are

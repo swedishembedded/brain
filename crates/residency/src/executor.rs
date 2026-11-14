@@ -28,7 +28,7 @@ use crate::adapter::{AdapterIdentity, ServedAdapters};
 use crate::affinity::{choose_replica, PrefixDirectory, ReplicaView};
 use crate::manager::{ClaimError, Claimed, ClaimedMulti, InstanceHandle};
 use crate::scheduler::{choose_next, Group, Policy};
-use crate::supervised::{device_label, Supervision};
+use crate::supervised::{device_label, Probe, Supervision};
 use crate::{Device, InstanceKey, MultiDeviceResidentModel, ResidencyManager, ResidentModel};
 
 /// One unit of work. `on_progress`/`reply`/`on_admit` are callbacks (no async
@@ -274,6 +274,11 @@ struct Inbox {
     /// limit); fixed at creation, so a group that never does skips the inbox.
     admits_late_jobs: bool,
     state: Mutex<InboxState>,
+    /// The first job result that reports an in-process device wait past
+    /// `--gpu-wait-s`, so the lane quarantines the card even when the model
+    /// turned the wedge into an error instead of panicking. Its own lock:
+    /// replies run while [`Self::state`] is held.
+    wait_timeout: Mutex<Option<String>>,
 }
 
 struct InboxState {
@@ -291,7 +296,16 @@ struct InboxState {
 
 impl Inbox {
     fn new(open: bool, room: usize) -> Arc<Inbox> {
-        Arc::new(Inbox { admits_late_jobs: open, state: Mutex::new(InboxState { open, room, jobs: Vec::new(), late_slots: Vec::new(), taken: 0 }) })
+        Arc::new(Inbox { admits_late_jobs: open, state: Mutex::new(InboxState { open, room, jobs: Vec::new(), late_slots: Vec::new(), taken: 0 }), wait_timeout: Mutex::new(None) })
+    }
+
+    /// Note `result` if it is the group's first in-process wait timeout.
+    fn note_result(&self, result: &ActionResult) {
+        if let Err(e) = result {
+            if backend_api::hardware::is_wait_timeout(e) {
+                self.wait_timeout.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(|| e.clone());
+            }
+        }
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, InboxState> {
@@ -1648,8 +1662,11 @@ fn lane_loop(rx: Receiver<LaneMsg>, done: Sender<Msg>, supervision: Option<Super
             0
         };
         let batch = batch + late_jobs;
-        if let (Some(h), Some((_, msg))) = (&health, &failed_jobs) {
-            note_in_process_wedge(h, &devices, msg);
+        if let Some(h) = &health {
+            let ran_past_wait = inbox.wait_timeout.lock().unwrap_or_else(|e| e.into_inner()).take();
+            if let Some(msg) = failed_jobs.as_ref().map(|(_, msg)| msg).or(ran_past_wait.as_ref()) {
+                note_in_process_wedge(h, &devices, msg);
+            }
         }
         let faulted = health.as_ref().is_some_and(|h| devices.iter().zip(&faults_before).any(|(d, &n)| h.faults(d) > n));
         let failed = failed || faulted;
@@ -1671,7 +1688,10 @@ fn lane_loop(rx: Receiver<LaneMsg>, done: Sender<Msg>, supervision: Option<Super
 /// probe never shares the device with other work.
 fn probe(supervision: &Supervision, device: Device) {
     let health = &supervision.health;
-    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| health.run_probe(&device, &supervision.probe, &format!("probe {}", device_label(device)), supervision.probe_deadline)));
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match &supervision.probe {
+        Probe::Worker { command, deadline } => health.run_probe(&device, command, &format!("probe {}", device_label(device)), *deadline),
+        Probe::Elapsed => health.pass_probe(&device),
+    }));
     match outcome {
         Ok(Ok(())) => {}
         Ok(Err(why)) => crate::log::warn(&format!("health probe of {device:?} failed: {why}")),
@@ -1823,6 +1843,7 @@ fn run_group(handle: &InstanceHandle, action: &str, jobs: Vec<Pending>, inbox: &
     let results = inst.run_batch(action, &invs, &mut route);
     if results.len() == feed.replies.len() {
         for (r, o) in feed.replies.drain(..).zip(results) {
+            inbox.note_result(&o);
             if let Some(r) = r {
                 r(o);
             }
@@ -1904,6 +1925,7 @@ impl crate::model::JobFeed for GroupFeed {
     }
 
     fn finish(&mut self, index: usize, result: ActionResult) {
+        self.inbox.note_result(&result);
         if let Some(reply) = self.replies.get_mut(index).and_then(Option::take) {
             reply(result);
         }

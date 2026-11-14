@@ -22,6 +22,7 @@ brain-checkpoint.workspace = true
 brain-fastvlm.workspace = true
 brain-gguf.workspace = true
 brain-gpu-core.workspace = true
+brain-gpu-supervisor.workspace = true
 brain-imgpipe.workspace = true
 brain-januspro.workspace = true
 brain-llava.workspace = true

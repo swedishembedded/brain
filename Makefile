@@ -130,17 +130,17 @@ build:
 # that (tens of GB on the shared build volume, alongside release's own); it
 # buys a link step fast enough to keep the e2e lane a fast lane, which is why
 # `build/release` below stays the separate, slower target everything else runs.
-## build/debug - dev-profile 'brain' binary (what the fast e2e suites drive)
+## build/debug - dev-profile 'brain' binary and its 'brain-gpu-worker' (what the fast e2e suites drive)
 build/debug:
 	cargo build
 
-## build/release - optimised 'brain' binary
+## build/release - optimised 'brain' binary and its device worker 'brain-gpu-worker' beside it
 build/release:
 	cargo build --release
 
 ## build/profiling - the release binary with line tables, for host CPU/cache/lock profiling (target/profiling/brain)
 build/profiling:
-	cargo build --profile profiling -p brain-cli
+	cargo build --profile profiling -p brain-cli -p brain-gpu-worker
 
 ## package - lists the package targets; builds nothing
 package:

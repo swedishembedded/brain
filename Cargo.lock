@@ -3062,6 +3062,7 @@ dependencies = [
  "brain-fastvlm",
  "brain-gguf",
  "brain-gpu-core",
+ "brain-gpu-supervisor",
  "brain-horizon",
  "brain-imgpipe",
  "brain-januspro",

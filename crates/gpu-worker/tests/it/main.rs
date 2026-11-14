@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use capability::{ActionSpec, Invocation, Manifest};
 use gpu_supervisor::{BreakerPolicy, BreakerState, CallError, Health, Worker, WorkerCommand};
 use residency::budget::Budgets;
-use residency::supervised::{Deadlines, SupervisedModel, Supervision};
+use residency::supervised::{Deadlines, Probe, SupervisedModel, Supervision};
 use residency::{Device, Executor, Job, MemCost, Policy};
 
 /// Device creation and pipeline compilation on a cold driver take seconds.
@@ -59,7 +59,7 @@ fn a_job_runs_on_a_real_card_through_a_supervised_worker() {
     let model = Arc::new(SupervisedModel::new(manifest, worker(), health.clone(), MemCost::new(64 << 20, 0), deadlines));
     let mut budgets = Budgets::new();
     budgets.set(Device::Gpu(0), 1 << 30, 0);
-    let supervision = Supervision { health: health.clone(), probe: worker(), probe_deadline: DEADLINE };
+    let supervision = Supervision { health: health.clone(), probe: Probe::Worker { command: worker(), deadline: DEADLINE } };
     let exec = Executor::start_supervised(vec![model], budgets, Policy::default(), None, Some(supervision));
     let (tx, rx) = channel();
     exec.submit(Job::new("gpu-probe", "probe", Invocation::new()).reply(move |r| {

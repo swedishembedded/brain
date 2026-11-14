@@ -18,8 +18,8 @@
 //! definitive error instead of holding the lane forever, and the executor
 //! unwinds the claim (budget, slot, instance) as for any failed group.
 //!
-//! [`Supervision`] hands the executor the shared [`Health`] registry and the
-//! probe worker. With it the executor places no work on a quarantined device,
+//! [`Supervision`] hands the executor the shared [`Health`] registry and how
+//! a quarantined device is probed ([`Probe`]). With it the executor places no work on a quarantined device,
 //! refuses work that nothing healthy can ever host, and probes each
 //! quarantined device on its own lane until the breaker closes.
 //!
@@ -43,13 +43,24 @@ use gpu_supervisor::{CallError, Health, Worker, WorkerCommand};
 use crate::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 
 /// What the executor needs to keep device health: the registry the supervised
-/// models record faults in, and the worker that probes a quarantined device.
+/// models record faults in, and how a quarantined device is probed.
 #[derive(Clone)]
 pub struct Supervision {
     pub health: Arc<Health<Device>>,
-    /// Started fresh for every probe and sent `probe <device>`.
-    pub probe: WorkerCommand,
-    pub probe_deadline: Duration,
+    pub probe: Probe,
+}
+
+/// How a quarantined device is tested before it is readmitted.
+#[derive(Clone, Debug)]
+pub enum Probe {
+    /// A fresh worker from `command` is sent `probe <device>` and must answer
+    /// within `deadline`.
+    Worker { command: WorkerCommand, deadline: Duration },
+    /// No worker program is available: a due probe passes without touching
+    /// the device. The breaker then only paces readmission (a restart is
+    /// readmitted at once, a tripped device after its spaced probes), which
+    /// still bounds what a wedging card costs.
+    Elapsed,
 }
 
 /// The bounds a supervised model's requests run under.

@@ -21,8 +21,8 @@ use std::time::{Duration, Instant};
 use capability::{ActionResult, ActionSpec, Invocation, Manifest};
 use gpu_supervisor::{BreakerPolicy, BreakerState, Health, WorkerCommand};
 use residency::budget::Budgets;
-use residency::supervised::{Deadlines, SupervisedModel, Supervision};
-use residency::{Device, Executor, Job, MemCost, Policy, ResidentModel};
+use residency::supervised::{Deadlines, Probe, SupervisedModel, Supervision};
+use residency::{Device, Executor, Instance, InstanceKey, Job, MemCost, Policy, ResidentModel};
 use serde_json::json;
 
 const GB: u64 = 1 << 30;
@@ -71,7 +71,7 @@ fn two_gpus() -> Budgets {
 }
 
 fn start(models: Vec<Arc<dyn ResidentModel>>, budgets: Budgets, health: &Arc<Health<Device>>, probe: &str) -> Executor {
-    let supervision = Supervision { health: health.clone(), probe: fake(probe), probe_deadline: Duration::from_secs(5) };
+    let supervision = Supervision { health: health.clone(), probe: Probe::Worker { command: fake(probe), deadline: Duration::from_secs(5) } };
     Executor::start_supervised(models, budgets, Policy::default(), None, Some(supervision))
 }
 
@@ -178,5 +178,70 @@ fn work_that_only_fits_a_quarantined_device_is_refused_not_left_waiting() {
     let err = r.recv_timeout(Duration::from_secs(10)).expect("a refusal, not a wait").0.expect_err("nothing may run on a quarantined device");
     assert!(err.contains("quarantined"), "{err}");
     assert!(started.elapsed() < Duration::from_secs(5), "the refusal took {:?}", started.elapsed());
+    exec.shutdown();
+}
+
+/// An in-process model whose run fails the way a device wait past
+/// `--gpu-wait-s` does when its parameters say `wedge`, without panicking.
+struct InProcess;
+
+struct InProcessInstance;
+
+impl ResidentModel for InProcess {
+    fn manifest(&self) -> Manifest {
+        Manifest::new("in-process", "a fake in-process device model", vec![ActionSpec::new("run", "run")])
+    }
+
+    fn instance_key(&self, _action: &str, _inv: &Invocation) -> InstanceKey {
+        InstanceKey::new("in-process", "default")
+    }
+
+    fn estimate(&self, _key: &InstanceKey) -> MemCost {
+        MemCost::new(GB, 0)
+    }
+
+    fn activate(&self, _key: &InstanceKey, _device: Device) -> Result<Box<dyn Instance>, String> {
+        Ok(Box::new(InProcessInstance))
+    }
+}
+
+impl Instance for InProcessInstance {
+    fn run(&mut self, _action: &str, inv: &Invocation, _progress: &mut dyn FnMut(capability::Progress)) -> ActionResult {
+        match inv.params.get("mode").and_then(|m| m.as_str()) {
+            Some("wedge") => Err(format!("poll_wait: GPU submit did not complete within 1s {} -- device likely wedged", backend_api::hardware::WAIT_TIMEOUT_MARK)),
+            _ => Ok(capability::Outcome::new()),
+        }
+    }
+}
+
+#[test]
+fn without_a_worker_an_in_process_wait_timeout_still_quarantines_the_card_until_the_breaker_readmits_it() {
+    let policy = BreakerPolicy { window: Duration::from_secs(600), trip_after: 2, probe_interval: Duration::from_millis(300), probes_to_close: 2 };
+    let health = Arc::new(Health::new(policy, REAP));
+    let mut one = Budgets::new();
+    one.set(Device::Gpu(0), 24 * GB, 0);
+    let exec = Executor::start_supervised(vec![Arc::new(InProcess)], one, Policy::default(), None, Some(Supervision { health: health.clone(), probe: Probe::Elapsed }));
+    let gpu0 = Device::Gpu(0);
+
+    // A first wait timeout is a restart: the card is quarantined, and with no
+    // worker to probe it the due probe readmits it without touching it.
+    let (_, r) = submit(&exec, "in-process", "wedge");
+    r.recv_timeout(Duration::from_secs(10)).expect("answered").0.expect_err("the wedged run fails");
+    assert_eq!(health.faults(&gpu0), 1, "the wait timeout is recorded against the card");
+    wait_until("the card to be readmitted", Duration::from_secs(15), || health.admits(&gpu0));
+    let (_, r) = submit(&exec, "in-process", "ok");
+    r.recv_timeout(Duration::from_secs(10)).expect("answered").0.expect("the readmitted card serves");
+
+    // A second inside the window trips the breaker: work is refused at once
+    // until the spaced readmissions have passed, then served again.
+    let (_, r) = submit(&exec, "in-process", "wedge");
+    r.recv_timeout(Duration::from_secs(10)).expect("answered").0.expect_err("the wedged run fails");
+    assert!(health.status(&gpu0).tripped, "{:?}", health.status(&gpu0));
+    let (_, r) = submit(&exec, "in-process", "ok");
+    let err = r.recv_timeout(Duration::from_secs(5)).expect("a refusal, not a wait").0.expect_err("a tripped card takes no work");
+    assert!(err.contains("quarantined"), "{err}");
+    wait_until("the tripped card to be readmitted", Duration::from_secs(20), || health.admits(&gpu0));
+    let (_, r) = submit(&exec, "in-process", "ok");
+    r.recv_timeout(Duration::from_secs(10)).expect("answered").0.expect("the card serves again");
     exec.shutdown();
 }

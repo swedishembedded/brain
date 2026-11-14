@@ -4,6 +4,10 @@
 
 # Build a standalone Debian package for the Brain CLI without cargo-deb.
 #
+# The package carries `brain` and the supervised device worker
+# `brain-gpu-worker` side by side in /usr/bin, where `brain serve` looks for
+# it. --worker defaults to the worker beside --binary (the same cargo profile).
+#
 # Depends are computed from the actual binary via dpkg-shlibdeps (brain links
 # wgpu/Vulkan/SDL - a hardcoded libc6-only guess would be wrong), the control
 # file carries Installed-Size, and the package ships md5sums plus a Debian
@@ -17,11 +21,13 @@ OUT_DIR="${ROOT}/target/debian"
 BINARY="${ROOT}/target/release/brain"
 ARCH="$(dpkg --print-architecture)"
 FLAVOR=""
+WORKER=""
 
 while (($#)); do
     case "$1" in
         --out-dir) OUT_DIR="$2"; shift 2 ;;
         --binary) BINARY="$2"; shift 2 ;;
+        --worker) WORKER="$2"; shift 2 ;;
         --arch) ARCH="$2"; shift 2 ;;
         --flavor) FLAVOR="$2"; shift 2 ;;
         *) printf 'error: unknown argument: %s\n' "$1" >&2; exit 2 ;;
@@ -29,6 +35,8 @@ while (($#)); do
 done
 
 [[ -f "${BINARY}" ]] || { printf 'error: binary not found: %s\n' "${BINARY}" >&2; exit 1; }
+WORKER="${WORKER:-$(dirname "${BINARY}")/brain-gpu-worker}"
+[[ -f "${WORKER}" ]] || { printf 'error: worker not found: %s (build it with the binary: cargo build -p brain-gpu-worker)\n' "${WORKER}" >&2; exit 1; }
 command -v dpkg-deb >/dev/null 2>&1 || { echo 'error: dpkg-deb is required' >&2; exit 1; }
 VERSION="$(grep '^version' "${ROOT}/Cargo.toml" | head -n1 | sed -E 's/.*"([^"]+)".*/\1/')"
 PACKAGE="brain_${VERSION}_${ARCH}${FLAVOR:+-${FLAVOR}}"
@@ -37,6 +45,7 @@ rm -rf "${STAGING}"
 install -d "${STAGING}/DEBIAN" "${STAGING}/usr/bin" "${STAGING}/usr/share/brain" \
     "${STAGING}/usr/share/doc/brain" "${STAGING}/usr/share/dbus-1/system.d"
 install -m 0755 "${BINARY}" "${STAGING}/usr/bin/brain"
+install -m 0755 "${WORKER}" "${STAGING}/usr/bin/brain-gpu-worker"
 # Only the shell/python samples are runtime client scripts against an
 # installed `brain`; the Rust SDK samples under samples/<category>/<name>
 # need `cargo build` and are not a release artifact.
@@ -69,7 +78,7 @@ Architecture: any
 Description: stub control for dpkg-shlibdeps
 EOF
     DEPENDS="$(cd "${SHLIBS_TMP}" \
-        && dpkg-shlibdeps -O "${STAGING}/usr/bin/brain" 2>/dev/null \
+        && dpkg-shlibdeps -O "${STAGING}/usr/bin/brain" "${STAGING}/usr/bin/brain-gpu-worker" 2>/dev/null \
         | sed -n 's/^shlibs:Depends=//p')"
     [[ -n "${DEPENDS}" ]] || { echo 'error: dpkg-shlibdeps produced no dependencies' >&2; exit 1; }
 else
@@ -92,6 +101,9 @@ Description: Swedish Embedded model training and inference runtime
  Brain is the native CLI and API server for Swedish Embedded's model runtime:
  training, evaluation and serving for the architectures listed by \`brain caps\`.
  .
+ brain-gpu-worker, beside brain in /usr/bin, is the worker process brain serve
+ health-probes a quarantined GPU in.
+ .
  Bundled sample client scripts are installed under /usr/share/brain/samples/;
  the D-Bus system-bus policy for \`brain serve --dbus-system\` is installed
  under /usr/share/dbus-1/system.d/.
@@ -106,6 +118,11 @@ brain for Debian
 
 Run `brain --help` for the full CLI reference and `brain caps` to list the
 architectures this build can train/eval/serve.
+
+/usr/bin/brain-gpu-worker is the supervised device worker: `brain serve`
+probes a GPU it quarantined (a device wait past --gpu-wait-s) in a fresh
+worker process before giving it work again. It must stay beside
+/usr/bin/brain.
 
 Bundled data installed under /usr/share/brain/:
   samples/shell/, samples/python/   runnable sample client scripts (each

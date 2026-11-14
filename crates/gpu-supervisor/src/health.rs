@@ -243,19 +243,32 @@ impl<K: Eq + Hash + Clone + Debug> Health<K> {
             }
         };
         match failure {
-            None => {
-                let closed = self.with(device, |e| {
-                    e.breaker.probe_passed(Instant::now());
-                    e.breaker.admits()
-                });
+            None => self.pass_probe(device),
+            Some(cause) => {
+                self.with(device, |e| self.note_fault(device, e, Instant::now(), &cause, None));
+                Err(cause)
+            }
+        }
+    }
+
+    /// Count the probe [`Self::begin_probe`] claimed as passed without running
+    /// one: for a caller with no worker program to probe with, whose breaker
+    /// then paces readmission only. Readmits the device once enough have passed.
+    pub fn pass_probe(&self, device: &K) -> Result<(), String> {
+        let state = self.with(device, |e| {
+            if e.breaker.state() != BreakerState::HalfOpen {
+                return None;
+            }
+            e.breaker.probe_passed(Instant::now());
+            Some(e.breaker.admits())
+        });
+        match state {
+            None => Err(format!("{device:?}: no health probe was begun")),
+            Some(closed) => {
                 if closed {
                     eprintln!("[gpu-supervisor] {device:?} passed its health probe; admitting work again");
                 }
                 Ok(())
-            }
-            Some(cause) => {
-                self.with(device, |e| self.note_fault(device, e, Instant::now(), &cause, None));
-                Err(cause)
             }
         }
     }

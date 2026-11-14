@@ -10,8 +10,9 @@ the question "what would an Erlang/OTP system have done here" was asked and
 answered honestly.
 
 **Status: the supervisor, the breaker and their executor integration are
-built and verified; one device path runs behind them end to end. In-process
-device work (every model today) still runs under `bounded`.** The table
+built and verified, and `brain serve` runs its executor with them; one
+device path runs behind them end to end. In-process device work (every
+served model today) still runs under `bounded`.** The table
 under "Milestones" says what is done and what is open, with the reason.
 
 The cross-process half of the device-init lock was reverted
@@ -60,9 +61,10 @@ worker.
 | `Worker` | `crates/gpu-supervisor/src/worker.rs` | `execve` of a worker program in its own process group with `PR_SET_PDEATHSIG = SIGKILL`; one `AF_UNIX` stream socket pair as its stdin/stdout; one line request and one line answer per call with a fresh id (a stale answer is discarded); an explicit deadline per request as a socket read timeout (no helper thread); on a missed deadline, end of stream or malformed reply, `SIGKILL` to the group and a bounded reap; a worker still in uninterruptible driver sleep after the bound is handed back, never waited on forever; drop terminates and reaps |
 | `Breaker` | `crates/gpu-supervisor/src/breaker.rs` | per-device circuit breaker with time passed in: a fault opens it with an immediate probe (a restart); the third fault within 600 s trips it, after which a probe runs every 300 s and two clean probes close it (`BreakerPolicy`, every value a parameter) |
 | `Health` | `crates/gpu-supervisor/src/health.rs` | the registry every supervised call goes through: refuses work for a quarantined device without sending anything, records each fault once, logs the trip once, parks unreaped workers and holds the device's probes back until they are reaped, runs probes in fresh workers |
-| executor integration | `crates/residency/src/executor.rs` (`start_supervised`, `assign`, `refuse_quarantined`, `start_probes`, `lane_loop`) | quarantined devices are excluded from placement like busy ones; work no healthy device can ever host is refused once the breaker tripped; a group that faulted its device fails and its claim (budget, slot, instance) is unwound; due probes run on the device's own lane, which is busy meanwhile; an in-process wait past `--gpu-wait-s` (`backend_api::hardware::WAIT_TIMEOUT_MARK`) quarantines the card too |
+| executor integration | `crates/residency/src/executor.rs` (`start_supervised`, `assign`, `refuse_quarantined`, `start_probes`, `lane_loop`) | quarantined devices are excluded from placement like busy ones; work no healthy device can ever host is refused once the breaker tripped; a group that faulted its device fails and its claim (budget, slot, instance) is unwound; due probes run on the device's own lane, which is busy meanwhile; an in-process wait past `--gpu-wait-s` (`backend_api::hardware::WAIT_TIMEOUT_MARK`) quarantines the card too, whether it panicked, failed the activation or came back as a job's error |
 | `SupervisedModel` | `crates/residency/src/supervised.rs` | a resident model whose instance is a worker process: `open <device>` at activation, `run <action> <params>` per job, `probe <device>` from the executor; a lost worker answers every later job of its batch with the same definitive error |
 | `brain-gpu-worker` | `crates/gpu-worker` | the real worker: opens card `gpu<i>` through `backend-wgpu`, compiles the probe kernel, and answers `probe` with a real dispatch whose result it checks |
+| `brain serve` supervision | `crates/serving/src/supervision.rs`, `ServeKnobs::supervision`, `crates/cli` `serve_supervision` | the serving executor runs with `Supervision`; probes run in the `brain-gpu-worker` found beside the `brain` executable (bounded by `--gpu-wait-s`); a missing or non-executable worker is named at startup and probes become `Probe::Elapsed` (the breaker paces readmission without touching the card); shipped in the Linux release artifacts and the `.deb` (`/usr/bin/brain-gpu-worker`) |
 
 Choices the design above left open, and what was chosen:
 
@@ -93,12 +95,20 @@ Choices the design above left open, and what was chosen:
   unsent; dropping a worker reaps it; the breaker's restart, trip, window
   and spaced-probe rules. The fakes are a POSIX shell that hangs in a
   grandchild or aborts.
-* `cargo test -p brain-residency --test it supervision` (3 tests): through
+* `cargo test -p brain-residency --test it supervision` (4 tests): through
   the executor, a hung run fails by its deadline while the other card
   serves and the restart probe readmits the device and the claim is
   unwound; a crash in activation keeps the card out (failing probes trip
   the breaker instead of spinning) while work is placed on the other card;
-  work only a tripped device could host is refused at once.
+  work only a tripped device could host is refused at once; with no worker
+  (`Probe::Elapsed`), a job error carrying the `--gpu-wait-s` mark
+  quarantines the card, a restart is readmitted at once, a trip refuses work
+  until the spaced readmissions pass.
+* `cargo test -p brain-serving --lib supervision` (2 tests): the worker
+  beside the server executable runs the probes, bounded by `--gpu-wait-s`; a
+  missing or non-executable worker is named and the breaker is kept.
+* `bats tests/e2e/deb.bats`: the package ships `/usr/bin/brain-gpu-worker`
+  executable beside `/usr/bin/brain`.
 * `cargo test -p brain-residency --test it supervisor_model` (2 tests): an
   exhaustive model of lanes, dispatcher, worker and the real `Breaker`
   (about half a million states); six deliberate bugs are each caught.
@@ -114,7 +124,7 @@ Choices the design above left open, and what was chosen:
 | **M1** worker binary with `open`/`probe`; supervised spawn, kill, reap; breaker | done and verified (above) |
 | executor lanes honour health; stuck activation or run frees the lane and unwinds the claim | done and verified for supervised instances |
 | in-process `bounded` wedges quarantine the card until a supervised probe passes | done (`note_in_process_wedge`); the abandoned thread itself is still not reclaimed, which is what M2 removes |
-| the serving process starts its executor with `Supervision` | open: `crates/serving` still calls `start_with_probe`. Needs the worker binary located beside `brain` and shipped with it in the release packaging; until then a served card is never quarantined |
+| the serving process starts its executor with `Supervision` | done: see "`brain serve` supervision" above. Served models still run in process, so what a probe readmits is a card whose in-process waits timed out; the wedged thread itself is reclaimed only by M2 |
 | **M2** buffers and dispatch behind the protocol for `backend-wgpu` (`Alloc`/`Write`/`Dispatch`/`Read` with a `memfd` mapping for bulk tensors), selected by a flag | open: no model runs in a worker yet; `brain-gpu-worker` serves the probe kernel only |
 | **M3** measure the per-dispatch round trip against a real dispatch batch on the target cards | open: gated on M2 |
 | **M4** make it the default; delete the abandon-the-thread path from `bounded` | open: gated on M3 |

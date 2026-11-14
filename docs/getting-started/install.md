@@ -39,6 +39,12 @@ A few things are optional, needed only for specific paths:
 make build/release          # build the optimized ./target/release/brain
 ```
 
+The build also produces `brain-gpu-worker` beside `brain`: the process
+`brain serve` health-probes a quarantined GPU in (see
+[device failure](../concepts/execution/device-failure.md)). Keep the two
+together when you copy `brain` elsewhere; the Linux release packages ship
+both.
+
 `make build/debug` also exists for an unoptimized debug build, but `make build/release`
 is what you want for anything performance-sensitive — training and inference
 both.

@@ -19,9 +19,28 @@ Device work that runs inside the brain process is bounded, not killable:
   claim (memory budget, slot, instance) is released. The next job for the
   model builds a fresh instance.
 
+## Device health in `brain serve`
+
+`brain serve` keeps a health record per card. A card whose device wait ran
+past `--gpu-wait-s` is quarantined: no new work is placed on it, work goes to
+another card that can hold it, and the card is readmitted once a health
+probe passes. The probe runs in `brain-gpu-worker`, a separate program that
+`brain serve` looks for in its own directory (the release packages install
+it beside `brain`; `make build/release` builds both into `target/release/`).
+At startup `brain serve` prints one line saying which form it runs in:
+
+- `device supervision: health probes run in <path>`: a probe is a fresh
+  worker process opening the card and running one checked dispatch, bounded
+  by `--gpu-wait-s`.
+- `device supervision without a worker: <why>`: the worker is missing or not
+  executable. Cards are still quarantined after a wait timeout, but are
+  readmitted on the schedule below without a probe, so a card that keeps
+  wedging is kept out after its third fault in ten minutes instead of costing
+  every request a full wait.
+
 ## Supervised work
 
-Device work can instead run in a supervised worker: a child process
+Device work can also run in a supervised worker: a child process
 (`brain-gpu-worker`) that owns one card's device and answers one request at a
 time. An embedder starts the executor with supervision
 (`residency::Executor::start_supervised`) and serves the model through

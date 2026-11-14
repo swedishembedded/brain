@@ -1158,7 +1158,7 @@ pub fn run_serve(args: &[String]) {
             adapter_mode,
             autofetch,
             scheduler: scheduler_policy(scheduler, policy.limits.max_batch),
-            knobs: serving::ServeKnobs { qwen: qwen_cfg, qwen35: qwen35_cfg, ricursive: ricursive_cfg, decision: decision_cfg, ocr: ocr_cfg, max_batch: policy.limits.max_batch, train, mock_delay_ms },
+            knobs: serving::ServeKnobs { qwen: qwen_cfg, qwen35: qwen35_cfg, ricursive: ricursive_cfg, decision: decision_cfg, ocr: ocr_cfg, max_batch: policy.limits.max_batch, train, mock_delay_ms, supervision: Some(serve_supervision()) },
         });
     }
 
@@ -1306,6 +1306,17 @@ fn refuse_unread_pins(store: &loader::served::ServedStore) {
         eprintln!("brain serve: {pin}");
     }
     std::process::exit(2);
+}
+
+/// Device health for `brain serve`, probing in the worker installed beside this
+/// executable; says at startup which form it runs in.
+fn serve_supervision() -> residency::supervised::Supervision {
+    let found = match std::env::current_exe() {
+        Ok(exe) => serving::serve_supervision(&exe),
+        Err(e) => serving::ServeSupervision::new(Err(format!("the brain executable's own path is unknown ({e}), so {} cannot be found beside it", serving::supervision::WORKER_PROGRAM))),
+    };
+    eprintln!("brain serve: {}", found.describe());
+    found.supervision
 }
 
 fn build_serving_executor(reserve_gb: u64, store: &loader::served::ServedStore, scheduler: residency::Policy, knobs: serving::ServeKnobs) -> serving::Serving {
