@@ -352,6 +352,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **determinant**: the signed factor by which a square matrix scales area or volume ($ad - bc$ for a $2 \times 2$); zero exactly when the matrix crushes space and has no inverse. *([Eigenvalues, Rotations and Low-Rank Structure](v01-mathematics/06-decompositions.md))*
 
+**determinism in training**: the property that a run's state after each step is a function of its recorded inputs (seeds, data, settings, code, group), so that repeating the run, or interrupting and resuming it, gives the same bits. *([Checkpoints, Determinism and Recovery](v13-training-at-scale/07-checkpoints-and-recovery.md))*
+
 **deterministic sampler**: a sampler whose output is a function of its starting noise alone, with no random draw after the first, so that the same noise always gives the same image; the step that re-noises the denoiser's guess to the next level with the noise the old level implies, and Euler's method on the velocity field, are such samplers. *([Samplers and Guidance](v08-image-generation/07-samplers-and-guidance.md))*
 
 **device-synchronized timing**: timing in which the clock stops only after the device has finished the work being timed, either by the host waiting for it or by reading timestamps the device wrote itself; a clock stopped when the call returns reads the host's cost of handing over the work. *([Measuring Performance Honestly](v04-computation/11-profiling.md))*
@@ -366,7 +368,7 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **diffusion world model**: a world model that produces the next frame by denoising noise, given the last frames and the action. *([World Models](v10-video-and-3d/07-world-models.md))*
 
-**direct preference optimisation**: training a policy on preference pairs with the loss $-\ln\mathrm{sigmoid}(u)$ of the reward difference whose reward is the policy's own log-ratio to a frozen reference, which is the closed-form optimum of the KL-penalised objective written as a reward model. *([Reinforcement and Preference Learning for Language Models](v12-reinforcement-learning/04-llm-alignment.md))*
+**direct preference optimization**: training a policy on preference pairs with the loss $-\ln\mathrm{sigmoid}(u)$ of the reward difference whose reward is the policy's own log-ratio to a frozen reference, which is the closed-form optimum of the KL-penalized objective written as a reward model. *([Reinforcement and Preference Learning for Language Models](v12-reinforcement-learning/04-llm-alignment.md))*
 
 **directional derivative**: the rate of change of a function per unit distance in a chosen unit direction $\mathbf{u}$, equal to $\nabla L\cdot\mathbf{u}$. *([Gradients, Jacobians and Many Variables](v01-mathematics/08-multivariable-calculus.md))*
 
@@ -562,7 +564,7 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **grouped-query attention**: attention in which each key-value head is read by a group of neighbouring query heads, so a layer stores $h_{\mathrm{kv}}$ key-value heads for $H$ query heads, the cache is $h_{\mathrm{kv}} / H$ of the multi-head cache, and the attention FLOPs are unchanged. *([Anatomy of a Modern Decoder](v06-language-models/01-modern-decoder.md))*
 
-**GRPO**: group relative policy optimisation, which samples several answers to a prompt and uses the group's mean reward (and optionally its standard deviation) in place of a learned critic to form each answer's advantage. *([Reinforcement and Preference Learning for Language Models](v12-reinforcement-learning/04-llm-alignment.md))*
+**GRPO**: group relative policy optimization, which samples several answers to a prompt and uses the group's mean reward (and optionally its standard deviation) in place of a learned critic to form each answer's advantage. *([Reinforcement and Preference Learning for Language Models](v12-reinforcement-learning/04-llm-alignment.md))*
 
 **GRU**: gated recurrent unit, a recurrent cell with one state, an update gate that sets how far the state moves toward a new candidate and a reset gate that sets how much of the old state the candidate may read, so that the old state reaches the new one through a gate and not through a matrix. *([Recurrent Networks](v05-sequences/05-recurrent-networks.md))*
 
@@ -668,7 +670,7 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **KL divergence**: the excess of the cross-entropy over the entropy, $D_{\mathrm{KL}}(p \,\Vert\, q) = \sum_k p_k \log(p_k/q_k)$; it is never negative, zero only when $q = p$, and not symmetric in its arguments. *([Information, Entropy and Surprise](v01-mathematics/13-information-theory.md))*
 
-**KL penalty**: the term $\beta\,\mathrm{KL}(\pi \,\|\, \pi_{\mathrm{ref}})$ subtracted from the expected reward to keep the policy near a frozen reference, whose maximiser is $\pi_{\mathrm{ref}} e^{r/\beta}/Z$. *([Reinforcement and Preference Learning for Language Models](v12-reinforcement-learning/04-llm-alignment.md))*
+**KL penalty**: the term $\beta\,\mathrm{KL}(\pi \,\|\, \pi_{\mathrm{ref}})$ subtracted from the expected reward to keep the policy near a frozen reference, whose maximizer is $\pi_{\mathrm{ref}} e^{r/\beta}/Z$. *([Reinforcement and Preference Learning for Language Models](v12-reinforcement-learning/04-llm-alignment.md))*
 
 **knowledge distillation**: training a student model to reproduce the output distributions of a frozen teacher, usually by the divergence $D_{\mathrm{KL}}(\mathbf{q} \,\Vert\, \mathbf{p})$ whose gradient with respect to the student's logits is $\mathbf{p} - \mathbf{q}$. *([Distillation](v13-training-at-scale/06-distillation.md))*
 
@@ -968,7 +970,7 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **policy**: a rule that chooses an action in each state; in this chapter a list of one action per state. *([Markov Decision Processes](v12-reinforcement-learning/01-mdps.md))*
 
-**policy-gradient theorem**: the statement that the gradient of the expected discounted return with respect to the policy's parameters is a sum over states, weighted by their discounted visitation, of each action's value times the gradient of its probability, with no term for the change of the state distribution. *([Policy Gradients](v12-reinforcement-learning/03-policy-gradients.md))*
+**policy gradient theorem**: the statement that the gradient of the expected discounted return with respect to the policy's parameters is a sum over states, weighted by their discounted visitation, of each action's value times the gradient of its probability, with no term for the change of the state distribution. *([Policy Gradients](v12-reinforcement-learning/03-policy-gradients.md))*
 
 **polynomial**: a sum of constant multiples of powers of $x$; one of degree $n$ has $n + 1$ parameters and is fixed by $n + 1$ points. *([Functions and Their Shapes](v01-mathematics/02-functions.md))*
 
@@ -978,7 +980,7 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **post-training quantization**: converting a trained float network to integer arithmetic without retraining, by choosing the scale and zero point of each weight tensor from the weights and of each activation tensor from ranges measured on data, and rewriting each layer as an integer accumulation followed by a requantization. *([Neural Processing Units and Graph Compilers](v04-computation/13-npu.md))*
 
-**PPO**: proximal policy optimisation, which takes several gradient steps on one batch of experience under a surrogate that weights each sample by the ratio of the new to the old policy's probability and clips the term of a sample that has moved far enough in the direction its advantage asked for. *([Policy Gradients](v12-reinforcement-learning/03-policy-gradients.md))*
+**PPO**: proximal policy optimization, which takes several gradient steps on one batch of experience under a surrogate that weights each sample by the ratio of the new to the old policy's probability and clips the term of a sample that has moved far enough in the direction its advantage asked for. *([Policy Gradients](v12-reinforcement-learning/03-policy-gradients.md))*
 
 **pre-norm**: the block layout in which each sublayer reads a normalized copy of the stream and its result is added to the stream unnormalized, $\mathbf{x} + g(\mathrm{norm}(\mathbf{x}))$, so that the path through the additions alone carries no norm. *([The Transformer Block](v05-sequences/09-transformer-block.md))*
 
@@ -1330,9 +1332,13 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **training memory formula**: the sum for a training step: for each parameter its value, gradient, optimizer slots and master copy (16 bytes under Adam in either f32 or mixed precision), plus the numbers kept per token for the backward pass, reduced by recomputation, plus scratch. *([Counting Parameters, FLOPs and Memory](v06-language-models/10-model-cost.md))*
 
+**training resumption**: continuing a run from a saved state so that the continuation performs the same updates as the uninterrupted run: it needs every number a step reads (weights, optimiser state, update count, data position, generator or seeds) and refuses a state that belongs to another run's options, data or group. *([Checkpoints, Determinism and Recovery](v13-training-at-scale/07-checkpoints-and-recovery.md))*
+
 **training set**: the rows used to fit a model's parameters, and no other decisions; the error on it is a flattering estimate of the error on new rows. *([Generalization, Overfitting and Honest Evaluation](v02-learning/05-generalization.md))*
 
 **training throughput**: the rate at which a training run consumes tokens, stated as the FLOPs and bytes each token costs and the fraction of the device's roofline that the run reaches, not as seconds. *([Training a GPT from Scratch](v05-sequences/10-training-gpt.md))*
+
+**transactional checkpoint**: a saved state of a run that is written under a name no reader uses, made durable part by part, and published by one atomic step, with the lengths and digests of its parts recorded, so that a crash at any point leaves the last complete checkpoint readable and a damaged one is detected and not used. *([Checkpoints, Determinism and Recovery](v13-training-at-scale/07-checkpoints-and-recovery.md))*
 
 **transducer**: a recogniser with an encoder, a predictor over the labels written so far and a joint network over every node of the lattice of rows and labels, in which a blank moves to the next row and a label is written on the same row. *([Speech Recognition](v09-audio/04-speech-recognition.md))*
 
