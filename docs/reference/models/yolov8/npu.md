@@ -57,7 +57,8 @@ $Y npu-run      --weights out/yolo.safetensors --image sample.png
 
 ## Install (Meteor Lake / NPU 3720)
 
-1. Install OpenVINO 2024.x runtime and the Intel NPU driver (Linux:
+1. Install an OpenVINO runtime of 2025.1 or newer (brain's binding refuses an
+   older one) and the Intel NPU driver (Linux:
    `intel-driver-compiler-npu` / `intel-level-zero-npu` plus level-zero;
    Windows: the Intel NPU driver from Intel's site).
 2. Source the OpenVINO environment so the runtime loader can find it:
