@@ -43,6 +43,7 @@ use crate::consolidate::{self, FullRequest, MergeRequest};
 use crate::dryrun;
 use crate::timeline;
 use crate::job::{self, FootprintCache, JobEnv};
+use crate::quota::{self, FreeSpace, Quotas};
 use crate::request::{self, Request};
 use crate::store::{ArtifactStore, StoreError};
 
@@ -59,6 +60,10 @@ pub struct TrainConfig {
     pub largest_card_bytes: Option<u64>,
     /// How many runs may be in flight at once: one per device that can hold one.
     pub devices: usize,
+    /// The storage limits a job and the artifact store are held to.
+    pub quotas: Quotas,
+    /// How the free disk space is read for the admission floor.
+    pub free_space: Arc<dyn FreeSpace>,
 }
 
 /// The training workload. See the module doc.
@@ -67,6 +72,7 @@ pub struct TrainResident {
     largest_card_bytes: Option<u64>,
     devices: usize,
     footprints: FootprintCache,
+    free_space: Arc<dyn FreeSpace>,
 }
 
 /// The key config prefixes: the bytes of a run that holds a card, and of one that works in host memory.
@@ -75,7 +81,7 @@ const HOST_PREFIX: &str = "host:";
 
 impl TrainResident {
     pub fn new(config: TrainConfig) -> TrainResident {
-        TrainResident { env: JobEnv { store: config.store, models_dir: config.models_dir, work_root: config.work_root }, largest_card_bytes: config.largest_card_bytes, devices: config.devices.max(1), footprints: FootprintCache::default() }
+        TrainResident { env: JobEnv { store: config.store, models_dir: config.models_dir, work_root: config.work_root, quotas: config.quotas }, largest_card_bytes: config.largest_card_bytes, devices: config.devices.max(1), footprints: FootprintCache::default(), free_space: config.free_space }
     }
 
     /// Everything about `inv` that can be known without a device: the request, the base, the artifact store it
@@ -243,6 +249,10 @@ impl ResidentModel for TrainResident {
     }
 
     fn check_job(&self, action: &str, inv: &Invocation) -> Result<(), String> {
+        // Work that would write to a disk that is nearly full is refused before it is queued.
+        let mut written_to = vec![self.env.work_root.as_path()];
+        written_to.extend(self.env.store.as_ref().map(|store| store.root()));
+        quota::admit_free_space(self.free_space.as_ref(), &self.env.quotas, &written_to)?;
         self.admit(action, inv).map(drop)
     }
 
@@ -290,4 +300,31 @@ impl Instance for TrainInstance {
 /// The service for `config`, as the executor registers it.
 pub fn resident(config: TrainConfig) -> Arc<dyn ResidentModel> {
     Arc::new(TrainResident::new(config))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Debug)]
+    struct Free(u64);
+    impl FreeSpace for Free {
+        fn available(&self, _: &std::path::Path) -> std::io::Result<u64> {
+            Ok(self.0)
+        }
+    }
+
+    fn service(free: u64) -> TrainResident {
+        let quotas = Quotas { min_free_bytes: 1000, ..Quotas::default() };
+        TrainResident::new(TrainConfig { models_dir: None, store: None, work_root: PathBuf::from("/nonexistent/work"), largest_card_bytes: None, devices: 1, quotas, free_space: Arc::new(Free(free)) })
+    }
+
+    #[test]
+    fn new_work_is_refused_at_admission_while_the_disk_is_under_the_floor() {
+        let refusal = service(999).check_job(request::ACTION, &Invocation::new()).unwrap_err();
+        assert!(refusal.contains("low on disk"), "{refusal}");
+        // With room, the same call gets as far as validating the request itself.
+        let past_the_floor = service(1000).check_job(request::ACTION, &Invocation::new()).unwrap_err();
+        assert!(!past_the_floor.contains("low on disk"), "{past_the_floor}");
+    }
 }

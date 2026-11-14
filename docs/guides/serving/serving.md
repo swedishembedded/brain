@@ -12,7 +12,8 @@ brain serve [--openai[:PORT]] [--anthropic[:PORT]] [--openrouter[:PORT]] \
             [--caller NAME:ROLE:KEYFILE[:MAX] ...] \
             [--checkpoint PATH [--tokenizer PATH]] \
             [--adapter FILE | --adapter-manifest FILE | --watch-adapters DIR | --serve-adapters DIR] \
-            [--training [--artifact-store DIR]]
+            [--training [--artifact-store DIR] [--artifact-max-bytes SIZE] [--artifact-store-max-bytes SIZE]
+             [--job-staging-max-bytes SIZE] [--min-free-bytes SIZE]]
 ```
 
 With no surface flag, `brain serve` serves the OpenAI-compatible API on
@@ -48,7 +49,7 @@ With no surface flag, `brain serve` serves the OpenAI-compatible API on
 - `--checkpoint PATH`, `--tokenizer PATH` - also serve this Qwen3 checkpoint
   (file or repo directory), with this `tokenizer.json` when none is beside it.
 - `--ready-file PATH` - see **Readiness** below.
-- `--training`, `--artifact-store DIR` - also serve training as a job (`brain/train`)
+- `--training`, `--artifact-store DIR` - also serve training as a job (`brain/train`); the storage quota flags are in [served training](../training/served-training.md#storage-quotas)
   on the cards serving shares, with datasets and adapters moved by file
   descriptor or by digest in `DIR`. Off unless given. See
   [Training as a served job](../training/served-training.md).

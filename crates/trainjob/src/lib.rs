@@ -21,6 +21,8 @@
 //! * [`request`]: the action's contract and the typed, bounded request.
 //! * [`store`]: the content-addressed artifact store datasets and adapters
 //!   move through, by blake3 digest; a caller never names a path.
+//! * [`quota`]: the storage limits (per artifact, whole store, per job, free-disk floor) and the
+//!   reservations that hold the service to them.
 //! * [`timeline`]: `timeline_train`, a timeline model trained and published as a checkpoint.
 //! * [`dryrun`]: `check_dataset`, a dataset checked against a base without training.
 //! * [`consolidate`]: the jobs that produce a checkpoint, `full_train` and `merge`.
@@ -31,11 +33,13 @@
 pub mod consolidate;
 pub mod dryrun;
 pub mod job;
+pub mod quota;
 pub mod request;
 pub mod resident;
 pub mod store;
 pub mod timeline;
 
+pub use quota::{DiskFree, FreeSpace, Quotas};
 pub use request::{ACTION, MODEL};
 pub use resident::{resident, TrainConfig, TrainResident};
 pub use store::{ArtifactStore, Digest, StoreError};

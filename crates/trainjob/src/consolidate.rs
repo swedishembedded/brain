@@ -285,9 +285,9 @@ pub fn run_full(env: &JobEnv, inv: &Invocation, progress: &mut dyn FnMut(Progres
     let request = FullRequest::from_invocation(inv)?;
     let p = &request.params;
     let base_dir = job::resolve_base(env.models_dir.as_deref(), &p.base)?;
-    let work = Workdir::create(&env.work_root)?;
+    let work = Workdir::create(env)?;
     progress(Progress::event(0, p.steps, json!({"type": "stage", "stage": "staging the datasets"})));
-    let staged = job::stage(&request.data, &inv.blobs, env.store.as_ref(), work.path())?;
+    let staged = job::stage(&request.data, &inv.blobs, env.store.as_ref(), &work)?;
     if inv.cancel.is_cancelled() {
         return Err("cancelled".into());
     }
@@ -347,6 +347,7 @@ pub fn run_full(env: &JobEnv, inv: &Invocation, progress: &mut dyn FnMut(Progres
         "initial_loss": outcome.initial_loss,
         "final_loss": outcome.final_loss,
     });
+    work.ensure_within_quota()?;
     let mut result = checkpoint_outcome(env, &checkpoint, p.install_as.as_deref(), report)?;
     // A server with no artifact store has nowhere to publish a checkpoint; it can only install one.
     if env.store.is_none() {
@@ -361,15 +362,16 @@ pub fn run_merge(env: &JobEnv, inv: &Invocation) -> ActionResult {
     let request = MergeRequest::from_invocation(inv)?;
     let p = &request.params;
     let base_dir = job::resolve_base(env.models_dir.as_deref(), &p.base)?;
-    let work = Workdir::create(&env.work_root)?;
+    let work = Workdir::create(env)?;
     let adapter = work.path().join("adapter.safetensors");
-    bring(&request.adapter, &inv.blobs, env.store.as_ref(), &adapter)?;
+    bring(&request.adapter, &inv.blobs, env.store.as_ref(), work.staging(), &adapter)?;
     if inv.cancel.is_cancelled() {
         return Err("cancelled".into());
     }
     let out_dir = work.path().join("merged");
     let merged = brain::merge_adapter(utf8(&base_dir)?, &adapter, &out_dir).map_err(trainer_failure)?;
     let report = json!({"status": "completed", "objective": "merge", "weights_sha256": merged.weights_digest});
+    work.ensure_within_quota()?;
     checkpoint_outcome(env, &merged.dir, p.install_as.as_deref(), report)
 }
 

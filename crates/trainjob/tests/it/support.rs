@@ -60,7 +60,7 @@ fn rig_over(tag: &str, memory: u64, store: bool, card: Option<u64>, extra: Vec<A
     std::fs::create_dir_all(&artifacts).unwrap();
     let store_handle = ArtifactStore::open(&artifacts).unwrap();
     let work_root = dir.join("work");
-    let config = TrainConfig { models_dir: Some(models.clone()), store: store.then(|| store_handle.clone()), work_root: work_root.clone(), largest_card_bytes: card, devices: 1 };
+    let config = TrainConfig { models_dir: Some(models.clone()), store: store.then(|| store_handle.clone()), work_root: work_root.clone(), largest_card_bytes: card, devices: 1, quotas: trainjob::Quotas::default(), free_space: Arc::new(trainjob::DiskFree) };
     let mut budgets = Budgets::new();
     budgets.set(Device::Cpu, memory, 0);
     let mut served = vec![trainjob::resident(config)];

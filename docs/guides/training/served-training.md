@@ -84,6 +84,29 @@ names the directory bulk data moves through (below); it must exist. The base is
 named by model id in `--models-dir`, as everywhere (`brain pull
 Qwen/Qwen3.8-27B-FP8`).
 
+### Storage quotas
+
+The store and every job's private directory are bounded, so one caller cannot
+fill the disk the other jobs share. Sizes are a byte count or `512M`, `8G`,
+`8GiB`, `1T` (binary multiples).
+
+| flag | default | bounds |
+|---|---|---|
+| `--artifact-max-bytes SIZE` | 64GiB | one published artifact |
+| `--artifact-store-max-bytes SIZE` | 1TiB | the artifact store in total, concurrent publishes included |
+| `--job-staging-max-bytes SIZE` | 128GiB | what one job keeps in its directory: staged datasets, checkpoints, temporaries |
+| `--min-free-bytes SIZE` | 10GiB | free space on the work directory's and the store's filesystems below which new work is refused; `0` turns the floor off |
+
+A publish claims its bytes against the store maximum as it copies and gives
+them back on every way it can end, so a write that would pass a limit fails
+with a clear error, leaves no partial artifact (publishing stays atomic) and
+frees its claim. Staged inputs are charged as they are copied; what the trainer
+writes is measured before anything is published, and the whole directory is
+removed when the job ends however it ends. A publish needs room for its whole
+size even when the artifact turns out to be one the store already holds. The
+quota flags need `--training`. The free-space floor is read with `statvfs` on
+Unix and is not enforced elsewhere.
+
 ## What moves, and how
 
 No dataset or adapter travels through the API as a message body.

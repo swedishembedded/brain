@@ -85,7 +85,7 @@ impl Sources {
 /// Runs the `timeline_train` job `inv` on the device this thread is scoped to.
 pub fn run(env: &JobEnv, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
     let sources = Sources::from_invocation(inv)?;
-    let work = Workdir::create(&env.work_root)?;
+    let work = Workdir::create(env)?;
     let mut call = Invocation::new();
     call.cancel = inv.cancel.clone();
     call.params = inv.params.clone();
@@ -96,7 +96,7 @@ pub fn run(env: &JobEnv, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -
     }
     for (name, source) in [("dataset", &sources.dataset), ("held_out", &sources.held_out)] {
         let staged = work.path().join(name);
-        bring(source, &inv.blobs, env.store.as_ref(), &staged)?;
+        bring(source, &inv.blobs, env.store.as_ref(), work.staging(), &staged)?;
         let bytes = std::fs::read(&staged).map_err(|e| format!("timeline_train: reading {name}: {e}"))?;
         std::fs::remove_file(&staged).ok();
         call.blobs.insert(name.to_string(), Blob::new(Media::Text, bytes));
@@ -114,5 +114,6 @@ pub fn run(env: &JobEnv, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -
     let mut report = trained.outputs.clone();
     report["status"] = json!("completed");
     report["objective"] = json!("timeline");
+    work.ensure_within_quota()?;
     checkpoint_outcome(env, &out, sources.install_as.as_deref(), report)
 }

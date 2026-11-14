@@ -215,6 +215,21 @@ SERVING OPTIONS
                          nodes share, which is how a dataset reaches this node. Without
                          it a job takes its datasets and returns its adapter by file
                          descriptor over D-Bus only.
+  --artifact-max-bytes SIZE
+                         (with --training) the most one published artifact may hold
+                         (default 64GiB); a larger write fails and leaves nothing behind.
+                         SIZE is a byte count or 512M, 8G, 8GiB, ...
+  --artifact-store-max-bytes SIZE
+                         (with --training) the most the artifact store may hold in total
+                         (default 1TiB); a publish that would pass it fails cleanly.
+  --job-staging-max-bytes SIZE
+                         (with --training) the most one job may keep in its private
+                         directory: staged datasets, checkpoints, temporaries (default
+                         128GiB). Inputs are charged as they are staged; what the trainer
+                         wrote is checked before anything is published.
+  --min-free-bytes SIZE  (with --training) new training work is refused while the work
+                         directory or the artifact store has less than this free on its
+                         filesystem (default 10GiB; 0 turns the floor off).
   --api-keys-out FILE    write {\"openai\":\"sk-brain-…\", …} as JSON, mode 0600
   --reserve-gb N         GB of VRAM kept free per GPU for activations (default 2, and
                          1 more for every 4 rows of --max-batch above 16: the
@@ -562,6 +577,16 @@ fn val(args: &[String], i: &mut usize, flag: &str) -> String {
     }
 }
 
+/// The byte count (`512M`, `8GiB`, `1.5G` or plain bytes) that must follow a size flag.
+fn size(args: &[String], i: &mut usize, flag: &str) -> u64 {
+    let v = val(args, i, flag);
+    memauth::parse_size(&v).unwrap_or_else(|e| {
+        eprintln!("brain serve: {flag}: {e}\n");
+        eprint!("{HELP}");
+        std::process::exit(2);
+    })
+}
+
 /// The parsed value that must follow a value-taking numeric flag. Same policy
 /// as [`val`], extended to the parse: an UNPARSEABLE value is a typo, not a
 /// request for the default - `--reserve-gb 2G` used to silently serve with
@@ -735,6 +760,8 @@ pub fn run_serve(args: &[String]) {
     // `--sched-*`: the residency scheduler's batching/fairness weights.
     let mut scheduler = residency::Policy::serving_default();
     let mut artifact_store: Option<String> = None;
+    let mut quotas = trainjob::Quotas::default();
+    let mut quota_flag_given = false;
     // Opt-in continuous-learning hot swap (`--watch-adapters DIR`): watch DIR
     // for a promoted LoRA adapter and point the served Qwen3 at it without a
     // restart. `None` (the default) spawns no watcher at all -- a server that
@@ -862,6 +889,10 @@ pub fn run_serve(args: &[String]) {
             "--autofetch" => autofetch = true,
             "--mock-delay-ms" => mock_delay_ms = Some(parsed(args, &mut i, "--mock-delay-ms")),
             "--artifact-store" => artifact_store = Some(val(args, &mut i, "--artifact-store")),
+            "--artifact-max-bytes" => (quotas.max_artifact_bytes, quota_flag_given) = (size(args, &mut i, "--artifact-max-bytes"), true),
+            "--artifact-store-max-bytes" => (quotas.max_store_bytes, quota_flag_given) = (size(args, &mut i, "--artifact-store-max-bytes"), true),
+            "--job-staging-max-bytes" => (quotas.max_job_staging_bytes, quota_flag_given) = (size(args, &mut i, "--job-staging-max-bytes"), true),
+            "--min-free-bytes" => (quotas.min_free_bytes, quota_flag_given) = (size(args, &mut i, "--min-free-bytes"), true),
             "--watch-adapters" => watch_adapters = Some(val(args, &mut i, "--watch-adapters")),
             "--serve-adapters" => serve_adapters = Some(val(args, &mut i, "--serve-adapters")),
             "--adapter" => adapter = Some(val(args, &mut i, "--adapter")),
@@ -1065,23 +1096,23 @@ pub fn run_serve(args: &[String]) {
     // The training workload, with its artifact store opened now: a mistyped directory ends the start, it is not
     // discovered by the first job.
     let train = match (training, artifact_store) {
-        (false, Some(_)) => {
-            eprintln!("brain serve: --artifact-store is the store of the training workload; add --training");
+        (false, artifact_store) if artifact_store.is_some() || quota_flag_given => {
+            eprintln!("brain serve: --artifact-store and the training quota flags belong to the training workload; add --training");
             std::process::exit(2);
         }
-        (false, None) => None,
+        (false, _) => None,
         (true, dir) => {
             if stdio {
                 eprintln!("brain serve: --training applies to the HTTP and D-Bus surfaces; the stdio controller serves none. Add --openai, --anthropic, --openrouter or --dbus.");
                 std::process::exit(2);
             }
             let artifact_store = dir.map(|dir| {
-                trainjob::ArtifactStore::open(Path::new(&dir)).unwrap_or_else(|e| {
+                trainjob::ArtifactStore::open_with(Path::new(&dir), &quotas).unwrap_or_else(|e| {
                     eprintln!("brain serve: --artifact-store {dir}: {e}");
                     std::process::exit(2);
                 })
             });
-            Some(serving::TrainKnobs { artifact_store })
+            Some(serving::TrainKnobs { artifact_store, quotas })
         }
     };
 

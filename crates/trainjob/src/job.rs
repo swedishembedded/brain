@@ -26,6 +26,7 @@ use std::time::Instant;
 use capability::{ActionResult, Blob, Invocation, Media, Outcome, Progress};
 use serde_json::{json, Value};
 
+use crate::quota::{Quotas, Staging};
 use crate::request::{DataRefs, Objective, Request, Source};
 use crate::store::{ArtifactStore, StoreError};
 
@@ -40,6 +41,8 @@ pub struct JobEnv {
     pub models_dir: Option<PathBuf>,
     /// Where each job makes its private directory.
     pub work_root: PathBuf,
+    /// What a job may keep in that directory.
+    pub quotas: Quotas,
 }
 
 /// The directory the jobs of this user make their private directories in: `brain-train-<uid>` under the
@@ -54,13 +57,18 @@ pub fn default_work_root() -> PathBuf {
     std::env::temp_dir().join(name)
 }
 
-/// A job's private directory, removed when the job ends however it ends.
-pub struct Workdir(PathBuf);
+/// A job's private directory, removed when the job ends however it ends (success, failure, cancellation or
+/// panic), with the budget of bytes the job may keep in it.
+pub struct Workdir {
+    path: PathBuf,
+    staging: Staging,
+}
 
 static JOBS: AtomicU64 = AtomicU64::new(0);
 
 impl Workdir {
-    pub fn create(root: &Path) -> Result<Workdir, String> {
+    pub fn create(env: &JobEnv) -> Result<Workdir, String> {
+        let root = env.work_root.as_path();
         let mut builder = std::fs::DirBuilder::new();
         #[cfg(unix)]
         std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
@@ -79,17 +87,31 @@ impl Workdir {
         }
         let dir = root.join(format!("job-{}-{}", std::process::id(), JOBS.fetch_add(1, Ordering::Relaxed)));
         builder.recursive(false).create(&dir).map_err(|e| format!("train: cannot make the job directory {}: {e}", dir.display()))?;
-        Ok(Workdir(dir))
+        Ok(Workdir { path: dir, staging: Staging::new(env.quotas.max_job_staging_bytes) })
     }
 
     pub fn path(&self) -> &Path {
-        &self.0
+        &self.path
+    }
+
+    /// The budget the datasets staged into this directory are charged to.
+    pub fn staging(&self) -> &Staging {
+        &self.staging
+    }
+
+    /// Refuses a job whose directory (what the trainer wrote as well as what was staged) has outgrown its budget,
+    /// before anything of it is published.
+    pub fn ensure_within_quota(&self) -> Result<(), String> {
+        if tree_bytes(&self.path) > self.staging.limit() {
+            return Err(self.staging.over());
+        }
+        Ok(())
     }
 }
 
 impl Drop for Workdir {
     fn drop(&mut self) {
-        std::fs::remove_dir_all(&self.0).ok();
+        std::fs::remove_dir_all(&self.path).ok();
     }
 }
 
@@ -114,31 +136,38 @@ pub(crate) fn store_failure(e: &StoreError) -> String {
 }
 
 /// Puts the input `source` at the new file `dest`: an input blob is copied, a digest is fetched from `store` and
-/// verified as it is copied.
-pub fn bring(source: &Source, blobs: &BTreeMap<String, Blob>, store: Option<&ArtifactStore>, dest: &Path) -> Result<(), String> {
+/// verified as it is copied. What lands there is charged to `staging`; an input that does not fit is refused
+/// before anything of it is kept.
+pub fn bring(source: &Source, blobs: &BTreeMap<String, Blob>, store: Option<&ArtifactStore>, staging: &Staging, dest: &Path) -> Result<(), String> {
     match source {
         Source::Blob(name) => {
             let blob = blobs.get(name).ok_or_else(|| format!("train: the input blob \"{name}\" is not attached"))?;
             if blob.bytes.len() as u64 > MAX_INPUT_BYTES {
                 return Err(format!("train: the input blob \"{name}\" is larger than {MAX_INPUT_BYTES} bytes"));
             }
+            staging.charge(blob.bytes.len() as u64)?;
             std::fs::write(dest, &blob.bytes).map_err(|e| format!("train: staging \"{name}\": {e}"))
         }
         Source::Digest(digest) => {
             let store = store.ok_or_else(|| "train: this server has no artifact store (--artifact-store), so a dataset cannot be named by digest".to_string())?;
-            store.fetch(digest, dest, MAX_INPUT_BYTES).map(drop).map_err(|e| store_failure(&e))
+            let limit = MAX_INPUT_BYTES.min(staging.remaining());
+            let size = store.fetch(digest, dest, limit).map_err(|e| match e {
+                StoreError::TooLarge { .. } if limit < MAX_INPUT_BYTES => staging.over(),
+                other => store_failure(&other),
+            })?;
+            staging.charge(size)
         }
     }
 }
 
 /// Puts every dataset of `data` into `dir` as a file of its own: input blobs are copied, digests are
 /// fetched from `store` and verified as they are copied.
-pub fn stage(data: &DataRefs, blobs: &BTreeMap<String, Blob>, store: Option<&ArtifactStore>, dir: &Path) -> Result<Staged, String> {
+pub fn stage(data: &DataRefs, blobs: &BTreeMap<String, Blob>, store: Option<&ArtifactStore>, work: &Workdir) -> Result<Staged, String> {
     let mut count = 0usize;
     let mut stage_one = |source: &Source| -> Result<PathBuf, String> {
         count += 1;
-        let dest = dir.join(format!("input-{count}"));
-        bring(source, blobs, store, &dest)?;
+        let dest = work.path().join(format!("input-{count}"));
+        bring(source, blobs, store, work.staging(), &dest)?;
         Ok(dest)
     };
     Ok(Staged {
@@ -539,9 +568,9 @@ pub fn run(env: &JobEnv, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -
     let request = Request::from_invocation(inv)?;
     let base_dir = resolve_base(env.models_dir.as_deref(), &request.params.base)?;
     let steps = request.params.steps;
-    let work = Workdir::create(&env.work_root)?;
+    let work = Workdir::create(env)?;
     progress(Progress::event(0, steps, json!({"type": "stage", "stage": "staging the datasets"})));
-    let staged = stage(&request.data, &inv.blobs, env.store.as_ref(), work.path())?;
+    let staged = stage(&request.data, &inv.blobs, env.store.as_ref(), &work)?;
     if inv.cancel.is_cancelled() {
         return Err("cancelled".into());
     }
@@ -552,6 +581,7 @@ pub fn run(env: &JobEnv, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -
         Objective::Dpo => train_preference(&request, &base_dir, &staged, &out_dir, &inv.cancel, began, progress)?,
         Objective::Sft | Objective::PolicyGradient => train_chat(&request, &base_dir, &staged, &out_dir, &inv.cancel, began, progress)?,
     };
+    work.ensure_within_quota()?;
     let mut result = Outcome::new();
     let mut digest = None;
     if let Some(store) = &env.store {
@@ -588,4 +618,57 @@ pub fn run(env: &JobEnv, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -
         result = result.blob("record", Blob::new(Media::Text, std::fs::read(record).map_err(|e| format!("train: reading the training record: {e}"))?));
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use capability::Media;
+
+    fn env_with(root: &Path, max_job_staging_bytes: u64, store: Option<ArtifactStore>) -> JobEnv {
+        JobEnv { store, models_dir: None, work_root: root.to_path_buf(), quotas: Quotas { max_job_staging_bytes, ..Quotas::default() } }
+    }
+
+    fn blobs(sizes: &[(&str, usize)]) -> BTreeMap<String, Blob> {
+        sizes.iter().map(|(name, n)| ((*name).to_string(), Blob::new(Media::Bytes, vec![7u8; *n]))).collect()
+    }
+
+    #[test]
+    fn staged_inputs_are_charged_and_the_one_that_does_not_fit_is_refused_unwritten() {
+        let root = tempfile::tempdir().unwrap();
+        let work = Workdir::create(&env_with(&root.path().join("w"), 10, None)).unwrap();
+        let inputs = blobs(&[("a", 6), ("b", 6)]);
+        let (a, b) = (work.path().join("a"), work.path().join("b"));
+        bring(&Source::Blob("a".into()), &inputs, None, work.staging(), &a).unwrap();
+        let error = bring(&Source::Blob("b".into()), &inputs, None, work.staging(), &b).unwrap_err();
+        assert!(error.contains("staging space"), "{error}");
+        assert!(a.exists() && !b.exists(), "the refused input left nothing behind");
+    }
+
+    #[test]
+    fn a_digest_larger_than_the_staging_room_is_refused_and_leaves_no_copy() {
+        let root = tempfile::tempdir().unwrap();
+        let artifacts = tempfile::tempdir().unwrap();
+        let store = ArtifactStore::open(artifacts.path()).unwrap();
+        let digest = store.publish_bytes(&[3u8; 64]).unwrap();
+        let work = Workdir::create(&env_with(&root.path().join("w"), 32, Some(store.clone()))).unwrap();
+        let dest = work.path().join("input");
+        let error = bring(&Source::Digest(digest), &BTreeMap::new(), Some(&store), work.staging(), &dest).unwrap_err();
+        assert!(error.contains("staging space"), "{error}");
+        assert!(!dest.exists());
+    }
+
+    #[test]
+    fn what_a_trainer_wrote_past_the_budget_is_caught_before_publishing_and_removed_with_the_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let work = Workdir::create(&env_with(&root.path().join("w"), 100, None)).unwrap();
+        std::fs::create_dir(work.path().join("run")).unwrap();
+        std::fs::write(work.path().join("run").join("checkpoint"), [0u8; 100]).unwrap();
+        work.ensure_within_quota().unwrap();
+        std::fs::write(work.path().join("run").join("extra"), [0u8; 1]).unwrap();
+        assert!(work.ensure_within_quota().unwrap_err().contains("staging space"));
+        let dir = work.path().to_path_buf();
+        drop(work);
+        assert!(!dir.exists(), "the partial staging is removed when the job ends");
+    }
 }

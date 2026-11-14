@@ -111,9 +111,9 @@ pub fn report_json(report: &brain::dataset_report::DatasetReport, kind: &str, ma
 pub fn run(env: &JobEnv, inv: &Invocation) -> ActionResult {
     let request = Request::from_invocation(inv)?;
     let p = &request.params;
-    let work = Workdir::create(&env.work_root)?;
+    let work = Workdir::create(env)?;
     let dataset = work.path().join("dataset.jsonl");
-    bring(&request.dataset, &inv.blobs, env.store.as_ref(), &dataset)?;
+    bring(&request.dataset, &inv.blobs, env.store.as_ref(), work.staging(), &dataset)?;
     if inv.cancel.is_cancelled() {
         return Err("cancelled".into());
     }

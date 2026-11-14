@@ -116,6 +116,9 @@ pub struct TrainKnobs {
     /// The content-addressed store datasets are named in and adapters are published to
     /// (`--artifact-store`); `None` serves a training workload that takes and returns data by descriptor only.
     pub artifact_store: Option<trainjob::ArtifactStore>,
+    /// The storage limits the artifact store, each job's staging and admission are held to
+    /// (`--artifact-max-bytes`, `--artifact-store-max-bytes`, `--job-staging-max-bytes`, `--min-free-bytes`).
+    pub quotas: trainjob::Quotas,
 }
 
 /// Build the shared executor with every model registered, sized to the given per-GPU
@@ -483,7 +486,7 @@ pub fn build_executor(machine: &Machine, reserved: u64, store: &catalog::ServedS
     // see `trainjob::resident` for the policy. One run per card that serving may use.
     if let Some(train) = train {
         let largest = gpus.iter().map(|&(_, total)| total.saturating_sub(reserved)).max();
-        exec.register(trainjob::resident(trainjob::TrainConfig { models_dir: store.models_dir().map(std::path::Path::to_path_buf), store: train.artifact_store, work_root: trainjob::job::default_work_root(), largest_card_bytes: largest, devices: gpus.len().max(1) }));
+        exec.register(trainjob::resident(trainjob::TrainConfig { models_dir: store.models_dir().map(std::path::Path::to_path_buf), store: train.artifact_store, work_root: trainjob::job::default_work_root(), largest_card_bytes: largest, devices: gpus.len().max(1), quotas: train.quotas, free_space: std::sync::Arc::new(trainjob::DiskFree) }));
     }
     Serving { executor: exec, qwen, qwen35: qwen35_discovered, ricursive: ricursive_discovered }
 }
