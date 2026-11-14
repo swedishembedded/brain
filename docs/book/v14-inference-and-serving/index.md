@@ -18,4 +18,5 @@ You can state how many copies of a model's weights a loader holds and why, read 
 3. [Managing the KV Cache](03-paged-kv.md): how do many conversations share one device's memory for their caches?
 4. [Batching and Scheduling Requests](04-batching.md): how does a server keep the device busy while answering many users at once?
 5. [Speculative Decoding](05-speculative-decoding.md): how can a small model's guesses make a large model generate faster without changing its output?
+6. [Capabilities, Providers and APIs](06-capabilities-and-apis.md): how does an engine present hundreds of models through a few stable interfaces?
 8. [Running and Observing an Engine](08-operations.md): how do we see what a running engine is doing, control it, and shut it down cleanly?
