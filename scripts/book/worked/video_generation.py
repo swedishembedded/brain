@@ -8,7 +8,7 @@ function without arguments returns a markdown string that the chapter embeds bet
 markers; the functions with arguments (or a leading underscore) supply the numbers of the chapter's figures, so a picture and the
 table beside it cannot disagree.
 
-* the frame-to-frame difference curve of a clip and the blow-up ratio that summarises it, on constant-frame clips;
+* the frame-to-frame difference curve of a clip and the blow-up ratio that summarizes it, on constant-frame clips;
 * the pairs of positions an attention layer scores for a clip read frame by frame, as space then time, and all at once;
 * the arithmetic of one transformer block (linear layers, self-attention, text cross-attention) for brain's video models;
 * the rotary angles of a latent token in LTX (physical positions, a band shared by three axes) and in Wan (three ladders);

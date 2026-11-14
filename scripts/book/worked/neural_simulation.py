@@ -153,7 +153,7 @@ def connectome_rows():
     return (f"The two files as printed above, read by splitting on commas outside double quotes. Neurons keep file order (row index "
             f"0 to 3). The believed transmitter is the verified one when there is one, otherwise the predicted one, and the sign is "
             f"+1 for ACH, -1 for GABA and GLUT, 0 for none.\n\n{t1}\n\nThe connection rows ({len(rows)} rows, {kept} synapses) "
-            f"are summed per (pre, post) pair across neuropils and sorted by (post, pre):\n\n{t2}\n\n{t3}\n\n"
+            f"as read:\n\n{t2}\n\nSummed per (pre, post) pair across neuropils and sorted by (post, pre), they become the edges:\n\n{t3}\n\n"
             f"Accounting: {len(rows)} rows read, {len(rows)} kept, 0 rejected; {len(edges)} distinct edges; {kept} synapses. Sign "
             f"census over edges: {exc} excitatory, {inh} inhibitory, {zero} with no sign. The graph by columns (neuron `i` owns "
             f"`indptr[i]` to `indptr[i+1]`-1):\n\n{t4}")
@@ -382,7 +382,7 @@ def sparse_network():
     t = _table(["neuron", "spikes, all edges", "spikes, floor 5", "first spike ticks, all edges", "first spike ticks, floor 5"], rows,
                align="lrrll")
     p = LIF
-    return (f"The graph of the previous block, signed and scaled by 0.3 (weights $+2.7$, $+3.6$ and $-1.2$ for the rows 0 to 1, 0 to 2 "
+    return (f"The graph of the first block, signed and scaled by 0.3 (weights $+2.7$, $+3.6$ and $-1.2$ for the rows 0 to 1, 0 to 2 "
             f"and 1 to 2). Neuron 0 receives the constant drive {drive_d} on every tick (units of $R = 1$); no other neuron is driven. "
             f"Parameters: $z = {p['z']}$, rest and reset 0, threshold 1, floor $V_{{\\mathrm{{min}}}} = {p['v_min']}$, "
             f"$E_{{\\mathrm{{exc}}}} = {p['e_exc']}$, $E_{{\\mathrm{{inh}}}} = {p['e_inh']}$, 1 refractory tick, excitatory keep factor "
@@ -414,7 +414,7 @@ def sparse_cost():
             f"layout stores every one of the $n^2$ weights as 4 bytes and reads the $n$-entry spike vector once; the gather stores "
             f"per edge a 4-byte weight and a 4-byte source index and reads one 4-byte spike value through that index (12 bytes per edge), plus "
             f"the column starts ($4(n+1)$ bytes) and the spike vector itself ($4n$ bytes).\n\n"
-            f"The graph of this chapter ($n = {n}$, $E = {e}$):\n\n{t1}\n\n"
+            f"The four-neuron graph ($n = {n}$, $E = {e}$):\n\n{t1}\n\n"
             f"The sizes below are chosen, not measured, except that the second and third rows are the cord sizes quoted in the header "
             f"of the engine's gather kernel (23,665 neurons and 1.37 million edges at the synapse floor of 5, 5.31 million before it); "
             f"the first and last are round numbers.\n\n{t2}\n\n"
@@ -552,13 +552,13 @@ def bouncing_ball():
             f"$z < 0$ the floor pushes up with the force $k\\,(-z)$, $k/m = {k:g}$ per second squared, so $\\omega = \\sqrt{{k/m}} = {omega:g}$ radians "
             f"per second; there is no damping, so the ideal bounce is perfectly elastic and returns to the height {z0:g}. Semi-implicit Euler: "
             f"$v \\leftarrow v + h a(z)$, then $z \\leftarrow z + h v$ with the new $v$. The ball reaches the floor at speed "
-            f"$\\sqrt{{2gz_0}} = {v_hit:.4f}$, penetrates at most $v/\\omega \\approx {v_hit / omega * 1000:.2f}$ millimetres, and one contact lasts "
+            f"$\\sqrt{{2gz_0}} = {v_hit:.4f}$, penetrates about $v/\\omega \\approx {v_hit / omega * 1000:.2f}$ millimetres plus the {z_eq * 1000:.2f} millimetres by which gravity alone sinks it, and one contact lasts "
             f"$\\pi/\\omega = {math.pi / omega * 1000:.2f}$ milliseconds. The energy "
             f"$E = mgz + \\frac12 mv^2 + \\frac12 k\\max(0, -z)^2$ starts at {m * g * z0:.2f}. {t_end:g} seconds are simulated, which holds "
             f"three contacts; an apex is the height of the first grid point where the upward velocity has run out.\n\n{t1}\n\n"
             f"The stability limit $h\\omega = 2$ needs a contact that lasts. The same body resting on the floor, at its equilibrium "
             f"penetration $z_{{\\mathrm{{eq}}}} = -mg/k = -{z_eq * 1000:.2f}$ millimetres, nudged by $\\epsilon = 0.01$ millimetre "
-            f"($10^{{-5}}$) at zero velocity, and stepped at $h = (h\\omega)/\\omega$ for 3000 steps (the growth per step is the modulus of the "
+            f"($10^{{-5}}$ metres) at zero velocity, and stepped at $h = (h\\omega)/\\omega$ for 3000 steps (the growth per step is the modulus of the "
             f"larger eigenvalue of the one-step matrix, 1 when the pair is on the unit circle):\n\n{t2}")
 
 
@@ -647,7 +647,7 @@ def closed_loop():
             f"command cell, driven with the constant current {q['i_d']}; 1 the proprioceptor, driven with the current "
             f"`angle_gain` times the joint angle; 2 to {1 + NP} an extensor pool of {NP} motor neurons, each excited by neuron 0 with "
             f"weight {q['w_de']}; {2 + NP} to {1 + 2 * NP} a flexor pool of {NP}, each excited by neuron 1 with weight {q['w_pf']}. "
-            f"Membrane and synapse parameters as in the previous block. Each control tick: the angle fixes the sensor current, one "
+            f"Membrane and synapse parameters as in the sparse-network block. Each control tick: the angle fixes the sensor current, one "
             f"neural tick runs, the activation is multiplied by {q['act_decay']} and then changed by {q['act_gain']} for each "
             f"extensor spike (plus) and each flexor spike (minus), the command is the activation clamped to $[-1, 1]$, and "
             f"{q['substeps']} physics steps of $h = {q['h']:g}$ seconds integrate $I\\ddot q = {q['torque_gain']:g}\\,u - {q['stiffness']:g}q "
@@ -697,9 +697,9 @@ def lateralisation():
             f"(+6), slot 1 of IR (+6), slot 2 of ML (+6), slot 3 of ML (-3), slot 4 of MR (+6) and slot 5 of MR (-3). The real wiring puts "
             f"the sources {', '.join(names[j] for j in real)} in slots 0 to 5: each side's sensor excites its interneuron, which excites "
             f"its own motor neuron and inhibits the other. Neuron 0 (SL) alone is driven, with current 3.0, for 100 ticks, with the "
-            f"neuron parameters of the previous block. The real wiring gives ML {len(fired[4])} spikes and MR {len(fired[5])}. A "
+            f"neuron parameters of the sparse-network block. The real wiring gives ML {len(fired[4])} spikes and MR {len(fired[5])}. A "
             f"shuffle assigns the six sources to the six slots in every possible way ({total} distinct assignments, since two sources "
-            f"appear twice), keeping every neuron's in-degree and the multiset of weights. Response of ML against MR: lateralisation "
+            f"appear twice), keeping every neuron's in-degree and the multiset of weights. Response of ML against MR: lateralization "
             f"$(L - R)/(L + R)$ above $+0.5$ is left, below $-0.5$ right, in between mixed; no spike on either is silent. "
             f"Smallest distance of any threshold decision from the threshold, over all runs: {margin:.1e}.\n\n{t}")
 
@@ -743,7 +743,7 @@ def discretisation_ledger():
         ("the wingbeat against the clocks",
          f"{1.0 / (beat_hz * dt_phys):.1f} physics steps and {1.0 / (beat_hz * dt_ctrl):.2f} control ticks per beat of {beat_hz:g} per second"),
     ]
-    return _table(["discretisation", "what it does in this chapter's examples"], rows, align="ll")
+    return _table(["discretization", "what it does in the examples above"], rows, align="ll")
 
 
 # ---------------------------------------------------------------------------------------------------------- figure data helpers

@@ -22,7 +22,7 @@ def render() -> str:
     front = sfm.sweep_curve(*PIXEL, rmax=5.5, samples=160)
     true = sfm.sweep_curve(*PIXEL, sfm.MVS_NORMAL, rmax=5.5, samples=160)
     rt = sfm.true_range(PIXEL[0] + 0.5, PIXEL[1] + 0.5)
-    p = Plot((2.5, 5.5), (0.0, 1.0), width=560, height=340, xlabel="hypothesised range along the ray (m)",
+    p = Plot((2.5, 5.5), (0.0, 1.0), width=560, height=340, xlabel="hypothesized range along the ray (m)",
              ylabel="cost, 1 - NCC", title="Plane sweep through pixel (36, 26)", legend_loc="ur")
     p.line([r for r, c in front], [c for r, c in front], color=0, label="fronto-parallel normal", width=1.9)
     p.line([r for r, c in true], [c for r, c in true], color=2, label="true normal", width=1.9)

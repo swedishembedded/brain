@@ -367,7 +367,7 @@ def rotation_forms():
     out = ["Each rotation is given as a rotation vector w (angle |w| about w / |w|). The matrix is Rodrigues' formula "
            "I + sin(th) S + (1 - cos(th)) S^2 with S the cross-product matrix of the unit axis; the quaternion is "
            "(cos(th/2), sin(th/2) axis); the matrix is taken back to a quaternion by the largest-component rule and to a "
-           "rotation vector by the formula of the chapter. The last column is the largest entry-wise difference between "
+           "rotation vector by the atan2 formula of rotation_vector_of. The last column is the largest entry-wise difference between "
            "the original matrix and the matrix rebuilt from each recovered form.", ""]
     rows = []
     for name, w in cases:

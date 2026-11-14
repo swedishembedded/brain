@@ -767,7 +767,7 @@ def sparse_structure():
     nsamp = sfm.ransac_iterations(sum(two["mask"]) / NTRACK, 8, 500)
     return "\n".join([
         f"Frames {BASE_PAIR[0]} and {BASE_PAIR[1]} give the pair (the distance of their centres, {BASELINE:.4f} metres, is the one length the "
-        f"reader is told). `structure_from_motion.ransac_essential` on the 43 normalized correspondences, threshold {PAIR_THRESH_PX:g} pixel, cap 500, "
+        f"reader is told). `structure_from_motion.ransac_essential` on the 43 normalized correspondences, threshold {PAIR_THRESH_PX:g} pixels, cap 500, "
         f"generator `{RANSAC_NAME}` (seed {bookrng.seed_of(RANSAC_NAME)}): {two['iters']} iterations (the adaptive bound at the end is {nsamp}), "
         f"{sum(two['mask'])} inliers of 43, the tracks outside the model are {[j for j in range(NTRACK) if not two['mask'][j]]} (tracks 40, 41, 42 are the "
         f"balls), the pose has the rotation angle {_rot_deg(two['R']):.3f} degrees (true {_rot_deg(cameras()[BASE_PAIR[1]][0]):.3f}) and the "
@@ -792,7 +792,7 @@ def sparse_structure():
         f"reprojection under the registered pose is within 8 pixels. Then {len(h1) - 1} iterations (RMS reprojection error {h1[0][4]:.3f} to "
         f"{h1[-1][4]:.3f} pixels); the median residual of every track is then below {GATE_PX:g} pixels (the gate of this milestone), so none is "
         f"dropped and the second solve has {len(h2) - 1} accepted iteration(s). {len(P.points)} points, {n} observations, {P.nc} camera unknowns "
-        f"and {3 * len(P.points)} point coordinates; the expected RMS of a fit with the noise {TRACK_SIGMA:g} px is "
+        f"and {3 * len(P.points)} point coordinates; the expected RMS of a fit with the noise {TRACK_SIGMA:g} pixel is "
         f"sigma sqrt(2) sqrt((2 n - p) / (2 n)) = {floor:.3f}, the adjustment reaches {h2[-1][4]:.3f}.", "",
         "The baseline of the pair is set to its length, so every translation and every point is multiplied by it. Against the truth:", "",
         _table(["frame", "rotation error (degrees)", "centre error (metres)"], err_rows, "rrr"), "",
@@ -891,9 +891,9 @@ def dynamics():
         f"the normal equations with {RIDGE:g} added to the diagonal entries of a and b, solved by Gauss-Jordan elimination with partial pivoting, each sum over "
         "the transitions in order. Fitted coefficients:", "",
         _table(["ball", "axis", "a", "b", "c"], rows, "llrrr"), "",
-        "The root mean square one-step residual over the 10 transitions, in metres: " + "; ".join(one) + ". A spring and a glider are linear: their "
-        "coefficients can be read against the recurrences of milestone 1 (for the spring in x, a = 1 + d - dk = 1.8756 and b = -d = -0.995; for a "
-        "glider a = 1.9 and b = -0.9), up to the noise of the detections.", "",
+        "The root mean square one-step residual over the 10 transitions, in metres: " + "; ".join(one) + ". The spring's coefficients can be read against the recurrence of milestone 1 "
+        "(in x, a = 1 + eta - eta k = 1.8756 and b = -eta = -0.995), up to the noise of the detections; a glider's would be a = 1.9 and "
+        "b = -0.9, which the nearly dependent features of ball B do not recover.", "",
         f"Free run from the detections of frames {OBSERVED - 2} and {OBSERVED - 1}, {HELD} frames, each prediction fed back (and, for the clamped "
         f"model, clipped to the clamp box of milestone 2 after every step). Distance in metres of the predicted position from the true one at frames "
         f"{OBSERVED} .. {FRAMES - 1}:", "",
@@ -916,7 +916,7 @@ def held_out():
         rows.append(row)
     return "\n".join([
         "Mean squared error over pixels and channels of each held-out frame (12 .. 17) against the clean true frame, rendered at the true camera of that "
-        "frame (exported as in milestone 3), with the Gaussians of milestone 4 and the balls where each row puts them. Each number carries the digits "
+        "frame (exported as in milestone 4), with the Gaussians of milestone 4 and the balls where each row puts them. Each number carries the digits "
         "that the run and its four nudged copies share. The last row is not a render: it scores the noisy observed frame 11 as if it were the prediction.", "",
         _table(["prediction"] + [f"frame {OBSERVED + k}" for k in range(HELD)] + ["mean"], rows, "lrrrrrrr")])
 

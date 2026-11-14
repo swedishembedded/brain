@@ -19,7 +19,7 @@ The module is a complete small splat renderer with its backward pass:
 * the analytic gradient of a pixel loss with respect to all 14 numbers of every Gaussian, checked against central differences;
 * Adam on a three-Gaussian scene seen from four cameras, with the nudges of `stable.py`;
 * the split and clone rules of density control, and the opacity and scale correction that makes a relocation image-preserving;
-* evaluation along rays through a pinhole and an equidistant fisheye lens, against the linearised footprint;
+* evaluation along rays through a pinhole and an equidistant fisheye lens, against the linearized footprint;
 * the work of the tiled pipeline in pairs, FLOPs and bytes.
 
 Arithmetic is the language's 64-bit floating point (correctly rounded library sqrt, exp, log, sin, cos, atan2, tan, acos) unless a block
@@ -295,11 +295,11 @@ def compositing_pixel():
         a = min(ALPHA_MAX, ops[i] * math.exp(-sigma_[i]))
         wsum += a * Tt
         Tt *= 1.0 - a
-    return ("One pixel; seven Gaussians in depth order, with sigma (the exponent of the Gaussian at this pixel) 0, 0, 6.5, 0, 0, 0, 0, "
+    return ("One pixel; seven Gaussians in depth order, with kappa (the exponent of the Gaussian at this pixel) 0, 0, 6.5, 0, 0, 0, 0, "
             "peak opacities 0.995, 0.8, 0.9, 0.7, 0.6, 0.5, 0.3, colours red, green, blue, yellow, cyan, magenta, white, and background "
-            "(0.2, 0.2, 0.2). The raw alpha is opacity * exp(-sigma), capped at 0.99; a pair below 1/255 is skipped; the walk stops "
+            "(0.2, 0.2, 0.2). The raw alpha is opacity * exp(-kappa), capped at 0.99; a pair below 1/255 is skipped; the walk stops "
             "before a Gaussian that would take T to 1e-4 or below. T is the transmittance before the row, w = alpha T.\n\n"
-            + _table(["i", "sigma", "opacity * exp(-sigma)", "alpha", "T before", "w = alpha T", "accumulated colour / note"], rows, "rrrrrrl")
+            + _table(["i", "kappa", "opacity * exp(-kappa)", "alpha", "T before", "w = alpha T", "accumulated colour / note"], rows, "rrrrrrl")
             + f"\n\nThe walk stops at Gaussian {stopped}. The pixel is the accumulated colour plus T * background = {_v(final, 6)} with "
             f"T = {_g(T, 6)}. The weights of the {len(used)} Gaussians used sum to {_g(wsum, 8)} = 1 - T = {_g(1.0 - T, 8)}. Composited "
             f"in the reverse order (the same {len(used)} Gaussians, last used first, each with its own alpha, no stop), the same Gaussians give {_v(swapped, 6)}: compositing is not commutative, which is why the "
@@ -971,7 +971,9 @@ def fit_toy():
             f"1e-8, bias correction) with the rates mean 0.02, log scale 0.03, quaternion 0.01, opacity logit 0.1, colour 0.03; the loss of an "
             f"update is the mean over the four training views of the mean squared error over pixels and channels; {FIT_STEPS} updates. The "
             "held-out column is the same error on the fifth camera, which no update saw. Under the stable-digits rule the run is repeated with the first "
-            "mean number of the start changed by +1e-12, -1e-12, +3e-12 and -3e-12. " + stab.RULE + "\n\n"
+            "mean number of the start changed by +1e-12, -1e-12, +3e-12 and -3e-12, and a number is printed with only the digits that "
+            "are the same in the run and in the four copies: in full if all agree on it, as 'about x' with the leading digits on which "
+            "all agree, or as 'unstable' when not even one digit survives.\n\n"
             + _table(["updates", "training loss", "held-out error"], rows, "rrr")
             + f"\n\nAfter {FIT_STEPS} updates the distance of each fitted mean from the target's is {dtext[0]}, {dtext[1]} and {dtext[2]} "
               f"(0.15 z draws started them at {', '.join(f'{norm(sub(s0[i][0:3], FIT_TARGET[i][0:3])):.4f}' for i in range(3))}), and the fitted "
@@ -1133,7 +1135,7 @@ def ray_response(m, Lam, d):
 
 
 def ewa_response(m, sigma, f, u, v):
-    """The linearised footprint of an isotropic Gaussian of standard deviation `sigma` at camera-frame mean m, evaluated at pixel offset
+    """The linearized footprint of an isotropic Gaussian of standard deviation `sigma` at camera-frame mean m, evaluated at pixel offset
     (u, v) from the principal point, with no dilation: exp(-sigma_q) for S2 = J (sigma^2 I) J^T."""
     x, y, z = m
     J = [[f / z, 0.0, -f * x / (z * z)], [0.0, f / z, -f * y / (z * z)]]
@@ -1193,7 +1195,7 @@ def ewa_vs_ray():
     return ("An isotropic Gaussian of standard deviation 0.5 (opacity 1, no dilation) whose mean is at camera-frame direction "
             "(0.25, 0.1, 1) times z, seen by a pinhole camera with f = 100; z is the distance along the axis. The ray column evaluates the "
             "exact maximum response along each pixel's ray (`ray_response`, with the ray (u/f, v/f, 1) for the pixel centre at "
-            "offset (u, v) from the principal point); the linearised column is exp(-q/2) of the Gaussian whose covariance is J Sigma J^T "
+            "offset (u, v) from the principal point); the linearized column is exp(-q/2) of the Gaussian whose covariance is J Sigma J^T "
             "with J taken at the mean (the full 2 by 3 Jacobian including its z column). The principal point is the origin of the pixel "
             "offsets (u, v), so a pixel centre is a half-integer offset: with (c_u, c_v) = (f x / z, f y / z) the projected mean, the "
             "centres tried are (floor(c_u) + d_u + 1/2, floor(c_v) + d_v + 1/2) for the integers d_u, d_v in [-h, h], a square, "
@@ -1202,7 +1204,7 @@ def ewa_vs_ray():
             "is the trace of the covariance of six sigma points m +- sqrt(3) sigma e_k projected through the same pinhole map, each "
             "squared offset taken about the projection of m itself (not about the mean of the projected points) and divided by 6, "
             "over the trace of J Sigma J^T.\n\n"
-            + _table(["z", "sigma / z", "projected sigma (pixels)", "largest difference", "at pixel", "sigma-point trace / linearised trace"],
+            + _table(["z", "sigma / z", "projected sigma (pixels)", "largest difference", "at pixel", "sigma-point trace / linearized trace"],
                      rows, "rrrrrr"))
 
 

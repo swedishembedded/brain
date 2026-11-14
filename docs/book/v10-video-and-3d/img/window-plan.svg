@@ -1,4 +1,4 @@
-<!-- source-sha256: 3397bbe9118e3e8af0113f527cd4a622cf1fe6c5314c8c8cb8f9b895d2312fd4 -->
+<!-- source-sha256: d639138c49c5f58ea525d568acc69515e68974f586ebc9b6e283307510e15ee1 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 264" width="800" height="264"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="800" height="264" fill="#ffffff"/>
 <rect x="20" y="16" width="760" height="228" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
 <text x="34" y="38" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">Windows on the latent timeline of a 601-frame clip (76 latent frames)</text>

@@ -1,4 +1,4 @@
-<!-- source-sha256: b6505f660785fc03b8c094699d696fd5fc9767665c63c2f2c3726616602a9acf -->
+<!-- source-sha256: 8ae86953cb9bddfe67cb371a04877f022221527eb10ebd332951d23b88e341df -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 178" width="800" height="178"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="800" height="178" fill="#ffffff"/>
 <rect x="20" y="16" width="760" height="150" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
 <text x="34" y="38" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">Encoder: channels x frames, then height x width, after each stage</text>

@@ -367,7 +367,7 @@ def latent_action_toy():
     return "\n".join([
         f"A square wanders an 8 by 8 torus for {LAT_N} steps under random actions 0 .. 4 (0 noop, 1 up, 2 left, 3 down, 4 right, "
         f"the order of the first block), drawn as `integer(5)` from the stream `{LAT_NAME}.actions` (seed "
-        f"{_seed(LAT_NAME + '.actions')}), starting at (0, 0). A localiser reports each of the {LAT_N + 1} positions plus normal noise "
+        f"{_seed(LAT_NAME + '.actions')}), starting at (0, 0). A localizer reports each of the {LAT_N + 1} positions plus normal noise "
         f"of the stated spread on both coordinates, two `normal()` draws per position (x then y) from `{LAT_NAME}.noise` (seed "
         f"{_seed(LAT_NAME + '.noise')}). All {LAT_N} actions are drawn first, then the noise. An action moves the square by (dx, dy) = noop (0, 0), up (0, -1), left (-1, 0), down (0, +1), right (+1, 0), "
         "with the coordinates taken mod 8 (y grows downward). The displacement of a step is the difference of two reports with each coordinate wrapped into "
@@ -376,7 +376,7 @@ def latent_action_toy():
         "the nearest centre, the lowest-numbered on a tie; a centre becomes the mean of its points, an empty cluster keeps its centre) until the "
         "assignment is unchanged (at most 100 rounds); codes are numbered in the order the centres were chosen; purity is the fraction of steps whose cluster's most common true action is their own.",
         "",
-        _table(["localiser error", "codes k", "codes used", "purity"], rows, "rrrr"),
+        _table(["localizer error", "codes k", "codes used", "purity"], rows, "rrrr"),
         "",
         "The five codes at error 0.05, with the true action each one stands for:",
         "",
@@ -653,7 +653,7 @@ def diamond_counts():
     per_step = [(n, f"{n * tf / 1e9:.3f}", f"{15 * n * tf / 1e12:.4f}") for n in (1, 2, 3)]
     weight_bytes = 4 * tp
     return "\n".join([
-        "The UNet of the Atari model, built from its config: 64 by 64 frames of 3 channels, the 4 context frames and the noisy frame "
+        "The U-Net of the Atari model, built from its config: 64 by 64 frames of 3 channels, the 4 context frames and the noisy frame "
         "stacked on the channels (5 frames of 3 channels: 15 input channels in all), 4 levels of 64 channels with 2 residual blocks "
         "a level on the way down and 3 on the way up, the sampling convolutions between levels (stride 2 down, nearest-neighbour "
         "doubling and a 3 by 3 convolution up), two residual blocks with self-attention at 8 by 8 in the middle (64 positions, "
@@ -715,8 +715,8 @@ def genie_inventory():
         f"A position-bias MLP maps a 2-vector to the width h, then h to h, then h to 8 heads, each linear with a bias. A patch embedding is a norm over the 48 values of a 4 by 4 patch of 3 channels "
         f"(gain and bias), a linear layer 48 to {d} with a bias and a norm over {d} (gain and bias); a pixel head is a linear layer {d} to 48 with a bias. "
         f"The quantizer is a linear layer {d} to 32 with a bias, a codebook of 1024 vectors of 32, a linear layer 32 to {d} with a bias, and the buffers the importer "
-        "reads: one initialised flag, 1024 cluster counts and 1024 vectors of 32 for the moving average. The dynamics works at width 519 (512 plus 7 action channels) with feed-forward width 1384; "
-        "its token embedding has 1025 rows of 512 (1024 codes and a mask), its position embedding 4000 rows of 512, and its logits are a linear layer 519 to 1024 with a bias. ")
+        "reads: one initialized flag, 1024 cluster counts and 1024 vectors of 32 for the moving average. The dynamics works at width 519 (512 plus 7 action channels) with feed-forward width 1384; "
+        "its token embedding has 1025 rows of 512 (1024 codes and a mask), its position embedding 4000 rows of 512, and its logits are a linear layer 519 to 1024 with a bias.")
 
 
 def _stblock_params(d, inner_attn, hd, ffi):
@@ -759,7 +759,7 @@ def genie_counts():
     return "\n".join([
         "Parameters of the two networks of the GenieRedux checkpoints brain imports, counted from their shapes: width 512 (519 in the "
         "dynamics: 512 plus 7 action channels), 8 heads of width 64, feed-forward inner width 1365 (1384), a 3 by 3 by 3 depthwise "
-        "convolution (PEG) and an attention and a feed-forward in each of the spatial and temporal halves of a block. The attention has "
+        "convolution (PEG, for positional encoding generator) and an attention and a feed-forward in each of the spatial and temporal halves of a block. The attention has "
         "no biases; the tensors the importer reads and discards (the unused context norm and the quantizer's exponential-moving-average (EMA) "
         "buffers) are counted because they are in the file. " + genie_inventory(),
         "",

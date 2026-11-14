@@ -444,7 +444,7 @@ def _predict_frame(prev, vectors):
 
 def loop_table():
     rows = [[t, c, o] for t, c, o in toy_loops()]
-    return (f"The same clip, with every residual replaced by {TOY_Q} times its quantised value, q(r) = sign(r) floor(|r| / {TOY_Q} + 1/2) "
+    return (f"The same clip, with every residual replaced by {TOY_Q} times its quantized value, q(r) = sign(r) floor(|r| / {TOY_Q} + 1/2) "
             f"(ties away from zero), and every rebuilt pixel clamped to 0 .. 255. Frame 0 is coded alone with prediction 128. The vectors are "
             f"those of the table above, found on the original frames. Closed loop: the residual is taken against the decoder's previous frame. "
             f"Open loop: against the original previous frame, while the decoder still predicts from its own.\n\n"

@@ -784,8 +784,8 @@ def two_view_ransac():
            "chapter with the inlier fraction of the best hypothesis so far (cap 5000).", "",
            "Each time a sample beats the best score so far, the bound is recomputed:", "",
            _table(["iteration", "inliers of the best hypothesis", "bound on the iterations still needed"], trace_rows), "",
-           f"The loop ended after {tv['iters']} iterations with {nb} inliers. Their eight-point essential matrix, its pose chosen by "
-           "the four-fold test and refined by Levenberg-Marquardt on the Sampson distances of the inliers, twice (the second "
+           f"The loop ended after {tv['iters']} iterations with {nb} inliers. Their eight-point essential matrix, its pose chosen among "
+           "the four decompositions by the points-in-front test and refined by Levenberg-Marquardt on the Sampson distances of the inliers, twice (the second "
            f"time on the inliers of the first result), leaves {len(inl)} inliers, of which {kept_true} are correct matches and "
            f"{len(inl) - kept_true} are wrong matches that lie within {THRESH_PX:g} pixel of an epipolar line; "
            f"{sum(truth) - kept_true} correct matches were rejected.", "",
@@ -848,8 +848,8 @@ def minimal_samples():
     rows = [["nearest essential matrix (singular values 1, 1, 0)", "%.1f" % med(ess), max(ess)],
             ["nearest rank-two matrix", "%.1f" % med(rk2), max(rk2)]]
     return "\n".join([f"The {len(good)} correct matches of the pair (0, 1) with their noisy pixels, and 100 samples of 8 of them from "
-                      f"`bookrng.generator(\"{MINIMAL_NAME}\")` (seed {bookrng.seed_of(MINIMAL_NAME)}; the same `integer` draws "
-                      "with repeats discarded). Each sample gives two hypotheses by the eight-point algorithm (the essential matrix is cut to "
+                      f"`bookrng.generator(\"{MINIMAL_NAME}\")` (seed {bookrng.seed_of(MINIMAL_NAME)}; each sample is `integer({len(good)})` "
+                      "draws, a repeated index discarded and drawn again, in the order of the good matches). Each sample gives two hypotheses by the eight-point algorithm (the essential matrix is cut to "
                       "singular values 1, 1, 0 after the similarities are undone, the rank-two matrix before); the table counts, for "
                       f"each kind, the matches within {THRESH_PX:g} pixel of Sampson distance of it (all {len(good)} are correct, so "
                       "a perfect hypothesis scores 54).", "",
@@ -1947,7 +1947,7 @@ def plane_sweep():
         rb_t, cb_t = min(sw_t, key=lambda a: a[1])
         rows.append([f"({px}, {py})", "%.4f" % rt, "%.4f" % c_true, "%.4f" % c_front, "%.4f" % rb, "%.4f" % cb, "%.4f" % rb_t, "%.4f" % cb_t])
     return "\n".join([
-        f"Three {MVS_W} by {MVS_H} gray images from cameras with f = {MVS_F:g} pixels and principal point ({MVS_CX:g}, {MVS_CY:g}) at "
+        f"Three {MVS_W} by {MVS_H} grey images from cameras with f = {MVS_F:g} pixels and principal point ({MVS_CX:g}, {MVS_CY:g}) at "
         f"the eyes {MVS_EYES[0]}, {MVS_EYES[1]} and {MVS_EYES[2]} (reference, right source, left source), all looking along +z. The "
         f"scene is the plane through {_vec(MVS_POINT, 1)} with unit normal {_vec(MVS_NORMAL, 6)}, tilted about the vertical axis. Its "
         f"texture is a lattice of 37 by 25 uniform values 0.25 m apart (`bookrng.generator(\"{TEXTURE_NAME}\")`, seed {seed_t}, row "
@@ -1957,12 +1957,12 @@ def plane_sweep():
         "views in order, rows top to bottom, left to right, one `normal()` each).", "",
         f"The cost of a hypothesis for the reference pixel is the mean over the two sources of 1 - NCC, the bilaterally weighted "
         f"normalized cross-correlation of the {len(range(-WIN_RADIUS, WIN_RADIUS + 1, WIN_STEP))} by "
-        f"{len(range(-WIN_RADIUS, WIN_RADIUS + 1, WIN_STEP))} samples of an 11 by 11 window (spacing {WIN_STEP}), color sigma "
+        f"{len(range(-WIN_RADIUS, WIN_RADIUS + 1, WIN_STEP))} samples of an 11 by 11 window (spacing {WIN_STEP}), colour sigma "
         f"{SIGMA_COLOR:g}, spatial sigma {SIGMA_SPATIAL:g}. The ray of pixel (x, y) leaves the camera through the pixel's centre "
         f"(x + 0.5, y + 0.5), and the window samples are the reference pixels (x + dx, y + dy) for dx, dy in -5, -3, ..., 5, read "
         "without interpolation; a sample outside the reference image is skipped (a window at the border has fewer than 36), and so is "
         "a sample whose ray meets the plane at n.d > -1e-4. The sample's point on the plane is imaged by the source camera, and the "
-        "source gray value is the bilinear interpolation of the four pixels around the position (pixel i is centred on i + 0.5), "
+        "source grey value is the bilinear interpolation of the four pixels around the position (pixel i is centred on i + 0.5), "
         "the position clamped to the image, so that a projection outside the source image reads the border. With sample weights "
         "w (bilateral, from the reference), the weighted means and variances are m = sum(w g) / sum(w) and v = sum(w g^2) / "
         f"sum(w) - m^2 for each image, the correlation is (sum(w g s) / sum(w) - m_g m_s) / sqrt(v_g v_s), and the cost is clamped "
@@ -2106,7 +2106,7 @@ def patchmatch_table():
                    "median normal error (deg)"], shown, "lrrrr"), "",
            f"A cost evaluation is one hypothesis scored against both sources, {nsamp} window samples each. The run used {per_iter} of "
            f"them for {MVS_W * MVS_H} pixels, {per_iter / (MVS_W * MVS_H):.0f} per pixel. An exhaustive search at the same resolution "
-           f"needs {n_ranges} ranges (steps of 1% of the inverse range at its middle value) times {n_normals} normals (cells of 10 "
+           f"needs {n_ranges} ranges (steps of 0.0025 per metre in inverse range, 1% of the inverse range at 4 m) times {n_normals} normals (cells of 10 "
            f"degrees on a hemisphere, 2 pi / (10 degrees in radians)^2) = {n_ranges * n_normals} evaluations per pixel, "
            f"{n_ranges * n_normals / (per_iter / (MVS_W * MVS_H)):.0f} times as many."]
     return "\n".join(out)
