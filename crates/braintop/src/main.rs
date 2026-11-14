@@ -105,8 +105,8 @@ async fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, opts: Con
     let name = opts.name.clone();
     let mut app = App::new(name);
 
-    // Background D-Bus client → updates over an unbounded channel.
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    // Background D-Bus client: the UI reads only its newest update.
+    let (tx, mut feed) = client::updates();
     tokio::spawn(client::run(opts, tx));
 
     let mut events = EventStream::new();
@@ -130,12 +130,7 @@ async fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, opts: Con
                     _ => {}
                 }
             }
-            update = rx.recv() => {
-                // `None` means the client task ended; keep showing the last state.
-                if let Some(u) = update {
-                    app.apply(u);
-                }
-            }
+            update = feed.next() => app.apply(update),
             _ = render.tick() => {}
         }
     }

@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use brain_stats::StatsSnapshot;
 use futures::StreamExt;
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::watch;
 
 /// Default well-known name brain requests.
 pub const DEFAULT_NAME: &str = "com.swedishembedded.Brain1";
@@ -54,6 +54,50 @@ pub enum Update {
     Connected,
     Disconnected(String),
     Snapshot(Box<StatsSnapshot>),
+}
+
+/// The client task's end of the hand-off to the UI: the latest [`Update`] only.
+pub type UpdateSender = watch::Sender<Option<Update>>;
+
+/// The latest-value hand-off from the client task to the UI ([`updates`]).
+/// Snapshots supersede each other, so the UI only ever needs the newest one:
+/// a burst that arrives while the UI is drawing costs one slot, never a queue.
+pub struct UpdateFeed {
+    /// `None` once the sender has gone and that has been reported.
+    rx: Option<watch::Receiver<Option<Update>>>,
+}
+
+/// A fresh hand-off: the sender for [`run`], the feed for the UI loop.
+pub fn updates() -> (UpdateSender, UpdateFeed) {
+    let (tx, rx) = watch::channel(None);
+    (tx, UpdateFeed { rx: Some(rx) })
+}
+
+/// What the UI shows once the client task has ended and nothing more will come.
+pub const CLIENT_STOPPED: &str = "the D-Bus client stopped; restart braintop";
+
+impl UpdateFeed {
+    /// The newest update not yet seen, waiting for one. Once the client task
+    /// has ended, one [`Update::Disconnected`] saying so, so the UI shows it
+    /// instead of freezing on its last snapshot; after that it never resolves.
+    pub async fn next(&mut self) -> Update {
+        let Some(rx) = self.rx.as_mut() else {
+            return std::future::pending().await;
+        };
+        loop {
+            match rx.changed().await {
+                Ok(()) => {
+                    if let Some(update) = rx.borrow_and_update().clone() {
+                        return update;
+                    }
+                }
+                Err(_) => {
+                    self.rx = None;
+                    return Update::Disconnected(CLIENT_STOPPED.to_string());
+                }
+            }
+        }
+    }
 }
 
 /// The `com.swedishembedded.Brain1.Manager` client proxy — just the stats surface
@@ -100,14 +144,15 @@ pub async fn fetch_once(opts: &ConnOpts) -> Result<StatsSnapshot> {
 }
 
 /// The long-running client loop: reconnect forever, subscribing to `StatsStream`
-/// and polling `stats_snapshot()` as a fallback, pushing every update to `tx`.
-/// Returns only if the channel receiver is dropped (app exiting).
-pub async fn run(opts: ConnOpts, tx: UnboundedSender<Update>) {
+/// and polling `stats_snapshot()` as a fallback, publishing every update to `tx`
+/// (each replaces the last one the UI has not read yet). Returns only if the
+/// feed is dropped (app exiting).
+pub async fn run(opts: ConnOpts, tx: UpdateSender) {
     loop {
         match serve_once(&opts, &tx).await {
             Ok(()) => return, // receiver gone → app exiting
             Err(why) => {
-                if tx.send(Update::Disconnected(why.to_string())).is_err() {
+                if tx.send(Some(Update::Disconnected(why.to_string()))).is_err() {
                     return;
                 }
                 tokio::time::sleep(RECONNECT_DELAY).await;
@@ -119,17 +164,17 @@ pub async fn run(opts: ConnOpts, tx: UnboundedSender<Update>) {
 /// One connected session: connect, prime with a poll, subscribe, then race the
 /// signal stream against the poll timer. Returns `Ok(())` only when `tx` is
 /// closed; any transport error bubbles up so [`run`] reconnects.
-async fn serve_once(opts: &ConnOpts, tx: &UnboundedSender<Update>) -> Result<()> {
+async fn serve_once(opts: &ConnOpts, tx: &UpdateSender) -> Result<()> {
     let conn = connect(opts).await?;
     let proxy = build_proxy(&conn, opts).await?;
-    if tx.send(Update::Connected).is_err() {
+    if tx.send(Some(Update::Connected)).is_err() {
         return Ok(());
     }
 
     // Prime immediately so the UI shows data without waiting for the first tick.
     if let Ok(json) = proxy.stats_snapshot().await {
         if let Ok(snap) = StatsSnapshot::from_json_str(&json) {
-            if tx.send(Update::Snapshot(Box::new(snap))).is_err() {
+            if tx.send(Some(Update::Snapshot(Box::new(snap)))).is_err() {
                 return Ok(());
             }
         }
@@ -150,7 +195,7 @@ async fn serve_once(opts: &ConnOpts, tx: &UnboundedSender<Update>) -> Result<()>
                 if let Ok(args) = sig.args() {
                     last_signal = Instant::now();
                     if let Ok(snap) = StatsSnapshot::from_json_str(&args.snapshot) {
-                        if tx.send(Update::Snapshot(Box::new(snap))).is_err() {
+                        if tx.send(Some(Update::Snapshot(Box::new(snap)))).is_err() {
                             return Ok(());
                         }
                     }
@@ -162,12 +207,47 @@ async fn serve_once(opts: &ConnOpts, tx: &UnboundedSender<Update>) -> Result<()>
                 if last_signal.elapsed() >= SIGNAL_GRACE {
                     let json = proxy.stats_snapshot().await.context("polling stats_snapshot()")?;
                     if let Ok(snap) = StatsSnapshot::from_json_str(&json) {
-                        if tx.send(Update::Snapshot(Box::new(snap))).is_err() {
+                        if tx.send(Some(Update::Snapshot(Box::new(snap)))).is_err() {
                             return Ok(());
                         }
                     }
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::App;
+
+    /// Updates the UI has not read yet are superseded, not queued: a burst
+    /// leaves one value behind, the newest.
+    #[tokio::test]
+    async fn the_feed_holds_only_the_newest_update() {
+        let (tx, mut feed) = updates();
+        for n in 0..1000 {
+            tx.send(Some(Update::Disconnected(n.to_string()))).unwrap();
+        }
+        assert!(matches!(feed.next().await, Update::Disconnected(why) if why == "999"));
+        tx.send(Some(Update::Connected)).unwrap();
+        assert!(matches!(feed.next().await, Update::Connected));
+    }
+
+    /// A client task that ends shows as disconnected once, and the feed then
+    /// stays quiet instead of spinning the UI loop.
+    #[tokio::test]
+    async fn a_stopped_client_shows_as_disconnected() {
+        let (tx, mut feed) = updates();
+        tx.send(Some(Update::Connected)).unwrap();
+        let mut app = App::new("com.swedishembedded.Brain1");
+        app.apply(feed.next().await);
+        assert!(app.connected);
+        drop(tx);
+        app.apply(feed.next().await);
+        assert!(!app.connected, "the UI no longer claims a live connection");
+        assert!(app.status.contains(CLIENT_STOPPED), "{}", app.status);
+        assert!(tokio::time::timeout(Duration::from_millis(50), feed.next()).await.is_err(), "nothing more is reported");
     }
 }

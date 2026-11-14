@@ -12,7 +12,11 @@ rows, with no fixed schema). `braintop` subscribes to a live stream of this
 snapshot and renders it; it does not require the `brain serve` process to be
 running elsewhere on the same machine — point it at the right bus and it
 reconnects automatically, showing a "waiting for brain…" state until the
-server comes up.
+server comes up. The dashboard always draws the newest snapshot: one that
+arrives while it is still drawing replaces the one before rather than queueing
+behind it. If its D-Bus client stops altogether, the header says so (`the
+D-Bus client stopped; restart braintop`) instead of leaving the last snapshot
+on screen as if it were live.
 
 ## Invocation modes
 
