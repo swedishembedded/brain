@@ -113,6 +113,7 @@ fn base_forecast_spec(summary: &str) -> ActionSpec {
         .param(ParamSpec::new("horizon", ParamType::Int, "number of steps to forecast").min(0.0).max(10000.0).default(json!(64)))
         .input(BlobSpec::new("context", Media::Bytes, "context series as raw f32-LE; meta {shape}").required())
         .output(BlobSpec::new("forecast", Media::Bytes, "forecast as raw f32-LE; meta {shape,kind,levels}"))
+        .cancellable()
 }
 
 /// What a forecaster's `predict` needs besides the model: how its window
@@ -268,6 +269,7 @@ struct Chronos2CpuInstance {
 
 impl Instance for Chronos2CpuInstance {
     fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         if action == "predict" {
             return predict_with(&self.forecaster, ContextPolicy::SinglePass, &mut |p, s| self.forecaster.forecast(p, s), inv, progress);
         }
@@ -332,6 +334,7 @@ impl Instance for Chronos2NpuInstance {
     // `predict` runs the device path (`ForecastModel::forecast`): the NPU is
     // the `forecast` action's.
     fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         if action == "predict" {
             return predict_with(&self.forecaster, ContextPolicy::SinglePass, &mut |p, s| self.forecaster.forecast(p, s), inv, progress);
         }
@@ -445,6 +448,7 @@ struct FincastCpuInstance {
 
 impl Instance for FincastCpuInstance {
     fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         if action == "predict" {
             return predict_with(&self.forecaster, ContextPolicy::SinglePass, &mut |p, s| self.forecaster.forecast(p, s), inv, progress);
         }
@@ -524,6 +528,7 @@ struct FincastNpuInstance {
 impl Instance for FincastNpuInstance {
     // `predict` runs the device path, like chronos2's.
     fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         if action == "predict" {
             return predict_with(&self.forecaster, ContextPolicy::SinglePass, &mut |p, s| self.forecaster.forecast(p, s), inv, progress);
         }
@@ -742,7 +747,7 @@ fn predict_sampling(inv: &Invocation) -> kronos::KronosSampling {
 /// default context leaves room for the horizon inside it.
 fn kronos_predict(forecaster: &kronos::KronosForecaster, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
     let sampling = predict_sampling(inv);
-    predict_with(forecaster, ContextPolicy::Autoregressive, &mut |p, s| forecaster.forecast_sampled(p, s, &sampling), inv, progress)
+    predict_with(forecaster, ContextPolicy::Autoregressive, &mut |p, s| forecaster.forecast_sampled(p, s, &sampling, &inv.cancel), inv, progress)
 }
 
 /// Decode the kronos context: either full OHLCV bars `[T, feat]`, or a univariate
@@ -790,6 +795,7 @@ fn kronos_opts(inv: &Invocation) -> Result<kronos::generate::GenOpts, String> {
         argmax: inv.get_bool("argmax").unwrap_or(true),
         top_p: inv.get_f64("top_p").map_or(1.0, |p| p as f32),
         seed: inv.seed()?.unwrap_or_else(data::rng::random_seed),
+        cancel: inv.cancel.clone(),
         ..Default::default()
     })
 }
@@ -805,6 +811,7 @@ fn kronos_outcome(out: Vec<f32>, horizon: usize, feat: usize, device: &str, seed
 
 impl Instance for KronosInstance {
     fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         if action == "predict" {
             return kronos_predict(&self.forecaster, inv, progress);
         }
@@ -821,6 +828,7 @@ impl Instance for KronosInstance {
         let samples = inv.get_i64("samples").unwrap_or(1).max(1) as usize;
         if samples > 1 {
             let outs = model.forecast_cached_samples(&bars, &ctx_stamp, &fut_stamp, horizon, samples, &opts);
+            inv.cancel.check()?;
             let flat: Vec<f32> = outs.into_iter().flatten().collect();
             return Ok(Outcome::new()
                 .set("model", json!(KRONOS_MODEL))
@@ -831,6 +839,7 @@ impl Instance for KronosInstance {
                 .blob("forecast", encode_forecast(&flat, vec![samples, horizon, feat], "samples", &[])));
         }
         let out = model.forecast_cached(&bars, &ctx_stamp, &fut_stamp, horizon, &opts); // [horizon, feat]
+        inv.cancel.check()?;
         Ok(kronos_outcome(out, horizon, feat, "gpu_core", opts.seed))
     }
 }
@@ -868,6 +877,7 @@ impl KronosNpuInstance {
 impl Instance for KronosNpuInstance {
     // `predict` runs the host rollout: the NPU is the `forecast` action's.
     fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         if action == "predict" {
             return kronos_predict(&self.forecaster, inv, progress);
         }
@@ -891,6 +901,7 @@ impl Instance for KronosNpuInstance {
                 let core = map.get_mut(&(t, cap)).expect("kronos cached graphs");
                 model.forecast_cached_samples_with_cores(&bars, &ctx_stamp, &fut_stamp, horizon, samples, &opts, core)
             })?;
+            inv.cancel.check()?;
             let flat: Vec<f32> = outs.into_iter().flatten().collect();
             return Ok(Outcome::new()
                 .set("model", json!(KRONOS_MODEL))
@@ -905,6 +916,7 @@ impl Instance for KronosNpuInstance {
             let core = map.get_mut(&(t, cap)).expect("kronos cached graphs");
             model.forecast_cached_with_cores(&bars, &ctx_stamp, &fut_stamp, horizon, &opts, core)
         })?;
+        inv.cancel.check()?;
         Ok(kronos_outcome(out, horizon, feat, &dev, opts.seed))
     }
 }
@@ -1307,6 +1319,7 @@ impl Timesfm3Instance {
 
 impl Instance for Timesfm3Instance {
     fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         if action == "predict" {
             return predict_with(&self.forecaster, ContextPolicy::SinglePass, &mut |p, s| self.forecaster.forecast(p, s), inv, progress);
         }

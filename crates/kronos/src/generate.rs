@@ -32,11 +32,16 @@ pub struct GenOpts {
     /// RNG seed for sampling; [`GenOpts::default`] draws a fresh one (unused
     /// while `argmax` is set).
     pub seed: u64,
+    /// Polled before every decode step. Once it fires the rollout stops at
+    /// that step boundary and returns an empty forecast (an empty sample set
+    /// for the `_samples` forms), which a caller that armed it reads as
+    /// "cancelled" by checking the token. A `default()` token never fires.
+    pub cancel: capability::CancelToken,
 }
 
 impl Default for GenOpts {
     fn default() -> Self {
-        GenOpts { temperature: 1.0, top_k: 0, top_p: 1.0, argmax: true, seed: data::rng::random_seed() }
+        GenOpts { temperature: 1.0, top_k: 0, top_p: 1.0, argmax: true, seed: data::rng::random_seed(), cancel: capability::CancelToken::default() }
     }
 }
 
@@ -158,6 +163,9 @@ impl KronosModel {
         // 3. autoregressive rollout
         let mut rng = SplitMix64::new(opts.seed);
         for step in 0..pred_len {
+            if opts.cancel.is_cancelled() {
+                return Vec::new();
+            }
             let len = s1.len();
             let w0 = len.saturating_sub(max_ctx);
             let s1w = &s1[w0..];
@@ -231,6 +239,9 @@ impl KronosModel {
         }
 
         for step in 0..pred_len {
+            if opts.cancel.is_cancelled() {
+                return Vec::new();
+            }
             let samp_s1 = sample(&last_s1_logits, opts, &mut rng);
             let s2_logits = hw.dep_step_cached(samp_s1, &mut cache);
             let samp_s2 = sample(&s2_logits, opts, &mut rng);
@@ -276,13 +287,16 @@ impl KronosModel {
         }
         hw.ensure_dep_kv(&mut base); // fill dep K/V once so forks share it
 
-        (0..n_samples)
+        let paths: Vec<Vec<f32>> = (0..n_samples)
             .map(|i| {
                 let mut cache = base.clone(); // fork the prefilled context
                 let (mut s1, mut s2) = (s1_ctx.clone(), s2_ctx.clone());
                 let mut rng = SplitMix64::new(opts.seed.wrapping_add(i as u64));
                 let mut last = last0.clone();
                 for step in 0..pred_len {
+                    if opts.cancel.is_cancelled() {
+                        return Vec::new();
+                    }
                     let samp_s1 = sample(&last, opts, &mut rng);
                     let s2_logits = hw.dep_step_cached(samp_s1, &mut cache);
                     let samp_s2 = sample(&s2_logits, opts, &mut rng);
@@ -294,7 +308,11 @@ impl KronosModel {
                 let recon = self.detokenize_tail(&s1, &s2, pred_len);
                 preprocess::denormalize(&norm, &recon, pred_len, feat)
             })
-            .collect()
+            .collect();
+        if opts.cancel.is_cancelled() {
+            return Vec::new();
+        }
+        paths
     }
 
     /// Cross-sectional batch: forecast N series in one call, running the expensive
@@ -346,6 +364,9 @@ impl KronosModel {
                 }
                 let mut rng = SplitMix64::new(opts.seed);
                 for step in 0..pred_len {
+                    if opts.cancel.is_cancelled() {
+                        return (Vec::new(), Vec::new());
+                    }
                     let a = sample(&last, opts, &mut rng);
                     let s2_logits = hw.dep_step_cached(a, &mut cache);
                     let b = sample(&s2_logits, opts, &mut rng);
@@ -357,6 +378,9 @@ impl KronosModel {
                 (s1, s2)
             }
         });
+        if opts.cancel.is_cancelled() {
+            return Vec::new();
+        }
         // 3. serial (device): detokenize + denormalize.
         prepped
             .iter()
@@ -403,6 +427,9 @@ impl KronosModel {
         let (vs1, vs2) = (dec.config().s1_vocab(), dec.config().s2_vocab());
         let mut rng = SplitMix64::new(opts.seed);
         for _ in 0..pred_len {
+            if opts.cancel.is_cancelled() {
+                return Vec::new();
+            }
             let len = s1.len();
             let w0 = len.saturating_sub(win);
             let (s1w, s2w) = (&s1[w0..], &s2[w0..]);
@@ -478,6 +505,9 @@ impl KronosModel {
         let mut last_s1_logits = cores.prefill(&x_ctx, t - p0);
 
         for step in 0..pred_len {
+            if opts.cancel.is_cancelled() {
+                return Vec::new();
+            }
             let samp_s1 = sample(&last_s1_logits, opts, &mut rng);
             let sib = dec.sib_embed(&[samp_s1]);
             let s2_logits = cores.dep_step(&sib);
@@ -521,13 +551,16 @@ impl KronosModel {
         let last0 = cores.prefill(&x_ctx, t - p0);
         cores.snapshot(); // seed once, fork per sample
 
-        (0..n_samples)
+        let paths: Vec<Vec<f32>> = (0..n_samples)
             .map(|i| {
                 cores.restore();
                 let (mut s1, mut s2) = (s1_ctx.clone(), s2_ctx.clone());
                 let mut rng = SplitMix64::new(opts.seed.wrapping_add(i as u64));
                 let mut last = last0.clone();
                 for step in 0..pred_len {
+                    if opts.cancel.is_cancelled() {
+                        return Vec::new();
+                    }
                     let samp_s1 = sample(&last, opts, &mut rng);
                     let sib = dec.sib_embed(&[samp_s1]);
                     let s2_logits = cores.dep_step(&sib);
@@ -541,7 +574,11 @@ impl KronosModel {
                 let recon = self.detokenize_tail(&s1, &s2, pred_len);
                 preprocess::denormalize(&norm, &recon, pred_len, feat)
             })
-            .collect()
+            .collect();
+        if opts.cancel.is_cancelled() {
+            return Vec::new();
+        }
+        paths
     }
 }
 
@@ -704,12 +741,74 @@ mod tests {
         assert_eq!(out, out2);
     }
 
+    /// Cores that report one progress event per decoded position, so the
+    /// harness can fire the token mid-rollout; their logits are all zero.
+    struct CountingCores<'a> {
+        s1_vocab: usize,
+        s2_vocab: usize,
+        progress: &'a mut dyn FnMut(capability::Progress),
+        steps: u32,
+    }
+    impl CachedCores for CountingCores<'_> {
+        fn prefill(&mut self, _x_ctx: &[f32], _t: usize) -> Vec<f32> {
+            vec![0.0; self.s1_vocab]
+        }
+        fn dep_step(&mut self, _sib: &[f32]) -> Vec<f32> {
+            vec![0.0; self.s2_vocab]
+        }
+        fn s1_step(&mut self, _x: &[f32]) -> Vec<f32> {
+            self.steps += 1;
+            (self.progress)(capability::Progress::step(self.steps, 0, "step"));
+            vec![0.0; self.s1_vocab]
+        }
+        fn snapshot(&mut self) {}
+        fn restore(&mut self) {}
+    }
+
+    /// Both cached rollouts stop at the next decode step once their token
+    /// fires, and refuse to start under a token that already fired; the
+    /// uncached and host forms poll the same way before every step.
+    #[test]
+    fn a_rollout_stops_at_the_step_its_token_fires() {
+        if skip() {
+            return;
+        }
+        let m = zero_model();
+        let feat = m.feat();
+        let (t, pred_len) = (12, 16);
+        let bars: Vec<f32> = (0..t * feat).map(|i| (i as f32).sin()).collect();
+        let (ctx_stamp, fut_stamp) = (vec![0u32; t * 5], vec![0u32; pred_len * 5]);
+        let (vs1, vs2) = (m.decoder_config().s1_vocab(), m.decoder_config().s2_vocab());
+        for samples in [1usize, 3] {
+            let run = |inv: &capability::Invocation, progress: &mut dyn FnMut(capability::Progress)| -> capability::ActionResult {
+                let opts = GenOpts { cancel: inv.cancel.clone(), ..GenOpts::default() };
+                let mut cores = CountingCores { s1_vocab: vs1, s2_vocab: vs2, progress, steps: 0 };
+                let rows = if samples == 1 {
+                    m.forecast_cached_with_cores(&bars, &ctx_stamp, &fut_stamp, pred_len, &opts, &mut cores).len()
+                } else {
+                    m.forecast_cached_samples_with_cores(&bars, &ctx_stamp, &fut_stamp, pred_len, samples, &opts, &mut cores).len()
+                };
+                inv.cancel.check()?;
+                assert!(rows > 0, "an uncancelled rollout forecasts");
+                Ok(capability::Outcome::new())
+            };
+            capability_mock::cancellation::certify(&format!("kronos cached rollout, {samples} sample(s)"), &capability::Invocation::new, &run, capability_mock::cancellation::Bound::ONE_STEP);
+        }
+        let fired = capability::CancelToken::armed();
+        fired.cancel();
+        let opts = GenOpts { cancel: fired, ..GenOpts::default() };
+        assert!(m.forecast(&bars, &ctx_stamp, &fut_stamp, pred_len, &opts).is_empty());
+        assert!(m.forecast_cached(&bars, &ctx_stamp, &fut_stamp, pred_len, &opts).is_empty());
+        assert!(m.forecast_cached_samples(&bars, &ctx_stamp, &fut_stamp, pred_len, 3, &opts).is_empty());
+        assert!(m.forecast_cached_batch(std::slice::from_ref(&bars), std::slice::from_ref(&ctx_stamp), std::slice::from_ref(&fut_stamp), pred_len, &opts).is_empty());
+    }
+
     #[test]
     fn top_k_short_circuits_top_p() {
         // with top_k set AND top_p set, only top_k is applied (reference quirk).
         let mut lg = vec![1.0, 2.0, 3.0, 4.0];
         let mut rng = SplitMix64::new(data::rng::random_seed());
-        let opts = GenOpts { argmax: false, top_k: 1, top_p: 0.1, temperature: 1.0, seed: data::rng::random_seed() };
+        let opts = GenOpts { argmax: false, top_k: 1, top_p: 0.1, temperature: 1.0, seed: data::rng::random_seed(), ..GenOpts::default() };
         // top_k=1 keeps only index 3 -> always sampled
         for _ in 0..8 {
             let l = lg.clone();

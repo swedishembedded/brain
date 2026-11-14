@@ -16,3 +16,6 @@ brain-fcbench.workspace = true
 brain-seed.workspace = true
 serde_json.workspace = true
 
+
+[dev-dependencies]
+brain-capability-mock.workspace = true

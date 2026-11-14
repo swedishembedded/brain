@@ -25,6 +25,7 @@ serde_json.workspace = true
 bytemuck.workspace = true
 
 [dev-dependencies]
+brain-capability-mock.workspace = true
 # `testutil::skip` / `skip_unavailable` - the two skip helpers, so an
 # absent fixture can be made fatal and absent hardware cannot.
 brain-testutil.workspace = true

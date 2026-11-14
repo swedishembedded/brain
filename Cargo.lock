@@ -1673,6 +1673,7 @@ name = "brain-forecastops"
 version = "5.1.0"
 dependencies = [
  "brain-capability",
+ "brain-capability-mock",
  "brain-fcbench",
  "brain-forecast",
  "brain-seed",
@@ -2004,6 +2005,7 @@ version = "5.1.0"
 dependencies = [
  "brain-backend-cpu",
  "brain-capability",
+ "brain-capability-mock",
  "brain-checkpoint",
  "brain-data",
  "brain-forecast",

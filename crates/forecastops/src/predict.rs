@@ -37,6 +37,7 @@ const MAX_SAMPLES: f64 = 1_000.0;
 /// the model that has them.
 pub fn predict_spec(summary: &str) -> ActionSpec {
     ActionSpec::new("predict", summary)
+        .cancellable()
         .param(ParamSpec::new("horizon", ParamType::Int, "bars held out as ground truth at each origin").min(1.0).max(MAX_BARS).default(json!(DEFAULT_HORIZON)))
         .param(ParamSpec::new("context", ParamType::Int, "bars of history the model sees; 0 = as many as the model's window allows").min(0.0).max(MAX_BARS).default(json!(0)))
         .param(ParamSpec::new("samples", ParamType::Int, "trajectories drawn: 1 is the deterministic path, more draw a cloud whose median is the point path and whose p10-p90 is the band").min(1.0).max(MAX_SAMPLES).default(json!(1)))
@@ -72,7 +73,12 @@ fn int(inv: &Invocation, key: &str, default: i64) -> usize {
 }
 
 /// Run `predict` for `model` on the invocation's CSV.
+///
+/// The token is checked on entry and before every forecast call (one per
+/// rolling origin), so a cancelled evaluation stops at the next origin with
+/// [`capability::failure::CANCELLED`].
 pub fn run_predict(model: PredictModel, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+    inv.cancel.check()?;
     let csv_blob = inv.get_blob("csv").ok_or("predict: missing input 'csv'")?;
     let text = std::str::from_utf8(&csv_blob.bytes).map_err(|_| "predict: csv is not UTF-8 text".to_string())?;
     let want_chart = inv.get_bool("chart").unwrap_or(false);
@@ -103,7 +109,16 @@ pub fn run_predict(model: PredictModel, inv: &Invocation, progress: &mut dyn FnM
     let req = HoldoutRequest { series: &series, horizon, context, samples: int(inv, "samples", 1).max(1), origins: int(inv, "origins", 1).max(1), seed, season: int(inv, "season", DEFAULT_SEASON), item: &item, freq: &freq };
 
     let mut on_origin = |done: usize, all: usize| progress(Progress::step(done as u32, all as u32, format!("origin {done}/{all}")));
-    let report = holdout::evaluate(model.name, model.forecast, &req, &mut on_origin).map_err(|e| format!("predict: {e}"))?;
+    let forecast = model.forecast;
+    let mut gated = |panel: &Panel, spec: &ForecastSpec| {
+        inv.cancel.check().map_err(ForecastError::internal)?;
+        forecast(panel, spec)
+    };
+    let report = holdout::evaluate(model.name, &mut gated, &req, &mut on_origin);
+    // A cancelled run fails with the contract's literal, whatever error the
+    // model or the gate above reported when it noticed.
+    inv.cancel.check()?;
+    let report = report.map_err(|e| format!("predict: {e}"))?;
 
     let m = report.model_score();
     let mut out = Outcome::new()
@@ -192,5 +207,15 @@ mod tests {
         assert!(e.contains("csv") && e.contains("line 2"), "{e}");
         let e = run_predict(model(&mut persistence), &Invocation::new(), &mut |_| {}).unwrap_err();
         assert!(e.contains("missing input 'csv'"), "{e}");
+    }
+
+    /// A token fired before the call refuses it before the CSV is read, and
+    /// one fired at an origin stops the evaluation before the next origin's
+    /// forecast: every forecaster's `predict` runs through here.
+    #[test]
+    fn a_cancelled_evaluation_stops_at_the_next_origin() {
+        let run = |inv: &Invocation, progress: &mut dyn FnMut(Progress)| -> ActionResult { run_predict(model(&mut persistence), inv, progress) };
+        let make = || inv(csv(160)).set("origins", json!(6));
+        capability_mock::cancellation::certify("forecast predict", &make, &run, capability_mock::cancellation::Bound::ONE_STEP);
     }
 }

@@ -96,7 +96,7 @@ fn shared_prefill_parity_and_speed() {
     let (ctx_stamp, fut_stamp) = (vec![0u32; t * 5], vec![0u32; h * 5]);
     // One draw shared by the batched and the independent rollouts it is compared against.
     let seed = data::rng::random_seed();
-    let opts = kronos::generate::GenOpts { argmax: false, temperature: 1.0, top_k: 0, top_p: 1.0, seed };
+    let opts = kronos::generate::GenOpts { argmax: false, temperature: 1.0, top_k: 0, top_p: 1.0, seed, ..Default::default() };
 
     // Parity: shared[i] == independent rollout with seed + i, bit-for-bit.
     let shared = model.forecast_cached_samples(&bars, &ctx_stamp, &fut_stamp, h, nsamp, &opts);

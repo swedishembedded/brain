@@ -196,14 +196,16 @@ impl ForecastModel for KronosForecaster {
     }
 
     fn forecast(&self, panel: &Panel, spec: &ForecastSpec) -> Result<Forecast, ForecastError> {
-        self.forecast_sampled(panel, spec, &self.sampling)
+        self.forecast_sampled(panel, spec, &self.sampling, &capability::CancelToken::default())
     }
 }
 
 impl KronosForecaster {
     /// [`ForecastModel::forecast`] under an explicit `sampling`, so one loaded
-    /// model serves requests that each name their own.
-    pub fn forecast_sampled(&self, panel: &Panel, spec: &ForecastSpec, sampling: &KronosSampling) -> Result<Forecast, ForecastError> {
+    /// model serves requests that each name their own. `cancel` is polled
+    /// before every series and every decode step; once it fires the call
+    /// fails with [`capability::failure::CANCELLED`] as its message.
+    pub fn forecast_sampled(&self, panel: &Panel, spec: &ForecastSpec, sampling: &KronosSampling, cancel: &capability::CancelToken) -> Result<Forecast, ForecastError> {
         self.validate(panel, spec)?;
         if spec.horizon == 0 {
             return Err(ForecastError::bad_request("kronos: horizon must be >= 1"));
@@ -222,6 +224,7 @@ impl KronosForecaster {
         fc.model_version = self.version.clone();
 
         for item in &panel.items {
+            cancel.check().map_err(ForecastError::internal)?;
             let (bars, feat) = self.build_bars(item)?;
             // Real calendar if the caller supplied minute/hour/weekday/day/month
             // variates; otherwise zeros (calendar-agnostic).
@@ -246,6 +249,7 @@ impl KronosForecaster {
                 top_p: sampling.top_p,
                 argmax,
                 seed: spec.seed,
+                cancel: cancel.clone(),
             };
             // KV-cached rollout with ONE shared prefill for all `n_samples`
             // paths. `forecast_cached_samples` is bit-identical to a loop of
@@ -257,6 +261,7 @@ impl KronosForecaster {
             // a short horizon, so the loop made every extra sample cost a
             // whole forecast.
             let paths = self.model.forecast_cached_samples(&bars, &ctx_stamp, &fut_stamp, spec.horizon, n_samples, &opts);
+            cancel.check().map_err(ForecastError::internal)?;
             // samples[k][col_i] = trajectory of length horizon for target col_i
             let mut per_target: Vec<Vec<f32>> = vec![Vec::with_capacity(n_samples * spec.horizon); cols.len()];
             for path in &paths {

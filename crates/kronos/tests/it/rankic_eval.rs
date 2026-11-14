@@ -118,6 +118,7 @@ fn predict_return(
             top_p: 0.9,
             argmax,
             seed: seed0.wrapping_add(k as u64),
+            ..GenOpts::default()
         };
         let path = model.forecast_cached(&bars, &ctx_stamp, &fut_stamp, horizon, &opts);
         acc += path[(horizon - 1) * feat + 3]; // predicted close at h=K-1
