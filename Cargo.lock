@@ -1221,6 +1221,7 @@ dependencies = [
  "brain-backend-cpu",
  "brain-campplus",
  "brain-capability",
+ "brain-capability-mock",
  "brain-checkpoint",
  "brain-data",
  "brain-diffusion",

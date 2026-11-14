@@ -623,9 +623,11 @@ pub(crate) fn cosine_t_span(n_timesteps: usize) -> Vec<f32> {
 /// noise (`rand_noise[.., :t]` for a real run - see [`rand_noise`] - or a
 /// captured golden entry state for composed-loop replay). Returns every
 /// post-step latent (`[80, t]` each), matching `flow_real_euler_steps.f32`'s
-/// `[n_timesteps, 1, 80, t]` layout when flattened.
+/// `[n_timesteps, 1, 80, t]` layout when flattened. `keep_going(step)` is
+/// asked after each completed step (1-based); `false` ends the loop there and
+/// the trajectory comes back short.
 #[allow(clippy::too_many_arguments)]
-pub fn solve_euler(cfg: &FlowConfig, w: &EstimatorW, x0: &[f32], mu: &[f32], spks: &[f32], cond: &[f32], t: usize, n_timesteps: usize) -> Vec<Vec<f32>> {
+pub fn solve_euler(cfg: &FlowConfig, w: &EstimatorW, x0: &[f32], mu: &[f32], spks: &[f32], cond: &[f32], t: usize, n_timesteps: usize, keep_going: &mut dyn FnMut(usize) -> bool) -> Vec<Vec<f32>> {
     let mel = cfg.estimator.mel_channels as usize;
     let t_span = cosine_t_span(n_timesteps);
     let zeros_mu = vec![0.0f32; mel * t];
@@ -646,6 +648,9 @@ pub fn solve_euler(cfg: &FlowConfig, w: &EstimatorW, x0: &[f32], mu: &[f32], spk
         }
         cur_t += dt;
         steps.push(x.clone());
+        if !keep_going(step) {
+            break;
+        }
         if step < n_timesteps {
             dt = t_span[step + 1] - cur_t;
         }
@@ -670,7 +675,8 @@ pub struct ForwardOutput {
 
 /// The whole `CausalMaskedDiffWithXvec.inference()` forward: condition
 /// assembly through the CFM Euler loop, sliced to the generated span
-/// (`feat[:, :, mel_len1:]`).
+/// (`feat[:, :, mel_len1:]`). `None` when `keep_going` stopped the Euler loop
+/// early (see [`solve_euler`]): a short trajectory is no mel.
 #[allow(clippy::too_many_arguments)]
 pub fn forward(
     w: &FlowWeights,
@@ -682,7 +688,8 @@ pub fn forward(
     mel_len1: usize,
     noise: &[f32],
     n_timesteps: usize,
-) -> ForwardOutput {
+    keep_going: &mut dyn FnMut(usize) -> bool,
+) -> Option<ForwardOutput> {
     let mel = cfg.output_size as usize;
     let embedding = speaker_embedding(w, cfg, xvec);
     let (mu_cl, conds_cl, mel_len1, mel_len2) = assemble_conditions(w, cfg, prompt_tokens, gen_tokens, prompt_feat_tc, mel_len1);
@@ -695,13 +702,16 @@ pub fn forward(
         x0[c * t..(c + 1) * t].copy_from_slice(&noise[c * noise_len..c * noise_len + t]);
     }
 
-    let steps = solve_euler(cfg, &w.estimator, &x0, &mu_cl, &embedding, &conds_cl, t, n_timesteps);
+    let steps = solve_euler(cfg, &w.estimator, &x0, &mu_cl, &embedding, &conds_cl, t, n_timesteps, keep_going);
+    if steps.len() < n_timesteps {
+        return None;
+    }
     let full = steps.last().expect("n_timesteps must be > 0").clone();
     let mut mel_out = vec![0.0f32; mel * mel_len2];
     for c in 0..mel {
         mel_out[c * mel_len2..(c + 1) * mel_len2].copy_from_slice(&full[c * t + mel_len1..c * t + t]);
     }
-    ForwardOutput { mel: mel_out, mu: mu_cl, conds: conds_cl, embedding, euler_steps: steps }
+    Some(ForwardOutput { mel: mel_out, mu: mu_cl, conds: conds_cl, embedding, euler_steps: steps })
 }
 
 #[cfg(test)]

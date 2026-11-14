@@ -323,7 +323,21 @@ fn token_budget(target_text_len: usize, opts: &GenOpts) -> (usize, usize) {
 /// S3Tokenizer + the 24 kHz prompt mel) -> LM speech-token generation ->
 /// flow decoder -> HiFT vocoder. See this module's own doc for the RAM
 /// discipline and the honest RNG-crossing/kaldi-fbank gaps.
-pub fn generate(paths: &CosyVoicePaths, opts: &GenOpts, text: &str, ref_wav_path: &str, ref_text: &str) -> Result<GeneratedSpeech, String> {
+///
+/// `cancel` is checked on entry and then once per generated speech token and
+/// once per flow Euler step, the two loops that hold the time; a fired token
+/// returns `Err(`[`capability::failure::CANCELLED`]`)` and drops every stage
+/// built so far. `progress` sees `(step, total, stage)` for both loops.
+pub fn generate(
+    paths: &CosyVoicePaths,
+    opts: &GenOpts,
+    text: &str,
+    ref_wav_path: &str,
+    ref_text: &str,
+    cancel: &capability::CancelToken,
+    progress: &mut dyn FnMut(u32, u32, &str),
+) -> Result<GeneratedSpeech, String> {
+    cancel.check()?;
     // Opt-in per-stage wall-clock profiling (`opts.profile`): the seam a
     // per-stage cost table comes from. Off by default, so a normal call pays
     // only a handful of `Instant::now()` calls it never reads.
@@ -411,13 +425,17 @@ pub fn generate(paths: &CosyVoicePaths, opts: &GenOpts, text: &str, ref_wav_path
     }
     let last_hidden = &hidden[hidden.len() - d..];
     let t_lm_generate = std::time::Instant::now();
-    let gen_tokens = lm.generate(last_hidden, max_tokens, min_len, opts.seed);
+    let gen_tokens = lm.generate(last_hidden, max_tokens, min_len, opts.seed, &mut |n| {
+        progress(n as u32, max_tokens as u32, "speech token");
+        !cancel.is_cancelled()
+    });
     if profile {
         let dt = t_lm_generate.elapsed();
         eprintln!("[profile] lm_generate (autoregressive decode, {} tokens): {:.3} ms", gen_tokens.len(), dt.as_secs_f64() * 1000.0);
         stage_times.push(("lm_generate (autoregressive decode)", dt));
     }
     drop(lm);
+    cancel.check()?;
     if gen_tokens.is_empty() {
         return Err("cosyvoice::generate: the LM sampled an immediate stop token (zero speech tokens) - try a different seed or prompt".to_string());
     }
@@ -425,6 +443,11 @@ pub fn generate(paths: &CosyVoicePaths, opts: &GenOpts, text: &str, ref_wav_path
     // ---- Flow decoder stage: tokens + x-vector + prompt mel -> target mel, own scope. ----
     profile::reset_flow_self_attn();
     let t_flow = std::time::Instant::now();
+    let n_timesteps = opts.n_timesteps as u32;
+    let mut flow_step = |step: usize| {
+        progress(step as u32, n_timesteps, "flow step");
+        !cancel.is_cancelled()
+    };
     let mel_out = {
         let flow_pt = format!("{}/flow.pt", paths.flow);
         match opts.variant {
@@ -432,7 +455,7 @@ pub fn generate(paths: &CosyVoicePaths, opts: &GenOpts, text: &str, ref_wav_path
                 let flow_cfg = FlowConfig::cosyvoice2();
                 let flow_w = import_flow_pt(&flow_pt, &flow_cfg)?;
                 let noise = flow::rand_noise();
-                flow::forward(&flow_w, &flow_cfg, &prompt_tokens, &gen_tokens, &xvec, &prompt_feat_tc, mel_len1, &noise, opts.n_timesteps).mel
+                flow::forward(&flow_w, &flow_cfg, &prompt_tokens, &gen_tokens, &xvec, &prompt_feat_tc, mel_len1, &noise, opts.n_timesteps, &mut flow_step).map(|o| o.mel)
             }
             // Same signature, same `[output_size, mel_len2]` result - a
             // 22-layer adaLN-zero DiT estimator instead of the UNet CFM one.
@@ -440,10 +463,12 @@ pub fn generate(paths: &CosyVoicePaths, opts: &GenOpts, text: &str, ref_wav_path
                 let flow_cfg = Cv3FlowConfig::cosyvoice3();
                 let flow_w = import_cv3_flow_pt(&flow_pt, &flow_cfg)?;
                 let noise = cv3_flow::rand_noise();
-                cv3_flow::forward(&flow_w, &flow_cfg, &prompt_tokens, &gen_tokens, &xvec, &prompt_feat_tc, mel_len1, &noise, opts.n_timesteps).mel
+                cv3_flow::forward(&flow_w, &flow_cfg, &prompt_tokens, &gen_tokens, &xvec, &prompt_feat_tc, mel_len1, &noise, opts.n_timesteps, &mut flow_step).map(|o| o.mel)
             }
         }
-    };
+    }
+    // The Euler loop only stops early when the token fired.
+    .ok_or_else(|| capability::failure::CANCELLED.to_string())?;
     if profile {
         let total = t_flow.elapsed();
         let attn = std::time::Duration::from_nanos(profile::flow_self_attn_ns());

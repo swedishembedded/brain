@@ -190,7 +190,8 @@ fn decode_ref_audio(blob: &Blob) -> Result<(Vec<f32>, u32), String> {
 /// adapter. `paths` is resolved by the caller (direct vs. resident differ
 /// only in error framing, not in how paths resolve - both come from
 /// [`CosyVoicePaths::from_assembly`]).
-pub fn synth_action(paths: &CosyVoicePaths, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
+pub fn synth_action(paths: &CosyVoicePaths, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+    inv.cancel.check()?;
     let text = inv.get_str("text").ok_or("cosyvoice synth: missing required param 'text'")?;
     let ref_text = inv.get_str("ref_text").ok_or("cosyvoice synth: missing required param 'ref_text'")?;
     let variant_str = inv.get_str("variant").unwrap_or_else(|| "cosyvoice2".to_string());
@@ -212,7 +213,7 @@ pub fn synth_action(paths: &CosyVoicePaths, inv: &Invocation, _progress: &mut dy
     };
 
     let scratch = ScratchWav::write(&samples, sample_rate)?;
-    let out = generate(paths, &opts, &text, scratch.path_str(), &ref_text)?;
+    let out = generate(paths, &opts, &text, scratch.path_str(), &ref_text, &inv.cancel, &mut |step, total, stage| progress(Progress::step(step, total, stage)))?;
     drop(scratch); // explicit: the scratch file must not outlive this call either way
 
     let bytes = audio::wav::encode(&out.samples, out.sample_rate);
@@ -324,6 +325,19 @@ mod tests {
         for v in VARIANTS {
             assert!(check_variant(v).is_ok(), "the advertised variant '{v}' must parse");
         }
+    }
+
+    /// A token fired before the call refuses it before the reference clip is
+    /// decoded or any checkpoint is read.
+    #[test]
+    fn a_synth_cancelled_before_admission_reads_nothing() {
+        let paths = CosyVoicePaths { llm: String::new(), flow: String::new(), hift: String::new(), s3tokenizer: String::new(), campplus: String::new(), tokenizer: String::new() };
+        let bytes: Vec<u8> = vec![0.0f32; 1600].iter().flat_map(|s| s.to_le_bytes()).collect();
+        let inv = Invocation::new()
+            .set("text", json!("hi"))
+            .set("ref_text", json!("hello"))
+            .blob("ref_audio", Blob::new(Media::Audio, bytes).with_meta(json!({"sample_rate": 16000})));
+        capability_mock::cancellation::admission("cosyvoice synth", inv, &|inv, progress| synth_action(&paths, inv, progress));
     }
 
     #[test]

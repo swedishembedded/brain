@@ -131,9 +131,9 @@ fn real_ar_generation_is_seed_deterministic_and_valid() {
     // starting state (mirrors this crate's own
     // `llm::tests::generate_is_deterministic_given_the_same_seed`).
     let h1 = lm.prefill(&text_ids, &prompt_speech_tokens);
-    let a = lm.generate(&h1[h1.len() - d..], want_tokens.len(), min_len, seed);
+    let a = lm.generate(&h1[h1.len() - d..], want_tokens.len(), min_len, seed, &mut |_| true);
     let h2 = lm.prefill(&text_ids, &prompt_speech_tokens);
-    let b = lm.generate(&h2[h2.len() - d..], want_tokens.len(), min_len, seed);
+    let b = lm.generate(&h2[h2.len() - d..], want_tokens.len(), min_len, seed, &mut |_| true);
     assert_eq!(a, b, "generate() must be deterministic for a fixed seed given a fresh prefill each time");
 
     for &t in &a {

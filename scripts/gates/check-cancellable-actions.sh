@@ -25,7 +25,6 @@ cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 # Every name here is a model whose streaming run cannot be stopped early:
 # firing the token changes nothing, and the caller waits for it to finish.
 KNOWN="
-cosyvoice
 deepseek2ocr
 deepseekocr2
 fastvlm

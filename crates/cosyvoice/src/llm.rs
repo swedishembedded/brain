@@ -197,14 +197,15 @@ impl CosyVoiceLm {
     /// the first step's hidden state. Stops at `cfg.stop_token_ids` or
     /// `max_tokens`, whichever comes first. `min_len` mirrors the reference's
     /// `min_token_text_ratio` gate: `eos` is masked out of the distribution for
-    /// steps `< min_len`.
+    /// steps `< min_len`. `keep_going(n)` is asked after each of the `n`
+    /// tokens is kept; `false` ends the decode there with what was generated.
     ///
     /// **Not bit-exact with the reference sampler** - see `crate::sampling`'s
     /// module doc. `seed` selects brain's OWN reproducible RNG stream, so the
     /// SAME seed always yields the SAME token sequence on this implementation
     /// (verified in `crates/cosyvoice/tests/it/llm_parity.rs`), but that sequence
     /// will not match `torch.manual_seed`'s.
-    pub fn generate(&self, last_hidden: &[f32], max_tokens: usize, min_len: usize, seed: u64) -> Vec<u32> {
+    pub fn generate(&self, last_hidden: &[f32], max_tokens: usize, min_len: usize, seed: u64, keep_going: &mut dyn FnMut(usize) -> bool) -> Vec<u32> {
         assert_eq!(last_hidden.len(), self.d());
         let mut rng = Rng::new(seed);
         let params = RasParams::default();
@@ -221,6 +222,9 @@ impl CosyVoiceLm {
                 break;
             }
             tokens.push(tok);
+            if !keep_going(tokens.len()) {
+                break;
+            }
             let next = self.speech_embed(tok).to_vec();
             hidden = self.qwen.step_embed(&next);
         }
@@ -295,7 +299,7 @@ mod tests {
         assert_eq!(hidden.len(), n * d);
         assert!(hidden.iter().all(|v| v.is_finite()));
 
-        let tokens = lm.generate(&hidden[hidden.len() - d..], 16, 0, 1234);
+        let tokens = lm.generate(&hidden[hidden.len() - d..], 16, 0, 1234, &mut |_| true);
         for &t in &tokens {
             assert!(!cfg.stop_token_ids.contains(&t), "generate() must not push a stop id into its own output");
             assert!((t as usize) < lm.speech_vocab());
@@ -317,6 +321,27 @@ mod tests {
         assert!(hidden.iter().all(|v| v.is_finite()));
     }
 
+    /// The speech-token decode is where a synth spends its time, so it is
+    /// where cancellation is certified: a token fired mid-decode stops it at
+    /// the next kept token.
+    #[test]
+    fn generate_stops_at_the_next_token_once_its_caller_says_stop() {
+        let cfg = tiny_cfg();
+        let lm = CosyVoiceLm::from_weights(cfg.clone(), tiny_weights(&cfg), 64);
+        let d = cfg.llm_input_size as usize;
+        let decode = |inv: &capability::Invocation, progress: &mut dyn FnMut(capability::Progress)| -> capability::ActionResult {
+            let hidden = lm.prefill(&[3, 5, 7], &[1, 4]);
+            let tokens = lm.generate(&hidden[hidden.len() - d..], 16, 16, 1234, &mut |n| {
+                progress(capability::Progress::step(n as u32, 16, "speech token"));
+                !inv.cancel.is_cancelled()
+            });
+            inv.cancel.check()?;
+            Ok(capability::Outcome::new().set("tokens", serde_json::json!(tokens.len())))
+        };
+        let report = capability_mock::cancellation::mid_run("cosyvoice lm decode", &capability::Invocation::new, &decode, capability_mock::cancellation::Bound::ONE_STEP);
+        assert_eq!(report.events_after_cancel, 0, "the decode asks before embedding the next token, so nothing follows the cancel");
+    }
+
     #[test]
     fn generate_stops_within_the_token_cap_and_never_emits_a_stop_id() {
         let cfg = tiny_cfg();
@@ -326,7 +351,7 @@ mod tests {
         let hidden = lm.prefill(&[3, 5, 7], &[1, 4]);
         let d = cfg.llm_input_size as usize;
         let last = &hidden[hidden.len() - d..];
-        let tokens = lm.generate(last, 16, 0, 1234);
+        let tokens = lm.generate(last, 16, 0, 1234, &mut |_| true);
         assert!(tokens.len() <= 16);
         for &t in &tokens {
             assert!(!cfg.stop_token_ids.contains(&t), "generate() must not push a stop id into its own output");
@@ -342,9 +367,9 @@ mod tests {
         let d = cfg.llm_input_size as usize;
 
         let h1 = lm.prefill(&[3, 5, 7], &[1, 4]);
-        let a = lm.generate(&h1[h1.len() - d..], 12, 0, 99);
+        let a = lm.generate(&h1[h1.len() - d..], 12, 0, 99, &mut |_| true);
         let h2 = lm.prefill(&[3, 5, 7], &[1, 4]);
-        let b = lm.generate(&h2[h2.len() - d..], 12, 0, 99);
+        let b = lm.generate(&h2[h2.len() - d..], 12, 0, 99, &mut |_| true);
         assert_eq!(a, b, "same seed + same prefix must reproduce the same generated sequence");
     }
 }

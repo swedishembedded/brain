@@ -175,7 +175,7 @@ fn spliced_flow_and_hift_reproduce_the_reference_given_golden_tokens_and_xvec() 
 
     let flow_w = import_flow_pt(flow_dir.join("flow.pt").to_str().unwrap(), &flow_cfg).unwrap_or_else(|e| panic!("import_flow_pt: {e}"));
     let noise_buf = flow::rand_noise();
-    let flow_out = flow::forward(&flow_w, &flow_cfg, &prompt_tokens, &gen_tokens, &xvec, &prompt_feat_tc, mel_len1, &noise_buf, flow_cfg.n_timesteps as usize);
+    let flow_out = flow::forward(&flow_w, &flow_cfg, &prompt_tokens, &gen_tokens, &xvec, &prompt_feat_tc, mel_len1, &noise_buf, flow_cfg.n_timesteps as usize, &mut |_| true).expect("an unstopped Euler loop yields a mel");
     drop(flow_w);
 
     assert_eq!(flow_out.mel.len(), want_mel.len(), "flow mel length");
@@ -213,7 +213,7 @@ fn full_pipeline_produces_a_real_playable_wav_from_real_weights() {
     eprintln!("pipeline seed: {seed}");
     let opts = GenOpts { seed, ..GenOpts::default() };
 
-    let out_a = pipeline::generate(&paths, &opts, text, ref_wav.to_str().unwrap(), ref_text).unwrap_or_else(|e| panic!("pipeline::generate: {e}"));
+    let out_a = pipeline::generate(&paths, &opts, text, ref_wav.to_str().unwrap(), ref_text, &capability::CancelToken::default(), &mut |_, _, _| {}).unwrap_or_else(|e| panic!("pipeline::generate: {e}"));
 
     assert!(!out_a.samples.is_empty(), "generated zero samples");
     assert!(out_a.samples.iter().all(|v| v.is_finite()), "waveform must be finite");
@@ -225,7 +225,7 @@ fn full_pipeline_produces_a_real_playable_wav_from_real_weights() {
     assert!(rms > 1e-4, "waveform RMS {rms} looks silent");
     assert!(duration_s > 0.05, "waveform duration {duration_s}s implausibly short for the requested text");
 
-    let out_b = pipeline::generate(&paths, &opts, text, ref_wav.to_str().unwrap(), ref_text).unwrap_or_else(|e| panic!("pipeline::generate (rerun): {e}"));
+    let out_b = pipeline::generate(&paths, &opts, text, ref_wav.to_str().unwrap(), ref_text, &capability::CancelToken::default(), &mut |_, _, _| {}).unwrap_or_else(|e| panic!("pipeline::generate (rerun): {e}"));
     assert_eq!(out_a.samples.len(), out_b.samples.len(), "same seed must reproduce the same length");
     assert_eq!(out_a.samples, out_b.samples, "same seed + same inputs must reproduce the same waveform end to end");
 

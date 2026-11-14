@@ -164,7 +164,7 @@ fn euler_loop_replay_matches_the_reference_steps() {
         x0[c * t..(c + 1) * t].copy_from_slice(&noise[c * noise_len..c * noise_len + t]);
     }
 
-    let got_steps = flow::solve_euler(&f.cfg, &f.weights.estimator, &x0, &mu, &embedding, &conds, t, f.cfg.n_timesteps as usize);
+    let got_steps = flow::solve_euler(&f.cfg, &f.weights.estimator, &x0, &mu, &embedding, &conds, t, f.cfg.n_timesteps as usize, &mut |_| true);
     let got_flat: Vec<f32> = got_steps.into_iter().flatten().collect();
 
     let mut table = Table::new(COS_FLOOR, REL_CEIL);
@@ -195,7 +195,9 @@ fn full_forward_matches_the_reference_mel() {
         f.mel_len1,
         &noise,
         f.cfg.n_timesteps as usize,
-    );
+        &mut |_| true,
+    )
+    .expect("an unstopped Euler loop yields a mel");
 
     assert_eq!(out.mel.len(), want_mel.len(), "mel_out length");
     let mut table = Table::new(COS_FLOOR, REL_CEIL);
