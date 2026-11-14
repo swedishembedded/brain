@@ -417,10 +417,10 @@ impl Executor {
             lanes.insert(d, ltx);
         }
 
-        let disp_stats = stats.clone();
+        let dispatcher = Dispatcher::new(mgr, policy, lanes, stats.clone(), supervision.map(|s| s.health));
         let h = std::thread::Builder::new()
             .name("brain-dispatcher".into())
-            .spawn(move || dispatch_loop(rx, mgr, policy, lanes, disp_stats, capacity, supervision))
+            .spawn(move || dispatch_loop(rx, dispatcher, capacity))
             .expect("spawn dispatcher");
         join_handles.push(h);
 
@@ -751,20 +751,52 @@ pub type CapacityProbe = Arc<dyn Fn() -> Vec<(Device, u64)> + Send + Sync>;
 /// true for causes originating outside this process.
 const IDLE_TICK: std::time::Duration = std::time::Duration::from_secs(2);
 
-fn dispatch_loop(rx: Receiver<Msg>, mut mgr: ResidencyManager, policy: Policy, lanes: HashMap<Device, Sender<LaneMsg>>, stats: Arc<Mutex<Stats>>, capacity: Option<CapacityProbe>, supervision: Option<Supervision>) {
-    let health = supervision.as_ref().map(|s| s.health.clone());
-    let mut queue: Vec<Pending> = Vec::new();
-    let mut running: HashSet<InstanceKey> = HashSet::new();
-    let mut busy: HashSet<Device> = HashSet::new();
-    // Jobs handed to a lane and running now - tracked here (not in `queue`) so the
-    // in-flight query can report them, keyed by the group's instance key.
-    let mut running_jobs: Vec<RunningJob> = Vec::new();
-    // Running groups that still take late jobs of their instance, by key.
-    let mut open_groups: HashMap<InstanceKey, OpenGroup> = HashMap::new();
-    // What was routed to each replica of the models that run several: the dispatcher's record of their prefix caches.
-    let mut replica_routes = ReplicaRoutes::default();
-    // Monotonic job-id source; each submitted job gets the next value.
-    let mut next_id: u64 = 0;
+/// What the dispatcher thread owns: the residency manager, the lanes, and the
+/// scheduling state every message and every round acts on. Nothing else
+/// touches it, so none of it is locked (except `stats`, which front ends read).
+struct Dispatcher {
+    mgr: ResidencyManager,
+    policy: Policy,
+    lanes: HashMap<Device, Sender<LaneMsg>>,
+    stats: Arc<Mutex<Stats>>,
+    /// Device health, when the executor runs supervised.
+    health: Option<Arc<Health<Device>>>,
+    queue: Vec<Pending>,
+    /// Instances a lane is running a group of.
+    running: HashSet<InstanceKey>,
+    /// Devices a lane is occupied on (a group or a probe).
+    busy: HashSet<Device>,
+    /// Jobs handed to a lane and running now - tracked here (not in `queue`) so the
+    /// in-flight query can report them, keyed by the group's instance key.
+    running_jobs: Vec<RunningJob>,
+    /// Running groups that still take late jobs of their instance, by key.
+    open_groups: HashMap<InstanceKey, OpenGroup>,
+    /// What was routed to each replica of the models that run several: the dispatcher's record of their prefix caches.
+    replica_routes: ReplicaRoutes,
+    /// Monotonic job-id source; each submitted job gets the next value.
+    next_id: u64,
+}
+
+impl Dispatcher {
+    fn new(mgr: ResidencyManager, policy: Policy, lanes: HashMap<Device, Sender<LaneMsg>>, stats: Arc<Mutex<Stats>>, health: Option<Arc<Health<Device>>>) -> Dispatcher {
+        Dispatcher {
+            mgr,
+            policy,
+            lanes,
+            stats,
+            health,
+            queue: Vec::new(),
+            running: HashSet::new(),
+            busy: HashSet::new(),
+            running_jobs: Vec::new(),
+            open_groups: HashMap::new(),
+            replica_routes: ReplicaRoutes::default(),
+            next_id: 0,
+        }
+    }
+}
+
+fn dispatch_loop(rx: Receiver<Msg>, mut d: Dispatcher, capacity: Option<CapacityProbe>) {
     // Best-effort observability refreshes on a TICK, not per message: rebuilding
     // a fresh HashMap of cloned keys/metrics under the stats lock after EVERY
     // dispatcher round was pure overhead on the scheduling thread (the D-Bus
@@ -825,7 +857,7 @@ fn dispatch_loop(rx: Receiver<Msg>, mut mgr: ResidencyManager, policy: Policy, l
         // queued this round.
         for msg in msgs {
             if let Err(p) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                on_msg(msg, &mut queue, &mut mgr, &mut running, &mut busy, &stats, &mut running_jobs, &mut open_groups, &mut replica_routes, &mut next_id);
+                d.on_msg(msg);
             })) {
                 eprintln!("[residency] dispatcher: panic processing a message: {} -- continuing", panic_message(p.as_ref()));
             }
@@ -837,22 +869,21 @@ fn dispatch_loop(rx: Receiver<Msg>, mut mgr: ResidencyManager, policy: Policy, l
         // goes back to blocking, since no MORE messages are coming just
         // because scheduling stalled. Own catch_unwind too: `assign`'s
         // eviction fallback can ALSO drop a Hot instance.
-        shed_cancelled(&mut queue, &stats);
-        refill_open_groups(&mut queue, &open_groups, &running, &mut running_jobs, &stats);
-        if let Err(p) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            assign(&mut queue, &mut mgr, &policy, &lanes, &mut running, &mut busy, &stats, &mut running_jobs, &mut open_groups, health.as_deref());
-        })) {
+        shed_cancelled(&mut d.queue, &d.stats);
+        refill_open_groups(&mut d.queue, &d.open_groups, &d.running, &mut d.running_jobs, &d.stats);
+        if let Err(p) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| d.assign())) {
             eprintln!("[residency] dispatcher: panic during assign: {} -- continuing", panic_message(p.as_ref()));
         }
         // After `assign`: a device that is quarantined takes no work, so its
         // lane is idle unless a group claimed before the fault is still
         // winding down there (then it is busy and the probe waits).
-        if let Some(health) = &health {
-            start_probes(health, &lanes, &mut busy);
+        if let Some(health) = &d.health {
+            start_probes(health, &d.lanes, &mut d.busy);
         }
         // After `assign`, so a job it just claimed is in `running_jobs` and a
         // retired model it names is kept until that job's group is done.
         if let Err(p) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let Dispatcher { mgr, queue, running_jobs, .. } = &mut d;
             mgr.sweep_retired(|model| queue.iter().any(|j| j.model == model) || running_jobs.iter().any(|j| j.model == model));
         })) {
             eprintln!("[residency] dispatcher: panic retiring a model: {} -- continuing", panic_message(p.as_ref()));
@@ -864,7 +895,7 @@ fn dispatch_loop(rx: Receiver<Msg>, mut mgr: ResidencyManager, policy: Policy, l
             if last_capacity.is_none_or(|t: Instant| t.elapsed() >= CAPACITY_REFRESH) {
                 let free = probe();
                 if let Err(p) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    mgr.refresh_accelerator_capacity(&free);
+                    d.mgr.refresh_accelerator_capacity(&free);
                 })) {
                     eprintln!("[residency] dispatcher: panic refreshing capacity: {} -- continuing", panic_message(p.as_ref()));
                 }
@@ -872,194 +903,195 @@ fn dispatch_loop(rx: Receiver<Msg>, mut mgr: ResidencyManager, policy: Policy, l
             }
         }
         if last_metrics.is_none_or(|t| t.elapsed() >= METRICS_REFRESH) {
-            if let Ok(mut s) = stats.lock() {
-                s.metrics = mgr.all_metrics();
-                s.load = instance_loads(&queue, &running_jobs);
+            if let Ok(mut s) = d.stats.lock() {
+                s.metrics = d.mgr.all_metrics();
+                s.load = instance_loads(&d.queue, &d.running_jobs);
             }
             last_metrics = Some(Instant::now());
         }
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn on_msg(msg: Msg, queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, running: &mut HashSet<InstanceKey>, busy: &mut HashSet<Device>, stats: &Arc<Mutex<Stats>>, running_jobs: &mut Vec<RunningJob>, open_groups: &mut HashMap<InstanceKey, OpenGroup>, replica_routes: &mut ReplicaRoutes, next_id: &mut u64) {
-    match msg {
-        Msg::Submit(mut job) => match mgr.instance_key_for(&job.model, &job.action, &job.inv) {
-            Some(key) => {
-                if let Err(refusal) = mgr.check_job(&job.model, &job.action, &job.inv) {
-                    (job.reply)(Err(refusal));
-                    return;
+impl Dispatcher {
+    /// Apply one message to the dispatcher's state.
+    fn on_msg(&mut self, msg: Msg) {
+        let Dispatcher { queue, mgr, running, busy, stats, running_jobs, open_groups, replica_routes, next_id, .. } = self;
+        match msg {
+            Msg::Submit(mut job) => match mgr.instance_key_for(&job.model, &job.action, &job.inv) {
+                Some(key) => {
+                    if let Err(refusal) = mgr.check_job(&job.model, &job.action, &job.inv) {
+                        (job.reply)(Err(refusal));
+                        return;
+                    }
+                    mgr.stamp(&job.model, &mut job.inv);
+                    let key = replica_routes.route(mgr, &job.model, &job.inv, key, queue, running_jobs);
+                    let id = *next_id;
+                    *next_id += 1;
+                    queue.push(Pending {
+                        id,
+                        model: job.model,
+                        action: job.action,
+                        inv: job.inv,
+                        key,
+                        enqueued: Instant::now(),
+                        on_progress: job.on_progress,
+                        reply: job.reply,
+                        on_admit: job.on_admit,
+                        screened: false,
+                    });
+                    let mut s = stats.lock().unwrap();
+                    s.queue_peak = s.queue_peak.max(queue.len());
+                    s.queue_depth = queue.len();
                 }
-                mgr.stamp(&job.model, &mut job.inv);
-                let key = replica_routes.route(mgr, &job.model, &job.inv, key, queue, running_jobs);
-                let id = *next_id;
-                *next_id += 1;
-                queue.push(Pending {
-                    id,
-                    model: job.model,
-                    action: job.action,
-                    inv: job.inv,
-                    key,
-                    enqueued: Instant::now(),
-                    on_progress: job.on_progress,
-                    reply: job.reply,
-                    on_admit: job.on_admit,
-                    screened: false,
-                });
+                None => (job.reply)(Err(format!("no model '{}'", job.model))),
+            },
+            Msg::Register(model) => {
+                crate::log::info(&format!("model registered: {}", model.manifest().model));
+                mgr.register(model);
+            }
+            Msg::Unregister(model) => {
+                crate::log::info(&format!("model unregistered: {model}"));
+                mgr.retire(&model);
+            }
+            Msg::RegisterMulti(model) => {
+                crate::log::info(&format!("model registered (multi-device): {}", model.manifest().model));
+                mgr.register_multi(model);
+            }
+            Msg::Built { key, handle } => {
+                // `mgr.adopt` itself logs "built {key}" (via `ResidencyManager::event`).
+                mgr.adopt(&key, handle);
+                // Deferred activate()/promote() finished -- this group is no longer
+                // "building" (see InFlightJob::phase's doc), even though it may keep
+                // running for a while yet.
+                for r in running_jobs.iter_mut() {
+                    if r.key == key {
+                        r.building = false;
+                    }
+                }
+            }
+            Msg::BuiltMulti { key, handle } => {
+                // `mgr.adopt_multi` itself logs "built {key} (multi-device)".
+                mgr.adopt_multi(&key, handle);
+                // See Msg::Built's identical building-flip, above.
+                for r in running_jobs.iter_mut() {
+                    if r.key == key {
+                        r.building = false;
+                    }
+                }
+            }
+            Msg::Plan { model, action, inv, reply } => {
+                let _ = reply.send(mgr.plan(&model, &action, &inv));
+            }
+            Msg::Report(tx) => {
+                let _ = tx.send(mgr.report());
+            }
+            Msg::InFlight(tx) => {
+                let now = Instant::now();
+                let mut jobs: Vec<InFlightJob> = Vec::with_capacity(queue.len() + running_jobs.len());
+                for p in queue.iter() {
+                    jobs.push(InFlightJob {
+                        id: p.id,
+                        model: p.model.clone(),
+                        action: p.action.clone(),
+                        phase: "queued".to_string(),
+                        since_ms: now.saturating_duration_since(p.enqueued).as_millis() as u64,
+                    });
+                }
+                for r in running_jobs.iter() {
+                    jobs.push(InFlightJob {
+                        id: r.id,
+                        model: r.model.clone(),
+                        action: r.action.clone(),
+                        phase: if r.building { "building" } else { "running" }.to_string(),
+                        since_ms: now.saturating_duration_since(r.enqueued).as_millis() as u64,
+                    });
+                }
+                jobs.sort_by_key(|j| j.id); // stable, submit-order
+                let _ = tx.send(jobs);
+            }
+            Msg::Done { key, device, batch, failed } => {
+                // Free the dispatcher's OWN bookkeeping (`busy`/`running`) BEFORE
+                // the risky `mgr.build_failed`/`release` call below, which drops
+                // the claim's `InstanceHandle` and can panic a SECOND time (a lost
+                // GPU device's backend panicking again from inside its own Drop -
+                // see dispatch_loop's per-message catch_unwind). If that panic cut
+                // this handler off here instead, `device` would stay marked busy
+                // FOREVER (nothing else ever clears it), silently wedging every
+                // future claim on it - not a hang in this one model, a dead
+                // device. `mgr`'s own state is a separate concern: `build_failed`/
+                // `release` still run next, and their own edits to `residents`/
+                // `budgets`/`instances` happen before THEIR risky drop too (see
+                // their own bodies).
+                running.remove(&key);
+                open_groups.remove(&key);
+                running_jobs.retain(|r| r.key != key); // group finished - drop its jobs
+                busy.remove(&device);
+                if failed {
+                    crate::log::warn(&format!("model activation/run failed: {key} on {device:?}"));
+                    mgr.build_failed(&key); // unwind budget + slot; jobs already failed
+                } else {
+                    mgr.release(&key);
+                }
                 let mut s = stats.lock().unwrap();
-                s.queue_peak = s.queue_peak.max(queue.len());
-                s.queue_depth = queue.len();
-            }
-            None => (job.reply)(Err(format!("no model '{}'", job.model))),
-        },
-        Msg::Register(model) => {
-            crate::log::info(&format!("model registered: {}", model.manifest().model));
-            mgr.register(model);
-        }
-        Msg::Unregister(model) => {
-            crate::log::info(&format!("model unregistered: {model}"));
-            mgr.retire(&model);
-        }
-        Msg::RegisterMulti(model) => {
-            crate::log::info(&format!("model registered (multi-device): {}", model.manifest().model));
-            mgr.register_multi(model);
-        }
-        Msg::Built { key, handle } => {
-            // `mgr.adopt` itself logs "built {key}" (via `ResidencyManager::event`).
-            mgr.adopt(&key, handle);
-            // Deferred activate()/promote() finished -- this group is no longer
-            // "building" (see InFlightJob::phase's doc), even though it may keep
-            // running for a while yet.
-            for r in running_jobs.iter_mut() {
-                if r.key == key {
-                    r.building = false;
-                }
-            }
-        }
-        Msg::BuiltMulti { key, handle } => {
-            // `mgr.adopt_multi` itself logs "built {key} (multi-device)".
-            mgr.adopt_multi(&key, handle);
-            // See Msg::Built's identical building-flip, above.
-            for r in running_jobs.iter_mut() {
-                if r.key == key {
-                    r.building = false;
-                }
-            }
-        }
-        Msg::Plan { model, action, inv, reply } => {
-            let _ = reply.send(mgr.plan(&model, &action, &inv));
-        }
-        Msg::Report(tx) => {
-            let _ = tx.send(mgr.report());
-        }
-        Msg::InFlight(tx) => {
-            let now = Instant::now();
-            let mut jobs: Vec<InFlightJob> = Vec::with_capacity(queue.len() + running_jobs.len());
-            for p in queue.iter() {
-                jobs.push(InFlightJob {
-                    id: p.id,
-                    model: p.model.clone(),
-                    action: p.action.clone(),
-                    phase: "queued".to_string(),
-                    since_ms: now.saturating_duration_since(p.enqueued).as_millis() as u64,
-                });
-            }
-            for r in running_jobs.iter() {
-                jobs.push(InFlightJob {
-                    id: r.id,
-                    model: r.model.clone(),
-                    action: r.action.clone(),
-                    phase: if r.building { "building" } else { "running" }.to_string(),
-                    since_ms: now.saturating_duration_since(r.enqueued).as_millis() as u64,
-                });
-            }
-            jobs.sort_by_key(|j| j.id); // stable, submit-order
-            let _ = tx.send(jobs);
-        }
-        Msg::Done { key, device, batch, failed } => {
-            // Free the dispatcher's OWN bookkeeping (`busy`/`running`) BEFORE
-            // the risky `mgr.build_failed`/`release` call below, which drops
-            // the claim's `InstanceHandle` and can panic a SECOND time (a lost
-            // GPU device's backend panicking again from inside its own Drop -
-            // see dispatch_loop's per-message catch_unwind). If that panic cut
-            // this handler off here instead, `device` would stay marked busy
-            // FOREVER (nothing else ever clears it), silently wedging every
-            // future claim on it - not a hang in this one model, a dead
-            // device. `mgr`'s own state is a separate concern: `build_failed`/
-            // `release` still run next, and their own edits to `residents`/
-            // `budgets`/`instances` happen before THEIR risky drop too (see
-            // their own bodies).
-            running.remove(&key);
-            open_groups.remove(&key);
-            running_jobs.retain(|r| r.key != key); // group finished - drop its jobs
-            busy.remove(&device);
-            if failed {
-                crate::log::warn(&format!("model activation/run failed: {key} on {device:?}"));
-                mgr.build_failed(&key); // unwind budget + slot; jobs already failed
-            } else {
-                mgr.release(&key);
-            }
-            let mut s = stats.lock().unwrap();
-            s.batches += 1;
-            s.jobs += batch as u64;
-            s.max_batch = s.max_batch.max(batch);
-            s.builds = mgr.builds;
-            s.evictions = mgr.evictions;
-            s.resident = mgr.resident_count();
-        }
-        Msg::DoneMulti { key, devices, batch, failed } => {
-            // See `Msg::Done`'s identical reordering + doc, above.
-            running.remove(&key);
-            open_groups.remove(&key);
-            running_jobs.retain(|r| r.key != key);
-            for &d in &devices {
-                busy.remove(&d);
-            }
-            if failed {
-                crate::log::warn(&format!("model activation/run failed (multi-device): {key} on {devices:?}"));
-                mgr.build_failed_multi(&key); // unwind budget on EVERY device; jobs already failed
-            } else {
-                mgr.release_multi(&key);
-            }
-            let mut s = stats.lock().unwrap();
-            s.batches += 1;
-            s.jobs += batch as u64;
-            s.max_batch = s.max_batch.max(batch);
-            s.builds = mgr.builds;
-            s.evictions = mgr.evictions;
-            s.resident = mgr.resident_count();
-            s.resident_multi = mgr.resident_multi_count();
-        }
-        Msg::Probed { device } => {
-            busy.remove(&device);
-        }
-        Msg::EvictMulti { key, reply } => {
-            let ok = mgr.evict_multi(&key);
-            if let Ok(mut s) = stats.lock() {
-                s.evictions = mgr.evictions;
-                s.resident_multi = mgr.resident_multi_count();
-            }
-            let _ = reply.send(ok);
-        }
-        Msg::Evict { key, reply } => {
-            let ok = mgr.evict(&key);
-            if let Ok(mut s) = stats.lock() {
+                s.batches += 1;
+                s.jobs += batch as u64;
+                s.max_batch = s.max_batch.max(batch);
+                s.builds = mgr.builds;
                 s.evictions = mgr.evictions;
                 s.resident = mgr.resident_count();
             }
-            let _ = reply.send(ok);
+            Msg::DoneMulti { key, devices, batch, failed } => {
+                // See `Msg::Done`'s identical reordering + doc, above.
+                running.remove(&key);
+                open_groups.remove(&key);
+                running_jobs.retain(|r| r.key != key);
+                for &d in &devices {
+                    busy.remove(&d);
+                }
+                if failed {
+                    crate::log::warn(&format!("model activation/run failed (multi-device): {key} on {devices:?}"));
+                    mgr.build_failed_multi(&key); // unwind budget on EVERY device; jobs already failed
+                } else {
+                    mgr.release_multi(&key);
+                }
+                let mut s = stats.lock().unwrap();
+                s.batches += 1;
+                s.jobs += batch as u64;
+                s.max_batch = s.max_batch.max(batch);
+                s.builds = mgr.builds;
+                s.evictions = mgr.evictions;
+                s.resident = mgr.resident_count();
+                s.resident_multi = mgr.resident_multi_count();
+            }
+            Msg::Probed { device } => {
+                busy.remove(&device);
+            }
+            Msg::EvictMulti { key, reply } => {
+                let ok = mgr.evict_multi(&key);
+                if let Ok(mut s) = stats.lock() {
+                    s.evictions = mgr.evictions;
+                    s.resident_multi = mgr.resident_multi_count();
+                }
+                let _ = reply.send(ok);
+            }
+            Msg::Evict { key, reply } => {
+                let ok = mgr.evict(&key);
+                if let Ok(mut s) = stats.lock() {
+                    s.evictions = mgr.evictions;
+                    s.resident = mgr.resident_count();
+                }
+                let _ = reply.send(ok);
+            }
+            // Unreachable: dispatch_loop checks the drained batch for this
+            // variant and returns before ever calling on_msg - see
+            // Msg::Shutdown's doc. Still matched (not `_`) so a future Msg
+            // variant added here fails exhaustiveness instead of silently
+            // falling through the wildcard.
+            Msg::Shutdown => {}
         }
-        // Unreachable: dispatch_loop checks the drained batch for this
-        // variant and returns before ever calling on_msg - see
-        // Msg::Shutdown's doc. Still matched (not `_`) so a future Msg
-        // variant added here fails exhaustiveness instead of silently
-        // falling through the wildcard.
-        Msg::Shutdown => {}
     }
 }
 
-/// Assign as many runnable groups as there are free device lanes.
-#[allow(clippy::too_many_arguments)]
 /// Jobs queued and running per instance key.
 fn instance_loads(queue: &[Pending], running_jobs: &[RunningJob]) -> HashMap<InstanceKey, InstanceLoad> {
     let mut loads: HashMap<InstanceKey, InstanceLoad> = HashMap::new();
@@ -1147,107 +1179,147 @@ fn note_unservable(stats: &Arc<Mutex<Stats>>, key: &InstanceKey, reason: Option<
     }
 }
 
-fn assign(queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, policy: &Policy, lanes: &HashMap<Device, Sender<LaneMsg>>, running: &mut HashSet<InstanceKey>, busy: &mut HashSet<Device>, stats: &Arc<Mutex<Stats>>, running_jobs: &mut Vec<RunningJob>, open_groups: &mut HashMap<InstanceKey, OpenGroup>, health: Option<&Health<Device>>) {
-    // Quarantined devices are excluded exactly like busy ones, so a group is
-    // placed on a healthy device when one can take it; what no healthy device
-    // could ever take is refused once the quarantine is a long one.
-    let quarantined: HashSet<Device> = health.map(|h| h.quarantined().into_iter().collect()).unwrap_or_default();
-    if let Some(h) = health.filter(|_| !quarantined.is_empty()) {
-        refuse_quarantined(queue, mgr, running, &quarantined, h);
-    }
-    // Groups whose claim came back `NoCapacity` THIS round. They are skipped
-    // for the rest of it, and reconsidered on the next one (a lane finishing,
-    // or the dispatcher's own idle tick).
-    //
-    // This used to `break` out of the entire assign loop instead, which meant
-    // one group that could not be placed stopped every OTHER group from being
-    // assigned - including ones on completely idle lanes, and including
-    // stateless CPU models that needed no card at all. `choose_next`
-    // force-picks the oldest overdue group, so the same group was picked
-    // again on the next round, and the next: the head of the queue blocked
-    // the whole server for as long as it was unplaceable.
-    let mut stalled: HashSet<InstanceKey> = HashSet::new();
-    loop {
-        // Groups whose key is not already running AND that can be placed on some
-        // non-busy device (the scheduler policy then picks among them).
-        let now = Instant::now();
-        let exclude: HashSet<Device> = busy.union(&quarantined).copied().collect();
-        let rows = group_rows(queue, now, running);
-        // Multi-device groups need `placeable_multi` (checks EVERY named device),
-        // never plain `placeable` - a model registered ONLY via `register_multi`
-        // is never in `self.models` at all, so `placeable` would always return
-        // `false` for it and its jobs would sit in the queue forever, silently.
-        let placeable: Vec<Group> = rows
-            .iter()
-            .filter(|r| !stalled.contains(&r.key))
-            .filter(|r| if mgr.is_multi(&r.model) { mgr.placeable_multi(&r.key, &r.model, &exclude) } else { mgr.placeable(&r.key, &r.model, &exclude) })
-            .map(|r| r.summary.clone())
-            .collect();
-        let (gid, batch) = match choose_next(&placeable, policy) {
-            Some(x) => x,
-            None => break, // nothing runnable right now
-        };
-        // choose_next returns the group's `id` FIELD - which group_rows numbered
-        // as its index into `rows` - never an index into the filtered
-        // `placeable` slice. (Indexing `placeable[gid]` here panicked the
-        // dispatcher with index-out-of-bounds the moment any group was filtered
-        // out as unplaceable, killing scheduling for the whole server.)
-        let chosen = gid; // == the row index in `rows`
-        let (key, model, action) = (rows[chosen].key.clone(), rows[chosen].model.clone(), rows[chosen].action.clone());
-        // A model that batches wider than the policy's default says so; give
-        // it everything queued up to its own limit.
-        let batch = match mgr.batch_limit(&model) {
-            Some(limit) => rows[chosen].summary.size.min(limit.max(1)),
-            None => batch,
-        };
+impl Dispatcher {
+    /// Assign as many runnable groups as there are free device lanes.
+    fn assign(&mut self) {
+        let Dispatcher { queue, mgr, policy, lanes, running, busy, stats, running_jobs, open_groups, health, .. } = self;
+        let health = health.as_deref();
+        // Quarantined devices are excluded exactly like busy ones, so a group is
+        // placed on a healthy device when one can take it; what no healthy device
+        // could ever take is refused once the quarantine is a long one.
+        let quarantined: HashSet<Device> = health.map(|h| h.quarantined().into_iter().collect()).unwrap_or_default();
+        if let Some(h) = health.filter(|_| !quarantined.is_empty()) {
+            refuse_quarantined(queue, mgr, running, &quarantined, h);
+        }
+        // Groups whose claim came back `NoCapacity` THIS round. They are skipped
+        // for the rest of it, and reconsidered on the next one (a lane finishing,
+        // or the dispatcher's own idle tick).
+        //
+        // This used to `break` out of the entire assign loop instead, which meant
+        // one group that could not be placed stopped every OTHER group from being
+        // assigned - including ones on completely idle lanes, and including
+        // stateless CPU models that needed no card at all. `choose_next`
+        // force-picks the oldest overdue group, so the same group was picked
+        // again on the next round, and the next: the head of the queue blocked
+        // the whole server for as long as it was unplaceable.
+        let mut stalled: HashSet<InstanceKey> = HashSet::new();
+        loop {
+            // Groups whose key is not already running AND that can be placed on some
+            // non-busy device (the scheduler policy then picks among them).
+            let now = Instant::now();
+            let exclude: HashSet<Device> = busy.union(&quarantined).copied().collect();
+            let rows = group_rows(queue, now, running);
+            // Multi-device groups need `placeable_multi` (checks EVERY named device),
+            // never plain `placeable` - a model registered ONLY via `register_multi`
+            // is never in `self.models` at all, so `placeable` would always return
+            // `false` for it and its jobs would sit in the queue forever, silently.
+            let placeable: Vec<Group> = rows
+                .iter()
+                .filter(|r| !stalled.contains(&r.key))
+                .filter(|r| if mgr.is_multi(&r.model) { mgr.placeable_multi(&r.key, &r.model, &exclude) } else { mgr.placeable(&r.key, &r.model, &exclude) })
+                .map(|r| r.summary.clone())
+                .collect();
+            let (gid, batch) = match choose_next(&placeable, policy) {
+                Some(x) => x,
+                None => break, // nothing runnable right now
+            };
+            // choose_next returns the group's `id` FIELD - which group_rows numbered
+            // as its index into `rows` - never an index into the filtered
+            // `placeable` slice. (Indexing `placeable[gid]` here panicked the
+            // dispatcher with index-out-of-bounds the moment any group was filtered
+            // out as unplaceable, killing scheduling for the whole server.)
+            let chosen = gid; // == the row index in `rows`
+            let (key, model, action) = (rows[chosen].key.clone(), rows[chosen].model.clone(), rows[chosen].action.clone());
+            // A model that batches wider than the policy's default says so; give
+            // it everything queued up to its own limit.
+            let batch = match mgr.batch_limit(&model) {
+                Some(limit) => rows[chosen].summary.size.min(limit.max(1)),
+                None => batch,
+            };
 
-        // Claim (promote/evict, pin) on non-busy device(s). Multi-device models
-        // (registered via `register_multi`, never also via `register` - see
-        // `Executor::register_multi`'s doc) go through `claim_multi` instead of
-        // `claim`; both `ClaimError` variants mean the same thing either way, so
-        // the handling below is shared.
-        let first = queue.iter().find(|p| p.key == key && p.action == action).map(|p| p.inv.clone());
-        let inv = match first {
-            Some(i) => i,
-            None => break,
-        };
-        let is_multi = mgr.is_multi(&model);
-        let claim_result = if is_multi {
-            mgr.claim_multi(&model, &action, &inv, key.replica_index(), &exclude).map(|(w, d, k)| (ClaimOutcome::Multi(w, d), k))
-        } else {
-            mgr.claim(&model, &action, &inv, key.replica_index(), &exclude).map(|(w, d, k)| (ClaimOutcome::Single(w, d), k))
-        };
-        let (outcome, ckey) = match claim_result {
-            Ok(x) => {
-                note_unservable(stats, &key, None);
-                x
-            }
-            Err(ClaimError::NoCapacity(_)) => {
-                // Transient: wait for a lane to free a device. Skip THIS group
-                // for the rest of the round and keep assigning the others.
-                stalled.insert(key.clone());
-                continue;
-            }
-            Err(refused @ (ClaimError::TooLarge(_) | ClaimError::Starved(_) | ClaimError::Activate(_))) => {
-                let too_large = matches!(refused, ClaimError::TooLarge(_) | ClaimError::Starved(_));
-                let e = refused.to_string();
-                if too_large {
-                    note_unservable(stats, &key, Some(&e));
+            // Claim (promote/evict, pin) on non-busy device(s). Multi-device models
+            // (registered via `register_multi`, never also via `register` - see
+            // `Executor::register_multi`'s doc) go through `claim_multi` instead of
+            // `claim`; both `ClaimError` variants mean the same thing either way, so
+            // the handling below is shared.
+            let first = queue.iter().find(|p| p.key == key && p.action == action).map(|p| p.inv.clone());
+            let inv = match first {
+                Some(i) => i,
+                None => break,
+            };
+            let is_multi = mgr.is_multi(&model);
+            let claim_result = if is_multi {
+                mgr.claim_multi(&model, &action, &inv, key.replica_index(), &exclude).map(|(w, d, k)| (ClaimOutcome::Multi(w, d), k))
+            } else {
+                mgr.claim(&model, &action, &inv, key.replica_index(), &exclude).map(|(w, d, k)| (ClaimOutcome::Single(w, d), k))
+            };
+            let (outcome, ckey) = match claim_result {
+                Ok(x) => {
+                    note_unservable(stats, &key, None);
+                    x
                 }
-                // Both permanent for this group: FAIL its queued jobs now and
-                // keep scheduling the others. (The old code broke out of the
-                // whole round here - the jobs waited forever and every other
-                // group starved behind them.) TooLarge specifically will
-                // never resolve itself by waiting (no eviction, however
-                // aggressive, could ever make room), so it must not be
-                // treated as `NoCapacity`'s "wait for a lane to free a device".
-                let msg = format!("{model}/{action}: {e}");
-                let msg = match too_large {
-                    // A size refusal names the model and sizes only: a client can act on it (a smaller model, a freer card), so
-                    // it carries a class a transport shows instead of its generic refusal.
-                    true => format!("{model}/{action}: {}", capability::failure::tag(capability::failure::FailureClass::FailedToLoad, &e)),
-                    false => msg,
-                };
+                Err(ClaimError::NoCapacity(_)) => {
+                    // Transient: wait for a lane to free a device. Skip THIS group
+                    // for the rest of the round and keep assigning the others.
+                    stalled.insert(key.clone());
+                    continue;
+                }
+                Err(refused @ (ClaimError::TooLarge(_) | ClaimError::Starved(_) | ClaimError::Activate(_))) => {
+                    let too_large = matches!(refused, ClaimError::TooLarge(_) | ClaimError::Starved(_));
+                    let e = refused.to_string();
+                    if too_large {
+                        note_unservable(stats, &key, Some(&e));
+                    }
+                    // Both permanent for this group: FAIL its queued jobs now and
+                    // keep scheduling the others. (The old code broke out of the
+                    // whole round here - the jobs waited forever and every other
+                    // group starved behind them.) TooLarge specifically will
+                    // never resolve itself by waiting (no eviction, however
+                    // aggressive, could ever make room), so it must not be
+                    // treated as `NoCapacity`'s "wait for a lane to free a device".
+                    let msg = format!("{model}/{action}: {e}");
+                    let msg = match too_large {
+                        // A size refusal names the model and sizes only: a client can act on it (a smaller model, a freer card), so
+                        // it carries a class a transport shows instead of its generic refusal.
+                        true => format!("{model}/{action}: {}", capability::failure::tag(capability::failure::FailureClass::FailedToLoad, &e)),
+                        false => msg,
+                    };
+                    let mut i = 0;
+                    while i < queue.len() {
+                        if queue[i].key == key && queue[i].action == action {
+                            let p = queue.remove(i);
+                            (p.reply)(Err(msg.clone()));
+                        } else {
+                            i += 1;
+                        }
+                    }
+                    continue;
+                }
+            };
+
+            // The HOME lane a multi-device group runs its ONE lane loop on: the
+            // first device `estimate_multi` named (`pick_devices` preserves
+            // declaration order). `busy` still gets every device the group
+            // occupies below - the home lane only decides which thread runs
+            // `run_group`, not which devices are considered occupied.
+            let home: Device = match &outcome {
+                ClaimOutcome::Single(_, device) => *device,
+                ClaimOutcome::Multi(_, devices) => devices[0],
+            };
+            // Structurally shouldn't happen (`pick_device`/`pick_devices` only ever
+            // name budgeted devices, and `Executor::start` spawns one lane per
+            // budgeted device) - but a missing lane must fail this group's jobs
+            // cleanly, never panic the one thread every model depends on.
+            if !lanes.contains_key(&home) {
+                match outcome {
+                    // Promote reuses the existing (Warm) instance, same as Hot --
+                    // just unpin it, don't unwind it out of existence.
+                    ClaimOutcome::Single(Claimed::Hot(_), _) | ClaimOutcome::Single(Claimed::Promote(_), _) => mgr.release(&ckey),
+                    ClaimOutcome::Single(Claimed::Build(_), _) => mgr.build_failed(&ckey),
+                    ClaimOutcome::Multi(ClaimedMulti::Hot(_), _) => mgr.release_multi(&ckey),
+                    ClaimOutcome::Multi(ClaimedMulti::Build(_), _) => mgr.build_failed_multi(&ckey),
+                }
+                let msg = format!("{model}/{action}: no lane for device {home:?}");
                 let mut i = 0;
                 while i < queue.len() {
                     if queue[i].key == key && queue[i].action == action {
@@ -1259,112 +1331,77 @@ fn assign(queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, policy: &Policy,
                 }
                 continue;
             }
-        };
 
-        // The HOME lane a multi-device group runs its ONE lane loop on: the
-        // first device `estimate_multi` named (`pick_devices` preserves
-        // declaration order). `busy` still gets every device the group
-        // occupies below - the home lane only decides which thread runs
-        // `run_group`, not which devices are considered occupied.
-        let home: Device = match &outcome {
-            ClaimOutcome::Single(_, device) => *device,
-            ClaimOutcome::Multi(_, devices) => devices[0],
-        };
-        // Structurally shouldn't happen (`pick_device`/`pick_devices` only ever
-        // name budgeted devices, and `Executor::start` spawns one lane per
-        // budgeted device) - but a missing lane must fail this group's jobs
-        // cleanly, never panic the one thread every model depends on.
-        if !lanes.contains_key(&home) {
-            match outcome {
-                // Promote reuses the existing (Warm) instance, same as Hot --
-                // just unpin it, don't unwind it out of existence.
-                ClaimOutcome::Single(Claimed::Hot(_), _) | ClaimOutcome::Single(Claimed::Promote(_), _) => mgr.release(&ckey),
-                ClaimOutcome::Single(Claimed::Build(_), _) => mgr.build_failed(&ckey),
-                ClaimOutcome::Multi(ClaimedMulti::Hot(_), _) => mgr.release_multi(&ckey),
-                ClaimOutcome::Multi(ClaimedMulti::Build(_), _) => mgr.build_failed_multi(&ckey),
-            }
-            let msg = format!("{model}/{action}: no lane for device {home:?}");
-            let mut i = 0;
-            while i < queue.len() {
-                if queue[i].key == key && queue[i].action == action {
-                    let p = queue.remove(i);
-                    (p.reply)(Err(msg.clone()));
-                } else {
-                    i += 1;
+            running.insert(ckey.clone());
+            let target = match outcome {
+                ClaimOutcome::Single(work, device) => {
+                    busy.insert(device);
+                    RunTarget::Single { work, device }
                 }
-            }
-            continue;
-        }
-
-        running.insert(ckey.clone());
-        let target = match outcome {
-            ClaimOutcome::Single(work, device) => {
-                busy.insert(device);
-                RunTarget::Single { work, device }
-            }
-            ClaimOutcome::Multi(work, devices) => {
-                for &d in &devices {
-                    busy.insert(d);
+                ClaimOutcome::Multi(work, devices) => {
+                    for &d in &devices {
+                        busy.insert(d);
+                    }
+                    RunTarget::Multi { work, devices }
                 }
-                RunTarget::Multi { work, devices }
-            }
-        };
-
-        // Pull the group's oldest `batch` jobs.
-        let mut idxs: Vec<usize> = queue.iter().enumerate().filter(|(_, p)| p.key == ckey && p.action == action).map(|(i, _)| i).collect();
-        idxs.sort_by_key(|&i| queue[i].enqueued);
-        idxs.truncate(batch);
-        idxs.sort_unstable_by(|a, b| b.cmp(a));
-        let mut jobs: Vec<Pending> = idxs.into_iter().map(|i| queue.remove(i)).collect();
-        jobs.reverse();
-
-        // The group is now CLAIMED onto a lane - work is about to start. Fire each
-        // job's admission signal exactly once (an HTTP layer gates streaming on it).
-        for j in jobs.iter_mut() {
-            if let Some(f) = j.on_admit.take() {
-                f();
-            }
-        }
-
-        // Track these jobs as running so the in-flight query keeps reporting them
-        // (they've left `queue`); cleared on this group's `Done`. `building` starts
-        // true for anything but an already-hot handle -- a deferred Build/Promote
-        // (single-device) or Build (multi-device) still has to run
-        // activate()/promote()/activate_multi() on the lane before Msg::Built/
-        // BuiltMulti flips it to false (see on_msg's Msg::Built/BuiltMulti arms).
-        let building = !matches!(target, RunTarget::Single { work: Claimed::Hot(_), .. } | RunTarget::Multi { work: ClaimedMulti::Hot(_), .. });
-        if building {
-            let cards = match &target {
-                RunTarget::Single { device, .. } => format!("{device:?}"),
-                RunTarget::Multi { devices, .. } => devices.iter().map(|d| format!("{d:?}")).collect::<Vec<_>>().join("+"),
             };
-            crate::log::info(&format!("model activating: {ckey} on {cards}"));
-        }
-        for j in jobs.iter() {
-            running_jobs.push(RunningJob { id: j.id, model: j.model.clone(), action: j.action.clone(), key: ckey.clone(), enqueued: j.enqueued, building });
-        }
 
-        // Sync residency counters immediately - a claim may have built/evicted, and
-        // that must be visible before the lane's Done (which lags the actual run).
-        if let Ok(mut s) = stats.lock() {
-            s.builds = mgr.builds;
-            s.evictions = mgr.evictions;
-            s.resident = mgr.resident_count();
-            s.resident_multi = mgr.resident_multi_count();
-            s.max_parallel = s.max_parallel.max(busy.len());
-            s.admitted += jobs.len() as u64;
-            s.queue_depth = queue.len();
+            // Pull the group's oldest `batch` jobs.
+            let mut idxs: Vec<usize> = queue.iter().enumerate().filter(|(_, p)| p.key == ckey && p.action == action).map(|(i, _)| i).collect();
+            idxs.sort_by_key(|&i| queue[i].enqueued);
+            idxs.truncate(batch);
+            idxs.sort_unstable_by(|a, b| b.cmp(a));
+            let mut jobs: Vec<Pending> = idxs.into_iter().map(|i| queue.remove(i)).collect();
+            jobs.reverse();
+
+            // The group is now CLAIMED onto a lane - work is about to start. Fire each
+            // job's admission signal exactly once (an HTTP layer gates streaming on it).
+            for j in jobs.iter_mut() {
+                if let Some(f) = j.on_admit.take() {
+                    f();
+                }
+            }
+
+            // Track these jobs as running so the in-flight query keeps reporting them
+            // (they've left `queue`); cleared on this group's `Done`. `building` starts
+            // true for anything but an already-hot handle -- a deferred Build/Promote
+            // (single-device) or Build (multi-device) still has to run
+            // activate()/promote()/activate_multi() on the lane before Msg::Built/
+            // BuiltMulti flips it to false (see on_msg's Msg::Built/BuiltMulti arms).
+            let building = !matches!(target, RunTarget::Single { work: Claimed::Hot(_), .. } | RunTarget::Multi { work: ClaimedMulti::Hot(_), .. });
+            if building {
+                let cards = match &target {
+                    RunTarget::Single { device, .. } => format!("{device:?}"),
+                    RunTarget::Multi { devices, .. } => devices.iter().map(|d| format!("{d:?}")).collect::<Vec<_>>().join("+"),
+                };
+                crate::log::info(&format!("model activating: {ckey} on {cards}"));
+            }
+            for j in jobs.iter() {
+                running_jobs.push(RunningJob { id: j.id, model: j.model.clone(), action: j.action.clone(), key: ckey.clone(), enqueued: j.enqueued, building });
+            }
+
+            // Sync residency counters immediately - a claim may have built/evicted, and
+            // that must be visible before the lane's Done (which lags the actual run).
+            if let Ok(mut s) = stats.lock() {
+                s.builds = mgr.builds;
+                s.evictions = mgr.evictions;
+                s.resident = mgr.resident_count();
+                s.resident_multi = mgr.resident_multi_count();
+                s.max_parallel = s.max_parallel.max(busy.len());
+                s.admitted += jobs.len() as u64;
+                s.queue_depth = queue.len();
+            }
+            // A model that declared a batch limit takes late jobs into this group
+            // up to that limit (an instance that cannot admit them mid-run closes
+            // the inbox at once and the lane runs whatever slipped in).
+            let limit = mgr.batch_limit(&model);
+            let inbox = Inbox::new(limit.is_some(), limit.map_or(0, |l| l.saturating_sub(jobs.len())));
+            if limit.is_some() {
+                open_groups.insert(ckey.clone(), OpenGroup { action: action.clone(), inbox: inbox.clone() });
+            }
+            // Hand to the home lane (which builds the instance first when cold).
+            let _ = lanes[&home].send(LaneMsg::Run(RunReq { target, action, jobs, key: ckey, inbox }));
         }
-        // A model that declared a batch limit takes late jobs into this group
-        // up to that limit (an instance that cannot admit them mid-run closes
-        // the inbox at once and the lane runs whatever slipped in).
-        let limit = mgr.batch_limit(&model);
-        let inbox = Inbox::new(limit.is_some(), limit.map_or(0, |l| l.saturating_sub(jobs.len())));
-        if limit.is_some() {
-            open_groups.insert(ckey.clone(), OpenGroup { action: action.clone(), inbox: inbox.clone() });
-        }
-        // Hand to the home lane (which builds the instance first when cold).
-        let _ = lanes[&home].send(LaneMsg::Run(RunReq { target, action, jobs, key: ckey, inbox }));
     }
 }
 
