@@ -96,7 +96,8 @@ prose from one whose tool call was lost.
 Cancellation is cooperative: an action whose manifest entry says `"cancellable": true`
 checks for it on entry and between steps (decode tokens, denoising steps, training
 steps) and aborts, which arrives as the stream's terminal `error` frame
-(`"cancelled"`). Returns `true` if the job was still in flight, `false`
+(`"cancelled"`). A text generation that has already streamed text ends instead with
+its partial text and `finish_reason` `"cancelled"`. Returns `true` if the job was still in flight, `false`
 for an unknown or already-finished id.
 
 ### `StreamTranscribe` — continuous input

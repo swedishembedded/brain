@@ -64,10 +64,14 @@ fires), and its shorter forms call that one with an unarmed token:
 
 A token that has fired before the call returns `Error::Cancelled` with
 nothing run. One that fires mid-call is noticed at the next poll, never
-inside a device call: a streaming text call then returns the partial text
-with `finish_reason` `"cancelled"` (never `"stop"`), and every other call
-returns `Error::Cancelled`. Either way what the call held is released and the
-pipeline stays usable.
+inside a device call: a streaming text call that has already handed over
+text returns that partial text with `finish_reason` `"cancelled"` (never
+`"stop"`), and every other call, a text call cancelled before its first
+token included, returns `Error::Cancelled`. Either way what the call held is
+released and the pipeline stays usable. The served models follow the same
+rule, and every action in a model's manifest says that it observes
+cancellation (`"cancellable": true` in `brain caps --json`, D-Bus
+`Manifests()` and `GET /v1/capabilities`).
 
 ## Embodied simulation
 

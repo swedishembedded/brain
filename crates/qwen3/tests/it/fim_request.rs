@@ -73,7 +73,7 @@ fn a_raw_completion_keeps_its_text_as_generated() {
     let req = parse_request_as(&tok, &format, &inv).unwrap();
     let generated = "<think>a</think> b";
     let seq = SeqState::new(&req, Default::default());
-    let out = seq.finish(&tok, &tok.encode(generated), &mut |_| {});
+    let out = seq.finish(&tok, &tok.encode(generated), &mut |_| {}).unwrap();
     assert_eq!(out.outputs.get("reasoning_content").and_then(|v| v.as_str()).unwrap_or_default(), "");
     assert_eq!(String::from_utf8(out.blobs["text"].bytes.clone()).unwrap(), generated);
 }

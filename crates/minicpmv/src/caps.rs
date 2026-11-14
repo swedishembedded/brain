@@ -233,7 +233,7 @@ impl Session {
         let mut results: Vec<ActionResult> = prepared.iter().map(|p| p.as_ref().map(|_| capability::Outcome::new()).map_err(|e| e.clone())).collect();
         for (r, ((seq, out), generated)) in states.into_iter().zip(model_out.drain(..)).enumerate() {
             let i = at[r];
-            results[i] = generated.map(|_| seq.finish(&tok, &out, &mut |p| progress(i, p)));
+            results[i] = generated.and_then(|_| seq.finish(&tok, &out, &mut |p| progress(i, p)));
         }
         results
     }

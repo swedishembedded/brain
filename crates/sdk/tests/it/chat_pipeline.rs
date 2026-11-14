@@ -249,17 +249,16 @@ fn the_context_bounds_the_generation_and_the_prompt() {
     assert!(err.to_string().contains("capacity"), "{err}");
 }
 
-/// A token fired before the call stops the generation in prefill: nothing is
-/// generated, and the reply says it was cancelled rather than finished.
+/// A token fired before the call stops the generation before any text: there
+/// is no partial reply to hand over, so the call is the cancelled error, the
+/// one rule every served text model follows.
 #[test]
-fn cancellation_before_the_first_token_reports_cancelled() {
+fn cancellation_before_the_first_token_is_the_cancelled_error() {
     let (pipe, _ckpt, _tok) = tiny_chat("cancel-early", None);
     let cancel = CancelToken::armed();
     cancel.cancel();
-    let reply = pipe.generate_stream(&ChatRequest::new(vec![ChatMessage::user(PROMPT_WITHIN_VOCAB)]).max_tokens(8), &cancel, |_| {}).unwrap();
-    assert_eq!(reply.finish_reason, FinishReason::Cancelled);
-    assert_eq!(reply.usage.completion_tokens, Some(0));
-    assert_eq!(reply.text, "");
+    let err = pipe.generate_stream(&ChatRequest::new(vec![ChatMessage::user(PROMPT_WITHIN_VOCAB)]).max_tokens(8), &cancel, |_| {}).unwrap_err();
+    assert!(matches!(err, brain::Error::Cancelled), "{err}");
 }
 
 /// A token fired from the stream stops the decode at the next token, and the

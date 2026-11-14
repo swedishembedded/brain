@@ -302,7 +302,7 @@ impl TextGenerationPipeline {
             )));
         }
 
-        let outcome = engine.run(&req, cancel, PREFILL_CHUNK, &mut forward);
+        let outcome = engine.run(&req, cancel, PREFILL_CHUNK, &mut forward).map_err(crate::error::backend_or_cancelled)?;
         generated_text_from_outcome(outcome)
     }
 
@@ -459,7 +459,10 @@ impl Engine {
     /// `progress` sees every visible-text delta and scanner event as it is
     /// produced, including the tail `finish` flushes, so the streamed text
     /// and the outcome's text are the same.
-    pub(crate) fn run(&self, req: &qwen3::chat::ParsedRequest, cancel: &capability::CancelToken, prefill_chunk: usize, progress: &mut dyn FnMut(capability::Progress)) -> capability::Outcome {
+    ///
+    /// A generation cancelled before it streamed text is
+    /// `Err(`[`capability::failure::CANCELLED`]`)` (`SeqState::finish`'s rule).
+    pub(crate) fn run(&self, req: &qwen3::chat::ParsedRequest, cancel: &capability::CancelToken, prefill_chunk: usize, progress: &mut dyn FnMut(capability::Progress)) -> capability::ActionResult {
         let mut rng = data::rng::Rng::new(req.seed);
         let max_new = req.max_new_within(self.capacity as usize);
         let mut seq = qwen3::chat::SeqState::new(req, cancel.clone());

@@ -497,7 +497,7 @@ impl Resident {
                     seq.advance(&self.tok, &ids, progress);
                 },
             );
-            Ok(seq.finish(&self.tok, &out_ids, progress).set("seed", json!(seed)))
+            Ok(seq.finish(&self.tok, &out_ids, progress)?.set("seed", json!(seed)))
         } else {
             let images = decode_images(inv)?;
             let p = Prepared::build_multi(self, &images, &prompt, max_new, tools)?;
@@ -509,7 +509,7 @@ impl Resident {
                 ids.push(tok_id);
                 seq.advance(&self.tok, &ids, progress);
             });
-            Ok(seq.finish(&self.tok, &out_ids, progress).set("seed", json!(seed)))
+            Ok(seq.finish(&self.tok, &out_ids, progress)?.set("seed", json!(seed)))
         }
     }
 }

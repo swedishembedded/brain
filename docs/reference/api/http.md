@@ -368,8 +368,11 @@ a shorter prompt.
 
 A request whose job the server cancels while draining at shutdown is answered
 `unavailable` (503) with the message `the request was cancelled`: retry it
-against another server. Over D-Bus a cancelled call fails with the message
-`cancelled`, whoever cancelled it.
+against another server. That holds for a chat or completion request too, as long
+as its generation had not streamed text yet; one that had ends with its partial
+text and `finish_reason` `"cancelled"`. Over D-Bus a cancelled call fails with the
+message `cancelled`, whoever cancelled it, with the same exception for a text
+generation that already streamed.
 
 ## Which models each provider exposes
 

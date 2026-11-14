@@ -2723,6 +2723,7 @@ dependencies = [
  "brain-apiserve",
  "brain-audio",
  "brain-capability",
+ "brain-capability-mock",
  "brain-checkpoint",
  "brain-data",
  "brain-gpu-core",

@@ -20,7 +20,7 @@
 //! "retire the duplicate" means here. Only the request-shape/streaming logic
 //! that must behave identically regardless of caller is shared.
 
-use capability::{Blob, CancelToken, Invocation, Media, Outcome, Progress};
+use capability::{ActionResult, Blob, CancelToken, Invocation, Media, Outcome, Progress};
 use data::qwen_chat::{self, ChatEvent, ChatMessage, ChatScanner, Role, ToolCallMsg};
 use data::qwen_tokenizer::{QwenBpe, Utf8Decoder};
 use data::tokenizer::Tokenizer;
@@ -733,7 +733,7 @@ pub fn parse_reply_as(format: &ChatFormat, inv: &Invocation, text: &str) -> Resu
         thinking_open: prompt.thinking_open,
         raw: prompt.raw,
     };
-    Ok(seq.finish_text(text, None, &mut |_| {}))
+    seq.finish_text(text, None, &mut |_| {})
 }
 
 /// Per-sequence streaming/finalisation state, common to every caller: the
@@ -829,27 +829,36 @@ impl SeqState {
     /// flush any held-back multi-byte tail through the scanner, then
     /// [`ChatScanner::finish`] closes out a still-open tool call (truncated
     /// by `max_new`) rather than silently dropping it.
-    pub fn finish(self, tok: &QwenBpe, all_tokens: &[u32], progress: &mut dyn FnMut(Progress)) -> Outcome {
+    ///
+    /// Cancellation, one rule for every caller and every action:
+    /// a sequence cancelled before it streamed any text has no partial
+    /// answer, so it fails with [`capability::failure::CANCELLED`]; one
+    /// cancelled after it streamed text completes with that text and
+    /// `finish_reason: "cancelled"`.
+    pub fn finish(self, tok: &QwenBpe, all_tokens: &[u32], progress: &mut dyn FnMut(Progress)) -> ActionResult {
         let full = tok.decode(all_tokens);
         let reasoning = (!self.raw).then(|| reasoning_tokens(tok, all_tokens, self.thinking_open));
-        let outcome = self.finish_text(&full, Some(all_tokens.len()), progress);
-        match reasoning {
+        let outcome = self.finish_text(&full, Some(all_tokens.len()), progress)?;
+        Ok(match reasoning {
             Some(n) => outcome.set("reasoning_tokens", json!(n)),
             None => outcome,
-        }
+        })
     }
 
     /// [`SeqState::finish`] over already-decoded text. `generated` is how many
     /// tokens produced `full`, or `None` when nobody counted them
     /// ([`parse_reply`]): the outcome then carries no `completion_tokens`
     /// and cannot report `length`.
-    fn finish_text(mut self, full: &str, generated: Option<usize>, progress: &mut dyn FnMut(Progress)) -> Outcome {
+    fn finish_text(mut self, full: &str, generated: Option<usize>, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         let step = generated.unwrap_or(0) as u32;
         // A token that fired during prefill stopped the sequence before its
         // first token was sampled, so `advance` never ran to notice - but
         // the sequence was cancelled all the same, and reporting "stop" for
         // it would pass an empty truncation off as a finished answer.
         let cancelled = self.cancelled || (generated == Some(0) && self.cancel.is_cancelled());
+        if cancelled && self.printed.is_empty() {
+            return Err(capability::failure::CANCELLED.to_string());
+        }
         // Post-hoc `required`/`named` enforcement: did the model actually
         // produce the demanded tool call? Evaluated AFTER the scanner is
         // flushed below, so a call closing only in the final held-back tail
@@ -925,7 +934,7 @@ impl SeqState {
                 self.scan.tool_calls().iter().map(|c| json!({ "id": c.id, "name": c.name, "arguments": c.arguments })).collect();
             out = out.set("tool_calls", json!(serde_json::to_string(&calls).unwrap_or_else(|_| "[]".to_string())));
         }
-        out
+        Ok(out)
     }
 }
 
@@ -1268,7 +1277,7 @@ mod tests {
         let prose = "The weather in Paris is lovely today.";
         let finish = |req: &ParsedRequest, gen: &str| {
             let seq = SeqState::new(req, CancelToken::default());
-            seq.finish(&tok, &tok.encode(gen), &mut |_| {})
+            seq.finish(&tok, &tok.encode(gen), &mut |_| {}).unwrap()
         };
         let reason = |out: &Outcome| out.outputs.get("finish_reason").and_then(|v| v.as_str()).unwrap_or("").to_string();
 
@@ -1307,7 +1316,7 @@ mod tests {
         let mut seq = SeqState::new(&req, cancel.clone());
         cancel.cancel();
         assert!(seq.advance(&tok, &tok.encode("prose"), &mut |_| {}));
-        let out = seq.finish(&tok, &tok.encode("prose"), &mut |_| {});
+        let out = seq.finish(&tok, &tok.encode("prose"), &mut |_| {}).unwrap();
         assert_eq!(out.outputs.get("finish_reason").and_then(|v| v.as_str()), Some("cancelled"));
     }
 
@@ -1402,7 +1411,7 @@ mod tests {
         let call = "<tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n</parameter>\n</function>\n</tool_call>";
         let mut seq = SeqState::new(&req, CancelToken::default());
         assert!(!seq.advance(&tok, &tok.encode(head), &mut |_| {}));
-        let out = seq.finish(&tok, &tok.encode(&format!("{head}{call}")), &mut |_| {});
+        let out = seq.finish(&tok, &tok.encode(&format!("{head}{call}")), &mut |_| {}).unwrap();
         assert_eq!(out.outputs.get("reasoning_content"), Some(&json!("thinking hard")), "out: {out:?}");
         assert_eq!(out.outputs.get("finish_reason"), Some(&json!("tool_calls")));
         let calls = out.outputs.get("tool_calls").and_then(|v| v.as_str()).unwrap_or("");
@@ -1428,7 +1437,34 @@ mod tests {
         let mut seq = SeqState::new(req, CancelToken::default());
         // Token by token, as the scheduler streams: a stop string ends the sequence the step it completes.
         let end = (1..=ids.len()).find(|&n| seq.advance(tok, &ids[..n], &mut |_| {})).unwrap_or(ids.len());
-        seq.finish(tok, &ids[..end], &mut |_| {})
+        seq.finish(tok, &ids[..end], &mut |_| {}).unwrap()
+    }
+
+    /// One rule for every `SeqState` user: a sequence cancelled before it
+    /// streamed any text fails with the cancelled literal (there is no
+    /// partial answer to hand over, and a caller must not read an empty
+    /// reply as an answer); one cancelled after it streamed text completes
+    /// with that text and `finish_reason: "cancelled"`.
+    #[test]
+    fn a_sequence_cancelled_before_it_streamed_text_is_the_cancelled_error() {
+        let (tok, req) = chatml_request(&[]);
+        let cancel = CancelToken::armed();
+        let seq = SeqState::new(&req, cancel.clone());
+        cancel.cancel();
+        assert_eq!(seq.finish(&tok, &[], &mut |_| {}).unwrap_err(), capability::failure::CANCELLED);
+
+        let cancel = CancelToken::armed();
+        let mut seq = SeqState::new(&req, cancel.clone());
+        let ids = tok.encode("hm</think>\n\nSunny");
+        let mut streamed = 0;
+        assert!(!seq.advance(&tok, &ids, &mut |_| streamed += 1));
+        assert!(streamed > 0, "the reply streamed before the token fired");
+        cancel.cancel();
+        let more = tok.encode("hm</think>\n\nSunny today");
+        assert!(seq.advance(&tok, &more, &mut |_| {}), "a fired token stops the sequence");
+        let out = seq.finish(&tok, &more, &mut |_| {}).unwrap();
+        assert_eq!(out.outputs["finish_reason"], json!("cancelled"));
+        assert!(out.outputs["text"].as_str().unwrap().contains("Sunny"), "{:?}", out.outputs);
     }
 
     const WEATHER_CALL: &str = "<tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n</parameter>\n</function>\n</tool_call>";

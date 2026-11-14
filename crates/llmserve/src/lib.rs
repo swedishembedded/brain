@@ -348,6 +348,11 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
         // The job remembers the request's parameters and cancellation, not its payload: a page's pixels are tens of
         // megabytes, copied here on the thread that is decoding other requests.
         let mut job = Job { invocation: inv.without_blobs(), seq: None, id: None, identity: None, capture: Capture::default(), base_digest: self.front.base_digest(), adapter: None };
+        // A request cancelled before admission is answered before it is parsed, encoded or queued.
+        if let Err(e) = inv.cancel.check() {
+            self.jobs.push(job);
+            return (bi, Some(Err(e)));
+        }
         // A name the bank no longer holds is the caller's "no model", never
         // the base's answer under another name.
         let adapter = match self.front.route(inv) {
@@ -502,12 +507,12 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
     /// it, and what the request asked to get back. A generation the chat scanner could not read cleanly is
     /// logged, so a reply that lost a tool call is visible on the server and not only in the outcome.
     #[allow(clippy::too_many_arguments)]
-    fn conclude(job: &Job, label: &str, seq: SeqState, tok: &QwenBpe, tokens: &[u32], logprobs: &[f32], completion: model::serve::Completion, progress: &mut dyn FnMut(Progress)) -> capability::Outcome {
-        let outcome = Self::named(seq.finish(tok, tokens, progress), job);
+    fn conclude(job: &Job, label: &str, seq: SeqState, tok: &QwenBpe, tokens: &[u32], logprobs: &[f32], completion: model::serve::Completion, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        let outcome = Self::named(seq.finish(tok, tokens, progress)?, job);
         if let Some(anomalies) = outcome.outputs.get("scan_anomalies") {
             residency::log::warn(&format!("{label}: a generation of {} tokens did not read as clean chat output: {anomalies}", tokens.len()));
         }
-        job.capture.attach(outcome, tok, tokens, logprobs, completion)
+        Ok(job.capture.attach(outcome, tok, tokens, logprobs, completion))
     }
 
     /// [`Self::conclude`] for job `bi`, plus the policy trace when the request asked for one: its prompt and
@@ -517,7 +522,7 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
     /// whose trace cannot be scored fails as a whole: a rollout without its trace is no rollout.
     fn conclude_scored(&mut self, bi: usize, seq: SeqState, toks: &[u32], logprobs: &[f32], completion: model::serve::Completion, progress: &mut dyn FnMut(usize, Progress)) -> ActionResult {
         let tok = self.front.tok();
-        let outcome = Self::conclude(&self.jobs[bi], self.front.label(), seq, tok, toks, logprobs, completion, &mut |p| progress(bi, p));
+        let outcome = Self::conclude(&self.jobs[bi], self.front.label(), seq, tok, toks, logprobs, completion, &mut |p| progress(bi, p))?;
         let Some(temperature) = self.jobs[bi].capture.trace else { return Ok(outcome) };
         let prompt = self.jobs[bi].capture.prompt.clone();
         let mut generated = toks.to_vec();

@@ -559,10 +559,12 @@ impl ChatPipeline {
     /// `on_delta` as it is produced and stopping when `cancel` fires.
     ///
     /// Cancellation is cooperative: it is noticed between prefill chunks and
-    /// after each generated token, never inside one device call. A cancelled
-    /// turn returns what was generated so far with
-    /// [`FinishReason::Cancelled`] - not an error. Pass a
-    /// [`CancelToken::armed`] token (a `default()` one can never fire).
+    /// after each generated token, never inside one device call. A turn
+    /// cancelled after it streamed text returns that text with
+    /// [`FinishReason::Cancelled`]; one cancelled before it streamed any
+    /// (a token fired before the call, or during prefill) returns
+    /// [`Error::Cancelled`]. Pass a [`CancelToken::armed`] token (a
+    /// `default()` one can never fire).
     ///
     /// Tool calls arrive complete in the response, not as deltas.
     pub fn generate_stream(&self, request: &ChatRequest, cancel: &CancelToken, mut on_delta: impl FnMut(ChatDelta)) -> Result<ChatResponse> {
@@ -590,7 +592,7 @@ impl ChatPipeline {
                 }
             }
         });
-        response_from_outcome(outcome)
+        response_from_outcome(outcome.map_err(crate::error::backend_or_cancelled)?)
     }
 }
 

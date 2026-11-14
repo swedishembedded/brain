@@ -576,7 +576,7 @@ impl Action for GenerateAction {
                         !seq.advance(&tok, &ids_out, progress)
                     },
                 );
-                Ok(seq.finish(&tok, &gen, progress))
+                seq.finish(&tok, &gen, progress)
             }
             Plan::Raw { ids, max_new, temp, top_k, top_p, seed, eos } => {
                 let mut rng = Rng::new(seed);

@@ -81,7 +81,12 @@ fn without_template_as_raw(format: &ChatFormat, tok: &QwenBpe, inv: &Invocation)
 /// # Errors
 /// The request is malformed (see `qwen3::chat::parse_request_as`), attaches
 /// media this stack cannot encode, or has no prompt.
+///
+/// The token is checked on entry and polled after every decoded token
+/// (`SeqState::advance`); a reply cancelled after it streamed text ends with
+/// that text and `finish_reason: "cancelled"`.
 pub fn serve_chat(engine: &dyn ThinkerChat, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+    inv.cancel.check()?;
     let tok = engine.tokenizer();
     let format = engine.chat_format();
     let inv = &without_template_as_raw(format, tok, inv);
@@ -109,7 +114,7 @@ pub fn serve_chat(engine: &dyn ThinkerChat, inv: &Invocation, progress: &mut dyn
             engine.decode_media(&prompt, max_new, &mut picker, &mut on_token)
         }
     };
-    Ok(seq.finish(tok, &decoded.tokens, progress).set("tokens", json!(decoded.tokens)))
+    Ok(seq.finish(tok, &decoded.tokens, progress)?.set("tokens", json!(decoded.tokens)))
 }
 
 #[cfg(test)]
@@ -203,6 +208,17 @@ mod tests {
         }
     }
 
+    /// A request whose token fired before the call is refused before it is
+    /// parsed; one fired after the first streamed token stops the decode at
+    /// the next and keeps the partial text.
+    #[test]
+    fn a_cancelled_reply_stops_at_the_next_token() {
+        let engine = Canned::new("Sunny in Paris today, with a light breeze and no rain at all", 50.0);
+        let make = || Invocation::new().set("messages", json!(r#"[{"role":"user","content":"weather?"}]"#)).set("max_new", json!(200));
+        // Fired at the first streamed token (event 2, after the "generating" step); only the closing report may follow.
+        capability_mock::cancellation::certify("qwen3omnimoe generate", &make, &|inv, p| serve_chat(&engine, inv, p), capability_mock::cancellation::Bound { fire_after: 2, within: 1 });
+    }
+
     fn ask(engine: &Canned, extra: impl FnOnce(Invocation) -> Invocation) -> Result<capability::Outcome, String> {
         let inv = Invocation::new().set("messages", json!(r#"[{"role":"user","content":"weather?"}]"#)).set("max_new", json!(200));
         serve_chat(engine, &extra(inv), &mut |_| {})
@@ -281,7 +297,8 @@ mod tests {
         assert_eq!(field(&greedy, "text"), field(&again, "text"));
     }
 
-    /// A cancelled request reports it, never a finished "stop".
+    /// A request cancelled before it streamed anything is the cancelled
+    /// error, never an empty finished "stop".
     #[test]
     fn a_cancelled_request_reports_cancellation() {
         let engine = Canned::new("a long answer that goes on", 50.0);
@@ -289,8 +306,7 @@ mod tests {
         token.cancel();
         let mut inv = Invocation::new().set("messages", json!(r#"[{"role":"user","content":"hi"}]"#)).set("max_new", json!(50));
         inv.cancel = token;
-        let out = serve_chat(&engine, &inv, &mut |_| {}).unwrap();
-        assert_eq!(field(&out, "finish_reason"), "cancelled");
+        assert_eq!(serve_chat(&engine, &inv, &mut |_| {}).unwrap_err(), capability::failure::CANCELLED);
     }
 
     /// A reply streams as deltas while it decodes, ending in the same text the outcome reports.
