@@ -117,6 +117,11 @@ them, so treat all request input as hostile.
       `ConnectionLimits::stream_stall`), never an unbounded channel, and a fetch
       progress tick is dropped rather than queued past it.
       `crates/apiserve/tests/it/backpressure.rs` pins each.
+- [ ] An auto-fetch waits under the request's cancel token
+      (`Executor::ensure_model`): requests for one model share one fetch, a
+      request that hangs up stops waiting, and the download stops between chunks
+      once no request waits for it (`residency::supply`'s tests,
+      `api.rs::a_fetch_nobody_waits_for_is_cancelled`).
 - [ ] Per-connection / per-stream limits exist where relevant; no route holds a lane
       while doing unbounded host allocation (see the streaming/mmap OOM invariant).
 

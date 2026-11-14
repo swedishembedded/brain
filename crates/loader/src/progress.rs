@@ -433,7 +433,7 @@ mod tests {
         {
             let mut rep = Reporter::new(mode, &mut buf, "Qwen/Qwen3-0.6B", remaining);
             rep.header();
-            brain_modelstore::execute(&store, hub, &plan, &mut |name, got, total| rep.on_bytes(name, got, total)).unwrap();
+            brain_modelstore::execute(&store, hub, &plan, &|| false, &mut |name, got, total| rep.on_bytes(name, got, total)).unwrap();
             let _ = rep.finish();
         }
         (String::from_utf8(buf).unwrap(), remaining.files)

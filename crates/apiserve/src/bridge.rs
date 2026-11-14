@@ -153,9 +153,14 @@ pub async fn ensure_and_recheck<T>(state: &AppState, provider: Provider, model: 
         Supply::Fetchable => {}
         Supply::Resident | Supply::Unknown(_) => return Err(ApiError::model_not_found(provider, model)),
     }
+    // Registered like a job: a client that hangs up drops this future and the guard stops its wait, and a
+    // draining server cancels it. The fetch itself stops only once no request waits for it
+    // (`residency::Executor::ensure_model`).
+    let (id, token) = state.register();
+    let _guard = CancelGuard { token: token.clone(), jobs: state.jobs.clone(), id };
     let exec = state.exec.clone();
     let model_owned = model.to_string();
-    let outcome = tokio::task::spawn_blocking(move || exec.ensure_model(&model_owned, supplier.as_ref(), &mut |_, _, _| {})).await;
+    let outcome = tokio::task::spawn_blocking(move || exec.ensure_model(&model_owned, &supplier, &mut |_, _, _| {}, &token)).await;
     match outcome {
         Ok(Ok(())) => resolve(model).ok_or_else(|| ApiError::model_not_found(provider, model)),
         Ok(Err(reason)) => {
@@ -738,15 +743,23 @@ pub fn stream_with_autofetch(state: &AppState, supplier: std::sync::Arc<dyn resi
         let tx_fetch = tx.clone();
         let fetch_model = model_owned.clone();
         let fetch_exec = exec.clone();
+        // The request's own token: the stream being dropped stops this request's wait, and the fetch once no
+        // request waits for it.
+        let fetch_cancel = token.clone();
         let outcome = tokio::task::spawn_blocking(move || {
-            fetch_exec.ensure_model(&fetch_model, supplier.as_ref(), &mut |name, got, total| {
-                // A tick the next one supersedes: dropped rather than waited for when the reader is behind.
-                tx_fetch.offer(StreamMsg::Fetching(FetchProgress {
-                    message: format!("fetching {fetch_model}: {name}").replace(['\n', '\r'], " "),
-                    got: got as u64,
-                    total: if total == 0 { None } else { Some(total as u64) },
-                }));
-            })
+            fetch_exec.ensure_model(
+                &fetch_model,
+                &supplier,
+                &mut |name, got, total| {
+                    // A tick the next one supersedes: dropped rather than waited for when the reader is behind.
+                    tx_fetch.offer(StreamMsg::Fetching(FetchProgress {
+                        message: format!("fetching {fetch_model}: {name}").replace(['\n', '\r'], " "),
+                        got: got as u64,
+                        total: if total == 0 { None } else { Some(total as u64) },
+                    }));
+                },
+                &fetch_cancel,
+            )
         })
         .await;
         let fetched = match outcome {
@@ -754,7 +767,9 @@ pub fn stream_with_autofetch(state: &AppState, supplier: std::sync::Arc<dyn resi
             Err(join_err) => Err(format!("blocking task failed: {join_err}")),
         };
         if let Err(reason) = fetched {
-            eprintln!("apiserve: auto-fetch {model_owned}: {reason}");
+            if !token.is_cancelled() {
+                eprintln!("apiserve: auto-fetch {model_owned}: {reason}");
+            }
             tx.finish(StreamMsg::Err(ApiError::model_not_found(provider, &model_owned)));
             jobs.remove(&id);
             return;

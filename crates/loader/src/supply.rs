@@ -187,7 +187,7 @@ pub fn execute_plan(store: &Store, hub: &dyn Hub, plan: &brain_modelstore::Plan,
 /// failure, since every step still had to succeed to get here.
 pub fn execute_plan_opt(store: &Store, hub: &dyn Hub, plan: &brain_modelstore::Plan, label: &str, progress: &mut dyn FnMut(&str, u64, Option<u64>)) -> Result<Option<brain_modelstore::LocalModel>, String> {
     let reference = &plan.reference;
-    let deferred = brain_modelstore::execute(store, hub, plan, progress).map_err(|e| format!("{label}: {e}"))?;
+    let deferred = brain_modelstore::execute(store, hub, plan, &|| false, progress).map_err(|e| format!("{label}: {e}"))?;
 
     for step in &deferred {
         match step {

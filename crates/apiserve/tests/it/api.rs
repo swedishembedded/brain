@@ -2311,7 +2311,7 @@ impl residency::ModelSupplier for StubSupplier {
             residency::Supply::Unknown(format!("{model}: not in the stub catalog"))
         }
     }
-    fn ensure(&self, model: &str, exec: &Executor, progress: &mut dyn FnMut(&str, u32, u32)) -> Result<(), String> {
+    fn ensure(&self, model: &str, exec: &Executor, progress: &mut dyn FnMut(&str, u32, u32), _cancel: &capability::CancelToken) -> Result<(), String> {
         self.ensure_calls.fetch_add(1, Ordering::SeqCst);
         progress("model.safetensors", 512, 1503);
         exec.register(Arc::new(FetchedChat(model.to_string())));
@@ -2400,7 +2400,7 @@ async fn a_newline_in_the_fetch_progress_name_does_not_panic_the_sse_stream() {
         fn classify(&self, model: &str) -> residency::Supply {
             if model == "vendor/fetchable-chat" { residency::Supply::Fetchable } else { residency::Supply::Unknown("n/a".into()) }
         }
-        fn ensure(&self, model: &str, exec: &Executor, progress: &mut dyn FnMut(&str, u32, u32)) -> Result<(), String> {
+        fn ensure(&self, model: &str, exec: &Executor, progress: &mut dyn FnMut(&str, u32, u32), _cancel: &capability::CancelToken) -> Result<(), String> {
             progress("evil\r\nfilename\nhere.safetensors", 1, 2);
             exec.register(Arc::new(FetchedChat(model.to_string())));
             Ok(())
@@ -2414,6 +2414,106 @@ async fn a_newline_in_the_fetch_progress_name_does_not_panic_the_sse_stream() {
     let (st, text) = post_text(&app, Provider::OpenAI, &key, "/v1/chat/completions", &body).await;
     assert_eq!(st, StatusCode::OK, "must not panic/500 on a newline-carrying fetch-progress name");
     assert_eq!(sse_data(&text).last().unwrap(), "[DONE]", "stream must still complete normally: {text}");
+}
+
+/// A supplier whose fetch runs until it is released or cancelled, reporting
+/// progress all the while: the shape of a long download.
+#[derive(Default)]
+struct SlowSupplier {
+    ensure_calls: AtomicUsize,
+    release: std::sync::atomic::AtomicBool,
+    cancelled: std::sync::atomic::AtomicBool,
+}
+impl residency::ModelSupplier for SlowSupplier {
+    fn classify(&self, model: &str) -> residency::Supply {
+        if model == "vendor/fetchable-chat" { residency::Supply::Fetchable } else { residency::Supply::Unknown("n/a".into()) }
+    }
+    fn ensure(&self, model: &str, exec: &Executor, progress: &mut dyn FnMut(&str, u32, u32), cancel: &capability::CancelToken) -> Result<(), String> {
+        self.ensure_calls.fetch_add(1, Ordering::SeqCst);
+        let deadline = Instant::now() + Duration::from_secs(20);
+        for chunk in 0.. {
+            if cancel.is_cancelled() {
+                self.cancelled.store(true, Ordering::SeqCst);
+                return Err("cancelled".into());
+            }
+            if self.release.load(Ordering::SeqCst) || Instant::now() > deadline {
+                break;
+            }
+            progress("model.safetensors", chunk, 0);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        exec.register(Arc::new(FetchedChat(model.to_string())));
+        Ok(())
+    }
+}
+
+fn slow_fetch_app(supplier: &Arc<SlowSupplier>) -> (Router, String) {
+    let key = "sk-brain-test-key".to_string();
+    let state = AppState::new(chat_executor(), key.clone(), Provider::OpenAI).with_supplier(Some(supplier.clone() as Arc<dyn residency::ModelSupplier>));
+    (router(state), key)
+}
+
+/// A streamed request for a model being fetched, read up to its first frame.
+async fn fetching_stream(app: &Router, key: &str) -> axum::body::BodyDataStream {
+    let body = json!({"model": "vendor/fetchable-chat", "messages": [{"role": "user", "content": "hi"}], "stream": true});
+    let req = auth(Request::builder().method(Method::POST).uri("/v1/chat/completions"), Provider::OpenAI, key)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let mut stream = resp.into_body().into_data_stream();
+    let first = stream.next().await.unwrap().unwrap();
+    assert!(String::from_utf8_lossy(&first).contains(": BRAIN fetching"), "the first frame is fetch progress");
+    stream
+}
+
+/// Two requests waiting on one fetch share it: the one that hangs up leaves
+/// the fetch running for the other, which gets its answer.
+#[tokio::test]
+async fn a_shared_fetch_outlives_one_of_its_requests_hanging_up() {
+    let supplier = Arc::new(SlowSupplier::default());
+    let (app, key) = slow_fetch_app(&supplier);
+    let leaving = fetching_stream(&app, &key).await;
+    let mut staying = fetching_stream(&app, &key).await;
+    drop(leaving);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!supplier.cancelled.load(Ordering::SeqCst), "a request still waits for the fetch");
+
+    supplier.release.store(true, Ordering::SeqCst);
+    let mut text = String::new();
+    while let Some(chunk) = staying.next().await {
+        text.push_str(&String::from_utf8_lossy(&chunk.unwrap()));
+    }
+    assert_eq!(sse_data(&text).last().map(String::as_str), Some("[DONE]"), "{text}");
+    assert!(text.contains("Hello"), "the remaining request is answered: {text}");
+    assert_eq!(supplier.ensure_calls.load(Ordering::SeqCst), 1, "one fetch served both requests");
+}
+
+/// A fetch no request waits for any more is cancelled, whether the request
+/// was streamed or not.
+#[tokio::test]
+async fn a_fetch_nobody_waits_for_is_cancelled() {
+    let supplier = Arc::new(SlowSupplier::default());
+    let (app, key) = slow_fetch_app(&supplier);
+    drop(fetching_stream(&app, &key).await);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !supplier.cancelled.load(Ordering::SeqCst) {
+        assert!(Instant::now() < deadline, "the abandoned streamed fetch was never cancelled");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    // The non-streamed path: the request is dropped while it waits.
+    let supplier = Arc::new(SlowSupplier::default());
+    let (app, key) = slow_fetch_app(&supplier);
+    let body = json!({"model": "vendor/fetchable-chat", "messages": [{"role": "user", "content": "hi"}]});
+    let waiting = tokio::time::timeout(Duration::from_millis(300), post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &body)).await;
+    assert!(waiting.is_err(), "the request was still waiting for the fetch");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !supplier.cancelled.load(Ordering::SeqCst) {
+        assert!(Instant::now() < deadline, "the abandoned fetch was never cancelled");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
 
 /// The STREAMING sibling of `unknown_model_with_a_supplier_present_still_404s_
@@ -2481,7 +2581,7 @@ async fn a_failed_fetch_404s_without_leaking_the_internal_error_reason() {
         fn classify(&self, _model: &str) -> residency::Supply {
             residency::Supply::Fetchable
         }
-        fn ensure(&self, _model: &str, _exec: &Executor, _progress: &mut dyn FnMut(&str, u32, u32)) -> Result<(), String> {
+        fn ensure(&self, _model: &str, _exec: &Executor, _progress: &mut dyn FnMut(&str, u32, u32), _cancel: &capability::CancelToken) -> Result<(), String> {
             Err("hub error: /abs/workspace/secret-internal-path unreachable".to_string())
         }
     }

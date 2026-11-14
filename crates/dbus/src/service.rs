@@ -148,7 +148,8 @@ impl Manager {
         }
         let exec = self.executor.clone();
         let model_owned = model.to_string();
-        let outcome = tokio::task::spawn_blocking(move || exec.ensure_model(&model_owned, supplier.as_ref(), &mut |_, _, _| {})).await;
+        // A method call has no cancel of its own: it waits for the fetch, which other callers may share.
+        let outcome = tokio::task::spawn_blocking(move || exec.ensure_model(&model_owned, &supplier, &mut |_, _, _| {}, &CancelToken::default())).await;
         match outcome {
             Ok(Ok(())) => Ok(()),
             Ok(Err(reason)) => {
@@ -651,12 +652,19 @@ impl Manager {
             let fetch_stream = stream_bg.clone();
             let fetch_model = model_owned.clone();
             let fetch_exec = exec.clone();
+            // The job's own token: cancelling the job stops this caller's wait, and the fetch once no caller waits.
+            let fetch_cancel = token.clone();
             let outcome = tokio::task::spawn_blocking(move || {
-                fetch_exec.ensure_model(&fetch_model, supplier.as_ref(), &mut |name, got, total| {
-                    if let Ok(mut s) = fetch_stream.lock() {
-                        s.progress(got, total, &format!("fetching {fetch_model}: {name}"), Some("fetching"), None, None);
-                    }
-                })
+                fetch_exec.ensure_model(
+                    &fetch_model,
+                    &supplier,
+                    &mut |name, got, total| {
+                        if let Ok(mut s) = fetch_stream.lock() {
+                            s.progress(got, total, &format!("fetching {fetch_model}: {name}"), Some("fetching"), None, None);
+                        }
+                    },
+                    &fetch_cancel,
+                )
             })
             .await;
             match outcome {
@@ -1023,7 +1031,7 @@ mod tests {
         fn classify(&self, model: &str) -> Supply {
             if model == "vendor/fetchable" { Supply::Fetchable } else { Supply::Unknown(format!("{model}: not in the stub catalog")) }
         }
-        fn ensure(&self, model: &str, exec: &Executor, _progress: &mut dyn FnMut(&str, u32, u32)) -> Result<(), String> {
+        fn ensure(&self, model: &str, exec: &Executor, _progress: &mut dyn FnMut(&str, u32, u32), _cancel: &capability::CancelToken) -> Result<(), String> {
             self.ensure_calls.fetch_add(1, Ordering::SeqCst);
             exec.register(std::sync::Arc::new(StubResident(model.to_string())));
             Ok(())
@@ -1120,7 +1128,7 @@ mod tests {
             fn classify(&self, _model: &str) -> Supply {
                 Supply::Fetchable
             }
-            fn ensure(&self, _model: &str, _exec: &Executor, _progress: &mut dyn FnMut(&str, u32, u32)) -> Result<(), String> {
+            fn ensure(&self, _model: &str, _exec: &Executor, _progress: &mut dyn FnMut(&str, u32, u32), _cancel: &capability::CancelToken) -> Result<(), String> {
                 Err("hub error: /abs/workspace/secret-internal-path unreachable".to_string())
             }
         }

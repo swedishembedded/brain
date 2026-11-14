@@ -158,6 +158,12 @@ on-demand fetch a first `infer`/serve request makes when `--autofetch` is
 passed. It is the same operation, spelled out loud - one plan, one download,
 one finish step.
 
+On a server, requests that ask for the same model while it is being fetched
+share one download. A request that disconnects stops waiting for it, and the
+download stops (leaving every finished file in place and no partial one) only
+when no request waits for it any more; the next request for that model starts
+it again and fetches only what is missing.
+
 The argument is the canonical reference or a HuggingFace URL, with or without
 a scheme, a `www.` host, a trailing slash, a query string or a fragment. A
 repo page and a `/tree/<revision>` branch view both name the whole repo, at

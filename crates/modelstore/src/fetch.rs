@@ -18,7 +18,10 @@ use sha2::{Digest, Sha256};
 /// partial file where [`crate::Store::scan`] could find it. Never buffers more
 /// than one fixed-size chunk regardless of file size (the same OOM invariant
 /// weight loading follows). `progress(got, total)` is called after each chunk;
-/// `total` is `None` when the caller does not know the expected size.
+/// `total` is `None` when the caller does not know the expected size. `stop` is
+/// asked before each chunk: `true` abandons the download with an
+/// [`std::io::ErrorKind::Interrupted`] error, removing the `.part` like any
+/// other failure.
 ///
 /// **No byte-level resume.** Each transfer creates its own `.part` afresh, so a
 /// retry after an interrupted transfer starts that file over rather than
@@ -35,6 +38,7 @@ pub fn stream_to_file(
     dest: &Path,
     total: Option<u64>,
     expected_sha256: Option<&str>,
+    stop: &dyn Fn() -> bool,
     progress: &mut dyn FnMut(u64, Option<u64>),
 ) -> std::io::Result<()> {
     if let Some(parent) = dest.parent() {
@@ -66,6 +70,9 @@ pub fn stream_to_file(
         let mut buf = [0u8; 64 * 1024];
         let mut got: u64 = 0;
         loop {
+            if stop() {
+                return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "the download was stopped"));
+            }
             let n = reader.read(&mut buf)?;
             if n == 0 {
                 break;
@@ -380,12 +387,12 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("brain-fetch-part-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let dest = dir.join("w.safetensors");
-        let err = stream_to_file(&b"0123456789"[..], &dest, Some(4), None, &mut |_, _| {}).unwrap_err();
+        let err = stream_to_file(&b"0123456789"[..], &dest, Some(4), None, &|| false, &mut |_, _| {}).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
-        let err = stream_to_file(&b"abc"[..], &dest, Some(3), Some("00"), &mut |_, _| {}).unwrap_err();
+        let err = stream_to_file(&b"abc"[..], &dest, Some(3), Some("00"), &|| false, &mut |_, _| {}).unwrap_err();
         assert!(err.to_string().contains("sha256"), "{err}");
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0, "no .part and no destination remain");
-        stream_to_file(&b"abc"[..], &dest, Some(3), None, &mut |_, _| {}).unwrap();
+        stream_to_file(&b"abc"[..], &dest, Some(3), None, &|| false, &mut |_, _| {}).unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), b"abc");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -412,7 +419,7 @@ mod tests {
         let dest = dir.join("weights.bin");
         let data = b"hello model weights";
         let mut seen = Vec::new();
-        stream_to_file(&data[..], &dest, Some(data.len() as u64), None, &mut |got, total| {
+        stream_to_file(&data[..], &dest, Some(data.len() as u64), None, &|| false, &mut |got, total| {
             seen.push((got, total));
         })
         .unwrap();
@@ -428,7 +435,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let dest = dir.join("weights.bin");
         let data = b"payload";
-        let err = stream_to_file(&data[..], &dest, None, Some("0000000000000000000000000000000000000000000000000000000000000000"), &mut |_, _| {})
+        let err = stream_to_file(&data[..], &dest, None, Some("0000000000000000000000000000000000000000000000000000000000000000"), &|| false, &mut |_, _| {})
             .unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
         assert!(!dest.exists());
@@ -443,7 +450,7 @@ mod tests {
         let data = b"";
         // sha256("") -- a known vector.
         let expected = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-        stream_to_file(&data[..], &dest, None, Some(expected), &mut |_, _| {}).unwrap();
+        stream_to_file(&data[..], &dest, None, Some(expected), &|| false, &mut |_, _| {}).unwrap();
         assert!(dest.exists());
         std::fs::remove_dir_all(&dir).ok();
     }

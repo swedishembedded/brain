@@ -109,6 +109,9 @@ pub enum HubError {
     NotFound(String),
     Network(String),
     BadResponse(String),
+    /// The caller stopped the transfer (its `stop` returned `true`); nothing
+    /// it was writing is left on disk.
+    Cancelled,
 }
 
 impl std::fmt::Display for HubError {
@@ -117,6 +120,7 @@ impl std::fmt::Display for HubError {
             HubError::NotFound(s) => write!(f, "not found: {s}"),
             HubError::Network(s) => write!(f, "network error: {s}"),
             HubError::BadResponse(s) => write!(f, "bad response: {s}"),
+            HubError::Cancelled => write!(f, "cancelled"),
         }
     }
 }
@@ -144,6 +148,8 @@ pub trait Hub: Send + Sync {
     /// Reads one file fully into memory -- only for small files (`config.json`,
     /// index manifests). Weight files use [`download`](Hub::download).
     fn read_file(&self, vendor: &str, repo: &str, revision: &str, file: &str) -> Result<Vec<u8>, HubError>;
+    /// Streams one file to `dest` ([`stream_to_file`]): `stop` is asked between
+    /// chunks, and `true` ends the transfer with [`HubError::Cancelled`].
     fn download(
         &self,
         vendor: &str,
@@ -151,8 +157,19 @@ pub trait Hub: Send + Sync {
         revision: &str,
         file: &str,
         dest: &Path,
+        stop: &dyn Fn() -> bool,
         progress: &mut dyn FnMut(u64, Option<u64>),
     ) -> Result<(), HubError>;
+}
+
+/// A failed transfer: [`HubError::Cancelled`] when the caller stopped it,
+/// otherwise the I/O failure as a network error.
+fn transfer_error(e: &std::io::Error, stop: &dyn Fn() -> bool) -> HubError {
+    if e.kind() == std::io::ErrorKind::Interrupted && stop() {
+        HubError::Cancelled
+    } else {
+        HubError::Network(e.to_string())
+    }
 }
 
 /// The real Hub, talking to Hugging Face's model hub over HTTPS.
@@ -259,6 +276,7 @@ impl Hub for HfHub {
         revision: &str,
         file: &str,
         dest: &Path,
+        stop: &dyn Fn() -> bool,
         progress: &mut dyn FnMut(u64, Option<u64>),
     ) -> Result<(), HubError> {
         let url = self.resolve_url(vendor, repo, revision, file);
@@ -271,7 +289,7 @@ impl Hub for HfHub {
         // the host lists for it, so a corrupted transfer of the declared size
         // is refused like a short one; a plain file has none to check.
         let digest = lfs_sha256(&self.revision_info_opt(vendor, repo, revision, true)?, file);
-        stream_to_file(resp.into_reader(), dest, total, digest.as_deref(), progress).map_err(|e| HubError::Network(e.to_string()))
+        stream_to_file(resp.into_reader(), dest, total, digest.as_deref(), stop, progress).map_err(|e| transfer_error(&e, stop))
     }
 }
 
@@ -460,10 +478,11 @@ impl Hub for FakeHub {
         revision: &str,
         file: &str,
         dest: &Path,
+        stop: &dyn Fn() -> bool,
         progress: &mut dyn FnMut(u64, Option<u64>),
     ) -> Result<(), HubError> {
         let bytes = self.read_file(vendor, repo, revision, file)?;
-        stream_to_file(&bytes[..], dest, Some(bytes.len() as u64), None, progress).map_err(|e| HubError::Network(e.to_string()))
+        stream_to_file(&bytes[..], dest, Some(bytes.len() as u64), None, stop, progress).map_err(|e| transfer_error(&e, stop))
     }
 }
 
@@ -591,7 +610,7 @@ mod tests {
         let dir = std::env::temp_dir().join("modelstore-hub-test-download");
         std::fs::create_dir_all(&dir).unwrap();
         let dest = dir.join("Q8_0.gguf");
-        hub.download("Qwen", "Qwen3-0.6B-GGUF", "main", "Qwen3-0.6B-Q8_0.gguf", &dest, &mut |_, _| {}).unwrap();
+        hub.download("Qwen", "Qwen3-0.6B-GGUF", "main", "Qwen3-0.6B-Q8_0.gguf", &dest, &|| false, &mut |_, _| {}).unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), vec![9, 9, 9]);
         std::fs::remove_dir_all(&dir).ok();
     }

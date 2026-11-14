@@ -403,7 +403,11 @@ fn store_relative(name: &str) -> Result<&std::path::Path, HubError> {
 /// existing early-out) already does: a file under `<vendor>/<repo>/` is taken
 /// as that reference's copy. Removing the file is how a caller forces a
 /// re-fetch.
-pub fn execute(store: &Store, hub: &dyn Hub, plan: &Plan, progress: &mut dyn FnMut(&str, u64, Option<u64>)) -> Result<Vec<Step>, HubError> {
+///
+/// `stop` is asked before each file and between the chunks of one: `true`
+/// ends the run with [`HubError::Cancelled`], leaving every finished file in
+/// place and no partial one, so a later run resumes where this one stopped.
+pub fn execute(store: &Store, hub: &dyn Hub, plan: &Plan, stop: &dyn Fn() -> bool, progress: &mut dyn FnMut(&str, u64, Option<u64>)) -> Result<Vec<Step>, HubError> {
     let dir = store.repo_dir(&plan.reference.base());
     let mut deferred = Vec::new();
     for step in &plan.steps {
@@ -414,7 +418,10 @@ pub fn execute(store: &Store, hub: &dyn Hub, plan: &Plan, progress: &mut dyn FnM
                 if dest.exists() {
                     continue;
                 }
-                hub.download(vendor, repo, revision, file, &dest, &mut |got, total| progress(dest_name, got, total))?;
+                if stop() {
+                    return Err(HubError::Cancelled);
+                }
+                hub.download(vendor, repo, revision, file, &dest, stop, &mut |got, total| progress(dest_name, got, total))?;
             }
             Step::Convert { .. } | Step::Quantize { .. } => deferred.push(step.clone()),
         }
@@ -525,8 +532,8 @@ mod tests {
         fn read_file(&self, v: &str, r: &str, rev: &str, f: &str) -> Result<Vec<u8>, HubError> {
             self.0.read_file(v, r, rev, f)
         }
-        fn download(&self, v: &str, r: &str, rev: &str, f: &str, dest: &std::path::Path, p: &mut dyn FnMut(u64, Option<u64>)) -> Result<(), HubError> {
-            self.0.download(v, r, rev, f, dest, p)
+        fn download(&self, v: &str, r: &str, rev: &str, f: &str, dest: &std::path::Path, stop: &dyn Fn() -> bool, p: &mut dyn FnMut(u64, Option<u64>)) -> Result<(), HubError> {
+            self.0.download(v, r, rev, f, dest, stop, p)
         }
     }
 
@@ -567,7 +574,7 @@ mod tests {
         // the shard's bytes staying as written rather than being re-fetched.
         std::fs::write(dir.join("model-00002-of-00002.safetensors"), b"sentinel").unwrap();
         let mut seen: Vec<String> = Vec::new();
-        execute(&st, &hub, &p, &mut |name, _, _| {
+        execute(&st, &hub, &p, &|| false, &mut |name, _, _| {
             if seen.last().map(String::as_str) != Some(name) {
                 seen.push(name.to_string());
             }
@@ -888,7 +895,7 @@ mod tests {
         let r = ModelRef::new("Qwen", "Qwen3-0.6B", Some(Quant::Q4KM));
         let p = plan(&r, &st, &hub).unwrap();
         let mut progressed = Vec::new();
-        let deferred = execute(&st, &hub, &p, &mut |name, got, total| progressed.push((name.to_string(), got, total))).unwrap();
+        let deferred = execute(&st, &hub, &p, &|| false, &mut |name, got, total| progressed.push((name.to_string(), got, total))).unwrap();
 
         assert_eq!(deferred, vec![Step::Convert { vendor: "Qwen".to_string(), repo: "Qwen3-0.6B".to_string(), recipe: "transformers" }, Step::Quantize {
             base: ModelRef::new("Qwen", "Qwen3-0.6B", None),
@@ -923,20 +930,51 @@ mod tests {
 
         let r = ModelRef::new("Qwen", "Qwen3-0.6B", None);
         let p = plan(&r, &st, &hub).unwrap();
-        execute(&st, &hub, &p, &mut |_, _, _| {}).unwrap();
+        execute(&st, &hub, &p, &|| false, &mut |_, _, _| {}).unwrap();
 
         let dir = st.repo_dir(&r.base());
         let shard = dir.join("model.safetensors");
         std::fs::write(&shard, b"already-here").unwrap();
 
         let mut progressed = Vec::new();
-        execute(&st, &hub, &p, &mut |name, got, total| progressed.push((name.to_string(), got, total))).unwrap();
+        execute(&st, &hub, &p, &|| false, &mut |name, got, total| progressed.push((name.to_string(), got, total))).unwrap();
 
         assert_eq!(std::fs::read(&shard).unwrap(), b"already-here", "an already-present file was re-downloaded");
         assert!(
             !progressed.iter().any(|(name, _, _)| name == "model.safetensors"),
             "a skipped download must not report transfer progress: {progressed:?}"
         );
+    }
+
+    /// A stopped run ends with [`HubError::Cancelled`] mid-file: the file it was
+    /// writing leaves no trace, the files before it stay, and a later run
+    /// fetches only what is missing.
+    #[test]
+    fn execute_stops_mid_file_and_leaves_no_partial_file() {
+        let st = store("modelstore-plan-test-execute-stop");
+        let mut hub = FakeHub::new();
+        hub.add_file("Qwen", "Qwen3-0.6B", "main", "config.json", br#"{"architectures":["Qwen3ForCausalLM"]}"#.to_vec());
+        // Several 64 KiB chunks, so the stop lands inside the transfer.
+        hub.add_file("Qwen", "Qwen3-0.6B", "main", "model.safetensors", vec![7u8; 4 << 16]);
+        let r = ModelRef::new("Qwen", "Qwen3-0.6B", None);
+        let p = plan(&r, &st, &hub).unwrap();
+        let dir = st.repo_dir(&r.base());
+
+        let shard_chunks = std::cell::Cell::new(0usize);
+        let stop = || shard_chunks.get() >= 2;
+        let err = execute(&st, &hub, &p, &stop, &mut |name, _, _| {
+            if name == "model.safetensors" {
+                shard_chunks.set(shard_chunks.get() + 1);
+            }
+        })
+        .unwrap_err();
+        assert!(matches!(err, HubError::Cancelled), "{err}");
+        assert_eq!(shard_chunks.get(), 2, "the transfer stopped at the next chunk");
+        let left: Vec<String> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        assert_eq!(left, ["config.json"], "only the finished file remains");
+
+        execute(&st, &hub, &p, &|| false, &mut |_, _, _| {}).unwrap();
+        assert_eq!(std::fs::read(dir.join("model.safetensors")).unwrap().len(), 4 << 16);
     }
 
     /// The skip is per-file, not per-plan: a repo missing ONE of its files
@@ -956,7 +994,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("config.json"), b"already-here").unwrap();
 
-        execute(&st, &hub, &p, &mut |_, _, _| {}).unwrap();
+        execute(&st, &hub, &p, &|| false, &mut |_, _, _| {}).unwrap();
 
         assert_eq!(std::fs::read(dir.join("config.json")).unwrap(), b"already-here");
         assert_eq!(std::fs::read(dir.join("model.safetensors")).unwrap(), vec![7u8; 32], "the missing file was not fetched");

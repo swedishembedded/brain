@@ -308,6 +308,9 @@ pub struct Executor {
     /// [`Self::start`] - see [`Self::shutdown`]'s doc for why a real,
     /// deterministic join (not a fixed sleep) needs these kept.
     join_handles: Arc<Mutex<Option<Vec<std::thread::JoinHandle<()>>>>>,
+    /// The model fetches in flight, one per model, shared by every caller of
+    /// [`Self::ensure_model`].
+    pub(crate) fetches: Arc<crate::supply::Fetches>,
 }
 
 impl Executor {
@@ -383,6 +386,7 @@ impl Executor {
             models: Arc::new(RwLock::new(known)),
             stats,
             join_handles: Arc::new(Mutex::new(Some(join_handles))),
+            fetches: Arc::default(),
         }
     }
 

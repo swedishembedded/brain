@@ -142,7 +142,7 @@ impl residency::ModelSupplier for CountingSupplier {
     fn classify(&self, _model: &str) -> residency::Supply {
         residency::Supply::Fetchable
     }
-    fn ensure(&self, _model: &str, _exec: &Executor, _progress: &mut dyn FnMut(&str, u32, u32)) -> Result<(), String> {
+    fn ensure(&self, _model: &str, _exec: &Executor, _progress: &mut dyn FnMut(&str, u32, u32), _cancel: &capability::CancelToken) -> Result<(), String> {
         self.0.fetch_add(1, Ordering::SeqCst);
         Err("nothing to fetch in a test".into())
     }

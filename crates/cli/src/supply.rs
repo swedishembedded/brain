@@ -6,9 +6,10 @@
 //! and reserved-vendor gate (no network for anything `classify` alone can
 //! answer), and fetches via the store's resolution ladder on `ensure`.
 //!
-//! Single-flight: concurrent `ensure` calls for the SAME model share one
-//! underlying fetch (via [`std::sync::Condvar`]) -- ten simultaneous
-//! requests for a cold model download it once, not ten times.
+//! Single-flight is the executor's (`Executor::ensure_model`): ten
+//! simultaneous requests for a cold model reach `ensure` once, and its cancel
+//! token fires only when none of them waits any more. `ensure` stops the
+//! download between chunks when it does.
 //!
 //! Honest scope note: `ensure` completes any plan whose deferred steps are
 //! pure `Download` and/or `Convert` -- covering every base ref, and a quant
@@ -28,23 +29,12 @@
 //! that constructs or registers a CLI-local `ResidentModel`
 //! (`StoreSupplier::ensure` calling `serving::model_dir::resident_for_local`).
 
-use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Mutex};
 
 use brain_modelref::ModelRef;
 use brain_modelstore::{Hub, Step, Store};
 use residency::{Executor, ModelSupplier, Supply};
-
-/// Constructed by `run_cli.rs::build_auto_fetch_supplier` -- only when
-/// `brain serve --autofetch` is given -- and threaded into
-/// every HTTP/D-Bus surface (`run_apis`). Wiring it in went through the full
-/// watertight-API security pass (AGENTS.md).
-#[derive(Clone)]
-enum FetchState {
-    Running,
-    Done(Result<(), String>),
-}
 
 /// The 10%-bucket to report for one file's download progress (`got`/`total`
 /// bytes), given the last bucket already reported for THIS file (`None` if
@@ -89,7 +79,7 @@ pub(crate) fn next_download_pct_bucket(got: u64, total: u64, last: Option<u32>) 
 /// pre-guess which entries are "broken" ourselves and duplicating `ensure`'s
 /// own resolution logic to do it.
 pub fn heal_missing_models_in_background(models_dir: std::path::PathBuf, supplier: Arc<dyn ModelSupplier>, exec: Executor) {
-    let spawned = std::thread::Builder::new().name("brain-model-healer".to_string()).spawn(move || heal_all(&models_dir, supplier.as_ref(), &exec));
+    let spawned = std::thread::Builder::new().name("brain-model-healer".to_string()).spawn(move || heal_all(&models_dir, &supplier, &exec));
     if let Err(e) = spawned {
         residency::log::warn(&format!("model healer: could not spawn its background thread: {e}"));
     }
@@ -130,25 +120,27 @@ fn heal_candidates(models_dir: &Path, already: &std::collections::HashSet<String
 /// background thread - pulled out on its own so it can be driven directly
 /// (a fake [`ModelSupplier`], a temp directory, no real thread/network) rather
 /// than only ever observable by joining a background thread.
-fn heal_all(models_dir: &Path, supplier: &dyn ModelSupplier, exec: &Executor) {
+/// Each entry goes through `Executor::ensure_model`, so a request for the same
+/// model shares the fetch instead of starting a second one; the walk itself
+/// never gives up on a fetch (its token never fires).
+fn heal_all(models_dir: &Path, supplier: &Arc<dyn ModelSupplier>, exec: &Executor) {
     let already: std::collections::HashSet<String> = exec.manifests().iter().map(|m| m.model.clone()).collect();
     for id in heal_candidates(models_dir, &already) {
         residency::log::info(&format!("model healer: attempting {id}"));
-        match supplier.ensure(&id, exec, &mut |_, _, _| {}) {
+        match exec.ensure_model(&id, supplier, &mut |_, _, _| {}, &capability::CancelToken::default()) {
             Ok(()) => residency::log::info(&format!("model healer: {id} is now servable")),
             Err(e) => residency::log::warn(&format!("model healer: {id}: {e}")),
         }
     }
 }
 
-/// One single-flight gate per model: the fetch's outcome plus the condvar
-/// that wakes every other concurrent `ensure` call waiting on it.
-type FetchGate = Arc<(Mutex<FetchState>, Condvar)>;
-
+/// Constructed by `run_cli.rs::build_auto_fetch_supplier` -- only when
+/// `brain serve --autofetch` is given -- and threaded into
+/// every HTTP/D-Bus surface (`run_apis`). Wiring it in went through the full
+/// watertight-API security pass (AGENTS.md).
 pub struct StoreSupplier {
     store: Store,
     hub: Box<dyn Hub>,
-    inflight: Mutex<HashMap<String, FetchGate>>,
     /// Held for the whole of one fetch: models are fetched one at a time, so
     /// requests naming many repos cannot start that many downloads at once.
     fetching: Mutex<()>,
@@ -156,10 +148,10 @@ pub struct StoreSupplier {
 
 impl StoreSupplier {
     pub fn new(store: Store, hub: Box<dyn Hub>) -> StoreSupplier {
-        StoreSupplier { store, hub, inflight: Mutex::new(HashMap::new()), fetching: Mutex::new(()) }
+        StoreSupplier { store, hub, fetching: Mutex::new(()) }
     }
 
-    fn do_ensure(&self, model: &str, exec: &Executor, progress: &mut dyn FnMut(&str, u32, u32)) -> Result<(), String> {
+    fn do_ensure(&self, model: &str, exec: &Executor, progress: &mut dyn FnMut(&str, u32, u32), cancel: &capability::CancelToken) -> Result<(), String> {
         let r = ModelRef::parse(model).map_err(|e| format!("{model}: {e}"))?;
         // `classify` never offers an adapter for fetching, and this is the
         // same refusal for a caller that does not go through it (the heal walk,
@@ -175,7 +167,7 @@ impl StoreSupplier {
         // happening) or one line per raw progress tick (the hub's chunk size,
         // not a number an operator would choose to watch scroll by).
         let mut last_pct: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
-        let deferred = brain_modelstore::execute(&self.store, self.hub.as_ref(), &plan, &mut |name, got, total| {
+        let deferred = brain_modelstore::execute(&self.store, self.hub.as_ref(), &plan, &|| cancel.is_cancelled(), &mut |name, got, total| {
             if let Some(total) = total {
                 if let Some(bucket) = next_download_pct_bucket(got, total, last_pct.get(name).copied()) {
                     residency::log::info(&format!("{model}: downloading {name} {bucket}%"));
@@ -185,6 +177,9 @@ impl StoreSupplier {
             progress(name, got.min(u32::MAX as u64) as u32, total.unwrap_or(0).min(u32::MAX as u64) as u32);
         })
         .map_err(|e| format!("{model}: {e}"))?;
+        if cancel.is_cancelled() {
+            return Err(format!("{model}: the fetch was cancelled"));
+        }
 
         // Convert is automated (dispatch by architecture, see
         // `loader::supply::convert`); Quantize is not yet (Phase 9 -- a
@@ -205,10 +200,10 @@ impl StoreSupplier {
             ));
         }
 
-        // `exec.register_if_absent`, not `register`: the `inflight` single-flight
-        // gate above only serializes callers that overlap IN TIME -- a straggler
-        // that lands after the leader already finished and tore its gate down
-        // starts a fresh, unguarded episode here. `register_if_absent` closes
+        // `exec.register_if_absent`, not `register`: the executor's single-flight
+        // only serializes callers that overlap IN TIME -- a straggler that lands
+        // after a fetch finished and left the executor's table starts a fresh
+        // episode here. `register_if_absent` closes
         // that gap atomically (unlike a separate check-then-`register()`, which
         // is itself a TOCTOU race between episodes), making this call genuinely
         // idempotent per this trait's own "MUST be idempotent" doc.
@@ -252,45 +247,16 @@ impl ModelSupplier for StoreSupplier {
         }
     }
 
-    fn ensure(&self, model: &str, exec: &Executor, progress: &mut dyn FnMut(&str, u32, u32)) -> Result<(), String> {
-        let existing = {
-            let mut map = self.inflight.lock().unwrap();
-            match map.get(model) {
-                Some(slot) => Some(slot.clone()),
-                None => {
-                    map.insert(model.to_string(), Arc::new((Mutex::new(FetchState::Running), Condvar::new())));
-                    None
-                }
-            }
-        };
-        if let Some(slot) = existing {
-            // A follower: another thread is already fetching this model --
-            // wait for it and share its result rather than fetching again.
-            let (lock, cv) = &*slot;
-            let mut state = lock.lock().unwrap();
-            while matches!(*state, FetchState::Running) {
-                state = cv.wait(state).unwrap();
-            }
-            return match &*state {
-                FetchState::Done(r) => r.clone(),
-                FetchState::Running => unreachable!("woke from wait while still Running"),
-            };
+    /// Called once per model at a time by `Executor::ensure_model`, which
+    /// shares the call between every request waiting on it. Fetches still run
+    /// one at a time across models; a fetch cancelled while it waits its turn
+    /// stops as soon as it gets it, before any network I/O.
+    fn ensure(&self, model: &str, exec: &Executor, progress: &mut dyn FnMut(&str, u32, u32), cancel: &capability::CancelToken) -> Result<(), String> {
+        let _one_at_a_time = self.fetching.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if cancel.is_cancelled() {
+            return Err(format!("{model}: the fetch was cancelled"));
         }
-
-        // The leader: do the real work, then publish the result to every
-        // follower waiting on the same slot.
-        let result = {
-            let _one_at_a_time = self.fetching.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            self.do_ensure(model, exec, progress)
-        };
-        let slot = self.inflight.lock().unwrap().get(model).cloned();
-        if let Some(slot) = slot {
-            let (lock, cv) = &*slot;
-            *lock.lock().unwrap() = FetchState::Done(result.clone());
-            cv.notify_all();
-        }
-        self.inflight.lock().unwrap().remove(model);
-        result
+        self.do_ensure(model, exec, progress, cancel)
     }
 }
 
@@ -368,7 +334,7 @@ pub(crate) mod tests {
         fn read_file(&self, v: &str, r: &str, _: &str, f: &str) -> Result<Vec<u8>, brain_modelstore::HubError> {
             panic!("the hub was asked to read {v}/{r}/{f}")
         }
-        fn download(&self, v: &str, r: &str, _: &str, f: &str, _: &Path, _: &mut dyn FnMut(u64, Option<u64>)) -> Result<(), brain_modelstore::HubError> {
+        fn download(&self, v: &str, r: &str, _: &str, f: &str, _: &Path, _: &dyn Fn() -> bool, _: &mut dyn FnMut(u64, Option<u64>)) -> Result<(), brain_modelstore::HubError> {
             panic!("the hub was asked to download {v}/{r}/{f}")
         }
     }
@@ -385,7 +351,7 @@ pub(crate) mod tests {
         for adapter in ["Qwen/Qwen3-0.6B:lab:canary:v1", "Qwen/Qwen3-0.6B-Q8_0:lab:canary:v1", "Qwen/Qwen3-0.6B:lab:never-trained:latest"] {
             assert!(matches!(supplier.classify(adapter), Supply::Unknown(_)), "{adapter} must not classify as fetchable");
             let mut progress = |_: &str, _: u32, _: u32| {};
-            let err = supplier.ensure(adapter, &exec(), &mut progress).unwrap_err();
+            let err = supplier.ensure(adapter, &exec(), &mut progress, &capability::CancelToken::default()).unwrap_err();
             assert!(err.contains("never fetched"), "{err}");
         }
         assert_eq!(supplier.classify("Qwen/Qwen3-0.6B"), Supply::Fetchable, "the base of an adapter is still an ordinary fetchable model");
@@ -455,7 +421,7 @@ pub(crate) mod tests {
         hub.add_file("Qwen", "Qwen3-0.6B", "main", "model.safetensors", weights);
         let supplier = StoreSupplier::new(store("supply-test-converts-base"), Box::new(hub));
         let e = exec();
-        supplier.ensure("Qwen/Qwen3-0.6B", &e, &mut |_, _, _| {}).unwrap();
+        supplier.ensure("Qwen/Qwen3-0.6B", &e, &mut |_, _, _| {}, &capability::CancelToken::default()).unwrap();
 
         // Registered under the fully-qualified vendor/repo id the manifest
         // carries, not anything derived from a file name.
@@ -474,7 +440,7 @@ pub(crate) mod tests {
         let dir = store("supply-test-keeps-upstream").root().to_path_buf();
         let supplier = StoreSupplier::new(Store::new(dir.clone()), Box::new(hub));
         let e = exec();
-        supplier.ensure("Qwen/Qwen3-0.6B", &e, &mut |_, _, _| {}).unwrap();
+        supplier.ensure("Qwen/Qwen3-0.6B", &e, &mut |_, _, _| {}, &capability::CancelToken::default()).unwrap();
 
         let repo_dir = dir.join("Qwen").join("Qwen3-0.6B");
         assert!(repo_dir.join("model.safetensors").exists(), "the downloaded model.safetensors is what serves");
@@ -493,7 +459,7 @@ pub(crate) mod tests {
         hub.add_file("openai-community", "gpt2", "main", "model.safetensors", vec![0u8; 8]);
         let supplier = StoreSupplier::new(store("supply-test-gpt-unsupported"), Box::new(hub));
         let e = exec();
-        let err = supplier.ensure("openai-community/gpt2", &e, &mut |_, _, _| {}).unwrap_err();
+        let err = supplier.ensure("openai-community/gpt2", &e, &mut |_, _, _| {}, &capability::CancelToken::default()).unwrap_err();
         assert!(err.contains("no HF checkpoint reader yet"), "{err}");
     }
 
@@ -511,7 +477,7 @@ pub(crate) mod tests {
         let dir = store("supply-test-quantize-not-automated").root().to_path_buf();
         let supplier = StoreSupplier::new(Store::new(dir.clone()), Box::new(hub));
         let e = exec();
-        let err = supplier.ensure("Qwen/Qwen3-0.6B-Q4_K_M", &e, &mut |_, _, _| {}).unwrap_err();
+        let err = supplier.ensure("Qwen/Qwen3-0.6B-Q4_K_M", &e, &mut |_, _, _| {}, &capability::CancelToken::default()).unwrap_err();
         assert!(err.contains("local-quantize"), "{err}");
         assert!(err.contains("1 additional step"), "{err}");
 
@@ -531,7 +497,7 @@ pub(crate) mod tests {
         let supplier = StoreSupplier::new(store("supply-test-pure-download"), Box::new(hub));
         let e = exec();
         let mut progressed = false;
-        supplier.ensure("Qwen/Qwen3-0.6B-Q8_0", &e, &mut |_, _, _| progressed = true).unwrap();
+        supplier.ensure("Qwen/Qwen3-0.6B-Q8_0", &e, &mut |_, _, _| progressed = true, &capability::CancelToken::default()).unwrap();
         assert!(progressed);
         let names: Vec<String> = e.manifests().iter().map(|m| m.model.clone()).collect();
         assert_eq!(names, vec!["toy-qwen-gguf".to_string()]);
@@ -558,7 +524,7 @@ pub(crate) mod tests {
         let dir = store("supply-test-gguf-only-repo").root().to_path_buf();
         let supplier = StoreSupplier::new(Store::new(dir.clone()), Box::new(hub));
         let e = exec();
-        supplier.ensure("unsloth/Toy-Model-GGUF", &e, &mut |_, _, _| {}).unwrap();
+        supplier.ensure("unsloth/Toy-Model-GGUF", &e, &mut |_, _, _| {}, &capability::CancelToken::default()).unwrap();
 
         // Exactly one file, under the store's own quant name -- so this and
         // an explicit `unsloth/Toy-Model-GGUF-Q8_0` are one artifact, and the
@@ -599,7 +565,7 @@ pub(crate) mod tests {
         let dir = store("supply-test-zimage-compound").root().to_path_buf();
         let supplier = StoreSupplier::new(Store::new(dir.clone()), Box::new(hub));
         let e = exec();
-        supplier.ensure("Tongyi-MAI/Z-Image-Turbo", &e, &mut |_, _, _| {}).unwrap();
+        supplier.ensure("Tongyi-MAI/Z-Image-Turbo", &e, &mut |_, _, _| {}, &capability::CancelToken::default()).unwrap();
 
         let names: Vec<String> = e.manifests().iter().map(|m| m.model.clone()).collect();
         assert_eq!(names, vec!["Tongyi-MAI/Z-Image-Turbo".to_string()], "must register under the fetched ref, not the compiled-in brain/s3dit constant, or the request that triggered the fetch would find nothing");
@@ -657,7 +623,7 @@ pub(crate) mod tests {
         let dir = store(&format!("supply-test-flux2-compound-{}", std::process::id())).root().to_path_buf();
         let supplier = StoreSupplier::new(Store::new(dir.clone()), Box::new(hub));
         let e = exec();
-        let err = supplier.ensure("black-forest-labs/FLUX.2-klein-4B", &e, &mut |_, _, _| {}).unwrap_err();
+        let err = supplier.ensure("black-forest-labs/FLUX.2-klein-4B", &e, &mut |_, _, _| {}, &capability::CancelToken::default()).unwrap_err();
         assert!(err.contains("compound family 'flux2' not servable from the model dir yet"), "{err}");
 
         let manifest_bytes = std::fs::read(dir.join("black-forest-labs").join("FLUX.2-klein-4B").join(brain_modelstore::MANIFEST_FILE)).unwrap();
@@ -687,7 +653,7 @@ pub(crate) mod tests {
         let e = exec();
         // Reaching a resident-dispatch complaint means the fetch AND the
         // finish step both completed; the checkpoint here is a stub.
-        let _ = supplier.ensure("deepseek-ai/DeepSeek-OCR", &e, &mut |_, _, _| {});
+        let _ = supplier.ensure("deepseek-ai/DeepSeek-OCR", &e, &mut |_, _, _| {}, &capability::CancelToken::default());
 
         let repo = dir.join("deepseek-ai").join("DeepSeek-OCR");
         let manifest: brain_modelstore::CompoundManifest = serde_json::from_slice(&std::fs::read(repo.join(brain_modelstore::MANIFEST_FILE)).unwrap()).unwrap();
@@ -710,7 +676,7 @@ pub(crate) mod tests {
         let dir = store(&format!("supply-test-deepseekocr2-hf-{}", std::process::id())).root().to_path_buf();
         let supplier = StoreSupplier::new(Store::new(dir.clone()), Box::new(hub));
         let e = exec();
-        let _ = supplier.ensure("deepseek-ai/DeepSeek-OCR-2", &e, &mut |_, _, _| {});
+        let _ = supplier.ensure("deepseek-ai/DeepSeek-OCR-2", &e, &mut |_, _, _| {}, &capability::CancelToken::default());
 
         let repo = dir.join("deepseek-ai").join("DeepSeek-OCR-2");
         let manifest: brain_modelstore::CompoundManifest = serde_json::from_slice(&std::fs::read(repo.join(brain_modelstore::MANIFEST_FILE)).unwrap()).unwrap();
@@ -751,7 +717,7 @@ pub(crate) mod tests {
         let dir = store("supply-test-wan-compound").root().to_path_buf();
         let supplier = StoreSupplier::new(Store::new(dir.clone()), Box::new(hub));
         let e = exec();
-        supplier.ensure("Wan-AI/Wan2.1-T2V-1.3B", &e, &mut |_, _, _| {}).unwrap();
+        supplier.ensure("Wan-AI/Wan2.1-T2V-1.3B", &e, &mut |_, _, _| {}, &capability::CancelToken::default()).unwrap();
 
         let names: Vec<String> = e.manifests().iter().map(|m| m.model.clone()).collect();
         assert_eq!(names, vec!["Wan-AI/Wan2.1-T2V-1.3B".to_string()], "must register under the fetched ref, not the compiled-in brain/wan constant");
@@ -799,7 +765,7 @@ pub(crate) mod tests {
         let dir = store("supply-test-yolo-flat-release").root().to_path_buf();
         let supplier = StoreSupplier::new(Store::new(dir.clone()), Box::new(hub));
         let e = exec();
-        supplier.ensure("Ultralytics/YOLOv8", &e, &mut |_, _, _| {}).unwrap();
+        supplier.ensure("Ultralytics/YOLOv8", &e, &mut |_, _, _| {}, &capability::CancelToken::default()).unwrap();
 
         let names: Vec<String> = e.manifests().iter().map(|m| m.model.clone()).collect();
         assert_eq!(names, vec!["Ultralytics/YOLOv8".to_string()]);
@@ -816,14 +782,14 @@ pub(crate) mod tests {
     fn concurrent_ensure_for_the_same_model_shares_one_fetch() {
         let mut hub = FakeHub::new();
         hub.add_file("Qwen", "Qwen3-0.6B-GGUF", "main", "Qwen3-0.6B-Q8_0.gguf", tiny_qwen3_gguf());
-        let supplier = Arc::new(StoreSupplier::new(store("supply-test-concurrent"), Box::new(hub)));
+        let supplier: Arc<dyn ModelSupplier> = Arc::new(StoreSupplier::new(store("supply-test-concurrent"), Box::new(hub)));
         let e = exec();
 
         let handles: Vec<_> = (0..8)
             .map(|_| {
                 let supplier = supplier.clone();
                 let e = e.clone();
-                std::thread::spawn(move || supplier.ensure("Qwen/Qwen3-0.6B-Q8_0", &e, &mut |_, _, _| {}))
+                std::thread::spawn(move || e.ensure_model("Qwen/Qwen3-0.6B-Q8_0", &supplier, &mut |_, _, _| {}, &capability::CancelToken::default()))
             })
             .collect();
         for h in handles {
@@ -873,7 +839,7 @@ pub(crate) mod tests {
         fn classify(&self, _model: &str) -> Supply {
             Supply::Fetchable
         }
-        fn ensure(&self, model: &str, _exec: &Executor, _progress: &mut dyn FnMut(&str, u32, u32)) -> Result<(), String> {
+        fn ensure(&self, model: &str, _exec: &Executor, _progress: &mut dyn FnMut(&str, u32, u32), _cancel: &capability::CancelToken) -> Result<(), String> {
             self.calls.lock().unwrap().push(model.to_string());
             if model.contains("bad") {
                 Err(format!("{model}: deliberately broken"))
@@ -891,8 +857,9 @@ pub(crate) mod tests {
         let s = store("brain-supply-heal-all");
         mkdir_all_under(s.root(), "vendor/bad-repo");
         mkdir_all_under(s.root(), "vendor/good-repo");
-        let sup = RecordingSupplier { calls: Mutex::new(Vec::new()) };
-        heal_all(s.root(), &sup, &exec());
+        let sup = Arc::new(RecordingSupplier { calls: Mutex::new(Vec::new()) });
+        let dynamic: Arc<dyn ModelSupplier> = sup.clone();
+        heal_all(s.root(), &dynamic, &exec());
         let mut calls = sup.calls.lock().unwrap().clone();
         calls.sort();
         assert_eq!(calls, vec!["vendor/bad-repo".to_string(), "vendor/good-repo".to_string()]);
