@@ -649,6 +649,7 @@ dependencies = [
  "anyhow",
  "async-stream",
  "axum",
+ "brain-arch",
  "brain-audio",
  "brain-capability",
  "brain-checkpoint",

@@ -665,6 +665,31 @@ async fn model_card_says_the_server_keeps_no_data() {
     }
 }
 
+/// A card says whether the model's architecture is certified for production serving (the serving-certification
+/// matrix): a production architecture's card says `production`; an uncertified architecture, and a model whose
+/// registrant declared none, say `preview`. The list and the single card agree, and both stay schema-valid.
+#[tokio::test]
+async fn model_card_reports_the_support_level_its_architecture_is_certified_at() {
+    use brain_arch::support::{serving_support, Support};
+    assert_eq!(serving_support("qwen3"), Support::Production, "the matrix certifies qwen3 for production");
+    assert_eq!(serving_support("gpt2"), Support::Preview, "the matrix does not certify gpt2");
+    for (provider, uri_prefix, model_schema) in [
+        (Provider::OpenAI, "/v1/models", ("openai.json", "Model")),
+        (Provider::OpenRouter, "/models", ("openrouter.json", "Model")),
+    ] {
+        let models = vec![chat_manifest().with_architecture("qwen3"), agent_chat_manifest().with_architecture("gpt2"), embed_manifest()];
+        let (app, _exec, key) = app_over(models, provider);
+        let listed = get_json(&app, provider, uri_prefix, &key).await;
+        for (model, support) in [("brain-chat", "production"), ("brain-agent", "preview"), ("brain-embed", "preview")] {
+            let card = get_json(&app, provider, &format!("{uri_prefix}/{model}"), &key).await;
+            assert_valid(model_schema.0, model_schema.1, &card);
+            assert_eq!(card["support"], json!(support), "{provider} {model}: {card}");
+            let entry = listed["data"].as_array().unwrap().iter().find(|m| m["id"] == model).unwrap();
+            assert_eq!(entry["support"], json!(support), "{provider} {model}: the list says the same");
+        }
+    }
+}
+
 /// A single model card is as key-gated as the list: it now names what is attached.
 #[tokio::test]
 async fn model_card_route_requires_the_key() {

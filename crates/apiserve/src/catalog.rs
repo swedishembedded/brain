@@ -40,6 +40,7 @@
 //! OpenAI/OpenRouter expose Chat ∪ Embeddings ∪ ImageGen ∪ Transcription ∪ Speech ∪
 //! Video (any capability in [`CapSet::any`]); Anthropic exposes Chat only.
 
+use brain_arch::support::{serving_support, Support};
 use capability::{Manifest, Media};
 use residency::Executor;
 use serde_json::Value;
@@ -120,6 +121,10 @@ pub struct ModelInfo {
     /// The most new tokens one request may ask for: the `generate` action's declared
     /// `max_new` upper bound.
     pub max_output_tokens: Option<u64>,
+    /// How far the serving of the model's architecture is certified
+    /// (`brain_arch::support`): [`Support::Preview`] for a model whose
+    /// manifest declares no architecture, never production by default.
+    pub support: Support,
 }
 
 impl ModelInfo {
@@ -132,7 +137,8 @@ impl ModelInfo {
             .and_then(|p| p.max)
             .filter(|max| max.is_finite() && *max >= 1.0)
             .map(|max| max as u64);
-        ModelInfo { name: m.model.clone(), caps: api_caps(m), max_context_tokens: m.max_context_tokens, max_output_tokens }
+        let support = m.architecture.as_deref().map_or(Support::Preview, serving_support);
+        ModelInfo { name: m.model.clone(), caps: api_caps(m), max_context_tokens: m.max_context_tokens, max_output_tokens, support }
     }
 }
 
