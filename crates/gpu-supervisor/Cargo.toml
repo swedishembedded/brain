@@ -1,0 +1,15 @@
+[package]
+name = "brain-gpu-supervisor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Supervised execution of device operations that cannot be cancelled: each runs in a child worker process under a deadline, a wedged or crashed worker is killed and reaped (the kernel reclaims its driver state), and a per-device circuit breaker quarantines the card until a health probe passes."
+
+[lib]
+name = "gpu_supervisor"
+path = "src/lib.rs"
+
+[dependencies]
+# kill(2) on the worker's process group and prctl(PR_SET_PDEATHSIG): std can
+# signal one pid but not a process group, and has no parent-death hook.
+libc.workspace = true

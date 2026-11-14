@@ -181,6 +181,7 @@ default-members = [
     "crates/cli",
     "crates/dbus",
     "crates/memauth",
+    "crates/gpu-supervisor",
     "crates/weightset",
     "crates/residency",
     "crates/stats",
@@ -308,6 +309,7 @@ brain-invoke = { path = "crates/invoke" }
 brain = { path = "crates/sdk", default-features = false }
 brain-captioner = { path = "crates/captioner" }
 brain-memauth = { path = "crates/memauth" }
+brain-gpu-supervisor = { path = "crates/gpu-supervisor" }
 brain-weightset = { path = "crates/weightset" }
 brain-residency = { path = "crates/residency" }
 brain-stats = { path = "crates/stats" }

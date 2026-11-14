@@ -48,7 +48,7 @@ diagram is stale.
 <!-- crate-layers:begin (generated from scripts/gates/crate-layers.map; edit the map, then run scripts/gates/crate-layers.py --write-doc) -->
 ```text
 layer 1 - kernels, architecture registry, device-neutral contracts
-    arch, backend-api, kernels, kernels-cuda, memauth, seed
+    arch, backend-api, gpu-supervisor, kernels, kernels-cuda, memauth, seed
 layer 2 - accelerator seam: backends and the gpu-core facade
     backend-cpu, backend-cuda, backend-vulkan, backend-wgpu, cuda-aot, gpu-core, rknpu, vulkan,
     wgsl-cpu, wgsl-cuda

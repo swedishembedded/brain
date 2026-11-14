@@ -30,6 +30,7 @@ brain-arch	1
 brain-backend-api	1
 brain-kernels	1
 brain-kernels-cuda	1
+brain-gpu-supervisor	1
 brain-memauth	1
 brain-seed	1
 

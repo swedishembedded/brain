@@ -1763,6 +1763,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-gpu-supervisor"
+version = "5.1.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "brain-gradcheck"
 version = "5.1.0"
 dependencies = [
