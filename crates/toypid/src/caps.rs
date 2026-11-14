@@ -87,22 +87,11 @@ pub fn manifest() -> Manifest {
     Manifest::new(MODEL, "PID event/effect control transformer: a learned controller for first-order plants, judged in closed loop against each plant's oracle.", vec![train_spec(), rollout_spec(), profile_spec()])
 }
 
-/// The per-step callback of a long loop: one progress step per forward, and a
-/// stop once the invocation's token fires.
-fn keep_going<'a>(inv: &'a Invocation, progress: &'a mut dyn FnMut(Progress), total: usize) -> impl FnMut() -> bool + 'a {
-    let mut done = 0u32;
-    move || {
-        progress(Progress::step(done, total as u32, ""));
-        done += 1;
-        !inv.cancel.is_cancelled()
-    }
-}
-
 /// The closed-loop report of `dec` on both plant sets; `Err(CANCELLED)` once
 /// the invocation's token fires, checked before every closed-loop step.
 fn reports(dec: &Pid, cfg: &crate::PidConfig, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> Result<serde_json::Value, String> {
     let (training, validation) = (pid_data::training_plants(), pid_data::validation_plants());
-    let mut go = keep_going(inv, progress, (training.len() + validation.len()) * ROLLOUT_STEPS);
+    let mut go = inv.keep_going(progress, ((training.len() + validation.len()) * ROLLOUT_STEPS) as u32, "closed-loop step");
     let mut side = |plants: &[pid_data::PlantSpec]| -> Result<serde_json::Value, String> {
         let r: Vec<PlantReport> = closed_loop(dec, cfg, plants, ROLLOUT_STEPS, &mut go).ok_or_else(|| capability::failure::CANCELLED.to_string())?;
         let gap = r.iter().map(|p| p.model_mse - p.oracle_mse).sum::<f32>() / r.len().max(1) as f32;
@@ -184,7 +173,7 @@ impl Action for ToyPidAction {
                 let (dec, cfg) = load(&weights()?)?;
                 let len = (n("seq_len", 64) as usize).clamp(1, cfg.block_size as usize);
                 let (cycles, warmup) = (n("cycles", 100).max(1) as usize, n("warmup", 10) as usize);
-                let mut go = keep_going(inv, progress, cycles + warmup);
+                let mut go = inv.keep_going(progress, (cycles + warmup) as u32, "inference");
                 let (mean, min, max) = dec.profile_inference(&profiling_context(len), cycles, warmup, &mut go).ok_or(capability::failure::CANCELLED)?;
                 Ok(Outcome::new()
                     .set("context", json!(len))

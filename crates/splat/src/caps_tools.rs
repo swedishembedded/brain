@@ -99,17 +99,6 @@ pub(crate) fn orient(inv: &Invocation) -> ActionResult {
     Ok(Outcome::new().set("gaussians", json!(oriented.len())).blob("scene", scene_blob(&oriented)?).blob("cameras", cameras_blob(&moved)))
 }
 
-/// The per-poll callback of a long tool: one progress step per poll, and a stop
-/// once the invocation's token fires.
-fn keep_going<'a>(inv: &'a Invocation, progress: &'a mut dyn FnMut(Progress)) -> impl FnMut() -> bool + 'a {
-    let mut polls = 0u32;
-    move || {
-        progress(Progress::step(polls, 0, ""));
-        polls += 1;
-        !inv.cancel.is_cancelled()
-    }
-}
-
 /// A comma-separated list of paths, without the empty entries.
 fn path_list(inv: &Invocation, name: &str) -> Result<Vec<String>, String> {
     let raw = inv.get_str(name).ok_or_else(|| format!("splat merge: missing required param '{name}'"))?;
@@ -132,7 +121,7 @@ pub(crate) fn merge(inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> Act
         })
         .collect::<Result<_, String>>()?;
     let overlap = inv.get_i64("overlap").ok_or("splat merge: missing required param 'overlap'")?.max(0) as usize;
-    let merged = tools::merge(&chunks, overlap, inv.get_f64("prune").unwrap_or(0.0) as f32, &mut keep_going(inv, progress)).map_err(|e| e.replacen("merge", "splat merge", 1))?;
+    let merged = tools::merge(&chunks, overlap, inv.get_f64("prune").unwrap_or(0.0) as f32, &mut inv.keep_going(progress, 0, "block")).map_err(|e| e.replacen("merge", "splat merge", 1))?;
     let links: Vec<_> = merged
         .links
         .iter()
@@ -162,7 +151,7 @@ pub(crate) fn prune(inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> Act
         opacity_gain: inv.get_f64("opacity_gain").unwrap_or(1.0) as f32,
         range,
     };
-    let p = tools::prune(&scene, cameras.as_deref(), &cfg, &mut keep_going(inv, progress))?;
+    let p = tools::prune(&scene, cameras.as_deref(), &cfg, &mut inv.keep_going(progress, 0, "block"))?;
     Ok(Outcome::new()
         .set("gaussians_in", json!(p.before))
         .set("gaussians_after_opacity", json!(p.after_opacity))

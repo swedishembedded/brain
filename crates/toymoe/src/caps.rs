@@ -84,18 +84,6 @@ fn parse_prompt(text: &str) -> Result<Vec<u32>, String> {
     text.split([',', ' ']).filter(|s| !s.is_empty()).map(|t| t.parse::<u32>().map_err(|_| format!("prompt token {t:?} is not a token id"))).collect()
 }
 
-/// The per-forward callback of a long loop: one progress step per forward, and
-/// a stop once the invocation's token fires.
-/// `total` is 0 when the number of forwards is not known up front.
-fn keep_going<'a>(inv: &'a Invocation, progress: &'a mut dyn FnMut(Progress), total: u32) -> impl FnMut() -> bool + 'a {
-    let mut done = 0u32;
-    move || {
-        progress(Progress::step(done, total, ""));
-        done += 1;
-        !inv.cancel.is_cancelled()
-    }
-}
-
 #[derive(Default)]
 pub struct ToyMoeProvider;
 
@@ -145,7 +133,7 @@ impl Action for ToyMoeAction {
                 Ok(Outcome::new().set("initial_loss", json!(report.initial_loss)).set("final_loss", json!(report.final_loss)).set("steps", json!(report.steps_completed)).set("seed", json!(seed)).set("saved", json!(save)))
             }
             "eval" => {
-                let r = crate::evaluate(&weights()?, inv.get_i64("corpus_seed").map_or(CORPUS_SEED, |s| s as u64), inv.get_i64("samples").unwrap_or(400).max(1) as usize, &mut keep_going(inv, progress, 0))?;
+                let r = crate::evaluate(&weights()?, inv.get_i64("corpus_seed").map_or(CORPUS_SEED, |s| s as u64), inv.get_i64("samples").unwrap_or(400).max(1) as usize, &mut inv.keep_going(progress, 0, "forward"))?;
                 Ok(Outcome::new()
                     .set("random", json!(r.random))
                     .set("best_context", json!(r.best_context))
@@ -162,7 +150,7 @@ impl Action for ToyMoeAction {
                 let seed = seed()?;
                 let top_k = inv.get_i64("top_k").map(|k| k.max(1) as usize);
                 let max_new = inv.get_i64("max_new").unwrap_or(DEFAULT_NEW).max(0) as usize;
-                let tokens = crate::generate(&weights()?, &prompt, max_new, inv.get_f64("temperature").unwrap_or(0.8) as f32, top_k, seed, &mut keep_going(inv, progress, max_new as u32))?;
+                let tokens = crate::generate(&weights()?, &prompt, max_new, inv.get_f64("temperature").unwrap_or(0.8) as f32, top_k, seed, &mut inv.keep_going(progress, max_new as u32, "token"))?;
                 Ok(Outcome::new().set("tokens", json!(tokens)).set("seed", json!(seed)))
             }
             other => Err(format!("toymoe: unknown action {other}")),
