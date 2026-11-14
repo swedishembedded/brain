@@ -1,0 +1,68 @@
+<!-- source-sha256: 674a77ef70ee5754c8bc8bc8cb0449a0ee13a04825ef2ffef9d38967c00f7ffa -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 560" width="1000" height="560"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker><marker id="head-4a5568" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs><rect width="1000" height="560" fill="#ffffff"/>
+<rect x="20" y="38" width="160" height="64" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="100" y="58.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">200 raw documents</text>
+<text x="100" y="74.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">dirty case, spaces,</text>
+<text x="100" y="90.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">duplicates</text>
+<rect x="210" y="38" width="160" height="64" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="290" y="66.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">clean, drop copies,</text>
+<text x="290" y="82.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">split by digest</text>
+<rect x="400" y="38" width="160" height="64" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="480" y="66.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">learn the tokenizer</text>
+<text x="480" y="82.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">on training text</text>
+<rect x="590" y="38" width="160" height="64" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="670" y="58.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">base run, 120</text>
+<text x="670" y="74.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">updates, killed</text>
+<text x="670" y="90.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">after 107, resumed</text>
+<rect x="780" y="38" width="160" height="64" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="860" y="58.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">adapter run, 60</text>
+<text x="860" y="74.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">updates, killed</text>
+<text x="860" y="90.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">after 47, resumed</text>
+<line x1="183" y1="70" x2="207" y2="70" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="373" y1="70" x2="397" y2="70" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="563" y1="70" x2="587" y2="70" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="753" y1="70" x2="777" y2="70" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M210,183 H358 L370,195 V247 H210 Z" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<path d="M358,183 V195 H370" fill="none" stroke="#4a5568" stroke-width="1.2"/>
+<text x="224" y="203.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="start">manifest.json:</text>
+<text x="224" y="219.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="start">lengths, digests,</text>
+<text x="224" y="235.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="start">trained_on</text>
+<ellipse cx="480" cy="215" rx="75" ry="22" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="480" y="219.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">tokenizer.bin</text>
+<ellipse cx="670" cy="215" rx="75" ry="22" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="670" y="219.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">base.bin</text>
+<ellipse cx="860" cy="215" rx="75" ry="22" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="860" y="219.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">adapter.bin</text>
+<line x1="480" y1="105" x2="480" y2="190" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="670" y1="105" x2="670" y2="190" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="860" y1="105" x2="860" y2="190" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="210" y="328" width="160" height="64" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="290" y="356.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">loader: check,</text>
+<text x="290" y="372.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">rebuild, merge</text>
+<rect x="485" y="328" width="170" height="64" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="570" y="348.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">server: 3 slots,</text>
+<text x="570" y="364.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">continuous batching,</text>
+<text x="570" y="380.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">cached forward</text>
+<rect x="780" y="328" width="160" height="64" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="860" y="364.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">8 answers</text>
+<line x1="290" y1="250" x2="290" y2="325" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="477.44" y1="238.56" x2="332.56" y2="326.44" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="667.1" y1="237.78" x2="332.9" y2="327.22" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="857.04" y1="237.51" x2="332.96" y2="327.49" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="373" y1="360" x2="482" y2="360" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="658" y1="360" x2="777" y2="360" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<ellipse cx="570" cy="470" rx="105" ry="22" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="570" y="466.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">8 requests, arriving at</text>
+<text x="570" y="482.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">iterations 0 to 7</text>
+<line x1="570" y1="445" x2="570" y2="395" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="20" y="438" width="160" height="64" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="100" y="458.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">reference: straight</text>
+<text x="100" y="474.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">runs, answers</text>
+<text x="100" y="490.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">computed offline</text>
+<path d="M100,502 L100,525 Q100,535 110,535 L850,535 Q860,535 860,525 L860,395" fill="none" stroke="#4a5568" stroke-width="1.4" stroke-dasharray="5 3" marker-end="url(#head-4a5568)"/>
+<text x="330" y="526.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">compared answer by answer, token by token</text>
+<text x="100" y="280.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">training writes</text>
+<text x="100" y="296.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">only these files;</text>
+<text x="100" y="312.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">serving reads</text>
+<text x="100" y="328.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">only these files</text>
+</svg>

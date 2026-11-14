@@ -12,4 +12,5 @@ It comes last because it needs everything before it. The layering of the first c
 After this volume you can draw the layers of an engine and check that its dependencies point down, find the cycle that an upward edge would close and remove it by moving code rather than keeping the edge, replace drifting lists of names with one registry whose lookups are exact, count what a change to one part sets in motion, and keep a library's features honest by building each one alone. The later chapters add the rest: building the whole system yourself, and reading the record of one that was built.
 
 1. [The Architecture of a Machine Learning Engine](01-engine-architecture.md): how should the parts of an engine be divided so that it can grow to hundreds of models without collapsing?
+2. [Capstone: From Raw Data to a Served Model](02-capstone.md): can you build the whole path yourself, in the language of your choice?
 3. [How brain Grew](03-evolution.md): what does the history of one real engine teach about how machine learning systems evolve?

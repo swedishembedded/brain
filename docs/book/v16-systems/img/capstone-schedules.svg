@@ -1,0 +1,224 @@
+<!-- source-sha256: 38b6b74db1c0f5ef953dcc018ee2481ee9b5f6065e80504b69d510a7dcf98a4d -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 936 364" width="936" height="364"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="936" height="364" fill="#ffffff"/>
+<text x="150" y="34.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="start">continuous batching: 16 iterations run</text>
+<text x="171" y="55.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">0</text>
+<text x="213" y="55.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">1</text>
+<text x="255" y="55.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">2</text>
+<text x="297" y="55.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">3</text>
+<text x="339" y="55.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">4</text>
+<text x="381" y="55.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">5</text>
+<text x="423" y="55.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">6</text>
+<text x="465" y="55.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">7</text>
+<text x="507" y="55.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">8</text>
+<text x="549" y="55.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">9</text>
+<text x="591" y="55.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">10</text>
+<text x="633" y="55.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">11</text>
+<text x="675" y="55.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">12</text>
+<text x="717" y="55.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">13</text>
+<text x="759" y="55.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">14</text>
+<text x="801" y="55.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">15</text>
+<text x="843" y="55.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">16</text>
+<text x="885" y="55.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">17</text>
+<text x="136" y="83.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="end">slot 0</text>
+<rect x="152" y="66" width="38" height="26" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="171" y="83.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">P0</text>
+<rect x="194" y="66" width="38" height="26" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="213" y="83.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">D0</text>
+<rect x="236" y="66" width="38" height="26" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="255" y="83.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">D0</text>
+<rect x="278" y="66" width="38" height="26" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="297" y="83.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">D0</text>
+<rect x="320" y="66" width="38" height="26" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="339" y="83.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">D0</text>
+<rect x="362" y="66" width="38" height="26" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="381" y="83.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">D0</text>
+<rect x="404" y="66" width="38" height="26" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="423" y="83.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">P4</text>
+<rect x="446" y="66" width="38" height="26" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="465" y="83.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">D4</text>
+<rect x="488" y="66" width="38" height="26" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="507" y="83.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">D4</text>
+<rect x="530" y="66" width="38" height="26" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="549" y="83.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">D4</text>
+<rect x="572" y="66" width="38" height="26" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="591" y="83.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">P7</text>
+<rect x="614" y="66" width="38" height="26" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="633" y="83.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">D7</text>
+<rect x="656" y="66" width="38" height="26" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="675" y="83.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">D7</text>
+<rect x="698" y="66" width="38" height="26" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="717" y="83.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">D7</text>
+<rect x="740" y="66" width="38" height="26" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="759" y="83.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">D7</text>
+<rect x="782" y="66" width="38" height="26" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="801" y="83.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">D7</text>
+<text x="136" y="113.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="end">slot 1</text>
+<rect x="152" y="96" width="38" height="26" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="171" y="113.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">P1</text>
+<rect x="194" y="96" width="38" height="26" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="213" y="113.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">D1</text>
+<rect x="236" y="96" width="38" height="26" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="255" y="113.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">D1</text>
+<rect x="278" y="96" width="38" height="26" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="297" y="113.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">P3</text>
+<rect x="320" y="96" width="38" height="26" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="339" y="113.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">D3</text>
+<rect x="362" y="96" width="38" height="26" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="381" y="113.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">D3</text>
+<rect x="404" y="96" width="38" height="26" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="423" y="113.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">D3</text>
+<rect x="446" y="96" width="38" height="26" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="465" y="113.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">D3</text>
+<rect x="488" y="96" width="38" height="26" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="507" y="113.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">D3</text>
+<rect x="530" y="96" width="38" height="26" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="549" y="113.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">P6</text>
+<rect x="572" y="96" width="38" height="26" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="591" y="113.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">D6</text>
+<rect x="614" y="96" width="38" height="26" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="633" y="113.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">D6</text>
+<text x="136" y="143.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="end">slot 2</text>
+<rect x="152" y="126" width="38" height="26" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="171" y="143.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">P2</text>
+<rect x="194" y="126" width="38" height="26" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="213" y="143.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">D2</text>
+<rect x="236" y="126" width="38" height="26" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="255" y="143.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">D2</text>
+<rect x="278" y="126" width="38" height="26" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="297" y="143.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">D2</text>
+<rect x="320" y="126" width="38" height="26" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="339" y="143.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">D2</text>
+<rect x="362" y="126" width="38" height="26" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="381" y="143.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">D2</text>
+<rect x="404" y="126" width="38" height="26" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="423" y="143.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">P5</text>
+<rect x="446" y="126" width="38" height="26" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="465" y="143.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">D5</text>
+<rect x="488" y="126" width="38" height="26" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="507" y="143.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">D5</text>
+<rect x="530" y="126" width="38" height="26" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="549" y="143.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">D5</text>
+<rect x="572" y="126" width="38" height="26" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="591" y="143.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">D5</text>
+<rect x="614" y="126" width="38" height="26" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="633" y="143.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">D5</text>
+<text x="150" y="194.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="start">static batching: 18 iterations run</text>
+<text x="171" y="215.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">0</text>
+<text x="213" y="215.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">1</text>
+<text x="255" y="215.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">2</text>
+<text x="297" y="215.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">3</text>
+<text x="339" y="215.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">4</text>
+<text x="381" y="215.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">5</text>
+<text x="423" y="215.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">6</text>
+<text x="465" y="215.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">7</text>
+<text x="507" y="215.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">8</text>
+<text x="549" y="215.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">9</text>
+<text x="591" y="215.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">10</text>
+<text x="633" y="215.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">11</text>
+<text x="675" y="215.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">12</text>
+<text x="717" y="215.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">13</text>
+<text x="759" y="215.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">14</text>
+<text x="801" y="215.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">15</text>
+<text x="843" y="215.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">16</text>
+<text x="885" y="215.85" font-family="Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#4a5568" text-anchor="middle">17</text>
+<text x="136" y="243.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="end">slot 0</text>
+<rect x="152" y="226" width="38" height="26" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="171" y="243.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">P0</text>
+<rect x="194" y="226" width="38" height="26" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="213" y="243.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">D0</text>
+<rect x="236" y="226" width="38" height="26" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="255" y="243.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">D0</text>
+<rect x="278" y="226" width="38" height="26" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="297" y="243.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">D0</text>
+<rect x="320" y="226" width="38" height="26" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="339" y="243.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">D0</text>
+<rect x="362" y="226" width="38" height="26" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="381" y="243.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">D0</text>
+<rect x="404" y="226" width="38" height="26" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="423" y="243.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">P3</text>
+<rect x="446" y="226" width="38" height="26" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="465" y="243.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">D3</text>
+<rect x="488" y="226" width="38" height="26" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="507" y="243.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">D3</text>
+<rect x="530" y="226" width="38" height="26" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="549" y="243.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">D3</text>
+<rect x="572" y="226" width="38" height="26" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="591" y="243.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">D3</text>
+<rect x="614" y="226" width="38" height="26" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="633" y="243.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">D3</text>
+<rect x="656" y="226" width="38" height="26" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="675" y="243.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">P6</text>
+<rect x="698" y="226" width="38" height="26" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="717" y="243.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">D6</text>
+<rect x="740" y="226" width="38" height="26" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="759" y="243.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">D6</text>
+<rect x="782" y="226" width="38" height="26" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="801" y="243.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">(6)</text>
+<rect x="824" y="226" width="38" height="26" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="843" y="243.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">(6)</text>
+<rect x="866" y="226" width="38" height="26" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="885" y="243.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">(6)</text>
+<text x="136" y="273.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="end">slot 1</text>
+<rect x="152" y="256" width="38" height="26" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="171" y="273.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">P1</text>
+<rect x="194" y="256" width="38" height="26" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="213" y="273.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">D1</text>
+<rect x="236" y="256" width="38" height="26" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="255" y="273.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">D1</text>
+<rect x="278" y="256" width="38" height="26" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="297" y="273.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">(1)</text>
+<rect x="320" y="256" width="38" height="26" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="339" y="273.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">(1)</text>
+<rect x="362" y="256" width="38" height="26" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="381" y="273.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">(1)</text>
+<rect x="404" y="256" width="38" height="26" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="423" y="273.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">P4</text>
+<rect x="446" y="256" width="38" height="26" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="465" y="273.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">D4</text>
+<rect x="488" y="256" width="38" height="26" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="507" y="273.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">D4</text>
+<rect x="530" y="256" width="38" height="26" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="549" y="273.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">D4</text>
+<rect x="572" y="256" width="38" height="26" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="591" y="273.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">(4)</text>
+<rect x="614" y="256" width="38" height="26" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="633" y="273.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">(4)</text>
+<rect x="656" y="256" width="38" height="26" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="675" y="273.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">P7</text>
+<rect x="698" y="256" width="38" height="26" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="717" y="273.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">D7</text>
+<rect x="740" y="256" width="38" height="26" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="759" y="273.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">D7</text>
+<rect x="782" y="256" width="38" height="26" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="801" y="273.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">D7</text>
+<rect x="824" y="256" width="38" height="26" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="843" y="273.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">D7</text>
+<rect x="866" y="256" width="38" height="26" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="885" y="273.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">D7</text>
+<text x="136" y="303.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="end">slot 2</text>
+<rect x="152" y="286" width="38" height="26" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="171" y="303.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">P2</text>
+<rect x="194" y="286" width="38" height="26" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="213" y="303.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">D2</text>
+<rect x="236" y="286" width="38" height="26" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="255" y="303.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">D2</text>
+<rect x="278" y="286" width="38" height="26" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="297" y="303.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">D2</text>
+<rect x="320" y="286" width="38" height="26" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="339" y="303.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">D2</text>
+<rect x="362" y="286" width="38" height="26" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="381" y="303.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">D2</text>
+<rect x="404" y="286" width="38" height="26" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="423" y="303.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">P5</text>
+<rect x="446" y="286" width="38" height="26" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="465" y="303.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">D5</text>
+<rect x="488" y="286" width="38" height="26" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="507" y="303.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">D5</text>
+<rect x="530" y="286" width="38" height="26" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="549" y="303.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">D5</text>
+<rect x="572" y="286" width="38" height="26" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="591" y="303.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">D5</text>
+<rect x="614" y="286" width="38" height="26" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="633" y="303.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">D5</text>
+<text x="150" y="346.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">P j: request j prefilled, D j: one token of request j decoded, (j): slot held by request j, nothing run; columns are iterations</text>
+</svg>
