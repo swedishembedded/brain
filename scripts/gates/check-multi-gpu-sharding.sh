@@ -78,6 +78,7 @@ mimi	Neural audio codec, well under 1B params - single GPU by design.
 minicpmv	default_ref openbmb/MiniCPM-V-4.6 - a SigLIP ViT tower plus the Qwen3.5-0.8B decoder (crates/minicpmv/src/lib.rs), well under 2B params - fits one GPU's fp32 budget comfortably.
 moondream3	SigLIP + MoE decoder - not yet audited/migrated onto model::shard; backlog.
 nemotronasr	default_ref nemotron-3.5-asr-streaming-0.6b - 0.6B, single GPU by design.
+openseeface	MobileNetV3 face detector and landmark nets (crates/openseeface/src/model.rs), a few million params in all, run per webcam frame - single GPU by design.
 pulid	PuLID-FLUX identity conditioning, adapter-scale on top of a host backbone - single GPU by design.
 qwen3asr	default_ref Qwen/Qwen3-ASR-1.7B - 1.7B, single GPU by design.
 qwen3tts	default_ref Qwen/Qwen3-TTS-12Hz-0.6B-Base - 0.6B, single GPU by design.
