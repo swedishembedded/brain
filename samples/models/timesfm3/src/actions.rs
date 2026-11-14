@@ -55,12 +55,12 @@ impl Action for Compare {
     fn spec(&self) -> ActionSpec {
         compare_spec()
     }
-    fn run(&self, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
+    fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         let models: Vec<Box<dyn ForecastModel>> = match &self.0 {
             Some(weights) => vec![Box::new(forecaster(weights)?)],
             None => Vec::new(),
         };
-        forecastops::run_compare(models, inv)
+        forecastops::run_compare(models, inv, progress)
     }
 }
 
