@@ -126,7 +126,10 @@ pub mod weightcache;
 pub use config::{ConditionEncoderConfig, DepthDecoderConfig, DitConfig, VocoderConfig};
 
 /// Where a long generation reports how far along it is: `(done, total,
-/// stage)`, with `stage` one of `"ar"`, `"denoise"` or `"vocode"`.
+/// stage)`, with `stage` one of `"ar"`, `"denoise"` or `"vocode"`, and
+/// learns whether to go on: `false` stops the stage at that step boundary
+/// (one AR frame, one Euler step, one vocoded chunk), which is how the
+/// caller's cancellation reaches every stage loop.
 ///
 /// Deliberately NOT `capability::Progress`. `pipeline`/`denoise`/`stitch`
 /// are library math and have no business depending on the serving
@@ -142,10 +145,10 @@ pub use config::{ConditionEncoderConfig, DepthDecoderConfig, DitConfig, VocoderC
 /// and dropped it, so the declaration was a promise nothing kept. It is
 /// also what `brain perf` derives its entire `submit -> first -> done`
 /// timeline from, so without it this model cannot be benchmarked at all.
-pub type ProgressSink<'a> = &'a mut dyn FnMut(u32, u32, &str);
+pub type ProgressSink<'a> = &'a mut dyn FnMut(u32, u32, &str) -> bool;
 
-/// A [`ProgressSink`] that discards everything - for callers that do not
-/// care (tests, one-shot library use).
-pub fn ignore_progress() -> impl FnMut(u32, u32, &str) {
-    |_, _, _| {}
+/// A [`ProgressSink`] that discards everything and never stops - for
+/// callers that do not care (tests, one-shot library use).
+pub fn ignore_progress() -> impl FnMut(u32, u32, &str) -> bool {
+    |_, _, _| true
 }

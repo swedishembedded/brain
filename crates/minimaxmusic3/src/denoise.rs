@@ -356,7 +356,9 @@ pub fn denoise_chunk(
         latents = scheduler.step(&velocity, &latents);
         // On the orchestrating thread, after both branches have joined - see
         // `ChunkResidents::cfg_pair` for why this may never move inside one.
-        progress(step_index as u32 + 1, total_steps, "denoise");
+        if !progress(step_index as u32 + 1, total_steps, "denoise") {
+            break;
+        }
     }
 
     if overlap > 0 {
@@ -509,6 +511,7 @@ mod tests {
         let mut state = ChunkState::default();
         let _ = denoise_chunk(&mut residents, &dit_cfg, &dit_w, &cond_cfg, &cond_w, &frame_hiddens, num_frames, 0, &mut state, steps, 7, &mut |done, total, stage| {
             seen.push((done, total, stage.to_string()));
+            true
         });
 
         assert_eq!(seen.len(), steps, "expected one progress report per Euler step, got {seen:?}");
@@ -518,6 +521,33 @@ mod tests {
         let done: Vec<u32> = seen.iter().map(|(d, _, _)| *d).collect();
         assert_eq!(done, (1..=steps as u32).collect::<Vec<_>>());
         assert!(seen.iter().all(|(_, total, _)| *total == steps as u32));
+    }
+
+    /// A sink that refuses stops the Euler loop at that step: the harness
+    /// fires the token at a step report, and at most the step already in
+    /// flight may follow.
+    #[test]
+    fn a_refusing_sink_stops_the_euler_loop_at_that_step() {
+        let dit_cfg = DitConfig::tiny();
+        let cond_cfg = ConditionEncoderConfig::tiny();
+        let dit_w = dit_train::random_weights(&dit_cfg, data::rng::random_seed());
+        let cond_w = random_condition_weights(&cond_cfg, data::rng::random_seed());
+        let devices = CfgDevices::single(Gpu::new_cpu(dit::PIPELINES));
+        let num_frames = 5usize;
+        let per_frame = (cond_cfg.num_condition_layers * cond_cfg.condition_hidden_dim) as usize;
+        let frame_hiddens = Lcg::new(data::rng::random_seed()).vec_scaled(num_frames * per_frame, 0.3);
+        let run = |inv: &capability::Invocation, progress: &mut dyn FnMut(capability::Progress)| -> capability::ActionResult {
+            inv.cancel.check()?;
+            let mut residents = ChunkResidents::new(&devices, &dit_cfg, &dit_w, condition_encoder::latent_length(&cond_cfg, num_frames));
+            let mut state = ChunkState::default();
+            denoise_chunk(&mut residents, &dit_cfg, &dit_w, &cond_cfg, &cond_w, &frame_hiddens, num_frames, 0, &mut state, 8, data::rng::random_seed(), &mut |done, total, stage| {
+                progress(capability::Progress::step(done, total, stage));
+                !inv.cancel.is_cancelled()
+            });
+            inv.cancel.check()?;
+            Ok(capability::Outcome::new())
+        };
+        capability_mock::cancellation::certify("minimaxmusic3 denoise", &capability::Invocation::new, &run, capability_mock::cancellation::Bound::ONE_STEP);
     }
 
     /// **Hoisting the weight upload out of the chunk loop must change

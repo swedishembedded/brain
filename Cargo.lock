@@ -2216,6 +2216,7 @@ version = "5.1.0"
 dependencies = [
  "brain-audio",
  "brain-capability",
+ "brain-capability-mock",
  "brain-checkpoint",
  "brain-data",
  "brain-diffusion",

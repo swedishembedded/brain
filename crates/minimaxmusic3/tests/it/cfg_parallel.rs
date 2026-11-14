@@ -104,7 +104,10 @@ fn run(place: Placement, label: &str, dit_cfg: &DitConfig, dit_w: &dit::DitWeigh
     let mut state = ChunkState::default();
     let mut marks: Vec<Instant> = Vec::new();
     let t0 = Instant::now();
-    let latents = denoise::denoise_chunk(&mut residents, dit_cfg, dit_w, cond_cfg, cond_w, hiddens, FRAMES, 0, &mut state, STEPS, SEED, &mut |_, _, _| marks.push(Instant::now()));
+    let latents = denoise::denoise_chunk(&mut residents, dit_cfg, dit_w, cond_cfg, cond_w, hiddens, FRAMES, 0, &mut state, STEPS, SEED, &mut |_, _, _| {
+        marks.push(Instant::now());
+        true
+    });
     let setup = marks.first().map(|m| m.duration_since(t0).as_secs_f64()).unwrap_or_default();
     let per_step: Vec<f64> = marks.windows(2).map(|w| w[1].duration_since(w[0]).as_secs_f64()).collect();
     eprintln!("[{label}] per-card Resident upload + first step {setup:.2} s, then per step: {}", per_step.iter().map(|s| format!("{s:.2}")).collect::<Vec<_>>().join(" "));

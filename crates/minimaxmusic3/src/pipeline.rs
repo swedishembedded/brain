@@ -408,8 +408,7 @@ pub fn generate_frames(
             frame_hiddens.extend_from_slice(&hidden_cond);
             frame_hiddens.extend_from_slice(&depth_hidden);
             frames += 1;
-            progress(frames as u32, max_frames as u32, "ar");
-            if frames >= max_frames {
+            if !progress(frames as u32, max_frames as u32, "ar") || frames >= max_frames {
                 break;
             }
         }

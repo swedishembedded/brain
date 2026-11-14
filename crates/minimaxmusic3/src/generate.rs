@@ -257,8 +257,20 @@ fn load_global_llm(dir: &str, cap: u32, device: Option<u32>) -> Result<(qwen3::Q
 /// chunked DiT denoising -> vocoder crop-and-stitch. See this module's own
 /// doc for the sequential-stage RAM discipline and the `BRAIN_DEVICE=cpu`
 /// operational note.
+///
+/// `progress` returning `false` stops the stage in flight at its next step
+/// and the call returns `Err(`[`capability::failure::CANCELLED`]`)` before
+/// the next stage loads its weights.
 pub fn generate(paths: &Paths, opts: &GenOpts, lyrics: &str, caption: &str, progress: crate::ProgressSink<'_>) -> Result<GeneratedSong, String> {
     let max_frames = max_frames_for_duration(opts.duration_seconds);
+    // Whether `progress` has refused: every stage loop stopped at that step,
+    // and nothing after it may load or run.
+    let stopped = std::cell::Cell::new(false);
+    let progress = &mut |done: u32, total: u32, stage: &str| {
+        let go = progress(done, total, stage);
+        stopped.set(stopped.get() || !go);
+        go
+    };
 
     // ---- AR stage: two int8 Global LLM instances + the depth decoder. ----
     let frame_hiddens = {
@@ -281,6 +293,9 @@ pub fn generate(paths: &Paths, opts: &GenOpts, lyrics: &str, caption: &str, prog
         let branches = pipeline::ArBranches::new(&lm_cond, &mut lm_uncond, place, opts.cfg_parallel);
         pipeline::generate_frames(branches, &mut dec, &dd_w, &dd_cfg, &head, cfg.vocab as usize, cfg.d_model as usize, &conditional_ids, &unconditional_ids, max_frames, opts.seed, progress)
     };
+    if stopped.get() {
+        return Err(capability::failure::CANCELLED.to_string());
+    }
 
     let (denoise_dev, vocoder_dev) = stage_devices(opts.device.as_deref());
 
@@ -322,14 +337,15 @@ pub fn generate(paths: &Paths, opts: &GenOpts, lyrics: &str, caption: &str, prog
         // first rebind is a no-op.
         let mut residents = denoise::ChunkResidents::new(&devices, &dit_cfg, &dit_w, length_of(starts[0]));
         let mut state = denoise::ChunkState::default();
-        starts
-            .iter()
-            .enumerate()
-            .map(|(i, &start)| {
-                let latents = denoise::denoise_chunk(&mut residents, &dit_cfg, &dit_w, &cond_cfg, &cond_w, &frame_hiddens, num_frames, start, &mut state, opts.num_inference_steps, opts.seed.wrapping_add(i as u64 + 1), progress);
-                (latents, length_of(start))
-            })
-            .collect()
+        let mut chunks = Vec::with_capacity(starts.len());
+        for (i, &start) in starts.iter().enumerate() {
+            let latents = denoise::denoise_chunk(&mut residents, &dit_cfg, &dit_w, &cond_cfg, &cond_w, &frame_hiddens, num_frames, start, &mut state, opts.num_inference_steps, opts.seed.wrapping_add(i as u64 + 1), progress);
+            if stopped.get() {
+                return Err(capability::failure::CANCELLED.to_string());
+            }
+            chunks.push((latents, length_of(start)));
+        }
+        chunks
         // `residents`, `devices` and `dit_w` all drop here, at the end of
         // the denoise stage's block scope and before the vocoder stage
         // loads anything - the sequential-stage RAM discipline this
@@ -346,7 +362,9 @@ pub fn generate(paths: &Paths, opts: &GenOpts, lyrics: &str, caption: &str, prog
         let n = chunks.len();
         for (i, (latents, length)) in chunks.iter().enumerate() {
             stitcher.push_chunk(&gpu, &vocoder_cfg, &vocoder_w, latents, *length, i == 0, i + 1 == n);
-            progress(i as u32 + 1, n as u32, "vocode");
+            if !progress(i as u32 + 1, n as u32, "vocode") {
+                return Err(capability::failure::CANCELLED.to_string());
+            }
         }
         stitcher.finish()
     };

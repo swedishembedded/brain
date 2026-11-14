@@ -52,6 +52,7 @@ pub fn generate_spec() -> ActionSpec {
     let d = GenOpts::default();
     ActionSpec::new("generate", "generate a song from lyrics and a caption (Qwen3-8B Global LLM AR sampling, CFG-guided flow-matching DiT denoise, DAC-style vocoder, 44.1 kHz stereo)")
         .streaming()
+        .cancellable()
         .param(ParamSpec::new("lyrics", ParamType::Str, "song lyrics, with [verse]/[chorus]/etc structural tags").required())
         .param(ParamSpec::new("caption", ParamType::Str, "structured music description: genre, BPM, vocal timbre, instrumentation, arrangement").required())
         .param(ParamSpec::new("duration_seconds", ParamType::Float, "target song length in seconds (the AR stage may stop earlier)").min(0.0).max(capability::bounds::SECONDS).default(json!(d.duration_seconds)))
@@ -104,7 +105,11 @@ fn opts_from(inv: &Invocation) -> Result<GenOpts, String> {
 /// direct/`brain do` path through the resolver
 /// (`crate::spec::MinimaxMusic3Spec`), the residency adapter through the
 /// serving store's resolution of the same spec.
+///
+/// The token is checked on entry, before any weight loads, and asked at every
+/// step of every stage (AR frame, Euler step, vocoded chunk).
 pub fn generate_action(paths: &Paths, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+    inv.cancel.check()?;
     let lyrics = inv.get_str("lyrics").ok_or("minimaxmusic3 generate: missing required param 'lyrics'")?;
     let caption = inv.get_str("caption").ok_or("minimaxmusic3 generate: missing required param 'caption'")?;
     if caption.trim().is_empty() {
@@ -120,6 +125,7 @@ pub fn generate_action(paths: &Paths, inv: &Invocation, progress: &mut dyn FnMut
     // and `brain perf`'s timeline wants the stage labels anyway.
     let song = generate(paths, &opts, &lyrics, &caption, &mut |done, total, stage| {
         progress(Progress::step(done, total, format!("{stage} {done}/{total}")));
+        !inv.cancel.is_cancelled()
     })?;
 
     // Pack a COMPLETE WAV byte stream (stereo, via audio::wav::encode_multi)
@@ -220,6 +226,15 @@ mod tests {
         let p = MinimaxMusic3Provider::new(empty_paths());
         assert!(p.action("generate").is_some());
         assert!(p.action("nonexistent").is_none());
+    }
+
+    /// A token fired before the call is refused before the params are read
+    /// or any weight loads (the paths are empty, so a load would fail
+    /// differently).
+    #[test]
+    fn a_generation_cancelled_before_admission_loads_nothing() {
+        let inv = Invocation::new().set("lyrics", json!("la")).set("caption", json!("calm"));
+        capability_mock::cancellation::admission("minimaxmusic3 generate", inv, &|inv, p| generate_action(&empty_paths(), inv, p));
     }
 
     #[test]

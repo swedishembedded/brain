@@ -67,6 +67,7 @@ fn real_short_generation_produces_a_playable_wav() {
             eprintln!("[{:>7.1}s] {stage} {done}/{total}", start.elapsed().as_secs_f32());
             last_stage = stage.to_string();
         }
+        true
     };
 
     // Every assertion below is structural (shape, finiteness, length), so the

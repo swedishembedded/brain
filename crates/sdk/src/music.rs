@@ -161,7 +161,7 @@ impl MusicPipeline {
     /// [`MusicPipeline::generate`] plus [`MusicOptions`].
     pub fn generate_with(&self, lyrics: &str, caption: &str, opts: MusicOptions) -> Result<Song> {
         let gen_opts = opts.to_gen_opts();
-        let song = minimaxmusic3::generate::generate(&self.paths, &gen_opts, lyrics, caption, &mut |_, _, _| {}).map_err(Error::Backend)?;
+        let song = minimaxmusic3::generate::generate(&self.paths, &gen_opts, lyrics, caption, &mut minimaxmusic3::ignore_progress()).map_err(Error::Backend)?;
         Ok(Song { left: song.left, right: song.right, sample_rate: song.sample_rate })
     }
 }
