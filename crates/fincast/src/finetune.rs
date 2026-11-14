@@ -156,7 +156,7 @@ pub fn eval_universe_loss(cfg: &FincastConfig, weights: &HashMap<String, Vec<f32
 /// decides what to do with a losing run; `report.promoted` is the only thing
 /// that should decide whether they are WRITTEN.
 #[allow(clippy::too_many_arguments)]
-pub fn finetune_universe(cfg: &FincastConfig, base: &HashMap<String, Vec<f32>>, series: &[Series], freq: &str, context: usize, horizon: usize, split: train_data::SplitConfig, opts: &FinetuneOpts) -> Result<forecast::FinetuneOutcome, String> {
+pub fn finetune_universe(cfg: &FincastConfig, base: &HashMap<String, Vec<f32>>, series: &[Series], freq: &str, context: usize, horizon: usize, split: train_data::SplitConfig, opts: &FinetuneOpts, observer: forecast::finetune::StepObserver) -> Result<forecast::FinetuneOutcome, String> {
     supported_shape(cfg, context, horizon)?;
     let windows = train_data::enumerate_windows(series, context, horizon);
     let sp = train_data::temporal_split(series, &windows, horizon, split);
@@ -168,7 +168,7 @@ pub fn finetune_universe(cfg: &FincastConfig, base: &HashMap<String, Vec<f32>>, 
     if let Some(policy) = opts.saved {
         model.set_saved_policy(policy)?;
     }
-    Ok(host_train::finetune_host(&mut model, &train, &val, opts, "fincast"))
+    host_train::finetune_host(&mut model, &train, &val, opts, observer)
 }
 
 /// The licence the FinCast pretrained weights are published under. The
@@ -261,9 +261,9 @@ mod tests {
         let (context, horizon) = (32usize, 4usize);
         let s: Vec<Series> = (0..3).map(|i| series(200, i as f32)).collect();
         let base = init_weights(&cfg, 7);
-        let opts = FinetuneOpts { epochs: 2, lr: 3e-3, wd: 0.0, clip: 1.0, lora: None, batch: 4, progress: false, saved: None };
+        let opts = FinetuneOpts { epochs: 2, lr: 3e-3, wd: 0.0, clip: 1.0, lora: None, batch: 4, saved: None };
         let split = train_data::SplitConfig { train_frac: 0.7, val_frac: 0.15, embargo: horizon };
-        let (rep, w) = finetune_universe(&cfg, &base, &s, "1d", context, horizon, split, &opts).unwrap();
+        let (rep, w) = finetune_universe(&cfg, &base, &s, "1d", context, horizon, split, &opts, &mut |_| true).unwrap();
 
         assert!(rep.steps > 0, "the fixture produced no training windows");
         assert!(rep.base_val.is_finite() && rep.ft_val.is_finite(), "{rep:?}");
