@@ -2624,6 +2624,7 @@ version = "5.1.0"
 dependencies = [
  "brain-arch",
  "brain-capability",
+ "brain-capability-mock",
  "brain-checkpoint",
  "brain-data",
  "brain-gguf",
@@ -2757,6 +2758,7 @@ dependencies = [
  "brain-audio",
  "brain-backend-cpu",
  "brain-capability",
+ "brain-capability-mock",
  "brain-checkpoint",
  "brain-data",
  "brain-ecapatdnn",

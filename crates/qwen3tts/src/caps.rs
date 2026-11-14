@@ -491,12 +491,12 @@ impl Action for ImportAction {
         import_spec()
     }
 
-    fn run(&self, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
+    fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         inv.cancel.check()?;
         let source = inv.get_str("source").ok_or("tts import: missing required param 'source'")?;
         let dest = inv.get_str("dest").ok_or("tts import: missing required param 'dest'")?;
         let sources = crate::import::Sources::new(&source, inv.get_str("codec_source").as_deref(), inv.get_str("speaker_source").as_deref());
-        let imported = crate::import::import_all(&sources, &dest).map_err(|e| format!("tts import: {e}"))?;
+        let imported = crate::import::import_all(&sources, &dest, &mut inv.keep_going(progress, 0, "tensor")).map_err(|e| if e == capability::failure::CANCELLED { e } else { format!("tts import: {e}") })?;
         Ok(Outcome::new().set("dest", json!(dest)).set("speaker_skipped", json!(imported.speaker_skipped)))
     }
 }

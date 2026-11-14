@@ -79,7 +79,7 @@ pub fn config_from_dir(dir: &str) -> Result<Chronos2Config, String> {
 /// tensors), streaming one source tensor at a time (never the whole checkpoint
 /// in memory). Mirrors `load_hf`'s validation (strict, same error shapes) but
 /// writes straight through `StWriter` instead of building an in-RAM map first.
-pub fn import(hf_dir: &str, out_path: &str) -> Result<(), String> {
+pub fn import(hf_dir: &str, out_path: &str, keep_going: &mut dyn FnMut() -> bool) -> Result<(), String> {
     let cfg = config_from_dir(hf_dir)?;
     // Output shapes are flat (matches this crate's long-standing convention:
     // the container stores element counts, not param_list's real shape).
@@ -102,7 +102,7 @@ pub fn import(hf_dir: &str, out_path: &str) -> Result<(), String> {
 
     let mut extra: Vec<String> = Vec::new();
     let mut err: Option<String> = None;
-    reader.for_each(|name, _shape, data| {
+    let finished = reader.for_each_while(keep_going, |name, _shape, data| {
         if err.is_some() || is_non_persistent(name) {
             return;
         }
@@ -114,6 +114,10 @@ pub fn import(hf_dir: &str, out_path: &str) -> Result<(), String> {
             err = Some(format!("import: {e}"));
         }
     });
+    if !finished {
+        writer.abandon();
+        return Err(capability::failure::CANCELLED.to_string());
+    }
     if let Some(e) = err {
         return Err(e);
     }
@@ -222,7 +226,7 @@ mod tests {
         w.finish().unwrap();
 
         let out = std::env::temp_dir().join(format!("chronos2-import-out-{pid}.safetensors"));
-        import(dir.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        import(dir.to_str().unwrap(), out.to_str().unwrap(), &mut || true).unwrap();
 
         let reader = checkpoint::weightio::WeightReader::open(out.to_str().unwrap()).unwrap();
         for (name, data) in &expect {

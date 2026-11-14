@@ -209,7 +209,7 @@ fn mtp_real_import_and_forward() {
     }
     let out = std::env::temp_dir().join("brain_mtp_test.safetensors");
     let out = out.to_str().unwrap();
-    qwen3tts::import::import_mtp(&dir, out).expect("mtp import");
+    qwen3tts::import::import_mtp(&dir, out, &mut || true).expect("mtp import");
     let m = MtpModel::load_inference_on(gpu_core::testgpu::dev(qwen3tts::mtp::PIPELINES), out);
     assert_eq!(m.cfg.vocab, 2048);
     assert_eq!(m.cfg.num_code_groups, 16);

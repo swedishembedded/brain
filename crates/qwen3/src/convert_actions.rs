@@ -56,12 +56,21 @@ pub(crate) fn export_peft_spec() -> ActionSpec {
         .param(ParamSpec::new("base_model", ParamType::Str, "the Hugging Face id recorded as the adapter's base model"))
 }
 
-pub(crate) fn import(_: &Resolved, inv: &Invocation, _: &mut dyn FnMut(Progress)) -> ActionResult {
+/// A conversion failure as the action's error: the cancellation literal passes through untouched.
+fn failed(e: String, action: &str) -> String {
+    if e == capability::failure::CANCELLED {
+        e
+    } else {
+        format!("qwen {action}: {e}")
+    }
+}
+
+pub(crate) fn import(_: &Resolved, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
     let source = path_param(inv, "source", "import")?;
     let dest = path_param(inv, "dest", "import")?;
     let block = inv.get_i64("block").map(|b| b.max(1) as u32);
     let id = inv.get_str("id").filter(|i| !i.is_empty());
-    guarded("import", || crate::import::import_as(&source.to_string_lossy(), &dest.to_string_lossy(), block, id.as_deref()))?.map_err(|e| format!("qwen import: {e}"))?;
+    guarded("import", || crate::import::import_as(&source.to_string_lossy(), &dest.to_string_lossy(), block, id.as_deref(), &mut inv.keep_going(progress, 0, "tensor")))?.map_err(|e| failed(e, "import"))?;
     Ok(Outcome::new().set("saved", json!(dest.display().to_string())))
 }
 

@@ -51,27 +51,37 @@ pub fn import_spec(summary: &str) -> ActionSpec {
         .param(ParamSpec::new("dest", ParamType::Str, "where to write the brain checkpoint (.safetensors)").required().host_resolved())
 }
 
+/// A model's own importer: `(source, dest, keep_going)`, asking `keep_going` before each tensor.
+type Converter = fn(&str, &str, &mut dyn FnMut() -> bool) -> Result<(), String>;
+
 /// `import` for one model: `convert(source, dest)` is the model's own importer.
 struct ImportAction {
     model: &'static str,
     summary: &'static str,
-    convert: fn(&str, &str) -> Result<(), String>,
+    convert: Converter,
 }
 
 impl Action for ImportAction {
     fn spec(&self) -> ActionSpec {
         import_spec(self.summary)
     }
-    fn run(&self, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
+    fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         inv.cancel.check()?;
         let source = inv.get_str("source").ok_or_else(|| format!("{} import: missing required param 'source'", self.model))?;
         let dest = inv.get_str("dest").ok_or_else(|| format!("{} import: missing required param 'dest'", self.model))?;
-        (self.convert)(&source, &dest).map_err(|e| format!("{} import: {e}", self.model))?;
+        // One progress step per source tensor, and a stop at the next one once the token fires.
+        let mut tensors = 0u32;
+        (self.convert)(&source, &dest, &mut || {
+            tensors += 1;
+            progress(Progress::step(tensors, 0, "tensor"));
+            !inv.cancel.is_cancelled()
+        })
+        .map_err(|e| if e == capability::failure::CANCELLED { e } else { format!("{} import: {e}", self.model) })?;
         Ok(Outcome::new().set("dest", json!(dest)))
     }
 }
 
-fn import_action(model: &'static str, summary: &'static str, convert: fn(&str, &str) -> Result<(), String>) -> Arc<dyn Action> {
+fn import_action(model: &'static str, summary: &'static str, convert: Converter) -> Arc<dyn Action> {
     Arc::new(ImportAction { model, summary, convert })
 }
 
@@ -463,6 +473,21 @@ mod tests {
         let store = loader::served::ServedStore::new(Some(root.join("out")));
         let resident = Chronos2Resident::from_store(&store);
         assert!(resident.is_some(), "the written container is what the store serves for chronos2");
+
+        // A token that fires mid-conversion stops it at the next tensor and leaves no partial container behind.
+        let stopped = root.join("out").join("stopped.safetensors");
+        let make = || Invocation::new().set("source", json!(src.to_string_lossy())).set("dest", json!(stopped.to_string_lossy()));
+        let action = chronos2_provider(&assembly).unwrap().action("import").unwrap();
+        capability_mock::cancellation::certify("chronos2 import", &make, &|inv, progress| action.run(inv, progress), capability_mock::cancellation::Bound::ONE_STEP);
+        std::fs::remove_file(&stopped).unwrap_or_default();
+        let mut inv = make();
+        inv.cancel = capability::CancelToken::armed();
+        let token = inv.cancel.clone();
+        let err = action.run(&inv, &mut |_| token.cancel()).unwrap_err();
+        assert_eq!(err, capability::failure::CANCELLED);
+        assert!(!stopped.exists(), "a stopped import leaves no partial container");
+        let leftovers: Vec<_> = std::fs::read_dir(root.join("out")).unwrap().filter_map(|e| e.ok()).filter(|e| e.file_name().to_string_lossy().ends_with(".tmp")).collect();
+        assert!(leftovers.is_empty(), "a stopped import leaves no temporary file: {leftovers:?}");
         let _ = std::fs::remove_dir_all(&root);
     }
 }

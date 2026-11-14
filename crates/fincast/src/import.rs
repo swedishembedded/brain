@@ -57,15 +57,15 @@ pub fn open_weights(path: &str) -> Result<(checkpoint::weightio::WeightReader, F
 /// Import a FinCast safetensors file (or dir) → a brain `.safetensors` container
 /// (config + tensors). The config is the published default (FinCast ships no
 /// `config.json`; the dims are fixed by the checkpoint and asserted by T0).
-pub fn import(ckpt: &str, out_path: &str) -> Result<(), String> {
-    import_cfg(&FincastConfig::default(), ckpt, out_path)
+pub fn import(ckpt: &str, out_path: &str, keep_going: &mut dyn FnMut() -> bool) -> Result<(), String> {
+    import_cfg(&FincastConfig::default(), ckpt, out_path, keep_going)
 }
 
 /// `import`, parametrized over the config (split out so tests can exercise the
 /// real streaming path at `tiny()` scale instead of the real ~1.3B-param model).
 /// Streams one source tensor at a time (never the whole checkpoint in memory);
 /// mirrors `load_hf`'s validation but writes straight through `StWriter`.
-fn import_cfg(cfg: &FincastConfig, ckpt: &str, out_path: &str) -> Result<(), String> {
+fn import_cfg(cfg: &FincastConfig, ckpt: &str, out_path: &str, keep_going: &mut dyn FnMut() -> bool) -> Result<(), String> {
     // Output shapes are flat (matches this crate's long-standing convention:
     // the container stores element counts, not param_list's real shape).
     let plan: Vec<(String, Vec<u64>)> = cfg
@@ -82,7 +82,7 @@ fn import_cfg(cfg: &FincastConfig, ckpt: &str, out_path: &str) -> Result<(), Str
 
     let mut extra: Vec<String> = Vec::new();
     let mut err: Option<String> = None;
-    reader.for_each(|name, _shape, data| {
+    let finished = reader.for_each_while(keep_going, |name, _shape, data| {
         if err.is_some() || is_non_persistent(name) {
             return;
         }
@@ -94,6 +94,10 @@ fn import_cfg(cfg: &FincastConfig, ckpt: &str, out_path: &str) -> Result<(), Str
             err = Some(format!("import: {e}"));
         }
     });
+    if !finished {
+        writer.abandon();
+        return Err(capability::failure::CANCELLED.to_string());
+    }
     if let Some(e) = err {
         return Err(e);
     }
@@ -174,7 +178,7 @@ mod tests {
         w.finish().unwrap();
 
         let out = std::env::temp_dir().join(format!("fincast-import-out-{pid}.safetensors"));
-        import_cfg(&cfg, src.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        import_cfg(&cfg, src.to_str().unwrap(), out.to_str().unwrap(), &mut || true).unwrap();
 
         let reader = checkpoint::weightio::WeightReader::open(out.to_str().unwrap()).unwrap();
         for (name, data) in &expect {

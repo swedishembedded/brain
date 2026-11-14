@@ -298,14 +298,14 @@ pub fn import(hf_dir: &str, out_path: &str) -> Result<(), String> {
 /// inference sizes context via `load_inference(.., t)` — so a smaller value is a
 /// cheaper fine-tuning window (attention is O(T²)); `None` keeps the HF default.
 pub fn import_with_block(hf_dir: &str, out_path: &str, block_size: Option<u32>) -> Result<(), String> {
-    import_as(hf_dir, out_path, block_size, None)
+    import_as(hf_dir, out_path, block_size, None, &mut || true)
 }
 
 /// Like [`import_with_block`] but overrides the card's `id` (defaults to the
 /// output filename stem). Used by the model-store auto-fetch dispatcher, which
 /// needs the id to be the fully-qualified `vendor/repo` reference rather than a
 /// filesystem-derived name.
-pub fn import_as(hf_dir: &str, out_path: &str, block_size: Option<u32>, id_override: Option<&str>) -> Result<(), String> {
+pub fn import_as(hf_dir: &str, out_path: &str, block_size: Option<u32>, id_override: Option<&str>, keep_going: &mut dyn FnMut() -> bool) -> Result<(), String> {
     let dir = Path::new(hf_dir);
     let cfg_json = std::fs::read_to_string(dir.join("config.json"))
         .map_err(|e| format!("read config.json: {e}"))?;
@@ -334,7 +334,7 @@ pub fn import_as(hf_dir: &str, out_path: &str, block_size: Option<u32>, id_overr
 
     let mut err: Option<String> = None;
     let mut n_written = 0usize;
-    reader.for_each(|name, _shape, data| {
+    let finished = reader.for_each_while(keep_going, |name, _shape, data| {
         if err.is_some() {
             return;
         }
@@ -349,6 +349,10 @@ pub fn import_as(hf_dir: &str, out_path: &str, block_size: Option<u32>, id_overr
             Err(e) => err = Some(e),
         }
     });
+    if !finished {
+        writer.abandon();
+        return Err(capability::failure::CANCELLED.to_string());
+    }
     if let Some(e) = err {
         return Err(e);
     }
@@ -664,6 +668,32 @@ mod tests {
         };
         assert!(err.contains("blocks.3.mlp.up.weight"), "{err}");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A token that fires mid-conversion stops the import at the next tensor and leaves no file behind.
+    #[test]
+    fn an_import_stops_at_the_next_tensor_when_its_token_fires() {
+        use capability::{Invocation, Outcome, Progress};
+        use capability_mock::cancellation::{certify, Bound};
+        let dir = build_tiny_hf_dir();
+        let out = std::env::temp_dir().join(format!("brain-qwen-import-cancel-out-{}.st", std::process::id()));
+        let run = |inv: &Invocation, progress: &mut dyn FnMut(Progress)| {
+            inv.cancel.check()?;
+            import_as(dir.to_str().unwrap(), out.to_str().unwrap(), None, None, &mut inv.keep_going(progress, 0, "tensor"))?;
+            Ok(Outcome::new())
+        };
+        certify("qwen import", &Invocation::new, &run, Bound::ONE_STEP);
+        std::fs::remove_file(&out).ok();
+        let mut asks = 0;
+        let err = import_as(dir.to_str().unwrap(), out.to_str().unwrap(), None, None, &mut || {
+            asks += 1;
+            asks < 3
+        });
+        assert_eq!(err.unwrap_err(), capability::failure::CANCELLED);
+        let prefix = format!("brain-qwen-import-cancel-out-{}.st.", std::process::id());
+        let leftovers = std::fs::read_dir(std::env::temp_dir()).unwrap().filter_map(|e| e.ok()).filter(|e| e.file_name().to_string_lossy().starts_with(&prefix)).count();
+        assert_eq!(leftovers, 0, "a stopped import leaves no temporary file");
+        std::fs::remove_file(&out).ok();
     }
 
     #[test]

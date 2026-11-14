@@ -235,20 +235,31 @@ pub fn load_mtp(path: &str) -> checkpoint::Container {
     open_mtp(path).and_then(|r| checkpoint::load_reader(&r)).unwrap_or_else(|e| panic!("{e}"))
 }
 
+/// A [`checkpoint::weightio::WeightReader::save_while`] outcome as an import's:
+/// a stopped save answers the contract's cancelled error.
+fn saved(result: std::io::Result<bool>) -> Result<(), String> {
+    match result {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(capability::failure::CANCELLED.to_string()),
+        Err(e) => Err(format!("import: {e}")),
+    }
+}
+
 /// Write the Talker decoder (+ text-conditioning tensors) of `<hf_dir>` to a
-/// brain checkpoint at `out_path` - [`talker_view`], one tensor at a time.
-pub fn import_talker(hf_dir: &str, out_path: &str) -> Result<(), String> {
+/// brain checkpoint at `out_path` - [`talker_view`], one tensor at a time,
+/// asking `keep_going` before each (`Err(CANCELLED)` once it says no).
+pub fn import_talker(hf_dir: &str, out_path: &str, keep_going: &mut dyn FnMut() -> bool) -> Result<(), String> {
     let view = talker_view(Path::new(hf_dir))?;
-    view.save(out_path, None).map_err(|e| format!("import: {e}"))?;
+    saved(view.save_while(out_path, None, keep_going))?;
     eprintln!("imported Talker: {} tensors -> {out_path}", view.names().count());
     Ok(())
 }
 
 /// Write the MTP code-predictor of `<hf_dir>` to a brain checkpoint at
 /// `out_path` - [`mtp_view`], one tensor at a time.
-pub fn import_mtp(hf_dir: &str, out_path: &str) -> Result<(), String> {
+pub fn import_mtp(hf_dir: &str, out_path: &str, keep_going: &mut dyn FnMut() -> bool) -> Result<(), String> {
     let view = mtp_view(Path::new(hf_dir))?;
-    view.save(out_path, None).map_err(|e| format!("import: {e}"))?;
+    saved(view.save_while(out_path, None, keep_going))?;
     eprintln!("imported MTP: {} tensors -> {out_path}", view.names().count());
     Ok(())
 }
@@ -294,12 +305,23 @@ pub struct Imported {
 
 /// Import every component of `sources` as brain checkpoints into `dest`
 /// ([`TALKER_FILE`], [`MTP_FILE`], [`CODEC_FILE`], [`SPEAKER_FILE`]).
-pub fn import_all(sources: &Sources, dest: &str) -> Result<Imported, String> {
+///
+/// `keep_going` is asked before each tensor of the Talker and the MTP and
+/// before each remaining component; once it says no the import answers
+/// `Err(CANCELLED)`.
+pub fn import_all(sources: &Sources, dest: &str, keep_going: &mut dyn FnMut() -> bool) -> Result<Imported, String> {
     std::fs::create_dir_all(dest).map_err(|e| format!("create {dest}: {e}"))?;
     let at = |file: &str| format!("{dest}/{file}");
-    import_talker(&sources.release, &at(TALKER_FILE)).map_err(|e| format!("import talker: {e}"))?;
-    import_mtp(&sources.release, &at(MTP_FILE)).map_err(|e| format!("import mtp: {e}"))?;
+    let component = |e: String, what: &str| if e == capability::failure::CANCELLED { e } else { format!("import {what}: {e}") };
+    import_talker(&sources.release, &at(TALKER_FILE), keep_going).map_err(|e| component(e, "talker"))?;
+    import_mtp(&sources.release, &at(MTP_FILE), keep_going).map_err(|e| component(e, "mtp"))?;
+    if !keep_going() {
+        return Err(capability::failure::CANCELLED.to_string());
+    }
     mimi::import::import(&sources.codec, &at(CODEC_FILE)).map_err(|e| format!("import codec: {e}"))?;
+    if !keep_going() {
+        return Err(capability::failure::CANCELLED.to_string());
+    }
     let speaker_skipped = ecapatdnn::import::import(&sources.speaker, &at(SPEAKER_FILE)).err();
     Ok(Imported { speaker_skipped })
 }
@@ -497,8 +519,31 @@ mod tests {
 
         let talker_out = std::env::temp_dir().join(format!("tts-import-talker-{pid}.safetensors"));
         let mtp_out = std::env::temp_dir().join(format!("tts-import-mtp-{pid}.safetensors"));
-        import_talker(dir.to_str().unwrap(), talker_out.to_str().unwrap()).unwrap();
-        import_mtp(dir.to_str().unwrap(), mtp_out.to_str().unwrap()).unwrap();
+        import_talker(dir.to_str().unwrap(), talker_out.to_str().unwrap(), &mut || true).unwrap();
+        import_mtp(dir.to_str().unwrap(), mtp_out.to_str().unwrap(), &mut || true).unwrap();
+
+        // A token that fires mid-conversion stops each import at the next tensor.
+        {
+            use capability::{Invocation, Outcome, Progress};
+            use capability_mock::cancellation::{certify, Bound};
+            let stopped = std::env::temp_dir().join(format!("tts-import-stopped-{pid}.safetensors"));
+            let run = |inv: &Invocation, progress: &mut dyn FnMut(Progress)| {
+                inv.cancel.check()?;
+                import_talker(dir.to_str().unwrap(), stopped.to_str().unwrap(), &mut inv.keep_going(progress, 0, "tensor"))?;
+                import_mtp(dir.to_str().unwrap(), stopped.to_str().unwrap(), &mut inv.keep_going(progress, 0, "tensor"))?;
+                Ok(Outcome::new())
+            };
+            certify("qwen3tts import", &Invocation::new, &run, Bound::ONE_STEP);
+            let mut asks = 0;
+            let err = import_mtp(dir.to_str().unwrap(), stopped.to_str().unwrap(), &mut || {
+                asks += 1;
+                asks < 3
+            });
+            assert_eq!(err.unwrap_err(), capability::failure::CANCELLED);
+            let leftovers = std::fs::read_dir(std::env::temp_dir()).unwrap().filter_map(|e| e.ok()).filter(|e| e.file_name().to_string_lossy().starts_with(&format!("tts-import-stopped-{pid}.safetensors."))).count();
+            assert_eq!(leftovers, 0, "a stopped import leaves no temporary file");
+            std::fs::remove_file(&stopped).ok();
+        }
 
         let tr = checkpoint::weightio::WeightReader::open(talker_out.to_str().unwrap()).unwrap();
         assert_eq!(tr.names().count(), expect_talker.len());
@@ -539,7 +584,7 @@ mod tests {
     #[test]
     fn importing_a_missing_release_names_the_failing_component() {
         let dest = std::env::temp_dir().join(format!("tts-import-missing-{}", std::process::id()));
-        let err = import_all(&Sources::new("/nonexistent/release", None, None), dest.to_str().unwrap()).unwrap_err();
+        let err = import_all(&Sources::new("/nonexistent/release", None, None), dest.to_str().unwrap(), &mut || true).unwrap_err();
         assert!(err.starts_with("import talker"), "got: {err}");
         std::fs::remove_dir_all(&dest).ok();
     }

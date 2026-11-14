@@ -102,7 +102,7 @@ fn talker_real_import_and_forward() {
     }
     let out = std::env::temp_dir().join("brain_talker_test.safetensors");
     let out = out.to_str().unwrap();
-    qwen3tts::import::import_talker(&dir, out).expect("talker import");
+    qwen3tts::import::import_talker(&dir, out, &mut || true).expect("talker import");
     let model = TalkerModel::load_inference(out, 1, 32);
     assert_eq!(model.vocab(), 3072);
     assert!(model.text.is_some(), "text_projection should load");

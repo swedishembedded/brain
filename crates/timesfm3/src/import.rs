@@ -64,9 +64,9 @@ pub fn load_config(path: &str) -> Result<Timesfm3Config, String> {
 /// container (config + tensors). Reads the checkpoint's own `config.json`
 /// when present (see [`load_config`]), so a future differently-sized release
 /// imports without a code change.
-pub fn import(ckpt: &str, out_path: &str) -> Result<(), String> {
+pub fn import(ckpt: &str, out_path: &str, keep_going: &mut dyn FnMut() -> bool) -> Result<(), String> {
     let cfg = load_config(ckpt)?;
-    import_cfg(&cfg, ckpt, out_path)
+    import_cfg(&cfg, ckpt, out_path, keep_going)
 }
 
 /// `import`, parametrized over the config (split out so tests can exercise
@@ -74,7 +74,7 @@ pub fn import(ckpt: &str, out_path: &str) -> Result<(), String> {
 /// model). Streams one source tensor at a time (never the whole checkpoint
 /// in memory); mirrors `load_hf`'s validation but writes straight through
 /// `StWriter`.
-fn import_cfg(cfg: &Timesfm3Config, ckpt: &str, out_path: &str) -> Result<(), String> {
+fn import_cfg(cfg: &Timesfm3Config, ckpt: &str, out_path: &str, keep_going: &mut dyn FnMut() -> bool) -> Result<(), String> {
     // Output shapes are flat (element counts, not param_list's real shape) -
     // the same convention fincast/chronos2's containers use.
     let plan: Vec<(String, Vec<u64>)> = cfg
@@ -91,7 +91,7 @@ fn import_cfg(cfg: &Timesfm3Config, ckpt: &str, out_path: &str) -> Result<(), St
 
     let mut extra: Vec<String> = Vec::new();
     let mut err: Option<String> = None;
-    reader.for_each(|name, _shape, data| {
+    let finished = reader.for_each_while(keep_going, |name, _shape, data| {
         if err.is_some() {
             return;
         }
@@ -103,6 +103,10 @@ fn import_cfg(cfg: &Timesfm3Config, ckpt: &str, out_path: &str) -> Result<(), St
             err = Some(format!("import: {e}"));
         }
     });
+    if !finished {
+        writer.abandon();
+        return Err(capability::failure::CANCELLED.to_string());
+    }
     if let Some(e) = err {
         return Err(e);
     }
@@ -168,7 +172,7 @@ mod tests {
         w.finish().unwrap();
 
         let out = std::env::temp_dir().join(format!("timesfm3-import-out-{pid}.safetensors"));
-        import_cfg(&cfg, src.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+        import_cfg(&cfg, src.to_str().unwrap(), out.to_str().unwrap(), &mut || true).unwrap();
 
         let reader = checkpoint::weightio::WeightReader::open(out.to_str().unwrap()).unwrap();
         for (name, data) in &expect {
@@ -200,7 +204,7 @@ mod tests {
         w.finish().unwrap();
 
         let out = std::env::temp_dir().join(format!("timesfm3-import-extra-out-{pid}.safetensors"));
-        let err = import_cfg(&cfg, src.to_str().unwrap(), out.to_str().unwrap()).unwrap_err();
+        let err = import_cfg(&cfg, src.to_str().unwrap(), out.to_str().unwrap(), &mut || true).unwrap_err();
         assert!(err.contains("unmapped"), "{err}");
 
         std::fs::remove_file(&src).ok();

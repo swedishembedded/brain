@@ -192,7 +192,7 @@ impl Action for LfmAction {
             "tokenize" => self.tokenize(inv),
             "finetune" => self.finetune(inv, progress),
             "eval" => self.eval(inv),
-            "import" => import(inv),
+            "import" => import(inv, progress),
             other => Err(format!("lfm2: unknown action {other}")),
         }
     }
@@ -207,13 +207,13 @@ fn mlm_config(tok: &QwenBpe) -> Result<data::mlm::MlmConfig, String> {
     Ok(data::mlm::MlmConfig { special_ids: specials, ..data::mlm::MlmConfig::new(mask, tok.vocab_size() as u32) })
 }
 
-fn import(inv: &Invocation) -> ActionResult {
+fn import(inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
     let source = inv.get_str("source").ok_or("lfm2 import: missing required param 'source'")?;
     let dest = inv.get_str("dest").ok_or("lfm2 import: missing required param 'dest'")?;
     if let Some(parent) = Path::new(&dest).parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent).map_err(|e| format!("lfm2 import: {}: {e}", parent.display()))?;
     }
-    crate::import::import(&source, &dest)?;
+    crate::import::import(&source, &dest, &mut inv.keep_going(progress, 0, "tensor"))?;
     Ok(Outcome::new().set("dest", json!(dest)))
 }
 

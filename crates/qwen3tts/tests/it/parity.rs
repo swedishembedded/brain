@@ -51,7 +51,7 @@ fn talker_logits_match_reference() {
 
     let out = std::env::temp_dir().join("brain_talker_parity.safetensors");
     let out = out.to_str().unwrap();
-    qwen3tts::import::import_talker(&ckpt, out).expect("talker import");
+    qwen3tts::import::import_talker(&ckpt, out, &mut || true).expect("talker import");
     let model = TalkerModel::load_inference(out, 1, t as u32);
     let got = model.logits_all(&tokens);
     assert_eq!(got.len(), t * vocab);

@@ -283,7 +283,7 @@ impl Action for GlmAction {
             Kind::Finetune => train(inv, Some(self.need_weights("finetune")?), progress),
             Kind::Eval => eval(inv, self.need_weights("eval")?),
             Kind::Generate => generate(inv, self.need_weights("generate")?, &self.hot, progress),
-            Kind::Import => import(inv),
+            Kind::Import => import(inv, progress),
         }
     }
 }
@@ -423,14 +423,14 @@ fn generate(inv: &Invocation, weights: &str, hot: &Hot<ModelKey, GlmModel>, prog
     )
 }
 
-fn import(inv: &Invocation) -> ActionResult {
+fn import(inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
     let source = required_path(inv, "source", "import")?;
     let dest = required_path(inv, "dest", "import")?;
     if let Some(parent) = dest.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent).map_err(|e| format!("glmdsa import: {}: {e}", parent.display()))?;
     }
     let (source_str, dest_str) = (source.to_string_lossy(), dest.to_string_lossy());
-    crate::import::import_as(&source_str, &dest_str, inv.get_str("id").as_deref()).map_err(|e| format!("glmdsa import: {e}"))?;
+    crate::import::import_as(&source_str, &dest_str, inv.get_str("id").as_deref(), &mut inv.keep_going(progress, 0, "tensor")).map_err(|e| if e == capability::failure::CANCELLED { e } else { format!("glmdsa import: {e}") })?;
     Ok(Outcome::new().set("dest", json!(dest_str)))
 }
 

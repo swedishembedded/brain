@@ -276,7 +276,7 @@ impl Action for ImportAction {
         let source = inv.get_str("source").ok_or("qwen3omnimoe import: missing required param 'source'")?;
         let dest = inv.get_str("dest").ok_or("qwen3omnimoe import: missing required param 'dest'")?;
         progress(Progress::step(0, 1, format!("converting {source}")));
-        crate::import::import_as(&source, &dest, inv.get_str("id").as_deref())?;
+        crate::import::import_as(&source, &dest, inv.get_str("id").as_deref(), &mut inv.keep_going(progress, 0, "tensor"))?;
         progress(Progress::step(1, 1, "written"));
         let bytes = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
         Ok(Outcome::new().set("dest", json!(dest)).set("bytes", json!(bytes)))

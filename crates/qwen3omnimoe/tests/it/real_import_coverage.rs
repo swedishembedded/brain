@@ -100,7 +100,7 @@ fn full_real_import_produces_a_two_way_covered_checkpoint() {
 
     println!("running the real 70 GB -> ~35 GB import against all 15 shards -- this streams the full source, expect real minutes...");
     let t0 = std::time::Instant::now();
-    qwen3omnimoe::import::import_as(dir.to_str().unwrap(), &out_path, Some("omni-full-import-test")).expect("import_as must succeed against the real, complete checkpoint");
+    qwen3omnimoe::import::import_as(dir.to_str().unwrap(), &out_path, Some("omni-full-import-test"), &mut || true).expect("import_as must succeed against the real, complete checkpoint");
     println!("import_as finished in {:.1}s", t0.elapsed().as_secs_f64());
 
     let out_bytes = std::fs::metadata(&out_path).expect("stat output").len();

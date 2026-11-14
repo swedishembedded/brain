@@ -458,8 +458,9 @@ impl checkpoint::weightio::DerivedCheckpoint for Int8View {
 /// `out_path` - the explicit export for a caller that wants one file; serving
 /// reads the directory itself. One tensor's f32 expansion at a time. Fails
 /// loudly and writes nothing on error (`StWriter::finish` refuses a plan with
-/// holes).
-pub fn import_as(hf_dir: &str, out_path: &str, id_override: Option<&str>) -> Result<(), String> {
+/// holes). `keep_going` is asked before each tensor; once it says no the
+/// import answers `Err(CANCELLED)` and leaves the destination as it was.
+pub fn import_as(hf_dir: &str, out_path: &str, id_override: Option<&str>, keep_going: &mut dyn FnMut() -> bool) -> Result<(), String> {
     use checkpoint::weightio::{DerivedCheckpoint, Dtype};
     let dir = std::path::Path::new(hf_dir);
     let view = Int8View::open(dir)?;
@@ -472,6 +473,10 @@ pub fn import_as(hf_dir: &str, out_path: &str, id_override: Option<&str>) -> Res
     let mut writer = checkpoint::weightio::StWriter::create_mixed(out_path, &plan, &serde_json::to_value(&cfg_json).unwrap_or(Value::Null), Some(&card))
         .map_err(|e| format!("create {out_path}: {e}"))?;
     for (name, _, dtype) in &plan {
+        if !keep_going() {
+            writer.abandon();
+            return Err(capability::failure::CANCELLED.to_string());
+        }
         let written = match dtype {
             Dtype::U32 => view.tensor_u32(name).map(|w| writer.write_u32(name, &w)),
             _ => view.tensor_f32(name).map(|v| writer.write(name, &v)),
@@ -500,9 +505,9 @@ mod import_as_tests {
         d
     }
 
-    #[test]
-    fn streams_qkv_fuse_and_quantizes_2d_weights() {
-        let dir = scratch_dir("e2e");
+    /// A small but structurally real HF release in a fresh scratch directory, and its source tensors by name.
+    fn tiny_release(name: &str) -> (std::path::PathBuf, HashMap<&'static str, Vec<f32>>) {
+        let dir = scratch_dir(name);
         // d=32 (a whole `model::int8::GROUP`, so every 2-D weight below is a
         // real should_quantize candidate), 2 experts, 1 layer per decoder.
         let config = serde_json::json!({
@@ -573,9 +578,38 @@ mod import_as_tests {
             w.write(name, &src_data[name]).unwrap();
         }
         w.finish().unwrap();
+        (dir, src_data)
+    }
+
+    #[test]
+    fn a_conversion_stops_at_the_next_tensor_when_its_token_fires() {
+        use capability::{Invocation, Outcome, Progress};
+        use capability_mock::cancellation::{certify, Bound};
+        let (dir, _) = tiny_release("cancel");
+        let out_path = dir.join("model.brain.safetensors");
+        let run = |inv: &Invocation, progress: &mut dyn FnMut(Progress)| {
+            inv.cancel.check()?;
+            import_as(dir.to_str().unwrap(), out_path.to_str().unwrap(), None, &mut inv.keep_going(progress, 0, "tensor"))?;
+            Ok(Outcome::new())
+        };
+        certify("qwen3omnimoe import", &Invocation::new, &run, Bound::ONE_STEP);
+        std::fs::remove_file(&out_path).unwrap();
+        let mut asks = 0;
+        let err = import_as(dir.to_str().unwrap(), out_path.to_str().unwrap(), None, &mut || {
+            asks += 1;
+            asks < 3
+        });
+        assert_eq!(err.unwrap_err(), capability::failure::CANCELLED);
+        let leftovers: Vec<_> = std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).filter(|e| e.file_name().to_string_lossy().contains("brain.safetensors")).collect();
+        assert!(leftovers.is_empty(), "a stopped conversion leaves neither the file nor its temporary: {leftovers:?}");
+    }
+
+    #[test]
+    fn streams_qkv_fuse_and_quantizes_2d_weights() {
+        let (dir, src_data) = tiny_release("e2e");
 
         let out_path = dir.join("model.brain.safetensors");
-        import_as(dir.to_str().unwrap(), out_path.to_str().unwrap(), Some("test/omni-tiny")).unwrap();
+        import_as(dir.to_str().unwrap(), out_path.to_str().unwrap(), Some("test/omni-tiny"), &mut || true).unwrap();
 
         // Independent verification via the raw safetensors crate.
         let out = std::fs::read(&out_path).unwrap();

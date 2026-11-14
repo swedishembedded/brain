@@ -152,13 +152,13 @@ pub fn open_dir(dir: &Path) -> Result<(LfmConfig, RemapSource<'static>), String>
 /// Import `<hf_dir>/config.json` + `model.safetensors` into the brain
 /// checkpoint `out_path`. Never writes a partial checkpoint. Streams one
 /// parameter at a time through [`open_dir`]'s source.
-pub fn import(hf_dir: &str, out_path: &str) -> Result<(), String> {
-    import_as(hf_dir, out_path, None)
+pub fn import(hf_dir: &str, out_path: &str, keep_going: &mut dyn FnMut() -> bool) -> Result<(), String> {
+    import_as(hf_dir, out_path, None, keep_going)
 }
 
 /// Like [`import`] but overrides the card's `id` (defaults to the output
 /// filename stem).
-pub fn import_as(hf_dir: &str, out_path: &str, id_override: Option<&str>) -> Result<(), String> {
+pub fn import_as(hf_dir: &str, out_path: &str, id_override: Option<&str>, keep_going: &mut dyn FnMut() -> bool) -> Result<(), String> {
     let (cfg, src) = open_dir(Path::new(hf_dir))?;
     let plan: Vec<(String, Vec<u64>)> = cfg.param_list().into_iter().map(|(name, numel)| (name, vec![numel as u64])).collect();
     let param_count: u64 = plan.iter().map(|(_, s)| s.iter().product::<u64>()).sum();
@@ -168,6 +168,10 @@ pub fn import_as(hf_dir: &str, out_path: &str, id_override: Option<&str>) -> Res
     card.param_count = Some(param_count);
     let mut writer = checkpoint::weightio::StWriter::create(out_path, &plan, &cfg.to_json(), Some(&card)).map_err(|e| format!("create {out_path}: {e}"))?;
     for (name, _) in &plan {
+        if !keep_going() {
+            writer.abandon();
+            return Err(capability::failure::CANCELLED.to_string());
+        }
         let mut result = Ok(());
         if !src.with_tensor(name, &mut |t| result = writer.write(name, t).map_err(|e| e.to_string())) {
             return Err(format!("lfm import: {name} has no source"));
@@ -240,8 +244,8 @@ mod tests {
 
     /// Tiny 2-layer (conv, then attention) tied-embedding checkpoint dir. Ships a
     /// redundant `lm_head.weight` to exercise the "tied -> drop" branch.
-    fn build_tiny_hf_dir() -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("brain-lfm-import-streaming-{}", std::process::id()));
+    fn build_tiny_hf_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("brain-lfm-import-{tag}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let json = r#"{"vocab_size":5,"hidden_size":6,"num_hidden_layers":2,
             "num_attention_heads":2,"num_key_value_heads":1,
@@ -284,13 +288,39 @@ mod tests {
         dir
     }
 
+    /// A token that fires mid-conversion stops the import at the next tensor and leaves no file behind.
+    #[test]
+    fn an_import_stops_at_the_next_tensor_when_its_token_fires() {
+        use capability::{Invocation, Outcome, Progress};
+        use capability_mock::cancellation::{certify, Bound};
+        let dir = build_tiny_hf_dir("cancel");
+        let out = std::env::temp_dir().join(format!("brain-lfm-import-cancel-out-{}.st", std::process::id()));
+        let run = |inv: &Invocation, progress: &mut dyn FnMut(Progress)| {
+            inv.cancel.check()?;
+            import(dir.to_str().unwrap(), out.to_str().unwrap(), &mut inv.keep_going(progress, 0, "tensor"))?;
+            Ok(Outcome::new())
+        };
+        certify("lfm import", &Invocation::new, &run, Bound::ONE_STEP);
+        std::fs::remove_file(&out).ok();
+        let mut asks = 0;
+        let err = import(dir.to_str().unwrap(), out.to_str().unwrap(), &mut || {
+            asks += 1;
+            asks < 3
+        });
+        assert_eq!(err.unwrap_err(), capability::failure::CANCELLED);
+        let prefix = format!("brain-lfm-import-cancel-out-{}.st.", std::process::id());
+        let leftovers = std::fs::read_dir(std::env::temp_dir()).unwrap().filter_map(|e| e.ok()).filter(|e| e.file_name().to_string_lossy().starts_with(&prefix)).count();
+        assert_eq!(leftovers, 0, "a stopped import leaves no temporary file");
+        std::fs::remove_file(&out).ok();
+    }
+
     #[test]
     fn import_streams_and_matches_param_list_tied_head_dropped() {
-        let dir = build_tiny_hf_dir();
+        let dir = build_tiny_hf_dir("streaming");
         let out = std::env::temp_dir().join(format!("brain-lfm-import-streaming-out-{}.st", std::process::id()));
         let out_str = out.to_str().unwrap();
 
-        import(dir.to_str().unwrap(), out_str).expect("streaming import");
+        import(dir.to_str().unwrap(), out_str, &mut || true).expect("streaming import");
 
         let cfg = config_from_hf(&std::fs::read_to_string(dir.join("config.json")).unwrap()).unwrap();
         let m = checkpoint::st::load_safetensors(out_str).unwrap();
