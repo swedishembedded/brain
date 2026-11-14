@@ -5,7 +5,8 @@
 # The crates listed in LEAF_CRATES below must stay BELOW the model layer.
 #
 # `.agents/rules/architecture.md` stacks this workspace in six layers and says
-# each may depend only on the layers above it. Nothing enforced that, and one
+# each may depend only on its own layer or a lower-numbered one (crate-layers.map
+# numbers them). Nothing enforced that, and one
 # violation is not a style problem - it is a hard Cargo dependency cycle that
 # only shows up when the crate that needs the code tries to use it:
 #
