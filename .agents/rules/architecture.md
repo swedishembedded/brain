@@ -266,6 +266,9 @@ layer 6 - serving, front ends, SDK, samples
                            crate) resolve an unset seed the same way. Every
                            default seed in the workspace is random and is
                            reported where it is drawn.
+   capability              typed ActionSpec manifests - the ONE dispatch shape
+                           for CLI (`brain <arch> <verb>`) and the event API
+                           alike (layer 3, so models and front-ends share it)
 
  ─── 4. models ─────────────────────────────────────────────────────────────
    decoder LMs    gpt2  qwen3  qwen35moe  toymoe  glmdsa  toypid  toyseq2seq  toyautoencoder
@@ -286,8 +289,6 @@ layer 6 - serving, front ends, SDK, samples
    capture        V4L2 webcam (ioctl FFI, YUYV->RGB)
 
  ─── 6. serving & front-ends ───────────────────────────────────────────────
-   capability     typed ActionSpec manifests - the ONE dispatch shape for CLI
-                  (`brain <arch> <verb>`) and the event API alike
    capability-mock a deterministic, weight-free Provider (gradient images,
                   moving-gradient video, sine-tone PCM, derived text/bytes) -
                   mirrors any real Manifest 1:1 or builds one by hand, so an
