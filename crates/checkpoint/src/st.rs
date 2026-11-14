@@ -497,16 +497,25 @@ pub fn save_safetensors_with_metadata(
             std::fs::create_dir_all(parent)?;
         }
     }
-    // The temporary is per-process: several ranks of one job may write the same
-    // path (their replicas are bit-identical), and a shared temporary would let
-    // them interleave into a corrupt file before the rename.
-    let tmp = format!("{path}.{}.tmp", std::process::id());
+    write_durable(std::path::Path::new(path), &out)
+}
+
+/// Replace `path` with `bytes` so that a crash or a power loss leaves either
+/// the previous file or the whole new one, never a short file under the name:
+/// a temporary beside it, synced, renamed over it, then the directory synced.
+/// The temporary is per-process: several ranks of one job may write the same
+/// path (their replicas are bit-identical), and a shared temporary would let
+/// them interleave into a corrupt file before the rename.
+pub fn write_durable(path: &std::path::Path, bytes: &[u8]) -> io::Result<()> {
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(format!(".{}.tmp", std::process::id()));
+    let tmp = std::path::PathBuf::from(tmp);
     {
         let mut file = std::io::BufWriter::new(std::fs::File::create(&tmp)?);
-        file.write_all(&out)?;
+        file.write_all(bytes)?;
         file.into_inner().map_err(std::io::IntoInnerError::into_error)?.sync_all()?;
     }
-    durable_rename(std::path::Path::new(&tmp), std::path::Path::new(path))
+    durable_rename(&tmp, path)
 }
 
 /// Rename a fully written and synced temporary into place, then sync the
