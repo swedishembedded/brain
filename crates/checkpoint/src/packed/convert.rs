@@ -36,11 +36,20 @@ pub struct ConversionReport {
 /// of host staging at a time; `config` is stored as the file's brain config. The output is complete or absent: it
 /// is renamed into place only after every tensor was written, and a failure leaves no file behind.
 pub fn convert_to_file(loader: &Loader<'_>, requests: &[(String, LoadPolicy)], path: &Path, config: &Value) -> Result<ConversionReport, String> {
+    convert_to_file_while(loader, requests, path, config, &mut || true).map(|report| report.expect("a conversion nobody stops finishes"))
+}
+
+/// [`convert_to_file`] that asks `keep_going` before each tensor. `Ok(None)` means it said no: the unfinished file
+/// is removed and `path` is as it was.
+pub fn convert_to_file_while(loader: &Loader<'_>, requests: &[(String, LoadPolicy)], path: &Path, config: &Value, keep_going: &mut dyn FnMut() -> bool) -> Result<Option<ConversionReport>, String> {
     let plan = loader.plan_all(requests)?;
     let dsts: Vec<_> = plan.steps.iter().map(|s| s.dst.clone()).collect();
     let mut sink = SafetensorsSink::create(path, &dsts, config).map_err(|e| format!("{}: {e}", path.display()))?;
     let mut report = ConversionReport { tensors: 0, converted: 0, payload_bytes_written: 0, peak_staging_bytes: 0 };
     for step in &plan.steps {
+        if !keep_going() {
+            return Ok(None);
+        }
         let r: LoadReport = loader.execute(step, &mut sink)?;
         report.tensors += 1;
         report.converted += usize::from(step.src.encoding != step.dst.encoding);
@@ -48,7 +57,7 @@ pub fn convert_to_file(loader: &Loader<'_>, requests: &[(String, LoadPolicy)], p
         report.peak_staging_bytes = report.peak_staging_bytes.max(r.peak_staging_bytes);
     }
     sink.commit().map_err(|e| format!("{}: {e}", path.display()))?;
-    Ok(report)
+    Ok(Some(report))
 }
 
 #[cfg(test)]

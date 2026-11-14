@@ -184,6 +184,13 @@ impl Writer {
         Ok(())
     }
 
+    /// Give up on the output: remove the unfinished temporary file and leave
+    /// the destination as it was.
+    pub fn abandon(self) {
+        drop(self.file);
+        let _ = std::fs::remove_file(&self.tmp);
+    }
+
     /// Flush and atomically move the temporary into place. Fails if any
     /// planned tensor was never written -- the header already promises those
     /// bytes exist, so a short file is a corrupt file, not a partial one.

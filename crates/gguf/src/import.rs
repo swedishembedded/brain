@@ -284,14 +284,16 @@ impl Sink for DryRun {
 
 /// The loop itself. `expected` is the plan (output name → element count);
 /// `label` prefixes every error so a failure names the model, not just the
-/// tensor.
+/// tensor. `keep_going` is asked before each tensor that is read; `Ok(None)`
+/// is its no.
 fn run<S: Sink>(
     mg: &MmapGguf,
     expected: &HashMap<&str, usize>,
     classify: &dyn Fn(&str) -> Result<Mapped, String>,
     sink: &mut S,
     label: &str,
-) -> Result<ImportStats, String> {
+    keep_going: &mut dyn FnMut() -> bool,
+) -> Result<Option<ImportStats>, String> {
     let mut stats = ImportStats { source_tensors: mg.names().len(), ..ImportStats::default() };
     let mut written: HashSet<String> = HashSet::with_capacity(expected.len());
 
@@ -318,6 +320,9 @@ fn run<S: Sink>(
         if let Mapped::Dropped(reason) = mapped {
             *stats.dropped.entry(reason).or_insert(0) += 1;
             continue;
+        }
+        if !keep_going() {
+            return Ok(None);
         }
         // One source tensor's fp32 expansion is the driver's peak host cost -
         // and a dry run does not pay even that.
@@ -377,7 +382,7 @@ fn run<S: Sink>(
         return Err(format!("{label} import: {} planned tensors never written, e.g. {sample:?}", missing.len()));
     }
 
-    Ok(stats)
+    Ok(Some(stats))
 }
 
 fn read(mg: &MmapGguf, name: &str, label: &str) -> Result<Vec<f32>, String> {
@@ -443,11 +448,24 @@ pub fn to_st_into(
     writer: &mut StWriter,
     label: &str,
 ) -> Result<ImportStats, String> {
+    to_st_into_while(mg, param_list, classify, writer, label, &mut || true).map(|stats| stats.expect("an import nobody stops finishes"))
+}
+
+/// [`to_st_into`] that asks `keep_going` before each source tensor is read. `Ok(None)` means it said no and
+/// the loop stopped there: the caller still owns the writer, and abandons it.
+pub fn to_st_into_while(
+    mg: &MmapGguf,
+    param_list: &[(String, usize)],
+    classify: &dyn Fn(&str) -> Result<Mapped, String>,
+    writer: &mut StWriter,
+    label: &str,
+    keep_going: &mut dyn FnMut() -> bool,
+) -> Result<Option<ImportStats>, String> {
     let expected: HashMap<&str, usize> = param_list.iter().map(|(n, numel)| (n.as_str(), *numel)).collect();
     if expected.len() != param_list.len() {
         return Err(format!("{label} import: parameter list contains duplicate names"));
     }
-    run(mg, &expected, classify, writer, label)
+    run(mg, &expected, classify, writer, label, keep_going)
 }
 
 /// Import into an in-memory map instead of a file.
@@ -468,7 +486,7 @@ pub fn to_map(
         return Err(format!("{label} import: parameter list contains duplicate names"));
     }
     let mut out: HashMap<String, Vec<f32>> = HashMap::with_capacity(param_list.len());
-    run(mg, &expected, classify, &mut out, label)?;
+    run(mg, &expected, classify, &mut out, label, &mut || true)?;
     Ok(out)
 }
 
@@ -491,7 +509,7 @@ pub fn dry_run(
     if expected.len() != param_list.len() {
         return Err(format!("{label} import: parameter list contains duplicate names"));
     }
-    run(mg, &expected, classify, &mut DryRun, label)
+    run(mg, &expected, classify, &mut DryRun, label, &mut || true).map(|stats| stats.expect("a dry run nobody stops finishes"))
 }
 
 #[cfg(test)]
