@@ -105,11 +105,15 @@ fn a_raised_retention_keeps_a_working_set_larger_than_the_default_cap_across_a_s
     let _s = serial();
     let Some(ctx) = pooled() else { return };
     let default_cap = ctx.cache_cap_bytes();
-    let block = (default_cap / 4).clamp(MIB as u64, 64 * MIB as u64) as usize;
-    let working_set = default_cap * 2;
+    let block = (default_cap / 4).clamp(MIB as u64, 64 * MIB as u64);
+    // A whole number of blocks: the default cap is a sixteenth of the card, which is not a multiple of the block on
+    // every card, and a working set rounded down to whole blocks is less than the bytes the assertion asks the pool
+    // to keep.
+    let blocks = (default_cap * 2).div_ceil(block);
+    let working_set = blocks * block;
     ctx.retain_freed_blocks(u64::MAX);
     assert!(ctx.cache_cap_bytes() >= working_set, "the cap did not rise: {} against {working_set}", ctx.cache_cap_bytes());
-    let held: Vec<_> = (0..(working_set as usize / block)).map(|_| ctx.alloc(block).expect("alloc")).collect();
+    let held: Vec<_> = (0..blocks).map(|_| ctx.alloc(block as usize).expect("alloc")).collect();
     drop(held);
     ctx.sync().expect("sync");
     assert!(
