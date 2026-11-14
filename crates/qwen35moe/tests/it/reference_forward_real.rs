@@ -6,12 +6,10 @@
 //! independent host implementation of the published architecture written in
 //! plain f64 loops - no kernel, no shared code with `qwen35moe::model`.
 //!
-//! Why it exists: every other test of this model's forward is structural (finite,
-//! deterministic, decode == prefill, gradient-checked); none says the forward is
-//! the architecture the checkpoint was trained as. The checkpoint's own tensors
-//! are the only oracle on this box (no Python, no reference runtime), so the
-//! oracle is the architecture's equations, transcribed from the reference
-//! modelling code:
+//! Why it exists: the reference goldens (`reference_parity`) prove the forward on
+//! tiny random weights; this proves it on the real checkpoint's tensors, where
+//! no reference runtime fits beside the model, so the oracle is the
+//! architecture's equations, transcribed from the reference modelling code:
 //!
 //! * RMSNorm `x * rsqrt(mean(x^2) + eps) * w` with the reference's `1 + w`
 //!   already folded into the stored weight (llama.cpp and brain both store it

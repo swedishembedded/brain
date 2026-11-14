@@ -2,9 +2,8 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! P0 smoke test for `qwen35moe::model::Qwen35`'s forward assembly: not a
-//! parity test (no `torch`/`transformers` in this environment — see
-//! `model.rs`'s module doc for the honest scope note), but proof the wiring
-//! composes: `Qwen35Config::tiny()` exercises both layer types (Gated
+//! parity test (that is `reference_parity`, against the reference's goldens),
+//! but proof the wiring composes: `Qwen35Config::tiny()` exercises both layer types (Gated
 //! DeltaNet at layers 0-2/4-6, GQA at layers 3/7 — `full_attention_interval
 //! =4`, `n_layers=8`) and a small-but-nontrivial MoE (`n_experts=6,
 //! top_k=2`), a real (>1) GDN chunk count (`tiny()`'s `block_size=24` and

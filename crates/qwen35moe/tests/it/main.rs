@@ -24,6 +24,7 @@ mod optimizer_state;
 mod real_decode_parity;
 mod recompute;
 mod reference_forward_real;
+mod reference_parity;
 mod sample_generate;
 mod sample_stream;
 mod serve;

@@ -139,6 +139,7 @@ use std::collections::{HashMap, HashSet};
 
 use checkpoint::TensorSource;
 use gpu_core::select::Dtype;
+use gpu_core::provider::library::GemmPrecision;
 use gpu_core::{DeviceBuffer, Gpu};
 use model::gdn::{RecurrentSlot, RecurrentSlotShape};
 use model::kv_tier::{KvLayer, KvTier};
@@ -196,12 +197,14 @@ pub struct EngineOptions {
     /// Take the fused native decode kernels where the device is offered them
     /// ([`Qwen35::set_decode_fusion`]).
     pub decode_fusion: bool,
+    /// The arithmetic of the fp32-weight products ([`Qwen35::set_gemm_precision`]).
+    pub gemm_precision: GemmPrecision,
 }
 
 impl EngineOptions {
     /// fp32 weights and KV - the engine's original, reference configuration.
     pub fn new(max_seq_len: u32, max_concurrent: u32) -> EngineOptions {
-        EngineOptions { max_seq_len, max_concurrent, tier: TierPolicy::uniform(Dtype::F32), kv_tier: KvTier::F32, prefill_chunk: DEFAULT_PREFILL_CHUNK, decode_tapes: true, moe_grouped_min_rows: MOE_GROUPED_MIN_ROWS, decode_fusion: true }
+        EngineOptions { max_seq_len, max_concurrent, tier: TierPolicy::uniform(Dtype::F32), kv_tier: KvTier::F32, prefill_chunk: DEFAULT_PREFILL_CHUNK, decode_tapes: true, moe_grouped_min_rows: MOE_GROUPED_MIN_ROWS, decode_fusion: true, gemm_precision: GemmPrecision::Auto }
     }
     pub fn with_tier(mut self, tier: TierPolicy) -> EngineOptions {
         self.tier = tier;
@@ -225,6 +228,10 @@ impl EngineOptions {
     }
     pub fn with_decode_tapes(mut self, on: bool) -> EngineOptions {
         self.decode_tapes = on;
+        self
+    }
+    pub fn with_gemm_precision(mut self, precision: GemmPrecision) -> EngineOptions {
+        self.gemm_precision = precision;
         self
     }
 }
@@ -487,7 +494,8 @@ impl Engine {
         // this engine submits is a prefill round or one decode token per resident
         // sequence.
         let t = if opts.tier.quantizes_anything() { SERVING_T } else { opts.max_concurrent.max(opts.prefill_chunk) };
-        let model = Qwen35::new_on_tier_src(gpu, cfg.clone(), 1, t, src, &opts.tier);
+        let mut model = Qwen35::new_on_tier_src(gpu, cfg.clone(), 1, t, src, &opts.tier);
+        model.set_gemm_precision(opts.gemm_precision);
         model.set_moe_grouped_min_rows(opts.moe_grouped_min_rows);
         model.set_decode_fusion(opts.decode_fusion);
         let n_layers = cfg.n_layers as usize;

@@ -2,13 +2,17 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! P0 smoke + parity test for `qwen35moe::q8`'s int8 (DP4A) inference path:
-//! not a numerical-parity-against-HF test (see `model.rs`'s own "honest
-//! scope note" - no `torch`/`transformers` in this environment), but proof
-//! that the int8 wiring is a genuine (if lossy) approximation of the SAME
-//! fp32 computation `crates/qwen35moe/tests/it/model_smoke.rs` already exercises,
-//! not a different one: build both an fp32 and an int8 `Qwen35` from the
-//! IDENTICAL fresh init weights, run `forward`, and confirm the outputs
-//! track each other within a generous but real tolerance.
+//! not a numerical-parity-against-HF test (that is `reference_parity`'s
+//! `the_int8_tier_computes_the_reference_w8a8_function`), but proof that the
+//! int8 wiring is an approximation of the SAME fp32 computation
+//! `crates/qwen35moe/tests/it/model_smoke.rs` already exercises, not a
+//! different one: build both an fp32 and an int8 `Qwen35` from the IDENTICAL
+//! fresh init weights, run `forward`, and confirm the outputs track each
+//! other. The tolerance below is this init's, not the tier's: `init_weights`
+//! makes every branch small against the residual stream, so quantization
+//! barely reaches the logits here. On weights whose branches carry the
+//! residual (the reference goldens), W8A8 alone moves the logits by 0.2 to
+//! 0.46 relative L2 (knowledge #456).
 //!
 //! ## Why this test does NOT use `Qwen35Config::tiny()` verbatim
 //!

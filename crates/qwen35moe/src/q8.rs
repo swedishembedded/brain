@@ -38,11 +38,11 @@
 //!   `expert_fwd`/`expert_fwd_i8` have a quantized sibling) - adding one
 //!   would be new kernel work outside this task's "integration, not new
 //!   math" scope, for a path that is not the bottleneck.
-//! - `tok.weight`/`lm_head.weight`: the embedding is a gather (`embed.wgsl`),
-//!   not a GEMM - there is no DP4A kernel it could dispatch to. `lm_head`
-//!   stays fp32 for the same precision-sensitive-logits reason as the
-//!   router, mirroring `qwen3::q8::Q8::LINEARS`'s own choice to leave both
-//!   out.
+//! - `tok.weight`: the embedding is a gather (`embed.wgsl`), not a GEMM -
+//!   there is no DP4A kernel it could dispatch to. The untied `lm_head` is
+//!   NOT in this list: under an int8 policy `model.rs` holds it as an int8
+//!   `model::ops::Weight` (the GGUF's own `Q8_0` `output.weight`, read once
+//!   per decode pass instead of its fp32 expansion).
 //! - Norms/RoPE/`A_log`/`dt_bias`/conv1d: not matmuls, untouched either way.
 //!
 //! ## The k%32 scale-group constraint, and why the real checkpoint always clears it

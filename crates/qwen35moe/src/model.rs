@@ -24,32 +24,24 @@
 //! backward, then the cache is gone" contract). Int8 and training are
 //! mutually exclusive.
 //!
-//! **Honest scope note on numerical parity**: this environment has no
-//! `torch`/`transformers` installed, so bit-exact parity against the real
-//! HF reference is **not achievable or
-//! claimed here**. Every op below was checked line-for-line against the real
-//! `modeling_qwen3_5_moe.py` from the released checkpoint (not a secondhand
-//! description), resolved under the model store root - see
-//! `BRAIN_QWEN35_DIR`. The achievable and required bar for this pass is
-//! *structural* correctness: compiles, runs, produces finite output,
-//! deterministic across repeated runs at the same seed.
+//! **Numerical parity** against the reference (`transformers`'
+//! `Qwen3_5MoeForCausalLM`) is gated on tiny random weights by
+//! `tests/it/reference_parity.rs` over the goldens of
+//! `tools/goldens/qwen35moe_dump_reference.py`: every layer's residual and the
+//! logits of the prefill, the cached decode and the serving engine, each held
+//! to the binary32 round-off bound, and the int8 tier against the reference's
+//! own W8A8 rounding.
 //!
-//! One assumption worth flagging up front: `Qwen3_5MoeRMSNorm.forward`
-//! (attention/MLP layer norms) computes `output * (1.0 + weight)`, not a
-//! plain `output * weight` - the reference's own comment says so ("We
-//! initialize with 0s to be 1 centered as the RMSNorm here does"). This
-//! engine's shared `rmsnorm.wgsl` (used by every model, not just this one)
-//! assumes the plain-multiply form, i.e. that a checkpoint's stored weight is
-//! already the FINAL per-channel multiplier - which is exactly what
-//! llama.cpp's GGUF conversion typically bakes in for this style of norm (the
-//! `+1` folded into the stored value at conversion time), and is also what
-//! `crates/qwen35moe/src/import.rs` (unmodified by this change) assumes. If that
-//! assumption is wrong for some future checkpoint source, RMSNorm output
-//! would be off by a `(x+1)` vs `x` factor - a real, if unlikely, gap, called
-//! out here rather than silently assumed away. `Qwen3_5MoeRMSNormGated` (the
-//! Gated DeltaNet output norm) is a genuinely different class with no such
-//! `+1` (`hidden_states = self.weight * hidden_states...`, verified directly
-//! against the reference), so `rmsnorm_fwd` is exactly right there.
+//! `Qwen3_5MoeRMSNorm.forward` (attention/MLP layer norms and the q/k norms)
+//! computes `output * (1.0 + weight)`, not a plain `output * weight` - the
+//! reference's own comment says the gain is initialised to zero so that it is
+//! centred on one. This engine's shared `rmsnorm.wgsl` (used by
+//! every model) takes the FINAL per-channel multiplier, so the `+1` is folded
+//! in at load: llama.cpp's GGUF conversion stores it folded, and
+//! `crate::hf_source` adds it to a HuggingFace checkpoint's stored gain.
+//! `Qwen3_5MoeRMSNormGated` (the Gated DeltaNet output norm) is a different
+//! class with no such `+1` (`hidden_states = self.weight * hidden_states...`),
+//! so `rmsnorm_fwd` takes its stored weight as is.
 //!
 //! ## Layer forward, per the real reference (`Qwen3_5MoeDecoderLayer.forward`)
 //!
@@ -3838,6 +3830,13 @@ impl Qwen35 {
         self.decode_fusion.set(on);
     }
 
+    /// Choose the arithmetic of the fp32-weight products (see [`model::ops::Ops::set_gemm_precision`]): `Auto` lets a
+    /// device with TF32 tensor cores round their operands to a 10-bit mantissa, `Fp32Reference` keeps every product in
+    /// binary32, which is what a comparison stated against the binary32 round-off bound needs.
+    pub fn set_gemm_precision(&mut self, precision: gpu_core::provider::library::GemmPrecision) {
+        self.ops.set_gemm_precision(precision);
+    }
+
     pub fn set_chunk_arena_min_rows(&self, rows: u32) {
         assert!(rows > 0, "qwen35moe::set_chunk_arena_min_rows: 0 would open a scope for an empty round; 1 is 'always pool'");
         self.chunk_arena_min_rows.set(rows);
@@ -4144,6 +4143,18 @@ impl Qwen35 {
     pub fn read_out_res(&self) -> Vec<f32> {
         self.assert_boundaries_addressable("read_out_res");
         self.gpu.read(&self.res[self.shard.end], self.res_numel())
+    }
+    /// The residual stream at layer boundary `boundary` of the last full-sequence forward, `[b * t, d_model]`: `0` is the
+    /// embedding output, `l + 1` the output of layer `l`. What a stage-by-stage comparison against a reference reads.
+    pub fn read_residual(&self, boundary: usize) -> Vec<f32> {
+        self.assert_boundaries_addressable("read_residual");
+        assert!(
+            (self.shard.start..=self.shard.end).contains(&boundary),
+            "qwen35moe::read_residual: boundary {boundary} is outside this instance's layers {}..={}",
+            self.shard.start,
+            self.shard.end
+        );
+        self.gpu.read(&self.res[boundary], self.res_numel())
     }
     /// Write this stage's INPUT residual `res[shard.start]` (from the
     /// previous stage's [`Self::read_out_res`]).

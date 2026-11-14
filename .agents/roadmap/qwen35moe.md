@@ -18,7 +18,15 @@ Qwen3.5-35B-A3B: a hybrid decoder mixing Gated DeltaNet (chunked linear-attentio
 - [ ] Overlapped (GPipe-style) pipeline execution - the sharded pipeline currently runs strictly sequentially, one GPU active at a time.
 - [ ] An INT4/INT8 frozen base with a trainable (backward-capable) path - needs a dequantizing backward matmul kernel that doesn't exist yet.
 - [ ] Register-tiled (non-naive) GEMM for weight gradients - a performance gap, not a correctness one.
-- [ ] Numerical parity against the reference implementation - only structural correctness of the forward pass is currently established.
+- [x] Numerical parity against the reference implementation, on tiny random weights in the release's checkpoint
+  layout (`tools/goldens/qwen35moe_dump_reference.py`, `transformers` `Qwen3_5MoeForCausalLM`; 8 layers in the
+  release's GDN/GQA pattern, 10 experts top-5, the gated shared expert, untied head, a 100-token prompt across two
+  64-row GDN chunks). `tests/it/reference_parity.rs`: `prefill_matches_the_reference_layer_by_layer`,
+  `cached_decode_matches_the_reference_cached_decode`, `the_served_engine_matches_the_reference` (alone and a
+  batch of three) hold every layer's residual and the logits to the binary32 round-off bound element by element
+  (worst error 5.8e-3 of its bound, logits rel-L2 at most 1.3e-5 on the default GPU backend);
+  `the_int8_tier_computes_the_reference_w8a8_function` holds the int8 tier to the reference under the same
+  W8A8 rounding (4e-7 until a code flips; knowledge #456 for why int8 is not compared with fp32).
 
 The dense (non-MoE) sibling and its MTP head are **not** in scope for this
 crate - they are `crates/qwen35` (llama.cpp `LLM_ARCH_QWEN35`, distinct from
@@ -227,7 +235,19 @@ hot path of the 35B's prefill.
 5.06e-2 against its floor), before and after these changes with identical
 numbers; it is an existing defect of the real-checkpoint gate, not of this work.
 It is not the packing overflow below either: with that fixed the gate still
-reports 5.056e-2 on prompt 3 (2026-10-29, gpu1). Open.
+reports 5.056e-2 on prompt 3 (2026-10-29, gpu1). Open, and now understood
+(knowledge #456): both sides of that gate are int8 evaluations that differ only
+in rounding, and the W8A8 function is discontinuous at every code's rounding
+midpoint, so the two agree to the last bits until one code flips and then part
+layer by layer. On the reference goldens the reference's own W8A8 function,
+evaluated in binary32 and in binary64, parts by 2.4e-2 to 3.8e-2 at the logits
+over 8 layers, and brain's int8 tier and that function by up to 8.5e-2, while
+both fp32 forwards agree to 1.3e-5. A fixed relative-L2 floor between two int8
+paths at 40 layers is therefore not a bound. What remains is the gate's
+restatement on the real checkpoint, which needs the checkpoint to run: hold each
+int8 path to the fp32 tier of the same truncated checkpoint, or compare the two
+int8 paths layer by layer from a shared input (teacher-forced residuals) where a
+flip cannot cascade.
 
 Fixed 2026-10-29: the int8 engine built its model with the 64-row decode scratch
 (`SERVING_T`) and the unfused prefill path packed a whole round's activations
