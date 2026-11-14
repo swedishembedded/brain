@@ -63,7 +63,8 @@ physics steps - and `fly::Timing` keeps them explicit, because pretending they
 are one rate is how a sensorimotor loop ends up running the body faster than the
 brain. The closed loop runs at **0.55x real time**. <!-- perf-number: measured result; reproduced by the named model binary/test (`brain perf run` for timings) -->
 
-MuJoCo is loaded at run time through `$BRAIN_MUJOCO_DIR` / `$MUJOCO_DIR`;
+MuJoCo is loaded at run time from the install root the caller names (the fly
+sample's `--mujoco-dir`), else MuJoCo's own `$MUJOCO_DIR` / `$MUJOCO_PATH`;
 nothing in brain builds against it, so a machine without it still builds and
 tests green.
 
@@ -167,7 +168,7 @@ make crates/fly/examples/replay/run ARGS=/tmp/walk.txt
 
 ## What it needs
 
-- **MuJoCo**, found at run time (`$BRAIN_MUJOCO_DIR` / `$MUJOCO_DIR`).
+- **MuJoCo**, found at run time (`--mujoco-dir`, else `$MUJOCO_DIR` / `$MUJOCO_PATH`).
 - **The connectome export** - a directory containing `manc-codex/` with
   `neurons.csv.gz` and `connections_princeton.csv.gz`; BANC additionally for
   the joined nervous system.

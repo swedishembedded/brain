@@ -58,7 +58,7 @@ impl MuJoCo {
 impl MuJoCo {
     /// `dlopen` MuJoCo and check its version.
     ///
-    /// Searched in order: `$BRAIN_MUJOCO_DIR/lib`, `$MUJOCO_DIR/lib`,
+    /// Searched in order: MuJoCo's own `$MUJOCO_DIR/lib` and
     /// `$MUJOCO_PATH/lib`, then the plain soname so the dynamic loader's own
     /// search path applies. The error names every place that was tried,
     /// because "not found" without a list is the least actionable message a

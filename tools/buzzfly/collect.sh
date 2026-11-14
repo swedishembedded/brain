@@ -42,7 +42,7 @@ need_dir() {
 conn="${BUZZFLY_CONNECTOME:-}"
 body="${BUZZFLY_BODY:-}"
 ref="${BUZZFLY_REFERENCE:-}"
-mj="${BUZZFLY_MUJOCO:-${BRAIN_MUJOCO_DIR:-${MUJOCO_DIR:-$HOME/.mujoco/mujoco-3.12.0}}}"
+mj="${BUZZFLY_MUJOCO:-${MUJOCO_DIR:-$HOME/.mujoco/mujoco-3.12.0}}"
 
 need_dir BUZZFLY_CONNECTOME "$conn" neurons.csv.gz
 need_dir BUZZFLY_BODY "$body" fruitfly.xml
@@ -86,7 +86,7 @@ cat > "$dest/env.sh" <<'ENV'
 # Source this, then run the fly:
 #
 #   . /path/to/buzzfly/env.sh
-#   make samples/fly/interactive/run
+#   make samples/fly/interactive/run ARGS="--connectome $BRAIN_CONNECTOME_DIR --body $BRAIN_FLYBODY_FRUITFLY_XML"
 #
 # Written by brain's tools/buzzfly/collect.sh; edit that rather than this.
 
@@ -118,29 +118,19 @@ export BRAIN_FLY_REFERENCE="$BUZZFLY_DIR/reference/REFERENCE_PLACEHOLDER"
 # MuJoCo is SEARCHED FOR rather than recorded. It is installed per machine,
 # outside this directory, and a path captured when this file was generated is
 # the one thing here guaranteed to be wrong somewhere else. An existing
-# setting always wins, so a machine with MuJoCo somewhere unusual is not
-# overridden.
-#
-# The conventional roots are spelled as overridable defaults rather than
-# literals so that a machine that installs MuJoCo elsewhere can redirect the
-# SEARCH without having to know its exact version-suffixed directory name (the
-# glob is appended outside the expansion, so `${BRAIN_MUJOCO_OPT}` names a
-# parent, not a match).
-if [ -z "${BRAIN_MUJOCO_DIR:-}" ]; then
-	for _buzzfly_mj in \
-		"${MUJOCO_DIR:-}" "${MUJOCO_PATH:-}" \
-		"${BRAIN_MUJOCO_HOME:-$HOME/.mujoco}"/mujoco-* \
-		"${BRAIN_MUJOCO_OPT:-/opt}"/mujoco-* \
-		"${BRAIN_MUJOCO_LOCAL:-/usr/local}"/mujoco-*; do
+# MUJOCO_DIR (MuJoCo's own install-root variable, which brain's loader reads)
+# always wins, so a machine with MuJoCo somewhere unusual is not overridden.
+if [ -z "${MUJOCO_DIR:-}" ]; then
+	for _buzzfly_mj in "${MUJOCO_PATH:-}" "$HOME"/.mujoco/mujoco-* /opt/mujoco-* /usr/local/mujoco-*; do
 		if [ -n "$_buzzfly_mj" ] && [ -f "$_buzzfly_mj/lib/libmujoco.so" ]; then
-			export BRAIN_MUJOCO_DIR="$_buzzfly_mj"
+			export MUJOCO_DIR="$_buzzfly_mj"
 			break
 		fi
 	done
 	unset _buzzfly_mj
 fi
-if [ -z "${BRAIN_MUJOCO_DIR:-}" ]; then
-	echo "buzzfly: no MuJoCo found. Install it and set \$BRAIN_MUJOCO_DIR to the" >&2
+if [ -z "${MUJOCO_DIR:-}" ]; then
+	echo "buzzfly: no MuJoCo found. Install it and set \$MUJOCO_DIR to the" >&2
 	echo "buzzfly: directory holding lib/libmujoco.so, e.g. ~/.mujoco/mujoco-3.12.0." >&2
 fi
 ENV
@@ -157,7 +147,7 @@ sed -i "s|TAG_PLACEHOLDER|$tag|; s|REFERENCE_PLACEHOLDER|$(basename "$ref")|" "$
 	echo
 	echo '```sh'
 	echo ". $dest/env.sh"
-	echo "make samples/fly/interactive/run"
+	echo 'make samples/fly/interactive/run ARGS="--connectome $BRAIN_CONNECTOME_DIR --body $BRAIN_FLYBODY_FRUITFLY_XML"'
 	echo '```'
 	echo
 	echo "## What is here, and where it came from"

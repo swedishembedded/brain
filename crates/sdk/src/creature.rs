@@ -128,9 +128,9 @@ impl CreatureBuilder {
     }
 
     /// The MuJoCo install root (the directory holding `lib/libmujoco.so`) to
-    /// load the physics engine from. Without it the loader searches
-    /// `BRAIN_MUJOCO_DIR`, `MUJOCO_DIR`, `MUJOCO_PATH` and then the system
-    /// library path; with it, no variable is read.
+    /// load the physics engine from. Without it the loader searches MuJoCo's
+    /// own `MUJOCO_DIR` and `MUJOCO_PATH` and then the system library path;
+    /// with it, no variable is read.
     pub fn mujoco_dir(mut self, dir: impl AsRef<Path>) -> CreatureBuilder {
         self.mujoco_dir = Some(dir.as_ref().to_path_buf());
         self

@@ -120,10 +120,10 @@ fn in_install_root(root: &str, out: &mut Vec<String>) {
 }
 
 /// Candidate paths when the caller names no install root, most specific
-/// first: the `*_DIR` variables, then the bare soname.
+/// first: MuJoCo's own install-root variables, then the bare soname.
 fn candidates_from_environment() -> Vec<String> {
     let mut out = Vec::new();
-    for var in ["BRAIN_MUJOCO_DIR", "MUJOCO_DIR", "MUJOCO_PATH"] {
+    for var in ["MUJOCO_DIR", "MUJOCO_PATH"] {
         if let Ok(root) = std::env::var(var) {
             if !root.is_empty() {
                 in_install_root(&root, &mut out);

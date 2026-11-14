@@ -7,7 +7,7 @@
 //! one a human can actually look at:
 //!
 //! ```text
-//! BRAIN_MUJOCO_DIR=... cargo run -p brain-mujoco --release --example render_ppm -- model.xml out.ppm
+//! MUJOCO_DIR=... cargo run -p brain-mujoco --release --example render_ppm -- model.xml out.ppm
 //! ```
 
 use std::io::Write;
