@@ -30,19 +30,24 @@ use model::{Batch, FitOpts, FitReport, Model};
 const SEQ: usize = 12;
 
 /// A prepared dataset of token records over `vocab`: train and validation
-/// splits, each record's second half supervised.
-fn write_prepared(dir: &Path, vocab: u32, seed: u64) {
+/// splits, each record's second half supervised. `val_is_train` writes the
+/// training records as the validation split too.
+fn write_prepared(dir: &Path, vocab: u32, seed: u64, val_is_train: bool) {
     std::fs::create_dir_all(dir).expect("the prepared directory");
     let mut rng = data::rng::Rng::new(seed);
-    for split in ["train", "val"] {
+    let mut draw = || {
         let mut encoded = data::chat::EncodedSplit::default();
         for _ in 0..4 {
             let ids: Vec<u32> = (0..SEQ).map(|_| rng.gen_range_inclusive(0, vocab as i64 - 1) as u32).collect();
             let mask: Vec<bool> = (0..SEQ).map(|p| p >= SEQ / 2).collect();
             encoded.push(&ids, &mask);
         }
-        data::chat::write_split(dir, split, &encoded).expect("write a split");
-    }
+        encoded
+    };
+    let train = draw();
+    let val = if val_is_train { train.clone() } else { draw() };
+    data::chat::write_split(dir, "train", &train).expect("write a split");
+    data::chat::write_split(dir, "val", &val).expect("write a split");
     std::fs::write(dir.join("meta.json"), data::binio::Meta::vocab_only(vocab as usize)).expect("write meta");
 }
 
@@ -92,7 +97,7 @@ fn served_matches_the_trainer<T: ChatTrainer>(vocab: u32, write_base: impl Fn(&P
     let base = dir.path().join("base.safetensors");
     write_base(&base);
     let prepared = dir.path().join("prepared");
-    write_prepared(&prepared, vocab, data::rng::random_seed());
+    write_prepared(&prepared, vocab, data::rng::random_seed(), false);
     let opts = FitOpts { steps: 1, batch_size: 1, block_size: SEQ as u32, seed: data::rng::random_seed(), ..Default::default() };
     let served = model::finetune::served_loss::<T>(&base, &TierPolicy::uniform(Dtype::F32), None, &prepared, &opts)
         .unwrap_or_else(|| panic!("{} offers a serving engine", T::LORA_BASES.model))
@@ -128,6 +133,66 @@ fn served_matches_the_trainer<T: ChatTrainer>(vocab: u32, write_base: impl Fn(&P
         assert!(loss.is_finite() && (loss - served).abs() <= 0.1 * served.abs(), "{} serves {} near fp32: {loss} against {served}", T::LORA_BASES.model, mixed.describe());
         assert_ne!(loss, served, "{}: {} was applied", T::LORA_BASES.model, mixed.describe());
     }
+}
+
+/// The served artifact carries the trained behaviour: a LoRA fine-tune of the base, its adapter written to disk by
+/// the family's own writer, then read back from that file into the family's serving engine. Through the engine the
+/// held-out set (here the training records, so training must move it) measures what the trainer measured on the
+/// model the run handed back, and the base alone measures what the trainer measured before the first step; the two
+/// are apart, so an adapter that served as a no-op, or one read back wrongly, fails.
+fn served_adapter_has_the_trained_loss<T: ChatTrainer>(vocab: u32, write_base: impl Fn(&Path)) {
+    let dir = tempfile::tempdir().expect("a scratch directory");
+    let base = dir.path().join("base.safetensors");
+    write_base(&base);
+    let prepared = dir.path().join("prepared");
+    // The held-out split is the training split: the loss the adapter was trained to lower.
+    write_prepared(&prepared, vocab, data::rng::random_seed(), true);
+    let opts = FitOpts { steps: 24, batch_size: 1, block_size: SEQ as u32, lr: 3e-2, min_lr: 3e-2, warmup: 0, eval_interval: 0, eval_batches: 0, seed: data::rng::random_seed(), ..Default::default() };
+    let f32_base = TierPolicy::uniform(Dtype::F32);
+    let lora = model::finetune::LoraRequest { rank: 4, alpha: 8.0, continue_from: None, base: &f32_base, modules_to_save: &[] };
+    let mut train = model::finetune::CausalLmFit { dir: &prepared, opts: &opts, out: None, control: Some(model::FitControl::default()) };
+    let held_out = [prepared.as_path()];
+    let mut scored = model::finetune::ScoredFit::new(&mut train, &held_out, &opts, false);
+    let (_, trained) = T::train_lora(&base, &lora, &opts, &mut scored).unwrap_or_else(|e| panic!("{}: {e}", T::LORA_BASES.model));
+    let set = scored.into_scored().pop().expect("one held-out set");
+    let (base_loss, tuned_loss) = (f64::from(set.base_loss.expect("scored before")), f64::from(set.tuned_loss.expect("scored after")));
+    let adapter = dir.path().join("adapter.safetensors");
+    let lineage = model::finetune::AdapterLineage { card_id: "served-conformance", base_id: "base", dataset_id: None, provenance: None };
+    T::save_adapter(&trained, &adapter, &lineage).unwrap_or_else(|e| panic!("{}: saving the adapter: {e}", T::LORA_BASES.model));
+    drop(trained);
+
+    let served = |adapter: Option<&Path>| model::finetune::served_loss::<T>(&base, &f32_base, adapter, &prepared, &opts).expect("a serving engine").unwrap_or_else(|e| panic!("{}: {e}", T::LORA_BASES.model));
+    let (served_base, served_tuned) = (served(None), served(Some(&adapter)));
+    let model = T::LORA_BASES.model;
+    // Twenty times the comparison tolerance below: a served no-op cannot pass for the trained adapter.
+    assert!(base_loss - tuned_loss > 0.02 * base_loss, "{model}: training must lower the loss it is served on: {base_loss} -> {tuned_loss}");
+    assert!((served_base - base_loss).abs() <= 1e-3 * base_loss.abs(), "{model}: the engine serves the base at {served_base}, the trainer measured {base_loss}");
+    assert!((served_tuned - tuned_loss).abs() <= 1e-3 * tuned_loss.abs(), "{model}: the engine serves the saved adapter at {served_tuned}, the trainer measured {tuned_loss} on the model it trained");
+}
+
+#[test]
+fn qwen3_serves_the_adapter_it_trained() {
+    let cfg = qwen3::QwenConfig { block_size: SEQ as u32, ..qwen3::QwenConfig::tiny_i8() };
+    served_adapter_has_the_trained_loss::<qwen3::finetune::Qwen3Trainer>(cfg.vocab, |path| {
+        qwen3::Qwen::new(cfg.clone(), 1, SEQ as u32, &qwen3::init_weights(&cfg, data::rng::random_seed())).save(path.to_str().unwrap());
+    });
+}
+
+#[test]
+fn qwen35_serves_the_adapter_it_trained() {
+    let cfg = qwen35::config::Qwen35Config { block_size: SEQ as u32, ..qwen35::config::Qwen35Config::tiny_i8() };
+    served_adapter_has_the_trained_loss::<qwen35::finetune::Qwen35Trainer>(cfg.vocab, |path| {
+        <qwen35::model::Qwen35 as Model>::new(cfg.clone(), 1, SEQ as u32, &qwen35::init::init_weights(&cfg, data::rng::random_seed())).save(path.to_str().unwrap());
+    });
+}
+
+#[test]
+fn qwen35moe_serves_the_adapter_it_trained() {
+    let cfg = qwen35moe::config::Qwen35Config { n_layers: 4, block_size: SEQ as u32, d_model: 32, moe_intermediate_size: 32, shared_expert_intermediate_size: 32, ..qwen35moe::config::Qwen35Config::tiny() };
+    served_adapter_has_the_trained_loss::<qwen35moe::finetune::Qwen35MoeTrainer>(cfg.vocab, |path| {
+        let init = <qwen35moe::model::Qwen35 as Model>::init_weights(&cfg, data::rng::random_seed());
+        <qwen35moe::model::Qwen35 as Model>::new(cfg.clone(), 1, SEQ as u32, &init).save(path.to_str().unwrap());
+    });
 }
 
 /// `init` with its MLP weights scaled up: at the initializers' small scale the
@@ -202,7 +267,7 @@ fn repeated_measurements_under_a_lowered_ceiling_helper() {
     let base = dir.path().join("base.safetensors");
     qwen3::Qwen::new(cfg.clone(), 1, SEQ as u32, &qwen3::init_weights(&cfg, 7)).save(base.to_str().unwrap());
     let prepared = dir.path().join("prepared");
-    write_prepared(&prepared, cfg.vocab, 7);
+    write_prepared(&prepared, cfg.vocab, 7, false);
     let opts = FitOpts { steps: 1, batch_size: 1, block_size: SEQ as u32, seed: 7, ..Default::default() };
     // The order `brain optimize` measures in: the original, then each baseline format, then the original again.
     let policies = [Dtype::F32, Dtype::NF4, Dtype::I8, Dtype::F32].map(|t| TierPolicy::uniform(Dtype::F32).with(&["blocks."], t));
