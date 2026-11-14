@@ -237,8 +237,10 @@ pub struct EvictionPlan {
     pub freed: u64,
 }
 
-/// Plan eviction for a GPU-resident instance of `cost`, avoiding `exclude` devices.
-/// Returns `None` only if no eligible GPU's usable budget can ever hold it.
+/// Plan eviction for an instance of `cost`, avoiding `exclude` devices: the NPU
+/// class first (when the model has an NPU path), then GPUs, then the host tier
+/// (see [`plan_eviction_with`]). Returns `None` only if no eligible device's
+/// usable budget can ever hold it.
 pub fn plan_eviction(cost: &MemCost, budgets: &Budgets, residents: &Residents, keep: &[InstanceKey], exclude: &HashSet<Device>) -> Option<EvictionPlan> {
     plan_eviction_with(&Lru, cost, budgets, residents, keep, exclude)
 }
