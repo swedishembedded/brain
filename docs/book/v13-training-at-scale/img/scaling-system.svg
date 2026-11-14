@@ -1,0 +1,48 @@
+<!-- source-sha256: 45b17e50a79834ce1b8762198ae5d326c44f10ecd21d3062ec000ed80cd9c625 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 430" width="1000" height="430"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="1000" height="430" fill="#ffffff"/>
+<rect x="25" y="182" width="170" height="64" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="110" y="202.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">draws of update t</text>
+<text x="110" y="218.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">10 rows, row b to</text>
+<text x="110" y="234.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">rank b mod 4</text>
+<rect x="280" y="72" width="220" height="56" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="390" y="88.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">rank 0: 3 rows</text>
+<text x="390" y="104.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">replay in segments of 2,</text>
+<text x="390" y="120.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">adapter gradient</text>
+<line x1="196.79" y1="211.59" x2="278.21" y2="102.41" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="280" y="148" width="220" height="56" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="390" y="164.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">rank 1: 3 rows</text>
+<text x="390" y="180.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">replay in segments of 2,</text>
+<text x="390" y="196.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">adapter gradient</text>
+<line x1="197.74" y1="212.78" x2="277.26" y2="177.22" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="280" y="224" width="220" height="56" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="390" y="240.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">rank 2: 2 rows</text>
+<text x="390" y="256.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">replay in segments of 2,</text>
+<text x="390" y="272.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">adapter gradient</text>
+<line x1="197.74" y1="215.22" x2="277.26" y2="250.78" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="280" y="300" width="220" height="56" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="390" y="316.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">rank 3: 2 rows</text>
+<text x="390" y="332.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">replay in segments of 2,</text>
+<text x="390" y="348.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">adapter gradient</text>
+<line x1="196.79" y1="216.41" x2="278.21" y2="325.59" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="575" y="182" width="150" height="64" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="650" y="210.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">ring all-reduce</text>
+<text x="650" y="226.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">sum, divide by 10</text>
+<line x1="501.65" y1="102.51" x2="573.35" y2="211.49" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="502.68" y1="177.36" x2="572.32" y2="212.64" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="502.68" y1="250.64" x2="572.32" y2="215.36" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="501.65" y1="325.49" x2="573.35" y2="216.51" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="785" y="98" width="170" height="64" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="870" y="126.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">Adam on the</text>
+<text x="870" y="142.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">128 adapter numbers</text>
+<rect x="785" y="268" width="170" height="64" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="870" y="296.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">every 10 updates:</text>
+<text x="870" y="312.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">values, state, meta</text>
+<line x1="726.74" y1="211.56" x2="783.26" y2="132.44" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="870" y1="165" x2="870" y2="265" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="879" y="219.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">t, d, m, v</text>
+<path d="M870,98 L870,32 Q870,22 860,22 L120,22 Q110,22 110,32 L110,179" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="490" y="48.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">the next update draws the next 10 rows</text>
+<ellipse cx="390" cy="404" rx="110" ry="20" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="390" y="408.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">frozen base, 337 numbers</text>
+<line x1="390" y1="381" x2="390" y2="359" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+</svg>

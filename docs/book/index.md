@@ -209,4 +209,5 @@ historical sections draw on in the [Chronology](history/chronology.md).
 5. [Parallel and Distributed Training](v13-training-at-scale/05-parallelism.md): How is one training run spread across many devices without changing its result?
 6. [Distillation](v13-training-at-scale/06-distillation.md): How does a small model learn from a large one?
 7. [Checkpoints, Determinism and Recovery](v13-training-at-scale/07-checkpoints-and-recovery.md): How does a long training run survive a crash and still produce the same model?
+8. [Project: Scaling a Training Run](v13-training-at-scale/08-project-scaling-training.md): Can you move a training run from one device to several without changing what it learns?
 <!-- /contents -->
