@@ -184,7 +184,8 @@ pub(super) fn grow(ctx: &Ctx, m: &[bool], w: usize, h: usize, radius: u32) -> Ve
 /// A `[0, 1]` alpha: `m` with its edge ramped over `radius` pixels.
 pub(super) fn feather(ctx: &Ctx, m: &[bool], w: usize, h: usize, radius: u32) -> Vec<f32> {
     let s = Shape::new(1, 1, h as u32, w as u32);
-    let soft = imaging::mask::feather(ctx, &to_plane(ctx, m), s, radius);
+    // Out-of-image taps read 0, the behaviour this alpha was written and checked against.
+    let soft = imaging::mask::feather(ctx, &to_plane(ctx, m), s, radius, imaging::mask::FeatherEdge::Zero);
     ctx.download(&soft, s.numel())
 }
 
