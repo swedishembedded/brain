@@ -64,7 +64,9 @@ time. An embedder starts the executor with supervision
   fault in that window trips the device's circuit breaker: it is probed
   every five minutes and readmitted after two passing probes. While tripped,
   work that no healthy device can hold fails at once with an error saying
-  the device is quarantined and why, instead of waiting.
+  the device is quarantined and why, instead of waiting. A model sharded
+  over several cards needs every one of them, so its work fails once any of
+  its cards is tripped.
 - **In-process waits count too.** When the executor runs with supervision,
   a device wait past `--gpu-wait-s` in the serving process also quarantines
   that card until a probe in a fresh worker passes.

@@ -1410,17 +1410,23 @@ impl Dispatcher {
 /// probe is due at once, so such jobs wait the moment it takes instead. A job
 /// whose instance is resident on a quarantined device counts as needing that
 /// device: moving a resident off a quarantined card would drop its instance on
-/// this thread, through a driver that may be the wedged one.
+/// this thread, through a driver that may be the wedged one. A multi-device
+/// model has one placement (the devices it is built across), so its jobs are
+/// refused once any device of it is quarantined with a tripped breaker.
 fn refuse_quarantined(queue: &mut Vec<Pending>, mgr: &ResidencyManager, running: &HashSet<InstanceKey>, quarantined: &HashSet<Device>, health: &Health<Device>) {
     let tripped = |d: &Device| health.status(d).tripped;
     let mut refused: HashSet<InstanceKey> = HashSet::new();
     for p in queue.iter() {
-        if running.contains(&p.key) || refused.contains(&p.key) || mgr.is_multi(&p.model) {
+        if running.contains(&p.key) || refused.contains(&p.key) {
             continue;
         }
-        let refuse = match mgr.resident_device(&p.key) {
-            Some(d) => quarantined.contains(&d) && tripped(&d),
-            None => !mgr.fits_outside(&p.key, &p.model, quarantined) && quarantined.iter().all(tripped),
+        let refuse = if mgr.is_multi(&p.model) {
+            mgr.multi_placement(&p.key, &p.model).iter().any(|d| quarantined.contains(d) && tripped(d))
+        } else {
+            match mgr.resident_device(&p.key) {
+                Some(d) => quarantined.contains(&d) && tripped(&d),
+                None => !mgr.fits_outside(&p.key, &p.model, quarantined) && quarantined.iter().all(tripped),
+            }
         };
         if refuse {
             refused.insert(p.key.clone());

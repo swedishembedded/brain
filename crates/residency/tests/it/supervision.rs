@@ -22,7 +22,7 @@ use capability::{ActionResult, ActionSpec, Invocation, Manifest};
 use gpu_supervisor::{BreakerPolicy, BreakerState, Health, WorkerCommand};
 use residency::budget::Budgets;
 use residency::supervised::{Deadlines, Probe, SupervisedModel, Supervision};
-use residency::{Device, Executor, Instance, InstanceKey, Job, MemCost, Policy, ResidentModel};
+use residency::{Device, Executor, Instance, InstanceKey, Job, MemCost, MultiDeviceCost, MultiDeviceResidentModel, Policy, ResidentModel};
 use serde_json::json;
 
 const GB: u64 = 1 << 30;
@@ -243,5 +243,60 @@ fn without_a_worker_an_in_process_wait_timeout_still_quarantines_the_card_until_
     wait_until("the tripped card to be readmitted", Duration::from_secs(20), || health.admits(&gpu0));
     let (_, r) = submit(&exec, "in-process", "ok");
     r.recv_timeout(Duration::from_secs(10)).expect("answered").0.expect("the card serves again");
+    exec.shutdown();
+}
+
+/// A model that spans both cards: its placement is exactly gpu0 and gpu1.
+struct Spanning;
+
+impl ResidentModel for Spanning {
+    fn manifest(&self) -> Manifest {
+        Manifest::new("spanning", "a fake model sharded over two cards", vec![ActionSpec::new("run", "run")])
+    }
+
+    fn instance_key(&self, _action: &str, _inv: &Invocation) -> InstanceKey {
+        InstanceKey::new("spanning", "default")
+    }
+
+    fn estimate(&self, _key: &InstanceKey) -> MemCost {
+        MemCost::new(GB, 0)
+    }
+
+    fn activate(&self, _key: &InstanceKey, _device: Device) -> Result<Box<dyn Instance>, String> {
+        Err("spanning runs only across both cards".into())
+    }
+}
+
+impl MultiDeviceResidentModel for Spanning {
+    fn estimate_multi(&self, _key: &InstanceKey) -> MultiDeviceCost {
+        MultiDeviceCost::new(vec![(Device::Gpu(0), GB), (Device::Gpu(1), GB)], 0)
+    }
+
+    fn activate_multi(&self, _key: &InstanceKey, _devices: &[Device]) -> Result<Box<dyn Instance>, String> {
+        Ok(Box::new(InProcessInstance))
+    }
+}
+
+#[test]
+fn a_multi_device_model_whose_placement_has_a_tripped_card_is_refused_not_left_waiting() {
+    let health = health();
+    let exec = Executor::start_supervised(vec![Arc::new(InProcess)], two_gpus(), Policy::default(), None, Some(Supervision { health: health.clone(), probe: Probe::Elapsed }));
+    exec.register_multi(Arc::new(Spanning));
+    let (_, r) = submit(&exec, "spanning", "ok");
+    r.recv_timeout(Duration::from_secs(10)).expect("answered").0.expect("both cards healthy: the model runs");
+
+    let now = Instant::now();
+    for _ in 0..health.policy().trip_after {
+        health.record_fault(&Device::Gpu(1), now, "a device wait ran past (--gpu-wait-s)");
+    }
+    assert!(health.status(&Device::Gpu(1)).tripped);
+    let started = Instant::now();
+    let (_, r) = submit(&exec, "spanning", "ok");
+    let err = r.recv_timeout(Duration::from_secs(10)).expect("a refusal, not a wait for the next probe").0.expect_err("gpu1 is out for a probe interval");
+    assert!(err.contains("quarantined") && err.contains("gpu1"), "{err}");
+    assert!(started.elapsed() < Duration::from_secs(5), "the refusal took {:?}", started.elapsed());
+    // Single-device work still lands on the healthy card.
+    let (_, r) = submit(&exec, "in-process", "ok");
+    r.recv_timeout(Duration::from_secs(10)).expect("answered").0.expect("gpu0 serves");
     exec.shutdown();
 }

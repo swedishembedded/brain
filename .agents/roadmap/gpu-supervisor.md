@@ -97,7 +97,7 @@ Choices the design above left open, and what was chosen:
   zombie, once it exits); the breaker's restart, trip, window
   and spaced-probe rules. The fakes are a POSIX shell that hangs in a
   grandchild or aborts.
-* `cargo test -p brain-residency --test it supervision` (4 tests): through
+* `cargo test -p brain-residency --test it supervision` (5 tests): through
   the executor, a hung run fails by its deadline while the other card
   serves and the restart probe readmits the device and the claim is
   unwound; a crash in activation keeps the card out (failing probes trip
@@ -105,7 +105,9 @@ Choices the design above left open, and what was chosen:
   work only a tripped device could host is refused at once; with no worker
   (`Probe::Elapsed`), a job error carrying the `--gpu-wait-s` mark
   quarantines the card, a restart is readmitted at once, a trip refuses work
-  until the spaced readmissions pass.
+  until the spaced readmissions pass; a multi-device model whose placement
+  has a tripped card is refused at once while single-device work keeps
+  running on the healthy card.
 * `cargo test -p brain-serving --lib supervision` (2 tests): the worker
   beside the server executable runs the probes, bounded by `--gpu-wait-s`; a
   missing or non-executable worker is named and the breaker is kept.
@@ -131,5 +133,5 @@ Choices the design above left open, and what was chosen:
 | **M3** measure the per-dispatch round trip against a real dispatch batch on the target cards | open: gated on M2 |
 | **M4** make it the default; delete the abandon-the-thread path from `bounded` | open: gated on M3 |
 | moving a resident off a quarantined card | open: its instance would be dropped on the dispatcher thread through a driver that may be the wedged one, so its jobs wait for the restart probe or are refused once the breaker trips |
-| multi-device models under quarantine | open: they are excluded from quarantined cards like any group, but `refuse_quarantined` does not refuse them, so behind a tripped breaker they wait for the 300 s probe instead of failing |
+| multi-device models under quarantine | done: a multi-device model has one placement (its resident devices, else the ones `estimate_multi` names; `ResidencyManager::multi_placement`), and `refuse_quarantined` refuses its jobs once any device of it is quarantined with a tripped breaker; before a trip they wait for the restart probe like single-device work |
 | Windows | open: no `SIGKILL` or process groups; `Worker::spawn` reports unsupported off Unix. `TerminateProcess` and a job object are the equivalent and need a platform seam |

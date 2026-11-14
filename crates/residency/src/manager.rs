@@ -426,6 +426,16 @@ impl ResidencyManager {
         self.models.get(model).is_some_and(|m| crate::place::fits_when_empty_outside(&m.estimate(key), &self.budgets, exclude))
     }
 
+    /// The devices a multi-device instance can run on: the ones it occupies
+    /// while resident, else the ones its estimate names (it is built across
+    /// exactly those). Empty for a model not registered as multi-device.
+    pub fn multi_placement(&self, key: &InstanceKey, model: &str) -> Vec<Device> {
+        if let Some(e) = self.multi_residents.get(key) {
+            return e.devices.clone();
+        }
+        self.multi_models.get(model).map(|m| m.estimate_multi(key).devices().collect()).unwrap_or_default()
+    }
+
     /// Whether the replica `key` names can run on this machine as its devices are budgeted now: it is hot, or every device it needs has
     /// a budget that holds its share with nothing else resident. A replica whose card another process holds is not one: its jobs would
     /// be refused for the budget, so the executor routes around it until the capacity probe sees the card free again.
