@@ -10,6 +10,8 @@ layer. Released tasks: `t2va` (text -> video+audio), `fl2va`
 (first/last-frame-conditioned), `ref2va` (up to 12 mixed image/video/audio
 references).
 
+Model id: `brain/minimaxh3`.
+
 **This port is in progress.** See `.agents/roadmap/minimaxh3.md` for the
 phase ledger and which convention questions are settled vs. still open. No
 capability below is claimed working until its own phase's real-weight parity

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-# Drift guard for README.md's "## Model support" table — see
+# Drift guard for the model catalog (docs/reference/models/): see
 # tests/e2e/model_table_check.py's module docs for exactly what this checks
 # and (importantly) what it deliberately does NOT check.
 
@@ -17,7 +17,7 @@ setup() {
   export PY
 }
 
-@test "README.md's Model support table matches \`brain caps\` and its links resolve" {
+@test "every \`brain caps\` model is named on a model page and the catalog's links resolve" {
   run "$PY" "$REPO/tests/e2e/model_table_check.py" --repo "$REPO" --brain "$BRAIN"
   if [ "$status" -ne 0 ]; then
     echo "$output" >&3

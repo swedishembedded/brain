@@ -9,6 +9,8 @@ character-level or BPE dataset, without the extra machinery (grouped-query
 attention, mixture-of-experts, quantization, paged serving) the larger models
 carry.
 
+Model id: `brain/gpt2`.
+
 ## Support
 
 | Capability | Supported |

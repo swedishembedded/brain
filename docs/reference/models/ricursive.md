@@ -9,6 +9,8 @@ residual, a sigmoid-gated attention output, per-head QK RMSNorm, four norms
 clipped SwiGLU feed-forward. It is served like Qwen3: through the same
 scheduler, tokenizer, chat-template, reply-parsing and policy paths.
 
+Model id: `brain/ricursive`.
+
 ## Support
 
 | Capability | Supported |

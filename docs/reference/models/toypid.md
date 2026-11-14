@@ -9,6 +9,8 @@ text generation. It's also the model behind brain's WebGPU browser demo:
 this model can run entirely client-side, in a browser, with no server round
 trip.
 
+Model id: `brain/toypid`.
+
 ## Support
 
 | Capability | Supported |

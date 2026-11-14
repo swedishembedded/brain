@@ -9,6 +9,8 @@ seen orbit, while one that has generalized continues correctly from an
 unseen starting pair. It is not a production LLM. It's also the model
 brain's federated/sharded expert training story is built on.
 
+Model id: `brain/toymoe`.
+
 ## Support
 
 | Capability | Supported |
