@@ -50,6 +50,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **aliasing**: the confusion, after sampling, of a tone above half the sampling rate with a slower one, because the two have the same samples. *([Sound and Sampling](v09-audio/01-sound.md))*
 
+**all-reduce**: the collective in which every rank contributes an array and every rank receives their elementwise sum; it equals a reduce-scatter followed by an all-gather. *([Parallel and Distributed Training](v13-training-at-scale/05-parallelism.md))*
+
 **alpha compositing**: combining translucent layers front to back, each contributing its colour weighted by its opacity and by the fraction of light the layers in front have let through, so that the weights add up to the pixel's coverage. *([3D Gaussian Splatting](v10-video-and-3d/06-gaussian-splatting.md))*
 
 **Amdahl's law**: the speedup of a whole from making a part that takes the share $p$ of the time $g$ times as fast, $1/((1 - p) + p/g)$, bounded by the ceiling $1/(1 - p)$ however fast the part becomes. *([Measuring Performance Honestly](v04-computation/11-profiling.md))*
@@ -218,6 +220,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **codec language model**: a causal language model whose vocabulary is the codes of a neural audio codec and whose context carries the text and the voice, so that it writes audio as a sequence of codes that the codec's decoder turns into a waveform. *([Speech Synthesis](v09-audio/06-speech-synthesis.md))*
 
+**collective communication**: an operation that all the ranks of a group call, each with its own data and each receiving a result, such as all-reduce, all-gather, reduce-scatter and broadcast. *([Parallel and Distributed Training](v13-training-at-scale/05-parallelism.md))*
+
 **color space**: the rule that turns a triple of numbers into a colour, made of three primary colours, a white point and a transfer curve, so that the same triple is a different colour in a different space. *([Images as Data](v07-vision/01-images.md))*
 
 **command recording**: appending many dispatches to one list and handing the list to the device as a single submission, so that the host pays the submission cost once instead of once per dispatch; a read-back or any other observation of the device ends the list. *([Kernel Fusion and Memory Traffic](v04-computation/08-fusion.md))*
@@ -307,6 +311,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **data leakage**: any route by which information about the rows used for scoring reaches the fitting (duplicates, statistics computed from all the rows, the future, the same subject on both sides), which makes the score too good to be true. *([Generalization, Overfitting and Honest Evaluation](v02-learning/05-generalization.md))*
 
 **data mixture**: the shares in which groups of records contribute to training, which must name what they are shares of (rows, tokens or supervised tokens) and be realised by a draw or a listing. *([Data Pipelines for Large Models](v13-training-at-scale/01-training-data.md))*
+
+**data parallelism**: copying the model onto several ranks, giving each its own share of the batch and combining the shares' gradients into the gradient of the whole batch before every rank applies the same update. *([Parallel and Distributed Training](v13-training-at-scale/05-parallelism.md))*
 
 **data-parallel loop**: a loop in which no iteration reads anything another iteration writes, so its iterations can be run in any order or at the same time with the same result; the `parallel for` of the book's pseudocode. *([The CPU: Cores, Caches and Vectors](v04-computation/02-cpu.md))*
 
@@ -950,6 +956,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **pinhole camera**: the camera that sends each point of the world along a straight ray through one point, the pinhole, to the image, so that the image position is the ratio of the lateral offset to the depth and the depth itself is lost. *([Cameras and Projective Geometry](v10-video-and-3d/03-camera-geometry.md))*
 
+**pipeline parallelism**: cutting a stack of layers into consecutive stages on different ranks, passing the residual forward and its gradient back across each cut, and feeding micro-batches so that the stages work at the same time. *([Parallel and Distributed Training](v13-training-at-scale/05-parallelism.md))*
+
 **pixel**: one sample of an image, a point measurement of light (three numbers for a colour image, usually 8-bit codes), taken at the centre of its cell in a grid of width times height. *([Images as Data](v07-vision/01-images.md))*
 
 **pointmap**: an array with one world point per pixel of an image, the point the pixel sees, written in the coordinates of one shared frame (the first camera's), so that a depth map and the camera that took it are one object and two pixels of two images that see the same surface hold the same point. *([Learning 3D Directly](v10-video-and-3d/05-feed-forward-3d.md))*
@@ -1162,6 +1170,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **shape**: the list of the sizes of a tensor's axes, outermost first; the number of elements is their product. *([Arrays, Shapes, Strides and Broadcasting](v01-mathematics/05-arrays.md))*
 
+**sharded optimizer**: an optimizer whose state is divided over the ranks, each rank holding and updating the moments of one slice of the weights, with the gradient reduce-scattered to it and the updated weights all-gathered afterwards. *([Parallel and Distributed Training](v13-training-at-scale/05-parallelism.md))*
+
 **shared expert**: an expert outside the routing that every token uses, whose output is added to the routed sum, so that what all tokens need is not copied across the routed experts. *([Mixture of Experts](v06-language-models/04-mixture-of-experts.md))*
 
 **shared memory**: the small, fast, on-chip memory of a compute unit that all invocations of one workgroup can read and write and no other workgroup can see, a cache whose contents the programmer chooses. *([The GPU: Thousands of Small Workers](v04-computation/04-gpu.md))*
@@ -1269,6 +1279,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **tensor**: an array of numbers with any number of axes (zero for a scalar, one for a vector, two for a matrix), described by its shape. *([Arrays, Shapes, Strides and Broadcasting](v01-mathematics/05-arrays.md))*
 
 **tensor core**: a hardware unit that multiplies two small fixed-size matrices and adds a third in one operation, usually with narrow inputs and a wider accumulator, raising the peak arithmetic rate of a device for matrix products. *([Making Matrix Multiplication Fast](v04-computation/06-matmul.md))*
+
+**tensor parallelism**: cutting the matrices inside one layer across ranks, the first of a pair by rows and the second by the matching columns, so that each rank holds a partial output and one all-reduce adds them. *([Parallel and Distributed Training](v13-training-at-scale/05-parallelism.md))*
 
 **test set**: rows used once, after every choice is made, to report the final score of the chosen model; looking at it more than once turns it into a validation set. *([Generalization, Overfitting and Honest Evaluation](v02-learning/05-generalization.md))*
 

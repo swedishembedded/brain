@@ -565,6 +565,7 @@ navigation:
           - docs/book/v13-training-at-scale/02-mixed-precision.md
           - docs/book/v13-training-at-scale/03-training-memory.md
           - docs/book/v13-training-at-scale/04-peft.md
+          - docs/book/v13-training-at-scale/05-parallelism.md
       - docs/book/glossary.md
       - docs/book/history/chronology.md
       - docs/book/about-the-author.md
