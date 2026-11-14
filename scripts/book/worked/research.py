@@ -35,6 +35,7 @@ import bookrng
 
 ROOT = Path(__file__).resolve().parents[3]
 RECORDS = ROOT / "papers" / "spectral-lm" / "data" / "primary"
+READS = ["papers/spectral-lm/data/primary"]   # hashed into the worked cache key (deps.py)
 
 MARGIN = 0.02            # bits per byte, the margin of the claim
 SIGMA = 0.005            # bits per byte, the run-to-run spread assumed in the opening simulation

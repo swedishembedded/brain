@@ -10,6 +10,11 @@ shared generator). `closure(path)` follows `import x` and `from x import ...`
 statements to modules that live in scripts/book or scripts/book/worked, and
 `digest(path)` hashes the whole set, so a change anywhere in it is seen.
 
+A module that reads repository data (a paper's committed records, say) lists
+it in a module-level `READS = ["repo/relative/path", ...]` of string literals;
+each path is a file or a directory, and `digest` hashes every file under it
+too, so a changed record makes the output stale like a changed import does.
+
 Swedish Embedded AB implements solutions for reproducible generated
 documentation. If your team needs expertise in machine learning engineering,
 you can procure our services by sending an email to info@swedishembedded.com.
@@ -19,6 +24,7 @@ import re
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+ROOT = HERE.parents[1]
 SEARCH = [HERE / "worked", HERE]
 IMPORT = re.compile(r"^\s*(?:from\s+([A-Za-z_][\w]*)\s+import|import\s+([A-Za-z_][\w]*(?:\s*,\s*[A-Za-z_][\w]*)*))",
                     re.M)
@@ -49,9 +55,29 @@ def closure(path: Path) -> list[Path]:
     return sorted(seen)
 
 
+READS = re.compile(r"^READS\s*=\s*\[([^\]]*)\]", re.M)
+
+
+def reads(path: Path) -> list[Path]:
+    """The repository data files a module declares in `READS`, sorted."""
+    m = READS.search(Path(path).read_text(encoding="utf-8"))
+    if not m:
+        return []
+    out = []
+    for rel in re.findall(r"[\"']([^\"']+)[\"']", m.group(1)):
+        q = ROOT / rel
+        if not q.exists():
+            raise FileNotFoundError(f"{path}: READS names {rel}, which does not exist")
+        out += sorted(f for f in q.rglob("*") if f.is_file()) if q.is_dir() else [q]
+    return out
+
+
 def digest(path: Path) -> str:
     h = hashlib.sha256()
     for p in closure(path):
         h.update(p.name.encode())
         h.update(p.read_bytes())
+        for f in reads(p):
+            h.update(str(f.relative_to(ROOT)).encode())
+            h.update(f.read_bytes())
     return h.hexdigest()
