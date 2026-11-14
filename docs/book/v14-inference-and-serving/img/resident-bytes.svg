@@ -1,0 +1,36 @@
+<!-- source-sha256: 915690141b31677e7e2c89669a0626e03d7121c03181886a73d58af511a3b234 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 620 380" width="620" height="380">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="620" height="380" fill="#ffffff"/>
+<line x1="215.94" y1="334" x2="215.94" y2="30" stroke="#edf2f7"/>
+<text x="215.94" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">10</text>
+<line x1="391.42" y1="334" x2="391.42" y2="30" stroke="#edf2f7"/>
+<text x="391.42" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">20</text>
+<line x1="566.9" y1="334" x2="566.9" y2="30" stroke="#edf2f7"/>
+<text x="566.9" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">30</text>
+<line x1="58" y1="334" x2="602" y2="334" stroke="#edf2f7"/>
+<text x="52" y="338" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
+<line x1="58" y1="263.3" x2="602" y2="263.3" stroke="#edf2f7"/>
+<text x="52" y="267.3" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">2</text>
+<line x1="58" y1="192.6" x2="602" y2="192.6" stroke="#edf2f7"/>
+<text x="52" y="196.6" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">4</text>
+<line x1="58" y1="121.91" x2="602" y2="121.91" stroke="#edf2f7"/>
+<text x="52" y="125.91" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">6</text>
+<line x1="58" y1="51.21" x2="602" y2="51.21" stroke="#edf2f7"/>
+<text x="52" y="55.21" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">8</text>
+<rect x="58" y="30" width="544" height="304" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="544" height="304"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#2b6cb0" stroke-width="2.0" points="58,188.19 75.55,183.77 93.1,179.35 110.65,174.93 128.19,170.51 145.74,166.09 163.29,161.67 180.84,157.26 198.39,152.84 215.94,148.42 233.48,144 251.03,139.58 268.58,135.16 286.13,130.74 303.68,126.33 321.23,121.91 338.77,117.49 356.32,113.07 373.87,108.65 391.42,104.23 408.97,99.81 426.52,95.4 444.06,90.98 461.61,86.56 479.16,82.14 496.71,77.72 514.26,73.3 531.81,68.88 549.35,64.47 566.9,60.05 584.45,55.63 602,51.21"/><polyline fill="none" stroke="#c05621" stroke-width="2.0" points="58,325.16 75.55,316.33 93.1,307.49 110.65,298.65 128.19,289.81 145.74,280.98 163.29,272.14 180.84,263.3 198.39,254.47 215.94,245.63 233.48,236.79 251.03,227.95 268.58,219.12 286.13,210.28 303.68,201.44 321.23,192.6 338.77,183.77 356.32,174.93 373.87,166.09 391.42,157.26 408.97,148.42 426.52,139.58 444.06,130.74 461.61,121.91 479.16,113.07 496.71,104.23 514.26,95.4 531.81,86.56 549.35,77.72 566.9,68.88 584.45,60.05 602,51.21"/><polyline fill="none" stroke="#2f855a" stroke-width="2.0" points="58,325.16 75.55,320.74 93.1,316.33 110.65,311.91 128.19,307.49 145.74,303.07 163.29,298.65 180.84,294.23 198.39,289.81 215.94,285.4 233.48,280.98 251.03,276.56 268.58,272.14 286.13,267.72 303.68,263.3 321.23,258.88 338.77,254.47 356.32,250.05 373.87,245.63 391.42,241.21 408.97,236.79 426.52,232.37 444.06,227.95 461.61,223.53 479.16,219.12 496.71,214.7 514.26,210.28 531.81,205.86 549.35,201.44 566.9,197.02 584.45,192.6 602,188.19"/><polyline fill="none" stroke="#9b2c2c" stroke-width="2.0" stroke-dasharray="6 4" points="58,188.19 75.55,188.19 93.1,188.19 110.65,188.19 128.19,188.19 145.74,188.19 163.29,188.19 180.84,188.19 198.39,188.19 215.94,188.19 233.48,188.19 251.03,188.19 268.58,188.19 286.13,188.19 303.68,188.19 321.23,188.19 338.77,188.19 356.32,188.19 373.87,188.19 391.42,188.19 408.97,188.19 426.52,188.19 444.06,188.19 461.61,188.19 479.16,188.19 496.71,188.19 514.26,188.19 531.81,188.19 549.35,188.19 566.9,188.19 584.45,188.19 602,188.19"/></g>
+<text x="330" y="370" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">tensors decoded so far (of 32)</text>
+<text x="14" y="182" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 182)">resident bytes (GiB)</text>
+<text x="330" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Resident bytes while a 4 GiB f32 checkpoint is decoded</text>
+<rect x="66" y="38" width="144.58" height="78" rx="3" fill="#ffffff" fill-opacity="0.92" stroke="#cbd5e0"/>
+<line x1="74" y1="53" x2="94" y2="53" stroke="#2b6cb0" stroke-width="2"/>
+<text x="100" y="57" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">slurp</text>
+<line x1="74" y1="70" x2="94" y2="70" stroke="#c05621" stroke-width="2"/>
+<text x="100" y="74" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">map</text>
+<line x1="74" y1="87" x2="94" y2="87" stroke="#2f855a" stroke-width="2"/>
+<text x="100" y="91" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">map + release</text>
+<line x1="74" y1="104" x2="94" y2="104" stroke="#9b2c2c" stroke-width="2" stroke-dasharray="6 4"/>
+<text x="100" y="108" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">populate + release</text>
+</svg>

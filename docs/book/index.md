@@ -210,4 +210,8 @@ historical sections draw on in the [Chronology](history/chronology.md).
 6. [Distillation](v13-training-at-scale/06-distillation.md): How does a small model learn from a large one?
 7. [Checkpoints, Determinism and Recovery](v13-training-at-scale/07-checkpoints-and-recovery.md): How does a long training run survive a crash and still produce the same model?
 8. [Project: Scaling a Training Run](v13-training-at-scale/08-project-scaling-training.md): Can you move a training run from one device to several without changing what it learns?
+
+### [Volume XIV: Inference Engines and Production Serving](v14-inference-and-serving/index.md)
+
+1. [Loading Models](v14-inference-and-serving/01-loading.md): How do gigabytes of weights get from disk to the device quickly and safely?
 <!-- /contents -->

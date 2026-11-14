@@ -806,6 +806,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **memory complexity**: the amount of memory, counted in cells and measured at the peak, that an algorithm needs as a function of its input size; it can be traded against time by storing a result instead of recomputing it, or the reverse. *([Algorithms, Cost and Complexity](v01-mathematics/16-algorithms.md))*
 
+**memory-mapping**: making the bytes of a file addressable as memory without reading them, so that the system loads a page of the file the first time a read touches it and can drop a clean page again at any time. *([Loading Models](v14-inference-and-serving/01-loading.md))*
+
 **memory-traffic accounting**: the routine of listing for every kernel of a program the FLOPs it executes and the distinct bytes it reads and writes, each operand counted once, so that designs of the same computation can be compared by bytes and by arithmetic intensity before anything is run. *([Kernel Fusion and Memory Traffic](v04-computation/08-fusion.md))*
 
 **metric selection**: choosing the number that scores a model from the decision its output feeds and the costs of its mistakes, checking it on a trivial and a perfect predictor, and reporting it with an uncertainty. *([Measuring Models: Metrics and Calibration](v02-learning/06-metrics.md))*
@@ -817,6 +819,10 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **mode collapse**: the failure in which a generator maps most of its noise to a few outputs, so its samples cover only a small part of the data's distribution even if each looks plausible. *([Adversarial Training](v08-image-generation/04-gans.md))*
 
 **model**: a function whose rule has a fixed shape and whose behaviour is set by a list of parameters, used to turn the features of an example into a prediction. *([The Learning Problem](v02-learning/01-learning-problem.md))*
+
+**model reference**: the string that names a model, `vendor/repo` with an optional quantization and adapter suffix, whose grammar gives it exactly one reading or a named refusal and keeps it from naming a place outside the store. *([Loading Models](v14-inference-and-serving/01-loading.md))*
+
+**model store**: the directory tree of a machine's models, keyed by the reference's vendor and base repository, together with the code that finds what is on disk and plans what must be fetched to serve a reference. *([Loading Models](v14-inference-and-serving/01-loading.md))*
 
 **modern decoder recipe**: the combination of choices common to present-day open-weight decoders: pre-norm blocks with RMS normalization and no biases, rotary positions applied to normalized queries and keys, grouped key-value heads, a SwiGLU network, and an output matrix that is tied or untied by size. *([Anatomy of a Modern Decoder](v06-language-models/01-modern-decoder.md))*
 
@@ -917,6 +923,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **overflow and underflow**: overflow is an exact result too large for the format, stored as infinity; underflow is a nonzero result too small, stored with fewer and fewer significant digits (subnormal numbers) and finally as zero. *([Floating Point and Numerical Error](v01-mathematics/15-floating-point.md))*
 
 ## P
+
+**packed tensor**: a tensor kept in its stored, quantized form: a payload of codes, sidecar tensors of scales and a descriptor that says how the bytes decode, so that sizes and byte ranges of a tile follow from arithmetic. *([Loading Models](v14-inference-and-serving/01-loading.md))*
 
 **paged sparse layout**: storing keys and values in fixed-size pages reached through a block table and reading a content-based selection as a list of positions resolved through that table, row by row, without copying the selected rows into one buffer. *([Sparse Attention](v06-language-models/06-sparse-attention.md))*
 
@@ -1251,6 +1259,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **straight-through estimator**: the rule that passes the gradient at a quantizer's output to its input unchanged, written $\mathbf{z} + \mathrm{sg}[\mathbf{z}_q - \mathbf{z}]$ with a stop-gradient $\mathrm{sg}$; it replaces a derivative that is zero by a biased one that trains the encoder. *([Discrete Latents and Vector Quantization](v08-image-generation/03-vector-quantization.md))*
 
 **streamed optimizer**: an optimizer update that walks through each tensor in tiles, decoding a tile of state, applying the update rule and encoding the state again, so that its working memory is the size of a tile and independent of the model, with a rounding draw that does not depend on how the tensor was cut. *([Where Training Memory Goes](v13-training-at-scale/03-training-memory.md))*
+
+**streaming loader**: a loader that moves a tensor from storage to its destination one bounded tile at a time, planned in advance from a staging budget, so that the memory it needs is a configured number and not the size of the tensor. *([Loading Models](v14-inference-and-serving/01-loading.md))*
 
 **streaming speech output**: speech that begins to leave the model while the text it says is still being written and its own later frames are still being drawn, so that the work before the first sound is that of a prefix of the reply and not of the whole reply. *([Models That Listen, See and Speak](v09-audio/08-omni-models.md))*
 

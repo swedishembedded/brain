@@ -569,6 +569,10 @@ navigation:
           - docs/book/v13-training-at-scale/06-distillation.md
           - docs/book/v13-training-at-scale/07-checkpoints-and-recovery.md
           - docs/book/v13-training-at-scale/08-project-scaling-training.md
+      - title: "Volume XIV: Inference Engines and Production Serving"
+        pages:
+          - docs/book/v14-inference-and-serving/index.md
+          - docs/book/v14-inference-and-serving/01-loading.md
       - docs/book/glossary.md
       - docs/book/history/chronology.md
       - docs/book/about-the-author.md
