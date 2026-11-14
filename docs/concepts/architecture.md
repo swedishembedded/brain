@@ -59,6 +59,9 @@ first-class compute path rather than storage-only quantization.
 - Backpropagation is gated by `gradcheck` (finite differences), not by a Python
   oracle, and each native CUDA kernel is checked against the portable
   kernel it replaces.
+- The protocols between serving threads (the dispatcher handing late jobs to a
+  running batch, exactly-once replies) are model-checked exhaustively in the
+  test suite, beside the tests of the code that implements them.
 - Every model is reachable the same way: `brain <model> <action>` on the CLI,
   and through HTTP, D-Bus and the SDK, because all of them dispatch the same
   typed capability manifest.

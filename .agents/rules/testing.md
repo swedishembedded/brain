@@ -133,6 +133,23 @@ Imported models are additionally parity-gated stage by stage against dumped
 goldens (`tools/goldens/*_dump_reference.py`); parity proves the forward,
 never the backward.
 
+## 2a. Concurrency protocols are model-checked
+
+A protocol between threads (a lock-guarded handoff, a reply that must be sent
+exactly once, a reservation released on every path) is checked by exhaustive
+exploration, not only by a test that happens to hit one interleaving. The model
+lives beside the crate's integration tests as a state machine whose actions are
+the code's critical sections, with a table mapping each action to the function
+that performs it; the explorer visits every reachable state for small bounds,
+checks the safety invariants in each, and checks the liveness conditions in
+every state with no successor. It prints the shortest trace to a violation.
+A change to the protocol changes the model in the same commit, and a model is
+only trusted once a deliberate bug in it has been seen to fail.
+
+- `crates/residency/tests/it/late_join_model.rs`: the dispatcher's late-job
+  inbox and a running group (every job answered exactly once, none stranded,
+  batch limit kept, a healthy group never errors a late job).
+
 ## 3. Federated round-trip & integrity
 
 - `split → merge` reconstructs a checkpoint **tensor-for-tensor** (identity).

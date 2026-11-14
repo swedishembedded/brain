@@ -1506,8 +1506,14 @@ fn lane_loop(rx: Receiver<RunReq>, done: Sender<Msg>) {
         let late_jobs = if inbox.admits_late_jobs {
             let mut st = inbox.lock();
             st.open = false;
+            // A job that arrived while the instance was being built shares the
+            // build's fate: it is told why the group ended, not only that it did.
+            let why = match &failed_jobs {
+                Some((_, build_error)) => build_error.clone(),
+                None => format!("{key}: the group ended before this job could join it"),
+            };
             for p in st.jobs.drain(..) {
-                (p.reply)(Err(format!("{key}: the group ended before this job could join it")));
+                (p.reply)(Err(why.clone()));
             }
             st.taken
         } else {
@@ -2096,6 +2102,48 @@ mod tests {
         built.sort_unstable();
         assert_eq!(built, vec![0, 1], "both replicas are built, one per job");
         assert!(elapsed < Duration::from_millis(280), "the two jobs ran one after the other ({elapsed:?}), not on two replicas");
+    }
+
+    /// **A job that joins a group whose build fails is told the build error.** It arrived in the group's inbox while the
+    /// instance was being built, so it shares the build's fate, and its caller learns why rather than only that the group
+    /// ended.
+    #[test]
+    fn a_late_job_of_a_failed_build_gets_the_build_error() {
+        struct Failing(Arc<Mutex<std::sync::mpsc::Receiver<()>>>);
+        impl ResidentModel for Failing {
+            fn manifest(&self) -> Manifest {
+                Manifest::new("failing", "a build that fails", vec![ActionSpec::new("run", "run")])
+            }
+            fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+                InstanceKey::new("failing", "default")
+            }
+            fn estimate(&self, _k: &InstanceKey) -> MemCost {
+                MemCost::new(GB, 0)
+            }
+            fn batch_limit(&self) -> Option<usize> {
+                Some(4)
+            }
+            fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn Instance>, String> {
+                let _ = self.0.lock().unwrap().recv();
+                Err("the checkpoint has no weights".to_string())
+            }
+        }
+        let (release, gate) = channel();
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(0), 16 * GB, 0);
+        let exec = Executor::start(vec![Arc::new(Failing(Arc::new(Mutex::new(gate))))], budgets, Policy::default());
+        let (tx, rx) = channel();
+        for _ in 0..2 {
+            let tx = tx.clone();
+            exec.submit(Job::new("failing", "run", Invocation::new()).reply(move |r| tx.send(r).unwrap()));
+            // The second job reaches the group's inbox while the first one's build waits on the gate.
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        release.send(()).unwrap();
+        for _ in 0..2 {
+            let err = rx.recv_timeout(Duration::from_secs(10)).expect("both jobs are answered").unwrap_err();
+            assert!(err.contains("the checkpoint has no weights"), "{err}");
+        }
     }
 
     /// **Replicas of a continuously batching model decode concurrently.** `n` requests streaming in over two replicas finish in
