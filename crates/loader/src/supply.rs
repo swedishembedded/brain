@@ -48,9 +48,10 @@ pub enum DownloadPolicy {
     /// error naming the remedy, never a download.
     Offline,
     /// Always go through the fetch/plan/execute sequence, even when a local
-    /// copy might already resolve. The plan step itself skips whatever has already
-    /// landed on disk, so this differs from `IfMissing` only in that it
-    /// still consults the hub for a resolution/verification pass.
+    /// copy might already resolve. The plan serves a reference that is already
+    /// complete on disk without a call to the hub, and skips each file that has
+    /// landed, so for a reference already present this behaves as `IfMissing`;
+    /// it differs when the local copy is incomplete or absent.
     AlwaysCheck,
 }
 
