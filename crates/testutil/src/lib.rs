@@ -58,7 +58,8 @@ pub fn skip(reason: &str) {
 }
 
 /// Whether the caller opted out of device-dependent tests with
-/// `MOE_SKIP_GPU_TESTS`; the one place that variable is read.
+/// `MOE_SKIP_GPU_TESTS`; the one place new code reads that variable (the raw
+/// reads that remain are listed in `scripts/gates/test-skips.allow`).
 ///
 /// A test that returns early on that variable is reported by cargo as a PASS
 /// and certifies nothing, which is why `scripts/gates/check-test-skips.sh`

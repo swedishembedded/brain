@@ -165,11 +165,13 @@ impl Report {
 /// A parity run that gates on cosine **and** relative L2 and prints nothing
 /// until the caller asks.
 ///
-/// Two floors rather than one because they fail on different things: a stage
+/// Two floors rather than one because they see different things: a stage
 /// uniformly double the reference is cosine 1.0 and fails only the relative-L2
-/// ceiling, while a permuted stage keeps its magnitude and fails only the
-/// cosine floor. Both are recorded per row, and every violation of either is
-/// collected so one run names every bad stage instead of stopping at the first.
+/// ceiling, so a cosine-only gate waves it through. A permuted stage keeps its
+/// norm but not its direction, so it fails the cosine floor and, being a
+/// different vector, the relative-L2 ceiling too. Both are recorded per row,
+/// and every violation of either is collected so one run names every bad stage
+/// instead of stopping at the first.
 pub struct Table {
     /// `(name, cosine, max_abs, rel_l2)` in the order the stages were checked.
     pub rows: Vec<(String, f64, f64, f64)>,
@@ -296,18 +298,20 @@ impl WorstTable {
                 1.0 - cos,
                 w = self.width
             );
-            if *cos < worst.0 {
+            // NaN compares false against every floor, so a NaN stage becomes the
+            // worst by name and then fails the floor checks below.
+            if cos.is_nan() || *cos < worst.0 {
                 worst = (*cos, name.clone());
             }
-            if *rel > worst_rel.0 {
+            if rel.is_nan() || *rel > worst_rel.0 {
                 worst_rel = (*rel, name.clone());
             }
         }
         println!("  worst: {} at cosine {:.9} (1-cos {:.2e})", worst.1, worst.0, 1.0 - worst.0);
         println!("  worst relative L2: {} at {:.3e}", worst_rel.1, worst_rel.0);
-        assert!(worst.0 >= floor, "{title}: {} cosine {:.9} < {floor}", worst.1, worst.0);
+        assert!(!worst.0.is_nan() && worst.0 >= floor, "{title}: {} cosine {:.9} < {floor}", worst.1, worst.0);
         assert!(
-            worst_rel.0 <= rel_floor,
+            !worst_rel.0.is_nan() && worst_rel.0 <= rel_floor,
             "{title}: {} relative L2 {:.3e} > {rel_floor:.0e} - the direction matches but the \
              MAGNITUDE does not",
             worst_rel.1,
@@ -363,11 +367,20 @@ mod tests {
     #[test]
     fn a_table_gates_a_permutation_on_cosine_and_a_scale_on_rel_l2() {
         let mut t = Table::new(0.9999, 1e-3);
+        // Same norm, wrong direction: cosine 0.8 and rel_l2 sqrt(2/5) = 0.63,
+        // so it fails both floors.
         t.check("permuted", &[1.0, 2.0], &[2.0, 1.0]);
         // Cosine 1.0 exactly, and only the magnitude is wrong: this row is the
         // one a cosine-only ladder waves through.
         t.check("scaled", &[2.0, 4.0], &[1.0, 2.0]);
-        assert!(t.failures.iter().any(|f| f.starts_with("permuted: cosine ")), "{:?}", t.failures);
+        let permuted: Vec<&String> = t.failures.iter().filter(|f| f.starts_with("permuted: ")).collect();
+        assert!(
+            permuted.len() == 2
+                && permuted[0].starts_with("permuted: cosine ")
+                && permuted[1].starts_with("permuted: rel_l2 6.325e-1 "),
+            "{:?}",
+            t.failures
+        );
         assert!(
             t.failures.iter().filter(|f| f.starts_with("scaled: ")).count() == 1
                 && t.failures.iter().any(|f| f.starts_with("scaled: rel_l2 ")),
@@ -395,6 +408,17 @@ mod tests {
         let e = std::panic::catch_unwind(move || w.finish("t", 0.9999, 1e-4)).unwrap_err();
         let msg = e.downcast_ref::<String>().map(String::as_str).unwrap_or("");
         assert!(msg.contains("MAGNITUDE"), "{msg:?}");
+    }
+
+    /// NaN compares false against every floor, so it must be rejected by name.
+    #[test]
+    fn a_worst_table_rejects_a_nan_stage() {
+        let mut w = WorstTable::new(30);
+        w.add("ok", &[1.0, 2.0], &[1.0, 2.0]);
+        w.add("nan", &[f32::NAN, 2.0], &[1.0, 2.0]);
+        let e = std::panic::catch_unwind(move || w.finish("t", 0.9999, 1e-4)).unwrap_err();
+        let msg = e.downcast_ref::<String>().map(String::as_str).unwrap_or("");
+        assert!(msg.contains("nan"), "{msg:?}");
     }
 
     #[test]

@@ -111,8 +111,8 @@ impl Source {
                 return None;
             }
         };
-        // Accept the block at the top level or nested under "source", so a
-        // dumper whose metadata file IS the source record needs no wrapper.
+        // The block lives under "source": every dumper writes it there through
+        // tools/goldens/golden_source.py, whatever the manifest file is named.
         let source = json.get("source").cloned().filter(|v| v.is_object());
         Some(Source { manifest: manifest.to_path_buf(), dumper: dumper.to_string(), source })
     }
