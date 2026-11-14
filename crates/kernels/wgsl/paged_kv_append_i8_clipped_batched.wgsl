@@ -12,23 +12,18 @@
 //
 // Append a batch of new tokens' K (or V) into an INT8 paged pool, capping
 // each kv-head's per-token online absmax scale at a CALIBRATED ceiling
-// before dividing by 127 — a percentile
+// before dividing by 127: a percentile
 // (e.g. p99.9) of that head's magnitude distribution over a representative
 // prompt set, computed offline (`brain qwen calib`) and uploaded once per
 // engine, not per token. This keeps today's per-token adaptivity (a typical
-// token still gets its own tight scale) while denying a single rare-token
-// outlier the ability to crush every other token's resolution in that head —
-// see docs/reference/models/qwen/... for the calibration writeup. `clip[head] ==
-// f32::MAX` (the "no calibration" sentinel `KvCalib`'s uncalibrated/disabled
-// case uploads) degrades this to bit-identical behaviour vs the uncalibrated
-// kernel, which is what makes the A/B clean.
-//
-// DUPLICATION NOTE (audit F42): given that MAX-sentinel degradation is
-// bit-identical, `paged_kv_append_i8_batched.wgsl` is this file minus one
-// `min()` — a 42-line copy holding a second pipeline slot. The intended
-// collapse is to delete the UNCLIPPED twin and feed a MAX-filled clip buffer
-// from the uncalibrated path; that lands with its `qwen::serve` call-site
-// change (the serving batch), not as a kernels-only edit.
+// token still gets its own tight scale) while denying a rare-token outlier
+// the ability to inflate its own (token, kv-head) row's scale; scales are per
+// row (`scales[slot * n_kv + head]`), so other tokens are never affected.
+// See `model::kvcalib` for the calibration. `clip[head] == f32::MAX` (the
+// "no calibration" sentinel `KvCalib`'s uncalibrated/disabled case uploads)
+// degrades this to plain online-absmax behaviour. This is the only i8 append
+// kernel: the unclipped twin was deleted (eddf52ced) and the uncalibrated path
+// feeds a MAX-filled clip buffer, which keeps the A/B clean.
 //   src   : [batch, kv_stride] f32   (kv_stride = n_kv * head_dim)
 //   clip  : [n_kv] f32               (per-kv-head calibrated ceiling)
 //   pool  : int8 packed as u32 words  ([num_blocks*block_size*kv_stride / 4])
