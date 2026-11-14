@@ -8,6 +8,7 @@
 //! others run beside it.
 
 mod chunked_equiv;
+mod cancel;
 mod chunked_train_equiv;
 mod flops;
 mod layer_streamed;

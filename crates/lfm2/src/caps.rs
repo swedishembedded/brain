@@ -278,7 +278,7 @@ impl LfmAction {
         let (batches, batch, seq) = (inv.get_i64("batches").unwrap_or(8) as u32, inv.get_i64("batch").unwrap_or(4) as u32, inv.get_i64("seq").unwrap_or(1024) as u32);
         let seed = inv.get_i64("seed").map_or_else(data::rng::random_seed, |s| s as u64);
         let model = Lfm::load_inference(&weights, batch, seq);
-        let r = crate::train::evaluate(&model, &val, &mlm, batches, batch, seq, seed);
+        let r = crate::train::evaluate(&model, &val, &mlm, batches, batch, seq, seed, &|| !inv.cancel.is_cancelled())?;
         Ok(Outcome::new()
             .set("pseudo_perplexity", json!(r.pseudo_perplexity))
             .set("masked_accuracy", json!(r.masked_accuracy))

@@ -56,15 +56,24 @@ fn lr_at(step: u32, o: &MlmTrainOpts) -> f32 {
 
 /// Mean masked-CE over `batches` random val windows (pseudo-ppl = exp of this).
 pub fn mlm_val_loss(model: &Lfm, val: &[u32], mlm: &MlmConfig, batches: u32, b: u32, t: u32, seed: u64) -> f32 {
+    mlm_val_loss_while(model, val, mlm, batches, b, t, seed, &|| true).expect("an always-true keep-going callback never cancels")
+}
+
+/// [`mlm_val_loss`] that asks `keep_going` before each batch and answers
+/// `Err(CANCELLED)` as soon as it says no.
+fn mlm_val_loss_while(model: &Lfm, val: &[u32], mlm: &MlmConfig, batches: u32, b: u32, t: u32, seed: u64, keep_going: &dyn Fn() -> bool) -> Result<f32, String> {
     let mut rng = Rng::new(seed);
     let mut total = 0.0;
     for _ in 0..batches.max(1) {
+        if !keep_going() {
+            return Err(capability::failure::CANCELLED.to_string());
+        }
         let (x, y) = get_mlm_batch(val, b as usize, t as usize, mlm, &mut rng);
         let y_u32: Vec<u32> = y.iter().map(|&v| v as u32).collect();
         model.set_batch(&x, &y_u32);
         total += model.forward();
     }
-    total / batches.max(1) as f32
+    Ok(total / batches.max(1) as f32)
 }
 
 /// Masked-token accuracy on one val batch (argmax over the full vocab at every
@@ -141,10 +150,12 @@ pub struct MlmEval {
 /// Pseudo-perplexity and masked-token accuracy of `model` on the token split
 /// `val`, over `batches` batches of `b x t` with deterministic corruption
 /// from `seed`: a fixed input distribution, so two checkpoints compare.
-pub fn evaluate(model: &Lfm, val: &[u32], mlm: &MlmConfig, batches: u32, b: u32, t: u32, seed: u64) -> MlmEval {
-    let loss = mlm_val_loss(model, val, mlm, batches, b, t, seed);
+/// `keep_going` is asked before every batch; once it says no the evaluation
+/// answers `Err(CANCELLED)`.
+pub fn evaluate(model: &Lfm, val: &[u32], mlm: &MlmConfig, batches: u32, b: u32, t: u32, seed: u64, keep_going: &dyn Fn() -> bool) -> Result<MlmEval, String> {
+    let loss = mlm_val_loss_while(model, val, mlm, batches, b, t, seed, keep_going)?;
     let (masked_accuracy, masked_tokens) = mlm_masked_accuracy(model, val, mlm, b, t, seed ^ 0xacc);
-    MlmEval { pseudo_perplexity: loss.exp(), masked_accuracy, masked_tokens }
+    Ok(MlmEval { pseudo_perplexity: loss.exp(), masked_accuracy, masked_tokens })
 }
 
 #[cfg(test)]
