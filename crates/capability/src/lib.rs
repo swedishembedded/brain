@@ -717,6 +717,19 @@ impl Invocation {
         self.params.as_object_mut().expect("params must be an object").insert(key.into(), v);
         self
     }
+    /// The keep-going callback an action hands to a library loop that has no
+    /// token of its own: each ask reports one progress step (`total` is 0 when
+    /// the loop's length is not known up front) and answers whether the
+    /// caller's token is still unfired. The library asks before each unit of
+    /// work and answers [`failure::CANCELLED`] once this says no.
+    pub fn keep_going<'a>(&'a self, progress: &'a mut dyn FnMut(Progress), total: u32, message: &'a str) -> impl FnMut() -> bool + 'a {
+        let mut done = 0u32;
+        move || {
+            progress(Progress::step(done, total, message));
+            done += 1;
+            !self.cancel.is_cancelled()
+        }
+    }
     pub fn blob(mut self, key: &str, b: Blob) -> Invocation {
         self.blobs.insert(key.into(), b);
         self
@@ -1261,6 +1274,23 @@ mod tests {
         fn action(&self, name: &str) -> Option<Arc<dyn Action>> {
             (name == "echo").then(|| Arc::new(Echo) as Arc<dyn Action>)
         }
+    }
+
+    /// The keep-going callback reports one step per ask and says no once the token fires.
+    #[test]
+    fn keep_going_reports_each_ask_and_stops_when_the_token_fires() {
+        let mut inv = Invocation::new();
+        inv.cancel = CancelToken::armed();
+        let token = inv.cancel.clone();
+        let mut steps = Vec::new();
+        {
+            let mut progress = |p: Progress| steps.push((p.step, p.total));
+            let mut keep_going = inv.keep_going(&mut progress, 7, "unit");
+            assert!(keep_going() && keep_going());
+            token.cancel();
+            assert!(!keep_going());
+        }
+        assert_eq!(steps, [(0, 7), (1, 7), (2, 7)]);
     }
 
     #[test]

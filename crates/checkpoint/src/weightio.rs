@@ -363,19 +363,30 @@ impl WeightReader {
     /// Write every tensor, in this reader's order and dtype, with its config,
     /// to a brain safetensors file at `path` - one tensor in memory at a time.
     pub fn save(&self, path: &str, card: Option<&ModelCard>) -> io::Result<()> {
+        self.save_while(path, card, &mut || true).map(|_| ())
+    }
+
+    /// [`WeightReader::save`] that asks `keep_going` before each tensor.
+    /// `Ok(false)` means it said no: the unfinished file is removed and the
+    /// destination is as it was.
+    pub fn save_while(&self, path: &str, card: Option<&ModelCard>, keep_going: &mut dyn FnMut() -> bool) -> io::Result<bool> {
         let plan: Vec<(String, Vec<u64>, Dtype)> = self
             .names()
             .map(|n| (n.to_string(), self.shapes[n].clone(), if self.dtype(n) == Some("U32") { Dtype::U32 } else { Dtype::F32 }))
             .collect();
         let mut w = StWriter::create_mixed(path, &plan, &self.config(), card)?;
         for (name, _, dtype) in &plan {
+            if !keep_going() {
+                w.abandon();
+                return Ok(false);
+            }
             let missing = || io::Error::other(format!("{name}: listed but unreadable"));
             match dtype {
                 Dtype::U32 => w.write_u32(name, &self.tensor_u32(name).ok_or_else(missing)?)?,
                 Dtype::F32 => w.write(name, &self.tensor(name).ok_or_else(missing)?)?,
             }
         }
-        w.finish()
+        w.finish().map(|()| true)
     }
 
     /// The GGUF mapping, when this reader has one open - its KV metadata is
@@ -438,12 +449,23 @@ impl WeightReader {
 
     /// Stream every tensor, one at a time: for each, decode it, call `f`, then
     /// drop it before the next. Peak extra allocation is one tensor's fp32.
-    pub fn for_each<F: FnMut(&str, &[u64], Vec<f32>)>(&self, mut f: F) {
+    pub fn for_each<F: FnMut(&str, &[u64], Vec<f32>)>(&self, f: F) {
+        self.for_each_while(&mut || true, f);
+    }
+
+    /// [`WeightReader::for_each`] that asks `keep_going` before decoding each
+    /// tensor. Returns `false` when it said no and the stream stopped there,
+    /// `true` when every tensor was handed to `f`.
+    pub fn for_each_while<F: FnMut(&str, &[u64], Vec<f32>)>(&self, keep_going: &mut dyn FnMut() -> bool, mut f: F) -> bool {
         for name in &self.order {
+            if !keep_going() {
+                return false;
+            }
             let data = self.tensor(name).expect("indexed tensor");
             let shape = self.shapes.get(name).map(|s| s.as_slice()).unwrap_or(&[]);
             f(name, shape, data);
         }
+        true
     }
 }
 
@@ -918,6 +940,13 @@ impl StWriter {
         self.written_count.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
     }
 
+    /// Give up on the output: remove the unfinished temporary file and leave
+    /// the destination as it was.
+    pub fn abandon(self) {
+        drop(self.file);
+        let _ = std::fs::remove_file(&self.tmp);
+    }
+
     /// Sync and atomically rename tmp → path. Errors if the plan was not fully
     /// written (the file would have holes).
     pub fn finish(self) -> io::Result<()> {
@@ -1065,6 +1094,35 @@ mod tests {
         assert!(tensor_bytes < header_and_blob, "tensor bytes ({tensor_bytes}) must be smaller than the whole file (header + blob = {header_and_blob})");
 
         std::fs::remove_file(&p).ok();
+    }
+
+    /// A stream or a save asked to stop does so before the next tensor, and an abandoned writer leaves nothing.
+    #[test]
+    fn a_stream_and_a_save_stop_before_the_next_tensor_and_leave_no_file() {
+        let dir = std::env::temp_dir().join(format!("brain-weightio-stop-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("src.safetensors");
+        let plan: Vec<(String, Vec<u64>)> = (0..4).map(|i| (format!("t{i}"), vec![3])).collect();
+        let mut w = StWriter::create(src.to_str().unwrap(), &plan, &serde_json::json!({}), None).unwrap();
+        for (name, _) in &plan {
+            w.write(name, &[1.0, 2.0, 3.0]).unwrap();
+        }
+        w.finish().unwrap();
+        let r = WeightReader::open(src.to_str().unwrap()).unwrap();
+
+        let (mut asks, mut seen) = (0, 0);
+        let finished = r.for_each_while(&mut || { asks += 1; asks <= 2 }, |_, _, _| seen += 1);
+        assert!(!finished && seen == 2, "two tensors were handed over before the third ask said no ({seen})");
+        assert!(r.for_each_while(&mut || true, |_, _, _| ()));
+
+        let dst = dir.join("dst.safetensors");
+        let mut asks = 0;
+        let saved = r.save_while(dst.to_str().unwrap(), None, &mut || { asks += 1; asks <= 2 }).unwrap();
+        assert!(!saved && !dst.exists(), "a stopped save leaves no destination");
+        let leftovers = std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).filter(|e| e.file_name().to_string_lossy().ends_with(".tmp")).count();
+        assert_eq!(leftovers, 0, "a stopped save leaves no temporary file");
+        assert!(r.save_while(dst.to_str().unwrap(), None, &mut || true).unwrap() && dst.exists());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
