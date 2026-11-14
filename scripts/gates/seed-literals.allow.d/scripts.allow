@@ -1,2 +1,3 @@
 scripts/demo/quickstart.sh	need:--seed=1337	shell-seed	frozen: reproduces the published docs/quickstart output the README embeds or quotes, run with the seed the README command names
 scripts/demo/quickstart.sh	need:--seed=7	shell-seed	frozen: reproduces the published docs/quickstart output the README embeds or quotes, run with the seed the README command names
+scripts/book/worked/capabilities_and_apis.py	event_lines:"seed"=42	python-default	world: an example event line printed in the book, the seed a reply reports; nothing is drawn from it
