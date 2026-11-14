@@ -3,7 +3,7 @@ name = "brain-hfsm"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Generic hierarchical state machine (HSM) substrate: RTC dispatch + state nesting (skeleton — P0)."
+description = "Generic hierarchical state machine (HSM) substrate: RTC dispatch + state nesting with LCA-correct entry/exit actions, behavioural inheritance and a run-to-completion event queue."
 
 [lib]
 name = "hfsm"

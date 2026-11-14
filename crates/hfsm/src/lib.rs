@@ -28,9 +28,12 @@
 //!   * **Run-to-completion** — `post` enqueues; `run` drains the queue dispatching
 //!     each event *fully* (including events posted during handling) before the
 //!     next; the loop is non-reentrant (guarded by `running`).
-//!   * **Reminder pattern** — a state can `post` a synthetic event to itself from
-//!     within `dispatch`; RTC guarantees it is processed after the current event
-//!     completes, which drives streaming (one token per self-posted `Tick`).
+//!   * **Reminder pattern** — `dispatch`/`on_entry` have no access to the queue, so
+//!     a state cannot `post` from inside them. It records the request in the
+//!     machine (a flag such as `pending_tick`); the code that owns the [`Hsm`]
+//!     reads it through [`machine_mut`](Hsm::machine_mut) after `run` returns and
+//!     `post`s the synthetic event. RTC then processes it after the current event
+//!     completes, which drives streaming (one token per re-posted `Tick`).
 
 use std::collections::VecDeque;
 
@@ -102,8 +105,8 @@ impl<M: Machine> Hsm<M> {
     }
 
     /// Run the entry chain from the (conceptual) top down to `initial`, then drain
-    /// any events posted during those entry actions. Use this when the initial
-    /// state's `on_entry` must fire at startup (e.g. it self-posts a `Tick`).
+    /// the queue (events posted before this call). Use this when the initial
+    /// state's `on_entry` must fire at startup.
     pub fn init(&mut self) {
         let chain = self.path_to_root(self.state); // [leaf, .., top]
         for &s in chain.iter().rev() {
@@ -222,7 +225,7 @@ mod tests {
     //       └── B   (leaf)
     //
     // Events: Go (A→B), Up (handled only by Op, to test inheritance),
-    //         Self (B self-transition), Tick (reminder self-post loop).
+    //         SelfB (B self-transition), Tick (stands in for a re-posted reminder).
     #[derive(Copy, Clone, PartialEq, Debug)]
     enum S {
         Root,
@@ -313,13 +316,13 @@ mod tests {
     }
 
     #[test]
-    fn self_transition_exits_and_reenters_leaf() {
+    fn self_transition_is_local_and_runs_no_exit_or_entry() {
         let mut hsm = Hsm::new(Toy::default(), S::B);
         hsm.post(E::SelfB);
         hsm.run();
         assert_eq!(hsm.state(), S::B);
-        // self-transition: LCA of B and B is B, so per local semantics nothing
-        // exits/enters here (LCA never exited). Leaf self-transition kept minimal.
+        // Self-transition: the LCA of B and B is B, and the LCA is never exited
+        // or re-entered (local semantics), so no action runs.
         assert!(hsm.machine().log.is_empty());
     }
 
@@ -333,8 +336,9 @@ mod tests {
 
     #[test]
     fn reminder_loop_terminates_under_rtc() {
-        // A state self-posts Tick from an action; RTC processes each before the
-        // next. We drive it by posting Tick three times (the machine logs each).
+        // RTC processes each posted Tick fully before the next. The driver posts
+        // Tick three times (as the runtime does for a machine's reminder flag);
+        // the machine logs each.
         let mut hsm = Hsm::new(Toy::default(), S::A);
         hsm.post(E::Tick);
         hsm.post(E::Tick);
