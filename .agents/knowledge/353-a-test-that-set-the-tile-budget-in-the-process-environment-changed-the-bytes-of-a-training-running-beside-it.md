@@ -25,9 +25,9 @@ tiling reorders its sums.
 
 ## What to do
 Tests scope the budget to their thread, with the thread-scoped
-`model::block::with_tile_budget_words`.
-`caps::tests::no_lib_test_publishes_the_tile_budget_through_the_process_environment` keeps the lib
-sources free of the write.
+`model::block::with_tile_budget_words`. Since commit 032492d01 the variable is gone altogether: the
+process-wide override is `model::block::set_tile_budget_words`, and
+`caps::tests::no_lib_test_forces_the_tile_budget_process_wide` keeps lib tests from calling it.
 
 Rule: a value another thread's numerics can read never goes through the process environment, even
 under `env_lock`.

@@ -11,7 +11,7 @@ type at both ends of the round trip, or about half the values silently fail to r
 Question: the server draws a fresh seed for an unseeded request and echoes it in the reply's `brain`
 object so the decode can be reproduced by sending it back. Does that hold for every seed it can
 draw? It did not. **VERIFIED-BY-TEST**
-(`crates/apiserve/src/sampling.rs`, `a_seed_the_model_drew_is_accepted_back_over_the_whole_u64_range`;
+(`crates/apiserve/src/sampling.rs`, `a_seed_is_any_unsigned_64_bit_integer_and_a_negative_one_is_refused_by_name`;
 `crates/catalog/tests/it/scheduled_batch.rs`).
 
 A trajectory recorder that trusted the echo therefore recorded the seed for half of the requests
