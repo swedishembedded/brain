@@ -79,6 +79,7 @@
 //!   feeding its result back in another turn - that is a separate, larger
 //!   piece of work (a real agent loop), not part of this contract.
 
+use std::ops::ControlFlow;
 use std::sync::Mutex;
 
 use capability::{Action, ActionResult, ActionSpec, Blob, BlobSpec, Invocation, Manifest, Media, Outcome, ParamSpec, ParamType, Progress, Provider};
@@ -496,7 +497,11 @@ impl Resident {
                 &mut rng,
                 |tok_id| {
                     ids.push(tok_id);
-                    seq.advance(&self.tok, &ids, progress);
+                    if seq.advance(&self.tok, &ids, progress) {
+                        ControlFlow::Break(())
+                    } else {
+                        ControlFlow::Continue(())
+                    }
                 },
             );
             Ok(seq.finish(&self.tok, &out_ids, progress)?.set("seed", json!(seed)))
@@ -509,7 +514,11 @@ impl Resident {
             progress(Progress::step(0, max_new, "generating"));
             let out_ids = self.model.generate_cb(&p.tokens, &p.image_inputs(), max_new, &p.eos, sample, &mut rng, |tok_id| {
                 ids.push(tok_id);
-                seq.advance(&self.tok, &ids, progress);
+                if seq.advance(&self.tok, &ids, progress) {
+                    ControlFlow::Break(())
+                } else {
+                    ControlFlow::Continue(())
+                }
             });
             Ok(seq.finish(&self.tok, &out_ids, progress)?.set("seed", json!(seed)))
         }
@@ -973,7 +982,7 @@ pub fn generate_profiled(
         // `qwen3vl_bench compare`'s tier-divergence numbers reproducible run
         // to run rather than confounded by sampling noise.
         let mut rng = data::rng::Rng::new(0);
-        let (ids, st) = hot.model.generate_timed(&p.tokens, &p.image_inputs(), max_new, &p.eos, crate::model::SampleParams::greedy(), &mut rng, |_| {});
+        let (ids, st) = hot.model.generate_timed(&p.tokens, &p.image_inputs(), max_new, &p.eos, crate::model::SampleParams::greedy(), &mut rng, |_| ControlFlow::Continue(()));
         debug_assert_eq!(st.visual_tokens, p.n_visual);
         Ok((hot.tok.decode(&ids), st, p.preprocess_s))
     })

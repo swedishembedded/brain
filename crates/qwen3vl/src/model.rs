@@ -12,6 +12,7 @@
 //! as is DeepStack and the vision backward for full-tower finetune).
 
 use std::collections::HashMap;
+use std::ops::ControlFlow;
 use std::time::Instant;
 
 use gpu_core::Gpu;
@@ -748,13 +749,15 @@ impl Qwen3Vl {
     /// `crates/qwen3/tests/deepstack_decode_parity.rs`).
     #[allow(clippy::too_many_arguments)]
     pub fn generate(&self, tokens: &[u32], images: &[ImageInput<'_>], max_new: u32, eos_ids: &[u32], sample: SampleParams, rng: &mut Rng) -> Vec<u32> {
-        self.generate_cb(tokens, images, max_new, eos_ids, sample, rng, |_| {})
+        self.generate_cb(tokens, images, max_new, eos_ids, sample, rng, |_| ControlFlow::Continue(()))
     }
 
     /// [`Self::generate`] with a per-token callback - the seam the served
     /// caps path uses to emit REAL streaming deltas (its ActionSpec declares
     /// `.streaming()`, which used to be satisfied by exactly two Progress
-    /// emissions around the whole decode; audit F11).
+    /// emissions around the whole decode; audit F11). `on_token` sees each
+    /// generated token and returns [`ControlFlow::Break`] to end the decode
+    /// there (a stop string, a fired cancel token).
     #[allow(clippy::too_many_arguments)]
     pub fn generate_cb(
         &self,
@@ -764,7 +767,7 @@ impl Qwen3Vl {
         eos_ids: &[u32],
         sample: SampleParams,
         rng: &mut Rng,
-        on_token: impl FnMut(u32),
+        on_token: impl FnMut(u32) -> ControlFlow<()>,
     ) -> Vec<u32> {
         self.generate_timed(tokens, images, max_new, eos_ids, sample, rng, on_token).0
     }
@@ -802,7 +805,7 @@ impl Qwen3Vl {
         eos_ids: &[u32],
         sample: SampleParams,
         rng: &mut Rng,
-        on_token: impl FnMut(u32),
+        on_token: impl FnMut(u32) -> ControlFlow<()>,
     ) -> (Vec<u32>, StageTimes) {
         let mut st = StageTimes { prompt_tokens: tokens.len() as u32, ..StageTimes::default() };
         let d_model = self.decoder.cfg.d_model as usize;
@@ -903,7 +906,7 @@ impl Qwen3Vl {
         eos_ids: &[u32],
         sample: SampleParams,
         rng: &mut Rng,
-        on_token: impl FnMut(u32),
+        on_token: impl FnMut(u32) -> ControlFlow<()>,
     ) -> (Vec<u32>, StageTimes) {
         let mut st = StageTimes { prompt_tokens: tokens.len() as u32, ..StageTimes::default() };
         let (gh, gw) = grid;
@@ -970,7 +973,7 @@ impl Qwen3Vl {
         eos_ids: &[u32],
         sample: SampleParams,
         rng: &mut Rng,
-        on_token: impl FnMut(u32),
+        on_token: impl FnMut(u32) -> ControlFlow<()>,
     ) -> Vec<u32> {
         self.generate_video_timed(tokens, grid, n_frames, pixels, video_token_id, frame_timestamps_s, tokens_per_second, max_new, eos_ids, sample, rng, on_token)
             .0
@@ -998,7 +1001,7 @@ impl Qwen3Vl {
         eos_ids: &[u32],
         sample: SampleParams,
         rng: &mut Rng,
-        mut on_token: impl FnMut(u32),
+        mut on_token: impl FnMut(u32) -> ControlFlow<()>,
     ) -> (Vec<u32>, f64, f64, f64) {
         let d_model = self.decoder.cfg.d_model as usize;
         let n_visual = visual.len().checked_div(d_model).unwrap_or(0);
@@ -1055,7 +1058,9 @@ impl Qwen3Vl {
                 break;
             }
             out.push(next);
-            on_token(next);
+            if on_token(next).is_break() {
+                break;
+            }
             let t_step = Instant::now();
             let (cos, sin) = mrope_tables(&[[next_pos; 3]], self.mrope_section, self.decoder.cfg.head_dim, self.decoder.cfg.rope_theta);
             self.decoder.prefill_mrope(qwen3::model::PrefillInput::Token(next), &cos, &sin, None);
@@ -2112,7 +2117,7 @@ mod tests {
 
         let max_new = 5u32;
         let mut gen_rng1 = Rng::new(random_seed());
-        let out1 = model.generate_video_cb(&tokens, (2, 2), n_frames, &pixels, VIDEO, &frame_timestamps_s, 1.0, max_new, &[], SampleParams::greedy(), &mut gen_rng1, |_| {});
+        let out1 = model.generate_video_cb(&tokens, (2, 2), n_frames, &pixels, VIDEO, &frame_timestamps_s, 1.0, max_new, &[], SampleParams::greedy(), &mut gen_rng1, |_| ControlFlow::Continue(()));
         assert!(!out1.is_empty(), "generate_video_cb produced no tokens");
         assert!(out1.len() as u32 <= max_new, "generate_video_cb exceeded max_new");
         for &t in &out1 {
@@ -2121,8 +2126,14 @@ mod tests {
 
         // Greedy + no RNG: a second call must reproduce the same sequence.
         let mut gen_rng2 = Rng::new(random_seed());
-        let out2 = model.generate_video_cb(&tokens, (2, 2), n_frames, &pixels, VIDEO, &frame_timestamps_s, 1.0, max_new, &[], SampleParams::greedy(), &mut gen_rng2, |_| {});
+        let out2 = model.generate_video_cb(&tokens, (2, 2), n_frames, &pixels, VIDEO, &frame_timestamps_s, 1.0, max_new, &[], SampleParams::greedy(), &mut gen_rng2, |_| ControlFlow::Continue(()));
         assert_eq!(out1, out2, "greedy video generation must be deterministic");
+
+        // A callback that breaks ends the decode at the token it was handed:
+        // that is how a fired cancel token stops a reply (`caps`' `SeqState`).
+        let mut gen_rng3 = Rng::new(random_seed());
+        let stopped = model.generate_video_cb(&tokens, (2, 2), n_frames, &pixels, VIDEO, &frame_timestamps_s, 1.0, max_new, &[], SampleParams::greedy(), &mut gen_rng3, |_| ControlFlow::Break(()));
+        assert_eq!(stopped, out1[..1], "a breaking callback must stop the decode after the token it saw");
 
         // Different real timestamp spacing changes the ACTUAL positions this
         // path computes -- the property `crate::mrope::get_rope_index_video`'s
