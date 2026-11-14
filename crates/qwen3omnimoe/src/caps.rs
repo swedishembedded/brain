@@ -203,15 +203,21 @@ pub fn direct_manifest() -> Manifest {
 /// action and stays loaded; `import` runs without it.
 pub fn provider(assembly: &capability::Assembly) -> Result<Arc<dyn Provider>, String> {
     let dir = assembly.roles.get("weights").map(|p| p.to_string_lossy().into_owned());
-    Ok(Arc::new(DirectProvider { dir, loaded: std::sync::OnceLock::new() }))
+    Ok(Arc::new(DirectProvider { model: Arc::new(DeferredModel { dir, loaded: std::sync::OnceLock::new() }) }))
 }
 
 struct DirectProvider {
+    model: Arc<DeferredModel>,
+}
+
+/// The checkpoint a [`DirectProvider`] serves, loaded by the first action
+/// that runs (never by looking an action up) and kept.
+struct DeferredModel {
     dir: Option<String>,
     loaded: std::sync::OnceLock<Result<Arc<OmniProvider>, String>>,
 }
 
-impl DirectProvider {
+impl DeferredModel {
     fn model(&self) -> Result<Arc<OmniProvider>, String> {
         self.loaded
             .get_or_init(|| {
@@ -231,15 +237,16 @@ impl Provider for DirectProvider {
             return Some(Arc::new(ImportAction));
         }
         resolve_action(name).ok()?;
-        Some(Arc::new(DeferredAction { name: name.to_string(), spec: direct_manifest().actions.into_iter().find(|a| a.name == name)?, provider: self.model() }))
+        Some(Arc::new(DeferredAction { name: name.to_string(), spec: direct_manifest().actions.into_iter().find(|a| a.name == name)?, model: self.model.clone() }))
     }
 }
 
-/// A served action whose model failed to load reports why when it runs.
+/// A served action over the deferred model: it loads on the first run, and
+/// one whose model failed to load reports why when it runs.
 struct DeferredAction {
     name: String,
     spec: ActionSpec,
-    provider: Result<Arc<OmniProvider>, String>,
+    model: Arc<DeferredModel>,
 }
 
 impl Action for DeferredAction {
@@ -247,7 +254,9 @@ impl Action for DeferredAction {
         self.spec.clone()
     }
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        let provider = self.provider.clone()?;
+        // Before the checkpoint loads: a cancelled request loads nothing.
+        inv.cancel.check()?;
+        let provider = self.model.model()?;
         run_action(&provider.inner(), &self.name, inv, progress)
     }
 }
@@ -259,6 +268,7 @@ impl Action for ImportAction {
         import_spec()
     }
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         let source = inv.get_str("source").ok_or("qwen3omnimoe import: missing required param 'source'")?;
         let dest = inv.get_str("dest").ok_or("qwen3omnimoe import: missing required param 'dest'")?;
         progress(Progress::step(0, 1, format!("converting {source}")));
@@ -770,6 +780,7 @@ impl Action for SpeakAction {
         speak_spec()
     }
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         // Client text cannot spell a control token (`Invocation::escape_client_text`).
         let inv = &inv.escape_client_text(&|text| self.inner.tok.escape_untrusted(text));
         let user_text = last_user_text(inv);
@@ -807,6 +818,7 @@ impl Action for ConverseAction {
         converse_spec()
     }
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         // Client text cannot spell a control token (`Invocation::escape_client_text`).
         let inv = &inv.escape_client_text(&|text| self.inner.tok.escape_untrusted(text));
         let prompt = last_user_text(inv);

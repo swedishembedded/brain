@@ -822,9 +822,10 @@ impl Instance for Int8ThinkerInstance {
     ///
     /// The `ids` blob is what selects between them, so an existing raw caller
     /// is unaffected by the chat shape existing.
-    fn run(&mut self, action: &str, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
+    fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         match action {
-            "generate" if inv.get_blob("ids").is_none() => self.generate_chat(inv, _progress),
+            "generate" if inv.get_blob("ids").is_none() => self.generate_chat(inv, progress),
             "forward" => {
                 let blob = inv.get_blob("x").ok_or_else(|| format!("{MODEL}: missing 'x' blob"))?;
                 let n = blob.meta.get("n").and_then(|v| v.as_u64()).ok_or_else(|| format!("{MODEL}: 'x' blob missing meta.n"))? as u32;
@@ -843,7 +844,10 @@ impl Instance for Int8ThinkerInstance {
                     .and_then(|v| v.as_array())
                     .map(|a| a.iter().filter_map(|v| v.as_u64()).map(|v| v as u32).collect())
                     .unwrap_or_default();
-                let out = self.generate(&prompt_ids, max_new_tokens, &eos_ids);
+                // Polled after every generated token; the raw contract has no partial answer, so a stopped
+                // decode is the cancelled error.
+                let out = self.generate_sampled(&prompt_ids, max_new_tokens, &eos_ids, &mut TokenPicker::greedy(), &mut |_| inv.cancel.is_cancelled()).tokens;
+                inv.cancel.check()?;
                 let bytes: Vec<u8> = out.iter().flat_map(|t| t.to_le_bytes()).collect();
                 Ok(Outcome::new().blob("ids", Blob::new(Media::Bytes, bytes).with_meta(serde_json::json!({"n": out.len()}))))
             }
