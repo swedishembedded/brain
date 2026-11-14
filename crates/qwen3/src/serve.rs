@@ -2440,7 +2440,7 @@ impl Engine {
     /// sources. `brain --no-autotune` skips every measurement (static policy).
     fn tune_i8(gpu: &Gpu, caps: &DeviceCaps, weights: &HashMap<String, Weight>, scratch: &I8Scratch, max_rows: u32) -> HashMap<(u32, u32, u32), KernelVariant> {
         let fp = gpu_core::tune::source_fingerprint(&[kernels::MATMUL_I8_GEMV, kernels::MATMUL_I8_DYN, &I8_TILE_TN.to_string()]);
-        let store = gpu_core::tune::FileTuneStore::for_adapter(fp)
+        let store = gpu_core::tune::FileTuneStore::for_device(gpu, fp)
             .map(|s| Box::new(s) as Box<dyn gpu_core::select::TuneStore>);
         let tuner = AutoTuner::new(store);
         // Distinct (n, k) shapes across every `I8` weight this engine holds
@@ -2455,7 +2455,7 @@ impl Engine {
             }
         }
         let mut out = HashMap::new();
-        let device = gpu_core::adapter_info().map(|(desc, _)| desc).unwrap_or_default();
+        let device = gpu_core::tune::device_slug(gpu).unwrap_or_else(|| gpu.kind().to_owned());
         let cap_bucket = max_rows.next_power_of_two().min(DECODE_REGIME_MAX_ROWS);
         for &m in &[1u32, 2, 4, 8, 16, 32] {
             if m > cap_bucket {
@@ -2536,7 +2536,7 @@ impl Engine {
     /// candidate-generator level.
     fn tune_splitk(gpu: &Gpu, weights: &HashMap<String, Weight>, splitk_part: &DeviceBuffer, splitk_cap: u64, max_rows: u32) -> HashMap<(u32, u32, u32), Schedule> {
         let fp = gpu_core::tune::source_fingerprint(&[kernels::MATMUL_REG3_SPLITK, kernels::DW_SPLITK_REDUCE]);
-        let store = gpu_core::tune::FileTuneStore::for_adapter(fp)
+        let store = gpu_core::tune::FileTuneStore::for_device(gpu, fp)
             .map(|s| Box::new(s) as Box<dyn gpu_core::select::TuneStore>);
         let tuner = AutoTuner::new(store);
         // Distinct [n, k] shapes across every fp32 linear this engine holds.

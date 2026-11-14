@@ -3,7 +3,7 @@
 
 //! File-backed persistence for measured kernel choices (S5).
 //!
-//! Keyed by adapter identity plus a caller-supplied fingerprint of the kernel
+//! Keyed by the device ([`device_slug`]: backend and physical card) plus a caller-supplied fingerprint of the kernel
 //! sources being chosen between — edit a candidate kernel and the old winners
 //! stop applying by *filename*, rather than by trusting stale measurements.
 //! A missing or unparseable file is ignored, never trusted; writes are atomic
@@ -47,16 +47,38 @@ pub fn cache_dir() -> Option<PathBuf> {
     backend_api::cache_dir()
 }
 
+/// The name a device's measured choices are filed under: its backend, and the physical card where the backend
+/// reports one (the per-card slug the roofline store uses), else the adapter this process selected. `None` when
+/// nothing names the device.
+///
+/// Candidates that round differently make the choice part of what a served model computes, so it has to survive a
+/// restart: a device whose choices lived in process memory only measured them again on every launch, and timing
+/// noise could then pick another reduction order for the same shape (greedy output changed between two launches of
+/// one binary).
+pub fn device_slug(gpu: &crate::Gpu) -> Option<String> {
+    let identity = gpu.identity();
+    let name = match &identity {
+        Some(id) => id.name.clone(),
+        None => crate::adapter_info()?.0,
+    };
+    let mut slug: String = format!("{name}-{}", gpu.kind()).chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
+    if let Some(id) = &identity {
+        slug.push('-');
+        slug.push_str(&crate::roof::identity_slug(id));
+    }
+    Some(slug)
+}
+
 impl FileTuneStore {
-    /// The store for the adapter this process selected. `None` when no wgpu
-    /// adapter was recorded (pure CPU / native-Vulkan runs then tune per
-    /// process, memo-only) or there is nowhere to persist.
-    pub fn for_adapter(source_hash: u64) -> Option<FileTuneStore> {
-        let (desc, _) = crate::adapter_info()?;
-        let dir = cache_dir()?;
-        let slug: String =
-            desc.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
-        let path = dir.join(format!("tune-{slug}-{source_hash:016x}.txt"));
+    /// The store of the device `gpu` runs on ([`device_slug`]) in the cache directory. `None` when nothing names the
+    /// device or there is nowhere to persist; the choices are then made per process, memo-only.
+    pub fn for_device(gpu: &crate::Gpu, source_hash: u64) -> Option<FileTuneStore> {
+        Self::in_dir(&cache_dir()?, gpu, source_hash)
+    }
+
+    /// [`Self::for_device`] with its file under `dir`.
+    pub fn in_dir(dir: &std::path::Path, gpu: &crate::Gpu, source_hash: u64) -> Option<FileTuneStore> {
+        let path = dir.join(format!("tune-{}-{source_hash:016x}.txt", device_slug(gpu)?));
         let mut map = HashMap::new();
         if let Ok(text) = std::fs::read_to_string(&path) {
             for line in text.lines() {

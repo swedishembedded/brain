@@ -1544,8 +1544,8 @@ mod native_facade {
 
         /// Stable identity of the PHYSICAL card this handle runs on - see
         /// `backend_api::GpuIdentity`. `None` where the backend has not been
-        /// wired to expose one (today: everything except `backend-wgpu`), in
-        /// which case a per-device consumer must treat every handle on that
+        /// wired to expose one (today: everything except `backend-wgpu` and
+        /// `backend-cuda`), in which case a per-device consumer must treat every handle on that
         /// backend as one shared device - the same process-wide,
         /// first-device-wins behaviour every backend had before this existed.
         pub fn identity(&self) -> Option<backend_api::GpuIdentity> {

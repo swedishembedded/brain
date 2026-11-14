@@ -795,10 +795,17 @@ Open, with the measured reason:
 - [ ] The decode-regime bound `DECODE_REGIME_MAX_ROWS` = 32 sends 33..64-row products (short prompts' prefill rounds at
       C = 16) to the split-K tiled GEMM, 19 % of a C = 16 run.
 - [ ] Small per-layer kernels (13 % of single-stream decode device time) are launch-sized on Pascal: fusion candidates.
-- [ ] Greedy output at temperature 0 differs between server launches of the same binary (one of six fixed prompts, in
-      both the before and after binaries, 96 tokens); within a launch single-stream and batched agree except where the
-      attention split depends on the batch (`--exact-decode` is refused by the family). Suspected: the split-K schedule the
-      engine measures at build (`tune_splitk`) changes the prefill GEMM's reduction order per launch; unconfirmed.
+- [x] Greedy output at temperature 0 differed between server launches of the same binary (one of six fixed prompts, in
+      both the before and after binaries, 96 tokens). Cause: the measured kernel choices (`tune_splitk`'s split-K slice
+      count, `tune_i8`'s GEMV against the tile, candidates whose reductions round differently) were persisted under the
+      wgpu adapter's name, and a CUDA-backend process records no wgpu adapter, so the store was `None` and every launch
+      measured them again; a near tie then picked another reduction order for a prefill GEMM. The cache directory held no
+      CUDA tune file before the change and one after (16 split-K choices for Qwen3-0.6B, six of them away from the static
+      guess, so measurement does decide them). The store is now keyed by the device (`gpu_core::tune::device_slug`: backend
+      and physical card), so the first launch's choice is the one every later launch reads (gate
+      `tune_store::a_choice_saved_on_a_device_is_read_back_by_a_later_store_for_it`). Nine fixed prompts (three past the
+      32-row decode regime, so split-K is reached) over three fresh launches: identical. The base did not reproduce the
+      difference in four launches either, so the closure rests on the mechanism, not on a before/after of the symptom.
 - [ ] The window boundary still costs the card a readback, the SSE write and the metadata upload (1-2 ms a window idle, up to
       20 ms under host contention), and launching a 509-node graph costs the host about 2 ms on a P40.
 - [ ] Pre-existing failures met on the way (not caused by these changes): `serve::rollout_tests::

@@ -68,6 +68,7 @@ mod i8_dyn_native_bench;
 mod i8_gemv_batched_variants;
 mod i8_gemv_multi_native;
 mod i8_gemv_native;
+mod tune_store;
 mod i8_gemv_native_bench;
 mod i8_gemv_reg_upgrade;
 mod kernel_catalog_validation;
