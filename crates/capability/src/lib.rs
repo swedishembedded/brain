@@ -269,6 +269,14 @@ pub struct ActionSpec {
     pub outputs: Vec<BlobSpec>,
     /// Whether the action emits progress updates while running.
     pub streaming: bool,
+    /// Whether the action observes its invocation's [`CancelToken`]: it
+    /// checks the token on entry, before any weight is read or lock taken,
+    /// and at least once per bounded unit of work (one decode token, one
+    /// denoise step, one optimizer step, one tile), and stops with the
+    /// contract's terminal shape. A one-shot action meets it with the entry
+    /// check plus size-bounded inputs. `false` means firing the token changes
+    /// nothing and the caller waits for the run to finish.
+    pub cancellable: bool,
     /// How this action should be presented and what encodings it accepts -
     /// see [`presentation`]. Same all-absent default as
     /// [`Manifest::presentation`].
@@ -297,6 +305,7 @@ impl ActionSpec {
             inputs: Vec::new(),
             outputs: Vec::new(),
             streaming: false,
+            cancellable: false,
             presentation: ActionPresentation::default(),
             video: None,
             training: false,
@@ -329,6 +338,11 @@ impl ActionSpec {
         self.streaming = true;
         self
     }
+    /// Builder setter for [`Self::cancellable`].
+    pub fn cancellable(mut self) -> ActionSpec {
+        self.cancellable = true;
+        self
+    }
     /// Builder setter for [`Self::training`].
     pub fn training(mut self) -> ActionSpec {
         self.training = true;
@@ -346,7 +360,7 @@ impl ActionSpec {
     }
     pub fn to_json(&self) -> Value {
         let mut v = json!({
-            "name": self.name, "summary": self.summary, "streaming": self.streaming,
+            "name": self.name, "summary": self.summary, "streaming": self.streaming, "cancellable": self.cancellable,
             "params": self.params.iter().map(|p| p.to_json()).collect::<Vec<_>>(),
             "inputs": self.inputs.iter().map(|b| b.to_json()).collect::<Vec<_>>(),
             "outputs": self.outputs.iter().map(|b| b.to_json()).collect::<Vec<_>>(),
@@ -639,18 +653,13 @@ impl Blob {
 ///    (files written, a checkpoint saved mid-training) disappear. An action with
 ///    side effects documents its own cancellation semantics on top of this.
 ///
-/// # The gap, named
+/// # Which actions observe it
 ///
-/// A token rides on EVERY invocation, whether or not the action looks at it,
-/// and a [`Manifest`] does not say which. So a caller that builds request
-/// lifetime on cancellation - "the consumer went away, stop the work" - cannot
-/// discover from the interface that a particular model will run to `max_new`
-/// regardless; it just waits. Several models in this workspace do exactly that
-/// today, and the ratchet in `scripts/gates/check-cancellable-actions.sh` names
-/// them and stops the list growing. What would close it properly is a declared
-/// bit on [`ActionSpec`] (`cancellable`, alongside `streaming`), so the answer
-/// travels with the manifest to every remote surface instead of living in a
-/// build gate.
+/// A token rides on EVERY invocation, whether or not the action looks at it.
+/// [`ActionSpec::cancellable`] is the declaration that it does, and it
+/// travels with the manifest to every remote surface, so a caller that builds
+/// request lifetime on cancellation ("the consumer went away, stop the work")
+/// can tell from the interface which actions will stop.
 #[derive(Clone, Debug, Default)]
 pub struct CancelToken(Option<Arc<AtomicBool>>);
 
@@ -1439,6 +1448,19 @@ mod tests {
         inv.cancel = t;
         let inv = Poller.spec().validate(inv).unwrap();
         assert!(inv.cancel.is_cancelled());
+    }
+
+    /// The manifest says whether an action observes its token, on every
+    /// remote surface (`to_json` is what D-Bus and `brain caps --json` emit),
+    /// and says so as `false` too: absent would read as unknown.
+    #[test]
+    fn an_action_declares_whether_it_observes_cancellation() {
+        assert!(!ActionSpec::new("a", "a").cancellable);
+        assert_eq!(ActionSpec::new("a", "a").to_json()["cancellable"], json!(false));
+        let spec = ActionSpec::new("a", "a").cancellable();
+        assert!(spec.cancellable);
+        assert_eq!(spec.to_json()["cancellable"], json!(true));
+        assert!(spec.for_serving().cancellable, "the served projection keeps the declaration");
     }
 
     #[test]

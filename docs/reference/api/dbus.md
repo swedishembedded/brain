@@ -93,9 +93,10 @@ it, every reasoning and tool-call marker included, ending with the stop token
 prose from one whose tool call was lost.
 
 `Cancel(job)` takes the job id `Subscribe` returned and asks that job to stop.
-Cancellation is cooperative: a long-running action checks for it between steps
-(denoising steps, training steps) and aborts, which arrives as the stream's terminal
-`error` frame (`"cancelled"`). Returns `true` if the job was still in flight, `false`
+Cancellation is cooperative: an action whose manifest entry says `"cancellable": true`
+checks for it on entry and between steps (decode tokens, denoising steps, training
+steps) and aborts, which arrives as the stream's terminal `error` frame
+(`"cancelled"`). Returns `true` if the job was still in flight, `false`
 for an unknown or already-finished id.
 
 ### `StreamTranscribe` — continuous input

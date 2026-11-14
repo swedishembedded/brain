@@ -199,6 +199,7 @@ async fn list(State(state): State<AppState>) -> Json<Value> {
                     "action": action.name,
                     "summary": action.summary,
                     "streaming": action.streaming,
+                    "cancellable": action.cancellable,
                     "params": params,
                     "inputs": action.inputs.iter().map(|b| json!({"name": b.name, "media": b.media.name(), "required": b.required})).collect::<Vec<_>>(),
                     "outputs": action.outputs.iter().map(|b| json!({"name": b.name, "media": b.media.name()})).collect::<Vec<_>>(),

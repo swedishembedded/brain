@@ -302,8 +302,9 @@ segmentation, music, video, 3D) is reached through three dialect-neutral routes,
 present on every surface and behind the same key, hooks and admission:
 
 - `GET /v1/capabilities` lists every model's every action with its contract: params
-  (type, default, range, allowed values), blob inputs and blob outputs. Clients are
-  generated from it.
+  (type, default, range, allowed values), blob inputs and blob outputs, whether it
+  streams progress (`streaming`) and whether it stops when cancelled (`cancellable`).
+  Clients are generated from it.
 - `GET /v1/devices` lists the devices the server schedules work on, as `{"object": "list", "host": {...}, "data":
   [...]}`. Each entry has `id` (`cpu`, `gpu<i>`, `npu<i>`: the names `--device` takes), `kind` and `memory`
   (`total_bytes`, `reserved_bytes` held back by the operator, `used_bytes` held by resident models and runs,
@@ -315,8 +316,8 @@ present on every surface and behind the same key, hooks and admission:
 - `POST /v1/jobs` starts one in the background, for work too long to hold a request
   open. `GET /v1/jobs/{id}` reports `running` (with `progress.step` / `progress.total`),
   `succeeded`, `failed` or `cancelled`; `GET /v1/jobs/{id}/result` returns the result
-  once it exists (409 while it is running); `DELETE /v1/jobs/{id}` cancels it, and the
-  running action sees the cancellation. `GET /v1/jobs/{id}/events` follows it as
+  once it exists (409 while it is running); `DELETE /v1/jobs/{id}` cancels it, and a
+  `cancellable` action stops at its next step. `GET /v1/jobs/{id}/events` follows it as
   server-sent events: a `progress` event per step tick, a `frame` event per structured
   frame the action reports (a training step's loss and statistics), and one `done`
   event with the final status. The last 4096 frames are kept, and `Last-Event-ID`

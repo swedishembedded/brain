@@ -114,6 +114,7 @@ fn slow_manifest() -> Manifest {
         "a video model",
         vec![ActionSpec::new("render", "render a clip")
             .streaming()
+            .cancellable()
             .param(ParamSpec::new("steps", ParamType::Int, "steps").default(json!(10)).max(1000.0))
             .output(BlobSpec::new("video", Media::Video, "the clip"))],
     )
@@ -345,6 +346,8 @@ async fn the_catalogue_lists_every_action_with_its_contract() {
     assert_eq!(transcribe["streaming"], false);
     let render = entries.iter().find(|e| e["action"] == "render").expect("render is listed");
     assert_eq!(render["streaming"], true);
+    assert_eq!(render["cancellable"], true, "an action that observes its token says so");
+    assert_eq!(transcribe["cancellable"], false, "and one that does not says that too");
 }
 
 /// The devices the executor schedules on are listed with their memory as it accounts it; the host adds what each one
