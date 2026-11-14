@@ -38,7 +38,7 @@
   {\fontsize{24}{28}\selectfont\bfseries}
   [\vspace{4pt}{\color{accent}\titlerule[1.2pt]}]
 \titleformat{name=\chapter,numberless}[display]
-  {\displayfont\color{ink}}{}{0pt}
+  {\raggedright\displayfont\color{ink}}{}{0pt}
   {\fontsize{24}{28}\selectfont\bfseries}
   [\vspace{4pt}{\color{accent}\titlerule[1.2pt]}]
 \titlespacing*{\chapter}{0pt}{0pt}{22pt}
@@ -74,15 +74,26 @@
 % A long chapter or section title is cut with an ellipsis rather than
 % allowed to run past the text block on either page.
 \usepackage[fit]{truncate}
-\fancyhead[LE]{\displayfont\footnotesize\color{muted}\truncate{\headwidth}{\nouppercase{\leftmark}}}
-\fancyhead[RO]{\displayfont\footnotesize\color{muted}\truncate[\,\dots]{\headwidth}{\hfill\nouppercase{\rightmark}}}
-\fancyfoot[LE,RO]{\displayfont\footnotesize\color{muted}\thepage}
-\renewcommand{\headrulewidth}{0pt}
-\renewcommand{\footrulewidth}{0pt}
-\fancypagestyle{plain}{%
-  \fancyhf{}%
+% Every page carries the chapter title at its outer edge and the author's
+% name (\bookauthor, set by the build from book.yaml) at its inner edge.
+\providecommand{\bookauthor}{}
+\newcommand{\runninghead}{%
+  \fancyhead[LE]{\displayfont\footnotesize\color{muted}\truncate{0.7\headwidth}{\nouppercase{\leftmark}}}%
+  \fancyhead[RE]{\displayfont\footnotesize\color{muted}\bookauthor}%
+  \fancyhead[LO]{\displayfont\footnotesize\color{muted}\bookauthor}%
+  \fancyhead[RO]{\displayfont\footnotesize\color{muted}\truncate[\,\dots]{0.7\headwidth}{\hfill\nouppercase{\leftmark}}}%
   \fancyfoot[LE,RO]{\displayfont\footnotesize\color{muted}\thepage}%
 }
+\runninghead
+\renewcommand{\headrulewidth}{0pt}
+\renewcommand{\footrulewidth}{0pt}
+\fancypagestyle{plain}{\fancyhf{}\runninghead}
+% The blank page that \cleardoublepage inserts before a right-hand page
+% stays blank: no running head on a page with nothing on it.
+\makeatletter
+\renewcommand{\cleardoublepage}{\clearpage\if@twoside\ifodd\c@page\else
+  \hbox{}\thispagestyle{empty}\newpage\if@twocolumn\hbox{}\newpage\fi\fi\fi}
+\makeatother
 
 % -- Text blocks -------------------------------------------------------------
 % Quotations carry the chapter's guiding question and set-off remarks.

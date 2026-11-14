@@ -41,6 +41,11 @@ from bookspec import BOOK, ROOT, load  # noqa: E402
 
 OUT = ROOT / "build" / "book"
 ABOUT = "about-the-author.md"
+# The author's portrait: a full page before the contents, captioned with the
+# author's name, and again under the heading of the author page, sized so that
+# page stays one page. Grayscale JPEG, the smallest format xelatex reads for a
+# photograph.
+AUTHOR_PHOTO = BOOK / "img" / "author.jpg"
 ROMAN = ["I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X", "XI", "XII", "XIII", "XIV", "XV", "XVI"]
 
 spec = importlib.util.spec_from_file_location("build_docs", ROOT / "docs" / "pandoc" / "build-docs.py")
@@ -60,7 +65,12 @@ def page(rel: str, unnumbered=False, drop_title=False) -> str:
     if drop_title:
         text = re.sub(r"^# .*\n", "", text, count=1, flags=re.M)
     elif unnumbered:
-        text = re.sub(r"^(# .*)$", r"\1 {-}", text, count=1, flags=re.M)
+        # A starred chapter does not update the running head, so the page
+        # sets it to its own title instead of the previous chapter's.
+        m = re.search(r"^# (.*)$", text, flags=re.M)
+        if m:
+            mark = latex(rf"\markboth{{{tex(m.group(1))}}}{{}}")
+            text = f"{text[:m.start()]}# {m.group(1)} {{-}}\n\n{mark}{text[m.end():].lstrip()}"
     return docs.transform(f"docs/book/{rel}", text).strip() + "\n\n"
 
 
@@ -80,6 +90,7 @@ def title_header(book, out: Path, title: str, subtitle: str) -> Path:
     rev = subprocess.run(["git", "rev-parse", "--short=9", "HEAD"], cwd=ROOT,
                          capture_output=True, text=True).stdout.strip() or "unknown"
     out.write_text(rf"""\makeatletter
+\renewcommand{{\bookauthor}}{{{tex(book.author)}}}
 \renewcommand{{\maketitle}}{{%
   \begin{{titlepage}}\raggedright
     \vspace*{{0.12\textheight}}
@@ -111,10 +122,48 @@ def title_header(book, out: Path, title: str, subtitle: str) -> Path:
     Published by Swedish Embedded AB, Sweden.
     \href{{https://swedishembedded.com}}{{swedishembedded.com}}\par}}
   \cleardoublepage
+  {portrait_page(book)}
 }}
 \makeatother
 """, encoding="utf-8")
     return out
+
+
+def portrait_page(book) -> str:
+    """A page of its own with the author's portrait and name under it, or
+    nothing when the photograph is absent."""
+    if not AUTHOR_PHOTO.is_file():
+        return ""
+    return rf"""\thispagestyle{{empty}}
+  \vspace*{{\fill}}
+  \begin{{center}}
+    \includegraphics[width=\linewidth,height=0.86\textheight,keepaspectratio]{{{AUTHOR_PHOTO}}}\par\vspace{{14pt}}
+    {{\displayfont\Large\color{{ink}} {tex(book.author)}\par}}
+  \end{{center}}
+  \vspace*{{\fill}}
+  \cleardoublepage"""
+
+
+def about_page() -> str:
+    """The author page, with the portrait under its heading."""
+    text = page(ABOUT, unnumbered=True)
+    if not AUTHOR_PHOTO.is_file():
+        return text
+    head, sep, body = text.partition("\n\n")
+    photo = latex(rf"\begin{{center}}\includegraphics[height=0.42\textheight]{{{AUTHOR_PHOTO}}}\end{{center}}")
+    return head + sep + photo + body
+
+
+def volume_title_page(volume) -> str:
+    """The title of a volume on a page of its own, for a volume's PDF; its
+    introduction starts on the next page under the same running head."""
+    intro = (BOOK / volume.intro_rel).read_text(encoding="utf-8")
+    title = tex(re.search(r"^# (.*)$", intro, flags=re.M).group(1))
+    return latex(
+        rf"\cleardoublepage\thispagestyle{{empty}}\vspace*{{0.28\textheight}}"
+        rf"{{\raggedright\displayfont\fontsize{{28}}{{34}}\selectfont\bfseries\color{{ink}} {title}\par}}"
+        rf"\vspace{{10pt}}{{\color{{accent}}\rule{{\linewidth}}{{1.2pt}}}}"
+        rf"\addcontentsline{{toc}}{{chapter}}{{{title}}}\markboth{{{title}}}{{}}\cleardoublepage")
 
 
 def build_markdown(book, out: Path, title: str, subtitle: str, volume=None) -> Path:
@@ -133,7 +182,8 @@ toc-title: "Contents"
     parts.append(latex("\\frontmatter\\setcounter{secnumdepth}{-2}"))
     parts += [page(rel, unnumbered=True) for rel in book.front]
     if volume is not None:
-        parts.append(page(volume.intro_rel, unnumbered=True))
+        parts.append(volume_title_page(volume))
+        parts.append(page(volume.intro_rel, drop_title=True))
     parts.append(latex("\\mainmatter\\setcounter{secnumdepth}{3}"))
     for v in [volume] if volume is not None else book.volumes:
         written = [ch for ch in v.chapters if ch.written]
@@ -150,7 +200,7 @@ toc-title: "Contents"
     parts.append(latex("\\appendix"))
     parts += [page(rel) for rel in back if rel != ABOUT]
     parts.append(latex("\\backmatter"))
-    parts += [page(rel, unnumbered=True) for rel in back if rel == ABOUT]
+    parts += [about_page() for rel in back if rel == ABOUT]
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text("".join(parts), encoding="utf-8")
     print(f"wrote {out.relative_to(ROOT)} ({out.stat().st_size // 1024} KiB)")
