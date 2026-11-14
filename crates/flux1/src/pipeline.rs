@@ -6,9 +6,10 @@
 //! Mirrors `sdxlunet::pipeline::Sdxl` and `flux2::pipeline::Pipeline`'s shape
 //! (build the conditioning towers, denoise, VAE decode) but is its own loop:
 //! FLUX.1 conditions on T5-XXL context + a CLIP-L pooled vector (not FLUX.2's
-//! Qwen3 taps), has no undistilled base variant (so no CFG branch at all -
-//! `dev`/`kontext-dev` fold a guidance SCALAR into the conditioning via
-//! `guidance_in`, `schnell` ignores it), and its 16-channel VAE uses the
+//! Qwen3 taps), has no undistilled base variant (`dev`/`kontext-dev` fold a
+//! guidance SCALAR into the conditioning via `guidance_in`, `schnell` ignores
+//! it; true classifier-free guidance is an opt-in second forward per step,
+//! [`GenerateOptions::true_cfg`]), and its 16-channel VAE uses the
 //! model's own scalar `(shift_factor, scaling_factor)` affine, NOT
 //! `vae::latent::pack`/`unpack` (that module is explicitly FLUX.2's
 //! BatchNorm-based packing - reusing it here would silently apply the wrong
