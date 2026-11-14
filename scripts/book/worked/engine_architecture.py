@@ -113,10 +113,10 @@ def class_routing():
     head = ("The scan lowercases the class name and returns the first of the family strings "
             + ", ".join(f"`{f}`" for f in SCAN_ORDER) + " (in this order) that it contains; the second scan column "
             "tries them in the order " + ", ".join(f"`{f}`" for f in SCAN_ORDER_OMNI_LAST) + ". A family string names "
-            "one importer. The exact lookups read this excerpt of the registry, one row per id with its class names: "
+            "one importer. The exact lookups read this excerpt of the registry, one row per id with its names, which are class names and, where there is a second lowercase spelling, the `model_type` string: "
             + excerpt + ". The class lookup answers only when exactly one row lists the class; the class and "
             "configuration lookup also keeps only the rows whose probe agrees with the configuration's keys, and "
-            "answers when exactly one remains. Text comparison is exact and case-sensitive.\n\n")
+            "answers when exactly one remains; a probe is satisfied when the configuration's key set contains the probed key, and the only configuration used is the key set {`gen_head_config`} in the row that has it and the empty set otherwise. Text comparison is exact and case-sensitive.\n\n")
     rows = []
     for cls, keys in CLASS_QUERIES:
         name = f"`{cls}`" + (" with " + ", ".join(f"`{k}`" for k in keys) if keys else "")
@@ -297,8 +297,8 @@ def layer_check():
 
 
 def change_reach():
-    head = ("For today's thirteen-crate graph of the previous table. A crate's closure is every crate it depends on, "
-            "directly or through others; its reach is every crate whose closure contains it. The work of a change "
+    head = ("For today's thirteen-crate graph of the previous table. A crate's closure, $\\mathrm{needs}(c)$, is every crate it depends on, "
+            "directly or through others; its reach is every crate other than itself whose closure contains it. The work of a change "
             "is counted in crates rebuilt and retested: the changed crate and its reach. The mean is taken over the "
             "13 crates, each counted once (divisor 13), and printed to three decimals.\n\n")
     rows, total = [], 0

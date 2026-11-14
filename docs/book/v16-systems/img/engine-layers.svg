@@ -1,4 +1,4 @@
-<!-- source-sha256: cbf7f0be42d1f5301fe1167e12a6c34c71810207a57a8d15aa2e28a44f8b78c5 -->
+<!-- source-sha256: 840547b1932d4a7bdde9fb6874fd21ae3ddef2bdc43b29117f1005a4ef089429 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 520" width="900" height="520"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker><marker id="head-4a5568" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs><rect width="900" height="520" fill="#ffffff"/>
 <rect x="80" y="24" width="640" height="58" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
 <text x="400" y="49.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">layer 6: serving, front ends, SDK, samples</text>
