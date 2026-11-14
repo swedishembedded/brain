@@ -42,6 +42,7 @@ brain-backend-wgpu	2
 brain-rknpu	2
 brain-cuda-aot	2
 brain-gpu-core	2
+brain-gpu-worker	2
 brain-vulkan	2
 brain-wgsl-cpu	2
 brain-wgsl-cuda	2

@@ -1770,6 +1770,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-gpu-worker"
+version = "5.1.0"
+dependencies = [
+ "brain-backend-wgpu",
+ "brain-capability",
+ "brain-gpu-supervisor",
+ "brain-kernels",
+ "brain-residency",
+ "brain-testutil",
+ "serde_json",
+]
+
+[[package]]
 name = "brain-gradcheck"
 version = "5.1.0"
 dependencies = [

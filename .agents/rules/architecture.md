@@ -50,8 +50,8 @@ diagram is stale.
 layer 1 - kernels, architecture registry, device-neutral contracts
     arch, backend-api, gpu-supervisor, kernels, kernels-cuda, memauth, seed
 layer 2 - accelerator seam: backends and the gpu-core facade
-    backend-cpu, backend-cuda, backend-vulkan, backend-wgpu, cuda-aot, gpu-core, rknpu, vulkan,
-    wgsl-cpu, wgsl-cuda
+    backend-cpu, backend-cuda, backend-vulkan, backend-wgpu, cuda-aot, gpu-core, gpu-worker,
+    rknpu, vulkan, wgsl-cpu, wgsl-cuda
 layer 3 - training substrate and shared contracts
     atif, audio, audit, camera, capability, checkpoint, data, diffusion, dit, events, forecast,
     gguf, model, modelref, modelstore, neuro, onnx, openvino-rt, optim, paramstore, promote,
