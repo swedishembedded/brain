@@ -89,7 +89,7 @@ fn the_release_layout_loads_end_to_end() {
 
     // The import writes a brain container whose card names the family and whose tensors are the same values.
     let out = dir.join("ouro.brain.safetensors");
-    import_as(dir.to_str().unwrap(), out.to_str().unwrap(), Some("fixture/ouro")).expect("import");
+    import_as(dir.to_str().unwrap(), out.to_str().unwrap(), Some("fixture/ouro"), &mut || true).expect("import");
     let reader = checkpoint::weightio::WeightReader::open(out.to_str().unwrap()).expect("the brain container opens");
     for (name, want) in &values {
         let mut got = Vec::new();
@@ -111,5 +111,32 @@ fn a_tensor_the_architecture_does_not_have_is_refused_by_name() {
     let (dir, ..) = fixture("refused", &[("model.layers.0.self_attn.rotary_emb.inv_freq", vec![2])]);
     let err = open_dir(&dir).err().expect("an unmapped tensor is an error, not a silent drop");
     assert!(err.contains("inv_freq"), "{err}");
+    std::fs::remove_dir_all(dir).ok();
+}
+
+/// A token that fires mid-import stops it at the next tensor and leaves no file behind.
+#[test]
+fn an_import_stops_at_the_next_tensor_when_its_token_fires() {
+    use capability::{Invocation, Outcome, Progress};
+    use capability_mock::cancellation::{certify, Bound};
+    let (dir, ..) = fixture("cancel", &[]);
+    // Beside the release directory, not in it: a finished reference import would otherwise be read as one of its shards.
+    let out = std::env::temp_dir().join(format!("ouro-import-cancel-out-{}.safetensors", std::process::id()));
+    let run = |inv: &Invocation, progress: &mut dyn FnMut(Progress)| {
+        inv.cancel.check()?;
+        import_as(dir.to_str().unwrap(), out.to_str().unwrap(), None, &mut inv.keep_going(progress, 0, "tensor"))?;
+        Ok(Outcome::new())
+    };
+    certify("ouro import", &Invocation::new, &run, Bound::ONE_STEP);
+    std::fs::remove_file(&out).ok();
+    let mut asks = 0;
+    let err = import_as(dir.to_str().unwrap(), out.to_str().unwrap(), None, &mut || {
+        asks += 1;
+        asks < 3
+    });
+    assert_eq!(err.unwrap_err(), capability::failure::CANCELLED);
+    let prefix = format!("ouro-import-cancel-out-{}.safetensors", std::process::id());
+    let leftovers: Vec<_> = std::fs::read_dir(std::env::temp_dir()).unwrap().filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.starts_with(&prefix)).collect();
+    assert!(leftovers.is_empty(), "a stopped import leaves no file: {leftovers:?}");
     std::fs::remove_dir_all(dir).ok();
 }

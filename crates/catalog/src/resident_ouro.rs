@@ -103,11 +103,11 @@ impl capability::Action for ImportAction {
     fn spec(&self) -> ActionSpec {
         direct_manifest().actions.into_iter().find(|a| a.name == "import").expect("declared")
     }
-    fn run(&self, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
+    fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         inv.cancel.check()?;
         let source = inv.get_str("source").ok_or("ouro import: missing required param 'source'")?;
         let dest = inv.get_str("dest").ok_or("ouro import: missing required param 'dest'")?;
-        ouro::import::import(&source, &dest)?;
+        ouro::import::import_as(&source, &dest, None, &mut inv.keep_going(progress, 0, "tensor"))?;
         Ok(capability::Outcome::new().set("dest", json!(dest)))
     }
 }

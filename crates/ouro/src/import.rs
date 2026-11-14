@@ -114,11 +114,11 @@ pub fn open_dir(dir: &Path) -> Result<(OuroConfig, RemapSource<'static>), String
 /// Import `<hf_dir>` into the brain checkpoint `out_path`. Never writes a
 /// partial checkpoint.
 pub fn import(hf_dir: &str, out_path: &str) -> Result<(), String> {
-    import_as(hf_dir, out_path, None)
+    import_as(hf_dir, out_path, None, &mut || true)
 }
 
 /// Like [`import`] with an explicit card id (defaults to the output stem).
-pub fn import_as(hf_dir: &str, out_path: &str, id_override: Option<&str>) -> Result<(), String> {
+pub fn import_as(hf_dir: &str, out_path: &str, id_override: Option<&str>, keep_going: &mut dyn FnMut() -> bool) -> Result<(), String> {
     let (cfg, src) = open_dir(Path::new(hf_dir))?;
     let plan: Vec<(String, Vec<u64>)> = cfg.param_list().into_iter().map(|(name, numel)| (name, vec![numel as u64])).collect();
     let param_count: u64 = plan.iter().map(|(_, s)| s.iter().product::<u64>()).sum();
@@ -129,6 +129,10 @@ pub fn import_as(hf_dir: &str, out_path: &str, id_override: Option<&str>) -> Res
     let mut writer = checkpoint::weightio::StWriter::create(out_path, &plan, &cfg.to_json(), Some(&card))
         .map_err(|e| format!("create {out_path}: {e}"))?;
     for (name, _) in &plan {
+        if !keep_going() {
+            writer.abandon();
+            return Err(capability::failure::CANCELLED.to_string());
+        }
         let mut result = Ok(());
         if !src.with_tensor(name, &mut |t| result = writer.write(name, t).map_err(|e| e.to_string())) {
             return Err(format!("ouro import: {name} has no source"));

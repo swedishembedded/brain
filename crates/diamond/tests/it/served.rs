@@ -92,3 +92,32 @@ fn import_rollout_replay_and_finetune_agree() {
     assert_eq!(cfg.num_actions, NUM_ACTIONS);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A token that fires mid-import stops it at the next tensor and leaves no file behind.
+#[test]
+fn an_import_stops_at_the_next_tensor_when_its_token_fires() {
+    use capability::{Outcome, Progress};
+    use capability_mock::cancellation::{certify, Bound};
+    let dir = std::env::temp_dir().join(format!("diamond-import-cancel-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let pt = dir.join("agent.pt").to_str().unwrap().to_string();
+    let out = dir.join("base.safetensors").to_str().unwrap().to_string();
+    random_reference_checkpoint(&pt);
+    let run = |inv: &Invocation, progress: &mut dyn FnMut(Progress)| {
+        inv.cancel.check()?;
+        diamond::import::import(&pt, &out, NUM_ACTIONS, &mut inv.keep_going(progress, 0, "tensor"))?;
+        Ok(Outcome::new())
+    };
+    certify("diamond import", &Invocation::new, &run, Bound::ONE_STEP);
+    let _ = std::fs::remove_file(&out);
+    let mut asks = 0;
+    let err = diamond::import::import(&pt, &out, NUM_ACTIONS, &mut || {
+        asks += 1;
+        asks < 5
+    });
+    assert_eq!(err.unwrap_err(), capability::failure::CANCELLED);
+    let names: Vec<_> = std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    assert_eq!(names, ["agent.pt"], "a stopped import leaves no file");
+    let _ = std::fs::remove_dir_all(&dir);
+}

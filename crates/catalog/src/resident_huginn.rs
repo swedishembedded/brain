@@ -102,11 +102,11 @@ impl capability::Action for ImportAction {
     fn spec(&self) -> ActionSpec {
         import_spec()
     }
-    fn run(&self, inv: &Invocation, _progress: &mut dyn FnMut(capability::Progress)) -> capability::ActionResult {
+    fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(capability::Progress)) -> capability::ActionResult {
         inv.cancel.check()?;
         let source = inv.get_str("source").ok_or("huginn import: missing required param 'source'")?;
         let dest = inv.get_str("dest").ok_or("huginn import: missing required param 'dest'")?;
-        huginn::import::import_as(&source, &dest, inv.get_str("id").as_deref())?;
+        huginn::import::import_as(&source, &dest, inv.get_str("id").as_deref(), &mut inv.keep_going(progress, 0, "tensor"))?;
         Ok(capability::Outcome::new().set("dest", json!(dest)))
     }
 }

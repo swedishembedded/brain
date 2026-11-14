@@ -28,8 +28,11 @@ pub fn card() -> checkpoint::st::ModelCard {
 }
 
 /// Import `src` (.pt) to `out` (.safetensors). `num_actions` must match the game
-/// (Breakout: 4); it is validated against the embedding shape.
-pub fn import(src: &str, out: &str, num_actions: u32) -> Result<DiamondConfig, String> {
+/// (Breakout: 4); it is validated against the embedding shape. The reference
+/// checkpoint is read whole, validated against the expected parameter list, and
+/// then written one tensor at a time, `keep_going` asked before each; once it
+/// says no the import answers `Err(CANCELLED)` and removes the unfinished file.
+pub fn import(src: &str, out: &str, num_actions: u32, keep_going: &mut dyn FnMut() -> bool) -> Result<DiamondConfig, String> {
     let report = checkpoint::torchpt::read_report(src)?;
     let mut found: HashMap<String, (Vec<usize>, Vec<f32>)> = HashMap::new();
     for t in report.tensors {
@@ -89,7 +92,16 @@ pub fn import(src: &str, out: &str, num_actions: u32) -> Result<DiamondConfig, S
 
     let config: serde_json::Value = serde_json::from_str(&cfg.to_json())
         .map_err(|e| format!("config json: {e}"))?;
-    checkpoint::save_carded(out, config, &tensors, &card());
+    let plan: Vec<(String, Vec<u64>)> = tensors.iter().map(|(name, shape, _)| (name.clone(), shape.clone())).collect();
+    let mut writer = checkpoint::weightio::StWriter::create(out, &plan, &config, Some(&card())).map_err(|e| format!("create {out}: {e}"))?;
+    for (name, _, data) in &tensors {
+        if !keep_going() {
+            writer.abandon();
+            return Err(capability::failure::CANCELLED.to_string());
+        }
+        writer.write(name, data).map_err(|e| format!("{name}: {e}"))?;
+    }
+    writer.finish().map_err(|e| format!("{out}: {e}"))?;
     Ok(cfg)
 }
 

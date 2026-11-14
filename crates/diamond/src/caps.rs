@@ -152,7 +152,7 @@ impl Action for DiamondAction {
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         inv.cancel.check()?;
         match self.name.as_str() {
-            "import" => import(inv),
+            "import" => import(inv, progress),
             "export" => self.export(inv),
             "finetune" => self.finetune(inv, progress),
             "rollout" => self.rollout(inv, progress),
@@ -189,11 +189,11 @@ fn seed_of(inv: &Invocation) -> u64 {
     inv.get_i64("seed").map_or_else(data::rng::random_seed, |s| s as u64)
 }
 
-fn import(inv: &Invocation) -> ActionResult {
+fn import(inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
     let source = required(inv, "import", "source")?;
     let dest = required(inv, "import", "dest")?;
     let actions = inv.get_i64("actions_count").unwrap_or(4).max(1) as u32;
-    let cfg = crate::import::import(&source, &dest, actions).map_err(|e| format!("diamond import: {e}"))?;
+    let cfg = crate::import::import(&source, &dest, actions, &mut inv.keep_going(progress, 0, "tensor")).map_err(|e| if e == capability::failure::CANCELLED { e } else { format!("diamond import: {e}") })?;
     Ok(Outcome::new()
         .set("tensors", json!(cfg.param_list().len()))
         .set("height", json!(cfg.h))
