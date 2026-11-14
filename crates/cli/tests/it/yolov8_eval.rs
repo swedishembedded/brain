@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! `brain yolov8 eval` end to end on a tiny generated dataset: split
-//! selection, the full metric table, a low confidence floor, and the
+//! selection, every metric the action reports, a low confidence floor, and the
 //! prediction dump.
 
 use std::path::{Path, PathBuf};
@@ -33,13 +33,15 @@ fn fixture(dir: &Path) -> (String, String) {
     let data = dir.join("data").to_string_lossy().into_owned();
     let weights = dir.join("yolo.safetensors").to_string_lossy().into_owned();
     brain(&["data", "gen", "detect", "--out", &data, "--n", &N_IMAGES.to_string(), "--seed", "7"]);
-    brain(&["yolov8", "train", &data, "--out", &weights, "--steps", "2", "--batch", "2", "--seed", "7"]);
+    brain(&["yolov8", "train", "--data", &data, "--save", &weights, "--steps", "2", "--batch", "2", "--seed", "7"]);
     (data, weights)
 }
 
-fn images_scored(stdout: &str) -> usize {
-    let tail = stdout.split("(images ").nth(1).expect("summary line");
-    tail.trim_end_matches(|c: char| c == ')' || c.is_whitespace()).parse().expect("image count")
+/// The eval action's scalar outputs, as `--json` prints them.
+fn report(args: &[&str]) -> serde_json::Value {
+    let mut argv = args.to_vec();
+    argv.push("--json");
+    serde_json::from_slice(&brain(&argv).stdout).expect("eval prints one JSON object")
 }
 
 #[test]
@@ -48,15 +50,16 @@ fn eval_reports_both_maps_per_class_ap_and_dumps_predictions() {
     let (data, weights) = fixture(&dir);
     let dump = dir.join("preds.jsonl");
 
-    let all = brain(&[
+    let all = report(&[
         "yolov8", "eval", "--weights", &weights, "--data", &data, "--split", "all", "--conf", "0.001",
         "--dump-preds", dump.to_str().unwrap(),
     ]);
-    let stdout = String::from_utf8(all.stdout).unwrap();
-    for needle in ["mAP@0.5 ", "mAP@0.5:0.95", "class  AP@0.5  AP@0.5:0.95"] {
-        assert!(stdout.contains(needle), "missing {needle:?} in:\n{stdout}");
+    for key in ["map50", "map50_95", "precision50", "recall50"] {
+        assert!(all[key].is_number(), "missing {key} in {all}");
     }
-    assert_eq!(images_scored(&stdout), N_IMAGES);
+    let per_class = all["per_class"].as_array().expect("per_class");
+    assert!(!per_class.is_empty() && per_class.iter().all(|c| c["ap50"].is_number() && c["ap50_95"].is_number()), "{all}");
+    assert_eq!(all["images"], N_IMAGES);
 
     let records = eval::detection_report::read_jsonl(std::io::BufReader::new(std::fs::File::open(&dump).unwrap())).unwrap();
     assert_eq!(records.len(), N_IMAGES);
@@ -64,8 +67,8 @@ fn eval_reports_both_maps_per_class_ap_and_dumps_predictions() {
     assert!(records.iter().all(|r| !r.gts.is_empty()), "the generator labels every image");
 
     // The default split is the held-out last 10%.
-    let val = brain(&["yolov8", "eval", "--weights", &weights, "--data", &data]);
-    assert_eq!(images_scored(&String::from_utf8(val.stdout).unwrap()), N_IMAGES / 10);
+    let val = report(&["yolov8", "eval", "--weights", &weights, "--data", &data]);
+    assert_eq!(val["images"], N_IMAGES / 10);
 }
 
 #[test]
