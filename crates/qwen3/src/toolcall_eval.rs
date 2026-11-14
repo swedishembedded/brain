@@ -29,11 +29,19 @@ fn argmax(s: &[f32]) -> usize {
 /// the rendered conversation, its end-of-turn token included. Returns
 /// `(exact_match, token_acc)`.
 pub fn eval(model: &Qwen, t: &QwenBpe, tmpl: &ChatTemplate, cases: &[ToolCase]) -> (f64, f64) {
+    eval_while(model, t, tmpl, cases, &mut || true).expect("an evaluation nobody stops finishes")
+}
+
+/// [`eval`] that asks `keep_going` before each case; `None` means it said no.
+pub fn eval_while(model: &Qwen, t: &QwenBpe, tmpl: &ChatTemplate, cases: &[ToolCase], keep_going: &mut dyn FnMut() -> bool) -> Option<(f64, f64)> {
     let vocab = model.cfg.vocab as usize;
     let cap = model.ctx_len();
     let (mut exact, mut counted) = (0usize, 0usize);
     let mut tok_acc = 0f64;
     for c in cases {
+        if !keep_going() {
+            return None;
+        }
         let Ok((full, mask)) = c.to_chat_example().to_sample().encode(t, tmpl) else { continue };
         let Some(p) = mask.iter().position(|&m| m) else { continue };
         if p == 0 || full.len() > cap {
@@ -59,12 +67,29 @@ pub fn eval(model: &Qwen, t: &QwenBpe, tmpl: &ChatTemplate, cases: &[ToolCase]) 
         }
     }
     let n = counted.max(1) as f64;
-    (exact as f64 / n, tok_acc / n)
+    Some((exact as f64 / n, tok_acc / n))
 }
 
 /// Load `weights`, generate `n` held-out cases (`tools` candidates each), score.
 pub fn score(weights: &str, tok: &QwenBpe, tmpl: &ChatTemplate, n: usize, tools: usize, seq: usize, seed: u64) -> (f64, f64) {
-    let model = Qwen::load_inference(weights, 1, seq as u32);
-    let cases = toolcall::generate(n, tools, seed);
-    eval(&model, tok, tmpl, &cases)
+    score_while(weights, tok, tmpl, &CaseSpec { n, tools, seq, seed }, &mut || true).expect("an evaluation nobody stops finishes")
+}
+
+/// The held-out cases [`score_while`] generates and the context it scores them in.
+#[derive(Clone, Copy, Debug)]
+pub struct CaseSpec {
+    /// Cases generated.
+    pub n: usize,
+    /// Candidate tools per case.
+    pub tools: usize,
+    /// The scoring context, tokens.
+    pub seq: usize,
+    pub seed: u64,
+}
+
+/// [`score`] that asks `keep_going` before each case; `None` means it said no.
+pub fn score_while(weights: &str, tok: &QwenBpe, tmpl: &ChatTemplate, spec: &CaseSpec, keep_going: &mut dyn FnMut() -> bool) -> Option<(f64, f64)> {
+    let model = Qwen::load_inference(weights, 1, spec.seq as u32);
+    let cases = toolcall::generate(spec.n, spec.tools, spec.seed);
+    eval_while(&model, tok, tmpl, &cases, keep_going)
 }

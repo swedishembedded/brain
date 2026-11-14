@@ -2479,4 +2479,29 @@ mod tests {
         assert!(scored.outputs["exact_match"].as_f64().is_some());
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// A token that fires mid-run stops `eval` (the base and paged passes), `calib` and `toolcall_eval` at the next
+    /// sample, prompt or case.
+    #[test]
+    fn a_cancelled_eval_calib_or_toolcall_eval_stops_at_the_next_unit() {
+        use capability_mock::cancellation::{certify, Bound};
+        let cfg = QwenConfig { vocab: 151936, ..QwenConfig::tiny() };
+        let dir = std::env::temp_dir().join(format!("qwen-caps-eval-cancel-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let base = dir.join("tiny.safetensors");
+        write_tiny_checkpoint(&base, &cfg, 3);
+        write_byte_tokenizer(&dir);
+        let mut reg = Registry::new();
+        reg.register(Arc::new(QwenProvider::new().with_defaults(Some(base.to_string_lossy().into_owned()), Some(dir.join("tokenizer.json").to_string_lossy().into_owned()))));
+        let eval = |inv: &Invocation, progress: &mut dyn FnMut(Progress)| reg.run(MODEL, "eval", inv.clone(), progress);
+        let calib = |inv: &Invocation, progress: &mut dyn FnMut(Progress)| reg.run(MODEL, "calib", inv.clone(), progress);
+        let toolcall_eval = |inv: &Invocation, progress: &mut dyn FnMut(Progress)| reg.run(MODEL, "toolcall_eval", inv.clone(), progress);
+        let samples = || Blob::new(Media::Bytes, dataset_jsonl());
+        certify("qwen eval", &|| Invocation::new().set("block", json!(256)).blob("samples", samples()), &eval, Bound::ONE_STEP);
+        // The first paged-pass sample comes after the base pass's six samples and the pass's own two progress steps.
+        certify("qwen eval kv", &|| Invocation::new().set("block", json!(256)).set("kv", json!("fp32")).blob("samples", samples()), &eval, Bound { fire_after: 9, within: 1 });
+        certify("qwen calib", &|| Invocation::new().blob("samples", samples()), &calib, Bound::ONE_STEP);
+        certify("qwen toolcall_eval", &|| Invocation::new().set("n", json!(4)).set("seq", json!(512)).set("seed", json!(9)), &toolcall_eval, Bound::ONE_STEP);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

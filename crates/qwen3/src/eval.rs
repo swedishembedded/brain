@@ -114,11 +114,36 @@ pub fn score_chat_dt(weights: &str, adapter: Option<&str>, tok: &QwenBpe, tmpl: 
 /// with [`RenderOpts::keep_reasoning`] is scored the way it trained.
 #[allow(clippy::too_many_arguments)]
 pub fn score_chat_rendered(weights: &str, adapter: Option<&str>, tok: &QwenBpe, tmpl: &ChatTemplate, samples: &[ChatSample], block: u32, dt: Dtype, render: RenderOpts) -> ChatScore {
+    let model = load_reporting_tier(weights, adapter, block, dt);
+    score_loaded(&model, tok, tmpl, samples, render, &mut || true).expect("a scoring nobody stops finishes")
+}
+
+/// The chat samples a scorer runs and the tokenizer and template that render them.
+#[derive(Clone, Copy)]
+pub struct ScoredSet<'a> {
+    pub tok: &'a QwenBpe,
+    pub tmpl: &'a ChatTemplate,
+    pub samples: &'a [ChatSample],
+}
+
+/// [`score_chat`] that asks `keep_going` before each sample; `None` means it said no.
+pub fn score_chat_while(weights: &str, adapter: Option<&str>, set: &ScoredSet<'_>, block: u32, keep_going: &mut dyn FnMut() -> bool) -> Option<ChatScore> {
+    let model = load_reporting_tier(weights, adapter, block, Dtype::F32);
+    score_loaded(&model, set.tok, set.tmpl, set.samples, RenderOpts::default(), keep_going)
+}
+
+/// [`load_scored_model`], saying which weight tier the linears landed on.
+fn load_reporting_tier(weights: &str, adapter: Option<&str>, block: u32, dt: Dtype) -> Qwen {
     let model = load_scored_model(weights, adapter, block, dt);
     eprintln!(
         "eval: weight tier requested {dt:?}, linears landed {:?}",
         model.linear_dtype()
     );
+    model
+}
+
+/// [`score_chat_rendered`]'s loop over an already built `model`, asking `keep_going` before each sample.
+fn score_loaded(model: &Qwen, tok: &QwenBpe, tmpl: &ChatTemplate, samples: &[ChatSample], render: RenderOpts, keep_going: &mut dyn FnMut() -> bool) -> Option<ChatScore> {
     let vocab = model.cfg.vocab as usize;
     let cap = model.ctx_len();
 
@@ -128,6 +153,9 @@ pub fn score_chat_rendered(weights: &str, adapter: Option<&str>, tok: &QwenBpe, 
     let mut skipped = 0usize;
 
     for (i, s) in samples.iter().enumerate() {
+        if !keep_going() {
+            return None;
+        }
         // A template-encoding failure is a data/config problem, not a
         // too-long sample -- surfaced loudly (the CLI half of this fix
         // already reports them), never silently folded into `skipped`.
@@ -159,13 +187,13 @@ pub fn score_chat_rendered(weights: &str, adapter: Option<&str>, tok: &QwenBpe, 
         }
     }
 
-    ChatScore {
+    Some(ChatScore {
         loss: if positions > 0 { (total_nll / positions as f64) as f32 } else { f32::NAN },
         token_accuracy: (positions > 0).then(|| correct as f64 / positions as f64),
         positions,
         samples: samples.len() - skipped,
         skipped,
-    }
+    })
 }
 
 pub use model::finetune::PreferenceMargins;
@@ -253,6 +281,12 @@ impl KvMode {
 /// samples are independent, so there is nothing to share between them and
 /// nothing for prefix reuse to change about the measurement.
 pub fn score_chat_paged(weights: &str, adapter: Option<&str>, tok: &QwenBpe, tmpl: &ChatTemplate, samples: &[ChatSample], block: u32, kv: KvMode) -> ChatScore {
+    score_chat_paged_while(weights, adapter, &ScoredSet { tok, tmpl, samples }, block, kv, &mut || true).expect("a scoring nobody stops finishes")
+}
+
+/// [`score_chat_paged`] that asks `keep_going` before each sample; `None` means it said no.
+pub fn score_chat_paged_while(weights: &str, adapter: Option<&str>, set: &ScoredSet<'_>, block: u32, kv: KvMode, keep_going: &mut dyn FnMut() -> bool) -> Option<ChatScore> {
+    let ScoredSet { tok, tmpl, samples } = *set;
     let (cfg, src) = scored_source(weights, adapter);
     let block_size = 16u32;
     let max_blocks_per_seq = block.div_ceil(block_size).max(1);
@@ -275,6 +309,9 @@ pub fn score_chat_paged(weights: &str, adapter: Option<&str>, tok: &QwenBpe, tmp
     let mut skipped = 0usize;
 
     for (i, s) in samples.iter().enumerate() {
+        if !keep_going() {
+            return None;
+        }
         // Same loud surfacing as `score_chat` -- see the comment there.
         let (ids, mask) = match s.encode(tok, tmpl) {
             Ok(v) => v,
@@ -307,13 +344,13 @@ pub fn score_chat_paged(weights: &str, adapter: Option<&str>, tok: &QwenBpe, tmp
         }
     }
 
-    ChatScore {
+    Some(ChatScore {
         loss: if positions > 0 { (total_nll / positions as f64) as f32 } else { f32::NAN },
         token_accuracy: (positions > 0).then(|| correct as f64 / positions as f64),
         positions,
         samples: samples.len() - skipped,
         skipped,
-    }
+    })
 }
 
 #[cfg(test)]

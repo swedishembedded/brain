@@ -3907,14 +3907,19 @@ impl Engine {
     /// the KV append in `run_batched_submit`), matching exactly
     /// what a real INT8 KV scale would be quantizing.
     pub fn calibrate_kv(&mut self, prompts: &[Vec<u32>]) -> model::actstats::Collector {
+        self.calibrate_kv_while(prompts, &mut || true).expect("a calibration nobody stops finishes")
+    }
+
+    /// [`Self::calibrate_kv`] that asks `keep_going` before each prompt is prefilled and before each layer's
+    /// read-back. `None` means it said no: every table is released and the engine is as it was.
+    pub fn calibrate_kv_while(&mut self, prompts: &[Vec<u32>], keep_going: &mut dyn FnMut() -> bool) -> Option<model::actstats::Collector> {
         let mut collector = model::actstats::Collector::new();
-        self.observe_kv(prompts, &mut collector);
-        collector
+        self.observe_kv(prompts, &mut collector, keep_going).then_some(collector)
     }
 
     /// [`Self::calibrate_kv`]'s pass, reporting to any [`model::kvcalib::KvObserver`]
-    /// (the [`model::kvcalib::KvCalibrationSource`] impl below).
-    fn observe_kv(&mut self, prompts: &[Vec<u32>], obs: &mut dyn model::kvcalib::KvObserver) {
+    /// (the [`model::kvcalib::KvCalibrationSource`] impl below). `false` when `keep_going` said no.
+    fn observe_kv(&mut self, prompts: &[Vec<u32>], obs: &mut dyn model::kvcalib::KvObserver, keep_going: &mut dyn FnMut() -> bool) -> bool {
         use model::kvcalib::{observe_rows, KvSide};
         assert!(!self.kv_int8, "calibrate_kv needs an fp32-KV engine (build with kv_int8: false)");
         let hd = self.cfg.head_dim as usize;
@@ -3926,7 +3931,16 @@ impl Engine {
         // allocator must not recycle a prompt's blocks before we've read
         // them back below.
         let mut tables: Vec<(BlockTable, usize)> = Vec::with_capacity(prompts.len());
+        let release = |engine: &mut Self, tables: Vec<(BlockTable, usize)>| {
+            for (mut table, _) in tables {
+                engine.release_table(&mut table);
+            }
+        };
         for prompt in prompts {
+            if !keep_going() {
+                release(self, tables);
+                return false;
+            }
             assert!(!prompt.is_empty(), "calibrate_kv: empty prompt");
             let mut table = BlockTable::new();
             self.prefill(&mut table, prompt);
@@ -3938,6 +3952,10 @@ impl Engine {
         let slots = self.alloc.num_blocks() as u64 * self.block_size as u64;
         let pool_words = (slots * hkv as u64) as usize;
         for l in 0..self.cfg.n_layers as usize {
+            if !keep_going() {
+                release(self, tables);
+                return false;
+            }
             let pk = self.gpu.read(&self.pool_k[l], pool_words);
             let pv = self.gpu.read(&self.pool_v[l], pool_words);
             for (table, len) in &tables {
@@ -3951,9 +3969,8 @@ impl Engine {
             }
         }
 
-        for (mut table, _) in tables {
-            self.release_table(&mut table);
-        }
+        release(self, tables);
+        true
     }
 
     /// Greedy generation of `max_new` tokens for each prompt, run with a **paged
@@ -4121,7 +4138,7 @@ impl model::kvcalib::KvCalibrationSource for Engine {
         if prompts.iter().any(|p| p.is_empty()) {
             return Err("KV calibration: empty prompt".into());
         }
-        self.observe_kv(prompts, obs);
+        self.observe_kv(prompts, obs, &mut || true);
         Ok(())
     }
 }

@@ -21,7 +21,7 @@ use data::qwen_tokenizer::QwenBpe;
 use serde_json::json;
 
 use crate::config::QwenConfig;
-use crate::eval::{score_chat, score_chat_paged, ChatScore, KvMode};
+use crate::eval::{score_chat_paged_while, score_chat_while, ChatScore, KvMode, ScoredSet};
 use crate::served::{count, guarded, path_param, Resolved, StoredAdapter};
 
 /// Largest sample count a generated or scored tool-call set may ask for.
@@ -135,9 +135,11 @@ pub(crate) fn eval(resolved: &Resolved, inv: &Invocation, progress: &mut dyn FnM
     let base_id = crate::served::base_id(&weights);
     let steps = 1 + kv_modes.len() as u32 + u32::from(adapter.is_some());
     let mut lines = Vec::new();
+    let set = ScoredSet { tok: &tok, tmpl: &template, samples: &samples };
 
+    // The scorers report one progress step per sample and stop at the next one once the token fires.
     progress(Progress::step(1, steps, "scoring the base"));
-    let base = guarded("eval", || score_chat(&weights, None, &tok, &template, &samples, block))?;
+    let base = guarded("eval", || score_chat_while(&weights, None, &set, block, &mut inv.keep_going(progress, samples.len() as u32, "sample")))?.ok_or(capability::failure::CANCELLED)?;
     lines.push(score_line(&format!("base {base_id}"), &base, ""));
     let mut out = Outcome::new().set("base", score_json(&base));
 
@@ -145,7 +147,7 @@ pub(crate) fn eval(resolved: &Resolved, inv: &Invocation, progress: &mut dyn FnM
     let mut paged = Vec::new();
     for (i, kv) in kv_modes.iter().enumerate() {
         progress(Progress::step(2 + i as u32, steps, format!("scoring through the paged engine, kv {}", kv.label())));
-        let score = guarded("eval", || score_chat_paged(&weights, None, &tok, &template, &samples, block, *kv))?;
+        let score = guarded("eval", || score_chat_paged_while(&weights, None, &set, block, *kv, &mut inv.keep_going(progress, samples.len() as u32, "sample")))?.ok_or(capability::failure::CANCELLED)?;
         let delta = if base.loss.is_finite() { score.loss - base.loss } else { f32::NAN };
         lines.push(score_line(&format!("base {base_id} [kv={}]", kv.label()), &score, &format!(" ({delta:+.4} vs legacy fp32)")));
         paged.push(json!({"kv": kv.label(), "score": score_json(&score)}));
@@ -156,7 +158,7 @@ pub(crate) fn eval(resolved: &Resolved, inv: &Invocation, progress: &mut dyn FnM
 
     if let (Some(adapter), Some(path)) = (&adapter, &adapter_path) {
         progress(Progress::step(steps, steps, "scoring the adapter"));
-        let tuned = guarded("eval", || score_chat(&weights, Some(path), &tok, &template, &samples, block))?;
+        let tuned = guarded("eval", || score_chat_while(&weights, Some(path), &set, block, &mut inv.keep_going(progress, samples.len() as u32, "sample")))?.ok_or(capability::failure::CANCELLED)?;
         lines.push(score_line(&adapter.reference, &tuned, ""));
         let beats = tuned.loss < base.loss;
         lines.push(format!("{} {} base on held-out loss ({:.4} vs {:.4})", adapter.reference, if beats { "beats" } else { "does NOT beat" }, tuned.loss, base.loss));
@@ -207,8 +209,9 @@ pub(crate) fn calib(resolved: &Resolved, inv: &Invocation, progress: &mut dyn Fn
     progress(Progress::step(1, 2, format!("running {} prompts through the fp32-KV engine", prompts.len())));
     let collector = guarded("calib", || {
         let mut engine = crate::serve::Engine::load(&weights, CALIB_BLOCK, num_blocks, max_batch, blocks_per_seq, max_len.max(1), false, false);
-        engine.calibrate_kv(&prompts)
-    })?;
+        engine.calibrate_kv_while(&prompts, &mut inv.keep_going(progress, prompts.len() as u32, "prompt"))
+    })?
+    .ok_or(capability::failure::CANCELLED)?;
     progress(Progress::step(2, 2, "reducing the statistics"));
     let rows = collector.report();
     let base_id = crate::served::base_id(&weights);
@@ -250,11 +253,12 @@ pub(crate) fn toolcall_gen(resolved: &Resolved, inv: &Invocation, _: &mut dyn Fn
     Ok(Outcome::new().set("train", json!(n)).set("validation", json!(held)).set("seed", json!(seed)).set("out", json!(out.display().to_string())))
 }
 
-pub(crate) fn toolcall_eval(resolved: &Resolved, inv: &Invocation, _: &mut dyn FnMut(Progress)) -> ActionResult {
+pub(crate) fn toolcall_eval(resolved: &Resolved, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
     let weights = resolved.weights(inv, "toolcall_eval")?;
     let (tok, template) = tokenizer_and_template(&resolved.tokenizer(inv, &weights), "toolcall_eval")?;
     let (n, tools, seq) = (count(inv, "n", 40) as usize, count(inv, "tools", 3) as usize, count(inv, "seq", 512) as usize);
     let seed = inv.seed()?.unwrap_or_else(data::rng::random_seed);
-    let (exact, token_accuracy) = guarded("toolcall_eval", || crate::toolcall_eval::score(&weights, &tok, &template, n, tools, seq, seed))?;
+    let spec = crate::toolcall_eval::CaseSpec { n, tools, seq, seed };
+    let (exact, token_accuracy) = guarded("toolcall_eval", || crate::toolcall_eval::score_while(&weights, &tok, &template, &spec, &mut inv.keep_going(progress, n as u32, "case")))?.ok_or(capability::failure::CANCELLED)?;
     Ok(Outcome::new().set("exact_match", json!(exact)).set("token_accuracy", json!(token_accuracy)).set("cases", json!(n)).set("seed", json!(seed)))
 }
