@@ -18,8 +18,10 @@
 //!
 //! Scope of "continuous": sequences join and leave the batch between steps
 //! and between prefills, for everything handed to ONE `run_batch` call (the
-//! dispatcher groups queued jobs into such a call). Work that arrives while
-//! a call is already running waits for the next call.
+//! dispatcher groups queued jobs into such a call). `run_batch` takes only
+//! what it was given, so work arriving during that call waits for the next
+//! one; `run_open_scheduled` instead keeps taking jobs from its feed and
+//! admits the ones that arrive while the group runs.
 
 mod routing;
 mod score;
