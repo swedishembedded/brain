@@ -286,7 +286,7 @@ $$r(x) = \frac{\max(0,\ p(x) - q(x))}{\sum_y \max(0,\ p(y) - q(y))}.$$
 
 The emitted token is $x$ either because $d = x$ was proposed and kept, with probability $q(x)\min(1, p(x)/q(x)) = \min(p(x), q(x))$, or because a proposal was rejected and the replacement is $x$. The probability of a rejection is $1 - \sum_y \min(p(y), q(y))$, and since $\min(p, q) + \max(0, p - q) = p$ for every token and $p$ sums to 1, the rejection probability equals $\sum_y \max(0, p(y) - q(y))$, the normaliser of $r$. So
 
-$$P(\text{emit } x) = \min(p(x), q(x)) + \sum_y \max(0, p(y) - q(y)) \cdot r(x) = \min(p(x), q(x)) + \max(0, p(x) - q(x)) = p(x).$$
+$$\begin{aligned}P(\text{emit } x) &= \min(p(x), q(x)) + \sum_y \max(0, p(y) - q(y)) \cdot r(x)\\ &= \min(p(x), q(x)) + \max(0, p(x) - q(x)) = p(x).\end{aligned}$$
 
 Compare it with the rejection sampling of Volume I, Chapter 17, which kept a candidate with probability $f(x)/M$ and drew again after a rejection, paying $M$ proposals per kept value. Here a rejection does not start over: the residual is exactly the probability that the test took away from the tokens where the draft over-proposes and failed to give to the tokens where it under-proposes, so one extra draw from it completes the distribution. And the probability that a proposal is kept is $\sum_y \min(p(y), q(y)) = 1 - \mathrm{TV}(p, q)$, one minus the total variation distance between the two distributions (half the sum of $|p(y) - q(y)|$): under sampling, the acceptance rate of a draft is its closeness to the target.
 
