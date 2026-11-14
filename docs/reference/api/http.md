@@ -288,7 +288,9 @@ launches a local qwen3 Anthropic surface and points Claude Code at it.
   model is still cold-building (its first-ever activation, which can take well over a
   minute for a real model), in which case it gets the longer
   `--cold-build-admit-deadline-ms` grace window instead - a legitimate cold start is
-  not overload. Genuine overload still sheds as **503**. See
+  not overload. Genuine overload still sheds as **503**. A job still waiting when
+  the scheduler's own `--queue-deadline-ms` passes (longer than both by default)
+  is answered **504** with a `timeout` error naming that flag. See
   [`docs/guides/serving/serving.md`](../../guides/serving/serving.md#admission-and-backpressure) for the general
   admission story and both flags' defaults.
 - **OpenRouter** reuses the OpenAI handlers, strips a `provider/` model prefix
