@@ -8,7 +8,8 @@
 //! decode with an on-device window, cancellation, prefix reuse, and the
 //! `StepReport` timeline `brain perf` measures TTFA/ITL from. None of it
 //! depends on a specific architecture; `crates/qwen3/src/serve.rs::Engine` was
-//! the first implementation, and `deepseek2` and `qwen35` implement it too.
+//! the first implementation; every paged engine implements it (search for
+//! `impl PagedDecoder for`).
 //! `qwen3::serve::Scheduler` is a type alias for `Scheduler<Engine>` so no
 //! caller of the qwen-specific names needs to change.
 //!
