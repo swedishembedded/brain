@@ -18,7 +18,7 @@
 //! expertise in time-series model evaluation then you can procure our
 //! services by sending an email to info@swedishembedded.com.
 
-use capability::{ActionResult, ActionSpec, Blob, BlobSpec, Invocation, Media, Outcome, ParamSpec, ParamType};
+use capability::{ActionResult, ActionSpec, Blob, BlobSpec, Invocation, Media, Outcome, ParamSpec, ParamType, Progress};
 use forecast::ForecastModel;
 use serde_json::json;
 
@@ -39,14 +39,19 @@ pub fn compare_spec(summary: &str) -> ActionSpec {
 }
 
 /// Run the battery for `models` (the baselines are always in) and fail if a
-/// model falsely beats naive on the random walk.
-pub fn run_compare(models: Vec<Box<dyn ForecastModel>>, inv: &Invocation) -> ActionResult {
+/// model falsely beats naive on the random walk. One progress step per scored
+/// window; a token that fires stops the battery at the next one.
+pub fn run_compare(models: Vec<Box<dyn ForecastModel>>, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
     inv.cancel.check()?;
     let windows = inv.get_i64("windows").unwrap_or(DEFAULT_WINDOWS).max(1) as usize;
     let seed = inv.seed()?.unwrap_or_else(seed::random_seed);
     let mut all = fcbench::baselines::default_set();
     all.extend(models);
-    let cmp = fcbench::harness::run(&all, &fcbench::scenarios::default_battery(), windows, seed);
+    let cmp = fcbench::harness::run_while(&all, &fcbench::scenarios::default_battery(), windows, seed, &mut |done, total| {
+        progress(Progress::step(done, total, "window"));
+        !inv.cancel.is_cancelled()
+    })
+    .ok_or(capability::failure::CANCELLED)?;
     let markdown = fcbench::report::markdown(&cmp);
     let violations = cmp.negative_control_violations("random_walk", fcbench::harness::CONTROL_Z);
     if !violations.is_empty() {
@@ -64,8 +69,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_battery_stops_at_the_next_window_once_its_token_fires() {
+        use capability_mock::cancellation::{certify, Bound};
+        let make = || Invocation::new().set("windows", json!(3)).set("seed", json!(5));
+        certify("forecast compare", &make, &|inv, progress| run_compare(Vec::new(), inv, progress), Bound::ONE_STEP);
+    }
+
+    #[test]
     fn the_baselines_alone_pass_their_own_negative_control_and_the_seed_is_echoed() {
-        let out = run_compare(Vec::new(), &Invocation::new().set("windows", json!(2)).set("seed", json!(5))).unwrap();
+        let out = run_compare(Vec::new(), &Invocation::new().set("windows", json!(2)).set("seed", json!(5)), &mut |_| {}).unwrap();
         assert_eq!(out.outputs["seed"], json!(5));
         let report = String::from_utf8(out.blobs["report"].bytes.clone()).unwrap();
         assert!(report.contains("random_walk"), "{report}");

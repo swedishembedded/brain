@@ -122,6 +122,19 @@ pub fn run(
     windows: usize,
     base_seed: u64,
 ) -> Comparison {
+    run_while(models, scenarios, windows, base_seed, &mut |_, _| true).expect("an always-true keep-going callback never stops the run")
+}
+
+/// [`run`] that calls `keep_going(done, total)` before scoring each (scenario,
+/// model, window) forecast; `None` means it said no and the run stopped.
+pub fn run_while(
+    models: &[Box<dyn ForecastModel>],
+    scenarios: &[Box<dyn Scenario>],
+    windows: usize,
+    base_seed: u64,
+    keep_going: &mut dyn FnMut(u32, u32) -> bool,
+) -> Option<Comparison> {
+    let (mut done, total) = (0u32, (scenarios.len() * models.len() * windows) as u32);
     let metric_names = score::default_metrics();
     let mut cells = Vec::new();
 
@@ -134,6 +147,10 @@ pub fn run(
         for model in models {
             let per_metric = series.entry(model.capabilities().name).or_default();
             for (w, win) in wins.iter().enumerate() {
+                if !keep_going(done, total) {
+                    return None;
+                }
+                done += 1;
                 for (m, v) in score_window(model.as_ref(), win, sc.season(), &metric_names) {
                     if v.is_finite() {
                         per_metric.entry(m).or_insert_with(|| vec![None; windows])[w] = Some(v);
@@ -165,7 +182,7 @@ pub fn run(
         }
     }
 
-    Comparison { cells, metrics: metric_names, windows }
+    Some(Comparison { cells, metrics: metric_names, windows })
 }
 
 #[cfg(test)]
