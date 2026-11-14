@@ -536,8 +536,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # braintop TUI (crates/braintop): a standalone btop-like monitor that renders the
 # StatsSnapshot over D-Bus. Confined to that bin - no engine/model crate links it.
-ratatui = "0.29"
-crossterm = { version = "0.28", features = ["event-stream"] }
+ratatui = "0.30"
+crossterm = { version = "0.29", features = ["event-stream"] }
 
 # crates/atif (brain's ATIF v1.7 trajectory model, validator and persistence).
 # Unrelated to crates/trace above, which is the tracing/observability crate.
