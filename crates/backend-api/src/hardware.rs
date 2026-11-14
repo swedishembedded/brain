@@ -59,8 +59,10 @@
 //! that can `SIGKILL` a child process and have the kernel reclaim its fds,
 //! mappings and driver contexts unconditionally. Killing a thread inside your
 //! own address space is not a safe operation, so the stronger form needs a
-//! separate OS process, and that stronger form is designed but not
-//! implemented here.
+//! separate OS process: that is the `brain-gpu-supervisor` crate, which runs
+//! such calls in a killable worker process. Every failure of a bounded wait
+//! carries [`WAIT_TIMEOUT_MARK`], so a scheduler can quarantine the device
+//! the abandoned thread is stuck on.
 
 #![cfg(not(target_arch = "wasm32"))]
 
@@ -370,7 +372,7 @@ impl std::error::Error for Wedged {}
 /// the process exits. That is the known ceiling of this mechanism: a thread
 /// cannot be killed safely, an OS process can, so genuinely reclaiming a
 /// wedged device needs a supervised child process rather than a worker
-/// thread. That successor is designed but deliberately not built here.
+/// thread: `brain-gpu-supervisor`, for device work that runs in a worker.
 pub fn try_bounded_for<T: Send + 'static>(
     what: &str,
     timeout: Duration,

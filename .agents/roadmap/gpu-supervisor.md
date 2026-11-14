@@ -3,181 +3,121 @@
 Scope: A killable supervisor for un-cancellable device operations.
 
 A killable, supervised owner for the device operations that cannot be
-cancelled. This is the designed successor to
-`backend_api::hardware::bounded`'s "time out and abandon the worker thread"
-fallback, written down after the cross-process device-init lock landed
-(`.agents/knowledge/` #73, #74) and the question "what would an
-Erlang/OTP system have done here" was asked and answered honestly.
+cancelled: the successor to `backend_api::hardware::bounded`'s "time out
+and abandon the worker thread" fallback, written down after the
+cross-process device-init lock landed (`.agents/knowledge/` #73, #74) and
+the question "what would an Erlang/OTP system have done here" was asked and
+answered honestly.
 
-**Status: designed, not implemented.** Nothing in this file is code today.
-What shipped instead is the smaller, complete fix it builds on: one shared
-cross-thread device-init lock plus one shared wall-clock bound, in
-`backend_api::hardware`, used by every crate that opens a device.
+**Status: the supervisor, the breaker and their executor integration are
+built and verified; one device path runs behind them end to end. In-process
+device work (every model today) still runs under `bounded`.** The table
+under "Milestones" says what is done and what is open, with the reason.
 
-The cross-process half of that lock was reverted (`.agents/knowledge/`
-#79): a host-wide lock made one process's ordinary device work stall an
-unrelated process on unrelated, idle hardware. `device_init_lock` is
-in-process only now. Any future revival of cross-process coordination -
-including the per-card worker design below - has to be scoped so that a
-process touching card A is never blocked by a process touching card B; the
-design below predates that finding and its cross-process serialisation
-claims (the child worker sharing `device_init_lock` "against any process
-that has not been migrated yet") need re-deriving against it, not assuming
-it still holds.
+The cross-process half of the device-init lock was reverted
+(`.agents/knowledge/` #79): a host-wide lock made one process's ordinary
+device work stall an unrelated process on unrelated, idle hardware.
+`device_init_lock` is in-process only. The worker below does not
+reintroduce cross-process serialisation: each worker takes the in-process
+lock for its own threads only, so a process touching card A is never
+blocked by a process touching card B.
 
 ---
 
-## What is actually still broken
+## What was broken, and what is fixed
 
 `bounded` runs the un-cancellable call on its own thread and gives up on it
-after `BRAIN_GPU_WAIT_S`. That converts an unattributed infinite hang into a
-named, timed failure, which is a real improvement and is why it shipped. It
-does **not** reclaim anything:
+after `--gpu-wait-s`. That converts an unattributed infinite hang into a
+named, timed failure. It does **not** reclaim anything: the abandoned
+thread is still inside the driver, holding its file descriptors, mappings
+and driver contexts, and there is no safe way to kill a thread mid-`ioctl`
+from inside its own process.
 
-* The abandoned thread is still inside the driver, still holding whatever
-  file descriptors, mappings and driver contexts the call had opened.
-* It still holds the device-init lock it acquired, so a wedge can starve
-  device creation for every OTHER THREAD of that same process until it
-  exits. This no longer crosses processes (`device_init_lock` is in-process
-  only, see the status note above), but it is still real within one
-  process.
-* There is no safe way to fix this from inside the process. Forcibly killing
-  a thread mid-`ioctl` leaves the allocator and the driver's own bookkeeping
-  in states that do not agree with each other, which is the same class of
-  corruption `DeviceShared::drop` already refuses to risk (it leaks a faulted
-  device rather than destroying it).
+Three properties were missing, and OTP names all three:
 
-Three properties are missing, and OTP names all three:
+1. **Exclusive ownership instead of shared access behind a lock.** Built:
+   a supervised instance owns its worker process outright, and a device's
+   lane is the only thread that talks to it.
+2. **A genuinely killable unit for the foreign call.** Built: a child
+   process, killed with `SIGKILL` to its whole process group and reaped, so
+   the kernel reclaims every fd, mapping and driver context it held.
+3. **A supervisor with an explicit restart and give-up policy.** Built: the
+   per-device circuit breaker, shared by every caller through one registry.
 
-1. **Exclusive ownership instead of shared access behind a lock.** Today N
-   call sites each touch the driver, correctly ordered by a lock. A
-   `gen_server` owns the resource outright; everyone else sends it a message.
-   There is no lock to get right because there is nothing to race.
-2. **A genuinely killable unit for the foreign call.** A Port or a dirty
-   scheduler is an OS-level thing the VM can tear down. `SIGKILL` on a child
-   process unconditionally reclaims every fd, mapping and driver context that
-   child held - the kernel does it, the wedged code does not have to
-   cooperate. That is strictly stronger than abandoning a thread.
-3. **A supervisor with an explicit restart and give-up policy**, rather than
-   a timeout constant re-invented per crate by whoever hit the problem next.
+Why the device cannot simply be created in a child and handed back: a
+`VkDevice` / `wgpu::Device` is a userspace object graph in the creating
+process's address space, with no `SCM_RIGHTS`-style transfer. Whatever
+process creates the device is the only one that can use it, so the worker
+owns the whole device lifetime and the parent holds only a handle to the
+worker.
 
 ---
 
-## Why the obvious shape does not work
+## What is built
 
-"Create the device in a child process and hand the handle back" is not
-available. A `VkDevice` / `wgpu::Device` is a userspace object graph in the
-creating process's address space: a pointer table into a `dlopen`ed ICD, with
-per-process driver state behind it. There is no `SCM_RIGHTS`-style transfer
-for it. Whatever process calls `vkCreateDevice` is the only process that can
-use the result.
-
-So the child either owns the whole device lifetime, or the split buys nothing.
-
----
-
-## Design: `brain-gpu-worker`
-
-One helper binary per physical card, spawned by the parent, owning that
-card's device for its whole lifetime. The parent holds no device handle at
-all; it holds a `WorkerHandle` and speaks a request/response protocol.
-
-### Process lifecycle
-
-* Spawned lazily on first use of a card, `execve` of a dedicated binary (not
-  a `fork` of the parent, and not a re-exec of the current executable - a
-  test binary re-executing itself would re-run the test suite).
-* One `SOCK_SEQPACKET` `AF_UNIX` socketpair, inherited on fd 3. Datagram
-  framing, so a partial write can never desynchronise the stream, and
-  `SOCK_SEQPACKET` closes on peer death, which is the parent's liveness
-  signal.
-* Bulk tensor payloads go through a `memfd` shared mapping passed once at
-  startup, not through the socket: the protocol carries offsets and lengths,
-  never megabytes.
-* The child takes the same `backend_api::hardware::device_init_lock` around
-  its own device creation, guarding its own threads exactly as any other
-  brain process would. It does NOT serialise against other worker
-  processes or other parents - per the status note above, cross-process
-  device-creation ordering is deliberately not this lock's job, and a
-  design that reintroduces it has to solve the same-card-vs-different-card
-  distinction this roadmap did not originally account for.
-
-### Protocol
-
-Request/response, one in flight per worker, every request carrying a
-monotonic id so a late reply from a restarted worker is discarded rather than
-mistaken for the current one.
-
-| message | direction | payload |
+| piece | where | what it does |
 |---|---|---|
-| `Open { card }` | to worker | canonical device identity |
-| `Opened { caps }` | from worker | the `backend_api` capability record |
-| `Compile { kernels }` | to worker | name + WGSL per kernel |
-| `Alloc { bytes, usage }` / `Freed { id }` | both | buffer ids, never pointers |
-| `Write { id, offset, memfd_range }` | to worker | offsets into the shared mapping |
-| `Dispatch { batch }` | to worker | the existing `Step` list, ids substituted for handles |
-| `Read { id, range }` | to worker | result written back into the mapping |
-| `Poll { deadline }` | to worker | the bounded fence wait |
-| `Wedged { what }` | from worker | the child noticed its own timeout first |
+| `Worker` | `crates/gpu-supervisor/src/worker.rs` | `execve` of a worker program in its own process group with `PR_SET_PDEATHSIG = SIGKILL`; one `AF_UNIX` stream socket pair as its stdin/stdout; one line request and one line answer per call with a fresh id (a stale answer is discarded); an explicit deadline per request as a socket read timeout (no helper thread); on a missed deadline, end of stream or malformed reply, `SIGKILL` to the group and a bounded reap; a worker still in uninterruptible driver sleep after the bound is handed back, never waited on forever; drop terminates and reaps |
+| `Breaker` | `crates/gpu-supervisor/src/breaker.rs` | per-device circuit breaker with time passed in: a fault opens it with an immediate probe (a restart); the third fault within 600 s trips it, after which a probe runs every 300 s and two clean probes close it (`BreakerPolicy`, every value a parameter) |
+| `Health` | `crates/gpu-supervisor/src/health.rs` | the registry every supervised call goes through: refuses work for a quarantined device without sending anything, records each fault once, logs the trip once, parks unreaped workers and holds the device's probes back until they are reaped, runs probes in fresh workers |
+| executor integration | `crates/residency/src/executor.rs` (`start_supervised`, `assign`, `refuse_quarantined`, `start_probes`, `lane_loop`) | quarantined devices are excluded from placement like busy ones; work no healthy device can ever host is refused once the breaker tripped; a group that faulted its device fails and its claim (budget, slot, instance) is unwound; due probes run on the device's own lane, which is busy meanwhile; an in-process wait past `--gpu-wait-s` (`backend_api::hardware::WAIT_TIMEOUT_MARK`) quarantines the card too |
+| `SupervisedModel` | `crates/residency/src/supervised.rs` | a resident model whose instance is a worker process: `open <device>` at activation, `run <action> <params>` per job, `probe <device>` from the executor; a lost worker answers every later job of its batch with the same definitive error |
+| `brain-gpu-worker` | `crates/gpu-worker` | the real worker: opens card `gpu<i>` through `backend-wgpu`, compiles the probe kernel, and answers `probe` with a real dispatch whose result it checks |
 
-Every message is data. Nothing that only means something inside one address
-space crosses the boundary.
+Choices the design above left open, and what was chosen:
 
-### Supervision
+* **Transport.** A stream socket pair with newline framing, not
+  `SOCK_SEQPACKET`: std offers only stream and datagram pairs, a stream
+  gives end of stream on peer death (a datagram pair does not), and with
+  one writer per direction a frame cannot interleave. Bounded replies
+  (`MAX_REPLY_BYTES`) keep a broken worker from growing the buffer.
+* **Where the breaker lives.** State in `gpu-supervisor` (layer 1, beside
+  `backend-api`, so every backend can share one policy); the placement
+  decision in the residency executor, which owns placement.
+* **One worker per card or per instance.** Per instance (one card and one
+  kernel set), owned by the instance; residency keys on instances, and the
+  lane already serialises a card's work.
+* **Restart.** A fault below the trip count makes the probe due at once;
+  the probe is a fresh worker opening the device, so a passing probe is
+  the restart. The faulted request is failed, never retried.
 
-* Each request has a deadline (the existing `BRAIN_GPU_WAIT_S` ladder).
-* Deadline exceeded: `SIGKILL` the worker, `waitpid` it, and **the kernel
-  reclaims the driver context** - the property the thread version cannot
-  offer. The in-process device-init lock the child held is released the
-  instant the process is gone, same as any other process exit.
-* Restart policy, per card: restart on the first two wedges within 600s,
-  replaying `Open` + `Compile` (both are pure functions of data the parent
-  still holds; in-flight buffer contents are lost and the request that
-  triggered the restart is failed, not retried, because a compute dispatch is
-  not idempotent from the caller's point of view).
-* **Circuit breaker**: a third wedge inside the same 600s window marks that
-  card offline in `gpu_core::devices`. Placement stops proposing it, the
-  breaker logs one line naming the card and the window, and a half-open probe
-  (one `Open` + one trivial dispatch) is attempted every 300s. Two clean
-  probes close the breaker. Without this, a card whose driver is genuinely
-  wedged costs every subsequent request a full `BRAIN_GPU_WAIT_S` before
-  failing - the failure is bounded but the cumulative cost is not.
+## Verification
 
-### What it would cost
-
-The parent-side `Backend` impl is mechanical (the trait is already ids and
-`Step` lists, not pointers). The expensive parts are: a new binary and its
-build/packaging, the shared-mapping allocator, and the fact that every
-existing test that builds a `Gpu` would start depending on a child process
-being spawnable from the test environment. That last point is the real risk
-and the reason this is a roadmap item and not a patch.
-
----
+* `cargo test -p brain-gpu-supervisor` (14 tests): a hung request fails
+  within its deadline with the worker and its whole process group gone
+  from `/proc` and no thread left behind; an abort is reported with its
+  signal and reaped; an open breaker refuses work until a probe passes; a
+  hung probe is killed and keeps the device out; another device serves
+  while one is wedged; an `err` answer is not a fault; a garbled reply is
+  a protocol fault; a request that would break the framing is refused
+  unsent; dropping a worker reaps it; the breaker's restart, trip, window
+  and spaced-probe rules. The fakes are a POSIX shell that hangs in a
+  grandchild or aborts.
+* `cargo test -p brain-residency --test it supervision` (3 tests): through
+  the executor, a hung run fails by its deadline while the other card
+  serves and the restart probe readmits the device and the claim is
+  unwound; a crash in activation keeps the card out (failing probes trip
+  the breaker instead of spinning) while work is placed on the other card;
+  work only a tripped device could host is refused at once.
+* `cargo test -p brain-residency --test it supervisor_model` (2 tests): an
+  exhaustive model of lanes, dispatcher, worker and the real `Breaker`
+  (about half a million states); six deliberate bugs are each caught.
+* `cargo test -p brain-gpu-worker` (2 tests, real card, skip with a printed
+  reason where no card opens): a job through the executor and a supervised
+  worker dispatches on gpu0 and returns the checked sum; a quarantined card
+  is readmitted by a real probe.
 
 ## Milestones
 
-* **M1** - `brain-gpu-worker` binary; `Open`/`Opened`/`Compile` only. Parent
-  still creates its own device for real work; the worker is used solely as a
-  preflight probe under supervision. Proves the spawn/kill/reap loop and the
-  breaker with no change to how compute runs.
-* **M2** - buffers and dispatch move behind the protocol for ONE backend
-  (`backend-wgpu`), selected by an opt-in env knob so the default path is
-  untouched while it is measured.
-* **M3** - measure. A per-dispatch round trip over a `SEQPACKET` socket is
-  order-microseconds and a real dispatch batch is order-milliseconds, but
-  that has to be shown on this hardware, not assumed. Gate M4 on it.
-* **M4** - make it the default; delete the abandon-the-thread path from
-  `backend_api::hardware::bounded` and leave only the supervised form.
-
-## Open questions
-
-* Does the breaker belong in `backend_api::hardware` (next to the lock, so
-  every backend shares one policy) or in `gpu_core::devices` (next to
-  placement, which is what has to act on it)? Probably the former for the
-  state and the latter for the decision.
-* One worker per card, or one per (card, kernel set)? Pipeline compilation is
-  the slow part of `Open`, and residency already keys on kernel sets.
-* Windows has no `SIGKILL`; `TerminateProcess` is the equivalent and needs a
-  small platform seam. (`device_init_lock` itself is a plain
-  `std::sync::Mutex` now, so no cross-platform file-lock equivalent is
-  needed for it.)
+| milestone | status |
+|---|---|
+| **M1** worker binary with `open`/`probe`; supervised spawn, kill, reap; breaker | done and verified (above) |
+| executor lanes honour health; stuck activation or run frees the lane and unwinds the claim | done and verified for supervised instances |
+| in-process `bounded` wedges quarantine the card until a supervised probe passes | done (`note_in_process_wedge`); the abandoned thread itself is still not reclaimed, which is what M2 removes |
+| the serving process starts its executor with `Supervision` | open: `crates/serving` still calls `start_with_probe`. Needs the worker binary located beside `brain` and shipped with it in the release packaging; until then a served card is never quarantined |
+| **M2** buffers and dispatch behind the protocol for `backend-wgpu` (`Alloc`/`Write`/`Dispatch`/`Read` with a `memfd` mapping for bulk tensors), selected by a flag | open: no model runs in a worker yet; `brain-gpu-worker` serves the probe kernel only |
+| **M3** measure the per-dispatch round trip against a real dispatch batch on the target cards | open: gated on M2 |
+| **M4** make it the default; delete the abandon-the-thread path from `bounded` | open: gated on M3 |
+| moving a resident off a quarantined card | open: its instance would be dropped on the dispatcher thread through a driver that may be the wedged one, so its jobs wait for the restart probe or are refused once the breaker trips |
+| multi-device models under quarantine | open: they are excluded from quarantined cards like any group, but `refuse_quarantined` does not refuse them, so behind a tripped breaker they wait for the 300 s probe instead of failing |
+| Windows | open: no `SIGKILL` or process groups; `Worker::spawn` reports unsupported off Unix. `TerminateProcess` and a job object are the equivalent and need a platform seam |

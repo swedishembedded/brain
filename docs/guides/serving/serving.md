@@ -462,7 +462,9 @@ the client connection over HTTP). What that guarantees, precisely:
   cancel flag between its own steps: one decode token, one denoise step, one
   item of a batch. Nothing checks it *inside* a step, so a step already in
   flight always completes. On a healthy device that is milliseconds; a step
-  wedged in a driver call is not interruptible at all from here.
+  wedged in a driver call is not interruptible at all from here; see
+  [device failure](../../concepts/execution/device-failure.md) for what
+  bounds it.
 - **Not every model honours it.** The flag rides on every request, so an
   action that ignores it looks exactly like one that honours it, and a client
   cancelling such a generation simply waits for it to finish. The models that
