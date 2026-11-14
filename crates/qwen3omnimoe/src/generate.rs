@@ -422,8 +422,8 @@ fn decode_step(stack: &ThinkerStack, gpus: &[Gpu], reader: &WeightReader, cfg: &
     final_norm(&gpus[dev], cfg, &stack.final_norm_w, &h, 1)
 }
 
-/// Opt-in (`BRAIN_QWEN3OMNIMOE_DEBUG_LOGITS=1`) top-3 logit dump for one decode step
-/// - diagnoses exactly the failure mode `crates/qwen3omnimoe/tests/it/generate_e2e.rs`
+/// Opt-in (`BRAIN_QWEN3OMNIMOE_DEBUG_LOGITS=1`) top-3 logit dump for one decode step,
+/// which diagnoses exactly the failure mode `crates/qwen3omnimoe/tests/it/generate_e2e.rs`
 /// found on the real checkpoint: a reference comparison (HF's bf16 compute
 /// vs. this engine's fp32) diverging at a token whose top candidates are
 /// closely spaced, distinguishing "a near-tied logit flipped by accumulated

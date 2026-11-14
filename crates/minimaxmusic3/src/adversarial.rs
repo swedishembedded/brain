@@ -288,7 +288,7 @@ mod tests {
         let gan = tiny_gan(cfg());
         let base = gan.generator_gradients(true);
         let eps = 2e-3f32;
-        let abs_tol = (rounding::agreement_bound(CHAIN_ROUNDINGS, f64::from(base.total(&gan.config()))) / f64::from(eps)) as f32;
+        let abs_tol = (rounding::agreement_bound(CHAIN_ROUNDINGS, f64::from(base.total(gan.config()))) / f64::from(eps)) as f32;
         let check = Directional { eps, abs_tol, rel_tol: 2e-2 };
         let mut dirs = Lcg::new(data::rng::random_seed());
         let mut checked = 0;
@@ -297,7 +297,7 @@ mod tests {
             let grad = gan.generator().read_grad(&name);
             let mut loss_at = |w: &[f32]| {
                 gan.generator().write_weight(&name, w);
-                f64::from(gan.objective(true).total(&gan.config()))
+                f64::from(gan.objective(true).total(gan.config()))
             };
             let res = check.check(&grad, &w0, || (0..w0.len()).map(|_| if dirs.unit() < 0.5 { -1.0 } else { 1.0 }).collect(), &mut loss_at);
             gan.generator().write_weight(&name, &w0);
@@ -314,7 +314,7 @@ mod tests {
     fn the_gradient_check_rejects_a_backward_that_drops_the_adversarial_terms() {
         let gan = tiny_gan(cfg());
         let joint = gan.generator_gradients(true);
-        let abs_tol = (rounding::agreement_bound(CHAIN_ROUNDINGS, f64::from(joint.total(&gan.config()))) / 2e-3) as f32;
+        let abs_tol = (rounding::agreement_bound(CHAIN_ROUNDINGS, f64::from(joint.total(gan.config()))) / 2e-3) as f32;
         let names = gan.generator().param_names();
         let full: Vec<Vec<f32>> = names.iter().map(|n| gan.generator().read_grad(n)).collect();
         gan.generator_gradients(false);
@@ -327,7 +327,7 @@ mod tests {
         let check = Directional { eps: 2e-3, abs_tol, rel_tol: 2e-2 };
         let mut loss_at = |w: &[f32]| {
             gan.generator().write_weight(name, w);
-            f64::from(gan.objective(true).total(&gan.config()))
+            f64::from(gan.objective(true).total(gan.config()))
         };
         let res = check.check(&rec_only[worst], &w0, || dir.clone(), &mut loss_at);
         assert!(res.is_err(), "{name}: a gradient without the adversarial terms passed the check: {res:?}");
@@ -356,7 +356,7 @@ mod tests {
         for _ in 0..400 {
             last = gan.step().objective;
         }
-        let (t0, t1) = (start.total(&gan.config()), last.total(&gan.config()));
+        let (t0, t1) = (start.total(gan.config()), last.total(gan.config()));
         assert!(t1 < t0 * 0.85, "joint objective did not fall: {t0} -> {t1}");
         assert!(last.rec < start.rec * 0.5, "reconstruction did not fall: {} -> {}", start.rec, last.rec);
     }
