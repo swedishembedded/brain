@@ -109,6 +109,23 @@ pub fn reduce_grads<M: Model>(model: &M, coll: &dyn Collective, rank: usize) -> 
     Ok(())
 }
 
+/// [`reduce_grads`] for ranks whose gradients are means over different
+/// numbers of items: `local_weight` is how many this rank's gradient averages
+/// over (a token objective's supervised positions in the step), and every rank
+/// receives `Σ(gᵢ·nᵢ) / Σ nᵢ`, the mean over all the items of the step rather
+/// than the mean of the ranks' means. Equal weights give [`reduce_grads`].
+pub fn reduce_grads_weighted<M: Model>(model: &M, coll: &dyn Collective, rank: usize, local_weight: f32) -> CollectiveResult<()> {
+    let total = pollster::block_on(coll.all_reduce(rank, Payload::f32(vec![local_weight])))?.data[0];
+    let inv = 1.0 / total.max(1e-12);
+    for name in model.param_names() {
+        let scaled: Vec<f32> = model.read_grad(&name).iter().map(|&g| g * local_weight).collect();
+        let summed = pollster::block_on(coll.all_reduce(rank, Payload::f32(scaled)))?.data;
+        let mean: Vec<f32> = summed.iter().map(|value| value * inv).collect();
+        model.write_grad(&name, &mean).map_err(CollectiveError::Transport)?;
+    }
+    Ok(())
+}
+
 // ---- Model-generic glue (flatten from / scatter to the model) ------------------
 
 /// Byte offsets of each named parameter within the flattened vector.

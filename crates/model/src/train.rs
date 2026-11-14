@@ -1969,6 +1969,9 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
             None => obj.micro_steps(&model, &mut rng, opts.grad_accum.max(1)),
         };
         gpu_core::profile::stage_time("fit: step micro-steps (forward+backward)", step_clock);
+        // What the micro-steps measured, taken once: its supervised count also
+        // weights this rank in a data-parallel reduction below.
+        let mut work = obj.step_work().unwrap_or_default();
         let update_clock = std::time::Instant::now();
         match obj.step_verdict() {
             StepVerdict::Apply => {
@@ -1976,7 +1979,13 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
                 let scale = 1.0 / opts.grad_accum.max(1) as f32;
                 let clip = (opts.grad_clip > 0.0).then_some(opts.grad_clip);
                 if let Some(sync) = &grad_sync {
-                    crate::distributed::reduce_grads(&model, sync.collective, sync.rank).map_err(std::io::Error::other)?;
+                    // A token objective's gradient is a mean over this rank's
+                    // supervised positions, so ranks are weighted by them: the
+                    // step then descends the per-token mean of the whole step,
+                    // not the mean of the ranks' means. An objective that
+                    // reports no count is weighted equally.
+                    let weight = if work.supervised_positions > 0 { work.supervised_positions as f32 } else { 1.0 };
+                    crate::distributed::reduce_grads_weighted(&model, sync.collective, sync.rank, weight).map_err(std::io::Error::other)?;
                 }
                 // Moments, the applied-step count and the weights change only once the step passed the gate.
                 match gate.admit(&model, step_loss)? {
@@ -2000,7 +2009,6 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
         // The optimizer's share of the step: everything the objective did not
         // measure, which is zeroing gradients, reducing them, AdamW and the
         // device wait above. The evaluation a step is due is not part of it.
-        let mut work = obj.step_work().unwrap_or_default();
         work.optimizer_secs = (step_clock.elapsed().as_secs_f64() - work.prepare_secs - work.forward_secs - work.backward_secs).max(0.0);
         work.device_memory = model.optimizer_parts().and_then(|parts| parts.gpu.memory_usage());
         if let (Some(m), true) = (work.device_memory, gpu_core::profile::enabled()) {

@@ -124,7 +124,7 @@ pub use collective::{Collective, HostCollective};
 pub use collective::{payload_bytes, CollectiveProfile, OpKind, OpSnapshot, ShapedCollective, SimulatedLink, Snapshot, TimedCollective};
 pub use optim::{grad_multiplier, Adam};
 #[cfg(not(target_arch = "wasm32"))]
-pub use distributed::{federated_average, reduce_grads, DdpOptimizer};
+pub use distributed::{federated_average, reduce_grads, reduce_grads_weighted, DdpOptimizer};
 #[cfg(not(target_arch = "wasm32"))]
 pub use netcollective::NetworkCollective;
 #[cfg(not(target_arch = "wasm32"))]
