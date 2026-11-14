@@ -76,10 +76,12 @@ pub trait ResidencyPlan {
     }
 }
 
-/// Optimal for a fully-known schedule: pin the longest prefix the budget
-/// allows (minus a small rotating reserve so the unpinned tail has
-/// somewhere to load into), and evict by furthest-next-use (Bélády) — exact,
-/// not a heuristic, because the future is the schedule.
+/// For a fully-known schedule: pin the longest prefix the budget allows
+/// (minus a small rotating reserve so the unpinned tail has somewhere to load
+/// into), and evict by furthest-next-use (Bélády) among the rest, which is
+/// exact rather than a heuristic because the future is the schedule. Each pass
+/// after the first reloads the fewest groups; counting the first pass's loads
+/// of the preloaded groups, the total can exceed the exhaustive minimum.
 pub struct CyclicScan {
     /// Rotating slots reserved for the unpinned tail (prefetch depth). At
     /// least 1 whenever the window is narrower than the model, or nothing
