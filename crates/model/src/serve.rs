@@ -7,8 +7,8 @@
 //! serving engine implements to plug into [`Scheduler`]: admission, batched
 //! decode with an on-device window, cancellation, prefix reuse, and the
 //! `StepReport` timeline `brain perf` measures TTFA/ITL from. None of it
-//! depends on a specific architecture; `crates/qwen3/src/serve.rs::Engine` is
-//! the first (and, at time of writing, only) implementation, and
+//! depends on a specific architecture; `crates/qwen3/src/serve.rs::Engine` was
+//! the first implementation, and `deepseek2` and `qwen35` implement it too.
 //! `qwen3::serve::Scheduler` is a type alias for `Scheduler<Engine>` so no
 //! caller of the qwen-specific names needs to change.
 //!
@@ -1181,13 +1181,14 @@ enum Admissibility {
 /// What the queue looks like when an admission decision is made.
 #[derive(Clone, Copy, Debug)]
 pub struct QueueState {
-    /// Requests waiting behind this one (its position in the queue).
+    /// Requests already waiting ahead of this one (its position in the queue).
     pub queued_ahead: usize,
     /// Sequences currently decoding.
     pub running: usize,
     /// KV blocks free in the pool.
     pub free_blocks: u32,
-    /// Observed mean milliseconds to serve one request, when known.
+    /// Observed mean milliseconds a request takes from the start of its service (admission out of the queue) to
+    /// completion, excluding time spent queued; `None` until one has completed.
     pub mean_service_ms: Option<f64>,
 }
 
@@ -1215,7 +1216,7 @@ impl AdmissionPolicy for UnboundedQueue {
     }
 }
 
-/// Refuse once more than `max` requests are already waiting.
+/// Refuse once `max` or more requests are already waiting (so at most `max` ever queue).
 pub struct MaxQueueDepth(pub usize);
 impl AdmissionPolicy for MaxQueueDepth {
     fn name(&self) -> &'static str {
@@ -1482,16 +1483,19 @@ pub struct Scheduler<D: PagedDecoder> {
     max_running: usize,
     /// Admission policy — what to do with work arriving beyond capacity.
     admission: Box<dyn AdmissionPolicy>,
-    /// EWMA of ms per completed request, feeding DeadlineAware decisions.
+    /// EWMA of ms per completed request, from the start of its service (not its submission), feeding DeadlineAware
+    /// decisions: the policy multiplies it by the queue length, so queue wait must not be in it.
     mean_service_ms: Option<f64>,
-    started: HashMap<u64, std::time::Instant>,
+    /// Clock seconds at which each admitted request left the queue and began service; feeds `mean_service_ms`.
+    started: HashMap<u64, f64>,
     /// Policy rejections made at submit time, surfaced in the next report.
     pending_rejects: Vec<(u64, RejectReason)>,
     /// Max prompt tokens prefilled per iteration before yielding to decode.
     ///
-    /// Admission runs a FULL prefill per accepted request, so without a budget
-    /// a burst of N arrivals performs N whole prompt forwards back-to-back
-    /// while every running sequence stalls - measured as TTFA and inter-token
+    /// Prefill is chunked: each iteration spends at most this many prompt tokens
+    /// across the sequences being prefilled, so a long prompt spans several
+    /// iterations. Unbounded, a burst of N arrivals would perform N whole prompt
+    /// forwards back-to-back while every running sequence stalls - measured as TTFA and inter-token
     /// tail latency each growing by an order of magnitude from concurrency 1 to
     /// 32, with the interactive SLO met at no concurrency level. Bounding the
     /// prefill work per iteration lets decode run every iteration and spreads
@@ -1646,7 +1650,6 @@ impl<D: PagedDecoder> Scheduler<D> {
             self.pending_rejects.push((id, RejectReason::PolicyRejected { policy: self.admission.name() }));
             return id;
         }
-        self.started.insert(id, std::time::Instant::now());
         let bad_token = self.invalid_token(&req.prompt);
         self.waiting.push_back(Waiting { id, req, adapter, sample, seed, resume: None, embeds, bad_token });
         id
@@ -1691,6 +1694,7 @@ impl<D: PagedDecoder> Scheduler<D> {
         }
         if let Some(pos) = self.prefilling.iter().position(|p| p.id == id) {
             let mut p = self.prefilling.remove(pos).expect("position just found it");
+            self.started.remove(&id);
             self.dec.release_table(&mut p.table);
             self.unpin(p.adapter);
             return Some(p.resume.map_or_else(Default::default, |r| (r.generated, r.logprobs)));
@@ -1699,12 +1703,14 @@ impl<D: PagedDecoder> Scheduler<D> {
             // Demoted: its blocks are already back in the pool, its bytes are
             // in host RAM. Dropping the host record is the whole reclaim.
             let r = self.swapped.remove(pos).expect("position just found it");
+            self.started.remove(&id);
             self.dec.discard_offloaded(id);
             self.unpin(r.adapter);
             return Some((r.generated, r.logprobs));
         }
         let pos = self.running.iter().position(|r| r.id == id)?;
         let mut r = self.running.remove(pos);
+        self.started.remove(&id);
         self.dec.release_table(&mut r.table);
         self.unpin(r.adapter);
         Some((r.generated, r.logprobs))
@@ -1858,11 +1864,6 @@ impl<D: PagedDecoder> Scheduler<D> {
                 report.produced.push((*id, toks.len() - prev));
             }
             report.finished.push(*id);
-            if let Some(t0) = self.started.remove(id) {
-                let ms = t0.elapsed().as_secs_f64() * 1000.0;
-                self.mean_service_ms =
-                    Some(self.mean_service_ms.map_or(ms, |m| 0.8 * m + 0.2 * ms));
-            }
         }
         report.completed = completed;
         report
@@ -2199,7 +2200,6 @@ impl<D: PagedDecoder> Scheduler<D> {
                 Admissibility::AdapterLoading => pos += 1,
                 Admissibility::Refused(reject) => {
                     self.waiting.remove(pos);
-                    self.started.remove(&id);
                     report.rejected.push((id, reject));
                 }
             }
@@ -2402,6 +2402,9 @@ impl<D: PagedDecoder> Scheduler<D> {
             return false;
         }
         let Waiting { id, req, adapter, sample, seed, resume, embeds, .. } = self.waiting.remove(pos).expect("admissible position");
+        // Service starts here; a preempted request that comes back keeps its first start.
+        let now = (self.clock)();
+        self.started.entry(id).or_insert(now);
         let table = match adapter {
             Some(adapter) => {
                 // A resumed sequence never gave its pin back.
@@ -2602,10 +2605,22 @@ impl<D: PagedDecoder> Scheduler<D> {
         report.rejected.push((id, RejectReason::DeviceOutOfMemory { bytes }));
     }
 
+    /// Fold a finished request's time in service (admission out of the queue to completion, queue wait excluded) into
+    /// the mean the admission policy reads.
+    fn record_service_time(&mut self, id: u64) {
+        if let Some(t0) = self.started.remove(&id) {
+            let ms = ((self.clock)() - t0) * 1000.0;
+            self.mean_service_ms = Some(self.mean_service_ms.map_or(ms, |m| 0.8 * m + 0.2 * ms));
+        }
+    }
+
     /// One iteration ([`Self::iterate`]) and what it says about the card: an iteration that carried work and ran
     /// without a device allocation failure counts towards giving the batch back ([`MemoryPressure`]).
     fn step_inner(&mut self, report: &mut StepReport) -> Vec<(u64, Vec<u32>)> {
         let completed = self.iterate(report);
+        for (id, _) in &completed {
+            self.record_service_time(*id);
+        }
         let in_flight = self.running.len() + self.prefilling.len() + completed.len();
         self.pressure.end_step(in_flight, self.max_running);
         completed

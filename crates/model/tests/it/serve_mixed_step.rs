@@ -347,3 +347,49 @@ fn the_prompt_with_the_fewest_rows_left_is_read_in_first_and_the_oldest_still_ad
     assert_eq!(log.forwards[0], (0, LIMITS.max_rows), "{:?}", log.forwards);
     assert_eq!(log.forwards[1].0, 1, "the short prompt was not read in by the first forward and decoding by the second: {:?}", log.forwards);
 }
+
+/// Admission policy that records the mean service time the scheduler reports.
+struct Recorder(Arc<Mutex<Option<f64>>>);
+impl model::serve::AdmissionPolicy for Recorder {
+    fn name(&self) -> &'static str {
+        "recorder"
+    }
+    fn admit(&self, _req: &Request, state: &model::serve::QueueState) -> bool {
+        *self.0.lock().unwrap() = state.mean_service_ms;
+        true
+    }
+}
+
+/// Serves `n` identical requests through one slot, one virtual second per iteration, and returns the mean service
+/// time (ms) the scheduler reports to a request submitted afterwards.
+fn mean_service_ms_after(n: usize) -> f64 {
+    let (toy, _log, now) = Toy::new(false);
+    let mut s = Scheduler::new(toy, 1);
+    let seen = Arc::new(Mutex::new(None));
+    s.set_admission(Box::new(Recorder(seen.clone())));
+    s.set_clock(Box::new({
+        let now = now.clone();
+        move || *now.lock().unwrap()
+    }));
+    let mut left = n;
+    for _ in 0..n {
+        s.submit(Request { prompt: prompt(1, 8), max_new: 3, stop: vec![] });
+    }
+    while left > 0 {
+        *now.lock().unwrap() += 1.0;
+        left -= s.step().len();
+    }
+    s.submit(Request { prompt: prompt(1, 8), max_new: 3, stop: vec![] });
+    let mean = *seen.lock().unwrap();
+    mean.expect("completed requests were timed")
+}
+
+/// The mean the admission policy multiplies the queue length by is the time a request spends being served: a request
+/// that waited behind others is no slower to serve, so queueing must not inflate it.
+#[test]
+fn mean_service_time_excludes_queue_wait() {
+    let alone = mean_service_ms_after(1);
+    let queued = mean_service_ms_after(3);
+    assert!(alone > 0.0);
+    assert!((queued - alone).abs() < 1e-6, "queue wait leaked into service time: alone {alone} ms, queued {queued} ms");
+}
