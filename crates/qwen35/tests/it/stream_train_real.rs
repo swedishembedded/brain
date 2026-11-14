@@ -166,4 +166,8 @@ fn short_real_streaming_lora_finetune_reduces_loss_and_shifts_generation() {
         losses.last().unwrap() < &losses[0],
         "loss did not decrease over {STEPS} real steps: {losses:?} (this is the gate - report the real numbers either way, do not loosen this silently)"
     );
+    // The adapter starts as an exact no-op, so BEFORE is the base model's own
+    // answer; a trained adapter that leaves the greedy answer unchanged has not
+    // shifted generation, whatever the loss did.
+    assert_ne!(after, before, "the trained adapter left the greedy generation unchanged: {GEN_PROMPT:?} -> {before:?}");
 }

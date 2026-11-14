@@ -2911,24 +2911,14 @@ place since 2026-10-21, so the accounting is the part that shows it per step.
 ## Not yet done
 
 
-- **M18 follow-up: `stream_train_real.rs` asserts on loss only, never on the
-  generations it prints.** That file's single test
-  (`short_real_streaming_lora_finetune_reduces_loss_and_shifts_generation`)
-  prints a BEFORE and an AFTER greedy generation from the real 27B
-  checkpoint, but its only gates are that the losses are finite
-  and that the last one is below the first - the test's own name promises a
-  generation shift that nothing in it checks. Closing it needs one of: an
-  expected-phrase check specific to `resources/qwen35_finetune/corpus.txt`'s
-  content, or a perplexity-on-held-out-corpus-lines comparison
-  (BEFORE vs AFTER) - both of which require encoding domain knowledge of that
-  corpus that this file does not currently carry. Blocked on this box either
-  way: the test is `BRAIN_QWEN35_DIR`-gated on the ~54 GB HF-safetensors FP8
-  checkpoint, which is not present here (only the community GGUF is) and
-  cannot be fetched - `df -h /` on this box moves between 41 GB and 58 GB
-  free as the build tree churns, i.e. never reliably more than the download
-  alone, never mind headroom beside it. A change to the assertions cannot be
-  validated against weights that are not here, so the test is left as-is and
-  the gap recorded instead.
+- **M18 follow-up (closed): `stream_train_real.rs` checks the generation
+  shift its name promises.** Beside the finite, decreasing loss, the test
+  asserts the AFTER greedy generation differs from the BEFORE one (the
+  zero-initialised adapter makes BEFORE the base model's own answer). The
+  recorded real run satisfies it (`" Paris.\n"` -> `"emelemelemel"` after two
+  steps). The check says the adapter changed behaviour, not that it improved it;
+  an improvement check needs held-out lines of the training corpus scored
+  BEFORE and AFTER.
 
 M0-M20 are complete; M21's real-checkpoint output-correctness gate was RED
 from M21 through the start of M23 and is now GREEN - see M23's own section
