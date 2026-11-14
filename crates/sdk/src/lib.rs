@@ -210,8 +210,9 @@ pub use prune::{ModelPruner, ModelPrunerOutcome};
 /// The model optimizer's report types, for a caller of [`ModelOptimizer`].
 #[cfg(feature = "study")]
 pub use modelopt::{Baseline as OptimizerBaseline, Progress as OptimizerSearchProgress, PruneReport, Report as OptimizerReport, SiteReport as OptimizerSiteReport};
+/// The toy chat checkpoint writer (it lives with the model it writes).
 #[cfg(feature = "study")]
-pub mod toy;
+pub use qwen3::toy;
 #[cfg(feature = "study")]
 mod preference;
 #[cfg(feature = "study")]

@@ -4223,7 +4223,10 @@ impl Qwen {
             config["itos"] = Value::Array(arr);
         }
         // One tensor at a time off the device or the master, written while the next is read.
-        checkpoint::weightio::save_streamed(path, &config, None, &plan, |name| self.read_weight(name)).expect("save safetensors");
+        // A base checkpoint carries the `qwen` card, so the model store resolves it (`crate::spec::Qwen3Spec`); a
+        // checkpoint extended with LoRA tensors is a training artifact, not a base.
+        let card = self.cfg.lora.is_none().then(|| checkpoint::st::ModelCard::new(crate::caps::MODEL, crate::spec::CARD_FAMILY));
+        checkpoint::weightio::save_streamed(path, &config, card.as_ref(), &plan, |name| self.read_weight(name)).expect("save safetensors");
     }
 }
 

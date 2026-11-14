@@ -62,7 +62,6 @@ crates/catalog/src/resident_horizon.rs	MOE_SKIP_GPU_TESTS
 crates/catalog/src/resident_januspro.rs	BRAIN_JANUSPRO_TUNED
 crates/catalog/src/resident_januspro.rs	BRAIN_JANUSPRO_TUNED_GENERATION
 crates/catalog/src/resident_llm.rs	BRAIN_DEVICE
-crates/catalog/src/resident_llm.rs	QWEN3_DIR
 crates/catalog/src/resident_llm.rs	QWEN_TOKENIZER
 crates/catalog/src/resident_qwen35.rs	QWEN_TOKENIZER
 crates/catalog/src/resident_supir.rs	BRAIN_SDXL_DIR
@@ -662,10 +661,6 @@ crates/pulid/src/caps.rs	BRAIN_PULID_DIR
 crates/pulid/tests/it/parity.rs	<var>
 crates/pulid/tests/it/parity.rs	BRAIN_FLUX1_TRANSFORMER
 crates/pulid/tests/it/parity.rs	BRAIN_PULID
-crates/qwen3/src/caps.rs	BRAIN_QWEN_STEP_CACHE
-crates/qwen3/src/caps.rs	QWEN_TOKENIZER
-crates/qwen3/src/chat.rs	QWEN3_DIR
-crates/qwen3/src/eval.rs	QWEN_TOKENIZER
 crates/qwen3/src/gguf_import.rs	MOE_SKIP_GPU_TESTS
 crates/qwen3/src/model.rs	BRAIN_QWEN_NAIVE_MM
 crates/qwen3/src/model.rs	MOE_SKIP_GPU_TESTS

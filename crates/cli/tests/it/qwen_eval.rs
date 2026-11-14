@@ -91,38 +91,35 @@ fn eval_scores_base_alone_and_base_plus_adapter_side_by_side() {
     // eval WIRING, not convergence; convergence is Gate A's job).
     let train_out = Command::new(bin())
         .args([
-            "qwen3", "finetune", "--lora", "4", "--weights", "Qwen/Qwen3-0.6B", "--adapter", "test-owner/eval-adapter", "--dataset",
-            dataset_dir.to_str().unwrap(), "--models-dir", store_dir.to_str().unwrap(), "--steps", "2", "--batch", "1", "--block", "48",
+            "qwen3", "lora_train", "--rank", "4", "--adapter-name", "test-owner/eval-adapter", "--dataset", dataset_dir.join("train.jsonl").to_str().unwrap(),
+            "--brain-data-dir", scratch.to_str().unwrap(), "--steps", "2", "--batch", "1", "--block", "48",
         ])
         .args(["--device", "cpu"])
         .output()
-        .expect("run brain qwen3 finetune --lora");
+        .expect("run brain qwen3 lora_train");
     assert!(train_out.status.success(), "training the adapter failed: {}", String::from_utf8_lossy(&train_out.stderr));
 
+    let eval = |extra: &[&str], report: &Path| {
+        let out = Command::new(bin())
+            .args(["qwen3", "eval", "--samples", dataset_dir.join("validation.jsonl").to_str().unwrap(), "--brain-data-dir", scratch.to_str().unwrap(), "--block", "48"])
+            .args(extra)
+            .args(["--out", &format!("report={}", report.display())])
+            .args(["--device", "cpu"])
+            .output()
+            .expect("run brain qwen3 eval");
+        assert!(out.status.success(), "eval failed: {}", String::from_utf8_lossy(&out.stderr));
+        std::fs::read_to_string(report).expect("the eval report")
+    };
+
     // Base score alone.
-    let base_only = Command::new(bin())
-        .args(["qwen3", "eval", "--weights", "Qwen/Qwen3-0.6B", "--jsonl", dataset_dir.join("validation.jsonl").to_str().unwrap(), "--models-dir", store_dir.to_str().unwrap(), "--block", "48"])
-        .args(["--device", "cpu"])
-        .output()
-        .expect("run brain qwen3 eval (base only)");
-    assert!(base_only.status.success(), "base-only eval failed: {}", String::from_utf8_lossy(&base_only.stderr));
-    let base_stdout = String::from_utf8_lossy(&base_only.stdout).into_owned();
-    assert!(base_stdout.contains("base Qwen/Qwen3-0.6B: loss"), "unexpected base-only output: {base_stdout}");
-    assert!(!base_stdout.to_lowercase().contains("nan"), "base-only eval reported NaN loss (nothing scored?): {base_stdout}");
+    let base_report = eval(&[], &scratch.join("base.txt"));
+    assert!(base_report.contains("base Qwen/Qwen3-0.6B: loss"), "unexpected base-only report: {base_report}");
+    assert!(!base_report.to_lowercase().contains("nan"), "base-only eval reported NaN loss (nothing scored?): {base_report}");
 
     // Base + adapter side by side.
-    let with_adapter = Command::new(bin())
-        .args([
-            "qwen3", "eval", "--weights", "Qwen/Qwen3-0.6B", "--adapter", "test-owner/eval-adapter", "--jsonl", dataset_dir.join("validation.jsonl").to_str().unwrap(), "--models-dir",
-            store_dir.to_str().unwrap(), "--block", "48",
-        ])
-        .args(["--device", "cpu"])
-        .output()
-        .expect("run brain qwen3 eval (with adapter)");
-    assert!(with_adapter.status.success(), "with-adapter eval failed: {}", String::from_utf8_lossy(&with_adapter.stderr));
-    let stdout = String::from_utf8_lossy(&with_adapter.stdout).into_owned();
-    assert!(stdout.contains("base Qwen/Qwen3-0.6B: loss"), "missing base line: {stdout}");
-    assert!(stdout.contains("Qwen/Qwen3-0.6B:test-owner:eval-adapter:latest: loss"), "missing adapter line: {stdout}");
-    assert!(stdout.contains("base on held-out loss"), "missing the beats/does-not-beat verdict line: {stdout}");
-    assert!(!stdout.to_lowercase().contains("nan"), "with-adapter eval reported NaN loss somewhere: {stdout}");
+    let report = eval(&["--adapter-name", "test-owner/eval-adapter"], &scratch.join("adapter.txt"));
+    assert!(report.contains("base Qwen/Qwen3-0.6B: loss"), "missing base line: {report}");
+    assert!(report.contains("Qwen/Qwen3-0.6B:test-owner:eval-adapter:latest: loss"), "missing adapter line: {report}");
+    assert!(report.contains("base on held-out loss"), "missing the beats/does-not-beat verdict line: {report}");
+    assert!(!report.to_lowercase().contains("nan"), "with-adapter eval reported NaN loss somewhere: {report}");
 }

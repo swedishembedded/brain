@@ -10,7 +10,7 @@
 //! and reasoning fine-tuning, where training on the (given) prompt would teach
 //! the model to hallucinate user turns.
 //!
-//! Output (consumed unchanged by `model::fit` / `brain qwen finetune`), per
+//! Output (consumed unchanged by `model::fit` / `brain qwen3 lora_train`), per
 //! split ([`write_split`]):
 //!   * `train.u32.bin` / `val.u32.bin` — `u32` token ids.
 //!   * `train.mask.bin` / `val.mask.bin` — `u8` per-token mask (1 = trainable).

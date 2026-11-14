@@ -8,7 +8,7 @@
 //! dataset" -- unlike `crates/qwen3/tests/it/lora_learning_gate.rs` (Gate A,
 //! synthetic, no checkpoint needed), this runs against a REAL base
 //! checkpoint and a REAL bench-exported dataset, so it lives behind
-//! `brain qwen eval` rather than as an always-on test.
+//! `brain qwen3 eval` rather than as an always-on test.
 //!
 //! Loss/accuracy are computed ONLY over positions the sample itself marks
 //! trainable (`ChatSample::encode`'s mask) -- prompt/context tokens the
@@ -263,7 +263,7 @@ pub fn score_chat_paged(weights: &str, adapter: Option<&str>, tok: &QwenBpe, tmp
         let dir = Path::new(weights).parent().unwrap_or_else(|| Path::new("."));
         let calib = model::kvcalib::KvCalib::from_model_dir(dir, cfg.n_layers as usize, cfg.n_kv_heads as usize, cfg.head_dim as usize);
         if calib.is_none() {
-            eprintln!("qwen eval --kv int8-calib: no kv_calib.json found beside {weights} (or its shape didn't match); scoring uncalibrated int8 instead");
+            eprintln!("qwen eval kv int8-calib: no kv_calib.json found beside {weights} (or its shape didn't match); scoring uncalibrated int8 instead");
         }
         eng.set_kv_calib(calib);
     }
@@ -327,25 +327,25 @@ mod paged_scoring_tests {
     /// paged `Engine`'s chunked prefill). A real mismatch here means the
     /// paged scoring backend is wrong, independent of any int8 question.
     ///
-    /// Needs a real tokenizer + chat template (`QWEN_TOKENIZER=/path/to/
-    /// tokenizer.json`, its sibling `tokenizer_config.json` supplies the
-    /// template) — self-skips loudly when unset. The
+    /// Needs the real Qwen3-0.6B tokenizer + chat template from the model
+    /// store (its sibling `tokenizer_config.json` supplies the template);
+    /// self-skips loudly when they are not there. The
     /// checkpoint's vocab matches the real tokenizer's full range so the
     /// rendered special tokens (`<|im_start|>` etc.) never index outside the
     /// embedding table (the exact class of bug root-caused as a CPU-backend
     /// JIT dispatch segfault in `decode_steps`).
     #[test]
     fn paged_fp32_scoring_matches_the_legacy_backend() {
-        let Ok(tok_path) = std::env::var("QWEN_TOKENIZER") else {
-            brain_testutil::skip("set QWEN_TOKENIZER to a real tokenizer.json to run this test");
+        let Some(tok_path) = brain_testutil::model_dir("Qwen/Qwen3-0.6B").map(|d| format!("{d}/tokenizer.json")).filter(|p| std::path::Path::new(p).is_file()) else {
+            brain_testutil::skip("pull Qwen/Qwen3-0.6B into the model store to run this test");
             return;
         };
-        let tok = QwenBpe::from_file(&tok_path).expect("load QWEN_TOKENIZER");
+        let tok = QwenBpe::from_file(&tok_path).expect("load the Qwen3-0.6B tokenizer");
         let base_dir = Path::new(&tok_path).parent().expect("tokenizer path has a parent dir");
         let tmpl = match ChatTemplate::from_model_dir(base_dir) {
             Ok(t) => t,
             Err(e) => {
-                brain_testutil::skip(&format!("no chat template beside QWEN_TOKENIZER ({base_dir:?}): {e}"));
+                brain_testutil::skip(&format!("no chat template beside the tokenizer ({base_dir:?}): {e}"));
                 return;
             }
         };

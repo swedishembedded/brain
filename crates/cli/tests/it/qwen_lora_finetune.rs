@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! End-to-end test of `brain qwen3 finetune --lora ...`: the "simple command
+//! End-to-end test of `brain qwen3 lora_train ...`: the "simple command
 //! to fully retrain and overwrite the lora checkpoint" from the training
 //! benchmark's Definition of Done. Runs the actual compiled
 //! `brain` binary against a real Qwen3-0.6B checkpoint symlinked into a
@@ -95,17 +95,15 @@ fn finetune_lora_writes_a_named_adapter_the_store_can_resolve() {
     let out = Command::new(bin())
         .args([
             "qwen3",
-            "finetune",
-            "--lora",
+            "lora_train",
+            "--rank",
             "4",
-            "--weights",
-            "Qwen/Qwen3-0.6B",
-            "--adapter",
+            "--adapter-name",
             "test-owner/test-adapter",
             "--dataset",
-            dataset_dir.to_str().unwrap(),
-            "--models-dir",
-            store_dir.to_str().unwrap(),
+            dataset_dir.join("train.jsonl").to_str().unwrap(),
+            "--brain-data-dir",
+            scratch.to_str().unwrap(),
             "--steps",
             "2",
             "--batch",
@@ -117,10 +115,10 @@ fn finetune_lora_writes_a_named_adapter_the_store_can_resolve() {
         ])
         .args(["--device", "cpu"])
         .output()
-        .expect("run brain qwen3 finetune --lora");
+        .expect("run brain qwen3 lora_train");
     assert!(
         out.status.success(),
-        "brain qwen3 finetune --lora failed:\nstdout: {}\nstderr: {}",
+        "brain qwen3 lora_train failed:\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
@@ -147,17 +145,15 @@ fn finetune_lora_writes_a_named_adapter_the_store_can_resolve() {
     let out2 = Command::new(bin())
         .args([
             "qwen3",
-            "finetune",
-            "--lora",
+            "lora_train",
+            "--rank",
             "4",
-            "--weights",
-            "Qwen/Qwen3-0.6B",
-            "--adapter",
+            "--adapter-name",
             "test-owner/test-adapter",
             "--dataset",
-            dataset_dir.to_str().unwrap(),
-            "--models-dir",
-            store_dir.to_str().unwrap(),
+            dataset_dir.join("train.jsonl").to_str().unwrap(),
+            "--brain-data-dir",
+            scratch.to_str().unwrap(),
             "--steps",
             "2",
             "--batch",
@@ -168,16 +164,16 @@ fn finetune_lora_writes_a_named_adapter_the_store_can_resolve() {
         ])
         .args(["--device", "cpu"])
         .output()
-        .expect("run brain qwen3 finetune --lora a second time");
+        .expect("run brain qwen3 lora_train a second time");
     assert!(out2.status.success(), "retrain-and-overwrite failed: {}", String::from_utf8_lossy(&out2.stderr));
     assert!(adapter_path.is_file(), "adapter file must still be there after overwrite");
 }
 
-/// The loss `brain qwen3 finetune` reports before the first step, from its
-/// `trained: loss A -> B` line.
+/// The loss `brain qwen3 lora_train` reports before the first step, from its
+/// `initial_loss: X` line.
 fn initial_loss(stdout: &str) -> f64 {
-    let line = stdout.lines().find(|l| l.starts_with("trained: loss ")).unwrap_or_else(|| panic!("no 'trained: loss' line in:\n{stdout}"));
-    line["trained: loss ".len()..].split_whitespace().next().unwrap().parse().unwrap()
+    let line = stdout.lines().find(|l| l.starts_with("initial_loss: ")).unwrap_or_else(|| panic!("no 'initial_loss' line in:\n{stdout}"));
+    line["initial_loss: ".len()..].trim().parse().unwrap()
 }
 
 #[test]
@@ -200,22 +196,22 @@ fn training_an_adapter_that_exists_continues_it_unless_asked_to_start_over() {
     let run = |extra: &[&str]| {
         let out = Command::new(bin())
             .args([
-                "qwen3", "finetune", "--lora", "4", "--weights", "Qwen/Qwen3-0.6B", "--adapter", "test-owner/test-adapter", "--dataset",
-                dataset_dir.to_str().unwrap(), "--models-dir", store_dir.to_str().unwrap(), "--steps", "12", "--batch", "1", "--block", "48",
+                "qwen3", "lora_train", "--rank", "4", "--adapter-name", "test-owner/test-adapter", "--dataset",
+                dataset_dir.join("train.jsonl").to_str().unwrap(), "--brain-data-dir", scratch.to_str().unwrap(), "--steps", "12", "--batch", "1", "--block", "48",
                 "--lr", "0.003", "--seed", "7",
             ])
             .args(extra)
             .args(["--device", "cpu"])
             .output()
-            .expect("run brain qwen3 finetune --lora");
+            .expect("run brain qwen3 lora_train");
         let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-        assert!(out.status.success(), "finetune failed:\nstdout: {stdout}\nstderr: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(out.status.success(), "lora_train failed:\nstdout: {stdout}\nstderr: {}", String::from_utf8_lossy(&out.stderr));
         stdout
     };
 
     let first = run(&[]);
     let again = run(&[]);
-    assert!(again.contains("continuing adapter"), "the second run says it continues the adapter:\n{again}");
+    assert!(again.contains("continued: true"), "the second run says it continues the adapter:\n{again}");
     assert!(
         initial_loss(&again) < initial_loss(&first),
         "a continued adapter starts where the last run ended: {} then {}",
@@ -224,7 +220,7 @@ fn training_an_adapter_that_exists_continues_it_unless_asked_to_start_over() {
     );
 
     let fresh = run(&["--fresh"]);
-    assert!(!fresh.contains("continuing adapter"));
+    assert!(fresh.contains("continued: false"));
     assert!(
         initial_loss(&fresh) > initial_loss(&again),
         "--fresh starts over from the base: {} against {}",

@@ -11,7 +11,7 @@
 //! ONNX (`qwen-seq{N}.onnx` + `.data`) is written there once and reused while it
 //! is newer than the weights, and OpenVINO's `CACHE_DIR` blob cache is pointed at
 //! the same dir so the compiled NPU graph is reused too. Use a fixed `seq` (and
-//! `brain qwen precompile`) so one cached graph serves every prompt up to that
+//! `npu-precompile` of `samples/models/qwen3`) so one cached graph serves every prompt up to that
 //! length.
 
 use std::path::{Path, PathBuf};

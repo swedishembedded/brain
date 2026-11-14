@@ -38,7 +38,6 @@ type Handler = fn(&[String]);
 /// matches `AGENTS.md`'s model grouping; add a row here when a new
 /// architecture gets its own `_cli.rs`.
 const ARCH_HANDLERS: &[(&str, Handler)] = &[
-    ("qwen3", crate::qwen_cli::run_qwen),
     ("qwen35", crate::qwen35_cli::run_qwen35),
 ];
 
@@ -122,6 +121,7 @@ const ARCH_TO_MODEL: &[(&str, &str)] = &[
     ("yolov8", "brain/yolov8"),
     ("gpt2", "brain/gpt2"),
     ("glmdsa", "brain/glm"),
+    ("qwen3", "brain/qwen3"),
     ("toypid", "brain/toypid"),
     ("toymoe", "brain/toymoe"),
     ("huginn", "brain/huginn"),
@@ -893,10 +893,10 @@ mod tests {
 
     #[test]
     fn import_with_a_real_arch_id_routes_to_that_archs_own_import_verb() {
-        let Resolved::Arch { arch, rest } = resolve(&s(&["import", "qwen3", "--hf", "dir", "--out", "f"])) else {
-            panic!("expected Resolved::Arch (qwen3 has a dedicated handler with its own import verb)");
+        let Resolved::Arch { arch, rest } = resolve(&s(&["import", "qwen35", "--hf", "dir", "--out", "f"])) else {
+            panic!("expected Resolved::Arch (qwen35 has a dedicated handler with its own import verb)");
         };
-        assert_eq!(arch, "qwen3");
+        assert_eq!(arch, "qwen35");
         assert_eq!(rest, s(&["import", "--hf", "dir", "--out", "f"]));
     }
 
@@ -1087,8 +1087,8 @@ mod tests {
     /// existed.
     #[test]
     fn verb_is_known_has_no_opinion_on_an_ungated_handler() {
-        assert_eq!(verb_is_known("qwen3", "t2i"), None);
-        assert_eq!(verb_is_known("qwen3", "infer"), None);
+        assert_eq!(verb_is_known("qwen35", "t2i"), None);
+        assert_eq!(verb_is_known("qwen35", "infer"), None);
     }
 
     /// The actual gate `dispatch_arch` consults before calling
@@ -1114,8 +1114,8 @@ mod tests {
     fn wants_weight_acquisition_still_proceeds_for_every_real_verb() {
         // An arch with no verb table entry is unaffected: unchanged
         // (pre-existing) behavior, gated only by help/no-verb.
-        assert!(wants_weight_acquisition("qwen3", &s(&["t2i"])));
-        assert!(wants_weight_acquisition("qwen3", &s(&["infer"])));
+        assert!(wants_weight_acquisition("qwen35", &s(&["t2i"])));
+        assert!(wants_weight_acquisition("qwen35", &s(&["infer"])));
     }
 
     /// `ARCH_TO_MODEL` architectures validate against their own capability

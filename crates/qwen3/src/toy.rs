@@ -14,13 +14,12 @@
 //! weights make of the tokens after it, so a task whose answer is a function of the prompt (a cipher, say) is learnt by a
 //! LoRA adapter of rank 16 in a few hundred steps, and a held-out prompt shows whether it generalised or memorised.
 //!
-//! The weights are drawn as [`qwen3::init::init_weights`] draws them and then widened ([`WEIGHT_SCALE`]): at the
+//! The weights are drawn as [`crate::init::init_weights`] draws them and then widened ([`WEIGHT_SCALE`]): at the
 //! standard 0.02 deviation the tied output embedding is so small that no adapter can lift a logit clear of 264 others
 //! in a feasible number of steps.
 
 use std::path::Path;
 
-use crate::{Error, Result};
 
 /// The factor the standard initialisation is widened by, norm gains excepted.
 pub const WEIGHT_SCALE: f32 = 6.0;
@@ -36,11 +35,11 @@ const TEMPLATE: &str = "{% for m in messages %}{% if m.role == 'user' %}{{ m.con
 ///
 /// # Errors
 /// `dir` cannot be written.
-pub fn write_toy_chat_checkpoint(dir: &Path, seed: u64) -> Result<()> {
-    let io = |e: std::io::Error| Error::Backend(format!("toy checkpoint in {}: {e}", dir.display()));
+pub fn write_toy_chat_checkpoint(dir: &Path, seed: u64) -> Result<(), String> {
+    let io = |e: std::io::Error| format!("toy checkpoint in {}: {e}", dir.display());
     std::fs::create_dir_all(dir).map_err(io)?;
-    let cfg = qwen3::QwenConfig { vocab: VOCAB, block_size: CONTEXT, max_position_embeddings: CONTEXT, d_model: 32, d_ff: 64, ..qwen3::QwenConfig::tiny() };
-    let init = qwen3::init::init_weights(&cfg, seed);
+    let cfg = crate::QwenConfig { vocab: VOCAB, block_size: CONTEXT, max_position_embeddings: CONTEXT, d_model: 32, d_ff: 64, ..crate::QwenConfig::tiny() };
+    let init = crate::init::init_weights(&cfg, seed);
     let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = cfg
         .param_list()
         .into_iter()
@@ -51,7 +50,7 @@ pub fn write_toy_chat_checkpoint(dir: &Path, seed: u64) -> Result<()> {
         })
         .collect();
     let weights = dir.join("model.safetensors");
-    let weights = weights.to_str().ok_or_else(|| Error::Backend("the toy checkpoint's path is not UTF-8".into()))?;
+    let weights = weights.to_str().ok_or_else(|| "the toy checkpoint's path is not UTF-8".to_string())?;
     checkpoint::st::save_safetensors(weights, &tensors, &cfg.to_json(), None).map_err(io)?;
 
     // One token per byte, spelled as GPT-2's byte-to-unicode table spells it.

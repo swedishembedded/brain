@@ -45,11 +45,12 @@ const SEEDED_VERBS: &[&[&str]] = &[
     &["gpt2", "eval", "--weights", "w", "--data", "d"],
     &["lfm2", "finetune", "--data", "d", "--save", "s"],
     &["lfm2", "eval", "--data", "d"],
-    &["qwen3", "train"],
-    &["qwen3", "infer"],
-    &["qwen3", "finetune", "--lora", "8"],
-    &["qwen3", "toolcall", "gen"],
-    &["qwen3", "toolcall", "eval"],
+    &["qwen3", "train", "--data", "d", "--save", "s"],
+    &["qwen3", "finetune", "--data", "d", "--save", "s"],
+    &["qwen3", "generate", "--weights", "w"],
+    &["qwen3", "lora_train", "--weights", "w"],
+    &["qwen3", "toolcall_gen", "--out", "o"],
+    &["qwen3", "toolcall_eval", "--weights", "w"],
     &["qwen35", "infer"],
     &["qwen35", "finetune"],
     &["qwen35moe", "generate", "--weights", "w"],
@@ -73,10 +74,6 @@ const SEEDED_VERBS: &[&[&str]] = &[
 const USAGE_STOPPED_VERBS: &[&[&str]] = &[
     &["perf", "run", "latency"],
     &["federated", "train-expert"],
-    &["qwen3", "infer"],
-    &["qwen3", "train"],
-    &["qwen3", "toolcall", "gen"],
-    &["qwen3", "toolcall", "eval"],
     &["qwen35moe", "generate", "--weights", "w"],
 ];
 

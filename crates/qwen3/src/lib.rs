@@ -21,6 +21,10 @@ pub mod q8;
 pub mod rollout;
 pub mod sample;
 pub mod serve;
+mod served;
+mod train_actions;
+mod eval_actions;
+mod convert_actions;
 pub mod finetune;
 pub mod lora;
 pub mod lora_params;
@@ -29,6 +33,7 @@ pub mod shard;
 pub mod slice;
 pub mod spec;
 pub mod toolcall_eval;
+pub mod toy;
 pub mod tp;
 
 pub use config::{LoraCfg, QwenConfig};

@@ -92,7 +92,7 @@ Scope: Running one training job as ranks across machines - the job plan every ra
       turns the shared `fit_controlled` loop into a data-parallel run: every
       rank reduces each step's gradients over the group and trains on its own
       shard of the training-record stream, derived from the group's rank and
-      world size. `brain qwen3 finetune --lora ... --job-plan FILE
+      world size. `brain qwen3 lora_train ... --job-plan FILE
       --job-rank N --job-secret FILE` joins the plan's collective and sets it;
       part of the three is a usage error, and a rank without `--seed` derives one from the plan bytes.
       The record strategy is index-based and explicit: record `n` belongs to
@@ -131,7 +131,7 @@ Scope: Running one training job as ranks across machines - the job plan every ra
       profile small and parses its report.
 
 - [x] **A distributed run reports its own collective cost.**
-      `brain gpt2 train` and `brain qwen3 finetune --lora` take
+      `brain gpt2 train` and `brain qwen3 lora_train` take
       `--profile-collectives FILE` alongside `--job-plan`/`--job-rank`. Each
       rank wraps its joined transport in `collective::TimedCollective` for the
       run and writes `FILE.rank<rank>.json`: the plan identity, rank, world,

@@ -27,19 +27,24 @@ own data.
 also import a checkpoint you already have locally:
 
 ```bash
-brain qwen3 import --hf /path/to/Qwen3-0.6B --out qwen.safetensors
+brain qwen3 import --source /path/to/Qwen3-0.6B --dest qwen.safetensors
 ```
+
+`import` writes a brain checkpoint with the `qwen` model card, so the model
+store resolves it: after `import`, `train` or `finetune`, put the file under
+the store (`<data root>/models/<vendor>/<repo>/`) and `brain qwen3 <action>`,
+`brain serve` and `brain pull` find it by that card, with no `--weights`.
 
 A **GGUF** works too -- llama.cpp's `qwen3` architecture, e.g.
 `Qwen/Qwen3-8B-GGUF` -- and needs **no conversion step**: `qwen3` is one of
-the architectures brain's model-dir scan and every `qwen3` CLI verb load
+the architectures brain's model-dir scan and every `qwen3` action load
 **directly**. `checkpoint::weightio::WeightReader::open` sniffs the file's
 `GGUF` magic (falling back to the `.gguf` extension) and dispatches straight
 to the GGUF reader, with no intermediate `.safetensors` in between. Point
 `--weights` straight at the file:
 
 ```bash
-brain qwen3 infer --weights /path/to/Qwen3-8B-Q8_0.gguf \
+brain qwen3 generate --weights /path/to/Qwen3-8B-Q8_0.gguf \
     --tokenizer tokenizer.json --prompt "Hello"
 ```
 
@@ -81,46 +86,61 @@ directory behaviour is unchanged.
 
 ## Running it
 
+Every capability of the model is a served action: `brain qwen3 <action>` runs
+it on this machine, `brain serve` publishes the same actions over HTTP and
+D-Bus, and `samples/models/qwen3` is a standalone program over the same code
+(`$G <action> --help` and `brain qwen3 <action> --help` list every parameter
+with its default). A parameter left out takes the action's own default.
+
 ```bash
-# Inference
-brain qwen3 infer --weights qwen.safetensors --prompt "Hello"
+# Inference (the checkpoint resolves from the model store; --weights names one)
+brain qwen3 generate --prompt "Hello" --max-new 64 --seed $RANDOM
 
-# Training from scratch
-brain qwen3 train --data data/shakespeare_char --out qwen-train.safetensors --steps 1000
+# Training from scratch on a tokenized dataset (`brain data` prepares one)
+brain qwen3 train --data data/shakespeare_char --save qwen-train.safetensors --steps 1000 --seed $RANDOM
 
-# LoRA finetune -- trains a NAMED adapter
-brain qwen3 finetune --lora 8 --weights Qwen/Qwen3-0.6B \
-    --adapter my-org/my-finetune --dataset /path/to/dataset/dir --steps 500
+# Full-parameter finetune of the stored checkpoint (no adapter)
+brain qwen3 finetune --data data/shakespeare_char --save qwen-ft.safetensors --steps 500 --seed $RANDOM
+
+# LoRA finetune -- trains a NAMED adapter into the model store
+brain qwen3 lora_train --rank 8 --adapter-name my-org/my-finetune \
+    --dataset train.jsonl --validation validation.jsonl --steps 500 --seed $RANDOM
 
 # Prove it learned: held-out loss/accuracy, base vs. the adapter
-brain qwen3 eval --weights Qwen/Qwen3-0.6B \
-    --adapter my-org/my-finetune --jsonl /path/to/validation.jsonl
-
-# Full-parameter finetune from a plain checkpoint file (no adapter)
-brain qwen3 finetune data/shakespeare_char --weights qwen.safetensors \
-    --out qwen-ft.safetensors --steps 500
-
-# Paged-KV continuous-batching decode over a batch of prompts (a CLI demo of
-# the serving engine, not an HTTP server -- see `brain serve --openai PORT`
-# for that)
-brain qwen3 serve --weights qwen.safetensors --tokenizer tokenizer.json \
-    --prompt "Hello" --prompt "Hi there"
+brain qwen3 eval --adapter-name my-org/my-finetune --samples validation.jsonl
 
 # Device selection
-brain qwen3 infer --weights … --device cpu     # JIT-compiled CPU path
-brain qwen3 infer --weights … --device gpu     # portable GPU backend (default)
-brain qwen3 infer --weights … --device vulkan  # native Vulkan
+brain qwen3 generate --prompt "Hello" --device cpu     # JIT-compiled CPU path
+brain qwen3 generate --prompt "Hello" --device gpu     # portable GPU backend (default)
+brain qwen3 generate --prompt "Hello" --device vulkan  # native Vulkan
 ```
 
-Other verbs: `brain qwen3 export` (to ONNX, or `--format hf|gguf` for a
-`transformers` directory or a llama.cpp GGUF, see below), `brain qwen3 precompile` (precompile
-kernels for a target device), `brain qwen3 toolcall` (tool-call evaluation).
+Batched, concurrent decoding over the paged KV cache is `brain serve --openai
+PORT`: it admits requests as they arrive and runs all running sequences in one
+batched forward per iteration, so there is no separate local batch command.
+
+The other actions: `lora_gate` (promote or reject a candidate adapter against
+frozen probes), `embed` (last-token pooled embeddings), `calib` (the INT8
+KV-cache outlier report and its clip table), `toolcall_gen` and
+`toolcall_eval` (a tool-call fine-tuning set, and exact-match scoring of a
+checkpoint on held-out cases), and the conversions `import`, `export`
+(`transformers` directory or GGUF) and `export_peft`.
+
+The ONNX export for OpenVINO and greedy decoding on the Intel NPU need the
+`npu` crate, so they are actions of the sample, not of the served model:
+
+```bash
+G=target/release/sample-models-qwen3
+$G export-onnx --weights qwen.safetensors --seq 64 --out qwen.onnx
+$G npu-precompile --weights qwen.safetensors --tokenizer tokenizer.json --seq 64 --npu-cache /tmp/npu-cache
+$G npu-generate --weights qwen.safetensors --tokenizer tokenizer.json --prompt "Hello" --seq 64 --npu-cache /tmp/npu-cache
+```
 
 ### Exporting to Hugging Face
 
 ```bash
 brain qwen3 export --weights model.safetensors --format hf --out my-model \
-    --tokenizer-dir path/to/base-checkpoint [--dtype bf16|f16|f32]
+    --tokenizer path/to/base-checkpoint/tokenizer.json [--dtype bf16|f16|f32]
 ```
 
 writes a directory `transformers` loads with `from_pretrained`: sharded
@@ -128,8 +148,9 @@ safetensors (5 GB shards and an index, or one `model.safetensors`) under the
 HF tensor names, and a `config.json` naming the class the checkpoint is:
 `Qwen3ForCausalLM` with QK-norm, `Qwen2ForCausalLM` with q/k/v bias,
 `LlamaForCausalLM` with neither, RoPE scaling included. The tokenizer,
-chat-template and generation files are copied from `--tokenizer-dir`, which
-defaults to `--weights` when that is a checkpoint directory. Any checkpoint
+chat-template and generation files are copied from the directory of
+`--tokenizer`, which defaults to the store's pick (or `--weights`'s own
+directory when that is a checkpoint directory). Any checkpoint
 the decoder reads can be the input: a brain file, a Hugging Face directory or
 a GGUF. Tensors stream one at a time. The default dtype is bf16; `--dtype
 f32` exports losslessly. `--adapter ADAPTER.safetensors` folds a LoRA adapter
@@ -146,7 +167,7 @@ default dtype for the matrices is f16. Exporting deepseek-coder-1.3b-instruct
 gives tensors byte-identical to llama.cpp's own converter, the same metadata,
 and the same tokenization under llama.cpp.
 
-`--format peft --adapter ADAPTER.safetensors --out DIR [--base-model HF_ID]`
+`brain qwen3 export_peft --adapter ADAPTER.safetensors --out DIR [--base-model HF_ID]`
 writes a LoRA adapter as a PEFT adapter directory (`adapter_model.safetensors`
 and `adapter_config.json`, with `lora_alpha` and the target modules) that
 `peft.PeftModel.from_pretrained` applies to the HF export of its base.
@@ -154,26 +175,39 @@ and `adapter_config.json`, with `lora_alpha` and the target modules) that
 
 ### Full fine-tuning
 
-`brain qwen3 finetune <data_dir> --weights BASE --out F` trains every weight.
-`BASE` is a brain checkpoint, a GGUF, a `transformers` directory or a model
-store `vendor/repo`, read as it is on disk and streamed into the training
-build: nothing is converted or written first. The AdamW moments live in host
-RAM, so the card holds the weights and their gradients (fp32): a 1.3B-1.5B
-decoder trains on one 24 GB card. `F` is a brain checkpoint (rerun with the
-same `--out` to continue it; `brain qwen3 export` writes it back as a
-`transformers` directory). `<data_dir>` is a token dataset
-(`train.u32.bin`, `val.u32.bin`, `meta.json`). `--activations keep|recompute`
-sets what the backward keeps of the forward; the decoder always recomputes each
-layer, so `keep` is refused by name.
+`brain qwen3 finetune --data <dir> --save F [--weights BASE]` trains every
+weight. `BASE` is a brain checkpoint, a GGUF or a `transformers` directory
+(the store's pick when `--weights` is omitted), read as it is on disk and
+streamed into the training build: nothing is converted or written first. The
+AdamW moments live in host RAM, so the card holds the weights and their
+gradients (fp32): a 1.3B-1.5B decoder trains on one 24 GB card. `F` is a brain
+checkpoint carrying the `qwen` card (rerun with the same `--save` to continue
+it; `brain qwen3 export` writes it back as a `transformers` directory).
+`--data` is a token dataset (`train.u32.bin`, `val.u32.bin`, `meta.json`).
+`--activations keep|recompute` sets what the backward keeps of the forward;
+the decoder always recomputes each layer, so `keep` is refused by name.
+`--train-precision SPEC` sets how the run stores what it trains
+(`state=int8,master=f32,...`). The run reports every step and stops between
+steps when cancelled, writing the checkpoint with the steps that ran.
 
 ### LoRA adapters
 
-A named LoRA adapter is stored beside its base checkpoint in the model store,
-at `<models-dir>/Qwen/Qwen3-0.6B/adapters/<owner>/<name>/<tag>/`, and is
+`lora_train` takes the chat dataset (`--dataset`, and optionally
+`--validation`) as JSONL files and returns the adapter as the `adapter` output
+(`--out adapter=FILE`). With `--adapter-name OWNER/NAME[:TAG]` the adapter is
+also stored beside its base checkpoint in the model store, at
+`<models-dir>/Qwen/Qwen3-0.6B/adapters/<owner>/<name>/<tag>/`, and is
 addressed as `Qwen/Qwen3-0.6B:<owner>:<name>:<tag>`. The tag defaults to
-`latest` and is **overwritten on every rerun** of the same adapter name - a
-finetune run always fully retrains and replaces that tag, it never
-incrementally continues a previous run.
+`latest`. Training under a name already stored **continues that adapter** from
+its own factors (at the rank and alpha it was trained at); `--fresh` starts
+over from the base and replaces it. `--patience N` stops when the held-out loss
+has not improved for N evaluations and keeps the best adapter.
+
+Several ranks can train one adapter as a distributed job (`--job-plan`,
+`--job-rank`, `--job-secret`, and `--profile-collectives` for what the
+collectives cost): every step's gradients are averaged over the group, each
+rank trains on its own shard of the records, and rank 0 commits the adapter.
+Without `--seed` every rank derives the seed from the plan.
 
 The base may be a brain checkpoint or a `transformers` directory
 (`deepseek-ai/DeepSeek-R1-Distill-Qwen-7B`, ...), and `brain serve` lists the
@@ -186,16 +220,20 @@ Which checkpoint to serve is the model store, or `brain serve --checkpoint`
 (with `--tokenizer`); FLUX.2's text encoder still takes `BRAIN_FLUX2_TE`,
 above. Everything about HOW to serve it is a `brain serve` flag:
 
-- `--lora N` - LoRA rank for `finetune`.
-- `--lora-targets LIST` - the projections a `finetune --lora` adapter
-  covers, comma-separated from `wq,wk,wv,wo,gate,up,down` (the default is
-  all seven). An unknown or repeated name is refused.
-- `--grad-accum N` - micro-batches averaged into each step of a `finetune
-  --lora` run. On a model laid out as a pipeline across cards the stages work
-  on neighbouring micro-batches at once instead of one after another, and the
-  run ends where the sequential schedule would.
-- `--base-format f32|bf16|int8|nf4|fp8` (earlier spelling `--base-dtype`) - the storage format of the frozen base during
-  a `finetune --lora` run (default `f32`). `bf16` halves the base's bytes - a
+These are the `lora_train` parameters:
+
+- `--rank N` and `--alpha A` - LoRA rank and scale (alpha defaults to
+  `2 x rank`); `--lora-variant plain|rs|fa`, `--lora-plus-ratio X` and
+  `--adapter-kind lora|ia3|lokr|dora` pick the adapter method.
+- `--targets LIST` - the projections an adapter covers, comma-separated from
+  `wq,wk,wv,wo,gate,up,down` (the default is all seven). An unknown or
+  repeated name is refused.
+- `--grad-accum N` - micro-batches averaged into each step. On a model laid
+  out as a pipeline across cards the stages work on neighbouring micro-batches
+  at once instead of one after another, and the run ends where the sequential
+  schedule would.
+- `--base-format f32|bf16|int8|nf4|fp8` - the storage format of the frozen base
+  during the run (default `f32`). `bf16` halves the base's bytes - a
   7B decoder trains on one 24 GB card - and holds the frozen embedding and
   LM head in bf16 too, while the adapters, activations and optimiser stay
   fp32. `int8` holds each linear as a byte per weight and a scale per 32
@@ -206,28 +244,31 @@ above. Everything about HOW to serve it is a `brain serve` flag:
   and `fp8` (block-scaled E4M3) run through the shared quantized-execution
   contract: a bounded tile decode feeds the dense product, forward and input
   gradient. `--weights` may name a `transformers` checkpoint
-  directory (a model-store `vendor/repo`): it is read as downloaded, one
-  tensor at a time, and nothing is written beside it.
+  directory: it is read as downloaded, one tensor at a time, and nothing is
+  written beside it.
   A model that does not fit one card is laid out across the cards by what
   each has free, with no flag: the whole model on one card when one has room,
   otherwise a pipeline of the fewest stages that fit (printed as `pipeline of
   N stages`), otherwise a refusal naming the bytes. An explicit `--device`
   pins one card. A 7B decoder with a bf16 base trains on one 24 GB card to
   about 3k tokens, and at 7.6k tokens across two.
+- `--block T` - the training row length; omitted, a row is as long as the
+  longest example. A `--block` shorter than the longest example is refused
+  rather than training on a cut-off answer.
 - `--keep-reasoning` - train each answer's `<think>...</think>` reasoning.
   A reasoning model's chat template drops it from the assistant turns it
   renders as history (DeepSeek-R1's drops it from every turn), which is
   right when serving and wrong when the reasoning is what the data teaches.
-  The `lora_train` action takes it as `keep_reasoning`.
 - `--weight-decay W`, `--grad-clip C` (0 disables), `--warmup N`,
-  `--min-lr X`, `--beta1 B`, `--beta2 B`, `--adam-eps E` - the LoRA
-  finetune schedule and AdamW settings. The defaults are 0.1, 1.0, 5% of the
-  steps, `lr/10`, and torch's AdamW (0.9, 0.999, 1e-8). The `lora_train`
-  action takes the same settings as `targets`, `weight_decay`, `grad_clip`,
-  `warmup`, `min_lr`, `beta1`, `beta2` and `eps`.
-- `--activations keep|recompute` - what the backward keeps of the forward; the
-  `lora_train` action takes it as `activations`. The decoder always recomputes
-  each layer, so `keep` is refused by name before the first step.
+  `--min-lr X`, `--beta1 B`, `--beta2 B`, `--eps E` - the schedule and AdamW
+  settings. The defaults are 0.1, 1.0, 5% of the steps, `lr/10`, and torch's
+  AdamW (0.9, 0.999, 1e-8).
+- `--activations keep|recompute` - what the backward keeps of the forward. The
+  decoder always recomputes each layer, so `keep` is refused by name before
+  the first step.
+
+These apply to serving (`brain serve` flags):
+
 - `--device cpu|gpu|vulkan` - backend selection.
 - `--ctx N` - built context length. Unset by default: the resident
   auto-sizes it to the target device's real usable VRAM instead of a fixed
@@ -254,7 +295,8 @@ above. Everything about HOW to serve it is a `brain serve` flag:
   (the same bytes per token; the tensor-core prefill decodes the E4M3 bytes
   while staging; off by default).
 - `--kv-calibration` - opt in to per-head KV clip ranges produced by `brain
-  qwen3 calib` (off by default).
+  qwen3 calib --out clip=kv_calib.json` (off by default; save the file beside
+  the checkpoint).
 - `--sparse-attention FILE` - latent sparse attention (Kubicek et al.,
   arXiv:2610.42147) through the indexer `FILE`. Each query attends its
   first 4 keys, its 512 most recent keys and up to `top_k` keys of the key

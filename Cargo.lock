@@ -1096,7 +1096,6 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_norway",
- "sha2",
  "tokio",
  "tower",
  "ureq",
@@ -2482,6 +2481,7 @@ dependencies = [
  "brain-kernels",
  "brain-memauth",
  "brain-model",
+ "brain-modelref",
  "brain-modelstore",
  "brain-optim",
  "brain-paramstore",
@@ -6923,6 +6923,21 @@ dependencies = [
  "brain-invoke",
  "brain-loader",
  "brain-ltxv",
+ "serde_json",
+]
+
+[[package]]
+name = "sample-models-qwen3"
+version = "5.1.0"
+dependencies = [
+ "brain-capability",
+ "brain-checkpoint",
+ "brain-data",
+ "brain-invoke",
+ "brain-modelref",
+ "brain-modelstore",
+ "brain-npu",
+ "brain-qwen3",
  "serde_json",
 ]
 

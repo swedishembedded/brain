@@ -22,11 +22,8 @@
 # under crates/gpu-core/src/ (the canonical resolver) and NOWHERE else under
 # any crates/*/src/ - i.e. nothing re-derives its own second opinion.
 #
-# Phase C3 (see .agents/roadmap/dtype.md) deleted the `NPU_REQUESTED`
-# sidecar and the belt-and-suspenders BRAIN_DEVICE re-read it motivated in
-# crates/cli/src/qwen_cli.rs's want_npu() - want_npu() now reads
-# gpu_core::ambient_compute_set() exclusively, like every other NPU-capable
-# subcommand. No exceptions remain.
+# Every NPU-capable command reads gpu_core::ambient_compute_set()
+# exclusively; none re-reads BRAIN_DEVICE. No exceptions remain.
 #
 # `BRAIN_BACKEND` (the environment spelling of `--backend`) is held to the same
 # rule: read in the one canonical resolver, applied to the same ComputeSet.

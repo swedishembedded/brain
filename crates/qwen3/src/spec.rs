@@ -98,6 +98,12 @@ impl ArchSpec for Qwen3Spec {
         ROLES
     }
 
+    /// A checkpoint `train` wrote over a character vocabulary has no tokenizer, and `generate` then reads and writes
+    /// token ids; the role resolves when one sits beside the weights and is otherwise absent.
+    fn optional_roles(&self) -> &'static [&'static str] {
+        &["tokenizer"]
+    }
+
     fn classify(&self, records: &[ArtifactRecord], inventory_root: &Path) -> Vec<(usize, String, Confidence)> {
         let mut out = Vec::new();
         for (idx, rec) in records.iter().enumerate() {
@@ -143,7 +149,6 @@ impl ArchSpec for Qwen3Spec {
     /// name and stays `local/qwen3`.
     fn assemble(&self, chosen: &BTreeMap<String, usize>, records: &[ArtifactRecord], _overrides: &BTreeMap<String, String>) -> Result<AssembleOutcome, String> {
         let weights = *chosen.get("weights").ok_or("qwen3 assemble: no weights chosen")?;
-        chosen.get("tokenizer").ok_or("qwen3 assemble: no tokenizer chosen")?;
         let rec = &records[weights];
         let repo_id = (rec.kind == ArtifactKind::HfDir)
             .then(|| {
@@ -157,7 +162,7 @@ impl ArchSpec for Qwen3Spec {
 
     fn validate(&self, assembly: &Assembly) -> Result<(), String> {
         let weights = assembly.roles.get("weights").ok_or("qwen3 validate: assembly has no weights role")?;
-        let tokenizer = assembly.roles.get("tokenizer").ok_or("qwen3 validate: assembly has no tokenizer role")?;
+        let Some(tokenizer) = assembly.roles.get("tokenizer") else { return Ok(()) };
         // Only a GGUF `weights` candidate carries a header this can check
         // against without loading tensors (see this module's own doc) - a
         // safetensors checkpoint's vocab lives in its OWN header, not
@@ -345,10 +350,11 @@ mod tests {
 
     /// A safetensors-only checkpoint with a same-vendor tokenizer does not
     /// auto-match by vocab (documented limitation - see this module's own
-    /// doc), so an explicit `--tokenizer` override is required; that
-    /// override must still resolve cleanly.
+    /// doc), so it resolves with its weights alone, as a checkpoint trained
+    /// over a character vocabulary does; an explicit `--tokenizer` override
+    /// adds the tokenizer.
     #[test]
-    fn a_safetensors_only_checkpoint_needs_an_explicit_tokenizer_override() {
+    fn a_safetensors_only_checkpoint_resolves_without_a_tokenizer_unless_one_is_named() {
         let dir = tmp("safetensors-only");
         let weights_path = dir.join("vendor").join("repo").join("qwen3.safetensors");
         write_safetensors(&weights_path, CARD_FAMILY);
@@ -358,7 +364,13 @@ mod tests {
 
         let spec = Qwen3Spec;
         let specs: Vec<&dyn ArchSpec> = vec![&spec];
-        assert!(matches!(resolve("qwen3", &records, &specs, &BTreeMap::new()), Resolution::Missing(_)), "vocab-based auto-match should not fire for a bare safetensors checkpoint");
+        match resolve("qwen3", &records, &specs, &BTreeMap::new()) {
+            Resolution::Resolved(assembly) => {
+                assert_eq!(assembly.roles["weights"], weights_path);
+                assert!(!assembly.roles.contains_key("tokenizer"), "vocab-based auto-match should not fire for a bare safetensors checkpoint");
+            }
+            other => panic!("expected Resolved with the weights alone, got {other:?}"),
+        }
 
         let mut overrides = BTreeMap::new();
         overrides.insert("tokenizer".to_string(), tok_path.to_string_lossy().into_owned());

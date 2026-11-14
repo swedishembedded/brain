@@ -65,17 +65,17 @@ relying on someone noticing the drift by eye.
 
 ## Fixed (not independently re-verified end to end): full-parameter finetune OOM at real Qwen3-0.6B scale
 
-`brain qwen3 finetune <toolcall-data> --weights <real Qwen3-0.6B
+`brain qwen3 finetune --data <toolcall-data> --weights <real Qwen3-0.6B
 checkpoint> --block 2048 --batch 1` used to panic with `wgpu error: Out of
 Memory` on a fully idle 24 GiB Tesla P40, even at `--batch 1`. Two real,
-distinct root causes, both fixed together (`crates/cli/src/qwen_cli.rs`'s
-`train()`, `crates/paramstore`): (1) `ParamStore::new`'s grad/Adam-moment
+distinct root causes, both fixed together (the full fine-tune path,
+`crates/paramstore`): (1) `ParamStore::new`'s grad/Adam-moment
 buffer init wrote an explicit zero vector via `gpu.storage_init`, and this
 backend's resident-cost accounting charges 2x for any buffer that is ever
 WRITTEN (vs. 1x for allocated-but-untouched) - three such buffers per
 trainable tensor (grad, adam_m, adam_v) made this the dominant real VRAM
 cost of a full finetune, invisible from the nominal parameter count; switched
-to `gpu.storage(numel)`, which allocates without writing. (2) `qwen_cli::train`
+to `gpu.storage(numel)`, which allocates without writing. (2) the full fine-tune
 never set `BRAIN_OFFLOAD_ADAM`, so `qwen3::finetune::Mode::FullOffload`
 (keeps AdamW moments in system RAM instead of on-GPU, trading weight+grad+m+v
 [4x] for weight+grad [2x] GPU-resident) was dead code - only the `--lora`

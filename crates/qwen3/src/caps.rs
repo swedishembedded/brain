@@ -2,21 +2,25 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Qwen3's capabilities behind the generalized [`capability`] interface — what
-//! makes `brain caps qwen` / `brain do qwen generate …` (and the perf suite's
+//! makes `brain caps qwen3` / `brain qwen3 generate …` (and the perf suite's
 //! `CapabilityTarget`) work with no Qwen-specific plumbing in the CLI.
 //!
-//! Three actions.
+//! The actions defined here: `generate`, `lora_train`, `lora_gate`, `embed`.
+//! The rest of the model's actions live beside them: [`crate::train_actions`]
+//! (`train`, `finetune`), [`crate::eval_actions`] (`eval`, `calib`,
+//! `toolcall_gen`, `toolcall_eval`) and [`crate::convert_actions`] (`import`,
+//! `export`, `export_peft`).
 //!
-//! `generate`: the same one-shot decode path `brain qwen infer`
-//! runs (`Qwen::load_inference` + the KV-cache [`crate::sample`] loop), with a
+//! `generate`: the one-shot decode path
+//! (`Qwen::load_inference` + the KV-cache [`crate::sample`] loop), with a
 //! `Progress` emitted **per generated token** so a streaming harness gets a
 //! real TTFT/ITL timeline. The manifest is static (no weights needed); the
 //! model loads lazily on the first run and stays resident across calls (keyed
 //! by weights path + context capacity), mirroring `s3dit::caps`.
 //!
-//! `lora_train`: the SAME LoRA fine-tuning loop `brain qwen3 finetune --lora`
-//! drives (`crate::finetune::finetune` over a `data::chat` masked dataset),
-//! published as a capability so anything that reads a manifest - `brain
+//! `lora_train`: the LoRA fine-tuning loop (`crate::finetune::finetune_lora_tuned`
+//! over a `data::chat` masked dataset), published as a capability so anything
+//! that reads a manifest - `brain
 //! caps`, the event API, D-Bus, a graph editor generating node types - can
 //! see that this model is trainable at all. It carries one deliberate
 //! improvement over the `flux2`/`s3dit`/`wan` precedent: **its dataset
@@ -29,10 +33,12 @@
 //! model store (`crate::spec::Qwen3Spec`), so `brain do qwen
 //! generate` and the generic `ARCH_TO_MODEL` dispatch get the same
 //! scan/resolve/fetch-if-missing convenience `brain pull` and every other
-//! resolver-migrated architecture already have. Progress on this action is
-//! **stage-level** (prepare → train → save), not per-step:
-//! `finetune::finetune` exposes no per-step callback, and claiming a step
-//! timeline it cannot produce would be worse than saying so.
+//! resolver-migrated architecture already have. It reports every optimizer
+//! step and stops between steps when its invocation is cancelled; a run named
+//! with `adapter_name` also files the adapter in the model store, where a
+//! later run of the same name continues it, and the distributed-job
+//! parameters make it one rank of a job whose gradients are averaged over the
+//! group.
 //!
 //! `lora_gate`: the OTHER half of a continuous-learning cycle - a candidate
 //! adapter blob plus a frozen probe set in, a `GateReport` and a
@@ -79,6 +85,8 @@ use serde_json::json;
 
 use crate::chat::{parse_request_as, ChatFormat, ParsedRequest, SeqState};
 use crate::model::Qwen;
+use crate::served::{Resolved, StoredAdapter};
+use model::job_params::JobRequest;
 
 /// The model id used on the CLI (`brain do qwen …`) and the event API.
 pub const MODEL: &str = "brain/qwen3";
@@ -121,7 +129,6 @@ pub const MAX_PROBE_PROMPT: usize = 8192;
 /// cost decode time and change no score.
 pub const DEFAULT_GATE_MAX_NEW: i64 = 32;
 
-/// The full, static capability manifest — safe to build with no weights loaded.
 /// Recorded-dispatch budget for the resident decoder's tape.
 ///
 /// The tape repeats per token, so this only has to hold one token's worth
@@ -131,14 +138,7 @@ pub const DEFAULT_GATE_MAX_NEW: i64 = 32;
 /// the cache anyway.
 const STEP_CACHE_ENTRIES: usize = 65536;
 
-/// Whether to arm the recorded-dispatch cache. On unless
-/// `BRAIN_QWEN_STEP_CACHE=0` - an A/B seam for measuring what the recording
-/// is worth on a given driver, and an escape hatch if one ever disagrees.
-fn step_cache_enabled() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("BRAIN_QWEN_STEP_CACHE").map(|v| v != "0").unwrap_or(true))
-}
-
+/// The full, static capability manifest, safe to build with no weights loaded.
 pub fn manifest() -> Manifest {
     let generate = ActionSpec::new("generate", "generate tokens continuing a prompt (KV-cache decode, one Progress per token)")
         .streaming()
@@ -210,6 +210,19 @@ pub fn manifest() -> Manifest {
             .host_resolved(),
         )
         .params(crate::lora_params::specs(&LORA_DEFAULTS))
+        .param(ParamSpec::new("patience", ParamType::Int, "stop when the held-out loss has not improved for this many evaluations, keeping the best adapter; 0 runs every step").default(json!(0)).min(0.0).max(capability::bounds::TRAIN_COUNT))
+        .param(ParamSpec::new("grad_accum", ParamType::Int, "micro-batches accumulated into each optimizer step").default(json!(1)).min(1.0).max(1_024.0))
+        .param(crate::lora_params::base_format_param(&crate::finetune::TRAIN_BASES, crate::Dtype::F32))
+        .param(ParamSpec::new("lora_variant", ParamType::Str, "comma list of plain, rs (rank-stabilized scaling) and fa (a frozen A)"))
+        .param(ParamSpec::new("lora_plus_ratio", ParamType::Float, "learning-rate ratio of B to A (LoRA+); omit for 1").min(0.0).max(1_000.0))
+        .param(ParamSpec::new("adapter_kind", ParamType::Enum(["lora", "ia3", "lokr", "dora"].map(String::from).to_vec()), "the adapter method (default lora)"))
+        .param(ParamSpec::new(
+            "adapter_name",
+            ParamType::Str,
+            "name the adapter OWNER/NAME[:TAG] and keep it in the model store under this base (tag defaults to latest); training under a name already stored continues that adapter from its own factors",
+        ))
+        .param(ParamSpec::new("fresh", ParamType::Bool, "start the named adapter over from the base, replacing the stored one").default(json!(false)))
+        .params(model::job_params::specs())
         .param(ParamSpec::new(
             "keep_reasoning",
             ParamType::Bool,
@@ -293,8 +306,22 @@ pub fn manifest() -> Manifest {
 
     Manifest::new(
         MODEL,
-        "Qwen3 dense decoder - autoregressive text generation with per-token streaming, LoRA fine-tuning on a chat dataset, the promote/reject gate over the adapter it produces, and last-token-pooled text embedding.",
-        vec![generate, lora_train, lora_gate, embed],
+        "Qwen3 dense decoder - autoregressive text generation with per-token streaming; training from scratch, full and LoRA fine-tuning; the promote/reject gate over the adapter it produces; held-out and tool-call evaluation; INT8 KV calibration; Hugging Face, GGUF and PEFT conversion; and last-token-pooled text embedding.",
+        vec![
+            generate,
+            lora_train,
+            lora_gate,
+            embed,
+            crate::train_actions::train_spec(),
+            crate::train_actions::finetune_spec(),
+            crate::eval_actions::eval_spec(),
+            crate::eval_actions::calib_spec(),
+            crate::eval_actions::toolcall_gen_spec(),
+            crate::eval_actions::toolcall_eval_spec(),
+            crate::convert_actions::import_spec(),
+            crate::convert_actions::export_spec(),
+            crate::convert_actions::export_peft_spec(),
+        ],
     )
 }
 
@@ -369,7 +396,24 @@ impl Provider for QwenProvider {
             // request happened to leave loaded.
             "lora_gate" => Some(Arc::new(LoraGateAction { default_weights: dw, default_tokenizer: dt }) as Arc<dyn Action>),
             "embed" => Some(Arc::new(EmbedAction { hot: self.hot_embed.clone(), default_weights: dw, default_tokenizer: dt }) as Arc<dyn Action>),
-            _ => None,
+            // The rest hold no resident state either: each is a function of
+            // the store-resolved roles and the invocation.
+            other => {
+                let spec = manifest().actions.into_iter().find(|a| a.name == other)?;
+                let run = match other {
+                    "train" => crate::train_actions::train,
+                    "finetune" => crate::train_actions::finetune,
+                    "eval" => crate::eval_actions::eval,
+                    "calib" => crate::eval_actions::calib,
+                    "toolcall_gen" => crate::eval_actions::toolcall_gen,
+                    "toolcall_eval" => crate::eval_actions::toolcall_eval,
+                    "import" => crate::convert_actions::import,
+                    "export" => crate::convert_actions::export,
+                    "export_peft" => crate::convert_actions::export_peft,
+                    _ => return None,
+                };
+                Some(crate::served::stateless(spec, &Resolved { weights: self.default_weights.clone(), tokenizer: self.default_tokenizer.clone() }, run))
+            }
         }
     }
 }
@@ -504,9 +548,7 @@ impl Action for GenerateAction {
                 // built, bit for bit. Armed here because this handle's buffers are
                 // a resident model's weights and scratch, which outlive the cache
                 // anyway - the condition `enable_step_cache` asks for.
-                if step_cache_enabled() {
-                    model.gpu().enable_step_cache(STEP_CACHE_ENTRIES);
-                }
+                model.gpu().enable_step_cache(STEP_CACHE_ENTRIES);
                 let head = model.read_weight(model.cfg.head_weight());
                 Ok(QwenResident { cap, model, head })
             },
@@ -604,12 +646,13 @@ fn with_resolved_defaults(inv: &Invocation, default_weights: &Option<String>, de
 /// code the in-process provider does, so a served run and a `brain do` run
 /// cannot train differently.
 ///
-/// A chat-JSONL dataset blob in, a LoRA adapter checkpoint blob out. Every
-/// intermediate - the decoded JSONL, the masked token dataset
-/// `data::chat::prepare_chat_samples` writes, the full post-training
-/// checkpoint - lives in one scratch directory that is removed on **every**
-/// exit path, so a served process does not accumulate multi-gigabyte
-/// leftovers from cancelled or failed requests.
+/// A chat-JSONL dataset blob in, a LoRA adapter checkpoint blob out; with
+/// `adapter` the adapter is also filed in the model store under its base, and
+/// training under a name already stored continues it. Every intermediate - the
+/// decoded JSONL and the masked token dataset
+/// `data::chat::prepare_chat_samples` writes - lives in one scratch directory
+/// that is removed on **every** exit path, so a served process does not
+/// accumulate leftovers from cancelled or failed requests.
 pub fn train_lora(inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
     let weights = inv.get_str("weights").ok_or("qwen lora_train: missing required param 'weights'")?;
     if !Path::new(&weights).exists() {
@@ -623,23 +666,39 @@ pub fn train_lora(inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> Actio
     out
 }
 
-/// What `lora_train` trains with when the caller names nothing.
-const LORA_DEFAULTS: crate::lora_params::LoraDefaults = crate::lora_params::LoraDefaults { rank: 8, steps: 500, lr: 5e-5, batch: 4, block: Some(1024) };
+/// What `lora_train` trains with when the caller names nothing: a row is as
+/// long as the longest example.
+const LORA_DEFAULTS: crate::lora_params::LoraDefaults = crate::lora_params::LoraDefaults { rank: 8, steps: 500, lr: 5e-5, batch: 4, block: None };
 
 /// [`train_lora`]'s body, with `scratch` already created and owned by the
 /// caller (which removes it however this returns).
 fn train_in(scratch: &Path, weights: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
-    let run = crate::lora_params::from_invocation(inv, &LORA_DEFAULTS, "qwen lora_train")?;
+    let mut run = crate::lora_params::from_invocation(inv, &LORA_DEFAULTS, "qwen lora_train")?;
+    // Every rank of a distributed job starts from the same weights and follows the same record stream; a rank that
+    // drew its own seed would diverge from its peers before the first reduction, so a job without a seed uses the
+    // digest of the plan every rank shares.
+    let job = JobRequest::from_invocation(inv)?;
+    if let (None, Some(job)) = (inv.seed()?, &job) {
+        run.seed = job.plan_seed()?;
+    }
     let crate::lora_params::LoraRun { rank, alpha, steps, lr, batch, seed, targets, hyper, saved: activations, .. } = run;
-    let block = run.block.unwrap_or(1024);
     let dataset_id = inv.get_str("dataset_id").filter(|s| !s.is_empty());
+    let patience = inv.get_i64("patience").map_or(0, |p| p.max(0) as u32);
+    let grad_accum = inv.get_i64("grad_accum").map_or(1, |g| g.max(1) as u32);
+    let tuning = model::adapter::device::AdapterTuning::parse(
+        inv.get_str("lora_variant").as_deref(),
+        inv.get_f64("lora_plus_ratio").map(|r| r.to_string()).as_deref(),
+        inv.get_str("adapter_kind").as_deref(),
+    )
+    .map_err(|e| format!("qwen lora_train: {e}"))?;
+    let base_dtype = crate::lora_params::base_format(inv, &crate::finetune::TRAIN_BASES, crate::Dtype::F32).map_err(|e| format!("qwen lora_train: {e}"))?;
+    let stored = inv.get_str("adapter_name").filter(|a| !a.is_empty()).map(|spec| StoredAdapter::locate(weights, &spec, "lora_train")).transpose()?;
 
-    progress(Progress::step(1, 4, "preparing dataset"));
+    progress(Progress::step(0, steps, "preparing dataset"));
 
     // The tokenizer, and from its own directory the checkpoint's chat
-    // template, are host facts like the weights are - `brain qwen3 finetune`
-    // reads both out of the base model's directory, and this action defaults
-    // to exactly that rather than inventing a second convention.
+    // template, are host facts like the weights are: both default to the
+    // base model's own directory.
     let tok_path: PathBuf = match inv.get_str("tokenizer").filter(|p| !p.is_empty()) {
         Some(p) => PathBuf::from(p),
         None => Path::new(weights).parent().unwrap_or(Path::new(".")).join("tokenizer.json"),
@@ -660,62 +719,106 @@ fn train_in(scratch: &Path, weights: &str, inv: &Invocation, progress: &mut dyn 
     // The MODEL's vocab (not the tokenizer's): it must match the checkpoint's
     // own embedding/lm_head row count, which is what `prepare_chat_samples`
     // records in the dataset's meta.json.
-    let vocab = crate::config::QwenConfig::from_json_checked(&checkpoint::read_config(weights)).map_err(|e| format!("qwen lora_train: {weights}: {e}"))?.vocab as usize;
+    let vocab = crate::open::checkpoint_config(weights).map_err(|e| format!("qwen lora_train: {weights}: {e}"))?.vocab as usize;
     let data_dir = scratch.join("data");
     let render = data::chat::RenderOpts { keep_reasoning: inv.get_bool("keep_reasoning").unwrap_or(false) };
-    data::chat::prepare_chat_samples(&train, &val, &tok, &tmpl, render, vocab, &data_dir).map_err(|e| format!("qwen lora_train: preparing training data: {e}"))?;
+    let prepared = data::chat::prepare_chat_samples(&train, &val, &tok, &tmpl, render, vocab, &data_dir).map_err(|e| format!("qwen lora_train: preparing training data: {e}"))?;
+    // A row holds one example, so it need only be as long as the longest one; a block named explicitly must still
+    // hold it, or the run would train on a cut-off answer.
+    let block = match run.block {
+        Some(b) if (b as usize) < prepared.longest_example => {
+            return Err(format!("qwen lora_train: block {b} is shorter than the longest example ({} tokens); it would train on a cut-off answer", prepared.longest_example));
+        }
+        Some(b) => b,
+        None => prepared.longest_example as u32,
+    };
 
     // The token mask file `prepare_chat_samples` writes supersedes
-    // character-offset masking; `model::load_dataset` prefers it.
+    // character-offset masking; `model::load_dataset` prefers it. Evaluated
+    // often enough that patience means something.
     let opts = model::FitOpts {
-        eval_interval: if val.is_empty() { 0 } else { (steps / 10).max(1) },
+        eval_interval: if val.is_empty() { 0 } else { (steps / 20).max(1) },
+        patience,
+        grad_accum,
         precision: model::TrainPrecision { activations, ..Default::default() },
         ..hyper.fit_opts(steps, batch, block, lr, seed)
     };
+    // An adapter that is already stored is trained further, from its own
+    // factors; `fresh` starts over from the base and replaces it.
+    let existing = stored.as_ref().filter(|a| a.path.is_file() && !inv.get_bool("fresh").unwrap_or(false)).map(|a| a.path.to_string_lossy().into_owned());
+    let target_names: Vec<&str> = targets.iter().map(String::as_str).collect();
+    let start = match &existing {
+        Some(path) => crate::finetune::LoraStart::Continue(path),
+        None => crate::finetune::LoraStart::FreshOn(&target_names),
+    };
 
-    progress(Progress::step(2, 4, format!("training {steps} steps (rank {rank}, alpha {alpha})")));
-    let full = scratch.join("full.safetensors");
-    let (l0, l1) = crate::finetune::finetune(weights, &data_dir, &opts, &crate::finetune::Mode::Lora { rank, alpha, targets, tuning: Default::default() }, &full.to_string_lossy())
-        .map_err(|e| format!("qwen lora_train: {e}"))?;
+    progress(Progress::step(0, steps, format!("training {steps} steps (rank {rank}, alpha {alpha})")));
+    let train_once = |control: model::FitControl<'_>| crate::finetune::finetune_lora_tuned(weights, &data_dir, &opts, rank, alpha, tuning, &start, control, base_dtype).map_err(|e| format!("qwen lora_train: {e}"));
+    let (report, trained) = match &job {
+        // A distributed run stops together or not at all: one rank leaving would stall its peers' next reduction.
+        Some(job) => job.run(|sync| {
+            let mut on_step = |s: &model::StepReport| {
+                progress(Progress::step(s.step, s.steps, format!("loss {:.4}", s.loss)));
+                true
+            };
+            train_once(model::FitControl { on_step: Some(&mut on_step), grad_sync: Some(sync), ..Default::default() })
+        })?,
+        None => {
+            let mut on_step = |s: &model::StepReport| {
+                progress(Progress::step(s.step, s.steps, format!("loss {:.4}", s.loss)));
+                !inv.cancel.is_cancelled()
+            };
+            train_once(model::FitControl { on_step: Some(&mut on_step), ..Default::default() })?
+        }
+    };
+    if report.interrupted {
+        return Err(format!("cancelled after step {}", report.steps_completed));
+    }
 
-    progress(Progress::step(3, 4, "saving adapter"));
+    progress(Progress::step(report.steps_completed, steps, "saving adapter"));
     // Only the adapter tensors travel back - a rank-8 adapter is a few MB
-    // against a multi-GB base, and the caller already has the base.
-    let base_id = checkpoint::st::read_card(weights).ok().flatten().map(|c| c.id).unwrap_or_else(|| MODEL.to_string());
-    // `modelref`'s adapter grammar is `<base>:<owner>:<name>:<tag>`. This
-    // action deliberately takes no adapter NAME: it hands back bytes, and
-    // deciding where those bytes are published (and under what id) belongs
-    // to whoever stores them, not to the training step.
-    let card_id = format!("{base_id}:brain:lora:latest");
-    let adapter_path = scratch.join("adapter.safetensors");
-    // The adapter is read back through a TRAINING-shaped build, never
-    // `Qwen::load_inference`: `Model::param_names` reports the OPTIMISED set
-    // (`ParamStore::trainable` + `offload`), and an inference build marks
-    // every parameter `Role::Frozen`, so `save_adapter` would find no
-    // `.lora_a`/`.lora_b` at all and assert. This model exists only to read
-    // those tensors out, so it is built at the smallest activation shape
-    // there is (b = 1, t = 1) - `param_names`/`read_weight` do not depend on
-    // it, and the frozen base is uploaded once either way.
-    let ck = checkpoint::load(&full.to_string_lossy());
-    let trained_cfg = crate::config::QwenConfig::from_json_checked(&ck.header["config"]).map_err(|e| format!("qwen lora_train: {e}"))?;
-    let trained = Qwen::new(trained_cfg, 1, 1, &ck.by_role(""));
+    // against a multi-GB base, and the caller already has the base. `modelref`'s adapter grammar is
+    // `<base>:<owner>:<name>:<tag>`; an unnamed adapter is `brain:lora:latest` of its base.
+    let base_id = stored.as_ref().map_or_else(|| crate::served::base_id(weights), |a| a.base.clone());
+    let card_id = stored.as_ref().map_or_else(|| format!("{base_id}:brain:lora:latest"), |a| a.reference.clone());
+    let adapter_path = match &stored {
+        Some(a) => {
+            if let Some(dir) = a.path.parent() {
+                std::fs::create_dir_all(dir).map_err(|e| format!("qwen lora_train: {}: {e}", dir.display()))?;
+            }
+            a.path.clone()
+        }
+        None => scratch.join("adapter.safetensors"),
+    };
+    // Every rank holds the same base, and each save of it would otherwise read the whole checkpoint again; the
+    // validated sidecar makes a repeat read a stat and still answers the true content digest.
     let base_digest = brain_modelstore::fetch::base_digest_sidecar(Path::new(weights)).map_err(|e| format!("qwen lora_train: hashing the base {weights}: {e}"))?;
     let provenance = checkpoint::st::TrainingProvenance::on_base("sft_lora", seed, gpu_core::backend_name(), base_digest);
-    crate::lora::save_adapter_with_lineage(&adapter_path.to_string_lossy(), &trained, &card_id, &base_id, dataset_id.as_deref(), Some(provenance))
-        .map_err(|e| format!("qwen lora_train: save_adapter: {e}"))?;
+    trained.save_adapter_with_lineage(&adapter_path.to_string_lossy(), &card_id, &base_id, dataset_id.as_deref(), Some(provenance)).map_err(|e| format!("qwen lora_train: save_adapter: {e}"))?;
     let bytes = std::fs::read(&adapter_path).map_err(|e| format!("qwen lora_train: read trained adapter: {e}"))?;
+    // One writer publishes the generation: every rank holds the same adapter, so a second manifest would only
+    // describe the same bytes. A job whose artifact cannot be committed must not report success.
+    let committed = match (&job, adapter_path.canonicalize()) {
+        (Some(job), Ok(absolute)) => absolute.parent().map(|dir| job.commit_artifact(report.steps_completed, dir, &absolute)).transpose()?.flatten(),
+        (Some(_), Err(e)) => return Err(format!("qwen lora_train: committing {}: {e}", adapter_path.display())),
+        (None, _) => None,
+    };
 
-    progress(Progress::step(4, 4, "done"));
     Ok(Outcome::new()
         .set("seed", json!(seed))
         .set("rank", json!(rank))
         .set("alpha", json!(alpha))
-        .set("steps", json!(steps))
+        .set("steps", json!(report.steps_completed))
         .set("train_samples", json!(train.len()))
         .set("val_samples", json!(val.len()))
-        .set("initial_loss", json!(l0))
-        .set("final_loss", json!(l1))
+        .set("initial_loss", json!(report.initial_loss))
+        .set("final_loss", json!(report.final_loss))
+        .set("stopped_early", json!(report.stopped_early))
+        .set("continued", json!(existing.is_some()))
         .set("base", json!(base_id))
+        .set("block", json!(block))
+        .set("saved", json!(stored.as_ref().map(|a| a.path.display().to_string())))
+        .set("committed", json!(committed.map(|p| p.display().to_string())))
         .blob("adapter", Blob::new(Media::Bytes, bytes).with_meta(json!({"id": card_id}))))
 }
 
@@ -1278,7 +1381,7 @@ mod tests {
 
     /// A `tokenizer.json` + `tokenizer_config.json` pair covering exactly the
     /// characters the fixture below uses, so a LoRA round-trip needs no real
-    /// checkpoint and no `QWEN_TOKENIZER`.
+    /// checkpoint.
     ///
     /// `QwenBpe` encodes each byte through GPT-2's `bytes_to_unicode` map,
     /// which is the IDENTITY on bytes `0x21..=0x7E`; the only two other bytes
@@ -1344,7 +1447,10 @@ mod tests {
         let m = manifest();
         assert_eq!(m.model, MODEL);
         let names: Vec<_> = m.actions.iter().map(|a| a.name.as_str()).collect();
-        assert_eq!(names, ["generate", "lora_train", "lora_gate", "embed"]);
+        assert_eq!(
+            names,
+            ["generate", "lora_train", "lora_gate", "embed", "train", "finetune", "eval", "calib", "toolcall_gen", "toolcall_eval", "import", "export", "export_peft"]
+        );
     }
 
     /// The `embed` action must match the shape `crates/apiserve/src/catalog.rs`
@@ -1526,7 +1632,7 @@ mod tests {
         let names: Vec<&str> = lt.params.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(
             names,
-            ["rank", "alpha", "steps", "lr", "batch", "block", "seed", "targets", "weight_decay", "grad_clip", "warmup", "min_lr", "beta1", "beta2", "eps", "activations", "keep_reasoning", "dataset_id"]
+            ["rank", "alpha", "steps", "lr", "batch", "block", "seed", "targets", "weight_decay", "grad_clip", "warmup", "min_lr", "beta1", "beta2", "eps", "activations", "patience", "grad_accum", "base_format", "lora_variant", "lora_plus_ratio", "adapter_kind", "adapter_name", "fresh", "job_rank", "keep_reasoning", "dataset_id"]
         );
         assert!(lt.inputs.iter().any(|b| b.name == "dataset"), "the dataset survives as a blob");
         assert!(lt.outputs.iter().any(|b| b.name == "adapter"), "the adapter survives as a blob");
@@ -2070,7 +2176,7 @@ mod tests {
     }
 
     /// The chat path end to end on a tiny synthetic checkpoint plus the byte
-    /// tokenizer fixture - no real model, no `QWEN3_DIR`, so this actually
+    /// tokenizer fixture - no real model, nothing from the model store, so this actually
     /// runs. It pins the three promises a host serving this action makes to
     /// its own callers:
     ///
@@ -2171,15 +2277,15 @@ mod tests {
     /// ad-hoc `apply_chat_template`-only implementation this replaces,
     /// but now with tool-call/stop-string/cancellation parity it never had.
     ///
-    /// Needs a real tokenizer (`QWEN_TOKENIZER=/path/to/tokenizer.json`) --
-    /// self-skips loudly when unset. The checkpoint's
+    /// Needs the real Qwen3-0.6B tokenizer from the model store --
+    /// self-skips loudly when it is not there. The checkpoint's
     /// vocab is sized to the real tokenizer's full range so the rendered
     /// chat-template special tokens (`<|im_start|>` etc., ids up in the
     /// 151000s) never index outside the embedding table.
     #[test]
     fn tokenizer_present_runs_the_shared_chat_parse_with_tools() {
-        let Ok(tok_path) = std::env::var("QWEN_TOKENIZER") else {
-            brain_testutil::skip("set QWEN_TOKENIZER to a real tokenizer.json to run this test");
+        let Some(tok_path) = brain_testutil::model_dir("Qwen/Qwen3-0.6B").map(|d| format!("{d}/tokenizer.json")).filter(|p| std::path::Path::new(p).is_file()) else {
+            brain_testutil::skip("pull Qwen/Qwen3-0.6B into the model store to run this test");
             return;
         };
 
@@ -2214,6 +2320,153 @@ mod tests {
         assert!(out.outputs.get("prompt_tokens").is_some());
         assert!(out.outputs.get("completion_tokens").is_some());
         assert!(events > 0, "must stream at least the final 'done' Progress");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    /// A character dataset (train.bin, val.bin, meta.json) for the full-parameter trainers.
+    fn write_char_dataset(dir: &Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        let text = "1+1=2\n2+2=4\n3+3=6\n".repeat(60);
+        let mut itos: Vec<char> = text.chars().collect();
+        itos.sort_unstable();
+        itos.dedup();
+        let ids: Vec<u16> = data::tokenizer::CharTokenizer::from_itos(itos.clone()).encode(&text).into_iter().map(|t| t as u16).collect();
+        let split = ids.len() * 9 / 10;
+        data::binio::write_u16_bin(&dir.join("train.bin"), &ids[..split]).unwrap();
+        data::binio::write_u16_bin(&dir.join("val.bin"), &ids[split..]).unwrap();
+        std::fs::write(dir.join("meta.json"), data::binio::Meta { vocab_size: itos.len(), itos }.to_json()).unwrap();
+    }
+
+    fn finetune_invocation(data: &Path, save: &Path) -> Invocation {
+        Invocation::new()
+            .set("data", json!(data.to_str().unwrap()))
+            .set("save", json!(save.to_str().unwrap()))
+            .set("steps", json!(3))
+            .set("batch", json!(2))
+            .set("block", json!(16))
+            .set("seed", json!(4))
+    }
+
+    fn train_invocation(data: &Path, save: &Path) -> Invocation {
+        finetune_invocation(data, save)
+            .set("layers", json!(1))
+            .set("d_model", json!(16))
+            .set("heads", json!(2))
+            .set("kv_heads", json!(1))
+            .set("head_dim", json!(8))
+            .set("d_ff", json!(32))
+    }
+
+    /// `train` writes a checkpoint the model store resolves (the `qwen` card), `generate` reads it back, and
+    /// `finetune` continues it into a second carded checkpoint; the seed is echoed.
+    #[test]
+    fn train_then_finetune_write_carded_checkpoints_the_store_resolves() {
+        let dir = std::env::temp_dir().join(format!("qwen-caps-train-{}", std::process::id()));
+        let data = dir.join("data");
+        write_char_dataset(&data);
+        let save = dir.join("qwen.safetensors");
+        let mut reg = Registry::new();
+        reg.register(Arc::new(QwenProvider::new()));
+
+        let trained = reg.run(MODEL, "train", train_invocation(&data, &save), &mut |_| {}).unwrap();
+        assert_eq!((trained.outputs["steps"].as_u64(), trained.outputs["seed"].as_u64()), (Some(3), Some(4)));
+        let card = checkpoint::st::read_card(save.to_str().unwrap()).unwrap().expect("the checkpoint carries a card");
+        assert_eq!(card.family, crate::spec::CARD_FAMILY);
+
+        let tuned = dir.join("tuned.safetensors");
+        let mut reg = Registry::new();
+        reg.register(Arc::new(QwenProvider::new().with_defaults(Some(save.to_string_lossy().into_owned()), None)));
+        let fine = reg.run(MODEL, "finetune", finetune_invocation(&data, &tuned).set("lr", json!(1e-4)), &mut |_| {}).unwrap();
+        assert_eq!(fine.outputs["steps"].as_u64(), Some(3));
+        assert!(checkpoint::st::read_card(tuned.to_str().unwrap()).unwrap().is_some_and(|c| c.family == crate::spec::CARD_FAMILY));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A cancelled run stops between steps and says how far it got.
+    #[test]
+    fn a_cancelled_train_stops_between_steps() {
+        let dir = std::env::temp_dir().join(format!("qwen-caps-train-cancel-{}", std::process::id()));
+        let data = dir.join("data");
+        write_char_dataset(&data);
+        let mut inv = train_invocation(&data, &dir.join("qwen.safetensors")).set("steps", json!(50));
+        inv.cancel = capability::CancelToken::armed();
+        let cancel = inv.cancel.clone();
+        let mut reg = Registry::new();
+        reg.register(Arc::new(QwenProvider::new()));
+        let err = reg.run(MODEL, "train", inv, &mut |p| {
+            if p.step >= 2 {
+                cancel.cancel();
+            }
+        }).unwrap_err();
+        assert!(err.to_string().contains("cancelled after step"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A mask that is not one character and head counts that do not divide are refused before any work.
+    #[test]
+    fn train_refuses_a_bad_mask_and_a_bad_head_split() {
+        let mut reg = Registry::new();
+        reg.register(Arc::new(QwenProvider::new()));
+        let base = Invocation::new().set("data", json!("/nonexistent")).set("save", json!("/nonexistent/out"));
+        let err = reg.run(MODEL, "train", base.clone().set("mask", json!("=>")), &mut |_| {}).unwrap_err();
+        assert!(err.to_string().contains("one character"), "{err}");
+        let err = reg.run(MODEL, "train", base.set("heads", json!(5)).set("kv_heads", json!(2)), &mut |_| {}).unwrap_err();
+        assert!(err.to_string().contains("multiple of kv_heads"), "{err}");
+    }
+
+    /// `eval` scores the checkpoint teacher-forced on a chat JSONL blob; a conversion pair
+    /// (`export` to a `transformers` directory) and the PEFT export need no further fixture than the tiny checkpoint.
+    #[test]
+    fn eval_and_export_run_on_a_tiny_checkpoint() {
+        let cfg = QwenConfig { vocab: 151936, ..QwenConfig::tiny() };
+        let dir = std::env::temp_dir().join(format!("qwen-caps-eval-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let base = dir.join("tiny.safetensors");
+        write_tiny_checkpoint(&base, &cfg, 3);
+        write_byte_tokenizer(&dir);
+        let mut reg = Registry::new();
+        reg.register(Arc::new(QwenProvider::new().with_defaults(Some(base.to_string_lossy().into_owned()), Some(dir.join("tokenizer.json").to_string_lossy().into_owned()))));
+
+        let scored = reg.run(MODEL, "eval", Invocation::new().set("block", json!(256)).blob("samples", Blob::new(Media::Bytes, dataset_jsonl())), &mut |_| {}).unwrap();
+        assert!(scored.outputs["base"]["loss"].as_f64().is_some_and(f64::is_finite));
+        assert!(String::from_utf8_lossy(&scored.blobs["report"].bytes).starts_with("base "));
+        let missing = reg.run(MODEL, "eval", Invocation::new().set("adapter_name", json!("owner/none")), &mut |_| {}).unwrap_err();
+        assert!(missing.to_string().contains("samples"), "{missing}");
+
+        let out = dir.join("hf");
+        let exported = reg.run(MODEL, "export", Invocation::new().set("out", json!(out.to_str().unwrap())).set("dtype", json!("f32")), &mut |_| {}).unwrap();
+        assert_eq!(exported.outputs["format"], "hf");
+        assert!(out.join("config.json").is_file() && out.join("model.safetensors").is_file());
+        let bad = reg.run(MODEL, "export", Invocation::new().set("out", json!(out.to_str().unwrap())).set("format", json!("gguf")).set("dtype", json!("bf16")), &mut |_| {}).unwrap_err();
+        assert!(bad.to_string().contains("f32 or f16"), "{bad}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `calib` reports the INT8 KV outlier statistics and a clip table over the tiny checkpoint, and the tool-call
+    /// pair writes a dataset and scores a checkpoint on held-out cases.
+    #[test]
+    fn calib_and_the_toolcall_pair_run_on_a_tiny_checkpoint() {
+        let cfg = QwenConfig { vocab: 151936, ..QwenConfig::tiny() };
+        let dir = std::env::temp_dir().join(format!("qwen-caps-calib-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let base = dir.join("tiny.safetensors");
+        write_tiny_checkpoint(&base, &cfg, 3);
+        write_byte_tokenizer(&dir);
+        let mut reg = Registry::new();
+        reg.register(Arc::new(QwenProvider::new().with_defaults(Some(base.to_string_lossy().into_owned()), Some(dir.join("tokenizer.json").to_string_lossy().into_owned()))));
+
+        let calibrated = reg.run(MODEL, "calib", Invocation::new().blob("samples", Blob::new(Media::Bytes, dataset_jsonl())), &mut |_| {}).unwrap();
+        assert_eq!(calibrated.outputs["prompts"].as_u64(), Some(6));
+        let report: serde_json::Value = serde_json::from_slice(&calibrated.blobs["report"].bytes).unwrap();
+        assert!(report["streams"].as_array().is_some_and(|s| !s.is_empty()));
+        assert!(serde_json::from_slice::<serde_json::Value>(&calibrated.blobs["clip"].bytes).is_ok());
+        assert!(reg.run(MODEL, "calib", Invocation::new().set("percentile", json!(2.0)).blob("samples", Blob::new(Media::Bytes, dataset_jsonl())), &mut |_| {}).is_err());
+
+        let out = dir.join("toolcalls");
+        let made = reg.run(MODEL, "toolcall_gen", Invocation::new().set("out", json!(out.to_str().unwrap())).set("n", json!(6)).set("held", json!(2)).set("seed", json!(9)), &mut |_| {}).unwrap();
+        assert_eq!((made.outputs["train"].as_u64(), made.outputs["seed"].as_u64()), (Some(6), Some(9)));
+        assert!(out.join("meta.json").is_file());
+        let scored = reg.run(MODEL, "toolcall_eval", Invocation::new().set("n", json!(2)).set("seq", json!(512)).set("seed", json!(9)), &mut |_| {}).unwrap();
+        assert!(scored.outputs["exact_match"].as_f64().is_some());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

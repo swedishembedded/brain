@@ -1133,13 +1133,14 @@ mod tests {
         assert!(parse_tool_choice(Some("[]")).is_err());
     }
 
-    /// A real Qwen3 tokenizer for the chat-path tests below; skipped loudly
-    /// when `QWEN3_DIR` is unset.
+    /// The real Qwen3-0.6B tokenizer of the model store for the chat-path
+    /// tests below; skipped loudly when it is not there.
     fn real_tok() -> Option<QwenBpe> {
-        match std::env::var("QWEN3_DIR") {
-            Ok(dir) => Some(QwenBpe::from_file(&format!("{dir}/tokenizer.json")).expect("load Qwen3 tokenizer")),
-            Err(_) => {
-                brain_testutil::skip("QWEN3_DIR unset (needs a real Qwen3 tokenizer.json)");
+        let path = brain_testutil::model_dir("Qwen/Qwen3-0.6B").map(|d| format!("{d}/tokenizer.json")).filter(|p| std::path::Path::new(p).is_file());
+        match path {
+            Some(path) => Some(QwenBpe::from_file(&path).expect("load Qwen3 tokenizer")),
+            None => {
+                brain_testutil::skip("pull Qwen/Qwen3-0.6B into the model store (needs its tokenizer.json)");
                 None
             }
         }

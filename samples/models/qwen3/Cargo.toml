@@ -1,0 +1,29 @@
+[package]
+# Package names under samples/ are derived from the path:
+# `samples/models/qwen3` -> `sample-models-qwen3`.
+name = "sample-models-qwen3"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Sample application: the Qwen3 dense decoder from the command line - generate, train, finetune, lora_train, eval, calibrate, convert and gate with every parameter, plus the ONNX export and greedy decoding on the Intel NPU through OpenVINO."
+publish = false
+
+[dependencies]
+# A per-model program links the model it drives and the shared action runner
+# directly (samples/README.md rule 1).
+brain-qwen3.workspace = true
+brain-invoke.workspace = true
+brain-capability.workspace = true
+brain-data.workspace = true
+brain-checkpoint.workspace = true
+# The NPU route: the ONNX writer and the OpenVINO decoder session.
+brain-npu.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+brain-modelstore.workspace = true
+brain-modelref.workspace = true
+
+[package.metadata.brain]
+# `make check/samples` fails if the real `cargo tree` closure exceeds this.
+max-brain-crates = 72

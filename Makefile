@@ -1187,26 +1187,26 @@ yolo/npu/bench: build/release
 # ADAPTER is OWNER/NAME[:TAG] (TAG defaults to "latest" and is OVERWRITTEN on
 # every rerun -- that's the "retrain and overwrite" part). QWEN_BASE is a model
 # store ref (default the published Qwen3-0.6B) or a direct .safetensors path.
-QWEN_BASE  ?= Qwen/Qwen3-0.6B
+QWEN_BASE  ?=
 LORA_RANK  ?= 8
 LORA_ALPHA ?= 16
 QWEN_STEPS ?= 500
 QWEN_LR    ?= 5e-5
 QWEN_BATCH ?= 4
-QWEN_BLOCK ?= 1024
 
 ## qwen - lists the Qwen targets; does nothing
 qwen:
 	$(LIST_CHILDREN)
 
-## qwen/finetune - LoRA-finetune a Qwen checkpoint (DATASET=<dir> ADAPTER=<owner/name[:tag]>)
+## qwen/finetune - LoRA-finetune the stored Qwen3 (DATASET=<dir with train.jsonl> ADAPTER=<owner/name[:tag]>; QWEN_BASE=<checkpoint> names one, DATA_ROOT=<data root>)
 qwen/finetune: build/release
 	@test -n "$(DATASET)" || (echo "usage: make qwen/finetune DATASET=<dir> ADAPTER=<owner/name[:tag]>" && exit 1)
 	@test -n "$(ADAPTER)" || (echo "usage: make qwen/finetune DATASET=<dir> ADAPTER=<owner/name[:tag]>" && exit 1)
-	$(BRAIN) qwen3 finetune --lora $(LORA_RANK) --alpha $(LORA_ALPHA) \
-		--weights $(QWEN_BASE) --adapter $(ADAPTER) --dataset $(DATASET) \
-		--steps $(QWEN_STEPS) --lr $(QWEN_LR) --batch $(QWEN_BATCH) --block $(QWEN_BLOCK) \
-		$(SEED_FLAG) $(if $(MODELS_DIR),--models-dir $(MODELS_DIR)) $(if $(DATASET_ID),--dataset-id $(DATASET_ID))
+	$(BRAIN) qwen3 lora_train --rank $(LORA_RANK) --alpha $(LORA_ALPHA) \
+		$(if $(QWEN_BASE),--weights $(QWEN_BASE)) --adapter-name $(ADAPTER) --dataset $(DATASET)/train.jsonl \
+		$(if $(wildcard $(DATASET)/validation.jsonl),--validation $(DATASET)/validation.jsonl) \
+		--steps $(QWEN_STEPS) --lr $(QWEN_LR) --batch $(QWEN_BATCH) \
+		$(SEED_FLAG) $(if $(DATA_ROOT),--brain-data-dir $(DATA_ROOT)) $(if $(DATASET_ID),--dataset-id $(DATASET_ID))
 
 # ---- depth (ZipDepth) ------------------------------------------------------
 # The checkpoint resolves from the model store (docs/reference/models/zipdepth.md

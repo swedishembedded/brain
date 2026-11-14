@@ -93,7 +93,7 @@ gradient comes back from it); `--device` pins one card. The checkpoint is
 read as downloaded and nothing is written beside it: `--save` receives
 `adapter.safetensors` and `aligner.safetensors`. The schedule and optimiser
 flags (`--weight-decay`, `--grad-clip`, `--warmup`, `--min-lr`) are
-`brain qwen3 finetune --lora`'s.
+`brain qwen3 lora_train`'s.
 
 To serve the result, start `brain serve` with `BRAIN_DEEPSEEKVL_TUNED=<out dir>`:
 the adapter is folded into the decoder's weights as they load and the

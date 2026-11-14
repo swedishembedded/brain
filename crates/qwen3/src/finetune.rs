@@ -61,6 +61,23 @@ pub fn finetune_from(
     out: &str,
     resume: bool,
 ) -> std::io::Result<(f32, f32)> {
+    let report = finetune_from_watched(base, dir, opts, mode, out, resume, &mut |_| true)?;
+    Ok((report.initial_loss, report.final_loss.unwrap_or(report.initial_loss)))
+}
+
+/// [`finetune_from`] with `on_step` seeing every completed step; it returns
+/// false to stop the run at that step boundary (a served action's
+/// cancellation). The checkpoint at `out` is written either way, with the
+/// steps that ran.
+pub fn finetune_from_watched(
+    base: &str,
+    dir: &Path,
+    opts: &FitOpts,
+    mode: &Mode,
+    out: &str,
+    resume: bool,
+    on_step: &mut dyn FnMut(&model::StepReport) -> bool,
+) -> std::io::Result<model::FitReport> {
     let (cfg, init): (QwenConfig, Box<dyn TensorSource>) = if resume && Path::new(out).exists() {
         // Resume: architecture + weights come from the checkpoint being
         // continued, not `base` - the adapter's (or full model's)
@@ -105,7 +122,8 @@ pub fn finetune_from(
     };
     let (train, val, bcfg, _vocab, itos) = model::load_dataset_with_itos(dir, opts)?;
     let obj = model::causal_lm::<Qwen>(train, val, bcfg, itos);
-    model::fit_with(m, obj, opts, Some(Path::new(out)))
+    let control = model::FitControl { on_step: Some(on_step), ..Default::default() };
+    model::fit_controlled(m, obj, opts, Some(Path::new(out)), control).map(|(report, _)| report)
 }
 
 /// A full-parameter fine-tune of `base` under `control`, over the masked

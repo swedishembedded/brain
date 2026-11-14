@@ -5,7 +5,7 @@
 //! the tool-call evaluation (the data types, generation, and scoring live in
 //! `data::toolcall`). Teacher-forced greedy over held-out requests: one forward
 //! per case, exact-match on the parsed call + mean response-token accuracy. Used
-//! by `brain qwen toolcall eval` and the integration tests.
+//! by `brain qwen3 toolcall_eval` and the integration tests.
 
 use data::chat_template::ChatTemplate;
 use data::qwen_tokenizer::QwenBpe;

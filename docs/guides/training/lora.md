@@ -4,7 +4,7 @@ brain can fine-tune a Qwen3 model on your own chat-style data using LoRA
 (Low-Rank Adaptation), producing a small adapter rather than a full copy of
 the model's weights.
 
-`brain qwen3 finetune` trains LoRA adapters. Full-parameter retraining
+`brain qwen3 lora_train` trains LoRA adapters. Full-parameter retraining
 (`brain::ChatFullFineTune`) and preference optimization with DPO
 (`brain::PreferenceFineTune`) are available through the SDK; see
 [`docs/reference/sdk.md`](../../reference/sdk.md). Qwen3.8-27B has its own verb,
@@ -13,28 +13,34 @@ described under [Qwen3.8-27B](#qwen38-27b-brain-qwen35-finetune).
 ## Running a fine-tune
 
 ```
-brain qwen3 finetune --lora RANK --weights BASE --adapter OWNER/NAME[:TAG] --dataset DIR
+brain qwen3 lora_train --rank RANK --adapter-name OWNER/NAME[:TAG] --dataset train.jsonl [--validation validation.jsonl]
 ```
 
-- `--lora RANK` - the LoRA rank (higher = more capacity, more adapter
+- `--rank RANK` - the LoRA rank (higher = more capacity, more adapter
   parameters).
-- `--weights BASE` - the base model to fine-tune from, either a model-store
-  reference or a direct path to a checkpoint.
-- `--adapter OWNER/NAME[:TAG]` - where to store the resulting adapter.
-  Running the same command again with the same `--adapter` overwrites that
-  tag in place, so retraining is just rerunning the command.
-- `--dataset DIR` - a directory of chat-template-driven supervised
-  fine-tuning (SFT) data. Each training example is a multi-turn
-  conversation (a sequence of role-tagged messages - user, assistant, and
-  optionally tool calls/results), rendered through the base model's own
-  chat template. Only the messages marked as trainable in a given example
-  contribute to the loss, so a dataset can mix turns you want the model to
-  learn from with context turns it shouldn't be scored against.
+- `--weights BASE` - the base model to fine-tune from; omitted, the model
+  store's Qwen3 checkpoint is used (a direct path to a checkpoint or a
+  `transformers` directory also works).
+- `--adapter-name OWNER/NAME[:TAG]` - where to store the resulting adapter in
+  the model store, under the base's id. Training under a name that already
+  exists continues that adapter; `--fresh` replaces it. Without it, the
+  adapter is only returned as the `adapter` output (`--out adapter=FILE`).
+- `--dataset FILE` - chat-template-driven supervised fine-tuning (SFT) data as
+  JSONL (what `bench datasets build` writes as `train.jsonl`), and
+  `--validation FILE` its held-out split. Each training example is a
+  multi-turn conversation (a sequence of role-tagged messages - user,
+  assistant, and optionally tool calls/results), rendered through the base
+  model's own chat template. Only the messages marked as trainable in a given
+  example contribute to the loss, so a dataset can mix turns you want the
+  model to learn from with context turns it shouldn't be scored against.
 - `--activations keep|recompute` - what the backward keeps of the forward. A
   Qwen3 decoder always recomputes each layer, so `recompute` is accepted and
   `keep` is refused by name before the first step. `brain qwen3 train` and
   `brain qwen3 finetune` (full) take it too, also as `activations=` in
   `--train-precision`; naming both with different values is refused.
+- `--seed N` - omit for a random seed, echoed in the outcome.
+
+The run reports every step and stops between steps when cancelled.
 
 This target is also wrapped by `make qwen/finetune DATASET=<dir>
 ADAPTER=<owner/name[:tag]>`, which builds the release binary first.
@@ -178,7 +184,7 @@ refused); `--fresh` starts over from the base and overwrites it.
 ## Evaluating an adapter
 
 ```
-brain qwen3 eval --weights BASE --jsonl held-out.jsonl [--adapter OWNER/NAME[:TAG]]
+brain qwen3 eval --samples held-out.jsonl [--adapter-name OWNER/NAME[:TAG]]
 ```
 
 scores a checkpoint on held-out data - either the base model alone, or the

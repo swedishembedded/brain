@@ -218,7 +218,7 @@ checkpoint you already have into brain's own format, rather than relying on
 auto-fetch or a raw upstream file. Qwen3 is the reference case:
 
 ```bash
-brain qwen3 import --hf /path/to/Qwen3-0.6B --out qwen.safetensors
+brain qwen3 import --source /path/to/Qwen3-0.6B --dest qwen.safetensors
 ```
 
 This converts an HF-layout checkpoint directory into a `.safetensors` file

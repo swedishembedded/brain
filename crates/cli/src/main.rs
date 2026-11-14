@@ -14,7 +14,6 @@
 
 mod args;
 mod caps_cli;
-mod collective_profile;
 mod data_cli;
 mod decide_cli;
 mod devices_api;
@@ -45,7 +44,6 @@ mod optimize_cli;
 mod prune_cli;
 mod quantize_cli;
 mod qwen35_cli;
-mod qwen_cli;
 mod resolver_cli;
 mod adapter_directory;
 mod continuous_train;
@@ -56,21 +54,6 @@ mod run_record;
 mod serve_daemon;
 mod supply;
 mod tree;
-/// Whether `--device`/`BRAIN_DEVICE` EXPLICITLY named the NPU. The NPU is a
-/// whole-graph (OpenVINO) path, not a `gpu_core` backend, so the commands that
-/// support it (`brain yolo detect`, `qwen infer`,
-/// `tts clone`/`synth`/`design`) consult this instead of a `gpu_core` backend
-/// check. Reads the SAME resolved `ComputeSet` every other caller reads
-/// (`gpu_core::ambient_compute_set()` - published by `select_backend` below
-/// for the CLI path, lazily resolved from `BRAIN_DEVICE` otherwise) rather
-/// than tracking its own process-global sidecar: `explicit` excludes the
-/// ambient "everything, including an NPU that happens to be present" case, so
-/// an omitted `--device` never silently triggers the whole-graph NPU path.
-pub(crate) fn npu_explicit() -> bool {
-    let set = gpu_core::ambient_compute_set();
-    set.npu_enabled() && set.explicit
-}
-
 const HELP: &str = "\
 brain - train and evaluate neural nets from scratch on the GPU (Rust + WGSL).
 
@@ -136,13 +119,13 @@ MEMORY CEILINGS (global - valid on any subcommand)
                             allocation path every model uses. Unset means no
                             ceiling (the default) and costs nothing.
                             Else $BRAIN_LIMIT_VRAM_TOTAL / $BRAIN_LIMIT_RAM_TOTAL.
-  Example: brain --limit-vram-total 8G qwen3 infer --weights model.safetensors
+  Example: brain --limit-vram-total 8G qwen3 generate --prompt hi
 
 CONFIG FILE (global - valid on any subcommand)
   --config <FILE>          a YAML file of settings, loaded before anything
                            else parses. Default: ~/.config/brain/config.yaml
                            ($XDG_CONFIG_HOME/brain/config.yaml) when it exists.
-                           A subcommand key (`serve`, `qwen3 infer`) maps that
+                           A subcommand key (`serve`, `qwen3 generate`) maps that
                            command's flags, without the dashes, to values (a
                            list for a repeatable flag, true for a switch); a
                            flag on the command line always wins. A BRAIN_* key
@@ -384,13 +367,18 @@ FLOP/OPS ACCOUNTING
       pricing cache `brain models list`/`brain models profile` read - see
       MODELS below.
 
-QWEN3 (dense decoder; paged continuous-batching serving)
-  brain qwen3 import <hf_dir|safetensors> --out F
-  brain qwen3 infer  --weights F --tokenizer T --prompt \"...\" [--max-new N --temp X --top-k K]
-  brain qwen3 serve  --weights F --tokenizer T --prompt \"...\" [--prompt ...] [--max-new N
-                    --block-size B --kv-fp32]     # paged KV + continuous batching;
-                                                  # int8 KV on by default, --kv-fp32 opts out
-  brain qwen3 train|finetune|export|precompile|toolcall|eval|calib ...
+QWEN3 (dense decoder; paged continuous-batching serving through `brain serve`)
+  brain qwen3 generate --prompt \"...\" [--weights F --tokenizer T --chat --max-new N --temp X --top-k K --seed $RANDOM]
+  brain qwen3 train --data <dir> --save F [--steps N --layers N --d-model N --heads N --seed $RANDOM]
+  brain qwen3 finetune --data <dir> --save F [--weights BASE --steps N --lr X --train-precision SPEC]
+  brain qwen3 lora_train --dataset train.jsonl [--validation val.jsonl --rank N --adapter-name OWNER/NAME[:TAG]
+                    --steps N --lr X --patience N --base-format f32|bf16|int8|nf4|fp8 --job-plan F --job-rank N --job-secret F]
+  brain qwen3 eval --samples val.jsonl [--adapter-name OWNER/NAME[:TAG] --block T --kv fp32,int8,int8-calib]
+  brain qwen3 calib --samples prompts.jsonl --out report=R.json --out clip=kv_calib.json
+  brain qwen3 toolcall_gen --out <dir> | toolcall_eval [--n N --tools K --seq S]
+  brain qwen3 import --source <hf_dir> --dest F | export --out <dir|f.gguf> [--format hf|gguf] | export_peft --adapter A --out <dir>
+  brain qwen3 lora_gate --adapter A --probes P.jsonl [--anchor ANCHOR.jsonl]
+      # the ONNX export and the OpenVINO decode are actions of samples/models/qwen3
 
 GLM-5.2 (MLA + sigmoid noaux_tc MoE)
   brain glmdsa train --data <dir> [--save F --size tiny|small|base --steps N --seed $RANDOM]
@@ -1413,7 +1401,7 @@ type ConfigSection = (Vec<String>, Vec<(String, Vec<String>)>);
 ///
 /// The file is a YAML mapping of two kinds of key:
 ///
-/// * a subcommand path, lowercase (`serve`, `qwen3 infer`): a mapping of that
+/// * a subcommand path, lowercase (`serve`, `qwen3 generate`): a mapping of that
 ///   command's long flag names (without `--`) to a value, a list of values
 ///   (a repeatable flag) or a bool (a switch). Returned as [`ConfigSections`]
 ///   for [`inject_config_flags`]; a flag on the command line always wins.
@@ -1522,7 +1510,7 @@ fn subcommand_index(argv: &[String]) -> usize {
 }
 
 /// Append the flags of the config section that names this command (the
-/// longest match, so `qwen3 infer` wins over `qwen3`) for every flag the
+/// longest match, so `qwen3 generate` wins over `qwen3`) for every flag the
 /// command line does not already give. A repeatable flag given on the command
 /// line replaces the file's list rather than adding to it.
 fn inject_config_flags(mut argv: Vec<String>, sections: &ConfigSections) -> Vec<String> {

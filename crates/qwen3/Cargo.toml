@@ -26,6 +26,7 @@ brain-kernels.workspace = true
 brain-data.workspace = true
 brain-promote.workspace = true
 brain-modelstore.workspace = true
+brain-modelref.workspace = true
 brain-arch.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -177,8 +177,9 @@ fn run_workflow(program: &str, model: &Model, wf: &Workflow, args: &[String], he
 fn resolve_for(arch: &str, spec: &dyn ArchSpec, overrides: BTreeMap<String, String>, action: &capability::ActionSpec, flags: &[String]) -> Result<Assembly, ResolveFailure> {
     let named = !overrides.is_empty();
     match resolve_in_store(arch, spec, overrides, action, flags) {
-        // A fresh model needs no checkpoint; one the caller named must exist.
-        Err(ResolveFailure::Missing(_) | ResolveFailure::NoModelsDir(_)) if action.from_scratch && !named => Ok(crate::resolve::empty_assembly()),
+        // A fresh model needs no checkpoint, so a store with none - or with several that tie, none of which it would
+        // start from - does not stop it; one the caller named must exist.
+        Err(ResolveFailure::Missing(_) | ResolveFailure::NoModelsDir(_) | ResolveFailure::Ambiguous(_)) if action.from_scratch && !named => Ok(crate::resolve::empty_assembly()),
         other => other,
     }
 }

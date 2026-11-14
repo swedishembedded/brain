@@ -15,7 +15,7 @@ unset simply isn't served (no error, it's just absent from `brain caps`).
 when it exists; `--config <FILE>` (global, valid on any subcommand) names
 another. It holds two kinds of key:
 
-- a subcommand (`serve`, `qwen3 infer`, ...) mapping that command's flags,
+- a subcommand (`serve`, `qwen3 generate`, ...) mapping that command's flags,
   written without the leading dashes, to values: a list for a repeatable
   flag, `true` for a switch. A flag given on the command line always wins
   over the file. The longest matching subcommand applies.
@@ -41,7 +41,6 @@ the flag that replaced it, and has no effect in the environment.
 | `BRAIN_DEVICE` | for programs with no CLI in the loop (test binaries): the schedulable compute set (`cpu`, `gpu`, `npu`, `gpu0`, `gpu,cpu`, …); same values as `--device`; a value that does not resolve on the machine stops the program, naming it. The `brain` CLI ignores it (and says so); pass `--device` | all detected devices |
 | `BRAIN_BACKEND` | for programs with no CLI in the loop: how the selected hardware is driven: `wgpu`, `vulkan`, `cuda` or `cpu`; same values as `--backend`, which the `brain` CLI takes instead. `cuda` needs a GPU in the device set; an unknown or unrunnable backend stops the program, naming it, rather than falling back | chosen from the hardware: `cuda` where every card is NVIDIA's and CUDA can run (driver plus NVRTC or the ahead-of-time kernels), `wgpu` on any other GPU, else `cpu`; `brain devices` prints the choice and why |
 | `BRAIN_VK_DEVICE` | forces a specific Vulkan physical-device index, overriding brain's discrete-GPU-first ranking | automatic ranking |
-| `BRAIN_QWEN_STEP_CACHE` | `0` disables the Qwen capability path's recorded-step cache, re-recording every dispatch - an A/B seam for measuring what the recording buys | on |
 | `BRAIN_SPLAT_PROFILE` | set (any value) to print `splat fit`'s per-stage timing breakdown | off |
 | `BRAIN_GPU_NO_READ_STAGING_REUSE` | `1` makes every device-to-host readback allocate its own staging buffer instead of reusing the device's, trading throughput for a smaller resident host footprint | off (the buffer is reused) |
 

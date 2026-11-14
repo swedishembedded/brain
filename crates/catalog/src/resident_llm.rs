@@ -2238,20 +2238,16 @@ mod tests {
     /// this never additionally carves the iGPU's own 8 GiB policy budget out
     /// of the same shared RAM while the box is also running everything else.
     ///
-    /// Gated on `QWEN3_DIR` (needs `qwen.brain.safetensors`), skips loudly if
-    /// unset -- same convention as `crates/cli/tests/it/qwen_eval.rs`.
+    /// Needs the stored Qwen3-0.6B brain checkpoint, skips loudly if it is
+    /// not there.
     #[test]
     #[ignore = "slow: real checkpoint"]
     fn kv_pool_bytes_at_the_new_ctx_default_fits_the_igpu_budget() {
-        let Ok(dir) = std::env::var("QWEN3_DIR") else {
-            brain_testutil::skip("set QWEN3_DIR to a real Qwen3-0.6B checkpoint dir to run this test");
+        let path = brain_testutil::model_dir("Qwen/Qwen3-0.6B").map(|d| std::path::Path::new(&d).join("model.brain.safetensors")).filter(|p| p.is_file());
+        let Some(path) = path else {
+            brain_testutil::skip("pull the Qwen/Qwen3-0.6B brain checkpoint into the model store to run this test");
             return;
         };
-        let path = std::path::Path::new(&dir).join("qwen.brain.safetensors");
-        if !path.is_file() {
-            brain_testutil::skip(&format!("{} not found under QWEN3_DIR", path.display()));
-            return;
-        }
         // SAFETY: this test is `#[ignore]`d (never runs under the default
         // `TEST_THREADS=8` fast lane) and is invoked alone, single-threaded,
         // for exactly this measurement -- see the module doc's OOM-budget
@@ -2541,12 +2537,12 @@ mod tests {
     /// tokenizer whose chat-template special tokens exceed the synth
     /// model's vocab hung indefinitely until this fix landed.
     ///
-    /// Needs a real tokenizer (`QWEN_TOKENIZER=/path/to/tokenizer.json`) --
-    /// self-skips loudly when unset.
+    /// Needs the real Qwen3-0.6B tokenizer from the model store --
+    /// self-skips loudly when it is not there.
     #[test]
     fn rejected_admission_resolves_promptly_instead_of_hanging() {
-        let Ok(tok_path) = std::env::var("QWEN_TOKENIZER") else {
-            brain_testutil::skip("set QWEN_TOKENIZER to a real tokenizer.json to run this test");
+        let Some(tok_path) = brain_testutil::model_dir("Qwen/Qwen3-0.6B").map(|d| format!("{d}/tokenizer.json")).filter(|p| std::path::Path::new(p).is_file()) else {
+            brain_testutil::skip("pull Qwen/Qwen3-0.6B into the model store to run this test");
             return;
         };
         let tok = data::qwen_tokenizer::QwenBpe::from_file(&tok_path).expect("load tokenizer");

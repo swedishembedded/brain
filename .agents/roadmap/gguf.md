@@ -1312,7 +1312,7 @@ this box yet.
       qwen3 being direct-load (`gguf_import.rs`'s `Qwen3Importer::
       loads_directly` returns `true`, and `resident_llm.rs`'s Qwen resident
       already opens a `.gguf` straight via `WeightReader` with zero
-      conversion) - rewritten to show `brain qwen3 infer --weights
+      conversion) - rewritten to show `brain qwen3 generate --weights
       *.gguf` directly, with the converter kept as an explicit "still
       available, now optional" path for callers who actually want a
       brain-native checkpoint (training, or pinning one on-disk format).

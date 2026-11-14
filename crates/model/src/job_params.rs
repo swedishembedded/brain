@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 use capability::{Invocation, ParamSpec, ParamType};
 
-use crate::{CheckpointIdentity, CollectiveProfile, GradSync, JobContext, TimedCollective};
+use crate::{CheckpointCommit, CheckpointIdentity, CollectiveProfile, GradSync, JobContext, JobPlan, TimedCollective};
 
 /// Most ranks a plan may place this process at.
 const MAX_RANK: f64 = 65_535.0;
@@ -61,6 +61,19 @@ impl JobRequest {
     pub fn plan_seed(&self) -> Result<u64, String> {
         let bytes = std::fs::read(&self.plan).map_err(|e| format!("{}: {e}", self.plan.display()))?;
         Ok(plan_seed(&bytes))
+    }
+
+    /// Publish the artifact a finished job produced: rank 0 writes the
+    /// checkpoint-commit manifest naming `artifact` (a file inside `dir`) for
+    /// the plan's identity at `steps`; every other rank holds the same bytes
+    /// and writes nothing. Returns the manifest's path on rank 0.
+    pub fn commit_artifact(&self, steps: u32, dir: &Path, artifact: &Path) -> Result<Option<PathBuf>, String> {
+        if self.rank != 0 {
+            return Ok(None);
+        }
+        let plan = JobPlan::read(&self.plan)?;
+        let commit = CheckpointCommit::build(&plan.job, &plan.identity(), steps, plan.world_size, dir, &[("adapter", artifact)]).map_err(|e| format!("committing {}: {e}", artifact.display()))?;
+        commit.write(dir).map(Some).map_err(|e| format!("committing {}: {e}", artifact.display()))
     }
 
     /// Join the job and run `train` as this rank, with the group to reduce
