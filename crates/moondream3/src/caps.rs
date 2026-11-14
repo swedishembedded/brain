@@ -192,6 +192,7 @@ impl Session {
 
     /// Run one `caption` invocation.
     pub fn caption(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         let (hwc, w, h) = capability::blob::decode_image(inv, "image")?;
         // Vision: the full overlap multi-crop front end.
         let embeds = self.model.image_embeds_from_pixels(&hwc, w, h);
@@ -231,6 +232,7 @@ impl Session {
     /// have come from a batched vision pass. ONE implementation, so the single
     /// and batched paths cannot drift about prompt assembly or token accounting.
     fn caption_with_embeds(&self, inv: &Invocation, embeds: &[f32], progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         let instruction = {
             let t = last_user_text(inv);
             if t.trim().is_empty() {
@@ -265,10 +267,12 @@ impl Session {
         // The KV path: one batched (masked, so the image prefix stays
         // bidirectional) prefill, then O(pos) steps. Gated against the O(T²)
         // recompute path token-for-token, which is what makes preferring it safe.
-        let ids = self.model.generate_kv(&prompt, embeds, budget, self.eos)?;
-        for (i, _) in ids.iter().enumerate() {
+        // Progress and the cancel poll, once per decoded token as it is decoded.
+        let ids = self.model.generate_kv(&prompt, embeds, budget, self.eos, &mut |i, _| {
             progress(Progress::step(i as u32 + 1, budget as u32, ""));
-        }
+            !inv.cancel.is_cancelled()
+        })?;
+        inv.cancel.check()?;
         let out = self.tok.decode(&ids);
 
         // Real token accounting: `apiserve::bridge::read_outcome` defaults these
@@ -332,6 +336,9 @@ impl Action for CaptionAction {
     }
 
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        // Before the resident lock: a cancelled request neither waits on nor
+        // builds a ~9 GiB session.
+        inv.cancel.check()?;
         let dir = inv
             .get_str("weights")
             .filter(|s| !s.is_empty())
@@ -350,6 +357,16 @@ impl Action for CaptionAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A token fired before the call refuses it before the resident lock and
+    /// the checkpoint load (the path does not exist, so a load would fail
+    /// differently).
+    #[test]
+    fn a_caption_cancelled_before_admission_loads_nothing() {
+        let action = CaptionAction { default_dir: Some("/nonexistent/moondream3".to_string()) };
+        let inv = Invocation::new().blob("image", Blob::new(Media::Image, [0.5f32; 3].iter().flat_map(|v| v.to_le_bytes()).collect()).with_meta(json!({"w": 1, "h": 1})));
+        capability_mock::cancellation::admission("moondream3 caption", inv, &|inv, p| action.run(inv, p));
+    }
 
     #[test]
     fn manifest_validates_without_weights() {

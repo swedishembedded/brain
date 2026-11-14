@@ -396,7 +396,10 @@ impl MoondreamModel {
     /// are causal-only by construction (they read cache rows `0..=pos`), which
     /// is correct for generated tokens and would be wrong for the prefix - so
     /// the prefix's K/V come from the masked batched pass, once.
-    pub fn generate_kv(&self, prompt: &[u32], img_embeds: &[f32], max_new: usize, eos: Option<u32>) -> Result<Vec<u32>, String> {
+    ///
+    /// `on_token(i, id)` sees each kept token; `false` ends the decode there,
+    /// before the next step runs.
+    pub fn generate_kv(&self, prompt: &[u32], img_embeds: &[f32], max_new: usize, eos: Option<u32>, on_token: &mut dyn FnMut(usize, u32) -> bool) -> Result<Vec<u32>, String> {
         let t = self.seq_len as usize;
         if prompt.len() >= t {
             return Err(format!("moondream3: prompt is {} tokens but the graph was built for seq_len {t}", prompt.len()));
@@ -422,6 +425,9 @@ impl MoondreamModel {
                 break;
             }
             out.push(next);
+            if !on_token(out.len() - 1, next) {
+                break;
+            }
             hidden = self.dec.decode_step(&self.dgpu, &caches, next, pos);
             pos += 1;
         }
@@ -679,9 +685,12 @@ mod tests {
         prompt.extend([7u32, 9]);
 
         let slow = model.generate(&prompt, &embeds, 5, None).expect("recompute path");
-        let fast = model.generate_kv(&prompt, &embeds, 5, None).expect("kv path");
+        let fast = model.generate_kv(&prompt, &embeds, 5, None, &mut |_, _| true).expect("kv path");
         assert_eq!(slow, fast, "the KV path must reproduce the recompute path exactly");
         assert_eq!(slow.len(), 5, "the comparison would be vacuous on an empty run");
+        // A caller that says stop ends the decode at the token it was shown.
+        let stopped = model.generate_kv(&prompt, &embeds, 5, None, &mut |i, _| i < 1).expect("kv path");
+        assert_eq!(stopped, fast[..2]);
     }
 
     /// The same agreement with tau OFF, so a defect in the tau fold cannot be
@@ -701,7 +710,7 @@ mod tests {
         prompt.push(7);
         assert_eq!(
             model.generate(&prompt, &embeds, 4, None).unwrap(),
-            model.generate_kv(&prompt, &embeds, 4, None).unwrap()
+            model.generate_kv(&prompt, &embeds, 4, None, &mut |_, _| true).unwrap()
         );
     }
 

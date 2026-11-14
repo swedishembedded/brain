@@ -26,7 +26,6 @@ cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 # firing the token changes nothing, and the caller waits for it to finish.
 KNOWN="
 minimaxmusic3
-moondream3
 "
 
 fail=0
