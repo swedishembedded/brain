@@ -174,7 +174,10 @@ pub struct Merged {
 /// reported rather than hidden. `voxel > 0` fuses the doubled surface the
 /// overlap leaves, a confident gaussian outvoting a faint duplicate of
 /// itself.
-pub fn merge(chunks: &[(Splats, CameraSet)], overlap: usize, voxel: f32) -> Result<Merged, String> {
+///
+/// `keep_going` is asked before each chunk and every [`crate::prune::POLL_EVERY`]
+/// gaussians of the fusion; once it says no the merge answers `Err(CANCELLED)`.
+pub fn merge(chunks: &[(Splats, CameraSet)], overlap: usize, voxel: f32, keep_going: &mut dyn FnMut() -> bool) -> Result<Merged, String> {
     if chunks.len() < 2 {
         return Err(format!("merge needs at least 2 chunks, got {}", chunks.len()));
     }
@@ -187,6 +190,9 @@ pub fn merge(chunks: &[(Splats, CameraSet)], overlap: usize, voxel: f32) -> Resu
     let mut cameras = Vec::with_capacity(chunks.len());
     let mut links = Vec::new();
     for (i, (scene, set)) in chunks.iter().enumerate() {
+        if !keep_going() {
+            return Err(cancelled());
+        }
         if i > 0 {
             let (prev, cur) = (&poses[i - 1], &poses[i]);
             if prev.len() < overlap || cur.len() < overlap {
@@ -206,9 +212,14 @@ pub fn merge(chunks: &[(Splats, CameraSet)], overlap: usize, voxel: f32) -> Resu
     let mut scene = crate::align::concat(&parts);
     if voxel > 0.0 {
         let weights = scene.opacities.clone();
-        scene = crate::prune::voxel_merge(&scene, &weights, voxel, 0);
+        scene = crate::prune::voxel_merge_while(&scene, &weights, voxel, 0, keep_going).ok_or_else(cancelled)?;
     }
     Ok(Merged { scene, cameras: CameraSet::concat(cameras), links })
+}
+
+/// The error a stopped tool answers.
+fn cancelled() -> String {
+    capability::failure::CANCELLED.to_string()
 }
 
 /// The largest distance of any camera centre in `poses` from their mean.
@@ -273,13 +284,19 @@ pub fn parse_range(s: &str) -> Result<(usize, usize), String> {
 /// Two gaussians closer together than the finest detail any camera resolved
 /// cannot be told apart by any training view, so `voxel_pixels` states the
 /// distance to fuse at in pixels and `cameras` convert it.
-pub fn prune(scene: &Splats, cameras: Option<&[Camera]>, cfg: &PruneCfg) -> Result<Pruned, String> {
+///
+/// `keep_going` is asked between stages and every [`crate::prune::POLL_EVERY`]
+/// gaussians within one; once it says no the prune answers `Err(CANCELLED)`.
+pub fn prune(scene: &Splats, cameras: Option<&[Camera]>, cfg: &PruneCfg, keep_going: &mut dyn FnMut() -> bool) -> Result<Pruned, String> {
     let (lo, hi) = match cfg.range {
         Some((start, count)) => (start.min(scene.len()), start.saturating_add(count).min(scene.len())),
         None => (0, scene.len()),
     };
     let mut kept = Splats::default();
     for i in (lo..hi).filter(|&i| scene.opacities[i] >= cfg.min_opacity) {
+        if (i - lo) % crate::prune::POLL_EVERY == 0 && !keep_going() {
+            return Err(cancelled());
+        }
         kept.means.extend_from_slice(&scene.means[i * 3..i * 3 + 3]);
         kept.quats.extend_from_slice(&scene.quats[i * 4..i * 4 + 4]);
         kept.scales.extend_from_slice(&scene.scales[i * 3..i * 3 + 3]);
@@ -288,7 +305,7 @@ pub fn prune(scene: &Splats, cameras: Option<&[Camera]>, cfg: &PruneCfg) -> Resu
     }
     if cfg.recalibrate_opacity {
         let cams = cameras.ok_or("prune: recalibrate_opacity needs the cameras the scene was reconstructed from")?;
-        kept = crate::mip::recalibrate_opacity(&kept, cams, crate::types::RenderOpts::default().eps2d);
+        kept = crate::mip::recalibrate_opacity(&kept, cams, crate::types::RenderOpts::default().eps2d, keep_going).ok_or_else(cancelled)?;
     }
     if cfg.opacity_gain != 1.0 {
         for v in kept.opacities.iter_mut() {
@@ -299,6 +316,9 @@ pub fn prune(scene: &Splats, cameras: Option<&[Camera]>, cfg: &PruneCfg) -> Resu
     let mut voxel = cfg.voxel;
     if voxel <= 0.0 && cfg.voxel_pixels > 0.0 {
         let cams = cameras.ok_or("prune: voxel_pixels needs the cameras (it is the cameras that set the scale)")?;
+        if !keep_going() {
+            return Err(cancelled());
+        }
         let mut sigma: Vec<f32> = crate::mip::smoothing_sigma(&kept, cams, cfg.voxel_pixels, &|_, _| true).into_iter().filter(|&v| v > 0.0).collect();
         if sigma.is_empty() {
             return Err("prune: no gaussian is visible from any of those cameras".to_string());
@@ -308,7 +328,7 @@ pub fn prune(scene: &Splats, cameras: Option<&[Camera]>, cfg: &PruneCfg) -> Resu
     }
     if voxel > 0.0 {
         let weights = kept.opacities.clone();
-        kept = crate::prune::voxel_merge(&kept, &weights, voxel, cfg.max_gaussians);
+        kept = crate::prune::voxel_merge_while(&kept, &weights, voxel, cfg.max_gaussians, keep_going).ok_or_else(cancelled)?;
     }
     Ok(Pruned { scene: kept, before: scene.len(), after_opacity, voxel })
 }
@@ -446,12 +466,45 @@ mod tests {
         assert!((d(&o) - d(&s)).abs() < 1e-5);
     }
 
+    /// `merge` and `prune` ask for a stop between chunks, stages and every few thousand gaussians, and answer the
+    /// contract's cancelled error as soon as the answer is no.
+    #[test]
+    fn merge_and_prune_stop_when_their_token_fires() {
+        use capability::{Invocation, Outcome, Progress};
+        use capability_mock::cancellation::{certify, Bound};
+        use std::cell::{Cell, RefCell};
+        let (a, b) = (orbit_part(0, 8, 12, 2.0), orbit_part(4, 12, 12, 2.0));
+        let chunks = [(scene(8_000), a), (scene(8_000), b)];
+        let merge_run = |inv: &Invocation, progress: &mut dyn FnMut(Progress)| {
+            inv.cancel.check()?;
+            let (progress, polls) = (RefCell::new(progress), Cell::new(0u32));
+            merge(&chunks, 4, 0.05, &mut || {
+                (progress.borrow_mut())(Progress::step(polls.replace(polls.get() + 1), 0, ""));
+                !inv.cancel.is_cancelled()
+            })?;
+            Ok(Outcome::new())
+        };
+        certify("splat merge", &Invocation::new, &merge_run, Bound::ONE_STEP);
+        let big = scene(40_000);
+        let cfg = PruneCfg { voxel: 0.05, voxel_pixels: 0.0, min_opacity: 0.0, recalibrate_opacity: false, max_gaussians: 0, opacity_gain: 1.0, range: None };
+        let prune_run = |inv: &Invocation, progress: &mut dyn FnMut(Progress)| {
+            inv.cancel.check()?;
+            let (progress, polls) = (RefCell::new(progress), Cell::new(0u32));
+            prune(&big, None, &cfg, &mut || {
+                (progress.borrow_mut())(Progress::step(polls.replace(polls.get() + 1), 0, ""));
+                !inv.cancel.is_cancelled()
+            })?;
+            Ok(Outcome::new())
+        };
+        certify("splat prune", &Invocation::new, &prune_run, Bound::ONE_STEP);
+    }
+
     #[test]
     fn merge_refuses_a_single_shared_frame_and_a_lone_chunk() {
         let chunk = (scene(4), orbit(6, 1.0));
-        assert!(merge(std::slice::from_ref(&chunk), 2, 0.0).err().unwrap().contains("at least 2 chunks"));
-        assert!(merge(&[chunk.clone(), chunk.clone()], 1, 0.0).err().unwrap().contains("at least 2"));
-        assert!(merge(&[chunk.clone(), chunk], 9, 0.0).err().unwrap().contains("fewer cameras"));
+        assert!(merge(std::slice::from_ref(&chunk), 2, 0.0, &mut || true).err().unwrap().contains("at least 2 chunks"));
+        assert!(merge(&[chunk.clone(), chunk.clone()], 1, 0.0, &mut || true).err().unwrap().contains("at least 2"));
+        assert!(merge(&[chunk.clone(), chunk], 9, 0.0, &mut || true).err().unwrap().contains("fewer cameras"));
     }
 
     /// Two chunks of one orbit that share four frames, in the same world,
@@ -459,7 +512,7 @@ mod tests {
     #[test]
     fn chunks_sharing_frames_in_one_world_link_at_unit_scale() {
         let (a, b) = (orbit_part(0, 8, 12, 2.0), orbit_part(4, 12, 12, 2.0));
-        let m = merge(&[(scene(4), a), (scene(4), b)], 4, 0.0).unwrap();
+        let m = merge(&[(scene(4), a), (scene(4), b)], 4, 0.0, &mut || true).unwrap();
         assert_eq!(m.scene.len(), 8);
         assert_eq!(m.cameras.len(), 16);
         let link = m.links[0];
@@ -470,9 +523,9 @@ mod tests {
     fn prune_drops_the_faint_and_slices_a_range() {
         let s = scene(10);
         let cfg = PruneCfg { voxel: 0.0, voxel_pixels: 0.0, min_opacity: 0.5, recalibrate_opacity: false, max_gaussians: 0, opacity_gain: 1.0, range: None };
-        let p = prune(&s, None, &cfg).unwrap();
+        let p = prune(&s, None, &cfg, &mut || true).unwrap();
         assert_eq!((p.before, p.after_opacity, p.scene.len()), (10, 5, 5));
-        let sliced = prune(&s, None, &PruneCfg { min_opacity: 0.0, range: Some((2, 3)), ..cfg }).unwrap();
+        let sliced = prune(&s, None, &PruneCfg { min_opacity: 0.0, range: Some((2, 3)), ..cfg }, &mut || true).unwrap();
         assert_eq!(sliced.scene.len(), 3);
     }
 
@@ -480,11 +533,11 @@ mod tests {
     fn prune_in_pixels_or_recalibration_needs_cameras() {
         let s = scene(4);
         let cfg = PruneCfg { voxel: 0.0, voxel_pixels: 2.0, min_opacity: 0.0, recalibrate_opacity: false, max_gaussians: 0, opacity_gain: 1.0, range: None };
-        assert!(prune(&s, None, &cfg).err().unwrap().contains("needs the cameras"));
-        let e = prune(&s, None, &PruneCfg { voxel_pixels: 0.0, recalibrate_opacity: true, ..cfg.clone() }).err().unwrap();
+        assert!(prune(&s, None, &cfg, &mut || true).err().unwrap().contains("needs the cameras"));
+        let e = prune(&s, None, &PruneCfg { voxel_pixels: 0.0, recalibrate_opacity: true, ..cfg.clone() }, &mut || true).err().unwrap();
         assert!(e.contains("recalibrate_opacity"), "{e}");
         // a world-unit voxel needs none, and fuses the two gaussians sharing a cell
-        let fused = prune(&s, None, &PruneCfg { voxel: 1.0, ..cfg }).unwrap();
+        let fused = prune(&s, None, &PruneCfg { voxel: 1.0, ..cfg }, &mut || true).unwrap();
         assert_eq!(fused.scene.len(), 1);
     }
 

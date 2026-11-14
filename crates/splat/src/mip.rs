@@ -117,10 +117,16 @@ pub fn bake_filter3d(s: &Splats, variance: &[f32]) -> Splats {
 ///
 /// The factor is screen-space and so view-dependent; the median over the
 /// cameras that saw a gaussian is what is corrected for.
-pub fn recalibrate_opacity(s: &Splats, cams: &[Camera], eps2d: f32) -> Splats {
+///
+/// `keep_going` is asked every [`crate::prune::POLL_EVERY`] gaussians; `None`
+/// means it said no and the pass stopped.
+pub fn recalibrate_opacity(s: &Splats, cams: &[Camera], eps2d: f32, keep_going: &mut dyn FnMut() -> bool) -> Option<Splats> {
     let mut out = s.clone();
     let mut comps: Vec<f32> = Vec::with_capacity(cams.len());
     for i in 0..s.len() {
+        if i % crate::prune::POLL_EVERY == 0 && !keep_going() {
+            return None;
+        }
         comps.clear();
         let m = &s.means[i * 3..i * 3 + 3];
         // the geometric mean axis is the isotropic splat with the same volume,
@@ -146,5 +152,5 @@ pub fn recalibrate_opacity(s: &Splats, cams: &[Camera], eps2d: f32) -> Splats {
         let c = comps[comps.len() / 2].max(1e-3);
         out.opacities[i] = (s.opacities[i] / c).min(1.0 - 1e-4);
     }
-    out
+    Some(out)
 }

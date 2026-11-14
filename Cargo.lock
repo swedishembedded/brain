@@ -3172,6 +3172,7 @@ dependencies = [
  "brain-backend-cpu",
  "brain-camera",
  "brain-capability",
+ "brain-capability-mock",
  "brain-data",
  "brain-gpu-core",
  "brain-imaging",

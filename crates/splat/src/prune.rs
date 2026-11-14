@@ -13,11 +13,21 @@
 use crate::types::Splats;
 use std::collections::HashMap;
 
+/// Gaussians a loop over a scene handles between two asks of its keep-going
+/// callback: bounded work between polls, whatever the scene's size.
+pub(crate) const POLL_EVERY: usize = 4096;
+
 /// Merge `splats` (with per-gaussian sigmoid weights) onto a `voxel`-sized
 /// grid. `max_points > 0` additionally keeps only the heaviest (largest Σw)
 /// voxels. `sh_rest` is dropped — the reference merges DC only. Output order
 /// is sorted by voxel coordinate (deterministic).
 pub fn voxel_merge(splats: &Splats, weights: &[f32], voxel: f32, max_points: usize) -> Splats {
+    voxel_merge_while(splats, weights, voxel, max_points, &mut || true).expect("an always-true keep-going callback never stops the merge")
+}
+
+/// [`voxel_merge`] that asks `keep_going` every [`POLL_EVERY`] gaussians;
+/// `None` means it said no and the merge stopped.
+pub fn voxel_merge_while(splats: &Splats, weights: &[f32], voxel: f32, max_points: usize, keep_going: &mut dyn FnMut() -> bool) -> Option<Splats> {
     let n = splats.len();
     assert_eq!(weights.len(), n, "one weight per gaussian");
     // group: voxel key -> accumulator index
@@ -25,6 +35,9 @@ pub fn voxel_merge(splats: &Splats, weights: &[f32], voxel: f32, max_points: usi
     let mut keys: Vec<[i64; 3]> = Vec::new();
     let mut acc: Vec<[f64; 15]> = Vec::new(); // wsum,w2sum, 3 mean, 4 quat, 3 scale, 3 color
     for (i, &wi) in weights.iter().enumerate() {
+        if i % POLL_EVERY == 0 && !keep_going() {
+            return None;
+        }
         let key = [
             (splats.means[i * 3] / voxel).floor() as i64,
             (splats.means[i * 3 + 1] / voxel).floor() as i64,
@@ -58,7 +71,10 @@ pub fn voxel_merge(splats: &Splats, weights: &[f32], voxel: f32, max_points: usi
     }
     order.sort_by_key(|&i| keys[i]);
     let mut out = Splats::default();
-    for &i in &order {
+    for (n_out, &i) in order.iter().enumerate() {
+        if n_out % POLL_EVERY == 0 && !keep_going() {
+            return None;
+        }
         let a = &acc[i];
         let ws = a[0].max(1e-8);
         for d in 0..3 {
@@ -76,7 +92,7 @@ pub fn voxel_merge(splats: &Splats, weights: &[f32], voxel: f32, max_points: usi
             out.colors.push((a[12 + d] / ws) as f32);
         }
     }
-    out
+    Some(out)
 }
 
 /// Drop the gaussians whose LARGEST axis is above the `q` quantile of that

@@ -322,8 +322,8 @@ impl Provider for SplatProvider {
             "fit" => tool(crate::caps_fit::fit_spec, crate::caps_fit::fit),
             "info" => tool(crate::caps_tools::info_spec, |inv, _| crate::caps_tools::info(inv)),
             "orient" => tool(crate::caps_tools::orient_spec, |inv, _| crate::caps_tools::orient(inv)),
-            "merge" => tool(crate::caps_tools::merge_spec, |inv, _| crate::caps_tools::merge(inv)),
-            "prune" => tool(crate::caps_tools::prune_spec, |inv, _| crate::caps_tools::prune(inv)),
+            "merge" => tool(crate::caps_tools::merge_spec, crate::caps_tools::merge),
+            "prune" => tool(crate::caps_tools::prune_spec, crate::caps_tools::prune),
             _ => None,
         }
     }

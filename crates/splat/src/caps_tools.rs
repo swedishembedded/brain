@@ -16,7 +16,7 @@
 //! services by sending an email to info@swedishembedded.com.
 
 use capability::bounds::{SIDE_PX, TRAIN_COUNT, UNIT};
-use capability::{ActionResult, ActionSpec, Blob, BlobSpec, Invocation, Media, Outcome, ParamSpec, ParamType};
+use capability::{ActionResult, ActionSpec, Blob, BlobSpec, Invocation, Media, Outcome, ParamSpec, ParamType, Progress};
 use serde_json::json;
 
 use crate::caps::{MAX_GAUSSIANS, MAX_WEIGHT};
@@ -99,13 +99,24 @@ pub(crate) fn orient(inv: &Invocation) -> ActionResult {
     Ok(Outcome::new().set("gaussians", json!(oriented.len())).blob("scene", scene_blob(&oriented)?).blob("cameras", cameras_blob(&moved)))
 }
 
+/// The per-poll callback of a long tool: one progress step per poll, and a stop
+/// once the invocation's token fires.
+fn keep_going<'a>(inv: &'a Invocation, progress: &'a mut dyn FnMut(Progress)) -> impl FnMut() -> bool + 'a {
+    let mut polls = 0u32;
+    move || {
+        progress(Progress::step(polls, 0, ""));
+        polls += 1;
+        !inv.cancel.is_cancelled()
+    }
+}
+
 /// A comma-separated list of paths, without the empty entries.
 fn path_list(inv: &Invocation, name: &str) -> Result<Vec<String>, String> {
     let raw = inv.get_str(name).ok_or_else(|| format!("splat merge: missing required param '{name}'"))?;
     Ok(raw.split(',').map(str::trim).filter(|s| !s.is_empty()).map(String::from).collect())
 }
 
-pub(crate) fn merge(inv: &Invocation) -> ActionResult {
+pub(crate) fn merge(inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
     let (scenes, cameras) = (path_list(inv, "scenes")?, path_list(inv, "cameras")?);
     if scenes.len() < 2 || cameras.len() != scenes.len() {
         return Err(format!("splat merge: give N scenes and N cameras files, comma separated, N at least 2 (got {} and {})", scenes.len(), cameras.len()));
@@ -121,7 +132,7 @@ pub(crate) fn merge(inv: &Invocation) -> ActionResult {
         })
         .collect::<Result<_, String>>()?;
     let overlap = inv.get_i64("overlap").ok_or("splat merge: missing required param 'overlap'")?.max(0) as usize;
-    let merged = tools::merge(&chunks, overlap, inv.get_f64("prune").unwrap_or(0.0) as f32).map_err(|e| e.replacen("merge", "splat merge", 1))?;
+    let merged = tools::merge(&chunks, overlap, inv.get_f64("prune").unwrap_or(0.0) as f32, &mut keep_going(inv, progress)).map_err(|e| e.replacen("merge", "splat merge", 1))?;
     let links: Vec<_> = merged
         .links
         .iter()
@@ -135,7 +146,7 @@ pub(crate) fn merge(inv: &Invocation) -> ActionResult {
         .blob("cameras", cameras_blob(&merged.cameras)))
 }
 
-pub(crate) fn prune(inv: &Invocation) -> ActionResult {
+pub(crate) fn prune(inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
     let scene = scene_input(inv, "prune")?;
     let cameras = match cameras_text(inv, "prune")? {
         Some(text) => Some(cameras_from_json(&text).map_err(|e| format!("splat prune: 'cameras': {e}"))?),
@@ -151,7 +162,7 @@ pub(crate) fn prune(inv: &Invocation) -> ActionResult {
         opacity_gain: inv.get_f64("opacity_gain").unwrap_or(1.0) as f32,
         range,
     };
-    let p = tools::prune(&scene, cameras.as_deref(), &cfg)?;
+    let p = tools::prune(&scene, cameras.as_deref(), &cfg, &mut keep_going(inv, progress))?;
     Ok(Outcome::new()
         .set("gaussians_in", json!(p.before))
         .set("gaussians_after_opacity", json!(p.after_opacity))
