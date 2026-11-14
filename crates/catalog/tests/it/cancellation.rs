@@ -32,6 +32,11 @@ fn absent_weights(model: &str) -> Assembly {
     Assembly { id: format!("local/{model}"), arch: resolver_spec_for(model).map(|(arch, _)| arch.to_string()).unwrap_or_default(), variant: None, roles, provenance: Vec::new() }
 }
 
+/// The models whose provider reads its weights when it is built, so this proof cannot reach them. The serving
+/// certification matrix (`scripts/gates/training-capabilities.tsv`) names this proof as the cancel evidence of every
+/// other served architecture, so the list is pinned: a provider that starts to need its weights fails here.
+const NEEDS_WEIGHTS: [&str; 5] = ["brain/codeformer", "brain/rrdbnet", "brain/supir", "deepseek-ai/DeepSeek-OCR", "deepseek-ai/DeepSeek-OCR-2"];
+
 #[test]
 fn every_listed_action_declares_that_it_observes_cancellation() {
     let undeclared: Vec<String> = manifests().iter().flat_map(|m| m.actions.iter().filter(|a| !a.cancellable).map(move |a| format!("{}/{}", m.model, a.name))).collect();
@@ -40,12 +45,13 @@ fn every_listed_action_declares_that_it_observes_cancellation() {
 
 #[test]
 fn every_action_built_without_weights_refuses_a_token_fired_before_the_call() {
-    let (mut proved, mut unbuilt, mut refused) = (0usize, Vec::new(), Vec::new());
+    let (mut proved, mut unbuilt, mut refused, mut needs_weights) = (0usize, Vec::new(), Vec::new(), Vec::new());
     for m in manifests() {
         let provider = match provider_from_assembly(&m.model, &absent_weights(&m.model)) {
             Ok(p) => p,
             Err(e) => {
                 unbuilt.push(format!("{}: {e}", m.model));
+                needs_weights.push(m.model.clone());
                 continue;
             }
         };
@@ -69,4 +75,6 @@ fn every_action_built_without_weights_refuses_a_token_fired_before_the_call() {
     eprintln!("admission proved for {proved} action(s); providers that need weights to be built: {unbuilt:#?}");
     assert!(refused.is_empty(), "{} action(s) ran work under a token that fired before the call:\n{}", refused.len(), refused.join("\n"));
     assert!(proved > 0, "no provider could be built without weights");
+    needs_weights.sort();
+    assert_eq!(needs_weights, NEEDS_WEIGHTS, "the providers that need weights to be built changed; update NEEDS_WEIGHTS and the cancel cells of the serving certification matrix");
 }
