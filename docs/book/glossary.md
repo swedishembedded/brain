@@ -734,9 +734,9 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 ## L
 
-**L1 regularization**: adding to the loss a penalty proportional to the sum of the absolute values of the weights, which is the effect of a Laplace prior and sets some weights exactly to zero. *([Maximum Likelihood, Priors and Regularization](v02-learning/04-likelihood.md))*
+**L1 regularization**: adding to the loss a penalty proportional to the sum of the absolute values of the weights, which is the effect of a Laplace prior and sets some weights exactly to zero (with a squared error, the lasso, solved by soft-thresholding: move a value toward zero by the penalty and stop at zero). *([Maximum Likelihood, Priors and Regularization](v02-learning/04-likelihood.md))*
 
-**L2 regularization**: adding to the loss a penalty proportional to the sum of the squared weights, which is the effect of a Gaussian prior on the weights and shrinks them smoothly toward zero. *([Maximum Likelihood, Priors and Regularization](v02-learning/04-likelihood.md))*
+**L2 regularization**: adding to the loss a penalty proportional to the sum of the squared weights (with a squared error, ridge regression), which is the effect of a Gaussian prior on the weights and shrinks them smoothly toward zero. *([Maximum Likelihood, Priors and Regularization](v02-learning/04-likelihood.md))*
 
 **label**: the answer attached to an example, the quantity a supervised model is asked to predict. *([The Learning Problem](v02-learning/01-learning-problem.md))*
 
@@ -846,7 +846,7 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **matrix-vector product**: the vector whose entries are the dot products of the rows of a matrix with the input vector, equivalently a weighted sum of the matrix's columns. *([Matrices as Linear Maps](v01-mathematics/04-matrices.md))*
 
-**maximum a posteriori**: choosing the parameter at the peak of the posterior, equivalently minimising the negative log-likelihood plus the negative log of the prior. *([Maximum Likelihood, Priors and Regularization](v02-learning/04-likelihood.md))*
+**maximum a posteriori**: choosing the parameter at the peak of the posterior (the distribution of the parameter after the data, prior times likelihood, rescaled), equivalently minimising the negative log-likelihood plus the negative log of the prior. *([Maximum Likelihood, Priors and Regularization](v02-learning/04-likelihood.md))*
 
 **maximum likelihood estimation**: choosing the parameter under which the observed data were most probable, equivalently the one that minimises the negative log-likelihood. *([Maximum Likelihood, Priors and Regularization](v02-learning/04-likelihood.md))*
 
