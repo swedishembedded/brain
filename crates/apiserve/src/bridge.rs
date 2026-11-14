@@ -153,14 +153,11 @@ pub async fn ensure_and_recheck<T>(state: &AppState, provider: Provider, model: 
 }
 
 /// Read the contract's `generate` [`Outcome`] into `(text, prompt_tokens,
-/// completion_tokens, finish_reason)`. `text` is the `text` blob (full assistant
-/// text); the counts + `finish_reason` come from the `outputs` object. Missing
-/// fields degrade gracefully (empty text, zero counts, `"stop"`). Kept as the
-/// smaller reader every existing caller (image generation's non-chat callers never
-/// use it; Anthropic — no tool-calling support yet — still does) uses unchanged;
-/// [`read_chat_outcome`] is an additive sibling for callers that also need
-/// reasoning/tool_calls, not a replacement.
-pub fn read_outcome(o: &Outcome) -> (String, i64, i64, String) {
+/// completion_tokens, finish_reason)`, the part of [`read_chat_outcome`] every
+/// generation reports. `text` is the `text` blob (full assistant text); the
+/// counts + `finish_reason` come from the `outputs` object. Missing fields
+/// degrade gracefully (empty text, zero counts, `"stop"`).
+fn read_outcome(o: &Outcome) -> (String, i64, i64, String) {
     let text = o.blobs.get("text").map(|b| String::from_utf8_lossy(&b.bytes).into_owned()).unwrap_or_default();
     let prompt = o.outputs.get("prompt_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
     let completion = o.outputs.get("completion_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
@@ -278,8 +275,7 @@ impl ChatOutcome {
     }
 }
 
-/// Read a [`ChatOutcome`] from the contract `Outcome`. See [`read_outcome`] for the
-/// smaller (pre-tool-calling) shape this extends.
+/// Read a [`ChatOutcome`] from the contract `Outcome`.
 pub fn read_chat_outcome(o: &Outcome) -> ChatOutcome {
     let (text, prompt_tokens, completion_tokens, finish) = read_outcome(o);
     let reasoning = o.outputs.get("reasoning_content").and_then(|v| v.as_str()).unwrap_or("").to_string();

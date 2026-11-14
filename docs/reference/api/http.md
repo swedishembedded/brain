@@ -96,7 +96,8 @@ launches a local qwen3 Anthropic surface and points Claude Code at it.
   frames and 64 million pixels across them. A remote URL is refused. Finished clips are kept for an hour, within the server's spool
   budget; a restart forgets every job.
 - **Streaming** (`stream:true`): Anthropic emits `message_start`, then per content
-  block (the thinking block, when the model reasons, then the text block)
+  block (the thinking block, when the model reasons, then the text block, then
+  one `tool_use` block per tool call)
   `content_block_start → content_block_delta* → content_block_stop`, then
   `message_delta → message_stop`; OpenAI/OpenRouter emit `chat.completion.chunk`s
   (`text_completion` objects on `/completions`) ending in `data: [DONE]`. Client disconnect
@@ -114,6 +115,23 @@ launches a local qwen3 Anthropic surface and points Claude Code at it.
   1024 <= N < `max_tokens`) or off (`{"type": "disabled"}`). The budget is a
   target, as Anthropic defines it: reasoning counts against `max_tokens`, and
   that is what bounds it.
+  `{"type": "adaptive"}` leaves the choice to the model's own default.
+- **Tool calling.** A model whose card lists `tools` takes them on every
+  surface. On the Anthropic surface a client tool (`name`, `description`,
+  `input_schema`) reaches the model as a function tool, an assistant turn's
+  `tool_use` blocks as its calls, and a user turn's `tool_result` blocks as the
+  results answering them (an `is_error` result is marked as an error). The
+  model's calls come back as `tool_use` blocks whose `input` is the JSON object
+  it wrote, streamed as `input_json_delta` fragments, with
+  `stop_reason: "tool_use"`. `tool_choice` takes `auto`, `any`, `none` and
+  `tool`. Refused by name: server tools (a `type` other than `custom`, such as
+  hosted web search), `disable_parallel_tool_use: true` (the model may call
+  several tools in one turn), and a call whose arguments are not a JSON object.
+  A request must fit the model's context, prompt plus `max_tokens`, as on
+  Anthropic's own API: Claude Code asks for 32000 output tokens unless
+  `CLAUDE_CODE_MAX_OUTPUT_TOKENS` lowers it, which
+  [`claude-with-brain.sh`](../../../samples/shell/api/claude-with-brain/claude-with-brain.sh)
+  does (`--max-output-tokens`).
 - **Completions** (`POST /v1/completions`): the `prompt` is continued as it is,
   with no chat template, and the `text` is the raw generation. `prompt` is one
   string (or an array holding one); several prompts and token-id prompts are a 400.

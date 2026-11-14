@@ -644,7 +644,7 @@ fn to_completion_invocation(provider: Provider, body: &Value) -> Result<(String,
 /// `function.name` a non-empty string of at most [`MAX_TOOL_NAME_LEN`]
 /// characters. Enforced BEFORE the array ever reaches the resident model /
 /// prompt renderer.
-fn validate_tools(provider: Provider, tools: &Value) -> Result<(), ApiError> {
+pub(crate) fn validate_tools(provider: Provider, tools: &Value) -> Result<(), ApiError> {
     let arr = tools.as_array().ok_or_else(|| ApiError::invalid_request(provider, "'tools' must be an array"))?;
     if arr.len() > MAX_TOOLS {
         return Err(ApiError::invalid_request(provider, format!("'tools' must not have more than {MAX_TOOLS} entries")));
@@ -669,7 +669,7 @@ fn validate_tools(provider: Provider, tools: &Value) -> Result<(), ApiError> {
 /// INPUT BOUNDS on `tool_choice`: `"auto"` | `"none"` | `"required"`, or
 /// `{"type":"function","function":{"name":<non-empty string>}}` — any other shape
 /// is a 400 rather than being forwarded verbatim to the resident.
-fn validate_tool_choice(provider: Provider, tc: &Value) -> Result<(), ApiError> {
+pub(crate) fn validate_tool_choice(provider: Provider, tc: &Value) -> Result<(), ApiError> {
     let ok = match tc {
         Value::String(s) => s == "auto" || s == "none" || s == "required",
         Value::Object(o) => {

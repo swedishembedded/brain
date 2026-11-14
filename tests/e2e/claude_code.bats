@@ -19,6 +19,9 @@
 
 CLAUDE_TIMEOUT="${CLAUDE_TIMEOUT:-60}"
 
+# `run --separate-stderr` keeps claude's stderr notices out of the JSON it prints.
+bats_require_minimum_version 1.5.0
+
 setup_file() {
   command -v claude >/dev/null 2>&1 || skip "claude CLI not installed"
   command -v jq >/dev/null 2>&1 || skip "jq not installed"
@@ -94,7 +97,7 @@ run_claude() {
 
 @test "claude uses OUR key (not the subscription) and reaches the local backend" {
   mkdir -p "$E2E_DIR/home"
-  run run_claude -p "hello" --output-format stream-json --verbose
+  run --separate-stderr run_claude -p "hello" --output-format stream-json --verbose
   [ "$status" -eq 0 ]
   # The init event proves the key source + that it routed to our local mock model.
   echo "$output" | grep -E '"type":"system"' | head -1 | jq -e '.apiKeySource == "ANTHROPIC_API_KEY"' >/dev/null
@@ -103,7 +106,7 @@ run_claude() {
 
 @test "claude -p (json) gets a non-error result from brain" {
   mkdir -p "$E2E_DIR/home"
-  run run_claude -p "Say pong" --output-format json
+  run --separate-stderr run_claude -p "Say pong" --output-format json
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.is_error == false' >/dev/null
   echo "$output" | jq -e '.result | length > 0' >/dev/null
@@ -111,7 +114,7 @@ run_claude() {
 
 @test "claude -p (stream-json) streams a terminal success result" {
   mkdir -p "$E2E_DIR/home"
-  run run_claude -p "Say hello in one word." --output-format stream-json --verbose
+  run --separate-stderr run_claude -p "Say hello in one word." --output-format stream-json --verbose
   [ "$status" -eq 0 ]
   # The final NDJSON result event has is_error=false.
   echo "$output" | grep -E '"type":"result"' | tail -1 | jq -e '.is_error == false' >/dev/null

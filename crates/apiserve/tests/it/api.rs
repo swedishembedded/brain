@@ -2636,6 +2636,90 @@ async fn openai_chat_tool_calls_nonstream_validates_content_null_and_arguments_p
 }
 
 #[tokio::test]
+async fn anthropic_tool_calls_nonstream_are_tool_use_blocks_with_object_inputs() {
+    let (app, key) = toolcall_app(Provider::Anthropic);
+    let body = json!({
+        "model": "brain-toolcall", "max_tokens": 64,
+        "tools": [{"name": "get_weather", "input_schema": {"type": "object"}}, {"name": "set_timer", "input_schema": {"type": "object"}}],
+        "messages": [{"role": "user", "content": "hi"}],
+    });
+    let (st, v) = post_json(&app, Provider::Anthropic, &key, "/v1/messages", &body).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    // The vendored spec predates thinking blocks: the rest of the message is
+    // validated with them set aside.
+    let mut answer = v.clone();
+    answer["content"].as_array_mut().unwrap().retain(|b| b["type"] != "thinking");
+    assert_valid("anthropic.json", "Message", &answer);
+    assert_eq!(v["stop_reason"], "tool_use");
+    let blocks = v["content"].as_array().unwrap();
+    assert_eq!(blocks[0]["type"], "thinking", "the reasoning leads: {v}");
+    let calls: Vec<&Value> = blocks.iter().filter(|b| b["type"] == "tool_use").collect();
+    assert_eq!(calls.len(), 2, "{v}");
+    assert_eq!((calls[0]["name"].as_str(), calls[0]["input"]["location"].as_str()), (Some("get_weather"), Some("Paris")));
+    assert_eq!((calls[1]["name"].as_str(), calls[1]["input"]["minutes"].as_i64()), (Some("set_timer"), Some(5)));
+    assert!(!blocks.iter().any(|b| b["type"] == "text"), "a turn that only calls tools has no empty text block: {v}");
+}
+
+#[tokio::test]
+async fn anthropic_tool_calls_stream_as_tool_use_blocks_of_input_json_deltas() {
+    let (app, key) = toolcall_app(Provider::Anthropic);
+    let body = json!({
+        "model": "brain-toolcall", "max_tokens": 64, "stream": true,
+        "tools": [{"name": "get_weather", "input_schema": {"type": "object"}}],
+        "messages": [{"role": "user", "content": "hi"}],
+    });
+    let (st, text) = post_text(&app, Provider::Anthropic, &key, "/v1/messages", &body).await;
+    assert_eq!(st, StatusCode::OK, "{text}");
+    let events = sse_events(&text);
+    let mut tools: Vec<(i64, String, String)> = Vec::new();
+    let mut stop_reason = Value::Null;
+    let mut open: Option<i64> = None;
+    for (e, d) in &events {
+        let v: Value = serde_json::from_str(d).unwrap();
+        let schema = match e.as_str() {
+            "message_start" => "MessageStartEvent",
+            "content_block_start" => "ContentBlockStartEvent",
+            "content_block_delta" => "ContentBlockDeltaEvent",
+            "content_block_stop" => "ContentBlockStopEvent",
+            "message_delta" => "MessageDeltaEvent",
+            "message_stop" => "MessageStopEvent",
+            other => panic!("unexpected event {other}"),
+        };
+        // The vendored spec predates thinking blocks and their deltas.
+        let thinking = v["content_block"]["type"] == "thinking" || matches!(v["delta"]["type"].as_str(), Some("thinking_delta" | "signature_delta"));
+        if !thinking {
+            assert_valid("anthropic.json", schema, &v);
+        }
+        let index = v["index"].as_i64();
+        match e.as_str() {
+            "content_block_start" => {
+                assert_eq!(open, None, "a block opened before the last one closed: {text}");
+                open = index;
+                if v["content_block"]["type"] == "tool_use" {
+                    tools.push((index.unwrap(), v["content_block"]["name"].as_str().unwrap().to_string(), String::new()));
+                }
+            }
+            "content_block_delta" => {
+                assert_eq!(index, open, "a delta for a block that is not open: {text}");
+                if v["delta"]["type"] == "input_json_delta" {
+                    tools.last_mut().expect("a tool block is open").2.push_str(v["delta"]["partial_json"].as_str().unwrap());
+                }
+            }
+            "content_block_stop" => open = None,
+            "message_delta" => stop_reason = v["delta"]["stop_reason"].clone(),
+            _ => {}
+        }
+    }
+    assert_eq!(stop_reason, "tool_use");
+    assert_eq!(tools.len(), 2, "{text}");
+    assert!(tools[0].0 < tools[1].0, "each call is a block of its own");
+    let first: Value = serde_json::from_str(&tools[0].2).expect("the joined fragments are the call's input");
+    assert_eq!((tools[0].1.as_str(), first["location"].as_str()), ("get_weather", Some("Paris")));
+    let second: Value = serde_json::from_str(&tools[1].2).unwrap();
+    assert_eq!((tools[1].1.as_str(), second["minutes"].as_i64()), ("set_timer", Some(5)));
+}
+
+#[tokio::test]
 async fn openai_chat_tool_calls_stream_validates_indices_fragments_and_no_markup_leak() {
     let (app, key) = toolcall_app(Provider::OpenAI);
     let body = json!({"model": "brain-toolcall", "messages": [{"role": "user", "content": "hi"}], "stream": true});
@@ -2898,42 +2982,6 @@ async fn unmet_tool_choice_collapses_to_stop_but_surfaces_under_native_finish_re
         }
     }
     assert!(saw_terminal, "stream must carry a terminal finish_reason chunk");
-}
-
-#[tokio::test]
-async fn anthropic_messages_with_tools_is_400() {
-    let (app, key) = chat_app(Provider::Anthropic);
-    let body = json!({
-        "model": "brain-chat", "max_tokens": 16,
-        "messages": [{"role": "user", "content": "hi"}],
-        "tools": [{"name": "get_weather", "input_schema": {"type": "object"}}],
-    });
-    let (st, v) = post_json(&app, Provider::Anthropic, &key, "/v1/messages", &body).await;
-    assert_eq!(st, StatusCode::BAD_REQUEST, "tools present must 400 on the Anthropic surface");
-    assert_valid("anthropic.json", "ErrorResponse", &v);
-}
-
-#[tokio::test]
-async fn anthropic_tool_result_content_block_is_400() {
-    let (app, key) = chat_app(Provider::Anthropic);
-    let body = json!({
-        "model": "brain-chat", "max_tokens": 16,
-        "messages": [{"role": "user", "content": [{"type": "tool_result", "tool_use_id": "x", "content": "22C"}]}],
-    });
-    let (st, v) = post_json(&app, Provider::Anthropic, &key, "/v1/messages", &body).await;
-    assert_eq!(st, StatusCode::BAD_REQUEST, "a tool_result content block must 400");
-    assert_valid("anthropic.json", "ErrorResponse", &v);
-
-    // The sibling case: a tool_use block in an assistant message.
-    let body = json!({
-        "model": "brain-chat", "max_tokens": 16,
-        "messages": [
-            {"role": "user", "content": "weather?"},
-            {"role": "assistant", "content": [{"type": "tool_use", "id": "x", "name": "get_weather", "input": {}}]},
-        ],
-    });
-    let (st, _) = post_json(&app, Provider::Anthropic, &key, "/v1/messages", &body).await;
-    assert_eq!(st, StatusCode::BAD_REQUEST, "a tool_use content block must 400");
 }
 
 #[tokio::test]

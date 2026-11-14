@@ -107,9 +107,15 @@ fn decode_input_audio(b64_data: &str, format: &str) -> Result<Blob, String> {
 /// on the async worker, where parsing text costs nothing worth bounding.
 pub fn carries_media(body: &Value) -> bool {
     let Some(messages) = body.get("messages").and_then(Value::as_array) else { return false };
-    messages.iter().filter_map(|m| m.get("content").and_then(Value::as_array)).flatten().any(|part| {
-        matches!(part.get("type").and_then(Value::as_str), Some("image_url" | "input_audio" | "image"))
-    })
+    fn any_media(parts: &[Value]) -> bool {
+        parts.iter().any(|part| match part.get("type").and_then(Value::as_str) {
+            Some("image_url" | "input_audio" | "image") => true,
+            // An Anthropic tool result carries its own content blocks.
+            Some("tool_result") => part.get("content").and_then(Value::as_array).is_some_and(|inner| any_media(inner)),
+            _ => false,
+        })
+    }
+    messages.iter().filter_map(|m| m.get("content").and_then(Value::as_array)).any(|parts| any_media(parts))
 }
 
 /// Scan OpenAI-shaped `messages` (the RAW pre-flatten request array) for
@@ -150,21 +156,35 @@ pub fn extract_anthropic(messages: &[Value]) -> Result<ExtractedMedia, String> {
     let mut out = ExtractedMedia::default();
     for m in messages {
         let Some(parts) = m.get("content").and_then(|c| c.as_array()) else { continue };
-        for p in parts {
-            if p.get("type").and_then(|v| v.as_str()) != Some("image") {
-                continue;
-            }
-            let source = p.get("source");
-            if source.and_then(|s| s.get("type")).and_then(|v| v.as_str()) != Some("base64") {
-                continue; // a URL source: out of scope, see this function's doc
-            }
-            if let Some(data) = source.and_then(|s| s.get("data")).and_then(|v| v.as_str()) {
-                // Anthropic's raw base64 `source.data`, no `data:` URL wrapper.
-                out.push_image(&b64::decode(data)?)?;
-            }
-        }
+        anthropic_images(parts, &mut out)?;
     }
     Ok(out)
+}
+
+/// The base64 images among Anthropic content `parts`, in order, including
+/// those a `tool_result` block carries (a tool that read an image file).
+fn anthropic_images(parts: &[Value], out: &mut ExtractedMedia) -> Result<(), String> {
+    for p in parts {
+        match p.get("type").and_then(|v| v.as_str()) {
+            Some("tool_result") => {
+                if let Some(inner) = p.get("content").and_then(|c| c.as_array()) {
+                    anthropic_images(inner, out)?;
+                }
+            }
+            Some("image") => {
+                let source = p.get("source");
+                if source.and_then(|s| s.get("type")).and_then(|v| v.as_str()) != Some("base64") {
+                    continue; // a URL source: out of scope, see this function's doc
+                }
+                if let Some(data) = source.and_then(|s| s.get("data")).and_then(|v| v.as_str()) {
+                    // Anthropic's raw base64 `source.data`, no `data:` URL wrapper.
+                    out.push_image(&b64::decode(data)?)?;
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
