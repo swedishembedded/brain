@@ -364,6 +364,20 @@ pub fn family_of_config(config: &serde_json::Value) -> Option<&'static str> {
     brain_arch::by_hf_config(&class, |key| config.get(key).is_some()).map(|a| a.id)
 }
 
+/// `name` (a file name the hub listed) as a path inside a repo directory, or
+/// a refusal: an absolute name would replace the directory it is joined onto
+/// and a `..` would climb out of it, so a listing could otherwise write any
+/// file this user can.
+fn store_relative(name: &str) -> Result<&std::path::Path, HubError> {
+    let path = std::path::Path::new(name);
+    let inside = !name.is_empty() && path.components().all(|c| matches!(c, std::path::Component::Normal(_)));
+    if inside {
+        Ok(path)
+    } else {
+        Err(HubError::BadResponse(format!("the hub listed a file named {name:?}, which is not a path inside the repository")))
+    }
+}
+
 /// Runs every [`Step::Download`] in `plan.steps` against `hub`, writing into
 /// `store`'s `<vendor>/<repo>` directory for `plan.reference`'s base repo.
 /// Returns the steps this crate could not execute (`Convert`/`Quantize`), in
@@ -389,20 +403,6 @@ pub fn family_of_config(config: &serde_json::Value) -> Option<&'static str> {
 /// existing early-out) already does: a file under `<vendor>/<repo>/` is taken
 /// as that reference's copy. Removing the file is how a caller forces a
 /// re-fetch.
-/// `name` (a file name the hub listed) as a path inside a repo directory, or
-/// a refusal: an absolute name would replace the directory it is joined onto
-/// and a `..` would climb out of it, so a listing could otherwise write any
-/// file this user can.
-fn store_relative(name: &str) -> Result<&std::path::Path, HubError> {
-    let path = std::path::Path::new(name);
-    let inside = !name.is_empty() && path.components().all(|c| matches!(c, std::path::Component::Normal(_)));
-    if inside {
-        Ok(path)
-    } else {
-        Err(HubError::BadResponse(format!("the hub listed a file named {name:?}, which is not a path inside the repository")))
-    }
-}
-
 pub fn execute(store: &Store, hub: &dyn Hub, plan: &Plan, progress: &mut dyn FnMut(&str, u64, Option<u64>)) -> Result<Vec<Step>, HubError> {
     let dir = store.repo_dir(&plan.reference.base());
     let mut deferred = Vec::new();

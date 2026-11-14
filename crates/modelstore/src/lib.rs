@@ -11,9 +11,14 @@
 //! <models-dir>/Qwen/Qwen3-0.6B/
 //!     config.json  tokenizer.json  tokenizer_config.json   # this repo's own tokenizer
 //!     model.safetensors                                    # upstream, as downloaded
-//!     model.brain.safetensors                               # brain-format conversion
+//!     brain.manifest.json                                   # what to serve: the roles and their files
+//!     model.brain.safetensors                               # a brain-format conversion, when one was made
 //!     Q8_0.gguf                                             # downloaded OR locally produced
 //! ```
+//!
+//! A base reference resolves to the manifest when there is one, then to
+//! `model.brain.safetensors`, then to a checkpoint directory: a pull serves the
+//! download as it is, through the manifest it writes.
 //!
 //! This crate has three responsibilities, each in its own module (and
 //! [`adapter_manifest`], the file a release step publishes for a server to
@@ -263,10 +268,9 @@ pub fn explicit_models_root() -> Option<PathBuf> {
     None
 }
 
-/// The brain-format conversion of a base repo's weights -- what a resident
-/// actually loads. The upstream `model.safetensors` (or shard set) that
-/// produced it is not itself servable: `model_dir::register` requires a
-/// `brain.card`, which only a brain-format file carries.
+/// A brain-format conversion of a base repo's weights, the second place a
+/// base reference resolves to: after a [`MANIFEST_FILE`] (which a pull writes
+/// so the download serves as it is) and before a checkpoint directory.
 const BASE_WEIGHTS_FILE: &str = "model.brain.safetensors";
 const TOKENIZER_FILE: &str = "tokenizer.json";
 /// Named LoRA adapters live inside their base repo's directory (they share
