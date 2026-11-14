@@ -3236,15 +3236,25 @@ impl Qwen {
         }
     }
 
-    /// Write DeepStack level `level`'s merged features `[n_rows, d_model]` for the
-    /// next forward.
+    /// Write DeepStack level `level`'s merged features `[rows, d_model]` for the
+    /// next forward, filling the runs in order. The runs' row counts are a
+    /// capacity: a resident sized once for its largest request writes a
+    /// smaller request's rows as a prefix, and the rows past them are never
+    /// read (decode indexes only the request's own rows).
     pub fn write_deepstack(&self, level: usize, data: &[f32]) {
         let d = self.cfg.d_model as usize;
-        let total: usize = self.deepstack_runs.iter().map(|&(_, n)| n as usize * d).sum();
-        assert_eq!(data.len(), total, "write_deepstack: level {level} needs every run's rows, concatenated");
+        let capacity: usize = self.deepstack_runs.iter().map(|&(_, n)| n as usize * d).sum();
+        assert!(
+            data.len().is_multiple_of(d) && data.len() <= capacity,
+            "write_deepstack: level {level} got {} values, expected whole rows of {d} within the runs' capacity of {capacity}",
+            data.len()
+        );
         let mut rest = data;
         for (&(_, n), buf) in self.deepstack_runs.iter().zip(&self.deepstack_bufs[level]) {
-            let (run, tail) = rest.split_at(n as usize * d);
+            if rest.is_empty() {
+                break;
+            }
+            let (run, tail) = rest.split_at(rest.len().min(n as usize * d));
             self.gpu.write(buf, bytemuck::cast_slice(run));
             rest = tail;
         }
@@ -5933,6 +5943,39 @@ mod kv_tests {
         let wrong = model.step_embed_mrope(&row, &cos, &sin, Some(1));
         let diff = maxabs(&correct, &wrong);
         assert!(diff > 1e-6, "deepstack_row=0 vs deepstack_row=1 produced identical output (diff={diff:e}) -- the index is not load-bearing");
+    }
+
+    /// A DeepStack run sized as a CAPACITY (a resident built once for the
+    /// largest request it admits) takes a request's fewer rows as a prefix,
+    /// and those rows act exactly as they do in a build sized to fit them.
+    #[test]
+    fn deepstack_capacity_takes_a_prefix_of_rows() {
+        if gpu_disabled() {
+            return;
+        }
+        let cfg = QwenConfig::tiny();
+        let d = cfg.d_model as usize;
+        let mut rng = Rng::random();
+        let mut map: HashMap<String, Vec<f32>> = HashMap::new();
+        for (name, count) in cfg.param_list() {
+            map.insert(name, (0..count).map(|_| rng.next_gaussian() as f32 * 0.08).collect());
+        }
+        let rows: Vec<f32> = (0..(2 * d)).map(|_| rng.next_gaussian() as f32 * 0.5).collect();
+        let embed: Vec<f32> = (0..d).map(|_| rng.next_gaussian() as f32 * 0.1).collect();
+        let half = (cfg.head_dim / 2) as usize;
+        let (cos, sin) = (vec![1.0f32; half], vec![0.0f32; half]);
+        let step_with_capacity = |capacity: u32| {
+            let mut model = Qwen::new(cfg.clone(), 1, 8, &map);
+            model.enable_mrope();
+            model.enable_mm_splice(0, capacity);
+            model.enable_deepstack(0, capacity, 1);
+            model.write_deepstack(0, &rows);
+            model.reset_cache();
+            model.step_embed_mrope(&embed, &cos, &sin, Some(1))
+        };
+        let exact = step_with_capacity(2);
+        let roomy = step_with_capacity(4);
+        assert!(maxabs(&exact, &roomy) < 1e-6, "a prefix write into a capacity buffer diverged from the exact-size build");
     }
 }
 
