@@ -41,6 +41,7 @@
 //! | `BuildFails` | `run_req`'s failed `activate` |
 //! | `LaneEnd` | `lane_loop`'s inbox drain and `Msg::Done` |
 //! | `Forget` / `NextGroup` | the dispatcher dropping the open group on `Done` and assigning the queue |
+//! | `Expire` | `Dispatcher::enforce_contract` answering an inbox job whose queue deadline passed |
 
 use std::collections::{HashSet, VecDeque};
 
@@ -64,6 +65,9 @@ enum Answer {
     /// Errored for having arrived while the group ended: legitimate only when
     /// the group failed.
     GroupEnded,
+    /// Its queue deadline passed while it waited in the inbox (the dispatcher's
+    /// `enforce_contract`): legitimate at any time, since it held no slot.
+    Expired,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -146,6 +150,17 @@ fn successors(s: &State, b: Bounds) -> Vec<(&'static str, State)> {
             t.inbox.push(j);
         }
         out.push(("Refill", t));
+    }
+
+    // Dispatcher: a job in the inbox whose deadline passed is removed and
+    // answered; it was never taken, so neither `taken` nor `room` moves.
+    if in_open_groups {
+        if let Some(&j) = s.inbox.first() {
+            let mut t = s.clone();
+            t.inbox.retain(|&x| x != j);
+            t.answer(j, Answer::Expired);
+            out.push(("Expire", t));
+        }
     }
 
     match s.lane {

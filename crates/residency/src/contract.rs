@@ -17,8 +17,8 @@
 //! * [`Decision::Admit`]: claim a device for it now, wherever it fits.
 //! * [`Decision::Elsewhere`]: claim a device for it now, but not one of the
 //!   named devices, which are held for a workload ([`Holds`]).
-//! * [`Decision::Wait`]: it stays queued (no device can take it this round);
-//!   it is answered no later than its deadline.
+//! * Neither, because no device can take it this round: it stays queued and
+//!   is answered no later than its deadline.
 //! * [`Decision::Shrink`]: a running group keeps the jobs it has and takes no
 //!   late ones, so its batch shrinks to nothing and its device frees.
 //! * [`Decision::Refuse`]: it is answered now with an error that names the
@@ -156,8 +156,6 @@ pub enum Decision {
     Admit,
     /// Claim a device now, but none of `avoid`: they are held for a workload.
     Elsewhere { avoid: Vec<Device> },
-    /// Stay queued; answered no later than `deadline`.
-    Wait { deadline: Instant },
     /// Keep running without taking late jobs.
     Shrink,
     /// Answer now with this error.
@@ -181,8 +179,8 @@ impl Contract {
     }
 
     /// The decision for the queued job `w` at `now`, given the devices held
-    /// for workloads. [`Decision::Wait`] is never returned here: it is what an
-    /// admitted job becomes when no device can take it this round.
+    /// for workloads. A job admitted here that no device can take this round
+    /// simply stays queued until its deadline.
     pub fn decide(&self, w: &Waiting, now: Instant, holds: &Holds) -> Decision {
         if now >= w.deadline {
             return Decision::Refuse(Expired { waited: now.saturating_duration_since(w.enqueued), limit: w.deadline.saturating_duration_since(w.enqueued), source: w.source });

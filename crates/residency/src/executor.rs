@@ -852,7 +852,9 @@ impl Dispatcher {
             }
         }
         // A job in an inbox has not been taken by its group: it holds no slot,
-        // so it is answered at its deadline like one in the queue.
+        // so it is answered at its deadline like one in the queue. It was
+        // counted admitted when it moved in, so it leaves that count again.
+        let mut from_inboxes = 0u64;
         for group in open_groups.values() {
             let mut st = group.inbox.lock();
             let mut j = 0;
@@ -861,6 +863,7 @@ impl Dispatcher {
                     Some(why) => {
                         let p = st.jobs.remove(j);
                         running_jobs.retain(|r| r.id != p.id);
+                        from_inboxes += 1;
                         expired.push((p, why));
                     }
                     None => j += 1,
@@ -870,6 +873,7 @@ impl Dispatcher {
         if !expired.is_empty() {
             if let Ok(mut s) = stats.lock() {
                 s.expired += expired.len() as u64;
+                s.admitted = s.admitted.saturating_sub(from_inboxes);
                 s.queue_depth = queue.len();
             }
             for (p, why) in expired {
@@ -1355,7 +1359,7 @@ impl Dispatcher {
                 .map(|r| match contract.decide(&r.oldest, now, holds) {
                     Decision::Admit => Some(exclude.clone()),
                     Decision::Elsewhere { avoid } => Some(exclude.iter().copied().chain(avoid).collect()),
-                    Decision::Wait { .. } | Decision::Shrink | Decision::Refuse(_) => None,
+                    Decision::Shrink | Decision::Refuse(_) => None,
                 })
                 .collect();
             // Multi-device groups need `placeable_multi` (checks EVERY named device),

@@ -169,6 +169,8 @@ fn a_job_waiting_in_a_running_groups_inbox_is_refused_at_its_deadline() {
         assert!(Instant::now() < until, "the refused job is still held: {:?}", exec.in_flight());
         std::thread::sleep(Duration::from_millis(5));
     }
+    let stats = exec.stats();
+    assert_eq!((stats.admitted, stats.expired), (1, 1), "the expired job is counted expired, not admitted");
     exec.shutdown();
 }
 
