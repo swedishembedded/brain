@@ -192,7 +192,7 @@ def tokenizer():
 
 
 def tokenizer_bytes(tk):
-    """u32 count of bytes, the bytes (one u8 each, ascending), u32 count of merges, each merge as two u32 (raw ids), all little-endian."""
+    """u32 count of bytes, the bytes (one u8 each, ascending), u32 count of merges, each merge as two u32 (BPE ids), all little-endian."""
     used = tk.to_raw[1:1 + tk.n_bytes]
     out = struct.pack("<I", len(used)) + bytes(used) + struct.pack("<I", len(tk.merges))
     return out + b"".join(struct.pack("<II", a, b) for a, b in tk.merges)
@@ -242,7 +242,7 @@ def tokenizer_stage():
             + _table(["document", "text", "tokens", "ids"], rows, "llll")
             + f"\n\nEvery base document is {', '.join(map(str, sorted(lengths)))} tokens with its separator and every fine-tuning document "
             f"{', '.join(map(str, sorted(ft_lengths)))}, so one row of {T} positions holds any of them. The artifact "
-            f"`tokenizer.bin` (a u32 count of bytes, the bytes one u8 each, a u32 count of merges, each merge as two u32 raw ids, all "
+            f"`tokenizer.bin` (a u32 count of bytes, the bytes one u8 each, a u32 count of merges, each merge as two u32 BPE ids (a byte is its value 0 to 255, merge number r is 256 + r), all "
             f"little-endian) is {len(blob)} bytes with the FNV-1a digest {_hex(blob)}. The tokenizer rebuilt from those bytes alone gives "
             f"the same ids as the one that learned them, and decodes them back to the text, for {trip} of the {len(every)} cleaned "
             f"documents of both corpora.")
@@ -452,7 +452,7 @@ def model_and_check():
             + f"\n\nGradient checks, by central differences of step {GC_STEP:g} on the loss of one row (the first draw of the first epoch "
             f"of the order `{NAME_ORDER}`), the deviation being |numeric - analytic| / max(1, |analytic|), criterion below 1e-7. The base: "
             f"{GC_COORDS} coordinates of the initial network, drawn from `{NAME_GC}` (seed {bookrng.seed_of(NAME_GC)}) as integer(21) "
-            f"for the tensor (in the order of the flat vector), then integer(rows) and integer(columns) of that tensor: "
+            f"for the tensor (in the order of the flat vector), then integer(rows) and integer(columns) of that tensor (a tensor of one row, a gain, still draws integer(1)): "
             f"{_crit(wb, 1e-7)}. The adapters: all {n_ad} adapter numbers on the initial network, with A drawn as above and B drawn, "
             f"site by site and row by row, as normal() / 10 from `{NAME_GC_B}` (seed {bookrng.seed_of(NAME_GC_B)}) (a B of zero would "
             f"make the gradient of A zero and test nothing): {_crit(wa, 1e-7)}. The planted mistake forms (dA, dB) from G instead of G^T: {bad}.")
@@ -668,7 +668,7 @@ def training_stages():
             f"(bias corrections by repeated multiplication from 1.0, no decay, no clip, constant rate). The held-out loss is the same "
             f"pooled mean over the {len(rows()['pre_val'])} held-out rows; an answer is right when the greedy continuation of the first "
             f"sentence and its full stop (the reference rule: the whole context through the network at every token, the largest "
-            f"logit, the lowest id on a tie, stopping at EOT or after {T} tokens or a full row) decodes to the held-out second "
+            f"logit, the lowest id on a tie; EOT ends the answer and is not kept, and so does a full row of {T}, whose logits still choose a last token that is kept) decodes to the held-out second "
             f"sentence. {stable.RULE} All five runs agree on every count of answers (the resume without moments included: each run is also resumed without its moments from its own generation 100).\n\n" + t1
             + f"\n\nThe adapter run on the frozen base after {PRE_STEPS} updates: {FT_STEPS} updates of {B} draws from the "
             f"{len(rows()['ft'])} fine-tuning rows (seed {_seed(NAME_ORDER_FT)}), the forward pass with every adapted matrix merged "
@@ -851,8 +851,8 @@ def opening():
     return (f"The adapted model after both stages of training, eight requests (the first sentences of the first eight held-out "
             f"fine-tuning documents), {SLOTS} slots, greedy decoding. 'Offline' is the reference answer, the whole context through the "
             f"network at every token; the two servers run the cached forward pass with continuous batching, the first giving each new "
-            f"token the position equal to its own cache length and the second giving every decode row of an iteration the position of "
-            f"the row in the lowest-numbered slot. A space is written `_`. The five runs of the stable-digits rule give the same tokens "
+            f"token the position equal to its own cache length and the second giving every decode row of an iteration (the step of one already running sequence) the position of "
+            f"the row in the lowest-numbered slot. A space is written `_`. The five runs of the stable-digits rule (a trained number is printed only to the digits that survive a nudge of the first weight, explained below) give the same tokens "
             f"in every cell.\n\n"
             + _table(["request", "arrives at iteration", "at most tokens", "offline answer", "correct server", "one position per batch"],
                      rows_, "rrrlll")
@@ -939,7 +939,7 @@ def artifacts():
     cases.append(("the four files as written", load(files)))
     swapped = dict(files)
     swapped["tokenizer.bin"] = tokenizer_bytes(every)
-    cases.append(("tokenizer.bin rebuilt from training and held-out documents", load(swapped)))
+    cases.append(("tokenizer.bin rebuilt from the training and held-out documents of the base corpus", load(swapped)))
     other = package(runs[0.0]["no_moments"]["p"], kf["resumed"]["p"], trained_on=_hex(_f64(kp["resumed"]["p"])))
     cases.append(("base.bin from the run resumed without its moments, manifest rewritten for it", load(other)))
     flipped = dict(files)
@@ -955,9 +955,11 @@ def artifacts():
             "is printed here cut after commas, and the file is these lines joined with nothing between them (no line break):\n\n"
             f"```text\n{meta}\n```\n\n"
             + _table(["file", "bytes", "FNV-1a digest"], rows_, "lrl")
-            + "\n\nThe digest of `tokenizer.bin` depends on no floating-point operation. Those of `base.bin`, `adapter.bin` and "
-              "`manifest.json` depend on the last bit of every trained number: another implementation reproduces them only when its "
-              "library functions round as these do, and otherwise checks its own files against its own manifest."
+            + "\n\nThe digest of `tokenizer.bin` depends on no floating-point operation, and the lengths depend on none of the trained "
+              "numbers. Those of `base.bin`, `adapter.bin` and `manifest.json` depend on the last bit of every trained number, which "
+              "depends on the order of the sums of the backward pass and on how the library functions round, and neither is fixed by "
+              "this book: the digests printed for them are those of the module's run, and an implementation checks its own files "
+              "against its own manifest, built from its own three digests in the form above."
             + "\n\nThe loader reads the manifest, then accepts the files only if each of the three has the recorded length and digest, the "
               "adapter's `trained_on` equals the base's digest and the tokenizer's vocabulary equals the configuration's V; it then "
               "rebuilds the tokenizer from its bytes and the network by merging the adapter into the base.\n\n"
@@ -1019,7 +1021,7 @@ def whole_path():
             "files, and answers from what its loader rebuilt from them, under continuous batching with the arrivals of the opening. "
             "Each planted mistake changes one seam of the system. 'Trained numbers' compares the base and adapter numbers the server "
             "is given with the reference's (the bits, or the criterion 1e-9 at the largest entry); 'loader' is what the loader with "
-            "its checks says; the last two columns are what the server answers when the files are loaded without the checks: answers "
+            f"its checks says; the third row's tokenizer is learned, with the same {MERGES} merges, on the training and held-out documents of the base corpus ({len(c['base'][0]) + len(c['base'][1])} of them) and its ids are compared with the reference's ids; the last two columns are what the server answers when the files are loaded without the checks: answers "
             f"equal to the reference's offline answers, and answers that are the held-out second sentence, among the {n_full} requests "
             "allowed 6 tokens. The five runs of the stable-digits rule give the same counts in every row (the resume without moments is "
             "taken from each run's own generation 100).\n\n"
