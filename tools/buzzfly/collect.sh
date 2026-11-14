@@ -121,7 +121,7 @@ export BRAIN_FLY_REFERENCE="$BUZZFLY_DIR/reference/REFERENCE_PLACEHOLDER"
 # MUJOCO_DIR (MuJoCo's own install-root variable, which brain's loader reads)
 # always wins, so a machine with MuJoCo somewhere unusual is not overridden.
 if [ -z "${MUJOCO_DIR:-}" ]; then
-	for _buzzfly_mj in "${MUJOCO_PATH:-}" "$HOME"/.mujoco/mujoco-* /opt/mujoco-* /usr/local/mujoco-*; do
+	for _buzzfly_mj in "${MUJOCO_PATH:-}" "$HOME"/.mujoco/mujoco-* $(printf '%s/mujoco-* ' ${MUJOCO_PREFIXES:-/opt /usr/local}); do
 		if [ -n "$_buzzfly_mj" ] && [ -f "$_buzzfly_mj/lib/libmujoco.so" ]; then
 			export MUJOCO_DIR="$_buzzfly_mj"
 			break
