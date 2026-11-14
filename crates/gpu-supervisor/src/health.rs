@@ -18,7 +18,7 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use crate::breaker::{Breaker, BreakerPolicy, BreakerState};
-use crate::worker::{FaultKind, Worker, WorkerCommand, WorkerFailure};
+use crate::worker::{Exchange, FaultKind, Worker, WorkerCommand, WorkerFailure};
 
 /// A device fault: what was being done, how it failed, and what became of
 /// the worker. Always definitive: the operation is not retried.
@@ -170,17 +170,32 @@ impl<K: Eq + Hash + Clone + Debug> Health<K> {
     /// once, and is returned as a definitive [`CallError::Fault`]: the
     /// request is not retried, on this worker or any other.
     pub fn call(&self, device: &K, worker: &mut Worker, request: &str, deadline: Duration) -> Result<String, CallError> {
+        self.exchange(device, worker, request, deadline, Exchange::default()).map(|reply| reply.0)
+    }
+
+    /// [`Self::call`] carrying descriptors, progress and cancellation
+    /// ([`Worker::exchange`]): the payload of an `ok` answer and the
+    /// descriptors it declared. A worker's `err` answer is
+    /// [`CallError::Failed`] and its descriptors are closed.
+    #[cfg(unix)]
+    pub fn exchange(&self, device: &K, worker: &mut Worker, request: &str, deadline: Duration, x: Exchange<'_>) -> Result<(String, Vec<std::os::fd::OwnedFd>), CallError> {
         if let Some(cause) = self.with(device, |e| (!e.breaker.admits()).then(|| e.breaker.cause().unwrap_or("a probe is running").to_string())) {
             return Err(CallError::Refused { device: format!("{device:?}"), cause });
         }
         // The worker call runs outside the registry lock: a wedged device
         // must never stall another device's admission.
-        match worker.request(request, deadline) {
-            Ok(Ok(payload)) => Ok(payload),
-            Ok(Err(message)) => Err(CallError::Failed(message)),
+        use crate::worker::Reply;
+        match worker.exchange(request, deadline, x) {
+            Ok(Reply { result: Ok(payload), fds }) => Ok((payload, fds)),
+            Ok(Reply { result: Err(message), .. }) => Err(CallError::Failed(message)),
             Err(WorkerFailure::Invalid(why)) => Err(CallError::Invalid(why)),
             Err(WorkerFailure::Fault(kind)) => Err(CallError::Fault(self.fault(device, worker, request, kind))),
         }
+    }
+
+    #[cfg(not(unix))]
+    pub fn exchange(&self, _device: &K, _worker: &mut Worker, _request: &str, _deadline: Duration, _x: Exchange<'_>) -> Result<(String, Vec<()>), CallError> {
+        Err(CallError::Invalid("supervised device workers need a Unix host".into()))
     }
 
     fn fault(&self, device: &K, worker: &mut Worker, request: &str, kind: FaultKind) -> Fault {

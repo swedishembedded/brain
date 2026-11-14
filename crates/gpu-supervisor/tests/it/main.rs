@@ -7,4 +7,6 @@
 
 mod breaker;
 #[cfg(target_os = "linux")]
+mod wire;
+#[cfg(target_os = "linux")]
 mod worker;

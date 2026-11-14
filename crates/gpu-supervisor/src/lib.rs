@@ -19,13 +19,17 @@
 //! supervisor kills the worker's whole process group and reaps it, so the
 //! kernel reclaims the driver state whether or not the wedged code cooperates.
 //!
-//! Three pieces:
+//! The pieces:
 //!
 //! * [`Worker`]: one child process speaking a line protocol over a Unix
 //!   socket pair, with one request in flight at a time, an explicit deadline
 //!   per request, and group kill plus bounded reaping on every failure path.
-//!   Dropping one kills its group and leaves the reaping to a reaper thread,
-//!   so the dropping thread never waits for an exit.
+//!   A request may stream progress frames back and be cancelled while it is
+//!   in flight ([`Worker::exchange`]). Dropping one kills its group and
+//!   leaves the reaping to a reaper thread, so the dropping thread never
+//!   waits for an exit.
+//! * `wire`: the frames both ends write and read, with descriptors passed
+//!   beside them, and the sealed memfds bulk data travels in.
 //! * [`Breaker`]: the per-device circuit breaker. A fault opens it at once; a
 //!   probe in a fresh worker (half-open) closes it again; faults that repeat
 //!   inside a window trip it, after which probes are spaced out and more than
@@ -42,8 +46,12 @@
 
 mod breaker;
 mod health;
+#[cfg(unix)]
+pub mod wire;
 mod worker;
 
 pub use breaker::{Breaker, BreakerPolicy, BreakerState};
 pub use health::{CallError, DeviceStatus, Fault, Health};
-pub use worker::{FaultKind, Worker, WorkerCommand, WorkerFailure, MAX_REPLY_BYTES};
+pub use worker::{Exchange, FaultKind, Reply, Worker, WorkerCommand, WorkerFailure, MAX_REPLY_BYTES, MAX_REQUEST_BYTES};
+#[cfg(unix)]
+pub use worker::OnProgress;

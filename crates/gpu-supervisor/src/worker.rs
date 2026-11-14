@@ -13,10 +13,16 @@
 //! messages still reach the operator). A request is one line,
 //! `<id> <request>\n`; the answer is one line, `<id> ok <payload>` or
 //! `<id> err <message>`. One request is in flight at a time and each has a
-//! fresh id, so a reply that carries an older id (an answer to a request the
-//! parent already gave up on) is discarded instead of being taken for the
-//! current one. Each direction has exactly one writer, so a frame can never
+//! fresh id, so a frame that carries an older id (about a request the parent
+//! already gave up on) is discarded instead of being taken for the current
+//! one. Each direction has exactly one writer, so a frame can never
 //! interleave with another.
+//!
+//! While a request is in flight ([`Worker::exchange`]) the worker may send
+//! any number of `<id> progress <payload>` frames before its answer, and the
+//! parent may send one `<id> cancel` frame. A frame passes descriptors beside
+//! its line when it says so (`ok+<n>`, `progress+<n>`; [`crate::wire`]): bulk
+//! data travels in sealed memfds, never on the socket.
 //!
 //! The deadline is a socket read timeout: no helper thread waits on the
 //! worker, so nothing is left running when the worker is abandoned. On a
@@ -36,7 +42,7 @@
 //! as the worker is used (a device lane, not a short-lived helper thread).
 
 use std::ffi::OsString;
-use std::io::{ErrorKind, Read, Write};
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
@@ -50,7 +56,7 @@ use std::os::unix::net::UnixStream;
 pub const MAX_REPLY_BYTES: usize = 1 << 20;
 
 /// The largest request line sent.
-const MAX_REQUEST_BYTES: usize = 1 << 20;
+pub const MAX_REQUEST_BYTES: usize = 1 << 20;
 
 /// How long a worker whose stream ended is given to finish exiting on its own
 /// before it is killed, so its real exit status (the signal that crashed it)
@@ -58,8 +64,10 @@ const MAX_REQUEST_BYTES: usize = 1 << 20;
 const EXIT_GRACE: Duration = Duration::from_millis(200);
 
 /// How to start a worker: a program and its arguments, run with `execve`.
-/// Never a fork of the caller and never a re-exec of the current executable
-/// (a test binary re-executing itself would run its test suite again).
+/// Never a fork of the caller: a fork of a process with a device open would
+/// share its driver state. A program may re-execute itself (`brain` hosts
+/// models that way), as long as its arguments select a worker mode rather
+/// than its ordinary entry point.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorkerCommand {
     program: PathBuf,
@@ -105,6 +113,41 @@ impl std::fmt::Display for FaultKind {
     }
 }
 
+/// What a progress frame is handed to: its payload and the descriptors it carried.
+#[cfg(unix)]
+pub type OnProgress<'a> = dyn FnMut(&str, Vec<std::os::fd::OwnedFd>) + 'a;
+
+/// What one [`Worker::exchange`] carries beside its request line. The default
+/// is a plain request: no descriptors, no progress, no cancellation.
+#[derive(Default)]
+pub struct Exchange<'a> {
+    /// Descriptors sent with the request (sealed memfds holding its blobs).
+    #[cfg(unix)]
+    pub fds: &'a [std::os::fd::BorrowedFd<'a>],
+    /// Asked while the answer is pending; once it returns true, one
+    /// `<id> cancel` frame is sent. The worker decides what a cancellation
+    /// does; the request still gets exactly one answer.
+    pub cancelled: Option<&'a dyn Fn() -> bool>,
+    /// Called with each progress frame's payload and the descriptors it
+    /// carried, in the order they arrive.
+    #[cfg(unix)]
+    pub progress: Option<&'a mut OnProgress<'a>>,
+}
+
+/// A worker's answer to one [`Worker::exchange`].
+#[derive(Debug)]
+pub struct Reply {
+    /// `Ok(payload)` for `ok`, `Err(message)` for `err`.
+    pub result: Result<String, String>,
+    /// The descriptors the answer declared (`ok+<n>`), in order.
+    #[cfg(unix)]
+    pub fds: Vec<std::os::fd::OwnedFd>,
+}
+
+/// How often a pending answer looks whether its caller cancelled.
+#[cfg(unix)]
+const CANCEL_POLL: Duration = Duration::from_millis(10);
+
 /// What [`Worker::request`] returns instead of an answer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WorkerFailure {
@@ -124,8 +167,9 @@ pub struct Worker {
     sock: UnixStream,
     pid: u32,
     next_id: u64,
-    /// Bytes read past the last complete reply.
-    buf: Vec<u8>,
+    /// Bytes and descriptors read past the last complete frame.
+    #[cfg(unix)]
+    reader: crate::wire::Reader,
     reap_within: Duration,
     /// Set once the worker was killed: it never serves another request.
     terminated: bool,
@@ -157,7 +201,8 @@ impl Worker {
         // sees end of stream the moment the worker is gone.
         drop(command);
         let pid = child.id();
-        Ok(Worker { child: Some(child), sock, pid, next_id: 1, buf: Vec::new(), reap_within, terminated: false, status: None })
+        let reader = crate::wire::Reader::new(MAX_REPLY_BYTES);
+        Ok(Worker { child: Some(child), sock, pid, next_id: 1, reader, reap_within, terminated: false, status: None })
     }
 
     #[cfg(not(unix))]
@@ -189,67 +234,91 @@ impl Worker {
     /// [`WorkerFailure`] otherwise. Every [`WorkerFailure::Fault`] leaves the
     /// worker killed and, within the reap bound, reaped; it serves no further
     /// request.
-    #[cfg(unix)]
     pub fn request(&mut self, request: &str, deadline: Duration) -> Result<Result<String, String>, WorkerFailure> {
+        self.exchange(request, deadline, Exchange::default()).map(|reply| reply.result)
+    }
+
+    /// [`Self::request`] with what may cross the boundary beside the line:
+    /// descriptors sent with the request, progress frames handed to the
+    /// caller while the answer is pending, one `<id> cancel` frame once the
+    /// caller asks for it, and the descriptors the answer carries. The
+    /// deadline covers the whole exchange; progress does not extend it.
+    #[cfg(unix)]
+    pub fn exchange(&mut self, request: &str, deadline: Duration, mut x: Exchange<'_>) -> Result<Reply, WorkerFailure> {
         if self.terminated {
             return Err(WorkerFailure::Invalid(format!("worker {} was terminated by an earlier fault; start a new one", self.pid)));
         }
         if request.is_empty() || request.len() > MAX_REQUEST_BYTES || request.contains(['\n', '\r']) {
             return Err(WorkerFailure::Invalid(format!("a request must be one non-empty line of at most {MAX_REQUEST_BYTES} bytes")));
         }
+        if x.fds.len() > crate::wire::MAX_FDS {
+            return Err(WorkerFailure::Invalid(format!("a request carries at most {} descriptors", crate::wire::MAX_FDS)));
+        }
         let until = Instant::now() + deadline;
         let id = self.next_id;
         self.next_id += 1;
         let frame = format!("{id} {request}\n");
         let _ = self.sock.set_write_timeout(Some(deadline.max(Duration::from_millis(1))));
-        if let Err(e) = self.sock.write_all(frame.as_bytes()) {
-            let kind = match e.kind() {
-                ErrorKind::WouldBlock | ErrorKind::TimedOut => FaultKind::Wedged { deadline },
-                _ => FaultKind::Crashed { status: String::new() },
-            };
-            return Err(WorkerFailure::Fault(self.fail(kind)));
+        if let Err(e) = crate::wire::send(&self.sock, frame.as_bytes(), x.fds) {
+            return Err(WorkerFailure::Fault(self.fail(write_fault(&e, deadline))));
         }
+        let mut cancel_sent = false;
         loop {
-            match self.take_line() {
-                Ok(Some(line)) => match parse_reply(&line, id) {
-                    Reply::Stale => continue,
-                    Reply::Answer(answer) => return Ok(answer),
-                    Reply::Broken(detail) => return Err(WorkerFailure::Fault(self.fail(FaultKind::Protocol { detail }))),
-                },
-                Ok(None) => {}
+            let line = match self.reader.line() {
+                Ok(line) => line,
                 Err(detail) => return Err(WorkerFailure::Fault(self.fail(FaultKind::Protocol { detail }))),
+            };
+            if let Some(line) = line {
+                let (frame, fds) = parse_frame(&line, id);
+                let fds = match self.reader.take_fds(fds) {
+                    Ok(fds) => fds,
+                    Err(detail) => return Err(WorkerFailure::Fault(self.fail(FaultKind::Protocol { detail }))),
+                };
+                match frame {
+                    Frame::Stale => {}
+                    Frame::Progress(payload) => {
+                        if let Some(progress) = x.progress.as_mut() {
+                            progress(&payload, fds);
+                        }
+                    }
+                    Frame::Answer(result) => {
+                        if self.reader.unclaimed_fds() > 0 {
+                            let detail = format!("{} descriptor(s) arrived that no frame declared", self.reader.unclaimed_fds());
+                            return Err(WorkerFailure::Fault(self.fail(FaultKind::Protocol { detail })));
+                        }
+                        return Ok(Reply { result, fds });
+                    }
+                    Frame::Broken(detail) => return Err(WorkerFailure::Fault(self.fail(FaultKind::Protocol { detail }))),
+                }
+                continue;
+            }
+            if !cancel_sent && x.cancelled.is_some_and(|cancelled| cancelled()) {
+                cancel_sent = true;
+                if let Err(e) = crate::wire::send(&self.sock, format!("{id} cancel\n").as_bytes(), &[]) {
+                    return Err(WorkerFailure::Fault(self.fail(write_fault(&e, deadline))));
+                }
             }
             let left = until.saturating_duration_since(Instant::now());
             if left.is_zero() {
                 return Err(WorkerFailure::Fault(self.fail(FaultKind::Wedged { deadline })));
             }
-            let _ = self.sock.set_read_timeout(Some(left));
-            let mut chunk = [0u8; 64 * 1024];
-            match self.sock.read(&mut chunk) {
+            // While a cancellation may still be asked for, the wait wakes on a
+            // short period to look.
+            let wait = if x.cancelled.is_some() && !cancel_sent { left.min(CANCEL_POLL) } else { left };
+            let _ = self.sock.set_read_timeout(Some(wait));
+            match self.reader.fill(&self.sock) {
                 Ok(0) => return Err(WorkerFailure::Fault(self.fail(FaultKind::Crashed { status: String::new() }))),
-                Ok(n) => self.buf.extend_from_slice(&chunk[..n]),
-                Err(e) if e.kind() == ErrorKind::Interrupted => {}
+                Ok(_) => {}
                 Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
+                Err(e) if e.kind() == ErrorKind::InvalidData => return Err(WorkerFailure::Fault(self.fail(FaultKind::Protocol { detail: e.to_string() }))),
                 Err(_) => return Err(WorkerFailure::Fault(self.fail(FaultKind::Crashed { status: String::new() }))),
             }
         }
     }
 
     #[cfg(not(unix))]
-    pub fn request(&mut self, _request: &str, _deadline: Duration) -> Result<Result<String, String>, WorkerFailure> {
+    pub fn exchange(&mut self, _request: &str, _deadline: Duration, _x: Exchange<'_>) -> Result<Reply, WorkerFailure> {
         Err(WorkerFailure::Invalid("supervised device workers need a Unix host".into()))
-    }
-
-    /// The next complete line in the buffer, `Ok(None)` if there is none yet.
-    fn take_line(&mut self) -> Result<Option<String>, String> {
-        match self.buf.iter().position(|&b| b == b'\n') {
-            Some(end) => {
-                let line: Vec<u8> = self.buf.drain(..=end).collect();
-                String::from_utf8(line[..end].to_vec()).map(Some).map_err(|_| "a reply that is not UTF-8".to_string())
-            }
-            None if self.buf.len() > MAX_REPLY_BYTES => Err(format!("a reply longer than {MAX_REPLY_BYTES} bytes")),
-            None => Ok(None),
-        }
     }
 
     /// Kill and reap after a failure; fills a crash's exit status in.
@@ -337,30 +406,56 @@ fn set_parent_death_signal(command: &mut Command) {
 #[cfg(all(unix, not(target_os = "linux")))]
 fn set_parent_death_signal(_command: &mut Command) {}
 
-enum Reply {
-    /// An answer to an earlier request this worker gave up on.
+/// One frame read while a request is in flight.
+enum Frame {
+    /// A frame about an earlier request this worker gave up on.
     Stale,
+    /// `<id> progress[+<n>] <payload>` for the request in flight.
+    Progress(String),
+    /// `<id> ok[+<n>] <payload>` or `<id> err <message>`.
     Answer(Result<String, String>),
     Broken(String),
 }
 
-fn parse_reply(line: &str, want: u64) -> Reply {
+/// The frame `line` is, for the request `want`, and how many descriptors it
+/// declared (`ok+2`): those are taken off the reader whatever the frame is,
+/// so a later frame never takes an earlier one's.
+fn parse_frame(line: &str, want: u64) -> (Frame, usize) {
     let mut parts = line.splitn(3, ' ');
     let Some(id) = parts.next().and_then(|s| s.parse::<u64>().ok()) else {
-        return Reply::Broken(format!("no request id in {:?}", truncate(line)));
+        return (Frame::Broken(format!("no request id in {:?}", truncate(line))), 0);
+    };
+    let status = parts.next().unwrap_or("");
+    let payload = parts.next().unwrap_or("").to_string();
+    let (kind, fds) = match status.split_once('+') {
+        Some((kind, n)) => match n.parse::<usize>() {
+            Ok(n) if (1..=crate::wire::MAX_FDS).contains(&n) && kind != "err" => (kind, n),
+            _ => return (Frame::Broken(format!("status {:?} declares descriptors it may not carry", truncate(status))), 0),
+        },
+        None => (status, 0),
     };
     if id < want {
-        return Reply::Stale;
+        return (Frame::Stale, fds);
     }
     if id != want {
-        return Reply::Broken(format!("an answer to request {id} while {want} is in flight"));
+        return (Frame::Broken(format!("an answer to request {id} while {want} is in flight")), fds);
     }
-    let rest = parts.next().unwrap_or("");
-    let payload = parts.next().unwrap_or("").to_string();
-    match rest {
-        "ok" => Reply::Answer(Ok(payload)),
-        "err" => Reply::Answer(Err(payload)),
-        other => Reply::Broken(format!("status {:?} is neither ok nor err", truncate(other))),
+    let frame = match kind {
+        "ok" => Frame::Answer(Ok(payload)),
+        "err" => Frame::Answer(Err(payload)),
+        "progress" => Frame::Progress(payload),
+        other => Frame::Broken(format!("status {:?} is neither ok, err nor progress", truncate(other))),
+    };
+    (frame, fds)
+}
+
+/// The fault a failed write to the worker is: a full socket past the deadline
+/// is a wedge, anything else means the worker is gone.
+#[cfg(unix)]
+fn write_fault(e: &std::io::Error, deadline: Duration) -> FaultKind {
+    match e.kind() {
+        ErrorKind::WouldBlock | ErrorKind::TimedOut => FaultKind::Wedged { deadline },
+        _ => FaultKind::Crashed { status: String::new() },
     }
 }
 

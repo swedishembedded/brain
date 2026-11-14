@@ -15,7 +15,7 @@
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use gpu_supervisor::{BreakerPolicy, BreakerState, CallError, FaultKind, Health, Worker, WorkerCommand};
+use gpu_supervisor::{BreakerPolicy, BreakerState, CallError, Exchange, FaultKind, Health, Worker, WorkerCommand};
 
 /// The fake worker. `hang` sleeps in a child of the shell, so killing only the
 /// shell would leave the sleeper holding the socket: the group kill is what
@@ -29,6 +29,9 @@ while IFS= read -r line; do
     *crash*) kill -ABRT $$ ;;
     *garble*) echo "this is not a reply" ;;
     *fail*) echo "$id err the operation failed" ;;
+    *stream*) echo "$id progress {\"step\":1}"; echo "$id progress {\"step\":2}"; IFS= read -r c; echo "$id err got $c" ;;
+    *stale*) echo "$((id - 1)) progress {\"old\":true}"; echo "$id ok {}" ;;
+    *ghostfd*) echo "$id ok+1 {}" ;;
     *) echo "$id ok {\"done\":true}" ;;
   esac
 done
@@ -251,4 +254,47 @@ fn dropping_a_worker_terminates_and_reaps_it() {
     drop(w);
     assert_reaped_soon(pid);
     assert_group_gone(pid);
+}
+
+/// Progress frames reach the caller in order while the answer is pending,
+/// and a cancellation the caller asks for reaches the worker as one frame
+/// naming the request in flight; the request still gets its one answer.
+#[test]
+fn progress_reaches_the_caller_and_a_cancel_reaches_the_worker() {
+    let mut w = spawn();
+    let mut seen: Vec<String> = Vec::new();
+    let frames = std::cell::Cell::new(0usize);
+    let cancelled = || frames.get() >= 2;
+    let mut progress = |payload: &str, fds: Vec<std::os::fd::OwnedFd>| {
+        assert!(fds.is_empty(), "the fake sends no descriptors");
+        seen.push(payload.to_string());
+        frames.set(frames.get() + 1);
+    };
+    let x = Exchange { cancelled: Some(&cancelled), progress: Some(&mut progress), ..Exchange::default() };
+    let reply = w.exchange("run stream", Duration::from_secs(5), x).expect("the worker answers");
+    assert_eq!(reply.result, Err("got 1 cancel".to_string()), "the cancel frame names request 1");
+    assert_eq!(seen, [r#"{"step":1}"#, r#"{"step":2}"#]);
+}
+
+/// A progress frame about an earlier request is not handed to the current one.
+#[test]
+fn progress_of_an_earlier_request_is_discarded() {
+    let mut w = spawn();
+    w.request("run ok", Duration::from_secs(5)).expect("answered").expect("ok");
+    let mut seen = 0;
+    let mut progress = |_: &str, _: Vec<std::os::fd::OwnedFd>| seen += 1;
+    let x = Exchange { progress: Some(&mut progress), ..Exchange::default() };
+    let reply = w.exchange("run stale", Duration::from_secs(5), x).expect("answered");
+    assert_eq!(reply.result, Ok("{}".to_string()));
+    assert_eq!(seen, 0, "request 1's progress was given to request 2");
+}
+
+/// An answer that declares descriptors which never arrived is a broken
+/// worker, not an answer with fewer blobs.
+#[test]
+fn an_answer_declaring_descriptors_that_never_came_is_a_protocol_fault() {
+    let health = health();
+    let mut w = spawn();
+    let err = health.call(&"gpu0", &mut w, "run ghostfd", Duration::from_secs(5)).expect_err("a missing descriptor is not an answer");
+    assert!(matches!(&err, CallError::Fault(f) if matches!(f.kind, FaultKind::Protocol { .. })), "{err}");
 }
