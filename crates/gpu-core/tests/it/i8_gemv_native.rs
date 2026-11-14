@@ -21,10 +21,11 @@
 //!
 //! Shapes cover what the vector-load path can get wrong: `kg` that is not a
 //! whole number of the kernel's 64-word stride (tails), `n` that is not a
-//! multiple of the block's weight rows, every `m` the kernel serves, weight
-//! and activation bindings that start at a word offset which is not 16-byte
-//! aligned (the scalar-load path), output windows inside larger buffers, and
-//! the real Qwen3.8-27B projection widths.
+//! multiple of the block's weight rows, every `m` the kernel serves, windows
+//! inside larger buffers (a binding offset is a whole number of
+//! `backend_api::STORAGE_BINDING_OFFSET_ALIGN_BYTES`, so every bound window
+//! starts on the vector path's 16-byte boundary), and the real Qwen3.8-27B
+//! projection widths.
 //!
 //! From `kernels_cuda::I8_GEMV_MMA_MIN_ROWS` rows on a device with int8 tensor
 //! cores the native kernel runs its tensor-core block, which applies each
@@ -52,6 +53,11 @@ const NATIVE_ROWS: u32 = backend_api::select::DECODE_REGIME_MAX_ROWS;
 const WPG: usize = 8;
 /// Written around every window so an out-of-window write shows.
 const SENTINEL: u32 = 0x7fc0_dead;
+/// Words in one binding-offset unit: the finest start a bound window may have.
+const GRAIN: u64 = backend_api::STORAGE_BINDING_OFFSET_ALIGN_BYTES / 4;
+/// Window starts: every window at its buffer's start, and windows one to three
+/// binding-offset units in (x, w, sx, sw, out).
+const LEADS: [[u64; 5]; 2] = [[0; 5], [GRAIN, 2 * GRAIN, GRAIN, 3 * GRAIN, GRAIN]];
 
 fn is_cuda(gpu: &Gpu) -> bool {
     gpu.kind() == "cuda" && gpu.caps().arch.compute_capability.is_some()
@@ -225,7 +231,7 @@ fn the_native_kernel_is_selected_exactly_for_the_shapes_it_serves() {
 
 /// Byte-identical to the WGSL tier below `I8_GEMV_MMA_MIN_ROWS` rows (and at every row count on a
 /// device without int8 tensor cores), within f32 rounding above it, over tails, ragged `n`, and
-/// unaligned and aligned binding windows.
+/// windows at and inside a buffer's start.
 #[test]
 fn the_native_kernel_is_byte_identical_to_the_wgsl_tier() {
     let gpu = gpu_core::testgpu::dev(KERNELS);
@@ -237,14 +243,11 @@ fn the_native_kernel_is_byte_identical_to_the_wgsl_tier() {
     // 8 and 16 are shorter than one 64-word stride; 72 and 136 leave a
     // 16-byte-vector tail inside the last stride; 328 spans several strides
     // with a partial one.
-    let aligned = [0, 0, 0, 0, 0];
-    let ragged = [1, 3, 1, 2, 5];
-    let quad = [4, 4, 4, 4, 4];
     for (kg, n) in [(8u32, 1u32), (16, 7), (72, 9), (136, 129), (328, 33), (1280, 64)] {
         // Every row count of the first tile, then ones that end a tile, split
         // across tiles, leave a ragged last tile and fill the regime.
         for m in (1..=TILE_ROWS).chain([9, 12, 16, 17, 24, 31, NATIVE_ROWS]) {
-            for lead in [aligned, ragged, quad] {
+            for lead in LEADS {
                 let (got, want) = run(&gpu, &Case { m, kg, n, lead });
                 assert_native_agrees(
                     &gpu,
@@ -272,7 +275,7 @@ fn random_shapes_and_windows_are_byte_identical() {
         let m = 1 + r.next_u32() % NATIVE_ROWS;
         let kg = 8 * (1 + r.next_u32() % 200);
         let n = 1 + r.next_u32() % 100;
-        let lead = [0, 1, 2, 3, 4].map(|_| u64::from(r.next_u32() % 8));
+        let lead = [0; 5].map(|_: u64| u64::from(r.next_u32() % 4) * GRAIN);
         let (got, want) = run(&gpu, &Case { m, kg, n, lead });
         assert_native_agrees(&gpu, m, &got, &want, &format!("native int8 GEMV differs at m={m} kg={kg} n={n} lead={lead:?}"));
     }
@@ -483,7 +486,7 @@ fn every_candidate_of_the_slot_agrees_with_the_wgsl_reference() {
         gpu_core::force_candidate("matmul_i8_gemv", forced);
         for (kg, n) in [(16u32, 17u32), (72, 9), (328, 33), (1280, 64)] {
             for m in (1..=NATIVE_ROWS).step_by(3).chain([NATIVE_ROWS]) {
-                for lead in [[0u64; 5], [1, 2, 3, 1, 3], [4, 4, 4, 4, 4]] {
+                for lead in LEADS {
                     if let Some(name) = gpu.native_kernel_for(K_GEMV, &[m, kg, n]) {
                         served.insert(name);
                     }

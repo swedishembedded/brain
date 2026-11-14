@@ -17,9 +17,10 @@
 //! what the vector path and the nibble unpacking can get wrong: `K` shorter
 //! than one 16-lane stride and with a ragged last stride, `n` that is not a
 //! multiple of the block's weight rows, every `m` the kernel serves (staged
-//! and shared-memory rows of x, partial tiles), binding windows that start
-//! off a 16-byte boundary (the scalar path), the full signed nibble range, and
-//! the real Qwen3.8-27B projection widths and decode groups.
+//! and shared-memory rows of x, partial tiles), windows inside larger buffers
+//! (a binding offset is a whole number of
+//! `backend_api::STORAGE_BINDING_OFFSET_ALIGN_BYTES`), the full signed nibble
+//! range, and the real Qwen3.8-27B projection widths and decode groups.
 
 use backend_api::DeviceBuffer;
 use gpu_core::{Dispatch, Fused, Gpu};
@@ -32,6 +33,8 @@ const K_REF: usize = 1;
 const NATIVE_ROWS: u32 = backend_api::select::DECODE_REGIME_MAX_ROWS;
 /// Written around every window so an out-of-window write shows.
 const SENTINEL: u32 = 0x7fc0_dead;
+/// Words in one binding-offset unit: the finest start a bound window may have.
+const GRAIN: u64 = backend_api::STORAGE_BINDING_OFFSET_ALIGN_BYTES / 4;
 
 /// A CUDA device with native kernels not withheld (`set_native_kernels`).
 fn is_cuda(gpu: &Gpu) -> bool {
@@ -201,7 +204,7 @@ fn the_single_gemv_is_byte_identical_to_the_wgsl_tier() {
     // last stride; 2624 spans several with a partial one.
     for (k, n) in [(32u32, 1u32), (64, 7), (544, 9), (1088, 129), (2624, 33), (5120, 64)] {
         for m in (1..=8).chain([9, 12, 16, 17, 24, 31, NATIVE_ROWS]) {
-            for lead in [[0; 5], [1, 3, 1, 2, 5], [4; 5]] {
+            for lead in [[0; 5], [GRAIN, 3 * GRAIN, GRAIN, 2 * GRAIN, GRAIN]] {
                 run_single(&gpu, m, k, n, lead);
             }
         }
@@ -220,7 +223,7 @@ fn random_shapes_and_windows_are_byte_identical() {
         let m = 1 + r.next_u32() % NATIVE_ROWS;
         let k = 32 * (1 + r.next_u32() % 200);
         let n = 1 + r.next_u32() % 100;
-        let lead = [0; 5].map(|_: u64| u64::from(r.next_u32() % 8));
+        let lead = [0; 5].map(|_: u64| u64::from(r.next_u32() % 4) * GRAIN);
         run_single(&gpu, m, k, n, lead);
     }
 }
