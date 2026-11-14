@@ -1,0 +1,46 @@
+<!-- source-sha256: 06034274f2c6496c13dd09e8f2f25b3a8503bbebde8c40ddca48ed1ac9301dfc -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 420" width="640" height="420">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="640" height="420" fill="#ffffff"/>
+<line x1="120.67" y1="374" x2="120.67" y2="30" stroke="#edf2f7"/>
+<text x="120.67" y="390" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">2</text>
+<line x1="246" y1="374" x2="246" y2="30" stroke="#edf2f7"/>
+<text x="246" y="390" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">4</text>
+<line x1="371.33" y1="374" x2="371.33" y2="30" stroke="#edf2f7"/>
+<text x="371.33" y="390" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">6</text>
+<line x1="496.67" y1="374" x2="496.67" y2="30" stroke="#edf2f7"/>
+<text x="496.67" y="390" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">8</text>
+<line x1="622" y1="374" x2="622" y2="30" stroke="#edf2f7"/>
+<text x="622" y="390" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">10</text>
+<line x1="58" y1="374" x2="622" y2="374" stroke="#edf2f7"/>
+<text x="52" y="378" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
+<line x1="58" y1="307.85" x2="622" y2="307.85" stroke="#edf2f7"/>
+<text x="52" y="311.85" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">1</text>
+<line x1="58" y1="241.69" x2="622" y2="241.69" stroke="#edf2f7"/>
+<text x="52" y="245.69" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">2</text>
+<line x1="58" y1="175.54" x2="622" y2="175.54" stroke="#edf2f7"/>
+<text x="52" y="179.54" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">3</text>
+<line x1="58" y1="109.38" x2="622" y2="109.38" stroke="#edf2f7"/>
+<text x="52" y="113.38" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">4</text>
+<line x1="58" y1="43.23" x2="622" y2="43.23" stroke="#edf2f7"/>
+<text x="52" y="47.23" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">5</text>
+<rect x="58" y="30" width="564" height="344" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="564" height="344"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#2b6cb0" stroke-width="2.0" points="58,283.79 120.67,277.53 183.33,278.59 246,282.45 308.67,287.17 371.33,291.95 434,296.48 496.67,300.64 559.33,304.43 622,307.88"/><polyline fill="none" stroke="#2b6cb0" stroke-width="2.0" stroke-dasharray="6 4" points="58,286.25 120.67,307.71 183.33,321.48 246,330.95 308.67,337.75 371.33,342.81 434,346.68 496.67,349.72 559.33,352.17 622,354.18"/><polyline fill="none" stroke="#c05621" stroke-width="2.0" points="58,271.76 120.67,253.27 183.33,245.1 246,242.96 308.67,244.29 371.33,247.53 434,251.76 496.67,256.44 559.33,261.22 622,265.92"/><polyline fill="none" stroke="#c05621" stroke-width="2.0" stroke-dasharray="6 4" points="58,274.55 120.67,291.04 183.33,303.05 246,312.38 308.67,319.84 371.33,325.92 434,330.92 496.67,335.1 559.33,338.61 622,341.6"/><polyline fill="none" stroke="#2f855a" stroke-width="2.0" points="58,259.73 120.67,224.6 183.33,199 246,180.5 308.67,167.35 371.33,158.3 434,152.37 496.67,148.86 559.33,147.22 622,147.03"/><polyline fill="none" stroke="#2f855a" stroke-width="2.0" stroke-dasharray="6 4" points="58,262.85 120.67,271.34 183.33,277.67 246,283.01 308.67,287.72 371.33,291.99 434,295.9 496.67,299.5 559.33,302.84 622,305.95"/><line x1="58" y1="307.85" x2="622" y2="307.85" stroke="#a0aec0" stroke-dasharray="4 4"/></g>
+<text x="340" y="410" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">proposals per round, k</text>
+<text x="14" y="202" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 202)">tokens per unit of work</text>
+<text x="340" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">A small draft decoder: tokens per plain step of work</text>
+<rect x="66" y="38" width="172.52" height="112" rx="3" fill="#ffffff" fill-opacity="0.92" stroke="#cbd5e0"/>
+<line x1="74" y1="53" x2="94" y2="53" stroke="#2b6cb0" stroke-width="2"/>
+<text x="100" y="57" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">alpha 0.5, 1 sequence</text>
+<line x1="74" y1="70" x2="94" y2="70" stroke="#2b6cb0" stroke-width="2" stroke-dasharray="6 4"/>
+<text x="100" y="74" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">alpha 0.5, 32 sequences</text>
+<line x1="74" y1="87" x2="94" y2="87" stroke="#c05621" stroke-width="2"/>
+<text x="100" y="91" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">alpha 0.7, 1 sequence</text>
+<line x1="74" y1="104" x2="94" y2="104" stroke="#c05621" stroke-width="2" stroke-dasharray="6 4"/>
+<text x="100" y="108" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">alpha 0.7, 32 sequences</text>
+<line x1="74" y1="121" x2="94" y2="121" stroke="#2f855a" stroke-width="2"/>
+<text x="100" y="125" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">alpha 0.9, 1 sequence</text>
+<line x1="74" y1="138" x2="94" y2="138" stroke="#2f855a" stroke-width="2" stroke-dasharray="6 4"/>
+<text x="100" y="142" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">alpha 0.9, 32 sequences</text>
+</svg>

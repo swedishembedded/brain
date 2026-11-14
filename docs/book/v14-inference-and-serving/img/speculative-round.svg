@@ -1,0 +1,42 @@
+<!-- source-sha256: 288b6b48e83c4082179853e7000416f4165db29e213eba9e690e05599a71cc33 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 940 420" width="940" height="420"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="940" height="420" fill="#ffffff"/>
+<text x="110" y="64.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#4a5568" text-anchor="middle">draft proposes</text>
+<text x="110" y="171.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#4a5568" text-anchor="middle">rows of one</text>
+<text x="110" y="187.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#4a5568" text-anchor="middle">target pass</text>
+<text x="110" y="286.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#4a5568" text-anchor="middle">target&#x27;s best</text>
+<text x="110" y="302.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#4a5568" text-anchor="middle">token per row</text>
+<rect x="240" y="153" width="120" height="44" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="300" y="179.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">row 0: dog</text>
+<rect x="240" y="268" width="120" height="44" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="300" y="294.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">near</text>
+<line x1="300" y1="200" x2="300" y2="265" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="300" y="340.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">= d1, kept</text>
+<rect x="410" y="38" width="120" height="44" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="470" y="64.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">d1 = near</text>
+<rect x="410" y="153" width="120" height="44" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="470" y="179.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">row 1: near</text>
+<line x1="470" y1="85" x2="470" y2="150" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="410" y="268" width="120" height="44" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="470" y="294.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">the</text>
+<line x1="470" y1="200" x2="470" y2="265" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="470" y="340.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">= d2, kept</text>
+<rect x="580" y="38" width="120" height="44" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="640" y="64.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">d2 = the</text>
+<rect x="580" y="153" width="120" height="44" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="640" y="179.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">row 2: the</text>
+<line x1="640" y1="85" x2="640" y2="150" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="580" y="268" width="120" height="44" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="640" y="294.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">dog</text>
+<line x1="640" y1="200" x2="640" y2="265" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="640" y="340.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#c53030" text-anchor="middle">differs from d3</text>
+<rect x="750" y="38" width="120" height="44" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="810" y="64.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">d3 = fox</text>
+<rect x="750" y="153" width="120" height="44" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="810" y="179.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">row 3: fox</text>
+<line x1="810" y1="85" x2="810" y2="150" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="750" y="268" width="120" height="44" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="810" y="294.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">sees</text>
+<line x1="810" y1="200" x2="810" y2="265" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="810" y="340.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">not used</text>
+<text x="470" y="389.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">context `the dog`: 2 of 3 proposals accepted; the round emits `near the dog` for one target pass</text>
+</svg>

@@ -16,3 +16,4 @@ You can state how many copies of a model's weights a loader holds and why, read 
 1. [Loading Models](01-loading.md): how do gigabytes of weights get from disk to the device quickly and safely?
 2. [Memory Budgets and Model Residency](02-residency.md): how does a server decide which models live on which device when they do not all fit?
 3. [Managing the KV Cache](03-paged-kv.md): how do many conversations share one device's memory for their caches?
+5. [Speculative Decoding](05-speculative-decoding.md): how can a small model's guesses make a large model generate faster without changing its output?
