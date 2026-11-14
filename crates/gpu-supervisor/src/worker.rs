@@ -29,11 +29,11 @@
 //! ([`Worker::take_unreaped`]) for the caller to keep polling rather than
 //! waited on forever.
 //!
-//! The worker is started with `PR_SET_PDEATHSIG = SIGKILL`, so it cannot
-//! outlive a parent that crashes without running its destructors. Linux
-//! delivers that signal when the parent THREAD that spawned the worker exits,
-//! so a worker must be spawned on a thread that lives at least as long as the
-//! worker is used (a device lane, not a short-lived helper thread).
+//! On Linux the worker is started with `PR_SET_PDEATHSIG = SIGKILL`, so it
+//! cannot outlive a parent that crashes without running its destructors.
+//! Linux delivers that signal when the parent THREAD that spawned the worker
+//! exits, so a worker must be spawned on a thread that lives at least as long
+//! as the worker is used (a device lane, not a short-lived helper thread).
 
 use std::ffi::OsString;
 use std::io::{ErrorKind, Read, Write};
@@ -152,21 +152,7 @@ impl Worker {
         command.args(&cmd.args).stdin(Stdio::from(stdin)).stdout(Stdio::from(stdout)).stderr(Stdio::inherit());
         // Its own process group, so one kill reaches anything it started.
         command.process_group(0);
-        let parent = std::process::id() as libc::pid_t;
-        // SAFETY: the closure runs in the forked child before exec and calls
-        // only async-signal-safe functions (prctl, getppid, _exit).
-        unsafe {
-            command.pre_exec(move || {
-                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL as libc::c_ulong, 0, 0, 0) != 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                // The parent died between fork and prctl: nobody would ever kill this worker.
-                if libc::getppid() != parent {
-                    libc::_exit(1);
-                }
-                Ok(())
-            });
-        }
+        set_parent_death_signal(&mut command);
         let child = command.spawn()?;
         // The parent's copies of the worker's end close here, so the parent
         // sees end of stream the moment the worker is gone.
@@ -313,6 +299,33 @@ impl Drop for Worker {
         }
     }
 }
+
+/// Kill the worker when the parent thread that spawned it exits.
+#[cfg(target_os = "linux")]
+fn set_parent_death_signal(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    let parent = std::process::id() as libc::pid_t;
+    // SAFETY: the closure runs in the forked child before exec and calls
+    // only async-signal-safe functions (prctl, getppid, _exit).
+    unsafe {
+        command.pre_exec(move || {
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL as libc::c_ulong, 0, 0, 0) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            // The parent died between fork and prctl: nobody would ever kill this worker.
+            if libc::getppid() != parent {
+                libc::_exit(1);
+            }
+            Ok(())
+        });
+    }
+}
+
+/// Other Unix hosts have no parent-death hook: a worker whose parent died
+/// without running its destructors exits when it reads end of stream on its
+/// stdin, unless it is stuck in the driver, which only killing it ends.
+#[cfg(all(unix, not(target_os = "linux")))]
+fn set_parent_death_signal(_command: &mut Command) {}
 
 enum Reply {
     /// An answer to an earlier request this worker gave up on.
