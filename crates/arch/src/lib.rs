@@ -265,7 +265,8 @@ pub const ARCHS: &[Arch] = &[
     // -- Timeline -------------------------------------------------------
     arch!("horizon", "Horizon continuous-time subject-timeline model (time-to-event)", Timeline, Brain, "brain-horizon"),
     // -- Text decoders --------------------------------------------------
-    arch!("gpt2", "GPT-2 (nanoGPT parity baseline)", Text, LlamaCpp, "brain-gpt2", hf: &["GPT2LMHeadModel"], caps: Caps::NONE.other()),
+    // `families: &["gpt"]`: the family a brain-format GPT-2 checkpoint's card records.
+    arch!("gpt2", "GPT-2 (nanoGPT parity baseline)", Text, LlamaCpp, "brain-gpt2", hf: &["GPT2LMHeadModel"], families: &["gpt"], caps: Caps::NONE.other()),
     // "qwen3" is the real config.json `model_type` fallback value (used when
     // `architectures[0]` is absent), alongside the real `architectures[0]`
     // class name.
@@ -365,10 +366,12 @@ pub const ARCHS: &[Arch] = &[
     // capability matrix names the tests that back them (fp32 full fine-tune and LoRA).
     arch!("edgerock", "EdgeRock windowed hybrid GDN/GQA decoder with anchor memory (config variant of qwen35)", Text, Brain, "brain-qwen35", hf: &["EdgeRockForCausalLM", "edgerock"],
         caps: Caps::NONE.full_ft().lora(&[BaseTier::F32])),
+    // `families: &["glm"]`: `glmdsa::spec::CARD_FAMILY`.
     arch!("glmdsa", "GLM-5.2 (glm_moe_dsa: MLA + sigmoid noaux_tc MoE + DSA)", Text, LlamaCpp, "brain-glmdsa", hf: &["GlmMoeDsaForCausalLM", "glm_moe_dsa"],
-        caps: Caps::NONE.full_ft()),
+        families: &["glm"], caps: Caps::NONE.full_ft()),
     arch!("deepseek2", "DeepSeek-V2-family MoE decoder", Text, LlamaCpp, "brain-deepseek2"),
-    arch!("lfm2", "LiquidAI LFM2.5-Encoder", Text, LlamaCpp, "brain-lfm2", hf: &["Lfm2ForCausalLM"], default_ref: Some("LiquidAI/LFM2.5-350M"),
+    // `families: &["lfm"]`: `lfm2::spec::CARD_FAMILY`.
+    arch!("lfm2", "LiquidAI LFM2.5-Encoder", Text, LlamaCpp, "brain-lfm2", hf: &["Lfm2ForCausalLM"], default_ref: Some("LiquidAI/LFM2.5-350M"), families: &["lfm"],
         variants: &[
             Variant { reference: "LiquidAI/LFM2.5-230M", params: 229_693_184, quants: &["Q4_0", "Q4_K_M", "Q5_K_M", "Q6_K", "Q8_0"], license: None },
             Variant { reference: "LiquidAI/LFM2.5-350M", params: 354_500_000, quants: &["Q4_0", "Q4_K_M", "Q5_K_M", "Q6_K", "Q8_0"], license: None },
@@ -542,7 +545,8 @@ pub const ARCHS: &[Arch] = &[
           hf: &["MiniMaxMusic3ForConditionalGeneration"],
           default_ref: Some("MiniMaxAI/MiniMax-Music3")),
     // -- Vision: detection / segmentation / face / depth -------------------
-    arch!("yolov8", "YOLOv8-style anchor-free detector", Vision, Brain, "brain-yolov8", default_ref: Some("Ultralytics/YOLOv8")),
+    // `families: &["yolo"]`: the family a trained YOLOv8 checkpoint's card records.
+    arch!("yolov8", "YOLOv8-style anchor-free detector", Vision, Brain, "brain-yolov8", default_ref: Some("Ultralytics/YOLOv8"), families: &["yolo"]),
     // No `default_ref`: the only checkpoints are AGPL-derived exports that brain
     // never fetches on its own; a converted checkpoint is supplied by path or
     // from the local model store.
@@ -565,7 +569,8 @@ pub const ARCHS: &[Arch] = &[
     arch!("openseeface", "OpenSeeFace face detector and 66-point face landmarks", Vision, Brain, "brain-openseeface"),
     arch!("arcface", "ArcFace IResNet-100 face embedding", Vision, Brain, "brain-arcface"),
     arch!("clip", "CLIP-L / OpenCLIP-bigG / EVA-CLIP text+image towers", Vision, LlamaCpp, "brain-clip"),
-    arch!("zipdepth", "ZipDepth monocular depth (pure-conv)", Vision, Brain, "brain-zipdepth"),
+    // `families: &["depth"]`: the family a trained ZipDepth checkpoint's card records.
+    arch!("zipdepth", "ZipDepth monocular depth (pure-conv)", Vision, Brain, "brain-zipdepth", families: &["depth"]),
     // `trunk` and `heads` are resolved through `crates/lpips/src/spec.rs`.
     arch!("lpips", "LPIPS (AlexNet) perceptual image distance", Vision, Brain, "brain-lpips"),
     // No GGUF/llama.cpp conversion exists upstream for Florence-2 (an open,
@@ -946,6 +951,10 @@ mod tests {
         // and an unknown string must still resolve to nothing.
         assert_eq!(by_family("zimage").map(|a| a.id), Some("s3dit"));
         assert_eq!(by_family("s3dit").map(|a| a.id), Some("s3dit"));
+        // The family each crate writes on its own trained checkpoint's card.
+        for (family, id) in [("gpt", "gpt2"), ("glm", "glmdsa"), ("lfm", "lfm2"), ("yolo", "yolov8"), ("depth", "zipdepth"), ("qwen", "qwen3")] {
+            assert_eq!(by_family(family).map(|a| a.id), Some(id), "card family {family}");
+        }
         assert_eq!(by_family("totally-unknown"), None);
     }
 
