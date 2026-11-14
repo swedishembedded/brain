@@ -180,6 +180,7 @@ struct MockAsrInstance;
 
 impl Instance for MockAsrInstance {
     fn run(&mut self, action: &str, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         if action != "transcribe" {
             return Err(format!("mock-asr: unknown action '{action}'"));
         }

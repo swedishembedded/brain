@@ -44,9 +44,10 @@ impl NemotronAsr {
     }
 
     /// Transcribe a 16 kHz mono waveform → emitted RNN-T token ids (non-blank).
-    /// `prompt_id` selects the language prompt.
-    pub fn transcribe(&self, wav: &[f32], prompt_id: usize) -> Vec<u32> {
-        self.enc.transcribe(wav, prompt_id)
+    /// `prompt_id` selects the language prompt; `cancel` as in
+    /// [`Encoder::transcribe`].
+    pub fn transcribe(&self, wav: &[f32], prompt_id: usize, cancel: &capability::CancelToken) -> Result<Vec<u32>, String> {
+        self.enc.transcribe(wav, prompt_id, cancel)
     }
 }
 
@@ -70,7 +71,7 @@ mod tests {
         let model = NemotronAsr::from_hf_on(&ckpt, cfg, gpu_core::testgpu::dev(encoder_pipelines())).expect("load");
 
         let t0 = std::time::Instant::now();
-        let toks = model.transcribe(&wav.samples, 0); // prompt 0 = en
+        let toks = model.transcribe(&wav.samples, 0, &capability::CancelToken::default()).expect("transcribe"); // prompt 0 = en
         let dt = t0.elapsed();
 
         let mut f = std::fs::File::open(format!("{gold}/output_ids.f32")).unwrap();

@@ -98,13 +98,13 @@ impl TranscribePipeline {
         match &self.backend {
             Backend::Qwen3Asr(provider) => {
                 let truncated = qwen3asr::caps::window_truncation(provider.window_samples(), samples);
-                let (text, tokens) = provider.transcribe(samples).map_err(Error::Backend)?;
+                let (text, tokens) = provider.transcribe(samples, &capability::CancelToken::default(), &mut |_| {}).map_err(Error::Backend)?;
                 Ok(Transcript { text, tokens, truncated })
             }
             Backend::Nemotron(n) => {
                 let (model, detokenizer) = (&n.model, &n.detokenizer);
                 let blank = model.config().blank_token_id;
-                let tokens: Vec<u32> = model.transcribe(samples, NEMOTRON_ENGLISH_PROMPT).into_iter().filter(|&t| t != blank).collect();
+                let tokens: Vec<u32> = model.transcribe(samples, NEMOTRON_ENGLISH_PROMPT, &capability::CancelToken::default()).map_err(Error::Backend)?.into_iter().filter(|&t| t != blank).collect();
                 Ok(Transcript { text: detokenizer.decode(&tokens), tokens, truncated: None })
             }
         }

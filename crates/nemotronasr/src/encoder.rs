@@ -17,6 +17,7 @@
 
 use std::collections::HashMap;
 
+use capability::CancelToken;
 use gpu_core::{DeviceBuffer, Gpu};
 
 use crate::config::NemotronConfig;
@@ -535,7 +536,12 @@ impl Encoder {
     /// is batched across all utterances (one `encode_batch`); the RNN-T greedy decode
     /// runs per stream (its length is data-dependent). This is the resident adapter's
     /// batched path for concurrent streams.
-    pub fn transcribe_batch(&self, wavs: &[&[f32]], prompt_id: usize) -> Vec<Vec<u32>> {
+    ///
+    /// `cancels[i]` is stream `i`'s token: its decode stops at the next frame
+    /// once it fires, and its slot is `Err(`[`capability::failure::CANCELLED`]`)`;
+    /// the other streams run on.
+    pub fn transcribe_batch(&self, wavs: &[&[f32]], cancels: &[&CancelToken], prompt_id: usize) -> Vec<Result<Vec<u32>, String>> {
+        assert_eq!(wavs.len(), cancels.len(), "one token per stream");
         if wavs.is_empty() {
             return Vec::new();
         }
@@ -548,7 +554,7 @@ impl Encoder {
             .collect();
         let refs: Vec<(&[f32], u32, u32)> = mels.iter().map(|(m, t, v)| (m.as_slice(), *t, *v)).collect();
         let encoded = self.encode_batch(&refs, prompt_id);
-        encoded.iter().map(|(pool, valid)| self.rnnt_greedy(pool, *valid as usize)).collect()
+        encoded.iter().zip(cancels).map(|((pool, valid), cancel)| self.rnnt_greedy_until(pool, *valid as usize, cancel)).collect()
     }
 
     /// Transcribe a 16 kHz mono waveform → emitted RNN-T token ids (non-blank),
@@ -556,7 +562,12 @@ impl Encoder {
     /// `prompt_id` selects the language prompt. This is the shared entry point for
     /// both the one-shot [`crate::model::NemotronAsr`] and the resident/served
     /// instance — front end → device encoder → RNN-T greedy decode.
-    pub fn transcribe(&self, wav: &[f32], prompt_id: usize) -> Vec<u32> {
+    ///
+    /// `cancel` is checked before the front end and polled per encoded frame
+    /// of the decode; once it fires the call returns
+    /// `Err(`[`capability::failure::CANCELLED`]`)`.
+    pub fn transcribe(&self, wav: &[f32], prompt_id: usize, cancel: &CancelToken) -> Result<Vec<u32>, String> {
+        cancel.check()?;
         // front end (matches HF: preemphasis, 512-fft/400-win, log-mel 128, no norm)
         let (mel, t, _nmel) = audio::asr_frontend::nemotron_logmel(wav);
         let mel_valid = wav.len() as u32 / 160; // floor(L/hop) — the extractor's valid length
@@ -566,7 +577,7 @@ impl Encoder {
             eprintln!("  encode: {:?}", te.elapsed());
         }
         let td = std::time::Instant::now();
-        let out = self.rnnt_greedy(&pooler, valid as usize);
+        let out = self.rnnt_greedy_until(&pooler, valid as usize, cancel);
         if std::env::var("NEM_TIMING").is_ok() {
             eprintln!("  decode: {:?}", td.elapsed());
         }
@@ -579,24 +590,34 @@ impl Encoder {
     /// the frontend + RNN-T decode stay host-side. Bit-identical to `transcribe`
     /// when the closure reproduces `encode` (the ONNX graph is parity-gated to
     /// cosine 1.0 vs the device encoder), so `brain serve --dbus --device …,npu`
-    /// gives the same tokens on the NPU.
-    pub fn transcribe_with_encoder<F>(&self, wav: &[f32], prompt_id: usize, encode: F) -> Vec<u32>
+    /// gives the same tokens on the NPU. `cancel` as in [`transcribe`](Self::transcribe).
+    pub fn transcribe_with_encoder<F>(&self, wav: &[f32], prompt_id: usize, cancel: &CancelToken, encode: F) -> Result<Vec<u32>, String>
     where
         F: FnOnce(&[f32], u32, u32, usize) -> (Vec<f32>, u32),
     {
+        cancel.check()?;
         let (mel, t, _nmel) = audio::asr_frontend::nemotron_logmel(wav);
         let mel_valid = wav.len() as u32 / 160;
         let (pooler, valid) = encode(&mel, t as u32, mel_valid, prompt_id);
-        self.rnnt_greedy(&pooler, valid as usize)
+        self.rnnt_greedy_until(&pooler, valid as usize, cancel)
+    }
+
+    /// [`rnnt_greedy`](Self::rnnt_greedy) polling `cancel` after every frame:
+    /// `Err(`[`capability::failure::CANCELLED`]`)` once it fires.
+    fn rnnt_greedy_until(&self, pooler: &[f32], valid: usize, cancel: &CancelToken) -> Result<Vec<u32>, String> {
+        let tokens = self.rnnt_greedy(pooler, valid, &mut |_| !cancel.is_cancelled());
+        cancel.check()?;
+        Ok(tokens)
     }
 
     /// RNN-T greedy transducer decode over an encoded `pooler` `[T, decoder_hidden]`.
     /// LSTM prediction net runs host-side (m=1 steps); the joint head is on device.
     /// One implementation with the streaming path: a fresh [`DecodeState`] stepped
-    /// over every frame.
-    pub(crate) fn rnnt_greedy(&self, pooler: &[f32], valid: usize) -> Vec<u32> {
+    /// over every frame. `keep_going(frame)` is asked after each frame is
+    /// decoded; `false` ends the decode there.
+    pub(crate) fn rnnt_greedy(&self, pooler: &[f32], valid: usize, keep_going: &mut dyn FnMut(usize) -> bool) -> Vec<u32> {
         let mut st = DecodeState::new(self, self.cfg.blank_token_id);
-        st.step_frames(self, pooler, valid);
+        st.step_frames(self, pooler, valid, keep_going);
         st.emitted
     }
 }
@@ -622,7 +643,9 @@ impl DecodeState {
     /// Greedy-decode `n` new pooler frames `[n, decoder_hidden]`, appending emitted
     /// tokens. Each frame's blank-terminated inner loop completes within the call,
     /// so state carried across calls is exactly (LSTM state, decoder output, tokens).
-    pub(crate) fn step_frames(&mut self, enc: &Encoder, pooler: &[f32], n: usize) {
+    /// `keep_going(frame)` is asked after each finished frame; `false` stops
+    /// the decode at that frame boundary.
+    pub(crate) fn step_frames(&mut self, enc: &Encoder, pooler: &[f32], n: usize, keep_going: &mut dyn FnMut(usize) -> bool) {
         let cfg = *enc.config();
         let dh = cfg.decoder_hidden as usize;
         let blank = cfg.blank_token_id;
@@ -633,6 +656,9 @@ impl DecodeState {
             if token == blank || symbols >= cfg.max_symbols_per_step {
                 frame += 1;
                 symbols = 0;
+                if !keep_going(frame) {
+                    return;
+                }
             } else {
                 self.emitted.push(token);
                 symbols += 1;

@@ -90,13 +90,34 @@ mod tests {
 
         let audio_s = mel.len() as f32 / 128.0 * 0.01; // ~frames*10ms
         let t0 = std::time::Instant::now();
-        let out = model.transcribe(&input_ids, &audio_embeds, &[151643, 151645], 64);
+        let out = model.transcribe(&input_ids, &audio_embeds, &[151643, 151645], 64, &mut |_| true);
         let dt = t0.elapsed();
         eprintln!("transcribe (KV): {} tokens in {:?} (prompt {} + gen)", out.len(), dt, input_ids.len());
         let _ = audio_s;
         eprintln!("brain out ({} tok): {:?}", out.len(), out);
         eprintln!("ref   out ({} tok): {:?}", ref_out.len(), ref_out);
         assert_eq!(out, ref_out, "greedy token sequence must match HF exactly");
+    }
+
+    /// The served `transcribe` on the real checkpoint polls its token per
+    /// decoded token: fired before the call it takes no lock and decodes
+    /// nothing; fired at the first decoded token, the decode stops at the next.
+    #[test]
+    #[ignore = "slow: loads the 1.7B checkpoint + KV-cache decode (~minutes; bandwidth-bound)"]
+    fn a_transcription_stops_at_the_token_its_cancel_fires() {
+        use capability::Provider;
+        let CKPT = crate::model_dir("Qwen/Qwen3-ASR-1.7B").unwrap_or_default();
+        let wav_path = crate::testdata("asr/audio/librispeech_mr_quilter.wav");
+        if !have(&format!("{CKPT}/model.safetensors")) || !have(&wav_path) {
+            brain_testutil::skip("Qwen/Qwen3-ASR-1.7B or asr/audio/librispeech_mr_quilter.wav absent (run `make testdata/fetch`)");
+            return;
+        }
+        let provider = caps::QwenAsrProvider::load(&CKPT, QwenAsrConfig::qwen3_asr_1_7b(), 10.0, 64).expect("load");
+        let action = provider.action("transcribe").expect("transcribe");
+        let wav = audio::wav::read(&wav_path).expect("wav");
+        let pcm: Vec<u8> = wav.samples.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let make = || capability::Invocation::new().blob("audio", capability::Blob::new(capability::Media::Audio, pcm.clone()).with_meta(serde_json::json!({"sample_rate": 16000})));
+        capability_mock::cancellation::certify("qwen3asr transcribe", &make, &|inv, p| action.run(inv, p), capability_mock::cancellation::Bound { fire_after: 3, within: 1 });
     }
 
     /// Full audio encoder + projector parity against the dumped HF activations.

@@ -146,7 +146,10 @@ impl Qwen3Asr {
     /// audio-placeholder run the projected audio embeddings are injected as raw
     /// rows (no re-embedding of the placeholder id). The LM head runs on the
     /// device.
-    pub fn transcribe(&self, input_ids: &[u32], audio_embeds: &[f32], eos: &[u32], max_new: usize) -> Vec<u32> {
+    ///
+    /// `keep_going(n)` is asked after each of the `n` kept tokens; `false`
+    /// ends the decode there, before the next decoder step.
+    pub fn transcribe(&self, input_ids: &[u32], audio_embeds: &[f32], eos: &[u32], max_new: usize, keep_going: &mut dyn FnMut(usize) -> bool) -> Vec<u32> {
         let d = self.cfg.text.d_model as usize;
         assert_eq!(audio_embeds.len(), self.n_audio as usize * d, "audio_embeds shape");
         self.decoder.reset_cache();
@@ -172,7 +175,7 @@ impl Qwen3Asr {
         while out.len() < max_new {
             let next = argmax(&self.decoder.decode_logits());
             out.push(next);
-            if eos.contains(&next) {
+            if eos.contains(&next) || !keep_going(out.len()) {
                 break;
             }
             self.decoder.step(next);

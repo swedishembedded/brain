@@ -17,7 +17,7 @@
 use std::sync::{Arc, Mutex};
 
 use audio::asr_caps::{transcription_outcome, wav_from_blob};
-use capability::{Action, ActionResult, ActionSpec, Invocation, Manifest, ParamSpec, ParamType, Progress, Provider};
+use capability::{Action, ActionResult, ActionSpec, CancelToken, Invocation, Manifest, ParamSpec, ParamType, Progress, Provider};
 use data::qwen_tokenizer::QwenBpe;
 use data::tokenizer::Tokenizer;
 
@@ -157,8 +157,9 @@ impl QwenAsrProvider {
     }
 
     /// Transcribe one waveform (padded/truncated to the window) → text + token ids.
-    pub fn transcribe(&self, wav: &[f32]) -> Result<(String, Vec<u32>), String> {
-        self.inner.transcribe(wav)
+    /// See [`QwenAsrInner::transcribe`] for `cancel` and `progress`.
+    pub fn transcribe(&self, wav: &[f32], cancel: &CancelToken, progress: &mut dyn FnMut(Progress)) -> Result<(String, Vec<u32>), String> {
+        self.inner.transcribe(wav, cancel, progress)
     }
 
     /// The fixed decode window in samples (16 kHz) — callers use this to
@@ -183,41 +184,53 @@ impl QwenAsrProvider {
     /// [`transcribe`](Self::transcribe) with the audio-encoder HEAD run by a closure
     /// — the seam the NPU resident uses to run the audio-tower ONNX head on the
     /// Intel NPU while the conv stem + Qwen decoder stay on the device backend.
-    pub fn transcribe_with_head<F>(&self, wav: &[f32], head: F) -> Result<(String, Vec<u32>), String>
+    pub fn transcribe_with_head<F>(&self, wav: &[f32], cancel: &CancelToken, progress: &mut dyn FnMut(Progress), head: F) -> Result<(String, Vec<u32>), String>
     where
         F: FnOnce(&[f32], u32, &[(u32, u32)]) -> (Vec<f32>, Vec<f32>),
     {
-        self.inner.transcribe_with_head(wav, head)
+        self.inner.transcribe_with_head(wav, cancel, progress, head)
     }
 }
 
 impl QwenAsrInner {
     /// The shared transcribe path (also used by the resident adapter).
-    pub fn transcribe(&self, wav: &[f32]) -> Result<(String, Vec<u32>), String> {
+    ///
+    /// `cancel` is checked before the model lock is taken and polled after
+    /// every decoded token, each of which is reported through `progress`;
+    /// once it fires the call returns `Err(`[`capability::failure::CANCELLED`]`)`
+    /// and the lock is released.
+    pub fn transcribe(&self, wav: &[f32], cancel: &CancelToken, progress: &mut dyn FnMut(Progress)) -> Result<(String, Vec<u32>), String> {
+        cancel.check()?;
         let (mel, valid) = window_features(wav, self.window_samples);
         let model = self.model.lock().map_err(|_| "qwen-asr: model lock poisoned")?;
         let embeds = model.encode_audio(&mel, valid);
-        self.decode(&model, &embeds)
+        self.decode(&model, &embeds, cancel, progress)
     }
 
     /// [`transcribe`](Self::transcribe) with the audio-encoder head supplied by a
     /// closure (the NPU path); everything else — window padding, frontend, decoder,
     /// detok — is identical.
-    pub fn transcribe_with_head<F>(&self, wav: &[f32], head: F) -> Result<(String, Vec<u32>), String>
+    pub fn transcribe_with_head<F>(&self, wav: &[f32], cancel: &CancelToken, progress: &mut dyn FnMut(Progress), head: F) -> Result<(String, Vec<u32>), String>
     where
         F: FnOnce(&[f32], u32, &[(u32, u32)]) -> (Vec<f32>, Vec<f32>),
     {
+        cancel.check()?;
         let (mel, valid) = window_features(wav, self.window_samples);
         let model = self.model.lock().map_err(|_| "qwen-asr: model lock poisoned")?;
         let embeds = model.encode_audio_with_head(&mel, valid, head);
-        self.decode(&model, &embeds)
+        self.decode(&model, &embeds, cancel, progress)
     }
 
     /// Splice the audio embeds into the Qwen decoder, greedy-decode, and detok —
     /// the tail shared by [`transcribe`](Self::transcribe) and
     /// [`transcribe_with_head`](Self::transcribe_with_head).
-    fn decode(&self, model: &crate::model::Qwen3Asr, embeds: &[f32]) -> Result<(String, Vec<u32>), String> {
-        let out = model.transcribe(&self.input_ids, embeds, &EOS, self.max_new);
+    fn decode(&self, model: &crate::model::Qwen3Asr, embeds: &[f32], cancel: &CancelToken, progress: &mut dyn FnMut(Progress)) -> Result<(String, Vec<u32>), String> {
+        let max_new = self.max_new as u32;
+        let out = model.transcribe(&self.input_ids, embeds, &EOS, self.max_new, &mut |n| {
+            progress(Progress::step(n as u32, max_new, "decoding"));
+            !cancel.is_cancelled()
+        });
+        cancel.check()?;
         // strip trailing EOS before detok
         let trimmed: Vec<u32> = out.iter().copied().take_while(|t| !EOS.contains(t)).collect();
         // The model emits a `language <Lang><asr_text>` preamble before the words
@@ -247,6 +260,7 @@ impl Action for TranscribeAction {
         transcribe_spec()
     }
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         let blob = inv.get_blob("audio").ok_or("qwen-asr transcribe: missing 'audio' input")?;
         let wav = wav_from_blob(blob)?;
         let truncated = window_truncation(self.inner.window_samples, &wav);
@@ -254,7 +268,7 @@ impl Action for TranscribeAction {
             progress(Progress::step(0, 1, format!("warning: audio is {total:.1}s but the decode window is {window:.1}s -- transcribing only the first {window:.1}s (raise window_secs)")));
         }
         progress(Progress::step(0, 1, "transcribing"));
-        let (text, tokens) = self.inner.transcribe(&wav)?;
+        let (text, tokens) = self.inner.transcribe(&wav, &inv.cancel, progress)?;
         progress(Progress::step(1, 1, text.clone()));
         Ok(transcription_outcome(text, &tokens).set("truncated", serde_json::json!(truncated.is_some())))
     }

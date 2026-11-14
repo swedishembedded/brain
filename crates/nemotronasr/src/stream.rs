@@ -372,7 +372,7 @@ impl Encoder {
             #[cfg(test)]
             st.pooler_log.extend_from_slice(&pooler);
             let before = st.dec.emitted.len();
-            st.dec.step_frames(self, &pooler, r);
+            st.dec.step_frames(self, &pooler, r, &mut |_| true);
             out[idx] = st.dec.emitted[before..].to_vec();
             st.pend.drain(..r * c);
             st.pos += r;
@@ -712,7 +712,7 @@ mod tests {
         let mel = r.vec_scaled(t * nm, 1.0);
 
         let (pooler, valid) = enc.encode(&mel, t as u32, t as u32, 0);
-        let tokens = enc.rnnt_greedy(&pooler, valid as usize);
+        let tokens = enc.rnnt_greedy(&pooler, valid as usize, &mut |_| true);
 
         let mut st = enc.stream_new(0);
         let mut got = Vec::new();
@@ -744,6 +744,32 @@ mod tests {
         assert!(!tokens.is_empty(), "tiny model should emit something");
         assert_eq!(got, tokens, "streamed tokens == offline tokens");
         assert_eq!(st.tokens(), &tokens[..], "state history matches");
+    }
+
+    /// The offline decode polls its token once per encoded frame: a token
+    /// fired before the call refuses it, and one fired at a frame boundary
+    /// stops the decode there (the served `transcribe` drives this loop through
+    /// `Encoder::transcribe`, whose 128-bin front end the tiny config cannot
+    /// take, so the encoder runs on random mel frames here).
+    #[test]
+    fn the_offline_decode_stops_at_the_frame_its_token_fires() {
+        let cfg = tiny_cfg();
+        let w = tiny_weights(&cfg);
+        let g = gpu_core::testgpu::dev(encoder_pipelines());
+        let enc = Encoder::new(g, cfg, &w);
+        let t = 160usize;
+        let mel = Lcg::new(random_seed()).vec_scaled(t * cfg.num_mel_bins as usize, 1.0);
+        let run = |inv: &capability::Invocation, progress: &mut dyn FnMut(capability::Progress)| -> capability::ActionResult {
+            inv.cancel.check()?;
+            let (pooler, valid) = enc.encode(&mel, t as u32, t as u32, 0);
+            enc.rnnt_greedy(&pooler, valid as usize, &mut |frame| {
+                progress(capability::Progress::step(frame as u32, valid, "frame"));
+                !inv.cancel.is_cancelled()
+            });
+            inv.cancel.check()?;
+            Ok(capability::Outcome::new())
+        };
+        capability_mock::cancellation::certify("nemotronasr transcribe decode", &capability::Invocation::new, &run, capability_mock::cancellation::Bound::ONE_STEP);
     }
 
     /// Batched streaming (two concurrent streams stepped together) must equal each
@@ -806,7 +832,7 @@ mod tests {
         let g = gpu_core::testgpu::dev(encoder_pipelines());
         let enc = Encoder::new(g, cfg, &w);
 
-        let offline = enc.transcribe(&wav.samples, 0);
+        let offline = enc.transcribe(&wav.samples, 0, &capability::CancelToken::default()).expect("transcribe");
 
         let mut st = enc.stream_new(0);
         let mut got = Vec::new();

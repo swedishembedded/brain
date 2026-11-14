@@ -225,7 +225,9 @@ impl Action for TranscribeStreamAction {
     fn spec(&self) -> ActionSpec {
         transcribe_stream_spec()
     }
+    /// One bounded window: checked on entry only.
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         let (id, wav, prompt_id, eos) = stream_job_from_inv(inv)?;
         progress(Progress::step(0, 1, format!("stream {id}: {} samples", wav.len())));
         let mut sessions = self.sessions.lock().map_err(|_| "nemotron stream sessions poisoned".to_string())?;
@@ -243,11 +245,12 @@ impl Action for TranscribeAction {
         transcribe_spec()
     }
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         let blob = inv.get_blob("audio").ok_or("nemotron transcribe: missing 'audio' input")?;
         let wav = wav_from_blob(blob)?;
         let prompt_id = inv.get_i64("prompt_id").unwrap_or(0).max(0) as usize;
         progress(Progress::step(0, 1, "transcribing"));
-        let tokens = self.model.transcribe(&wav, prompt_id);
+        let tokens = self.model.transcribe(&wav, prompt_id, &inv.cancel)?;
         let text = self.detok.decode(&tokens);
         progress(Progress::step(1, 1, text.clone()));
         Ok(transcription_outcome(text, &tokens))
@@ -291,7 +294,7 @@ mod tests {
         let enc = Encoder::new(gpu_core::testgpu::dev(encoder_pipelines()), cfg, &w);
         let detok = Detokenizer::from_hf(&ckpt).expect("detok");
 
-        let offline_text = detok.decode(&enc.transcribe(&wav.samples, 0));
+        let offline_text = detok.decode(&enc.transcribe(&wav.samples, 0, &capability::CancelToken::default()).expect("transcribe"));
 
         let mut sessions = StreamSessions::new();
         let mut text = String::new();

@@ -26,6 +26,7 @@ pub fn transcribe_spec() -> ActionSpec {
         .input(BlobSpec::new("audio", Media::Audio, "raw mono f32 little-endian PCM at 16 kHz").required())
         .output(BlobSpec::new("text", Media::Text, "the transcription"))
         .streaming()
+        .cancellable()
 }
 
 /// The `transcribe_stream` action schema: one window of a live session. `stream`
@@ -42,6 +43,7 @@ pub fn transcribe_stream_spec() -> ActionSpec {
         .input(BlobSpec::new("audio", Media::Audio, "raw mono f32 little-endian PCM at 16 kHz (may be absent on the final eos call)"))
         .output(BlobSpec::new("text", Media::Text, "text newly emitted by this window"))
         .streaming()
+        .cancellable()
 }
 
 /// The sample rate every brain ASR front end is fixed at, and the rate the

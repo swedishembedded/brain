@@ -153,11 +153,12 @@ impl NemotronNpuInstance {
 
 impl Instance for NemotronNpuInstance {
     fn run(&mut self, _action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         let blob = inv.get_blob("audio").ok_or("nemotron transcribe: missing 'audio' input")?;
         let wav = wav_from_blob(blob)?;
         let prompt_id = inv.get_i64("prompt_id").unwrap_or(0).max(0) as usize;
         progress(Progress::step(0, 1, "transcribing (NPU encoder)"));
-        let toks = self.model.encoder().transcribe_with_encoder(&wav, prompt_id, |mel, t, mv, pid| self.npu_encode(mel, t, mv, pid));
+        let toks = self.model.encoder().transcribe_with_encoder(&wav, prompt_id, &inv.cancel, |mel, t, mv, pid| self.npu_encode(mel, t, mv, pid))?;
         let text = self.detok.decode(&toks);
         progress(Progress::step(1, 1, text.clone()));
         let mut out = transcription_outcome(text, &toks);
@@ -198,6 +199,11 @@ impl Instance for NemotronInstance {
         let mut results: Vec<Option<ActionResult>> = vec![None; invs.len()];
         let mut jobs: Vec<(usize, StreamJob)> = Vec::new();
         for (i, inv) in invs.iter().enumerate() {
+            // One bounded window per job: checked on entry only.
+            if let Err(e) = inv.cancel.check() {
+                results[i] = Some(Err(e));
+                continue;
+            }
             match nemotronasr::caps::stream_job_from_inv(inv) {
                 Ok(j) => jobs.push((i, j)),
                 Err(e) => results[i] = Some(Err(e)),
@@ -224,7 +230,7 @@ impl NemotronInstance {
         let mut pids: Vec<usize> = Vec::with_capacity(invs.len());
         let mut errs: Vec<Option<String>> = Vec::with_capacity(invs.len());
         for inv in invs {
-            match inv.get_blob("audio").ok_or_else(|| "nemotron transcribe: missing 'audio' input".to_string()).and_then(wav_from_blob) {
+            match inv.cancel.check().and_then(|()| inv.get_blob("audio").ok_or_else(|| "nemotron transcribe: missing 'audio' input".to_string())).and_then(wav_from_blob) {
                 Ok(w) => {
                     pids.push(inv.get_i64("prompt_id").unwrap_or(0).max(0) as usize);
                     wavs.push(w);
@@ -243,7 +249,7 @@ impl NemotronInstance {
         }
 
         // 2. group valid jobs by prompt_id; batch-encode each group.
-        let mut tokens_by_job: Vec<Option<Vec<u32>>> = vec![None; invs.len()];
+        let mut tokens_by_job: Vec<Option<Result<Vec<u32>, String>>> = vec![None; invs.len()];
         let mut groups: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
         for (i, e) in errs.iter().enumerate() {
             if e.is_none() {
@@ -252,7 +258,8 @@ impl NemotronInstance {
         }
         for (pid, idxs) in groups {
             let refs: Vec<&[f32]> = idxs.iter().map(|&i| wavs[i].as_slice()).collect();
-            let batch = self.model.encoder().transcribe_batch(&refs, pid);
+            let cancels: Vec<&capability::CancelToken> = idxs.iter().map(|&i| &invs[i].cancel).collect();
+            let batch = self.model.encoder().transcribe_batch(&refs, &cancels, pid);
             for (slot, toks) in idxs.into_iter().zip(batch) {
                 tokens_by_job[slot] = Some(toks);
             }
@@ -264,6 +271,7 @@ impl NemotronInstance {
             .map(|(i, _)| match (&errs[i], tokens_by_job[i].take()) {
                 (Some(e), _) => Err(e.clone()),
                 (None, Some(toks)) => {
+                    let toks = toks?;
                     let text = self.detok.decode(&toks);
                     Ok(transcription_outcome(text, &toks))
                 }
@@ -335,6 +343,7 @@ struct QwenAsrInstance {
 
 impl Instance for QwenAsrInstance {
     fn run(&mut self, _action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         let blob = inv.get_blob("audio").ok_or("qwen-asr transcribe: missing 'audio' input")?;
         let wav = wav_from_blob(blob)?;
         let truncated = qwen3asr::caps::window_truncation(self.provider.window_samples(), &wav);
@@ -342,7 +351,7 @@ impl Instance for QwenAsrInstance {
             progress(Progress::step(0, 1, format!("warning: audio is {total:.1}s but the decode window is {window:.1}s -- transcribing only the first {window:.1}s (raise window_secs)")));
         }
         progress(Progress::step(0, 1, "transcribing"));
-        let (text, tokens) = self.provider.transcribe(&wav)?;
+        let (text, tokens) = self.provider.transcribe(&wav, &inv.cancel, progress)?;
         progress(Progress::step(1, 1, text.clone()));
         Ok(transcription_outcome(text, &tokens).set("truncated", serde_json::json!(truncated.is_some())))
     }
@@ -405,10 +414,11 @@ impl QwenAsrNpuInstance {
 
 impl Instance for QwenAsrNpuInstance {
     fn run(&mut self, _action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         let blob = inv.get_blob("audio").ok_or("qwen-asr transcribe: missing 'audio' input")?;
         let wav = wav_from_blob(blob)?;
         progress(Progress::step(0, 1, "transcribing (NPU audio encoder)"));
-        let (text, tokens) = self.provider.transcribe_with_head(&wav, |packed, n, spans| self.npu_head(packed, n, spans))?;
+        let (text, tokens) = self.provider.transcribe_with_head(&wav, &inv.cancel, progress, |packed, n, spans| self.npu_head(packed, n, spans))?;
         progress(Progress::step(1, 1, text.clone()));
         Ok(transcription_outcome(text, &tokens).set("device", serde_json::json!(self.device.borrow().clone())))
     }

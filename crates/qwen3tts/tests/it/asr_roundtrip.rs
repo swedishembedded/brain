@@ -44,7 +44,7 @@ fn synth_then_transcribe_recovers_the_text() {
     let cfg = nemotronasr::NemotronConfig::nemotron_3_5_asr_0_6b();
     let asr = nemotronasr::model::NemotronAsr::from_hf(&asr_ckpt, cfg).expect("load ASR model");
     let detok = nemotronasr::tokenizer::Detokenizer::from_hf(&asr_ckpt).expect("load ASR tokenizer");
-    let ids = asr.transcribe(&wav16, 0); // prompt 0 = english
+    let ids = asr.transcribe(&wav16, 0, &capability::CancelToken::default()).expect("transcribe"); // prompt 0 = english
     let nonblank: Vec<u32> = ids.into_iter().filter(|&x| x != cfg.blank_token_id).collect();
     let transcript = detok.decode(&nonblank);
 
