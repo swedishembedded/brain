@@ -1,0 +1,44 @@
+<!-- source-sha256: d78b3300d3e2a8aee4610c9fcb243b180570a86923afb1dff8e515699afc359a -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 360" width="820" height="360"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="820" height="360" fill="#ffffff"/>
+<rect x="22" y="88" width="176" height="84" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="110" y="118.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">registered protocol</text>
+<text x="110" y="134.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">hypotheses, margin,</text>
+<text x="110" y="150.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">arms, budget, seeds</text>
+<rect x="222" y="88" width="176" height="84" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="310" y="118.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">driver runs a plan</text>
+<text x="310" y="134.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">refuses a tree with</text>
+<text x="310" y="150.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">uncommitted changes</text>
+<rect x="422" y="88" width="176" height="84" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="510" y="118.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">one record per run</text>
+<text x="510" y="134.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">commit, command, seed,</text>
+<text x="510" y="150.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">device, measurements</text>
+<rect x="622" y="88" width="176" height="84" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="710" y="118.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">records committed</text>
+<text x="710" y="134.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">under data/&lt;plan&gt;/</text>
+<text x="710" y="150.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">(null if not measured)</text>
+<rect x="22" y="248" width="176" height="84" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="110" y="278.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">table generator</text>
+<text x="110" y="294.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">reads every record,</text>
+<text x="110" y="310.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">types no number</text>
+<rect x="222" y="248" width="176" height="84" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="310" y="278.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">tables and macros</text>
+<text x="310" y="294.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">quoted numbers, verdicts,</text>
+<text x="310" y="310.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">draft or final status</text>
+<rect x="422" y="248" width="176" height="84" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="510" y="278.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">paper sections</text>
+<text x="510" y="294.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">cite the macros,</text>
+<text x="510" y="310.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">never a typed value</text>
+<rect x="622" y="248" width="176" height="84" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="710" y="278.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">PDF</text>
+<text x="710" y="294.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">rebuilt by one</text>
+<text x="710" y="310.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">make target</text>
+<line x1="201" y1="130" x2="219" y2="130" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="201" y1="290" x2="219" y2="290" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="401" y1="130" x2="419" y2="130" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="401" y1="290" x2="419" y2="290" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="601" y1="130" x2="619" y2="130" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="601" y1="290" x2="619" y2="290" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M710,172 L710,200 Q710,210 700,210 L120,210 Q110,210 110,220 L110,245" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M710,88 L710,64 Q710,54 700,54 L320,54 Q310,54 310,64 L310,85" fill="none" stroke="#1a202c" stroke-width="1.4" stroke-dasharray="5 3" marker-end="url(#head)"/>
+<text x="510" y="46.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">the next plan reads committed records (the chosen learning rate)</text>
+</svg>

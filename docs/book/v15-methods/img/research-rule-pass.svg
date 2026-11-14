@@ -1,0 +1,41 @@
+<!-- source-sha256: a6b67369e8e26c05391d722cade6288499e697f0cb743a20ab7152d7b32ba8e3 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 422" width="640" height="422">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="640" height="422" fill="#ffffff"/>
+<line x1="58" y1="334" x2="58" y2="30" stroke="#edf2f7"/>
+<text x="58" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">-0.01</text>
+<line x1="199" y1="334" x2="199" y2="30" stroke="#edf2f7"/>
+<text x="199" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0</text>
+<line x1="340" y1="334" x2="340" y2="30" stroke="#edf2f7"/>
+<text x="340" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0.01</text>
+<line x1="481" y1="334" x2="481" y2="30" stroke="#edf2f7"/>
+<text x="481" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0.02</text>
+<line x1="622" y1="334" x2="622" y2="30" stroke="#edf2f7"/>
+<text x="622" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0.03</text>
+<line x1="58" y1="334" x2="622" y2="334" stroke="#edf2f7"/>
+<text x="52" y="338" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
+<line x1="58" y1="273.2" x2="622" y2="273.2" stroke="#edf2f7"/>
+<text x="52" y="277.2" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.2</text>
+<line x1="58" y1="212.4" x2="622" y2="212.4" stroke="#edf2f7"/>
+<text x="52" y="216.4" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.4</text>
+<line x1="58" y1="151.6" x2="622" y2="151.6" stroke="#edf2f7"/>
+<text x="52" y="155.6" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.6</text>
+<line x1="58" y1="90.8" x2="622" y2="90.8" stroke="#edf2f7"/>
+<text x="52" y="94.8" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.8</text>
+<line x1="58" y1="30" x2="622" y2="30" stroke="#edf2f7"/>
+<text x="52" y="34" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">1</text>
+<rect x="58" y="30" width="564" height="304" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="564" height="304"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#2b6cb0" stroke-width="2.0" points="58,30 65.05,30 72.1,30 79.15,30 86.2,30 93.25,30 100.3,30 107.35,30 114.4,30 121.45,30 128.5,30 135.55,30 142.6,30 149.65,30 156.7,30 163.75,30 170.8,30 177.85,30 184.9,30 191.95,30 199,30 206.05,30 213.1,30 220.15,30 227.2,30 234.25,30 241.3,30 248.35,30.01 255.4,30.01 262.45,30.02 269.5,30.04 276.55,30.06 283.6,30.09 290.65,30.14 297.7,30.22 304.75,30.33 311.8,30.5 318.85,30.74 325.9,31.07 332.95,31.54 340,32.17 347.05,33.03 354.1,34.18 361.15,35.68 368.2,37.61 375.25,40.06 382.3,43.13 389.35,46.92 396.4,51.53 403.45,57.04 410.5,63.54 417.55,71.09 424.6,79.73 431.65,89.47 438.7,100.29 445.75,112.12 452.8,124.88 459.85,138.42 466.9,152.59 473.95,167.18 481,182 488.05,196.82 495.1,211.41 502.15,225.58 509.2,239.12 516.25,251.88 523.3,263.71 530.35,274.53 537.4,284.27 544.45,292.91 551.5,300.46 558.55,306.96 565.6,312.47 572.65,317.08 579.7,320.87 586.75,323.94 593.8,326.39 600.85,328.32 607.9,329.82 614.95,330.97 622,331.83"/><polyline fill="none" stroke="#2b6cb0" stroke-width="2.0" stroke-dasharray="6 4" points="58,32.04 128.5,38.24 199,65.78 269.5,130.53 340,223.22 410.5,298.4 481,328.8 551.5,333.67 622,334"/><circle cx="58" cy="32.04" r="3" fill="#2b6cb0"/><circle cx="128.5" cy="38.24" r="3" fill="#2b6cb0"/><circle cx="199" cy="65.78" r="3" fill="#2b6cb0"/><circle cx="269.5" cy="130.53" r="3" fill="#2b6cb0"/><circle cx="340" cy="223.22" r="3" fill="#2b6cb0"/><circle cx="410.5" cy="298.4" r="3" fill="#2b6cb0"/><circle cx="481" cy="328.8" r="3" fill="#2b6cb0"/><circle cx="551.5" cy="333.67" r="3" fill="#2b6cb0"/><circle cx="622" cy="334" r="3" fill="#2b6cb0"/><polyline fill="none" stroke="#c05621" stroke-width="2.0" points="58,30 65.05,30 72.1,30 79.15,30 86.2,30 93.25,30 100.3,30 107.35,30 114.4,30 121.45,30 128.5,30 135.55,30 142.6,30 149.65,30 156.7,30 163.75,30 170.8,30 177.85,30 184.9,30 191.95,30 199,30 206.05,30 213.1,30 220.15,30 227.2,30 234.25,30 241.3,30 248.35,30 255.4,30 262.45,30 269.5,30 276.55,30 283.6,30 290.65,30 297.7,30 304.75,30 311.8,30 318.85,30 325.9,30 332.95,30 340,30.01 347.05,30.02 354.1,30.05 361.15,30.1 368.2,30.21 375.25,30.41 382.3,30.78 389.35,31.42 396.4,32.49 403.45,34.23 410.5,36.92 417.55,40.92 424.6,46.66 431.65,54.55 438.7,64.98 445.75,78.23 452.8,94.4 459.85,113.37 466.9,134.75 473.95,157.91 481,182 488.05,206.09 495.1,229.25 502.15,250.63 509.2,269.6 516.25,285.77 523.3,299.02 530.35,309.45 537.4,317.34 544.45,323.08 551.5,327.08 558.55,329.77 565.6,331.51 572.65,332.58 579.7,333.22 586.75,333.59 593.8,333.79 600.85,333.9 607.9,333.95 614.95,333.98 622,333.99"/><polyline fill="none" stroke="#c05621" stroke-width="2.0" stroke-dasharray="6 4" points="58,30 128.5,30 199,30 269.5,30.12 340,42.37 410.5,194.31 481,327.37 551.5,333.97 622,334"/><circle cx="58" cy="30" r="3" fill="#c05621"/><circle cx="128.5" cy="30" r="3" fill="#c05621"/><circle cx="199" cy="30" r="3" fill="#c05621"/><circle cx="269.5" cy="30.12" r="3" fill="#c05621"/><circle cx="340" cy="42.37" r="3" fill="#c05621"/><circle cx="410.5" cy="194.31" r="3" fill="#c05621"/><circle cx="481" cy="327.37" r="3" fill="#c05621"/><circle cx="551.5" cy="333.97" r="3" fill="#c05621"/><circle cx="622" cy="334" r="3" fill="#c05621"/><line x1="481" y1="334" x2="481" y2="30" stroke="#a0aec0" stroke-dasharray="4 4"/><text x="497.92" y="60.4" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" paint-order="stroke" text-anchor="start">claim false</text></g>
+<text x="340" y="370" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">true difference, candidate minus baseline (bits per byte)</text>
+<text x="14" y="182" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 182)">chance the rule says supported</text>
+<text x="340" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Two rules for one claim, margin 0.02</text>
+<line x1="35.02" y1="393" x2="55.02" y2="393" stroke="#2b6cb0" stroke-width="2"/>
+<text x="61.02" y="397" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">mean rule, 3 runs per arm</text>
+<line x1="225.38" y1="393" x2="245.38" y2="393" stroke="#2b6cb0" stroke-width="2" stroke-dasharray="6 4"/>
+<text x="251.38" y="397" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">interval rule, 3 runs per arm</text>
+<line x1="428.62" y1="393" x2="448.62" y2="393" stroke="#c05621" stroke-width="2"/>
+<text x="454.62" y="397" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">mean rule, 8 runs per arm</text>
+<line x1="225.38" y1="410" x2="245.38" y2="410" stroke="#c05621" stroke-width="2" stroke-dasharray="6 4"/>
+<text x="251.38" y="414" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">interval rule, 8 runs per arm</text>
+</svg>

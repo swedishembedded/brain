@@ -14,4 +14,5 @@ After it you can take a published model to a proven reimplementation step by ste
 1. [Porting a Model from Its Reference](01-porting.md): what is the disciplined way to reimplement a published model and prove it correct?
 2. [Testing Numerical Code](02-testing-numerical-code.md): why do tests of numerical code pass while the code is wrong, and how do we write tests that cannot be fooled?
 3. [Benchmarking and Performance Claims](03-benchmarking.md): what makes a benchmark trustworthy, and what are the classic ways it lies?
+4. [From Hypothesis to Paper](04-research.md): how does an idea become a result others can trust, check and build on?
 6. [Project: Reproduce, Verify, Optimize, Defend](06-project-reproduction.md): can you reproduce a published model component, prove it correct, make it fast and defend the result?
