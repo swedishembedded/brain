@@ -742,7 +742,13 @@ fn resident_for(weights: &str, card: &ModelCard, tokenizer: Option<&str>, qwen_c
         return None;
     }
     if family == "qwen" {
-        return Some(Built::Qwen(Arc::new(QwenResident::from_card_configured(weights, card, tokenizer, qwen_cfg))));
+        let qwen = QwenResident::from_card_configured(weights, card, tokenizer, qwen_cfg);
+        // A plan that cannot fit the card share would only fail its first requests: say why and what to change now.
+        if let Some(why) = qwen.unfit_reason() {
+            eprintln!("brain: skip {} ({why})", card.id);
+            return None;
+        }
+        return Some(Built::Qwen(Arc::new(qwen)));
     }
     let other: Option<Arc<dyn ResidentModel>> = match family {
         "gpt" => Some(Arc::new(catalog::resident_llm::GptResident::from_card(weights, card, tokenizer))),

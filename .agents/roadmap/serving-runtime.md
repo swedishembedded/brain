@@ -761,10 +761,12 @@ int8 C = 16 arm measured 536 tok/s (0.59): the second pass over the weights. Ope
 
 ## Refusals that name the setting (2026-11-13, knowledge #448)
 
-- [ ] A model whose default serving plan does not fit the memory it was given (Qwen3-4B in a 13 GB share of a card: HTTP 400 and
-      500 on the first requests; `--ctx 16384 --kv-cache fp8` fit, bf16 KV is not supported by the Qwen3 engine) is refused at
-      startup, or on the first request, with the number or flag to change, as the Qwen3.8 placement does. Today the failure
-      carries no setting.
+- [x] A Qwen3 model whose serving plan does not fit the card share it was given is refused at startup
+      (`QwenResident::unfit_reason`, the scan's `skip` line and `--checkpoint`): the per-category arithmetic, the share, the
+      longest `--ctx` that fits (or that none does) and the other settings that shrink the plan. The plan now counts the
+      widest step's activations (`DecoderWidths`), which it used to leave out. Gated in `catalog`
+      `a_plan_that_cannot_fit_its_card_share_is_refused_at_startup_naming_what_to_change`. Not reproduced on the Qwen3-4B
+      13 GB share of the original report (a capture run): whether that failure was this plan or an allocation outside it is open.
 - [x] A device out-of-memory in a decode step or a graph launch is a typed back-off, and the handle is usable afterwards
       (#448); the default `--reserve-gb` follows `--max-batch` above 16 rows.
 - [x] A per-model peak activation in the placement (`residency::MemCost::activation`, `MultiDeviceCost::with_activation`),

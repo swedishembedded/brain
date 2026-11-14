@@ -982,6 +982,67 @@ impl QwenResident {
         cfg.rope_scaling = Some(model::rope_scaling::RopeScaling::Yarn(model::yarn::YarnConfig::new(ctx as f32 / original as f32, original)));
     }
 
+    /// What serving `cfg` at a context of `ctx` tokens with a pool of `kv_tokens` (`None`: two contexts) costs on the
+    /// device, as the global planner's categories: the one sizing `estimate` charges and the startup check refuses by.
+    fn serve_demands(&self, cfg: &qwen3::config::QwenConfig, ctx: u32, kv_tokens: Option<u32>) -> Vec<model::memplan::Demand> {
+        let (block_size, max_batch, max_blocks_per_seq, num_blocks, max_prefill) = Self::pool_sizing(ctx, self.max_batch, self.max_prefill_cap, kv_tokens);
+        let kv_int8 = self.kv_int8_requested && qwen3::serve::kv_int8_supported(cfg);
+        // The paged-attention scores/probs scratch (`Scratch::{scores,probs}`) is a real, often
+        // multi-GiB device allocation `activate()` makes alongside the KV pool. The fused-attention
+        // answer needs the target device's own `DeviceCaps`, unknown at this pre-placement point, so
+        // `FusedAttention::default()` (nothing fused) is the larger size `paged_attn_scratch_bytes`
+        // can return: a worst-case, never-under bound.
+        let cap = max_blocks_per_seq * block_size;
+        // The adapter bank is allocated beside the weights at activation, sized by the same settings,
+        // over the larger of the decode batch and the prefill chunk.
+        let bank_bytes = self.adapters.settings().map_or(0, |bank| bank.device_bytes(cfg, max_batch.max(max_prefill)));
+        // Host-RAM KV offload moves blocks through device staging buffers the engine allocates when
+        // offload is enabled; they come out of the same budget as the pool.
+        let profile = PoolProfile::new(cfg, block_size, num_blocks, max_batch, max_prefill, cap, kv_int8, qwen3::serve::FusedAttention::default());
+        let profile = if self.kv_offload_bytes > 0 { profile.with_swap_staging(cfg, block_size, num_blocks, kv_int8) } else { profile };
+        profile.demands(self.weight_bytes(cfg), bank_bytes)
+    }
+
+    /// Why this resident's serving plan cannot fit the card share the server gave it, naming the context that would
+    /// fit (or that none does) and the other settings that shrink the plan; `None` when it fits, or when no share is
+    /// known. Asked when the server starts, so a model that could only fail its requests is not listed.
+    pub fn unfit_reason(&self) -> Option<String> {
+        if self.refused.is_some() {
+            return None;
+        }
+        let share = self.card_budget_bytes.filter(|&b| b > 0)?;
+        let cfg = qwen3::checkpoint_config(&self.path).ok()?;
+        let need = |ctx: u32, kv_tokens: Option<u32>| model::memplan::device_total(&self.serve_demands(&cfg, ctx, kv_tokens));
+        let demands = self.serve_demands(&cfg, self.ctx, self.kv_tokens);
+        let total = model::memplan::device_total(&demands);
+        if total <= share {
+            return None;
+        }
+        let gib = |b: u64| b as f64 / (1u64 << 30) as f64;
+        let shorter = AUTO_CTX_TIERS.iter().rev().copied().find(|&ctx| ctx < self.ctx && need(ctx, None) <= share);
+        let context = match shorter {
+            Some(ctx) => format!("--ctx {ctx} fits"),
+            None => format!("no context of {} tokens or more fits beside the weights", AUTO_CTX_TIERS[0].min(self.ctx)),
+        };
+        let mut levers = vec![format!("a smaller --max-batch (now {})", self.max_batch)];
+        if !self.kv_int8_requested && qwen3::serve::kv_int8_supported(&cfg) {
+            levers.push("--kv-cache int8 or fp8".to_string());
+        }
+        if !self.weights_int8_requested && self.weight_tiers.is_none() {
+            levers.push("--weight-format int8".to_string());
+        }
+        levers.push("a smaller --reserve-gb or a larger card".to_string());
+        Some(format!(
+            "{}: the serving plan for a context of {} tokens needs {:.1} GiB ({}) and a card offers it {:.1} GiB: {context}; or use {}",
+            self.id,
+            self.ctx,
+            gib(total),
+            model::memplan::summary(&demands),
+            gib(share),
+            levers.join(", ")
+        ))
+    }
+
     /// The adapters this base offers.
     pub fn adapters(&self) -> &Arc<AdapterRegistry> {
         &self.adapters
@@ -1224,23 +1285,7 @@ impl ResidentModel for QwenResident {
         let Ok(cfg) = qwen3::checkpoint_config(&self.path) else {
             return cost;
         };
-        let (block_size, max_batch, max_blocks_per_seq, num_blocks, max_prefill) = Self::pool_sizing(self.ctx, self.max_batch, self.max_prefill_cap, self.kv_tokens);
-        let kv_int8 = self.kv_int8_requested && qwen3::serve::kv_int8_supported(&cfg);
-        // The paged-attention scores/probs scratch (`Scratch::{scores,probs}`) is a real, often
-        // multi-GiB device allocation `activate()` makes alongside the KV pool. The fused-attention
-        // answer needs the target device's own `DeviceCaps`, unknown at this pre-placement point, so
-        // `FusedAttention::default()` (nothing fused) is the larger size `paged_attn_scratch_bytes`
-        // can return: a worst-case, never-under bound.
-        let cap = max_blocks_per_seq * block_size;
-        let weight_bytes = self.weight_bytes(&cfg);
-        // The adapter bank is allocated beside the weights at activation, sized by the same settings,
-        // over the larger of the decode batch and the prefill chunk.
-        let bank_bytes = self.adapters.settings().map_or(0, |bank| bank.device_bytes(&cfg, max_batch.max(max_prefill)));
-        // Host-RAM KV offload moves blocks through device staging buffers the engine allocates when
-        // offload is enabled; they come out of the same budget as the pool.
-        let profile = PoolProfile::new(&cfg, block_size, num_blocks, max_batch, max_prefill, cap, kv_int8, qwen3::serve::FusedAttention::default());
-        let profile = if self.kv_offload_bytes > 0 { profile.with_swap_staging(&cfg, block_size, num_blocks, kv_int8) } else { profile };
-        let demands = profile.demands(weight_bytes, bank_bytes);
+        let demands = self.serve_demands(&cfg, self.ctx, self.kv_tokens);
         residency::log::info(&format!("{}: estimate {}", self.id, model::memplan::summary(&demands)));
         let activation = model::memplan::category_total(&demands, model::memplan::Category::Activations);
         MemCost::new(model::memplan::device_total(&demands) - activation, cost.ram).with_activation(activation)
@@ -2220,6 +2265,34 @@ mod tests {
     /// independent recomputation at the resident's own default, and checks
     /// the dtype-shrink property directly against the pure `kv_pool_bytes`
     /// function (parameterized over `kv_int8`, no engine needed).
+    /// A serving plan that cannot fit the card share the server gave the model is refused when the server starts,
+    /// naming the context that would fit (or that none does) and the other settings that shrink it, instead of being
+    /// listed and failing its first requests.
+    #[test]
+    fn a_plan_that_cannot_fit_its_card_share_is_refused_at_startup_naming_what_to_change() {
+        let path = write_tiny_checkpoint(41, "unfit");
+        let card = checkpoint::st::ModelCard::new("brain/qwen3", "qwen");
+        let at = |ctx: u32, share: u64| QwenResident::from_card_configured(path.to_str().unwrap(), &card, Some("unused.json"), QwenServeConfig { ctx: Some(ctx), card_budget_bytes: Some(share), ..QwenServeConfig::default() });
+        let key = InstanceKey::new("brain/qwen3", "default");
+        let need = |r: &QwenResident| r.estimate(&key).placed(0).vram;
+        let (short, long) = (need(&at(2048, u64::MAX)), need(&at(24576, u64::MAX)));
+        assert!(short < long, "a longer context needs more: {short} against {long}");
+
+        assert_eq!(at(24576, long).unfit_reason(), None, "a plan that fits its share is served");
+        assert_eq!(QwenResident::from_card(path.to_str().unwrap(), &card, Some("unused.json")).unfit_reason(), None, "no share known, nothing to refuse");
+
+        let share = (short + long) / 2;
+        let why = at(24576, share).unfit_reason().expect("the 24576-token plan does not fit between the two");
+        for needle in ["GiB", "--ctx ", "--max-batch", "--reserve-gb"] {
+            assert!(why.contains(needle), "the refusal names {needle:?}: {why}");
+        }
+        let named: u32 = why.split("--ctx ").nth(1).and_then(|rest| rest.split(|c: char| !c.is_ascii_digit()).next()).and_then(|n| n.parse().ok()).expect("a context number");
+        assert!(named < 24576 && at(named, share).unfit_reason().is_none(), "the context it names fits that share: --ctx {named}: {why}");
+
+        let why = at(2048, short / 2).unfit_reason().expect("not even the shortest context fits");
+        assert!(why.contains("no context") && why.contains("--max-batch"), "{why}");
+    }
+
     #[test]
     fn estimate_counts_the_kv_pool_and_shrinks_under_int8() {
         let path = write_tiny_checkpoint(11, "estimate");

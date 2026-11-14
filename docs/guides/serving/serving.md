@@ -119,6 +119,14 @@ added for a model that states no estimate. The estimates are a model, not a
 measurement: the launch workspace of a wide batch is calibrated on
 Qwen3.8-27B-FP8 at 64 rows and scaled by each model's depth and width.
 
+A model whose plan cannot fit the card it would be given is not served rather
+than listed and failing its first requests: startup prints a `skip` line with
+what the plan needs per category, what the card offers, the `--ctx` that would
+fit (or that none does), and the other settings that shrink the plan
+(`--max-batch`, `--kv-cache`, `--weight-format`, `--reserve-gb`). The Qwen3
+family is checked this way; the Qwen3.8 and Ripple placements already refuse
+with their own arithmetic.
+
 ## Serving on several cards
 
 `brain serve --device gpu0,gpu1,gpu2,gpu3` (or `gpu`, every GPU) serves a large

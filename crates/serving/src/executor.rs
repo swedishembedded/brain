@@ -59,9 +59,16 @@ pub struct Serving {
 
 /// Register `qwen` (when its weights are configured) as an ordinary erased
 /// resident AND keep the concrete handle - see [`Serving::qwen`] for why
-/// both, and why they must be one allocation.
+/// both, and why they must be one allocation. A `--checkpoint` whose serving
+/// plan cannot fit the card share is not served, and startup says why and what
+/// to change.
 fn register_qwen(models: &mut Vec<Arc<dyn ResidentModel>>, qwen: Option<QwenResident>) -> Option<Arc<QwenResident>> {
-    let q = Arc::new(qwen?);
+    let qwen = qwen?;
+    if let Some(why) = qwen.unfit_reason() {
+        eprintln!("brain: --checkpoint not served: {why}");
+        return None;
+    }
+    let q = Arc::new(qwen);
     models.push(q.clone());
     Some(q)
 }
