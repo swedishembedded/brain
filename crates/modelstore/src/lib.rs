@@ -188,6 +188,19 @@ pub fn publish_data_root(root: Option<PathBuf>) {
     *slot = root;
 }
 
+/// brain's data root: the published one, else `$XDG_DATA_HOME/brain`, else
+/// `$HOME/.local/share/brain`. `BRAIN_MODELS_DIR` names a models directory
+/// only, so it does not move the rest of the data root.
+pub fn default_data_root() -> Option<PathBuf> {
+    if let Some(root) = DATA_ROOT.read().unwrap_or_else(|e| e.into_inner()).as_deref() {
+        return Some(root.to_path_buf());
+    }
+    if let Some(x) = std::env::var_os("XDG_DATA_HOME").filter(|s| !s.is_empty()) {
+        return Some(Path::new(&x).join("brain"));
+    }
+    std::env::var_os("HOME").filter(|s| !s.is_empty()).map(|h| Path::new(&h).join(".local").join("share").join("brain"))
+}
+
 /// The models directory inside a data root. brain's data root holds more
 /// than models over time, so models live in their own subdirectory; this is
 /// the one place that fact is written down.

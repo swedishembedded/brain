@@ -208,6 +208,17 @@ pub struct ServeOpts {
     pub callers: Option<std::sync::Arc<Callers>>,
     /// What the host knows of its devices, for `GET /v1/devices` ([`AppState::with_devices`]).
     pub devices: Option<std::sync::Arc<dyn DeviceInventory>>,
+    /// Keep `/videos` jobs across restarts ([`video::VideoJobs::durable`]):
+    /// each video surface keeps its jobs in its own subdirectory of
+    /// [`VideoJobsConfig::dir`]. `None` keeps them in memory only.
+    pub video_jobs: Option<VideoJobsConfig>,
+}
+
+/// Where `brain serve` keeps its video jobs, and how many bytes of clips.
+#[derive(Clone, Debug)]
+pub struct VideoJobsConfig {
+    pub dir: std::path::PathBuf,
+    pub spool_bytes: u64,
 }
 
 impl ServeOpts {
@@ -254,6 +265,10 @@ impl ServeOpts {
         self.devices = devices;
         self
     }
+    pub fn with_video_jobs(mut self, video_jobs: Option<VideoJobsConfig>) -> ServeOpts {
+        self.video_jobs = video_jobs;
+        self
+    }
 }
 
 /// The addresses every surface actually bound, gathered as each listener
@@ -294,7 +309,7 @@ pub const SHUTDOWN_DRAIN: std::time::Duration = std::time::Duration::from_secs(3
 /// concurrently on a [`tokio::task::JoinSet`]. Blocks the calling thread.
 pub fn serve_all(exec: Executor, surfaces: Vec<Surface>, opts: ServeOpts) -> anyhow::Result<()> {
     let shutdown = opts.shutdown.unwrap_or_else(brain_shutdown::Shutdown::from_signals);
-    let ServeOpts { supplier, ready, deadlines, record, limits, tls, training, callers, devices, .. } = opts;
+    let ServeOpts { supplier, ready, deadlines, record, limits, tls, training, callers, devices, video_jobs, .. } = opts;
     let scheme = if tls.is_some() { "https" } else { "http" };
     let publication = record.and_then(|path| {
         if let Err(e) = path.parent().map_or(Ok(()), surface::private_dir) {
@@ -303,6 +318,18 @@ pub fn serve_all(exec: Executor, surfaces: Vec<Surface>, opts: ServeOpts) -> any
         }
         Some(std::sync::Arc::new(Publication { path, scheme, expected: surfaces.len(), bound: std::sync::Mutex::new(Vec::new()) }))
     });
+    // One store per dialect, shared by every address it binds: two stores over
+    // one directory would each take the other's files for strays. The
+    // Anthropic dialect has no video routes, so it keeps no jobs.
+    let mut stores: std::collections::HashMap<Provider, std::sync::Arc<video::VideoJobs>> = std::collections::HashMap::new();
+    if let Some(cfg) = &video_jobs {
+        for provider in surfaces.iter().map(|s| s.provider).filter(|p| *p != Provider::Anthropic) {
+            if !stores.contains_key(&provider) {
+                let jobs = video::VideoJobs::durable(cfg.dir.join(provider.as_str()), cfg.spool_bytes, provider).map_err(|e| anyhow::anyhow!("video jobs in {}: {e}", cfg.dir.display()))?;
+                stores.insert(provider, std::sync::Arc::new(jobs));
+            }
+        }
+    }
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     let published = publication.clone();
     let result = rt.block_on(async move {
@@ -318,6 +345,10 @@ pub fn serve_all(exec: Executor, surfaces: Vec<Surface>, opts: ServeOpts) -> any
                 .with_supplier(supplier.clone())
                 .with_training(training)
                 .with_devices(devices.clone());
+            let state = match stores.get(&s.provider) {
+                Some(jobs) => state.with_video_jobs(jobs.clone()),
+                None => state,
+            };
             // Graceful shutdown waits for every in-flight request, and a
             // generation answers only when it ends: cancel them all the moment
             // shutdown fires so they end at their next poll.

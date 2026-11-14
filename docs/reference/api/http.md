@@ -103,7 +103,12 @@ launches a local qwen3 Anthropic surface and points Claude Code at it.
   "data:video/mp4;base64,..."}}` (MP4 or WebM, AV1, read by brain itself:
   a clip in another codec is refused, never handed to ffmpeg), at most 2000
   frames and 64 million pixels across them. A remote URL is refused. Finished clips are kept for an hour, within the server's spool
-  budget; a restart forgets every job.
+  budget (`brain serve --video-spool-gb`). Jobs outlive a restart: `brain serve`
+  records each one beside its clip under `--video-jobs-dir` (default
+  `<data root>/video-jobs`), so a finished clip is still served by its id and its
+  `Idempotency-Key`, a clip whose file is gone reads `expired`, and a job that was
+  running when the server stopped reads `failed` with that reason. Such a job is
+  never rendered again on its own; submit it with a new key to render it.
 - **Streaming** (`stream:true`): Anthropic emits `message_start`, then per content
   block (the thinking block, when the model reasons, then the text block, then
   one `tool_use` block per tool call)

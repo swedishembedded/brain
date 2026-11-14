@@ -173,6 +173,13 @@ PROCESS LIFECYCLE
                          is invisible to clients looking in the default one.
 
 SERVING OPTIONS
+  --video-jobs-dir DIR   where /videos jobs and their clips are kept, one
+                         subdirectory per dialect (default <data root>/video-jobs).
+                         Jobs survive a restart: a finished clip is still served
+                         by its id and Idempotency-Key, and a job that was running
+                         is reported failed rather than rendered again.
+  --video-spool-gb N     the most gigabytes of finished clips kept (default 20);
+                         the oldest is expired first.
   --models-dir DIR       the model store every served model is resolved from
                          (else $BRAIN_MODELS_DIR, else $XDG_DATA_HOME/brain/models)
   --pin ARCH.ROLE=PATH   serve that role of that architecture from PATH instead of
@@ -783,6 +790,8 @@ pub fn run_serve(args: &[String]) {
     // record live (see `serve_daemon::state_dir`); `main` reads it too, for
     // `-d`/`--status`/`--stop`.
     let mut runtime_dir: Option<PathBuf> = None;
+    let mut video_jobs_dir: Option<PathBuf> = None;
+    let mut video_spool_gb: Option<u64> = None;
     let mut ready_file: Option<String> = None;
     // `--admit-deadline-ms` / `--cold-build-admit-deadline-ms`: how long a
     // request may wait to start before it is shed with a 429.
@@ -935,6 +944,8 @@ pub fn run_serve(args: &[String]) {
                 fixed_key_file = Some(PathBuf::from(file));
             }
             "--runtime-dir" => runtime_dir = Some(PathBuf::from(val(args, &mut i, "--runtime-dir"))),
+            "--video-jobs-dir" => video_jobs_dir = Some(PathBuf::from(val(args, &mut i, "--video-jobs-dir"))),
+            "--video-spool-gb" => video_spool_gb = Some(parsed(args, &mut i, "--video-spool-gb")),
             "--tls-cert" => tls_cert = Some(PathBuf::from(val(args, &mut i, "--tls-cert"))),
             "--tls-key" => tls_key = Some(PathBuf::from(val(args, &mut i, "--tls-key"))),
             "--insecure-plaintext" => insecure_plaintext = true,
@@ -1107,6 +1118,10 @@ pub fn run_serve(args: &[String]) {
             tls,
             callers,
             record: serve_daemon_record(runtime_dir.as_deref()),
+            video_jobs: video_jobs_dir.or_else(|| brain_modelstore::default_data_root().map(|root| root.join("video-jobs"))).map(|dir| apiserve::VideoJobsConfig {
+                dir,
+                spool_bytes: video_spool_gb.map_or(apiserve::video::DEFAULT_SPOOL_BYTES, |gb| gb.saturating_mul(1 << 30)),
+            }),
             ready,
             deadlines,
             adapter_mode,
@@ -1335,6 +1350,9 @@ struct RunApis {
     tls: Option<apiserve::Tls>,
     /// `--caller`: named callers replace the per-dialect keys.
     callers: Option<std::sync::Arc<apiserve::Callers>>,
+    /// `--video-jobs-dir`/`--video-spool-gb`: the durable `/videos` job store;
+    /// `None` only when there is no data root to put it in.
+    video_jobs: Option<apiserve::VideoJobsConfig>,
     /// Where the connection record is published once every HTTP surface has
     /// bound (see `apiserve::surface::record_json`).
     record: PathBuf,
@@ -1639,7 +1657,7 @@ fn run_apis(a: RunApis) {
             eprintln!("brain serve: the surfaces did not drain within {}s of the shutdown signal; exiting", SHUTDOWN_DRAIN_TIMEOUT.as_secs());
             brain_shutdown::exit_now(0);
         });
-        let opts = apiserve::ServeOpts::new().with_shutdown(shutdown).with_supplier(supplier).with_ready(a.ready).with_deadlines(a.deadlines).with_record(Some(a.record)).with_tls(a.tls).with_training(training).with_callers(a.callers).with_devices(Some(std::sync::Arc::new(crate::devices_api::HostDevices)));
+        let opts = apiserve::ServeOpts::new().with_shutdown(shutdown).with_supplier(supplier).with_ready(a.ready).with_deadlines(a.deadlines).with_record(Some(a.record)).with_tls(a.tls).with_training(training).with_callers(a.callers).with_devices(Some(std::sync::Arc::new(crate::devices_api::HostDevices))).with_video_jobs(a.video_jobs);
         if let Err(e) = apiserve::serve_all(executor, surfaces, opts) {
             eprintln!("brain serve: {e}");
             std::process::exit(1);
@@ -1768,7 +1786,7 @@ mod tests {
         for f in [
             "--gpt", "--yolo", "--max-new", "--temp", "--top-k", "--seed", "--conf", "--dbus", "--dbus-system", "--dbus-name",
             "--reserve-gb", "--models-dir", "--pin", "--autofetch", "--mock", "--mock-delay-ms", "--anthropic", "--openai", "--openrouter", "--api-keys-out", "--ready-file",
-            "--admit-deadline-ms", "--cold-build-admit-deadline-ms", "--sched-max-wait-ms", "--sched-age-weight", "--sched-batch-weight",
+            "--admit-deadline-ms", "--cold-build-admit-deadline-ms", "--video-jobs-dir", "--video-spool-gb", "--sched-max-wait-ms", "--sched-age-weight", "--sched-batch-weight",
         ] {
             assert!(HELP.contains(f), "{f} is parsed by run_serve but not documented in HELP");
         }

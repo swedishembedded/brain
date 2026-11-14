@@ -154,6 +154,20 @@ impl AppState {
         self
     }
 
+    /// Keep video jobs and their clips in `dir` across restarts, at most
+    /// `bytes` of clips (builder-style): [`VideoJobs::durable`].
+    pub fn with_durable_video_jobs(self, dir: std::path::PathBuf, bytes: u64) -> Result<AppState, String> {
+        let jobs = VideoJobs::durable(dir, bytes, self.provider)?;
+        Ok(self.with_video_jobs(Arc::new(jobs)))
+    }
+
+    /// Serve `/videos` from `jobs`, a store other surfaces of the same dialect
+    /// may share (builder-style).
+    pub fn with_video_jobs(mut self, jobs: Arc<VideoJobs>) -> AppState {
+        self.videos = jobs;
+        self
+    }
+
     /// Override the admission deadline (builder-style). Used by tests to force fast
     /// shedding without slow real-time waits.
     pub fn with_admit_deadline(mut self, deadline: Duration) -> AppState {

@@ -16,7 +16,7 @@ use std::path::Path;
 use serde_json::{json, Value};
 
 /// The API dialect a surface speaks.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Provider {
     OpenAI,
     Anthropic,

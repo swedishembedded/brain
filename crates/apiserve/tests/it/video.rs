@@ -308,6 +308,53 @@ async fn the_same_idempotency_key_never_renders_twice() {
     assert_eq!(s3, StatusCode::UNPROCESSABLE_ENTITY);
 }
 
+/// An app whose video jobs are kept in `dir` across restarts.
+fn durable_app(provider: Provider, dir: &std::path::Path) -> (Router, Arc<AtomicUsize>) {
+    let runs = Arc::new(AtomicUsize::new(0));
+    let models: Vec<Arc<dyn ResidentModel>> = vec![Arc::new(FakeVideo(runs.clone(), Seen::default()))];
+    let mut budgets = Budgets::new();
+    budgets.set(Device::Cpu, 8 << 30, 0);
+    let state = AppState::new(Executor::start(models, budgets, Policy::default()), KEY.to_string(), provider).with_durable_video_jobs(dir.to_path_buf(), 1 << 30).expect("the job directory opens");
+    (router(state), runs)
+}
+
+/// A finished job outlives the server: after a restart its id still answers with the same clip, and its
+/// Idempotency-Key still names it, so a client retrying the request gets the clip instead of a second render.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_finished_job_survives_a_restart_by_id_and_by_idempotency_key() {
+    let dir = std::env::temp_dir().join(format!("brain-video-durable-{}", uuid::Uuid::new_v4()));
+    let body = json!({"model": MODEL, "prompt": "kept", "duration": 1, "size": "32x16"});
+    let key = [("idempotency-key", "kept-1")];
+    let (before, id) = {
+        let (app, _) = durable_app(Provider::OpenRouter, &dir);
+        let (status, v) = json_call(&app, "POST", "/videos", Some(body.clone()), &key).await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{v}");
+        let id = v["id"].as_str().unwrap().to_string();
+        let done = wait(&app, &id).await;
+        assert_eq!(done["status"], "completed", "{done}");
+        let (_, _, mp4) = call(&app, "GET", done["unsigned_urls"][0].as_str().unwrap(), None, &[]).await;
+        (mp4, id)
+    };
+
+    let (app, runs) = durable_app(Provider::OpenRouter, &dir);
+    let (status, v) = json_call(&app, "GET", &format!("/v1/videos/{id}"), None, &[]).await;
+    assert_eq!((status, v["status"].as_str()), (StatusCode::OK, Some("completed")), "{v}");
+    let (status, _, mp4) = call(&app, "GET", &format!("/v1/videos/{id}/content?index=0"), None, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(mp4, before, "the same clip, byte for byte");
+    let (status, v) = json_call(&app, "POST", "/videos", Some(body), &key).await;
+    assert_eq!((status, v["id"].as_str()), (StatusCode::OK, Some(id.as_str())), "{v}");
+    assert_eq!(runs.load(Ordering::SeqCst), 0, "nothing was rendered again");
+
+    let (status, v) = json_call(&app, "DELETE", &format!("/v1/videos/{id}"), None, &[]).await;
+    assert_eq!((status, v["status"].as_str()), (StatusCode::OK, Some("deleted")));
+    drop(app);
+    let (app, _) = durable_app(Provider::OpenRouter, &dir);
+    let (status, _) = json_call(&app, "GET", &format!("/v1/videos/{id}"), None, &[]).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "a deleted job stays deleted");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_finished_clip_can_be_extended_as_an_edit() {
     let (app, _) = app_counting(Provider::OpenRouter);

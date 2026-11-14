@@ -21,9 +21,17 @@
 //! bytes per channel (a 5 s 720p clip is over a gigabyte), its file a few
 //! megabytes. The spool is private to this process, bounded in bytes (the
 //! oldest finished clip is expired first) and in age ([`RESULT_TTL`]), and a
-//! file is removed with its job. Jobs live in memory: a restart forgets them,
-//! and a client that needs durability keeps its own record and re-submits
-//! with the same `Idempotency-Key`.
+//! file is removed with its job.
+//!
+//! A store opened with [`VideoJobs::durable`] (what `brain serve` uses) keeps
+//! each job's record beside its clip and writes it, atomically, at every
+//! lifecycle transition: started, finished, cancelled, expired, deleted.
+//! Progress is not recorded. A restart reloads every record: a finished job
+//! answers by its id and its `Idempotency-Key` as before, a clip whose file
+//! is gone is `expired`, and a job that was running when the server stopped
+//! is `failed`, saying so. Such a job is never re-run on its own: whether a
+//! render may be repeated is the caller's decision, made by submitting again
+//! with a new key. [`VideoJobs::new`] keeps jobs in memory only.
 //!
 //! Inputs travel inline: an edit's `input_video` is a `data:` URL of an MP4 or
 //! WebM (AV1), decoded at the boundary, and `frame_images` and
@@ -363,6 +371,8 @@ pub struct VideoJobs {
     entries: Mutex<HashMap<Uuid, Entry>>,
     spool: PathBuf,
     spool_bytes: u64,
+    /// Records are written beside the clips and the spool outlives the store.
+    durable: bool,
 }
 
 impl Default for VideoJobs {
@@ -378,7 +388,82 @@ impl VideoJobs {
     /// Jobs whose clips are kept under `spool` (created private on first use,
     /// removed when the jobs are dropped), at most `spool_bytes` of them.
     pub fn new(spool: PathBuf, spool_bytes: u64) -> VideoJobs {
-        VideoJobs { entries: Mutex::default(), spool, spool_bytes }
+        VideoJobs { entries: Mutex::default(), spool, spool_bytes, durable: false }
+    }
+
+    /// Jobs kept in `dir` across restarts, at most `spool_bytes` of clips: the
+    /// records already there are loaded and reconciled (see the module doc),
+    /// and a clip or partial file no record names is removed. `provider`
+    /// renders the errors of reloaded failed jobs.
+    pub fn durable(dir: PathBuf, spool_bytes: u64, provider: Provider) -> Result<VideoJobs, String> {
+        create_private_dir(&dir)?;
+        let jobs = VideoJobs { entries: Mutex::default(), spool: dir, spool_bytes, durable: true };
+        let mut entries = HashMap::new();
+        let listing = std::fs::read_dir(&jobs.spool).map_err(|e| format!("{}: {e}", jobs.spool.display()))?;
+        let mut files = Vec::new();
+        for item in listing {
+            let path = item.map_err(|e| format!("{}: {e}", jobs.spool.display()))?.path();
+            files.push(path);
+        }
+        for path in &files {
+            let Some(id) = record_id(path) else { continue };
+            let entry = std::fs::read(path).ok().and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok()).and_then(|v| record::load(&v, provider, &jobs.clip_path(id)));
+            match entry {
+                Some((entry, changed)) => {
+                    if changed {
+                        jobs.persist(id, &entry);
+                    }
+                    entries.insert(id, entry);
+                }
+                None => {
+                    eprintln!("brain apiserve: video job record {} is unreadable and is dropped", path.display());
+                    let _ = std::fs::remove_file(path);
+                }
+            }
+        }
+        // Only names this store writes are its own: anything else in the
+        // directory is left alone.
+        for path in &files {
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
+            let Some(id) = name.get(..36).and_then(|stem| Uuid::parse_str(stem).ok()) else { continue };
+            let stale = match &name[36..] {
+                ".mp4" => !matches!(entries.get(&id).map(|e| &e.phase), Some(Phase::Completed(_))),
+                rest if rest == RECORD_SUFFIX => !entries.contains_key(&id),
+                rest => rest.starts_with(".job.tmp-") || rest.starts_with(".tmp-"),
+            };
+            if stale {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+        jobs.reap(&mut entries, Instant::now());
+        *jobs.lock() = entries;
+        Ok(jobs)
+    }
+
+    fn clip_path(&self, id: Uuid) -> PathBuf {
+        self.spool.join(format!("{id}.mp4"))
+    }
+
+    fn record_path(&self, id: Uuid) -> PathBuf {
+        self.spool.join(format!("{id}{RECORD_SUFFIX}"))
+    }
+
+    /// Write `entry`'s record, replacing the previous one in one rename. A
+    /// record that cannot be written leaves the job served from memory and is
+    /// reported: the next transition writes it again.
+    fn persist(&self, id: Uuid, entry: &Entry) {
+        if !self.durable {
+            return;
+        }
+        if let Err(e) = write_atomic(&self.record_path(id), record::save(entry).to_string().as_bytes()) {
+            eprintln!("brain apiserve: video job {id} could not be recorded: {e}");
+        }
+    }
+
+    fn unpersist(&self, id: Uuid) {
+        if self.durable {
+            let _ = std::fs::remove_file(self.record_path(id));
+        }
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<Uuid, Entry>> {
@@ -396,12 +481,13 @@ impl VideoJobs {
     /// Forget finished jobs past [`RESULT_TTL`] and remove their files; then
     /// expire the oldest finished clips while the spool is over budget.
     fn reap(&self, entries: &mut HashMap<Uuid, Entry>, now: Instant) {
-        entries.retain(|_, e| {
+        entries.retain(|id, e| {
             let keep = e.finished.is_none_or(|at| now.duration_since(at) < RESULT_TTL);
             if !keep {
                 if let Phase::Completed(clip) = &e.phase {
                     let _ = std::fs::remove_file(&clip.path);
                 }
+                self.unpersist(*id);
             }
             keep
         });
@@ -423,6 +509,7 @@ impl VideoJobs {
                     let _ = std::fs::remove_file(&clip.path);
                 }
                 e.phase = Phase::Expired;
+                self.persist(id, e);
             }
             total -= bytes;
         }
@@ -448,12 +535,15 @@ impl VideoJobs {
             return Err((StatusCode::TOO_MANY_REQUESTS, "too many video jobs: fetch or delete some before starting another"));
         }
         let id = Uuid::new_v4();
-        entries.insert(id, Entry { scope: scope.to_string(), key, finished: None, phase: Phase::Running { step: 0, total: 0 }, cancel: Some(cancel) });
+        let entry = Entry { scope: scope.to_string(), key, finished: None, phase: Phase::Running { step: 0, total: 0 }, cancel: Some(cancel) };
+        self.persist(id, &entry);
+        entries.insert(id, entry);
         Ok((id, true))
     }
 
     fn discard(&self, id: Uuid) {
         self.lock().remove(&id);
+        self.unpersist(id);
     }
 
     fn progress(&self, id: Uuid, step: u32, total: u32) {
@@ -473,6 +563,7 @@ impl VideoJobs {
                 if terminal {
                     e.finished = Some(Instant::now());
                     e.cancel = None;
+                    self.persist(id, e);
                 }
             }
             _ => {
@@ -510,18 +601,183 @@ impl VideoJobs {
             }
             e.phase = Phase::Cancelled;
             e.finished = Some(Instant::now());
+            self.persist(id, e);
             return Some("cancelled");
         }
         if let Some(Entry { phase: Phase::Completed(clip), .. }) = entries.remove(&id) {
             let _ = std::fs::remove_file(&clip.path);
         }
+        self.unpersist(id);
         Some("deleted")
     }
 }
 
 impl Drop for VideoJobs {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.spool);
+        if !self.durable {
+            let _ = std::fs::remove_dir_all(&self.spool);
+        }
+    }
+}
+
+/// The suffix of a job's record file, `<id>.job.json`, beside its `<id>.mp4`.
+const RECORD_SUFFIX: &str = ".job.json";
+
+/// The job a record file belongs to, if `path` is one.
+fn record_id(path: &FsPath) -> Option<Uuid> {
+    let name = path.file_name()?.to_str()?;
+    Uuid::parse_str(name.strip_suffix(RECORD_SUFFIX)?).ok()
+}
+
+/// Write `bytes` to `path` so a reader sees the old file or the new one, never
+/// a part: a private temporary file beside it, synced, then renamed over it.
+fn write_atomic(path: &FsPath, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let tmp = path.with_extension(format!("tmp-{}", Uuid::new_v4()));
+    let result = (|| {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let mut file = options.open(&tmp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        std::fs::rename(&tmp, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
+}
+
+/// A job's record: what a restart needs to answer for it.
+mod record {
+    use super::*;
+    use crate::error::Kind;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn kind_name(kind: Kind) -> String {
+        match kind {
+            Kind::Failure(class) => format!("failure:{}", class.slug()),
+            other => format!("{other:?}"),
+        }
+    }
+
+    fn kind_of(name: &str) -> Kind {
+        const PLAIN: [Kind; 12] = [
+            Kind::Unauthorized,
+            Kind::Forbidden,
+            Kind::PaymentRequired,
+            Kind::RateLimited,
+            Kind::Internal,
+            Kind::NotFound,
+            Kind::ModelNotFound,
+            Kind::InvalidRequest,
+            Kind::ContextLengthExceeded,
+            Kind::NotImplemented,
+            Kind::Overloaded,
+            Kind::Saturated,
+        ];
+        if let Some(class) = name.strip_prefix("failure:").and_then(capability::FailureClass::parse) {
+            return Kind::Failure(class);
+        }
+        PLAIN.into_iter().find(|k| format!("{k:?}") == name).unwrap_or(Kind::Internal)
+    }
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    fn unhex(text: &str) -> Option<[u8; 32]> {
+        let mut out = [0u8; 32];
+        if text.len() != 64 {
+            return None;
+        }
+        for (i, byte) in out.iter_mut().enumerate() {
+            *byte = u8::from_str_radix(text.get(2 * i..2 * i + 2)?, 16).ok()?;
+        }
+        Some(out)
+    }
+
+    fn unix_ms(at: Instant) -> u64 {
+        let wall = SystemTime::now().checked_sub(Instant::now().saturating_duration_since(at)).unwrap_or(UNIX_EPOCH);
+        wall.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
+    }
+
+    fn instant_of(ms: u64) -> Instant {
+        let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+        let age = Duration::from_millis(now_ms.saturating_sub(ms));
+        Instant::now().checked_sub(age).unwrap_or_else(Instant::now)
+    }
+
+    pub(super) fn save(e: &Entry) -> Value {
+        let mut v = json!({
+            "version": 1,
+            "scope": e.scope,
+            "key": e.key.as_ref().map(|(k, _)| k.clone()),
+            "digest": e.key.as_ref().map(|(_, d)| hex(d)),
+            "finished_unix_ms": e.finished.map(unix_ms),
+        });
+        v["phase"] = json!(match &e.phase {
+            Phase::Running { .. } | Phase::Encoding => "running",
+            Phase::Completed(_) => "completed",
+            Phase::Failed(_) => "failed",
+            Phase::Cancelled => "cancelled",
+            Phase::Expired => "expired",
+        });
+        match &e.phase {
+            Phase::Completed(clip) => v["clip"] = json!({"bytes": clip.bytes, "sha256": clip.sha256, "usage": clip.usage}),
+            Phase::Failed(error) => v["error"] = json!({"kind": kind_name(error.kind), "message": error.message}),
+            _ => {}
+        }
+        v
+    }
+
+    /// The entry a record describes, reconciled with what is on disk, and
+    /// whether reconciling changed it. `None` for a record that does not parse.
+    pub(super) fn load(v: &Value, provider: Provider, clip_path: &FsPath) -> Option<(Entry, bool)> {
+        if v.get("version")?.as_u64()? != 1 {
+            return None;
+        }
+        let scope = v.get("scope")?.as_str()?.to_string();
+        let key = match (v.get("key").and_then(Value::as_str), v.get("digest").and_then(Value::as_str)) {
+            (Some(k), Some(d)) => Some((k.to_string(), unhex(d)?)),
+            _ => None,
+        };
+        let finished = v.get("finished_unix_ms").and_then(Value::as_u64).map(instant_of);
+        let mut changed = false;
+        let phase = match v.get("phase")?.as_str()? {
+            "running" => {
+                changed = true;
+                let _ = std::fs::remove_file(clip_path);
+                Phase::Failed(ApiError::new(
+                    provider,
+                    Kind::Failure(capability::FailureClass::Unavailable),
+                    "the server restarted while this job ran, so no clip was made; submit it again with a new Idempotency-Key to render it",
+                ))
+            }
+            "completed" => {
+                let c = v.get("clip")?;
+                let bytes = c.get("bytes")?.as_u64()?;
+                let on_disk = std::fs::metadata(clip_path).map(|m| m.len()).ok();
+                if on_disk == Some(bytes) {
+                    Phase::Completed(Clip { path: clip_path.to_path_buf(), bytes, sha256: c.get("sha256")?.as_str()?.to_string(), usage: c.get("usage").cloned().unwrap_or(Value::Null) })
+                } else {
+                    changed = true;
+                    let _ = std::fs::remove_file(clip_path);
+                    Phase::Expired
+                }
+            }
+            "failed" => {
+                let err = v.get("error")?;
+                Phase::Failed(ApiError::new(provider, kind_of(err.get("kind")?.as_str()?), err.get("message")?.as_str()?))
+            }
+            "cancelled" => Phase::Cancelled,
+            "expired" => Phase::Expired,
+            _ => return None,
+        };
+        let finished = if changed { Some(finished.unwrap_or_else(Instant::now)) } else { finished };
+        Some((Entry { scope, key, finished, phase, cancel: None }, changed))
     }
 }
 
@@ -870,6 +1126,33 @@ async fn models(State(state): State<AppState>) -> Json<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A job the server was running when it stopped is not run again on its own (its retry semantics are the
+    /// caller's), and not left pending forever: after the restart it is failed, saying why, and its
+    /// Idempotency-Key still names it.
+    #[test]
+    fn a_job_running_when_the_server_stopped_is_failed_after_the_restart() {
+        let dir = std::env::temp_dir().join(format!("brain-video-interrupted-{}", Uuid::new_v4()));
+        let id = {
+            let jobs = VideoJobs::durable(dir.clone(), 1 << 20, Provider::OpenRouter).unwrap();
+            let (tx, _rx) = oneshot::channel();
+            let (id, fresh) = jobs.open("scope", Some(("k".to_string(), [7; 32])), tx).unwrap();
+            assert!(fresh);
+            jobs.progress(id, 3, 10);
+            id
+        };
+        let jobs = VideoJobs::durable(dir.clone(), 1 << 20, Provider::OpenRouter).unwrap();
+        match jobs.view("scope", id) {
+            Some(View::Failed(e)) => assert!(e.message.contains("restarted"), "{}", e.message),
+            _ => panic!("the interrupted job is not reported as failed"),
+        }
+        let (tx, _rx) = oneshot::channel();
+        assert_eq!(jobs.open("scope", Some(("k".to_string(), [7; 32])), tx).unwrap(), (id, false));
+        assert!(jobs.view("other", id).is_none(), "a job stays its caller's across the restart");
+        drop(jobs);
+        assert!(dir.is_dir(), "a durable store keeps its directory");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn ranges_follow_rfc_9110_for_one_part() {
