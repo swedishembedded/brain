@@ -1,0 +1,32 @@
+<!-- source-sha256: cbf7f0be42d1f5301fe1167e12a6c34c71810207a57a8d15aa2e28a44f8b78c5 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 520" width="900" height="520"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker><marker id="head-4a5568" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs><rect width="900" height="520" fill="#ffffff"/>
+<rect x="80" y="24" width="640" height="58" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="400" y="49.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">layer 6: serving, front ends, SDK, samples</text>
+<text x="400" y="65.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">loader, catalog, brain, cli</text>
+<rect x="80" y="104" width="640" height="58" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="400" y="129.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">layer 5: cross-cutting evaluation and tooling</text>
+<text x="400" y="145.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">bench, rl</text>
+<rect x="80" y="184" width="640" height="58" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="400" y="209.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">layer 4: models</text>
+<text x="400" y="225.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">qwen3</text>
+<rect x="80" y="264" width="640" height="58" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="400" y="289.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">layer 3: training substrate and shared contracts</text>
+<text x="400" y="305.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">data, model, promote</text>
+<rect x="80" y="344" width="640" height="58" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="400" y="369.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">layer 2: accelerator seam: backends and the device facade</text>
+<text x="400" y="385.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">gpu-core</text>
+<rect x="80" y="424" width="640" height="58" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="400" y="449.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">layer 1: kernels, architecture registry, device-neutral contracts</text>
+<text x="400" y="465.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">arch, backend-api</text>
+<line x1="400" y1="85" x2="400" y2="101" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="400" y1="165" x2="400" y2="181" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="400" y1="245" x2="400" y2="261" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="400" y1="325" x2="400" y2="341" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="400" y1="405" x2="400" y2="421" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M780,34 L780,469" fill="none" stroke="#4a5568" stroke-width="1.4" marker-end="url(#head-4a5568)"/>
+<text x="800" y="225.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">every</text>
+<text x="800" y="241.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">dependency</text>
+<text x="800" y="257.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">points to the</text>
+<text x="800" y="273.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">same or a</text>
+<text x="800" y="289.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">lower layer</text>
+</svg>

@@ -1,0 +1,14 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+<!-- Copyright (c) 2026 Martin Schröder <info@swedishembedded.com> -->
+
+# Volume XVI: Constructing a Complete Machine Learning System
+
+Every volume so far has taken one piece of a machine learning system and made it correct: the arithmetic of a layer and its gradient, a kernel and the device it runs on, a model and the proof that it matches its reference, a training run that survives a crash, a server that admits only what it can hold. Each piece was studied on its own, and each was small enough to be held in view. A real engine is all of them at once, for a hundred architectures and more, reached by people through several doors, and it is the joining that fails first. A model is added and one of four lists that name it is not updated; a helper is borrowed across the wrong boundary and the build has no order in which to compile; a feature that worked in every test cannot be compiled on its own. None of those failures is in the mathematics, and none of the earlier volumes could have shown them.
+
+This volume is about the whole. It starts with how an engine is divided: into layers whose dependencies point one way, around a registry that answers for everyone which architecture a file is, under a rule that each behaviour lives in one place, with a public library at the top that is organised by the task a person wants done. It then builds the complete path itself, from raw data through training, checking, quantizing and serving, in a language of the reader's choice. And it ends with the history of one real engine, read as evidence of how such systems grow, what breaks as they do and which decisions held.
+
+It comes last because it needs everything before it. The layering of the first chapter is only meaningful once the reader knows what the device seam, the training substrate, the models, the evaluation tools and the front ends each are, and those were the subjects of Volumes IV, XIII, XIV and the model volumes between them. The capstone uses the batching of Volume XIV, the adapters and checkpoints of Volume XIII and the gradient check of Volume III in one program. And the history can only be read as a set of lessons by someone who has met, in the earlier volumes, the defects it records.
+
+After this volume you can draw the layers of an engine and check that its dependencies point down, find the cycle that an upward edge would close and remove it by moving code rather than keeping the edge, replace drifting lists of names with one registry whose lookups are exact, count what a change to one part sets in motion, and keep a library's features honest by building each one alone. The later chapters add the rest: building the whole system yourself, and reading the record of one that was built.
+
+1. [The Architecture of a Machine Learning Engine](01-engine-architecture.md): how should the parts of an engine be divided so that it can grow to hundreds of models without collapsing?
