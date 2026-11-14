@@ -25,7 +25,7 @@ Every value has a type, and the book always states it when it matters.
 | `bool` | `true` or `false` |
 | `array<T>[d0, d1, ...]` | a tensor of element type `T` with the given shape |
 | `function(T) -> U` | a function taken as an argument or returned (a `function(real) -> real` maps a number to a number; with several arguments the types are listed, `function(real, real) -> real`). A function is passed by writing its name, `map(tanh, a)`, and called through the argument's name |
-| `optional T` | either a value of type `T` or nothing. `x is present` is true when it holds a value and false otherwise; the value is only read after that test |
+| `optional T` | either a value of type `T` or nothing. `x is present` is true when it holds a value and false otherwise, and `x is absent` is `not (x is present)`; `nothing` is the absent value; the value is only read after that test |
 | `text` | a string of characters. Its **bytes** are those of its UTF-8 encoding, each an `int` in `0 .. 255`, taken in order: `for b in the bytes of s:` visits them first to last (the text `"ab"` has the bytes `97, 98`) |
 | `(T, U)`, `(T, U, V)` | a pair or triple (tuple) of a `T` and a `U` (and a `V`); an argument may have a tuple type, `a: (real, int)`, and `a[0]`, `a[1]`, `a[2]` read the components (0-indexed like an array). A function may return a tuple of unnamed components, `-> (real, int, int)`, received as `(x, i, j) = f(...)` |
 | `Generator` | the state of a random number generator, see "Randomness" |
