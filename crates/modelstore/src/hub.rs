@@ -267,8 +267,22 @@ impl Hub for HfHub {
             return Err(HubError::NotFound(format!("{vendor}/{repo}@{revision}/{file}")));
         }
         let total = resp.header("Content-Length").and_then(|s| s.parse::<u64>().ok());
-        stream_to_file(resp.into_reader(), dest, total, None, progress).map_err(|e| HubError::Network(e.to_string()))
+        // An LFS-backed file (every weight file) is checked against the digest
+        // the host lists for it, so a corrupted transfer of the declared size
+        // is refused like a short one; a plain file has none to check.
+        let digest = lfs_sha256(&self.revision_info_opt(vendor, repo, revision, true)?, file);
+        stream_to_file(resp.into_reader(), dest, total, digest.as_deref(), progress).map_err(|e| HubError::Network(e.to_string()))
     }
+}
+
+/// The SHA-256 the revision listing (`?blobs=true`) records for `file`'s LFS
+/// object, when it has one: a 64-digit lowercase hex digest. A plain (non-LFS)
+/// file, or a value that is not such a digest, gives `None`.
+fn lfs_sha256(info: &serde_json::Value, file: &str) -> Option<String> {
+    let siblings = info.get("siblings")?.as_array()?;
+    let entry = siblings.iter().find(|s| s.get("rfilename").and_then(serde_json::Value::as_str) == Some(file))?;
+    let sha = entry.get("lfs")?.get("sha256")?.as_str()?;
+    (sha.len() == 64 && sha.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))).then(|| sha.to_string())
 }
 
 /// GETs `url`, manually following redirects one hop at a time and refusing
@@ -456,6 +470,23 @@ impl Hub for FakeHub {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Spec: an LFS-backed file's digest is read off the revision listing
+    /// (`?blobs=true`), so a download can be checked against it; a plain file
+    /// has none, and a malformed value is not taken as a digest.
+    #[test]
+    fn the_listing_gives_each_lfs_file_its_sha256() {
+        let sha = "a".repeat(64);
+        let info = serde_json::json!({"siblings": [
+            {"rfilename": "config.json", "size": 120},
+            {"rfilename": "model.safetensors", "size": 135, "lfs": {"size": 4000, "sha256": sha, "pointerSize": 135}},
+            {"rfilename": "bad.bin", "lfs": {"size": 9, "sha256": "not-hex"}},
+        ]});
+        assert_eq!(lfs_sha256(&info, "model.safetensors").as_deref(), Some(sha.as_str()));
+        assert_eq!(lfs_sha256(&info, "config.json"), None);
+        assert_eq!(lfs_sha256(&info, "bad.bin"), None);
+        assert_eq!(lfs_sha256(&info, "missing.bin"), None);
+    }
 
     #[test]
     fn hf_token_prefers_the_env_var_over_the_token_file() {

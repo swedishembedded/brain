@@ -80,6 +80,12 @@ pub fn stream_to_file(
             }
             progress(got, total);
         }
+        // A stream that ends short of its declared size is a dropped
+        // connection, not the file: renaming it into place would pass a
+        // truncated checkpoint off as complete.
+        if let Some(t) = total.filter(|&t| got < t) {
+            return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, format!("the download ended at {got} of its declared {t} bytes")));
+        }
         file.sync_all()?;
         if let (Some(expected), Some(h)) = (expected_sha256, hasher) {
             let digest = hex_lower(&h.finalize());
@@ -380,6 +386,21 @@ mod tests {
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0, "no .part and no destination remain");
         stream_to_file(&b"abc"[..], &dest, Some(3), None, &mut |_, _| {}).unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), b"abc");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Spec: a stream that ends before the size it declared is not the file:
+    /// the download is refused and leaves neither a `.part` nor the
+    /// destination, so a dropped connection cannot pass as a complete file.
+    #[test]
+    fn a_download_shorter_than_declared_is_refused() {
+        let dir = std::env::temp_dir().join(format!("brain-fetch-short-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("w.safetensors");
+        let err = stream_to_file(&b"abc"[..], &dest, Some(10), None, &mut |_, _| {}).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof, "{err}");
+        assert!(err.to_string().contains("3 of its declared 10"), "{err}");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0, "no .part and no destination remain");
         std::fs::remove_dir_all(&dir).ok();
     }
 
