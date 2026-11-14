@@ -13,6 +13,19 @@
 #
 #   samples/shell/api/claude-with-brain/claude-with-brain.sh              # interactive claude on the local model
 #   samples/shell/api/claude-with-brain/claude-with-brain.sh -p "hi"      # or pass any claude flags through
+#   samples/shell/api/claude-with-brain/claude-with-brain.sh --model Qwen/Qwen3-8B --port 9000 -- -p "hi"
+#
+# Options (before any claude flags; `--` ends them): --model REF, --port N,
+# --brain PATH (default ./target/release/brain), --models-dir DIR (default the
+# model store brain serve resolves), --max-output-tokens N, --ready-timeout
+# SECONDS (default 600: startup scans the whole model store), --no-autofetch,
+# --mock, --check.
+#
+# --max-output-tokens (default 8192) is the reply budget Claude Code asks for.
+# Claude Code otherwise asks for 32000 output tokens on top of a prompt of
+# about 20000 (its system prompt and tool definitions), sized for Claude's own
+# context; a request that cannot fit the local model's context is refused, so
+# the budget is set to fit.
 #
 # Nothing to pre-fetch or pre-import: MODEL doesn't have to be resident yet.
 # The server runs with `--autofetch`, so brain downloads +
@@ -39,20 +52,31 @@ set -uo pipefail
 CHECK=0
 MOCK=0
 AUTOFETCH=(--autofetch)
+PORT=8787
+MODEL=""
+BRAIN=./target/release/brain
+MODELS_DIR=()
+MAX_OUTPUT_TOKENS=8192
+READY_TIMEOUT=600
+need_value() { [ $# -ge 2 ] || { echo "error: $1 needs a value" >&2; exit 2; }; }
 while [ $# -gt 0 ]; do
   case "$1" in
     --check) CHECK=1 ;;
     --mock) MOCK=1 ;;   # serve the weight-free mock model instead
     --no-autofetch) AUTOFETCH=() ;;   # require MODEL already pulled
+    --model) need_value "$@"; MODEL="$2"; shift ;;
+    --port) need_value "$@"; PORT="$2"; shift ;;
+    --brain) need_value "$@"; BRAIN="$2"; shift ;;
+    --models-dir) need_value "$@"; MODELS_DIR=(--models-dir "$2"); shift ;;
+    --max-output-tokens) need_value "$@"; MAX_OUTPUT_TOKENS="$2"; shift ;;
+    --ready-timeout) need_value "$@"; READY_TIMEOUT="$2"; shift ;;
+    --) shift; break ;;
     *) break ;;
   esac
   shift
 done
-
-# ---- config (override via env) ----------------------------------------------
-PORT="${PORT:-8787}"
-MODEL="${MODEL:-$([ "$MOCK" = "0" ] && echo Qwen/Qwen3-0.6B || echo brain/mock)}"
-BRAIN="${BRAIN:-./target/release/brain}"
+[ -n "$MODEL" ] || MODEL="$([ "$MOCK" = "0" ] && echo Qwen/Qwen3-0.6B || echo brain/mock)"
+case "$PORT$MAX_OUTPUT_TOKENS$READY_TIMEOUT" in *[!0-9]*) echo "error: --port, --max-output-tokens and --ready-timeout take whole numbers" >&2; exit 2 ;; esac
 
 # ---- preflight --------------------------------------------------------------
 [ -x "$BRAIN" ] || { echo "error: brain binary not found at '$BRAIN' (build: make build/release)" >&2; exit 1; }
@@ -66,7 +90,7 @@ RUNDIR="$(mktemp -d)"
 READY="$RUNDIR/ready"
 KEYS="$RUNDIR/keys.json"   # 0600; the key is kept out of the server log
 if [ "$MOCK" = "0" ]; then
-  "$BRAIN" serve "${AUTOFETCH[@]}" --anthropic "$PORT" --api-keys-out "$KEYS" --ready-file "$READY" >"$LOG" 2>&1 &
+  "$BRAIN" serve "${AUTOFETCH[@]}" "${MODELS_DIR[@]}" --anthropic "$PORT" --api-keys-out "$KEYS" --ready-file "$READY" >"$LOG" 2>&1 &
 else
   # The mock models need no weights, so the server gets an empty store of its
   # own rather than scanning the user's.
@@ -82,13 +106,15 @@ trap cleanup EXIT INT TERM
 
 # Wait for the ready file: it is touched only once the listener is actually
 # bound AND (since it's written first) the keys file below is already on
-# disk -- so once this loop exits, no retry is needed for either.
-for _ in $(seq 1 60); do
+# disk -- so once this loop exits, no retry is needed for either. A server
+# that fails exits, which ends the wait at once; --ready-timeout bounds the
+# rest (the startup scan of a large model store takes minutes).
+for _ in $(seq 1 $((READY_TIMEOUT * 2))); do
   [ -e "$READY" ] && break
   kill -0 "$BRAIN_PID" 2>/dev/null || { echo "error: brain server exited on startup:" >&2; cat "$LOG" >&2; exit 1; }
   sleep 0.5
 done
-[ -e "$READY" ] || { echo "error: brain server never became ready:" >&2; cat "$LOG" >&2; exit 1; }
+[ -e "$READY" ] || { echo "error: brain server not ready after ${READY_TIMEOUT}s (--ready-timeout):" >&2; cat "$LOG" >&2; exit 1; }
 
 # brain generates a fresh key each launch and writes it to $KEYS.
 API_KEY="$(sed -n 's/.*"anthropic": *"\([^"]*\)".*/\1/p' "$KEYS" 2>/dev/null | head -1)"
@@ -116,6 +142,7 @@ export ANTHROPIC_MODEL="$MODEL"
 export ANTHROPIC_DEFAULT_HAIKU_MODEL="$MODEL"
 export ANTHROPIC_DEFAULT_SONNET_MODEL="$MODEL"
 export ANTHROPIC_DEFAULT_OPUS_MODEL="$MODEL"
+export CLAUDE_CODE_MAX_OUTPUT_TOKENS="$MAX_OUTPUT_TOKENS"
 export DISABLE_TELEMETRY=1 DISABLE_ERROR_REPORTING=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
 
 # ---- start Claude Code against brain ----------------------------------------

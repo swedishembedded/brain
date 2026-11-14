@@ -245,7 +245,7 @@ run_example() {
 # ------------------------------------------------------------- api/
 
 @test "samples/shell/api/claude-with-brain/claude-with-brain.sh --check runs against the mock" {
-  run env BRAIN="$BRAIN" PORT=8993 bash "$REPO/samples/shell/api/claude-with-brain/claude-with-brain.sh" --check --mock
+  run bash "$REPO/samples/shell/api/claude-with-brain/claude-with-brain.sh" --brain "$BRAIN" --port 8993 --check --mock
   if [ "$status" -ne 0 ]; then
     echo "$output" >&3
   fi
