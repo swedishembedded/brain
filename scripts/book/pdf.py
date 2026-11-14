@@ -19,7 +19,7 @@ implementation; the book adds the book class and docs/pandoc/book.tex.
     scripts/book/pdf.py               # the whole book and every written volume
     scripts/book/pdf.py --whole       # -> build/book/brain-book.{md,pdf}
     scripts/book/pdf.py --volumes     # every written volume, each on its own
-    scripts/book/pdf.py --volume v05  # -> build/book/volumes/brain-book-v05-<dir>.{md,pdf}
+    scripts/book/pdf.py --volume v05  # -> build/book/volumes/FFPIM-Volume-05-<Title>.{md,pdf}
     scripts/book/pdf.py -j 3          # how many PDFs typeset at once (default 2)
 
 Requires pandoc, xelatex and rsvg-convert (pandoc converts the SVG figures).
@@ -264,6 +264,16 @@ def typeset(name: str, title: str, subtitle: str, volume=None) -> list[str]:
     return [f"{name}: {p}" for p in problems]
 
 
+def volume_file(book, n: int) -> str:
+    """The file name of volume `n` (from 0) without its extension: the
+    initials of the book's title, the volume number in two digits so the
+    files sort in reading order, and the volume's title in capitalized
+    words, e.g. FFPIM-Volume-02-What-Does-It-Mean-To-Learn."""
+    acronym = "".join(w[0] for w in book.title.split() if w[0].isupper())
+    words = re.findall(r"[A-Za-z0-9]+", book.volumes[n].title)
+    return f"{acronym}-Volume-{n + 1:02d}-" + "-".join(w[0].upper() + w[1:] for w in words)
+
+
 def jobs(args: list[str]) -> list[tuple]:
     """(name, title, subtitle, volume) of every PDF the arguments ask for."""
     book = load()
@@ -271,7 +281,7 @@ def jobs(args: list[str]) -> list[tuple]:
     written = [v for v in book.volumes if any(ch.written for ch in v.chapters)]
     def of(v):
         n = book.volumes.index(v)
-        return (f"volumes/brain-book-{v.dir}", f"Volume {ROMAN[n]}: {v.title}", book.title, v)
+        return (f"volumes/{volume_file(book, n)}", f"Volume {ROMAN[n]}: {v.title}", book.title, v)
     if "--whole" in args:
         return [whole]
     if "--volumes" in args:

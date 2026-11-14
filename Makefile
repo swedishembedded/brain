@@ -2032,7 +2032,7 @@ book:
 book/pdf:
 	scripts/book/pdf.py --whole
 
-## book/volumes - typeset each written volume on its own -> build/book/volumes/brain-book-vNN-<name>.pdf
+## book/volumes - typeset each written volume on its own -> build/book/volumes/FFPIM-Volume-NN-<Title>.pdf
 book/volumes:
 	scripts/book/pdf.py --volumes
 
