@@ -40,7 +40,8 @@ text and `finish_reason: "cancelled"` (`.agents/rules/serving-contract.md`).
       and there is no allow list.
 - [ ] **C5. Close the entry-only loops** listed under "Open" below: actions
       that declare the bit and check on entry, but whose long loop lives in a
-      library function with no stop hook yet.
+      library function with no stop hook yet. Open: qwen3 `toolcall_gen` and
+      minicpmv `export_peft`.
 
 ## One terminal rule (2026-11-14)
 
@@ -91,22 +92,21 @@ release on the early return, and the bit declared.
 | splat | merge, prune | per chunk, stage and 4096 gaussians | `certify` on synthetic scenes |
 | forecast | compare | per scored window | `certify` |
 | chronos2, fincast, timesfm3, glmdsa, lfm2, qwen3, qwen3omnimoe, qwen3tts | import | per source tensor; a stopped import leaves no file | `certify` on tiny fixtures |
+| qwen3 | export (hf, gguf), export_peft | per tensor read for a shard or the GGUF; per pair assembled for the PEFT adapter; a stopped export removes every shard and the unfinished file, and the PEFT directory is never created | `certify` on a tiny model and a tiny adapter (the GGUF over `write_gguf` with an empty tokenizer block: the tokenizer families need the model store) |
+| qwen35 | import (GGUF, Hugging Face directory) | per source tensor, the MTP head included; per converted tensor; a stopped run removes the file, the copied config and tokenizer files and a directory it made | `certify` on the synthetic GGUF and a tiny Hugging Face fixture |
+| huginn, ouro, diamond | import | per source tensor; a stopped import leaves no file (diamond reads its `.pt` whole before the write loop, which is the part a stop cannot cut short) | `certify` on the release fixtures and a random reference checkpoint |
+| qwen3 | eval, calib, toolcall_eval | per sample (base, paged and adapter passes), per calibration prompt and per layer read-back, per case | `certify` through the action on a tiny checkpoint |
+| trainjob | check_dataset (chat, preference, timeline), merge | per record, per line; per tensor of the folded export (`ChatTrainer::export_checkpoint` takes the callback in qwen3, qwen35, qwen35moe and ricursive; the families with no Hugging Face writer copy the weights in 8 MiB chunks) | `certify` over `brain::merge_adapter` and `brain::dataset_report::check_dataset` on the tiny chat model, over the chunked copy, and over `timeline_report` |
 | one-shots | lfm2 embed/fill_mask, sam2 segment, yolov8 detect, scrfd, arcface, clip, zipdepth infer, codeformer, t5encoder, vqgan, worldmirror2, splat render, imageops, demo, the mocks | entry | the catalog C2 test where the provider builds without weights |
 | already polling | the `SeqState` models, qwen3vl lora_train, flux2, wan, ltxv, qwen3tts synth/clone/design, supir, splat fit, deepseekvl, januspro, sam2 track, recon | entry check added where it was missing | their existing tests; C2 for admission |
 
 ## Open
 
-- **Entry check only, loop without a stop hook**: the `export` actions
-  (qwen3 `export_hf`/`export_gguf`/`export_peft`), qwen35's `import` and
-  `convert` (`gguf_import`, `fp8_source::write_converted_base`), huginn, ouro
-  and diamond `import`, qwen3's eval actions (`eval_actions.rs`), and trainjob
-  `check_dataset` (the per-record loop of `brain::check_dataset`) and `merge`
-  (`brain::merge_adapter` reaches each architecture's `export_checkpoint`
-  through `ChatEntry::export`). Each needs its library loop to take a
-  keep-going callback: `Invocation::keep_going` builds one that reports a
-  progress step per ask and answers whether the token is unfired,
-  `WeightReader::for_each_while` and `save_while` ask before each tensor, and
-  `StWriter::abandon` removes the unfinished file.
+- **Entry check only, loop without a stop hook**: qwen3 `toolcall_gen` (the
+  dataset writer `data::chat::prepare_chat` tokenizes and writes every case
+  in one call) and minicpmv `export_peft` (its only fixture is the real
+  checkpoint, so a stop cannot be proved here; the library takes the
+  callback through `PeftAdapter::write`).
 - Real-weight mid-run proofs to run on a box with the checkpoints: llava
   caption, the SDK's `ask_stream`, flux1 and pulid, s3dit's edit actions,
   cosyvoice's flow loop, qwen3asr (the test above, with the LibriSpeech clip).
