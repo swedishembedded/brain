@@ -32,7 +32,7 @@ pub const MODEL: &str = "brain/lpips";
 const DISTANCE: &str = "distance";
 
 fn distance_spec() -> ActionSpec {
-    ActionSpec::new(DISTANCE, "LPIPS (AlexNet, v0.1) perceptual distance between two same-sized images")
+    ActionSpec::new(DISTANCE, "LPIPS (AlexNet, v0.1) perceptual distance between two same-sized images").cancellable()
         .input(BlobSpec::new("a", Media::Image, "the first RGB image").required())
         .input(BlobSpec::new("b", Media::Image, "the second RGB image, the same size as the first").required())
 }
@@ -81,6 +81,7 @@ impl Action for DistanceAction {
     }
 
     fn run(&self, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         // Decode before touching the weights: a bad request is refused without
         // reading the checkpoint.
         let (a, w, h) = capability::blob::decode_image(inv, "a")?;

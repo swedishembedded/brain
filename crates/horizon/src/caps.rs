@@ -72,7 +72,7 @@ pub fn predict_spec() -> ActionSpec {
     ActionSpec::new(
         "predict",
         "outcome probabilities over time for each subject of a timeline-v1 file, or a structured risk forecast for each patient history",
-    )
+    ).cancellable()
     .param(
         ParamSpec::new(
             "weights",
@@ -391,7 +391,8 @@ pub fn predict(loaded: &impl Members, inv: &Invocation) -> ActionResult {
 /// each answer equals the request run by itself.
 pub fn predict_batch(loaded: &impl Members, invs: &[Invocation]) -> Vec<ActionResult> {
     let lead = &loaded.members()[0];
-    let parsed: Vec<Result<Request, String>> = invs.iter().map(|inv| parse_request(lead, inv)).collect();
+    // A cancelled request fails alone, before its subjects join the shared forward.
+    let parsed: Vec<Result<Request, String>> = invs.iter().map(|inv| inv.cancel.check().and_then(|()| parse_request(lead, inv))).collect();
     let subjects: Vec<Subject> = parsed
         .iter()
         .flatten()
@@ -473,6 +474,7 @@ impl Action for PredictAction {
     }
 
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         let dir = inv
             .get_str("weights")
             .ok_or("horizon: missing required param 'weights'")?;
@@ -495,6 +497,7 @@ impl Action for TrainAction {
         train_spec()
     }
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         lifecycle::train(inv, progress)
     }
 }
@@ -506,6 +509,7 @@ impl Action for EvalAction {
         eval_spec()
     }
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         let dir = inv.get_str("weights").ok_or("horizon: missing required param 'weights'")?;
         let loaded = Loaded::load(Path::new(&dir)).map_err(|e| format!("horizon: {e}"))?;
         progress(Progress::step(1, 1, "eval"));
@@ -520,6 +524,7 @@ impl Action for CalibrateAction {
         calibrate_spec()
     }
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         progress(Progress::step(1, 1, "calibrate"));
         lifecycle::calibrate(inv)
     }

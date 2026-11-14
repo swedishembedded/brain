@@ -100,7 +100,7 @@ fn unit_norm(pre: &Preprocess) -> imaging::Normalization {
 }
 
 pub fn embed_spec() -> ActionSpec {
-    ActionSpec::new("embed", "512-d ArcFace identity embedding of the primary face (L2-normalised)")
+    ActionSpec::new("embed", "512-d ArcFace identity embedding of the primary face (L2-normalised)").cancellable()
         .param(ParamSpec::new(
             "align",
             ParamType::Bool,
@@ -311,6 +311,7 @@ impl Action for EmbedAction {
         embed_spec()
     }
     fn run(&self, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         self.hot.try_get(
             self.dir.clone(),
             || ArcFaceSession::load(&self.dir, Gpu::new(&SERVING_PIPELINES)),

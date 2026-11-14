@@ -13,7 +13,7 @@ use serde_json::json;
 pub const MODEL: &str = "brain/yolov5";
 
 pub fn manifest() -> Manifest {
-    let detect = ActionSpec::new("detect", "detect objects in an image (letterbox -> forward -> anchor decode -> NMS)")
+    let detect = ActionSpec::new("detect", "detect objects in an image (letterbox -> forward -> anchor decode -> NMS)").cancellable()
         .param(ParamSpec::new("weights", ParamType::Str, "path to a brain-format YOLOv5 checkpoint (.safetensors)").required())
         .param(ParamSpec::new("conf", ParamType::Float, "confidence threshold (objectness x class score)").default(json!(0.25)))
         .param(ParamSpec::new("iou", ParamType::Float, "NMS IoU threshold").default(json!(0.45)))

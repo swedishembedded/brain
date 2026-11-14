@@ -53,7 +53,7 @@ pub fn train_spec() -> ActionSpec {
     ActionSpec::new(
         "train",
         "train a timeline model (or an ensemble) on a timeline-v1 dataset, early-stopping on held-out subjects; the model directory appears only when training completes",
-    )
+    ).cancellable()
     .training()
     .streaming()
     .param(
@@ -103,7 +103,7 @@ pub fn eval_spec() -> ActionSpec {
     ActionSpec::new(
         "eval",
         "judge a saved model on held-out subjects: per outcome and horizon Uno C, time-dependent AUC, IPCW Brier, integrated Brier, calibration and event NLL",
-    )
+    ).cancellable()
     .param(
         ParamSpec::new("weights", ParamType::Str, "directory of a saved timeline model (not an ensemble: evaluate a member)")
             .required()
@@ -120,7 +120,7 @@ pub fn calibrate_spec() -> ActionSpec {
     ActionSpec::new(
         "calibrate",
         "fit calibrators for the given horizons on validation subjects the model was neither trained nor early-stopped on",
-    )
+    ).cancellable()
     .param(
         ParamSpec::new("weights", ParamType::Str, "directory of a saved timeline model (not an ensemble)")
             .required()

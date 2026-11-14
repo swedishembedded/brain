@@ -75,7 +75,7 @@ const fn serving_set() -> [(&'static str, &'static str); N_MODEL + 2] {
 /// The `restore_face` schema. One function, so the [`Provider`], the residency
 /// adapter and the static manifest cannot drift apart.
 pub fn restore_spec() -> ActionSpec {
-    ActionSpec::new("restore_face", "blind face restoration with a fidelity dial (CodeFormer)")
+    ActionSpec::new("restore_face", "blind face restoration with a fidelity dial (CodeFormer)").cancellable()
         .param(
             ParamSpec::new("w", ParamType::Float, "identity-fidelity dial: 0 = maximum quality, 1 = maximum fidelity to the input").min(0.0).max(capability::bounds::UNIT)
                 .default(json!(0.5)),
@@ -227,6 +227,7 @@ impl Action for RestoreAction {
         restore_spec()
     }
     fn run(&self, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         self.hot.try_get(
             self.weights.clone(),
             || Ok(Session::new(load(&self.weights, Gpu::new(&SERVING_PIPELINES))?)),

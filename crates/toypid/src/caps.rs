@@ -45,7 +45,7 @@ fn weights_param() -> ParamSpec {
 pub fn train_spec() -> ActionSpec {
     let d = TrainCfg::default();
     let int = |name: &str, what: &str, default: f64, min: f64, max: f64| ParamSpec::new(name, ParamType::Int, what).default(json!(default as u64)).min(min).max(max);
-    ActionSpec::new("train", "train the controller on simulated plant trajectories, then report it in closed loop on the training and interpolated plants")
+    ActionSpec::new("train", "train the controller on simulated plant trajectories, then report it in closed loop on the training and interpolated plants").cancellable()
         .training()
         .streaming()
         .from_scratch()
@@ -72,11 +72,11 @@ pub fn train_spec() -> ActionSpec {
 }
 
 pub fn rollout_spec() -> ActionSpec {
-    ActionSpec::new("rollout", "run a checkpoint in closed loop on the training and interpolated plants, against each plant's oracle controller").param(weights_param())
+    ActionSpec::new("rollout", "run a checkpoint in closed loop on the training and interpolated plants, against each plant's oracle controller").cancellable().param(weights_param())
 }
 
 pub fn profile_spec() -> ActionSpec {
-    ActionSpec::new("profile", "time one inference (a forward to the DECIDE position) over a context of the given length")
+    ActionSpec::new("profile", "time one inference (a forward to the DECIDE position) over a context of the given length").cancellable()
         .param(weights_param())
         .param(ParamSpec::new("cycles", ParamType::Int, "timed inferences").default(json!(100)).min(1.0).max(MAX_CYCLES))
         .param(ParamSpec::new("warmup", ParamType::Int, "untimed inferences first").default(json!(10)).min(0.0).max(MAX_CYCLES))
@@ -119,6 +119,7 @@ impl Action for ToyPidAction {
     }
 
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         let n = |name: &str, default: u64| inv.get_i64(name).map_or(default, |v| v.max(0) as u64);
         let weights = || inv.get_str("weights").ok_or_else(|| format!("toypid {}: missing required param 'weights'", self.spec.name));
         match self.spec.name.as_str() {
@@ -147,7 +148,8 @@ impl Action for ToyPidAction {
                     !inv.cancel.is_cancelled()
                 })?;
                 if t.steps < tc.steps {
-                    return Err(format!("cancelled after step {} (the checkpoint so far is at {})", t.steps, tc.out));
+                    progress(Progress::step(t.steps, tc.steps, format!("cancelled; the checkpoint so far is at {}", tc.out)));
+                    return Err(capability::failure::CANCELLED.to_string());
                 }
                 let dec = Pid::new(t.cfg.clone(), 1, t.cfg.block_size, &weights_of(&t.model));
                 Ok(Outcome::new()

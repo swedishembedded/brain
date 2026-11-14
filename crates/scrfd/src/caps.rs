@@ -77,7 +77,7 @@ fn unit_norm(pre: &Preprocess) -> imaging::Normalization {
 }
 
 pub fn detect_spec() -> ActionSpec {
-    ActionSpec::new("detect", "detect faces: boxes, scores and 5-point landmarks (SCRFD-10GF)")
+    ActionSpec::new("detect", "detect faces: boxes, scores and 5-point landmarks (SCRFD-10GF)").cancellable()
         .param(ParamSpec::new("max_faces", ParamType::Int, "keep at most N faces, highest score first (0 = all)").min(0.0).max(10000.0).default(json!(0)))
         .input(BlobSpec::new("image", Media::Image, "the image to detect faces in").required())
 }
@@ -226,6 +226,7 @@ impl Action for DetectAction {
         detect_spec()
     }
     fn run(&self, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         self.hot.try_get(
             self.dir.clone(),
             || ScrfdSession::load(&self.dir, Gpu::new(&SERVING_PIPELINES)),

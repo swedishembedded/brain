@@ -96,6 +96,7 @@ struct Sam2Instance {
 
 impl Instance for Sam2Instance {
     fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         // The batch callback carries the batch index; a single invocation is
         // index 0, so the one-shot path forwards its progress unchanged.
         self.run_batch(action, std::slice::from_ref(inv), &mut |_, p| progress(p))
@@ -123,7 +124,7 @@ impl Instance for Sam2Instance {
             // session's encoder cache and pays the trunk, the rest hit it and
             // run the mask decoder alone.
             for i in group {
-                out[i] = Some(self.session.segment(&invs[i]));
+                out[i] = Some(invs[i].cancel.check().and_then(|()| self.session.segment(&invs[i])));
             }
         }
         out.into_iter().map(|r| r.expect("every index filled")).collect()

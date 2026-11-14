@@ -75,7 +75,7 @@ pub fn reconstruct_spec() -> ActionSpec {
     ActionSpec::new(
         "reconstruct",
         "multi-view 3D reconstruction: N unposed RGB frames in, a Gaussian-splat scene + per-frame cameras out (single feed-forward pass: DINOv2 + alternating-attention trunk + DPT/camera/Gaussian heads)",
-    )
+    ).cancellable()
     .param(ParamSpec::new("stride", ParamType::Int, "use every Nth frame of the capture").default(json!(1)).min(1.0).max(VIDEO_FRAMES))
     .param(ParamSpec::new("max_frames", ParamType::Int, "use at most this many frames, spread ACROSS the capture rather than taking a prefix (0 = a clip with a frame rate of its own gets 48, a set of stills is used whole)").default(json!(0)).min(0.0).max(VIDEO_FRAMES))
     .param(ParamSpec::new("fps", ParamType::Float, "resample a clip to this many frames per second before selecting (0 = the clip's own rate; needs a clip that states its frame rate)").default(json!(0.0)).min(0.0).max(FPS))
@@ -114,7 +114,7 @@ pub fn import_spec() -> ActionSpec {
     ActionSpec::new(
         "import",
         "convert the reference WorldMirror-2 checkpoint once into brain's own .safetensors container: config embedded, every tensor shape-verified against the model, streamed one tensor at a time",
-    )
+    ).cancellable()
     .from_scratch()
     .param(ParamSpec::new("source", ParamType::Str, "the reference model.safetensors, or a Hugging Face directory holding it, on the serving machine").required().host_resolved())
     .param(ParamSpec::new("dest", ParamType::Str, "where to write the converted .safetensors, on the serving machine").required().host_resolved())
@@ -214,13 +214,6 @@ impl Request {
     }
 }
 
-fn cancelled(inv: &Invocation) -> Result<(), String> {
-    if inv.cancel.is_cancelled() {
-        return Err("cancelled".to_string());
-    }
-    Ok(())
-}
-
 /// The frames the model will see: decoded from the `images` clip, narrowed by
 /// the request's selection, masked.
 fn gather(inv: &Invocation, sel: &FrameSel) -> Result<Vec<imaging::Rgb8>, String> {
@@ -273,7 +266,7 @@ fn map_frames(model: &Mirror, fi: usize, w: u32, h: u32) -> (ClipFrame, ClipFram
 /// The pass itself cannot be interrupted, so cancellation is honoured between
 /// its stages: before the trunk runs, before assembly, and between map frames.
 pub fn run_reconstruct(session: &mut Session, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
-    cancelled(inv)?;
+    inv.cancel.check()?;
     let req = Request::read(inv).map_err(|e| format!("worldmirror2 reconstruct: {e}"))?;
     let model = &mut session.model;
     let cfg = model.cfg.clone();
@@ -304,11 +297,11 @@ pub fn run_reconstruct(session: &mut Session, inv: &Invocation, progress: &mut d
         None => None,
     };
 
-    cancelled(inv)?;
+    inv.cancel.check()?;
     progress(Progress::step(1, 3, format!("running WorldMirror-2 on {s} frame(s) at {w}x{h}")));
     let known = scene::forward(model, &conformed.chw, s, size, priors.as_deref());
 
-    cancelled(inv)?;
+    inv.cancel.check()?;
     progress(Progress::step(2, 3, "assembling the scene"));
     let built = scene::build(model, &conformed.chw, s, size, known.as_deref(), &req.scene);
     let ply = splat::ply::serialize(&built.splats)?;
@@ -323,7 +316,7 @@ pub fn run_reconstruct(session: &mut Session, inv: &Invocation, progress: &mut d
     if req.maps {
         let (mut depth, mut normals) = (Vec::with_capacity(s), Vec::with_capacity(s));
         for fi in 0..s {
-            cancelled(inv)?;
+            inv.cancel.check()?;
             let (d, n) = map_frames(model, fi, w, h);
             depth.push(d);
             normals.push(n);
@@ -344,7 +337,7 @@ pub fn run_reconstruct(session: &mut Session, inv: &Invocation, progress: &mut d
 // ===================== import =====================
 
 fn run_import(inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
-    cancelled(inv)?;
+    inv.cancel.check()?;
     let (source, dest) = (inv.get_str("source").unwrap_or_default(), inv.get_str("dest").unwrap_or_default());
     if source.is_empty() || dest.is_empty() {
         return Err("worldmirror2 import: 'source' and 'dest' are both required".to_string());
@@ -421,6 +414,7 @@ impl Action for ReconstructAction {
         reconstruct_spec()
     }
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         let weights = self.weights.clone().ok_or("worldmirror2 reconstruct: no checkpoint: put one in the model store, or name it with --weights (`import` converts the reference release)")?;
         self.hot.try_get_mut(weights.clone(), || load(&weights, Gpu::new(crate::model::PIPELINES)), |s| run_reconstruct(s, inv, progress))
     }

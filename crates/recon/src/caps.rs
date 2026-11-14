@@ -86,7 +86,7 @@ fn cameras_output(what: &str) -> BlobSpec {
 }
 
 pub fn sfm_spec() -> ActionSpec {
-    ActionSpec::new("sfm", "structure from motion alone: the cameras and the sparse point cloud of a set of photographs, for inspection or for a fit")
+    ActionSpec::new("sfm", "structure from motion alone: the cameras and the sparse point cloud of a set of photographs, for inspection or for a fit").cancellable()
         .param(images_param())
         .param(ParamSpec::new("halvings", ParamType::Int, "the training resolution of the cameras, as exact 2x2 box-downsamplings of the photographs' own: structure from motion runs on the full photographs, the fit on their own pixels through their own lens, this many halvings below").default(json!(0)).min(0.0).max(MAX_HALVINGS))
         .param(focal_guess_param())
@@ -97,7 +97,7 @@ pub fn sfm_spec() -> ActionSpec {
 
 pub fn train_spec() -> ActionSpec {
     let d = PhotoCfg::default();
-    ActionSpec::new("train", "photographs to a finished splat scene: structure from motion, multi-view stereo priors and a dense start, and the full reconstruction objective, rendered along each pixel's ray through its own lens")
+    ActionSpec::new("train", "photographs to a finished splat scene: structure from motion, multi-view stereo priors and a dense start, and the full reconstruction objective, rendered along each pixel's ray through its own lens").cancellable()
         .training()
         .streaming()
         .param(images_param())
@@ -135,11 +135,15 @@ impl Action for Sfm {
     }
 
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        if inv.cancel.is_cancelled() {
-            return Err("cancelled".to_string());
-        }
+        inv.cancel.check()?;
         let paths = photograph_paths(inv, "sfm")?;
-        let photos: Vec<imaging::Rgb8> = paths.iter().map(|p| imaging::load(p).map_err(|e| format!("splat sfm: {p}: {e}"))).collect::<Result<_, _>>()?;
+        let photos: Vec<imaging::Rgb8> = paths
+            .iter()
+            .map(|p| {
+                inv.cancel.check()?;
+                imaging::load(p).map_err(|e| format!("splat sfm: {p}: {e}"))
+            })
+            .collect::<Result<_, _>>()?;
         progress(Progress::step(0, 1, format!("structure from motion on {} photographs", photos.len())));
         let defaults = SfmCfg::default();
         let cfg = SfmCfg { focal_guess: inv.get_f64("focal_guess").unwrap_or(defaults.focal_guess), verbose: true, ..defaults };
@@ -168,13 +172,17 @@ impl Action for Train {
     }
 
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        if inv.cancel.is_cancelled() {
-            return Err("cancelled".to_string());
-        }
+        inv.cancel.check()?;
         let paths = photograph_paths(inv, "train")?;
         // as recorded: GPS places the scene, EXIF exposure starts the camera
         // model's, a linear or deep photograph keeps its precision
-        let photos: Vec<imaging::Photo> = paths.iter().map(|p| imaging::load_photo(p).map_err(|e| format!("splat train: {p}: {e}"))).collect::<Result<_, _>>()?;
+        let photos: Vec<imaging::Photo> = paths
+            .iter()
+            .map(|p| {
+                inv.cancel.check()?;
+                imaging::load_photo(p).map_err(|e| format!("splat train: {p}: {e}"))
+            })
+            .collect::<Result<_, _>>()?;
         let defaults = PhotoCfg::default();
         let iterations = inv.get_i64("iters").map(|v| v.max(1) as usize);
         let cfg = PhotoCfg {
@@ -201,9 +209,7 @@ impl Action for Train {
             !cancel.is_cancelled()
         })
         .map_err(|e| format!("splat train: {e}"))?;
-        if inv.cancel.is_cancelled() {
-            return Err("cancelled".to_string());
-        }
+        inv.cancel.check()?;
         Ok(Outcome::new()
             .set("photographs", json!(photos.len()))
             .set("placed", json!(res.source.len()))

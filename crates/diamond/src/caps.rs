@@ -49,7 +49,7 @@ fn model_params(spec: ActionSpec) -> ActionSpec {
 }
 
 pub fn import_spec() -> ActionSpec {
-    ActionSpec::new("import", "convert a reference DIAMOND agent checkpoint (agent.pt) into brain's checkpoint, every denoiser tensor verified; the reward/termination and actor-critic sub-models are not imported")
+    ActionSpec::new("import", "convert a reference DIAMOND agent checkpoint (agent.pt) into brain's checkpoint, every denoiser tensor verified; the reward/termination and actor-critic sub-models are not imported").cancellable()
         .from_scratch()
         .param(ParamSpec::new("source", ParamType::Str, "path of the reference agent.pt, on the serving machine").required().host_resolved())
         .param(ParamSpec::new("dest", ParamType::Str, "path to write the converted .safetensors to, on the serving machine").required().host_resolved())
@@ -57,12 +57,12 @@ pub fn import_spec() -> ActionSpec {
 }
 
 pub fn export_spec() -> ActionSpec {
-    ActionSpec::new("export", "write the checkpoint's UNet as an fp32 ONNX graph, which `rollout`, `replay` and `bench` run on the Intel NPU through OpenVINO (the sampler stays on the host)")
+    ActionSpec::new("export", "write the checkpoint's UNet as an fp32 ONNX graph, which `rollout`, `replay` and `bench` run on the Intel NPU through OpenVINO (the sampler stays on the host)").cancellable()
         .param(ParamSpec::new("dest", ParamType::Str, "path to write the .onnx to, on the serving machine").required().host_resolved())
 }
 
 pub fn finetune_spec() -> ActionSpec {
-    ActionSpec::new("finetune", "fine-tune the denoiser's convolutions on a recorded episode dataset (AdamW, batch 1), from the resolved checkpoint; a run whose loss diverges saves nothing")
+    ActionSpec::new("finetune", "fine-tune the denoiser's convolutions on a recorded episode dataset (AdamW, batch 1), from the resolved checkpoint; a run whose loss diverges saves nothing").cancellable()
         .training()
         .streaming()
         .param(ParamSpec::new("data", ParamType::Str, "directory of the recorded episode dataset to train on (from `rollout`'s record), on the serving machine").required().host_resolved())
@@ -76,7 +76,7 @@ pub fn finetune_spec() -> ActionSpec {
 }
 
 pub fn rollout_spec() -> ActionSpec {
-    model_params(ActionSpec::new("rollout", "play the world model headless over an action script and return the frames as a clip, with a hash of the rollout that is equal for equal runs; optionally dump the frames or record them as an episode dataset"))
+    model_params(ActionSpec::new("rollout", "play the world model headless over an action script and return the frames as a clip, with a hash of the rollout that is equal for equal runs; optionally dump the frames or record them as an episode dataset").cancellable())
         .streaming()
         .from_scratch()
         .param(ParamSpec::new("frames", ParamType::Int, "steps to play: with an action script, 0 plays all of it and a smaller count cuts it short; without one, that many no-op steps (0 = one)").default(json!(0)).min(0.0).max(capability::bounds::VIDEO_FRAMES))
@@ -91,7 +91,7 @@ pub fn rollout_spec() -> ActionSpec {
 }
 
 pub fn replay_spec() -> ActionSpec {
-    model_params(ActionSpec::new("replay", "describe a recorded episode dataset and, with verify, re-generate it through the model and compare frame by frame; the noise streams align when seed and denoise_steps match the recording's"))
+    model_params(ActionSpec::new("replay", "describe a recorded episode dataset and, with verify, re-generate it through the model and compare frame by frame; the noise streams align when seed and denoise_steps match the recording's").cancellable())
         .from_scratch()
         .param(ParamSpec::new("episode", ParamType::Str, "directory of the recorded episode dataset, on the serving machine").required().host_resolved())
         .param(ParamSpec::new("verify", ParamType::Bool, "re-generate the recording through the model and compare it").default(json!(false)))
@@ -100,7 +100,7 @@ pub fn replay_spec() -> ActionSpec {
 }
 
 pub fn bench_spec() -> ActionSpec {
-    model_params(ActionSpec::new("bench", "per-frame timings of an unpaced run, or with profile the per-kernel time of one UNet forward"))
+    model_params(ActionSpec::new("bench", "per-frame timings of an unpaced run, or with profile the per-kernel time of one UNet forward").cancellable())
         .from_scratch()
         .param(ParamSpec::new("frames", ParamType::Int, "steps to time").default(json!(200)).min(1.0).max(MAX_BENCH_FRAMES))
         .param(ParamSpec::new("profile", ParamType::Bool, "instead time each kernel of one UNet forward (one submit per step: for ranking kernels, not absolute time; diamond only)").default(json!(false)))
@@ -150,6 +150,7 @@ impl Action for DiamondAction {
     }
 
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         match self.name.as_str() {
             "import" => import(inv),
             "export" => self.export(inv),

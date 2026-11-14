@@ -119,6 +119,7 @@ fn embedding_outcome(v: &[f32], tower: &str) -> Outcome {
 
 impl Instance for ClipInstance {
     fn run(&mut self, action: &str, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         self.session.run(action, inv)
     }
 
@@ -144,6 +145,10 @@ impl Instance for ClipInstance {
         let mut groups: std::collections::BTreeMap<String, (Vec<usize>, Vec<String>)> = Default::default();
         let mut out: Vec<Option<ActionResult>> = (0..invs.len()).map(|_| None).collect();
         for (i, inv) in invs.iter().enumerate() {
+            if inv.cancel.is_cancelled() {
+                out[i] = Some(Err(capability::failure::CANCELLED.to_string()));
+                continue;
+            }
             let tower = inv.get_str("tower").unwrap_or_else(|| "clip_l".into());
             match inv.get_str("text") {
                 Some(t) => {

@@ -143,6 +143,7 @@ struct ArcFaceInstance {
 
 impl Instance for ArcFaceInstance {
     fn run(&mut self, action: &str, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         self.session.run(action, inv)
     }
     // `run_batch` is deliberately the serial default - see the module docs: the

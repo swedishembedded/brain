@@ -24,12 +24,12 @@ use crate::tools::{self, CameraSet, PruneCfg};
 use crate::types::{cameras_from_json, Splats};
 
 pub fn info_spec() -> ActionSpec {
-    ActionSpec::new("info", "what a Gaussian-splat scene is: gaussian count, bounds, mean opacity and spherical-harmonic degree")
+    ActionSpec::new("info", "what a Gaussian-splat scene is: gaussian count, bounds, mean opacity and spherical-harmonic degree").cancellable()
         .input(BlobSpec::new("scene", Media::Bytes, "the scene: Inria-layout binary PLY").required())
 }
 
 pub fn orient_spec() -> ActionSpec {
-    ActionSpec::new("orient", "rigidly re-frame a scene so it opens the right way up: the plane the cameras orbit in is the scene's vertical, and their rays meet at its centre")
+    ActionSpec::new("orient", "rigidly re-frame a scene so it opens the right way up: the plane the cameras orbit in is the scene's vertical, and their rays meet at its centre").cancellable()
         .param(ParamSpec::new("y_up", ParamType::Bool, "make +Y up for a viewer that expects it; brain's own world is y-down, so by default up is -Y").default(json!(false)))
         .input(BlobSpec::new("scene", Media::Bytes, "the scene: Inria-layout binary PLY").required())
         .input(BlobSpec::new("cameras", Media::Text, "the cameras the scene was reconstructed with, as JSON in the shape the 'fit' action's 'views' takes; at least 3, orbiting the subject").required())
@@ -38,7 +38,7 @@ pub fn orient_spec() -> ActionSpec {
 }
 
 pub fn merge_spec() -> ActionSpec {
-    ActionSpec::new("merge", "chain chunks of one long capture into a single scene in the first chunk's world, aligning each onto the one before it by the frames they share")
+    ActionSpec::new("merge", "chain chunks of one long capture into a single scene in the first chunk's world, aligning each onto the one before it by the frames they share").cancellable()
         .param(ParamSpec::new("scenes", ParamType::Str, "comma-separated paths of the scene files on the serving machine, in capture order").required().host_resolved())
         .param(ParamSpec::new("cameras", ParamType::Str, "comma-separated paths of the cameras JSON files on the serving machine, one per scene in the same order").required().host_resolved())
         .param(ParamSpec::new("overlap", ParamType::Int, "how many trailing frames of each chunk lead the next one; at least 2, because a single shared frame fixes no scale").required().min(2.0).max(TRAIN_COUNT))
@@ -48,7 +48,7 @@ pub fn merge_spec() -> ActionSpec {
 }
 
 pub fn prune_spec() -> ActionSpec {
-    ActionSpec::new("prune", "fuse duplicate gaussians and drop the faint ones: a pixel-aligned reconstruction counts one surface once per view that saw it")
+    ActionSpec::new("prune", "fuse duplicate gaussians and drop the faint ones: a pixel-aligned reconstruction counts one surface once per view that saw it").cancellable()
         .param(ParamSpec::new("voxel", ParamType::Float, "fuse on a grid of this cell size in world units; 0 = use 'voxel_pixels'").default(json!(0.0)).min(0.0).max(MAX_WEIGHT))
         .param(ParamSpec::new("voxel_pixels", ParamType::Float, "fuse at the distance the cameras can resolve, in pixels at the median sampling rate - two gaussians closer than the finest detail any camera saw cannot be told apart by any training view; needs 'cameras'; 0 = off; ignored when 'voxel' is set").default(json!(2.0)).min(0.0).max(SIDE_PX))
         .param(ParamSpec::new("min_opacity", ParamType::Float, "drop gaussians fainter than this").default(json!(0.0)).min(0.0).max(UNIT))
@@ -114,6 +114,7 @@ pub(crate) fn merge(inv: &Invocation) -> ActionResult {
         .iter()
         .zip(&cameras)
         .map(|(scene, cams)| {
+            inv.cancel.check()?;
             let s = crate::ply::read(scene).map_err(|e| format!("splat merge: cannot read {scene}: {e}"))?;
             let text = std::fs::read_to_string(cams).map_err(|e| format!("splat merge: cannot read {cams}: {e}"))?;
             Ok((s, CameraSet::parse(&text).map_err(|e| format!("splat merge: {cams}: {e}"))?))

@@ -136,7 +136,7 @@ fn view_names() -> Vec<String> {
 }
 
 pub fn infer_spec() -> ActionSpec {
-    ActionSpec::new("infer", "dense relative inverse depth from a single image, and optionally a view of it: the map colorized beside the photo, a depth effect or a stereogram")
+    ActionSpec::new("infer", "dense relative inverse depth from a single image, and optionally a view of it: the map colorized beside the photo, a depth effect or a stereogram").cancellable()
         .param(ParamSpec::new("input", ParamType::Int, "model input (shorter side, x32); 0 = the checkpoint's native 384. The net is fully convolutional: work scales with the square, so 256 is about 2.3x quicker and mildly softer").min(0.0).max(capability::bounds::SIZE_PX).default(json!(0)))
         .param(ParamSpec::new("view", ParamType::Enum(view_names()), "also render the depth as: side (photo | colorized depth), depth (colorized), fog or blur (depth effects on the photo), stereo (random-dot autostereogram), stereo-image (one patterned with the photo), stereo-dual (cross-eye pair); none = only the map").default(json!("none")))
         .param(ParamSpec::new("colormap", ParamType::Enum(vec!["turbo".into(), "gray".into(), "grayinv".into()]), "how the view colors depth").default(json!("turbo")))
@@ -148,7 +148,7 @@ pub fn infer_spec() -> ActionSpec {
 }
 
 pub fn train_spec() -> ActionSpec {
-    ActionSpec::new("train", "train ZipDepth on RGB to depth pairs (a paired directory, or synthetic scenes) with the MiDaS loss (scale-and-shift-invariant MSE plus multi-scale gradient matching on inverse depth), backward and AdamW: from the resolved checkpoint (fine-tune), or from freshly initialized weights when there is none or `fresh` asks")
+    ActionSpec::new("train", "train ZipDepth on RGB to depth pairs (a paired directory, or synthetic scenes) with the MiDaS loss (scale-and-shift-invariant MSE plus multi-scale gradient matching on inverse depth), backward and AdamW: from the resolved checkpoint (fine-tune), or from freshly initialized weights when there is none or `fresh` asks").cancellable()
         .training()
         .streaming()
         .from_scratch()
@@ -170,7 +170,7 @@ pub fn train_spec() -> ActionSpec {
 const MAX_BATCH: f64 = 1_024.0;
 
 pub fn calib_spec() -> ActionSpec {
-    ActionSpec::new("calib", "per-layer activation outlier ratios (absmax / p99.99) over a folder of images, encoder against decoder: the data for choosing which layers keep full precision under INT8")
+    ActionSpec::new("calib", "per-layer activation outlier ratios (absmax / p99.99) over a folder of images, encoder against decoder: the data for choosing which layers keep full precision under INT8").cancellable()
         .param(ParamSpec::new("images", ParamType::Str, "folder of calibration images on the serving machine (read in name order; files that are not images are skipped)").required().host_resolved())
         .param(ParamSpec::new("max", ParamType::Int, "most images to read").default(json!(100)).min(1.0).max(MAX_CALIB_IMAGES))
         .param(ParamSpec::new("top", ParamType::Int, "layers listed, most INT8-hostile first").default(json!(20)).min(1.0).max(MAX_CALIB_IMAGES))
@@ -260,6 +260,7 @@ impl Action for InferAction {
     }
 
     fn run(&self, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         let weights = need(&self.weights, "infer")?;
         let (hwc, w, h) = capability::blob::decode_image(inv, "image")?;
         let bench = inv.get_i64("bench").unwrap_or(0).max(0) as usize;
@@ -273,13 +274,13 @@ impl Action for InferAction {
             }
             // The first predict paid the one-time costs (pipeline build,
             // packing); these repeats are the steady state a stream sees.
-            let mut ms: Vec<f64> = (0..bench)
-                .map(|_| {
-                    let t = std::time::Instant::now();
-                    let _ = predictor.predict(&hwc, w, h);
-                    t.elapsed().as_secs_f64() * 1000.0
-                })
-                .collect();
+            let mut ms: Vec<f64> = Vec::new();
+            for _ in 0..bench {
+                inv.cancel.check()?;
+                let t = std::time::Instant::now();
+                let _ = predictor.predict(&hwc, w, h);
+                ms.push(t.elapsed().as_secs_f64() * 1000.0);
+            }
             ms.sort_by(f64::total_cmp);
             let mean = ms.iter().sum::<f64>() / ms.len() as f64;
             Ok(outcome.set("bench_ms", json!({"frames": ms.len(), "min": ms[0], "median": ms[ms.len() / 2], "mean": mean})))
@@ -324,6 +325,7 @@ impl Action for TrainAction {
     }
 
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         let save = inv.get_str("save").ok_or("zipdepth train: missing required param 'save'")?;
         let (w, h) = (inv.get_i64("width").unwrap_or(64) as u32, inv.get_i64("height").unwrap_or(64) as u32);
         if w % 32 != 0 || h % 32 != 0 {
@@ -402,13 +404,14 @@ impl Action for CalibAction {
     }
 
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         let weights = need(&self.weights, "calib")?;
         let dir = inv.get_str("images").ok_or("zipdepth calib: missing required param 'images'")?;
         let max = inv.get_i64("max").unwrap_or(100).max(1) as usize;
         let top = inv.get_i64("top").unwrap_or(20).max(1) as usize;
         self.hot.try_get(weights.clone(), || DepthModel::load(&weights), |hot| {
             let cfg = with_input(&hot.cfg, inv);
-            let images = calibration_images(&dir, cfg.input, max)?;
+            let images = calibration_images(&dir, cfg.input, max, &inv.cancel)?;
             progress(Progress::step(0, 1, format!("calibrating on {} images", images.len())));
             let params: Vec<(String, usize)> = cfg.param_list().into_iter().map(|(name, s)| (name, s.iter().product())).collect();
             let ps = paramstore::ParamStore::new(&hot.gpu, params, &hot.init);
@@ -438,7 +441,7 @@ impl Action for CalibAction {
 /// predictor prepares a frame (aspect-preserving resize so the shorter side is
 /// `input`, both sides rounded to 32, no pad): INT8 scales fitted to any
 /// other geometry describe activations the model never produces.
-fn calibration_images(dir: &str, input: u32, max: usize) -> Result<Vec<crate::CalibImage>, String> {
+fn calibration_images(dir: &str, input: u32, max: usize, cancel: &capability::CancelToken) -> Result<Vec<crate::CalibImage>, String> {
     let mut paths: Vec<std::path::PathBuf> = std::fs::read_dir(dir).map_err(|e| format!("zipdepth calib: {dir}: {e}"))?.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.is_file()).collect();
     paths.sort();
     let mut out = Vec::new();
@@ -446,6 +449,7 @@ fn calibration_images(dir: &str, input: u32, max: usize) -> Result<Vec<crate::Ca
         if out.len() >= max {
             break;
         }
+        cancel.check()?;
         // Not every file in a folder is an image; those are skipped.
         let Ok(img) = imaging::load(&path) else { continue };
         let hwc: Vec<f32> = img.px.iter().map(|&b| b as f32 / 255.0).collect();
@@ -511,7 +515,7 @@ mod caps_tests {
         let dir = std::env::temp_dir().join(format!("zipdepth-calib-empty-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("notes.txt"), b"not an image").unwrap();
-        let err = calibration_images(dir.to_str().unwrap(), 384, 10).err().expect("refused");
+        let err = calibration_images(dir.to_str().unwrap(), 384, 10, &capability::CancelToken::default()).err().expect("refused");
         assert!(err.contains("no images"), "{err}");
         let _ = std::fs::remove_dir_all(&dir);
     }

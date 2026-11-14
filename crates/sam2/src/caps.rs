@@ -69,7 +69,7 @@ pub fn variant_config(name: &str) -> Result<Sam2Config, String> {
 /// The `segment` schema. Kept as one function so the [`Provider`], the residency
 /// adapter and the static manifest cannot drift apart.
 pub fn segment_spec() -> ActionSpec {
-    ActionSpec::new("segment", "promptable segmentation: point/box prompts on an image -> a mask (SAM 2.1)")
+    ActionSpec::new("segment", "promptable segmentation: point/box prompts on an image -> a mask (SAM 2.1)").cancellable()
         .param(ParamSpec::new("variant", ParamType::Enum(vec!["tiny".into(), "large".into()]), "released checkpoint variant").default(json!("tiny")))
         .param(ParamSpec::new(
             "points",
@@ -89,7 +89,7 @@ pub fn segment_spec() -> ActionSpec {
 
 /// The `track` schema, shared by the [`Provider`] and the residency adapter.
 pub fn track_spec() -> ActionSpec {
-    ActionSpec::new("track", "follow one object through a clip: clicks on one frame -> the object's mask on every frame (SAM 2.1 memory bank)")
+    ActionSpec::new("track", "follow one object through a clip: clicks on one frame -> the object's mask on every frame (SAM 2.1 memory bank)").cancellable()
         .streaming()
         .param(ParamSpec::new("variant", ParamType::Enum(vec!["tiny".into(), "large".into()]), "released checkpoint variant").default(json!("tiny")))
         .param(ParamSpec::new("points", ParamType::Str, "clicks ON the object in source pixels, 'x,y;x,y' - several pick one object together (head, coat and legs of a person)").required())
@@ -537,6 +537,7 @@ impl Action for SegmentAction {
         segment_spec()
     }
     fn run(&self, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         // Reject a malformed/absent prompt BEFORE a 150 MB checkpoint read.
         parse_prompt(inv)?;
         let variant = inv.get_str("variant").unwrap_or_else(|| "tiny".into());
@@ -559,6 +560,7 @@ impl Action for TrackAction {
         track_spec()
     }
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         let call = track_call(inv)?;
         let variant = inv.get_str("variant").unwrap_or_else(|| "tiny".into());
         let key = format!("{}:{variant}", self.weights);

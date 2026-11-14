@@ -75,7 +75,7 @@ fn variant_cfg(name: &str) -> Result<T5Config, String> {
 }
 
 fn encode_spec() -> ActionSpec {
-    ActionSpec::new("encode", "Encode a string with T5-XXL or umT5-XXL, returning its last hidden state.")
+    ActionSpec::new("encode", "Encode a string with T5-XXL or umT5-XXL, returning its last hidden state.").cancellable()
         .param(ParamSpec::new("text", ParamType::Str, "the string to encode").required())
         .param(
             ParamSpec::new("variant", ParamType::Str, "flux_xxl (FLUX.1, unmasked) or wan_umt5 (Wan2.1/2.2, masked)")
@@ -266,6 +266,7 @@ impl Action for T5encoderAction {
         encode_spec()
     }
     fn run(&self, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         let session = self.hot.get_cloned(self.dir.clone(), || Ok(Arc::new(Session::load(&self.dir, Gpu::new(crate::model::PIPELINES))?)))?;
         session.run("encode", inv)
     }

@@ -104,6 +104,7 @@ struct WorldMirror2Instance {
 
 impl Instance for WorldMirror2Instance {
     fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         if action != "reconstruct" {
             return Err(format!("worldmirror2: unknown action '{action}'"));
         }

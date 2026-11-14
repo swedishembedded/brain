@@ -50,7 +50,7 @@ fn contract() -> VideoContract {
 }
 
 fn t2v_spec() -> ActionSpec {
-    ActionSpec::new("t2v", "deterministic mock text-to-video: one flat colour per frame")
+    ActionSpec::new("t2v", "deterministic mock text-to-video: one flat colour per frame").cancellable()
         .streaming()
         .param(ParamSpec::new("prompt", ParamType::Str, "the prompt (only its presence is checked)").required())
         .param(ParamSpec::new("frames", ParamType::Int, "frames, of the form 1 + 8k").default(json!(9)).min(1.0).max(321.0))
@@ -65,7 +65,7 @@ fn t2v_spec() -> ActionSpec {
 }
 
 fn extend_spec() -> ActionSpec {
-    ActionSpec::new("extend", "deterministic mock clip extension: the clip followed by new frames continuing its colour walk")
+    ActionSpec::new("extend", "deterministic mock clip extension: the clip followed by new frames continuing its colour walk").cancellable()
         .streaming()
         .input(BlobSpec::new("video", Media::Video, "the clip to continue, in the video blob wire format").required())
         .param(ParamSpec::new("prompt", ParamType::Str, "what the new part shows (only its presence is checked)").required())
@@ -97,6 +97,7 @@ struct MockVideoInstance;
 
 impl Instance for MockVideoInstance {
     fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         match action {
             "t2v" => t2v(inv, progress),
             "extend" => extend(inv, progress),
@@ -119,9 +120,7 @@ fn flat_frame(rgb: [u8; 3], w: u32, h: u32) -> (Vec<f32>, u32, u32) {
 fn draw(seed: i64, first: u32, count: u32, w: u32, h: u32, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> Result<Vec<(Vec<f32>, u32, u32)>, String> {
     let mut frames = Vec::with_capacity(count as usize);
     for i in 0..count {
-        if inv.cancel.is_cancelled() {
-            return Err("cancelled".into());
-        }
+        inv.cancel.check()?;
         frames.push(flat_frame(frame_rgb(seed, first + i), w, h));
         progress(Progress::step(i + 1, count, "frame"));
     }

@@ -65,21 +65,21 @@ pub fn manifest() -> Manifest {
         a.param(ParamSpec::new("text", ParamType::Str, "input text; falls back to the 'text' input blob for long documents"))
             .input(BlobSpec::new("text", Media::Text, "input document (used when the 'text' param is absent)"))
     };
-    let fill_mask = text(ActionSpec::new("fill_mask", "MLM top-k predictions at every <|mask|> position"))
+    let fill_mask = text(ActionSpec::new("fill_mask", "MLM top-k predictions at every <|mask|> position").cancellable())
         .param(ParamSpec::new("topk", ParamType::Int, "predictions per mask position").min(0.0).max(capability::bounds::TOP_K).default(json!(5)))
         .output(BlobSpec::new("predictions", Media::Text, "JSON: [{row, tokens: [{id, token, logit}]}]"));
-    let embed = text(ActionSpec::new("embed", "bidirectional encoding: per-token hidden states + mean-pooled embedding"))
+    let embed = text(ActionSpec::new("embed", "bidirectional encoding: per-token hidden states + mean-pooled embedding").cancellable())
         .param(ParamSpec::new("max_tokens", ParamType::Int, "truncate the input to this many tokens (0 = no limit)").min(0.0).max(capability::bounds::TOKENS).default(json!(0)))
         .param(
             ParamSpec::new("normalize", ParamType::Bool, "L2-normalize the mean-pooled embedding before returning it")
                 .default(json!(false)),
         )
         .output(BlobSpec::new("embeddings", Media::Bytes, "LE-f32 [n_tokens, dim] hidden states; shape in blob meta"));
-    let tokenize = ActionSpec::new("tokenize", "tokenize a text corpus with the checkpoint's tokenizer into the train and validation splits `finetune` and `eval` read")
+    let tokenize = ActionSpec::new("tokenize", "tokenize a text corpus with the checkpoint's tokenizer into the train and validation splits `finetune` and `eval` read").cancellable()
         .param(ParamSpec::new("corpus", ParamType::Str, "the text file on the serving machine").required().host_resolved())
         .param(ParamSpec::new("dest", ParamType::Str, "the directory to write train.u32.bin, val.u32.bin and meta.json to, on the serving machine").required().host_resolved())
         .param(ParamSpec::new("val_frac", ParamType::Float, "share of the tokens held out for validation").default(json!(0.05)).min(0.0).max(capability::bounds::UNIT));
-    let finetune = ActionSpec::new("finetune", "masked-language-model fine-tuning on a tokenized corpus, with periodic validation")
+    let finetune = ActionSpec::new("finetune", "masked-language-model fine-tuning on a tokenized corpus, with periodic validation").cancellable()
         .training()
         .streaming()
         .param(data_param())
@@ -90,13 +90,13 @@ pub fn manifest() -> Manifest {
         .param(ParamSpec::new("lr", ParamType::Float, "peak AdamW learning rate").default(json!(3e-5)).min(0.0).max(capability::bounds::UNIT))
         .param(ParamSpec::new("seed", ParamType::Int, "seeds the corruption and the batch order (omit for random)").min(0.0))
         .param(ParamSpec::new("activations", ParamType::Enum(model::saved::SavedPolicy::ACTIVATIONS_CHOICES.map(String::from).to_vec()), "what the backward keeps of the forward: every unit's intermediates, or only each unit's input, rebuilt in the backward for the same gradients at lower memory (default keep)"));
-    let eval = ActionSpec::new("eval", "pseudo-perplexity and masked-token accuracy on a tokenized validation split")
+    let eval = ActionSpec::new("eval", "pseudo-perplexity and masked-token accuracy on a tokenized validation split").cancellable()
         .param(data_param())
         .param(ParamSpec::new("batches", ParamType::Int, "validation batches").default(json!(8)).min(1.0).max(capability::bounds::TRAIN_COUNT))
         .param(batch_param())
         .param(seq_param(1024))
         .param(ParamSpec::new("seed", ParamType::Int, "seeds the masking, so two checkpoints are scored on the same corruption (omit for random)").min(0.0));
-    let import = ActionSpec::new("import", "convert the reference Hugging Face release into brain's checkpoint, every tensor verified")
+    let import = ActionSpec::new("import", "convert the reference Hugging Face release into brain's checkpoint, every tensor verified").cancellable()
         .from_scratch()
         .param(ParamSpec::new("source", ParamType::Str, "the Hugging Face checkpoint directory, on the serving machine").required().host_resolved())
         .param(ParamSpec::new("dest", ParamType::Str, "where to write the converted .safetensors, on the serving machine").required().host_resolved());
@@ -186,6 +186,7 @@ impl Action for LfmAction {
     }
 
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         match self.name.as_str() {
             "fill_mask" | "embed" => self.encode(inv, progress),
             "tokenize" => self.tokenize(inv),

@@ -88,6 +88,7 @@ struct RestoreInstance {
 
 impl Instance for RestoreInstance {
     fn run(&mut self, action: &str, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         match action {
             "restore_face" => self.session.restore_face(inv),
             other => Err(format!("restore: unknown action '{other}'")),
@@ -154,6 +155,7 @@ struct VqganInstance {
 
 impl Instance for VqganInstance {
     fn run(&mut self, action: &str, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         self.session.run(action, inv)
     }
     // `run_batch` is deliberately the serial default - see the module docs.

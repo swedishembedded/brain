@@ -94,6 +94,7 @@ fn hidden_outcome(v: &[f32], variant: &str, max_len: u32) -> Outcome {
 
 impl Instance for T5encoderInstance {
     fn run(&mut self, action: &str, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         self.session.run(action, inv)
     }
 
@@ -118,6 +119,10 @@ impl Instance for T5encoderInstance {
         let mut groups: std::collections::BTreeMap<(String, u32), (Vec<usize>, Vec<String>)> = Default::default();
         let mut out: Vec<Option<ActionResult>> = (0..invs.len()).map(|_| None).collect();
         for (i, inv) in invs.iter().enumerate() {
+            if inv.cancel.is_cancelled() {
+                out[i] = Some(Err(capability::failure::CANCELLED.to_string()));
+                continue;
+            }
             let variant = inv.get_str("variant").unwrap_or_else(|| "flux_xxl".into());
             let max_len = inv.get_i64("max_len").map(|v| v as u32).unwrap_or(t5encoder::caps::DEFAULT_MAX_LEN);
             match inv.get_str("text") {

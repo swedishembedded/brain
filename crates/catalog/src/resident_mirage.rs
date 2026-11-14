@@ -132,6 +132,7 @@ struct MirageInstance {
 
 impl Instance for MirageInstance {
     fn run(&mut self, action: &str, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         self.session.run_batch(action, std::slice::from_ref(inv)).pop().expect("one result per request")
     }
 

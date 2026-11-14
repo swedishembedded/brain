@@ -20,24 +20,24 @@ pub fn manifest() -> Manifest {
         s.param(ParamSpec::new("width", ParamType::Int, "image width, px").min(0.0).max(capability::bounds::SIDE_PX).default(json!(512)))
             .param(ParamSpec::new("height", ParamType::Int, "image height, px").min(0.0).max(capability::bounds::SIDE_PX).default(json!(512)))
     };
-    let mask_rect = size(ActionSpec::new("mask_rect", "make a binary inpainting mask: white rectangle on black (white = regenerate)"))
+    let mask_rect = size(ActionSpec::new("mask_rect", "make a binary inpainting mask: white rectangle on black (white = regenerate)").cancellable())
         .param(ParamSpec::new("x", ParamType::Int, "rectangle left, px").min(0.0).max(capability::bounds::SIDE_PX).default(json!(0)))
         .param(ParamSpec::new("y", ParamType::Int, "rectangle top, px").min(0.0).max(capability::bounds::SIDE_PX).default(json!(0)))
         .param(ParamSpec::new("w", ParamType::Int, "rectangle width, px").min(0.0).max(capability::bounds::SIDE_PX).required())
         .param(ParamSpec::new("h", ParamType::Int, "rectangle height, px").min(0.0).max(capability::bounds::SIDE_PX).required())
         .output(BlobSpec::new("mask", Media::Mask, "the mask (white rect on black)"));
 
-    let gradient = size(ActionSpec::new("gradient", "render a smooth procedural gradient image - a deterministic, viewable test image"))
+    let gradient = size(ActionSpec::new("gradient", "render a smooth procedural gradient image - a deterministic, viewable test image").cancellable())
         .param(ParamSpec::new("style", ParamType::Enum(vec!["sunset".into(), "ocean".into(), "aurora".into()]), "palette").default(json!("sunset")))
         .output(BlobSpec::new("image", Media::Image, "the rendered image"));
 
-    let draw_boxes = ActionSpec::new("draw_boxes", "draw labeled detection boxes onto an image (e.g. yolov8 detect's own output)")
+    let draw_boxes = ActionSpec::new("draw_boxes", "draw labeled detection boxes onto an image (e.g. yolov8 detect's own output)").cancellable()
         .param(ParamSpec::new("boxes", ParamType::Str, "JSON array of {bbox:[x1,y1,x2,y2], conf, class, label?} in image coords - yolov8 detect's exact output shape; the optional 'label' string is drawn instead of the numeric class (e.g. 'einstein:0.87')").required())
         .param(ParamSpec::new("thickness", ParamType::Int, "box edge thickness, px").min(0.0).max(64.0).default(json!(2)))
         .input(BlobSpec::new("image", Media::Image, "the image the boxes were detected on"))
         .output(BlobSpec::new("image", Media::Image, "the image with boxes and class/confidence labels drawn"));
 
-    let colorize = ActionSpec::new("colorize", "false-color a single-channel field (a depth map, a segmentation mask) for viewing")
+    let colorize = ActionSpec::new("colorize", "false-color a single-channel field (a depth map, a segmentation mask) for viewing").cancellable()
         .param(ParamSpec::new("colormap", ParamType::Enum(vec!["turbo".into(), "gray".into(), "grayinv".into()]), "palette").default(json!("turbo")))
         .input(BlobSpec::new("image", Media::Image, "a 1-channel field, replicated to grey RGB (what save_blob writes for a Mask output)"))
         .output(BlobSpec::new("image", Media::Image, "the false-colored image"));
@@ -68,6 +68,7 @@ impl Action for MaskRect {
         manifest().actions.into_iter().find(|a| a.name == "mask_rect").unwrap()
     }
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> capability::ActionResult {
+        inv.cancel.check()?;
         let (wd, ht) = (inv.get_i64("width").unwrap_or(512) as usize, inv.get_i64("height").unwrap_or(512) as usize);
         let (x, y) = (inv.get_i64("x").unwrap_or(0).max(0) as usize, inv.get_i64("y").unwrap_or(0).max(0) as usize);
         let (rw, rh) = (inv.get_i64("w").unwrap_or(0).max(0) as usize, inv.get_i64("h").unwrap_or(0).max(0) as usize);
@@ -88,6 +89,7 @@ impl Action for Gradient {
         manifest().actions.into_iter().find(|a| a.name == "gradient").unwrap()
     }
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> capability::ActionResult {
+        inv.cancel.check()?;
         let (wd, ht) = (inv.get_i64("width").unwrap_or(512) as usize, inv.get_i64("height").unwrap_or(512) as usize);
         let style = inv.get_str("style").unwrap_or_else(|| "sunset".into());
         // Two-stop palette per style, blended diagonally with a soft radial vignette.
@@ -188,6 +190,7 @@ impl Action for DrawBoxes {
         manifest().actions.into_iter().find(|a| a.name == "draw_boxes").unwrap()
     }
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> capability::ActionResult {
+        inv.cancel.check()?;
         let (hwc, w, h) = capability::blob::decode_image(inv, "image")?;
         let mut img = imaging::pixels::hwc_to_rgb8(&hwc, w, h, 3, imaging::ChannelPolicy::RequireRgb)?;
         let thickness = inv.get_i64("thickness").unwrap_or(2).clamp(1, 32) as u32;
@@ -242,6 +245,7 @@ impl Action for Colorize {
         manifest().actions.into_iter().find(|a| a.name == "colorize").unwrap()
     }
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> capability::ActionResult {
+        inv.cancel.check()?;
         let (hwc, w, h) = capability::blob::decode_image(inv, "image")?;
         let map = imaging::viz::parse_colormap(&inv.get_str("colormap").unwrap_or_else(|| "turbo".into()))?;
         // A saved Mask/depth blob is replicated to grey RGB (`save_blob`'s

@@ -121,6 +121,7 @@ struct DepthNpuInstance {
 impl Instance for DepthNpuInstance {
     fn run(&mut self, _action: &str, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
         use npu::openvino::Feed;
+        inv.cancel.check()?;
         let (hwc, w, h) = capability::blob::decode_image(inv, "image")?;
         let s = self.side;
         // resize to the compiled square, pack CHW
@@ -153,6 +154,7 @@ struct DepthInstance {
 
 impl Instance for DepthInstance {
     fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         let act = self.provider.action(action).ok_or_else(|| format!("zipdepth: unknown action '{action}'"))?;
         crate::resident_llm::on_device(self.device, || act.run(inv, progress))?
     }

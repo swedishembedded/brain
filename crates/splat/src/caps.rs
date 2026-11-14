@@ -79,7 +79,7 @@ pub(crate) fn vec3_param(name: &str, help: &str) -> ParamSpec {
 }
 
 pub fn render_spec() -> ActionSpec {
-    ActionSpec::new("render", "one-shot render of a Gaussian-splat scene from a posed camera (tiled rasterizer)")
+    ActionSpec::new("render", "one-shot render of a Gaussian-splat scene from a posed camera (tiled rasterizer)").cancellable()
         .param(ParamSpec::new("width", ParamType::Int, "output width, px").default(json!(960)).min(1.0).max(MAX_SIDE as f64).step(1.0))
         .param(ParamSpec::new("height", ParamType::Int, "output height, px").default(json!(720)).min(1.0).max(MAX_SIDE as f64).step(1.0))
         .param(ParamSpec::new("fov", ParamType::Float, "vertical field of view, degrees").default(json!(60.0)).min(1.0).max(179.0))
@@ -338,6 +338,7 @@ impl Action for RenderAction {
         render_spec()
     }
     fn run(&self, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         render(inv, &self.hot)
     }
 }
@@ -356,6 +357,7 @@ impl Action for ToolAction {
         (self.spec)()
     }
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         (self.run)(inv, progress)
     }
 }

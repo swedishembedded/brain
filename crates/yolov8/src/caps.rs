@@ -48,7 +48,7 @@ const MAX_BATCH: f64 = 1_024.0;
 const MAX_CLASSES: f64 = 10_000.0;
 
 fn detect_spec() -> ActionSpec {
-    ActionSpec::new("detect", "detect objects in an image (letterbox, forward, DFL decode, NMS); with identity_ref, also tell which person each person box holds (SCRFD + ArcFace)")
+    ActionSpec::new("detect", "detect objects in an image (letterbox, forward, DFL decode, NMS); with identity_ref, also tell which person each person box holds (SCRFD + ArcFace)").cancellable()
         .param(ParamSpec::new("conf", ParamType::Float, "confidence threshold").min(0.0).max(capability::bounds::UNIT).default(json!(0.25)))
         .param(ParamSpec::new("iou", ParamType::Float, "NMS IoU threshold").min(0.0).max(capability::bounds::UNIT).default(json!(0.45)))
         .param(ParamSpec::new("input", ParamType::Int, "side the image is letterboxed to, x32; 0 = the checkpoint's own. The net is fully convolutional, so a fine-tune's cheap training side need not be the pretrained classes' inference side").min(0.0).max(capability::bounds::SIZE_PX).default(json!(0)))
@@ -86,15 +86,15 @@ fn training_params(spec: ActionSpec) -> ActionSpec {
 }
 
 fn train_spec() -> ActionSpec {
-    training_params(ActionSpec::new("train", "train a detector from freshly initialized weights on a detection dataset (the real detection loss, AdamW)")).from_scratch()
+    training_params(ActionSpec::new("train", "train a detector from freshly initialized weights on a detection dataset (the real detection loss, AdamW)").cancellable()).from_scratch()
 }
 
 fn finetune_spec() -> ActionSpec {
-    training_params(ActionSpec::new("finetune", "continue training the resolved checkpoint on a detection dataset, on the checkpoint's own architecture; a larger nc appends classes"))
+    training_params(ActionSpec::new("finetune", "continue training the resolved checkpoint on a detection dataset, on the checkpoint's own architecture; a larger nc appends classes").cancellable())
 }
 
 fn eval_spec() -> ActionSpec {
-    ActionSpec::new("eval", "score the checkpoint on a detection dataset: mAP@0.5, mAP@0.5:0.95, precision, recall and per-class AP")
+    ActionSpec::new("eval", "score the checkpoint on a detection dataset: mAP@0.5, mAP@0.5:0.95, precision, recall and per-class AP").cancellable()
         .param(ParamSpec::new("data", ParamType::Str, "detection dataset directory on the serving machine (images.f32, boxes.bin, meta.json)").required().host_resolved())
         .param(ParamSpec::new("split", ParamType::Enum(Split::NAMES.map(String::from).to_vec()), "images to score: val = the last 10% that training never sees, all = every image (for a checkpoint not trained on this dataset)").default(json!("val")))
         .param(ParamSpec::new("conf", ParamType::Float, "confidence floor; use 0.001 for mAP").min(0.0).max(capability::bounds::UNIT).default(json!(0.25)))
@@ -200,6 +200,7 @@ impl Action for DetectAction {
     }
 
     fn run(&self, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         let weights = need(&self.weights, "detect")?;
         let conf = inv.get_f64("conf").unwrap_or(0.25) as f32;
         let iou = inv.get_f64("iou").unwrap_or(0.45) as f32;
@@ -278,6 +279,7 @@ impl Action for TrainAction {
     }
 
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         let verb = if self.finetune { "finetune" } else { "train" };
         let data = inv.get_str("data").ok_or_else(|| format!("yolov8 {verb}: missing required param 'data'"))?;
         let save = inv.get_str("save").ok_or_else(|| format!("yolov8 {verb}: missing required param 'save'"))?;
@@ -322,6 +324,7 @@ impl Action for EvalAction {
     }
 
     fn run(&self, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         let weights = need(&self.weights, "eval")?;
         let data = inv.get_str("data").ok_or("yolov8 eval: missing required param 'data'")?;
         let split = Split::parse(&inv.get_str("split").unwrap_or_else(|| "val".into())).map_err(|e| format!("yolov8 eval: {e}"))?;

@@ -40,7 +40,7 @@ fn weights_param() -> ParamSpec {
 }
 
 pub fn train_spec() -> ActionSpec {
-    ActionSpec::new("train", "train the toy MoE on its synthetic substitution-orbit corpus (the generic trainer, AdamW)")
+    ActionSpec::new("train", "train the toy MoE on its synthetic substitution-orbit corpus (the generic trainer, AdamW)").cancellable()
         .training()
         .streaming()
         .from_scratch()
@@ -59,14 +59,14 @@ pub fn train_spec() -> ActionSpec {
 }
 
 pub fn eval_spec() -> ActionSpec {
-    ActionSpec::new("eval", "next-token accuracy on the training, validation and a never-seen orbit of the corpus, at the context length the checkpoint does best at")
+    ActionSpec::new("eval", "next-token accuracy on the training, validation and a never-seen orbit of the corpus, at the context length the checkpoint does best at").cancellable()
         .param(weights_param())
         .param(ParamSpec::new("corpus_seed", ParamType::Int, "which toy corpus to score on; the trainer's by default").default(json!(CORPUS_SEED)).min(0.0))
         .param(ParamSpec::new("samples", ParamType::Int, "positions scored per measurement").default(json!(400)).min(1.0).max(MAX_SAMPLES))
 }
 
 pub fn generate_spec() -> ActionSpec {
-    ActionSpec::new("generate", "continue a prompt of token ids, or return the logits of the next token")
+    ActionSpec::new("generate", "continue a prompt of token ids, or return the logits of the next token").cancellable()
         .param(weights_param())
         .param(ParamSpec::new("prompt", ParamType::Str, "comma- or space-separated token ids").default(json!("0,1,2,3")))
         .param(ParamSpec::new("max_new", ParamType::Int, "tokens to generate").default(json!(DEFAULT_NEW)).min(0.0).max(MAX_NEW))
@@ -106,6 +106,7 @@ impl Action for ToyMoeAction {
     }
 
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         let weights = || inv.get_str("weights").ok_or_else(|| format!("toymoe {}: missing required param 'weights'", self.spec.name));
         let seed = || inv.seed().map(|s| s.unwrap_or_else(data::rng::random_seed));
         match self.spec.name.as_str() {
@@ -120,13 +121,14 @@ impl Action for ToyMoeAction {
                     out: inv.get_str("save").ok_or("toymoe train: missing required param 'save'")?,
                     saved: inv.get_str("activations").map(|a| model::saved::SavedPolicy::parse_activations(&a)).transpose()?,
                 };
-                let (seed, save) = (args.seed, args.out.clone());
+                let (seed, save, steps) = (args.seed, args.out.clone(), args.steps);
                 let report = crate::train::train(args, &mut |s| {
                     progress(Progress::step(s.step, s.steps, format!("loss {:.4}", s.loss)));
                     !inv.cancel.is_cancelled()
                 })?;
                 if report.interrupted {
-                    return Err(format!("cancelled after step {} (the checkpoint so far is at {save})", report.steps_completed));
+                    progress(Progress::step(report.steps_completed, steps, format!("cancelled; the checkpoint so far is at {save}")));
+                    return Err(capability::failure::CANCELLED.to_string());
                 }
                 Ok(Outcome::new().set("initial_loss", json!(report.initial_loss)).set("final_loss", json!(report.final_loss)).set("steps", json!(report.steps_completed)).set("seed", json!(seed)).set("saved", json!(save)))
             }

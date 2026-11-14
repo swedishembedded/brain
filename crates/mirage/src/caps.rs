@@ -123,7 +123,7 @@ pub fn describe_spec() -> ActionSpec {
     ];
     params.extend(proposal_params());
     params.push(precision_param());
-    ActionSpec::new("describe", "describe an image: scene, objects with boxes, scores and masks, regions, text lines, relations, events and reasoning")
+    ActionSpec::new("describe", "describe an image: scene, objects with boxes, scores and masks, regions, text lines, relations, events and reasoning").cancellable()
         .params(params)
         .input(BlobSpec::new("image", Media::Image, "the image to describe (HWC f32 in [0,1])").required())
 }
@@ -138,7 +138,7 @@ pub fn extract_spec() -> ActionSpec {
     .required()];
     params.extend(proposal_params());
     params.push(precision_param());
-    ActionSpec::new("extract", "answer the fields of a form about an image (choice, count and text fields) with the probability of every candidate")
+    ActionSpec::new("extract", "answer the fields of a form about an image (choice, count and text fields) with the probability of every candidate").cancellable()
         .params(params)
         .input(BlobSpec::new("image", Media::Image, "the image to read the form from (HWC f32 in [0,1])").required())
 }
@@ -148,7 +148,7 @@ pub fn extract_spec() -> ActionSpec {
 /// codebooks, tokenizer) of the released `mirage.cact` beside it; an adapter
 /// in the weights directory is folded in first.
 pub fn quantize_spec() -> ActionSpec {
-    ActionSpec::new("quantize", "write the packed deployment archive (mirage.cact, 2-4 bits per weight) from the FP32 checkpoint, the archive `precision cq` serves and the vendor engine loads")
+    ActionSpec::new("quantize", "write the packed deployment archive (mirage.cact, 2-4 bits per weight) from the FP32 checkpoint, the archive `precision cq` serves and the vendor engine loads").cancellable()
         .param(ParamSpec::new("dest", ParamType::Str, "the directory that receives mirage.cact (written through a temporary name) and config.json, on the serving machine").required().host_resolved())
 }
 
@@ -493,6 +493,7 @@ impl Action for MirageAction {
         self.spec.clone()
     }
     fn run(&self, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         if self.spec.name == "quantize" {
             let dest = inv.get_str("dest").ok_or("mirage quantize: missing required param 'dest'")?;
             let written = crate::model::quantize_dir(std::path::Path::new(&self.dir), std::path::Path::new(&dest)).map_err(|e| format!("mirage quantize: {e}"))?;

@@ -62,7 +62,7 @@ impl MockResident {
     /// invocation. `streaming` + a `messages`/`prompt` param + a `Text` output is
     /// what `catalog::api_caps` classifies as chat.
     fn generate_spec() -> ActionSpec {
-        ActionSpec::new("generate", "deterministic mock chat generation")
+        ActionSpec::new("generate", "deterministic mock chat generation").cancellable()
             .streaming()
             .param(ParamSpec::new("messages", ParamType::Str, "flattened chat messages (JSON array string)"))
             .param(ParamSpec::new("prompt", ParamType::Str, "a raw prompt (alternative to messages)"))
@@ -94,7 +94,7 @@ impl MockResident {
     /// at the spec level so either alone validates; [`embed`] rejects only if BOTH
     /// are absent.
     fn embed_spec() -> ActionSpec {
-        ActionSpec::new("embed", "deterministic mock text embedding")
+        ActionSpec::new("embed", "deterministic mock text embedding").cancellable()
             .param(ParamSpec::new("text", ParamType::Str, "input text (alternative to the `text` input blob)"))
             .input(BlobSpec::new("text", Media::Text, "input text (alternative to the `text` param)"))
             .output(BlobSpec::new("embedding", Media::Bytes, "embedding vector bytes (legacy/unused placeholder)"))
@@ -105,7 +105,7 @@ impl MockResident {
     /// an f32-LE context blob, three quantile levels, returned `[levels, horizon]`
     /// quantile-major — chronos2's own wire shape (see `crates/chronos2`).
     fn forecast_spec() -> ActionSpec {
-        ActionSpec::new("forecast", "deterministic mock time-series forecast")
+        ActionSpec::new("forecast", "deterministic mock time-series forecast").cancellable()
             .input(BlobSpec::new("context", Media::Bytes, "f32-LE context series, meta.shape=[T]").required())
             .param(ParamSpec::new("horizon", ParamType::Int, "steps to forecast").min(0.0).max(10000.0).default(json!(16)))
             .param(ParamSpec::new("freq", ParamType::Int, "frequency bucket (accepted, ignored by the mock)").default(json!(0)))
@@ -115,7 +115,7 @@ impl MockResident {
     /// The text-to-image action. An `Image` output + a `prompt` param + no required
     /// input blob is what `catalog::text2image_action` selects for `/images/generations`.
     fn text2image_spec() -> ActionSpec {
-        ActionSpec::new("text2image", "deterministic mock image generation")
+        ActionSpec::new("text2image", "deterministic mock image generation").cancellable()
             .streaming()
             .param(ParamSpec::new("prompt", ParamType::Str, "the prompt").required())
             .param(ParamSpec::new("width", ParamType::Int, "image width").min(0.0).max(capability::bounds::SIDE_PX).default(json!(1024)))
@@ -196,6 +196,7 @@ struct MockInstance {
 
 impl Instance for MockInstance {
     fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         match action {
             "generate" => generate(inv, self.delay_ms, progress),
             "embed" => embed(inv),
@@ -406,15 +407,23 @@ fn generate(inv: &Invocation, delay: u64, progress: &mut dyn FnMut(Progress)) ->
 
     let total = pieces.len() as u32;
     let mut text = String::new();
+    let mut emitted = 0;
+    let mut cancelled = false;
     for (i, piece) in pieces.iter().enumerate() {
+        // A streamed partial answer completes as `cancelled`, never as a finished one.
+        if inv.cancel.is_cancelled() {
+            cancelled = true;
+            break;
+        }
         text.push_str(piece);
         progress(Progress::token(i as u32, total, piece.clone()));
+        emitted += 1;
     }
     let prompt_tokens = user.split_whitespace().count().max(1) as i64;
     Ok(Outcome::new()
         .set("prompt_tokens", json!(prompt_tokens))
-        .set("completion_tokens", json!(pieces.len()))
-        .set("finish_reason", json!(finish))
+        .set("completion_tokens", json!(emitted))
+        .set("finish_reason", json!(if cancelled { capability::failure::CANCELLED } else { finish }))
         .blob("text", Blob::new(Media::Text, text.into_bytes())))
 }
 
@@ -516,9 +525,7 @@ fn text2image(inv: &Invocation, delay: u64, progress: &mut dyn FnMut(Progress)) 
         if per_step_delay > 0 && sleep_cancellable(per_step_delay, &inv.cancel) {
             return Err("cancelled".into());
         }
-        if inv.cancel.is_cancelled() {
-            return Err("cancelled".into());
-        }
+        inv.cancel.check()?;
         progress(Progress::step(s + 1, steps, "denoise"));
     }
     let mut hwc = Vec::with_capacity((w * h * 3) as usize);

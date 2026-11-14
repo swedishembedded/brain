@@ -96,6 +96,7 @@ impl Instance for HorizonInstance {
         inv: &Invocation,
         progress: &mut dyn FnMut(Progress),
     ) -> ActionResult {
+        inv.cancel.check()?;
         match action {
             "predict" => {
                 progress(Progress::step(1, 1, "predict"));

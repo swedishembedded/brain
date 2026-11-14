@@ -89,14 +89,14 @@ fn size_param() -> ParamSpec {
 }
 
 pub fn encode_spec() -> ActionSpec {
-    ActionSpec::new("encode", "image -> one codebook index per latent position (VQ encoder + nearest-code assignment)")
+    ActionSpec::new("encode", "image -> one codebook index per latent position (VQ encoder + nearest-code assignment)").cancellable()
         .param(size_param())
         .input(BlobSpec::new("image", Media::Image, "the image to encode; resized to size x size").required())
         .output(BlobSpec::new("codes", Media::Bytes, "u32 little-endian, row-major over the [lh, lw] latent grid"))
 }
 
 pub fn decode_spec() -> ActionSpec {
-    ActionSpec::new("decode", "codebook indices -> an image (codebook gather + VQ generator)")
+    ActionSpec::new("decode", "codebook indices -> an image (codebook gather + VQ generator)").cancellable()
         .param(size_param())
         .input(BlobSpec::new("codes", Media::Bytes, "u32 little-endian, exactly lh*lw of them").required())
         .output(BlobSpec::new("image", Media::Image, "the generated image, RGB in [0,1]"))
@@ -269,6 +269,7 @@ impl Action for VqAction {
         }
     }
     fn run(&self, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         let size = inv.get_i64("size").unwrap_or(DEFAULT_SIZE).max(0) as u32;
         let key = format!("{}:{size}", self.weights);
         self.hot.try_get(key, || Ok(Session::new(load(&self.weights, size, Gpu::new(&SERVING_PIPELINES))?)), |s| s.run(&self.name, inv))

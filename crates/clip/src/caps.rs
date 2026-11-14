@@ -78,7 +78,7 @@ fn tower_cfg(name: &str) -> Result<ClipTextConfig, String> {
 }
 
 fn embed_text_spec() -> ActionSpec {
-    ActionSpec::new("embed_text", "Embed a string with one of the CLIP text towers.")
+    ActionSpec::new("embed_text", "Embed a string with one of the CLIP text towers.").cancellable()
         .param(
             ParamSpec::new("text", ParamType::Str, "the string to embed").required(),
         )
@@ -94,7 +94,7 @@ fn embed_text_spec() -> ActionSpec {
 }
 
 fn embed_image_spec() -> ActionSpec {
-    ActionSpec::new("embed_image", "Embed an image with the EVA-CLIP-L/336 vision tower.")
+    ActionSpec::new("embed_image", "Embed an image with the EVA-CLIP-L/336 vision tower.").cancellable()
         .input(BlobSpec::new("image", Media::Image, "the image (resized to the tower's 336² input)").required())
         .output(BlobSpec::new("embedding", Media::Bytes, "f32 little-endian, L2-normalised CLS embedding"))
 }
@@ -302,6 +302,7 @@ impl Action for ClipAction {
         if self.name == "embed_text" { embed_text_spec() } else { embed_image_spec() }
     }
     fn run(&self, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         let session = self.hot.get_cloned(self.dir.clone(), || {
             // `Gpu::share` - one device for every tower (text and EVA vision
             // alike) plus `embed_image`'s own device-side resize, so the
