@@ -1386,6 +1386,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **symmetry-breaking**: starting the units of a layer with different weights, by random draws, so that their gradients differ; units that start identical stay identical forever. *([Initialization: Where Training Starts](v03-neural-networks/09-initialization.md))*
 
+**system evolution**: the sequence of changes by which a long-lived system's structure is reshaped by the work it is asked to do, in which arrangements made for its first workload (sizes, names, copies, placeholders, judgements of cost) are generalised, gathered into one home, guarded by a check over their whole class of failures, or deleted; its record, read with the code, shows which decisions held. *([How brain Grew](v16-systems/03-evolution.md))*
+
 ## T
 
 **tanh-activation**: the hyperbolic tangent used as a neuron's activation, a smooth step from $-1$ to $1$ equal to $2\sigma(2z) - 1$ with slope $1 - \tanh^2(z)$, centred on zero and saturating for large $|z|$. *([Multilayer Networks](v03-neural-networks/02-mlp.md))*
