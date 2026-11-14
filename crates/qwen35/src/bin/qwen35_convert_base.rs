@@ -37,7 +37,7 @@ fn main() {
     let block = qwen35::fp8_source::hf_fp8_block_size(&dir).unwrap_or_else(|e| panic!("{e}"));
     let tiers = model::ops::TierPolicy::parse(&arg(&args, "--weight-format").unwrap_or_else(|| "nf4".into())).unwrap_or_else(|e| panic!("{e}"));
     let t0 = Instant::now();
-    let report = qwen35::fp8_source::write_converted_base(&dir, &cfg, block, &out, &tiers).unwrap_or_else(|e| panic!("convert: {e}"));
+    let report = qwen35::fp8_source::write_converted_base(&dir, &cfg, block, &out, &tiers, &mut || true).unwrap_or_else(|e| panic!("convert: {e}"));
     println!(
         "CONVERTED tensors={} converted={} payload_bytes={} peak_staging_bytes={} seconds={:.1}",
         report.tensors,

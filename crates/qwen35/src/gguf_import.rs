@@ -279,7 +279,7 @@ fn read_tensor(mg: &MmapGguf, name: &str) -> Result<Vec<f32>, String> {
 /// Import the MTP block's real weights directly into `writer` - the tensors
 /// [`classify`] drops as [`DROP_MTP_BLOCK`]. See this module's doc for why
 /// this cannot go through the generic per-tensor driver.
-fn import_mtp_block(mg: &MmapGguf, cfg: &Qwen35Config, writer: &mut StWriter) -> Result<(), String> {
+fn import_mtp_block(mg: &MmapGguf, cfg: &Qwen35Config, writer: &mut StWriter, keep_going: &mut dyn FnMut() -> bool) -> Result<(), String> {
     let prefix = format!("blk.{}.", cfg.n_layers);
     let d = cfg.d_model as usize;
     let names: Vec<String> = mg.names().iter().filter(|n| n.starts_with(&prefix)).cloned().collect();
@@ -288,6 +288,9 @@ fn import_mtp_block(mg: &MmapGguf, cfg: &Qwen35Config, writer: &mut StWriter) ->
     }
 
     for name in &names {
+        if !keep_going() {
+            return Err(capability::failure::CANCELLED.to_string());
+        }
         let leaf = &name[prefix.len()..];
         if let Some(nextn) = leaf.strip_prefix("nextn.") {
             match nextn {
@@ -322,16 +325,18 @@ fn import_mtp_block(mg: &MmapGguf, cfg: &Qwen35Config, writer: &mut StWriter) ->
 }
 
 /// Import a Qwen3.8-27B GGUF into a brain-native safetensors checkpoint,
-/// including the MTP head.
-pub fn import_gguf(gguf_path: &str, out_path: &str, id_override: Option<&str>) -> Result<ImportStats, String> {
+/// including the MTP head. `keep_going` is asked before each source tensor;
+/// once it says no the import answers `Err(CANCELLED)` and removes the
+/// unfinished file.
+pub fn import_gguf(gguf_path: &str, out_path: &str, id_override: Option<&str>, keep_going: &mut dyn FnMut() -> bool) -> Result<ImportStats, String> {
     let mg = MmapGguf::open(gguf_path)?;
-    import_mmap(&mg, out_path, id_override)
+    import_mmap(&mg, out_path, id_override, keep_going)
 }
 
 /// [`import_gguf`] over an ALREADY-OPEN checkpoint - the shape the generic
 /// architecture-dispatch registry needs, since it must read
 /// `general.architecture` before it can know which importer to call.
-pub fn import_mmap(mg: &MmapGguf, out_path: &str, id_override: Option<&str>) -> Result<ImportStats, String> {
+pub fn import_mmap(mg: &MmapGguf, out_path: &str, id_override: Option<&str>, keep_going: &mut dyn FnMut() -> bool) -> Result<ImportStats, String> {
     let cfg = config_from_gguf(mg)?;
     let full_params = cfg.param_list();
     let mtp_names: HashSet<&str> = full_params.iter().map(|(n, _)| n.as_str()).filter(|n| n.starts_with("mtp.")).collect();
@@ -344,8 +349,14 @@ pub fn import_mmap(mg: &MmapGguf, out_path: &str, id_override: Option<&str>) -> 
     let plan: Vec<(String, Vec<u64>)> = full_params.iter().map(|(n, numel)| (n.clone(), vec![*numel as u64])).collect();
     let mut writer = StWriter::create(out_path, &plan, &cfg.to_json(), Some(&card)).map_err(|e| format!("create {out_path}: {e}"))?;
 
-    let stats = import::to_st_into(mg, &main_params, &|n| Ok(classify(n, &cfg)), &mut writer, "qwen35")?;
-    import_mtp_block(mg, &cfg, &mut writer)?;
+    let Some(stats) = import::to_st_into_while(mg, &main_params, &|n| Ok(classify(n, &cfg)), &mut writer, "qwen35", keep_going)? else {
+        writer.abandon();
+        return Err(capability::failure::CANCELLED.to_string());
+    };
+    if let Err(e) = import_mtp_block(mg, &cfg, &mut writer, keep_going) {
+        writer.abandon();
+        return Err(e);
+    }
     // `finish` re-checks the writer's OWN full plan (main stack + MTP), so a
     // gap in the manual MTP pass is caught exactly like a gap in the generic
     // one would be.
@@ -661,6 +672,49 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
+    /// A token that fires mid-conversion stops the import at the next tensor, in the main stack or the MTP head,
+    /// and leaves no file behind.
+    #[test]
+    fn an_import_stops_at_the_next_tensor_when_its_token_fires() {
+        use capability::{Invocation, Outcome, Progress};
+        use capability_mock::cancellation::{certify, Bound};
+        let dir = std::env::temp_dir().join(format!("qwen35-gguf-import-cancel-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("src.gguf").to_string_lossy().into_owned();
+        let out = dir.join("out.safetensors").to_string_lossy().into_owned();
+        synthetic_gguf(&src);
+        let run = |inv: &Invocation, progress: &mut dyn FnMut(Progress)| {
+            inv.cancel.check()?;
+            import_gguf(&src, &out, None, &mut inv.keep_going(progress, 0, "tensor"))?;
+            Ok(Outcome::new())
+        };
+        certify("qwen35 gguf import", &Invocation::new, &run, Bound::ONE_STEP);
+        let leftovers = |dir: &std::path::Path| std::fs::read_dir(dir).unwrap().filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.starts_with("out.")).collect::<Vec<_>>();
+        std::fs::remove_file(&out).ok();
+        // The last ask is in the MTP pass, which runs after every main-stack tensor.
+        let total_asks = {
+            let mut asks = 0;
+            import_gguf(&src, &out, None, &mut || {
+                asks += 1;
+                true
+            })
+            .unwrap();
+            asks
+        };
+        std::fs::remove_file(&out).ok();
+        for stop_at in [3, total_asks - 1] {
+            let mut asks = 0;
+            let err = import_gguf(&src, &out, None, &mut || {
+                asks += 1;
+                asks < stop_at
+            });
+            assert_eq!(err.unwrap_err(), capability::failure::CANCELLED, "stopped at ask {stop_at}");
+            assert!(leftovers(&dir).is_empty(), "a stopped import leaves no file: {:?}", leftovers(&dir));
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn import_gguf_covers_the_main_stack_and_the_mtp_head_with_no_norm_fold() {
         let dir = std::env::temp_dir().join(format!("qwen35-gguf-import-test-out-{}", std::process::id()));
@@ -669,7 +723,7 @@ mod tests {
         let out = dir.join("out.safetensors").to_string_lossy().into_owned();
         synthetic_gguf(&src);
 
-        import_gguf(&src, &out, Some("test/qwen35-gguf-tiny")).expect("import must succeed with full coverage");
+        import_gguf(&src, &out, Some("test/qwen35-gguf-tiny"), &mut || true).expect("import must succeed with full coverage");
 
         let reader = checkpoint::weightio::WeightReader::open(&out).unwrap();
         assert!(reader.tensor("tok.weight").is_some());

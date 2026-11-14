@@ -183,7 +183,7 @@ impl GgufArchitectureImporter for Qwen35Importer {
         "Qwen3.8-27B dense hybrid Gated-DeltaNet/GQA decoder + MTP"
     }
     fn import(&self, gguf: &MmapGguf, out_path: &str, id_override: Option<&str>) -> Result<(), String> {
-        qwen35::gguf_import::import_mmap(gguf, out_path, id_override).map(|_| ())
+        qwen35::gguf_import::import_mmap(gguf, out_path, id_override, &mut || true).map(|_| ())
     }
 }
 

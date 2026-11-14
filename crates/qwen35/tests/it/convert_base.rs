@@ -33,7 +33,7 @@ fn a_base_converted_once_equals_the_base_converted_on_every_load() {
     let cfg = Qwen35Config { vocab: 64, n_layers: 4, ..Qwen35Config::tiny_i8() };
     let dir = write_checkpoint(&cfg, "convert_src", None);
     let out = std::env::temp_dir().join(format!("convert_base_out_{}", std::process::id()));
-    let report = write_converted_base(&dir, &cfg, BLOCK, &out, &TierPolicy::uniform(Dtype::NF4)).expect("convert once");
+    let report = write_converted_base(&dir, &cfg, BLOCK, &out, &TierPolicy::uniform(Dtype::NF4), &mut || true).expect("convert once");
     assert!(report.converted > 0 && report.converted < report.tensors, "the matrices convert, the norms and tables stay as stored: {report:?}");
 
     let ops = Ops::new(Gpu::new_cpu(training_kernel_list())).expect("Ops::new");
@@ -59,4 +59,29 @@ fn a_base_converted_once_equals_the_base_converted_on_every_load() {
     assert!(bytes(&out) < bytes(&dir), "the converted base is smaller on disk: {} vs {} bytes", bytes(&out), bytes(&dir));
     std::fs::remove_dir_all(&dir).ok();
     std::fs::remove_dir_all(&out).ok();
+}
+
+/// A token that fires mid-conversion stops it at the next tensor and leaves nothing in the destination: no weights,
+/// no copied config, no directory it made.
+#[test]
+fn a_conversion_stops_at_the_next_tensor_and_leaves_no_directory() {
+    use capability::{Invocation, Outcome, Progress};
+    use capability_mock::cancellation::{certify, Bound};
+    let cfg = Qwen35Config { vocab: 64, n_layers: 4, ..Qwen35Config::tiny_i8() };
+    let dir = write_checkpoint(&cfg, "convert_cancel_src", None);
+    let out = std::env::temp_dir().join(format!("convert_base_cancel_out_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&out);
+    let run = |inv: &Invocation, progress: &mut dyn FnMut(Progress)| {
+        inv.cancel.check()?;
+        let converted = write_converted_base(&dir, &cfg, BLOCK, &out, &TierPolicy::uniform(Dtype::NF4), &mut inv.keep_going(progress, 0, "tensor"));
+        // A finished reference run leaves its base behind; the next run starts clean.
+        if converted.is_ok() {
+            std::fs::remove_dir_all(&out).ok();
+        }
+        converted?;
+        Ok(Outcome::new())
+    };
+    certify("qwen35 convert", &Invocation::new, &run, Bound::ONE_STEP);
+    assert!(!out.exists(), "a stopped conversion leaves no directory it made");
+    std::fs::remove_dir_all(&dir).ok();
 }

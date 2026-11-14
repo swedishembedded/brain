@@ -48,26 +48,25 @@ pub(crate) fn import(inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> Ac
     if !source.exists() {
         return Err(fail(format!("source not found at '{}'", source.display())));
     }
-    progress(Progress::step(0, 1, format!("converting {}", source.display())));
+    let fail = |why: String| if why == capability::failure::CANCELLED { why } else { fail(why) };
     let outcome = if source.is_dir() {
-        convert_hf(&source, &dest, inv.get_str("weight_format").filter(|f| !f.is_empty()).as_deref().unwrap_or("nf4")).map_err(&fail)?
+        convert_hf(&source, &dest, inv.get_str("weight_format").filter(|f| !f.is_empty()).as_deref().unwrap_or("nf4"), &mut inv.keep_going(progress, 0, "tensor")).map_err(&fail)?
     } else if source.extension().is_some_and(|e| e == "gguf") {
         let id = inv.get_str("id").filter(|i| !i.is_empty());
-        let stats = crate::gguf_import::import_gguf(&source.to_string_lossy(), &dest.to_string_lossy(), id.as_deref()).map_err(&fail)?;
+        let stats = crate::gguf_import::import_gguf(&source.to_string_lossy(), &dest.to_string_lossy(), id.as_deref(), &mut inv.keep_going(progress, 0, "tensor")).map_err(&fail)?;
         Outcome::new().set("tensors", json!(stats.written))
     } else {
         return Err(fail(format!("source '{}' is neither a .gguf file nor a Hugging Face directory", source.display())));
     };
-    progress(Progress::step(1, 1, "converted"));
     Ok(outcome.set("saved", json!(dest.display().to_string())))
 }
 
 /// A Hugging Face release directory re-encoded into `dest`.
-fn convert_hf(source: &Path, dest: &Path, weight_format: &str) -> Result<Outcome, String> {
+fn convert_hf(source: &Path, dest: &Path, weight_format: &str, keep_going: &mut dyn FnMut() -> bool) -> Result<Outcome, String> {
     let cfg = crate::fp8_source::hf_config(source)?;
     let block = crate::fp8_source::hf_fp8_block_size(source)?;
     let tiers = model::ops::TierPolicy::parse(weight_format).map_err(|e| format!("weight_format {weight_format:?}: {e}"))?;
-    let report = crate::fp8_source::write_converted_base(source, &cfg, block, dest, &tiers)?;
+    let report = crate::fp8_source::write_converted_base(source, &cfg, block, dest, &tiers, keep_going)?;
     Ok(Outcome::new()
         .set("tensors", json!(report.tensors))
         .set("converted", json!(report.converted))

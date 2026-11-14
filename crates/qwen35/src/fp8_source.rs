@@ -29,7 +29,7 @@
 //! low-precision fine-tuning then you can procure our services by sending an
 //! email to info@swedishembedded.com.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use checkpoint::packed::{Binding, CodecRegistry, PackedReader, PackedSource, PackedTensorReader};
 use checkpoint::TensorSource;
@@ -210,7 +210,11 @@ impl PackedBase {
 /// embedding table, the head) is converted only when a rule of `tiers` names it, and is otherwise copied as
 /// stored. A tensor that cannot take its tier (a matrix whose width is not a whole block, a tier with no
 /// encoder) stays as stored; the report counts what changed.
-pub fn write_converted_base(dir: &Path, cfg: &Qwen35Config, block: usize, out: &Path, tiers: &TierPolicy) -> Result<checkpoint::packed::ConversionReport, String> {
+///
+/// `keep_going` is asked before each tensor; once it says no the conversion answers `Err(CANCELLED)` and, as for
+/// any other failure, removes what it wrote: the weights file, the copied config and tokenizer files and the
+/// directory when it made it.
+pub fn write_converted_base(dir: &Path, cfg: &Qwen35Config, block: usize, out: &Path, tiers: &TierPolicy, keep_going: &mut dyn FnMut() -> bool) -> Result<checkpoint::packed::ConversionReport, String> {
     use checkpoint::packed::{BoundedWorkspace, LoadConfig, LoadPolicy, Loader, MemoryBudget};
     if out.join("model.safetensors").exists() {
         return Err(format!("qwen35 conversion: {} already holds a converted base", out.display()));
@@ -226,13 +230,25 @@ pub fn write_converted_base(dir: &Path, cfg: &Qwen35Config, block: usize, out: &
     }
     let codecs = CodecRegistry::reference();
     let loader = Loader { reader: &reader, codecs: &codecs, workspace: BoundedWorkspace::new(MemoryBudget::new(WEIGHT_STAGING_BYTES, 0)), config: LoadConfig::default() };
+    let made_dir = !out.exists();
     std::fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
-    for aux in ["config.json", "generation_config.json", "tokenizer.json", "tokenizer_config.json"] {
-        if dir.join(aux).exists() {
-            std::fs::copy(dir.join(aux), out.join(aux)).map_err(|e| format!("copy {aux}: {e}"))?;
+    let mut copied: Vec<PathBuf> = Vec::new();
+    let converted = (|| {
+        for aux in ["config.json", "generation_config.json", "tokenizer.json", "tokenizer_config.json"] {
+            if dir.join(aux).exists() {
+                copied.push(out.join(aux));
+                std::fs::copy(dir.join(aux), out.join(aux)).map_err(|e| format!("copy {aux}: {e}"))?;
+            }
+        }
+        checkpoint::packed::convert_to_file_while(&loader, &requests, &out.join("model.safetensors"), &serde_json::json!({}), keep_going)?.ok_or_else(|| capability::failure::CANCELLED.to_string())
+    })();
+    if converted.is_err() {
+        copied.iter().for_each(|file| drop(std::fs::remove_file(file)));
+        if made_dir {
+            let _ = std::fs::remove_dir(out);
         }
     }
-    checkpoint::packed::convert_to_file(&loader, &requests, &out.join("model.safetensors"), &serde_json::json!({}))
+    converted
 }
 
 /// Two-way coverage against `cfg.param_list()` from shapes alone.

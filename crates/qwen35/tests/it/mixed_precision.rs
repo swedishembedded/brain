@@ -74,7 +74,7 @@ fn fixture(tag: &str) -> Fixture {
     let cfg = cfg();
     let dense = write_dense_checkpoint(&cfg, tag, &weights(&cfg, 0.0));
     let out = dense.join("mixed");
-    write_converted_base(&dense, &cfg, BLOCK, &out, &mixed_policy()).expect("convert to the mixed file");
+    write_converted_base(&dense, &cfg, BLOCK, &out, &mixed_policy(), &mut || true).expect("convert to the mixed file");
     Fixture { cfg, dir: dense }
 }
 
