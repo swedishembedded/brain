@@ -53,7 +53,8 @@ shape that `--layers`, `--d-model`, `--heads` and `--experts` override. `train` 
 `finetune` take `--activations keep|recompute` (what the backward keeps of the
 forward: every layer's activations, or only each layer's input, rebuilt in the
 backward for the same gradients at lower memory), stop between steps when
-cancelled, and print the seed they used. The ONNX export and NPU decode are
+cancelled, and print the seed they used; `generate` stops at the next decoded
+token. A cancelled action answers `cancelled`. The ONNX export and NPU decode are
 actions of `samples/models/glmdsa` (below).
 
 ## Options

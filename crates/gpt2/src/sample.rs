@@ -18,6 +18,7 @@ pub fn generate(
     temperature: f32,
     top_k: usize,
     rng: &mut Rng,
+    on_token: &mut dyn FnMut(usize, u32) -> bool,
 ) -> Vec<u32> {
     let block = model.cfg.block_size as usize;
     let vocab = model.cfg.vocab as usize;
@@ -36,6 +37,9 @@ pub fn generate(
         let next = sample_logits(last, temperature, top_k, rng);
         ctx.push(next);
         out.push(next);
+        if !on_token(out.len() - 1, next) {
+            break;
+        }
     }
     out
 }
@@ -53,6 +57,7 @@ pub fn generate_kv(
     temperature: f32,
     top_k: usize,
     rng: &mut Rng,
+    on_token: &mut dyn FnMut(usize, u32) -> bool,
 ) -> Vec<u32> {
     let vocab = model.cfg.vocab as usize;
     let d = model.cfg.d_model as usize;
@@ -74,6 +79,9 @@ pub fn generate_kv(
     for _ in 0..max_new {
         let next = sample_logits(&logits_of(&hidden), temperature, top_k, rng);
         out.push(next);
+        if !on_token(out.len() - 1, next) {
+            break;
+        }
         hidden = model.step(next);
     }
     out

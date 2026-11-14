@@ -337,6 +337,7 @@ struct GptInstance {
 
 impl Instance for GptInstance {
     fn run(&mut self, _action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         let (max_new, temp, top_k, seed) = sampling_params(inv)?;
         let max_new = max_new.unwrap_or(TOY_MAX_NEW);
         let prompt = inv.get_str("prompt").unwrap_or_default();
@@ -344,7 +345,12 @@ impl Instance for GptInstance {
         let ids = self.tok.encode(&prompt_text);
         let mut rng = Rng::new(seed);
         progress(Progress::step(0, max_new as u32, "generating"));
-        let gen = gpt2::sample::generate(&self.model, &ids, max_new, temp, top_k, &mut rng);
+        let gen = gpt2::sample::generate(&self.model, &ids, max_new, temp, top_k, &mut rng, &mut |i, _| {
+            progress(Progress::step(i as u32 + 1, max_new as u32, "token"));
+            !inv.cancel.is_cancelled()
+        });
+        // Polled once per decoded token: a stopped decode is the caller's cancel.
+        inv.cancel.check()?;
         let text = self.tok.decode(&gen);
         progress(Progress::step(max_new as u32, max_new as u32, "done"));
         Ok(text_outcome(text).set("seed", json!(seed)))

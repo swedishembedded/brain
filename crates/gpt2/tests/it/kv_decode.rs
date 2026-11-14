@@ -90,9 +90,13 @@ fn greedy_kv_generation_equals_recompute_with_a_margin_the_bound_needs() {
     let prompt = vec![1u32, 5, 3];
     let new_tokens = 16;
 
-    let recompute = generate(&model, &prompt, new_tokens, 0.0, 0, &mut Rng::new(data::rng::random_seed()));
-    let kv = generate_kv(&model, &prompt, new_tokens, 0.0, 0, &mut Rng::new(data::rng::random_seed()));
+    let recompute = generate(&model, &prompt, new_tokens, 0.0, 0, &mut Rng::new(data::rng::random_seed()), &mut |_, _| true);
+    let kv = generate_kv(&model, &prompt, new_tokens, 0.0, 0, &mut Rng::new(data::rng::random_seed()), &mut |_, _| true);
     assert_eq!(recompute, kv, "KV greedy generation must equal recompute generation");
+    // A caller that says stop ends either decode at the token it was shown.
+    let stop_at = |i: usize, _: u32| i < 2;
+    assert_eq!(generate(&model, &prompt, new_tokens, 0.0, 0, &mut Rng::new(1), &mut { stop_at }), recompute[..3]);
+    assert_eq!(generate_kv(&model, &prompt, new_tokens, 0.0, 0, &mut Rng::new(1), &mut { stop_at }), kv[..3]);
 
     // Each path's logit is within the agreement bound of the other's, so a leading logit survives whenever its lead
     // exceeds twice that bound (once for the leader's move, once for the runner-up's).

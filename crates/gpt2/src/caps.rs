@@ -114,6 +114,7 @@ fn vocabulary(weights: &str, data: Option<&Path>) -> Result<Vec<char>, String> {
 }
 
 fn train(inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+    inv.cancel.check()?;
     let dir = path(inv, "data", "train")?;
     let save = inv.get_str("save").map(PathBuf::from);
     let job = JobRequest::from_invocation(inv)?;
@@ -153,7 +154,8 @@ fn train(inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         .map_err(|e| format!("gpt2 train: {e}"))?,
     };
     if report.interrupted {
-        return Err(format!("cancelled after step {}", report.steps_completed));
+        progress(Progress::step(report.steps_completed, report.steps_completed, format!("cancelled after step {}", report.steps_completed)));
+        return Err(capability::failure::CANCELLED.to_string());
     }
     Ok(Outcome::new()
         .set("initial_loss", json!(report.initial_loss))
@@ -164,7 +166,8 @@ fn train(inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         .set("saved", json!(save.map(|p| p.display().to_string()))))
 }
 
-fn generate(inv: &Invocation) -> ActionResult {
+fn generate(inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+    inv.cancel.check()?;
     let weights = path(inv, "weights", "generate")?.display().to_string();
     let data = inv.get_str("data").map(PathBuf::from);
     let tok = CharTokenizer::from_itos(vocabulary(&weights, data.as_deref())?);
@@ -172,14 +175,21 @@ fn generate(inv: &Invocation) -> ActionResult {
     let model = Gpt::load(&weights, 1, block);
     let prompt = inv.get_str("prompt").filter(|p| !p.is_empty()).unwrap_or_else(|| "\n".into());
     let seed = inv.seed()?.unwrap_or_else(data::rng::random_seed);
+    let max_new = inv.get_i64("max_new").unwrap_or(200).max(0) as usize;
     let ids = crate::sample::generate_kv(
         &model,
         &tok.encode(&prompt),
-        inv.get_i64("max_new").unwrap_or(200).max(0) as usize,
+        max_new,
         inv.get_f64("temperature").unwrap_or(0.8) as f32,
         inv.get_i64("top_k").unwrap_or(40).max(1) as usize,
         &mut Rng::new(seed),
+        &mut |i, _| {
+            progress(Progress::step(i as u32 + 1, max_new as u32, "token"));
+            !inv.cancel.is_cancelled()
+        },
     );
+    // Polled once per decoded token: a stopped decode is the caller's cancel.
+    inv.cancel.check()?;
     Ok(Outcome::new().set("text", json!(format!("{prompt}{}", tok.decode(&ids)))).set("seed", json!(seed)))
 }
 
@@ -222,7 +232,7 @@ impl Action for Gpt2Action {
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         match self.spec.name.as_str() {
             "train" => train(inv, progress),
-            "generate" => generate(inv),
+            "generate" => generate(inv, progress),
             "eval" => eval(inv),
             other => Err(format!("gpt2: unknown action {other}")),
         }
@@ -267,6 +277,8 @@ mod tests {
         let gen = |seed: u64| run("generate", Invocation::new().set("weights", w.clone()).set("prompt", json!("1+")).set("max_new", json!(5)).set("seed", json!(seed))).outputs["text"].clone();
         assert_eq!(gen(7), gen(7), "the seed reproduces the sample");
         assert!(gen(7).as_str().unwrap().starts_with("1+"));
+        let long = || Invocation::new().set("weights", w.clone()).set("prompt", json!("1+")).set("max_new", json!(12)).set("seed", json!(7));
+        capability_mock::cancellation::certify("gpt2 generate", &long, &|inv, p| reg.run(MODEL, "generate", inv.clone(), p), capability_mock::cancellation::Bound::ONE_STEP);
         let scored = run("eval", Invocation::new().set("weights", w).set("data", d).set("batches", json!(1)).set("samples", json!(3)).set("seed", json!(1)));
         assert!(scored.outputs["val_perplexity"].as_f64().is_some_and(|p| p > 1.0));
         let _ = std::fs::remove_dir_all(&dir);

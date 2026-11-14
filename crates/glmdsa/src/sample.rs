@@ -45,6 +45,9 @@ pub fn generate(
 /// instead of re-running the whole context each time. Produces the same tokens
 /// as [`generate`] for greedy decoding (the cache is algebraically exact). GLM's
 /// untied `lm_head` is applied on the host to the final-norm hidden state.
+/// `on_token(i, id)` sees each kept token; `false` ends the decode there,
+/// before the next step runs.
+#[allow(clippy::too_many_arguments)]
 pub fn generate_kv(
     model: &Glm,
     prompt: &[u32],
@@ -53,6 +56,7 @@ pub fn generate_kv(
     top_k: usize,
     eos: Option<u32>,
     rng: &mut Rng,
+    on_token: &mut dyn FnMut(usize, u32) -> bool,
 ) -> Vec<u32> {
     let vocab = model.cfg.vocab as usize;
     let d = model.cfg.d_model as usize;
@@ -77,6 +81,9 @@ pub fn generate_kv(
             break;
         }
         out.push(next);
+        if !on_token(out.len() - 1, next) {
+            break;
+        }
         hidden = model.step(next);
     }
     out
@@ -156,7 +163,7 @@ mod kv_gen_tests {
             let mut r1 = data::rng::Rng::new(data::rng::random_seed());
             let recompute = generate(&model, &prompt, 32, 0.0, 0, None, &mut r1);
             let mut r2 = data::rng::Rng::new(data::rng::random_seed());
-            let kv = generate_kv(&model, &prompt, 32, 0.0, 0, None, &mut r2);
+            let kv = generate_kv(&model, &prompt, 32, 0.0, 0, None, &mut r2, &mut |_, _| true);
             assert_eq!(recompute, kv, "KV greedy generation must equal recompute generation for prompt {prompt:?}");
             compared += recompute.len();
         }
@@ -181,9 +188,9 @@ mod kv_gen_tests {
 
         let seed = data::rng::random_seed();
         let mut r1 = data::rng::Rng::new(seed);
-        let run1 = generate_kv(&model, &prompt, max_new, 0.8, 40, None, &mut r1);
+        let run1 = generate_kv(&model, &prompt, max_new, 0.8, 40, None, &mut r1, &mut |_, _| true);
         let mut r2 = data::rng::Rng::new(seed);
-        let run2 = generate_kv(&model, &prompt, max_new, 0.8, 40, None, &mut r2);
+        let run2 = generate_kv(&model, &prompt, max_new, 0.8, 40, None, &mut r2, &mut |_, _| true);
 
         println!("generate_kv_sampled_path_is_well_formed_and_self_reproducible: {} tokens/run, vocab={vocab}", run1.len());
         assert_eq!(run1.len(), max_new, "sampled generate_kv must emit max_new tokens with no eos set");

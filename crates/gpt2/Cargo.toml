@@ -24,4 +24,5 @@ wgpu.workspace = true
 pollster.workspace = true
 
 [dev-dependencies]
+brain-capability-mock.workspace = true
 brain-testutil.workspace = true

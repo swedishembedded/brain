@@ -345,6 +345,7 @@ fn fresh_config(inv: &Invocation, block: u32) -> Result<GlmConfig, String> {
 /// the run continues). A fine-tune's output starts as a copy of the base, so a
 /// run that stopped resumes from its own output.
 fn train(inv: &Invocation, base: Option<&str>, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+    inv.cancel.check()?;
     let action = if base.is_some() { "finetune" } else { "train" };
     let dir = required_path(inv, "data", action)?;
     let save = if base.is_some() { Some(required_path(inv, "save", action)?) } else { inv.get_str("save").map(PathBuf::from) };
@@ -371,7 +372,8 @@ fn train(inv: &Invocation, base: Option<&str>, progress: &mut dyn FnMut(Progress
     })
     .map_err(|e| format!("glmdsa {action}: {e}"))?;
     if report.interrupted {
-        return Err(format!("cancelled after step {}", report.steps_completed));
+        progress(Progress::step(report.steps_completed, report.steps_completed, format!("cancelled after step {}", report.steps_completed)));
+        return Err(capability::failure::CANCELLED.to_string());
     }
     Ok(Outcome::new()
         .set("initial_loss", json!(report.initial_loss))
@@ -394,6 +396,7 @@ fn eval(inv: &Invocation, weights: &str) -> ActionResult {
 }
 
 fn generate(inv: &Invocation, weights: &str, hot: &Hot<ModelKey, GlmModel>, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+    inv.cancel.check()?;
     let (max_new, temp, top_k, seed) = sampling(inv)?;
     let data = inv.get_str("data").map(PathBuf::from);
     let key = (weights.to_string(), data.as_ref().map(|d| d.display().to_string()));
@@ -404,7 +407,12 @@ fn generate(inv: &Invocation, weights: &str, hot: &Hot<ModelKey, GlmModel>, prog
             let prompt = inv.get_str("prompt").filter(|p| !p.is_empty()).unwrap_or_else(|| "\n".into());
             progress(Progress::step(0, max_new as u32, "generating"));
             let mut rng = Rng::new(seed);
-            let generated = crate::sample::generate_kv(&hot.model, &hot.tok.encode(&prompt), max_new, temp, top_k, None, &mut rng);
+            let generated = crate::sample::generate_kv(&hot.model, &hot.tok.encode(&prompt), max_new, temp, top_k, None, &mut rng, &mut |i, _| {
+                progress(Progress::step(i as u32 + 1, max_new as u32, "token"));
+                !inv.cancel.is_cancelled()
+            });
+            // Once per decoded token: a stopped decode is the caller's cancel.
+            inv.cancel.check()?;
             progress(Progress::step(max_new as u32, max_new as u32, "done"));
             Ok(Outcome::new().set("seed", json!(seed)).blob("text", Blob::new(Media::Text, hot.tok.decode(&generated).into_bytes())))
         },
@@ -542,6 +550,8 @@ mod tests {
         assert_eq!(replay.blobs["text"].bytes, first.blobs["text"].bytes, "the reported seed reproduces the draw");
         let err = run(&reg, "generate", request().set("seed", json!(-1))).unwrap_err();
         assert!(err.contains("seed"), "{err}");
+        let long = || request().set("max_new", json!(12)).set("seed", json!(1));
+        capability_mock::cancellation::certify("glmdsa generate", &long, &|inv, p| reg.run(MODEL, "generate", inv.clone(), p), capability_mock::cancellation::Bound::ONE_STEP);
 
         let tuned = dir.join("tuned.safetensors");
         let fine = run(&reg, "finetune", finetune_inv(&data, &tuned).set("lr", json!(1e-4))).unwrap();
@@ -550,17 +560,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A cancelled run stops between steps and says how far it got.
+    /// A run cancelled before admission trains nothing, and one cancelled
+    /// mid-run stops at the next optimizer step with the contract's literal.
     #[test]
     fn a_cancelled_training_run_stops_between_steps() {
         let dir = std::env::temp_dir().join(format!("glmdsa-caps-cancel-{}", std::process::id()));
         let data = dir.join("data");
         write_dataset(&data);
-        let mut inv = train_inv(&data, &dir.join("glm.safetensors")).set("steps", json!(50));
-        inv.cancel = capability::CancelToken::armed();
-        inv.cancel.cancel();
-        let err = run(&registry(None), "train", inv).unwrap_err();
-        assert!(err.contains("cancelled after step 1"), "{err}");
+        let reg = registry(None);
+        let inv = || train_inv(&data, &dir.join("glm.safetensors")).set("steps", json!(8));
+        capability_mock::cancellation::certify("glmdsa train", &inv, &|inv, p| reg.run(MODEL, "train", inv.clone(), p), capability_mock::cancellation::Bound { fire_after: 2, within: 1 });
         let _ = std::fs::remove_dir_all(&dir);
     }
 
