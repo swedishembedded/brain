@@ -38,10 +38,13 @@ text and `finish_reason: "cancelled"` (`.agents/rules/serving-contract.md`).
       `tests/gates/cancellable_actions.bats`) fails any production
       `ActionSpec::new(..)` without `.cancellable()`; the KNOWN list is gone
       and there is no allow list.
-- [ ] **C5. Close the entry-only loops** listed under "Open" below: actions
-      that declare the bit and check on entry, but whose long loop lives in a
-      library function with no stop hook yet. Open: qwen3 `toolcall_gen` and
-      minicpmv `export_peft`.
+- [x] **C5. Close the entry-only loops**: every action that declares the bit
+      polls inside its long loop. The last two: qwen3 `toolcall_gen` asks before
+      each example it renders (`data::chat::prepare_chat_while`, nothing written
+      on a stop; `caps.rs::a_cancelled_eval_calib_or_toolcall_action_stops_at_the_next_unit`,
+      red with the poll removed), and minicpmv `export_peft` passes its token to
+      `PeftAdapter::write` (proved on the real checkpoint by
+      `minicpmv/tests/it/peft_export.rs`, which skips without it).
 
 ## One terminal rule (2026-11-14)
 
@@ -102,11 +105,8 @@ release on the early return, and the bit declared.
 
 ## Open
 
-- **Entry check only, loop without a stop hook**: qwen3 `toolcall_gen` (the
-  dataset writer `data::chat::prepare_chat` tokenizes and writes every case
-  in one call) and minicpmv `export_peft` (its only fixture is the real
-  checkpoint, so a stop cannot be proved here; the library takes the
-  callback through `PeftAdapter::write`).
+- minicpmv `export_peft`'s stop is proved only with the real checkpoint
+  (`peft_export.rs`); a tiny MiniCPM-V fixture would prove it everywhere.
 - Real-weight mid-run proofs to run on a box with the checkpoints: llava
   caption, the SDK's `ask_stream`, flux1 and pulid, s3dit's edit actions,
   cosyvoice's flow loop, qwen3asr (the test above, with the LibriSpeech clip).

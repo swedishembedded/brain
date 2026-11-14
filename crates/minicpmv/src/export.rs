@@ -48,8 +48,9 @@ fn row_blocks(v: &[f32], n: usize, what: &str) -> Result<Vec<Vec<f32>>, String> 
 }
 
 /// Write the tune in `tune` (over the checkpoint in `base_dir`) as a PEFT
-/// adapter directory `out`.
-pub fn export_peft(tune: &Path, base_dir: &Path, out: &Path) -> Result<(), String> {
+/// adapter directory `out`, asking `keep_going` before each adapter pair:
+/// `false` ends the export with the canonical cancelled error.
+pub fn export_peft(tune: &Path, base_dir: &Path, out: &Path, keep_going: &mut dyn FnMut() -> bool) -> Result<(), String> {
     let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(tune.join(TUNE_MANIFEST)).map_err(|e| format!("{}: {e}", tune.display()))?)
         .map_err(|e| format!("{}: {e}", tune.join(TUNE_MANIFEST).display()))?;
     if tune.join(TUNE_DECODER_FULL).is_file() {
@@ -110,7 +111,7 @@ pub fn export_peft(tune: &Path, base_dir: &Path, out: &Path) -> Result<(), Strin
             tune.display()
         ));
     }
-    PeftAdapter { base_model, task_type: None, loras, modules_to_save, saved }.write(out, &mut || true)
+    PeftAdapter { base_model, task_type: None, loras, modules_to_save, saved }.write(out, keep_going)
 }
 
 #[cfg(test)]

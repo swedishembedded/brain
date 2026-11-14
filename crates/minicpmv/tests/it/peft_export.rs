@@ -110,7 +110,11 @@ fn a_peft_export_computes_in_transformers_what_brain_serves() {
     let golden = brain_testutil::testdata_path("minicpmv").join("peft");
     let adapter = golden.join("adapter");
     std::fs::remove_dir_all(&adapter).ok();
-    minicpmv::export::export_peft(&tune, &dir, &adapter).expect("export");
+    // A stop at the first adapter pair is the cancelled error and leaves no adapter behind.
+    let stopped = work.join("stopped");
+    assert_eq!(minicpmv::export::export_peft(&tune, &dir, &stopped, &mut || false).unwrap_err(), capability::failure::CANCELLED);
+    assert!(!stopped.join("adapter_model.safetensors").exists(), "a stopped export writes no adapter");
+    minicpmv::export::export_peft(&tune, &dir, &adapter, &mut || true).expect("export");
     let config: serde_json::Value = serde_json::from_slice(&std::fs::read(adapter.join("adapter_config.json")).unwrap()).unwrap();
     let targets = config["target_modules"].as_array().unwrap();
     let decoder_linears = cfg.text.param_list().iter().filter(|(n, _)| qwen35::import::hf_linear_name(n).is_some()).count();

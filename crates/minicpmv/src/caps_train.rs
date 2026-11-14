@@ -175,13 +175,13 @@ impl Action for ExportPeftAction {
         export_peft_spec()
     }
 
-    fn run(&self, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
+    fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         inv.cancel.check()?;
         let dir = checkpoint(&self.dir, "export_peft")?;
         let tune = inv.get_str("tune").ok_or("minicpmv export_peft: missing required param 'tune'")?;
         let save = PathBuf::from(inv.get_str("save").ok_or("minicpmv export_peft: missing required param 'save'")?);
         let tune_dir = if Path::new(&tune).is_dir() { PathBuf::from(&tune) } else { store_dir(&dir, &tune)? };
-        crate::export::export_peft(&tune_dir, &dir, &save)?;
+        crate::export::export_peft(&tune_dir, &dir, &save, &mut inv.keep_going(progress, 0, "adapter pair"))?;
         Ok(Outcome::new().set("tune", json!(tune_dir.display().to_string())).set("saved", json!(save.display().to_string())))
     }
 }
