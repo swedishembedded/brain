@@ -1084,13 +1084,13 @@ ci:
 ## ci/static - build/static tier: every static gate and every gate self-test
 ci/static: ci/static/scripts check/env-reads check/env-writes check/test-skips check/seed-literals check/serve-conformance check/spdx check/copyright check/paths check/scope check/saved-policy check/agents-md check/files check/make-targets check/generated/kernels-wgsl-table check/generated/kernels-cuda-table check/generated/samples-manifest check/generated/knowledge-index check/generated/roadmap-index ci/static/gate-specs
 
-# The tier is the gates that are clean on the tree today: `check/scripts` and `check/generated/book` are
-# left out because `check-no-perf-numbers.sh`, `check-multi-gpu-sharding.sh` and the book's figure check report
-# existing findings, and a required gate that is red from the first run gates nothing. Each returns
-# to the tier when its findings are fixed. `check-crate-layers.sh` runs here, where the registry is reachable.
+# The tier is the gates that are clean on the tree today: `check/generated/book` is left out because the
+# book's figure check reports existing findings, and a required gate that is red from the first run gates
+# nothing. It returns to the tier when its findings are fixed. `check-crate-layers.sh` runs here, where the
+# registry is reachable.
 ## ci/static/scripts - the clean members of check/scripts (script syntax, env docs, citations, doc links, architecture, layering, kernel and format gates)
 ci/static/scripts:
-	@for gate in check-scripts check-env-docs check-no-doc-citations check-measured-citations check-device-env-single-source check-arch-names check-linear-history check-golden-source check-doc-links check-kernel-selection check-crate-layers check-placement-accounting check-training-capabilities check-model-flags check-adapter-naming check-format-logic check-tier-gemm check-whole-tensor-loads check-cancellable-actions; do \
+	@for gate in check-scripts check-env-docs check-no-doc-citations check-measured-citations check-device-env-single-source check-arch-names check-linear-history check-golden-source check-doc-links check-kernel-selection check-crate-layers check-placement-accounting check-training-capabilities check-model-flags check-adapter-naming check-format-logic check-tier-gemm check-whole-tensor-loads check-cancellable-actions check-no-perf-numbers check-multi-gpu-sharding; do \
 	    bash scripts/gates/$$gate.sh || exit 1; \
 	done
 
