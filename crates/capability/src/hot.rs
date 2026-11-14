@@ -48,10 +48,25 @@ impl<K, V> Hot<K, V> {
 }
 
 impl<K: PartialEq, V> Hot<K, V> {
+    /// The slot, locked. A poisoned lock means a panic ran inside a use and may
+    /// have left the value half-updated (a device queue mid-submission, weights
+    /// partly rebound), so the value is discarded and the poison cleared: the
+    /// next call rebuilds. This is `capability::lock_resident`'s rule, for the
+    /// same reason - a reused value that a panic touched answers wrongly
+    /// instead of failing.
+    fn lock(&self) -> std::sync::MutexGuard<'_, Option<(K, V)>> {
+        self.cell.lock().unwrap_or_else(|poisoned| {
+            let mut guard = poisoned.into_inner();
+            *guard = None;
+            self.cell.clear_poison();
+            guard
+        })
+    }
+
     /// The slot, with the value for `key` built if `accept` does not already
     /// hold for what is cached.
     fn ready_with(&self, accept: impl Fn(&K) -> bool, key: K, build: impl FnOnce() -> Result<V, String>) -> Result<std::sync::MutexGuard<'_, Option<(K, V)>>, String> {
-        let mut guard = self.cell.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut guard = self.lock();
         if !matches!(&*guard, Some((k, _)) if accept(k)) {
             *guard = None;
             let value = build()?;
@@ -62,7 +77,7 @@ impl<K: PartialEq, V> Hot<K, V> {
 
     /// The slot, with the value for `key` built if it was not already.
     fn ready(&self, key: K, build: impl FnOnce() -> Result<V, String>) -> Result<std::sync::MutexGuard<'_, Option<(K, V)>>, String> {
-        let mut guard = self.cell.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut guard = self.lock();
         if !matches!(&*guard, Some((k, _)) if *k == key) {
             *guard = None;
             let value = build()?;
@@ -80,9 +95,9 @@ impl<K: PartialEq, V> Hot<K, V> {
     /// cache empty rather than holding the value it replaced: the next call
     /// retries.
     ///
-    /// A panic elsewhere in the process may poison the lock; this recovers the
-    /// value rather than failing every later call, because a panic during
-    /// `use_it` does not change what the cache holds.
+    /// A panic inside a use poisons the lock. The next call does not fail and
+    /// does not reuse the value the panic may have left half-updated: it
+    /// discards it and rebuilds, as `lock_resident` does.
     pub fn get<R>(&self, key: K, build: impl FnOnce() -> Result<V, String>, use_it: impl FnOnce(&V) -> R) -> Result<R, String> {
         let guard = self.ready(key, build)?;
         Ok(use_it(&guard.as_ref().expect("built above").1))
@@ -92,7 +107,7 @@ impl<K: PartialEq, V> Hot<K, V> {
     /// use (a one-shot generation) drops it here, before a later phase
     /// allocates its own large buffers.
     pub fn clear(&self) {
-        let mut guard = self.cell.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut guard = self.lock();
         *guard = None;
     }
 
@@ -219,5 +234,23 @@ mod tests {
         assert_eq!(hot.get("b".to_string(), || Err("no weights".to_string()), |v| *v), Err("no weights".to_string()));
         // The replaced value is gone: the next call for the old key builds.
         assert_eq!(hot.get("a".to_string(), || Ok(2), |v| *v), Ok(2));
+    }
+
+    /// A panic inside a use may leave the resident half-updated (a device queue
+    /// mid-submission, weights partly rebound), so the next call must rebuild
+    /// rather than trust it - the same rule as `lock_resident`.
+    #[test]
+    fn a_panicking_use_discards_the_value_and_the_next_call_rebuilds() {
+        let hot: Hot<String, u32> = Hot::new();
+        hot.get_mut("a".to_string(), || Ok(1), |v| *v).expect("built");
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = hot.get_mut("a".to_string(), || Ok(1), |v| {
+                *v = 99;
+                panic!("mid-update");
+            });
+        }));
+        assert!(panicked.is_err());
+        assert_eq!(hot.get("a".to_string(), || Ok(2), |v| *v), Ok(2), "the touched value is gone, not reused");
+        assert_eq!(hot.get("a".to_string(), || Ok(3), |v| *v), Ok(2), "and the poison is cleared, so the rebuilt value stays");
     }
 }

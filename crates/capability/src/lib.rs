@@ -1085,19 +1085,16 @@ impl Registry {
     /// life of the process. [`lock_resident`] is the recovery every resident
     /// slot should use.
     ///
-    /// The error itself is a **`String`**, and that is a known gap in this
-    /// interface, not a design: a caller cannot tell "no such model" from
-    /// "context exceeded" from "the device is out of memory" without matching
-    /// on prose, and brain's own HTTP layer does exactly that
-    /// (`apiserve::bridge`'s `parse_exceeds_capacity` matches a fixed English
-    /// phrase to turn one failure into a 400 instead of a 500). The shape that
-    /// closes it is a kinded error - `{ kind: NoSuchModel | NoSuchAction |
-    /// InvalidParams | ContextExceeded | OutOfMemory | Cancelled | Internal,
-    /// message: String }` - returned by [`Action::run`] and widened by the
-    /// registry, which requires changing the error type of every action in the
-    /// workspace and is therefore its own piece of work. Until then the exact
-    /// strings below are load-bearing and are pinned by
-    /// `tests/contracts.rs`.
+    /// The error itself is a **`String`** ([`ActionResult`]). A client that
+    /// must tell "weights not installed" from "malformed request" from "the
+    /// device is out of memory" does not match prose: an action tags its error
+    /// with a [`failure::FailureClass`] (`failure::tag`, rendered
+    /// `[<slug>] <message>`) and a transport reads it back with
+    /// `failure::classify`. The convention is additive, so an untagged error is
+    /// simply unclassified and gets the transport's generic handling. The
+    /// registry's own errors (`no action '<a>' on model '<m>'` and the
+    /// validation messages) are untagged, and their exact strings are
+    /// load-bearing and pinned by `tests/contracts.rs`.
     pub fn run(&self, model: &str, action: &str, inv: Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         let act = self.find(model, action).ok_or_else(|| format!("no action '{action}' on model '{model}'"))?;
         let inv = act.spec().validate(inv)?;
