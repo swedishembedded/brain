@@ -25,4 +25,5 @@ serde_json.workspace = true
 bytemuck.workspace = true
 
 [dev-dependencies]
+brain-capability-mock.workspace = true
 brain-testutil.workspace = true

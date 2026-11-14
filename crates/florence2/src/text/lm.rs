@@ -153,7 +153,10 @@ impl Florence2Lm {
     /// (matching the reference's own `generate()` convention of returning
     /// the sequence a caller then strips the seed token from) - EOS IS
     /// included if generation stopped by producing it.
-    pub fn generate(&self, gpu: &Gpu, k: &Florence2LmKernelIds, ps: &paramstore::ParamStore, enc: &DeviceBuffer, max_new_tokens: u32) -> Vec<u32> {
+    ///
+    /// `keep_going(n)` is asked after each of the `n` tokens is kept; `false`
+    /// ends the decode there, before the next decoder pass.
+    pub fn generate(&self, gpu: &Gpu, k: &Florence2LmKernelIds, ps: &paramstore::ParamStore, enc: &DeviceBuffer, max_new_tokens: u32, keep_going: &mut dyn FnMut(usize) -> bool) -> Vec<u32> {
         let vocab = self.cfg.vocab_size as usize;
         let mut ids = vec![self.cfg.decoder_start_token_id];
         let mut generated = Vec::with_capacity(max_new_tokens as usize);
@@ -166,7 +169,7 @@ impl Florence2Lm {
             let next = last_row.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).map(|(i, _)| i as u32).expect("vocab is non-empty");
             ids.push(next);
             generated.push(next);
-            if next == self.cfg.eos_token_id {
+            if next == self.cfg.eos_token_id || !keep_going(generated.len()) {
                 break;
             }
         }

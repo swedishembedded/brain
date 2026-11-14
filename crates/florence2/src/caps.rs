@@ -158,6 +158,7 @@ impl FlorenceSession {
 
     /// Run one `ground` invocation.
     pub fn ground(&self, inv: &Invocation) -> ActionResult {
+        inv.cancel.check()?;
         let target = inv.get_str("target").ok_or("florence2 ground: missing required param 'target'")?;
         let max_new_tokens = match inv.get_i64("max_new_tokens").unwrap_or(0) {
             0 => MAX_NEW_TOKENS,
@@ -172,7 +173,9 @@ impl FlorenceSession {
 
         let lm = Florence2Lm::new(&self.gpu, self.bart_cfg, self.t_vision, prompt_ids.len() as u32, max_new_tokens + 1);
         let enc = lm.encode(&self.gpu, &self.lm_k, &self.ps, image_features, &prompt_ids);
-        let ids = lm.generate(&self.gpu, &self.lm_k, &self.ps, enc, max_new_tokens);
+        // Polled once per decoded token: a stopped decode is the caller's cancel.
+        let ids = lm.generate(&self.gpu, &self.lm_k, &self.ps, enc, max_new_tokens, &mut |_| !inv.cancel.is_cancelled());
+        inv.cancel.check()?;
 
         let text = self.tok.decode(&ids);
         let boxes = parse_boxes(&text);
@@ -227,6 +230,8 @@ impl Action for GroundAction {
         ground_spec()
     }
     fn run(&self, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        // Before the resident import: a cancelled request builds nothing.
+        inv.cancel.check()?;
         self.hot.try_get(
             self.dir.clone(),
             || FlorenceSession::load(&self.dir, Gpu::new(&SERVING_PIPELINES)),
@@ -239,6 +244,16 @@ impl Action for GroundAction {
 mod caps_tests {
     use super::*;
     use capability::{Blob, Registry};
+
+    /// A token fired before the call refuses it before the checkpoint
+    /// imports (the directory does not exist, so an import would fail
+    /// differently).
+    #[test]
+    fn a_ground_cancelled_before_admission_imports_nothing() {
+        let action = Florence2Provider::new("/nonexistent/florence2").action("ground").expect("ground");
+        let inv = Invocation::new().set("target", json!("a cat")).blob("image", Blob::new(Media::Image, [0.5f32; 3].iter().flat_map(|v| v.to_le_bytes()).collect()).with_meta(json!({"w": 1, "h": 1})));
+        capability_mock::cancellation::admission("florence2 ground", inv, &|inv, p| action.run(inv, p));
+    }
 
     #[test]
     fn manifest_declares_ground_only() {

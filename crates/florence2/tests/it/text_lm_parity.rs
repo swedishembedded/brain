@@ -126,6 +126,6 @@ fn florence2_lm_encoder_and_decoder_match_real_checkpoint() {
     // cosine near 1.0 while silently corrupting row 0 specifically).
     let vocab = cfg.vocab_size as usize;
     let want_argmax = want_logits[..vocab].iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).map(|(i, _)| i as u32).unwrap();
-    let generated = lm.generate(&gpu, &k, &ps, enc_out, 1);
+    let generated = lm.generate(&gpu, &k, &ps, enc_out, 1, &mut |_| true);
     assert_eq!(generated, vec![want_argmax], "generate()'s first greedy token must match the golden's row-0 argmax");
 }
