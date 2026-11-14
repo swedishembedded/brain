@@ -1,4 +1,4 @@
-<!-- source-sha256: ece397612e88be5b47c90c42df0529655b97dde227366da5b5bd4132cf0bddfc -->
+<!-- source-sha256: ee682e9b089dc8c954358bec8959c966f180b7d0256b51b5a171019fb7288277 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 834 332" width="834" height="332"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="834" height="332" fill="#ffffff"/>
 <text x="417" y="30.9" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="bold" fill="#1a202c" text-anchor="middle">The request that holds each block after every step (blank: the block is free)</text>
 <text x="76" y="85.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="end">block 0</text>

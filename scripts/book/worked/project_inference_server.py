@@ -646,8 +646,9 @@ def paged_alone():
         rows.append([label, f"{len(equal)} of {N_REQ}", ", ".join(map(str, diff)) or "none",
                      "0 (the same bits)" if worst == 0.0 else f"{worst:.3g}"])
     return ("Each request of the workload served by itself on the paged cache (a fresh server, nothing else in it), against "
-            "its reply on the dense cache. The largest difference is over every logit of every token up to the first token "
-            "on which the two replies differ (all of them when the replies are equal).\n\n"
+            "its reply on the dense cache. The largest difference is over the logits that chose the tokens before the first "
+            "token on which the two replies differ (the logits that chose that token are not counted; all tokens count when the "
+            "replies are equal).\n\n"
             + _table(["block table", "replies equal to the dense cache", "requests that differ",
                       "largest difference of a logit"], rows, "lrll"))
 
@@ -696,7 +697,12 @@ def preemption():
     return ("The preemptions of the specified server ('tokens' counts the tokens the sequence had generated when it was "
             "preempted; the rebuild prefills the prompt and all of them but the last, which is fed by the next decode step), and "
             "three ways of rebuilding a preempted sequence, each on the whole workload. 'Replies that differ' prints the reply "
-            "the build returned; the replies alone are in the workload table.\n\n"
+            "the build returned; the replies alone are in the workload table. Both planted rebuilds are admitted by the specified rule, "
+            "which counts the blocks of the full context (the prompt and all generated tokens but the last) and the promises of the "
+            "running sequences; only what is then run differs: the prompt-alone build takes blocks for, and prefills, only the prompt "
+            "rows, so the sequence holds only the prompt's positions and blocks afterwards (its pending token is then fed at the "
+            "position after the prompt), and the pending-token build prefills the prompt and "
+            "every generated token, one row more than the specified rebuild.\n\n"
             + _table(["request", "preempted in step", "tokens", "rebuilt in step", "rows rebuilt"], rows1, "rrrrl")
             + "\n\n" + _table(["rebuild", "preemptions", "equal to alone", "replies that differ"], rows2, "lrrl"))
 
@@ -729,7 +735,10 @@ def admission_rules():
             "whatever its number of rows (the rows of a step are one batch). FLOPs are counted as in Volume V, Chapter 12: two "
             "per multiply-add of every matrix product, the attention's included, and the head for the last row of each prefill "
             "and for each decode row; norms, softmax and the gate are not counted. 'Rebuilt' is the FLOPs of the prefills of "
-            "preempted sequences. 'Wait' is the mean over the ten requests of the steps from arrival to the step of the last "
+            "preempted sequences. 'Peak blocks' is the most blocks held in the tables of the running sequences at the end of a step, "
+            "after the finished ones gave theirs back. The reserving rule admits the head of the queue when the free blocks are at "
+            "least its reservation, ceil((n + m - 1) / " + str(BLK) + "), and puts all of those blocks into its table at once "
+            "(no promise is counted: nothing is left to take later). 'Wait' is the mean over the ten requests of the steps from arrival to the step of the last "
             "token.\n\n"
             + _table(["admission", "forward passes", "weight bytes", "FLOPs, first pass", "FLOPs rebuilt", "preemptions",
                       "peak blocks", "wait (steps)"], rows, "lrrrrrrr"))
@@ -749,16 +758,17 @@ def _fields(msg):
 def messages():
     rows = []
     srv = Server()
-    for label, msg, _ in hostile_messages():
+    for label, msg, at in hostile_messages():
         why = validate(msg, NBLK, 0, 0, ALL_CHECKS)
-        rows.append([label, _fields(msg), WORD * len(msg), why or "accepted"])
-    return (f"Client 4's messages, each checked by the specified server with an empty queue. A message is a list of 32-bit "
+        rows.append([label, at, _fields(msg), WORD * len(msg), why or "accepted"])
+    return (f"Client 4's messages, each checked by the specified server with an empty queue ('arrives at step' is the step of the "
+            f"whole run below at which it is sent, and the unguarded runs use the same steps). A message is a list of 32-bit "
             f"fields: max_new, the declared prompt length n, then the tokens (printed as 'max_new; n; tokens'). The checks run "
             f"in this order and the first that fails is the answer: the message is at most {MAX_MSG} bytes (2 + T fields); it "
             f"has at least 2 fields; n equals the number of tokens; n is at least 1; every token is in 0 .. {V - 1}; max_new is "
             f"at least 1; n + max_new - 1 is at most the capacity, min(T, blocks x {BLK}) = {capacity(NBLK)} positions; the "
             f"client has fewer than {Q_CLIENT} requests waiting; fewer than {Q_TOTAL} requests are waiting in all.\n\n"
-            + _table(["message", "fields", "bytes", "answer"], rows, "llrl"))
+            + _table(["message", "arrives at step", "fields", "bytes", "answer"], rows, "lrlrl"))
 
 
 def _hostile(label):
@@ -831,7 +841,8 @@ def flood_table():
             f"drawn as an honest one is, the prompt length 3 + integer(6), its tokens integer(12), max_new 6 + integer(11); the "
             f"first is {_toks(fr[0]['prompt'])} with max_new {fr[0]['max_new']}). 'Honest replies' counts the replies of requests 0 to 9 "
             f"equal to their replies alone, 'honest refused' those refused at arrival, 'peak waiting' the most requests waiting "
-            f"at once and 'wait' the mean over the answered honest requests of the steps from arrival to the last token.\n\n"
+            f"at once, measured right after each accepted arrival is appended to the queue (a sequence waiting to be rebuilt after a "
+            f"preemption counts; the preemption itself takes no sample) and 'wait' the mean over the answered honest requests of the steps from arrival to the last token.\n\n"
             + _table(["queue", "honest replies", "honest refused", "flood accepted", "peak waiting", "wait (steps)", "steps"],
                      rows, "lrrrrrr"))
 
@@ -861,6 +872,6 @@ def whole_run():
     return (f"Everything at once: the ten honest requests, client 3's flood of {FLOOD} at step 0 and client 4's ten messages "
             f"at their steps (the message table gives the step of each), on the specified server and with each planted "
             f"mistake. The specified server refuses {len(expect)} messages ({tally}), answers {flood_answered} requests of the "
-            f"flood and {len(host_answered)} of client 4's, and its peak of waiting requests is {ref.peak_waiting}. 'Refusals "
+            f"flood and {len(host_answered)} of client 4's, and its peak of waiting requests (measured as in the flood table, right after each accepted arrival) is {ref.peak_waiting}. 'Refusals "
             f"as specified' counts the refusals that a build gives with the same reason as the specified server.\n\n"
             + _table(["build", "honest replies", "refusals as specified", "ledger holds", "how the run ends"], rows, "lrrll"))

@@ -112,7 +112,7 @@ function paged_extend(model, pool: inout Pool, s: inout Seq, ids: list<int>) -> 
 The slot of the row written for position $c + i$ is computed from $c + i$, the count before the new row is counted. That is the rule of the dense cache said once more, and it is where the planted mistake of this step goes: a server that advances its count first and then takes the slot from it writes position 0 into slot 1, position 1 into slot 2, position 3 into slot 0 of the same block, and reads them back from the slots where they belong. The table below serves each request alone on a fresh server through the paged cache, and compares the reply and every logit with the dense cache.
 
 <!-- worked: project_inference_server.paged_alone -->
-Each request of the workload served by itself on the paged cache (a fresh server, nothing else in it), against its reply on the dense cache. The largest difference is over every logit of every token up to the first token on which the two replies differ (all of them when the replies are equal).
+Each request of the workload served by itself on the paged cache (a fresh server, nothing else in it), against its reply on the dense cache. The largest difference is over the logits that chose the tokens before the first token on which the two replies differ (the logits that chose that token are not counted; all tokens count when the replies are equal).
 
 | block table | replies equal to the dense cache | requests that differ | largest difference of a logit |
 |---|---:|---|---|
@@ -149,13 +149,13 @@ First the requests of the step arrive, in order of their ids, and are checked (t
 
 The admission rule is the heart of it. A waiting request with a context of $n$ tokens needs $\lceil (n + 1)/B_{\mathrm{blk}} \rceil$ blocks: its prompt, and the slot of its first new position, into which its first token is written when it decodes in the same step. The rule also counts what the sequences already running have been promised, the blocks each of them must take to store its next position, and admits the newcomer only if the free blocks cover both:
 
-$$\text{admit} \iff \text{free} \ \ge\ \Bigl\lceil \frac{n + 1}{B_{\mathrm{blk}}} \Bigr\rceil + \sum_{s\ \text{running}} \Bigl( \Bigl\lceil \frac{c_s + 1}{B_{\mathrm{blk}}} \Bigr\rceil - |\mathrm{table}_s| \Bigr),$$
+$$\text{admit} \iff \text{free} \ \ge\ \Bigl\lceil \frac{n + 1}{B_{\mathrm{blk}}} \Bigr\rceil + \sum_{s\ \text{running}} \max\Bigl(0,\ \Bigl\lceil \frac{c_s + 1}{B_{\mathrm{blk}}} \Bigr\rceil - |\mathrm{table}_s| \Bigr),$$
 
-where $c_s$ is the number of positions sequence $s$ stores and $|\mathrm{table}_s|$ the number of blocks it holds. The sum is the number of running sequences whose last block is full; each of them takes one block in this step's decode.
+where $c_s$ is the number of positions sequence $s$ stores and $|\mathrm{table}_s|$ the number of blocks it holds. The sum is the number of running sequences whose last block is full; each of them takes one block in this step's decode. Each term is clamped at 0: a sequence whose table is longer than its positions need (as under the planted kept table of the opening, whose rebuilt table still lists its old blocks) is owed nothing, and must not lower the other sequences' promises.
 
 ```text
 function promised(running: list<Seq>) -> int    # blocks the running sequences take to store one more position each
-    return sum([blocks_for(s.length + 1) - len(s.table) for s in running])
+    return sum([max(0, blocks_for(s.length + 1) - len(s.table)) for s in running])
 
 function context(s: Seq) -> list<int>           # what a prefill puts into the cache
     k = len(s.generated)
@@ -272,7 +272,7 @@ Stopping a running sequence to free its blocks is preemption, and it raises the 
 The rebuilt cache holds the same numbers as the lost one, not merely similar ones. Row $j$ of the cache is a function of the weights and of the tokens at positions 0 to $j$ (the statement that Volume V, Chapter 12 proved for the causal mask), and the arithmetic that computes a row in a prefill of many rows is, row for row, the arithmetic that computed it in a decode of one: every sum adds the same terms in the same order. The next token is then the token of the uninterrupted run, and so is every token after it. The comparison against the replies alone checks this end to end.
 
 <!-- worked: project_inference_server.preemption -->
-The preemptions of the specified server ('tokens' counts the tokens the sequence had generated when it was preempted; the rebuild prefills the prompt and all of them but the last, which is fed by the next decode step), and three ways of rebuilding a preempted sequence, each on the whole workload. 'Replies that differ' prints the reply the build returned; the replies alone are in the workload table.
+The preemptions of the specified server ('tokens' counts the tokens the sequence had generated when it was preempted; the rebuild prefills the prompt and all of them but the last, which is fed by the next decode step), and three ways of rebuilding a preempted sequence, each on the whole workload. 'Replies that differ' prints the reply the build returned; the replies alone are in the workload table. Both planted rebuilds are admitted by the specified rule, which counts the blocks of the full context (the prompt and all generated tokens but the last) and the promises of the running sequences; only what is then run differs: the prompt-alone build takes blocks for, and prefills, only the prompt rows, so the sequence holds only the prompt's positions and blocks afterwards (its pending token is then fed at the position after the prompt), and the pending-token build prefills the prompt and every generated token, one row more than the specified rebuild.
 
 | request | preempted in step | tokens | rebuilt in step | rows rebuilt |
 |---:|---:|---:|---:|---|
@@ -299,7 +299,7 @@ The equality holds here because the reference arithmetic computes each row on it
 The promise rule admits a request into the blocks it needs now, and pays for the bet with an occasional rebuild when sequences grow together. The obvious alternative bets nothing: it reserves, at admission, every block the sequence could ever need, $\lceil (n + m - 1)/B_{\mathrm{blk}} \rceil$, and then no sequence can ever be short of a block and nothing is preempted. A third server runs one sequence at a time and needs no rule at all. Which is better is a question of work, and the work of a step is countable. A step that runs at least one row is one forward pass, and a forward pass reads the 4,544 numbers of the model's matrix products once, 36,352 bytes, however many rows it carries: the rows of a step are one batch, the assumption under which batching pays at all (Volume V, Chapter 12 counted that a decode row reads the weights once per step for the whole batch and its own cache once). The FLOPs follow the counting rule of that chapter.
 
 <!-- worked: project_inference_server.admission_rules -->
-Five admission rules on the workload, each with the same pool of 6 blocks. A forward pass is a step that runs at least one row; it reads the 4,544 numbers of the matrix products once, 36,352 bytes, whatever its number of rows (the rows of a step are one batch). FLOPs are counted as in Volume V, Chapter 12: two per multiply-add of every matrix product, the attention's included, and the head for the last row of each prefill and for each decode row; norms, softmax and the gate are not counted. 'Rebuilt' is the FLOPs of the prefills of preempted sequences. 'Wait' is the mean over the ten requests of the steps from arrival to the step of the last token.
+Five admission rules on the workload, each with the same pool of 6 blocks. A forward pass is a step that runs at least one row; it reads the 4,544 numbers of the matrix products once, 36,352 bytes, whatever its number of rows (the rows of a step are one batch). FLOPs are counted as in Volume V, Chapter 12: two per multiply-add of every matrix product, the attention's included, and the head for the last row of each prefill and for each decode row; norms, softmax and the gate are not counted. 'Rebuilt' is the FLOPs of the prefills of preempted sequences. 'Peak blocks' is the most blocks held in the tables of the running sequences at the end of a step, after the finished ones gave theirs back. The reserving rule admits the head of the queue when the free blocks are at least its reservation, ceil((n + m - 1) / 4), and puts all of those blocks into its table at once (no promise is counted: nothing is left to take later). 'Wait' is the mean over the ten requests of the steps from arrival to the step of the last token.
 
 | admission | forward passes | weight bytes | FLOPs, first pass | FLOPs rebuilt | preemptions | peak blocks | wait (steps) |
 |---|---:|---:|---:|---:|---:|---:|---:|
@@ -351,23 +351,23 @@ function check_message(msg: list<int>, NBLK: int, waiting_of_client: int, waitin
     return "accepted"
 ```
 
-Client 4 sends ten messages, one of them honest. The table gives each the specified server's answer.
+The constants of the pseudocode are `ROWS` = 4 sequences in a step, `STOP` = 0, `Q_CLIENT` = 4 waiting requests of one client and `Q_TOTAL` = 16 waiting in all. Client 4 sends ten messages, one of them honest. The table gives each the specified server's answer and the step at which it is sent.
 
 <!-- worked: project_inference_server.messages -->
-Client 4's messages, each checked by the specified server with an empty queue. A message is a list of 32-bit fields: max_new, the declared prompt length n, then the tokens (printed as 'max_new; n; tokens'). The checks run in this order and the first that fails is the answer: the message is at most 104 bytes (2 + T fields); it has at least 2 fields; n equals the number of tokens; n is at least 1; every token is in 0 .. 11; max_new is at least 1; n + max_new - 1 is at most the capacity, min(T, blocks x 4) = 24 positions; the client has fewer than 4 requests waiting; fewer than 16 requests are waiting in all.
+Client 4's messages, each checked by the specified server with an empty queue ('arrives at step' is the step of the whole run below at which it is sent, and the unguarded runs use the same steps). A message is a list of 32-bit fields: max_new, the declared prompt length n, then the tokens (printed as 'max_new; n; tokens'). The checks run in this order and the first that fails is the answer: the message is at most 104 bytes (2 + T fields); it has at least 2 fields; n equals the number of tokens; n is at least 1; every token is in 0 .. 11; max_new is at least 1; n + max_new - 1 is at most the capacity, min(T, blocks x 4) = 24 positions; the client has fewer than 4 requests waiting; fewer than 16 requests are waiting in all.
 
-| message | fields | bytes | answer |
-|---|---|---:|---|
-| a token id past the vocabulary | 8; 3; 7 7 12 | 20 | token out of range |
-| a negative token id | 8; 3; 7 -1 7 | 20 | token out of range |
-| a budget of no tokens | 0; 3; 7 7 7 | 20 | max_new below 1 |
-| a budget of a billion tokens | 1,000,000,000; 3; 7 7 7 | 20 | exceeds capacity |
-| a declared length of a million | 8; 1,000,000; 7 7 7 | 20 | length mismatch |
-| a prompt of no tokens | 8; 0; none | 8 | empty prompt |
-| one field | 8 | 4 | malformed |
-| 25 tokens | 8; 25; 25 times 2 | 108 | too large |
-| 20 tokens and a budget of 8 | 8; 20; 20 times 2 | 88 | exceeds capacity |
-| a well-formed request | 8; 3; 7 7 7 | 20 | accepted |
+| message | arrives at step | fields | bytes | answer |
+|---|---:|---|---:|---|
+| a token id past the vocabulary | 1 | 8; 3; 7 7 12 | 20 | token out of range |
+| a negative token id | 1 | 8; 3; 7 -1 7 | 20 | token out of range |
+| a budget of no tokens | 2 | 0; 3; 7 7 7 | 20 | max_new below 1 |
+| a budget of a billion tokens | 2 | 1,000,000,000; 3; 7 7 7 | 20 | exceeds capacity |
+| a declared length of a million | 3 | 8; 1,000,000; 7 7 7 | 20 | length mismatch |
+| a prompt of no tokens | 3 | 8; 0; none | 8 | empty prompt |
+| one field | 4 | 8 | 4 | malformed |
+| 25 tokens | 4 | 8; 25; 25 times 2 | 108 | too large |
+| 20 tokens and a budget of 8 | 5 | 8; 20; 20 times 2 | 88 | exceeds capacity |
+| a well-formed request | 5 | 8; 3; 7 7 7 | 20 | accepted |
 <!-- /worked -->
 
 The capacity check is the one that ties the boundary to the argument that a decode never finds the pool empty: $n + m - 1$ positions is the most a sequence will ever store, and it must fit both the model's $T$ and the whole pool, $\min(24, 6 \times 4) = 24$ positions here. The message of 20 tokens and a budget of 8 is well-formed, its tokens are valid and its prompt fits, and it is still refused, because its life does not. The order of the checks matters for the reason reported and, more, for what is read: the length is compared with the bytes before a token is looked at, and the size before the length.
@@ -409,7 +409,7 @@ Your server passes step 6 when its answers to the ten messages are those of the 
 The checks so far judge each message on its own. A client can also send many messages that are each perfectly honest, and the damage is then done by the number. Client 3 sends 40 well-formed requests at step 0, just after request 0. A server whose queue has no bound accepts them all, and since the queue is first in, first out, every honest request that arrives afterwards waits behind client 3's; the queue itself grows to 44 entries, each a message the server must hold. A bound on the total number of waiting requests fixes the memory but not the unfairness: once client 3's requests fill it, the honest ones are refused. The bound that protects the other clients is one per client.
 
 <!-- worked: project_inference_server.flood_table -->
-Client 3 sends 40 well-formed requests at step 0, just after request 0 (generator: the book's SplitMix64, seed 11948608382804451597, `seed_of('project_inference_server.flood')`, one generator, never restarted; each request drawn as an honest one is, the prompt length 3 + integer(6), its tokens integer(12), max_new 6 + integer(11); the first is 5 2 1 7 6 5 8 with max_new 13). 'Honest replies' counts the replies of requests 0 to 9 equal to their replies alone, 'honest refused' those refused at arrival, 'peak waiting' the most requests waiting at once and 'wait' the mean over the answered honest requests of the steps from arrival to the last token.
+Client 3 sends 40 well-formed requests at step 0, just after request 0 (generator: the book's SplitMix64, seed 11948608382804451597, `seed_of('project_inference_server.flood')`, one generator, never restarted; each request drawn as an honest one is, the prompt length 3 + integer(6), its tokens integer(12), max_new 6 + integer(11); the first is 5 2 1 7 6 5 8 with max_new 13). 'Honest replies' counts the replies of requests 0 to 9 equal to their replies alone, 'honest refused' those refused at arrival, 'peak waiting' the most requests waiting at once, measured right after each accepted arrival is appended to the queue (a sequence waiting to be rebuilt after a preemption counts; the preemption itself takes no sample) and 'wait' the mean over the answered honest requests of the steps from arrival to the last token.
 
 | queue | honest replies | honest refused | flood accepted | peak waiting | wait (steps) | steps |
 |---|---:|---:|---:|---:|---:|---:|
@@ -428,7 +428,7 @@ Your server passes step 7 when the four rows come out as printed: the honest rep
 The last run puts everything together: the honest workload, client 3's flood at step 0 and client 4's ten messages at their steps, against the specified server and against each of the planted mistakes of the earlier steps. The refusals of the specified server are the reference for the boundary, the replies alone for the replies, and the ledger for the memory.
 
 <!-- worked: project_inference_server.whole_run -->
-Everything at once: the ten honest requests, client 3's flood of 40 at step 0 and client 4's ten messages at their steps (the message table gives the step of each), on the specified server and with each planted mistake. The specified server refuses 45 messages (too large 1; malformed 1; length mismatch 1; empty prompt 1; token out of range 2; max_new below 1 1; exceeds capacity 2; client queue full 36), answers 4 requests of the flood and 1 of client 4's, and its peak of waiting requests is 9. 'Refusals as specified' counts the refusals that a build gives with the same reason as the specified server.
+Everything at once: the ten honest requests, client 3's flood of 40 at step 0 and client 4's ten messages at their steps (the message table gives the step of each), on the specified server and with each planted mistake. The specified server refuses 45 messages (too large 1; malformed 1; length mismatch 1; empty prompt 1; token out of range 2; max_new below 1 1; exceeds capacity 2; client queue full 36), answers 4 requests of the flood and 1 of client 4's, and its peak of waiting requests (measured as in the flood table, right after each accepted arrival) is 9. 'Refusals as specified' counts the refusals that a build gives with the same reason as the specified server.
 
 | build | honest replies | refusals as specified | ledger holds | how the run ends |
 |---|---:|---:|---|---|
