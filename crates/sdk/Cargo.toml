@@ -276,6 +276,7 @@ tempfile = { workspace = true, optional = true }
 
 [dev-dependencies]
 brain-checkpoint.workspace = true
+brain-capability-mock.workspace = true
 # Weightless CAM++/S3Tokenizer graphs for the CosyVoice resolution fixture.
 brain-campplus.workspace = true
 brain-s3tokenizer.workspace = true

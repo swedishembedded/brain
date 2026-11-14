@@ -26,3 +26,4 @@ bytemuck.workspace = true
 # `testutil::skip` / `skip_unavailable` - an absent fixture can be made fatal
 # and absent hardware cannot.
 brain-testutil.workspace = true
+brain-capability-mock.workspace = true

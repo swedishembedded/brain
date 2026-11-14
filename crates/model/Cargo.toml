@@ -62,6 +62,7 @@ pollster.workspace = true
 # this is not a real cycle.
 [dev-dependencies]
 brain-testutil.workspace = true
+brain-capability-mock.workspace = true
 # Test-only: parses and validates every sparse-attention kernel variant, which the CPU JIT cannot execute.
 naga.workspace = true
 brain-gradcheck.workspace = true

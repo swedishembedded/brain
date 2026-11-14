@@ -36,6 +36,7 @@ nix = { version = "0.29", features = ["socket", "uio"] }
 zbus = { workspace = true }
 tokio = { workspace = true }
 brain-testutil.workspace = true
+brain-capability-mock.workspace = true
 brain-apiserve.workspace = true
 axum.workspace = true
 tower.workspace = true

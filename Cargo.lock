@@ -575,6 +575,7 @@ dependencies = [
  "brain-audit",
  "brain-campplus",
  "brain-capability",
+ "brain-capability-mock",
  "brain-checkpoint",
  "brain-clip",
  "brain-codeformer",
@@ -1895,6 +1896,7 @@ name = "brain-huginn"
 version = "5.1.0"
 dependencies = [
  "brain-capability",
+ "brain-capability-mock",
  "brain-checkpoint",
  "brain-data",
  "brain-gpu-core",
@@ -2271,6 +2273,7 @@ dependencies = [
  "brain-backend-cpu",
  "brain-backend-cuda",
  "brain-capability",
+ "brain-capability-mock",
  "brain-checkpoint",
  "brain-data",
  "brain-gpu-core",
@@ -2543,6 +2546,7 @@ name = "brain-ouro"
 version = "5.1.0"
 dependencies = [
  "brain-capability",
+ "brain-capability-mock",
  "brain-checkpoint",
  "brain-data",
  "brain-gpu-core",
@@ -2657,6 +2661,7 @@ dependencies = [
  "brain-audio",
  "brain-backend-cuda",
  "brain-capability",
+ "brain-capability-mock",
  "brain-checkpoint",
  "brain-data",
  "brain-dflash2",
@@ -3363,6 +3368,7 @@ dependencies = [
  "brain",
  "brain-apiserve",
  "brain-capability",
+ "brain-capability-mock",
  "brain-catalog",
  "brain-checkpoint",
  "brain-data",
