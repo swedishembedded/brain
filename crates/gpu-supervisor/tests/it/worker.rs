@@ -47,16 +47,24 @@ fn spawn() -> Worker {
 
 const REAP: Duration = Duration::from_secs(20);
 
-/// Thread counts are per process, so the tests that compare them run one at a
-/// time; the others still run in parallel threads of the harness, which only
-/// ever lowers the count between two reads taken under this lock.
+/// The tests that count threads run one at a time.
 fn serial() -> MutexGuard<'static, ()> {
     static LOCK: Mutex<()> = Mutex::new(());
     LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Threads named like the calling one. The harness names each test's thread
+/// after its test and an unnamed thread inherits the name of the thread that
+/// started it, so this counts the test's own thread plus any helper it (or
+/// the supervisor on its behalf) started, never another test's threads or the
+/// named reaper.
 fn threads() -> usize {
-    std::fs::read_dir("/proc/self/task").expect("procfs").count()
+    let me = std::fs::read_to_string("/proc/thread-self/comm").expect("procfs");
+    std::fs::read_dir("/proc/self/task")
+        .expect("procfs")
+        .flatten()
+        .filter(|t| std::fs::read_to_string(t.path().join("comm")).is_ok_and(|c| c == me))
+        .count()
 }
 
 /// Live (non-zombie) processes whose process group is `pgid`.
@@ -87,6 +95,15 @@ fn assert_group_gone(pgid: u32) {
 
 fn assert_reaped(pid: u32) {
     assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists(), "worker {pid} was not reaped (still in /proc)");
+}
+
+/// A dropped worker is reaped by the supervisor's reaper thread, a moment later.
+fn assert_reaped_soon(pid: u32) {
+    let until = Instant::now() + Duration::from_secs(5);
+    while std::path::Path::new(&format!("/proc/{pid}")).exists() && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_reaped(pid);
 }
 
 fn health() -> Health<&'static str> {
@@ -232,6 +249,6 @@ fn dropping_a_worker_terminates_and_reaps_it() {
     let w = spawn();
     let pid = w.pid();
     drop(w);
-    assert_reaped(pid);
+    assert_reaped_soon(pid);
     assert_group_gone(pid);
 }

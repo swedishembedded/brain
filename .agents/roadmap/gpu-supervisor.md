@@ -58,7 +58,7 @@ worker.
 
 | piece | where | what it does |
 |---|---|---|
-| `Worker` | `crates/gpu-supervisor/src/worker.rs` | `execve` of a worker program in its own process group with `PR_SET_PDEATHSIG = SIGKILL`; one `AF_UNIX` stream socket pair as its stdin/stdout; one line request and one line answer per call with a fresh id (a stale answer is discarded); an explicit deadline per request as a socket read timeout (no helper thread); on a missed deadline, end of stream or malformed reply, `SIGKILL` to the group and a bounded reap; a worker still in uninterruptible driver sleep after the bound is handed back, never waited on forever; drop terminates and reaps |
+| `Worker` | `crates/gpu-supervisor/src/worker.rs` | `execve` of a worker program in its own process group with `PR_SET_PDEATHSIG = SIGKILL`; one `AF_UNIX` stream socket pair as its stdin/stdout; one line request and one line answer per call with a fresh id (a stale answer is discarded); an explicit deadline per request as a socket read timeout (no helper thread); on a missed deadline, end of stream or malformed reply, `SIGKILL` to the group and a bounded reap; a worker still in uninterruptible driver sleep after the bound is handed back, never waited on forever; drop sends the group `SIGKILL` and hands the worker to the process's reaper thread (`brain-gpu-reaper`), so dropping an instance (an eviction on the scheduler's thread) never waits for an exit |
 | `Breaker` | `crates/gpu-supervisor/src/breaker.rs` | per-device circuit breaker with time passed in: a fault opens it with an immediate probe (a restart); the third fault within 600 s trips it, after which a probe runs every 300 s and two clean probes close it (`BreakerPolicy`, every value a parameter) |
 | `Health` | `crates/gpu-supervisor/src/health.rs` | the registry every supervised call goes through: refuses work for a quarantined device without sending anything, records each fault once, logs the trip once, parks unreaped workers and holds the device's probes back until they are reaped, runs probes in fresh workers |
 | executor integration | `crates/residency/src/executor.rs` (`start_supervised`, `assign`, `refuse_quarantined`, `start_probes`, `lane_loop`) | quarantined devices are excluded from placement like busy ones; work no healthy device can ever host is refused once the breaker tripped; a group that faulted its device fails and its claim (budget, slot, instance) is unwound; due probes run on the device's own lane, which is busy meanwhile; an in-process wait past `--gpu-wait-s` (`backend_api::hardware::WAIT_TIMEOUT_MARK`) quarantines the card too, whether it panicked, failed the activation or came back as a job's error |
@@ -85,14 +85,16 @@ Choices the design above left open, and what was chosen:
 
 ## Verification
 
-* `cargo test -p brain-gpu-supervisor` (14 tests): a hung request fails
+* `cargo test -p brain-gpu-supervisor` (14 integration tests, 1 unit test): a hung request fails
   within its deadline with the worker and its whole process group gone
   from `/proc` and no thread left behind; an abort is reported with its
   signal and reaped; an open breaker refuses work until a probe passes; a
   hung probe is killed and keeps the device out; another device serves
   while one is wedged; an `err` answer is not a fault; a garbled reply is
   a protocol fault; a request that would break the framing is refused
-  unsent; dropping a worker reaps it; the breaker's restart, trip, window
+  unsent; dropping a worker reaps it (through the reaper, which takes a
+  still-running process without blocking the caller and reaps it, no
+  zombie, once it exits); the breaker's restart, trip, window
   and spaced-probe rules. The fakes are a POSIX shell that hangs in a
   grandchild or aborts.
 * `cargo test -p brain-residency --test it supervision` (4 tests): through

@@ -116,7 +116,7 @@ pub enum WorkerFailure {
     Fault(FaultKind),
 }
 
-/// A supervised child process. Dropping it terminates and reaps it.
+/// A supervised child process. Dropping it kills it; the reaper thread reaps it.
 pub struct Worker {
     /// `None` once reaped, or once an unreaped child was handed over.
     child: Option<Child>,
@@ -144,7 +144,6 @@ impl Worker {
     pub fn spawn_with(cmd: &WorkerCommand, reap_within: Duration) -> std::io::Result<Worker> {
         use std::os::fd::OwnedFd;
         use std::os::unix::process::CommandExt;
-        reap_orphans();
         let (sock, theirs) = UnixStream::pair()?;
         let stdin: OwnedFd = theirs.try_clone()?.into();
         let stdout: OwnedFd = theirs.into();
@@ -272,14 +271,7 @@ impl Worker {
         self.terminated = true;
         let Some(child) = self.child.as_mut() else { return };
         let mut status = poll_exit(child, grace);
-        // Always, even when the leader already exited: what it started may
-        // still run. The group id stays reserved while any member lives, so
-        // this cannot reach an unrelated process.
-        #[cfg(unix)]
-        // SAFETY: kill(2) with a negative pid signals that process group; no memory is touched.
-        unsafe {
-            libc::kill(-(self.pid as libc::pid_t), libc::SIGKILL);
-        }
+        kill_group(self.pid);
         if status.is_none() {
             let _ = child.kill();
             status = poll_exit(child, self.reap_within);
@@ -291,12 +283,30 @@ impl Worker {
     }
 }
 
+/// `SIGKILL` to the process group a worker leads. Always sent, even when the
+/// leader already exited: what it started may still run. The group id stays
+/// reserved while any member lives, so this cannot reach an unrelated process.
+fn kill_group(leader: u32) {
+    #[cfg(unix)]
+    // SAFETY: kill(2) with a negative pid signals that process group; no memory is touched.
+    unsafe {
+        libc::kill(-(leader as libc::pid_t), libc::SIGKILL);
+    }
+    #[cfg(not(unix))]
+    let _ = leader;
+}
+
 impl Drop for Worker {
+    /// Kills the worker and hands it to the reaper without waiting: a worker
+    /// is dropped wherever its owner is, which for an evicted instance is the
+    /// scheduler's one thread, and a healthy worker still takes a moment to
+    /// exit (one inside a driver call, until that call returns).
     fn drop(&mut self) {
-        self.terminate(Duration::ZERO);
-        if let Some(child) = self.child.take() {
-            park_orphan(child);
-        }
+        self.terminated = true;
+        let Some(mut child) = self.child.take() else { return };
+        kill_group(self.pid);
+        let _ = child.kill();
+        reap_later(child);
     }
 }
 
@@ -396,14 +406,66 @@ fn describe(s: ExitStatus) -> String {
     }
 }
 
-/// Killed workers dropped before the kernel released them, polled on the next
-/// spawn so they are reaped as soon as their driver call returns.
-static ORPHANS: std::sync::Mutex<Vec<Child>> = std::sync::Mutex::new(Vec::new());
+/// How often the reaper polls the workers it holds.
+const REAP_POLL: Duration = Duration::from_millis(5);
 
-fn park_orphan(child: Child) {
-    ORPHANS.lock().unwrap_or_else(|e| e.into_inner()).push(child);
+/// Hand a killed worker to the process's reaper thread, which reaps it as
+/// soon as the kernel releases it (at once for a healthy worker, when its
+/// driver call returns for one stuck inside the driver). Never blocks: if the
+/// reaper cannot be started the child is reaped here when it already exited,
+/// and otherwise left to the kernel's reparenting at exit.
+fn reap_later(mut child: Child) {
+    if matches!(child.try_wait(), Ok(Some(_)) | Err(_)) {
+        return;
+    }
+    static REAPER: std::sync::OnceLock<Option<std::sync::mpsc::Sender<Child>>> = std::sync::OnceLock::new();
+    let reaper = REAPER.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel::<Child>();
+        std::thread::Builder::new().name("brain-gpu-reaper".into()).spawn(move || reaper_loop(rx)).ok().map(|_| tx)
+    });
+    if let Some(tx) = reaper {
+        let _ = tx.send(child);
+    }
 }
 
-fn reap_orphans() {
-    ORPHANS.lock().unwrap_or_else(|e| e.into_inner()).retain_mut(|c| matches!(c.try_wait(), Ok(None)));
+/// The reaper thread: waits for workers while it holds none, polls the ones
+/// it holds until each has exited. Runs for the life of the process (its
+/// sender is never dropped).
+fn reaper_loop(rx: std::sync::mpsc::Receiver<Child>) {
+    let mut held: Vec<Child> = Vec::new();
+    loop {
+        if held.is_empty() {
+            match rx.recv() {
+                Ok(child) => held.push(child),
+                Err(_) => return,
+            }
+        } else if let Ok(child) = rx.recv_timeout(REAP_POLL) {
+            held.push(child);
+        }
+        held.extend(rx.try_iter());
+        held.retain_mut(|c| matches!(c.try_wait(), Ok(None)));
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    /// A process that is still alive when it is handed over (as a killed
+    /// worker inside a driver call is) does not hold up the caller, and is
+    /// reaped, not left a zombie, once it exits.
+    #[test]
+    fn a_worker_the_kernel_has_not_released_is_reaped_later_without_blocking() {
+        let child = Command::new("/bin/sh").arg("-c").arg("sleep 0.3").spawn().expect("spawn sh");
+        let pid = child.id();
+        let started = Instant::now();
+        reap_later(child);
+        assert!(started.elapsed() < Duration::from_millis(100), "handing over waited {:?}", started.elapsed());
+        assert!(std::path::Path::new(&format!("/proc/{pid}")).exists(), "the process was still running when handed over");
+        let until = Instant::now() + Duration::from_secs(10);
+        while std::path::Path::new(&format!("/proc/{pid}")).exists() {
+            assert!(Instant::now() < until, "process {pid} was never reaped");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
 }

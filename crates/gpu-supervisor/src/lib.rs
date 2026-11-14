@@ -23,8 +23,9 @@
 //!
 //! * [`Worker`]: one child process speaking a line protocol over a Unix
 //!   socket pair, with one request in flight at a time, an explicit deadline
-//!   per request, and group kill plus bounded reaping on every failure path
-//!   and on drop.
+//!   per request, and group kill plus bounded reaping on every failure path.
+//!   Dropping one kills its group and leaves the reaping to a reaper thread,
+//!   so the dropping thread never waits for an exit.
 //! * [`Breaker`]: the per-device circuit breaker. A fault opens it at once; a
 //!   probe in a fresh worker (half-open) closes it again; faults that repeat
 //!   inside a window trip it, after which probes are spaced out and more than
