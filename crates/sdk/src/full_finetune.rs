@@ -309,6 +309,10 @@ impl ChatFullFineTune {
     /// checkpoint.
     pub fn run_with(&self, cancel: &CancelToken, mut on_progress: impl FnMut(&FineTuneProgress)) -> Result<ChatFullFineTuneOutcome> {
         let run_clock = std::time::Instant::now();
+        // A named architecture is refused before anything is read.
+        if let Some(named) = self.arch.as_deref() {
+            chat_entry(named)?;
+        }
         let store_root = loader::model_dir::resolve(self.models_dir.as_deref());
         let (weights, model_dir, base_id) = loader::model_dir::resolve_base(&self.base, store_root.as_deref()).map_err(Error::ModelNotFound)?;
         let chat = chat_entry(self.arch_of(&model_dir))?;

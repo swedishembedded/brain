@@ -922,7 +922,8 @@ mod tests {
         let table = [ArchEntry::of::<Fake>()];
         assert_eq!(refused(arch_in(&table, "fake").unwrap().require(Capability::ChatFineTune)), "fake does not provide chat fine-tuning yet");
         assert!(ARCHS.iter().all(|a| a.chat_fine_tune && a.chat.is_some()));
-        assert!(matches!(crate::ChatFullFineTune::from_pretrained("none").arch("nonesuch").dataset("d.jsonl").out_dir(&dir).run(), Err(Error::UnsupportedArchitecture(_))));
+        let full = crate::ChatFullFineTune::from_pretrained("none").arch("nonesuch").dataset("d.jsonl").out_dir(&dir).run();
+        assert!(matches!(full, Err(Error::UnsupportedArchitecture(_))), "{:?}", full.map(|_| ()));
         match crate::ChatFineTune::from_pretrained("none").arch("nonesuch").dataset("d.jsonl").out_dir(&dir).run() {
             Err(Error::UnsupportedArchitecture(m)) => assert!(m.contains("nonesuch") && m.contains("qwen3"), "{m}"),
             other => panic!("expected an unknown-architecture refusal, got {:?}", other.map(|_| ())),
