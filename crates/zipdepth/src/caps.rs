@@ -412,10 +412,13 @@ impl Action for CalibAction {
         self.hot.try_get(weights.clone(), || DepthModel::load(&weights), |hot| {
             let cfg = with_input(&hot.cfg, inv);
             let images = calibration_images(&dir, cfg.input, max, &inv.cancel)?;
-            progress(Progress::step(0, 1, format!("calibrating on {} images", images.len())));
             let params: Vec<(String, usize)> = cfg.param_list().into_iter().map(|(name, s)| (name, s.iter().product())).collect();
             let ps = paramstore::ParamStore::new(&hot.gpu, params, &hot.init);
-            let report = crate::collect_activation_stats_sized(&hot.gpu, &cfg, &ps, &images).report();
+            let stats = crate::collect_activation_stats_sized(&hot.gpu, &cfg, &ps, &images, &mut |done, total| {
+                progress(Progress::step(done, total, format!("image {} of {total}", done + 1)));
+                !inv.cancel.is_cancelled()
+            });
+            let report = stats.ok_or_else(|| capability::failure::CANCELLED.to_string())?.report();
             let mean = |encoder: bool| {
                 let ratios: Vec<f32> = report.iter().filter(|r| r.is_encoder() == encoder).map(|r| r.outlier_ratio).collect();
                 if ratios.is_empty() { 0.0 } else { ratios.iter().sum::<f32>() / ratios.len() as f32 }

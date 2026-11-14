@@ -102,3 +102,24 @@ fn convs_sharing_an_input_report_identical_stats() {
     assert_eq!(a.to_bits(), c.to_bits(), "cross_scale.high_to_low shares stage3's output: {a} vs {c}");
     let _ = Ctx::new(&gpu, zipdepth::net::ids());
 }
+
+/// The pass stops before the next image once its token fires.
+#[test]
+fn the_activation_pass_stops_at_the_next_image() {
+    use capability::{Invocation, Outcome, Progress};
+    use capability_mock::cancellation::{certify, Bound};
+    let gpu = Gpu::new_cpu(zipdepth::net::PIPELINES);
+    let cfg = small();
+    let ps = store(&gpu, &cfg);
+    let images: Vec<zipdepth::CalibImage> = (0..6).map(|_| zipdepth::CalibImage { chw: vec![0.5; (3 * cfg.input * cfg.input) as usize], h: cfg.input, w: cfg.input }).collect();
+    let run = |inv: &Invocation, progress: &mut dyn FnMut(Progress)| {
+        inv.cancel.check()?;
+        zipdepth::collect_activation_stats_sized(&gpu, &cfg, &ps, &images, &mut |done, total| {
+            progress(Progress::step(done, total, ""));
+            !inv.cancel.is_cancelled()
+        })
+        .ok_or_else(|| capability::failure::CANCELLED.to_string())?;
+        Ok(Outcome::new())
+    };
+    certify("zipdepth calib pass", &Invocation::new, &run, Bound::ONE_STEP);
+}

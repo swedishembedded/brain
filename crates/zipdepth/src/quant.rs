@@ -99,12 +99,16 @@ pub struct CalibImage {
 /// every image to a padded square, which is a different resampler, a different
 /// geometry and a grey fill the model never sees at inference — so the INT8
 /// scales were fitted to a distribution that does not occur.
+///
+/// `keep_going(done, total)` is asked before each image; `None` means it said
+/// no and the pass stopped.
 pub fn collect_activation_stats_sized(
     gpu: &Gpu,
     cfg: &ZipConfig,
     ps: &ParamStore,
     images: &[CalibImage],
-) -> ActStatsCollector {
+    keep_going: &mut dyn FnMut(u32, u32) -> bool,
+) -> Option<ActStatsCollector> {
     let collector = ActStatsCollector::new();
     let ids = crate::net::ids();
     let ctx = Ctx::with_tap(gpu, ids, &collector);
@@ -114,7 +118,10 @@ pub fn collect_activation_stats_sized(
     order.sort_by_key(|&i| (images[i].h, images[i].w));
 
     let mut cur: Option<(u32, u32, ZipDepth, gpu_core::DeviceBuffer)> = None;
-    for i in order {
+    for (done, i) in order.into_iter().enumerate() {
+        if !keep_going(done as u32, images.len() as u32) {
+            return None;
+        }
         let im = &images[i];
         assert_eq!(im.chw.len(), (3 * im.h * im.w) as usize, "calib image must be [3,{},{}] CHW", im.h, im.w);
         let need = cur.as_ref().map(|(h, w, _, _)| (*h, *w) != (im.h, im.w)).unwrap_or(true);
@@ -128,7 +135,7 @@ pub fn collect_activation_stats_sized(
         gpu.write(input, bytemuck::cast_slice(&im.chw));
         model.forward(&ctx, ps, input);
     }
-    collector
+    Some(collector)
 }
 
 /// Square-input convenience: every image is `[3, input, input]`.
@@ -140,5 +147,5 @@ pub fn collect_activation_stats_sized(
 pub fn collect_activation_stats(gpu: &Gpu, cfg: &ZipConfig, ps: &ParamStore, images: &[Vec<f32>]) -> ActStatsCollector {
     let sized: Vec<CalibImage> =
         images.iter().map(|c| CalibImage { chw: c.clone(), h: cfg.input, w: cfg.input }).collect();
-    collect_activation_stats_sized(gpu, cfg, ps, &sized)
+    collect_activation_stats_sized(gpu, cfg, ps, &sized, &mut |_, _| true).expect("an always-true keep-going callback never stops the pass")
 }

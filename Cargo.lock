@@ -3618,6 +3618,7 @@ version = "5.1.0"
 dependencies = [
  "brain-backend-cpu",
  "brain-capability",
+ "brain-capability-mock",
  "brain-checkpoint",
  "brain-data",
  "brain-gpu-core",

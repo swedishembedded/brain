@@ -152,7 +152,7 @@ impl BatchSource for Synthetic {
 /// (fresh `init_weights` or a loaded checkpoint for fine-tune), and step, drawing
 /// each step's batch from `source`.
 /// `on_step(step, loss)` fires every step with the total loss (progress printing, test capture);
-/// returning false stops the run with an error naming the step.
+/// returning false stops the run with `Err(CANCELLED)`.
 /// Returns the trained `ParamStore` (the caller saves it) and the loss report, or the refusal of `t.saved`, of a
 /// batch the source cannot deliver, or of an image the loss cannot fit (fewer than two valid pixels, a NaN).
 pub fn train_loop(
@@ -219,7 +219,7 @@ pub fn train_loop(
         }
         last = loss;
         if !on_step(step, loss) {
-            return Err(format!("cancelled after step {}", step + 1));
+            return Err(capability::failure::CANCELLED.to_string());
         }
     }
     Ok((ps, Trained { first_loss: first, last_loss: last }))

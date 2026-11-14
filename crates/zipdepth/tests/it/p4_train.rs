@@ -104,3 +104,23 @@ fn fixed_batch_repeats_and_rotating_batches_differ() {
         assert!(out.last_loss.is_finite());
     }
 }
+
+/// A stopped loop answers the contract's cancelled error at the next step.
+#[test]
+fn a_training_loop_stops_at_the_step_its_token_fires() {
+    use capability::{Invocation, Outcome, Progress};
+    use capability_mock::cancellation::{certify, Bound};
+    let cfg = tiny();
+    let gpu = Gpu::new_cpu(zipdepth::net::PIPELINES);
+    let init: HashMap<String, Vec<f32>> = zipdepth::init_weights(&cfg, 3);
+    let t = TrainCfg { steps: 6, batch: 1, h: 32, w: 32, lr: 1e-3, wd: 0.0, seed: 3, fixed_batch: false, grad_weight: DEFAULT_GRAD_WEIGHT, saved: None };
+    let run = |inv: &Invocation, progress: &mut dyn FnMut(Progress)| {
+        inv.cancel.check()?;
+        train_loop(&gpu, cfg.clone(), &t, &init, &mut Synthetic::new(3), |step, _| {
+            progress(Progress::step(step + 1, t.steps, ""));
+            !inv.cancel.is_cancelled()
+        })?;
+        Ok(Outcome::new())
+    };
+    certify("zipdepth train_loop", &Invocation::new, &run, Bound::ONE_STEP);
+}
