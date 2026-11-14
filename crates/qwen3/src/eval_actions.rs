@@ -234,7 +234,7 @@ pub(crate) fn calib(resolved: &Resolved, inv: &Invocation, progress: &mut dyn Fn
         .blob("clip", Blob::new(Media::Text, clip.into_bytes())))
 }
 
-pub(crate) fn toolcall_gen(resolved: &Resolved, inv: &Invocation, _: &mut dyn FnMut(Progress)) -> ActionResult {
+pub(crate) fn toolcall_gen(resolved: &Resolved, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
     let out = path_param(inv, "out", "toolcall_gen")?;
     // It needs no checkpoint, only the tokenizer: named, resolved, or beside the checkpoint the store resolved.
     let tokenizer = match (inv.get_str("tokenizer").filter(|p| !p.is_empty()), &resolved.weights) {
@@ -249,7 +249,12 @@ pub(crate) fn toolcall_gen(resolved: &Resolved, inv: &Invocation, _: &mut dyn Fn
     let seed = inv.seed()?.unwrap_or_else(data::rng::random_seed);
     let train: Vec<_> = data::toolcall::generate(n, tools, seed).iter().map(|c| c.to_chat_example()).collect();
     let validation: Vec<_> = data::toolcall::generate(held, tools, seed ^ 0xDEAD).iter().map(|c| c.to_chat_example()).collect();
-    data::chat::prepare_chat(&train, &validation, &tok, &template, vocab, &out).map_err(|e| format!("qwen toolcall_gen: {e}"))?;
+    // One progress step per example rendered; a stop before the last leaves `out` unwritten.
+    match data::chat::prepare_chat_while(&train, &validation, &tok, &template, vocab, &out, &mut inv.keep_going(progress, (n + held) as u32, "example")) {
+        Ok(_) => {}
+        Err(data::chat::PrepareError::Stopped) => return Err(capability::failure::CANCELLED.to_string()),
+        Err(e) => return Err(format!("qwen toolcall_gen: {e}")),
+    }
     Ok(Outcome::new().set("train", json!(n)).set("validation", json!(held)).set("seed", json!(seed)).set("out", json!(out.display().to_string())))
 }
 

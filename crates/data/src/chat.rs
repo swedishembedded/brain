@@ -1133,12 +1133,22 @@ impl EncodedSplit {
 
 /// Encode a set of packed samples into one split.
 pub fn encode_sample_split(samples: &[ChatSample], tok: &dyn Tokenizer, tmpl: &ChatTemplate, opts: RenderOpts) -> Result<EncodedSplit, TemplateError> {
+    // Asked never to stop, the split is always whole.
+    encode_sample_split_while(samples, tok, tmpl, opts, &mut || true).map(Option::unwrap_or_default)
+}
+
+/// [`encode_sample_split`] that asks `keep_going` before each sample: `None`
+/// when it said stop.
+pub fn encode_sample_split_while(samples: &[ChatSample], tok: &dyn Tokenizer, tmpl: &ChatTemplate, opts: RenderOpts, keep_going: &mut dyn FnMut() -> bool) -> Result<Option<EncodedSplit>, TemplateError> {
     let mut out = EncodedSplit::default();
     for s in samples {
+        if !keep_going() {
+            return Ok(None);
+        }
         let encoded = s.encode_rollout(tok, tmpl, opts)?;
         out.push_rollout(&encoded, &s.media, s.rollout.as_ref().map(|r| r.advantage));
     }
-    Ok(out)
+    Ok(Some(out))
 }
 
 /// Write one split - `<split>.u32.bin`, `<split>.mask.bin` and the example
@@ -1166,11 +1176,23 @@ pub fn prepare_chat_samples(
     vocab: usize,
     dir: &Path,
 ) -> Result<Prepared, PrepareError> {
+    let train = encode_while(train, tok, tmpl, opts, &mut || true)?;
+    let val = encode_while(val, tok, tmpl, opts, &mut || true)?;
+    write_prepared(dir, vocab, &train, &val)
+}
+
+/// The samples encoded through `tmpl`, asking `keep_going` before each one:
+/// `false` is [`PrepareError::Stopped`].
+fn encode_while(samples: &[ChatSample], tok: &dyn Tokenizer, tmpl: &ChatTemplate, opts: RenderOpts, keep_going: &mut dyn FnMut() -> bool) -> Result<EncodedSplit, PrepareError> {
+    encode_sample_split_while(samples, tok, tmpl, opts, keep_going).map_err(PrepareError::Template)?.ok_or(PrepareError::Stopped)
+}
+
+/// Write both encoded splits and the metadata into `dir`, made only now, so a
+/// run stopped while encoding leaves no directory behind.
+fn write_prepared(dir: &Path, vocab: usize, train: &EncodedSplit, val: &EncodedSplit) -> Result<Prepared, PrepareError> {
     std::fs::create_dir_all(dir).map_err(PrepareError::Io)?;
-    let train = encode_sample_split(train, tok, tmpl, opts).map_err(PrepareError::Template)?;
-    let val = encode_sample_split(val, tok, tmpl, opts).map_err(PrepareError::Template)?;
-    write_split(dir, "train", &train).map_err(PrepareError::Io)?;
-    write_split(dir, "val", &val).map_err(PrepareError::Io)?;
+    write_split(dir, "train", train).map_err(PrepareError::Io)?;
+    write_split(dir, "val", val).map_err(PrepareError::Io)?;
     std::fs::write(dir.join("meta.json"), binio::Meta::vocab_only(vocab)).map_err(PrepareError::Io)?;
     Ok(Prepared { longest_example: train.longest_example().max(val.longest_example()) })
 }
@@ -1188,6 +1210,8 @@ pub struct Prepared {
 pub enum PrepareError {
     Io(io::Error),
     Template(TemplateError),
+    /// The caller's `keep_going` said stop before every sample was encoded.
+    Stopped,
 }
 
 impl std::fmt::Display for PrepareError {
@@ -1195,6 +1219,7 @@ impl std::fmt::Display for PrepareError {
         match self {
             PrepareError::Io(e) => write!(f, "{e}"),
             PrepareError::Template(e) => write!(f, "{e}"),
+            PrepareError::Stopped => f.write_str("stopped before the dataset was written"),
         }
     }
 }
@@ -1206,9 +1231,18 @@ impl std::error::Error for PrepareError {}
 /// [`ChatExample::to_sample`]. `vocab` is the MODEL's vocabulary (from its
 /// `config.json`, matching its `lm_head`), not the tokenizer's derived size.
 pub fn prepare_chat(train: &[ChatExample], val: &[ChatExample], tok: &dyn Tokenizer, tmpl: &ChatTemplate, vocab: usize, dir: &Path) -> Result<Prepared, PrepareError> {
+    prepare_chat_while(train, val, tok, tmpl, vocab, dir, &mut || true)
+}
+
+/// [`prepare_chat`] that asks `keep_going` before each example it encodes:
+/// `false` ends the run with [`PrepareError::Stopped`] before any file is
+/// written, so a stopped run leaves `dir` as it found it.
+pub fn prepare_chat_while(train: &[ChatExample], val: &[ChatExample], tok: &dyn Tokenizer, tmpl: &ChatTemplate, vocab: usize, dir: &Path, keep_going: &mut dyn FnMut() -> bool) -> Result<Prepared, PrepareError> {
     let train: Vec<ChatSample> = train.iter().map(ChatExample::to_sample).collect();
     let val: Vec<ChatSample> = val.iter().map(ChatExample::to_sample).collect();
-    prepare_chat_samples(&train, &val, tok, tmpl, RenderOpts::default(), vocab, dir)
+    let train = encode_while(&train, tok, tmpl, RenderOpts::default(), keep_going)?;
+    let val = encode_while(&val, tok, tmpl, RenderOpts::default(), keep_going)?;
+    write_prepared(dir, vocab, &train, &val)
 }
 
 #[cfg(test)]

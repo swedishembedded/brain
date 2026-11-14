@@ -2480,10 +2480,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A token that fires mid-run stops `eval` (the base and paged passes), `calib` and `toolcall_eval` at the next
-    /// sample, prompt or case.
+    /// A token that fires mid-run stops `eval` (the base and paged passes), `calib`, `toolcall_eval` and
+    /// `toolcall_gen` at the next sample, prompt, case or example.
     #[test]
-    fn a_cancelled_eval_calib_or_toolcall_eval_stops_at_the_next_unit() {
+    fn a_cancelled_eval_calib_or_toolcall_action_stops_at_the_next_unit() {
         use capability_mock::cancellation::{certify, Bound};
         let cfg = QwenConfig { vocab: 151936, ..QwenConfig::tiny() };
         let dir = std::env::temp_dir().join(format!("qwen-caps-eval-cancel-{}", std::process::id()));
@@ -2502,6 +2502,15 @@ mod tests {
         certify("qwen eval kv", &|| Invocation::new().set("block", json!(256)).set("kv", json!("fp32")).blob("samples", samples()), &eval, Bound { fire_after: 9, within: 1 });
         certify("qwen calib", &|| Invocation::new().blob("samples", samples()), &calib, Bound::ONE_STEP);
         certify("qwen toolcall_eval", &|| Invocation::new().set("n", json!(4)).set("seq", json!(512)).set("seed", json!(9)), &toolcall_eval, Bound::ONE_STEP);
+        let toolcall_gen = |inv: &Invocation, progress: &mut dyn FnMut(Progress)| reg.run(MODEL, "toolcall_gen", inv.clone(), progress);
+        let gen_out = dir.join("toolcall-set");
+        certify("qwen toolcall_gen", &|| Invocation::new().set("out", json!(gen_out.to_string_lossy())).set("n", json!(6)).set("held", json!(2)).set("seed", json!(9)), &toolcall_gen, Bound::ONE_STEP);
+        // The reference run above wrote the set; a run stopped at its first example writes none.
+        let _ = std::fs::remove_dir_all(&gen_out);
+        let token = capability::CancelToken::armed();
+        let stopped = Invocation { cancel: token.clone(), ..Invocation::new().set("out", json!(gen_out.to_string_lossy())).set("n", json!(6)).set("held", json!(2)).set("seed", json!(9)) };
+        assert_eq!(toolcall_gen(&stopped, &mut |_| token.cancel()).unwrap_err(), capability::failure::CANCELLED);
+        assert!(!gen_out.join("train.u32.bin").exists(), "a stopped toolcall_gen writes no dataset");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
