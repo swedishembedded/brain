@@ -3368,7 +3368,6 @@ dependencies = [
  "brain-data",
  "brain-dbus",
  "brain-horizon",
- "brain-llmserve",
  "brain-modelref",
  "brain-modelstore",
  "brain-qwen3",
