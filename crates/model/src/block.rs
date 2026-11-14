@@ -2748,7 +2748,7 @@ pub fn flash_cross_relpos_step(
 /// Checking the offsets themselves, once per call, names the width and the row instead of surfacing as the backend's
 /// `step_sliced` refusal at whichever recorded step first binds the offset.
 pub(crate) fn assert_row_windows_bindable(entry: &str, spans: &[(u32, u32)], chunk: u32, widths: &[(&str, u32)]) {
-    let grain_words = u64::from(gpu_core::STORAGE_BINDING_OFFSET_ALIGN_BYTES / 4);
+    let grain_words = gpu_core::STORAGE_BINDING_OFFSET_ALIGN_BYTES / 4;
     for &(row0, len) in spans {
         let chunk_starts = (0..len.max(1)).step_by(chunk.max(1) as usize).map(|q0| row0 + q0);
         for row in std::iter::once(row0).chain(chunk_starts) {

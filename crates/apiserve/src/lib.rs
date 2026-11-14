@@ -327,9 +327,9 @@ pub fn serve_all(exec: Executor, surfaces: Vec<Surface>, opts: ServeOpts) -> any
     let mut stores: std::collections::HashMap<Provider, std::sync::Arc<video::VideoJobs>> = std::collections::HashMap::new();
     if let Some(cfg) = &video_jobs {
         for provider in surfaces.iter().map(|s| s.provider).filter(|p| *p != Provider::Anthropic) {
-            if !stores.contains_key(&provider) {
+            if let std::collections::hash_map::Entry::Vacant(slot) = stores.entry(provider) {
                 let jobs = video::VideoJobs::durable(cfg.dir.join(provider.as_str()), cfg.spool_bytes, provider).map_err(|e| anyhow::anyhow!("video jobs in {}: {e}", cfg.dir.display()))?;
-                stores.insert(provider, std::sync::Arc::new(jobs));
+                slot.insert(std::sync::Arc::new(jobs));
             }
         }
     }

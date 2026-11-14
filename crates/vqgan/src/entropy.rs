@@ -199,10 +199,11 @@ mod tests {
         let check = |name: &str, analytic: &[f32], n: usize, bump: &dyn Fn(usize, f64) -> f64| {
             let scale = analytic.iter().fold(0.0f64, |m, v| m.max((*v as f64).abs()));
             assert!(scale > 1e-3, "{name}: a vanishing gradient proves nothing");
-            for j in 0..n {
+            assert_eq!(analytic.len(), n, "{name}: one analytic entry per coordinate");
+            for (j, &got_j) in analytic.iter().enumerate() {
                 let want = rich(&|d| bump(j, d));
-                let tol = 2.0 * U * want.abs().max(analytic[j].abs() as f64) + 1e-9 * scale;
-                assert!((analytic[j] as f64 - want).abs() <= tol, "{name}[{j}]: analytic {} vs central difference {want} (tolerance {tol:e})", analytic[j]);
+                let tol = 2.0 * U * want.abs().max(got_j.abs() as f64) + 1e-9 * scale;
+                assert!((got_j as f64 - want).abs() <= tol, "{name}[{j}]: analytic {got_j} vs central difference {want} (tolerance {tol:e})");
             }
         };
         let at_rows = |j: usize, d: f64| {

@@ -275,7 +275,8 @@ fn analytic_gradient_equals_central_differences_of_the_whole_loss() {
 
     let mut worst: f64 = 0.0;
     let mut through_checked = 0;
-    for i in 0..N * HW {
+    assert_eq!(m.len(), N * HW, "one mask entry per pixel");
+    for (i, &mi) in m.iter().enumerate() {
         let (g_num, trunc) = derivative(&total, &pd, i);
         let (g_ssi, _) = derivative(&ssi, &pd, i);
         let (g_direct, _) = derivative(&direct, &pd, i);
@@ -286,8 +287,8 @@ fn analytic_gradient_equals_central_differences_of_the_whole_loss() {
         let f64_roundoff = (N * HW) as f64 * f64::EPSILON * loss_scale / STEP;
         let tol = rounding::accumulation_bound(CHAIN, s) + trunc + f64_roundoff;
         let err = (r.d_pred[i] as f64 - g_num).abs();
-        assert!(err <= tol, "pixel {i} (valid {}): analytic {} vs numeric {g_num}, error {err} > {tol}", m[i], r.d_pred[i]);
-        if m[i] == 0.0 {
+        assert!(err <= tol, "pixel {i} (valid {mi}): analytic {} vs numeric {g_num}, error {err} > {tol}", r.d_pred[i]);
+        if mi == 0.0 {
             assert_eq!(r.d_pred[i], 0.0, "masked pixel {i} must receive exactly no gradient");
         } else if g_through.abs() > 10.0 * tol {
             through_checked += 1;

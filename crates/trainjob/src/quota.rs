@@ -70,7 +70,10 @@ impl FreeSpace for DiskFree {
         }
         // SAFETY: `statvfs` succeeded, so it initialised the struct.
         let stat = unsafe { stat.assume_init() };
-        Ok((stat.f_bavail as u64).saturating_mul(stat.f_frsize as u64))
+        // The field widths differ by platform (u64 on Linux, narrower on macOS).
+        #[allow(clippy::unnecessary_cast)]
+        let (blocks, block_bytes) = (stat.f_bavail as u64, stat.f_frsize as u64);
+        Ok(blocks.saturating_mul(block_bytes))
     }
 
     /// The free-space check is not implemented off Unix: the watermark never refuses there.

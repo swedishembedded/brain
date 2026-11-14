@@ -947,7 +947,7 @@ impl VqganTrainer {
     fn submit_seed(&self) {
         self.gpu.submit(&[], &self.seed_steps);
         if let Some(p) = &self.perceptual {
-            let n = (self.cfg.out_channels * self.hw.0 * self.hw.1) as u32;
+            let n = self.cfg.out_channels * self.hw.0 * self.hw.1;
             let add = self.gpu.step(K_AXPY, &[&self.d_out, &p.d_image], &[n, f(self.obj.perceptual_weight)], n);
             self.gpu.submit(&[], &[add]);
         }
@@ -1004,7 +1004,7 @@ impl VqganTrainer {
     /// ([`Objective::adaptive_weight`]) or 1. Returns the raw generator loss and the `lambda` applied, if adaptive.
     fn adversarial_seed(&self) -> (f64, Option<f32>) {
         let adv = self.adversarial.as_ref().expect("live implies a discriminator");
-        let n = (self.cfg.out_channels * self.hw.0 * self.hw.1) as u32;
+        let n = self.cfg.out_channels * self.hw.0 * self.hw.1;
         adv.d.stage(true, &self.gpu, &self.out);
         let (g_loss, d_logits) = patchgan::generator_loss(&adv.d.forward(true));
         adv.d.zero_grads();

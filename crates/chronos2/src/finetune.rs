@@ -82,7 +82,7 @@ pub struct Example {
 pub fn supported_horizon(cfg: &Chronos2Config, horizon: usize) -> Result<(), String> {
     let patch = cfg.output_patch_size;
     let max = cfg.max_output_patches * patch;
-    if horizon == 0 || horizon % patch != 0 || horizon > max {
+    if horizon == 0 || !horizon.is_multiple_of(patch) || horizon > max {
         return Err(format!(
             "horizon {horizon}: this fine-tune scores whole output patches, so the horizon must be a multiple of output_patch_size ({patch}) in {patch}..={max}"
         ));

@@ -32,19 +32,19 @@ fn kept_and_masked_tokens_embed_by_the_reference_rule() {
     for (p, &id) in ids.iter().enumerate() {
         let row = &got[p * (dim + na)..(p + 1) * (dim + na)];
         let pos = first_frame * hw + p;
-        for c in 0..dim {
+        for (c, &got_c) in row[..dim].iter().enumerate() {
             let blend = if id == mask {
                 0.0
             } else {
                 let code = &dw.codebook[id as usize * cd..(id as usize + 1) * cd];
                 let mut acc = dw.project_out_b[c];
-                for k in 0..cd {
-                    acc += code[k] * dw.project_out_w[c * cd + k];
+                for (k, &code_k) in code.iter().enumerate() {
+                    acc += code_k * dw.project_out_w[c * cd + k];
                 }
                 10.0 * acc
             };
             let want = dw.token_emb[id as usize * dim + c] + blend + dw.pos_emb[pos * dim + c];
-            assert!((row[c] - want).abs() < 1e-4, "token {p} ({id}) channel {c}: {} vs {want}", row[c]);
+            assert!((got_c - want).abs() < 1e-4, "token {p} ({id}) channel {c}: {got_c} vs {want}");
         }
         assert_eq!(&row[dim..], &actions[..], "action one-hot at token {p}");
     }

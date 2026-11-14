@@ -84,8 +84,9 @@ fn every_pass_overwrites_every_position_with_its_own_prediction() {
     let last = steps - 1;
     assert_eq!(out, (0..n).map(|i| ((i + last) % nc) as u32).collect::<Vec<_>>());
     // Unmasked positions entering pass k carry pass k-1's prediction.
-    for k in 1..steps {
-        for (j, &v) in inputs[k].iter().enumerate() {
+    assert_eq!(inputs.len(), steps, "one recorded input per pass");
+    for (k, pass) in inputs.iter().enumerate().skip(1) {
+        for (j, &v) in pass.iter().enumerate() {
             if v != nc as u32 {
                 assert_eq!(v as usize, (j + k - 1) % nc, "pass {k} position {j}");
             }

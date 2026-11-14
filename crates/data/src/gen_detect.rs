@@ -439,7 +439,7 @@ mod tests {
     fn fixed_seed_corpus_is_pinned() {
         use sha2::{Digest as _, Sha256};
         // seed: frozen: the digest below was recorded from this seed.
-        let mut rng = Rng::new(0x5EED_D37E_C7);
+        let mut rng = Rng::new(0x005E_EDD3_7EC7);
         let mut hash = Sha256::new();
         for preset in [Preset::Localization, Preset::Classification, Preset::Scale, Preset::MultiObject, Preset::Background] {
             let (images, boxes) = generate(preset, 16, 96, 80, 6, &mut rng);

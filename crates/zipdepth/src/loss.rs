@@ -148,7 +148,7 @@ impl Moments {
             return Err(format!("{} valid pixel(s): a scale-and-shift fit needs at least 2", self.a11));
         }
         // `!(x > eps)` also catches NaN (a00 = 0 gives 0 / 0).
-        if !(self.conditioning() > DET_REL_EPS) {
+        if self.conditioning().partial_cmp(&DET_REL_EPS) != Some(std::cmp::Ordering::Greater) {
             return Ok(Fit { s: 1.0, b: (self.b1 - self.a01) / self.a11, exact: false });
         }
         let det = self.det();

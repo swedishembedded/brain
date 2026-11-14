@@ -198,7 +198,7 @@ pub fn maskgit_sample(
 ) -> Vec<u32> {
     let hw = (h * wd) as usize;
     let total = prime_ids.len() + num_tokens;
-    assert!(total % hw == 0 && total / hw >= 2, "prime + generated must be at least two whole frames");
+    assert!(total.is_multiple_of(hw) && total / hw >= 2, "prime + generated must be at least two whole frames");
     let t_fwd = total / hw - 1; // the reference drops the last frame
     let nc = dc.n_codes as usize;
     maskgit_sample_with(num_tokens, dc.n_codes, settings, seed, |vids| {

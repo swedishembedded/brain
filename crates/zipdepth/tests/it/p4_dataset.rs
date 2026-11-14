@@ -97,9 +97,12 @@ fn resizing_keeps_inverse_depth_and_mask_on_source_values() {
     }
 }
 
+/// What a malformed input is called, how it is made in a dataset dir, and what its refusal must name.
+type Case = (&'static str, fn(&Path), &'static [&'static str]);
+
 #[test]
 fn every_malformed_input_is_refused_naming_the_file() {
-    let cases: [(&str, fn(&Path), &[&str]); 12] = [
+    let cases: [Case; 12] = [
         ("an unknown manifest field", |d| manifest(d, r#"{"depth_per_count": 0.5, "invalid_count": 0, "scale": 2}"#), &["manifest.json", "scale"]),
         ("a missing manifest field", |d| manifest(d, r#"{"depth_per_count": 0.5}"#), &["manifest.json", "invalid_count"]),
         ("a non-positive depth unit", |d| manifest(d, r#"{"depth_per_count": 0, "invalid_count": 0}"#), &["manifest.json", "depth_per_count"]),

@@ -1372,7 +1372,6 @@ fn generate_core(prompt: &str, opts: &Opts, paths: &Paths, init: Option<Init>, c
             let sig = sig_full[start];
 
             let mask_lat = mask.map(|m| latent_mask(&ictx, &m, w, h, lw as usize, lh as usize, init.feather)).transpose()?;
-            drop(ictx);
             drop(imaging_gpu);
             drop(enc);
 

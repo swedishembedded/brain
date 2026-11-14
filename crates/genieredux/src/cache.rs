@@ -399,7 +399,7 @@ pub fn dynamics_forward_extend(
     dc: &DynamicsConfig, h: u32, w: u32, spatial_bias: &[f32],
 ) -> Vec<f32> {
     let hw = (h * w) as usize;
-    assert!(ids_new.len() % hw == 0 && !ids_new.is_empty(), "ids_new must be whole frames");
+    assert!(ids_new.len().is_multiple_of(hw) && !ids_new.is_empty(), "ids_new must be whole frames");
     let t_new = (ids_new.len() / hw) as u32;
     let vta = dynamics_embed(
         gpu, ids_new, actions_new, dw, 1, t_new, h, w, dc.dim, dc.n_codes, dc.code_dim,
@@ -421,7 +421,7 @@ pub fn decode_extend(
     h: u32, w: u32, spatial_bias: &[f32],
 ) -> Vec<f32> {
     let hw = (h * w) as usize;
-    assert!(indices_new.len() % hw == 0 && !indices_new.is_empty(), "indices_new must be whole frames");
+    assert!(indices_new.len().is_multiple_of(hw) && !indices_new.is_empty(), "indices_new must be whole frames");
     let t_new = indices_new.len() / hw;
     let t0 = cache.frames;
     let latents = indices_to_latents(gpu, indices_new, &tw.vq, hw as u32 * t_new as u32, tc.dim, tc.code_dim);

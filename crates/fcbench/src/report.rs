@@ -323,7 +323,7 @@ mod tests {
             fn forecast(&self, panel: &forecast::Panel, spec: &forecast::ForecastSpec) -> Result<forecast::Forecast, forecast::ForecastError> {
                 let k = self.0.get();
                 self.0.set(k + 1);
-                if k % 2 == 0 {
+                if k.is_multiple_of(2) {
                     return Err(forecast::ForecastError::internal("every other window fails"));
                 }
                 RandomWalk.forecast(panel, spec)

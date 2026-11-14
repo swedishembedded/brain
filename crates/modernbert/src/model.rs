@@ -257,6 +257,10 @@ pub struct ModernBert {
     saved: SavedPolicy,
 }
 
+
+/// Packed `(start row, rows)` spans.
+type Spans = Vec<(u32, u32)>;
+
 impl ModernBert {
     /// Build on an existing device, sized for at most `cap_rows` packed
     /// tokens and a longest span of `max_span`. Every parameter is `Frozen`.
@@ -580,7 +584,7 @@ impl ModernBert {
     /// only spans strictly longer than the band take it. The two groups
     /// together cover every span, and the band slab always fits the scratch,
     /// which is sized for the longest span.
-    fn local_span_split(&self) -> (Vec<(u32, u32)>, Vec<(u32, u32)>) {
+    fn local_span_split(&self) -> (Spans, Spans) {
         let band = 2 * self.cfg.window + 1;
         self.spans.iter().copied().partition(|&(_, len)| len > band)
     }

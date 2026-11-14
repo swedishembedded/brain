@@ -122,7 +122,9 @@ fn check(g: &Gpu, label: &str) {
     let (heads, d) = (4u32, 64u32);
     // (window, spans, chunk): span 53 and 30 are several times 2*window+1;
     // chunk 8 and 7 are ragged against both; the 5-row span is shorter than the band (7).
-    let cases: &[(u32, &[(u32, u32)], u32)] =
+    // (window, (start row, rows) spans, chunk)
+    type Case = (u32, &'static [(u32, u32)], u32);
+    let cases: &[Case] =
         &[(3, &[(0, 53), (53, 30), (83, 5)], 8), (3, &[(0, 53)], 7), (2, &[(0, 41)], 41), (5, &[(0, 64)], 1)];
     for &(window, spans, chunk) in cases {
         let rows: u32 = spans.iter().map(|s| s.1).sum();
