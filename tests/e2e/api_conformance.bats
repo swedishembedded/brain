@@ -213,15 +213,18 @@ get_url() {
 
 @test "model cards: capabilities derived from the manifest, no adapter when none is attached, no path leakage" {
   # The mock serves no adapter, so the optional `adapter` field must be absent
-  # (not null, not empty); `capabilities` comes from its manifest; nothing in a
-  # card names a file on the serving machine.
+  # (not null, not empty); `capabilities` comes from its manifest, and
+  # `max_output_tokens` from its generate action's `max_new` ceiling (every
+  # served number has one); nothing in a card names a file on the serving
+  # machine.
   for spec in "openai /v1/models" "openrouter /models"; do
     set -- $spec
     get_url "$1" "$2"
     [ "$STATUS" -eq 200 ]
     [ "$(jq -r '.data[] | select(.id == "brain/mock") | .capabilities | index("chat")' "$RESP")" != "null" ]
     [ "$(jq -r '.data[] | select(.id == "brain/mock") | has("adapter")' "$RESP")" = "false" ]
-    [ "$(jq -r '.data[] | select(.id == "brain/mock") | has("max_output_tokens")' "$RESP")" = "false" ]
+    [ "$(jq -r '.data[] | select(.id == "brain/mock") | .max_output_tokens | type' "$RESP")" = "number" ]
+    [ "$(jq -r '.data[] | select(.id == "brain/mock") | .max_output_tokens >= 1' "$RESP")" = "true" ]
     ! grep -qE "safetensors|$CONF_DIR|/home/|/tmp/" "$RESP"
   done
 }
