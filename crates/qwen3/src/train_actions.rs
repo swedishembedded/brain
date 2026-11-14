@@ -133,9 +133,12 @@ fn watch<'a>(inv: &'a Invocation, progress: &'a mut dyn FnMut(Progress)) -> impl
     }
 }
 
-fn outcome(report: &model::FitReport, seed: u64, save: &Path) -> ActionResult {
+/// A stopped run answers the contract's cancelled error; how far it got (and
+/// that `save` holds those steps) travels as its last progress event.
+fn outcome(report: &model::FitReport, seed: u64, save: &Path, progress: &mut dyn FnMut(Progress)) -> ActionResult {
     if report.interrupted {
-        return Err(format!("cancelled after step {} (the checkpoint at {} holds the steps that ran)", report.steps_completed, save.display()));
+        progress(Progress::step(report.steps_completed, report.steps_completed, format!("cancelled after step {} (the checkpoint at {} holds the steps that ran)", report.steps_completed, save.display())));
+        return Err(capability::failure::CANCELLED.to_string());
     }
     Ok(Outcome::new()
         .set("initial_loss", json!(report.initial_loss))
@@ -146,6 +149,7 @@ fn outcome(report: &model::FitReport, seed: u64, save: &Path) -> ActionResult {
 }
 
 pub(crate) fn train(_: &Resolved, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+    inv.cancel.check()?;
     let dir = path_param(inv, "data", "train")?;
     let save = path_param(inv, "save", "train")?;
     let seed = inv.seed()?.unwrap_or_else(data::rng::random_seed);
@@ -174,10 +178,11 @@ pub(crate) fn train(_: &Resolved, inv: &Invocation, progress: &mut dyn FnMut(Pro
         return Err(format!("qwen train: heads ({}) must be a multiple of kv_heads ({})", cfg.n_heads, cfg.n_kv_heads));
     }
     let report = model::train::fit_watched::<Qwen>(&dir, cfg, &opts, Some(&save), &mut watch(inv, progress)).map_err(|e| format!("qwen train: {e}"))?;
-    outcome(&report, seed, &save)
+    outcome(&report, seed, &save, progress)
 }
 
 pub(crate) fn finetune(resolved: &Resolved, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+    inv.cancel.check()?;
     let weights = resolved.weights(inv, "finetune")?;
     let dir = path_param(inv, "data", "finetune")?;
     let save = path_param(inv, "save", "finetune")?;
@@ -198,5 +203,5 @@ pub(crate) fn finetune(resolved: &Resolved, inv: &Invocation, progress: &mut dyn
     // `save` when that already exists.
     let resume = save.exists();
     let report = crate::finetune::finetune_from_watched(&weights, &dir, &opts, &crate::finetune::Mode::FullOffload, &save.to_string_lossy(), resume, &mut watch(inv, progress)).map_err(|e| format!("qwen finetune: {e}"))?;
-    outcome(&report, seed, &save).map(|o| o.set("resumed", json!(resume)))
+    outcome(&report, seed, &save, progress).map(|o| o.set("resumed", json!(resume)))
 }

@@ -139,7 +139,7 @@ fn train_stops_between_steps_on_cancellation_and_writes_nothing() {
         }
     })
     .unwrap_err();
-    assert_eq!(e, "cancelled after step 2");
+    assert_eq!(e, capability::failure::CANCELLED, "a stopped run answers the contract's literal, not a reworded one");
     assert!(!root.join("out").exists());
 }
 

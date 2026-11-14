@@ -103,7 +103,10 @@ fn train_action(inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionR
     });
     let outcome = match result {
         Ok(outcome) => outcome,
-        Err(Error::Cancelled) => return Err(format!("cancelled after step {last}")),
+        Err(Error::Cancelled) => {
+            progress(Progress::step(last as u32, steps as u32, format!("cancelled after step {last}")));
+            return Err(capability::failure::CANCELLED.to_string());
+        }
         Err(e) => return Err(e.to_string()),
     };
     let text = format!(

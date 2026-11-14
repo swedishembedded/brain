@@ -118,6 +118,7 @@ impl capability::Action for TrainAction {
         train_spec()
     }
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
         let weights = self.weights.as_deref().ok_or("ouro train: no checkpoint (brain pull ByteDance/Ouro-2.6B-Thinking, or name one with --weights)")?;
         let corpus: Vec<u32> = match inv.get_str("ids") {
             Some(raw) => raw.split(',').map(|t| t.trim().parse::<u32>().map_err(|_| format!("ouro train: ids takes comma-separated token ids (got {raw:?})"))).collect::<Result<_, _>>()?,
@@ -141,7 +142,8 @@ impl capability::Action for TrainAction {
             !inv.cancel.is_cancelled()
         })?;
         if t.steps < run.steps {
-            return Err(format!("cancelled after step {}", t.steps));
+            progress(Progress::step(t.steps, run.steps, format!("cancelled after step {}", t.steps)));
+            return Err(capability::failure::CANCELLED.to_string());
         }
         Ok(capability::Outcome::new().set("first_loss", json!(t.first_loss)).set("final_loss", json!(t.final_loss)).set("steps", json!(t.steps)).set("saved", json!(save)))
     }

@@ -772,7 +772,8 @@ fn train_in(scratch: &Path, weights: &str, inv: &Invocation, progress: &mut dyn 
         }
     };
     if report.interrupted {
-        return Err(format!("cancelled after step {}", report.steps_completed));
+        progress(Progress::step(report.steps_completed, steps, format!("cancelled after step {}", report.steps_completed)));
+        return Err(capability::failure::CANCELLED.to_string());
     }
 
     progress(Progress::step(report.steps_completed, steps, "saving adapter"));
@@ -2398,7 +2399,7 @@ mod tests {
                 cancel.cancel();
             }
         }).unwrap_err();
-        assert!(err.to_string().contains("cancelled after step"), "{err}");
+        assert_eq!(err.to_string(), capability::failure::CANCELLED, "a stopped run answers the contract's literal, not a reworded one");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
