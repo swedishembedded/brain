@@ -60,7 +60,7 @@ pub const MAX_LEVEL: u8 = 5;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Format {
     /// `tracing_subscriber`'s human-readable formatter: timestamp, level,
-    /// `target::module`, message, then the event's fields.
+    /// `target`, message, then the event's fields.
     #[default]
     Text,
     /// One JSON object per line, with `target`, `level`, `fields` and the
