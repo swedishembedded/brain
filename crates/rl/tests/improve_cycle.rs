@@ -148,12 +148,12 @@ fn improve_cycle_end_to_end_promotes_a_genuinely_better_candidate() {
 
     let (env, held_out) = env_and_held_out();
     let log = CycleLog::new();
-    let grpo_cfg = GrpoConfig { group_size: 2, clip_eps: 0.2, kl_beta: 0.0, seq_len: 12, rollout: rollout_params(), max_attempts: 1, options: Default::default() };
+    let grpo_cfg = GrpoConfig { group_size: 4, clip_eps: 0.2, kl_beta: 0.0, seq_len: 12, rollout: rollout_params(), max_attempts: 1, options: Default::default() };
     let objective = Grpo::try_new(env, FracMatchVerifier, grpo_cfg).expect("a valid GRPO configuration").with_log(log.clone());
 
     let opts = FitOpts {
         steps: 120,
-        grad_accum: 2, // one full GRPO group's worth of rows per optimizer step
+        grad_accum: 4, // one full GRPO group's worth of rows per optimizer step
         lr: 5e-3,
         min_lr: 5e-4,
         warmup: 0,
@@ -189,12 +189,12 @@ fn improve_cycle_end_to_end_promotes_a_genuinely_better_candidate() {
             train_out: &train_out,
             adapter_out_dir: &adapter_dir,
             adapter: AdapterMeta { rank: 4, alpha: 8.0, targets: &targets, family: "qwen", base_id: "base", dataset_id: None },
-            provenance: ProvenanceInput { regime: "grpo".to_string(), seed, hyperparams: serde_json::json!({"group_size": 2, "clip_eps": 0.2}), environment: "cpu/test".to_string(), cycle: 0 },
+            provenance: ProvenanceInput { regime: "grpo".to_string(), seed, hyperparams: serde_json::json!({"group_size": 4, "clip_eps": 0.2}), environment: "cpu/test".to_string(), cycle: 0 },
         },
     )
     .expect("cycle");
 
-    assert_eq!(outcome.decision, Decision::Promote, "report: {:?}", outcome.report);
+    assert_eq!(outcome.decision, Decision::Promote, "seed {seed}: report: {:?}", outcome.report);
     let adapter_path = outcome.adapter_path.expect("Promote must produce an adapter path");
     assert!(adapter_path.exists(), "the adapter file must actually exist on disk");
 
@@ -238,11 +238,11 @@ fn improve_cycle_rejects_a_deliberately_worse_candidate_and_retains_the_incumben
     write_base_checkpoint(&base_path, 1);
 
     let (env, held_out) = env_and_held_out();
-    let grpo_cfg = GrpoConfig { group_size: 2, clip_eps: 0.2, kl_beta: 0.0, seq_len: 12, rollout: rollout_params(), max_attempts: 1, options: Default::default() };
+    let grpo_cfg = GrpoConfig { group_size: 4, clip_eps: 0.2, kl_beta: 0.0, seq_len: 12, rollout: rollout_params(), max_attempts: 1, options: Default::default() };
     let objective = Grpo::try_new(env, FracMatchVerifier, grpo_cfg).expect("a valid GRPO configuration");
     let opts = FitOpts {
         steps: 120,
-        grad_accum: 2,
+        grad_accum: 4,
         lr: 5e-3,
         min_lr: 5e-4,
         warmup: 0,
@@ -276,7 +276,7 @@ fn improve_cycle_rejects_a_deliberately_worse_candidate_and_retains_the_incumben
         },
     )
     .expect("cycle");
-    assert_eq!(good.decision, Decision::Promote, "the setup cycle producing this test's incumbent must itself promote: {:?}", good.report);
+    assert_eq!(good.decision, Decision::Promote, "seed {seed}: the setup cycle producing this test's incumbent must itself promote: {:?}", good.report);
 
     // Fold the promoted adapter into the base to get a real, full,
     // servable "incumbent" checkpoint on disk - the same shape
