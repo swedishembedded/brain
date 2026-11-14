@@ -112,6 +112,10 @@ pub struct ServeKnobs {
     /// and readmit it once a health probe passes ([`crate::serve_supervision`]).
     /// `None` treats every card as always healthy.
     pub supervision: Option<residency::supervised::Supervision>,
+    /// The model families whose code runs in a supervised worker instead of
+    /// in this process (`--worker-hosted`, [`crate::supervision::worker_hosting`]);
+    /// `None` runs every family in process.
+    pub worker_hosting: Option<residency::supervised::WorkerHosting>,
 }
 
 /// What `brain serve --training` decides about the training workload.
@@ -159,7 +163,7 @@ pub struct TrainKnobs {
 /// resident, and `knobs.decision` naming the decision models served beyond
 /// those the store holds.
 pub fn build_executor(machine: &Machine, reserved: u64, store: &catalog::ServedStore, policy: Policy, knobs: ServeKnobs) -> Serving {
-    let ServeKnobs { qwen: qwen_cfg, qwen35, ricursive, decision, ocr, max_batch, train, mock_delay_ms, supervision } = knobs;
+    let ServeKnobs { qwen: qwen_cfg, qwen35, ricursive, decision, ocr, max_batch, train, mock_delay_ms, supervision, worker_hosting } = knobs;
     // Process-wide, before any OCR model is built: the models read it when they load.
     ocrserve::configure(ocr);
     let (gpus, npus, unified_gpus) = (&machine.gpus, &machine.npus, &machine.unified_gpus);
@@ -278,9 +282,10 @@ pub fn build_executor(machine: &Machine, reserved: u64, store: &catalog::ServedS
     // splat needs no weights and is always registered.
     models.extend(catalog::residents(store));
     // Decision models (decide + Laya): one resident per checkpoint under its
-    // store id, plus the family model that answers inventory and `auto`
-    // selection without loading anything.
-    models.extend(decisions::resident::serve_all(&decision, store.models_dir(), None));
+    // store id, in a supervised worker when `--worker-hosted decision` asks,
+    // plus the family model that answers inventory and `auto` selection
+    // without loading anything.
+    models.extend(decisions::resident::serve_all(&decision, store.models_dir(), worker_hosting.as_ref()));
     // Deterministic mock model (`--mock`): a real ResidentModel - no weights, no
     // GPU - registered as `mock` so the HTTP conformance harness can validate the
     // whole API surface through the true serving path (placement → activate →

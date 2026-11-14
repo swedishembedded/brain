@@ -30,5 +30,7 @@ mod seed_flag;
 mod serve_cli;
 mod serve_connection;
 mod version;
+#[cfg(target_os = "linux")]
+mod worker_hosted;
 mod yolov8_eval;
 mod zipdepth_smoke;

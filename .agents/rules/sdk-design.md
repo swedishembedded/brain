@@ -322,6 +322,35 @@ say so in the roadmap file and keep the test asserting as much of the real
 path as it can, rather than skipping SDK-level coverage entirely in favor of
 only the backend's own `#[ignore]`-gated real-checkpoint test.
 
+## 15. Internal entry points are not commands
+
+`brain` sometimes has to run as something other than a CLI: a worker process
+a server starts to host a model's code (`serving::supervision::WORKER_MODE`,
+dispatched in `crates/cli/src/main.rs`) is `brain` re-executing itself, so
+one binary holds every model. Such an entry point is not a verb and not a
+capability, and it follows these rules:
+
+- **Reached only by its own spawner.** The mode is one reserved argument
+  (a leading `__`, which no architecture name or verb uses), passed only by
+  the code that starts it. It is never listed in `brain help`, any
+  `--help`, the docs' command reference or shell completion; a user-facing
+  page may say the process exists, never how to start it.
+- **Refused unless its spawner set it up.** It checks what it was handed
+  before doing anything (a worker: stdin is a socket, and the first request
+  is `hello <protocol>` naming the version it speaks) and otherwise exits
+  with code 2 and one line saying it is internal and what starts it. It
+  never falls back to a default behavior.
+- **Configured by its spawner's flags, never by new environment variables.**
+  A spawner passes what the child must share (a server passes its own
+  device flags, `crate::device_flags()`); the child parses them through the
+  same global flag handling as any command.
+- **Same executable, same version.** A spawner on Linux executes
+  `/proc/self/exe`, so a binary replaced on disk by an upgrade is never
+  mixed with the running one.
+- **Tested from outside.** One test proves the mode is absent from help and
+  refused when started by hand (`crates/cli/tests/it/worker_hosted.rs`); its
+  protocol is tested through its spawner.
+
 ## Review checklist for a new or changed public API
 
 Before calling an SDK-facing feature done:

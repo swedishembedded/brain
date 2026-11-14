@@ -463,8 +463,10 @@ fn select_backend(argv: Vec<String>) -> Vec<String> {
     let mut out = Vec::with_capacity(argv.len());
     let mut spec_text: Option<String> = None;
     let mut backend_text: Option<String> = None;
+    let mut consumed: Vec<String> = Vec::new();
     let mut i = 0;
     while i < argv.len() {
+        let (start, kept) = (i, out.len());
         if argv[i] == "--device" {
             match argv.get(i + 1) {
                 Some(v) => spec_text = Some(v.clone()),
@@ -683,7 +685,11 @@ fn select_backend(argv: Vec<String>) -> Vec<String> {
             out.push(argv[i].clone());
             i += 1;
         }
+        if out.len() == kept {
+            consumed.extend_from_slice(&argv[start..i.min(argv.len())]);
+        }
     }
+    let _ = DEVICE_FLAGS.set(consumed);
 
     let backend = backend_text.map(|text| match gpu_core::devices::Backend::parse(&text) {
         Ok(b) => b,
@@ -751,6 +757,16 @@ fn select_backend(argv: Vec<String>) -> Vec<String> {
     }
     gpu_core::publish_compute_set(set);
     out
+}
+
+/// The device flags `select_backend` consumed, in the order given: what a
+/// worker this process starts is given too, so it selects backends and
+/// bounds device waits as this process does.
+static DEVICE_FLAGS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+
+/// The device flags this process was started with (empty before `select_backend` ran).
+pub fn device_flags() -> &'static [String] {
+    DEVICE_FLAGS.get().map_or(&[], Vec::as_slice)
 }
 
 /// What `--device` resolved to. `None` only before `select_backend` has run.
@@ -1577,7 +1593,8 @@ fn main() {
     // segfaulted (exit 139) instead of the clean, non-zero exit this hook
     // produces. The default hook still runs first, so `RUST_BACKTRACE`
     // keeps working exactly as before.
-    if argv.get(1).map(String::as_str) != Some("serve") {
+    // The worker mode catches model panics itself, per job, like `serve`.
+    if !matches!(argv.get(1).map(String::as_str), Some("serve" | serving::supervision::WORKER_MODE)) {
         let default_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
             default_hook(info);
@@ -1597,6 +1614,12 @@ fn main() {
         Some("models") => std::process::exit(models_cli::run_models(&argv[2..])),
         Some("plan") => std::process::exit(plan_cli::run_plan(&argv[2..])),
         Some("serve") => run_cli::run_serve(&argv[2..]),
+        // The internal worker mode a server's worker-hosted models run in
+        // (`serving::supervision::worker_hosting`): not a command, never in
+        // `brain help`, and it serves nothing unless its stdin is the
+        // supervisor's socket and the supervisor greets it first.
+        #[cfg(target_os = "linux")]
+        Some(serving::supervision::WORKER_MODE) => std::process::exit(residency::supervised::host(&catalog::hosted_families())),
         Some("help") | Some("-h") | Some("--help") | None => print!("{HELP}"),
         Some(_) => resolve::dispatch(&argv[1..], HELP),
     }

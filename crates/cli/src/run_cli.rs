@@ -430,6 +430,19 @@ SERVING POLICY  (one model-agnostic policy for every model that serves it.
   Deprecated spellings (--qwen-*, --qwen35-*) still work, with a warning, until
   their callers have moved.
 
+WORKER HOSTING  (a model's code in a supervised worker process on its card,
+                so a driver call that wedges or crashes ends that process,
+                never the server)
+  --worker-hosted FAMILY[,FAMILY]  run every model of FAMILY in a worker
+                         (repeatable). Families: decision. Default: every
+                         family runs in this process. A job whose worker misses
+                         its deadline or dies fails at once with the reason;
+                         the worker is killed and reaped, its card quarantined
+                         until a health probe passes, and the next job is built
+                         in a new worker on a healthy card.
+  --worker-deadline-s SECS  the longest a worker may take to load its model,
+                         and to answer one job (default 900).
+
 DECISION MODELS  (decide + Laya; every servable one in the model store is
                  served under its store id, e.g. convaiinnovations/laya)
   --decision-model REF|DIR  also serve this model, whatever state its files
@@ -795,6 +808,10 @@ pub fn run_serve(args: &[String]) {
     // `--decision-model` / `--decision-default`: the decision models served
     // beyond those the model store holds, and the one `auto` resolves to.
     let mut decision_cfg = decisions::resident::DecisionServeConfig::default();
+    // `--worker-hosted` / `--worker-deadline-s`: the model families whose code
+    // runs in a supervised worker, and how long a worker may take.
+    let mut worker_hosted: Vec<String> = Vec::new();
+    let mut worker_deadline = serving::supervision::DEFAULT_WORKER_DEADLINE;
     // HTTP inference APIs (`--anthropic|--openai|--openrouter [ADDR]`), each
     // bound on one or more addresses (127.0.0.1 by default) with ONE
     // per-dialect key generated at startup regardless of how many addresses
@@ -949,6 +966,17 @@ pub fn run_serve(args: &[String]) {
                         policy_flag(&mut policy, what, &value);
                     }
                 }
+            }
+            "--worker-hosted" => worker_hosted.extend(val(args, &mut i, "--worker-hosted").split(',').filter(|f| !f.is_empty()).map(str::to_string)),
+            "--worker-deadline-s" => {
+                let v = val(args, &mut i, "--worker-deadline-s");
+                worker_deadline = match v.parse::<u64>() {
+                    Ok(s) if s > 0 => std::time::Duration::from_secs(s),
+                    _ => {
+                        eprintln!("brain serve: --worker-deadline-s {v:?} is not a positive number of seconds\n");
+                        std::process::exit(2);
+                    }
+                };
             }
             "--decision-model" => decision_cfg.models.push(val(args, &mut i, "--decision-model")),
             "--decision-default" => decision_cfg.default = Some(val(args, &mut i, "--decision-default")),
@@ -1158,7 +1186,11 @@ pub fn run_serve(args: &[String]) {
             adapter_mode,
             autofetch,
             scheduler: scheduler_policy(scheduler, policy.limits.max_batch),
-            knobs: serving::ServeKnobs { qwen: qwen_cfg, qwen35: qwen35_cfg, ricursive: ricursive_cfg, decision: decision_cfg, ocr: ocr_cfg, max_batch: policy.limits.max_batch, train, mock_delay_ms, supervision: Some(serve_supervision()) },
+            knobs: {
+                let supervision = serve_supervision();
+                let worker_hosting = serve_worker_hosting(&worker_hosted, worker_deadline, &supervision);
+                serving::ServeKnobs { qwen: qwen_cfg, qwen35: qwen35_cfg, ricursive: ricursive_cfg, decision: decision_cfg, ocr: ocr_cfg, max_batch: policy.limits.max_batch, train, mock_delay_ms, supervision: Some(supervision), worker_hosting }
+            },
         });
     }
 
@@ -1317,6 +1349,28 @@ fn serve_supervision() -> residency::supervised::Supervision {
     };
     eprintln!("brain serve: {}", found.describe());
     found.supervision
+}
+
+/// Worker hosting for the families `--worker-hosted` named, the workers
+/// being this very executable (`/proc/self/exe`, so an upgrade that replaced
+/// the file on disk does not mix versions) re-executed with this process's
+/// device flags; `None` when no family was named. A family no worker can host
+/// stops the server at startup.
+fn serve_worker_hosting(families: &[String], deadline: std::time::Duration, supervision: &residency::supervised::Supervision) -> Option<residency::supervised::WorkerHosting> {
+    if families.is_empty() {
+        return None;
+    }
+    let exe = std::path::PathBuf::from("/proc/self/exe");
+    match serving::supervision::worker_hosting(&exe, crate::device_flags(), families, deadline, supervision.health.clone()) {
+        Ok(hosting) => {
+            eprintln!("brain serve: worker-hosted model families: {}", families.join(", "));
+            Some(hosting)
+        }
+        Err(e) => {
+            eprintln!("brain serve: {e}");
+            std::process::exit(2);
+        }
+    }
 }
 
 fn build_serving_executor(reserve_gb: u64, store: &loader::served::ServedStore, scheduler: residency::Policy, knobs: serving::ServeKnobs) -> serving::Serving {
@@ -1829,6 +1883,7 @@ mod tests {
             "--gpt", "--yolo", "--max-new", "--temp", "--top-k", "--seed", "--conf", "--dbus", "--dbus-system", "--dbus-name",
             "--reserve-gb", "--models-dir", "--pin", "--autofetch", "--mock", "--mock-delay-ms", "--anthropic", "--openai", "--openrouter", "--api-keys-out", "--ready-file",
             "--admit-deadline-ms", "--cold-build-admit-deadline-ms", "--video-jobs-dir", "--video-spool-gb", "--sched-max-wait-ms", "--sched-age-weight", "--sched-batch-weight",
+            "--worker-hosted", "--worker-deadline-s",
         ] {
             assert!(HELP.contains(f), "{f} is parsed by run_serve but not documented in HELP");
         }

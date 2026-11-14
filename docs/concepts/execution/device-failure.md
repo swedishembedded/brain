@@ -40,13 +40,44 @@ At startup `brain serve` prints one line saying which form it runs in:
   wedging is kept out after its third fault in ten minutes instead of costing
   every request a full wait.
 
+## Models hosted in a worker
+
+`brain serve --worker-hosted FAMILY` runs every model of that family in a
+supervised worker instead of in the serving process: a child process that
+owns one card's device and the model's instance on it, and answers one job
+at a time. The worker is `brain` itself, started by the server in an internal
+mode with the server's own device flags (`--backend`, `--gpu-wait-s`, ...);
+it is not a command and refuses to run when started by hand. A model answers
+the same in a worker as in process: its inputs, outputs, progress (streamed
+tokens and steps) and cancellation cross the process boundary, and its
+images and audio travel in shared memory rather than over the socket.
+
+Today one family can be hosted this way: `decision` (the decide and Laya
+models). Every other family runs in the serving process; naming one in the
+flag stops the server at startup with the list of families that can be
+hosted. `--worker-deadline-s SECS` (900 by default <!-- perf-number: the flag's default, a configured bound not a measurement -->) bounds how
+long a worker may take to load its model and to answer one job.
+
+What a worker changes when something goes wrong:
+
+- **A wedged or crashed driver call ends the worker, not the server.** The
+  job it was running fails at once (or at its deadline) with an error naming
+  the card, the job and what became of the worker; the worker is killed and
+  reaped, so the driver state it held is released, and the card is
+  quarantined as described below. The job is not retried.
+- **The next job is built in a new worker,** on a healthy card if the
+  quarantined one is kept out.
+- **A bug in model code is not a device fault.** A model that panics in a
+  worker fails its job the way it would in process: its instance is rebuilt
+  for the next job and the card is not quarantined.
+
 ## Supervised work
 
-Device work can also run in a supervised worker: a child process
-(`brain-gpu-worker`) that owns one card's device and answers one request at a
-time. An embedder starts the executor with supervision
-(`residency::Executor::start_supervised`) and serves the model through
-`residency::supervised::SupervisedModel`. Then:
+Device work in a supervised worker (a model hosted as above, or one an
+embedder serves through `residency::supervised::SupervisedModel` on an
+executor started with `residency::Executor::start_supervised`) runs in a
+child process that owns one card's device and answers one request at a
+time. Then:
 
 - **Every request has a deadline.** A request that misses it, or a worker
   that dies, fails the job within the deadline with an error that names the

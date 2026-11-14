@@ -87,6 +87,10 @@ impl WorkerCommand {
     pub fn program(&self) -> &Path {
         &self.program
     }
+
+    pub fn args(&self) -> &[OsString] {
+        &self.args
+    }
 }
 
 /// Why a worker could not answer. Each one leaves the worker killed.

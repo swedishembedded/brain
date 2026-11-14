@@ -167,6 +167,11 @@ impl WorkerHosting {
         self.families.iter().any(|f| f == family)
     }
 
+    /// How a worker is started.
+    pub fn command(&self) -> &WorkerCommand {
+        &self.command
+    }
+
     /// `resident`, served from a worker when `hosting` covers its family, else as is.
     pub fn serve(hosting: Option<&WorkerHosting>, resident: Arc<dyn ResidentModel>, spec: HostSpec) -> Arc<dyn ResidentModel> {
         match hosting {

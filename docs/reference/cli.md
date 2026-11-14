@@ -299,6 +299,10 @@ like, rather than silently fetching something adjacent.
   admission behavior. Given several devices (`--device gpu0,gpu1,...`), a
   large chat model runs one replica per card behind the one endpoint (see
   [Serving on several cards](../guides/serving/serving.md#serving-on-several-cards)).
+  `--worker-hosted FAMILY` runs a model family's code in supervised worker
+  processes instead of in the server, so a wedged or crashed driver call
+  ends a worker rather than the server (see
+  [Device failure](../concepts/execution/device-failure.md#models-hosted-in-a-worker)).
 - With `--stdio`, it instead runs an event-driven stdio controller: it reads
   JSONL events on stdin (e.g. `user_text`, `camera_frame`) and streams JSONL
   events back on stdout (e.g. `brain_text_chunk`, `object_detected`), driven

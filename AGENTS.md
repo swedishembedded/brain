@@ -69,7 +69,7 @@ Enforced by `make check/scope`; `CHANGELOG.md` is exempt.
 | write, dispatch or optimize a kernel, or chase a slow path | `.agents/rules/kernels.md` (section F is the optimization loop) |
 | write a test, a fixture or a gradient check | `.agents/rules/testing.md` |
 | serve a model or add a capability | `.agents/rules/serving-contract.md` |
-| add or change a public SDK type, CLI verb or Python surface | `.agents/rules/sdk-design.md` |
+| add or change a public SDK type, CLI verb, internal entry point or Python surface | `.agents/rules/sdk-design.md` |
 | touch `crates/apiserve` or `crates/dbus` | `.agents/rules/api-security.md` |
 | bring in third-party code or weights | `.agents/rules/licensing.md` |
 | write or change a paper, or change a finding one states | `.agents/rules/papers.md` |

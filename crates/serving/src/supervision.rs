@@ -16,19 +16,56 @@
 //! `--gpu-wait-s`, and readmits it on the breaker's own schedule without a
 //! probe ([`Probe::Elapsed`]): a card that keeps wedging is still kept out
 //! after its third fault, instead of costing every request a full wait.
+//!
+//! Model code runs in a worker for the families an operator names
+//! (`--worker-hosted`, [`worker_hosting`]): the worker is the server's own
+//! executable re-executed in its internal worker mode ([`WORKER_MODE`]), so
+//! one binary holds every model, and health probes stay in the small
+//! `brain-gpu-worker`, which opens a card with nothing but one backend and a
+//! probe kernel and so tests the card, not a model build.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use gpu_supervisor::{BreakerPolicy, Health, WorkerCommand};
-use residency::supervised::{Probe, Supervision};
+use residency::supervised::{Deadlines, Probe, Supervision, WorkerHosting};
+use residency::Device;
 
 /// The worker program's file name, looked for in the server executable's directory.
 pub const WORKER_PROGRAM: &str = "brain-gpu-worker";
 
 /// How long a killed worker is waited for before it is kept for later polling.
 const REAP: Duration = Duration::from_secs(2);
+
+/// The argument that starts `brain` in its internal worker mode. Reached only
+/// by a supervisor's spawn ([`worker_hosting`]); never listed in help.
+pub const WORKER_MODE: &str = "__worker";
+
+/// `--worker-deadline-s` unset: how long a worker may take to load its model,
+/// and to answer one job, before it counts as wedged.
+pub const DEFAULT_WORKER_DEADLINE: Duration = Duration::from_secs(900);
+
+/// Worker hosting for the model `families` an operator named, each worker
+/// being `executable` re-executed as `<executable> <device_flags> __worker`:
+/// the server's own device flags (`--backend`, `--gpu-wait-s`, ...), so a
+/// worker selects and bounds its card as the server does. `deadline` bounds
+/// a worker's load and each of its jobs. A family no worker can host is
+/// refused, naming the ones it can.
+pub fn worker_hosting(executable: &Path, device_flags: &[String], families: &[String], deadline: Duration, health: Arc<Health<Device>>) -> Result<WorkerHosting, String> {
+    let known: Vec<&str> = catalog::hosted_families().iter().map(|f| f.name).collect();
+    let mut chosen: Vec<String> = Vec::new();
+    for family in families {
+        if !known.contains(&family.as_str()) {
+            return Err(format!("--worker-hosted: no model family {family:?} can be hosted in a worker yet (the ones that can: {})", known.join(", ")));
+        }
+        if !chosen.contains(family) {
+            chosen.push(family.clone());
+        }
+    }
+    let command = device_flags.iter().fold(WorkerCommand::new(executable), |c, flag| c.arg(flag)).arg(WORKER_MODE);
+    Ok(WorkerHosting::new(command, health, Deadlines { open: deadline, run: deadline, reap: REAP }, chosen))
+}
 
 /// A serving process's device supervision and the worker its probes run in.
 pub struct ServeSupervision {
@@ -126,6 +163,22 @@ mod tests {
         }
         assert!(s.describe().contains(&worker.display().to_string()), "{}", s.describe());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn worker_hosting_re_executes_the_server_with_its_device_flags_for_the_families_named() {
+        let health = Arc::new(Health::new(BreakerPolicy::default(), REAP));
+        let flags = ["--backend".to_string(), "cuda".to_string(), "--gpu-wait-s".to_string(), "12".to_string()];
+        let families = ["decision".to_string(), "decision".to_string()];
+        let hosting = worker_hosting(Path::new("/proc/self/exe"), &flags, &families, Duration::from_secs(7), health.clone()).expect("decision models can be hosted");
+        assert!(hosting.hosts("decision"));
+        assert!(!hosting.hosts("qwen3"), "only the families named");
+        let command = hosting.command();
+        assert_eq!(command.program(), Path::new("/proc/self/exe"));
+        let args: Vec<&str> = command.args().iter().map(|a| a.to_str().unwrap()).collect();
+        assert_eq!(args, ["--backend", "cuda", "--gpu-wait-s", "12", WORKER_MODE]);
+        let err = worker_hosting(Path::new("/proc/self/exe"), &[], &["qwen3".to_string()], Duration::from_secs(7), health).err().expect("a family no worker hosts is refused");
+        assert!(err.contains("qwen3") && err.contains("decision"), "{err}");
     }
 
     #[test]
