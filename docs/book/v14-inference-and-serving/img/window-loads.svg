@@ -1,0 +1,36 @@
+<!-- source-sha256: 55133f84449fd3833a5026736b1108d2e69ee362f3dfb68f974bff6cb7eb9197 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 620 380" width="620" height="380">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="620" height="380" fill="#ffffff"/>
+<line x1="172.53" y1="334" x2="172.53" y2="30" stroke="#edf2f7"/>
+<text x="172.53" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">10</text>
+<line x1="315.68" y1="334" x2="315.68" y2="30" stroke="#edf2f7"/>
+<text x="315.68" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">20</text>
+<line x1="458.84" y1="334" x2="458.84" y2="30" stroke="#edf2f7"/>
+<text x="458.84" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">30</text>
+<line x1="602" y1="334" x2="602" y2="30" stroke="#edf2f7"/>
+<text x="602" y="350" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">40</text>
+<line x1="58" y1="334" x2="602" y2="334" stroke="#edf2f7"/>
+<text x="52" y="338" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
+<line x1="58" y1="279.71" x2="602" y2="279.71" stroke="#edf2f7"/>
+<text x="52" y="283.71" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">25</text>
+<line x1="58" y1="225.43" x2="602" y2="225.43" stroke="#edf2f7"/>
+<text x="52" y="229.43" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">50</text>
+<line x1="58" y1="171.14" x2="602" y2="171.14" stroke="#edf2f7"/>
+<text x="52" y="175.14" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">75</text>
+<line x1="58" y1="116.86" x2="602" y2="116.86" stroke="#edf2f7"/>
+<text x="52" y="120.86" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">100</text>
+<line x1="58" y1="62.57" x2="602" y2="62.57" stroke="#edf2f7"/>
+<text x="52" y="66.57" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">125</text>
+<rect x="58" y="30" width="544" height="304" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="544" height="304"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#2b6cb0" stroke-width="2.0" points="58,64.74 72.32,73.43 86.63,82.11 100.95,90.8 115.26,99.49 129.58,108.17 143.89,116.86 158.21,125.54 172.53,134.23 186.84,142.91 201.16,151.6 215.47,160.29 229.79,168.97 244.11,177.66 258.42,186.34 272.74,195.03 287.05,203.71 301.37,212.4 315.68,221.09 330,229.77 344.32,238.46 358.63,247.14 372.95,255.83 387.26,264.51 401.58,273.2 415.89,281.89 430.21,290.57 444.53,299.26 458.84,307.94 473.16,316.63 487.47,334 501.79,334 516.11,334 530.42,334 544.74,334 559.05,334 573.37,334 587.68,334 602,334"/><polyline fill="none" stroke="#c05621" stroke-width="2.0" stroke-dasharray="6 4" points="58,56.06 72.32,56.06 86.63,56.06 100.95,56.06 115.26,56.06 129.58,56.06 143.89,56.06 158.21,56.06 172.53,56.06 186.84,56.06 201.16,56.06 215.47,56.06 229.79,56.06 244.11,56.06 258.42,56.06 272.74,56.06 287.05,56.06 301.37,56.06 315.68,56.06 330,56.06 344.32,56.06 358.63,56.06 372.95,56.06 387.26,56.06 401.58,56.06 415.89,56.06 430.21,56.06 444.53,56.06 458.84,56.06 473.16,56.06 487.47,264.51 501.79,264.51 516.11,264.51 530.42,264.51 544.74,264.51 559.05,264.51 573.37,264.51 587.68,264.51 602,264.51"/></g>
+<text x="330" y="370" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">slots in the window (linear axis)</text>
+<text x="14" y="182" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 182)">loads over 4 passes of 32 groups (linear axis)</text>
+<text x="330" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Loads against the width of the window</text>
+<rect x="66" y="282" width="203.65" height="44" rx="3" fill="#ffffff" fill-opacity="0.92" stroke="#cbd5e0"/>
+<line x1="74" y1="297" x2="94" y2="297" stroke="#2b6cb0" stroke-width="2"/>
+<text x="100" y="301" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">plan over the known schedule</text>
+<line x1="74" y1="314" x2="94" y2="314" stroke="#c05621" stroke-width="2" stroke-dasharray="6 4"/>
+<text x="100" y="318" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">least recently used</text>
+</svg>

@@ -1,0 +1,47 @@
+<!-- source-sha256: 368b55fb4d3141f848b5b3a79341c4bcd6bcedcc06d1d30630de3ecea4b8d770 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 300" width="1000" height="300"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="1000" height="300" fill="#ffffff"/>
+<rect x="17" y="37" width="156" height="66" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="95" y="66.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">claim for a model</text>
+<text x="95" y="82.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">that costs c bytes</text>
+<rect x="207" y="37" width="156" height="66" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="285" y="66.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">does a card have</text>
+<text x="285" y="82.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">c bytes free?</text>
+<rect x="397" y="37" width="156" height="66" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="475" y="66.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">could any device</text>
+<text x="475" y="82.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">ever hold c?</text>
+<rect x="587" y="37" width="156" height="66" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="665" y="66.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">do the lowest-score</text>
+<text x="665" y="82.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">residents free enough?</text>
+<rect x="797" y="37" width="156" height="66" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="875" y="66.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">does the host</text>
+<text x="875" y="82.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">have c bytes free?</text>
+<line x1="176" y1="70" x2="204" y2="70" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="366" y1="70" x2="394" y2="70" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="380" y="61.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">no</text>
+<line x1="556" y1="70" x2="584" y2="70" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="570" y="61.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">yes</text>
+<line x1="746" y1="70" x2="794" y2="70" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="770" y="61.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">no</text>
+<rect x="207" y="182" width="156" height="66" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="285" y="211.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">place on the card</text>
+<text x="285" y="227.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">with the most free bytes</text>
+<line x1="285" y1="106" x2="285" y2="179" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="294" y="146.7" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">yes</text>
+<rect x="397" y="182" width="156" height="66" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="475" y="203.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">refuse: too large,</text>
+<text x="475" y="219.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">or starved if it</text>
+<text x="475" y="235.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">fitted before</text>
+<line x1="475" y1="106" x2="475" y2="179" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="484" y="146.7" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">no</text>
+<rect x="587" y="182" width="156" height="66" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="665" y="211.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">evict those</text>
+<text x="665" y="227.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">residents, place</text>
+<line x1="665" y1="106" x2="665" y2="179" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="674" y="146.7" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">yes</text>
+<rect x="797" y="182" width="156" height="66" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="875" y="203.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">place on the host if</text>
+<text x="875" y="219.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">it has room, else</text>
+<text x="875" y="235.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">refuse: no capacity</text>
+<line x1="875" y1="106" x2="875" y2="179" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="884" y="146.7" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">last resort</text>
+</svg>

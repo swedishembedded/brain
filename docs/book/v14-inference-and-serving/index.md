@@ -14,3 +14,4 @@ The order follows what each part needs of the one before. Nothing can be budgete
 You can state how many copies of a model's weights a loader holds and why, read a range of a stored tensor without decoding the rest, work out the size and the byte ranges of a quantized tensor from its descriptor, plan a load inside a fixed staging budget, and say why a model name has exactly one reading. The later chapters add the rest: to place models and caches under a budget, to schedule many requests onto one device, to make generation faster without changing its output, to expose an engine safely and to run it so that it can be seen and stopped.
 
 1. [Loading Models](01-loading.md): how do gigabytes of weights get from disk to the device quickly and safely?
+2. [Memory Budgets and Model Residency](02-residency.md): how does a server decide which models live on which device when they do not all fit?
