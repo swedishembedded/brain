@@ -52,6 +52,8 @@ mod device_sharing;
 mod device_stats;
 mod dry_run_recording;
 mod e4m3_quant_native;
+mod f32_gemv_native;
+mod f32_gemv_native_bench;
 mod fp8_linear_native;
 mod fused_native_bench;
 mod gate_mul_quant_e4m3_native;

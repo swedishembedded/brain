@@ -205,6 +205,10 @@ pub const I8_STREAM_SPLITS: [u32; 4] = [1, 2, 4, 8];
 /// same number and a test holds the two together.
 pub use backend_api::select::I8_GEMV_MMA_MIN_ROWS;
 
+/// Rows of x one block of `matmul_f32_gemv_rows` covers; a larger batch takes more blocks of the grid. The source's
+/// `BRAIN_F32G_ROWS` is the same number and a test holds the two together.
+pub const F32_GEMV_TILE_ROWS: u32 = 4;
+
 /// The lowest compute capability a CUDA 12.x toolchain will emit code for at
 /// all (`--gpu-architecture=sm_50`). A kernel whose text uses nothing beyond
 /// the always-available core - shared memory, `__syncthreads`, fp32
@@ -1837,6 +1841,44 @@ pub const ALL: &[CudaKernel] = &[
         shared_bytes: 2 * 8 * 32 * 16,
         programmatic: true,
         src: include_str!("../cu/matmul_kq_gemv.cu"),
+    },
+    CudaKernel {
+        name: "matmul_f32_gemv",
+        // The native twin of `matmul_gemv_reg.wgsl` for one row of x, redirected to BY NAME by
+        // `gpu_core::native_upgrade`; the (MatMul, F32) answer stays `matmul_f32_tiled`.
+        op: Op::MatMul,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_matmul_f32_gemv",
+        what: "fp32 GEMV for one row of x; 16 B weight loads, every load of a stage issued before any is consumed, bit-identical to matmul_gemv_reg",
+        reported: "native:matmul_f32_gemv",
+        block_dim: 256,
+        // One row of x by 16 weight rows per block.
+        tile: (1, 16),
+        shared_bytes: 0,
+        programmatic: true,
+        src: include_str!("../cu/matmul_f32_gemv.cu"),
+    },
+    CudaKernel {
+        name: "matmul_f32_gemv_rows",
+        // The same source's batched entry: two rows of x and more, the rows of x shared per block.
+        op: Op::MatMul,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_matmul_f32_gemv_rows",
+        what: "fp32 skinny-M GEMV for 2..32 rows of x; the rows of x staged once per block in shared memory for its 16 weight rows, bit-identical to matmul_gemv_reg",
+        reported: "native:matmul_f32_gemv_rows",
+        block_dim: 256,
+        // F32_GEMV_TILE_ROWS rows of x by 16 weight rows per block.
+        tile: (F32_GEMV_TILE_ROWS, 16),
+        // The double-buffered tile of x (`BrainF32gXTile`).
+        shared_bytes: 2 * F32_GEMV_TILE_ROWS * 64 * 16,
+        programmatic: true,
+        src: include_str!("../cu/matmul_f32_gemv.cu"),
     },
     CudaKernel {
         name: "matmul_f32_skinny",
@@ -5248,6 +5290,15 @@ mod tests {
             let stage = 128 * 128 + n * 128 + 128 * 16 + n * 16;
             assert_eq!(i8_wgstream_dynamic_shared_bytes(n), 4 * stage + 2 * 4 * (n / 2) * 16 + 1024);
         }
+    }
+
+    #[test]
+    fn the_f32_gemv_source_and_the_rust_constant_agree_on_the_row_tile() {
+        let src = get("matmul_f32_gemv").expect("registered").src;
+        assert!(
+            src.contains(&format!("#define BRAIN_F32G_ROWS {F32_GEMV_TILE_ROWS}\n")),
+            "matmul_f32_gemv.cu must define BRAIN_F32G_ROWS as {F32_GEMV_TILE_ROWS}"
+        );
     }
 
     #[test]

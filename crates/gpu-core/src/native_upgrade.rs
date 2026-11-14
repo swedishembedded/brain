@@ -493,6 +493,22 @@ fn serves_i8_dyn(p: &[u32]) -> bool {
 /// The fp32 GEMM family's bindings (`matmul_reg3.wgsl`): params, `x`, `w`, `out`.
 const F32_GEMM_BINDINGS: &[BindKind] = &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageReadWrite];
 
+/// `Params { m, k, n }` of the decode GEMV with `rows` rows of x: within the WGSL kernel's own contract
+/// (`select::DECODE_REGIME_MAX_ROWS` rows), any non-empty `k` and `n`.
+fn serves_f32_gemv(p: &[u32], rows: std::ops::RangeInclusive<u32>) -> bool {
+    matches!(p, [m, k, n] if rows.contains(m) && *m <= backend_api::select::DECODE_REGIME_MAX_ROWS && *k >= 1 && *n >= 1 && u64::from(*m) * u64::from(*n) <= u64::from(u32::MAX))
+}
+
+/// One row of x: the entry with no shared tile.
+fn serves_f32_gemv_one(p: &[u32]) -> bool {
+    serves_f32_gemv(p, 1..=1)
+}
+
+/// Two rows of x and more: the entry that shares the rows of x per block.
+fn serves_f32_gemv_rows(p: &[u32]) -> bool {
+    serves_f32_gemv(p, 2..=backend_api::select::DECODE_REGIME_MAX_ROWS)
+}
+
 /// `Params { m, k, n }`: any non-empty product whose output fits the kernel's
 /// 32-bit element arithmetic.
 fn serves_f32_gemm(p: &[u32]) -> bool {
@@ -1982,6 +1998,31 @@ pub(crate) const ROWS: &[Row] = &[
         serves: serves_kq_dyn,
         blocks: gemm_blocks,
         requires_wgsl_upgrade: false,
+        align_words: 1,
+        input: Input::PACKED,
+        launch: CudaLaunch::NONE,
+    },
+    // The fp32 decode GEMV every model dispatches for `m <= 32` (`model::block::gemm_variant`): the WGSL tier reads one
+    // word per lane and, with several rows of x, the activation from the cache once per weight row. The native kernel
+    // keeps the WGSL kernel's 64 virtual accumulators and fold order, so it is bit-identical (`tests/f32_gemv_native.rs`).
+    Row {
+        slow: "matmul_gemv",
+        target: Target::Named("matmul_f32_gemv"),
+        bindings: F32_GEMM_BINDINGS,
+        serves: serves_f32_gemv_one,
+        blocks: gemm_blocks,
+        requires_wgsl_upgrade: true,
+        align_words: 1,
+        input: Input::PACKED,
+        launch: CudaLaunch::NONE,
+    },
+    Row {
+        slow: "matmul_gemv",
+        target: Target::Named("matmul_f32_gemv_rows"),
+        bindings: F32_GEMM_BINDINGS,
+        serves: serves_f32_gemv_rows,
+        blocks: gemm_blocks,
+        requires_wgsl_upgrade: true,
         align_words: 1,
         input: Input::PACKED,
         launch: CudaLaunch::NONE,
