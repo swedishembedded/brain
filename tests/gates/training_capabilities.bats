@@ -9,7 +9,9 @@
 
 # Spec for scripts/gates/check-training-capabilities.sh: the capability page is
 # generated from the declaration; a missing or ignored test, a registration with
-# no row and a drifted page all fail. Runs against a synthetic tree.
+# no row and a drifted page all fail; every served architecture is a
+# serving-certification row with a support level derived from its cells. Runs
+# against a synthetic tree.
 
 setup() {
   REPO="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)"
@@ -87,4 +89,58 @@ gate() { run bash "$REPO/scripts/gates/check-training-capabilities.sh" --root "$
   gate
   [ "$status" -ne 0 ]
   [[ "$output" == *"MISSING TEST"*"cert:Exact resume"*"gone"* ]]
+}
+
+# A synthetic registry and catalog: qwen3 and lpips are served, toyx is a toy
+# and imgpipe a pipeline; qwen3 certifies every cell the support level needs.
+serving_tree() {
+  mkdir -p "$T/crates/arch/src" "$T/crates/catalog/src"
+  printf 'pub const ARCHS: &[Arch] = &[\n    arch!("qwen3", "Qwen3", Text, LlamaCpp, "brain-qwen3"),\n    arch!("lpips", "LPIPS", Vision, Brain, "brain-lpips"),\n    arch!("toyx", "Toy", Domain::Toy, Source::Toy, "brain-toyx"),\n];\n' >"$T/crates/arch/src/lib.rs"
+  printf 'pub fn models() -> Vec<ModelEntry> {\n    vec![\n        ModelEntry { manifest: lpips::caps::manifest },\n        ModelEntry { manifest: resident_qwen3::direct_manifest },\n        ModelEntry { manifest: toyx::caps::manifest },\n        ModelEntry { manifest: imgpipe::caps::manifest },\n    ]\n}\n' >"$T/crates/catalog/src/lib.rs"
+  for c in parity serve cancel batch; do printf 'qwen3\t%s\t\tqwen3/tests/t.rs::lora_works\n' "$c" >>"$BATS_TEST_TMPDIR/decl.tsv"; done
+  printf 'lpips\tparity\t\tqwen3/tests/t.rs::lora_works\n' >>"$BATS_TEST_TMPDIR/decl.tsv"
+}
+
+regenerate() { python3 "$REPO/scripts/gates/training-capabilities.py" --root "$T" --decl "$BATS_TEST_TMPDIR/decl.tsv" --write >/dev/null; }
+
+@test "every served architecture is a serving-certification row with its derived support level" {
+  serving_tree
+  regenerate
+  gate
+  [ "$status" -eq 0 ]
+  page="$T/docs/reference/training-capabilities.md"
+  grep -qE '^\| `qwen3` \|.*\| production \|$' "$page"
+  grep -qE '^\| `lpips` \|.*\| preview \|$' "$page"
+  ! grep -qE '^\| `toyx` \|' "$page"
+}
+
+@test "a serving cell for an architecture the catalog does not serve fails" {
+  serving_tree
+  printf 'toyx\tserve\t\tqwen3/tests/t.rs::lora_works\n' >>"$BATS_TEST_TMPDIR/decl.tsv"
+  regenerate
+  gate
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"NOT SERVED"*"toyx"* ]]
+}
+
+@test "a catalog entry that names no architecture fails" {
+  serving_tree
+  sed -i 's/imgpipe::caps::manifest/mystery::caps::manifest/' "$T/crates/catalog/src/lib.rs"
+  regenerate
+  gate
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"UNRESOLVED CATALOG ENTRY"*"mystery"* ]]
+}
+
+@test "a real-weights cell needs every test flagged" {
+  serving_tree
+  printf 'qwen3\treal\t\tqwen3/tests/t.rs::lora_works\n' >>"$BATS_TEST_TMPDIR/decl.tsv"
+  regenerate
+  gate
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"UNFLAGGED REAL"* ]]
+  sed -i 's/^\(qwen3\treal\t.*\)$/\1 (real)/' "$BATS_TEST_TMPDIR/decl.tsv"
+  regenerate
+  gate
+  [ "$status" -eq 0 ]
 }

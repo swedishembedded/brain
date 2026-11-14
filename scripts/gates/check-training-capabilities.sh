@@ -12,7 +12,9 @@
 # when the page and the declaration disagree, when a declared test does not
 # exist (or is not a #[test], or is #[ignore]d without a (real)/(cuda) flag), or
 # when a registration (conformance tiers, SDK chat fine-tuner declarations) has
-# no row. Regenerate the page with scripts/gates/training-capabilities.py --write.
+# no row, when a catalog entry resolves to no architecture, when a serving
+# certification cell names an architecture the catalog does not serve, or when
+# a test in a `real` cell carries no (real)/(cuda) flag. Regenerate the page with scripts/gates/training-capabilities.py --write.
 #
 # Usage: scripts/gates/check-training-capabilities.sh [--root DIR] [--decl FILE]
 set -u

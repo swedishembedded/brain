@@ -179,4 +179,8 @@ Notes on the columns:
   `flux2` (int8 base, CUDA). Everything else fine-tunes an fp32 base, and no
   architecture fine-tunes a quantized or fp8 base in full. INT8/GGUF serving
   paths are inference-only. The per-architecture matrix, with the test that
-  backs each cell, is in [training capabilities](../training-capabilities.md).
+  backs each cell, is in [training capabilities](../training-capabilities.md);
+  its serving-certification table says which serving contracts (import,
+  forward parity, serve, cancel, batch, quantized tiers, real weights) each
+  served architecture is certified for, and its support level, `production`
+  or `preview`.
