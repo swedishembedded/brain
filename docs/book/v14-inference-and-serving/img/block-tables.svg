@@ -1,0 +1,62 @@
+<!-- source-sha256: 6d728bead9a26c63d3d4cf871633a4fcf9e0d85cc20cf76668ffb37521abd647 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 360" width="960" height="360"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="960" height="360" fill="#ffffff"/>
+<rect x="24" y="261" width="96" height="58" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="72" y="286.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">block 0</text>
+<text x="72" y="302.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">2 references</text>
+<rect x="141" y="261" width="96" height="58" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="189" y="286.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">block 1</text>
+<text x="189" y="302.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">1 reference</text>
+<rect x="258" y="261" width="96" height="58" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="306" y="286.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">block 2</text>
+<text x="306" y="302.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">1 reference</text>
+<rect x="375" y="261" width="96" height="58" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="423" y="286.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">block 3</text>
+<text x="423" y="302.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">1 reference</text>
+<rect x="492" y="261" width="96" height="58" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="540" y="286.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">block 4</text>
+<text x="540" y="302.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">1 reference</text>
+<rect x="609" y="261" width="96" height="58" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="657" y="286.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">block 5</text>
+<text x="657" y="302.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">1 reference</text>
+<rect x="726" y="261" width="96" height="58" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="774" y="286.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">block 6</text>
+<text x="774" y="302.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">free</text>
+<rect x="843" y="261" width="96" height="58" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="891" y="286.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">block 7</text>
+<text x="891" y="302.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">free</text>
+<text x="480" y="346.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">physical pool: 8 blocks of 4 rows (free list, bottom to top: 7, 6)</text>
+<rect x="56" y="26" width="206" height="104" rx="12" fill="none" stroke="#a0aec0" stroke-width="1.3" stroke-dasharray="5 3"/>
+<text x="70" y="48.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="start">A: 7 rows</text>
+<rect x="70" y="69" width="84" height="46" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="112" y="88.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">logical 0</text>
+<text x="112" y="104.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">-&gt; 0</text>
+<line x1="111.21" y1="117.89" x2="72.79" y2="258.11" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="164" y="69" width="84" height="46" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="206" y="88.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">logical 1</text>
+<text x="206" y="104.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">-&gt; 1</text>
+<line x1="205.65" y1="117.98" x2="189.35" y2="258.02" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="356" y="26" width="206" height="104" rx="12" fill="none" stroke="#a0aec0" stroke-width="1.3" stroke-dasharray="5 3"/>
+<text x="370" y="48.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="start">D: 8 rows</text>
+<rect x="370" y="69" width="84" height="46" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="412" y="88.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">logical 0</text>
+<text x="412" y="104.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">-&gt; 0</text>
+<line x1="409.24" y1="116.18" x2="74.76" y2="259.82" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="464" y="69" width="84" height="46" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="506" y="88.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">logical 1</text>
+<text x="506" y="104.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">-&gt; 4</text>
+<line x1="506.68" y1="117.92" x2="539.32" y2="258.08" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="626" y="26" width="300" height="104" rx="12" fill="none" stroke="#a0aec0" stroke-width="1.3" stroke-dasharray="5 3"/>
+<text x="640" y="48.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="start">C: 9 rows</text>
+<rect x="640" y="69" width="84" height="46" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="682" y="88.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">logical 0</text>
+<text x="682" y="104.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">-&gt; 3</text>
+<line x1="679.39" y1="116.47" x2="425.61" y2="259.53" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="734" y="69" width="84" height="46" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="776" y="88.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">logical 1</text>
+<text x="776" y="104.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">-&gt; 2</text>
+<line x1="773.14" y1="115.89" x2="308.86" y2="260.11" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="828" y="69" width="84" height="46" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="870" y="88.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">logical 2</text>
+<text x="870" y="104.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">-&gt; 5</text>
+<line x1="867.53" y1="116.7" x2="659.47" y2="259.3" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+</svg>
