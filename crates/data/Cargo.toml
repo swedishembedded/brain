@@ -42,9 +42,10 @@ fancy-regex.workspace = true
 # in-memory RGB buffers; the captioned-image dataset loader (imageset, hoisted
 # from zimage) additionally decodes JPEG/PNG/PPM training images — so exactly
 # those three codecs are enabled and nothing else. `imageproc` supplies the
-# shape-drawing primitives.
+# shape-drawing primitives; its default features stay off, which leaves out the
+# text drawing and the font parser it brings.
 image = { workspace = true, features = ["jpeg", "png", "pnm"] }
-imageproc = { version = "0.25", default-features = false }
+imageproc = { version = "0.27", default-features = false }
 
 [dev-dependencies]
 # The shared model-store fixture resolution, so the train/serve template

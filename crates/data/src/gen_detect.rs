@@ -432,6 +432,30 @@ mod tests {
         assert_eq!(ba, bb, "boxes differ for same seed");
     }
 
+    /// The corpus a fixed seed yields is pinned across builds, not only within
+    /// one: a rasterizer upgrade that moves a single painted pixel of any
+    /// preset changes this digest, and with it every dataset already on disk.
+    #[test]
+    fn fixed_seed_corpus_is_pinned() {
+        use sha2::{Digest as _, Sha256};
+        // seed: frozen: the digest below was recorded from this seed.
+        let mut rng = Rng::new(0x5EED_D37E_C7);
+        let mut hash = Sha256::new();
+        for preset in [Preset::Localization, Preset::Classification, Preset::Scale, Preset::MultiObject, Preset::Background] {
+            let (images, boxes) = generate(preset, 16, 96, 80, 6, &mut rng);
+            for v in images {
+                hash.update(v.to_le_bytes());
+            }
+            for b in boxes.iter().flatten() {
+                hash.update(b.class.to_le_bytes());
+                for v in [b.cx, b.cy, b.w, b.h] {
+                    hash.update(v.to_le_bytes());
+                }
+            }
+        }
+        assert_eq!(format!("{:x}", hash.finalize()), "ed4c2064727052b006a99ed8a1ab3b7905850f356a09351c0890f00b4457c306");
+    }
+
     #[test]
     fn different_seed_differs() {
         let seed = random_seed();
