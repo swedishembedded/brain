@@ -198,6 +198,30 @@ fn a_cancelled_training_leaves_no_model_directory() {
     std::fs::remove_dir_all(&work).ok();
 }
 
+/// `eval` and `calibrate` report one progress step per (code, horizon) cell and stop at the next cell once the token
+/// fires.
+#[test]
+fn eval_and_calibrate_stop_at_the_next_cell() {
+    use capability_mock::cancellation::{certify, Bound};
+    if skip_gpu() {
+        return;
+    }
+    let (train, _) = population(400, 1);
+    let (held, _) = population(100, 2);
+    let (test, _) = population(500, 4);
+    let work = scratch("cancel-cells");
+    let model = work.join("model");
+    run("train", &train_request(&model, &train, &held, 10)).unwrap();
+    let weights = json!(model.to_string_lossy());
+    let provider = HorizonProvider::new();
+    let (eval, calibrate) = (provider.action("eval").unwrap(), provider.action("calibrate").unwrap());
+    let make_eval = || Invocation::new().set("weights", weights.clone()).set("horizons", json!("2,5")).set("min_events", json!(20)).blob("dataset", jsonl(&test));
+    certify("horizon eval", &make_eval, &|inv, progress| eval.run(inv, progress), Bound::ONE_STEP);
+    let make_calibrate = || Invocation::new().set("weights", weights.clone()).set("horizons", json!("2,5")).set("force", json!(true)).blob("validation", jsonl(&test));
+    certify("horizon calibrate", &make_calibrate, &|inv, progress| calibrate.run(inv, progress), Bound::ONE_STEP);
+    let _ = std::fs::remove_dir_all(&work);
+}
+
 #[test]
 fn a_bad_dataset_is_named_and_trains_nothing() {
     let work = scratch("bad");

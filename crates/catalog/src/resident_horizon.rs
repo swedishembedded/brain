@@ -102,14 +102,8 @@ impl Instance for HorizonInstance {
                 progress(Progress::step(1, 1, "predict"));
                 horizon::caps::predict(self.model()?, inv)
             }
-            "eval" => {
-                progress(Progress::step(1, 1, "eval"));
-                horizon::lifecycle::eval(self.model()?, inv)
-            }
-            "calibrate" => {
-                progress(Progress::step(1, 1, "calibrate"));
-                horizon::lifecycle::calibrate_loaded(self.model()?, inv)
-            }
+            "eval" => horizon::lifecycle::eval(self.model()?, inv, progress),
+            "calibrate" => horizon::lifecycle::calibrate_loaded(self.model()?, inv, progress),
             other => Err(format!("horizon: no action '{other}'")),
         }
     }

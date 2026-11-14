@@ -512,8 +512,7 @@ impl Action for EvalAction {
         inv.cancel.check()?;
         let dir = inv.get_str("weights").ok_or("horizon: missing required param 'weights'")?;
         let loaded = Loaded::load(Path::new(&dir)).map_err(|e| format!("horizon: {e}"))?;
-        progress(Progress::step(1, 1, "eval"));
-        lifecycle::eval(&loaded, inv)
+        lifecycle::eval(&loaded, inv, progress)
     }
 }
 
@@ -525,7 +524,6 @@ impl Action for CalibrateAction {
     }
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         inv.cancel.check()?;
-        progress(Progress::step(1, 1, "calibrate"));
-        lifecycle::calibrate(inv)
+        lifecycle::calibrate(inv, progress)
     }
 }

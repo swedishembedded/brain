@@ -40,7 +40,7 @@ use serde_json::{json, Value};
 use crate::calibration::{self, Calibration, MIN_EVENTS};
 use crate::config::Mixer;
 use crate::ensemble::{Ensemble, Kind, Loaded};
-use crate::evaluation::{evaluate, EvaluationSpec};
+use crate::evaluation::{evaluate_while, EvaluationSpec};
 use crate::fit::{
     self, Hooks, Report, StepProgress, TrainError, TrainSpec, DEFAULT_BATCH, DEFAULT_EVAL_INTERVAL, DEFAULT_PATIENCE,
     DEFAULT_STEPS,
@@ -157,6 +157,25 @@ fn write_file_atomically(path: &Path, bytes: &[u8]) -> Result<(), String> {
         let _ = std::fs::remove_file(&tmp);
         format!("{}: {e}", path.display())
     })
+}
+
+/// The per-cell callback of a long loop: one progress step per (code,
+/// horizon) cell, and a stop once the invocation's token fires.
+fn keep_going<'a>(inv: &'a Invocation, progress: &'a mut dyn FnMut(Progress), what: &'a str) -> impl FnMut(u32, u32) -> bool + 'a {
+    move |done, total| {
+        progress(Progress::step(done, total, what));
+        !inv.cancel.is_cancelled()
+    }
+}
+
+/// A library failure as the action's error: the cancellation literal passes
+/// through untouched, anything else is prefixed with the capability.
+fn failed(e: String) -> String {
+    if e == capability::failure::CANCELLED {
+        e
+    } else {
+        format!("horizon: {e}")
+    }
 }
 
 fn missing(what: &str) -> String {
@@ -364,7 +383,7 @@ pub fn train(inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResu
 }
 
 /// `eval` on a loaded model.
-pub fn eval(loaded: &Loaded, inv: &Invocation) -> ActionResult {
+pub fn eval(loaded: &Loaded, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
     let saved = match loaded {
         Loaded::Single(s) => s,
         Loaded::Ensemble(_) => {
@@ -380,7 +399,7 @@ pub fn eval(loaded: &Loaded, inv: &Invocation) -> ActionResult {
     if let Some(n) = inv.get_i64("min_events") {
         spec = spec.min_events(usize::try_from(n).map_err(|_| "horizon: min_events is out of range".to_string())?);
     }
-    let evaluation = evaluate(saved, &subjects, &spec).map_err(|e| format!("horizon: {e}"))?;
+    let evaluation = evaluate_while(saved, &subjects, &spec, &mut keep_going(inv, progress, "eval")).map_err(failed)?;
     let value = serde_json::to_value(&evaluation).map_err(|e| format!("horizon: {e}"))?;
     let text = serde_json::to_string_pretty(&value).map_err(|e| format!("horizon: {e}"))?;
     Ok(with_fields(Outcome::new(), &value).blob("evaluation", Blob::new(Media::Text, text.into_bytes())))
@@ -388,7 +407,7 @@ pub fn eval(loaded: &Loaded, inv: &Invocation) -> ActionResult {
 
 /// The calibration `inv` asks of `saved`, and the outcome that reports it (its
 /// `calibration` blob is the file's content).
-fn fit_calibration(saved: &Saved, inv: &Invocation) -> Result<(Calibration, Outcome), String> {
+fn fit_calibration(saved: &Saved, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> Result<(Calibration, Outcome), String> {
     let validation = subjects_of(inv, "validation")?;
     for s in &validation {
         saved.vocab.check_units(s).map_err(|e| format!("horizon: {e}"))?;
@@ -403,8 +422,8 @@ fn fit_calibration(saved: &Saved, inv: &Invocation) -> Result<(Calibration, Outc
         None => kind.min_events(),
     };
     let digest = saved.weights_digest().map_err(|e| format!("horizon: {e}"))?;
-    let calibration = Calibration::fit(saved, digest, &validation, &horizons, kind, min_events)
-        .map_err(|e| format!("horizon: {e}"))?;
+    let calibration = Calibration::fit_while(saved, digest, &validation, &horizons, kind, min_events, &mut keep_going(inv, progress, "calibrate"))
+        .map_err(failed)?;
     let text = calibration.to_json().map_err(|e| format!("horizon: {e}"))?;
     let outcome = Outcome::new()
         .set("kind", json!(kind.name()))
@@ -419,9 +438,9 @@ fn fit_calibration(saved: &Saved, inv: &Invocation) -> Result<(Calibration, Outc
 
 /// `calibrate` on a model a scheduler holds: the calibration is returned and
 /// nothing is written, since the served directory is the host's.
-pub fn calibrate_loaded(loaded: &Loaded, inv: &Invocation) -> ActionResult {
+pub fn calibrate_loaded(loaded: &Loaded, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
     match loaded {
-        Loaded::Single(saved) => fit_calibration(saved, inv).map(|(_, outcome)| outcome),
+        Loaded::Single(saved) => fit_calibration(saved, inv, progress).map(|(_, outcome)| outcome),
         Loaded::Ensemble(_) => Err("horizon: calibrate takes a single model, not an ensemble".into()),
     }
 }
@@ -429,7 +448,7 @@ pub fn calibrate_loaded(loaded: &Loaded, inv: &Invocation) -> ActionResult {
 /// `calibrate` from the command line: fit, then write `calibration.json` into
 /// the model directory, or a calibrated copy of the model into `out`; neither
 /// overwrites without `force`.
-pub fn calibrate(inv: &Invocation) -> ActionResult {
+pub fn calibrate(inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
     let dir = inv.get_str("weights").ok_or_else(|| missing("param 'weights'"))?;
     let dir = Path::new(&dir);
     let out = inv.get_str("out");
@@ -452,7 +471,7 @@ pub fn calibrate(inv: &Invocation) -> ActionResult {
         return Err("horizon: calibrate takes a single model, not an ensemble".into());
     }
     let mut saved = Saved::load(dir).map_err(|e| format!("horizon: {e}"))?;
-    let (calibration, outcome) = fit_calibration(&saved, inv)?;
+    let (calibration, outcome) = fit_calibration(&saved, inv, progress)?;
     match out {
         Some(out) => {
             saved.calibration = Some(std::sync::Arc::new(calibration));

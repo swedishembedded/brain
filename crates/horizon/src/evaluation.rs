@@ -236,6 +236,12 @@ fn finite(x: f64) -> Option<f64> {
 /// Evaluate `saved` on `subjects` (held out: neither trained on nor used to
 /// early-stop or calibrate). See the module docs.
 pub fn evaluate(saved: &Saved, subjects: &[Subject], spec: &EvaluationSpec) -> Result<Evaluation, String> {
+    evaluate_while(saved, subjects, spec, &mut |_, _| true)
+}
+
+/// [`evaluate`] that calls `keep_going(done, total)` before each (code,
+/// horizon) cell and answers `Err(CANCELLED)` as soon as it returns false.
+pub fn evaluate_while(saved: &Saved, subjects: &[Subject], spec: &EvaluationSpec, keep_going: &mut dyn FnMut(u32, u32) -> bool) -> Result<Evaluation, String> {
     if subjects.is_empty() {
         return Err("evaluate: subjects are required".into());
     }
@@ -254,6 +260,7 @@ pub fn evaluate(saved: &Saved, subjects: &[Subject], spec: &EvaluationSpec) -> R
     let clusters = clusters(subjects);
     let codes = &saved.vocab.codes;
     let (mut results, mut absent) = (Vec::new(), Vec::new());
+    let (mut done, total) = (0u32, (codes.len() * horizons.len()) as u32);
     for (k, code) in codes.iter().enumerate() {
         // The code, then the absorbing codes it competes with.
         let mut list: Vec<&str> = vec![code.as_str()];
@@ -271,6 +278,10 @@ pub fn evaluate(saved: &Saved, subjects: &[Subject], spec: &EvaluationSpec) -> R
             .map(|r| censoring(&observed(r, &list)));
         let g = fixed_g.clone().unwrap_or_else(|| censoring(&obs));
         for &h in &horizons {
+            if !keep_going(done, total) {
+                return Err(capability::failure::CANCELLED.to_string());
+            }
+            done += 1;
             let events = obs.iter().filter(|o| o.time <= h && o.cause == Some(0)).count();
             if events < spec.min_events {
                 absent.push(Absent { code: code.clone(), horizon: h, events, min_events: spec.min_events });

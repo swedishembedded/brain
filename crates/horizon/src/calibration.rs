@@ -259,6 +259,21 @@ impl Calibration {
         kind: Kind,
         min_events: usize,
     ) -> Result<Calibration, String> {
+        Self::fit_while(saved, weights_sha256, validation, horizons, kind, min_events, &mut |_, _| true)
+    }
+
+    /// [`Calibration::fit`] that calls `keep_going(done, total)` before each
+    /// (code, horizon) cell and answers `Err(CANCELLED)` as soon as it
+    /// returns false.
+    pub fn fit_while(
+        saved: &Saved,
+        weights_sha256: String,
+        validation: &[Subject],
+        horizons: &[f64],
+        kind: Kind,
+        min_events: usize,
+        keep_going: &mut dyn FnMut(u32, u32) -> bool,
+    ) -> Result<Calibration, String> {
         if validation.is_empty() {
             return Err("calibration: validation subjects are required".into());
         }
@@ -280,6 +295,7 @@ impl Calibration {
         let curves = saved.predict(validation)?;
         let codes = &saved.vocab.codes;
         let (mut entries, mut uncalibrated) = (Vec::new(), Vec::new());
+        let (mut done, total) = (0u32, (codes.len() * horizons.len()) as u32);
         for (k, code) in codes.iter().enumerate() {
             // The code, then the codes it competes with (see `Curves::cif`).
             let mut list: Vec<&str> = vec![code.as_str()];
@@ -294,6 +310,10 @@ impl Calibration {
             // The censoring distribution of THIS data, not of the training set.
             let g = censoring(&obs);
             for &t in &horizons {
+                if !keep_going(done, total) {
+                    return Err(capability::failure::CANCELLED.to_string());
+                }
+                done += 1;
                 let events = obs
                     .iter()
                     .filter(|o| o.time <= t && o.cause == Some(0))
