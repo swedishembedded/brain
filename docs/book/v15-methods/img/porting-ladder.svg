@@ -1,0 +1,35 @@
+<!-- source-sha256: 4665cd139cc9bcdaaba3580aa40f83e7570a36b98921c6821b1929c0486cc82d -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 320" width="1000" height="320"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="1000" height="320" fill="#ffffff"/>
+<rect x="15" y="40" width="200" height="60" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="115" y="66.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">1  facts</text>
+<text x="115" y="82.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">authority, layout, config</text>
+<rect x="272" y="40" width="200" height="60" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="372" y="66.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">2  goldens</text>
+<text x="372" y="82.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">reference, real inputs</text>
+<rect x="529" y="40" width="200" height="60" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="629" y="66.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">3  mapping</text>
+<text x="629" y="82.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">coverage and shapes</text>
+<rect x="786" y="40" width="200" height="60" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="886" y="66.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">4  smoke run</text>
+<text x="886" y="82.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">toy sizes, no weights</text>
+<rect x="786" y="192" width="200" height="60" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="886" y="218.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">5  isolated stages</text>
+<text x="886" y="234.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">golden input to each</text>
+<rect x="529" y="192" width="200" height="60" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="629" y="218.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">6  chained run</text>
+<text x="629" y="234.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">every tap, end to end</text>
+<rect x="272" y="192" width="200" height="60" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="372" y="218.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">7  gradient check</text>
+<text x="372" y="234.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">backward vs own loss</text>
+<rect x="15" y="192" width="200" height="60" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="115" y="218.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">8  optimise</text>
+<text x="115" y="234.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">parity gate frozen</text>
+<line x1="218" y1="70" x2="269" y2="70" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="475" y1="70" x2="526" y2="70" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="732" y1="70" x2="783" y2="70" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="886" y1="103" x2="886" y2="189" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="783" y1="222" x2="732" y2="222" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="526" y1="222" x2="475" y2="222" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="269" y1="222" x2="218" y2="222" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="500" y="290.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">a rung is entered only when the one before it passes; a failure is looked for in the newest rung</text>
+</svg>

@@ -1,0 +1,45 @@
+<!-- source-sha256: ae0edc8647246cda4cf3e132a1d3ab353fdf92e1b82a224d1ce8fa5a0e4af129 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 425" width="640" height="425">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="640" height="425" fill="#ffffff"/>
+<line x1="156.13" y1="354" x2="156.13" y2="30" stroke="#edf2f7"/>
+<text x="156.13" y="370" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">2</text>
+<line x1="304.03" y1="354" x2="304.03" y2="30" stroke="#edf2f7"/>
+<text x="304.03" y="370" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">4</text>
+<line x1="451.92" y1="354" x2="451.92" y2="30" stroke="#edf2f7"/>
+<text x="451.92" y="370" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">6</text>
+<line x1="599.82" y1="354" x2="599.82" y2="30" stroke="#edf2f7"/>
+<text x="599.82" y="370" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">8</text>
+<line x1="60" y1="354" x2="622" y2="354" stroke="#edf2f7"/>
+<text x="54" y="358" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">1e-08</text>
+<line x1="60" y1="315.78" x2="622" y2="315.78" stroke="#edf2f7"/>
+<text x="54" y="319.78" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">1e-07</text>
+<line x1="60" y1="277.56" x2="622" y2="277.56" stroke="#edf2f7"/>
+<text x="54" y="281.56" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">1e-06</text>
+<line x1="60" y1="239.34" x2="622" y2="239.34" stroke="#edf2f7"/>
+<text x="54" y="243.34" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">1e-05</text>
+<line x1="60" y1="201.12" x2="622" y2="201.12" stroke="#edf2f7"/>
+<text x="54" y="205.12" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.0001</text>
+<line x1="60" y1="162.9" x2="622" y2="162.9" stroke="#edf2f7"/>
+<text x="54" y="166.9" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.001</text>
+<line x1="60" y1="124.68" x2="622" y2="124.68" stroke="#edf2f7"/>
+<text x="54" y="128.68" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.01</text>
+<line x1="60" y1="86.46" x2="622" y2="86.46" stroke="#edf2f7"/>
+<text x="54" y="90.46" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0.1</text>
+<line x1="60" y1="48.24" x2="622" y2="48.24" stroke="#edf2f7"/>
+<text x="54" y="52.24" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">1</text>
+<rect x="60" y="30" width="562" height="324" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="60" y="30" width="562" height="324"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#4a5568" stroke-width="1.6" stroke-dasharray="6 4" points="82.18,246.8 156.13,235.38 230.08,228.67 304.03,223.91 377.97,220.21 451.92,217.19 525.87,216.88 599.82,216.73"/><polyline fill="none" stroke="#a0aec0" stroke-width="1.6" stroke-dasharray="6 4" points="82.18,246.65 156.13,246.65 230.08,246.65 304.03,246.65 377.97,246.65 451.92,246.65 525.87,280.56 599.82,289.85"/><polyline fill="none" stroke="#9b2c2c" stroke-width="1.8" points="82.18,313.41 156.13,61.49 230.08,63.79 304.03,63.73 377.97,59.72 451.92,60.38 525.87,60.8 599.82,60.27"/><circle cx="82.18" cy="313.41" r="3.5" fill="#9b2c2c"/><circle cx="156.13" cy="61.49" r="3.5" fill="#9b2c2c"/><circle cx="230.08" cy="63.79" r="3.5" fill="#9b2c2c"/><circle cx="304.03" cy="63.73" r="3.5" fill="#9b2c2c"/><circle cx="377.97" cy="59.72" r="3.5" fill="#9b2c2c"/><circle cx="451.92" cy="60.38" r="3.5" fill="#9b2c2c"/><circle cx="525.87" cy="60.8" r="3.5" fill="#9b2c2c"/><circle cx="599.82" cy="60.27" r="3.5" fill="#9b2c2c"/><polyline fill="none" stroke="#2b6cb0" stroke-width="1.8" points="82.18,313.41 156.13,61.49 230.08,319 304.03,318.2 377.97,68.18 451.92,321.49 525.87,322.58 599.82,323.31"/><circle cx="82.18" cy="313.41" r="3.5" fill="#2b6cb0"/><circle cx="156.13" cy="61.49" r="3.5" fill="#2b6cb0"/><circle cx="230.08" cy="319" r="3.5" fill="#2b6cb0"/><circle cx="304.03" cy="318.2" r="3.5" fill="#2b6cb0"/><circle cx="377.97" cy="68.18" r="3.5" fill="#2b6cb0"/><circle cx="451.92" cy="321.49" r="3.5" fill="#2b6cb0"/><circle cx="525.87" cy="322.58" r="3.5" fill="#2b6cb0"/><circle cx="599.82" cy="323.31" r="3.5" fill="#2b6cb0"/></g>
+<text x="341" y="390" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">stage (1 to 6 = layers 0 to 5, 7 = final norm, 8 = logits)</text>
+<text x="14" y="192" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 192)">rel_l2 against the golden</text>
+<text x="341" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Two mistakes, two ways of comparing</text>
+<line x1="33.51" y1="413" x2="53.51" y2="413" stroke="#4a5568" stroke-width="2" stroke-dasharray="6 4"/>
+<text x="59.51" y="417" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">chained bound</text>
+<line x1="157.87" y1="413" x2="177.87" y2="413" stroke="#a0aec0" stroke-width="2" stroke-dasharray="6 4"/>
+<text x="183.87" y="417" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">isolated bound</text>
+<line x1="282.67" y1="413" x2="302.67" y2="413" stroke="#9b2c2c" stroke-width="2"/>
+<text x="308.67" y="417" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">chained, mistaken port</text>
+<line x1="451.36" y1="413" x2="471.36" y2="413" stroke="#2b6cb0" stroke-width="2"/>
+<text x="477.36" y="417" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">isolated, mistaken port</text>
+</svg>
