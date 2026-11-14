@@ -400,7 +400,11 @@ impl ResidentEngine {
         let mut next_at = FIRST_STREAM_FRAMES;
         let first_audio: std::cell::Cell<Option<std::time::Duration>> = std::cell::Cell::new(None);
         let decoding = std::cell::Cell::new(std::time::Duration::ZERO);
+        // Codes decoded by the last call: the finished clip is decoded only if
+        // generation went past the last trigger, never the same codes twice.
+        let decoded = std::cell::Cell::new(0usize);
         let mut emit = |codes: &[u32], pcm: &mut Vec<f32>| {
+            decoded.set(codes.len());
             let at = std::time::Instant::now();
             let all = codec.decode(codes);
             decoding.set(decoding.get() + at.elapsed());
@@ -423,7 +427,9 @@ impl ResidentEngine {
         if codes.is_empty() {
             return Err("no codec frames were generated".to_string());
         }
-        emit(&codes, &mut pcm);
+        if codes.len() != decoded.get() {
+            emit(&codes, &mut pcm);
+        }
         self.last = SpeakTimings { generate, decode: decoding.get(), frames: codes.len() / 16, first_audio: first_audio.get() };
         Ok(pcm)
     }
