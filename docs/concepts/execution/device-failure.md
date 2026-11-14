@@ -9,7 +9,7 @@ a caller sees.
 
 Device work that runs inside the brain process is bounded, not killable:
 
-- Every wait on a device has a ceiling, `--gpu-wait-s` (30 s by default). A
+- Every wait on a device has a ceiling, `--gpu-wait-s` (30 s by default <!-- perf-number: the flag's default, a configured ceiling not a measurement -->). A
   wait past it fails with an error naming the operation and the flag, instead
   of hanging the process.
 - The thread stuck in the driver cannot be killed safely from inside its own

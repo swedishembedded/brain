@@ -255,7 +255,7 @@ mod tests {
         Executor::start(vec![], budgets, Policy::default())
     }
 
-    /// A supplier whose fetch takes `chunks` steps of 10 ms, checking its
+    /// A supplier whose fetch takes `chunks` short steps, checking its
     /// cancel token before each, and records what happened to it.
     #[derive(Default)]
     struct FakeSupplier {
