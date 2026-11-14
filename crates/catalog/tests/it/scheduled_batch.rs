@@ -78,8 +78,8 @@ fn a_batch_reproduces_each_request_run_alone() {
     assert_eq!(wide, alone);
 }
 
-/// A request cancelled before it starts is finished on its own, without
-/// disturbing the others in the same batch.
+/// A request cancelled before it starts is answered with the cancelled error
+/// on its own, without disturbing the others in the same batch.
 #[test]
 fn a_cancelled_request_leaves_the_batch_without_disturbing_the_rest() {
     let front = front();
@@ -90,7 +90,7 @@ fn a_cancelled_request_leaves_the_batch_without_disturbing_the_rest() {
     doomed.cancel.cancel();
     let results = run_batch_scheduled(&mut scheduler(4), &front, &[doomed, keep], &mut |_, _| {});
     assert_eq!(results.len(), 2);
-    assert!(results[0].is_ok());
+    assert_eq!(results[0].as_ref().err().map(String::as_str), Some(capability::failure::CANCELLED));
     assert_eq!(texts(vec![results[1].clone()]), alone);
 }
 
