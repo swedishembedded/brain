@@ -128,7 +128,7 @@ def causal_attention(Q, K, V, mutant=None):
 
     P = [[0.0] * T for _ in range(T)]
     if mutant == "axis":
-        # each column j is normalised over the queries i that may see key j
+        # each column j is normalized over the queries i that may see key j
         for j in range(T):
             rows = [i for i in range(T) if allowed(i, j)]
             p = _softmax([score(i, j) for i in rows])
@@ -172,7 +172,7 @@ def degenerate_instances():
             f"each, Q (T x d_k), then K (T x d_k), then V (T x d_v), every entry normal() in row-major order, except for "
             f"'identical tokens', where one row of Q, one of K and one of V are drawn (d_k, d_k and d_v values) and repeated "
             f"T times. Each mutant (numbered m as in attention_variant) replaces one step: 1, the scale 1/sqrt(d_k) left "
-            f"out; 2, each column of the masked scores normalised over the queries that may see that key instead of each "
+            f"out; 2, each column of the masked scores normalized over the queries that may see that key instead of each "
             f"row over its keys; 3, every key visible to every query; 4, query i seeing keys up to i + 1; 5, K in place "
             f"of V (a product that exists only when d_v = d_k); 6, score (i, j) computed as k_i . q_j instead of "
             f"q_i . k_j. Dot products and the sums of the softmax and of P V are taken in increasing index. A mutant is "

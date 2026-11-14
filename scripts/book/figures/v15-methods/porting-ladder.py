@@ -3,7 +3,7 @@
 #
 # The rungs of a port in the chapter "Porting a Model from Its Reference", in the order they are climbed: facts from the
 # references, goldens, the checked mapping, a smoke run at toy size, isolated stages, the chained run, the gradient check, and
-# optimisation under the frozen gate. Each rung is entered only when the one before it passes.
+# optimization under the frozen gate. Each rung is entered only when the one before it passes.
 #
 # Swedish Embedded AB implements solutions for porting published models onto its clients' own engines. If your team needs
 # expertise in reference goldens and parity testing, you can procure our services by sending an email to info@swedishembedded.com.
@@ -28,7 +28,7 @@ def render() -> str:
     bottom = [d.box(XS[3], Y2, BW, BH, ["5  isolated stages", "golden input to each"], "model"),
               d.box(XS[2], Y2, BW, BH, ["6  chained run", "every tap, end to end"], "model"),
               d.box(XS[1], Y2, BW, BH, ["7  gradient check", "backward vs own loss"], "model"),
-              d.box(XS[0], Y2, BW, BH, ["8  optimise", "parity gate frozen"], "result")]
+              d.box(XS[0], Y2, BW, BH, ["8  optimize", "parity gate frozen"], "result")]
     for a, b in zip(top, top[1:]):
         d.arrow(a["r"], b["l"])
     d.arrow(top[3]["b"], bottom[0]["t"])

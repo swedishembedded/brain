@@ -315,7 +315,7 @@ def golden_precision():
             "rounded to 32 bits, as in Volume VI, Chapter 2) with one of the three summation orders of that chapter, applied to every "
             "sum. Each stored golden is compared, number by number, with the first one (64-bit, left to right): how many stored "
             "32-bit patterns differ, and the largest relative difference |a - b| / |b| over the numbers. The digest is the first 16 "
-            "hex digits of the SHA-256 of the stored bytes.\n\n"
+            "hex digits of the SHA-256 (Secure Hash Algorithm, 256 bits) of the stored bytes.\n\n"
             + _table(["reference arithmetic", "summation order", "stored numbers that differ", "largest relative difference",
                       "digest"], body, "llrrl"))
 

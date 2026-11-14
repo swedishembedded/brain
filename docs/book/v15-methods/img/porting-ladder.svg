@@ -1,4 +1,4 @@
-<!-- source-sha256: 4665cd139cc9bcdaaba3580aa40f83e7570a36b98921c6821b1929c0486cc82d -->
+<!-- source-sha256: 226a860bc84677dcd0efc3a7435fae0b5e6fcbb2dbc45e971998233f1242c36d -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 320" width="1000" height="320"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="1000" height="320" fill="#ffffff"/>
 <rect x="15" y="40" width="200" height="60" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
 <text x="115" y="66.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">1  facts</text>
@@ -22,7 +22,7 @@
 <text x="372" y="218.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">7  gradient check</text>
 <text x="372" y="234.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">backward vs own loss</text>
 <rect x="15" y="192" width="200" height="60" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
-<text x="115" y="218.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">8  optimise</text>
+<text x="115" y="218.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">8  optimize</text>
 <text x="115" y="234.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">parity gate frozen</text>
 <line x1="218" y1="70" x2="269" y2="70" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
 <line x1="475" y1="70" x2="526" y2="70" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>

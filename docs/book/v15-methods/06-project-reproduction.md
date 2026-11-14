@@ -17,7 +17,7 @@ The steps use the whole volume: the porting workflow and the golden of Chapter 1
 4. (Chapter 3 and Volume IV, Chapter 11, Amdahl's law.) A part that takes the share $p$ of a whole is made $g$ times cheaper. What does the whole gain, and which measurement, of the part or of the whole, says what a user pays?
 5. (Chapter 4, falsifiable hypotheses, and Chapter 5, regression gates.) What must be written down before a measurement for its result to be able to refute a claim, and what makes a gate that skips its check worse than no gate?
 
-## The rules every number below obeys
+## Seeds, roundings and digests
 
 Every random input comes from the book's SplitMix64 generator ([Volume I, Chapter 17](../v01-mathematics/17-randomness.md)) started at the seed `seed_of(name)` printed beside its table, with `uniform()` and `integer(n)` as the pseudocode page defines them; each named generator is started once and never restarted, and the order of its draws is printed with it. Every weight and every input is rounded to the nearest 32-bit number (ties to even) as it is drawn, so that a 32-bit implementation and a 64-bit one start from the same bytes. Two arithmetics are used. The 64-bit one is ordinary double precision. The 32-bit one, which the port uses, rounds the result of every addition, subtraction, multiplication, division and square root to 32 bits, one operation at a time as the pseudocode page defines, with no fused multiply-add; `exp` is the library's 64-bit value rounded once to 32 bits, and the constant $\epsilon = 10^{-6}$ is rounded to 32 bits before it is used. A sum starts from its first term and adds the others left to right, in increasing index; a dot product rounds its first product, then each further product and each addition. Matrices are row-major with shape [outputs, inputs], indices count from 0, and positions are processed one at a time and independently.
 
@@ -61,7 +61,7 @@ Your build has its component when it draws the 186 weights and 30 inputs in the 
 
 The reference is the straightforward implementation of the three equations in 64-bit arithmetic, written from the papers and nothing else, and the golden is what it leaves behind: the inputs and all six taps of every position, each rounded once to 32 bits and stored under a name. The golden generation is the step where the reference's output stops being a run and becomes evidence, so it is done by a script that records which weights produced it (here, the digests of the previous table) and is run again whenever they change, never edited by hand.
 
-One set of inputs is not enough, for a reason that the norm makes plain. The constant $\epsilon$ is added to a mean square near 0.33 for inputs drawn from $[-1, 1)$, where it changes the result in the seventh digit; any mistake about where $\epsilon$ goes is then smaller than the rounding of the port and invisible to every comparison. The golden therefore holds a second set, the probe: the same inputs times $10^{-3}$, whose mean squares are near $3 \times 10^{-7}$, below $\epsilon$. A golden designed this way puts its inputs where the mistakes it must catch are large, the way Volume VI, Chapter 2 shrank its activations until a wrong epsilon showed.
+One set of inputs is not enough, for a reason that the norm makes plain. The constant $\epsilon$ is added to a mean square near 0.33 for inputs drawn from $[-1, 1)$, where it changes the result by about 1.5 parts in a million; a mistake about where $\epsilon$ goes can then be smaller than the rounding of the port and invisible to every comparison. The golden therefore holds a second set, the probe: the same inputs times $10^{-3}$, whose mean squares are near $3 \times 10^{-7}$, below $\epsilon$. A golden designed this way puts its inputs where the mistakes it must catch are large, the way Volume VI, Chapter 2 shrank its activations until a wrong epsilon showed.
 
 <!-- worked: project_reproduction.golden_contents -->
 The golden: the 64-bit reference run on both sets of inputs, every tap rounded once to 32 bits. Row-major, positions first; the digest is the FNV-1a 64 of the 32-bit numbers, little-endian.
@@ -297,7 +297,7 @@ One feed-forward block at D = 256, F = 768, one token. FLOPs: a sum of n product
 The ratio of the bytes of the first two rows is 3.5516; the vectors left out (x, n, gate, up, h, f, y: 3328 numbers, 13,312 bytes if each were read or written once) are 2.00 percent of the 8-bit block's bytes.
 <!-- /worked -->
 
-The 8-bit block does 18,432 more FLOPs than the 32-bit one (one scale product and one addition per group of every row) and reads 1,695,744 fewer bytes. Its byte ratio, 3.5516, is not 4: each group of 32 one-byte codes carries a 4-byte scale, 1.125 bytes per weight, and the block keeps its 32-bit gain. The per-row scheme reads fewer bytes still; the claims below are about why it is not used.
+The 8-bit block does 18,432 more FLOPs than the 32-bit one (one scale product and one addition per group of every row) and reads 1,695,744 fewer bytes. Its byte ratio, 3.5516, is not 4: each group of 32 one-byte codes carries a 4-byte scale, 1.125 bytes per weight, and the block keeps its 32-bit gain. The per-row scheme reads fewer bytes still, and its error on weights with outliers is why it is not used.
 
 ## Ten calls that measured the cache
 
@@ -314,7 +314,7 @@ Bytes read from memory, by a simulated cache of 16,384 lines of 64 bytes (1 MiB)
 Ratios of 32-bit to 8-bit: one block's bytes 3.5516, ten calls 35.52, the whole step 1.5155.
 <!-- /worked -->
 
-The 32-bit block's 2,360,320 bytes are larger than the cache, and reading them in the same order every call evicts each line before it is needed again: every call misses on every line, ten calls read ten blocks. The 8-bit block's 664,576 bytes fit, so the first call reads them and the next nine read nothing. The ratio of the ten calls, 35.52, is the ratio of a block that does not fit in a cache to one that does, repeated ten times; it would be 3.55 at one call and grows without bound with the number of calls. A decoding step reads eight blocks, eight sets of attention weights, their caches and the output head, 26 MB in all, and every line of it is gone before the next token wants it: the simulated step and the counted step agree to the byte, and the ratio is 1.5155. The whole step is the unit of work a token pays for in the model, with everything the model reads inside the bracket; it is a step towards the end-to-end benchmark of Chapter 3, which would also drive requests through the server's entry point with their batching and scheduling, and it is already enough to refute the microbenchmark. The lesson of the microbenchmark is not that it is false, since it counts its own bytes exactly, but that it answers a question no request asks.
+The 32-bit block's 2,360,320 bytes are larger than the cache, and reading them in the same order every call evicts each line before it is needed again: every call misses on every line, ten calls read ten blocks. The 8-bit block's 664,576 bytes fit, so the first call reads them and the next nine read nothing. The ratio of the ten calls, 35.52, is the ratio of a block that does not fit in a cache to one that does, repeated ten times; it would be 3.55 at one call and grows without bound with the number of calls. A decoding step reads eight blocks, eight sets of attention weights, their caches and the output head, 26 to 40 MB in all, and every line of it is gone before the next token wants it: the simulated step and the counted step agree to the byte, and the ratio is 1.5155. The whole step is the unit of work a token pays for in the model, with everything the model reads inside the bracket; it is a step towards the end-to-end benchmark of Chapter 3, which would also drive requests through the server's entry point with their batching and scheduling, and it is already enough to refute the microbenchmark. The lesson of the microbenchmark is not that it is false, since it counts its own bytes exactly, but that it answers a question no request asks.
 
 Your simulation is right when it reproduces the four simulated numbers of the table exactly, and your counting rule when it reproduces the counted ones.
 
@@ -345,7 +345,7 @@ Bytes of one decoding step of the 8-layer decoder by the counting rule, against 
 The largest context at which the ratio is still at least 1.4 is S = 975.
 <!-- /worked -->
 
-The Amdahl column equals the ratio in every row, as it must when the parts of the cost add, and it shows what the change can and cannot do. With no context at all the step's ratio is 1.7568, half of the block's; at a context of 2,048 positions it is 1.2635; at 8,192 it is 1.0892, and the key-value cache, which the change does not touch, is most of what the step reads.
+The Amdahl column equals the ratio in every row, as it must when the parts of the cost add, and it shows what the change can and cannot do. With no context at all the step's ratio is 1.7568, about half of the block's; at a context of 2,048 positions it is 1.2635; at 8,192 it is 1.0892, and the key-value cache, which the change does not touch, is most of what the step reads.
 
 ![The ratio of the bytes of a 32-bit decoding step to those of a step with 8-bit feed-forward weights, against the context from 0 to 8,192 cached positions. The ratio starts at 1.76, falls through the dashed line of the claim, 1.4, at a context of 975, and approaches 1.09 at 8,192. A dashed horizontal line at 3.55 marks the ratio of one block alone, which no context reaches.](img/byte-ratio-context.svg)
 
@@ -440,7 +440,7 @@ Your gate is right when it reproduces the table cell by cell.
 
 ## The numbers your build must match
 
-Collected in one place, the system is built when it reproduces:
+Collected in one place, the numbers the system must reproduce are these:
 
 - the five digests of the component and its first values, and the fourteen digests of the golden;
 - the import outcomes of the five mappings, including the refusal by name at 6 x 10 and the 0.206 of the missed transpose at 8 x 8;
@@ -452,7 +452,7 @@ Collected in one place, the system is built when it reproduces:
 
 ## Where brain does each of these
 
-brain is a larger instance of every step, and the evidence for each is its code.
+Each of these steps has a larger instance in brain, and the evidence for each is its code.
 
 The tap-by-tap comparison is `crates/testutil/src/parity.rs`. Its `Table` records, for every stage of a parity run, the cosine, the largest absolute difference and the relative L2 error, and holds every stage both to a cosine floor and to a relative-L2 ceiling, collecting every violation so that one run names every bad stage; `Report`, the streaming form, gates on a cosine floor and refuses a reference tap that is all near zero, since such a tap compares perfectly with anything. Tolerances derived from the rounding count are `crates/testutil/src/rounding.rs`, which defines $\gamma_k = k u/(1 - k u)$, the bound $\gamma_k \sum_i |x_i|$ of a sum of $k$ terms in 32 bits, and the agreement bound of twice that for two evaluations that may each be off by it; commit `65c09d5df` (12 November 2026) added it and changed the device golden tests and a model's backend parity test, which had compared against a fixed $10^{-6}$, to derive each tolerance from the bound over its own terms (for the model, one bound per logit, from its own shapes and weights).
 
@@ -494,13 +494,15 @@ The project establishes less than a production system needs. The component is on
 
 ## Answers
 
+**Recall.**
+
 1. Collect the facts from the published references (the papers, the configuration and the weight layout), generate the goldens first with a recorded script, map the published names onto the implementation and check the mapping for coverage and shape, run a smoke test at a toy size, compare stage by stage (isolated, then chained) at tolerances derived from the arithmetic, check the gradient of every trained path, and only then optimize, under the frozen parity gate; each step begins only when the one before it has passed. The golden stores the activations between the layers because a comparison of the output alone says that something is wrong and not where; with every tap, the first tap above its bound names the first equation that is wrong.
 2. $N_{\mathrm{rnd}}\,u$ with $u = 2^{-24}$ (plus one rounding if the reference is stored in 32 bits): the relative error that the roundings can explain when no stage amplifies the error of its input. A mistake whose effect is smaller than that tolerance can never fail the comparison; it must be made large by the choice of inputs or checked another way (a constant compared as a value, a second input scale).
 3. The central difference $(f(x + h) - f(x - h))/(2h)$ cancels the first error term of the Taylor expansion, so its truncation error is proportional to $h^2$ instead of $h$, and a step can be found at which both truncation and round-off are small. Dividing by $\max(1, |\text{analytic}|)$ makes the deviation relative for large gradients and absolute for small ones, so that a gradient near zero, where finite-difference noise dominates, does not produce a huge relative deviation.
 4. The whole gains $1/((1 - p) + p/g)$, which is below the ceiling $1/(1 - p)$ however large $g$ is. The measurement of the whole unit of work a user waits for, made the way the real use makes it, says what the user pays; a measurement of the part says what the part costs under the conditions of its own test.
 5. The claim, the quantity measured, the margin, the scope (the conditions under which it is said to hold), the measurement procedure and the rule that turns the result into "refuted" or "not refuted", all before the run. A gate that skips its check reports a pass when nothing was compared, which looks exactly like a pass when everything was, and so it certifies whatever happened; having no gate at least claims nothing.
 
-Check your understanding.
+**Check your understanding.**
 
 1. The two numbers measure different things, and a mean of them measures nothing. The ten calls measure how a block that fits in a 1 MiB cache compares with one that does not when the same weights are read again and again, which no decoding step does; the whole step reads every weight of eight layers and the head once per token. The whole step at the context of the use, 1.5155 at 512 positions, is what a user pays, and it falls with the context.
 2. With the sum in place of the mean, the divisor is $\sqrt{D m + \epsilon}$ instead of $\sqrt{m + \epsilon}$ for the mean square $m$, so the output is the right output times $\sqrt{(m + \epsilon)/(Dm + \epsilon)}$, which is $1/\sqrt{D} = 0.408$ up to terms in $\epsilon/m$. The relative error is $1 - 1/\sqrt{6} = 0.591752$. The factor depends on each row's $m$ only through $\epsilon/m$, near $3 \times 10^{-6}$, so it is the same for every row to about six digits, the output is very nearly the golden times one constant, and the cosine is 1 to nine places. The measured error, 0.592 to the digits printed, is 0.5917513 to seven: the small differences between the rows' factors and the rounding of the port move only the seventh digit.
