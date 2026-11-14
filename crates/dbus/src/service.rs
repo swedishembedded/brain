@@ -299,7 +299,6 @@ fn emit_window(executor: &Executor, model: &str, window: &[f32], prompt_id: i64,
     }
 }
 
-/// Drop a finished job's cancel token from the registry.
 /// `inv` checked as a call from off this machine: the spec `model`'s
 /// `action` declares, with every host-resolved param refused as unknown
 /// ([`capability::ActionSpec::validate_served`]) - the same check
@@ -342,6 +341,7 @@ fn reply_message(model: &str, e: &str) -> String {
     }
 }
 
+/// Drop a finished job's cancel token from the registry.
 fn finish_job(jobs: &JobRegistry, job: u64) {
     jobs.remove(&job);
 }

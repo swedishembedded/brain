@@ -7,11 +7,10 @@
 //! - Results/inputs use a **sealed memfd** (portable, zero-copy host-side). A
 //!   client mmaps it read-only; the seals let the receiver trust the size and that
 //!   the contents will not change under it.
-//! - Reads are **mmap-based and offset-independent**, so it does not matter where a
-//!   sender left the fd's file offset (a real gotcha: an fd passed via `SCM_RIGHTS`
-//!   shares its open-file offset with the sender). Works for memfd, files, and
-//!   dmabuf (which is mmap-able); a dmabuf export path lives in
-//!   [`crate::dmabuf`] and falls back here.
+//! - Reads are **offset-independent**, so it does not matter where a sender left
+//!   the fd's file offset (a real gotcha: an fd passed via `SCM_RIGHTS` shares its
+//!   open-file offset with the sender). A regular file or memfd is `pread`; only a
+//!   dmabuf, which is not a regular file, is mmapped.
 
 use std::ffi::CString;
 use std::num::NonZeroUsize;
@@ -50,7 +49,8 @@ pub fn memfd_seal(name: &str, bytes: &[u8]) -> anyhow::Result<OwnedFd> {
 /// with `--dbus-system` — is refused up front instead of buffered whole.
 pub const MAX_FD_BLOB_BYTES: u64 = 256 << 20;
 
-/// Read the whole contents of `fd` into a `Vec` by mmap (offset-independent). Empty
+/// Read the whole contents of `fd` into a `Vec`, offset-independent: `pread` for a regular
+/// file or memfd, an mmap only for a dmabuf. Empty
 /// fds return an empty vec. The caller keeps ownership of `fd`. Refuses fds larger
 /// than [`MAX_FD_BLOB_BYTES`] (checked against `st_size` BEFORE mapping): the size
 /// is attacker-chosen, and the check is what keeps a crafted fd from becoming an
