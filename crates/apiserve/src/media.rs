@@ -18,10 +18,17 @@
 //! dropping the image as before. Every image of a request is extracted (up to
 //! [`MAX_IMAGES`], scanning all messages in order) and attached as the blobs
 //! `image`, `image1`, ... ([`image_key`]), the naming a model that takes
-//! several images declares (`brain-deepseekvl`'s `generate`); a model that
-//! declares only `image` reads the first. At most ONE audio clip is
-//! extracted (the first found), matching the single `audio` blob input
-//! `qwen3omnimoe::caps::generate_spec()` declares.
+//! several images declares (`brain-deepseekvl`'s `generate`). A request
+//! carries at most ONE audio clip, matching the single `audio` blob input
+//! `qwen3omnimoe::caps::generate_spec()` declares; a second is refused.
+//!
+//! **Every content part is accounted for**: it is text the prompt keeps, a
+//! medium decoded here, or a conversation block the provider module reads
+//! (tool calls, reasoning). Any other part, and a media part this server
+//! cannot read (a URL source, a missing payload), refuses the request rather
+//! than being dropped, so a reply never looks as if it had seen input it
+//! did not. `crate::bridge::refuse_unread_media` then checks that the model's
+//! action declares an input for every medium attached.
 
 use capability::Blob;
 use serde_json::Value;
@@ -119,39 +126,51 @@ pub fn carries_media(body: &Value) -> bool {
 }
 
 /// Scan OpenAI-shaped `messages` (the RAW pre-flatten request array) for
-/// every `image_url` content part and the first `input_audio` one across all
-/// messages, in order.
+/// every `image_url` content part and the one `input_audio` part across all
+/// messages, in order. A part of any other type than `text`, `refusal` (an
+/// assistant turn's), `image_url` or `input_audio` is refused, as is a media
+/// part without its payload and a second audio clip.
 pub fn extract_openai(messages: &[Value]) -> Result<ExtractedMedia, String> {
     let mut out = ExtractedMedia::default();
     for m in messages {
         let Some(parts) = m.get("content").and_then(|c| c.as_array()) else { continue };
         for p in parts {
             match p.get("type").and_then(|v| v.as_str()) {
+                Some("text" | "refusal") => {}
                 Some("image_url") => {
-                    if let Some(url) = p.get("image_url").and_then(|u| u.get("url")).and_then(|v| v.as_str()) {
-                        out.push_image(&image_data_url_bytes(url)?)?;
-                    }
+                    let url = p.get("image_url").and_then(|u| u.get("url")).and_then(|v| v.as_str()).ok_or("image_url: the part has no image_url.url")?;
+                    out.push_image(&image_data_url_bytes(url)?)?;
                 }
-                Some("input_audio") if out.audio.is_none() => {
+                Some("input_audio") => {
+                    if out.audio.is_some() {
+                        return Err("a request may carry at most one input_audio clip".to_string());
+                    }
                     let ia = p.get("input_audio");
-                    let data = ia.and_then(|a| a.get("data")).and_then(|v| v.as_str());
+                    let data = ia.and_then(|a| a.get("data")).and_then(|v| v.as_str()).ok_or("input_audio: the part has no input_audio.data")?;
                     let format = ia.and_then(|a| a.get("format")).and_then(|v| v.as_str()).unwrap_or("wav");
-                    if let Some(data) = data {
-                        out.audio = Some(decode_input_audio(data, format)?);
-                    }
+                    out.audio = Some(decode_input_audio(data, format)?);
                 }
-                _ => {}
+                other => return Err(unsupported_part(other, "text, image_url, input_audio")),
             }
         }
     }
     Ok(out)
 }
 
+/// The refusal for a content part of a type this server does not read.
+fn unsupported_part(kind: Option<&str>, accepted: &str) -> String {
+    match kind {
+        Some(kind) => format!("content part type {kind:?} is not supported; accepted types are {accepted}"),
+        None => format!("a content part has no \"type\"; accepted types are {accepted}"),
+    }
+}
+
 /// Scan Anthropic-shaped `messages` for every `image` content block
 /// across all messages (`{"type":"image","source":{"type":"base64",
-/// "media_type":...,"data":...}}` - `source.type` other than `"base64"`,
-/// e.g. a URL source, is out of scope for the same reason OpenAI's
-/// external `image_url` is).
+/// "media_type":...,"data":...}}`). A `source.type` other than `"base64"`,
+/// e.g. a URL source, is refused for the same reason OpenAI's external
+/// `image_url` is, and so is a block of a type the conversation does not
+/// carry (a `document`, say).
 pub fn extract_anthropic(messages: &[Value]) -> Result<ExtractedMedia, String> {
     let mut out = ExtractedMedia::default();
     for m in messages {
@@ -161,11 +180,16 @@ pub fn extract_anthropic(messages: &[Value]) -> Result<ExtractedMedia, String> {
     Ok(out)
 }
 
+/// The block types an Anthropic conversation carries: text, images, and the
+/// tool and reasoning blocks `crate::anthropic` maps onto the contract.
+const ANTHROPIC_BLOCKS: &str = "text, image, tool_use, tool_result, thinking, redacted_thinking";
+
 /// The base64 images among Anthropic content `parts`, in order, including
 /// those a `tool_result` block carries (a tool that read an image file).
 fn anthropic_images(parts: &[Value], out: &mut ExtractedMedia) -> Result<(), String> {
     for p in parts {
         match p.get("type").and_then(|v| v.as_str()) {
+            Some("text" | "tool_use" | "thinking" | "redacted_thinking") => {}
             Some("tool_result") => {
                 if let Some(inner) = p.get("content").and_then(|c| c.as_array()) {
                     anthropic_images(inner, out)?;
@@ -173,15 +197,15 @@ fn anthropic_images(parts: &[Value], out: &mut ExtractedMedia) -> Result<(), Str
             }
             Some("image") => {
                 let source = p.get("source");
-                if source.and_then(|s| s.get("type")).and_then(|v| v.as_str()) != Some("base64") {
-                    continue; // a URL source: out of scope, see this function's doc
+                match source.and_then(|s| s.get("type")).and_then(|v| v.as_str()) {
+                    Some("base64") => {}
+                    other => return Err(format!("image: source type {} is not supported; send the image inline as a \"base64\" source (no external fetch)", other.map_or("(none)".to_string(), |t| format!("{t:?}")))),
                 }
-                if let Some(data) = source.and_then(|s| s.get("data")).and_then(|v| v.as_str()) {
-                    // Anthropic's raw base64 `source.data`, no `data:` URL wrapper.
-                    out.push_image(&b64::decode(data)?)?;
-                }
+                let data = source.and_then(|s| s.get("data")).and_then(|v| v.as_str()).ok_or("image: the base64 source has no data")?;
+                // Anthropic's raw base64 `source.data`, no `data:` URL wrapper.
+                out.push_image(&b64::decode(data)?)?;
             }
-            _ => {}
+            other => return Err(unsupported_part(other, ANTHROPIC_BLOCKS)),
         }
     }
     Ok(())
@@ -279,6 +303,32 @@ mod tests {
         let messages = json!([{"role": "user", "content": "just text"}]);
         let got = extract_openai(messages.as_array().unwrap()).expect("extract");
         assert!(got.images.is_empty() && got.audio.is_none());
+    }
+
+    /// Every part is read, decoded, or refused: none is dropped on the way to
+    /// the model, so a reply never looks as if it had seen input it did not.
+    #[test]
+    fn a_part_the_server_cannot_read_refuses_the_request() {
+        let wav = crate::b64::encode(&audio::wav::encode(&[0.0; 1600], 16_000));
+        let clip = json!({"type": "input_audio", "input_audio": {"data": wav, "format": "wav"}});
+        let two_clips = json!([{"role": "user", "content": [clip.clone(), clip.clone()]}]);
+        assert!(extract_openai(two_clips.as_array().unwrap()).unwrap_err().contains("at most one input_audio"));
+        let one_clip = json!([{"role": "user", "content": [clip]}]);
+        assert!(extract_openai(one_clip.as_array().unwrap()).unwrap().audio.is_some());
+        let file = json!([{"role": "user", "content": [{"type": "file", "file": {"file_id": "f"}}]}]);
+        assert!(extract_openai(file.as_array().unwrap()).unwrap_err().contains("\"file\" is not supported"));
+        let no_payload = json!([{"role": "user", "content": [{"type": "input_audio", "input_audio": {"format": "wav"}}]}]);
+        assert!(extract_openai(no_payload.as_array().unwrap()).unwrap_err().contains("no input_audio.data"));
+
+        let url_image = json!([{"role": "user", "content": [{"type": "image", "source": {"type": "url", "url": "https://example.com/a.png"}}]}]);
+        assert!(extract_anthropic(url_image.as_array().unwrap()).unwrap_err().contains("source type \"url\""));
+        let document = json!([{"role": "user", "content": [{"type": "document", "source": {"type": "text", "data": "x"}}]}]);
+        assert!(extract_anthropic(document.as_array().unwrap()).unwrap_err().contains("\"document\" is not supported"));
+        let conversation = json!([
+            {"role": "assistant", "content": [{"type": "thinking", "thinking": "t", "signature": ""}, {"type": "tool_use", "id": "a", "name": "Bash", "input": {}}]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "a", "content": [{"type": "text", "text": "ok"}]}, {"type": "text", "text": "go on"}]}
+        ]);
+        assert!(extract_anthropic(conversation.as_array().unwrap()).unwrap().images.is_empty());
     }
 
     #[test]

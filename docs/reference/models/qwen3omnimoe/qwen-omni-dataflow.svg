@@ -310,7 +310,7 @@
     <text class="t" x="156" y="2458">D-Bus (Run / Subscribe, typed audio&#8201;&#183;&#8201;image&#8201;&#183;&#8201;video blobs)&#160;&#160;&#183;&#160;&#160;OpenAI-compatible HTTP (/v1/chat/completions)&#160;&#160;&#183;&#160;&#160;Anthropic-compatible HTTP (/v1/messages)</text>
     <text class="t" x="156" y="2482">generate &#8594; text out; optional audio / image / video INPUT&#160;&#160;(generate_spec :68, OmniInner::generate :204 / generate_multimodal :223)</text>
     <text class="t" x="156" y="2502">speak &#8594; text in; text + 24&#8201;kHz speech OUT&#160;&#160;(speak_spec :94, OmniInner::speak :247)</text>
-    <text class="gapi" x="156" y="2528">gaps: the HTTP surfaces drop image_url / input_audio content parts server-side today (only D-Bus carries multimodal blobs) &#183; there is NO converse action (audio / image in + speech out in one call)</text>
+    <text class="gapi" x="156" y="2528">HTTP image_url / input_audio parts and Anthropic image blocks reach generate as blobs; a medium the action does not take is a 400 &#183; gap: there is NO converse action (audio / image in + speech out in one call)</text>
   </g>
 
   <!-- ======================= honesty strip ======================= -->

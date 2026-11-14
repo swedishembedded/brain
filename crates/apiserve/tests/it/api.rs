@@ -627,7 +627,7 @@ async fn model_card_derives_capabilities_and_output_limit_from_the_manifest() {
         assert_eq!(vision["capabilities"], json!(["chat", "tools", "vision"]), "{provider}: {vision}");
         assert_eq!(vision["architecture"]["input_modalities"], json!(["text", "image"]), "{provider}: {vision}");
         // What one request may carry, so a client trims its history instead of being refused.
-        assert_eq!(vision["max_images_per_request"], json!(capability::blob::MAX_IMAGES), "{provider}: {vision}");
+        assert_eq!(vision["max_images_per_request"], json!(1), "{provider}: the one `image` input it declares: {vision}");
         assert_eq!(vision["max_image_pixels_per_request"], json!(capability::blob::MAX_REQUEST_PIXELS), "{provider}: {vision}");
 
         let agent = get_json(&app, provider, &format!("{uri_prefix}/brain-agent"), &key).await;
@@ -1035,6 +1035,35 @@ async fn an_image_block_for_a_model_that_cannot_read_images_is_refused_on_the_an
     let (st, v) = post_json(&app, Provider::Anthropic, &key, "/v1/messages", &body).await;
     assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
     assert!(v["error"]["message"].as_str().unwrap().contains("brain-chat"));
+}
+
+/// Every medium a request carries must be one the model reads: a second image to a model that declares one, and an
+/// audio clip to a model that declares none, are 400s naming the limit rather than answers from the first image or the
+/// text alone.
+#[tokio::test]
+async fn media_the_model_does_not_read_is_a_400_not_a_partial_answer() {
+    let (app, key) = vision_chat_app(Provider::OpenAI);
+    let two_images = json!({"model": "brain-vision-chat", "messages": [{"role": "user", "content": [
+        {"type": "text", "text": "compare these"},
+        {"type": "image_url", "image_url": {"url": TINY_PNG_URL}},
+        {"type": "image_url", "image_url": {"url": TINY_PNG_URL}},
+    ]}]});
+    let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &two_images).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
+    assert!(v["error"]["message"].as_str().unwrap().contains("at most 1 image"), "{v}");
+
+    let wav = events::base64::encode(&audio::wav::encode(&[0.0; 1600], 16_000));
+    let with_audio = json!({"model": "brain-vision-chat", "messages": [{"role": "user", "content": [
+        {"type": "text", "text": "what is said?"},
+        {"type": "input_audio", "input_audio": {"data": wav, "format": "wav"}},
+    ]}]});
+    let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &with_audio).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
+    assert!(v["error"]["message"].as_str().unwrap().contains("does not read audio"), "{v}");
+
+    let document = json!({"model": "brain-vision-chat", "messages": [{"role": "user", "content": [{"type": "file", "file": {"file_id": "f"}}]}]});
+    let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &document).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "an unread part type is refused too: {v}");
 }
 
 /// A PNG that is a signature, an IHDR declaring 65535 x 65535 pixels and the start of the pixel stream: a few dozen bytes
@@ -3374,6 +3403,7 @@ impl ResidentModel for MessagesEchoChat {
                 .param(ParamSpec::new("prompt", ParamType::Str, "the prompt"))
                 .param(ParamSpec::new("messages", ParamType::Str, "chat messages"))
                 .input(BlobSpec::new("image", Media::Image, "an image the model reads"))
+                .input(BlobSpec::new("audio", Media::Audio, "a recording the model hears"))
                 .output(BlobSpec::new("text", Media::Text, "generated text"))],
         )
     }

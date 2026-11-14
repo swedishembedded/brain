@@ -52,8 +52,12 @@ pub struct CapSet {
     pub chat: bool,
     /// Chat whose `generate` action accepts `tools` (function calling).
     pub tools: bool,
-    /// Chat whose `generate` action reads `image` inputs beside the prompt.
-    pub vision: bool,
+    /// How many images a chat request may carry: the `generate` action's
+    /// declared `image`, `image1`, ... inputs, counted while they run on
+    /// unbroken. `0` is a model that reads no images.
+    pub max_images: usize,
+    /// Chat whose `generate` action reads an `audio` clip beside the prompt.
+    pub audio_input: bool,
     pub embeddings: bool,
     pub image: bool,
     /// Speech to text, served on `/audio/transcriptions`.
@@ -71,13 +75,21 @@ impl CapSet {
         self.chat || self.embeddings || self.image || self.transcription || self.speech || self.video
     }
 
+    /// Chat that reads images beside the prompt.
+    pub fn vision(&self) -> bool {
+        self.max_images > 0
+    }
+
     /// What a chat request to this model may carry, as model cards spell it.
     pub fn input_modalities(&self) -> Vec<&'static str> {
-        if self.vision {
-            vec!["text", "image"]
-        } else {
-            vec!["text"]
+        let mut modalities = vec!["text"];
+        if self.vision() {
+            modalities.push("image");
         }
+        if self.audio_input {
+            modalities.push("audio");
+        }
+        modalities
     }
 
     /// The capability names a model card lists, in a fixed order.
@@ -85,7 +97,7 @@ impl CapSet {
         [
             ("chat", self.chat),
             ("tools", self.tools),
-            ("vision", self.vision),
+            ("vision", self.vision()),
             ("embeddings", self.embeddings),
             ("images", self.image),
             ("transcription", self.transcription),
@@ -135,8 +147,11 @@ pub fn api_caps(m: &Manifest) -> CapSet {
     let embeddings = m.actions.iter().any(|a| a.name == "embed" && a.params.iter().any(|p| p.name == "text"));
     let image = text2image_action(m).is_some();
     let tools = chat && m.actions.iter().any(|a| a.name == "generate" && a.params.iter().any(|p| p.name == "tools"));
-    // The same rule the chat bridge refuses images by: the action takes an `image` input.
-    let vision = chat && m.actions.iter().any(|a| a.name == "generate" && a.inputs.iter().any(|b| b.name == "image"));
+    // The same rule the chat bridge refuses media by (`crate::bridge::refuse_unread_media`).
+    let generate = m.actions.iter().find(|a| a.name == "generate").filter(|_| chat);
+    let declares = |name: &str| generate.is_some_and(|a| a.inputs.iter().any(|b| b.name == name));
+    let max_images = (0..capability::blob::MAX_IMAGES).take_while(|&i| declares(&capability::blob::image_key(i))).count();
+    let audio_input = declares("audio");
     let transcription = m.actions.iter().any(|a| {
         a.name == "transcribe"
             && a.inputs.iter().any(|b| b.name == "audio" && b.media == Media::Audio)
@@ -144,7 +159,7 @@ pub fn api_caps(m: &Manifest) -> CapSet {
     });
     let speech = speak_action(m).is_some();
     let video = m.actions.iter().any(|a| a.video.as_ref().is_some_and(|c| c.sellable && c.clip_input.is_none()));
-    CapSet { chat, tools, vision, embeddings, image, transcription, speech, video }
+    CapSet { chat, tools, max_images, audio_input, embeddings, image, transcription, speech, video }
 }
 
 /// Does `provider` expose a model with capabilities `caps`?

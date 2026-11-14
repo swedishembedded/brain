@@ -40,6 +40,15 @@ launches a local qwen3 Anthropic surface and points Claude Code at it.
 | speech synthesis (text to speech) | - | `POST /audio/speech` | `POST /audio/speech` |
 | video (generate and edit) | - | `POST /videos`, `GET /videos/{id}`, `GET /videos/{id}/content`, `GET /videos/models` | same |
 
+- **Chat content parts**: a message's `content` may be a string or a list of
+  parts. OpenAI parts are `text`, `refusal`, `image_url` (an inline `data:` URL)
+  and `input_audio` (one clip per request, WAV, Ogg/Opus or WebM/Opus);
+  Anthropic blocks are `text`, `image` (a `base64` source), `tool_use`,
+  `tool_result`, `thinking` and `redacted_thinking`. Every part is read: any
+  other type, an external URL, a part without its payload, a second audio
+  clip, more images than the model's card states in `max_images_per_request`,
+  or a medium the model's `generate` action does not take is a 400 naming it,
+  never a reply from the rest of the request.
 - **Transcription** (`POST /v1/audio/transcriptions`, also without `/v1`): an
   OpenAI multipart form (`file`, `model`, optional `language` as an ISO-639-1
   code; `response_format` may only be `json`) or OpenRouter's JSON
@@ -373,8 +382,8 @@ The Anthropic entry is unchanged.
 | Field | Meaning |
 |---|---|
 | `capabilities` | Names derived from the model's manifest: `chat`, `tools` (chat whose `generate` accepts `tools`), `vision` (chat whose `generate` reads `image` inputs; image parts sent to any other model are refused with 400), `embeddings`, `images`, `transcription` (a `transcribe` action taking `audio`), `speech` (a `speak` action taking `text` and returning `audio`). On OpenRouter the card's `architecture` modalities follow from the same set, e.g. `audio->text` for a speech model. |
-| `max_images_per_request`, `max_image_pixels_per_request` | On a `vision` model: the most images, and pixels over all of them, one request may carry; a request past either is refused with 400. |
-| `architecture.input_modalities` | On a chat model: `["text", "image"]` for a `vision` model, else `["text"]` (the field an agent runtime reads to decide whether it may attach images). |
+| `max_images_per_request`, `max_image_pixels_per_request` | On a `vision` model: the most images (the `image`, `image1`, ... inputs its `generate` action declares), and pixels over all of them, one request may carry; a request past either is refused with 400. |
+| `architecture.input_modalities` | On a chat model: `"text"`, then `"image"` for a `vision` model and `"audio"` for one whose `generate` takes an `audio` clip (the field an agent runtime reads to decide what it may attach). |
 | `max_output_tokens` | The most new tokens one request may ask for, when the model's `generate` action declares an upper bound. On OpenRouter it is also `top_provider.max_completion_tokens`. |
 | `adapter` | Present on an entry that IS a LoRA adapter: `{ "id": "<adapter card id>", "digest": "sha256:<hex>", "version": <int> }`. The id is the adapter's name and the digest is that of its file; no file path is ever included. A release that replaces an adapter under the same id changes the digest and raises the policy version on the next read. |
 | `zero_data_retention` | Always `true`: the server keeps nothing of a request (no prompt, answer or upload is written anywhere or logged). A client that routes by data retention reads it to tell this server from one that does not say. |

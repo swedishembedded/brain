@@ -66,7 +66,7 @@ impl Pending {
     /// Asks the hooks whether this call may run.
     fn begin(state: &AppState, model: &str, action: &str, invocation: &Invocation) -> Result<Pending, ApiError> {
         refuse_training(state, model, action)?;
-        refuse_unread_images(&state.exec, state.provider, model, action, invocation)?;
+        refuse_unread_media(&state.exec, state.provider, model, action, invocation)?;
         // A named caller holds at most its own share in flight, for as long as
         // this call is unsettled - a background job's whole run included.
         let in_flight = match state.caller.as_ref().and_then(|p| p.clone().downcast::<crate::auth::Caller>().ok()) {
@@ -96,26 +96,38 @@ impl Drop for Pending {
     }
 }
 
-/// Refuses a request that carries images to a model whose `action` takes no `image` input.
+/// Refuses a request that carries a medium the model's `action` does not read.
 ///
-/// The images are attached to every chat invocation as blobs, and a model that declares no such input would never
-/// read them: it would answer the text alone, as if it had looked at the picture. A model not yet known to the
-/// executor (one still to be fetched) is checked again once it is, by the same call.
-pub fn refuse_unread_images(exec: &residency::Executor, provider: Provider, model: &str, action: &str, inv: &Invocation) -> Result<(), ApiError> {
-    if inv.get_blob("image").is_none() {
+/// Images (`image`, `image1`, ...) and the audio clip are attached to every chat invocation as blobs, and a model that
+/// declares no such input would never read them: it would answer the text alone, as if it had looked at the picture
+/// or listened to the recording. So every attached medium must match a declared input; a model that takes one image
+/// refuses a request with two rather than reading the first. A model not yet known to the executor (one still to be
+/// fetched) is checked again once it is, by the same call.
+pub fn refuse_unread_media(exec: &residency::Executor, provider: Provider, model: &str, action: &str, inv: &Invocation) -> Result<(), ApiError> {
+    let images = (0..).take_while(|&i| inv.get_blob(&capability::blob::image_key(i)).is_some()).count();
+    let audio = inv.get_blob("audio").is_some();
+    if images == 0 && !audio {
         return Ok(());
     }
     let manifests = exec.manifests();
     let Some(spec) = manifests.iter().find(|m| m.model == model).and_then(|m| m.actions.iter().find(|a| a.name == action)) else {
         return Ok(());
     };
-    if spec.inputs.iter().any(|b| b.name == "image") {
-        return Ok(());
+    let declares = |name: &str| spec.inputs.iter().any(|b| b.name == name);
+    let readable = (0..images).take_while(|&i| declares(&capability::blob::image_key(i))).count();
+    let refuse = |msg: String| Err(ApiError::invalid_request(provider, msg));
+    if images > 0 && readable == 0 {
+        return refuse(format!(
+            "model '{model}' does not read images: its '{action}' action takes no image input (a text-only model, or a checkpoint loaded without vision weights); resend without image parts"
+        ));
     }
-    Err(ApiError::invalid_request(
-        provider,
-        format!("model '{model}' does not read images: its '{action}' action takes no image input (a text-only model, or a checkpoint loaded without vision weights); resend without image parts"),
-    ))
+    if readable < images {
+        return refuse(format!("model '{model}' reads at most {readable} image(s) per request on its '{action}' action, and this request carries {images}; resend with fewer images"));
+    }
+    if audio && !declares("audio") {
+        return refuse(format!("model '{model}' does not read audio: its '{action}' action takes no audio input; resend without input_audio parts"));
+    }
+    Ok(())
 }
 
 /// Auto-fetch entry point: `model` didn't resolve against `resolve` (the caller's
@@ -727,7 +739,7 @@ pub fn stream_with_autofetch(state: &AppState, supplier: std::sync::Arc<dyn resi
             }
         }
         // The fetched model's manifest is known now: images it cannot read are refused before the job is queued.
-        if let Err(e) = refuse_unread_images(&exec, provider, &model_owned, &action_owned, &inv) {
+        if let Err(e) = refuse_unread_media(&exec, provider, &model_owned, &action_owned, &inv) {
             let _ = tx.send(StreamMsg::Err(e));
             jobs.remove(&id);
             return;

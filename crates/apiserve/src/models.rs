@@ -131,10 +131,10 @@ fn add_discovery(card: &mut Value, info: &ModelInfo, adapter: Option<&AdapterIde
         // OpenRouter's spelling, which agent runtimes read for every dialect.
         card["architecture"]["input_modalities"] = json!(info.caps.input_modalities());
     }
-    if info.caps.vision {
+    if info.caps.vision() {
         // What one request may carry (a request past either is refused with 400),
         // so a client can leave older pictures out of a long conversation instead.
-        card["max_images_per_request"] = json!(capability::blob::MAX_IMAGES);
+        card["max_images_per_request"] = json!(info.caps.max_images);
         card["max_image_pixels_per_request"] = json!(capability::blob::MAX_REQUEST_PIXELS);
     }
     if let Some(max) = info.max_output_tokens {
@@ -159,10 +159,10 @@ fn modalities(caps: CapSet) -> (Vec<&'static str>, Vec<&'static str>) {
     if caps.chat || caps.embeddings || caps.image || caps.speech || caps.video {
         input.push("text");
     }
-    if caps.vision {
+    if caps.vision() {
         input.push("image");
     }
-    if caps.transcription {
+    if caps.transcription || caps.audio_input {
         input.push("audio");
     }
     if caps.chat || caps.transcription {
