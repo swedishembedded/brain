@@ -120,3 +120,47 @@ fn qwen35moe_onnx_compiles_on_openvino_cpu() {
     }
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// Numerical parity: the exported graph on OpenVINO's CPU device against
+/// brain's own forward on the same tiny weights, position by position. This
+/// is what checks the GDN chunk recurrence and the sparse expert dispatch
+/// compute what the model does, not only that they run. Gated on
+/// `BRAIN_OV_PROBE` (needs OpenVINO) and on a backend for brain's reference
+/// forward (`brain_testutil::gpu_tests_skipped`).
+#[test]
+fn qwen35moe_onnx_matches_brain_forward() {
+    if std::env::var("BRAIN_OV_PROBE").is_err() || brain_testutil::gpu_tests_skipped() {
+        return brain_testutil::skip_unavailable("set BRAIN_OV_PROBE (and a working backend) for OpenVINO parity");
+    }
+    use npu::openvino::{DecoderSession, NpuConfig, NpuDevice};
+
+    let cfg = Qwen35Config::tiny();
+    let vocab = cfg.vocab as usize;
+    let dir = std::env::temp_dir().join(format!("brain-qwen35moe-parity-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = write_tiny_ckpt(&dir, &cfg);
+    let ids: Vec<u32> = (0..SEQ as u32).map(|i| (i * 5 + 1) % cfg.vocab).collect();
+    let reference = qwen35moe::model::Qwen35::new(cfg.clone(), 1, SEQ as u32, &qwen35moe::init::init_weights(&cfg, 3)).logits_all(&ids);
+
+    let (bytes, _) = npu::qwen35moe_export::build_qwen35_fp32_bytes(path.to_str().unwrap(), SEQ).unwrap();
+    std::fs::remove_dir_all(&dir).ok();
+    let mut sess = DecoderSession::load_bytes(&bytes, &NpuConfig { device: NpuDevice::Cpu, allow_fallback: true, ..Default::default() })
+        .expect("compile qwen35moe on OpenVINO CPU");
+    let got = sess.run_ids(&ids.iter().map(|&x| x as i64).collect::<Vec<_>>()).expect("run qwen35moe");
+
+    assert_eq!(got.len(), reference.len(), "logit count");
+    // A comparison of two flat outputs proves nothing: the logits must vary.
+    let spread = reference.iter().fold(f32::NEG_INFINITY, |m, &v| m.max(v)) - reference.iter().fold(f32::INFINITY, |m, &v| m.min(v));
+    assert!(spread > 1e-3, "the reference logits are flat (spread {spread})");
+    let argmax = |s: &[f32]| (0..s.len()).max_by(|&a, &b| s[a].partial_cmp(&s[b]).unwrap()).unwrap();
+    let mut max_abs = 0f32;
+    for pos in 0..SEQ {
+        let (r, g) = (&reference[pos * vocab..(pos + 1) * vocab], &got[pos * vocab..(pos + 1) * vocab]);
+        for (a, b) in r.iter().zip(g) {
+            max_abs = max_abs.max((a - b).abs());
+        }
+        assert_eq!(argmax(r), argmax(g), "argmax disagrees at position {pos} (max_abs so far {max_abs})");
+    }
+    eprintln!("qwen35moe ONNX vs brain: max_abs={max_abs:.2e} over a logit spread of {spread:.3} (device {})", sess.device());
+    assert!(max_abs < 1e-2, "logit mismatch too large: {max_abs}");
+}

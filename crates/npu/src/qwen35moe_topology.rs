@@ -488,7 +488,12 @@ impl<'a> Topo<'a> {
             self.f32(&stril, &[1, 1, 1, ci_, ci_], st);
             self.f32(&ident, &[1, 1, 1, ci_, ci_], id);
         }
-        let exp_diff = self.unary("Exp", &diff);
+        // Masked before the Exp, not after: above the diagonal `diff` is a
+        // positive sum of decay rates that overflows fp32's exp, and the
+        // inf the mask then multiplies by zero is NaN. Below it `diff <= 0`
+        // (the cumulative log-decay never rises), so `exp` stays in (0, 1].
+        let diff_lower = self.mul_t(&diff, &tril);
+        let exp_diff = self.unary("Exp", &diff_lower);
         let decay_mask = self.mul_t(&exp_diff, &tril);
 
         // ---- 11. attn0 = -(k_beta @ key^T) * decay_mask, strictly lower ----

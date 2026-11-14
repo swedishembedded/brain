@@ -231,6 +231,10 @@ tuned from the environment instead of a recompile.
 **Device / GPU selection for tests:**
 - `BRAIN_DEV_GPU` - selects/forces a GPU device for a test run.
 - `BRAIN_NPU_DEVICE` - selects the NPU device for npu-crate tests.
+- `BRAIN_OV_PROBE`, `BRAIN_NPU_AVAILABLE` - turn on the npu-crate tests that need an OpenVINO
+  runtime. With no NPU, `BRAIN_NPU_DEVICE=CPU` runs every export's parity check on OpenVINO's CPU
+  plugin; the `openvino` Python wheel carries a usable runtime (`libopenvino_c.so` is its
+  versioned `libopenvino_c.so.<n>`, found through `LD_LIBRARY_PATH`).
 - `MOE_SKIP_GPU_TESTS` - skips device-dependent tests on a machine with no GPU; read only by
   `brain_testutil::gpu_tests_skipped` (fatal under `BRAIN_REQUIRE_FIXTURES`).
 - `SHARD_TEST_GPUS` - how many GPUs a pipeline/tensor-parallel sharding test should assume.
