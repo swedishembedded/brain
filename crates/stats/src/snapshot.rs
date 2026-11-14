@@ -34,7 +34,7 @@ pub struct StatsSnapshot {
     pub models: Vec<ModelStat>,
     /// The scheduler/executor counters.
     pub executor: ExecutorStat,
-    /// In-flight work (may be empty until the request registry is wired).
+    /// In-flight work: the executor's queued and running jobs (empty when idle).
     pub requests: Vec<RequestStat>,
     /// Front-end connections (kept for forward-compat; may be empty for now).
     pub connections: Vec<ConnStat>,
