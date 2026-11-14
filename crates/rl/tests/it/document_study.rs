@@ -132,7 +132,7 @@ fn tmp(name: &str) -> PathBuf {
     dir
 }
 
-/// Every maximal run of supervised tokens in a written dataset, decoded -
+/// Every maximal run of supervised tokens within one record of a written dataset, decoded -
 /// i.e. exactly the text the loss is spent on, span by span. Deliberately
 /// NOT the whole stream joined: a substring check over the concatenation
 /// could match text straddling two records that never appeared in either.
@@ -140,9 +140,16 @@ fn trained_spans(dir: &Path, tok: &QwenBpe) -> Vec<String> {
     let ids = data::binio::read_tokens_u32(&dir.join("train")).expect("read train tokens");
     let mask = data::binio::read_mask_bin(&dir.join("train.mask.bin")).expect("read train mask");
     assert_eq!(ids.len(), mask.len(), "the token stream and its mask must be parallel");
+    // A run never crosses a record boundary: two records the template writes
+    // back to back can both be supervised to their last token.
+    let starts = data::binio::read_u64_bin(&dir.join("train.ex.bin")).expect("read the record index");
     let mut spans = Vec::new();
     let mut current: Vec<u32> = Vec::new();
     for (i, &supervised) in mask.iter().enumerate() {
+        if starts.binary_search(&(i as u64)).is_ok() && !current.is_empty() {
+            spans.push(tok.decode(&current));
+            current.clear();
+        }
         if supervised {
             current.push(ids[i]);
         } else if !current.is_empty() {
