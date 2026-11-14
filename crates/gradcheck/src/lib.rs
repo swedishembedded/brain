@@ -1730,7 +1730,8 @@ pub fn check_qwen35moe(seed: u64) -> Report {
 /// `q`/`k`/`v`/`g`/`beta` directly at `std=1.0` with no upstream conv chain,
 /// so they never hit this collapse; qwen35's INTEGRATED gradcheck goes
 /// through the real `in_proj_qkv` -> conv1d -> SiLU -> L2-norm pipeline and
-/// therefore needs an init scale that survives it. `std=1.0` for just these
+/// therefore needs an init scale that survives it. A wide init (uniform on
+/// [-1, 1) via `Lcg::scaled(1.0)`, std about 0.58) for just these
 /// two GDN-specific tensors (everything else keeps the standard init) was
 /// confirmed to restore real, non-degenerate FD sensitivity to `A_log`
 /// (`check_qwen35moe_a_log_elementwise`) without needing to touch
@@ -1786,7 +1787,7 @@ pub fn check_qwen35moe_a_log_elementwise(seed: u64) -> Report {
 /// mixer math (verified against the real reference, unlike qwen35moe's port),
 /// no MoE. `Qwen35Config::tiny()` already gives `n_layers=4` with layer 3
 /// `Full` (qwen35moe's own `tiny()` defaults to 8 layers and needs an
-/// override to 4 - this crate's tiny() needs none). Same `std=1.0`
+/// override to 4 - this crate's tiny() needs none). Same wide uniform [-1, 1) (`Lcg::scaled(1.0)`)
 /// `in_proj_qkv.weight`/`conv1d.weight` override as
 /// `qwen35moe_gradcheck_harness` - identical numerical-conditioning gap
 /// through the identical GDN pipeline (see that function's own doc for the
@@ -2074,7 +2075,7 @@ pub fn check_qwen35moe_lora(seed: u64) -> Report {
 /// trainable `.lora_a`/`.lora_b` tensors (proving the frozen base never
 /// receives a gradient-buffer write); a few AdamW warm-up steps move the
 /// zero-initialised `B` adapter (and hence `A`'s gradient) off zero before
-/// the FD comparison; the wide `std=1.0` `in_proj_qkv.weight`/
+/// the FD comparison; the wide uniform [-1, 1) `in_proj_qkv.weight`/
 /// `conv1d.weight` init dodges the same GDN numerical-conditioning gap
 /// [`qwen35_gradcheck_harness`]'s own doc explains, LoRA or not.
 pub fn check_qwen35_lora(seed: u64) -> Report {
@@ -2303,11 +2304,14 @@ pub fn check_cosyvoice_lm(seed: u64, cv3: bool) -> Report {
 mod tests {
     use super::*;
 
-    /// The one gate every model check asserts: (1) every tensor inside the
+    /// The one gate every model check asserts: (0) at least one check, (1) every tensor inside the
     /// combined workspace tolerance, and (2) no silently-dead gradient
     /// (analytic exactly 0.0 with a clearly nonzero numeric derivative --
     /// the shape the atol floor waves through; see Report::dead_gradients).
     fn assert_grad_gate(report: &Report, what: &str) {
+        // (0) Something was checked: both conditions below hold vacuously on
+        // an empty report.
+        assert!(!report.checks.is_empty(), "{what}: empty report: no gradient was checked");
         // (1) Every tensor within the shared workspace tolerance - the same
         // `(atol, rtol)` the bespoke checks in this module and the
         // `brain gradcheck` CLI both use.
@@ -2325,6 +2329,15 @@ mod tests {
             "{what}: silently-DEAD gradients (analytic exactly 0, numeric nonzero -- a wrong or missing backward kernel, not a small derivative): {:?}",
             dead.iter().map(|c| (&c.param, c.analytic, c.numeric)).collect::<Vec<_>>()
         );
+    }
+
+    /// A report that checked nothing proves nothing, so the gate must not
+    /// pass it: a model check whose parameter walk came back empty would
+    /// otherwise certify a backward pass it never looked at.
+    #[test]
+    #[should_panic(expected = "empty report: no gradient was checked")]
+    fn the_grad_gate_fails_an_empty_report() {
+        assert_grad_gate(&Report { checks: Vec::new() }, "empty");
     }
 
     #[test]
