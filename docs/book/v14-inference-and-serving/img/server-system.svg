@@ -1,0 +1,41 @@
+<!-- source-sha256: cd05a17d9450abe532a9d2446ebc2903b1f9739cf37c5ea3a522b50e17dbb268 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 330" width="1000" height="330"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="1000" height="330" fill="#ffffff"/>
+<rect x="20" y="77" width="150" height="66" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="95" y="106.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">message from</text>
+<text x="95" y="122.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">a client</text>
+<rect x="205" y="77" width="170" height="66" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="290" y="106.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">checks at the</text>
+<text x="290" y="122.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">boundary</text>
+<rect x="400" y="77" width="170" height="66" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="485" y="98.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">waiting queue,</text>
+<text x="485" y="114.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">bounded per client</text>
+<text x="485" y="130.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">and in total</text>
+<rect x="595" y="77" width="170" height="66" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="680" y="98.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">admission: prompt</text>
+<text x="680" y="114.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">and next positions</text>
+<text x="680" y="130.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">fit the free blocks</text>
+<rect x="800" y="77" width="170" height="66" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="885" y="98.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">step: prefill the</text>
+<text x="885" y="114.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">admitted, one row</text>
+<text x="885" y="130.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">per running sequence</text>
+<line x1="173" y1="110" x2="202" y2="110" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="378" y1="110" x2="397" y2="110" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="573" y1="110" x2="592" y2="110" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="768" y1="110" x2="797" y2="110" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<rect x="205" y="223" width="170" height="54" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="290" y="246.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">refusal with</text>
+<text x="290" y="262.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">its reason</text>
+<line x1="290" y1="146" x2="290" y2="220" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="299" y="187.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">first failing check</text>
+<rect x="800" y="223" width="170" height="54" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="885" y="246.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">pool of blocks,</text>
+<text x="885" y="262.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">block tables</text>
+<line x1="885" y1="146" x2="885" y2="220" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="894" y="187.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="start">reads, writes</text>
+<rect x="595" y="223" width="170" height="54" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="680" y="246.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">finished: reply out,</text>
+<text x="680" y="262.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">blocks given back</text>
+<line x1="797" y1="250" x2="768" y2="250" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M885,77 L885,50 Q885,40 875,40 L495,40 Q485,40 485,50 L485,74" fill="none" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="685" y="32.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#1a202c" text-anchor="middle">preempted: blocks given back, requeued at the head</text>
+</svg>

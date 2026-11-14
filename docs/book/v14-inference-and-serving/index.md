@@ -20,3 +20,4 @@ You can state how many copies of a model's weights a loader holds and why, read 
 5. [Speculative Decoding](05-speculative-decoding.md): how can a small model's guesses make a large model generate faster without changing its output?
 6. [Capabilities, Providers and APIs](06-capabilities-and-apis.md): how does an engine present hundreds of models through a few stable interfaces?
 8. [Running and Observing an Engine](08-operations.md): how do we see what a running engine is doing, control it, and shut it down cleanly?
+9. [Project: A Multi-Client Inference Server](09-project-inference-server.md): can you build a server that answers many clients at once within fixed memory and stays safe under hostile input?
