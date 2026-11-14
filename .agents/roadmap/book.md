@@ -107,6 +107,13 @@ reproduced its worked examples from the text alone in another language.
       a claim-validating editor. Independent readers reproduced 921 items from the page alone: 898 passed, 19 after a
       guess and 4 failed (an adapter router stated by x0 but printed as if by task label, a chaotic joint row printed
       with full digits, verifiers without the length check their table assumed). All were fixed in the following commits.
+- [x] Volume XIII, Training Large Models Efficiently: 8 chapters, each written and then checked by a claim-validating
+      editor. Independent readers reproduced 656 items from the page alone: 570 passed, 82 after a guess and 4 failed (a
+      worked module that drew every target from a fresh generator and printed a stale loss, a packed layout whose word
+      lists were not on the page, a summation count that depended on an unstated tanh and accumulation order, an
+      unreproducible adapter-layout count). All were fixed in the following commits. Writing it found and fixed real
+      defects in brain: oversized optimizer tiles, an unused scale buffer, a data-parallel step that averaged the ranks'
+      means instead of weighting by supervised positions, and checkpoint writes renamed without an fsync.
 
 ## Open
 
