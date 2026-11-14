@@ -432,7 +432,7 @@ pub use chat_tokens::ChatTokenizer;
 /// token every served invocation carries. Make one with
 /// `CancelToken::armed()` - a `default()` token is unarmed and never fires.
 /// [`ChatFineTune::run_with`] and the resident synthesizer's streaming calls take the same token.
-#[cfg(any(feature = "text", feature = "study", feature = "audio"))]
+#[cfg(any(feature = "text", feature = "study", feature = "audio", feature = "video"))]
 pub use capability::CancelToken;
 #[cfg(feature = "audio")]
 pub use tts::{Audio, PolicyOptions, PolicyStats, PolicyUpdate, ResidentTts, Take, TtsOptions, TtsPipeline, TtsPipelineBuilder, TtsPolicy};
