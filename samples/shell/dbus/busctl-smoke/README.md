@@ -27,10 +27,9 @@ dbus-run-session -- bash samples/shell/dbus/busctl-smoke/busctl_smoke.sh target/
 - A `brain` binary (`make build/debug`); pass its path as the one positional
   argument, default `target/debug/brain`.
 - To validate against an already-running server instead of one this script
-  starts and stops itself (what `tests/e2e/examples.bats` does, to avoid two
-  processes racing for the same well-known bus name), set
-  `BRAIN_DBUS_EXTERNAL=1`:
+  starts and stops itself (what `tests/e2e/samples.bats` does, to avoid two
+  processes racing for the same well-known bus name), pass `--external`:
 
   ```bash
-  BRAIN_DBUS_EXTERNAL=1 dbus-run-session -- bash samples/shell/dbus/busctl-smoke/busctl_smoke.sh
+  dbus-run-session -- bash samples/shell/dbus/busctl-smoke/busctl_smoke.sh --external
   ```

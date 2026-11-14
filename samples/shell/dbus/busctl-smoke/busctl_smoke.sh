@@ -6,7 +6,7 @@
 #
 # Run it inside a private session bus so it needs no system config:
 #
-#     tools/dbus-session.sh -- bash samples/shell/dbus/busctl-smoke/busctl_smoke.sh [path/to/brain]
+#     tools/dbus-session.sh -- bash samples/shell/dbus/busctl-smoke/busctl_smoke.sh [--external] [path/to/brain]
 #
 # It starts `brain serve --dbus`, then introspects the interface, reads properties,
 # lists models, fetches the manifests, and calls Run on the always-available `demo`
@@ -14,13 +14,18 @@
 # validating the surface + reply signatures; a real client (see brain_dbus.py) is
 # needed to actually consume returned fds.
 #
-# Set BRAIN_DBUS_EXTERNAL=1 to reuse an ALREADY-RUNNING `brain serve --dbus` on
-# this bus instead of starting (and later killing) one of our own - a single
-# well-known bus name can only have one owner, so this is what lets
-# tests/e2e/examples.bats run this script against its own shared server rather
-# than racing a second `brain serve --dbus` for ownership of the name.
+# --external reuses an ALREADY-RUNNING `brain serve --dbus` on this bus instead
+# of starting (and later killing) one of our own - a single well-known bus name
+# can only have one owner, so this is what lets tests/e2e/samples.bats run this
+# script against its own shared server rather than racing a second
+# `brain serve --dbus` for ownership of the name.
 set -euo pipefail
 
+EXTERNAL=0
+if [[ "${1:-}" == "--external" ]]; then
+  EXTERNAL=1
+  shift
+fi
 BIN="${1:-target/debug/brain}"
 BUS=com.swedishembedded.Brain1
 OBJ=/com/swedishembedded/Brain1
@@ -31,8 +36,8 @@ if [[ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]]; then
   exit 1
 fi
 
-if [[ "${BRAIN_DBUS_EXTERNAL:-0}" == "1" ]]; then
-  echo "== BRAIN_DBUS_EXTERNAL=1: reusing the already-running server =="
+if [[ "$EXTERNAL" == "1" ]]; then
+  echo "== --external: reusing the already-running server =="
 else
   echo "== starting: $BIN serve --dbus =="
   "$BIN" serve --dbus &

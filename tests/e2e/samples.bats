@@ -100,7 +100,7 @@ run_example() {
 }
 
 @test "samples/shell/dbus/busctl-smoke/busctl_smoke.sh runs against the shared harness server" {
-  run env BRAIN_DBUS_EXTERNAL=1 bash "$REPO/samples/shell/dbus/busctl-smoke/busctl_smoke.sh" "$BRAIN"
+  run bash "$REPO/samples/shell/dbus/busctl-smoke/busctl_smoke.sh" --external "$BRAIN"
   if [ "$status" -ne 0 ]; then
     echo "$output" >&3
   fi
