@@ -1056,7 +1056,7 @@ volumes:
         question: "How do we see what a running engine is doing, control it, and shut it down cleanly?"
         introduces: [structured-tracing, runtime-statistics, hierarchical-state-machine, graceful-shutdown, event-driven-runtime]
         requires: [capability, request-scheduling]
-        brain: [trace, stats, braintop, hfsm, runtime, shutdown]
+        brain: [trace, stats, braintop, hfsm, runtime, shutdown, gpu-supervisor, gpu-worker]
 
       - id: project-inference-server
         title: "Project: A Multi-Client Inference Server"
