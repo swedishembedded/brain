@@ -242,7 +242,7 @@ def lora_gradient_check():
             "|numeric - analytic| / max(1, |analytic|), and the criterion is that its largest value is below 1e-6.\n\n")
     ok = "passes" if worst < 1e-6 else "FAILS"
     rows = [[f"largest deviation over all {r * INN + OUT * r} entries", f"{ok} (below 1e-6)"],
-            ["|dA| and |dB| (Frobenius) at B = 0 with s = 2/3 (alpha = 2, r = 3), A the rank-3 start of the sweep",
+            ["|dA| and |dB| (Frobenius) at B = 0 with s = 2/3 (alpha = 2, r = 3), A the first 3 rows the rank-sweep generator draws",
              f"{_num(_fro(dA0), 4)} and {_num(_fro(dB0), 4)}"]]
     return head + _table(["quantity", "value"], rows, "lr")
 
@@ -447,7 +447,7 @@ def fold_into_quantized():
             "decoded matrix) and the rank-2 adapter trained on it with the rank-sweep recipe (s = 1, the task's original target W*, "
             "not Q + the change), multiplied by a strength. 'Delta in steps' is the root mean square of one entry of "
             "strength x B A divided by the mean step of the base, the mean over the 16 rows of their scale. The fold re-encodes "
-            "Q + strength x B A (the W of the next sentence is Q) with the same rule "
+            "Q + strength x B A with the same rule "
             "and subtracts the decoded base; 'same code' is the percent of the 512 weights whose integer code is the old one, and the next "
             "column the Frobenius norm of (what survived - what was intended) over the norm of what was intended. The runtime route "
             "computes y = W x + strength B (A x) with W the decoded base; its last column is the largest difference from "

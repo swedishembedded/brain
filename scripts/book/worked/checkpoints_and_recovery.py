@@ -80,9 +80,9 @@ def failure_budget():
                      _g(math.sqrt(2.0 * SAVE_COST / m), 4), _g(slowdown(tau, SAVE_COST, m), 4)])
     head = (f"Assumptions of the example, not measurements: one device fails on average once in {DEVICE_STEPS:,} device-steps, "
             f"failures of different devices are independent and arrive at a constant rate, a run is S = {RUN_STEPS:,} steps, and one "
-            f"checkpoint write costs c = {SAVE_COST} steps of work. For a group of D devices M = {DEVICE_STEPS:,} / D steps. "
+            f"checkpoint write costs c = {SAVE_COST} steps of work (c_save of the text). For a group of D devices M = {DEVICE_STEPS:,} / D steps (mu_f of the text). "
             "The expected number of failures is S / M; the chance of none is e^(-S/M); a run that restarts from step 0 needs "
-            "M (e^(S/M) - 1) steps on average; the interval tau* = sqrt(2 c M) (rounded to a whole step) minimises the first-order "
+            "M (e^(S/M) - 1) steps on average; the interval tau* = sqrt(2 c M) (k_c* of the text, rounded to a whole step) minimizes the first-order "
             "waste sqrt(2 c / M); the last column is the exact slowdown M (e^((tau + c)/M) - 1) / tau at that interval, in steps of "
             "work per step of progress. exp is the library function; numbers are to four significant digits.\n\n")
     heads = ["devices D", "M (steps)", "expected failures", "chance of none", "steps with no checkpoint", "tau* (steps)",

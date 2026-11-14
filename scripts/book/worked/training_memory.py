@@ -230,7 +230,7 @@ def activations_against_state():
         act = 4 * L * n * (D + F)
         rows.append([f"{n:,}", _gib(wb), _gib(wb), _gib(2 * wb), _gib(act), _gib(4 * wb + act), f"{(4 * wb + act) / wb:.2f}"])
     cross = 2 * D * F / (D + F)
-    head = (f"The stack of the chapter: L = {L} blocks with D = {D} and F = {F:,}, so P = L x 2 D F = {P:,} trainable numbers "
+    head = (f"The stack: L = {L} blocks with D = {D} and F = {F:,}, so P = L x 2 D F = {P:,} trainable numbers "
             "(2^32), no embedding and no attention. Every number is fp32, 4 bytes: a weight, its gradient, and the two AdamW moments "
             f"(16 bytes per parameter in all). Kept activations are L x n x (D + F) numbers (the count of the previous table, per block "
             f"and token). Gibibytes are 2^30 bytes, rounded to two decimals. The kept activations equal the parameter count at "
@@ -552,7 +552,7 @@ def optimizer_bytes():
     per_block = (F + D) + (D + F)
     af = 4 * per_block * L
     rows.append(["Adafactor (factored, no first moment)", "rows + columns, fp32", f"{af:,}", f"{af / GIB:.3f}", f"{af / P:.6f}"])
-    head = (f"The optimizer state of the stack of the chapter, P = {P:,} numbers, counted physically: an fp32 slot is 4 bytes a number, "
+    head = (f"The optimizer state of the stack, P = {P:,} numbers, counted physically: an fp32 slot is 4 bytes a number, "
             "a bf16 slot 2, an int8 slot 1 byte a number plus one fp32 scale (4 bytes) per block (the last block counted whole, "
             "here P divides evenly). Adafactor keeps, for each of the 2 L matrices of shape [F, D] and [D, F], one fp32 number per row "
             "and one per column.\n\n")

@@ -354,7 +354,7 @@ def sharded_equivalence():
     head = (f"{bookrng.seed_of('parallelism.sharded')} is seed_of 'parallelism.sharded'. One generator draws, by normal(), the 8 starting "
             "weights (each times 0.5) and then, for each of the 5 steps in turn, the gradients of the 4 ranks (rank 0's 8 numbers first), "
             "so the gradients are given and do not depend on the weights. Each step sums the four gradients in rank order from 0.0 and "
-            "divides by 4. Adam is the adam_update of Volume XIII, Chapter 4 (rate 0.01, beta1 0.9, beta2 0.999, epsilon 1e-8, bias-corrected, no weight decay, "
+            "divides by 4. Adam is the adam_update of Chapter 4 (rate 0.01, beta1 0.9, beta2 0.999, epsilon 1e-8, bias-corrected, no weight decay, "
             "steps counted from 1), in float64, with 1 - beta1 and 1 - beta2 evaluated in float64, the second moment updated as ((1 - beta2) g) g, and the powers "
             "beta ^ t formed by exponentiation, not by repeated multiplication. The replicated run gives every rank all 8 weights and 16 moments; the sharded run gives rank "
             "r the elements 2 r and 2 r + 1 and their 4 moments, and all-gathers the updated pairs.\n\n")
@@ -543,7 +543,7 @@ def balanced_cuts():
     assert len(winners) == 1
     even = tuple(BC_LAYERS // BC_STAGES for _ in range(BC_STAGES))
     rows = []
-    for name, c in (("equal layers per stage", even), ("cuts that minimise the largest stage cost", winners[0])):
+    for name, c in (("equal layers per stage", even), ("cuts that minimize the largest stage cost", winners[0])):
         costs = _stage_costs(c)
         rows.append((name, ", ".join(str(x) for x in c), ", ".join(_g(x) for x in costs), _g(max(costs))))
     head = (f"{BC_LAYERS} layers of cost 1 each are cut into {BC_STAGES} stages of consecutive layers, every stage with at least one layer; "
@@ -738,7 +738,7 @@ FED_RATE, FED_STEPS = 0.5, 12
 
 
 def _fed_opt(counts=FED_COUNTS):
-    """The minimiser of the weighted objective sum_i n_i f_i / sum_i n_i, with f_i(w) = 1/2 sum_j h_ij (w_j - c_ij)^2."""
+    """The minimizer of the weighted objective sum_i n_i f_i / sum_i n_i, with f_i(w) = 1/2 sum_j h_ij (w_j - c_ij)^2."""
     return tuple(sum(n * h[j] * c[j] for n, h, c in zip(counts, FED_CURV, FED_CENTRES)) /
                  sum(n * h[j] for n, h in zip(counts, FED_CURV)) for j in range(2))
 
@@ -769,7 +769,7 @@ def fedavg_counts():
                          ", ".join(_g(v) for v in w), _g(d, 4)))
     head = ("The nodes, curvatures, centres, starting point, rate and 12 steps of fedavg_rounds, with only the sample counts changed; "
             "the counts weight both the objective and the average of the nodes' weights.\n\n")
-    return head + _table(["sample counts", "minimiser", "local steps E per round", "final weights", "distance from the minimiser"],
+    return head + _table(["sample counts", "minimizer", "local steps E per round", "final weights", "distance from the minimizer"],
                          rows, "llrll")
 
 
@@ -786,17 +786,17 @@ def fedavg_rounds():
     avg = [v / 4 for v in num]
     head = (f"Three nodes with n = {FED_COUNTS[0]}, {FED_COUNTS[1]} and {FED_COUNTS[2]} samples. Node i has the loss f_i(w) = 1/2 sum over j of "
             f"h_ij (w_j - c_ij)^2 on two weights, with the curvatures h = {FED_CURV} and the centres c = {FED_CENTRES} (one pair per node, "
-            "in node order). The common objective is the sample-weighted mean of the nodes' losses, whose minimiser is "
+            "in node order). The common objective is the sample-weighted mean of the nodes' losses, whose minimizer is "
             f"({_g(opt[0])}, {_g(opt[1])}). Every run starts from w = (0, 0) and makes {FED_STEPS} gradient steps in all with the rate {FED_RATE}: "
             "each round, every node takes E steps of plain gradient descent on its own loss from the shared weights, and the new shared weights "
             "are the average of the nodes' weights weighted by their sample counts (summed in node order from 0.0 and divided by 1 + 3 + 4 = 8). "
-            "The distance is the Euclidean distance of the final weights from the minimiser.\n\n")
+            "The distance is the Euclidean distance of the final weights from the minimizer.\n\n")
     tail = (f"\n\nA run of gradient averaging, in which each of the 12 steps moves the weights along the sample-weighted mean of the nodes' "
             f"gradients at the current weights, reaches "
-            f"{', '.join(_g(v) for v in _grad_avg_run())} (differences from the K = 1 row below 1e-12: "
+            f"{', '.join(_g(v) for v in _grad_avg_run())} (differences from the E = 1 row below 1e-12: "
             f"{'yes' if _dev(_grad_avg_run(), ref) < 1e-12 else 'NO'}). The sample-weighted average of the weight vectors (10, 20) with 1 sample and "
             f"(0, 0) with 3 samples is ({_g(avg[0])}, {_g(avg[1])}).")
-    return head + _table(["local steps E per round", "rounds", "final weights", "distance from the minimiser"], rows, "rrll") + tail
+    return head + _table(["local steps E per round", "rounds", "final weights", "distance from the minimizer"], rows, "rrll") + tail
 
 
 def _grad_avg_run():

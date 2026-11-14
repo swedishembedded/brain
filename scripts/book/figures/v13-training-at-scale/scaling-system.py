@@ -35,7 +35,7 @@ def render() -> str:
     adam = d.box(870, 130, 170, 64, ["Adam on the", f"{pst.P_AD} adapter numbers"], "model")
     gen = d.box(870, 300, 170, 64, [f"every {pst.EVERY} updates:", "values, state, meta"], "result")
     d.arrow(ring["r"], adam["l"])
-    d.arrow(adam["b"], gen["t"], "t, d, m, v", side="right")
+    d.arrow(adam["b"], gen["t"], "values, m, v, t, d", side="right")
     d.path([adam["t"], (870, 22), (110, 22), draws["t"]], color=INK)
     d.text(490, 44, ["the next update draws the next 10 rows"], size=12, color=MUTED)
     base = d.oval(390, 404, 220, 40, [f"frozen base, {pst.P_BASE} numbers"], "plain")

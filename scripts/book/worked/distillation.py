@@ -9,7 +9,7 @@ leading underscore that takes no arguments returns a markdown string that the ch
 with the chapter's figures so a picture and the table beside it cannot disagree.
 
 Every trained number comes from a strongly convex problem (a softmax regression with an L2 penalty) run to a
-gradient below 1e-12, so its digits are those of the unique minimiser; the stable-digits rule of `stable.py` is applied
+gradient below 1e-12, so its digits are those of the unique minimizer; the stable-digits rule of `stable.py` is applied
 on top, from five starting points. The grid searches and the expectations are exact sums, and the few sampled numbers
 come from a named generator with a stated draw order. The step the chapter counts (tokens, weights) is the one of
 `training_memory`, imported and never copied.
@@ -56,7 +56,7 @@ def entropy(q):
 
 
 def topk_teacher(z, k):
-    """The ids and renormalised probabilities of the k largest entries of the logits z, ties to the lower id."""
+    """The ids and renormalized probabilities of the k largest entries of the logits z, ties to the lower id."""
     order = sorted(range(len(z)), key=lambda i: (-z[i], i))[:k]
     m = z[order[0]]
     e = [math.exp(z[i] - m) for i in order]
@@ -236,7 +236,7 @@ def soft_versus_hard():
             f"({D_T} normal() each, in order) and then {N_MAX} uniform() values, one per context; a run with n contexts uses the "
             f"first n of both. The hard label of a context is the first class whose cumulative teacher probability exceeds its "
             f"uniform value (the last class if none does). The three targets are that one-hot label, the teacher's top 2 "
-            f"classes renormalised, and the full teacher distribution. The student has no bias and starts at zero; it minimises "
+            f"classes renormalized, and the full teacher distribution. The student has no bias and starts at zero; it minimizes "
             f"the mean cross-entropy against its targets plus {LAMBDA}/2 times the sum of its squared weights by {STEPS} steps "
             f"of gradient descent with rate {LR}, from which every run ends with a largest gradient component below 1e-12 (checked). The score is the mean over "
             f"{N_TEST} test contexts (generator 'distillation.test', seed {bookrng.seed_of('distillation.test')}, {D_T} normal() each) "
@@ -335,7 +335,7 @@ def topk_gap():
         rows.append([k, _f(kept), _f(kl(dense, p)), _f(l1), 8 * k])
     head = ("One position, eight tokens. Teacher logits (2.6, 2.1, 1.7, 0.9, 0.2, -0.4, -1.1, -2.0), student logits (1.2, 1.9, "
             "0.6, 1.1, 0.4, 0.0, -0.3, -0.5), temperature 1. 'kept mass' is the teacher's probability on its K largest tokens "
-            "before renormalising; KL is KL(q_K || p) for the renormalised top-K distribution q_K; 'distance' is the sum over "
+            "before renormalizing; KL is KL(q_K || p) for the renormalized top-K distribution q_K; 'distance' is the sum over "
             "the eight tokens of |q_K - q|, which is how far the gradient p - q_K is from the full gradient p - q in the sum of "
             "absolute components; 'bytes' is 4 for each stored id and 4 for each stored probability, 8 K. "
             f"For every K the gradient p - q_K equals the sum over the K kept tokens of q_k (p - e_k) to below 1e-12 (checked). "
@@ -354,8 +354,8 @@ def topk_cost():
         dense = 4 * VOCAB_EX
         sparse = 8 * k
         rows.append([k, f"{sparse:,}", _g(100 * sparse / dense, 3), f"{sparse * TOKENS_STEP:,}", f"{k * STEP_FLOPS:,}"])
-    head = (f"A vocabulary of {VOCAB_EX:,} tokens, one step of {TOKENS_STEP:,} positions, and the stack of Volume XIII, Chapter 3 "
-            f"(2^32 weights, {STEP_FLOPS:,} FLOPs for one forward and backward pass over {TOKENS_STEP:,} tokens, 6 n P). A dense "
+    head = (f"A vocabulary of {VOCAB_EX:,} tokens, one step of {TOKENS_STEP:,} positions, and the stack of Chapter 3 "
+            f"(2^32 weights, {STEP_FLOPS:,} FLOPs for one forward and backward pass over {TOKENS_STEP:,} tokens, 6 n P for n tokens and P weights). A dense "
             f"teacher row is 4 x {VOCAB_EX:,} = {4 * VOCAB_EX:,} bytes of fp32 probabilities per position. A top-K row is 4 bytes "
             "for each id and 4 for each probability, 8 K bytes; it is smaller than the dense row while K is below half the "
             "vocabulary. The FLOP column counts K passes, one forward and one backward each, over the same tokens.\n\n")
@@ -419,7 +419,7 @@ def normalisation():
     head = (f"A student that is one linear softmax: logits W x with W of shape [{V_N}, {D_N}] and x of {D_N} numbers, the same W at "
             f"every position. One generator seeded {seed} (seed_of 'distillation.normalisation') draws, in this order: the {V_N * D_N} "
             f"entries of W (row-major, each 0.5 * normal()), then for each of 4 positions its x ({D_N} normal()) and its teacher "
-            f"logits ({V_N} values, each 1.5 * normal()), whose top 2 renormalised is the position's target. An example is its first "
+            f"logits ({V_N} values, each 1.5 * normal()), whose top 2 renormalized is the position's target. An example is its first "
             "n positions. The loss is the mean over the n positions of KL(q_K || p). The two gradients are with respect to W, "
             "summed over positions: the older convention adds the positions' gradients of KL(q_K || p) without dividing, the "
             "current one divides the sum by n. The table gives the Frobenius norm of each (the square root of the sum of the "
@@ -486,12 +486,12 @@ def forward_versus_reverse():
         ["student mass on tokens 0 to 4", _f(mass_left(bf[3])), _f(mass_left(br[3]))],
     ]
     head = ("A teacher over the ten tokens 0 to 9 with two peaks: q_v is proportional to 0.005 + exp(-(v - 2)^2 / (2 x 0.36)) + "
-            "exp(-(v - 7)^2 / (2 x 0.36)), normalised to sum 1. The student is a discretised Gaussian, p_v proportional to "
+            "exp(-(v - 7)^2 / (2 x 0.36)), normalized to sum 1. The student is a discretized Gaussian, p_v proportional to "
             "exp(-(v - mu)^2 / (2 sigma^2)), with two numbers to choose: mu from 0 to 9 in steps of 0.25 and sigma from 0.25 to 6 "
-            "in steps of 0.25 (37 x 24 = 888 students). Each objective is minimised by trying every student, mu ascending "
+            "in steps of 0.25 (37 x 24 = 888 students). Each objective is minimized by trying every student, mu ascending "
             "then sigma ascending, and keeping the first student whose value is smaller than the best so far by more than 1e-9 "
             "(the teacher is symmetric about 4.5, so a student with mean mu and the one with mean 9 - mu tie up to rounding, "
-            "and the smaller mu is kept). 'Forward' minimises KL(q || p), 'reverse' "
+            "and the smaller mu is kept). 'Forward' minimizes KL(q || p), 'reverse' "
             "KL(p || q). Natural logarithms, four decimals.\n\n")
     return (head + _table(["token", "teacher q", "forward-KL student", "reverse-KL student"], rows, "rrrr") + "\n\n"
             + _table(["quantity", "forward-KL student", "reverse-KL student"], summary, "lrr"))
@@ -586,7 +586,7 @@ def descent_on_the_advantage():
             rows.append([step, _f(p[2]), _f(p[0]), _f(kl(p, q), 5)])
         g = _exact_reverse_gradient(z, [math.log(v) for v in q])
         z = [a - 1.0 * b for a, b in zip(z, g)]
-    head = ("Gradient descent on the student's four logits, rate 1.0, minimising KL(p || q) against the hinted teacher of the "
+    head = ("Gradient descent on the student's four logits, rate 1.0, minimizing KL(p || q) against the hinted teacher of the "
             "previous table, which stays frozen at its logits (0.5, 0.2, 1.7, 0.0), using the exact gradient. Four decimals, five "
             "for the divergence.\n\n")
     return head + _table(["step", "p(answer 2)", "p(answer 0)", "KL(p \\|\\| q)"], rows, "rrrr")
@@ -653,7 +653,7 @@ def answer_floor():
         q, bf, br = _fits(floor)
         rows.append([floor, f"{bf[0]}, {bf[1]}", f"{br[0]}, {br[1]}", _f(bf[2]), _f(br[2])])
     return ("The grid search of the table 'forward versus reverse' with the teacher's floor (the constant added to each raw "
-            "weight before normalising) changed. mu, sigma are the best student's mean and spread; the divergences are those "
+            "weight before normalizing) changed. mu, sigma are the best student's mean and spread; the divergences are those "
             "of the student chosen by that objective, with the same tie rule.\n\n"
             + _table(["floor", "forward best mu, sigma", "reverse best mu, sigma", "forward KL(q \\|\\| p)", "reverse KL(p \\|\\| q)"],
                      rows, "rrrrr"))

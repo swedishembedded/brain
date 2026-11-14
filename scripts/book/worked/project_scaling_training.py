@@ -904,7 +904,7 @@ def commit_protocol():
             f"base is the trained vector of milestone 2; its FNV-1a digest, {bd}, is a field of every meta file and a generation "
             f"whose base differs is not accepted. A reader opens generations from the newest, accepts the first whose meta parses, "
             f"whose base digest matches and whose two files have the recorded lengths and FNV-1a digests, and reads nothing else. "
-            f"After the updates 10, 20 and 30 are committed the disk holds {', '.join(before)} (step 10 was pruned). The files of the "
+            f"After updates 10, 20 and 30 are committed the disk holds {', '.join(before)} (step 10 was pruned). The files of the "
             f"commit of step 40:\n\n")
     mid = ("\n\nThe process is killed after each prefix of that commit's operations (everything written before the kill survives, "
            "nothing after; power loss is the subject of Chapter 7):\n\n")

@@ -343,7 +343,7 @@ def _round_half_up(x):
 def mix_repeats(groups):
     """`groups` is [(records, share)], the dataset first (its share is what the others leave). Each group's weight per record is its
     share over its records; the repeats are those weights over the smallest, times a whole scale from 1 to 16, rounded half away
-    from zero and at least 1; the first scale at which every realised share is within 0.01 of its share is used (the closest scale
+    from zero and at least 1; the first scale at which every realized share is within 0.01 of its share is used (the closest scale
     when none is). A group with no records is listed once. Returns (repeats, scale, deviation)."""
     others = sum(s for _, s in groups[1:])
     shares = [(groups[0][0], 1.0 - others)] + [(n, s) for n, s in groups[1:]]
@@ -381,7 +381,7 @@ def mixture():
         asked = [1.0 - sum(s for _, s in groups[1:])] + [s for _, s in groups[1:]]
         rows.append((name, ", ".join(str(n) for n, _ in groups), ", ".join(f"{s:.2f}" for s in asked), ", ".join(str(r) for r in rep),
                      scale, _int(total), ", ".join(f"{x / total:.4f}" for x in listed), _fx(off, 4)))
-    lines = [_table(["case", "records per group", "share asked", "times listed", "scale", "rows listed", "share realised",
+    lines = [_table(["case", "records per group", "share asked", "times listed", "scale", "rows listed", "share realized",
                      "largest deviation"], rows, "lrrrrrrr"), ""]
     # A share of rows is not a share of tokens.
     a_len, b_len = 40, 200
@@ -477,7 +477,7 @@ def normalise(text):
 
 
 def shingles(text):
-    """The set of word 3-shingles of the normalised text: each run of three consecutive words joined by single spaces."""
+    """The set of word 3-shingles of the normalized text: each run of three consecutive words joined by single spaces."""
     w = normalise(text).split()
     return {" ".join(w[i:i + SHINGLE]) for i in range(len(w) - SHINGLE + 1)}
 
@@ -542,12 +542,12 @@ def duplicates():
              f"the next three runs of 20 the originals corrupted at the rates 0.1, 0.2 and 0.3. A corrupted copy takes its words in "
              f"turn: one `uniform()` from `{PLANT}`, and when it is below the rate one `integer({VOCAB})` from the same generator "
              f"gives the new word (the copies and the format variants use no draws). A shingle is three consecutive words of the "
-             f"normalised text joined by single spaces (`w007 w101 w044`); a document has {DOC_WORDS - SHINGLE + 1} shingles at most.", ""]
+             f"normalized text joined by single spaces (`w007 w101 w044`); a document has {DOC_WORDS - SHINGLE + 1} shingles at most.", ""]
     raw = [hashlib.sha256(t.encode("utf-8")).hexdigest() for t in texts]
     norm = [hashlib.sha256(normalise(t).encode("utf-8")).hexdigest() for t in texts]
     lines.append(_table(["rule for calling a document a duplicate of an earlier one", "documents dropped", "of the planted"],
                         [("SHA-256 of the raw text", _first_copies(raw), "30 copies"),
-                         ("SHA-256 of the normalised text", _first_copies(norm), "30 copies and 30 format variants")], "lrl"))
+                         ("SHA-256 of the normalized text", _first_copies(norm), "30 copies and 30 format variants")], "lrl"))
     lines.append("")
     # exact Jaccard of every planted document with its original
     by_kind = {}
