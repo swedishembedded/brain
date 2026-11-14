@@ -218,9 +218,11 @@ fn migrated_forward_paths_never_hand_pick_a_gemm_kernel() {
     // activation packing the façade exists to own.
     let helper = function_body(&model_src, "ops_act");
     check(helper, "qwen3::model::Qwen::ops_act");
+    // The packed entry point is `Ops::act` or its shared-scratch form (`Ops::act_shared_scratch`, one packed copy per
+    // width for a layer stack); both are the façade's own packing.
     assert!(
-        helper.contains("self.ops.act(") && helper.contains("self.ops.act_f32("),
-        "no_kernel_names: `ops_act` must choose between the two `Ops` activation entry points, not build one itself"
+        (helper.contains("self.ops.act(") || helper.contains("self.ops.act_shared_scratch(")) && helper.contains("self.ops.act_f32("),
+        "no_kernel_names: `ops_act` must choose between the `Ops` activation entry points, not build one itself"
     );
 
     let serve_src = read(SERVE_RS);
