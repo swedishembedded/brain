@@ -12,6 +12,7 @@ mod batch_time;
 mod block_grad;
 mod dit_parity;
 mod e2e_parity;
+mod flow_batch_convention;
 mod gguf_direct_int8;
 mod host_forward_parity;
 mod import_real;
