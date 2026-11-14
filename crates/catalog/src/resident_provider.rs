@@ -88,6 +88,8 @@ impl Action for ResidentAction {
     }
 
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        // Before the lock and any build or activation: a cancelled request builds nothing.
+        inv.cancel.check()?;
         let mut live = self.state.live.lock().map_err(|_| format!("{}: an earlier request panicked while holding the model", self.spec.name))?;
         let sizing = (self.state.sizing)(inv);
         if live.resident.as_ref().is_none_or(|(s, _)| *s != sizing) {

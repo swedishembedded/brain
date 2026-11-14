@@ -179,6 +179,8 @@ impl Action for LazyAction {
         self.spec.clone()
     }
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        // Before the multi-gigabyte first load: a cancelled request loads nothing.
+        inv.cancel.check()?;
         let p = self.inner.loaded()?;
         let act = p.action(&self.name).ok_or_else(|| format!("loaded provider has no action '{}'", self.name))?;
         act.run(inv, progress)

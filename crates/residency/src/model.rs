@@ -231,8 +231,10 @@ pub trait Instance: Send {
     /// Run a batch of same-key invocations. Default = sequential loop; a model with
     /// real batch support overrides this (P4). Results align with `invs`. `progress`
     /// is called with the batch index so per-sequence token streams stay separate.
+    /// A job whose token fired while an earlier one ran is answered "cancelled"
+    /// without running.
     fn run_batch(&mut self, action: &str, invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress)) -> Vec<ActionResult> {
-        invs.iter().enumerate().map(|(i, inv)| self.run(action, inv, &mut |p| progress(i, p))).collect()
+        invs.iter().enumerate().map(|(i, inv)| inv.cancel.check().and_then(|()| self.run(action, inv, &mut |p| progress(i, p)))).collect()
     }
 
     /// Run `invs` as an OPEN group: a model that decodes many requests per step
@@ -342,6 +344,21 @@ mod tests {
 
         drop(inst); // demote
         assert_eq!(live.load(Ordering::SeqCst), 0, "dropping the instance must free the device");
+    }
+
+    /// The default batch runs no job whose token already fired: it is answered
+    /// "cancelled" and the instance never sees it.
+    #[test]
+    fn the_default_batch_skips_a_job_cancelled_before_its_turn() {
+        let live = Arc::new(AtomicU32::new(0));
+        let m = FakeModel { vram: 1, live };
+        let mut inst = m.activate(&m.instance_key("run", &Invocation::new()), Device::Cpu).unwrap();
+        let mut cancelled = Invocation::new();
+        cancelled.cancel = capability::CancelToken::armed();
+        cancelled.cancel.cancel();
+        let res = inst.run_batch("run", &[cancelled, Invocation::new()], &mut |_, _| {});
+        assert_eq!(res[0].as_ref().unwrap_err(), capability::failure::CANCELLED);
+        assert_eq!(res[1].as_ref().unwrap().blobs["out"].bytes, vec![1], "only the live job ran");
     }
 
     /// The default `demote`/`promote`/`estimate_at` must be a complete no-op
