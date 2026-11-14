@@ -214,4 +214,14 @@ historical sections draw on in the [Chronology](history/chronology.md).
 ### [Volume XIV: Inference Engines and Production Serving](v14-inference-and-serving/index.md)
 
 1. [Loading Models](v14-inference-and-serving/01-loading.md): How do gigabytes of weights get from disk to the device quickly and safely?
+2. [Memory Budgets and Model Residency](v14-inference-and-serving/02-residency.md): How does a server decide which models live on which device when they do not all fit?
+3. [Managing the KV Cache](v14-inference-and-serving/03-paged-kv.md): How do many conversations share one device's memory for their caches?
+4. [Batching and Scheduling Requests](v14-inference-and-serving/04-batching.md): How does a server keep the device busy while answering many users at once?
+5. [Speculative Decoding](v14-inference-and-serving/05-speculative-decoding.md): How can a small model's guesses make a large model generate faster without changing its output?
+8. [Running and Observing an Engine](v14-inference-and-serving/08-operations.md): How do we see what a running engine is doing, control it, and shut it down cleanly?
+
+### [Volume XV: Scientific and Engineering Methods](v15-methods/index.md)
+
+1. [Porting a Model from Its Reference](v15-methods/01-porting.md): What is the disciplined way to reimplement a published model and prove it correct?
+2. [Testing Numerical Code](v15-methods/02-testing-numerical-code.md): Why do tests of numerical code pass while the code is wrong, and how do we write tests that cannot be fooled?
 <!-- /contents -->

@@ -573,6 +573,16 @@ navigation:
         pages:
           - docs/book/v14-inference-and-serving/index.md
           - docs/book/v14-inference-and-serving/01-loading.md
+          - docs/book/v14-inference-and-serving/02-residency.md
+          - docs/book/v14-inference-and-serving/03-paged-kv.md
+          - docs/book/v14-inference-and-serving/04-batching.md
+          - docs/book/v14-inference-and-serving/05-speculative-decoding.md
+          - docs/book/v14-inference-and-serving/08-operations.md
+      - title: "Volume XV: Scientific and Engineering Methods"
+        pages:
+          - docs/book/v15-methods/index.md
+          - docs/book/v15-methods/01-porting.md
+          - docs/book/v15-methods/02-testing-numerical-code.md
       - docs/book/glossary.md
       - docs/book/history/chronology.md
       - docs/book/about-the-author.md

@@ -12,6 +12,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **absolute position embedding**: a table with one trained vector for each position, added to the token's embedding before the first layer, so that the same word at two places enters the network as two different vectors; it cannot name a position beyond its last row. *([Positional Information](v05-sequences/08-positions.md))*
 
+**acceptance rate**: the probability that a proposal is kept by verification given that the proposals before it in the same round were kept, estimated as accepted proposals over accepted proposals plus rounds that ended in a rejection; it bounds the tokens a round can emit at one over one minus itself. *([Speculative Decoding](v14-inference-and-serving/05-speculative-decoding.md))*
+
 **accuracy**: the share of a classifier's decisions that are right, $(\mathrm{TP} + \mathrm{TN})/N$; equivalently the average of the per-class success rates weighted by the class shares, so a rare class barely affects it. *([Measuring Models: Metrics and Calibration](v02-learning/06-metrics.md))*
 
 **activation checkpointing**: keeping only the inputs of a stack's blocks or segments in the forward pass and replaying each segment's forward just before its backward, so that one segment's activations exist at a time, for one more forward pass of arithmetic. *([Where Training Memory Goes](v13-training-at-scale/03-training-memory.md))*
@@ -35,6 +37,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **adaptive layer normalization**: a normalization layer whose scale and shift (and, around a sublayer, whose gate) are computed from a conditioning vector such as the timestep embedding instead of being learned constants; a zero gate makes the block the identity. *([Denoiser Architectures: U-Nets and Diffusion Transformers](v08-image-generation/08-denoiser-architectures.md))*
 
 **additive attention**: attention whose score for a decoder state and an encoder state is computed by a small network that adds a projection of each before a tanh and takes a weighted sum of the result, so that the decoder can build a different weighted average of the encoder states at every step. *([Encoder-Decoder Models and the Birth of Attention](v05-sequences/06-seq2seq.md))*
+
+**admission control**: deciding, before any work is spent on a request, whether to take it in now, let it wait or refuse it, from what it will need (blocks of cache, a deadline) and what the server has. *([Batching and Scheduling Requests](v14-inference-and-serving/04-batching.md))*
 
 **advantage**: the value of an action in a state minus the value of the state, $q^\pi(s, a) - V^\pi(s)$: how much better the action is than the policy's average there. *([Policy Gradients](v12-reinforcement-learning/03-policy-gradients.md))*
 
@@ -206,6 +210,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **checkpoint format**: the layout of a trained model in a file: which names, shapes and number formats it holds, and where the bytes of each tensor are, so that a reader that has never seen the file can find and decode them. *([Importing Pretrained Models and Proving Parity](v06-language-models/02-importing-models.md))*
 
+**chunked prefill**: reading a prompt into the cache in slices of a bounded number of rows over several iterations, with the running sequences decoding between or beside the slices, so that a long prompt cannot stall them. *([Batching and Scheduling Requests](v14-inference-and-serving/04-batching.md))*
+
 **chunked recurrence**: computing a recurrence over groups of $C$ tokens, with a triangular solve and matrix products inside a group and the state passed only between groups, which gives the same outputs with fewer sequential steps and less state traffic. *([Linear Attention, Recurrence and Hybrid Models](v06-language-models/05-linear-attention.md))*
 
 **classification**: predicting which of a fixed set of categories an example belongs to, from its features, learned from labelled examples; with two categories, labelled $0$ and $1$, it is binary classification. *([Classification and Logistic Regression](v02-learning/03-logistic-regression.md))*
@@ -248,6 +254,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **config default**: the value a reader substitutes for a field a configuration omits, which is a guess about the publisher: loud when the field fixes a shape and silent when it only changes a value. *([Importing Pretrained Models and Proving Parity](v06-language-models/02-importing-models.md))*
 
+**conformance suite**: a set of contracts written once against an interface and run unchanged over every registered implementation on a small instance of its own, which refuses an empty registry, counts its checks and rejects known-wrong subjects. *([Testing Numerical Code](v15-methods/02-testing-numerical-code.md))*
+
 **conformer**: an encoder block in which attention and a convolution module sit between two half-step feed-forwards, so that it relates both distant rows and close ones. *([Speech Recognition](v09-audio/04-speech-recognition.md))*
 
 **connectionist temporal classification**: a loss and a decoding rule for a model that writes a distribution over a vocabulary and a blank at every row, scoring a transcript by the total probability of all the paths that collapse to it. *([Speech Recognition](v09-audio/04-speech-recognition.md))*
@@ -259,6 +267,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **context vector**: the vector that carries what an encoder has read to the decoder; in the first design a single vector, the encoder's last state, and in attention a vector of its own at every output step, a weighted average of the encoder states. *([Encoder-Decoder Models and the Birth of Attention](v05-sequences/06-seq2seq.md))*
 
 **continual reader**: a process that takes in an unbounded stream of new experience episode by episode, trains a candidate on each, promotes it only through the gate, and can report what it is still able to do. *([Continual Learning and Promotion](v12-reinforcement-learning/07-continual-learning.md))*
+
+**continuous batching**: rebuilding the batch before every pass of the model, so that finished sequences leave and waiting requests take their rows at every iteration; also called iteration-level scheduling. *([Batching and Scheduling Requests](v14-inference-and-serving/04-batching.md))*
 
 **continuous ranked probability score**: the integral of the squared gap between a forecast's distribution function and the step at the outcome, in the units of the outcome, which equals the absolute error for a point forecast and twice the pinball loss averaged over all levels. *([Probabilistic Forecasts](v11-forecasting/02-probabilistic-forecasting.md))*
 
@@ -336,6 +346,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **deduplication**: removing records that repeat other records, exactly by a hash of the text and approximately by a set similarity of shingles, within the training data and between it and the held-out data. *([Data Pipelines for Large Models](v13-training-at-scale/01-training-data.md))*
 
+**degenerate-dimension trap**: a test instance on which some wrong program computes the same function as the right one, because a size is 1, two sizes are equal, a size lies below the threshold where the code changes path, or the values have a symmetry or a restricted range, so the test cannot fail for that mistake at any tolerance. *([Testing Numerical Code](v15-methods/02-testing-numerical-code.md))*
+
 **delta rule**: updating a key-value memory by the outer product of the key and the prediction error, $\mathbf{S} \leftarrow \mathbf{S} + \beta\,\mathbf{k}(\mathbf{v} - \mathbf{S}^\top\mathbf{k})^\top$, one gradient step of a regression of the value on the key, so that a write replaces what the key returned. *([Linear Attention, Recurrence and Hybrid Models](v06-language-models/05-linear-attention.md))*
 
 **denoising objective**: the training loss of a diffusion model: the mean squared error between the network's output for a noisy input and the target that the noising supplied, averaged over the data, the step and the noise. *([Diffusion Models](v08-image-generation/05-diffusion.md))*
@@ -390,6 +402,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **dot product**: the number $\sum_i a_i b_i$ obtained from two vectors of equal length, equal to $\lVert\mathbf{a}\rVert\lVert\mathbf{b}\rVert\cos\theta$. *([Vectors: Lists of Numbers with Geometry](v01-mathematics/03-vectors.md))*
 
+**draft model**: a model, or any procedure, much cheaper to run than the target, used only to propose the next few tokens of a sequence for the target to check; its quality changes how many proposals are kept, never what the target emits. *([Speculative Decoding](v14-inference-and-serving/05-speculative-decoding.md))*
+
 **dropout**: randomly setting each unit of a layer to zero with probability $p_{\mathrm{drop}}$ during training, and scaling the kept units by $1/(1 - p_{\mathrm{drop}})$ so that the expected output is unchanged; the layer is the identity at prediction time. *([Regularization in Neural Networks](v03-neural-networks/11-regularization.md))*
 
 **dynamic resolution**: letting the grid of a picture, and so its number of tokens, follow its size and shape instead of resizing every picture to one fixed square: each side is rounded to a multiple of the patch times the merge, and the area is bounded from both ends. *([Vision-Language Models](v07-vision/09-vlms.md))*
@@ -429,6 +443,10 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **Euler's formula**: the identity $e^{it} = \cos t + i\sin t$, which names the point of the unit circle at angle $t$ and turns the law of exponents into the addition of angles. *([Complex Numbers, Frequencies and the Fourier Transform](v01-mathematics/14-fourier.md))*
 
 **Euler's method**: the rule $x_{i+1} = x_i + h\,f(t_i, x_i)$ that follows the slope of an ODE for a short step $h$ and repeats; with a gradient as the slope it is gradient descent. *([Integrals and Differential Equations](v01-mathematics/09-integrals-and-odes.md))*
+
+**event-driven runtime**: a program organised around one queue of events, taken one at a time and each handled to completion before the next, with long work cut into steps that post themselves as further events. *([Running and Observing an Engine](v14-inference-and-serving/08-operations.md))*
+
+**eviction policy**: the rule that orders resident instances that are not in use by a score, such as the clock value of the last use or uses times bytes over age, and removes the lowest until the freed bytes cover a deficit. *([Memory Budgets and Model Residency](v14-inference-and-serving/02-residency.md))*
 
 **evidence lower bound (ELBO)**: for any distribution $r(z \mid \mathbf{x})$ over the latent, the quantity $\mathbb{E}_r[\log p_\theta(\mathbf{x} \mid z)] - D_{\mathrm{KL}}(r \,\Vert\, p(z))$; it is never above the log-likelihood of the reading, and the gap is the KL divergence from $r$ to the model's posterior. *([Variational Autoencoders](v08-image-generation/02-vae.md))*
 
@@ -518,6 +536,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **gamma encoding**: the fixed nonlinear curve, in sRGB a short line and a power law, that maps linear light to the stored code so that equal steps in the code are roughly equal ratios of light; averaging encoded values is therefore not averaging light. *([Images as Data](v07-vision/01-images.md))*
 
+**gate that never runs**: a test whose comparison does not happen or cannot fail while the report shows it as passing, such as an early return on a missing fixture, a check over an empty list, an assertion computed but never made, or a target that is never built or invoked. *([Testing Numerical Code](v15-methods/02-testing-numerical-code.md))*
+
 **gated delta network**: a delta-rule memory whose state is first multiplied by a decay gate chosen by the token, with a write strength chosen the same way, so that it forgets as well as corrects. *([Linear Attention, Recurrence and Hybrid Models](v06-language-models/05-linear-attention.md))*
 
 **gated linear unit**: a hidden layer whose output is the product of two linear functions of the input, one of them passed through a nonlinearity that acts as a gate, so that each hidden unit can be switched or scaled by a second projection. *([The Transformer Block](v05-sequences/09-transformer-block.md))*
@@ -538,9 +558,13 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **goal-conditioned policy**: a policy that takes the goal as an input beside the state, so that one function serves every goal. *([Search, Planning and Discovery](v12-reinforcement-learning/05-search.md))*
 
+**golden generation**: the recorded, rerunnable procedure that makes a reference golden: inputs chosen to exercise every mechanism of the model, the reference run at a precision well above the comparison's, the state at every stage captured from the reference's real pipeline, and a record of the identity and digest of the checkpoint it came from. *([Porting a Model from Its Reference](v15-methods/01-porting.md))*
+
 **GPT architecture**: a decoder-only transformer language model: token embeddings plus positions, a stack of pre-norm blocks, a final normalization and a head (tied to the embedding table in GPT-2) that gives one row of logits per position, trained to predict the next token. *([Training a GPT from Scratch](v05-sequences/10-training-gpt.md))*
 
 **GPU architecture**: the organization of a graphics processor used for computing: many compute units, each with lanes, a large register file, a small on-chip memory and a scheduler, over a memory of high bandwidth and high latency, built for throughput and not for the speed of one thread. *([The GPU: Thousands of Small Workers](v04-computation/04-gpu.md))*
+
+**graceful shutdown**: the sequence that turns a request to stop into a clean end: stop accepting new work, finish or cancel the work in flight, bound every wait, give back what is held and end the process. *([Running and Observing an Engine](v14-inference-and-serving/08-operations.md))*
 
 **gradient**: the vector of all the partial derivatives of a scalar function, the same shape as its inputs; it points in the direction of steepest ascent and its length is the steepest rate of change. *([Gradients, Jacobians and Many Variables](v01-mathematics/08-multivariable-calculus.md))*
 
@@ -581,6 +605,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **Hessian**: the symmetric matrix of second partial derivatives of a scalar function; $\mathbf{u}^\top\mathbf{H}\mathbf{u}$ is the curvature along the unit direction $\mathbf{u}$. *([Gradients, Jacobians and Many Variables](v01-mathematics/08-multivariable-calculus.md))*
 
 **hidden layer**: a layer of units between the input and the output whose values are not given by the data; it computes a new description of the input from which the next layer can compute the answer with a simpler rule. *([Multilayer Networks](v03-neural-networks/02-mlp.md))*
+
+**hierarchical state machine**: a state machine whose states can contain states, so that an event a state does not handle is offered to its parent, and a transition leaves and enters exactly the states between the active state and the least common ancestor of source and target. *([Running and Observing an Engine](v14-inference-and-serving/08-operations.md))*
 
 **hierarchical vision transformer**: a vision transformer arranged as a pyramid of stages, in which merging neighbouring patches between stages reduces the number of tokens and widens the channels, like the stages of a convolutional network. *([Vision Transformers](v07-vision/06-vision-transformers.md))*
 
@@ -678,6 +704,10 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **KV offload**: keeping part of the key-value cache in host memory and moving it back to the device when it is needed; because a decoded sequence reads all its cache at every token, what pays is moving whole sequences between scheduling turns, which raises how many sequences can be admitted and not how long one running sequence can be. *([Long Context](v06-language-models/08-long-context.md))*
 
+**KV quantization**: storing each row of the cache, one token's keys or values for one key-value head, as low-bit codes with a scale of its own computed when the row is written, and widening it as the attention loads it, so that the cache's bytes shrink and its arithmetic does not change. *([Managing the KV Cache](v14-inference-and-serving/03-paged-kv.md))*
+
+**KV tiering**: arranging a cache across levels of storage of different capacity and cost (blocks in use on the device, blocks only the prefix cache holds, an exact copy in host memory, and nothing at all, to be prefilled again) with a rule that decides which sequence's blocks move where when the device runs short. *([Managing the KV Cache](v14-inference-and-serving/03-paged-kv.md))*
+
 ## L
 
 **L1 regularization**: adding to the loss a penalty proportional to the sum of the absolute values of the weights, which is the effect of a Laplace prior and sets some weights exactly to zero. *([Maximum Likelihood, Priors and Regularization](v02-learning/04-likelihood.md))*
@@ -702,6 +732,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **law of large numbers**: the statement that the average of $n$ independent draws with finite variance converges to their expectation, with the probability of an error above any fixed amount going to zero as $n$ grows. *([The Distributions Machine Learning Uses](v01-mathematics/11-distributions.md))*
 
+**layer-by-layer parity**: comparison of a port with its golden at every stage boundary, either isolated (each stage fed the golden's own input and held to its own constant rounding bound, which locates every mistake in one run) or chained (the port running on its own outputs, under a bound that grows with depth, which tests how the stages are composed). *([Porting a Model from Its Reference](v15-methods/01-porting.md))*
+
 **layer-normalization**: normalizing each example's features with the mean and variance taken over the features of that one example, then applying a learned gain and shift; it does not depend on the batch or the mode. *([Normalization Layers](v03-neural-networks/10-normalization.md))*
 
 **leakage-safe window**: a (context, target) window assigned to training or evaluation by its origin, with a purge and an embargo so that no bar a model is judged on was used in fitting it. *([Time Series Fundamentals](v11-forecasting/01-time-series.md))*
@@ -719,6 +751,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **least squares**: the method of choosing parameters that minimise the sum of the squared differences between predictions and labels. *([Linear Regression and the First Descent](v02-learning/02-linear-regression.md))*
 
 **lens distortion**: the departure of a real lens from the pinhole, modelled as a correction of the normalized image point (a radial polynomial and tangential terms) or as a polynomial in the angle of the ray, valid only where the polynomial still increases with the distance from the axis. *([Cameras and Projective Geometry](v10-video-and-3d/03-camera-geometry.md))*
+
+**lifetime-based fitting**: charging a device for the parts that share it by their lifetimes, the permanent parts plus the largest sum over the phases, so that parts that are never alive together do not add. *([Memory Budgets and Model Residency](v14-inference-and-serving/02-residency.md))*
 
 **likelihood**: the probability (or density) that a model with a given parameter assigns to the observed data, read as a function of the parameter; it is not the probability of the parameter. *([Maximum Likelihood, Priors and Regularization](v02-learning/04-likelihood.md))*
 
@@ -800,7 +834,11 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **memory attention**: the attention of a video frame's features onto a bank of memories of earlier frames and object pointers, with position encoded by rotation, which marks the cells that resemble the tracked object before the mask is decoded. *([Promptable Segmentation and Video Tracking](v07-vision/07-segment-anything.md))*
 
+**memory authority**: the process-wide ledger of granted bytes, checked against a live view of what the machine has left, that answers whether a request may be allocated now, never, or not yet, and releases a grant when it is dropped. *([Memory Budgets and Model Residency](v14-inference-and-serving/02-residency.md))*
+
 **memory bandwidth**: the number of bytes per second that main memory can deliver to the processor when the program asks for them in the best possible way (long sequential reads), a property of the machine and not of the program. *([Memory Bandwidth, Compute and the Roofline](v04-computation/03-roofline.md))*
+
+**memory budget**: the account of one device: its total capacity, the part reserved and never promised, and the bytes charged to the instances on it, so that what a new instance may still be promised is the capacity less the reserve less the charge. *([Memory Budgets and Model Residency](v14-inference-and-serving/02-residency.md))*
 
 **memory coalescing**: the merging of the loads or stores of the lanes of a subgroup into few memory transactions when they touch adjacent addresses, so that all the bytes of each block moved are used. *([The GPU: Thousands of Small Workers](v04-computation/04-gpu.md))*
 
@@ -926,6 +964,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **packed tensor**: a tensor kept in its stored, quantized form: a payload of codes, sidecar tensors of scales and a descriptor that says how the bytes decode, so that sizes and byte ranges of a tile follow from arithmetic. *([Loading Models](v14-inference-and-serving/01-loading.md))*
 
+**paged KV cache**: a cache of keys and values kept in a shared pool of fixed-size blocks of token rows, each sequence holding the blocks it has filled through a block table that maps a position to a block and an offset, so that a sequence holds memory for the rows it has and not for its longest possible length. *([Managing the KV Cache](v14-inference-and-serving/03-paged-kv.md))*
+
 **paged sparse layout**: storing keys and values in fixed-size pages reached through a block table and reading a content-based selection as a list of positions resolved through that table, row by row, without copying the selected rows into one buffer. *([Sparse Attention](v06-language-models/06-sparse-attention.md))*
 
 **paired test**: a comparison of two systems scored on the same examples through the per-example differences, whose standard error is smaller than an unpaired one when the systems' answers are correlated; the paired z-test and the exact sign test are two of them. *([Statistics: Learning Facts from Samples](v01-mathematics/12-statistics.md))*
@@ -986,6 +1026,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **pooling**: a layer that summarizes each window of a map by one number, the largest (max pooling, whose gradient goes to the winner of the window) or the mean (average pooling, whose gradient is shared equally), with no weights; global average pooling takes the whole map. *([Convolutional Networks and Residual Learning](v07-vision/03-cnns.md))*
 
+**porting workflow**: the ordered sequence of gated steps that takes a published model to a proven reimplementation (facts from the references, goldens generated first, the mapping checked for coverage and shape, a smoke run at toy size, isolated and then chained parity, a gradient check of every trained path, and optimisation only under the frozen parity gate), each begun only when the one before it passes. *([Porting a Model from Its Reference](v15-methods/01-porting.md))*
+
 **post-training quantization**: converting a trained float network to integer arithmetic without retraining, by choosing the scale and zero point of each weight tensor from the weights and of each activation tensor from ranges measured on data, and rewriting each layer as an integer accumulation followed by a requantization. *([Neural Processing Units and Graph Compilers](v04-computation/13-npu.md))*
 
 **PPO**: proximal policy optimization, which takes several gradient steps on one batch of experience under a surrogate that weights each sample by the ratio of the new to the old policy's probability and clips the term of a sample that has moved far enough in the direction its advantage asked for. *([Policy Gradients](v12-reinforcement-learning/03-policy-gradients.md))*
@@ -999,6 +1041,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **preference data**: pairs of answers to the same prompt with a label saying which one people chose, which says that one is better than the other and nothing about how good either is. *([Reinforcement and Preference Learning for Language Models](v12-reinforcement-learning/04-llm-alignment.md))*
 
 **prefill phase**: processing the whole prompt in one call, with every matrix seeing all the prompt's rows at once and the keys and values of every prompt position written into the cache; limited by the arithmetic once the prompt is long. *([The KV Cache](v05-sequences/12-kv-cache.md))*
+
+**prefix caching**: keeping the full cache blocks of earlier prompts after their sequences finish, indexed so exactly that a later prompt beginning with the same tokens adopts them and computes only the rest, and giving them back first when the pool runs short. *([Managing the KV Cache](v14-inference-and-serving/03-paged-kv.md))*
 
 **prefix sum**: the list of running totals of an array, either inclusive (including the element at each position) or exclusive (stopping just before it), used to turn probabilities into a cumulative distribution and lengths into offsets. *([Algorithms, Cost and Complexity](v01-mathematics/16-algorithms.md))*
 
@@ -1098,7 +1142,11 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **reproducibility**: the property that running again from the same recorded inputs (seed, data, code, settings) gives the same results exactly, which requires the same draws in the same order and the same floating-point arithmetic. *([Randomness on a Deterministic Machine](v01-mathematics/17-randomness.md))*
 
+**request scheduling**: the order of the steps of each iteration (resume, admit, prefill, make room, decode, release) and the rules that choose among waiting and running requests at each step, each with a bound on how long a request can be held back. *([Batching and Scheduling Requests](v14-inference-and-serving/04-batching.md))*
+
 **reshape-and-view**: reshaping keeps a tensor's line of numbers in row-major order and cuts it into a new shape; a view is a new shape, strides and offset over the same storage, so a reshape of a contiguous array needs no copy. *([Arrays, Shapes, Strides and Broadcasting](v01-mathematics/05-arrays.md))*
+
+**residency placement**: the rule that decides which device a model's instance goes to: the card that fits it with the most free bytes, the host only when no card could ever hold it, and a refusal that says whether the model can never fit or only does not fit now. *([Memory Budgets and Model Residency](v14-inference-and-serving/02-residency.md))*
 
 **residual network**: a network of blocks that compute $\mathrm{relu}(f(\mathbf{x}) + \mathrm{sh}(\mathbf{x}))$, the sum of a short stack of convolutions and a shortcut (the identity, or a $1 \times 1$ projection when the shape changes), which lets gradients and signals pass a deep stack along a path without weights; the basic block has two $3 \times 3$ convolutions and the bottleneck block a $1 \times 1$ reduction, a $3 \times 3$ and a $1 \times 1$ expansion. *([Convolutional Networks and Residual Learning](v07-vision/03-cnns.md))*
 
@@ -1136,6 +1184,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **row-major layout**: storing a tensor in memory with the last index changing fastest, so that the element $(i_0, \dots, i_{R-1})$ sits at offset $\sum_k i_k s_k$ with $s_k$ the product of the sizes to its right. *([Arrays, Shapes, Strides and Broadcasting](v01-mathematics/05-arrays.md))*
 
+**runtime statistics**: numbers that a running engine keeps up to date as it works (counters that only grow, gauges that go up and down, high-water marks) and that can be sampled at any moment as a snapshot without disturbing it. *([Running and Observing an Engine](v14-inference-and-serving/08-operations.md))*
+
 ## S
 
 **safetensors**: a checkpoint format of an unsigned 64-bit little-endian length, that many bytes of JSON mapping each tensor name to its element type, shape and byte offsets, and then the raw bytes of every tensor, back to back. *([Importing Pretrained Models and Proving Parity](v06-language-models/02-importing-models.md))*
@@ -1153,6 +1203,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **scalar multiplication**: multiplying every entry of a vector by one number, which stretches, shrinks or flips the arrow. *([Vectors: Lists of Numbers with Geometry](v01-mathematics/03-vectors.md))*
 
 **scale and zero point**: the pair $(\Delta, q_0)$ of a group: the distance between neighbouring levels and the code that stands for the number 0, chosen so that the codes cover the group's range and 0 is exactly a code. *([Quantization: Fewer Bits per Weight](v04-computation/12-quantization.md))*
+
+**scale-invariant-metric trap**: a test that gates on a measure unchanged by a transformation that a plausible mistake applies to the output (cosine under a scale, top-1 agreement under an order-preserving change, probabilities under a constant shift of the logits, any comparison after a normalisation), so the mistake scores as a perfect match. *([Testing Numerical Code](v15-methods/02-testing-numerical-code.md))*
 
 **scaled dot-product attention**: the layer in which every query is compared with every key by a dot product divided by the square root of their width, a softmax along each row turns the scores into weights, and the weighted sums of the values are the output, $\mathrm{softmax}(\mathbf{Q}\mathbf{K}^\top/\sqrt{d_k})\mathbf{V}$. *([Self-Attention](v05-sequences/07-self-attention.md))*
 
@@ -1230,6 +1282,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **special tokens**: ids that stand for no piece of text, such as the beginning or end of a sequence, padding, an unknown piece or the markers of a chat turn, matched from their literals before ordinary encoding and never to be produced from text a client wrote. *([Tokenization](v05-sequences/02-tokenization.md))*
 
+**speculative verification**: scoring a draft's proposals with the target in one pass and keeping the longest prefix the target agrees with (its greedy token, or a token kept by the accept-or-residual test when sampling), followed by the target's own next token, so that the output is exactly what plain decoding would produce. *([Speculative Decoding](v14-inference-and-serving/05-speculative-decoding.md))*
+
 **speech encoder**: the stack that turns the frames of a log-mel spectrogram into fewer rows of one width, each informed by its neighbours, ready for an alignment loss or a decoder. *([Speech Recognition](v09-audio/04-speech-recognition.md))*
 
 **speech tokenizer**: a network trained, with a supervised target such as the transcript and not by reconstruction, to turn speech into discrete tokens that carry what is said and little of who says it or how. *([Speech Synthesis](v09-audio/06-speech-synthesis.md))*
@@ -1248,6 +1302,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **state-space search**: finding a path from a start to a goal by keeping a frontier of states that have been reached and repeatedly expanding one of them, with the order of the frontier (fewest moves, lowest cost so far, nearest by a heuristic, or the sum of cost so far and heuristic) deciding which method it is and how many expansions it spends. *([Search, Planning and Discovery](v12-reinforcement-learning/05-search.md))*
 
+**static batching**: forming a batch from the requests waiting when the previous one ended and running it until its longest member is done, so that rows of finished requests stay idle and new requests wait for the whole batch. *([Batching and Scheduling Requests](v14-inference-and-serving/04-batching.md))*
+
 **stationarity**: the property that a series has the same mean and variance at every bar and a covariance between two bars that depends only on how far apart they are. *([Time Series Fundamentals](v11-forecasting/01-time-series.md))*
 
 **stochastic gradient descent**: gradient descent that steps along the gradient of a small random batch of examples instead of the whole training set, $\theta \leftarrow \theta - \eta\,\mathbf{g}_t$, an unbiased but noisy estimate of the full step. *([Optimizers: From SGD to AdamW](v03-neural-networks/07-optimizers.md))*
@@ -1265,6 +1321,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **streaming speech output**: speech that begins to leave the model while the text it says is still being written and its own later frames are still being drawn, so that the work before the first sound is that of a prefix of the reply and not of the whole reply. *([Models That Listen, See and Speak](v09-audio/08-omni-models.md))*
 
 **stride**: the distance in memory, counted in elements, between two neighbours along one axis; a view is described by one stride per axis, and stride 0 repeats one number. *([Arrays, Shapes, Strides and Broadcasting](v01-mathematics/05-arrays.md))*
+
+**structured tracing**: describing what a program does as events that carry a severity, the component that emitted them, a message and named, typed fields, inside named units of work, so that one configurable component can choose which events to write and render them as text or as data. *([Running and Observing an Engine](v14-inference-and-serving/08-operations.md))*
 
 **subgroup**: the group of consecutive invocations of a workgroup, 32 in the model of Volume IV, that the hardware executes with one instruction at a time. *([The GPU: Thousands of Small Workers](v04-computation/04-gpu.md))*
 
