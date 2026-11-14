@@ -203,9 +203,8 @@ fn resolve_for(arch: &str, spec: &dyn ArchSpec, overrides: BTreeMap<String, Stri
 fn resolve_in_store(arch: &str, spec: &dyn ArchSpec, mut overrides: BTreeMap<String, String>, action: &capability::ActionSpec, flags: &[String]) -> Result<Assembly, ResolveFailure> {
     let dir = loader::model_dir::resolve(None);
     let variant_param = action.params.iter().find(|p| p.name == "variant" && matches!(p.ty, ParamType::Enum(_) | ParamType::Str));
-    let given = flags.iter().position(|f| f == "--variant").and_then(|i| flags.get(i + 1)).cloned();
-    if let (Some(_), Some(v)) = (variant_param, &given) {
-        overrides.entry("variant".to_string()).or_insert_with(|| v.clone());
+    if let (Some(_), Some(v)) = (variant_param, given_variant(action, flags)) {
+        overrides.entry("variant".to_string()).or_insert(v);
     }
     match loader::resolver::try_resolve(dir.as_deref(), arch, spec, &overrides) {
         Err(ResolveFailure::Ambiguous(why)) => {
@@ -220,6 +219,15 @@ fn resolve_in_store(arch: &str, spec: &dyn ArchSpec, mut overrides: BTreeMap<Str
         }
         other => other,
     }
+}
+
+/// The `--variant` the command line gives, read by the action's own parser so
+/// `--variant X`, `--variant=X` and any alias resolve alike. Errors are ignored
+/// here: [`crate::args::check`] reports them, and a workflow's own extra flags
+/// must not hide the variant.
+fn given_variant(action: &capability::ActionSpec, flags: &[String]) -> Option<String> {
+    let matches = crate::args::command("variant", action).ignore_errors(true).try_get_matches_from(flags).ok()?;
+    matches.try_get_one::<String>("variant").ok().flatten().cloned()
 }
 
 /// What a store ambiguous without a variant answers once resolved again under
@@ -296,5 +304,16 @@ mod tests {
         let absent = under_default_variant(first(), Err(ResolveFailure::Missing("no 4B dit".into())));
         assert!(matches!(absent, Err(ResolveFailure::Ambiguous(m)) if m == "which dit?"));
         assert!(matches!(under_default_variant(first(), Ok(assembly())), Ok(a) if a.id == "local/x"));
+    }
+
+    /// The resolver must see the variant however the flag is spelled, or an
+    /// ambiguous store loads the default variant's weights for another variant.
+    #[test]
+    fn both_spellings_of_variant_reach_the_resolver() {
+        let spec = capability::ActionSpec::new("run", "s").param(capability::ParamSpec::new("variant", ParamType::Str, "which release").default(serde_json::json!("tiny")));
+        let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(given_variant(&spec, &args(&["--variant", "large"])).as_deref(), Some("large"));
+        assert_eq!(given_variant(&spec, &args(&["--variant=large"])).as_deref(), Some("large"));
+        assert_eq!(given_variant(&spec, &args(&["--steps", "4"])), None);
     }
 }

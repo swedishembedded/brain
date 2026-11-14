@@ -3,7 +3,7 @@ name = "brain-invoke"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Run one model's served capability actions from a command line on the machine that holds the weights: the action's manifest becomes its flags (every param, its default and its bounds), files become input blobs, output blobs become files. The one implementation behind `brain do` and every per-model sample."
+description = "Run one model's served capability actions from a command line on the machine that holds the weights: the action's manifest becomes its flags (every param, its default and its bounds), files become input blobs, output blobs become files. The one implementation behind every per-model program and sample."
 
 [lib]
 name = "invoke"
