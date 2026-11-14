@@ -23,7 +23,7 @@
 //! promotion policy you can procure our services by sending an email to
 //! info@swedishembedded.com.
 
-use crate::finetune::{promoted, FinetuneOpts, FinetuneOutcome, FinetuneReport};
+use crate::finetune::{promoted, FinetuneOpts, FinetuneOutcome, FinetuneReport, StepObserver, StepReport, CANCELLED};
 use std::collections::HashMap;
 
 /// Named tensors: parameters or gradients, keyed by the checkpoint's tensor names.
@@ -121,30 +121,34 @@ pub fn mean_loss<M: HostTrainable>(model: &M, examples: &[M::Example]) -> f32 {
 /// Each step averages the gradients of `opts.batch` examples (a trailing short
 /// batch is a smaller mean, not dropped). The returned weights are the tuned
 /// ones whether or not the gate promoted them; `report.promoted` alone decides
-/// whether the caller writes them. `label` prefixes the progress lines.
-pub fn finetune_host<M: HostTrainable, L, S>(model: &mut M, train: &[M::Example], val: &[M::Example], opts: &FinetuneOpts<L, S>, label: &str) -> FinetuneOutcome {
+/// whether the caller writes them. `observer` sees every step as it is taken
+/// and stops the run (with [`CANCELLED`]) by returning false.
+pub fn finetune_host<M: HostTrainable, L, S>(model: &mut M, train: &[M::Example], val: &[M::Example], opts: &FinetuneOpts<L, S>, observer: StepObserver) -> Result<FinetuneOutcome, String> {
     let base_val = mean_loss(model, val);
     let batch = (opts.batch.max(1) as usize).min(train.len().max(1));
+    let total = opts.epochs * train.len().div_ceil(batch) as u32;
     let mut adam = HostAdamW::new();
     for epoch in 0..opts.epochs {
         for group in train.chunks(batch) {
             let mut grads: Tensors = model.params().iter().map(|(k, v)| (k.clone(), vec![0.0; v.len()])).collect();
+            let mut loss = 0.0f64;
             for ex in group {
-                model.loss_and_grad(ex, &mut grads);
+                loss += model.loss_and_grad(ex, &mut grads) as f64;
             }
             let inv = 1.0 / group.len() as f32;
             for g in grads.values_mut().flat_map(|g| g.iter_mut()) {
                 *g *= inv;
             }
             adam.step(model.params_mut(), &grads, opts.lr, opts.wd, Some(opts.clip));
-        }
-        if opts.progress {
-            eprintln!("{label} finetune: epoch {}/{} ({} steps)", epoch + 1, opts.epochs, adam.steps());
+            let report = StepReport { step: adam.steps(), total, epoch: epoch + 1, epochs: opts.epochs, loss: (loss / group.len() as f64) as f32 };
+            if !observer(report) {
+                return Err(CANCELLED.to_string());
+            }
         }
     }
     let ft_val = if adam.steps() == 0 { f32::NAN } else { mean_loss(model, val) };
     let report = FinetuneReport { promoted: promoted(base_val, ft_val), base_val, ft_val, steps: adam.steps(), lora_seed: None };
-    (report, Some(model.params().clone()))
+    Ok((report, Some(model.params().clone())))
 }
 
 #[cfg(test)]
@@ -212,19 +216,44 @@ mod tests {
         let train: Vec<(f32, f32)> = (1..=8).map(|i| (i as f32 * 0.5, i as f32 * 1.0)).collect(); // y = 2x
         let val = vec![(3.0, 6.0), (0.5, 1.0)];
         let opts: FinetuneOpts<()> = FinetuneOpts { epochs: 60, lr: 0.05, wd: 0.0, clip: 100.0, batch: 3, ..Default::default() };
-        let (rep, w) = finetune_host(&mut m, &train, &val, &opts, "line");
+        let (rep, w) = finetune_host(&mut m, &train, &val, &opts, &mut |_| true).unwrap();
         assert!(rep.promoted && rep.ft_val < 0.01 * rep.base_val, "{rep:?}");
         assert_eq!(rep.steps, 60 * 3, "8 examples at batch 3 are 3 steps an epoch, the short batch included");
         assert!((w.unwrap()["w"][0] - 2.0).abs() < 0.1);
     }
 
+    /// Spec: the observer sees every step (1-based, of the run's total, with
+    /// its epoch and the batch's loss before the update), and returning false
+    /// stops the run with `CANCELLED` before any further step.
+    #[test]
+    fn the_observer_sees_every_step_and_can_stop_the_run() {
+        let train: Vec<(f32, f32)> = (1..=8).map(|i| (i as f32 * 0.5, i as f32 * 1.0)).collect();
+        let val = vec![(3.0, 6.0)];
+        let opts: FinetuneOpts<()> = FinetuneOpts { epochs: 2, lr: 0.05, wd: 0.0, clip: 100.0, batch: 3, ..Default::default() };
+        let mut seen = Vec::new();
+        finetune_host(&mut Line(one("w", &[0.0])), &train, &val, &opts, &mut |r| {
+            seen.push((r.step, r.total, r.epoch, r.epochs, r.loss.is_finite()));
+            true
+        })
+        .unwrap();
+        let want: Vec<_> = (1..=6).map(|k| (k, 6, if k <= 3 { 1 } else { 2 }, 2, true)).collect();
+        assert_eq!(seen, want);
+        let mut steps = 0;
+        let stopped = finetune_host(&mut Line(one("w", &[0.0])), &train, &val, &opts, &mut |_| {
+            steps += 1;
+            steps < 2
+        });
+        assert_eq!(stopped.err().as_deref(), Some(crate::finetune::CANCELLED));
+        assert_eq!(steps, 2, "no step is taken after the observer says stop");
+    }
+
     #[test]
     fn a_run_with_no_steps_or_no_held_out_windows_is_never_promoted() {
         let opts: FinetuneOpts<()> = FinetuneOpts { epochs: 0, ..Default::default() };
-        let (rep, _) = finetune_host(&mut Line(one("w", &[0.0])), &[(1.0, 2.0)], &[(1.0, 2.0)], &opts, "line");
+        let (rep, _) = finetune_host(&mut Line(one("w", &[0.0])), &[(1.0, 2.0)], &[(1.0, 2.0)], &opts, &mut |_| true).unwrap();
         assert!(!rep.promoted && rep.ft_val.is_nan());
         let opts: FinetuneOpts<()> = FinetuneOpts { epochs: 3, lr: 0.1, ..Default::default() };
-        let (rep, _) = finetune_host(&mut Line(one("w", &[0.0])), &[(1.0, 2.0)], &[], &opts, "line");
+        let (rep, _) = finetune_host(&mut Line(one("w", &[0.0])), &[(1.0, 2.0)], &[], &opts, &mut |_| true).unwrap();
         assert!(!rep.promoted, "{rep:?}");
     }
 }
