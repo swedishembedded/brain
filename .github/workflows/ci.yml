@@ -2,9 +2,12 @@
 # Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 #
 # Every push to main and every pull request: the `brain` executable still
-# builds on each system a release ships for (release.yml), so a change that
-# breaks one is found here rather than at the release tag. The full test
-# suites need GPUs and model files and run where those are (make test).
+# builds on each system a release ships for (release.yml), the static gates
+# and clippy hold, and the deterministic CPU suites pass with none of them
+# skipped (tiers 1 and 2 of docs/development/release-gates.md). The suites that
+# need GPUs and model files run where those are (make ci/gpu, make test/full);
+# release.yml requires them. This workflow is also called by release.yml, so a
+# tag is published only after these jobs pass on the tagged commit.
 name: CI
 run-name: "CI - ${{ github.ref_name }} (${{ github.event_name }})"
 
@@ -12,6 +15,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_call:
 
 permissions:
   contents: read
@@ -71,3 +75,110 @@ jobs:
         run: |
           cargo check --locked -p brain-cli --target x86_64-apple-darwin
           cargo check --locked -p brain-cli --target aarch64-apple-darwin
+
+  # Tier 1, build/static: the gate scripts, their self-tests and clippy.
+  static:
+    name: Static gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0 # check-linear-history reads the whole history
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: static
+      - name: Install bats and the build dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends bats cmake mold
+      - name: Fetch the dependencies
+        run: cargo fetch --locked
+      - name: Gates
+        run: make ci/static
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: results-static
+          path: target/ci/results
+          if-no-files-found: error
+
+  # `make check/clippy` exits non-zero when the lint pass aborts or the warning count passes its
+  # recorded baseline (zero), the whole workspace being linted.
+  clippy:
+    name: Clippy (workspace)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          components: clippy
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: clippy
+      - name: Install cmake (libopus) and mold
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends cmake mold
+      - name: Free disk space
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+      - run: cargo fetch --locked
+      - run: make check/clippy
+
+  # Tier 2, deterministic CPU correctness. One job per suite family; each uploads its verdict, and
+  # `matrix` fails the workflow when a required suite has no pass.
+  cpu:
+    name: CPU ${{ matrix.suite }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suite: unit
+            target: ci/cpu/unit
+          - suite: e2e
+            target: ci/cpu/e2e
+            prebuild: cargo build --locked -p brain-cli
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: cpu-${{ matrix.suite }}
+      - name: Install the build and test dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends bats cmake mold jq dbus python3-jsonschema
+      - name: Free disk space
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+      - run: cargo fetch --locked
+      - name: Build the binary the suites drive
+        if: matrix.prebuild != ''
+        run: ${{ matrix.prebuild }}
+      # The target runs the suite, captures its output and holds it to scripts/ci/suite-report.py: a
+      # suite that ran no tests or skipped one fails here although cargo and bats would exit 0.
+      - name: Suite
+        run: make ${{ matrix.target }} E2E_BUILD=
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: results-cpu-${{ matrix.suite }}
+          path: target/ci/results
+          if-no-files-found: error
+
+  # The pass/fail/skip/not-run table of every required suite, as the run's summary.
+  matrix:
+    name: Test matrix
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [static, cpu]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: results-*
+          path: target/ci/results
+          merge-multiple: true
+        continue-on-error: true # a job that died before writing results is a not-run row, not a missing table
+      - name: Matrix
+        run: make ci/matrix SUMMARY="$GITHUB_STEP_SUMMARY"

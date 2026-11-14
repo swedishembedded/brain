@@ -11,7 +11,12 @@
 #   macOS   universal         brain-darwin-universal (x86_64 + Apple silicon)
 #   Windows x86_64            brain-windows-x86_64.exe
 #
-# Every platform is required: a release missing one is not published. Linux
+# Every platform is required: a release missing one is not published. So is
+# every gate: the static and CPU gates of ci.yml on the tagged commit, the
+# accelerated parity tier on a self-hosted runner labelled `gpu`, and a
+# dependency audit. A release with no such runner online waits; it is not
+# published without the accelerated tier. The release carries a CycloneDX
+# SBOM and a build provenance attestation for every binary. Linux
 # builds link glibc, not musl: brain loads the GPU driver (Vulkan) at run
 # time, which a static musl binary cannot.
 name: Release
@@ -44,6 +49,65 @@ env:
   CARGO_INCREMENTAL: 0
 
 jobs:
+  # ── Gates: nothing is published unless these pass on the tagged commit ──────
+  gates:
+    name: CI gates (static, clippy, CPU)
+    uses: ./.github/workflows/ci.yml
+
+  # Tier 3, accelerated correctness: CPU == Vulkan == CUDA on the machine's own devices.
+  gpu-parity:
+    name: Accelerated parity (self-hosted GPU)
+    runs-on: [self-hosted, gpu]
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Parity on every device
+        run: make ci/gpu/parity
+      - name: Matrix
+        if: always()
+        run: make ci/matrix CI_REQUIRED=ci-gpu-parity SUMMARY="$GITHUB_STEP_SUMMARY"
+
+  # Known-vulnerable or yanked dependencies and unexpected sources (deny.toml).
+  audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: audit
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked --version 0.18.3
+      - run: cargo deny --locked check advisories sources
+
+  # The software bill of materials of the `brain` executable, from the lockfile's resolved graph.
+  sbom:
+    name: SBOM (CycloneDX)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: sbom
+      - name: Install cargo-cyclonedx
+        run: cargo install cargo-cyclonedx --locked --version 0.5.7
+      - name: Generate
+        run: |
+          cargo cyclonedx --manifest-path crates/cli/Cargo.toml --format json --override-filename brain.cdx
+          mkdir -p sbom
+          mv crates/cli/brain.cdx.json sbom/brain.cdx.json
+          test -s sbom/brain.cdx.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: sbom
+          path: sbom/
+
   # ── Linux: x86_64 and aarch64, each on its own architecture's runner ────────
   build-linux:
     name: Linux ${{ matrix.arch }}
@@ -166,9 +230,11 @@ jobs:
   publish:
     name: Publish GitHub Release
     runs-on: ubuntu-latest
-    needs: [build-linux, build-macos, build-windows]
+    needs: [gates, gpu-parity, audit, sbom, build-linux, build-macos, build-windows]
     permissions:
       contents: write
+      id-token: write # the provenance attestation is signed with the run's OIDC identity
+      attestations: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -178,11 +244,27 @@ jobs:
           path: dist
           merge-multiple: true
 
+      - name: Download the SBOM
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: sbom
+          path: dist
+
       - name: Checksums
         run: |
           cd dist
-          sha256sum brain-* > checksums.txt
+          sha256sum brain-* brain.cdx.json > checksums.txt
           cat checksums.txt
+
+      # Pinned by version tag: the commit behind the tag could not be looked up where this was written;
+      # replace it with the commit, as the actions above, when it is.
+      - name: Attest build provenance
+        if: ${{ !(github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run == 'true') }}
+        uses: actions/attest-build-provenance@v2.4.0
+        with:
+          subject-path: |
+            dist/brain-*
+            dist/brain.cdx.json
 
       - name: Release notes (the tag's CHANGELOG section)
         run: make release/notes

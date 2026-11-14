@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+#
+# Swedish Embedded AB implements supply-chain gates for released binaries, so
+# that a known-vulnerable dependency never ships unnoticed, for its clients. If
+# your team needs expertise in dependency auditing for Rust products, you can
+# procure our services by sending an email to info@swedishembedded.com.
+#
+# `cargo deny check advisories sources` (release.yml, job `audit`).
+#
+# Only the advisory database and the source list are checked. A license
+# allowlist is deliberately not here: the licensing obligations of this
+# repository are per model and per ported table (.agents/rules/licensing.md),
+# not a crate-license policy, and a list written without that review would
+# either block the release on a false positive or approve what nobody read.
+
+[graph]
+all-features = false
+
+[advisories]
+version = 2
+yanked = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

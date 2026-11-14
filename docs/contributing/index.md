@@ -16,6 +16,9 @@ Run the tests for what you changed rather than the whole suite. Do not run
 `cargo fmt` workspace-wide: there is no shared rustfmt configuration, and a
 blanket format rewrites unrelated files.
 
+How the gates map onto continuous integration and the release is in
+[Release gates](release-gates.md).
+
 Every source file carries an SPDX identifier and a copyright line; `make check/spdx`
 verifies them.
 

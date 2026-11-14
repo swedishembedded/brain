@@ -212,12 +212,12 @@ navigation:
         path: examples/models/ltxv.md
       - source: samples/models/qwen3/README.md
         path: examples/models/qwen3.md
-      - source: samples/models/qwen3omnimoe/README.md
-        path: examples/models/qwen3omnimoe.md
       - source: samples/models/qwen35/README.md
         path: examples/models/qwen35.md
       - source: samples/models/qwen35moe/README.md
         path: examples/models/qwen35moe.md
+      - source: samples/models/qwen3omnimoe/README.md
+        path: examples/models/qwen3omnimoe.md
       - source: samples/models/qwen3tts/README.md
         path: examples/models/qwen3tts.md
       - source: samples/models/sam2/README.md
@@ -603,6 +603,7 @@ navigation:
   - title: Contributing
     pages:
       - docs/contributing/index.md
+      - docs/contributing/release-gates.md
   - title: Compliance
     pages:
       - docs/compliance/third-party-models.md

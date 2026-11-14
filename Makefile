@@ -61,6 +61,8 @@ BRAIN  ?= ./target/release/brain
 # to point an e2e run at a release build instead: `BRAIN_BIN=./target/release/brain
 # make test/e2e/api-conformance`.
 BRAIN_BIN ?= ./target/debug/brain
+# What the mock-model e2e targets build first; empty when the binary was already built (CI builds only `brain-cli`).
+E2E_BUILD ?= build/debug
 # Rewritten in place by `make release/{patch,minor,major}` (bump2version) -
 # the single source the release targets below read AFTER the bump, since a
 # sub-make re-reads the Makefile from disk. Cargo.toml's [workspace.package]
@@ -617,13 +619,13 @@ test/e2e: test/e2e/api-conformance test/e2e/video-api test/e2e/shutdown test/e2e
 # binary + jq (+ optional Python jsonschema for full schema validation).
 #   make test/e2e/api-conformance   (or: BRAIN_BIN=./target/debug/brain bats tests/e2e/api_conformance.bats)
 ## test/e2e/api-conformance - HTTP API conformance of every provider dialect against the mock model
-test/e2e/api-conformance: build/debug
+test/e2e/api-conformance: $(E2E_BUILD)
 	BRAIN_BIN=$(BRAIN_BIN) bats tests/e2e/api_conformance.bats
 
 # End-to-end: the OpenRouter /videos contract over a real socket against the mock
 # video model (brain serve --mock): list, submit, poll, download, edit. No weights, no GPU.
 ## test/e2e/video-api - the /videos contract end to end against the mock video model
-test/e2e/video-api: build/debug
+test/e2e/video-api: $(E2E_BUILD)
 	BRAIN_BIN=$(BRAIN_BIN) bats tests/e2e/video_api.bats
 
 # End-to-end: `brain serve` actually stops on SIGINT/SIGTERM, for every combination
@@ -632,7 +634,7 @@ test/e2e/video-api: build/debug
 # per-test dbus-daemon, never the real session/system bus. Needs a debug/release
 # binary + a working dbus-daemon.
 ## test/e2e/shutdown - `brain serve` stops on SIGINT/SIGTERM for every surface combination
-test/e2e/shutdown: build/debug
+test/e2e/shutdown: $(E2E_BUILD)
 	BRAIN_BIN=$(BRAIN_BIN) bats tests/e2e/shutdown.bats
 
 # End-to-end: every sample script under samples/{shell,python}/ is actually
@@ -691,7 +693,7 @@ test/gpu/ripple/e2e: build/debug
 # CPU-only, no real weights. Needs a debug/release binary + jq + curl (+
 # dbus-daemon/busctl for the D-Bus cases, which skip cleanly without them).
 ## test/e2e/ready - `brain serve --ready-file` fires only after every surface has bound
-test/e2e/ready: build/debug
+test/e2e/ready: $(E2E_BUILD)
 	BRAIN_BIN=$(BRAIN_BIN) bats tests/e2e/ready.bats
 
 # End-to-end: drive the real `claude` CLI against a local `brain serve --anthropic`
@@ -792,8 +794,8 @@ check/seed-literals/tests:
 	bash scripts/gates/check-seed-literals.sh --tests
 
 # Spec for the gate above, run against throwaway trees (needs only bats).
-## test/gates - default: every gate self-test (env-reads, env-writes, test-skips, seed-literals, group-kernels, crate-layers, whole-tensor-loads, format-logic, adapter-naming, placement-accounting, training-capabilities, model-flags, tier-gemm)
-test/gates: test/gates/env-reads test/gates/env-writes test/gates/test-skips test/gates/seed-literals test/gates/group-kernels test/gates/crate-layers test/gates/whole-tensor-loads test/gates/format-logic test/gates/adapter-naming test/gates/placement-accounting test/gates/training-capabilities test/gates/model-flags test/gates/tier-gemm
+## test/gates - default: every gate self-test (env-reads, env-writes, test-skips, seed-literals, group-kernels, crate-layers, whole-tensor-loads, format-logic, adapter-naming, placement-accounting, training-capabilities, model-flags, tier-gemm, suite-report)
+test/gates: test/gates/env-reads test/gates/env-writes test/gates/test-skips test/gates/seed-literals test/gates/group-kernels test/gates/crate-layers test/gates/whole-tensor-loads test/gates/format-logic test/gates/adapter-naming test/gates/placement-accounting test/gates/training-capabilities test/gates/model-flags test/gates/tier-gemm test/gates/suite-report
 
 ## test/gates/test-skips - the silent-skip ratchet fails on a new bare skip and on a stale entry, passes on a match
 test/gates/test-skips:
@@ -822,6 +824,10 @@ test/gates/whole-tensor-loads:
 ## test/gates/format-logic - the format-logic ratchet fails on Weight-variant, kernel-lookup and codec calls in a layer-4 crate and on a stale entry, ignores layer 3, tests and comments
 test/gates/format-logic:
 	bats tests/gates/format_logic.bats
+
+## test/gates/suite-report - the suite verdict fails a suite that ran nothing, failed or skipped, and the matrix names a missing required suite as not-run
+test/gates/suite-report:
+	bats tests/gates/suite_report.bats
 
 ## test/gates/tier-gemm - the tier-coverage gate fails on a format without a row, an unrecorded or stale gap and a missing kernel file
 test/gates/tier-gemm:
@@ -1045,6 +1051,91 @@ check/generated/book:
 ## check/book - the book follows its specification and every citation in it resolves
 check/book:
 	scripts/book/check.py
+
+# ---------------------------------------------------------------------------
+##@ Continuous integration
+# The four tiers of the release gates (docs/development/release-gates.md), as
+# targets a developer runs locally and the workflows call, so a gate is defined
+# once. A suite target captures the run's output and holds it to
+# scripts/ci/suite-report.py: a required suite that ran no tests or skipped
+# one fails, which `cargo test` and `bats` alone do not (they exit 0).
+# Results land in CI_OUT; `ci/matrix` turns them into the pass/fail/skip/not-run
+# table and fails when a required suite has no result.
+CI_OUT ?= target/ci
+# Crates whose tests are deterministic on the CPU backend with no model files, so a hosted runner
+# without a GPU runs them with no skip: the contract of the cpu tier.
+CI_CPU_CRATES ?= brain-modelref brain-modelstore brain-memauth brain-residency brain-capability brain-trainjob
+# Suites `ci/matrix` requires (the cpu tier; the accelerated tier adds ci-gpu-parity in its own job).
+CI_REQUIRED ?= gate-specs,cpu-unit,e2e-api-conformance,e2e-video-api,e2e-shutdown,e2e-ready
+
+# $(call ci_suite,<command>,<suite name>,<cargo|tap>,<suite-report check flags>)
+define ci_suite
+	@mkdir -p $(CI_OUT)/results
+	@$(1) > $(CI_OUT)/$(2).log 2>&1; rc=$$?; cat $(CI_OUT)/$(2).log; \
+	python3 scripts/ci/suite-report.py check --name $(2) --format $(3) --input $(CI_OUT)/$(2).log --out $(CI_OUT)/results $(4) || rc=1; \
+	exit $$rc
+endef
+
+## ci - lists the CI tiers; `ci/static` and `ci/cpu` run the ones a hosted runner can, `ci/gpu` needs a GPU
+ci:
+	$(LIST_CHILDREN)
+
+# Tier 1, build/static: no model files, no GPU, no build beyond the gate scripts' own.
+## ci/static - build/static tier: every static gate and every gate self-test
+ci/static: ci/static/scripts check/env-reads check/env-writes check/test-skips check/seed-literals check/serve-conformance check/spdx check/copyright check/paths check/scope check/saved-policy check/agents-md check/files check/make-targets check/generated/kernels-wgsl-table check/generated/kernels-cuda-table check/generated/samples-manifest check/generated/knowledge-index check/generated/roadmap-index ci/static/gate-specs
+
+# The tier is the gates that are clean on the tree today: `check/scripts` and `check/generated/book` are
+# left out because `check-no-perf-numbers.sh`, `check-multi-gpu-sharding.sh` and the book's figure check report
+# existing findings, and a required gate that is red from the first run gates nothing. Each returns
+# to the tier when its findings are fixed. `check-crate-layers.sh` runs here, where the registry is reachable.
+## ci/static/scripts - the clean members of check/scripts (script syntax, env docs, citations, doc links, architecture, layering, kernel and format gates)
+ci/static/scripts:
+	@for gate in check-scripts check-env-docs check-no-doc-citations check-measured-citations check-device-env-single-source check-arch-names check-linear-history check-golden-source check-doc-links check-kernel-selection check-crate-layers check-placement-accounting check-training-capabilities check-model-flags check-adapter-naming check-format-logic check-tier-gemm check-whole-tensor-loads check-cancellable-actions; do \
+	    bash scripts/gates/$$gate.sh || exit 1; \
+	done
+
+## ci/static/gate-specs - the gate self-tests (bats), held to the skip-and-empty-suite rule
+ci/static/gate-specs:
+	$(call ci_suite,$(MAKE) test/gates,gate-specs,tap)
+
+# Tier 2, deterministic CPU correctness.
+## ci/cpu - deterministic CPU tier: unit tests and the mock-model end-to-end suites
+ci/cpu: ci/cpu/unit ci/cpu/e2e
+
+## ci/cpu/unit - unit and integration tests of CI_CPU_CRATES on the CPU backend, no skips allowed
+ci/cpu/unit:
+	$(call ci_suite,BRAIN_DEVICE=cpu $(CARGO_TEST) $(addprefix -p ,$(CI_CPU_CRATES)) --lib --bins --tests -- --test-threads=$(TEST_THREADS),cpu-unit,cargo)
+
+## ci/cpu/e2e - the end-to-end bats suites that serve the weight-free mock model
+ci/cpu/e2e: ci/cpu/e2e/api-conformance ci/cpu/e2e/video-api ci/cpu/e2e/shutdown ci/cpu/e2e/ready
+
+## ci/cpu/e2e/api-conformance - HTTP API conformance of every dialect against the mock model, held to the skip rule
+ci/cpu/e2e/api-conformance:
+	$(call ci_suite,$(MAKE) test/e2e/api-conformance,e2e-api-conformance,tap)
+
+## ci/cpu/e2e/video-api - the /videos contract against the mock video model, held to the skip rule
+ci/cpu/e2e/video-api:
+	$(call ci_suite,$(MAKE) test/e2e/video-api,e2e-video-api,tap)
+
+## ci/cpu/e2e/shutdown - `brain serve` stops on SIGINT/SIGTERM for every surface, held to the skip rule
+ci/cpu/e2e/shutdown:
+	$(call ci_suite,$(MAKE) test/e2e/shutdown,e2e-shutdown,tap)
+
+## ci/cpu/e2e/ready - the readiness gate of `brain serve`, held to the skip rule
+ci/cpu/e2e/ready:
+	$(call ci_suite,$(MAKE) test/e2e/ready,e2e-ready,tap)
+
+# Tier 3, accelerated correctness: needs the accelerators the parity gate compares.
+## ci/gpu - accelerated tier: cross-backend parity on every device the machine has
+ci/gpu: ci/gpu/parity
+
+## ci/gpu/parity - CPU == Vulkan == CUDA parity (scripts/gates/parity-gate.sh), held to the skip rule
+ci/gpu/parity:
+	$(call ci_suite,scripts/gates/parity-gate.sh,ci-gpu-parity,cargo)
+
+## ci/matrix - the pass/fail/skip/not-run table of the suites run so far; fails when a required one (CI_REQUIRED) has no pass (SUMMARY=<file> appends it, as a job summary)
+ci/matrix:
+	python3 scripts/ci/suite-report.py matrix --results $(CI_OUT)/results --require $(CI_REQUIRED) $(if $(SUMMARY),--summary $(SUMMARY))
 
 # ---------------------------------------------------------------------------
 ##@ Models and datasets
@@ -2242,6 +2333,8 @@ help:
         test/e2e/results-hygiene test/e2e/s3dit-int8 \
         check check/workspace check/clippy check/scripts check/env-reads check/test-skips check/seed-literals check/seed-literals/tests check/serve-conformance test/gates test/gates/env-reads test/gates/test-skips test/gates/seed-literals test/gates/group-kernels _train/need-wrapper qwen35 qwen35/train qwen35/train/probe qwen35/train/step check/spdx check/copyright check/paths check/scope check/saved-policy check/hf-fixtures \
         check/files check/samples check/sdk-features check/make-targets \
+        ci ci/static ci/static/scripts ci/static/gate-specs ci/cpu ci/cpu/unit ci/cpu/e2e \
+        ci/cpu/e2e/api-conformance ci/cpu/e2e/video-api ci/cpu/e2e/shutdown ci/cpu/e2e/ready ci/gpu ci/gpu/parity ci/matrix \
         check/generated check/generated/kernels-wgsl-table check/generated/kernels-cuda-table \
         check/generated/samples-manifest \
         check/generated/knowledge-index check/generated/book check/book \
