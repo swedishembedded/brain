@@ -15,4 +15,5 @@ After it you can take a published model to a proven reimplementation step by ste
 2. [Testing Numerical Code](02-testing-numerical-code.md): why do tests of numerical code pass while the code is wrong, and how do we write tests that cannot be fooled?
 3. [Benchmarking and Performance Claims](03-benchmarking.md): what makes a benchmark trustworthy, and what are the classic ways it lies?
 4. [From Hypothesis to Paper](04-research.md): how does an idea become a result others can trust, check and build on?
+5. [A Catalogue of Expensive Mistakes](05-failure-catalogue.md): what went wrong while building a real engine, and what general lesson does each failure teach?
 6. [Project: Reproduce, Verify, Optimize, Defend](06-project-reproduction.md): can you reproduce a published model component, prove it correct, make it fast and defend the result?

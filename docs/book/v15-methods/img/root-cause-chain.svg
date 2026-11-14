@@ -1,0 +1,50 @@
+<!-- source-sha256: dbb30bc89d520fef8872f86cdcf1d8f44981614adc5607eed653f31a3c885794 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 400" width="1000" height="400"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker><marker id="head-4a5568" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker><marker id="head-c53030" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#c53030"/></marker></defs><rect width="1000" height="400" fill="#ffffff"/>
+<rect x="20" y="35" width="210" height="70" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="125" y="58.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">symptom</text>
+<text x="125" y="74.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">loss rises at every</text>
+<text x="125" y="90.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">rate that moves</text>
+<rect x="270" y="35" width="210" height="70" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="375" y="58.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">measurement</text>
+<text x="375" y="74.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">gradient norm 2.8e5</text>
+<text x="375" y="90.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">where the true one is 0.98</text>
+<rect x="520" y="35" width="210" height="70" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="625" y="58.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">mechanism</text>
+<text x="625" y="74.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">row chunks added into</text>
+<text x="625" y="90.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">an uncleared buffer</text>
+<rect x="770" y="35" width="210" height="70" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="875" y="58.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">decision</text>
+<text x="875" y="74.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">clear dropped: each</text>
+<text x="875" y="90.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">chunk &#x27;written whole&#x27;</text>
+<line x1="233" y1="70" x2="267" y2="70" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="250" y="61.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">why?</text>
+<line x1="483" y1="70" x2="517" y2="70" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="500" y="61.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">why?</text>
+<line x1="733" y1="70" x2="767" y2="70" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<text x="750" y="61.2" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#4a5568" text-anchor="middle">why?</text>
+<path d="M20,180 H218 L230,192 V250 H20 Z" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<path d="M218,180 V192 H230" fill="none" stroke="#4a5568" stroke-width="1.2"/>
+<text x="34" y="203.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="start">CPU memory is</text>
+<text x="34" y="219.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="start">zero-filled, so an add</text>
+<text x="34" y="235.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="start">into it is a copy</text>
+<path d="M270,180 H468 L480,192 V250 H270 Z" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<path d="M468,180 V192 H480" fill="none" stroke="#4a5568" stroke-width="1.2"/>
+<text x="284" y="203.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="start">the gates ran 12 tokens,</text>
+<text x="284" y="219.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="start">which never select</text>
+<text x="284" y="235.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="start">the chunked path</text>
+<path d="M520,180 H718 L730,192 V250 H520 Z" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<path d="M718,180 V192 H730" fill="none" stroke="#4a5568" stroke-width="1.2"/>
+<text x="534" y="203.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="start">the evidence was the</text>
+<text x="534" y="219.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="start">loss bits, which cannot</text>
+<text x="534" y="235.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="start">see a gradient</text>
+<line x1="125" y1="180" x2="125" y2="113" stroke="#a0aec0" stroke-width="1.2" stroke-dasharray="4 3"/>
+<line x1="375" y1="180" x2="375" y2="113" stroke="#a0aec0" stroke-width="1.2" stroke-dasharray="4 3"/>
+<line x1="625" y1="180" x2="625" y2="113" stroke="#a0aec0" stroke-width="1.2" stroke-dasharray="4 3"/>
+<rect x="270" y="310" width="460" height="60" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="500" y="336.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">regression gate: device against CPU at the published geometry,</text>
+<text x="500" y="352.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">more than one chunk, memory that is not zero</text>
+<path d="M875,105 L875,330 Q875,340 865,340 L733,340" fill="none" stroke="#c53030" stroke-width="1.4" marker-end="url(#head-c53030)"/>
+<path d="M125,250 L125,330 Q125,340 135,340 L267,340" fill="none" stroke="#4a5568" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#head-4a5568)"/>
+<line x1="375" y1="253" x2="375" y2="307" stroke="#4a5568" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#head-4a5568)"/>
+<line x1="625" y1="253" x2="625" y2="307" stroke="#4a5568" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#head-4a5568)"/>
+</svg>
