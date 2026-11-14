@@ -82,6 +82,8 @@ pub fn upscale_spec() -> ActionSpec {
         )
         .input(BlobSpec::new("image", Media::Image, "the image to upscale, RGB in [0,1]").required())
         .output(BlobSpec::new("image", Media::Image, "the upscaled image, RGB in [0,1]"))
+        .streaming()
+        .cancellable()
 }
 
 /// The full, static capability manifest - safe to build with no weights loaded.
@@ -109,15 +111,24 @@ pub fn manifest() -> Manifest {
 /// blob/layout handling below.
 pub trait Upscaler: Send + Sync {
     /// `chw` is `[3,h,w]` in `[0,1]`; return `([3,oh,ow], ow, oh)` in `[0,1]`.
-    fn upscale(&self, chw: &[f32], w: u32, h: u32, tile: u32) -> Result<(Vec<f32>, u32, u32), String>;
+    ///
+    /// `keep_going(done, total)` is asked after each of the `total` windows
+    /// (one for a whole-image pass); `false` stops the sweep there with
+    /// `Err(`[`capability::failure::CANCELLED`]`)`.
+    fn upscale(&self, chw: &[f32], w: u32, h: u32, tile: u32, keep_going: &mut dyn FnMut(u32, u32) -> bool) -> Result<(Vec<f32>, u32, u32), String>;
 }
 
-/// The single implementation of the action, over any [`Upscaler`].
-pub fn run_upscale(up: &dyn Upscaler, inv: &Invocation) -> ActionResult {
+/// The single implementation of the action, over any [`Upscaler`]: the token
+/// is checked on entry and after every window, each of which is reported.
+pub fn run_upscale(up: &dyn Upscaler, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+    inv.cancel.check()?;
     let (hwc, w, h) = capability::blob::decode_image(inv, "image")?;
     let tile = inv.get_i64("tile").unwrap_or(0).max(0) as u32;
     let chw = imaging::pixels::hwc_to_chw(&hwc, 3, h as usize, w as usize);
-    let (out, ow, oh) = up.upscale(&chw, w, h, tile)?;
+    let (out, ow, oh) = up.upscale(&chw, w, h, tile, &mut |done, total| {
+        progress(Progress::step(done, total, "window"));
+        !inv.cancel.is_cancelled()
+    })?;
     let want = 3 * (ow as usize) * (oh as usize);
     if out.len() != want {
         return Err(format!("upscale: model returned {} floats, expected {want} for {ow}x{oh}", out.len()));
@@ -137,8 +148,8 @@ impl<T: Upscaler + 'static> Action for UpscaleAction<T> {
         upscale_spec()
     }
 
-    fn run(&self, inv: &Invocation, _p: &mut dyn FnMut(Progress)) -> ActionResult {
-        run_upscale(self.0.as_ref(), inv)
+    fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        run_upscale(self.0.as_ref(), inv, progress)
     }
 }
 
@@ -253,7 +264,7 @@ impl Session {
     /// over windows of `tile + 2R` pixels a side (`R` =
     /// [`RrdbConfig::receptive_radius`]), and each window contributes only the
     /// output core it owns.
-    fn upscale_tiled(&self, chw: &[f32], w: u32, h: u32, tile: u32) -> Vec<f32> {
+    fn upscale_tiled(&self, chw: &[f32], w: u32, h: u32, tile: u32, keep_going: &mut dyn FnMut(u32, u32) -> bool) -> Result<Vec<f32>, String> {
         let s = self.cfg.scale as usize;
         let r = self.cfg.receptive_radius();
         let (win_w, xs) = plan_axis(w, tile, r);
@@ -261,6 +272,8 @@ impl Session {
         let (ow, oh) = (w as usize * s, h as usize * s);
         let (uw, uh) = (win_w as usize * s, win_h as usize * s);
         let mut out = vec![0.0f32; 3 * ow * oh];
+        let total = (ys.len() * xs.len()) as u32;
+        let mut done = 0u32;
         for y in &ys {
             for x in &xs {
                 let up = self.run_exact(&Self::cut(chw, w, h, (x.start, y.start), (win_w, win_h)), win_w, win_h);
@@ -273,14 +286,18 @@ impl Session {
                         out[dst..dst + n].copy_from_slice(&up[src..src + n]);
                     }
                 }
+                done += 1;
+                if !keep_going(done, total) {
+                    return Err(capability::failure::CANCELLED.to_string());
+                }
             }
         }
-        out
+        Ok(out)
     }
 }
 
 impl Upscaler for Session {
-    fn upscale(&self, chw: &[f32], w: u32, h: u32, tile: u32) -> Result<(Vec<f32>, u32, u32), String> {
+    fn upscale(&self, chw: &[f32], w: u32, h: u32, tile: u32, keep_going: &mut dyn FnMut(u32, u32) -> bool) -> Result<(Vec<f32>, u32, u32), String> {
         let s = self.cfg.scale;
         if chw.len() != 3 * (w as usize) * (h as usize) {
             return Err(format!("upscale: input is {} floats, expected {}", chw.len(), 3 * w * h));
@@ -288,7 +305,15 @@ impl Upscaler for Session {
         if w == 0 || h == 0 {
             return Err(format!("upscale: empty image {w}x{h}"));
         }
-        let out = if tile == 0 { self.run_exact(chw, w, h) } else { self.upscale_tiled(chw, w, h, tile) };
+        let out = if tile == 0 {
+            let out = self.run_exact(chw, w, h);
+            if !keep_going(1, 1) {
+                return Err(capability::failure::CANCELLED.to_string());
+            }
+            out
+        } else {
+            self.upscale_tiled(chw, w, h, tile, keep_going)?
+        };
         Ok((out, w * s, h * s))
     }
 }
@@ -313,7 +338,7 @@ mod tests {
     /// round-trip, rejection) rather than the model.
     struct Stub;
     impl Upscaler for Stub {
-        fn upscale(&self, chw: &[f32], w: u32, h: u32, _t: u32) -> Result<(Vec<f32>, u32, u32), String> {
+        fn upscale(&self, chw: &[f32], w: u32, h: u32, _t: u32, _keep_going: &mut dyn FnMut(u32, u32) -> bool) -> Result<(Vec<f32>, u32, u32), String> {
             let (ow, oh) = (w * 2, h * 2);
             let mut out = vec![0.0f32; 3 * (ow * oh) as usize];
             for c in 0..3usize {
@@ -369,13 +394,13 @@ mod tests {
     fn a_short_model_output_is_rejected() {
         struct Short;
         impl Upscaler for Short {
-            fn upscale(&self, _c: &[f32], w: u32, h: u32, _t: u32) -> Result<(Vec<f32>, u32, u32), String> {
+            fn upscale(&self, _c: &[f32], w: u32, h: u32, _t: u32, _keep_going: &mut dyn FnMut(u32, u32) -> bool) -> Result<(Vec<f32>, u32, u32), String> {
                 Ok((vec![0.0; 3], w * 4, h * 4))
             }
         }
         let hwc = vec![0.0f32; 3 * 4];
         let inv = Invocation::new().blob("image", capability::blob::image_blob(&hwc, 2, 2, 3));
-        let e = run_upscale(&Short, &inv).unwrap_err();
+        let e = run_upscale(&Short, &inv, &mut |_| {}).unwrap_err();
         assert!(e.contains("expected"), "{e}");
     }
 

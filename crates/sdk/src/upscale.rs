@@ -103,7 +103,7 @@ impl UpscalePipeline {
         let (w, h) = (image.width(), image.height());
         let hwc = image.to_hwc_unit();
         let chw = imaging::pixels::hwc_to_chw(&hwc, 3, h as usize, w as usize);
-        let (out, ow, oh) = self.session.upscale(&chw, w, h, opts.tile).map_err(Error::Backend)?;
+        let (out, ow, oh) = self.session.upscale(&chw, w, h, opts.tile, &mut |_, _| true).map_err(Error::Backend)?;
         let hwc_out = imaging::pixels::chw_to_hwc(&out, 3, oh as usize, ow as usize);
         Image::from_hwc_unit(ow, oh, &hwc_out)
     }

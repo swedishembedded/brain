@@ -2905,6 +2905,7 @@ name = "brain-rrdbnet"
 version = "5.1.0"
 dependencies = [
  "brain-capability",
+ "brain-capability-mock",
  "brain-checkpoint",
  "brain-data",
  "brain-gpu-core",

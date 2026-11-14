@@ -120,9 +120,9 @@ struct UpscaleInstance {
 }
 
 impl Instance for UpscaleInstance {
-    fn run(&mut self, action: &str, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
+    fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         match action {
-            "upscale" => rrdbnet::caps::run_upscale(&self.session, inv),
+            "upscale" => rrdbnet::caps::run_upscale(&self.session, inv, progress),
             other => Err(format!("upscale: unknown action '{other}'")),
         }
     }

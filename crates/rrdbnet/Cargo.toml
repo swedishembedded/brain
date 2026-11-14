@@ -21,5 +21,6 @@ brain-modelstore.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
+brain-capability-mock.workspace = true
 brain-testutil.workspace = true
 brain-data.workspace = true

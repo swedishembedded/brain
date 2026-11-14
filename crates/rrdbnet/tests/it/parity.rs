@@ -202,8 +202,8 @@ fn tiled_upscale_equals_the_whole_image_pass() {
         let chw: Vec<f32> = (0..3 * (w * h) as usize).map(|_| rng.unit()).collect();
 
         let s = rrdbnet::caps::Session::new(gpu_core::testgpu::dev(&KERNELS), cfg, weights);
-        let (whole, ow, oh) = s.upscale(&chw, w, h, 0).expect("whole");
-        let (tiled, tw, th) = s.upscale(&chw, w, h, tile).expect("tiled");
+        let (whole, ow, oh) = s.upscale(&chw, w, h, 0, &mut |_, _| true).expect("whole");
+        let (tiled, tw, th) = s.upscale(&chw, w, h, tile, &mut |_, _| true).expect("tiled");
         assert_eq!((tw, th), (ow, oh));
         assert_eq!((ow, oh), (w * scale, h * scale));
         let max = max_abs(&whole, &tiled);
@@ -211,6 +211,21 @@ fn tiled_upscale_equals_the_whole_image_pass() {
         eprintln!("  x{scale} {w}x{h} tile {tile} R={r}: max|tiled-whole| = {max:.3e}, {differing} px not bitwise equal");
         assert_eq!(differing, 0, "x{scale} {w}x{h} tile {tile}: tiled differs from whole by up to {max:.3e}");
     }
+}
+
+/// The served action polls its token per window: fired before the call it
+/// decodes nothing, fired at a window boundary the sweep stops there.
+#[test]
+fn a_tiled_upscale_stops_at_the_window_its_token_fires() {
+    let cfg = RrdbConfig { in_channels: 3, out_channels: 3, num_feat: 8, num_grow_ch: 4, num_block: 1, scale: 2 };
+    // R = 19 here, so a 60-pixel width sweeps 15 windows of 42 per row of cores.
+    let (w, h, tile) = (60u32, 8u32, 4u32);
+    let s = rrdbnet::caps::Session::new(gpu_core::testgpu::dev(&KERNELS), cfg.clone(), synthetic_weights(&cfg));
+    let mut rng = data::rng::Lcg::new(data::rng::random_seed());
+    let hwc: Vec<f32> = (0..3 * (w * h) as usize).map(|_| rng.unit()).collect();
+    let make = || capability::Invocation::new().set("tile", serde_json::json!(tile)).blob("image", capability::blob::image_blob(&hwc, w, h, 3));
+    let run = |inv: &capability::Invocation, progress: &mut dyn FnMut(capability::Progress)| rrdbnet::caps::run_upscale(&s, inv, progress);
+    capability_mock::cancellation::certify("rrdbnet upscale", &make, &run, capability_mock::cancellation::Bound::ONE_STEP);
 }
 
 /// The same contract on the RELEASED net (R = 349), skipped when the checkpoint
@@ -235,8 +250,8 @@ fn tiled_upscale_equals_the_whole_image_pass_on_the_released_net() {
     let chw: Vec<f32> = (0..3 * (side * side) as usize).map(|_| rng.unit()).collect();
 
     let s = rrdbnet::caps::Session::new(gpu_core::testgpu::dev(&KERNELS), cfg, w);
-    let (whole, _, _) = s.upscale(&chw, side, side, 0).expect("whole");
-    let (tiled, _, _) = s.upscale(&chw, side, side, tile).expect("tiled");
+    let (whole, _, _) = s.upscale(&chw, side, side, 0, &mut |_, _| true).expect("whole");
+    let (tiled, _, _) = s.upscale(&chw, side, side, tile, &mut |_, _| true).expect("tiled");
     let max = max_abs(&whole, &tiled);
     eprintln!("x4plus {side}x{side} tile {tile}: max|tiled-whole| = {max:.3e}");
     assert_eq!(max, 0.0, "tiled differs from whole");
