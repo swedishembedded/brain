@@ -523,7 +523,7 @@ def threshold_choice():
                      _fmt(_mean_cost(rp, ry, ts, 1.0, float(r)))])
     return (f"Fresh set of `calibrated_decisions.decomposition` (20000 examples). A false alarm (block, label 0) costs 1 and a "
             f"miss (release, label 1) costs r; block when the probability is at least the threshold. 'accuracy cut' is the "
-            f"cut c = k/100, k = 0 .. 100, that maximises the accuracy of the raw model on the fit set (the first of equals): "
+            f"cut c = k/100, k = 0 .. 100, that maximizes the accuracy on the fit set (the first of equals): "
             f"{t_acc:.2f} on the raw probabilities and {t_acc_cal:.2f} on the probabilities recalibrated by scale and shift on the fit "
             f"set (the same fit as in `calibrated_decisions.decomposition`). t* = 1/(1 + r) is applied to the "
             f"raw probabilities, to the recalibrated ones, and to the true "

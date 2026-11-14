@@ -120,7 +120,8 @@ def _window_z(y, t):
 
 
 def _draw_events(name, panel):
-    """Per series: one uniform for the intercept b, then per bar t one uniform u, with an event when u < sigmoid(b + 0.9 z_t + 0.6 age_t + 0.7 [t >= change]).
+    """Per series: one uniform for the intercept b, then per bar t one uniform u, with an event when
+    u < sigmoid(b + EVENT_Z z_t + EVENT_AGE age_t + EVENT_SHIFT [t >= change]).
     Adds z[t], age[t] (bars since the last event, capped at 12 and divided by 12) and ev[t] to every series."""
     g = bookrng.generator(name)
     for sr in panel:
@@ -432,7 +433,7 @@ def run(nudge):
                 "mean_p": {"raw": sum(p) / len(p), "recal": sum(q) / len(q)},
                 "cost": {"never": COST_MISS * rate, "always": COST_FALSE_ALARM * (1 - rate), "raw half": alert_cost(p, y, 0.5),
                          "raw": alert_cost(p, y, t_star), "recal": alert_cost(q, y, t_star)},
-                "alerts": {"raw": sum(v >= t_star for v in p), "recal": sum(v >= t_star for v in q)}}
+                "alerts": {"raw": sum(v >= t_star for v in p), "recal": sum(v >= t_star for v in q), "raw half": sum(v >= 0.5 for v in p)}}
 
     R["event"] = {"rates": tuple(sum(y for _, y in e) / len(e) for e in (ev_fit, ev_cal)), "steps": steps, "cal": event_block(p_cal, y_cal, iso),
                   "test": event_block(p_test, y_test, iso), "deploy": event_block(p_dep, y_dep, iso)}
@@ -577,6 +578,7 @@ def panel_setup():
         hist[sr["change"] // 50] = hist.get(sr["change"] // 50, 0) + 1
     ev_total = sum(sum(sr["ev"]) for sr in panel)
     bars = lambda lo, hi: sum(sum(sr["ev"][lo:hi]) for sr in panel)
+    moved = lambda last: sum(1 for sr in panel if sr["change"] <= last)
     head = (f"The panel has {S} series of {N} bars. Generator `{PANEL_NAME}` (SplitMix64, seed {_seed(PANEL_NAME)}), series after series; for series i the draws, in this order, are "
             f"seven values (six calls of uniform() and one of integer(200)) and then {N} calls of normal(): u1 for level = 20 * 5^u1; u2 for slope = 0.0005 + 0.0025 u2; u3 for amp = 0.05 + 0.20 u3; u4 for phase = 2 pi u4; "
             f"u5 for shock = 0.01 + 0.03 u5; integer(200) for change = 100 + that integer; u6 for jump = -0.25 + 0.50 u6. Then v_t = 0.7 v_(t-1) + shock normal() with "
@@ -589,6 +591,8 @@ def panel_setup():
     t1 = _table(["i", "level", "slope", "amp", "phase", "shock", "change", "jump", "sum of y", "y at bar 299", "events"], rows)
     mid = (f"\n\nSeries 0 starts " + ", ".join(first) + f"; its events fall on bars {', '.join(map(str, ev0))}; its z_24, z_25, z_26 are {', '.join(zs)}. "
            f"Change bars by fifties: 100 .. 149: {hist.get(2, 0)}, 150 .. 199: {hist.get(3, 0)}, 200 .. 249: {hist.get(4, 0)}, 250 .. 299: {hist.get(5, 0)} series. "
+           f"Series whose change bar is at most 114 (the last bar a fit window reads): {moved(114)}; at most 119, 179, 239 and 299: "
+           f"{moved(119)}, {moved(179)}, {moved(239)} and {moved(299)}. "
            f"Events in all: {ev_total}; in bars 0 .. 119: {bars(0, 120)}, 120 .. 179: {bars(120, 180)}, 180 .. 239: {bars(180, 240)}, 240 .. 299: {bars(240, 300)}.")
     return head + t1 + mid
 
@@ -728,7 +732,8 @@ def decisions():
                        (f"alert when p >= {t_star:.4f}, raw p", "raw"), (f"alert when p >= {t_star:.4f}, recalibrated p", "recal")):
         rows.append((label, *(_c(lambda r, b=b, k=key: r["event"][b]["cost"][k], 4) for b in ("cal", "test", "deploy"))))
     alerts = [("number of alerts, raw p", *(cell(lambda r, b=b: float(r["event"][b]["alerts"]["raw"]), lambda x: f"{x:.0f}") for b in ("cal", "test", "deploy"))),
-              ("number of alerts, recalibrated p", *(cell(lambda r, b=b: float(r["event"][b]["alerts"]["recal"]), lambda x: f"{x:.0f}") for b in ("cal", "test", "deploy")))]
+              ("number of alerts, recalibrated p", *(cell(lambda r, b=b: float(r["event"][b]["alerts"]["recal"]), lambda x: f"{x:.0f}") for b in ("cal", "test", "deploy"))),
+              ("number of alerts at p >= 0.5, raw p", *(cell(lambda r, b=b: float(r["event"][b]["alerts"]["raw half"]), lambda x: f"{x:.0f}") for b in ("cal", "test", "deploy")))]
     ords = []
     for label, key in (("seasonal naive, raw head, quantile 0.9", "sn raw"), ("seasonal AR(1), raw head, quantile 0.9", "ar raw"),
                        ("learned map, raw head, quantile 0.9", "map raw"), ("learned map, raw head, median", "map raw median"),
@@ -760,6 +765,7 @@ def mistakes():
                           _c(lambda r, k=key, a=tk, v=v: r[k][a]["cost"][v], 4), _c(lambda r, k=key, a=dk, v=v: r[k][a]["cost"][v], 4)))
     t2 = _table(["mistake", "probability", "ECE, test", "ECE, deployment", "Brier, test", "Brier, deployment", "alert cost, test", "alert cost, deployment"], erows)
     shared = runs()[0]["random"]["shared"]
+    levels_t = runs()[0]["test_fit"]["steps"]
     fit, cal, test = split_forward()
     head = ("Each mistake is planted alone in the system as specified. The random split is the one of milestone 2 (its test block holds "
             f"{len(test)} origins as the forward one does, so the rows are the same in number). The future scaler scales every window by the mean and the standard "
@@ -767,7 +773,8 @@ def mistakes():
             "the point forecast is mu + d times the map's output with those mu and d, and losses are still divided by the context's own d_loss; in deployment the "
             "windows are scaled by their context alone, since the future is not there to be read. The test-block recalibration computes the multipliers of milestone 6 "
             "from the test rows, and the isotonic repair of the event probability from the test windows. 'Deployment' is the 55 origins after the study with the models "
-            f"unchanged. In the random split, {shared} of the test block's forecast bars are also forecast bars of fit windows. First table: the learned model's skill "
+            f"unchanged. In the random split, {shared} of the test block's forecast bars are also forecast bars of fit windows. The isotonic repair fitted on the test block "
+            f"takes {levels_t} distinct values. First table: the learned model's skill "
             "against the seasonal naive forecast, each with its own head and recalibration, and the share inside the central 80 percent interval; second table: the event "
             "model, whose probabilities are repaired by the isotonic fit of the calibration block (the test-block row: of the test block itself). The head scale d of "
             "every forecaster, baselines included, is the window's scaling, so under the future scaler the baselines' spread uses the leaky d too.\n\n")

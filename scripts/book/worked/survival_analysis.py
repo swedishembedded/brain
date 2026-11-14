@@ -12,7 +12,7 @@ one intercept per interval), cause-specific hazards with the cumulative incidenc
 estimator against the naive one minus Kaplan-Meier, a count with no exposure behind it, the concordance
 index by hand and on a cohort, the inverse-probability-of-censoring-weighted Brier score against the Brier
 score an oracle computes from the uncensored lifetimes, and the closed-form survival and cumulative
-incidence of a piecewise-constant hazard table at any horizon. Each public function without a leading
+incidence of a piecewise-constant hazard table at any horizon, and the answers to two exercises on the opening cohort. Each public function without a leading
 underscore that takes no arguments returns a markdown string that the chapter embeds between
 `<!-- worked: survival_analysis.<name> -->` markers. Underscore functions and the constants are shared with
 the chapter's figures, so a picture and the table beside it cannot disagree.
@@ -429,6 +429,7 @@ def discrete_hazard():
     cohort = _discrete_cohort()
     rows, (th0, _, g0), (th1, var1, g1) = _discrete_fits()
     n_ev = sum(c[2] for c in cohort)
+    assert max(g0, g1) < 1e-9, "Newton's method has not converged"
     head = (_gen_line(DISCRETE_NAME, "Subject i = 0 .. 399 in order draws u = uniform() (x = 1 when u < 0.5), then c = 1 + integer(8) "
                       "(the subject is observed through the end of interval c), then eight uniform() draws u_1 .. u_8; the event "
                       "interval is the first j with u_j < sigmoid(alpha_j + 0.8 x), alpha_j = -2.6 + 0.15 (j - 1), and the event counts "
@@ -436,7 +437,7 @@ def discrete_hazard():
             + (f"The {len(cohort)} subjects give {len(rows)} person-period rows (j, x, y): a subject observed through interval L gives the "
                f"rows j = 1 .. L with y = 0, except that the row j = L has y = 1 when the event happened in interval L. There are {n_ev} events. "
                f"The model is logit p_j = alpha_j (one intercept per interval) or alpha_j + beta x, fitted by Newton's method from "
-               f"all-zero parameters, {NEWTON_STEPS} steps; the largest gradient entry after them is {g0:.0e} and {g1:.0e}, below 1e-9.\n\n"))
+               f"all-zero parameters, {NEWTON_STEPS} steps; for both models the largest gradient entry after them is below 1e-9.\n\n"))
     counts = []
     for j in range(1, DISCRETE_J + 1):
         n_j = sum(1 for r in rows if r[0] == j)
@@ -524,6 +525,7 @@ def competing_risks():
     rows = _compete_cohort()
     af_a, af_b, km_a, km_b, km_all = _compete_curves()
     d = [sum(1 for r in rows if r[1] == k) for k in (0, 1, 2)]
+    last = max(rows, key=lambda r: r[0])
     out = []
     for t in (3.0, 6.0, 12.0, 18.0, 24.0):
         fa, fb = _step_at(af_a, t), _step_at(af_b, t)
@@ -536,7 +538,8 @@ def competing_risks():
             f"(at each distinct time F_k grows by S(t-) d_k / n, then S is multiplied by 1 - d / n with d the events of both causes); "
             f"'naive' is one minus the Kaplan-Meier estimate that treats the other cause as a censoring. Last two columns: "
             f"F_a + F_b + S for the AJ estimates (S the Kaplan-Meier estimate for either cause) and the sum of the two naive "
-            f"estimates. The second column is the number of subjects whose time is at least t.\n\n")
+            f"estimates. The second column is the number of subjects whose time is at least t. The largest observed time is "
+            f"{last[0]:.2f} months, {'a failure from cause ' + 'ab'[last[1] - 1] if last[1] else 'a censoring'}.\n\n")
     tab = _table(["t", "at risk", "true F_a", "AJ F_a", "naive F_a", "true F_b", "AJ F_b", "naive F_b", "AJ: F_a + F_b + S", "naive: F_a + F_b"], out)
     return head + tab
 
@@ -578,8 +581,8 @@ def count_without_exposure():
     for e in (1.0, 0.1, 0.01, 0.001):
         lam_hat = 1.0 / e
         nll_rows.append((e, _fx(lam_hat, 0), _fx(lam_hat * e - math.log(lam_hat), 3)))
-    t = _table(["exposure E (one event)", "minimiser d / E", "negative log-likelihood at it"], nll_rows, "lrr")
-    return ("The Poisson negative log-likelihood of one event (d = 1) over an exposure E, lambda E - ln lambda, is minimised at "
+    t = _table(["exposure E (one event)", "minimizer d / E", "negative log-likelihood at it"], nll_rows, "lrr")
+    return ("The Poisson negative log-likelihood of one event (d = 1) over an exposure E, lambda E - ln lambda, is minimized at "
             "lambda = 1 / E, where it equals 1 + ln E:\n\n" + t)
 
 
@@ -889,5 +892,40 @@ def horizon_curves():
             "at the start of the piece times (1 - exp(-L_p w_p(t))); past the last knot the curves keep their value at 10. "
             "'Diagnosis' is the probability of the diagnosis before t and before any death.\n\n")
     tab = _table(["t", "S(t)", "F_a(t)", "F_b(t)", "S + F_a + F_b", "diagnosis before t, alive"], out)
-    return head + tab + (f"\n\nAgainst the midpoint rule on the integral of lambda_k S_k with step 0.0005 years, the largest difference "
-                         f"over the 21 closed-form values above is {worst:.1e}, below 1e-6.")
+    assert worst < 1e-6, "closed form and midpoint rule disagree"
+    return head + tab + ("\n\nAgainst the midpoint rule on the integral of lambda_k S_k with step 0.0005 years, every one of the 21 "
+                         "closed-form incidences above agrees to below 1e-6.")
+
+
+# ------------------------------------------------------------------ the answers to two exercises
+
+
+def censoring_exercises():
+    """Exercise 11 (informative censoring) and exercise 12 (piecewise-exponential fit) on the opening cohort."""
+    rows = _cohort()
+    times = [r[0] for r in rows]
+    events = [r[1] for r in rows]
+    t2, e2, moved = list(times), list(events), 0
+    for i, (t, e) in enumerate(zip(times, events)):
+        if i % 2 == 0 and e and t < 12.0:
+            t2[i], e2[i], moved = t / 2.0, 0, moved + 1
+
+    def median(km):
+        return next(r[0] for r in km if r[4] <= 0.5)
+
+    km, km2 = _km_table(times, events), _km_table(t2, e2)
+    knots = (0.0, 3.0, 6.0, 12.0, 24.0)
+    pieces = []
+    for a, b in zip(knots, knots[1:]):
+        d = sum(1 for t, e in zip(times, events) if e and a < t <= b)
+        exp_p = sum(max(0.0, min(t, b) - a) for t in times)
+        pieces.append((f"({a:g}, {b:g}]", d, exp_p, d / exp_p))
+    s12 = math.exp(-sum(lam * max(0.0, min(12.0, b) - a) for (_, _, _, lam), a, b in zip(pieces, knots, knots[1:])))
+    tab = _table(["piece (months)", "failures d_p", "exposure E_p (months)", "d_p / E_p (per month)"],
+                 [(p, d, _fx(e, 2), _fx(lam, 4)) for p, d, e, lam in pieces])
+    return (f"Exercise 11, on the cohort of `survival_analysis.censoring_bias`: the rule turns {moved} failures into censorings, "
+            f"leaving {sum(e2)} failures. Kaplan-Meier median {median(km):.2f} months before and {median(km2):.2f} after; survival at "
+            f"month 12 {_km_at(km, 12.0):.4f} before and {_km_at(km2, 12.0):.4f} after.\n\n"
+            f"Exercise 12, the same cohort with no features: total exposure {sum(times):.2f} months and {sum(events)} failures.\n\n" + tab +
+            f"\n\nImplied S(12) = exp(-(3 lambda_1 + 3 lambda_2 + 6 lambda_3)) = {s12:.4f}, against the Kaplan-Meier "
+            f"{_km_at(km, 12.0):.4f} with standard error {_se_at(km, 12.0):.4f}.")
