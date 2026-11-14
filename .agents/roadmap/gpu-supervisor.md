@@ -97,7 +97,7 @@ Choices the design above left open, and what was chosen:
   zombie, once it exits); the breaker's restart, trip, window
   and spaced-probe rules. The fakes are a POSIX shell that hangs in a
   grandchild or aborts.
-* `cargo test -p brain-residency --test it supervision` (5 tests): through
+* `cargo test -p brain-residency --test it supervision` (7 tests): through
   the executor, a hung run fails by its deadline while the other card
   serves and the restart probe readmits the device and the claim is
   unwound; a crash in activation keeps the card out (failing probes trip
@@ -107,15 +107,22 @@ Choices the design above left open, and what was chosen:
   quarantines the card, a restart is readmitted at once, a trip refuses work
   until the spaced readmissions pass; a multi-device model whose placement
   has a tripped card is refused at once while single-device work keeps
-  running on the healthy card.
+  running on the healthy card; a resident on a tripped card whose teardown
+  never finishes is moved: the next job is served on the healthy card, the
+  old instance is dropped on neither the dispatcher nor a lane, and its
+  memory stays charged until its teardown ends; a faulted instance whose
+  teardown wedges leaves the scheduler answering and placing other work.
 * `cargo test -p brain-serving --lib supervision` (2 tests): the worker
   beside the server executable runs the probes, bounded by `--gpu-wait-s`; a
   missing or non-executable worker is named and the breaker is kept.
 * `bats tests/e2e/deb.bats`: the package ships `/usr/bin/brain-gpu-worker`
   executable beside `/usr/bin/brain`.
 * `cargo test -p brain-residency --test it supervisor_model` (2 tests): an
-  exhaustive model of lanes, dispatcher, worker and the real `Breaker`
-  (about half a million states); six deliberate bugs are each caught.
+  exhaustive model of lanes, dispatcher, worker, the real `Breaker` and a
+  resident instance that must leave a tripped card, with teardowns that may
+  wedge (about 1.4 million states); nine deliberate bugs are each caught,
+  among them never moving the resident, releasing its memory before its
+  teardown ends, and tearing it down on the dispatcher.
 * `cargo test -p brain-gpu-worker` (2 tests, real card, skip with a printed
   reason where no card opens): a job through the executor and a supervised
   worker dispatches on gpu0 and returns the checked sum; a quarantined card
@@ -132,6 +139,6 @@ Choices the design above left open, and what was chosen:
 | **M2** buffers and dispatch behind the protocol for `backend-wgpu` (`Alloc`/`Write`/`Dispatch`/`Read` with a `memfd` mapping for bulk tensors), selected by a flag | open: no model runs in a worker yet; `brain-gpu-worker` serves the probe kernel only |
 | **M3** measure the per-dispatch round trip against a real dispatch batch on the target cards | open: gated on M2 |
 | **M4** make it the default; delete the abandon-the-thread path from `bounded` | open: gated on M3 |
-| moving a resident off a quarantined card | open: its instance would be dropped on the dispatcher thread through a driver that may be the wedged one, so its jobs wait for the restart probe or are refused once the breaker trips |
+| moving a resident off a quarantined card | done: once the card's breaker trips (before that the restart probe is due at once, cheaper than a rebuild), an idle resident a queued job needs is abandoned when a healthy device could hold it (`move_off_quarantined`, `ResidencyManager::abandon_resident`): it leaves residency at once, so the claim builds it afresh on the healthy card, and it is dropped on a thread of its own (`drop_elsewhere`), keeping its memory charged until the drop reports back (`Msg::Dropped`, `release_abandoned`). A failed group's instance (`unwind_failed`, `unwind_failed_multi`) goes the same way, so no teardown through a suspect driver runs on the dispatcher. A teardown that never returns holds one thread and its memory, nothing else. A resident no healthy card can hold is refused while the trip lasts |
 | multi-device models under quarantine | done: a multi-device model has one placement (its resident devices, else the ones `estimate_multi` names; `ResidencyManager::multi_placement`), and `refuse_quarantined` refuses its jobs once any device of it is quarantined with a tripped breaker; before a trip they wait for the restart probe like single-device work |
 | Windows | open: no `SIGKILL` or process groups; `Worker::spawn` reports unsupported off Unix. `TerminateProcess` and a job object are the equivalent and need a platform seam |

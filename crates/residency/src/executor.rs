@@ -26,7 +26,7 @@ use gpu_supervisor::Health;
 
 use crate::adapter::{AdapterIdentity, ServedAdapters};
 use crate::affinity::{choose_replica, PrefixDirectory, ReplicaView};
-use crate::manager::{ClaimError, Claimed, ClaimedMulti, InstanceHandle};
+use crate::manager::{Abandoned, ClaimError, Claimed, ClaimedMulti, InstanceHandle};
 use crate::scheduler::{choose_next, Group, Policy};
 use crate::supervised::{device_label, Probe, Supervision};
 use crate::{Device, InstanceKey, MultiDeviceResidentModel, ResidencyManager, ResidentModel};
@@ -206,6 +206,9 @@ enum Msg {
     /// A lane finished the health probe the dispatcher sent it; the device is
     /// free again (whatever the probe found is already in the registry).
     Probed { device: Device },
+    /// An abandoned instance (see [`drop_elsewhere`]) finished dropping; its
+    /// memory is given back.
+    Dropped { key: InstanceKey, charges: Vec<(Device, u64)> },
     /// Ask the dispatcher what starting one job would require and disturb
     /// (see [`Executor::plan`]). Answered on the dispatcher thread because
     /// that thread owns the manager, so a plan is consistent with the
@@ -417,7 +420,7 @@ impl Executor {
             lanes.insert(d, ltx);
         }
 
-        let dispatcher = Dispatcher::new(mgr, policy, lanes, stats.clone(), supervision.map(|s| s.health));
+        let dispatcher = Dispatcher::new(mgr, policy, lanes, tx.clone(), stats.clone(), supervision.map(|s| s.health));
         let h = std::thread::Builder::new()
             .name("brain-dispatcher".into())
             .spawn(move || dispatch_loop(rx, dispatcher, capacity))
@@ -758,6 +761,8 @@ struct Dispatcher {
     mgr: ResidencyManager,
     policy: Policy,
     lanes: HashMap<Device, Sender<LaneMsg>>,
+    /// The dispatcher's own inbox, for the threads that drop abandoned instances.
+    done: Sender<Msg>,
     stats: Arc<Mutex<Stats>>,
     /// Device health, when the executor runs supervised.
     health: Option<Arc<Health<Device>>>,
@@ -778,11 +783,12 @@ struct Dispatcher {
 }
 
 impl Dispatcher {
-    fn new(mgr: ResidencyManager, policy: Policy, lanes: HashMap<Device, Sender<LaneMsg>>, stats: Arc<Mutex<Stats>>, health: Option<Arc<Health<Device>>>) -> Dispatcher {
+    fn new(mgr: ResidencyManager, policy: Policy, lanes: HashMap<Device, Sender<LaneMsg>>, done: Sender<Msg>, stats: Arc<Mutex<Stats>>, health: Option<Arc<Health<Device>>>) -> Dispatcher {
         Dispatcher {
             mgr,
             policy,
             lanes,
+            done,
             stats,
             health,
             queue: Vec::new(),
@@ -915,7 +921,7 @@ fn dispatch_loop(rx: Receiver<Msg>, mut d: Dispatcher, capacity: Option<Capacity
 impl Dispatcher {
     /// Apply one message to the dispatcher's state.
     fn on_msg(&mut self, msg: Msg) {
-        let Dispatcher { queue, mgr, running, busy, stats, running_jobs, open_groups, replica_routes, next_id, .. } = self;
+        let Dispatcher { queue, mgr, running, busy, stats, running_jobs, open_groups, replica_routes, next_id, done, .. } = self;
         match msg {
             Msg::Submit(mut job) => match mgr.instance_key_for(&job.model, &job.action, &job.inv) {
                 Some(key) => {
@@ -1011,24 +1017,28 @@ impl Dispatcher {
             }
             Msg::Done { key, device, batch, failed } => {
                 // Free the dispatcher's OWN bookkeeping (`busy`/`running`) BEFORE
-                // the risky `mgr.build_failed`/`release` call below, which drops
-                // the claim's `InstanceHandle` and can panic a SECOND time (a lost
-                // GPU device's backend panicking again from inside its own Drop -
-                // see dispatch_loop's per-message catch_unwind). If that panic cut
-                // this handler off here instead, `device` would stay marked busy
-                // FOREVER (nothing else ever clears it), silently wedging every
-                // future claim on it - not a hang in this one model, a dead
-                // device. `mgr`'s own state is a separate concern: `build_failed`/
-                // `release` still run next, and their own edits to `residents`/
-                // `budgets`/`instances` happen before THEIR risky drop too (see
-                // their own bodies).
+                // the `mgr` call below: `release` can still drop an instance
+                // here (a transient model's), and a drop can panic a SECOND time
+                // (a lost GPU device's backend panicking again from inside its
+                // own Drop - see dispatch_loop's per-message catch_unwind). If
+                // that panic cut this handler off here instead, `device` would
+                // stay marked busy FOREVER (nothing else ever clears it),
+                // silently wedging every future claim on it - not a hang in this
+                // one model, a dead device. A failed group's instance, the one
+                // most likely to panic or block in its teardown, is never
+                // dropped on this thread (`drop_elsewhere`).
                 running.remove(&key);
                 open_groups.remove(&key);
                 running_jobs.retain(|r| r.key != key); // group finished - drop its jobs
                 busy.remove(&device);
                 if failed {
                     crate::log::warn(&format!("model activation/run failed: {key} on {device:?}"));
-                    mgr.build_failed(&key); // unwind budget + slot; jobs already failed
+                    // Unwind the slot; the instance, which faulted or
+                    // panicked, is dropped elsewhere and its budget comes
+                    // back with `Msg::Dropped`. Jobs already failed.
+                    if let Some(abandoned) = mgr.unwind_failed(&key) {
+                        drop_elsewhere(abandoned, done);
+                    }
                 } else {
                     mgr.release(&key);
                 }
@@ -1050,7 +1060,10 @@ impl Dispatcher {
                 }
                 if failed {
                     crate::log::warn(&format!("model activation/run failed (multi-device): {key} on {devices:?}"));
-                    mgr.build_failed_multi(&key); // unwind budget on EVERY device; jobs already failed
+                    // As for `Msg::Done`, on EVERY device the group held.
+                    if let Some(abandoned) = mgr.unwind_failed_multi(&key) {
+                        drop_elsewhere(abandoned, done);
+                    }
                 } else {
                     mgr.release_multi(&key);
                 }
@@ -1065,6 +1078,9 @@ impl Dispatcher {
             }
             Msg::Probed { device } => {
                 busy.remove(&device);
+            }
+            Msg::Dropped { key, charges } => {
+                mgr.release_abandoned(&key, &charges);
             }
             Msg::EvictMulti { key, reply } => {
                 let ok = mgr.evict_multi(&key);
@@ -1182,13 +1198,14 @@ fn note_unservable(stats: &Arc<Mutex<Stats>>, key: &InstanceKey, reason: Option<
 impl Dispatcher {
     /// Assign as many runnable groups as there are free device lanes.
     fn assign(&mut self) {
-        let Dispatcher { queue, mgr, policy, lanes, running, busy, stats, running_jobs, open_groups, health, .. } = self;
+        let Dispatcher { queue, mgr, policy, lanes, done, running, busy, stats, running_jobs, open_groups, health, .. } = self;
         let health = health.as_deref();
         // Quarantined devices are excluded exactly like busy ones, so a group is
         // placed on a healthy device when one can take it; what no healthy device
         // could ever take is refused once the quarantine is a long one.
         let quarantined: HashSet<Device> = health.map(|h| h.quarantined().into_iter().collect()).unwrap_or_default();
         if let Some(h) = health.filter(|_| !quarantined.is_empty()) {
+            move_off_quarantined(queue, mgr, running, &quarantined, h, done);
             refuse_quarantined(queue, mgr, running, &quarantined, h);
         }
         // Groups whose claim came back `NoCapacity` THIS round. They are skipped
@@ -1405,12 +1422,57 @@ impl Dispatcher {
     }
 }
 
+/// Abandon the idle residents that queued jobs need on a device whose breaker
+/// tripped, when a healthy device could hold them: the claim that follows
+/// builds a fresh instance there. Before a trip the restart probe is due at
+/// once, so such jobs wait the moment it takes instead of paying a rebuild.
+/// The old instance is dropped off this thread ([`drop_elsewhere`]): its
+/// teardown goes through the driver that stopped answering.
+fn move_off_quarantined(queue: &[Pending], mgr: &mut ResidencyManager, running: &HashSet<InstanceKey>, quarantined: &HashSet<Device>, health: &Health<Device>, done: &Sender<Msg>) {
+    let mut seen: HashSet<&InstanceKey> = HashSet::new();
+    for p in queue {
+        if running.contains(&p.key) || !seen.insert(&p.key) {
+            continue;
+        }
+        let Some(device) = mgr.resident_device(&p.key) else { continue };
+        if !quarantined.contains(&device) || !health.status(&device).tripped || !mgr.fits_outside(&p.key, &p.model, quarantined) {
+            continue;
+        }
+        crate::log::warn(&format!("moving {} off quarantined {device:?}: its instance is abandoned and rebuilt on a healthy device", p.key));
+        if let Some(abandoned) = mgr.abandon_resident(&p.key) {
+            drop_elsewhere(abandoned, done);
+        }
+    }
+}
+
+/// Drop an abandoned instance on a thread of its own, then report the drop
+/// so its memory is given back. A teardown that wedges in its driver holds
+/// only that thread (and keeps the memory charged), never the dispatcher; a
+/// panicking one is caught and still reported.
+fn drop_elsewhere(abandoned: Abandoned, done: &Sender<Msg>) {
+    let Abandoned { key, charges, instance } = abandoned;
+    let report = (key.clone(), charges.clone());
+    let sender = done.clone();
+    let spawned = std::thread::Builder::new().name("brain-drop".into()).spawn(move || {
+        if let Err(p) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(instance))) {
+            eprintln!("[residency] panic while dropping abandoned {key}: {}", panic_message(p.as_ref()));
+        }
+        let _ = sender.send(Msg::Dropped { key, charges });
+    });
+    // Without a thread the closure, and the instance with it, was dropped by
+    // the failed spawn itself; its memory is free now.
+    if let Err(e) = spawned {
+        let (key, charges) = report;
+        eprintln!("[residency] could not start a thread to drop {key} ({e}); dropped it in place");
+        let _ = done.send(Msg::Dropped { key, charges });
+    }
+}
+
 /// Fail the queued jobs that only a quarantined device could run, once that
 /// quarantine is a long one (its breaker tripped). Before a trip the restart
 /// probe is due at once, so such jobs wait the moment it takes instead. A job
-/// whose instance is resident on a quarantined device counts as needing that
-/// device: moving a resident off a quarantined card would drop its instance on
-/// this thread, through a driver that may be the wedged one. A multi-device
+/// whose instance is still resident on a quarantined device (no healthy one
+/// could hold it, so [`move_off_quarantined`] kept it) needs that device. A multi-device
 /// model has one placement (the devices it is built across), so its jobs are
 /// refused once any device of it is quarantined with a tripped breaker.
 fn refuse_quarantined(queue: &mut Vec<Pending>, mgr: &ResidencyManager, running: &HashSet<InstanceKey>, quarantined: &HashSet<Device>, health: &Health<Device>) {
@@ -3324,8 +3386,9 @@ mod tests {
         let models: Vec<Arc<dyn ResidentModel>> = vec![Arc::new(DropPanicsModel), Arc::new(Slow { name: "good".into(), vram: GB, ms: 1, builds })];
         let exec = Executor::start(models, budgets, Policy::default());
 
-        // "boom" fails (its run() panics, then its Drop panics AGAIN on the
-        // dispatcher thread while the claim unwinds) -- the caller must still
+        // "boom" fails (its run() panics, then its Drop panics AGAIN while the
+        // claim unwinds, on the thread the failed instance is dropped on, so
+        // its memory must still come back) -- the caller must still
         // get a reply, not hang. `run_blocking`'s own recv is unbounded, so
         // this call itself would hang forever pre-fix -- exactly the failure
         // this regression exists to catch. Bounded via a plain submit +

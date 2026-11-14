@@ -16,8 +16,10 @@ Device work that runs inside the brain process is bounded, not killable:
   process, so it is left behind, still holding what it had opened, until the
   driver returns or the process exits.
 - The job fails with that error, its device lane is freed and the model's
-  claim (memory budget, slot, instance) is released. The next job for the
-  model builds a fresh instance.
+  claim (slot, instance) is released. The failed instance is torn down in
+  the background, so a teardown that blocks in the driver holds up nothing
+  else; its memory is counted as used until the teardown finishes. The next
+  job for the model builds a fresh instance.
 
 ## Device health in `brain serve`
 
@@ -58,6 +60,9 @@ time. An embedder starts the executor with supervision
   it.
 - **The device is quarantined.** No new work is placed on it; work goes to
   another device that can hold it. Other devices keep serving throughout.
+  A model loaded on a device whose breaker tripped (below) is moved: its
+  next job builds it afresh on a healthy device, and the old copy is torn
+  down in the background, its memory still counted until that finishes.
 - **A health probe readmits it.** After a first or second fault in ten
   minutes, a probe (a fresh worker opening the device and running one
   checked dispatch) runs at once, and a pass readmits the device. A third

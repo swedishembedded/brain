@@ -15,7 +15,7 @@
 //! once a health probe passes.
 
 use std::sync::mpsc::{channel, Receiver};
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use capability::{ActionResult, ActionSpec, Invocation, Manifest};
@@ -298,5 +298,116 @@ fn a_multi_device_model_whose_placement_has_a_tripped_card_is_refused_not_left_w
     // Single-device work still lands on the healthy card.
     let (_, r) = submit(&exec, "in-process", "ok");
     r.recv_timeout(Duration::from_secs(10)).expect("answered").0.expect("gpu0 serves");
+    exec.shutdown();
+}
+
+/// An in-process model whose instance's drop blocks until the test opens a
+/// gate, as a drop through a wedged driver would, and records the thread it
+/// ran on.
+#[derive(Default)]
+struct Sticky {
+    gate: Arc<(Mutex<bool>, Condvar)>,
+    dropped_on: Arc<Mutex<Option<String>>>,
+}
+
+struct StickyInstance {
+    gate: Arc<(Mutex<bool>, Condvar)>,
+    dropped_on: Arc<Mutex<Option<String>>>,
+}
+
+impl Sticky {
+    fn open_gate(&self) {
+        let (open, cv) = &*self.gate;
+        *open.lock().unwrap() = true;
+        cv.notify_all();
+    }
+}
+
+impl ResidentModel for Sticky {
+    fn manifest(&self) -> Manifest {
+        Manifest::new("sticky", "a fake model whose teardown wedges", vec![ActionSpec::new("run", "run")])
+    }
+
+    fn instance_key(&self, _action: &str, _inv: &Invocation) -> InstanceKey {
+        InstanceKey::new("sticky", "default")
+    }
+
+    fn estimate(&self, _key: &InstanceKey) -> MemCost {
+        MemCost::new(20 * GB, 0)
+    }
+
+    fn activate(&self, _key: &InstanceKey, _device: Device) -> Result<Box<dyn Instance>, String> {
+        Ok(Box::new(StickyInstance { gate: self.gate.clone(), dropped_on: self.dropped_on.clone() }))
+    }
+}
+
+impl Instance for StickyInstance {
+    fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(capability::Progress)) -> ActionResult {
+        InProcessInstance.run(action, inv, progress)
+    }
+}
+
+impl Drop for StickyInstance {
+    fn drop(&mut self) {
+        *self.dropped_on.lock().unwrap() = std::thread::current().name().map(str::to_string);
+        let (open, cv) = &*self.gate;
+        let mut open = open.lock().unwrap();
+        while !*open {
+            open = cv.wait(open).unwrap();
+        }
+    }
+}
+
+fn used_on(exec: &Executor, device: Device) -> u64 {
+    exec.residency().budgets.iter().find(|b| b.device == device).map_or(0, |b| b.used)
+}
+
+#[test]
+fn a_resident_on_a_tripped_card_is_abandoned_off_the_dispatcher_and_rebuilt_on_a_healthy_one() {
+    let health = health();
+    let sticky = Arc::new(Sticky::default());
+    let exec = Executor::start_supervised(vec![sticky.clone()], two_gpus(), Policy::default(), None, Some(Supervision { health: health.clone(), probe: Probe::Elapsed }));
+    let (_, r) = submit(&exec, "sticky", "ok");
+    r.recv_timeout(Duration::from_secs(10)).expect("answered").0.expect("the first job builds the instance");
+    let home = exec.residency().placements.iter().find(|p| p.key.model == "sticky").map(|p| p.device).expect("sticky is resident");
+    let other = if home == Device::Gpu(0) { Device::Gpu(1) } else { Device::Gpu(0) };
+
+    let now = Instant::now();
+    for _ in 0..health.policy().trip_after {
+        health.record_fault(&home, now, "a device wait ran past (--gpu-wait-s)");
+    }
+    // The next job is served on the healthy card even though tearing the old
+    // instance down never finishes: the teardown runs off the dispatcher.
+    let (_, r) = submit(&exec, "sticky", "ok");
+    r.recv_timeout(Duration::from_secs(10)).expect("answered, not refused or left waiting").0.expect("rebuilt on the healthy card");
+    let placed: Vec<Device> = exec.residency().placements.iter().filter(|p| p.key.model == "sticky").map(|p| p.device).collect();
+    assert_eq!(placed, vec![other], "the instance moved off the tripped card");
+    wait_until("the abandoned instance's teardown to start", Duration::from_secs(10), || sticky.dropped_on.lock().unwrap().is_some());
+    let dropped_on = sticky.dropped_on.lock().unwrap().clone();
+    assert!(dropped_on.as_deref().is_some_and(|t| t != "brain-dispatcher" && !t.starts_with("brain-lane")), "the abandoned instance was dropped on {dropped_on:?}");
+    // Its memory is still taken until the teardown finishes, so nothing is
+    // placed on the card over it once the card is readmitted.
+    assert_eq!(used_on(&exec, home), 20 * GB, "the abandoned instance stays charged while it is torn down");
+    sticky.open_gate();
+    wait_until("the abandoned charge to be released", Duration::from_secs(10), || used_on(&exec, home) == 0);
+    exec.shutdown();
+}
+
+#[test]
+fn a_faulted_instance_whose_teardown_wedges_does_not_stall_the_scheduler() {
+    let health = health();
+    let sticky = Arc::new(Sticky::default());
+    let exec = Executor::start_supervised(vec![sticky.clone(), Arc::new(InProcess)], two_gpus(), Policy::default(), None, Some(Supervision { health: health.clone(), probe: Probe::Elapsed }));
+    let (_, r) = submit(&exec, "sticky", "wedge");
+    r.recv_timeout(Duration::from_secs(10)).expect("answered").0.expect_err("the wedged run fails");
+    // The faulted claim is unwound while its instance's teardown is stuck:
+    // the scheduler still answers and still places work.
+    wait_until("the stuck teardown to start", Duration::from_secs(10), || sticky.dropped_on.lock().unwrap().is_some());
+    assert!(exec.residency().placements.iter().all(|p| p.key.model != "sticky"), "the faulted instance is no longer resident");
+    let (_, r) = submit(&exec, "in-process", "ok");
+    r.recv_timeout(Duration::from_secs(10)).expect("answered").0.expect("another model is served meanwhile");
+    let dropped_on = sticky.dropped_on.lock().unwrap().clone();
+    assert!(dropped_on.as_deref().is_some_and(|t| t != "brain-dispatcher"), "the faulted instance was dropped on {dropped_on:?}");
+    sticky.open_gate();
     exec.shutdown();
 }

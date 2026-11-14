@@ -46,6 +46,19 @@ use crate::{Device, Instance, InstanceKey, MemCost, ResidentModel, Tier};
 /// The scheduler runs it outside the manager lock; the key stays pinned meanwhile.
 pub type InstanceHandle = Arc<Mutex<Box<dyn Instance>>>;
 
+/// An instance taken out of residency but not dropped: the caller drops it
+/// where a slow or wedged teardown (a driver that stopped answering) cannot
+/// stall scheduling, then gives its memory back with
+/// [`ResidencyManager::release_abandoned`]. Until then the bytes stay
+/// charged, so nothing is placed over memory the old instance may still hold.
+#[must_use = "an abandoned instance's memory stays charged until release_abandoned"]
+pub struct Abandoned {
+    pub key: InstanceKey,
+    /// What the instance is charged on each device it occupied.
+    pub charges: Vec<(Device, u64)>,
+    pub instance: InstanceHandle,
+}
+
 /// Why a claim could not produce a runnable instance. The executor MUST treat
 /// these differently: `NoCapacity` is transient (retry when a lane frees a
 /// device); `TooLarge` and `Activate` are permanent for the key - the queued
@@ -1004,6 +1017,64 @@ impl ResidencyManager {
         self.builds += 1;
         self.event(format!("built {key}"));
         handle
+    }
+
+    /// A claimed group failed: unwind the resident slot, and hand back the
+    /// instance (when one was built) as [`Abandoned`] instead of dropping it
+    /// here; without one the budget is released at once. The claim is over -
+    /// do NOT also call [`release`](Self::release).
+    pub fn unwind_failed(&mut self, key: &InstanceKey) -> Option<Abandoned> {
+        let entry = self.residents.get(key).copied()?;
+        let Some(instance) = self.instances.remove(key) else {
+            self.build_failed(key);
+            return None;
+        };
+        self.residents.remove(key);
+        self.event(format!("build-failed {key} (instance abandoned)"));
+        Some(Abandoned { key: key.clone(), charges: vec![(entry.device, entry.cost.resident_on(entry.device))], instance })
+    }
+
+    /// [`Self::unwind_failed`]'s multi-device sibling.
+    pub fn unwind_failed_multi(&mut self, key: &InstanceKey) -> Option<Abandoned> {
+        if !self.multi_residents.contains_key(key) {
+            return None;
+        }
+        let Some(instance) = self.instances.remove(key) else {
+            self.build_failed_multi(key);
+            return None;
+        };
+        let entry = self.multi_residents.remove(key)?;
+        let mut charges: Vec<(Device, u64)> = entry.devices.iter().map(|&d| (d, entry.cost.on(d))).collect();
+        if self.charges_multi_host(&entry.cost, &entry.devices) {
+            charges.push((Device::Cpu, entry.cost.ram()));
+        }
+        self.event(format!("build-failed {key} (multi-device, instance abandoned)"));
+        Some(Abandoned { key: key.clone(), charges, instance })
+    }
+
+    /// Take an idle resident off its device without dropping it, so a later
+    /// claim builds the key afresh elsewhere: for an instance on a device that
+    /// stopped working, whose teardown may block in its driver. `None` when
+    /// the key is not resident, is running, or has no instance (then nothing
+    /// is held and its slot is simply freed).
+    pub fn abandon_resident(&mut self, key: &InstanceKey) -> Option<Abandoned> {
+        let entry = self.residents.get(key).copied().filter(|e| !e.pinned)?;
+        let Some(instance) = self.instances.remove(key) else {
+            self.build_failed(key);
+            return None;
+        };
+        self.residents.remove(key);
+        self.evictions += 1;
+        self.event(format!("abandon {key} <- {:?}", entry.device));
+        Some(Abandoned { key: key.clone(), charges: vec![(entry.device, entry.cost.resident_on(entry.device))], instance })
+    }
+
+    /// An [`Abandoned`] instance was dropped: give back what it was charged.
+    pub fn release_abandoned(&mut self, key: &InstanceKey, charges: &[(Device, u64)]) {
+        for &(device, bytes) in charges {
+            self.budgets.release(device, bytes);
+        }
+        self.event(format!("dropped {key}"));
     }
 
     /// A deferred build failed: unwind the pre-accounted budget + resident slot.
