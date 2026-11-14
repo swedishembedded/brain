@@ -1751,8 +1751,8 @@ fn agreed_eval<M: Model, O: Objective<M>>(obj: &mut O, model: &M, rng: &Rng, bat
 /// already named by [`FitControl::grad_sync`] is the same request; naming a
 /// different one is refused, not overridden.
 ///
-/// Exact resume is refused with a sync: the state is one rank's, and a world
-/// size is not part of its identity yet.
+/// Exact resume with a sync needs the world size in the run identity: the
+/// state is one rank's, and a resume with a different group is refused.
 pub fn fit_controlled_sync<M: Model, O: Objective<M>>(model: M, obj: O, opts: &FitOpts, out: Option<&Path>, control: FitControl<'_>, grad_sync: Option<GradSync<'_>>) -> std::io::Result<(FitReport, M)> {
     fit_controlled_sharded(model, obj, opts, out, control, grad_sync, None)
 }

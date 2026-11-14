@@ -942,8 +942,10 @@ impl<M: Shardable> Pipeline<M> {
     /// keeps only per-microbatch *input residuals* and recomputes its forward
     /// before its backward), so activation memory is `O(p · b·t·d)` regardless of
     /// the microbatch count. Gradients accumulate across microbatches; returns the
-    /// summed loss. Bit-exact to running the microbatches sequentially with
-    /// grad-accum (validated in `shard_microbatch.rs`).
+    /// summed loss. Equal, up to float summation order, to running the
+    /// microbatches sequentially with grad-accum: the backward visits them in
+    /// reverse, so accumulated gradients can differ in their last bits
+    /// (`shard_microbatch.rs` holds them within 1e-3 relative).
     ///
     /// Call [`Self::zero_grads`] first and an optimiser step (e.g.
     /// [`Self::adamw_step`] with `extra_scale = 1/m`) after.

@@ -82,8 +82,11 @@ pub fn tp_step_secs(hw: &Hardware, s: &ModelShape, t: usize) -> f64 {
     } else {
         l * 2.0 * (2.0 * (t as f64 - 1.0) / t as f64 * msg / hw.link_bytes_per_s + hw.link_latency_s)
     };
-    // Backward ≈ 2× the forward's compute and communication.
-    2.0 * (t_local + t_comm)
+    // The backward's GEMMs form the input and the weight gradient, twice the
+    // forward's FLOPs; it all-reduces the input gradient once per sublayer, the
+    // forward's communication again. A step is three forwards of compute and
+    // two of communication.
+    3.0 * t_local + 2.0 * t_comm
 }
 
 /// Does the model fit at TP degree `t`? TP shards weights+optimiser by `t`;
@@ -194,6 +197,20 @@ mod tests {
     }
 
     // ---- cost model: the T_local ↓ / T_comm ↑ tradeoff the degree selection abstracts over ----
+
+    /// Spec: a training step is a forward and a backward whose GEMMs form both
+    /// the input and the weight gradient, twice the forward's FLOPs: three
+    /// forwards of compute. At TP 1 there is no communication, so the step is
+    /// exactly that.
+    #[test]
+    fn a_step_costs_a_forward_and_a_backward_of_twice_its_flops() {
+        let s = shape();
+        let hw = pcie();
+        let (m, d, ff) = (s.tokens as f64, s.d_model as f64, s.d_ff as f64);
+        let forward = s.n_layers as f64 * (2.0 * (2.0 * m * d * ff) + 4.0 * (2.0 * m * d * d)) / hw.peak_flops;
+        let step = tp_step_secs(&hw, &s, 1);
+        assert!((step / forward - 3.0).abs() < 1e-12, "step {step} s is {:.3} forwards, not 3", step / forward);
+    }
 
     #[test]
     fn more_tp_cuts_compute_but_adds_communication() {
