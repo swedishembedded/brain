@@ -667,7 +667,7 @@ def flags_from_spec():
     return ("The action `sketch` declares six params, one required input blob `image` and one output blob `result`. "
             "Every param becomes a flag of its own; an input blob becomes `--image PATH` (or `--in image=PATH`) and an "
             "output `--out result=PATH`. A flag left out sets nothing, so the action's own default applies when it "
-            "validates. The numeric refusals are worded as the flag reader words them; the parser's other refusals (a missing required flag, an unknown flag) are paraphrased.\n\n" + t1 + "\n\n" + t2)
+            "validates. A refusal is printed as `--flag: reason`, a simplified framing of the longer message the flag-parsing library prints; the reason is the program's own wording for a number out of bounds and for an unknown output, and the refusal of a missing required flag is paraphrased.\n\n" + t1 + "\n\n" + t2)
 
 
 # ------------------------------------------------------------------ the consuming flag grammar

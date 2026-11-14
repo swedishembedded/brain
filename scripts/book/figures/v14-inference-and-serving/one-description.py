@@ -49,7 +49,7 @@ def render() -> str:
     for b in boxes[2:4]:
         d.arrow(b["r"], served["l"])
     d.path([boxes[4]["r"], (690, 410), ex["b"]])
-    d.text(470, 395, ["an invocation built from the dialect's fixed fields"], size=12, color=MUTED)
+    d.text(470, 395, ["an invocation built from the dialect's own fields"], size=12, color=MUTED)
     d.arrow(local["r"], (prov["l"][0], local["r"][1]))
     d.arrow(served["r"], ex["l"])
     d.arrow(ex["r"], (prov["l"][0], ex["r"][1]))
