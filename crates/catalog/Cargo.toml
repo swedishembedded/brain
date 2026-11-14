@@ -10,6 +10,7 @@ name = "catalog"
 path = "src/lib.rs"
 
 [dependencies]
+brain-arch.workspace = true
 brain-capability.workspace = true
 brain-residency.workspace = true
 brain-modelstore.workspace = true

@@ -544,11 +544,24 @@ pub struct Manifest {
     /// serializes to nothing, so a manifest that declares none of it is
     /// byte-identical on the wire to one from before this field existed.
     pub presentation: ModelPresentation,
+    /// The canonical architecture id (`brain_arch::ARCHS`) of the weights
+    /// this model serves, when the code that registered it knows it: what a
+    /// served model's support level is looked up by. `None` when nobody
+    /// declared one; a consumer then treats the model as uncertified rather
+    /// than guessing from its id.
+    pub architecture: Option<String>,
 }
 
 impl Manifest {
     pub fn new(model: &str, summary: &str, actions: Vec<ActionSpec>) -> Manifest {
-        Manifest { model: model.into(), summary: summary.into(), actions, max_context_tokens: None, presentation: ModelPresentation::default() }
+        Manifest { model: model.into(), summary: summary.into(), actions, max_context_tokens: None, presentation: ModelPresentation::default(), architecture: None }
+    }
+    /// Builder setter for [`Self::architecture`], called where a model is
+    /// registered for serving (the registrant is what knows which
+    /// architecture's weights it built the model over).
+    pub fn with_architecture(mut self, architecture: &str) -> Manifest {
+        self.architecture = Some(architecture.into());
+        self
     }
     /// Builder setter for [`Self::max_context_tokens`]. Kept as a separate
     /// setter (rather than a `new()` parameter) so the other ~35 existing
@@ -582,6 +595,9 @@ impl Manifest {
         let presentation = self.presentation.to_json();
         if !presentation.is_null() {
             v["presentation"] = presentation;
+        }
+        if let Some(architecture) = &self.architecture {
+            v["architecture"] = json!(architecture);
         }
         v
     }

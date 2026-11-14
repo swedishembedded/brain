@@ -918,6 +918,7 @@ dependencies = [
  "brain",
  "brain-apiserve",
  "brain-arcface",
+ "brain-arch",
  "brain-audio",
  "brain-capability",
  "brain-capability-mock",

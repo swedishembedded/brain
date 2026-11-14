@@ -450,9 +450,11 @@ impl RicursiveResident {
         self.deployment.serve.max_seq_len
     }
 
+    /// Declares the architecture itself, so the adapter views served over this resident (which restate its
+    /// manifest) declare it too.
     fn manifest_for(&self) -> Manifest {
         let generate = llmserve::with_sampling_defaults(generate_action(), &self.id, &self.sampling);
-        Manifest::new(&self.id, SUMMARY, vec![generate]).with_max_context_tokens(u64::from(self.max_seq_len()))
+        Manifest::new(&self.id, SUMMARY, vec![generate]).with_max_context_tokens(u64::from(self.max_seq_len())).with_architecture(CARD_FAMILY)
     }
 
     /// The scheduler and front end over an engine opened on `plan`, in the process's current device scope.

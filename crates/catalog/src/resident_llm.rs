@@ -764,6 +764,12 @@ pub struct QwenResident {
     id: String,
     path: String,
     tokenizer: String,
+    /// The architecture its card names (`qwen3`, or a config variant such as
+    /// `llama`), declared on its own manifest rather than by a wrapper:
+    /// adapter views and aliases restate this resident's manifest, so they
+    /// declare it too. `None` for a checkpoint `--checkpoint` names without
+    /// a card.
+    architecture: Option<&'static str>,
     /// The adapters this base offers and the bank size they run on.
     adapters: Arc<AdapterRegistry>,
     /// Resolved once at construction (see [`Self::resolve_ctx`]) - explicit,
@@ -860,7 +866,7 @@ impl QwenResident {
     /// [`Self::resolve_ctx`]), and is otherwise copied straight into fields
     /// `estimate`/`activate` read.
     pub fn from_card_configured(path: &str, card: &ModelCard, tokenizer: Option<&str>, cfg: QwenServeConfig) -> QwenResident {
-        Self::build(path, card.id.clone(), Some(card.id.clone()), tokenizer.unwrap_or_default(), cfg)
+        QwenResident { architecture: brain_arch::by_family(&card.family).map(|a| a.id), ..Self::build(path, card.id.clone(), Some(card.id.clone()), tokenizer.unwrap_or_default(), cfg) }
     }
 
     fn build(path: &str, id: String, base_id: Option<String>, tokenizer: &str, cfg: QwenServeConfig) -> QwenResident {
@@ -876,6 +882,7 @@ impl QwenResident {
             id,
             path: path.to_string(),
             tokenizer: tokenizer.to_string(),
+            architecture: None,
             adapters: AdapterRegistry::new(cfg.adapter_bank, ServedBase::new(path, base_id)),
             ctx,
             max_batch: cfg.max_batch.max(1),
@@ -1258,8 +1265,11 @@ impl ResidentModel for QwenResident {
         // on why this must be the actual engine capacity, not the
         // checkpoint's architectural `max_position_embeddings`.
         let generate = llmserve::with_sampling_defaults(generate_spec("generate text (Qwen3; chat template optional)", true), &self.id, self.sampling_defaults());
-        Manifest::new(&self.id, "text generation (Qwen3 BPE decoder)", vec![generate, llmserve::score_spec()])
-            .with_max_context_tokens(self.ctx as u64)
+        let manifest = Manifest::new(&self.id, "text generation (Qwen3 BPE decoder)", vec![generate, llmserve::score_spec()]).with_max_context_tokens(self.ctx as u64);
+        match self.architecture {
+            Some(arch) => manifest.with_architecture(arch),
+            None => manifest,
+        }
     }
     /// One key for the base and every adapter riding on it: a constant, because
     /// the instance holds the base weights once and the adapters beside them

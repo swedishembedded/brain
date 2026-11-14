@@ -21,7 +21,7 @@ use catalog::resident_yolo::YoloResident;
 use catalog::resident_zimage::ZImageResident;
 use residency::bridge::ProviderResident;
 use residency::multi::MultiDeviceResidentModel;
-use residency::{Device, Executor, Policy, ResidentModel};
+use residency::{Device, Executor, OfArchitecture, Policy, ResidentModel};
 
 use crate::Machine;
 
@@ -55,6 +55,14 @@ pub struct Serving {
     /// The Ripple checkpoints the model scan registered, as concrete handles: `--adapter` offers its adapter as a
     /// model of its own beside the base ([`ricursive::resident::RicursiveResident::with_adapter`]).
     pub ricursive: Vec<Arc<ricursive::resident::RicursiveResident>>,
+}
+
+/// `model`, registered with `arch` (an id of `brain_arch::ARCHS`) declared on
+/// its manifest: the architecture of the weights this function built it over,
+/// which a front end reports the certified support level of.
+fn of_arch(arch: &'static str, model: Arc<dyn ResidentModel>) -> Arc<dyn ResidentModel> {
+    debug_assert!(brain_arch::by_id(arch).is_some(), "{arch} is not a registered architecture");
+    Arc::new(OfArchitecture::new(arch, model))
 }
 
 /// Register `qwen` (when its weights are configured) as an ordinary erased
@@ -235,12 +243,12 @@ pub fn build_executor(machine: &Machine, reserve: Reserve, store: &catalog::Serv
     // names) through `s3dit::spec::S3ditSpec` - see `ZImageResident::
     // from_store`'s own doc.
     match ZImageResident::from_store(store) {
-        Some(z) => models.push(Arc::new(z)),
+        Some(z) => models.push(of_arch("s3dit", Arc::new(z))),
         None => residency::log::not_served("brain: z-image not served over the scheduler (place a checkpoint under the model dir, or --pin s3dit.ROLE=PATH)"),
     }
     // YOLO object detection, over the checkpoint the model store holds.
     if let Some(y) = YoloResident::from_store(store) {
-        models.push(Arc::new(y));
+        models.push(of_arch("yolov8", Arc::new(y)));
     } else {
         residency::log::not_served("brain: yolo not served over the scheduler (pull Ultralytics/YOLOv8 into the model dir)");
     }
@@ -266,7 +274,7 @@ pub fn build_executor(machine: &Machine, reserve: Reserve, store: &catalog::Serv
             if let Some(why) = qwen35.fp32_refused.as_ref().filter(|_| qwen35.fp32.refused) {
                 residency::log::not_served(&format!("brain: qwen35 (brain checkpoint) not served: {why}"));
             } else if let Some(q) = catalog::resident_qwen35::Qwen35Resident::from_assembly_sized(&assembly, qwen35.fp32.sanitized()) {
-                models.push(Arc::new(q));
+                models.push(of_arch("qwen35", Arc::new(q)));
             }
         }
         Err(e) => residency::log::not_served(&format!("brain: qwen35 not served over the scheduler ({e})")),
@@ -282,14 +290,14 @@ pub fn build_executor(machine: &Machine, reserve: Reserve, store: &catalog::Serv
         residency::log::not_served("brain: flux2-klein not served over the scheduler (pull a FLUX.2 Klein checkpoint into the model dir)");
     }
     for f in flux2_residents {
-        models.push(Arc::new(f));
+        models.push(of_arch("flux2", Arc::new(f)));
     }
     // Wan2.1 text-to-video: a resident transformer per (variant, frames,
     // size) - see resident_wan.rs. A pulled checkpoint reaches its adapter
     // through `model_dir::resident_for_compound`'s `"wan"` arm, so whether
     // Wan is missing is decided after the model-dir scan below.
     if let Some(w) = catalog::resident_wan::WanResident::from_pins(store) {
-        models.push(Arc::new(w));
+        models.push(of_arch("wan", Arc::new(w)));
     }
     // MiniMax-H3 joint video+audio reaches its adapter through
     // `model_dir::resident_for_compound`'s `"minimaxh3"` arm, from the store.
@@ -302,7 +310,7 @@ pub fn build_executor(machine: &Machine, reserve: Reserve, store: &catalog::Serv
         residency::log::not_served("brain: ltxv not served over the scheduler (pull an LTX-2.5 checkpoint into the model dir)");
     }
     for l in ltxv_residents {
-        models.push(Arc::new(l));
+        models.push(of_arch("ltxv", Arc::new(l)));
     }
     // Every catalog model with a residency adapter (`catalog::models()`, the
     // one table `brain caps` and `brain <model> <action>` read too, so a model
@@ -316,7 +324,7 @@ pub fn build_executor(machine: &Machine, reserve: Reserve, store: &catalog::Serv
     // store id, in a supervised worker when `--worker-hosted decision` asks,
     // plus the family model that answers inventory and `auto` selection
     // without loading anything.
-    models.extend(decisions::resident::serve_all(&decision, store.models_dir(), worker_hosting.as_ref()));
+    models.extend(decisions::resident::serve_all(&decision, store.models_dir(), worker_hosting.as_ref()).into_iter().map(|d| of_arch("decide", d)));
     // Deterministic mock model (`--mock`): a real ResidentModel - no weights, no
     // GPU - registered as `mock` so the HTTP conformance harness can validate the
     // whole API surface through the true serving path (placement → activate →
@@ -347,10 +355,10 @@ pub fn build_executor(machine: &Machine, reserve: Reserve, store: &catalog::Serv
             None
         }
     };
-    models.push(Arc::new(ProviderResident::stateless_with_manifest(
-        Arc::new(fastvlm::caps::FastVlmProvider::new(fastvlm_weights)),
-        fastvlm::caps::manifest_resident(),
-    )));
+    models.push(of_arch(
+        "fastvlm",
+        Arc::new(ProviderResident::stateless_with_manifest(Arc::new(fastvlm::caps::FastVlmProvider::new(fastvlm_weights)), fastvlm::caps::manifest_resident())),
+    ));
     // Moondream 3: `dir` resolved through `moondream3::spec::Moondream3Spec`
     // instead of `BRAIN_MOONDREAM3_WEIGHTS` - registered directly (not through
     // `catalog::residents()`) because `Moondream3Resident::
@@ -360,7 +368,7 @@ pub fn build_executor(machine: &Machine, reserve: Reserve, store: &catalog::Serv
     match store.resolve("moondream3", &moondream3::spec::Moondream3Spec) {
         Ok(assembly) => {
             if let Some(m) = catalog::resident_moondream3::Moondream3Resident::from_assembly(&assembly) {
-                models.push(Arc::new(m));
+                models.push(of_arch("moondream3", Arc::new(m)));
             }
         }
         Err(e) => residency::log::not_served(&format!("brain: moondream3 not served over the scheduler ({e})")),
@@ -370,7 +378,7 @@ pub fn build_executor(machine: &Machine, reserve: Reserve, store: &catalog::Serv
     match store.resolve("januspro", &januspro::spec::JANUS_PRO) {
         Ok(assembly) => {
             for m in catalog::resident_januspro::JanusProResident::family_from_assembly(&assembly, gpus, reserve.undeclared()) {
-                models.push(Arc::new(m));
+                models.push(of_arch("januspro", Arc::new(m)));
             }
         }
         Err(e) => residency::log::not_served(&format!("brain: januspro not served over the scheduler ({e})")),
@@ -386,10 +394,7 @@ pub fn build_executor(machine: &Machine, reserve: Reserve, store: &catalog::Serv
             None
         }
     };
-    models.push(Arc::new(ProviderResident::stateless_with_manifest(
-        Arc::new(llava::caps::LlavaProvider::new(llava_weights)),
-        llava::caps::manifest_resident(),
-    )));
+    models.push(of_arch("llava", Arc::new(ProviderResident::stateless_with_manifest(Arc::new(llava::caps::LlavaProvider::new(llava_weights)), llava::caps::manifest_resident()))));
     // brain/imgpipe: the pipeline holds no weights of its own (each stage
     // resolves its own through the model store), so it is stateless from the
     // scheduler's point of view too. Its stages come from
@@ -506,7 +511,7 @@ pub fn build_executor(machine: &Machine, reserve: Reserve, store: &catalog::Serv
     // plain `register` would be structurally wrong for it). The full Qwen3-Omni
     // is a catalog multi-device resident, registered with the others above.
     if let Some(t) = catalog::resident_omni::int8_thinker_multi_from_store(store, gpus, reserve.undeclared()) {
-        exec.register_multi(Arc::new(t));
+        exec.register_multi(Arc::new(OfArchitecture::new("qwen3omnimoe", Arc::new(t))));
     } else {
         residency::log::not_served(&format!("brain: {} not served over the scheduler (no Qwen3-Omni checkpoint in the model store; brain qwen3omnimoe import writes one)", qwen3omnimoe::int8_thinker_resident::MODEL));
     }

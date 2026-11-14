@@ -397,7 +397,7 @@ impl Scan {
         };
 
         match resident_for(&wp, card, tokenizer.as_deref(), self.qwen_cfg_for(&card.id), self.settings.qwen35.fp32, self.settings.encoder_batch) {
-            Some(built) => self.keep(&card.id, built, dir),
+            Some(built) => self.keep(&card.id, built.declaring(card), dir),
             None => {
                 self.seen.remove(&card.id); // free the id if the family declined
             }
@@ -516,6 +516,20 @@ enum Built {
 }
 
 impl Built {
+    /// This model with the architecture `card` names declared on its manifest
+    /// ([`residency::OfArchitecture`]), so a front end can report the support
+    /// level that architecture is certified at. A Qwen3 base declares its own
+    /// (the adapters served over its concrete handle restate its manifest);
+    /// a card whose family names no registered architecture declares none.
+    fn declaring(self, card: &ModelCard) -> Built {
+        let Some(arch) = brain_arch::by_family(&card.family).map(|a| a.id) else { return self };
+        match self {
+            Built::Qwen(q) => Built::Qwen(q),
+            Built::Other(o) => Built::Other(Arc::new(residency::OfArchitecture::new(arch, o))),
+            Built::Multi(m) => Built::Multi(Arc::new(residency::OfArchitecture::new(arch, m))),
+        }
+    }
+
     fn erased(&self) -> Arc<dyn ResidentModel> {
         match self {
             Built::Qwen(q) => q.clone(),
@@ -836,12 +850,14 @@ fn build_for_local(local: &brain_modelstore::LocalModel, qwen_cfg: catalog::resi
     if local.adapter.is_some() {
         return Err(format!("{}: an adapter is served by the base it rides on, not built as a model of its own", card.id));
     }
-    if let Some(roles) = &local.roles {
-        return resident_for_compound(card, roles, qwen_cfg, qwen35_sizing, encoder_batch, gpus);
-    }
-    let weights = local.weights.to_str().ok_or_else(|| "weights path is not valid UTF-8".to_string())?;
-    let tokenizer = local.tokenizer.as_deref().and_then(|p| p.to_str());
-    resident_for(weights, card, tokenizer, qwen_cfg, qwen35_sizing, encoder_batch).ok_or_else(|| format!("family '{}' not servable from the model dir yet", card.family))
+    let built = if let Some(roles) = &local.roles {
+        resident_for_compound(card, roles, qwen_cfg, qwen35_sizing, encoder_batch, gpus)?
+    } else {
+        let weights = local.weights.to_str().ok_or_else(|| "weights path is not valid UTF-8".to_string())?;
+        let tokenizer = local.tokenizer.as_deref().and_then(|p| p.to_str());
+        resident_for(weights, card, tokenizer, qwen_cfg, qwen35_sizing, encoder_batch).ok_or_else(|| format!("family '{}' not servable from the model dir yet", card.family))?
+    };
+    Ok(built.declaring(card))
 }
 
 /// The compound-model counterpart of [`resident_for`]: family dispatch keyed
@@ -1822,5 +1838,35 @@ mod tests {
         let tiny = ScanSettings { gpus: vec![(0, 3 * GIB)], reserved: 3 * GIB - 64, ..Default::default() };
         assert!(discover(&dir, &tiny).multi.is_empty());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Every model the scan serves declares the architecture its card names, and an adapter declares its base's:
+    /// what a front end reports the certified support level of. A config variant keeps its own id (a Llama served by
+    /// the Qwen3 decoder is `llama`, not `qwen3`).
+    #[test]
+    fn discover_declares_each_models_architecture_and_an_adapter_its_bases() {
+        use brain_testutil::adapters::{write_lora_adapter_of, Linear};
+        let root = tmp_dir("discover-architectures");
+        let llama = root.join("deepseek-ai").join("tiny-llama");
+        std::fs::create_dir_all(&llama).unwrap();
+        let manifest = brain_modelstore::CompoundManifest { id: "deepseek-ai/tiny-llama".into(), family: "llama".into(), roles: [("weights".to_string(), ".".to_string())].into() };
+        std::fs::write(llama.join(brain_modelstore::MANIFEST_FILE), serde_json::to_vec(&manifest).unwrap()).unwrap();
+        write_compound_fixture(&root, "Wan-AI", "Wan2.1-T2V-1.3B", "wan");
+        let ripple = root.join("ricursiveAI").join("Ripple-tiny");
+        write_tiny_ripple(&ripple);
+        let adapter_id = "ricursiveAI/Ripple-tiny:lab-alpha:sft:v1";
+        let adapter_dir = ripple.join("adapters").join("lab-alpha").join("sft").join("v1");
+        std::fs::create_dir_all(&adapter_dir).unwrap();
+        let linears = [Linear { base: "model.layers.0.self_attn.q_proj.weight".into(), out: 32, inn: 32 }];
+        write_lora_adapter_of("ricursive", &adapter_dir.join("adapter.brain.safetensors"), adapter_id, "ricursiveAI/Ripple-tiny", 4, &linears, 3);
+
+        let found = discover(&root, &ScanSettings::default());
+        assert!(found.errors.is_empty(), "{:?}", found.errors);
+        let architecture = |id: &str| found.residents.iter().find(|r| r.manifest().model == id).unwrap_or_else(|| panic!("{id} not served")).manifest().architecture;
+        assert_eq!(architecture("deepseek-ai/tiny-llama").as_deref(), Some("llama"));
+        assert_eq!(architecture("Wan-AI/Wan2.1-T2V-1.3B").as_deref(), Some("wan"));
+        assert_eq!(architecture("ricursiveAI/Ripple-tiny").as_deref(), Some("ricursive"));
+        assert_eq!(architecture(adapter_id).as_deref(), Some("ricursive"), "an adapter is served on its base's architecture");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -852,8 +852,11 @@ impl AdapterHost for Qwen35GgufServed {
 }
 
 impl ResidentModel for Qwen35GgufServed {
+    /// Declares its architecture itself rather than through a registration
+    /// wrapper: the adapter views served over this resident restate its
+    /// manifest, so they declare it too.
     fn manifest(&self) -> Manifest {
-        self.replicas[0].manifest()
+        self.replicas[0].manifest().with_architecture(qwen35::spec::CARD_FAMILY)
     }
     fn instance_key(&self, action: &str, inv: &Invocation) -> InstanceKey {
         self.replicas[0].instance_key(action, inv)

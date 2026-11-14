@@ -129,6 +129,52 @@ pub trait ResidentModel: Send + Sync {
     }
 }
 
+/// The [`ResidentModel`] methods of a wrapper that restates only its inner
+/// model's manifest: each forwards to `self.inner` unchanged, so the wrapper
+/// is scheduled, budgeted, built and batched exactly as the model it wraps.
+/// One list, so a method the trait gains is forwarded by every such wrapper
+/// or by none.
+macro_rules! forward_resident_model {
+    () => {
+        fn instance_key(&self, action: &str, inv: &Invocation) -> InstanceKey {
+            self.inner.instance_key(action, inv)
+        }
+        fn estimate(&self, key: &InstanceKey) -> MemCost {
+            self.inner.estimate(key)
+        }
+        fn estimate_at(&self, key: &InstanceKey, tier: Tier) -> MemCost {
+            self.inner.estimate_at(key, tier)
+        }
+        fn batch_limit(&self) -> Option<usize> {
+            self.inner.batch_limit()
+        }
+        fn replicas(&self) -> usize {
+            self.inner.replicas()
+        }
+        fn replica_routing(&self) -> Option<crate::affinity::ReplicaRouting> {
+            self.inner.replica_routing()
+        }
+        fn prefix_chain(&self, inv: &Invocation) -> crate::affinity::PrefixChain {
+            self.inner.prefix_chain(inv)
+        }
+        fn activate(&self, key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
+            self.inner.activate(key, device)
+        }
+        fn stamp(&self, inv: &mut Invocation) {
+            self.inner.stamp(inv)
+        }
+        fn check_job(&self, action: &str, inv: &Invocation) -> Result<(), String> {
+            self.inner.check_job(action, inv)
+        }
+        fn transient(&self) -> bool {
+            self.inner.transient()
+        }
+        fn adapter_identity(&self) -> Option<AdapterIdentity> {
+            self.inner.adapter_identity()
+        }
+    };
+}
+
 /// A model served under a second id by the SAME resident: every request for
 /// `id` runs on the inner model's instance (one set of weights, one batch),
 /// exactly as if it had named the inner model. Use it where two ids must mean
@@ -150,41 +196,41 @@ impl<M: ResidentModel + ?Sized> ResidentModel for Alias<M> {
         manifest.model = self.id.clone();
         manifest
     }
-    fn instance_key(&self, action: &str, inv: &Invocation) -> InstanceKey {
-        self.inner.instance_key(action, inv)
+    forward_resident_model!();
+}
+
+/// A model registered with the architecture of the weights it serves declared
+/// on its manifest ([`Manifest::architecture`]): what a registrant that knows
+/// the architecture (a catalog entry's resolver spec, a model card's family)
+/// wraps a resident in, so the resident itself need not say. Everything else
+/// is the inner model's, single- and multi-device alike.
+pub struct OfArchitecture<M: ResidentModel + ?Sized> {
+    architecture: &'static str,
+    inner: std::sync::Arc<M>,
+}
+
+impl<M: ResidentModel + ?Sized> OfArchitecture<M> {
+    pub fn new(architecture: &'static str, inner: std::sync::Arc<M>) -> OfArchitecture<M> {
+        OfArchitecture { architecture, inner }
     }
-    fn estimate(&self, key: &InstanceKey) -> MemCost {
-        self.inner.estimate(key)
+}
+
+impl<M: ResidentModel + ?Sized> ResidentModel for OfArchitecture<M> {
+    fn manifest(&self) -> Manifest {
+        self.inner.manifest().with_architecture(self.architecture)
     }
-    fn estimate_at(&self, key: &InstanceKey, tier: Tier) -> MemCost {
-        self.inner.estimate_at(key, tier)
+    forward_resident_model!();
+}
+
+impl<M: crate::multi::MultiDeviceResidentModel + ?Sized> crate::multi::MultiDeviceResidentModel for OfArchitecture<M> {
+    fn estimate_multi(&self, key: &InstanceKey) -> crate::multi::MultiDeviceCost {
+        self.inner.estimate_multi(key)
     }
-    fn batch_limit(&self) -> Option<usize> {
-        self.inner.batch_limit()
+    fn unavailable_reason(&self, key: &InstanceKey) -> Option<String> {
+        self.inner.unavailable_reason(key)
     }
-    fn replicas(&self) -> usize {
-        self.inner.replicas()
-    }
-    fn replica_routing(&self) -> Option<crate::affinity::ReplicaRouting> {
-        self.inner.replica_routing()
-    }
-    fn prefix_chain(&self, inv: &Invocation) -> crate::affinity::PrefixChain {
-        self.inner.prefix_chain(inv)
-    }
-    fn activate(&self, key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
-        self.inner.activate(key, device)
-    }
-    fn stamp(&self, inv: &mut Invocation) {
-        self.inner.stamp(inv)
-    }
-    fn check_job(&self, action: &str, inv: &Invocation) -> Result<(), String> {
-        self.inner.check_job(action, inv)
-    }
-    fn transient(&self) -> bool {
-        self.inner.transient()
-    }
-    fn adapter_identity(&self) -> Option<AdapterIdentity> {
-        self.inner.adapter_identity()
+    fn activate_multi(&self, key: &InstanceKey, devices: &[Device]) -> Result<Box<dyn Instance>, String> {
+        self.inner.activate_multi(key, devices)
     }
 }
 
