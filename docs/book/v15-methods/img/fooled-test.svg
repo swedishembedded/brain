@@ -1,0 +1,44 @@
+<!-- source-sha256: 3ec35b1ec404808bcc35beb4c9e8503fafdc91cf2edd9a1407c2d92681198ce9 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 268" width="780" height="268"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="780" height="268" fill="#ffffff"/>
+<rect x="20" y="16" width="740" height="240" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
+<text x="34" y="38" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">The chain of a numerical test and where a wrong program gets through</text>
+<rect x="38" y="66" width="150" height="52" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<text x="113" y="88.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">test instance</text>
+<text x="113" y="104.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">sizes and values</text>
+<rect x="223" y="66" width="150" height="52" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="298" y="88.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">code under test</text>
+<text x="298" y="104.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">and its reference</text>
+<rect x="408" y="66" width="150" height="52" rx="10" fill="#e2e8f0" stroke="#4a5568" stroke-width="1.2"/>
+<text x="483" y="88.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">measure and</text>
+<text x="483" y="104.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">threshold</text>
+<rect x="593" y="66" width="150" height="52" rx="10" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
+<text x="668" y="88.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">verdict the</text>
+<text x="668" y="104.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">runner reports</text>
+<line x1="191" y1="92" x2="220" y2="92" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="376" y1="92" x2="405" y2="92" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<line x1="561" y1="92" x2="590" y2="92" stroke="#1a202c" stroke-width="1.4" marker-end="url(#head)"/>
+<path d="M29,161 H185 L197,173 V231 H29 Z" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<path d="M185,161 V173 H197" fill="none" stroke="#4a5568" stroke-width="1.2"/>
+<text x="43" y="184.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="start">degenerate instance:</text>
+<text x="43" y="200.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="start">a wrong program</text>
+<text x="43" y="216.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="start">computes the same</text>
+<line x1="113" y1="118" x2="113" y2="161" stroke="#a0aec0" stroke-width="1.2" stroke-dasharray="4 3"/>
+<path d="M214,161 H370 L382,173 V231 H214 Z" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<path d="M370,161 V173 H382" fill="none" stroke="#4a5568" stroke-width="1.2"/>
+<text x="228" y="184.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="start">shared reference:</text>
+<text x="228" y="200.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="start">the oracle repeats</text>
+<text x="228" y="216.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="start">the same mistake</text>
+<line x1="298" y1="118" x2="298" y2="161" stroke="#a0aec0" stroke-width="1.2" stroke-dasharray="4 3"/>
+<path d="M399,161 H555 L567,173 V231 H399 Z" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<path d="M555,161 V173 H567" fill="none" stroke="#4a5568" stroke-width="1.2"/>
+<text x="413" y="184.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="start">invariant measure:</text>
+<text x="413" y="200.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="start">a family of errors</text>
+<text x="413" y="216.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="start">scores perfectly</text>
+<line x1="483" y1="118" x2="483" y2="161" stroke="#a0aec0" stroke-width="1.2" stroke-dasharray="4 3"/>
+<path d="M584,161 H740 L752,173 V231 H584 Z" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
+<path d="M740,161 V173 H752" fill="none" stroke="#4a5568" stroke-width="1.2"/>
+<text x="598" y="184.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="start">gate never runs:</text>
+<text x="598" y="200.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="start">no comparison made,</text>
+<text x="598" y="216.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="start">reported as a pass</text>
+<line x1="668" y1="118" x2="668" y2="161" stroke="#a0aec0" stroke-width="1.2" stroke-dasharray="4 3"/>
+</svg>
