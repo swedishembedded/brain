@@ -23,7 +23,7 @@ setup_file() {
   export LOG="$CONF_DIR/serve.log"
   export PORT="${VIDEO_API_PORT:-8899}"
   mkdir -p "$CONF_DIR/models"
-  BRAIN_DEVICE=cpu "$BRAIN" serve --mock --models-dir "$CONF_DIR/models" \
+  "$BRAIN" serve --mock --device cpu --models-dir "$CONF_DIR/models" \
     --openrouter "$PORT" --api-keys-out "$KEYS" --ready-file "$CONF_DIR/ready" >"$LOG" 2>&1 &
   export SERVER_PID=$!
   for _ in $(seq 1 60); do

@@ -35,7 +35,8 @@ setup_file() {
   export E2E_LOG="$E2E_DIR/serve.log"
 
   # Local Anthropic surface backed by the deterministic mock model.
-  BRAIN_DEVICE=cpu "$BRAIN" serve --mock --anthropic "$E2E_PORT" \
+  mkdir -p "$E2E_DIR/models"
+  "$BRAIN" serve --mock --device cpu --models-dir "$E2E_DIR/models" --anthropic "$E2E_PORT" \
     --api-keys-out "$E2E_KEYS" >"$E2E_LOG" 2>&1 &
   echo "$!" > "$E2E_DIR/pid"
 

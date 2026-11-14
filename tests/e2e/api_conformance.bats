@@ -59,7 +59,7 @@ setup_file() {
   mkdir -p "$ARTIFACTS"
 
   # ONE server, all three surfaces, CPU-only, backed by the mock. Record its PID.
-  BRAIN_DEVICE=cpu "$BRAIN" serve --mock \
+  "$BRAIN" serve --mock --device cpu \
     --models-dir "$MODELS_DIR" \
     --training --artifact-store "$ARTIFACTS" \
     --openai "$OPENAI_PORT" \
@@ -920,8 +920,7 @@ train_body() { # train_body <extra params json fragment, with a leading comma or
 
   # A SECOND server: one CPU lane, a 3s mock delay (pins the lane), a 500ms admit
   # deadline (fast shed). OpenAI surface only. Record its PID for teardown.
-  BRAIN_DEVICE=cpu \
-    "$BRAIN" serve --mock --mock-delay-ms 3000 --admit-deadline-ms 500 --models-dir "$MODELS_DIR" --openai "$port" --api-keys-out "$keys2" >"$log2" 2>&1 &
+  "$BRAIN" serve --mock --device cpu --mock-delay-ms 3000 --admit-deadline-ms 500 --models-dir "$MODELS_DIR" --openai "$port" --api-keys-out "$keys2" >"$log2" 2>&1 &
   local pid2=$!
   echo "$pid2" > "$CONF_DIR/pid2"
 

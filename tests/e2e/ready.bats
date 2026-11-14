@@ -34,6 +34,10 @@ setup_file() {
 setup() {
   TDIR="$(mktemp -d)"
   export TDIR
+  # The mock models need no weights: every server here serves from an empty
+  # store of its own, so startup does not depend on the user's.
+  MOCK_SERVE=(serve --mock --device cpu --models-dir "$TDIR/models")
+  mkdir -p "$TDIR/models"
   unset SERVER_PID SERVER2_PID DBUS_PID DBUS_SESSION_BUS_ADDRESS
 }
 
@@ -72,7 +76,7 @@ start_private_bus() {
   PORT=8993
   KEYS="$TDIR/keys.json"
   READY="$TDIR/ready"
-  BRAIN_DEVICE=cpu "$BRAIN" serve --mock --openai "$PORT" --api-keys-out "$KEYS" --ready-file "$READY" \
+  "$BRAIN" "${MOCK_SERVE[@]}" --openai "$PORT" --api-keys-out "$KEYS" --ready-file "$READY" \
     >"$TDIR/log" 2>&1 &
   SERVER_PID=$!
 
@@ -95,7 +99,7 @@ start_private_bus() {
   READY="$TDIR/ready"
   echo "stale content from a previous run" > "$READY"
 
-  BRAIN_DEVICE=cpu "$BRAIN" serve --mock --openai "$PORT" --ready-file "$READY" >"$TDIR/log" 2>&1 &
+  "$BRAIN" "${MOCK_SERVE[@]}" --openai "$PORT" --ready-file "$READY" >"$TDIR/log" 2>&1 &
   SERVER_PID=$!
 
   # The stale marker must go (it is removed at parse time, long before any
@@ -120,13 +124,13 @@ start_private_bus() {
 @test "no ready file when the only requested listener cannot bind" {
   PORT=8995
   READY1="$TDIR/ready1"
-  BRAIN_DEVICE=cpu "$BRAIN" serve --mock --openai "$PORT" --ready-file "$READY1" >"$TDIR/log1" 2>&1 &
+  "$BRAIN" "${MOCK_SERVE[@]}" --openai "$PORT" --ready-file "$READY1" >"$TDIR/log1" 2>&1 &
   SERVER_PID=$!
   wait_for_ready_file "$READY1" "$SERVER_PID" || { cat "$TDIR/log1" >&3; skip "first server never became ready"; }
 
   # Second server: same port, must fail to bind.
   READY2="$TDIR/ready2"
-  BRAIN_DEVICE=cpu "$BRAIN" serve --mock --openai "$PORT" --ready-file "$READY2" >"$TDIR/log2" 2>&1 &
+  "$BRAIN" "${MOCK_SERVE[@]}" --openai "$PORT" --ready-file "$READY2" >"$TDIR/log2" 2>&1 &
   SERVER2_PID=$!
 
   local deadline=$((SECONDS + READY_DEADLINE_S))
@@ -143,7 +147,7 @@ start_private_bus() {
 @test "no ready file on a partial bind (2 of 3 requested surfaces up)" {
   P1=8996
   READY1="$TDIR/ready1"
-  BRAIN_DEVICE=cpu "$BRAIN" serve --mock --openai "$P1" --ready-file "$READY1" >"$TDIR/log1" 2>&1 &
+  "$BRAIN" "${MOCK_SERVE[@]}" --openai "$P1" --ready-file "$READY1" >"$TDIR/log1" 2>&1 &
   SERVER_PID=$!
   wait_for_ready_file "$READY1" "$SERVER_PID" || { cat "$TDIR/log1" >&3; skip "first server never became ready"; }
 
@@ -152,7 +156,7 @@ start_private_bus() {
   # never bind, so the ready file must never appear even though the other one did.
   P2=8997
   READY2="$TDIR/ready2"
-  BRAIN_DEVICE=cpu "$BRAIN" serve --mock --openai "$P2" --anthropic "$P1" --ready-file "$READY2" \
+  "$BRAIN" "${MOCK_SERVE[@]}" --openai "$P2" --anthropic "$P1" --ready-file "$READY2" \
     >"$TDIR/log2" 2>&1 &
   SERVER2_PID=$!
 
@@ -170,7 +174,7 @@ start_private_bus() {
 @test "the ready file covers the D-Bus surface alone" {
   start_private_bus
   READY="$TDIR/ready"
-  BRAIN_DEVICE=cpu "$BRAIN" serve --mock --dbus --ready-file "$READY" >"$TDIR/log" 2>&1 &
+  "$BRAIN" "${MOCK_SERVE[@]}" --dbus --ready-file "$READY" >"$TDIR/log" 2>&1 &
   SERVER_PID=$!
   wait_for_ready_file "$READY" "$SERVER_PID" || { cat "$TDIR/log" >&3; skip "ready file never appeared"; }
 
@@ -184,7 +188,7 @@ start_private_bus() {
   start_private_bus
   PORT=8998
   READY="$TDIR/ready"
-  BRAIN_DEVICE=cpu "$BRAIN" serve --mock --dbus --openai "$PORT" --ready-file "$READY" >"$TDIR/log" 2>&1 &
+  "$BRAIN" "${MOCK_SERVE[@]}" --dbus --openai "$PORT" --ready-file "$READY" >"$TDIR/log" 2>&1 &
   SERVER_PID=$!
   wait_for_ready_file "$READY" "$SERVER_PID" || { cat "$TDIR/log" >&3; skip "ready file never appeared"; }
 
@@ -202,7 +206,7 @@ start_private_bus() {
 @test "--ready-file with an unwritable directory fails fast, before any model scan" {
   PORT=8999
   t0=$SECONDS
-  run timeout 10 env BRAIN_DEVICE=cpu "$BRAIN" serve --mock --openai "$PORT" \
+  run timeout 10 "$BRAIN" "${MOCK_SERVE[@]}" --openai "$PORT" \
     --ready-file /nonexistent-dir-for-brain-ready-e2e-xyz/ready
   elapsed=$((SECONDS - t0))
   [ "$status" -ne 0 ]
