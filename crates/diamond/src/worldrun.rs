@@ -24,7 +24,7 @@ use wm_core::{FakeWorldModel, WorldModel};
 use wm_display::keymap::{Key, KeyChordMap, KeySet};
 use wm_display::pacing::{FixedTimestep, WallClock};
 use wm_display::record::RecorderSink;
-use wm_display::sink::{fnv1a, FrameSink, HashSink, HeadlessSink, Hud, PpmDirSink};
+use wm_display::sink::{fnv1a, FrameSink, HashSink, Hud, PpmDirSink};
 use wm_display::{play_loop, InputSource, PlayReport, PolledInput, ScriptInput, SplitIo};
 
 use crate::DiamondWorldModel;
@@ -225,6 +225,18 @@ impl FrameSink for RolloutSink<'_> {
     }
 }
 
+/// Discards every frame and reports one progress step per frame.
+struct ProgressSink<'a> {
+    total: u32,
+    progress: &'a mut dyn FnMut(Progress),
+}
+
+impl FrameSink for ProgressSink<'_> {
+    fn frame(&mut self, _rgb: &[u8], _w: u32, _h: u32, hud: &Hud) {
+        (self.progress)(Progress::step(hud.step as u32, self.total, format!("frame {}", hud.step)));
+    }
+}
+
 /// Ends a scripted input early once `cancel` is armed.
 struct CancellableScript<'a> {
     script: ScriptInput,
@@ -305,8 +317,9 @@ pub struct VerifyRequest {
 /// Re-generate `ds` through `model` and compare it frame by frame (mean
 /// absolute difference over RGB8). Exact by construction for deterministic
 /// models, and for DIAMOND when the seed and denoising steps match the
-/// recording's.
-pub fn verify(model: &mut dyn WorldModel, ds: &EpisodeDataset, req: &VerifyRequest) -> Result<Verification, String> {
+/// recording's. `Err("cancelled")` once `cancel` fires, checked before every
+/// regenerated frame; each compared frame is one progress step.
+pub fn verify(model: &mut dyn WorldModel, ds: &EpisodeDataset, req: &VerifyRequest, cancel: &CancelToken, progress: &mut dyn FnMut(Progress)) -> Result<Verification, String> {
     let (c, h, w) = model.frame_shape();
     if (c, h, w) != (ds.c, ds.h, ds.w) {
         return Err(format!("model frames are {c}x{h}x{w} but the dataset is {}x{}x{}", ds.c, ds.h, ds.w));
@@ -322,6 +335,7 @@ pub fn verify(model: &mut dyn WorldModel, ds: &EpisodeDataset, req: &VerifyReque
         // Burn the context steps so a stochastic model's rng lands where it
         // was at record time, then load the recorded frames as context.
         for &act in &actions[..req.context] {
+            cancel.check()?;
             let _ = model.step(act);
         }
         let mut ctx = Vec::with_capacity(req.context * ds.frame_len());
@@ -332,6 +346,7 @@ pub fn verify(model: &mut dyn WorldModel, ds: &EpisodeDataset, req: &VerifyReque
     }
     let mut v = Verification { checked: ds.n - req.context, max_mad: 0.0, worst_frame: req.context, failed: 0 };
     for (i, &action) in actions.iter().enumerate().take(ds.n).skip(req.context) {
+        cancel.check()?;
         let f = model.step(action);
         // The exact conversion the recorder applied: f32 -> RGB8 -> CHW u8.
         let rgb = imaging::pixels::chw_to_rgb8(&f, w, h, c as usize, imaging::ChannelPolicy::RequireRgb)?.px;
@@ -346,6 +361,7 @@ pub fn verify(model: &mut dyn WorldModel, ds: &EpisodeDataset, req: &VerifyReque
         if mad > req.tolerance {
             v.failed += 1;
         }
+        progress(Progress::step((i - req.context) as u32, v.checked as u32, format!("frame {i}")));
     }
     Ok(v)
 }
@@ -362,14 +378,17 @@ pub struct BenchResult {
     pub total_s: f32,
 }
 
-pub fn bench(model: &mut dyn WorldModel, model_name: &str, frames: u64) -> BenchResult {
+/// `Err("cancelled")` once `cancel` fires, checked before every frame; each
+/// frame is one progress step.
+pub fn bench(model: &mut dyn WorldModel, model_name: &str, frames: u64, cancel: &CancelToken, progress: &mut dyn FnMut(Progress)) -> Result<BenchResult, String> {
     let na = model.num_actions() as u64;
-    let mut input = ScriptInput::new((0..frames).map(|i| (i % na) as u32).collect());
-    let mut sink = HeadlessSink;
+    let mut input = CancellableScript { script: ScriptInput::new((0..frames).map(|i| (i % na) as u32).collect()), cancel };
+    let mut sink = ProgressSink { total: frames as u32, progress };
     let mut io = SplitIo { input: &mut input, sink: &mut sink };
     let t0 = std::time::Instant::now();
     let report = play_loop(model, &mut io, &KeyChordMap::wasd(0), FixedTimestep::new(WallClock::new(), UNPACED_FPS, false), 0, model_name, Some(frames));
-    BenchResult { report, total_s: t0.elapsed().as_secs_f32() }
+    cancel.check()?;
+    Ok(BenchResult { report, total_s: t0.elapsed().as_secs_f32() })
 }
 
 /// One UNet forward's per-kernel timings, `(kernel, ms, dispatches)`, with

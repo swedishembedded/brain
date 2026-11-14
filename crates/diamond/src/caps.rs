@@ -156,8 +156,8 @@ impl Action for DiamondAction {
             "export" => self.export(inv),
             "finetune" => self.finetune(inv, progress),
             "rollout" => self.rollout(inv, progress),
-            "replay" => self.replay(inv),
-            "bench" => self.bench(inv),
+            "replay" => self.replay(inv, progress),
+            "bench" => self.bench(inv, progress),
             other => Err(format!("diamond: unknown action {other}")),
         }
     }
@@ -291,7 +291,7 @@ impl DiamondAction {
         let fps = inv.get_i64("fps").unwrap_or(15).max(1) as u32;
         let targets = RolloutTargets { ppm_dir: inv.get_str("dump_ppm").filter(|p| !p.is_empty()), record_dir: inv.get_str("record").filter(|p| !p.is_empty()) };
         let name = inv.get_str("model").unwrap_or_else(|| "diamond".into());
-        let run = worldrun::rollout(built.model.as_mut(), &name, steps, fps, &targets, &inv.cancel, progress).map_err(|e| if e == "cancelled" { e } else { format!("diamond rollout: {e}") })?;
+        let run = worldrun::rollout(built.model.as_mut(), &name, steps, fps, &targets, &inv.cancel, progress).map_err(|e| failed(e, "rollout"))?;
         let clip: Vec<(Vec<f32>, u32, u32)> = run.frames.iter().map(|rgb| (rgb.iter().map(|&b| b as f32 / 255.0).collect(), run.width, run.height)).collect();
         let mut outcome = Outcome::new()
             .set("model", json!(name))
@@ -312,7 +312,7 @@ impl DiamondAction {
         Ok(outcome)
     }
 
-    fn replay(&self, inv: &Invocation) -> ActionResult {
+    fn replay(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         let dir = required(inv, "replay", "episode")?;
         let ds = worldrun::open_dataset(&dir).map_err(|e| format!("diamond replay: {e}"))?;
         let episodes: Vec<_> = ds.episodes.iter().map(|e| json!({"start": e.start, "len": e.len})).collect();
@@ -332,7 +332,7 @@ impl DiamondAction {
         let mut built = worldrun::build(&req).map_err(|e| format!("diamond replay: {e}"))?;
         let tolerance = inv.get_f64("tolerance").unwrap_or(2.0 / 255.0) as f32;
         let context = inv.get_i64("context").unwrap_or(0).max(0) as usize;
-        let v = worldrun::verify(built.model.as_mut(), &ds, &VerifyRequest { tolerance, context }).map_err(|e| format!("diamond replay: {e}"))?;
+        let v = worldrun::verify(built.model.as_mut(), &ds, &VerifyRequest { tolerance, context }, &inv.cancel, progress).map_err(|e| failed(e, "replay"))?;
         if v.failed > 0 {
             return Err(format!("diamond replay: FAIL - {} of {} frames exceeded the tolerance {tolerance:.6} (max_mad {:.6} at frame {})", v.failed, v.checked, v.max_mad, v.worst_frame));
         }
@@ -345,7 +345,7 @@ impl DiamondAction {
         Ok(outcome)
     }
 
-    fn bench(&self, inv: &Invocation) -> ActionResult {
+    fn bench(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         let name = inv.get_str("model").unwrap_or_else(|| "diamond".into());
         if inv.get_bool("profile").unwrap_or(false) {
             if name != "diamond" {
@@ -359,7 +359,7 @@ impl DiamondAction {
         let (req, seed) = self.model_request(inv, "bench")?;
         let frames = inv.get_i64("frames").unwrap_or(200).max(1) as u64;
         let mut built = worldrun::build(&req).map_err(|e| format!("diamond bench: {e}"))?;
-        let b = worldrun::bench(built.model.as_mut(), &name, frames);
+        let b = worldrun::bench(built.model.as_mut(), &name, frames, &inv.cancel, progress).map_err(|e| failed(e, "bench"))?;
         Ok(Outcome::new()
             .set("model", json!(name))
             .set("backend", json!(built.backend))
@@ -369,6 +369,16 @@ impl DiamondAction {
             .set("ms_per_frame_mean", json!(b.report.work_ms_mean))
             .set("ms_per_frame_p95", json!(b.report.work_ms_p95))
             .set("fps", json!(b.report.steps as f32 / b.total_s.max(1e-6))))
+    }
+}
+
+/// A library failure as the action's error: the cancellation literal passes
+/// through untouched, anything else is prefixed with the action.
+fn failed(e: String, action: &str) -> String {
+    if e == capability::failure::CANCELLED {
+        e
+    } else {
+        format!("diamond {action}: {e}")
     }
 }
 
@@ -483,6 +493,24 @@ mod tests {
         let verify = |seed: i64| run("replay", Invocation::new().set("episode", json!(rec)).set("verify", json!(true)).set("model", json!("fake")).set("seed", json!(seed)));
         assert_eq!(verify(3).unwrap().outputs["verified_frames"], json!(6));
         assert!(refused(verify(4)).contains("FAIL"), "a different world fails verification");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bench_and_replay_verify_stop_at_the_next_frame() {
+        use capability_mock::cancellation::{certify, Bound};
+        let dir = std::env::temp_dir().join(format!("diamond-cancel-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let rec = dir.to_str().unwrap().to_string();
+        let recorded = Invocation::new().set("model", json!("fake")).set("seed", json!(3)).set("action_seq", json!("1,2,0,4,1,2,3,0,1,2,3,4")).set("record", json!(rec));
+        run("rollout", recorded).unwrap();
+        let provider = Arc::new(DiamondProvider::new(None));
+        let action = |name: &str| provider.action(name).expect("a declared action");
+        let (bench, replay) = (action("bench"), action("replay"));
+        let make_bench = || Invocation::new().set("model", json!("fake")).set("frames", json!(12));
+        certify("diamond bench", &make_bench, &|inv, progress| bench.run(inv, progress), Bound::ONE_STEP);
+        let make_replay = || Invocation::new().set("episode", json!(rec)).set("verify", json!(true)).set("model", json!("fake")).set("seed", json!(3));
+        certify("diamond replay verify", &make_replay, &|inv, progress| replay.run(inv, progress), Bound::ONE_STEP);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
