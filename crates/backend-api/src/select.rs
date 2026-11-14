@@ -525,6 +525,28 @@ impl KernelVariant {
     }
 }
 
+impl KernelVariant {
+    /// Whether this variant, serving `op` over `dtype`, computes each output row with arithmetic that does not depend
+    /// on how many rows the dispatch carries, up to [`exact_decode_group_rows`]: the declaration an exact
+    /// (batch-invariant) caller selects by ([`row_invariant_candidates`]).
+    ///
+    /// The per-output float reference and the register-tiled float GEMM sum each output in one accumulator, `k`
+    /// ascending (the tile is bit for bit the reference, `matmul_reg3.wgsl`); the GEMV folds its 64 virtual
+    /// accumulators the same way for every row, and its native int8 build stays on that fold below the tensor-core
+    /// block's first row count, which is what bounds the int8 group. The packed-int8 tile (what an int8 caller maps
+    /// the int8 `Reference` to) is not declared: its native candidates are timed per row bucket and round
+    /// differently. Split, fused-attention and row-tiled adapter variants change their reduction with the row count
+    /// and are not declared either.
+    pub fn row_count_invariant(self, op: Op, dtype: Dtype) -> bool {
+        let float = matches!(dtype, Dtype::F32 | Dtype::BF16 | Dtype::F16);
+        match (op, self) {
+            (Op::MatMul, KernelVariant::WorkgroupPerOutput) => true,
+            (Op::MatMul, KernelVariant::Reference | KernelVariant::RegisterTiled) => float,
+            _ => false,
+        }
+    }
+}
+
 /// Picks a [`KernelVariant`] for an op/shape on a device.
 ///
 /// Implementations must be pure with respect to their inputs — selection is
@@ -583,8 +605,8 @@ pub fn i8_gemv_max_rows_at(compute_capability: Option<(u32, u32)>) -> u32 {
     }
 }
 
-/// Rows of one group in the exact-decode regime: the widest row count whose
-/// int8 projections are the same arithmetic as a single row's.
+/// Rows of one group in the exact-decode regime for a linear whose weights are `dtype`: the widest row count over
+/// which the variant [`row_invariant_candidates`] picks computes every row as it would compute that row alone.
 ///
 /// A decode step normally sends every sequence of the batch through one
 /// `[bsz, d] x [d, *]` product, sharing one weight read. The int8 GEMV that
@@ -597,17 +619,30 @@ pub fn i8_gemv_max_rows_at(compute_capability: Option<(u32, u32)>) -> u32 {
 /// rows, each group on the bit-identical block, and pays one extra pass over
 /// the weights per group beyond the first in exchange.
 ///
-/// One fewer than the tensor-core block's first row count where the device has
-/// it (4 on a GH200, so eight rows are two groups and double the weight
-/// traffic); the GEMV's whole row range on a device without int8 tensor cores,
-/// where every row count is already bit for bit the reference.
-pub fn exact_decode_group_rows(caps: &DeviceCaps) -> u32 {
-    let tensor_core = caps.arch.compute_capability.is_some_and(|cc| cc >= I8_MMA_MIN_CC);
-    if tensor_core {
-        (I8_GEMV_MMA_MIN_ROWS - 1).min(I8_GEMV_MAX_ROWS)
-    } else {
-        I8_GEMV_MAX_ROWS
+/// For the int8-activation tiers: one fewer than the tensor-core block's first row count where the device has it (4
+/// on a GH200, so eight rows are two groups and double the weight traffic); the GEMV's whole row range on a device
+/// without int8 tensor cores, where every row count is already bit for bit the reference. The float tiers' GEMV keeps
+/// its fold at every row count of the decode regime, so their group is the regime itself.
+pub fn exact_decode_group_rows(caps: &DeviceCaps, dtype: Dtype) -> u32 {
+    match dtype {
+        Dtype::I8 | Dtype::Q4 | Dtype::Q4K | Dtype::Q8K | Dtype::NF4 | Dtype::F4E2M1 => {
+            let tensor_core = caps.arch.compute_capability.is_some_and(|cc| cc >= I8_MMA_MIN_CC);
+            if tensor_core {
+                (I8_GEMV_MMA_MIN_ROWS - 1).min(I8_GEMV_MAX_ROWS)
+            } else {
+                I8_GEMV_MAX_ROWS
+            }
+        }
+        _ => DECODE_REGIME_MAX_ROWS,
     }
+}
+
+/// The candidates an exact (batch-invariant) caller chooses among for `op` over `shape`'s weights: the decode-regime
+/// candidates at one row that declare [`KernelVariant::row_count_invariant`], in preference order. The one chosen
+/// serves every row count up to [`exact_decode_group_rows`], so a row's result does not depend on how many rows share
+/// its dispatch. Empty when no candidate on `caps` declares it: the caller then refuses the regime by name.
+pub fn row_invariant_candidates(op: Op, shape: OpShape, caps: &DeviceCaps) -> Vec<KernelVariant> {
+    candidates(op, OpShape { m: 1, ..shape }, caps).into_iter().filter(|v| v.row_count_invariant(op, shape.dtype)).collect()
 }
 
 /// The fp32/storage-tier register-tiled GEMM ([`KernelVariant::RegisterTiled`])
@@ -1523,17 +1558,23 @@ pub struct AutoTuner {
     /// `(op, shape)` can never collide with, or be mistaken for, that same
     /// key's `KernelVariant` choice.
     schedule_memo: std::sync::Mutex<std::collections::HashMap<(Op, OpShape), Schedule>>,
+    /// [`AutoTuner::resolve_row_invariant`]'s choices, apart from `memo` so the two searches for one `(op, shape)`
+    /// never read each other's answer.
+    invariant_memo: VariantMemo,
 }
+
+/// A tuner's remembered variant per `(op, shape)`.
+type VariantMemo = std::sync::Mutex<std::collections::HashMap<(Op, OpShape), KernelVariant>>;
 
 impl AutoTuner {
     pub fn new(store: Option<Box<dyn TuneStore>>) -> AutoTuner {
         let enabled = !NO_AUTOTUNE.load(Ordering::Relaxed);
-        AutoTuner { enabled, store, memo: Default::default(), schedule_memo: Default::default() }
+        AutoTuner { enabled, store, memo: Default::default(), schedule_memo: Default::default(), invariant_memo: Default::default() }
     }
 
     /// A tuner that never measures — the static policy with the same API.
     pub fn disabled() -> AutoTuner {
-        AutoTuner { enabled: false, store: None, memo: Default::default(), schedule_memo: Default::default() }
+        AutoTuner { enabled: false, store: None, memo: Default::default(), schedule_memo: Default::default(), invariant_memo: Default::default() }
     }
 
     fn key(op: Op, shape: OpShape) -> String {
@@ -1551,22 +1592,53 @@ impl AutoTuner {
         measure: &mut dyn FnMut(KernelVariant) -> Option<f64>,
     ) -> KernelVariant {
         let cands = candidates(op, shape, caps);
+        self.pick(&self.memo, op, shape, Self::key(op, shape), &cands, measure)
+    }
+
+    /// The measured-best of [`row_invariant_candidates`] for `(op, shape)`: the one variant an exact (batch-invariant)
+    /// caller dispatches at every row count of its group, timed at `shape.m` (the group's rows). `None` when no
+    /// candidate on `caps` declares row-count invariance, which the caller refuses by name. The memo, store and
+    /// stale-entry rules are [`Self::resolve`]'s, under keys of their own.
+    pub fn resolve_row_invariant(
+        &self,
+        op: Op,
+        shape: OpShape,
+        caps: &DeviceCaps,
+        measure: &mut dyn FnMut(KernelVariant) -> Option<f64>,
+    ) -> Option<KernelVariant> {
+        let cands = row_invariant_candidates(op, shape, caps);
+        if cands.is_empty() {
+            return None;
+        }
+        Some(self.pick(&self.invariant_memo, op, shape, format!("{}/row-invariant", Self::key(op, shape)), &cands, measure))
+    }
+
+    /// Memo, then the persisted store under `key`, then one measurement of each of `cands` (never empty); the winner is
+    /// remembered and persisted. A stored value outside `cands` is ignored.
+    fn pick(
+        &self,
+        memo: &VariantMemo,
+        op: Op,
+        shape: OpShape,
+        key: String,
+        cands: &[KernelVariant],
+        measure: &mut dyn FnMut(KernelVariant) -> Option<f64>,
+    ) -> KernelVariant {
         if !self.enabled || cands.len() < 2 {
             return cands[0];
         }
-        if let Some(&hit) = self.memo.lock().unwrap().get(&(op, shape)) {
+        if let Some(&hit) = memo.lock().unwrap().get(&(op, shape)) {
             return hit;
         }
-        let key = Self::key(op, shape);
         if let Some(stored) = self.store.as_ref().and_then(|s| s.load(&key)) {
             if let Some(v) = KernelVariant::parse_str(&stored).filter(|v| cands.contains(v)) {
-                self.memo.lock().unwrap().insert((op, shape), v);
+                memo.lock().unwrap().insert((op, shape), v);
                 return v;
             }
         }
         let mut best = cands[0];
         let mut best_cost = f64::INFINITY;
-        for &c in &cands {
+        for &c in cands {
             if let Some(cost) = measure(c) {
                 if cost < best_cost {
                     best_cost = cost;
@@ -1574,7 +1646,7 @@ impl AutoTuner {
                 }
             }
         }
-        self.memo.lock().unwrap().insert((op, shape), best);
+        memo.lock().unwrap().insert((op, shape), best);
         if let Some(s) = &self.store {
             s.save(&key, best.as_str());
         }
@@ -2329,6 +2401,7 @@ mod tests {
             store: Some(Box::new(Ref(store))),
             memo: Default::default(),
             schedule_memo: Default::default(),
+            invariant_memo: Default::default(),
         };
         let sh = shape(4, 512, 512, Dtype::I8); // static best: WorkgroupPerOutput
         let caps = gpu_caps();
@@ -2348,6 +2421,7 @@ mod tests {
             store: Some(Box::new(Ref(store))),
             memo: Default::default(),
             schedule_memo: Default::default(),
+            invariant_memo: Default::default(),
         };
         let mut no_measure = |_: KernelVariant| -> Option<f64> { panic!("stored winner must be reused") };
         assert_eq!(t2.resolve(Op::MatMul, sh, &caps, &mut no_measure), KernelVariant::PackedInt8);
@@ -2642,6 +2716,7 @@ mod tests {
             store: Some(Box::new(Ref(store))),
             memo: Default::default(),
             schedule_memo: Default::default(),
+            invariant_memo: Default::default(),
         };
         let sh = shape(128, 2048, 1024, Dtype::F32);
         let cands = gemm_schedule_candidates(1, 8); // [1, 2]
@@ -2660,6 +2735,7 @@ mod tests {
             store: Some(Box::new(Ref(store))),
             memo: Default::default(),
             schedule_memo: Default::default(),
+            invariant_memo: Default::default(),
         };
         let mut no_measure = |_: Schedule| -> Option<f64> { panic!("stored winner must be reused") };
         assert_eq!(t2.resolve_schedule(Op::MatMul, sh, &cands, &mut no_measure), Schedule::splitk(2));
@@ -2680,5 +2756,68 @@ mod tests {
             Schedule::splitk(1),
             "disabled = the static guess (candidates[0])"
         );
+    }
+
+    /// The exact regime's choice is ONE variant for every row count of its group: the decode-regime GEMV for a float
+    /// or int8 linear wherever the device runs it, at a row count whose default choice is the tile; nothing on a device
+    /// whose only int8 candidate is not declared invariant, which the caller refuses.
+    #[test]
+    fn the_row_invariant_choice_is_one_variant_for_every_row_count_of_the_group() {
+        let mut gpu = gpu_caps();
+        gpu.numeric.bf16_storage = true;
+        for dt in [Dtype::F32, Dtype::BF16, Dtype::I8] {
+            let group = exact_decode_group_rows(&gpu, dt);
+            for m in 1..=group {
+                assert_eq!(row_invariant_candidates(Op::MatMul, shape(m, 4096, 2048, dt), &gpu)[0], KernelVariant::WorkgroupPerOutput, "{dt:?} m={m}");
+            }
+        }
+        // At 64 float rows the default prefers the tile; the exact choice does not move.
+        assert_eq!(candidates(Op::MatMul, shape(64, 4096, 2048, Dtype::F32), &gpu)[0], KernelVariant::RegisterTiled);
+        assert_eq!(row_invariant_candidates(Op::MatMul, shape(64, 4096, 2048, Dtype::F32), &gpu)[0], KernelVariant::WorkgroupPerOutput);
+        assert!(row_invariant_candidates(Op::MatMul, shape(1, 4096, 2048, Dtype::I8), &cpu_caps()).is_empty(), "the packed tile alone is not declared");
+        assert!(row_invariant_candidates(Op::MatMul, shape(1, 4096, 2048, Dtype::I8), &gpu).iter().all(|v| *v != KernelVariant::PackedInt8));
+    }
+
+    /// The int8 group stops one row short of the native GEMV's tensor-core block where the device has it, and is the
+    /// GEMV's row range elsewhere; a float group is the whole decode regime.
+    #[test]
+    fn the_exact_group_stops_where_the_int8_gemv_changes_its_arithmetic() {
+        let mut hopper = gpu_caps();
+        hopper.arch.compute_capability = Some((9, 0));
+        let mut pascal = gpu_caps();
+        pascal.arch.compute_capability = Some((6, 1));
+        assert_eq!(exact_decode_group_rows(&hopper, Dtype::I8), I8_GEMV_MMA_MIN_ROWS - 1);
+        assert_eq!(exact_decode_group_rows(&pascal, Dtype::I8), I8_GEMV_MAX_ROWS);
+        assert_eq!(exact_decode_group_rows(&hopper, Dtype::F32), DECODE_REGIME_MAX_ROWS);
+    }
+
+    /// The row-invariant search is the tuner's measure-once discipline under keys of its own: a single declared
+    /// candidate is taken unmeasured, two are measured once each, and its answer never answers [`AutoTuner::resolve`].
+    #[test]
+    fn the_row_invariant_search_measures_once_under_its_own_keys() {
+        let t = AutoTuner { enabled: true, store: None, memo: Default::default(), schedule_memo: Default::default(), invariant_memo: Default::default() };
+        let gpu = gpu_caps();
+        let mut calls = 0;
+        let mut counted = |_v: KernelVariant| {
+            calls += 1;
+            Some(1.0)
+        };
+        let i8 = shape(8, 4096, 2048, Dtype::I8);
+        assert_eq!(t.resolve_row_invariant(Op::MatMul, i8, &gpu, &mut counted), Some(KernelVariant::WorkgroupPerOutput));
+        assert_eq!(calls, 0, "one declared candidate needs no measurement");
+        let f32 = shape(16, 4096, 2048, Dtype::F32);
+        let mut faster_reference = |v: KernelVariant| Some(if v == KernelVariant::Reference { 1.0 } else { 2.0 });
+        assert_eq!(t.resolve_row_invariant(Op::MatMul, f32, &gpu, &mut faster_reference), Some(KernelVariant::Reference));
+        let mut remeasured = false;
+        let mut flag = |_v: KernelVariant| {
+            remeasured = true;
+            Some(0.0)
+        };
+        assert_eq!(t.resolve_row_invariant(Op::MatMul, f32, &gpu, &mut flag), Some(KernelVariant::Reference));
+        assert!(!remeasured, "the second search is a memo hit");
+        let mut faster_gemv = |v: KernelVariant| Some(if v == KernelVariant::WorkgroupPerOutput { 1.0 } else { 2.0 });
+        assert_eq!(t.resolve(Op::MatMul, f32, &gpu, &mut faster_gemv), KernelVariant::WorkgroupPerOutput, "the default search is separate");
+        let mut unused = |_v: KernelVariant| Some(1.0);
+        assert_eq!(t.resolve_row_invariant(Op::MatMul, shape(1, 4096, 2048, Dtype::I8), &cpu_caps(), &mut unused), None);
     }
 }

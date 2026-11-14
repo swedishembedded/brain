@@ -398,7 +398,7 @@ fn exact_decode_groups_make_every_batch_row_bit_identical_to_the_same_row_alone(
     let (kg, n) = (1280u32, 1024u32);
     let ng = kg / WPG as u32;
     let rows = 8u32;
-    let step = backend_api::select::exact_decode_group_rows(&gpu.caps());
+    let step = backend_api::select::exact_decode_group_rows(&gpu.caps(), Dtype::I8);
     assert!((1..=rows).contains(&step), "the exact group size {step} is outside the decode batch");
     let x = Windowed::new(&gpu, &packed((rows * kg) as usize, 0x51ed), 0);
     let w = Windowed::new(&gpu, &packed((n * kg) as usize, 0x1234), 0);

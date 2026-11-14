@@ -2514,7 +2514,7 @@ impl Qwen35 {
     /// The exact-decode group size on this device, `None` when the regime is
     /// off.
     pub(crate) fn exact_decode_step(&self) -> Option<u32> {
-        self.exact_decode.get().map(|_| gpu_core::select::exact_decode_group_rows(&self.gpu.caps()))
+        self.exact_decode.get().map(|_| gpu_core::select::exact_decode_group_rows(&self.gpu.caps(), gpu_core::select::Dtype::I8))
     }
 
     /// **Turn the decode step's native fused kernels off (or back on).** On by
@@ -6460,7 +6460,7 @@ impl Qwen35 {
     /// group, and stays bit-identical to the decode steps it stands for
     /// (`tests/chunk_tape_decode_parity.rs`).
     fn exact_group_rows(&self) -> usize {
-        gpu_core::select::exact_decode_group_rows(&self.gpu.caps()) as usize
+        gpu_core::select::exact_decode_group_rows(&self.gpu.caps(), gpu_core::select::Dtype::I8) as usize
     }
 
     /// Whether a round of `n` rows runs as plain decode steps

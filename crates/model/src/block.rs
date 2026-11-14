@@ -3504,8 +3504,14 @@ pub const PAGED_SCORES_PER_WORKGROUP: u32 = 16;
 /// every backend); a caller dispatching the packed-int8 KV trio always
 /// uses it unconditionally, with no `*_variant` seam needed on that side.
 pub fn paged_scores_variant(g: &Gpu, reference: usize, coop: Option<usize>, batch_heads: u32, cap: u32) -> (usize, gpu_core::Dispatch) {
+    paged_scores_variant_chosen_at(g, reference, coop, batch_heads, batch_heads, cap)
+}
+
+/// [`paged_scores_variant`] with the kernel chosen as for `chosen_at` (batch x heads) rows and the dispatch sized for
+/// `batch_heads`: a batch-invariant caller chooses as for one sequence's heads at every batch size.
+pub fn paged_scores_variant_chosen_at(g: &Gpu, reference: usize, coop: Option<usize>, chosen_at: u32, batch_heads: u32, cap: u32) -> (usize, gpu_core::Dispatch) {
     use gpu_core::select::{Dtype, KernelSelector, KernelVariant, Op, OpShape};
-    let shape = OpShape { m: batch_heads, n: cap, k: 0, dtype: Dtype::F32 };
+    let shape = OpShape { m: chosen_at, n: cap, k: 0, dtype: Dtype::F32 };
     let total = batch_heads.saturating_mul(cap);
     match coop {
         Some(i)
@@ -3960,6 +3966,23 @@ pub fn gemm_variant(v: GemmVariants, m: u32, n: u32) -> (usize, gpu_core::Dispat
             match (gemv, head) {
                 // One workgroup per output column, and one per 128x128 output
                 // tile: both cooperative, both counted in their own unit.
+                (Some(g), Some(KernelVariant::WorkgroupPerOutput)) => (g, gpu_core::Dispatch::Workgroups(n)),
+                _ => (tiled, gpu_core::Dispatch::Workgroups(m.div_ceil(128) * n.div_ceil(128))),
+            }
+        }
+    }
+}
+
+/// [`gemm_variant`] for an exact (batch-invariant) caller: the kernel `select::row_invariant_candidates` names, the
+/// same one at every row count, so a row computes what it computes alone. The GEMV where the tier registers one, else
+/// the tile (bit for bit the reference, a single accumulator per output); the dispatch is sized for the `m` rows.
+pub fn gemm_variant_row_invariant(v: GemmVariants, m: u32, n: u32) -> (usize, gpu_core::Dispatch) {
+    match v {
+        GemmVariants::Reference(k) => (k, gpu_core::Dispatch::Threads(m * n)),
+        GemmVariants::Fast { gemv, tiled } => {
+            let shape = select::OpShape { m, n, k: 0, dtype: select::Dtype::F32 };
+            let head = select::row_invariant_candidates(select::Op::MatMul, shape, &fast_tier_caps()).into_iter().next();
+            match (gemv, head) {
                 (Some(g), Some(KernelVariant::WorkgroupPerOutput)) => (g, gpu_core::Dispatch::Workgroups(n)),
                 _ => (tiled, gpu_core::Dispatch::Workgroups(m.div_ceil(128) * n.div_ceil(128))),
             }

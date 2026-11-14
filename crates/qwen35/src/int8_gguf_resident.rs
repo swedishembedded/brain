@@ -2170,7 +2170,7 @@ impl Qwen35GgufInstance {
             return None;
         }
         let last = self.shards.last()?;
-        Some(gpu_core::select::exact_decode_group_rows(&last.qwen35.gpu.caps()))
+        Some(gpu_core::select::exact_decode_group_rows(&last.qwen35.gpu.caps(), gpu_core::select::Dtype::I8))
     }
 
     /// `[rows, vocab]` logits of a `[rows, d_model]` hidden block, on the host.
