@@ -71,6 +71,7 @@ def safetensors_layout(tensors, pad=8):
         header[name] = {"dtype": dtype, "shape": shape, "data_offsets": [pos, pos + n]}
         pos += n
     text = json.dumps(header, separators=(",", ":"))
+    safetensors_layout.json_bytes = len(text)             # the unpadded header text, read back by the worked block
     length = len(text) + (-len(text) % pad)
     base = 8 + length
     spans = {name: (base + h["data_offsets"][0], base + h["data_offsets"][1]) for name, h in header.items()}
@@ -97,7 +98,7 @@ def pages_touched():
     for label, a, b in reads:
         first, last, n = _pages(a, b)
         rows.append((label, f"{a:,}", f"{b:,}", f"{first:,} to {last:,}", f"{n:,}", f"{100 * n / total_pages:.4g}"))
-    out = [f"The file holds {len(MODEL)} tensors, header text {length:,} bytes (padded to a multiple of 8), data starting at byte "
+    out = [f"The file holds {len(MODEL)} tensors, header text {length:,} bytes (the compact JSON is {safetensors_layout.json_bytes:,} bytes, padded with spaces to a multiple of 8), data starting at byte "
            f"{8 + length:,}, size {size:,} bytes = {total_pages:,} pages of {PAGE:,} bytes.", ""]
     for name, dtype, shape in MODEL:
         a, b = spans[name]
@@ -693,7 +694,7 @@ _INTRO = {
         "(an element of 4 bits: 2 elements per byte). A scale level adds its count (1 per tensor; elements / n for a scale per n "
         "elements; ceil(4096 / 128)^2 = 1,024 for 128 x 128 tiles) times its width in bytes. Bits per element = 8 x total bytes / "
         "elements. The tile quantum is the least number of elements that is a multiple of the payload block and of every scale "
-        "block (a scale per row or per tile counts the row length 4096); the encode quantum adds whole bands of tile rows."),
+        "block (a scale per row or per tile counts the row length 4096); the encode quantum adds whole bands of tile rows (a band is 128 rows of 4096 elements, 524,288 elements, so a scale per 128 x 128 tile makes it a multiple of 524,288). The block bytes of the ggml types are Q8_0 34 per 32 elements, Q4_0 18 per 32, Q4_K 144 per 256 and Q6_K 210 per 256."),
     "tile_ranges": (
         "A tile is a range [a, b) of the flat, row-major elements of a tensor, a multiple of the tile quantum (the last tile may end at "
         "the end of the tensor). Its payload bytes are [a // g x B, ceil(b / g) x B) for a payload block of g elements and B bytes; "
@@ -711,7 +712,7 @@ _INTRO = {
         "load for tensors of 2^22, 2^26 and 2^30 elements."),
     "lease_schedules": (
         "Two loads share a budget of 100 bytes. A load that needs 80 bytes in all either asks for them in two leases of 40 bytes, "
-        "one after the other, and gives both back when it is done, or asks for one lease of 80. A move is one step by one load; a "
+        "one after the other, and gives both back when it is done, or asks for one lease of 80. A move is one step by one load, and the final release of everything a load holds is a move of its own; a "
         "request for bytes that are not free is not a move (the load waits). An interleaving is a maximal sequence of moves, counted "
         "by exhaustive search; two sequences that differ in the order of the moves are two interleavings."),
     "reference_grammar": (
@@ -726,7 +727,7 @@ _INTRO = {
         "the machine names, `<home>` for the value of HOME."),
     "quant_candidates": (
         "For a reference with a quantization, repos are listed in this order and the first that holds the file is downloaded "
-        "(`<repo>` is the repo name without the suffix, `<Q>` the token)."),
+        "(`<repo>` is the repo name without the suffix, `<Q>` the token); the file looked for is always `<repo>-<Q>.gguf`."),
     "atomic_download": (
         "A download writes its bytes to a part file beside the destination and renames the part file onto the destination only when "
         "every check has passed. The first four rows are the four outcomes of the transfer of `model.safetensors` through an "

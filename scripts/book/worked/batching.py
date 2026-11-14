@@ -289,7 +289,10 @@ def burst():
             f"the next prompt starts in the iteration after the previous one is in. Chunks of 256, mixed pass: the same rows carried "
             f"in the decode forward. Every forward costs B_eq of the cost table; an iteration costs the sum of its forwards, and a "
             f"token exists at the cumulative cost at the end of the iteration that computes it. The run ends when requests 1 to "
-            f"{BURST_N} have finished. Costs in 10^12 and in 10^9 equivalent bytes, rounded half away from zero.\n\n"
+            f"{BURST_N} have finished. The first new token is the earliest cumulative cost at which any of requests 1 to {BURST_N} has "
+            f"its first token; the longest gap of request 0 is the largest difference between the cumulative costs at the ends of "
+            f"two consecutive iterations in which it decodes, the first measured from cost 0 because its first token exists at "
+            f"time 0; its tokens are the number of those iterations. Costs in 10^12 and in 10^9 equivalent bytes, rounded half away from zero.\n\n"
             + _table(["policy", "iterations", "first new token (10^12)", "mean first token (10^12)", "last first token (10^12)",
                       "all new done (10^12)", "longest gap of request 0 (10^9)", "tokens of request 0"], rows, "lrrrrrrr"))
 

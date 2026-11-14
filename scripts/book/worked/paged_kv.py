@@ -524,7 +524,8 @@ def clip_tradeoff():
     return (f"{N_ROWS} rows of {D_ROW} elements for each outlier size m, from the generator `{NAME_CLIP}` (seed "
             f"{_seed(NAME_CLIP)}), one generator across the whole table: for m = 3, 5, 10, 20 in turn and each row in turn, "
             "63 `normal()` draws fill elements 1 to 63, then one `uniform()` gives the sign of element 0, + when it is below "
-            "0.5, and element 0 is that sign times m. Each row is stored as int8 with scale = min(absmax, ceiling) / 127 "
+            "0.5, and element 0 is that sign times m (63 is odd, so the unused second value of a pair of `normal()` draws is held "
+            "over into the next row, as in Volume I, Chapter 17). Each row is stored as int8 with scale = min(absmax, ceiling) / 127 "
             "and codes round(x / scale) (to nearest, ties to even) clamped to -127 .. 127. Squared errors are summed per "
             "row and averaged over the rows; the last column is sqrt(total squared error / total sum of squares) over "
             "all rows of that m. Three significant digits, which the draws fix.\n\n"
@@ -671,6 +672,10 @@ def preemption_trace():
             "recompute otherwise, its blocks freed either way; (3) every running sequence appends a row, taking a block "
             "when its last is full; (4) finished sequences free their blocks. Steps (0) and (1) also take cache-only "
             "blocks when they are short. A newly swapped-in or re-prefilled sequence joins the end of the running list. "
+            "A sequence's growth is 1 block when its cached rows are a multiple of 16 and 0 otherwise, "
+            "and a dropped sequence keeps the rows it had cached when it was dropped, which is what is prefilled "
+            "again (the 128 rows of D are its 90 plus the 38 it appended). Steps are numbered from 1, the first "
+            "after the state described; steps (0) and (1) do nothing while no sequence is swapped out or dropped. "
             "Only the steps on which something other than a plain decode happens are listed.\n\n"
             + _table(["step", "events, in order", "free device blocks after the step", "host blocks in use"], rows, "lllr"))
 

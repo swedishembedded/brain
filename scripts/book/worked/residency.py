@@ -202,7 +202,8 @@ def eviction_stream():
         "subtracting each weight from the draw until it is smaller than the next weight. One generator runs once through the "
         "stream and both policies replay the same stream. Everything else is the rule of the previous example: the clock "
         "advances at every claim and every release, a hit adds 1 to the use count, a load starts it at 1, and the score of "
-        "the cost-aware policy at clock value now is uses x bytes / (now - last use + 1) with the lowest score evicted first.\n\n"
+        "the cost-aware policy at clock value now is uses x bytes / (now - last use + 1) with the lowest score evicted first, where "
+        "now is the clock value when the claim arrives, before the claim's own tick (the value left by the previous request's release).\n\n"
         + inv + "\n\n" + t)
 
 
@@ -244,16 +245,23 @@ def _decide(cost, gpus, host, residents, peak):
     empty_now = any(g[1] - g[2] >= cost for g in gpus) or host_usable >= cost
     if not empty_now:
         return "refuse: starved", "an empty device would not hold it now"
-    for g in gpus:                                    # a plan on a card that evicts the fewest bytes
+    best = None                                       # the plan that evicts the fewest bytes; the first card on a tie
+    for g in gpus:
         if g[1] - g[2] < cost:
             continue
         deficit = cost - free(g)
         vic, got = [], 0
-        for name, size in residents.get(g[0], []):
+        for name, size, pinned in residents.get(g[0], []):
+            if pinned:
+                continue                              # a pinned resident is never a victim
             vic.append(name)
             got += size
             if got >= deficit:
-                return f"evict {', '.join(vic)} on {g[0]}, then place", f"frees {got} GiB"
+                if best is None or got < best[1]:
+                    best = (f"evict {', '.join(vic)} on {g[0]}, then place", got)
+                break
+    if best:
+        return best[0], f"frees {best[1]} GiB"
     if host and host_usable >= cost:
         return "place on the host", "no card can ever hold it"
     return "refuse: no capacity", "nothing evictable frees enough"
@@ -265,8 +273,8 @@ def claim_outcomes():
     peak = {"gpu0": 24, "gpu1": 24}
     cases = [
         ("6 GiB; gpu0 holds 15 GiB, gpu1 is empty", 6, cards(15, 0), host, {}, peak),
-        ("13 GiB; both cards hold 20 GiB; on gpu1 the older resident is 8 GiB, the newer 12 GiB", 13, cards(20, 20), host,
-         {"gpu1": [("old", 8), ("new", 12)]}, peak),
+        ("13 GiB; both cards hold 20 GiB; gpu0 holds one pinned 20 GiB resident, on gpu1 the older resident is 8 GiB, the newer 12 GiB", 13, cards(20, 20), host,
+         {"gpu0": [("pinned", 20, True)], "gpu1": [("old", 8, False), ("new", 12, False)]}, peak),
         ("23 GiB; cards empty", 23, cards(0, 0), host, {}, peak),
         ("121 GiB; cards empty", 121, cards(0, 0), host, {}, peak),
         ("20 GiB; one card of 24 GiB, no host budget, empty", 20, [["gpu0", 24, 2, 0]], None, {}, {"gpu0": 24}),
@@ -283,8 +291,10 @@ def claim_outcomes():
         "whose free bytes are at least c, take the one with the most free bytes (the lower index on a tie); (2) otherwise, if "
         "every card's best usable bytes (the largest total it has had, less its reserve) and the host's usable bytes are all "
         "below c, refuse as too large; (3) otherwise, if every card's current usable bytes and the host's usable bytes are "
-        "all below c, refuse as starved; (4) otherwise, on the first card (by index) whose current usable bytes are at "
-        "least c, evict residents oldest use first until the deficit is covered, and place; (5) otherwise place on the host if "
+        "all below c, refuse as starved; (4) otherwise, for each card whose current usable bytes are at "
+        "least c, plan to evict its unpinned residents, oldest use first, until the deficit is covered (a pinned resident is never a "
+        "victim, so a card whose unpinned residents cannot cover the deficit has no plan), and carry out the plan that evicts the "
+        "fewest bytes, the lower index on a tie, as `plan_eviction_with` does; (5) otherwise place on the host if "
         "its free bytes allow, else refuse for lack of capacity. Free bytes of a card: total - reserved - used.\n\n"
         + _table(["case", "outcome", "note"], rows, "lll"))
 
