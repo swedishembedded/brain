@@ -263,8 +263,8 @@ def hypothesis_spaces():
     return (f"Best member of each space found on the {len(rows)} known rows (the line and parabola by the grids of the "
             f"text, the lookup table by storing the rows); then scored on {len(fresh)} fresh rows from the same source "
             f"(seed {bookrng.seed_of(FRESH_NAME):#018x}). The lookup table answers with the label of the stored row whose "
-            f"voltage is closest to the question; a question exactly between two stored voltages goes to the lower "
-            f"one; stored rows with equal voltage (none occur here) would be tried in order of increasing label, so "
+            f"voltage is closest to the question (distances compared in hundredths of a volt, so that equal distances are exact); a "
+            f"question exactly between two stored voltages goes to the lower one; stored rows with equal voltage (none occur here) would be tried in order of increasing label, so "
             f"the lowest label would answer. Averages are shown to 2 decimals.\n\n"
             + _table(["hypothesis space", "numbers that define a member", "average off by on the 10 known rows",
                       f"average off by on {len(fresh)} fresh rows"], body))
@@ -276,7 +276,7 @@ def parabola_grid():
     ga, gw, gb = PARABOLA_GRID
     return (f"Parabola grid: a from {ga[0]:g} to {ga[-1]:g} in steps of 0.25 ({len(ga)} values), w from {gw[0]:g} to "
             f"{gw[-1]:g} in steps of 1 ({len(gw)} values), b from {gb[0]:g} to {gb[-1]:g} in steps of 1 ({len(gb)} values); "
-            f"a is the outer loop, then w, then b, all ascending, strict improvement only, as for the line.\n\n"
+            f"a is the outer loop, then w, then b, all ascending, strict improvement only, as for the line; a v^2 + w v + b is evaluated as (a v^2 + w v) + b with v^2 = v * v.\n\n"
             f"Best parabola on the grid ({tried} settings): a = {a:.1f}, w = {w:.1f}, b = {b:.1f}, "
             f"average off by {e:.2f} deg C on the known rows.")
 

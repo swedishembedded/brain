@@ -464,7 +464,7 @@ The scores of the rows on the principal directions are uncorrelated, because, wi
 Two hundred points from a stretched, tilted cloud (the recipe is in the table), and the principal directions drawn from the sample mean with a length of two standard deviations each:
 
 <!-- worked: classical.pca_cloud -->
-Generator: the book's SplitMix64, seed 0x1403b86a7f392896 (1442199073229187222). 200 points; each is two draws a = 2.0 rng.normal(), b = 0.5 rng.normal(), then x1 = 3.0 + a cos(angle) - b sin(angle), x2 = 2.0 + a sin(angle) + b cos(angle) with angle = 30 degrees, rounded to 2 decimals. Covariance with divisor N; eigenvectors signed so that the entry of largest magnitude is positive. Average point (2.98, 1.97).
+Generator: the book's SplitMix64, seed 0x1403b86a7f392896 (1442199073229187222). 200 points; each is two draws a = 2.0 rng.normal(), b = 0.5 rng.normal(), then x1 = 3.0 + a cos(angle) - b sin(angle), x2 = 2.0 + a sin(angle) + b cos(angle) with angle = 30 degrees, rounded to 2 decimals. Covariance with divisor N; eigenvectors signed so that the entry of largest magnitude is positive. An entry that is zero up to rounding error (magnitude below 0.00005) is printed as 0.0000, whatever its sign. Average point (2.98, 1.97).
 
 | quantity | value |
 |---|---|

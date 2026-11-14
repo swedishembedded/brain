@@ -597,7 +597,7 @@ def pca_cloud():
     ]
     return (f"{_seed_line(CLOUD_NAME)} {CLOUD_N} points; each is two draws a = {CLOUD_SD[0]} rng.normal(), b = {CLOUD_SD[1]} rng.normal(), "
             f"then x1 = {CLOUD_MEAN[0]} + a cos(angle) - b sin(angle), x2 = {CLOUD_MEAN[1]} + a sin(angle) + b cos(angle) with angle = {CLOUD_ANGLE:g} degrees, rounded to 2 decimals. "
-            f"Covariance with divisor N; eigenvectors signed so that the entry of largest magnitude is positive. Average point {_pt(mu)}.\n\n" + _table(["quantity", "value"], rows, "ll")
+            f"Covariance with divisor N; eigenvectors signed so that the entry of largest magnitude is positive. An entry that is zero up to rounding error (magnitude below 0.00005) is printed as 0.0000, whatever its sign. Average point {_pt(mu)}.\n\n" + _table(["quantity", "value"], rows, "ll")
             + "\n\nWhitened data: the point with score_1, score_2 becomes (score_1 / sqrt(lambda1), score_2 / sqrt(lambda2)), where score_j is the dot product of the centred point with direction j; its covariance has divisor N as above.")
 
 

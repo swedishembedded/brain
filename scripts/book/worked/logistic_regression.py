@@ -354,7 +354,7 @@ def logistic_fit_one_feature():
     shift = [abs(a - b) for a, b in zip(*fits)]
     out.append(("absolute change of the weights", _sci(shift[0], 1), _sci(shift[1], 1), "", ""))
     head = (f"Weights that minimise the mean binary cross-entropy of the next sections, found by Newton's method from "
-            f"w = (0, 0): {NEWTON_ITERATIONS} updates w <- w - solve(H, g, true), with the gradient g and Hessian H of the sections "
+            f"w = (0, 0): {NEWTON_ITERATIONS} updates w <- w - solve(H, g, true), with the gradient g and Hessian H (both of the mean loss, with the factor 1/N) of the sections "
             "\"The gradient\" and \"Convexity: one valley\" (the gradient norm is then below 1e-12). The last row "
             "needs a solution that accurate; the others are printed to four decimals.\n\n")
     return head + _table(["fit", "w0", "w1", "x where p = 0.5", "rows misclassified"], out)

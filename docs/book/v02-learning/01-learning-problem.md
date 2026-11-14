@@ -368,7 +368,7 @@ The source (the learner never sees these lines): voltage v uniform on [0.4, 2.8]
 <!-- /worked -->
 
 <!-- worked: learning_problem.hypothesis_spaces -->
-Best member of each space found on the 10 known rows (the line and parabola by the grids of the text, the lookup table by storing the rows); then scored on 2000 fresh rows from the same source (seed 0x0fe67df3a852f39e). The lookup table answers with the label of the stored row whose voltage is closest to the question; a question exactly between two stored voltages goes to the lower one; stored rows with equal voltage (none occur here) would be tried in order of increasing label, so the lowest label would answer. Averages are shown to 2 decimals.
+Best member of each space found on the 10 known rows (the line and parabola by the grids of the text, the lookup table by storing the rows); then scored on 2000 fresh rows from the same source (seed 0x0fe67df3a852f39e). The lookup table answers with the label of the stored row whose voltage is closest to the question (distances compared in hundredths of a volt, so that equal distances are exact); a question exactly between two stored voltages goes to the lower one; stored rows with equal voltage (none occur here) would be tried in order of increasing label, so the lowest label would answer. Averages are shown to 2 decimals.
 
 | hypothesis space | numbers that define a member | average off by on the 10 known rows | average off by on 2000 fresh rows |
 |---|---:|---:|---:|
@@ -378,7 +378,7 @@ Best member of each space found on the 10 known rows (the line and parabola by t
 <!-- /worked -->
 
 <!-- worked: learning_problem.parabola_grid -->
-Parabola grid: a from -14 to 2 in steps of 0.25 (65 values), w from 20 to 80 in steps of 1 (61 values), b from -30 to 30 in steps of 1 (61 values); a is the outer loop, then w, then b, all ascending, strict improvement only, as for the line.
+Parabola grid: a from -14 to 2 in steps of 0.25 (65 values), w from 20 to 80 in steps of 1 (61 values), b from -30 to 30 in steps of 1 (61 values); a is the outer loop, then w, then b, all ascending, strict improvement only, as for the line; a v^2 + w v + b is evaluated as (a v^2 + w v) + b with v^2 = v * v.
 
 Best parabola on the grid (241865 settings): a = -8.0, w = 50.0, b = -6.0, average off by 0.68 deg C on the known rows.
 <!-- /worked -->

@@ -620,9 +620,9 @@ The limits are in the choices that remain. The loss is only as right as the dist
 - **maximum likelihood estimation**: choosing the parameter under which the observed data were most probable, equivalently the one that minimises the negative log-likelihood. <!-- concept: maximum-likelihood-estimation -->
 - **negative log-likelihood**: minus the natural logarithm of the likelihood, a sum over independent examples of the surprise at each observed label; the loss that maximum likelihood minimises. <!-- concept: negative-log-likelihood -->
 - **prior**: a probability distribution over the parameters stating what is believed about them before the data are seen. <!-- concept: prior -->
-- **maximum a posteriori**: choosing the parameter at the peak of the posterior, equivalently minimising the negative log-likelihood plus the negative log of the prior. <!-- concept: maximum-a-posteriori -->
-- **L2 regularization**: adding to the loss a penalty proportional to the sum of the squared weights, which is the effect of a Gaussian prior on the weights and shrinks them smoothly toward zero. <!-- concept: l2-regularization -->
-- **L1 regularization**: adding to the loss a penalty proportional to the sum of the absolute values of the weights, which is the effect of a Laplace prior and sets some weights exactly to zero. <!-- concept: l1-regularization -->
+- **maximum a posteriori**: choosing the parameter at the peak of the posterior (the distribution of the parameter after the data, prior times likelihood, rescaled), equivalently minimising the negative log-likelihood plus the negative log of the prior. <!-- concept: maximum-a-posteriori -->
+- **L2 regularization**: adding to the loss a penalty proportional to the sum of the squared weights (with a squared error, ridge regression), which is the effect of a Gaussian prior on the weights and shrinks them smoothly toward zero. <!-- concept: l2-regularization -->
+- **L1 regularization**: adding to the loss a penalty proportional to the sum of the absolute values of the weights, which is the effect of a Laplace prior and sets some weights exactly to zero (with a squared error, the lasso, solved by soft-thresholding: move a value toward zero by the penalty and stop at zero). <!-- concept: l1-regularization -->
 
 ## Answers
 

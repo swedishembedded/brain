@@ -475,7 +475,7 @@ function fit_least_squares(X: array<real>[N, d], y: array<real>[N])
                 A[i, j] = A[i, j] + X[n, i] * X[n, j]
         for n in 0 .. N:
             c[i] = c[i] + X[n, i] * y[n]
-    return solve(A, c, true)            # partial pivoting, Volume I, chapter 4; vanishing-pivot test as in the text
+    return solve(A, c, true)            # partial pivoting, Volume I, chapter 4; this `solve` also raises the vanishing-pivot error of the text
 ```
 
 Forming $\mathbf{A}$ costs $N d^2$ multiply-adds and solving costs about $d^3/3$.
@@ -742,7 +742,7 @@ wasteful: every step is a full pass over the data, and for a model with millions
 of parameters ten times as many steps means ten times the arithmetic.
 
 **Good ($\eta = 0.2$).** The loss falls fast at first and then settles; by step
-$100$ it is within $0.07$ of the minimum, and by step $200$ the weights are within $0.02$ of
+$100$ it is within $0.07$ of the minimum, and by step $200$ each weight is within $0.02$ of
 the exact line. Early on the path overshoots (the slope
 is $20.38$ after one step and $6.30$ after two), a sign that the step is large
 for one of the two directions of the bowl.
