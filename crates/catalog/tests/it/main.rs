@@ -10,6 +10,7 @@
 #[path = "../common/mod.rs"]
 mod common;
 
+mod cancellation;
 mod decision_agreement;
 mod decision_lifecycle;
 mod decision_served;

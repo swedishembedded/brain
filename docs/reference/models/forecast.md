@@ -61,7 +61,8 @@ lists every parameter:
   and seasonal naive on the last `horizon` bars it was not shown (CRPS, MAE,
   pinball, band coverage, averaged over `origins` disjoint windows), with the
   evidence chart when `chart` is set. This is the way to sanity-check a
-  forecaster on your own data before trusting it.
+  forecaster on your own data before trusting it. A cancelled evaluation
+  stops before the next origin (a Kronos rollout before its next step).
   ```bash
   brain kronos predict --in csv=ohlcv.csv --horizon 48 --origins 5 --seed $RANDOM
   ```

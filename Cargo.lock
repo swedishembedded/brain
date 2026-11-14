@@ -919,6 +919,7 @@ dependencies = [
  "brain-arcface",
  "brain-audio",
  "brain-capability",
+ "brain-capability-mock",
  "brain-checkpoint",
  "brain-chronos2",
  "brain-clip",

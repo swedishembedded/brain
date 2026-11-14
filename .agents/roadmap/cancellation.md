@@ -7,115 +7,101 @@ Scope: Cooperative cancellation of every served action (`CancelToken`, `ActionSp
 
 Goal: EVERY served action stops when its caller's `CancelToken` fires, the
 manifest says so (`ActionSpec::cancellable`), and a behavioural gate proves
-it. Today the token is cooperative (`crates/capability/src/lib.rs`,
-`CancelToken`): an action checks it between bounded units of work and returns
+it. The token is cooperative (`crates/capability/src/lib.rs`, `CancelToken`):
+an action checks it on entry and between bounded units of work and returns
 `Err("cancelled")`, or, once it has streamed text, completes with the partial
 text and `finish_reason: "cancelled"` (`.agents/rules/serving-contract.md`).
-An action that never reads the token runs to completion whatever the caller
-does, and nothing in the manifest tells the caller which kind it got.
-
-`scripts/gates/check-cancellable-actions.sh` (`make check/scripts`) is the
-interim ratchet: a per-crate text heuristic over `caps.rs` files that declare
-a `.streaming()` action. It cannot see a non-streaming action, a resident path
-that bypasses the provider's polling, or a crate where one action polls and
-another does not, and a `cancel` read in a crate's test code counts
-as polling. It is a fast pre-check, not the gate this file
-works toward. Its KNOWN list is down to minimaxmusic3.
 
 ## Milestones
 
-- [x] **C0. The ratchet is green again.** It was red at HEAD 2026-10-06:
-      deepseekvl `generate` and januspro `text2image` ignored the token and
-      were not listed; lfm2 was listed only because a comment in its
-      `caps.rs` mentions `.streaming()` (both its actions are one-shot
-      encoders). deepseekvl's batched decode now stops a request's sequence
-      at the next token once its token fires, and januspro's `text2image`
-      polls per image token (it passed `&|| false`); both check on entry.
-      The gate skips comment lines, so lfm2 is off the list.
-- [ ] **C1. The bit.** `ActionSpec::cancellable: bool` (default false),
-      emitted by `to_json`, the D-Bus manifest and `/v1/capabilities`, with
-      the contract "checks the token on entry and at least once per bounded
-      unit of work". A one-shot action meets it with the entry check plus
-      size-bounded inputs.
-- [ ] **C2. The behavioural gate.** For every served action: run it under a
-      weight-free harness with the token fired before the call (one-shot) or
-      after the first progress event (streaming) and assert it returns within
-      a bound with the contract's error or `finish_reason`. The text heuristic
-      stays only as a pre-check.
-      - [x] The harness: `capability_mock::cancellation` (`admission`,
-            `mid_run`, `certify`, `Bound`). `admission` fires the token before
-            the call and requires `Err(capability::failure::CANCELLED)` with no
-            progress; `mid_run` fires it from the `fire_after`-th progress
-            event and requires at most `within` more events, ending in the
-            cancelled error or (after streamed text) `finish_reason:
-            "cancelled"`, and refuses a workload too short to show a stop. An
-            action reports with `CancelToken::check`.
-      - [x] Applied to every action reworked in the list below (the
-            "verified" column says how).
-      - [ ] Applied to the "already polling" set below, and run over every
-            served action from one place rather than per crate.
-- [ ] **C3. Work the list below**, smallest first, declaring the bit as each
-      action lands.
-- [ ] **C4. Flip it.** A served action without `cancellable = true` fails
-      `make check`; the KNOWN list in the script is deleted.
+- [x] **C0. The ratchet is green again** (2026-10-06): deepseekvl `generate`
+      and januspro `text2image` poll; lfm2 left the list.
+- [x] **C1. The bit.** `ActionSpec::cancellable` (default false, builder
+      `.cancellable()`), emitted by `to_json` (D-Bus `Manifests()`, `brain caps
+      --json`) and `GET /v1/capabilities`, as `false` too. Contract: the token
+      is checked on entry, before any weight is read or lock taken, and at
+      least once per bounded unit of work; a one-shot action meets it with the
+      entry check plus size-bounded inputs.
+- [x] **C2. The behavioural gate.** The harness is
+      `capability_mock::cancellation::{admission, mid_run, certify, Bound}`.
+      `crates/catalog/tests/it/cancellation.rs` runs from one place over
+      `catalog::manifests()`: every listed action declares the bit, and every
+      action whose provider builds from an assembly of absent paths refuses a
+      token fired before the call with the literal and no progress. The test
+      prints which providers need real weights to be built; those are covered
+      by their own crates (table below). Mid-run proofs stay beside each
+      model's loop.
+- [x] **C3. Work the list**, declaring the bit as each action lands (tables
+      below).
+- [x] **C4. Flip it.** `scripts/gates/check-cancellable-actions.sh`
+      (`make check/scripts` and a pre-commit hook; spec
+      `tests/gates/cancellable_actions.bats`) fails any production
+      `ActionSpec::new(..)` without `.cancellable()`; the KNOWN list is gone
+      and there is no allow list.
+- [ ] **C5. Close the entry-only loops** listed under "Open" below: actions
+      that declare the bit and check on entry, but whose long loop lives in a
+      library function with no stop hook yet.
 
-## Done (2026-11-14)
+## One terminal rule (2026-11-14)
 
-Every row: entry check before any weight is read or resident lock taken,
-a poll at the stated granularity, the canonical `"cancelled"` literal (a
-stopped training run used to answer `"cancelled after step N"`, which
-`ReplyError::of` classed as a model failure; the step now travels as the last
-progress event), and RAII release of guards and scratch on the early return.
+`qwen3::chat::SeqState::finish` answers `Err("cancelled")` for a sequence
+cancelled before it streamed any text (also during prefill), and `Ok` with
+the partial text and `finish_reason: "cancelled"` after. It used to answer
+`Ok` with an empty reply, which the harness's `admission` rejects and which
+an HTTP caller read as a 200. Every chat model, `llmserve` (which also
+refuses a fired token at admission), the SDK's `TextGenerationPipeline` and
+`ChatPipeline` (now `Error::Cancelled` before the first token) and the omni
+Thinker share it; HTTP answers 503 for a draining server and D-Bus the error
+frame, as they already did for every other action.
+
+## Done
+
+Every row: entry check before any weight is read or resident lock taken, a
+poll at the stated granularity, the canonical `"cancelled"` literal, RAII
+release on the early return, and the bit declared.
 
 | model | action(s) | polled | verified |
 |---|---|---|---|
-| llava, fastvlm | caption | entry, after the vision tower, per decoded token | `admission` weight-free; `mid_run` with the real checkpoint (fastvlm `apple/FastVLM-0.5B` passed; llava skips by name: no `liuhaotian/llava-v1.5-13b` in the store) |
-| cosyvoice | synth (provider, resident, SDK) | entry, per speech token, per flow Euler step; per-step progress now emitted | `admission` weight-free; `mid_run` over the LM decode loop on a tiny random config; flow loop by reading (no tiny flow config) |
-| moondream3 | caption | entry (before the resident lock), per decoded token; progress is now live, no longer replayed after generation | `admission` weight-free; tiny-model test that `generate_kv` stops at the token its caller refuses |
-| glmdsa | generate (provider and `resident_llm.rs` `GlmInstance`), train, finetune | entry, per decoded token, per optimizer step | `certify` on generate and train with a tiny trained checkpoint |
-| gpt2 | generate (provider and `resident_llm.rs` `GptInstance`), train | entry, per decoded token, per optimizer step | `certify` on generate with a tiny trained checkpoint; both sample loops stop at a refused token (tiny model); the resident by compile and reading |
-| florence2 | ground | entry (before the import), per decoded token | `admission` weight-free |
-| qwen3 | lora_train, train, finetune | entry, per optimizer step | the existing tiny train test now asserts the literal |
-| ouro (`resident_ouro.rs`), decisions (`brain::decision_actions`) | train | entry (ouro), per optimizer step | `decision_lifecycle` asserts the literal; ouro by reading |
-| qwen3tts | batch | entry, per round (already), per vocoded clip | entry check weight-free; mid-run was already tested (`run_batch`) |
-| deepseek2ocr, deepseekocr2 | generate | entry (before the resident lock and the build); the decode is `llmserve`'s scheduler, which stops a request at its next token | `admission` weight-free through `ocrserve` with a toy model; the rows' old `on_token` notes were stale, these models are served through `ocrserve` |
-| s3dit | image2image, inpaint, outpaint (and lora_train's entry) | entry, per denoise step, through `generate_core` shared with text2image | `admission` weight-free for all five actions; mid-run needs the real Qwen text encoder and DiT |
-| flux1, pulid | text2image | entry (before the pipeline cache lock), per denoise step | `admission` weight-free; mid-run skips by name (needs FLUX.1, PuLID, ArcFace, EVA-CLIP and BiSeNet checkpoints) |
-| sdxlunet, controlnet | text2image | entry, per denoise step in the shared `sampler::sample` | `admission` weight-free for both; `certify` over the real `sample` loop with a fake `Denoiser` |
-| SDK | `VisionLanguagePipeline::ask_stream`, `TextGenerationPipeline::generate_stream`, `VideoPipeline::generate_with_progress`, `TtsPipeline::{speak_with, clone_voice_with, design_with}` | as the model underneath | text: fired-before and mid-stream on a synthetic checkpoint; video and TTS: fired-before on the resolve fixtures; VLM skips by name without `Qwen/Qwen3-VL-4B-Instruct` |
+| shared adapters | catalog `LazyProvider`, `ResidentProvider` actions; `Instance::run_batch` default | before the build/load and lock; per queued job | `residency` unit test; the catalog C2 test runs through them |
+| llava, fastvlm | caption | entry, after the vision tower, per decoded token | `admission` weight-free; `mid_run` with the real checkpoint (fastvlm passed; llava skips by name: no `liuhaotian/llava-v1.5-13b`) |
+| cosyvoice | synth (provider, resident, SDK) | entry, per speech token, per flow Euler step | `admission` weight-free; `mid_run` over the LM decode on a tiny random config |
+| moondream3 | caption | entry, per decoded token, live progress | `admission` weight-free; tiny-model stop test |
+| glmdsa, gpt2 | generate, train, finetune | entry, per token, per optimizer step | `certify` with tiny trained checkpoints |
+| florence2 | ground | entry, per decoded token | `admission` weight-free |
+| qwen3, ouro, decisions | train, finetune, lora_train | entry, per optimizer step | tiny train tests assert the literal |
+| qwen3tts | batch | entry, per round, per vocoded clip | entry weight-free; `run_batch` mid-run |
+| deepseek2ocr, deepseekocr2 | generate | entry; `llmserve` per token | `admission` through `ocrserve` with a toy model |
+| s3dit | text2image, image2image, inpaint, outpaint | entry, per denoise step | `admission` weight-free |
+| flux1, pulid | text2image | entry, per denoise step; one progress step per denoise step through `Session::run` and the residents | `admission` weight-free; mid-run skips by name (FLUX.1 and the PuLID towers) |
+| sdxlunet, controlnet | text2image | entry, per denoise step; one progress step per step through `Session::run` and the residents | `certify` and a per-step report test over the real `sampler::sample` with a fake `Denoiser` |
+| imgpipe | run | entry, per stage; the token rides into every model stage | `certify` with stub stages |
+| kronos | forecast (CPU, NPU), predict | entry, per decode step in every rollout form | `certify` over both injected-cores rollouts on a zero model; fired-token test for the host forms |
+| every forecaster | predict (`forecastops::run_predict`), forecast entry | entry, per origin | `certify` with a persistence forecaster |
+| nemotronasr | transcribe (provider, CPU and NPU residents, batched) | entry, per encoded frame of the RNN-T decode; per stream in a batch | `certify` on a tiny random config; `transcribe_stream` is one window, entry only |
+| qwen3asr | transcribe (provider, CPU and NPU residents) | entry (before the model lock), per decoded token, each reported | real-weight `certify` `a_transcription_stops_at_the_token_its_cancel_fires` (ignored by default like its siblings; skips by name without `Qwen/Qwen3-ASR-1.7B` or `asr/audio/librispeech_mr_quilter.wav`) |
+| rrdbnet | upscale | entry, per window of a tiled sweep | `certify` on synthetic weights |
+| minimaxmusic3 | generate | entry, per AR frame, per Euler step, per vocoded chunk | `admission` weight-free; `certify` over the Euler loop on a tiny DiT; AR and vocoder by reading |
+| qwen3omnimoe | generate (bf16 and int8), speak, converse, int8 raw generate | entry (the checkpoint now loads on first run, not on lookup), per token (`SeqState`), Talker and Code2Wav as before | `certify` over `serve_chat` with a canned Thinker |
+| one-shots | lfm2 embed/fill_mask, sam2 segment, yolov8 detect, scrfd, arcface, clip, zipdepth infer, codeformer, t5encoder, vqgan, worldmirror2, splat render, imageops, demo, the mocks | entry | the catalog C2 test where the provider builds without weights |
+| already polling | the `SeqState` models, qwen3vl lora_train, flux2, wan, ltxv, qwen3tts synth/clone/design, supir, splat fit, deepseekvl, januspro, sam2 track, recon | entry check added where it was missing | their existing tests; C2 for admission |
 
-## Work list: actions that still ignore the token
+## Open
 
-Effort: S = the token is already in reach; M = thread a token or a stop
-callback through one or two library functions; L = several loops or a batch
-engine.
-
-| effort | model | action(s) | streaming | where the loop is | why still open |
-|---|---|---|---|---|---|
-| S | imgpipe | run | no | `lib.rs` `Pipeline::run`, per stage | few stages, low value |
-| M | kronos (forecast) | forecast | no | `generate.rs` `forecast*` `for step in 0..pred_len` | several entry points; not reached |
-| M | nemotronasr | transcribe | yes | model `transcribe`/`transcribe_with_encoder` chunk loop | not reached; `transcribe_stream` is one bounded window, N/A |
-| M | qwen3asr | transcribe | yes | `model.rs` `transcribe` decode loop under `caps.rs` `decode` | fixed window; not reached |
-| M | rrdbnet | upscale | no | `caps.rs` `upscale_tiled` window loop behind the `Upscaler` trait | trait signature changes; not reached |
-| M | flux1, pulid, sdxlunet, controlnet | text2image | no | `Session::run`, `resident_flux1`/`resident_sdxl`/`resident_controlnet` | they now stop, but emit no per-step progress, so a client cannot see a step boundary; adding it changes `Session::run` and three residents |
-| M/L | minimaxmusic3 | generate | yes | pipeline: LLM decode, DiT denoise, vocoder | multi-minute; three phases; not reached |
-| L | qwen3omnimoe | generate, speak, converse | yes | `caps.rs` `generate_greedy`, `generate_multimodal`, `speak` (thinker, talker/MTP, code2wav), `converse`; `int8_thinker_resident.rs` `generate_with_embeds` | several decode loops plus the multi-device int8 path; `generate` emits only start and end progress |
-| S (entry check only) | one-shot | lfm2 embed/fill_mask, sam2 segment, yolov8 detect, scrfd detect, arcface embed, clip embed_text/embed_image, zipdepth infer, codeformer restore_face, t5encoder encode, vqgan encode/decode, worldmirror2 reconstruct, horizon predict, qwen3 embed, chronos2/fincast/timesfm3 forecast, splat render, imageops, demo echo | no | single forward | C1's entry check plus size-bounded inputs |
-
-Real-weight mid-run proofs still to run on a box with the checkpoints: llava
-caption (LLaVA-1.5-13B), the SDK's `ask_stream` (Qwen3-VL-4B-Instruct), flux1
-and pulid text2image, s3dit's edit actions, cosyvoice's flow loop end to end.
-
-Already polling (for C2 to prove, not to fix): the `qwen3::chat::SeqState`
-users (qwen3, qwen35, qwen35moe, qwen3vl `generate`, and their residents),
-qwen3 `lora_gate`, qwen3vl `lora_train`, s3dit `text2image` and `lora_train`,
-flux2 (all), wan (all), ltxv `t2v`/`dfr`, qwen3tts `synth`/`clone`/`design`/
-`speak`, supir `restore`, splat `fit`, deepseekvl `generate`, januspro
-`generate`/`text2image`, the mock. Note for C2: a `SeqState` user cancelled
-before it starts answers `Ok` with `finish_reason: "cancelled"` and no text,
-where the contract says `Err("cancelled")`; `admission` rejects that, so the
-SDK's text, chat and VLM forms check on entry themselves.
-
-Still with an SDK entry point that passes `CancelToken::default()` and has no
-cancellable form: none of the surfaces above; `pipeline.rs` and `finetune.rs`
-pass it only from their convenience forms.
+- **Entry check only, loop without a stop hook** (declared, but a fired token
+  is seen only on entry): lfm2 `eval` (`train::evaluate`), diamond `bench` and
+  `replay --verify` (`worldrun`), horizon `eval` and `calibrate`, toypid
+  `rollout`/`profile`, toymoe `eval`/`generate`, zipdepth `calib`
+  (activation statistics; image loading polls), splat `merge`/`prune`, the
+  `import`/`export`/`convert` actions (qwen3, qwen35, qwen3tts, glmdsa,
+  qwen3omnimoe, the forecasters, `resident_provider::import_spec`), qwen3
+  eval actions, forecast `compare`, trainjob `dryrun`/`consolidate`. Each
+  needs its library loop to take a keep-going callback, as florence2 and
+  rrdbnet did.
+- yolov8 and zipdepth `train` stop through their step callback but answer
+  `Ok` with the partial run, not `"cancelled"`.
+- Real-weight mid-run proofs to run on a box with the checkpoints: llava
+  caption, the SDK's `ask_stream`, flux1 and pulid, s3dit's edit actions,
+  cosyvoice's flow loop, qwen3asr (the test above, with the LibriSpeech clip).
+- The C2 test proves admission only for providers that build without
+  weights; residents are covered by the shared `run_batch` check and their
+  own entry checks, not by a weight-free behavioural test.

@@ -75,30 +75,31 @@ Implement `capability::Action` for each action and advertise them in a
   every model that has one. Reference: `qwen3::caps` with
   `qwen3::spec::Qwen3Spec`, and `crates/catalog`'s own tests, which pin over the
   REAL catalog that no served manifest carries a checkpoint path.
-- **Long-running actions must be cancellable.** Every [`Invocation`] carries a
-  `capability::CancelToken` (`inv.cancel`; the `Default` token is unarmed and never
-  fires, so short actions can ignore it). An action whose run is longer than a few
-  seconds — multi-minute generation, multi-hour training — polls
-  `inv.cancel.is_cancelled()` between steps (once per denoising step / training
-  step; the check is one relaxed atomic load) and returns `Err("cancelled".into())`.
-  Front-ends arm the token (the D-Bus `Cancel` method flips it); the token rides
-  inside the `Invocation` through the executor, so `residency::Job` needs nothing.
-  Reference: `zimage::caps` `text2image` + `lora_train`
-  (`pipeline::HotPipeline::generate`, `finetune::run`).
-  - **One exception, and it is a reporting rule, not an opt-out.** An action that
-    has already streamed partial output to the caller (per-token `delta` progress)
-    does not throw that output away: it completes with `Ok(Outcome)` carrying the
-    partial text and reports `finish_reason: "cancelled"`. It must never report
-    `"stop"`, which is an EOS: a caller cannot tell a truncated answer from a
-    finished one. `qwen3::chat::SeqState::finish` is the one implementation, shared
-    by every chat model. An action that has produced nothing yet still fails with
-    `Err("cancelled")`.
-  - A token that is accepted and never polled is worse than no token, because a
-    caller builds request lifetime on it and then waits for a generation that will
-    run to `max_new` regardless. `scripts/gates/check-cancellable-actions.sh` is the
-    ratchet: it carries the list of models that currently ignore cancellation and
-    fails when a new streaming action joins them. A new model must not be added to
-    that list.
+- **Every action observes cancellation and declares it.** Every [`Invocation`]
+  carries a `capability::CancelToken` (`inv.cancel`; the `Default` token is unarmed
+  and never fires). An action checks it on entry, before it decodes inputs, reads a
+  weight or takes a lock, and at least once per bounded unit of work (one decode
+  token, one denoising step, one optimizer step, one tile or chunk), with
+  `inv.cancel.check()?`, which answers the canonical `Err("cancelled")`
+  (`capability::failure::CANCELLED`). A one-shot action meets it with the entry
+  check plus size-bounded inputs. Anything it holds is released on the early return.
+  Its spec then says so with `.cancellable()` (`ActionSpec::cancellable`), which
+  every manifest surface carries. Front-ends arm the token (the D-Bus `Cancel`
+  method, `DELETE /v1/jobs/{id}`); it rides inside the `Invocation` through the
+  executor, so `residency::Job` needs nothing.
+  - **One terminal rule.** An action that has already streamed partial text to the
+    caller (per-token `delta` progress) completes with `Ok(Outcome)` carrying that
+    text and `finish_reason: "cancelled"`, never `"stop"` (a caller cannot tell a
+    truncated answer from a finished one). An action that has streamed nothing,
+    including a generation cancelled before or during prefill, fails with
+    `Err("cancelled")`: an empty reply must not read as an answer. For text,
+    `qwen3::chat::SeqState::finish` is the one implementation, shared by every
+    chat model and `llmserve`.
+  - Proof, not trust: a new action gets `capability_mock::cancellation::{admission,
+    mid_run, certify}` on a tiny random config where one exists, and
+    `crates/catalog/tests/it/cancellation.rs` runs `admission` over every listed
+    action that builds without weights. `scripts/gates/check-cancellable-actions.sh`
+    fails any production action spec without `.cancellable()`.
 - **A served model is named `<vendor>/<repo>[-<QUANT>]`, matching its upstream
   URL exactly, case included** (`Qwen/Qwen3-0.6B`, `Qwen/Qwen3-0.6B-Q4_K_M`).
   `brain/`, `local/` and `test/` are reserved vendors for built-ins, hand-placed

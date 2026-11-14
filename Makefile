@@ -794,8 +794,12 @@ check/seed-literals/tests:
 	bash scripts/gates/check-seed-literals.sh --tests
 
 # Spec for the gate above, run against throwaway trees (needs only bats).
-## test/gates - default: every gate self-test (env-reads, env-writes, test-skips, seed-literals, group-kernels, crate-layers, whole-tensor-loads, format-logic, adapter-naming, placement-accounting, training-capabilities, model-flags, tier-gemm, suite-report)
-test/gates: test/gates/env-reads test/gates/env-writes test/gates/test-skips test/gates/seed-literals test/gates/group-kernels test/gates/crate-layers test/gates/whole-tensor-loads test/gates/format-logic test/gates/adapter-naming test/gates/placement-accounting test/gates/training-capabilities test/gates/model-flags test/gates/tier-gemm test/gates/suite-report
+## test/gates - default: every gate self-test (env-reads, env-writes, test-skips, seed-literals, group-kernels, crate-layers, whole-tensor-loads, format-logic, adapter-naming, placement-accounting, training-capabilities, model-flags, tier-gemm, suite-report, cancellable-actions)
+test/gates: test/gates/env-reads test/gates/env-writes test/gates/test-skips test/gates/seed-literals test/gates/group-kernels test/gates/crate-layers test/gates/whole-tensor-loads test/gates/format-logic test/gates/adapter-naming test/gates/placement-accounting test/gates/training-capabilities test/gates/model-flags test/gates/tier-gemm test/gates/suite-report test/gates/cancellable-actions
+
+## test/gates/cancellable-actions - the cancellable-actions gate fails on a production action spec without .cancellable() (also through a helper), passes when declared, ignores tests, comments and strings
+test/gates/cancellable-actions:
+	bats tests/gates/cancellable_actions.bats
 
 ## test/gates/test-skips - the silent-skip ratchet fails on a new bare skip and on a stale entry, passes on a match
 test/gates/test-skips:
@@ -910,12 +914,10 @@ check/clippy: check/workspace
 # - the layering in .agents/rules/architecture.md is otherwise unenforced, and
 # one violation there is not a style problem but a hard Cargo cycle that only
 # surfaces at the next call site.
-# check-cancellable-actions.sh is a RATCHET, not a rule: every action is handed
-# a cancel token whether or not it honours one, so a caller that builds request
-# lifetime on cancellation cannot tell from the manifest which models will
-# actually stop. The script carries the list of models that knowingly ignore it
-# and fails when a new streaming action joins them (or when a listed one starts
-# polling and the list goes stale).
+# check-cancellable-actions.sh requires every production action spec to declare
+# `.cancellable()`, the manifest bit that says the action checks its cancel
+# token on entry and per bounded unit of work; there is no allow list. The
+# behavioural proof is crates/catalog/tests/it/cancellation.rs.
 ## check/scripts - scripts/tools self-validation + env-var doc gate + no-doc-citations
 ##   + no-perf-numbers + measured-citations + architecture, layering and link gates
 check/scripts:

@@ -236,6 +236,18 @@ repos:
         files: '(^crates/.*\.rs$|^scripts/gates/(model-flags\.|check-model-flags\.sh|ratchet\.py))'
         pass_filenames: false
         stages: [pre-commit]
+      - id: cancellable-actions
+        name: "Every production action spec declares that it observes cancellation"
+        description: >-
+          Every ActionSpec::new(..) in production code chains .cancellable():
+          the action checks its CancelToken on entry and per bounded unit of
+          work, and the manifest says so. No allow list. See
+          scripts/gates/check-cancellable-actions.sh. Also run by `make check/scripts`.
+        entry: bash scripts/gates/check-cancellable-actions.sh
+        language: system
+        files: '(^crates/.*\.rs$|^scripts/gates/(cancellable-actions\.py|check-cancellable-actions\.sh))'
+        pass_filenames: false
+        stages: [pre-commit]
       - id: seed-literals
         name: "No new literal seeds in production code (every default seed is random)"
         description: >-
