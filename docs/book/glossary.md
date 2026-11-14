@@ -468,7 +468,7 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **feed-forward network**: the sublayer that applies one small network, two or three matrices and an activation, to each position on its own, so that it computes with what attention has gathered and moves nothing between positions. *([The Transformer Block](v05-sequences/09-transformer-block.md))*
 
-**feed-forward reconstruction**: recovering cameras and scene geometry from images by one evaluation of a trained network, with no optimisation over the images at the time of use, in place of the matching, robust estimation and adjustment of structure from motion. *([Learning 3D Directly](v10-video-and-3d/05-feed-forward-3d.md))*
+**feed-forward reconstruction**: recovering cameras and scene geometry from images by one evaluation of a trained network, with no optimization over the images at the time of use, in place of the matching, robust estimation and adjustment of structure from motion. *([Learning 3D Directly](v10-video-and-3d/05-feed-forward-3d.md))*
 
 **finite difference**: an estimate of a derivative built from values of the function at nearby points, such as the forward difference $(f(x+h) - f(x))/h$. *([Proving Gradients Correct](v03-neural-networks/06-gradient-checking.md))*
 
@@ -524,7 +524,7 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **Gaussian distribution**: the bell-shaped distribution with density $\frac{1}{\sigma\sqrt{2\pi}}e^{-(x-\mu)^2/(2\sigma^2)}$, fixed by its mean $\mu$ and variance $\sigma^2$, written $\mathcal{N}(\mu, \sigma^2)$ and also called the normal distribution. *([The Distributions Machine Learning Uses](v01-mathematics/11-distributions.md))*
 
-**gaussian primitive**: a three-dimensional bell $\exp(-\frac12(\mathbf{x}-\boldsymbol\mu)^\top\boldsymbol\Sigma^{-1}(\mathbf{x}-\boldsymbol\mu))$ with a position, a covariance built from a rotation and three scales so that it is positive definite, an opacity and a colour, fourteen numbers in all as the optimizer holds them. *([3D Gaussian Splatting](v10-video-and-3d/06-gaussian-splatting.md))*
+**Gaussian primitive**: a three-dimensional bell $\exp(-\frac12(\mathbf{x}-\boldsymbol\mu)^\top\boldsymbol\Sigma^{-1}(\mathbf{x}-\boldsymbol\mu))$ with a position, a covariance built from a rotation and three scales so that it is positive definite, an opacity and a colour, fourteen numbers in all as the optimizer holds them. *([3D Gaussian Splatting](v10-video-and-3d/06-gaussian-splatting.md))*
 
 **gelu**: the Gaussian error linear unit $z\,\Phi(z)$, the input times the probability that a standard Gaussian variable lies below it, a smooth cousin of the ReLU that dips slightly below zero for negative inputs; it is computed exactly with the error function or approximately by a tanh form or a sigmoid form that are different functions. *([Multilayer Networks](v03-neural-networks/02-mlp.md))*
 
@@ -669,6 +669,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **KL divergence**: the excess of the cross-entropy over the entropy, $D_{\mathrm{KL}}(p \,\Vert\, q) = \sum_k p_k \log(p_k/q_k)$; it is never negative, zero only when $q = p$, and not symmetric in its arguments. *([Information, Entropy and Surprise](v01-mathematics/13-information-theory.md))*
 
 **KL penalty**: the term $\beta\,\mathrm{KL}(\pi \,\|\, \pi_{\mathrm{ref}})$ subtracted from the expected reward to keep the policy near a frozen reference, whose maximiser is $\pi_{\mathrm{ref}} e^{r/\beta}/Z$. *([Reinforcement and Preference Learning for Language Models](v12-reinforcement-learning/04-llm-alignment.md))*
+
+**knowledge distillation**: training a student model to reproduce the output distributions of a frozen teacher, usually by the divergence $D_{\mathrm{KL}}(\mathbf{q} \,\Vert\, \mathbf{p})$ whose gradient with respect to the student's logits is $\mathbf{p} - \mathbf{q}$. *([Distillation](v13-training-at-scale/06-distillation.md))*
 
 **KV cache**: for every layer, the key and the value of every token already seen, stored once and read by every later token, so that the past is never run through the model again; its size is two rows of $h_{\mathrm{kv}} d_h$ numbers per token and layer. *([The KV Cache](v05-sequences/12-kv-cache.md))*
 
@@ -882,6 +884,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **omni model**: one network whose decoder reads rows from the encoders of several media (sound, pictures, video and text) in a single sequence, and that answers in more than one medium, here in text and in speech. *([Models That Listen, See and Speak](v09-audio/08-omni-models.md))*
 
+**on-policy distillation**: distillation on the student's own samples, the teacher scoring each sampled token in its context, so that the student is corrected where it actually goes; its loss is the reverse divergence $D_{\mathrm{KL}}(\mathbf{p} \,\Vert\, \mathbf{q})$, estimated per token by the advantage $\ln q - \ln p$. *([Distillation](v13-training-at-scale/06-distillation.md))*
+
 **one-hot-encoding**: writing a class index as a vector with a one in the position of that class and zeros elsewhere, the probability vector that puts all its weight on that class. *([Softmax, Logits and Cross-Entropy](v03-neural-networks/03-softmax.md))*
 
 **online softmax**: the way of computing a softmax and the weighted sum of values in one pass over a row of scores read in chunks, by carrying the running maximum $m$, the running sum $\ell$ of exponentials relative to it and the running weighted sum $\mathbf{o}$, and multiplying the old sum and the old output by $e^{m - m'}$ whenever a chunk raises the maximum from $m$ to $m'$. *([Attention Without the Quadratic Memory](v05-sequences/13-flash-attention.md))*
@@ -1014,7 +1018,7 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **promptable segmentation**: the task of returning the mask of an object in an image from a prompt, a point, a box or a rough mask, with the same model for every object and no fixed list of classes; a prompt that leaves the extent open is answered with several masks. *([Promptable Segmentation and Video Tracking](v07-vision/07-segment-anything.md))*
 
-**proper scoring rule**: a loss for probability reports under which the expected loss is smallest when the report equals the true probability, so that a forecaster minimising it has no reason to state anything but their belief; it is strictly proper when the truth is the only best report. *([Scoring Rules and Calibrated Decisions](v11-forecasting/06-calibrated-decisions.md))*
+**proper scoring rule**: a loss for probability reports under which the expected loss is smallest when the report equals the true probability, so that a forecaster minimizing it has no reason to state anything but their belief; it is strictly proper when the truth is the only best report. *([Scoring Rules and Calibrated Decisions](v11-forecasting/06-calibrated-decisions.md))*
 
 **pseudo-random generator**: a deterministic state machine (a state, a rule that advances it, and a rule that turns it into a number) whose outputs are judged by how closely they resemble draws from a uniform distribution, not by being unpredictable to someone who knows the rule. *([Randomness on a Deterministic Machine](v01-mathematics/17-randomness.md))*
 
@@ -1199,6 +1203,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **sinusoidal encoding**: a position vector made of sines and cosines at a geometric scale of rates, $\sin(i\omega_m)$ and $\cos(i\omega_m)$, which needs no training and has, for every offset, a fixed linear map from the vector at one position to the vector at another. *([Positional Information](v05-sequences/08-positions.md))*
 
 **sliding-window attention**: attention in which a query reads only the last $n_{\mathrm{win}}$ keys, itself included, so the cache of the layer is bounded by the window; a stack of such layers reaches $L(n_{\mathrm{win}} - 1) + 1$ positions. *([Attention Variants: Sharing and Compressing Keys](v06-language-models/03-attention-variants.md))*
+
+**soft targets**: the teacher's probability for every class (or its $K$ largest, renormalised) used as the training target in place of a single label, so each example tells the student how the classes relate. *([Distillation](v13-training-at-scale/06-distillation.md))*
 
 **softmax**: the function that turns a vector of real scores into a probability vector by exponentiating each score and dividing by the sum of the exponentials, so that the outputs are positive, add to one and keep the order of the scores. *([Softmax, Logits and Cross-Entropy](v03-neural-networks/03-softmax.md))*
 
