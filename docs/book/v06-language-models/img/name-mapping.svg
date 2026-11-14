@@ -1,4 +1,4 @@
-<!-- source-sha256: d8149c017fb106f859c3d765954698fd1675412edf6404dd22002cd8cdb9c7cc -->
+<!-- source-sha256: 1d00efc3b9c4f9af6c6826bb2370ac88e89dc4a834412b9ee9c7ba4fb973f78f -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 680" width="800" height="680"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="800" height="680" fill="#ffffff"/>
 <text x="195" y="32.9" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="bold" fill="#1a202c" text-anchor="middle">published layout (one layer)</text>
 <text x="640" y="32.9" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="bold" fill="#1a202c" text-anchor="middle">the book&#x27;s decoder (layer 0)</text>

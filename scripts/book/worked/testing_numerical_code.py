@@ -307,7 +307,7 @@ def silent_gates():
     correct = {n: [r32(v) for v in row] for n, row in ref.items()}
     scaled = {n: [1.05 * v for v in row] for n, row in ref.items()}
     head = (f"One parity test of three taps ({', '.join(TAPS)}; the golden holds the three rows of the reference logits "
-            f"of the previous table, one tap each) run in eight states, on the correct output (rounded to 32 bits) and on "
+            f"of the previous table, one tap each, in the order listed) run in eight states, on the correct output (rounded to 32 bits) and on "
             f"the mutant that multiplies every value by 1.05. The sound test asserts cosine at least {COS_FLOOR} and rel_l2 "
             f"at most {CEILING:g} on every tap. 'returns early' and 'skip printed' return without comparing when the golden "
             f"is absent; 'demands fixtures' turns that return into a failure; 'no tap name matches' looks up names the "
@@ -469,7 +469,7 @@ def conformance_suite():
             f"0.5 + 0.1 i, so w = [{', '.join(f'{v:g}' for v in w)}]. The five implementations return a loss and its "
             f"gradient with respect to Z: the definition; plain cross-entropy that ignores w; the weighted sum divided by "
             f"the sum of the supervised weights instead of n_sup; w applied to the loss but not to the gradient; the ignored "
-            f"position counted as a supervised one of class 0 (dividing by N). K1 compares, at w = 1 everywhere, the "
+            f"position counted as a supervised one of class 0, with its own weight w_4 applied (dividing by N). K1 compares, at w = 1 everywhere, the "
             f"loss and every gradient entry with the plain masked mean (within {EXACT:g}); K2 differences the "
             f"implementation's own loss in each of the 24 logits (h = {FD_STEP:g}, gate {FD_ATOL:g} + {FD_RTOL:g} "
             f"max(|a|, |n|)); K3 and K4 require the gradient rows of position 0 and 3 (weight 0) and of position 4 "

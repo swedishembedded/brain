@@ -202,8 +202,10 @@ def two_mistakes_table():
     return (f"The 6-layer tiny decoder (V = 11, D = 6, H = 4, 2 key-value heads of width 4, F = 10, L = 6, rotary base 100, eps 1e-6; "
             f"weights from the generator `{im.NAME_BIS}`, seed {seed:#018x}, drawn in the order of Volume VI, Chapter 1 and rounded "
             "to bf16) on the 8-token text 3, 9, 1, 7, 4, 4, 10, 2. The golden is the 64-bit forward pass with every hidden state "
-            "and the logits stored in 32 bits. The implementation under test is the 32-bit forward pass (every operation rounded, "
-            f"sums left to right) of an import with keys and values exchanged in layer {BUG_KV_LAYER} and gate and up exchanged in "
+            "and the logits stored in 32 bits; each stored state is a tap, a state at which two runs can be compared. The implementation "
+            "under test is the 32-bit forward pass (every operation rounded, the gated product of the feed-forward block evaluated as "
+            "fl(fl(g / fl(1 + fl(exp(-g)))) * up), that is silu(g) = g / (1 + exp(-g)) with exp, add, divide and the product with up "
+            f"rounded in that order, the four roundings of Volume VI, Chapter 2; sums left to right) of an import with keys and values exchanged in layer {BUG_KV_LAYER} and gate and up exchanged in "
             f"layer {BUG_GU_LAYER}; the correct import is the same pass without the two mistakes. Chained: the implementation runs "
             "end to end and each of its states is compared with the golden's. Isolated: each stage is run alone on the golden's "
             "stored input to that stage (layer k on the stored output of layer k - 1, the final norm on the stored output of layer "
@@ -257,6 +259,8 @@ def golden_text():
             cells.append("exactly 0" if v == 0 else (_fmt(v) + (" (below bound)" if v <= bounds[label] else "")))
         body.append([name] + cells)
     body.append(["parity tolerance of the logits"] + [_fmt(bounds[label]) for label, _ in GOLDEN_TEXTS])
+    cfg, _, _ = im.published()
+    counts = ", ".join(f"{im.bound_logits(cfg, len(ids)) / im.U32:.0f}" for _, ids in GOLDEN_TEXTS)
     seed = bookrng.seed_of(md.NAME_TINY)
     return ("The published 2-layer tiny decoder of Volume VI, Chapter 2 (V = 11, D = 6, H = 4, 2 key-value heads of width 4, "
             f"F = 10, rotary base 100, eps 1e-6; weights from the generator `{md.NAME_TINY}`, seed {seed:#018x}, drawn in the order "
@@ -265,7 +269,8 @@ def golden_text():
             "logits against the golden's, both in 64-bit arithmetic, so the number is the mistake alone. The query-norm gain is "
             "halved to divide every score by d_h = 4 instead of sqrt(d_h) = 2, which multiplies each score by 0.5. The last row is "
             "the parity tolerance of Volume VI, Chapter 2 for that text (the rounding count of a 32-bit pass times 2^-24; it grows "
-            "with the number of positions T through the softmax and the weighted sum of values).\n\n"
+            "with the number of positions T through the softmax, which costs T + 3 roundings, and the weighted sum of values, which "
+            f"costs T, so each layer counts 90 + 2T; the counts N of the three columns are {counts}).\n\n"
             + _table(["mistake in the port"] + [label for label, _ in GOLDEN_TEXTS], body, "lrrr"))
 
 
@@ -376,7 +381,9 @@ def pairing():
     rec = ", ".join(f"{k} {v}" for k, v in recorded.items())
     return ("The golden of the 6-layer model of the two-mistakes table records, beside its tensors, the identity of the checkpoint "
             f"it was generated from (the integers that fix every tensor shape: {rec}) and the SHA-256 of that checkpoint's file "
-            f"(the {8 * recorded['L'] + 3} tensors of the published layout of Volume VI, Chapter 2 in bf16 and in the order of that chapter's tables, written as one safetensors "
+            f"(the {8 * recorded['L'] + 3} tensors of the published layout of Volume VI, Chapter 2 in bf16, layer after layer in the order of that chapter's tables (input norm, fused q-k-v projection, query norm, key norm, "
+            f"output projection, post-attention norm, fused gate-up projection, down projection; each matrix stored [out, in]), then the "
+            f"final norm and the head, written as one safetensors "
             "file exactly as that chapter writes one: the compact JSON (JavaScript Object Notation) header with `__metadata__` `{\"format\":\"pt\"}` first, "
             "padded with spaces to a multiple of 8, then the data; "
             f"digest beginning `{digest[:16]}`). Three checkpoints are offered to it. The identity is compared field by field "
@@ -423,7 +430,9 @@ def two_gates():
     return (f"The two-layer network of Volume III, Chapter 6 (B = {B} examples, D = {D} inputs, H = {H} hidden units, O = {O} outputs, "
             f"{rows[0][3]} parameters, mean squared error), as the reference with tanh. Its inputs, targets and weights come from "
             f"the generator `{NAME_GATES}`, seed {seed:#018x}, drawn in the order X (row by row), T (row by row), W1 (row by row), b1, "
-            "W2 (row by row), b2, each `normal()` and the last four multiplied by 0.5. Every port runs in 64-bit arithmetic in the same "
+            "W2 (row by row), b2, each entry `normal()`, and the four tensors W1, b1, W2, b2 (the last four of the six) multiplied "
+            f"by 0.5; W1 has {H} rows of {D} entries and W2 has {O} rows of {H}, so the hidden layer is tanh(W1 x + b1) and "
+            "the outputs are W2 a + b2, and the loss is the sum of the squared errors divided by B x O. Every port runs in 64-bit arithmetic in the same "
             "order of operations as the reference, so a correct port's outputs are equal to the reference's and the forward gate "
             "demands rel_l2 = 0 exactly; a real port, with its own order of operations, would use the rounding bound instead. The "
             f"gradient check compares the port's backward pass with the central difference of the port's own loss, step h = {GATE_H:g} "
