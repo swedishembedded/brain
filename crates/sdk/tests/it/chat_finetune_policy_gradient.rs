@@ -209,3 +209,40 @@ fn every_step_reports_what_the_objective_measured_while_the_run_is_still_going()
         assert_eq!(metric("pg_scoring_seconds"), step.scoring_seconds);
     }
 }
+
+/// A policy-gradient run cancelled at a step boundary resumes when run again and ends at the bit-identical adapter
+/// an uninterrupted run writes: the record stream, the start-of-run behaviour policy and the base reference are the
+/// run's, not those of the adapter it restored, and the statistics on the outcome and the card are the whole run's.
+#[test]
+fn a_cancelled_policy_gradient_run_resumes_to_the_uninterrupted_adapter() {
+    let model = qwen35_model_dir("pg-resume");
+    let dataset = rollouts(&model);
+    let config = || PolicyGradientConfig { behaviour: BehaviourSource::StartOfRunProxy, ..Default::default() };
+    let straight = policy_gradient(&model, &dataset, &model.join("straight"), config()).run().expect("the uninterrupted run");
+
+    let out = model.join("interrupted");
+    let cancel = brain::CancelToken::armed();
+    let stopped = policy_gradient(&model, &dataset, &out, config())
+        .run_with(&cancel, |p| {
+            if p.step == 4 {
+                cancel.cancel();
+            }
+        })
+        .expect("the run that is cancelled");
+    assert_eq!((stopped.status, stopped.steps_completed), (FineTuneStatus::Cancelled, 4));
+    assert!(stopped.adapter.is_none() && stopped.resume_state.as_ref().is_some_and(|p| p.exists()), "{stopped:?}");
+
+    let resumed = policy_gradient(&model, &dataset, &out, config()).run().expect("the resumed run");
+    assert_eq!((resumed.status, resumed.resumed_at, resumed.steps_completed), (FineTuneStatus::Completed, Some(4), 10));
+    let tensors = |p: &Option<PathBuf>| checkpoint::st::load_safetensors(p.as_ref().unwrap().to_str().unwrap()).unwrap().tensors;
+    let (a, b) = (tensors(&straight.adapter), tensors(&resumed.adapter));
+    assert_eq!(a.len(), b.len());
+    for (name, values) in &a {
+        let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        assert_eq!(bits(values), bits(&b[name]), "{name} differs between the uninterrupted and the resumed run");
+    }
+    // The statistics are the whole run's: every step, numbered as the uninterrupted run numbers it, measuring what it measured.
+    let measured = |o: &brain::ChatFineTuneOutcome| o.policy_gradient.as_ref().expect("statistics").stats.steps.iter().map(|s| (s.step, s.loss.to_bits(), s.clip_fraction.to_bits(), s.kl.map(f32::to_bits))).collect::<Vec<_>>();
+    assert_eq!(measured(&resumed), measured(&straight), "the resumed run reports the steps of the uninterrupted one");
+    assert_eq!(resumed.adapter_digest, straight.adapter_digest, "the same adapter file, byte for byte");
+}

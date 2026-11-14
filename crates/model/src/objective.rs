@@ -134,10 +134,11 @@ pub trait Objective<M: Model> {
     fn updates_applied(&mut self, _applied: u32) {}
 
     /// Where this objective is in a data stream it walks on its own - the position of a cycling
-    /// dataset, the index of the next record a source is asked for - as a value
-    /// [`Self::restore_cursor`] puts back. The shared loop saves it with the exact-resume state, so a
-    /// resumed run continues the stream an uninterrupted one would have followed. `None` (the default)
-    /// says the objective keeps no position of its own: its order is a function of the loop's batch
+    /// dataset, the index of the next record a source is asked for - and any history it reports for
+    /// the whole run (per-step statistics), as a value [`Self::restore_cursor`] puts back. The shared
+    /// loop saves it with the exact-resume state, so a resumed run continues the stream an
+    /// uninterrupted one would have followed and reports what that run would. `None` (the default)
+    /// says the objective keeps no state of its own: its order is a function of the loop's batch
     /// generator and [`Self::begin`].
     fn cursor(&self) -> Option<serde_json::Value> {
         None

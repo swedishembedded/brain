@@ -344,7 +344,8 @@ impl PolicyGradientConfig {
 }
 
 /// What one optimiser step measured. Losses are means per supervised token.
-#[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PolicyGradientStep {
     /// 1-based index of the optimiser step among those the objective ran.
     pub step: usize,
@@ -1065,6 +1066,30 @@ impl<M: Model> Objective<M> for ExternalPolicyGradient {
 
     fn begin(&mut self, seed: u64, draws_done: u64) {
         self.order = Some(Order::new(seed, self.rows.eligible.len(), draws_done));
+    }
+
+    /// The record order is the loop's ([`Self::begin`]); what a resume needs from the objective is the history it
+    /// reports, so a resumed run's statistics are the whole run's and its step numbers continue.
+    fn cursor(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({ "steps": self.stats.steps, "steps_skipped_nonfinite": self.stats.steps_skipped_nonfinite, "steps_skipped_guard": self.stats.steps_skipped_guard }))
+    }
+
+    fn restore_cursor(&mut self, cursor: &serde_json::Value) -> Result<(), std::io::Error> {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct History {
+            steps: Vec<PolicyGradientStep>,
+            steps_skipped_nonfinite: usize,
+            steps_skipped_guard: usize,
+        }
+        let history: History = serde_json::from_value(cursor.clone()).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("the policy-gradient history of the saved state: {e}")))?;
+        if history.steps.iter().enumerate().any(|(i, s)| s.step != i + 1) {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "the policy-gradient history of the saved state does not number its steps 1, 2, ..."));
+        }
+        self.stats.steps = history.steps;
+        self.stats.steps_skipped_nonfinite = history.steps_skipped_nonfinite;
+        self.stats.steps_skipped_guard = history.steps_skipped_guard;
+        Ok(())
     }
 
     /// The weights differ from the start-of-run ones exactly when an update was applied (also true of a
