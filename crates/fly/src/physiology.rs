@@ -33,7 +33,7 @@
 //!   36 published classes
 //!   693 connection types that actually occur, covering 95% of edges
 //!   36 x 3 per-class parameters
-//!   ~800 numbers, against 1.4 million synapses
+//!   ~800 numbers, against 1.4 million connections (edges of 5+ synapses)
 //! ```
 //!
 //! which is the same order as the published connectome-constrained visual
