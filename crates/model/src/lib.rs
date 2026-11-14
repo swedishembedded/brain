@@ -317,10 +317,13 @@ pub trait Model {
     /// Forward and backward every batch of `batches` as one accumulation,
     /// the gradients adding up, and return the summed loss: for a model that
     /// can overlap the micro-batches (a pipeline's stages working on
-    /// neighbouring ones at once). `None` (the default) means it cannot, and
+    /// neighbouring ones at once). `loss_denominator`, when given, divides
+    /// every batch's loss and gradient in place of its own count of supervised
+    /// positions, as [`training::TokenObjectives::set_loss_denominator`] does
+    /// for one batch. A `None` return (the default) means it cannot, and
     /// the caller runs them one after another with [`Model::set_batch`],
     /// [`Model::forward`] and [`Model::backward`].
-    fn accumulate_overlapped(&self, _batches: &[Batch]) -> Option<f32> {
+    fn accumulate_overlapped(&self, _batches: &[Batch], _loss_denominator: Option<f32>) -> Option<f32> {
         None
     }
 

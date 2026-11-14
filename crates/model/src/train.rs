@@ -813,11 +813,13 @@ impl<M: Model> Objective<M> for CausalLm {
         let drawn: Vec<Drawn> = (0..k).map(|_| self.draw(rng)).collect();
         let targets: Vec<Vec<u32>> = drawn.iter().map(|d| targets_to_u32(&d.y)).collect();
         let mut work = StepWork { useful_tokens: drawn.iter().map(|d| d.useful_tokens).sum(), supervised_positions: targets.iter().flatten().filter(|&&t| t != IGNORE).count() as u64, ..StepWork::default() };
+        let mean_supervised = work.supervised_positions as f32 / k.max(1) as f32;
+        let denominator = (mean_supervised > 0.0 && model.token_objectives().is_some()).then_some(mean_supervised);
         if k > 1 && !self.tag_examples {
             let batches: Vec<Batch> = drawn.iter().zip(&targets).map(|(d, y)| Batch::Lm { tokens: &d.x, targets: y }).collect();
             let drew = clock.elapsed().as_secs_f64();
             let pass = std::time::Instant::now();
-            if let Some(total) = model.accumulate_overlapped(&batches) {
+            if let Some(total) = model.accumulate_overlapped(&batches, denominator) {
                 // An overlapped pass runs the micro-steps' forwards and
                 // backwards together, so its whole time is the backward's.
                 work.prepare_secs = drew;
@@ -828,15 +830,12 @@ impl<M: Model> Objective<M> for CausalLm {
             }
         }
         work.prepare_secs = clock.elapsed().as_secs_f64();
-        let mean_supervised = work.supervised_positions as f32 / k.max(1) as f32;
         let mut total = 0.0;
         for (drawn, targets) in drawn.iter().zip(&targets) {
             let pass = std::time::Instant::now();
             self.upload(model, Split::Train, &drawn.x, targets, &drawn.picks);
-            if mean_supervised > 0.0 {
-                if let Some(objectives) = model.token_objectives() {
-                    objectives.set_loss_denominator(mean_supervised);
-                }
+            if let (Some(tokens), Some(objectives)) = (denominator, model.token_objectives()) {
+                objectives.set_loss_denominator(tokens);
             }
             work.prepare_secs += pass.elapsed().as_secs_f64();
             let pass = std::time::Instant::now();

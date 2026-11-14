@@ -950,6 +950,16 @@ impl<M: Shardable> Pipeline<M> {
     /// Call [`Self::zero_grads`] first and an optimiser step (e.g.
     /// [`Self::adamw_step`] with `extra_scale = 1/m`) after.
     pub fn pipelined_fwd_bwd(&mut self, microbatches: &[crate::Batch]) -> f32 {
+        self.pipelined_fwd_bwd_over(microbatches, None)
+    }
+
+    /// [`Self::pipelined_fwd_bwd`] with every micro-batch's loss and gradient
+    /// divided by `loss_denominator` instead of its own count of supervised
+    /// positions (`TokenObjectives::set_loss_denominator` on the head stage,
+    /// after each of its `set_batch` calls, the recomputing one included), so
+    /// micro-batches of unequal length accumulate the step's per-token mean.
+    /// `None` keeps each micro-batch's own count.
+    pub fn pipelined_fwd_bwd_over(&mut self, microbatches: &[crate::Batch], loss_denominator: Option<f32>) -> f32 {
         use std::sync::mpsc::{channel, Receiver, Sender};
         let p = self.stages.len();
         let m = microbatches.len();
@@ -959,6 +969,7 @@ impl<M: Shardable> Pipeline<M> {
             let mut total = 0.0;
             for mb in microbatches {
                 st.set_batch(clone_batch(mb));
+                set_denominator(st, loss_denominator);
                 total += st.run_forward_stage().unwrap_or(0.0);
                 st.run_backward_stage();
             }
@@ -991,8 +1002,11 @@ impl<M: Shardable> Pipeline<M> {
                     let mut stash: Vec<Option<Vec<f32>>> = (0..m).map(|_| None).collect();
                     let mut total = 0.0f32;
                     // Forward phase (microbatches in order).
+                    // Only the head stage computes the loss, so only it takes the denominator.
+                    let denominator = if fout.is_none() { loss_denominator } else { None };
                     for mb in 0..m {
                         stage.set_batch(clone_batch(&mbs[mb]));
+                        set_denominator(stage, denominator);
                         if let Some(rx) = &fin {
                             // A closed channel here means the NEIGHBOUR stage
                             // died — a cascade, not the root cause. Say so,
@@ -1011,6 +1025,7 @@ impl<M: Shardable> Pipeline<M> {
                     // Backward phase (reverse order): recompute forward, then backward.
                     for mb in (0..m).rev() {
                         stage.set_batch(clone_batch(&mbs[mb]));
+                        set_denominator(stage, denominator);
                         if let Some(inp) = &stash[mb] {
                             stage.write_in_res(inp);
                         }
@@ -1260,7 +1275,7 @@ impl<M: Shardable> Model for PipelineModel<M> {
     fn set_batch(&self, batch: crate::Batch) {
         self.pipe.borrow().set_batch(batch);
     }
-    fn accumulate_overlapped(&self, batches: &[crate::Batch]) -> Option<f32> {
+    fn accumulate_overlapped(&self, batches: &[crate::Batch], loss_denominator: Option<f32>) -> Option<f32> {
         // Only plain language-model batches (the schedule recomputes each
         // stage's forward from its stored input, which a weighted loss on the
         // head would have to repeat), and only when there are stages to overlap.
@@ -1270,7 +1285,7 @@ impl<M: Shardable> Model for PipelineModel<M> {
             return None;
         }
         self.overlapped.set(self.overlapped.get() + 1);
-        Some(pipe.pipelined_fwd_bwd(batches))
+        Some(pipe.pipelined_fwd_bwd_over(batches, loss_denominator))
     }
     fn token_objectives(&self) -> Option<&dyn TokenObjectives> {
         self.pipe.borrow().head_stage().token_objectives().is_some().then_some(self)
@@ -1375,6 +1390,15 @@ impl<M: Shardable> OffDeviceState for PipelineModel<M> {
             stage.off_device_state().ok_or_else(|| std::io::Error::other(format!("stage {i} has no off-device state to restore")))?.restore(&dir.join(format!("stage-{i}")), step)?;
         }
         Ok(())
+    }
+}
+
+/// Divide the batch `stage` was just given by `tokens` (see
+/// [`Pipeline::pipelined_fwd_bwd_over`]); a stage without per-token
+/// objectives computes no loss and takes none.
+fn set_denominator<M: Model>(stage: &M, tokens: Option<f32>) {
+    if let (Some(tokens), Some(objectives)) = (tokens, stage.token_objectives()) {
+        objectives.set_loss_denominator(tokens);
     }
 }
 

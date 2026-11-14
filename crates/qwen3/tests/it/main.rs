@@ -7,6 +7,7 @@
 //! process-wide state (the current directory, environment variables): the
 //! others run beside it; `bench_train_p40` keeps a binary of its own.
 
+mod accumulation_normalisation;
 mod adamw_hyperparameters;
 mod adapter_variants;
 mod batched_prefill;
