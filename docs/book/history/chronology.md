@@ -215,9 +215,9 @@ The chapters teach in the order a reader needs the ideas. This page shows the or
 | 2026-11-07, commit `ae9370878` | `ricursive` | [Attention Variants: Sharing and Compressing Keys](../v06-language-models/03-attention-variants.md) |
 | 2026-11-08, commit `e46df139d` | `dflash2` | Speculative Decoding |
 | 2026-11-10, commit `fcc137c65` | `mirage` | [Vision-Language Models](../v07-vision/09-vlms.md) |
-| 2026-11-12, commit `640734e62` | `headpose` | [Cameras and Projective Geometry](../v10-video-and-3d/03-camera-geometry.md) |
-| 2026-11-12, commit `c4a105fdf` | `openseeface` | [Faces: Detection, Identity and Parsing](../v07-vision/11-faces.md) |
-| 2026-11-12, commit `9bac3e112` | `openvino-rt` | [Neural Processing Units and Graph Compilers](../v04-computation/13-npu.md) |
-| 2026-11-13, commit `5c5cfc090` | `invoke` | not yet placed |
-| 2026-11-13, commit `bb84017d6` | `yolov8-faces` | not yet placed |
-| 2026-11-13, commit `a67fd258e` | `forecastops` | not yet placed |
+| 2026-11-12, commit `abf6bbb71` | `headpose` | [Cameras and Projective Geometry](../v10-video-and-3d/03-camera-geometry.md) |
+| 2026-11-12, commit `c4b3ac9b6` | `openseeface` | [Faces: Detection, Identity and Parsing](../v07-vision/11-faces.md) |
+| 2026-11-12, commit `8dded4ec1` | `openvino-rt` | [Neural Processing Units and Graph Compilers](../v04-computation/13-npu.md) |
+| 2026-11-13, commit `8350c4a47` | `invoke` | not yet placed |
+| 2026-11-13, commit `3c048d2a7` | `yolov8-faces` | not yet placed |
+| 2026-11-13, commit `b1b609515` | `forecastops` | not yet placed |

@@ -114,8 +114,8 @@ Forecasting and decisions:
       needs a CUDA device to confirm no provider passes an unaligned offset.
 - [x] gemma4 and minimaxh3 `measure` landed (`modelcost`: held/peak bytes; gemma4 is the peak of one forward under its
       layer stream); `brain models profile --measure` prints both, or "not measured" (CLI; compiled in CI).
-- [x] Commit e2b53afa0 (gradcheck tied GPT-2 check) landed before 6a769385b (the gpt2 tie) and does not build alone. Both
-      are published, so history is not rewritten; every commit from 6a769385b on builds, and no chapter cites e2b53afa0.
+- [x] Commit ec59bff48 (gradcheck tied GPT-2 check) landed before 9d2f03cb5 (the gpt2 tie) and does not build alone. Both
+      are published, so history is not rewritten; every commit from 9d2f03cb5 on builds, and no chapter cites ec59bff48.
 
 - [x] mimi `recon::tests::decoder_weight_grad_is_taken_at_the_quantized_latent` checks with a relative `2e-2`: its
       weights (seed 42) and input are fixed, so the comparison is one deterministic number, not a random draw that can

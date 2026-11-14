@@ -39,5 +39,5 @@ Toy `qwen3` LoRA model (`brain::toy`, a three-letter cipher, held-out exact matc
 
 ## Evidence
 
-Roadmap `grpo-corrections.md`, section "External policy gradient on a toy" (brain 520f34e44), on
-the toy checkpoint of ab90a4d10. Related: #290 (the objective's own fixes), #292.
+Roadmap `grpo-corrections.md`, section "External policy gradient on a toy" (brain 4585b9e2e), on
+the toy checkpoint of 04db7c0fd. Related: #290 (the objective's own fixes), #292.
