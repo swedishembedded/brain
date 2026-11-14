@@ -106,8 +106,11 @@ fn build_into(dir: &Path, ctx: &Context, jobs: &[Job], cubin: bool) {
 
 /// Re-run the ignored test `child` of this binary in a process of its own; assert it reached its marker.
 fn run_child(child: &str) {
+    // The harness names a test by its path inside the test binary, without the binary's own crate name.
+    let module = module_path!().split_once("::").map_or("", |(_, m)| m);
+    let child = format!("{module}::{child}");
     let out = std::process::Command::new(std::env::current_exe().unwrap())
-        .args([child, "--exact", "--ignored", "--nocapture", "--test-threads=1"])
+        .args([child.as_str(), "--exact", "--ignored", "--nocapture", "--test-threads=1"])
         .output()
         .expect("spawn the child test");
     let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
