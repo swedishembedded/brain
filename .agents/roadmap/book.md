@@ -103,7 +103,10 @@ reproduced its worked examples from the text alone in another language.
       orientation, a stitch rule unsound for long overlaps, two wrong bytes
       cells in the project's bill, unlabelled raw-head order rows).
       All were fixed in the following commits; a recheck has not been run.
-- [ ] Volume XII, Reinforcement Learning and Continuous Improvement: chapter 1 written.
+- [x] Volume XII, Reinforcement Learning and Continuous Improvement: 8 chapters, each written and then checked by
+      a claim-validating editor. Independent readers reproduced 921 items from the page alone: 898 passed, 19 after a
+      guess and 4 failed (an adapter router stated by x0 but printed as if by task label, a chaotic joint row printed
+      with full digits, verifiers without the length check their table assumed). All were fixed in the following commits.
 
 ## Open
 

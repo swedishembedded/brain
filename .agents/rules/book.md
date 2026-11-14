@@ -42,7 +42,15 @@ the chapter where a reader should first meet it.
   `# <title from book.yaml>`, followed by the question as an italic line; the
   body after that is the author's own. Open with a situation, a puzzle, a
   failure or a number, whatever makes this subject urgent, and let the reason
-  for each idea come out of the story of the previous one. Headings name the
+  for each idea come out of the story of the previous one. Open on the subject
+  itself, something any reader of the field would recognise; brain's history
+  is the case study and comes in where it illustrates an idea, not as the
+  first thing a reader meets. The text never talks about the book or the
+  chapter (what it "does not repeat", what "the count is evidence of", which
+  order "the chapter takes"): it states facts and lets the structure show.
+  Every acronym is spelled out on first use, every number carries its unit
+  and says what quantity it is, and an idea is stated before the code that
+  implements it (a code comment is not an authority; state the reason). Headings name the
   subject of their section ("Why a column walk misses the cache", not "Common
   mistakes" or "What this is for"), and no two chapters should feel cut from
   the same template. `make check/book` rejects template-slot labels and any
@@ -58,7 +66,11 @@ the chapter where a reader should first meet it.
   from the chapter's `requires` (at least one from three or more chapters
   back, when the chapter has such prerequisites), each naming where it was
   taught, as questions woven into the opening or set apart briefly in
-  whatever form suits the chapter. Their answers go in `## Answers`.
+  whatever form suits the chapter, introduced in the chapter's own words: no
+  stock lead-in ("Answer them from memory; the answers are at the end of the
+  chapter."). Their answers go in `## Answers`. `make check/book` rejects any
+  sentence of six or more words, outside the end apparatus and generated
+  blocks, that appears verbatim in more than three chapters.
 - **Check your understanding** has 4 to 8 questions that ask the reader to
   explain, predict an outcome, or find the error in a short argument or
   computation. Answers go in `## Answers`.

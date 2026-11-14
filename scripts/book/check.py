@@ -182,6 +182,34 @@ def recycled(page_list, errors):
                           "give each its own subject-specific wording")
 
 
+def stock_sentences(page_list, errors):
+    """A sentence of six or more words repeated verbatim in more than RECYCLED_LIMIT chapters
+    is a formula, not writing (a stock lead-in to the recall questions was the case that
+    prompted this). Only body prose counts: the end apparatus, generated blocks, code and
+    tables are left out."""
+    where: dict[str, set[str]] = {}
+    for path, ch in page_list:
+        if ch is None:
+            continue
+        text = path.read_text(encoding="utf-8")
+        text = re.sub(r"<!-- worked:.*?<!-- /worked -->", "", text, flags=re.S)
+        text = re.sub(r"```.*?```", "", text, flags=re.S)
+        body = []
+        for line in text.splitlines():
+            if line.startswith("## ") and line[3:].strip() in APPARATUS:
+                break
+            if not line.startswith(("|", "#", "!", "<")):
+                body.append(line)
+        for sentence in re.split(r"(?<=[.!?])\s+", " ".join(body)):
+            sentence = sentence.strip()
+            if len(sentence.split()) >= 6 and not re.match(r"\d+\.\s", sentence):
+                where.setdefault(sentence, set()).add(path.relative_to(ROOT).as_posix())
+    for sentence, files in sorted(where.items()):
+        if len(files) > RECYCLED_LIMIT:
+            errors.append(f"the sentence {sentence!r} appears in {len(files)} chapters (limit "
+                          f"{RECYCLED_LIMIT}): write it in each chapter's own words")
+
+
 def _labels(path, rel, errors, where):
     """Collect one chapter's headings and run-in labels; report its template slots and repeats."""
     local: dict[str, int] = {}
@@ -285,6 +313,7 @@ def main() -> int:
     page_list = pages(book, errors)
     content(page_list, errors, introduced)
     recycled(page_list, errors)
+    stock_sentences(page_list, errors)
     if errors:
         print("\n".join(errors), file=sys.stderr)
         print(f"book check: {len(errors)} problem(s)", file=sys.stderr)
