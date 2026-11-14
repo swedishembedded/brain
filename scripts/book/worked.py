@@ -136,7 +136,8 @@ def main() -> int:
             else:
                 page.write_text(new, encoding="utf-8")
                 print(f"updated {page.relative_to(ROOT)}")
-    cache.save()
+        # Saved per page: a cold run cut short by a timeout keeps what it computed.
+        cache.save()
     if stale:
         print("stale worked examples in:\n  " + "\n  ".join(stale), file=sys.stderr)
         print("run `make generate/book/worked`", file=sys.stderr)
