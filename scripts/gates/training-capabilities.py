@@ -13,7 +13,9 @@ The page is rendered from scripts/gates/training-capabilities.tsv. Checking
   - the page differs from the rendering (`--write` regenerates it);
   - a named test does not exist, is not a #[test] function, or is #[ignore]d
     without a (real) or (cuda) flag, or a named file does not exist;
-  - a declared arch is not rendered in any table, or a capability name is unknown;
+  - a declared arch is not rendered in any table, or a capability name is unknown
+    (a `load:<source>` row renders in the checkpoint-precision table, a
+    `cert:<contract>` row in the training-correctness table);
   - a registration disagrees: each tier registered for a subject in
     crates/rl/tests/conformance.rs needs a lora_<tier> row, and each
     architecture in crates/sdk/src/study.rs registered `with_chat_trainer` needs a
@@ -26,7 +28,7 @@ import re
 import sys
 from pathlib import Path
 
-CAPS = {"full_ft", "lora_f32", "lora_bf16", "lora_int8", "lora_nf4", "lora_fp8", "other", "adapter_serving", "quant_serving", "kv_tiers", "load"}
+CAPS = {"full_ft", "lora_f32", "lora_bf16", "lora_int8", "lora_nf4", "lora_fp8", "other", "adapter_serving", "quant_serving", "kv_tiers", "load", "certify"}
 TIER_CAP = {"bf16": "lora_bf16", "int8": "lora_int8", "nf4": "lora_nf4", "fp8": "lora_fp8", "f32": "lora_f32"}
 
 HEAD = """# Training and serving capability matrix
@@ -57,6 +59,16 @@ TABLES = [
     ("Serving adapters and KV tiers", ["qwen3", "qwen35", "qwen35moe", "ricursive"],
      [("adapter_serving", "Adapters while serving"), ("quant_serving", "Quantized weights while serving"), ("kv_tiers", "KV tiers")], ""),
 ]
+CERT_HEAD = """## Training correctness
+
+Contracts every training run relies on, each held by the tests named beside
+it against an independent reference (an FP64 oracle written from the math,
+finite differences, or the uninterrupted run for a resume). A contract with
+no row here is not certified.
+
+| Contract | What holds | Tests |
+|---|---|---|"""
+
 TAIL = """
 A LoRA adapter trains over an FP8 base on qwen3, qwen35 and ricursive. NVFP4
 and MX checkpoints have `Weight` storage and execution, and only ricursive's
@@ -104,6 +116,12 @@ def render(cells):
     for (a, c), (detail, tests) in cells.items():
         if a.startswith("load:"):
             refs = ", ".join(f"`{f}{'::' + n if n else ''}`" for f, n, _ in tests)
+            out.append(f"| {a[5:]} | {detail} | {refs} |")
+    out.append("")
+    out.append(CERT_HEAD)
+    for (a, c), (detail, tests) in cells.items():
+        if a.startswith("cert:"):
+            refs = ", ".join(f"`{f}{'::' + n if n else ''}`" + (f" ({fl})" if fl else "") for f, n, fl in tests)
             out.append(f"| {a[5:]} | {detail} | {refs} |")
     out.append(TAIL)
     return "\n".join(out).replace("\n\n\n", "\n\n")
@@ -163,7 +181,7 @@ def check_registrations(cells, root):
                 problems.append(f"UNDECLARED CAPABILITY: sdk study.rs declares {a} CHAT_LORA_FINE_TUNE but there is no {a} lora_* row")
     rendered = {a for _, archs, _, _ in TABLES for a in archs}
     for a, c in sorted(have):
-        if not a.startswith("load:") and a not in rendered:
+        if not a.startswith(("load:", "cert:")) and a not in rendered:
             problems.append(f"NOT RENDERED: {a} {c} is declared but {a} is in no table; add it to TABLES")
     return problems
 

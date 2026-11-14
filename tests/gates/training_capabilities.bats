@@ -75,3 +75,16 @@ gate() { run bash "$REPO/scripts/gates/check-training-capabilities.sh" --root "$
   gate
   [ "$status" -eq 0 ]
 }
+
+@test "a certified contract renders in the training-correctness table and its tests are checked" {
+  printf 'cert:Exact resume\tcertify\tresumes bit-exactly\tqwen3/tests/t.rs::lora_works\n' >>"$BATS_TEST_TMPDIR/decl.tsv"
+  python3 "$REPO/scripts/gates/training-capabilities.py" --root "$T" --decl "$BATS_TEST_TMPDIR/decl.tsv" --write >/dev/null
+  gate
+  [ "$status" -eq 0 ]
+  grep -qF '| Exact resume | resumes bit-exactly | `qwen3/tests/t.rs::lora_works` |' "$T/docs/reference/training-capabilities.md"
+  printf 'cert:Exact resume\tcertify\tresumes bit-exactly\tqwen3/tests/t.rs::gone\n' >>"$BATS_TEST_TMPDIR/decl.tsv"
+  python3 "$REPO/scripts/gates/training-capabilities.py" --root "$T" --decl "$BATS_TEST_TMPDIR/decl.tsv" --write >/dev/null
+  gate
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"MISSING TEST"*"cert:Exact resume"*"gone"* ]]
+}
