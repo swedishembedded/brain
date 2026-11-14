@@ -726,6 +726,30 @@ mod tests {
         assert!((at_reference.loss - std::f32::consts::LN_2).abs() < 1e-6, "{at_reference:?}");
     }
 
+    /// The loss and its gradient weight against an f64 oracle written from
+    /// `L(u) = ln(1 + e^-u)`, `dL/du = -1 / (1 + e^u)`, at margins from deep in
+    /// either tail to zero: a confident pair whose sequence log-probabilities
+    /// differ by hundreds of nats (an f32 `e^200` overflows) keeps a finite loss
+    /// and a weight that is the loss's derivative, checked by central
+    /// differences of the oracle.
+    #[test]
+    fn pair_term_matches_the_fp64_oracle_at_extreme_margins() {
+        let oracle_loss = |u: f64| if u > 0.0 { (-u).exp().ln_1p() } else { -u + u.exp().ln_1p() };
+        let oracle_slope = |u: f64| -1.0 / (1.0 + u.exp());
+        let (beta, count) = (0.5f32, 6.0f32);
+        for margin in [-800.0f32, -200.0, -60.0, -1.0, -1e-3, 0.0, 1e-3, 1.0, 60.0, 200.0, 800.0] {
+            let t = pair_term(beta, margin, 0.0, 0.0, 0.0, count);
+            let u = f64::from(beta) * f64::from(margin);
+            let (want_loss, want_weight) = (oracle_loss(u), -f64::from(beta) * oracle_slope(u) * f64::from(count));
+            assert!(t.loss.is_finite() && t.weight_chosen.is_finite(), "margin {margin}: {t:?}");
+            assert!((f64::from(t.loss) - want_loss).abs() <= 1e-6 * want_loss.max(1.0), "margin {margin}: loss {} vs {want_loss}", t.loss);
+            assert!((f64::from(t.weight_chosen) - want_weight).abs() <= 1e-6 * want_weight.abs().max(1e-30) + 1e-30, "margin {margin}: weight {} vs {want_weight}", t.weight_chosen);
+            let h = 1e-4;
+            let fd = (oracle_loss(u + h) - oracle_loss(u - h)) / (2.0 * h);
+            assert!((fd - oracle_slope(u)).abs() <= 1e-6, "margin {margin}: the oracle's slope {} vs finite differences {fd}", oracle_slope(u));
+        }
+    }
+
     /// The anchor on the chosen answer adds `nll_weight` times its mean
     /// negative log-likelihood to the loss, and exactly that term's gradient
     /// to every chosen position's weight; the rejected row is untouched.
