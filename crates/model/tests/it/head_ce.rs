@@ -214,6 +214,50 @@ fn per_token_weights_and_logit_scale_enter_loss_and_gradient() {
     assert_close(&d_hidden, &want.d_hidden, 1e-4, "weighted d_hidden");
 }
 
+/// At extreme logits (a logit scale of 40 puts them in the hundreds, where an f32 `e^x` overflows past 88) the loss,
+/// the log-probabilities and the hidden gradient still equal the f64 reference, both where every label is a random
+/// id (losses of hundreds of nats, a gradient that is the softmax's mass on the winning wrong id) and where every
+/// label is the row's argmax (a probability that rounds to one, a loss and gradient that vanish).
+#[test]
+fn extreme_logits_match_the_host_reference_in_both_tails() {
+    let ops = ops();
+    let mut p = problem(70, 64, 300);
+    let logit_scale = 40.0f32;
+    for tier in held_tiers(&ops) {
+        let w = head(&ops, &p, tier);
+        let eff = if matches!(tier, Dtype::F8E4M3 | Dtype::I8) { decoded(&ops, &w) } else { effective(&p.raw, p.v, p.d, tier) };
+        let random_labels = p.labels.clone();
+        let argmax_labels: Vec<u32> = (0..p.n)
+            .map(|i| {
+                let logit = |j: usize| (0..p.d).map(|c| f64::from(p.hidden[i * p.d + c]) * f64::from(eff[j * p.d + c])).sum::<f64>();
+                (0..p.v).max_by(|&a, &b| logit(a).total_cmp(&logit(b))).expect("a vocabulary") as u32
+            })
+            .collect();
+        for (tail, labels) in [("random labels", random_labels.clone()), ("argmax labels", argmax_labels)] {
+            p.labels = labels;
+            let want = reference(&p.hidden, &eff, p.n, p.d, p.v, &p.labels, None, logit_scale, 1.0 / p.n as f32);
+            let hc = build(&ops, &p, &w, 64, false);
+            let (loss, d_hidden) = run(&ops, &hc, &p, None, logit_scale, 1.0 / p.n as f32);
+            let what = format!("{tier:?} {tail}");
+            let sum: f64 = want.nll.iter().sum();
+            assert!(loss.loss_sum.is_finite() && d_hidden.iter().all(|g| g.is_finite()), "{what}: non-finite loss or gradient");
+            assert!((loss.loss_sum - sum).abs() <= 1e-4 * sum.abs().max(1.0), "{what}: loss {} vs {sum}", loss.loss_sum);
+            for (i, (&got, &nll)) in loss.logprobs.iter().zip(&want.nll).enumerate() {
+                assert!((f64::from(-got) - nll).abs() <= 1e-4 * nll.abs().max(1.0), "{what}: token {i}: nll {} vs {nll}", -got);
+            }
+            let scale = want.d_hidden.iter().fold(0f64, |a, &v| a.max(v.abs()));
+            let worst = d_hidden.iter().zip(&want.d_hidden).map(|(&g, &w)| (f64::from(g) - w).abs()).fold(0f64, f64::max);
+            assert!(worst <= 1e-4 * scale.max(1e-3), "{what}: d_hidden off by {worst:e} at a scale of {scale:e}");
+            if tail == "random labels" {
+                assert!(sum / p.n as f64 > 50.0, "{what}: the logits must be extreme, a mean loss of {} nats is not", sum / p.n as f64);
+            } else {
+                assert!(sum / (p.n as f64) < 1.0, "{what}: an argmax label must be near certain, a mean loss of {} nats is not", sum / p.n as f64);
+            }
+        }
+        p.labels = random_labels;
+    }
+}
+
 /// d(loss)/d(hidden) by central differences of the device loss, at dims
 /// (n, d, v) = (9, 96, 130), pairwise distinct and none a multiple of 64 or of the chunk.
 #[test]
