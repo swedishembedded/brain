@@ -1848,6 +1848,14 @@ pub fn resident_specs(cfg: &Qwen35Config, shard: &Shard) -> Vec<model::resident_
     specs
 }
 
+/// Whether the 32-row groups of the anchor memory's skinny-M product start their activation (`n_in` wide) and output
+/// (`n_out` wide) views on the backend's storage binding-offset boundary.
+fn memory_gemv_groups_bindable(n_in: u32, n_out: u32) -> bool {
+    let group_bytes = |width: u32| 32 * u64::from(width) * 4;
+    let align = gpu_core::STORAGE_BINDING_OFFSET_ALIGN_BYTES;
+    group_bytes(n_in) % align == 0 && group_bytes(n_out) % align == 0
+}
+
 impl Qwen35 {
     pub fn new_on(gpu: Gpu, cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Qwen35 {
         let shard = Shard::whole(cfg.n_layers as usize);
@@ -4235,7 +4243,12 @@ impl Qwen35 {
                         let tile = g.kernel_index("matmul_tile16").expect("checked");
                         s.push(g.dispatch(tile, &[x, self.w(&wname), out], &[n, n_in, n_out], gpu_core::Dispatch::Workgroups(n.div_ceil(16) * n_out.div_ceil(16))));
                     }
-                    // Groups of up to 32 rows, each a view of the activations and the output.
+                    // Groups of up to 32 rows, each a view of the activations and the output, when every group's
+                    // views start on a binding-offset boundary. Past one group whose row widths do not keep them
+                    // there, the plain exact product runs over every row instead.
+                    Some(_) if n > 32 && !memory_gemv_groups_bindable(n_in, n_out) => {
+                        s.push(g.step(MATMUL, &[x, self.w(&wname), out], &[n, n_in, n_out], n * n_out));
+                    }
                     Some(gemv) => {
                         let wbuf = self.w(&wname);
                         let wlen = u64::from(n_in) * u64::from(n_out);
