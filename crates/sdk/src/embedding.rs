@@ -27,7 +27,7 @@
 //!
 //! ```no_run
 //! let pipe = brain::EmbeddingPipeline::from_pretrained("stabilityai/stable-diffusion-xl-base-1.0")?;
-//! let v = pipe.embed("a whale submarine")?;
+//! let v = pipe.embed("a lighthouse at dusk")?;
 //! println!("{} dims", v.len());
 //! # Ok::<(), brain::Error>(())
 //! ```

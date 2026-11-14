@@ -23,7 +23,7 @@
 //!
 //! ```no_run
 //! let pipe = brain::VisionLanguagePipeline::from_pretrained("Qwen/Qwen3-VL-4B-Instruct")?;
-//! let image = brain::Image::open("whale.png")?;
+//! let image = brain::Image::open("lighthouse.png")?;
 //! let out = pipe.ask(&image, "What is in this image?")?;
 //! println!("{}", out.text);
 //! # Ok::<(), brain::Error>(())

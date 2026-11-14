@@ -29,7 +29,7 @@
 //!
 //! ```no_run
 //! let pipe = brain::VideoPipeline::from_pretrained("Wan-AI/Wan2.1-T2V-1.3B")?;
-//! let clip = pipe.generate("a whale submarine")?;
+//! let clip = pipe.generate("a lighthouse at dusk")?;
 //! clip.save("out.mp4")?;
 //! # Ok::<(), brain::Error>(())
 //! ```

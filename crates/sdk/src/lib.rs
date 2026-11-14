@@ -12,7 +12,7 @@
 //!
 //! ```no_run
 //! let mut pipe = brain::ImagePipeline::from_pretrained("black-forest-labs/FLUX.2-klein-9B")?;
-//! pipe.generate("a whale submarine")?.save("out.png")?;
+//! pipe.generate("a lighthouse at dusk")?.save("out.png")?;
 //! # Ok::<(), brain::Error>(())
 //! ```
 //!
