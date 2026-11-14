@@ -17,8 +17,9 @@
 //! trainer last published, exactly as a served request does.
 //!
 //! EOS and top-p/top-k sampling are not reinvented here: both rollouts
-//! sample via [`crate::serve::sample_from_topk_with_logprob`], the same
-//! primitive [`crate::serve::Scheduler`]'s production decode loop uses.
+//! draw through [`crate::serve::sample_logits_row`], the whole-row sampler
+//! [`crate::serve::Scheduler`]'s production decode loop uses, so a seed gives
+//! the same completion on the dense model as when served.
 //!
 //! Swedish Embedded AB builds training engines where a new sampling-based
 //! objective (GRPO, RFT/STaR, best-of-n) composes from one rollout
@@ -50,7 +51,7 @@ pub enum StopReason {
 /// One sampled completion of a prompt. `logprobs[i]` is `log
 /// pi(tokens[i] | prompt, tokens[..i])` under the sampling policy
 /// [`RolloutParams::sample`] actually drew from - captured for free at
-/// sample time (see [`crate::serve::sample_from_topk_with_logprob`]), never
+/// sample time (see [`crate::serve::sample_logits_row`]), never
 /// re-derived by a second forward pass. `tokens.len() == logprobs.len()`
 /// always.
 #[derive(Clone, Debug)]
@@ -149,21 +150,6 @@ pub trait SyncRollout: Rollout {
     fn sampling(&self) -> Option<SampleParams> {
         None
     }
-}
-
-/// Build the sorted-descending `(token id, logit)` candidate list
-/// [`serve::sample_from_topk_with_logprob`] expects, from one position's full
-/// vocabulary logits. Ties break toward the LOWER token id (stable secondary
-/// key) so greedy decoding here matches the leftmost-wins convention of a
-/// plain host `argmax` fold exactly - the property [`ModelRollout`]'s
-/// byte-identical-refactor gate depends on. Deliberately not
-/// [`PagedDecoder::admit_topk`]'s default body: that one has no such
-/// tie-break contract to keep, since a paged decoder's own kernels resolve
-/// ties before the host ever sees a full vocab vector.
-fn candidates_from_logits(logits: &[f32]) -> Vec<(u32, f32)> {
-    let mut candidates: Vec<(u32, f32)> = logits.iter().enumerate().map(|(i, &v)| (i as u32, v)).collect();
-    candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap().then(a.0.cmp(&b.0)));
-    candidates
 }
 
 /// One sampling step's outcome for a single position: accept `next` into
@@ -271,12 +257,16 @@ impl<'a, M: Model> ModelRollout<'a, M> {
         let mut logprobs = Vec::with_capacity(params.max_new);
         let mut stop = StopReason::MaxNew;
         let mut eos_lp = None;
+        // Drawn exactly as the scheduler draws a sequence's token from its whole row
+        // (`serve::sample_logits_row`, with the sequence's own processor state), so the same
+        // seed gives the same tokens and log-probabilities on the dense model as when served.
+        let mut procs = serve::ProcessorState::default();
         for _ in 0..params.max_new {
             let window: &[u32] = if ctx.len() > block { &ctx[ctx.len() - block..] } else { &ctx };
             let logits = self.m.logits_all(window).expect("ModelRollout: model has no token-classification head");
-            let last = &logits[logits.len() - vocab..];
-            let candidates = candidates_from_logits(last);
-            let (next, logprob) = serve::sample_from_topk_with_logprob(&candidates, params.sample, rng);
+            let mut row = logits[logits.len() - vocab..].to_vec();
+            let sample_ctx = serve::SampleContext { context: &ctx, prompt_len: prompt.len() };
+            let (next, logprob) = serve::sample_logits_row(&mut row, params.sample, &sample_ctx, &mut procs, rng);
             match accept(&mut tokens, &mut logprobs, next, logprob, params.eos, params.max_new) {
                 Some(s) => {
                     stop = s;
@@ -568,16 +558,6 @@ mod tests {
         let h = mean_completion_entropy(&m, &[1], &[0, 1]);
         let want = ((vocab as f64).ln() + 0.0) / 2.0;
         assert!((h - want).abs() < 1e-6, "must be the unweighted mean of each position's own entropy, got {h} want {want}");
-    }
-
-    #[test]
-    fn candidates_from_logits_sorts_descending_with_lowest_index_tie_break() {
-        let logits = [1.0f32, 5.0, 5.0, 2.0];
-        let c = candidates_from_logits(&logits);
-        assert_eq!(c[0], (1, 5.0)); // tie between idx 1 and 2 -> lower index first
-        assert_eq!(c[1], (2, 5.0));
-        assert_eq!(c[2], (3, 2.0));
-        assert_eq!(c[3], (0, 1.0));
     }
 
     #[test]
