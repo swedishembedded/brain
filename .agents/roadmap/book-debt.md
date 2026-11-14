@@ -140,6 +140,18 @@ Forecasting and decisions:
   cosine (COS_FLOOR 0.9999), so a dropped or doubled scale passes; add a rel_l2 bound as `rrdbnet/tests/it/parity.rs`
   does (needs the checkpoint and its reference dump) (v06 ch02).
 
+## Open: found while verifying the rebases (2026-11-14)
+
+- [ ] mirage kernels with 512-thread workgroups (`mirage_argmax_ban_wg`, `mirage_attn_step_wg`, `mirage_hada_mlp_wg`,
+  `mirage_kron_hada`, `mirage_kron_hada_wg`, `mirage_kron_rows`, `mirage_kron_rows_wg`) exceed WebGPU's default limit
+  of 256 invocations, so on a device at the defaults (llvmpipe here) the whole kernel catalog fails to register:
+  `kernel_catalog_validation::whole_kernel_catalog_registers_on_the_active_default_backend` and
+  `matmul_family_is_correct_...` fail in brain-gpu-core, and `mirage_argmax_ban_wg`'s header says `yes-wg256`. Either
+  gate registration on the device's limits or give each a 256-wide form; decide with the mirage work (5966c14ff).
+- [ ] brain-gpu-core on llvmpipe also fails `moe_i8_pipeline::the_gather_gemv_is_bit_identical_to_its_documented_arithmetic`
+  (last-bit mismatches) and `roofline::the_measured_roofs_are_physically_plausible` (int8 roof 7x the fp32 one on a
+  software rasteriser); check whether both need a software-device skip or a real fix.
+
 ## Book text only
 
 - [ ] The 16 passages that describe defects already fixed (stale text). Done: v03 ch10, ch11; v05 ch09, ch11; v06 ch10;
