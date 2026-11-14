@@ -1049,21 +1049,21 @@ pub struct Engine {
     /// `submit_topk_head` iterating the argmax pair + `topk_extract_step`.
     topk_vals_dev: DeviceBuffer,
     topk_idx_dev: DeviceBuffer,
-    /// M6.3: the decode tape (uniform buffers + bind groups `batched_tape`
-    /// records), keyed by `bsz` - a pure function of `bsz` alone once
+    /// The recorded decode step (`gpu_core::tape::Tape` of what `batched_tape`
+    /// builds), keyed by `(bsz, lora)` - a pure function of that key once
     /// `causal_chunk` is `false` and the input is `Tokens`/`Resident` (every
     /// kernel choice, buffer identity and uniform PARAMETER in that tape
     /// comes from this engine's own fixed config; the only thing that varies
     /// step to step is buffer CONTENTS, written separately by
     /// `write_batch_meta`/`write_batch_input` before a cached tape is
-    /// replayed) - so it is recorded once per bucket and reused unchanged,
-    /// instead of a fresh uniform + bind group per dispatch every step. Never
-    /// populated above `DECODE_REGIME_MAX_ROWS` (prefill's row count is not
-    /// bucketed) or for `Input::Embeds` (its tape has no embed step at all,
-    /// a structurally different shape at the same `bsz`) - both keep
-    /// rebuilding via `Self::run_batched_steps`, unchanged from before this
-    /// cache existed.
-    tape_cache: HashMap<(u32, bool), Vec<Step>>,
+    /// replayed) - so it is recorded once per bucket and replayed as the
+    /// backend's frozen program: no dispatch is rebuilt, resolved or matched
+    /// against a captured graph per step. Never populated above
+    /// `DECODE_REGIME_MAX_ROWS` (prefill's row count is not bucketed) or for
+    /// `Input::Embeds` (its tape has no embed step at all, a structurally
+    /// different shape at the same `bsz`) - both keep rebuilding via
+    /// `Self::run_batched_steps`.
+    tape_cache: HashMap<(u32, bool), gpu_core::tape::Tape>,
     /// Latent sparse attention ([`Engine::set_lsa`]): the layers it covers
     /// read a per-query selection of keys instead of every cached key.
     lsa: Option<model::lsa::binding::LsaBinding>,
@@ -3148,14 +3148,14 @@ impl Engine {
 
     /// [`Self::run_batched_steps`] plus the submit - decode's hot path
     /// (`causal_chunk = false`, `bsz <= DECODE_REGIME_MAX_ROWS`,
-    /// `Input::Tokens`/`Input::Resident`) goes through M6.3's tape cache
+    /// `Input::Tokens`/`Input::Resident`) goes through the tape cache
     /// instead: `Self::batched_tape` is a pure function of `(bsz, causal_chunk,
     /// matches!(input, Embeds), lora)` (see its own doc), so the FIRST call at
     /// a given `(bsz, lora)` records the tape into `self.tape_cache` and every
     /// later call at that key replays it unchanged - `write_batch_meta`/
     /// `write_batch_input` still run every call (real per-step values, not
-    /// cacheable), only the uniform-buffer/bind-group churn `batched_tape`
-    /// itself costs is skipped on a hit. A batch with no adapter row keys
+    /// cacheable); building the steps, and on a backend that freezes a tape
+    /// resolving and matching them, is skipped on a hit. A batch with no adapter row keys
     /// `lora = false`, the tape an engine without a bank records. Prefill's
     /// chunked rows (`causal_chunk = true`, an unbucketed row count) and
     /// `Input::Embeds` (a structurally different tape at the same `bsz` - no
@@ -3169,10 +3169,12 @@ impl Engine {
         if !causal_chunk && bsz <= DECODE_REGIME_MAX_ROWS && !matches!(input, Input::Embeds(_)) {
             if !self.tape_cache.contains_key(&(bsz, lora)) {
                 let s = self.batched_tape(bsz, input, causal_chunk, lora);
-                self.tape_cache.insert((bsz, lora), s);
+                let recording = self.gpu.record_tape();
+                self.gpu.submit(&[], &s);
+                self.tape_cache.insert((bsz, lora), recording.finish());
             }
             let cached = self.tape_cache.get(&(bsz, lora)).expect("just inserted or already present");
-            self.gpu.submit(&[], cached);
+            self.gpu.replay_tape(cached);
             return bsz;
         }
         let s = self.batched_tape(bsz, input, causal_chunk, lora);
