@@ -115,12 +115,30 @@ reproduced its worked examples from the text alone in another language.
       defects in brain: oversized optimizer tiles, an unused scale buffer, a data-parallel step that averaged the ranks'
       means instead of weighting by supervised positions, and checkpoint writes renamed without an fsync.
 
+- [x] Volume XIV, Inference Engines and Production Serving: 9 chapters, each written, checked by a claim-validating editor and
+      line-edited. Independent readers reproduced 716 items from the page alone: 648 passed, 64 after a guess and 4
+      failed (a planted-element prediction below the noise of its own draws, rounding noise printed as digits, and a
+      preemption row whose rebuild sizing the page did not state). All were fixed in the following commits. Writing it
+      found and fixed real defects in brain: a mean service time that included queue wait, a --variant=VALUE flag the
+      weight resolver never saw, a hot cache that kept a value a panic had half-updated, a key comparison that leaked
+      the key's length, a crafted zip64 checkpoint that panicked, and a percentile rank skipped by binary rounding.
+- [x] Volume XV, Scientific and Engineering Methods: 6 chapters, each written, checked by a claim-validating editor and line-edited.
+      Independent readers reproduced 294 items: 271 passed, 23 after a guess and none failed (an unstated 32-bit
+      order of silu, a transform length, units and conventions). All were fixed. Writing it fixed a parity gate that
+      passed NaN, a gradient gate that passed an empty report, and the worked cache, which now hashes the repository
+      data a module declares in READS.
+- [x] Volume XVI, Constructing a Complete Machine Learning System: 3 chapters, each written, checked by a claim-validating editor
+      and line-edited. Independent readers reproduced 172 items: 165 passed, 3 after a guess and 4 failed, all four
+      digests of trained files, which depend on a summation order the book does not fix; the acceptance criteria now
+      ask for what a reader can reproduce. Writing it fixed a NaN logit in the dflash2 drafter and a draft pool too
+      small for a slot at full context.
+
+- [x] Volume II wording items left by its reader recheck (a stale term in the project chapter, the distance unit of
+      chapter 1's midpoint rule, chapter 4's key terms, and similar), closed after the Volume II line edit.
+- [x] All 16 volumes and 165 chapters are written, checked by a claim-validating editor, reproduced by independent
+      readers from the page alone and line-edited; `make book` typesets the whole book and every volume with no
+      overfull line.
+
 ## Open
 
-- [ ] Every chapter in `docs/book/book.yaml`, in reading order, each with its
-      volume introduction, worked examples, figures and exercises.
-- [ ] Independent-reader verification of each chapter's [Implement]
-      exercises.
-- [ ] Volume II wording nits from `scratchpad/reader/v02-recheck/REPORT.md`
-      (a stale symbol in the project chapter, a midpoint rule in chapter 1,
-      Key terms for chapter 4's helper terms, and similar).
+Nothing open. New chapters follow `book.yaml` and the same four passes.
