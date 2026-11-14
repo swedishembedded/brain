@@ -87,14 +87,29 @@ pub fn manifest() -> Manifest {
     Manifest::new(MODEL, "PID event/effect control transformer: a learned controller for first-order plants, judged in closed loop against each plant's oracle.", vec![train_spec(), rollout_spec(), profile_spec()])
 }
 
-fn reports(dec: &Pid, cfg: &crate::PidConfig) -> serde_json::Value {
-    let side = |plants: &[pid_data::PlantSpec]| {
-        let r: Vec<PlantReport> = closed_loop(dec, cfg, plants, ROLLOUT_STEPS);
+/// The per-step callback of a long loop: one progress step per forward, and a
+/// stop once the invocation's token fires.
+fn keep_going<'a>(inv: &'a Invocation, progress: &'a mut dyn FnMut(Progress), total: usize) -> impl FnMut() -> bool + 'a {
+    let mut done = 0u32;
+    move || {
+        progress(Progress::step(done, total as u32, ""));
+        done += 1;
+        !inv.cancel.is_cancelled()
+    }
+}
+
+/// The closed-loop report of `dec` on both plant sets; `Err(CANCELLED)` once
+/// the invocation's token fires, checked before every closed-loop step.
+fn reports(dec: &Pid, cfg: &crate::PidConfig, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> Result<serde_json::Value, String> {
+    let (training, validation) = (pid_data::training_plants(), pid_data::validation_plants());
+    let mut go = keep_going(inv, progress, (training.len() + validation.len()) * ROLLOUT_STEPS);
+    let mut side = |plants: &[pid_data::PlantSpec]| -> Result<serde_json::Value, String> {
+        let r: Vec<PlantReport> = closed_loop(dec, cfg, plants, ROLLOUT_STEPS, &mut go).ok_or_else(|| capability::failure::CANCELLED.to_string())?;
         let gap = r.iter().map(|p| p.model_mse - p.oracle_mse).sum::<f32>() / r.len().max(1) as f32;
         let plants: Vec<_> = r.iter().map(|p| json!({"tau": p.tau, "gain": p.gain, "model_mse": p.model_mse, "oracle_mse": p.oracle_mse, "steady_state_error": p.steady_state_error})).collect();
-        json!({"plants": plants, "mean_mse_gap": gap})
+        Ok(json!({"plants": plants, "mean_mse_gap": gap}))
     };
-    json!({"training": side(&pid_data::training_plants()), "validation": side(&pid_data::validation_plants())})
+    Ok(json!({"training": side(&training)?, "validation": side(&validation)?}))
 }
 
 #[derive(Default)]
@@ -159,16 +174,18 @@ impl Action for ToyPidAction {
                     .set("block", json!(t.cfg.block_size))
                     .set("seed", json!(tc.seed))
                     .set("saved", json!(tc.out))
-                    .set("closed_loop", reports(&dec, &t.cfg)))
+                    .set("closed_loop", reports(&dec, &t.cfg, inv, progress)?))
             }
             "rollout" => {
                 let (dec, cfg) = load(&weights()?)?;
-                Ok(Outcome::new().set("closed_loop", reports(&dec, &cfg)))
+                Ok(Outcome::new().set("closed_loop", reports(&dec, &cfg, inv, progress)?))
             }
             "profile" => {
                 let (dec, cfg) = load(&weights()?)?;
                 let len = (n("seq_len", 64) as usize).clamp(1, cfg.block_size as usize);
-                let (mean, min, max) = dec.profile_inference(&profiling_context(len), n("cycles", 100).max(1) as usize, n("warmup", 10) as usize);
+                let (cycles, warmup) = (n("cycles", 100).max(1) as usize, n("warmup", 10) as usize);
+                let mut go = keep_going(inv, progress, cycles + warmup);
+                let (mean, min, max) = dec.profile_inference(&profiling_context(len), cycles, warmup, &mut go).ok_or(capability::failure::CANCELLED)?;
                 Ok(Outcome::new()
                     .set("context", json!(len))
                     .set("mean_ms", json!(mean * 1e3))
@@ -214,6 +231,25 @@ mod tests {
         assert!(run("rollout", Invocation::new().set("weights", w.clone())).outputs["closed_loop"]["training"]["mean_mse_gap"].is_number());
         let p = run("profile", Invocation::new().set("weights", w).set("cycles", json!(2)).set("warmup", json!(0)).set("seq_len", json!(8)));
         assert_eq!(p.outputs["context"].as_u64(), Some(8));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `rollout` and `profile` stop at the next forward once the token fires.
+    #[test]
+    fn rollout_and_profile_stop_at_the_next_forward() {
+        use capability_mock::cancellation::{certify, Bound};
+        let dir = std::env::temp_dir().join(format!("toypid-cancel-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let save = dir.join("pid.safetensors");
+        let provider = ToyPidProvider;
+        let train = Invocation::new().set("save", json!(save.to_str().unwrap())).set("steps", json!(1)).set("batch", json!(1)).set("seq_steps", json!(2)).set("d_model", json!(16)).set("heads", json!(2)).set("trajectories", json!(2)).set("trajectory_len", json!(20)).set("seed", json!(4));
+        provider.action("train").unwrap().run(&train, &mut |_| {}).unwrap();
+        let w = json!(save.to_str().unwrap());
+        let (rollout, profile) = (provider.action("rollout").unwrap(), provider.action("profile").unwrap());
+        let make_rollout = || Invocation::new().set("weights", w.clone());
+        certify("toypid rollout", &make_rollout, &|inv, progress| rollout.run(inv, progress), Bound::ONE_STEP);
+        let make_profile = || Invocation::new().set("weights", w.clone()).set("cycles", json!(20)).set("warmup", json!(2)).set("seq_len", json!(8));
+        certify("toypid profile", &make_profile, &|inv, progress| profile.run(inv, progress), Bound::ONE_STEP);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

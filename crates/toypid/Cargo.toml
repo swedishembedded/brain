@@ -31,3 +31,4 @@ wgpu = { version = "29", default-features = false, features = ["webgpu", "wgsl"]
 
 [dev-dependencies]
 brain-seed.workspace = true
+brain-capability-mock.workspace = true

@@ -164,14 +164,16 @@ pub struct PlantReport {
 }
 
 /// The closed-loop run of `dec` on every plant in `plants`, `steps` long.
-pub fn closed_loop(dec: &Pid, cfg: &PidConfig, plants: &[PlantSpec], steps: usize) -> Vec<PlantReport> {
+/// `keep_going` is asked before every closed-loop step (one forward each);
+/// `None` means it said no and the run stopped.
+pub fn closed_loop(dec: &Pid, cfg: &PidConfig, plants: &[PlantSpec], steps: usize, keep_going: &mut dyn FnMut() -> bool) -> Option<Vec<PlantReport>> {
     plants
         .iter()
         .map(|spec| {
-            let (model_mse, steady_state_error) = pid_data::rollout_on_plant(dec, cfg, spec, steps);
+            let (model_mse, steady_state_error) = pid_data::rollout_on_plant(dec, cfg, spec, steps, keep_going)?;
             let oracle = pid_data::run_oracle_closed_loop(spec, steps);
             let oracle_mse = oracle.iter().map(|&(_, sp, y)| (sp - y).powi(2)).sum::<f32>() / oracle.len() as f32;
-            PlantReport { tau: spec.tau, gain: spec.gain, model_mse, oracle_mse, steady_state_error }
+            Some(PlantReport { tau: spec.tau, gain: spec.gain, model_mse, oracle_mse, steady_state_error })
         })
         .collect()
 }

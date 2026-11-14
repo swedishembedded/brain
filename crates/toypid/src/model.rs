@@ -772,15 +772,22 @@ impl Pid {
     /// the result back -- so the timing is end-to-end and exact. Returns
     /// (mean, min, max) seconds per inference over `cycles`, after `warmup`
     /// untimed iterations (to amortise pipeline warm-up / allocator effects).
+    /// `keep_going` is asked before every inference; `None` means it said no.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn profile_inference(&self, tokens: &[u32], cycles: usize, warmup: usize) -> (f64, f64, f64) {
+    pub fn profile_inference(&self, tokens: &[u32], cycles: usize, warmup: usize, keep_going: &mut dyn FnMut() -> bool) -> Option<(f64, f64, f64)> {
         for _ in 0..warmup {
+            if !keep_going() {
+                return None;
+            }
             let _ = self.logits_last(tokens);
         }
         let mut total = 0.0f64;
         let mut min = f64::INFINITY;
         let mut max = 0.0f64;
         for _ in 0..cycles.max(1) {
+            if !keep_going() {
+                return None;
+            }
             let t0 = std::time::Instant::now();
             let _ = self.logits_last(tokens);
             let dt = t0.elapsed().as_secs_f64();
@@ -788,7 +795,7 @@ impl Pid {
             min = min.min(dt);
             max = max.max(dt);
         }
-        (total / cycles.max(1) as f64, min, max)
+        Some((total / cycles.max(1) as f64, min, max))
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -1035,7 +1042,7 @@ mod tests {
         let init = crate::data::init_weights(&cfg, 5);
         let model = Pid::from_gpu(gpu_core::testgpu::dev(PIPELINES), cfg, 1, 16, &init);
         let ctx: Vec<u32> = vec![BOS, EV_START, 1, 50, 50, 50, EV_END, DECIDE];
-        let (mean, min, max) = model.profile_inference(&ctx, 3, 1);
+        let (mean, min, max) = model.profile_inference(&ctx, 3, 1, &mut || true).unwrap();
         assert!(mean.is_finite() && mean > 0.0);
         assert!(min <= mean + 1e-9 && mean <= max + 1e-9);
     }

@@ -324,13 +324,18 @@ pub fn run_oracle_closed_loop(spec: &PlantSpec, steps: usize) -> Vec<(usize, f32
 /// (rows, mse, ss_err). `dec` must be a Pid built with b=1, t>=block_size.
 /// Native only: drives the model with the blocking `logits_last` readback. The
 /// browser build performs single inferences via `Pid::logits_last_async`.
+/// `keep_going` is asked before every step (one forward each); `None` means it
+/// said no and the rollout stopped.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn rollout_on_plant(dec: &Pid, cfg: &PidConfig, spec: &PlantSpec, steps: usize) -> (f32, f32) {
+pub fn rollout_on_plant(dec: &Pid, cfg: &PidConfig, spec: &PlantSpec, steps: usize, keep_going: &mut dyn FnMut() -> bool) -> Option<(f32, f32)> {
     let mut plant = Plant::new(*spec);
     let mut context: Vec<u32> = vec![BOS];
     let block = cfg.block_size as usize;
     let mut rows = Vec::new();
     for t in 0..steps {
+        if !keep_going() {
+            return None;
+        }
         let sp = eval_step_schedule(t);
         let measured = plant.y;
         let error = sp - measured;
@@ -354,7 +359,7 @@ pub fn rollout_on_plant(dec: &Pid, cfg: &PidConfig, spec: &PlantSpec, steps: usi
         }
     }
     let mse = rows.iter().map(|&(_, sp, y)| (sp - y).powi(2)).sum::<f32>() / rows.len().max(1) as f32;
-    (mse, steady_state_error(&rows))
+    Some((mse, steady_state_error(&rows)))
 }
 
 // ---- from-scratch init (Rust training; PyTorch-trained nets load from file) ----
