@@ -298,35 +298,33 @@ fn build_assembly(spec: &dyn ArchSpec, av: &AssembledVariant, chosen: &BTreeMap<
     Assembly { id: av.id.clone(), arch: spec.arch().to_string(), variant: av.variant.clone(), roles, provenance }
 }
 
-/// A search over every combination of the tied candidates across ALL
-/// currently-ambiguous roles at once, bounded by [`MAX_AUTO_RESOLVE_COMBINATIONS`]
-/// so a store with several roles each carrying several tied candidates
-/// cannot turn this into an unbounded search. A combination counts as a real
-/// success only if `spec.assemble` returns [`AssembleOutcome::Assembled`]
-/// AND `spec.validate` then accepts it - the exact bar [`resolve`]'s own
-/// success path holds every candidate to, never a looser one invented here.
+/// Every combination of the tied candidates across ALL currently-ambiguous
+/// roles at once that really answers them, or `None` when there are more
+/// combinations than [`MAX_AUTO_RESOLVE_COMBINATIONS`], so a store with
+/// several roles each carrying several tied candidates cannot turn this into
+/// an unbounded search. A combination counts only if `spec.assemble` returns
+/// [`AssembleOutcome::Assembled`] AND `spec.validate` then accepts it - the
+/// exact bar [`resolve`]'s own success path holds every candidate to, never
+/// a looser one invented here.
 ///
-/// Returns `Some` only when EXACTLY ONE combination succeeds - "nothing on
-/// disk answers this role except by naming one file among several that
-/// happen to share a filename shape" is a real, common situation (three of
-/// four tied checkpoints are missing a companion role, or are the wrong size
-/// for the ones that DID resolve), and picking the one candidate that
-/// actually assembles and validates is not a guess between real
-/// alternatives - there IS only one real alternative once the other tied
-/// candidates are checked against what is actually on disk. Two or more
-/// successes means two or more genuinely complete, independent checkpoints
-/// exist (e.g. a real 4B and a real 9B model, each with its own matching
-/// vae/te/tokenizer) - `None` in that case, same as hitting the bound, so
-/// the caller falls back to [`role_ambiguity`] and asks rather than guesses
-/// which of two real models the operator meant.
+/// [`resolve`] serves the one combination when there is exactly one -
+/// "nothing on disk answers this role except by naming one file among
+/// several that happen to share a filename shape" is a real, common
+/// situation (three of four tied checkpoints are missing a companion role,
+/// or are the wrong size for the ones that DID resolve), and picking the one
+/// candidate that actually assembles and validates is not a guess between
+/// real alternatives. Two or more mean two or more genuinely complete,
+/// independent checkpoints exist (e.g. a real 4B and a real 9B model, each
+/// with its own matching vae/te/tokenizer): [`resolve`] asks which, offering
+/// only the candidates these combinations use.
 const MAX_AUTO_RESOLVE_COMBINATIONS: usize = 4096;
 
-fn try_auto_resolve(spec: &dyn ArchSpec, ambiguous: &[(&'static str, &Vec<(usize, Confidence)>)], base_chosen: &BTreeMap<String, usize>, records: &[ArtifactRecord], overrides: &BTreeMap<String, String>) -> Option<(AssembledVariant, BTreeMap<String, usize>)> {
+fn viable_combinations(spec: &dyn ArchSpec, ambiguous: &[(&'static str, &Vec<(usize, Confidence)>)], base_chosen: &BTreeMap<String, usize>, records: &[ArtifactRecord], overrides: &BTreeMap<String, String>) -> Option<Vec<(AssembledVariant, BTreeMap<String, usize>)>> {
     let total: usize = ambiguous.iter().map(|(_, c)| c.len()).product();
     if total == 0 || total > MAX_AUTO_RESOLVE_COMBINATIONS {
         return None;
     }
-    let mut success: Option<(AssembledVariant, BTreeMap<String, usize>)> = None;
+    let mut viable = Vec::new();
     let mut indices = vec![0usize; ambiguous.len()];
     loop {
         let mut chosen = base_chosen.clone();
@@ -336,10 +334,7 @@ fn try_auto_resolve(spec: &dyn ArchSpec, ambiguous: &[(&'static str, &Vec<(usize
         if let Ok(AssembleOutcome::Assembled(av)) = spec.assemble(&chosen, records, overrides) {
             let assembly = build_assembly(spec, &av, &chosen, records);
             if spec.validate(&assembly).is_ok() {
-                if success.is_some() {
-                    return None; // a second genuinely complete option - ask, never guess
-                }
-                success = Some((av, chosen));
+                viable.push((av, chosen));
             }
         }
         // Mixed-radix odometer increment across every ambiguous role's own
@@ -348,7 +343,7 @@ fn try_auto_resolve(spec: &dyn ArchSpec, ambiguous: &[(&'static str, &Vec<(usize
         let mut slot = 0;
         loop {
             if slot == indices.len() {
-                return success;
+                return Some(viable);
             }
             indices[slot] += 1;
             if indices[slot] < ambiguous[slot].1.len() {
@@ -499,13 +494,23 @@ pub fn resolve_under(root: &Path, arch: &str, records: &[ArtifactRecord], specs:
     // AND validate together (real production e.g.: four `dit` GGUFs tied at
     // the same confidence, three of them sized for a different `vae`/`te`
     // than what's on disk). Never picks between two genuinely complete,
-    // independent checkpoints - see [`try_auto_resolve`]'s own doc.
+    // independent checkpoints - see [`viable_combinations`]'s own doc.
     let ambiguous_roles: Vec<(&'static str, &Vec<(usize, Confidence)>)> =
         per_role.iter().filter_map(|(role, r)| match r { RoleResult::Ambiguous(c) => Some((*role, c)), _ => None }).collect();
-    if !ambiguous_roles.is_empty() {
-        if let Some((av, picked)) = try_auto_resolve(spec, &ambiguous_roles, &chosen, records, overrides) {
-            let assembly = build_assembly(spec, &av, &picked, records);
-            return Resolution::Resolved(Box::new(assembly));
+    if let Some(viable) = (!ambiguous_roles.is_empty()).then(|| viable_combinations(spec, &ambiguous_roles, &chosen, records, overrides)).flatten() {
+        if let [(av, picked)] = viable.as_slice() {
+            return Resolution::Resolved(Box::new(build_assembly(spec, av, picked, records)));
+        }
+        // Several real checkpoints: ask about the first role that still
+        // holds a choice among the candidates they use, each shown as part
+        // of a combination that assembles.
+        if let Some((_, base)) = viable.first() {
+            for &(role, candidates) in &ambiguous_roles {
+                let used: Vec<(usize, Confidence)> = candidates.iter().copied().filter(|(idx, _)| viable.iter().any(|(_, c)| c.get(role) == Some(idx))).collect();
+                if used.len() > 1 {
+                    return Resolution::Ambiguous(Box::new(role_ambiguity(spec, arch, role, &used, base, records, overrides)));
+                }
+            }
         }
     }
 
@@ -1353,6 +1358,33 @@ mod tests {
         let specs: Vec<&dyn ArchSpec> = vec![&spec];
         let out = resolve("compat", &records, &specs, &BTreeMap::new());
         assert!(matches!(out, Resolution::Ambiguous(_)), "two genuinely valid candidates must still be asked about, never guessed: {out:?}");
+    }
+
+    /// When several combinations really assemble, the question names only
+    /// the candidates that take part in one: a candidate that validates with
+    /// nothing on disk (a dit of the wrong variant or size) is no answer to
+    /// it, and listing it makes the operator pick among non-options.
+    #[test]
+    fn an_ambiguity_lists_only_the_candidates_some_valid_combination_uses() {
+        let records = vec![
+            rec("/models/toy/vae-a.bin"),
+            rec("/models/toy/vae-b.bin"),
+            rec("/models/toy/dit-GOOD-1.bin"),
+            rec("/models/toy/dit-GOOD-2.bin"),
+            rec("/models/toy/dit-BAD.bin"),
+        ];
+        let spec = CompatCheckSpec { compatible_marker: "GOOD" };
+        let specs: Vec<&dyn ArchSpec> = vec![&spec];
+        let Resolution::Ambiguous(a) = resolve("compat", &records, &specs, &BTreeMap::new()) else { panic!("two real dits and two vaes must be asked about") };
+        assert_eq!(a.question, Question::Role { role: "dit".to_string() });
+        let offered: Vec<&str> = a.choices.iter().map(|c| c.selector[0].1.as_str()).collect();
+        assert_eq!(offered, ["/models/toy/dit-GOOD-1.bin", "/models/toy/dit-GOOD-2.bin"]);
+
+        // With the dit named, the remaining real choice is the vae.
+        let named = BTreeMap::from([("dit".to_string(), "/models/toy/dit-GOOD-1.bin".to_string())]);
+        let Resolution::Ambiguous(a) = resolve("compat", &records, &specs, &named) else { panic!("two vaes are still a choice") };
+        assert_eq!(a.question, Question::Role { role: "vae".to_string() });
+        assert_eq!(a.choices.len(), 2);
     }
 
     /// What a resolution decided, in a form two runs can be compared by.
