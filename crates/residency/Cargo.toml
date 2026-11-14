@@ -12,4 +12,8 @@ path = "src/lib.rs"
 [dependencies]
 brain-capability.workspace = true
 brain-memauth.workspace = true
+# Supervised device workers and the per-device circuit breaker.
+brain-gpu-supervisor.workspace = true
+# `hardware::is_wait_timeout`: how an in-process driver wait that ran past its bound is recognised.
+brain-backend-api.workspace = true
 serde_json.workspace = true

@@ -44,6 +44,7 @@ pub mod runplan;
 pub mod scheduler;
 pub mod staged;
 pub mod supply;
+pub mod supervised;
 
 
 pub use adapter::AdapterIdentity;

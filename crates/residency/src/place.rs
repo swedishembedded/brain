@@ -199,6 +199,17 @@ pub fn fits_when_empty(cost: &MemCost, budgets: &Budgets) -> bool {
     fits_within(cost, budgets, Budgets::usable_on)
 }
 
+/// [`fits_when_empty`] on the devices outside `exclude` only: whether `cost`
+/// could run today on some device that is not excluded (a quarantined card,
+/// say) once that device were empty.
+pub fn fits_when_empty_outside(cost: &MemCost, budgets: &Budgets, exclude: &HashSet<Device>) -> bool {
+    let mut outside = Budgets::new();
+    for d in budgets.devices().filter(|d| !exclude.contains(d)) {
+        outside.set(d, budgets.usable_on(d), 0);
+    }
+    fits_within(cost, &outside, Budgets::usable_on)
+}
+
 fn fits_within(cost: &MemCost, budgets: &Budgets, capacity: fn(&Budgets, Device) -> u64) -> bool {
     if cost.vram == 0 && cost.ram == 0 && cost.npu == 0 {
         return true; // stateless: placeable anywhere a budget exists at all.

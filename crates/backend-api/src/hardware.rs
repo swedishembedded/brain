@@ -331,12 +331,20 @@ pub struct Wedged {
 
 impl std::fmt::Display for Wedged {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{} exceeded {:?} (--gpu-wait-s) -- driver likely wedged; see `backend_api::hardware::bounded`",
-            self.what, self.timeout
-        )
+        write!(f, "{} exceeded {:?} {WAIT_TIMEOUT_MARK} -- driver likely wedged; see `backend_api::hardware::bounded`", self.what, self.timeout)
     }
+}
+
+/// The words every failure of a device wait bounded by [`wait_timeout`]
+/// carries: [`Wedged`], and the fence and poll timeouts of each backend. A
+/// scheduler that sees them in a failure knows a driver call ran past the
+/// bound and the device is suspect, not merely that the operation failed.
+pub const WAIT_TIMEOUT_MARK: &str = "(--gpu-wait-s)";
+
+/// Whether `failure` (an error or panic message) reports a device wait that
+/// ran past [`wait_timeout`].
+pub fn is_wait_timeout(failure: &str) -> bool {
+    failure.contains(WAIT_TIMEOUT_MARK)
 }
 
 impl std::error::Error for Wedged {}
@@ -457,6 +465,17 @@ mod tests {
         let err = got.expect_err("a call that never returns must not report success");
         assert_eq!(err.what, "test op");
         assert!(err.to_string().contains("--gpu-wait-s"), "the failure must name the knob that set the bound: {err}");
+    }
+
+    /// A scheduler tells a device that wedged from an operation that merely
+    /// failed by the bound's mark, whichever backend reported it.
+    #[test]
+    fn a_wait_timeout_is_recognised_from_its_message() {
+        let wedged = Wedged { what: "WgpuBackend::new_on".into(), timeout: Duration::from_secs(30) };
+        assert!(is_wait_timeout(&wedged.to_string()));
+        assert!(is_wait_timeout("poll_wait: GPU submit did not complete within 30s (--gpu-wait-s) -- device likely wedged"));
+        assert!(!is_wait_timeout("activate qwen3: out of device memory"));
+        assert!(!is_wait_timeout("--gpu-wait-s must be a positive number of seconds"));
     }
 
     /// [`device_init_lock`] must actually exclude a second holder on another

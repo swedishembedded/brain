@@ -2789,7 +2789,9 @@ dependencies = [
 name = "brain-residency"
 version = "5.1.0"
 dependencies = [
+ "brain-backend-api",
  "brain-capability",
+ "brain-gpu-supervisor",
  "brain-memauth",
  "serde_json",
 ]

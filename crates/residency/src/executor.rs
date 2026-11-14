@@ -22,11 +22,13 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
 use capability::{ActionResult, Invocation, Manifest, Progress};
+use gpu_supervisor::Health;
 
 use crate::adapter::{AdapterIdentity, ServedAdapters};
 use crate::affinity::{choose_replica, PrefixDirectory, ReplicaView};
 use crate::manager::{ClaimError, Claimed, ClaimedMulti, InstanceHandle};
 use crate::scheduler::{choose_next, Group, Policy};
+use crate::supervised::{device_label, Supervision};
 use crate::{Device, InstanceKey, MultiDeviceResidentModel, ResidencyManager, ResidentModel};
 
 /// One unit of work. `on_progress`/`reply`/`on_admit` are callbacks (no async
@@ -201,6 +203,9 @@ enum Msg {
     /// group occupied (in the same order `estimate_multi` named them), all of
     /// which must be freed from `busy` here.
     DoneMulti { key: InstanceKey, devices: Vec<Device>, batch: usize, failed: bool },
+    /// A lane finished the health probe the dispatcher sent it; the device is
+    /// free again (whatever the probe found is already in the registry).
+    Probed { device: Device },
     /// Ask the dispatcher what starting one job would require and disturb
     /// (see [`Executor::plan`]). Answered on the dispatcher thread because
     /// that thread owns the manager, so a plan is consistent with the
@@ -235,6 +240,13 @@ enum Msg {
 enum RunTarget {
     Single { work: Claimed, device: Device },
     Multi { work: ClaimedMulti, devices: Vec<Device> },
+}
+
+/// What a device lane is asked to do. A probe occupies the lane like a run,
+/// so a device never runs a probe beside other work.
+enum LaneMsg {
+    Run(RunReq),
+    Probe(Device),
 }
 
 /// A group of same-key jobs handed to a device lane to run. `target` is
@@ -343,6 +355,24 @@ impl Executor {
         policy: Policy,
         capacity: Option<CapacityProbe>,
     ) -> Executor {
+        Executor::start_supervised(models, budgets, policy, capacity, None)
+    }
+
+    /// [`Self::start_with_probe`] with device health ([`Supervision`]): no
+    /// work is placed on a device whose breaker is open, work that only a
+    /// quarantined device could ever host is refused once its breaker has
+    /// tripped, each quarantined device is probed on its own lane when its
+    /// probe is due, and a lane whose group faulted its device (a supervised
+    /// worker that wedged or crashed, or an in-process driver call that
+    /// exceeded `--gpu-wait-s`) unwinds the claim. `None` is the behaviour of
+    /// [`Self::start_with_probe`]: every device is always taken as healthy.
+    pub fn start_supervised(
+        models: Vec<Arc<dyn ResidentModel>>,
+        budgets: crate::budget::Budgets,
+        policy: Policy,
+        capacity: Option<CapacityProbe>,
+        supervision: Option<Supervision>,
+    ) -> Executor {
         let manifests: Vec<Manifest> = models.iter().map(|m| m.manifest()).collect();
         let adapters = Arc::new(ServedAdapters::default());
         for m in &models {
@@ -359,14 +389,15 @@ impl Executor {
         let (tx, rx) = channel::<Msg>();
 
         // One lane per device; each returns completions to the dispatcher via `tx`.
-        let mut lanes: HashMap<Device, Sender<RunReq>> = HashMap::new();
+        let mut lanes: HashMap<Device, Sender<LaneMsg>> = HashMap::new();
         let mut join_handles = Vec::new();
         for d in devices {
-            let (ltx, lrx) = channel::<RunReq>();
+            let (ltx, lrx) = channel::<LaneMsg>();
             let done = tx.clone();
+            let lane_supervision = supervision.clone();
             let h = std::thread::Builder::new()
                 .name(format!("brain-lane-{d:?}"))
-                .spawn(move || lane_loop(lrx, done))
+                .spawn(move || lane_loop(lrx, done, lane_supervision))
                 .expect("spawn lane");
             join_handles.push(h);
             lanes.insert(d, ltx);
@@ -375,7 +406,7 @@ impl Executor {
         let disp_stats = stats.clone();
         let h = std::thread::Builder::new()
             .name("brain-dispatcher".into())
-            .spawn(move || dispatch_loop(rx, mgr, policy, lanes, disp_stats, capacity))
+            .spawn(move || dispatch_loop(rx, mgr, policy, lanes, disp_stats, capacity, supervision))
             .expect("spawn dispatcher");
         join_handles.push(h);
 
@@ -706,7 +737,8 @@ pub type CapacityProbe = Arc<dyn Fn() -> Vec<(Device, u64)> + Send + Sync>;
 /// true for causes originating outside this process.
 const IDLE_TICK: std::time::Duration = std::time::Duration::from_secs(2);
 
-fn dispatch_loop(rx: Receiver<Msg>, mut mgr: ResidencyManager, policy: Policy, lanes: HashMap<Device, Sender<RunReq>>, stats: Arc<Mutex<Stats>>, capacity: Option<CapacityProbe>) {
+fn dispatch_loop(rx: Receiver<Msg>, mut mgr: ResidencyManager, policy: Policy, lanes: HashMap<Device, Sender<LaneMsg>>, stats: Arc<Mutex<Stats>>, capacity: Option<CapacityProbe>, supervision: Option<Supervision>) {
+    let health = supervision.as_ref().map(|s| s.health.clone());
     let mut queue: Vec<Pending> = Vec::new();
     let mut running: HashSet<InstanceKey> = HashSet::new();
     let mut busy: HashSet<Device> = HashSet::new();
@@ -794,9 +826,15 @@ fn dispatch_loop(rx: Receiver<Msg>, mut mgr: ResidencyManager, policy: Policy, l
         shed_cancelled(&mut queue, &stats);
         refill_open_groups(&mut queue, &open_groups, &running, &mut running_jobs, &stats);
         if let Err(p) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            assign(&mut queue, &mut mgr, &policy, &lanes, &mut running, &mut busy, &stats, &mut running_jobs, &mut open_groups);
+            assign(&mut queue, &mut mgr, &policy, &lanes, &mut running, &mut busy, &stats, &mut running_jobs, &mut open_groups, health.as_deref());
         })) {
             eprintln!("[residency] dispatcher: panic during assign: {} -- continuing", panic_message(p.as_ref()));
+        }
+        // After `assign`: a device that is quarantined takes no work, so its
+        // lane is idle unless a group claimed before the fault is still
+        // winding down there (then it is busy and the probe waits).
+        if let Some(health) = &health {
+            start_probes(health, &lanes, &mut busy);
         }
         // After `assign`, so a job it just claimed is in `running_jobs` and a
         // retired model it names is kept until that job's group is done.
@@ -978,6 +1016,9 @@ fn on_msg(msg: Msg, queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, runnin
             s.resident = mgr.resident_count();
             s.resident_multi = mgr.resident_multi_count();
         }
+        Msg::Probed { device } => {
+            busy.remove(&device);
+        }
         Msg::EvictMulti { key, reply } => {
             let ok = mgr.evict_multi(&key);
             if let Ok(mut s) = stats.lock() {
@@ -1092,7 +1133,14 @@ fn note_unservable(stats: &Arc<Mutex<Stats>>, key: &InstanceKey, reason: Option<
     }
 }
 
-fn assign(queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, policy: &Policy, lanes: &HashMap<Device, Sender<RunReq>>, running: &mut HashSet<InstanceKey>, busy: &mut HashSet<Device>, stats: &Arc<Mutex<Stats>>, running_jobs: &mut Vec<RunningJob>, open_groups: &mut HashMap<InstanceKey, OpenGroup>) {
+fn assign(queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, policy: &Policy, lanes: &HashMap<Device, Sender<LaneMsg>>, running: &mut HashSet<InstanceKey>, busy: &mut HashSet<Device>, stats: &Arc<Mutex<Stats>>, running_jobs: &mut Vec<RunningJob>, open_groups: &mut HashMap<InstanceKey, OpenGroup>, health: Option<&Health<Device>>) {
+    // Quarantined devices are excluded exactly like busy ones, so a group is
+    // placed on a healthy device when one can take it; what no healthy device
+    // could ever take is refused once the quarantine is a long one.
+    let quarantined: HashSet<Device> = health.map(|h| h.quarantined().into_iter().collect()).unwrap_or_default();
+    if let Some(h) = health.filter(|_| !quarantined.is_empty()) {
+        refuse_quarantined(queue, mgr, running, &quarantined, h);
+    }
     // Groups whose claim came back `NoCapacity` THIS round. They are skipped
     // for the rest of it, and reconsidered on the next one (a lane finishing,
     // or the dispatcher's own idle tick).
@@ -1109,6 +1157,7 @@ fn assign(queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, policy: &Policy,
         // Groups whose key is not already running AND that can be placed on some
         // non-busy device (the scheduler policy then picks among them).
         let now = Instant::now();
+        let exclude: HashSet<Device> = busy.union(&quarantined).copied().collect();
         let rows = group_rows(queue, now, running);
         // Multi-device groups need `placeable_multi` (checks EVERY named device),
         // never plain `placeable` - a model registered ONLY via `register_multi`
@@ -1117,7 +1166,7 @@ fn assign(queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, policy: &Policy,
         let placeable: Vec<Group> = rows
             .iter()
             .filter(|r| !stalled.contains(&r.key))
-            .filter(|r| if mgr.is_multi(&r.model) { mgr.placeable_multi(&r.key, &r.model, busy) } else { mgr.placeable(&r.key, &r.model, busy) })
+            .filter(|r| if mgr.is_multi(&r.model) { mgr.placeable_multi(&r.key, &r.model, &exclude) } else { mgr.placeable(&r.key, &r.model, &exclude) })
             .map(|r| r.summary.clone())
             .collect();
         let (gid, batch) = match choose_next(&placeable, policy) {
@@ -1150,9 +1199,9 @@ fn assign(queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, policy: &Policy,
         };
         let is_multi = mgr.is_multi(&model);
         let claim_result = if is_multi {
-            mgr.claim_multi(&model, &action, &inv, key.replica_index(), busy).map(|(w, d, k)| (ClaimOutcome::Multi(w, d), k))
+            mgr.claim_multi(&model, &action, &inv, key.replica_index(), &exclude).map(|(w, d, k)| (ClaimOutcome::Multi(w, d), k))
         } else {
-            mgr.claim(&model, &action, &inv, key.replica_index(), busy).map(|(w, d, k)| (ClaimOutcome::Single(w, d), k))
+            mgr.claim(&model, &action, &inv, key.replica_index(), &exclude).map(|(w, d, k)| (ClaimOutcome::Single(w, d), k))
         };
         let (outcome, ckey) = match claim_result {
             Ok(x) => {
@@ -1301,7 +1350,60 @@ fn assign(queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, policy: &Policy,
             open_groups.insert(ckey.clone(), OpenGroup { action: action.clone(), inbox: inbox.clone() });
         }
         // Hand to the home lane (which builds the instance first when cold).
-        let _ = lanes[&home].send(RunReq { target, action, jobs, key: ckey, inbox });
+        let _ = lanes[&home].send(LaneMsg::Run(RunReq { target, action, jobs, key: ckey, inbox }));
+    }
+}
+
+/// Fail the queued jobs that only a quarantined device could run, once that
+/// quarantine is a long one (its breaker tripped). Before a trip the restart
+/// probe is due at once, so such jobs wait the moment it takes instead. A job
+/// whose instance is resident on a quarantined device counts as needing that
+/// device: moving a resident off a quarantined card would drop its instance on
+/// this thread, through a driver that may be the wedged one.
+fn refuse_quarantined(queue: &mut Vec<Pending>, mgr: &ResidencyManager, running: &HashSet<InstanceKey>, quarantined: &HashSet<Device>, health: &Health<Device>) {
+    let tripped = |d: &Device| health.status(d).tripped;
+    let mut refused: HashSet<InstanceKey> = HashSet::new();
+    for p in queue.iter() {
+        if running.contains(&p.key) || refused.contains(&p.key) || mgr.is_multi(&p.model) {
+            continue;
+        }
+        let refuse = match mgr.resident_device(&p.key) {
+            Some(d) => quarantined.contains(&d) && tripped(&d),
+            None => !mgr.fits_outside(&p.key, &p.model, quarantined) && quarantined.iter().all(tripped),
+        };
+        if refuse {
+            refused.insert(p.key.clone());
+        }
+    }
+    if refused.is_empty() {
+        return;
+    }
+    let mut why: Vec<String> = quarantined
+        .iter()
+        .map(|d| format!("{} is quarantined until a health probe passes (last fault: {})", device_label(*d), health.status(d).cause.unwrap_or_default()))
+        .collect();
+    why.sort();
+    let why = why.join("; ");
+    let (gone, kept): (Vec<Pending>, Vec<Pending>) = std::mem::take(queue).into_iter().partition(|p| refused.contains(&p.key));
+    *queue = kept;
+    for p in gone {
+        (p.reply)(Err(format!("{}/{}: no healthy device can run it: {why}", p.model, p.action)));
+    }
+}
+
+/// Send each quarantined device whose probe is due a probe on its own lane,
+/// marking the device busy until the lane reports [`Msg::Probed`].
+fn start_probes(health: &Health<Device>, lanes: &HashMap<Device, Sender<LaneMsg>>, busy: &mut HashSet<Device>) {
+    let now = Instant::now();
+    for device in health.due(now) {
+        let Some(lane) = lanes.get(&device) else { continue };
+        if busy.contains(&device) || !health.begin_probe(&device, now) {
+            continue;
+        }
+        busy.insert(device);
+        if lane.send(LaneMsg::Probe(device)).is_err() {
+            busy.remove(&device);
+        }
     }
 }
 
@@ -1448,8 +1550,19 @@ fn panic_message(p: &(dyn std::any::Any + Send)) -> String {
     p.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| p.downcast_ref::<String>().cloned()).unwrap_or_else(|| "non-string panic payload".to_string())
 }
 
-fn lane_loop(rx: Receiver<RunReq>, done: Sender<Msg>) {
-    while let Ok(mut req) = rx.recv() {
+fn lane_loop(rx: Receiver<LaneMsg>, done: Sender<Msg>, supervision: Option<Supervision>) {
+    let health = supervision.as_ref().map(|s| s.health.clone());
+    while let Ok(msg) = rx.recv() {
+        let mut req = match msg {
+            LaneMsg::Run(req) => req,
+            LaneMsg::Probe(device) => {
+                if let Some(s) = &supervision {
+                    probe(s, device);
+                }
+                let _ = done.send(Msg::Probed { device });
+                continue;
+            }
+        };
         let batch = req.jobs.len();
         let key = req.key.clone();
         let inbox = req.inbox.clone();
@@ -1461,6 +1574,14 @@ fn lane_loop(rx: Receiver<RunReq>, done: Sender<Msg>) {
             RunTarget::Single { device, .. } => Ran::Single(*device),
             RunTarget::Multi { devices, .. } => Ran::Multi(devices.clone()),
         };
+        let devices: Vec<Device> = match &ran_shape {
+            Ran::Single(d) => vec![*d],
+            Ran::Multi(ds) => ds.clone(),
+        };
+        // A fault recorded against one of the group's devices while it ran
+        // means its instance is gone (a killed worker) or suspect (a wedged
+        // in-process call): the claim is unwound, never reused.
+        let faults_before: Vec<u64> = health.as_ref().map(|h| devices.iter().map(|d| h.faults(d)).collect()).unwrap_or_default();
         // A lane runs model code - activate(), promote(), run_batch() - that
         // CAN panic in practice (a bug reachable only with real weights, a
         // driver fault). Without isolation a panic killed this thread with no
@@ -1483,6 +1604,9 @@ fn lane_loop(rx: Receiver<RunReq>, done: Sender<Msg>) {
             Err(p) => {
                 let what = panic_message(p.as_ref());
                 eprintln!("[residency] lane: panic while running {key}: {what}");
+                if let Some(h) = &health {
+                    note_in_process_wedge(h, &devices, &what);
+                }
                 let msg = format!("{key}: panicked while running: {what}");
                 // Close the inbox first so no job is stranded in it, then answer
                 // the group's own jobs and every late job it took or was given.
@@ -1524,6 +1648,11 @@ fn lane_loop(rx: Receiver<RunReq>, done: Sender<Msg>) {
             0
         };
         let batch = batch + late_jobs;
+        if let (Some(h), Some((_, msg))) = (&health, &failed_jobs) {
+            note_in_process_wedge(h, &devices, msg);
+        }
+        let faulted = health.as_ref().is_some_and(|h| devices.iter().zip(&faults_before).any(|(d, &n)| h.faults(d) > n));
+        let failed = failed || faulted;
         let done_msg = match ran {
             Ran::Single(device) => Msg::Done { key, device, batch, failed },
             Ran::Multi(devices) => Msg::DoneMulti { key, devices, batch, failed },
@@ -1533,6 +1662,32 @@ fn lane_loop(rx: Receiver<RunReq>, done: Sender<Msg>) {
             for p in jobs {
                 (p.reply)(Err(msg.clone()));
             }
+        }
+    }
+}
+
+/// Probe `device` in a fresh worker; the result goes to the registry, which
+/// closes the breaker or keeps it open. Runs on the device's own lane, so the
+/// probe never shares the device with other work.
+fn probe(supervision: &Supervision, device: Device) {
+    let health = &supervision.health;
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| health.run_probe(&device, &supervision.probe, &format!("probe {}", device_label(device)), supervision.probe_deadline)));
+    match outcome {
+        Ok(Ok(())) => {}
+        Ok(Err(why)) => crate::log::warn(&format!("health probe of {device:?} failed: {why}")),
+        // The probe never got to record its result; it must not leave the breaker half-open.
+        Err(p) => health.record_fault(&device, Instant::now(), &format!("health probe of {device:?} panicked: {}", panic_message(p.as_ref()))),
+    }
+}
+
+/// Quarantine `devices` when `failure` is an in-process driver call that ran
+/// past `--gpu-wait-s` (`backend_api::hardware::bounded` and its siblings).
+/// That thread cannot be reclaimed from here, but the card stays out of
+/// placement until a probe in a fresh worker shows it works.
+fn note_in_process_wedge(health: &Health<Device>, devices: &[Device], failure: &str) {
+    if backend_api::hardware::is_wait_timeout(failure) {
+        for d in devices {
+            health.record_fault(d, Instant::now(), failure);
         }
     }
 }

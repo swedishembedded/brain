@@ -413,6 +413,19 @@ impl ResidencyManager {
         self.residents.contains(key) || self.multi_residents.contains_key(key)
     }
 
+    /// The device a single-device instance is resident on, if it is.
+    pub fn resident_device(&self, key: &InstanceKey) -> Option<Device> {
+        self.residents.get(key).map(|e| e.device)
+    }
+
+    /// Whether `model`'s instance `key` could run today on a device outside
+    /// `exclude`, once that device were empty. False for a model registered
+    /// only as multi-device, whose placement this does not answer, and for an
+    /// unregistered one.
+    pub fn fits_outside(&self, key: &InstanceKey, model: &str, exclude: &HashSet<Device>) -> bool {
+        self.models.get(model).is_some_and(|m| crate::place::fits_when_empty_outside(&m.estimate(key), &self.budgets, exclude))
+    }
+
     /// Whether the replica `key` names can run on this machine as its devices are budgeted now: it is hot, or every device it needs has
     /// a budget that holds its share with nothing else resident. A replica whose card another process holds is not one: its jobs would
     /// be refused for the budget, so the executor routes around it until the capacity probe sees the card free again.
