@@ -184,9 +184,13 @@ launches a local qwen3 Anthropic surface and points Claude Code at it.
   `dry_multiplier`, `dry_base` (default 1.75), `dry_allowed_length` (default 2)
   and `dry_sequence_breakers` (an array of strings, each reduced to its first
   token; default newline, colon, quote, asterisk). Processors run on the
-  decoder's candidate list (its 64 best tokens) before temperature, top-k, top-p
-  and min-p, and also steer a greedy request (`temperature: 0` then takes the
-  best penalised token). `thinking_budget` (also accepted as
+  decoder's whole logits row before temperature, top-k, top-p and min-p, and
+  also steer a greedy request (`temperature: 0` then takes the best penalised
+  token). Sampling is exact over the full vocabulary: a request whose draw the
+  decoder's on-device candidate list cannot answer exactly (`top_p`, `min_p`, a
+  penalty, or no `top_k` within the list) is sampled from the whole row, and a
+  decoder that cannot read its row back refuses such a request with 400 rather
+  than draw from a truncated distribution. `thinking_budget` (also accepted as
   `thinking_token_budget` and `max_thinking_tokens`; Anthropic's
   `thinking.budget_tokens` sets it too) limits the tokens inside a think block:
   when it is spent the closing tag and the blank line after it are forced and

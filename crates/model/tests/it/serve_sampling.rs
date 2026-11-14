@@ -14,7 +14,7 @@
 //! ahead of 7), so what the sequence emits is entirely the sampler's doing.
 
 use model::paged::{BlockAllocator, BlockTable};
-use model::serve::{DryParams, PagedDecoder, Request, SampleParams, Scheduler, ThinkingBudget};
+use model::serve::{DryParams, PagedDecoder, RejectReason, Request, SampleParams, Scheduler, ThinkingBudget};
 
 const VOCAB: usize = 16;
 /// The candidates every step offers: (token, logit).
@@ -57,14 +57,7 @@ impl PagedDecoder for Fixed {
         vec![0.0]
     }
     fn logits(&self, _hidden: &[f32]) -> Vec<f32> {
-        if let Some(row) = &self.row {
-            return row.clone();
-        }
-        let mut l = vec![-10.0; VOCAB];
-        for (t, v) in CANDIDATES {
-            l[t as usize] = v;
-        }
-        l
+        self.row.clone().unwrap_or_else(candidate_row)
     }
     fn forward_batched_greedy(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32]) -> Vec<u32> {
         for t in tables.iter_mut() {
@@ -115,6 +108,40 @@ fn generate(params: SampleParams, prompt: Vec<u32>, max_new: usize) -> Vec<u32> 
     generate_with(None, params, prompt, max_new)
 }
 
+/// The whole row behind [`CANDIDATES`]: a penalty ranks the processed row, so it is sampled from the row a
+/// decoder reads back.
+fn candidate_row() -> Vec<f32> {
+    let mut l = vec![-10.0; VOCAB];
+    for (t, v) in CANDIDATES {
+        l[t as usize] = v;
+    }
+    l
+}
+
+fn generate_penalised(params: SampleParams, prompt: Vec<u32>, max_new: usize) -> Vec<u32> {
+    generate_with(Some(candidate_row()), params, prompt, max_new)
+}
+
+/// A decoder that offers only its candidate list refuses a request it cannot sample exactly from that list
+/// (`top_p`, a penalty, no `top_k` within the list), rather than drawing from a truncated distribution while
+/// reporting the requested one; greedy decoding and a `top_k` within the list are still served.
+#[test]
+fn a_decoder_without_row_readback_refuses_what_its_candidates_cannot_answer_exactly() {
+    for params in [
+        SampleParams { temp: 1.0, top_p: 0.9, ..SampleParams::greedy() },
+        SampleParams { temp: 1.0, ..SampleParams::greedy() },
+        SampleParams { temp: 1.0, top_k: 9, ..SampleParams::greedy() },
+        SampleParams { frequency_penalty: 0.4, ..SampleParams::greedy() },
+    ] {
+        let mut sched = Scheduler::new(Fixed { alloc: BlockAllocator::new(256, 8), row: None }, 4);
+        let id = sched.submit_sampled(Request { prompt: vec![1, 2, 3], max_new: 4, stop: Vec::new() }, params, 1);
+        let report = sched.step_report();
+        assert!(matches!(report.rejected.as_slice(), [(got, RejectReason::InexactSampling { capacity: 8 })] if *got == id), "{params:?}: {:?}", report.rejected);
+    }
+    assert_eq!(generate(SampleParams { temp: 1.0, top_k: 3, ..SampleParams::greedy() }, vec![1, 2, 3], 4).len(), 4);
+    assert_eq!(generate(SampleParams::greedy(), vec![1, 2, 3], 4), vec![5; 4]);
+}
+
 fn generate_with(row: Option<Vec<f32>>, params: SampleParams, prompt: Vec<u32>, max_new: usize) -> Vec<u32> {
     let mut sched = Scheduler::new(Fixed { alloc: BlockAllocator::new(256, 8), row }, 4);
     let id = sched.submit_sampled(Request { prompt, max_new, stop: Vec::new() }, params, 1);
@@ -156,7 +183,7 @@ fn a_greedy_request_without_processors_is_the_plain_argmax() {
 #[test]
 fn a_frequency_penalty_changes_what_a_greedy_request_emits() {
     let params = SampleParams { frequency_penalty: 0.4, ..SampleParams::greedy() };
-    assert_eq!(generate(params, vec![1, 2, 3], 6), vec![5, 6, 5, 6, 5, 6]);
+    assert_eq!(generate_penalised(params, vec![1, 2, 3], 6), vec![5, 6, 5, 6, 5, 6]);
 }
 
 /// Presence and repetition penalties count what the request has generated (repetition also the prompt):
@@ -164,9 +191,9 @@ fn a_frequency_penalty_changes_what_a_greedy_request_emits() {
 #[test]
 fn penalties_read_the_right_part_of_the_context() {
     let presence = SampleParams { presence_penalty: 0.5, ..SampleParams::greedy() };
-    assert_eq!(generate(presence, vec![5, 5, 5], 1), vec![5], "a prompt-only token is not penalised by presence");
+    assert_eq!(generate_penalised(presence, vec![5, 5, 5], 1), vec![5], "a prompt-only token is not penalised by presence");
     let repetition = SampleParams { repetition_penalty: 2.0, ..SampleParams::greedy() };
-    assert_eq!(generate(repetition, vec![5, 5, 5], 1), vec![6], "the prompt counts for a repetition penalty: 5 falls to 1.5 behind 6");
+    assert_eq!(generate_penalised(repetition, vec![5, 5, 5], 1), vec![6], "the prompt counts for a repetition penalty: 5 falls to 1.5 behind 6");
 }
 
 /// DRY over the whole context: after a prompt `5 5 5` the argmax (5) would extend a repeat of two tokens, so it
@@ -174,8 +201,8 @@ fn penalties_read_the_right_part_of_the_context() {
 #[test]
 fn dry_uses_the_prompt_as_context() {
     let dry = SampleParams { dry: DryParams::new(10.0, 2.0, 2, &[]), ..SampleParams::greedy() };
-    assert_eq!(generate(dry, vec![5, 5, 5], 1), vec![6]);
-    assert_eq!(generate(dry, vec![1, 2, 3], 1), vec![5], "no repeat in the context, no penalty");
+    assert_eq!(generate_penalised(dry, vec![5, 5, 5], 1), vec![6]);
+    assert_eq!(generate_penalised(dry, vec![1, 2, 3], 1), vec![5], "no repeat in the context, no penalty");
 }
 
 /// The budget forces `</think>` (here token 1 then 2) after three tokens inside the block, then the model goes on.

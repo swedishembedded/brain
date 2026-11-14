@@ -1102,6 +1102,11 @@ pub enum RejectReason {
     /// The card had no memory left for this request even with nothing else on it, after the prefix cache was given
     /// back. Retrying later, or with a shorter prompt, can succeed.
     DeviceOutOfMemory { bytes: u64 },
+    /// The sampling the request asks for draws from the whole row (`top_p`, `min_p`, a penalty, or no `top_k` within
+    /// the decoder's candidate list), and this decoder can return only its best `capacity` candidates
+    /// ([`PagedDecoder::full_row_readback`] is false). Drawing from the list would sample a truncated distribution
+    /// while reporting the requested one, so the request is refused instead.
+    InexactSampling { capacity: usize },
 }
 
 impl std::fmt::Display for RejectReason {
@@ -1119,6 +1124,10 @@ impl std::fmt::Display for RejectReason {
             }
             RejectReason::InvalidEmbeds { why } => write!(f, "invalid embedding rows: {why}"),
             RejectReason::DeviceOutOfMemory { bytes } => write!(f, "the device ran out of memory ({bytes} bytes refused) and the request does not fit it even alone"),
+            RejectReason::InexactSampling { capacity } => write!(
+                f,
+                "this decoder samples from its best {capacity} candidates only; ask for greedy decoding or a top_k of at most {capacity} without top_p, min_p or penalties"
+            ),
         }
     }
 }
@@ -1649,6 +1658,10 @@ impl<D: PagedDecoder> Scheduler<D> {
         };
         if !self.admission.admit(&req, &state) {
             self.pending_rejects.push((id, RejectReason::PolicyRejected { policy: self.admission.name() }));
+            return id;
+        }
+        if let Some(reason) = self.sampling_refusal(sample) {
+            self.pending_rejects.push((id, reason));
             return id;
         }
         let bad_token = self.invalid_token(&req.prompt);
@@ -2290,6 +2303,12 @@ impl<D: PagedDecoder> Scheduler<D> {
     /// without queueing it: the refusal [`Self::submit_embedded`] would report.
     pub fn embeds_refusal(&self, req: &Request, embeds: &PromptEmbeds) -> Option<RejectReason> {
         embeds.refusal(req.prompt.len(), self.dec.embed_width()).map(|why| RejectReason::InvalidEmbeds { why })
+    }
+
+    /// Why this decoder cannot sample `sample` exactly, if it cannot: see [`RejectReason::InexactSampling`].
+    pub fn sampling_refusal(&self, sample: SampleParams) -> Option<RejectReason> {
+        let capacity = self.dec.topk_capacity();
+        (!self.dec.full_row_readback() && sample.needs_full_row(capacity)).then_some(RejectReason::InexactSampling { capacity })
     }
 
     /// The first token of `prompt` outside the vocabulary, if any. O(prompt): done once per request, at
