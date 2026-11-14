@@ -14,7 +14,7 @@ build/docs/ is reserved for the publication built by the docs publisher.
 No HTML is produced. Run from the repo root:  python3 docs/pandoc/build-docs.py
 Requires pandoc + xelatex and PyYAML.
 """
-import os, re, sys, subprocess, posixpath
+import hashlib, os, re, sys, subprocess, posixpath
 import yaml
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -118,16 +118,91 @@ def build_markdown():
     print(f"wrote {md} ({os.path.getsize(md)//1024} KiB)")
     return md
 
+SVG_LINK = re.compile(r"\]\(([^)\s]+\.svg)\)")
+# xelatex passes before giving up on references that keep moving; a build
+# whose aux files carry over from the last one usually needs one or two.
+MAX_PASSES = 4
+RERUN = re.compile(r"Rerun to get|Label\(s\) may have changed|Table widths have changed|There were undefined references")
+STATE = (".aux", ".toc", ".out")
+
+
+def cached_pdf(rel, cache):
+    """Where the PDF of the SVG `rel` is kept: named by the hash of its content."""
+    src = rel if os.path.isabs(rel) else os.path.join(ROOT, rel)
+    with open(src, "rb") as f:
+        return os.path.join(cache, hashlib.sha256(f.read()).hexdigest()[:20] + ".pdf")
+
+
+def figures_as_pdf(md, cache):
+    """`md` with every SVG figure replaced by a PDF converted once and kept in
+    `cache` under the hash of its content, so an unchanged figure is never
+    converted again. The conversion is the one pandoc itself runs."""
+    os.makedirs(cache, exist_ok=True)
+    text = open(md, encoding="utf-8").read()
+    converted = {}
+    new = sum(1 for rel in set(SVG_LINK.findall(text)) if not os.path.exists(cached_pdf(rel, cache)))
+    if new:
+        print(f"converting {new} new figure(s) to PDF (kept in {os.path.relpath(cache, ROOT)})", flush=True)
+
+    def to_pdf(m):
+        rel = m.group(1)
+        if rel not in converted:
+            src = rel if os.path.isabs(rel) else os.path.join(ROOT, rel)
+            out = cached_pdf(rel, cache)
+            if not os.path.exists(out):
+                tmp = out + f".{os.getpid()}.tmp"
+                subprocess.run(["rsvg-convert", "-f", "pdf", "-a", "--dpi-x", "96", "--dpi-y", "96", "-o", tmp, src],
+                               check=True)
+                os.replace(tmp, out)
+            converted[rel] = out
+        return f"]({converted[rel]})"
+
+    text = SVG_LINK.sub(to_pdf, text)
+    out_md = os.path.splitext(md)[0] + ".pdf-figures.md"
+    open(out_md, "w", encoding="utf-8").write(text)
+    return out_md, len(converted)
+
+
+def state_of(stem):
+    return {ext: open(stem + ext, "rb").read() for ext in STATE if os.path.exists(stem + ext)}
+
+
+def xelatex_pass(work, n, env, label):
+    """One xelatex pass in `work`, printing progress every 500 pages; returns
+    (exit code, output)."""
+    proc = subprocess.Popen(["xelatex", "-interaction=nonstopmode", "-halt-on-error", "input.tex"],
+                            cwd=work, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True, errors="replace")
+    out, shown = [], 0
+    for line in proc.stdout:
+        out.append(line)
+        for page in re.findall(r"\[(\d+)", line):
+            if int(page) >= shown + 500:
+                shown = int(page) // 500 * 500
+                print(f"{label}: pass {n}, page {shown}", flush=True)
+    return proc.wait(), "".join(out)
+
+
 def build_pdf(md, pdf=None, header=None, extra=()):
     """Typeset `md` with pandoc + xelatex. Shared with the book's PDF build,
-    which passes its own output, header and document-class options."""
+    which passes its own output, header and document-class options.
+
+    The stages run here rather than inside pandoc so that each one reports
+    and none repeats work: figures are converted once (`figures_as_pdf`),
+    pandoc writes LaTeX, and xelatex runs in a work directory kept between
+    builds, whose aux, toc and outline files let a rebuild settle in one or
+    two passes instead of starting from nothing every time."""
     pdf = pdf or os.path.join(OUT, "brain-docs.pdf")
     out_dir = os.path.dirname(pdf)
     os.makedirs(out_dir, exist_ok=True)
-    log = os.path.splitext(pdf)[0] + ".pandoc.log"
+    stem = os.path.splitext(pdf)[0]
+    label = os.path.basename(stem)
+    log = stem + ".pandoc.log"
+    work = stem + ".tex.d"
+    os.makedirs(work, exist_ok=True)
+    md, figures = figures_as_pdf(md, os.path.join(os.path.dirname(OUT), "figures-pdf"))
     cmd = [
-        "pandoc", md, "-o", pdf,
-        "--pdf-engine=xelatex",
+        "pandoc", md, "-o", os.path.join(work, "input.tex"), "--standalone",
         "--toc", "--number-sections",
         "--highlight-style=tango",
         "-H", header or os.path.join(DOCS, "pandoc", "header.tex"),
@@ -135,26 +210,95 @@ def build_pdf(md, pdf=None, header=None, extra=()):
         "-V", "geometry:margin=1in",
         "-V", "fontsize=10pt",
         "-V", "colorlinks=true", "-V", "linkcolor=blue", "-V", "urlcolor=blue", "-V", "toccolor=black",
-        "--pdf-engine-opt=-interaction=nonstopmode",
-        # Without --verbose pandoc keeps LaTeX's log to itself, and the
-        # overflow count below would always read zero.
-        "--verbose",
         *(extra or ("--toc-depth=2", "--top-level-division=chapter", "-V", "documentclass=report")),
     ]
-    env = dict(os.environ, TEXMFVAR=os.path.join(out_dir, "texmf"))
-    r = subprocess.run(cmd, cwd=ROOT, env=env, capture_output=True, text=True)
-    open(log, "w").write(r.stdout + "\n---STDERR---\n" + r.stderr)
+    stamp = stem + ".inputs.sha256"
+    key = inputs_digest(md, cmd)
+    if os.path.exists(pdf) and os.path.exists(log) and os.path.exists(stamp) and open(stamp).read() == key:
+        print(f"{label}: up to date", flush=True)
+        return pdf, overfull_widths(open(log, encoding="utf-8", errors="replace").read())
+    if os.path.exists(stamp):
+        os.remove(stamp)
+    print(f"{label}: {figures} figures ready, writing LaTeX", flush=True)
+    r = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
     if r.returncode != 0:
+        open(log, "w").write(r.stdout + "\n---STDERR---\n" + r.stderr)
         print("pandoc FAILED; tail of output:", file=sys.stderr)
         print((r.stdout + r.stderr)[-2000:], file=sys.stderr)
         sys.exit(1)
+    env = dict(os.environ, TEXMFVAR=os.path.join(out_dir, "texmf"))
+    # LaTeX's log of every pass, marked as pandoc marks them, so a reader of
+    # the log (the book's overflow report) sees the same layout as before.
+    runs, fresh = [], False
+    n = 0
+    while n < MAX_PASSES:
+        n += 1
+        before = state_of(os.path.join(work, "input"))
+        code, out = xelatex_pass(work, n, env, label)
+        runs.append(f"[makePDF] LaTeX run number {n}\n{out}")
+        if code != 0 and not fresh:
+            # A build killed mid-pass leaves a truncated aux file that stops
+            # the next one at \begin{document}: start this build clean once.
+            for ext in STATE:
+                if os.path.exists(os.path.join(work, "input" + ext)):
+                    os.remove(os.path.join(work, "input" + ext))
+            fresh, n = True, 0
+            print(f"{label}: pass failed on carried-over state, starting clean", flush=True)
+            continue
+        if code != 0:
+            break
+        pages = re.search(r"Output written on input\.pdf \((\d+) pages", out)
+        settled = state_of(os.path.join(work, "input")) == before and not RERUN.search(out)
+        print(f"{label}: pass {n} done, {pages.group(1) if pages else '?'} pages"
+              + ("" if settled else ", references moved, another pass"), flush=True)
+        if settled:
+            break
+    else:
+        print(f"{label}: references still moving after {MAX_PASSES} passes; see {log}", file=sys.stderr)
+    text = "".join(runs)
+    open(log, "w").write(text + "\n---STDERR---\n" + r.stderr)
+    if code != 0:
+        print("xelatex FAILED; tail of output:", file=sys.stderr)
+        print(text[-2000:], file=sys.stderr)
+        sys.exit(1)
+    os.replace(os.path.join(work, "input.pdf"), pdf)
     print(f"wrote {pdf} ({os.path.getsize(pdf)//1024} KiB)")
-    # Report overflow: xelatex logs 'Overfull \hbox (N.NNpt too wide)'.
-    # LaTeX repeats each warning on every pass; count each place once.
-    overfull = set(re.findall(r"Overfull \\hbox \(([\d.]+)pt too wide\) (.*)", r.stdout + r.stderr))
-    bad = [float(w) for w, _ in overfull if float(w) > 2.0]  # ignore < 2pt hairline
+    bad = overfull_widths(text)
     print(f"overfull hboxes >2pt: {len(bad)}" + (f"  (max {max(bad):.1f}pt)" if bad else ""))
+    # Written last, so a build that stops early is never taken as up to date.
+    open(stamp, "w").write(key)
     return pdf, bad
+
+
+def overfull_widths(log):
+    """Widths of the lines wider than the text (xelatex logs 'Overfull \\hbox
+    (N.NNpt too wide)'), each place once although every pass repeats it,
+    ignoring hairlines under 2pt."""
+    overfull = set(re.findall(r"Overfull \\hbox \(([\d.]+)pt too wide\) (.*)", log))
+    return [float(w) for w, _ in overfull if float(w) > 2.0]
+
+
+IMAGE_PATH = re.compile(r"(/[^\s{}()\[\]`'\"]+\.(?:jpe?g|png|pdf))")
+
+
+def inputs_digest(md, cmd):
+    """A hash of everything a PDF is made from: the markdown (whose figure
+    links name their converted PDFs by content), every file the pandoc command
+    reads (headers, filters), the images those name by path, this program,
+    and the pandoc and xelatex versions. Equal digests mean an equal PDF."""
+    h = hashlib.sha256()
+    h.update("\0".join(cmd[2:]).encode())
+    h.update(open(__file__, "rb").read())
+    for tool in ("pandoc", "xelatex"):
+        h.update(subprocess.run([tool, "--version"], capture_output=True, text=True).stdout.split("\n")[0].encode())
+    files = [md] + [cmd[i + 1] for i, a in enumerate(cmd[:-1]) if a in ("-H", "--lua-filter")]
+    for f in files:
+        text = open(f, "rb").read()
+        h.update(f.encode() + b"\0" + text)
+        for img in sorted(set(IMAGE_PATH.findall(text.decode("utf-8", "replace")))):
+            if os.path.isfile(img):
+                h.update(img.encode() + b"\0" + open(img, "rb").read())
+    return h.hexdigest()
 
 if __name__ == "__main__":
     md = build_markdown()

@@ -87,7 +87,10 @@ def tex(s: str) -> str:
 def title_header(book, out: Path, title: str, subtitle: str) -> Path:
     """The title page and its reverse (the colophon), from book.yaml: `title`
     and `subtitle` are the book's own, or a volume's title over the book's."""
-    rev = subprocess.run(["git", "rev-parse", "--short=9", "HEAD"], cwd=ROOT,
+    # The last commit that changed what the book is built from, not HEAD: a
+    # commit elsewhere in the repository leaves the PDFs as they were.
+    rev = subprocess.run(["git", "log", "-1", "--format=%h", "--abbrev=9", "--",
+                          "docs/book", "docs/pandoc", "scripts/book"], cwd=ROOT,
                          capture_output=True, text=True).stdout.strip() or "unknown"
     out.write_text(rf"""\makeatletter
 \renewcommand{{\bookauthor}}{{{tex(book.author)}}}
@@ -203,7 +206,7 @@ toc-title: "Contents"
     parts += [about_page() for rel in back if rel == ABOUT]
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text("".join(parts), encoding="utf-8")
-    print(f"wrote {out.relative_to(ROOT)} ({out.stat().st_size // 1024} KiB)")
+    print(f"wrote {out.relative_to(ROOT)} ({out.stat().st_size // 1024} KiB)", flush=True)
     return out
 
 
