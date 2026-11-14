@@ -11,3 +11,4 @@ mod late_join_model;
 mod plan;
 mod sibling_models;
 mod supervision;
+mod supervisor_model;

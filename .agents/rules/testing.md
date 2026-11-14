@@ -149,6 +149,11 @@ only trusted once a deliberate bug in it has been seen to fail.
 - `crates/residency/tests/it/late_join_model.rs`: the dispatcher's late-job
   inbox and a running group (every job answered exactly once, none stranded,
   batch limit kept, a healthy group never errors a late job).
+- `crates/residency/tests/it/supervisor_model.rs`: supervised device work on
+  the lanes with the real circuit breaker (a device never runs two exclusive
+  operations, every operation answered exactly once, every killed worker
+  reaped, no work admitted while a breaker is open); each deliberate bug in
+  it is checked to fail.
 
 ## 3. Federated round-trip & integrity
 
