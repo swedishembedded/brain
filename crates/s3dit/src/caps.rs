@@ -408,6 +408,48 @@ mod tests {
         }
     }
 
+    /// A token fired at the third progress event (the first sampling step is
+    /// the second) stops each image-editing action at the next one, on the
+    /// real Z-Image-Turbo checkpoint: 4 steps over a 256 px gradient. These
+    /// actions rebuild the DiT per call, so the reference run and the
+    /// cancelled run each pay the load.
+    #[test]
+    #[ignore = "slow: each action loads the 6B DiT and the Qwen-4B encoder twice"]
+    fn a_token_fired_mid_run_stops_every_image_edit_action_at_the_next_step() {
+        let Some(root) = brain_testutil::model_dir("Tongyi-MAI/Z-Image-Turbo").filter(|d| std::path::Path::new(d).join("transformer").exists()) else {
+            brain_testutil::skip("s3dit mid-run cancel needs the Tongyi-MAI/Z-Image-Turbo checkpoint in the model store");
+            return;
+        };
+        let provider = ZImageProvider::from_paths(crate::pipeline::Paths {
+            dit: format!("{root}/transformer"),
+            vae: format!("{root}/vae"),
+            qwen: format!("{root}/text_encoder"),
+            tokenizer: format!("{root}/tokenizer/tokenizer.json"),
+        });
+        let side = 256usize;
+        let gradient: Vec<f32> = (0..side * side * 3).map(|i| ((i / 3) % side) as f32 / side as f32).collect();
+        let image = capability::blob::image_blob(&gradient, side as u32, side as u32, 3);
+        let mut plane = vec![0.0f32; side * side];
+        for (i, v) in plane.iter_mut().enumerate() {
+            *v = f32::from(i % side >= side / 2);
+        }
+        let mask = capability::blob::image_blob(&plane, side as u32, side as u32, 1);
+        let mask = capability::Blob::new(Media::Mask, mask.bytes).with_meta(mask.meta);
+        let base = || Invocation::new().set("prompt", json!("a lighthouse at dusk")).set("steps", json!(4)).set("seed", json!(7));
+        let request = |name: &str| {
+            let inv = base().blob("image", image.clone());
+            match name {
+                "inpaint" => inv.blob("mask", mask.clone()),
+                "outpaint" => inv.set("right", json!(64)),
+                _ => inv,
+            }
+        };
+        for name in ["image2image", "inpaint", "outpaint"] {
+            let action = provider.action(name).expect("declared action");
+            capability_mock::cancellation::mid_run(&format!("s3dit {name}"), &|| request(name), &|inv, p| action.run(inv, p), capability_mock::cancellation::Bound { fire_after: 3, within: 1 });
+        }
+    }
+
     #[test]
     fn manifest_declares_the_full_surface() {
         let m = manifest();

@@ -47,6 +47,12 @@ mod tests {
         Path::new(p).exists()
     }
 
+    /// Whether `dir` holds a checkpoint, single-file or sharded (the store's
+    /// Qwen3-ASR-1.7B is two shards behind an index).
+    fn have_checkpoint(dir: &str) -> bool {
+        have(&format!("{dir}/model.safetensors")) || have(&format!("{dir}/model.safetensors.index.json"))
+    }
+
     fn maxdiff(a: &[f32], b: &[f32]) -> f32 {
         assert_eq!(a.len(), b.len(), "len {} vs {}", a.len(), b.len());
         a.iter().zip(b).map(|(x, y)| (x - y).abs()).fold(0.0, f32::max)
@@ -63,7 +69,7 @@ mod tests {
     fn qwen_transcribe_matches_reference() {
         let dg = crate::testdata("asr/golden/qwen_decode");
         let CKPT = crate::model_dir("Qwen/Qwen3-ASR-1.7B").unwrap_or_default();
-        if !have(&format!("{dg}/output_ids.f32")) || !have(&format!("{CKPT}/model.safetensors")) {
+        if !have(&format!("{dg}/output_ids.f32")) || !have_checkpoint(&CKPT) {
             brain_testutil::skip("goldens/checkpoint absent");
             return;
         }
@@ -108,7 +114,7 @@ mod tests {
         use capability::Provider;
         let CKPT = crate::model_dir("Qwen/Qwen3-ASR-1.7B").unwrap_or_default();
         let wav_path = crate::testdata("asr/audio/librispeech_mr_quilter.wav");
-        if !have(&format!("{CKPT}/model.safetensors")) || !have(&wav_path) {
+        if !have_checkpoint(&CKPT) || !have(&wav_path) {
             brain_testutil::skip("Qwen/Qwen3-ASR-1.7B or asr/audio/librispeech_mr_quilter.wav absent (run `make testdata/fetch`)");
             return;
         }
@@ -125,7 +131,7 @@ mod tests {
     fn qwen_encoder_matches_reference() {
         let GOLD = crate::testdata("asr/golden/qwen_encoder");
         let CKPT = crate::model_dir("Qwen/Qwen3-ASR-1.7B").unwrap_or_default();
-        if !have(&format!("{GOLD}/encoder_out.f32")) || !have(&format!("{CKPT}/model.safetensors")) {
+        if !have(&format!("{GOLD}/encoder_out.f32")) || !have_checkpoint(&CKPT) {
             brain_testutil::skip("goldens/checkpoint absent");
             return;
         }

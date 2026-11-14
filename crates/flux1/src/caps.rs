@@ -218,13 +218,29 @@ mod caps_tests {
         capability_mock::cancellation::admission("flux1 text2image", Invocation::new().set("prompt", json!("a lighthouse")), &|inv, p| action.run(inv, p));
     }
 
-    /// The per-step poll in `Flux1::generate_injected` needs a built pipeline
-    /// (T5-XXL, CLIP, the DiT and the VAE from a diffusers checkpoint); no
-    /// tiny configuration of it exists, so the mid-run certification states
-    /// what it lacks rather than passing vacuously.
+    /// A token fired at the second denoise step stops the loop at the next
+    /// one, on the real FLUX.1-dev checkpoint (int8 DiT, 256 px, 4 steps: the
+    /// smallest run that reaches the loop on a 24 GiB card).
     #[test]
+    #[ignore = "slow: loads FLUX.1-dev (T5-XXL, CLIP-L, 12B DiT) and denoises on a GPU"]
     fn a_token_fired_mid_run_stops_the_denoise_loop() {
-        brain_testutil::skip("mid-run cancel of flux1 needs a real FLUX.1 diffusers checkpoint: Flux1::load has no weight-free configuration");
+        let Some(root) = brain_testutil::model_dir("black-forest-labs/FLUX.1-dev").filter(|d| std::path::Path::new(d).join("transformer").exists()) else {
+            brain_testutil::skip("flux1 mid-run cancel needs the black-forest-labs/FLUX.1-dev diffusers checkpoint in the model store");
+            return;
+        };
+        let provider = Flux1Provider::new(root);
+        let action = provider.action("text2image").expect("declared action");
+        let request = || {
+            Invocation::new()
+                .set("prompt", json!("a lighthouse at dusk"))
+                .set("width", json!(256))
+                .set("height", json!(256))
+                .set("steps", json!(4))
+                .set("precision", json!("int8"))
+                .set("te_device", json!("gpu1"))
+                .set("seed", json!(7))
+        };
+        capability_mock::cancellation::mid_run("flux1 text2image", &request, &|inv, p| action.run(inv, p), capability_mock::cancellation::Bound { fire_after: 2, within: 1 });
     }
 
     /// An unseeded request draws its own seed (a different one each time), a

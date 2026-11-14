@@ -510,12 +510,46 @@ mod caps_tests {
         capability_mock::cancellation::admission("pulid text2image", Invocation::new().set("prompt", json!("a portrait")), &|inv, p| action.run(inv, p));
     }
 
-    /// The denoise loop is `flux1::Flux1::generate_injected`'s, which needs
-    /// the FLUX.1 checkpoint plus the PuLID, ArcFace, EVA-CLIP and BiSeNet
-    /// weights; none has a weight-free configuration to certify against.
+    /// A token fired at the second denoise step stops the PuLID-injected
+    /// loop at the next one, on the real checkpoints: FLUX.1-dev (int8 DiT,
+    /// 256 px, 4 steps), the PuLID adapter, ArcFace (antelopev2), EVA-CLIP-L
+    /// and the BiSeNet parser, conditioned on the fixture portrait.
     #[test]
+    #[ignore = "slow: loads FLUX.1-dev plus the PuLID towers and denoises on a GPU"]
     fn a_token_fired_mid_run_stops_the_denoise_loop() {
-        brain_testutil::skip("mid-run cancel of pulid needs the FLUX.1, PuLID, ArcFace, EVA-CLIP and BiSeNet checkpoints: Bundle::load has no weight-free configuration");
+        let store = |rel: &str| brain_testutil::model_dir(rel).filter(|d| std::path::Path::new(d).exists());
+        let (Some(flux1), Some(adapter), Some(arcface), Some(clip), Some(bisenet)) = (
+            store("black-forest-labs/FLUX.1-dev"),
+            store("guozinan/PuLID").map(|d| format!("{d}/pulid_flux_v0.9.1.safetensors")).filter(|f| std::path::Path::new(f).exists()),
+            store("DIAMONIK7777/antelopev2"),
+            store("QuanSun/EVA-CLIP"),
+            store("facexlib/pulid"),
+        ) else {
+            brain_testutil::skip("pulid mid-run cancel needs FLUX.1-dev, guozinan/PuLID, DIAMONIK7777/antelopev2, QuanSun/EVA-CLIP and facexlib/pulid in the model store");
+            return;
+        };
+        let photo_path = brain_testutil::testdata("pulid/face_source.jpg");
+        if !std::path::Path::new(&photo_path).exists() {
+            brain_testutil::skip(&format!("portrait {photo_path} absent (run `make testdata/fetch`)"));
+            return;
+        }
+        let photo = imaging::load(&photo_path).unwrap_or_else(|e| panic!("reading {photo_path}: {e}"));
+        let face = capability::blob::image_blob(&photo.to_hwc_unit(), photo.w, photo.h, 3);
+
+        let provider = PulidProvider::new(flux1, adapter, arcface, clip, bisenet);
+        let action = provider.action("text2image").expect("declared action");
+        let request = || {
+            Invocation::new()
+                .set("prompt", json!("a portrait photo, studio light"))
+                .set("width", json!(256))
+                .set("height", json!(256))
+                .set("steps", json!(4))
+                .set("precision", json!("int8"))
+                .set("te_device", json!("gpu1"))
+                .set("seed", json!(7))
+                .blob("face_image", face.clone())
+        };
+        capability_mock::cancellation::mid_run("pulid text2image", &request, &|inv, p| action.run(inv, p), capability_mock::cancellation::Bound { fire_after: 2, within: 1 });
     }
 
     /// An unseeded request draws its own seed (a different one each time), a

@@ -67,7 +67,7 @@ release on the early return, and the bit declared.
 | model | action(s) | polled | verified |
 |---|---|---|---|
 | shared adapters | catalog `LazyProvider`, `ResidentProvider` actions; `Instance::run_batch` default | before the build/load and lock; per queued job | `residency` unit test; the catalog C2 test runs through them |
-| llava, fastvlm | caption | entry, after the vision tower, per decoded token | `admission` weight-free; `mid_run` with the real checkpoint (fastvlm passed; llava skips by name: no `liuhaotian/llava-v1.5-13b`) |
+| llava, fastvlm | caption | entry, after the vision tower, per decoded token | `admission` weight-free; `mid_run` with the real checkpoint (fastvlm passed; llava skips by name: no `liuhaotian/llava-v1.5-13b`, so its mid-run proof is open) |
 | cosyvoice | synth (provider, resident, SDK) | entry, per speech token, per flow Euler step | `admission` weight-free; `mid_run` over the LM decode on a tiny random config |
 | moondream3 | caption | entry, per decoded token, live progress | `admission` weight-free; tiny-model stop test |
 | glmdsa, gpt2 | generate, train, finetune | entry, per token, per optimizer step | `certify` with tiny trained checkpoints |
@@ -75,14 +75,14 @@ release on the early return, and the bit declared.
 | qwen3, ouro, decisions | train, finetune, lora_train | entry, per optimizer step | tiny train tests assert the literal |
 | qwen3tts | batch | entry, per round, per vocoded clip | entry weight-free; `run_batch` mid-run |
 | deepseek2ocr, deepseekocr2 | generate | entry; `llmserve` per token | `admission` through `ocrserve` with a toy model |
-| s3dit | text2image, image2image, inpaint, outpaint | entry, per denoise step | `admission` weight-free |
-| flux1, pulid | text2image | entry, per denoise step; one progress step per denoise step through `Session::run` and the residents | `admission` weight-free; mid-run skips by name (FLUX.1 and the PuLID towers) |
+| s3dit | text2image, image2image, inpaint, outpaint | entry, per denoise step | `admission` weight-free; `caps::tests::a_token_fired_mid_run_stops_every_image_edit_action_at_the_next_step` for image2image, inpaint and outpaint (real weights, P40) |
+| flux1, pulid | text2image | entry, per denoise step; one progress step per denoise step through `Session::run` and the residents | `admission` weight-free; `flux1::caps::caps_tests::a_token_fired_mid_run_stops_the_denoise_loop` and `pulid::caps::caps_tests::a_token_fired_mid_run_stops_the_denoise_loop` (real weights, P40: int8 DiT, 256 px, 4 steps, T5-XXL and CLIP-L on the second card) |
 | sdxlunet, controlnet | text2image | entry, per denoise step; one progress step per step through `Session::run` and the residents | `certify` and a per-step report test over the real `sampler::sample` with a fake `Denoiser` |
 | imgpipe | run | entry, per stage; the token rides into every model stage | `certify` with stub stages |
 | kronos | forecast (CPU, NPU), predict | entry, per decode step in every rollout form | `certify` over both injected-cores rollouts on a zero model; fired-token test for the host forms |
 | every forecaster | predict (`forecastops::run_predict`), forecast entry | entry, per origin | `certify` with a persistence forecaster |
 | nemotronasr | transcribe (provider, CPU and NPU residents, batched) | entry, per encoded frame of the RNN-T decode; per stream in a batch | `certify` on a tiny random config; `transcribe_stream` is one window, entry only |
-| qwen3asr | transcribe (provider, CPU and NPU residents) | entry (before the model lock), per decoded token, each reported | real-weight `certify` `a_transcription_stops_at_the_token_its_cancel_fires` (ignored by default like its siblings; skips by name without `Qwen/Qwen3-ASR-1.7B` or `asr/audio/librispeech_mr_quilter.wav`) |
+| qwen3asr | transcribe (provider, CPU and NPU residents) | entry (before the model lock), per decoded token, each reported | real-weight `certify` `a_transcription_stops_at_the_token_its_cancel_fires` (real weights, P40; ignored by default like its siblings; skips by name without `Qwen/Qwen3-ASR-1.7B` or `asr/audio/librispeech_mr_quilter.wav`) |
 | rrdbnet | upscale | entry, per window of a tiled sweep | `certify` on synthetic weights |
 | minimaxmusic3 | generate | entry, per AR frame, per Euler step, per vocoded chunk | `admission` weight-free; `certify` over the Euler loop on a tiny DiT; AR and vocoder by reading |
 | qwen3omnimoe | generate (bf16 and int8), speak, converse, int8 raw generate | entry (the checkpoint now loads on first run, not on lookup), per token (`SeqState`), Talker and Code2Wav as before | `certify` over `serve_chat` with a canned Thinker |
@@ -107,9 +107,15 @@ release on the early return, and the bit declared.
 
 - minicpmv `export_peft`'s stop is proved only with the real checkpoint
   (`peft_export.rs`); a tiny MiniCPM-V fixture would prove it everywhere.
-- Real-weight mid-run proofs to run on a box with the checkpoints: llava
-  caption, the SDK's `ask_stream`, flux1 and pulid, s3dit's edit actions,
-  cosyvoice's flow loop, qwen3asr (the test above, with the LibriSpeech clip).
+- Real-weight mid-run proofs still open, for want of a checkpoint: llava
+  caption (no `liuhaotian/llava-v1.5-13b`), cosyvoice's flow loop (no
+  CosyVoice checkpoint), and the SDK's `ask_stream`
+  (`crates/sdk/tests/vlm_pipeline.rs`, which needs the Hugging Face
+  `Qwen/Qwen3-VL-4B-Instruct` directory: the store holds only GGUF Qwen3-VL
+  files, and `qwen3vl::spec::Qwen3VlSpec` resolves a directory with
+  `config.json` and `tokenizer.json`, not a GGUF).
+- s3dit's `text2image` mid-run proof (the resident pipeline path) is not
+  covered by the edit-action test.
 - The C2 test proves admission only for providers that build without
   weights; residents are covered by the shared `run_batch` check and their
   own entry checks, not by a weight-free behavioural test.
