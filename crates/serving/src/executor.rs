@@ -129,9 +129,31 @@ pub struct TrainKnobs {
     pub quotas: trainjob::Quotas,
 }
 
+/// What a server keeps free on each card, and the activation room it charges a
+/// model that estimates none of its own (`residency::MemCost::activation`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Reserve {
+    /// Bytes kept free on every card, whatever is placed on it.
+    pub card: u64,
+    /// Bytes the placement charges beside a model that declares no peak
+    /// activation estimate (`residency::budget::Budgets::set_activation_fallback`).
+    pub activation_fallback: u64,
+}
+
+impl Reserve {
+    /// The headroom a model that estimates no activations of its own sizes
+    /// itself against: the card's reserve and the fallback the placement will
+    /// charge beside it.
+    pub fn undeclared(&self) -> u64 {
+        self.card + self.activation_fallback
+    }
+}
+
 /// Build the shared executor with every model registered, sized to the given per-GPU
-/// budgets. `gpus` is `(index, total_bytes)` per card; `reserved` bytes are kept free
-/// on each. `unified_gpus` names the indices among `gpus` that physically share RAM
+/// budgets. `gpus` is `(index, total_bytes)` per card; `reserve.card` bytes are kept free
+/// on each, and a model whose resident declares no activation estimate is charged
+/// `reserve.activation_fallback` beside its own bytes (and sizes itself against both).
+/// `unified_gpus` names the indices among `gpus` that physically share RAM
 /// with the CPU (an integrated GPU, or the no-discrete-GPU fallback) - every NPU
 /// always shares RAM too (`docs/reference/models/*`'s Meteor-Lake NPU note) - so those,
 /// plus `Device::Cpu`, are declared into ONE `memauth` pool sized to `pool_ram` (the
@@ -162,7 +184,8 @@ pub struct TrainKnobs {
 /// cards `--device` allows), `knobs.qwen35.fp32` sizing the brain-checkpoint
 /// resident, and `knobs.decision` naming the decision models served beyond
 /// those the store holds.
-pub fn build_executor(machine: &Machine, reserved: u64, store: &catalog::ServedStore, policy: Policy, knobs: ServeKnobs) -> Serving {
+pub fn build_executor(machine: &Machine, reserve: Reserve, store: &catalog::ServedStore, policy: Policy, knobs: ServeKnobs) -> Serving {
+    let reserved = reserve.card;
     let ServeKnobs { qwen: qwen_cfg, qwen35, ricursive, decision, ocr, max_batch, train, mock_delay_ms, supervision, worker_hosting } = knobs;
     // Process-wide, before any OCR model is built: the models read it when they load.
     ocrserve::configure(ocr);
@@ -179,6 +202,7 @@ pub fn build_executor(machine: &Machine, reserved: u64, store: &catalog::ServedS
     for &(i, total) in gpus {
         budgets.set(Device::Gpu(i), limits.clamp(Device::Gpu(i), total), reserved);
     }
+    budgets.set_activation_fallback(reserve.activation_fallback);
     // NPUs get their own budget + lane; a model advertising an NPU path (MemCost.npu
     // > 0) is then auto-placed there in preference to CPU/GPU (see place::pick_device).
     // An NPU's bytes ARE host RAM, so `--limit-ram-total` is what bounds it.
@@ -338,7 +362,7 @@ pub fn build_executor(machine: &Machine, reserved: u64, store: &catalog::ServedS
     // needs the cards' budgets (see `catalog::resident_januspro`).
     match store.resolve("januspro", &januspro::spec::JANUS_PRO) {
         Ok(assembly) => {
-            for m in catalog::resident_januspro::JanusProResident::family_from_assembly(&assembly, gpus, reserved) {
+            for m in catalog::resident_januspro::JanusProResident::family_from_assembly(&assembly, gpus, reserve.undeclared()) {
                 models.push(Arc::new(m));
             }
         }
@@ -466,7 +490,7 @@ pub fn build_executor(machine: &Machine, reserved: u64, store: &catalog::ServedS
     // can charge only one of them, leaving the other silently unbudgeted.
     // `catalog::residents()` deliberately excludes them, so nothing is
     // registered twice.
-    for m in catalog::multi_residents(store, gpus, reserved) {
+    for m in catalog::multi_residents(store, gpus, reserve.undeclared()) {
         exec.register_multi(m);
     }
     // The int8 dual-GPU Thinker is multi-device-only, so it is registered
@@ -474,7 +498,7 @@ pub fn build_executor(machine: &Machine, reserved: u64, store: &catalog::ServedS
     // (see `resident_omni::int8_thinker_multi_from_store`'s own doc for why a
     // plain `register` would be structurally wrong for it). The full Qwen3-Omni
     // is a catalog multi-device resident, registered with the others above.
-    if let Some(t) = catalog::resident_omni::int8_thinker_multi_from_store(store, gpus, reserved) {
+    if let Some(t) = catalog::resident_omni::int8_thinker_multi_from_store(store, gpus, reserve.undeclared()) {
         exec.register_multi(Arc::new(t));
     } else {
         residency::log::not_served(&format!("brain: {} not served over the scheduler (no Qwen3-Omni checkpoint in the model store; brain qwen3omnimoe import writes one)", qwen3omnimoe::int8_thinker_resident::MODEL));

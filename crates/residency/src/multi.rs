@@ -79,6 +79,10 @@ pub struct MultiDeviceCost {
     /// `MemCost::ram`, kept separate from `per_device` because RAM is not
     /// itself a placement decision the way a GPU/NPU slot is.
     ram: u64,
+    /// Activation bytes each device a stage runs on allocates beyond its
+    /// share of `per_device`, as the model estimates them; `None` when it
+    /// declares no estimate (see [`crate::MemCost::activation`]).
+    activation: Option<u64>,
 }
 
 impl MultiDeviceCost {
@@ -92,7 +96,22 @@ impl MultiDeviceCost {
         for &(d, _) in &per_device {
             assert!(seen.insert(d), "MultiDeviceCost::new: device {d:?} named twice");
         }
-        MultiDeviceCost { per_device, ram }
+        MultiDeviceCost { per_device, ram, activation: None }
+    }
+
+    /// Declare the activation bytes each stage allocates beyond its share,
+    /// on every device it names (see [`crate::MemCost::with_activation`]).
+    pub fn with_activation(mut self, bytes_per_device: u64) -> MultiDeviceCost {
+        self.activation = Some(bytes_per_device);
+        self
+    }
+
+    /// The cost a placement charges: every device's share plus the declared
+    /// activation, or plus `fallback` when none is declared
+    /// ([`crate::MemCost::placed`]).
+    pub fn placed(&self, fallback: u64) -> MultiDeviceCost {
+        let activation = self.activation.unwrap_or(fallback);
+        MultiDeviceCost { per_device: self.per_device.iter().map(|&(d, b)| (d, b + activation)).collect(), ram: self.ram, activation: Some(activation) }
     }
 
     /// The devices this instance would occupy, in the order given to `new`.

@@ -413,7 +413,7 @@ pub fn plan(parts: &[Part], budgets: &Budgets) -> Result<Placement, Unplaceable>
     for g in &groups {
         // What the group is placed BY on the flat paths (see `UNSIZED_FLOOR`):
         // its peak, not its sum - the sum over phases is never live at once.
-        let probe = MemCost { vram: g.peak_vram, ram: g.cost.ram, npu: g.cost.npu, mapped: 0 };
+        let probe = MemCost { vram: g.peak_vram, ram: g.cost.ram, npu: g.cost.npu, mapped: 0, activation: None };
         // `allow_host` is what keeps [`Affinity::Apart`] meaning what it says.
         // Apart is a preference between CARDS ("do not stack the DiT and its
         // text encoder"), and the host tier is not a card - it is the fallback

@@ -100,11 +100,26 @@ pub struct Budgets {
     /// (Grace LPDDR beside HBM). Empty unless a caller declares one, so a device
     /// has exactly its own [`Budget`] and every figure above is unchanged.
     coherent: HashMap<Device, Budget>,
+    /// Activation bytes the placement charges a model that declares no
+    /// estimate of its own ([`crate::MemCost::activation`]); `0` by default.
+    activation_fallback: u64,
 }
 
 impl Budgets {
     pub fn new() -> Budgets {
-        Budgets { devices: HashMap::new(), pools: HashMap::new(), pool_of: HashMap::new(), coherent: HashMap::new() }
+        Budgets { devices: HashMap::new(), pools: HashMap::new(), pool_of: HashMap::new(), coherent: HashMap::new(), activation_fallback: 0 }
+    }
+    /// Charge `bytes` of activations to every placed instance whose model
+    /// declares no estimate of its own ([`crate::MemCost::placed`]): the
+    /// measured headroom a batch of the server's width needed on the one model
+    /// it was measured on, applied where nothing better is known.
+    pub fn set_activation_fallback(&mut self, bytes: u64) -> &mut Self {
+        self.activation_fallback = bytes;
+        self
+    }
+    /// See [`Self::set_activation_fallback`].
+    pub fn activation_fallback(&self) -> u64 {
+        self.activation_fallback
     }
     /// Declare `device`'s coherent tier: `total` bytes of host memory it can use
     /// directly, `reserved` of it kept free. Only [`Self::place_tiered`] with a

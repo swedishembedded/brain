@@ -220,6 +220,14 @@ impl Qwen35Config {
     pub fn kv_dim(&self) -> u32 {
         self.n_kv_heads * self.head_dim
     }
+    /// The widths that set this decoder's activation peak when served: a
+    /// row's feed-forward is its routed experts' and the shared expert's
+    /// together, beside the router's logits.
+    pub fn decoder_widths(&self) -> model::memplan::DecoderWidths {
+        let w = u64::from;
+        let ffn = w(self.top_k) * w(self.moe_intermediate_size) + w(self.shared_expert_intermediate_size) + w(self.n_experts);
+        model::memplan::DecoderWidths { layers: w(self.n_layers), d_model: w(self.d_model), q_width: w(2 * self.q_dim()), kv_width: w(self.kv_dim()), ffn_width: ffn, vocab: w(self.vocab) }
+    }
     pub fn group(&self) -> u32 {
         self.n_heads / self.n_kv_heads
     }

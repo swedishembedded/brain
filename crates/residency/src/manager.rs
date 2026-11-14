@@ -436,7 +436,7 @@ impl ResidencyManager {
     /// only as multi-device, whose placement this does not answer, and for an
     /// unregistered one.
     pub fn fits_outside(&self, key: &InstanceKey, model: &str, exclude: &HashSet<Device>) -> bool {
-        self.models.get(model).is_some_and(|m| crate::place::fits_when_empty_outside(&m.estimate(key), &self.budgets, exclude))
+        self.models.get(model).is_some_and(|m| crate::place::fits_when_empty_outside(&self.hot_cost(&**m, key), &self.budgets, exclude))
     }
 
     /// The devices a multi-device instance can run on: the ones it occupies
@@ -446,7 +446,7 @@ impl ResidencyManager {
         if let Some(e) = self.multi_residents.get(key) {
             return e.devices.clone();
         }
-        self.multi_models.get(model).map(|m| m.estimate_multi(key).devices().collect()).unwrap_or_default()
+        self.multi_models.get(model).map(|m| self.hot_cost_multi(&**m, key).devices().collect()).unwrap_or_default()
     }
 
     /// Whether the replica `key` names can run on this machine as its devices are budgeted now: it is hot, or every device it needs has
@@ -457,11 +457,11 @@ impl ResidencyManager {
             return true;
         }
         if let Some(m) = self.multi_models.get(model) {
-            let cost = m.estimate_multi(key);
+            let cost = self.hot_cost_multi(&**m, key);
             return cost.devices().all(|d| self.budgets.get(d).is_some() && self.budgets.usable_on(d) >= cost.on(d));
         }
         match self.models.get(model) {
-            Some(m) => fits_when_empty(&m.estimate(key), &self.budgets),
+            Some(m) => fits_when_empty(&self.hot_cost(&**m, key), &self.budgets),
             None => true,
         }
     }
@@ -471,6 +471,19 @@ impl ResidencyManager {
     /// and `claim_multi`/`placeable_multi` branches for a queued group.
     pub fn is_multi(&self, model: &str) -> bool {
         self.multi_models.contains_key(model)
+    }
+
+    /// What `key` of `m` costs placed Hot: its estimate with its peak
+    /// activation, or the operator's fallback when it declares none
+    /// ([`MemCost::placed`]). The one figure every placement, eviction plan,
+    /// charge and release of this manager uses, so they cannot disagree.
+    fn hot_cost(&self, m: &dyn ResidentModel, key: &InstanceKey) -> MemCost {
+        m.estimate(key).placed(self.budgets.activation_fallback())
+    }
+
+    /// [`Self::hot_cost`] for a multi-device model.
+    fn hot_cost_multi(&self, m: &dyn MultiDeviceResidentModel, key: &InstanceKey) -> MultiDeviceCost {
+        m.estimate_multi(key).placed(self.budgets.activation_fallback())
     }
 
     /// Whether `model` is a workload ([`ResidentModel::transient`]): the
@@ -485,7 +498,7 @@ impl ResidencyManager {
     /// ([`crate::contract::Holds`]); empty when no device ever could.
     pub fn fit_devices(&self, key: &InstanceKey, model: &str, exclude: &HashSet<Device>) -> Vec<Device> {
         let Some(m) = self.models.get(model) else { return Vec::new() };
-        let cost = m.estimate(key);
+        let cost = self.hot_cost(&**m, key);
         let mut out: Vec<Device> = Vec::new();
         for (devices, need) in [(self.budgets.npus(), cost.npu), (self.budgets.gpus(), cost.vram)] {
             if need > 0 {
@@ -544,7 +557,7 @@ impl ResidencyManager {
         // names several devices at once, so `pick_device`'s single-device
         // answer would be meaningless for it.
         if let Some(m) = self.multi_models.get(model) {
-            let cost = m.estimate_multi(&key);
+            let cost = self.hot_cost_multi(&**m, &key);
             let devices: Vec<Device> = cost.devices().collect();
             // `MultiDeviceCost` reports accelerator bytes per device plus
             // one host figure, so the aggregate is the sum of the per-device
@@ -591,7 +604,7 @@ impl ResidencyManager {
             .models
             .get(model)
             .ok_or_else(|| PlanError::UnknownModel { model: model.to_string() })?;
-        let cost = m.estimate(&key);
+        let cost = self.hot_cost(&**m, &key);
         let supported = crate::runplan::supported_devices(&cost, &self.budgets);
 
         if let Some(entry) = self.residents.get(&key) {
@@ -738,7 +751,7 @@ impl ResidencyManager {
             Some(m) => m,
             None => return false,
         };
-        let cost = m.estimate(key);
+        let cost = self.hot_cost(&**m, key);
         if pick_device(&cost, &self.budgets, exclude).is_some()
             || plan_eviction_with(&*self.eviction, &cost, &self.budgets, &self.residents, std::slice::from_ref(key), exclude).is_some()
         {
@@ -781,7 +794,7 @@ impl ResidencyManager {
             Some(m) => m,
             None => return false,
         };
-        let cost = m.estimate_multi(key);
+        let cost = self.hot_cost_multi(&**m, key);
         let wanted: Vec<Device> = cost.devices().collect();
         if wanted.is_empty() {
             return true; // unavailable model -- see doc above
@@ -970,7 +983,7 @@ impl ResidencyManager {
             // own placement, same as a cold build's `keep`), but hand back
             // `Claimed::Promote` so the caller reuses the existing
             // `Instance` via `promote()` instead of rebuilding it.
-            let hot_cost = m.estimate(&key);
+            let hot_cost = self.hot_cost(&*m, &key);
             let device = match pick_device(&hot_cost, &self.budgets, exclude) {
                 Some(d) => d,
                 None => {
@@ -1010,7 +1023,7 @@ impl ResidencyManager {
                 "{key}: a deferred build for this key is already in flight - retry when it adopts or fails"
             )));
         }
-        let cost = m.estimate(&key);
+        let cost = self.hot_cost(&*m, &key);
         let device = match pick_device(&cost, &self.budgets, exclude) {
             Some(d) => d,
             None => {
@@ -1175,7 +1188,7 @@ impl ResidencyManager {
         if self.multi_residents.contains_key(&key) {
             return Err(ClaimError::NoCapacity(format!("{key}: build already in flight")));
         }
-        let cost = m.estimate_multi(&key);
+        let cost = self.hot_cost_multi(&*m, &key);
         let wanted: Vec<Device> = cost.devices().collect();
         if wanted.is_empty() {
             let why = m.unavailable_reason(&key).unwrap_or_else(|| "estimate_multi named zero devices".to_string());

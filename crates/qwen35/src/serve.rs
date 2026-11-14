@@ -190,7 +190,7 @@ const TOPK_CAPACITY: usize = 32;
 /// prefill kernel rather than a bigger number here (`paged_flash_prefill.wgsl`
 /// is that kernel, but its tiles cap `head_dim` at 128 and this model's is
 /// 256 - see the M25 roadmap entry).
-const MAX_PREFILL_TOKENS: u32 = 256;
+pub const MAX_PREFILL_TOKENS: u32 = 256;
 /// Rows of the head projected at once when a continuation is scored: bounds the `[rows, vocab]` logits block on the host and card.
 const SCORE_HEAD_ROWS: usize = 16;
 

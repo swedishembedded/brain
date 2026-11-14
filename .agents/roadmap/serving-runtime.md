@@ -767,8 +767,16 @@ int8 C = 16 arm measured 536 tok/s (0.59): the second pass over the weights. Ope
       carries no setting.
 - [x] A device out-of-memory in a decode step or a graph launch is a typed back-off, and the handle is usable afterwards
       (#448); the default `--reserve-gb` follows `--max-batch` above 16 rows.
-- [ ] The reserve rule is measured on one model (Qwen3.8-27B-FP8, 64 rows); a per-model activation estimate in the placement
-      (`MemCost`) would replace it.
+- [x] A per-model peak activation in the placement (`residency::MemCost::activation`, `MultiDeviceCost::with_activation`),
+      estimated from each model's own widths (`model::memplan::DecoderWidths`: the widest step's forward buffers and, above 16
+      rows, a recorded decode step's launch workspace calibrated on Qwen3.8-27B-FP8 at 64 rows and scaled by depth times width).
+      Declared by Qwen3 (with the attention scratch, also in its context sizing), the Qwen3.8 GGUF/FP8 stages (`stage_workspace`,
+      now charged to the residency budget as well as held free by its planner), the native Qwen3.8, Qwen3.5-MoE and Ripple
+      (`Footprint::per_stage`). `--reserve-gb` no longer grows with `--max-batch`: the measured rule is charged per model only to
+      a model that declares no estimate, and an explicit `--reserve-gb` is the whole headroom. Tests: `crates/residency/tests/it/activation.rs`,
+      `model::memplan` (the calibration point), `catalog` `estimate_counts_the_kv_pool_and_shrinks_under_int8`, `cli` `card_reserve`.
+- [ ] The launch workspace is calibrated on one model and one card; a second measurement (Qwen3 at 64 rows on a 24 GB card)
+      would tell whether depth times width is the right scale.
 - [ ] `policy_trace` over D-Bus is the `generate` action's `policy_trace` param, the same spec as HTTP (no separate gap); the
       released Qwen3.8 GGUF/FP8 resident (`Qwen35GgufEngine`) has no `score_continuation`, so the trace is refused for it by
       name. A slot-safe scoring pass over its working state and pool rows is the work.

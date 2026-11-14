@@ -631,6 +631,10 @@ struct PoolProfile {
     kv_bytes: u64,
     /// Paged-attention scratch (`scores` + `probs`).
     scratch_bytes: u64,
+    /// The widest step's forward buffers and a wide decode batch's launch
+    /// workspace, from the model's own widths
+    /// (`QwenConfig::decoder_widths`).
+    step_bytes: u64,
     /// Device staging for host-RAM KV offload (`0` with offload off): the
     /// buffers a preemption moves blocks through, allocated up front with the
     /// pool so that demoting a sequence can never need memory the budget did
@@ -656,7 +660,8 @@ impl PoolProfile {
         // the real device limit, so this pre-flight and that authoritative
         // check cannot disagree about the size of the buffer in question.
         let per_layer_kv = qwen3::serve::kv_binding_bytes(cfg, block_size, num_blocks, kv_int8);
-        PoolProfile { kv_bytes, scratch_bytes, swap_staging_bytes: 0, sparse_attention_bytes: 0, largest_binding: per_layer_kv.max(scratch_bytes / 2) }
+        let step_bytes = cfg.decoder_widths().serve_peak_bytes(max_batch, max_prefill);
+        PoolProfile { kv_bytes, scratch_bytes, step_bytes, swap_staging_bytes: 0, sparse_attention_bytes: 0, largest_binding: per_layer_kv.max(scratch_bytes / 2) }
     }
 
     /// This sizing with the swap staging a host-RAM KV offload needs counted
@@ -693,6 +698,7 @@ impl PoolProfile {
             Demand::fixed(Category::Weights, "adapter bank", bank_bytes),
             Demand::fixed(Category::Kv, "paged pool", self.kv_bytes),
             Demand::fixed(Category::Activations, "attention scratch", self.scratch_bytes),
+            Demand::fixed(Category::Activations, "step activations", self.step_bytes),
             Demand::fixed(Category::Transfers, "kv swap staging", self.swap_staging_bytes),
             Demand::fixed(Category::Kv, "sparse attention index", self.sparse_attention_bytes),
         ]
@@ -1236,7 +1242,8 @@ impl ResidentModel for QwenResident {
         let profile = if self.kv_offload_bytes > 0 { profile.with_swap_staging(&cfg, block_size, num_blocks, kv_int8) } else { profile };
         let demands = profile.demands(weight_bytes, bank_bytes);
         residency::log::info(&format!("{}: estimate {}", self.id, model::memplan::summary(&demands)));
-        MemCost::new(model::memplan::device_total(&demands), cost.ram)
+        let activation = model::memplan::category_total(&demands, model::memplan::Category::Activations);
+        MemCost::new(model::memplan::device_total(&demands) - activation, cost.ram).with_activation(activation)
     }
     fn activate(&self, _key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
         // Coarse stage progress -- NOT per-tensor (the actual weight upload
@@ -2228,12 +2235,16 @@ mod tests {
         let expected_scratch_bytes = qwen3::serve::paged_attn_scratch_bytes(&cfg, max_batch, max_prefill, cap, qwen3::serve::FusedAttention::default());
         let weights = weights_fp32_bytes(&cfg);
 
+        let step_bytes = cfg.decoder_widths().serve_peak_bytes(max_batch, max_prefill);
+
         let got = resident.estimate(&key);
+        assert_eq!(got.vram, weights + expected_kv_bytes, "estimate() holds the fp32 weights + the KV pool resident, no more and no less");
         assert_eq!(
-            got.vram,
-            weights + expected_kv_bytes + expected_scratch_bytes,
-            "estimate() must equal the fp32 weights + the KV pool + the paged-attention scratch, no more and no less"
+            got.activation,
+            Some(expected_scratch_bytes + step_bytes),
+            "and declares the paged-attention scratch and the widest step's activations from the model's own widths as its peak activation"
         );
+        assert!(step_bytes > 0, "the step activations must contribute a nonzero amount at these test dims");
         assert!(expected_kv_bytes > 0, "the KV pool must contribute a nonzero amount at these test dims");
         assert!(expected_scratch_bytes > 0, "the paged-attention scratch must contribute a nonzero amount at these test dims");
 

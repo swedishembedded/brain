@@ -170,6 +170,71 @@ pub fn summary(demands: &[Demand]) -> String {
     format!("{} = {:.2} GiB", parts.join(" + "), gib(device_total(demands)))
 }
 
+/// The device bytes of every demand of `category` at its preferred variant.
+pub fn category_total(demands: &[Demand], category: Category) -> u64 {
+    demands.iter().filter(|d| d.category == category).map(|d| d.variants[0].device_bytes).sum()
+}
+
+/// Decode rows the base per-card reserve of a server covers: up to this many,
+/// a recorded decode step's launch workspace was measured to fit beside the
+/// planned bytes in the reserve every card keeps anyway.
+pub const RESERVE_COVERED_ROWS: u32 = 16;
+
+/// Launch workspace a recorded decode step needs per row past
+/// [`RESERVE_COVERED_ROWS`], per unit of `layers * d_model`, as the ratio
+/// `bytes / (layers * d_model)`. Calibrated on
+/// Qwen3.8-27B-FP8 (64 layers, width 5120) on one 96 GB card at 64 rows: 12
+/// GiB beyond the base reserve served 64 concurrent requests without a device
+/// out-of-memory failure, 4 GiB did not (1 GiB per 4 rows above 16). Scaled to
+/// another model by its own depth and width: an estimate, not a measurement of
+/// that model.
+const STEP_WORKSPACE_PER_ROW: (u128, u128) = ((1 << 30) / 4, 64 * 5120);
+
+/// The widths of a served decoder that set its activation peak, read from the
+/// model's own configuration ([`Self::serve_peak_bytes`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DecoderWidths {
+    pub layers: u64,
+    pub d_model: u64,
+    /// The query projection's width (heads times head dimension).
+    pub q_width: u64,
+    /// The key projection's width; the value projection has the same.
+    pub kv_width: u64,
+    /// The widest feed-forward one row passes through: the MLP's intermediate
+    /// width, or for a mixture of experts its active experts' and shared
+    /// expert's together.
+    pub ffn_width: u64,
+    pub vocab: u64,
+}
+
+impl DecoderWidths {
+    /// The fp32 bytes live at the peak of one forward over `rows` rows that
+    /// computes logits for `logit_rows` of them: the residual stream, its
+    /// normed copy and the attention output; the query, key and value
+    /// projections; the feed-forward's gate, up and product; the logits.
+    pub fn forward_bytes(&self, rows: u32, logit_rows: u32) -> u64 {
+        let per_row = 3 * self.d_model + self.q_width + 2 * self.kv_width + 3 * self.ffn_width;
+        4 * (u64::from(rows) * per_row + u64::from(logit_rows) * self.vocab)
+    }
+
+    /// The launch workspace of a recorded decode step over `rows` rows beyond
+    /// what the base reserve covers ([`STEP_WORKSPACE_PER_ROW`]).
+    pub fn step_workspace_bytes(&self, rows: u32) -> u64 {
+        let (bytes, per) = STEP_WORKSPACE_PER_ROW;
+        let past = u128::from(rows.saturating_sub(RESERVE_COVERED_ROWS));
+        u64::try_from(past * u128::from(self.layers) * u128::from(self.d_model) * bytes / per).unwrap_or(u64::MAX)
+    }
+
+    /// The peak activation bytes a served decoder allocates beyond its
+    /// weights, KV and state: the wider of a decode step over `decode_rows`
+    /// (logits for every row) and a prefill chunk of `prefill_rows` (logits
+    /// for one), plus the decode batch's launch workspace. What a resident
+    /// declares as `MemCost::activation`.
+    pub fn serve_peak_bytes(&self, decode_rows: u32, prefill_rows: u32) -> u64 {
+        self.forward_bytes(decode_rows, decode_rows).max(self.forward_bytes(prefill_rows, 1)) + self.step_workspace_bytes(decode_rows)
+    }
+}
+
 /// What the machine offers.
 #[derive(Clone, Copy, Debug)]
 pub struct Capacity {
@@ -406,6 +471,37 @@ fn activation_demand(f: &TrainingFootprint) -> Result<Demand, PlanError> {
 /// or `None` when the plan has no activation demand or labels it otherwise.
 pub fn saved_policy(report: &PlanReport) -> Option<SavedPolicy> {
     SavedPolicy::parse(&report.variant(Category::Activations)?.label)
+}
+
+#[cfg(test)]
+mod serve_activation_tests {
+    use super::*;
+
+    const GIB: u64 = 1 << 30;
+
+    /// Qwen3.8-27B's widths (64 layers, 5120 wide, 24 query and 4 key heads of 256, a 17408-wide MLP).
+    fn qwen38_27b() -> DecoderWidths {
+        DecoderWidths { layers: 64, d_model: 5120, q_width: 24 * 256, kv_width: 4 * 256, ffn_width: 17408, vocab: 248320 }
+    }
+
+    #[test]
+    fn the_launch_workspace_reproduces_its_calibration_and_scales_with_the_model() {
+        let big = qwen38_27b();
+        assert_eq!(big.step_workspace_bytes(RESERVE_COVERED_ROWS), 0, "the base reserve covers a narrow batch");
+        assert_eq!(big.step_workspace_bytes(64), 12 * GIB, "the measured point: 12 GiB beyond the base reserve at 64 rows");
+        let small = DecoderWidths { layers: 28, d_model: 1024, q_width: 2048, kv_width: 1024, ffn_width: 3072, vocab: 151936 };
+        assert!(small.step_workspace_bytes(64) * 10 < big.step_workspace_bytes(64), "a 0.6B model is charged for its own depth and width: {}", small.step_workspace_bytes(64));
+    }
+
+    #[test]
+    fn the_peak_is_the_wider_of_a_decode_step_and_a_prefill_chunk() {
+        let w = qwen38_27b();
+        // A 512-row prefill chunk outweighs a 16-row decode step, logits and all.
+        assert_eq!(w.serve_peak_bytes(16, 512), w.forward_bytes(512, 1));
+        // A wide decode batch computes logits for every row and adds its launch workspace.
+        assert_eq!(w.serve_peak_bytes(64, 1), w.forward_bytes(64, 64) + 12 * GIB);
+        assert!(w.serve_peak_bytes(32, 256) < w.serve_peak_bytes(64, 256), "more rows never cost less");
+    }
 }
 
 #[cfg(test)]

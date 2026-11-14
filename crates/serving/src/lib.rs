@@ -26,6 +26,6 @@ pub mod machine;
 pub mod model_dir;
 pub mod supervision;
 
-pub use executor::{build_executor, ServeKnobs, Serving, TrainKnobs};
+pub use executor::{build_executor, Reserve, ServeKnobs, Serving, TrainKnobs};
 pub use machine::Machine;
 pub use supervision::{serve_supervision, ServeSupervision};

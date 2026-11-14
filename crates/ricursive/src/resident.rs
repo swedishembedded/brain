@@ -509,7 +509,8 @@ impl ResidentModel for RicursiveResident {
     /// A server with cards places Ripple through [`MultiDeviceResidentModel`]; this is the host tier's footprint
     /// (the whole deployment as one stage), which is what a server with no card registers the resident for.
     fn estimate(&self, _key: &InstanceKey) -> MemCost {
-        MemCost::new(self.deployment.footprint.single_card_bytes(), HOST_OVERHEAD_BYTES + self.deployment.footprint.taps_host)
+        let fp = &self.deployment.footprint;
+        MemCost::new(fp.bytes.total(), HOST_OVERHEAD_BYTES + fp.taps_host).with_activation(fp.per_stage)
     }
     fn activate(&self, _key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
         let plan = model::shard::StreamPlan::single(self.cfg.num_hidden_layers);
@@ -520,7 +521,7 @@ impl ResidentModel for RicursiveResident {
 impl MultiDeviceResidentModel for RicursiveResident {
     fn estimate_multi(&self, _key: &InstanceKey) -> MultiDeviceCost {
         match place(&self.deployment.footprint, &self.cards) {
-            Some(placed) => MultiDeviceCost::new(placed.iter().map(|p| (Device::Gpu(p.shard.gpu_index as u32), p.bytes + self.deployment.footprint.per_stage)).collect(), HOST_OVERHEAD_BYTES),
+            Some(placed) => MultiDeviceCost::new(placed.iter().map(|p| (Device::Gpu(p.shard.gpu_index as u32), p.bytes)).collect(), HOST_OVERHEAD_BYTES).with_activation(self.deployment.footprint.per_stage),
             None => MultiDeviceCost::default(),
         }
     }

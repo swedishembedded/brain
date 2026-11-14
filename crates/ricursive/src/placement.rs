@@ -59,7 +59,8 @@ fn small_tensor_bytes(cfg: &RicursiveConfig) -> u64 {
 pub struct Footprint {
     /// Per-layer bytes (weights, KV, index share) and the head's, for the planner.
     pub bytes: LayerBytes,
-    /// Bytes every stage carries whatever layers it holds.
+    /// Bytes every stage carries whatever layers it holds: the widest step's activations and scratch, the
+    /// resident's declared peak activation.
     pub per_stage: u64,
     pub weights: u64,
     pub kv_global: u64,
@@ -138,11 +139,15 @@ pub fn footprint(cfg: &RicursiveConfig, serve: &ServeConfig, tiers: &TierPolicy,
     let activations = 4 * rows * (3 * cfg.intermediate_size as u64 + 5 * cfg.q_dim() as u64 + 4 * cfg.kv_dim() as u64 + 10 * cfg.hidden_size as u64);
     let decodes_tiles = tiers.dtypes().any(|t| matches!(t, Dtype::F8E4M3 | Dtype::F8E5M2 | Dtype::NF4 | Dtype::F4E2M1));
     let tiles = if decodes_tiles { DEFAULT_TILE_BUDGET_BYTES } else { 0 };
+    // A wide recorded decode step's launch workspace, by this model's depth and width.
+    let w = |n: usize| n as u64;
+    let widths = model::memplan::DecoderWidths { layers: w(cfg.num_hidden_layers), d_model: w(cfg.hidden_size), q_width: w(cfg.q_dim()), kv_width: w(cfg.kv_dim()), ffn_width: w(cfg.intermediate_size), vocab: w(cfg.vocab_size) };
+    let launch = widths.step_workspace_bytes(serve.max_batch);
 
     let n_slide = cfg.layer_types.len() as u64 - globals;
     Footprint {
         bytes: LayerBytes { per_layer, embed: 0, head },
-        per_stage: scores + activations + tiles + lsa.per_stage + bank_scratch,
+        per_stage: scores + activations + tiles + launch + lsa.per_stage + bank_scratch,
         weights,
         kv_global: pool_bytes * globals,
         kv_rings: ring_bytes * n_slide,

@@ -462,13 +462,16 @@ impl ServingShape {
 
     /// Device bytes every stage must keep free beside what this shape places: the
     /// activations of a prefill round and of a decode (or verify) step, which run
-    /// at the same time on separate streams. Decode rows are the larger of the
-    /// sequences and the verify rows speculation batches.
+    /// at the same time on separate streams, and the launch workspace a recorded
+    /// decode step of that width needs (`DecoderWidths::step_workspace_bytes`).
+    /// Decode rows are the larger of the sequences and the verify rows
+    /// speculation batches. What the resident declares as its peak activation.
     pub fn stage_workspace(&self, cfg: &Qwen35Config) -> u64 {
         let rows = self.max_batch.max(self.spec.scratch_rows).max(1);
         prefill_workspace_bytes(cfg, self.prefill_rows)
             + prefill_staging_bytes(cfg, self.cap, self.native_attention)
             + decode_scratch_bytes(cfg, rows, self.cap, !self.native_attention)
+            + cfg.decoder_widths().step_workspace_bytes(rows)
             + self.vision_bytes
             + tile_decode_scratch_bytes(&self.tier)
     }
@@ -3844,6 +3847,8 @@ struct Plan {
     cfg: Option<Qwen35Config>,
     /// `(device, that stage's shard, that stage's bytes)`.
     stages: Vec<(Device, Shard, u64)>,
+    /// What every stage keeps free beside its bytes ([`ServingShape::stage_workspace`]).
+    workspace: u64,
 }
 
 /// The [`ResidentModel`] / [`MultiDeviceResidentModel`] adapter. See this
@@ -4353,7 +4358,7 @@ impl Qwen35GgufResident {
                 (device, Shard { gpu_index: physical, ..p.shard.clone() }, p.bytes)
             })
             .collect();
-        Plan { refusal: None, cfg: Some(cfg), stages }
+        Plan { refusal: None, cfg: Some(cfg), stages, workspace }
     }
 
     /// The longest context one sequence may have: [`Self::longest_cap`] less the pool rows its own state row takes when state
@@ -4553,7 +4558,9 @@ impl MultiDeviceResidentModel for Qwen35GgufResident {
             .as_ref()
             .map(|c| c.intermediate_size as u64 * c.d_model as u64 * 4)
             .unwrap_or(0);
-        MultiDeviceCost::new(plan.stages.iter().map(|&(d, _, bytes)| (d, bytes)).collect(), ram)
+        // Every stage keeps the step workspace free beside its layers (the plan placed them against the cards less it),
+        // so the residency budget charges it too: it is this model's own activation estimate.
+        MultiDeviceCost::new(plan.stages.iter().map(|&(d, _, bytes)| (d, bytes)).collect(), ram).with_activation(plan.workspace)
     }
 
     /// The served instance: the checkpoint as a [`Qwen35GgufEngine`] under
@@ -4973,9 +4980,9 @@ mod tests {
         let cfg = Qwen35Config::qwen38_27b();
         let i8 = TierPolicy::uniform(Dtype::I8);
         let usable = [(97_871u64 << 20) - (2 << 30)];
-        // 150 f32 sequences of 4096 tokens: not as f32 (or bf16), but as int8 beside the weights, the recurrent state
-        // and the prefill round's workspace.
-        let why = sizing_refusal(&cfg, &ServingShape::new(4096, i8.clone(), KvTier::F32, 150), &usable).expect("150 f32 sequences of 4096 tokens cannot fit");
+        // 100 f32 sequences of 4096 tokens: not as f32 (or bf16), but as int8 beside the weights, the recurrent state
+        // and the step workspace of a 100-row batch.
+        let why = sizing_refusal(&cfg, &ServingShape::new(4096, i8.clone(), KvTier::F32, 100), &usable).expect("100 f32 sequences of 4096 tokens cannot fit");
         assert!(why.contains("a more compact --kv-cache (bf16) would fit") || why.contains("a more compact --kv-cache (int8) would fit"), "{why}");
         assert!(why.contains("GiB weights") && why.contains("GiB KV cache") && why.contains("GiB recurrent state"), "{why}");
         let why = sizing_refusal(&cfg, &ServingShape::new(4096, i8.clone(), KvTier::F32, 1000), &usable).unwrap();

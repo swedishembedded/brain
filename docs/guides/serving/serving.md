@@ -103,6 +103,22 @@ architecture-prefixed spellings (`--qwen-ctx`, `--qwen35-kv`,
 warning until their callers have moved; the ones for derived settings still
 set them so existing launch lines behave as before.
 
+### Room for activations
+
+A model holds its weights, KV cache and state for as long as it is resident,
+and while it runs a step it also allocates activations: the forward buffers of
+a decode batch or a prefill round, attention scratch, and for a wide decode
+batch the workspace of its recorded launches. Each model is placed with room
+for its own peak activation at its own `--max-batch`, estimated from its shapes
+(layers, widths, vocabulary); the Qwen3, Qwen3.8, Qwen3.5-MoE and Ripple
+families state one. A model that states none is placed with the measured room
+a wide batch needed instead: 1 GB for every 4 rows of `--max-batch` above 16.
+`--reserve-gb N` (default 2) is kept free on every card besides, whatever is
+placed on it; given explicitly, it is the whole headroom and nothing more is
+added for a model that states no estimate. The estimates are a model, not a
+measurement: the launch workspace of a wide batch is calibrated on
+Qwen3.8-27B-FP8 at 64 rows and scaled by each model's depth and width.
+
 ## Serving on several cards
 
 `brain serve --device gpu0,gpu1,gpu2,gpu3` (or `gpu`, every GPU) serves a large

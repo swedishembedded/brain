@@ -459,6 +459,13 @@ impl Qwen35Config {
     pub fn kv_dim(&self) -> u32 {
         self.n_kv_heads * self.head_dim
     }
+    /// The widths that set this decoder's activation peak when served: the
+    /// gated-attention layers' projections (the linear-attention layers'
+    /// streams are no wider) and the MLP.
+    pub fn decoder_widths(&self) -> model::memplan::DecoderWidths {
+        let w = u64::from;
+        model::memplan::DecoderWidths { layers: w(self.n_layers), d_model: w(self.d_model), q_width: w(2 * self.q_dim()), kv_width: w(self.kv_dim()), ffn_width: w(self.intermediate_size), vocab: w(self.vocab) }
+    }
     pub fn group(&self) -> u32 {
         self.n_heads / self.n_kv_heads
     }

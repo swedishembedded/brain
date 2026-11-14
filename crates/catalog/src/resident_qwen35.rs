@@ -228,7 +228,9 @@ impl ResidentModel for Qwen35Resident {
         // rather than over-claiming a number this crate cannot cheaply
         // verify from outside `serve.rs`.
         let gqa_bytes = n_full * max_concurrent * 2 * ctx * cfg.kv_dim() as u64 * 4;
-        MemCost::new(cost.vram + gqa_bytes, cost.ram)
+        // The peak activation of a decode step over every concurrent sequence or one prefill round, from the model's own widths.
+        let activation = cfg.decoder_widths().serve_peak_bytes(self.max_concurrent(), qwen35::serve::MAX_PREFILL_TOKENS);
+        MemCost::new(cost.vram + gqa_bytes, cost.ram).with_activation(activation)
     }
     fn activate(&self, _key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
         // Open first so a GGUF can supply its own embedded tokenizer, exactly

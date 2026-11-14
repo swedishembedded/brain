@@ -234,6 +234,11 @@ impl QwenConfig {
     pub fn kv_dim(&self) -> u32 {
         self.n_kv_heads * self.head_dim
     }
+    /// The widths that set this decoder's activation peak when served.
+    pub fn decoder_widths(&self) -> model::memplan::DecoderWidths {
+        let w = u64::from;
+        model::memplan::DecoderWidths { layers: w(self.n_layers), d_model: w(self.d_model), q_width: w(self.n_heads * self.head_dim), kv_width: w(self.kv_dim()), ffn_width: w(self.d_ff), vocab: w(self.vocab) }
+    }
     /// Query heads per kv head (GQA grouping factor).
     pub fn group(&self) -> u32 {
         self.n_heads / self.n_kv_heads

@@ -88,11 +88,34 @@ pub struct MemCost {
     /// must not treat them as equally "in use". Zero for every model that
     /// doesn't override [`Instance::demote`] to a mapped tier.
     pub mapped: u64,
+    /// Device bytes the instance allocates beyond `vram` while it runs its
+    /// widest step (the forward buffers of a decode batch or a prefill chunk,
+    /// attention scratch, a recorded step's launch workspace), as the model
+    /// estimates them from its own shapes ([`Self::with_activation`]). `None`
+    /// means the model declares no estimate: the placement then charges the
+    /// operator's measured fallback in its place
+    /// ([`crate::budget::Budgets::activation_fallback`]).
+    pub activation: Option<u64>,
 }
 
 impl MemCost {
     pub fn new(vram: u64, ram: u64) -> MemCost {
-        MemCost { vram, ram, npu: 0, mapped: 0 }
+        MemCost { vram, ram, npu: 0, mapped: 0, activation: None }
+    }
+    /// Declare the instance's peak activation bytes, beyond [`Self::vram`]
+    /// (see [`Self::activation`]). `0` declares that `vram` already covers
+    /// them, so no fallback is charged.
+    pub fn with_activation(mut self, bytes: u64) -> MemCost {
+        self.activation = Some(bytes);
+        self
+    }
+    /// The cost a placement charges: `vram` plus the declared activation, or
+    /// plus `fallback` for a model that declares none and holds device bytes
+    /// (a model with no device bytes runs no device batch). The result
+    /// declares what it added, so placing it again adds nothing.
+    pub fn placed(&self, fallback: u64) -> MemCost {
+        let activation = self.activation.unwrap_or(if self.vram > 0 { fallback } else { 0 });
+        MemCost { vram: self.vram + activation, activation: Some(activation), ..*self }
     }
     /// Add an NPU footprint (marks the instance as NPU-placeable). The NPU's compiled
     /// blob + I/O live in shared host memory, so this is a host-memory figure — but

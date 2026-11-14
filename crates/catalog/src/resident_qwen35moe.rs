@@ -121,8 +121,16 @@ impl Qwen35Resident {
             return MemCost::new(stored, 0);
         };
         let weights = stored + cfg.vocab as u64 * cfg.d_model as u64 * 2;
-        let kv = qwen35moe::serve::kv_pool_bytes(&cfg, qwen35moe::serve::EngineOptions::new(self.ctx(), self.max_concurrent()).kv_tier, self.max_concurrent(), self.ctx());
-        MemCost::new(weights + kv, 0)
+        let options = qwen35moe::serve::EngineOptions::new(self.ctx(), self.max_concurrent());
+        let kv = qwen35moe::serve::kv_pool_bytes(&cfg, options.kv_tier, self.max_concurrent(), self.ctx());
+        MemCost::new(weights + kv, 0).with_activation(self.activation_bytes(&cfg))
+    }
+
+    /// The peak activation of a decode step over every concurrent sequence or one prefill round, from the model's own
+    /// widths.
+    fn activation_bytes(&self, cfg: &Qwen35Config) -> u64 {
+        let options = qwen35moe::serve::EngineOptions::new(self.ctx(), self.max_concurrent());
+        cfg.decoder_widths().serve_peak_bytes(self.max_concurrent(), options.prefill_chunk)
     }
 
     /// Build the scheduler from the directory, in place: the config and the tensors are read from the published files.
@@ -190,7 +198,7 @@ impl ResidentModel for Qwen35Resident {
         // smaller) amount rather than over-claiming a number this crate
         // cannot cheaply verify from outside `serve.rs`.
         let gqa_bytes = n_full * max_concurrent * 2 * ctx * cfg.kv_dim() as u64 * 4;
-        MemCost::new(cost.vram + gqa_bytes, cost.ram)
+        MemCost::new(cost.vram + gqa_bytes, cost.ram).with_activation(self.activation_bytes(&cfg))
     }
     fn activate(&self, _key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
         if self.hf_dir {

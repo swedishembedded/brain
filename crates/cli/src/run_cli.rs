@@ -231,9 +231,11 @@ SERVING OPTIONS
                          directory or the artifact store has less than this free on its
                          filesystem (default 10GiB; 0 turns the floor off).
   --api-keys-out FILE    write {\"openai\":\"sk-brain-…\", …} as JSON, mode 0600
-  --reserve-gb N         GB of VRAM kept free per GPU for activations (default 2, and
-                         1 more for every 4 rows of --max-batch above 16: the
-                         graph launches of a wide decode batch need that room)
+  --reserve-gb N         GB of VRAM kept free per GPU (default 2). Each model is
+                         placed with room for its own activations at --max-batch;
+                         one that does not estimate them gets 1 GB more for every 4
+                         rows above 16. Given, N is the whole headroom and nothing
+                         more is added
   --sched-max-wait-ms N  a request group whose oldest job has waited N ms is run
                          next whatever its batch size (default 30000)
   --sched-age-weight X   scheduler score per millisecond a group has waited
@@ -763,7 +765,7 @@ pub fn run_serve(args: &[String]) {
     let mut conf: Option<f32> = None;
     // D-Bus control surface (`--dbus [--dbus-system] [--dbus-name NAME]`).
     let (mut dbus, mut dbus_system, mut dbus_name) = (false, false, None::<String>);
-    let mut dbus_reserve_gb: Option<u64> = None; // GB kept free per GPU (headroom for activations); unset: sized from --max-batch
+    let mut dbus_reserve_gb: Option<u64> = None; // GB kept free per GPU; unset: the default, with a wide batch's room charged per model
     // The one model store everything served reads: the startup catalog scan
     // and every architecture resolver (`--models-dir`, else BRAIN_MODELS_DIR /
     // XDG default; see model_dir::resolve).
@@ -1311,17 +1313,23 @@ pub fn run_serve(args: &[String]) {
 /// Returns `serving::Serving`, not a bare `Executor`: the
 /// continuous-learning hot swap needs the CONCRETE `QwenResident` handle
 /// alongside the type-erased one the executor holds - see that type's doc.
-/// GB kept free per card for activations when `--reserve-gb` is not given and the batch is at most [`NARROW_BATCH`] rows.
+/// GB kept free per card when `--reserve-gb` is not given.
 const DEFAULT_RESERVE_GB: u64 = 2;
-/// The widest decode batch the default reserve covers.
-const NARROW_BATCH: u32 = 16;
 
-/// The default `--reserve-gb` for a server whose widest decode batch is `max_batch` rows: [`DEFAULT_RESERVE_GB`], and one
-/// more for every 4 rows above [`NARROW_BATCH`]. Measured on Qwen3.8-27B-FP8 on one 96 GB card at `--max-batch 64`, 64
-/// concurrent requests: 2 GB made the scheduler halve its batch down to one row on device out-of-memory failures, 6 GB still
-/// failed five times, 12 GB none; the rule gives 14.
-fn default_reserve_gb(max_batch: u32) -> u64 {
-    DEFAULT_RESERVE_GB + u64::from(max_batch.saturating_sub(NARROW_BATCH).div_ceil(4))
+/// What a server keeps free: `--reserve-gb` when given (the operator's whole headroom), else [`DEFAULT_RESERVE_GB`] per
+/// card, with the room a decode batch of `max_batch` rows needs charged to each model's placement instead: a model that
+/// estimates its own peak activation is charged that, and one that does not is charged the measured fallback, one GB for
+/// every 4 rows above `model::memplan::RESERVE_COVERED_ROWS`. Measured on Qwen3.8-27B-FP8 on one 96 GB card at
+/// `--max-batch 64`, 64 concurrent requests: 2 GB made the scheduler halve its batch down to one row on device
+/// out-of-memory failures, 6 GB still failed five times, 12 GB none; the rule gives 14.
+fn card_reserve(explicit_gb: Option<u64>, max_batch: u32) -> serving::Reserve {
+    match explicit_gb {
+        Some(gb) => serving::Reserve { card: gb << 30, activation_fallback: 0 },
+        None => {
+            let fallback_gb = u64::from(max_batch.saturating_sub(model::memplan::RESERVE_COVERED_ROWS).div_ceil(4));
+            serving::Reserve { card: DEFAULT_RESERVE_GB << 30, activation_fallback: fallback_gb << 30 }
+        }
+    }
 }
 
 /// The widest decode batch any served family was asked for (0 when none was).
@@ -1383,15 +1391,14 @@ fn serve_worker_hosting(families: &[String], deadline: std::time::Duration, supe
     }
 }
 
-fn build_serving_executor(reserve_gb: u64, store: &loader::served::ServedStore, scheduler: residency::Policy, knobs: serving::ServeKnobs) -> serving::Serving {
+fn build_serving_executor(reserve: serving::Reserve, store: &loader::served::ServedStore, scheduler: residency::Policy, knobs: serving::ServeKnobs) -> serving::Serving {
     let machine = serving::Machine::probe(crate::compute_set());
-    let reserved = reserve_gb << 30;
     eprintln!(
         "brain serve: compute {} | {} GPU(s), {} NPU(s) schedulable, {} GB reserved/card, {} GB RAM budget",
         machine.compute,
         machine.gpus.len(),
         machine.npus.len(),
-        reserve_gb,
+        reserve.card >> 30,
         machine.pool_ram >> 30
     );
     // `models_dir` is the ONE store every resolver below reads (see
@@ -1407,7 +1414,7 @@ fn build_serving_executor(reserve_gb: u64, store: &loader::served::ServedStore, 
         }
         eprintln!("brain serve: scanning model dir {}", d.display());
     }
-    serving::build_executor(&machine, reserved, store, scheduler, knobs)
+    serving::build_executor(&machine, reserve, store, scheduler, knobs)
 }
 
 /// Live host RAM this process could actually get right now: `MemAvailable`
@@ -1437,7 +1444,7 @@ struct RunApis {
     /// long-lived one.
     dbus_addr: Option<String>,
     dbus_name: Option<String>,
-    /// `--reserve-gb`; `None` sizes it from the widest `--max-batch` ([`default_reserve_gb`]).
+    /// `--reserve-gb`; `None` keeps the default and charges a wide batch per model ([`card_reserve`]).
     reserve_gb: Option<u64>,
     models_dir: Option<String>,
     /// `--pin`s, applied over the resolved models directory.
@@ -1568,11 +1575,14 @@ fn run_apis(a: RunApis) {
     // `brain/train`'s: without it every surface refuses them.
     let training = a.knobs.train.is_some();
     let widest = widest_batch(&a.knobs);
-    let reserve_gb = a.reserve_gb.unwrap_or_else(|| default_reserve_gb(widest));
-    if a.reserve_gb.is_none() && reserve_gb > DEFAULT_RESERVE_GB {
-        eprintln!("brain serve: --max-batch {widest} keeps {reserve_gb} GB free per card for the decode batch's activations and graph launches (--reserve-gb to change it)");
+    let reserve = card_reserve(a.reserve_gb, widest);
+    if reserve.activation_fallback > 0 {
+        eprintln!(
+            "brain serve: --max-batch {widest}: a model that does not estimate its own activations is placed with {} GB more for the decode batch's activations and graph launches (--reserve-gb N keeps N GB free per card instead)",
+            reserve.activation_fallback >> 30
+        );
     }
-    let serving::Serving { executor, qwen, qwen35, ricursive } = build_serving_executor(reserve_gb, &store, a.scheduler, a.knobs);
+    let serving::Serving { executor, qwen, qwen35, ricursive } = build_serving_executor(reserve, &store, a.scheduler, a.knobs);
     refuse_unread_pins(&store);
     let manifests = executor.manifests();
     let served: Vec<&str> = manifests.iter().map(|m| m.model.as_str()).collect();
@@ -1820,20 +1830,28 @@ pub(crate) fn query_ram_bytes() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    /// The card reserve stays the base headroom; the room a wide batch needs
+    /// is charged per model, and the measured rule is the fallback for a model
+    /// that states no estimate. An explicit `--reserve-gb` is the operator's
+    /// whole headroom, with no fallback beside it.
     #[test]
-    fn the_default_reserve_grows_with_the_decode_batch_only_past_the_narrow_batch() {
-        use super::default_reserve_gb;
+    fn a_wide_batch_is_a_per_model_fallback_and_never_grows_the_card_reserve() {
+        use super::card_reserve;
+        const GB: u64 = 1 << 30;
         for narrow in [0, 1, 4, 16] {
-            assert_eq!(default_reserve_gb(narrow), 2, "{narrow} rows");
+            assert_eq!(card_reserve(None, narrow), serving::Reserve { card: 2 * GB, activation_fallback: 0 }, "{narrow} rows");
         }
-        assert_eq!((default_reserve_gb(17), default_reserve_gb(20), default_reserve_gb(32), default_reserve_gb(64)), (3, 3, 6, 14));
-        assert!(default_reserve_gb(64) >= 12, "12 GB is the least that ran 64 rows of the 27B FP8 without a device out-of-memory failure");
+        let fallback = |rows| card_reserve(None, rows).activation_fallback / GB;
+        assert_eq!((fallback(17), fallback(20), fallback(32), fallback(64)), (1, 1, 4, 12));
+        assert_eq!(card_reserve(None, 64).card, 2 * GB);
+        assert!(card_reserve(None, 64).undeclared() >= 12 * GB, "12 GB is the least that ran 64 rows of the 27B FP8 without a device out-of-memory failure");
+        assert_eq!(card_reserve(Some(16), 64), serving::Reserve { card: 16 * GB, activation_fallback: 0 });
     }
 
     #[test]
     fn a_default_server_asks_for_no_more_than_the_narrow_reserve() {
         let knobs = serving::ServeKnobs::default();
-        assert_eq!(super::default_reserve_gb(super::widest_batch(&knobs)), 2);
+        assert_eq!(super::card_reserve(None, super::widest_batch(&knobs)), serving::Reserve { card: 2 << 30, activation_fallback: 0 });
     }
 
     use super::{surface_choice, unserved_line, SurfaceChoice};
