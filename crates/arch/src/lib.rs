@@ -179,8 +179,10 @@ pub struct Arch {
     /// family already equals `id` (the common case: `wan`, `kronos`, every
     /// `FilesRecipe` row named after its own arch).
     pub families: &'static [&'static str],
-    /// What this architecture can DO: its training modes, the frozen-base
-    /// formats its adapter trainer accepts, and its serving precision tiers.
+    /// What this architecture can DO: its training modes and the frozen-base
+    /// formats its adapter trainer accepts, and whether the matrix records
+    /// anything else for it (`Caps::other`); serving precision tiers are not
+    /// declared here.
     /// [`Caps::NONE`] is an inference-only architecture. The declaration is
     /// machine-readable and held to the capability matrix's evidence
     /// (`crates/arch/tests/caps_vs_matrix.rs`); see the `caps` module.
