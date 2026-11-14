@@ -438,6 +438,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **end-to-end benchmark**: a benchmark that drives a system through its users' entry point with a stated stream of requests and arrival process, records each request's submission, admission, outputs and completion, and reports the distributions of time to first output, gaps and end-to-end time with throughput, goodput under a stated service-level objective, and an output check. *([Benchmarking and Performance Claims](v15-methods/03-benchmarking.md))*
 
+**end-to-end machine learning system**: the whole path from raw data to answers served to clients, built as stages that hand each other only named and checked artifacts, together with a reference that computes the same final answers by the simplest path, so that a fault at any stage or seam shows as a difference that can be traced to where it entered. *([Capstone: From Raw Data to a Served Model](v16-systems/02-capstone.md))*
+
 **end-to-end-training-loop**: the whole path from data to saved model in one function: shuffle, batch, forward, loss, backward, clip, optimizer step at the scheduled rate, log, evaluate on the validation set, keep the best checkpoint. *([First Complete Models](v03-neural-networks/13-first-models.md))*
 
 **ensemble**: a set of models whose predictions are combined by a vote or an average; trained independently on resampled data (bagging, random forests) it lowers variance, trained in sequence on what is left (boosting) it lowers bias. *([Machine Learning Before Deep Learning](v02-learning/07-classical-methods.md))*

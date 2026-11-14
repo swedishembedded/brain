@@ -235,5 +235,6 @@ historical sections draw on in the [Chronology](history/chronology.md).
 ### [Volume XVI: Constructing a Complete Machine Learning System](v16-systems/index.md)
 
 1. [The Architecture of a Machine Learning Engine](v16-systems/01-engine-architecture.md): How should the parts of an engine be divided so that it can grow to hundreds of models without collapsing?
+2. [Capstone: From Raw Data to a Served Model](v16-systems/02-capstone.md): Can you build the whole path yourself, in the language of your choice?
 3. [How brain Grew](v16-systems/03-evolution.md): What does the history of one real engine teach about how machine learning systems evolve?
 <!-- /contents -->

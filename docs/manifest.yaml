@@ -594,6 +594,7 @@ navigation:
         pages:
           - docs/book/v16-systems/index.md
           - docs/book/v16-systems/01-engine-architecture.md
+          - docs/book/v16-systems/02-capstone.md
           - docs/book/v16-systems/03-evolution.md
       - docs/book/glossary.md
       - docs/book/history/chronology.md
