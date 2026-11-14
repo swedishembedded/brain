@@ -358,6 +358,11 @@ let chat = brain::ChatPipeline::from(
   A selection made on the held-out set biases the held-out score it is then
   measured by, so a caller that decides anything on that score gives the run
   a monitoring set of its own.
+- A held-out set may repeat training records (to measure fit): it is scored
+  as given, and `outcome.held_out_repeats` (`held_out_text_repeats` for
+  `.held_out_text`, and the same keys in the training record) counts its
+  examples whose tokens and supervision are those of a training row, `None`
+  without the set.
 - `run_with(&cancel, |progress| ..)` reports every optimizer step and stops
   at the next step boundary once the `CancelToken` fires. A cancelled run
   exports nothing and leaves its training state in the out directory
@@ -487,6 +492,8 @@ copy is held while training, and the first step's margin is exactly zero
   `beta`), and `accuracy` the fraction of pairs where it is positive. The
   outcome's `train_score` and `held_out_score` are the same measurement
   against the run's own reference. Unmeasured values are `None`.
+  `outcome.held_out_repeats` (and `held_out_repeats` in the record) counts
+  the held-out pairs that are also training pairs, both answers alike.
 
 ### Policy-gradient fine-tuning on collected rollouts
 

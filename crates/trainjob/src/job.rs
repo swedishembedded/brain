@@ -494,6 +494,8 @@ fn chat_summary(outcome: &brain::ChatFineTuneOutcome) -> Value {
         "tuned_score": score_json(outcome.tuned_score),
         "base_text_score": score_json(outcome.base_text_score),
         "tuned_text_score": score_json(outcome.tuned_text_score),
+        "held_out_repeats": outcome.held_out_repeats,
+        "held_out_text_repeats": outcome.held_out_text_repeats,
         "eval_every": outcome.eval_every,
         "patience": outcome.patience,
         "curve": outcome.curve.iter().map(|p| json!({"step": p.step, "train_loss": p.train_loss, "monitor_loss": p.monitor_loss})).collect::<Vec<_>>(),
@@ -531,6 +533,7 @@ fn preference_summary(outcome: &brain::PreferenceFineTuneOutcome) -> Value {
         "final_loss": outcome.final_loss,
         "train_score": preference_score_json(outcome.train_score),
         "held_out_score": preference_score_json(outcome.held_out_score),
+        "held_out_repeats": outcome.held_out_repeats,
     })
 }
 

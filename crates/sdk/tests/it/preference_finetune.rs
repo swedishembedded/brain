@@ -163,6 +163,23 @@ fn dpo_raises_the_training_preference_margin_and_exports_its_record() {
     assert_eq!(record["train_score"]["mean_margin"].as_f64().map(|v| v as f32), Some(margin));
 }
 
+/// T028: held-out pairs that repeat training pairs are scored as asked, and the run says how many it also trained on,
+/// in the outcome and in the training record; a disjoint set repeats none. A pair repeats only when both answers do:
+/// the same prompt and chosen answer over another rejected one is a new pair.
+#[test]
+fn held_out_pairs_that_repeat_training_pairs_report_the_overlap() {
+    let model = chat_model_dir("pref-held-out-overlap");
+    let repeating = write_pairs(&model, "repeating.jsonl", &[TRAIN[0], ("cad", "bead", "kiwi"), TRAIN[2], ("cab", "bad", "kiwi")]);
+    let outcome = fine_tune(&model, &model.join("repeating")).held_out(&repeating).steps(1).run().expect("repeating held-out pairs are scored, not refused");
+    assert_eq!(outcome.held_out_score.map(|s| s.pairs), Some(4), "every held-out pair is scored");
+    assert_eq!(outcome.held_out_repeats, Some(2), "two of the four held-out pairs are training pairs");
+    let record: serde_json::Value = serde_json::from_slice(&std::fs::read(outcome.record.as_ref().unwrap()).unwrap()).unwrap();
+    assert_eq!(record["held_out_repeats"].as_u64(), Some(2), "{record}");
+
+    let disjoint = fine_tune(&model, &model.join("disjoint")).steps(1).run().unwrap();
+    assert_eq!(disjoint.held_out_repeats, Some(0));
+}
+
 /// Continuing an adapter trains it further against itself: its digest is the
 /// new adapter's parent and the reference's adapter.
 #[test]

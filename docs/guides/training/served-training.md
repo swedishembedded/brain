@@ -191,8 +191,8 @@ began. Step frames over D-Bus are droppable like every progress frame: a
 subscriber that does not read them loses frames, never the result.
 
 The result is `outputs` (the report: `objective`, `adapter_digest`, the scores before and
-after, the monitoring curve, `selected_step`, the policy-gradient totals,
-`base_tier` and why; for `dpo`, `beta`, `nll_weight` and `train_score` and `held_out_score`, each
+after, `held_out_repeats` and `held_out_text_repeats` (held-out examples that are also trained on), the monitoring curve, `selected_step`, the policy-gradient totals,
+`base_tier` and why; for `dpo`, `held_out_repeats` (held-out pairs that are also training pairs), `beta`, `nll_weight` and `train_score` and `held_out_score`, each
 `{accuracy, mean_margin, pairs, skipped}`: the share of pairs the tuned policy prefers the chosen
 answer on more than its reference does, and the mean margin in nats). The trainer's own training record, which holds every
 step's statistics, is published to the artifact store beside the adapter

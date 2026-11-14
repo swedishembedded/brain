@@ -255,6 +255,26 @@ fn a_selecting_fine_tune_exports_the_best_evaluation_and_records_the_curve() {
     assert_eq!((plain.selected_step, plain.selection, plain.curve.len()), (6, brain::Selection::LastStep, 0));
 }
 
+/// T028: a held-out set that repeats training records is scored as asked (it may be meant to measure fit), and the
+/// run says how many of its examples it also trained on, in the outcome and in the training record; a disjoint one
+/// repeats none. The plain-text held-out set is counted the same way.
+#[test]
+fn a_held_out_set_that_repeats_training_records_reports_the_overlap() {
+    let model = chat_model_dir("held-out-overlap");
+    let repeating = write_dataset(&model, "repeating.jsonl", &[("cab", "bad"), ("cad", "bead"), ("ace", "face"), ("cab", "bad")]);
+    let outcome = fine_tune(&model, &model.join("repeating")).held_out(&repeating).held_out_text(&repeating).steps(1).run().expect("a repeating held-out set is scored, not refused");
+    assert_eq!(outcome.base_score.map(|s| s.records), Some(4), "every held-out record is scored");
+    assert_eq!((outcome.held_out_repeats, outcome.held_out_text_repeats), (Some(3), Some(3)), "three of the four held-out examples are training examples");
+    let record: serde_json::Value = serde_json::from_slice(&std::fs::read(outcome.record.as_ref().unwrap()).unwrap()).unwrap();
+    assert_eq!((record["held_out_repeats"].as_u64(), record["held_out_text_repeats"].as_u64()), (Some(3), Some(3)), "{record}");
+
+    let disjoint = fine_tune(&model, &model.join("disjoint")).steps(1).run().unwrap();
+    assert_eq!((disjoint.held_out_repeats, disjoint.held_out_text_repeats), (Some(0), None));
+    let record: serde_json::Value = serde_json::from_slice(&std::fs::read(disjoint.record.as_ref().unwrap()).unwrap()).unwrap();
+    assert_eq!(record["held_out_repeats"].as_u64(), Some(0));
+    assert!(record["held_out_text_repeats"].is_null(), "no plain-text set, no count");
+}
+
 /// Exact resume covers selection: a selecting run cancelled mid-way and run
 /// again exports the same adapter the uninterrupted one does, with the
 /// whole run's curve.

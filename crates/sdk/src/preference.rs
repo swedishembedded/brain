@@ -395,6 +395,10 @@ impl PreferenceFineTune {
         let train = encode_checked(dataset, &tok, &tmpl, self.max_block, render)?;
         let held_out = self.held_out.as_deref().map(|path| encode_checked(path, &tok, &tmpl, None, render)).transpose()?;
         let block = block_for(longest(&train), self.max_block)?;
+        // Held-out pairs may repeat training pairs on purpose, to measure fit: they are scored as given, and the run
+        // says how many it also trains on.
+        let pair_key = |(c, r): &(EncodedTurn, EncodedTurn)| (c.ids.clone(), c.mask.clone(), r.ids.clone(), r.mask.clone());
+        let held_out_repeats = held_out.as_ref().map(|pairs| crate::finetune::repeated(pairs.iter().map(pair_key), &train.iter().map(pair_key).collect()));
         let base_format = match self.base_format.as_deref() {
             Some(spec) => chat.lora_bases.parse(spec).map_err(Error::Backend)?,
             None if self.placed => chat.lora_bases.parse(&self.placed_base_tier(arch.id, block)?).map_err(Error::Backend)?,
@@ -520,6 +524,7 @@ impl PreferenceFineTune {
             base_digest: Some(base_digest.clone()),
             train_score: None,
             held_out_score: None,
+            held_out_repeats,
         };
         if report.interrupted {
             outcome.status = FineTuneStatus::Cancelled;
@@ -597,6 +602,10 @@ pub struct PreferenceFineTuneOutcome {
     /// The same on the held-out pairs; `None` unless completed with a
     /// held-out set.
     pub held_out_score: Option<PreferenceScore>,
+    /// Of the held-out pairs, those the run also trains on (both answers the same tokens with the same supervision as
+    /// a training pair's): held-out pairs may repeat training pairs on purpose, to measure fit, and their score is
+    /// then partly a training score. `None` without a held-out set.
+    pub held_out_repeats: Option<usize>,
 }
 
 impl PreferenceFineTuneOutcome {
@@ -623,6 +632,7 @@ impl PreferenceFineTuneOutcome {
             "nll_weight": self.nll_weight,
             "train_score": score(&self.train_score),
             "held_out_score": score(&self.held_out_score),
+            "held_out_repeats": self.held_out_repeats,
         })
     }
 }

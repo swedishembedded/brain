@@ -1142,6 +1142,14 @@ impl ChatFineTune {
         let (rank, alpha, parent) = lora_shape(self.continue_from.as_deref(), self.rank, self.alpha, self.tuning)?;
 
         let Mix { rows: training, replay_records, repeats } = mix_rows(train_samples, replay_samples, self.replay_share, weighted_samples)?;
+        // A held-out set may repeat training records on purpose, to measure fit: it is scored as given, and the run
+        // says how many of its examples it also trains on.
+        let trained_examples = match held_out.is_some() || held_out_text.is_some() {
+            true => encoded_examples(&training, &tok, &tmpl, render)?.into_iter().collect(),
+            false => std::collections::HashSet::new(),
+        };
+        let repeated_in = |records: Option<&[ChatSample]>| records.map(|r| encoded_examples(r, &tok, &tmpl, render).map(|held| repeated(held, &trained_examples))).transpose();
+        let (held_out_repeats, held_out_text_repeats) = (repeated_in(held_out.as_deref())?, repeated_in(held_out_text.as_deref())?);
         // The packed validation split is what a periodic evaluation scores:
         // the monitoring set, else the held-out set, else (unread, when
         // nothing is evaluated) the training set.
@@ -1325,6 +1333,8 @@ impl ChatFineTune {
             base_tier_reason,
             step_work,
             policy_gradient,
+            held_out_repeats,
+            held_out_text_repeats,
         };
         if report.interrupted {
             outcome.status = FineTuneStatus::Cancelled;
@@ -1490,6 +1500,12 @@ pub struct ChatFineTuneOutcome {
     pub base_text_score: Option<HeldOutScore>,
     /// Base plus the new adapter on the same records.
     pub tuned_text_score: Option<HeldOutScore>,
+    /// Of the [`ChatFineTune::held_out`] examples, those the run also trains on (the same tokens with the same
+    /// supervision as a training row): a held-out set may repeat training records on purpose, to measure fit, and
+    /// its score is then partly a training score. `None` without a held-out set.
+    pub held_out_repeats: Option<usize>,
+    /// The same for the [`ChatFineTune::held_out_text`] examples.
+    pub held_out_text_repeats: Option<usize>,
     /// The tier the frozen base was held at (`f32`, `bf16`, `int8` or `nf4`) and why: asked for, or the
     /// automatic choice ([`choose_base_tier`]) with its reason.
     pub base_tier: String,
@@ -1588,6 +1604,8 @@ impl ChatFineTuneOutcome {
             "tuned_score": score(&self.tuned_score),
             "base_text_score": score(&self.base_text_score),
             "tuned_text_score": score(&self.tuned_text_score),
+            "held_out_repeats": self.held_out_repeats,
+            "held_out_text_repeats": self.held_out_text_repeats,
             "base_tier": self.base_tier,
             "base_tier_reason": self.base_tier_reason,
             "step_work": self.step_work_json(),
@@ -2174,6 +2192,16 @@ impl Asked<'_> {
         }
         Ok(samples)
     }
+}
+
+/// Each example's tokens with their supervision, as the trainer reads them: what makes two examples the same one.
+fn encoded_examples(samples: &[ChatSample], tok: &dyn data::tokenizer::Tokenizer, tmpl: &ChatTemplate, render: data::chat::RenderOpts) -> Result<Vec<(Vec<u32>, Vec<bool>)>> {
+    samples.iter().enumerate().map(|(at, s)| s.encode_with(tok, tmpl, render).map_err(|e| Error::Backend(format!("example {}: {e}", at + 1)))).collect()
+}
+
+/// How many of the `held_out` examples are also `trained` ones, a repeat within the held-out set counted each time.
+pub(crate) fn repeated<K: std::hash::Hash + Eq>(held_out: impl IntoIterator<Item = K>, trained: &std::collections::HashSet<K>) -> usize {
+    held_out.into_iter().filter(|k| trained.contains(k)).count()
 }
 
 /// How a base's records are read for training: with the vision tower's geometry and placeholder tokens when the base
