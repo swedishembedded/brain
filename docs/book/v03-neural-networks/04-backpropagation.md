@@ -8,15 +8,15 @@ parameters in about the cost of one forward pass?*
 
 Gradient descent asks one thing of a network at every step: the gradient $\nabla_\theta L$ of the loss $L$ on a batch, a vector with one entry per parameter saying how much the loss changes if that parameter is nudged. The most direct way to get an entry is the definition of the derivative. Nudge the parameter by a small amount, run the network again, and see how the loss moved. One nudge costs one forward pass. A network with a million parameters therefore costs a million forward passes for a single gradient, for a single step of training, and training takes hundreds of thousands of steps. This is not slow; it is impossible.
 
-The way out is not a cleverer nudge. It is to notice that the million derivatives are not independent facts. They all come from the same network, whose layers share almost all of their arithmetic, and the chain rule lets that shared work be done once. **Backpropagation** is the name for doing it: one forward pass, then one backward pass, and every parameter's gradient falls out. The derivation starts from a single weight and builds up to a full two-layer network with batches. It then explains why the method is cheap (the cost argument is the heart of the chapter), what it forces the forward pass to remember, and why no one ever builds the matrices of derivatives that the chain rule seems to ask for.
+The way out is not a cleverer nudge. It is to notice that the million derivatives are not independent facts. They all come from the same network, whose layers share almost all of their arithmetic, and the chain rule lets that shared work be done once. **Backpropagation** is the name for doing it: one forward pass, then one backward pass, and every parameter's gradient falls out. Why that costs only about one extra pass is the heart of the matter, together with what it forces the forward pass to remember and why nobody builds the matrices of derivatives that the chain rule seems to ask for.
 
-The argument uses the chain rule for several variables and the Jacobian (Volume I), the squared-error loss and gradient descent (Volume II), and the multilayer network with its activation functions and softmax with cross-entropy (the earlier chapters of this volume). Five questions bring those back; answer them from memory, because the answers are at the end of the chapter, and a hard one sends you to the chapter it names.
+The derivation is the chain rule applied with care, so it leans on the chain rule for several variables and the Jacobian, on the shapes of matrix products, and on the squared-error loss and the layered network it differentiates. Five questions bring those back before the first weight.
 
-1. ("Gradients, Jacobians and Many Variables", chain rule.) A quantity $z$ depends on $x$ through two intermediate quantities $y_1(x)$ and $y_2(x)$. Write $\frac{dz}{dx}$ in terms of partial derivatives.
-2. ("Gradients, Jacobians and Many Variables", Jacobian.) What is the shape of the Jacobian of a function from three inputs to two outputs, and what is its entry in row $i$, column $j$?
-3. ("Multilayer Networks".) A hidden layer computes $\mathbf{h} = \tanh(\mathbf{W}_1\mathbf{x} + \mathbf{b}_1)$ from an input of width 4 to a hidden width of 3. What is the shape of $\mathbf{W}_1$?
-4. ("Linear Regression and the First Descent", loss and descent.) Write the squared error of a prediction $y$ for a target $t$, and the gradient-descent update of a weight $w$ with learning rate $\eta$.
-5. (Chapter 4, "Matrices as Linear Maps", and Chapter 5, "Arrays, Shapes, Strides and Broadcasting".) If $\mathbf{A}$ has shape $[m, k]$ and $\mathbf{B}$ has shape $[k, n]$, what are the shapes of $\mathbf{A}\mathbf{B}$ and of $\mathbf{B}^\top\mathbf{A}^\top$?
+1. (Volume I, chapter 8, "Gradients, Jacobians and Many Variables", chain rule.) A quantity $z$ depends on $x$ through two intermediate quantities $y_1(x)$ and $y_2(x)$. Write $\frac{dz}{dx}$ in terms of partial derivatives.
+2. (Volume I, chapter 8, Jacobian.) What is the shape of the Jacobian of a function from three inputs to two outputs, and what is its entry in row $i$, column $j$?
+3. (Chapter 2, "Multilayer Networks".) A hidden layer computes $\mathbf{h} = \tanh(\mathbf{W}_1\mathbf{x} + \mathbf{b}_1)$ from an input of width 4 to a hidden width of 3. What is the shape of $\mathbf{W}_1$?
+4. (Volume II, chapter 2, "Linear Regression and the First Descent", loss and descent.) Write the squared error of a prediction $y$ for a target $t$, and the gradient-descent update of a weight $w$ with learning rate $\eta$.
+5. (Volume I, chapter 4, "Matrices as Linear Maps", and chapter 5, "Arrays, Shapes, Strides and Broadcasting".) If $\mathbf{A}$ has shape $[m, k]$ and $\mathbf{B}$ has shape $[k, n]$, what are the shapes of $\mathbf{A}\mathbf{B}$ and of $\mathbf{B}^\top\mathbf{A}^\top$?
 
 ## One weight
 
@@ -62,8 +62,6 @@ w \leftarrow w - \eta \frac{dL}{dw} = w - 2\eta\,(wx - t)\,x .
 $$
 
 Here is a run with $x = 2$, $t = 3$, starting at $w = 0.5$, with $\eta = 0.05$.
-Every number in the table was computed by the chapter's reference program,
-not typed.
 
 <!-- worked: backprop.single_weight -->
 Setup: x = 2.0, target t = 3.0, start w = 0.5, learning rate 0.05.
@@ -159,8 +157,8 @@ $$
 
 Every line has the same shape: *the gradient at this quantity equals the
 gradient arriving from the quantity after it, times the local derivative of
-the step that connects them*. This is backpropagation. The rest of the
-chapter generalises the "quantity" from a number to an array, and the "step"
+the step that connects them*. This is backpropagation. Everything that follows
+generalises the "quantity" from a number to an array, and the "step"
 from a scalar function to a layer.
 
 Numbers, for $x = 1.5$, $w_1 = 0.4$, $w_2 = 1.2$, $t = -0.5$:
@@ -181,12 +179,12 @@ The two parameter gradients are dL/dw2 = dL/dy * h = 1.2293 and dL/dw1 = dL/du *
 
 Notice what the forward values are used for. The backward rule for $h$ needs
 $h$ itself (through $1 - h^2$), and the rule for $w_2$ needs $h$ too. The
-backward sweep reads numbers the forward pass produced. We come back to this
-dependency in the section on saved activations.
+backward sweep reads numbers the forward pass produced, and that dependency
+decides what the forward pass must keep.
 
 A sweep like this is easy to get subtly wrong, so check it against the
 definition of the derivative: nudge each weight up and down by a tiny
-amount and compare. This is the central difference (chapter 6 studies it): for a parameter $\theta$ the estimate of $\partial L/\partial \theta$ is $(L(\theta + h) - L(\theta - h))/(2h)$, here with $h = 10^{-6}$ in double precision (a later section derives its error and chapter 6 studies the choice of $h$).
+amount and compare. This is the central difference: for a parameter $\theta$ the estimate of $\partial L/\partial \theta$ is $(L(\theta + h) - L(\theta - h))/(2h)$, here with $h = 10^{-6}$ in double precision (a later section derives its error and chapter 6 studies the choice of $h$).
 
 <!-- worked: backprop.scalar_chain_check -->
 Central difference with h = 1e-6, double precision, tanh the library tanh; loss (w2 tanh(w1 x) - t)^2.
@@ -343,7 +341,7 @@ between one and two forward passes (the ratio column of the table below, and
 the count after it). So the whole gradient costs a small constant number of
 forward passes, independent of $P$.
 
-This is the central fact of the chapter, and it is a fact about shapes:
+This is the central fact of backpropagation, and it is a fact about shapes:
 **the cost of reverse mode scales with the number of outputs (one loss), and
 the cost of forward mode scales with the number of inputs (all parameters).**
 Where a function has few inputs and many outputs the argument runs the other
@@ -379,7 +377,7 @@ Work counts multiplications and additions of the matrix products only (a multipl
 <!-- /worked -->
 
 The backward-to-forward ratio is small because of how a linear layer
-differentiates (derived in the next section): the forward does one matrix
+differentiates (derived below): the forward does one matrix
 product, and the backward does two, one for the gradient of the weights and one
 for the gradient of the input. A layer that needs both costs exactly twice its
 forward; the first layer of a network needs no gradient of its input, so it
@@ -471,7 +469,7 @@ or care what the operations are.
 
 ## The backward pass of a two-layer network
 
-Now the network the book uses for the rest of the volume: a linear layer, a
+Now the network of this chapter's worked examples: a linear layer, a
 nonlinearity, a second linear layer and the mean squared error. For a batch we
 use the convention that **each example is a row**. The data are a matrix
 $\mathbf{X}$ of shape $[B, D]$ (batch size $B$, $D$ features), the targets
@@ -507,7 +505,7 @@ $$
 d\mathbf{Y} := \frac{\partial L}{\partial \mathbf{Y}} = \frac{2}{B\,O}\,\mathbf{E} \qquad [B, O].
 $$
 
-(I write $d\mathbf{Y}$ for the matrix of all $\frac{\partial L}{\partial Y_{bo}}$,
+(Here $d\mathbf{Y}$ stands for the matrix of all $\frac{\partial L}{\partial Y_{bo}}$,
 the same bar notation as before. The factor $\frac{1}{B O}$ from the *mean*
 in the loss is easy to drop by accident; the section on checking shows how
 a finite difference catches it.)
@@ -566,8 +564,7 @@ is a shape error and not a quietly wrong answer (knowledge #4 describes
 what happens in real systems when toy dimensions coincide).
 
 The next chapter derives the backward pass of every layer type
-systematically, including the cases we skipped here. We needed just enough
-for this one.
+systematically, including the cases skipped here.
 
 ### The algorithm
 
@@ -865,7 +862,7 @@ Relative error = |wrong - central difference| / max(|wrong|, |central difference
 
 The second layer's gradients are exactly right (they sit downstream of the
 mistake) and the first layer's are wrong by tens of percent. A model with
-this bug trains badly and never throws an error. The next section is the
+this bug trains badly and never throws an error. Finite differences are the
 instrument that finds it.
 
 The fourth is a kink. ReLU has no derivative at zero. Engines pick a
@@ -889,7 +886,7 @@ step. Expanding $L$ in a Taylor series on both sides shows that the first error
 term cancels and the estimate is off by a term proportional to $h^2$, which is
 why it is preferred over the one-sided difference, whose error is proportional
 to $h$. Choosing $h$ and judging how close is close enough is the subject
-of the chapter after next. Here, $h = 10^{-5}$ in double precision, on every
+of Chapter 6. Here, $h = 10^{-5}$ in double precision, on every
 one of the 21 parameters:
 
 <!-- worked: backprop.finite_difference -->
@@ -924,7 +921,7 @@ Largest absolute difference over all 21 parameters: 2.1e-10.
 
 The two columns agree to at least ten digits. The finite difference costs two
 forward passes per parameter, which is why it is a *test* and never a training
-method, and why this chapter's cost argument matters.
+method, and why the cost argument above matters.
 
 A finite difference tests a backward pass against *the forward pass it was
 given*, nothing more. If the forward is the wrong function (the wrong loss, a
@@ -933,8 +930,8 @@ check passes. It proves the derivative, not the objective (knowledge #3).
 
 ## Hand-written backward passes in brain
 
-brain is a collection of models whose backward passes are written by hand.
-There is no general-purpose differentiation engine in it. This is a design
+Every model in brain has a backward pass written by hand; the engine has no
+general-purpose differentiation library. This is a design
 decision with a history, and it is worth looking at because the alternative
 (an automatic differentiation library that records an arbitrary program and
 replays it backwards) is what most readers meet first.
@@ -951,8 +948,8 @@ chapter. The nonlinearity is `tanh_act_bwd.wgsl`: $dx = dy\,(1 - \tanh^2 x)$, wh
 reads the *input* of the tanh where the chapter's pseudocode read the output,
 the other choice from the saved-activation table. Counting by file name, about
 a quarter of the several hundred kernels in that directory are backward or
-gradient kernels (names ending in `_bwd`, `_dx`, `_dw`, `_grad`), a count made
-for this book in November 2026.
+gradient kernels (names ending in `_bwd`, `_dx`, `_dw`, `_grad`), counted in
+November 2026.
 
 **A model is a forward list and a backward list.** The smallest complete
 example is the autoencoder in `crates/toyautoencoder/src/model.rs`: linear,
@@ -1040,7 +1037,7 @@ again. This is the whole idea of recomputation, small enough to read.
 Memory for the gradients themselves is managed in the same spirit: commit
 `9a3b157d2` (26 October 2026) makes the block-tape reverse hold the gradient of
 an activation only while the walk still needs it, with the input gradient
-bit-identical. The volume on training at scale returns to all of this.
+bit-identical. Volume XIII, on training at scale, returns to all of this.
 
 ## Check your understanding
 
@@ -1085,7 +1082,7 @@ reverse-mode tape only for a family of shared convolutional blocks; the
 history shows why a general autodiff crate was planned, never written, and
 deleted.
 
-Limits: we have derived the backward pass for one linear layer, one elementwise
+The backward pass so far covers one linear layer, one elementwise
 function and one loss. A real network has convolutions, attention,
 normalisation, softmax, embeddings and shared weights, and each needs its own
 derivation. The next chapter, The Backward Pass of Every Layer,
@@ -1149,7 +1146,7 @@ and how to read its output.
 
 8. **[Implement]** Add a central-difference checker over a flat list of all 21
    parameters and reproduce `backprop.finite_difference`. Then introduce the
-   bug of the "Making it work" section (drop the $1 - A^2$ factor) and
+   bug of the forgotten factor (drop the $1 - A^2$ factor) and
    reproduce the pattern of `backprop.wrong_backward`. Which tensors' gradients
    are still correct, and why?
 
@@ -1176,8 +1173,8 @@ and how to read its output.
 12. **[Investigate]** Run your central-difference checker on the 21 parameters
     in single precision (32-bit floats) with $h = 10^{-1}, 10^{-2}, \dots, 10^{-7}$.
     Plot the largest absolute difference against $h$. Explain the shape of the
-    curve, in particular why it rises again as $h$ gets small. (The next chapters
-    explain what you will see.)
+    curve, in particular why it rises again as $h$ gets small. (Chapter 6
+    explains what you will see.)
 
 ## Key terms
 

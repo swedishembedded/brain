@@ -28,7 +28,7 @@ The volume needs Volume I (vectors, matrices, the chain rule, Jacobians,
 floating-point numbers) and Volume II (loss functions, gradient descent,
 generalisation). It is needed by everything that follows.
 
-You can build a multilayer network from a blank file in any language, derive
+At its end you can build a multilayer network from a blank file in any language, derive
 and implement its backward pass layer by layer, prove the gradients correct
 against finite differences, train it with AdamW under a warmed-up schedule
 with gradient clipping, initialise it so that signals neither vanish nor

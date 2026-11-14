@@ -1394,13 +1394,13 @@ def checklist_table():
          step_flops(dims, 8) + 4 * 2 * fwd(8), ""),
         ("5. a linear baseline", f"a linear softmax model, {STEPS} steps of {BATCH} examples", STEPS * step_flops([IN_DIM, CLASSES], BATCH),
          f"validation loss {_num(base['evals'][-1][2], 4)}, validation accuracy {_num(base['evals'][-1][4], 3)}"),
-        ("6. monitoring during the run", "five monitors at every step (previous table)", monitors, ""),
+        ("6. monitoring during the run", "five monitors at every step (monitoring table)", monitors, ""),
         ("7. overfit one batch", f"{OVERFIT_STEPS} steps of 8 examples", OVERFIT_STEPS * step_flops(dims, 8), ""),
         ("8. a rate sweep", f"{len(SWEEP_RATES)} rates of 100 steps of {BATCH} examples", len(SWEEP_RATES) * 100 * step_flops(dims, BATCH), ""),
         ("the run itself", f"{STEPS} steps of {BATCH} examples", full, ""),
     ]
     rows = [(a, b, f"{c:,}", _num(100.0 * c / full, 2), n) for a, b, c, n in items]
-    return (f"Network {dims}. Cost in FLOPs (counted as in the previous table) and as a share of the {STEPS}-step run. The monitoring row is spread over "
+    return (f"Network {dims}. Cost in FLOPs (counted as in the monitoring table) and as a share of the {STEPS}-step run. The monitoring row is spread over "
             f"the run, the others are paid before or beside it. {_baseline_text()}\n\n"
             + _table(["check", "what it costs", "FLOPs", "% of the run", "what it tells"], rows, "llrrl"))
 

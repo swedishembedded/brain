@@ -488,7 +488,7 @@ def init_linear(n_out, n_in, scheme, shape, rng, factor=1.0):
                 z = rng.normal()
                 if abs(z) <= 2.0:
                     break
-            W.append(sigma * z / math.sqrt(0.7737))
+            W.append(sigma * z / math.sqrt(0.773741))
     return W
 
 

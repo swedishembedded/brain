@@ -743,10 +743,10 @@ def residual_growth():
             ql = sum(v * v for r in x for v in r) / (RES_N * WIDTH)
             rows.append((blocks, label, f"{gamma:.4f}", _sci((1.0 + gamma) ** blocks, 3), _sci(ql / q0, 3)))
     return (f"{_gen_note(name)}. A stack of L blocks x <- x + W2 relu(W1 x) on 64 units; W1 is He normal (sigma^2 = 2/64), "
-            f"W2 has sigma^2 = gamma/64, no biases. Cells in the order of the rows; for each cell, {RES_N} inputs of 64 normal() draws "
+            f"W2 has sigma^2 = omega/64 (omega: the branch's share of the second moment), no biases. Cells in the order of the rows; for each cell, {RES_N} inputs of 64 normal() draws "
             f"(row by row), then for each block W1 and W2 (row by row, scale times normal()), all from one generator. "
             f"Growth = mean of x^2 after the last block divided by the mean of x^2 at the input.\n\n"
-            + _table(["blocks L", "gamma", "gamma value", "predicted (1 + gamma)^L", "measured growth"], rows, align="rlrrr"))
+            + _table(["blocks L", "omega", "omega value", "predicted (1 + omega)^L", "measured growth"], rows, align="rlrrr"))
 
 
 def _entropy(p):

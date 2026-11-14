@@ -894,7 +894,7 @@ def ctrl_data():
     mean_val = mse([[mean_u]] * len(Tv), Tv)
     head = (f"{CTRL_TRAJ} trajectories of {CTRL_LEN} steps on the nominal plant, so {len(X)} samples per training set, and {CTRL_VAL_TRAJ} validation trajectories ({len(Xv)} samples, the expert driving). "
             f"Per trajectory, in this draw order: y(0) = -0.6 + 1.2 u (one uniform u); the setpoint, the previous command u_prev and the previous error e_prev start at 0. At step t = 0 a new setpoint -1 + 2 u is drawn (one uniform) and no c is drawn; "
-            "at every later step c = uniform and, if c < 0.10, a new setpoint -1 + 2 u (one more uniform). Then e = setpoint - y and u* is the expert's command from e, e_prev and u_prev (chapter section above); "
+            "at every later step c = uniform and, if c < 0.10, a new setpoint -1 + 2 u (one more uniform). Then e = setpoint - y and u* is the expert's command from e, e_prev and u_prev (the velocity-form law above); "
             "for the 'explore' set then r = uniform and, if r < 0.3, a normal draw g and the applied command clamp(u* + 0.25 g, -1, 1), "
             "else if r < 0.38 a uniform draw and the applied command -1 + 2 u, else the applied command u*. "
             "The plant then advances with the applied command, u_prev becomes the applied command and e_prev becomes e. "

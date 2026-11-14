@@ -5,15 +5,15 @@
 
 *What is the backward pass of a matrix multiply, a sum, a broadcast and an elementwise function, written out exactly?*
 
-A bias $\mathbf{b} = (0.5, -0.5, 0, 1)$ is added to each of three rows of an activation. The loss sends back a gradient for every entry of the result, and in column 1 the three rows hold $-1$, $2$ and $1$. What is the gradient of $b_1$? Chapter 4's fan-out rule answers it: $b_1$ was used three times, once per row, each use passes its gradient straight through (the derivative of an addition is $1$), and the contributions add: $-1 + 2 + 1 = 2$. A one-line rule hides in that sentence, *a value that was copied forward gets the sum of the gradients of its copies*, and the rest of this chapter shows that every layer's backward pass is one such statement about *who read what*.
+A bias $\mathbf{b} = (0.5, -0.5, 0, 1)$ is added to each of three rows of an activation. The loss sends back a gradient for every entry of the result, and in column 1 the three rows hold $-1$, $2$ and $1$. What is the gradient of $b_1$? Chapter 4's fan-out rule answers it: $b_1$ was used three times, once per row, each use passes its gradient straight through (the derivative of an addition is $1$), and the contributions add: $-1 + 2 + 1 = 2$. A one-line rule hides in that sentence, *a value that was copied forward gets the sum of the gradients of its copies*, and every layer's backward pass turns out to be one such statement about *who read what*.
 
-One case is not a catalogue. The previous chapter derived the backward pass of only one small network, two linear layers around a $\tanh$, and then stated a design: every operation in an engine supplies a rule that takes the gradient arriving from above and returns the gradients going down. That is a contract, not a rule. A real network is built from many more operations than the ones we differentiated: matrix products with a leading batch axis, sums and means, maximums, softmax, additions of a small array to a large one, reshapes, slices, lookups by index, and weights that are used twice. Each of them needs its backward written exactly, once, so that nobody ever has to derive it again under pressure. We derive them all with one method, check every one numerically, count what each costs, and end with the rule that keeps them from silently going wrong: gradients **accumulate**.
+One case is not a catalogue. The previous chapter derived the backward pass of only one small network, two linear layers around a $\tanh$, and then stated a design: every operation in an engine supplies a rule that takes the gradient arriving from above and returns the gradients going down. That is a contract, not a rule. A real network is built from many more operations than the ones we differentiated: matrix products with a leading batch axis, sums and means, maximums, softmax, additions of a small array to a large one, reshapes, slices, lookups by index, and weights that are used twice. Each of them needs its backward written exactly, once, so that nobody ever has to derive it again under pressure. All of them follow from one method, every one can be checked numerically and its cost counted, and one rule keeps them from silently going wrong: gradients **accumulate**.
 
-The derivations lean on the backward pass, the vector-Jacobian product and the fan-out rule (Chapter 4), the softmax Jacobian (Chapter 3), matrix products and transposes (Volume I, Chapter 4), broadcasting (Volume I, Chapter 5) and the multivariable chain rule (Volume I, Chapter 8). Five questions bring them back before they are needed. Answer them from memory; the answers are at the end of the chapter, and a hard one sends you to the chapter named.
+The derivations lean on the backward pass, the vector-Jacobian product and the fan-out rule (Chapter 4), the softmax Jacobian (Chapter 3), matrix products and transposes (Volume I, Chapter 4), broadcasting (Volume I, Chapter 5) and the multivariable chain rule (Volume I, Chapter 8). Five questions bring back the pieces that every rule below is assembled from.
 
 1. ("Gradients, Jacobians and Many Variables", Volume I, Chapter 8, the chain rule.) A quantity $z$ depends on $x$ through three intermediate quantities $y_1(x), y_2(x), y_3(x)$. Write $\frac{dz}{dx}$ in terms of partial derivatives.
-2. ("Backpropagation Derived from Scratch", Chapter 4 of this volume.) For $a_i = \tanh(z_i)$ the backward pass computes $dz_i = da_i\,(1 - a_i^2)$ without building a Jacobian. What shape does the Jacobian have, and why can the product be done with $n$ multiplications instead of $n^2$?
-3. ("Backpropagation Derived from Scratch".) A linear layer maps $\mathbf{X}$ of shape $[B, D]$ with a weight $\mathbf{W}$ of shape $[O, D]$ to $\mathbf{Y} = \mathbf{X}\mathbf{W}^\top$. What are the shapes of $d\mathbf{Y}$, $d\mathbf{W}$ and $d\mathbf{X}$?
+2. ("Backpropagation Derived from Scratch", Chapter 4.) For $a_i = \tanh(z_i)$ the backward pass computes $dz_i = da_i\,(1 - a_i^2)$ without building a Jacobian. What shape does the Jacobian have, and why can the product be done with $n$ multiplications instead of $n^2$?
+3. ("Backpropagation Derived from Scratch", Chapter 4.) A linear layer maps $\mathbf{X}$ of shape $[B, D]$ with a weight $\mathbf{W}$ of shape $[O, D]$ to $\mathbf{Y} = \mathbf{X}\mathbf{W}^\top$. What are the shapes of $d\mathbf{Y}$, $d\mathbf{W}$ and $d\mathbf{X}$?
 4. ("Arrays, Shapes, Strides and Broadcasting", Volume I, Chapter 5.) What does it mean to add an array $\mathbf{b}$ of shape $[4]$ to an array of shape $[3, 4]$? Which axis is stretched, and does the stretching copy any memory?
 5. ("Matrices as Linear Maps", Volume I, Chapter 4.) If $\mathbf{A}$ is $[m, k]$ and $\mathbf{B}$ is $[k, n]$, what is $(\mathbf{A}\mathbf{B})^\top$ in terms of $\mathbf{A}^\top$ and $\mathbf{B}^\top$?
 
@@ -25,7 +25,7 @@ $$
 dx_i = \sum_j dy_j \,\frac{\partial y_j}{\partial x_i}. \tag{1}
 $$
 
-That is the vector-Jacobian product of Chapter 4 written one entry at a time, and it is the only formula in this chapter. What changes from operation to operation is which $j$ appear in the sum and what the partial derivative is. In nearly every layer of a network the partial derivative is trivial (a weight, an input, a constant), so the work is bookkeeping, and the bookkeeping has one rule:
+That is the vector-Jacobian product of Chapter 4 written one entry at a time, and it is the only formula every rule below needs. What changes from operation to operation is which $j$ appear in the sum and what the partial derivative is. In nearly every layer of a network the partial derivative is trivial (a weight, an input, a constant), so the work is bookkeeping, and the bookkeeping has one rule:
 
 > **Every place the forward pass reads a value becomes a place where the backward pass adds into that value's gradient.**
 
@@ -106,7 +106,7 @@ $$
 \boxed{\;d\mathbf{X} = d\mathbf{Y}\,\mathbf{W}, \qquad d\mathbf{W} = d\mathbf{Y}^\top\mathbf{X}, \qquad d\mathbf{b} = \sum_b d\mathbf{Y}_{b,\cdot}\;}
 $$
 
-These three are the **backward pass of a linear layer**. Chapter 4 derived them inside a network; here they stand alone, and they are the rules that every later layer of this book is built on. A mnemonic is the shapes. The gradient of an array always has that array's shape: $d\mathbf{X}$ is $[B, D]$, $d\mathbf{W}$ is $[O, D]$, $d\mathbf{b}$ is $[O]$. To produce an $[B, D]$ from $d\mathbf{Y}$ $[B, O]$ and the one other array that mentions $D$, namely $\mathbf{W}$ $[O, D]$, there is only one product with matching inner dimensions, $d\mathbf{Y}\mathbf{W}$. To produce an $[O, D]$ from $d\mathbf{Y}$ and $\mathbf{X}$ $[B, D]$ the shared index to sum over is $B$, so $d\mathbf{Y}$ must be transposed first. If you forget a formula, the shapes rebuild it.
+These three are the **backward pass of a linear layer**. Chapter 4 derived them inside a network; here they stand alone, and they are the rules that every later layer of this book is built on. A mnemonic is the shapes. The gradient of an array always has that array's shape: $d\mathbf{X}$ is $[B, D]$, $d\mathbf{W}$ is $[O, D]$, $d\mathbf{b}$ is $[O]$. To produce a $[B, D]$ from $d\mathbf{Y}$ $[B, O]$ and the one other array that mentions $D$, namely $\mathbf{W}$ $[O, D]$, there is only one product with matching inner dimensions, $d\mathbf{Y}\mathbf{W}$. To produce an $[O, D]$ from $d\mathbf{Y}$ and $\mathbf{X}$ $[B, D]$ the shared index to sum over is $B$, so $d\mathbf{Y}$ must be transposed first. If you forget a formula, the shapes rebuild it.
 
 ![The backward pass of one linear layer. Top: the forward pass from X of shape 3 by 2 to Y of shape 3 by 4. Bottom: the gradient dY of shape 3 by 4 feeds three products, each written with its shapes: dX equals dY times W, dW equals dY transposed times X, and db is dY summed over the batch axis. Each result has the shape of the array whose gradient it is.](img/linear-layer-backward.svg)
 
@@ -133,7 +133,7 @@ On the numbers:
 One entry of each, from the sums over the shared index: dW[2, 1] = sum over b of dY[b, 2] X[b, 1] = (2)(2) + (-1)(-1) + (0)(1) = 5; dX[0, 1] = sum over o of dY[0, o] W[o, 1] = (1)(0) + (-1)(1) + (2)(1) + (0)(-1) = 1.
 <!-- /worked -->
 
-Every entry of those tables is a sum of the form we derived, and the last paragraph of the block writes two of them out. To be sure the rules are right and not just plausible, compare them with the definition of the derivative. Nudge one entry of $\mathbf{X}$, $\mathbf{W}$ or $\mathbf{b}$ up and down by $10^{-6}$, recompute $L$, and divide the difference of the two losses by $2 \times 10^{-6}$ (a central difference, previewed in Chapter 4 and made rigorous in the next chapter). Doing that for every entry of every input gives a second, independent gradient:
+Every entry of those tables is a sum of the form derived above, and the line under the tables writes two of them out. To be sure the rules are right and not just plausible, compare them with the definition of the derivative. Nudge one entry of $\mathbf{X}$, $\mathbf{W}$ or $\mathbf{b}$ up and down by $10^{-6}$, recompute $L$, and divide the difference of the two losses by $2 \times 10^{-6}$ (a central difference, previewed in Chapter 4 and made rigorous in the next chapter). Doing that for every entry of every input gives a second, independent gradient:
 
 <!-- worked: layer_gradients.linear_check -->
 Central difference with step 1e-6 against the three rules, every entry:
@@ -164,7 +164,7 @@ function linear_backward(X: array<real>[B, D], W: array<real>[O, D],
     return matmul(dY, W)                               # dX, [B, D]
 ```
 
-`dW` and `db` are `inout` because they are the persistent gradient buffers of the parameters. The reason they are added into, rather than overwritten, is the last section of this chapter. `dX` is returned fresh because it is the gradient of a value the layer read once.
+`dW` and `db` are `inout` because they are the persistent gradient buffers of the parameters. They are added into, rather than overwritten, because a parameter may be read several times before its update (gradient accumulation, below). `dX` is returned fresh because it is the gradient of a value the layer read once.
 
 ## Matrix multiplication in general
 
@@ -193,7 +193,7 @@ $$
 This is exactly the weight gradient of a linear layer in disguise: stacking the items into one tall matrix $\mathbf{A}$ of shape $[N m, k]$ turns the shared-weight product into a single matrix product, and $\mathbf{A}^\top d\mathbf{C}$ for the tall matrices is the same sum over $i$ (the inner dimension of the product now runs over items and rows together).
 
 <!-- worked: layer_gradients.batched_matmul -->
-Seed 17980087011661528469. Draw order: every entry is `integer(7) - 3`, so a value in -3 .. 3; first `A` (2 x 2 x 3 = 12 values, batch index slowest), then the shared `B` (3 x 4 = 12 values), then `dC` (2 x 2 x 4 = 16 values).
+Generator: the book's SplitMix64, seed 0xf98619dfe0b33d95 (17980087011661528469). Draw order: every entry is `integer(7) - 3`, so a value in -3 .. 3; first `A` (2 x 2 x 3 = 12 values, batch index slowest), then the shared `B` (3 x 4 = 12 values), then `dC` (2 x 2 x 4 = 16 values).
 
 Forward: `C[i] = A[i] B` for batch item `i`, one weight matrix `B` shared by both items.
 
@@ -212,7 +212,7 @@ Forward: `C[i] = A[i] B` for batch item `i`, one weight matrix `B` shared by bot
 Largest absolute difference from a central difference: dA 2.5e-09, dB 2.5e-09.
 <!-- /worked -->
 
-The sum for $d\mathbf{B}$ is visible in the table: the third and fourth rows are the two per-item contributions, and the last row is their sum. This is the first appearance of a pattern the chapter returns to: the shared object, read $N$ times, receives $N$ terms.
+The sum for $d\mathbf{B}$ is visible in the table: the third and fourth rows are the two per-item contributions, and the last row is their sum. The pattern recurs throughout: the shared object, read $N$ times, receives $N$ terms.
 
 ## Elementwise functions
 
@@ -320,7 +320,7 @@ Input A = [[1, 3, 2], [4, 4, 0]] (2 rows, 3 columns), reduced along each row; th
 At the tied row the central difference reports [-0.5, -0.5, 0]: it splits dr[1] = -1 evenly between the two tied entries, while the rule above gives all of it to column 0.
 <!-- /worked -->
 
-The central difference at the tied row is $-0.5$ at each tied position: it measures the average of the two one-sided slopes. A gradient checker therefore cannot validate a rule at a tie, and test inputs must avoid ties and kinks (the ReLU, $0$ rules, and the max rule alike) by a margin larger than the step. The table of rules at the end of the chapter does that and reports the margin.
+The central difference at the tied row is $-0.5$ at each tied position: it measures the average of the two one-sided slopes. A gradient checker therefore cannot validate a rule at a tie, and test inputs must avoid ties and kinks (ReLU at $0$ and the max rule alike) by a margin larger than the step. The table of rule checks below does that and reports the margin.
 
 ```text
 function max_backward(X: array<real>[B, C], dr: array<real>[B]) -> array<real>[B, C]:
@@ -355,7 +355,7 @@ Rows of logits z = [[1, 2, 3], [0, 0, 1]] and upstream dy = [[1, 0, -1], [0.5, 2
 Row sums of dx: -2.8e-17 and 3.5e-17 (a shift of all logits changes nothing). Largest difference from a central difference: 7.5e-11.
 <!-- /worked -->
 
-**A duality.** Put the sum and the broadcast side by side. The backward of a sum is a broadcast (copy the gradient to every input it collapsed); the next section shows that the backward of a broadcast is a sum. Reductions and broadcasts are each other's adjoints, and this single pair explains the bias gradient and the $1/n$ of a mean loss, and the normalisation layers of a later chapter are built from it.
+**A duality.** Put the sum and the broadcast side by side. The backward of a sum is a broadcast (copy the gradient to every input it collapsed); the next section shows that the backward of a broadcast is a sum. Reductions and broadcasts are each other's adjoints. This single pair explains the bias gradient and the $1/n$ of a mean loss, and the normalisation layers of Chapter 10 are built from it.
 
 ## Broadcasting
 
@@ -418,7 +418,7 @@ What happens depends on how many outputs read each input:
 
 - **Reshape and transpose** read every input exactly once (the map $\pi$ is a permutation of positions). The backward pass moves each gradient entry back to where it came from: the inverse reshape, the inverse transpose. No arithmetic.
 - **Slice** reads a part of the input, once each, and never reads the rest. The gradient of the part is $d\mathbf{y}$ and the gradient of everything else is zero: the backward builds a zero array of the input's shape and writes $d\mathbf{y}$ into the sliced region. A concatenation is the opposite: its backward slices the gradient apart.
-- **Gather** (looking up rows by an index list) may read the same input row more than once if an index repeats. Those rows then receive the *sum* of the gradients of all their uses. This is the same accumulation as a shared weight, and it is the gradient of an embedding table, taken up in its own chapter.
+- **Gather** (looking up rows by an index list) may read the same input row more than once if an index repeats. Those rows then receive the *sum* of the gradients of all their uses. This is the same accumulation as a shared weight, and it is the gradient of an embedding table, taken up in Volume V.
 
 <!-- worked: layer_gradients.index_ops -->
 Input X = [[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12]] ([3, 4]). Upstream gradients are drawn as the numbers 1, 2, 3, ... in row-major order of the result, so every entry of the answer can be traced.
@@ -451,7 +451,7 @@ One weight matrix W = [[1, -1, 0.5], [0, 2, 1]] is applied to two inputs, x_a = 
 | accumulate: add both | [[2.5, -1, 8], [-1.5, -5, 5]] | 4.7e-10 |
 <!-- /worked -->
 
-Weights shared on purpose appear throughout later volumes: a convolution applied at every position, a recurrent cell applied at every time step, an embedding table reused as the output projection (tied embeddings). In every one the backward pass adds the contribution of each use into the same buffer, and the buffer must have been zeroed at the start of the step. The two requirements go together. *Accumulate* because there are several contributions; *zero once per step* because the buffer persists between steps (Chapter 4's "zero before you accumulate"). A buffer that is assigned loses contributions; a buffer that is added into but never zeroed adds this step's gradient to every earlier step's.
+Weights shared on purpose appear throughout later volumes: a convolution applied at every position, a recurrent cell applied at every time step, an embedding table reused as the output projection (tied embeddings). In every one the backward pass adds the contribution of each use into the same buffer, and the buffer must have been zeroed at the start of the step. The two requirements go together. *Accumulate* because there are several contributions; *zero once per step* because the buffer persists between steps (the zeroing rule of Chapter 4). A buffer that is assigned loses contributions; a buffer that is added into but never zeroed adds this step's gradient to every earlier step's.
 
 ### Many small batches, one big one
 
@@ -472,7 +472,7 @@ $$
 For equal sizes $B_j = B/K$ the weights are all $1/K$: accumulate the sum of the micro-batch gradients, then multiply by $1/K$. For unequal sizes the weights differ, and a flat $1/K$ is wrong. The least error-prone design avoids the issue: have each micro-batch compute the gradient of *its examples' sum divided by the total count* $B$, then a plain sum is the answer for any split.
 
 <!-- worked: layer_gradients.microbatch_accumulation -->
-Seed 10560831267439448640. Draw order, all from `normal()`: `X` (8 x 3, row-major), `T` (8 x 2), then `W` (2 x 3) each multiplied by 0.5; the bias `b` is zero. Loss: the mean over all B O = 16 squared errors; micro-batches are consecutive rows. The one-batch gradient has norm 1.385759 (dW only).
+Generator: the book's SplitMix64, seed 0x928f9c1584911240 (10560831267439448640). Draw order, all from `normal()`: `X` (8 x 3, row-major), `T` (8 x 2), then `W` (2 x 3) each multiplied by 0.5; the bias `b` is zero. Loss: the mean over all B O = 16 squared errors; micro-batches are consecutive rows. The one-batch gradient has norm 1.385759 (dW only).
 
 | strategy | largest abs. difference of dW from the one-batch gradient | norm of dW / norm of one-batch dW |
 |---|---:|---:|
@@ -483,7 +483,7 @@ Seed 10560831267439448640. Draw order, all from `normal()`: `X` (8 x 3, row-majo
 | micro-batches of 3, 3, 2, divided by the total B O | 2.2e-16 | 1.0000 |
 <!-- /worked -->
 
-The first row is the mean-versus-sum pitfall: forgetting to rescale gives a gradient $K = 4$ times too large, with a norm ratio of exactly $4$. The third row is the subtle one: splitting $8$ examples as $3, 3, 2$ and scaling by the flat $1/3$ gives a gradient whose norm is $4\%$ too large and whose direction is off by an entry-wise error of $0.16$, which looks like noise and is a bias. The last two rows are exact to rounding, by weighting each piece by $B_j / B$ or by dividing by the total count once. Accumulation also costs no extra arithmetic: the floating-point operations of the $K$ pieces add up to those of the whole, and only the memory for saved activations drops, roughly by $K$.
+The first row is the mean-versus-sum pitfall: forgetting to rescale gives a gradient $K = 4$ times too large, with a norm ratio of exactly $4$. The third row is the subtle one: splitting $8$ examples as $3, 3, 2$ and scaling by the flat $1/3$ gives a gradient whose norm is $4\%$ too large and whose largest entry is off by $0.16$, an error that looks like noise and is a bias. The last two rows are exact to rounding, by weighting each piece by $B_j / B$ or by dividing by the total count once. Accumulation also costs no extra arithmetic: the floating-point operations of the $K$ pieces add up to those of the whole, and only the memory for saved activations drops, roughly by $K$.
 
 ```text
 function accumulate_gradient(X: array<real>[B, D], T: array<real>[B, O],
@@ -513,7 +513,7 @@ function accumulate_gradient(X: array<real>[B, D], T: array<real>[B, O],
 
 ## Every rule, and what it saves
 
-Here is the whole chapter in one table. "Needs" is what the forward pass must keep for the backward pass to read.
+All the rules fit in one table. "Needs" is what the forward pass must keep for the backward pass to read.
 
 | operation | forward | backward | the backward needs |
 |---|---|---|---|
@@ -556,7 +556,7 @@ The sums, means, reshapes and slices save nothing but sizes; the maximum and the
 Finally the check. For every rule of the table we drew random inputs from the book's generator, computed the rule's gradient and the central difference of $L = \sum G\,f(\text{inputs})$ with respect to every entry of every input, and report the largest difference:
 
 <!-- worked: layer_gradients.rule_checks -->
-Seed 5575565785777740154. One generator for the whole table, `normal()` draws in table order: for each row its inputs in the order listed (row-major), then the output gradient (row-major), which has the shape of the row's output (a single number for the sum of all entries, [4] for the sum along axis 0, [3] for the mean and the max along axis 1). For the division the denominator is replaced by 1.5 plus the absolute value of its draw. Central-difference step 1e-6; the closest any ReLU or max input comes to its kink is 0.051 (a check on your draw order). The last column is rounding noise of the central difference: expect values below 1e-8, not these digits. [x > 0] in the ReLU rule is the Iverson bracket (1 when the condition holds, 0 otherwise). Phi and phi in the GELU rule are the standard Gaussian cumulative distribution, Phi(x) = (1 + erf(x / sqrt 2)) / 2, and density, phi(x) = exp(-x^2 / 2) / sqrt(2 pi).
+Generator: the book's SplitMix64, seed 0x4d60638aa31a997a (5575565785777740154). One generator for the whole table, `normal()` draws in table order: for each row its inputs in the order listed (row-major), then the output gradient (row-major), which has the shape of the row's output (a single number for the sum of all entries, [4] for the sum along axis 0, [3] for the mean and the max along axis 1). For the division the denominator is replaced by 1.5 plus the absolute value of its draw. Central-difference step 1e-6; the closest any ReLU or max input comes to its kink is 0.051 (a check on your draw order). The last column is rounding noise of the central difference: expect values below 1e-8, not these digits. [x > 0] in the ReLU rule is the Iverson bracket (1 when the condition holds, 0 otherwise). Phi and phi in the GELU rule are the standard Gaussian cumulative distribution, Phi(x) = (1 + erf(x / sqrt 2)) / 2, and density, phi(x) = exp(-x^2 / 2) / sqrt(2 pi).
 
 | operation | backward rule | inputs | largest absolute difference |
 |---|---|---|---:|
@@ -627,7 +627,7 @@ A stack of identical layers, where the first layer needs no dX because the data 
 | 32 | 822,083,584 | 1,618,477,056 | 1.9688 |
 <!-- /worked -->
 
-**The backward pass of a matrix multiply costs about twice its forward pass** in arithmetic: $4BDO$ against $2BDO$ when the layer needs both $d\mathbf{X}$ and $d\mathbf{W}$. The first layer of a network needs no $d\mathbf{X}$, because the data are not a parameter and nothing below them needs a gradient; that layer's backward costs the same as its forward. A stack of $L$ identical layers therefore costs $(2L - 1)/L$ forwards in its backward, which tends to $2$ as depth grows; the table shows $1.9688$ at $32$ layers. A training step is a forward plus a backward, about three forwards of arithmetic, the figure Chapter 4 used. Everything else in the table is cheap by comparison: the bias add and the bias gradient are $BO$ operations each, against $2BDO$, a fraction $1/(2D)$ of one product. They are limited by moving data and not by arithmetic, which is why engines spend effort on them (the next section has an example).
+**The backward pass of a matrix multiply costs about twice its forward pass** in arithmetic: $4BDO$ against $2BDO$ when the layer needs both $d\mathbf{X}$ and $d\mathbf{W}$. The first layer of a network needs no $d\mathbf{X}$, because the data are not a parameter and nothing below them needs a gradient; that layer's backward costs the same as its forward. A stack of $n$ identical layers therefore costs $(2n - 1)/n$ forwards in its backward, which tends to $2$ as depth grows; the table shows $1.9688$ at $32$ layers. A training step is a forward plus a backward, about three forwards of arithmetic, the figure Chapter 4 used. Everything else in the table is cheap by comparison: the bias add and the bias gradient are $BO$ operations each, against $2BDO$, a fraction $1/(2D)$ of one product. They are limited by moving data and not by arithmetic, which is why engines spend effort on them (the bias-gradient kernels below are an example).
 
 ## Five ways a correct rule goes wrong in code
 
@@ -645,7 +645,7 @@ Every rule above is short, and a short rule can still be implemented wrongly wit
 
 ## The rules as kernels, and the bugs that broke them
 
-brain's backward passes are written by hand as one kernel per rule (Chapter 4 explained why), so the rules of this chapter are visible as files in `crates/kernels/wgsl/`.
+In brain, backward passes are written by hand as one kernel per rule (Chapter 4 explained why), so the rules of this chapter are visible as files in `crates/kernels/wgsl/`.
 
 **Matrix products.** `matmul_dx.wgsl` computes $dX[m, k] = \sum_n dY[m, n]\,W[n, k]$ with one thread per output element and a serial sum over $n$. It takes an `accumulate` flag: $0$ overwrites, $1$ adds, "so dX can collect contributions from several matmuls", for example a shared input read by several experts of a mixture. `matmul_dw.wgsl` is $dW[n, k] \mathrel{+}= \sum_m dY[m, n]\,X[m, k]$ and always adds (`dw[idx] = dw[idx] + acc`); its header states that the weight-gradient buffer "is zeroed once before the backward pass" and that adding is what lets a tied embedding collect the contributions of both the output projection and the lookup. The two kernels are the two products of the section on matrix multiplication, and the two loops are the same length, $2BDO$ operations each, as the work table showed.
 
@@ -665,7 +665,7 @@ Three defects from brain's history are this chapter's rules broken.
 
 *Half a buffer assigned, half accumulated* (commit `002c3aeb8`, 25 September 2026; knowledge #157). A head wrote its hidden-state gradient into one buffer in two pieces: the state rows with an assigning kernel (`row_scatter`), the option rows with an accumulating one (`emb_bwd`). The assigned half corrected itself every step; the accumulated half carried the running sum of every step before it, because one backward path, the one for a frozen encoder, never cleared the buffer. Nothing in the crate read that half, so no test noticed; a regression test repeats one identical step twice and asserts the two gradients are equal (before the fix the second was exactly twice the first). The general lesson is in the section above: with a mix of assigning and accumulating writers into one buffer, the assigning one *masks* the missing clear of the other.
 
-*The averaging scale* (commit `fab825f32`, 30 September 2026; knowledge #181). The optimiser entry point took an `extra_scale` that is the $1/K$ average of $K$ accumulated micro-batches, and the optimisers disagreed on what it meant: the device kernels multiplied by it, several host optimisers divided by it (a factor $K^2$ apart), and the clipping norm was measured on the unscaled sum. The test that compared two optimisers passed anyway, because Adam divides by the root of its second moment, which cancels a constant gradient scale unless $\varepsilon$ is comparable to it. The commit made one function, `optim::grad_multiplier`, the single definition, and tested it with a large $\varepsilon$ where scale shows. That is the "mean-versus-sum scaling pitfall" of the accumulation section, hidden for a time by the optimiser that Chapter 7 will introduce.
+*The averaging scale* (commit `fab825f32`, 30 September 2026; knowledge #181). The optimiser entry point took an `extra_scale` that is the $1/K$ average of $K$ accumulated micro-batches, and the optimisers disagreed on what it meant: the device kernels multiplied by it, several host optimisers divided by it (a factor $K^2$ apart), and the clipping norm was measured on the unscaled sum. The test that compared two optimisers passed anyway, because Adam divides by the root of its second moment, which cancels a constant gradient scale unless $\varepsilon$ is comparable to it. The commit made one function, `optim::grad_multiplier`, the single definition, and tested it with a large $\varepsilon$ where scale shows. That is the mean-versus-sum pitfall of the accumulation section, hidden for a time by the optimiser that Chapter 7 will introduce.
 
 A fourth entry is the shared weight. In the vision tower of one imported model the same two convolutions run twice, once on the main path and once on a high-resolution branch whose output is added with a learned scale. The weight gradient is the sum of both uses, and the kernel `conv2d_dw.wgsl` accumulates into the parameter's buffer, so the sum came for free (commit `8d2b4f884`, 30 September 2026). The lesson is in the test, knowledge #187: a gradient check that projects the gradient on a few random directions passed even when one of the two uses was deliberately dropped, on one of the two weight tensors. A weight read at several sites is checked entry by entry (`crates/gradcheck/src/lib.rs`, `elementwise_check`; the gate is `check_sam_hd_shared` in `crates/gradcheck/src/sam_hd.rs`), at a coupling that is large enough for the second use to show.
 
@@ -711,7 +711,7 @@ We have taken each rule on trust from its derivation plus a quick numerical comp
 
 8. **[Implement]** Implement the softmax backward and reproduce `layer_gradients.softmax_backward`. Check that rows of $d\mathbf{x}$ sum to zero, and that adding $100$ to every logit changes neither $\mathbf{y}$ nor $d\mathbf{x}$ when softmax subtracts the row maximum.
 
-9. **[Implement]** Implement the SplitMix64 generator of Chapter 17, draw the data of `layer_gradients.microbatch_accumulation` in the stated order from the stated seed, and reproduce the five strategies of its table, including the factor $4$ and the $4\%$ error.
+9. **[Implement]** Implement the SplitMix64 generator of Volume I, Chapter 17, draw the data of `layer_gradients.microbatch_accumulation` in the stated order from the stated seed, and reproduce the five strategies of its table, including the factor $4$ and the $4\%$ error.
 
 10. **[Implement]** Implement the batched shared-weight product, the gather and the shared-weight example, and reproduce `layer_gradients.batched_matmul`, `layer_gradients.index_ops` and `layer_gradients.shared_weight`. In the last, run the "assign" variant and confirm that its error equals the missing term exactly.
 

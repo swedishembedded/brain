@@ -220,7 +220,7 @@ def batched_matmul():
         return [mm(a_[i], b_) for i in range(n)]
 
     num = central_vjp(f, [a, b], dc)
-    lines = [f"Seed {bookrng.seed_of(name)}. Draw order: every entry is `integer(7) - 3`, so a value in -3 .. 3; "
+    lines = [f"Generator: the book's SplitMix64, seed 0x{bookrng.seed_of(name):016x} ({bookrng.seed_of(name)}). Draw order: every entry is `integer(7) - 3`, so a value in -3 .. 3; "
              f"first `A` ({n} x {m} x {k} = {n * m * k} values, batch index slowest), then the shared `B` "
              f"({k} x {p} = {k * p} values), then `dC` ({n} x {m} x {p} = {n * m * p} values).", "",
              "Forward: `C[i] = A[i] B` for batch item `i`, one weight matrix `B` shared by both items.", ""]
@@ -603,7 +603,7 @@ def microbatch_accumulation():
         aw, _ = accumulate(sizes, sc, dn)
         rows.append(f"| {title} | {maxdiff(aw, big_w):.1e} | {norm(aw) / norm(big_w):.4f} |")
     return "\n".join([
-        f"Seed {bookrng.seed_of(name)}. Draw order, all from `normal()`: `X` ({MB_B} x {MB_D}, row-major), "
+        f"Generator: the book's SplitMix64, seed 0x{bookrng.seed_of(name):016x} ({bookrng.seed_of(name)}). Draw order, all from `normal()`: `X` ({MB_B} x {MB_D}, row-major), "
         f"`T` ({MB_B} x {MB_O}), then `W` ({MB_O} x {MB_D}) each multiplied by 0.5; the bias `b` is zero. "
         f"Loss: the mean over all B O = {MB_B * MB_O} squared errors; micro-batches are consecutive rows. "
         f"The one-batch gradient has norm {norm(big_w):.6f} (dW only).", ""] + rows)
@@ -752,7 +752,7 @@ def rule_checks():
         worst = max(worst, d)
         rows.append(f"| {title} | {RULE_FORMS[title]} | {', '.join(str(list(s)) for s in shapes)} | {d:.1e} |")
     return "\n".join([
-        f"Seed {bookrng.seed_of(name)}. One generator for the whole table, `normal()` draws in table order: for "
+        f"Generator: the book's SplitMix64, seed 0x{bookrng.seed_of(name):016x} ({bookrng.seed_of(name)}). One generator for the whole table, `normal()` draws in table order: for "
         f"each row its inputs in the order listed (row-major), then the output gradient (row-major), which has the shape of the row's output "
         f"(a single number for the sum of all entries, [4] for the sum along axis 0, [3] for the mean and the max along axis 1). For the "
         f"division the denominator is replaced by 1.5 plus the absolute value of its draw. Central-difference "

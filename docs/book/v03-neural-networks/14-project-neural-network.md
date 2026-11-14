@@ -15,17 +15,17 @@ A neural network library can pass every test its author thought to write and sti
 6. **Two models trained end to end.** A classifier with softmax cross-entropy on a three-class synthetic task, and the autoencoder of chapter 13.
 7. **A debugging exercise.** A configuration that ships with three planted defects. You find each with the checklist of chapter 12 and fix it.
 
-Five words recur, each defined by where it is used. A **fixture** is a small input fixed by a formula rather than by a generator, so that any language computes the identical numbers. A **probe** is a fixed array that stands in for the gradient arriving from above, so that a layer's output becomes a single number to differentiate. A **checkpoint** is the saved state of a training run, and the **patience** is the number of consecutive epochs without an improvement of the validation loss that the loop tolerates before it stops. A **directional** check compares the gradient with a finite difference along one direction instead of along each coordinate (chapter 6).
+Five words recur in what follows. A **fixture** is a small input fixed by a formula rather than by a generator, so that any language computes the identical numbers. A **probe** is a fixed array that stands in for the gradient arriving from above, so that a layer's output becomes a single number to differentiate. A **checkpoint** is the saved state of a training run, and the patience is the number of consecutive epochs without an improvement of the validation loss that the loop tolerates before it stops. A **directional** check compares the gradient with a finite difference along one direction instead of along each coordinate (chapter 6).
 
 Nothing here is new. Every part was derived and worked by hand; the project asks whether the parts compose into a library you would trust, which is a different thing from following a derivation. The failures it is designed to expose are the ordinary ones: a backward pass that is right for a layer alone and wrong in a network, a test instance whose sizes hide the bug, an optimizer that applies its decay in the wrong place, a checkpoint that forgets one piece of state, a schedule measured in the wrong unit, an evaluation that quietly leaves dropout on.
 
-Each milestone describes what to build (in the book's pseudocode, which fixes the interface and nothing else), explains what later work leans on it, gives a check to run before moving on, and lists the mistakes readers actually make. The **acceptance tests** at the end give inputs and the outputs a correct library produces, written so that any language can be tested against them. Every expected value was computed by a second, independent implementation, `scripts/book/worked/project_nnlib.py`, and is regenerated whenever the book is built. Use only your language's standard library plus the library of Volume I (the generator, the strided arrays, matrix multiplication, log-sum-exp and the numerical gradient).
+Each milestone describes what to build (in the book's pseudocode, which fixes the interface and nothing else), explains what later work leans on it, gives a check to run before moving on, and lists the mistakes readers actually make. The **acceptance tests** at the end give inputs and the outputs a correct library produces, written so that any language can be tested against them. Every expected value was computed by a second, independent implementation. Use only your language's standard library plus the library of Volume I (the generator, the strided arrays, matrix multiplication, log-sum-exp and the numerical gradient).
 
 ![Seven boxes labelled with the milestones. Milestones 1 (layers), 3 (optimizers) and 4 (initialisation) sit in the top row. Milestone 2 (gradient checker) is below milestone 1, and milestone 5 (training loop) is below milestone 3 and receives arrows from milestones 1, 3 and 4. Milestone 6 (two models) receives arrows from milestones 5 and 2. Milestone 7 (debugging), highlighted, sits at the bottom and receives an arrow from milestone 6.](img/nnlib-milestones.svg)
 
 The figure shows which milestone feeds which, so the order 1 to 7 is a valid build order. Build and test each milestone before starting the next. A failure in milestone 6 that traces back to milestone 1 costs an afternoon; the same failure caught by milestone 1's own check costs a minute.
 
-Before the first line of code, six questions reach across the whole volume, and the last one reaches back to Volume I. Answer each from memory before reading on; the answers are at the end.
+Before the first line of code, six questions reach across the whole volume, and the last one reaches back to Volume I.
 
 1. (Chapters 4 and 5, [Backpropagation Derived from Scratch](04-backpropagation.md) and [The Backward Pass of Every Layer](05-layer-gradients.md)) A linear layer computes $y_{nj} = \sum_i x_{ni} W_{ji} + b_j$ for a batch of $B$ rows. Given the gradient $dy$ of a scalar loss with respect to $y$, what are the gradients with respect to $W$, $b$ and $x$? What goes wrong if the backward pass assigns to $dW$ instead of adding to it?
 2. (Chapter 6, [Proving Gradients Correct](06-gradient-checking.md)) A finite-difference check is run on a layer whose batch size, input width and output width are all 4. Name two bugs it can miss for that reason, and say how the sizes should be chosen.
@@ -415,7 +415,7 @@ function init_linear(n_out: int, n_in: int, scheme: text, shape: text, rng: inou
                      factor: real) -> array<real>[n_out, n_in]
     # scheme "he": variance 2 / n_in;  "xavier": 2 / (n_in + n_out);  "fan_in": 1 / n_in
     # shape "normal": sigma * rng.normal();  "uniform": sigma * sqrt(3) * (2 * rng.uniform() - 1);
-    # "truncated": redraw rng.normal() until abs(z) <= 2, then sigma * z / sqrt(0.7737)
+    # "truncated": redraw rng.normal() until abs(z) <= 2, then sigma * z / sqrt(0.773741)
     # sigma = factor * sqrt(variance); entries are drawn row-major, one draw per entry
 ```
 
@@ -432,7 +432,7 @@ A weight matrix with n_out = 128 and n_in = 96 (12288 entries, row-major), drawn
 |---|---|---:|---:|---:|---:|
 | he | normal | +0.010290, +0.310372, -0.154359 | 0.144338 | 0.145302 | 0.5985 |
 | he | uniform | +0.121690, +0.188562, -0.005744 | 0.144338 | 0.144823 | 0.2499 |
-| he | truncated | +0.086434, -0.057611, +0.156911 | 0.144338 | 0.144787 | 0.3282 |
+| he | truncated | +0.086431, -0.057610, +0.156907 | 0.144338 | 0.144783 | 0.3282 |
 | xavier | normal | +0.188860, +0.067068, -0.053125 | 0.094491 | 0.093375 | 0.3505 |
 | fan_in | normal | +0.006299, +0.127228, -0.067008 | 0.102062 | 0.102331 | 0.4063 |
 
@@ -566,7 +566,7 @@ function make_classifier(p_drop: real, rng: inout Generator) -> Sequential
     return Sequential([first, GELU, Residual(Sequential([LayerNorm(32), inner, GELU, Dropout(p_drop)])), last])
 ```
 
-The weights are drawn in the order `first`, `inner`, `last`. The loss is `softmax_ce`. Before training, run the checklist of chapter 12 that applies: the loop of milestone 2 on the whole model, the initial loss against $\ln 3$, the label prior, a linear baseline, and the overfit-one-batch test on 8 training rows with dropout off. Then train. The full settings are in the head of the table.
+The weights are drawn in the order `first`, `inner`, `last`. The loss is `softmax_ce`. Before training, run the checklist of chapter 12 that applies: the checker of milestone 2 on the whole model, the initial loss against $\ln 3$, the label prior, a linear baseline, and the overfit-one-batch test on 8 training rows with dropout off. Then train. The full settings are in the head of the table.
 
 <!-- worked: project_nnlib.classifier_training -->
 Model: Linear 8 -> 32 (He), GELU, residual block [layer norm 32, Linear 32 -> 32 (He), GELU, dropout 0.3], Linear 32 -> 3 (1/n_in scale times 0.1); 1507 parameters, biases and layer-norm shifts 0, gains 1. Start draws: Generator seed 0x9551c68b36b463fb (10759599285985371131), weights of the three linear layers in order, row-major, one normal() each. Loop: batch 32 (16 steps per epoch, at most 40 epochs = 640 steps), shuffles of 0 .. 511 from Generator seed 0x211ccd342efd4ba8 (2386007526609865640) (one in-place shuffle per epoch), dropout draws from Generator seed 0x4f307fd441988ba6 (5706201277488728998) (one uniform() per element of the 32 x 32 block, row-major, per step). AdamW (0.9, 0.999, 1e-8), decay 0.01, clip 1.0, peak rate 0.003, warmup 64 steps, cosine to 3.0e-05, early stopping with patience 8 on the validation loss. Losses and accuracy are computed in eval mode over the whole set after each epoch; 'grad norm' is the mean norm before the clip, 'clipped' the number of clipped steps in the epoch, 'rate' the rate of the epoch's last step. Linear softmax baseline: one linear layer 8 -> 3 (weights N(0, 1/8) row-major from Generator seed 0xb55c5dfb7d7f3d96 (13068423553446002070), biases 0), trained on the same data by the same loop (batch 32, shuffles from the classifier's shuffle stream, no dropout, no early stopping) for 20 epochs of 16 steps with AdamW decay 0.01, clip 1 and peak rate 0.01 (warmup 32 steps, cosine to 1e-4); validation loss and accuracy in eval mode after epoch 20. Overfit one batch: the classifier above with dropout in eval mode (off), training rows 0 to 7, a constant rate 0.01 (no schedule), AdamW without clip and without decay, 150 steps, the loss before the first step and after the 150th and the accuracy on those 8 rows.
@@ -628,7 +628,7 @@ Data, start and shuffles are the streams of chapter 13: `first_models.ae_data` (
 Best validation loss 0.00246 at epoch 281; the checkpoint kept is that epoch's, with test loss 0.00254. Mean predictor on the test readings: 0.72837.
 <!-- /worked -->
 
-The run reproduces the log of chapter 13 to the digits printed there: the loss at epoch 1 is $1.00545$, the best validation loss is at epoch 281, and the test loss of the checkpoint is $0.00254$ against $0.72837$ for the mean predictor. That agreement is an independent test of the library: that chapter's code shares nothing with this chapter's but the generator and the arithmetic it describes. (Your library computes in its own order of summation, so an agreement to five decimals is the expected result and a bit-exact one is not.)
+The run reproduces the log of chapter 13 to the digits printed there: the loss at epoch 1 is $1.00545$, the best validation loss is at epoch 281, and the test loss of the checkpoint is $0.00254$ against $0.72837$ for the mean predictor. That agreement is an independent test of your library, because chapter 13's numbers came from separate code that shares nothing with it but the generator and the arithmetic. (Your library computes in its own order of summation, so an agreement to five decimals is the expected result and a bit-exact one is not.)
 
 These two are the smallest models that exercise every part: a classifier with a normalization, a residual connection and dropout, and a regression with a bottleneck. A library that trains both and passes every check is the base on which the engines of later volumes are compared.
 
@@ -741,7 +741,7 @@ The diagnosis itself can go wrong in four ways.
 
 ## The checklist your library must pass
 
-The checklist repeats the blocks printed in the milestones. The network is correct when every line of it holds. "Exact" means integers or text equal; "to $t$" means the stated absolute tolerance.
+The checklist repeats the blocks printed in the milestones. The library is correct when every line of it holds. "Exact" means integers or text equal; "to $t$" means the stated absolute tolerance.
 
 | milestone | test | expected | tolerance |
 |---|---|---|---|
@@ -800,7 +800,7 @@ If every acceptance test passes you have built and checked: ten layer types and 
 
 What the project established, in order. The sizes of the test instance decide what the gradient check can see. A layer is not checked until its input gradient is. A resumed run is the same run only if the order of the examples and the state of every generator travel with the weights. A schedule is a function of steps and a loss curve is read in epochs. A passing gradient check and a passing overfit test say nothing about the data or about the evaluation.
 
-Where this stops. The library is dense, single-threaded and written for clarity: every layer is a few loops, and the cost of the autoencoder run is the 456 multiply-adds per example of chapter 13 repeated 2400 steps over a batch of 32. It has no attention, no convolution, no batch normalization (which needs running statistics and a second mode), no gradient accumulation across calls to the optimizer and no mixed precision. The next volume trains models that are millions of times larger, where nothing can be checked by hand; the habits built here (the fixture, the checker with distinct sizes, the exact resume, the checklist in order of cost) are what stand in for checking.
+Where this stops. The library is dense, single-threaded and written for clarity: every layer is a few loops, and the cost of the autoencoder run is the 456 multiply-adds per example of chapter 13 repeated 2400 steps over a batch of 32. It has no attention, no convolution, no batch normalization (which needs running statistics and a second mode), no gradient accumulation across calls to the optimizer and no mixed precision. Later volumes train models that are millions of times larger, where nothing can be checked by hand; the habits built here (the fixture, the checker with distinct sizes, the exact resume, the checklist in order of cost) are what stand in for checking.
 
 ## Further trainers to build on the library
 
@@ -812,7 +812,7 @@ These are optional. Each is a bigger test of the same ideas.
 4. **A deeper residual stack.** Make the residual block appear 1, 4, 8 and 16 times. Compare the gradient norm per layer at initialization with and without scaling the last weights of each branch by $1/\sqrt{2L}$ (chapter 9, "Residual branches").
 5. **A gradient accumulation loop.** Run the batch of 32 as four micro-batches of 8, accumulating into the same gradient before one optimizer step. Show that the log agrees with milestone 6 to $10^{-10}$ and say which layer would break this (chapter 10).
 6. **Kinks.** Replace GELU by ReLU in the classifier. Which entries of the model check now fail, how many, and what does the margin test of chapter 6 say about the input that was used?
-7. **A sixth planted defect.** Plant a defect of your own in the driver of milestone 7 (for example, the clip applied after the update, or the decay on the gradient), and write the table of symptoms that a reader following the checklist would see. Give the driver to another reader and ask them to find it.
+7. **A fourth planted defect.** Plant a defect of your own in the driver of milestone 7 (for example, the clip applied after the update, or the decay on the gradient), and write the table of symptoms that a reader following the checklist would see. Give the driver to another reader and ask them to find it.
 8. **From fixtures to random inputs.** Replace the fixtures of the layer tests by inputs drawn from your generator and run the test 1000 times with different seeds. How many runs fail the ReLU check, and how many of those would the margin rule have rescued?
 
 ## Answers

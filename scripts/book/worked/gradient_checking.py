@@ -326,7 +326,7 @@ def buggy_training():
         g = grad_vector(backward(P0, X, T, bug))
         err = _norm([a - b for a, b in zip(g, g_ok)]) / _norm(g_ok)
         rows2.append([label, f"{_cos(g, g_ok):.6f}", f"{err:.3f}"])
-    head = (f"Setup: B = {B} examples, D = {D} inputs, H = {H} hidden units, O = {O} outputs, tanh, mean squared error. Seed {bookrng.seed_of(name)}; draws in order: X ({B} x {D}, row-major), "
+    head = (f"Setup: B = {B} examples, D = {D} inputs, H = {H} hidden units, O = {O} outputs, tanh, mean squared error. Generator: the book's SplitMix64 with seed 0x{bookrng.seed_of(name):016x} ({bookrng.seed_of(name)}); draws in order: X ({B} x {D}, row-major), "
             f"V ({D} x 3, row-major), Wt (3 x {O}, row-major), W1 ({H} x {D}, row-major, each draw multiplied by 0.3), W2 ({O} x {H}, row-major, each draw multiplied by 0.3), all normal(); the biases start at 0. "
             "The targets are T = tanh(X V) Wt (tanh elementwise). Plain full-batch gradient descent in double precision, 2000 steps; each entry is the loss before the step with that index.\n\n")
     mid = "\n\nAt the starting weights, the gradient each buggy backward pass returns against the correct one (the 7 x 5 + 7 + 2 x 7 + 2 = 58 numbers):\n\n"
@@ -471,7 +471,7 @@ def accumulator_noise():
     for label, acc64 in (("32-bit accumulator", False), ("64-bit accumulator", True)):
         num = (loss(r32(w0 + h), acc64) - loss(r32(w0 - h), acc64)) / (2 * h)
         rows.append([label, f"{num:.6f}", _sci(abs(num - exact), 2)])
-    head = (f"L(w) = (1/N) sum_k (a_k w + b_k)^2 with N = {n}, w = {w0:.10f}, h = 5e-3. Seed {bookrng.seed_of(name)}; draws in order: a_0 ... a_{n - 1}, then b_0 ... b_{n - 1}, each normal() rounded to 32 bits. "
+    head = (f"L(w) = (1/N) sum_k (a_k w + b_k)^2 with N = {n}, w = {w0:.10f}, h = 5e-3. Generator: the book's SplitMix64 with seed 0x{bookrng.seed_of(name):016x} ({bookrng.seed_of(name)}); draws in order: a_0 ... a_{n - 1}, then b_0 ... b_{n - 1}, each normal() rounded to 32 bits. "
             f"w is 0.3 rounded to 32 bits, and the two evaluation points w + h and w - h are each rounded to 32 bits before use, so the quotient (L(w + h) - L(w - h)) / (2 h) is taken in 64 bits on 32-bit losses. "
             "Every product a_k w, sum with b_k and square inside a term is rounded to 32 bits; only the sum over k differs: the 32-bit accumulator adds the 4096 terms in order k = 0, 1, ... starting from 0, rounding every partial sum to 32 bits, and rounds the division by N to 32 bits; "
             f"the 64-bit accumulator sums the (still 32-bit) terms exactly and divides by N in 64 bits. The exact derivative is 2/N sum a_k (a_k w + b_k) = {exact:.6f}.\n\n")
@@ -654,9 +654,9 @@ def bug_catalogue():
         rows.append([desc[bug], f"{_cos(g, gv):.6f}", f"{err:.3f}", f"{fail_entries} of {len(g)}",
                      "pass" if not fails else "FAIL: " + ", ".join(fails)])
     head = (f"Network B = {B}, D = {D}, H = {H}, O = {O} ({len(gv)} parameters), tanh, mean squared error, double precision. "
-            f"Seed {bookrng.seed_of(name)}; draws in order: X (row-major), T (row-major), W1 (row-major), b1, W2 (row-major), b2, each normal(), the last four multiplied by 0.5. "
+            f"Generator: the book's SplitMix64 with seed 0x{bookrng.seed_of(name):016x} ({bookrng.seed_of(name)}); draws in order: X (row-major), T (row-major), W1 (row-major), b1, W2 (row-major), b2, each normal(), the last four multiplied by 0.5. "
             "Per-entry check: central difference with h = 1e-5 on every parameter. "
-            f"Directional check: per tensor 4 directions of +-1 entries (seed {bookrng.seed_of(dname)}; for W1, b1, W2, b2 in turn, four directions each, an entry is +1 when integer(2) is 1 and -1 otherwise), step eps = 1e-4, the best of the four kept by relative error. "
+            f"Directional check: per tensor 4 directions of +-1 entries (a second generator, the book's SplitMix64 with seed 0x{bookrng.seed_of(dname):016x} ({bookrng.seed_of(dname)}); for W1, b1, W2, b2 in turn, four directions each, an entry is +1 when integer(2) is 1 and -1 otherwise), step eps = 1e-4, the best of the four kept by relative error. "
             "The 16 directions are drawn once, before any row is evaluated, and every row that is evaluated uses these same 16; a row rejected by the shape check is not evaluated, so it uses none. "
             f"Both use the gate |a - n| <= {F64_ATOL:g} + {F64_RTOL:g} max(|a|, |n|). The cosine and relative L2 error compare the 58 analytic values with the correct backward pass's.\n\n")
     return head + _table(["bug injected in the backward pass", "cosine with correct gradient", "relative L2 error", "per-entry check: entries failing", "directional check, best of 4"], rows,
@@ -691,7 +691,7 @@ def dims_hide():
                 bad = sum(not within(a, n, F64_ATOL, F64_RTOL) for a, n in zip(g, fd))
                 cells[(label, bug)] = f"caught ({bad} of {len(g)} entries)" if bad else "wrong but passes"
     rows = [[f"{label}, (B, D, H, O) = {dims}"] + [cells[(label, b)] for b, _ in DIM_BUGS] for label, dims in DIM_SETS]
-    head = (f"One generator, seed {bookrng.seed_of(name)}, draws the four problems one after another; for each, in the order X (row-major), T (row-major), W1 (row-major), b1, W2 (row-major), b2, each normal(), the last four multiplied by 0.5. "
+    head = (f"One generator, the book's SplitMix64 with seed 0x{bookrng.seed_of(name):016x} ({bookrng.seed_of(name)}), draws the four problems one after another; for each, in the order X (row-major), T (row-major), W1 (row-major), b1, W2 (row-major), b2, each normal(), the last four multiplied by 0.5. "
             f"Per-entry check in double precision: central difference h = 1e-5, gate |a - n| <= {F64_ATOL:g} + {F64_RTOL:g} max(|a|, |n|). \"Shape error\": the buggy formula's result has a shape that cannot be the parameter's, or the product does not exist.\n\n")
     return head + _table(["test sizes"] + [d for _, d in DIM_BUGS], rows, "l" + "l" * len(DIM_BUGS))
 
@@ -738,7 +738,7 @@ def directional_miss():
         ["per-entry check: at least one of the 35 entries fails", f"{entry_fail} of {trials}"],
         ["per-entry check: mean share of the 35 entries that fail", f"{entry_share / trials:.3f}"],
     ]
-    head = (f"Bug: the batch sum of dW1 omits the last of B = {B} examples. One generator, seed {bookrng.seed_of(name)}, draws {trials} problems one after another (D = {D}, H = {H}, O = {O}); "
+    head = (f"Bug: the batch sum of dW1 omits the last of B = {B} examples. One generator, the book's SplitMix64 with seed 0x{bookrng.seed_of(name):016x} ({bookrng.seed_of(name)}), draws {trials} problems one after another (D = {D}, H = {H}, O = {O}); "
             "for each, X, T, W1, b1, W2, b2 as in bug_catalogue, then four directions of 35 entries each (+1 when integer(2) is 1, otherwise -1), the first of the four being 'one random direction'. "
             f"Directional comparison: eps = {eps:g} on W1 alone; per entry: h = 1e-5; gate {LOOSE_ATOL:g} + {LOOSE_RTOL:g} max(|a|, |n|), double precision.\n\n")
     return head + _table(["measure", "result over 1000 random problems"], rows)

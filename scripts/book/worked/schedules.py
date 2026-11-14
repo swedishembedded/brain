@@ -677,7 +677,7 @@ def clip_threshold_table():
         outs = [train(CLEAN_SCHEDULE, stream=s, clip=tau, outlier=(OUT_STEP, OUT_FACTOR), dense=700) for s in ORDERS]
         rows.append([f"{tau:g}", f"{100 * frac:.1f}%", cell(tail, runs), cell(lambda q: worst(q, 301, 400), outs, 3), cell(tail, outs)])
     head = ("The run of the previous tables (warmup 30 steps to 0.3, cosine to 0.003, 600 steps) on the five batch orders of the schedule comparison, with the global-norm clip "
-            f"at each threshold tau, once as it is and once with the outlier of the next table (the gradient of step index {OUT_STEP} multiplied by {OUT_FACTOR:g}). "
+            f"at each threshold tau, once as it is and once with the outlier of the outlier-batch table (the gradient of step index {OUT_STEP} multiplied by {OUT_FACTOR:g}). "
             "Columns: the share of the 3000 steps of the clean runs in which the clip changed the gradient; the tail (mean loss at steps 550, 560, ..., 600) of the clean runs; "
             "the largest loss over steps 301 to 400 of the runs with the outlier; their tail. All loss entries are means of the five orders. " + _unstable_note() + "\n\n")
     return head + _table(["tau", "steps clipped (clean)", "tail (clean)", "worst, 301-400 (outlier)", "tail (outlier)"], rows)
