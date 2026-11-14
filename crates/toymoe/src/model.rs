@@ -385,8 +385,9 @@ pub struct EvalReport {
 
 /// Next-token accuracy of the checkpoint at `weights` on the toy corpus that
 /// `corpus_seed` names (the trainer's is [`train::CORPUS_SEED`]), over at
-/// most `samples` positions per measurement.
-pub fn evaluate(weights: &str, corpus_seed: u64, samples: usize) -> Result<EvalReport, String> {
+/// most `samples` positions per measurement. `keep_going` is asked before
+/// every forward; once it says no the evaluation answers `Err(CANCELLED)`.
+pub fn evaluate(weights: &str, corpus_seed: u64, samples: usize, keep_going: &mut dyn FnMut() -> bool) -> Result<EvalReport, String> {
     let weights = load_weights(weights)?;
     let vocab = weights.cfg.vocab_size;
     let bs = weights.cfg.block_size as usize;
@@ -397,12 +398,15 @@ pub fn evaluate(weights: &str, corpus_seed: u64, samples: usize) -> Result<EvalR
     let (train_region, val_region) = corpus.split_at(corpus.len() - n_val);
     let new_orbit = train::orbit(&table, vocab, 1500, 41, 7);
 
-    let acc = |seq: &[u32], ctx: usize, skip_reset: bool| -> f32 {
+    let mut acc = |seq: &[u32], ctx: usize, skip_reset: bool| -> Result<f32, String> {
         let ctx = ctx.min(bs);
         let (mut correct, mut total) = (0usize, 0usize);
         for j in (ctx - 1)..(seq.len() - 1) {
             if skip_reset && (j + 1) % 257 == 0 {
                 continue;
+            }
+            if !keep_going() {
+                return Err(capability::failure::CANCELLED.to_string());
             }
             let logits = engine.forward(&seq[j - ctx + 1..=j]);
             let pred = logits.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).map_or(0, |(i, _)| i as u32);
@@ -412,16 +416,16 @@ pub fn evaluate(weights: &str, corpus_seed: u64, samples: usize) -> Result<EvalR
                 break;
             }
         }
-        correct as f32 / total.max(1) as f32
+        Ok(correct as f32 / total.max(1) as f32)
     };
 
-    let by_context: Vec<(usize, f32)> = [2usize, 8, 16, 32, bs].into_iter().filter(|&l| l <= bs).map(|l| (l, acc(&new_orbit, l, false))).collect();
+    let by_context = [2usize, 8, 16, 32, bs].into_iter().filter(|&l| l <= bs).map(|l| Ok((l, acc(&new_orbit, l, false)?))).collect::<Result<Vec<(usize, f32)>, String>>()?;
     let (best_context, new_orbit_acc) = by_context.iter().copied().max_by(|a, b| a.1.total_cmp(&b.1)).ok_or("the checkpoint's block size is below 2")?;
     Ok(EvalReport {
         random: 1.0 / vocab as f32,
         best_context,
-        train_orbit: acc(train_region, best_context, true),
-        val_orbit: acc(val_region, best_context, true),
+        train_orbit: acc(train_region, best_context, true)?,
+        val_orbit: acc(val_region, best_context, true)?,
         new_orbit: new_orbit_acc,
         by_context,
     })
@@ -445,8 +449,9 @@ fn check_prompt(prompt: &[u32], vocab: u32) -> Result<(), String> {
 }
 
 /// `prompt` continued by `max_new` sampled tokens (temperature `temperature`,
-/// the `top_k` most likely when given), from `seed`.
-pub fn generate(weights: &str, prompt: &[u32], max_new: usize, temperature: f32, top_k: Option<usize>, seed: u64) -> Result<Vec<u32>, String> {
+/// the `top_k` most likely when given), from `seed`. `keep_going` is asked
+/// before every token; once it says no the call answers `Err(CANCELLED)`.
+pub fn generate(weights: &str, prompt: &[u32], max_new: usize, temperature: f32, top_k: Option<usize>, seed: u64, keep_going: &mut dyn FnMut() -> bool) -> Result<Vec<u32>, String> {
     let weights = load_weights(weights)?;
     check_prompt(prompt, weights.cfg.vocab_size)?;
     let block_size = weights.cfg.block_size as usize;
@@ -454,6 +459,9 @@ pub fn generate(weights: &str, prompt: &[u32], max_new: usize, temperature: f32,
     let mut tokens = prompt.to_vec();
     let mut rng = seed.max(1);
     for _ in 0..max_new {
+        if !keep_going() {
+            return Err(capability::failure::CANCELLED.to_string());
+        }
         let start = tokens.len().saturating_sub(block_size);
         let logits = engine.forward(&tokens[start..]);
         tokens.push(sample(&logits, temperature, top_k, &mut rng));
