@@ -84,7 +84,7 @@ impl Harness {
     }
 
     fn batch(&self) -> PgBatch<'_> {
-        PgBatch { targets: &self.targets, old_lp: &self.old_lp, ref_lp: Some(&self.ref_lp), advantage: &self.advantage }
+        PgBatch { targets: &self.targets, old_lp: &self.old_lp, ref_lp: Some(&self.ref_lp), advantage: &self.advantage, is_weight: None }
     }
 
     fn assert_base_point_is_clear_of_the_clip_boundaries(&self) {
