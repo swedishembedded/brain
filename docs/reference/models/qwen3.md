@@ -358,6 +358,14 @@ These apply to serving (`brain serve` flags):
   batched decode) run on TF32 tensor cores where the card has them
   (operands rounded to a 10-bit mantissa, fp32 accumulation, no extra
   memory).
+- `--exact-decode` - make a request's tokens and per-token log-probabilities
+  independent of what shares its batch: every decode linear and the head run
+  the one GEMV that keeps a row's arithmetic at every row count (int8 steps
+  are cut into groups small enough to stay on it), the int8 attention splits
+  each row's keys as a single sequence's are split, a prompt reuses cached
+  blocks only at prefill-chunk boundaries (so a cached prefix holds what a
+  cold prefill computes), and speculation is off. Refused beside an adapter
+  bank, `--sparse-attention` or a 4-bit weight format. Default off.
 - the prefill row cap - cap the chunked-prefill row count below its
   512 default (clamped to `1..=512`; can only shrink it). The scores/probs
   scratch buffer this bounds is the single largest per-token-scaling cost

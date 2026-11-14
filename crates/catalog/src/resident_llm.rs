@@ -499,6 +499,9 @@ pub struct QwenServeConfig {
     pub gemm_precision: gpu_core::provider::library::GemmPrecision,
     /// `the norm-fusion switch` turns off the residual-add + norm fusion (the A/B switch of that launch fusion); default on.
     pub fuse_residual_norm: bool,
+    /// `--exact-decode`: a decode row's tokens and log-probabilities do not depend on what shares its batch
+    /// (`qwen3::serve::Engine::set_exact_decode`); default off.
+    pub exact_decode: bool,
     /// `--adapter-slots`, `--adapter-rank-cap`, `--adapter-targets`: the
     /// size of the adapter bank built beside the base weights, which lets
     /// requests run under LoRA adapters ([`crate::adapter_registry`]). `None`
@@ -532,7 +535,7 @@ pub const QWEN3_POLICY: model::policy::PolicySupport = model::policy::PolicySupp
     gemm: true,
     fuse_norm: true,
     kv_calibration: true,
-    exact_decode: false,
+    exact_decode: true,
     act_precision: false,
     gdn_state: false,
     linear_activations: false,
@@ -572,6 +575,7 @@ impl QwenServeConfig {
         if let Some(f) = p.fuse_norm {
             self.fuse_residual_norm = f;
         }
+        self.exact_decode |= p.exact_decode;
         if let Some(path) = &p.sparse_attention {
             self.sparse_attention = Some(path.clone());
         }
@@ -593,7 +597,7 @@ impl QwenServeConfig {
 
 impl Default for QwenServeConfig {
     fn default() -> QwenServeConfig {
-        QwenServeConfig { weights: None, tokenizer: None, ctx: None, auto_budget_bytes: None, card_budget_bytes: None, max_batch: 16, kv_int8: true, kv_fp8: false, kv_calib_opt_in: false, kv_offload_gb: 0.0, weights_int8: None, weights_bf16: false, weight_tiers: None, max_prefill_cap: 512, kv_tokens: None, gemm_precision: gpu_core::provider::library::GemmPrecision::Auto, fuse_residual_norm: true, adapter_bank: None, adapter_targets_named: false, refused: None, sparse_attention: None }
+        QwenServeConfig { weights: None, tokenizer: None, ctx: None, auto_budget_bytes: None, card_budget_bytes: None, max_batch: 16, kv_int8: true, kv_fp8: false, kv_calib_opt_in: false, kv_offload_gb: 0.0, weights_int8: None, weights_bf16: false, weight_tiers: None, max_prefill_cap: 512, kv_tokens: None, gemm_precision: gpu_core::provider::library::GemmPrecision::Auto, fuse_residual_norm: true, exact_decode: false, adapter_bank: None, adapter_targets_named: false, refused: None, sparse_attention: None }
     }
 }
 
@@ -821,6 +825,7 @@ pub struct QwenResident {
     card_budget_bytes: Option<u64>,
     gemm_precision: gpu_core::provider::library::GemmPrecision,
     fuse_residual_norm: bool,
+    exact_decode: bool,
     refused: Option<String>,
     /// The sampling defaults the checkpoint's `generation_config.json` declares, read once.
     sampling: std::sync::OnceLock<data::generation::SamplingDefaults>,
@@ -926,6 +931,7 @@ impl QwenResident {
             card_budget_bytes: cfg.card_budget_bytes.or(cfg.auto_budget_bytes),
             gemm_precision: cfg.gemm_precision,
             fuse_residual_norm: cfg.fuse_residual_norm,
+            exact_decode: cfg.exact_decode,
             refused: cfg.refused.clone(),
             sampling: std::sync::OnceLock::new(),
         }
@@ -1433,6 +1439,8 @@ impl ResidentModel for QwenResident {
             if let Some(bank) = self.adapters.settings() {
                 eng.enable_adapters(bank.bank_config(&checkpoint_cfg)?).map_err(|e| format!("qwen: adapter bank: {e}"))?;
             }
+            // After everything it pins is in place (the bank and the sparse attention are what it refuses).
+            eng.set_exact_decode(self.exact_decode)?;
             // --kv-calibration: opt IN to a kv_calib.json beside the
             // BASE checkpoint (measured on the base's K/V distribution, which
             // an adapter's differs from: the engine warns when the two are
@@ -1601,7 +1609,10 @@ mod tests {
         p.set("prefix-slots", "16").unwrap();
         p.set("--sparse-attention", "/indexers/qwen3-0.6b.safetensors").unwrap();
         let mut cfg = QwenServeConfig::default();
+        assert!(!cfg.exact_decode, "off by default: the default serving's numerics");
+        p.switch("--exact-decode").unwrap();
         let notes = cfg.apply_policy(&p).unwrap();
+        assert!(cfg.exact_decode, "--exact-decode reaches the engine");
         assert!(cfg.weights_bf16 && cfg.kv_int8 && cfg.kv_fp8);
         assert_eq!(cfg.sparse_attention.as_deref(), Some("/indexers/qwen3-0.6b.safetensors"));
         assert_eq!((cfg.ctx, cfg.max_batch, cfg.kv_offload_gb), (Some(4096), 32, 2.0));

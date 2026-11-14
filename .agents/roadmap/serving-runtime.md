@@ -708,13 +708,55 @@ serve the checkpoints exams and RL use:
       summation order independent of the row count, selected through `select`'s capability and the autotuner (a candidate
       that declares row-count invariance), not a per-model branch; then the end-to-end gate of #358 (one request's tokens and
       per-token log-probabilities unchanged while co-batched) on this checkpoint, with the throughput cost measured.
-- [ ] Qwen3: the family refuses the flag. Its decode batch (int8 and bf16 projections, the head, the split-count of the
-      attention) needs the same treatment; measured co-batch variance at the default serving is divergence at token 29 and
-      log-probability delta up to 0.07 (int8) or 0.18 (bf16 weights, int8 KV).
-- [ ] The warm-versus-cold prefix cache path computes a different prefill arithmetic than the cold prompt on Qwen3 at bf16 (a
-      repeated request differs from its first answer at token 76): a bit-identical mode must serve a cached prefix with the
-      arithmetic that computed it, or recompute.
-- Until these land, an exam gets its paired same-load base replicate from the harness, and a trainer takes its serve/train gap from
+- [x] Qwen3 takes `--exact-decode` (knowledge #457). Every row-count-dependent choice of a decode step is pinned: each
+      linear and the head run the variant `select::row_invariant_candidates` names (a candidate declares row-count
+      invariance, `KernelVariant::row_count_invariant`; the autotuner chooses among those once per weight shape,
+      `AutoTuner::resolve_row_invariant`), never the per-bucket int8 GEMV/tile choice or a library GEMM; a step carries at
+      most `select::exact_decode_group_rows` rows (the int8 GEMV's bit-identical range: 4 rows with int8 tensor cores, the
+      32-row decode regime on a P40) and a wider batch runs as consecutive groups; the int8 attention splits every row's
+      keys as a single sequence's are split; the f32-KV attention keeps the triad at every batch size; speculation is off.
+      Refused by name beside an adapter bank, `--sparse-attention` or a 4-bit tier. Gate:
+      `crates/qwen3/tests/it/engine_exact_decode.rs` (synthetic f32/bf16/int8 weights with int8 KV and f32 KV at a shape the
+      default serving fails, mutation-checked on the split pin, the int8 pin and the prefix rule; the real Qwen3-0.6B at
+      f32, int8 and bf16 weights: alone, beside 15 others, 8 identical at once, all bit-identical in tokens and per-token
+      log-probabilities). The group cut itself cannot fail on a P40 (its int8 GEMV is the same fold at every row count);
+      it is held by `i8_gemv_native::exact_decode_groups_make_every_batch_row_bit_identical_to_the_same_row_alone`.
+- [x] The warm-versus-cold prefix cache path: under `--exact-decode` a prompt reuses cached blocks only up to a boundary of
+      the cold prompt's prefill chunks, and only blocks of whole chunks are published, so a cached prefix holds what a cold
+      prefill computes and the rest of the prompt runs as the cold prompt's remaining chunks. The default serving keeps
+      block-granular reuse. A prompt shorter than one prefill chunk (512 rows by default) is therefore never served from
+      the cache in the exact regime.
+
+Measured through HTTP on one Tesla P40 (`brain serve --device gpu1 --max-batch 16`, Qwen3-0.6B, int8 KV, host load 70-120
+on 48 cores), chat completions at temperature 1, seed 1234, 128 tokens, a probe of about 1100 prompt tokens: three
+sequential repeats, the probe beside 15 other requests (8 long, 8 short), then 8 identical probes at once.
+
+| weights, mode | repeats 2-3: diverge at token | beside 15 others: token, largest log-probability delta | 8 identical: diverge at, distinct |
+|---|---|---|---|
+| fp32, default | 46 (the warm prefix) | 46, 0.089 | 46, 1 |
+| fp32, `--exact-decode` | none | none, 0 | none, 1 |
+| int8, default | 58 | 30, 0.070 | 58 (delta 0.18), 1 |
+| int8, `--exact-decode` | none | none, 0 | none, 1 |
+
+Throughput cost, same binary, fresh server per arm, arms interleaved, two rounds (median): single-stream 256-token decode,
+and aggregate output tok/s of 8 and 16 concurrent 128-token requests after a warm-up wave.
+
+| weights | metric | default | `--exact-decode` | ratio |
+|---|---|---|---|---|
+| fp32 | single-stream tok/s | 88.7 | 86.8 | 0.98 |
+| fp32 | C = 8 tok/s | 526 | 434 | 0.82 |
+| fp32 | C = 16 tok/s | 670 | 516 | 0.77 |
+| int8 | single-stream tok/s | 119.4 | 116.3 | 0.97 |
+| int8 | C = 8 tok/s | 656 | 527 | 0.80 |
+| int8 | C = 16 tok/s | 916 | 664 | 0.72 |
+
+With the int8 group at the 8 rows of the portable crossover (before the group followed the native GEMV's range) the
+int8 C = 16 arm measured 536 tok/s (0.59): the second pass over the weights. Open:
+
+- [ ] Where the remaining batched cost goes is not profiled. Candidates: the single-sequence split count gives every row
+      the alone-row's workgroup count in the int8 attention (most splits idle at these lengths), and the pinned int8 GEMV
+      replaces the tile the autotuner picks at 16 rows. An nsys run of each arm is the next step.
+- Until the FP8 item lands, an exam on Qwen3.8 gets its paired same-load base replicate from the harness, and a trainer takes its serve/train gap from
   `brain finetune --policy-gradient --numerics-gate` (#446) and corrects for it with `--importance`.
 
 ## Refusals that name the setting (2026-11-13, knowledge #448)

@@ -416,10 +416,12 @@ SERVING POLICY  (one model-agnostic policy for every model that serves it.
                          model agrees with, so greedy output is unchanged; it
                          falls back to plain decoding when the batch is large.
   --exact-decode         make a decode row's result independent of which other
-                         requests share its batch: the int8 projections and the
-                         head run in groups small enough to stay on the
-                         bit-identical kernel, and every row's attention is
-                         sized from --ctx, so an identical request returns
+                         requests share its batch: the projections and the
+                         head run on a kernel that keeps a row's arithmetic at
+                         every row count, in groups small enough to stay on it,
+                         every row's attention is split as a single sequence's,
+                         and a Qwen3 prompt reuses cached blocks only at
+                         prefill-chunk boundaries, so an identical request returns
                          identical tokens and per-token log-probabilities alone
                          or beside any batch of neighbours. Costs one extra
                          pass over the weights per group (two at --max-batch 8

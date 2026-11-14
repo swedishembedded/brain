@@ -31,6 +31,7 @@ use crate::config::QwenConfig;
 use crate::model::PrefillInput;
 
 mod adapters;
+mod exact;
 pub use adapters::{AdapterBankConfig, AdapterError, AdapterInfo, LoraSite, UnloadStatus, VerifiedAdapter};
 use model::adapter::bank::AdapterBank;
 
@@ -236,6 +237,25 @@ const PIPELINES: &[(&str, &str)] = &[
     ("lora_xa_rows_tiled", kernels::LORA_XA_ROWS_TILED),
     ("lora_delta_rows_tiled", kernels::LORA_DELTA_ROWS_TILED),
 ];
+
+/// The int8 candidates' sources, the fingerprint their measured choices are filed under.
+fn i8_tune_fingerprint() -> u64 {
+    gpu_core::tune::source_fingerprint(&[kernels::MATMUL_I8_GEMV, kernels::MATMUL_I8_DYN, &I8_TILE_TN.to_string()])
+}
+
+/// The distinct `[n, k]` shapes of the int8 linears in `weights`, each with one of its weights and that weight's scales:
+/// what an int8 choice is measured on (every layer shares the same seven shapes; the head is usually another).
+fn i8_shapes(weights: &HashMap<String, Weight>) -> Vec<(u32, u32, &DeviceBuffer, &DeviceBuffer)> {
+    let mut shapes: Vec<(u32, u32, &DeviceBuffer, &DeviceBuffer)> = Vec::new();
+    for w in weights.values() {
+        if let Weight::I8 { w: wb, s: sw, n, k } = w {
+            if !shapes.iter().any(|&(sn, sk, _, _)| sn == *n && sk == *k) {
+                shapes.push((*n, *k, wb, sw));
+            }
+        }
+    }
+    shapes
+}
 
 /// A tuned-kernel table: variant by (device, kernel sources, row bucket, shape).
 type TunedI8 = std::sync::Mutex<HashMap<(String, u64, u32, u32, u32), KernelVariant>>;
@@ -1086,6 +1106,8 @@ pub struct Engine {
     /// Staging buffers the swap moves through, built on first use (an engine
     /// that never swaps never pays for them).
     swap: Option<SwapBufs>,
+    /// The exact-decode regime's pinned choices ([`Engine::set_exact_decode`]); `None` is the default serving.
+    exact: Option<exact::ExactDecode>,
 }
 
 /// Device buffers one swap chunk moves through. A whole sequence is
@@ -1647,6 +1669,7 @@ impl Engine {
             host_kv: HostKvPool::new(block_words, 0),
             kv_block_words: block_words,
             swap: None,
+            exact: None,
         }
     }
 
@@ -2097,8 +2120,10 @@ impl Engine {
     /// per row, with the LM head applied on the device (see
     /// [`Engine::run_batched_greedy`]).
     pub(crate) fn forward_batched_greedy(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32]) -> Vec<u32> {
-        let meta = self.append_meta(tables);
-        self.run_batched_greedy(&meta, Input::Tokens(inputs), false)
+        self.grouped(tables, inputs, |e, tables, inputs| {
+            let meta = e.append_meta(tables);
+            e.run_batched_greedy(&meta, Input::Tokens(inputs), false)
+        })
     }
 
     /// Advance every sequence by one token from a ready-made embedding per sequence
@@ -2359,35 +2384,43 @@ impl Engine {
     /// Dispatch one linear `out = x @ Wᵀ` by `w`'s own tag (B7) - `self.
     /// lin_weights`'s tier, never a separate on/off flag inspected here.
     /// `x` must already be quantized (`Self::quant_once`) when `w` is `I8`.
-    fn linear(&self, s: &mut Vec<Step>, w: &Weight, x: &DeviceBuffer, out: &DeviceBuffer, rows: u32) {
+    ///
+    /// `exact` is the exact-decode regime's pinned choices for a decode step's rows (`None` for a prefill chunk, or
+    /// outside the regime): the row-invariant variant at every row count, never a library GEMM or a per-bucket choice.
+    fn linear(&self, s: &mut Vec<Step>, w: &Weight, x: &DeviceBuffer, out: &DeviceBuffer, rows: u32, exact: Option<&exact::ExactDecode>) {
         let bf16 = w.dtype() == Dtype::BF16;
         match w {
             Weight::F32 { w, n, k } => {
                 // Rows from `library_min_rows` up (batched decode and prefill) on TF32 tensor cores; fewer
                 // rows are bandwidth-bound and keep the GEMV kernels.
                 let whole = |buf| library::Operand { buf, range: (0, 0) };
-                if rows >= self.library_min_rows && self.gemm.forward_tf32(&self.gpu, s, &whole(x), &whole(w), &whole(out), rows, *n, *k) {
+                if exact.is_none() && rows >= self.library_min_rows && self.gemm.forward_tf32(&self.gpu, s, &whole(x), &whole(w), &whole(out), rows, *n, *k) {
+                    return;
+                }
+                if exact.is_some() && self.fits_one_binding(*k, *n) {
+                    let (kind, threads) = block::gemm_variant_row_invariant(self.gemm_tier(), rows, *n);
+                    s.push(self.gpu.dispatch(kind, &[x, w, out], &[rows, *k, *n], threads));
                     return;
                 }
                 self.mm_into(s, x, w, out, rows, *k, *n)
             }
             Weight::I8 { w, s: sw, n, k } => {
                 let scratch = self.i8_scratch.as_ref().expect("qwen3 serve: I8 weight built without i8_scratch");
-                self.mm8(s, scratch, w, sw, *n, *k, out, rows);
+                self.mm8(s, scratch, w, sw, *n, *k, out, rows, exact);
             }
             Weight::BF16 { w, n, k } | Weight::F16 { w, n, k } => {
                 // Rows from `library_min_rows` up of a bf16 weight on bf16 tensor cores (the activation is
                 // rounded to bf16 for the product, fp32 accumulation); fewer rows stream the weight through
                 // the inline-decode GEMV below.
                 let whole = |buf| library::Operand { buf, range: (0, 0) };
-                if bf16 && rows >= self.library_min_rows && self.gemm.forward(&self.gpu, s, &whole(x), &whole(w), &whole(out), rows, *n, *k) {
+                if exact.is_none() && bf16 && rows >= self.library_min_rows && self.gemm.forward(&self.gpu, s, &whole(x), &whole(w), &whole(out), rows, *n, *k) {
                     return;
                 }
                 // Same kernels, same selection as the fp32 path, with the
                 // weight decoded inline; no split-K variant exists for them.
                 let h = self.half_gemm.expect("qwen3 serve: half weight built without its GEMM kernels");
                 let tier = if self.caps.workgroup_reductions { block::GemmVariants::Fast { gemv: Some(h.gemv), tiled: h.tiled } } else { block::GemmVariants::Reference(h.plain) };
-                let (kind, threads) = block::gemm_variant(tier, rows, *n);
+                let (kind, threads) = if exact.is_some() { block::gemm_variant_row_invariant(tier, rows, *n) } else { block::gemm_variant(tier, rows, *n) };
                 s.push(self.gpu.dispatch(kind, &[x, w, out], &[rows, *k, *n], threads));
             }
             // A tier without a GEMM of this engine's own: the ops façade's product, on this device.
@@ -2406,9 +2439,11 @@ impl Engine {
     /// crossover is per-device. Must be preceded by a matching `Self::
     /// quant_once` writing into `scratch`.
     #[allow(clippy::too_many_arguments)]
-    fn mm8(&self, s: &mut Vec<Step>, scratch: &I8Scratch, w: &DeviceBuffer, sw: &DeviceBuffer, n: u32, k: u32, out: &DeviceBuffer, rows: u32) {
+    fn mm8(&self, s: &mut Vec<Step>, scratch: &I8Scratch, w: &DeviceBuffer, sw: &DeviceBuffer, n: u32, k: u32, out: &DeviceBuffer, rows: u32, exact: Option<&exact::ExactDecode>) {
         let shape = OpShape { m: rows, n, k, dtype: Dtype::I8 };
-        let variant = if rows <= DECODE_REGIME_MAX_ROWS {
+        let variant = if let Some(e) = exact {
+            e.i8_variant(n, k)
+        } else if rows <= DECODE_REGIME_MAX_ROWS {
             let bucket = rows.next_power_of_two().min(DECODE_REGIME_MAX_ROWS);
             self.tuned_i8
                 .get(&(bucket, n, k))
@@ -2439,21 +2474,11 @@ impl Engine {
     /// overhead amortises - and the winner persists per adapter + kernel
     /// sources. `brain --no-autotune` skips every measurement (static policy).
     fn tune_i8(gpu: &Gpu, caps: &DeviceCaps, weights: &HashMap<String, Weight>, scratch: &I8Scratch, max_rows: u32) -> HashMap<(u32, u32, u32), KernelVariant> {
-        let fp = gpu_core::tune::source_fingerprint(&[kernels::MATMUL_I8_GEMV, kernels::MATMUL_I8_DYN, &I8_TILE_TN.to_string()]);
+        let fp = i8_tune_fingerprint();
         let store = gpu_core::tune::FileTuneStore::for_device(gpu, fp)
             .map(|s| Box::new(s) as Box<dyn gpu_core::select::TuneStore>);
         let tuner = AutoTuner::new(store);
-        // Distinct (n, k) shapes across every `I8` weight this engine holds
-        // (every layer shares the same 7 shapes; the head is usually a
-        // distinct one).
-        let mut shapes: Vec<(u32, u32, &DeviceBuffer, &DeviceBuffer)> = Vec::new();
-        for w in weights.values() {
-            if let Weight::I8 { w: wb, s: sw, n, k } = w {
-                if !shapes.iter().any(|&(sn, sk, _, _)| sn == *n && sk == *k) {
-                    shapes.push((*n, *k, wb, sw));
-                }
-            }
-        }
+        let shapes = i8_shapes(weights);
         let mut out = HashMap::new();
         let device = gpu_core::tune::device_slug(gpu).unwrap_or_else(|| gpu.kind().to_owned());
         let cap_bucket = max_rows.next_power_of_two().min(DECODE_REGIME_MAX_ROWS);
@@ -2860,6 +2885,8 @@ impl Engine {
         let sc = &self.sc;
         let w = |name: &str| self.ps.w(name);
         let b = bsz;
+        // A decode step under the exact-decode regime pins every choice its row count would make.
+        let exact = self.exact.as_ref().filter(|_| !causal_chunk);
         let mut s: Vec<Step> = Vec::new();
         if !matches!(input, Input::Embeds(_)) {
             // Vocab-tiled (`Self::embed_tiled`), not a single `EMBED` dispatch
@@ -2908,7 +2935,7 @@ impl Engine {
             // `concat_split` narrows the wide `[b, hq+2*hkv]` output back
             // into the same compact `q_pre`/`k_pre`/`v` buffers QK-norm/
             // RoPE/KV-append already require.
-            self.linear(&mut s, &self.lin_weights[&p(WQKV)], &sc.xn1, &sc.qkv_pre, b);
+            self.linear(&mut s, &self.lin_weights[&p(WQKV)], &sc.xn1, &sc.qkv_pre, b, exact);
             let qkv_width = hq + 2 * hkv;
             if lora {
                 // The corrections land in the fused output's own columns
@@ -2975,7 +3002,8 @@ impl Engine {
                         // dispatch size and parameters depend on `b` alone and
                         // stay valid for every step it is replayed at. The
                         // combine pass merges the splits that did work.
-                        let n_splits = int8_decode_splits(c, b, cap);
+                        // Under the exact-decode regime every row splits its keys as a single sequence's are split.
+                        let n_splits = int8_decode_splits(c, if exact.is_some() { 1 } else { b }, cap);
                         let slabs = group.div_ceil(INT8_DECODE_SLAB);
                         s.push(g.dispatch(
                             self.kv_fp8.map_or(PAGED_FLASH_DECODE_SPLIT_I8, |k| k.decode_split),
@@ -2984,7 +3012,7 @@ impl Engine {
                             gpu_core::Dispatch::Workgroups(b * nkv * slabs * n_splits),
                         ));
                         s.push(g.step(PAGED_FLASH_DECODE_COMBINE_I8, &[&sc.part_i8, &sc.seqlen_buf, &sc.ctx], &[b, nh, hd, n_splits], b * nh * 128));
-                    } else if let Some(step) = (!causal_chunk && !self.gemm.is_reference_pinned() && self.kv_fp8.is_none())
+                    } else if let Some(step) = (!causal_chunk && exact.is_none() && !self.gemm.is_reference_pinned() && self.kv_fp8.is_none())
                         .then(|| block::native_paged_decode_batched(g, true, &[&sc.q, &self.pool_k[l], &self.pool_v[l], &self.scales_k[l], &self.scales_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.ctx], &[b, nh, nkv, hd, group, bs, mbt]))
                         .flatten()
                     {
@@ -3037,7 +3065,9 @@ impl Engine {
                     let bufs = model::lsa::engine::LayerBuffers { q: &sc.q, pos: &sc.pos_buf, seqlen: &sc.seqlen_buf, block_tables: &sc.bt_buf, pool_k: &self.pool_k[l], pool_v: &self.pool_v[l], scales: None, ctx: &sc.ctx };
                     lsa.record_layer(g, &mut s, l, b, &bufs).unwrap_or_else(|e| panic!("qwen3: latent sparse attention: {e}"));
                 } else {
-                    let fused = fused_paged_attention(g, causal_chunk, false, hd, b);
+                    // The fused decode serves a single row and the native batched one two or more, so the exact
+                    // regime keeps every batch size on the triad below, chosen as for one row.
+                    let fused = exact.is_none() && fused_paged_attention(g, causal_chunk, false, hd, b);
                     if fused && causal_chunk {
                         s.push(self.dense_chunk_attention(l, b));
                     } else if fused {
@@ -3058,7 +3088,7 @@ impl Engine {
                             gpu_core::Dispatch::Workgroups(b * nh * n_splits),
                         ));
                         s.push(g.step(PAGED_FLASH_DECODE_COMBINE, &[&sc.part_m, &sc.part_l, &sc.part_o, &sc.ctx], &[b, nh, hd, n_splits], b * nh * 128));
-                    } else if let Some(step) = (!causal_chunk && !self.gemm.is_reference_pinned())
+                    } else if let Some(step) = (!causal_chunk && exact.is_none() && !self.gemm.is_reference_pinned())
                         .then(|| block::native_paged_decode_batched(g, false, &[&sc.q, &self.pool_k[l], &self.pool_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.ctx], &[b, nh, nkv, hd, group, bs, mbt]))
                         .flatten()
                     {
@@ -3073,7 +3103,8 @@ impl Engine {
                         // (`Op::PagedAttention`), not an ad-hoc
                         // `caps.workgroup_reductions` check - this engine registers
                         // both kernels unconditionally, so `coop` is always `Some`.
-                        let (sk, st) = model::block::paged_scores_variant(g, SCORES_B, Some(SCORES_B_WG), b * nh, cap);
+                        let chosen_at = if exact.is_some() { nh } else { b * nh };
+                        let (sk, st) = model::block::paged_scores_variant_chosen_at(g, SCORES_B, Some(SCORES_B_WG), chosen_at, b * nh, cap);
                         s.push(g.dispatch(sk, &[&sc.q, &self.pool_k[l], &sc.bt_buf, &sc.seqlen_buf, &sc.scores], &[b, nh, group, hd, bs, hkv, cap, mbt, fb(scale)], st));
                         s.push(g.step(SOFTMAX_B, &[&sc.scores, &sc.seqlen_buf, &sc.probs], &[b, nh, cap], b * nh));
                         s.push(g.step(APPLY_B, &[&sc.probs, &self.pool_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.ctx], &[b, nh, group, hd, bs, hkv, cap, mbt], b * nh * hd));
@@ -3081,7 +3112,7 @@ impl Engine {
                 }
             }
             self.quant_once(&mut s, &sc.ctx, hq, b);
-            self.linear(&mut s, &self.lin_weights[&p("attn.wo.weight")], &sc.ctx, &sc.proj, b);
+            self.linear(&mut s, &self.lin_weights[&p("attn.wo.weight")], &sc.ctx, &sc.proj, b, exact);
             if lora {
                 self.lora_correct(&mut s, l, LoraSite::Wo, &sc.ctx, &sc.proj, b, d, 0);
             }
@@ -3094,7 +3125,7 @@ impl Engine {
             // time) instead of two, `concat_split` narrowing its `[b, 2*ff]`
             // output back into the compact `gate_pre`/`up` buffers
             // `swiglu_fwd` requires.
-            self.linear(&mut s, &self.lin_weights[&p(WGATEUP)], &sc.xn2, &sc.gateup_pre, b);
+            self.linear(&mut s, &self.lin_weights[&p(WGATEUP)], &sc.xn2, &sc.gateup_pre, b, exact);
             if lora {
                 for (site, col0) in [(LoraSite::Gate, 0), (LoraSite::Up, ff)] {
                     self.lora_correct(&mut s, l, site, &sc.xn2, &sc.gateup_pre, b, 2 * ff, col0);
@@ -3104,7 +3135,7 @@ impl Engine {
             s.push(concat_split_step(g, &sc.gateup_pre, &sc.up, b, 2 * ff, ff, ff));
             s.push(block::swiglu_fwd(g, &kids, &sc.gate_pre, &sc.up, &sc.h, b * ff));
             self.quant_once(&mut s, &sc.h, ff, b);
-            self.linear(&mut s, &self.lin_weights[&p("mlp.down.weight")], &sc.h, &sc.mlp_out, b);
+            self.linear(&mut s, &self.lin_weights[&p("mlp.down.weight")], &sc.h, &sc.mlp_out, b, exact);
             if lora {
                 self.lora_correct(&mut s, l, LoraSite::Down, &sc.h, &sc.mlp_out, b, d, 0);
             }
@@ -3232,7 +3263,7 @@ impl Engine {
         // dispatched through the SAME `Self::quant_once`/`Self::linear` pair
         // every per-layer projection uses, no separate int8-head branch.
         self.quant_once(steps, &self.sc.xn_final, d, bsz);
-        self.linear(steps, &self.lin_weights[self.cfg.head_weight()], &self.sc.xn_final, &self.logits_dev, bsz);
+        self.linear(steps, &self.lin_weights[self.cfg.head_weight()], &self.sc.xn_final, &self.logits_dev, bsz, self.exact.as_ref());
     }
 
     /// Record + submit the greedy head (logits + row argmax into
@@ -3300,15 +3331,22 @@ impl Engine {
     /// the extraction, exactly as `argmax_dev` already is by the greedy path -
     /// callers never read either between decode steps.
     pub(crate) fn forward_batched_topk(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32], k: u32) -> Vec<Vec<(u32, f32)>> {
-        let meta = self.append_meta(tables);
-        self.run_batched_submit(&meta, Input::Tokens(inputs), false);
-        self.topk_from_hidden(meta.bsz, k)
+        self.grouped(tables, inputs, |e, tables, inputs| {
+            let meta = e.append_meta(tables);
+            e.run_batched_submit(&meta, Input::Tokens(inputs), false);
+            e.topk_from_hidden(meta.bsz, k)
+        })
     }
 
     /// Advance every sequence by one token, returning each row's whole `[vocab]` logits: the step of
     /// [`Self::forward_batched_topk`] with the row read back instead of its best `k`. The sampler uses it for a
     /// request its candidate list cannot answer exactly (`model::serve::SampleParams::needs_full_row`).
     pub(crate) fn forward_batched_logit_rows(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32]) -> Vec<Vec<f32>> {
+        self.grouped(tables, inputs, Engine::logit_rows_step)
+    }
+
+    /// [`Self::forward_batched_logit_rows`] for one step of all of `tables`.
+    fn logit_rows_step(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32]) -> Vec<Vec<f32>> {
         let meta = self.append_meta(tables);
         self.run_batched_submit(&meta, Input::Tokens(inputs), false);
         let bsz = meta.bsz;
@@ -3337,6 +3375,11 @@ impl Engine {
         inputs: &[u32],
         k: usize,
     ) -> Vec<Vec<u32>> {
+        self.grouped(tables, inputs, |e, tables, inputs| e.greedy_window_step(tables, inputs, k))
+    }
+
+    /// [`Self::forward_batched_greedy_window`] for one window of all of `tables`.
+    fn greedy_window_step(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32], k: usize) -> Vec<Vec<u32>> {
         assert!((1..=DECODE_WINDOW).contains(&k), "window {k} out of range");
         let meta = self.append_meta(tables);
         let bsz = meta.bsz;
@@ -3476,7 +3519,12 @@ impl Engine {
         let ns = table.kv_namespace();
         // Refuse an adapter that is not resident before touching the cache.
         self.row_slots(std::iter::once(ns));
-        let hits = self.prefix.lookup_in(ns, &lead, bs, max_reuse);
+        let mut hits = self.prefix.lookup_in(ns, &lead, bs, max_reuse);
+        if self.exact.is_some() {
+            // Only whole chunks at the cold prompt's chunk boundaries: those blocks hold what a cold prefill computes,
+            // and the rest of the prompt then runs as the cold prompt's remaining chunks.
+            hits.truncate(exact::ExactDecode::reusable_blocks(hits.len(), bs, chunk));
+        }
         let matched = hits.len();
         if matched > 0 {
             table.adopt_prefix(&hits, &mut self.alloc);
@@ -3511,7 +3559,10 @@ impl Engine {
         }
         // Index this prompt's freshly-computed full leading-token blocks for
         // later prompts.
-        self.prefix.insert_chain_in(ns, &lead, table.blocks(), matched, &mut self.alloc);
+        // Under the exact-decode regime only the blocks of whole chunks are offered: a partial chunk's rows were computed
+        // at another row count than a longer prompt computes them.
+        let published = if self.exact.is_some() { &lead[..exact::ExactDecode::publishable_tokens(lead.len(), chunk)] } else { &lead[..] };
+        self.prefix.insert_chain_in(ns, published, table.blocks(), matched, &mut self.alloc);
         last
     }
 
@@ -4278,7 +4329,11 @@ impl model::serve::PagedDecoder for Engine {
         Engine::forward_batched_logit_rows(self, tables, inputs)
     }
     fn spec_max_draft(&self) -> usize {
-        // A verify forwards 1 + proposals rows of one sequence in one batch.
+        // A verify forwards 1 + proposals rows of one sequence in one batch, a chunk the exact-decode regime does not
+        // pin, so the regime does not speculate.
+        if self.exact.is_some() {
+            return 0;
+        }
         model::serve::rows::DEFAULT_MAX_DRAFT.min((self.max_batch as usize).saturating_sub(1))
     }
     fn forward_batched_verify(&mut self, tables: &mut [&mut BlockTable], rows: &[Vec<u32>], cands: usize) -> Vec<Vec<Vec<(u32, f32)>>> {
