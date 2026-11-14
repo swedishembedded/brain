@@ -131,9 +131,13 @@ pub struct DraftCache {
 }
 
 impl DraftCache {
-    /// The dense layout: f32, and a pool that holds every slot at `cap` positions (what a slot per sequence costs).
-    pub fn dense(slots: u32, cap: u32) -> DraftCache {
-        DraftCache { tier: KvTier::F32, block_size: 16, pool_positions: slots.saturating_mul(cap) }
+    /// The dense layout: f32, and a pool that holds every slot at once at what a slot holds - `cap` context positions
+    /// and the denoising block of `cfg` past them, rounded up to whole pool blocks - so no sequence within the cap is
+    /// ever refused for want of a block.
+    pub fn dense(cfg: &Dflash2Config, slots: u32, cap: u32) -> DraftCache {
+        const BLOCK: u32 = 16;
+        let per_slot = cap.saturating_add(cfg.block_size).div_ceil(BLOCK).saturating_mul(BLOCK);
+        DraftCache { tier: KvTier::F32, block_size: BLOCK, pool_positions: slots.saturating_mul(per_slot) }
     }
 
     fn pool_blocks(&self) -> u32 {
@@ -189,7 +193,8 @@ impl Dflash2 {
     /// Load the draft from `src` onto `gpu` (whose pipelines include [`pipelines`] or [`kernels_beyond`]), with K/V
     /// caches for `slots` sequences of up to `cap` positions each.
     pub fn load(gpu: Gpu, cfg: Dflash2Config, src: Box<dyn DraftSource>, slots: u32, cap: u32) -> Result<Dflash2, String> {
-        Self::load_with(gpu, cfg, src, slots, cap, DraftCache::dense(slots, cap))
+        let cache = DraftCache::dense(&cfg, slots, cap);
+        Self::load_with(gpu, cfg, src, slots, cap, cache)
     }
 
     /// [`Self::load`] with the caches held as `cache` says.
@@ -682,5 +687,31 @@ impl Dflash2 {
     /// [`Self::denoise_blocks`] for one block in slot 0, the single-stream shape the Qwen3.8 path drives.
     pub fn denoise_block(&self, noise: &[f32], pos: u32) -> Result<Vec<f32>, String> {
         Ok(self.denoise_blocks(&[BlockJob { slot: 0, pos, noise }])?.remove(0))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A small draft config: a block of five rows, one sliding and one full layer.
+    const TINY: &str = r#"{
+      "dflash_config": {"block_size": 5, "conv_group_size": 8, "conv_kernel_size": 4, "mask_token_id": 3,
+                        "selector_rank": 4, "selector_top_k": 4, "target_layer_ids": [0, 1]},
+      "draft_vocab_size": 64, "head_dim": 8, "hidden_size": 32, "intermediate_size": 64, "is_causal": false,
+      "layer_types": ["sliding_attention", "full_attention"], "no_rope_layers": [1], "num_attention_heads": 4,
+      "num_hidden_layers": 2, "num_key_value_heads": 2, "num_target_layers": 2, "rms_norm_eps": 1e-06,
+      "rope_theta": 10000.0, "sliding_window": 6, "use_sliding_window": true, "vocab_size": 64}"#;
+
+    /// A slot holds `cap` context positions and the denoising block past them, so the dense pool must let every slot
+    /// reserve `cap + block_size` positions at once: the drafter serves a sequence right up to the cap.
+    #[test]
+    fn a_dense_pool_holds_every_slot_at_the_cap_and_one_block() {
+        let cfg = Dflash2Config::from_json(TINY).unwrap();
+        for (slots, cap) in [(1u32, 1u32), (3, 32), (2, 27), (4, 11)] {
+            let cache = DraftCache::dense(&cfg, slots, cap);
+            let per_slot = (cap + cfg.block_size).div_ceil(cache.block_size);
+            assert!(cache.pool_blocks() >= slots * per_slot, "{slots} slots at cap {cap}: {} blocks, need {}", cache.pool_blocks(), slots * per_slot);
+        }
     }
 }

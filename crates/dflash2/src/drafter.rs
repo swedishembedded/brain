@@ -178,7 +178,8 @@ impl Dflash2Drafter {
                 tracing::warn!(id = r.id, table = r.table.len(), context = r.context.len(), "dflash2: the sequence's cache and context disagree; not drafting for it");
                 continue;
             }
-            if ctx_len + cfg.block_size > self.model.cap() + cfg.block_size {
+            // A slot holds `cap` context positions and the denoising block past them, so a context up to the cap drafts.
+            if ctx_len > self.model.cap() {
                 tracing::warn!(id = r.id, ctx_len, cap = self.model.cap(), "dflash2: the sequence outgrew the draft's cache; not drafting for it");
                 continue;
             }

@@ -73,6 +73,9 @@ impl Selector {
         for i in 0..n {
             let row = &logits[i * vocab..(i + 1) * vocab];
             let cand = top_k_ids(row, top_k);
+            if cand.is_empty() {
+                return Err(format!("dflash2: the target head's logits at block position {i} are all NaN"));
+            }
             let pred = src.rows(Tensor::SelectorPredecessor, prev as usize, 1, rank)?;
             let left: Vec<f32> = (0..rank).map(|r| pred[r] * proj[i][r]).collect();
             let mut best = (f32::NEG_INFINITY, cand[0]);
@@ -95,23 +98,26 @@ impl Selector {
 ///
 /// One pass with a `k`-element insertion buffer rather than a sort of a materialized `0..vocab`, because the caller
 /// runs this once per block position on a vocabulary-wide row and the allocation alone was the larger half of the
-/// selector's cost. Unordered is enough: the caller takes an argmax over the whole set anyway. A NaN logit sorts as
-/// the smallest, so it is never a candidate.
+/// selector's cost. Unordered is enough: the caller takes an argmax over the whole set anyway. A NaN logit is skipped
+/// wherever it sits, so it is never a candidate; a row with fewer than `k` numbers yields only those, and an all-NaN
+/// row yields none.
 pub fn top_k_ids(row: &[f32], k: usize) -> Vec<u32> {
     assert!(k > 0 && row.len() >= k, "top_k_ids: asked for {k} of {} values", row.len());
-    let mut best: Vec<(f32, u32)> = row.iter().take(k).copied().zip(0u32..).collect();
-    best.sort_by(|a, b| a.0.total_cmp(&b.0));
-    let mut floor = best[0].0;
-    for (i, &v) in row.iter().enumerate().skip(k) {
-        if v <= floor {
+    // Sorted ascending, so `best[0]` is the floor once the buffer is full. `k` is small, so an insertion is a shift of
+    // at most `k - 1` pairs - cheaper than a heap at this size, and it keeps the floor correct without a second scan.
+    let mut best: Vec<(f32, u32)> = Vec::with_capacity(k);
+    for (i, &v) in row.iter().enumerate() {
+        if v.is_nan() {
             continue;
         }
-        // The buffer is sorted ascending and `k` is small, so this is a shift of at most `k - 1` pairs - cheaper
-        // than a heap at this size, and it keeps `floor` correct without a second scan.
         let at = best.partition_point(|e| e.0 < v);
-        best.copy_within(1..at, 0);
-        best[at - 1] = (v, i as u32);
-        floor = best[0].0;
+        if best.len() < k {
+            best.insert(at, (v, i as u32));
+        } else if at > 0 {
+            // `at > 0` is `v > floor`: drop the floor and slot `v` in at its rank.
+            best.copy_within(1..at, 0);
+            best[at - 1] = (v, i as u32);
+        }
     }
     best.into_iter().map(|(_, i)| i).collect()
 }
@@ -154,5 +160,21 @@ mod tests {
         got.sort();
         got.dedup();
         assert_eq!(got.len(), 16, "ties must still yield k distinct indices");
+    }
+
+    /// A NaN logit is never a candidate, wherever it sits: among the first `k` (which seed the buffer) or after
+    /// them (which are compared against its floor), and a row with fewer than `k` numbers yields only those.
+    #[test]
+    fn a_nan_logit_is_never_a_candidate() {
+        let mut early = top_k_ids(&[f32::NAN, 1.0, 2.0, 3.0, 4.0], 2);
+        early.sort();
+        assert_eq!(early, vec![3, 4], "NaN among the first k");
+        let mut late = top_k_ids(&[1.0, 2.0, 3.0, f32::NAN, 0.5], 2);
+        late.sort();
+        assert_eq!(late, vec![1, 2], "NaN after the first k");
+        let mut sparse = top_k_ids(&[f32::NAN, 5.0, f32::NAN], 2);
+        sparse.sort();
+        assert_eq!(sparse, vec![1], "fewer numbers than k");
+        assert!(top_k_ids(&[f32::NAN; 4], 2).is_empty(), "an all-NaN row has no candidate");
     }
 }

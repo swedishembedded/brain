@@ -39,7 +39,7 @@ fn fixture() -> Option<Fixture> {
 }
 
 fn load(fx: &Fixture, slots: u32, cap: u32) -> Dflash2 {
-    load_with(fx, slots, cap, DraftCache::dense(slots, cap))
+    load_with(fx, slots, cap, DraftCache::dense(&fx.cfg, slots, cap))
 }
 
 fn load_with(fx: &Fixture, slots: u32, cap: u32, cache: DraftCache) -> Dflash2 {
@@ -148,9 +148,10 @@ fn the_memory_plan_charges_the_weight_bytes_the_load_reports() {
     let planned = src.device_weight_bytes(&fx.cfg);
     let m = load(&fx, 1, 20);
     assert_eq!(planned, m.weight_bytes());
-    // Sliding layers keep a ring per slot, the full layer a pool of 3 x 32 positions in blocks of 16.
-    let rows = |l: usize| if fx.cfg.layers[l].kind == dflash2::LayerKind::Sliding { 3 * u64::from(fx.cfg.cache_rows(l, 32)) } else { 96 };
-    assert_eq!(DraftCache::dense(3, 32).bytes(&fx.cfg, 3, 32), (0..fx.cfg.n_layers).map(|l| 2 * rows(l) * u64::from(fx.cfg.kv_dim()) * 4).sum::<u64>());
+    // Sliding layers keep a ring per slot, the full layer a pool of 3 x (32 + a block of 5) positions, each slot rounded up
+    // to whole blocks of 16: 3 x 48.
+    let rows = |l: usize| if fx.cfg.layers[l].kind == dflash2::LayerKind::Sliding { 3 * u64::from(fx.cfg.cache_rows(l, 32)) } else { 144 };
+    assert_eq!(DraftCache::dense(&fx.cfg, 3, 32).bytes(&fx.cfg, 3, 32), (0..fx.cfg.n_layers).map(|l| 2 * rows(l) * u64::from(fx.cfg.kv_dim()) * 4).sum::<u64>());
 }
 
 /// The caches held at a compact tier and paged in small blocks: two sequences interleaved, fed in pieces, one extended after
