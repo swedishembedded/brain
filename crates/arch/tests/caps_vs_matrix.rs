@@ -38,9 +38,10 @@ fn matrix() -> BTreeMap<String, BTreeSet<String>> {
         let mut cols = line.split('\t');
         let arch = cols.next().unwrap_or_default();
         let capability = cols.next().unwrap_or_default();
-        // `load:<source>` rows describe the checkpoint-precision table, not an
+        // `load:<source>` and `cert:<contract>` rows describe the
+        // checkpoint-precision and training-correctness tables, not an
         // architecture.
-        if arch.starts_with("load:") || arch.is_empty() {
+        if arch.starts_with("load:") || arch.starts_with("cert:") || arch.is_empty() {
             continue;
         }
         rows.entry(arch.to_string()).or_default().insert(capability.to_string());
