@@ -213,12 +213,24 @@ fn resolve_in_store(arch: &str, spec: &dyn ArchSpec, mut overrides: BTreeMap<Str
             match default.filter(|_| !overrides.contains_key("variant")) {
                 Some(v) => {
                     overrides.insert("variant".to_string(), v);
-                    loader::resolver::try_resolve(dir.as_deref(), arch, spec, &overrides).map_err(|_| ResolveFailure::Ambiguous(why))
+                    under_default_variant(why, loader::resolver::try_resolve(dir.as_deref(), arch, spec, &overrides))
                 }
                 None => Err(ResolveFailure::Ambiguous(why)),
             }
         }
         other => other,
+    }
+}
+
+/// What a store ambiguous without a variant answers once resolved again under
+/// the action's default one: that resolution, or its own question when it
+/// still asks one (it is the narrower question, the one left to answer), or
+/// else the first question, since nothing of the default variant is there.
+fn under_default_variant(first: String, retry: Result<Assembly, ResolveFailure>) -> Result<Assembly, ResolveFailure> {
+    match retry {
+        Err(ResolveFailure::Ambiguous(narrower)) => Err(ResolveFailure::Ambiguous(narrower)),
+        Err(_) => Err(ResolveFailure::Ambiguous(first)),
+        resolved => resolved,
     }
 }
 
@@ -266,3 +278,23 @@ pub const GLOBAL_HELP: &str = "  --device SPEC          cpu | gpu | gpu0 | gpu0,
   --backend NAME         wgpu | vulkan | cuda | cpu                  [the device's own]
   --brain-data-dir DIR   brain's data root; the model store is DIR/models
 ";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Resolving again under the default variant keeps the narrower question
+    /// it still asks (a role left to choose once the variant settled the
+    /// rest), and falls back to the first question only when the default
+    /// variant has nothing in the store.
+    #[test]
+    fn the_default_variant_retry_reports_the_question_left_to_answer() {
+        let first = || "which dit?".to_string();
+        let assembly = || Assembly { id: "local/x".into(), arch: "x".into(), variant: None, roles: Default::default(), provenance: Vec::new() };
+        let narrower = under_default_variant(first(), Err(ResolveFailure::Ambiguous("which vae?".into())));
+        assert!(matches!(narrower, Err(ResolveFailure::Ambiguous(m)) if m == "which vae?"));
+        let absent = under_default_variant(first(), Err(ResolveFailure::Missing("no 4B dit".into())));
+        assert!(matches!(absent, Err(ResolveFailure::Ambiguous(m)) if m == "which dit?"));
+        assert!(matches!(under_default_variant(first(), Ok(assembly())), Ok(a) if a.id == "local/x"));
+    }
+}
