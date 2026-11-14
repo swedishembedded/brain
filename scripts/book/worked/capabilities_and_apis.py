@@ -163,8 +163,7 @@ def spec_table():
     return ("The action `paint` of a hypothetical model. Ranges are inclusive. A param marked `from $VAR` is filled from that "
             "environment variable of the machine that runs the action when the caller gives none; a host-resolved param "
             "is answered by the host in some other way. The last column says whether a remote caller is shown the param: the served "
-            "view of an action is its spec without the params marked no, which the section on answers only the serving machine can give "
-            "explains. Input blobs: `init` (image, optional). Output blobs: `image` (image).\n\n"
+            "view of an action is its spec without the params marked no. Input blobs: `init` (image, optional). Output blobs: `image` (image).\n\n"
             + _table(["param", "type", "required", "default", "range", "host", "in the served view"], rows, "lllllll"))
 
 
@@ -469,8 +468,8 @@ def failure_replies():
         model = "x/z" if e.startswith("no model") else "x/y"
         kind, msg, hides, status, bus = reply(e, model)
         rows.append([e, kind, msg or "(empty)", "yes" if hides else "no", str(status), bus])
-    return ("What one action error becomes on each surface, for a request to the model named in the second column of each "
-            "error (`x/z` for the sixth, `x/y` otherwise). The rules are tried in the order of the chapter; an error that "
+    return ("What one action error becomes on each surface, for a request to the model "
+            "`x/z` (the sixth error) or `x/y` (every other). The rules are tried in the order of `sort_reply`; an error that "
             "hides detail is written to the server's log and never sent. A tagged failure's message to the caller is the text after its tag "
             "(empty for a bare tag) and its status is the one of its class in the list above; the other sorts have fixed texts and statuses: "
             "faulted 'the model faulted while running the request', 500; cancelled 'the request was cancelled', 503, and 'cancelled' on the "

@@ -680,7 +680,7 @@ _INTRO = {
         "was made, and tensors 0 to i - 1 have been dropped, so the pages of tensors i to 31 remain. Two cases of 32 equal tensors: "
         "f32, 134,217,728 bytes stored (as f32) and 134,217,728 decoded each, 4 GiB in all; bf16, 500,000,000 bytes stored and "
         "1,000,000,000 decoded each, 16 x 10^9 bytes of file. The peak is the largest value of heap plus file-backed over the 32 "
-        "tensors (the last tensor that reaches it is reported); GiB = 2^30 bytes, GB = 10^9 bytes, four significant digits."),
+        "tensors; GiB = 2^30 bytes, GB = 10^9 bytes, four significant digits."),
     "zero_copy": (
         "Four tensors in this order, `a.weight` F32 [3, 5] (60 bytes), `b.bias` BF16 [3] (6 bytes), `c.weight` F32 [2, 2] (16 bytes) and "
         "`d.scale` U32 [8] (32 bytes), in a file whose header is a compact JSON object of the form of the first example, padded with spaces "

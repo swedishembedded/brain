@@ -640,8 +640,8 @@ def ready_probe():
         mark = lambda x: ("yes" + (" (stale)" if k == 0 else "") + (" (false)" if x and bound < 2 and k > 0 else "")) if x else "no"
         rows.append([k, e, bound, mark(old), mark(new)])
     head = ("A server with two surfaces starts with a readiness marker left behind by a previous run. A waiter checks "
-            "whether the marker path exists after each step of the start; 'false' marks a yes while fewer than both "
-            "surfaces are bound. The writability probe either creates and deletes the marker path itself or a sibling "
+            "whether the marker path exists after each step of the start; '(false)' marks a yes that signals readiness "
+            "falsely, while fewer than both surfaces are bound. The writability probe either creates and deletes the marker path itself or a sibling "
             "name beside it.\n\n")
     return head + _table(["after", "step of the start", "surfaces bound", "path exists, probe on the path",
                           "path exists, probe on a sibling"], rows, "rlrll")

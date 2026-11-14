@@ -199,7 +199,7 @@ def eviction_stream():
         f"k asks for model m with probability proportional to its weight. Generator: the book's SplitMix64, seed "
         f"{_seed(NAME_STREAM)} (`seed_of` of the name `{NAME_STREAM}`), one draw `integer(W)` per request with W = "
         f"{sum(w for _, _, w in _SCENARIO)} the sum of the weights, mapped by walking the models in the order listed and "
-        "subtracting each weight from the draw until it is smaller than the next weight. One generator runs once through the "
+        "subtracting each model's weight from the draw until the draw is smaller than the weight of the model reached, which is the one chosen. One generator runs once through the "
         "stream and both policies replay the same stream. Everything else is the rule of the previous example: the clock "
         "advances at every claim and every release, a hit adds 1 to the use count, a load starts it at 1, and the score of "
         "the cost-aware policy at clock value now is uses x bytes / (now - last use + 1) with the lowest score evicted first, where "
