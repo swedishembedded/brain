@@ -1379,6 +1379,8 @@ const RETIRED_VARIABLES: &[Retired] = &[
     Retired { name: "BRAIN_MOCK_DELAY_MS", replacement: "serve: {mock-delay-ms: MS}" },
     Retired { name: "BRAIN_HORIZON_DIR", replacement: "a saved model installed in the model store as local/<name> (serve: {models-dir: DIR})" },
     Retired { name: "BRAIN_HORIZON_TRAIN_DIR", replacement: "the training service's timeline_train action (serve: {training: true, artifact-store: DIR})" },
+    Retired { name: "BRAIN_FLUX2_FAMILY", replacement: "serve: {pin: [flux2.variant=base-9b]} (klein unless pinned)" },
+    Retired { name: "BRAIN_FLUX2_MAX_BATCH", replacement: "serve: {max-batch: N}" },
     Retired { name: "BRAIN_WM_RENDERER", replacement: "diamond play: {renderer: auto|software|accelerated}" },
 ];
 

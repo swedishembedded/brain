@@ -51,8 +51,6 @@ crates/capability/src/lib.rs	BRAIN_TEST_HOST_SERVED
 crates/capability/src/lib.rs	BRAIN_TEST_HOST_UNSET
 crates/capability/src/lib.rs	BRAIN_TEST_HOST_WEIGHTS
 crates/catalog/src/resident_deepseekvl.rs	BRAIN_DEEPSEEKVL_TUNED
-crates/catalog/src/resident_flux2.rs	BRAIN_FLUX2_FAMILY
-crates/catalog/src/resident_flux2.rs	BRAIN_FLUX2_MAX_BATCH
 crates/catalog/src/resident_forecast.rs	BRAIN_CHRONOS2
 crates/catalog/src/resident_forecast.rs	BRAIN_FINCAST
 crates/catalog/src/resident_forecast.rs	BRAIN_KRONOS_DECODER

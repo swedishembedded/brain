@@ -40,13 +40,9 @@ brain flux2 text2image --prompt "…" --seed $RANDOM --out image=fox.png \
     --tokenizer …/FLUX.2-klein-4B/tokenizer/tokenizer.json
 ```
 
-The `BRAIN_FLUX2_{DIT,VAE,TE,TOKENIZER}` variables belong to `brain serve`
-(below), not to `brain flux2 <action>`.
-
 ### Serving more than one checkpoint at once
 
-`brain serve` does not require the `BRAIN_FLUX2_*` variables at all: with the
-model dir holding one or more real `dit` checkpoints (a diffusers-layout
+With the model dir holding one or more real `dit` checkpoints (a diffusers-layout
 directory or a GGUF), each becomes its own served resident, addressed by its
 real `<vendor>/<repo>` id - e.g. a store holding both
 `black-forest-labs/FLUX.2-klein-9B` and `unsloth/FLUX.2-klein-4B-GGUF` serves
@@ -57,9 +53,13 @@ ambiguous choice, and each is resolved against the SAME shared `vae`/
 checkpoint (nothing else in its own directory) still serves as long as a
 compatible VAE/text-encoder/tokenizer exists somewhere on disk.
 
-Setting `BRAIN_FLUX2_DIT` (and the other three variables) pins one exact
-instance instead, which is the single-resident behavior to reach for when the
-store holds more checkpoints than you want served.
+Pinning every role (`brain serve --pin flux2.dit=F --pin flux2.vae=F --pin
+flux2.text_encoder=DIR --pin flux2.tokenizer=F`) serves one exact instance
+instead, which is the single-resident behavior to reach for when the store
+holds more checkpoints than you want served. A served resident is the klein
+variant of its DiT's size unless `--pin flux2.variant=base-<size>` names the
+undistilled base; `--max-batch N` (default 4) caps how many same-size requests
+share one denoise loop.
 
 `lora_train`'s `--activations keep|recompute` (default `keep`) sets what the host trainer
 (`--trainer host`) holds of each step's forward for its backward: `keep` holds

@@ -15,8 +15,8 @@ use capability::{ActionResult, Invocation, Manifest, Progress};
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 
 
-/// FLUX.2 Klein resident model family, gated on the four weight env vars
-/// (`BRAIN_FLUX2_{DIT,VAE,TE,TOKENIZER}`).
+/// FLUX.2 resident model family, over the DiT, VAE, text encoder and
+/// tokenizer the model store resolves (or the operator pinned).
 ///
 /// `id`/`variant` are BOUND at construction time, from the DiT weights
 /// themselves ([`flux2::sniff_dit_size`]) - never re-derived per request from
@@ -26,28 +26,35 @@ use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 /// "klein-4b" when the caller claimed nothing at all).
 pub struct Flux2Resident {
     /// What this instance's keys and manifest register under -
-    /// `flux2::caps::MODEL` for the env-configured build, but a fetched
+    /// `flux2::caps::MODEL` for a store-resolved build, but a fetched
     /// checkpoint would register under its own reference (same reason
     /// `WanResident::from_paths` takes one).
     id: String,
     /// The full variant name bound to the real weights: sniffed SIZE
     /// (`4b`/`9b`, from [`flux2::sniff_dit_size`]) combined with an explicit
-    /// klein/base FAMILY (`BRAIN_FLUX2_FAMILY`, default `"klein"`) - klein vs
-    /// base is not recoverable from tensor shapes (see [`flux2::DitSize`]'s
+    /// klein/base FAMILY (the resolver's variant: `klein` unless the operator
+    /// pins `flux2.variant=base-<size>`) - klein vs base is not recoverable
+    /// from tensor shapes (see [`flux2::DitSize`]'s
     /// doc), so it can never be sniffed, only stated. `flux2::caps::
     /// check_license` reads this string's own size suffix, so binding it here
     /// (not per request) is what makes that gate trustworthy.
     variant: String,
     paths: flux2::Paths,
+    /// Concurrent same-key generations one instance batches into a single
+    /// denoise loop (`brain serve --max-batch`).
+    max_batch: u32,
 }
 
+/// [`Flux2Resident::max_batch`] when the serving policy names none: only the
+/// DiT activation scratch scales with it, and the scheduler's own
+/// `Policy::max_batch` caps the group size on top of it.
+pub const DEFAULT_MAX_BATCH: u32 = 4;
+
 impl Flux2Resident {
-    /// Each of the four components independently: its own `BRAIN_FLUX2_*`
-    /// variable if the operator set that one, else whatever the model-store
-    /// resolver finds for that role through `flux2::spec::Flux2Spec` - the
-    /// SAME spec, scan and candidate rules `brain flux2 generate` already
-    /// uses on the one-shot path, rather than a second mechanism that only
-    /// knew how to read four environment variables.
+    /// Each of the four components independently: its pin if the operator
+    /// gave one, else whatever the model-store resolver finds for that role
+    /// through `flux2::spec::Flux2Spec` - the SAME spec, scan and candidate
+    /// rules `brain flux2 generate` uses on the one-shot path.
     ///
     /// FLUX.2 is the architecture most likely to stay genuinely ambiguous
     /// here, and correctly so: a store holding both an official release and a
@@ -79,7 +86,7 @@ impl Flux2Resident {
                 return None;
             }
         };
-        match Flux2Resident::from_paths(flux2::caps::MODEL.to_string(), paths) {
+        match Flux2Resident::from_paths(flux2::caps::MODEL.to_string(), paths, family(&assembly)) {
             Ok(r) => Some(r),
             Err(e) => {
                 residency::log::not_served(&format!("brain: flux2-klein not served over the scheduler ({e})"));
@@ -100,7 +107,7 @@ impl Flux2Resident {
     /// match, an unsniffable checkpoint) is logged and that ONE instance is
     /// skipped - it never drops every other real, independently-servable
     /// checkpoint with it.
-    pub fn all_from_store(store: &loader::served::ServedStore) -> Vec<Flux2Resident> {
+    pub fn all_from_store(store: &loader::served::ServedStore, max_batch: u32) -> Vec<Flux2Resident> {
         loader::served::served_assemblies(
             store,
             "flux2",
@@ -117,8 +124,8 @@ impl Flux2Resident {
                     return None;
                 }
             };
-            match Flux2Resident::from_paths(id.clone(), paths) {
-                Ok(r) => Some(r),
+            match Flux2Resident::from_paths(id.clone(), paths, family(&assembly)) {
+                Ok(r) => Some(r.with_max_batch(max_batch)),
                 Err(e) => {
                     residency::log::not_served(&format!("brain: {id} not served over the scheduler ({e})"));
                     None
@@ -130,18 +137,28 @@ impl Flux2Resident {
 
     /// Bind a resident to real, explicitly-named weights. `id` is the
     /// registration name (see the struct doc); `variant` is fixed HERE, from
-    /// `paths.dit`'s own tensor shapes combined with `BRAIN_FLUX2_FAMILY`
-    /// (default `"klein"`).
-    pub fn from_paths(id: String, paths: flux2::Paths) -> Result<Flux2Resident, String> {
-        let family = std::env::var("BRAIN_FLUX2_FAMILY").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "klein".to_string());
+    /// `paths.dit`'s own tensor shapes combined with `family` (`klein` or
+    /// `base`).
+    pub fn from_paths(id: String, paths: flux2::Paths, family: &str) -> Result<Flux2Resident, String> {
         if family != "klein" && family != "base" {
-            return Err(format!("BRAIN_FLUX2_FAMILY must be 'klein' or 'base' (got {family:?})"));
+            return Err(format!("flux2: the family must be 'klein' or 'base' (got {family:?})"));
         }
         let size = flux2::sniff_dit_size(&paths.dit)?;
         let variant = format!("{family}-{}", size.as_str());
         flux2::Flux2Config::from_name(&variant)?; // the combination must actually exist
-        Ok(Flux2Resident { id, variant, paths })
+        Ok(Flux2Resident { id, variant, paths, max_batch: DEFAULT_MAX_BATCH })
     }
+
+    /// Batch up to `max_batch` same-key generations into one denoise loop.
+    pub fn with_max_batch(self, max_batch: u32) -> Flux2Resident {
+        Flux2Resident { max_batch: max_batch.max(1), ..self }
+    }
+}
+
+/// The klein/base family of the resolver's variant (`klein-4b`, `base-9b`, ...):
+/// `klein` when it named none.
+fn family(assembly: &capability::Assembly) -> &str {
+    assembly.variant.as_deref().and_then(|v| v.split_once('-')).map_or("klein", |(family, _)| family)
 }
 
 /// A request's `variant` param, if present, must name exactly the resident's
@@ -157,19 +174,6 @@ fn check_variant_matches(bound: &str, inv: &Invocation) -> Result<(), String> {
         )),
         _ => Ok(()),
     }
-}
-
-/// How many concurrent same-key generations one instance batches into a single
-/// denoise loop (`BRAIN_FLUX2_MAX_BATCH`, default 4). Only the DiT activation
-/// scratch scales with it — measured VRAM per sample determines
-/// the point where latency stops paying for throughput.
-/// The scheduler's own `Policy::max_batch` caps the group size on top of this.
-pub fn max_batch() -> u32 {
-    std::env::var("BRAIN_FLUX2_MAX_BATCH")
-        .ok()
-        .and_then(|v| v.parse::<u32>().ok())
-        .unwrap_or(4)
-        .max(1)
 }
 
 /// The tokens one forward of an instance key's pipeline sees, for the memory
@@ -247,7 +251,7 @@ impl ResidentModel for Flux2Resident {
         if int8 {
             per_slot += n_joint * (hidden + mlp); // packed int8 activations
         }
-        MemCost::new(vram + per_slot * (max_batch() as u64 - 1), 2u64 << 30)
+        MemCost::new(vram + per_slot * (self.max_batch as u64 - 1), 2u64 << 30)
     }
 
     fn activate(&self, key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
@@ -284,7 +288,7 @@ impl ResidentModel for Flux2Resident {
         // the assigned card (scoped registry selection; the TE card is
         // flux2's own BRAIN_FLUX2_TE_DEVICE and left as configured).
         let (pipe, ..) = crate::resident_llm::on_device(device, || {
-            flux2::build_resolved(flux2::VariantSource::Bound(variant), &self.paths, n_fwd, n_gen, &adapters, precision, false, max_batch())
+            flux2::build_resolved(flux2::VariantSource::Bound(variant), &self.paths, n_fwd, n_gen, &adapters, precision, false, self.max_batch)
         })??;
         Ok(Box::new(Flux2Instance { pipe: Some(pipe), paths: clone_paths(&self.paths), variant: self.variant.clone() }))
     }
@@ -433,8 +437,8 @@ mod tests {
     fn the_resident_binds_its_variant_from_the_real_weights_not_a_default() {
         let p4 = write_fake_dit(&flux2::Flux2Config::klein_4b(), "4b");
         let p9 = write_fake_dit(&flux2::Flux2Config::klein_9b(), "9b");
-        let r4 = Flux2Resident::from_paths(flux2::caps::MODEL.to_string(), paths_with_dit(p4.to_str().unwrap().to_string())).unwrap();
-        let r9 = Flux2Resident::from_paths(flux2::caps::MODEL.to_string(), paths_with_dit(p9.to_str().unwrap().to_string())).unwrap();
+        let r4 = Flux2Resident::from_paths(flux2::caps::MODEL.to_string(), paths_with_dit(p4.to_str().unwrap().to_string()), "klein").unwrap();
+        let r9 = Flux2Resident::from_paths(flux2::caps::MODEL.to_string(), paths_with_dit(p9.to_str().unwrap().to_string()), "klein").unwrap();
         assert_eq!(r4.variant, "klein-4b", "a 4B-shaped checkpoint must bind to klein-4b, not default there by luck");
         assert_eq!(r9.variant, "klein-9b", "a 9B-shaped checkpoint must bind to klein-9b, never klein-4b's default");
 
@@ -464,7 +468,7 @@ mod tests {
     #[test]
     fn a_request_naming_a_contradicting_variant_is_a_hard_error() {
         let p4 = write_fake_dit(&flux2::Flux2Config::klein_4b(), "contradiction");
-        let r = Flux2Resident::from_paths(flux2::caps::MODEL.to_string(), paths_with_dit(p4.to_str().unwrap().to_string())).unwrap();
+        let r = Flux2Resident::from_paths(flux2::caps::MODEL.to_string(), paths_with_dit(p4.to_str().unwrap().to_string()), "klein").unwrap();
         assert_eq!(r.variant, "klein-4b");
         let key = r.instance_key("lora_train", &Invocation::new());
         let mut inst = r.activate(&key, Device::Cpu).unwrap();

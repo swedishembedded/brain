@@ -99,8 +99,10 @@ pub struct ServeKnobs {
     pub decision: catalog::resident_decision::DecisionServeConfig,
     /// The DeepSeek-OCR generations: the model-agnostic policy flags they honour (`--max-batch`, `--ctx`, `--kv-cache`, `--gemm`).
     pub ocr: ocrserve::OcrServeConfig,
-    /// `--max-batch` for the encoders that batch equal-length requests into one forward (LFM2.5).
-    pub encoder_batch: Option<u32>,
+    /// `--max-batch` for the residents that batch their own requests into one
+    /// forward (the LFM2.5 encoders, FLUX.2's denoise loop); `None` keeps each
+    /// one's own default.
+    pub max_batch: Option<u32>,
     /// Serve training (`brain/train`) beside the models; `None` serves none.
     pub train: Option<TrainKnobs>,
     /// Serve the deterministic, weight-free mock models (`--mock`), each call
@@ -150,7 +152,7 @@ pub struct TrainKnobs {
 /// resident, and `knobs.decision` naming the decision models served beyond
 /// those the store holds.
 pub fn build_executor(machine: &Machine, reserved: u64, store: &catalog::ServedStore, policy: Policy, knobs: ServeKnobs) -> Serving {
-    let ServeKnobs { qwen: qwen_cfg, qwen35, ricursive, decision, ocr, encoder_batch, train, mock_delay_ms } = knobs;
+    let ServeKnobs { qwen: qwen_cfg, qwen35, ricursive, decision, ocr, max_batch, train, mock_delay_ms } = knobs;
     // Process-wide, before any OCR model is built: the models read it when they load.
     ocrserve::configure(ocr);
     let (gpus, npus, unified_gpus) = (&machine.gpus, &machine.npus, &machine.unified_gpus);
@@ -233,7 +235,7 @@ pub fn build_executor(machine: &Machine, reserved: u64, store: &catalog::ServedS
     // independent `dit` checkpoint the model store holds, each its own
     // resident under its real vendor/repo id): text-to-image,
     // reference-image editing, LoRA training (see resident_flux2.rs).
-    let flux2_residents = catalog::resident_flux2::Flux2Resident::all_from_store(store);
+    let flux2_residents = catalog::resident_flux2::Flux2Resident::all_from_store(store, max_batch.unwrap_or(catalog::resident_flux2::DEFAULT_MAX_BATCH));
     if flux2_residents.is_empty() {
         residency::log::not_served("brain: flux2-klein not served over the scheduler (pull a FLUX.2 Klein checkpoint into the model dir)");
     }
@@ -360,7 +362,7 @@ pub fn build_executor(machine: &Machine, reserved: u64, store: &catalog::ServedS
     let mut ricursive_discovered = Vec::new();
     if let Some(dir) = store.models_dir() {
         let existing: std::collections::BTreeSet<String> = models.iter().map(|m| m.manifest().model).collect();
-        let settings = crate::model_dir::ScanSettings { qwen: qwen_cfg, qwen35: qwen35.clone(), ricursive, gpus: gpus.clone(), reserved, encoder_batch };
+        let settings = crate::model_dir::ScanSettings { qwen: qwen_cfg, qwen35: qwen35.clone(), ricursive, gpus: gpus.clone(), reserved, encoder_batch: max_batch };
         let discovered = crate::model_dir::discover(dir, &settings);
         // The env-selected resident and a model-dir entry may be the same
         // checkpoint. Two residents would be two instances: two copies of the

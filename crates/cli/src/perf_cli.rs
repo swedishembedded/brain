@@ -68,7 +68,7 @@ OPTIONS
                                                    512x512x4:fp32; unit: denoise_step.
                                                    Concurrent same-size requests share
                                                    one batched denoise loop (cap:
-                                                   BRAIN_FLUX2_MAX_BATCH, default 4).
+                                                   default 4).
                           wan[:<frames>x<W>x<H>x<steps>]
                                                    Wan2.1 text-to-video (t2v-1.3B)
                                                    behind the residency executor;
@@ -1145,7 +1145,7 @@ fn build_flux2(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
         .with("precision", precision.clone().into())
         // What the instance batches into one denoise loop; `Executor::stats()`
         // reports the batch sizes actually reached.
-        .with("max_batch", catalog::resident_flux2::max_batch().into())
+        .with("max_batch", catalog::resident_flux2::DEFAULT_MAX_BATCH.into())
         .with("engine", "residency-executor".into());
     let build = Box::new(move |req: &perf::target::PerfRequest| {
         // Prompt values do not change the cost: text conditioning is padded to

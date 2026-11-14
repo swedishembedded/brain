@@ -152,8 +152,6 @@ See [`docs/guides/serving/serving.md`](../guides/serving/serving.md) for what ad
 
 | Variable | Meaning | Default |
 | --- | --- | --- |
-| `BRAIN_FLUX2_MAX_BATCH` | FLUX.2 concurrent same-size batch cap | 4 |
-| `BRAIN_FLUX2_FAMILY` | `klein` or `base`, combined with the DiT's own sniffed size (`4b`/`9b`) to pick the served variant when a resident is bound to explicit weight paths rather than a `--variant` flag | `klein` |
 | `BRAIN_FLUX2_TE_DEVICE` | **Override** for FLUX.2 text-encoder placement (`gpu<i>[:i8]` for a truncated shard on that card). Unset, placement is automatic: the pipeline declares the DiT, encoder and VAE with their costs and the engine places them on cards that can hold them (`residency::plan`, reached through `gpu_core::devices::place`), printing what it chose | automatic |
 | `BRAIN_FLUX1_TE_DEVICE` | Same override, for FLUX.1's T5-XXL/CLIP-L text-encoder placement (`cpu` or `gpu<i>`) - the escape hatch for when the automatic plan doesn't fit some other box | automatic |
 | `BRAIN_FLUX2_NO_STREAM` | `1` forces a non-GGUF FLUX.2 DiT to build from a whole fp32 tensor map. It is rejected for a `.gguf` DiT: decoding a quantized GGUF into a whole fp32 map is not an allowed implicit conversion | off |

@@ -160,8 +160,9 @@ pub fn served_assembly(store: &ServedStore, arch: &str, spec: &dyn ArchSpec) -> 
     };
     // A pinned path outranks the resolver's pick for that role even when the
     // resolver also found one - rule 1 above, applied last so it cannot be
-    // undone.
-    for (role, path) in named {
+    // undone. A pin that names no role (`variant`) is the resolver's own
+    // override, already applied.
+    for (role, path) in named.into_iter().filter(|(role, _)| spec.roles().contains(&role.as_str())) {
         assembly.provenance.push(format!("{role}: {path} (pinned, overriding the store)"));
         assembly.roles.insert(role, PathBuf::from(path));
     }
@@ -202,7 +203,7 @@ pub fn served_assemblies(store: &ServedStore, arch: &str, spec: &dyn ArchSpec, d
             Resolution::Missing(_) => continue,
         };
         assembly.id = if id == placeholder { default_id.to_string() } else { id };
-        for (role, path) in &named {
+        for (role, path) in named.iter().filter(|(role, _)| spec.roles().contains(&role.as_str())) {
             assembly.provenance.push(format!("{role}: {path} (pinned, overriding the store)"));
             assembly.roles.insert(role.clone(), PathBuf::from(path));
         }
@@ -450,6 +451,20 @@ mod tests {
         std::fs::write(&graph, b"x").unwrap();
         assert_eq!(containing_dir(&graph), containing_dir(&repo), "a role's file and an operator's directory must agree");
         assert_eq!(containing_dir(&repo).as_deref(), repo.to_str());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A pin that names no role of the spec (`variant`) reaches the
+    /// resolver as its override and never becomes a role of the assembly.
+    #[test]
+    fn a_pin_that_names_no_role_is_not_a_role() {
+        let root = store("non-role-pin");
+        let real = write_candidate(&root, "vendor", "model.safetensors");
+        let mut store = unpinned(&root);
+        store.pin("servedtest.variant=whatever").unwrap();
+        let assembly = served_assembly(&store, "servedtest", &ServedSpec).expect("the one candidate resolves");
+        assert_eq!(assembly.roles.keys().collect::<Vec<_>>(), ["weights"]);
+        assert_eq!(assembly.roles["weights"], real);
         std::fs::remove_dir_all(&root).ok();
     }
 

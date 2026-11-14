@@ -1091,7 +1091,7 @@ pub fn run_serve(args: &[String]) {
             ready,
             deadlines,
             adapter_mode,
-            knobs: serving::ServeKnobs { qwen: qwen_cfg, qwen35: qwen35_cfg, ricursive: ricursive_cfg, decision: decision_cfg, ocr: ocr_cfg, encoder_batch: policy.limits.max_batch, train, mock_delay_ms },
+            knobs: serving::ServeKnobs { qwen: qwen_cfg, qwen35: qwen35_cfg, ricursive: ricursive_cfg, decision: decision_cfg, ocr: ocr_cfg, max_batch: policy.limits.max_batch, train, mock_delay_ms },
         });
     }
 
