@@ -2,7 +2,9 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Z-Image DiT profiler: ms per full forward + effective GFLOP/s, on CPU or a
-//! single GPU. Reports against the card's own datasheet fp32 peak.
+//! single GPU. Utilisation divides by the device's MEASURED fp32 roof
+//! (`gpu_core::roof`), never a datasheet literal; where no roof can be measured
+//! (the CPU backend) the utilisation prints `-`.
 //!
 //! Usage:
 //!   BRAIN_S3DIT_DIT=<z_image_turbo_bf16.safetensors> \
@@ -15,7 +17,16 @@ use std::time::Instant;
 
 use s3dit::{import::import_comfy, ZImageConfig, ZImageDit, ZImageDitI8, ZImageDitShard};
 
-const P40_FP32_TFLOPS: f64 = 11.76;
+/// Measured fp32 peak of `gpu` in GFLOP/s, or `None` when the device cannot be
+/// probed (see `gpu_core::roof::ensure`).
+fn measured_peak_gflops(gpu: &gpu_core::Gpu) -> Option<f64> {
+    gpu_core::roof::ensure(gpu).map(|r| r.gflops as f64)
+}
+
+/// `"12.3% of ..."`-style utilisation, or `-` without a measured roof.
+fn pct_of(rate_gflops: f64, peak_gflops: Option<f64>) -> String {
+    peak_gflops.map_or_else(|| "-".into(), |p| format!("{:.1}%", 100.0 * rate_gflops / p))
+}
 
 /// Analytical FLOPs of one forward (the matmul-dominated ops), in GFLOP.
 fn forward_gflop(cfg: &ZImageConfig, n_img: u64, ncap: u64) -> f64 {
@@ -146,11 +157,11 @@ fn main() {
         let fwd_s = time(&fwd);
         let bwd_s = time(&bwd);
         let gflop = forward_gflop(&cfg, n_img as u64, ncap as u64);
-        let peak = P40_FP32_TFLOPS * 1e3;
-        println!("\n=== Z-Image DiT training GEMM sweep — 1×P40 ===");
+        let peak = measured_peak_gflops(&gpu);
+        println!("\n=== Z-Image DiT training GEMM sweep - 1 card ===");
         println!("config: {} main + {} refiner layers, {ntot} tokens ({n_img} img + {ncap} cap)", cfg.n_layers, 2 * cfg.n_refiner_layers);
-        println!("fwd GEMM: {:.1} ms  ({:.0} GFLOP/s, {:.1}% peak) — {gflop:.0} GFLOP", fwd_s * 1e3, gflop / fwd_s, 100.0 * gflop / fwd_s / peak);
-        println!("bwd GEMM: {:.1} ms  ({:.0} GFLOP/s, {:.1}% peak) — {:.0} GFLOP (dx+dw = 2×fwd)", bwd_s * 1e3, 2.0 * gflop / bwd_s, 100.0 * 2.0 * gflop / bwd_s / peak, 2.0 * gflop);
+        println!("fwd GEMM: {:.1} ms  ({:.0} GFLOP/s, {} of measured peak) - {gflop:.0} GFLOP", fwd_s * 1e3, gflop / fwd_s, pct_of(gflop / fwd_s, peak));
+        println!("bwd GEMM: {:.1} ms  ({:.0} GFLOP/s, {} of measured peak) - {:.0} GFLOP (dx+dw = 2×fwd)", bwd_s * 1e3, 2.0 * gflop / bwd_s, pct_of(2.0 * gflop / bwd_s, peak), 2.0 * gflop);
         println!("bwd/fwd ratio: {:.2}× (ideal 2.0)", bwd_s / fwd_s);
         println!("fwd+bwd GEMM: {:.1} ms/step", (fwd_s + bwd_s) * 1e3);
         return;
@@ -221,10 +232,15 @@ fn main() {
 
     let gflops = gflop / best;
     let ntot = n_img + cap_len as u64;
-    let peak = P40_FP32_TFLOPS * 1e3 * cards;
+    // `shard` assumes its cards are identical: the roof of the ambient card times the count.
+    let probe_gpu = if device == "cpu" { gpu_core::Gpu::new_cpu(&[]) } else { gpu_core::Gpu::new_gpu(&[]) };
+    let peak = measured_peak_gflops(&probe_gpu).map(|p| p * cards);
     println!("\n=== Z-Image DiT forward — {device} ({cards} card(s)) ===");
     println!("size: latent {h}x{w} -> {n_img} image + {cap_len} caption = {ntot} tokens");
     println!("work: {gflop:.1} GFLOP/forward");
     println!("time: {:.1} ms/forward (best of {reps})", best * 1e3);
-    println!("rate: {gflops:.0} GFLOP/s  ({:.1}% of {cards}×P40 fp32 peak {peak:.0} GFLOP/s)", 100.0 * gflops / peak);
+    match peak {
+        Some(p) => println!("rate: {gflops:.0} GFLOP/s  ({} of {cards}×measured fp32 peak {p:.0} GFLOP/s)", pct_of(gflops, Some(p))),
+        None => println!("rate: {gflops:.0} GFLOP/s  (roofline unmeasured on this device, utilisation -)"),
+    }
 }
