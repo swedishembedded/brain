@@ -88,14 +88,20 @@ const STOP_AFTER: u32 = 4;
 /// a fresh objective. Three records against five probes and four steps: any restart of the cursor, or any
 /// probe that moved it, lands the resumed run on another record.
 fn assert_resume_continues_the_stream<O: Objective<Qwen>>(name: &str, rows: u32, make: impl Fn() -> O) {
+    assert_resume_after(name, rows, STOP_AFTER, make)
+}
+
+/// [`assert_resume_continues_the_stream`] with the stop after `stop_after` steps.
+fn assert_resume_after<O: Objective<Qwen>>(name: &str, rows: u32, stop_after: u32, make: impl Fn() -> O) {
     let opts = FitOpts { steps: STEPS, batch_size: rows, block_size: SEQ_LEN as u32, lr: 1e-2, min_lr: 1e-2, weight_decay: 0.1, eval_interval: 0, ..Default::default() };
     let (straight_report, straight) = fit_controlled(lora_model(rows), make(), &opts, None, FitControl::default()).expect("the uninterrupted run");
+    assert_eq!(straight_report.applied_steps, STEPS, "{name}: every step of the uninterrupted run updates the weights");
 
-    let dir = std::env::temp_dir().join(format!("objective-cursor-{name}-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("objective-cursor-{name}-{stop_after}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let state = dir.join("train.state");
     let identity = serde_json::json!({ "run": name });
-    let mut stop = |s: &StepReport| s.step < STOP_AFTER;
+    let mut stop = |s: &StepReport| s.step < stop_after;
     let control = FitControl { on_step: Some(&mut stop), state: Some(&state), state_every: 0, identity: identity.clone(), snapshots: None, grad_sync: None };
     let (first, _) = fit_controlled(lora_model(rows), make(), &opts, None, control).expect("the interrupted run");
     assert!(first.interrupted);
@@ -103,7 +109,7 @@ fn assert_resume_continues_the_stream<O: Objective<Qwen>>(name: &str, rows: u32,
     let (resumed_report, resumed) = fit_controlled(lora_model(rows), make(), &opts, None, control).expect("the resumed run");
     std::fs::remove_dir_all(&dir).ok();
 
-    assert_eq!(resumed_report.resumed_at, Some(STOP_AFTER));
+    assert_eq!(resumed_report.resumed_at, Some(stop_after));
     assert!(trained_state(&straight) == trained_state(&resumed), "{name}: weights and moments after a stop and resume differ from the uninterrupted run");
     assert_eq!(resumed_report.final_loss.map(f32::to_bits), straight_report.final_loss.map(f32::to_bits), "{name}: final loss");
 }
@@ -120,6 +126,50 @@ fn a_resumed_dpo_run_over_an_indexed_source_continues_it() {
         let source = source.clone();
         Dpo::try_new(DpoConfig { beta: 0.1, seq_len: SEQ_LEN, nll_weight: 0.0, beta_ablation: false }, move |n: u64| Some(source[(n * 2 % 3) as usize].clone()), |p: &DpoPair| (vec![-1.0; p.chosen.len()], vec![-1.0; p.rejected.len()])).expect("a valid DPO configuration")
     });
+}
+
+/// Prompts that differ by the seed the objective draws, so a resumed run that drew another task trains another row.
+struct SeededPrompts;
+
+impl rl::env::Environment for SeededPrompts {
+    fn name(&self) -> &str {
+        "seeded-prompts"
+    }
+    fn tasks(&self, seed: u64) -> Vec<rl::env::Task> {
+        vec![rl::env::Task { id: format!("t{seed}"), prompt: vec![1 + (seed % 5) as u32, 2], answer: serde_json::Value::Null }]
+    }
+}
+
+/// A reward that tells the sampled completions apart: the share of tokens below the middle of the vocabulary.
+struct LowTokens;
+
+impl rl::env::Verifier for LowTokens {
+    fn verify(&self, _task: &rl::env::Task, _transcript: &[rl::env::Step], completion: &[u32]) -> rl::env::Reward {
+        let low = completion.iter().filter(|&&t| t < 12).count();
+        rl::env::Reward { value: low as f32 / completion.len().max(1) as f32, parts: Default::default() }
+    }
+}
+
+/// GRPO samples a group of three completions and trains one row a step, so a stop can fall inside a group, with
+/// sampled rows not yet trained: the resumed run must train those, from the policy that sampled them, and then
+/// sample on as the uninterrupted run does. The stops fall after every step from the second to the fifth.
+#[test]
+fn a_resumed_grpo_run_continues_its_rollout_stream() {
+    use rl::objective::grpo::{Grpo, GrpoConfig};
+    for stop_after in 2..=5 {
+        assert_resume_after("grpo", 1, stop_after, || {
+            let cfg = GrpoConfig {
+                group_size: 3,
+                clip_eps: 0.2,
+                kl_beta: 0.0,
+                seq_len: SEQ_LEN,
+                rollout: model::rollout::RolloutParams { max_new: 4, sample: model::serve::SampleParams { temp: 1.0, top_k: 0, top_p: 1.0, ..model::serve::SampleParams::greedy() }, eos: None },
+                max_attempts: 1,
+                options: Default::default(),
+            };
+            Grpo::try_new(SeededPrompts, LowTokens, cfg).expect("a valid GRPO configuration")
+        });
+    }
 }
 
 #[test]

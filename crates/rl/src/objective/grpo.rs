@@ -208,21 +208,40 @@ impl GrpoConfig {
 /// completion) -> per-completion-token reference logprob`.
 type RefLogprobFn = Box<dyn Fn(&Task, &Completion) -> Vec<f32>>;
 
-/// One already-sampled, scored and packed training row.
+/// One already-sampled, scored and packed training row. Saved with a run's resume state
+/// ([`Objective::cursor`]) while it waits in the queue; its floats travel as their bits, so a
+/// resumed run trains exactly the row the interrupted one sampled.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PackedRow {
     tokens: Vec<u32>,
     targets: Vec<u32>,
     /// Behaviour log-probabilities, recomputed by the training forward.
+    #[serde(with = "f32_bits")]
     old_lp: Vec<f32>,
     /// Reference log-probabilities; meaningful only when `has_ref`.
+    #[serde(with = "f32_bits")]
     ref_lp: Vec<f32>,
     has_ref: bool,
+    #[serde(with = "f32_bits")]
     advantage: Vec<f32>,
     /// The completion span as verified and trained (no stop token).
     completion: Vec<u32>,
     /// Optimiser steps taken when this row's behaviour policy was current.
     version: u64,
     supervised: usize,
+}
+
+/// A float vector as the bits of each value: exact, and NaN-safe where JSON numbers are not.
+mod f32_bits {
+    pub fn serialize<S: serde::Serializer>(values: &[f32], s: S) -> Result<S::Ok, S::Error> {
+        s.collect_seq(values.iter().map(|v| v.to_bits()))
+    }
+
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<f32>, D::Error> {
+        let bits: Vec<u32> = serde::Deserialize::deserialize(d)?;
+        Ok(bits.into_iter().map(f32::from_bits).collect())
+    }
 }
 
 /// The sampling policy copy [`Grpo::with_rollout`] installs.
@@ -758,6 +777,28 @@ impl<M: Model, E: Environment, V: Verifier> Objective<M> for Grpo<E, V> {
     fn updates_applied(&mut self, applied: u32) {
         self.version = u64::from(applied);
         self.stats.steps_applied = applied as usize;
+    }
+
+    /// Rows a group sampled that no step has trained yet: a stop inside a group would otherwise
+    /// drop them, and the resumed run would sample anew where the uninterrupted one trains them.
+    /// The rest of the stream is the loop's generator, which the resume state carries.
+    fn cursor(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({ "pending": self.pending }))
+    }
+
+    fn restore_cursor(&mut self, cursor: &serde_json::Value) -> Result<(), std::io::Error> {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Queue {
+            pending: std::collections::VecDeque<PackedRow>,
+        }
+        let queue: Queue = serde_json::from_value(cursor.clone()).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("the GRPO queue of the saved state: {e}")))?;
+        let n = self.cfg.seq_len;
+        if let Some(bad) = queue.pending.iter().find(|r| [r.tokens.len(), r.targets.len(), r.old_lp.len(), r.ref_lp.len(), r.advantage.len()].iter().any(|&len| len != n)) {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("the GRPO queue of the saved state holds a row of {} positions; this run packs rows of {n}", bad.tokens.len())));
+        }
+        self.pending = queue.pending;
+        Ok(())
     }
 
     /// The loss of a freshly drawn group, forward only. The queue, the log and
