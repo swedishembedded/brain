@@ -636,7 +636,7 @@ volumes:
         question: "How does a model find faces and recognize the same person across photos?"
         introduces: [face-detection, angular-margin-loss, identity-embedding, face-parsing]
         requires: [anchor-free-detection, cosine-similarity, softmax-cross-entropy, semantic-segmentation]
-        brain: [scrfd, arcface, openseeface]
+        brain: [scrfd, arcface, openseeface, yolov8-faces]
 
       - id: project-vision-pipeline
         title: "Project: A Vision Pipeline"
@@ -876,7 +876,7 @@ volumes:
         question: "How do we tell a forecaster with real skill from one that got lucky?"
         introduces: [walk-forward-evaluation, out-of-sample-test, forecast-skill-score]
         requires: [leakage-safe-window, paired-test, multiple-comparisons]
-        brain: [fcbench]
+        brain: [fcbench, forecastops]
       - id: survival-analysis
         title: "Survival Analysis and Competing Risks"
         question: "How do we predict when something will happen when many examples have not happened yet?"
@@ -1044,7 +1044,7 @@ volumes:
         question: "How does an engine present hundreds of models through a few stable interfaces?"
         introduces: [capability, provider, model-catalog, http-inference-api, ipc-interface, public-sdk]
         requires: [model-reference, continuous-batching]
-        brain: [capability, capability-mock, catalog, apiserve, dbus, server, events, sdk, cli, appopts]
+        brain: [capability, capability-mock, catalog, apiserve, dbus, server, events, sdk, cli, appopts, invoke]
       - id: security
         title: "Security of Machine Learning Services"
         question: "What can a hostile request or a malicious model file do to a server, and how do we stop it?"
