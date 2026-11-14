@@ -45,7 +45,7 @@ fn gen_params(spec: ActionSpec) -> ActionSpec {
         .param(ParamSpec::new("width", ParamType::Int, "output width, px (multiple of 16); unset, 512 - or, for an edit that starts from its image (strength or mask), that image's").min(64.0).max(capability::bounds::SIDE_PX).step(16.0))
         .param(ParamSpec::new("height", ParamType::Int, "output height, px (multiple of 16); unset, as width").min(64.0).max(capability::bounds::SIDE_PX).step(16.0))
         .param(ParamSpec::new("steps", ParamType::Int, "denoising steps; 0 = variant default (4 distilled / 50 base)").default(json!(0)).min(0.0).max(crate::pipeline::MAX_STEPS as f64).step(1.0))
-        .param(ParamSpec::new("seed", ParamType::Int, "RNG seed - required, never silently randomized: two invocations with the same prompt/params and no explicit distinct seed would otherwise be indistinguishable to an orchestrator's execution cache and collapse to one cached result").required())
+        .param(ParamSpec::new("seed", ParamType::Int, "RNG seed (omit for random; the outcome reports the one used)"))
         .param(ParamSpec::new("guidance", ParamType::Float, "CFG scale -- base variants only (klein is guidance-distilled)").default(json!(4.0)).min(0.0).max(30.0).step(0.1))
         .param(ParamSpec::new("variant", ParamType::Enum(VARIANTS.iter().map(|s| s.to_string()).collect()), "model variant; 9B needs allow_non_commercial (FLUX Non-Commercial license)").default(json!("klein-4b")))
         .param(allow_non_commercial_param())
@@ -118,7 +118,7 @@ pub fn manifest() -> Manifest {
         .param(ParamSpec::new("edit_weight", ParamType::Float, "region-aware flow loss for a PAIRED run: weight each token by 1 + this * its normalised |target - reference| change, rescaled to mean 1. 0 (default) is the plain mean; 2 is the published value. Only meaningful for spatially aligned pairs (declutter, removal, relight) - not for subject-driven ones").default(json!(0.0)).min(0.0).max(8.0))
         .param(ParamSpec::new("detail_weight", ParamType::Float, "detail-aware flow loss: weight each token by 1 + this * its normalised local detail, rescaled to mean 1. 0 (default) is off; 2 is the value to reach for on a SMOOTHING objective (remove clutter, remove noise), where the cheapest prediction under a uniform loss is the flattest one and a flat latent lifts the frozen VAE decoder's own 4-pixel cell structure into the picture as a grid. Needs no reference, so it applies to unpaired runs too").default(json!(0.0)).min(0.0).max(8.0))
         .param(ParamSpec::new("ref_dropout", ParamType::Float, "probability a PAIRED step trains with its reference tokens blanked (InstructPix2Pix's null image conditioning). 0 (default) never drops. Denies the adapter the 'just copy the reference' solution a near-identical pair makes available, at the cost of steps spent on a mode a guidance-distilled sampler never runs; 0.1 is the rate to reach for").default(json!(0.0)).min(0.0).max(1.0))
-        .param(ParamSpec::new("seed", ParamType::Int, "RNG seed - required, see text2image's own seed param doc for why").required())
+        .param(ParamSpec::new("seed", ParamType::Int, "RNG seed (omit for random; the outcome reports the one used)"))
         .param(ParamSpec::new("cards", ParamType::Int, "GPUs the device trainer spreads the block stack over (klein-9b's fp32 frozen base does not fit one 24 GiB card)").min(0.0).max(64.0).default(json!(1)))
         .param(ParamSpec::new("trainer", ParamType::Enum(vec!["device".into(), "host".into()]), "gradient implementation: 'device' runs the WGSL kernels with the frozen base on the card; 'host' is the finite-difference-gradchecked reference it is validated against").default(json!("device")))
         .param(ParamSpec::new("variant", ParamType::Enum(VARIANTS.iter().map(|s| s.to_string()).collect()), "base model to adapt; 9B needs allow_non_commercial").default(json!("klein-4b")))
@@ -221,18 +221,19 @@ pub fn non_commercial_accepted(inv: &Invocation) -> bool {
 pub fn generate_on(pipe: &Pipeline, inv: &Invocation, plan: &crate::request::Plan, progress: &mut dyn FnMut(Progress)) -> ActionResult {
     let refs = plan.decode(inv)?;
     let (rgb, w, h) = pipe.generate(&plan.prompt, &refs, &plan.opts, &inv.cancel, |step, total, msg| progress(Progress::step(step, total, msg.to_string())))?;
-    Ok(image_outcome(&rgb, w, h))
+    Ok(image_outcome(&rgb, w, h, plan.opts.seed))
 }
 
-/// Wrap a generated RGB8 HWC image as an image-output [`Outcome`] (the shared
-/// `capability::blob` wire format) — ONE implementation, shared by the
-/// single-request path above and the batched
+/// Wrap a generated RGB8 HWC image, and the seed it was sampled with, as an
+/// image-output [`Outcome`] (the shared `capability::blob` wire format): ONE
+/// implementation, shared by the single-request path above and the batched
 /// `resident_flux2::Flux2Instance::run_batch`.
-pub fn image_outcome(rgb: &[u8], w: u32, h: u32) -> Outcome {
+pub fn image_outcome(rgb: &[u8], w: u32, h: u32, seed: u64) -> Outcome {
     let hwc: Vec<f32> = rgb.iter().map(|&b| b as f32 / 255.0).collect();
     Outcome::new()
         .set("width", json!(w))
         .set("height", json!(h))
+        .set("seed", json!(seed))
         .blob("image", capability::blob::image_blob(&hwc, w, h, 3))
 }
 
@@ -288,10 +289,7 @@ pub fn train_action(paths: &Paths, inv: &Invocation, progress: &mut dyn FnMut(Pr
         },
         cache_dir: inv.get_str("cache_dir").filter(|d| !d.is_empty()).map(std::path::PathBuf::from),
         size: inv.get_i64("size").unwrap_or(512).max(16) as u32,
-        seed: inv
-            .get_i64("seed")
-            .expect("ActionSpec::validate refuses an invocation missing this required param")
-            .max(0) as u64,
+        seed: inv.seed()?.unwrap_or_else(data::rng::random_seed),
         save_path: save.clone(),
         ckpt_every: inv.get_i64("ckpt_every").unwrap_or(100).max(0) as u32,
         // A served run is the one most likely to be cancelled and re-issued,
@@ -319,6 +317,7 @@ pub fn train_action(paths: &Paths, inv: &Invocation, progress: &mut dyn FnMut(Pr
         .set("adapter", json!(save))
         .set("steps", json!(opts.steps))
         .set("rank", json!(adapter.rank()))
+        .set("seed", json!(opts.seed))
         .blob("adapter", Blob::new(Media::Bytes, bytes).with_meta(json!({"path": save}))))
 }
 
@@ -458,11 +457,9 @@ mod tests {
         // default, variant enum with klein-4b default, produces an image.
         let t2i = &m.actions[0];
         assert!(t2i.params.iter().any(|p| p.name == "prompt" && p.required));
-        // seed must be required, never silently defaulted: two invocations
-        // with no explicit distinct seed would otherwise be indistinguishable
-        // to an orchestrator's execution cache and collapse to one cached
-        // result.
-        assert!(t2i.params.iter().any(|p| p.name == "seed" && p.required && p.default.is_none()));
+        // seed is optional with no default: an unseeded request draws one and
+        // reports it in its outcome.
+        assert!(t2i.params.iter().any(|p| p.name == "seed" && !p.required && p.default.is_none()));
         assert_eq!(t2i.params.iter().find(|p| p.name == "width").unwrap().default, None, "unset width is 512, or an edit's init image's");
         assert_eq!(t2i.params.iter().find(|p| p.name == "steps").unwrap().default, Some(json!(0)));
         let variant = t2i.params.iter().find(|p| p.name == "variant").unwrap();
@@ -484,7 +481,7 @@ mod tests {
         let lt = m.actions.iter().find(|a| a.name == "lora_train").unwrap();
         assert!(lt.params.iter().any(|p| p.name == "data" && p.required));
         assert!(lt.params.iter().any(|p| p.name == "save" && p.required));
-        assert!(lt.params.iter().any(|p| p.name == "seed" && p.required && p.default.is_none()));
+        assert!(lt.params.iter().any(|p| p.name == "seed" && !p.required && p.default.is_none()));
         assert!(lt.outputs.iter().any(|b| b.name == "adapter" && b.media == Media::Bytes));
         // method/lr_ratio/freeze_a are params on this SAME action, not a new
         // one - the action list assertion above already pins that.
@@ -537,12 +534,13 @@ mod tests {
         assert!(non_commercial_accepted(&Invocation::new().set("allow_non_commercial", json!(true))));
     }
 
+    /// An unseeded request is valid, and the image it produces reports the
+    /// seed it was drawn with, so it can be reproduced.
     #[test]
-    fn text2image_refuses_an_invocation_missing_seed() {
+    fn text2image_takes_an_unseeded_request_and_reports_the_seed() {
         let t2i = manifest().actions.into_iter().find(|a| a.name == "text2image").unwrap();
-        let inv = capability::Invocation::new().set("prompt", json!("a cat"));
-        let err = t2i.validate(inv).unwrap_err();
-        assert!(err.contains("seed"), "error must name the missing param: {err}");
+        assert!(t2i.validate(capability::Invocation::new().set("prompt", json!("a cat"))).is_ok());
+        assert_eq!(image_outcome(&[0, 0, 0], 1, 1, 42).outputs["seed"], json!(42));
     }
 
     #[test]

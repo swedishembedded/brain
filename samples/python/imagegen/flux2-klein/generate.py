@@ -20,7 +20,6 @@ Requires: jeepney - `pip install -e brain-py`.
 from __future__ import annotations
 
 import argparse
-import random
 import sys
 import time
 from pathlib import Path
@@ -54,6 +53,8 @@ def run_streaming(brain: BrainDBus, model: str, action: str, params: dict, out: 
         print(f"  ERROR: {e}", file=sys.stderr)
         return 1
     print(f"  done: {outcome.outputs} ({time.monotonic() - t0:.1f}s)")
+    if "seed" in outcome.outputs:
+        print(f"seed: {outcome.outputs['seed']} (pass --seed {outcome.outputs['seed']} to reproduce)")
     data = outcome.blobs.get("image")
     if data is None:
         print("  no image blob arrived", file=sys.stderr)
@@ -73,14 +74,14 @@ def main() -> int:
     ap.add_argument("--width", type=int, default=512, help="output width (multiple of 16)")
     ap.add_argument("--height", type=int, default=512, help="output height (multiple of 16)")
     ap.add_argument("--steps", type=int, default=0, help="denoise steps (0 = variant default)")
-    ap.add_argument("--seed", type=int, default=None, help="RNG seed (omit: a random one is drawn here and printed; the action requires an explicit seed)")
+    ap.add_argument("--seed", type=int, default=None, help="RNG seed (omit: the action draws one and the run prints it)")
     ap.add_argument("--variant", default="klein-4b", choices=["klein-4b", "klein-9b", "base-4b", "base-9b"])
     ap.add_argument("--allow-non-commercial", action="store_true", help="confirm non-commercial use of the FLUX.2 9B weights (the 9B variants are refused without it)")
     args = ap.parse_args()
 
     params = {"prompt": args.prompt, "width": args.width, "height": args.height}
-    params["seed"] = args.seed if args.seed is not None else random.SystemRandom().randrange(2**63)
-    print(f"seed: {params['seed']} (pass --seed {params['seed']} to reproduce)")
+    if args.seed is not None:
+        params["seed"] = args.seed
     # `steps`/`variant` are FLUX.2-specific params the mock model
     # doesn't declare - ActionSpec.validate rejects unknown params, so only send
     # them to a model that actually advertises them.

@@ -144,7 +144,7 @@ pub fn plan(inv: &Invocation, editing: bool) -> Result<Plan, String> {
         strength,
         steps: (steps > 0).then_some(steps),
         guidance: inv.get_f64("guidance").unwrap_or(4.0) as f32,
-        seed: inv.get_i64("seed").ok_or("'seed' is required")?.max(0) as u64,
+        seed: inv.seed()?.unwrap_or_else(data::rng::random_seed),
         mask,
         experimental_steps: inv.get_bool("experimental_steps").unwrap_or(false),
         ref_resolution_scale: inv.get_f64("ref_resolution_scale").map_or(crate::pipeline::DEFAULT_REF_RESOLUTION_SCALE, |v| v as f32),
@@ -226,6 +226,18 @@ mod tests {
         let refs = plan(&inv.clone().set("ref_size", json!(0)), true).unwrap().decode(&inv).unwrap();
         assert_eq!((refs[1].2, refs[1].1), (1024, 768));
         assert!(plan(&inv.set("ref_size", json!(8)), true).err().unwrap().contains("ref_size"));
+    }
+
+    /// An unseeded request draws its own seed (a different one each time), a
+    /// given seed is kept, and one that is not a non-negative integer is
+    /// refused rather than clamped.
+    #[test]
+    fn an_unseeded_request_draws_a_seed_and_a_malformed_one_is_refused() {
+        let unseeded = || Invocation::new().set("prompt", json!("a cat"));
+        let seed_of = |inv: Invocation| plan(&inv, false).map(|p| p.opts.seed);
+        assert_ne!(seed_of(unseeded()), seed_of(unseeded()), "two unseeded requests must not share a seed");
+        assert_eq!(seed_of(unseeded().set("seed", json!(42))), Ok(42));
+        assert!(seed_of(unseeded().set("seed", json!(-1))).is_err());
     }
 
     /// `strength` 0 anchors on the image (the VAE round trip), it is not "no

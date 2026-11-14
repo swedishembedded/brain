@@ -394,8 +394,8 @@ impl Instance for Flux2Instance {
             }
         };
         let results = pipe.generate_batch(&batch, &mut prog);
-        for (&i, r) in live.iter().zip(results) {
-            out[i] = r.map(|(rgb, w, h)| flux2::caps::image_outcome(&rgb, w, h));
+        for ((&i, r), seed) in live.iter().zip(results).zip(batch.iter().map(|r| r.opts.seed)) {
+            out[i] = r.map(|(rgb, w, h)| flux2::caps::image_outcome(&rgb, w, h, seed));
         }
         out
     }

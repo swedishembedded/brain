@@ -38,7 +38,7 @@ $W t2v --prompt "a red fox running through snow" --out video=fox.mp4
 $W --device gpu0 t2v --prompt "..." --frames 33 --width 480 --height 288 --dit-dtype int8 --te-device gpu1 --out video=draft.mp4
 
 # a video LoRA, then the base-vs-adapted report next to it
-$W lora_train --data clips/ --save fox.brain --steps 200 --seed $RANDOM --report fox-report/
+$W lora_train --data clips/ --save fox.brain --steps 200 --report fox-report/
 ```
 
 `sample-models-wan --help` lists the actions, `sample-models-wan <action>

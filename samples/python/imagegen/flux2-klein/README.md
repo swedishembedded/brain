@@ -94,7 +94,7 @@ wrote fox.ppm (512x512)
   15+ min on CPU); cancellation is cooperative, not immediate.
 - Same-key concurrent requests are grouped by the scheduler but execute
   sequentially for now (`resident_flux2.rs::run_batch`'s module docs).
-- The CLI twin of these scripts: `brain flux2 text2image --prompt ... --seed 1 --out image=out.ppm`.
+- The CLI twin of these scripts: `brain flux2 text2image --prompt ... --out image=out.ppm`.
 - All three also run against the weight-free mock model (`--model brain/mock`);
   `cancel_generation.py`'s own header explains the `--mock-delay-ms` knob
   needed to make that timing-sensitive.

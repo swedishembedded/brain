@@ -34,23 +34,24 @@ under the FLUX.2 Non-Commercial license and run only with
 ```bash
 F=target/release/sample-models-flux2
 
-# text to image
-$F text2image --prompt "a red apple on a wooden table" --seed $RANDOM --out image=apple.png
+# text to image; with no --seed the run draws one and prints it, so
+# `--seed N` reproduces the image
+$F text2image --prompt "a red apple on a wooden table" --out image=apple.png
 
 # inpaint: white in the mask is redrawn, the canvas takes the image's size
-$F edit --image apple.png --mask mask.png --prompt "a green pear on a wooden table" --seed $RANDOM --out image=pear.png
+$F edit --image apple.png --mask mask.png --prompt "a green pear on a wooden table" --out image=pear.png
 
 # edit against several references (up to eight), each bounded to 512 px unless --ref-size says otherwise
-$F edit --image scene.png --image0 person.png --prompt "the person from image 2 sitting in the scene" --seed $RANDOM --out image=out.png
+$F edit --image scene.png --image0 person.png --prompt "the person from image 2 sitting in the scene" --out image=out.png
 
 # a large canvas in 512 px windows
-$F text2image --prompt "a harbour at dusk" --width 2048 --height 1152 --tile-size 512 --seed $RANDOM --out image=harbour.png
+$F text2image --prompt "a harbour at dusk" --width 2048 --height 1152 --tile-size 512 --out image=harbour.png
 
 # two adapters, each at its own strength
-$F text2image --prompt "..." --adapter "style.safetensors@0.6,subject.brain" --seed $RANDOM --out image=a.png
+$F text2image --prompt "..." --adapter "style.safetensors@0.6,subject.brain" --out image=a.png
 
 # a LoRA from a folder of images and captions
-$F lora_train --data my-set/ --save my.brain --steps 500 --seed $RANDOM
+$F lora_train --data my-set/ --save my.brain --steps 500
 ```
 
 `sample-models-flux2 --help` lists the actions, `sample-models-flux2 <action>

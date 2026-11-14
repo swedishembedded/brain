@@ -47,7 +47,7 @@ fn text2image_spec() -> ActionSpec {
         .param(ParamSpec::new("steps", ParamType::Int, "denoising steps").default(json!(30)).min(1.0).max(150.0).step(1.0))
         .param(ParamSpec::new("guidance", ParamType::Float, "classifier-free guidance scale; 1.0 disables CFG").default(json!(5.0)).min(1.0).max(30.0).step(0.1))
         .param(ParamSpec::new("vae_device", ParamType::Str, "where the VAE decode runs, a --device spec (default cpu: the UNet is still resident, and a 768px+ decode beside it can exceed a 24 GB card)").default(json!("cpu")))
-        .param(ParamSpec::new("seed", ParamType::Int, "RNG seed - required, never silently randomized: two invocations with the same prompt/params and no explicit distinct seed would otherwise be indistinguishable to an orchestrator's execution cache and collapse to one cached result").required())
+        .param(ParamSpec::new("seed", ParamType::Int, "RNG seed (omit for random; the outcome reports the one used)"))
         .output(capability::BlobSpec::new("image", capability::Media::Image, "the generated image"))
 }
 
@@ -56,20 +56,20 @@ pub fn manifest() -> Manifest {
     Manifest::new(MODEL, "SDXL text-to-image: UNet2DConditionModel + dual CLIP conditioning.", vec![text2image_spec()])
 }
 
-fn opts_from(inv: &Invocation) -> (String, GenerateOptions) {
+/// Decode the request. A `seed` that is not a non-negative integer is refused;
+/// an absent one is drawn, and the outcome reports it.
+fn opts_from(inv: &Invocation) -> Result<(String, GenerateOptions), String> {
     let prompt = inv.get_str("prompt").unwrap_or_default();
     let o = GenerateOptions {
         steps: inv.get_i64("steps").unwrap_or(30).max(1) as usize,
         guidance: inv.get_f64("guidance").unwrap_or(5.0) as f32,
-        seed: inv
-            .get_i64("seed")
-            .expect("ActionSpec::validate refuses an invocation missing this required param") as u64,
+        seed: inv.seed()?.unwrap_or_else(data::rng::random_seed),
         height: inv.get_i64("height").unwrap_or(1024).max(8) as u32,
         width: inv.get_i64("width").unwrap_or(1024).max(8) as u32,
         negative: inv.get_str("negative").unwrap_or_default(),
         vae_device: inv.get_str("vae_device").unwrap_or_else(|| "cpu".into()),
     };
-    (prompt, o)
+    Ok((prompt, o))
 }
 
 // ===================== the shared work =====================
@@ -96,7 +96,7 @@ impl Session {
     }
 
     fn text2image(&self, inv: &Invocation) -> ActionResult {
-        let (prompt, o) = opts_from(inv);
+        let (prompt, o) = opts_from(inv)?;
         let (h, w) = (o.height, o.width);
         let mut guard = self.built.lock().map_err(|_| "sdxl: pipeline lock poisoned")?;
         let p = match guard.entry((h, w)) {
@@ -104,7 +104,7 @@ impl Session {
             std::collections::hash_map::Entry::Vacant(e) => e.insert(Sdxl::load(&self.root, h, w)?),
         };
         let hwc = p.generate(&prompt, &o)?;
-        Ok(Outcome::new().blob("image", capability::blob::image_blob(&hwc, w, h, 3)))
+        Ok(Outcome::new().set("seed", json!(o.seed)).blob("image", capability::blob::image_blob(&hwc, w, h, 3)))
     }
 }
 
@@ -176,17 +176,16 @@ mod caps_tests {
         assert_eq!(w.step, Some(8.0));
     }
 
+    /// An unseeded request is valid and draws its own seed (a different one
+    /// each time), a given seed is kept, and one that is not a non-negative
+    /// integer is refused rather than clamped.
     #[test]
-    fn seed_is_required_never_silently_defaulted() {
-        let spec = text2image_spec();
-        let seed = spec.params.iter().find(|p| p.name == "seed").expect("seed param");
-        assert!(seed.required && seed.default.is_none());
-    }
-
-    #[test]
-    fn text2image_refuses_an_invocation_missing_seed() {
-        let inv = Invocation::new().set("prompt", json!("a cat"));
-        let err = text2image_spec().validate(inv).unwrap_err();
-        assert!(err.contains("seed"), "error must name the missing param: {err}");
+    fn an_unseeded_request_draws_a_seed_and_a_malformed_one_is_refused() {
+        let unseeded = || Invocation::new().set("prompt", json!("a cat"));
+        assert!(text2image_spec().validate(unseeded()).is_ok());
+        let seed_of = |inv: Invocation| opts_from(&inv).map(|(_, o)| o.seed);
+        assert_ne!(seed_of(unseeded()), seed_of(unseeded()), "two unseeded requests must not share a seed");
+        assert_eq!(seed_of(unseeded().set("seed", json!(42))), Ok(42));
+        assert!(seed_of(unseeded().set("seed", json!(-1))).is_err());
     }
 }
