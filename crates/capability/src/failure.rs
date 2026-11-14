@@ -117,6 +117,11 @@ const PANICKED: &str = ": panicked while running: ";
 /// in the middle of (the end of `qwen3::chat::NO_FIM_TOKENS`'s message).
 const NO_FIM_TOKENS: &str = "has no fill-in-the-middle tokens";
 
+/// The error a cancelled action or job answers with: the literal every
+/// surface forwards unchanged, so a client can map it onto a typed
+/// cancellation (see `Registry::run`'s cancellation contract).
+pub const CANCELLED: &str = "cancelled";
+
 /// What a failed call may tell the caller, whatever surface it came through.
 ///
 /// A model's or the scheduler's error text can carry a weight path, a panic
@@ -136,6 +141,9 @@ pub enum ReplyError {
     NoFim,
     /// The prompt needs more tokens than the model's serving capacity.
     Capacity { need: u64, capacity: u64 },
+    /// The job was cancelled before it answered: by its caller, or by the
+    /// server draining at shutdown.
+    Cancelled,
     /// Anything else: a runtime or activation failure.
     Failed,
 }
@@ -148,6 +156,9 @@ impl ReplyError {
         }
         if e.contains(PANICKED) {
             return ReplyError::Faulted;
+        }
+        if e == CANCELLED || e.ends_with(&format!(": {CANCELLED}")) {
+            return ReplyError::Cancelled;
         }
         if e.starts_with("no model") || e.contains("no action") {
             return ReplyError::NoModel;
@@ -177,6 +188,7 @@ impl ReplyError {
             ReplyError::Capacity { need, capacity } => {
                 format!("the request needs {need} tokens but this model's serving capacity is {capacity} tokens; reduce the prompt or lower max_tokens")
             }
+            ReplyError::Cancelled => CANCELLED.into(),
             ReplyError::Failed => "the model failed to process the request".into(),
         }
     }
@@ -223,6 +235,20 @@ mod tests {
         assert_eq!(classify(""), None);
         // Only a tag at the start, or right after a "context: " prefix, counts.
         assert_eq!(classify("clip says [timeout] in prose"), None);
+    }
+
+    /// A cancellation keeps its load-bearing literal: it names nothing of
+    /// the machine, and a client maps exactly that word back onto a typed
+    /// cancellation.
+    #[test]
+    fn a_cancellation_reaches_the_caller_as_cancelled() {
+        for e in ["cancelled", "mock/default: cancelled"] {
+            let reply = ReplyError::of(e);
+            assert_eq!(reply, ReplyError::Cancelled, "{e}");
+            assert_eq!(reply.client_message("m"), "cancelled");
+            assert!(!reply.hides_detail());
+        }
+        assert_eq!(ReplyError::of("not cancelled yet: disk full"), ReplyError::Failed);
     }
 
     #[test]

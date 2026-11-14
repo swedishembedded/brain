@@ -314,6 +314,9 @@ pub fn map_reply_err(provider: Provider, model: &str, e: &str) -> ApiError {
         capability::ReplyError::Faulted => ApiError::failure(provider, capability::FailureClass::BackendFailure, message),
         capability::ReplyError::NoModel => ApiError::model_not_found(provider, model),
         capability::ReplyError::Capacity { .. } => ApiError::context_length_exceeded(provider, message),
+        // Only a draining server cancels under an open request (a caller's
+        // own cancel is answered by the job API), so it is retryable elsewhere.
+        capability::ReplyError::Cancelled => ApiError::failure(provider, capability::FailureClass::Unavailable, "the request was cancelled"),
         capability::ReplyError::NoFim | capability::ReplyError::Failed => ApiError::invalid_request(provider, message),
     }
 }
@@ -839,6 +842,15 @@ mod tests {
         let body = e.body();
         assert_eq!(body["error"]["code"], "backend_failure");
         assert!(!body["error"]["message"].as_str().unwrap().contains("secret"));
+    }
+
+    /// A job cancelled under a request (the server draining at shutdown) is
+    /// a 503 the client may retry elsewhere, not its own invalid request.
+    #[test]
+    fn a_cancelled_job_is_unavailable_not_a_client_error() {
+        let e = map_reply_err(Provider::OpenAI, "m", "cancelled");
+        assert_eq!(e.kind.status(), axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(e.body()["error"]["message"], "the request was cancelled");
     }
 
     #[test]

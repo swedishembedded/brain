@@ -323,6 +323,11 @@ Only a request that fails again while it is alone on the card, after the prefix
 cache has been given back, is answered `unavailable` (503): retry later, or with
 a shorter prompt.
 
+A request whose job the server cancels while draining at shutdown is answered
+`unavailable` (503) with the message `the request was cancelled`: retry it
+against another server. Over D-Bus a cancelled call fails with the message
+`cancelled`, whoever cancelled it.
+
 ## Which models each provider exposes
 
 `/models` per provider lists only the loaded models whose capability fits that
