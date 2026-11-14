@@ -730,3 +730,79 @@ serve the checkpoints exams and RL use:
 - [ ] `policy_trace` over D-Bus is the `generate` action's `policy_trace` param, the same spec as HTTP (no separate gap); the
       released Qwen3.8 GGUF/FP8 resident (`Qwen35GgufEngine`) has no `score_continuation`, so the trace is refused for it by
       name. A slot-safe scoring pass over its working state and pool rows is the work.
+
+## Qwen3 serving on a Tesla P40: measured profile (2026-11-14, knowledge #455)
+
+Hardware: one Tesla P40 (sm_61, 24 GB, CUDA backend) of a pair shared with other jobs, on a host whose load average sat
+between 40 and 180 on 48 cores during every run (other builds), so host-side timings carry that contention. Model:
+`Qwen/Qwen3-0.6B` from the model store, served as stored (fp32 weights, int8 KV), `brain serve --device gpu1
+--max-batch 16 --checkpoint <store>/Qwen/Qwen3-0.6B` with an empty `--models-dir`, profiling build (release plus line
+tables). Workload, through the OpenAI `/v1/completions` SSE route, greedy, `ignore_eos`, `stream_options.include_usage`,
+random word prompts with a per-request salt (no prefix hits): single-stream decode of 256 tokens from a 43-token prompt
+(tokens after the first over the time after the first; 2 warm-up requests excluded, 3 measured); TTFT of a 2041-token
+prompt with `max_tokens` 1 (1 warm-up, 3 measured); C = 1 / 4 / 16 clients each issuing 2 requests of 128 tokens back to
+back after one warm-up wave (aggregate output tok/s over the wave, 2 waves). Each arm on a fresh server, arms interleaved,
+two rounds. The client counted tokens from the server's usage chunk; the decode figure reproduced within 5 % across rounds
+of one binary, and the nsys wall per token agreed with it.
+
+Before -> after (median of the rounds; base `8c04c9540`, after `d298249f3`):
+
+| metric | before | after |
+|---|---|---|
+| single-stream decode tok/s | 61.6 | 89.4 |
+| 2K-prompt TTFT ms | 1208 | 1178 |
+| C = 1 output tok/s | 53.9 | 85.2 |
+| C = 4 output tok/s | 134 | 290 |
+| C = 16 output tok/s | 234 | 539 |
+| C = 16 frame interval p50 ms (4 tokens a frame) | 241 | 87 |
+
+Per change (same workload, interleaved):
+
+- `43b5cdb4c` a changed CUDA graph replay waits for its own graph's previous launch, not the stream. nsys showed every
+  decode-window sub-step blocked in `cuStreamSynchronize` inside the feed/advance graph's replay (its parameters name the
+  sub-step), then ~0.9 ms of card idle while the host resolved and launched the layer stack. Gaps under 1 ms per 256-token
+  decode 227 -> 61 ms; single-stream decode +5 to +9 % in three interleaved pairs (64.3 / 61.1 / 58.3 -> 68.7 / 64.4 / 63.8
+  tok/s medians). Greedy outputs byte-identical. Gate: `cuda_graphs::a_changed_replay_does_not_wait_for_another_graph_in_flight`.
+- `ab85e7b0d` native fp32 decode GEMV (`matmul_f32_gemv`, `matmul_f32_gemv_rows`) behind `native_upgrade`, bit-identical to
+  `matmul_gemv_reg` (gate `f32_gemv_native`, mutation-checked on the fold order). The WGSL GEMV was the top kernel in every
+  decode profile (82 % of device time at C = 1, 83 % at C = 16), at 130-183 GB/s for one row (270 for the head) and 33-58 GB/s of weights at
+  16 rows (each lane re-reads every row of x per weight word). `f32_gemv_native_bench`, device-timed best of 7, weights
+  cycled past L2, Qwen3-0.6B shapes, WGSL -> native us: m = 1 qkv 105.5 -> 70.5, out 64.7 -> 40.9, gate/up 137.2 -> 99.7,
+  down 82.3 -> 53.9, head 2307 -> 1996 (312 GB/s); m = 4 gate/up 238.5 -> 96.5; m = 16 qkv 407.7 -> 132.7, gate/up 552.6 ->
+  192.9, down 308.0 -> 84.2, head 10650 -> 4480; m = 32 gate/up 863 -> 379, head 20073 -> 11989. Served: decode 67 -> 88
+  tok/s, C = 4 139 -> 289, C = 16 238 -> 555.
+- `d298249f3` the Qwen3 decode step cache replays a recorded `gpu_core` tape (the backend's frozen program) instead of
+  resubmitting its step list. heaptrack over a 64 + 512-token decode: allocations under `forward_batched_greedy_window`
+  1.815 M -> 71 K (about 3150 -> 124 a token), process total 3.28 M -> 1.54 M. Throughput unchanged within noise (the host
+  was already off the critical path after `43b5cdb4c`); greedy outputs byte-identical.
+
+Profile after the changes (nsys, 256-token single-stream decode): card busy 95 %, 12.1 ms a token; `matmul_f32_gemv` 75 % of
+device time, `paged_flash_decode_split_i8` 8 %, then five small kernels per layer (`concat_split`, `qknorm_rope_fused`,
+`kv_append_i8_clipped`, `add_rmsnorm_fwd`, `silu_mul`, 3-8 us each) together 13 %. C = 16: `matmul_f32_gemv_rows` 63 %,
+`matmul_reg3_splitk` 19 % (the prefill rounds of arriving 43-token prompts, m = 33..64 rows, 430 us median a call), card
+busy 91-93 %. 2K prefill: `paged_flash_prefill_i8` 47 % of device time (about 0.44 TFLOPS, 4 % of the fp32 peak), the
+prefill GEMMs 47 % (about 3.4 TFLOPS). Host: `perf_event_open` is unavailable to the user (paranoid level 4, so neither
+`perf` nor nsys CPU sampling), so host stacks came from gdb sampling of the serving thread (113 of 120 samples in the
+graph-replay `sync` before `43b5cdb4c`).
+
+Open, with the measured reason:
+
+- [ ] Prefill attention: `paged_flash_prefill_i8` at 4 % of the fp32 peak is half of a 2K TTFT on a P40. A native
+      Pascal prefill attention (fp32, no tensor cores) is a kernel project, not a selection fix.
+- [ ] Batched fp32 GEMV above 4 rows re-reads the weights once per 4-row block: m = 16 reaches 120-150 GB/s of weights (about
+      45 % of the measured DRAM rate), m = 32 50-80 GB/s. Single-pass 8- and 16-row instances measured slower (16 rows: 409-480 us
+      at gate/up against 193), consistent with register pressure; not inspected with counters (`ncu` counters need host admin on the profiling host).
+- [ ] The decode-regime bound `DECODE_REGIME_MAX_ROWS` = 32 sends 33..64-row products (short prompts' prefill rounds at
+      C = 16) to the split-K tiled GEMM, 19 % of a C = 16 run.
+- [ ] Small per-layer kernels (13 % of single-stream decode device time) are launch-sized on Pascal: fusion candidates.
+- [ ] Greedy output at temperature 0 differs between server launches of the same binary (one of six fixed prompts, in
+      both the before and after binaries, 96 tokens); within a launch single-stream and batched agree except where the
+      attention split depends on the batch (`--exact-decode` is refused by the family). Suspected: the split-K schedule the
+      engine measures at build (`tune_splitk`) changes the prefill GEMM's reduction order per launch; unconfirmed.
+- [ ] The window boundary still costs the card a readback, the SSE write and the metadata upload (1-2 ms a window idle, up to
+      20 ms under host contention), and launching a 509-node graph costs the host about 2 ms on a P40.
+- [ ] Pre-existing failures met on the way (not caused by these changes): `serve::rollout_tests::
+      a_sampled_group_matches_the_dense_model_token_for_token` (fails at the base too, after the full-row sampling change of
+      `8c04c9540`); `i8_gemv_native` and `q4_gemv_native` identity tests bind windows at word offsets the 256-byte
+      binding-offset check now refuses; `mem_pool::a_raised_retention_keeps_a_working_set_larger_than_the_default_cap_across_a_sync`
+      (the pool gave 49 MB of a 3.2 GB working set back at the sync).
