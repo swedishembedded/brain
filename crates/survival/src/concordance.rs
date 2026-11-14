@@ -8,8 +8,8 @@
 //! and `j` was still free of it after `T_i` (`T_j > T_i`, or censored at
 //! exactly `T_i`). A subject whose event was a DIFFERENT cause never has the
 //! event of interest: it stays comparable at every later time (the
-//! competing-risks concordance). Ties in the prediction
-//! (within [`TIED_TOL`]) count one half.
+//! competing-risks concordance). Ties in the prediction (two predictions
+//! that round to the same multiple of [`TIED_TOL`]) count one half.
 //!
 //! Uno's C restricts cases to `T_i < tau` and weights each by `1 / G(T_i)^2`,
 //! which removes the dependence on the censoring distribution that concordance
@@ -21,7 +21,8 @@
 use crate::estimate::Step;
 use crate::Obs;
 
-/// Predictions within this distance of each other are a tie.
+/// The tie grid: predictions that round to the same multiple of this are a
+/// tie (so two within it of each other may fall on either side of a step).
 pub const TIED_TOL: f64 = 1e-8;
 
 struct Fenwick {
@@ -62,7 +63,8 @@ fn counts(
     case_weight: impl Fn(usize) -> f64,
 ) -> (f64, f64) {
     assert_eq!(risk.len(), obs.len(), "one prediction per subject");
-    // Ties within TIED_TOL share a rank: quantise, then rank the distinct keys.
+    // Predictions on the same multiple of TIED_TOL share a rank: quantise,
+    // then rank the distinct keys.
     let keys: Vec<i64> = risk.iter().map(|r| (r / TIED_TOL).round() as i64).collect();
     let mut distinct = keys.clone();
     distinct.sort_unstable();
