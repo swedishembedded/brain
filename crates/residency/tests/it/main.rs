@@ -7,6 +7,7 @@
 //! process-wide state (the current directory, environment variables): the
 //! others run beside it.
 
+mod host_exchange_model;
 mod late_join_model;
 mod plan;
 mod sibling_models;

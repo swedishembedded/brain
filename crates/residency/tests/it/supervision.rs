@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 use capability::{ActionResult, ActionSpec, Invocation, Manifest};
 use gpu_supervisor::{BreakerPolicy, BreakerState, Health, WorkerCommand};
 use residency::budget::Budgets;
-use residency::supervised::{Deadlines, Probe, SupervisedModel, Supervision};
+use residency::supervised::{Deadlines, HostSpec, Probe, SupervisedModel, Supervision};
 use residency::{Device, Executor, Instance, InstanceKey, Job, MemCost, MultiDeviceCost, MultiDeviceResidentModel, Policy, ResidentModel};
 use serde_json::json;
 
@@ -40,7 +40,7 @@ while IFS= read -r line; do
     probe*) if [ "$role" = bad-probe ]; then echo "$id err the device did not answer"; else echo "$id ok {}"; fi ;;
     *hang*) sleep 3600 ;;
     *crash*) kill -ABRT $$ ;;
-    *) echo "$id ok {\"done\":true}" ;;
+    *) echo "$id ok {\"outputs\":{\"done\":true}}" ;;
   esac
 done
 "#;
@@ -58,10 +58,32 @@ fn health() -> Arc<Health<Device>> {
     Arc::new(Health::new(policy, REAP))
 }
 
+/// What the serving process knows of a fake worker's model: its manifest
+/// and footprint. Its code runs only in the worker.
+struct Declared(String);
+
+impl ResidentModel for Declared {
+    fn manifest(&self) -> Manifest {
+        Manifest::new(&self.0, "a fake supervised device model", vec![ActionSpec::new("run", "run")])
+    }
+
+    fn instance_key(&self, _action: &str, _inv: &Invocation) -> InstanceKey {
+        InstanceKey::new(&self.0, "default")
+    }
+
+    fn estimate(&self, _key: &InstanceKey) -> MemCost {
+        MemCost::new(20 * GB, 0)
+    }
+
+    fn activate(&self, _key: &InstanceKey, _device: Device) -> Result<Box<dyn Instance>, String> {
+        Err("a fake worker's model runs only in its worker".into())
+    }
+}
+
 fn model(name: &str, role: &str, health: &Arc<Health<Device>>) -> Arc<dyn ResidentModel> {
-    let manifest = Manifest::new(name, "a fake supervised device model", vec![ActionSpec::new("run", "run")]);
     let deadlines = Deadlines { open: Duration::from_secs(5), run: RUN_DEADLINE, reap: REAP };
-    Arc::new(SupervisedModel::new(manifest, fake(role), health.clone(), MemCost::new(20 * GB, 0), deadlines))
+    let spec = HostSpec { family: "fake".into(), args: json!({}) };
+    Arc::new(SupervisedModel::new(Arc::new(Declared(name.to_string())), spec, fake(role), health.clone(), deadlines))
 }
 
 fn two_gpus() -> Budgets {

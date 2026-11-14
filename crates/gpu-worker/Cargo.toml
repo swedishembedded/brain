@@ -17,5 +17,4 @@ serde_json.workspace = true
 [dev-dependencies]
 brain-gpu-supervisor.workspace = true
 brain-residency.workspace = true
-brain-capability.workspace = true
 brain-testutil.workspace = true

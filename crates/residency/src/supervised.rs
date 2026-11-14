@@ -7,40 +7,75 @@
 // then you can procure our services by sending an email to
 // info@swedishembedded.com.
 
-//! Device work that runs in a supervised worker process, and the executor's
-//! side of device health.
+//! Models whose code runs in a supervised worker process, both ends of the
+//! protocol they speak, and the executor's side of device health.
 //!
 //! A [`SupervisedModel`] is a [`ResidentModel`] whose instance lives in a
-//! child process ([`gpu_supervisor::Worker`]): activation starts the worker
-//! and asks it to `open` the device, and every run is one request with a
-//! deadline. A wedged or crashed worker is killed and reaped by the
-//! supervisor, so a stuck activation or run returns to its lane with a
+//! child process ([`gpu_supervisor::Worker`]). The serving process keeps the
+//! model's own resident for everything the scheduler asks without a device
+//! (manifest, instance key, estimate, admission checks); activation starts a
+//! worker, which rebuilds that same resident from a [`HostSpec`] and
+//! activates it on the assigned device ([`host`]), and every run is one
+//! request with a deadline. A wedged or crashed worker is killed and reaped
+//! by the supervisor, so a stuck activation or run returns to its lane with a
 //! definitive error instead of holding the lane forever, and the executor
 //! unwinds the claim (budget, slot, instance) as for any failed group.
 //!
 //! [`Supervision`] hands the executor the shared [`Health`] registry and how
-//! a quarantined device is probed ([`Probe`]). With it the executor places no work on a quarantined device,
-//! refuses work that nothing healthy can ever host, and probes each
-//! quarantined device on its own lane until the breaker closes.
+//! a quarantined device is probed ([`Probe`]). With it the executor places no
+//! work on a quarantined device, refuses work that nothing healthy can ever
+//! host, and probes each quarantined device on its own lane until the breaker
+//! closes.
 //!
-//! The worker protocol a supervised model speaks (each a line; the answer is
-//! `ok <payload>` or `err <message>`):
+//! The protocol a hosted model speaks (each a line `<id> <request>`; the
+//! answer is `<id> ok <payload>` or `<id> err <message>`):
 //!
 //! | request | answer payload |
 //! |---|---|
-//! | `open <device>` | anything; the instance is ready |
-//! | `run <action> <params JSON>` | the outputs, a JSON object |
-//! | `probe <device>` | anything; the device works (sent to a fresh worker) |
+//! | `hello <PROTOCOL>` | `{"protocol": n, "pid": p}`; must be the first request |
+//! | `open <device> <spec>` | `{}`; the instance is built on `<device>` |
+//! | `run[+<n>] <action> <envelope>` | `{"outputs": {...}, "blobs": [...]}`, with `ok+<n>` for `n` blobs |
+//! | `probe <device>` | anything; the device works (sent to a fresh probe worker) |
 //!
-//! `<device>` is `gpu<i>`, `npu<i>` or `cpu` ([`device_label`]).
+//! While a run is in flight the worker sends `<id> progress[+<n>] <json>`
+//! frames ([`Progress`], a chunk blob in a descriptor) and the parent may send
+//! one `<id> cancel`, which fires the run's [`capability::CancelToken`] in the
+//! worker. Blobs travel in sealed memfds beside their frame, never on the
+//! line; an envelope or answer too long for a line travels the same way, as
+//! the first descriptor, with `-` in its place. `<device>` is `gpu<i>`,
+//! `npu<i>` or `cpu` ([`device_label`]).
+//!
+//! Model code that panics in the worker answers `err panicked: <message>`;
+//! the serving process raises that panic again on the lane that ran the job,
+//! so the executor treats it exactly as an in-process panic (the group fails,
+//! the instance is unwound and rebuilt for the next job, the card is not
+//! quarantined), and the worker exits.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use capability::{ActionResult, Invocation, Manifest, Outcome, Progress};
-use gpu_supervisor::{CallError, Health, Worker, WorkerCommand};
+use capability::{ActionResult, Invocation, Manifest, Progress};
+use gpu_supervisor::{Health, Worker, WorkerCommand};
+use serde_json::{json, Value};
 
-use crate::{Device, Instance, InstanceKey, MemCost, ResidentModel};
+use crate::{AdapterIdentity, Device, Instance, InstanceKey, MemCost, ResidentModel, Tier};
+
+/// The protocol version a worker and its parent must agree on (`hello`).
+pub const PROTOCOL: u32 = 1;
+
+#[cfg(unix)]
+mod codec;
+#[cfg(unix)]
+mod host;
+
+#[cfg(target_os = "linux")]
+pub use host::host;
+#[cfg(unix)]
+pub use host::host_on;
+
+/// The first word of an answer whose model code panicked in the worker.
+#[cfg(unix)]
+const PANICKED: &str = "panicked:";
 
 /// What the executor needs to keep device health: the registry the supervised
 /// models record faults in, and how a quarantined device is probed.
@@ -66,7 +101,7 @@ pub enum Probe {
 /// The bounds a supervised model's requests run under.
 #[derive(Clone, Copy, Debug)]
 pub struct Deadlines {
-    /// Starting the worker's device (`open`).
+    /// Starting the worker and building the instance (`hello`, `open`).
     pub open: Duration,
     /// One run.
     pub run: Duration,
@@ -83,40 +118,131 @@ pub fn device_label(device: Device) -> String {
     }
 }
 
+/// The device a label from [`device_label`] names.
+pub fn parse_device_label(label: &str) -> Result<Device, String> {
+    let index = |rest: &str| rest.parse::<u32>().map_err(|_| format!("{label:?} is not a device (gpu<i>, npu<i> or cpu)"));
+    match label {
+        "cpu" => Ok(Device::Cpu),
+        l if l.starts_with("gpu") => Ok(Device::Gpu(index(&l[3..])?)),
+        l if l.starts_with("npu") => Ok(Device::Npu(index(&l[3..])?)),
+        _ => Err(format!("{label:?} is not a device (gpu<i>, npu<i> or cpu)")),
+    }
+}
+
+/// What a worker rebuilds to host a model: the family that knows how, and the
+/// family's own description of the model (a checkpoint's id and directory,
+/// say). The serving process and the worker build the same resident from it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HostSpec {
+    pub family: String,
+    pub args: Value,
+}
+
+/// A model family a worker can host: its name, and how it rebuilds a
+/// resident from the arguments its [`HostSpec`] carries. Rebuilding reads no
+/// weights; the worker then activates the resident on its device.
+#[derive(Clone, Copy)]
+pub struct HostedFamily {
+    pub name: &'static str,
+    pub open: fn(&Value) -> Result<Arc<dyn ResidentModel>, String>,
+}
+
+/// Worker hosting for the model families an operator chose: how to start a
+/// worker, the health registry its faults go to, and its deadlines.
+#[derive(Clone)]
+pub struct WorkerHosting {
+    command: WorkerCommand,
+    health: Arc<Health<Device>>,
+    deadlines: Deadlines,
+    families: Vec<String>,
+}
+
+impl WorkerHosting {
+    pub fn new(command: WorkerCommand, health: Arc<Health<Device>>, deadlines: Deadlines, families: Vec<String>) -> WorkerHosting {
+        WorkerHosting { command, health, deadlines, families }
+    }
+
+    /// Whether models of `family` run in a worker.
+    pub fn hosts(&self, family: &str) -> bool {
+        self.families.iter().any(|f| f == family)
+    }
+
+    /// `resident`, served from a worker when `hosting` covers its family, else as is.
+    pub fn serve(hosting: Option<&WorkerHosting>, resident: Arc<dyn ResidentModel>, spec: HostSpec) -> Arc<dyn ResidentModel> {
+        match hosting {
+            Some(h) if h.hosts(&spec.family) => Arc::new(SupervisedModel::new(resident, spec, h.command.clone(), h.health.clone(), h.deadlines)),
+            _ => resident,
+        }
+    }
+}
+
 /// A model served by a supervised worker process: one worker per instance
 /// (one device and one kernel set), owned by that instance.
 pub struct SupervisedModel {
-    manifest: Manifest,
+    inner: Arc<dyn ResidentModel>,
+    spec: HostSpec,
     command: WorkerCommand,
     health: Arc<Health<Device>>,
-    cost: MemCost,
     deadlines: Deadlines,
 }
 
 impl SupervisedModel {
-    pub fn new(manifest: Manifest, command: WorkerCommand, health: Arc<Health<Device>>, cost: MemCost, deadlines: Deadlines) -> SupervisedModel {
-        SupervisedModel { manifest, command, health, cost, deadlines }
+    /// `inner` answers everything the scheduler asks without a device; a
+    /// worker started from `command` rebuilds it from `spec` and runs it.
+    pub fn new(inner: Arc<dyn ResidentModel>, spec: HostSpec, command: WorkerCommand, health: Arc<Health<Device>>, deadlines: Deadlines) -> SupervisedModel {
+        SupervisedModel { inner, spec, command, health, deadlines }
     }
 }
 
 impl ResidentModel for SupervisedModel {
     fn manifest(&self) -> Manifest {
-        self.manifest.clone()
+        self.inner.manifest()
     }
 
-    fn instance_key(&self, _action: &str, _inv: &Invocation) -> InstanceKey {
-        InstanceKey::new(&self.manifest.model, "default")
+    fn instance_key(&self, action: &str, inv: &Invocation) -> InstanceKey {
+        self.inner.instance_key(action, inv)
     }
 
-    fn estimate(&self, _key: &InstanceKey) -> MemCost {
-        self.cost
+    fn estimate(&self, key: &InstanceKey) -> MemCost {
+        self.inner.estimate(key)
+    }
+
+    fn estimate_at(&self, key: &InstanceKey, tier: Tier) -> MemCost {
+        self.inner.estimate_at(key, tier)
+    }
+
+    fn replicas(&self) -> usize {
+        self.inner.replicas()
+    }
+
+    fn batch_limit(&self) -> Option<usize> {
+        self.inner.batch_limit()
+    }
+
+    fn stamp(&self, inv: &mut Invocation) {
+        self.inner.stamp(inv)
+    }
+
+    fn check_job(&self, action: &str, inv: &Invocation) -> Result<(), String> {
+        self.inner.check_job(action, inv)
+    }
+
+    fn transient(&self) -> bool {
+        self.inner.transient()
+    }
+
+    fn adapter_identity(&self) -> Option<AdapterIdentity> {
+        self.inner.adapter_identity()
     }
 
     /// Runs on the device's lane, which outlives the worker it starts (the
     /// worker is killed when the thread that spawned it exits).
     fn activate(&self, key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
         let mut worker = Worker::spawn_with(&self.command, self.deadlines.reap).map_err(|e| format!("{key}: could not start worker {} ({e})", self.command.program().display()))?;
-        self.health.call(&device, &mut worker, &format!("open {}", device_label(device)), self.deadlines.open).map_err(|e| format!("{key}: {e}"))?;
+        let open = json!({ "family": self.spec.family, "args": self.spec.args, "key": { "model": key.model, "config": key.config } });
+        for request in [format!("hello {PROTOCOL}"), format!("open {} {open}", device_label(device))] {
+            self.health.call(&device, &mut worker, &request, self.deadlines.open).map_err(|e| format!("{key}: {e}"))?;
+        }
         Ok(Box::new(SupervisedInstance { worker, device, health: self.health.clone(), run: self.deadlines.run, lost: None }))
     }
 }
@@ -134,32 +260,88 @@ struct SupervisedInstance {
 }
 
 impl Instance for SupervisedInstance {
-    fn run(&mut self, action: &str, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
+    fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         if let Some(lost) = &self.lost {
             return Err(lost.clone());
-        }
-        if !inv.blobs.is_empty() {
-            return Err(format!("{action}: a supervised worker takes no blobs"));
         }
         if action.is_empty() || action.contains(char::is_whitespace) {
             return Err(format!("{action:?} is not an action name"));
         }
-        // Compact JSON has no raw newline, so the request stays one frame.
-        let params = serde_json::to_string(&inv.params).map_err(|e| format!("{action}: params: {e}"))?;
-        match self.health.call(&self.device, &mut self.worker, &format!("run {action} {params}"), self.run) {
-            Ok(payload) => {
-                let outputs: serde_json::Value = serde_json::from_str(&payload).map_err(|e| format!("{action}: the worker's outputs are not JSON ({e})"))?;
-                if !outputs.is_object() {
-                    return Err(format!("{action}: the worker's outputs are not a JSON object"));
+        self.run_in_worker(action, inv, progress)
+    }
+}
+
+impl SupervisedInstance {
+    /// One run as one exchange with the worker: the envelope (and the blobs
+    /// in memfds) out, progress and a cancellation while it runs, the
+    /// outcome back.
+    #[cfg(unix)]
+    fn run_in_worker(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        use gpu_supervisor::{CallError, Exchange};
+        let mut fds = Vec::new();
+        let blobs = codec::write_blobs(&inv.blobs, &mut fds).map_err(|e| format!("{action}: {e}"))?;
+        let envelope = json!({ "params": inv.params, "scope": inv.scope, "blobs": blobs }).to_string();
+        let envelope = codec::pack(envelope, &mut fds).map_err(|e| format!("{action}: {e}"))?;
+        let verb = if fds.is_empty() { "run".to_string() } else { format!("run+{}", fds.len()) };
+        let request = format!("{verb} {action} {envelope}");
+
+        let borrowed: Vec<_> = fds.iter().map(std::os::fd::AsFd::as_fd).collect();
+        let cancelled = || inv.cancel.is_cancelled();
+        let mut broken: Option<String> = None;
+        let mut forward = |payload: &str, fds: Vec<std::os::fd::OwnedFd>| {
+            if broken.is_some() {
+                return;
+            }
+            match codec::decode_progress(payload, fds) {
+                Ok(p) => progress(p),
+                Err(e) => broken = Some(format!("{action}: the worker's progress breaks the protocol ({e})")),
+            }
+        };
+        let x = Exchange { fds: &borrowed, cancelled: Some(&cancelled), progress: Some(&mut forward) };
+        let answer = self.health.exchange(&self.device, &mut self.worker, &request, self.run, x);
+        if let Some(why) = broken {
+            return Err(self.lose(why));
+        }
+        match answer {
+            Ok((payload, fds)) => codec::decode_outcome(&payload, fds).map_err(|e| self.lose(format!("{action}: the worker's answer breaks the protocol ({e})"))),
+            Err(CallError::Failed(message)) => match message.strip_prefix(PANICKED) {
+                // The same unwind an in-process panic takes: the lane fails
+                // the group and the executor rebuilds the instance.
+                Some(what) => {
+                    let what = format!("{action}: the worker panicked:{what}");
+                    self.lost = Some(what.clone());
+                    panic!("{what}");
                 }
-                Ok(Outcome { outputs, ..Outcome::new() })
-            }
-            Err(e @ (CallError::Fault(_) | CallError::Refused { .. })) => {
-                let msg = e.to_string();
-                self.lost = Some(msg.clone());
-                Err(msg)
-            }
-            Err(e) => Err(e.to_string()),
+                None => Err(message),
+            },
+            Err(e @ (CallError::Fault(_) | CallError::Refused { .. })) => Err(self.lose(e.to_string())),
+            Err(e @ CallError::Invalid(_)) => Err(e.to_string()),
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn run_in_worker(&mut self, _action: &str, _inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        Err("supervised device workers need a Unix host".into())
+    }
+
+    /// Mark the worker unusable for every later run, and say why.
+    fn lose(&mut self, why: String) -> String {
+        self.lost = Some(why.clone());
+        why
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn device_labels_round_trip_and_nothing_else_parses() {
+        for d in [Device::Cpu, Device::Gpu(0), Device::Gpu(11), Device::Npu(1)] {
+            assert_eq!(parse_device_label(&device_label(d)), Ok(d));
+        }
+        for bad in ["", "gpu", "gpu-1", "tpu0", "cpu0", "gpu 1"] {
+            assert!(parse_device_label(bad).is_err(), "{bad:?} parsed");
         }
     }
 }

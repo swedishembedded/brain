@@ -20,3 +20,9 @@ brain-backend-api.workspace = true
 brain-gpu-core.workspace = true
 serde_json.workspace = true
 
+# A model hosted in a real worker process: the test binary is its own worker,
+# so it runs its own harness (libtest would print to the worker's socket).
+[[test]]
+name = "hosted"
+path = "tests/hosted/main.rs"
+harness = false

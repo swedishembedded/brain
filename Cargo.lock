@@ -1793,7 +1793,6 @@ name = "brain-gpu-worker"
 version = "5.1.0"
 dependencies = [
  "brain-backend-wgpu",
- "brain-capability",
  "brain-gpu-supervisor",
  "brain-kernels",
  "brain-residency",

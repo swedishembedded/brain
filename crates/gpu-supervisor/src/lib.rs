@@ -55,3 +55,5 @@ pub use health::{CallError, DeviceStatus, Fault, Health};
 pub use worker::{Exchange, FaultKind, Reply, Worker, WorkerCommand, WorkerFailure, MAX_REPLY_BYTES, MAX_REQUEST_BYTES};
 #[cfg(unix)]
 pub use worker::OnProgress;
+#[cfg(target_os = "linux")]
+pub use worker::take_worker_socket;

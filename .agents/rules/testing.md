@@ -154,6 +154,11 @@ only trusted once a deliberate bug in it has been seen to fail.
   operations, every operation answered exactly once, every killed worker
   reaped, no work admitted while a breaker is open); each deliberate bug in
   it is checked to fail.
+- `crates/residency/tests/it/host_exchange_model.rs`: a hosted model's jobs
+  crossing the worker socket with progress, cancellation and a worker that
+  may die (every job answered once, `cancelled` only when its caller asked
+  and never for a job that ran to completion, no cancellation that reached
+  the worker dropped); each deliberate bug in it is checked to fail.
 
 ## 3. Federated round-trip & integrity
 

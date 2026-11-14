@@ -352,6 +352,39 @@ impl Worker {
     }
 }
 
+/// The worker's end of [`Worker::spawn`]: the socket its supervisor handed it
+/// as stdin, moved to a private close-on-exec descriptor. Standard input then
+/// reads the null device and standard output goes to standard error, so code
+/// in the worker that reads stdin or prints cannot reach the protocol. An
+/// error, touching nothing, when stdin is not a socket (a worker program
+/// started by hand).
+#[cfg(target_os = "linux")]
+pub fn take_worker_socket() -> Result<UnixStream, String> {
+    use std::os::fd::FromRawFd;
+    // SAFETY: fstat fills a plain struct for descriptor 0.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(0, &mut st) } != 0 || st.st_mode & libc::S_IFMT != libc::S_IFSOCK {
+        return Err("standard input is not a supervisor's socket".into());
+    }
+    // SAFETY: F_DUPFD_CLOEXEC returns a fresh descriptor this process owns.
+    let raw = unsafe { libc::fcntl(0, libc::F_DUPFD_CLOEXEC, 3) };
+    if raw < 0 {
+        return Err(format!("cannot take the supervisor's socket: {}", std::io::Error::last_os_error()));
+    }
+    // SAFETY: `raw` is owned from here on; the null device is opened
+    // read-only and both dup2 targets are this process's own standard
+    // descriptors.
+    unsafe {
+        let sock = UnixStream::from_raw_fd(raw);
+        let null = libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC);
+        if null < 0 || libc::dup2(null, 0) < 0 || libc::dup2(2, 1) < 0 {
+            return Err(format!("cannot detach the standard descriptors from the protocol: {}", std::io::Error::last_os_error()));
+        }
+        libc::close(null);
+        Ok(sock)
+    }
+}
+
 /// `SIGKILL` to the process group a worker leads. Always sent, even when the
 /// leader already exited: what it started may still run. The group id stays
 /// reserved while any member lives, so this cannot reach an unrelated process.
