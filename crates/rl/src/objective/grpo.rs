@@ -781,9 +781,10 @@ impl<M: Model, E: Environment, V: Verifier> Objective<M> for Grpo<E, V> {
 
     /// Rows a group sampled that no step has trained yet: a stop inside a group would otherwise
     /// drop them, and the resumed run would sample anew where the uninterrupted one trains them.
-    /// The rest of the stream is the loop's generator, which the resume state carries.
+    /// The rest of the stream is the loop's generator, which the resume state carries. The counters
+    /// come along, so a resumed run reports the whole run.
     fn cursor(&self) -> Option<serde_json::Value> {
-        Some(serde_json::json!({ "pending": self.pending }))
+        Some(serde_json::json!({ "pending": self.pending, "stats": self.stats }))
     }
 
     fn restore_cursor(&mut self, cursor: &serde_json::Value) -> Result<(), std::io::Error> {
@@ -791,6 +792,7 @@ impl<M: Model, E: Environment, V: Verifier> Objective<M> for Grpo<E, V> {
         #[serde(deny_unknown_fields)]
         struct Queue {
             pending: std::collections::VecDeque<PackedRow>,
+            stats: GrpoStats,
         }
         let queue: Queue = serde_json::from_value(cursor.clone()).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("the GRPO queue of the saved state: {e}")))?;
         let n = self.cfg.seq_len;
@@ -798,6 +800,7 @@ impl<M: Model, E: Environment, V: Verifier> Objective<M> for Grpo<E, V> {
             return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("the GRPO queue of the saved state holds a row of {} positions; this run packs rows of {n}", bad.tokens.len())));
         }
         self.pending = queue.pending;
+        self.stats = queue.stats;
         Ok(())
     }
 

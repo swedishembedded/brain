@@ -77,15 +77,17 @@ impl From<BehaviourRefusal> for std::io::Error {
 }
 
 /// Why a queued row was not trained.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum RowRefusal {
     /// Its behaviour policy is `age` optimiser steps older than the current
     /// one, beyond the `bound` allowed.
     Stale { age: u64, bound: u32 },
 }
 
-/// Counters of one objective's life.
-#[derive(Clone, Debug, Default, PartialEq)]
+/// Counters of one objective's life (a resumed run's included: they travel in its resume state).
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GrpoStats {
     /// Groups (or RFT attempt series) drawn, and how many of them held no
     /// non-zero advantage (every reward equal, or nothing verified).
