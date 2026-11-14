@@ -405,7 +405,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("brain-fetch-short-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let dest = dir.join("w.safetensors");
-        let err = stream_to_file(&b"abc"[..], &dest, Some(10), None, &mut |_, _| {}).unwrap_err();
+        let err = stream_to_file(&b"abc"[..], &dest, Some(10), None, &|| false, &mut |_, _| {}).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof, "{err}");
         assert!(err.to_string().contains("3 of its declared 10"), "{err}");
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0, "no .part and no destination remain");
