@@ -21,6 +21,10 @@
 //!
 //! * [`batched_output_equals_single_request_output`]: sequences decoded
 //!   together produce what each produces alone.
+//! * [`a_cancelled_request_frees_its_state_and_spares_its_neighbours`][]: a
+//!   request cancelled mid-decode hands back what it produced, returns its KV
+//!   blocks to the pool at once and never completes, and the requests decoding
+//!   beside it answer what each answers alone.
 //! * [`a_short_request_is_not_held_behind_a_long_decode`]: a short request
 //!   admitted while a long sequence decodes finishes in about its own number
 //!   of steps, and the long one is still running (no head-of-line blocking).
@@ -133,6 +137,7 @@ fn alone<D: PagedDecoder>(c: &Conformance<D>, prompt: &[u32], max_new: usize) ->
 
 pub fn run_all<D: PagedDecoder>(c: &Conformance<D>) {
     batched_output_equals_single_request_output(c);
+    a_cancelled_request_frees_its_state_and_spares_its_neighbours(c);
     a_short_request_is_not_held_behind_a_long_decode(c);
     a_prefix_hit_prefills_only_the_suffix(c);
     if c.load_adapter.is_some() {
@@ -186,6 +191,35 @@ pub fn batched_output_equals_single_request_output<D: PagedDecoder>(c: &Conforma
     for (p, id) in prompts.iter().zip(ids) {
         assert_eq!(together[&id], alone(c, p, 6), "a batched request must decode exactly as it does alone (prompt of {} tokens)", p.len());
     }
+}
+
+/// The longest generation the cancellation property asks for: it must outlast two scheduler steps of a decoder that
+/// produces a window of tokens per step, and fit [`MIN_SEQ_TOKENS`] with its prompt.
+const CANCELLED_MAX_NEW: usize = 40;
+
+pub fn a_cancelled_request_frees_its_state_and_spares_its_neighbours<D: PagedDecoder>(c: &Conformance<D>) {
+    let mut sched = Scheduler::new((c.make)(), 4);
+    let vocab = sched.decoder_mut().vocab();
+    let (keep_a, doomed, keep_b) = (tokens(vocab, 21, 6), tokens(vocab, 22, 7), tokens(vocab, 23, 5));
+    let a = sched.submit(request(keep_a.clone(), 10));
+    let d = sched.submit(request(doomed, CANCELLED_MAX_NEW));
+    let b = sched.submit(request(keep_b.clone(), 10));
+    let mut finished = std::collections::HashMap::new();
+    for _ in 0..2 {
+        finished.extend(sched.step());
+    }
+    assert!(!finished.contains_key(&d), "the request to cancel is still decoding after two steps");
+    let free = sched.free_blocks();
+    let produced = sched.cancel(d).expect("a running request can be cancelled");
+    assert!(produced.len() < CANCELLED_MAX_NEW, "a cancelled request hands back only what it produced ({} tokens)", produced.len());
+    assert!(sched.free_blocks() > free, "a cancelled request's KV blocks return to the pool at once ({} free before, {} after)", free, sched.free_blocks());
+    assert!(sched.cancel(d).is_none(), "a request is cancelled once");
+    while sched.pending() {
+        finished.extend(sched.step());
+    }
+    assert!(!finished.contains_key(&d), "a cancelled request never completes");
+    assert_eq!(finished[&a], alone(c, &keep_a, 10), "a neighbour of a cancelled request decodes as it does alone");
+    assert_eq!(finished[&b], alone(c, &keep_b, 10), "a neighbour of a cancelled request decodes as it does alone");
 }
 
 pub fn a_short_request_is_not_held_behind_a_long_decode<D: PagedDecoder>(c: &Conformance<D>) {
