@@ -155,6 +155,55 @@ impl Drafter for NgramDrafter {
     }
 }
 
+/// What `--speculative` selects: the drafter a served decoder verifies proposals from. A family honours the modes
+/// its engine has and refuses the others by name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum SpeculativeMode {
+    /// No speculation: every decode step produces one token per sequence.
+    #[default]
+    Off,
+    /// The best drafter the checkpoints on disk provide; off when there is none.
+    Auto,
+    /// Draft with the checkpoint's own multi-token-prediction head.
+    Mtp,
+    /// Draft with the DFlash2 block-diffusion draft model.
+    Dflash,
+    /// Draft by copying what the context repeats (prompt lookup): no second
+    /// model, strong on code edits and tool-call arguments.
+    Ngram,
+}
+
+impl SpeculativeMode {
+    /// The flag spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SpeculativeMode::Off => "off",
+            SpeculativeMode::Auto => "auto",
+            SpeculativeMode::Mtp => "mtp",
+            SpeculativeMode::Dflash => "dflash",
+            SpeculativeMode::Ngram => "ngram",
+        }
+    }
+
+    /// Parse a `--speculative` value.
+    pub fn parse(s: &str) -> Result<SpeculativeMode, String> {
+        match s {
+            "off" => Ok(SpeculativeMode::Off),
+            "auto" => Ok(SpeculativeMode::Auto),
+            "mtp" => Ok(SpeculativeMode::Mtp),
+            "dflash" => Ok(SpeculativeMode::Dflash),
+            "ngram" => Ok(SpeculativeMode::Ngram),
+            other => Err(format!("unknown speculative mode '{other}': expected auto, off, mtp, dflash or ngram")),
+        }
+    }
+}
+
+impl std::fmt::Display for SpeculativeMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// How the scheduler uses a decoder's speculation hooks.
 #[derive(Clone, Copy, Debug)]
 pub struct SpecPolicy {

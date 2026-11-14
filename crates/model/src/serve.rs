@@ -37,7 +37,7 @@ pub use fullrow::{best_candidates, sample_logits_row};
 pub use sampler::{apply_processors, apply_processors_to_row, apply_processors_with, ngram_followers, DryParams, NoRepeatNgram, ProcessorState, SampleContext, ThinkingBudget, MAX_DRY_BREAKERS, MAX_NGRAM_ALLOW, MAX_THINK_CLOSE, MAX_THINK_LEAD};
 pub use taps::TapPool;
 use speculate::Scored;
-pub use speculate::{verify_proposals, DraftQuery, Drafter, NgramDrafter, SpecPolicy, SpecStats, Verdict};
+pub use speculate::{verify_proposals, DraftQuery, Drafter, NgramDrafter, SpecPolicy, SpecStats, SpeculativeMode, Verdict};
 
 /// The seam a model's paged serving engine implements. Every method mirrors
 /// one qwen `Engine` method the [`Scheduler`] used to call directly (see
