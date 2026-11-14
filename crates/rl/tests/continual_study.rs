@@ -254,6 +254,11 @@ fn lora_targets() -> Vec<String> {
 /// sanity checks below re-run on every call, cached or not: a fixture that
 /// cannot be re-validated is not a fixture.
 fn prepare_base() -> PathBuf {
+    // The three tests run on threads of one process and share the cache: one at
+    // a time checks and builds it, or a cold build by one is deleted under the
+    // others' feet.
+    static BUILD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _one_at_a_time = BUILD.lock().unwrap_or_else(|e| e.into_inner());
     let cache = std::env::temp_dir().join("brain-rl-continual-base");
     let stamp = cache.join("fingerprint.txt");
     let base = cache.join("base.safetensors");
