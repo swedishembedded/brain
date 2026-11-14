@@ -245,7 +245,7 @@ fn softmax_entropy(logits: &[f32]) -> f64 {
 /// O(T^2) re-prefill via [`Model::logits_all`] exactly like
 /// `crate::train::generate` did before this module existed. Works for every
 /// token-head [`Model`] with zero per-model code; the oracle
-/// [`PagedRollout`]'s fast path is tested against.
+/// [`SchedulerRollout`]'s serving path is tested against.
 pub struct ModelRollout<'a, M: Model> {
     m: &'a M,
 }

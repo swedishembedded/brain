@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use data::rng::Rng;
 use model::paged::{BlockAllocator, BlockTable};
-use model::rollout::{PagedRollout, Rollout, RolloutParams};
+use model::rollout::{Rollout, RolloutParams, SchedulerRollout};
 use model::serve::{DraftQuery, Drafter, MixedLimits, PagedDecoder, PrefillProgress, Request, SampleParams, Scheduler};
 
 const VOCAB: usize = 300;
@@ -251,7 +251,7 @@ fn a_mixed_speculative_iteration_verifies_against_whole_rows() {
 #[test]
 fn a_rollout_samples_a_nucleus_wider_than_the_candidate_list() {
     let (dec, _) = Flat::new(false, false);
-    let mut rollout = PagedRollout::new(dec);
+    let mut rollout = SchedulerRollout::new(dec, 1);
     let params = RolloutParams { max_new: 300, sample: wide_nucleus(), eos: None };
     let done = rollout.sample_n(&prompt(5), 1, &params, &mut Rng::new(3));
     assert_drawn_from_the_nucleus(&done[0].tokens);
