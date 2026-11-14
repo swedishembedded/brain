@@ -389,6 +389,13 @@ impl BlockTable {
     /// block, returning `Some((old, new))` so the caller can copy the block's live
     /// contents old→new on the device. No-op (returns `None`) when the tail block
     /// is already private or the table is empty.
+    ///
+    /// # Panics
+    /// When the pool has no free block. The caller must have paid for the copy
+    /// before adopting the shared prefix: both serving callers (`ricursive`,
+    /// `qwen35` GGUF resident) subtract the copied tail from the blocks their
+    /// `cached_prefix_blocks` reports as adopted, so admission charges the
+    /// private block this allocates.
     pub fn unshare_tail(&mut self, alloc: &mut BlockAllocator) -> Option<(u32, u32)> {
         let last = *self.blocks.last()?;
         if alloc.refcount(last) <= 1 {

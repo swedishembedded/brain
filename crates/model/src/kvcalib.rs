@@ -7,12 +7,12 @@
 //! `PagedDecoder` trait + `Scheduler<D>`, `actstats`'s percentile reservoir).
 //! [`KvCalib`] itself names no model: it is a pure `(layer, kv_head, K|V) ->
 //! f32` table plus JSON I/O, built from an `actstats::Collector` any paged-KV
-//! model can populate its own way. `crates/qwen` is the first (and today
-//! only) consumer — see `crates/qwen3/src/serve.rs`'s `Engine::calibrate_kv`/
-//! `set_kv_calib` for how a concrete `PagedDecoder` implementation wires this
-//! in — but nothing here is Qwen-specific; a second paged-attention model
-//! adopting the same INT8-KV-with-calibration pattern reuses this file and
-//! its `kv_calib.json` format as-is.
+//! model can populate its own way. `crates/qwen3` (see its `serve.rs`'s
+//! `Engine::calibrate_kv`/`set_kv_calib`) and `crates/qwen35` (its `serve.rs`
+//! `KvCalibrationSource` impl) are the consumers today, but nothing here is
+//! Qwen-specific; another paged-attention model adopting the same
+//! INT8-KV-with-calibration pattern reuses this file and its `kv_calib.json`
+//! format as-is.
 //!
 //! A per-`(layer, kv_head, K|V)` clip ceiling, derived offline (`brain qwen
 //! calib` today) from a chosen percentile of a representative prompt set's
@@ -24,15 +24,15 @@
 //! an online per-token absmax. [`KvCalib`] is instead used as a CEILING on
 //! that online scale (`paged_kv_append_i8_clipped_batched.wgsl`:
 //! `scale = min(this_token's_absmax, clip[head]) / 127`) — keeping the
-//! per-token adaptivity while denying one rare outlier token the ability to
-//! crush every other token's resolution in that head. A `KvCalib` whose
+//! per-token adaptivity while capping how coarse an outlier token's own row can
+//! get: scales are per `(token, kv-head)` row, so an outlier never affects any
+//! other token's resolution. A `KvCalib` whose
 //! every entry is [`f32::MAX`] (the uncalibrated sentinel, see
 //! [`KvCalib::disabled`]) degrades the clipped kernel to bit-identical
 //! behaviour vs the plain online-absmax one, which is what makes the A/B
 //! (and the "no calibration file present" default) clean.
 //!
-//! This was built against a real-checkpoint measurement, on the one
-//! consumer that exists today.
+//! This was built against a real-checkpoint measurement.
 //!
 //! # Calibrating any architecture
 //!
@@ -178,7 +178,7 @@ impl KvCalib {
 
     /// Build from a [`crate::actstats::Collector`] populated by a model's own
     /// calibration pass (`crates/qwen3/src/serve.rs`'s `Engine::calibrate_kv`
-    /// is the one that exists today; stream names `layer{L:02}.{k|v}.head{H}`
+    /// is one such caller; stream names `layer{L:02}.{k|v}.head{H}`
     /// is that caller's convention, not one this function enforces), at
     /// percentile `q` (e.g. `0.999`). A `(layer, head)` the collector never
     /// observed — shouldn't happen with a non-empty, representative prompt
