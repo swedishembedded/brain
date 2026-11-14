@@ -1383,9 +1383,10 @@ pub struct FitControl<'a> {
     pub on_step: Option<&'a mut dyn FnMut(&StepReport) -> bool>,
     /// Exact resume: the file this run's training state is written to, and
     /// read back from when it already exists. The state is the optimised
-    /// weights, their AdamW moments, the completed step count (which fixes the
-    /// learning-rate schedule's position and AdamW's bias correction) and the
-    /// batch generator's position - everything a step depends on besides the
+    /// weights, their AdamW moments, the completed step count, the applied
+    /// update count (which fixes the learning-rate schedule's position and
+    /// AdamW's bias correction; a step the update gate refused is completed
+    /// but not applied) and the batch generator's position - everything a step depends on besides the
     /// frozen weights and the data, so a run continued from it computes the
     /// same updates an uninterrupted run would. The model must expose its
     /// optimizer state ([`Model::optimized_params`]).
