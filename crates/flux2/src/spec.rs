@@ -93,9 +93,12 @@ fn classify_safetensors(idx: usize, rec: &ArtifactRecord, out: &mut Vec<(usize, 
     // 3D VIDEO vae (Wan's release) carries the exact same two names. The
     // conv kernel's shape RANK is real structure that tells them apart: a
     // 2D image vae is `[out,in,kh,kw]` (4 dims), a causal 3D video vae adds
-    // a leading temporal axis, `[out,in,kt,kh,kw]` (5 dims).
+    // a leading temporal axis, `[out,in,kt,kh,kw]` (5 dims). Among 2D image
+    // VAEs, the decoder's input channels are the latent width: FLUX.2's 32
+    // against the 16 of FLUX.1's (and Z-Image's) VAE.
     let is_2d_conv = |name: &str| m.shape(name).is_some_and(|s| s.len() == 4);
-    if is_2d_conv("decoder.conv_in.weight") && is_2d_conv("encoder.conv_in.weight") {
+    let latent_channels = m.shape("decoder.conv_in.weight").and_then(|s| s.get(1).copied());
+    if is_2d_conv("decoder.conv_in.weight") && is_2d_conv("encoder.conv_in.weight") && latent_channels == Some(vae::VaeConfig::flux2().latent_channels as usize) {
         out.push((idx, "vae".to_string(), Confidence::Declared));
         return;
     }
@@ -597,6 +600,32 @@ mod tests {
         write_causal_3d_vae_safetensors_flat(&video_vae_path);
 
         let records = vec![complete(flux_vae_path, ArtifactKind::Safetensors), complete(video_vae_path, ArtifactKind::Safetensors)];
+        let out = Flux2Spec.classify(&records, dir.as_path());
+        assert_eq!(out, vec![(0, "vae".to_string(), Confidence::Declared)], "{out:?}");
+    }
+
+    /// FLUX.1's 2D image VAE (also Z-Image's) has FLUX.2's tensor names and
+    /// conv rank but 16 latent channels to FLUX.2's 32, so a store holding
+    /// both families offers only the FLUX.2 one as a vae candidate.
+    #[test]
+    fn classify_rejects_a_flux1_family_vae_by_its_latent_channels() {
+        let dir = tmp("flat-vae-flux1-decoy");
+        std::fs::create_dir_all(&dir).unwrap();
+        let flux2_vae = dir.join("flux2-vae.safetensors");
+        write_vae_safetensors_flat(&flux2_vae);
+        let flux1_vae = dir.join("flux1-vae.safetensors");
+        checkpoint::st::save_safetensors(
+            flux1_vae.to_str().unwrap(),
+            &[
+                ("decoder.conv_in.weight".to_string(), vec![512, 16, 3, 3], vec![0.0f32; 512 * 16 * 3 * 3]),
+                ("encoder.conv_in.weight".to_string(), vec![128, 3, 3, 3], vec![0.0f32; 128 * 3 * 3 * 3]),
+            ],
+            &serde_json::json!({}),
+            None,
+        )
+        .unwrap();
+
+        let records = vec![complete(flux2_vae, ArtifactKind::Safetensors), complete(flux1_vae, ArtifactKind::Safetensors)];
         let out = Flux2Spec.classify(&records, dir.as_path());
         assert_eq!(out, vec![(0, "vae".to_string(), Confidence::Declared)], "{out:?}");
     }
