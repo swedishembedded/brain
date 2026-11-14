@@ -436,7 +436,7 @@ def arrangements(k, tier, n_ref_tokens, which):
         "all resident on one card": sum(p.values()),
         "one card, encoder permanent, denoiser and decoder in turn": p["te"] + max(ph1, ph2),
         "one card, encoder, denoiser and decoder each in turn": max(p["te"], ph1, ph2),
-        "two cards: denoiser and decoder in turn | encoder": (max(ph1, ph2), p["te"]),
+        "two cards: denoiser and decoder in turn on one, encoder on the other": (max(ph1, ph2), p["te"]),
     }
 
 
@@ -488,8 +488,8 @@ def placement_table(card_gib=24):
     return (
         "Bytes (GiB = 2^30) that the parts of a FLUX.2 run hold on a device at 1024 x 1024: the denoiser's weights and its scratch for "
         "the joint sequence of 512 text rows, 4,096 generated rows and the reference's 4,096 if there is one (DiT, priced before: what "
-        "`flux2::pipeline::dit_bytes` summed before commit 38e8b2b7a; DiT, uploaded: the layout the constructor writes, "
-        "`flux2_weight_bytes`, which `dit_bytes` has summed since), the truncated text "
+        "`flux2::pipeline::dit_bytes` summed before commit 38e8b2b7a; DiT, uploaded: the layout the constructor writes, which "
+        "`dit_bytes` has summed since), the truncated text "
         "encoder's weights at the same tier, and the autoencoder's decode and encode graphs. " + BYTES_RULES + "\n\n" + t1 +
         f"\n\nThe four arrangements on cards of {card_gib} GiB, charged as the planner charges them: a card holds its permanent parts and "
         "the heaviest single phase (the denoiser, with the reference encoder if there is one, is phase 1; the decode is phase 2).\n\n" + t2)

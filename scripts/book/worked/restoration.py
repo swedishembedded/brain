@@ -179,8 +179,8 @@ def degradations():
                 [[n, f"{_mean_sq(p, plain):.2f}"] for n, p in errs], "lr")
     return (
         "The picture x (grey levels 0 to 255: 40 on the dark side, 200 on the bright side, a checkerboard of plus and minus 24 on the "
-        "dark top-left 4 by 4 corner; rows are y, columns x, the bright side is x + y >= 8) and its blur by (1, 2, 1) / 4 along x and then "
-        f"along y with the edge value repeated beyond the border.\n\n{t1}\n\n"
+        "dark top-left 4 by 4 corner; pixel (i, j) is row i, column j, and the bright side is i + j >= 8) and its blur by (1, 2, 1) / 4 along each row and then "
+        f"along each column with the edge value repeated beyond the border.\n\n{t1}\n\n"
         "The degraded 4 by 4 pictures. 'Box mean only' averages each non-overlapping 2 by 2 block of x; 'blur, then box mean' does so "
         f"after the blur; '+ noise' adds {NOISE_SD:g} times one draw of `normal()` of the stream {_seed(DEGRADE)} to each of the 16 "
         f"pixels in row-major order; '+ quantised' takes each 2 by 2 block (p00 p01 / p10 p11) of the noisy picture as a mean "
@@ -637,10 +637,10 @@ def sr_setup():
         "one pixel for the 3 by 3 convolutions. The 142 numbers are drawn from the stream `restoration.sr.init` with `normal()`, W1 first and W2 "
         "second, each in row-major order of its shape. The pictures of the streams `restoration.sr.train` and `restoration.sr.test` are "
         "drawn one after another, each from `uniform()` draws in this order: u1, u2, u3 give the plane, a = 0.4 + 0.2 u1, "
-        "b = 0.12 (u2 - 0.5), c = 0.12 (u3 - 0.5), pixel (row y, column x) a + b (x - 3.5) + c (y - 3.5); then, for each of the 8 blocks of "
+        "b = 0.12 (u2 - 0.5), c = 0.12 (u3 - 0.5), pixel (row i, column j) a + b (j - 3.5) + c (i - 3.5); then, for each of the 8 blocks of "
         "the right half in row-major order (low-resolution rows 0 to 3, columns 2 then 3) three draws h, v, d, each +1 if `uniform()` < 0.5 "
-        "and -1 otherwise, are added to the block's four pixels as 0.08 (h s_y + v s_x + d s_y s_x), where s_y is +1 for the block's top "
-        "row and -1 for its bottom row and s_x is +1 for its left column and -1 for its right column (h is the horizontal stripe, v the "
+        "and -1 otherwise, are added to the block's four pixels as 0.08 (h s_i + v s_j + d s_i s_j), where s_i is +1 for the block's top "
+        "row and -1 for its bottom row and s_j is +1 for its left column and -1 for its right column (h is the horizontal stripe, v the "
         "vertical stripe, d the checkerboard). The low-resolution picture is the box mean of the 2 by 2 blocks.\n\n" + t1 + "\n\n" + t2
     )
 

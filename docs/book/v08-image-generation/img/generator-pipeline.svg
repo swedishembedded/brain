@@ -1,4 +1,4 @@
-<!-- source-sha256: 630300c23f78dc88fb7878755874d6ad25300c2810ff26ee1a632b85e3c3f47b -->
+<!-- source-sha256: 29979b6e0f9970f6fa2457b5630d3133dc8a32846118d7385e174bf0cec1d55c -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 440" width="980" height="440"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="980" height="440" fill="#ffffff"/>
 <text x="20" y="28.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="start">training: one item</text>
 <ellipse cx="100" cy="140" rx="55" ry="30" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>

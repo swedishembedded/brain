@@ -265,7 +265,7 @@ def product_order():
         acc64 *= 1.0 - b
         wide.append(_f32(acc64))
     rel = max(abs(s - w) / w for s, w in zip(seq32, wide))
-    return (f"The scaled-linear schedule of the SDXL, beta computed in float64 and rounded to float32 (round to nearest). Left: every "
+    return (f"The scaled-linear schedule of SDXL, beta computed in float64 and rounded to float32 (round to nearest). Left: every "
             f"factor 1 - beta_t is rounded to float32 and every partial product too. Right: the product is accumulated in float64 "
             f"from the same float32 betas and rounded to float32 once, at the end of each entry.\n\n"
             + _table(["quantity", "float32 partial products", "float64 accumulator"],

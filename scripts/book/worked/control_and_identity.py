@@ -678,7 +678,8 @@ def control_training():
         "The embedder's first weight is the one the nudges change (it multiplies a control pixel that is 1 in the first sample).\n\n"
         + _table(["step", "loss, zero start", "grad zero-convs", "grad copy", "grad embedder", "loss, random start"], rows)
         + "\n\n" + (stable.RULE if any("about " in c or "unstable" in c for r in rows for c in map(str, r)) else
-                    "The digits shown are shared by the run and by its four nudged copies (the rule of `stable.py`).")
+                    "The digits shown are shared by the run and by four copies whose embedder first weight is changed by +1e-12, -1e-12, "
+                    "+3e-12 and -3e-12 (the nudge rule introduced with the first trained tables of Chapter 2).")
     )
 
 
@@ -1076,7 +1077,7 @@ def control_traffic():
         "The ten control residuals of the SDXL ControlNet at a 128 by 128 latent, in the order in which the U-Net takes them (the nine "
         "entries of its skip stack, finest first, and the middle block), as channels x height x width and as numbers.\n\n"
         + _table(["injection point", "shape", "numbers"], rows, "llr")
-        + f"\n\nIn 32-bit floats the ten residuals are {total * 4 / 2 ** 20:,.1f} MiB. brain's ControlNet returns them to the host and the "
+        + f"\n\nIn 32-bit floats the ten residuals are {total * 4 / 2 ** 20:,.1f} MiB. The ControlNet of brain returns them to the host and the "
         f"U-Net writes them back, so every evaluation moves {2 * total * 4 / 2 ** 20:,.1f} MiB across that boundary in addition to the "
         f"{total * 4 / 2 ** 20:,.1f} MiB the zero-convolutions write. A generation of {steps} steps with guidance evaluates the denoiser "
         f"{evals} times, and each evaluation is a ControlNet pass of {_gf(cn_g)} and a U-Net pass of {_gf(SDXL_PASS_GFLOP)}: "

@@ -893,7 +893,7 @@ def opening():
             ["mean of the class's two templates"] + _mrow(measures(mean, labels))]
     ideal = -0.5 * D * (1.0 + math.log(2.0 * math.pi * SIGMA_X ** 2)) - math.log(N_POS)
     peak = -0.5 * D * math.log(2.0 * math.pi * SIGMA_X ** 2) - math.log(N_POS)
-    return (f"Four ways to produce 300 pictures (100 requests for each of the three classes; the data are drawn class by class) and the five measures of this chapter. 'Accuracy' "
+    return (f"Four ways to produce 300 pictures (100 requests for each of the three classes; the data are drawn class by class) and the five measures of the project. 'Accuracy' "
             f"is the share whose nearest template is of the requested class; 'on data' the share whose distance to that template, per pixel, "
             f"is below {VALID_RMS}; 'distance' the mean of that distance (the data's own is about {SIGMA_X}); the 'mean ln p' column the mean of "
             f"ln p(x given class) under the exact mixture; 'TV' the total variation distance of the positions among each class's pictures "
@@ -956,7 +956,7 @@ def exact_checks():
             f"| one Euler step from sigma = 0.3 or 0.7 to 0 lands on the guess E[x_0 given x_sigma, class 1], 8 cases | {crit(worst_land, 1e-12)} |\n"
             f"| unconditional field = sum over classes of p(class given x) times the class field, sigma = 0.5, 4 cases | {crit(worst_post, 1e-12)} |\n"
             f"| class-1 field = -(x + sigma s)/(1 - sigma), s the central difference (step 1e-5) of the log density, sigma 0.4 and 0.8, 16 cases | {crit(worst_score, 1e-6)} |\n"
-            f"| vector Euler and Heun against the scalar ones of the sampler chapter on a separable guess, 4 and 16 steps | {crit(worst_sampler, 1e-12)} |")
+            f"| vector Euler and Heun against the scalar ones of Chapter 7 on a separable guess, 4 and 16 steps | {crit(worst_sampler, 1e-12)} |")
 
 
 def exact_reference():
@@ -1051,7 +1051,7 @@ def ae_gradient_check():
 
 
 NOTE = ("Digits are those shared by the run and four copies of it with the first weight changed by +1e-12, -1e-12, +3e-12 and -3e-12 "
-        "(the rule of `stable.py`); here all five agree on every digit shown.")
+        "(the stable-digit rule of Chapter 2); here all five agree on every digit shown.")
 
 
 def training_table():
@@ -1271,7 +1271,7 @@ def acceptance_tests():
         (6, "FLOPs of a 16-step guided sample: pixel space / latent space", f"{_int(G_STEPS * 2 * fp)} / {_int(G_STEPS * 2 * fl + dec)}", "exact"),
     ]
     return ("Expected values of the project, computed by this module. 'Exact' means equal; a number is compared with the tolerance in the "
-            "last column, absolute. A cell of five numbers is the five measures of the chapter in the order accuracy, share on data, "
+            "last column, absolute. A cell of five numbers is the five measures of the project in the order accuracy, share on data, "
             "distance to the template, mean ln p, TV.\n\n"
             + _table(["milestone", "quantity", "value", "tolerance"], [list(r) for r in rows], "rlll"))
 

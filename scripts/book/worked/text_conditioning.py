@@ -237,8 +237,8 @@ def taps_example():
     first = (
         f"The prompt `{PROMPT_1}` (nine tokens, causal mask) through the toy encoder. The residual stream is not normalised "
         "between blocks, so the length of a row is something the blocks add to; the table gives the RMS of the rows at each depth "
-        "(mean, smallest, largest over the nine positions) and the mean cosine of each depth's rows with the penultimate rows.\n\n"
-        + _table(["depth", "mean RMS", "smallest RMS", "largest RMS", "mean cosine with the penultimate rows"], rows, "lrrrr")
+        "(mean, smallest, largest over the nine positions) and the mean cosine similarity of each depth's rows with the penultimate rows.\n\n"
+        + _table(["depth", "mean RMS", "smallest RMS", "largest RMS", "mean cosine similarity with the penultimate rows"], rows, "lrrrr")
     )
 
     # the layout of three taps (the outputs of blocks 0, 1 and 2: a quarter, a half and three quarters of the depth)

@@ -253,12 +253,12 @@ def forward_counts():
         ("Wan text-to-video", 50, 5.0, True, "`crates/wan/src/config.rs`: sample_steps 50, guide_scale 5.0"),
         ("FLUX.2 base", 50, 4.0, True, "`crates/flux2/src/pipeline.rs`: 50 steps, guidance 4.0"),
         ("FLUX.2 Klein (distilled)", 4, 1.0, False, "`resolved_steps`: fixed 4, no guidance branch"),
-        ("FLUX.1 dev", 50, 3.5, False, "one forward; the guidance scalar is an input of the network"),
-        ("Z-Image Turbo", 8, 0.0, False, "`crates/s3dit/src/caps.rs`: steps 8, and no guidance scale: one DiT pass a step"),
+        ("FLUX.1 dev", 50, 3.5, False, "`crates/flux1/src/caps.rs`: one forward; the guidance scalar is an input of the network"),
+        ("Z-Image Turbo", 8, None, False, "`crates/s3dit/src/caps.rs`: steps 8, and no guidance scale: one DiT pass a step"),
     ]
     out = []
     for name, steps, g, two, note in rows:
-        out.append((name, steps, f"{g:g}", 2 if two else 1, steps * (2 if two else 1), note))
+        out.append((name, steps, "none" if g is None else f"{g:g}", 2 if two else 1, steps * (2 if two else 1), note))
     return ("Network evaluations (forward passes of the denoiser) per image, from each pipeline's default step count and the rule that "
             "decides whether a second, unconditional pass is made: evaluations = steps x passes per step.\n\n"
             + _table(["model", "steps", "guidance scale", "passes per step", "evaluations", "source"], out, "lrrrrl"))
@@ -513,7 +513,7 @@ def step_coefficients():
     return text + (f"One step of each kind from sigma = 0.6 (x = 2) to 0.45 (h = {h:.4f}), with the history point at sigma = 0.8 and a guess that depends only on "
                    "lambda (so the exact step is (sigma'/sigma) x + (1 - sigma') I and the integral I is Simpson's rule with 4000 panels): "
                    "the error of the step against it. The guess is m(lambda) = 0.3 + 0.7 lambda for 'linear' and m(lambda) = 0.3 + 0.7 lambda - 0.2 lambda^2 for 'quadratic', "
-                   "with lambda = ln((1 - sigma)/sigma) at the sigma of each point, and the history point at sigma = 0.8 supplies m1, the starting point m0 and the new point mt. 'first order' keeps the guess; 'predictor 1/2' adds the difference with weight 1/2; "
+                   "with lambda = ln((1 - sigma)/sigma) at the sigma of each point: the history point supplies m1, the starting point m0 and the new point mt. 'first order' keeps the guess; 'predictor 1/2' adds the difference with weight 1/2; "
                    "'predictor b_1' with weight b_1; 'corrector 1' uses the new guess with weight 1/2; 'corrector 2' solves the 2 x 2 system.\n\n"
                    + _table(["guess", "first order", "predictor 1/2", "predictor b_1", "corrector 1", "corrector 2"], rows))
 

@@ -1,4 +1,4 @@
-<!-- source-sha256: aec10d3dcaa4ed4d4ce86c99664e67208ce704c5d4a90b9c3a66cefaaa5e9951 -->
+<!-- source-sha256: a742a760a9294806bfdab705e20371595eee7f7f83812dd3dfc43ec5368878c6 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 940 580" width="940" height="580"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="940" height="580" fill="#ffffff"/>
 <text x="290" y="38.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#4a5568" text-anchor="middle">encoder</text>
 <text x="520" y="38.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#4a5568" text-anchor="middle">states read</text>
