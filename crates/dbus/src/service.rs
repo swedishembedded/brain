@@ -1247,7 +1247,7 @@ mod tests {
     /// classes, with no decision-specific code here.
     #[tokio::test]
     async fn run_carries_a_decision_model_request_answer_and_failure_class() {
-        use catalog::resident_decision::DecisionResident;
+        use decisions::resident::DecisionResident;
         use decisions::fixtures::{write_laya, Scratch};
 
         let store = Scratch::new("dbus-decision");

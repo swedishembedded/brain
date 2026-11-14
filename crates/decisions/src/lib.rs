@@ -46,6 +46,7 @@ pub mod load;
 pub mod manifest;
 pub mod promotion;
 pub mod provider;
+pub mod resident;
 pub mod select;
 pub mod store;
 pub mod wire;

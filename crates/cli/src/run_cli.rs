@@ -794,7 +794,7 @@ pub fn run_serve(args: &[String]) {
     let mut ocr_cfg = ocrserve::OcrServeConfig::default();
     // `--decision-model` / `--decision-default`: the decision models served
     // beyond those the model store holds, and the one `auto` resolves to.
-    let mut decision_cfg = catalog::resident_decision::DecisionServeConfig::default();
+    let mut decision_cfg = decisions::resident::DecisionServeConfig::default();
     // HTTP inference APIs (`--anthropic|--openai|--openrouter [ADDR]`), each
     // bound on one or more addresses (127.0.0.1 by default) with ONE
     // per-dialect key generated at startup regardless of how many addresses

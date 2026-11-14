@@ -54,7 +54,6 @@ pub mod resident_asr;
 pub mod resident_clip;
 pub mod resident_controlnet;
 pub mod resident_cosyvoice;
-pub mod resident_decision;
 pub mod resident_deepseekvl;
 pub mod resident_minicpmv;
 pub mod resident_mirage;
@@ -376,6 +375,14 @@ pub mod __reexport {
     pub use residency::ResidentModel;
 }
 
+/// Every model family a supervised worker can host: what `brain`'s internal
+/// worker mode serves, and the names `brain serve --worker-hosted` accepts.
+/// A family is listed once its models are certified to answer from a worker
+/// as they do in process.
+pub fn hosted_families() -> Vec<residency::supervised::HostedFamily> {
+    vec![decisions::resident::hosted()]
+}
+
 /// Every model's static manifest + weight-free-to-construct provider, in one
 /// list, with the residency adapter where there is one.
 pub fn models() -> Vec<ModelEntry> {
@@ -529,7 +536,7 @@ pub fn models() -> Vec<ModelEntry> {
         // Decision models (decide + Laya): `brain caps decide`,
         // `brain decide decide ...`. The provider answers from the
         // default model store; a serving process instead schedules each
-        // checkpoint as its own model (`resident_decision`) and serves this
+        // checkpoint as its own model (`decisions::resident`) and serves this
         // family for its inventory and `auto` selection, registered directly
         // by the serving executor because that needs the operator's flags.
         ModelEntry {

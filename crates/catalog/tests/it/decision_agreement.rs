@@ -34,7 +34,7 @@ use axum::body::Body;
 use axum::http::{header, Method, Request, StatusCode};
 use axum::Router;
 use brain::decision::{Answer, Opt, Question, State};
-use catalog::resident_decision::DecisionResident;
+use decisions::resident::DecisionResident;
 use brain::decision_run::{train, TrainRun};
 use decisions::fixtures::{synthetic_jsonl, write_decide, write_laya, Scratch, SyntheticTask};
 use residency::budget::Budgets;

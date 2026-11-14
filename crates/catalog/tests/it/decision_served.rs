@@ -20,7 +20,7 @@ use apiserve::{router, AppState, Provider};
 use axum::body::Body;
 use axum::http::{header, Method, Request, StatusCode};
 use axum::Router;
-use catalog::resident_decision::{serve_all, DecisionServeConfig};
+use decisions::resident::{serve_all, DecisionServeConfig};
 use decisions::engine::Backend;
 use decisions::fixtures::{write_decide, write_laya, write_laya_head_only, Scratch};
 use decisions::manifest::{weights_identity, FILE as MANIFEST_FILE};
@@ -48,7 +48,7 @@ impl Drop for Rig {
 /// model that answers inventory and selection.
 fn rig(store: &Scratch, configured: &[&str], default: Option<&str>) -> Rig {
     let config = DecisionServeConfig { models: configured.iter().map(|s| s.to_string()).collect(), default: default.map(str::to_string) };
-    let models = serve_all(&config, Some(&**store));
+    let models = serve_all(&config, Some(&**store), None);
     let mut budgets = Budgets::new();
     budgets.set(Device::Gpu(0), 8 << 30, 0);
     let exec = Executor::start(models, budgets, Policy::default());

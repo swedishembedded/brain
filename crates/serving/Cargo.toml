@@ -12,6 +12,8 @@ path = "src/lib.rs"
 [dependencies]
 brain-capability.workspace = true
 brain-catalog.workspace = true
+# `resident`: the decision models a serving process schedules.
+brain-decisions.workspace = true
 brain-ocrserve.workspace = true
 brain-loader.workspace = true
 brain-residency.workspace = true

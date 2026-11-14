@@ -96,7 +96,7 @@ pub struct ServeKnobs {
     pub ricursive: catalog::resident_ricursive::RicursiveServeConfig,
     /// Which decision models to serve beyond the ones the model store holds,
     /// and which one `"auto"` resolves to.
-    pub decision: catalog::resident_decision::DecisionServeConfig,
+    pub decision: decisions::resident::DecisionServeConfig,
     /// The DeepSeek-OCR generations: the model-agnostic policy flags they honour (`--max-batch`, `--ctx`, `--kv-cache`, `--gemm`).
     pub ocr: ocrserve::OcrServeConfig,
     /// `--max-batch` for the residents that batch their own requests into one
@@ -280,7 +280,7 @@ pub fn build_executor(machine: &Machine, reserved: u64, store: &catalog::ServedS
     // Decision models (decide + Laya): one resident per checkpoint under its
     // store id, plus the family model that answers inventory and `auto`
     // selection without loading anything.
-    models.extend(catalog::resident_decision::serve_all(&decision, store.models_dir()));
+    models.extend(decisions::resident::serve_all(&decision, store.models_dir(), None));
     // Deterministic mock model (`--mock`): a real ResidentModel - no weights, no
     // GPU - registered as `mock` so the HTTP conformance harness can validate the
     // whole API surface through the true serving path (placement → activate →

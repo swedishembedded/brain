@@ -27,7 +27,7 @@
 //!
 //! A serving process schedules each checkpoint as its own model under its
 //! store id with just the `decide` action
-//! (`crates/catalog/src/resident_decision.rs`) and serves this family model
+//! (`crates/decisions/src/resident.rs`) and serves this family model
 //! with [`served_manifest`], whose actions are the two that load nothing. The
 //! lifecycle is host-only: every input is a file on the host and `train`
 //! writes one, so a server neither registers nor runs it.
