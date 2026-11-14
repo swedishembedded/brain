@@ -15,7 +15,8 @@ brain-residency.workspace = true
 brain-modelref.workspace = true
 brain-modelstore.workspace = true
 brain-horizon.workspace = true
-brain-catalog.workspace = true
+# `on_device`: a job's work runs in the device scope residency assigned it.
+brain-llmserve.workspace = true
 brain = { workspace = true, features = ["study"] }
 blake3.workspace = true
 libc.workspace = true
@@ -24,6 +25,8 @@ serde_json.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+# The served timeline model a consolidated job hands over to.
+brain-catalog.workspace = true
 brain-modelref.workspace = true
 tempfile.workspace = true
 brain-qwen3.workspace = true

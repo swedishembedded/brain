@@ -75,13 +75,16 @@ three-d = ["device", "imagetype", "dep:brain-recon", "dep:brain-splat", "dep:ser
 # the model store. When that changes this feature gains `resolve`, not a
 # parallel resolver.
 creature = ["device", "dep:brain-fly", "dep:brain-connectome", "dep:brain-flybody", "dep:brain-mujoco", "dep:brain-neuro", "dep:brain-wm-display", "dep:tempfile", "dep:brain-checkpoint", "dep:serde_json"]
-# `brain::TextGenerationPipeline`. Covers qwen3 only. Accepts a literal local
-# checkpoint path OR a `<vendor>/<repo>` hub id (through `crates/qwen3`'s own
-# `qwen3::spec::Qwen3Spec`, same as every resolver-backed pipeline) - a local
-# path wins whenever the string names a real file on disk, so this never
+# `brain::TextGenerationPipeline`. Covers qwen3, and a Ripple directory through
+# the resident `brain serve` runs (`ricursive::resident`, its adapters a slot of
+# the bank `llmserve::adapter_registry` keeps over one base). Accepts a literal
+# local checkpoint path OR a `<vendor>/<repo>` hub id (through `crates/qwen3`'s
+# own `qwen3::spec::Qwen3Spec`, same as every resolver-backed pipeline) - a
+# local path wins whenever the string names a real file on disk, so this never
 # guesses between the two. Selects `resolve` now that `Qwen3Spec` exists to
-# resolve a hub id against.
-text = ["resolve", "dep:brain-catalog", "dep:brain-residency", "dep:brain-ricursive", "dep:brain-qwen3", "dep:brain-lfm2", "dep:brain-data", "dep:brain-checkpoint", "dep:serde_json", "dep:serde"]
+# resolve a hub id against. `brain-lfm2` is the `EmbeddingPipeline` and
+# `EncoderFineTuner` backend.
+text = ["resolve", "dep:brain-llmserve", "dep:brain-residency", "dep:brain-ricursive", "dep:brain-qwen3", "dep:brain-lfm2", "dep:brain-data", "dep:brain-checkpoint", "dep:serde_json", "dep:serde"]
 # `brain::EmbeddingPipeline` (CLIP text embedding), `brain::
 # DetectionPipeline` (YOLOv8 object detection) and `brain::SegmentPipeline`
 # (SAM 2.1 promptable segmentation) - three public types under one feature.
@@ -237,7 +240,7 @@ brain-qwen3 = { workspace = true, optional = true }
 brain-qwen35 = { workspace = true, optional = true }
 brain-qwen35moe = { workspace = true, optional = true }
 brain-ricursive = { workspace = true, optional = true }
-brain-catalog = { workspace = true, optional = true }
+brain-llmserve = { workspace = true, optional = true }
 brain-residency = { workspace = true, optional = true }
 brain-rl = { workspace = true, optional = true }
 # `ModelOptimizer`: the weight precision search and its measurement visitors.

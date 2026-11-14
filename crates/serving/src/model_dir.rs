@@ -65,8 +65,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Once};
 
-use catalog::adapter_registry::{AdapterBankSettings, AdapterHost, AdapterTargets};
-use catalog::adapter_release::verify_adapter;
+use llmserve::adapter_registry::{AdapterBankSettings, AdapterHost, AdapterTargets};
+use llmserve::adapter_release::verify_adapter;
 use catalog::resident_llm::QwenResident;
 use catalog::resident_qwen35::Qwen35GgufServed;
 use checkpoint::st::{self, ModelCard};
@@ -96,7 +96,7 @@ pub struct ScanSettings {
     /// the released-GGUF residents.
     pub qwen35: catalog::resident_qwen35::Qwen35ServeConfig,
     /// Ripple's knobs: the model-agnostic policy flags it honours.
-    pub ricursive: catalog::resident_ricursive::RicursiveServeConfig,
+    pub ricursive: ricursive::resident::RicursiveServeConfig,
     /// `(index, TOTAL bytes)` of every GPU the process may use - already
     /// narrowed by `--device`. Empty means no model that needs a GPU can be
     /// served, and none is listed.
@@ -121,11 +121,11 @@ pub struct Discovered {
     /// checkpoint is merged into them (see `build_executor`).
     pub qwen: Vec<Arc<QwenResident>>,
     /// The released Qwen3.8 GGUFs among `multi`, as concrete handles: adapters
-    /// are offered on them ([`catalog::adapter_registry::AdapterHost`]).
+    /// are offered on them ([`llmserve::adapter_registry::AdapterHost`]).
     pub qwen35: Vec<Arc<Qwen35GgufServed>>,
     /// The Ripple checkpoints among `residents` and `multi`, as concrete handles: `--adapter` offers its adapter as
-    /// a model of its own ([`catalog::resident_ricursive::RicursiveResident::with_adapter`]).
-    pub ricursive: Vec<Arc<catalog::resident_ricursive::RicursiveResident>>,
+    /// a model of its own ([`ricursive::resident::RicursiveResident::with_adapter`]).
+    pub ricursive: Vec<Arc<ricursive::resident::RicursiveResident>>,
     /// Every [`DiscoveryError`] a compound model produced -- a partial scan
     /// still serves what it can.
     pub errors: Vec<DiscoveryError>,
@@ -203,7 +203,7 @@ fn hf_qwen35_dir(local: &brain_modelstore::LocalModel) -> Option<PathBuf> {
 }
 
 /// The Hugging Face directory of a Ripple release (bf16 or NVFP4) that `local` names as its `weights` role: served by
-/// [`catalog::resident_ricursive::RicursiveResident`], every tensor held as the release stores it.
+/// [`ricursive::resident::RicursiveResident`], every tensor held as the release stores it.
 fn hf_ricursive_dir(local: &brain_modelstore::LocalModel) -> Option<PathBuf> {
     if local.card.as_ref().is_none_or(|c| c.family != "ricursive") {
         return None;
@@ -247,8 +247,8 @@ struct Scan {
     /// beside one is served as a view over it ([`Scan::register_adapter`]).
     qwen35_bases: BTreeMap<String, Arc<Qwen35GgufServed>>,
     /// The Ripple checkpoints registered ([`Discovered::ricursive`]), by served id.
-    ricursive: Vec<Arc<catalog::resident_ricursive::RicursiveResident>>,
-    ricursive_bases: BTreeMap<String, Arc<catalog::resident_ricursive::RicursiveResident>>,
+    ricursive: Vec<Arc<ricursive::resident::RicursiveResident>>,
+    ricursive_bases: BTreeMap<String, Arc<ricursive::resident::RicursiveResident>>,
     /// The adapter bank each Ripple base that has adapters in the store is built with, by base id.
     ricursive_banks: BTreeMap<String, AdapterBankSettings>,
     /// Multi-device residents ([`Discovered::multi`]).
@@ -409,8 +409,8 @@ impl Scan {
     /// server with cards stages it over the fewest that hold it; one with none runs it on the host tier.
     fn register_ricursive(&mut self, weights: &str, id: &str) {
         let ScanSettings { gpus, reserved, ricursive, .. } = &self.settings;
-        let knobs = catalog::resident_ricursive::RicursiveServeConfig { adapter_bank: self.ricursive_banks.get(id).cloned().or_else(|| ricursive.adapter_bank.clone()), ..ricursive.clone() };
-        match catalog::resident_ricursive::RicursiveResident::from_hf_dir(weights, id, &knobs, gpus, *reserved) {
+        let knobs = ricursive::resident::RicursiveServeConfig { adapter_bank: self.ricursive_banks.get(id).cloned().or_else(|| ricursive.adapter_bank.clone()), ..ricursive.clone() };
+        match ricursive::resident::RicursiveResident::from_hf_dir(weights, id, &knobs, gpus, *reserved) {
             Ok(resident) => {
                 for line in resident.chosen_defaults() {
                     eprintln!("brain: {id}: default {line}");

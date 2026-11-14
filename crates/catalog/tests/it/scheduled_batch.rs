@@ -247,7 +247,7 @@ fn an_idle_open_group_with_stale_routes_hands_back_before_taking_a_job() {
 fn token_ids_and_logprobs_come_back_only_when_asked_for() {
     let front = front();
     // Through the generate spec every surface validates against (D-Bus included), not just the scheduler.
-    let spec = catalog::resident_llm::generate_spec("capture", true);
+    let spec = llmserve::generate_spec("capture", true);
     let asked = spec.validate(inv("token capture", 6, 0.8, 17).set("logprobs", json!(true)).set("return_token_ids", json!(true))).expect("the generate spec declares both capture flags");
     let plain = inv("token capture", 6, 0.8, 17);
     let results = run_batch_scheduled(&mut scheduler(2), &front, &[asked, plain], &mut |_, _| {});
@@ -300,7 +300,7 @@ fn a_policy_trace_equals_the_trainers_teacher_forced_log_probs() {
     /// training forward) of one model on the CPU.
     const TOLERANCE: f32 = 2e-3;
     let front = front();
-    let spec = catalog::resident_llm::generate_spec("trace", true);
+    let spec = llmserve::generate_spec("trace", true);
     let temperature = 0.8f32;
     let asked = spec.validate(inv("policy trace", 7, f64::from(temperature), 23).set("top_k", json!(4)).set("policy_trace", json!(true)).set("logprobs", json!(true))).expect("the generate spec declares policy_trace");
     let plain = inv("policy trace", 7, f64::from(temperature), 23).set("top_k", json!(4));
@@ -335,7 +335,7 @@ fn a_policy_trace_equals_the_trainers_teacher_forced_log_probs() {
 #[test]
 fn a_policy_trace_is_refused_when_the_request_reshapes_the_distribution() {
     let front = front();
-    let spec = catalog::resident_llm::generate_spec("trace", true);
+    let spec = llmserve::generate_spec("trace", true);
     let reshaped = spec.validate(inv("x", 3, 0.8, 1).set("policy_trace", json!(true)).set("repetition_penalty", json!(1.3))).expect("valid request");
     let results = run_batch_scheduled(&mut scheduler(1), &front, &[reshaped], &mut |_, _| {});
     let error = results[0].clone().expect_err("a penalty reshapes the distribution");

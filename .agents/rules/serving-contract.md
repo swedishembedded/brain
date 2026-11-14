@@ -129,8 +129,8 @@ fine-tune requests share one instance and one batch), delegates `estimate` and
 `activate` to the base, tells the instance which id was asked for in
 `ResidentModel::stamp` (a reserved param no manifest declares, so no caller can
 set it, and the base's own `stamp` removes it), and names itself in
-`adapter_identity` for the model card. Reference: `QwenAdapterView`
-(`crates/catalog/src/adapter_registry.rs`); `Executor::unregister` withdraws
+`adapter_identity` for the model card. Reference: `AdapterView`
+(`crates/llmserve/src/adapter_registry.rs`); `Executor::unregister` withdraws
 such an id after its last job. Never fold an adapter into a second copy of the
 weights.
 

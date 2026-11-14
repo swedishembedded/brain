@@ -44,8 +44,6 @@
 //! assembling an executor (budgets, discovery of a models directory) is
 //! `crates/serving`'s job.
 
-pub mod adapter_registry;
-pub mod adapter_release;
 pub mod demo;
 pub mod imageops;
 mod parkable;
@@ -81,7 +79,6 @@ pub mod resident_omni;
 pub mod resident_pulid;
 pub mod resident_edgerock;
 pub mod resident_qwen35;
-pub mod resident_ricursive;
 pub mod resident_qwen_embed;
 pub mod resident_qwen35moe;
 pub mod resident_qwen3vl;
@@ -99,7 +96,6 @@ pub mod resident_worldmirror2;
 pub mod resident_yolo;
 pub mod resident_zimage;
 pub mod sampling_defaults;
-mod served_family;
 mod serving;
 
 pub use loader::served::ServedStore;
@@ -512,16 +508,16 @@ pub fn models() -> Vec<ModelEntry> {
             spec: Some(("edgerock", &qwen35::spec::EdgeRockSpec)),
             resident: None,
         },
-        // Ripple-65B: the pulled Hugging Face directory, resolved through `resident_ricursive::RicursiveSpec`; served by
-        // `resident_ricursive::RicursiveResident`, which the model-dir scan registers under the pulled id (over every
+        // Ripple-65B: the pulled Hugging Face directory, resolved through `ricursive::resident::RicursiveSpec`; served by
+        // `ricursive::resident::RicursiveResident`, which the model-dir scan registers under the pulled id (over every
         // selected card as one staged model, or on the host tier).
         ModelEntry {
-            manifest: resident_ricursive::manifest,
+            manifest: ricursive::resident::manifest,
             provider: |assembly: &Assembly| {
                 let weights = assembly.roles.get("weights").cloned();
-                Ok(Arc::new(resident_ricursive::RicursiveProvider::new(weights)) as Arc<dyn Provider>)
+                Ok(Arc::new(ricursive::resident::RicursiveProvider::new(weights)) as Arc<dyn Provider>)
             },
-            spec: Some(("ricursive", &resident_ricursive::RicursiveSpec)),
+            spec: Some(("ricursive", &ricursive::resident::RicursiveSpec)),
             resident: None,
         },
         // The timeline model: a directory a caller trained and saved (no released weights to resolve), named per

@@ -45,8 +45,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use catalog::adapter_registry::LiveAdapters;
-use catalog::adapter_release::{verify_adapter, ServedBase};
+use llmserve::adapter_registry::LiveAdapters;
+use llmserve::adapter_release::{verify_adapter, ServedBase};
 
 /// How many directory levels below the root are searched: room for the model
 /// store's `<owner>/<name>/<tag>/adapter.brain.safetensors` layout.
@@ -249,7 +249,7 @@ fn scan(dir: &Path) -> std::io::Result<BTreeMap<PathBuf, Stamp>> {
 mod tests {
     use super::*;
     use brain_testutil::adapters::{file_digest as digest, scratch_dir as tmp, write_adapter, write_base};
-    use catalog::adapter_registry::AdapterBankSettings;
+    use llmserve::adapter_registry::AdapterBankSettings;
     use catalog::resident_llm::{QwenResident, QwenServeConfig};
     use checkpoint::st::ModelCard;
     use residency::{budget::Budgets, Device, Executor, Policy};
@@ -277,7 +277,7 @@ mod tests {
         let mut budgets = Budgets::new();
         budgets.set(Device::Cpu, 8 << 30, 0);
         let executor = Executor::start(vec![resident.clone()], budgets, Policy::default());
-        let served = catalog::adapter_registry::AdapterHost::served_base(resident.as_ref());
+        let served = llmserve::adapter_registry::AdapterHost::served_base(resident.as_ref());
         let live = LiveAdapters::new(resident, executor.clone());
         let published = dir.join("bank");
         std::fs::create_dir_all(&published).unwrap();

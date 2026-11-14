@@ -30,8 +30,8 @@ use std::time::{Duration, Instant};
 
 use brain_testutil::adapters::{scratch_dir, write_byte_tokenizer, write_lora_adapter, Linear};
 use capability::{Invocation, Outcome};
-use catalog::adapter_registry::{AdapterBankSettings, AdapterTargets, LiveAdapters, ADAPTER_PARAM};
-use catalog::adapter_release::verify_adapter;
+use llmserve::adapter_registry::{AdapterBankSettings, AdapterTargets, LiveAdapters, ADAPTER_PARAM};
+use llmserve::adapter_release::verify_adapter;
 use catalog::resident_llm::{QwenResident, QwenServeConfig};
 use checkpoint::st::ModelCard;
 use qwen3::config::QwenConfig;

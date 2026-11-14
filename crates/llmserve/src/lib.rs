@@ -23,8 +23,12 @@
 //! one; `run_open_scheduled` instead keeps taking jobs from its feed and
 //! admits the ones that arrive while the group runs.
 
+pub mod adapter_registry;
+pub mod adapter_release;
+mod resident;
 mod routing;
 mod score;
+pub use resident::generate_spec;
 pub use routing::request_prefix_chain;
 pub use score::{score_batch_scheduled, score_spec, MAX_ANSWERS_PER_CALL, MAX_ANSWERS_PER_RECORD, MAX_SCORE_RECORDS, SCORE_ACTION};
 

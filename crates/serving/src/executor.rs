@@ -14,8 +14,8 @@
 
 use std::sync::Arc;
 
-use catalog::adapter_release::ServedBase;
-use catalog::adapter_registry::AdapterHost;
+use llmserve::adapter_release::ServedBase;
+use llmserve::adapter_registry::AdapterHost;
 use catalog::resident_llm::QwenResident;
 use catalog::resident_yolo::YoloResident;
 use catalog::resident_zimage::ZImageResident;
@@ -32,7 +32,7 @@ use crate::Machine;
 ///
 /// Today that is exactly one: offering LoRA adapters beside the Qwen3 base
 /// ([`QwenResident::adapter_view`], what the CLI's `continuous_train` drives
-/// through `catalog::adapter_registry::LiveAdapters`). It is inherent rather
+/// through `llmserve::adapter_registry::LiveAdapters`). It is inherent rather
 /// than a `ResidentModel` method because "serve this adapter beside yourself"
 /// is not a concept the trait has - putting it there would put a decoder-LM-
 /// shaped method on every detector, VAE and forecaster that implements it - so
@@ -53,8 +53,8 @@ pub struct Serving {
     /// names one of them, only that one: it is the checkpoint's host.
     pub qwen35: Vec<Arc<catalog::resident_qwen35::Qwen35GgufServed>>,
     /// The Ripple checkpoints the model scan registered, as concrete handles: `--adapter` offers its adapter as a
-    /// model of its own beside the base ([`catalog::resident_ricursive::RicursiveResident::with_adapter`]).
-    pub ricursive: Vec<Arc<catalog::resident_ricursive::RicursiveResident>>,
+    /// model of its own beside the base ([`ricursive::resident::RicursiveResident::with_adapter`]).
+    pub ricursive: Vec<Arc<ricursive::resident::RicursiveResident>>,
 }
 
 /// Register `qwen` (when its weights are configured) as an ordinary erased
@@ -93,7 +93,7 @@ pub struct ServeKnobs {
     /// sizes the brain-checkpoint resident.
     pub qwen35: catalog::resident_qwen35::Qwen35ServeConfig,
     /// Ripple: the model-agnostic policy flags it honours (`--weight-format`, `--kv-cache`, `--sparse-attention`, `--ctx`, `--max-batch`).
-    pub ricursive: catalog::resident_ricursive::RicursiveServeConfig,
+    pub ricursive: ricursive::resident::RicursiveServeConfig,
     /// Which decision models to serve beyond the ones the model store holds,
     /// and which one `"auto"` resolves to.
     pub decision: decisions::resident::DecisionServeConfig,
@@ -561,11 +561,11 @@ mod tests {
     /// Qwen3 resident built over the same directory.
     #[test]
     fn a_checkpoint_naming_a_scanned_release_selects_that_release() {
-        use catalog::adapter_release::{ServedBase, QWEN35_FAMILY};
+        use llmserve::adapter_release::ServedBase;
         let root = std::env::temp_dir().join(format!("brain-exec-ckpt-{}", std::process::id()));
         let fp8 = dir_with_config(&root, "fp8");
         let other = dir_with_config(&root, "other");
-        let scanned = [ServedBase::of_family(QWEN35_FAMILY, other.join("."), Some("v/other".into())), ServedBase::of_family(QWEN35_FAMILY, fp8.join("."), Some("v/fp8".into()))];
+        let scanned = [ServedBase::of_family(catalog::resident_qwen35::family(), other.join("."), Some("v/other".into())), ServedBase::of_family(catalog::resident_qwen35::family(), fp8.join("."), Some("v/fp8".into()))];
 
         let by_dir = ServedBase::new(&fp8, None);
         assert_eq!(checkpoint_base(&by_dir, &scanned), Some(1), "the same directory, spelled differently");

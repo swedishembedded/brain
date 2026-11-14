@@ -8,15 +8,15 @@
 // email to info@swedishembedded.com.
 
 //! [`crate::TextGenerationPipeline`] over a Ripple directory: the same resident the server runs
-//! (`catalog::resident_ricursive`), driven in process. Its adapter is a slot of the resident's bank, so attaching,
+//! (`ricursive::resident`), driven in process. Its adapter is a slot of the resident's bank, so attaching,
 //! switching and detaching an adapter never reloads the base, and the base's answers beside it are unchanged.
 
 use std::path::Path;
 use std::sync::Mutex;
 
-use catalog::adapter_registry::{AdapterBankSettings, AdapterHost, AdapterTargets, AdapterView, ADAPTER_PARAM};
-use catalog::adapter_release::verify_adapter;
-use catalog::resident_ricursive::{RicursiveResident, RicursiveServeConfig};
+use llmserve::adapter_registry::{AdapterBankSettings, AdapterHost, AdapterTargets, AdapterView, ADAPTER_PARAM};
+use llmserve::adapter_release::verify_adapter;
+use ricursive::resident::{RicursiveResident, RicursiveServeConfig};
 use residency::Instance;
 
 use crate::chat::{ModelIdentity, WeightsIdentity};

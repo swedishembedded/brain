@@ -56,11 +56,12 @@ use std::sync::Arc;
 use residency::multi::{MultiDeviceCost, MultiDeviceResidentModel};
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel, Tier};
 
-use crate::adapter_registry::{AdapterBankSettings, AdapterHost, AdapterRegistry, AdaptedInstance};
-use crate::adapter_release::{LoadedAdapter, ServedBase, QWEN35_FAMILY};
+use llmserve::adapter_registry::{AdapterBankSettings, AdapterHost, AdapterRegistry, AdaptedInstance};
+use llmserve::adapter_release::{LoadedAdapter, ServedBase, ServedFamily};
 
 use crate::parkable::{Build, HostWeights, ParkableInstance};
-use crate::resident_llm::{est_vram, generate_spec, open_stored_checkpoint};
+use crate::resident_llm::{est_vram, open_stored_checkpoint};
+use llmserve::generate_spec;
 use residency::on_device;
 use llmserve::{ScheduledInstance, TextFrontend};
 
@@ -779,7 +780,7 @@ fn given_or_chosen<T: Copy + std::fmt::Display>(given: Option<T>, knob: &str, ru
 /// Everything about the model is [`Qwen35GgufResident`]'s (it derefs to it:
 /// placement, activation, the engine); this adds the registry of adapters the
 /// operator wants served and the instance that applies them. Each served
-/// adapter is a model of its own ([`crate::adapter_registry::AdapterView`])
+/// adapter is a model of its own ([`llmserve::adapter_registry::AdapterView`])
 /// registered with the executor beside this one, sharing its instance, so a
 /// batch mixes base and adapter requests in one batched decode step.
 pub struct Qwen35GgufServed {
@@ -795,7 +796,7 @@ impl Qwen35GgufServed {
     fn new(replicas: Vec<qwen35::int8_gguf_resident::Qwen35GgufResident>, bank: Option<AdapterBankSettings>, gguf_path: &str, id: &str, chosen: Vec<String>) -> Qwen35GgufServed {
         // An adapter trains on the full-precision release and serves on its
         // quantisation: the card names the release, not this file.
-        let base = ServedBase::of_family(QWEN35_FAMILY, gguf_path, Some(id.to_string())).quantizing(&QWEN35_SOURCES);
+        let base = ServedBase::of_family(family(), gguf_path, Some(id.to_string())).quantizing(&QWEN35_SOURCES);
         Qwen35GgufServed { replicas, adapters: AdapterRegistry::new(bank, base), chosen }
     }
 
@@ -810,6 +811,11 @@ impl Qwen35GgufServed {
 /// Ids of the full-precision releases the Qwen3.8-27B quantisations are made
 /// from, which an adapter's card names as its base: the repo ids and the bare
 /// directory names `brain qwen35 finetune` records for a base it was pointed at.
+/// Qwen3.8 as an adapter-serving family: the linears its bank may correct.
+pub fn family() -> ServedFamily {
+    ServedFamily::of(qwen35::spec::CARD_FAMILY, "Qwen3.8", &qwen35::config::Qwen35Config::tiny())
+}
+
 const QWEN35_SOURCES: [&str; 4] = ["Qwen/Qwen3.8-27B-FP8", "Qwen/Qwen3.8-27B", "Qwen3.8-27B-FP8", "Qwen3.8-27B"];
 
 impl std::ops::Deref for Qwen35GgufServed {
@@ -868,7 +874,7 @@ impl ResidentModel for Qwen35GgufServed {
     /// The request's prompt keyed for the prefix caches, in the namespace of the adapter it names: a prefix cached under
     /// one adapter is not another's, and the base is the empty namespace.
     fn prefix_chain(&self, inv: &Invocation) -> residency::affinity::PrefixChain {
-        llmserve::request_prefix_chain(inv, &inv.get_str(crate::adapter_registry::ADAPTER_PARAM).unwrap_or_default())
+        llmserve::request_prefix_chain(inv, &inv.get_str(llmserve::adapter_registry::ADAPTER_PARAM).unwrap_or_default())
     }
     fn activate(&self, key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
         self.replica(key).activate(key, device)
@@ -1022,7 +1028,7 @@ mod tests {
         let path = dir.join("adapter.safetensors");
         let linear = brain_testutil::adapters::Linear { base: "blocks.0.self_attn.q_proj.weight".to_string(), out: 4, inn: 3 };
         brain_testutil::adapters::write_lora_adapter_of("qwen35", &path, "unsloth/Qwen3.8-27B-GGUF:lab:facts:v1", "Qwen/Qwen3.8-27B-FP8", 2, &[linear], 5);
-        let view = served.adapter_view(crate::adapter_release::load_adapter(&path).unwrap()).expect("an adapter attaches to the base");
+        let view = served.adapter_view(llmserve::adapter_release::load_adapter(&path).unwrap()).expect("an adapter attaches to the base");
         assert_eq!(view.replicas(), 4, "the view is served by every replica of its base");
         assert_eq!(view.replica_routing(), served.replica_routing());
 
@@ -1355,5 +1361,79 @@ mod tests {
         let missing = gguf_resident("/nonexistent/m.gguf", "t/x", &gpu_budget(), RESERVED, &Qwen35GgufServeConfig::default()).err().expect("must be refused");
         assert!(missing.contains("/nonexistent/m.gguf"), "{missing}");
         std::fs::remove_file(path).ok();
+    }
+
+
+    use llmserve::adapter_registry::AdapterTargets;
+
+    /// The Qwen3 registry and adapters the family tests compare against.
+    fn qwen3_registry(settings: Option<AdapterBankSettings>) -> std::sync::Arc<AdapterRegistry> {
+        AdapterRegistry::new(settings, ServedBase::new("unused.safetensors", Some("Qwen/Qwen3-0.6B".to_string())))
+    }
+
+    fn qwen3_adapter(dir: &std::path::Path, id: &str) -> LoadedAdapter {
+        let path = dir.join(format!("{}.safetensors", id.replace([':', '/'], "_")));
+        brain_testutil::adapters::write_adapter(&path, id, "Qwen/Qwen3-0.6B", None, 0.5);
+        llmserve::adapter_release::load_adapter(&path).expect("fixture adapter loads")
+    }
+
+    const Q35_ID: &str = "unsloth/Qwen3.8-27B-GGUF:lab:facts:v1";
+
+    fn qwen35_registry(settings: Option<AdapterBankSettings>) -> std::sync::Arc<AdapterRegistry> {
+        AdapterRegistry::new(settings, ServedBase::of_family(family(), "unused.gguf", Some("unsloth/Qwen3.8-27B-GGUF".to_string())).quantizing(&["Qwen/Qwen3.8-27B-FP8"]))
+    }
+
+    /// A Qwen3.8 adapter over the named linears of layer 0 (shapes are the
+    /// engine's to check, not the registry's).
+    fn qwen35_adapter(dir: &std::path::Path, bases: &[&str]) -> LoadedAdapter {
+        use brain_testutil::adapters::{write_lora_adapter_of, Linear};
+        let linears: Vec<Linear> = bases.iter().map(|b| Linear { base: format!("blocks.0.{b}.weight"), out: 4, inn: 3 }).collect();
+        let path = dir.join(format!("q35-{}.safetensors", bases.join("-").replace('.', "_")));
+        write_lora_adapter_of("qwen35", &path, Q35_ID, "Qwen/Qwen3.8-27B-FP8", 2, &linears, 5);
+        llmserve::adapter_release::load_adapter(&path).expect("a trainer-shaped qwen35 adapter loads")
+    }
+
+    /// One registry implementation serves both families: the pre-attach check
+    /// resolves against the family's real sites, not the Qwen3 ones, names the
+    /// flag that widens the bank, and refuses an adapter of the other family.
+    #[test]
+    fn the_pre_attach_check_resolves_against_the_families_own_sites() {
+        let dir = brain_testutil::adapters::scratch_dir("registry-qwen35");
+        let mixer = qwen35_adapter(&dir, &["linear_attn.in_proj_qkv", "self_attn.q_proj"]);
+        let mlp = qwen35_adapter(&dir, &["mlp.gate"]);
+        assert_eq!(mixer.family, "qwen35");
+
+        let attention = qwen35_registry(Some(AdapterBankSettings::default()));
+        assert!(attention.attach(mixer.clone()).is_ok(), "the default group of a Qwen3.8 is its mixers (in_proj_*, out_proj, q/k/v/o_proj)");
+        let why = attention.attach(mlp.clone()).err().unwrap();
+        assert!(why.contains("gate") && why.contains("--adapter-targets"), "{why}");
+
+        let all = qwen35_registry(Some(AdapterBankSettings { targets: AdapterTargets::ALL, ..Default::default() }));
+        assert!(all.attach(mlp.clone()).is_ok(), "`all` is every site the model has");
+        let down = qwen35_registry(Some(AdapterBankSettings { targets: AdapterTargets::parse("gate,up,down").unwrap(), ..Default::default() }));
+        assert!(down.attach(mlp).is_ok() && down.attach(mixer.clone()).is_err(), "named leaves are the family's own names");
+
+        // The other family's adapter and the other family's leaves.
+        let qwen3 = qwen3_registry(Some(AdapterBankSettings::default()));
+        let why = qwen3.attach(mixer).err().unwrap();
+        assert!(why.contains("qwen35") && why.contains("qwen"), "an adapter of another family is refused by family: {why}");
+        let q3_adapter = qwen3_adapter(&dir, "unsloth/Qwen3.8-27B-GGUF:lab:wq:v1");
+        assert!(attention.attach(q3_adapter).err().unwrap().contains("qwen"), "a Qwen3 adapter does not ride on a Qwen3.8");
+    }
+
+    #[test]
+    fn a_quantisation_is_bound_by_the_release_it_was_made_from() {
+        let dir = brain_testutil::adapters::scratch_dir("registry-quantizing");
+        let adapter = qwen35_adapter(&dir, &["self_attn.q_proj"]);
+        assert_eq!(adapter.release.id, Q35_ID);
+        // The adapter's card names `Qwen/Qwen3.8-27B-FP8`, which the served
+        // GGUF declares it quantises, so no file digest of the GGUF is needed.
+        let base = ServedBase::of_family(family(), "unused.gguf", Some("unsloth/Qwen3.8-27B-GGUF".to_string())).quantizing(&["Qwen/Qwen3.8-27B-FP8"]);
+        assert!(llmserve::adapter_release::verify_adapter(&dir.join("q35-self_attn_q_proj.safetensors"), &base).is_ok());
+        let file = dir.join("other.gguf");
+        brain_testutil::adapters::write_base(&file, 1.0);
+        let other = ServedBase::of_family(family(), &file, Some("unsloth/Other".to_string()));
+        let why = llmserve::adapter_release::verify_adapter(&dir.join("q35-self_attn_q_proj.safetensors"), &other).err().unwrap();
+        assert!(why.contains("Qwen/Qwen3.8-27B-FP8") && why.contains("unsloth/Other"), "a base that is not the release's quantisation is refused by name: {why}");
     }
 }

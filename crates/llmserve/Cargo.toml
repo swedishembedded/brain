@@ -3,7 +3,7 @@ name = "brain-llmserve"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "The one residency glue for brain's text LLMs: drives a request group through model::serve::Scheduler (continuous batching over any PagedDecoder), with per-request streaming, cancellation, stop strings and adapter routing, and the Instance that wraps it. What every LLM resident serves through."
+description = "The one residency glue for brain's text LLMs: drives a request group through model::serve::Scheduler (continuous batching over any PagedDecoder), with per-request streaming, cancellation, stop strings and adapter routing, the Instance that wraps it, and the registry and verified releases of the LoRA adapters served over one resident base. What every LLM resident serves through."
 
 [lib]
 name = "llmserve"
@@ -17,7 +17,14 @@ brain-gpu-core.workspace = true
 brain-model.workspace = true
 brain-qwen3.workspace = true
 brain-residency.workspace = true
+# `adapter_release`: an adapter's card (`checkpoint::st::ModelCard`), its
+# content digest and release manifest (`brain_modelstore`), and the adapter
+# reference grammar a served id must follow (`brain_modelref`).
+brain-checkpoint.workspace = true
+brain-modelstore.workspace = true
+brain-modelref.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
-brain-checkpoint.workspace = true
+# Adapter and base fixtures for the registry and release tests.
+brain-testutil.workspace = true

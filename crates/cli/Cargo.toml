@@ -48,6 +48,8 @@ brain-appopts.workspace = true
 brain-gpt2.workspace = true
 brain-qwen3.workspace = true
 brain-ricursive.workspace = true
+# The adapter registry and verified releases `brain serve` offers over a base.
+brain-llmserve.workspace = true
 brain-rl.workspace = true
 brain-qwen35moe.workspace = true
 brain-qwen35.workspace = true

@@ -6,11 +6,11 @@
 // expertise in serving and rolling out fine-tuned language models, you can
 // procure our services by sending an email to info@swedishembedded.com.
 
-//! Which LoRA adapter release `brain serve` puts beside its Qwen3 base, and
+//! Which LoRA adapter release `brain serve` puts beside a served base, and
 //! the checks that make "this is what is served" a verified statement rather
 //! than a file name.
 //!
-//! A [`LoadedAdapter`] is an adapter file that has been read as a Qwen3 LoRA,
+//! A [`LoadedAdapter`] is an adapter file that has been read as a LoRA,
 //! (for [`verify_adapter`]) bound to the served base, and named by its content
 //! digest - `brain_modelstore::fetch::bytes_digest` over the file's bytes, the
 //! same string `brain_modelstore::fetch::file_digest` gives for the file, a
@@ -22,8 +22,8 @@
 //! those bytes and the factors are parsed from those same bytes, so there is
 //! no window between "verified" and "served" in which the file can be
 //! rewritten: what the digest names is what the engine is given. The engine
-//! cannot do this check itself (the catalog depends on the engine crate, not
-//! the reverse), so a [`LoadedAdapter`] is what crosses that boundary
+//! cannot do this check itself (the serving layer depends on the engine crate,
+//! not the reverse), so a [`LoadedAdapter`] is what crosses that boundary
 //! ([`LoadedAdapter::into_engine`]).
 //!
 //! **Binding to the base.** An adapter is only meaningful on the exact base it
@@ -50,7 +50,7 @@ use std::sync::OnceLock;
 
 pub use brain_modelstore::adapter_manifest::AdapterManifest;
 use checkpoint::st::ModelCard;
-use model::adapter::bank::VerifiedAdapter;
+use model::adapter::bank::{AdapterServing, VerifiedAdapter};
 use model::lora::device_adapter::DeviceAdapter;
 use residency::AdapterIdentity;
 use std::sync::Arc;
@@ -68,8 +68,8 @@ const MAX_ADAPTER_BYTES: u64 = 2 << 30;
 pub struct ServedBase {
     path: PathBuf,
     id: Option<String>,
-    /// The `ModelCard.family` of the adapters this base takes.
-    family: &'static str,
+    /// The family of the adapters this base takes.
+    family: ServedFamily,
     /// Ids of the full-precision sources this base was made from (a released
     /// quantisation of a model names the model it quantises). An adapter is
     /// trained on the source and served on the quantisation, so its card's
@@ -79,22 +79,45 @@ pub struct ServedBase {
     digest: Arc<OnceLock<Result<String, String>>>,
 }
 
-/// The card family of a Qwen3 adapter.
-pub const QWEN_FAMILY: &str = "qwen";
-/// The card family of a Qwen3.5/3.8 adapter.
-pub const QWEN35_FAMILY: &str = "qwen35";
-/// The card family of Ripple adapters.
-pub const RICURSIVE_FAMILY: &str = "ricursive";
+/// What a served model family calls its linears: the card family of its
+/// adapters, the leaves an adapter may correct and the `attention` group, as
+/// the family's [`AdapterServing`] config lists them. Leaf names do not
+/// depend on a config's dimensions, so a small config of the family stands
+/// for all of them. The resident of a family builds its own; the registry
+/// ([`crate::adapter_registry`]) reads it and names no architecture itself.
+#[derive(Clone, Debug)]
+pub struct ServedFamily {
+    /// The `ModelCard.family` of the family's adapters.
+    pub tag: &'static str,
+    /// What the family is called in a refusal (`Qwen3`, `Ripple`).
+    pub name: &'static str,
+    /// Every leaf the family has a site for.
+    pub all: Vec<&'static str>,
+    /// The leaves of the `attention` group.
+    pub attention: Vec<&'static str>,
+}
+
+impl ServedFamily {
+    /// The family `name` of `model`, adapters tagged `tag`.
+    pub fn of<M: AdapterServing + ?Sized>(tag: &'static str, name: &'static str, model: &M) -> ServedFamily {
+        ServedFamily { tag, name, all: model.all_leaves(), attention: model.attention_leaves() }
+    }
+
+    /// Qwen3, whose decoder every resident of this crate's own front end runs.
+    pub fn qwen3() -> ServedFamily {
+        ServedFamily::of(qwen3::spec::CARD_FAMILY, "Qwen3", &qwen3::config::QwenConfig::tiny())
+    }
+}
 
 impl ServedBase {
     /// The Qwen3 base at `path`, served under `id` when it has one (a catalog
     /// id, or the id `--checkpoint` resolved to).
     pub fn new(path: impl Into<PathBuf>, id: Option<String>) -> ServedBase {
-        ServedBase::of_family(QWEN_FAMILY, path, id)
+        ServedBase::of_family(ServedFamily::qwen3(), path, id)
     }
 
-    /// The base at `path` for adapters of card family `family`.
-    pub fn of_family(family: &'static str, path: impl Into<PathBuf>, id: Option<String>) -> ServedBase {
+    /// The base at `path` for adapters of `family`.
+    pub fn of_family(family: ServedFamily, path: impl Into<PathBuf>, id: Option<String>) -> ServedBase {
         ServedBase { path: path.into(), id, family, quantized_from: Vec::new(), digest: Arc::new(OnceLock::new()) }
     }
 
@@ -119,9 +142,9 @@ impl ServedBase {
         self.quantized_from.iter().any(|q| q == source)
     }
 
-    /// The card family of the adapters this base takes.
-    pub fn family(&self) -> &'static str {
-        self.family
+    /// The family of the adapters this base takes.
+    pub fn family(&self) -> &ServedFamily {
+        &self.family
     }
 
     /// Start hashing the base in the background, so replies can name it once
@@ -178,7 +201,7 @@ impl AdapterRelease {
 /// An adapter read once: its name and its factors, both from the same bytes.
 #[derive(Clone)]
 pub struct LoadedAdapter {
-    /// The card family the file declares (`qwen`, `qwen35`).
+    /// The card family the file declares (`qwen`, `qwen35`, `ricursive`).
     pub family: String,
     /// The release this file is: card id, digest, where it was read.
     pub release: AdapterRelease,
@@ -204,10 +227,9 @@ impl LoadedAdapter {
 }
 
 /// Read the adapter file at `path` ONCE: its digest, card and factors, all
-/// from the same bytes. Checks the file is a LoRA of a family this crate
-/// serves (`expect`: exactly that family) with at least one factor pair;
-/// nothing about the base.
-fn read_once(path: &Path, expect: Option<&str>) -> Result<(LoadedAdapter, ModelCard), String> {
+/// from the same bytes. Checks the file is a LoRA (of `expect`'s family, when
+/// given) with at least one factor pair; nothing about the base.
+fn read_once(path: &Path, expect: Option<&ServedFamily>) -> Result<(LoadedAdapter, ModelCard), String> {
     let shown = path.display();
     let len = std::fs::metadata(path).map_err(|e| format!("adapter {shown}: {e}"))?.len();
     if len > MAX_ADAPTER_BYTES {
@@ -221,19 +243,16 @@ fn read_once(path: &Path, expect: Option<&str>) -> Result<(LoadedAdapter, ModelC
         _ => e.to_string(),
     })?;
     let descriptor = card.adapter.as_ref().ok_or_else(|| format!("adapter {shown}: its card ({}) describes a model, not an adapter", card.id))?;
-    // The engines' banks implement exactly these families and this kind;
-    // anything else would only fail later, at the first request.
-    let family_ok = match expect {
-        Some(family) => card.family == family,
-        None => card.family == QWEN_FAMILY || card.family == QWEN35_FAMILY || card.family == RICURSIVE_FAMILY,
-    };
-    if !family_ok || descriptor.kind != "lora" {
-        let served = match expect {
-            Some(QWEN35_FAMILY) => "a Qwen3.8",
-            Some(RICURSIVE_FAMILY) => "a Ripple",
-            Some(_) | None => "a Qwen3",
-        };
-        return Err(format!("adapter {shown}: a {} {:?} adapter; the served base is {served} that takes LoRA adapters of family {}", card.family, descriptor.kind, expect.unwrap_or("qwen, qwen35 or ricursive")));
+    // The engines' banks implement this kind, and a base takes its own
+    // family; anything else would only fail later, at the first request. An
+    // unbound read leaves the family to the registry it is offered to, which
+    // refuses another family's adapter by name.
+    match expect {
+        Some(family) if card.family != family.tag || descriptor.kind != "lora" => {
+            return Err(format!("adapter {shown}: a {} {:?} adapter; the served base is a {} that takes LoRA adapters of family {}", card.family, descriptor.kind, family.name, family.tag));
+        }
+        None if descriptor.kind != "lora" => return Err(format!("adapter {shown}: a {} {:?} adapter; a served base takes LoRA adapters", card.family, descriptor.kind)),
+        _ => {}
     }
     let release = AdapterRelease { id: card.id.clone(), path: path.to_path_buf(), digest };
     Ok((LoadedAdapter { family: card.family.clone(), release, adapter, version: 0 }, card))
@@ -248,12 +267,12 @@ pub fn load_adapter(path: &Path) -> Result<LoadedAdapter, String> {
     read_once(path, None).map(|(loaded, _)| loaded)
 }
 
-/// Read `path` as a Qwen3 LoRA adapter and bind it to `base`. Every refusal
-/// names the file and what was wrong with it; a base mismatch names both
-/// digests.
+/// Read `path` as a LoRA adapter of `base`'s family and bind it to `base`.
+/// Every refusal names the file and what was wrong with it; a base mismatch
+/// names both digests.
 pub fn verify_adapter(path: &Path, base: &ServedBase) -> Result<LoadedAdapter, String> {
     let shown = path.display();
-    let (loaded, card) = read_once(path, Some(base.family))?;
+    let (loaded, card) = read_once(path, Some(&base.family))?;
     let adapter = card.adapter.as_ref().expect("read_once refused a card without an adapter descriptor");
     let recorded_base_digest = card.training.as_ref().and_then(|t| t.base_digest.as_deref());
     match (recorded_base_digest, adapter.base.as_deref()) {
@@ -479,9 +498,9 @@ mod tests {
 
     /// An unbound read (a directory a gated promotion fills) names the file
     /// by its card and digest without hashing any base, and still refuses a
-    /// file that is not a Qwen3 LoRA.
+    /// file that is not a LoRA adapter.
     #[test]
-    fn an_unbound_load_names_the_file_and_still_refuses_what_is_not_a_qwen3_lora() {
+    fn an_unbound_load_names_the_file_and_still_refuses_what_is_not_a_lora_adapter() {
         let dir = tmp("unbound");
         let adapter = dir.join("adapter.safetensors");
         write_adapter(&adapter, "promoted", "base", None, 0.5);

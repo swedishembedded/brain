@@ -13,7 +13,7 @@
 //! Ripple cannot honour is refused by name.
 
 use capability::Invocation;
-use catalog::resident_ricursive::{RicursiveResident, RicursiveServeConfig};
+use ricursive::resident::{RicursiveResident, RicursiveServeConfig};
 use data::rng::Lcg;
 use model::kv_tier::KvTier;
 use model::policy::ServePolicy;
@@ -337,12 +337,12 @@ const A: &str = "ricursiveAI/Ripple-tiny:lab:alpha:v1";
 const B: &str = "ricursiveAI/Ripple-tiny:lab:beta:v1";
 
 fn banked(dir: &std::path::Path) -> std::sync::Arc<RicursiveResident> {
-    let knobs = RicursiveServeConfig { adapter_bank: Some(catalog::adapter_registry::AdapterBankSettings { slots: 2, rank_cap: 4, targets: catalog::adapter_registry::AdapterTargets::ALL }), max_batch: Some(4), ..Default::default() };
+    let knobs = RicursiveServeConfig { adapter_bank: Some(llmserve::adapter_registry::AdapterBankSettings { slots: 2, rank_cap: 4, targets: llmserve::adapter_registry::AdapterTargets::ALL }), max_batch: Some(4), ..Default::default() };
     std::sync::Arc::new(resident(dir, &knobs, &[]).expect("a Ripple directory"))
 }
 
 fn on(inv: Invocation, id: &str) -> Invocation {
-    inv.set(catalog::adapter_registry::ADAPTER_PARAM, serde_json::json!(id))
+    inv.set(llmserve::adapter_registry::ADAPTER_PARAM, serde_json::json!(id))
 }
 
 /// Spec: two trained adapters and the base are served from ONE resident instance: a batch holding a request for each
@@ -350,12 +350,12 @@ fn on(inv: Invocation, id: &str) -> Invocation {
 /// token, and differ from the base's.
 #[test]
 fn two_adapters_and_the_base_are_served_from_one_instance_as_the_training_forward_does() {
-    use catalog::adapter_registry::AdapterHost;
+    use llmserve::adapter_registry::AdapterHost;
     let dir = pulled_dir("adapters");
     let (fa, fb) = (dir.with_extension("a.safetensors"), dir.with_extension("b.safetensors"));
     let (train_a, train_b) = (trained_adapter(&dir, &fa, A, 9), trained_adapter(&dir, &fb, B, 10));
     let base = banked(&dir);
-    let (va, vb) = (base.adapter_view(catalog::adapter_release::verify_adapter(&fa, &base.served_base()).unwrap()).unwrap(), base.adapter_view(catalog::adapter_release::verify_adapter(&fb, &base.served_base()).unwrap()).unwrap());
+    let (va, vb) = (base.adapter_view(llmserve::adapter_release::verify_adapter(&fa, &base.served_base()).unwrap()).unwrap(), base.adapter_view(llmserve::adapter_release::verify_adapter(&fb, &base.served_base()).unwrap()).unwrap());
     assert_eq!((va.id(), vb.id()), (A, B));
     let prompt = "the vault code is 4817";
     gpu_core::devices::with_host_tier(|| {
@@ -379,20 +379,20 @@ fn two_adapters_and_the_base_are_served_from_one_instance_as_the_training_forwar
 /// bank's.
 #[test]
 fn an_adapter_that_does_not_fit_the_base_is_refused_by_name() {
-    use catalog::adapter_registry::AdapterHost;
+    use llmserve::adapter_registry::AdapterHost;
     let dir = pulled_dir("adapter-refused");
     let file = dir.with_extension("adapter.safetensors");
     trained_adapter(&dir, &file, A, 9);
     let base = banked(&dir);
 
-    let other = catalog::adapter_release::ServedBase::of_family("ricursive", dir.clone(), Some("someone/else".into()));
-    let err = catalog::adapter_release::verify_adapter(&file, &other).err().expect("a different base");
+    let other = llmserve::adapter_release::ServedBase::of_family(ricursive::resident::family(), dir.clone(), Some("someone/else".into()));
+    let err = llmserve::adapter_release::verify_adapter(&file, &other).err().expect("a different base");
     assert!(err.contains("refusing to put it on a different base"), "{err}");
-    let qwen = catalog::adapter_release::ServedBase::of_family("qwen", dir.clone(), Some(ID.into()));
-    let err = catalog::adapter_release::verify_adapter(&file, &qwen).err().expect("a ricursive adapter on a Qwen base");
+    let qwen = llmserve::adapter_release::ServedBase::of_family(llmserve::adapter_release::ServedFamily::qwen3(), dir.clone(), Some(ID.into()));
+    let err = llmserve::adapter_release::verify_adapter(&file, &qwen).err().expect("a ricursive adapter on a Qwen base");
     assert!(err.contains("ricursive") && err.contains("qwen"), "{err}");
 
-    let fresh = || catalog::adapter_release::verify_adapter(&file, &base.served_base()).unwrap();
+    let fresh = || llmserve::adapter_release::verify_adapter(&file, &base.served_base()).unwrap();
     let mut deeper = fresh();
     deeper.adapter.sites[0].base = "model.layers.9.self_attn.q_proj.weight".into();
     assert!(base.adapter_view(deeper).err().expect("a layer past the model's depth").contains("model.layers.9"));
@@ -402,12 +402,12 @@ fn an_adapter_that_does_not_fit_the_base_is_refused_by_name() {
     let mut rankless = fresh();
     rankless.adapter.rank = 0;
     assert!(base.adapter_view(rankless).err().expect("rank 0").contains("rank"));
-    let narrow = std::sync::Arc::new(resident(&dir, &RicursiveServeConfig { adapter_bank: Some(catalog::adapter_registry::AdapterBankSettings { slots: 1, rank_cap: 2, targets: catalog::adapter_registry::AdapterTargets::ALL }), ..Default::default() }, &[]).unwrap());
-    let err = narrow.adapter_view(catalog::adapter_release::verify_adapter(&file, &narrow.served_base()).unwrap()).err().expect("above the bank's rank cap");
+    let narrow = std::sync::Arc::new(resident(&dir, &RicursiveServeConfig { adapter_bank: Some(llmserve::adapter_registry::AdapterBankSettings { slots: 1, rank_cap: 2, targets: llmserve::adapter_registry::AdapterTargets::ALL }), ..Default::default() }, &[]).unwrap());
+    let err = narrow.adapter_view(llmserve::adapter_release::verify_adapter(&file, &narrow.served_base()).unwrap()).err().expect("above the bank's rank cap");
     assert!(err.contains("--adapter-rank-cap"), "{err}");
     // A server started without an adapter bank offers no adapter at all.
     let bare = std::sync::Arc::new(resident(&dir, &RicursiveServeConfig::default(), &[]).unwrap());
-    let loaded = catalog::adapter_release::verify_adapter(&file, &bare.served_base()).unwrap();
+    let loaded = llmserve::adapter_release::verify_adapter(&file, &bare.served_base()).unwrap();
     assert!(bare.adapter_view(loaded).err().expect("no bank").contains("--adapter-slots"));
     std::fs::remove_dir_all(&dir).ok();
     std::fs::remove_file(&file).ok();
@@ -445,7 +445,7 @@ fn say(exec: &residency::Executor, model: &str) -> Result<String, String> {
 /// is driven by the same `LiveAdapters` the Qwen residents are.
 #[test]
 fn adapters_are_offered_replaced_and_withdrawn_on_a_running_server() {
-    use catalog::adapter_registry::{AdapterHost, LiveAdapters};
+    use llmserve::adapter_registry::{AdapterHost, LiveAdapters};
     let dir = pulled_dir("adapters-live");
     let files: Vec<std::path::PathBuf> = (0..3).map(|i| dir.with_extension(format!("{i}.safetensors"))).collect();
     trained_adapter(&dir, &files[0], A, 9);
@@ -454,7 +454,7 @@ fn adapters_are_offered_replaced_and_withdrawn_on_a_running_server() {
     let base = banked(&dir);
     let exec = executor(vec![base.clone()]);
     let live = LiveAdapters::new(base.clone(), exec.clone());
-    let offer = |file: &std::path::Path| live.serve(catalog::adapter_release::verify_adapter(file, &base.served_base()).unwrap()).expect("the adapter is offered");
+    let offer = |file: &std::path::Path| live.serve(llmserve::adapter_release::verify_adapter(file, &base.served_base()).unwrap()).expect("the adapter is offered");
 
     let plain = say(&exec, ID).expect("the base answers");
     assert!(say(&exec, A).unwrap_err().starts_with("no model"), "an adapter not yet offered is an unknown model");

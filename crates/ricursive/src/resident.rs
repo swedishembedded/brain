@@ -10,18 +10,18 @@
 //! Ripple-65B (`RicursiveForCausalLM`) behind the residency [`Executor`](residency) and the capability interface:
 //! the Hugging Face directory a pull of `ricursiveAI/Ripple-65B-Preview` (bf16) or
 //! `ricursiveAI/Ripple-65B-Preview-NVFP4` leaves in the store, or any local directory of the same layout, served
-//! through the generic continuous-batching scheduler by [`ricursive::RicursiveEngine`].
+//! through the generic continuous-batching scheduler by [`crate::RicursiveEngine`].
 //!
 //! Everything a Qwen3 model gets from the shared paths, Ripple gets from the same ones: the request front end is
 //! `llmserve::TextFrontend` over `qwen3::chat::parse_request_as` with the checkpoint's own `chat_template.jinja`
 //! ([`qwen3::chat::ChatFormat::own_template`]), the tokenizer is the checkpoint's `tokenizer.json`, replies are
 //! scanned into reasoning, content and OpenAI tool calls by the shared scanner, and the model-agnostic policy
 //! (`--weight-format`, `--kv-cache`, `--sparse-attention`, `--ctx`, `--max-batch`) is checked against what
-//! [`ricursive::POLICY`] declares.
+//! [`crate::POLICY`] declares.
 //!
 //! # Sizing
 //!
-//! The memory the deployment costs is stated by [`ricursive::placement::footprint`], the same functions the engine
+//! The memory the deployment costs is stated by [`crate::placement::footprint`], the same functions the engine
 //! allocates with: the linears at the tier the checkpoint stores them in (or `--weight-format`), the rings of the
 //! sliding layers for every live and cached sequence, the block pool of the global layers for the context asked
 //! for, the index of latent sparse attention when `--sparse-attention` names one, and the fixed bytes of each
@@ -31,7 +31,7 @@
 //! # Devices
 //!
 //! The device selection (`--device`) decides how many cards the layers are cut over: the fewest of the selected
-//! cards that hold the deployment, one stage each ([`ricursive::placement::stream_plan`]). A server with cards
+//! cards that hold the deployment, one stage each ([`crate::placement::stream_plan`]). A server with cards
 //! registers the resident as a multi-device model; a server on the host (`--device cpu`) registers it as a plain
 //! one, a single stage on the host tier.
 
@@ -41,23 +41,21 @@ use std::sync::Arc;
 use capability::{Action, ActionResult, ActionSpec, Invocation, Manifest, ParamSpec, ParamType, Progress, Provider};
 use data::generation::SamplingDefaults;
 use data::qwen_tokenizer::QwenBpe;
-use llmserve::{ScheduledInstance, TextFrontend};
+use llmserve::adapter_registry::{AdaptedInstance, AdapterBankSettings, AdapterHost, AdapterRegistry, AdapterView};
+use llmserve::adapter_release::{LoadedAdapter, ServedBase, ServedFamily};
+use llmserve::{generate_spec, ScheduledInstance, TextFrontend};
+use residency::on_device;
 use model::kv_tier::KvTier;
 use model::lsa::indexer::Indexer;
 use model::ops::TierPolicy;
 use model::policy::ServePolicy;
-use model::serve::{NgramDrafter, Scheduler};
+use model::serve::{NgramDrafter, Scheduler, SpeculativeMode};
 use qwen3::chat::{parse_request_as, ChatFormat};
-use qwen35::int8_gguf_resident::SpeculativeMode;
 use residency::multi::{MultiDeviceCost, MultiDeviceResidentModel};
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
-use ricursive::placement::{card_budget, footprint, place, stream_plan, Footprint};
-use ricursive::{DraftSizing, LsaCharge, RicursiveConfig, RicursiveEngine, ServeConfig};
 
-use crate::adapter_registry::{AdaptedInstance, AdapterBankSettings, AdapterHost, AdapterRegistry};
-use crate::adapter_release::{LoadedAdapter, ServedBase, RICURSIVE_FAMILY};
-use crate::resident_llm::generate_spec;
-use residency::on_device;
+use crate::placement::{card_budget, footprint, place, stream_plan, Footprint};
+use crate::{DraftSizing, LsaCharge, RicursiveConfig, RicursiveEngine, ServeConfig};
 
 /// Rows per global KV block.
 const BLOCK_SIZE: u32 = 16;
@@ -83,6 +81,14 @@ const HOST_OVERHEAD_BYTES: u64 = 256 << 20;
 
 /// The catalog id of the in-process capability (`brain do ricursive generate`).
 pub const MODEL: &str = "brain/ricursive";
+
+/// The card family of Ripple adapters.
+pub const CARD_FAMILY: &str = "ricursive";
+
+/// Ripple as an adapter-serving family: the linears its bank may correct.
+pub fn family() -> ServedFamily {
+    ServedFamily::of(CARD_FAMILY, "Ripple", &crate::TrainConfig::tiny())
+}
 
 /// The serving knobs of Ripple, parsed from the model-agnostic policy (`apply_policy`) and nothing else.
 #[derive(Clone, Debug, Default)]
@@ -113,9 +119,9 @@ pub struct RicursiveServeConfig {
 
 impl RicursiveServeConfig {
     /// Apply the model-agnostic serving policy. A choice Ripple cannot honour is refused by name
-    /// ([`ricursive::POLICY`]) and recorded in [`Self::refused`]. Returns notes for settings that have no meaning here.
+    /// ([`crate::POLICY`]) and recorded in [`Self::refused`]. Returns notes for settings that have no meaning here.
     pub fn apply_policy(&mut self, p: &ServePolicy) -> Result<Vec<String>, String> {
-        if let Err(e) = ricursive::POLICY.check(p) {
+        if let Err(e) = crate::POLICY.check(p) {
             self.refused = Some(e.clone());
             return Err(e);
         }
@@ -173,7 +179,7 @@ fn sibling_draft_id(id: &str) -> String {
 fn draft_sizing(cfg: &RicursiveConfig, dir: &Path) -> Result<DraftSizing, String> {
     let text = std::fs::read_to_string(dir.join("config.json")).map_err(|e| format!("draft model {}: config.json: {e}", dir.display()))?;
     let draft = dflash2::Dflash2Config::from_json(&text).map_err(|e| format!("draft model {}: {e}", dir.display()))?;
-    ricursive::check_draft_fits(cfg, &draft)?;
+    crate::check_draft_fits(cfg, &draft)?;
     let source = dflash2::HfDraft::open(dir)?;
     Ok(DraftSizing { weight_bytes: source.device_weight_bytes(&draft), cfg: draft })
 }
@@ -363,14 +369,14 @@ impl RicursiveResident {
         }
         let (cfg, max_positions) = read_config(path)?;
         let layers: Vec<usize> = (0..cfg.num_hidden_layers).collect();
-        let src = ricursive::open_shared_checkpoint(dir, &cfg, &layers).map_err(|e| format!("{id}: {e}"))?;
-        let tiers = ricursive::resolve_tiers(&cfg, src.as_ref(), knobs.weights.as_ref());
+        let src = crate::open_shared_checkpoint(dir, &cfg, &layers).map_err(|e| format!("{id}: {e}"))?;
+        let tiers = crate::resolve_tiers(&cfg, src.as_ref(), knobs.weights.as_ref());
         drop(src);
         let draft = Self::resolve_draft(path, id, knobs)?;
         let draft_sizing = draft.as_ref().map(|d| draft_sizing(&cfg, d)).transpose().map_err(|e| format!("{id}: {e}"))?;
         let indexer = knobs.sparse_attention.as_deref().map(Indexer::load).transpose().map_err(|e| format!("{id}: --sparse-attention: {e}"))?;
         let cards: Vec<(usize, u64)> = gpus.iter().map(|&(i, total)| (i as usize, card_budget(total).saturating_sub(reserved))).collect();
-        let bank = knobs.adapter_bank.as_ref().map(|b| b.bank_config(&ricursive::TrainConfig::new(cfg.clone(), 1))).transpose().map_err(|e| format!("{id}: {e}"))?;
+        let bank = knobs.adapter_bank.as_ref().map(|b| b.bank_config(&crate::TrainConfig::new(cfg.clone(), 1))).transpose().map_err(|e| format!("{id}: {e}"))?;
         let ck = Checkpoint { cfg: cfg.clone(), bank, tiers, max_positions };
         let mut deployment = size(&ck, knobs, indexer.as_ref(), draft_sizing.as_ref(), &cards).map_err(|e| format!("{id}: {e}"))?;
         if let (Some(dir), None) = (&draft, &knobs.draft_model) {
@@ -412,7 +418,7 @@ impl RicursiveResident {
     /// The per-stage description of the placement over the offered cards, or the host tier's single stage.
     pub fn placement(&self) -> String {
         match place(&self.deployment.footprint, &self.cards) {
-            Some(placed) if !self.cards.is_empty() => ricursive::placement::describe(&self.deployment.footprint, &placed),
+            Some(placed) if !self.cards.is_empty() => crate::placement::describe(&self.deployment.footprint, &placed),
             _ => format!("host tier, {:.1} GiB", self.deployment.footprint.single_card_bytes() as f64 / (1u64 << 30) as f64),
         }
     }
@@ -420,7 +426,7 @@ impl RicursiveResident {
     /// The registry of the adapters this base offers, made on first use: hashing the base to bind an adapter to it is
     /// the registry's first act, and a server that offers no adapter never pays it.
     fn registry(&self) -> &Arc<AdapterRegistry> {
-        self.adapters.get_or_init(|| AdapterRegistry::new(self.bank.clone(), ServedBase::of_family(RICURSIVE_FAMILY, self.dir.clone(), Some(self.id.clone()))))
+        self.adapters.get_or_init(|| AdapterRegistry::new(self.bank.clone(), ServedBase::of_family(family(), self.dir.clone(), Some(self.id.clone()))))
     }
 
     /// Whether the placement of this resident is over cards (registered with `register_multi`) or on the host.
@@ -467,7 +473,7 @@ impl RicursiveResident {
         };
         let front = Arc::new(TextFrontend::new(tok, stop, "ricursive", Arc::new(move |tok, inv| parse_request_as(tok, &format, inv))));
         let layers: Vec<usize> = (0..self.cfg.num_hidden_layers).collect();
-        let src = ricursive::open_shared_checkpoint(&self.dir.to_string_lossy(), &self.cfg, &layers)?;
+        let src = crate::open_shared_checkpoint(&self.dir.to_string_lossy(), &self.cfg, &layers)?;
         let serve = self.deployment.serve.clone();
         let live = serve.max_batch as usize;
         let mut engine = RicursiveEngine::from_source_staged(self.cfg.clone(), src, serve, None, plan)?;
@@ -636,10 +642,10 @@ impl AdapterHost for RicursiveResident {
 
     /// The view of `adapter`, refused by name when it does not fit this model (a layer it does not have, a linear it
     /// does not have, rank 0): the registry checks the bank's settings, the model's own sites are checked here.
-    fn adapter_view(self: &Arc<Self>, adapter: LoadedAdapter) -> Result<crate::adapter_registry::AdapterView<Self>, String> {
-        ricursive::train::adapter::check_fits(&self.cfg, &adapter.adapter).map_err(|e| format!("adapter {}: {e}", adapter.release.path.display()))?;
+    fn adapter_view(self: &Arc<Self>, adapter: LoadedAdapter) -> Result<AdapterView<Self>, String> {
+        crate::train::adapter::check_fits(&self.cfg, &adapter.adapter).map_err(|e| format!("adapter {}: {e}", adapter.release.path.display()))?;
         let lease = self.registry().attach(adapter)?;
-        Ok(crate::adapter_registry::AdapterView::new(self.clone(), lease))
+        Ok(AdapterView::new(self.clone(), lease))
     }
 
     fn register_view(self: &Arc<Self>, executor: &residency::Executor, adapter: LoadedAdapter) -> Result<(), String> {

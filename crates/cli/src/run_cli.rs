@@ -526,7 +526,7 @@ fn apply_policy(
     policy: &model::policy::ServePolicy,
     qwen: &mut catalog::resident_llm::QwenServeConfig,
     qwen35: &mut catalog::resident_qwen35::Qwen35ServeConfig,
-    ricursive: &mut catalog::resident_ricursive::RicursiveServeConfig,
+    ricursive: &mut ricursive::resident::RicursiveServeConfig,
     ocr: &mut ocrserve::OcrServeConfig,
 ) {
     if *policy == model::policy::ServePolicy::default() {
@@ -793,7 +793,7 @@ pub fn run_serve(args: &[String]) {
     // `--adapter-slots` / `--adapter-rank-cap` / `--adapter-targets`: the size
     // of the adapter bank. Built only when one of them, or any adapter source
     // above, asks for adapters.
-    let mut adapter_bank = catalog::adapter_registry::AdapterBankSettings::default();
+    let mut adapter_bank = llmserve::adapter_registry::AdapterBankSettings::default();
     let mut adapter_bank_asked = false;
     // Every serving-policy flag, built up as its own arm below is matched -
     // `catalog::resident_llm::QwenServeConfig`'s own `Default` is every
@@ -805,7 +805,7 @@ pub fn run_serve(args: &[String]) {
     // resident - two different models, so the flags are name-spaced apart.
     let mut qwen35_cfg = catalog::resident_qwen35::Qwen35ServeConfig::default();
     let mut policy = model::policy::ServePolicy::default();
-    let mut ricursive_cfg = catalog::resident_ricursive::RicursiveServeConfig::default();
+    let mut ricursive_cfg = ricursive::resident::RicursiveServeConfig::default();
     let mut ocr_cfg = ocrserve::OcrServeConfig::default();
     // `--decision-model` / `--decision-default`: the decision models served
     // beyond those the model store holds, and the one `auto` resolves to.
@@ -926,7 +926,7 @@ pub fn run_serve(args: &[String]) {
             }
             "--adapter-targets" => {
                 let list = val(args, &mut i, "--adapter-targets");
-                adapter_bank.targets = catalog::adapter_registry::AdapterTargets::parse(&list).unwrap_or_else(|e| {
+                adapter_bank.targets = llmserve::adapter_registry::AdapterTargets::parse(&list).unwrap_or_else(|e| {
                     eprintln!("brain serve: --adapter-targets {list:?}: {e}\n");
                     eprint!("{HELP}");
                     std::process::exit(2);
@@ -1096,7 +1096,7 @@ pub fn run_serve(args: &[String]) {
         // corrects them all rather than the attention four.
         let mut ripple_bank = adapter_bank.clone();
         if !qwen_cfg.adapter_targets_named {
-            ripple_bank.targets = catalog::adapter_registry::AdapterTargets::ALL;
+            ripple_bank.targets = llmserve::adapter_registry::AdapterTargets::ALL;
         }
         ricursive_cfg.adapter_bank = Some(ripple_bank);
         qwen_cfg.adapter_bank = Some(adapter_bank);

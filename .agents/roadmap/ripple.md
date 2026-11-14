@@ -122,7 +122,7 @@ ordered plan is `ripple-gpu-validation.md` (`make test/gpu/ripple`).
        faces through the generic trainer, pipeline and objectives; LoRA/QLoRA through `model::adapter` served by
        the engine; full fine-tuning; N-LSA on the global layers; `brain finetune` and the SDK fine-tuners. Measured
        on the CPU backend and the software Vulkan adapter below; no card has trained it (step 8).
-7c. [x] Adapters served from a bank over one shared base (generalised `model::adapter::bank` / `catalog::adapter_registry`,
+7c. [x] Adapters served from a bank over one shared base (generalised `model::adapter::bank` / `llmserve::adapter_registry`,
        no Ripple copy): per-request selection by model id, a batch mixing base and several adapters on any number of
        stages, `--adapter`, `--adapter-manifest`, `--watch-adapters`, model-store adapters, `TextGenerationPipeline::adapter`.
 7b. [x] `brain serve --adapter` for Ripple, training across pipeline stages from the memory plan (generic

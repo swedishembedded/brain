@@ -8,14 +8,14 @@
 //!
 //! Every adapter is a model of its own, named by its card id
 //! (`<vendor>/<repo>:<owner>:<name>:<tag>`), served on the one resident copy of
-//! the base weights ([`catalog::adapter_registry`]). The base keeps answering
+//! the base weights ([`llmserve::adapter_registry`]). The base keeps answering
 //! under its own id. A new release has a new card id (a new tag) and digest:
 //! it is offered beside the old one, and only then is the old one withdrawn, so
 //! a client that selects the new id never sees a gap, and a request already
 //! running under the old one finishes on it. A release that keeps its card id
 //! under a new digest replaces the adapter under that id the same way.
 //!
-//! [`LiveAdapters`](catalog::adapter_registry::LiveAdapters) is the one place
+//! [`LiveAdapters`](llmserve::adapter_registry::LiveAdapters) is the one place
 //! an adapter enters or leaves a running executor; [`AdapterWatcher`] drives it
 //! unattended against a LIVE server and [`start_adapter_mode`] does the same
 //! once, before anything binds ([`AdapterMode`]).
@@ -25,11 +25,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::adapter_directory::BankDirectory;
-use catalog::adapter_registry::{AdapterHost, LiveAdapters};
-use catalog::adapter_release::{load_adapter, verify_adapter, LoadedAdapter, ManifestFollower, ManifestPoll};
+use llmserve::adapter_registry::{AdapterHost, LiveAdapters};
+use llmserve::adapter_release::{load_adapter, verify_adapter, LoadedAdapter, ManifestFollower, ManifestPoll};
 use catalog::resident_llm::QwenResident;
 use catalog::resident_qwen35::Qwen35GgufServed;
-use catalog::resident_ricursive::RicursiveResident;
+use ricursive::resident::RicursiveResident;
 use residency::{Executor, ResidentModel};
 
 /// Where `brain serve`'s Qwen3 gets its LoRA adapter from. One source at
@@ -350,8 +350,8 @@ fn next_adapter(source: &mut FollowSource, memory: &mut DirMemory, rejections: &
         FollowSource::Latest(dir) => match rl::improve::latest_adapter(dir) {
             // This directory's files are not bound to the base (a gated
             // promotion put them there), but each is read once, named by its
-            // card id and content digest, and refused if it is not a Qwen3
-            // LoRA.
+            // card id and content digest, and refused if it is not a LoRA;
+            // the base refuses another family's adapter when it is offered.
             Ok(Some((_, path))) if memory.offered.as_deref() != Some(path.as_path()) => {
                 let stamp = FileStamp::of(&path);
                 if memory.failed.as_ref().is_some_and(|(p, s)| *p == path && *s == stamp) {
@@ -430,7 +430,7 @@ fn watch_loop(follow: &mut Follow, live: &LiveAdapters, counters: &WatchCounters
 mod tests {
     use super::*;
     use brain_testutil::adapters::{file_digest as digest, scratch_dir as tmp, write_adapter, write_base, write_byte_tokenizer, write_lora_adapter, Linear};
-    use catalog::adapter_registry::AdapterBankSettings;
+    use llmserve::adapter_registry::AdapterBankSettings;
     use catalog::resident_llm::QwenServeConfig;
     use checkpoint::st::ModelCard;
     use qwen3::config::QwenConfig;

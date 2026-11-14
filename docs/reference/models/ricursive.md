@@ -240,4 +240,4 @@ weights. A config that sets a RoPE scaling, an attention or MLP bias, a
 non-SiLU activation or tied embeddings is refused, because this port does not
 implement them.
 
-Package: `brain-ricursive` (engine), `brain-dflash2` (the draft model), `brain-catalog` (`resident_ricursive`).
+Package: `brain-ricursive` (engine), `brain-dflash2` (the draft model), `brain-llmserve` (the adapter registry); the served resident is `ricursive::resident`.

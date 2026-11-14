@@ -14,6 +14,9 @@ brain-capability.workspace = true
 brain-catalog.workspace = true
 # `resident`: the decision models a serving process schedules.
 brain-decisions.workspace = true
+# The adapter registry and releases a served base offers, and Ripple's resident.
+brain-llmserve.workspace = true
+brain-ricursive.workspace = true
 brain-ocrserve.workspace = true
 brain-loader.workspace = true
 brain-residency.workspace = true
@@ -50,5 +53,4 @@ serde_json.workspace = true
 
 [dev-dependencies]
 brain-testutil.workspace = true
-brain-ricursive.workspace = true
 brain-horizon.workspace = true

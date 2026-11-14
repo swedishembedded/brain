@@ -34,8 +34,8 @@ Hugging Face directory), so on-policy methods continue an adapter instead of fol
 - [x] The serving `AdapterBank` is `model::adapter::bank` over `LoraSites` /
       `AdapterServing`; qwen3 and qwen35 (fp32 and GGUF engines) serve adapters
       from it as overlays without folding into the base, and
-      `catalog/src/adapter_registry.rs` names no architecture (the family table
-      is `catalog/src/served_family.rs`). `Qwen::attach_adapter_pairs` checks
+      `llmserve/src/adapter_registry.rs` names no architecture (each resident
+      hands it its `adapter_release::ServedFamily`). `Qwen::attach_adapter_pairs` checks
       shapes with `adapter::sites::validate`. Regression gates:
       `catalog/tests/multi_adapter.rs`, `qwen3/tests/engine_adapter_bank.rs`,
       `qwen35/tests/adapter_bank.rs`, `apiserve/tests/api.rs`.

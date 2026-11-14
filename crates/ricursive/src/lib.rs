@@ -29,6 +29,7 @@
 //! - [`finetune`]: Ripple as a `model::finetune::ChatTrainer`, the generic trainers' entry.
 //! - [`placement`]: byte-exact per-layer costs and the placement over devices.
 //! - [`policy`]: what Ripple honours of the model-agnostic serving policy.
+//! - [`resident`]: the served model: sizing, the residency resident, its adapters and its resolver spec.
 
 pub mod config;
 pub mod finetune;
@@ -38,6 +39,7 @@ pub mod model;
 pub(crate) mod ops;
 pub mod placement;
 pub mod policy;
+pub mod resident;
 pub mod serve;
 pub(crate) mod stage;
 pub mod train;

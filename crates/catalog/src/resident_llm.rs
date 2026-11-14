@@ -23,14 +23,14 @@
 //! real free VRAM (see [`QwenResident::resolve_ctx`]) rather than a single
 //! fixed number for every box.
 
-use capability::{ActionResult, ActionSpec, BlobSpec, Invocation, Manifest, Media, ParamSpec, ParamType, Progress, Provider};
+use capability::{ActionResult, Invocation, Manifest, Progress, Provider};
 use checkpoint::st::ModelCard;
 use residency::{on_device, Device, Instance, InstanceKey, MemCost, ResidentModel};
 use serde_json::json;
 
-use crate::adapter_registry::{AdapterBankSettings, AdapterHost, AdapterRegistry, AdapterSync, QwenAdapterView, ADAPTER_PARAM};
-use crate::adapter_release::{LoadedAdapter, ServedBase};
-use llmserve::{run_batch_scheduled, run_open_scheduled, OpenGroup, scheduler_metrics, Frontend};
+use llmserve::adapter_registry::{AdapterBankSettings, AdapterHost, AdapterRegistry, AdapterSync, AdapterView, ADAPTER_PARAM};
+use llmserve::adapter_release::{LoadedAdapter, ServedBase};
+use llmserve::{generate_spec, run_batch_scheduled, run_open_scheduled, OpenGroup, scheduler_metrics, Frontend};
 
 use std::sync::Arc;
 
@@ -40,54 +40,8 @@ use qwen3::chat::{parse_request_as, sampling_params, text_outcome, ChatFormat};
 
 // ---------------------------------------------------------------- shared
 
-/// The shared `"generate"` action spec. `chat` adds Qwen's chat contract: the
-/// chat-template toggle plus `messages`/`system`/`top_p`/`stop` and per-token
-/// streaming (one `Progress::token` delta each accepted token).
-///
-/// `pub(crate)`: reused as-is by [`crate::resident_qwen35moe::Qwen35Resident`]
-/// (same chat contract, same `qwen3::chat` shared parse underneath) rather
-/// than duplicated a third time.
-pub fn generate_spec(summary: &str, chat: bool) -> ActionSpec {
-    let mut s = ActionSpec::new("generate", summary)
-        .cancellable()
-        .param(ParamSpec::new("prompt", ParamType::Str, "the prompt to continue (or chat message)"))
-        .param(ParamSpec::new("max_new", ParamType::Int, "number of new tokens to generate; omitted, the reply runs to its end of turn or to the end of the context").min(0.0).max(capability::bounds::TOKENS))
-        .param(ParamSpec::new("temp", ParamType::Float, "sampling temperature (<= 0 = greedy)").default(json!(0.8)))
-        .param(ParamSpec::new("top_k", ParamType::Int, "top-k filter (40 = standard; 1 = greedy; 0 or negative = disabled)").min(0.0).max(capability::bounds::TOP_K).default(json!(40)))
-        .param(ParamSpec::new("seed", ParamType::Int, "RNG seed (omit for random)"));
-    if chat {
-        s = s
-            .streaming()
-            .param(ParamSpec::new("chat", ParamType::Bool, "apply the chat template to the prompt").default(json!(true)))
-            .param(ParamSpec::new(
-                "messages",
-                ParamType::Str,
-                "JSON array of {role,content,reasoning_content?,tool_calls?,tool_call_id?} chat turns (overrides prompt)",
-            ))
-            .param(ParamSpec::new("system", ParamType::Str, "optional system prompt prepended to the chat"))
-            .param(ParamSpec::new(
-                "suffix",
-                ParamType::Str,
-                "fill-in-the-middle: the text after the insertion point, with the raw prompt (chat false) the text before it (needs FIM tokens in the vocabulary)",
-            ))
-            .param(ParamSpec::new("top_p", ParamType::Float, "nucleus sampling threshold (>= 1 = disabled)").default(json!(1.0)))
-            .param(ParamSpec::new("stop", ParamType::Str, "JSON array of stop strings"))
-            .param(ParamSpec::new("ignore_eos", ParamType::Bool, "generate to max_new past the model's end-of-sequence tokens (stop strings still apply)").default(json!(false)))
-            .param(ParamSpec::new("tools", ParamType::Str, "JSON array of tool definitions (OpenAI function-calling schema)"))
-            .param(ParamSpec::new("tool_choice", ParamType::Str, "tool_choice directive, raw JSON text (\"auto\"|\"none\"|\"required\"|{...})"))
-            .param(ParamSpec::new("enable_thinking", ParamType::Bool, "allow the model to emit a <think> reasoning block").default(json!(true)))
-            .param(ParamSpec::new("thinking_budget", ParamType::Int, "tokens the think block may take; after that the closing tag is forced and the model answers (default: unbounded)").min(0.0).max(capability::bounds::TOKENS))
-            .param(ParamSpec::new("min_p", ParamType::Float, "drop tokens below this fraction of the best token's probability (0 = off)"))
-            .param(ParamSpec::new("presence_penalty", ParamType::Float, "subtracted from the logit of every token already generated (0 = off)"))
-            .param(ParamSpec::new("frequency_penalty", ParamType::Float, "subtracted from a token's logit once per time it was generated (0 = off)"))
-            .param(ParamSpec::new("repetition_penalty", ParamType::Float, "divides the positive logit of every token in the context, prompt included (1 = off)"))
-            .param(ParamSpec::new("dry_multiplier", ParamType::Float, "DRY repetition penalty strength over the whole context (0 = off)"))
-            .param(ParamSpec::new("dry_base", ParamType::Float, "DRY penalty growth per extra repeated token (default 1.75)"))
-            .param(ParamSpec::new("dry_allowed_length", ParamType::Int, "DRY: repeats up to this many tokens are not penalised (default 2)").min(0.0).max(1024.0))
-            .param(ParamSpec::new("dry_sequence_breakers", ParamType::Str, "JSON array of strings that end a DRY sequence (default newline, colon, quote, asterisk)"));
-    }
-    llmserve::with_token_capture(s.output(BlobSpec::new("text", Media::Text, "the generated text")))
-}
+/// A Qwen3 adapter's view.
+pub type QwenAdapterView = AdapterView<QwenResident>;
 
 /// Estimate the Hot VRAM footprint of a checkpoint as ~1.3x its file size.
 /// `pub(crate)`: reused by [`crate::resident_qwen35moe::Qwen35Resident`] too.
@@ -237,6 +191,7 @@ const MAX_FP32_KV_POOL_BYTES: u64 = 8 << 30;
 /// accept this binding - is answered against the device's own queried limit
 /// where the device exists, in `qwen3::serve::check_kv_bindings_fit`.
 const WGPU_MAX_REPORTABLE_BINDING_BYTES: u64 = 2047 * (1 << 20);
+
 
 /// A brain safetensors checkpoint opened for serving: its config and a source that serves every tensor in the
 /// encoding it is stored in ([`checkpoint::packed::stored_source`]), so a bf16 or int8 checkpoint reaches the
@@ -504,7 +459,7 @@ pub struct QwenServeConfig {
     pub exact_decode: bool,
     /// `--adapter-slots`, `--adapter-rank-cap`, `--adapter-targets`: the
     /// size of the adapter bank built beside the base weights, which lets
-    /// requests run under LoRA adapters ([`crate::adapter_registry`]). `None`
+    /// requests run under LoRA adapters ([`llmserve::adapter_registry`]). `None`
     /// (the default) builds no bank and costs nothing; `Some` costs
     /// [`AdapterBankSettings::device_bytes`] of device memory, which the
     /// resident's footprint estimate includes. A model directory that holds
@@ -798,7 +753,7 @@ fn auto_ctx_for_budget(weight_bytes: u64, budget_bytes: u64, cfg: &qwen3::config
 /// One resident is one copy of the weights, however many LoRA adapters ride
 /// on it: each adapter is its own model id ([`QwenAdapterView`]) that shares
 /// this resident's [`InstanceKey`], so base and adapter requests run in the
-/// same batches on the same engine. See [`crate::adapter_registry`].
+/// same batches on the same engine. See [`llmserve::adapter_registry`].
 pub struct QwenResident {
     id: String,
     path: String,
@@ -1027,7 +982,7 @@ impl QwenResident {
     }
 
     /// The base checkpoint adapters are bound to, for
-    /// `crate::adapter_release` to verify an adapter against before it is
+    /// `llmserve::adapter_release` to verify an adapter against before it is
     /// offered.
     /// The checkpoint this resident serves: two residents with the same path
     /// are one set of weights and must be one instance.

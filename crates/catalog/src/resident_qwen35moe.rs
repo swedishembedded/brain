@@ -49,7 +49,8 @@ use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel, Tier};
 
 use crate::parkable::{Build, HostWeights, ParkableInstance};
 use crate::resident_qwen35::Qwen35Sizing;
-use crate::resident_llm::{est_vram, generate_spec, open_stored_checkpoint};
+use crate::resident_llm::{est_vram, open_stored_checkpoint};
+use llmserve::generate_spec;
 use residency::on_device;
 use llmserve::{ScheduledInstance, TextFrontend};
 

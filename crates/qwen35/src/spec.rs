@@ -59,9 +59,9 @@ const ROLES: &[&str] = &["weights", "tokenizer"];
 /// `general.architecture` a Qwen3.8-27B GGUF release declares
 /// (`crates/qwen35/src/gguf_import.rs::GGUF_ARCHITECTURE`).
 const GGUF_ARCHITECTURE: &str = "qwen35";
-/// `ModelCard.family` a brain-format Qwen3.8-27B checkpoint declares
+/// `ModelCard.family` a brain-format Qwen3.8-27B checkpoint, and an adapter of one, declares
 /// (`Qwen35::save`).
-const CARD_FAMILY: &str = "qwen35";
+pub const CARD_FAMILY: &str = "qwen35";
 
 fn classify_gguf(idx: usize, rec: &ArtifactRecord, out: &mut Vec<(usize, String, Confidence)>) {
     let Ok(g) = MmapGguf::open(&rec.path.to_string_lossy()) else { return };

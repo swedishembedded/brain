@@ -297,7 +297,12 @@ layer 6 - serving, front ends, SDK, samples
    catalog        the served-model catalog: manifest + weight-free provider
                   ctor + residency adapter for every registered model (~70
                   crates), in ONE list, depending on nothing CLI-local, so
-                  any process can serve a model under a memory budget
+                  any process can serve a model under a memory budget. A
+                  top-level composition: binaries, serving front ends and
+                  their tests link it, an SDK surface never does. What a
+                  surface needs of serving sits below it: the adapter
+                  registry and verified releases in `llmserve`, a family's
+                  own resident in its model crate (`ricursive::resident`)
    serving        what a serving process stands on: the machine probe, the
                   one shared `residency::Executor` built from the catalog and
                   a models directory, models-directory discovery; `cli`
@@ -349,7 +354,8 @@ growing a second one.
   (`model::paged`, incl. `PrefixCache`). A decoder joins by implementing
   `PagedDecoder`, never by copying the scheduler. Chat templates, tool-call and
   stop-string streaming live once in `qwen3::chat`; many LoRA adapters on one
-  resident base are `model::adapter::bank`.
+  resident base are `model::adapter::bank` (the data plane) and
+  `llmserve::adapter_registry` (which adapters a base offers, under which ids).
 - **Stats**: `stats` assembles a self-describing `StatsSnapshot` from
   `StatsSource` contributors (`stats::build::ExecutorSource` reads the
   executor); D-Bus publishes it (`StatsSnapshot`, `StatsStream`) and `braintop`
