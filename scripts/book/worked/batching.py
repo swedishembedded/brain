@@ -199,9 +199,9 @@ CHUNK = 256                  # prompt rows per iteration under chunking
 POLICIES = ("whole prompts, no budget", "one prompt an iteration", "chunks of 256, own pass", "chunks of 256, mixed pass")
 
 
-def run_burst(policy):
+def run_burst(policy, chunk=CHUNK):
     """(cost50 of every iteration, first-token iteration and last iteration of every request (entries 1 .. 8; entry 0 is
-    unused), the iterations in which request 0 got a token). Request 0 is the sequence already decoding; a sequence is [id, cached, made, wants]."""
+    unused), the iterations in which request 0 got a token), with prompt slices of `chunk` rows under the two chunked policies. Request 0 is the sequence already decoding; a sequence is [id, cached, made, wants]."""
     running = [[0, LONG_PROMPT, 1, 10 ** 9]]
     waiting = list(range(1, BURST_N + 1))
     pre, pre_done = -1, 0                 # the prompt being read in under chunking (-1: none) and its rows already in
@@ -225,7 +225,7 @@ def run_burst(policy):
                 pre, pre_done = waiting[0], 0
                 waiting = waiting[1:]
             if pre >= 0:
-                n = min(CHUNK, BURST_PROMPT - pre_done)
+                n = min(chunk, BURST_PROMPT - pre_done)
                 sl = [(pre_done, n, pre_done + n == BURST_PROMPT)]
                 pre_done += n
                 if pre_done == BURST_PROMPT:
@@ -309,8 +309,8 @@ def blocks(tokens):
     return -(-tokens // BLOCK)
 
 
-def run_pool(policy):
-    """(dry, iterations, decode rows, prompt tokens prefilled, preemptions, work50) of the eight requests against the pool; a
+def run_pool(policy, pool=POOL_BLOCKS):
+    """(dry, iterations, decode rows, prompt tokens prefilled, preemptions, work50) of the eight requests against a pool of `pool` blocks; a
     dry run (the third policy) returns (True, the iteration at which the pool cannot back a decode step, the sequences then
     decoding, 0, 0, 0). A waiting request is [id, ctx, made],
     a running sequence [id, cached, held, made]."""
@@ -321,7 +321,7 @@ def run_pool(policy):
 
     waiting = [[i, POOL_PROMPT, 0] for i in range(len(POOL_LENGTHS))]
     running = []
-    free, t, work50, prefilled, preempted, rows = POOL_BLOCKS, 0, 0, 0, 0, 0
+    free, t, work50, prefilled, preempted, rows = pool, 0, 0, 0, 0, 0
     while waiting or running:
         t += 1
         # 1. Admission, oldest first; a request that does not fit holds the line.
@@ -370,14 +370,20 @@ def run_pool(policy):
     return False, t, rows, prefilled, preempted, work50
 
 
-def pool_admission():
+def _pool_rows(pool):
+    """One table row per policy for a pool of `pool` blocks."""
     out = []
     for p in POOL_POLICIES:
-        dry, t, rows, prefilled, preempted, work50 = run_pool(p)
+        dry, t, rows, prefilled, preempted, work50 = run_pool(p, pool)
         if dry:
             out.append((p, f"no free block at iteration {t}, {rows} sequences decoding", "", "", "", ""))
         else:
-            out.append((p, t, _round(Fraction(rows, t), 2), _int(prefilled), preempted, _round(Fraction(work50, RIDGE * TERA), 3)))
+            out.append((p, _int(t), _round(Fraction(rows, t), 2), _int(prefilled), preempted, _round(Fraction(work50, RIDGE * TERA), 3)))
+    return out
+
+
+def pool_admission():
+    out = _pool_rows(POOL_BLOCKS)
     return (f"A pool of {POOL_BLOCKS} blocks of {BLOCK} tokens ({POOL_BLOCKS * BLOCK} tokens), at most {MAX_RUN} sequences in flight, "
             f"and eight requests, 0 to 7, arriving together, each with a prompt of {POOL_PROMPT} tokens and a ceiling of {MAX_NEW} new "
             f"tokens; they produce {', '.join(str(n) for n in POOL_LENGTHS)} tokens and then stop ({_int(sum(POOL_LENGTHS))} in all). "
@@ -439,7 +445,7 @@ def overload():
     for gap in GAPS:
         for p in ADMISSION:
             a, b, c = run_overload(gap, p)
-            rows.append((_round(Fraction(SERVICE, gap), 2), p, a, b, c, b * SERVICE))
+            rows.append((_round(Fraction(SERVICE, gap), 2), p, a, b, c, _int(b * SERVICE)))
     return (f"{ARRIVALS} requests arrive, request k (from 0) at k x g units of device work, for g = {', '.join(str(g) for g in GAPS)}; "
             f"the device serves one request at a time, first come first served, each for {SERVICE} units, so the offered load "
             f"{SERVICE} / g is 0.5, 1, 1.5 and 2. A request is useful when it starts at most {DEADLINE} units after it arrives. At "
@@ -448,3 +454,36 @@ def overload():
             f"the depth rule admits when q < {DEPTH}; the deadline-aware rule admits when the wait is at most {DEADLINE}. A refused "
             f"request is answered at once and costs no work.\n\n"
             + _table(["offered load", "policy", "in time", "late", "refused", "work on late answers (units)"], rows, "llrrrr"))
+
+
+# ------------------------------------------------------------------------------------------------ the answers' extra runs
+
+POOL_HEADERS = ["policy", "iterations", "mean batch", "prompt tokens prefilled", "preemptions", "work (10^12)"]
+
+
+def variations():
+    """The runs that the check-your-understanding and exercise answers quote: the burst under the mixed pass with slices of 64
+    rows, the twelve requests served shortest first, and the pool of 64 blocks."""
+    burst_rows = []
+    for chunk in (CHUNK, 64):
+        costs, first, last, long_iters = run_burst(POLICIES[3], chunk)
+        cum = [0]
+        for c in costs:
+            cum.append(cum[-1] + c)
+        worst = max(costs[k - 1] for k in long_iters)
+        burst_rows.append((chunk, len(costs), _round(Fraction(worst, RIDGE * GIGA), 1), _round(Fraction(cum[first[BURST_N]], RIDGE * TERA), 3),
+                           _round(Fraction(max(cum[k] for k in last[1:]), RIDGE * TERA), 3)))
+    shortest_first = sorted(range(len(LENGTHS)), key=lambda i: (LENGTHS[i], i))
+    order_rows = []
+    for name, lengths in (("arrival order", LENGTHS), ("shortest first", tuple(LENGTHS[i] for i in shortest_first))):
+        sched = continuous_slots(lengths, SLOTS)
+        order_rows.append((name, max(last for _, _, last in sched), _round(Fraction(sum(first - 1 for _, first, _ in sched), len(sched)), 2)))
+    return ("The burst of `batching.burst` under the mixed pass with the slice of 256 rows and with a slice of 64 rows (the last first token is "
+            "the cumulative cost at which the last of requests 1 to 8 has its first token; costs as in that block):\n\n"
+            + _table(["slice rows", "iterations", "longest gap of request 0 (10^9)", "last first token (10^12)", "all new done (10^12)"],
+                     burst_rows, "rrrrr")
+            + "\n\nThe twelve requests of `batching.static_vs_continuous` on 4 slots under the continuous rule, in arrival order and sorted "
+            "by tokens produced, shortest first, ties by request number:\n\n"
+            + _table(["order", "iterations", "mean wait (iterations)"], order_rows, "lrr")
+            + f"\n\nThe pool of `batching.pool_admission` made {64} blocks instead of {POOL_BLOCKS}, with every other rule unchanged:\n\n"
+            + _table(POOL_HEADERS, _pool_rows(64), "lrrrrr"))
