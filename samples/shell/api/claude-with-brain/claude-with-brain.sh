@@ -68,7 +68,10 @@ KEYS="$RUNDIR/keys.json"   # 0600; the key is kept out of the server log
 if [ "$MOCK" = "0" ]; then
   "$BRAIN" serve "${AUTOFETCH[@]}" --anthropic "$PORT" --api-keys-out "$KEYS" --ready-file "$READY" >"$LOG" 2>&1 &
 else
-  "$BRAIN" serve --device cpu --mock --anthropic "$PORT" --api-keys-out "$KEYS" --ready-file "$READY" >"$LOG" 2>&1 &
+  # The mock models need no weights, so the server gets an empty store of its
+  # own rather than scanning the user's.
+  mkdir -p "$RUNDIR/models"
+  "$BRAIN" serve --device cpu --mock --models-dir "$RUNDIR/models" --anthropic "$PORT" --api-keys-out "$KEYS" --ready-file "$READY" >"$LOG" 2>&1 &
 fi
 BRAIN_PID=$!
 echo "brain serve --anthropic on http://127.0.0.1:$PORT  (pid $BRAIN_PID)"

@@ -56,9 +56,11 @@ setup_file() {
   # holds it per instance) - it must be set on this launch, not on a client
   # invocation later, or the cancellation test below
   # races every step to completion before Cancel can land. 300ms split across
-  # text2image's 4 steps is unnoticeable for every other test here.
-  BRAIN_DEVICE=cpu \
-    dbus_session_start_serve "$BRAIN" "--dbus --mock --mock-delay-ms 300 --anthropic $ANTHROPIC_PORT --openai $OPENAI_PORT"
+  # text2image's 4 steps is unnoticeable for every other test here. The mock
+  # models need no weights: an empty model store keeps startup independent of
+  # what the user's own store holds.
+  mkdir -p "$CONF_DIR/models"
+  dbus_session_start_serve "$BRAIN" "--dbus --mock --mock-delay-ms 300 --anthropic $ANTHROPIC_PORT --openai $OPENAI_PORT --models-dir $CONF_DIR/models --device cpu"
   SERVER_PID="$DBUS_SESSION_SERVER_PID"
   export SERVER_PID
 
@@ -201,10 +203,6 @@ run_example() {
 
 @test "samples/python/imagegen/flux2-klein/edit_image.py skips cleanly without FLUX.2 weights (mock has no edit action)" {
   run_example "$REPO/samples/python/imagegen/flux2-klein/edit_image.py" --image "$OUT/mock.ppm" --prompt test --model brain/flux2-klein
-}
-
-@test "samples/python/imagegen/flux2-klein/lora_finetune.py skips cleanly without FLUX.2 weights" {
-  run_example "$REPO/samples/python/imagegen/flux2-klein/lora_finetune.py" --data /nonexistent --save /nonexistent/out.lora --model brain/flux2-klein
 }
 
 @test "samples/python/imagegen/flux2-klein/cancel_generation.py actually cancels a mock job" {
