@@ -630,7 +630,7 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **homogeneous coordinates**: a representation of a point by one more number than it has coordinates, defined up to a nonzero factor, in which a division by depth, a translation and a point at infinity become matrix products. *([Cameras and Projective Geometry](v10-video-and-3d/03-camera-geometry.md))*
 
-**hostile input**: any input a server receives from a source whose aim may be to harm it, request bodies and headers, the timing of a connection, files fetched for a request, descriptors from local programs, so that every quantity it declares is a claim to check rather than a fact. *([Security of Machine Learning Services](v14-inference-and-serving/07-security.md))*
+**hostile input**: any input a server receives from a source whose aim may be to harm it (request bodies and headers, the timing of a connection, files fetched for a request, descriptors from local programs), so that every quantity it declares is a claim to check rather than a fact. *([Security of Machine Learning Services](v14-inference-and-serving/07-security.md))*
 
 **HTTP inference API**: the routes a server answers over HTTP to run models, in a vendor's request and response shapes or in the engine's own, with models offered on each route according to what their manifests declare. *([Capabilities, Providers and APIs](v14-inference-and-serving/06-capabilities-and-apis.md))*
 
@@ -888,7 +888,7 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **model catalog**: the single list of the models an engine offers, one entry per model, from which listing, construction by name and scheduling are all derived so that they cannot disagree. *([Capabilities, Providers and APIs](v14-inference-and-serving/06-capabilities-and-apis.md))*
 
-**model file attack surface**: everything a reader of a model file does on the file's word, the code it may run, the memory it reserves from declared counts, the offsets it follows, the depth it recurses to and the arithmetic on sizes the file chose. *([Security of Machine Learning Services](v14-inference-and-serving/07-security.md))*
+**model file attack surface**: everything a reader of a model file does on the file's word: the code it may run, the memory it reserves from declared counts, the offsets it follows, the depth it recurses to and the arithmetic on sizes the file chose. *([Security of Machine Learning Services](v14-inference-and-serving/07-security.md))*
 
 **model reference**: the string that names a model, `vendor/repo` with an optional quantization and adapter suffix, whose grammar gives it exactly one reading or a named refusal and keeps it from naming a place outside the store. *([Loading Models](v14-inference-and-serving/01-loading.md))*
 
@@ -1058,7 +1058,7 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **pooling**: a layer that summarizes each window of a map by one number, the largest (max pooling, whose gradient goes to the winner of the window) or the mean (average pooling, whose gradient is shared equally), with no weights; global average pooling takes the whole map. *([Convolutional Networks and Residual Learning](v07-vision/03-cnns.md))*
 
-**porting workflow**: the ordered sequence of gated steps that takes a published model to a proven reimplementation (facts from the references, goldens generated first, the mapping checked for coverage and shape, a smoke run at toy size, isolated and then chained parity, a gradient check of every trained path, and optimisation only under the frozen parity gate), each begun only when the one before it passes. *([Porting a Model from Its Reference](v15-methods/01-porting.md))*
+**porting workflow**: the ordered sequence of gated steps that takes a published model to a proven reimplementation (facts from the references, goldens generated first, the mapping checked for coverage and shape, a smoke run at toy size, isolated and then chained parity, a gradient check of every trained path, and optimization only under the frozen parity gate), each begun only when the one before it passes. *([Porting a Model from Its Reference](v15-methods/01-porting.md))*
 
 **post-training quantization**: converting a trained float network to integer arithmetic without retraining, by choosing the scale and zero point of each weight tensor from the weights and of each activation tensor from ranges measured on data, and rewriting each layer as an integer accumulation followed by a requantization. *([Neural Processing Units and Graph Compilers](v04-computation/13-npu.md))*
 
@@ -1198,7 +1198,7 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **residual-connection**: a layer that returns its input plus a correction, $\mathbf{y} = \mathbf{x} + f(\mathbf{x})$, so that its Jacobian is $\mathbf{I} + \mathbf{J}_f$ and the gradient has a path through it that passes no weights. *([Training Dynamics and Debugging](v03-neural-networks/12-training-dynamics.md))*
 
-**resource exhaustion**: an attack or accident in which input makes a server spend a resource shared by all its clients, memory, threads, connections, device lanes or disk, until it cannot serve anyone; measured by how much the server spends per unit the sender spends. *([Security of Machine Learning Services](v14-inference-and-serving/07-security.md))*
+**resource exhaustion**: an attack or accident in which input makes a server spend a resource shared by all its clients (memory, threads, connections, device lanes or disk) until it cannot serve anyone; measured by how much the server spends per unit the sender spends. *([Security of Machine Learning Services](v14-inference-and-serving/07-security.md))*
 
 **retrieval**: finding the stored texts that answer a query by embedding the query, comparing its vector with the stored vectors and ranking the collection by cosine, judged by the share of the relevant texts found among the top $k$ (recall at $k$). *([Bidirectional Encoders and Embedding Models](v05-sequences/14-encoders.md))*
 
@@ -1250,7 +1250,7 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **scale and zero point**: the pair $(\Delta, q_0)$ of a group: the distance between neighbouring levels and the code that stands for the number 0, chosen so that the codes cover the group's range and 0 is exactly a code. *([Quantization: Fewer Bits per Weight](v04-computation/12-quantization.md))*
 
-**scale-invariant-metric trap**: a test that gates on a measure unchanged by a transformation that a plausible mistake applies to the output (cosine under a scale, top-1 agreement under an order-preserving change, probabilities under a constant shift of the logits, any comparison after a normalisation), so the mistake scores as a perfect match. *([Testing Numerical Code](v15-methods/02-testing-numerical-code.md))*
+**scale-invariant-metric trap**: a test that gates on a measure unchanged by a transformation that a plausible mistake applies to the output (cosine under a scale, top-1 agreement under an order-preserving change, probabilities under a constant shift of the logits, any comparison after a normalization), so the mistake scores as a perfect match. *([Testing Numerical Code](v15-methods/02-testing-numerical-code.md))*
 
 **scaled dot-product attention**: the layer in which every query is compared with every key by a dot product divided by the square root of their width, a softmax along each row turns the scores into weights, and the weighted sums of the values are the output, $\mathrm{softmax}(\mathbf{Q}\mathbf{K}^\top/\sqrt{d_k})\mathbf{V}$. *([Self-Attention](v05-sequences/07-self-attention.md))*
 
@@ -1464,7 +1464,7 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **transformer block**: the repeating unit of a transformer, one attention sublayer and one feed-forward sublayer, each with its normalization and its addition to the residual stream. *([The Transformer Block](v05-sequences/09-transformer-block.md))*
 
-**transport security**: protection of what crosses the network between client and server, confidentiality, integrity and authentication of the server, in practice TLS, together with keeping the server's secrets out of logs and readable files. *([Security of Machine Learning Services](v14-inference-and-serving/07-security.md))*
+**transport security**: protection of what crosses the network between client and server (confidentiality, integrity and authentication of the server), in practice TLS, together with keeping the server's secrets out of logs and readable files. *([Security of Machine Learning Services](v14-inference-and-serving/07-security.md))*
 
 **transpose**: the matrix $\mathbf{A}^\top$ with rows and columns swapped; $(\mathbf{A}\mathbf{B})^\top = \mathbf{B}^\top\mathbf{A}^\top$. *([Matrices as Linear Maps](v01-mathematics/04-matrices.md))*
 
