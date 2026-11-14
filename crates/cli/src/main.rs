@@ -1405,6 +1405,10 @@ const RETIRED_VARIABLES: &[Retired] = &[
     Retired { name: "BRAIN_QWEN3TTS_WEIGHTS", replacement: "serve: {pin: [qwen3tts.weights_dir=DIR]}" },
     Retired { name: "BRAIN_QWEN3TTS_CKPT", replacement: "serve: {pin: [qwen3tts.ckpt=DIR]}" },
     Retired { name: "BRAIN_QWEN3TTS_LANG", replacement: "the synth request's own language field" },
+    Retired { name: "BRAIN_SCHED_MAX_BATCH", replacement: "serve: {max-batch: N}" },
+    Retired { name: "BRAIN_SCHED_AGE_WEIGHT", replacement: "serve: {sched-age-weight: X}" },
+    Retired { name: "BRAIN_SCHED_BATCH_WEIGHT", replacement: "serve: {sched-batch-weight: X}" },
+    Retired { name: "BRAIN_SCHED_MAX_WAIT_MS", replacement: "serve: {sched-max-wait-ms: N}" },
     Retired { name: "BRAIN_WM_RENDERER", replacement: "diamond play: {renderer: auto|software|accelerated}" },
 ];
 

@@ -207,6 +207,12 @@ SERVING OPTIONS
   --reserve-gb N         GB of VRAM kept free per GPU for activations (default 2, and
                          1 more for every 4 rows of --max-batch above 16: the
                          graph launches of a wide decode batch need that room)
+  --sched-max-wait-ms N  a request group whose oldest job has waited N ms is run
+                         next whatever its batch size (default 30000)
+  --sched-age-weight X   scheduler score per millisecond a group has waited
+                         (default 0.05)
+  --sched-batch-weight X scheduler score per job a group would batch (default
+                         200); --max-batch also caps the jobs one run takes
   --admit-deadline-ms N  how long a request may wait to START (be claimed onto a
                          lane) before it is shed with HTTP 429 (default 900000)
   --cold-build-admit-deadline-ms N
@@ -711,6 +717,8 @@ pub fn run_serve(args: &[String]) {
     let mut training = false;
     // `--mock [--mock-delay-ms MS]`: serve the weight-free mock models.
     let (mut mock, mut mock_delay_ms) = (false, None::<u64>);
+    // `--sched-*`: the residency scheduler's batching/fairness weights.
+    let mut scheduler = residency::Policy::serving_default();
     let mut artifact_store: Option<String> = None;
     // Opt-in continuous-learning hot swap (`--watch-adapters DIR`): watch DIR
     // for a promoted LoRA adapter and point the served Qwen3 at it without a
@@ -822,6 +830,9 @@ pub fn run_serve(args: &[String]) {
             "--stop" => do_stop = true,
             "--status" => do_status = true,
             "--reserve-gb" => dbus_reserve_gb = Some(parsed(args, &mut i, "--reserve-gb")),
+            "--sched-max-wait-ms" => scheduler.max_wait_ms = parsed(args, &mut i, "--sched-max-wait-ms"),
+            "--sched-age-weight" => scheduler.age_weight_per_ms = parsed(args, &mut i, "--sched-age-weight"),
+            "--sched-batch-weight" => scheduler.batch_weight = parsed(args, &mut i, "--sched-batch-weight"),
             "--models-dir" => models_dir = Some(val(args, &mut i, "--models-dir")),
             "--pin" => {
                 if let Err(e) = pins.pin(&val(args, &mut i, "--pin")) {
@@ -1090,6 +1101,7 @@ pub fn run_serve(args: &[String]) {
             ready,
             deadlines,
             adapter_mode,
+            scheduler: scheduler_policy(scheduler, policy.limits.max_batch),
             knobs: serving::ServeKnobs { qwen: qwen_cfg, qwen35: qwen35_cfg, ricursive: ricursive_cfg, decision: decision_cfg, ocr: ocr_cfg, max_batch: policy.limits.max_batch, train, mock_delay_ms },
         });
     }
@@ -1211,7 +1223,14 @@ fn widest_batch(knobs: &serving::ServeKnobs) -> u32 {
     [knobs.qwen.max_batch, knobs.qwen35.fp32.max_batch, knobs.qwen35.gguf.max_batch.unwrap_or(0), knobs.ricursive.max_batch.unwrap_or(0), knobs.ocr.max_batch.unwrap_or(0)].into_iter().max().unwrap_or(0)
 }
 
-fn build_serving_executor(reserve_gb: u64, store: &loader::served::ServedStore, knobs: serving::ServeKnobs) -> serving::Serving {
+/// The scheduler policy a server runs with: the `--sched-*` weights, and
+/// `--max-batch` (when given) as the most jobs one run takes - the same bound
+/// the batching residents apply inside their own forward.
+fn scheduler_policy(scheduler: residency::Policy, max_batch: Option<u32>) -> residency::Policy {
+    residency::Policy { max_batch: max_batch.map_or(scheduler.max_batch, |n| n as usize), ..scheduler }
+}
+
+fn build_serving_executor(reserve_gb: u64, store: &loader::served::ServedStore, scheduler: residency::Policy, knobs: serving::ServeKnobs) -> serving::Serving {
     let machine = serving::Machine::probe(crate::compute_set());
     let reserved = reserve_gb << 30;
     eprintln!(
@@ -1235,7 +1254,7 @@ fn build_serving_executor(reserve_gb: u64, store: &loader::served::ServedStore, 
         }
         eprintln!("brain serve: scanning model dir {}", d.display());
     }
-    serving::build_executor(&machine, reserved, store, residency::Policy::from_env(), knobs)
+    serving::build_executor(&machine, reserved, store, scheduler, knobs)
 }
 
 /// Live host RAM this process could actually get right now: `MemAvailable`
@@ -1252,6 +1271,8 @@ pub(crate) fn host_ram_available() -> u64 {
 
 /// Which serving surfaces to bring up and their config (see `run_apis`).
 struct RunApis {
+    /// The residency scheduler's policy (`--sched-*`, `--max-batch`).
+    scheduler: residency::Policy,
     dbus: bool,
     dbus_system: bool,
     /// `--dbus-address ADDR`: serve on an explicit bus rather than the one
@@ -1394,7 +1415,7 @@ fn run_apis(a: RunApis) {
     if a.reserve_gb.is_none() && reserve_gb > DEFAULT_RESERVE_GB {
         eprintln!("brain serve: --max-batch {widest} keeps {reserve_gb} GB free per card for the decode batch's activations and graph launches (--reserve-gb to change it)");
     }
-    let serving::Serving { executor, qwen, qwen35, ricursive } = build_serving_executor(reserve_gb, &store, a.knobs);
+    let serving::Serving { executor, qwen, qwen35, ricursive } = build_serving_executor(reserve_gb, &store, a.scheduler, a.knobs);
     let manifests = executor.manifests();
     let served: Vec<&str> = manifests.iter().map(|m| m.model.as_str()).collect();
     eprintln!("{}", served_models_line(&served, models_dir.as_deref()));
@@ -1693,7 +1714,7 @@ mod tests {
         assert!(served_models_line(&[], None).contains("no model store is configured"));
     }
 
-    use super::HELP;
+    use super::{scheduler_policy, HELP};
     use brain_testutil::env_lock;
 
     /// The node's fetch gateway: with the default (no opt-in) there is NO
@@ -1736,10 +1757,20 @@ mod tests {
         for f in [
             "--gpt", "--yolo", "--max-new", "--temp", "--top-k", "--seed", "--conf", "--dbus", "--dbus-system", "--dbus-name",
             "--reserve-gb", "--models-dir", "--pin", "--mock", "--mock-delay-ms", "--anthropic", "--openai", "--openrouter", "--api-keys-out", "--ready-file",
-            "--admit-deadline-ms", "--cold-build-admit-deadline-ms",
+            "--admit-deadline-ms", "--cold-build-admit-deadline-ms", "--sched-max-wait-ms", "--sched-age-weight", "--sched-batch-weight",
         ] {
             assert!(HELP.contains(f), "{f} is parsed by run_serve but not documented in HELP");
         }
+    }
+
+    /// `--max-batch` caps the jobs one scheduled run takes; without it the
+    /// scheduler keeps its own default, and the `--sched-*` weights pass through.
+    #[test]
+    fn max_batch_bounds_the_scheduler_run() {
+        let flags = residency::Policy { max_wait_ms: 5, ..residency::Policy::serving_default() };
+        let p = scheduler_policy(flags, Some(16));
+        assert_eq!((p.max_batch, p.max_wait_ms), (16, 5));
+        assert_eq!(scheduler_policy(flags, None).max_batch, residency::Policy::serving_default().max_batch);
     }
 
     #[test]

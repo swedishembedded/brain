@@ -79,25 +79,6 @@ impl Policy {
     pub fn serving_default() -> Policy {
         Policy { age_weight_per_ms: 0.05, max_wait_ms: 30_000, ..Policy::default() }
     }
-
-    /// [`Self::serving_default`], overridable per-field via
-    /// `BRAIN_SCHED_{MAX_BATCH,AGE_WEIGHT,BATCH_WEIGHT,MAX_WAIT_MS}`. This is
-    /// what the CLI's serving entry point uses — the production path, where
-    /// a scheduler that has silently collapsed to FIFO-of-one is a real
-    /// regression, not merely a suboptimal default. An unset or unparseable
-    /// var falls back to the serving default for that field alone.
-    pub fn from_env() -> Policy {
-        let d = Self::serving_default();
-        fn env_or<T: std::str::FromStr>(key: &str, default: T) -> T {
-            std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
-        }
-        Policy {
-            max_batch: env_or("BRAIN_SCHED_MAX_BATCH", d.max_batch),
-            age_weight_per_ms: env_or("BRAIN_SCHED_AGE_WEIGHT", d.age_weight_per_ms),
-            batch_weight: env_or("BRAIN_SCHED_BATCH_WEIGHT", d.batch_weight),
-            max_wait_ms: env_or("BRAIN_SCHED_MAX_WAIT_MS", d.max_wait_ms),
-        }
-    }
 }
 
 /// Choose the next group to run and how many of its jobs to batch. Returns
@@ -198,20 +179,6 @@ mod tests {
         // score comparison applies, and the rebalanced age_weight_per_ms no
         // longer lets an 8-second age gap swamp a full batch's weight.
         assert_eq!(choose_next(&groups, &Policy::serving_default()), Some((1, 8)));
-    }
-
-    #[test]
-    fn from_env_falls_back_to_serving_default_when_unset() {
-        // Guard against leakage from a parallel test or the outer shell.
-        for k in ["BRAIN_SCHED_MAX_BATCH", "BRAIN_SCHED_AGE_WEIGHT", "BRAIN_SCHED_BATCH_WEIGHT", "BRAIN_SCHED_MAX_WAIT_MS"] {
-            assert!(std::env::var(k).is_err(), "{k} must be unset for this test to be meaningful");
-        }
-        let p = Policy::from_env();
-        let d = Policy::serving_default();
-        assert_eq!(p.max_batch, d.max_batch);
-        assert_eq!(p.max_wait_ms, d.max_wait_ms);
-        assert_eq!(p.age_weight_per_ms, d.age_weight_per_ms);
-        assert_eq!(p.batch_weight, d.batch_weight);
     }
 
     #[test]

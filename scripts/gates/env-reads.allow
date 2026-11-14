@@ -789,12 +789,6 @@ crates/qwen3vl/tests/it/gguf_parity.rs	BRAIN_QWEN3VL_GGUF
 crates/qwen3vl/tests/it/int8_tier.rs	BRAIN_QWEN3VL_WEIGHTS
 crates/qwen3vl/tests/it/int8_tier.rs	MOE_SKIP_GPU_TESTS
 crates/qwen3vl/tests/it/vision_tower_parity.rs	MOE_SKIP_GPU_TESTS
-crates/residency/src/scheduler.rs	<k>
-crates/residency/src/scheduler.rs	<key>
-crates/residency/src/scheduler.rs	BRAIN_SCHED_AGE_WEIGHT
-crates/residency/src/scheduler.rs	BRAIN_SCHED_BATCH_WEIGHT
-crates/residency/src/scheduler.rs	BRAIN_SCHED_MAX_BATCH
-crates/residency/src/scheduler.rs	BRAIN_SCHED_MAX_WAIT_MS
 crates/rrdbnet/tests/it/parity.rs	BRAIN_ESRGAN
 crates/rrdbnet/tests/it/parity.rs	BRAIN_TESTDATA
 crates/runtime/src/tts.rs	BRAIN_QWEN3TTS_CKPT

@@ -262,7 +262,7 @@ redistributable) - see `docs/reference/models/timesfm3.md`.
       specifically to keep an unmeasured number out of committed docs/
       comments, so none is claimed here. Run `brain perf run sweep --target
       timesfm3:<real weights> --ladder 1,2,4,8,16` (sweeping
-      `BRAIN_SCHED_MAX_BATCH`) on real hardware to get one.
+      `brain serve --max-batch`) on real hardware to get one.
 - [ ] Symmetric averaging, z-normalization, configurable `make_positive`, and
       32-variate chunking (the reference evaluator's own knobs) still have no
       home - `forecast::ForecastSpec` carries no per-request flags for them,
