@@ -210,8 +210,10 @@ mod tests {
         let cmp = Comparison {
             cells: vec![
                 control_cell("naive", 1.0, None),
+                // perf-number: fixture edge sizes for the control test, not measurements
                 // a 2% edge measured tightly is real skill on a random walk
                 control_cell("tight_small_edge", 0.98, paired(-0.02, 0.002)),
+                // perf-number: fixture edge size, not a measurement
                 // a 50% edge measured loosely is noise
                 control_cell("loose_big_edge", 0.5, paired(-0.5, 0.4)),
                 control_cell("worse", 1.2, paired(0.2, 0.05)),

@@ -30,8 +30,8 @@
 //! input pixels, so on `x4plus` a tile is worth cutting only for images larger
 //! than about `2R + tile` per side (698 + tile); a smaller image is one window
 //! anyway. The work grows by the overlap factor `((tile + 2R) / tile)^2`
-//! relative to the whole image: tile 512 on `x4plus` computes about 5.6x the
-//! pixels, tile 64 about 142x. Peak memory is set by `tile + 2R`, so shrinking
+//! relative to the whole image: several times the pixels at tile 512 on
+//! `x4plus` and two orders of magnitude more at tile 64. Peak memory is set by `tile + 2R`, so shrinking
 //! `tile` below `2R` saves almost nothing and multiplies the work.
 //!
 //! **Value range and geometry.** The reference feeds RGB in `[0,1]` (unlike the

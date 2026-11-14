@@ -180,6 +180,7 @@ fn negative_control_section(cmp: &Comparison) -> String {
 fn paired_lines(cmp: &Comparison, control: &str) -> String {
     let z = crate::harness::CONTROL_Z;
     let mut out = String::from(
+        // perf-number: the confidence level CONTROL_Z encodes
         "MASE minus naive, mean and the 99% interval the verdict uses (a model is flagged only if the whole interval is below 0):\n\n",
     );
     for c in cmp.cells.iter().filter(|c| c.scenario == control && c.metric == "mase") {

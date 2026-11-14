@@ -108,6 +108,7 @@ pub struct Gray16 {
 /// An image of more than `max_pixels` pixels is refused from its header before a pixel is decoded.
 pub fn decode_gray16(bytes: &[u8], max_pixels: u64) -> Result<Gray16, String> {
     if !bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+        // perf-number: `{:02x?}` is a hex format specifier
         return Err(format!("not a PNG: leading bytes {:02x?}", &bytes[..bytes.len().min(4)]));
     }
     let reader = || image::ImageReader::with_format(std::io::Cursor::new(bytes), image::ImageFormat::Png);

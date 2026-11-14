@@ -375,7 +375,7 @@ mod tests {
         let cfg = TriageConfig::default();
         let n = cfg.min_chars;
         // One page is one draw from a spread that straddles the threshold,
-        // so a single page failed about 2% of runs. The claim is about what
+        // so a single page failed some runs. The claim is about what
         // a realistic page scores, which is the mean over many pages; the
         // seeds are listed so a failure can be replayed.
         const PAGES: usize = 32;

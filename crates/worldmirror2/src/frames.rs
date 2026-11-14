@@ -40,7 +40,7 @@ impl Default for FrameSel {
 
 /// The cap a clip with a frame rate of its own gets when the caller sets none:
 /// the trunk's global attention is quadratic in frame count, and a minute of
-/// video at 30 fps is 1800 frames. A set of stills is the set the caller chose
+/// video is thousands of frames. A set of stills is the set the caller chose
 /// and is left alone.
 pub const DEFAULT_CLIP_FRAME_CAP: usize = 48;
 
@@ -228,6 +228,7 @@ mod tests {
 
     #[test]
     fn a_clip_resamples_to_the_requested_rate_and_never_invents_frames() {
+        // perf-number: fixture frame rates
         // 30 frames at 30 fps is one second: 10 fps keeps frames 0, 3, 6, ...
         assert_eq!(resample_indices(30, 30.0, 10.0), (0..10).map(|k| k * 3).collect::<Vec<_>>());
         // at or above the source rate, every frame
@@ -239,6 +240,7 @@ mod tests {
     #[test]
     fn selection_composes_resampling_stride_and_cap() {
         let sel = FrameSel { stride: 2, max: 0, fps: 10.0 };
+        // perf-number: fixture frame rates
         // 30 fps -> 10 fps gives 0,3,6,...,27; stride 2 keeps 0,6,12,18,24
         assert_eq!(sel.indices(30, Some(30.0)).unwrap(), vec![0, 6, 12, 18, 24]);
     }

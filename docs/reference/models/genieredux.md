@@ -44,7 +44,7 @@ The dynamics and the decoder keep a per-layer cache of the temporal attention
 keys and values (and the two preceding frames each position encoding reads), so
 a new frame costs one frame of projections and feed-forward plus its attention
 against the cache. At the released size with a 4-frame context that is 41.6
-GFLOP per frame against 166.5 GFLOP recomputing the context; with a 15-frame
+GFLOP per frame against 166.5 GFLOP recomputing the context; with a 15-frame <!-- perf-number: FLOP counts computed by genieredux::cached_forward_flops, not timings -->
 context (the position table's limit) 41.7 against 624.8
 (`genieredux::cached_forward_flops`, multiply-adds counted as two). Cached and
 recomputed outputs are bit-identical on the CPU backend. When the window is full

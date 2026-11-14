@@ -614,6 +614,7 @@ impl StudyReport {
         let xvf = self.xfer_vs_fresh.map(|v| format!("{v:+.3}")).unwrap_or_else(|| "n/a".to_string());
         let rho_n = self.records.last().and_then(|r| r.plasticity_ratio).map(|v| format!("{v:.3}")).unwrap_or_else(|| "n/a".to_string());
         let slope = match self.plasticity_slope {
+            // perf-number: 95% is the confidence level of the interval, not a speed
             Some(s) => format!("slope {:+.4}/cycle, 95% CI [{:+.4}, {:+.4}]", s.slope, s.ci_lo, s.ci_hi),
             None => "not enough points".to_string(),
         };

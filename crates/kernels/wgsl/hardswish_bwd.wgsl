@@ -11,7 +11,7 @@
 // @dtype f32
 //
 // Gradient of hardswish.wgsl w.r.t. its input:
-//   d/dx hardswish(x) = 0 for x < -3, 1 for x > 3, (2x + 3) / 6 between.
+//   d/dx hardswish(x) = 0 for x < -3, 1 for x > 3, (2*x + 3) / 6 between.
 // At the two kinks the value from the inside branch is taken (torch takes the
 // same one-sided values), which no finite-difference check can distinguish.
 //   dx[i] = dout[i] * hardswish'(x[i])

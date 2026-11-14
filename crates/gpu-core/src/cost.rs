@@ -1553,7 +1553,7 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             f(k * (2 * r + 8), 4 * (r * k + 2 * k))
         }
         // Per (token, dim): the token's mean `m` (exp, mul, add per code) and the gradient sum per code (exp, divide,
-        // three subtractions, mul for g; sub, mul, add for the accumulate: 10), then scale, 2x, divide (3) and the `m`
+        // three subtractions, mul for g; sub, mul, add for the accumulate: 10), then scale, double, divide (3) and the `m`
         // store.
         "entropy_dz" => {
             let (r, k, d) = (p(0)?, p(1)?, p(2)?);

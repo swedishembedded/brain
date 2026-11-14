@@ -950,10 +950,9 @@ pub fn t2va(ckpt: &H3Checkpoint, text: &TextConditioning, opts: &GenOpts, cancel
 ///
 /// **A clip that cuts is generated again.** Stills no continuous motion
 /// connects - an interior keyframe from another composition than the ends -
-/// are dissolved between at some seeds and CUT between at others: measured
-/// on the real weights, the same request dissolved at seed 11 (worst frame
-/// step 1.68x its neighbours) and cut at seed 12 (15.5x), and holding the
-/// interior keyframe weaker (t = 0.8, 0.5) cut at the same frame. A cut is
+/// are dissolved between at some seeds and CUT between at others: on the real
+/// weights the same request dissolved at one seed and cut at the next, and
+/// holding the interior keyframe weaker (t = 0.8, 0.5) cut at the same frame. A cut is
 /// unmistakable in the decoded clip ([`worst_frame_step`]), so a clip with a
 /// step above [`CUT_STEP`] is regenerated from fresh noise, up to
 /// [`CUT_RETRIES`] times; the seed it came from is [`GeneratedAv::seed`].
@@ -979,9 +978,8 @@ pub fn fl2va(ckpt: &H3Checkpoint, text: &TextConditioning, keyframes: &[Keyframe
 
 /// How many times [`fl2va`] regenerates a clip that cuts.
 pub const CUT_RETRIES: u64 = 2;
-/// A frame step this many times the steps around it is a cut: measured,
-/// H3 cuts sit at 13.6-15.5x and its smooth and dissolving clips at most
-/// 1.7x.
+/// A frame step this many times the steps around it is a cut: H3 cuts sit
+/// far above it and its smooth and dissolving clips well below.
 pub const CUT_STEP: f32 = 4.0;
 /// Mixed into the request's seed for each retry's noise.
 const CUT_RETRY_SEED_SALT: u64 = 0x4355_5452_4554_5259; // "CUTRETRY"

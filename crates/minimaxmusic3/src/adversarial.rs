@@ -254,7 +254,7 @@ mod tests {
         MrdConfig { resolutions: vec![StftConfig { n_fft: 8, hop: 4 }, StftConfig { n_fft: 16, hop: 8 }], disc: DiscConfig { c1: 2, c2: 2, k: 3 } }
     }
 
-    /// A tiny vocoder over a fixed (latents, target) batch: 8 latent frames upsample 4x to 32 samples per channel.
+    /// A tiny vocoder over a fixed (latents, target) batch: 8 latent frames upsample fourfold to 32 samples per channel.
     fn tiny_gan(cfg: GanConfig) -> GanTrainer {
         tiny_gan_seeded(cfg, data::rng::random_seed())
     }

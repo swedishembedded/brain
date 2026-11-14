@@ -628,13 +628,13 @@ mod tests {
     ///
     /// What sits above the matmul floor is real work the floor leaves out on
     /// purpose: attention scores and context (`4 * heads * head_dim * rows^2 /
-    /// 2` per layer, ~8% of the floor for the 9-row H3 and ~20% for the
-    /// 16..64-row decoders), the lm head, norms, RoPE, activations and the
+    /// 2` per layer, a small share of the floor for the 9-row H3 and a larger
+    /// one for the 16..64-row decoders), the lm head, norms, RoPE, activations and the
     /// recurrent/conv mixers. Measured on the tiny configs the ratio is
     /// 1.16..1.47. The bound is 2.0: a pricer that double counts a pass (the
     /// floor itself doubled, plus the same extras, is >= 2.2) or prices a
     /// training step fails it, while the attention scores, now priced like
-    /// every other kernel, add at most that ~20% and stay inside it.
+    /// every other kernel, add at most that larger share and stay inside it.
     const MAX_OVER_FLOOR: f64 = 2.0;
 
     #[test]

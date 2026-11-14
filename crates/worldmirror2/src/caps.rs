@@ -79,6 +79,7 @@ pub fn reconstruct_spec() -> ActionSpec {
     .param(ParamSpec::new("stride", ParamType::Int, "use every Nth frame of the capture").default(json!(1)).min(1.0).max(VIDEO_FRAMES))
     .param(ParamSpec::new("max_frames", ParamType::Int, "use at most this many frames, spread ACROSS the capture rather than taking a prefix (0 = a clip with a frame rate of its own gets 48, a set of stills is used whole)").default(json!(0)).min(0.0).max(VIDEO_FRAMES))
     .param(ParamSpec::new("fps", ParamType::Float, "resample a clip to this many frames per second before selecting (0 = the clip's own rate; needs a clip that states its frame rate)").default(json!(0.0)).min(0.0).max(FPS))
+    // perf-number: derived from the two input sizes, (952/518)^2, not a measurement
     .param(ParamSpec::new("target_size", ParamType::Int, "longest-edge cap, in pixels, the frames are resized to before the model (floored to the 14px patch grid; any aspect ratio); the reference's inference default, about 3.4x the samples of the native 518").default(json!(952)).min(28.0).max(SIDE_PX))
     .param(ParamSpec::new("min_opacity", ParamType::Float, "drop gaussians below this opacity").default(json!(0.01)).min(0.0).max(UNIT))
     .param(ParamSpec::new("max_depth", ParamType::Float, "clip gaussians past this depth, in scene units (0 = off)").default(json!(0.0)).min(0.0).max(MAX_SCENE_UNITS))

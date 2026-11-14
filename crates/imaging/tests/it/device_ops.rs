@@ -476,7 +476,7 @@ fn feather_replicate_is_the_clamped_separable_box() {
     assert!(zero[0] < 0.7, "zero padding darkens the corner, got {}", zero[0]);
 }
 
-/// The exact 8x ratios the VAE latent grid uses: `avgpool2d` is the host
+/// The exact eightfold ratios the VAE latent grid uses: `avgpool2d` is the host
 /// integer-window mean `sum / (sx*sy)`, within the round-off of a 64-term sum.
 #[test]
 fn downsample_matches_the_host_window_mean_on_exact_ratios() {

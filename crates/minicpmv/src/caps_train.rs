@@ -56,6 +56,7 @@ pub fn finetune_spec() -> ActionSpec {
         .param(ParamSpec::new("connector_lr", ParamType::Float, "the connector's peak rate; omit to derive it from lr").min(0.0).max(capability::bounds::UNIT))
         .param(ParamSpec::new("vision_lr", ParamType::Float, "the tower's peak rate; omit to derive it from lr (a fully trained tower gets a fiftieth)").min(0.0).max(capability::bounds::UNIT))
         .param(ParamSpec::new("min_lr_ratio", ParamType::Float, "where the cosine ends, as a fraction of each peak").default(json!(o.min_lr_ratio)).min(0.0).max(capability::bounds::UNIT))
+        // perf-number: the default warmup fraction is a training hyperparameter
         .param(ParamSpec::new("warmup", ParamType::Int, "warmup steps; omit for 5% of the run").min(0.0).max(capability::bounds::TRAIN_COUNT))
         .param(ParamSpec::new("weight_decay", ParamType::Float, "AdamW decoupled weight decay").default(json!(o.weight_decay)).min(0.0).max(capability::bounds::UNIT))
         .param(ParamSpec::new("grad_clip", ParamType::Float, "global gradient-norm clip; 0 disables it").default(json!(o.grad_clip.unwrap_or(0.0))).min(0.0).max(MAX_CLIP))

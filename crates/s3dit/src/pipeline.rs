@@ -1919,7 +1919,7 @@ mod latent_mask_tests {
     }
 
     /// `latent_mask` is the old host downsample-then-feather: the VAE's exact
-    /// 8x ratio and the border-clamped ramp, within the round-off of the
+    /// eightfold ratio and the border-clamped ramp, within the round-off of the
     /// longest summation chain (an 8x8 window, then two `2r+1` box passes; the
     /// device does the box as one `(2r+1)^2` sum with a rounded weight).
     #[test]

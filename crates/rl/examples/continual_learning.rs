@@ -695,6 +695,7 @@ fn print_verdict(report: &StudyReport, oracle: Option<f64>, args: &Args, targets
             report.bwt.map_or("unmeasured".to_string(), |v| format!("{v:+.3}")),
             report
                 .plasticity_slope
+                // perf-number: 95% is the confidence level of the interval, not a speed
                 .map(|s| format!("{:+.4}/cycle, 95% CI [{:+.4}, {:+.4}] - one seed times {t} points is a diagnostic, not a test", s.slope, s.ci_lo, s.ci_hi))
                 .unwrap_or_else(|| "not enough points".to_string())
         );
