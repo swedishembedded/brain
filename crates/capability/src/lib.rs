@@ -668,6 +668,16 @@ impl CancelToken {
     pub fn is_cancelled(&self) -> bool {
         self.0.as_ref().map(|f| f.load(Ordering::Relaxed)).unwrap_or(false)
     }
+    /// `Err(`[`failure::CANCELLED`]`)` once cancellation was requested, else
+    /// `Ok(())`: the one way an action that has produced no output yet reports
+    /// it, so `token.check()?` at entry and between steps is the whole poll.
+    pub fn check(&self) -> Result<(), String> {
+        if self.is_cancelled() {
+            Err(failure::CANCELLED.to_string())
+        } else {
+            Ok(())
+        }
+    }
 }
 
 /// The inputs to one action call.
@@ -1429,6 +1439,15 @@ mod tests {
         inv.cancel = t;
         let inv = Poller.spec().validate(inv).unwrap();
         assert!(inv.cancel.is_cancelled());
+    }
+
+    #[test]
+    fn check_reports_the_cancelled_literal_only_once_fired() {
+        let t = CancelToken::armed();
+        assert_eq!(t.check(), Ok(()));
+        t.cancel();
+        assert_eq!(t.check(), Err(failure::CANCELLED.to_string()));
+        assert_eq!(CancelToken::default().check(), Ok(()));
     }
 
     #[test]

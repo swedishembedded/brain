@@ -56,6 +56,7 @@ use capability::blob::{image_blob, video_blob};
 use capability::{Action, ActionResult, ActionSpec, Blob, Invocation, Manifest, Media, Outcome, Progress, Provider};
 use serde_json::json;
 
+pub mod cancellation;
 mod expect;
 mod synth;
 
