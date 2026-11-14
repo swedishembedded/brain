@@ -1036,10 +1036,8 @@ fn write_spill<M: Model>(model: &M, path: &Path) -> std::io::Result<()> {
             (name, vec![w.len() as u64], w)
         })
         .collect();
-    let tmp = path.with_extension("best.tmp");
-    let tmp_str = tmp.to_str().ok_or_else(|| std::io::Error::other(format!("{}: not a UTF-8 path", tmp.display())))?;
-    checkpoint::st::save_safetensors(tmp_str, &tensors, &serde_json::json!({"format": "brain-best-parameters-v1"}), None)?;
-    std::fs::rename(&tmp, path)
+    let path_str = path.to_str().ok_or_else(|| std::io::Error::other(format!("{}: not a UTF-8 path", path.display())))?;
+    checkpoint::st::save_safetensors(path_str, &tensors, &serde_json::json!({"format": "brain-best-parameters-v1"}), None)
 }
 
 /// The parameters [`write_spill`] wrote.
@@ -1569,10 +1567,10 @@ fn save_train_state<M: Model>(model: &M, path: &Path, step: u32, applied: u32, r
         // The moments of an offloaded store live in its host optimizer: committed beside the resume file the same way.
         host.optim.host_commit(host.gpu, host.store, &optim::checkpoint::CheckpointDir::new(off_device_dir(path))?, applied)?;
     }
-    let tmp = path.with_extension("tmp");
-    let tmp_str = tmp.to_str().ok_or_else(|| std::io::Error::other(format!("{}: not a UTF-8 path", tmp.display())))?;
-    checkpoint::st::save_safetensors(tmp_str, &tensors, &header, None)?;
-    std::fs::rename(&tmp, path)
+    // save_safetensors writes a per-process temporary, syncs it and renames it
+    // into place durably, so a crash or a power loss leaves the previous state.
+    let path_str = path.to_str().ok_or_else(|| std::io::Error::other(format!("{}: not a UTF-8 path", path.display())))?;
+    checkpoint::st::save_safetensors(path_str, &tensors, &header, None)
 }
 
 /// The seed the run that wrote the exact-resume state at `path` trained with,
