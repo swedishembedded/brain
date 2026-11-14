@@ -70,6 +70,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **architecture hypothesis testing**: deciding whether a new architectural idea is worth anything by a hypothesis and a margin stated before the run, a baseline that differs from the candidate in exactly one thing, equal tuning and paired seeds, an ablation of the part the idea is named for, and an effect size with its interval judged against the margin. *([A Research Architecture: The Spectral Language Model](v06-language-models/09-spectral-lm.md))*
 
+**architecture registry**: one table with a row per supported model architecture, holding its canonical identifier and every outside spelling of it (configuration class names, file-format names, default checkpoint), which every part of an engine reads instead of keeping its own list. *([The Architecture of a Machine Learning Engine](v16-systems/01-engine-architecture.md))*
+
 **arithmetic intensity**: the number of floating-point operations a computation performs per byte it must move between main memory and the arithmetic, a property of the algorithm and the sizes and formats and not of the machine. *([Memory Bandwidth, Compute and the Roofline](v04-computation/03-roofline.md))*
 
 **artificial neuron**: a function of an input vector that forms a weighted sum of its entries plus a bias and passes the total through an activation function, $y = g(\mathbf{w}\cdot\mathbf{x} + b)$; the weights and the bias are what is learned. *([The Neuron and the Perceptron](v03-neural-networks/01-perceptron.md))*
@@ -130,6 +132,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **Bellman equation**: the equation that says the value of a state is the reward of the day plus the discounted, averaged value of the next state, linear for a policy and with a maximum over actions for the optimal values. *([Markov Decision Processes](v12-reinforcement-learning/01-mdps.md))*
 
+**benchmark validity**: the property that a benchmark's number measures the quantity the claim built on it is about: the computation is the right one (its outputs are checked), the workload is the claim's, the denominator is stated and of the right kind, and a comparison differs only in the thing claimed, by more than the procedure's own variation. *([Benchmarking and Performance Claims](v15-methods/03-benchmarking.md))*
+
 **Bernoulli distribution**: the distribution of a single yes/no outcome coded as $1$ or $0$, equal to $1$ with probability $p$; its mean is $p$ and its variance is $p(1-p)$. *([The Distributions Machine Learning Uses](v01-mathematics/11-distributions.md))*
 
 **bf16 format**: the 16-bit floating-point layout of 1 sign bit, 8 exponent bits (the exponent field of fp32) and 7 fraction bits: fp32's range with 2.4 digits, obtained from an fp32 by dropping the low 16 bits (with rounding). *([Bits and Number Formats](v04-computation/01-number-formats.md))*
@@ -181,6 +185,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **camera extrinsics**: the rotation and translation that carry a world point into the camera's own frame, six numbers that say where the camera stood and which way it faced for one photograph. *([Cameras and Projective Geometry](v10-video-and-3d/03-camera-geometry.md))*
 
 **camera intrinsics**: the numbers that belong to the camera itself and hold for every photograph it takes: the focal lengths in pixels along the two image axes and the principal point, collected in the matrix $\mathbf{K}$, together with the lens coefficients that bend the ray. *([Cameras and Projective Geometry](v10-video-and-3d/03-camera-geometry.md))*
+
+**capability**: one action a model can perform, together with a description a program can read: its name, typed params with defaults and ranges, named binary inputs and outputs, and whether it streams progress. *([Capabilities, Providers and APIs](v14-inference-and-serving/06-capabilities-and-apis.md))*
 
 **capability declaration**: the statement of what a device can execute correctly, queried from the device and absent when unknown, matched against what each candidate needs, so that a candidate that cannot run is removed before any cost is considered. *([Choosing the Fastest Correct Kernel](v04-computation/10-kernel-selection.md))*
 
@@ -320,7 +326,7 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **data leakage**: any route by which information about the rows used for scoring reaches the fitting (duplicates, statistics computed from all the rows, the future, the same subject on both sides), which makes the score too good to be true. *([Generalization, Overfitting and Honest Evaluation](v02-learning/05-generalization.md))*
 
-**data mixture**: the shares in which groups of records contribute to training, which must name what they are shares of (rows, tokens or supervised tokens) and be realised by a draw or a listing. *([Data Pipelines for Large Models](v13-training-at-scale/01-training-data.md))*
+**data mixture**: the shares in which groups of records contribute to training, which must name what they are shares of (rows, tokens or supervised tokens) and be realized by a draw or a listing. *([Data Pipelines for Large Models](v13-training-at-scale/01-training-data.md))*
 
 **data parallelism**: copying the model onto several ranks, giving each its own share of the batch and combining the shares' gradients into the gradient of the whole batch before every rank applies the same update. *([Parallel and Distributed Training](v13-training-at-scale/05-parallelism.md))*
 
@@ -346,6 +352,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **deduplication**: removing records that repeat other records, exactly by a hash of the text and approximately by a set similarity of shingles, within the training data and between it and the held-out data. *([Data Pipelines for Large Models](v13-training-at-scale/01-training-data.md))*
 
+**defect class**: a set of defects that share one mechanism and are hidden by the same property of a test (zero-filled memory, a degenerate width, a scale-invariant metric), so that a single check outside that hiding place catches every member. *([A Catalogue of Expensive Mistakes](v15-methods/05-failure-catalogue.md))*
+
 **degenerate-dimension trap**: a test instance on which some wrong program computes the same function as the right one, because a size is 1, two sizes are equal, a size lies below the threshold where the code changes path, or the values have a symmetry or a restricted range, so the test cannot fail for that mistake at any tolerance. *([Testing Numerical Code](v15-methods/02-testing-numerical-code.md))*
 
 **delta rule**: updating a key-value memory by the outer product of the key and the prediction error, $\mathbf{S} \leftarrow \mathbf{S} + \beta\,\mathbf{k}(\mathbf{v} - \mathbf{S}^\top\mathbf{k})^\top$, one gradient step of a regression of the value on the key, so that a write replaces what the key returned. *([Linear Attention, Recurrence and Hybrid Models](v06-language-models/05-linear-attention.md))*
@@ -355,6 +363,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **densification**: changing the number of primitives during a fit by adding them where the image error is concentrated (splitting a large one, cloning a small one, relocating a transparent one onto an opaque one) and removing those that carry nothing. *([3D Gaussian Splatting](v10-video-and-3d/06-gaussian-splatting.md))*
 
 **density estimation**: choosing from a family of candidate distributions the one that best explains observed data, usually by maximizing the likelihood and judging it by the likelihood of data that were held out. *([What It Means to Generate](v08-image-generation/01-generative-modeling.md))*
+
+**dependency direction**: the rule that a part on one layer may depend only on parts of its own or a lower layer, so that no dependency points up; it confines cycles to one layer and makes a change spread only upward. *([The Architecture of a Machine Learning Engine](v16-systems/01-engine-architecture.md))*
 
 **depth-vs-width**: the tradeoff between a network of many layers and one of few wide layers; for the sawtooth, $d$ layers of width $2$ make $2^d$ linear pieces, while one layer with $u$ units makes at most $u + 1$. *([Multilayer Networks](v03-neural-networks/02-mlp.md))*
 
@@ -426,6 +436,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **encoder-decoder CNN**: a convolutional network that shrinks the picture to gather context (the encoder) and then enlarges the result back to the picture's resolution (the decoder), usually joined by skip connections that carry high-resolution encoder features to the decoder. *([Dense Prediction: Segmentation and Depth](v07-vision/05-dense-prediction.md))*
 
+**end-to-end benchmark**: a benchmark that drives a system through its users' entry point with a stated stream of requests and arrival process, records each request's submission, admission, outputs and completion, and reports the distributions of time to first output, gaps and end-to-end time with throughput, goodput under a stated service-level objective, and an output check. *([Benchmarking and Performance Claims](v15-methods/03-benchmarking.md))*
+
 **end-to-end-training-loop**: the whole path from data to saved model in one function: shuffle, batch, forward, loss, backward, clip, optimizer step at the scheduled rate, log, evaluate on the validation set, keep the best checkpoint. *([First Complete Models](v03-neural-networks/13-first-models.md))*
 
 **ensemble**: a set of models whose predictions are combined by a vote or an average; trained independently on resampled data (bagging, random forests) it lowers variance, trained in sequence on what is left (boosting) it lowers bias. *([Machine Learning Before Deep Learning](v02-learning/07-classical-methods.md))*
@@ -477,6 +489,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **face detection**: finding every face in a photograph as a box with a confidence and five landmark points, so that each face can be aligned to a template; a detector of one class that carries an extra output. *([Faces: Detection, Identity and Parsing](v07-vision/11-faces.md))*
 
 **face parsing**: semantic segmentation of a face crop into the parts of a head and its surroundings, with a fixed set of classes, one for every pixel. *([Faces: Detection, Identity and Parsing](v07-vision/11-faces.md))*
+
+**falsifiable hypothesis**: a claim stated before the data together with the quantity measured, the comparison, the margin that matters, the decision rule and the sample, so that every possible result is assigned to a verdict in advance and some results would refute it; its decision rule's chance of supporting the claim at each true difference can be computed before any run. *([From Hypothesis to Paper](v15-methods/04-research.md))*
 
 **fast Fourier transform**: an algorithm for the discrete Fourier transform that splits the samples into even and odd indices and combines the two half-size transforms with one twiddle multiplication per output pair, using about $\tfrac N2\log_2 N$ multiplications instead of $N^2$ and giving the same result up to rounding. *([Complex Numbers, Frequencies and the Fourier Transform](v01-mathematics/14-fourier.md))*
 
@@ -614,6 +628,10 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **homogeneous coordinates**: a representation of a point by one more number than it has coordinates, defined up to a nonzero factor, in which a division by depth, a translation and a point at infinity become matrix products. *([Cameras and Projective Geometry](v10-video-and-3d/03-camera-geometry.md))*
 
+**hostile input**: any input a server receives from a source whose aim may be to harm it, request bodies and headers, the timing of a connection, files fetched for a request, descriptors from local programs, so that every quantity it declares is a claim to check rather than a fact. *([Security of Machine Learning Services](v14-inference-and-serving/07-security.md))*
+
+**HTTP inference API**: the routes a server answers over HTTP to run models, in a vendor's request and response shapes or in the engine's own, with models offered on each route according to what their manifests declare. *([Capabilities, Providers and APIs](v14-inference-and-serving/06-capabilities-and-apis.md))*
+
 **hybrid architecture**: a stack that interleaves a few full-attention layers, whose cache grows with the context, with many layers of a fixed-size recurrence or convolution, whose cost does not. *([Linear Attention, Recurrence and Hybrid Models](v06-language-models/05-linear-attention.md))*
 
 **hypothesis space**: the set of all functions a model can express as its parameters vary. *([The Learning Problem](v02-learning/01-learning-problem.md))*
@@ -646,6 +664,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **information content**: the surprise of an event, $-\log_2 p$ bits (or $-\ln p$ nats) for an event of probability $p$, the only measure for which certain events carry zero, rarer events carry more and independent events add. *([Information, Entropy and Surprise](v01-mathematics/13-information-theory.md))*
 
+**input bound**: a ceiling on a quantity that input controls and that sizes the server's work, sized from the largest legitimate use, checked before the work is done and refused with an error that names it. *([Security of Machine Learning Services](v14-inference-and-serving/07-security.md))*
+
 **input normalization**: subtracting a per-channel mean and dividing by a per-channel standard deviation, with exactly the constants and channel order the model was trained with, before the first layer. *([Images as Data](v07-vision/01-images.md))*
 
 **integer**: a whole number, positive, negative or zero, with no fractional part; the exact numbers of counting and naming. *([Numbers, Quantities and Notation](v01-mathematics/01-numbers.md))*
@@ -661,6 +681,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **intersection over union**: the area two boxes share divided by the area they cover together, a number from 0 to 1 that is unchanged by scaling or shifting both boxes and is 0 for boxes that do not meet. *([Object Detection](v07-vision/04-detection.md))*
 
 **inverse function**: the function $f^{-1}$ that undoes $f$, so $f^{-1}(f(x)) = x$; it exists when $f$ is one-to-one. *([Functions and Their Shapes](v01-mathematics/02-functions.md))*
+
+**IPC interface**: the protocol by which processes on one machine exchange requests and results with an engine: the messages, their framing, how replies are matched to requests and how large payloads travel. *([Capabilities, Providers and APIs](v14-inference-and-serving/06-capabilities-and-apis.md))*
 
 ## J
 
@@ -735,6 +757,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **layer-by-layer parity**: comparison of a port with its golden at every stage boundary, either isolated (each stage fed the golden's own input and held to its own constant rounding bound, which locates every mistake in one run) or chained (the port running on its own outputs, under a bound that grows with depth, which tests how the stages are composed). *([Porting a Model from Its Reference](v15-methods/01-porting.md))*
 
 **layer-normalization**: normalizing each example's features with the mean and variance taken over the features of that one example, then applying a learned gain and shift; it does not depend on the batch or the mode. *([Normalization Layers](v03-neural-networks/10-normalization.md))*
+
+**layered architecture**: a division of a system into parts that each sit on one of a few ordered layers, from those that know least about the rest (device contracts, shared formats) to those that know most (front ends), so that each layer is built from the ones below it. *([The Architecture of a Machine Learning Engine](v16-systems/01-engine-architecture.md))*
 
 **leakage-safe window**: a (context, target) window assigned to training or evaluation by its origin, with a purge and an embargo so that no bar a model is judged on was used in fitting it. *([Time Series Fundamentals](v11-forecasting/01-time-series.md))*
 
@@ -828,6 +852,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **measured roofline**: the peak arithmetic rate and the memory bandwidth of the device itself, found by two probes that do nothing but arithmetic and nothing but streaming and whose work is counted, in whose terms every result is stated as a fraction. *([Choosing the Fastest Correct Kernel](v04-computation/10-kernel-selection.md))*
 
+**measured versus nominal peak**: the distinction between the rate a device's specification implies (lanes times 2 times the boost clock, bus bytes times the pin rate) and the rate a probe reaches on the device that ran the work, with the rule that a fraction of peak names its peak, divides by a peak of the kernel's own kind of arithmetic or memory, and compares devices only through measured peaks. *([Benchmarking and Performance Claims](v15-methods/03-benchmarking.md))*
+
 **mel filterbank**: a set of overlapping triangular weights whose edges are equally spaced on the mel scale, which turns a spectrum into one energy for each band. *([Spectrograms and the Mel Scale](v09-audio/02-spectrograms.md))*
 
 **mel scale**: a function from frequency to pitch, nearly linear below 1000 Hz and logarithmic above, fitted to listening experiments, in an HTK form and a Slaney form. *([Spectrograms and the Mel Scale](v09-audio/02-spectrograms.md))*
@@ -857,6 +883,10 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **mode collapse**: the failure in which a generator maps most of its noise to a few outputs, so its samples cover only a small part of the data's distribution even if each looks plausible. *([Adversarial Training](v08-image-generation/04-gans.md))*
 
 **model**: a function whose rule has a fixed shape and whose behaviour is set by a list of parameters, used to turn the features of an example into a prediction. *([The Learning Problem](v02-learning/01-learning-problem.md))*
+
+**model catalog**: the single list of the models an engine offers, one entry per model, from which listing, construction by name and scheduling are all derived so that they cannot disagree. *([Capabilities, Providers and APIs](v14-inference-and-serving/06-capabilities-and-apis.md))*
+
+**model file attack surface**: everything a reader of a model file does on the file's word, the code it may run, the memory it reserves from declared counts, the offsets it follows, the depth it recurses to and the arithmetic on sizes the file chose. *([Security of Machine Learning Services](v14-inference-and-serving/07-security.md))*
 
 **model reference**: the string that names a model, `vendor/repo` with an optional quantization and adapter suffix, whose grammar gives it exactly one reading or a named refusal and keeps it from naming a place outside the store. *([Loading Models](v14-inference-and-serving/01-loading.md))*
 
@@ -1074,7 +1104,11 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **proper scoring rule**: a loss for probability reports under which the expected loss is smallest when the report equals the true probability, so that a forecaster minimizing it has no reason to state anything but their belief; it is strictly proper when the truth is the only best report. *([Scoring Rules and Calibrated Decisions](v11-forecasting/06-calibrated-decisions.md))*
 
+**provider**: the object that stands for one model behind the capability interface: it hands out the model's manifest and, given an action's name, something that runs that action. *([Capabilities, Providers and APIs](v14-inference-and-serving/06-capabilities-and-apis.md))*
+
 **pseudo-random generator**: a deterministic state machine (a state, a rule that advances it, and a rule that turns it into a number) whose outputs are judged by how closely they resemble draws from a uniform distribution, not by being unpredictable to someone who knows the rule. *([Randomness on a Deterministic Machine](v01-mathematics/17-randomness.md))*
+
+**public SDK**: the library an engine offers for use inside another program's process: a small set of typed entry points whose names and signatures are kept stable across versions. *([Capabilities, Providers and APIs](v14-inference-and-serving/06-capabilities-and-apis.md))*
 
 ## Q
 
@@ -1120,6 +1154,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **register blocking**: giving each invocation of a kernel a small square block of outputs held in its registers, so that each operand it reads is used once per row or column of the block, which enlarges the output tile beyond the number of invocations and cuts the reads of shared memory per multiply-add. *([Making Matrix Multiplication Fast](v04-computation/06-matmul.md))*
 
+**regression gate**: a test written from a fixed defect that fails on the defective code, passes on the corrected code, runs in the configuration where the defect's class is visible and where the code really runs, and can change its verdict. *([A Catalogue of Expensive Mistakes](v15-methods/05-failure-catalogue.md))*
+
 **REINFORCE**: the Monte Carlo policy gradient, which samples a life under the policy and moves the parameters along the score of every action taken times the return that followed it. *([Policy Gradients](v12-reinforcement-learning/03-policy-gradients.md))*
 
 **reinforcement learning (overview)**: learning by an agent that acts in an environment and receives rewards, without being told the right action; full treatment in Volume XII. *([The Learning Problem](v02-learning/01-learning-problem.md))*
@@ -1142,7 +1178,11 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **reproducibility**: the property that running again from the same recorded inputs (seed, data, code, settings) gives the same results exactly, which requires the same draws in the same order and the same floating-point arithmetic. *([Randomness on a Deterministic Machine](v01-mathematics/17-randomness.md))*
 
+**reproducibility package**: the files that make a report a function of its runs: the code at a named commit, the identity of the data, the registered protocol, one record per run with its commit, command, seed, device and measurements (absent where nothing was measured), and the scripts that build every table and quoted number from the records. *([From Hypothesis to Paper](v15-methods/04-research.md))*
+
 **request scheduling**: the order of the steps of each iteration (resume, admit, prefill, make room, decode, release) and the rules that choose among waiting and running requests at each step, each with a bound on how long a request can be held back. *([Batching and Scheduling Requests](v14-inference-and-serving/04-batching.md))*
+
+**research paper structure**: the sequence of parts of an empirical paper (abstract, introduction with scope and contributions, related work, method, implementation, protocol, results, discussion and limitations, references, appendices), each answering a question a reader asks and each holding something the reader can check. *([From Hypothesis to Paper](v15-methods/04-research.md))*
 
 **reshape-and-view**: reshaping keeps a tensor's line of numbers in row-major order and cuts it into a new shape; a view is a new shape, strides and offset over the same storage, so a reshape of a contiguous array needs no copy. *([Arrays, Shapes, Strides and Broadcasting](v01-mathematics/05-arrays.md))*
 
@@ -1155,6 +1195,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **residual vector quantization**: a chain of codebooks in which each quantizes the error left by the ones before it, so that the stored indices are one per stage and the reconstruction is the sum of the chosen entries. *([Neural Audio Codecs](v09-audio/03-audio-codecs.md))*
 
 **residual-connection**: a layer that returns its input plus a correction, $\mathbf{y} = \mathbf{x} + f(\mathbf{x})$, so that its Jacobian is $\mathbf{I} + \mathbf{J}_f$ and the gradient has a path through it that passes no weights. *([Training Dynamics and Debugging](v03-neural-networks/12-training-dynamics.md))*
+
+**resource exhaustion**: an attack or accident in which input makes a server spend a resource shared by all its clients, memory, threads, connections, device lanes or disk, until it cannot serve anyone; measured by how much the server spends per unit the sender spends. *([Security of Machine Learning Services](v14-inference-and-serving/07-security.md))*
 
 **retrieval**: finding the stored texts that answer a query by embedding the query, comparing its vector with the stored vectors and ranking the collection by cosine, judged by the share of the relevant texts found among the top $k$ (recall at $k$). *([Bidirectional Encoders and Embedding Models](v05-sequences/14-encoders.md))*
 
@@ -1171,6 +1213,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **ROC curve**: the curve of the true positive rate against the false positive rate as the decision threshold moves over every value; its area equals the probability that a random positive is scored above a random negative, counting ties as one half. *([Measuring Models: Metrics and Calibration](v02-learning/06-metrics.md))*
 
 **roofline model**: the bound that the attainable rate of a computation on a machine is the smaller of the machine's peak arithmetic rate and its arithmetic intensity times its memory bandwidth, drawn as a slanted line that meets a flat one at the ridge point. *([Memory Bandwidth, Compute and the Roofline](v04-computation/03-roofline.md))*
+
+**root-cause analysis**: working back from an observed failure through measurements and mechanism to the decision that let the defect in, until a change is found that removes the whole class, and asking for every existing check why it did not see the defect. *([A Catalogue of Expensive Mistakes](v15-methods/05-failure-catalogue.md))*
 
 **RoPE scaling**: changing the rotation rates of the rotary table (and sometimes the magnitude of the rotated vectors) so that a model trained on one length can be run at a longer one, by dividing all rates, a geometric ramp of them or a different rule for each pair. *([Long Context](v06-language-models/08-long-context.md))*
 
@@ -1258,6 +1302,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **SIMT execution**: single instruction, multiple threads: the hardware issues each instruction once for a fixed group of threads, each applying it to its own registers, so a program is written for one thread and the group's lanes are filled by the hardware. *([The GPU: Thousands of Small Workers](v04-computation/04-gpu.md))*
 
+**single-implementation rule**: the rule that each behaviour of a system exists in exactly one place and is reached elsewhere by depending on it, re-exporting it or configuring it, never by copying it, with deliberate and documented exceptions only where independence is the purpose. *([The Architecture of a Machine Learning Engine](v16-systems/01-engine-architecture.md))*
+
 **singular value decomposition**: the factorisation $\mathbf{A} = \mathbf{U}\boldsymbol{\Sigma}\mathbf{V}^\top$ of any matrix into a rotation, a stretch by non-negative singular values and a second rotation. *([Eigenvalues, Rotations and Low-Rank Structure](v01-mathematics/06-decompositions.md))*
 
 **sinusoid**: a wave $A\cos(2\pi f t + \varphi)$ described by an amplitude $A$ (its largest value), a frequency $f$ (cycles per second) and a phase $\varphi$ (where in its cycle it stands at time zero); a cosine and a sine are the same sinusoid a quarter period apart. *([Complex Numbers, Frequencies and the Fourier Transform](v01-mathematics/14-fourier.md))*
@@ -1266,7 +1312,7 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **sliding-window attention**: attention in which a query reads only the last $n_{\mathrm{win}}$ keys, itself included, so the cache of the layer is bounded by the window; a stack of such layers reaches $L(n_{\mathrm{win}} - 1) + 1$ positions. *([Attention Variants: Sharing and Compressing Keys](v06-language-models/03-attention-variants.md))*
 
-**soft targets**: the teacher's probability for every class (or its $K$ largest, renormalised) used as the training target in place of a single label, so each example tells the student how the classes relate. *([Distillation](v13-training-at-scale/06-distillation.md))*
+**soft targets**: the teacher's probability for every class (or its $K$ largest, renormalized) used as the training target in place of a single label, so each example tells the student how the classes relate. *([Distillation](v13-training-at-scale/06-distillation.md))*
 
 **softmax**: the function that turns a vector of real scores into a probability vector by exponentiating each score and dividing by the sum of the exponentials, so that the outputs are positive, add to one and keep the order of the scores. *([Softmax, Logits and Cross-Entropy](v03-neural-networks/03-softmax.md))*
 
@@ -1352,6 +1398,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **temporal-difference learning**: learning the value of a state from the difference between two successive estimates of it, by moving the estimate a fraction of the way toward the reward of one day plus the discounted estimate of the next state, without a model and without waiting for the end of the episode. *([Learning Values from Experience](v12-reinforcement-learning/02-value-learning.md))*
 
+**tenant isolation**: the property that one client of a shared server can neither see, change nor exhaust what belongs to another, provided by an identity for every request, a scope for every piece of kept state and a budget for every identity. *([Security of Machine Learning Services](v14-inference-and-serving/07-security.md))*
+
 **tensor**: an array of numbers with any number of axes (zero for a scalar, one for a vector, two for a matrix), described by its shape. *([Arrays, Shapes, Strides and Broadcasting](v01-mathematics/05-arrays.md))*
 
 **tensor core**: a hardware unit that multiplies two small fixed-size matrices and adds a third in one operation, usually with narrow inputs and a wider accumulator, raising the peak arithmetic rate of a device for matrix products. *([Making Matrix Multiplication Fast](v04-computation/06-matmul.md))*
@@ -1400,7 +1448,7 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 
 **training memory formula**: the sum for a training step: for each parameter its value, gradient, optimizer slots and master copy (16 bytes under Adam in either f32 or mixed precision), plus the numbers kept per token for the backward pass, reduced by recomputation, plus scratch. *([Counting Parameters, FLOPs and Memory](v06-language-models/10-model-cost.md))*
 
-**training resumption**: continuing a run from a saved state so that the continuation performs the same updates as the uninterrupted run: it needs every number a step reads (weights, optimiser state, update count, data position, generator or seeds) and refuses a state that belongs to another run's options, data or group. *([Checkpoints, Determinism and Recovery](v13-training-at-scale/07-checkpoints-and-recovery.md))*
+**training resumption**: continuing a run from a saved state so that the continuation performs the same updates as the uninterrupted run: it needs every number a step reads (weights, optimizer state, update count, data position, generator or seeds) and refuses a state that belongs to another run's options, data or group. *([Checkpoints, Determinism and Recovery](v13-training-at-scale/07-checkpoints-and-recovery.md))*
 
 **training set**: the rows used to fit a model's parameters, and no other decisions; the error on it is a flattering estimate of the error on new rows. *([Generalization, Overfitting and Honest Evaluation](v02-learning/05-generalization.md))*
 
@@ -1411,6 +1459,8 @@ Every term the book defines, in alphabetical order, with the chapter that teache
 **transducer**: a recogniser with an encoder, a predictor over the labels written so far and a joint network over every node of the lattice of rows and labels, in which a blank moves to the next row and a label is written on the same row. *([Speech Recognition](v09-audio/04-speech-recognition.md))*
 
 **transformer block**: the repeating unit of a transformer, one attention sublayer and one feed-forward sublayer, each with its normalization and its addition to the residual stream. *([The Transformer Block](v05-sequences/09-transformer-block.md))*
+
+**transport security**: protection of what crosses the network between client and server, confidentiality, integrity and authentication of the server, in practice TLS, together with keeping the server's secrets out of logs and readable files. *([Security of Machine Learning Services](v14-inference-and-serving/07-security.md))*
 
 **transpose**: the matrix $\mathbf{A}^\top$ with rows and columns swapped; $(\mathbf{A}\mathbf{B})^\top = \mathbf{B}^\top\mathbf{A}^\top$. *([Matrices as Linear Maps](v01-mathematics/04-matrices.md))*
 

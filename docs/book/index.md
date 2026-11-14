@@ -218,10 +218,21 @@ historical sections draw on in the [Chronology](history/chronology.md).
 3. [Managing the KV Cache](v14-inference-and-serving/03-paged-kv.md): How do many conversations share one device's memory for their caches?
 4. [Batching and Scheduling Requests](v14-inference-and-serving/04-batching.md): How does a server keep the device busy while answering many users at once?
 5. [Speculative Decoding](v14-inference-and-serving/05-speculative-decoding.md): How can a small model's guesses make a large model generate faster without changing its output?
+6. [Capabilities, Providers and APIs](v14-inference-and-serving/06-capabilities-and-apis.md): How does an engine present hundreds of models through a few stable interfaces?
+7. [Security of Machine Learning Services](v14-inference-and-serving/07-security.md): What can a hostile request or a malicious model file do to a server, and how do we stop it?
 8. [Running and Observing an Engine](v14-inference-and-serving/08-operations.md): How do we see what a running engine is doing, control it, and shut it down cleanly?
+9. [Project: A Multi-Client Inference Server](v14-inference-and-serving/09-project-inference-server.md): Can you build a server that answers many clients at once within fixed memory and stays safe under hostile input?
 
 ### [Volume XV: Scientific and Engineering Methods](v15-methods/index.md)
 
 1. [Porting a Model from Its Reference](v15-methods/01-porting.md): What is the disciplined way to reimplement a published model and prove it correct?
 2. [Testing Numerical Code](v15-methods/02-testing-numerical-code.md): Why do tests of numerical code pass while the code is wrong, and how do we write tests that cannot be fooled?
+3. [Benchmarking and Performance Claims](v15-methods/03-benchmarking.md): What makes a benchmark trustworthy, and what are the classic ways it lies?
+4. [From Hypothesis to Paper](v15-methods/04-research.md): How does an idea become a result others can trust, check and build on?
+5. [A Catalogue of Expensive Mistakes](v15-methods/05-failure-catalogue.md): What went wrong while building a real engine, and what general lesson does each failure teach?
+6. [Project: Reproduce, Verify, Optimize, Defend](v15-methods/06-project-reproduction.md): Can you reproduce a published model component, prove it correct, make it fast and defend the result?
+
+### [Volume XVI: Constructing a Complete Machine Learning System](v16-systems/index.md)
+
+1. [The Architecture of a Machine Learning Engine](v16-systems/01-engine-architecture.md): How should the parts of an engine be divided so that it can grow to hundreds of models without collapsing?
 <!-- /contents -->

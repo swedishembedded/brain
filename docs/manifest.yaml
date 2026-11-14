@@ -577,12 +577,23 @@ navigation:
           - docs/book/v14-inference-and-serving/03-paged-kv.md
           - docs/book/v14-inference-and-serving/04-batching.md
           - docs/book/v14-inference-and-serving/05-speculative-decoding.md
+          - docs/book/v14-inference-and-serving/06-capabilities-and-apis.md
+          - docs/book/v14-inference-and-serving/07-security.md
           - docs/book/v14-inference-and-serving/08-operations.md
+          - docs/book/v14-inference-and-serving/09-project-inference-server.md
       - title: "Volume XV: Scientific and Engineering Methods"
         pages:
           - docs/book/v15-methods/index.md
           - docs/book/v15-methods/01-porting.md
           - docs/book/v15-methods/02-testing-numerical-code.md
+          - docs/book/v15-methods/03-benchmarking.md
+          - docs/book/v15-methods/04-research.md
+          - docs/book/v15-methods/05-failure-catalogue.md
+          - docs/book/v15-methods/06-project-reproduction.md
+      - title: "Volume XVI: Constructing a Complete Machine Learning System"
+        pages:
+          - docs/book/v16-systems/index.md
+          - docs/book/v16-systems/01-engine-architecture.md
       - docs/book/glossary.md
       - docs/book/history/chronology.md
       - docs/book/about-the-author.md
