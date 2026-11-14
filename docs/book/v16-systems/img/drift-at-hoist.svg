@@ -1,0 +1,39 @@
+<!-- source-sha256: c00cb99f93656cdcefd2b6c31d432fffa4c8251ed2ad803891ee745037baaddc -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 385" width="600" height="385">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker></defs>
+<rect width="600" height="385" fill="#ffffff"/>
+<line x1="58" y1="314" x2="58" y2="30" stroke="#edf2f7"/>
+<text x="58" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">0</text>
+<line x1="185.8" y1="314" x2="185.8" y2="30" stroke="#edf2f7"/>
+<text x="185.8" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">10</text>
+<line x1="313.61" y1="314" x2="313.61" y2="30" stroke="#edf2f7"/>
+<text x="313.61" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">20</text>
+<line x1="441.41" y1="314" x2="441.41" y2="30" stroke="#edf2f7"/>
+<text x="441.41" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">30</text>
+<line x1="569.22" y1="314" x2="569.22" y2="30" stroke="#edf2f7"/>
+<text x="569.22" y="330" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="middle">40</text>
+<line x1="58" y1="314" x2="582" y2="314" stroke="#edf2f7"/>
+<text x="52" y="318" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">0</text>
+<line x1="58" y1="257.2" x2="582" y2="257.2" stroke="#edf2f7"/>
+<text x="52" y="261.2" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">5</text>
+<line x1="58" y1="200.4" x2="582" y2="200.4" stroke="#edf2f7"/>
+<text x="52" y="204.4" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">10</text>
+<line x1="58" y1="143.6" x2="582" y2="143.6" stroke="#edf2f7"/>
+<text x="52" y="147.6" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">15</text>
+<line x1="58" y1="86.8" x2="582" y2="86.8" stroke="#edf2f7"/>
+<text x="52" y="90.8" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">20</text>
+<line x1="58" y1="30" x2="582" y2="30" stroke="#edf2f7"/>
+<text x="52" y="34" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#4a5568" text-anchor="end">25</text>
+<rect x="58" y="30" width="524" height="284" fill="none" stroke="#718096"/>
+<clipPath id="plot"><rect x="58" y="30" width="524" height="284"/></clipPath>
+<g clip-path="url(#plot)"><polyline fill="none" stroke="#2b6cb0" stroke-width="2.0" points="70.78,314 83.56,313.43 96.34,312.32 109.12,310.7 121.9,308.6 134.68,306.03 147.46,303.02 160.24,299.59 173.02,295.77 185.8,291.57 198.59,287.01 211.37,282.11 224.15,276.89 236.93,271.36 249.71,265.54 262.49,259.44 275.27,253.08 288.05,246.47 300.83,239.63 313.61,232.55 326.39,225.26 339.17,217.77 351.95,210.09 364.73,202.22 377.51,194.18 390.29,185.97 403.07,177.6 415.85,169.09 428.63,160.43 441.41,151.63 454.2,142.71 466.98,133.67 479.76,124.51 492.54,115.24 505.32,105.87 518.1,96.39 530.88,86.82 543.66,77.17 556.44,67.43 569.22,57.6"/><circle cx="83.56" cy="313.43" r="3.5" fill="#c05621"/><circle cx="96.34" cy="312.32" r="3.5" fill="#c05621"/><circle cx="121.9" cy="308.6" r="3.5" fill="#c05621"/><circle cx="185.8" cy="291.57" r="3.5" fill="#c05621"/><circle cx="313.61" cy="232.55" r="3.5" fill="#c05621"/><circle cx="569.22" cy="47.7" r="4.5" fill="#9b2c2c"/></g>
+<text x="320" y="350" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle">model whose arrival triggers the hoist</text>
+<text x="14" y="172" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#1a202c" text-anchor="middle" transform="rotate(-90 14 172)">expected drifted copies</text>
+<text x="320" y="18" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">What a late hoist has to reconcile</text>
+<line x1="29.54" y1="373" x2="49.54" y2="373" stroke="#2b6cb0" stroke-width="2"/>
+<text x="55.54" y="377" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">drifted copies at the hoist</text>
+<circle cx="221.55" cy="373" r="3.5" fill="#c05621"/>
+<text x="237.55" y="377" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">hoist points of the table</text>
+<circle cx="391.23" cy="373" r="3.5" fill="#9b2c2c"/>
+<text x="407.23" y="377" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#1a202c">never hoisted, after model 40</text>
+</svg>
