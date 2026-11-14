@@ -392,9 +392,9 @@ pub struct LaunchStats {
     /// instantiated graph - a native kernel whose scalars (a position, a
     /// scale) change between replays.
     pub graph_scalar_updates: u64,
-    /// Replays that had to wait for the device before overwriting their
-    /// parameter staging. Zero whenever the caller reads between submissions,
-    /// which a decoder does every token.
+    /// Replays that had to wait for their own graph's previous launch before
+    /// overwriting its parameter staging. Zero whenever that launch has run by
+    /// the time the graph is replayed, however much other work is queued.
     pub staging_waits: u64,
     /// Host-to-device parameter copies recorded into captured graphs - nodes
     /// the device runs on every replay. A captured submission carries one for

@@ -211,6 +211,9 @@ pub struct ExecFns {
     /// Blocks the host until the event has completed: what freeing host memory
     /// a device kernel may still be reading has to wait on.
     pub(crate) event_synchronize: unsafe extern "C" fn(CuEvent) -> CuResult,
+    /// `cuEventQuery`: `CUDA_SUCCESS` once the work before the event's last record has run, `CUDA_ERROR_NOT_READY`
+    /// while it is pending - without waiting.
+    pub(crate) event_query: unsafe extern "C" fn(CuEvent) -> CuResult,
     pub(crate) mem_alloc_host: unsafe extern "C" fn(*mut *mut c_void, usize) -> CuResult,
     pub(crate) mem_free_host: unsafe extern "C" fn(*mut c_void) -> CuResult,
     /// `cuFuncSetAttribute`: how a kernel opts in to more dynamic shared memory
@@ -606,6 +609,7 @@ unsafe fn load_exec(lib: &libloading::Library) -> Result<ExecFns, String> {
         event_elapsed_time: sym(lib, b"cuEventElapsedTime\0")?,
         event_destroy: sym(lib, b"cuEventDestroy_v2\0")?,
         event_synchronize: sym(lib, b"cuEventSynchronize\0")?,
+        event_query: sym(lib, b"cuEventQuery\0")?,
         mem_alloc_host: sym(lib, b"cuMemAllocHost_v2\0")?,
         mem_free_host: sym(lib, b"cuMemFreeHost\0")?,
         func_set_attribute: sym(lib, b"cuFuncSetAttribute\0")?,

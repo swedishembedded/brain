@@ -1703,6 +1703,24 @@ impl Event {
             self.d.check((self.fns.event_synchronize)(self.ev), "cuEventSynchronize")
         }
     }
+
+    /// Whether everything enqueued before the event's last record has run (an event never recorded has), without
+    /// waiting.
+    pub fn is_complete(&self) -> Result<bool, String> {
+        /// `CUDA_ERROR_NOT_READY`: work is still pending, which is an answer, not a failure.
+        const NOT_READY: crate::driver::CuResult = 600;
+        // SAFETY: as in `synchronize`.
+        unsafe {
+            let rc = (self.fns.ctx_set_current)(self.ctx);
+            if rc != 0 {
+                return Err(format!("cuCtxSetCurrent: {}", self.d.error_text(rc)));
+            }
+            match (self.fns.event_query)(self.ev) {
+                NOT_READY => Ok(false),
+                rc => self.d.check(rc, "cuEventQuery").map(|()| true),
+            }
+        }
+    }
 }
 
 impl Drop for Event {

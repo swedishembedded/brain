@@ -666,3 +666,57 @@ fn a_large_submission_alternating_with_a_small_one_is_captured() {
         assert!((got[i] - expect).abs() <= 1e-5 * expect.abs().max(1.0), "element {i}: got {}, want {expect}", got[i]);
     }
 }
+
+/// A replay that changes its parameters waits only for its OWN graph's previous launch, never for other work queued
+/// behind that launch.
+///
+/// A decode window is this shape: per sub-step a two-node feed/advance submission whose parameters name the sub-step,
+/// then the layer stack and the head, with no read in between. The feed/advance graph's previous launch ran before the
+/// stack that is still executing, so its staging is free; waiting for the whole stream there instead holds the host
+/// until the card is idle, and the card then idles while the host resolves and launches the next sub-step.
+///
+/// Deterministic by construction: the device is drained after `A`'s launch, so when `A` is replayed with new
+/// parameters behind an in-flight `B`, its own launch has certainly completed and no wait is owed.
+#[test]
+fn a_changed_replay_does_not_wait_for_another_graph_in_flight() {
+    let Some(b) = backend() else { return };
+    let inp = b.storage_init("inp", &input());
+    let outs_a: Vec<_> = (0..4).map(|_| b.storage(N as u64)).collect();
+    let outs_b: Vec<_> = (0..8).map(|_| b.storage(N as u64)).collect();
+    let scales_a = [0.25f32, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0];
+    // Capture both shapes: a small submission is captured when it repeats the one before it.
+    for &s in &scales_a[..3] {
+        round(&b, &outs_a, &inp, N, s);
+    }
+    for _ in 0..3 {
+        round(&b, &outs_b, &inp, N, 1.0);
+    }
+    b.poll_wait();
+    let captured = b.launch_stats();
+    assert_eq!(captured.graph_captures, 2, "both shapes must be captured before the claim is tested");
+
+    // `B` in flight, `A`'s own last launch complete: the changed replay of `A` owes no wait.
+    round(&b, &outs_b, &inp, N, 1.0);
+    round(&b, &outs_a, &inp, N, scales_a[3]);
+    b.poll_wait();
+    let after = b.launch_stats();
+    assert_eq!(after.graph_captures, 2, "the alternation re-captured a shape");
+    assert_eq!(after.staging_waits - captured.staging_waits, 0, "a changed replay waited for another graph's launch");
+
+    // Running ahead with no drain at all still gives every replay its own parameters.
+    for &s in &scales_a[4..] {
+        round(&b, &outs_a, &inp, N, s);
+        round(&b, &outs_b, &inp, N, 1.0);
+    }
+    b.poll_wait();
+    let want = input();
+    let total_a: f32 = scales_a.iter().sum();
+    let rounds_b = (4 + scales_a.len() - 4) as f32;
+    for (o, total) in outs_a.iter().map(|o| (o, total_a)).chain(outs_b.iter().map(|o| (o, rounds_b))) {
+        let got = b.read(o, N);
+        for i in 0..N {
+            let expect = total * want[i];
+            assert!((got[i] - expect).abs() <= 1e-4 * expect.abs().max(1.0), "element {i}: got {}, want {expect}", got[i]);
+        }
+    }
+}

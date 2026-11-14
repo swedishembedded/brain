@@ -211,6 +211,10 @@ pub(crate) struct LiveGraph {
     _params: Option<exec::DeviceMem>,
     _clears: Vec<Weak<exec::DeviceMem>>,
     nodes: Vec<LiveNode>,
+    /// Recorded on the stream right after each launch of THIS graph: complete once that launch has run, and so once
+    /// its parameter copy has read the staging. A replay that changes the staging waits on this, not on the stream:
+    /// work queued after this graph's launch (another graph, the rest of a decode step) does not read this staging.
+    launched: exec::Event,
 }
 
 /// What the backend must do with a submission it just described.
@@ -352,14 +356,10 @@ pub(crate) struct GraphCache {
     spare_params: Vec<ParamBlock>,
     /// Captures or replays that returned an error - see [`Self::forget`].
     failures: u32,
-    /// Set while a replayed graph may still be executing.
-    ///
-    /// A replay that has to CHANGE something - new parameter words, or a new
-    /// grid - is changing state the in-flight graph is still using, so it
-    /// waits first. Neither of the two loops this mechanism exists for pays
-    /// that wait: a decoder's parameters change every token but it reads its
-    /// logits between submissions, which already drains the device, and a loop
-    /// that resubmits an unchanged shape changes nothing to wait for.
+    /// Set while a replayed graph may still be executing: what discarding or
+    /// recycling a graph's staging must first wait out ([`Self::settle`]). A
+    /// replay that changes a graph waits only for that graph's own previous
+    /// launch ([`LiveGraph::launched`]), and only while this is set.
     in_flight: bool,
 }
 
@@ -519,6 +519,8 @@ impl GraphCache {
             (None, None)
         };
 
+        // Not a stream operation either, so made before the capture opens.
+        let launched = ctx.ordering_event()?;
         let capture = ctx.begin_capture()?;
         // The graph's ONE parameter copy: first, so every kernel after it reads
         // this replay's values. See the module doc for why it is one node.
@@ -592,6 +594,7 @@ impl GraphCache {
                 _params: params,
                 _clears: clears.iter().map(Arc::downgrade).collect(),
                 nodes,
+                launched,
             },
         );
         // Oldest capture out. Dropping it releases its instantiated graph, its
@@ -627,23 +630,24 @@ impl GraphCache {
                 live.nodes.len()
             ));
         }
-        // Both of the things a replay may change - the words in a staging
-        // block, and a node's grid inside the instantiated graph - are illegal
-        // to perform while that graph is still running: the copy nodes may not
-        // have read the staging yet, and an executable graph may not be
-        // updated with a launch pending. A replay that changes NEITHER is
-        // therefore free of any wait, which is the whole reason the comparison
-        // is made before the writes rather than after them.
+        // A replay may change the words in this graph's staging block and a
+        // node's grid or scalars inside its instantiated graph. The staging
+        // must not be rewritten while this graph's previous launch may not
+        // have copied it yet, and the node updates are held to the same point
+        // so that nothing a pending launch was enqueued with moves under it.
+        // Only THIS graph's previous launch matters: whatever was queued after
+        // it reads neither its staging nor its nodes. A replay that changes
+        // nothing is free of any wait, which is the whole reason the
+        // comparison is made before the writes rather than after them.
         let changed = live.nodes.iter().zip(steps).any(|(n, s)| {
             !n.library
                 && (n.threads != s.threads
                 || n.args[n.scalar_at..] != s.args[s.scalar_at..]
                 || (n.staging.is_some() && n.staged != s.params))
         });
-        if changed && self.in_flight {
+        if changed && self.in_flight && !live.launched.is_complete()? {
             counters.staging_waits.fetch_add(1, Ordering::Relaxed);
-            ctx.sync()?;
-            self.in_flight = false;
+            live.launched.synchronize()?;
         }
         for (node, step) in live.nodes.iter_mut().zip(steps) {
             if node.library {
@@ -700,6 +704,7 @@ impl GraphCache {
             }
         }
         ctx.launch_graph(&live.exec)?;
+        ctx.record(&live.launched)?;
         self.in_flight = true;
         counters.replays.fetch_add(1, Ordering::Relaxed);
         crate::live::graph_replayed();
