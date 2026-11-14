@@ -566,7 +566,7 @@ def room_for(total, free):
 
 def _stream_to_file(fs, dest, data, total, expected, die_after=None):
     """The download of `data` to `dest` in the file system `fs` (a dict from path to bytes): chunks of 64 KiB (here the data is
-    shorter) are written to dest + ".part-1"; more bytes than `total` declared, or a digest that is not `expected`, removes the
+    shorter) are written to dest + ".part-1"; more bytes than `total` declared, a stream that ends before `total`, or a digest that is not `expected`, removes the
     part file and fails; a process killed after `die_after` bytes leaves the part file; success renames it onto dest."""
     tmp = dest + ".part-1"
     fs[tmp] = b""
@@ -581,6 +581,9 @@ def _stream_to_file(fs, dest, data, total, expected, die_after=None):
             del fs[tmp]
             return "error: runs past its declared length"
         fs[tmp] += chunk
+    if total is not None and got < total:
+        del fs[tmp]
+        return "error: ends before its declared length"
     if expected is not None and hashlib.sha256(fs[tmp]).hexdigest() != expected:
         del fs[tmp]
         return "error: digest differs"
@@ -591,6 +594,7 @@ def _stream_to_file(fs, dest, data, total, expected, die_after=None):
 def atomic_download():
     abc = hashlib.sha256(b"abc").hexdigest()
     cases = [("10 bytes arrive, 4 declared", b"0123456789", 4, None, None),
+             ("3 bytes arrive, 10 declared", b"abc", 10, None, None),
              ("b\"abc\", digest 00", b"abc", 3, "00", None),
              ("b\"abc\", 3 declared, digest of b\"abc\"", b"abc", 3, abc, None),
              ("b\"abcdef\", killed after 2 bytes", b"abcdef", 6, None, 2)]
@@ -725,8 +729,8 @@ _INTRO = {
         "(`<repo>` is the repo name without the suffix, `<Q>` the token)."),
     "atomic_download": (
         "A download writes its bytes to a part file beside the destination and renames the part file onto the destination only when "
-        "every check has passed. The first three rows are the three outcomes of the transfer of `model.safetensors` through an "
-        "in-memory file system; in the fourth the process is killed after 2 bytes, so nothing runs that could remove the part "
+        "every check has passed. The first four rows are the four outcomes of the transfer of `model.safetensors` through an "
+        "in-memory file system; in the fifth the process is killed after 2 bytes, so nothing runs that could remove the part "
         "file. The second table asks whether a download of the first size may start when the file system has the second size "
         "free: it needs the download plus a reserve of 2^30 bytes."),
     "resume_by_file": (
