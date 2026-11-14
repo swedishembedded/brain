@@ -110,9 +110,9 @@ pub fn camera(call: &invoke::WorkflowCall) -> Result<(), String> {
         let mut seq = 0u64;
         while capturing.load(Ordering::Relaxed) {
             match device.next_frame(imaging::color::yuyv_to_rgb) {
-                Ok(rgb) => {
+                Ok((rgb, stamp)) => {
                     seq += 1;
-                    producer.push(Frame { rgb, w, h, seq });
+                    producer.push(Frame { rgb, w, h, seq, stamp });
                 }
                 Err(e) => {
                     eprintln!("capture error: {e}");

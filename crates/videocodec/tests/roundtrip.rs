@@ -162,7 +162,7 @@ fn a_late_start_decodes_from_the_preceding_key_frame() {
             let want: Vec<(u64, Vec<u8>)> = all.iter().enumerate().skip(first as usize).map(|(i, px)| (i as u64, px.clone())).collect();
             assert!(got == want, "{name}: frames from {first} differ from the whole decode's");
             let extra = done.units_decoded - (FRAMES as u64 - first);
-            assert!(extra < SETTINGS.key_frame_interval, "{name}: from {first} the decoder handled {extra} units before it");
+            assert!(extra < SETTINGS.key_frame_interval.expect("the fixture forces key frames"), "{name}: from {first} the decoder handled {extra} units before it");
         }
     }
 }
