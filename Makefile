@@ -370,10 +370,10 @@ test/nextest:
 
 # One crate, optionally one test target and filter, for the edit-test loop:
 # `make test/one P=brain-qwen35 T=gguf_mixed_step ARGS="--device gpu1"`.
-## test/one - one crate's tests (P=<package> [T=<test target>] [ARGS=<test args>]), fast profile, seconds per rebuild
+## test/one - one crate's tests (P=<package> [T=<test target>] [F=<features>] [ARGS=<test args>]), fast profile, seconds per rebuild
 test/one:
-	@test -n "$(P)" || { echo "test/one: set P=<package> (and optionally T=<test target>, ARGS=<test args>)"; exit 2; }
-	$(CARGO_TEST) -p $(P) $(if $(T),--test $(T)) -- $(ARGS)
+	@test -n "$(P)" || { echo "test/one: set P=<package> (and optionally T=<test target>, F=<features>, ARGS=<test args>)"; exit 2; }
+	$(CARGO_TEST) -p $(P) $(if $(F),--features $(F)) $(if $(T),--test $(T)) -- $(ARGS)
 
 ## test/package - the spec of the release publishing script against a scratch repository and a fake gh (bats; no build, seconds)
 test/package:
