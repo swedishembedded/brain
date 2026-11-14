@@ -46,8 +46,10 @@ use crate::FixedProbe;
 /// both of `default_pool`'s index ranges.
 pub const VRAM_POOL: PoolId = PoolId(3_000_000);
 
-/// Environment fallbacks, read exactly once (in [`Limits::from_env`]) - the
-/// same flag-beats-env shape as `--device`/`BRAIN_DEVICE`.
+/// The environment interface for a process with no CLI in the loop (a test
+/// binary, an embedding application), read exactly once (in
+/// [`Limits::from_env`]) - the same shape as `BRAIN_DEVICE`. The brain CLI
+/// publishes its flags instead and ignores these.
 const ENV_VRAM: &str = "BRAIN_LIMIT_VRAM_TOTAL";
 const ENV_RAM: &str = "BRAIN_LIMIT_RAM_TOTAL";
 const ENV_COHERENT_TIER: &str = "BRAIN_COHERENT_TIER";
@@ -61,7 +63,7 @@ pub struct Limits {
     /// `--limit-ram-total`: bytes of host RAM (CPU + every NPU).
     pub ram_total: Option<u64>,
     /// Opt in to the coherent tier: every GPU may also use host memory as a
-    /// second tier of its own (`BRAIN_COHERENT_TIER=1`). Off by default, so a
+    /// second tier of its own (`--coherent-tier`, or `BRAIN_COHERENT_TIER=1` with no CLI). Off by default, so a
     /// ceiling on a coherent node governs the GPU-only run it always did; it
     /// matters only to requests that ask for a tier ([`crate::TierPolicy`]).
     pub coherent_tier: bool,
@@ -209,17 +211,16 @@ impl PoolProbe for Unbounded {
 static LIMITS: OnceLock<Limits> = OnceLock::new();
 static AUTHORITY: OnceLock<Option<MemoryAuthority>> = OnceLock::new();
 
-/// Publish the ceilings for this process. Each `None` argument falls back to
-/// that ceiling's environment variable, so a flag beats the environment and an
-/// omitted flag does not erase it.
+/// Publish exactly `limits` as this process's ceilings - the CLI's flags, or
+/// an embedder's own choice. Only a process that never publishes falls back to
+/// the environment ([`limits`]).
 ///
 /// Called once from `main`, before any `Gpu` exists. A second call (or a call
 /// after something already read [`limits`]) is ignored - the process cannot
 /// change its own ceiling halfway through, which is what makes it hard to
 /// bypass.
-pub fn publish_limits(vram_total: Option<u64>, ram_total: Option<u64>) {
-    let env = Limits::from_env();
-    let _ = LIMITS.set(Limits { vram_total: vram_total.or(env.vram_total), ram_total: ram_total.or(env.ram_total), coherent_tier: env.coherent_tier });
+pub fn publish_limits(limits: Limits) {
+    let _ = LIMITS.set(limits);
 }
 
 /// This process's ceilings: whatever [`publish_limits`] recorded, else the

@@ -75,7 +75,6 @@ crates/cli/src/main.rs	BRAIN_TEST_CONFIG_BOOL
 crates/cli/src/main.rs	BRAIN_TEST_CONFIG_FILLED
 crates/cli/src/main.rs	BRAIN_TEST_CONFIG_INHERITED
 crates/cli/src/main.rs	BRAIN_TEST_CONFIG_NUMBER
-crates/cli/src/main.rs	BRAIN_VERBOSE
 crates/cli/src/main.rs	HOME
 crates/cli/src/main.rs	XDG_CONFIG_HOME
 crates/cli/src/perf_longctx.rs	<qwen35moe::gguf_load::GGUF_ENV>

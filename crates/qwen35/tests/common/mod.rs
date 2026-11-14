@@ -98,7 +98,7 @@ pub fn assert_same_training_signal(got: (f32, Vec<(String, Vec<f32>)>), want: (f
 /// helper calls it first, before any `Gpu` exists, so `Gpu::charged_bytes`
 /// is populated.
 pub fn publish_ceiling() {
-    memauth::publish_limits(Some(64 << 30), Some(64 << 30));
+    memauth::publish_limits(memauth::Limits { vram_total: Some(64 << 30), ram_total: Some(64 << 30), coherent_tier: false });
 }
 
 /// Run the `#[ignore]`d helper test `helper` of the calling test binary in a

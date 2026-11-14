@@ -80,7 +80,7 @@ fn quantized_boundaries_train_the_adapters_the_fp32_boundaries_do_to_the_formats
 
 #[test]
 fn a_quantized_stream_holds_fewer_device_bytes_than_the_fp32_one() {
-    memauth::publish_limits(Some(64 << 30), Some(64 << 30));
+    memauth::publish_limits(memauth::Limits { vram_total: Some(64 << 30), ram_total: Some(64 << 30), coherent_tier: false });
     // Many layers and rows so the boundary stream dominates the fixed buffers.
     let cfg = QwenConfig { n_layers: 12, block_size: 96, max_position_embeddings: 96, ..config() };
     let init = qwen3::init_weights(&cfg, 5);

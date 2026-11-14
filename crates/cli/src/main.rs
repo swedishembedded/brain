@@ -15,7 +15,6 @@
 mod args;
 mod caps_cli;
 mod data_cli;
-mod decide_cli;
 mod devices_api;
 mod devices_cli;
 mod doctor_cli;
@@ -112,7 +111,9 @@ MEMORY CEILINGS (global - valid on any subcommand)
                             model automatically - they are enforced at the one
                             allocation path every model uses. Unset means no
                             ceiling (the default) and costs nothing.
-                            Else $BRAIN_LIMIT_VRAM_TOTAL / $BRAIN_LIMIT_RAM_TOTAL.
+  --coherent-tier           count host memory a card reads coherently (GH200's
+                            Grace memory) as that card's second tier: a managed
+                            allocation the VRAM ceiling refuses spills into it.
   Example: brain --limit-vram-total 8G qwen3 generate --prompt hi
 
 CONFIG FILE (global - valid on any subcommand)
@@ -157,7 +158,7 @@ DIAGNOSTIC VERBOSITY (global - valid on any subcommand, including auto-fetch)
   -v, --verbose [0-3]      0 errors only (default) | 1 +warnings | 2 +lifecycle
                            (model activate/evict, auto-fetch download progress)
                            | 3 +fine-grained detail. Repeatable (-v -v = 2);
-                           bare --verbose (no number) means 1. Else $BRAIN_VERBOSE.
+                           bare --verbose (no number) means 1.
 
 TRACING (structured, per-component; global - valid on any subcommand)
   --trace-<family> <0-5>   0 off (default) | 1 errors | 2 +warnings | 3 +lifecycle
@@ -198,25 +199,26 @@ LABEL (caption a dataset with a vision-language model)
       only what is missing and never overwrites a hand-edited caption unless
       --overwrite says so. `brain label --help` for the full flag list.
 
-DECIDE (decision-model training on outcome-labelled examples)
-  brain decide train --data FILE --base REF --out DIR [--freeze-encoder | --finetune-encoder]
+DECIDE (decision models: calibrated answers, and the lifecycle of their checkpoints)
+  brain decide train --data FILE --base REF --out DIR [--finetune-encoder]
       [--steps N --batch N --seed N --activations keep|recompute]
       Trains a decision head on the `train` split of a JSONL file and writes a
       checkpoint whose manifest records its lineage and says `unvalidated`.
   brain decide eval --model DIR|REF --data FILE --split validation|test
-      [--costs FILE] [--order-seed N] [--json] [--out FILE]
+      [--costs FILE --seed N] [--out report=FILE --out record=FILE]
       Accuracy against the majority baseline, NLL, Brier, ECE/AdaECE, coverage
       versus accuracy, option-order instability, cost-weighted regret and a
-      per-family breakdown, as a table or JSON.
-  brain decide promote --model DIR --data FILE --policy POLICY.json [--json]
+      per-family breakdown; `report` is the table, `record` the JSON.
+  brain decide promote --model DIR --data FILE --policy POLICY.json
       Re-evaluates DIR on the test split under the policy; only if every gate
       passes is it marked validated (what `auto` requires). A failed gate is
       printed with its margin, nothing changes, the exit code is 1.
   brain decide rollback --model DIR
       Makes the last-known-good checkpoint the validated one again.
-  brain decide inspect --data FILE [--json]
+  brain decide inspect --data FILE [--out report=FILE]
       Validates the file (schema, leakage across splits) and prints its summary.
-      `brain caps decide` lists the served `decide` action.
+  brain decide decide|models|select, and `brain decide <action> --help`: the
+      served `decide` family; `brain caps decide` lists it.
 
 INTEL NPU (OpenVINO)
   brain npu check    --onnx M [--ov-device NPU]              # ONNX op histogram + compile/coverage
@@ -1015,7 +1017,7 @@ fn install_tracing(argv: Vec<String>) -> Vec<String> {
 }
 
 /// Extract the global `-v`/`--verbose [0-3]` flags from anywhere in `argv`
-/// (else `$BRAIN_VERBOSE`) and return `(level, remaining args)`. Pure - no
+/// and return `(level, remaining args)`. Pure - no
 /// process-global side effect - so it's testable without racing every other
 /// test in this binary over `residency::log`'s one `AtomicU8`; [`main`] is
 /// the sole caller of [`residency::log::set_verbosity`] with this result.
@@ -1024,7 +1026,7 @@ fn install_tracing(argv: Vec<String>) -> Vec<String> {
 /// auto-fetch's download progress (`residency::log::info`) is visible on
 /// every command, not only `brain serve`.
 fn parse_verbosity(argv: Vec<String>) -> (u8, Vec<String>) {
-    let mut level: u8 = std::env::var("BRAIN_VERBOSE").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let mut level: u8 = 0;
     let mut rest = Vec::with_capacity(argv.len());
     let mut i = 0;
     while i < argv.len() {
@@ -1051,17 +1053,22 @@ fn parse_verbosity(argv: Vec<String>) -> (u8, Vec<String>) {
 /// Pure - no process-global side effect - so it is testable without racing
 /// every other test in this binary over `memauth`'s one `OnceLock`; [`main`]
 /// is the sole caller of [`memauth::publish_limits`] with this result, which
-/// is also what applies the `$BRAIN_LIMIT_*` fallbacks for an omitted flag.
+/// publishes exactly these flags, with no environment fallback.
 ///
 /// Hard-exits on an unparseable value, like [`select_backend`] does: the user
 /// just typed it, so a silently ignored ceiling would be the worst outcome -
 /// the run would proceed unbounded and OOM exactly as if the flag were never
 /// supported.
-fn parse_limits(argv: Vec<String>) -> (Option<u64>, Option<u64>, Vec<String>) {
-    let (mut vram, mut ram) = (None, None);
+fn parse_limits(argv: Vec<String>) -> (memauth::Limits, Vec<String>) {
+    let (mut vram, mut ram, mut coherent_tier) = (None, None, false);
     let mut rest = Vec::with_capacity(argv.len());
     let mut i = 0;
     while i < argv.len() {
+        if argv[i] == "--coherent-tier" {
+            coherent_tier = true;
+            i += 1;
+            continue;
+        }
         let slot = match argv[i].as_str() {
             "--limit-vram-total" => Some(&mut vram),
             "--limit-ram-total" => Some(&mut ram),
@@ -1089,7 +1096,7 @@ fn parse_limits(argv: Vec<String>) -> (Option<u64>, Option<u64>, Vec<String>) {
             }
         }
     }
-    (vram, ram, rest)
+    (memauth::Limits { vram_total: vram, ram_total: ram, coherent_tier }, rest)
 }
 
 /// Extract the global `--brain-data-dir <root>` flag from anywhere in `argv`
@@ -1304,6 +1311,10 @@ const RETIRED_VARIABLES: &[Retired] = &[
     Retired { name: "BRAIN_FLUX2_LORA_FOLD", replacement: "flux2 text2image / edit: {lora_fold: true}" },
     Retired { name: "BRAIN_VAE_TILE", replacement: "flux2 text2image / edit: {vae_tiling: true|false}" },
     Retired { name: "BRAIN_MINIMAXMUSIC3_CFG_PARALLEL", replacement: "minimaxmusic3 generate: {cfg_parallel: false}" },
+    Retired { name: "BRAIN_VERBOSE", replacement: "-v / --verbose N (global flag)" },
+    Retired { name: "BRAIN_LIMIT_VRAM_TOTAL", replacement: "--limit-vram-total SIZE (global flag)" },
+    Retired { name: "BRAIN_LIMIT_RAM_TOTAL", replacement: "--limit-ram-total SIZE (global flag)" },
+    Retired { name: "BRAIN_COHERENT_TIER", replacement: "--coherent-tier (global flag)" },
     Retired { name: "BRAIN_WM_RENDERER", replacement: "diamond play: {renderer: auto|software|accelerated}" },
     Retired { name: "BRAIN_CHRONOS2", replacement: "serve: {pin: [chronos2.weights=PATH]}" },
     Retired { name: "BRAIN_FINCAST", replacement: "serve: {pin: [fincast.weights=FILE]}" },
@@ -1346,10 +1357,8 @@ type ConfigSection = (Vec<String>, Vec<(String, Vec<String>)>);
 ///   caller already exported always wins. A variable brain no longer reads
 ///   ([`RETIRED_VARIABLES`]) is refused, naming its replacement.
 ///
-/// Must run before every other `parse_*`/`apply_*` call in [`main`] that
-/// reads a `BRAIN_*` variable as its own default (`parse_verbosity` reads
-/// `BRAIN_VERBOSE` directly) - so this is `main`'s FIRST call, not merely an
-/// early one.
+/// Runs first in [`main`], so a variable the file sets is in place before
+/// anything reads it.
 ///
 /// Hard-exits on a missing/unreadable/unparseable file or a value of the
 /// wrong shape: the operator named this file, so silently ignoring a mistake
@@ -1518,8 +1527,10 @@ fn main() {
     // so the ceiling is already published by the time the first byte of device
     // memory is requested - there is no window in which an allocation escapes
     // it.
-    let (limit_vram, limit_ram, argv) = parse_limits(argv);
-    memauth::publish_limits(limit_vram, limit_ram);
+    let (limits, argv) = parse_limits(argv);
+    memauth::publish_limits(limits);
+    // The CLI is configured by its flags; the environment form of these
+    // ceilings serves only a process with no CLI in the loop.
     // Before any subcommand, so every surface that resolves a models
     // directory - `pull`, auto-fetch, the served catalog scan - reads the
     // same published answer.
@@ -1582,7 +1593,6 @@ fn main() {
         Some("bench") => run_bench(&argv[2..]),
         Some("perf") => perf_cli::run_perf(&argv[2..]),
         Some("label") => label_cli::run_label(&argv[2..]),
-        Some("decide") if decide_cli::handles(argv.get(2).map(String::as_str)) => std::process::exit(decide_cli::run_decide(&argv[2..])),
         Some("caps") => std::process::exit(caps_cli::run_caps(&argv[2..])),
         Some("pull") => std::process::exit(pull_cli::run_pull(&argv[2..])),
         Some("models") => std::process::exit(models_cli::run_models(&argv[2..])),
@@ -1651,15 +1661,21 @@ mod tests {
     #[test]
     fn parse_limits_strips_both_flags_and_reads_human_sizes() {
         let argv = ["brain", "--limit-vram-total", "8G", "ltxv", "t2v", "--limit-ram-total", "16GiB", "--prompt", "x"].map(String::from).to_vec();
-        let (vram, ram, rest) = parse_limits(argv);
-        assert_eq!(vram, Some(8 << 30));
-        assert_eq!(ram, Some(16 << 30));
+        let (limits, rest) = parse_limits(argv);
+        assert_eq!(limits.vram_total, Some(8 << 30));
+        assert_eq!(limits.ram_total, Some(16 << 30));
+        assert!(!limits.coherent_tier);
         assert_eq!(rest, ["brain", "ltxv", "t2v", "--prompt", "x"].map(String::from).to_vec());
 
-        // Neither flag present: both None, args untouched -- the default path,
+        // No flag present: no ceiling, args untouched -- the default path,
         // which must stay a no-op.
-        let (vram, ram, rest) = parse_limits(["brain", "caps"].map(String::from).to_vec());
-        assert_eq!((vram, ram), (None, None));
+        let (limits, rest) = parse_limits(["brain", "caps"].map(String::from).to_vec());
+        assert_eq!(limits, memauth::Limits::default());
+        assert_eq!(rest, ["brain", "caps"].map(String::from).to_vec());
+
+        // `--coherent-tier` is a switch, stripped from anywhere.
+        let (limits, rest) = parse_limits(["brain", "caps", "--coherent-tier"].map(String::from).to_vec());
+        assert!(limits.coherent_tier);
         assert_eq!(rest, ["brain", "caps"].map(String::from).to_vec());
     }
 
@@ -1670,7 +1686,7 @@ mod tests {
     /// undocumented is a flag nobody can discover.
     #[test]
     fn every_memory_ceiling_flag_is_documented_and_every_documented_one_is_parsed() {
-        for f in ["--limit-vram-total", "--limit-ram-total", "BRAIN_LIMIT_VRAM_TOTAL", "BRAIN_LIMIT_RAM_TOTAL"] {
+        for f in ["--limit-vram-total", "--limit-ram-total", "--coherent-tier"] {
             assert!(HELP.contains(f), "{f} is implemented but absent from `brain help`");
         }
         for line in HELP.lines() {
@@ -1680,9 +1696,9 @@ mod tests {
                 continue;
             }
             let flag = format!("--limit-{name}");
-            let (vram, ram, rest) = parse_limits(["brain".to_string(), flag.clone(), "8G".to_string(), "caps".to_string()].to_vec());
+            let (limits, rest) = parse_limits(["brain".to_string(), flag.clone(), "8G".to_string(), "caps".to_string()].to_vec());
             assert_eq!(rest, ["brain", "caps"].map(String::from).to_vec(), "`brain help` documents {flag}, which parse_limits does not strip");
-            assert_eq!(vram.or(ram), Some(8 << 30), "`brain help` documents {flag}, which parse_limits does not turn into a ceiling");
+            assert_eq!(limits.vram_total.or(limits.ram_total), Some(8 << 30), "`brain help` documents {flag}, which parse_limits does not turn into a ceiling");
         }
     }
 

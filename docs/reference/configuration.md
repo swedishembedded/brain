@@ -101,7 +101,6 @@ Most users never need these - they exist for GPU-driver quirks and profiling.
 | `BRAIN_GPU_VALIDATION` | enables wgpu debug/validation instance flags | off |
 | `BRAIN_GPU_CHECKED` | enables extra wgpu-side checked-mode assertions | off |
 | `BRAIN_GPU_MEM_PERF` | switches wgpu's memory allocator to its performance-hint mode | off |
-| `BRAIN_VERBOSE` | CLI/serving log verbosity (`0` = quiet) | 0 |
 
 **NPU capability boundary.** brain can run a subset of models on an Intel NPU
 through a separate export -> compile -> run path (ONNX export, OpenVINO
@@ -145,8 +144,7 @@ capping the jobs one run takes (8 when unset).
 | Variable | Meaning | Default |
 | --- | --- | --- |
 | `BRAIN_MODELS_DIR` | model directory scanned at startup (also `--models-dir`) | `$XDG_DATA_HOME/brain/models` |
-| `BRAIN_LIMIT_VRAM_TOTAL` | environment fallback for `--limit-vram-total`: a ceiling on VRAM the whole process may hold, summed over every GPU (not per card) | no ceiling |
-| `BRAIN_LIMIT_RAM_TOTAL` | environment fallback for `--limit-ram-total`: a ceiling on host RAM the process may hold (CPU + every NPU) | no ceiling |
+| `BRAIN_LIMIT_VRAM_TOTAL`, `BRAIN_LIMIT_RAM_TOTAL`, `BRAIN_COHERENT_TIER` | the memory ceilings and coherent tier for a process with no brain CLI in the loop (an embedding application, a test binary); the CLI ignores them and takes `--limit-vram-total`, `--limit-ram-total`, `--coherent-tier` | no ceiling |
 
 See [`docs/guides/serving/serving.md`](../guides/serving/serving.md) for what admission/backpressure means in practice.
 

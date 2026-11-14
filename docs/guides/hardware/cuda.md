@@ -246,7 +246,7 @@ available and was not run on a shared card.
 
 The process memory ceiling (`--limit-vram-total`, `--limit-ram-total`) can account
 for a second tier per card: host memory the card reads coherently. It is off by
-default, so a ceiling governs the GPU-only run it always did. `BRAIN_COHERENT_TIER=1`
+default, so a ceiling governs the GPU-only run it always did. `--coherent-tier`
 declares the host as every card's second tier; only a managed allocation
 (`try_alloc_placed`) then spills into it when the card's ceiling refuses it, and
 ordinary device allocations never do. `memauth::MemoryAuthority::request_tiered`
