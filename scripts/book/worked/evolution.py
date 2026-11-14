@@ -48,6 +48,8 @@ FIRST_APPEARANCES = [
      datetime.date(2026, 6, 24)),
     ("data", "tokenizers, dataset generators, loaders", "00121704e", datetime.date(2026, 6, 24)),
     ("checking", "the finite-difference gradient check", "afbbae41d", datetime.date(2026, 6, 24)),
+    ("quantization", "post-training 8-bit integer quantization of a detector", "0aab1e42e",
+     datetime.date(2026, 6, 26)),
     ("device", "the backend traits under the device facade", "7c8c97045", datetime.date(2026, 7, 14)),
     ("serving", "one capability interface for every model's actions", "da5bdf257", datetime.date(2026, 7, 26)),
     ("serving", "the HTTP layer", "28fd28203", datetime.date(2026, 7, 31)),

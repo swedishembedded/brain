@@ -242,7 +242,7 @@ def tokenizer_stage():
             + _table(["document", "text", "tokens", "ids"], rows, "llll")
             + f"\n\nEvery base document is {', '.join(map(str, sorted(lengths)))} tokens with its separator and every fine-tuning document "
             f"{', '.join(map(str, sorted(ft_lengths)))}, so one row of {T} positions holds any of them. The artifact "
-            f"`tokenizer.bin` (a u32 count of bytes, the bytes one u8 each, a u32 count of merges, each merge as two u32 BPE ids (a byte is its value 0 to 255, merge number r is 256 + r), all "
+            f"`tokenizer.bin` (a u32 count of bytes, the bytes one u8 each, a u32 count of merges, each merge as two u32 byte-pair ids (a byte is its value 0 to 255, merge number r is 256 + r), all "
             f"little-endian) is {len(blob)} bytes with the FNV-1a digest {_hex(blob)}. The tokenizer rebuilt from those bytes alone gives "
             f"the same ids as the one that learned them, and decodes them back to the text, for {trip} of the {len(every)} cleaned "
             f"documents of both corpora.")
@@ -875,7 +875,7 @@ def _schedule_rows(p):
         wait = sum(d[j]["adm"] - d[j]["arr"] for j in d) / len(d)
         span = sum(d[j]["fin"] - d[j]["arr"] + 1 for j in d) / len(d)
         out.append((policy, r["iterations"], r["rows"], r["generated"], _int(r["flops"]), _int(r["weight_bytes"]),
-                    f"{r['weight_bytes'] / r['generated']:.1f}", _int(r["kv_bytes"]), f"{wait:.3f}", f"{span:.3f}", f"{same} of {len(reqs)}"))
+                    f"{r['weight_bytes'] / r['generated']:,.1f}", _int(r["kv_bytes"]), f"{wait:.3f}", f"{span:.3f}", f"{same} of {len(reqs)}"))
     c = per["continuous"]["done"]
     s = per["static"]["done"]
     req_rows = [(j, arr, mx, c[j]["adm"], c[j]["fin"], len(c[j]["tokens"]), s[j]["adm"], s[j]["fin"]) for j, arr, _, mx, _ in reqs]
@@ -894,7 +894,7 @@ def schedules():
             + _table(["request", "arrives", "at most tokens", "continuous: admitted", "continuous: last token", "tokens",
                       "static: admitted", "static: last token"], req_rows, "rrrrrrrr")
             + "\n\nWork, counted by these rules: an iteration is one in which at least one row runs; a row is one token through the "
-            "network (a prefill of 7 tokens is 7 rows); FLOPs are 2 for each multiply-add of the cached forward pass `extend` of "
+            "network (a prefill of 7 tokens is 7 rows); FLOPs (floating-point operations) are 2 for each multiply-add of the cached forward pass `extend` of "
             "Volume V, Chapter 12 (every matrix product, every attention score and every weighted sum of values); every iteration reads "
             f"all {_int(n_w)} served weights once, 8 bytes each; a decode row at cache length c reads the c + 1 key rows and value "
             "rows of every layer (the new token's own included), 8 bytes a number. A request's wait is its admission iteration minus "

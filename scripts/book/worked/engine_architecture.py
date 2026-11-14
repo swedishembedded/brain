@@ -29,13 +29,14 @@ def growth_cost():
     rows = []
     for n in (10, 100, 300):
         rows.append([f"{n:,}", f"{n * fronts:,}", f"{n + fronts:,}", f"{comb(tables, 2) * n:,}", f"{n:,}"])
-    head = ("Counting rule: an engine serves N architectures through F = 5 front ends, and k = 4 separate tables each "
-            "name every architecture. Without a shared interface every pair (architecture, front end) needs its own "
-            "adapter, N x F of them; with one interface every architecture implements it once and every front end "
-            "calls it once, N + F pieces. Four separate tables agree only when every one of the C(4, 2) = 6 pairs of "
-            "tables agrees on every architecture, 6 N name pairs; one registry that all four read has N rows and "
-            "nothing to keep in agreement.\n\n")
-    return head + _table(["architectures N", "adapters, one per model and front end", "pieces through one interface",
+    head = ("Counting rule: an engine serves $N_{\\mathrm{a}}$ architectures through $N_{\\mathrm{f}} = 5$ front ends, "
+            "and $k_{\\mathrm{t}} = 4$ separate tables each name every architecture. Without a shared interface every "
+            "pair (architecture, front end) needs its own adapter, $N_{\\mathrm{a}} N_{\\mathrm{f}}$ of them; with one "
+            "interface every architecture implements it once and every front end calls it once, "
+            "$N_{\\mathrm{a}} + N_{\\mathrm{f}}$ pieces. Four separate tables agree only when every one of the "
+            "$\\binom{4}{2} = 6$ pairs of tables agrees on every architecture, $6 N_{\\mathrm{a}}$ name pairs; one "
+            "registry that all four read has $N_{\\mathrm{a}}$ rows and nothing to keep in agreement.\n\n")
+    return head + _table(["architectures $N_{\\mathrm{a}}$", "adapters, one per model and front end", "pieces through one interface",
                           "name pairs that must agree, four tables", "rows of one registry"], rows)
 
 
@@ -277,7 +278,7 @@ def _edges_text(deps):
 
 def layer_check():
     layers = "; ".join(f"layer {n}: " + ", ".join(f"`{c}`" for c in CRATES if LAYER[c] == n) for n in range(1, 7))
-    head = ("Thirteen crates and their layers (" + layers + "; `brain` is the SDK's package name). Today's edges, "
+    head = ("Thirteen crates and their layers (" + layers + "; `brain` is the package name of the public library). Today's edges, "
             "\"depends on\" written as an arrow: " + _edges_text(DEPS_NOW) + ". The layers are those of "
             "`scripts/gates/crate-layers.map` and the edges are read from the `[dependencies]` tables of the thirteen "
             "crates' current `Cargo.toml` files (normal dependencies, optional ones included, development-only ones "
@@ -297,7 +298,7 @@ def layer_check():
 
 
 def change_reach():
-    head = ("For today's thirteen-crate graph of the previous table. A crate's closure, $\\mathrm{needs}(c)$, is every crate it depends on, "
+    head = ("The graph is today's thirteen-crate graph of the previous table. A crate's closure, $\\mathrm{needs}(c)$, is every crate it depends on, "
             "directly or through others; its reach is every crate other than itself whose closure contains it. The work of a change "
             "is counted in crates rebuilt and retested: the changed crate and its reach. The mean is taken over the "
             "13 crates, each counted once (divisor 13), and printed to three decimals.\n\n")
