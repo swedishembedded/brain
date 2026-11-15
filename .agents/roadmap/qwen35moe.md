@@ -274,6 +274,12 @@ intervals between the first and the last `moe_i8_grouped_mma` of a 16K prefill (
 | base (10ce4f488) | 3747 | 3744 | 80.0 % | 5.66 / 16.56 / 40.30 |
 | 1. no allocation, free or wait inside a round | 4265 | 4249 | 93.2 % | 5.67 / 16.59 / 40.87 |
 | 2. 4096-row rounds on tensor cores | 6242 | 6255 | 98.8 % | 5.67 / 16.62 / 40.38 |
+| 3. the dense engine's GDN segment kernels | 11087 | 11055 | ~100 % (device-timed) | 4.53 / 12.63 / 29.67 (*) |
+
+(*) Step 3's tree includes the shared fused GQA decode attention landed beside it (knowledge 469); none of this
+lane's changes is on the decode path. nsys stopped recording CUDA activity on the node for step 3 ("No CUDA events
+collected", also on runs that recorded before), so its busy figure is the engine's own: 1503 ms of device time a
+16K prefill pass (`qwen35moe_decode_profile`, kernel timing on) against 1488 ms of wall time.
 
 - [x] Step 1: a round's per-layer `poll_wait` (2514 `cuStreamSynchronize`, 1.63 s of host time over a 16K prompt)
   is owed only where submissions are not ordered (`qwen35`'s rule); the `Ops` handle holds its freed blocks (10.1K
@@ -285,8 +291,10 @@ intervals between the first and the last `moe_i8_grouped_mma` of a 16K prefill (
   (`qwen35moe_decode_profile`, kernel timing on): 256 / 1024 / 2048 / 4096 rows 1991 / 3038 / 5850 / 6234 tok/s. The
   activation charge was a seventh of what a round allocates (knowledge 470) and is now measured: 4.39 GiB charged
   against a 3.42 GiB peak at 4096 rows.
-- [ ] Step 3: the dense engine's GDN prefill form (bf16, warpgroup recurrence) instead of the f32 chunk chain
-  (at 4096-row rounds `gdn_chunk_loop_f32` 0.49 s + `l2norm_scale`, `bmm_tiled`, layout copies, `conv1d`, `gdn_ut_fwd`
-  ~0.6 s more, of 2.7 s kernel time).
-- [ ] Step 4: `moe_i8_grouped_mma` (1.10 s at 4096-row rounds, 41 % of kernel time): an 8-slot tile re-reads the
-  expert's weights per tile.
+- [x] Step 3: the round's Gated-DeltaNet layers run `model::gdn_segments` (convolution, chunk prep, warpgroup
+  recurrence, gated norm: one launch each) on the sequence's state row, as the dense serving rounds do; the model
+  measures the prefill form at placement and opts in to the tensor-core GDN kernels (knowledge 473). The GDN share of
+  a 16K prefill 1.1 s -> 0.08 s. Gate: `chunked_prefill::a_round_on_the_segment_kernels_leaves_the_state_a_token_
+  replay_leaves` (3.8e-7 against the replay; a round leaving half its rows to no kernel reads 1.2e-3).
+- [ ] Step 4: `moe_i8_grouped_mma` (1.07 s of a 1.50 s 16K prefill, 71 % of device time): an 8-slot tile re-reads
+  the expert's weights per tile.

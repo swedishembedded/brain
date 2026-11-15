@@ -183,8 +183,9 @@ pub fn activation_bytes(cfg: &Qwen35Config, opts: &EngineOptions) -> u64 {
 /// Layers' worth of one layer's intermediates a prefill round holds at its peak, as a ratio. Measured on gpu3 (GH200,
 /// int8 35B-A3B, bf16 KV, `prefill_round_census::the_activations_of_a_prefill_round_of_the_real_checkpoint_fit_their_
 /// charge`): 0.31 GiB above the resident at 256-row rounds and 3.42 GiB at 4096, 4.1 and 3.5 of the layer's words a
-/// row past the private recurrent slot. Not a count of live layers: the f32 Gated-DeltaNet chunk form allocates
-/// scratch of its own beyond the projections the layer's words count. Charged as 9/2 so the bound holds with a margin.
+/// row past the private recurrent slot. Not a count of live layers: the f32 Gated-DeltaNet chunk form (a device without
+/// the segment kernels) allocates scratch of its own beyond the projections the layer's words count; on the segment
+/// kernels the 4096-row peak is 2.15 GiB (2.1). Charged as 9/2 so the bound holds for both forms with a margin.
 const PREFILL_LIVE_LAYERS: (u64, u64) = (9, 2);
 
 /// Device bytes one prefill round of `rows` rows allocates beyond the weights, the KV pool and the state pool: the

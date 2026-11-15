@@ -636,7 +636,7 @@ fn gdn_ids() -> GdnIds {
         sub: SUB,
         mul: MUL,
         region_copy: REGION_COPY,
-        fast: Some(model::gdn::GdnFastIds { ut_fwd: GDN_UT_FWD, bmm_tiled: BMM_TILED, tensor_core: false }),
+        fast: Some(model::gdn::GdnFastIds { ut_fwd: GDN_UT_FWD, bmm_tiled: BMM_TILED, tensor_core: true }),
     }
 }
 
@@ -1180,7 +1180,9 @@ impl Hidden {
 /// state, or one decode token for each of several independent sequences.
 pub(crate) enum GdnCall<'a> {
     Whole,
-    Chunk(model::gdn_mixer::GdnStream<'a>),
+    /// One sequence's prefill round continuing `stream`, with the round's segment table where the device serves the
+    /// round-wide segment kernels ([`model::gdn_segments`]; `stream` is then a pool of one row).
+    Chunk(model::gdn_mixer::GdnStream<'a>, Option<&'a model::gdn_segments::GdnSegmentRound>),
     Decode(model::gdn_mixer::GdnDecodeState<'a>),
 }
 
@@ -1453,6 +1455,11 @@ impl Qwen35 {
         shard: Shard,
     ) -> Qwen35 {
         let train = !matches!(purpose, Purpose::Inference);
+        // The Gated DeltaNet form of the forward that saves nothing (the serving prefill) is measured now, not inside
+        // the first recorded step, as `qwen35`'s placement does: until it has run the exact TF32 form is served.
+        if cfg.linear_key_head_dim == 128 && cfg.linear_value_head_dim == 128 {
+            gpu.prepare_gdn_prefill();
+        }
         let resident = match purpose {
             Purpose::Training(resident) => resident,
             Purpose::Inference => None,
@@ -2131,7 +2138,7 @@ impl Qwen35 {
             // A chunked round is ONE sequence's `n` rows, with its own chunk
             // size (`n` is a round's length, unrelated to this instance's
             // construction-time `t`).
-            GdnCall::Chunk(_) => GdnShape { b: 1, h: nvh, t: n, dk: khd, dv: vhd, chunk: gdn_chunk_size(n) },
+            GdnCall::Chunk(..) => GdnShape { b: 1, h: nvh, t: n, dk: khd, dv: vhd, chunk: gdn_chunk_size(n) },
             GdnCall::Decode(_) => GdnShape { b: n, h: nvh, t: 1, dk: khd, dv: vhd, chunk: 1 },
         };
         let shape = model::gdn_mixer::GdnMixerShape { gdn, nkh: c.linear_num_key_heads, conv_kernel: c.linear_conv_kernel_dim, rms_eps: c.rms_eps };
@@ -2148,7 +2155,19 @@ impl Qwen35 {
                 None,
             ),
             GdnCall::Whole => model::gdn_mixer::gdn_mixer_stream_fwd(g, &gdn_mixer_ids(), &shape, &weights, &mixed_qkv, &bproj, &aproj, &z, n, self.is_train, None),
-            GdnCall::Chunk(cont) => model::gdn_mixer::gdn_mixer_stream_fwd(g, &gdn_mixer_ids(), &shape, &weights, &mixed_qkv, &bproj, &aproj, &z, n, self.is_train, Some(cont)),
+            GdnCall::Chunk(cont, round) => {
+                // The dense engine's serving form: convolution, chunk prep, recurrence and gated norm as one launch each
+                // over the round, on the sequence's state row in place. A training forward keeps the stream path, which
+                // saves what its backward reads.
+                let pools = model::gdn_segments::GdnSegmentPools { state: cont.state, hist: cont.hist, bf16: false };
+                let segments = round
+                    .filter(|_| !self.is_train)
+                    .and_then(|round| model::gdn_segments::gdn_mixer_segments_fwd(g, &gdn_mixer_ids(), &shape, &weights, round, &pools, &mixed_qkv, &bproj, &aproj, &z, n, 0, false, false));
+                match segments {
+                    Some(out) => (out.gated, None),
+                    None => model::gdn_mixer::gdn_mixer_stream_fwd(g, &gdn_mixer_ids(), &shape, &weights, &mixed_qkv, &bproj, &aproj, &z, n, self.is_train, Some(cont)),
+                }
+            }
         };
 
         // out_proj (LoRA/int8 dispatch stays local). Fresh `Ops::act` call:
@@ -3914,6 +3933,10 @@ impl Qwen35 {
         g.write(&offsets, &(0..n).map(|i| pos_start + i).collect::<Vec<u32>>());
         g.write(&seq_lens, &(0..n).map(|i| pos_start + i + 1).collect::<Vec<u32>>());
 
+        // The round is one segment of the sequence's state row (a pool of one row), built once for every recurrent layer.
+        let gdn_round = (!self.is_train && c.layer_types().contains(&LayerType::Linear))
+            .then(|| model::gdn_segments::GdnSegmentRound::new(g, &[model::gdn_segments::SegmentSpan { row0: 0, rows: n, slot: 0 }]))
+            .flatten();
         let pooled = n >= self.chunk_arena_min_rows.get();
         if pooled {
             // The quantised activations and the GEMM outputs are allocated by the
@@ -3951,7 +3974,7 @@ impl Qwen35 {
             let mixer_out = match types[l] {
                 LayerType::Linear => {
                     let cont = model::gdn_mixer::GdnStream { state: &caches.gdn_state[l], hist: &caches.gdn_hist[l] };
-                    self.layer_gdn_fwd(l, &xn1, n, GdnCall::Chunk(cont)).0
+                    self.layer_gdn_fwd(l, &xn1, n, GdnCall::Chunk(cont, gdn_round.as_ref())).0
                 }
                 LayerType::Full => {
                     let ctx = GqaChunkCtx {
