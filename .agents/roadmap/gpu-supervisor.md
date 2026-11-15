@@ -325,8 +325,11 @@ scanned encoder as `Built::Hostable`, which `ScanSettings::worker_hosting`
 wraps in a `SupervisedModel` when it covers `lfm`. The encoder's own
 `run_batch` (equal-length jobs, `--max-batch` per forward, progress after
 each forward) runs in the worker on the whole group. An encoder supplied on
-demand (`StoreSupplier`, `serving::model_dir::resident_for_local`) is still
-built in process: that path takes no hosting yet.
+demand (`StoreSupplier`, `serving::model_dir::resident_for_local`) is hosted
+the same way: the supplier carries the server's `WorkerHosting`, and
+`resident_for_local` serves a `Built::Hostable` through it
+(`an_encoder_supplied_on_demand_runs_in_a_worker_when_its_family_is_hosted`
+in `brain-serving`, beside the scan's own test).
 
 `crates/cli/tests/it/worker_hosted_lfm.rs` (4 tests, P40s): six equal-length
 jobs at two per forward answer in a worker as in process (every embedding
@@ -445,9 +448,6 @@ only the rest, and a promotion goes back to that card first.
   cover (the worker could report its resident set after `open`, or the
   estimate could add the model's own `ram`), and a host short of memory
   refuses the claim rather than evicting idle residents to make room.
-* **Models supplied on demand.** `resident_for_local` (the `StoreSupplier`
-  path that builds a model a request names but the scan did not serve)
-  builds in process; it needs the scan's `worker_hosting`.
 * **The Qwen3 embedding resident.** It is a stateless `ProviderResident`
   over `QwenProvider`, which loads on first use and keeps the model inside
   the provider; hosting it needs a `HostedFamily` that rebuilds the provider

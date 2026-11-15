@@ -444,7 +444,8 @@ WORKER HOSTING  (a model's code in a supervised worker process on its card,
                 so a driver call that wedges or crashes ends that process,
                 never the server)
   --worker-hosted FAMILY[,FAMILY]  run every model of FAMILY in a worker
-                         (repeatable). Families: decision, lfm. Default: every
+                         (repeatable), on disk at startup or fetched with
+                         --autofetch. Families: decision, lfm. Default: every
                          family runs in this process. A job whose worker misses
                          its deadline or dies fails at once with the reason;
                          the worker is killed and reaped, its card quarantined
@@ -1530,7 +1531,10 @@ const SHUTDOWN_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_se
 /// one per surface): `StoreSupplier`'s in-flight map is what makes concurrent
 /// requests for the same cold model share a single fetch rather than each
 /// surface racing its own download.
-fn build_auto_fetch_supplier(models_dir: Option<&Path>, autofetch: bool) -> Option<Arc<dyn residency::ModelSupplier>> {
+///
+/// A fetched model of a family `hosting` names (`--worker-hosted`) is served
+/// from a worker, as one already on disk at startup is.
+fn build_auto_fetch_supplier(models_dir: Option<&Path>, autofetch: bool, hosting: Option<residency::supervised::WorkerHosting>) -> Option<Arc<dyn residency::ModelSupplier>> {
     if !autofetch {
         eprintln!("brain serve: auto-fetch off -- a request for a model that is not pulled errors (pass --autofetch to enable on-demand fetching)");
         return None;
@@ -1540,7 +1544,7 @@ fn build_auto_fetch_supplier(models_dir: Option<&Path>, autofetch: bool) -> Opti
     // scan would find it again.
     let store = brain_modelstore::Store::new(models_dir?.to_path_buf());
     let hub: Box<dyn brain_modelstore::Hub> = Box::new(brain_modelstore::HfHub::new());
-    Some(Arc::new(crate::supply::StoreSupplier::new(store, hub)))
+    Some(Arc::new(crate::supply::StoreSupplier::new(store, hub).with_worker_hosting(hosting)))
 }
 
 /// The startup line naming what is served. An empty list is said outright
@@ -1572,7 +1576,7 @@ fn run_apis(a: RunApis) {
     // supplier and the healer - so the flag decides the store everywhere.
     let models_dir = loader::model_dir::resolve(a.models_dir.as_deref());
     let store = a.pins.with_models_dir(models_dir.clone());
-    let supplier = build_auto_fetch_supplier(models_dir.as_deref(), a.autofetch);
+    let supplier = build_auto_fetch_supplier(models_dir.as_deref(), a.autofetch, a.knobs.worker_hosting.clone());
     // `--training` is the one switch for every training action, not only
     // `brain/train`'s: without it every surface refuses them.
     let training = a.knobs.train.is_some();
@@ -1902,8 +1906,8 @@ mod tests {
     fn the_auto_fetch_supplier_is_built_only_when_fetching_is_enabled() {
         let dir = std::env::temp_dir().join(format!("run-cli-autofetch-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        assert!(super::build_auto_fetch_supplier(Some(&dir), false).is_none(), "fetching is opt-in");
-        assert!(super::build_auto_fetch_supplier(Some(&dir), true).is_some(), "--autofetch builds the supplier");
+        assert!(super::build_auto_fetch_supplier(Some(&dir), false, None).is_none(), "fetching is opt-in");
+        assert!(super::build_auto_fetch_supplier(Some(&dir), true, None).is_some(), "--autofetch builds the supplier");
         std::fs::remove_dir_all(&dir).ok();
     }
 

@@ -144,11 +144,20 @@ pub struct StoreSupplier {
     /// Held for the whole of one fetch: models are fetched one at a time, so
     /// requests naming many repos cannot start that many downloads at once.
     fetching: Mutex<()>,
+    /// `--worker-hosted`: a fetched model of a family it names is served from a worker, as the startup scan serves
+    /// one already on disk.
+    hosting: Option<residency::supervised::WorkerHosting>,
 }
 
 impl StoreSupplier {
     pub fn new(store: Store, hub: Box<dyn Hub>) -> StoreSupplier {
-        StoreSupplier { store, hub, fetching: Mutex::new(()) }
+        StoreSupplier { store, hub, fetching: Mutex::new(()), hosting: None }
+    }
+
+    /// Serve each fetched model of a family `hosting` names from a supervised worker.
+    pub fn with_worker_hosting(mut self, hosting: Option<residency::supervised::WorkerHosting>) -> StoreSupplier {
+        self.hosting = hosting;
+        self
     }
 
     fn do_ensure(&self, model: &str, exec: &Executor, progress: &mut dyn FnMut(&str, u32, u32), cancel: &capability::CancelToken) -> Result<(), String> {
@@ -220,7 +229,7 @@ impl StoreSupplier {
         // auto-fetch gets the historical 24576 default rather than
         // auto-sized context, unlike one already on disk at startup
         // (`model_dir::discover`, which DOES receive the real config).
-        let resident = serving::model_dir::resident_for_local(&local, catalog::resident_llm::QwenServeConfig::default(), catalog::resident_qwen35::Qwen35Sizing::default(), None).map_err(|e| format!("{model}: {e}"))?;
+        let resident = serving::model_dir::resident_for_local(&local, catalog::resident_llm::QwenServeConfig::default(), catalog::resident_qwen35::Qwen35Sizing::default(), None, self.hosting.as_ref()).map_err(|e| format!("{model}: {e}"))?;
         exec.register_if_absent(resident);
         Ok(())
     }

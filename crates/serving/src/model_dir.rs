@@ -465,10 +465,7 @@ impl Scan {
         let model = match &built {
             Built::Qwen(_) => built.erased(),
             Built::Other(other) => catalog::sampling_defaults::with_checkpoint_sampling(other.clone(), dir),
-            Built::Hostable(resident, spec) => {
-                let served = residency::supervised::WorkerHosting::serve(self.settings.worker_hosting.as_ref(), resident.clone(), spec.clone());
-                catalog::sampling_defaults::with_checkpoint_sampling(served, dir)
-            }
+            Built::Hostable(..) => catalog::sampling_defaults::with_checkpoint_sampling(built.served(self.settings.worker_hosting.as_ref()), dir),
             Built::Multi(multi) => {
                 self.multi.push(multi.clone());
                 return;
@@ -540,6 +537,14 @@ impl Built {
             // The serving process answers the manifest; the worker rebuilds the bare resident from its spec.
             Built::Hostable(o, spec) => Built::Hostable(Arc::new(residency::OfArchitecture::new(arch, o)), spec),
             Built::Multi(m) => Built::Multi(Arc::new(residency::OfArchitecture::new(arch, m))),
+        }
+    }
+
+    /// The resident to register: a hostable one from a worker when `hosting` covers its family.
+    fn served(&self, hosting: Option<&residency::supervised::WorkerHosting>) -> Arc<dyn ResidentModel> {
+        match self {
+            Built::Hostable(resident, spec) => residency::supervised::WorkerHosting::serve(hosting, resident.clone(), spec.clone()),
+            other => other.erased(),
         }
     }
 
@@ -857,8 +862,11 @@ fn resident_for(weights: &str, card: &ModelCard, tokenizer: Option<&str>, qwen_c
 /// No card is offered here: a model that spans cards is never auto-fetched
 /// (it has no default reference), so it reaches serving only through
 /// [`discover`], which hands it the cards it may use.
-pub fn resident_for_local(local: &brain_modelstore::LocalModel, qwen_cfg: catalog::resident_llm::QwenServeConfig, qwen35_sizing: catalog::resident_qwen35::Qwen35Sizing, encoder_batch: Option<u32>) -> Result<Arc<dyn ResidentModel>, String> {
-    build_for_local(local, qwen_cfg, qwen35_sizing, encoder_batch, &[]).map(|built| built.erased())
+///
+/// A model of a family `hosting` covers is served from a supervised worker,
+/// as the scan serves it ([`ScanSettings::worker_hosting`]).
+pub fn resident_for_local(local: &brain_modelstore::LocalModel, qwen_cfg: catalog::resident_llm::QwenServeConfig, qwen35_sizing: catalog::resident_qwen35::Qwen35Sizing, encoder_batch: Option<u32>, hosting: Option<&residency::supervised::WorkerHosting>) -> Result<Arc<dyn ResidentModel>, String> {
+    build_for_local(local, qwen_cfg, qwen35_sizing, encoder_batch, &[]).map(|built| built.served(hosting))
 }
 
 fn build_for_local(local: &brain_modelstore::LocalModel, qwen_cfg: catalog::resident_llm::QwenServeConfig, qwen35_sizing: catalog::resident_qwen35::Qwen35Sizing, encoder_batch: Option<u32>, gpus: &[u32]) -> Result<Built, String> {
@@ -1227,26 +1235,65 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// Worker hosting for the LFM2.5 encoders whose worker is a fake that refuses every request, so an activation
+    /// says whether it went to a worker.
+    #[cfg(unix)]
+    fn refusing_lfm_hosting() -> residency::supervised::WorkerHosting {
+        use residency::supervised::{Deadlines, WorkerHosting};
+        let refuse = r#"while IFS= read -r line; do echo "${line%% *} err refused by the test worker"; done"#;
+        let command = gpu_supervisor::WorkerCommand::new("/bin/sh").arg("-c").arg(refuse);
+        let health = Arc::new(gpu_supervisor::Health::new(gpu_supervisor::BreakerPolicy::default(), std::time::Duration::from_secs(2)));
+        let deadline = std::time::Duration::from_secs(10);
+        WorkerHosting::new(command, health, Deadlines { open: deadline, run: deadline, reap: deadline }, vec![catalog::resident_lfm::FAMILY.to_string()])
+    }
+
+    /// Why activating `enc`'s instance for an `embed` job failed.
+    #[cfg(unix)]
+    fn activation_error(enc: &dyn ResidentModel) -> String {
+        let key = enc.instance_key("embed", &capability::Invocation::new().set("text", serde_json::json!("hi")));
+        enc.activate(&key, residency::Device::Gpu(0)).err().expect("the fake worker refuses")
+    }
+
     /// With `--worker-hosted lfm` a scanned encoder is built in a worker:
     /// activating it starts the worker command (here a fake that refuses
     /// every request) instead of loading the weights in this process.
     #[test]
     #[cfg(unix)]
     fn a_scanned_encoder_runs_in_a_worker_when_its_family_is_hosted() {
-        use residency::supervised::{Deadlines, WorkerHosting};
         let dir = tmp_dir("hosted-lfm");
         write_tokenizer(&dir);
         write_st(&dir, "enc.safetensors", "toy-enc", "lfm");
-        let refuse = r#"while IFS= read -r line; do echo "${line%% *} err refused by the test worker"; done"#;
-        let command = gpu_supervisor::WorkerCommand::new("/bin/sh").arg("-c").arg(refuse);
-        let health = Arc::new(gpu_supervisor::Health::new(gpu_supervisor::BreakerPolicy::default(), std::time::Duration::from_secs(2)));
-        let deadline = std::time::Duration::from_secs(10);
-        let hosting = WorkerHosting::new(command, health, Deadlines { open: deadline, run: deadline, reap: deadline }, vec![catalog::resident_lfm::FAMILY.to_string()]);
-        let residents = discover(&dir, &ScanSettings { worker_hosting: Some(hosting), ..Default::default() }).residents;
+        let residents = discover(&dir, &ScanSettings { worker_hosting: Some(refusing_lfm_hosting()), ..Default::default() }).residents;
         let enc = residents.iter().find(|r| r.manifest().model == "toy-enc").expect("the encoder is served");
-        let key = enc.instance_key("embed", &capability::Invocation::new().set("text", serde_json::json!("hi")));
-        let err = enc.activate(&key, residency::Device::Gpu(0)).err().expect("the fake worker refuses");
+        let err = activation_error(&**enc);
         assert!(err.contains("refused by the test worker"), "activation went to the worker: {err}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A model supplied on demand (`resident_for_local`, what an auto-fetch builds) is hosted as the scan hosts
+    /// it: in a worker when its family is named, in process otherwise.
+    #[test]
+    #[cfg(unix)]
+    fn an_encoder_supplied_on_demand_runs_in_a_worker_when_its_family_is_hosted() {
+        let dir = tmp_dir("hosted-lfm-on-demand");
+        write_tokenizer(&dir);
+        write_st(&dir, "enc.safetensors", "toy-enc", "lfm");
+        let local = brain_modelstore::LocalModel {
+            reference: brain_modelref::ModelRef::parse("toy/enc").unwrap(),
+            dir: dir.clone(),
+            weights: dir.join("enc.safetensors"),
+            tokenizer: Some(dir.join("tokenizer.json")),
+            card: Some(ModelCard::new("toy-enc", "lfm")),
+            format: brain_modelstore::Format::Safetensors,
+            adapter: None,
+            roles: None,
+        };
+        let build = |hosting: Option<&residency::supervised::WorkerHosting>| resident_for_local(&local, Default::default(), Default::default(), None, hosting).expect("the encoder builds");
+        let hosting = refusing_lfm_hosting();
+        let err = activation_error(&*build(Some(&hosting)));
+        assert!(err.contains("refused by the test worker"), "activation went to the worker: {err}");
+        let err = activation_error(&*build(None));
+        assert!(!err.contains("refused by the test worker"), "without hosting the encoder is built in process: {err}");
         std::fs::remove_dir_all(&dir).ok();
     }
 

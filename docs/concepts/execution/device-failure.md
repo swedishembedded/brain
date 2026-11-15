@@ -60,7 +60,8 @@ the model is demoted, so that context (about 150 MiB on a P40 <!-- perf-number: 
 against the card until the model is promoted back there or dropped.
 
 Two families can be hosted this way: `decision` (the decide and Laya
-models) and `lfm` (LFM2.5 encoders served from the model store). Every other
+models) and `lfm` (LFM2.5 encoders served from the model store, on disk at
+startup or fetched on demand with `--autofetch`). Every other
 family runs in the serving process; naming one in the
 flag stops the server at startup with the list of families that can be
 hosted. `--worker-deadline-s SECS` (900 by default <!-- perf-number: the flag's default, a configured bound not a measurement -->) bounds how
