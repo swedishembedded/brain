@@ -345,7 +345,8 @@ pub fn directional_check<M: CheckModel>(m: &M, eps: f32, n_dirs: usize, seed: u6
     for name in m.param_names() {
         let w0 = m.read_weight(&name);
         let g = m.read_grad(&name);
-        let mut best: Option<Check> = None;
+        // (check, whether its central difference resolved anything: equal losses at both ends measured nothing).
+        let mut best: Option<(Check, bool)> = None;
 
         for _ in 0..n_dirs.max(1) {
             let v: Vec<f32> = (0..w0.len())
@@ -364,13 +365,20 @@ pub fn directional_check<M: CheckModel>(m: &M, eps: f32, n_dirs: usize, seed: u6
             let abs_err = (analytic - numeric).abs();
             let denom = analytic.abs().max(numeric.abs()).max(1e-3);
             let cand = Check { param: name.clone(), analytic, numeric, abs_err, rel_err: abs_err / denom };
-            // Keep the direction with the smallest relative error (best conditioned).
-            if best.as_ref().is_none_or(|b| cand.rel_err < b.rel_err) {
-                best = Some(cand);
+            let resolved = lp != lm;
+            // Keep the direction with the smallest relative error (best conditioned), among the directions whose
+            // difference resolved the loss at all: an unresolved one has numeric 0, and for a gradient below the
+            // 1e-3 floor of `denom` its relative error is small, so it would otherwise win over a real measurement.
+            let better = match &best {
+                None => true,
+                Some((b, b_resolved)) => (resolved && !b_resolved) || (resolved == *b_resolved && cand.rel_err < b.rel_err),
+            };
+            if better {
+                best = Some((cand, resolved));
             }
         }
         m.write_weight(&name, &w0); // restore
-        checks.push(best.unwrap());
+        checks.push(best.expect("at least one direction").0);
     }
     Report { checks }
 }
