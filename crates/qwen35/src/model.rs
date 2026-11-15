@@ -4840,8 +4840,8 @@ impl Qwen35 {
             on(LayerEvent::BeforeBackward(l))?;
             // The rebuild, the MLP row chunks and the input gradients of the layer read each frozen weight
             // from one decode.
-            let _decoded = self.ops.decoded_weights();
-            let _pass = g.pass_scope();
+            let decoded = self.ops.decoded_weights();
+            let pass = g.pass_scope();
             // This layer's input boundary (decoded into `res[0]` when packed).
             let x = match &self.res_saved {
                 Some(saved) => {
@@ -4890,6 +4890,11 @@ impl Qwen35 {
                 d_res_l = joined;
             }
             d_res_next = d_res_l;
+            // The layer's held submissions issue and its decodes end before the event: a layer-streamed build reads
+            // the layer's gradients and updates its weights there, after every product of the layer and outside the
+            // decode scope.
+            drop(pass);
+            drop(decoded);
             if rebuilt.is_some() {
                 // Return this layer's rebuilt activations before the next
                 // layer allocates its own.
