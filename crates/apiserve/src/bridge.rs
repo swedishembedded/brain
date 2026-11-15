@@ -653,6 +653,10 @@ impl StreamedJob<'_> {
                 if let Some(piece) = p.delta {
                     tx_progress.send(StreamMsg::Delta(piece));
                 } else if let Some(ev) = p.event {
+                    // A frame that counts steps (a fine-tune's loss per step) is the job's progress too.
+                    if forward_steps && p.total > 0 {
+                        tx_progress.send(StreamMsg::Progress(p.step, p.total));
+                    }
                     tx_progress.send(StreamMsg::Event(ev));
                 } else if forward_steps {
                     tx_progress.send(StreamMsg::Progress(p.step, p.total));

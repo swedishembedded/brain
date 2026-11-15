@@ -481,6 +481,27 @@ async fn a_running_job_reports_its_progress() {
     let _ = call(&rig.app, Method::DELETE, &format!("/v1/jobs/{id}"), "alice", None).await;
 }
 
+/// Spec: a job whose steps arrive as structured frames (a fine-tune's loss per step) reports them as its progress
+/// too, so `GET /v1/jobs/{id}` says how far a training run is and not `step 0 of 0` until it ends.
+#[tokio::test]
+async fn a_job_that_reports_its_steps_as_frames_shows_them_as_its_progress() {
+    let rig = rig();
+    let (_, created) = call(&rig.app, Method::POST, "/v1/jobs", "alice", Some(run_body("brain-trainer", "train", json!({"steps": 100}), json!({})))).await;
+    let id = created["id"].as_str().unwrap().to_string();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let (_, status) = call(&rig.app, Method::GET, &format!("/v1/jobs/{id}"), "alice", None).await;
+        if status["progress"]["step"].as_u64().is_some_and(|s| s > 0) {
+            assert_eq!(status["status"], "running");
+            assert_eq!(status["progress"]["total"], 100);
+            break;
+        }
+        assert!(status["status"] == "running" && Instant::now() < deadline, "no step was ever reported as progress: {status}");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let _ = call(&rig.app, Method::DELETE, &format!("/v1/jobs/{id}"), "alice", None).await;
+}
+
 #[tokio::test]
 async fn a_job_can_be_cancelled_and_the_model_sees_it() {
     let rig = rig();
