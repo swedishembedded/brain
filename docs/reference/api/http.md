@@ -172,7 +172,8 @@ launches a local qwen3 Anthropic surface and points Claude Code at it.
   characters / 4, no tokenizer), and the `input_tokens` in an Anthropic
   stream's `message_start` is the same heuristic, because the real count is
   not known until the model has rendered and encoded the prompt. The
-  non-streaming reply and the OpenAI-shaped `usage` chunk carry the real
+  non-streaming reply, the Anthropic stream's closing `message_delta` (which
+  repeats `input_tokens`) and the OpenAI-shaped `usage` chunk carry the real
   numbers.
 - **Sampling parameters.** `temperature`, `top_p`, `top_k` (an integer in
   0..=1000) and `seed` are passed on only when the request sets them; otherwise
@@ -207,9 +208,10 @@ launches a local qwen3 Anthropic surface and points Claude Code at it.
   when it is spent the closing tag and the blank line after it are forced and
   the model answers. A reply reports the tokens spent thinking in
   `usage.completion_tokens_details.reasoning_tokens`.
-- **Prompt cache.** `usage.prompt_tokens_details.cached_tokens` is how many of
-  `prompt_tokens` the model's prefix cache served instead of computing (0 for a
-  cold prompt); a model that does not report it omits the field.
+- **Prompt cache.** `usage.prompt_tokens_details.cached_tokens` (Anthropic:
+  `usage.cache_read_input_tokens`) is how many of the prompt tokens the model's
+  prefix cache served instead of computing (0 for a cold prompt); a model that
+  does not report it omits the field.
 - **Sampled tokens (chat).** `logprobs: true` makes the reply carry
   `choices[0].logprobs.content[]` (`{token, logprob, bytes, top_logprobs}`; the
   server relays ids, so `token` is `token_id:<id>`, `top_logprobs` is empty) and

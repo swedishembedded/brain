@@ -1276,11 +1276,13 @@ async fn anthropic_messages_stream_orders_events_and_concatenates() {
         .collect();
     assert_eq!(cat, "Hello world");
 
-    // message_delta carries the mapped stop_reason + cumulative output tokens.
+    // message_delta carries the mapped stop_reason + cumulative output tokens,
+    // and the real prompt count: message_start could only estimate it.
     let (_, md) = events.iter().find(|(e, _)| e == "message_delta").unwrap();
     let v: Value = serde_json::from_str(md).unwrap();
     assert_eq!(v["delta"]["stop_reason"], "end_turn");
     assert_eq!(v["usage"]["output_tokens"], 2);
+    assert_eq!(v["usage"]["input_tokens"], 5, "the real prompt count closes the stream");
 }
 
 #[tokio::test]

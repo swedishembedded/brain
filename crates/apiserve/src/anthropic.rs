@@ -478,6 +478,16 @@ fn tool_use_block(call: &Value) -> Result<Value, ApiError> {
     Ok(json!({ "type": "tool_use", "id": call.get("id").and_then(Value::as_str).unwrap_or_default(), "name": name, "input": input }))
 }
 
+/// Anthropic's `usage`: the prompt as `input_tokens`, of it the prefix cache's share
+/// as `cache_read_input_tokens` when the model reports one.
+fn usage(prompt: i64, completion: i64, cached: Option<i64>) -> Value {
+    let mut usage = json!({ "input_tokens": prompt, "output_tokens": completion });
+    if let Some(cached) = cached {
+        usage["cache_read_input_tokens"] = json!(cached);
+    }
+    usage
+}
+
 /// The non-streaming `Message` response body: the reasoning (when there is
 /// any) as a `thinking` block, then the answer as a `text` block (left out of a
 /// turn that only calls tools), then one `tool_use` block per call.
@@ -500,7 +510,7 @@ pub fn from_outcome(model: &str, co: &bridge::ChatOutcome) -> Result<Value, ApiE
         "model": model,
         "stop_reason": stop_reason(&co.finish),
         "stop_sequence": Value::Null,
-        "usage": { "input_tokens": co.prompt_tokens, "output_tokens": co.completion_tokens },
+        "usage": usage(co.prompt_tokens, co.completion_tokens, co.cached_tokens),
     }))
 }
 
@@ -555,6 +565,8 @@ fn render_messages_stream(mut src: bridge::EventStream, model: String, est_input
         let mut blocks = Blocks::default();
         let mut finish = String::from("stop");
         let mut completion = 0i64;
+        let mut prompt = est_input;
+        let mut cached = None;
         // Whether any real token delta was streamed. A resident that only
         // reports coarse `Progress::step` ticks (no `delta`) - `brain/qwen3omnimoe` is
         // one - carries its whole answer in the terminal `Outcome`, and would
@@ -595,6 +607,8 @@ fn render_messages_stream(mut src: bridge::EventStream, model: String, est_input
                 StreamMsg::Done(outcome) => {
                     let co = bridge::read_chat_outcome(&outcome);
                     completion = co.completion_tokens;
+                    prompt = co.prompt_tokens;
+                    cached = co.cached_tokens;
                     finish = co.finish;
                     final_text = co.text;
                     final_calls = co.tool_calls;
@@ -630,11 +644,12 @@ fn render_messages_stream(mut src: bridge::EventStream, model: String, est_input
             }
         }
 
-        // message_delta (stop_reason + cumulative output) → message_stop.
+        // message_delta (stop_reason + cumulative usage, the real prompt count
+        // included: message_start could only estimate it) → message_stop.
         yield Ok(Event::default().event("message_delta").data(json!({
             "type": "message_delta",
             "delta": { "stop_reason": stop_reason(&finish), "stop_sequence": Value::Null },
-            "usage": { "output_tokens": completion },
+            "usage": usage(prompt, completion, cached),
         }).to_string()));
         yield Ok(Event::default().event("message_stop").data(json!({ "type": "message_stop" }).to_string()));
     };
@@ -832,6 +847,14 @@ mod tests {
         assert!(refused(json!({"tool_choice": {"type": "auto", "disable_parallel_tool_use": true}})).contains("disable_parallel_tool_use"));
         assert!(refused(json!({"messages": [{"role": "user", "content": [{"type": "tool_result", "content": "x"}]}]})).contains("tool_use_id"));
         assert_eq!(refused(json!({"tool_choice": {"type": "tool", "name": "Read"}})), "");
+    }
+
+    /// The usage reports the prompt as `input_tokens` and, when the model says how
+    /// much of it the prefix cache served, that share as `cache_read_input_tokens`.
+    #[test]
+    fn usage_carries_the_prefix_caches_share_of_the_prompt() {
+        assert_eq!(usage(40, 3, Some(32)), json!({"input_tokens": 40, "output_tokens": 3, "cache_read_input_tokens": 32}));
+        assert_eq!(usage(40, 3, None), json!({"input_tokens": 40, "output_tokens": 3}));
     }
 
     /// A model's call becomes a `tool_use` block with an object `input`, and
