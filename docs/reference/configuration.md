@@ -160,6 +160,12 @@ See [`docs/guides/serving/serving.md`](../guides/serving/serving.md) for what ad
 | `BRAIN_QWEN3TTS_SPEAKER` | overrides the speaker-encoder weights used for voice-clone evaluation | derived from the resolved qwen3tts `weights_dir` role |
 | `BRAIN_MINILM_DIR` | encoder checkpoint directory for the `salesconv_embed` developer binary | the MiniLM checkpoint under the models directory |
 
+The weight tier is the `brain serve --weight-format` flag; unset, a Qwen3
+dense checkpoint is held at the floating precision it stores its linears in
+(bf16 for the Hugging Face releases), and one of 6B parameters or more falls
+to int8 only where that does not fit the largest card
+([Qwen3](models/qwen3.md)).
+
 The Qwen3 and Qwen3.8 serving sizes are `brain serve` flags, not variables:
 `--ctx` (default: auto-sized to the card), `--max-batch` (default
 16), the KV pool size (default: batch x half a context when it fits), `--kv-calibration`, `--kv-cache fp8`, `--ctx` (default: the longest the cards hold)

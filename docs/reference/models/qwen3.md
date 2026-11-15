@@ -343,16 +343,23 @@ These apply to serving (`brain serve` flags):
   `qwen_lsa` binary, whose modes and flags it keeps.
 - `--kv-offload-gb N` - host RAM the serving engine may use to park
   preempted sessions' KV cache (default `0`, off). See below.
-- `--weight-format int8` / `--weight-format f32` - quantize the 7
-  per-layer linears to int8, or keep them fp32. Unset, a checkpoint of 6B
-  parameters or more is quantized (its fp32 weights do not fit one 24 GB
-  card) and a smaller one is not - at the real Qwen3-8B config, int8
-  shrinks the weight term from ~20.8 GiB to ~11.9 GiB. A device with no packed-int8 dot path (the CPU
-  backend, or an unusual GPU) degrades to fp32 with a printed warning
-  rather than failing.
-- `--weight-format bf16` - store the linears and the head as bf16 (exact
-  for a checkpoint that ships bf16, half the fp32 bytes in memory), decoded
-  inline.
+- Default weight tier: the linears and the head are held at the floating
+  precision the checkpoint stores them in - the bf16 Hugging Face releases
+  are served bf16 (half the fp32 bytes, the checkpoint's own values), an
+  fp32 file fp32. A checkpoint of 6B parameters or more falls to int8 only
+  where those weights plus 8 GiB of serving headroom do not fit the largest
+  card (or no card reports its memory). The SDK pipeline and `brain perf`
+  targets decide by the same rule. On Qwen3-4B (GH200, 32K context, int8 KV)
+  bf16 decodes at 7.9 ms per step for one stream against 10.6 ms for fp32 and
+  admits 35 sequences against 30; its next-token KL from the exact fp32
+  reference is 3.1e-4 / 5.7e-4 mean on two 96-prompt texts against 2.7e-4 /
+  4.8e-4 for fp32 weights on tensor cores (`qwen_bench serve-accuracy`).
+- `--weight-format f32` / `bf16` / `f16` / `int8` - hold the linears (and
+  the head) at that tier whatever the checkpoint stores. int8 quantizes the
+  7 per-layer linears (at the real Qwen3-8B config ~11.9 GiB of weights
+  against ~20.8 GiB at fp32) and is the least accurate tier. A device with
+  no packed-int8 dot path, or no half-precision storage, degrades to fp32
+  with a printed warning rather than failing.
 - `--gemm fp32` - pin exact fp32 arithmetic for the linears. By
   default the linears of fp32 weights with at least 8 rows (prefill and
   batched decode) run on TF32 tensor cores where the card has them

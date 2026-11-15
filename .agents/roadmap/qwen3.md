@@ -190,6 +190,33 @@ queried capability (`GemmPrecision::Auto`, the default of `Engine`, `FitOpts` an
   switch; `Fp32Reference` pins the portable fp32 trio.
 - Accuracy on the real 8B weights, throughput before/after and the open items: knowledge #326.
 
+## Served at the stored precision (default weight tier)
+
+One rule decides the weight tier for `brain serve` (catalog resident), the SDK
+`TextGenerationPipeline` and the `brain perf` `qwen:`/`qwen-synth:` targets:
+`qwen3::footprint::default_weight_tier` keeps the floating tier the checkpoint stores
+its linears in (`qwen3::stored_weight_tier`, read from the tensor headers) and falls to
+int8 only for 6B+ parameters where those weights plus 8 GiB do not fit the card;
+`--weight-format` always wins (`catalog::resident_llm::qwen3_weight_policy`). Knowledge #468.
+
+Qwen3-4B (bf16 release), GH200 gpu3, `brain perf run longctx --target qwen:<4B> --context 32768
+--ladder 1,16,31 --steps 4 --seed 1`, int8 KV, one run each (2026-11-15):
+
+| default tier | batch 1 ms/step (tok/s) | batch 16 tok/s | largest batch admitted at 32K |
+|---|---|---|---|
+| fp32 (before) | 10.60 (94) | 485 | 30 |
+| bf16, the stored tier (after) | 7.92 (126) | 527 | 35 (batch 31: 496 tok/s) |
+
+Accuracy, `qwen_bench serve-accuracy --weights <4B> --t 256 --gen 24`, KL of the last-token
+distribution from exact fp32 (fp32 weights, fp32 kernels; its repeat KL 0), int8 KV:
+
+| text, prompts | fp32 weights, tensor cores (old default) KL mean / max, top-1 | bf16 weights, tensor cores (new default) | bf16 weights, fp32 kernels | int8 weights |
+|---|---|---|---|---|
+| book, 96 | 2.68e-4 / 3.83e-3, 95/96 | 3.12e-4 / 4.66e-3, 94/96 | 1.85e-4 / 2.93e-3, 94/96 | 1.28e-3 / 1.05e-2, 93/96 |
+| knowledge notes, 96 | 4.85e-4 / 5.82e-3, 96/96 | 5.67e-4 / 5.03e-3, 96/96 | 3.29e-4 / 3.99e-3, 96/96 | 1.92e-3 / 1.45e-2, 95/96 |
+| book, 16 (the first 16 of the 96) | 3.08e-4 / 1.76e-3, 15/16 | 3.59e-4 / 1.67e-3, 14/16 | 1.61e-4 / 1.20e-3, 15/16 | 1.26e-3 / 3.45e-3, 14/16 |
+| knowledge notes 300-349, 16 | 2.71e-4 / 1.33e-3, 16/16 | 9.73e-4 / 1.06e-2, 16/16 | 3.32e-4 / 2.60e-3, 16/16 | 1.41e-3 / 4.16e-3, 16/16 |
+
 ## Not yet done
 
 - [ ] Faster KV swap-out: the gather side runs at about half the measured

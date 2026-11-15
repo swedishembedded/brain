@@ -211,8 +211,8 @@ impl Opener for QwenOpener<'_> {
     }
 }
 
-/// An engine for prompts of `max_tokens`, its KV cache int8 (fp8) when asked, its linears int8 when `int8` says so
-/// (by default from the parameter count up that serving quantizes). Past the checkpoint's native positions it
+/// An engine for prompts of `max_tokens`, its KV cache int8 (fp8) when asked, its linears int8 or fp32 when `int8`
+/// says so (by default the serving rule, `qwen3::footprint::default_weight_tier`, with no card known). Past the checkpoint's native positions it
 /// rotates under YaRN by `yarn`, by default the smallest power of two that covers `max_tokens`.
 fn qwen_engine(path: &str, max_tokens: u32, kv_int8: bool, kv_fp8: bool, int8: Option<bool>, yarn: Option<f32>) -> Result<qwen3::serve::Engine, String> {
     let (mut cfg, src) = qwen3::open_checkpoint(path)?;
@@ -222,7 +222,11 @@ fn qwen_engine(path: &str, max_tokens: u32, kv_int8: bool, kv_fp8: bool, int8: O
         println!("YaRN x{factor} over {native} native positions");
         cfg.rope_scaling = Some(model::rope_scaling::RopeScaling::Yarn(model::yarn::YarnConfig::new(factor, native)));
     }
-    let tier = if int8.unwrap_or_else(|| qwen3::footprint::int8_by_default(&cfg)) { qwen3::Dtype::I8 } else { qwen3::Dtype::F32 };
+    let tier = match int8 {
+        Some(true) => qwen3::Dtype::I8,
+        Some(false) => qwen3::Dtype::F32,
+        None => qwen3::footprint::default_weight_tier(&cfg, qwen3::source_weight_tier(&cfg, &*src), None),
+    };
     let mbt = max_tokens.div_ceil(BLOCK);
     // Room for the warm-up prompt the prefix cache keeps beside the measured one.
     let pool = mbt + (WARM_TOKENS as u32).div_ceil(BLOCK) + 8;

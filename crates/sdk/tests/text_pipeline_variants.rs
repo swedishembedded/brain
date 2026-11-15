@@ -72,6 +72,25 @@ fn the_precision_asked_for_is_the_one_built() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A checkpoint is loaded at the floating tier it stores its linears in when no precision is asked for: a bf16
+/// directory (how Hugging Face ships Qwen3) is held bf16, not widened to fp32.
+#[test]
+fn a_bf16_checkpoint_is_held_bf16_by_default() {
+    let cfg = qwen3::QwenConfig { qk_norm: false, tie_embeddings: false, ..qwen3::QwenConfig::tiny() };
+    let dir = common::scratch_path("text-bf16-default", "d");
+    let _ = std::fs::remove_dir_all(&dir);
+    let weights = qwen3::init_weights(&cfg, 7);
+    qwen3::export::export_hf(&weights, &cfg, &dir, &qwen3::export::HfExport { dtype: qwen3::export::HfDtype::Bf16, ..Default::default() }, &mut || true).unwrap();
+    std::fs::copy(&*tiny_tokenizer("text-bf16-default"), dir.join("tokenizer.json")).unwrap();
+    let pipe = brain::TextGenerationPipeline::builder(dir.to_str().unwrap()).load().expect("a bf16 directory loads");
+    assert_eq!(pipe.precision(), "bf16", "the stored tier is the default");
+    let out = pipe.generate_with(PROMPT_WITHIN_VOCAB, brain::TextGenerationOptions::new().chat(false).max_new_tokens(2)).unwrap();
+    assert_eq!(out.completion_tokens, 2);
+    let fp32 = brain::TextGenerationPipeline::builder(dir.to_str().unwrap()).precision("fp32").unwrap().load().expect("an fp32 build");
+    assert_eq!(fp32.precision(), "fp32", "the precision asked for wins");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A hub id names one repo: with two checkpoints of the same architecture in
 /// the store, the one asked for is the one loaded, never an ambiguity over
 /// (or a silent pick of) the other.

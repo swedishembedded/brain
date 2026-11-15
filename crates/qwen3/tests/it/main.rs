@@ -17,6 +17,7 @@ mod deepseek_chat_format;
 mod deepseek_gguf_parity;
 mod deepseek_parity;
 mod deepseek_refs_resolve;
+mod default_weight_tier;
 mod dp_parity;
 mod encoder_parity;
 mod engine_adapter_bank;

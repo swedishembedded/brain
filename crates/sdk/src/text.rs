@@ -64,7 +64,7 @@ use serde_json::json;
 use crate::{Device, Error, Result};
 
 /// The memory of the largest card this load may run on - the selected device, else the biggest one the machine
-/// has - for the weight-tier default (`qwen3::footprint::int8_weights_default`); `None` when no card reports one
+/// has - for the weight-tier default (`qwen3::footprint::default_weight_tier`); `None` when no card reports one
 /// (a CPU-only machine, or a build without the `device` surface), which keeps the size rule.
 fn largest_device_bytes() -> Option<u64> {
     #[cfg(feature = "device")]
@@ -314,8 +314,8 @@ impl TextGenerationPipeline {
         }
     }
 
-    /// The storage tier the decoder's linears were built at: `"fp32"` or
-    /// `"int8"`.
+    /// The storage tier the decoder's linears were built at: `"fp32"`,
+    /// `"bf16"`, `"f16"` or `"int8"`.
     pub fn precision(&self) -> &'static str {
         match &self.engine {
             Backend::Qwen(e) => e.precision.name(),
@@ -591,7 +591,7 @@ pub struct TextGenerationPipelineBuilder {
 
 /// The device bytes a chat load of the Qwen3 checkpoint in `dir` holds with
 /// a `context`-token KV cache: its weights at the tier a load picks on this
-/// machine's largest card (`qwen3::footprint::int8_weights_default`), the cache
+/// machine's largest card (`qwen3::footprint::default_weight_tier`), the cache
 /// and the decode scratch - the figure the load places by, read from the
 /// checkpoint's `config.json` without opening its weights. `None` when `dir`
 /// holds no Qwen3 config.
@@ -602,7 +602,8 @@ pub fn chat_footprint_bytes(dir: &Path, context: u32) -> Option<u64> {
         return None;
     }
     let cfg = qwen3::hf::decoder_config(&text).ok()?;
-    let precision = if qwen3::footprint::int8_weights_default(&cfg, largest_device_bytes()) { Precision::Int8 } else { Precision::Fp32 };
+    let stored = qwen3::stored_weight_tier(dir.to_str()?).unwrap_or(qwen3::Dtype::F32);
+    let precision = Precision::default_for(&cfg, stored);
     let shard = qwen3::Shard::whole(cfg.n_layers as usize);
     Some(qwen3::footprint::estimate_vram_bytes(&cfg, &shard, precision.dtype(), 1, context, false, true))
 }
@@ -611,6 +612,10 @@ pub fn chat_footprint_bytes(dir: &Path, context: u32) -> Option<u64> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Precision {
     Fp32,
+    /// bf16 linears and head, decoded inline: exact for a checkpoint stored bf16.
+    Bf16,
+    /// f16 linears and head, decoded inline: exact for a checkpoint stored f16.
+    F16,
     /// Group-wise int8 linears with dynamic activation quantization - lossy.
     Int8,
 }
@@ -619,19 +624,35 @@ impl Precision {
     fn from_name(name: &str) -> Result<Precision> {
         match name {
             "fp32" => Ok(Precision::Fp32),
+            "bf16" => Ok(Precision::Bf16),
+            "f16" => Ok(Precision::F16),
             "int8" => Ok(Precision::Int8),
-            other => Err(Error::Backend(format!("precision {other:?}: expected \"fp32\" or \"int8\""))),
+            other => Err(Error::Backend(format!("precision {other:?}: expected \"fp32\", \"bf16\", \"f16\" or \"int8\""))),
+        }
+    }
+    /// The tier a load that asks for none builds `cfg` at, from the tier the checkpoint stores its linears in:
+    /// the rule `brain serve` uses (`qwen3::footprint::default_weight_tier`).
+    fn default_for(cfg: &qwen3::QwenConfig, stored: qwen3::Dtype) -> Precision {
+        match qwen3::footprint::default_weight_tier(cfg, stored, largest_device_bytes()) {
+            qwen3::Dtype::BF16 => Precision::Bf16,
+            qwen3::Dtype::F16 => Precision::F16,
+            qwen3::Dtype::I8 => Precision::Int8,
+            _ => Precision::Fp32,
         }
     }
     fn name(self) -> &'static str {
         match self {
             Precision::Fp32 => "fp32",
+            Precision::Bf16 => "bf16",
+            Precision::F16 => "f16",
             Precision::Int8 => "int8",
         }
     }
     fn dtype(self) -> qwen3::Dtype {
         match self {
             Precision::Fp32 => qwen3::Dtype::F32,
+            Precision::Bf16 => qwen3::Dtype::BF16,
+            Precision::F16 => qwen3::Dtype::F16,
             Precision::Int8 => qwen3::Dtype::I8,
         }
     }
@@ -659,7 +680,7 @@ impl TextGenerationPipelineBuilder {
     /// no way to serve it through this surface, which makes the whole
     /// fine-tune unmeasurable from here. On an fp32 base the adapter's delta
     /// is folded into the targeted linears at load - exact, and decode then
-    /// costs what the base's does. On an int8 base a fold would round the
+    /// costs what the base's does. On a narrower base (bf16, f16, int8) a fold would round the
     /// delta back onto the weight grid, so the adapter runs beside the base
     /// instead ([`TextGenerationPipeline::attach_adapter`]). Either way the
     /// pipeline can switch or drop the adapter later without reloading. Rank
@@ -679,10 +700,13 @@ impl TextGenerationPipelineBuilder {
         self
     }
 
-    /// The decoder's storage tier: `"fp32"` (exact) or `"int8"` (LOSSY:
-    /// group-wise int8 linears, a quarter of the memory). Unset, a checkpoint
-    /// of 6B parameters or more is loaded int8 - its fp32 weights do not fit
-    /// one 24 GB card - and a smaller one fp32. `Err` for any other spelling.
+    /// The decoder's storage tier: `"fp32"`, `"bf16"`, `"f16"` (the linears and
+    /// the head at half width, exact for a checkpoint stored at that width) or
+    /// `"int8"` (LOSSY: group-wise int8 linears, a quarter of the memory).
+    /// Unset, the checkpoint is held at the tier it stores its linears in (a
+    /// bf16 Hugging Face checkpoint bf16), and a checkpoint of 6B parameters or
+    /// more falls to int8 only where those weights do not fit the largest card.
+    /// `Err` for any other spelling.
     pub fn precision(mut self, precision: impl AsRef<str>) -> Result<Self> {
         self.precision = Some(Precision::from_name(precision.as_ref())?);
         Ok(self)
@@ -775,7 +799,7 @@ impl TextGenerationPipelineBuilder {
         let tok_dir = tok_file.as_deref().and_then(|t| Path::new(t).parent()).map(Path::to_path_buf);
         let format = qwen3::chat::ChatFormat::for_checkpoint(tok_dir.as_deref(), &tok);
         let eos = data::generation::stop_ids(tok_dir.as_deref(), &tok, embedded.as_ref().and_then(|g| g.eos), format.end_of_turn()).map_err(|e| Error::Backend(format!("qwen3: {e}")))?;
-        let precision = precision.unwrap_or(if qwen3::footprint::int8_weights_default(&cfg, largest_device_bytes()) { Precision::Int8 } else { Precision::Fp32 });
+        let precision = precision.unwrap_or_else(|| Precision::default_for(&cfg, qwen3::source_weight_tier(&cfg, &*src)));
         let dt = precision.dtype();
 
         // Built for KV-cache DECODE, which is the only thing a generation
@@ -810,7 +834,7 @@ impl TextGenerationPipelineBuilder {
             // An fp32 base takes the adapter's delta exactly, so it is folded
             // in and decode costs what the base's does.
             Some(path) if precision == Precision::Fp32 => engine.fold_adapter(path, &*src)?,
-            // A quantized base would round the delta back onto its grid, so
+            // A narrower base (bf16, f16, int8) would round the delta back onto its grid, so
             // the adapter runs beside it instead.
             Some(path) => engine.attach_adapter(path)?,
             None => {}

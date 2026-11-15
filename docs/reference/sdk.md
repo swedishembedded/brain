@@ -133,11 +133,12 @@ let pipe = brain::TextGenerationPipeline::builder("/models/qwen3-4b.safetensors"
 ```
 
 Generation stops on the checkpoint's own end tokens, and chat requests render
-through its own template. A checkpoint of 6B parameters or more loads with
-int8 linears when the largest card cannot hold its fp32 weights plus 8 GiB
-(a 7-8B one does not fit a 24 GB card), and with fp32 linears otherwise;
-`.precision("fp32")` or `.precision("int8")` chooses explicitly, and
-`pipe.precision()` reports what was built.
+through its own template. The linears load at the floating precision the
+checkpoint stores them in (a bf16 Hugging Face release bf16, an fp32 file
+fp32); a checkpoint of 6B parameters or more loads with int8 linears only
+when the largest card cannot hold those weights plus 8 GiB - the rule
+`brain serve` uses. `.precision("fp32")`, `"bf16"`, `"f16"` or `"int8"`
+chooses explicitly, and `pipe.precision()` reports what was built.
 
 `pipe.generate_with(prompt, brain::TextGenerationOptions::new().max_new_tokens(256).temperature(0.7))`
 layers on the common knobs; the result's `prompt_tokens`/`completion_tokens`/

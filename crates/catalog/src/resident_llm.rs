@@ -450,17 +450,11 @@ pub struct QwenServeConfig {
     pub kv_calib_opt_in: bool,
     /// `--kv-offload-gb N` (fractional allowed), default `0.0` (off).
     pub kv_offload_gb: f64,
-    /// `--weight-format int8` (`Some(true)`) or `--weight-format f32`
-    /// (`Some(false)`); `None` (the default) quantizes the linears of a
-    /// checkpoint of `qwen3::footprint::INT8_WEIGHTS_FROM_PARAMS` parameters
-    /// or more, which at fp32 does not fit one 24 GB card.
-    pub weights_int8: Option<bool>,
-    /// `--weight-format bf16`: the linears and the head are stored as bf16 and decoded inline (rounded to
-    /// bf16, exact for a checkpoint that ships bf16; half the fp32 bytes). Takes precedence over `weights_int8`.
-    pub weights_bf16: bool,
-    /// A per-leaf `--weight-format` (`f32,blocks.0.mlp.up.weight=i8,...`, what `brain optimize` prints): each
-    /// linear and the head at the tier it names. Takes precedence over `weights_int8`/`weights_bf16`.
-    pub weight_tiers: Option<model::ops::TierPolicy>,
+    /// `--weight-format`: the tier of the linears and the head, uniform (`f32`, `bf16`, `f16`, `int8`, `nf4`,
+    /// `q4`) or per leaf (`f32,blocks.0.mlp.up.weight=i8,...`, what `brain optimize` prints). `None` (the
+    /// default) serves the checkpoint at the floating tier it stores them in, int8 only where that does not fit
+    /// the card ([`qwen3_weight_policy`]).
+    pub weight_format: Option<model::ops::TierPolicy>,
     /// `the prefill row cap N`, clamped to `1..=512`, default 512.
     pub max_prefill_cap: u32,
     /// `the KV pool size N`: the KV pool's size in tokens, shared by every
@@ -510,7 +504,7 @@ pub struct QwenServeConfig {
 /// What the Qwen3 paged engine honours of a [`model::policy::ServePolicy`].
 pub const QWEN3_POLICY: model::policy::PolicySupport = model::policy::PolicySupport {
     model: "qwen3",
-    weights: &[gpu_core::select::Dtype::F32, gpu_core::select::Dtype::BF16, gpu_core::select::Dtype::I8, gpu_core::select::Dtype::NF4, gpu_core::select::Dtype::Q4],
+    weights: &[gpu_core::select::Dtype::F32, gpu_core::select::Dtype::BF16, gpu_core::select::Dtype::F16, gpu_core::select::Dtype::I8, gpu_core::select::Dtype::NF4, gpu_core::select::Dtype::Q4],
     weight_rules: true,
     kv_cache: &["f32", "int8", "fp8"],
     gemm: true,
@@ -534,16 +528,7 @@ impl QwenServeConfig {
             return Err(e);
         }
         if let Some(w) = &p.weights {
-            use gpu_core::select::Dtype;
-            // A per-leaf policy, or a tier only the per-leaf build holds (the 4-bit codes), is kept whole.
-            self.weight_tiers = (w.rule_count() > 0 || matches!(w.default_dtype(), Dtype::NF4 | Dtype::Q4)).then(|| w.clone());
-            let (int8, bf16) = match w.default_dtype() {
-                Dtype::I8 => (Some(true), false),
-                Dtype::BF16 => (None, true),
-                _ => (Some(false), false),
-            };
-            self.weights_int8 = int8;
-            self.weights_bf16 = bf16;
+            self.weight_format = Some(w.clone());
         }
         if let Some(t) = p.kv_cache {
             self.kv_int8 = t.as_str() != "f32";
@@ -578,24 +563,35 @@ impl QwenServeConfig {
 
 impl Default for QwenServeConfig {
     fn default() -> QwenServeConfig {
-        QwenServeConfig { weights: None, tokenizer: None, ctx: None, auto_budget_bytes: None, card_budget_bytes: None, max_batch: 16, kv_int8: true, kv_fp8: false, kv_calib_opt_in: false, kv_offload_gb: 0.0, weights_int8: None, weights_bf16: false, weight_tiers: None, max_prefill_cap: 512, kv_tokens: None, gemm_precision: gpu_core::provider::library::GemmPrecision::Auto, fuse_residual_norm: true, exact_decode: false, adapter_bank: None, adapter_targets_named: false, refused: None, sparse_attention: None, worker_hosting: None }
+        QwenServeConfig { weights: None, tokenizer: None, ctx: None, auto_budget_bytes: None, card_budget_bytes: None, max_batch: 16, kv_int8: true, kv_fp8: false, kv_calib_opt_in: false, kv_offload_gb: 0.0, weight_format: None, max_prefill_cap: 512, kv_tokens: None, gemm_precision: gpu_core::provider::library::GemmPrecision::Auto, fuse_residual_norm: true, exact_decode: false, adapter_bank: None, adapter_targets_named: false, refused: None, sparse_attention: None, worker_hosting: None }
     }
 }
 
-/// Whether `checkpoint`'s linears are served int8: the operator's explicit choice, else
-/// `qwen3::footprint::int8_weights_default` for the largest card's free memory (the one rule the SDK shares).
-fn weights_int8_for(cfg: &QwenServeConfig, checkpoint: &qwen3::config::QwenConfig) -> bool {
-    !cfg.weights_bf16 && cfg.weights_int8.unwrap_or_else(|| qwen3::footprint::int8_weights_default(checkpoint, cfg.auto_budget_bytes))
+/// The weight tiers the Qwen3 checkpoint at `path` is served at: the operator's `explicit` `--weight-format`,
+/// else [`qwen3::footprint::default_weight_tier`] of the tier the checkpoint stores its linears in, for
+/// `device_bytes` (the memory the weights may use on the largest card, `None` when unknown). The one answer
+/// `brain serve`, the SDK and `brain perf` give; a checkpoint that cannot be opened yet is planned at fp32 and
+/// `activate` reports the real error.
+pub fn qwen3_weight_policy(path: &str, explicit: Option<&model::ops::TierPolicy>, device_bytes: Option<u64>) -> model::ops::TierPolicy {
+    use model::ops::TierPolicy;
+    if let Some(explicit) = explicit {
+        return explicit.clone();
+    }
+    match qwen3::open_checkpoint(path) {
+        Ok((checkpoint, src)) => TierPolicy::uniform(qwen3::footprint::default_weight_tier(&checkpoint, qwen3::source_weight_tier(&checkpoint, &*src), device_bytes)),
+        Err(_) => TierPolicy::uniform(gpu_core::select::Dtype::F32),
+    }
 }
 
-/// Device bytes of the weights at the tier `cfg` asks for.
-fn serve_weight_bytes(cfg: &QwenServeConfig, checkpoint: &qwen3::config::QwenConfig) -> u64 {
-    if cfg.weights_bf16 {
-        weights_bf16_bytes(checkpoint)
-    } else if weights_int8_for(cfg, checkpoint) {
-        weights_int8_bytes(checkpoint)
-    } else {
-        weights_fp32_bytes(checkpoint)
+/// Device bytes of `cfg`'s weights at `weights`: a uniform fp32, half or int8 tier by its own estimate, a
+/// per-leaf or 4-bit policy leaf by leaf ([`weights_bytes_at`]).
+pub fn weights_bytes_for(cfg: &qwen3::config::QwenConfig, weights: &model::ops::TierPolicy) -> u64 {
+    use gpu_core::select::Dtype;
+    match (weights.rule_count(), weights.default_dtype()) {
+        (0, Dtype::F32) => weights_fp32_bytes(cfg),
+        (0, Dtype::BF16 | Dtype::F16) => weights_bf16_bytes(cfg),
+        (0, Dtype::I8) => weights_int8_bytes(cfg),
+        _ => weights_bytes_at(cfg, weights),
     }
 }
 
@@ -881,14 +877,9 @@ impl QwenResident {
     }
 
     fn build(path: &str, id: String, base_id: Option<String>, tokenizer: &str, architecture: Option<String>, cfg: QwenServeConfig) -> QwenResident {
-        let ctx = Self::resolve_ctx(path, &cfg);
-        // A checkpoint that cannot be read yet keeps the operator's explicit choice or fp32; `activate`
-        // reports the real error.
-        let weights_int8_requested = match qwen3::checkpoint_config(path) {
-            Ok(checkpoint) => weights_int8_for(&cfg, &checkpoint),
-            Err(_) => !cfg.weights_bf16 && cfg.weights_int8.unwrap_or(false),
-        };
-        let kv_tokens = Self::resolve_kv_tokens(path, &cfg, ctx);
+        let weights = qwen3_weight_policy(path, cfg.weight_format.as_ref(), cfg.auto_budget_bytes);
+        let ctx = Self::resolve_ctx(path, &cfg, &weights);
+        let kv_tokens = Self::resolve_kv_tokens(path, &cfg, ctx, &weights);
         let hosting = cfg.worker_hosting.filter(|h| h.hosts(FAMILY));
         let resident = Self::from_plan(QwenPlan {
             id,
@@ -903,9 +894,7 @@ impl QwenResident {
             sparse_attention: cfg.sparse_attention,
             kv_calib_opt_in: cfg.kv_calib_opt_in,
             kv_offload_bytes: (cfg.kv_offload_gb.max(0.0) * (1u64 << 30) as f64) as u64,
-            weights_int8_requested,
-            weights_bf16_requested: cfg.weights_bf16,
-            weight_tiers: cfg.weight_tiers,
+            weights,
             max_prefill_cap: cfg.max_prefill_cap.clamp(1, 512),
             kv_tokens,
             card_budget_bytes: cfg.card_budget_bytes.or(cfg.auto_budget_bytes),
@@ -974,13 +963,13 @@ impl QwenResident {
     /// one cached at its next turn without a flag. `None` keeps the
     /// two-context pool: no budget known, nothing to add beyond two contexts,
     /// or the larger pool would not fit.
-    fn resolve_kv_tokens(path: &str, cfg: &QwenServeConfig, ctx: u32) -> Option<u32> {
+    fn resolve_kv_tokens(path: &str, cfg: &QwenServeConfig, ctx: u32, weights: &model::ops::TierPolicy) -> Option<u32> {
         if cfg.kv_tokens.is_some() {
             return cfg.kv_tokens;
         }
         let budget = cfg.card_budget_bytes.or(cfg.auto_budget_bytes)?;
         let checkpoint_cfg = qwen3::checkpoint_config(path).ok()?;
-        let weight_bytes = serve_weight_bytes(cfg, &checkpoint_cfg);
+        let weight_bytes = weights_bytes_for(&checkpoint_cfg, weights);
         fleet_pool_tokens(&checkpoint_cfg, weight_bytes, budget, ctx, cfg)
     }
 
@@ -994,14 +983,14 @@ impl QwenResident {
     /// itself hard-fail - a checkpoint this can't open just falls back to
     /// the historical default and defers the real, specific error to
     /// `activate`'s own open, exactly like `estimate` already does.
-    fn resolve_ctx(path: &str, cfg: &QwenServeConfig) -> u32 {
+    fn resolve_ctx(path: &str, cfg: &QwenServeConfig, weights: &model::ops::TierPolicy) -> u32 {
         const HISTORICAL_DEFAULT: u32 = 24576;
         if let Some(explicit) = cfg.ctx {
             return explicit.max(1);
         }
         let Some(budget) = cfg.auto_budget_bytes else { return HISTORICAL_DEFAULT };
         let Ok(checkpoint_cfg) = qwen3::checkpoint_config(path) else { return HISTORICAL_DEFAULT };
-        let weight_bytes = serve_weight_bytes(cfg, &checkpoint_cfg);
+        let weight_bytes = weights_bytes_for(&checkpoint_cfg, weights);
         auto_ctx_for_budget(weight_bytes, budget, &checkpoint_cfg, cfg.max_batch.max(1), cfg.max_prefill_cap.clamp(1, 512), cfg.kv_tokens, cfg.kv_int8, cfg.kv_offload_gb > 0.0)
     }
 
@@ -1083,7 +1072,7 @@ impl QwenResident {
         if !self.plan.kv_int8_requested && qwen3::serve::kv_int8_supported(&cfg) {
             levers.push("--kv-cache int8 or fp8".to_string());
         }
-        if !self.plan.weights_int8_requested && self.plan.weight_tiers.is_none() {
+        if self.plan.weights.rule_count() == 0 && matches!(self.plan.weights.default_dtype(), qwen3::Dtype::F32 | qwen3::Dtype::BF16 | qwen3::Dtype::F16) {
             levers.push("--weight-format int8".to_string());
         }
         levers.push("a smaller --reserve-gb or a larger card".to_string());
@@ -1221,20 +1210,11 @@ impl QwenResident {
         ))
     }
 
-    /// The device bytes of the weights this resident will load, for the tier it requests:
-    /// `--weight-format int8` reads them off `cfg` (the same canonical-name derivation
-    /// `decoder_param_list` builds the engine from), so the estimate and `activate()`
-    /// cannot disagree about which tensors are quantized.
+    /// The device bytes of the weights this resident will load, at the tiers its plan holds: read off
+    /// `cfg` (the same canonical-name derivation `decoder_param_list` builds the engine from), so the
+    /// estimate and `activate()` cannot disagree about which tensors are narrowed.
     fn weight_bytes(&self, cfg: &qwen3::config::QwenConfig) -> u64 {
-        if let Some(tiers) = &self.plan.weight_tiers {
-            weights_bytes_at(cfg, tiers)
-        } else if self.plan.weights_bf16_requested {
-            weights_bf16_bytes(cfg)
-        } else if self.plan.weights_int8_requested {
-            weights_int8_bytes(cfg)
-        } else {
-            weights_fp32_bytes(cfg)
-        }
+        weights_bytes_for(cfg, &self.plan.weights)
     }
 
     /// `Err` naming the checkpoint, the requested `ctx`/`max_prefill` and the
@@ -1458,16 +1438,10 @@ impl ResidentModel for QwenResident {
                 let bank_bytes = self.adapters.settings().map_or(0, |bank| bank.device_bytes(&checkpoint_cfg, max_batch.max(max_prefill)));
                 profile.plan(self.weight_bytes(&checkpoint_cfg), bank_bytes, card).map_err(|e| format!("qwen: {}: refusing to load, {e}; lower --ctx, --max-batch or the KV pool size", self.plan.path))?;
             }
-            // `--weight-format int8` -- requested, not asserted: the real
-            // capability gate (`caps.numeric.int8_dot`) lives inside
-            // `Engine::from_map_with_gpu` itself, which degrades to fp32
-            // weights with its own loud fallback message when a device (the
-            // CPU JIT, or an unusual GPU) has no packed-int8 path, exactly
-            // the same shape `kv_int8`'s own request/degrade split already
-            // uses. `estimate()` above computes its budget from this SAME
-            // field, so the two cannot silently disagree about what was
-            // asked for.
-            let weights_int8 = self.plan.weights_int8_requested;
+            // The weight tiers are requested, not asserted: the engine falls back loudly to fp32 where the
+            // device has no packed-int8 path or cannot hold a half tier (`Engine::from_source_tiers`).
+            // `estimate()` computes its budget from this SAME plan field, so the two cannot silently
+            // disagree about what was asked for.
             // `Engine::load` re-derives its own `QwenConfig` straight from the
             // file, with no seam for `ctx`'s own YaRN decision below to reach
             // it - open the checkpoint here and build from its source, so the config is
@@ -1478,20 +1452,9 @@ impl ResidentModel for QwenResident {
             gpu_core::profile::stage_time(&format!("{}: open checkpoint source for engine build", self.plan.id), load_t0);
             let mut cfg = checkpoint_cfg.clone();
             Self::apply_yarn_if_serving_past_native(&mut cfg, ctx);
-            let tier = if self.plan.weights_bf16_requested {
-                qwen3::Dtype::BF16
-            } else if weights_int8 {
-                qwen3::Dtype::I8
-            } else {
-                qwen3::Dtype::F32
-            };
-            let mut eng = match &self.plan.weight_tiers {
-                Some(tiers) => {
-                    qwen3::serve::Engine::check_tiers(&cfg, tiers).map_err(|e| format!("qwen: --weight-format {}: {e}", tiers.describe()))?;
-                    qwen3::serve::Engine::from_source_tiers(cfg, &*src, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, kv_int8, tiers)
-                }
-                None => qwen3::serve::Engine::from_source_tier(cfg, &*src, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, kv_int8, tier),
-            };
+            let tiers = &self.plan.weights;
+            qwen3::serve::Engine::check_tiers(&cfg, tiers).map_err(|e| format!("qwen: --weight-format {}: {e}", tiers.describe()))?;
+            let mut eng = qwen3::serve::Engine::from_source_tiers(cfg, &*src, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, kv_int8, tiers);
             if self.plan.kv_fp8_requested {
                 if kv_int8 {
                     eng.set_kv_fp8().map_err(|e| format!("qwen: --kv-cache fp8: {e}"))?;
@@ -1685,7 +1648,7 @@ mod tests {
         p.switch("--exact-decode").unwrap();
         let notes = cfg.apply_policy(&p).unwrap();
         assert!(cfg.exact_decode, "--exact-decode reaches the engine");
-        assert!(cfg.weights_bf16 && cfg.kv_int8 && cfg.kv_fp8);
+        assert!(cfg.weight_format.as_ref().is_some_and(|w| w.default_dtype() == gpu_core::select::Dtype::BF16) && cfg.kv_int8 && cfg.kv_fp8);
         assert_eq!(cfg.sparse_attention.as_deref(), Some("/indexers/qwen3-0.6b.safetensors"));
         assert_eq!((cfg.ctx, cfg.max_batch, cfg.kv_offload_gb), (Some(4096), 32, 2.0));
         assert_eq!(cfg.gemm_precision, gpu_core::provider::library::GemmPrecision::Fp32Reference);
@@ -1708,7 +1671,7 @@ mod tests {
         p.set("--weight-format", "f32,attn.=int8,mlp.down.weight=bf16").unwrap();
         let mut cfg = QwenServeConfig::default();
         cfg.apply_policy(&p).unwrap();
-        let tiers = cfg.weight_tiers.clone().expect("a per-leaf policy is kept whole");
+        let tiers = cfg.weight_format.clone().expect("a per-leaf policy is kept whole");
         assert_eq!((tiers.want("blocks.3.attn.wo.weight"), tiers.want("blocks.3.mlp.down.weight"), tiers.want("blocks.3.mlp.up.weight")), (Dtype::I8, Dtype::BF16, Dtype::F32));
 
         let shape = qwen3::QwenConfig::qwen3_0_6b();
@@ -1719,7 +1682,7 @@ mod tests {
         p.set("--weight-format", "nf4").unwrap();
         let mut cfg = QwenServeConfig::default();
         cfg.apply_policy(&p).unwrap();
-        assert_eq!(cfg.weight_tiers.map(|t| t.default_dtype()), Some(Dtype::NF4), "uniform nf4 is built per leaf, never widened to f32");
+        assert_eq!(cfg.weight_format.map(|t| t.default_dtype()), Some(Dtype::NF4), "uniform nf4 is kept, never widened to f32");
 
         let mut p = model::policy::ServePolicy::default();
         p.set("--weight-format", "f32,mlp.=fp8").unwrap();
@@ -1829,32 +1792,47 @@ mod tests {
     /// past the historical 512 default `pool_sizing`'s own doc comment
     /// records a real crash at a larger value; a nonsense/zero override
     /// clamps up to the minimum, not disabling prefill).
-    /// A checkpoint whose fp32 weights do not fit one card is served with
-    /// int8 linears unless the operator says otherwise; a small one stays
-    /// fp32; either flag overrides the size.
+    /// A checkpoint is served at the tier it stores its linears in unless the operator names one; a large
+    /// one falls to int8 only where its stored-tier weights and the headroom do not fit the card.
     #[test]
-    fn a_7b_checkpoint_defaults_to_int8_weights() {
-        let dir = std::env::temp_dir().join(format!("brain-qwen-int8-default-{}", std::process::id()));
+    fn a_checkpoint_is_served_at_its_stored_tier_and_int8_only_where_it_does_not_fit() {
+        use gpu_core::select::Dtype;
+        let dir = std::env::temp_dir().join(format!("brain-qwen-tier-default-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
+        let card = checkpoint::st::ModelCard::new("Qwen/Qwen3-0.6B", "qwen");
+        let explicit = |spec: &str| QwenServeConfig { weight_format: Some(model::policy::parse_weight_format(spec).unwrap()), ..QwenServeConfig::default() };
+        let tier = |path: &str, cfg: QwenServeConfig| {
+            let w = QwenResident::from_card_configured(path, &card, None, cfg).plan.weights;
+            assert_eq!(w.rule_count(), 0);
+            w.default_dtype()
+        };
+
+        // A bf16 checkpoint (as Hugging Face ships Qwen3) is served bf16; an fp32 one fp32; the flag wins.
+        let tiny = qwen3::config::QwenConfig::tiny();
+        let weights = qwen3::init_weights(&tiny, 7);
+        for (stored, want) in [(qwen3::export::HfDtype::Bf16, Dtype::BF16), (qwen3::export::HfDtype::F16, Dtype::F16), (qwen3::export::HfDtype::F32, Dtype::F32)] {
+            let hf = dir.join(format!("{stored:?}"));
+            qwen3::export::export_hf(&weights, &tiny, &hf, &qwen3::export::HfExport { dtype: stored, ..Default::default() }, &mut || true).unwrap();
+            let hf = hf.to_string_lossy().into_owned();
+            assert_eq!(tier(&hf, QwenServeConfig::default()), want, "a {stored:?} checkpoint is served at its stored tier");
+            assert_eq!(tier(&hf, explicit("f32")), Dtype::F32, "--weight-format wins over the stored tier");
+            assert_eq!(tier(&hf, explicit("int8")), Dtype::I8);
+        }
+
+        // The size rule, for a shape-only file (no linears stored, so fp32 is its stored tier).
         let shaped = |name: &str, cfg: &qwen3::config::QwenConfig| {
             let p = dir.join(name);
             checkpoint::st::save_safetensors(p.to_str().unwrap(), &[("w".to_string(), vec![1], vec![0.0])], &cfg.to_json(), None).unwrap();
             p.to_string_lossy().into_owned()
         };
-        let seven_b = qwen3::config::QwenConfig { vocab: 102_400, d_model: 4096, n_layers: 30, n_heads: 32, n_kv_heads: 32, head_dim: 128, d_ff: 11_008, qk_norm: false, tie_embeddings: false, ..qwen3::config::QwenConfig::tiny() };
-        let (big, small) = (shaped("7b.safetensors", &seven_b), shaped("tiny.safetensors", &qwen3::config::QwenConfig::tiny()));
-        let card = checkpoint::st::ModelCard::new("deepseek-ai/deepseek-llm-7b-chat", "qwen");
-        let with = |path: &str, w: Option<bool>| QwenResident::from_card_configured(path, &card, None, QwenServeConfig { weights_int8: w, ..QwenServeConfig::default() }).plan.weights_int8_requested;
-        assert!(with(&big, None), "6.9B parameters default to int8 linears");
-        assert!(!with(&small, None), "a tiny checkpoint stays fp32");
-        assert!(!with(&big, Some(false)) && with(&small, Some(true)), "the flags win over the size");
-        // A card that holds the fp32 weights and the headroom serves them fp32 (the more accurate tier); a smaller one stays int8.
-        let fp32_need = qwen3::footprint::fp32_weight_bytes(&qwen3::config::QwenConfig::qwen3_8b()) + qwen3::footprint::FP32_SERVE_HEADROOM_BYTES;
-        let eight_b = shaped("8b.safetensors", &qwen3::config::QwenConfig::qwen3_8b());
-        let on = |budget: Option<u64>| QwenResident::from_card_configured(&eight_b, &card, None, QwenServeConfig { auto_budget_bytes: budget, ..QwenServeConfig::default() }).plan.weights_int8_requested;
-        assert!(on(None), "no budget known: the size rule stands");
-        assert!(on(Some(24 << 30)), "a 24 GB card cannot hold the 8B at fp32");
-        assert!(!on(Some(fp32_need)), "a card that holds the fp32 weights and the headroom serves them fp32");
+        let eight_b = qwen3::config::QwenConfig::qwen3_8b();
+        let path = shaped("8b.safetensors", &eight_b);
+        let fp32_need = qwen3::footprint::held_weight_bytes(&eight_b, Dtype::F32) + qwen3::footprint::SERVE_HEADROOM_BYTES;
+        let on = |budget: Option<u64>| tier(&path, QwenServeConfig { auto_budget_bytes: budget, ..QwenServeConfig::default() });
+        assert_eq!(on(None), Dtype::I8, "no budget known: the size rule stands");
+        assert_eq!(on(Some(24 << 30)), Dtype::I8, "a 24 GB card cannot hold the 8B at fp32");
+        assert_eq!(on(Some(fp32_need)), Dtype::F32, "a card that holds the stored weights and the headroom serves them as stored");
+        assert_eq!(tier(&shaped("tiny.safetensors", &tiny), QwenServeConfig::default()), Dtype::F32, "a small checkpoint is never int8 by default");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1866,7 +1844,7 @@ mod tests {
         assert!(cfg.kv_int8, "int8 KV must be the default");
         assert!(!cfg.kv_calib_opt_in, "calibration must default OFF");
         assert_eq!(cfg.kv_offload_gb, 0.0);
-        assert_eq!(cfg.weights_int8, None, "int8 weights default by size - see weights_int8_for");
+        assert!(cfg.weight_format.is_none(), "the weight tier defaults to the checkpoint's stored one - see qwen3_weight_policy");
         assert_eq!(cfg.max_prefill_cap, 512);
     }
 
@@ -1997,7 +1975,7 @@ mod tests {
         let path = write_tiny_checkpoint(5, "fleet");
         let path = path.to_str().unwrap();
         let live = |budget: Option<u64>, kv_tokens: Option<u32>| QwenServeConfig { ctx: Some(4096), max_batch: 16, card_budget_bytes: budget, kv_tokens, ..QwenServeConfig::default() };
-        let resolve = |cfg: &QwenServeConfig| QwenResident::resolve_kv_tokens(path, cfg, 4096);
+        let resolve = |cfg: &QwenServeConfig| QwenResident::resolve_kv_tokens(path, cfg, 4096, &qwen3_weight_policy(path, None, cfg.auto_budget_bytes));
         assert_eq!(resolve(&live(Some(u64::MAX / 4), None)), Some(4096 * 16 / 2), "16 slots x half a context");
         assert_eq!(resolve(&live(None, None)), None, "no card budget: the two-context pool");
         assert_eq!(resolve(&live(Some(1 << 20), None)), None, "does not fit the budget");
@@ -2102,7 +2080,7 @@ mod tests {
         let fp32_resident = QwenResident::from_card(path.to_str().unwrap(), &card, Some("unused.json"));
         let fp32_total = fp32_resident.estimate(&key).vram;
 
-        let int8_cfg = QwenServeConfig { weights_int8: Some(true), ..QwenServeConfig::default() };
+        let int8_cfg = QwenServeConfig { weight_format: Some(model::ops::TierPolicy::uniform(gpu_core::select::Dtype::I8)), ..QwenServeConfig::default() };
         let int8_resident = QwenResident::from_card_configured(path.to_str().unwrap(), &card, Some("unused.json"), int8_cfg);
         let int8_total = int8_resident.estimate(&key).vram;
 

@@ -108,8 +108,10 @@ OPTIONS
   --prefill <a,b,c>     longctx: prompt lengths for the real cold-prefill table
                         (default none)
   --steps <N>           longctx: timed decode steps per batch size (default 8)
-  --weight-format SPEC  the weight tier of a qwen35moe: target (the `brain serve --weight-format`
-                        grammar: int8, f32, or per-leaf like i8,out_proj=f32; default int8)
+  --weight-format SPEC  the weight tier of a qwen:, qwen-synth: or qwen35moe: target (the `brain serve
+                        --weight-format` grammar: f32, bf16, f16, int8, or per-leaf like i8,out_proj=f32);
+                        default: what `brain serve` serves - for qwen: the checkpoint's stored tier
+                        (int8 only where it does not fit the card), for qwen35moe: int8
   --kernels             longctx: also profile each batch size's decode steps per kernel on
                         the device and roll the table up into phases (linear, experts,
                         attention, recurrent mixer, norm/epilogue, sampling) - the same
@@ -157,7 +159,7 @@ NOTES
 /// `perf list` appends them here rather than in `perf::list()`.
 const TARGET_LIST: &str = "
 targets (--target):
-  qwen-synth:<L>x<D>x<H>[xV[xHeadDim[xNKvHeads]]][:i8w][:kvf32]   the real paged serving engine on random weights
+  qwen-synth:<L>x<D>x<H>[xV[xHeadDim[xNKvHeads]]][:kvf32]   the real paged serving engine on random weights
   qwen35:<gguf>[:kvf32|:kvbf16|:kvint8]
                                      the released Qwen3.8-27B GGUF through the shared scheduler,
                                      built by `brain serve`'s own engine construction (tier,
@@ -169,9 +171,9 @@ targets (--target):
                                      the Qwen3.6-35B-A3B GGUF through the shared scheduler on the
                                      first `--device` card (context 8192, 16 resident sequences,
                                      int8 weights); also `longctx`.
-  qwen:<weights.brain>[:i8w][:kvf32]         the paged serving engine on a real checkpoint (also `longctx`)
-                                     (:i8w opts IN to int8 weights, off by default; :kvf32 opts
-                                     OUT of int8 KV, which is ON by default -- either order, both optional.
+  qwen:<weights>[:kvf32]             the paged serving engine on a real checkpoint (also `longctx`), its
+                                     weights at the tier `brain serve` picks (--weight-format overrides);
+                                     :kvf32 opts OUT of int8 KV, which is ON by default.
                                      HeadDim/NKvHeads override the derived guess -- e.g.
                                      28x1024x16x151936x128x8 is Qwen3-0.6B's REAL KV shape, not the
                                      derived 64x4 -- give them to measure a real model, not a stand-in)
@@ -179,7 +181,7 @@ targets (--target):
                                      the REAL served path: apiserve's HTTP router, in-process,
                                      over random weights of that shape (needs a real tokenizer).
                                      The shape, incl. HeadDim/NKvHeads, is honoured -- it becomes
-                                     the written checkpoint's real config; :i8w/:kvf32 are NOT --
+                                     the written checkpoint's real config; :kvf32 is NOT --
                                      KV/weights dtype come from the serving policy same as
                                      `brain serve`, since this measures the REAL served default.
   http:qwen:<weights.brain>:<tokenizer.json>
@@ -409,7 +411,7 @@ fn run(args: &[String]) {
             "--kernels" => longctx.kernels = true,
             "--weight-format" => {
                 let spec = val(args, &mut i, "--weight-format");
-                longctx.weight_format = Some(model::ops::TierPolicy::parse(&spec).unwrap_or_else(|e| {
+                longctx.weight_format = Some(model::policy::parse_weight_format(&spec).unwrap_or_else(|e| {
                     eprintln!("perf run: --weight-format {spec:?}: {e}");
                     std::process::exit(2);
                 }));
@@ -467,7 +469,7 @@ fn run(args: &[String]) {
                     .as_deref()
                     .and_then(|s| s.strip_prefix("qwen-synth:"))
                     .ok_or_else(|| format!("`{other}` needs --target qwen-synth:<L>x<D>x<H>[xV]"))
-                    .and_then(|sh| SynthSpec::parse(sh, &workload, opt.input_override, opt.output_override));
+                    .and_then(|sh| SynthSpec::parse(sh, &workload, opt.input_override, opt.output_override, longctx.weight_format.as_ref()));
                 match shape {
                     Ok(sp) => match other {
                         "startup" => crate::perf_engine::run_startup(&sp, opt.best_of.max(2), &opt),
@@ -494,8 +496,7 @@ fn run(args: &[String]) {
         eprintln!("perf run: --target is required (no default - see `brain perf list` or `brain perf --help`)");
         std::process::exit(2);
     };
-    let weights = longctx.weight_format.clone().unwrap_or_else(crate::perf_qwen35moe::default_tier);
-    let mut target = match build_target(&target_spec, &workload, opt.input_override, opt.output_override, forecast, &weights) {
+    let mut target = match build_target(&target_spec, &workload, opt.input_override, opt.output_override, forecast, longctx.weight_format.as_ref()) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("perf: {e}");
@@ -562,23 +563,23 @@ pub struct SynthSpec {
     pub num_blocks: u32,
     pub per_seq: u32,
     pub max_prefill: u32,
-    /// From `:i8w` -- opt IN to int8 weights, off by default.
-    pub weights_int8: bool,
+    /// The tiers of the linears and the head: `--weight-format`, else the serving rule for random fp32 weights
+    /// (`qwen3::footprint::default_weight_tier`, on the first selected card).
+    pub tiers: model::ops::TierPolicy,
     /// From `:kvf32` -- opt OUT of int8 KV, which is ON by default.
     pub kv_fp32: bool,
 }
 
 impl SynthSpec {
-    /// Parse `<L>x<D>x<H>[xV[xHeadDim[xNKvHeads]]][:i8w][:kvf32]` (flags in
-    /// either order) and size a KV pool for `workload`, honouring `--input`/
+    /// Parse `<L>x<D>x<H>[xV[xHeadDim[xNKvHeads]]][:kvf32]` and size a KV pool for `workload`, honouring `--input`/
     /// `--output` overrides the same way the actual request stream will
     /// (`crate::scenarios::workload_for`) -- see `pool_for`'s doc comment for
     /// why sizing from the un-overridden preset is a real OOM risk, not a
     /// theoretical one. The trailing `HeadDim`/`NKvHeads` are optional -- see
     /// the fields' doc comments for why a caller needs them to measure a
     /// REAL model's KV shape rather than a same-param-count stand-in.
-    pub fn parse(shape: &str, workload: &str, input_override: Option<usize>, output_override: Option<usize>) -> Result<SynthSpec, String> {
-        let (shape, weights_int8, kv_fp32) = spec_flags(shape);
+    pub fn parse(shape: &str, workload: &str, input_override: Option<usize>, output_override: Option<usize>, weight_format: Option<&model::ops::TierPolicy>) -> Result<SynthSpec, String> {
+        let (shape, kv_fp32) = spec_flags(shape);
         let parts: Vec<u32> = shape.split('x').map(|p| p.trim().parse().unwrap_or(0)).collect();
         if parts.len() < 3 || parts[..3].contains(&0) {
             return Err(format!("bad shape {shape:?}, expected <layers>x<d_model>x<heads>[x<vocab>[x<head_dim>[x<n_kv_heads>]]]"));
@@ -594,7 +595,7 @@ impl SynthSpec {
             .filter(|&v| v > 0)
             .unwrap_or(if n_heads.is_multiple_of(4) { n_heads / 4 } else { n_heads });
         let (block_size, max_batch, num_blocks, per_seq, max_prefill) = pool_for(workload, input_override, output_override)?;
-        Ok(SynthSpec {
+        let mut spec = SynthSpec {
             n_layers,
             d_model,
             n_heads,
@@ -606,9 +607,15 @@ impl SynthSpec {
             num_blocks,
             per_seq,
             max_prefill,
-            weights_int8,
+            tiers: model::ops::TierPolicy::uniform(qwen3::Dtype::F32),
             kv_fp32,
-        })
+        };
+        spec.tiers = match weight_format {
+            Some(w) => w.clone(),
+            None => model::ops::TierPolicy::uniform(qwen3::footprint::default_weight_tier(&spec.config(), qwen3::Dtype::F32, crate::perf_longctx::first_gpu_usable_bytes())),
+        };
+        qwen3::serve::Engine::check_tiers(&spec.config(), &spec.tiers).map_err(|e| format!("--weight-format {}: {e}", spec.tiers.describe()))?;
+        Ok(spec)
     }
 
     pub fn shape(&self) -> String {
@@ -665,18 +672,7 @@ impl SynthSpec {
         w: &std::collections::HashMap<String, Vec<f32>>,
     ) -> qwen3::serve::Engine {
         let kv_int8 = resolve_kv_int8(&cfg, self.kv_fp32, &self.shape());
-        qwen3::serve::Engine::from_map_on(
-            parent.gpu(),
-            cfg,
-            w,
-            self.block_size,
-            self.num_blocks,
-            self.max_batch,
-            self.per_seq,
-            self.max_prefill,
-            kv_int8,
-            self.weights_int8,
-        )
+        qwen3::serve::Engine::from_source_tiers_on(parent.gpu(), cfg, w, self.block_size, self.num_blocks, self.max_batch, self.per_seq, self.max_prefill, kv_int8, &self.tiers)
     }
 
     pub fn build_engine_with_blocks(
@@ -686,32 +682,22 @@ impl SynthSpec {
         num_blocks: u32,
     ) -> qwen3::serve::Engine {
         let kv_int8 = resolve_kv_int8(&cfg, self.kv_fp32, &self.shape());
-        qwen3::serve::Engine::from_map(
-            cfg,
-            w,
-            self.block_size,
-            num_blocks,
-            self.max_batch,
-            self.per_seq,
-            self.max_prefill,
-            kv_int8,
-            self.weights_int8,
-        )
+        qwen3::serve::Engine::from_source_tiers(cfg, w, self.block_size, num_blocks, self.max_batch, self.per_seq, self.max_prefill, kv_int8, &self.tiers)
     }
 }
 
-fn build_target(spec: &str, workload: &str, input_override: Option<usize>, output_override: Option<usize>, forecast: ForecastShape, weights: &model::ops::TierPolicy) -> Result<Box<dyn PerfTarget>, String> {
+fn build_target(spec: &str, workload: &str, input_override: Option<usize>, output_override: Option<usize>, forecast: ForecastShape, weight_format: Option<&model::ops::TierPolicy>) -> Result<Box<dyn PerfTarget>, String> {
     if let Some(shape) = spec.strip_prefix("qwen-synth:") {
-        return build_qwen_synth(shape, workload, input_override, output_override);
+        return build_qwen_synth(shape, workload, input_override, output_override, weight_format);
     }
     if let Some(weights) = spec.strip_prefix("qwen:") {
-        return build_qwen(weights, workload, input_override, output_override);
+        return build_qwen(weights, workload, input_override, output_override, weight_format);
     }
     if let Some(rest) = spec.strip_prefix("qwen35:") {
         return crate::perf_qwen35::build(rest);
     }
     if let Some(rest) = spec.strip_prefix("qwen35moe:") {
-        return crate::perf_qwen35moe::build(rest, weights);
+        return crate::perf_qwen35moe::build(rest, &weight_format.cloned().unwrap_or_else(crate::perf_qwen35moe::default_tier));
     }
     if let Some(rest) = spec.strip_prefix("http:") {
         return build_http(rest, workload, input_override, output_override);
@@ -802,7 +788,7 @@ fn build_target(spec: &str, workload: &str, input_override: Option<usize>, outpu
     }
     Err(format!(
         "unknown --target {spec:?} \
-         (expected 'qwen-synth:<L>x<D>x<H>[xV][:i8w][:kvf32]', 'qwen:<weights>[:i8w][:kvf32]', \
+         (expected 'qwen-synth:<L>x<D>x<H>[xV][:kvf32]', 'qwen:<weights>[:kvf32]', \
          'qwen35:<gguf>[:kvf32|:kvbf16|:kvint8]', 'qwen35moe:<gguf>[:kvf32|:kvbf16|:kvint8]', 'http:qwen-synth:<L>x<D>x<H>[xV]:<tokenizer.json>', 'http:qwen:<weights>:<tokenizer.json>', \
          'lfm:<weights>:<tokenizer.json>', 'kronos:<tokenizer-dir>:<decoder-dir>', \
          'chronos2:<weights>', 'fincast:<weights>', 'timesfm3:<weights>', 'flux2[:<W>x<H>x<steps>[:<precision>]]', \
@@ -853,7 +839,7 @@ fn build_http(rest: &str, workload: &str, input_override: Option<usize>, output_
 /// bypassing it. Content is irrelevant to serving cost; only shape matters,
 /// same rationale as `SynthSpec::build_weights` for the engine-direct target.
 ///
-/// `spec.weights_int8`/`spec.kv_fp32` are deliberately UNUSED here: this
+/// `spec.tiers`/`spec.kv_fp32` are deliberately UNUSED here: this
 /// target writes a real checkpoint and serves it through the real
 /// `QwenResident`/residency executor, which decides KV/weights dtype from
 /// its serving policy (`--kv-cache`, `--weight-format`) same as `brain serve` -- exactly the
@@ -866,7 +852,7 @@ fn build_http_qwen_synth(shape: &str, tokenizer: &str, workload: &str, input_ove
     // serving pool comes from `QwenResident::pool_sizing` (`--ctx` or the budget-sized default),
     // not from a workload preset. Still threaded for signature consistency
     // and because a bad override should still error the same way.
-    let spec = SynthSpec::parse(shape, workload, input_override, output_override)?;
+    let spec = SynthSpec::parse(shape, workload, input_override, output_override, None)?;
     let (cfg, weights) = spec.build_weights();
     let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = cfg
         .param_list()
@@ -1823,29 +1809,37 @@ fn build_qwen_asr(dir: &str) -> Result<Box<dyn PerfTarget>, String> {
     )))
 }
 
-/// Split optional trailing target-spec flags, in either order:
-/// `:i8w` (int8 weights, opt IN - off by default) and `:kvf32` (fp32 KV,
-/// opt OUT of int8 KV, which perf targets default to ON - matching
+/// Split the optional trailing target-spec flag `:kvf32` (fp32 KV, opt OUT
+/// of int8 KV, which perf targets default to ON - matching
 /// `resident_llm.rs::QwenResident::kv_int8`'s serving default, so perf
-/// numbers stay representative of what actually ships).
-pub(crate) fn spec_flags(spec: &str) -> (&str, bool, bool) {
-    let mut s = spec;
-    let mut weights_int8 = false;
-    let mut kv_fp32 = false;
-    loop {
-        if let Some(rest) = s.strip_suffix(":i8w") {
-            s = rest;
-            weights_int8 = true;
-            continue;
-        }
-        if let Some(rest) = s.strip_suffix(":kvf32") {
-            s = rest;
-            kv_fp32 = true;
-            continue;
-        }
-        break;
+/// numbers stay representative of what actually ships). The weight tier is
+/// not a spec flag: it is `--weight-format`, else what `brain serve` picks.
+pub(crate) fn spec_flags(spec: &str) -> (&str, bool) {
+    match spec.strip_suffix(":kvf32") {
+        Some(rest) => (rest, true),
+        None => (spec, false),
     }
-    (s, weights_int8, kv_fp32)
+}
+
+/// A weight policy as an artifact records it: `fp32`, `bf16`, `f16`, `int8` for one tier, the
+/// `--weight-format` spelling for a per-leaf policy.
+pub(crate) fn weight_label(tiers: &model::ops::TierPolicy) -> String {
+    match (tiers.rule_count(), tiers.default_dtype()) {
+        (0, qwen3::Dtype::F32) => "fp32".into(),
+        (0, qwen3::Dtype::I8) => "int8".into(),
+        (0, other) => other.name().into(),
+        _ => tiers.describe(),
+    }
+}
+
+/// [`weight_label`] of what an engine built at `tiers` holds: a uniform tier as it landed (the device may widen
+/// it), a per-leaf policy as asked.
+fn landed_label(eng: &qwen3::serve::Engine, tiers: &model::ops::TierPolicy) -> String {
+    if tiers.rule_count() == 0 {
+        weight_label(&model::ops::TierPolicy::uniform(eng.weights_tier()))
+    } else {
+        weight_label(tiers)
+    }
 }
 
 /// The int8-KV boundary policy (D2), in ONE place: `:kvf32` is an explicit
@@ -1880,8 +1874,8 @@ pub(crate) fn resolve_kv_int8(cfg: &qwen3::QwenConfig, kv_fp32_requested: bool, 
 /// and the derived `head_dim`/`n_kv_heads` silently did not match real
 /// Qwen3-0.6B's, understating both the memory win and the append kernel's
 /// cost at the shape that mattered).
-fn build_qwen_synth(shape: &str, workload: &str, input_override: Option<usize>, output_override: Option<usize>) -> Result<Box<dyn PerfTarget>, String> {
-    let spec = SynthSpec::parse(shape, workload, input_override, output_override)?;
+fn build_qwen_synth(shape: &str, workload: &str, input_override: Option<usize>, output_override: Option<usize>, weight_format: Option<&model::ops::TierPolicy>) -> Result<Box<dyn PerfTarget>, String> {
+    let spec = SynthSpec::parse(shape, workload, input_override, output_override, weight_format)?;
     let (cfg, weights) = spec.build_weights();
     let params: usize = cfg.param_list().iter().map(|(_, n)| n).sum();
     eprintln!(
@@ -1910,8 +1904,8 @@ fn build_qwen_synth(shape: &str, workload: &str, input_override: Option<usize>, 
         // DEFAULT is capability-gated (see resolve_kv_int8) just like
         // weights_dtype below.
         .with("kv_dtype", if eng.kv_int8() { "int8" } else { "fp32" }.into())
-        // What actually ran: the int8 request is capability-gated in the engine.
-        .with("weights_dtype", if eng.weights_int8() { "int8" } else { "fp32" }.into());
+        // What actually ran: the tier request is capability-gated in the engine.
+        .with("weights_dtype", landed_label(&eng, &spec.tiers).into());
     let sched = qwen3::serve::Scheduler::new(eng, spec.max_batch as usize);
     Ok(Box::new(perf::targets::PagedLlmTarget::new(sched, info, Vec::new(), spec.vocab)))
 }
@@ -1954,35 +1948,25 @@ fn pool_for(workload: &str, input_override: Option<usize>, output_override: Opti
 
 /// Size the KV pool for the workload so admission, not allocation failure, is
 /// what limits concurrency.
-fn build_qwen(weights: &str, workload: &str, input_override: Option<usize>, output_override: Option<usize>) -> Result<Box<dyn PerfTarget>, String> {
-    let (weights, weights_int8, kv_fp32) = spec_flags(weights);
+fn build_qwen(weights: &str, workload: &str, input_override: Option<usize>, output_override: Option<usize>, weight_format: Option<&model::ops::TierPolicy>) -> Result<Box<dyn PerfTarget>, String> {
+    let (weights, kv_fp32) = spec_flags(weights);
     let (block_size, max_batch, num_blocks, per_seq, max_prefill) = pool_for(workload, input_override, output_override)?;
-    // A header-only peek (not a second full checkpoint load) to feed the
-    // shared boundary policy -- see resolve_kv_int8.
-    let kv_int8 = match checkpoint::weightio::WeightReader::open(weights) {
-        Ok(r) => resolve_kv_int8(&qwen3::QwenConfig::from_reader(&r).map_err(|e| format!("{weights}: {e}"))?, kv_fp32, weights),
-        Err(_) => !kv_fp32, // let Engine::load raise the real, specific I/O error below
-    };
-    let eng = qwen3::serve::Engine::load(
-        weights,
-        block_size,
-        num_blocks,
-        max_batch,
-        per_seq,
-        max_prefill,
-        kv_int8,
-        weights_int8,
-    );
+    let (cfg, src) = qwen3::open_checkpoint(weights)?;
+    let kv_int8 = resolve_kv_int8(&cfg, kv_fp32, weights);
+    // The tier `brain serve` serves this checkpoint at on the first selected card, unless --weight-format names one.
+    let tiers = catalog::resident_llm::qwen3_weight_policy(weights, weight_format, crate::perf_longctx::first_gpu_usable_bytes());
+    qwen3::serve::Engine::check_tiers(&cfg, &tiers).map_err(|e| format!("--weight-format {}: {e}", tiers.describe()))?;
+    let eng = qwen3::serve::Engine::from_source_tiers(cfg, &*src, block_size, num_blocks, max_batch, per_seq, max_prefill, kv_int8, &tiers);
     let vocab = eng.vocab() as u32;
-    let w8_effective = eng.weights_int8();
     let kv_dtype = if eng.kv_int8() { "int8" } else { "fp32" };
+    let weights_dtype = landed_label(&eng, &tiers);
     let sched = qwen3::serve::Scheduler::new(eng, max_batch as usize);
     let info = TargetInfo::new("qwen", "token")
         .with("weights", weights.into())
         .with("block_size", block_size.into())
         .with("max_batch", max_batch.into())
         .with("kv_dtype", kv_dtype.into())
-        .with("weights_dtype", if w8_effective { "int8" } else { "fp32" }.into());
+        .with("weights_dtype", weights_dtype.into());
     Ok(Box::new(perf::targets::PagedLlmTarget::new(sched, info, Vec::new(), vocab)))
 }
 

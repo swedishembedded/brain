@@ -27,10 +27,10 @@ its `deepseek-ai/<checkpoint>` id; the R1 distills' reasoning comes back as
 `reasoning_content` (a `thinking` block on the Anthropic surface), and
 generation ends on the checkpoint's own end-of-sentence token. See
 [`samples/python/api/deepseek-chat`](../../../samples/python/api/deepseek-chat/).
-A checkpoint of 6B parameters or more is served with int8 linears by
-default only on a card that cannot hold its fp32 weights (a 7-8B one fits a
-single 24 GB card that way); a larger card serves it fp32, the more accurate
-tier, and `--weight-format int8` / `--weight-format f32` choose explicitly. Their Qwen vocabulary carries the
+Weights are held at the precision the checkpoint stores them in (a bf16
+release bf16); a checkpoint of 6B parameters or more falls to int8 linears
+only on a card that cannot hold those weights plus serving headroom, and
+`--weight-format f32|bf16|f16|int8` chooses explicitly. Their Qwen vocabulary carries the
 fill-in-the-middle tokens, so `POST /v1/completions` accepts a `suffix`.
 From Rust, `brain::TextGenerationPipeline::from_pretrained("deepseek-ai/<checkpoint>")`
 loads either ([SDK](../sdk.md)).

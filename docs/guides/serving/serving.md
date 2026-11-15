@@ -76,7 +76,7 @@ every model that serves it; no flag is spelled with an architecture name.
 | flag | what it chooses |
 |---|---|
 | `--checkpoint PATH` | the LLM checkpoint to serve (file or repo directory) |
-| `--weight-format SPEC` | weight storage: `f32`, `bf16`, `f16`, `int8`, `q4`, `nf4`, or per leaf `int8,blk.0.attn_q=f32` where the model supports rules |
+| `--weight-format SPEC` | weight storage: `f32`, `bf16`, `f16`, `int8`, `q4`, `nf4`, or per leaf `int8,blk.0.attn_q=f32` where the model supports rules; unset, a Qwen3 dense checkpoint is held at the precision it stores (int8 only where that does not fit the card) |
 | `--kv-cache TIER` | KV-cache storage: `f32`, `bf16`, `int8`, `fp8` |
 | `--gemm auto\|fp32` | `fp32` pins exact fp32 arithmetic (the reference tier); `auto` uses tensor cores where the device has them |
 | `--act-precision auto\|f32\|bf16` | the element type of the activations between the FP8 matrix products of a model that supports it (the Qwen3.8 GGUF and FP8 releases): `auto` (default) is bf16 on a device with bf16 tensor cores and f32 elsewhere, `f32` is the A/B switch; accumulation is f32 inside every kernel either way |

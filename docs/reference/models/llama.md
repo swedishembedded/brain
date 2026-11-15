@@ -28,11 +28,10 @@ brain serves it from those files as downloaded, at its own configuration,
 RoPE scaling included, reading each checkpoint's own tokenizer pipeline,
 chat template and stop tokens. `brain serve` serves a pulled checkpoint under
 its `deepseek-ai/<checkpoint>` id; the R1 distills' reasoning comes back as
-`reasoning_content` (a `thinking` block on the Anthropic surface). A
-checkpoint of 6B parameters or more is served with int8 linears by default
-only on a card that cannot hold its fp32 weights (a 7-8B one fits a single
-24 GB card that way); a larger card serves it fp32, the more accurate tier, and
-`--weight-format int8` / `--weight-format f32` choose explicitly.
+`reasoning_content` (a `thinking` block on the Anthropic surface). Weights are held at the precision the checkpoint stores them in (a bf16
+release bf16); a checkpoint of 6B parameters or more falls to int8 linears
+only on a card that cannot hold those weights plus serving headroom, and
+`--weight-format f32|bf16|f16|int8` chooses explicitly.
 
 The coder base checkpoints fill in the middle of code: `POST /v1/completions`
 with the code before the cursor as `prompt` and the code after it as

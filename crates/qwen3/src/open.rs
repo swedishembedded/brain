@@ -59,6 +59,26 @@ pub fn checkpoint_config(path: &str) -> Result<QwenConfig, String> {
     QwenConfig::from_reader(&reader).map_err(|e| format!("{path}: {e}"))
 }
 
+/// The floating tier the checkpoint at `path` stores its linears and head in: `BF16` or `F16` when every one of
+/// them is stored at that half tier, else `F32` (an fp32 file, a mixed one, or one stored in a quantized encoding
+/// the engine decodes). Reads tensor headers only. What [`crate::footprint::default_weight_tier`] keeps when the
+/// caller names no tier.
+pub fn stored_weight_tier(path: &str) -> Result<crate::Dtype, String> {
+    let (cfg, src) = open_checkpoint(path)?;
+    Ok(source_weight_tier(&cfg, &*src))
+}
+
+/// [`stored_weight_tier`] of an already opened source.
+pub fn source_weight_tier(cfg: &QwenConfig, src: &dyn TensorSource) -> crate::Dtype {
+    use crate::Dtype;
+    let head = cfg.head_weight().to_string();
+    let mut held = cfg.param_list().into_iter().map(|(name, _)| name).filter(|name| crate::q8::Q8::is_i8_linear(name) || *name == head).map(|name| model::ops::stored_tier(src, &name));
+    match held.next().flatten() {
+        Some(first @ (Dtype::BF16 | Dtype::F16)) if held.all(|t| t == Some(first)) => first,
+        _ => Dtype::F32,
+    }
+}
+
 /// The brain checkpoint a model-store directory holds in place of upstream
 /// weights - `model.brain.safetensors` beside the repo's `config.json`, which
 /// is what a converted pull leaves - or `None` when `path` is not such a

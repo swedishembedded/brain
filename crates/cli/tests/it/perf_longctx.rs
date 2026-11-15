@@ -79,6 +79,10 @@ fn qwen3_paged_engine_runs_longctx() {
     let a = smoke(&format!("qwen:{dir}"), "qwen", &[]);
     assert_artifact_is_honest(&a);
     assert_eq!(a["target"]["config"]["kv_precision"], "int8");
+    // The release stores bf16: measured at the tier `brain serve` serves it at, unless --weight-format names one.
+    assert_eq!(a["target"]["config"]["weight_tier"], "bf16", "the stored tier is the default");
+    let int8 = smoke(&format!("qwen:{dir}"), "qwen-int8", &["--weight-format", "int8"]);
+    assert_eq!(int8["target"]["config"]["weight_tier"], "int8", "--weight-format wins");
 }
 
 #[test]

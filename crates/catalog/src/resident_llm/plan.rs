@@ -47,12 +47,10 @@ pub(super) struct QwenPlan {
     pub(super) sparse_attention: Option<String>,
     pub(super) kv_calib_opt_in: bool,
     pub(super) kv_offload_bytes: u64,
-    /// The linears' tier as resolved: the operator's flag, else the size and card rule.
-    pub(super) weights_int8_requested: bool,
-    pub(super) weights_bf16_requested: bool,
-    /// A per-leaf weight policy, which the engine is built at instead of one tier.
+    /// The tiers of the linears and the head as resolved: the operator's `--weight-format`, else the
+    /// checkpoint's stored tier under the card rule ([`super::qwen3_weight_policy`]).
     #[serde(with = "tier_spelling")]
-    pub(super) weight_tiers: Option<TierPolicy>,
+    pub(super) weights: TierPolicy,
     pub(super) max_prefill_cap: u32,
     /// The KV pool in tokens as resolved (`None`: two contexts).
     pub(super) kv_tokens: Option<u32>,
@@ -93,20 +91,17 @@ impl QwenPlan {
     }
 }
 
-/// A per-leaf weight policy as its `--weight-format` spelling ([`TierPolicy::describe`]).
+/// A weight policy as its `--weight-format` spelling ([`TierPolicy::describe`]).
 mod tier_spelling {
     use super::TierPolicy;
     use serde::{Deserialize, Deserializer, Serializer};
 
-    pub fn serialize<S: Serializer>(tiers: &Option<TierPolicy>, s: S) -> Result<S::Ok, S::Error> {
-        match tiers {
-            Some(t) => s.serialize_some(&t.describe()),
-            None => s.serialize_none(),
-        }
+    pub fn serialize<S: Serializer>(tiers: &TierPolicy, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&tiers.describe())
     }
 
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<TierPolicy>, D::Error> {
-        Option::<String>::deserialize(d)?.map(|s| TierPolicy::parse(&s).map_err(serde::de::Error::custom)).transpose()
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<TierPolicy, D::Error> {
+        TierPolicy::parse(&String::deserialize(d)?).map_err(serde::de::Error::custom)
     }
 }
 

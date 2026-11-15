@@ -223,29 +223,56 @@ pub fn encode_stage_split(cfg: &QwenConfig, dt: Dtype, t: u32) -> (u64, u64) {
 /// weights, more than a 24 GB card holds.
 pub const INT8_WEIGHTS_FROM_PARAMS: u64 = 6_000_000_000;
 
-/// Whether `cfg`'s linears default to int8 - [`INT8_WEIGHTS_FROM_PARAMS`]
-/// parameters and up. The serving resident and the SDK both default by it.
-pub fn int8_by_default(cfg: &QwenConfig) -> bool {
+/// Whether `cfg` is large enough ([`INT8_WEIGHTS_FROM_PARAMS`] parameters and
+/// up) for [`default_weight_tier`] to fall to int8 where its weights do not fit.
+fn int8_by_default(cfg: &QwenConfig) -> bool {
     cfg.param_list().iter().map(|(_, n)| *n as u64).sum::<u64>() >= INT8_WEIGHTS_FROM_PARAMS
 }
 
-/// Room beyond a checkpoint's fp32 weights that serving them still needs on a device (a KV pool for a working
+/// Room beyond a checkpoint's weights that serving them still needs on a device (a KV pool for a working
 /// context, row buffers, library workspace).
-pub const FP32_SERVE_HEADROOM_BYTES: u64 = 8 << 30;
+pub const SERVE_HEADROOM_BYTES: u64 = 8 << 30;
 
-/// Bytes of `cfg`'s weights at fp32.
-pub fn fp32_weight_bytes(cfg: &QwenConfig) -> u64 {
-    cfg.param_list().iter().map(|(_, n)| *n as u64 * 4).sum()
+/// Device bytes of `cfg`'s weights with the linears and the head held at `tier` (one of the floating tiers or
+/// int8, with its group scales) and everything else (embeddings, norms) at fp32.
+pub fn held_weight_bytes(cfg: &QwenConfig, tier: Dtype) -> u64 {
+    let head = cfg.head_weight();
+    cfg.param_list()
+        .into_iter()
+        .map(|(name, n)| {
+            let n = n as u64;
+            if !(crate::q8::Q8::is_i8_linear(&name) || name == head) {
+                return n * 4;
+            }
+            match tier {
+                Dtype::BF16 | Dtype::F16 => n * 2,
+                Dtype::I8 => n + (n / 32) * 4,
+                _ => n * 4,
+            }
+        })
+        .sum()
 }
 
-/// Whether a caller that did not choose a weight tier serves `cfg` with int8 linears: a checkpoint of
-/// [`INT8_WEIGHTS_FROM_PARAMS`] parameters or more, and only when the device cannot hold its fp32 weights plus
-/// [`FP32_SERVE_HEADROOM_BYTES`] (`device_bytes`, the memory the weights may use on the largest card; `None`
-/// when unknown, which keeps the size rule). int8 is the least accurate tier - on the 8B its next-token
-/// distribution is KL 7.5e-2 from the exact one against 1.6e-4 for fp32 on tensor cores (knowledge 326) - so a
-/// card that fits the fp32 weights serves them. The serving resident and the SDK pipeline both decide by this.
-pub fn int8_weights_default(cfg: &QwenConfig, device_bytes: Option<u64>) -> bool {
-    int8_by_default(cfg) && device_bytes.is_none_or(|bytes| bytes < fp32_weight_bytes(cfg) + FP32_SERVE_HEADROOM_BYTES)
+/// The tier a caller that did not choose one serves `cfg`'s linears at, given the floating tier the checkpoint
+/// stores them in ([`crate::stored_weight_tier`]) and `device_bytes`, the memory the weights may use on the
+/// largest card (`None` when unknown). The stored tier is kept (a bf16 checkpoint is served bf16, an fp32 one
+/// fp32; any other stored encoding is decoded to fp32), so the device reads the checkpoint's own values at their
+/// own width. int8 is chosen only for a checkpoint of [`INT8_WEIGHTS_FROM_PARAMS`] parameters or more whose
+/// stored-tier weights plus [`SERVE_HEADROOM_BYTES`] do not fit the card, or on an unknown card: it is the least
+/// accurate tier (on the 8B, KL 7.5e-2 from the exact next-token distribution against 1.6e-4 for fp32 and 1.9e-4
+/// for bf16 weights on tensor cores, knowledge 326). A device that cannot hold a half tier widens it to fp32 at
+/// upload and says so. The serving resident, the SDK pipeline and the perf targets all decide by this.
+pub fn default_weight_tier(cfg: &QwenConfig, stored: Dtype, device_bytes: Option<u64>) -> Dtype {
+    let stored = match stored {
+        Dtype::BF16 | Dtype::F16 => stored,
+        _ => Dtype::F32,
+    };
+    let fits = |bytes: u64| bytes >= held_weight_bytes(cfg, stored) + SERVE_HEADROOM_BYTES;
+    if int8_by_default(cfg) && !device_bytes.is_some_and(fits) {
+        Dtype::I8
+    } else {
+        stored
+    }
 }
 
 /// Declares [`estimate_vram_bytes`]'s figure to [`gpu_core::devices::place`]
@@ -276,18 +303,6 @@ pub fn place_and_build<R>(cfg: &QwenConfig, shard: &Shard, dt: Dtype, b: u32, t:
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A large checkpoint is int8 by default only where its fp32 weights and the headroom do not fit; a small one never is.
-    #[test]
-    fn the_default_weight_tier_follows_the_device_that_serves_it() {
-        let big = QwenConfig::qwen3_8b();
-        let need = fp32_weight_bytes(&big) + FP32_SERVE_HEADROOM_BYTES;
-        assert!(int8_weights_default(&big, None), "no device known: the size rule stands");
-        assert!(int8_weights_default(&big, Some(24 << 30)), "a 24 GB card cannot hold the 8B at fp32");
-        assert!(int8_weights_default(&big, Some(need - 1)));
-        assert!(!int8_weights_default(&big, Some(need)), "a card that holds the fp32 weights and the headroom serves fp32");
-        assert!(!int8_weights_default(&QwenConfig::qwen3_1_7b(), Some(1 << 30)) && !int8_weights_default(&QwenConfig::qwen3_1_7b(), None), "below 6B parameters the default is fp32");
-    }
 
     fn tiny_cfg(n_layers: u32, d_model: u32, d_ff: u32) -> QwenConfig {
         QwenConfig {

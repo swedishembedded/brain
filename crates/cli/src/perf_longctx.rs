@@ -49,6 +49,12 @@ fn gpu_budget() -> Vec<(u32, String, u64)> {
     selected_budget(&all, crate::compute_set().map(|s| s.gpus.as_slice()))
 }
 
+/// The usable bytes of the first selected GPU (the card a single-device engine is built on), `None` with no GPU:
+/// what the weight-tier default is decided for.
+pub(crate) fn first_gpu_usable_bytes() -> Option<u64> {
+    gpu_budget().first().map(|g| g.2)
+}
+
 /// `gpus` narrowed to `selected` (every GPU when `--device` has not resolved), less [`RESERVE`] each. A card
 /// outside the selection is never planned on: another process may own it, and its bytes counted as usable made
 /// the sweep load a model across both cards of a machine whose `--device` named one.
@@ -393,11 +399,12 @@ impl LongContextEngine for Qwen35MoeEngine {
 const BLOCK_SIZE: u32 = 16;
 const PREFILL_CHUNK: u32 = 512;
 
-/// The Qwen3 paged serving engine (`qwen:<weights>[:i8w][:kvf32]`).
+/// The Qwen3 paged serving engine (`qwen:<weights>[:kvf32]`), its weights at the tiers `brain serve` serves the
+/// checkpoint at on this card (`catalog::resident_llm::qwen3_weight_policy`) or at `--weight-format`.
 pub struct QwenPagedEngine {
     weights: String,
     cfg: qwen3::QwenConfig,
-    weights_int8: bool,
+    tiers: model::ops::TierPolicy,
     kv_int8: bool,
     /// Device bytes of the first GPU after the reserve: the engine runs on one
     /// device.
@@ -415,12 +422,14 @@ pub struct QwenPagedEngine {
 }
 
 impl QwenPagedEngine {
-    pub fn open(spec: &str) -> Result<QwenPagedEngine, String> {
-        let (weights, weights_int8, kv_fp32) = crate::perf_cli::spec_flags(spec);
+    pub fn open(spec: &str, weight_format: Option<&model::ops::TierPolicy>) -> Result<QwenPagedEngine, String> {
+        let (weights, kv_fp32) = crate::perf_cli::spec_flags(spec);
         let gpu = gpu_budget().into_iter().next().ok_or("no GPU with queryable memory: longctx is GPU-only and has no host fallback")?;
         let cfg = qwen3::checkpoint_config(weights)?;
+        let tiers = catalog::resident_llm::qwen3_weight_policy(weights, weight_format, Some(gpu.2));
+        qwen3::serve::Engine::check_tiers(&cfg, &tiers).map_err(|e| format!("--weight-format {}: {e}", tiers.describe()))?;
         let kv_int8 = crate::perf_cli::resolve_kv_int8(&cfg, kv_fp32, weights);
-        Ok(QwenPagedEngine { weights: weights.to_string(), cfg, weights_int8, kv_int8, gpu, source: None, fused_attention: None, eng: None, tables: Vec::new() })
+        Ok(QwenPagedEngine { weights: weights.to_string(), cfg, tiers, kv_int8, gpu, source: None, fused_attention: None, eng: None, tables: Vec::new() })
     }
 
     /// `(blocks per sequence, pool blocks, prefill chunk)` for a sizing: room
@@ -441,7 +450,7 @@ impl LongContextEngine for QwenPagedEngine {
     fn describe(&self) -> EngineInfo {
         EngineInfo {
             model: format!("qwen3:{}", std::path::Path::new(&self.weights).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()),
-            weight_tier: if self.weights_int8 { "int8" } else { "fp32" }.into(),
+            weight_tier: crate::perf_cli::weight_label(&self.tiers),
             kv_precision: if self.kv_int8 { "int8" } else { "fp32" }.into(),
             backend: gpu_core::backend_name().to_string(),
             devices: vec![format!("gpu{} {}", self.gpu.0, self.gpu.1)],
@@ -455,7 +464,7 @@ impl LongContextEngine for QwenPagedEngine {
 
     fn plan(&mut self, batch: u32, context: u32) -> Result<Fit, String> {
         let (_, num_blocks, _) = Self::geometry(batch, context);
-        let weights = if self.weights_int8 { catalog::resident_llm::weights_int8_bytes(&self.cfg) } else { catalog::resident_llm::weights_fp32_bytes(&self.cfg) };
+        let weights = catalog::resident_llm::weights_bytes_for(&self.cfg, &self.tiers);
         let kv = qwen3::serve::kv_pool_bytes(&self.cfg, BLOCK_SIZE, num_blocks, self.kv_int8);
         let needed = weights + kv + self.scratch_bytes(batch, context, self.fused_attention.unwrap_or_default());
         Ok(Fit { fits: needed <= self.gpu.2, needed_bytes: needed, usable_bytes: self.gpu.2 })
@@ -470,11 +479,10 @@ impl LongContextEngine for QwenPagedEngine {
         let source = self.source.as_deref().expect("opened above");
         let (per_seq, num_blocks, chunk) = Self::geometry(batch, context);
         let (cfg, kv_int8) = (self.cfg.clone(), self.kv_int8);
-        let tier = if self.weights_int8 { qwen3::Dtype::I8 } else { qwen3::Dtype::F32 };
         // Allocation failure on the device surfaces as a panic from the engine
         // constructor; it is the out-of-memory boundary, not a crash.
         let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            qwen3::serve::Engine::from_source_tier(cfg, source, BLOCK_SIZE, num_blocks, batch, per_seq, chunk, kv_int8, tier)
+            qwen3::serve::Engine::from_source_tiers(cfg, source, BLOCK_SIZE, num_blocks, batch, per_seq, chunk, kv_int8, &self.tiers)
         }))
         .map_err(|p| {
             p.downcast_ref::<String>().cloned().or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_else(|| "engine construction panicked".into())
@@ -563,7 +571,7 @@ pub struct Args {
     /// `--kernels`: profile each batch size's decode steps per kernel.
     pub kernels: bool,
     /// `--weight-format`: the weight tier of an engine that takes one
-    /// (`qwen35moe:`); `None` is the engine's default.
+    /// (`qwen:`, `qwen35moe:`); `None` is the engine's default.
     pub weight_format: Option<model::ops::TierPolicy>,
 }
 
@@ -623,12 +631,12 @@ pub fn build_engine(spec: &str, args: &Args) -> Result<Box<dyn LongContextEngine
         return Ok(Box::new(Qwen35MoeEngine::open(path, tier, kv.unwrap_or(model::kv_tier::KvTier::F32))?));
     }
     if let Some(weights) = spec.strip_prefix("qwen:") {
-        return Ok(Box::new(QwenPagedEngine::open(weights)?));
+        return Ok(Box::new(QwenPagedEngine::open(weights, args.weight_format.as_ref())?));
     }
     if let Some(rest) = spec.strip_prefix("ricursive:") {
         return Ok(Box::new(crate::perf_ricursive::RicursiveLongCtx::open(rest)?));
     }
-    Err(format!("longctx does not support target {spec:?}: use qwen35:<gguf>[:kvf32|:kvbf16|:kvint8], qwen35moe:<gguf>, qwen35moe-gguf, qwen:<weights>[:i8w][:kvf32] or ricursive:<dir>[:kvbf16|:kvint8|:kvfp8]"))
+    Err(format!("longctx does not support target {spec:?}: use qwen35:<gguf>[:kvf32|:kvbf16|:kvint8], qwen35moe:<gguf>, qwen35moe-gguf, qwen:<weights>[:kvf32] or ricursive:<dir>[:kvbf16|:kvint8|:kvfp8]"))
 }
 
 #[cfg(test)]
