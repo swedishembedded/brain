@@ -63,6 +63,11 @@ pub const DP4A_MIN_CC: Cc = (6, 1);
 /// a kernel whose body issues them cannot declare a lower floor.
 pub const MMA_S8_MIN_CC: Cc = (8, 0);
 
+/// The compute capability that introduced bulk asynchronous copies (`cp.async.bulk`) and the transaction-counted barriers
+/// they complete (`mbarrier` `expect_tx` / `complete_tx`): Hopper. Like [`MMA_S8_MIN_CC`] a property of the instruction set,
+/// so a kernel whose body moves memory that way cannot declare a lower floor.
+pub const BULK_COPY_MIN_CC: Cc = (9, 0);
+
 /// The compute capability that introduced the FP8 conversions (`cvt.rn.f16x2.e4m3x2`): Ada.
 pub const FP8_CVT_MIN_CC: Cc = (8, 9);
 
@@ -3560,7 +3565,7 @@ pub const ALL: &[CudaKernel] = &[
         weight: Dtype::F32,
         by_name: true,
         source: ImplSource::Tuned,
-        min_cc: MMA_S8_MIN_CC,
+        min_cc: BASELINE_MIN_CC,
         entry: "brain_gdn_decode",
         what: "one Gated DeltaNet decode step in one launch: conv+SiLU, L2 norm, gates, delta-rule state update, gated RMSNorm; a block per key head, bit-identical to the 19-kernel WGSL chain",
         reported: "native:gdn_decode",
@@ -3582,7 +3587,7 @@ pub const ALL: &[CudaKernel] = &[
         weight: Dtype::F32,
         by_name: true,
         source: ImplSource::Tuned,
-        min_cc: MMA_S8_MIN_CC,
+        min_cc: BASELINE_MIN_CC,
         entry: "brain_gdn_decode_pool",
         what: "one Gated DeltaNet decode step for every sequence of a batch in one launch, updating each sequence's pool row of state and conv window in place; the single-sequence body per (key head, row), bit-identical to the 19-kernel WGSL chain",
         reported: "native:gdn_decode_pool",
@@ -3603,7 +3608,7 @@ pub const ALL: &[CudaKernel] = &[
         weight: Dtype::F32,
         by_name: true,
         source: ImplSource::Tuned,
-        min_cc: MMA_S8_MIN_CC,
+        min_cc: BASELINE_MIN_CC,
         entry: "brain_gdn_decode_pool_bf16",
         what: "gdn_decode_pool over a pool that stores the state and the conv window as bf16: widened to f32 on load, every step f32, rounded to nearest even on store",
         reported: "native:gdn_decode_pool_bf16",
@@ -3623,7 +3628,7 @@ pub const ALL: &[CudaKernel] = &[
         weight: Dtype::F32,
         by_name: true,
         source: ImplSource::Tuned,
-        min_cc: MMA_S8_MIN_CC,
+        min_cc: BASELINE_MIN_CC,
         entry: "brain_gdn_conv_pool",
         what: "the causal conv + SiLU of every channel of every sequence of a decode batch, one thread a channel, the windows slid in place in the pool rows; the first half of the split pooled decode, bit-identical to the fused body's conv",
         reported: "native:gdn_conv_pool",
@@ -3640,7 +3645,7 @@ pub const ALL: &[CudaKernel] = &[
         weight: Dtype::F32,
         by_name: true,
         source: ImplSource::Tuned,
-        min_cc: MMA_S8_MIN_CC,
+        min_cc: BASELINE_MIN_CC,
         entry: "brain_gdn_conv_pool_bf16",
         what: "gdn_conv_pool over a pool that stores the conv window as bf16 (widened on load, rounded to nearest even on store)",
         reported: "native:gdn_conv_pool_bf16",
@@ -3674,7 +3679,7 @@ pub const ALL: &[CudaKernel] = &[
         weight: Dtype::F32,
         by_name: true,
         source: ImplSource::Tuned,
-        min_cc: MMA_S8_MIN_CC,
+        min_cc: BULK_COPY_MIN_CC,
         entry: "brain_gdn_recur_pool_stream",
         what: "the L2 norms, gates, delta-rule recurrence and gated norm of one value head of one sequence per 128-thread block over an f32 state pool built for the memory roof: the state tile arrives by one bulk copy, a thread owns two adjacent columns over half the rows, one bulk store returns it; agrees with the exact body to f32 reassociation",
         reported: "native:gdn_recur_pool_stream",
@@ -3708,7 +3713,7 @@ pub const ALL: &[CudaKernel] = &[
         weight: Dtype::F32,
         by_name: true,
         source: ImplSource::Tuned,
-        min_cc: MMA_S8_MIN_CC,
+        min_cc: BASELINE_MIN_CC,
         entry: "brain_gdn_decode_pool_wide",
         what: "the pooled decode step built for occupancy: a pair of lanes shares each state column (64 registers a thread), the contractions fold with one shuffle, the norm sums by warp tree, fused multiply-adds; agrees with the exact body to f32 reassociation",
         reported: "native:gdn_decode_pool_wide",
@@ -3728,7 +3733,7 @@ pub const ALL: &[CudaKernel] = &[
         weight: Dtype::F32,
         by_name: true,
         source: ImplSource::Tuned,
-        min_cc: MMA_S8_MIN_CC,
+        min_cc: BASELINE_MIN_CC,
         entry: "brain_gdn_decode_pool_wide_bf16",
         what: "the pooled decode step built for occupancy: a pair of lanes shares each state column (64 registers a thread), the contractions fold with one shuffle, the norm sums by warp tree, fused multiply-adds; agrees with the exact body to f32 reassociation (bf16 pools)",
         reported: "native:gdn_decode_pool_wide_bf16",
@@ -3748,7 +3753,7 @@ pub const ALL: &[CudaKernel] = &[
         weight: Dtype::F32,
         by_name: true,
         source: ImplSource::Tuned,
-        min_cc: MMA_S8_MIN_CC,
+        min_cc: BULK_COPY_MIN_CC,
         entry: "brain_gdn_decode_pool_stream_bf16",
         what: "the pooled decode step over bf16 pools built for the memory roof: a block a (key head, sequence), the block's state tiles arrive by bulk copy while the conv and gates run, a thread owns two adjacent state columns over half the rows; agrees with the exact body to f32 reassociation and bf16 storage rounding",
         reported: "native:gdn_decode_pool_stream_bf16",
@@ -3767,7 +3772,7 @@ pub const ALL: &[CudaKernel] = &[
         weight: Dtype::F32,
         by_name: true,
         source: ImplSource::Tuned,
-        min_cc: MMA_S8_MIN_CC,
+        min_cc: BULK_COPY_MIN_CC,
         entry: "brain_gdn_verify_pool_stream_bf16",
         what: "up to 8 consecutive streaming Gated DeltaNet decode steps for every sequence of a batch over bf16 pools in one launch, the state tile and conv window rounded to bf16 after every row exactly as the plain streaming decode does, f32 snapshots after every row but the last; each row bit-identical to the plain step",
         reported: "native:gdn_verify_pool_stream_bf16",
@@ -3787,7 +3792,7 @@ pub const ALL: &[CudaKernel] = &[
         weight: Dtype::F32,
         by_name: true,
         source: ImplSource::Tuned,
-        min_cc: MMA_S8_MIN_CC,
+        min_cc: BASELINE_MIN_CC,
         entry: "brain_gdn_verify_pool",
         what: "up to 8 consecutive Gated DeltaNet decode steps for every sequence of a batch in one launch, each sequence from its pool row, snapshotting the state and conv window after every row but the last so a rejected tail can be undone; the same body as gdn_decode_pool, bit-identical to repeated single steps",
         reported: "native:gdn_verify_pool",
@@ -3805,7 +3810,7 @@ pub const ALL: &[CudaKernel] = &[
         weight: Dtype::F32,
         by_name: true,
         source: ImplSource::Tuned,
-        min_cc: MMA_S8_MIN_CC,
+        min_cc: BASELINE_MIN_CC,
         entry: "brain_gdn_conv_verify_pool",
         what: "the causal conv + SiLU of every channel of every row of a speculative verify step, one thread a (sequence, channel) taking the sequence's rows in order, the window snapshotted after every row but the last; the first half of the split verify, bit-identical to the fused body",
         reported: "native:gdn_conv_verify_pool",
@@ -3839,7 +3844,7 @@ pub const ALL: &[CudaKernel] = &[
         weight: Dtype::F32,
         by_name: true,
         source: ImplSource::Tuned,
-        min_cc: MMA_S8_MIN_CC,
+        min_cc: BULK_COPY_MIN_CC,
         entry: "brain_gdn_recur_verify_pool_stream",
         what: "up to 8 consecutive streaming recurrence steps of one value head of one sequence per 128-thread block over an f32 state pool, the tile resident in shared memory throughout, f32 snapshots of the tile after every row but the last; each row bit-identical to the plain streaming step",
         reported: "native:gdn_recur_verify_pool_stream",
@@ -3856,7 +3861,7 @@ pub const ALL: &[CudaKernel] = &[
         weight: Dtype::F32,
         by_name: true,
         source: ImplSource::Tuned,
-        min_cc: MMA_S8_MIN_CC,
+        min_cc: BASELINE_MIN_CC,
         entry: "brain_gdn_commit_pool",
         what: "copies, for each sequence that rejected speculated rows, the snapshot of its last accepted row's recurrent state and conv window back over its pool row; a block per 4096-element tile per sequence",
         reported: "native:gdn_commit_pool",
@@ -3873,7 +3878,7 @@ pub const ALL: &[CudaKernel] = &[
         weight: Dtype::F32,
         by_name: true,
         source: ImplSource::Tuned,
-        min_cc: MMA_S8_MIN_CC,
+        min_cc: BASELINE_MIN_CC,
         entry: "brain_gdn_commit_pool_bf16",
         what: "copies, for each sequence that rejected speculated rows, the snapshot of its last accepted row's recurrent state and conv window back over its bf16 pool row (narrowed exactly); a block per 4096-element tile per sequence",
         reported: "native:gdn_commit_pool_bf16",
@@ -5092,6 +5097,14 @@ pub fn check_table(table: &[CudaKernel]) -> Vec<String> {
             errs.push(format!(
                 "{}: issues mma.sync/cp.async but declares min_cc {}.{}, below the capability that introduced them ({}.{})",
                 k.name, k.min_cc.0, k.min_cc.1, MMA_S8_MIN_CC.0, MMA_S8_MIN_CC.1
+            ));
+        }
+        // Bulk copies the same way, behind `__CUDA_ARCH__ >= 900`.
+        let gates_bulk_itself = code.contains("__CUDA_ARCH__ >= 900");
+        if code.contains("cp.async.bulk") && k.min_cc < BULK_COPY_MIN_CC && !gates_bulk_itself {
+            errs.push(format!(
+                "{}: issues cp.async.bulk but declares min_cc {}.{}, below the capability that introduced it ({}.{})",
+                k.name, k.min_cc.0, k.min_cc.1, BULK_COPY_MIN_CC.0, BULK_COPY_MIN_CC.1
             ));
         }
         // `wgmma.mma_async` is a Hopper instruction (and arch-specific): a lower floor would offer the kernel to

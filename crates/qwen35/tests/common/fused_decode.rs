@@ -28,8 +28,8 @@ pub fn serial() -> MutexGuard<'static, ()> {
 
 /// Whether `gpu` is offered what an FP8 build needs to hold a layer's projections as one weight: the native FP8 products
 /// on row windows and, for `in_proj_qkv | in_proj_z` (`gdn`), the streaming GDN decode and verify kernels that read the
-/// fused product in place. A device below their floor (they need `mma.sync` and `cp.async`) holds every projection on
-/// its own, so the specs of these tests have nothing to check there.
+/// fused product in place. A device below their floors (the FP8 products need `mma.sync`, the streaming GDN kernels bulk
+/// copies) holds every projection on its own, so the specs of these tests have nothing to check there.
 pub fn offers_fused_projections(gpu: &gpu_core::Gpu, gdn: bool) -> bool {
     gpu.has_fp8_linear() && (!gdn || (gpu.has_fused(gpu_core::Fused::GdnDecodePoolStreamBf16) && gpu.has_fused(gpu_core::Fused::GdnVerifyPoolStreamBf16)))
 }

@@ -492,10 +492,19 @@ brain_gdn_verify_pool(const unsigned int* params, const float* mixed, const floa
                           snap_state + off * state_len, snap_hist + off * hist_len);
 }
 
+// Two f32 values rounded to nearest even as one word of two bf16 halves, `lo` in the lower half. From compute 8.0 one
+// instruction; below it the rounding `brain_st_state` stores with, which agrees with it on every finite value.
 __device__ __forceinline__ unsigned int brain_pack_bf16x2(float lo, float hi) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
     unsigned int d;
     asm("cvt.rn.bf16x2.f32 %0, %1, %2;\n" : "=r"(d) : "f"(hi), "f"(lo));  // the first source takes the upper half
     return d;
+#else
+    unsigned short h[2];
+    brain_st_state(&h[0], lo);
+    brain_st_state(&h[1], hi);
+    return static_cast<unsigned int>(h[0]) | (static_cast<unsigned int>(h[1]) << 16);
+#endif
 }
 
 // Put the snapshot row `sel[bi]` back over pool row `rows[bi]` for every
@@ -838,6 +847,15 @@ brain_gdn_conv_pool_bf16(const unsigned int* params, const float* mixed, const f
     brain_gdn_conv_pool_entry<unsigned short>(params, mixed, conv_w, hist, conv_out, rows);
 }
 
+// ---- kernels that need compute 8.0 or 9.0 ---------------------------------------------------------------------------
+//
+// Everything above runs on any part the backend supports. The split recurrences below stage their state tile with
+// `cp.async` (compute 8.0), and the streaming kernels at the end move it with bulk copies and transaction-counted barriers
+// (`cp.async.bulk`, `mbarrier` `complete_tx`: compute 9.0). They are compiled only for a device that has those
+// instructions, so this module still builds, and the kernels above still load, on an older part; each registry entry
+// declares the floor of its own body.
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+
 // 16-byte global -> shared copies (`cp.async`) of the state tile, and the shared -> global store of the result.
 __device__ __forceinline__ void brain_gdn_cp16(unsigned int dst, const void* src) {
     asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" ::"r"(dst), "l"(src) : "memory");
@@ -971,6 +989,8 @@ brain_gdn_recur_pool_bf16(const unsigned int* params, const float* conv_out, con
     brain_gdn_recur_pool_entry<unsigned short>(params, conv_out, bproj, aproj, a_log, dt_bias, state, z, norm_w, gated, rows);
 }
 
+#endif  // __CUDA_ARCH__ >= 800
+
 // The split verify (speculative decoding)
 // ----------------------------------------
 // `brain_gdn_verify_pool` is the fused body over a sequence's rows: one block of 384 threads per (key head, sequence), 128 state
@@ -1020,6 +1040,7 @@ brain_gdn_conv_verify_pool(const unsigned int* params, const float* mixed, const
     for (int i = 0; i < 3; ++i) { h_ptr[i] = h[i]; }
 }
 
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
 extern "C" __global__ void __launch_bounds__(BRAIN_GDN_HD, 3)
 brain_gdn_recur_verify_pool(const unsigned int* params, const float* conv_out, const float* bproj, const float* aproj, const float* a_log,
                             const float* dt_bias, float* state, const float* z, const float* norm_w, float* gated, const unsigned int* rows,
@@ -1135,6 +1156,10 @@ brain_gdn_recur_verify_pool(const unsigned int* params, const float* conv_out, c
     uint4* dst = reinterpret_cast<uint4*>(gtile);
     for (unsigned int c = j; c < TILE_BYTES / 16u; c += BRAIN_GDN_HD) { dst[c] = src[c]; }
 }
+
+#endif  // __CUDA_ARCH__ >= 800
+
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
 
 // ---- the streaming pooled decode over a bf16 pool ---------------------------------------------------------------------
 //
@@ -1659,3 +1684,5 @@ brain_gdn_recur_verify_pool_stream(const unsigned int* params, const float* conv
     if (bi >= params[6]) { return; }                  // block-uniform
     brain_gdn_recur_stream_body<true>(params, conv_out, bproj, aproj, a_log, dt_bias, state, z, norm_w, gated, vh, rows[bi], counts[bi], offs[bi], snap_state);
 }
+
+#endif  // __CUDA_ARCH__ >= 900

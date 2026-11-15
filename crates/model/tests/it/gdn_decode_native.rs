@@ -163,10 +163,19 @@ fn is_cuda(g: &Gpu) -> bool {
     g.kind() == "cuda" && g.caps().arch.compute_capability.is_some() && gpu_core::native_kernels_enabled()
 }
 
-/// Whether this device is offered the GDN fused kernels: a CUDA device at their floor (tensor-core int8
-/// and `cp.async`, compute capability 8.0), native kernels not withheld.
+/// Whether this device is offered the exact GDN fused kernels (any CUDA device the backend supports), native kernels not
+/// withheld.
 fn offers_gdn(g: &gpu_core::Gpu) -> bool {
     is_cuda(g) && g.has_fused(gpu_core::Fused::GdnDecode)
+}
+
+/// Whether this device is also offered the streaming GDN kernels (bulk copies: compute capability 9.0), the plain decode a
+/// serving pool takes and the verify that has to reproduce it.
+fn offers_gdn_streaming(g: &gpu_core::Gpu) -> bool {
+    offers_gdn(g)
+        && [gpu_core::Fused::GdnDecodePoolStreamBf16, gpu_core::Fused::GdnVerifyPoolStreamBf16, gpu_core::Fused::GdnRecurPoolStream, gpu_core::Fused::GdnRecurVerifyPoolStream]
+            .into_iter()
+            .all(|k| g.has_fused(k))
 }
 
 /// Run the chain and the fused kernel from identical inputs and compare every
@@ -235,7 +244,7 @@ fn the_fused_step_is_offered_only_where_it_can_run() {
 fn the_fused_step_is_byte_identical_to_the_wgsl_chain() {
     let g = gpu_core::testgpu::dev(KERNELS);
     if !offers_gdn(&g) {
-        brain_testutil::skip_unavailable("the GDN fused kernels need a CUDA device at their floor (compute capability 8.0)");
+        brain_testutil::skip_unavailable("the GDN fused kernels need a CUDA device");
         return;
     }
     // Group 1, 2 and 3 (the block is group x 128 threads), a single key head,
@@ -253,7 +262,7 @@ fn the_fused_step_is_byte_identical_to_the_wgsl_chain() {
 fn a_run_of_steps_stays_byte_identical() {
     let g = gpu_core::testgpu::dev(KERNELS);
     if !offers_gdn(&g) {
-        brain_testutil::skip_unavailable("the GDN fused kernels need a CUDA device at their floor (compute capability 8.0)");
+        brain_testutil::skip_unavailable("the GDN fused kernels need a CUDA device");
         return;
     }
     let (nkh, group, dk, dv, kw) = (4u32, 3u32, 128u32, 128u32, 4u32);
@@ -292,7 +301,7 @@ fn a_run_of_steps_stays_byte_identical() {
 fn a_pooled_batch_is_byte_identical_to_the_staged_chain() {
     let g = gpu_core::testgpu::dev(KERNELS);
     if !offers_gdn(&g) {
-        brain_testutil::skip_unavailable("the GDN fused kernels need a CUDA device at their floor (compute capability 8.0)");
+        brain_testutil::skip_unavailable("the GDN fused kernels need a CUDA device");
         return;
     }
     let (dk, dv, kw) = (128u32, 128u32, 4u32);
@@ -344,7 +353,7 @@ fn a_pooled_batch_is_byte_identical_to_the_staged_chain() {
 fn a_multi_row_launch_is_byte_identical_to_the_same_rows_one_step_at_a_time() {
     let g = gpu_core::testgpu::dev(KERNELS);
     if !offers_gdn(&g) {
-        brain_testutil::skip_unavailable("the GDN fused kernels need a CUDA device at their floor (compute capability 8.0)");
+        brain_testutil::skip_unavailable("the GDN fused kernels need a CUDA device");
         return;
     }
     let (dk, dv, kw) = (128u32, 128u32, 4u32);
@@ -422,7 +431,7 @@ fn a_multi_row_launch_is_byte_identical_to_the_same_rows_one_step_at_a_time() {
 fn the_wide_candidate_agrees_with_the_exact_body_within_a_stated_tolerance() {
     let g = gpu_core::testgpu::dev(KERNELS);
     if !offers_gdn(&g) {
-        brain_testutil::skip_unavailable("the GDN fused kernels need a CUDA device at their floor (compute capability 8.0)");
+        brain_testutil::skip_unavailable("the GDN fused kernels need a CUDA device");
         return;
     }
     let (dk, dv, kw) = (128u32, 128u32, 4u32);
@@ -484,8 +493,8 @@ fn the_wide_candidate_agrees_with_the_exact_body_within_a_stated_tolerance() {
 #[test]
 fn the_streaming_decode_reads_qkv_and_z_in_place_from_one_fused_product() {
     let g = gpu_core::testgpu::dev(KERNELS);
-    if !offers_gdn(&g) {
-        brain_testutil::skip_unavailable("the GDN fused kernels need a CUDA device at their floor (compute capability 8.0)");
+    if !offers_gdn_streaming(&g) {
+        brain_testutil::skip_unavailable("the streaming GDN kernels need a CUDA device at their floor (compute capability 9.0)");
         return;
     }
     let (dk, dv, kw) = (128u32, 128u32, 4u32);
@@ -547,8 +556,8 @@ fn the_streaming_decode_reads_qkv_and_z_in_place_from_one_fused_product() {
 #[test]
 fn the_f32_streaming_decode_agrees_with_the_exact_body_over_many_steps() {
     let g = gpu_core::testgpu::dev(KERNELS);
-    if !offers_gdn(&g) || !g.set_kernel_timing(true) {
-        brain_testutil::skip_unavailable("the GDN fused kernels and device timing need a CUDA device at their floor (compute capability 8.0)");
+    if !offers_gdn_streaming(&g) || !g.set_kernel_timing(true) {
+        brain_testutil::skip_unavailable("the streaming GDN kernels and device timing need a CUDA device at their floor (compute capability 9.0)");
         return;
     }
     // The bound this test states: relative L2 error against the exact body, per step for the layer output and after the last
@@ -616,7 +625,7 @@ fn the_f32_streaming_decode_agrees_with_the_exact_body_over_many_steps() {
 fn the_split_pooled_decode_is_byte_identical_to_the_single_launch_body() {
     let g = gpu_core::testgpu::dev(KERNELS);
     if !offers_gdn(&g) {
-        brain_testutil::skip_unavailable("the GDN fused kernels need a CUDA device at their floor (compute capability 8.0)");
+        brain_testutil::skip_unavailable("the GDN fused kernels need a CUDA device");
         return;
     }
     let (dk, dv, kw) = (128u32, 128u32, 4u32);
@@ -686,7 +695,7 @@ fn the_split_pooled_decode_is_byte_identical_to_the_single_launch_body() {
 fn gdn_decode_pool_production_shape() {
     let g = gpu_core::testgpu::dev(KERNELS);
     if !offers_gdn(&g) || !g.set_kernel_timing(true) {
-        brain_testutil::skip_unavailable("the GDN fused kernels and device timing need a CUDA device at their floor (compute capability 8.0)");
+        brain_testutil::skip_unavailable("the GDN fused kernels and device timing need a CUDA device");
         return;
     }
     let (dk, dv, kw, nkh, group) = (128u32, 128u32, 4u32, 16u32, 3u32);

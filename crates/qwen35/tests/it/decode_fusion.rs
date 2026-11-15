@@ -136,7 +136,7 @@ fn the_gdn_step_is_one_launch_with_128_wide_heads() {
         return;
     };
     if !gpu.has_fused(gpu_core::Fused::GdnDecode) {
-        brain_testutil::skip_unavailable("the device is not offered the native GDN decode step (it needs cp.async)");
+        brain_testutil::skip_unavailable("the device is not offered the native GDN decode step");
         return;
     }
     let (narrow, wide) = (tiny(), wide_gdn());

@@ -41,10 +41,19 @@ fn is_cuda(g: &gpu_core::Gpu) -> bool {
     g.kind() == "cuda" && g.caps().arch.compute_capability.is_some() && gpu_core::native_kernels_enabled()
 }
 
-/// Whether this device is offered the GDN fused kernels: a CUDA device at their floor (tensor-core int8
-/// and `cp.async`, compute capability 8.0), native kernels not withheld.
+/// Whether this device is offered the exact GDN fused kernels (any CUDA device the backend supports), native kernels not
+/// withheld.
 fn offers_gdn(g: &gpu_core::Gpu) -> bool {
     is_cuda(g) && g.has_fused(gpu_core::Fused::GdnDecode)
+}
+
+/// Whether this device is also offered the streaming GDN kernels (bulk copies: compute capability 9.0), the plain decode a
+/// serving pool takes and the verify that has to reproduce it.
+fn offers_gdn_streaming(g: &gpu_core::Gpu) -> bool {
+    offers_gdn(g)
+        && [gpu_core::Fused::GdnDecodePoolStreamBf16, gpu_core::Fused::GdnVerifyPoolStreamBf16, gpu_core::Fused::GdnRecurPoolStream, gpu_core::Fused::GdnRecurVerifyPoolStream]
+            .into_iter()
+            .all(|k| g.has_fused(k))
 }
 
 fn u32s(g: &gpu_core::Gpu, v: &[u32]) -> gpu_core::DeviceBuffer {
@@ -94,7 +103,12 @@ fn verify_rows_over_f32_pools_equal_repeated_plain_streaming_steps() {
 fn verify_equals_single_steps(bf16: bool, stream: bool) {
     let g = gpu_core::testgpu::dev(&[]);
     if !offers_gdn(&g) {
-        brain_testutil::skip_unavailable("the GDN fused kernels need a CUDA device at their floor (compute capability 8.0)");
+        brain_testutil::skip_unavailable("the GDN fused kernels need a CUDA device");
+        return;
+    }
+    // A bf16 pool and the serving default stream.
+    if (bf16 || stream) && !offers_gdn_streaming(&g) {
+        brain_testutil::skip_unavailable("the streaming GDN kernels need a CUDA device at their floor (compute capability 9.0)");
         return;
     }
     let (dk, dv, kw) = (128u32, 128u32, 4u32);
@@ -228,8 +242,8 @@ fn verify_equals_single_steps(bf16: bool, stream: bool) {
 #[test]
 fn verify_reads_qkv_and_z_in_place_from_one_fused_product() {
     let g = gpu_core::testgpu::dev(&[]);
-    if !offers_gdn(&g) {
-        brain_testutil::skip_unavailable("the GDN fused kernels need a CUDA device at their floor (compute capability 8.0)");
+    if !offers_gdn_streaming(&g) {
+        brain_testutil::skip_unavailable("the streaming GDN kernels need a CUDA device at their floor (compute capability 9.0)");
         return;
     }
     let (dk, dv, kw) = (128u32, 128u32, 4u32);
@@ -303,8 +317,8 @@ fn verify_reads_qkv_and_z_in_place_from_one_fused_product() {
 #[ignore]
 fn qkvz_back_to_back_stress() {
     let g = gpu_core::testgpu::dev(&[]);
-    if !offers_gdn(&g) {
-        brain_testutil::skip_unavailable("the GDN fused kernels need a CUDA device at their floor (compute capability 8.0)");
+    if !offers_gdn_streaming(&g) {
+        brain_testutil::skip_unavailable("the streaming GDN kernels need a CUDA device at their floor (compute capability 9.0)");
         return;
     }
     let (dk, dv, kw, nkh, group, pool_rows) = (128u32, 128u32, 4u32, 16u32, 3u32, 64u32);

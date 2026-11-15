@@ -72,6 +72,12 @@ fn assert_round_matches_decode(rows: usize) {
         brain_testutil::skip_unavailable("no usable CUDA backend");
         return;
     };
+    // A round runs as decode steps only where the device is offered the multi-row recurrent kernel; elsewhere it is the
+    // chunk tape, which agrees with decode to the bound `decode_step` gates, not bit for bit.
+    if !gpu.has_fused(gpu_core::Fused::GdnDecode) {
+        brain_testutil::skip_unavailable("the device is not offered the native GDN decode kernel an exact round runs on");
+        return;
+    }
     let (m, tokens) = build(gpu);
     let (warm, round) = (&tokens[..WARM], &tokens[WARM..WARM + rows]);
     let after = &tokens[WARM + rows..WARM + rows + 2];
