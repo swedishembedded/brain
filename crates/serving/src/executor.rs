@@ -418,7 +418,7 @@ pub fn build_executor(machine: &Machine, reserve: Reserve, store: &catalog::Serv
     let mut ricursive_discovered = Vec::new();
     if let Some(dir) = store.models_dir() {
         let existing: std::collections::BTreeSet<String> = models.iter().map(|m| m.manifest().model).collect();
-        let settings = crate::model_dir::ScanSettings { qwen: qwen_cfg, qwen35: qwen35.clone(), ricursive, gpus: gpus.clone(), reserved, encoder_batch: max_batch };
+        let settings = crate::model_dir::ScanSettings { qwen: qwen_cfg, qwen35: qwen35.clone(), ricursive, gpus: gpus.clone(), reserved, encoder_batch: max_batch, worker_hosting: worker_hosting.clone() };
         let discovered = crate::model_dir::discover(dir, &settings);
         // The env-selected resident and a model-dir entry may be the same
         // checkpoint. Two residents would be two instances: two copies of the

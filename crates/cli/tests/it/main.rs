@@ -32,5 +32,7 @@ mod serve_connection;
 mod version;
 #[cfg(target_os = "linux")]
 mod worker_hosted;
+#[cfg(target_os = "linux")]
+mod worker_hosted_lfm;
 mod yolov8_eval;
 mod zipdepth_smoke;

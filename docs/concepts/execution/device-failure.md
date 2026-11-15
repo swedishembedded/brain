@@ -44,16 +44,19 @@ At startup `brain serve` prints one line saying which form it runs in:
 
 `brain serve --worker-hosted FAMILY` runs every model of that family in a
 supervised worker instead of in the serving process: a child process that
-owns one card's device and the model's instance on it, and answers one job
-at a time. The worker is `brain` itself, started by the server in an internal
-mode with the server's own device flags (`--backend`, `--gpu-wait-s`, ...);
+owns one card's device and the model's instance on it, and answers the
+jobs its card is given: a group a model batches is batched in the worker,
+and a model that admits requests into a running batch admits them there.
+The worker is `brain` itself, started by the server in an internal mode
+with the server's own device flags (`--backend`, `--gpu-wait-s`, ...);
 it is not a command and refuses to run when started by hand. A model answers
 the same in a worker as in process: its inputs, outputs, progress (streamed
 tokens and steps) and cancellation cross the process boundary, and its
 images and audio travel in shared memory rather than over the socket.
 
-Today one family can be hosted this way: `decision` (the decide and Laya
-models). Every other family runs in the serving process; naming one in the
+Two families can be hosted this way: `decision` (the decide and Laya
+models) and `lfm` (LFM2.5 encoders served from the model store). Every other
+family runs in the serving process; naming one in the
 flag stops the server at startup with the list of families that can be
 hosted. `--worker-deadline-s SECS` (900 by default <!-- perf-number: the flag's default, a configured bound not a measurement -->) bounds how
 long a worker may take to load its model, and how long a job may go without

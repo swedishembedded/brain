@@ -60,6 +60,11 @@ against the NPU export via OpenVINO.
       generic D-Bus executor, staged tokenize/encode/head pipelining so
       requests overlap, an NPU device lane, and batched padding (zeroed pad
       states plus an additive key mask)
+- [x] Worker hosting: `brain serve --worker-hosted lfm` runs every scanned
+      encoder in a supervised worker, its groups batched there by its own
+      `run_batch`; certified and measured in
+      `crates/cli/tests/it/worker_hosted_lfm.rs` (status and numbers:
+      `gpu-supervisor.md`)
 - [x] Python D-Bus embedding client example - `samples/python/embedding/lfm2-embed/lfm2_embed.py`,
       exercising both `embed` (per-token hidden states + mean-pooled embedding)
       and `fill_mask` over D-Bus
@@ -73,7 +78,10 @@ against the NPU export via OpenVINO.
 - [ ] Fixing the buffer-offset alignment violation in the GEMM attention
       fallback path at its source - it's currently just avoided because the
       faster flash-attention kernel is selected by default; a device that
-      falls back to the GEMM path can still hit it
+      falls back to the GEMM path can still hit it, and so does a batched
+      forward of a model whose `d_model` is not a multiple of 64 (a tiny
+      `d_model` 16 encoder at batch 2 binds offset 2688 bytes on a P40), which
+      is why the worker-hosting tests use `d_model` 64
 
 Bidirectional attention has no causal mask to hide padded positions, so
 mixing sequence lengths in one batch requires either exact-length builds or

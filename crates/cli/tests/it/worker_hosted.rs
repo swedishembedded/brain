@@ -37,12 +37,14 @@ const QUESTIONS: &str = r#"[
 /// Both sides build the same graph on the same card.
 const TOLERANCE: f64 = 1e-5;
 
-fn brain() -> &'static str {
+pub(super) fn brain() -> &'static str {
     env!("CARGO_BIN_EXE_brain")
 }
 
 #[test]
 fn the_worker_mode_is_internal_and_refused_from_a_terminal() {
+    // It starts the worker mode, which the GPU tests would count as theirs.
+    let _serial = serial();
     let help = Command::new(brain()).arg("help").output().expect("run brain help");
     assert!(!String::from_utf8_lossy(&help.stdout).contains(serving::supervision::WORKER_MODE), "the internal worker mode is listed in `brain help`");
     let out = Command::new(brain()).arg(serving::supervision::WORKER_MODE).stdin(Stdio::null()).output().expect("run the worker mode");
@@ -58,7 +60,7 @@ fn store() -> Scratch {
     s
 }
 
-fn cards(n: u32) -> Budgets {
+pub(super) fn cards(n: u32) -> Budgets {
     let mut budgets = Budgets::new();
     for i in 0..n {
         budgets.set(Device::Gpu(i), 8 << 30, 0);
@@ -66,7 +68,7 @@ fn cards(n: u32) -> Budgets {
     budgets
 }
 
-fn supervision() -> Supervision {
+pub(super) fn supervision() -> Supervision {
     serving::ServeSupervision::new(Err("probes are paced by the breaker in this test".into())).supervision
 }
 
@@ -115,7 +117,7 @@ fn agree(a: &Value, b: &Value, at: &str) {
 }
 
 /// The worker processes this process has started that are alive now.
-fn live_workers() -> Vec<u32> {
+pub(super) fn live_workers() -> Vec<u32> {
     let mut out = Vec::new();
     for task in std::fs::read_dir("/proc/self/task").expect("procfs").flatten() {
         let Ok(children) = std::fs::read_to_string(task.path().join("children")) else { continue };
@@ -131,7 +133,7 @@ fn live_workers() -> Vec<u32> {
 
 /// The GPU tests run one at a time: each counts the workers this process
 /// started, and the cards are shared.
-fn serial() -> std::sync::MutexGuard<'static, ()> {
+pub(super) fn serial() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }

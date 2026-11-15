@@ -106,6 +106,9 @@ pub struct ScanSettings {
     /// `--max-batch` for the encoders that batch equal-length requests into
     /// one forward (LFM2.5); `None` keeps each one's own default.
     pub encoder_batch: Option<u32>,
+    /// The families whose models run in a supervised worker
+    /// (`--worker-hosted`); `None` runs every model in this process.
+    pub worker_hosting: Option<residency::supervised::WorkerHosting>,
 }
 
 /// What [`discover`] found.
@@ -462,6 +465,10 @@ impl Scan {
         let model = match &built {
             Built::Qwen(_) => built.erased(),
             Built::Other(other) => catalog::sampling_defaults::with_checkpoint_sampling(other.clone(), dir),
+            Built::Hostable(resident, spec) => {
+                let served = residency::supervised::WorkerHosting::serve(self.settings.worker_hosting.as_ref(), resident.clone(), spec.clone());
+                catalog::sampling_defaults::with_checkpoint_sampling(served, dir)
+            }
             Built::Multi(multi) => {
                 self.multi.push(multi.clone());
                 return;
@@ -511,6 +518,10 @@ fn widen_to_hold(bank: AdapterBankSettings, card: &ModelCard, widen: Widen) -> A
 enum Built {
     Qwen(Arc<QwenResident>),
     Other(Arc<dyn ResidentModel>),
+    /// A model of a family a supervised worker can host: run in a worker when
+    /// the scan's [`ScanSettings::worker_hosting`] covers its family, else
+    /// as [`Built::Other`].
+    Hostable(Arc<dyn ResidentModel>, residency::supervised::HostSpec),
     /// A model that occupies several cards at once, for `register_multi`.
     Multi(Arc<dyn MultiDeviceResidentModel>),
 }
@@ -526,6 +537,8 @@ impl Built {
         match self {
             Built::Qwen(q) => Built::Qwen(q),
             Built::Other(o) => Built::Other(Arc::new(residency::OfArchitecture::new(arch, o))),
+            // The serving process answers the manifest; the worker rebuilds the bare resident from its spec.
+            Built::Hostable(o, spec) => Built::Hostable(Arc::new(residency::OfArchitecture::new(arch, o)), spec),
             Built::Multi(m) => Built::Multi(Arc::new(residency::OfArchitecture::new(arch, m))),
         }
     }
@@ -533,7 +546,7 @@ impl Built {
     fn erased(&self) -> Arc<dyn ResidentModel> {
         match self {
             Built::Qwen(q) => q.clone(),
-            Built::Other(o) => o.clone(),
+            Built::Other(o) | Built::Hostable(o, _) => o.clone(),
             Built::Multi(m) => m.clone(),
         }
     }
@@ -768,7 +781,10 @@ fn resident_for(weights: &str, card: &ModelCard, tokenizer: Option<&str>, qwen_c
         "gpt" => Some(Arc::new(catalog::resident_llm::GptResident::from_card(weights, card, tokenizer))),
         "glm" => Some(Arc::new(catalog::resident_llm::GlmResident::from_card(weights, card, tokenizer))),
         "lfm" => match catalog::resident_lfm::LfmResident::from_card(weights, card, tokenizer, encoder_batch.unwrap_or(catalog::resident_lfm::DEFAULT_BATCH)) {
-            Ok(l) => Some(Arc::new(l)),
+            Ok(l) => {
+                let spec = l.host_spec();
+                return Some(Built::Hostable(Arc::new(l), spec));
+            }
             Err(e) => {
                 eprintln!("brain: skip {} ({e})", card.id);
                 None
@@ -877,7 +893,11 @@ fn resident_for_compound(card: &ModelCard, roles: &std::collections::BTreeMap<St
             Some("qwen3") if catalog::resident_qwen_embed::is_embedding_id(&card.id) => Ok(Built::Other(catalog::resident_qwen_embed::embedding_resident(weights, card, tokenizer.to_str()))),
             Some("qwen3") => Ok(Built::Qwen(Arc::new(QwenResident::from_card_configured(weights, card, tokenizer.to_str(), qwen_cfg)))),
             Some("glmdsa") => Ok(Built::Other(Arc::new(catalog::resident_llm::GlmResident::from_card(weights, card, None)))),
-            Some("lfm2") => Ok(Built::Other(Arc::new(catalog::resident_lfm::LfmResident::from_card(weights, card, tokenizer.to_str(), encoder_batch.unwrap_or(catalog::resident_lfm::DEFAULT_BATCH))?))),
+            Some("lfm2") => {
+                let lfm = catalog::resident_lfm::LfmResident::from_card(weights, card, tokenizer.to_str(), encoder_batch.unwrap_or(catalog::resident_lfm::DEFAULT_BATCH))?;
+                let spec = lfm.host_spec();
+                Ok(Built::Hostable(Arc::new(lfm), spec))
+            }
             // Sharded across several GPUs, so it is registered on its own
             // multi-device path (resolved from the store) rather than here.
             _ => Err(format!("{} is served across GPUs by brain/qwen3omnimoe and its int8 Thinker, not as a model-dir entry", card.id)),
@@ -1204,6 +1224,29 @@ mod tests {
         assert!(got.contains(&"toy-glm".to_string()), "glm missing: {got:?}");
         assert!(got.contains(&"toy-yolo".to_string()), "yolo missing: {got:?}");
         assert!(got.contains(&"toy-depth".to_string()), "depth missing: {got:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// With `--worker-hosted lfm` a scanned encoder is built in a worker:
+    /// activating it starts the worker command (here a fake that refuses
+    /// every request) instead of loading the weights in this process.
+    #[test]
+    #[cfg(unix)]
+    fn a_scanned_encoder_runs_in_a_worker_when_its_family_is_hosted() {
+        use residency::supervised::{Deadlines, WorkerHosting};
+        let dir = tmp_dir("hosted-lfm");
+        write_tokenizer(&dir);
+        write_st(&dir, "enc.safetensors", "toy-enc", "lfm");
+        let refuse = r#"while IFS= read -r line; do echo "${line%% *} err refused by the test worker"; done"#;
+        let command = gpu_supervisor::WorkerCommand::new("/bin/sh").arg("-c").arg(refuse);
+        let health = Arc::new(gpu_supervisor::Health::new(gpu_supervisor::BreakerPolicy::default(), std::time::Duration::from_secs(2)));
+        let deadline = std::time::Duration::from_secs(10);
+        let hosting = WorkerHosting::new(command, health, Deadlines { open: deadline, run: deadline, reap: deadline }, vec![catalog::resident_lfm::FAMILY.to_string()]);
+        let residents = discover(&dir, &ScanSettings { worker_hosting: Some(hosting), ..Default::default() }).residents;
+        let enc = residents.iter().find(|r| r.manifest().model == "toy-enc").expect("the encoder is served");
+        let key = enc.instance_key("embed", &capability::Invocation::new().set("text", serde_json::json!("hi")));
+        let err = enc.activate(&key, residency::Device::Gpu(0)).err().expect("the fake worker refuses");
+        assert!(err.contains("refused by the test worker"), "activation went to the worker: {err}");
         std::fs::remove_dir_all(&dir).ok();
     }
 

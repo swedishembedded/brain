@@ -11,10 +11,10 @@ answered honestly.
 
 **Status: the supervisor, the breaker and their executor integration are
 built and verified, and `brain serve` runs its executor with them. The
-decision models can be served from a killable worker (`brain serve
---worker-hosted decision`), which is `brain` re-executing itself in an
-internal worker mode; that is off by default. Every other served model still
-runs in process under `bounded`.** The table under "Milestones" says what is
+decision models and the LFM2.5 encoders can be served from a killable
+worker (`brain serve --worker-hosted decision,lfm`), which is `brain`
+re-executing itself in an internal worker mode; that is off by default. Every
+other served model still runs in process under `bounded`.** The table under "Milestones" says what is
 done and what is open, with the reason.
 
 The cross-process half of the device-init lock was reverted
@@ -67,7 +67,7 @@ worker.
 | `wire` | `crates/gpu-supervisor/src/wire.rs` | frames with descriptors beside them (`SCM_RIGHTS`, close-on-exec, truncation refused), sealed memfds for bulk data (`seal`, `read_sealed`: refuses an unsealed or oversized descriptor), `take_worker_socket` (the worker's end: stdin must be a socket, then stdin reads `/dev/null` and stdout goes to stderr so model code cannot write into the protocol) |
 | `SupervisedModel` | `crates/residency/src/supervised.rs` | a resident whose instance is a worker process; it wraps the model's own resident, which answers the manifest, instance key, estimate and job checks in the serving process. Activation sends `hello <PROTOCOL>` then `open <device> <spec>`; each group of jobs `run_batch` is handed is one `batch[+<n>] <action> <k> <jobs>` exchange with the group's blobs in one memfd, each job's progress forwarded to its own caller (renewing the deadline) and each caller's cancellation sent as `cancel <job>`; a single job is a group of one; `run_open` sends the group as `group`, whose worker reaches the executor's `JobFeed` through `take`/`joined`, `done` and `close`/`closed` frames (an action whose worker-side `run_open` declined is remembered and batched directly); an envelope or answer too long for a line moves into a memfd. A lost worker answers every later job of its batch with the same definitive error; a worker's `err panicked:` answer is raised again on the lane, so the group fails and the instance is rebuilt exactly as for an in-process panic, with no quarantine |
 | host loop | `crates/residency/src/supervised/host.rs` (`host`, `host_on`), frame JSON in `supervised/codec.rs` | the worker side over any `ResidentModel` a `HostedFamily` rebuilds from a `HostSpec`: refuses (exit 2, nothing served) unless stdin is a socket and the first request is `hello` with this protocol; `open` activates on the named device; `batch` runs the instance's own `run_batch` over the group under `catch_unwind`, so a model that batches batches in the worker; a reader thread registers one cancel token per job as it reads the group and fires only the one a `cancel <job>` names, and registers a joined job's token as it reads the `joined` frame; `group` runs the instance's `run_open` with a `WorkerFeed` whose `take` and `close` are round trips to the parent; the request loop is the socket's only writer |
-| worker hosting | `WorkerHosting` (residency), `serving::supervision::worker_hosting`, `catalog::hosted_families`, `crates/cli` (`--worker-hosted`, `--worker-deadline-s`, the `__worker` arm in `main`) | `brain serve --worker-hosted FAMILY` wraps that family's residents in `SupervisedModel`s whose worker is `/proc/self/exe <device flags> __worker`: the server's own executable (an upgrade on disk never mixes versions) with the device flags `select_backend` consumed (`crate::device_flags`). A family no worker can host stops the server at startup. `decisions::resident` (moved out of the catalog) is the one certified family; `residency::on_device` (moved out of the catalog) is how it binds its card in either process |
+| worker hosting | `WorkerHosting` (residency), `serving::supervision::worker_hosting`, `catalog::hosted_families`, `crates/cli` (`--worker-hosted`, `--worker-deadline-s`, the `__worker` arm in `main`) | `brain serve --worker-hosted FAMILY` wraps that family's residents in `SupervisedModel`s whose worker is `/proc/self/exe <device flags> __worker`: the server's own executable (an upgrade on disk never mixes versions) with the device flags `select_backend` consumed (`crate::device_flags`). A family no worker can host stops the server at startup. `decisions::resident` (moved out of the catalog) and `catalog::resident_lfm` (scanned encoders, through `ScanSettings::worker_hosting` and `Built::Hostable` in `serving::model_dir`) are the certified families; `residency::on_device` (moved out of the catalog) is how it binds its card in either process |
 | `brain-gpu-worker` | `crates/gpu-worker` | the real worker: opens card `gpu<i>` through `backend-wgpu`, compiles the probe kernel, and answers `probe` with a real dispatch whose result it checks |
 | `brain serve` supervision | `crates/serving/src/supervision.rs`, `ServeKnobs::supervision`, `crates/cli` `serve_supervision` | the serving executor runs with `Supervision`; probes run in the `brain-gpu-worker` found beside the `brain` executable (bounded by `--gpu-wait-s`); a missing or non-executable worker is named at startup and probes become `Probe::Elapsed` (the breaker paces readmission without touching the card); shipped in the Linux release artifacts and the `.deb` (`/usr/bin/brain-gpu-worker`) |
 
@@ -192,6 +192,14 @@ Choices the design above left open, and what was chosen:
   started; a worker killed between jobs fails the next job at once and
   records one fault on its card, and once that card is tripped the job
   after is built on the other card; the per-job cost (below).
+* `cargo test -p brain-cli --test it worker_hosted_lfm` (4 tests, each
+  skips without a GPU, the healthy-card one without two): an LFM2.5 encoder
+  batches a group in its worker and answers as in process, a worker killed
+  mid-stream fails its group and quarantines its card, a dead worker's next
+  job is built on the healthy card, and the per-job, per-group and per-card
+  costs (below). `cargo test -p brain-serving --lib
+  a_scanned_encoder_runs_in_a_worker`: with `--worker-hosted lfm` a scanned
+  encoder's activation goes to the worker command, not to its weights.
 * `cargo test -p brain-serving --lib supervision` (3 tests) adds: worker
   hosting re-executes the server with its device flags and `__worker` for
   the families named, and refuses a family no worker can host.
@@ -204,9 +212,9 @@ Choices the design above left open, and what was chosen:
 | executor lanes honour health; stuck activation or run frees the lane and unwinds the claim | done and verified for supervised instances |
 | in-process `bounded` wedges quarantine the card until a supervised probe passes | done (`note_in_process_wedge`); the abandoned thread itself is still not reclaimed, which is what M2 removes |
 | the serving process starts its executor with `Supervision` | done: see "`brain serve` supervision" above. Served models still run in process, so what a probe readmits is a card whose in-process waits timed out; the wedged thread itself is reclaimed only by M2 |
-| **M2** a served model executing inside the worker | done for the decision models (`--worker-hosted decision`, off by default): request-level hosting in `brain`'s own worker mode, verified above; what each next family needs is below |
-| **M3** measure the per-request round trip against real device work | measured for the protocol (below); per-request hosting passes, per-dispatch proxying does not |
-| **M4** make it the default; delete the abandon-the-thread path from `bounded` | open: gated on every served model hosting in a worker; the decision family is certified, every other family needs the items below |
+| **M2** a served model executing inside the worker | done for the decision models and the LFM2.5 encoders (`--worker-hosted decision,lfm`, off by default): request-level hosting in `brain`'s own worker mode, verified above; what each next family needs is below |
+| **M3** measure the per-request round trip against real device work | measured for the protocol, a decision job, an encoder job and an encoder group, and a worker's memory per card (below); per-request hosting passes, per-dispatch proxying does not |
+| **M4** make it the default; delete the abandon-the-thread path from `bounded` | open: gated on every served model hosting in a worker; the decision and LFM2.5 families are certified, every other family needs the items below |
 | moving a resident off a quarantined card | done: once the card's breaker trips (before that the restart probe is due at once, cheaper than a rebuild), an idle resident a queued job needs is abandoned when a healthy device could hold it (`move_off_quarantined`, `ResidencyManager::abandon_resident`): it leaves residency at once, so the claim builds it afresh on the healthy card, and it is dropped on a thread of its own (`drop_elsewhere`), keeping its memory charged until the drop reports back (`Msg::Dropped`, `release_abandoned`). A failed group's instance (`unwind_failed`, `unwind_failed_multi`) goes the same way, so no teardown through a suspect driver runs on the dispatcher. A teardown that never returns holds one thread and its memory, nothing else. A resident no healthy card can hold is refused while the trip lasts |
 | multi-device models under quarantine | done: a multi-device model has one placement (its resident devices, else the ones `estimate_multi` names; `ResidencyManager::multi_placement`), and `refuse_quarantined` refuses its jobs once any device of it is quarantined with a tripped breaker; before a trip they wait for the restart probe like single-device work |
 | Windows | open: no `SIGKILL` or process groups; `Worker::spawn` reports unsupported off Unix. `TerminateProcess` and a job object are the equivalent and need a platform seam |
@@ -272,6 +280,57 @@ seconds of device work per job it is small; against a sub-millisecond job
 it is a third. Not yet measured: how much of it is the hand-off (the
 request loop could read the socket itself while idle).
 
+### The first batching family: LFM2.5 encoders
+
+`catalog::resident_lfm::hosted` rebuilds an encoder from `{id, weights,
+tokenizer, batch}` (`LfmResident::host_spec`); the model-dir scan builds a
+scanned encoder as `Built::Hostable`, which `ScanSettings::worker_hosting`
+wraps in a `SupervisedModel` when it covers `lfm`. The encoder's own
+`run_batch` (equal-length jobs, `--max-batch` per forward, progress after
+each forward) runs in the worker on the whole group. An encoder supplied on
+demand (`StoreSupplier`, `serving::model_dir::resident_for_local`) is still
+built in process: that path takes no hosting yet.
+
+`crates/cli/tests/it/worker_hosted_lfm.rs` (4 tests, P40s): six equal-length
+jobs at two per forward answer in a worker as in process (every embedding
+value within 1e-5, the same three `batch i/3` progress steps per job, so
+one `run_batch` of three forwards in both); a worker killed with `SIGKILL`
+at the first progress of a 64-job group (31 forwards still to run) fails
+all 64 naming the signal, records one fault and quarantines the card, and
+the instance answers later jobs at once; through the executor a worker
+killed between jobs fails the next job, and once the card is tripped the
+job after is built in a new worker on the other card.
+
+### What an encoder costs in a worker
+
+`a_worker_hosted_encoder_costs_a_round_trip_per_group_and_a_context_per_card`,
+on a P40 with the tiny random encoder (`d_model` 64, three layers), host
+load average 2 to 5 on 48 cores, eight runs:
+
+* one `embed` job through the executor, median of 60 after a warm-up: 1.59
+  to 1.77 ms in process, 1.73 to 1.90 ms in a worker, 0.04 to 0.31 ms more;
+* an eight-job group straight on the instance (four forwards, 32 progress
+  frames, eight results each with an embeddings blob), median of 30: 4.84
+  to 5.50 ms in process, 5.50 to 6.18 ms in a worker, 0.17 to 1.0 ms more.
+  The extra cost grows with the frames a group sends (each is a socket
+  write, a JSON encode and parse and a thread wake-up on each side), not
+  with the jobs' device work.
+
+### What a worker costs per card
+
+The same test reads the cards' used memory (`nvidia-smi`) before and after
+a build, with no other work on them, and the worker's resident set: the
+first encoder instance in a process that had no card open adds 150 MiB of
+device memory (the device context: a second instance beside it adds
+nothing measurable at this model size), and the same encoder as a worker
+adds 154 MiB, steady over five runs. So a worker costs one device context
+per card per worker, about 150 MiB on a P40, that in-process instances of
+the same card share, plus about 283 MiB of host memory (its own process:
+the `brain` binary's mappings, its runtime and its own copy of what the
+model keeps on the host, which for a large checkpoint is its converted
+weights). A card that hosts N workers pays N contexts; the residency
+budget does not charge them yet (below).
+
 ### What each next family needs
 
 Built for every family: progress frames (a chunk blob included) that renew
@@ -282,23 +341,48 @@ batching (a group is one `batch` request and the worker's own `run_batch`
 runs it, with per-job progress, cancellation and results), late joins
 (an open group is one `group` request whose `run_open` reaches the
 executor's `JobFeed` through `take`/`joined`, `done` and `close`/`closed`
-frames; `JobFeed::screen` is not forwarded, so a joiner that can never run
-waits for a slot and is turned away only once it is taken, not at once; each
+frames; each
 `take` is one round trip, about the protocol's 18 us, paid between decode
 steps), caller cancellation, blobs in and out through memfds, envelopes and answers of
 any size, panics answered as job errors.
 
 * **Adapters.** The adapter registry, bank and release following live in
-  the serving process; a family serving adapters needs the attach and
-  detach operations as requests, and its `stamp`ed selection passed in the
-  envelope (it is, as a param, but the worker has no registry to resolve it).
-* **Multi-device instances.** `MultiDeviceResidentModel` has no hosted form:
-  one worker would own several cards (`open` with a device list), and a
-  fault would quarantine the card that faulted, not every card of the
-  instance.
-* **Memory per worker.** Each worker holds its own device context and its
-  own host copy of converted weights, which in-process instances of the same
-  card share; that cost per card is not measured yet and has to be before a
-  second family moves.
+  the serving process, and every family that serves adapters (the Qwen3 and
+  Qwen3.8 decoders, through `llmserve::adapter_registry` and its
+  `AdapterSync`) resolves the `stamp`ed selection against that registry
+  inside `run_open`. The `stamp` already runs in the parent and the selection
+  crosses as a param; what the worker lacks is the registry itself. It needs
+  an `attach`/`detach` request pair the parent sends to every live worker of
+  the base when the registry changes (with the adapter weights in a memfd or
+  a path the worker reads), the worker's own registry rebuilt from those
+  requests, and a group refresh (`OpenGroup::Refresh`) triggered by them, so
+  a running group picks up a new adapter as it does in process.
+* **Multi-device instances.** `MultiDeviceResidentModel` has no hosted form.
+  It needs a `HostedFamily` variant that rebuilds a multi-device resident and
+  an `open` that names a device list (`open gpu0,gpu1 <spec>`), so one worker
+  owns every card of the instance (a device object graph cannot be shared
+  between processes); a `SupervisedMultiModel` registered through
+  `register_multi`; and fault attribution per card: the worker reports which
+  card a failing driver call was on (a `fault <device>` frame before it
+  dies, or the device in its panic answer), so only that card is
+  quarantined, and a silent death quarantines every card of the instance,
+  since it cannot be attributed.
+* **Memory accounting.** A worker's device context (about 150 MiB per
+  worker on a P40, measured above) is not in its resident's estimate, so the
+  budget overcommits a card by that much per hosted instance; the estimate
+  of a hosted resident needs the context added, measured per device rather
+  than assumed.
+* **Screening joiners.** `JobFeed::screen` is not forwarded: the worker's
+  feed refuses nothing, so a late job that can never run (a prompt longer
+  than the instance's context) waits for a slot instead of being refused at
+  once. Forwarding it needs a round trip carrying the waiting jobs out and
+  the verdicts back.
+* **Models supplied on demand.** `resident_for_local` (the `StoreSupplier`
+  path that builds a model a request names but the scan did not serve)
+  builds in process; it needs the scan's `worker_hosting`.
+* **The Qwen3 embedding resident.** It is a stateless `ProviderResident`
+  over `QwenProvider`, which loads on first use and keeps the model inside
+  the provider; hosting it needs a `HostedFamily` that rebuilds the provider
+  from its weights and tokenizer, and its estimate to charge the card.
 * **Metrics, demotion.** `Instance::metrics`, `demote` and `promote` are not
   forwarded; a hosted instance reports nothing and is only ever dropped.

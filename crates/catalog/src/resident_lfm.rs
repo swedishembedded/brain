@@ -23,7 +23,9 @@ use capability::{ActionResult, Invocation, Manifest, Progress};
 use checkpoint::st::ModelCard;
 use data::qwen_tokenizer::QwenBpe;
 use data::tokenizer::Tokenizer;
+use residency::supervised::{HostSpec, HostedFamily};
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
+use serde_json::{json, Value};
 
 use lfm2::model::Lfm;
 
@@ -34,6 +36,29 @@ const PROBE_CAP: u32 = 64;
 
 /// Batched-forward slots per instance when the operator names none.
 pub const DEFAULT_BATCH: u32 = 2;
+
+/// The family name worker hosting knows LFM2.5 encoders by
+/// (`brain serve --worker-hosted lfm`).
+pub const FAMILY: &str = "lfm";
+
+/// How a worker rebuilds an LFM2.5 encoder: from the id, weights, tokenizer
+/// and batch its [`LfmResident::host_spec`] carries. Rebuilding reads the
+/// tokenizer (and a downloaded directory's config), never the weights; the
+/// worker reads those when it activates the resident on its card.
+pub fn hosted() -> HostedFamily {
+    HostedFamily { name: FAMILY, open: open_hosted }
+}
+
+fn open_hosted(args: &Value) -> Result<Arc<dyn ResidentModel>, String> {
+    let map = args.as_object().ok_or("an LFM2.5 host spec is not an object")?;
+    if let Some(k) = map.keys().find(|k| !matches!(k.as_str(), "id" | "weights" | "tokenizer" | "batch")) {
+        return Err(format!("an LFM2.5 host spec has an unknown field {k:?}"));
+    }
+    let text = |k: &str| map.get(k).and_then(Value::as_str).ok_or_else(|| format!("an LFM2.5 host spec has no {k}"));
+    let batch = map.get("batch").and_then(Value::as_u64).and_then(|b| u32::try_from(b).ok()).ok_or("an LFM2.5 host spec has no batch")?;
+    let card = ModelCard::new(text("id")?, FAMILY);
+    Ok(Arc::new(LfmResident::from_card(text("weights")?, &card, Some(text("tokenizer")?), batch)?))
+}
 
 pub struct LfmResident {
     /// Catalog id (the model-card id): the manifest/instance-key key.
@@ -78,6 +103,11 @@ impl LfmResident {
             batch,
             weight_bytes,
         })
+    }
+
+    /// What a worker rebuilds this resident from ([`hosted`]).
+    pub fn host_spec(&self) -> HostSpec {
+        HostSpec { family: FAMILY.to_string(), args: json!({ "id": self.id, "weights": self.weights, "tokenizer": self.tokenizer_path, "batch": self.batch }) }
     }
 
     /// Tokenize an invocation exactly as the instance will (template prefix +

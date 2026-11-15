@@ -390,7 +390,7 @@ pub mod __reexport {
 /// A family is listed once its models are certified to answer from a worker
 /// as they do in process.
 pub fn hosted_families() -> Vec<residency::supervised::HostedFamily> {
-    vec![decisions::resident::hosted()]
+    vec![decisions::resident::hosted(), resident_lfm::hosted()]
 }
 
 /// Every model's static manifest + weight-free-to-construct provider, in one
