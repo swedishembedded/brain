@@ -710,7 +710,7 @@ they once quoted live here. All on GH200 (Hopper, 96 GB) unless stated, Qwen3.8-
   went in at 1.56 s as one 2048-row round, 0.97 s as two 1024-row rounds, 0.75 s as four
   512-row rounds, 0.86 s as 256-row rounds, 0.76 s sliced at 512 rows
   (`gguf_resident_real::a_lone_prompt_reads_in_at_least_as_fast_in_the_background`).
-- `TENSOR_CORE_PREFILL_TOKENS`: one uncached 32.5K prompt's first token took 3.30 s at
+- `model::serve::TENSOR_CORE_PREFILL_ROUND_ROWS`: one uncached 32.5K prompt's first token took 3.30 s at
   2048 rows, 3.10 s at 4096, 3.09 s at 8192; 8192 costs the default context 18 percent
   of its scratch, 4096 costs 6.
 - Deferred MTP feed (`FEED_ROWS_PER_SLICE`): a 128-row round of the head takes about

@@ -918,7 +918,7 @@ backend once per handle.
 
 A tensor-core stack also runs 1024-row prefill rounds instead of 256: what a
 round pays per dispatch is a real fraction of it once the arithmetic is cheap
-(table at `TENSOR_CORE_PREFILL_TOKENS`).
+(table at `model::serve::TENSOR_CORE_PREFILL_ROUND_ROWS`).
 
 **Measured** (GH200, one card shared with other jobs, so the figures are the
 fastest of repeated runs taken while the card was idle; `brain perf run longctx
@@ -1423,7 +1423,7 @@ about 512 rows (222-276 TOPS against 190-216), `mma.sync` keeps 129-256 rows (14
 the MMA roof because the group-scale fold, not the MMA, is the bound (~3 issue slots per output per k32; `wgmma` without
 the fold: ~950 TOPS). The fold now runs on two fused multiply-adds per element with the activation scale rounded to 21 bits.
 End to end (`qwen35_gguf_prefill_profile`, depth 8192): 1024 rows 2634 -> 3034 tok/s, 2048 rows 2699 -> 3342, 4096 rows 3396;
-`TENSOR_CORE_PREFILL_TOKENS` 1024 -> 2048. `brain perf run longctx` prefill 1K/8K/32K: 2852/2740/2392 -> 3347/3607/2892 tok/s.
+`model::serve::TENSOR_CORE_PREFILL_ROUND_ROWS` 1024 -> 2048. `brain perf run longctx` prefill 1K/8K/32K: 2852/2740/2392 -> 3347/3607/2892 tok/s.
 Open: overlap the fold with the next group's `wgmma` (BN 64 or a producer warpgroup), a narrower warpgroup tile for 129-256
 rows, `matmul_i8_dyn`-slot (DiT) use of the same candidates, and the other tiers' prefill classes.
 

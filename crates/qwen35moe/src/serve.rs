@@ -162,18 +162,48 @@ const DECODE_WINDOW_CAPACITY: usize = 1;
 /// device argmax-and-mask the top-k head runs (`Qwen35::head_topk_rows_dev`).
 const TOPK_CAPACITY: usize = 32;
 
-/// Prompt tokens pushed through the layer stack per prefill round when
-/// [`EngineOptions`] does not say otherwise. A round's attention scratch grows
-/// as `chunk * n_heads * (pos + chunk)`, the one cost that does not shrink with
-/// the dispatch count, so the round is bounded rather than the whole prompt.
-pub const DEFAULT_PREFILL_CHUNK: u32 = 256;
-
 /// The `t` a quantized engine builds its `Qwen35` at: only the single-sequence
 /// buffers (`logits`, `res`, the training tape's tokens) are sized by it, and a
 /// serving engine uses none of them, so the smallest legal value is the right
 /// one. An fp32 engine's grouped-expert scratch is sized by it too - see
 /// `Engine::from_source_on`.
 const SERVING_T: u32 = 64;
+
+/// The activation bytes an engine built with `opts` allocates beyond its weights, KV pool and recurrent state: the
+/// larger of a decode step over every resident sequence and one prefill round. What a placement keeps free for it
+/// (`catalog::resident_qwen35moe`), and what the engine's handles keep of their freed blocks.
+///
+/// The device is not known when a placement asks, so a round size left to the device is charged at the widest the
+/// policy chooses ([`model::serve::TENSOR_CORE_PREFILL_ROUND_ROWS`]).
+pub fn activation_bytes(cfg: &Qwen35Config, opts: &EngineOptions) -> u64 {
+    let rows = opts.prefill_chunk.unwrap_or(model::serve::TENSOR_CORE_PREFILL_ROUND_ROWS);
+    cfg.decoder_widths().serve_peak_bytes(opts.max_concurrent, 0).max(prefill_round_bytes(cfg, rows))
+}
+
+/// Layers' worth of one layer's intermediates a prefill round holds at its peak, as a ratio. Measured on gpu3 (GH200,
+/// int8 35B-A3B, bf16 KV, `prefill_round_census::the_activations_of_a_prefill_round_of_the_real_checkpoint_fit_their_
+/// charge`): 0.31 GiB above the resident at 256-row rounds and 3.42 GiB at 4096, 4.1 and 3.5 of the layer's words a
+/// row past the private recurrent slot. Not a count of live layers: the f32 Gated-DeltaNet chunk form allocates
+/// scratch of its own beyond the projections the layer's words count. Charged as 9/2 so the bound holds with a margin.
+const PREFILL_LIVE_LAYERS: (u64, u64) = (9, 2);
+
+/// Device bytes one prefill round of `rows` rows allocates beyond the weights, the KV pool and the state pool: the
+/// sequence's private recurrent slot (the prompt runs over it before it becomes the pool row) and
+/// [`PREFILL_LIVE_LAYERS`] of a layer's f32 intermediates a row - the residual pair, the larger of the recurrent and
+/// the attention mixer's projections, and the expert sublayer's per-slot gate, up and product (the routed experts and
+/// the shared one).
+pub fn prefill_round_bytes(cfg: &Qwen35Config, rows: u32) -> u64 {
+    let w = u64::from;
+    let d = w(cfg.d_model);
+    let recurrent = d + 3 * w(cfg.linear_conv_dim()) + 3 * w(cfg.linear_value_dim()) + d;
+    let attention = d + w(cfg.q_proj_dim()) + 2 * w(cfg.kv_dim()) + 2 * w(cfg.q_dim()) + d;
+    let experts = d + 3 * w(cfg.top_k + 1) * w(cfg.moe_intermediate_size) + d;
+    let layer_words = 2 * d + recurrent.max(attention) + experts;
+    let (num, den) = PREFILL_LIVE_LAYERS;
+    let slot = gdn_slot_shape(cfg);
+    let slot_bytes = 4 * slot.is_recurrent.iter().filter(|&&r| r).count() as u64 * (slot.state_len + slot.hist_len);
+    slot_bytes + w(rows) * layer_words * 4 * num / den
+}
 
 /// How an [`Engine`] is built: capacity, weight tier, KV tier, prefill round.
 #[derive(Clone, Debug)]
@@ -185,8 +215,9 @@ pub struct EngineOptions {
     pub max_concurrent: u32,
     pub tier: TierPolicy,
     pub kv_tier: KvTier,
-    /// Prompt tokens per prefill round.
-    pub prefill_chunk: u32,
+    /// Prompt tokens per prefill round; `None` takes the device's ([`model::serve::prefill_round_rows_for`]: wider on
+    /// tensor cores, where a round's per-dispatch cost is a large share of a narrow one).
+    pub prefill_chunk: Option<u32>,
     /// Record a decode step once per batch shape and replay it (`Qwen35::
     /// record_decode`) instead of building it every token. Only the int8 expert
     /// tier can be recorded; for an fp32 engine this is ignored.
@@ -204,7 +235,7 @@ pub struct EngineOptions {
 impl EngineOptions {
     /// fp32 weights and KV - the engine's original, reference configuration.
     pub fn new(max_seq_len: u32, max_concurrent: u32) -> EngineOptions {
-        EngineOptions { max_seq_len, max_concurrent, tier: TierPolicy::uniform(Dtype::F32), kv_tier: KvTier::F32, prefill_chunk: DEFAULT_PREFILL_CHUNK, decode_tapes: true, moe_grouped_min_rows: MOE_GROUPED_MIN_ROWS, decode_fusion: true, gemm_precision: GemmPrecision::Auto }
+        EngineOptions { max_seq_len, max_concurrent, tier: TierPolicy::uniform(Dtype::F32), kv_tier: KvTier::F32, prefill_chunk: None, decode_tapes: true, moe_grouped_min_rows: MOE_GROUPED_MIN_ROWS, decode_fusion: true, gemm_precision: GemmPrecision::Auto }
     }
     pub fn with_tier(mut self, tier: TierPolicy) -> EngineOptions {
         self.tier = tier;
@@ -215,7 +246,7 @@ impl EngineOptions {
         self
     }
     pub fn with_prefill_chunk(mut self, rows: u32) -> EngineOptions {
-        self.prefill_chunk = rows.max(1);
+        self.prefill_chunk = Some(rows.max(1));
         self
     }
     pub fn with_moe_grouped_min_rows(mut self, rows: u32) -> EngineOptions {
@@ -496,14 +527,15 @@ impl Engine {
         // asserted against `rows * top_k` at dispatch, and the widest row count
         // this engine submits is a prefill round or one decode token per resident
         // sequence.
-        let t = if opts.tier.quantizes_anything() { SERVING_T } else { opts.max_concurrent.max(opts.prefill_chunk) };
+        let prefill_chunk = opts.prefill_chunk.unwrap_or_else(|| model::serve::prefill_round_rows_for(gpu_core::provider::cuda::tensor_core_kernels_enabled(&gpu)));
+        let t = if opts.tier.quantizes_anything() { SERVING_T } else { opts.max_concurrent.max(prefill_chunk) };
         let mut model = Qwen35::new_on_tier_src(gpu, cfg.clone(), 1, t, src, &opts.tier);
         model.set_gemm_precision(opts.gemm_precision);
         model.set_moe_grouped_min_rows(opts.moe_grouped_min_rows);
         model.set_decode_fusion(opts.decode_fusion);
         // The activations the placement charges this engine (`catalog::resident_qwen35moe`): the larger of a decode
         // step over every resident sequence and one prefill round. Their freed blocks stay with the handles.
-        model.retain_freed_blocks(cfg.decoder_widths().serve_peak_bytes(opts.max_concurrent, opts.prefill_chunk));
+        model.retain_freed_blocks(activation_bytes(&cfg, &EngineOptions { prefill_chunk: Some(prefill_chunk), ..opts.clone() }));
         let n_layers = cfg.n_layers as usize;
         let mut gqa_kv: Vec<KvLayer> = Vec::with_capacity(n_layers);
         for ty in cfg.layer_types() {
@@ -522,7 +554,7 @@ impl Engine {
             block_size: opts.max_seq_len,
             gqa_kv,
             kv_tier: opts.kv_tier,
-            prefill_chunk: opts.prefill_chunk,
+            prefill_chunk,
             gdn,
         }
     }

@@ -21,6 +21,8 @@ use model::ops::TierPolicy;
 use model::paged::BlockTable;
 use qwen35moe::config::Qwen35Config;
 use qwen35moe::model::pipelines;
+use checkpoint::gguf::MmapGguf;
+use qwen35moe::gguf_load;
 use qwen35moe::serve::{Engine, EngineOptions};
 
 /// `engine_tiers`'s int8-friendly tiny model: every quantised width a multiple of 32.
@@ -83,4 +85,35 @@ fn a_steady_state_prefill_round_neither_allocates_nor_waits_for_the_device() {
         // The one wait is the read of the last row's hidden state, which the caller asked for.
         assert_eq!(after.host_waits - before.host_waits, 1, "pass {pass}: a prefill of {} rounds made the host wait for the device inside it", prompt.len() as u32 / ROUND);
     }
+}
+
+/// The memory a placement keeps free for activations ([`qwen35moe::serve::activation_bytes`]) holds what the widest
+/// round of the released checkpoint really allocates. Under-charged, a long prompt runs out of device memory after the
+/// model loaded, or the handles hand blocks back to the driver every round (knowledge 431).
+#[test]
+fn the_activations_of_a_prefill_round_of_the_real_checkpoint_fit_their_charge() {
+    // The release as `brain pull unsloth/Qwen3.6-35B-A3B-GGUF` stores it.
+    let path = format!("{}/Q8_0.gguf", brain_testutil::model_dir("unsloth/Qwen3.6-35B-A3B-GGUF").unwrap_or_default());
+    if !std::path::Path::new(&path).is_file() {
+        return brain_testutil::skip_unavailable("unsloth/Qwen3.6-35B-A3B-GGUF (Q8_0) is not in the model store");
+    }
+    let mg = MmapGguf::open(&path).unwrap_or_else(|e| panic!("open {path}: {e}"));
+    const ROWS: u32 = 4096;
+    let cfg = gguf_load::resident_config(&mg, 2 * ROWS).expect("the release's config");
+    let src = gguf_load::source(&mg, &cfg).expect("the release's tensors");
+    let opts = EngineOptions::new(2 * ROWS, 1).with_tier(TierPolicy::uniform(Dtype::I8)).with_kv_tier(model::kv_tier::KvTier::BF16).with_prefill_chunk(ROWS);
+    let charged = qwen35moe::serve::activation_bytes(&cfg, &opts);
+    let mut e = Engine::from_source(cfg.clone(), &src, opts);
+    let Some(resident) = e.gpu().memory_usage().map(|m| m.live) else {
+        return brain_testutil::skip_unavailable("this backend reports no device memory use");
+    };
+    e.gpu().reset_memory_peak();
+    let prompt: Vec<u32> = (0..2 * ROWS).map(|i| (i * 7919 + 13) % cfg.vocab).collect();
+    let mut t = BlockTable::new();
+    e.prefill(&mut t, &prompt);
+    e.release_table(&mut t);
+    let peak = e.gpu().memory_usage().expect("reported above").peak_live - resident;
+    let gib = |b: u64| b as f64 / (1u64 << 30) as f64;
+    println!("two {ROWS}-row rounds: activation peak {:.2} GiB, charged {:.2} GiB", gib(peak), gib(charged));
+    assert!(peak <= charged, "a {ROWS}-row round allocated {:.2} GiB of activations, the placement charges {:.2} GiB", gib(peak), gib(charged));
 }

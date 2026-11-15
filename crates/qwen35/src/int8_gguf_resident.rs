@@ -89,7 +89,7 @@
 //!   Self-speculative decode stays a single-GPU concern.
 //! * **No flash-attention prefill.** A prefill round's GQA scratch is
 //!   `[chunk, n_heads, pos+chunk]` twice over, the one cost that does not
-//!   shrink with the dispatch count, and it is why [`MAX_PREFILL_TOKENS`] is a
+//!   shrink with the dispatch count, and it is why [`PREFILL_ROUND_ROWS`] is a
 //!   bounded round size rather than "the whole prompt at once". Growing this
 //!   resident into genuinely long contexts needs a flash-attention prefill
 //!   kernel, not a bigger constant - `paged_flash_prefill.wgsl` is that
@@ -127,7 +127,7 @@
 //!   1555-token measurement moved from 152.1 s (10.2 tok/s) per-token /
 // perf-number: measured by `tests/gguf_resident_real.rs` and `qwen35_gguf_prefill_profile`
 //!   1108.3 s (1.4 tok/s) chunked to 22.9 s (68.0 tok/s) chunked, a ~6.6x
-//!   win. See [`MAX_PREFILL_TOKENS`] for the full before/after.
+//!   win. See [`PREFILL_ROUND_ROWS`] for the full before/after.
 //! * **Batched PREFILL.** Decode is genuinely multi-sequence as of
 //!   [`Qwen35GgufInstance::generate_batch`] - one dispatch set per step
 //!   carrying every live request's row - but a prompt is still replayed into
@@ -170,7 +170,7 @@ use model::dispatch::LORA_SLOT_NONE;
 use model::kv_tier::{KvLayer, KvTier};
 use model::ops::TierPolicy;
 use model::policy::{GdnState, LinearActivations};
-use model::serve::PromptEmbeds;
+use model::serve::{PromptEmbeds, PREFILL_ROUND_ROWS, TENSOR_CORE_PREFILL_ROUND_ROWS};
 use model::shard::{LayerBytes, Shard};
 use residency::multi::{MultiDeviceCost, MultiDeviceResidentModel};
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
@@ -192,121 +192,6 @@ use crate::model::{BatchDecodeCaches, BatchSeq, DecodeCaches, GdnPoolStore, KvWi
 /// provenance (which is what `crate::caps::MODEL`, the fp32 brain-checkpoint
 /// path, is).
 pub const MODEL: &str = "unsloth/Qwen3.8-27B-Q8_0";
-
-/// How many prompt tokens [`Qwen35GgufInstance::generate`] pushes through the
-/// whole pipeline per round.
-///
-/// The upside is `crate::serve`'s and applies here twice over: a round
-/// amortises each stage's per-layer dispatch overhead over `n` rows AND
-/// replaces `n` per-token stage hand-offs (there are `n_stages` of those per
-/// token) with one.
-///
-/// The same 256 `crate::serve::Engine` uses - but RE-MEASURED on this model
-/// rather than inherited, because the first honest attempt at it did not run
-// perf-number: hardware count (2x P40), not a rate
-/// at all. Measured on 2x Tesla P40, real Q4_K_M checkpoint at the INT8 tier,
-/// 1731-token prompt; `prefill_seconds` from the instance's own metrics, peak
-/// card occupancy sampled from `nvidia-smi`:
-///
-/// | chunk | prefill | tok/s | peak VRAM |
-/// |-------|---------|-------|-----------|
-// perf-number: measured by `tests/gguf_resident_real.rs` and `qwen35_gguf_prefill_profile`
-/// | (per token) | 262.8 s | 6.6 | - |
-// perf-number: measured by `tests/gguf_resident_real.rs` and `qwen35_gguf_prefill_profile`
-/// | 64 | 36.5 s | 47.4 | 16.2 GiB |
-// perf-number: measured by `tests/gguf_resident_real.rs` and `qwen35_gguf_prefill_profile`
-/// | 128 | 26.6 s | 65.0 | 17.8 GiB |
-// perf-number: measured by `tests/gguf_resident_real.rs` and `qwen35_gguf_prefill_profile`
-/// | 192 | 26.4 s | 65.4 | 20.3 GiB |
-/// | 256 | OOM | - | (> 24 GiB) |
-///
-/// A round's transients are not just its GQA scratch: EVERY intermediate a
-/// layer allocates stays alive until something drains the queue, and a round
-/// used to drain only at its terminal readback - so a stage held all ~32 of
-/// its layers' worth at once, at the real 27B widths (`d_model` 5120,
-/// `intermediate_size` 17408, `conv_dim` 10240). That is a DEPTH problem, not
-/// a chunk-size problem, and capping the chunk is the wrong lever for it: a
-/// single-card plan (the Q4 tier fits one) is 64 layers deep and overruns the
-/// same budget at half the chunk.
-///
-/// So the fix went where the defect was - `Qwen35::run_prefill_chunk_stage`'s
-/// `DRAIN_EVERY_N_LAYERS` - and the table became:
-///
-/// | chunk | prefill | tok/s | peak VRAM |
-/// |-------|---------|-------|-----------|
-// perf-number: measured by `tests/gguf_resident_real.rs` and `qwen35_gguf_prefill_profile`
-/// | 256 | 26.5 s | 65.4 | 15.3 GiB |
-// perf-number: measured by `tests/gguf_resident_real.rs` and `qwen35_gguf_prefill_profile`
-/// | 512 | 27.6 s | 62.8 | 16.6 GiB |
-///
-/// 256 is now both the fastest measured round size AND cheaper in memory than
-/// 64 was before the drain, and 512 is slower - so this is a real optimum
-/// rather than a memory-driven compromise.
-///
-/// One thing that is NOT a consideration here and is in `crate::serve`: the
-/// per-stage buffers a round needs are all allocated per call from `n`
-/// (`Qwen35::run_prefill_chunk_stage` sizes every one of them), so a stage
-/// built at `b = t = 1` carries no FIXED cost for this at all.
-///
-/// **This constant now applies to a Q4 build too** - see
-/// [`Qwen35GgufInstance::replay_prompt`] and
-/// `Qwen35::chunked_prefill_is_profitable`. It did not always: the Q4 tier's
-/// `m > 1` GEMM (`matmul_q4_dyn.wgsl`) used to resolve to the naive
-/// one-thread-per-output kernel its own header describes, and a round
-/// through it cost far MORE than the same tokens through `matmul_q4_gemv`'s
-/// coalesced `m = 1` path - measured on the real checkpoint, uniform Q4 on
-// perf-number: measured by `tests/gguf_resident_real.rs` and `qwen35_gguf_prefill_profile`
-/// ONE P40, 1555-token prompt: 152.1 s (10.2 tok/s) per token, 1108.3 s
-// perf-number: measured by `tests/gguf_resident_real.rs` and `qwen35_gguf_prefill_profile`
-/// (1.4 tok/s) in rounds of 256, a 7.3x REGRESSION, where the same change on
-// perf-number: measured by `tests/gguf_resident_real.rs` and `qwen35_gguf_prefill_profile`
-/// the INT8 two-card stack was a 9.9x win. Same host code, same round size;
-/// the only difference was which GEMM the weight tier bound.
-///
-/// Fixed by wiring `matmul_q4_dyn_reg` (128x128 register-tiled, already
-/// proven bit-identical to `matmul_q4_dyn`, kernel-performance ledger M5.5:
-// perf-number: recorded in kernel-performance ledger M5.5 (matmul_q4_dyn_reg vs matmul_q4_dyn)
-/// 2.02x at `m = 32` rising to 12.56x at `m = 2048`) into `model::ops::
-/// Ops::bind`. Re-measured on the same real checkpoint, same one P40, the
-// perf-number: measured by `tests/gguf_resident_real.rs` and `qwen35_gguf_prefill_profile`
-/// same 1555-token prompt, same round size: **22.9 s (68.0 tok/s)** - a
-// perf-number: measured by `tests/gguf_resident_real.rs` and `qwen35_gguf_prefill_profile`
-/// ~6.6x win over the per-token baseline, and slightly FASTER than the
-// perf-number: measured by `tests/gguf_resident_real.rs` and `qwen35_gguf_prefill_profile`
-/// INT8 stack's own chunked result (64.6-65.4 tok/s) despite streaming
-/// fewer bytes per round, not more.
-const MAX_PREFILL_TOKENS: u32 = 256;
-
-/// The round size on a stack whose every stage runs the chunk round on tensor
-/// cores (`gpu_core::provider::cuda::tensor_core_kernels_enabled`).
-///
-/// 256 is the P40-era optimum above: there the round is arithmetic-bound and
-/// a bigger one only costs memory. On tensor cores the arithmetic is cheap
-/// enough that what a round pays per DISPATCH - every step is a launch plus a
-/// parameter upload, a few thousand of them per round whatever its width - is
-/// a real fraction of it, so a wider round amortises that. Measured on a
-/// GH200 (`qwen35_gguf_prefill_profile`, production rounds at depth 256, the
-/// fastest of repeated rounds on a shared card):
-///
-/// | rows | ms/round | tok/s |
-/// |------|----------|-------|
-/// | 256  | 188      | 1363  |
-/// | 512  | 309      | 1659  |
-/// | 768  | 434      | 1770  |
-/// | 1024 | 610      | 1679  |
-/// | 2048 | 1028     | 1993  |
-///
-/// Re-measured with the prefill GEMM chosen per shape class (the Hopper
-/// warpgroup candidate wins from about 512 rows): the 2048-row round is
-/// faster than 1024 on `qwen35_gguf_prefill_profile` and on `brain perf run
-/// longctx` prompts of 1K/8K/32K, and 4096 rows buy only a little more for
-/// twice the scratch (the cuda.md ledger has the numbers). With the FP8
-/// stack's GEMMs of N = 5120 (down and output projections) a 2048-row round
-/// is 16 x 20 = 320 tiles of 128 x 256, 2.4 waves of the 132 multiprocessors
-/// run as 3; 4096 rows are 640 tiles, 4.8 waves run as 5. One uncached 32.5K
-/// prompt's first token on a GH200 gains little past 4096 rows, while a wider
-/// round takes a larger share of the default context in scratch memory.
-const TENSOR_CORE_PREFILL_TOKENS: u32 = 4096;
 
 /// Hidden rows one head readback of [`Qwen35GgufInstance::teacher_forced_scores`]
 /// projects at once. The readback is `[rows, vocab]` on the host, which at this
@@ -453,7 +338,7 @@ pub struct BankBytes {
 impl ServingShape {
     /// `max_batch` sequences of `cap` tokens, no prompt cache, no speculation.
     pub fn new(cap: u32, tier: TierPolicy, kv: KvTier, max_batch: u32) -> ServingShape {
-        ServingShape { cap, tier, kv, max_batch, prefix_slots: 0, kv_pool_rows: 0, spec: SpecCost::NONE, prefill_rows: TENSOR_CORE_PREFILL_TOKENS, adapter_bank: None, head: Dtype::I8, embed: None, gdn_bf16: false, native_attention: false, snapshots_on_host: false, vision_bytes: 0, unified_state: false, sequence_state_rows: 0, block_rows: 0 }
+        ServingShape { cap, tier, kv, max_batch, prefix_slots: 0, kv_pool_rows: 0, spec: SpecCost::NONE, prefill_rows: TENSOR_CORE_PREFILL_ROUND_ROWS, adapter_bank: None, head: Dtype::I8, embed: None, gdn_bf16: false, native_attention: false, snapshots_on_host: false, vision_bytes: 0, unified_state: false, sequence_state_rows: 0, block_rows: 0 }
     }
 
     /// The same shape for a stack whose largest prefill forward carries `rows` rows ([`stack_prefill_rows`]). A shape
@@ -649,21 +534,12 @@ fn gpu_capacities(devices: &[(Device, u64)], headroom: u64) -> Vec<(usize, u64)>
     devices.iter().enumerate().filter(|(_, (d, _))| matches!(d, Device::Gpu(_))).map(|(i, &(_, cap))| (i, cap.saturating_sub(headroom))).collect()
 }
 
-/// Rows of one prefill round, on a stack whose stages all run it on tensor cores or not.
-pub fn prefill_round_rows_for(tensor_cores: bool) -> u32 {
-    if tensor_cores {
-        TENSOR_CORE_PREFILL_TOKENS
-    } else {
-        MAX_PREFILL_TOKENS
-    }
-}
-
-/// Rows of the largest prefill forward a stack runs: its single-sequence round ([`prefill_round_rows_for`]), or the
+/// Rows of the largest prefill forward a stack runs: its single-sequence round ([`model::serve::prefill_round_rows_for`]), or the
 /// batched-prefill setting `batch_tokens` when that is wider. What the placement keeps free on every card is this
 /// forward's activations, so a stack without tensor cores, whose rounds are narrower, is not charged a tensor-core
 /// round it never runs.
 pub fn stack_prefill_rows(tensor_cores: bool, batch_tokens: usize) -> u32 {
-    prefill_round_rows_for(tensor_cores).max(batch_tokens.try_into().unwrap_or(u32::MAX))
+    model::serve::prefill_round_rows_for(tensor_cores).max(batch_tokens.try_into().unwrap_or(u32::MAX))
 }
 
 /// How many layers' worth of intermediate activations a prefill round holds at
@@ -2399,7 +2275,7 @@ impl Qwen35GgufInstance {
     }
 
     /// Prefill `prompt` into slot 0 through the same path a request takes
-    /// (rounds of [`MAX_PREFILL_TOKENS`] when the weight tier makes a round
+    /// (rounds of [`PREFILL_ROUND_ROWS`] when the weight tier makes a round
     /// profitable), wait for the device, and return the wall time in seconds.
     /// The instance is reset first, so this is a cold prefill of exactly
     /// `prompt`, never a continuation.
@@ -2479,7 +2355,7 @@ impl Qwen35GgufInstance {
     /// this build's weight tier makes a round profitable, one token at a time
     /// via [`Self::stack_step`] when it does not
     /// ([`Qwen35::chunked_prefill_is_profitable`] owns that judgement and its
-    /// reasons; `MAX_PREFILL_TOKENS`'s doc has the numbers). The two leave
+    /// reasons; `PREFILL_ROUND_ROWS`'s doc has the numbers). The two leave
     /// IDENTICAL state either way - that equivalence is the whole contract of
     /// `Qwen35::run_prefill_chunk_stage` and is gated bit-for-bit by
     /// `crate::model`'s `two_shard_chunked_prefill_matches_token_by_token_replay`
@@ -2811,15 +2687,11 @@ impl Qwen35GgufInstance {
         }
     }
 
-    /// Rows per prefill round on this stack: [`TENSOR_CORE_PREFILL_TOKENS`] when
-    /// every stage runs the round on tensor cores, [`MAX_PREFILL_TOKENS`]
+    /// Rows per prefill round on this stack: [`TENSOR_CORE_PREFILL_ROUND_ROWS`] when
+    /// every stage runs the round on tensor cores, [`PREFILL_ROUND_ROWS`]
     /// otherwise.
     fn prefill_round_rows(&self) -> u32 {
-        if self.shards.iter().all(|s| gpu_core::provider::cuda::tensor_core_kernels_enabled(&s.qwen35.gpu)) {
-            TENSOR_CORE_PREFILL_TOKENS
-        } else {
-            MAX_PREFILL_TOKENS
-        }
+        model::serve::prefill_round_rows_for(self.shards.iter().all(|s| gpu_core::provider::cuda::tensor_core_kernels_enabled(&s.qwen35.gpu)))
     }
 
     fn reset(&self) {
@@ -2856,7 +2728,7 @@ impl Qwen35GgufInstance {
     }
 
     /// Real generation: CHUNKED prefill of `prompt` (bounded rounds of
-    /// [`MAX_PREFILL_TOKENS`] through [`Self::stack_prefill_chunk`], each
+    /// [`PREFILL_ROUND_ROWS`] through [`Self::stack_prefill_chunk`], each
     /// continuing from the state the previous one left), then greedy/sampled
     /// per-token decode until `max_new` tokens or a stop id. `on_token` sees
     /// every generated id as it is produced (streaming), and returning `true`
@@ -4505,7 +4377,7 @@ impl Qwen35GgufResident {
         let bank = self.bank.as_ref()?.config(cfg).ok()?;
         Some(BankBytes {
             per_layer: bank.device_bytes_by_layer(cfg, cfg.layer_types().len()),
-            head: bank.row_scratch_bytes(self.max_batch.max(MAX_PREFILL_TOKENS.max(TENSOR_CORE_PREFILL_TOKENS))),
+            head: bank.row_scratch_bytes(self.max_batch.max(PREFILL_ROUND_ROWS.max(TENSOR_CORE_PREFILL_ROUND_ROWS))),
         })
     }
 
@@ -4843,7 +4715,7 @@ mod tests {
     /// `tests/gguf_resident_real.rs`'s `where_does_the_real_checkpoint_
     /// start_producing_garbage` found the residual RMS exploding
     /// (single-digit -> tens -> hundreds) starting right around the 3rd
-    /// `MAX_PREFILL_TOKENS`-sized CHUNKED round (~pos 680) and never
+    /// `PREFILL_ROUND_ROWS`-sized CHUNKED round (~pos 680) and never
     /// recovering. This test asks the one question that result cannot
     /// answer on its own: does the SAME real checkpoint also diverge at the
     /// same real position when replayed one token at a time, with no
@@ -5418,10 +5290,10 @@ mod tests {
     /// with them, and the batched-prefill setting where that is wider.
     #[test]
     fn a_stack_is_charged_the_prefill_round_it_runs() {
-        assert_eq!(stack_prefill_rows(false, 0), MAX_PREFILL_TOKENS);
-        assert_eq!(stack_prefill_rows(true, 0), TENSOR_CORE_PREFILL_TOKENS);
+        assert_eq!(stack_prefill_rows(false, 0), PREFILL_ROUND_ROWS);
+        assert_eq!(stack_prefill_rows(true, 0), TENSOR_CORE_PREFILL_ROUND_ROWS);
         assert_eq!(stack_prefill_rows(false, 1024), 1024);
-        assert_eq!(stack_prefill_rows(true, 2 * TENSOR_CORE_PREFILL_TOKENS as usize), 2 * TENSOR_CORE_PREFILL_TOKENS);
+        assert_eq!(stack_prefill_rows(true, 2 * TENSOR_CORE_PREFILL_ROUND_ROWS as usize), 2 * TENSOR_CORE_PREFILL_ROUND_ROWS);
         let cfg = Qwen35Config::qwen38_27b();
         let shape = ServingShape::new(8192, TierPolicy::uniform(Dtype::I8), KvTier::INT8, 8);
         assert!(shape.with_prefill_rows(stack_prefill_rows(false, 0)).stage_workspace(&cfg) < shape.stage_workspace(&cfg), "a narrow round keeps less free than the tensor-core round");
@@ -5435,7 +5307,7 @@ mod tests {
         let i8 = TierPolicy::uniform(Dtype::I8);
         // A shape starts at the tensor-core round; a wider batched prefill widens the workspace.
         let base = ServingShape::new(8192, i8, KvTier::INT8, 8);
-        assert!(base.with_prefill_rows(2 * TENSOR_CORE_PREFILL_TOKENS).stage_workspace(&cfg) > base.stage_workspace(&cfg));
+        assert!(base.with_prefill_rows(2 * TENSOR_CORE_PREFILL_ROUND_ROWS).stage_workspace(&cfg) > base.stage_workspace(&cfg));
     }
 
     /// Weights that do not fit the cards at all leave no context to offer.

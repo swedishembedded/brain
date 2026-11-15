@@ -6645,7 +6645,7 @@ impl Qwen35 {
     /// token - a ~6.6x win, not a regression, and slightly FASTER than the
     // perf-number: measured by `tests/gguf_resident_real.rs` and `qwen35_gguf_prefill_profile`
     /// INT8 two-card stack's own chunked result (64.6-65.4 tok/s). See
-    /// `crate::int8_gguf_resident::MAX_PREFILL_TOKENS`'s own doc for the
+    /// `model::serve::PREFILL_ROUND_ROWS`'s own doc for the
     /// full before/after.
     pub(crate) fn chunked_prefill_is_profitable(&self) -> bool {
         true

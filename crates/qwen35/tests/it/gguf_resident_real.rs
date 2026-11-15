@@ -34,7 +34,8 @@ use model::kv_tier::KvTier;
 use model::ops::TierPolicy;
 use model::shard::Shard;
 use qwen35::config::{LayerType, Qwen35Config};
-use qwen35::int8_gguf_resident::{decode_scratch_bytes, endpoint_names, layer_cost, native_attention, prefill_round_rows_for, prefill_staging_bytes, prefill_workspace_bytes, resident_config, shard_fetch_plan, shard_source, Qwen35GgufResident};
+use model::serve::prefill_round_rows_for;
+use qwen35::int8_gguf_resident::{decode_scratch_bytes, endpoint_names, layer_cost, native_attention, prefill_staging_bytes, prefill_workspace_bytes, resident_config, shard_fetch_plan, shard_source, Qwen35GgufResident};
 use residency::multi::MultiDeviceResidentModel;
 use residency::model::Instance;
 use residency::{Device, ResidentModel};
@@ -768,7 +769,7 @@ fn long_factual_prompt() -> String {
 // perf-number: measured by this test (command in the module header) and `qwen35_gguf_prefill_profile`
 /// replay, **26.5 s / 65.4 tok/s** once the prompt is consumed in rounds -
 // perf-number: measured by this test (command in the module header) and `qwen35_gguf_prefill_profile`
-/// 9.9x. See `int8_gguf_resident::MAX_PREFILL_TOKENS` for the round-size
+/// 9.9x. See `model::serve::PREFILL_ROUND_ROWS` for the round-size
 /// sweep behind that second number.
 #[test]
 fn prefill_throughput_at_a_real_long_context() {
@@ -806,7 +807,7 @@ fn prefill_throughput_at_a_real_long_context() {
     let text = out.outputs["text"].as_str().unwrap_or_default().to_string();
     println!("  long-context greedy continuation: {text:?}");
 
-    // Several rounds of `int8_gguf_resident::MAX_PREFILL_TOKENS` (256), with
+    // Several rounds of `model::serve::PREFILL_ROUND_ROWS` (256), with
     // a ragged last one - the case a single-round prompt cannot reach.
     assert!(prompt_tokens > 3 * 256, "this gate needs a prompt spanning several prefill rounds, got {prompt_tokens} tokens");
     assert!(
@@ -843,7 +844,7 @@ fn the_real_checkpoints_cost_model_is_reported() {
 /// instance, to find whether the real-checkpoint garbage seen at ~1500-1700
 /// tokens (`decode_throughput_at_a_real_long_context`,
 /// `prefill_throughput_at_a_real_long_context`) onsets at a length tied to
-/// `int8_gguf_resident::MAX_PREFILL_TOKENS` round boundaries (256, 512, 768,
+/// `model::serve::PREFILL_ROUND_ROWS` round boundaries (256, 512, 768,
 /// ...) or is simply a function of total context length regardless of
 /// round count - every prompt here below `MAX_PREFILL_TOKENS` still goes
 /// through `replay_prompt`'s SINGLE-round chunked path, so a break at a

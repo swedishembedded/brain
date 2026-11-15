@@ -7504,7 +7504,7 @@ two chunk sizes:
   slower than OLD's slowest), a clean, repeatable ~3.2x REGRESSION at this
   scale. Not a fluke: rerun confirmed the same ordering.
 - **`n=256` rows/round** (512-token prompt, chunk 256 - this crate's own
-  production default, `crate::int8_gguf_resident::MAX_PREFILL_TOKENS`, and
+  production default, `model::serve::PREFILL_ROUND_ROWS`, and
   the chunk size the removed constant's own doc was measured at): NEW
   min-of-4 `3.167s` (161.7 tok/s) across 4 samples all within 5% of each
   other (3.167-3.334s). OLD min-of-4, run TWICE for a fair best-of-8: `3.300s`

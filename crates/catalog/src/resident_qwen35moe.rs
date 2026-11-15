@@ -126,11 +126,9 @@ impl Qwen35Resident {
         MemCost::new(weights + kv, 0).with_activation(self.activation_bytes(&cfg))
     }
 
-    /// The peak activation of a decode step over every concurrent sequence or one prefill round, from the model's own
-    /// widths.
+    /// The peak activation of a decode step over every concurrent sequence or one prefill round.
     fn activation_bytes(&self, cfg: &Qwen35Config) -> u64 {
-        let options = qwen35moe::serve::EngineOptions::new(self.ctx(), self.max_concurrent());
-        cfg.decoder_widths().serve_peak_bytes(self.max_concurrent(), options.prefill_chunk)
+        qwen35moe::serve::activation_bytes(cfg, &qwen35moe::serve::EngineOptions::new(self.ctx(), self.max_concurrent()))
     }
 
     /// Build the scheduler from the directory, in place: the config and the tensors are read from the published files.

@@ -29,7 +29,7 @@
 //!   BRAIN_PROFILE_CONTEXT  synthetic decode context, tokens (default 1024)
 //!   BRAIN_PROFILE_BATCH    sequences decoded together (default 1)
 //!   BRAIN_PROFILE_PREFILL  profile a cold prefill of this many tokens instead
-//!   BRAIN_PROFILE_CHUNK    prefill round size (default 256)
+//!   BRAIN_PROFILE_CHUNK    prefill round size (default: the device's, `model::serve::prefill_round_rows_for`)
 //!   BRAIN_PROFILE_GROUPED_MIN_ROWS  rows from which the expert GEMMs group their slots
 //!                          (default `MOE_GROUPED_MIN_ROWS`; the sweep that set it)
 //!   BRAIN_QWEN35MOE_TIER   weight tier policy (default `i8`)
@@ -62,7 +62,8 @@ fn main() {
     let context = env_u32("BRAIN_PROFILE_CONTEXT", 1024);
     let batch = env_u32("BRAIN_PROFILE_BATCH", 1);
     let prefill = std::env::var("BRAIN_PROFILE_PREFILL").ok().and_then(|s| s.parse::<u32>().ok());
-    let chunk = env_u32("BRAIN_PROFILE_CHUNK", 256);
+    // 0 (unset) leaves the round to the device.
+    let chunk = Some(env_u32("BRAIN_PROFILE_CHUNK", 0)).filter(|&rows| rows > 0);
     // A release read in place keeps every tensor in its stored format: no tier is asked for.
     let tier = if hf_dir.is_some() { model::ops::TierPolicy::uniform(gpu_core::select::Dtype::F32) } else { gguf_load::tier_from_env() };
     let kv = gguf_load::kv_tier_from_env().unwrap_or_else(|e| panic!("{e}"));
@@ -88,17 +89,31 @@ fn main() {
         (None, None) => unreachable!("one of the two sources was opened"),
     };
     let t0 = Instant::now();
-    let opts = EngineOptions::new(capacity, if prefill.is_some() { 1 } else { batch }).with_tier(tier.clone()).with_kv_tier(kv).with_prefill_chunk(chunk).with_moe_grouped_min_rows(env_u32("BRAIN_PROFILE_GROUPED_MIN_ROWS", qwen35moe::model::MOE_GROUPED_MIN_ROWS));
-    let mut engine = Engine::from_source(cfg.clone(), &*src, opts);
+    let opts = EngineOptions::new(capacity, if prefill.is_some() { 1 } else { batch }).with_tier(tier.clone()).with_kv_tier(kv).with_moe_grouped_min_rows(env_u32("BRAIN_PROFILE_GROUPED_MIN_ROWS", qwen35moe::model::MOE_GROUPED_MIN_ROWS));
+    let opts = match chunk {
+        Some(rows) => opts.with_prefill_chunk(rows),
+        None => opts,
+    };
+    let mut engine = Engine::from_source(cfg.clone(), &*src, opts.clone());
+    let chunk = engine.max_prefill_tokens();
     println!("weight tier {}, kv {kv}, backend {}", tier.describe(), gpu_core::backend_name());
     println!("cold load {:.1} s, KV pool + recurrent state {:.2} GiB", t0.elapsed().as_secs_f64(), engine.kv_pool_bytes() as f64 / (1u64 << 30) as f64);
 
+    let resident = engine.gpu().memory_usage().map(|m| m.live);
+    engine.gpu().reset_memory_peak();
     let (profile, what, per_pass_tokens) = match prefill {
         Some(n) => (engine.profile_prefill(n, passes), format!("prefill of {n} tokens (rounds of {chunk})"), n as f64),
         None => (engine.profile_decode_at(batch, context, passes), format!("decode, batch {batch} at context {context}"), batch as f64),
     };
     let p = profile.unwrap_or_else(|e| panic!("{e}"));
     report(&p, &what, per_pass_tokens);
+    // What the pass allocated beyond the resident weights and caches: the activation peak a placement has to leave
+    // free (`qwen35moe::serve::activation_bytes` is what it charges).
+    if let (Some(base), Some(m)) = (resident, engine.gpu().memory_usage()) {
+        let charged = qwen35moe::serve::activation_bytes(&cfg, &opts.with_prefill_chunk(chunk));
+        let gib = |b: u64| b as f64 / (1u64 << 30) as f64;
+        println!("  activation peak {:.2} GiB above the resident {:.2} GiB; the placement charges {:.2} GiB", gib(m.peak_live.saturating_sub(base)), gib(base), gib(charged));
+    }
     if let Some((hits, misses, live)) = engine.gpu().step_cache_stats() {
         println!("  step cache: {hits} hits, {misses} misses, {live} entries");
     }

@@ -273,14 +273,20 @@ intervals between the first and the last `moe_i8_grouped_mma` of a 16K prefill (
 |---|---|---|---|---|
 | base (10ce4f488) | 3747 | 3744 | 80.0 % | 5.66 / 16.56 / 40.30 |
 | 1. no allocation, free or wait inside a round | 4265 | 4249 | 93.2 % | 5.67 / 16.59 / 40.87 |
+| 2. 4096-row rounds on tensor cores | 6242 | 6255 | 98.8 % | 5.67 / 16.62 / 40.38 |
 
 - [x] Step 1: a round's per-layer `poll_wait` (2514 `cuStreamSynchronize`, 1.63 s of host time over a 16K prompt)
   is owed only where submissions are not ordered (`qwen35`'s rule); the `Ops` handle holds its freed blocks (10.1K
   `cuMemFree`, 1.6 s, each waiting for the device); both handles retain up to the activations the placement charges;
   each layer is one pass (one parameter upload). Gate: `tests/it/prefill_round_census.rs` (no `cuMemAlloc` and one
   host wait, the hidden-state read, per steady-state prefill; `CallTotals::host_waits`).
-- [ ] Step 2: the round size from measurement, within the activations the planner charges.
+- [x] Step 2: the round size is the dense engine's policy (`model::serve::prefill_round_rows_for`, 4096 rows on
+  tensor cores, 256 elsewhere), moved to `model::serve` and taken by both engines. Swept first on the 16K prompt
+  (`qwen35moe_decode_profile`, kernel timing on): 256 / 1024 / 2048 / 4096 rows 1991 / 3038 / 5850 / 6234 tok/s. The
+  activation charge was a seventh of what a round allocates (knowledge 470) and is now measured: 4.39 GiB charged
+  against a 3.42 GiB peak at 4096 rows.
 - [ ] Step 3: the dense engine's GDN prefill form (bf16, warpgroup recurrence) instead of the f32 chunk chain
-  (`gdn_chunk_loop_f32` + `gdn_ut_fwd` + `bmm_tiled` + `l2norm_scale` + layout copies: ~0.9 s of 3.2 s kernel time).
-- [ ] Step 4: `moe_i8_grouped_mma` (1.28 s, 40 % of kernel time): an 8-slot tile re-reads the expert's weights per
-  tile.
+  (at 4096-row rounds `gdn_chunk_loop_f32` 0.49 s + `l2norm_scale`, `bmm_tiled`, layout copies, `conv1d`, `gdn_ut_fwd`
+  ~0.6 s more, of 2.7 s kernel time).
+- [ ] Step 4: `moe_i8_grouped_mma` (1.10 s at 4096-row rounds, 41 % of kernel time): an 8-slot tile re-reads the
+  expert's weights per tile.
