@@ -860,7 +860,6 @@ impl HotPipeline {
                 let cut = tuning.encoder_cut.map_or((n * 2) / 3, |c| c as usize).min(n - 1);
                 progress(&format!("building Qwen-4B encoder bulk (fp32 split @{cut}: GPU {bulk} + GPU {dit_gpu})"));
                 // Bulk shard: embedding + layers 0..cut on the (empty) bulk card.
-                gpu_core::set_default_backend(gpu_core::Backend::Wgpu);
                 let s0 = Qwen::new_shard(qcfg.clone(), 1, cap_len, &qsrc, false, Shard { start: 0, end: cut, embed: true, head: false, gpu_index: bulk as usize });
                 split = Some((s0, cut, n, dit_gpu));
                 None // tail (and thus Encoder::Split) assembled after the DiT below
@@ -887,19 +886,15 @@ impl HotPipeline {
                 // the unused last layer (encode reads the penultimate hidden).
                 let n = qcfg.n_layers as usize;
                 progress(&format!("building Qwen-4B encoder (int8 DP4A, GPU {bulk})"));
-                gpu_core::set_default_backend(gpu_core::Backend::Wgpu);
                 let e = Qwen::new_shard_i8(qcfg.clone(), 1, cap_len, &qsrc, Shard { start: 0, end: n - 1, embed: true, head: false, gpu_index: bulk as usize });
                 Some(Encoder::Gpu8(Box::new(e)))
             }
             _ => {
                 progress("building Qwen-4B encoder (CPU/AVX2)");
-                gpu_core::set_default_backend(gpu_core::Backend::Cpu);
-                let e = Qwen::new_shard(qcfg.clone(), 1, cap_len, &qsrc, false, Shard::whole(qcfg.n_layers as usize));
-                gpu_core::set_default_backend(gpu_core::Backend::Wgpu);
+                let e = gpu_core::devices::with_host_tier(|| Qwen::new_shard(qcfg.clone(), 1, cap_len, &qsrc, false, Shard::whole(qcfg.n_layers as usize)));
                 Some(Encoder::Cpu(Box::new(e)))
             }
         };
-        gpu_core::set_default_backend(gpu_core::Backend::Wgpu);
 
         let dit = build_dit_engine(paths, spec, dit_gpu, &mut progress)?;
 
@@ -925,8 +920,8 @@ impl HotPipeline {
         progress(&format!("building VAE decoder (GPU {vae_gpu})"));
         // `VaeDecoder::from_diffusers`'s `Some("cpu")`/`Some("gpu")` already pick
         // the device explicitly regardless of the ambient default backend, so no
-        // `set_default_backend` toggle is needed here (unlike the encoder above,
-        // whose `Qwen::new_shard` has no such explicit-device parameter).
+        // scope is needed here (unlike the CPU encoder above, whose
+        // `Qwen::new_shard` has no such explicit-device parameter).
         let vtensors = tensors_map(read_component_tensors(&paths.vae).map_err(|e| format!("read vae: {e}"))?);
         let vae = gpu_core::devices::with_gpu(vae_gpu, || {
             VaeDecoder::from_diffusers(zimage_vae_config(), &vtensors, lh, lw, Some("gpu"))
@@ -972,26 +967,21 @@ impl HotPipeline {
             Some(bulk) => {
                 let n = qcfg.n_layers as usize;
                 progress(&format!("building Qwen-4B encoder (int8 DP4A, GPU {bulk})"));
-                gpu_core::set_default_backend(gpu_core::Backend::Wgpu);
                 let e = Qwen::new_shard_i8(qcfg.clone(), 1, cap_len, &qsrc, Shard { start: 0, end: n - 1, embed: true, head: false, gpu_index: bulk as usize });
                 Encoder::Gpu8(Box::new(e))
             }
             None => {
                 progress("building Qwen-4B encoder (CPU/AVX2)");
-                gpu_core::set_default_backend(gpu_core::Backend::Cpu);
-                let e = Qwen::new_shard(qcfg.clone(), 1, cap_len, &qsrc, false, Shard::whole(qcfg.n_layers as usize));
-                gpu_core::set_default_backend(gpu_core::Backend::Wgpu);
+                let e = gpu_core::devices::with_host_tier(|| Qwen::new_shard(qcfg.clone(), 1, cap_len, &qsrc, false, Shard::whole(qcfg.n_layers as usize)));
                 Encoder::Cpu(Box::new(e))
             }
         };
         drop(qsrc);
         drop(qreader);
-        gpu_core::set_default_backend(gpu_core::Backend::Wgpu);
 
         let dit = build_dit(dit_gpu, lh, lw)?;
 
         progress(&format!("building VAE decoder (GPU {vae_gpu})"));
-        gpu_core::set_default_backend(gpu_core::Backend::Wgpu);
         let vtensors = tensors_map(read_component_tensors(&paths.vae).map_err(|e| format!("read vae: {e}"))?);
         let vae = gpu_core::devices::with_gpu(vae_gpu, || VaeDecoder::from_diffusers(zimage_vae_config(), &vtensors, lh, lw, Some("gpu")))?;
 
@@ -1309,11 +1299,9 @@ fn generate_core(prompt: &str, opts: &Opts, paths: &Paths, init: Option<Init>, c
     let qreader = open_component(&paths.qwen).map_err(|e| format!("open qwen: {e}"))?;
     let qsrc = qwen3::import::hf_source(&qreader, &qcfg)?;
     let cap = {
-        gpu_core::set_default_backend(gpu_core::Backend::Cpu); // encoder → CPU (AVX2)
-        let enc = Qwen::new_shard(qcfg.clone(), 1, cap_len, &qsrc, false, qwen3::Shard::whole(qcfg.n_layers as usize));
-        let c = enc.encode(&tokens); // [cap_len · 2560]
-        gpu_core::set_default_backend(gpu_core::Backend::Wgpu); // heavy compute → GPU
-        c
+        // The encoder builds on the CPU (AVX2); the heavy compute after it stays on the ambient device.
+        let enc = gpu_core::devices::with_host_tier(|| Qwen::new_shard(qcfg.clone(), 1, cap_len, &qsrc, false, qwen3::Shard::whole(qcfg.n_layers as usize)));
+        enc.encode(&tokens) // [cap_len · 2560]
     };
     drop(qsrc);
     drop(qreader);

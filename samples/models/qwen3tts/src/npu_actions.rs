@@ -130,10 +130,9 @@ impl Action for NpuAction {
                 // The Talker and the codec run on the device; the speaker
                 // x-vector encoder is the one engine model left, and it is
                 // small enough for the CPU backend.
-                gpu_core::set_default_backend(gpu_core::Backend::Cpu);
                 let (reference, ref_codes) = qwen3tts::caps::reference_from(inv, &name)?;
                 let ref_text = inv.get_str("ref_text").unwrap_or_default();
-                qwen3tts::pipeline::clone_npu(&paths, &opts, &text, &reference, &ref_text, &lang, ref_codes, cache, &npu)
+                gpu_core::devices::with_host_tier(|| qwen3tts::pipeline::clone_npu(&paths, &opts, &text, &reference, &ref_text, &lang, ref_codes, cache, &npu))
             }
             Kind::Design => {
                 let instruct = inv.get_str("instruct").unwrap_or_default();

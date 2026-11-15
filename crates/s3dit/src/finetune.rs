@@ -160,7 +160,6 @@ pub fn encode_samples(
         let qcfg = QwenConfig::qwen3_4b();
         let qtensors = checkpoint::safetensors::read(&paths.qwen).map_err(|e| format!("read qwen: {e}"))?;
         let qinit = qwen3::import::brain_init_from_hf(qtensors, &qcfg)?;
-        gpu_core::set_default_backend(gpu_core::Backend::Wgpu);
         let nl = qcfg.n_layers as usize;
         let enc = Qwen::new_shard_i8(qcfg, 1, cap_len, &qinit, Shard { start: 0, end: nl - 1, embed: true, head: false, gpu_index: enc_gpu as usize });
         let mut out = Vec::with_capacity(n);

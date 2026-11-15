@@ -241,13 +241,11 @@ fn train_rank(timed: &TimedCollective<'_>, rank: usize, world: usize, cfg: &Prof
     Ok((RankOutcome { step_times, weights }, snapshot))
 }
 
-/// Point the process at the CPU backend so the profile never depends on a
-/// device being present, and every transport measures the same arithmetic.
-/// A caller that already selected a backend keeps its choice.
-fn select_cpu_if_unset() {
-    if !gpu_core::backend_selected() {
-        gpu_core::set_default_backend(gpu_core::Backend::Cpu);
-    }
+/// The backend every rank builds on: the CPU, so the profile never depends on
+/// a device being present and every transport measures the same arithmetic,
+/// unless the caller already selected one, which it keeps.
+fn rank_backend() -> gpu_core::Backend {
+    gpu_core::selected_backend().unwrap_or(gpu_core::Backend::Cpu)
 }
 
 /// Run every configured transport at every configured world size over one
@@ -256,7 +254,7 @@ fn select_cpu_if_unset() {
 /// A run that cannot start fails with the reason naming the rank and the
 /// transport; nothing is skipped.
 pub fn run_profile(cfg: &ProfileConfig) -> Result<Value, String> {
-    select_cpu_if_unset();
+    let backend = rank_backend();
     if cfg.worlds.is_empty() {
         return Err("the profile has no world sizes to run".to_string());
     }
@@ -272,7 +270,7 @@ pub fn run_profile(cfg: &ProfileConfig) -> Result<Value, String> {
     let mut runs = Vec::new();
     for &transport in &cfg.transports {
         for &world in &cfg.worlds {
-            runs.push(run_once(cfg, &data, transport, world));
+            runs.push(run_once(cfg, &data, transport, world, backend));
         }
     }
     let _ = std::fs::remove_dir_all(&data);
@@ -315,7 +313,7 @@ pub fn run_profile(cfg: &ProfileConfig) -> Result<Value, String> {
 
     Ok(json!({
         "config": {
-            "backend": gpu_core::backend_name(),
+            "backend": gpu_core::with_backend(backend, gpu_core::backend_name),
             "steps": cfg.steps,
             "batch_size": cfg.batch_size,
             "block_size": cfg.block_size,
@@ -339,7 +337,7 @@ pub fn run_profile(cfg: &ProfileConfig) -> Result<Value, String> {
 /// One transport at one world size: spawn every rank as a scope thread, give
 /// each its own timed wrapper, and collect the rank results. A failed rank is
 /// returned with its reason rather than silently dropped.
-fn run_once(cfg: &ProfileConfig, data: &Path, transport: Transport, world: usize) -> Result<RunResult, String> {
+fn run_once(cfg: &ProfileConfig, data: &Path, transport: Transport, world: usize, backend: gpu_core::Backend) -> Result<RunResult, String> {
     if world == 0 {
         return Err("a world size of zero has no ranks".to_string());
     }
@@ -363,8 +361,9 @@ fn run_once(cfg: &ProfileConfig, data: &Path, transport: Transport, world: usize
             let host = host.as_ref();
             let listener = listener.as_ref();
             let address = address.as_deref();
+            // A backend scope does not cross threads, so each rank enters its own.
             scope.spawn(move || {
-                let outcome = match transport {
+                let outcome = gpu_core::with_backend(backend, || match transport {
                     Transport::Host => {
                         let timed = TimedCollective::new(&**host.expect("the host transport has a collective"));
                         train_rank(&timed, rank, world, cfg, data)
@@ -389,7 +388,7 @@ fn run_once(cfg: &ProfileConfig, data: &Path, transport: Transport, world: usize
                             Err(e) => Err(format!("rank {rank}: join the loopback group: {e}")),
                         }
                     }
-                };
+                });
                 let mut slots = results.lock().unwrap();
                 slots[rank] = Some(outcome);
             });
