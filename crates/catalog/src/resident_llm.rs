@@ -25,11 +25,11 @@
 
 use capability::{ActionResult, Invocation, Manifest, Progress, Provider};
 use checkpoint::st::ModelCard;
-use residency::supervised::HostSpec;
+use residency::supervised::{HostSpec, HostedFamily, HostedModel};
 use residency::{on_device, Device, Instance, InstanceKey, MemCost, ResidentModel};
 use serde_json::json;
 
-use llmserve::adapter_registry::{AdapterBankSettings, AdapterHost, AdapterRegistry, AdapterSync, AdapterView, ADAPTER_PARAM};
+use llmserve::adapter_registry::{AdapterBankSettings, AdapterHost, AdapterMirror, AdapterRegistry, AdapterSync, AdapterView, ADAPTER_PARAM};
 use llmserve::adapter_release::{LoadedAdapter, ServedBase};
 use llmserve::{generate_spec, run_batch_scheduled, run_open_scheduled, OpenGroup, scheduler_metrics, Frontend};
 
@@ -47,6 +47,20 @@ use plan::QwenPlan;
 /// The family name worker hosting knows the Qwen3 decoder by
 /// (`brain serve --worker-hosted qwen3`).
 pub const FAMILY: &str = "qwen3";
+
+/// How a worker rebuilds a Qwen3 resident: from the resolved plan its [`QwenResident::host_spec`] carries, with
+/// the adapters its parent offers mirrored into the resident's own registry. Rebuilding reads nothing; the worker
+/// opens the checkpoint when it activates the resident on its card.
+pub fn hosted() -> HostedFamily {
+    HostedFamily {
+        name: FAMILY,
+        open: |args| {
+            let resident = Arc::new(QwenResident::from_host_spec(args)?);
+            let mirror = Arc::new(AdapterMirror::new(resident.adapters().clone()));
+            Ok(HostedModel::new(resident).with_adapters(mirror))
+        },
+    }
+}
 
 /// A Qwen3 adapter's view.
 pub type QwenAdapterView = AdapterView<QwenResident>;
@@ -487,6 +501,10 @@ pub struct QwenServeConfig {
     /// engine reads its attention through (`Engine::set_lsa`); `None` reads
     /// densely.
     pub sparse_attention: Option<String>,
+    /// `--worker-hosted qwen3`: the resident's instances run in supervised
+    /// workers ([`QwenResident::host_spec`]); `None`, or hosting that does not
+    /// name [`FAMILY`], builds them in this process.
+    pub worker_hosting: Option<residency::supervised::WorkerHosting>,
 }
 
 /// What the Qwen3 paged engine honours of a [`model::policy::ServePolicy`].
@@ -560,7 +578,7 @@ impl QwenServeConfig {
 
 impl Default for QwenServeConfig {
     fn default() -> QwenServeConfig {
-        QwenServeConfig { weights: None, tokenizer: None, ctx: None, auto_budget_bytes: None, card_budget_bytes: None, max_batch: 16, kv_int8: true, kv_fp8: false, kv_calib_opt_in: false, kv_offload_gb: 0.0, weights_int8: None, weights_bf16: false, weight_tiers: None, max_prefill_cap: 512, kv_tokens: None, gemm_precision: gpu_core::provider::library::GemmPrecision::Auto, fuse_residual_norm: true, exact_decode: false, adapter_bank: None, adapter_targets_named: false, refused: None, sparse_attention: None }
+        QwenServeConfig { weights: None, tokenizer: None, ctx: None, auto_budget_bytes: None, card_budget_bytes: None, max_batch: 16, kv_int8: true, kv_fp8: false, kv_calib_opt_in: false, kv_offload_gb: 0.0, weights_int8: None, weights_bf16: false, weight_tiers: None, max_prefill_cap: 512, kv_tokens: None, gemm_precision: gpu_core::provider::library::GemmPrecision::Auto, fuse_residual_norm: true, exact_decode: false, adapter_bank: None, adapter_targets_named: false, refused: None, sparse_attention: None, worker_hosting: None }
     }
 }
 
@@ -783,6 +801,11 @@ pub struct QwenResident {
     adapters: Arc<AdapterRegistry>,
     /// The sampling defaults the checkpoint's `generation_config.json` declares, read once.
     sampling: std::sync::OnceLock<data::generation::SamplingDefaults>,
+    /// The resident as served from a supervised worker, when its family is hosted: activation and placement go
+    /// through it, so this resident's adapter views ([`QwenAdapterView`], which build and place through the base)
+    /// are built in the worker too. It answers everything else from a twin of this resident over the same plan and
+    /// the same adapter registry, which it offers to each worker ([`AdapterMirror`] rebuilds it there).
+    worker: Option<residency::supervised::SupervisedModel>,
 }
 
 /// What `--checkpoint` names, as the `(path to open, repo directory,
@@ -866,7 +889,8 @@ impl QwenResident {
             Err(_) => !cfg.weights_bf16 && cfg.weights_int8.unwrap_or(false),
         };
         let kv_tokens = Self::resolve_kv_tokens(path, &cfg, ctx);
-        Self::from_plan(QwenPlan {
+        let hosting = cfg.worker_hosting.filter(|h| h.hosts(FAMILY));
+        let resident = Self::from_plan(QwenPlan {
             id,
             path: path.to_string(),
             tokenizer: tokenizer.to_string(),
@@ -890,14 +914,26 @@ impl QwenResident {
             exact_decode: cfg.exact_decode,
             refused: cfg.refused,
             adapter_bank: cfg.adapter_bank,
-        })
+        });
+        match hosting {
+            Some(hosting) => resident.hosted_by(&hosting),
+            None => resident,
+        }
+    }
+
+    /// This resident with its instances built in `hosting`'s workers, each rebuilding it from [`Self::host_spec`]
+    /// and told every change of its adapters.
+    fn hosted_by(self, hosting: &residency::supervised::WorkerHosting) -> QwenResident {
+        let twin = QwenResident { plan: self.plan.clone(), architecture: self.architecture, adapters: self.adapters.clone(), sampling: std::sync::OnceLock::new(), worker: None };
+        let worker = hosting.supervised(Arc::new(twin), self.host_spec()).with_adapters(self.adapters.clone());
+        QwenResident { worker: Some(worker), ..self }
     }
 
     /// The resident a resolved plan describes, built from it as it stands.
     fn from_plan(plan: QwenPlan) -> QwenResident {
         let architecture = plan.architecture.as_deref().and_then(brain_arch::by_id).map(|a| a.id);
         let adapters = AdapterRegistry::new(plan.adapter_bank.clone(), ServedBase::new(&plan.path, plan.base_id.clone()));
-        QwenResident { plan, architecture, adapters, sampling: std::sync::OnceLock::new() }
+        QwenResident { plan, architecture, adapters, sampling: std::sync::OnceLock::new(), worker: None }
     }
 
     /// What a worker rebuilds this resident from: the resolved plan, so the worker builds the engine the serving
@@ -1300,7 +1336,11 @@ impl ResidentModel for QwenResident {
             params.remove(ADAPTER_PARAM);
         }
     }
-    fn estimate(&self, _key: &InstanceKey) -> MemCost {
+    /// In a worker: the hosted estimate (the model's own plus the worker's device context and process).
+    fn estimate(&self, key: &InstanceKey) -> MemCost {
+        if let Some(worker) = &self.worker {
+            return worker.estimate(key);
+        }
         let cost = est_vram(&self.plan.path);
         // Any failure here just defers to the real, specific error
         // `activate()` raises -- `estimate()` must never itself hard-fail.
@@ -1312,7 +1352,10 @@ impl ResidentModel for QwenResident {
         let activation = model::memplan::category_total(&demands, model::memplan::Category::Activations);
         MemCost::new(model::memplan::device_total(&demands) - activation, cost.ram).with_activation(activation)
     }
-    fn activate(&self, _key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
+    fn activate(&self, key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
+        if let Some(worker) = &self.worker {
+            return worker.activate(key, device);
+        }
         // Coarse stage progress -- NOT per-tensor (the actual weight upload
         // loop lives in `paramstore`, a lower-level crate that must not
         // depend on `residency` just for this), a handful of stage markers so

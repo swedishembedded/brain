@@ -178,8 +178,8 @@ mod tests {
         assert_eq!(command.program(), Path::new("/proc/self/exe"));
         let args: Vec<&str> = command.args().iter().map(|a| a.to_str().unwrap()).collect();
         assert_eq!(args, ["--backend", "cuda", "--gpu-wait-s", "12", WORKER_MODE]);
-        let err = worker_hosting(Path::new("/proc/self/exe"), &[], &["qwen3".to_string()], Duration::from_secs(7), health).err().expect("a family no worker hosts is refused");
-        assert!(err.contains("qwen3") && err.contains("decision"), "{err}");
+        let err = worker_hosting(Path::new("/proc/self/exe"), &[], &["flux2".to_string()], Duration::from_secs(7), health).expect_err("a family no worker hosts is refused");
+        assert!(err.contains("flux2") && err.contains("decision"), "{err}");
     }
 
     #[test]

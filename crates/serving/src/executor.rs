@@ -260,7 +260,14 @@ pub fn build_executor(machine: &Machine, reserve: Reserve, store: &catalog::Serv
     // was ALSO given explicitly: `QwenResident::resolve_ctx` checks the
     // explicit value first, so filling this in unconditionally is harmless
     // when it is, and is what makes auto-sizing real when it is not.
-    let qwen_cfg = catalog::resident_llm::QwenServeConfig { auto_budget_bytes: gpus.iter().map(|&(_, total)| total.saturating_sub(reserved)).max(), card_budget_bytes: gpus.iter().map(|&(_, total)| total.saturating_sub(reserved)).max(), ..qwen_cfg };
+    // With `--worker-hosted qwen3` the resident is served from workers it holds itself, so the views of its
+    // adapters (which build through the base) are built in the worker too.
+    let qwen_cfg = catalog::resident_llm::QwenServeConfig {
+        auto_budget_bytes: gpus.iter().map(|&(_, total)| total.saturating_sub(reserved)).max(),
+        card_budget_bytes: gpus.iter().map(|&(_, total)| total.saturating_sub(reserved)).max(),
+        worker_hosting: worker_hosting.clone(),
+        ..qwen_cfg
+    };
     let mut qwen = register_qwen(&mut models, QwenResident::from_config(qwen_cfg.clone()));
     // Qwen3.8-27B dense hybrid Gated-DeltaNet/GQA decoder, a brain-format
     // checkpoint resolved through `qwen35::spec::Qwen35Fp32Spec`'s

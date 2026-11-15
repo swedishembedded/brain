@@ -292,6 +292,12 @@ pub struct WorkerHosting {
     families: Vec<String>,
 }
 
+impl std::fmt::Debug for WorkerHosting {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WorkerHosting").field("command", &self.command).field("deadlines", &self.deadlines).field("families", &self.families).finish_non_exhaustive()
+    }
+}
+
 impl WorkerHosting {
     pub fn new(command: WorkerCommand, health: Arc<Health<Device>>, deadlines: Deadlines, families: Vec<String>) -> WorkerHosting {
         WorkerHosting { command, health, deadlines, families }
@@ -310,9 +316,16 @@ impl WorkerHosting {
     /// `resident`, served from a worker when `hosting` covers its family, else as is.
     pub fn serve(hosting: Option<&WorkerHosting>, resident: Arc<dyn ResidentModel>, spec: HostSpec) -> Arc<dyn ResidentModel> {
         match hosting {
-            Some(h) if h.hosts(&spec.family) => Arc::new(SupervisedModel::new(resident, spec, h.command.clone(), h.health.clone(), h.deadlines)),
+            Some(h) if h.hosts(&spec.family) => Arc::new(h.supervised(resident, spec)),
             _ => resident,
         }
+    }
+
+    /// `resident` served from this hosting's workers, which rebuild it from `spec`, whether or not its family is
+    /// one an operator named: for a model that holds its hosted form itself (a base adapters are served over, whose
+    /// views must build through the worker) and checks [`Self::hosts`] first.
+    pub fn supervised(&self, resident: Arc<dyn ResidentModel>, spec: HostSpec) -> SupervisedModel {
+        SupervisedModel::new(resident, spec, self.command.clone(), self.health.clone(), self.deadlines)
     }
 
     /// [`Self::serve`] for a model across several cards, which a worker hosts whole; register the result with

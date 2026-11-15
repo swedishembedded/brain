@@ -308,7 +308,8 @@ impl Scan {
     /// bank when the store holds adapters for it.
     fn qwen_cfg_for(&self, id: &str) -> catalog::resident_llm::QwenServeConfig {
         let card_budget_bytes = self.settings.qwen.card_budget_bytes.or_else(|| self.settings.gpus.iter().map(|&(_, total)| total.saturating_sub(self.settings.reserved)).max());
-        catalog::resident_llm::QwenServeConfig { adapter_bank: self.banks.get(id).cloned().or_else(|| self.settings.qwen.adapter_bank.clone()), card_budget_bytes, ..self.settings.qwen.clone() }
+        let worker_hosting = self.settings.worker_hosting.clone().or_else(|| self.settings.qwen.worker_hosting.clone());
+        catalog::resident_llm::QwenServeConfig { adapter_bank: self.banks.get(id).cloned().or_else(|| self.settings.qwen.adapter_bank.clone()), card_budget_bytes, worker_hosting, ..self.settings.qwen.clone() }
     }
 
     /// Serve the adapter `local` as a model of its own over the Qwen3 base it
@@ -866,6 +867,8 @@ fn resident_for(weights: &str, card: &ModelCard, tokenizer: Option<&str>, qwen_c
 /// A model of a family `hosting` covers is served from a supervised worker,
 /// as the scan serves it ([`ScanSettings::worker_hosting`]).
 pub fn resident_for_local(local: &brain_modelstore::LocalModel, qwen_cfg: catalog::resident_llm::QwenServeConfig, qwen35_sizing: catalog::resident_qwen35::Qwen35Sizing, encoder_batch: Option<u32>, hosting: Option<&residency::supervised::WorkerHosting>) -> Result<Arc<dyn ResidentModel>, String> {
+    // A Qwen3 base holds its hosted form itself, so the views of its adapters build through it.
+    let qwen_cfg = catalog::resident_llm::QwenServeConfig { worker_hosting: hosting.cloned().or(qwen_cfg.worker_hosting), ..qwen_cfg };
     build_for_local(local, qwen_cfg, qwen35_sizing, encoder_batch, &[]).map(|built| built.served(hosting))
 }
 
@@ -1239,12 +1242,18 @@ mod tests {
     /// says whether it went to a worker.
     #[cfg(unix)]
     fn refusing_lfm_hosting() -> residency::supervised::WorkerHosting {
+        refusing_hosting(catalog::resident_lfm::FAMILY)
+    }
+
+    /// Hosting for `family` whose worker is a fake that refuses every request.
+    #[cfg(unix)]
+    fn refusing_hosting(family: &str) -> residency::supervised::WorkerHosting {
         use residency::supervised::{Deadlines, WorkerHosting};
         let refuse = r#"while IFS= read -r line; do echo "${line%% *} err refused by the test worker"; done"#;
         let command = gpu_supervisor::WorkerCommand::new("/bin/sh").arg("-c").arg(refuse);
         let health = Arc::new(gpu_supervisor::Health::new(gpu_supervisor::BreakerPolicy::default(), std::time::Duration::from_secs(2)));
         let deadline = std::time::Duration::from_secs(10);
-        WorkerHosting::new(command, health, Deadlines { open: deadline, run: deadline, reap: deadline }, vec![catalog::resident_lfm::FAMILY.to_string()])
+        WorkerHosting::new(command, health, Deadlines { open: deadline, run: deadline, reap: deadline }, vec![family.to_string()])
     }
 
     /// Why activating `enc`'s instance for an `embed` job failed.
@@ -1252,6 +1261,40 @@ mod tests {
     fn activation_error(enc: &dyn ResidentModel) -> String {
         let key = enc.instance_key("embed", &capability::Invocation::new().set("text", serde_json::json!("hi")));
         enc.activate(&key, residency::Device::Gpu(0)).err().expect("the fake worker refuses")
+    }
+
+    /// With `--worker-hosted qwen3` a scanned Qwen3 base and every adapter served over it are built in the base's
+    /// worker: activating either starts the worker command (a fake that refuses every request), and both are
+    /// placed as the hosted base, its worker's context and process charged on top of the model's own estimate.
+    #[test]
+    #[cfg(unix)]
+    fn a_scanned_qwen3_base_and_its_adapters_run_in_a_worker_when_its_family_is_hosted() {
+        let dir = tmp_dir("hosted-qwen3");
+        let repo = dir.join("Qwen").join("Qwen3-Toy");
+        std::fs::create_dir_all(&repo).unwrap();
+        st::save_safetensors(repo.join("model.brain.safetensors").to_str().unwrap(), &[("w".into(), vec![1u64], vec![0.0f32])], &serde_json::json!({}), Some(&ModelCard::new("Qwen/Qwen3-Toy", "qwen"))).unwrap();
+        write_tokenizer(&repo);
+        let adapter_id = "Qwen/Qwen3-Toy:lab:canary:v1";
+        let adapter_dir = repo.join("adapters").join("lab").join("canary").join("v1");
+        std::fs::create_dir_all(&adapter_dir).unwrap();
+        brain_testutil::adapters::write_adapter(&adapter_dir.join("adapter.brain.safetensors"), adapter_id, "Qwen/Qwen3-Toy", None, 0.5);
+
+        let hosted = discover(&dir, &ScanSettings { worker_hosting: Some(refusing_hosting(catalog::resident_llm::FAMILY)), ..Default::default() });
+        let in_process = discover(&dir, &ScanSettings::default());
+        let by_id = |found: &Discovered, id: &str| found.residents.iter().find(|r| r.manifest().model == id).cloned().unwrap_or_else(|| panic!("{id} not served"));
+        let inv = capability::Invocation::new();
+        for id in ["Qwen/Qwen3-Toy", adapter_id] {
+            let (model, local) = (by_id(&hosted, id), by_id(&in_process, id));
+            let key = model.instance_key("generate", &inv);
+            let err = model.activate(&key, residency::Device::Gpu(0)).err().expect("the fake worker refuses");
+            assert!(err.contains("refused by the test worker"), "{id}: activation went to the worker: {err}");
+            let local_err = local.activate(&key, residency::Device::Gpu(0)).err().expect("a one-tensor checkpoint does not build");
+            assert!(!local_err.contains("refused by the test worker"), "{id}: without hosting it is built in process: {local_err}");
+            let (charged, own) = (model.estimate(&key), local.estimate(&key));
+            assert_eq!(charged.vram, own.vram + residency::supervised::WORKER_DEVICE_CONTEXT_BYTES, "{id}: placed as the hosted base, its worker's context charged");
+            assert_eq!(charged.process_host, residency::supervised::WORKER_HOST_BYTES, "{id}: and its worker's process");
+        }
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// With `--worker-hosted lfm` a scanned encoder is built in a worker:
