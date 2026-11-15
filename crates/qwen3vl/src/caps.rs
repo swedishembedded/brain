@@ -298,10 +298,10 @@ pub fn generate_spec() -> ActionSpec {
             .default(json!(DEFAULT_CTX)),
         )
         .param(
-            // perf-number: size ratio: int8 is 1 byte against fp32's 4, not a rate
             ParamSpec::new(
                 "precision",
                 ParamType::Str,
+                // perf-number: size ratio: int8 is 1 byte against fp32's 4, not a rate
                 "decoder storage tier: fp32 or int8 (int8 weights and int8 activations, ~4x less weight traffic per token); \
                  omitted, the checkpoint's stored encoding (int8 for a quantized GGUF, else fp32)",
             ),
