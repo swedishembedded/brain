@@ -764,7 +764,7 @@ fn metrics_demotion_and_promotion_reach_the_hosted_instance() {
 fn adapter_file(dir: &std::path::Path, id: &str, digest: &str) -> HostedAdapter {
     let path = dir.join(format!("{id}.safetensors"));
     std::fs::write(&path, digest).unwrap();
-    HostedAdapter { id: id.into(), digest: digest.into(), path }
+    HostedAdapter { id: id.into(), digest: digest.into(), path, version: 1 }
 }
 
 /// The adapters a base offers in the serving process reach its worker: one

@@ -38,7 +38,7 @@
 //! | `group[+<n>] <action> <k> <jobs>` | `{"open": bool, "metrics"}`; the jobs were finished through `done` frames |
 //! | `demote warm\|cold` | `{"metrics"}`; the instance released its device buffers, the worker keeps its device context |
 //! | `promote <device>` | `{"metrics"}`; the instance is Hot again on `<device>`, which must be the card it was opened on |
-//! | `attach {"id", "digest", "path"}` | `{"metrics"}`; the model's registry offers the adapter the file holds, once its digest checks ([`AdapterSink`]) |
+//! | `attach {"id", "digest", "path", "version"}` | `{"metrics"}`; the model's registry offers the adapter the file holds under the version the serving process numbered it, once its digest checks ([`AdapterSink`]) |
 //! | `detach <id>` | `{"metrics"}`; the registry no longer offers `<id>` |
 //! | `probe <device>` | anything; the device works (sent to a fresh probe worker) |
 //!
@@ -117,7 +117,7 @@ use crate::multi::MultiDeviceResidentModel;
 use crate::{AdapterIdentity, Device, Instance, InstanceKey, JobFeed, MemCost, ResidentModel, Tier};
 
 /// The protocol version a worker and its parent must agree on (`hello`).
-pub const PROTOCOL: u32 = 4;
+pub const PROTOCOL: u32 = 5;
 
 mod adapters;
 #[cfg(unix)]

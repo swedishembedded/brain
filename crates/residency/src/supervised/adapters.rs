@@ -29,13 +29,17 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 
 /// One adapter a hosted base offers: its serving id, the digest of its file's
-/// bytes, and the file a worker reads it from (the release the serving process
-/// verified). The worker checks the digest of what it reads.
+/// bytes, the file a worker reads it from (the release the serving process
+/// verified), and the version the serving process numbered the release under
+/// its id, which a reply names (a worker started after a release was replaced
+/// has seen only the new one, and must still call it by the serving process's
+/// number). The worker checks the digest of what it reads.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostedAdapter {
     pub id: String,
     pub digest: String,
     pub path: PathBuf,
+    pub version: u64,
 }
 
 /// The serving process's side: the adapters a hosted base offers now.
@@ -72,7 +76,7 @@ impl Change {
     /// The request or frame that carries it: `attach <json>` or `detach <id>`.
     pub(super) fn line(&self) -> String {
         match self {
-            Change::Attach(a) => format!("attach {}", json!({ "id": a.id, "digest": a.digest, "path": a.path.to_string_lossy() })),
+            Change::Attach(a) => format!("attach {}", json!({ "id": a.id, "digest": a.digest, "path": a.path.to_string_lossy(), "version": a.version })),
             Change::Detach(id) => format!("detach {id}"),
         }
     }
@@ -83,11 +87,12 @@ impl Change {
             "attach" => {
                 let v: Value = serde_json::from_str(rest).map_err(|e| format!("attach: not JSON ({e})"))?;
                 let map = v.as_object().ok_or("an adapter is not an object")?;
-                if let Some(k) = map.keys().find(|k| !["id", "digest", "path"].contains(&k.as_str())) {
+                if let Some(k) = map.keys().find(|k| !["id", "digest", "path", "version"].contains(&k.as_str())) {
                     return Err(format!("an adapter has an unknown field {k:?}"));
                 }
                 let field = |k: &str| map.get(k).and_then(Value::as_str).map(str::to_string).ok_or_else(|| format!("an adapter without its {k}"));
-                Ok(Change::Attach(HostedAdapter { id: field("id")?, digest: field("digest")?, path: PathBuf::from(field("path")?) }))
+                let version = map.get("version").and_then(Value::as_u64).ok_or("an adapter without its version")?;
+                Ok(Change::Attach(HostedAdapter { id: field("id")?, digest: field("digest")?, path: PathBuf::from(field("path")?), version }))
             }
             "detach" if !rest.is_empty() && !rest.contains(char::is_whitespace) => Ok(Change::Detach(rest.to_string())),
             _ => Err(format!("{verb} {rest:?} is not an adapter change")),
@@ -162,7 +167,7 @@ mod tests {
     }
 
     fn adapter(id: &str, digest: &str) -> HostedAdapter {
-        HostedAdapter { id: id.into(), digest: digest.into(), path: PathBuf::from(format!("/adapters/{id}.safetensors")) }
+        HostedAdapter { id: id.into(), digest: digest.into(), path: PathBuf::from(format!("/adapters/{id}.safetensors")), version: 1 }
     }
 
     /// The feed tells a worker each change once, a replaced release as a new
@@ -178,12 +183,13 @@ mod tests {
         assert_eq!(feed.changes(), [Change::Detach("a".into()), Change::Attach(adapter("b", "d3"))]);
         feed.reset();
         assert_eq!(feed.changes(), [Change::Attach(adapter("b", "d3"))]);
-        for change in [Change::Attach(adapter("x:y", "sha256:00")), Change::Detach("x:y".into())] {
+        for change in [Change::Attach(adapter("x:y", "sha256:00")), Change::Attach(HostedAdapter { version: 7, ..adapter("x:y", "sha256:01") }), Change::Detach("x:y".into())] {
             let line = change.line();
             let (verb, rest) = line.split_once(' ').unwrap();
             assert_eq!(Change::parse(verb, rest).unwrap(), change);
         }
         assert!(Change::parse("detach", "a b").is_err(), "an id is one word");
         assert!(Change::parse("attach", r#"{"id": "a"}"#).is_err(), "an adapter names its digest and file");
+        assert!(Change::parse("attach", r#"{"id": "a", "digest": "d", "path": "/a"}"#).is_err(), "an adapter names the version its release is numbered");
     }
 }
