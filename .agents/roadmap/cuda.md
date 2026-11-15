@@ -1391,8 +1391,8 @@ layer at 32K keys against 3.4 TB/s: 32/8 x 128 int8 16 rows 359 us (91 %), 64 ro
 rows; 24/4 x 256 int8 64 rows 100 % (was 95 %). The 8-bit pools' block order is knowledge #469. The Qwen3.6-35B-A3B
 (group 8 at 256, bf16 KV) had no native row and ran the generated kernel: `perf run longctx` at 32K, 10 layers,
 batch 1/16/64 attention 1.54/7.30/23.45 -> 0.31/3.30/12.63 ms (64 rows at 3.4 TB/s), step 5.66/16.46/40.26 ->
-4.52/12.57/29.59 ms. Open: batch 1 (one sequence) at 55-65 % of the roof in every tier, and a perf floor for
-`decode_attn_gqa_b16_s2048` (the gate reports it as new).
+4.52/12.57/29.59 ms. Open: batch 1 (one sequence) at 55-65 % of the roof in every tier. Perf floor `decode_attn_gqa_b16_s2048` recorded at 2034 GB/s
+(CUDA, native) and 1930 GB/s (Vulkan, WGSL) on gpu3.
 
 ### Measured kernel selection and the roofline gap list (int8 decode linear)
 
