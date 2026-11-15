@@ -3239,6 +3239,14 @@ pub fn rms_variant(g: &Gpu, reference: usize, coop: Option<usize>, rows: u32, d:
     }
 }
 
+/// Whether an RMSNorm of `rows` rows of `d` dispatched through [`rmsnorm_fwd`] on `g` runs the cooperative twin
+/// (`rmsnorm_rows`) rather than the per-element `rmsnorm`: [`rms_variant`]'s choice for the handle's registered `rmsnorm`.
+/// A fused kernel that promises the chain's bits reproduces the cooperative reduction and asks here whether the chain
+/// takes it. `true` where `rmsnorm` is not registered: such a handle runs no chain the fused kernel could disagree with.
+pub fn rms_rows_selected(g: &Gpu, rows: u32, d: u32) -> bool {
+    g.kernel_index("rmsnorm").is_none_or(|reference| rms_variant(g, reference, None, rows, d).0 != reference)
+}
+
 /// Gate for a model that has just registered [`KernelIds::rmsnorm_rows`]:
 /// assert the seam computes the reference normalization at every `(rows, dim)`
 /// its own tapes dispatch one at.

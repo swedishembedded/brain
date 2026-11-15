@@ -40,12 +40,17 @@
 //
 // How it stays bit-identical to the chain it replaces
 // ---------------------------------------------------
-// The per-head `rmsnorm.wgsl` is one thread per row: `ss = ss + v * v` for
-// c = 0..d-1 in ascending order, `inv = 1 / sqrt(ss / d + eps)`, then
-// `weight[c] * x * inv` - the product order matters, it is `(weight * x) *
-// inv`. One thread of the block does that ascending sum from shared memory
-// (every other element of the head is already in place), and the elementwise
-// parts run across all threads. The rotation is `rope2d_partial.wgsl`'s: for
+// The chain's per-head norm is `rmsnorm_rows.wgsl`, the cooperative twin every
+// device with a workgroup reduction dispatches for `rmsnorm`
+// (`model::block::rms_variant`): 64 threads, thread t summing `v * v` over
+// channels t, t + 64, t + 128, ... in that order, the 64 partials folded in
+// order, `inv = 1 / sqrt(ss / d + eps)`, then `x * inv * weight` - the
+// product order matters, it is `(x * inv) * weight`. The first 64 threads of
+// the block form those partials from shared memory, one thread folds them,
+// and the elementwise parts run across all threads. Where the chain keeps the
+// one-thread-per-row `rmsnorm` instead (no workgroup reduction, or the kernel
+// upgrade switched off), its caller declines this kernel
+// (`model::gqa_mixer::decode_prep_form`). The rotation is `rope2d_partial.wgsl`'s: for
 // d < half, `x1 * c - x2 * s` and `x2 * c + x1 * s` with `s = sin * 1.0f`,
 // channels past 2 * half passing through. `--fmad=false` is the backend's
 // default and every product and sum is an explicit round-to-nearest operation
@@ -65,6 +70,7 @@
 
 #define BRAIN_GPREP_THREADS 256
 #define BRAIN_GPREP_MAX_HD 512
+#define BRAIN_GPREP_NORM_LANES 64  // `rmsnorm_rows.wgsl`'s workgroup: the partial sums its reduction folds
 
 // Programmatic dependent launch (compute capability 9.0): wait until the kernel before this one in the stream has
 // finished and its writes are visible, then let the kernel after this one become resident at once. A launch without
@@ -100,6 +106,7 @@ __device__ __forceinline__ void brain_gqa_prep_body(const unsigned int* params, 
     const unsigned int t = threadIdx.x;
 
     __shared__ float xs[BRAIN_GPREP_MAX_HD];
+    __shared__ float partial[BRAIN_GPREP_NORM_LANES];
     __shared__ float inv_s;
     // The int8 tier's staging: the head's rotated K and its V, and the two maxima per warp.
     __shared__ float ys[I8 ? BRAIN_GPREP_MAX_HD : 1];
@@ -128,20 +135,26 @@ __device__ __forceinline__ void brain_gqa_prep_body(const unsigned int* params, 
     }
     __syncthreads();
 
-    // The sum of squares: one thread, ascending, as the reference's one thread.
+    // The sum of squares as `rmsnorm_rows` forms it: a strided partial per lane, the partials folded in lane order.
+    if (t < BRAIN_GPREP_NORM_LANES) {
+        float acc = 0.0f;
+        for (unsigned int c = t; c < hd; c += BRAIN_GPREP_NORM_LANES) { acc = __fadd_rn(acc, __fmul_rn(xs[c], xs[c])); }
+        partial[t] = acc;
+    }
+    __syncthreads();
     if (t == 0) {
         float ss = 0.0f;
-        for (unsigned int c = 0; c < hd; ++c) { ss = __fadd_rn(ss, __fmul_rn(xs[c], xs[c])); }
+        for (unsigned int i = 0; i < BRAIN_GPREP_NORM_LANES; ++i) { ss = __fadd_rn(ss, partial[i]); }
         inv_s = __fdiv_rn(1.0f, __fsqrt_rn(__fadd_rn(__fdiv_rn(ss, static_cast<float>(hd)), eps)));
     }
     __syncthreads();
     const float inv = inv_s;
-    // `(weight * x) * inv`, then keep the normalised head in shared memory so
+    // `(x * inv) * weight`, then keep the normalised head in shared memory so
     // the rotation can read both halves of each rotated pair.
 #pragma unroll
     for (int i = 0; i < BRAIN_GPREP_MAX_HD / BRAIN_GPREP_THREADS; ++i) {
         const unsigned int d = t + BRAIN_GPREP_THREADS * i;
-        if (d < hd) { xs[d] = __fmul_rn(__fmul_rn(g[i], x[i]), inv); }
+        if (d < hd) { xs[d] = __fmul_rn(__fmul_rn(x[i], inv), g[i]); }
     }
     __syncthreads();
 

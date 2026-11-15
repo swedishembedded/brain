@@ -780,7 +780,8 @@ fn decode_prep_params(shape: &GqaMixerShape, block_size: u32, batch: u32) -> [u3
 
 /// Which native decode front half serves `batch` rows of this layer: `Some(false)` the f32-KV one, `Some(true)` the int8-KV one
 /// (`gqa_decode_prep_i8`), `None` where neither runs (an empty batch, a KV tier the kernels do not append, a device or a head
-/// shape outside them) and [`gqa_mixer_decode_fused_kv_attend`] declines. A caller that wants to know before it produces its
+/// shape outside them, a chain whose QK norm is the per-element `rmsnorm` rather than the cooperative `rmsnorm_rows` the
+/// kernels reproduce) and [`gqa_mixer_decode_fused_kv_attend`] declines. A caller that wants to know before it produces its
 /// inputs - whether the chain of `concat_split`, norm and rotation will run on a de-interleaved query or the one kernel on the
 /// projection's interleaved rows - asks here.
 pub fn decode_prep_form(g: &Gpu, shape: &GqaMixerShape, layer: &KvLayer, batch: u32, block_size: u32) -> Option<bool> {
@@ -789,8 +790,9 @@ pub fn decode_prep_form(g: &Gpu, shape: &GqaMixerShape, layer: &KvLayer, batch: 
     if batch == 0 || (!int8 && (layer.k.tier() != KvTier::F32 || layer.v.tier() != KvTier::F32)) {
         return None;
     }
+    let norms_rows = crate::block::rms_rows_selected(g, batch * shape.n_heads, shape.head_dim) && crate::block::rms_rows_selected(g, batch * shape.n_kv_heads, shape.head_dim);
     let which = if int8 { gpu_core::Fused::GqaDecodePrepI8 } else { gpu_core::Fused::GqaDecodePrep };
-    (g.has_fused(which) && which.serves(&decode_prep_params(shape, block_size, batch))).then_some(int8)
+    (norms_rows && g.has_fused(which) && which.serves(&decode_prep_params(shape, block_size, batch))).then_some(int8)
 }
 
 /// [`gqa_mixer_decode_batched_kv_attend`] with the whole front half - the

@@ -206,6 +206,13 @@ fn the_fused_prep_is_offered_only_where_it_can_run() {
     assert!(!try_it(&shape, 1, &layer_in(KvTier::BF16)), "a compact KV tier keeps the tier's own append");
     assert!(try_it(&shape, 1, &layer_in(KvTier::INT8)), "the int8 tier has its own fused append");
     assert!(!try_it(&GqaMixerShape { head_dim: 30, rotary_half: 8, ..shape }, 1, &layer_in(KvTier::INT8)), "an int8 head is whole words");
+    // The kernels reproduce the cooperative `rmsnorm_rows` the chain dispatches. A handle whose `rmsnorm` is not the canonical
+    // source gets no cooperative twin, so its chain runs the per-element norm, and it is not offered them.
+    let own_norm: &'static str = Box::leak(format!("{}\n// a model's own copy of the per-element norm\n", kernels::RMSNORM).into_boxed_str());
+    let per_element_kernels: &'static [(&str, &str)] = Box::leak(Box::new([("rmsnorm", own_norm), ("concat_split", kernels::CONCAT_SPLIT)]));
+    let per_element = gpu_core::testgpu::dev(per_element_kernels);
+    let per_element_layer = KvLayer::new(&per_element, KvTier::F32, 16, u64::from(shape.kvd()), 64);
+    assert_eq!(model::gqa_mixer::decode_prep_form(&per_element, &shape, &per_element_layer, 1, 4), None, "a chain that keeps the per-element norm keeps its own front half");
 }
 
 #[test]

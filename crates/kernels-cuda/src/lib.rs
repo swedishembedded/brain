@@ -3898,8 +3898,8 @@ pub const ALL: &[CudaKernel] = &[
         block_dim: 256,
         // One block per head per row (query heads, then key heads).
         tile: (1, 1),
-        // The head's 512 staged values and the shared inverse norm.
-        shared_bytes: 512 * 4 + 4,
+        // The head's 512 staged values, the norm's 64 partial sums and the shared inverse norm.
+        shared_bytes: 512 * 4 + 64 * 4 + 4,
         programmatic: true,
         src: include_str!("../cu/gqa_decode_prep.cu"),
     },
@@ -3918,8 +3918,8 @@ pub const ALL: &[CudaKernel] = &[
         block_dim: 256,
         // One block per head per row (query heads, then key heads).
         tile: (1, 1),
-        // The head's 512 staged values, its rotated K and V, the maxima and the shared inverse norm.
-        shared_bytes: 512 * 4 + 4 + 2 * 512 * 4 + 16 * 4,
+        // The head's 512 staged values, the norm's 64 partial sums, its rotated K and V, the maxima and the shared inverse norm.
+        shared_bytes: 512 * 4 + 64 * 4 + 4 + 2 * 512 * 4 + 16 * 4,
         programmatic: true,
         src: include_str!("../cu/gqa_decode_prep.cu"),
     },

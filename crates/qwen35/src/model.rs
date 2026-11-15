@@ -5111,6 +5111,11 @@ impl Qwen35 {
         if !epilogue || self.is_train || self.packs_activations() || !self.gate_mul_e4m3_serves(n, shape.qd(), shape.head_dim) {
             return None;
         }
+        // The kernel reproduces the cooperative `rmsnorm_rows` reduction the chain dispatches; a chain that keeps the
+        // per-element `rmsnorm` keeps its own front half.
+        if !(model::block::rms_rows_selected(g, n * shape.n_heads, shape.head_dim) && model::block::rms_rows_selected(g, n * shape.n_kv_heads, shape.head_dim)) {
+            return None;
+        }
         let qk = gpu_core::provider::library::GqaQkShape { rows: n, n_heads: shape.n_heads, n_kv_heads: shape.n_kv_heads, head_dim: shape.head_dim, rotary_half: shape.rotary_half, rms_eps: shape.rms_eps };
         let mut steps = Vec::new();
         let out = gpu_core::provider::library::gqa_qk_prepare(g, &mut steps, &qk, q_full, k, w.q_norm, w.k_norm, w.cos, w.sin)?;
