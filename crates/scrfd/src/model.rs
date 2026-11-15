@@ -466,9 +466,9 @@ impl Scrfd {
         let mut fp = Footprint::new();
         fp.buffer(3 * sz as u64 * sz as u64);
         let mut shape = Shape::new(1, 3, sz, sz);
-        for i in 0..3usize {
+        for (i, &channels) in cfg.stem_channels.iter().enumerate().take(3) {
             let stride = if i == 0 { 2 } else { 1 };
-            shape = fp.conv(shape, folded(cfg.stem_channels[i], 3, stride, 1, Act::Relu));
+            shape = fp.conv(shape, folded(channels, 3, stride, 1, Act::Relu));
         }
         shape = fp.maxpool(shape, PoolSpec::half());
 
