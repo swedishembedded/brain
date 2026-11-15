@@ -258,29 +258,42 @@ fn down(n: &AtomicU64) {
     n.fetch_sub(1, Ordering::Relaxed);
 }
 
-static IN_USE_BYTES: AtomicU64 = AtomicU64::new(0);
-static PEAK_IN_USE_BYTES: AtomicU64 = AtomicU64::new(0);
-
-/// A device block (from the driver, the block cache or a pool) handed to an owner.
-pub(crate) fn in_use_alloc(bytes: usize) {
-    let now = IN_USE_BYTES.fetch_add(bytes as u64, Ordering::Relaxed) + bytes as u64;
-    PEAK_IN_USE_BYTES.fetch_max(now, Ordering::Relaxed);
+/// Bytes in the device blocks (from the driver, the block cache or a pool) that owners of one handle's allocations
+/// hold, and the most they have been since the peak was last reset: the accounting behind
+/// `backend_api::Backend::memory_usage`.
+///
+/// One per handle, not one per process: a handle opened on its own (`CudaBackend::try_new*`, `new_like`) starts its
+/// own, and a handle `share` gives charges its parent's, as the wgpu backend's device tally does. A block is
+/// uncharged from the tally it was charged to, whichever handle drops it, so the figure for one model is its own
+/// while other models allocate on the same card in the same process.
+#[derive(Debug, Default)]
+pub(crate) struct InUse {
+    live: AtomicU64,
+    peak: AtomicU64,
 }
 
-/// A device block given back by its owner (to the cache, a pool or the driver).
-pub(crate) fn in_use_free(bytes: usize) {
-    IN_USE_BYTES.fetch_sub(bytes as u64, Ordering::Relaxed);
-}
+impl InUse {
+    /// A block handed to an owner.
+    pub(crate) fn alloc(&self, bytes: usize) {
+        let now = self.live.fetch_add(bytes as u64, Ordering::Relaxed) + bytes as u64;
+        self.peak.fetch_max(now, Ordering::Relaxed);
+    }
 
-/// `(bytes in blocks an owner holds, the most they have been since [`reset_in_use_peak`])`, process-wide.
-pub fn in_use() -> (u64, u64) {
-    let now = IN_USE_BYTES.load(Ordering::Relaxed);
-    (now, PEAK_IN_USE_BYTES.load(Ordering::Relaxed).max(now))
-}
+    /// A block given back by its owner (to the cache, a pool or the driver).
+    pub(crate) fn free(&self, bytes: usize) {
+        self.live.fetch_sub(bytes as u64, Ordering::Relaxed);
+    }
 
-/// Start a new peak of [`in_use`] from the current figure.
-pub fn reset_in_use_peak() {
-    PEAK_IN_USE_BYTES.store(IN_USE_BYTES.load(Ordering::Relaxed), Ordering::Relaxed);
+    /// `(bytes in blocks an owner holds, the most they have been since [`Self::reset_peak`])`.
+    pub(crate) fn read(&self) -> (u64, u64) {
+        let now = self.live.load(Ordering::Relaxed);
+        (now, self.peak.load(Ordering::Relaxed).max(now))
+    }
+
+    /// Start a new peak from the current figure.
+    pub(crate) fn reset_peak(&self) {
+        self.peak.store(self.live.load(Ordering::Relaxed), Ordering::Relaxed);
+    }
 }
 
 pub(crate) fn device_alloc(bytes: usize) {

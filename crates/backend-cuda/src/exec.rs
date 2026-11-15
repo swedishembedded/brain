@@ -147,6 +147,9 @@ pub struct Context {
     graph_epoch: Arc<AtomicU64>,
     /// Freed device blocks held for reuse - see [`BlockCache`].
     cache: Arc<BlockCache>,
+    /// The live device bytes this handle's allocations hold - see [`crate::live::InUse`]. Its own unless
+    /// [`Context::charge_to`] joined it to another handle's.
+    in_use: Arc<crate::live::InUse>,
     /// The stream-ordered pool backing held blocks, created on first use - see
     /// [`PoolRef`].
     pool: std::sync::OnceLock<Option<Arc<PoolRef>>>,
@@ -227,6 +230,7 @@ impl Context {
             holding: std::sync::atomic::AtomicBool::new(false),
             pool_wanted: std::sync::atomic::AtomicBool::new(backend_api::runtime::stream_pool()),
             cache: Arc::new(BlockCache::new(d, fns, ctx, primary, 0)),
+            in_use: Arc::default(),
             capture_gate: Arc::new(Mutex::new(())),
             blas: std::sync::OnceLock::new(),
         };
@@ -287,6 +291,22 @@ impl Context {
             self.d.check(unsafe { (self.fns.stream_synchronize)(other.stream as CuStream) }, "cuStreamSynchronize")?;
         }
         Ok(())
+    }
+
+    /// Charge this handle's allocations to `parent`'s tally of live device bytes from now on, so a handle shared from
+    /// another reports what the two hold together ([`Context::memory_in_use`]).
+    pub(crate) fn charge_to(&mut self, parent: &Context) {
+        self.in_use = parent.in_use.clone();
+    }
+
+    /// `(live device bytes this handle's allocations hold, their peak since [`Context::reset_memory_peak`])`.
+    pub(crate) fn memory_in_use(&self) -> (u64, u64) {
+        self.in_use.read()
+    }
+
+    /// Start a new peak of [`Context::memory_in_use`] from the current live bytes.
+    pub(crate) fn reset_memory_peak(&self) {
+        self.in_use.reset_peak()
     }
 
     /// This handle's identity among streams.
@@ -425,7 +445,7 @@ impl Context {
                 (ptr, Fences::default())
             }
         };
-        crate::live::in_use_alloc(len);
+        self.in_use.alloc(len);
         Ok(DeviceMem {
             d: self.d,
             fns: self.fns,
@@ -437,7 +457,7 @@ impl Context {
             graph_pinned: std::sync::atomic::AtomicBool::new(false),
             fence: std::sync::Mutex::new(fence),
             rows_shared: std::sync::atomic::AtomicBool::new(false),
-            origin: Origin::Driver { cache: self.cache.clone() },
+            origin: Origin::Driver { cache: self.cache.clone(), in_use: self.in_use.clone() },
             _primary: self.primary.clone(),
         })
     }
@@ -481,7 +501,7 @@ impl Context {
                 pool.alloc(len)?
             }
         };
-        crate::live::in_use_alloc(len);
+        self.in_use.alloc(len);
         Ok(DeviceMem {
             d: self.d,
             fns: self.fns,
@@ -493,7 +513,7 @@ impl Context {
             graph_pinned: std::sync::atomic::AtomicBool::new(false),
             fence: std::sync::Mutex::new(Fences::default()),
             rows_shared: std::sync::atomic::AtomicBool::new(false),
-            origin: Origin::Pool(pool.clone()),
+            origin: Origin::Pool { pool: pool.clone(), in_use: self.in_use.clone() },
             _primary: self.primary.clone(),
         })
     }
@@ -2000,11 +2020,11 @@ enum Origin {
     /// `pinned`: page-locked with the driver (`cuMemHostRegister`), unregistered before it is freed.
     System { layout: std::alloc::Layout, stream: Arc<StreamGuard>, pinned: bool },
     /// `cuMemAlloc`; goes to the exact-size cache when that is holding, else
-    /// back to the driver.
-    Driver { cache: Arc<BlockCache> },
+    /// back to the driver. `in_use` is the tally the block was charged to.
+    Driver { cache: Arc<BlockCache>, in_use: Arc<crate::live::InUse> },
     /// A stream-ordered pool block; freed back to its pool without waiting for
-    /// the device.
-    Pool(Arc<PoolRef>),
+    /// the device. `in_use` as for `Driver`.
+    Pool { pool: Arc<PoolRef>, in_use: Arc<crate::live::InUse> },
     /// A reserved address range whose granules are backed by physical memory on demand
     /// ([`DeviceMem::back`]); the memory is returned and the range freed when it drops.
     Sparse(SparseBacking),
@@ -2048,8 +2068,8 @@ impl Drop for DeviceMem {
             // exactly as the first one would have. Anything else is freed here:
             // `cuMemFree` also waits for the device, which is what made it safe to
             // free a block another handle's stream was still reading.
-            Origin::Driver { cache } => {
-                crate::live::in_use_free(len);
+            Origin::Driver { cache, in_use } => {
+                in_use.free(len);
                 if !cache.keep(self.ptr, len, fence) {
                     // The context must be current for the free to reach the right device.
                     // SAFETY: `ctx` is kept alive by the `Context` that made this
@@ -2066,8 +2086,8 @@ impl Drop for DeviceMem {
                     }
                 }
             }
-            Origin::Pool(pool) => {
-                crate::live::in_use_free(len);
+            Origin::Pool { pool, in_use } => {
+                in_use.free(len);
                 pool.free(self.ptr, len, fence)
             }
             Origin::Managed => {

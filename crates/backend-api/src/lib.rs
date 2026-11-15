@@ -1706,8 +1706,8 @@ pub trait Backend: Send + Sync {
     /// no-op.
     fn retain_freed_blocks(&self, _bytes: u64) {}
 
-    /// The device memory this process holds, by the backend's own accounting ([`MemoryUsage`]); `None` for a backend
-    /// that does not account for its allocations.
+    /// The device memory this handle's allocations hold, by the backend's own accounting ([`MemoryUsage`], which
+    /// says which handles share one tally); `None` for a backend that does not account for its allocations.
     fn memory_usage(&self) -> Option<MemoryUsage> {
         None
     }

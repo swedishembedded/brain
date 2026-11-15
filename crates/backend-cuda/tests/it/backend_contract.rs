@@ -495,3 +495,35 @@ fn freeing_a_buffer_waits_for_the_work_still_running_on_it() {
         a.poll_wait();
     }
 }
+
+/// `memory_usage` is the handle's own tally (`backend_api::MemoryUsage`): a buffer on a handle opened on its own, or on
+/// one for another kernel set, never moves it, while a buffer on a handle `share` gave from it does, in the live
+/// figure and in the peak. A process-wide tally fails the first assertion whenever anything else in the process holds
+/// or allocates device memory, which is how every model measured on its own handle was polluted by its neighbours.
+#[test]
+fn memory_usage_counts_this_handle_and_its_shares_only() {
+    let Some(own) = backend() else { return };
+    let other = CudaBackend::try_new(KERNELS).expect("a second handle");
+    let like = own.new_like(KERNELS).expect("a handle for another kernel set");
+    let shared = own.share().expect("a shared handle");
+    let usage = || own.memory_usage().expect("the CUDA backend accounts for its allocations");
+    let start = usage();
+    assert_eq!(start.live, 0, "a fresh handle holds nothing");
+
+    let elsewhere = (other.storage(1 << 20), like.storage(1 << 20));
+    assert_eq!(usage(), start, "buffers on other handles are not this handle's");
+    assert_eq!(other.memory_usage().map(|u| u.live), Some(4 << 20), "the other handle holds its own buffer");
+
+    let words = 1u64 << 18;
+    let mine = shared.storage(words);
+    let held = usage();
+    assert_eq!(held.live, 4 * words, "a buffer on a shared handle is the parent's");
+    assert_eq!(shared.memory_usage().map(|u| u.live), Some(held.live), "a shared handle reads the same tally");
+    drop(mine);
+    own.poll_wait();
+    let after = usage();
+    assert_eq!((after.live, after.peak_live), (0, held.live), "the drop is uncharged from the tally it was charged to; the peak keeps it");
+    own.reset_memory_peak();
+    assert_eq!(usage().peak_live, 0, "a reset peak starts from the live bytes");
+    drop(elsewhere);
+}

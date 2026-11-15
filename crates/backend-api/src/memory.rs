@@ -227,8 +227,12 @@ mod tests {
     }
 }
 
-/// What a device currently holds for this process, read from the backend's own allocation accounting (never from the
-/// driver's free-memory figure, which moves with every other process on the card).
+/// What one handle's allocations currently hold on its device, read from the backend's own allocation accounting
+/// (never from the driver's free-memory figure, which moves with every other process on the card).
+///
+/// The tally belongs to the handle: one built on its own (`Backend::new_like` included) starts its own, and a handle
+/// from `Backend::share` counts into its parent's. Another model allocating on the same card in the same process is
+/// therefore not in the figure, so a model measured on its own handle is measured alone.
 ///
 /// * `live` - bytes in buffers some handle still owns;
 /// * `reserved` - `live` plus bytes the backend keeps from allocations already released (a block cache, buffers

@@ -2054,9 +2054,9 @@ mod native_facade {
                 a.leave();
             }
         }
-        /// The device memory this process holds, by the backend's own accounting: live, reserved and the peak of
-        /// live since [`Self::reset_memory_peak`] (`backend_api::MemoryUsage`). `None` on a backend that does not
-        /// account for its allocations.
+        /// The device memory this handle's allocations hold (with those of the handles [`Self::share`] gave from it),
+        /// by the backend's own accounting: live, reserved and the peak of live since [`Self::reset_memory_peak`]
+        /// (`backend_api::MemoryUsage`). `None` on a backend that does not account for its allocations.
         pub fn memory_usage(&self) -> Option<backend_api::MemoryUsage> {
             self.be().memory_usage()
         }

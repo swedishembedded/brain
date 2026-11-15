@@ -5,7 +5,7 @@
 // in measuring what a training step really holds on the device, you can procure our services by sending an email to
 // info@swedishembedded.com.
 
-//! `Gpu::memory_usage`: the device memory a process holds, from the backend's own accounting. It runs alone in a
+//! `Gpu::memory_usage`: the device memory a handle holds, from the backend's own accounting. It runs alone in a
 //! child process, so no other test of this binary allocates on the device while it measures.
 
 #[test]

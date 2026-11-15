@@ -2054,13 +2054,14 @@ impl backend_api::Backend for CudaBackend {
         }
     }
 
-    /// The process's device blocks in use, plus the freed ones this context's block cache and pool keep.
+    /// The device blocks this handle's allocations (and those of the handles shared from it) hold, plus the freed
+    /// ones this context's block cache and pool keep.
     fn memory_usage(&self) -> Option<backend_api::MemoryUsage> {
-        let (live, peak_live) = crate::live::in_use();
+        let (live, peak_live) = self.ctx.memory_in_use();
         Some(backend_api::MemoryUsage { live, reserved: live + self.ctx.cached_bytes(), peak_live })
     }
     fn reset_memory_peak(&self) {
-        crate::live::reset_in_use_peak();
+        self.ctx.reset_memory_peak();
     }
     fn read(&self, buf: &DeviceBuffer, n: usize) -> Vec<f32> {
         self.issue_held();
@@ -2269,9 +2270,10 @@ impl backend_api::Backend for CudaBackend {
     /// pool, staging and graph cache. Cheap by design: nothing is recompiled
     /// and no device memory moves.
     fn share_urgent(&self) -> Option<Box<dyn backend_api::Backend>> {
-        let ctx = exec::Context::open_urgent(self.ordinal)
+        let mut ctx = exec::Context::open_urgent(self.ordinal)
             .map_err(|e| tracing::warn!(reason = %e, "backend-cuda: cannot open an urgent handle on this device"))
             .ok()?;
+        ctx.charge_to(&self.ctx);
         let graph = self.graph.as_ref().map(|_| Mutex::new(GraphCache::default()));
         Some(Box::new(CudaBackend::assemble(
             ctx,
@@ -2302,9 +2304,10 @@ impl backend_api::Backend for CudaBackend {
     }
 
     fn share(&self) -> Option<Box<dyn backend_api::Backend>> {
-        let ctx = exec::Context::open(self.ordinal)
+        let mut ctx = exec::Context::open(self.ordinal)
             .map_err(|e| tracing::warn!(reason = %e, "backend-cuda: cannot open a second handle on this device"))
             .ok()?;
+        ctx.charge_to(&self.ctx);
         let graph = self.graph.as_ref().map(|_| Mutex::new(GraphCache::default()));
         Some(Box::new(CudaBackend::assemble(
             ctx,
