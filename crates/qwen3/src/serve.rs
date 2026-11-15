@@ -1599,6 +1599,12 @@ impl Engine {
         let topk_vals_dev = st(max_batch as u64 * TOPK_CAPACITY as u64);
         let topk_idx_dev = st(max_batch as u64 * TOPK_CAPACITY as u64);
         let gemm = LibraryGemmProvider::for_gpu(&gpu, GemmPrecision::Auto);
+        // Every prefill chunk and unrecorded step allocates its temporaries (the bf16 activation scratch of each
+        // library GEMM among them) and drops them when the step is done. Freed to the driver, each drop is a
+        // `cuMemFree` that waits for the whole device and the next chunk's `cuMemAlloc` maps it again: a 16K-token
+        // bf16 prefill of the 4B spent most of its time with the card idle. Held, they are reissued; what is held stays
+        // under the backend's retention bound.
+        gpu.hold_freed_blocks(true);
         Engine {
             cfg,
             caps,
