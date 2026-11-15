@@ -11,8 +11,9 @@ answered honestly.
 
 **Status: the supervisor, the breaker and their executor integration are
 built and verified, and `brain serve` runs its executor with them. The
-decision models and the LFM2.5 encoders can be served from a killable
-worker (`brain serve --worker-hosted decision,lfm`), which is `brain`
+decision models, the LFM2.5 encoders and the Qwen3 decoder with its
+adapters can be served from a killable worker (`brain serve --worker-hosted
+decision,lfm,qwen3`), which is `brain`
 re-executing itself in an internal worker mode; that is off by default. Every
 other served model still runs in process under `bounded`.** The table under "Milestones" says what is
 done and what is open, with the reason.
@@ -279,6 +280,37 @@ Choices the design above left open, and what was chosen:
   costs (below). `cargo test -p brain-serving --lib
   a_scanned_encoder_runs_in_a_worker`: with `--worker-hosted lfm` a scanned
   encoder's activation goes to the worker command, not to its weights.
+* `cargo test -p brain-cli --test it worker_hosted_qwen3` (5 tests, the
+  store's `Qwen/Qwen3-0.6B`, each skips without it or a GPU): a batch of
+  four greedy generations (exact decode, so a row's tokens do not depend on
+  what shares its step) decodes the same token ids, text and streamed deltas
+  in a worker as in process; a generation cancelled at its third delta
+  finishes `cancelled` after a handful of tokens and the same worker answers
+  the next; a worker killed with `SIGKILL` at the fifth streamed token fails
+  that generation naming signal 9, records one fault and quarantines the
+  card, and the next generation is built in a new worker; an adapter offered
+  through `LiveAdapters` while a base generation streams in the worker is
+  used by the next request, which decodes the same tokens as in process and
+  names the release the serving process offers (id, digest, version), and an
+  unoffered adapter name is refused; the per-request, per-token and host
+  costs (below). `cargo test -p brain-catalog --lib
+  a_resident_rebuilt_from_its_host_spec_sizes_the_identical_engine`: for
+  every flag combination the policy tests cover, on a budgeted card, the
+  resident rebuilt from its host spec has the original's manifest, estimate
+  and spec, while the same configuration resolved again without the budget
+  sizes another context; an unknown field, a zero batch and an unknown GEMM
+  precision are refused (mutation-checked: a dropped KV pool size and a
+  plan that accepts unknown fields are each caught). `cargo test -p
+  brain-llmserve --lib
+  a_worker_mirror_offers_what_the_serving_registry_offers_under_its_versions`
+  (mutation-checked: numbering in the mirror, skipping the digest check).
+  `cargo test -p brain-serving --lib
+  a_scanned_qwen3_base_and_its_adapters_run_in_a_worker_when_its_family_is_hosted`:
+  with `--worker-hosted qwen3` activating a scanned base or an adapter view
+  over it goes to the worker, and both are placed as the hosted base.
+  Through HTTP on a release binary: `brain serve --worker-hosted qwen3`
+  over the model store answers a streamed `/v1/chat/completions` for
+  `Qwen/Qwen3-0.6B` from its worker.
 * `cargo test -p brain-serving --lib supervision` (3 tests) adds: worker
   hosting re-executes the server with its device flags and `__worker` for
   the families named, and refuses a family no worker can host.
@@ -291,9 +323,9 @@ Choices the design above left open, and what was chosen:
 | executor lanes honour health; stuck activation or run frees the lane and unwinds the claim | done and verified for supervised instances |
 | in-process `bounded` wedges quarantine the card until a supervised probe passes | done (`note_in_process_wedge`); the abandoned thread itself is still not reclaimed, which is what M2 removes |
 | the serving process starts its executor with `Supervision` | done: see "`brain serve` supervision" above. Served models still run in process, so what a probe readmits is a card whose in-process waits timed out; the wedged thread itself is reclaimed only by M2 |
-| **M2** a served model executing inside the worker | done for the decision models and the LFM2.5 encoders (`--worker-hosted decision,lfm`, off by default): request-level hosting in `brain`'s own worker mode, verified above; what each next family needs is below |
-| **M3** measure the per-request round trip against real device work | measured for the protocol, a decision job, an encoder job and an encoder group, and a worker's memory per card (below); per-request hosting passes, per-dispatch proxying does not |
-| **M4** make it the default; delete the abandon-the-thread path from `bounded` | open: gated on every served model hosting in a worker; the decision and LFM2.5 families are certified, every other family needs the items below |
+| **M2** a served model executing inside the worker | done for the decision models, the LFM2.5 encoders and the Qwen3 decoder with its adapters (`--worker-hosted decision,lfm,qwen3`, off by default): request-level hosting in `brain`'s own worker mode, verified above; what each next family needs is below |
+| **M3** measure the per-request round trip against real device work | measured for the protocol, a decision job, an encoder job and an encoder group, a worker's memory per card, and Qwen3 generation (time to first token, decode speed, host memory; below); per-request hosting passes, per-dispatch proxying does not |
+| **M4** make it the default; delete the abandon-the-thread path from `bounded` | open: gated on every served model hosting in a worker; the decision, LFM2.5 and Qwen3 families are certified, every other family needs the items below |
 | moving a resident off a quarantined card | done: once the card's breaker trips (before that the restart probe is due at once, cheaper than a rebuild), an idle resident a queued job needs is abandoned when a healthy device could hold it (`move_off_quarantined`, `ResidencyManager::abandon_resident`): it leaves residency at once, so the claim builds it afresh on the healthy card, and it is dropped on a thread of its own (`drop_elsewhere`), keeping its memory charged until the drop reports back (`Msg::Dropped`, `release_abandoned`). A failed group's instance (`unwind_failed`, `unwind_failed_multi`) goes the same way, so no teardown through a suspect driver runs on the dispatcher. A teardown that never returns holds one thread and its memory, nothing else. A resident no healthy card can hold is refused while the trip lasts |
 | multi-device models under quarantine | done: a multi-device model has one placement (its resident devices, else the ones `estimate_multi` names; `ResidencyManager::multi_placement`), and `refuse_quarantined` refuses its jobs once any device of it is quarantined with a tripped breaker; before a trip they wait for the restart probe like single-device work |
 | Windows | open: no `SIGKILL` or process groups; `Worker::spawn` reports unsupported off Unix. `TerminateProcess` and a job object are the equivalent and need a platform seam |
@@ -431,6 +463,58 @@ more. What it does not cover: a large checkpoint's host copy in the
 worker grows with the model, and a model's own `ram` is not charged for a
 GPU-placed instance, in process or hosted.
 
+### The first text-generation family: Qwen3
+
+A `QwenResident` is built from one resolved plan (`resident_llm::plan::
+QwenPlan`): the serving process resolves the context, the KV pool, the
+weight tier and every other choice from the operator's flags and its cards'
+budgets, and the host spec carries that plan as JSON (each tier type in its
+flag spelling), so the worker builds the engine the server sized without
+knowing a budget (`QwenResident::host_spec`, `from_host_spec`, refusing an
+unknown field). With `--worker-hosted qwen3` (`QwenServeConfig::
+worker_hosting`, which the executor, the model-dir scan and an on-demand
+supply set) the resident holds its hosted form itself: a `SupervisedModel`
+over a twin built from the same plan and sharing its adapter registry,
+through which `estimate` and `activate` go. An `AdapterView`, which places
+and builds through its base, is therefore built in the base's worker and
+charged as the base, and every concrete handle the adapter flags, the
+watcher and the scan hold (`Serving::qwen`, the scan's bases,
+`LiveAdapters`) stays the one resident. The registry is the hosted base's
+`AdapterSource`; in the worker `catalog::resident_llm::hosted` rebuilds the
+resident and mirrors what it is offered into the resident's own registry
+(`llmserve::adapter_registry::AdapterMirror`: the file is read, bytes that
+are not the offered digest are refused, the serving process's version is
+kept, so a reply names the release as it would in process; the attach
+request carries that version, protocol 5).
+
+### What a generation costs in a worker
+
+`a_worker_hosted_qwen3_costs_a_round_trip_per_request_and_little_per_token`,
+`Qwen/Qwen3-0.6B` at fp32 weights and int8 KV, context 2048, exact decode,
+on one P40, host load average 4 to 15 on 48 cores, six runs:
+
+* one stream of 64 tokens: time to first token (median of three) 57.6 to
+  61.4 ms in process, 58.2 to 58.5 ms in a worker; decode 97.2 to 97.6
+  tokens/s in process, 96.9 to 97.2 in a worker. A worker adds about 0.5 ms
+  per request and about 0.05 ms per token (0.5 percent): one progress frame
+  per token, against about 10 ms of device work per token.
+* a batch of eight streams of 64 tokens: decode 536 to 627 tokens/s in
+  process and 530 to 625 in a worker, median time to first token 131 to
+  230 ms and 141 to 227 ms; the spread between runs (when the eight join the
+  open group) is larger than any difference between the two.
+* the worker's resident set is 370 MiB, of which 126 MiB is its own
+  (anonymous and shared memory) and the rest file pages of the `brain`
+  executable and the driver's libraries, which the serving process maps
+  too; placement charges `WORKER_HOST_BYTES` (320 MiB), which the test
+  requires to cover the worker's own memory. The weights are uploaded tile
+  by tile and not kept on the host, so this does not grow with the
+  checkpoint the way an encoder's host copy would.
+
+What is not covered yet for Qwen3: the base digest a reply names is
+looked up again in each worker (cached on disk by file identity, so usually
+at once); a reply before it is known names none, as one in process does
+before the server's own lookup finishes.
+
 ### What each next family needs
 
 Built for every family: progress frames (a chunk blob included) that renew
@@ -485,51 +569,6 @@ context (`MemCost::context`, set by `SupervisedModel::estimate` only for a
 model that demotes), the planner counts a Hot one's demotion as freeing
 only the rest, and a promotion goes back to that card first.
 
-* **The first text-generation family: Qwen3 (next, not started).** Every
-  protocol piece it needs is built (streaming progress, open groups and late
-  joins, screening, cancellation, adapters, metrics); what is left is the
-  family itself, in this order, each its own change:
-  1. *A host spec that rebuilds the identical engine.* `QwenResident` is
-     built from a `QwenServeConfig` of about 25 fields, none serializable
-     (`model::ops::TierPolicy`, `GemmPrecision`, `AdapterBankSettings`,
-     `sparse_attention`, `refused` among them), and `build` resolves `ctx`
-     and `kv_tokens` from budgets only the serving process knows. The spec
-     must carry the resolved values (`ctx`, `kv_tokens`, the chosen weight
-     tiers), not the budgets, or the worker sizes a different engine. Needs
-     `QwenResident::host_spec` and a config JSON codec in `catalog` (each
-     tier type already has a flag spelling to parse and print), refusing an
-     unknown field, and a test that a rebuilt resident's `estimate` and
-     manifest equal the original's for every flag combination the policy
-     tests cover.
-  2. *The adapter ends* in `llmserve::adapter_registry`: an `AdapterSource`
-     over the serving process's `AdapterRegistry` (each entry's `release`
-     is the id, digest and path; the registry's generation is the
-     source's), and in the worker an `AdapterSink` that `load_adapter`s the
-     path, refuses a digest other than the one offered, and holds each
-     attached id's `AdapterLease` in the worker resident's own registry,
-     which its `AdaptedInstance` syncs from (`OpenGroup::Refresh` then picks
-     a change up in a running group as in process). Unit-testable with
-     `write_adapter` fixtures, no GPU.
-  3. *Views over a hosted base.* `AdapterView<R: AdapterHost>` builds and
-     places through the concrete `Arc<QwenResident>` (`activate`,
-     `estimate`), so a job for an adapter would build the base in process
-     beside its hosted copy. The view needs the served base (the
-     `SupervisedModel` wrapping it) for `activate`/`estimate`/`estimate_at`
-     while keeping the concrete one for `adapters()`; `model_dir`'s
-     `qwen_bases` and `LiveAdapters` then register views over that pair, and
-     `Built::Qwen` gets a hosted form (`WorkerHosting::serve` with
-     `SupervisedModel::with_adapters`). A test that a view's activation
-     goes to the worker, as the encoder's scan test does.
-  4. *The GPU proof* (`crates/cli/tests/it/worker_hosted_qwen3.rs`, the
-     store's `Qwen/Qwen3-0.6B`, skipped with a reason where it or a card is
-     missing): greedy tokens identical in a worker and in process for a
-     batch of prompts; the same streamed deltas; a cancel mid-stream
-     answered `cancelled` with the worker serving on; `SIGKILL` at the
-     fifth streamed token failing the job naming signal 9 and quarantining
-     the card; an adapter offered while a group runs used by the next
-     request and an unknown one refused. Measured: tokens per second for
-     one stream and a batch of eight, and time to first token, both ways,
-     and the worker's host memory.
 * **A multi-device family.** The hosting is built (above); no served
   multi-device family is hosted yet. Each needs its `HostedFamily` returning
   `HostedModel::multi`, its registration through
