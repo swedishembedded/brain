@@ -135,6 +135,51 @@ pub fn probe_gpus() -> Vec<GpuMem> {
     mem
 }
 
+/// How far under a part's estimate its measured peak may sit, as a share of
+/// the estimate ([`estimate_bounds`]): further under, a plan refuses a card
+/// the part does fit and sends it to a slower tier.
+pub const ESTIMATE_UNDER_PERCENT: u64 = 5;
+
+/// The measured device peak a placement estimate `estimate` is accurate to:
+/// at least [`ESTIMATE_UNDER_PERCENT`] under it, and at most
+/// [`ALLOC_OVERHEAD_PERCENT`] over it - the allocator overhead the placement
+/// headroom reserves on top of every byte a plan charges. Further over, the
+/// plan puts the part on a card it does not fit.
+pub fn estimate_bounds(estimate: u64) -> std::ops::RangeInclusive<u64> {
+    estimate * (100 - ESTIMATE_UNDER_PERCENT) / 100..=estimate * (100 + ALLOC_OVERHEAD_PERCENT) / 100
+}
+
+/// The free bytes the driver reports on registry card `card` right now.
+/// For measuring a build against its estimate; a card the probe cannot read
+/// reports its registry size, so callers check [`GpuMem::measured`] first.
+pub fn free_on(card: u32) -> Option<u64> {
+    probe_gpus().into_iter().find(|g| g.index == card).map(|g| g.free)
+}
+
+/// Run `f` while a sampler records the lowest free figure the driver reports
+/// on `card`; returns `f`'s result and the peak bytes taken past
+/// `baseline_free`. Take the baseline once the card's context exists, so the
+/// driver context (which the placement headroom covers, not a part's
+/// estimate) is not charged to the part.
+pub fn peak_taken_while<R>(card: u32, baseline_free: u64, f: impl FnOnce() -> R) -> (R, u64) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let done = std::sync::Arc::new(AtomicBool::new(false));
+    let sampler = {
+        let done = done.clone();
+        std::thread::spawn(move || {
+            let mut low = u64::MAX;
+            while !done.load(Ordering::SeqCst) {
+                low = low.min(free_on(card).unwrap_or(u64::MAX));
+            }
+            low.min(free_on(card).unwrap_or(u64::MAX))
+        })
+    };
+    let r = f();
+    done.store(true, Ordering::SeqCst);
+    let low = sampler.join().expect("sampler");
+    (r, baseline_free.saturating_sub(low))
+}
+
 static VRAM_BUDGET: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Bound every GPU this process budgets from to `bytes`: the VRAM the process

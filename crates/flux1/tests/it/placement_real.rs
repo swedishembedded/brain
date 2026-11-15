@@ -14,23 +14,9 @@
 //! your team needs expertise in device memory planning then you can procure
 //! our services by sending an email to info@swedishembedded.com.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-
 use flux1::pipeline::{part_needs, MAX_TXT_LEN, TE_TAPS};
 use flux1::{Flux1Config, Flux1Model, Precision};
 use gpu_core::Gpu;
-
-/// How far under the estimate the measured peak may sit, as a share of the
-/// estimate: further under, the plan refuses a card the part does fit and
-/// sends it to a slower tier.
-const UNDER_PERCENT: u64 = 5;
-
-/// How far over the estimate the measured peak may sit: the allocator
-/// overhead the placement headroom reserves on top of every byte a plan
-/// charges (`gpu_core::capacity::headroom`). Further over, the plan puts the
-/// part on a card it does not fit.
-const OVER_PERCENT: u64 = gpu_core::capacity::ALLOC_OVERHEAD_PERCENT;
 
 const MIB: f64 = (1u64 << 20) as f64;
 
@@ -53,37 +39,24 @@ fn idle_card(needed: u64) -> Option<u32> {
 }
 
 fn free_on(card: u32) -> u64 {
-    gpu_core::capacity::probe_gpus().into_iter().find(|g| g.index == card).map(|g| g.free).expect("probed card")
+    gpu_core::capacity::free_on(card).expect("probed card")
 }
 
-/// Run `f` on `card` while a sampler records the lowest free figure the
-/// driver reports; returns `f`'s result and the peak bytes taken past
+/// Run `f` on `card` and return its result with the peak bytes it took past
 /// `baseline_free`.
 fn peak_while<R>(card: u32, baseline_free: u64, f: impl FnOnce() -> R) -> (R, u64) {
-    let done = Arc::new(AtomicBool::new(false));
-    let sampler = {
-        let done = done.clone();
-        std::thread::spawn(move || {
-            let mut low = u64::MAX;
-            while !done.load(Ordering::SeqCst) {
-                low = low.min(free_on(card));
-            }
-            low.min(free_on(card))
-        })
-    };
-    let r = gpu_core::devices::with_gpu(card, f).expect("card in the registry");
-    done.store(true, Ordering::SeqCst);
-    let low = sampler.join().expect("sampler");
-    (r, baseline_free.saturating_sub(low))
+    gpu_core::capacity::peak_taken_while(card, baseline_free, || gpu_core::devices::with_gpu(card, f).expect("card in the registry"))
 }
 
 fn assert_within(what: &str, estimate: u64, measured: u64) {
-    let (lo, hi) = (estimate * (100 - UNDER_PERCENT) / 100, estimate * (100 + OVER_PERCENT) / 100);
     eprintln!("{what}: estimate {:.0} MiB, measured peak {:.0} MiB", estimate as f64 / MIB, measured as f64 / MIB);
+    let bounds = gpu_core::capacity::estimate_bounds(estimate);
     assert!(
-        (lo..=hi).contains(&measured),
-        "{what}: measured peak {:.0} MiB is outside -{UNDER_PERCENT}%..+{OVER_PERCENT}% of the {:.0} MiB estimate",
+        bounds.contains(&measured),
+        "{what}: measured peak {:.0} MiB is outside the {:.0}..{:.0} MiB band around the {:.0} MiB estimate",
         measured as f64 / MIB,
+        *bounds.start() as f64 / MIB,
+        *bounds.end() as f64 / MIB,
         estimate as f64 / MIB
     );
 }
