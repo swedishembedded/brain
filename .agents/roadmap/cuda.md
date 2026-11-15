@@ -1382,6 +1382,18 @@ again at the point it is used.
   environment" on hardware without it.
 
 
+### The fused GQA decode attention at head width 128 and any group up to 8 (2026-11-15)
+
+`paged_flash_decode_gqa_{kv8,kvbf16,tf32}.cu` take the head width as a define (128, 256) and the group as a runtime
+value, one template-family row per tier and width (`native_upgrade::TEMPLATE_ROWS`) serving every `GRP`
+specialisation of the WGSL kernel. GH200 gpu3, `decode_attention_matrix_cell_report` (model tests), split + merge a
+layer at 32K keys against 3.4 TB/s: 32/8 x 128 int8 16 rows 359 us (91 %), 64 rows 97 %; bf16 100 %; f32 94 % at 16
+rows; 24/4 x 256 int8 64 rows 100 % (was 95 %). The 8-bit pools' block order is knowledge #469. The Qwen3.6-35B-A3B
+(group 8 at 256, bf16 KV) had no native row and ran the generated kernel: `perf run longctx` at 32K, 10 layers,
+batch 1/16/64 attention 1.54/7.30/23.45 -> 0.31/3.30/12.63 ms (64 rows at 3.4 TB/s), step 5.66/16.46/40.26 ->
+4.52/12.57/29.59 ms. Open: batch 1 (one sequence) at 55-65 % of the roof in every tier, and a perf floor for
+`decode_attn_gqa_b16_s2048` (the gate reports it as new).
+
 ### Measured kernel selection and the roofline gap list (int8 decode linear)
 
 The int8 decode linear (`matmul_i8_gemv`) is a candidate set chosen per device by measurement

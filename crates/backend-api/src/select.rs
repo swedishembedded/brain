@@ -169,7 +169,7 @@ pub enum Op {
     /// workgroup per (sequence, kv head, key split) attends every query head of
     /// the group, so K and V are read once per group, and the split count fills
     /// the device whatever the batch. Its native forms read the pool at the HBM
-    /// roof at 16 sequences and more (knowledge 465), so `(0, F32 | I8)` is
+    /// roof at 16 sequences and more (knowledge 469), so `(0, F32 | I8)` is
     /// `FusedFlash` at every `shape.m` for a power-of-two `head_dim` from 16 to
     /// 256 (the kernel's specialisations; the caller also needs one registered
     /// for its group). The I8 tier stands for both 8-bit pools (int8, FP8).

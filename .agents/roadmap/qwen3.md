@@ -217,6 +217,33 @@ distribution from exact fp32 (fp32 weights, fp32 kernels; its repeat KL 0), int8
 | book, 16 (the first 16 of the 96) | 3.08e-4 / 1.76e-3, 15/16 | 3.59e-4 / 1.67e-3, 14/16 | 1.61e-4 / 1.20e-3, 15/16 | 1.26e-3 / 3.45e-3, 14/16 |
 | knowledge notes 300-349, 16 | 2.71e-4 / 1.33e-3, 16/16 | 9.73e-4 / 1.06e-2, 16/16 | 3.32e-4 / 2.60e-3, 16/16 | 1.41e-3 / 4.16e-3, 16/16 |
 
+## Decode attention through the fused GQA decode (2026-11-15)
+
+The serving engine decodes attention through `model::kv_tier::FlashDecode` (the split-key GQA decode the 27B uses)
+at every batch size and at its f32, int8 and FP8 KV tiers, for the dense family's head shapes (`DECODE_SHAPES`:
+width 128, groups 2/4/5/8); the exact-decode regime pins the single-sequence split count. Its native CUDA forms
+(`paged_flash_decode_gqa_hd128_{kv8,kvfp8,f32}`) replaced the split/combine pairs, which were removed. Knowledge #469
+(the block order the 8-bit pools' row scales need).
+
+Measured, GH200 gpu3, Qwen3-4B fp32 weights, `perf run longctx --context 32768 --steps 4 --kernels`, attention
+device time per step (36 layers, split + merge) and its rate on the K/V bytes (scales included) against 3.4 TB/s:
+
+| KV, batch | before | after | rate after |
+|---|---|---|---|
+| int8, 1 | 2.17 + 1.76 ms | 1.23 + 0.41 ms | 2.0 TB/s split alone (60 %) |
+| int8, 16 | 26.15 + 0.39 ms (step 32.9 ms) | 12.81 + 0.29 ms (step 20.0 ms) | 3.1 TB/s (92 %) |
+| int8, 30 (planner max) | - | 22.95 + 0.42 ms (step 30.4 ms) | 3.3 TB/s (96 %) |
+| f32, 1 | 189.7 + 0.24 ms (step 199 ms) | 4.14 + 0.27 ms (step 11.1 ms) | 2.3 TB/s (69 %) |
+| f32, 7 (planner max) | 147.0 ms (step 157 ms) | 22.78 + 0.33 ms (step 33.2 ms) | 3.0 TB/s (87 %) |
+
+The per-kernel timer adds a few microseconds a launch; nsys showed the int8 batch-1 split at 28.5 us and the
+merge at 4.2 us a layer (62 % of the roof together).
+
+- [ ] Batch 1 at 32K is 60 % of the roof (int8, split pass alone): one wave of 512 blocks of eight 16-key chunks a
+      warp, with the merge a fixed 4 us a layer. A persistent split or a merge folded into the split's last block.
+- [ ] bf16 KV and an FP8 target in `perf run longctx` for this engine (the kernels are registered at FP8; bf16 is
+      not an engine tier).
+
 ## Not yet done
 
 - [ ] Faster KV swap-out: the gather side runs at about half the measured
