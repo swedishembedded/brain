@@ -25,3 +25,9 @@ brain-testutil.workspace = true
 # The qwen3 decoder is served from the downloaded directory (no importer to
 # gate); the tests read a served checkpoint back through its config reader.
 brain-qwen3.workspace = true
+# The pull-then-classify tests plan a pull against a mock hub, run it, and
+# resolve the resulting store directory through the architecture's own spec.
+brain-cosyvoice.workspace = true
+brain-llava.workspace = true
+brain-s3tokenizer.workspace = true
+brain-campplus.workspace = true

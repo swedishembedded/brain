@@ -2095,14 +2095,18 @@ name = "brain-loader"
 version = "5.1.0"
 dependencies = [
  "brain-arch",
+ "brain-campplus",
  "brain-capability",
  "brain-checkpoint",
+ "brain-cosyvoice",
  "brain-gpu-core",
+ "brain-llava",
  "brain-memauth",
  "brain-modelref",
  "brain-modelstore",
  "brain-qwen3",
  "brain-residency",
+ "brain-s3tokenizer",
  "brain-testutil",
  "serde_json",
 ]

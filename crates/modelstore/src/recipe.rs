@@ -489,6 +489,42 @@ const FILES_RECIPES: &[FilesRecipe] = &[
         ],
         roles: &[("dir", ".")],
     },
+    // CosyVoice 2 (`FunAudioLLM/CosyVoice2-0.5B`): the repo's root `config.json`
+    // carries no `architectures`, so `TransformersRecipe` would refuse it, and
+    // its listing also holds files the pipeline never reads (an fp32 ONNX copy
+    // of the flow estimator, a batch ONNX variant of the speech tokenizer, the
+    // yaml training config, a 1 GB `CosyVoice-BlankEN/model.safetensors`).
+    // NAMED files, so exactly what `cosyvoice::spec::CosyVoiceSpec` resolves is
+    // fetched and served as it is, with no conversion: the three torch
+    // checkpoints, the two front-end ONNX graphs, and the `CosyVoice-BlankEN`
+    // tokenizer files (`vocab.json` + `merges.txt` are what `QwenBpe::from_dir`
+    // reads; the repo ships no unified `tokenizer.json`). The tokenizer role is
+    // that directory.
+    FilesRecipe {
+        id: "cosyvoice",
+        family: "cosyvoice",
+        signature: &["llm.pt", "flow.pt", "hift.pt"],
+        repos: &["FunAudioLLM/CosyVoice2-0.5B"],
+        files: &[
+            "llm.pt",
+            "flow.pt",
+            "hift.pt",
+            "speech_tokenizer_v2.onnx",
+            "campplus.onnx",
+            "CosyVoice-BlankEN/config.json",
+            "CosyVoice-BlankEN/tokenizer_config.json",
+            "CosyVoice-BlankEN/vocab.json",
+            "CosyVoice-BlankEN/merges.txt",
+        ],
+        roles: &[
+            ("llm", "llm.pt"),
+            ("flow", "flow.pt"),
+            ("hift", "hift.pt"),
+            ("s3tokenizer", "speech_tokenizer_v2.onnx"),
+            ("campplus", "campplus.onnx"),
+            ("tokenizer", "CosyVoice-BlankEN"),
+        ],
+    },
 ];
 
 /// The `(family, roles)` a [`FilesRecipe::id`] carries, for the finish-side
@@ -996,6 +1032,25 @@ impl ArtifactRecipe for GgufRecipe {
 /// this becoming pluggable.
 pub struct TransformersRecipe;
 
+impl TransformersRecipe {
+    /// Families whose loader reads one fixed file layout out of the checkpoint
+    /// directory, which the upstream release does not ship. llava reads a
+    /// single `model.safetensors` holding the decoder, projector AND CLIP
+    /// vision tower, plus a `tokenizer.json` (`llava::caps::load_vision` and
+    /// `load_decode`). `liuhaotian/llava-v1.5-13b` ships PyTorch `.bin` shards
+    /// without the vision tower (a separate CLIP repo) and a sentencepiece
+    /// `tokenizer.model`, so pulling it would download ~26 GB no loader reads.
+    const LOADER_LAYOUTS: &'static [(&'static str, &'static [&'static str])] = &[("llava", &["model.safetensors", "tokenizer.json"])];
+
+    /// The layout `family`'s loader requires, spelled for an error message,
+    /// when `listing` does not carry every file of it.
+    fn unmet_loader_layout(family: &str, listing: &[String]) -> Option<String> {
+        let (_, required) = Self::LOADER_LAYOUTS.iter().find(|(f, _)| *f == family)?;
+        let met = required.iter().all(|f| listing.iter().any(|l| l == f));
+        (!met).then(|| required.join(" and "))
+    }
+}
+
 impl ArtifactRecipe for TransformersRecipe {
     fn id(&self) -> &'static str {
         "transformers"
@@ -1024,8 +1079,16 @@ impl ArtifactRecipe for TransformersRecipe {
             .map_err(|e| Box::new(PlanError::NoUpstreamArtifact(reference.clone(), format!("unparseable config.json: {e}"))))?;
         let arch =
             declared_architecture(&config).ok_or_else(|| Box::new(PlanError::NoUpstreamArtifact(reference.clone(), "config.json has no architecture".to_string())))?;
-        if family_of_config(&config).is_none() {
+        let Some(family) = family_of_config(&config) else {
             return Err(Box::new(PlanError::UnsupportedArchitecture(reference.clone(), arch)));
+        };
+        if let Some(required) = Self::unmet_loader_layout(family, listing) {
+            return Err(Box::new(PlanError::NoUpstreamArtifact(
+                reference.clone(),
+                format!(
+                    "{family}'s loader reads {required} from the checkpoint directory, but this repo does not ship that layout; brain serves checkpoints as published and never converts them on disk, so nothing in this repo is loadable. Prepare a directory in that layout and pass it with --weights"
+                ),
+            )));
         }
 
         // `generation_config.json` names the model's stop tokens (its

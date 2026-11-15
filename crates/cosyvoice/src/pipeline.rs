@@ -125,14 +125,17 @@ impl CosyVoicePaths {
     /// (`crate::spec::CosyVoiceSpec`'s six roles).
     ///
     /// Every resolved role is a FILE (`llm.pt`/`flow.pt`/`hift.pt`, the two
-    /// `.onnx` graphs, or a `tokenizer.json`), never the directory this struct's fields actually
-    /// want - `crate::pipeline::generate` joins `"{dir}/llm.pt"` etc. itself,
-    /// exactly as `Paths::vae`'s own bare-file case does in `flux2::pipeline`
-    /// - so this takes each resolved path's own parent directory.
+    /// `.onnx` graphs, or a `tokenizer.json`) except a split-file tokenizer,
+    /// which resolves to its directory. The fields want directories:
+    /// `crate::pipeline::generate` joins `"{dir}/llm.pt"` etc. itself, exactly
+    /// as `Paths::vae`'s own bare-file case does in `flux2::pipeline`, so a
+    /// file role contributes its parent directory and a directory role itself.
     pub fn from_assembly(assembly: &capability::Assembly) -> Result<CosyVoicePaths, String> {
         let dir_of = |role: &str| -> Result<String, String> {
             let p = assembly.roles.get(role).ok_or_else(|| format!("cosyvoice: assembly '{}' has no {role} role", assembly.id))?;
-            let d = p.parent().ok_or_else(|| format!("cosyvoice: {role} path {} has no parent directory", p.display()))?;
+            // A role that resolved to a directory (the split-file tokenizer)
+            // already is the directory the pipeline wants.
+            let d = if p.is_dir() { p.as_path() } else { p.parent().ok_or_else(|| format!("cosyvoice: {role} path {} has no parent directory", p.display()))? };
             Ok(d.to_string_lossy().into_owned())
         };
         Ok(CosyVoicePaths {

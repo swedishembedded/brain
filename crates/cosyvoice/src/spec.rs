@@ -148,8 +148,22 @@ fn classify_onnx(idx: usize, rec: &ArtifactRecord, out: &mut Vec<(usize, String,
     }
 }
 
-/// Pass 2: `tokenizer` - a stock Qwen BPE identity (`CosyVoice-BlankEN`) from
-/// a genuinely different upstream repo than `llm`/`flow`/`hift`, so it needs
+/// The vocabulary size of a split-file Qwen BPE directory (`vocab.json` +
+/// `merges.txt`, the layout `data::qwen_tokenizer::QwenBpe::from_dir` reads
+/// when there is no unified `tokenizer.json`), or `None` when `dir` is not
+/// one. `CosyVoice-BlankEN`, the tokenizer `FunAudioLLM/CosyVoice2-0.5B`
+/// ships, is exactly this shape.
+fn split_bpe_vocab_count(dir: &Path) -> Option<usize> {
+    if !dir.join("merges.txt").is_file() {
+        return None;
+    }
+    let vocab: serde_json::Map<String, serde_json::Value> = serde_json::from_slice(&std::fs::read(dir.join("vocab.json")).ok()?).ok()?;
+    Some(vocab.len())
+}
+
+/// Pass 2: `tokenizer` - a stock Qwen BPE identity (`CosyVoice-BlankEN`),
+/// either a unified `tokenizer.json` or a split-file directory, usually from
+/// a different repo (or a nested directory) than `llm`/`flow`/`hift`, so it needs
 /// the same real signal `brain_modelstore::resolve::classify_tokenizer_role`
 /// gives every other architecture's tokenizer-shaped role (same-vendor
 /// co-location AND vocab-size compatibility with a dependency candidate) -
@@ -162,10 +176,15 @@ fn classify_onnx(idx: usize, rec: &ArtifactRecord, out: &mut Vec<(usize, String,
 fn classify_tokenizer(records: &[ArtifactRecord], root: &Path, llm_candidates: &[&Path], out: &mut Vec<(usize, String, Confidence)>) {
     let vendor_dirs: std::collections::BTreeSet<std::path::PathBuf> = llm_candidates.iter().filter_map(|p| vendor_dir(p, root)).collect();
     for (idx, rec) in records.iter().enumerate() {
-        if !rec.usable() || rec.kind != ArtifactKind::TokenizerJson {
+        if !rec.usable() {
             continue;
         }
-        let Some(tok_count) = tokenizer_vocab_count(&rec.path) else { continue };
+        let tok_count = match rec.kind {
+            ArtifactKind::TokenizerJson => tokenizer_vocab_count(&rec.path),
+            ArtifactKind::HfDir | ArtifactKind::Compound => split_bpe_vocab_count(&rec.path),
+            _ => None,
+        };
+        let Some(tok_count) = tok_count else { continue };
         let Some(vendor) = vendor_dir(&rec.path, root) else { continue };
         if !vendor_dirs.contains(&vendor) {
             continue;

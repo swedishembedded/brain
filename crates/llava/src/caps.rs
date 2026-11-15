@@ -316,8 +316,8 @@ mod tests {
     /// next one. Needs the real LLaVA-1.5-13B checkpoint in the model store.
     #[test]
     fn a_caption_cancelled_mid_decode_stops_at_the_next_token() {
-        let Some(dir) = brain_testutil::model_dir("liuhaotian/llava-v1.5-13b").filter(|d| std::path::Path::new(d).join("config.json").exists()) else {
-            brain_testutil::skip("llava caption mid-run cancellation needs the liuhaotian/llava-v1.5-13b checkpoint in the model store");
+        let Some(dir) = brain_testutil::model_dir("liuhaotian/llava-v1.5-13b").filter(|d| std::path::Path::new(d).join("model.safetensors").exists()) else {
+            brain_testutil::skip("llava caption mid-run cancellation needs a llava checkpoint with the single model.safetensors the loader reads (the upstream PyTorch shards are not loadable)");
             return;
         };
         let action = CaptionAction { default_weights: None };
