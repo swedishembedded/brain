@@ -289,6 +289,13 @@ pub fn flags_for_arch(arch: &str, defines: &[(&str, &str)]) -> Vec<String> {
         format!("--gpu-architecture={arch}"),
         "--fmad=false".to_string(),
     ];
+    // Pascal's global loads skip L1 unless ptxas is told to cache them, and a GEMV's activation rows, read once per
+    // weight row, then come from L2 every time. Volta and later cache global loads in L1 by default, so this asks
+    // Pascal for what every later architecture does anyway. Only a cubin goes through ptxas here; a PTX image is
+    // compiled by the driver when it loads.
+    if arch.strip_prefix("sm_").is_some_and(|cc| cc.starts_with('6')) {
+        f.push("--ptxas-options=--def-load-cache=ca".to_string());
+    }
     f.extend(defines.iter().map(|(k, v)| format!("-D{k}={v}")));
     f
 }
@@ -587,5 +594,18 @@ mod tests {
         let f = flags(&Target { cc: (9, 0), arch_specific: true }, &[("TILE", "64")]);
         assert!(f.iter().any(|o| o == "--gpu-architecture=sm_90a"), "{f:?}");
         assert!(f.iter().any(|o| o == "-DTILE=64"), "{f:?}");
+    }
+
+    /// A Pascal cubin is asked to cache global loads in L1, as every later architecture does by default; later
+    /// architectures and PTX images (compiled by the driver, not ptxas) are not given the option.
+    #[test]
+    fn pascal_caches_global_loads_in_l1() {
+        const CA: &str = "--ptxas-options=--def-load-cache=ca";
+        for arch in ["sm_61", "sm_60"] {
+            assert!(flags_for_arch(arch, &[]).iter().any(|o| o == CA), "{arch}");
+        }
+        for arch in ["sm_75", "sm_90a", "compute_61"] {
+            assert!(!flags_for_arch(arch, &[]).iter().any(|o| o == CA), "{arch}");
+        }
     }
 }
