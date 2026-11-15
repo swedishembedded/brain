@@ -59,9 +59,16 @@ inside its worker. The worker keeps its device context on the card while
 the model is demoted, so that context (about 150 MiB on a P40 <!-- perf-number: measured device context of a worker, see the gpu-supervisor ledger -->) stays counted
 against the card until the model is promoted back there or dropped.
 
-Two families can be hosted this way: `decision` (the decide and Laya
-models) and `lfm` (LFM2.5 encoders served from the model store, on disk at
-startup or fetched on demand with `--autofetch`). Every other
+Three families can be hosted this way: `decision` (the decide and Laya
+models), `lfm` (LFM2.5 encoders served from the model store, on disk at
+startup or fetched on demand with `--autofetch`) and `qwen3` (the Qwen3
+text-generation decoder, whether `--checkpoint` names it or the model store
+holds it). A hosted Qwen3 is sized by the server (its context, KV pool and
+weight format are resolved against the card budget as in process) and the
+worker builds exactly that engine; its LoRA adapters are served from the
+same worker, and an adapter offered while the server runs (`--adapter`,
+`--watch-adapters`, an adapter directory) reaches the worker before the
+first request that names it. Every other
 family runs in the serving process; naming one in the
 flag stops the server at startup with the list of families that can be
 hosted. `--worker-deadline-s SECS` (900 by default <!-- perf-number: the flag's default, a configured bound not a measurement -->) bounds how

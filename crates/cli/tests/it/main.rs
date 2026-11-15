@@ -34,5 +34,6 @@ mod version;
 mod worker_hosted;
 #[cfg(target_os = "linux")]
 mod worker_hosted_lfm;
+mod worker_hosted_qwen3;
 mod yolov8_eval;
 mod zipdepth_smoke;

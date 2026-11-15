@@ -265,7 +265,7 @@ fn cards_used_mib() -> Option<u64> {
 }
 
 /// Resident host memory of `pid`, in MiB.
-fn resident_mib(pid: u32) -> Option<u64> {
+pub(super) fn resident_mib(pid: u32) -> Option<u64> {
     let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
     let kib: u64 = status.lines().find_map(|l| l.strip_prefix("VmRSS:"))?.split_whitespace().next()?.parse().ok()?;
     Some(kib / 1024)

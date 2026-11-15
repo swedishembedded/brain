@@ -445,8 +445,10 @@ WORKER HOSTING  (a model's code in a supervised worker process on its card,
                 never the server)
   --worker-hosted FAMILY[,FAMILY]  run every model of FAMILY in a worker
                          (repeatable), on disk at startup or fetched with
-                         --autofetch. Families: decision, lfm. Default: every
-                         family runs in this process. A job whose worker misses
+                         --autofetch. Families: decision, lfm, qwen3 (the
+                         Qwen3 decoder and the adapters served on it).
+                         Default: every family runs in this process. A job
+                         whose worker misses
                          its deadline or dies fails at once with the reason;
                          the worker is killed and reaped, its card quarantined
                          until a health probe passes, and the next job is built
