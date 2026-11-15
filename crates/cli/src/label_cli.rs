@@ -79,12 +79,15 @@ const HELP: &str = "brain label <cmd>
                   affordable on a busy machine; 0 (default) keeps the model's
                   own default. Captioning cost is close to linear in this.
   --precision P   decoder storage tier, where the model has one (qwen3vl):
-                  fp32 (default, exact) or int8. int8 reads a quarter of the
+                  fp32 or int8. Omitted, the checkpoint's stored encoding:
+                  int8 for a quantized GGUF (its weights as stored, int8
+                  activations), fp32 otherwise. int8 reads a quarter of the
                   weight bytes per token, and captioning is bandwidth-bound,
-                  so it is much faster - but it is LOSSY, and these captions
-                  are training data. Compare both on YOUR images before
-                  choosing it (`qwen3vl_bench compare --dir <dir>` prints the
-                  two side by side with the divergence).
+                  so it is much faster - but over an fp32 or bf16 checkpoint
+                  it is LOSSY, and these captions are training data. Compare
+                  both on YOUR images before choosing it (`qwen3vl_bench
+                  compare --dir <dir>` prints the two side by side with the
+                  divergence).
   --overwrite     re-caption images that already have a caption, discarding
                   what is there. WITHOUT this flag a re-run is resumable and
                   idempotent: existing captions - including hand edits - are
@@ -163,7 +166,10 @@ fn resolved_default_weights(model: &str) -> Option<String> {
 fn build(model: &str, weights: &str, max_pixels: u32, precision: &str) -> Result<Box<dyn Captioner>, String> {
     match model {
         "qwen3vl" => {
-            let mut c = qwen3vl::captioner::Qwen3VlCaptioner::new(weights).with_precision(qwen3vl::caps::Precision::from_name(precision)?);
+            let mut c = qwen3vl::captioner::Qwen3VlCaptioner::new(weights);
+            if !precision.is_empty() {
+                c = c.with_precision(qwen3vl::caps::Precision::from_name(precision)?);
+            }
             if max_pixels > 0 {
                 c = c.with_max_pixels(max_pixels);
             }
@@ -269,7 +275,7 @@ fn images(args: &[String]) -> Result<(), String> {
     let trigger_role = a.str_or("--trigger-role", DEFAULT_TRIGGER_ROLE);
     let max_new = a.u32_or("--max-new", 320);
     let max_pixels = a.u32_or("--max-pixels", 0);
-    let precision = a.str_or("--precision", "fp32");
+    let precision = a.str_or("--precision", "");
     let overwrite = a.take_flag("--overwrite");
     let dir = a.positional().unwrap_or_default();
     a.finish();

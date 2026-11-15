@@ -41,7 +41,8 @@ const USAGE: &str = "usage: qwen3vl_bench <mode> [options]
           ViT tower + PatchMerger at the real 4B geometry, random weights.
   caption [--image FILE] [--pixels N] [--max-new N] [--reps N] [--profile]
           [--precision fp32|int8]
-          the real checkpoint end to end ($BRAIN_QWEN3VL_WEIGHTS), per stage.
+          the real checkpoint end to end ($BRAIN_QWEN3VL_WEIGHTS), per stage,
+          at the named tier or, omitted, the one the checkpoint stores.
           --profile adds the per-kernel device table (timestamp queries
           perturb, so read it for shares between kernels, not absolutes).
           --precision int8 is LOSSY: see `compare` below before trusting it.
@@ -304,15 +305,23 @@ fn caption_mode(args: &Args) {
         eprintln!("caption: {e}");
         std::process::exit(1);
     });
+    // No `--precision`: the checkpoint's own stored encoding, as every served path takes it.
+    let precision = match args.precision {
+        Some(p) => p,
+        None => Precision::stored(&dir).unwrap_or_else(|e| {
+            eprintln!("caption: {e}");
+            std::process::exit(1);
+        }),
+    };
     let hwc: Vec<f32> = img.px.iter().map(|&b| b as f32 / 255.0).collect();
     let pixels = args.pixels.unwrap_or(CAPTION_MAX_PIXELS);
 
     let cfg = Qwen3VlConfig::qwen3_vl_4b();
     let params = decoder_params(&cfg.text);
-    println!("qwen3vl caption profile: {} ({}x{}), {pixels} px budget, max_new {}, precision {}", path, img.w, img.h, args.max_new, args.precision.name());
+    println!("qwen3vl caption profile: {} ({}x{}), {pixels} px budget, max_new {}, precision {}", path, img.w, img.h, args.max_new, precision.name());
     println!("decoder: {:.2} B params, {:.1} GiB fp32 -- every weight is read once per token at batch 1", params as f64 / 1e9, params as f64 * 4.0 / (1 << 30) as f64);
 
-    let load = qwen3vl::caps::load_time(&dir, qwen3vl::caps::Capacity { max_pixels: pixels, ..Default::default() }, args.precision).unwrap_or_else(|e| {
+    let load = qwen3vl::caps::load_time(&dir, qwen3vl::caps::Capacity { max_pixels: pixels, ..Default::default() }, precision).unwrap_or_else(|e| {
         eprintln!("caption: {e}");
         std::process::exit(1);
     });
@@ -323,7 +332,7 @@ fn caption_mode(args: &Args) {
     // without a device to measure on reported every stage as "no measured
     // roof" - the meter failing quietly rather than the kernels being
     // ungradeable.
-    let r = qwen3vl::caps::device_roof(&dir, qwen3vl::caps::Capacity { max_pixels: pixels, ..Default::default() }, args.precision).unwrap_or(None);
+    let r = qwen3vl::caps::device_roof(&dir, qwen3vl::caps::Capacity { max_pixels: pixels, ..Default::default() }, precision).unwrap_or(None);
     let head_params = cfg.text.vocab as u64 * cfg.text.d_model as u64;
     let layer_params = params - head_params;
     match decode_ceiling_tok_s(layer_params, head_params, r) {
@@ -338,12 +347,12 @@ fn caption_mode(args: &Args) {
     // caption costs as much as the measurement itself, and at one rep it would
     // double a multi-minute run to protect a number nothing is averaged into.
     if args.reps > 1 {
-        let _ = qwen3vl::caps::generate_profiled(&dir, qwen3vl::caps::Capacity { max_pixels: pixels, ..Default::default() }, args.precision, prompt, &hwc, img.w, img.h, args.max_new);
+        let _ = qwen3vl::caps::generate_profiled(&dir, qwen3vl::caps::Capacity { max_pixels: pixels, ..Default::default() }, precision, prompt, &hwc, img.w, img.h, args.max_new);
     }
 
     let mut best: Option<(qwen3vl::model::StageTimes, f64, String)> = None;
     for _ in 0..args.reps {
-        let (text, st, pre) = qwen3vl::caps::generate_profiled(&dir, qwen3vl::caps::Capacity { max_pixels: pixels, ..Default::default() }, args.precision, prompt, &hwc, img.w, img.h, args.max_new).unwrap_or_else(|e| {
+        let (text, st, pre) = qwen3vl::caps::generate_profiled(&dir, qwen3vl::caps::Capacity { max_pixels: pixels, ..Default::default() }, precision, prompt, &hwc, img.w, img.h, args.max_new).unwrap_or_else(|e| {
             eprintln!("caption: {e}");
             std::process::exit(1);
         });
@@ -369,7 +378,7 @@ fn caption_mode(args: &Args) {
     // perf-number: example of the metering bug this comment describes, not a result
     // bytes each reported prefill at 164.5% of roof, which is the meter
     // failing, not the kernel exceeding physics.
-    let bpp = layer_bytes_per_param(args.precision);
+    let bpp = layer_bytes_per_param(precision);
     let layer_bytes = |tokens: u64| (layer_params as f64 * bpp) as u64 * tokens;
     report("prefill", st.prefill_s, 2 * layer_params * st.prompt_tokens as u64, layer_bytes(st.prompt_tokens as u64), r);
     // The generation loop is pipelined, so it is priced as ONE stage - see
@@ -395,14 +404,14 @@ fn caption_mode(args: &Args) {
     println!("  decode                   {decode_tok_s:>10.1} tok/s  (what a streaming caller sees: step + head)");
     if let Some((f32_ceil, i8_ceil)) = decode_ceiling_tok_s(layer_params, head_params, r) {
         // Grade against the tier that is actually running, never the other's.
-        let mine = match args.precision {
+        let mine = match precision {
             Precision::F32 => f32_ceil,
             Precision::I8 => i8_ceil,
         };
         println!(
             "  ceiling (weight BW)      {f32_ceil:>10.1} tok/s fp32, {i8_ceil:.1} tok/s int8 -- decode is at {:.1}% of the {} one",
             100.0 * decode_tok_s / mine,
-            args.precision.name()
+            precision.name()
         );
     }
     println!("  end-to-end (per image)   {:>10.2} tok/s  ({} tokens / {:.1} s of preprocess+vision+merge+prefill+decode)", st.new_tokens as f64 / per_image, st.new_tokens, per_image);
@@ -417,7 +426,7 @@ fn caption_mode(args: &Args) {
         // Timestamp queries perturb, so read this for SHARES between kernels,
         // not as an absolute next to the stage table above.
         println!();
-        let _ = qwen3vl::caps::dump_profile(&dir, qwen3vl::caps::Capacity { max_pixels: pixels, ..Default::default() }, args.precision);
+        let _ = qwen3vl::caps::dump_profile(&dir, qwen3vl::caps::Capacity { max_pixels: pixels, ..Default::default() }, precision);
     }
 }
 
@@ -565,7 +574,7 @@ struct Args {
     max_new: u32,
     image: Option<String>,
     profile: bool,
-    precision: Precision,
+    precision: Option<Precision>,
     dir: Option<String>,
     limit: usize,
 }
@@ -574,7 +583,7 @@ fn main() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     // caption reps default to 1: one rep is minutes long, and `--reps N`
     // switches on the warm-up as well as the statistics.
-    let mut a = Args { mode: String::new(), device: "both".into(), reps: 0, pixels: None, max_new: 90, image: None, profile: false, precision: Precision::F32, dir: None, limit: 4 };
+    let mut a = Args { mode: String::new(), device: "both".into(), reps: 0, pixels: None, max_new: 90, image: None, profile: false, precision: None, dir: None, limit: 4 };
     let mut i = 0;
     while i < argv.len() {
         let next = |i: &mut usize| -> String {
@@ -594,10 +603,10 @@ fn main() {
             "--limit" => a.limit = next(&mut i).parse().unwrap_or(a.limit),
             "--profile" => a.profile = true,
             "--precision" => {
-                a.precision = Precision::from_name(&next(&mut i)).unwrap_or_else(|e| {
+                a.precision = Some(Precision::from_name(&next(&mut i)).unwrap_or_else(|e| {
                     eprintln!("{e}");
                     std::process::exit(2)
-                })
+                }))
             }
             "-h" | "--help" => {
                 println!("{USAGE}");

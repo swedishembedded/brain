@@ -79,6 +79,10 @@ pub struct Qwen3VlResident {
     /// store resolved it, [`MODEL`] when the operator pinned it.
     id: String,
     dir: String,
+    /// The tier a request that names none builds: the encoding the
+    /// checkpoint stores (`qwen3vl::caps::Precision::stored`), so a quantized
+    /// GGUF is served as stored, never widened to fp32 by default.
+    stored: Precision,
 }
 
 impl Qwen3VlResident {
@@ -94,26 +98,33 @@ impl Qwen3VlResident {
     }
 
     /// Direct constructor for a caller that already holds the checkpoint;
-    /// `None` when the path is absent - registering a model whose every call
-    /// would fail is worse than not serving it.
+    /// `None` when the path is absent or its header cannot say how it is
+    /// stored - registering a model whose every call would fail is worse
+    /// than not serving it.
     pub fn new(id: impl Into<String>, dir: impl Into<String>) -> Option<Qwen3VlResident> {
         let (id, dir) = (id.into(), dir.into());
         if !std::path::Path::new(&dir).exists() {
             residency::log::not_served(&format!("brain: {id} not served ({dir} does not exist)"));
             return None;
         }
-        Some(Qwen3VlResident { id, dir })
+        match Precision::stored(&dir) {
+            Ok(stored) => Some(Qwen3VlResident { id, dir, stored }),
+            Err(e) => {
+                residency::log::not_served(&format!("brain: {id} not served ({e})"));
+                None
+            }
+        }
     }
 
-    /// The precision a request asks for, defaulting to the one that fits
-    /// (`Precision::default()` is fp32, matching the action spec's own
-    /// `"precision"` param default). Unlike `qwen3vl::caps::GenerateAction`'s
-    /// direct-provider path, an unrecognised string here falls back rather
-    /// than erroring - `instance_key` cannot return a `Result`, and
-    /// `activate` will hit the same fallback so the two never disagree about
-    /// which instance a bad string builds.
-    fn precision_of(inv: &Invocation) -> Precision {
-        inv.get_str("precision").as_deref().and_then(|s| Precision::from_name(s).ok()).unwrap_or_default()
+    /// The tier name a request keys its instance by: the one it names, else
+    /// [`Self::stored`]'s. A name that is no tier is kept as given, so
+    /// `activate` refuses it by name (`parse_key`) instead of building some
+    /// other tier in its place.
+    fn precision_of(&self, inv: &Invocation) -> String {
+        match inv.get_str("precision").filter(|name| !name.is_empty()) {
+            Some(name) => Precision::from_name(&name).map_or(name, |p| p.name().to_string()),
+            None => self.stored.name().to_string(),
+        }
     }
 }
 
@@ -134,7 +145,7 @@ impl ResidentModel for Qwen3VlResident {
         // sharing one key across them would let a stray request evict a
         // working instance to build a differently-shaped one.
         let Capacity { max_pixels, ctx } = Capacity::of(inv);
-        let p = Self::precision_of(inv).name();
+        let p = self.precision_of(inv);
         InstanceKey::new(&self.id, format!("{}|{max_pixels}|{ctx}|{p}", self.dir))
     }
 
@@ -144,7 +155,8 @@ impl ResidentModel for Qwen3VlResident {
         // `place::pick_device` falls a weight-holding model back to the CPU
         // pool at the same figure on a machine with no GPU, which is its own
         // rule and the behaviour this model wants.
-        let (_, capacity, precision) = parse_key(key).unwrap_or((String::new(), Capacity::default(), Precision::default()));
+        // A key `activate` will refuse is budgeted as this checkpoint's stored tier.
+        let (_, capacity, precision) = parse_key(key).unwrap_or((String::new(), Capacity::default(), self.stored));
         // Read THIS checkpoint's own config (never the request's `dir` from
         // `key` -- `self.dir` is the one this resident actually serves) and
         // derive the real figure from it; only a config this resident cannot
@@ -219,18 +231,18 @@ mod tests {
     use super::*;
 
     /// A weight-free llama.cpp release at `<store>/<repo>`: the language half
-    /// `lm` beside its projector, headers only (one 1-element tensor each).
+    /// `lm` (one Q8_0 decoder linear) beside its F16 projector, one block each.
     fn write_gguf_release(store: &std::path::Path, repo: &str, lm: &str, mmproj: &str) -> std::path::PathBuf {
         use checkpoint::gguf::{GgmlType, GgufValue};
         let dir = store.join(repo);
         std::fs::create_dir_all(&dir).unwrap();
-        let write = |file: &str, kv: &[(&str, &str)]| {
-            let tensor = checkpoint::gguf_write::TensorOut { name: "w".to_string(), shape: vec![1], ty: GgmlType::F32.id(), data: vec![0u8; 4] };
+        let write = |file: &str, kv: &[(&str, &str)], (name, ty): (&str, GgmlType)| {
+            let tensor = checkpoint::gguf_write::TensorOut { name: name.to_string(), shape: vec![ty.block_elems()], ty: ty.id(), data: vec![0u8; ty.block_bytes()] };
             let kv: Vec<_> = kv.iter().map(|(k, v)| (k.to_string(), GgufValue::String(v.to_string()))).collect();
             checkpoint::gguf_write::write(dir.join(file).to_str().unwrap(), &kv, &[tensor], 32).unwrap();
         };
-        write(lm, &[("general.architecture", qwen3vl::gguf_import::GGUF_ARCHITECTURE)]);
-        write(mmproj, &[("general.architecture", "clip"), ("clip.projector_type", qwen3vl::gguf_import::PROJECTOR_TYPE)]);
+        write(lm, &[("general.architecture", qwen3vl::gguf_import::GGUF_ARCHITECTURE)], ("blk.0.attn_q.weight", GgmlType::Q8_0));
+        write(mmproj, &[("general.architecture", "clip"), ("clip.projector_type", qwen3vl::gguf_import::PROJECTOR_TYPE)], ("v.patch_embd.weight", GgmlType::F16));
         dir.join(lm)
     }
 
@@ -276,23 +288,43 @@ mod tests {
     /// request evict a working fp32 instance built for a different capacity.
     #[test]
     fn max_pixels_and_precision_key_separate_instances() {
-        let r = Qwen3VlResident { id: MODEL.into(), dir: "/tmp".into() };
+        let r = Qwen3VlResident { id: MODEL.into(), dir: "/tmp".into(), stored: Precision::F32 };
         let k_default = r.instance_key("generate", &Invocation::new());
         let k_i8 = r.instance_key("generate", &Invocation::new().set("precision", serde_json::json!("int8")));
         let k_bigger = r.instance_key("generate", &Invocation::new().set("max_pixels", serde_json::json!(2_000_000)));
         assert_ne!(k_default, k_i8);
         assert_ne!(k_default, k_bigger);
         assert_ne!(k_i8, k_bigger);
-        // An absent or unparseable precision falls back to fp32, matching
-        // `Precision::default()` and the action spec's own default.
-        assert_eq!(r.instance_key("generate", &Invocation::new().set("precision", serde_json::json!("bogus"))), k_default);
+        // A spelling of the stored tier is the same instance; a name that is
+        // no tier is refused when the instance is built, never replaced.
+        assert_eq!(r.instance_key("generate", &Invocation::new().set("precision", serde_json::json!("f32"))), k_default);
+        let bogus = r.instance_key("generate", &Invocation::new().set("precision", serde_json::json!("bogus")));
+        assert_ne!(bogus, k_default);
+        let e = r.activate(&bogus, Device::Cpu).err().unwrap_or_default();
+        assert!(e.contains("bogus"), "{e}");
+    }
+
+    /// A Q8_0 GGUF is served as it stores its decoder: a request naming no
+    /// precision keys (and budgets) the int8 instance, not an fp32 upcast,
+    /// and fp32 is still built when a request asks for it.
+    #[test]
+    fn a_q8_0_gguf_is_served_at_its_stored_int8_and_fp32_is_asked_for_by_name() {
+        let store = std::env::temp_dir().join(format!("brain-resident-qwen3vl-stored-{}", std::process::id()));
+        std::fs::remove_dir_all(&store).ok();
+        let lm = write_gguf_release(&store, "unsloth/Qwen3-VL-4B-Instruct-GGUF", "Q8_0.gguf", "mmproj-F16.gguf");
+        let r = Qwen3VlResident::new("unsloth/Qwen3-VL-4B-Instruct-GGUF", lm.to_string_lossy()).expect("a resident for the fixture");
+
+        let precision = |inv: &Invocation| parse_key(&r.instance_key("generate", inv)).map(|(_, _, p)| p);
+        assert_eq!(precision(&Invocation::new()), Ok(Precision::I8), "no precision asked for keeps the stored Q8_0 as int8");
+        assert_eq!(precision(&Invocation::new().set("precision", serde_json::json!("fp32"))), Ok(Precision::F32), "fp32 is an explicit choice");
+        std::fs::remove_dir_all(&store).ok();
     }
 
     /// The two precisions must be budgeted differently, and fp32 must be the
     /// larger one - the whole point of the int8 tier existing.
     #[test]
     fn the_two_precisions_are_budgeted_apart() {
-        let r = Qwen3VlResident { id: MODEL.into(), dir: "/tmp".into() };
+        let r = Qwen3VlResident { id: MODEL.into(), dir: "/tmp".into(), stored: Precision::F32 };
         let c32 = r.estimate(&r.instance_key("generate", &Invocation::new()));
         let c8 = r.estimate(&r.instance_key("generate", &Invocation::new().set("precision", serde_json::json!("int8"))));
         assert!(c32.vram > 0, "this model is GPU-placeable; a zero vram would hide it from the GPU class");
@@ -306,7 +338,7 @@ mod tests {
     /// for.
     #[test]
     fn an_npu_assignment_is_refused() {
-        let r = Qwen3VlResident { id: MODEL.into(), dir: "/tmp".into() };
+        let r = Qwen3VlResident { id: MODEL.into(), dir: "/tmp".into(), stored: Precision::F32 };
         let e = r.activate(&r.instance_key("generate", &Invocation::new()), Device::Npu(0)).err().unwrap_or_default();
         assert!(e.contains("no NPU export path"), "{e}");
     }
@@ -316,7 +348,7 @@ mod tests {
     /// checkpoint, only the operator (the model store or a `qwen3vl.weights` pin) can.
     #[test]
     fn the_resident_manifest_has_no_weights_param() {
-        let r = Qwen3VlResident { id: MODEL.into(), dir: "/tmp".into() };
+        let r = Qwen3VlResident { id: MODEL.into(), dir: "/tmp".into(), stored: Precision::F32 };
         let m = r.manifest();
         let a = &m.actions[0];
         assert_eq!(a.name, "generate");
@@ -341,7 +373,7 @@ mod tests {
     /// `/v1/models`) without needing a real checkpoint.
     #[test]
     fn brain_qwen3vl_is_auto_exposed_on_openai_and_anthropic_model_lists() {
-        let resident = Qwen3VlResident { id: MODEL.into(), dir: "/nonexistent/qwen3vl".to_string() };
+        let resident = Qwen3VlResident { id: MODEL.into(), dir: "/nonexistent/qwen3vl".to_string(), stored: Precision::F32 };
         let models: Vec<std::sync::Arc<dyn ResidentModel>> = vec![std::sync::Arc::new(resident)];
         let mut budgets = residency::budget::Budgets::new();
         budgets.set(Device::Cpu, 8 << 30, 0);

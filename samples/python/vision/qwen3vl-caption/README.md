@@ -20,10 +20,11 @@ tools/dbus-session.sh --serve "--dbus" -- \
   recompute. `generate` is still `.streaming()` and this example still
   uses `Subscribe`, but for the ordinary reason - seeing partial output as
   it's produced - not to hide a quadratic cost.
-* **`--precision`.** `fp32` (the default) is the exact decoder tier;
-  `int8` is explicitly LOSSY (~4x less weight traffic per token) and must
-  be asked for by name - it never arrives by falling back. The scheduler
-  budgets the two as separate resident instances.
+* **`--precision`.** Omitted, the checkpoint is served in the encoding it
+  stores: a quantized GGUF keeps its int8 weights (the int8 tier quantizes
+  activations too), a safetensors checkpoint loads fp32. `fp32` or `int8`
+  names a tier instead; int8 over an fp32 checkpoint is LOSSY. The
+  scheduler budgets each tier as its own resident instance.
 * **`--max-pixels` sizes a capacity, not a per-request resize limit.** It
   sets the resident's DeepStack/splice buffer capacity at *build* time (a
   practical default around a 1024x1024 image); a request whose
@@ -48,5 +49,5 @@ is a binary PPM (P6).
 | `--prompt TEXT` | `Describe this image.` |
 | `--max-new N` | `64` |
 | `--model ID` | the only served Qwen3-VL model |
-| `--precision` | `fp32` (exact); `int8` (lossy, ~4x less weight traffic) |
+| `--precision` | the checkpoint's stored encoding; `fp32` or `int8` by name |
 | `--max-pixels N` | resident's own default |

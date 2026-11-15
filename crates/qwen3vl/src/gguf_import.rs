@@ -163,6 +163,14 @@ impl GgufFiles {
         }
         Ok(GgufFiles { lm, mmproj })
     }
+
+    /// Whether the language half stores any decoder tensor (`blk.*`) in a
+    /// quantized GGML type rather than F32/F16/BF16. Header only.
+    pub fn decoder_is_quantized(&self) -> Result<bool, String> {
+        let lm = MmapGguf::open(self.lm.to_str().ok_or("qwen3vl gguf: non-UTF8 lm path")?)?;
+        let unquantized = |dtype: Option<&str>| matches!(dtype, Some("F32" | "F16" | "BF16"));
+        Ok(lm.names().iter().filter(|name| name.starts_with("blk.")).any(|name| !unquantized(lm.dtype(name))))
+    }
 }
 
 fn route_of(p: &Path) -> Result<gguf::Route, String> {

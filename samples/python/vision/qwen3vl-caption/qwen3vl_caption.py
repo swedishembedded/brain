@@ -17,11 +17,12 @@ served model, under its own `<vendor>/<repo>` id. `--model` names one; omitted,
 the one Qwen3-VL model the server lists is used, and a server listing several
 is asked to choose.
 
-**Precision.** `--precision fp32` (the default) is the exact decoder tier;
-`--precision int8` is explicitly LOSSY (~4x less weight traffic per token) and
-must be asked for by name - it never arrives by falling back. The scheduler
-budgets the two as separate resident instances, so a stray request at one
-precision cannot silently evict a working instance at the other.
+**Precision.** Omitted, the checkpoint is served in the encoding it stores: a
+quantized GGUF keeps its int8 weights (and the int8 tier quantizes activations
+too), a safetensors checkpoint loads fp32. `--precision fp32` or
+`--precision int8` names a tier instead; int8 over an fp32 checkpoint is
+LOSSY. The scheduler budgets each tier as its own resident instance, so a
+request at one precision cannot evict a working instance at the other.
 
 **Capacity, not a per-request resize limit.** `--max-pixels` sizes the
 resident's DeepStack/splice buffer CAPACITY at build time (a practical default
@@ -76,7 +77,7 @@ def main() -> int:
     ap.add_argument("--prompt", default=DEFAULT_PROMPT, help="the instruction after the image")
     ap.add_argument("--max-new", type=int, default=64, help="max tokens to generate")
     ap.add_argument("--model", default=None, help="served Qwen3-VL model id; default: the only one the server lists")
-    ap.add_argument("--precision", default="fp32", choices=["fp32", "int8"], help="fp32 (default, exact) or int8 (lossy)")
+    ap.add_argument("--precision", default=None, choices=["fp32", "int8"], help="decoder tier; default: the encoding the checkpoint stores")
     ap.add_argument("--max-pixels", type=int, default=None, help="resident capacity override (pixels); default is this resident's own")
     args = ap.parse_args()
 
@@ -85,9 +86,11 @@ def main() -> int:
     model = pick_model(brain, args.model)
     if model is None:
         return 2
-    print(f"model {model}, image {w}x{h}, prompt {args.prompt!r}, max_new {args.max_new}, precision {args.precision}", flush=True)
+    print(f"model {model}, image {w}x{h}, prompt {args.prompt!r}, max_new {args.max_new}, precision {args.precision or 'as stored'}", flush=True)
 
-    params = {"prompt": args.prompt, "max_new": args.max_new, "precision": args.precision}
+    params = {"prompt": args.prompt, "max_new": args.max_new}
+    if args.precision is not None:
+        params["precision"] = args.precision
     if args.max_pixels is not None:
         params["max_pixels"] = args.max_pixels
 

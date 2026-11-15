@@ -18,7 +18,9 @@
 //!   indistinguishable from one that got int8, in either direction;
 //! * the two tiers are separate residents, so an int8 request can never be
 //!   served by an fp32 model that happens to already be loaded;
-//! * `int8` is never reachable by default, from any spelling.
+//! * `int8` is never reached from a typo: a tier is named exactly or
+//!   refused, and no name at all means the checkpoint's stored encoding
+//!   (`Precision::stored`, tested in `caps.rs`), never a guess.
 //!
 //! What int8 numerically costs is bounded one level down, by
 //! `qwen3`'s own `int8_kv_decode_tracks_fp32` (relative L2 of the decode
@@ -30,13 +32,13 @@
 
 use qwen3vl::caps::Precision;
 
-/// `int8` must be unreachable except by asking for it in those words. A tier
-/// that can be arrived at by an empty string, a typo, or a default is a tier
-/// somebody ships training data from without deciding to.
+/// A tier is named in exactly these words or refused. An empty string names
+/// no tier (`Precision::resolve` then takes the stored encoding), so it is not
+/// a spelling of either one.
 #[test]
-fn the_lossy_tier_is_never_the_default_and_never_a_typo() {
-    assert_eq!(Precision::default(), Precision::F32);
-    for spelling in ["", "fp32", "f32"] {
+fn a_tier_is_named_exactly_or_refused() {
+    assert!(Precision::from_name("").is_err(), "an empty string names no tier");
+    for spelling in ["fp32", "f32"] {
         assert_eq!(Precision::from_name(spelling).unwrap(), Precision::F32, "{spelling:?} must mean fp32");
     }
     for spelling in ["int8", "i8"] {

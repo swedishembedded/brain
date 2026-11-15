@@ -162,7 +162,7 @@ impl VisionLanguagePipeline {
             model_id: model_id.as_ref().to_string(),
             device: Device::default(),
             capacity: qwen3vl::caps::Capacity::default(),
-            precision: qwen3vl::caps::Precision::default(),
+            precision: None,
             download_policy: loader::DownloadPolicy::default(),
         }
     }
@@ -253,7 +253,8 @@ pub struct VisionLanguagePipelineBuilder {
     model_id: String,
     device: Device,
     capacity: qwen3vl::caps::Capacity,
-    precision: qwen3vl::caps::Precision,
+    /// `None` builds the checkpoint at its stored encoding.
+    precision: Option<qwen3vl::caps::Precision>,
     download_policy: loader::DownloadPolicy,
 }
 
@@ -280,12 +281,14 @@ impl VisionLanguagePipelineBuilder {
         self
     }
 
-    /// Decoder storage tier: `"fp32"` (default, exact) or `"int8"` (LOSSY -
-    /// see `qwen3vl::caps::Precision`'s own doc). `Err` for any other
-    /// spelling, the same vocabulary `qwen3vl::caps::Precision::from_name`
-    /// (and `brain do qwen3vl generate --precision`) already reject.
+    /// Decoder storage tier: `"fp32"` or `"int8"` (int8 weights and int8
+    /// activations - see `qwen3vl::caps::Precision`'s own doc). Not called,
+    /// the checkpoint is built at the encoding it stores: int8 for a
+    /// quantized GGUF, fp32 otherwise. `Err` for any other spelling, the same
+    /// vocabulary `qwen3vl::caps::Precision::from_name` (and `brain do
+    /// qwen3vl generate --precision`) already reject.
     pub fn precision(mut self, precision: impl AsRef<str>) -> Result<Self> {
-        self.precision = qwen3vl::caps::Precision::from_name(precision.as_ref()).map_err(Error::Backend)?;
+        self.precision = Some(qwen3vl::caps::Precision::from_name(precision.as_ref()).map_err(Error::Backend)?);
         Ok(self)
     }
 
@@ -331,7 +334,12 @@ impl VisionLanguagePipelineBuilder {
         let assembly = crate::resolve_policy::resolve_with_policy("qwen3vl", &qwen3vl::spec::Qwen3VlSpec, &model_id, &overrides, download_policy)?;
 
         let weights = assembly.roles.get("weights").ok_or_else(|| Error::Backend(format!("qwen3vl: resolved assembly {:?} has no weights role", assembly.id)))?;
-        let resident = qwen3vl::caps::Resident::load_on(&weights.to_string_lossy(), capacity, precision, None).map_err(Error::Backend)?;
+        let weights = weights.to_string_lossy();
+        let precision = match precision {
+            Some(p) => p,
+            None => qwen3vl::caps::Precision::stored(&weights).map_err(Error::Backend)?,
+        };
+        let resident = qwen3vl::caps::Resident::load_on(&weights, capacity, precision, None).map_err(Error::Backend)?;
 
         Ok(VisionLanguagePipeline { resident })
     }

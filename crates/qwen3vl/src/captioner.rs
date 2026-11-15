@@ -40,7 +40,9 @@ use serde_json::json;
 pub struct Qwen3VlCaptioner {
     dir: String,
     max_pixels: u32,
-    precision: crate::caps::Precision,
+    /// The decoder tier asked for; `None` takes the checkpoint's stored
+    /// encoding (`crate::caps::Precision::stored`).
+    precision: Option<crate::caps::Precision>,
 }
 
 impl Qwen3VlCaptioner {
@@ -48,18 +50,19 @@ impl Qwen3VlCaptioner {
     /// whatever `crate::caps::QwenVlProvider::new` was constructed with - the
     /// model-store resolver's own pick, when one is configured.
     pub fn new(dir: impl Into<String>) -> Qwen3VlCaptioner {
-        Qwen3VlCaptioner { dir: dir.into(), max_pixels: DEFAULT_MAX_PIXELS, precision: crate::caps::Precision::F32 }
+        Qwen3VlCaptioner { dir: dir.into(), max_pixels: DEFAULT_MAX_PIXELS, precision: None }
     }
 
-    /// Build the decoder at a narrower storage tier.
+    /// Build the decoder at a named storage tier instead of the one the
+    /// checkpoint stores.
     ///
-    /// `int8` is LOSSY and is never the default: a captioning run is usually
-    /// making training data, and a caption that is faster and subtly wrong is
-    /// a worse trade there than anywhere else. `qwen3vl_bench compare` prints
-    /// both tiers' captions side by side with the time and the divergence,
-    /// which is the evidence this choice should be made on.
+    /// `int8` over an fp32 or bf16 checkpoint is LOSSY: a captioning run is
+    /// usually making training data, and a caption that is faster and subtly
+    /// wrong is a worse trade there than anywhere else. `qwen3vl_bench
+    /// compare` prints both tiers' captions side by side with the time and
+    /// the divergence, which is the evidence this choice should be made on.
     pub fn with_precision(mut self, p: crate::caps::Precision) -> Qwen3VlCaptioner {
-        self.precision = p;
+        self.precision = Some(p);
         self
     }
 
@@ -91,8 +94,10 @@ impl Captioner for Qwen3VlCaptioner {
         let mut inv = Invocation::new()
             .set("prompt", json!(req.instruction))
             .set("max_new", json!(req.max_new.min(MAX_NEW_LIMIT)))
-            .set("max_pixels", json!(self.max_pixels))
-            .set("precision", json!(self.precision.name()));
+            .set("max_pixels", json!(self.max_pixels));
+        if let Some(p) = self.precision {
+            inv = inv.set("precision", json!(p.name()));
+        }
         if !self.dir.is_empty() {
             inv = inv.set("weights", json!(self.dir));
         }

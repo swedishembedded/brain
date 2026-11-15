@@ -3850,3 +3850,56 @@ deferral that this entry now resolves). No other structural inconsistency
 found in the ledger itself - this pass does not re-verify any prior phase's
 own numeric claims, per this phase's own explicit scope limit.
 
+
+## Qwen3-VL GGUF: the stored tier is the default
+
+A GGUF is served honouring each tensor's stored quant, never with a silent
+fp32 upcast. Qwen3-VL's decoder has two tiers, fp32 and int8, and its
+`precision` used to default to fp32, so a Q8_0 GGUF was widened to fp32
+unless a caller asked for int8 by name.
+
+### Done
+
+- [x] `qwen3vl::caps::Precision` has no fixed default. `Precision::stored`
+      reads the checkpoint's header: a GGUF whose `blk.*` tensors are
+      quantized is int8, anything else (a GGUF of F32/F16/BF16 linears, a
+      safetensors directory) is fp32. `Precision::resolve` takes a named tier
+      over it, and an empty string names none. Every entry point resolves
+      through it: the served resident (`Qwen3VlResident::stored`, keyed per
+      request), `brain do qwen3vl generate`, `brain label`, the SDK's
+      `VisionLanguagePipeline` and `qwen3vl_bench caption`. fp32 stays an
+      explicit choice. A precision that names no tier is refused at
+      activation instead of building another tier in its place. Tests:
+      `caps::tests::a_quantized_gguf_defaults_to_its_stored_int8_and_fp32_is_asked_for_by_name`,
+      `caps::tests::an_unquantized_checkpoint_defaults_to_fp32`,
+      `resident_qwen3vl::tests::a_q8_0_gguf_is_served_at_its_stored_int8_and_fp32_is_asked_for_by_name`.
+- [x] What int8 holds for a Q8_0 tensor: `model::int8` groups 32 weights
+      along `k` with one scale, `Q8_0`'s block exactly, so requantizing the
+      decoded block gives back the stored codes
+      (`model::int8::tests::q8_0_rect_is_bit_identical_to_the_fp32_round_trip`).
+      A K-quant decoder is re-encoded to int8, quant to quant.
+- [x] What int8 does to activations: the decode build's int8 products are
+      W8A8. Each product quantizes its input rows to int8 on the device, one
+      scale per 32 elements of a row, and accumulates in integers
+      (`matmul_i8_gemv*.wgsl`, `matmul_i8_dyn.wgsl`). Holding Q8_0 weights as
+      stored therefore also makes every decoder linear's activations int8 on
+      this path. That is the int8 tier the decoder has, and the dtype rules
+      constrain the stored weights, not the activations, so the stored tier
+      is the default and fp32 is the request for full-precision activations.
+      Documented in `docs/reference/models/qwen3vl.md`.
+
+### Open
+
+- [ ] Weight-only int8 for the decode build. `qwen3::Qwen` already runs a
+      frozen int8 base with fp32 activations (`int8_base`, the
+      `matmul#w=w8` kernels) for a LoRA build; the decode build does not take
+      it, so a Q8_0 GGUF cannot be served with its weights as stored and its
+      activations in fp32.
+- [ ] The token embedding and LM head of a Q8_0 GGUF are still widened to
+      fp32 on the device at either tier (the decode build holds its tables in
+      fp32), as is the F16 vision projector.
+- [ ] The GGUF decoder is decoded to one host fp32 map
+      (`qwen3vl::gguf_import::weights`) before the int8 upload. A packed
+      GGUF source (`qwen3::gguf_import::open_source`'s plan) through
+      `Qwen3Vl::from_streamed_decoder` would bound the host copy to one
+      tensor.

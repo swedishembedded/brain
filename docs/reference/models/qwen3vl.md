@@ -202,15 +202,31 @@ qwen3vl_bench caption --image photo.jpg    # the real checkpoint, per stage, wit
 reports each stage against the machine's own measured roofline plus the
 weight-bandwidth ceiling a batch-1 decode cannot beat.
 
-## The int8 decoder tier
+## The decoder tier, and the default
 
-`--precision int8` (or the `precision` action parameter) builds the decoder's
-per-layer linears as packed int8 instead of fp32. The vision tower and the LM
-head stay fp32. Because captioning is weight-bandwidth bound, reading a
-quarter of the weight bytes per token is a large speed-up.
+The `precision` action parameter (`--precision` on the CLI) chooses the tier
+of the decoder's per-layer linears: `fp32` or `int8`. The vision tower, the
+token embedding and the LM head are fp32 at either tier.
 
-**It is lossy, it is never the default, and it should not be chosen from a
-speed number alone.** Quantization perturbs the decode hidden state enough to
+**Omitted, a checkpoint is served in the encoding it stores.** A GGUF whose
+decoder linears are quantized is built at `int8`: a `Q8_0` tensor's int8
+codes and its per-32-element scale are what the int8 tier holds, so its
+weights are kept exactly as published rather than widened to fp32. A GGUF
+quantized some other way (a K-quant) is re-encoded to int8, quant to quant.
+A GGUF of F32/F16/BF16 linears and a safetensors directory have no narrower
+stored tier in this decoder and load at `fp32`. `fp32` stays available by
+name for any checkpoint, at four times the decoder's weight bytes.
+
+**The int8 tier quantizes activations too.** Each product quantizes its
+input rows to int8 on the device, with one scale per 32 elements of a row,
+and accumulates in integers (W8A8, `model::int8`). So serving a `Q8_0` GGUF
+as stored also means its activations are int8 at every decoder linear; ask
+for `fp32` when the activations must stay full precision.
+
+`int8` asked for on an fp32 or bf16 checkpoint quantizes its weights, and
+that is lossy. Because captioning is weight-bandwidth bound, reading a quarter
+of the weight bytes per token is a large speed-up, but **it should not be
+chosen from a speed number alone.** Quantization perturbs the decode hidden state enough to
 flip a greedy argmax, and one flipped token rewrites the rest of the caption.
 In practice int8 and fp32 captions of the same photograph usually differ.
 Many differences are cosmetic - the same scene described in a different
@@ -305,8 +321,8 @@ buffers - and each training step forwards/backwards exactly one sample
 
 ## Hardware and limits
 
-Served (CLI, D-Bus, HTTP) one request at a time, fp32 by default (int8
-decoder opt-in), with real temperature/top-k/top-p sampling (greedy by
+Served (CLI, D-Bus, HTTP) one request at a time, at the tier the checkpoint
+stores by default (see "The decoder tier, and the default" above), with real temperature/top-k/top-p sampling (greedy by
 default - see "Sampling" above). `run_batch` is the documented serial
 default: unlike Moondream 3 (whose vision tower attends within each crop
 independently and so batches across requests), Qwen3-VL's vision tower feeds

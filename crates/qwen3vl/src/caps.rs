@@ -112,18 +112,22 @@ pub type VideoFrames = Option<(Vec<DecodedFrame>, f32)>;
 /// about what "a video this model accepts" means.
 pub const MAX_VIDEO_FRAMES: u32 = 32;
 
-/// The storage tier this checkpoint's DECODER is built at. The vision tower
-/// is always fp32: it is a small fraction of the weights and none of the
-/// per-token bandwidth, so narrowing it would trade accuracy for nothing.
+/// The storage tier this checkpoint's DECODER linears are built at. The
+/// vision tower is always fp32: it is a small fraction of the weights and
+/// none of the per-token bandwidth.
 ///
-/// `int8` is **LOSSY** and exists as a named request precisely so that it can
-/// never arrive by defaulting. Everything downstream of a caption made this
-/// way is downstream of a different model, so it is reported on load and it
-/// is part of the resident key - an int8 request never silently reuses an
-/// fp32 resident, or the reverse.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+/// There is no fixed default: a request that names no tier gets the one the
+/// checkpoint stores ([`Precision::stored`]), so a quantized GGUF is never
+/// widened to fp32 behind the caller's back. `int8` is brain's group-wise
+/// int8 product (`model::int8`): weights in 32-element groups with one scale
+/// each, which holds a `Q8_0` tensor's codes exactly, and ACTIVATIONS
+/// quantized to int8 on the device for every product, one scale per 32
+/// elements of a row (W8A8). Asked for on an fp32 or bf16 checkpoint it is
+/// lossy, which is why it is never chosen for one. The tier is reported on
+/// load and is part of the resident key, so an int8 resident is never reused
+/// for an fp32 request, or the reverse.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Precision {
-    #[default]
     F32,
     I8,
 }
@@ -134,9 +138,31 @@ impl Precision {
     /// cannot drift about what `int8` is called.
     pub fn from_name(v: &str) -> Result<Precision, String> {
         match v {
-            "fp32" | "f32" | "" => Ok(Precision::F32),
+            "fp32" | "f32" => Ok(Precision::F32),
             "int8" | "i8" => Ok(Precision::I8),
             other => Err(format!("qwenvl: unknown precision {other:?} (fp32, int8)")),
+        }
+    }
+
+    /// The tier `weights` is held at when no request names one: the encoding
+    /// it stores. A GGUF whose decoder linears are quantized (`Q8_0`, a
+    /// K-quant) is int8: `Q8_0` codes are kept as stored, and any other
+    /// quantized type is re-encoded quant to quant, as the load log states.
+    /// Anything else (a GGUF of F32/F16/BF16 linears, a safetensors
+    /// directory) has no narrower tier in this decoder and is fp32.
+    pub fn stored(weights: &str) -> Result<Precision, String> {
+        match classify_source(weights)? {
+            Source::Gguf(files) if files.decoder_is_quantized()? => Ok(Precision::I8),
+            _ => Ok(Precision::F32),
+        }
+    }
+
+    /// The tier to build `weights` at: `requested` by name when it names
+    /// one, else [`Precision::stored`]. An empty string is no request.
+    pub fn resolve(requested: Option<&str>, weights: &str) -> Result<Precision, String> {
+        match requested.filter(|name| !name.is_empty()) {
+            Some(name) => Precision::from_name(name),
+            None => Precision::stored(weights),
         }
     }
 
@@ -273,8 +299,12 @@ pub fn generate_spec() -> ActionSpec {
         )
         .param(
             // perf-number: size ratio: int8 is 1 byte against fp32's 4, not a rate
-            ParamSpec::new("precision", ParamType::Str, "decoder storage tier: fp32 (default, exact) or int8 (LOSSY, ~4x less weight traffic per token)")
-                .default(json!("fp32")),
+            ParamSpec::new(
+                "precision",
+                ParamType::Str,
+                "decoder storage tier: fp32 or int8 (int8 weights and int8 activations, ~4x less weight traffic per token); \
+                 omitted, the checkpoint's stored encoding (int8 for a quantized GGUF, else fp32)",
+            ),
         )
         .param(ParamSpec::new(
             "fps",
@@ -338,8 +368,9 @@ pub fn lora_train_spec() -> ActionSpec {
 pub fn manifest() -> Manifest {
     Manifest::new(
         MODEL,
-        "Qwen3-VL -- image + text in, text out. Validation-tier: fp32 weights by default \
-         (int8 decoder opt-in), temperature/top-k/top-p sampling (greedy by default), \
+        "Qwen3-VL -- image + text in, text out. Validation-tier: the decoder is held at the tier the \
+         checkpoint stores by default (int8 weights and activations for a quantized GGUF, else fp32), \
+         temperature/top-k/top-p sampling (greedy by default), \
          one request at a time (no batching), context capacity set by the `ctx` param \
          (clamped to the checkpoint's own declared max_position_embeddings). \
          `lora_train` fine-tunes a decoder-only LoRA adapter on a captioned-image folder.",
@@ -643,7 +674,7 @@ impl Action for GenerateAction {
             .filter(|s| !s.is_empty())
             .or_else(|| self.default_weights.clone())
             .ok_or("qwenvl generate: no checkpoint directory (pass 'weights', or configure one through the models directory)")?;
-        let precision = Precision::from_name(inv.get_str("precision").unwrap_or_default().as_str())?;
+        let precision = Precision::resolve(inv.get_str("precision").as_deref(), &dir)?;
         with_resident(&dir, Capacity::of(inv), precision, |hot| hot.generate(inv, video_frames, tool_choice, &tools, seed, progress))
     }
 }
@@ -1083,7 +1114,7 @@ fn report_tier(model: &Qwen3Vl, asked: Precision) {
             "qwenvl: WARNING: int8 was requested but this device promoted the decoder back to fp32 \
              (its capabilities cannot serve a packed int8 dot) -- this run is exact, and slow"
         ),
-        (Precision::I8, true) => eprintln!("qwenvl: decoder linears at INT8 (lossy tier, explicitly requested); vision tower fp32"),
+        (Precision::I8, true) => eprintln!("qwenvl: decoder linears at INT8 (int8 weights, activations quantized to int8 per 32-element group); vision tower fp32"),
         (Precision::F32, _) => {}
     }
 }
@@ -1759,5 +1790,54 @@ mod tests {
         assert!(px(0, 0) < 0.3, "left stays dark");
         assert!(px(7, 0) > 0.7, "right stays light");
         assert!(px(0, 3) < 0.3 && px(7, 3) > 0.7, "orientation holds across rows");
+    }
+
+    /// A weight-free llama.cpp release in `dir`: a language half whose one
+    /// decoder linear is stored as `linear`, beside its projector.
+    fn write_gguf_pair(dir: &std::path::Path, linear: checkpoint::gguf::GgmlType) -> String {
+        use checkpoint::gguf::{GgmlType, GgufValue};
+        use checkpoint::gguf_write::TensorOut;
+        std::fs::create_dir_all(dir).unwrap();
+        let kv = |pairs: &[(&str, &str)]| -> Vec<(String, GgufValue)> { pairs.iter().map(|(k, v)| (k.to_string(), GgufValue::String(v.to_string()))).collect() };
+        let elems = linear.block_elems();
+        let data = vec![0u8; linear.block_bytes()];
+        let lm = dir.join("model.gguf");
+        let weight = TensorOut { name: "blk.0.attn_q.weight".to_string(), shape: vec![elems], ty: linear.id(), data };
+        let norm = TensorOut { name: "blk.0.attn_norm.weight".to_string(), shape: vec![1], ty: GgmlType::F32.id(), data: vec![0u8; 4] };
+        checkpoint::gguf_write::write(lm.to_str().unwrap(), &kv(&[("general.architecture", crate::gguf_import::GGUF_ARCHITECTURE)]), &[weight, norm], 32).unwrap();
+        let tower = TensorOut { name: "v.patch_embd.weight".to_string(), shape: vec![1], ty: GgmlType::F32.id(), data: vec![0u8; 4] };
+        let projector = kv(&[("general.architecture", "clip"), ("clip.projector_type", crate::gguf_import::PROJECTOR_TYPE)]);
+        checkpoint::gguf_write::write(dir.join("mmproj-F16.gguf").to_str().unwrap(), &projector, &[tower], 32).unwrap();
+        lm.to_string_lossy().into_owned()
+    }
+
+    /// A quantized GGUF is served in the encoding it stores: with no
+    /// `precision` asked for, a Q8_0 decoder keeps its int8 weights rather
+    /// than being widened to fp32. fp32 stays available by name.
+    #[test]
+    fn a_quantized_gguf_defaults_to_its_stored_int8_and_fp32_is_asked_for_by_name() {
+        let dir = tmp_dir("stored-q8");
+        let lm = write_gguf_pair(&dir, checkpoint::gguf::GgmlType::Q8_0);
+        assert_eq!(Precision::resolve(None, &lm), Ok(Precision::I8), "a Q8_0 GGUF must not default to fp32");
+        assert_eq!(Precision::resolve(Some(""), &lm), Ok(Precision::I8), "an empty precision is no request");
+        assert_eq!(Precision::resolve(Some("fp32"), &lm), Ok(Precision::F32), "fp32 is an explicit choice");
+        assert_eq!(Precision::resolve(Some("int8"), &lm), Ok(Precision::I8));
+        assert!(Precision::resolve(Some("bf16"), &lm).is_err(), "an unknown tier is refused, never coerced");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A GGUF stored at full or half precision has no stored tier this
+    /// decoder holds narrower than fp32, so it loads at fp32, as does a
+    /// safetensors directory.
+    #[test]
+    fn an_unquantized_checkpoint_defaults_to_fp32() {
+        let dir = tmp_dir("stored-f16");
+        let lm = write_gguf_pair(&dir, checkpoint::gguf::GgmlType::F16);
+        assert_eq!(Precision::resolve(None, &lm), Ok(Precision::F32));
+        let hf = tmp_dir("stored-hf");
+        write_hf_config(&hf, 2, 64, 128);
+        assert_eq!(Precision::resolve(None, hf.to_str().unwrap()), Ok(Precision::F32));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&hf).ok();
     }
 }
