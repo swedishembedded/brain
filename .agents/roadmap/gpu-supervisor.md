@@ -142,7 +142,7 @@ Choices the design above left open, and what was chosen:
 * `cargo test -p brain-gpu-worker` (2 tests, real card, skip with a printed
   reason where no card opens): a quarantined card is readmitted by a real
   probe; the per-request cost (below).
-* `cargo test -p brain-residency --test hosted` (9 tests; the test binary is
+* `cargo test -p brain-residency --test hosted` (10 tests; the test binary is
   its own worker, `harness = false`): an 8 MiB blob and a 2 MiB parameter
   cross in memfds, the caller's scope reaches the worker; three progress
   frames arrive in order and a cancellation fired from a progress callback
@@ -161,7 +161,10 @@ Choices the design above left open, and what was chosen:
   that only batches closed groups declines having done nothing; a worker
   killed mid-group fails every job the group had not finished (the joined
   one included) once, keeps the finished ones' answers and quarantines its
-  card; a job that keeps reporting runs
+  card; the jobs waiting behind an open group cross to the worker to be
+  screened, and only the one its model can never run is refused through the
+  parent's feed, by its ticket and with the model's reason; a job that keeps
+  reporting runs
   past a 600 ms run deadline in the same worker, and one that goes silent
   fails at it and quarantines its card; the worker mode refuses a
   non-socket stdin, a first request that is not `hello`, another protocol
@@ -171,13 +174,16 @@ Choices the design above left open, and what was chosen:
   progress, caller cancellation, a deadline that progress renews, and a
   worker that may die or wedge, with jobs sent one per request, two to a
   `batch` request, or as an open `group` that up to two late jobs join
-  through `take`/`joined`, finish through `done` and end through
-  `close`/`closed` (about 730 thousand states over up to three jobs and one
-  fault): every job answered once, `cancelled` only when its
-  caller asked and never for a job that ran to completion, no cancellation
-  that reached the worker dropped, a deadline kills only a silent worker,
-  no late job left waiting for a group that ended healthy, and from every
-  state an end is reachable (no cycle starves a job); twelve
+  through `take`/`joined`, that screens the jobs still waiting through
+  `screen`/`waiting`/`refused` (one late job may never run), finish through
+  `done` and end through `close`/`closed` (about 1.3 million states over up
+  to three jobs and one fault): every job answered once, `cancelled` only
+  when its caller asked and never for a job that ran to completion, no
+  cancellation that reached the worker dropped, a deadline kills only a
+  silent worker, a job refused only if it can never run and never joined, a
+  job that can never run never joining once the worker screened it, no late
+  job left waiting for a group that ended healthy, and from every state an
+  end is reachable (no cycle starves a job); fifteen
   deliberate bugs are each caught (registering the token when the run
   starts rather than when it is read, clearing it unconditionally after the
   answer, answering `cancelled` when the cancel is sent, freeing the lane at
@@ -186,7 +192,9 @@ Choices the design above left open, and what was chosen:
   a token registered for only the group's first job, a joined job's token
   registered when `take` returns rather than when `joined` is read, a fault
   answering finished jobs again, a fault forgetting the joined jobs, a
-  worker ending its group on `closed false`).
+  worker ending its group on `closed false`, a worker refusing every job it
+  is shown, a lane dropping the verdicts, a lane answering a refused job
+  and leaving it waiting).
 * `cargo test -p brain-cli --test it worker_hosted` (4 tests, the three
   device ones skip without a GPU): the worker mode is absent from `brain
   help` and refused from a terminal; a tiny Laya and a tiny decide
@@ -352,7 +360,10 @@ runs it, with per-job progress, cancellation and results), late joins
 executor's `JobFeed` through `take`/`joined`, `done` and `close`/`closed`
 frames; each
 `take` is one round trip, about the protocol's 18 us, paid between decode
-steps), caller cancellation, blobs in and out through memfds, envelopes and answers of
+steps), screening the jobs waiting to join (`screen` answered `waiting`
+with the jobs not screened yet, the worker's instance checks each and
+`refused` has the parent's feed turn the doomed ones away at once; one more
+round trip per step for a family that screens every step), caller cancellation, blobs in and out through memfds, envelopes and answers of
 any size, panics answered as job errors.
 
 * **Adapters.** The adapter registry, bank and release following live in
@@ -381,11 +392,6 @@ any size, panics answered as job errors.
   larger context needs it measured there (a probe worker could report its
   own context's footprint at startup), and a worker's host memory is not
   charged at all.
-* **Screening joiners.** `JobFeed::screen` is not forwarded: the worker's
-  feed refuses nothing, so a late job that can never run (a prompt longer
-  than the instance's context) waits for a slot instead of being refused at
-  once. Forwarding it needs a round trip carrying the waiting jobs out and
-  the verdicts back.
 * **Models supplied on demand.** `resident_for_local` (the `StoreSupplier`
   path that builds a model a request names but the scan did not serve)
   builds in process; it needs the scan's `worker_hosting`.

@@ -27,9 +27,12 @@
 //!   arrive in the parent's queue at any time. Between steps the worker's
 //!   `run_open` asks for joiners (`take`, answered `joined` with what the
 //!   parent's `JobFeed` gave), finishes each job as soon as it is done
-//!   (`done`), and once it holds nothing asks to close (`close`, answered
-//!   `closed true` only when no job is waiting); a job that arrives after
-//!   the close is the next group's.
+//!   (`done`), screens the jobs still waiting to join (`screen`, answered
+//!   `waiting` with the ones not screened yet; the worker's check turns away
+//!   the ones that can never run, and `refused` has the parent refuse them),
+//!   and once it holds nothing asks to close (`close`, answered `closed true`
+//!   only when no job is waiting); a job that arrives after the close is the
+//!   next group's. The last `doomed` late jobs can never run.
 //!
 //! The caller of each job may ask to cancel it at any time; the worker may
 //! be killed, or wedge (its request loop stops inside the driver while its
@@ -53,6 +56,9 @@
 //!   joining or running) is never dropped;
 //! * a deadline kills only a worker that went silent (wedged), never one
 //!   that kept reporting;
+//! * a job is refused only if it can never run and never joined the group;
+//! * a job that can never run, once the worker has screened it, never joins
+//!   the group (it is refused instead);
 //!
 //! in every state with no successor:
 //!
@@ -85,6 +91,7 @@
 //! | `Finish` | the model finishing one job (cancelled only if its token fired); in an open group `WorkerFeed::finish` writes `done` |
 //! | `Take` / `Joined` | `WorkerFeed::take` writing `take` and taking the `joined` reply off the request loop's channel |
 //! | `Close` / `Closed` | `WorkerFeed::close` writing `close` and taking the `closed` reply |
+//! | `Screen` / `Screened` | `WorkerFeed::screen` writing `screen`, taking the `waiting` reply and writing `refused` for the jobs its check turned away; the lane answers `screen` with `JobFeed::unscreened` and applies `refused` through `JobFeed::refuse` |
 //! | `Answer` | `Host::batch` answering with every result, `Host::group` answering that it ran the group |
 //! | `Cleared` | `Host::handle` clearing `Current` if it still names this request |
 //! | `Crash` | the environment: the worker dies |
@@ -98,6 +105,8 @@ enum Answer {
     Fault,
     /// The group ended without finishing the job.
     Unfinished,
+    /// Refused while waiting to join: it can never run.
+    Refused,
 }
 
 /// A request is named by its index; request `r` holds jobs
@@ -111,6 +120,8 @@ enum ToWorker {
     Joined(Option<usize>),
     /// The reply to `close`.
     Closed(bool),
+    /// The reply to `screen`: the waiting jobs not screened yet, as a set of job bits.
+    Waiting(u8),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -120,6 +131,9 @@ enum ToParent {
     Done(usize, Answer),
     Take,
     Close,
+    Screen,
+    /// The waiting jobs the worker's check turned away, as job bits.
+    Refused(u8),
     /// The request's answer: for a closed group each of its jobs' results, as
     /// `produced` holds them.
     Answer(usize),
@@ -131,6 +145,7 @@ enum ToLoop {
     Run(usize),
     Joined(Option<usize>),
     Closed(bool),
+    Waiting(u8),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -141,6 +156,8 @@ enum Exec {
     Joining(usize),
     /// An open group waiting for the reply to its `close`.
     Closing(usize),
+    /// An open group waiting for the reply to its `screen`.
+    Screening(usize),
     /// Answered the request, has not cleared `Current` yet.
     Clearing(usize),
 }
@@ -163,6 +180,12 @@ struct State {
     waiting: VecDeque<usize>,
     /// `JobFeed::close` returned true: later arrivals are the next group's.
     closed: bool,
+    /// `JobFeed::unscreened` handed the waiting job out: it is not asked about again.
+    screened: Vec<bool>,
+    /// The lane's tickets for the jobs its last `waiting` reply carried.
+    screening: u8,
+    /// A job that can never run joined the group after the worker screened it.
+    doomed_joined: bool,
     /// The request in flight faulted (its worker died or was killed).
     faulted: bool,
     to_worker: VecDeque<ToWorker>,
@@ -209,15 +232,22 @@ struct Bounds {
     faults: u8,
     /// Ticks in one deadline.
     deadline: u8,
+    /// The last this many late jobs can never run.
+    doomed: usize,
 }
 
 impl Bounds {
     fn closed(jobs: usize, batch: usize, faults: u8) -> Bounds {
-        Bounds { jobs, batch, late: 0, faults, deadline: 2 }
+        Bounds { jobs, batch, late: 0, faults, deadline: 2, doomed: 0 }
     }
 
-    fn open(own: usize, late: usize, faults: u8) -> Bounds {
-        Bounds { jobs: own + late, batch: own, late, faults, deadline: 2 }
+    fn open(own: usize, late: usize, doomed: usize, faults: u8) -> Bounds {
+        assert!(doomed <= late, "only late jobs are screened");
+        Bounds { jobs: own + late, batch: own, late, faults, deadline: 2, doomed }
+    }
+
+    fn is_doomed(&self, j: usize) -> bool {
+        self.is_late(j) && j >= self.jobs - self.doomed
     }
 
     fn is_open(&self) -> bool {
@@ -270,6 +300,16 @@ enum Mutation {
     ForgetJoined,
     /// The worker ends the group on `closed false` too.
     IgnoreClosedFalse,
+    /// The worker refuses every waiting job it is shown, not only the ones its check turns away.
+    RefuseUnchecked,
+    /// The lane reads `refused` and refuses nothing.
+    DropVerdicts,
+    /// The lane answers a refused job and leaves it waiting.
+    RefuseLeavesWaiting,
+}
+
+fn bit(j: usize) -> u8 {
+    1 << j
 }
 
 fn answer(t: &mut State, job: usize, a: Answer) {
@@ -355,6 +395,7 @@ fn lane(s: &State, b: Bounds, m: Mutation, out: &mut Vec<(String, State)>) {
                 let joined = t.waiting.pop_front();
                 if let Some(j) = joined {
                     t.in_group[j] = true;
+                    t.doomed_joined |= b.is_doomed(j) && t.screened[j];
                 }
                 t.to_worker.push_back(ToWorker::Joined(joined));
             }
@@ -362,6 +403,32 @@ fn lane(s: &State, b: Bounds, m: Mutation, out: &mut Vec<(String, State)>) {
                 let empty = t.waiting.is_empty();
                 t.closed |= empty;
                 t.to_worker.push_back(ToWorker::Closed(empty));
+            }
+            ToParent::Screen => {
+                let mut handed = 0;
+                for &j in &t.waiting {
+                    if !t.screened[j] {
+                        t.screened[j] = true;
+                        handed |= bit(j);
+                    }
+                }
+                t.screening = handed;
+                t.to_worker.push_back(ToWorker::Waiting(handed));
+            }
+            ToParent::Refused(refused) => {
+                assert_eq!(refused & !t.screening, 0, "a verdict names a job the last waiting reply did not carry");
+                t.screening = 0;
+                for j in (0..b.jobs).filter(|&j| refused & bit(j) != 0) {
+                    if m == Mutation::DropVerdicts {
+                        continue;
+                    }
+                    if let Some(at) = t.waiting.iter().position(|&w| w == j) {
+                        if m != Mutation::RefuseLeavesWaiting {
+                            t.waiting.remove(at);
+                        }
+                        answer(&mut t, j, Answer::Refused);
+                    }
+                }
             }
             ToParent::Answer(i) => {
                 assert_eq!(i, r, "an answer is about the request in flight");
@@ -425,6 +492,8 @@ fn reader(s: &State, b: Bounds, m: Mutation, out: &mut Vec<(String, State)>) {
             }
         }
         ToWorker::Closed(c) => t.queued.push_back(ToLoop::Closed(c)),
+        // Waiting jobs are not the group's: no token of theirs is registered.
+        ToWorker::Waiting(w) => t.queued.push_back(ToLoop::Waiting(w)),
         ToWorker::Cancel(j) => {
             if t.current.is_some() && t.registered[j] {
                 if m == Mutation::CancelWholeRequest {
@@ -439,7 +508,7 @@ fn reader(s: &State, b: Bounds, m: Mutation, out: &mut Vec<(String, State)>) {
                 let queued = t.queued.iter().any(|q| match *q {
                     ToLoop::Run(r) => b.jobs_of(r).contains(&j),
                     ToLoop::Joined(x) => x == Some(j),
-                    ToLoop::Closed(_) => false,
+                    ToLoop::Closed(_) | ToLoop::Waiting(_) => false,
                 });
                 let running = t.held[j] && t.produced[j].is_none();
                 if queued || running {
@@ -498,6 +567,11 @@ fn request_loop(s: &State, b: Bounds, m: Mutation, out: &mut Vec<(String, State)
                     t.to_parent.push_back(ToParent::Take);
                     t.exec = Exec::Joining(r);
                     out.push(("Take".to_string(), t));
+                    // And asks whether the jobs still waiting can ever run.
+                    let mut t = s.clone();
+                    t.to_parent.push_back(ToParent::Screen);
+                    t.exec = Exec::Screening(r);
+                    out.push(("Screen".to_string(), t));
                 }
                 if unfinished.is_empty() {
                     let mut t = s.clone();
@@ -537,6 +611,19 @@ fn request_loop(s: &State, b: Bounds, m: Mutation, out: &mut Vec<(String, State)
                     t.exec = Exec::Running(r);
                 }
                 out.push((format!("Closed({closed})"), t));
+            }
+        }
+        Exec::Screening(r) => {
+            if let Some(&ToLoop::Waiting(shown)) = s.queued.front() {
+                let mut t = s.clone();
+                t.queued.pop_front();
+                let doomed: u8 = (0..b.jobs).filter(|&j| b.is_doomed(j)).map(bit).sum();
+                let refused = if m == Mutation::RefuseUnchecked { shown } else { shown & doomed };
+                if refused != 0 {
+                    t.to_parent.push_back(ToParent::Refused(refused));
+                }
+                t.exec = Exec::Running(r);
+                out.push((format!("Screened({shown:#b})"), t));
             }
         }
         Exec::Clearing(r) => {
@@ -618,7 +705,7 @@ fn kill(t: &mut State) {
     t.exec = Exec::Idle;
 }
 
-fn check_invariants(s: &State) -> Result<(), String> {
+fn check_invariants(s: &State, b: Bounds) -> Result<(), String> {
     if let Some(j) = s.answers.iter().position(|&n| n > 1) {
         return Err(format!("j{j} answered {} times", s.answers[j]));
     }
@@ -632,6 +719,15 @@ fn check_invariants(s: &State) -> Result<(), String> {
         if *a == Some(Answer::Unfinished) {
             return Err(format!("j{j} was in a group that ended without finishing it"));
         }
+        if *a == Some(Answer::Refused) && !b.is_doomed(j) {
+            return Err(format!("j{j} was refused though it can run"));
+        }
+        if *a == Some(Answer::Refused) && s.in_group[j] {
+            return Err(format!("j{j} was refused after it joined the group"));
+        }
+    }
+    if s.doomed_joined {
+        return Err("a job that can never run joined the group after the worker screened it".into());
     }
     if s.dropped_cancel {
         return Err("a cancellation reached the worker while it held the job and was dropped".into());
@@ -672,6 +768,9 @@ fn explore(b: Bounds, m: Mutation) -> Result<usize, String> {
         arrived: vec![false; b.jobs],
         waiting: VecDeque::new(),
         closed: false,
+        screened: vec![false; b.jobs],
+        screening: 0,
+        doomed_joined: false,
         faulted: false,
         to_worker: VecDeque::new(),
         to_parent: VecDeque::new(),
@@ -710,7 +809,7 @@ fn explore(b: Bounds, m: Mutation) -> Result<usize, String> {
     let mut at = 0;
     while at < states.len() {
         let s = states[at].clone();
-        check_invariants(&s).map_err(|e| format!("{e}\n  {b:?} {m:?}\n  trace: {}", trace(&parent, at)))?;
+        check_invariants(&s, b).map_err(|e| format!("{e}\n  {b:?} {m:?}\n  trace: {}", trace(&parent, at)))?;
         let next = successors(&s, b, m);
         if next.is_empty() {
             check_terminal(&s, b).map_err(|e| format!("{e}\n  {b:?} {m:?}\n  trace: {}", trace(&parent, at)))?;
@@ -758,7 +857,7 @@ fn explore(b: Bounds, m: Mutation) -> Result<usize, String> {
 fn explore_all(m: Mutation) -> Result<usize, String> {
     let mut states = 0;
     for faults in 0..=1 {
-        for b in [Bounds::closed(1, 1, faults), Bounds::closed(2, 1, faults), Bounds::closed(3, 1, faults), Bounds::closed(2, 2, faults), Bounds::closed(3, 2, faults), Bounds::open(1, 1, faults), Bounds::open(1, 2, faults), Bounds::open(2, 1, faults)] {
+        for b in [Bounds::closed(1, 1, faults), Bounds::closed(2, 1, faults), Bounds::closed(3, 1, faults), Bounds::closed(2, 2, faults), Bounds::closed(3, 2, faults), Bounds::open(1, 1, 0, faults), Bounds::open(1, 1, 1, faults), Bounds::open(1, 2, 1, faults), Bounds::open(2, 1, 1, faults)] {
             states += explore(b, m)?;
         }
     }
@@ -787,6 +886,9 @@ fn every_mutation_of_the_exchange_is_caught() {
         Mutation::FaultAnswersFinished,
         Mutation::ForgetJoined,
         Mutation::IgnoreClosedFalse,
+        Mutation::RefuseUnchecked,
+        Mutation::DropVerdicts,
+        Mutation::RefuseLeavesWaiting,
     ];
     for m in mutations {
         let why = explore_all(m).err().unwrap_or_else(|| panic!("{m:?} broke the exchange and the model did not notice"));

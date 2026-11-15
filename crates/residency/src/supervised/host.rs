@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 use capability::{CancelToken, Progress};
 use serde_json::{json, Value};
 
-use super::codec::{decode_jobs, encode_done, encode_progress, encode_results, object};
+use super::codec::{decode_jobs, encode_done, encode_progress, encode_refused, encode_results, object};
 use super::{parse_device_label, HostedFamily, PANICKED, PROTOCOL};
 use crate::{Instance, InstanceKey};
 
@@ -97,12 +97,12 @@ pub fn host_on(sock: UnixStream, families: &[HostedFamily]) -> i32 {
 }
 
 /// How many jobs a frame announces before its JSON: `<k>` in
-/// `batch <action> <k> <jobs>`, `group <action> <k> <jobs>` and
-/// `joined <k> <jobs>`.
+/// `batch <action> <k> <jobs>`, `group <action> <k> <jobs>`,
+/// `joined <k> <jobs>` and `waiting <k> <jobs>`.
 fn announced_jobs(verb: &str, rest: &str) -> Option<usize> {
     match verb {
         "batch" | "group" => rest.split(' ').nth(1)?.parse().ok(),
-        "joined" => rest.split(' ').next()?.parse().ok(),
+        "joined" | "waiting" => rest.split(' ').next()?.parse().ok(),
         _ => Some(0),
     }
 }
@@ -171,7 +171,9 @@ fn read_requests(sock: UnixStream, current: &Current, tx: &std::sync::mpsc::Send
                 }
                 "batch" | "group" => *current = Some((id, tokens.clone())),
                 // The jobs that joined a running group follow its own, in
-                // the order they joined, as the parent numbers them.
+                // the order they joined, as the parent numbers them. Jobs
+                // only `waiting` to join are not the group's: a cancel cannot
+                // name them, so their tokens are registered nowhere.
                 "joined" => {
                     if let Some((running, held)) = current.as_mut() {
                         if *running == id {
@@ -418,10 +420,11 @@ impl Host<'_> {
 }
 
 /// The worker's side of the parent's [`crate::JobFeed`] for one open group:
-/// `take` and `close` are round trips to the parent's feed (`take <max>`
-/// answered `joined`, `close` answered `closed`), `finish` is one `done`
-/// frame. Every frame is about the group's request and written by the
-/// request loop, the socket's one writer.
+/// `take`, `screen` and `close` are round trips to the parent's feed
+/// (`take <max>` answered `joined`, `screen` answered `waiting` and followed
+/// by `refused` when the check turns a job away, `close` answered `closed`),
+/// `finish` is one `done` frame. Every frame is about the group's request and
+/// written by the request loop, the socket's one writer.
 struct WorkerFeed<'h, 'a> {
     host: &'h Host<'a>,
     id: u64,
@@ -466,6 +469,45 @@ impl crate::JobFeed for WorkerFeed<'_, '_> {
                     Ok(payload) => self.host.send_frame(self.id, "done", &payload, &fds),
                     Err(_) => Err(Step::Exit(0)),
                 }
+            }
+        };
+        self.gone.set(sent.is_err());
+    }
+
+    /// The check runs here, in the worker, on copies of the parent's waiting
+    /// jobs; the parent's feed refuses the ones it turns away.
+    fn screen(&mut self, check: &mut dyn FnMut(&capability::Invocation) -> Option<String>) {
+        if self.gone.get() {
+            return;
+        }
+        if self.host.send(&format!("{} screen", self.id), &[]).is_err() {
+            self.gone.set(true);
+            return;
+        }
+        let Some(Incoming { rest, fds, tokens, .. }) = self.host.reply(self.id, "waiting", self.gone) else { return };
+        let Some((_, jobs)) = rest.split_once(' ') else {
+            eprintln!("brain worker: a waiting frame without its jobs");
+            self.gone.set(true);
+            return;
+        };
+        let waiting = match decode_jobs(jobs, fds, tokens) {
+            Ok(invs) => invs,
+            Err(why) => {
+                eprintln!("brain worker: the waiting jobs break the protocol ({why})");
+                self.gone.set(true);
+                return;
+            }
+        };
+        let refused: Vec<(usize, String)> = waiting.iter().enumerate().filter_map(|(job, inv)| check(inv).map(|why| (job, why))).collect();
+        if refused.is_empty() {
+            return;
+        }
+        let mut fds = Vec::new();
+        let sent = match encode_refused(&refused, &mut fds) {
+            Ok(payload) => self.host.send_frame(self.id, "refused", &payload, &fds),
+            Err(e) => {
+                eprintln!("brain worker: the verdicts could not be sent: {e}");
+                Err(Step::Exit(0))
             }
         };
         self.gone.set(sent.is_err());

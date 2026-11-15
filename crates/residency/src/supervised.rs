@@ -57,8 +57,15 @@
 //! with the jobs that joined (numbered after the group's own, in order; the
 //! reader registers their tokens as it reads them), `<id> done[+<n>] <json>`
 //! (`{"job": i}` and its result) finishes one job at once, and `<id> close`
-//! is answered `<id> closed true|false`. A worker that dies mid-group fails
-//! every job the group had not finished, the joined ones included, once.
+//! is answered `<id> closed true|false`. The feed's screening crosses the
+//! same way: `<id> screen` is answered `<id> waiting[+<n>] <k> <jobs>` with
+//! the jobs waiting to join that were not screened yet (their tokens are not
+//! registered: they are not the group's), the worker's instance asks its own
+//! check of each, and `<id> refused <json>` (`{"refused": [{"job", "why"}]}`,
+//! `job` its index in that `waiting` frame; sent only when one is refused)
+//! has the parent's feed refuse each at once. A worker that dies mid-group
+//! fails every job the group had not finished, the joined ones included,
+//! once.
 //!
 //! A frame's blobs travel in one sealed memfd beside it, never
 //! on the line; an envelope or answer too long for a line travels the same
@@ -81,7 +88,7 @@ use serde_json::{json, Value};
 use crate::{AdapterIdentity, Device, Instance, InstanceKey, JobFeed, MemCost, ResidentModel, Tier};
 
 /// The protocol version a worker and its parent must agree on (`hello`).
-pub const PROTOCOL: u32 = 2;
+pub const PROTOCOL: u32 = 3;
 
 #[cfg(unix)]
 mod codec;
@@ -462,12 +469,15 @@ struct JobsTalk<'a> {
     own: usize,
     progress: &'a mut dyn FnMut(usize, Progress),
     feed: Option<&'a mut dyn JobFeed>,
+    /// The feed's tickets for the waiting jobs the last `waiting` frame
+    /// carried, by their index in it, until the worker's verdicts on them.
+    screening: Vec<u64>,
 }
 
 #[cfg(unix)]
 impl<'a> JobsTalk<'a> {
     fn new(invs: &[Invocation], progress: &'a mut dyn FnMut(usize, Progress)) -> JobsTalk<'a> {
-        let mut talk = JobsTalk { tokens: Vec::new(), cancel_sent: Vec::new(), finished: Vec::new(), own: invs.len(), progress, feed: None };
+        let mut talk = JobsTalk { tokens: Vec::new(), cancel_sent: Vec::new(), finished: Vec::new(), own: invs.len(), progress, feed: None, screening: Vec::new() };
         talk.know(invs);
         talk
     }
@@ -538,11 +548,29 @@ impl gpu_supervisor::Conversation for JobsTalk<'_> {
                 self.feed(kind)?.finish(job, result);
                 Ok(Vec::new())
             }
+            "screen" => {
+                let (tickets, waiting): (Vec<u64>, Vec<Invocation>) = self.feed(kind)?.unscreened().into_iter().unzip();
+                let mut fds = Vec::new();
+                let envelope = codec::encode_jobs(&waiting, &mut fds)?;
+                let verb = if fds.is_empty() { "waiting".to_string() } else { format!("waiting+{}", fds.len()) };
+                self.screening = tickets;
+                Ok(vec![Outgoing { line: format!("{verb} {} {envelope}", waiting.len()), fds }])
+            }
+            "refused" => {
+                let verdicts = codec::decode_refused(payload, fds).map_err(|e| format!("the worker's verdicts break the protocol ({e})"))?;
+                let tickets = std::mem::take(&mut self.screening);
+                let feed = self.feed(kind)?;
+                for (job, why) in verdicts {
+                    let ticket = *tickets.get(job).ok_or_else(|| format!("a verdict on waiting job {job} of {}", tickets.len()))?;
+                    feed.refuse(ticket, why);
+                }
+                Ok(Vec::new())
+            }
             "close" => {
                 let closed = self.feed(kind)?.close();
                 Ok(vec![Outgoing::line(format!("closed {closed}"))])
             }
-            other => Err(format!("a group takes progress, take, done and close frames, not {other:?}")),
+            other => Err(format!("a group takes progress, take, done, screen, refused and close frames, not {other:?}")),
         }
     }
 

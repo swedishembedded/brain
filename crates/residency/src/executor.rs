@@ -2152,35 +2152,25 @@ impl crate::model::JobFeed for GroupFeed {
         invs
     }
 
-    fn screen(&mut self, check: &mut dyn FnMut(&Invocation) -> Option<String>) {
-        // Ask outside the inbox lock: checking a prompt means tokenizing it, and the
-        // dispatcher pushes under that lock.
-        let unasked: Vec<(u64, Invocation)> = {
+    /// Copies, so a check runs outside the inbox lock: checking a prompt means
+    /// tokenizing it, and the dispatcher pushes under that lock.
+    fn unscreened(&mut self) -> Vec<(u64, Invocation)> {
+        let mut st = self.inbox.lock();
+        st.jobs.iter_mut().filter(|p| !p.screened).map(|p| {
+            p.screened = true;
+            (p.id, p.inv.clone())
+        }).collect()
+    }
+
+    fn refuse(&mut self, ticket: u64, why: String) {
+        let refused = {
             let mut st = self.inbox.lock();
-            st.jobs.iter_mut().filter(|p| !p.screened).map(|p| {
-                p.screened = true;
-                (p.id, p.inv.clone())
-            }).collect()
+            let at = st.jobs.iter().position(|p| p.id == ticket);
+            let refused = at.map(|at| st.jobs.remove(at));
+            st.taken += usize::from(refused.is_some());
+            refused
         };
-        if unasked.is_empty() {
-            return;
-        }
-        let verdicts: Vec<(u64, String)> = unasked.iter().filter_map(|(id, inv)| check(inv).map(|why| (*id, why))).collect();
-        if verdicts.is_empty() {
-            return;
-        }
-        let refused: Vec<(Pending, String)> = {
-            let mut st = self.inbox.lock();
-            let mut out = Vec::new();
-            for (id, why) in verdicts {
-                if let Some(at) = st.jobs.iter().position(|p| p.id == id) {
-                    out.push((st.jobs.remove(at), why));
-                }
-            }
-            st.taken += out.len();
-            out
-        };
-        for (mut p, why) in refused {
+        if let Some(mut p) = refused {
             if let Some(f) = p.on_admit.take() {
                 f();
             }

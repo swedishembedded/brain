@@ -116,8 +116,8 @@ impl Instance for TestInstance {
     }
 
     /// `open` is a model that batches continuously: between steps it takes
-    /// the jobs that joined, finishes each job as it is done, and ends once
-    /// the feed closes. A job asked to `wait` waits for its cancellation; one
+    /// the jobs that joined, turns away the waiting ones asked to be `never`
+    /// run, finishes each job as it is done, and ends once the feed closes. A job asked to `wait` waits for its cancellation; one
     /// asked to `block` never returns, as a wedged driver call.
     fn run_open(&mut self, action: &str, invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress), feed: &mut dyn JobFeed) -> bool {
         if action != "open" {
@@ -127,6 +127,7 @@ impl Instance for TestInstance {
         let mut finished = 0;
         loop {
             jobs.extend(feed.take(4));
+            feed.screen(&mut |inv| inv.params.get("never").map(|_| format!("job {} can never run here", inv.params["n"])));
             for (i, inv) in jobs.iter().enumerate().skip(finished) {
                 let mut step = Progress::step(1, 1, format!("job {i}"));
                 step.event = Some(json!({ "pid": std::process::id() }));
@@ -344,6 +345,15 @@ struct TestFeed {
     refuse_closes: usize,
     finished: Vec<(usize, ActionResult)>,
     closes: usize,
+    /// Jobs waiting behind the group, by ticket, handed out to be screened once.
+    waiting: Vec<(u64, Invocation)>,
+    refused: Vec<(u64, String)>,
+}
+
+impl TestFeed {
+    fn new(rounds: Vec<Vec<Invocation>>, refuse_closes: usize) -> TestFeed {
+        TestFeed { rounds, refuse_closes, finished: Vec::new(), closes: 0, waiting: Vec::new(), refused: Vec::new() }
+    }
 }
 
 impl JobFeed for TestFeed {
@@ -359,6 +369,15 @@ impl JobFeed for TestFeed {
     fn finish(&mut self, index: usize, result: ActionResult) {
         assert!(self.finished.iter().all(|(i, _)| *i != index), "job {index} was finished twice");
         self.finished.push((index, result));
+    }
+
+    fn unscreened(&mut self) -> Vec<(u64, Invocation)> {
+        std::mem::take(&mut self.waiting)
+    }
+
+    fn refuse(&mut self, ticket: u64, why: String) {
+        assert!(self.refused.iter().all(|(t, _)| *t != ticket), "ticket {ticket} was refused twice");
+        self.refused.push((ticket, why));
     }
 
     fn close(&mut self) -> bool {
@@ -386,12 +405,7 @@ fn an_open_group_takes_late_joiners_and_finishes_each_job_through_the_feed() {
     let mut cancelled = Invocation::new().set("n", json!(3)).set("wait", json!(true));
     cancelled.cancel = CancelToken::armed();
     cancelled.cancel.cancel();
-    let mut feed = TestFeed {
-        rounds: vec![vec![Invocation::new().set("n", json!(2)), cancelled], vec![Invocation::new().set("n", json!(4))]],
-        refuse_closes: 1,
-        finished: Vec::new(),
-        closes: 0,
-    };
+    let mut feed = TestFeed::new(vec![vec![Invocation::new().set("n", json!(2)), cancelled], vec![Invocation::new().set("n", json!(4))]], 1);
     let own = [Invocation::new().set("n", json!(0)), Invocation::new().set("n", json!(1))];
     let mut seen: Vec<(usize, String)> = Vec::new();
     assert!(instance.run_open("open", &own, &mut |i, p| seen.push((i, p.message)), &mut feed), "the worker ran the group");
@@ -405,9 +419,27 @@ fn an_open_group_takes_late_joiners_and_finishes_each_job_through_the_feed() {
     assert_eq!(result_of(&feed, 3).as_ref().err().map(String::as_str), Some(failure::CANCELLED), "the late job asked to cancel was cancelled");
     assert_eq!(feed.closes, 2, "the refused close kept the group going");
 
-    let mut feed = TestFeed { rounds: Vec::new(), refuse_closes: 0, finished: Vec::new(), closes: 0 };
+    let mut feed = TestFeed::new(Vec::new(), 0);
     assert!(!instance.run_open("batch", &own, &mut |_, _| {}, &mut feed), "a model that only batches closed groups runs none open");
     assert!(feed.finished.is_empty() && feed.closes == 0, "and did nothing");
+    assert_eq!(health.status(&Device::Gpu(0)).faults, 0);
+}
+
+/// The jobs waiting behind an open group cross to the worker to be screened
+/// once: the one its model can never run is refused through the parent's
+/// feed, by its ticket and with the model's reason, while the group runs;
+/// the one it can run keeps waiting for a slot, and the group's own jobs are
+/// unaffected.
+fn an_open_group_screens_the_jobs_waiting_to_join_it_in_its_worker() {
+    let health = health();
+    let mut instance = hosted("m", &health, DEADLINES).activate(&InstanceKey::new("m", "default"), Device::Gpu(0)).expect("the worker opens");
+    let mut feed = TestFeed::new(Vec::new(), 0);
+    feed.waiting = vec![(17, Invocation::new().set("n", json!(5)).set("never", json!(true))), (18, Invocation::new().set("n", json!(6)))];
+    let own = [Invocation::new().set("n", json!(0))];
+    assert!(instance.run_open("open", &own, &mut |_, _| {}, &mut feed), "the worker ran the group");
+    assert_eq!(feed.refused, [(17, "job 5 can never run here".to_string())], "only the job that can never run was refused, with the model's reason");
+    assert!(result_of(&feed, 0).is_ok(), "the group's own job ran");
+    assert_eq!(feed.finished.len(), 1, "a refused job is not one of the group's");
     assert_eq!(health.status(&Device::Gpu(0)).faults, 0);
 }
 
@@ -417,7 +449,7 @@ fn an_open_group_takes_late_joiners_and_finishes_each_job_through_the_feed() {
 fn a_worker_killed_mid_group_fails_its_unfinished_jobs_once() {
     let health = health();
     let mut instance = hosted("m", &health, DEADLINES).activate(&InstanceKey::new("m", "default"), Device::Gpu(0)).expect("the worker opens");
-    let mut feed = TestFeed { rounds: vec![vec![Invocation::new().set("block", json!(true))]], refuse_closes: 0, finished: Vec::new(), closes: 0 };
+    let mut feed = TestFeed::new(vec![vec![Invocation::new().set("block", json!(true))]], 0);
     let own = [Invocation::new().set("n", json!(0))];
     let handled = instance.run_open("open", &own, &mut |i, p| {
         if i == 1 {
@@ -498,6 +530,7 @@ const TESTS: &[(&str, fn())] = &[
     ("killing_the_worker_mid_job_fails_that_job_and_the_next_rebuilds_on_a_healthy_card", killing_the_worker_mid_job_fails_that_job_and_the_next_rebuilds_on_a_healthy_card),
     ("a_group_crosses_as_one_batch_with_per_job_progress_results_and_cancellation", a_group_crosses_as_one_batch_with_per_job_progress_results_and_cancellation),
     ("an_open_group_takes_late_joiners_and_finishes_each_job_through_the_feed", an_open_group_takes_late_joiners_and_finishes_each_job_through_the_feed),
+    ("an_open_group_screens_the_jobs_waiting_to_join_it_in_its_worker", an_open_group_screens_the_jobs_waiting_to_join_it_in_its_worker),
     ("a_worker_killed_mid_group_fails_its_unfinished_jobs_once", a_worker_killed_mid_group_fails_its_unfinished_jobs_once),
     ("a_job_that_keeps_reporting_outlives_the_run_deadline_and_a_silent_one_is_killed_at_it", a_job_that_keeps_reporting_outlives_the_run_deadline_and_a_silent_one_is_killed_at_it),
     ("a_panic_in_model_code_fails_the_job_without_quarantining_the_card", a_panic_in_model_code_fails_the_job_without_quarantining_the_card),

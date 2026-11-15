@@ -234,6 +234,32 @@ pub(super) fn decode_done(payload: &str, fds: Vec<OwnedFd>) -> Result<(usize, Ac
     Ok((job, result))
 }
 
+/// The worker's verdicts on the jobs a `waiting` frame carried: each refused
+/// job's index in that frame and why, `{"refused": [{"job", "why"}, ...]}`.
+pub(super) fn encode_refused(refused: &[(usize, String)], fds: &mut Vec<OwnedFd>) -> Result<String, String> {
+    let refused: Vec<Value> = refused.iter().map(|(job, why)| json!({ "job": job, "why": why })).collect();
+    pack(json!({ "refused": refused }).to_string(), fds)
+}
+
+/// The verdicts [`encode_refused`] wrote.
+pub(super) fn decode_refused(payload: &str, fds: Vec<OwnedFd>) -> Result<Vec<(usize, String)>, String> {
+    let mut fds = VecDeque::from(fds);
+    let v = unpack(payload, &mut fds)?;
+    if !fds.is_empty() {
+        return Err("verdicts carry no blobs".into());
+    }
+    let refused = object(&v, "the verdicts", &["refused"])?.get("refused").and_then(Value::as_array).ok_or("the verdicts are not a list")?;
+    refused
+        .iter()
+        .map(|r| {
+            let map = object(r, "a verdict", &["job", "why"])?;
+            let job = map.get("job").and_then(Value::as_u64).and_then(|n| usize::try_from(n).ok()).ok_or("a verdict names no job")?;
+            let why = map.get("why").and_then(Value::as_str).ok_or("a verdict gives no reason")?;
+            Ok((job, why.to_string()))
+        })
+        .collect()
+}
+
 /// The answer to a `group`: whether the worker's instance ran it open.
 pub(super) fn decode_opened(payload: &str, fds: Vec<OwnedFd>) -> Result<bool, String> {
     if !fds.is_empty() {
@@ -278,6 +304,20 @@ pub(super) fn encode_progress(job: usize, p: &Progress, fds: &mut Vec<OwnedFd>) 
 mod tests {
     use super::*;
     use capability::Media;
+
+    /// The worker's verdicts on waiting jobs survive their frame encoding, a
+    /// reason too long for a line included, and a malformed one is refused.
+    #[test]
+    fn screening_verdicts_cross_the_frame_encoding() {
+        let long = "y".repeat(gpu_supervisor::MAX_REQUEST_BYTES);
+        let verdicts = vec![(0, "too long for this instance".to_string()), (3, long.clone())];
+        let mut fds = Vec::new();
+        let text = encode_refused(&verdicts, &mut fds).unwrap();
+        assert_eq!((text.as_str(), fds.len()), ("-", 1), "a long reason travels in a descriptor");
+        assert_eq!(decode_refused(&text, fds).unwrap(), verdicts);
+        assert!(decode_refused(r#"{"refused": [{"job": 1}]}"#, Vec::new()).is_err(), "a verdict without a reason is refused");
+        assert!(decode_refused(r#"{"refused": [{"job": 1, "why": "x", "extra": 2}]}"#, Vec::new()).is_err(), "an unknown field is refused");
+    }
 
     /// A progress update and a group's results survive the trip through their
     /// frame encoding, blobs included, and an answer too long for a line goes

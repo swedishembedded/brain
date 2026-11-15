@@ -885,6 +885,12 @@ impl JobFeed for CountingFeed<'_> {
     fn screen(&mut self, check: &mut dyn FnMut(&Invocation) -> Option<String>) {
         self.inner.screen(check)
     }
+    fn unscreened(&mut self) -> Vec<(u64, Invocation)> {
+        self.inner.unscreened()
+    }
+    fn refuse(&mut self, ticket: u64, why: String) {
+        self.inner.refuse(ticket, why)
+    }
 }
 
 /// Request parsing for a family with no adapters: a function from tokenizer and

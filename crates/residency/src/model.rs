@@ -255,9 +255,31 @@ pub trait JobFeed {
     /// that has not been asked yet and answers with the error to deliver, or
     /// `None` to leave the job waiting. A refused job's caller is answered at
     /// once, however long the running jobs will take: refusing a request is not
-    /// work that should wait for a free slot. The default refuses nothing.
+    /// work that should wait for a free slot. The default asks about each job
+    /// [`Self::unscreened`] hands out and [`refuses`](Self::refuse) the ones
+    /// `check` turns away.
     fn screen(&mut self, check: &mut dyn FnMut(&Invocation) -> Option<String>) {
-        let _ = check;
+        for (ticket, inv) in self.unscreened() {
+            if let Some(why) = check(&inv) {
+                self.refuse(ticket, why);
+            }
+        }
+    }
+
+    /// The jobs waiting to join this group that have not been screened yet,
+    /// each with the ticket [`Self::refuse`] names it by; from now on they
+    /// count as screened. What [`Self::screen`] asks about, and what a feed
+    /// whose check runs elsewhere (a worker process) sends there. The default
+    /// has none.
+    fn unscreened(&mut self) -> Vec<(u64, Invocation)> {
+        Vec::new()
+    }
+
+    /// Refuse the waiting job `ticket` names (from [`Self::unscreened`]) with
+    /// `why`, answering its caller at once; nothing when it has joined the
+    /// group or left since. The default refuses nothing.
+    fn refuse(&mut self, ticket: u64, why: String) {
+        let _ = (ticket, why);
     }
 
     /// Stop accepting further jobs because the instance has nothing running.
