@@ -267,7 +267,7 @@ REAL_CONFIG = dict(
     apply_gated_attention=True,       # real LTX-2.5 value
     caption_projection=None,          # caption_proj_before_connector=true, see ltxv_dit_dump_reference.py's doc
     cross_attention_adaln=True,
-    use_prompt_adaln_single=False,
+    use_prompt_adaln_single=True,     # real LTX-2.5 value: the header carries prompt_adaln_single.*
     ff_bias=False,
     use_keyframes_abs_pos_embedding=True,
 )
@@ -289,6 +289,9 @@ def real_tensor_names(num_layers: int):
         "scale_shift_table",
         "proj_out.weight", "proj_out.bias",
         "keyframes_abs_pos_embedding",
+        "prompt_adaln_single.emb.timestep_embedder.linear_1.weight", "prompt_adaln_single.emb.timestep_embedder.linear_1.bias",
+        "prompt_adaln_single.emb.timestep_embedder.linear_2.weight", "prompt_adaln_single.emb.timestep_embedder.linear_2.bias",
+        "prompt_adaln_single.linear.weight", "prompt_adaln_single.linear.bias",
     ]
     for l in range(num_layers):
         p = f"transformer_blocks.{l}"
