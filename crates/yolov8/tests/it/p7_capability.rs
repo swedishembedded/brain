@@ -18,12 +18,10 @@
 //!   MOE_SKIP_GPU_TESTS= BRAIN_DEVICE=cpu cargo test -p brain-yolo --test p7_capability -- --nocapture
 //!   (+ ` -- --ignored` for scale / multi-object).
 
-#[path = "../common/p7.rs"]
-mod p7;
 
 use data::gen_detect::Preset;
 use eval::detection::{map50, precision_recall, GtBox as EvalGt};
-use p7::*;
+use crate::p7::*;
 use yolov8::boxmath::{iou, xywhn_to_xyxy};
 
 const IDENT: fn(u32) -> u32 = |c| c;

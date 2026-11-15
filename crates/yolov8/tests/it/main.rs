@@ -23,6 +23,8 @@ mod p4_detection;
 mod p5_overfit;
 mod p6_infer;
 mod p6_nms;
+/// The capability fixtures `p7_capability` and `p7_negative` share.
+mod p7;
 mod p7_capability;
 mod p7_negative;
 mod p7_unit;

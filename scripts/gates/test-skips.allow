@@ -231,7 +231,7 @@ crates/wm-core/tests/it/dwconv3d.rs	2
 crates/wm-core/tests/it/gn_multigroup.rs	2
 crates/wm-core/tests/it/l2norm_scale.rs	1
 crates/yolov8/tests/bench_forward_p40.rs	1
-crates/yolov8/tests/common/p7.rs	1
+crates/yolov8/tests/it/p7.rs	1
 crates/yolov8/tests/it/import_real.rs	1
 crates/yolov8/tests/it/p11_eval_inference.rs	1
 crates/yolov8/tests/it/p12_npu_refactor.rs	1

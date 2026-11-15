@@ -21,12 +21,10 @@
 //! Gated by `MOE_SKIP_GPU_TESTS` (train with `MOE_SKIP_GPU_TESTS= BRAIN_DEVICE=cpu
 //! cargo test -p brain-yolo --test p7_negative -- --nocapture`).
 
-#[path = "../common/p7.rs"]
-mod p7;
 
 use data::gen_detect::Preset;
 use data::rng::Rng;
-use p7::*;
+use crate::p7::*;
 
 // ===========================================================================
 // Shuffled-label control: clean mAP high, shuffled mAP collapses.

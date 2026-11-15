@@ -934,7 +934,7 @@ crates/worldmirror2/tests/it/t3_dpt_tiny.rs	MIRROR_DPT_TINY
 crates/worldmirror2/tests/it/t6_pos_interp.rs	MIRROR_BICUBIC_REFS
 crates/yolov8/tests/bench_forward_p40.rs	BRAIN_CONV_GEMM
 crates/yolov8/tests/bench_forward_p40.rs	MOE_SKIP_GPU_TESTS
-crates/yolov8/tests/common/p7.rs	MOE_SKIP_GPU_TESTS
+crates/yolov8/tests/it/p7.rs	MOE_SKIP_GPU_TESTS
 crates/yolov8/tests/it/import_real.rs	MOE_SKIP_GPU_TESTS
 crates/yolov8/tests/it/import_real.rs	YOLO_RAW_PT
 crates/yolov8/tests/it/p11_eval_inference.rs	MOE_SKIP_GPU_TESTS

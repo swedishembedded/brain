@@ -3,8 +3,8 @@
 
 //! Shared scaffolding for the P7 detection capability + negative-control tests.
 //!
-//! Included (via `#[path]`) into `p7_capability.rs` and `p7_negative.rs` rather
-//! than published as a crate module, because it is pure test glue: build a tiny
+//! A module of the test binary that `p7_capability.rs` and `p7_negative.rs`
+//! use, rather than a crate module, because it is pure test glue: build a tiny
 //! `Yolo`, train it on a fixed synthetic batch, then score a held-out split with
 //! the golden `eval::detection::map50`. Everything is CPU-backend, deterministic
 //! for a fixed seed, and kept to minute-scale smoke training — NOT a full
