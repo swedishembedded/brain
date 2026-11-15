@@ -43,6 +43,16 @@
 //! always finds it loaded, and the adapter leaves the bank only after the
 //! request is done.
 //!
+//! ## A base hosted in a worker
+//!
+//! A base whose instance runs in a supervised worker keeps this registry in
+//! the serving process, which offers it to the worker as an
+//! [`AdapterSource`]: every release with its file, digest and version. The
+//! worker rebuilds its resident's own registry from that list through an
+//! [`AdapterMirror`], which reads each file, refuses bytes that are not the
+//! offered digest, and keeps the serving process's version, so a reply names
+//! a release as it would in process.
+//!
 //! ## Sizing
 //!
 //! The bank's slots, rank cap and targeted linears are fixed when the engine
@@ -62,6 +72,7 @@ use model::adapter::bank::{AdapterBankConfig, AdapterError, AdapterServing, Bank
 pub use model::adapter::bank::AdapterTargets;
 
 use residency::multi::{MultiDeviceCost, MultiDeviceResidentModel};
+use residency::supervised::{AdapterSink, AdapterSource, HostedAdapter};
 use residency::{AdapterIdentity, Device, Executor, Instance, InstanceKey, MemCost, ResidentModel};
 
 use crate::adapter_release::{LoadedAdapter, ServedBase, ServedFamily};
@@ -274,7 +285,18 @@ impl AdapterRegistry {
     /// an adapter (`<vendor>/<repo>[-QUANT]:<owner>:<name>:<tag>`): it becomes a
     /// model id that every front end resolves, and the grammar is what keeps it
     /// from being anything else.
-    pub fn attach(self: &Arc<Self>, mut loaded: LoadedAdapter) -> Result<AdapterLease, String> {
+    pub fn attach(self: &Arc<Self>, loaded: LoadedAdapter) -> Result<AdapterLease, String> {
+        self.offer(loaded, true)
+    }
+
+    /// [`Self::attach`] for a registry that mirrors another one (a worker's, rebuilt from what its serving process
+    /// offers): `loaded` keeps the version the registry it mirrors numbered it, which replies name.
+    fn attach_numbered(self: &Arc<Self>, loaded: LoadedAdapter) -> Result<AdapterLease, String> {
+        self.offer(loaded, false)
+    }
+
+    /// Offer `loaded` and take a lease on it, numbering its release here when `number` (else it keeps its own).
+    fn offer(self: &Arc<Self>, mut loaded: LoadedAdapter, number: bool) -> Result<AdapterLease, String> {
         let id = loaded.release.id.clone();
         check_serving_id(&id)?;
         self.fits(&loaded)?;
@@ -282,7 +304,9 @@ impl AdapterRegistry {
         if !state.entries.contains_key(&id) && state.entries.len() as u32 >= MAX_SERVED_ADAPTERS {
             return Err(format!("this server already offers {MAX_SERVED_ADAPTERS} adapters, the most it holds; retire one before adding {id}"));
         }
-        state.stamp(&mut loaded);
+        if number {
+            state.stamp(&mut loaded);
+        }
         match state.entries.get_mut(&id) {
             Some(entry) => {
                 entry.loaded = Arc::new(loaded);
@@ -332,6 +356,62 @@ impl AdapterRegistry {
         // releases the lock, so a snapshot is at least as new as its number.
         let generation = self.generation.load(Ordering::SeqCst);
         (generation, state.entries.iter().map(|(id, e)| (id.clone(), e.loaded.clone())).collect())
+    }
+}
+
+/// The serving process's side of a hosted base's adapters: what the registry offers, each release with the file a
+/// worker reads it from and the version it is numbered here ([`residency::supervised`]).
+impl AdapterSource for AdapterRegistry {
+    fn generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
+    }
+
+    fn offered(&self) -> (u64, Vec<HostedAdapter>) {
+        let (generation, offered) = self.snapshot();
+        let adapters = offered.into_iter().map(|(id, a)| HostedAdapter { id, digest: a.release.digest.clone(), path: a.release.path.clone(), version: a.version }).collect();
+        (generation, adapters)
+    }
+}
+
+/// A worker's side of a hosted base's adapters: the hosted resident's own registry, rebuilt from what the serving
+/// process offers. Each attached id holds one lease, so the registry offers exactly what the worker was told, and the
+/// resident's instance brings its engine's bank in line from it as it does in process ([`AdapterSync`]).
+pub struct AdapterMirror {
+    registry: Arc<AdapterRegistry>,
+    leases: Mutex<HashMap<String, AdapterLease>>,
+}
+
+impl AdapterMirror {
+    /// Mirror into `registry`, the registry of the resident the worker hosts.
+    pub fn new(registry: Arc<AdapterRegistry>) -> AdapterMirror {
+        AdapterMirror { registry, leases: Mutex::new(HashMap::new()) }
+    }
+}
+
+impl AdapterSink for AdapterMirror {
+    /// Read the release's file, refuse it unless its bytes are the offered digest and its card the offered id, and
+    /// offer it under the serving process's version in place of what the id offered before.
+    fn attach(&self, adapter: &HostedAdapter) -> Result<(), String> {
+        let mut leases = self.leases.lock().unwrap_or_else(|e| e.into_inner());
+        // Whatever happens below, the id no longer offers what it offered: a refused release is unoffered.
+        let previous = leases.remove(&adapter.id);
+        let mut loaded = crate::adapter_release::load_adapter(&adapter.path)?;
+        if loaded.release.digest != adapter.digest {
+            return Err(format!("{} holds {}, not the offered release {}", adapter.path.display(), loaded.release.digest, adapter.digest));
+        }
+        if loaded.release.id != adapter.id {
+            return Err(format!("{} is adapter {}, not the offered {}", adapter.path.display(), loaded.release.id, adapter.id));
+        }
+        loaded.version = adapter.version;
+        let lease = self.registry.attach_numbered(loaded)?;
+        leases.insert(adapter.id.clone(), lease);
+        drop(previous);
+        Ok(())
+    }
+
+    fn detach(&self, id: &str) {
+        let lease = self.leases.lock().unwrap_or_else(|e| e.into_inner()).remove(id);
+        drop(lease);
     }
 }
 
@@ -875,5 +955,44 @@ mod tests {
         assert!(reg.attach(loaded(&dir, "Qwen/Qwen3-0.6B:lab:one-more:v1", 0.5)).err().unwrap().contains("retire one"));
         assert!(reg.attach(loaded(&dir, "Qwen/Qwen3-0.6B:lab:a0:v1", 0.25)).is_ok(), "a new release of an offered name is not a new adapter");
         drop(leases);
+    }
+
+    /// What a serving process offers reaches a worker's registry as the same releases: the source lists each
+    /// offered adapter with its file, digest and version, and the worker's mirror, rebuilt from that list alone,
+    /// offers the same identities (a worker that never saw the first release still numbers the second as the
+    /// serving process did). A file whose bytes are not the offered digest is refused and leaves the id unoffered;
+    /// a detach withdraws it; each change moves the mirror's generation.
+    #[test]
+    fn a_worker_mirror_offers_what_the_serving_registry_offers_under_its_versions() {
+        use residency::supervised::{AdapterSink, AdapterSource};
+        let dir = scratch_dir("registry-mirror");
+        let served = registry(Some(AdapterBankSettings::default()));
+        let (one, two) = (loaded(&dir, ID, 0.5), loaded(&dir, ID, 0.25));
+        let _lease = served.attach(one).unwrap();
+        served.replace(two).unwrap();
+        const OTHER: &str = "Qwen/Qwen3-0.6B:lab:other:v1";
+        let _other = served.attach(loaded(&dir, OTHER, 0.125)).unwrap();
+        let (generation, offered) = served.offered();
+        assert_eq!(generation, served.generation(), "the list is as new as the generation it names");
+        assert_eq!(offered.iter().map(|a| (a.id.as_str(), a.version)).collect::<Vec<_>>(), [(ID, 2), (OTHER, 1)]);
+
+        let worker = registry(Some(AdapterBankSettings::default()));
+        let mirror = AdapterMirror::new(worker.clone());
+        for adapter in &offered {
+            mirror.attach(adapter).unwrap();
+        }
+        for id in [ID, OTHER] {
+            assert_eq!(worker.identity(id), served.identity(id), "{id} is the same release in the worker");
+        }
+        let before = worker.generation();
+        let mut forged = offered[1].clone();
+        forged.digest = "sha256:00".to_string();
+        let refused = mirror.attach(&forged).unwrap_err();
+        assert!(refused.contains("sha256:00"), "{refused}");
+        assert_eq!(worker.identity(OTHER), None, "a refused release leaves its id unoffered");
+        mirror.detach(ID);
+        assert_eq!(worker.ids(), Vec::<String>::new(), "detached");
+        assert!(worker.generation() > before, "each change moves the generation an instance syncs by");
+        mirror.detach("Qwen/Qwen3-0.6B:lab:never:v1");
     }
 }
