@@ -1146,9 +1146,22 @@ tuned kernel are deferred.**
   rounds activations to bf16, so the FD of the CUDA loss is a staircase; the
   analytic gradients match the CPU's to 5e-3, and the check now pins the fp32
   reference tier; knowledge 408).
-- **No cost formulas** for CUDA steps in `gpu-core/src/cost.rs` (a coverage
-  ratchet), and `step_native` carries no `StepMeta`, so profiling would show
-  `<no-meta>`.
+- **Provider-lowered steps are priced as the portable work they replace**
+  (`backend_api::Lowering`, `kernels.md`): every `OperatorProvider` lowering
+  through `ProviderRegistry::dispatch`, the `Ops` products that bypass it
+  (library GEMMs, the int8 dequantize-in-register and FP8 linears, the fused
+  group GEMVs, the NVFP4 products, the library `dx`/`dw`), the activation
+  casts and E4M3 quantizers as zero-cost helpers, and `add_rmsnorm_fwd`/
+  `rmsnorm_dx_add`. Library GEMMs and `Gpu::fused_step` launches are named by
+  their reported kernel even before a caller prices them. **Still unpriced**
+  (uncovered, named where they come through `fused_step` or the library,
+  `<no-meta>` where a raw `step_native` builds them): the fused attention,
+  paged decode and GDN kernels in `provider/cuda.rs` and `model::gdn_*`, the
+  `Fused` launches models call directly (`AddRmsQuant`, `QuantEpilogue`, the
+  GDN decode pools), and the `library.rs` fused helpers with a portable chain
+  (`silu_mul_quant_e4m3`, `gate_mul_quant_e4m3`, `qkv_split`, `gqa_qk_prep`,
+  `weight_dequant_bf16`). Each needs its call site to state the chain it
+  replaces; qwen35's tiny exact pricer reaches none of them.
 - **memauth**: a CUDA and a Vulkan handle on one physical card both charge
   `Device::Gpu(i)`, and under `--limit-vram-total` every GPU shares one pool, so
   they do not double-count. What is still wrong: `Gpu::try_new_cuda` opens CUDA

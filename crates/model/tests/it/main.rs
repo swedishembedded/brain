@@ -99,6 +99,7 @@ mod moe_sparse_parity;
 mod ops_act_quant_groups;
 mod ops_facade_parity;
 mod ops_kquant;
+mod ops_lowered_cost;
 mod ops_matmul_group;
 mod ops_matmul_step_identity;
 mod ops_nf4_weight;

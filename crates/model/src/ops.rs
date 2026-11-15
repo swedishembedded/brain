@@ -131,7 +131,7 @@ pub fn concat_rows_parallel(parts: &[&[f32]]) -> Vec<f32> {
 use gpu_core::provider::library::{self, GemmPrecision, LibraryGemmProvider};
 use gpu_core::provider::{LowerCtx, Operand, OpRequest, Pass, ProviderRegistry, Role};
 use gpu_core::select::{self, Dtype, KernelSelector, KernelVariant, Op, OpShape};
-use gpu_core::{ActPrecision, DeviceBuffer, DeviceCaps, Fp8Act, Gpu, Step};
+use gpu_core::{ActPrecision, DeviceBuffer, DeviceCaps, Fp8Act, Gpu, Lowering, PortableDispatch, Step};
 
 use crate::dispatch::I8Scratch;
 
@@ -1624,6 +1624,41 @@ impl Ops {
         self.gemm.path()
     }
 
+    /// The reference provider's dispatch for `act[m] @ W[rows]^T` over `count` rows of `w`: what any other
+    /// implementation of that product is priced as (`gpu_core::cost::step_cost`), so a linear costs the same whichever
+    /// tier serves it. The stored-format tiers the reference serves by tile decode are priced as the dense product of
+    /// the decoded tiles (`matmul` at `[m, k, count]`), which is what that path multiplies.
+    fn portable_product(&self, w: &Weight, m: u32, count: u32) -> PortableDispatch {
+        let (k, dt, group) = (w.k(), w.dtype(), w.group());
+        if matches!(w, Weight::NF4 { .. } | Weight::FP8 { .. } | Weight::Micro { .. } | Weight::Cq { .. }) {
+            return PortableDispatch { kernel: kname::MATMUL, params: vec![m, k, count], threads: m * count };
+        }
+        // The int8 kernels take the packed word count, every other tier the logical K (see `packed_product`).
+        let param_k = if dt == Dtype::I8 { k / Dtype::I8.per_word() } else { k };
+        let attrs = [m, param_k, count];
+        // Priced, never dispatched: an unregistered slot only costs the thread count its workgroup size would scale.
+        let bind = |variant: KernelVariant| -> (usize, &'static str) {
+            let name = Self::bind(variant, dt, group);
+            (self.idx.get(name).copied().unwrap_or(usize::MAX), name)
+        };
+        let req = OpRequest { op: Op::MatMul, shape: OpShape { m, n: count, k, dtype: dt }, pass: Pass::Forward, operands: &[], attrs: &attrs, group, bind: &bind };
+        self.providers.portable(&self.gpu, &self.caps, &req).expect("the reference provider plans every MatMul")
+    }
+
+    /// Price the one product step a native tier pushed into `s` (the library's or a fused kernel's, named and
+    /// unpriced) as [`Self::portable_product`] of `w`'s `count` rows against `m` activation rows.
+    fn price_product(&self, s: &mut [Step], w: &Weight, m: u32, count: u32) {
+        Self::price_unpriced(s, || self.portable_product(w, m, count));
+    }
+
+    /// Give the first unpriced lowered step of `s` the portable `work` it replaces; nothing when every step is a
+    /// portable dispatch or already priced (`work` is then never built).
+    fn price_unpriced(s: &mut [Step], work: impl FnOnce() -> PortableDispatch) {
+        if let Some(step) = s.iter_mut().find(|st| st.lowering().is_some_and(|l| l.portable.is_none())) {
+            *step = step.priced_as(vec![work()]).expect("an unpriced lowered step takes its price");
+        }
+    }
+
     /// `y[yoff ..] = act @ W[first.., :]^T` on the library path, for an f32 or bf16 `w` (every other tier
     /// reaches the library as a decoded bf16 tile, see [`tiled`]);
     /// `false` (nothing pushed) when the fp32 kernels must run instead.
@@ -1685,9 +1720,9 @@ impl Ops {
         }
         let mut prep = Vec::new();
         let Some((xb, fresh)) = self.bf16_rows(act, &mut prep) else { return false };
-        let Some((step, _)) = self.gpu.int8_dequant_step(&[&xb, wb, sw, y], &[(0, 0), (0, 0), (0, 0), (yoff, m as u64 * n as u64)], &params) else { return false };
+        let Some((step, reported)) = self.gpu.int8_dequant_step(&[&xb, wb, sw, y], &[(0, 0), (0, 0), (0, 0), (yoff, m as u64 * n as u64)], &params) else { return false };
         s.append(&mut prep);
-        s.push(step);
+        s.push(step.with_lowering(Lowering::priced(reported, vec![self.portable_product(w, m, n)])));
         if fresh {
             *act.bf16.borrow_mut() = Some(xb);
         }
@@ -1719,14 +1754,14 @@ impl Ops {
         let weight_window = if rows == (0, *weight_n) { WHOLE } else { (u64::from(first) * u64::from(k) / 4, u64::from(count) * u64::from(k) / 4) };
         let scale_window = if rows == (0, *weight_n) { WHOLE } else { (u64::from(first / FP8_BLOCK) * blocks_per_row, u64::from(count.div_ceil(FP8_BLOCK)) * blocks_per_row) };
         let mut prep = Vec::new();
-        let step = match form {
+        let (step, reported) = match form {
             Fp8Act::Bf16 => {
                 let Some((xb, fresh)) = self.bf16_rows(act, &mut prep) else { return false };
-                let Some((step, _)) = self.gpu.fp8_linear_step(form, out_precision, &[&xb, wb, sb, y], &[WHOLE, weight_window, scale_window, out], &params) else { return false };
+                let Some((step, reported)) = self.gpu.fp8_linear_step(form, out_precision, &[&xb, wb, sb, y], &[WHOLE, weight_window, scale_window, out], &params) else { return false };
                 if fresh {
                     *act.bf16.borrow_mut() = Some(xb);
                 }
-                step
+                (step, reported)
             }
             Fp8Act::E4m3 => {
                 let shared = act.e4m3.borrow().clone();
@@ -1738,15 +1773,15 @@ impl Ops {
                         (xq, sx, true)
                     }
                 };
-                let Some((step, _)) = self.gpu.fp8_linear_step(form, out_precision, &[&xq, wb, &sx, sb, y], &[WHOLE, weight_window, WHOLE, scale_window, out], &params) else { return false };
+                let Some((step, reported)) = self.gpu.fp8_linear_step(form, out_precision, &[&xq, wb, &sx, sb, y], &[WHOLE, weight_window, WHOLE, scale_window, out], &params) else { return false };
                 if fresh {
                     *act.e4m3.borrow_mut() = Some((xq, sx));
                 }
-                step
+                (step, reported)
             }
         };
         s.append(&mut prep);
-        s.push(step);
+        s.push(step.with_lowering(Lowering::priced(reported, vec![self.portable_product(w, m, count)])));
         true
     }
 
@@ -1781,8 +1816,24 @@ impl Ops {
 
     /// `dx[dx_row0.., :] (+)= dy[m, count] @ W[first.., :]` on the library path
     /// for a bf16 `w`; `false` when the fp32 kernels must run instead.
+    ///
+    /// The library product is priced as the reference `matmul_dx` over the same window.
     #[allow(clippy::too_many_arguments)]
     fn library_dx(&self, s: &mut Vec<Step>, w: &Weight, rows: (u32, u32), dy: &DeviceBuffer, m: u32, dx: &DeviceBuffer, dx_row0: u32, accumulate: bool) -> bool {
+        let pushed = s.len();
+        if !self.library_dx_steps(s, w, rows, dy, m, dx, dx_row0, accumulate) {
+            return false;
+        }
+        Self::price_unpriced(&mut s[pushed..], || {
+            let k = w.k();
+            let kernel = if w.dtype() == Dtype::BF16 { kname::MATMUL_DX_BF16 } else { kname::MATMUL_DX };
+            PortableDispatch { kernel, params: vec![m, k, rows.1, accumulate as u32], threads: m * k }
+        });
+        true
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn library_dx_steps(&self, s: &mut Vec<Step>, w: &Weight, rows: (u32, u32), dy: &DeviceBuffer, m: u32, dx: &DeviceBuffer, dx_row0: u32, accumulate: bool) -> bool {
         if let Weight::F32 { w: wb, n, k } = w {
             let window = if rows.0 == 0 && rows.1 == *n { WHOLE } else { Self::row_window(rows.0, rows.1, *n, *k, 1) };
             let dx_range = if dx_row0 == 0 { WHOLE } else { (dx_row0 as u64 * *k as u64, m as u64 * *k as u64) };
@@ -2173,7 +2224,9 @@ impl Ops {
         let (n, k) = (w.n(), w.k());
         assert_eq!(act.k, k, "Ops::matmul: activation width {} does not match weight K {k}", act.k);
         let m = act.m;
+        let first = s.len();
         if self.dense_small_m_gemv(s, w, (0, n), act, y, yoff) || self.library_forward(s, w, (0, n), act, y, yoff) {
+            self.price_product(&mut s[first..], w, m, n);
             return;
         }
         let shape = OpShape { m, n, k, dtype: w.dtype() };
@@ -2721,7 +2774,9 @@ impl Ops {
     /// before.
     pub fn matmul_group(&self, s: &mut Vec<Step>, group: &[(&Weight, &DeviceBuffer)], act: &Act) {
         if let Some(step) = self.fused_group(group, act) {
-            s.push(step);
+            // One launch computes every member's product: it is priced as all of them.
+            let work = group.iter().map(|(w, _)| self.portable_product(w, act.m, w.n())).collect();
+            s.push(step.priced_as(work).unwrap_or(step));
             return;
         }
         for (w, y) in group {
@@ -3011,17 +3066,22 @@ impl Ops {
         if matches!(w, Weight::Cq { .. }) && rows == (0, n) {
             return self.cq_product(s, w, act, y, yoff);
         }
+        // A native tier that serves the product leaves its product step unpriced (or prices it itself); the reference
+        // product it replaces is stated here, once, for whichever tier answered.
+        let pushed = s.len();
         if matches!(self.linear_plan(w, count), LinearPlan::TileDecode { .. }) {
             if self.fp8_forward(s, w, rows, act, y, yoff, ActPrecision::F32)
                 || self.small_m_gemv(s, w, rows, act, y, yoff)
                 || self.nvfp4_e4m3(s, w, rows, act, y, yoff)
                 || self.nvfp4_mma(s, w, rows, act, y, yoff)
             {
+                self.price_product(&mut s[pushed..], w, m, count);
                 return;
             }
             return self.forward_tiled(s, w, rows, act, y, yoff);
         }
         if self.dense_small_m_gemv(s, w, rows, act, y, yoff) || self.library_forward(s, w, rows, act, y, yoff) {
+            self.price_product(&mut s[pushed..], w, m, count);
             return;
         }
         let tiled = self.tiled_gemm(m, count);
