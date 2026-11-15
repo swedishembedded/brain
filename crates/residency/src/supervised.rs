@@ -33,7 +33,7 @@
 //! | request | answer payload |
 //! |---|---|
 //! | `hello <PROTOCOL>` | `{"protocol": n, "pid": p}`; must be the first request |
-//! | `open <device> <spec>` | `{"metrics"}`; the instance is built on `<device>` |
+//! | `open <devices> <spec>` | `{"metrics"}`; the instance is built on `<devices>`: one, or every card of a multi-device instance, comma-separated |
 //! | `batch[+<n>] <action> <k> <jobs>` | `{"results": [...], "metrics"}`, one result per job: `{"outputs", "blobs"}` or `{"error"}` |
 //! | `group[+<n>] <action> <k> <jobs>` | `{"open": bool, "metrics"}`; the jobs were finished through `done` frames |
 //! | `demote warm\|cold` | `{"metrics"}`; the instance released its device buffers, the worker keeps its device context |
@@ -49,6 +49,14 @@
 //! hosted instance stays charged that context on its card
 //! ([`MemCost::context`]); a promotion onto another card kills the worker and
 //! opens a new one there.
+//!
+//! While any request is in flight the worker may send `<id> fault <device>
+//! <why>` before its next frame ([`report_device_fault`]: model code that saw
+//! a driver call fail on one card of several). The parent quarantines that
+//! card and loses the instance, whether the worker then answers or dies; a
+//! worker that dies with no such frame has every card it held quarantined
+//! ([`gpu_supervisor::Health::exchange_on`]). A multi-device model is hosted
+//! whole by one worker ([`SupervisedMultiModel`], [`HostedResident::Multi`]).
 //!
 //! A base that serves adapters ([`SupervisedModel::with_adapters`]) tells its
 //! worker every change of what the serving process offers
@@ -105,6 +113,7 @@ use capability::{ActionResult, Invocation, Manifest, Progress};
 use gpu_supervisor::{Health, Worker, WorkerCommand};
 use serde_json::{json, Value};
 
+use crate::multi::MultiDeviceResidentModel;
 use crate::{AdapterIdentity, Device, Instance, InstanceKey, JobFeed, MemCost, ResidentModel, Tier};
 
 /// The protocol version a worker and its parent must agree on (`hello`).
@@ -119,10 +128,13 @@ mod host;
 pub use adapters::{AdapterSink, AdapterSource, HostedAdapter};
 use adapters::AdapterFeed;
 
+mod multi;
+
 #[cfg(target_os = "linux")]
 pub use host::host;
 #[cfg(unix)]
-pub use host::host_on;
+pub use host::{host_on, report_device_fault};
+pub use multi::SupervisedMultiModel;
 
 /// Device memory a worker's own device context holds on its card beside the instance it hosts: what every in-process
 /// instance of a card shares through the serving process's one context and each worker pays again, so every hosted
@@ -220,14 +232,47 @@ pub struct HostedFamily {
 /// for a base that serves adapters, the registry its parent's `attach` and
 /// `detach` rebuild ([`AdapterSink`]).
 pub struct HostedModel {
-    pub resident: Arc<dyn ResidentModel>,
+    pub resident: HostedResident,
     pub adapters: Option<Arc<dyn AdapterSink>>,
 }
 
+/// The resident a worker activates: on the one card `open` names, or across
+/// every card it names, all owned by the one worker (a device's object graph
+/// lives in the process that created it, so the cards of one instance cannot
+/// be split between workers).
+pub enum HostedResident {
+    Single(Arc<dyn ResidentModel>),
+    Multi(Arc<dyn MultiDeviceResidentModel>),
+}
+
+impl HostedResident {
+    /// The model, for what is asked of it without a device.
+    pub fn model(&self) -> &dyn ResidentModel {
+        match self {
+            HostedResident::Single(r) => &**r,
+            HostedResident::Multi(m) => &**m,
+        }
+    }
+
+    /// Build the instance on `devices`: exactly one for a single-device resident.
+    fn activate(&self, key: &InstanceKey, devices: &[Device]) -> Result<Box<dyn Instance>, String> {
+        match (self, devices) {
+            (HostedResident::Single(r), [device]) => r.activate(key, *device),
+            (HostedResident::Single(_), _) => Err(format!("{key} runs on one device, and the worker was asked to open {}", devices.len())),
+            (HostedResident::Multi(m), _) => m.activate_multi(key, devices),
+        }
+    }
+}
+
 impl HostedModel {
-    /// A model that serves no adapters.
+    /// A model on one card that serves no adapters.
     pub fn new(resident: Arc<dyn ResidentModel>) -> HostedModel {
-        HostedModel { resident, adapters: None }
+        HostedModel { resident: HostedResident::Single(resident), adapters: None }
+    }
+
+    /// A model across several cards, every one owned by the worker.
+    pub fn multi(resident: Arc<dyn MultiDeviceResidentModel>) -> HostedModel {
+        HostedModel { resident: HostedResident::Multi(resident), adapters: None }
     }
 
     /// A base whose adapters the parent offers reach `adapters`.
@@ -266,6 +311,15 @@ impl WorkerHosting {
     pub fn serve(hosting: Option<&WorkerHosting>, resident: Arc<dyn ResidentModel>, spec: HostSpec) -> Arc<dyn ResidentModel> {
         match hosting {
             Some(h) if h.hosts(&spec.family) => Arc::new(SupervisedModel::new(resident, spec, h.command.clone(), h.health.clone(), h.deadlines)),
+            _ => resident,
+        }
+    }
+
+    /// [`Self::serve`] for a model across several cards, which a worker hosts whole; register the result with
+    /// `Executor::register_multi`.
+    pub fn serve_multi(hosting: Option<&WorkerHosting>, resident: Arc<dyn MultiDeviceResidentModel>, spec: HostSpec) -> Arc<dyn MultiDeviceResidentModel> {
+        match hosting {
+            Some(h) if h.hosts(&spec.family) => Arc::new(SupervisedMultiModel::new(resident, spec, h.command.clone(), h.health.clone(), h.deadlines)),
             _ => resident,
         }
     }
@@ -360,11 +414,8 @@ impl ResidentModel for SupervisedModel {
     /// Runs on the device's lane, which outlives the worker it starts (the
     /// worker is killed when the thread that spawned it exits).
     fn activate(&self, key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
-        let open = json!({ "family": self.spec.family, "args": self.spec.args, "key": { "model": key.model, "config": key.config } });
-        let start = WorkerStart { command: self.command.clone(), open, key: key.to_string(), health: self.health.clone(), deadlines: self.deadlines };
-        let (worker, metrics) = start.open_on(device)?;
-        let adapters = self.adapters.clone().map(AdapterFeed::new);
-        Ok(Box::new(SupervisedInstance { worker: Some(worker), device, start, lost: None, closed_only: std::collections::BTreeSet::new(), metrics, adapters }))
+        let start = WorkerStart::new(&self.spec, key, &self.command, &self.health, self.deadlines);
+        SupervisedInstance::open(start, &[device], self.adapters.clone())
     }
 }
 
@@ -377,7 +428,7 @@ impl SupervisedModel {
 }
 
 /// How an instance's worker is started and its instance built: what activation does, and what a promotion onto
-/// another card does again (a worker owns one card).
+/// another card does again (a worker owns the cards it opened).
 struct WorkerStart {
     command: WorkerCommand,
     /// The `open` request's spec.
@@ -389,13 +440,82 @@ struct WorkerStart {
 }
 
 impl WorkerStart {
-    /// A new worker with the instance built on `device`, and the instance's metrics.
-    fn open_on(&self, device: Device) -> Result<(Worker, Vec<(String, Value)>), String> {
+    fn new(spec: &HostSpec, key: &InstanceKey, command: &WorkerCommand, health: &Arc<Health<Device>>, deadlines: Deadlines) -> WorkerStart {
+        let open = json!({ "family": spec.family, "args": spec.args, "key": { "model": key.model, "config": key.config } });
+        WorkerStart { command: command.clone(), open, key: key.to_string(), health: health.clone(), deadlines }
+    }
+
+    /// A new worker with the instance built on `devices` (one, or every card of a multi-device instance: one worker
+    /// owns them all), and the instance's metrics.
+    fn open_on(&self, devices: &[Device]) -> Result<(Worker, Vec<(String, Value)>), String> {
         let key = &self.key;
         let mut worker = Worker::spawn_with(&self.command, self.deadlines.reap).map_err(|e| format!("{key}: could not start worker {} ({e})", self.command.program().display()))?;
-        self.health.call(&device, &mut worker, &format!("hello {PROTOCOL}"), self.deadlines.open).map_err(|e| format!("{key}: {e}"))?;
-        let metrics = control(&self.health, device, &mut worker, &format!("open {} {}", device_label(device), self.open), self.deadlines.open).map_err(|e| format!("{key}: {}", e.why))?;
+        control(&self.health, devices, &mut worker, &format!("hello {PROTOCOL}"), self.deadlines.open).map_err(|e| format!("{key}: {}", e.why))?;
+        let labels: Vec<String> = devices.iter().map(|&d| device_label(d)).collect();
+        let metrics = control(&self.health, devices, &mut worker, &format!("open {} {}", labels.join(","), self.open), self.deadlines.open).map_err(|e| format!("{key}: {}", e.why))?;
         Ok((worker, metrics))
+    }
+}
+
+/// The devices a worker said faulted while one request was in flight, from its `fault <device> <why>` frames: a
+/// driver call its model saw fail on one card of several. They alone are quarantined if the worker then dies, and
+/// they are quarantined even if it answers, which loses the instance (its card is suspect).
+#[derive(Default)]
+struct Blamed(std::cell::RefCell<Vec<(Device, String)>>);
+
+impl Blamed {
+    /// One `fault` frame's payload, which must name a device of `devices`.
+    fn note(&self, devices: &[Device], payload: &str) -> Result<(), String> {
+        let (label, why) = payload.split_once(' ').unwrap_or((payload, "a device fault"));
+        let device = parse_device_label(label)?;
+        if !devices.contains(&device) {
+            return Err(format!("the worker reported a fault on {label}, which it does not hold"));
+        }
+        self.0.borrow_mut().push((device, why.to_string()));
+        Ok(())
+    }
+
+    fn devices(&self) -> Vec<Device> {
+        self.0.borrow().iter().map(|&(d, _)| d).collect()
+    }
+
+    /// After an answer: quarantine each device the worker blamed, and say why; `None` when it blamed none.
+    fn record(&self, health: &Health<Device>) -> Option<String> {
+        let blamed = self.0.borrow();
+        let causes: Vec<String> = blamed
+            .iter()
+            .map(|(device, why)| {
+                let cause = format!("{device:?}: the worker reported a device fault ({why}); the device is quarantined until a health probe passes");
+                health.record_fault(device, std::time::Instant::now(), &cause);
+                cause
+            })
+            .collect();
+        (!causes.is_empty()).then(|| causes.join("; "))
+    }
+}
+
+/// The parent's side of a request that runs no job: it takes only `fault` frames.
+#[cfg(unix)]
+struct FaultTalk<'a> {
+    devices: &'a [Device],
+    blamed: &'a Blamed,
+}
+
+#[cfg(unix)]
+impl gpu_supervisor::Conversation for FaultTalk<'_> {
+    fn frame(&mut self, kind: &str, payload: &str, _fds: Vec<std::os::fd::OwnedFd>) -> Result<Vec<gpu_supervisor::Outgoing>, String> {
+        match kind {
+            "fault" => self.blamed.note(self.devices, payload).map(|()| Vec::new()),
+            other => Err(format!("a request that runs no job takes fault frames, not {other:?}")),
+        }
+    }
+
+    fn poll(&mut self) -> Vec<gpu_supervisor::Outgoing> {
+        Vec::new()
+    }
+
+    fn polls(&self) -> bool {
+        false
     }
 }
 
@@ -405,12 +525,23 @@ struct ControlError {
     lost: bool,
 }
 
-/// A request that runs no job (`open`, `demote`, `promote`) on `worker`: the instance's metrics after it. A model
-/// panic is answered and ends the worker, so it loses the worker as a fault does.
+/// A request that runs no job (`hello`, `open`, `demote`, `promote`, `attach`, `detach`) on the worker of
+/// `devices`: the instance's metrics after it. A model panic is answered and ends the worker, and a device the
+/// worker blamed is quarantined, so either loses the worker as a fault does.
 #[cfg(unix)]
-fn control(health: &Health<Device>, device: Device, worker: &mut Worker, request: &str, deadline: Duration) -> Result<Vec<(String, Value)>, ControlError> {
+fn control(health: &Health<Device>, devices: &[Device], worker: &mut Worker, request: &str, deadline: Duration) -> Result<Vec<(String, Value)>, ControlError> {
     use gpu_supervisor::{CallError, Exchange};
-    match health.exchange(&device, worker, request, deadline, Exchange::default()) {
+    let blamed = Blamed::default();
+    let mut talk = FaultTalk { devices, blamed: &blamed };
+    let x = Exchange { fds: &[], talk: Some(&mut talk), renew: false };
+    let answer = health.exchange_on(devices, worker, request, deadline, x, &|| blamed.devices());
+    let faulted = || answer.as_ref().is_err_and(|e| matches!(e, CallError::Fault(_)));
+    if let Some(cause) = (!faulted()).then(|| blamed.record(health)).flatten() {
+        return Err(ControlError { why: cause, lost: true });
+    }
+    match answer {
+        // The greeting's answer names the worker, not an instance.
+        Ok(_) if request.starts_with("hello ") => Ok(Vec::new()),
         Ok((payload, fds)) => codec::decode_control(&payload, fds).map_err(|e| ControlError { why: format!("the worker's answer breaks the protocol ({e})"), lost: true }),
         Err(CallError::Failed(message)) => {
             let lost = message.starts_with(PANICKED);
@@ -422,7 +553,7 @@ fn control(health: &Health<Device>, device: Device, worker: &mut Worker, request
 }
 
 #[cfg(not(unix))]
-fn control(_health: &Health<Device>, _device: Device, _worker: &mut Worker, _request: &str, _deadline: Duration) -> Result<Vec<(String, Value)>, ControlError> {
+fn control(_health: &Health<Device>, _devices: &[Device], _worker: &mut Worker, _request: &str, _deadline: Duration) -> Result<Vec<(String, Value)>, ControlError> {
     Err(ControlError { why: "supervised device workers need a Unix host".into(), lost: true })
 }
 
@@ -440,7 +571,8 @@ struct SupervisedInstance {
     /// `None` only while [`Self::lost`] says why: between the old worker of a promotion onto another card being
     /// killed and its new one opening, or when that opening failed.
     worker: Option<Worker>,
-    device: Device,
+    /// The cards the worker owns: one, or every card of a multi-device instance.
+    devices: Vec<Device>,
     start: WorkerStart,
     /// Why the worker is gone. Every later run fails with it at once: a run
     /// is not idempotent, so nothing is retried on a replacement worker; the
@@ -476,12 +608,12 @@ impl Instance for SupervisedInstance {
     /// the instance is rebuilt in a new worker there (the old one is killed): a worker owns one card, and the
     /// rebuild is the activation the model would get anyway.
     fn promote(&mut self, device: Device) -> Result<(), String> {
-        if self.lost.is_some() || device != self.device {
+        if self.lost.is_some() || self.devices != [device] {
             // The old worker goes first: its device context is no longer charged to its card.
             self.worker = None;
-            let (worker, metrics) = self.start.open_on(device).map_err(|e| self.lose(e))?;
+            let (worker, metrics) = self.start.open_on(&[device]).map_err(|e| self.lose(e))?;
             self.worker = Some(worker);
-            self.device = device;
+            self.devices = vec![device];
             self.lost = None;
             self.closed_only.clear();
             self.metrics = metrics;
@@ -531,12 +663,19 @@ impl Instance for SupervisedInstance {
 }
 
 impl SupervisedInstance {
+    /// A worker started from `start` with its instance built on `devices`, told the adapters `adapters` offers.
+    fn open(start: WorkerStart, devices: &[Device], adapters: Option<Arc<dyn AdapterSource>>) -> Result<Box<dyn Instance>, String> {
+        let (worker, metrics) = start.open_on(devices)?;
+        let adapters = adapters.map(AdapterFeed::new);
+        Ok(Box::new(SupervisedInstance { worker: Some(worker), devices: devices.to_vec(), start, lost: None, closed_only: std::collections::BTreeSet::new(), metrics, adapters }))
+    }
+
     /// A request that runs no job, its answer's metrics kept.
     fn control(&mut self, request: &str, deadline: Duration) -> Result<(), String> {
         let (Some(worker), None) = (self.worker.as_mut(), &self.lost) else {
             return Err(self.lost.clone().unwrap_or_else(|| "the worker is gone".into()));
         };
-        match control(&self.start.health, self.device, worker, request, deadline) {
+        match control(&self.start.health, &self.devices, worker, request, deadline) {
             Ok(metrics) => {
                 self.metrics = metrics;
                 Ok(())
@@ -582,10 +721,18 @@ impl SupervisedInstance {
 
         let Some(worker) = self.worker.as_mut() else { return every("the worker is gone".into()) };
         let borrowed: Vec<_> = fds.iter().map(std::os::fd::AsFd::as_fd).collect();
+        let blamed = Blamed::default();
         let mut talk = JobsTalk::new(invs, progress);
         talk.adapters = self.adapters.as_mut();
+        talk.blame = Some((&self.devices, &blamed));
         let x = Exchange { fds: &borrowed, talk: Some(&mut talk), renew: true };
-        let answer = self.start.health.exchange(&self.device, worker, &request, self.start.deadlines.run, x);
+        let answer = self.start.health.exchange_on(&self.devices, worker, &request, self.start.deadlines.run, x, &|| blamed.devices());
+        if !matches!(answer, Err(CallError::Fault(_))) {
+            if let Some(cause) = blamed.record(&self.start.health) {
+                // The jobs keep the answers the worker gave; the instance is lost with its suspect card.
+                self.lost = Some(cause);
+            }
+        }
         match answer {
             Ok((payload, fds)) => match codec::decode_results(&payload, fds) {
                 Ok((results, metrics)) => {
@@ -638,8 +785,15 @@ impl SupervisedInstance {
         };
         talk.adapters = self.adapters.as_mut();
         let borrowed: Vec<_> = fds.iter().map(std::os::fd::AsFd::as_fd).collect();
+        let blamed = Blamed::default();
+        talk.blame = Some((&self.devices, &blamed));
         let x = Exchange { fds: &borrowed, talk: Some(&mut talk), renew: true };
-        let answer = self.start.health.exchange(&self.device, worker, &request, self.start.deadlines.run, x);
+        let answer = self.start.health.exchange_on(&self.devices, worker, &request, self.start.deadlines.run, x, &|| blamed.devices());
+        if !matches!(answer, Err(CallError::Fault(_))) {
+            if let Some(cause) = blamed.record(&self.start.health) {
+                self.lost = Some(cause);
+            }
+        }
         // `talk` borrows the adapter feed until the group's jobs are finished, so the worker is marked lost by its field.
         let lose = |lost: &mut Option<String>, why: String| {
             *lost = Some(why.clone());
@@ -715,12 +869,14 @@ struct JobsTalk<'a> {
     /// The base's adapters, for a base that serves them: each change made while the group runs is sent as a frame,
     /// before the reply to the worker's next `take`, so no job that joins after it reaches the worker first.
     adapters: Option<&'a mut AdapterFeed>,
+    /// The worker's cards, and the ones it says faulted while the group runs.
+    blame: Option<(&'a [Device], &'a Blamed)>,
 }
 
 #[cfg(unix)]
 impl<'a> JobsTalk<'a> {
     fn new(invs: &[Invocation], progress: &'a mut dyn FnMut(usize, Progress)) -> JobsTalk<'a> {
-        let mut talk = JobsTalk { tokens: Vec::new(), cancel_sent: Vec::new(), finished: Vec::new(), own: invs.len(), progress, feed: None, screening: Vec::new(), adapters: None };
+        let mut talk = JobsTalk { tokens: Vec::new(), cancel_sent: Vec::new(), finished: Vec::new(), own: invs.len(), progress, feed: None, screening: Vec::new(), adapters: None, blame: None };
         talk.know(invs);
         talk
     }
@@ -821,7 +977,11 @@ impl gpu_supervisor::Conversation for JobsTalk<'_> {
                 let closed = self.feed(kind)?.close();
                 Ok(vec![Outgoing::line(format!("closed {closed}"))])
             }
-            other => Err(format!("a group takes progress, take, done, screen, refused and close frames, not {other:?}")),
+            "fault" => {
+                let (devices, blamed) = self.blame.ok_or("a fault frame for a group whose devices are not known")?;
+                blamed.note(devices, payload).map(|()| Vec::new())
+            }
+            other => Err(format!("a group takes progress, take, done, screen, refused, close and fault frames, not {other:?}")),
         }
     }
 

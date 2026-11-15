@@ -43,6 +43,22 @@ pub fn host(families: &[HostedFamily]) -> i32 {
     }
 }
 
+/// Whether this process is a hosting worker: only then does a reported device fault reach anyone.
+static HOSTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Device faults model code reported and the worker has not told its parent yet.
+static REPORTED: Mutex<Vec<(Device, String)>> = Mutex::new(Vec::new());
+
+/// For model code in a hosted worker that knows which of its cards a failing driver call was on (a wait past its
+/// bound on one card of several, say): the worker tells its parent before the next frame it sends, and the parent
+/// quarantines that card and no other, where a death nothing was reported for quarantines every card the worker
+/// holds. The instance is lost either way. Outside a worker it does nothing.
+pub fn report_device_fault(device: Device, why: &str) {
+    if HOSTING.load(std::sync::atomic::Ordering::SeqCst) {
+        REPORTED.lock().unwrap_or_else(|e| e.into_inner()).push((device, why.to_string()));
+    }
+}
+
 /// One frame a worker read, with the descriptors it declared and, for a
 /// group, the token of each job it carries.
 struct Incoming {
@@ -87,7 +103,8 @@ pub fn host_on(sock: UnixStream, families: &[HostedFamily]) -> i32 {
         eprintln!("brain worker: cannot start its reader: {e}");
         return 2;
     }
-    let mut host = Host { sock, current, adapters, rx, families, greeted: false, instance: None, device: None };
+    HOSTING.store(true, std::sync::atomic::Ordering::SeqCst);
+    let mut host = Host { sock, current, adapters, rx, families, greeted: false, instance: None, devices: Vec::new() };
     loop {
         let incoming = match host.rx.recv() {
             Ok(Ok(incoming)) => incoming,
@@ -230,13 +247,21 @@ struct Host<'a> {
     families: &'a [HostedFamily],
     greeted: bool,
     instance: Option<Box<dyn Instance>>,
-    /// The device `open` built the instance on: the only one this worker ever opens.
-    device: Option<Device>,
+    /// The devices `open` built the instance on: the only ones this worker ever opens.
+    devices: Vec<Device>,
 }
 
 impl Host<'_> {
     /// Write one frame; a supervisor that is gone ends the worker.
+    /// Every device fault model code reported ([`report_device_fault`]) goes first, as a `fault` frame about the
+    /// same request: each frame starts with its request's id.
     fn send(&self, line: &str, fds: &[OwnedFd]) -> Result<(), Step> {
+        let id = line.split(' ').next().unwrap_or("0");
+        for (device, why) in std::mem::take(&mut *REPORTED.lock().unwrap_or_else(|e| e.into_inner())) {
+            let why: String = why.replace(['\n', '\r'], " ").chars().take(1024).collect();
+            let frame = format!("{id} fault {} {why}\n", super::device_label(device));
+            gpu_supervisor::wire::send(&self.sock, frame.as_bytes(), &[]).map_err(|_| Step::Exit(0))?;
+        }
         let mut frame = line.replace(['\n', '\r'], " ");
         frame.push('\n');
         let borrowed: Vec<_> = fds.iter().map(std::os::fd::AsFd::as_fd).collect();
@@ -318,8 +343,11 @@ impl Host<'_> {
         if self.instance.is_some() {
             return Err("this worker already hosts an instance".into());
         }
-        let (label, spec) = rest.split_once(' ').ok_or("open needs a device and a spec")?;
-        let device = parse_device_label(label)?;
+        let (labels, spec) = rest.split_once(' ').ok_or("open needs its devices and a spec")?;
+        let devices = labels.split(',').map(parse_device_label).collect::<Result<Vec<_>, _>>()?;
+        if (1..devices.len()).any(|i| devices[..i].contains(&devices[i])) {
+            return Err(format!("open names a device twice: {labels}"));
+        }
         let spec: Value = serde_json::from_str(spec).map_err(|e| format!("open: the spec is not JSON ({e})"))?;
         let spec = object(&spec, "the open spec", &["family", "args", "key"])?;
         let family = spec.get("family").and_then(Value::as_str).ok_or("the open spec names no family")?;
@@ -331,12 +359,12 @@ impl Host<'_> {
             format!("this worker hosts no family {family:?} (it hosts {known:?})")
         })?;
         let args = spec.get("args").cloned().unwrap_or(Value::Null);
-        let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (hosted.open)(&args).and_then(|model| model.resident.activate(&key, device).map(|instance| (instance, model.adapters)))));
+        let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (hosted.open)(&args).and_then(|model| model.resident.activate(&key, &devices).map(|instance| (instance, model.adapters)))));
         match built {
             Ok(built) => {
                 let (instance, adapters) = built?;
                 self.instance = Some(instance);
-                self.device = Some(device);
+                self.devices = devices;
                 *self.adapters.lock().unwrap_or_else(|e| e.into_inner()) = adapters;
                 Ok(())
             }
@@ -381,8 +409,8 @@ impl Host<'_> {
     /// card is refused: a worker opens one, and the parent moves an instance by starting a new worker.
     fn promote(&mut self, rest: &str) -> Result<(), String> {
         let device = parse_device_label(rest)?;
-        if self.device != Some(device) {
-            return Err(format!("this worker owns {:?}; promoting onto {rest} needs a worker of its own", self.device));
+        if self.devices != [device] {
+            return Err(format!("this worker owns {:?}; promoting onto {rest} needs a worker of its own", self.devices));
         }
         let instance = self.instance.as_mut().ok_or("no instance is open; send `open` first")?;
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| instance.promote(device))).unwrap_or_else(|p| Err(format!("{PANICKED} {}", panic_text(p.as_ref()))))

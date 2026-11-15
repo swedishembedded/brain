@@ -142,7 +142,7 @@ Choices the design above left open, and what was chosen:
 * `cargo test -p brain-gpu-worker` (2 tests, real card, skip with a printed
   reason where no card opens): a quarantined card is readmitted by a real
   probe; the per-request cost (below).
-* `cargo test -p brain-residency --test hosted` (12 tests; the test binary is
+* `cargo test -p brain-residency --test hosted` (13 tests; the test binary is
   its own worker, `harness = false`): an 8 MiB blob and a 2 MiB parameter
   cross in memfds, the caller's scope reaches the worker; three progress
   frames arrive in order and a cancellation fired from a progress callback
@@ -177,7 +177,12 @@ Choices the design above left open, and what was chosen:
   while an open group runs reaches the worker before the job that joins
   after it and the idle group refreshes its routes for it, a withdrawn one
   and one never offered are answered as no model, and one whose file does
-  not hold its digest is refused by the worker; the worker mode refuses a
+  not hold its digest is refused by the worker; a model across two cards
+  runs in one worker that owns both, registered through `register_multi`
+  and charged a worker's context on each card, a fault its worker reports
+  on one card quarantines that card alone whether the worker then dies or
+  answers (the instance is lost), and a death nothing was reported for
+  quarantines both; the worker mode refuses a
   non-socket stdin, a first request that is not `hello`, another protocol
   version and an unknown family.
 * `cargo test -p brain-residency --lib demotion_that_keeps
@@ -203,6 +208,22 @@ Choices the design above left open, and what was chosen:
   over). The fourth is why the reader applies a late frame itself: handed
   to the request loop, a frame about a group that just ended can land after
   a newer frame the reader applied.
+* `cargo test -p brain-residency --test it hosted_multi` (2 tests): an
+  exhaustive model of fault attribution for a model hosted across two cards
+  (about 2.3 thousand states over up to two requests, two reports, one
+  worker fault, rebuilds and readmissions): no request is sent while a card
+  is quarantined or to a lost instance, once a request ends a card its
+  worker blamed is quarantined, a death without a blame quarantines every
+  card, and no unblamed card is quarantined when the worker blamed one;
+  five deliberate bugs are each caught (a silent death blaming only the
+  first card, fault frames ignored, a fault in an answered request not
+  recorded, admission asking only the first card, reports sent after the
+  answer).
+* `cargo test -p brain-gpu-supervisor --test it several_devices` (1 test): a
+  worker owning two devices is refused work once either is quarantined, its
+  hang is recorded against the device `blame` names (never one it does not
+  hold) and its crash against both, and the unreaped worker is held by
+  every faulted device.
 * `cargo test -p brain-residency --test it hosted_tier` (2 tests): an
   exhaustive model of a hosted instance moving between tiers on two cards
   beside another tenant (about 2.5 thousand states over up to three jobs,
@@ -439,7 +460,19 @@ returned, and the model refreshes its routes from it as it does in process.
 A worker is told lazily, before it next runs anything, not the moment the
 registry changes: a worker that runs nothing needs no adapter, and no
 thread has to push to workers that may be busy. A new worker of an instance
-is told everything again (`AdapterFeed::reset`). And metrics and tiers: every
+is told everything again (`AdapterFeed::reset`). Then multi-device instances: a `HostedFamily` returns `HostedModel::multi` for a
+`MultiDeviceResidentModel`, `SupervisedMultiModel` (registered through
+`register_multi`, `WorkerHosting::serve_multi`) charges each card its
+model's share plus a worker's device context
+(`MultiDeviceCost::with_device_context`), and its activation opens every
+card of the placement in one worker (`open gpu0,gpu1 <spec>`); faults are
+attributed per card: model code in a worker calls `report_device_fault`
+for the card a failing driver call was on, the worker sends it as a
+`<id> fault <device> <why>` frame before its next frame, and the parent
+quarantines that card alone (`Health::exchange_on` with the devices the
+frames named; `Blamed::record` when the worker answers anyway, which loses
+the instance), while a death no card was named for quarantines every card
+the worker held, and work is admitted only while every card admits it. And metrics and tiers: every
 answer carries the instance's `metrics` after the request, which the parent
 keeps (the dispatcher's poll never reaches a worker); `demote warm|cold`
 runs the instance's own demotion in its worker, bounded by the run deadline
@@ -462,16 +495,13 @@ only the rest, and a promotion goes back to that card first.
   id in its own registry, which the worker's `AdaptedInstance` syncs from
   (its `OpenGroup::Refresh` then picks a change up in a running group as in
   process).
-* **Multi-device instances.** `MultiDeviceResidentModel` has no hosted form.
-  It needs a `HostedFamily` variant that rebuilds a multi-device resident and
-  an `open` that names a device list (`open gpu0,gpu1 <spec>`), so one worker
-  owns every card of the instance (a device object graph cannot be shared
-  between processes); a `SupervisedMultiModel` registered through
-  `register_multi`; and fault attribution per card: the worker reports which
-  card a failing driver call was on (a `fault <device>` frame before it
-  dies, or the device in its panic answer), so only that card is
-  quarantined, and a silent death quarantines every card of the instance,
-  since it cannot be attributed.
+* **A multi-device family.** The hosting is built (above); no served
+  multi-device family is hosted yet. Each needs its `HostedFamily` returning
+  `HostedModel::multi`, its registration through
+  `WorkerHosting::serve_multi`, and, for per-card attribution, a call to
+  `report_device_fault` where its lane sees a driver call fail on one card
+  (a `--gpu-wait-s` timeout of that card's stage); without one, a fault
+  quarantines every card of the instance, as in process.
 * **Memory accounting per device.** The worker's device context is
   charged as one constant measured on a P40; a card whose driver holds a
   larger context needs it measured there (a probe worker could report its

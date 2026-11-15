@@ -25,7 +25,8 @@ use std::time::{Duration, Instant};
 use capability::{failure, ActionResult, ActionSpec, Blob, CancelToken, Invocation, Manifest, Media, Outcome, Progress};
 use gpu_supervisor::{BreakerPolicy, BreakerState, Health, Worker, WorkerCommand};
 use residency::budget::Budgets;
-use residency::supervised::{device_label, AdapterSink, AdapterSource, Deadlines, HostSpec, HostedAdapter, HostedFamily, HostedModel, Probe, SupervisedModel, Supervision};
+use residency::supervised::{device_label, AdapterSink, AdapterSource, Deadlines, HostSpec, HostedAdapter, HostedFamily, HostedModel, Probe, SupervisedModel, SupervisedMultiModel, Supervision};
+use residency::multi::{MultiDeviceCost, MultiDeviceResidentModel};
 use residency::{Device, Executor, Instance, InstanceKey, Job, JobFeed, MemCost, Policy, ResidentModel, Tier};
 use serde_json::{json, Value};
 
@@ -33,7 +34,74 @@ const GB: u64 = 1 << 30;
 const REAP: Duration = Duration::from_secs(20);
 const DEADLINES: Deadlines = Deadlines { open: Duration::from_secs(30), run: Duration::from_secs(30), reap: REAP };
 
-const FAMILIES: &[HostedFamily] = &[HostedFamily { name: "test", open: open_test }];
+const FAMILIES: &[HostedFamily] = &[HostedFamily { name: "test", open: open_test }, HostedFamily { name: "multi", open: open_multi }];
+
+fn open_multi(args: &Value) -> Result<HostedModel, String> {
+    let id = args.get("id").and_then(Value::as_str).ok_or("the multi family needs an id")?;
+    Ok(HostedModel::multi(Arc::new(TestMulti(id.to_string()))))
+}
+
+/// A model across two cards, ten GiB on each.
+struct TestMulti(String);
+
+impl ResidentModel for TestMulti {
+    fn manifest(&self) -> Manifest {
+        Manifest::new(&self.0, "a model across two cards in a test worker", ["echo", "report", "blame", "block"].map(|a| ActionSpec::new(a, a)).to_vec())
+    }
+
+    fn instance_key(&self, _action: &str, _inv: &Invocation) -> InstanceKey {
+        InstanceKey::new(&self.0, "default")
+    }
+
+    fn estimate(&self, _key: &InstanceKey) -> MemCost {
+        MemCost::new(0, 0)
+    }
+
+    fn activate(&self, key: &InstanceKey, _device: Device) -> Result<Box<dyn Instance>, String> {
+        Err(format!("{key} is built across its cards"))
+    }
+}
+
+impl MultiDeviceResidentModel for TestMulti {
+    fn estimate_multi(&self, _key: &InstanceKey) -> MultiDeviceCost {
+        MultiDeviceCost::new(vec![(Device::Gpu(0), 10 * GB), (Device::Gpu(1), 10 * GB)], 0)
+    }
+
+    fn activate_multi(&self, _key: &InstanceKey, devices: &[Device]) -> Result<Box<dyn Instance>, String> {
+        Ok(Box::new(TestMultiInstance { devices: devices.to_vec() }))
+    }
+}
+
+struct TestMultiInstance {
+    devices: Vec<Device>,
+}
+
+impl Instance for TestMultiInstance {
+    /// `echo` names the cards and the worker; `report` reports a fault on the second card and answers; `blame`
+    /// reports it, says so, and then never returns, as a driver call wedged on that card; `block` never returns
+    /// without reporting anything.
+    fn run(&mut self, action: &str, _inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        let mut step = Progress::step(1, 1, action);
+        step.event = Some(json!({ "pid": std::process::id() }));
+        match action {
+            "echo" => Ok(Outcome::new().set("devices", json!(self.devices.iter().map(|&d| device_label(d)).collect::<Vec<_>>())).set("pid", json!(std::process::id()))),
+            "report" => {
+                residency::supervised::report_device_fault(self.devices[1], "a wait on it ran past its bound");
+                Ok(Outcome::new())
+            }
+            "blame" | "block" => {
+                if action == "blame" {
+                    residency::supervised::report_device_fault(self.devices[1], "a wait on it ran past its bound");
+                }
+                progress(step);
+                loop {
+                    std::thread::sleep(Duration::from_secs(3600));
+                }
+            }
+            other => Err(format!("no action {other}")),
+        }
+    }
+}
 
 fn open_test(args: &Value) -> Result<HostedModel, String> {
     let id = args.get("id").and_then(Value::as_str).ok_or("the test family needs an id")?;
@@ -737,6 +805,64 @@ fn adapters_offered_in_the_serving_process_reach_the_worker_and_a_running_group_
     std::fs::remove_dir_all(&dir).ok();
 }
 
+fn hosted_multi(health: &Arc<Health<Device>>) -> Arc<SupervisedMultiModel> {
+    let spec = HostSpec { family: "multi".into(), args: json!({ "id": "mm" }) };
+    Arc::new(SupervisedMultiModel::new(Arc::new(TestMulti("mm".into())), spec, worker_command(), health.clone(), DEADLINES))
+}
+
+/// Kill the worker a progress step names, as a crash would.
+fn kill_reporter(p: &Progress) {
+    let worker = p.event.as_ref().and_then(|e| e["pid"].as_u64()).expect("the step names its worker");
+    let killed = std::process::Command::new("kill").arg("-KILL").arg(worker.to_string()).status();
+    assert!(killed.is_ok_and(|s| s.success()), "kill {worker}");
+}
+
+/// A model across two cards runs in one worker that owns both, registered
+/// through `register_multi` and charged a worker's device context on each
+/// card; a fault the worker reports on one card quarantines that card
+/// alone, whether the worker then dies or answers (the instance is lost
+/// either way); a death nothing was reported for quarantines both.
+fn a_multi_device_model_runs_in_one_worker_and_its_faults_are_attributed_per_card() {
+    let health = health();
+    let key = InstanceKey::new("mm", "default");
+    let model = hosted_multi(&health);
+    let cost = model.estimate_multi(&key);
+    assert_eq!((cost.on(Device::Gpu(0)), cost.on(Device::Gpu(1))), (10 * GB + residency::supervised::WORKER_DEVICE_CONTEXT_BYTES, 10 * GB + residency::supervised::WORKER_DEVICE_CONTEXT_BYTES), "each card is charged the worker's context");
+
+    let supervision = Supervision { health: health.clone(), probe: failing_probe() };
+    let exec = Executor::start_supervised(Vec::new(), gpus(2), Policy::default(), None, Some(supervision));
+    exec.register_multi(model.clone());
+    let (tx, rx) = channel();
+    exec.submit(Job::new("mm", "echo", Invocation::new()).reply(move |r| {
+        let _ = tx.send(r);
+    }));
+    let out = rx.recv_timeout(Duration::from_secs(60)).expect("answered").expect("the model runs across its cards");
+    assert_eq!(out.outputs["devices"], json!(["gpu0", "gpu1"]), "one worker opened both cards");
+    assert_ne!(out.outputs["pid"].as_u64(), Some(u64::from(std::process::id())));
+    exec.shutdown();
+
+    let both = [Device::Gpu(0), Device::Gpu(1)];
+    let mut instance = model.activate_multi(&key, &both).expect("the worker opens both cards");
+    let err = instance.run("blame", &Invocation::new(), &mut |p| kill_reporter(&p)).expect_err("the worker died");
+    assert!(err.contains("lost its worker") || err.contains("signal 9"), "{err}");
+    assert!(health.admits(&Device::Gpu(0)), "the card the worker did not blame keeps serving");
+    assert!(!health.admits(&Device::Gpu(1)), "the card it blamed is quarantined");
+
+    let health = self::health();
+    let model = hosted_multi(&health);
+    let mut instance = model.activate_multi(&key, &both).expect("the worker opens both cards");
+    instance.run("report", &Invocation::new(), &mut |_| {}).expect("the job answered");
+    assert!(health.admits(&Device::Gpu(0)) && !health.admits(&Device::Gpu(1)), "a reported fault quarantines its card though the worker answered");
+    let err = instance.run("echo", &Invocation::new(), &mut |_| {}).expect_err("the instance is lost with its card");
+    assert!(err.contains("reported a device fault"), "{err}");
+
+    let health = self::health();
+    let model = hosted_multi(&health);
+    let mut instance = model.activate_multi(&key, &both).expect("the worker opens both cards");
+    instance.run("block", &Invocation::new(), &mut |p| kill_reporter(&p)).expect_err("the worker died");
+    assert!(!health.admits(&Device::Gpu(0)) && !health.admits(&Device::Gpu(1)), "a death nothing was reported for quarantines every card");
+}
+
 fn the_worker_mode_serves_only_a_supervisor_that_greets_it() {
     // Not a socket: refused before anything is read.
     let out = std::process::Command::new(std::env::current_exe().unwrap()).arg("worker").stdin(std::process::Stdio::null()).output().expect("run the worker mode");
@@ -770,6 +896,7 @@ const TESTS: &[(&str, fn())] = &[
     ("a_panic_in_model_code_fails_the_job_without_quarantining_the_card", a_panic_in_model_code_fails_the_job_without_quarantining_the_card),
     ("metrics_demotion_and_promotion_reach_the_hosted_instance", metrics_demotion_and_promotion_reach_the_hosted_instance),
     ("adapters_offered_in_the_serving_process_reach_the_worker_and_a_running_group_refreshes", adapters_offered_in_the_serving_process_reach_the_worker_and_a_running_group_refreshes),
+    ("a_multi_device_model_runs_in_one_worker_and_its_faults_are_attributed_per_card", a_multi_device_model_runs_in_one_worker_and_its_faults_are_attributed_per_card),
     ("the_worker_mode_serves_only_a_supervisor_that_greets_it", the_worker_mode_serves_only_a_supervisor_that_greets_it),
 ];
 

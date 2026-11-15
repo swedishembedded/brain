@@ -115,6 +115,10 @@ time. Then:
   the device is quarantined and why, instead of waiting. A model sharded
   over several cards needs every one of them, so its work fails once any of
   its cards is tripped.
+- **A model sharded over several cards has one worker for all of them.**
+  When that worker dies, every one of its cards is quarantined, unless the
+  model told the worker which card failed: then only that card is, and the
+  others keep serving other work.
 - **In-process waits count too.** When the executor runs with supervision,
   a device wait past `--gpu-wait-s` in the serving process also quarantines
   that card until a probe in a fresh worker passes.

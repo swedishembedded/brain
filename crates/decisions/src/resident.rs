@@ -196,6 +196,7 @@ mod tests {
         let spec = r.host_spec();
         assert_eq!(spec.family, FAMILY);
         let rebuilt = (hosted().open)(&spec.args).expect("a decision host spec opens").resident;
+        let rebuilt = rebuilt.model();
         assert_eq!(rebuilt.manifest().model, "acme/laya");
         assert_eq!(rebuilt.estimate(&InstanceKey::new("acme/laya", "default")), r.estimate(&InstanceKey::new("acme/laya", "default")));
         for bad in [json!({"id": "a"}), json!({"id": "a", "dir": "/d", "extra": 1}), json!(["a", "/d"])] {

@@ -114,6 +114,14 @@ impl MultiDeviceCost {
         MultiDeviceCost { per_device: self.per_device.iter().map(|&(d, b)| (d, b + activation)).collect(), ram: self.ram, activation: Some(activation) }
     }
 
+    /// Add `bytes` on every device this instance holds memory on: a device context of the instance's own on each
+    /// (the worker process that hosts it opens every card), as [`crate::MemCost::with_device_context`] adds one.
+    pub fn with_device_context(mut self, bytes: u64) -> MultiDeviceCost {
+        let holds = |b: u64| b > 0 || self.activation.is_some_and(|a| a > 0);
+        self.per_device = self.per_device.iter().map(|&(d, b)| (d, if holds(b) { b + bytes } else { b })).collect();
+        self
+    }
+
     /// The devices this instance would occupy, in the order given to `new`.
     pub fn devices(&self) -> impl Iterator<Item = Device> + '_ {
         self.per_device.iter().map(|&(d, _)| d)

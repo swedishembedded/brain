@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::fmt::Debug;
 use std::hash::Hash;
 use std::process::Child;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use crate::breaker::{Breaker, BreakerPolicy, BreakerState};
@@ -79,16 +79,20 @@ pub struct DeviceStatus {
     pub unreaped: usize,
 }
 
+/// A killed worker the kernel has not released yet, held by every device it
+/// held (a worker may own several), each of whose probes waits for it.
+type Unreaped = Arc<Mutex<Child>>;
+
 struct Entry {
     breaker: Breaker,
     faults: u64,
-    unreaped: Vec<Child>,
+    unreaped: Vec<Unreaped>,
 }
 
 impl Entry {
     /// Reap what the kernel has let go of since the last look.
     fn reap(&mut self) {
-        self.unreaped.retain_mut(|c| matches!(c.try_wait(), Ok(None)));
+        self.unreaped.retain(|c| matches!(c.lock().unwrap_or_else(|e| e.into_inner()).try_wait(), Ok(None)));
     }
 }
 
@@ -150,7 +154,7 @@ impl<K: Eq + Hash + Clone + Debug> Health<K> {
         self.with(device, |e| self.note_fault(device, e, now, cause, None));
     }
 
-    fn note_fault(&self, device: &K, e: &mut Entry, now: Instant, cause: &str, unreaped: Option<Child>) {
+    fn note_fault(&self, device: &K, e: &mut Entry, now: Instant, cause: &str, unreaped: Option<Unreaped>) {
         e.faults += 1;
         e.unreaped.extend(unreaped);
         let probing = e.breaker.state() == BreakerState::HalfOpen;
@@ -179,8 +183,21 @@ impl<K: Eq + Hash + Clone + Debug> Health<K> {
     /// [`CallError::Failed`] and its descriptors are closed.
     #[cfg(unix)]
     pub fn exchange(&self, device: &K, worker: &mut Worker, request: &str, deadline: Duration, x: Exchange<'_>) -> Result<(String, Vec<std::os::fd::OwnedFd>), CallError> {
-        if let Some(cause) = self.with(device, |e| (!e.breaker.admits()).then(|| e.breaker.cause().unwrap_or("a probe is running").to_string())) {
-            return Err(CallError::Refused { device: format!("{device:?}"), cause });
+        self.exchange_on(std::slice::from_ref(device), worker, request, deadline, x, &Vec::new)
+    }
+
+    /// [`Self::exchange`] for a worker that owns every one of `devices`:
+    /// refused while any of them is quarantined, and a fault is recorded
+    /// against the ones `blame` names once the exchange has ended (the devices
+    /// the worker said faulted, of `devices` only), or against every one of
+    /// them when it names none: a death the worker could not attribute leaves
+    /// every device it held suspect.
+    #[cfg(unix)]
+    pub fn exchange_on(&self, devices: &[K], worker: &mut Worker, request: &str, deadline: Duration, x: Exchange<'_>, blame: &dyn Fn() -> Vec<K>) -> Result<(String, Vec<std::os::fd::OwnedFd>), CallError> {
+        for device in devices {
+            if let Some(cause) = self.with(device, |e| (!e.breaker.admits()).then(|| e.breaker.cause().unwrap_or("a probe is running").to_string())) {
+                return Err(CallError::Refused { device: format!("{device:?}"), cause });
+            }
         }
         // The worker call runs outside the registry lock: a wedged device
         // must never stall another device's admission.
@@ -189,7 +206,11 @@ impl<K: Eq + Hash + Clone + Debug> Health<K> {
             Ok(Reply { result: Ok(payload), fds }) => Ok((payload, fds)),
             Ok(Reply { result: Err(message), .. }) => Err(CallError::Failed(message)),
             Err(WorkerFailure::Invalid(why)) => Err(CallError::Invalid(why)),
-            Err(WorkerFailure::Fault(kind)) => Err(CallError::Fault(self.fault(device, worker, request, kind))),
+            Err(WorkerFailure::Fault(kind)) => {
+                let named: Vec<K> = blame().into_iter().filter(|d| devices.contains(d)).collect();
+                let faulted = if named.is_empty() { devices } else { named.as_slice() };
+                Err(CallError::Fault(self.fault(faulted, worker, request, kind)))
+            }
         }
     }
 
@@ -198,11 +219,20 @@ impl<K: Eq + Hash + Clone + Debug> Health<K> {
         Err(CallError::Invalid("supervised device workers need a Unix host".into()))
     }
 
-    fn fault(&self, device: &K, worker: &mut Worker, request: &str, kind: FaultKind) -> Fault {
-        let unreaped = worker.take_unreaped();
-        let fault = Fault { device: format!("{device:?}"), op: verb(request), kind, pid: worker.pid(), reaped: unreaped.is_none() };
+    #[cfg(not(unix))]
+    pub fn exchange_on(&self, _devices: &[K], _worker: &mut Worker, _request: &str, _deadline: Duration, _x: Exchange<'_>, _blame: &dyn Fn() -> Vec<K>) -> Result<(String, Vec<()>), CallError> {
+        Err(CallError::Invalid("supervised device workers need a Unix host".into()))
+    }
+
+    /// Record the fault once against each of `devices`; a worker the kernel has not released is held by each.
+    fn fault(&self, devices: &[K], worker: &mut Worker, request: &str, kind: FaultKind) -> Fault {
+        let unreaped = worker.take_unreaped().map(|child| Arc::new(Mutex::new(child)));
+        let named: Vec<String> = devices.iter().map(|d| format!("{d:?}")).collect();
+        let fault = Fault { device: named.join(", "), op: verb(request), kind, pid: worker.pid(), reaped: unreaped.is_none() };
         let cause = fault.to_string();
-        self.with(device, |e| self.note_fault(device, e, Instant::now(), &cause, unreaped));
+        for device in devices {
+            self.with(device, |e| self.note_fault(device, e, Instant::now(), &cause, unreaped.clone()));
+        }
         fault
     }
 
@@ -250,7 +280,7 @@ impl<K: Eq + Hash + Clone + Debug> Health<K> {
             Ok(Err(message)) => Some(format!("{device:?}: health probe answered an error: {message}")),
             Err(WorkerFailure::Invalid(why)) => Some(format!("{device:?}: health probe request refused: {why}")),
             Err(WorkerFailure::Fault(kind)) => {
-                let unreaped = worker.take_unreaped();
+                let unreaped = worker.take_unreaped().map(|child| Arc::new(Mutex::new(child)));
                 let fault = Fault { device: format!("{device:?}"), op: verb(request), kind, pid: worker.pid(), reaped: unreaped.is_none() };
                 let cause = format!("health probe {fault}");
                 self.with(device, |e| self.note_fault(device, e, Instant::now(), &cause, unreaped));

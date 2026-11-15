@@ -163,6 +163,36 @@ fn a_crashed_worker_is_reported_with_its_signal_and_reaped() {
     assert!(matches!(again, CallError::Refused { .. }), "{again}");
 }
 
+/// A worker that owns several devices is refused work once any of them is
+/// quarantined, and a fault of it is recorded against the devices it said
+/// faulted (only those of its own), or against every one of them when it
+/// named none: a death it could not attribute leaves every card it held
+/// suspect.
+#[test]
+fn a_worker_of_several_devices_faults_the_devices_it_names_or_every_one() {
+    let _serial = serial();
+    let devices = ["gpu0", "gpu1"];
+    let health = health();
+    let mut w = spawn();
+    let err = health.exchange_on(&devices, &mut w, "run hang", Duration::from_millis(300), Exchange::default(), &|| vec!["gpu1", "gpu7"]).expect_err("a hung operation fails");
+    let CallError::Fault(f) = &err else { panic!("expected a device fault, got {err}") };
+    assert!(f.device.contains("gpu1") && !f.device.contains("gpu0") && !f.device.contains("gpu7"), "{err}");
+    assert!(health.admits(&"gpu0"), "the device it did not name keeps serving");
+    assert!(!health.admits(&"gpu1"), "the device it named is quarantined");
+    assert_eq!(health.faults(&"gpu7"), 0, "a device that is not the worker's is never blamed");
+    let mut fresh = spawn();
+    let refused = health.exchange_on(&devices, &mut fresh, "run ok", Duration::from_secs(5), Exchange::default(), &Vec::new).expect_err("refused");
+    assert!(matches!(&refused, CallError::Refused { device, .. } if device.contains("gpu1")), "{refused}");
+
+    let health = self::health();
+    let mut w = spawn();
+    let pid = w.pid();
+    health.exchange_on(&devices, &mut w, "run crash", Duration::from_secs(5), Exchange::default(), &Vec::new).expect_err("a crash fails");
+    assert!(!health.admits(&"gpu0") && !health.admits(&"gpu1"), "a death no device was named for quarantines every one");
+    assert_eq!((health.faults(&"gpu0"), health.faults(&"gpu1")), (1, 1));
+    assert_reaped(pid);
+}
+
 #[test]
 fn an_open_breaker_refuses_work_until_a_probe_passes() {
     let _serial = serial();
