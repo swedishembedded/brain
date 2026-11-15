@@ -345,6 +345,11 @@ fn a_worker_hosted_encoder_costs_a_round_trip_per_group_and_a_context_per_card()
         mib(worker_device),
         mib(worker_host.map(|m| m as i64))
     );
+    // What placement charges each hosted instance for its worker's context must cover what the driver reports.
+    if let (Some(worker), Some(instance)) = (worker_device, instance_device) {
+        let charged = (residency::supervised::WORKER_DEVICE_CONTEXT_BYTES >> 20) as i64;
+        assert!(worker - instance <= charged, "a worker's device context holds {} MiB, placement charges {charged} MiB", worker - instance);
+    }
     assert!(worker_job < local_job + Duration::from_millis(50), "a worker added {:?} per job", worker_job.saturating_sub(local_job));
     assert!(worker_group < local_group + Duration::from_millis(50), "a worker added {:?} per group", worker_group.saturating_sub(local_group));
 }

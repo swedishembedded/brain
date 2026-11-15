@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 use capability::{ActionResult, ActionSpec, Invocation, Manifest};
 use gpu_supervisor::{BreakerPolicy, BreakerState, Health, WorkerCommand};
 use residency::budget::Budgets;
-use residency::supervised::{Deadlines, HostSpec, Probe, SupervisedModel, Supervision};
+use residency::supervised::{Deadlines, HostSpec, Probe, SupervisedModel, Supervision, WORKER_DEVICE_CONTEXT_BYTES};
 use residency::{Device, Executor, Instance, InstanceKey, Job, MemCost, MultiDeviceCost, MultiDeviceResidentModel, Policy, ResidentModel};
 use serde_json::json;
 
@@ -433,5 +433,38 @@ fn a_faulted_instance_whose_teardown_wedges_does_not_stall_the_scheduler() {
     let dropped_on = sticky.dropped_on.lock().unwrap().clone();
     assert!(dropped_on.as_deref().is_some_and(|t| t != "brain-dispatcher"), "the faulted instance was dropped on {dropped_on:?}");
     sticky.open_gate();
+    exec.shutdown();
+}
+
+/// A worker holds a device context of its own beside its instance, which in-process instances of the card share, so a
+/// card that fits the instance in process but not with that context never hosts it: the hosted work is refused at
+/// once, naming the budget, and the card has nothing placed on it.
+#[test]
+fn a_card_that_fits_the_instance_but_not_its_workers_context_refuses_it() {
+    let health = health();
+    let instance = Declared("e".into()).estimate(&InstanceKey::new("e", "default")).vram;
+    let mut budgets = Budgets::new();
+    budgets.set(Device::Gpu(0), instance + WORKER_DEVICE_CONTEXT_BYTES / 2, 0);
+    let exec = start(vec![model("e", "normal", &health)], budgets, &health, "normal");
+    let (_, reply) = submit(&exec, "e", "ok");
+    let err = reply.recv_timeout(Duration::from_secs(10)).expect("e is answered").0.expect_err("the worker's context does not fit beside e");
+    assert!(err.contains("budget"), "the refusal names the budget: {err}");
+    assert!(exec.residency().placements.is_empty(), "nothing was placed on the card");
+    exec.shutdown();
+}
+
+/// The same hosted model on two cards, one with room for the instance alone and one with room for its worker's
+/// context too: it is built on the second.
+#[test]
+fn a_hosted_instance_is_built_on_the_card_with_room_for_its_workers_context() {
+    let health = health();
+    let instance = Declared("f".into()).estimate(&InstanceKey::new("f", "default")).vram;
+    let mut budgets = Budgets::new();
+    budgets.set(Device::Gpu(0), instance + WORKER_DEVICE_CONTEXT_BYTES / 2, 0).set(Device::Gpu(1), instance + WORKER_DEVICE_CONTEXT_BYTES, 0);
+    let exec = start(vec![model("f", "normal", &health)], budgets, &health, "normal");
+    let (_, reply) = submit(&exec, "f", "ok");
+    reply.recv_timeout(Duration::from_secs(10)).expect("f is answered").0.expect("f runs where its worker fits");
+    let placed: Vec<Device> = exec.residency().placements.iter().filter(|p| p.key.model == "f").map(|p| p.device).collect();
+    assert_eq!(placed, vec![Device::Gpu(1)], "f is built on the card with room for its worker's context");
     exec.shutdown();
 }

@@ -117,6 +117,15 @@ impl MemCost {
         let activation = self.activation.unwrap_or(if self.vram > 0 { fallback } else { 0 });
         MemCost { vram: self.vram + activation, activation: Some(activation), ..*self }
     }
+    /// Add `bytes` of device memory a device context of the instance's own holds beside it (the worker process that
+    /// hosts it), charged with [`Self::vram`] so [`Self::placed`] and every budget see it. Nothing is added for an
+    /// instance that holds no device memory, whose worker opens no device.
+    pub fn with_device_context(mut self, bytes: u64) -> MemCost {
+        if self.vram > 0 || self.activation.is_some_and(|a| a > 0) {
+            self.vram += bytes;
+        }
+        self
+    }
     /// Add an NPU footprint (marks the instance as NPU-placeable). The NPU's compiled
     /// blob + I/O live in shared host memory, so this is a host-memory figure — but
     /// kept a separate field from `ram` so NPU-eligibility is explicit (a CPU-only

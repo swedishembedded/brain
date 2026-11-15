@@ -110,7 +110,7 @@ Choices the design above left open, and what was chosen:
   renewing one is killed at it; each frame gets its own descriptors and an
   8 MiB blob travels in a memfd; an unsealed or oversized descriptor is
   refused. The fakes are a POSIX shell that hangs in a grandchild or aborts.
-* `cargo test -p brain-residency --test it supervision` (7 tests): through
+* `cargo test -p brain-residency --test it supervision` (9 tests): through
   the executor, a hung run fails by its deadline while the other card
   serves and the restart probe readmits the device and the claim is
   unwound; a crash in activation keeps the card out (failing probes trip
@@ -124,7 +124,10 @@ Choices the design above left open, and what was chosen:
   never finishes is moved: the next job is served on the healthy card, the
   old instance is dropped on neither the dispatcher nor a lane, and its
   memory stays charged until its teardown ends; a faulted instance whose
-  teardown wedges leaves the scheduler answering and placing other work.
+  teardown wedges leaves the scheduler answering and placing other work; a
+  card that fits a hosted instance but not its worker's device context
+  refuses it at once naming the budget, and with a second card that fits
+  both the instance is built there.
 * `cargo test -p brain-serving --lib supervision` (2 tests): the worker
   beside the server executable runs the probes, bounded by `--gpu-wait-s`; a
   missing or non-executable worker is named and the breaker is kept.
@@ -328,8 +331,14 @@ per card per worker, about 150 MiB on a P40, that in-process instances of
 the same card share, plus about 283 MiB of host memory (its own process:
 the `brain` binary's mappings, its runtime and its own copy of what the
 model keeps on the host, which for a large checkpoint is its converted
-weights). A card that hosts N workers pays N contexts; the residency
-budget does not charge them yet (below).
+weights). A card that hosts N workers pays N contexts, and placement
+charges each: a hosted resident's estimate is its model's plus
+`supervised::WORKER_DEVICE_CONTEXT_BYTES` (`MemCost::with_device_context`,
+added only where the instance holds device memory), so `hot_cost` and
+every placement, eviction plan and release see it. The constant is the
+measured context rounded up, and the test above fails when a worker's
+context grows past it. The worker's host memory is not charged: a
+GPU-placed instance is charged device bytes only.
 
 ### What each next family needs
 
@@ -367,11 +376,11 @@ any size, panics answered as job errors.
   dies, or the device in its panic answer), so only that card is
   quarantined, and a silent death quarantines every card of the instance,
   since it cannot be attributed.
-* **Memory accounting.** A worker's device context (about 150 MiB per
-  worker on a P40, measured above) is not in its resident's estimate, so the
-  budget overcommits a card by that much per hosted instance; the estimate
-  of a hosted resident needs the context added, measured per device rather
-  than assumed.
+* **Memory accounting per device.** The worker's device context is
+  charged as one constant measured on a P40; a card whose driver holds a
+  larger context needs it measured there (a probe worker could report its
+  own context's footprint at startup), and a worker's host memory is not
+  charged at all.
 * **Screening joiners.** `JobFeed::screen` is not forwarded: the worker's
   feed refuses nothing, so a late job that can never run (a prompt longer
   than the instance's context) waits for a slot instead of being refused at

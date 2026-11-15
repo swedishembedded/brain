@@ -93,6 +93,14 @@ pub use host::host;
 #[cfg(unix)]
 pub use host::host_on;
 
+/// Device memory a worker's own device context holds on its card beside the instance it hosts: what every in-process
+/// instance of a card shares through the serving process's one context and each worker pays again, so every hosted
+/// instance is charged it on top of its estimate ([`MemCost::with_device_context`]). It is the card's used memory
+/// with a worker built on it less what the same instance adds beside an open context, as the driver reports both, and
+/// rounded up to a whole 64 MiB; `a_worker_hosted_encoder_costs_a_round_trip_per_group_and_a_context_per_card` (the
+/// brain CLI's `worker_hosted_lfm` tests) measures it on a real card and fails when a worker holds more.
+pub const WORKER_DEVICE_CONTEXT_BYTES: u64 = 192 << 20;
+
 /// The first word of an answer whose model code panicked in the worker.
 #[cfg(unix)]
 const PANICKED: &str = "panicked:";
@@ -231,12 +239,13 @@ impl ResidentModel for SupervisedModel {
         self.inner.instance_key(action, inv)
     }
 
+    /// The model's own estimate plus its worker's device context: each instance is one worker on one card.
     fn estimate(&self, key: &InstanceKey) -> MemCost {
-        self.inner.estimate(key)
+        self.inner.estimate(key).with_device_context(WORKER_DEVICE_CONTEXT_BYTES)
     }
 
     fn estimate_at(&self, key: &InstanceKey, tier: Tier) -> MemCost {
-        self.inner.estimate_at(key, tier)
+        self.inner.estimate_at(key, tier).with_device_context(WORKER_DEVICE_CONTEXT_BYTES)
     }
 
     fn replicas(&self) -> usize {
