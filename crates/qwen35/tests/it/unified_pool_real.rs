@@ -16,8 +16,8 @@
 //!   the geometry says (3 for the first f32 row, 5 for two, 9 for four: neighbouring rows share a granule), and an idle server
 //!   holds none.
 //!
-//! Self-skips when the checkpoint is not in the model store (`brain pull Qwen/Qwen3.8-27B-FP8`) or the card has no sparse
-//! buffers.
+//! Self-skips when the checkpoint is not in the model store (`brain pull Qwen/Qwen3.8-27B-FP8`), the card has no sparse
+//! buffers, or no single card can hold the whole model (the unified pool serves one stage).
 
 use model::kv_tier::KvTier;
 use model::paged::BlockTable;
@@ -41,10 +41,13 @@ fn resident(path: &str, slots: u32, unified: bool, pool_blocks: u32) -> Option<(
     let tier = held_tiers_at(path).expect("the directory is a servable checkpoint");
     let devices = devices[..1].to_vec();
     let device = devices[0].0;
-    let r = Qwen35GgufResident::new(path.to_string(), devices, CAP, tier).with_kv_tier(KvTier::BF16).with_gdn_state(GdnState::F32).with_max_batch(slots).with_prefix_slots(0).with_kv_block_rows(BLOCK_ROWS);
+    let r = Qwen35GgufResident::new(path.to_string(), devices.clone(), CAP, tier).with_kv_tier(KvTier::BF16).with_gdn_state(GdnState::F32).with_max_batch(slots).with_prefix_slots(0).with_kv_block_rows(BLOCK_ROWS);
     let r = if unified { r.with_unified_pool(true) } else { r };
     let pool = pool_blocks * BLOCK_ROWS + r.sequence_state_rows().expect("the shape of the model");
-    Some((r.with_kv_pool_rows(pool), device))
+    let r = r.with_kv_pool_rows(pool);
+    // The unified pool serves one stage: the whole model on the one card.
+    crate::common::placed_devices(&r, &devices)?;
+    Some((r, device))
 }
 
 fn engine(r: &(Qwen35GgufResident, residency::Device)) -> Qwen35GgufEngine {

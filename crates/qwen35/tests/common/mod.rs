@@ -143,6 +143,28 @@ pub fn measure_in_child_at(module: &str, helper: &str) -> HashMap<String, u64> {
         .collect()
 }
 
+/// The cards `resident` is planned on, to load it on exactly those. `cards` are the budgeted cards it was built with.
+/// `None`, after a skip naming the requirement, when those cards cannot hold what the model places
+/// (`total_device_bytes`: its weights and decode state whatever the split) beside the workspace each card keeps free
+/// (`stage_workspace_bytes`). Cards that can hold it must take a placement: a plan that refuses them fails here.
+pub fn placed_devices(resident: &qwen35::int8_gguf_resident::Qwen35GgufResident, cards: &[(residency::Device, u64)]) -> Option<Vec<residency::Device>> {
+    let planned: Vec<residency::Device> = resident.placement().iter().map(|(device, ..)| *device).collect();
+    if !planned.is_empty() {
+        return Some(planned);
+    }
+    let why = resident.unservable_reason().unwrap_or_default();
+    let needed = resident.total_device_bytes().unwrap_or_else(|e| panic!("{e}"));
+    let workspace = resident.stage_workspace_bytes().unwrap_or_else(|e| panic!("{e}"));
+    let usable: u64 = cards.iter().map(|(_, bytes)| bytes.saturating_sub(workspace)).sum();
+    assert!(needed > usable, "{} cards leave {usable} B beside their workspace for the {needed} B the model places, and the plan still refuses them: {why}", cards.len());
+    brain_testutil::skip_unavailable(&format!(
+        "{} needs {needed} B of device memory beside {workspace} B of workspace per card, more than the {} budgeted card(s) offer: {why}",
+        resident.model_id(),
+        cards.len()
+    ));
+    None
+}
+
 /// Print one marker for [`measure_in_child!`] (on a line of its own: libtest
 /// leaves its `test name ... ` prefix on the line a `--nocapture` test starts
 /// printing on).

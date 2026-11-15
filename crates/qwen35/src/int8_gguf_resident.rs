@@ -453,11 +453,10 @@ impl ServingShape {
         ServingShape { cap, tier, kv, max_batch, prefix_slots: 0, kv_pool_rows: 0, spec: SpecCost::NONE, prefill_rows: TENSOR_CORE_PREFILL_TOKENS, adapter_bank: None, head: Dtype::I8, embed: None, gdn_bf16: false, native_attention: false, snapshots_on_host: false, vision_bytes: 0, unified_state: false, sequence_state_rows: 0, block_rows: 0 }
     }
 
-    /// The same shape for a stack whose prefill forward may carry `rows` rows (the
-    /// batched-prefill setting): never fewer than the widest single-sequence round,
-    /// which a stack with tensor cores runs whatever the setting.
+    /// The same shape for a stack whose largest prefill forward carries `rows` rows ([`stack_prefill_rows`]). A shape
+    /// made with [`Self::new`] assumes the tensor-core round, the widest single-sequence round any stack runs.
     pub fn with_prefill_rows(&self, rows: u32) -> ServingShape {
-        ServingShape { prefill_rows: rows.max(TENSOR_CORE_PREFILL_TOKENS), ..self.clone() }
+        ServingShape { prefill_rows: rows, ..self.clone() }
     }
 
     /// Device bytes every stage must keep free beside what this shape places: the
@@ -654,6 +653,14 @@ pub fn prefill_round_rows_for(tensor_cores: bool) -> u32 {
     } else {
         MAX_PREFILL_TOKENS
     }
+}
+
+/// Rows of the largest prefill forward a stack runs: its single-sequence round ([`prefill_round_rows_for`]), or the
+/// batched-prefill setting `batch_tokens` when that is wider. What the placement keeps free on every card is this
+/// forward's activations, so a stack without tensor cores, whose rounds are narrower, is not charged a tensor-core
+/// round it never runs.
+pub fn stack_prefill_rows(tensor_cores: bool, batch_tokens: usize) -> u32 {
+    prefill_round_rows_for(tensor_cores).max(batch_tokens.try_into().unwrap_or(u32::MAX))
 }
 
 /// How many layers' worth of intermediate activations a prefill round holds at
@@ -4388,6 +4395,15 @@ impl Qwen35GgufResident {
         Ok(serving_cost(&cfg, &self.serving_shape(&mg, &cfg)).total())
     }
 
+    /// The device bytes every card this resident is placed on keeps free beside what it holds: the activations of a
+    /// prefill round and of a decode step ([`ServingShape::stage_workspace`]). With [`Self::total_device_bytes`] it says
+    /// whether a set of cards can take the model at all.
+    pub fn stage_workspace_bytes(&self) -> Result<u64, String> {
+        let mg = self.checkpoint().map_err(|e| format!("{MODEL}: cannot open '{}': {e}", self.gguf_path))?;
+        let cfg = mg.config(self.cap)?;
+        Ok(self.serving_shape(&mg, &cfg).stage_workspace(&cfg))
+    }
+
     /// The longest per-sequence context this configuration places on its
     /// cards ([`auto_cap`]), or why not even one token fits.
     ///
@@ -4451,7 +4467,8 @@ impl Qwen35GgufResident {
             unified_state: self.unified(),
             sequence_state_rows: self.state_rows_of_a_sequence(cfg, spec.mtp_head),
             block_rows: self.block_rows(),
-            ..ServingShape::new(self.cap, self.tier.clone(), self.kv_tier, self.max_batch).with_prefill_rows(self.prefill.batch_tokens.try_into().unwrap_or(u32::MAX))
+            ..ServingShape::new(self.cap, self.tier.clone(), self.kv_tier, self.max_batch)
+                .with_prefill_rows(stack_prefill_rows(gpu_core::provider::cuda::tensor_core_kernels_offered(hw, &cards), self.prefill.batch_tokens))
         }
     }
 
@@ -5371,6 +5388,19 @@ mod tests {
         let fp8 = TierPolicy::uniform(Dtype::F8E4M3);
         assert_eq!(shape(fp8.clone().with(&["mlp.up"], Dtype::BF16)), shape(fp8.clone()), "bf16 and FP8 products read their stored bytes");
         assert_eq!(shape(fp8.clone().with(&["mlp"], Dtype::F4E2M1)) - shape(fp8), 2 * model::ops::DEFAULT_TILE_BUDGET_BYTES);
+    }
+
+    /// A stack's largest prefill forward is its own round: the narrow one without tensor cores, the tensor-core one
+    /// with them, and the batched-prefill setting where that is wider.
+    #[test]
+    fn a_stack_is_charged_the_prefill_round_it_runs() {
+        assert_eq!(stack_prefill_rows(false, 0), MAX_PREFILL_TOKENS);
+        assert_eq!(stack_prefill_rows(true, 0), TENSOR_CORE_PREFILL_TOKENS);
+        assert_eq!(stack_prefill_rows(false, 1024), 1024);
+        assert_eq!(stack_prefill_rows(true, 2 * TENSOR_CORE_PREFILL_TOKENS as usize), 2 * TENSOR_CORE_PREFILL_TOKENS);
+        let cfg = Qwen35Config::qwen38_27b();
+        let shape = ServingShape::new(8192, TierPolicy::uniform(Dtype::I8), KvTier::INT8, 8);
+        assert!(shape.with_prefill_rows(stack_prefill_rows(false, 0)).stage_workspace(&cfg) < shape.stage_workspace(&cfg), "a narrow round keeps less free than the tensor-core round");
     }
 
     /// The workspace follows the rows a round carries, and the batched-prefill setting widens them.

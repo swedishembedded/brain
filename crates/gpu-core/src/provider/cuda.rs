@@ -246,6 +246,15 @@ pub fn tensor_core_kernels_enabled(gpu: &crate::Gpu) -> bool {
     !super::cuda_disabled() && gpu.caps().arch.compute_capability.is_some_and(|cc| cc >= kernels_cuda::MMA_S8_MIN_CC)
 }
 
+/// [`tensor_core_kernels_enabled`] for every one of the cards `indices` of `hw`, before any of them is opened: what a
+/// memory plan asks so it sizes the work the stack will run there (a prefill round is wider on tensor cores).
+pub fn tensor_core_kernels_offered(hw: &crate::defaults::Hardware, indices: &[u32]) -> bool {
+    !super::cuda_disabled()
+        && crate::backend_name() == "cuda"
+        && !indices.is_empty()
+        && indices.iter().all(|i| hw.cards.iter().find(|c| c.index == *i).and_then(|c| c.compute_capability).is_some_and(|cc| cc >= kernels_cuda::MMA_S8_MIN_CC))
+}
+
 /// Value-column blocks `gdn_chunk_loop_f32` splits each head across; its launch
 /// is `bh * GDN_CHUNK_LOOP_SPLITS` blocks.
 const GDN_CHUNK_LOOP_SPLITS: u32 = 4;
