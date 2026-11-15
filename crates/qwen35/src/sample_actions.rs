@@ -96,7 +96,7 @@ impl SampleRequest {
         if prompts.len() > MAX_PROMPTS {
             return Err(fail(format!("{} prompts is more than the {MAX_PROMPTS} one call decodes", prompts.len())));
         }
-        let base_dtype = qwen3::lora_params::base_format(inv, &TRAIN_BASES, Dtype::NF4).map_err(&fail)?;
+        let base_dtype = qwen3::lora_params::base_format(inv, &TRAIN_BASES, Dtype::NF4).map_err(fail)?;
         let max_new = inv.get_i64("max_new").unwrap_or(DEFAULT_MAX_NEW);
         if max_new < 1 {
             return Err(fail("max_new must be at least 1".into()));
@@ -152,7 +152,7 @@ pub(crate) fn sample_adapter(default_weights: Option<&str>, default_tokenizer: O
 
     let len = u32::try_from(longest + request.max_new).map_err(|_| fail("the forward length is beyond any context".into()))?;
     progress(Progress::step(0, request.prompts.len() as u32, format!("loading the base as {}, forward length {len}", model::policy::format_name(request.base_dtype))));
-    let mut sampler = AdapterSampler::open(&weights, adapter.as_deref(), request.base_dtype, len).map_err(&fail)?;
+    let mut sampler = AdapterSampler::open(&weights, adapter.as_deref(), request.base_dtype, len).map_err(fail)?;
     let modes: &[(&str, bool)] = match request.which {
         SampleWhich::AdapterOnly => &[("adapter", true)],
         SampleWhich::BaseOnly => &[("base", false)],
@@ -167,7 +167,7 @@ pub(crate) fn sample_adapter(default_weights: Option<&str>, default_tokenizer: O
         answer.insert("prompt".into(), json!(prompt));
         for (label, on) in modes {
             sampler.set_adapter(*on);
-            let out = sampler.greedy(ids, request.max_new, &eos).map_err(&fail)?;
+            let out = sampler.greedy(ids, request.max_new, &eos).map_err(fail)?;
             let text = tok.decode(&out);
             lines.push(format!("[{label}] {prompt}{text}"));
             answer.insert((*label).into(), json!(text));

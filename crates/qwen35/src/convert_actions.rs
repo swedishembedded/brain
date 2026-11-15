@@ -50,10 +50,10 @@ pub(crate) fn import(inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> Ac
     }
     let fail = |why: String| if why == capability::failure::CANCELLED { why } else { fail(why) };
     let outcome = if source.is_dir() {
-        convert_hf(&source, &dest, inv.get_str("weight_format").filter(|f| !f.is_empty()).as_deref().unwrap_or("nf4"), &mut inv.keep_going(progress, 0, "tensor")).map_err(&fail)?
+        convert_hf(&source, &dest, inv.get_str("weight_format").filter(|f| !f.is_empty()).as_deref().unwrap_or("nf4"), &mut inv.keep_going(progress, 0, "tensor")).map_err(fail)?
     } else if source.extension().is_some_and(|e| e == "gguf") {
         let id = inv.get_str("id").filter(|i| !i.is_empty());
-        let stats = crate::gguf_import::import_gguf(&source.to_string_lossy(), &dest.to_string_lossy(), id.as_deref(), &mut inv.keep_going(progress, 0, "tensor")).map_err(&fail)?;
+        let stats = crate::gguf_import::import_gguf(&source.to_string_lossy(), &dest.to_string_lossy(), id.as_deref(), &mut inv.keep_going(progress, 0, "tensor")).map_err(fail)?;
         Outcome::new().set("tensors", json!(stats.written))
     } else {
         return Err(fail(format!("source '{}' is neither a .gguf file nor a Hugging Face directory", source.display())));

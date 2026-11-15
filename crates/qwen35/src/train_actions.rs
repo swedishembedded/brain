@@ -185,8 +185,8 @@ impl FinetuneRequest {
             inv.get_f64("lora_plus_ratio").map(|r| r.to_string()).as_deref(),
             named(inv, "adapter_kind").as_deref(),
         )
-        .map_err(&fail)?;
-        let base_dtype = qwen3::lora_params::base_format(inv, &TRAIN_BASES, Dtype::F32).map_err(&fail)?;
+        .map_err(fail)?;
+        let base_dtype = qwen3::lora_params::base_format(inv, &TRAIN_BASES, Dtype::F32).map_err(fail)?;
         let long = LongSeqOverrides { gdn_segment: whole(inv, "gdn_segment"), bf16_residuals: inv.get_bool("bf16_residuals"), mlp_rows: whole(inv, "mlp_rows") };
         let naming = AdapterNaming { id: named(inv, "adapter_id"), name: named(inv, "adapter_name") };
         if naming.id.is_some() && naming.name.is_some() {
@@ -336,7 +336,7 @@ fn dataset(inv: &Invocation, weights: &Path, default_tokenizer: Option<&str>, sc
             }
             let val = qwen3::caps::read_jsonl_blob(inv, "validation", scratch, "qwen35 finetune")?.unwrap_or_default();
             // The MODEL's vocab (not the tokenizer's): it must match the base's embedding rows.
-            let vocab = open_base(weights).map_err(&fail)?.cfg.vocab as usize;
+            let vocab = open_base(weights).map_err(fail)?.cfg.vocab as usize;
             let dir = scratch.join("data");
             let render = data::chat::RenderOpts { keep_reasoning: false };
             let prepared = data::chat::prepare_chat_samples(&train, &val, &tok, &tmpl, render, vocab, &dir).map_err(|e| fail(format!("preparing the training data: {e}")))?;
@@ -376,7 +376,7 @@ fn target(request: &FinetuneRequest, inv: &Invocation, streamed_lora: bool, card
         (Some(path), false) => Ok(Target { path, as_blob: false, filed: false }),
         (None, true) => {
             let root = brain_modelstore::default_root().ok_or_else(|| fail("no models directory resolved (name one with --brain-data-dir)".into()))?;
-            Ok(Target { path: filed_adapter_path(card_id, &root).map_err(&fail)?, as_blob: false, filed: true })
+            Ok(Target { path: filed_adapter_path(card_id, &root).map_err(fail)?, as_blob: false, filed: true })
         }
         (None, false) if streamed_lora => Ok(Target { path: scratch.join("adapter.safetensors"), as_blob: true, filed: false }),
         (None, false) => Err(fail("missing required param 'save': a full or fp32 run writes a checkpoint".into())),
@@ -413,7 +413,7 @@ fn train_in(scratch: &Path, request: &FinetuneRequest, weights: &Path, default_t
         return Err(fail("a Hugging Face directory trains only as a LoRA adapter (mode lora); full-parameter fine-tuning needs a brain checkpoint (.safetensors) at base_format f32".into()));
     }
     // The card of a streamed adapter, refused here when it cannot be made, before any training time is spent.
-    let (card_id, base_id) = if streamed { adapter_card(weights, &request.naming).map_err(&fail)? } else { (String::new(), String::new()) };
+    let (card_id, base_id) = if streamed { adapter_card(weights, &request.naming).map_err(fail)? } else { (String::new(), String::new()) };
     let target = target(request, inv, streamed, &card_id, scratch)?;
     let data = dataset(inv, weights, default_tokenizer, scratch)?;
 
