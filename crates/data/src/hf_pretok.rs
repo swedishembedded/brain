@@ -100,6 +100,12 @@ pub const QWEN2_PATTERN: &str = r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]
 /// Qwen3.8 releases.
 const QWEN35_PATTERN: &str = r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?[\p{L}\p{M}]+|\p{N}| ?[^\s\p{L}\p{M}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+";
 
+/// GPT-2's split, exactly as a `tokenizer.json` declaring `{"type": "ByteLevel", "add_prefix_space": false,
+/// "use_regex": true}` applies it (Unicode letter and number classes): the pieces a byte-level BPE merges within.
+pub fn gpt2_pieces(text: &str) -> Vec<String> {
+    PreTokenizer::ByteLevel { add_prefix_space: false, use_regex: true }.split(text)
+}
+
 impl PreTokenizer {
     /// Read `v` (`null` is no pre-tokenization: the whole text is one piece).
     /// An unimplemented type is an error naming it.
@@ -170,8 +176,10 @@ impl PreTokenizer {
                     }
                 }
                 if *use_regex {
-                    let gpt2 = Pattern::Regex(regex(GPT2_PATTERN).expect("GPT-2 pattern compiles"));
-                    *pieces = pieces.iter().flat_map(|p| split_piece(p, &spans(p, &gpt2), SplitBehavior::Isolated, false)).collect();
+                    // Compiled once per process: a pattern compile per encode call cost more than the split itself.
+                    static GPT2: std::sync::OnceLock<Pattern> = std::sync::OnceLock::new();
+                    let gpt2 = GPT2.get_or_init(|| Pattern::Regex(regex(GPT2_PATTERN).expect("GPT-2 pattern compiles")));
+                    *pieces = pieces.iter().flat_map(|p| split_piece(p, &spans(p, gpt2), SplitBehavior::Isolated, false)).collect();
                 }
             }
         }
