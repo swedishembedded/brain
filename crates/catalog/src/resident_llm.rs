@@ -25,6 +25,7 @@
 
 use capability::{ActionResult, Invocation, Manifest, Progress, Provider};
 use checkpoint::st::ModelCard;
+use residency::supervised::HostSpec;
 use residency::{on_device, Device, Instance, InstanceKey, MemCost, ResidentModel};
 use serde_json::json;
 
@@ -38,7 +39,14 @@ use data::rng::Rng;
 use data::tokenizer::{CharTokenizer, Tokenizer};
 use qwen3::chat::{parse_request_as, sampling_params, text_outcome, ChatFormat};
 
+mod plan;
+use plan::QwenPlan;
+
 // ---------------------------------------------------------------- shared
+
+/// The family name worker hosting knows the Qwen3 decoder by
+/// (`brain serve --worker-hosted qwen3`).
+pub const FAMILY: &str = "qwen3";
 
 /// A Qwen3 adapter's view.
 pub type QwenAdapterView = AdapterView<QwenResident>;
@@ -761,10 +769,11 @@ fn auto_ctx_for_budget(weight_bytes: u64, budget_bytes: u64, cfg: &qwen3::config
 /// this resident's [`InstanceKey`], so base and adapter requests run in the
 /// same batches on the same engine. See [`llmserve::adapter_registry`].
 pub struct QwenResident {
-    id: String,
-    path: String,
-    tokenizer: String,
-    /// The architecture its card names (`qwen3`, or a config variant such as
+    /// Everything the engine is built from, resolved once at construction ([`Self::resolve_ctx`],
+    /// [`Self::resolve_kv_tokens`]): fixed for this resident's whole lifetime, and what a worker hosting it is
+    /// sent ([`Self::host_spec`]).
+    plan: QwenPlan,
+    /// The architecture the plan names (`qwen3`, or a config variant such as
     /// `llama`), declared on its own manifest rather than by a wrapper:
     /// adapter views and aliases restate this resident's manifest, so they
     /// declare it too. `None` for a checkpoint `--checkpoint` names without
@@ -772,28 +781,6 @@ pub struct QwenResident {
     architecture: Option<&'static str>,
     /// The adapters this base offers and the bank size they run on.
     adapters: Arc<AdapterRegistry>,
-    /// Resolved once at construction (see [`Self::resolve_ctx`]) - explicit,
-    /// auto-sized, or the historical 24576 fallback. Fixed for this
-    /// resident's whole lifetime, exactly like every other field below.
-    ctx: u32,
-    max_batch: u32,
-    kv_int8_requested: bool,
-    kv_fp8_requested: bool,
-    /// `--sparse-attention`: the indexer file the engine reads through.
-    sparse_attention: Option<String>,
-    kv_calib_opt_in: bool,
-    kv_offload_bytes: u64,
-    weights_int8_requested: bool,
-    weights_bf16_requested: bool,
-    /// A per-leaf weight policy, which the engine is built at instead of one tier.
-    weight_tiers: Option<model::ops::TierPolicy>,
-    max_prefill_cap: u32,
-    kv_tokens: Option<u32>,
-    card_budget_bytes: Option<u64>,
-    gemm_precision: gpu_core::provider::library::GemmPrecision,
-    fuse_residual_norm: bool,
-    exact_decode: bool,
-    refused: Option<String>,
     /// The sampling defaults the checkpoint's `generation_config.json` declares, read once.
     sampling: std::sync::OnceLock<data::generation::SamplingDefaults>,
 }
@@ -846,7 +833,7 @@ impl QwenResident {
         // Named by path, so no upstream provenance: the canonical brain/
         // fallback id (see crates/modelref/src/alias.rs's module docs). Adapters are bound to the id the spelling resolved to, the id a
         // trainer resolving the same spelling writes on an adapter's card.
-        Some(Self::build(&path, "brain/qwen3".to_string(), base_id, &tokenizer, cfg))
+        Some(Self::build(&path, "brain/qwen3".to_string(), base_id, &tokenizer, None, cfg))
     }
 
     /// [`Self::from_card_configured`] at every historical default -
@@ -866,10 +853,11 @@ impl QwenResident {
     /// [`Self::resolve_ctx`]), and is otherwise copied straight into fields
     /// `estimate`/`activate` read.
     pub fn from_card_configured(path: &str, card: &ModelCard, tokenizer: Option<&str>, cfg: QwenServeConfig) -> QwenResident {
-        QwenResident { architecture: brain_arch::by_family(&card.family).map(|a| a.id), ..Self::build(path, card.id.clone(), Some(card.id.clone()), tokenizer.unwrap_or_default(), cfg) }
+        let architecture = brain_arch::by_family(&card.family).map(|a| a.id.to_string());
+        Self::build(path, card.id.clone(), Some(card.id.clone()), tokenizer.unwrap_or_default(), architecture, cfg)
     }
 
-    fn build(path: &str, id: String, base_id: Option<String>, tokenizer: &str, cfg: QwenServeConfig) -> QwenResident {
+    fn build(path: &str, id: String, base_id: Option<String>, tokenizer: &str, architecture: Option<String>, cfg: QwenServeConfig) -> QwenResident {
         let ctx = Self::resolve_ctx(path, &cfg);
         // A checkpoint that cannot be read yet keeps the operator's explicit choice or fp32; `activate`
         // reports the real error.
@@ -878,41 +866,65 @@ impl QwenResident {
             Err(_) => !cfg.weights_bf16 && cfg.weights_int8.unwrap_or(false),
         };
         let kv_tokens = Self::resolve_kv_tokens(path, &cfg, ctx);
-        QwenResident {
+        Self::from_plan(QwenPlan {
             id,
             path: path.to_string(),
             tokenizer: tokenizer.to_string(),
-            architecture: None,
-            adapters: AdapterRegistry::new(cfg.adapter_bank, ServedBase::new(path, base_id)),
+            architecture,
+            base_id,
             ctx,
             max_batch: cfg.max_batch.max(1),
             kv_int8_requested: cfg.kv_int8,
             kv_fp8_requested: cfg.kv_fp8,
-            sparse_attention: cfg.sparse_attention.clone(),
+            sparse_attention: cfg.sparse_attention,
             kv_calib_opt_in: cfg.kv_calib_opt_in,
             kv_offload_bytes: (cfg.kv_offload_gb.max(0.0) * (1u64 << 30) as f64) as u64,
             weights_int8_requested,
             weights_bf16_requested: cfg.weights_bf16,
-            weight_tiers: cfg.weight_tiers.clone(),
+            weight_tiers: cfg.weight_tiers,
             max_prefill_cap: cfg.max_prefill_cap.clamp(1, 512),
             kv_tokens,
             card_budget_bytes: cfg.card_budget_bytes.or(cfg.auto_budget_bytes),
             gemm_precision: cfg.gemm_precision,
             fuse_residual_norm: cfg.fuse_residual_norm,
             exact_decode: cfg.exact_decode,
-            refused: cfg.refused.clone(),
-            sampling: std::sync::OnceLock::new(),
-        }
+            refused: cfg.refused,
+            adapter_bank: cfg.adapter_bank,
+        })
+    }
+
+    /// The resident a resolved plan describes, built from it as it stands.
+    fn from_plan(plan: QwenPlan) -> QwenResident {
+        let architecture = plan.architecture.as_deref().and_then(brain_arch::by_id).map(|a| a.id);
+        let adapters = AdapterRegistry::new(plan.adapter_bank.clone(), ServedBase::new(&plan.path, plan.base_id.clone()));
+        QwenResident { plan, architecture, adapters, sampling: std::sync::OnceLock::new() }
+    }
+
+    /// What a worker rebuilds this resident from: the resolved plan, so the worker builds the engine the serving
+    /// process sized, not one sized again against budgets it does not know ([`Self::from_host_spec`]).
+    pub fn host_spec(&self) -> HostSpec {
+        HostSpec { family: FAMILY.to_string(), args: self.plan.to_spec() }
+    }
+
+    /// The resident [`Self::host_spec`] describes. Reads nothing: the worker opens the checkpoint when it
+    /// activates the resident on its card.
+    ///
+    /// # Errors
+    ///
+    /// An argument that is not a plan: an unknown field, a value of the wrong kind, a sizing no engine is built
+    /// with, an architecture or adapter bank that does not exist.
+    pub fn from_host_spec(args: &serde_json::Value) -> Result<QwenResident, String> {
+        QwenPlan::from_spec(args).map(Self::from_plan)
     }
 
     /// What the checkpoint declares as its sampling defaults (`generation_config.json` beside the weights),
     /// read once. Unreadable or out-of-range settings are logged and leave the action's constants in force.
     fn sampling_defaults(&self) -> &data::generation::SamplingDefaults {
         self.sampling.get_or_init(|| {
-            let path = std::path::Path::new(&self.path);
+            let path = std::path::Path::new(&self.plan.path);
             let dir = if path.is_dir() { Some(path) } else { path.parent() };
             dir.map_or(Ok(Default::default()), data::generation::SamplingDefaults::from_generation_config).unwrap_or_else(|e| {
-                residency::log::warn(&format!("{}: ignoring the checkpoint's sampling defaults: {e}", self.id));
+                residency::log::warn(&format!("{}: ignoring the checkpoint's sampling defaults: {e}", self.plan.id));
                 Default::default()
             })
         })
@@ -958,7 +970,7 @@ impl QwenResident {
     }
 
     /// Give `cfg` a derived [`model::yarn::YarnConfig`] when `ctx` (the KV
-    /// pool `activate` is actually about to build - `self.ctx`, whether from
+    /// pool `activate` is actually about to build - `self.plan.ctx`, whether from
     /// `--ctx` or auto-sizing) exceeds the checkpoint's declared
     /// `max_position_embeddings` and nothing already named a scaling. A
     /// checkpoint that already declares its own `rope_scaling` (a real
@@ -992,8 +1004,8 @@ impl QwenResident {
     /// What serving `cfg` at a context of `ctx` tokens with a pool of `kv_tokens` (`None`: two contexts) costs on the
     /// device, as the global planner's categories: the one sizing `estimate` charges and the startup check refuses by.
     fn serve_demands(&self, cfg: &qwen3::config::QwenConfig, ctx: u32, kv_tokens: Option<u32>) -> Vec<model::memplan::Demand> {
-        let (block_size, max_batch, max_blocks_per_seq, num_blocks, max_prefill) = Self::pool_sizing(ctx, self.max_batch, self.max_prefill_cap, kv_tokens);
-        let kv_int8 = self.kv_int8_requested && qwen3::serve::kv_int8_supported(cfg);
+        let (block_size, max_batch, max_blocks_per_seq, num_blocks, max_prefill) = Self::pool_sizing(ctx, self.plan.max_batch, self.plan.max_prefill_cap, kv_tokens);
+        let kv_int8 = self.plan.kv_int8_requested && qwen3::serve::kv_int8_supported(cfg);
         // The paged-attention scores/probs scratch (`Scratch::{scores,probs}`) is a real, often
         // multi-GiB device allocation `activate()` makes alongside the KV pool. The fused-attention
         // answer needs the target device's own `DeviceCaps`, unknown at this pre-placement point, so
@@ -1006,7 +1018,7 @@ impl QwenResident {
         // Host-RAM KV offload moves blocks through device staging buffers the engine allocates when
         // offload is enabled; they come out of the same budget as the pool.
         let profile = PoolProfile::new(cfg, block_size, num_blocks, max_batch, max_prefill, cap, kv_int8, qwen3::serve::FusedAttention::default());
-        let profile = if self.kv_offload_bytes > 0 { profile.with_swap_staging(cfg, block_size, num_blocks, kv_int8) } else { profile };
+        let profile = if self.plan.kv_offload_bytes > 0 { profile.with_swap_staging(cfg, block_size, num_blocks, kv_int8) } else { profile };
         profile.demands(self.weight_bytes(cfg), bank_bytes)
     }
 
@@ -1014,35 +1026,35 @@ impl QwenResident {
     /// fit (or that none does) and the other settings that shrink the plan; `None` when it fits, or when no share is
     /// known. Asked when the server starts, so a model that could only fail its requests is not listed.
     pub fn unfit_reason(&self) -> Option<String> {
-        if self.refused.is_some() {
+        if self.plan.refused.is_some() {
             return None;
         }
-        let share = self.card_budget_bytes.filter(|&b| b > 0)?;
-        let cfg = qwen3::checkpoint_config(&self.path).ok()?;
+        let share = self.plan.card_budget_bytes.filter(|&b| b > 0)?;
+        let cfg = qwen3::checkpoint_config(&self.plan.path).ok()?;
         let need = |ctx: u32, kv_tokens: Option<u32>| model::memplan::device_total(&self.serve_demands(&cfg, ctx, kv_tokens));
-        let demands = self.serve_demands(&cfg, self.ctx, self.kv_tokens);
+        let demands = self.serve_demands(&cfg, self.plan.ctx, self.plan.kv_tokens);
         let total = model::memplan::device_total(&demands);
         if total <= share {
             return None;
         }
         let gib = |b: u64| b as f64 / (1u64 << 30) as f64;
-        let shorter = AUTO_CTX_TIERS.iter().rev().copied().find(|&ctx| ctx < self.ctx && need(ctx, None) <= share);
+        let shorter = AUTO_CTX_TIERS.iter().rev().copied().find(|&ctx| ctx < self.plan.ctx && need(ctx, None) <= share);
         let context = match shorter {
             Some(ctx) => format!("--ctx {ctx} fits"),
-            None => format!("no context of {} tokens or more fits beside the weights", AUTO_CTX_TIERS[0].min(self.ctx)),
+            None => format!("no context of {} tokens or more fits beside the weights", AUTO_CTX_TIERS[0].min(self.plan.ctx)),
         };
-        let mut levers = vec![format!("a smaller --max-batch (now {})", self.max_batch)];
-        if !self.kv_int8_requested && qwen3::serve::kv_int8_supported(&cfg) {
+        let mut levers = vec![format!("a smaller --max-batch (now {})", self.plan.max_batch)];
+        if !self.plan.kv_int8_requested && qwen3::serve::kv_int8_supported(&cfg) {
             levers.push("--kv-cache int8 or fp8".to_string());
         }
-        if !self.weights_int8_requested && self.weight_tiers.is_none() {
+        if !self.plan.weights_int8_requested && self.plan.weight_tiers.is_none() {
             levers.push("--weight-format int8".to_string());
         }
         levers.push("a smaller --reserve-gb or a larger card".to_string());
         Some(format!(
             "{}: the serving plan for a context of {} tokens needs {:.1} GiB ({}) and a card offers it {:.1} GiB: {context}; or use {}",
-            self.id,
-            self.ctx,
+            self.plan.id,
+            self.plan.ctx,
             gib(total),
             model::memplan::summary(&demands),
             gib(share),
@@ -1061,7 +1073,7 @@ impl QwenResident {
     /// The checkpoint this resident serves: two residents with the same path
     /// are one set of weights and must be one instance.
     pub fn weights_path(&self) -> &str {
-        &self.path
+        &self.plan.path
     }
 
     pub fn served_base(&self) -> ServedBase {
@@ -1119,7 +1131,7 @@ impl QwenResident {
     /// same scenario post-fix.
     /// A free function of its inputs (no `self`, no I/O) - both a test and
     /// [`auto_ctx_for_budget`]'s own sweep can drive it directly, and
-    /// `estimate`/`activate` pass `self.max_batch`/`self.max_prefill_cap`
+    /// `estimate`/`activate` pass `self.plan.max_batch`/`self.plan.max_prefill_cap`
     /// explicitly so the two can never silently disagree about which
     /// resident's tuning they're sizing for. `max_prefill_cap`: see
     /// [`QwenServeConfig::max_prefill_cap`]'s own doc for why lowering it
@@ -1178,11 +1190,11 @@ impl QwenResident {
     /// `decoder_param_list` builds the engine from), so the estimate and `activate()`
     /// cannot disagree about which tensors are quantized.
     fn weight_bytes(&self, cfg: &qwen3::config::QwenConfig) -> u64 {
-        if let Some(tiers) = &self.weight_tiers {
+        if let Some(tiers) = &self.plan.weight_tiers {
             weights_bytes_at(cfg, tiers)
-        } else if self.weights_bf16_requested {
+        } else if self.plan.weights_bf16_requested {
             weights_bf16_bytes(cfg)
-        } else if self.weights_int8_requested {
+        } else if self.plan.weights_int8_requested {
             weights_int8_bytes(cfg)
         } else {
             weights_fp32_bytes(cfg)
@@ -1264,8 +1276,8 @@ impl ResidentModel for QwenResident {
         // serving capacity - see `Manifest::max_context_tokens`'s doc comment
         // on why this must be the actual engine capacity, not the
         // checkpoint's architectural `max_position_embeddings`.
-        let generate = llmserve::with_sampling_defaults(generate_spec("generate text (Qwen3; chat template optional)", true), &self.id, self.sampling_defaults());
-        let manifest = Manifest::new(&self.id, "text generation (Qwen3 BPE decoder)", vec![generate, llmserve::score_spec()]).with_max_context_tokens(self.ctx as u64);
+        let generate = llmserve::with_sampling_defaults(generate_spec("generate text (Qwen3; chat template optional)", true), &self.plan.id, self.sampling_defaults());
+        let manifest = Manifest::new(&self.plan.id, "text generation (Qwen3 BPE decoder)", vec![generate, llmserve::score_spec()]).with_max_context_tokens(self.plan.ctx as u64);
         match self.architecture {
             Some(arch) => manifest.with_architecture(arch),
             None => manifest,
@@ -1276,10 +1288,10 @@ impl ResidentModel for QwenResident {
     /// in a bank, so a request for any of them runs on it, in the same batch as
     /// the others ([`QwenAdapterView`] answers with this same key).
     fn batch_limit(&self) -> Option<usize> {
-        Some(self.max_batch as usize)
+        Some(self.plan.max_batch as usize)
     }
     fn instance_key(&self, _action: &str, _inv: &Invocation) -> InstanceKey {
-        InstanceKey::new(self.id.as_str(), "default")
+        InstanceKey::new(self.plan.id.as_str(), "default")
     }
     /// A caller reaching the base never selects an adapter: the reserved
     /// param is the host's, and only a [`QwenAdapterView`] writes it.
@@ -1289,14 +1301,14 @@ impl ResidentModel for QwenResident {
         }
     }
     fn estimate(&self, _key: &InstanceKey) -> MemCost {
-        let cost = est_vram(&self.path);
+        let cost = est_vram(&self.plan.path);
         // Any failure here just defers to the real, specific error
         // `activate()` raises -- `estimate()` must never itself hard-fail.
-        let Ok(cfg) = qwen3::checkpoint_config(&self.path) else {
+        let Ok(cfg) = qwen3::checkpoint_config(&self.plan.path) else {
             return cost;
         };
-        let demands = self.serve_demands(&cfg, self.ctx, self.kv_tokens);
-        residency::log::info(&format!("{}: estimate {}", self.id, model::memplan::summary(&demands)));
+        let demands = self.serve_demands(&cfg, self.plan.ctx, self.plan.kv_tokens);
+        residency::log::info(&format!("{}: estimate {}", self.plan.id, model::memplan::summary(&demands)));
         let activation = model::memplan::category_total(&demands, model::memplan::Category::Activations);
         MemCost::new(model::memplan::device_total(&demands) - activation, cost.ram).with_activation(activation)
     }
@@ -1306,23 +1318,23 @@ impl ResidentModel for QwenResident {
         // depend on `residency` just for this), a handful of stage markers so
         // `-v -v` shows SOMETHING moving during a cold activate that can take
         // over a minute, without turning into a per-layer scroll.
-        if let Some(why) = &self.refused {
+        if let Some(why) = &self.plan.refused {
             return Err(why.clone());
         }
         let stage_t0 = std::time::Instant::now();
-        residency::log::info(&format!("{}: step 1/3 opening checkpoint", self.id));
+        residency::log::info(&format!("{}: step 1/3 opening checkpoint", self.plan.id));
         // The checkpoint is read as it is on disk (a Hugging Face directory, a
         // GGUF or a brain file); only a GGUF carries its own tokenizer.
-        let is_gguf = self.path.to_ascii_lowercase().ends_with(".gguf");
-        let gguf_tok = if is_gguf { checkpoint::weightio::WeightReader::open(&self.path).map_err(|e| format!("qwen: {e}"))?.tokenizer() } else { None };
-        gpu_core::profile::stage_time(&format!("{}: open checkpoint", self.id), stage_t0);
+        let is_gguf = self.plan.path.to_ascii_lowercase().ends_with(".gguf");
+        let gguf_tok = if is_gguf { checkpoint::weightio::WeightReader::open(&self.plan.path).map_err(|e| format!("qwen: {e}"))?.tokenizer() } else { None };
+        gpu_core::profile::stage_time(&format!("{}: open checkpoint", self.plan.id), stage_t0);
         let stage_t0 = std::time::Instant::now();
-        residency::log::info(&format!("{}: step 2/3 loading tokenizer", self.id));
+        residency::log::info(&format!("{}: step 2/3 loading tokenizer", self.plan.id));
         // Tokenizer precedence: an explicit sibling `tokenizer.json` (safetensors
         // path, or an override) wins; else a `.gguf` builds from its embedded
         // `tokenizer.ggml.*` KV; else there is nothing to tokenize with.
-        let (tok, tok_dir, gguf_eos) = if !self.tokenizer.is_empty() {
-            (data::qwen_tokenizer::QwenBpe::from_file(&self.tokenizer)?, std::path::Path::new(&self.tokenizer).parent(), None)
+        let (tok, tok_dir, gguf_eos) = if !self.plan.tokenizer.is_empty() {
+            (data::qwen_tokenizer::QwenBpe::from_file(&self.plan.tokenizer)?, std::path::Path::new(&self.plan.tokenizer).parent(), None)
         } else if let Some(gt) = gguf_tok {
             (data::qwen_tokenizer::QwenBpe::from_gguf(&gt).map_err(|e| format!("qwen: {e}"))?, None, gt.eos)
         } else {
@@ -1332,10 +1344,10 @@ impl ResidentModel for QwenResident {
         // on its eos ids and on that format's end-of-turn marker.
         let format = ChatFormat::for_checkpoint(tok_dir, &tok);
         let stop = data::generation::stop_ids(tok_dir, &tok, gguf_eos, format.end_of_turn()).map_err(|e| format!("qwen: {e}"))?;
-        gpu_core::profile::stage_time(&format!("{}: load tokenizer", self.id), stage_t0);
+        gpu_core::profile::stage_time(&format!("{}: load tokenizer", self.plan.id), stage_t0);
         let stage_t0 = std::time::Instant::now();
-        residency::log::info(&format!("{}: step 3/3 building engine (uploading weights to {device:?})", self.id));
-        let ctx = self.ctx;
+        residency::log::info(&format!("{}: step 3/3 building engine (uploading weights to {device:?})", self.plan.id));
+        let ctx = self.plan.ctx;
         // Every checkpoint - a Hugging Face directory, a GGUF or a brain file -
         // gets the paged, continuous-batching engine, which holds f32 or int8
         // weights and, when the server was started with an adapter bank, the
@@ -1344,18 +1356,18 @@ impl ResidentModel for QwenResident {
             // See QwenResident::pool_sizing's doc comment for the arithmetic
             // -- the same derivation `estimate()` predicts a budget from, so
             // the two cannot silently drift apart.
-            let (block_size, max_batch, max_blocks_per_seq, num_blocks, max_prefill) = QwenResident::pool_sizing(ctx, self.max_batch, self.max_prefill_cap, self.kv_tokens);
+            let (block_size, max_batch, max_blocks_per_seq, num_blocks, max_prefill) = QwenResident::pool_sizing(ctx, self.plan.max_batch, self.plan.max_prefill_cap, self.plan.kv_tokens);
             // A DEFAULT-selecting caller degrades loudly rather than hitting
             // `Engine::from_map_with_gpu`'s hard assert: nobody explicitly
             // asked this checkpoint's unusual `head_dim` for int8, so a
             // serving-process panic on activation would be the wrong failure
             // mode -- see `qwen3::serve::kv_int8_supported`'s doc comment.
-            let checkpoint_cfg = qwen3::checkpoint_config(&self.path).map_err(|e| format!("qwen: {e}"))?;
-            let kv_int8 = self.kv_int8_requested && qwen3::serve::kv_int8_supported(&checkpoint_cfg);
-            if self.kv_int8_requested && !kv_int8 {
+            let checkpoint_cfg = qwen3::checkpoint_config(&self.plan.path).map_err(|e| format!("qwen: {e}"))?;
+            let kv_int8 = self.plan.kv_int8_requested && qwen3::serve::kv_int8_supported(&checkpoint_cfg);
+            if self.plan.kv_int8_requested && !kv_int8 {
                 eprintln!(
                     "serve: {}: int8 KV requested (the default) but head_dim={} is not a multiple of 4; falling back to fp32 KV",
-                    self.path, checkpoint_cfg.head_dim
+                    self.plan.path, checkpoint_cfg.head_dim
                 );
             }
             // Boundary guard: refuse a fp32 KV pool over the safety ceiling,
@@ -1364,7 +1376,7 @@ impl ResidentModel for QwenResident {
             // opt-out (--kv-cache f32) or an unsupported head_dim -- the
             // int8 default at the SAME ctx does not come close.
             if !kv_int8 {
-                QwenResident::check_fp32_kv_pool_fits(&checkpoint_cfg, block_size, num_blocks, ctx, self.card_budget_bytes.unwrap_or(0).max(MAX_FP32_KV_POOL_BYTES), &self.path)?;
+                QwenResident::check_fp32_kv_pool_fits(&checkpoint_cfg, block_size, num_blocks, ctx, self.plan.card_budget_bytes.unwrap_or(0).max(MAX_FP32_KV_POOL_BYTES), &self.plan.path)?;
             }
             // Runs on BOTH branches (unlike the fp32-only guard above): a
             // per-buffer overflow is a different failure mode than the
@@ -1386,22 +1398,22 @@ impl ResidentModel for QwenResident {
                 cap,
                 kv_int8,
                 ctx,
-                &self.path,
+                &self.plan.path,
                 fused,
             )?;
             // Refuse BEFORE loading when the whole footprint (weights, adapter bank, KV pool, attention
             // scratch, swap staging) cannot fit the card this server was told it may use, with the
             // planner's per-category arithmetic. `estimate()` charged the same demands for placement.
-            let indexer = match &self.sparse_attention {
+            let indexer = match &self.plan.sparse_attention {
                 Some(path) => Some(model::lsa::indexer::Indexer::load(path).map_err(|e| format!("qwen: --sparse-attention: {e}"))?),
                 None => None,
             };
-            if let Some(card) = self.card_budget_bytes.filter(|&b| b > 0) {
+            if let Some(card) = self.plan.card_budget_bytes.filter(|&b| b > 0) {
                 let profile = PoolProfile::new(&checkpoint_cfg, block_size, num_blocks, max_batch, max_prefill, cap, kv_int8, fused);
-                let profile = if self.kv_offload_bytes > 0 { profile.with_swap_staging(&checkpoint_cfg, block_size, num_blocks, kv_int8) } else { profile };
+                let profile = if self.plan.kv_offload_bytes > 0 { profile.with_swap_staging(&checkpoint_cfg, block_size, num_blocks, kv_int8) } else { profile };
                 let profile = profile.with_sparse_attention(indexer.as_ref().map_or(0, |ix| qwen3::serve::lsa_device_bytes(ix, block_size, num_blocks, max_blocks_per_seq, max_batch, max_prefill)));
                 let bank_bytes = self.adapters.settings().map_or(0, |bank| bank.device_bytes(&checkpoint_cfg, max_batch.max(max_prefill)));
-                profile.plan(self.weight_bytes(&checkpoint_cfg), bank_bytes, card).map_err(|e| format!("qwen: {}: refusing to load, {e}; lower --ctx, --max-batch or the KV pool size", self.path))?;
+                profile.plan(self.weight_bytes(&checkpoint_cfg), bank_bytes, card).map_err(|e| format!("qwen: {}: refusing to load, {e}; lower --ctx, --max-batch or the KV pool size", self.plan.path))?;
             }
             // `--weight-format int8` -- requested, not asserted: the real
             // capability gate (`caps.numeric.int8_dot`) lives inside
@@ -1412,43 +1424,43 @@ impl ResidentModel for QwenResident {
             // uses. `estimate()` above computes its budget from this SAME
             // field, so the two cannot silently disagree about what was
             // asked for.
-            let weights_int8 = self.weights_int8_requested;
+            let weights_int8 = self.plan.weights_int8_requested;
             // `Engine::load` re-derives its own `QwenConfig` straight from the
             // file, with no seam for `ctx`'s own YaRN decision below to reach
             // it - open the checkpoint here and build from its source, so the config is
             // mutated in one place. The engine reads each tensor as it uploads (a packed
             // source streams into the tier tile by tile), never a whole-model host map.
             let load_t0 = std::time::Instant::now();
-            let (_, src) = qwen3::open_checkpoint(&self.path).map_err(|e| format!("qwen: {e}"))?;
-            gpu_core::profile::stage_time(&format!("{}: open checkpoint source for engine build", self.id), load_t0);
+            let (_, src) = qwen3::open_checkpoint(&self.plan.path).map_err(|e| format!("qwen: {e}"))?;
+            gpu_core::profile::stage_time(&format!("{}: open checkpoint source for engine build", self.plan.id), load_t0);
             let mut cfg = checkpoint_cfg.clone();
             Self::apply_yarn_if_serving_past_native(&mut cfg, ctx);
-            let tier = if self.weights_bf16_requested {
+            let tier = if self.plan.weights_bf16_requested {
                 qwen3::Dtype::BF16
             } else if weights_int8 {
                 qwen3::Dtype::I8
             } else {
                 qwen3::Dtype::F32
             };
-            let mut eng = match &self.weight_tiers {
+            let mut eng = match &self.plan.weight_tiers {
                 Some(tiers) => {
                     qwen3::serve::Engine::check_tiers(&cfg, tiers).map_err(|e| format!("qwen: --weight-format {}: {e}", tiers.describe()))?;
                     qwen3::serve::Engine::from_source_tiers(cfg, &*src, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, kv_int8, tiers)
                 }
                 None => qwen3::serve::Engine::from_source_tier(cfg, &*src, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, kv_int8, tier),
             };
-            if self.kv_fp8_requested {
+            if self.plan.kv_fp8_requested {
                 if kv_int8 {
                     eng.set_kv_fp8().map_err(|e| format!("qwen: --kv-cache fp8: {e}"))?;
                 } else {
-                    eprintln!("serve: {}: --kv-cache fp8 needs the packed KV pools but the KV cache is fp32; ignoring", self.path);
+                    eprintln!("serve: {}: --kv-cache fp8 needs the packed KV pools but the KV cache is fp32; ignoring", self.plan.path);
                 }
             }
-            if let (Some(path), Some(indexer)) = (&self.sparse_attention, &indexer) {
+            if let (Some(path), Some(indexer)) = (&self.plan.sparse_attention, &indexer) {
                 eng.set_lsa(indexer).map_err(|e| format!("qwen: --sparse-attention {path}: {e}"))?;
             }
-            eng.set_gemm_precision(self.gemm_precision);
-            eng.set_fuse_residual_norm(self.fuse_residual_norm);
+            eng.set_gemm_precision(self.plan.gemm_precision);
+            eng.set_fuse_residual_norm(self.plan.fuse_residual_norm);
             // The adapter bank, once per engine, from the settings the
             // estimate above budgeted. Refusing here is deliberate: a server
             // asked for adapters that cannot give them must say so, not serve
@@ -1457,7 +1469,7 @@ impl ResidentModel for QwenResident {
                 eng.enable_adapters(bank.bank_config(&checkpoint_cfg)?).map_err(|e| format!("qwen: adapter bank: {e}"))?;
             }
             // After everything it pins is in place (the bank and the sparse attention are what it refuses).
-            eng.set_exact_decode(self.exact_decode)?;
+            eng.set_exact_decode(self.plan.exact_decode)?;
             // --kv-calibration: opt IN to a kv_calib.json beside the
             // BASE checkpoint (measured on the base's K/V distribution, which
             // an adapter's differs from: the engine warns when the two are
@@ -1465,8 +1477,8 @@ impl ResidentModel for QwenResident {
             // KvCalib::from_model_dir already warns and returns None on a
             // missing file or a shape mismatch, so opting in without a real
             // file just serves uncalibrated, same as not opting in.
-            if kv_int8 && self.kv_calib_opt_in {
-                if let Some(dir) = std::path::Path::new(&self.path).parent() {
+            if kv_int8 && self.plan.kv_calib_opt_in {
+                if let Some(dir) = std::path::Path::new(&self.plan.path).parent() {
                     let calib = model::kvcalib::KvCalib::from_model_dir(dir, checkpoint_cfg.n_layers as usize, checkpoint_cfg.n_kv_heads as usize, checkpoint_cfg.head_dim as usize);
                     eng.set_kv_calib(calib);
                 }
@@ -1480,11 +1492,11 @@ impl ResidentModel for QwenResident {
             // which skips the re-prefill. Off by default (0): it spends host
             // memory, and a box that has none to spare must not be made to.
             // Enabling it builds the device staging `estimate()` budgeted.
-            eng.set_kv_offload_bytes(self.kv_offload_bytes);
+            eng.set_kv_offload_bytes(self.plan.kv_offload_bytes);
             Ok(Box::new(model::serve::Scheduler::new(eng, max_batch as usize)))
         })??;
-        gpu_core::profile::stage_time(&format!("{}: build engine (total, on_device)", self.id), stage_t0);
-        let mut instance = QwenInstance { max_batch: Self::pool_sizing(self.ctx, self.max_batch, self.max_prefill_cap, self.kv_tokens).1 as usize, decoding: Decoding { tok, format, stop }, engine, adapters: AdapterSync::new(self.adapters.clone()) };
+        gpu_core::profile::stage_time(&format!("{}: build engine (total, on_device)", self.plan.id), stage_t0);
+        let mut instance = QwenInstance { max_batch: Self::pool_sizing(self.plan.ctx, self.plan.max_batch, self.plan.max_prefill_cap, self.plan.kv_tokens).1 as usize, decoding: Decoding { tok, format, stop }, engine, adapters: AdapterSync::new(self.adapters.clone()) };
         // Every adapter offered so far is registered with the engine before
         // the first request, so a cold instance answers an adapter request
         // as soon as it answers a base one.
@@ -1672,6 +1684,69 @@ mod tests {
         assert!(e.contains("qwen3") && e.contains("fp8"), "{e}");
     }
 
+    /// A worker rebuilds the resident from its host spec alone and sizes the identical engine: for every flag
+    /// combination the policy tests above cover, served on a card whose budget sized the context and the KV pool,
+    /// the rebuilt resident's manifest, estimate and spec equal the original's, though the worker is told no
+    /// budget. A spec with an unknown field, or one that sizes no engine, is refused.
+    #[test]
+    fn a_resident_rebuilt_from_its_host_spec_sizes_the_identical_engine() {
+        let dir = std::env::temp_dir().join(format!("brain-qwen-host-spec-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("0.6b.safetensors");
+        checkpoint::st::save_safetensors(path.to_str().unwrap(), &[("w".to_string(), vec![1], vec![0.0])], &qwen3::config::QwenConfig::qwen3_0_6b().to_json(), None).unwrap();
+        let path = path.to_string_lossy().into_owned();
+        let policy = |flags: &[(&str, &str)], switches: &[&str]| {
+            let mut p = model::policy::ServePolicy::default();
+            for (flag, value) in flags {
+                p.set(flag, value).unwrap();
+            }
+            for switch in switches {
+                p.switch(switch).unwrap();
+            }
+            let mut cfg = QwenServeConfig::default();
+            let _ = cfg.apply_policy(&p);
+            cfg
+        };
+        let bank = AdapterBankSettings { slots: 3, rank_cap: 16, targets: llmserve::adapter_registry::AdapterTargets::parse("attention,down").unwrap() };
+        let combinations = [
+            QwenServeConfig::default(),
+            policy(&[("--weight-format", "bf16"), ("--kv-cache", "fp8"), ("--gemm", "fp32"), ("--max-batch", "32"), ("--kv-offload-gb", "2"), ("--sparse-attention", "/indexers/qwen3-0.6b.safetensors")], &["--exact-decode"]),
+            policy(&[("--weight-format", "f32,attn.=int8,mlp.down.weight=bf16"), ("--kv-cache", "f32")], &[]),
+            policy(&[("--weight-format", "nf4")], &[]),
+            policy(&[("--weight-format", "int8"), ("--ctx", "4096"), ("kv-tokens", "65536"), ("max-prefill", "128")], &["--kv-calibration"]),
+            policy(&[("--kv-cache", "bf16")], &[]),
+            QwenServeConfig { adapter_bank: Some(bank), fuse_residual_norm: false, ..QwenServeConfig::default() },
+        ];
+        let card = checkpoint::st::ModelCard::new("Qwen/Qwen3-0.6B", "qwen3");
+        for (i, cfg) in combinations.into_iter().enumerate() {
+            let ctx_named = cfg.ctx.is_some();
+            let served = QwenResident::from_card_configured(&path, &card, Some("/tok/tokenizer.json"), QwenServeConfig { auto_budget_bytes: Some(6 << 30), card_budget_bytes: Some(6 << 30), ..cfg.clone() });
+            let spec = served.host_spec();
+            assert_eq!(spec.family, FAMILY);
+            let rebuilt = QwenResident::from_host_spec(&spec.args).unwrap_or_else(|e| panic!("combination {i}: {e}"));
+            let key = served.instance_key("generate", &Invocation::new());
+            assert_eq!(format!("{:?}", rebuilt.manifest()), format!("{:?}", served.manifest()), "combination {i}: the manifest");
+            assert_eq!(rebuilt.estimate(&key), served.estimate(&key), "combination {i}: the estimate");
+            assert_eq!(rebuilt.host_spec(), spec, "combination {i}: the plan survives its spec");
+            // What a worker would size if it resolved the configuration again without the server's budgets.
+            let unbudgeted = QwenResident::from_card_configured(&path, &card, Some("/tok/tokenizer.json"), cfg);
+            if !ctx_named {
+                assert_ne!(unbudgeted.plan.ctx, served.plan.ctx, "combination {i}: the budget sized the context, so a worker must not size it again");
+            }
+        }
+        let served = QwenResident::from_card_configured(&path, &card, None, QwenServeConfig::default());
+        let mut args = served.host_spec().args;
+        args["kv_pool"] = serde_json::json!(1);
+        assert!(QwenResident::from_host_spec(&args).is_err_and(|e| e.contains("kv_pool")), "an unknown field is refused");
+        let mut args = served.host_spec().args;
+        args["max_batch"] = serde_json::json!(0);
+        assert!(QwenResident::from_host_spec(&args).is_err_and(|e| e.contains("sizes no engine")), "a zero batch is refused");
+        let mut args = served.host_spec().args;
+        args["gemm_precision"] = serde_json::json!("fp16");
+        assert!(QwenResident::from_host_spec(&args).is_err(), "an unknown GEMM precision is refused");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// `--checkpoint` naming a Hugging Face repo directory serves the
     /// directory itself, the form `open_checkpoint` reads (its `config.json`
     /// holds the architecture); a carded brain checkpoint serves as its
@@ -1726,14 +1801,14 @@ mod tests {
         let seven_b = qwen3::config::QwenConfig { vocab: 102_400, d_model: 4096, n_layers: 30, n_heads: 32, n_kv_heads: 32, head_dim: 128, d_ff: 11_008, qk_norm: false, tie_embeddings: false, ..qwen3::config::QwenConfig::tiny() };
         let (big, small) = (shaped("7b.safetensors", &seven_b), shaped("tiny.safetensors", &qwen3::config::QwenConfig::tiny()));
         let card = checkpoint::st::ModelCard::new("deepseek-ai/deepseek-llm-7b-chat", "qwen");
-        let with = |path: &str, w: Option<bool>| QwenResident::from_card_configured(path, &card, None, QwenServeConfig { weights_int8: w, ..QwenServeConfig::default() }).weights_int8_requested;
+        let with = |path: &str, w: Option<bool>| QwenResident::from_card_configured(path, &card, None, QwenServeConfig { weights_int8: w, ..QwenServeConfig::default() }).plan.weights_int8_requested;
         assert!(with(&big, None), "6.9B parameters default to int8 linears");
         assert!(!with(&small, None), "a tiny checkpoint stays fp32");
         assert!(!with(&big, Some(false)) && with(&small, Some(true)), "the flags win over the size");
         // A card that holds the fp32 weights and the headroom serves them fp32 (the more accurate tier); a smaller one stays int8.
         let fp32_need = qwen3::footprint::fp32_weight_bytes(&qwen3::config::QwenConfig::qwen3_8b()) + qwen3::footprint::FP32_SERVE_HEADROOM_BYTES;
         let eight_b = shaped("8b.safetensors", &qwen3::config::QwenConfig::qwen3_8b());
-        let on = |budget: Option<u64>| QwenResident::from_card_configured(&eight_b, &card, None, QwenServeConfig { auto_budget_bytes: budget, ..QwenServeConfig::default() }).weights_int8_requested;
+        let on = |budget: Option<u64>| QwenResident::from_card_configured(&eight_b, &card, None, QwenServeConfig { auto_budget_bytes: budget, ..QwenServeConfig::default() }).plan.weights_int8_requested;
         assert!(on(None), "no budget known: the size rule stands");
         assert!(on(Some(24 << 30)), "a 24 GB card cannot hold the 8B at fp32");
         assert!(!on(Some(fp32_need)), "a card that holds the fp32 weights and the headroom serves them fp32");
@@ -1894,7 +1969,7 @@ mod tests {
         for (requested, expected) in [(128u32, 128u32), (0, 1), (999_999, 512)] {
             let cfg = QwenServeConfig { max_prefill_cap: requested, ..QwenServeConfig::default() };
             let resident = QwenResident::from_card_configured("unused.safetensors", &card, Some("unused.json"), cfg);
-            assert_eq!(resident.max_prefill_cap, expected, "requested {requested}");
+            assert_eq!(resident.plan.max_prefill_cap, expected, "requested {requested}");
         }
     }
 
@@ -2183,7 +2258,7 @@ mod tests {
         let ctx = 24576u32;
         let card = checkpoint::st::ModelCard::new("brain/qwen3", "qwen");
         let resident = QwenResident::from_card("unused.safetensors", &card, Some("unused.json"));
-        assert_eq!(resident.ctx, ctx, "this test's premise is the new default -- update it if the default changes");
+        assert_eq!(resident.plan.ctx, ctx, "this test's premise is the new default -- update it if the default changes");
         let (block_size, _max_batch, _max_blocks_per_seq, num_blocks, _max_prefill) = QwenResident::pool_sizing(ctx, 16, 512, None);
 
         let int8_bytes = qwen3::serve::kv_pool_bytes(&cfg, block_size, num_blocks, true);
@@ -2237,7 +2312,7 @@ mod tests {
         let cfg = qwen3::config::QwenConfig::qwen3_0_6b();
         let card = checkpoint::st::ModelCard::new("brain/qwen3", "qwen");
         let resident = QwenResident::from_card("unused.safetensors", &card, Some("unused.json"));
-        let ctx = resident.ctx;
+        let ctx = resident.plan.ctx;
         assert_eq!(ctx, 24576, "this test's premise is the new default");
         let (block_size, max_batch, max_blocks_per_seq, num_blocks, max_prefill) = QwenResident::pool_sizing(ctx, 16, 512, None);
         let expected_pool_bytes = qwen3::serve::kv_pool_bytes(&cfg, block_size, num_blocks, true);
@@ -2311,8 +2386,8 @@ mod tests {
         let resident = QwenResident::from_card(path.to_str().unwrap(), &card, Some("unused.json"));
         let key = InstanceKey::new("brain/qwen3", "default");
 
-        let (block_size, max_batch, max_blocks_per_seq, num_blocks, max_prefill) = QwenResident::pool_sizing(resident.ctx, resident.max_batch, resident.max_prefill_cap, resident.kv_tokens);
-        let kv_int8 = resident.kv_int8_requested;
+        let (block_size, max_batch, max_blocks_per_seq, num_blocks, max_prefill) = QwenResident::pool_sizing(resident.plan.ctx, resident.plan.max_batch, resident.plan.max_prefill_cap, resident.plan.kv_tokens);
+        let kv_int8 = resident.plan.kv_int8_requested;
         let expected_kv_bytes = qwen3::serve::kv_pool_bytes(&cfg, block_size, num_blocks, kv_int8);
         let cap = max_blocks_per_seq * block_size;
         let expected_scratch_bytes = qwen3::serve::paged_attn_scratch_bytes(&cfg, max_batch, max_prefill, cap, qwen3::serve::FusedAttention::default());
