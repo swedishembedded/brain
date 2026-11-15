@@ -141,7 +141,7 @@ No dataset or adapter travels through the API as a message body.
 | `thinking`, `pack_answers` | how records are rendered |
 | `base_format` | how the frozen base is held: `bf16`, `fp8`, `nf4`, ...; default the tier that fits the card |
 | `eval_every`, `patience`, `replay_share`, `keep_evaluations` | monitoring and early stopping |
-| `adapter_id` | the id on the adapter's card |
+| `adapter_id` | the id on the adapter's card, an adapter model reference `<vendor>/<repo>:<owner>:<name>[:<tag>]` (any other id is refused before the run, since a server would not offer the adapter under it) |
 | `return_adapter` | also return the adapter as an output blob (D-Bus) |
 | `clip_eps`, `kl_beta`, `reference`, `behaviour`, `loss_agg`, `temperature`, `teacher`, `advantage_bound`, `sequence_advantage_cap` | the policy-gradient objective's settings (only with `objective: policy_gradient`) |
 | `behaviour` | where the importance ratio's behaviour log-probabilities come from. `recorded` (default): the sampler's own `behavior_logprobs`, on every supervised token of every record with an advantage; a dataset missing any is refused. `start_of_run_proxy`: the start-of-run policy's where none was recorded, exact only if the rollouts were sampled from it; the training record states which was used |

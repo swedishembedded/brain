@@ -353,6 +353,11 @@ impl Request {
             if id.is_empty() || id.len() > MAX_ADAPTER_ID_LEN || !id.chars().all(|c| c.is_ascii_alphanumeric() || "/:._-".contains(c)) {
                 return refused(&format!("adapter_id must be 1 to {MAX_ADAPTER_ID_LEN} characters of letters, digits and / : . _ -"));
             }
+            // The id is written on the adapter's card, and a server offers an adapter only under an id in the model
+            // reference grammar: refused here, before the run, rather than after it by the server that would serve it.
+            if !brain_modelref::ModelRef::parse(id).is_ok_and(|r| r.adapter().is_some()) {
+                return refused(&format!("adapter_id {id:?} does not name an adapter: an adapter card is named <vendor>/<repo>:<owner>:<name>[:<tag>], as a server offers it"));
+            }
         }
         check_attached(&data, inv)?;
         Ok(Request { params, data })
@@ -527,7 +532,9 @@ mod tests {
     #[test]
     fn an_adapter_id_is_plain_text() {
         let data = json!({"train": {"digest": digest(1)}}).to_string();
-        for bad in ["", "has space", "new\nline", "../../x y", &"a".repeat(MAX_ADAPTER_ID_LEN + 1)] {
+        // "lsp-g1" and "Qwen/Qwen3-4B" are plain text but no adapter a server could offer: serving names an adapter
+        // card `<vendor>/<repo>:<owner>:<name>[:<tag>]` and would refuse to serve what the run trained.
+        for bad in ["", "has space", "new\nline", "../../x y", &"a".repeat(MAX_ADAPTER_ID_LEN + 1), "lsp-g1", "Qwen/Qwen3-4B"] {
             assert!(request(json!({"base": "a/b", "data": data, "adapter_id": bad}), &[]).is_err(), "{bad:?}");
         }
         assert!(request(json!({"base": "a/b", "data": data, "adapter_id": "Qwen/Qwen3.8-27B-FP8:local:chat:cand-1"}), &[]).is_ok());
