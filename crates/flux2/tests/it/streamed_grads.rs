@@ -184,12 +184,25 @@ fn apply_into_matches_apply_bit_for_bit() {
 /// copies of the model, inherent to a trainer that differentiates a dense
 /// `W_eff`. It must NOT hold a third for the gradients. The model here is
 /// sized so that one extra copy is hundreds of MB, far outside the noise of a
-/// test binary, while a step still runs in seconds. The other tests in this
-/// file share the process (libtest runs them in parallel) but all use
-/// `Cfg::tiny`, so their footprint is kilobytes against this one's hundreds of
-/// megabytes.
+/// test binary, while a step still runs in seconds. Peak RSS is the process's,
+/// and the crate's other tests run beside this one in the same binary, so the
+/// measurement runs in a process of its own: this binary again, on the ignored
+/// child.
 #[test]
 fn a_host_step_costs_two_copies_of_the_model_not_three() {
+    let exe = std::env::current_exe().expect("the running test executable");
+    let out = std::process::Command::new(exe)
+        .args(["streamed_grads::a_host_step_costs_two_copies_of_the_model_not_three_alone", "--exact", "--ignored", "--nocapture"])
+        .output()
+        .expect("run the child test");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success() && text.contains("1 passed"), "the child failed:\n{text}\n{}", String::from_utf8_lossy(&out.stderr));
+}
+
+/// The child of [`a_host_step_costs_two_copies_of_the_model_not_three`].
+#[test]
+#[ignore = "runs alone in a child process of its parent test"]
+fn a_host_step_costs_two_copies_of_the_model_not_three_alone() {
     // ~284 MB of fp32 weights: big enough that a third copy is unmistakable.
     let c = Cfg {
         in_channels: 64,
