@@ -709,7 +709,10 @@ mod tests {
         let x = toy_wav(64);
         let (_, _, _, idx) = ae.forward(&x, None);
         let (_, dwd) = ae.grads(&x, &idx);
-        let eps = 1e-2f32;
+        // The step moves every decoder weight at once, so the two one-sided differences also part by the loss's
+        // curvature along it, which the kink test reads as a kink: at 1e-2 about one run in three found no direction
+        // the check would take. 3e-3 keeps that well inside the tolerance and the round-off above it.
+        let eps = 3e-3f32;
         // The loss is O(10) and its f32 evaluation spans a few hundred rounded operations.
         let abs_tol = (2.0 * agreement_bound(400, 20.0) / f64::from(eps)) as f32;
         let mut rng = Lcg::new(data::rng::random_seed());
