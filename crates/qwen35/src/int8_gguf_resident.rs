@@ -589,7 +589,7 @@ pub fn prefill_staging_bytes(cfg: &Qwen35Config, cap: u32, native_attention: boo
     if !native_attention {
         return 0;
     }
-    gpu_core::provider::cuda::flash_prefill_staging_bytes(cfg.n_kv_heads, cap) * PREFILL_LIVE_STAGING.0 / PREFILL_LIVE_STAGING.1
+    gpu_core::provider::cuda::flash_prefill_staging_bytes(cfg.head_dim, cfg.n_kv_heads, cap) * PREFILL_LIVE_STAGING.0 / PREFILL_LIVE_STAGING.1
 }
 
 /// Device bytes one decode (or verify) step of `rows` rows allocates at a

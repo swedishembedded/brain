@@ -6,8 +6,11 @@
 // compact paged KV cache then you can procure our services by sending an email to
 // info@swedishembedded.com.
 //
-// Fused causal paged-attention PREFILL at head_dim 256 over an int8, FP8 E4M3 or bf16 cache, version 4 of flash_prefill_f16_hd256.cu:
-// the warpgroup kernel of flash_prefill_f16_hd256_wg.cu with the KV widening taken out of its inner loop.
+// Fused causal paged-attention PREFILL at head_dim 256 or 128 (BRAIN_HD) over an fp32, bf16, int8 or FP8 E4M3 cache, version 4 of
+// flash_prefill_f16_hd256.cu: the warpgroup kernel of flash_prefill_f16_hd256_wg.cu with the KV widening taken out of its inner loop.
+// Every width-dependent count below is derived from HD; a 128-wide head halves the tiles, the S chain and the output registers.
+// (A two-stage K/V ring, which the smaller tiles of a 128-wide head leave room for, measured no faster: the copy of the next
+// tile is not what the consumers wait on.)
 //
 // Version 3 widens each key tile's 8-bit bytes to fp16 inside every block, so a tile is widened once per 128-row query block
 // and head (about 512 times per kv head at 64K context) by a producer warpgroup that shares shared-memory bandwidth and issue
@@ -20,32 +23,38 @@
 //
 //   widen params : [bsz, n_heads, n_kv_heads, head_dim, group, block_size, max_bt, splits_max, multiprocessors, tiles_cap] u32
 //   widen        : pool_k, pool_v (paged 8-bit planes), block_tables (the FIRST row's table is read: one sequence), seq_lens,
-//                  k_scales, v_scales -> stage. Over a bf16 cache (BRAIN_KV_TIER 1) there are no scales: each value is rounded
-//                  to fp16 as version 2 rounds it, the K row scale is 1/sqrt(d) log2 e and the V row scale 1. Compiled with
-//                  BRAIN_WGS_WIDEN_ONLY that pass alone is built (the attention kernel needs the warpgroup file's helpers).
-//   stage        : per (kv head, 128-key tile) a record of WGS_STRIDE bytes: K tile (4 swizzle atom columns of 128 rows x 128 bytes),
+//                  k_scales, v_scales -> stage. Over an fp32 or bf16 cache (BRAIN_KV_TIER 0 or 1) there are no scales: each value
+//                  is rounded to fp16 as version 1 and 2 round it, the K row scale is 1/sqrt(d) log2 e and the V row scale 1.
+//                  Compiled with BRAIN_WGS_WIDEN_ONLY that pass alone is built.
+//   stage        : per (kv head, 128-key tile) a record of WGS_STRIDE bytes: K tile (HD / 64 swizzle atom columns of 128 rows x 128 bytes),
 //                  V tile, K row scales x 1/sqrt(d) log2 e (128 f32), V row scales (128 f32). Keys at or past the longest
 //                  sequence length are zero with zero scales (so a masked key can never poison a product with 0 x NaN).
 //   attention    : params (as above), q, stage, seq_lens, ctx, part -- one block is 384 threads, a producer warpgroup (one
 //                  thread works) and two consumer warpgroups of 64 query rows that take turns on the tensor cores (ping-pong); S = Q K^T
-//                  is 16 wgmma m64n128k16 a 128-key tile. Key splits and the combine kernel are version 3's.
+//                  is HD / 16 wgmma m64n128k16 a 128-key tile and O += P V 8 wgmma m64n{HD}k16. Key splits and the combine kernel
+//                  are version 3's.
 
 #ifndef BRAIN_FLASH_HELPERS_ONLY
 #error "flash_prefill_f16_hd256_wgs.cu is compiled after flash_prefill_f16_hd256.cu and flash_prefill_f16_hd256_wg.cu"
 #endif
+#if HD != 128 && HD != 256
+#error "version 4 serves head_dim 128 and 256"
+#endif
 
-#define WGS_KEYS 128                  // keys a tile: S = Q K^T is 16 wgmma m64n128k16 (91 % of the tensor peak, against 66 % at n64)
+#define WGS_KEYS 128                  // keys a tile: S = Q K^T is wgmma m64n128k16 (91 % of the tensor peak, against 66 % at n64)
 #define WGS_ATOM_BYTES 16384          // one 128-row x 64-value fp16 swizzle atom column: 128 rows x 128 bytes
-#define WGS_TILE_BYTES 65536          // a 128-row x 256-value fp16 tile: four atom columns
-#define WGS_STRIDE 132096             // a staged record: K tile, V tile, 128 K scales, 128 V scales
-#define WGS_OFF_STAGE_V 65536
-#define WGS_OFF_STAGE_KS 131072
-#define WGS_OFF_STAGE_VS 131584
-
+#define WGS_TILE_BYTES (WGS_KEYS * HD * 2)              // a 128-row x HD-value fp16 tile: HD / 64 atom columns
+#define WGS_STRIDE (2 * WGS_TILE_BYTES + 1024)          // a staged record: K tile, V tile, 128 K scales, 128 V scales
+#define WGS_OFF_STAGE_V WGS_TILE_BYTES
+#define WGS_OFF_STAGE_KS (2 * WGS_TILE_BYTES)
+#define WGS_OFF_STAGE_VS (2 * WGS_TILE_BYTES + 512)
+#define WGS_Q_BYTES (64 * HD * 2)     // one consumer warpgroup's 64 query rows as fp16, HD / 64 atom columns of WG_SUB_BYTES
+#define WGS_KSTEPS (HD / 16)          // k16 steps of S over the head width
+#define WGS_OUT (HD / 2)              // output accumulators a consumer thread: 64 rows x HD over 128 threads
 // Dynamic shared memory layout (offsets from the 1024-aligned base).
-#define WGS_OFF_Q 0                                      // two warpgroups x 32 KiB
-#define WGS_OFF_K (WGS_OFF_Q + 2 * WG_TILE_BYTES)        // one stage x 64 KiB
-#define WGS_OFF_V (WGS_OFF_K + WGS_TILE_BYTES)           // one stage x 64 KiB
+#define WGS_OFF_Q 0                                      // two warpgroups x WGS_Q_BYTES
+#define WGS_OFF_K (WGS_OFF_Q + 2 * WGS_Q_BYTES)          // one stage x WGS_TILE_BYTES
+#define WGS_OFF_V (WGS_OFF_K + WGS_TILE_BYTES)           // one stage x WGS_TILE_BYTES
 #define WGS_OFF_KS (WGS_OFF_V + WGS_TILE_BYTES)          // K scales, 128 f32
 #define WGS_OFF_VS (WGS_OFF_KS + 512)                    // V scales, 128 f32
 #define WGS_OFF_BAR (WGS_OFF_VS + 512)                   // four 8-byte mbarriers
@@ -67,6 +76,23 @@ __device__ __forceinline__ void wgs_mma_s(float (&d)[64], unsigned long long da,
 __device__ __forceinline__ unsigned long long wgs_desc_mn(unsigned int addr) {
     return static_cast<unsigned long long>((addr & 0x3FFFFu) >> 4) | (1024ull << 16) | (64ull << 32) | (1ull << 62);
 }
+// O (64 x HD f32, WGS_OUT registers a thread) += P (64 x 16 f16, the thread's four registers) . V (16 x HD f16, key-major in
+// shared memory: the transposed-B form).
+__device__ __forceinline__ void wgs_mma_pv(float (&d)[WGS_OUT], const unsigned int (&a)[4], unsigned long long db) {
+#if HD == 256
+    brain_wg_mma_pv(d, a, db);
+#else
+    asm volatile(
+        "{\n"
+        ".reg .pred p;\n"
+        "setp.ne.b32 p, 1, 0;\n"
+        "wgmma.mma_async.sync.aligned.m64n128k16.f32.f16.f16 "
+        "{%0, %1, %2, %3, %4, %5, %6, %7, %8, %9, %10, %11, %12, %13, %14, %15, %16, %17, %18, %19, %20, %21, %22, %23, %24, %25, %26, %27, %28, %29, %30, %31, %32, %33, %34, %35, %36, %37, %38, %39, %40, %41, %42, %43, %44, %45, %46, %47, %48, %49, %50, %51, %52, %53, %54, %55, %56, %57, %58, %59, %60, %61, %62, %63}, {%64, %65, %66, %67}, %68, p, 1, 1, 1;\n"
+        "}\n"
+        : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3]), "+f"(d[4]), "+f"(d[5]), "+f"(d[6]), "+f"(d[7]), "+f"(d[8]), "+f"(d[9]), "+f"(d[10]), "+f"(d[11]), "+f"(d[12]), "+f"(d[13]), "+f"(d[14]), "+f"(d[15]), "+f"(d[16]), "+f"(d[17]), "+f"(d[18]), "+f"(d[19]), "+f"(d[20]), "+f"(d[21]), "+f"(d[22]), "+f"(d[23]), "+f"(d[24]), "+f"(d[25]), "+f"(d[26]), "+f"(d[27]), "+f"(d[28]), "+f"(d[29]), "+f"(d[30]), "+f"(d[31]), "+f"(d[32]), "+f"(d[33]), "+f"(d[34]), "+f"(d[35]), "+f"(d[36]), "+f"(d[37]), "+f"(d[38]), "+f"(d[39]), "+f"(d[40]), "+f"(d[41]), "+f"(d[42]), "+f"(d[43]), "+f"(d[44]), "+f"(d[45]), "+f"(d[46]), "+f"(d[47]), "+f"(d[48]), "+f"(d[49]), "+f"(d[50]), "+f"(d[51]), "+f"(d[52]), "+f"(d[53]), "+f"(d[54]), "+f"(d[55]), "+f"(d[56]), "+f"(d[57]), "+f"(d[58]), "+f"(d[59]), "+f"(d[60]), "+f"(d[61]), "+f"(d[62]), "+f"(d[63])
+        : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "l"(db));
+#endif
+}
 __device__ __forceinline__ void wgs_mbar_expect_tx(unsigned int bar, unsigned int bytes) {
     asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;\n" ::"r"(bar), "r"(bytes) : "memory");
 }
@@ -76,7 +102,7 @@ __device__ __forceinline__ void wgs_bulk_copy(unsigned int dst, const void* src,
 __device__ __forceinline__ void wgs_fence_barrier_init() { asm volatile("fence.mbarrier_init.release.cluster;\n" ::: "memory"); }
 
 // Widens the keys of one (128-key tile, kv head) into its staged record: 256 threads, a pair per key row.
-#if BRAIN_KV_TIER == 1
+#if BRAIN_KV_TIER <= 1
 extern "C" __global__ void __launch_bounds__(256) brain_flash_prefill_wgs_widen(
     const unsigned int* params, const KvT* pool_k, const KvT* pool_v, const unsigned int* block_tables, const unsigned int* seq_lens,
     unsigned char* stage) {
@@ -112,9 +138,24 @@ extern "C" __global__ void __launch_bounds__(256) brain_flash_prefill_wgs_widen(
     for (int plane = 0; plane < 2; ++plane) {
         const KvT* const src = plane == 0 ? ksrc : vsrc;
         unsigned char* const tile = rec + plane * WGS_OFF_STAGE_V;
-#if BRAIN_KV_TIER == 1
+#if BRAIN_KV_TIER == 0
 #pragma unroll
-        for (int i = 0; i < 16; ++i) {
+        for (int i = 0; i < HD / 16; ++i) {
+            // 8 f32 (d-chunk c of the row) -> 8 fp16, rounded as version 1 rounds them.
+            const unsigned int c = 2u * i + half;
+            const float4 lo = live ? *reinterpret_cast<const float4*>(src + c * 8u) : make_float4(0.f, 0.f, 0.f, 0.f);
+            const float4 hi = live ? *reinterpret_cast<const float4*>(src + c * 8u + 4u) : make_float4(0.f, 0.f, 0.f, 0.f);
+            uint4 o;
+            o.x = brain_pack_f16x2(lo.x, lo.y);
+            o.y = brain_pack_f16x2(lo.z, lo.w);
+            o.z = brain_pack_f16x2(hi.x, hi.y);
+            o.w = brain_pack_f16x2(hi.z, hi.w);
+            unsigned char* const dst = tile + (c >> 3) * WGS_ATOM_BYTES + row * 128u;
+            *reinterpret_cast<uint4*>(dst + ((c & 7u) ^ (row & 7u)) * 16u) = o;
+        }
+#elif BRAIN_KV_TIER == 1
+#pragma unroll
+        for (int i = 0; i < HD / 16; ++i) {
             // 8 bf16 (d-chunk c of the row) -> 8 fp16, rounded as version 2 rounds them: a bf16 is the top half of an f32.
             const unsigned int c = 2u * i + half;
             const uint4 w = live ? *reinterpret_cast<const uint4*>(src + c * 8u) : make_uint4(0u, 0u, 0u, 0u);
@@ -128,7 +169,7 @@ extern "C" __global__ void __launch_bounds__(256) brain_flash_prefill_wgs_widen(
         }
 #else
 #pragma unroll
-        for (int i = 0; i < 8; ++i) {
+        for (int i = 0; i < HD / 32; ++i) {
             const unsigned int c = 2u * i + half;
             uint4 w = live ? *reinterpret_cast<const uint4*>(src + c * 16u) : make_uint4(0u, 0u, 0u, 0u);
             uint4 o0, o1;
@@ -146,7 +187,7 @@ extern "C" __global__ void __launch_bounds__(256) brain_flash_prefill_wgs_widen(
 #endif
     }
     if (half == 0u) {
-#if BRAIN_KV_TIER == 1
+#if BRAIN_KV_TIER <= 1
         reinterpret_cast<float*>(rec + WGS_OFF_STAGE_KS)[row] = live ? SM_SCALE_LOG2 : 0.f;
         reinterpret_cast<float*>(rec + WGS_OFF_STAGE_VS)[row] = live ? 1.f : 0.f;
 #else
@@ -248,12 +289,12 @@ extern "C" __global__ void __launch_bounds__(WG_THREADS, 1) brain_flash_prefill_
     const unsigned int len_b = live_b ? seq_lens[row_b] : 0u;
     const unsigned int wg_min_len = wg_row0 < nrows ? seq_lens[wg_row0] : 0u;
 
-    // ---- Q (this warpgroup's 64 rows) to shared memory as fp16, swizzled: 64 rows x 32 chunks of 8 values.
-    const unsigned int q_tile = base + WGS_OFF_Q + cw * WG_TILE_BYTES;
+    // ---- Q (this warpgroup's 64 rows) to shared memory as fp16, swizzled: 64 rows x HD / 8 chunks of 8 values.
+    const unsigned int q_tile = base + WGS_OFF_Q + cw * WGS_Q_BYTES;
 #pragma unroll 4
-    for (int c = 0; c < 16; ++c) {
+    for (int c = 0; c < HD / 16; ++c) {
         const unsigned int e = ct + 128u * c;
-        const unsigned int r = e >> 5, cc = e & 31u;
+        const unsigned int r = e / (HD / 8u), cc = e % (HD / 8u);
         uint4 v = make_uint4(0u, 0u, 0u, 0u);
         if (wg_row0 + r < nrows) {
             const float* src = q + static_cast<unsigned long long>(wg_row0 + r) * q_row + h * HD + cc * 8u;
@@ -274,9 +315,9 @@ extern "C" __global__ void __launch_bounds__(WG_THREADS, 1) brain_flash_prefill_
     // by the previous slot's; slot 0 is primed here. Both warpgroups run the same tile count, so the order never starves.
     if (cw == 1u) { wg_turn_pass(4u); }
 
-    float o[128];
+    float o[WGS_OUT];
 #pragma unroll
-    for (int i = 0; i < 128; ++i) { o[i] = 0.f; }
+    for (int i = 0; i < WGS_OUT; ++i) { o[i] = 0.f; }
     float m_a = NEG_BIG, m_b = NEG_BIG, l_a = 0.f, l_b = 0.f;
 #ifndef BRAIN_WGS_UNIT_SCALE
     const float* const ks2 = reinterpret_cast<const float*>(gen + WGS_OFF_KS);
@@ -296,7 +337,7 @@ extern "C" __global__ void __launch_bounds__(WG_THREADS, 1) brain_flash_prefill_
             wg_turn_wait(4u + cw);
             wg_fence();
 #pragma unroll
-            for (int k = 0; k < 16; ++k) {
+            for (int k = 0; k < WGS_KSTEPS; ++k) {
                 wgs_mma_s(s, wg_desc_k(q_tile + (k >> 2) * WG_SUB_BYTES + (k & 3) * 32u), wg_desc_k(k_tile + (k >> 2) * WGS_ATOM_BYTES + (k & 3) * 32u), k > 0);
             }
             wg_commit();
@@ -393,7 +434,7 @@ extern "C" __global__ void __launch_bounds__(WG_THREADS, 1) brain_flash_prefill_
             // O is still zero, and the vote keeps the warp together.
             if (j > 0u && !__all_sync(0xffffffffu, al_a == 1.0f && al_b == 1.0f)) {
 #pragma unroll
-                for (int n = 0; n < 32; ++n) {
+                for (int n = 0; n < HD / 8; ++n) {
                     o[4 * n + 0] *= al_a;
                     o[4 * n + 1] *= al_a;
                     o[4 * n + 2] *= al_b;
@@ -428,7 +469,7 @@ extern "C" __global__ void __launch_bounds__(WG_THREADS, 1) brain_flash_prefill_
             wg_turn_wait(6u + cw);
             wg_fence();
 #pragma unroll
-            for (int kk = 0; kk < 8; ++kk) { brain_wg_mma_pv(o, pf[kk], wgs_desc_mn(v_tile + kk * 2048u)); }
+            for (int kk = 0; kk < 8; ++kk) { wgs_mma_pv(o, pf[kk], wgs_desc_mn(v_tile + kk * 2048u)); }
             wg_commit();
             wg_turn_pass(cw == 0u ? 7u : 4u);
         }
@@ -446,7 +487,7 @@ extern "C" __global__ void __launch_bounds__(WG_THREADS, 1) brain_flash_prefill_
         const float inv_a = l_a > 0.f ? 1.0f / l_a : 0.f;
         const float inv_b = l_b > 0.f ? 1.0f / l_b : 0.f;
 #pragma unroll
-        for (int n = 0; n < 32; ++n) {
+        for (int n = 0; n < HD / 8; ++n) {
             const unsigned int d = n * 8u + t4 * 2u;
             if (live_a) { *reinterpret_cast<float2*>(ctx + static_cast<unsigned long long>(row_a) * q_row + h * HD + d) = make_float2(o[4 * n] * inv_a, o[4 * n + 1] * inv_a); }
             if (live_b) { *reinterpret_cast<float2*>(ctx + static_cast<unsigned long long>(row_b) * q_row + h * HD + d) = make_float2(o[4 * n + 2] * inv_b, o[4 * n + 3] * inv_b); }
@@ -455,7 +496,7 @@ extern "C" __global__ void __launch_bounds__(WG_THREADS, 1) brain_flash_prefill_
         const unsigned long long split_rows = static_cast<unsigned long long>(split) * bsz;
         float* const part_ml = part + static_cast<unsigned long long>(smax) * bsz * q_row;
 #pragma unroll
-        for (int n = 0; n < 32; ++n) {
+        for (int n = 0; n < HD / 8; ++n) {
             const unsigned int d = n * 8u + t4 * 2u;
             if (live_a) { *reinterpret_cast<float2*>(part + ((split_rows + row_a) * n_heads + h) * HD + d) = make_float2(o[4 * n], o[4 * n + 1]); }
             if (live_b) { *reinterpret_cast<float2*>(part + ((split_rows + row_b) * n_heads + h) * HD + d) = make_float2(o[4 * n + 2], o[4 * n + 3]); }

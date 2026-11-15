@@ -44,7 +44,9 @@
 #ifndef BRAIN_FLASH_HELPERS_ONLY
 #error "flash_prefill_f16_hd256_wg.cu is compiled after flash_prefill_f16_hd256.cu with BRAIN_FLASH_HELPERS_ONLY defined"
 #endif
-#if BRAIN_HD != 256 || BRAIN_DENSE || BRAIN_KV_TIER < 2
+// BRAIN_WG_HELPERS_ONLY compiles the helpers and the combine kernel alone (at any BRAIN_HD and tier), for
+// flash_prefill_f16_hd256_wgs.cu and the combine entries; the version-3 kernel itself is head_dim 256 over an 8-bit cache.
+#if !defined(BRAIN_WG_HELPERS_ONLY) && (BRAIN_HD != 256 || BRAIN_DENSE || BRAIN_KV_TIER < 2)
 #error "version 3 serves head_dim 256 over an int8 or FP8 paged cache"
 #endif
 
@@ -224,6 +226,7 @@ __device__ __forceinline__ void brain_wg_mma_pv(float (&d)[128], const unsigned 
         : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "l"(db));
 }
 
+#ifndef BRAIN_WG_HELPERS_ONLY
 extern "C" __global__ void __launch_bounds__(WG_THREADS, 1) brain_flash_prefill_f16_hd256_wg(
     const unsigned int* params, const float* q, const KvT* pool_k, const KvT* pool_v, const unsigned int* block_tables,
     const unsigned int* seq_lens, float* ctx, const float* k_scales, const float* v_scales, float* part) {
@@ -559,10 +562,11 @@ extern "C" __global__ void __launch_bounds__(WG_THREADS, 1) brain_flash_prefill_
         }
     }
 }
+#endif  // BRAIN_WG_HELPERS_ONLY
 
-// Merges the splits of `brain_flash_prefill_f16_hd256_wg`: one block of 256 threads (one per output value; the head is 256
-// wide) for each (row, head), grid = bsz * n_heads. Does nothing for a row whose block ran a single split.
-extern "C" __global__ void __launch_bounds__(256) brain_flash_prefill_combine(const unsigned int* params, const unsigned int* seq_lens, const float* part, float* ctx) {
+// Merges the splits of `brain_flash_prefill_f16_hd256_wg` and `_wgs`: one block of HD threads (one per output value of the
+// head) for each (row, head), grid = bsz * n_heads. Does nothing for a row whose block ran a single split.
+extern "C" __global__ void __launch_bounds__(HD) brain_flash_prefill_combine(const unsigned int* params, const unsigned int* seq_lens, const float* part, float* ctx) {
     const unsigned int bsz = params[0];
     const unsigned int n_heads = params[1];
     const unsigned int smax = params[7];

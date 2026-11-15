@@ -89,14 +89,22 @@ pub const I8_WGMMA_DYNAMIC_SHARED_BYTES: u32 = 4 * (2 * 128 * 128 + 2 * 4 * 128 
 /// the K scales of two stages (512 bytes), the V scales (256) and the barriers (64), and 1 KiB to align the tiles to the
 /// 128-byte swizzle pattern. A test holds it to the source.
 pub const FLASH_PREFILL_WG_DYNAMIC_SHARED_BYTES: u32 = 2 * 32768 + 2 * 32768 + 32768 + 4 * 16384 + 2 * 2 * 256 + 512 + 256 + 64 + 1024;
-/// Dynamic shared memory per block of `flash_prefill_f16_hd256_wgs`: two 32 KiB Q tiles, a 64 KiB K stage and a 64 KiB V stage
-/// (128 keys of 256 fp16 values), their row scales (2 x 512 bytes), the four barriers (64 with padding), and 1 KiB to align the
-/// tiles to the 128-byte swizzle pattern. A test holds it to the source.
-pub const FLASH_PREFILL_WGS_DYNAMIC_SHARED_BYTES: u32 = 2 * 32768 + 2 * 65536 + 2 * 512 + 64 + 1024;
-/// Keys of one tile (and one staged record) of `flash_prefill_f16_hd256_wgs`.
+/// Keys of one tile (and one staged record) of `flash_prefill_f16_hd{128,256}_wgs`.
 pub const FLASH_PREFILL_WGS_KEYS: u32 = 128;
-/// Bytes of one staged record of `flash_prefill_f16_hd256_wgs_widen_*` (a K tile, a V tile and their 128 row scales each).
-pub const FLASH_PREFILL_WGS_RECORD_BYTES: u64 = 2 * 65536 + 2 * 512;
+/// Bytes of one 128-key fp16 K (or V) tile of `flash_prefill_f16_hd{head_dim}_wgs`.
+const fn flash_prefill_wgs_tile_bytes(head_dim: u32) -> u32 {
+    FLASH_PREFILL_WGS_KEYS * head_dim * 2
+}
+/// Dynamic shared memory per block of `flash_prefill_f16_hd{head_dim}_wgs`: two Q tiles of 64 rows (one per consumer
+/// warpgroup), a K and a V stage (128 keys of `head_dim` fp16 values each), their row scales (2 x 512 bytes), the four
+/// barriers (64 with padding), and 1 KiB to align the tiles to the 128-byte swizzle pattern. A test holds it to the source.
+pub const fn flash_prefill_wgs_dynamic_shared_bytes(head_dim: u32) -> u32 {
+    2 * 64 * head_dim * 2 + 2 * flash_prefill_wgs_tile_bytes(head_dim) + 2 * 512 + 64 + 1024
+}
+/// Bytes of one staged record of `flash_prefill_f16_hd{head_dim}_wgs_widen_*` (a K tile, a V tile and their 128 row scales each).
+pub const fn flash_prefill_wgs_record_bytes(head_dim: u32) -> u64 {
+    2 * flash_prefill_wgs_tile_bytes(head_dim) as u64 + 2 * 512
+}
 /// Dynamic shared memory per block of `matmul_i8_stream_*` with `bn` weight rows a block, room for `rows` rows of x and
 /// `stages` stages (the source's `BRAIN_I8S_STAGE_BYTES` x `BRAIN_I8S_STAGES`): per stage `bn` rows x 128 bytes of
 /// weights, `rows` rows of x x 128 bytes and their four scale groups each. A test holds it to the source.
@@ -676,79 +684,108 @@ pub const ALL: &[CudaKernel] = &[
         ),
     },
     CudaKernel {
-        name: "flash_prefill_f16_hd256_wgs_widen_kv8",
-        // Asked for by name by `paged_flash_prefill_wgs_steps` for head_dim 256 on a part with warpgroup tensor cores.
+        name: "flash_prefill_f16_hd256_wgs_widen_f32",
+        // Asked for by name by `paged_flash_prefill_wg_steps` on a part with warpgroup tensor cores.
         op: Op::PagedAttentionFused,
-        weight: Dtype::I8,
+        weight: Dtype::F32,
         by_name: true,
         source: ImplSource::Tuned,
-        // `wgmma` and `setmaxnreg` are arch-specific (`sm_90a`), so the launch also requires it (`ArchFeatures::Required`).
+        // Its consumer, flash_prefill_f16_hd256_wgs, is arch-specific (`sm_90a`); the pass is launched under the same requirement.
         min_cc: WGMMA_MIN_CC,
-        entry: "brain_flash_prefill_wgs_widen_kv8",
-        what: "widens the keys of a prefill round over an int8 KV cache once into fp16 records (128-byte swizzled 64-key K and V tiles with the row scales beside them) for flash_prefill_f16_hd256_wgs: a block of 256 threads a (128-key tile, kv head), exact",
-        reported: "native:flash_prefill_f16_hd256_wgs_widen_kv8",
+        entry: "brain_flash_prefill_hd256_wgs_widen_f32",
+        what: "widens the keys of a prefill round at head_dim 256 over an fp32 KV cache (each value rounded to fp16 as version 1 rounds it, unit row scales) once into fp16 records (128-byte swizzled 128-key K and V tiles with the row scales beside them) for flash_prefill_f16_hd256_wgs: a block of 256 threads a (128-key tile, kv head)",
+        reported: "native:flash_prefill_f16_hd256_wgs_widen_f32",
         block_dim: 256,
         tile: (1, 1),
         shared_bytes: 0,
         programmatic: false,
         src: concat!(
-            "#define BRAIN_FLASH_HELPERS_ONLY 1\n#define BRAIN_KV_TIER 2\n",
+            "#define BRAIN_HD 256\n#define BRAIN_FLASH_HELPERS_ONLY 1\n#define BRAIN_KV_TIER 0\n",
             include_str!("../cu/flash_prefill_f16_hd256.cu"),
-            "\n#define brain_flash_prefill_f16_hd256_wg brain_flash_prefill_f16_hd256_wg_unused\n#define BRAIN_WGS_WIDEN_ONLY 1\n#define brain_flash_prefill_wgs_widen brain_flash_prefill_wgs_widen_kv8\n",
+            "\n#define BRAIN_WG_HELPERS_ONLY 1\n",
             include_str!("../cu/flash_prefill_f16_hd256_wg.cu"),
-            include_str!("../cu/flash_prefill_f16_hd256_wgs.cu")
-        ),
-    },
-    CudaKernel {
-        name: "flash_prefill_f16_hd256_wgs_widen_kvfp8",
-        // Asked for by name by `paged_flash_prefill_wgs_steps` for head_dim 256 on a part with warpgroup tensor cores.
-        op: Op::PagedAttentionFused,
-        weight: Dtype::F8E4M3,
-        by_name: true,
-        source: ImplSource::Tuned,
-        // `wgmma` and `setmaxnreg` are arch-specific (`sm_90a`), so the launch also requires it (`ArchFeatures::Required`).
-        min_cc: WGMMA_MIN_CC,
-        entry: "brain_flash_prefill_wgs_widen_kvfp8",
-        what: "widens the keys of a prefill round over an FP8 E4M3 KV cache once into fp16 records (128-byte swizzled 64-key K and V tiles with the row scales beside them) for flash_prefill_f16_hd256_wgs: a block of 256 threads a (128-key tile, kv head), exact",
-        reported: "native:flash_prefill_f16_hd256_wgs_widen_kvfp8",
-        block_dim: 256,
-        tile: (1, 1),
-        shared_bytes: 0,
-        programmatic: false,
-        src: concat!(
-            "#define BRAIN_FLASH_HELPERS_ONLY 1\n#define BRAIN_KV_TIER 3\n",
-            include_str!("../cu/flash_prefill_f16_hd256.cu"),
-            "\n#define brain_flash_prefill_f16_hd256_wg brain_flash_prefill_f16_hd256_wg_unused\n#define BRAIN_WGS_WIDEN_ONLY 1\n#define brain_flash_prefill_wgs_widen brain_flash_prefill_wgs_widen_kvfp8\n",
-            include_str!("../cu/flash_prefill_f16_hd256_wg.cu"),
+            "\n#define BRAIN_WGS_WIDEN_ONLY 1\n#define brain_flash_prefill_wgs_widen brain_flash_prefill_hd256_wgs_widen_f32\n",
             include_str!("../cu/flash_prefill_f16_hd256_wgs.cu")
         ),
     },
     CudaKernel {
         name: "flash_prefill_f16_hd256_wgs_widen_bf16",
-        // Asked for by name by `paged_flash_prefill_wg_steps` for head_dim 256 on a part with warpgroup tensor cores.
+        // Asked for by name by `paged_flash_prefill_wg_steps` on a part with warpgroup tensor cores.
         op: Op::PagedAttentionFused,
         weight: Dtype::BF16,
         by_name: true,
         source: ImplSource::Tuned,
         // Its consumer, flash_prefill_f16_hd256_wgs, is arch-specific (`sm_90a`); the pass is launched under the same requirement.
         min_cc: WGMMA_MIN_CC,
-        entry: "brain_flash_prefill_wgs_widen_bf16",
-        what: "rounds the keys of a prefill round over a bf16 KV cache once to fp16 records (128-byte swizzled 128-key K and V tiles, unit row scales) for flash_prefill_f16_hd256_wgs: a block of 256 threads a (128-key tile, kv head), the rounding version 2 applies",
+        entry: "brain_flash_prefill_hd256_wgs_widen_bf16",
+        what: "widens the keys of a prefill round at head_dim 256 over a bf16 KV cache (each value rounded to fp16 as version 2 rounds it, unit row scales) once into fp16 records (128-byte swizzled 128-key K and V tiles with the row scales beside them) for flash_prefill_f16_hd256_wgs: a block of 256 threads a (128-key tile, kv head)",
         reported: "native:flash_prefill_f16_hd256_wgs_widen_bf16",
         block_dim: 256,
         tile: (1, 1),
         shared_bytes: 0,
         programmatic: false,
         src: concat!(
-            "#define BRAIN_FLASH_HELPERS_ONLY 1\n#define BRAIN_KV_TIER 1\n",
+            "#define BRAIN_HD 256\n#define BRAIN_FLASH_HELPERS_ONLY 1\n#define BRAIN_KV_TIER 1\n",
             include_str!("../cu/flash_prefill_f16_hd256.cu"),
-            "\n#define BRAIN_WGS_WIDEN_ONLY 1\n#define brain_flash_prefill_wgs_widen brain_flash_prefill_wgs_widen_bf16\n",
+            "\n#define BRAIN_WG_HELPERS_ONLY 1\n",
+            include_str!("../cu/flash_prefill_f16_hd256_wg.cu"),
+            "\n#define BRAIN_WGS_WIDEN_ONLY 1\n#define brain_flash_prefill_wgs_widen brain_flash_prefill_hd256_wgs_widen_bf16\n",
+            include_str!("../cu/flash_prefill_f16_hd256_wgs.cu")
+        ),
+    },
+    CudaKernel {
+        name: "flash_prefill_f16_hd256_wgs_widen_kv8",
+        // Asked for by name by `paged_flash_prefill_wg_steps` on a part with warpgroup tensor cores.
+        op: Op::PagedAttentionFused,
+        weight: Dtype::I8,
+        by_name: true,
+        source: ImplSource::Tuned,
+        // Its consumer, flash_prefill_f16_hd256_wgs, is arch-specific (`sm_90a`); the pass is launched under the same requirement.
+        min_cc: WGMMA_MIN_CC,
+        entry: "brain_flash_prefill_hd256_wgs_widen_kv8",
+        what: "widens the keys of a prefill round at head_dim 256 over an int8 KV cache with its row scales, exact, once into fp16 records (128-byte swizzled 128-key K and V tiles with the row scales beside them) for flash_prefill_f16_hd256_wgs: a block of 256 threads a (128-key tile, kv head)",
+        reported: "native:flash_prefill_f16_hd256_wgs_widen_kv8",
+        block_dim: 256,
+        tile: (1, 1),
+        shared_bytes: 0,
+        programmatic: false,
+        src: concat!(
+            "#define BRAIN_HD 256\n#define BRAIN_FLASH_HELPERS_ONLY 1\n#define BRAIN_KV_TIER 2\n",
+            include_str!("../cu/flash_prefill_f16_hd256.cu"),
+            "\n#define BRAIN_WG_HELPERS_ONLY 1\n",
+            include_str!("../cu/flash_prefill_f16_hd256_wg.cu"),
+            "\n#define BRAIN_WGS_WIDEN_ONLY 1\n#define brain_flash_prefill_wgs_widen brain_flash_prefill_hd256_wgs_widen_kv8\n",
+            include_str!("../cu/flash_prefill_f16_hd256_wgs.cu")
+        ),
+    },
+    CudaKernel {
+        name: "flash_prefill_f16_hd256_wgs_widen_kvfp8",
+        // Asked for by name by `paged_flash_prefill_wg_steps` on a part with warpgroup tensor cores.
+        op: Op::PagedAttentionFused,
+        weight: Dtype::F8E4M3,
+        by_name: true,
+        source: ImplSource::Tuned,
+        // Its consumer, flash_prefill_f16_hd256_wgs, is arch-specific (`sm_90a`); the pass is launched under the same requirement.
+        min_cc: WGMMA_MIN_CC,
+        entry: "brain_flash_prefill_hd256_wgs_widen_kvfp8",
+        what: "widens the keys of a prefill round at head_dim 256 over an FP8 E4M3 KV cache with its row scales, exact, once into fp16 records (128-byte swizzled 128-key K and V tiles with the row scales beside them) for flash_prefill_f16_hd256_wgs: a block of 256 threads a (128-key tile, kv head)",
+        reported: "native:flash_prefill_f16_hd256_wgs_widen_kvfp8",
+        block_dim: 256,
+        tile: (1, 1),
+        shared_bytes: 0,
+        programmatic: false,
+        src: concat!(
+            "#define BRAIN_HD 256\n#define BRAIN_FLASH_HELPERS_ONLY 1\n#define BRAIN_KV_TIER 3\n",
+            include_str!("../cu/flash_prefill_f16_hd256.cu"),
+            "\n#define BRAIN_WG_HELPERS_ONLY 1\n",
+            include_str!("../cu/flash_prefill_f16_hd256_wg.cu"),
+            "\n#define BRAIN_WGS_WIDEN_ONLY 1\n#define brain_flash_prefill_wgs_widen brain_flash_prefill_hd256_wgs_widen_kvfp8\n",
             include_str!("../cu/flash_prefill_f16_hd256_wgs.cu")
         ),
     },
     CudaKernel {
         name: "flash_prefill_f16_hd256_wgs",
-        // Asked for by name by `paged_flash_prefill_wgs_steps` for head_dim 256 on a part with warpgroup tensor cores.
+        // Asked for by name by `paged_flash_prefill_wg_steps` on a part with warpgroup tensor cores.
         op: Op::PagedAttentionFused,
         weight: Dtype::F32,
         by_name: true,
@@ -756,23 +793,25 @@ pub const ALL: &[CudaKernel] = &[
         // `wgmma` and `setmaxnreg` are arch-specific (`sm_90a`), so the launch also requires it (`ArchFeatures::Required`).
         min_cc: WGMMA_MIN_CC,
         entry: "brain_flash_prefill_f16_hd256_wgs",
-        what: "flash_prefill_f16_hd256 version 4 over the fp16 records flash_prefill_f16_hd256_wgs_widen_* stages: one thread of a producer warpgroup bulk-copies whole key tiles (cp.async.bulk, mbarriers), two consumer warpgroups of 64 query rows run QK^T and PV on Hopper tensor cores (wgmma) with P in registers; the key range of a block is split as in version 3 and merged by flash_prefill_f16_hd256_wg_combine",
+        what: "flash_prefill_f16_hd256 version 4: over the fp16 records flash_prefill_f16_hd256_wgs_widen_* stages, one thread of a producer warpgroup bulk-copies whole key tiles (cp.async.bulk, mbarriers), two consumer warpgroups of 64 query rows run QK^T and PV on Hopper tensor cores (wgmma) with P in registers; the key range of a block is split as in version 3 and merged by flash_prefill_f16_hd256_wg_combine",
         reported: "native:flash_prefill_f16_hd256_wgs",
         block_dim: 384,
         tile: (128, 1),
+        // Everything is dynamic (opted in): see `flash_prefill_wgs_dynamic_shared_bytes`.
         shared_bytes: 0,
         programmatic: false,
         src: concat!(
-            "#define BRAIN_FLASH_HELPERS_ONLY 1\n#define BRAIN_KV_TIER 2\n",
+            "#define BRAIN_HD 256\n#define BRAIN_FLASH_HELPERS_ONLY 1\n#define BRAIN_KV_TIER 2\n#define brain_flash_prefill_f16_hd256_wgs brain_flash_prefill_f16_hd256_wgs\n",
             include_str!("../cu/flash_prefill_f16_hd256.cu"),
-            "\n#define brain_flash_prefill_f16_hd256_wg brain_flash_prefill_f16_hd256_wg_unused\n#define brain_flash_prefill_wgs_widen brain_flash_prefill_wgs_widen_unused\n",
+            "\n#define BRAIN_WG_HELPERS_ONLY 1\n",
             include_str!("../cu/flash_prefill_f16_hd256_wg.cu"),
+            "\n#define brain_flash_prefill_wgs_widen brain_flash_prefill_wgs_widen_unused\n",
             include_str!("../cu/flash_prefill_f16_hd256_wgs.cu")
         ),
     },
     CudaKernel {
         name: "flash_prefill_f16_hd256_wgs_bf16",
-        // Asked for by name by `paged_flash_prefill_wgs_steps` for head_dim 256 on a part with warpgroup tensor cores.
+        // Asked for by name by `paged_flash_prefill_wg_steps` on a part with warpgroup tensor cores.
         op: Op::PagedAttentionFused,
         weight: Dtype::F32,
         by_name: true,
@@ -780,39 +819,215 @@ pub const ALL: &[CudaKernel] = &[
         // `wgmma` and `setmaxnreg` are arch-specific (`sm_90a`), so the launch also requires it (`ArchFeatures::Required`).
         min_cc: WGMMA_MIN_CC,
         entry: "brain_flash_prefill_f16_hd256_wgs_bf16",
-        what: "flash_prefill_f16_hd256_wgs for the records of a bf16 cache, whose row scales are all 1/sqrt(d) log2 e and 1, so the K scale is folded into the exponent's fused multiply-add and the V scale is left out (fewer non-tensor-core instructions a score, the lever on a power-limited card): version 4 over the fp16 records flash_prefill_f16_hd256_wgs_widen_* stages: one thread of a producer warpgroup bulk-copies whole key tiles (cp.async.bulk, mbarriers), two consumer warpgroups of 64 query rows run QK^T and PV on Hopper tensor cores (wgmma) with P in registers; the key range of a block is split as in version 3 and merged by flash_prefill_f16_hd256_wg_combine",
+        what: "flash_prefill_f16_hd256 version 4 for the records of an fp32 or bf16 cache, whose row scales are all 1/sqrt(d) log2 e and 1, so the K scale is folded into the exponent's fused multiply-add and the V scale is left out (fewer non-tensor-core instructions a score, the lever on a power-limited card): over the fp16 records flash_prefill_f16_hd256_wgs_widen_* stages, one thread of a producer warpgroup bulk-copies whole key tiles (cp.async.bulk, mbarriers), two consumer warpgroups of 64 query rows run QK^T and PV on Hopper tensor cores (wgmma) with P in registers; the key range of a block is split as in version 3 and merged by flash_prefill_f16_hd256_wg_combine",
         reported: "native:flash_prefill_f16_hd256_wgs_bf16",
         block_dim: 384,
         tile: (128, 1),
+        // Everything is dynamic (opted in): see `flash_prefill_wgs_dynamic_shared_bytes`.
         shared_bytes: 0,
         programmatic: false,
         src: concat!(
-            "#define BRAIN_FLASH_HELPERS_ONLY 1\n#define BRAIN_KV_TIER 2\n#define BRAIN_WGS_UNIT_SCALE 1\n#define brain_flash_prefill_f16_hd256_wgs brain_flash_prefill_f16_hd256_wgs_bf16\n",
+            "#define BRAIN_HD 256\n#define BRAIN_FLASH_HELPERS_ONLY 1\n#define BRAIN_KV_TIER 2\n#define BRAIN_WGS_UNIT_SCALE 1\n#define brain_flash_prefill_f16_hd256_wgs brain_flash_prefill_f16_hd256_wgs_bf16\n",
             include_str!("../cu/flash_prefill_f16_hd256.cu"),
-            "\n#define brain_flash_prefill_f16_hd256_wg brain_flash_prefill_f16_hd256_wg_unused\n#define brain_flash_prefill_wgs_widen brain_flash_prefill_wgs_widen_unused\n",
+            "\n#define BRAIN_WG_HELPERS_ONLY 1\n",
             include_str!("../cu/flash_prefill_f16_hd256_wg.cu"),
+            "\n#define brain_flash_prefill_wgs_widen brain_flash_prefill_wgs_widen_unused\n",
             include_str!("../cu/flash_prefill_f16_hd256_wgs.cu")
         ),
     },
     CudaKernel {
         name: "flash_prefill_f16_hd256_wg_combine",
-        // Asked for by name beside `flash_prefill_f16_hd256_wg_kv8` / `_kvfp8`: merges the key splits those wrote.
+        // Asked for by name by `paged_flash_prefill_wg_steps` beside the warpgroup kernels: merges the key splits they wrote.
         op: Op::PagedAttentionFused,
         weight: Dtype::F32,
         by_name: true,
         source: ImplSource::Tuned,
         min_cc: WGMMA_MIN_CC,
-        entry: "brain_flash_prefill_combine",
-        what: "merges the key splits of flash_prefill_f16_hd256_wg_*: one block of 256 threads a (row, head) rescales the splits' unnormalised outputs by their running maxima and normalises",
+        entry: "brain_flash_prefill_hd256_combine",
+        what: "merges the key splits of flash_prefill_f16_hd256_wg*: one block of 256 threads a (row, head) rescales the splits' unnormalised outputs by their running maxima and normalises",
         reported: "native:flash_prefill_f16_hd256_wg_combine",
         block_dim: 256,
         tile: (1, 1),
         shared_bytes: 0,
         programmatic: false,
         src: concat!(
-            "#define BRAIN_FLASH_HELPERS_ONLY 1\n#define BRAIN_KV_TIER 2\n",
+            "#define BRAIN_HD 256\n#define BRAIN_FLASH_HELPERS_ONLY 1\n#define BRAIN_KV_TIER 2\n",
             include_str!("../cu/flash_prefill_f16_hd256.cu"),
-            "\n#define brain_flash_prefill_f16_hd256_wg brain_flash_prefill_f16_hd256_wg_combine_unused\n",
+            "\n#define BRAIN_WG_HELPERS_ONLY 1\n#define brain_flash_prefill_combine brain_flash_prefill_hd256_combine\n",
+            include_str!("../cu/flash_prefill_f16_hd256_wg.cu")
+        ),
+    },
+    CudaKernel {
+        name: "flash_prefill_f16_hd128_wgs_widen_f32",
+        // Asked for by name by `paged_flash_prefill_wg_steps` on a part with warpgroup tensor cores.
+        op: Op::PagedAttentionFused,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        // Its consumer, flash_prefill_f16_hd128_wgs, is arch-specific (`sm_90a`); the pass is launched under the same requirement.
+        min_cc: WGMMA_MIN_CC,
+        entry: "brain_flash_prefill_hd128_wgs_widen_f32",
+        what: "widens the keys of a prefill round at head_dim 128 over an fp32 KV cache (each value rounded to fp16 as version 1 rounds it, unit row scales) once into fp16 records (128-byte swizzled 128-key K and V tiles with the row scales beside them) for flash_prefill_f16_hd128_wgs: a block of 256 threads a (128-key tile, kv head)",
+        reported: "native:flash_prefill_f16_hd128_wgs_widen_f32",
+        block_dim: 256,
+        tile: (1, 1),
+        shared_bytes: 0,
+        programmatic: false,
+        src: concat!(
+            "#define BRAIN_HD 128\n#define BRAIN_FLASH_HELPERS_ONLY 1\n#define BRAIN_KV_TIER 0\n",
+            include_str!("../cu/flash_prefill_f16_hd256.cu"),
+            "\n#define BRAIN_WG_HELPERS_ONLY 1\n",
+            include_str!("../cu/flash_prefill_f16_hd256_wg.cu"),
+            "\n#define BRAIN_WGS_WIDEN_ONLY 1\n#define brain_flash_prefill_wgs_widen brain_flash_prefill_hd128_wgs_widen_f32\n",
+            include_str!("../cu/flash_prefill_f16_hd256_wgs.cu")
+        ),
+    },
+    CudaKernel {
+        name: "flash_prefill_f16_hd128_wgs_widen_bf16",
+        // Asked for by name by `paged_flash_prefill_wg_steps` on a part with warpgroup tensor cores.
+        op: Op::PagedAttentionFused,
+        weight: Dtype::BF16,
+        by_name: true,
+        source: ImplSource::Tuned,
+        // Its consumer, flash_prefill_f16_hd128_wgs, is arch-specific (`sm_90a`); the pass is launched under the same requirement.
+        min_cc: WGMMA_MIN_CC,
+        entry: "brain_flash_prefill_hd128_wgs_widen_bf16",
+        what: "widens the keys of a prefill round at head_dim 128 over a bf16 KV cache (each value rounded to fp16 as version 2 rounds it, unit row scales) once into fp16 records (128-byte swizzled 128-key K and V tiles with the row scales beside them) for flash_prefill_f16_hd128_wgs: a block of 256 threads a (128-key tile, kv head)",
+        reported: "native:flash_prefill_f16_hd128_wgs_widen_bf16",
+        block_dim: 256,
+        tile: (1, 1),
+        shared_bytes: 0,
+        programmatic: false,
+        src: concat!(
+            "#define BRAIN_HD 128\n#define BRAIN_FLASH_HELPERS_ONLY 1\n#define BRAIN_KV_TIER 1\n",
+            include_str!("../cu/flash_prefill_f16_hd256.cu"),
+            "\n#define BRAIN_WG_HELPERS_ONLY 1\n",
+            include_str!("../cu/flash_prefill_f16_hd256_wg.cu"),
+            "\n#define BRAIN_WGS_WIDEN_ONLY 1\n#define brain_flash_prefill_wgs_widen brain_flash_prefill_hd128_wgs_widen_bf16\n",
+            include_str!("../cu/flash_prefill_f16_hd256_wgs.cu")
+        ),
+    },
+    CudaKernel {
+        name: "flash_prefill_f16_hd128_wgs_widen_kv8",
+        // Asked for by name by `paged_flash_prefill_wg_steps` on a part with warpgroup tensor cores.
+        op: Op::PagedAttentionFused,
+        weight: Dtype::I8,
+        by_name: true,
+        source: ImplSource::Tuned,
+        // Its consumer, flash_prefill_f16_hd128_wgs, is arch-specific (`sm_90a`); the pass is launched under the same requirement.
+        min_cc: WGMMA_MIN_CC,
+        entry: "brain_flash_prefill_hd128_wgs_widen_kv8",
+        what: "widens the keys of a prefill round at head_dim 128 over an int8 KV cache with its row scales, exact, once into fp16 records (128-byte swizzled 128-key K and V tiles with the row scales beside them) for flash_prefill_f16_hd128_wgs: a block of 256 threads a (128-key tile, kv head)",
+        reported: "native:flash_prefill_f16_hd128_wgs_widen_kv8",
+        block_dim: 256,
+        tile: (1, 1),
+        shared_bytes: 0,
+        programmatic: false,
+        src: concat!(
+            "#define BRAIN_HD 128\n#define BRAIN_FLASH_HELPERS_ONLY 1\n#define BRAIN_KV_TIER 2\n",
+            include_str!("../cu/flash_prefill_f16_hd256.cu"),
+            "\n#define BRAIN_WG_HELPERS_ONLY 1\n",
+            include_str!("../cu/flash_prefill_f16_hd256_wg.cu"),
+            "\n#define BRAIN_WGS_WIDEN_ONLY 1\n#define brain_flash_prefill_wgs_widen brain_flash_prefill_hd128_wgs_widen_kv8\n",
+            include_str!("../cu/flash_prefill_f16_hd256_wgs.cu")
+        ),
+    },
+    CudaKernel {
+        name: "flash_prefill_f16_hd128_wgs_widen_kvfp8",
+        // Asked for by name by `paged_flash_prefill_wg_steps` on a part with warpgroup tensor cores.
+        op: Op::PagedAttentionFused,
+        weight: Dtype::F8E4M3,
+        by_name: true,
+        source: ImplSource::Tuned,
+        // Its consumer, flash_prefill_f16_hd128_wgs, is arch-specific (`sm_90a`); the pass is launched under the same requirement.
+        min_cc: WGMMA_MIN_CC,
+        entry: "brain_flash_prefill_hd128_wgs_widen_kvfp8",
+        what: "widens the keys of a prefill round at head_dim 128 over an FP8 E4M3 KV cache with its row scales, exact, once into fp16 records (128-byte swizzled 128-key K and V tiles with the row scales beside them) for flash_prefill_f16_hd128_wgs: a block of 256 threads a (128-key tile, kv head)",
+        reported: "native:flash_prefill_f16_hd128_wgs_widen_kvfp8",
+        block_dim: 256,
+        tile: (1, 1),
+        shared_bytes: 0,
+        programmatic: false,
+        src: concat!(
+            "#define BRAIN_HD 128\n#define BRAIN_FLASH_HELPERS_ONLY 1\n#define BRAIN_KV_TIER 3\n",
+            include_str!("../cu/flash_prefill_f16_hd256.cu"),
+            "\n#define BRAIN_WG_HELPERS_ONLY 1\n",
+            include_str!("../cu/flash_prefill_f16_hd256_wg.cu"),
+            "\n#define BRAIN_WGS_WIDEN_ONLY 1\n#define brain_flash_prefill_wgs_widen brain_flash_prefill_hd128_wgs_widen_kvfp8\n",
+            include_str!("../cu/flash_prefill_f16_hd256_wgs.cu")
+        ),
+    },
+    CudaKernel {
+        name: "flash_prefill_f16_hd128_wgs",
+        // Asked for by name by `paged_flash_prefill_wg_steps` on a part with warpgroup tensor cores.
+        op: Op::PagedAttentionFused,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        // `wgmma` and `setmaxnreg` are arch-specific (`sm_90a`), so the launch also requires it (`ArchFeatures::Required`).
+        min_cc: WGMMA_MIN_CC,
+        entry: "brain_flash_prefill_f16_hd128_wgs",
+        what: "flash_prefill_f16_hd128 version 4: over the fp16 records flash_prefill_f16_hd128_wgs_widen_* stages, one thread of a producer warpgroup bulk-copies whole key tiles (cp.async.bulk, mbarriers), two consumer warpgroups of 64 query rows run QK^T and PV on Hopper tensor cores (wgmma) with P in registers; the key range of a block is split as in version 3 and merged by flash_prefill_f16_hd128_wg_combine",
+        reported: "native:flash_prefill_f16_hd128_wgs",
+        block_dim: 384,
+        tile: (128, 1),
+        // Everything is dynamic (opted in): see `flash_prefill_wgs_dynamic_shared_bytes`.
+        shared_bytes: 0,
+        programmatic: false,
+        src: concat!(
+            "#define BRAIN_HD 128\n#define BRAIN_FLASH_HELPERS_ONLY 1\n#define BRAIN_KV_TIER 2\n#define brain_flash_prefill_f16_hd256_wgs brain_flash_prefill_f16_hd128_wgs\n",
+            include_str!("../cu/flash_prefill_f16_hd256.cu"),
+            "\n#define BRAIN_WG_HELPERS_ONLY 1\n",
+            include_str!("../cu/flash_prefill_f16_hd256_wg.cu"),
+            "\n#define brain_flash_prefill_wgs_widen brain_flash_prefill_wgs_widen_unused\n",
+            include_str!("../cu/flash_prefill_f16_hd256_wgs.cu")
+        ),
+    },
+    CudaKernel {
+        name: "flash_prefill_f16_hd128_wgs_bf16",
+        // Asked for by name by `paged_flash_prefill_wg_steps` on a part with warpgroup tensor cores.
+        op: Op::PagedAttentionFused,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        // `wgmma` and `setmaxnreg` are arch-specific (`sm_90a`), so the launch also requires it (`ArchFeatures::Required`).
+        min_cc: WGMMA_MIN_CC,
+        entry: "brain_flash_prefill_f16_hd128_wgs_bf16",
+        what: "flash_prefill_f16_hd128 version 4 for the records of an fp32 or bf16 cache, whose row scales are all 1/sqrt(d) log2 e and 1, so the K scale is folded into the exponent's fused multiply-add and the V scale is left out (fewer non-tensor-core instructions a score, the lever on a power-limited card): over the fp16 records flash_prefill_f16_hd128_wgs_widen_* stages, one thread of a producer warpgroup bulk-copies whole key tiles (cp.async.bulk, mbarriers), two consumer warpgroups of 64 query rows run QK^T and PV on Hopper tensor cores (wgmma) with P in registers; the key range of a block is split as in version 3 and merged by flash_prefill_f16_hd128_wg_combine",
+        reported: "native:flash_prefill_f16_hd128_wgs_bf16",
+        block_dim: 384,
+        tile: (128, 1),
+        // Everything is dynamic (opted in): see `flash_prefill_wgs_dynamic_shared_bytes`.
+        shared_bytes: 0,
+        programmatic: false,
+        src: concat!(
+            "#define BRAIN_HD 128\n#define BRAIN_FLASH_HELPERS_ONLY 1\n#define BRAIN_KV_TIER 2\n#define BRAIN_WGS_UNIT_SCALE 1\n#define brain_flash_prefill_f16_hd256_wgs brain_flash_prefill_f16_hd128_wgs_bf16\n",
+            include_str!("../cu/flash_prefill_f16_hd256.cu"),
+            "\n#define BRAIN_WG_HELPERS_ONLY 1\n",
+            include_str!("../cu/flash_prefill_f16_hd256_wg.cu"),
+            "\n#define brain_flash_prefill_wgs_widen brain_flash_prefill_wgs_widen_unused\n",
+            include_str!("../cu/flash_prefill_f16_hd256_wgs.cu")
+        ),
+    },
+    CudaKernel {
+        name: "flash_prefill_f16_hd128_wg_combine",
+        // Asked for by name by `paged_flash_prefill_wg_steps` beside the warpgroup kernels: merges the key splits they wrote.
+        op: Op::PagedAttentionFused,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: WGMMA_MIN_CC,
+        entry: "brain_flash_prefill_hd128_combine",
+        what: "merges the key splits of flash_prefill_f16_hd128_wg*: one block of 128 threads a (row, head) rescales the splits' unnormalised outputs by their running maxima and normalises",
+        reported: "native:flash_prefill_f16_hd128_wg_combine",
+        block_dim: 128,
+        tile: (1, 1),
+        shared_bytes: 0,
+        programmatic: false,
+        src: concat!(
+            "#define BRAIN_HD 128\n#define BRAIN_FLASH_HELPERS_ONLY 1\n#define BRAIN_KV_TIER 2\n",
+            include_str!("../cu/flash_prefill_f16_hd256.cu"),
+            "\n#define BRAIN_WG_HELPERS_ONLY 1\n#define brain_flash_prefill_combine brain_flash_prefill_hd128_combine\n",
             include_str!("../cu/flash_prefill_f16_hd256_wg.cu")
         ),
     },
@@ -5343,25 +5558,32 @@ mod tests {
                 "#define WG_SMEM_END (WG_OFF_BAR + 64)",
             ],
         );
-        has(
-            "flash_prefill_f16_hd256_wgs",
-            &[
-                "#define WGS_KEYS 128",
-                "#define WGS_ATOM_BYTES 16384",
-                "#define WGS_TILE_BYTES 65536",
-                "#define WGS_STRIDE 132096",
-                "#define WGS_OFF_STAGE_V 65536",
-                "#define WGS_OFF_STAGE_KS 131072",
-                "#define WGS_OFF_STAGE_VS 131584",
-                "#define WGS_OFF_K (WGS_OFF_Q + 2 * WG_TILE_BYTES)",
-                "#define WGS_OFF_V (WGS_OFF_K + WGS_TILE_BYTES)",
-                "#define WGS_OFF_KS (WGS_OFF_V + WGS_TILE_BYTES)",
-                "#define WGS_OFF_VS (WGS_OFF_KS + 512)",
-                "#define WGS_OFF_BAR (WGS_OFF_VS + 512)",
-                "#define WGS_SMEM_END (WGS_OFF_BAR + 64)",
-            ],
-        );
-        assert_eq!(FLASH_PREFILL_WGS_RECORD_BYTES, 132096);
+        for name in ["flash_prefill_f16_hd256_wgs", "flash_prefill_f16_hd128_wgs"] {
+            has(
+                name,
+                &[
+                    "#define WGS_KEYS 128",
+                    "#define WGS_ATOM_BYTES 16384",
+                    "#define WGS_TILE_BYTES (WGS_KEYS * HD * 2)",
+                    "#define WGS_STRIDE (2 * WGS_TILE_BYTES + 1024)",
+                    "#define WGS_OFF_STAGE_V WGS_TILE_BYTES",
+                    "#define WGS_OFF_STAGE_KS (2 * WGS_TILE_BYTES)",
+                    "#define WGS_OFF_STAGE_VS (2 * WGS_TILE_BYTES + 512)",
+                    "#define WGS_Q_BYTES (64 * HD * 2)",
+                    "#define WGS_OFF_K (WGS_OFF_Q + 2 * WGS_Q_BYTES)",
+                    "#define WGS_OFF_V (WGS_OFF_K + WGS_TILE_BYTES)",
+                    "#define WGS_OFF_KS (WGS_OFF_V + WGS_TILE_BYTES)",
+                    "#define WGS_OFF_VS (WGS_OFF_KS + 512)",
+                    "#define WGS_OFF_BAR (WGS_OFF_VS + 512)",
+                    "#define WGS_SMEM_END (WGS_OFF_BAR + 64)",
+                ],
+            );
+        }
+        // The head_dim 256 form as it was measured (knowledge 405, 434): one 64 KiB stage a plane, 132096-byte records.
+        assert_eq!(flash_prefill_wgs_dynamic_shared_bytes(256), 2 * 32768 + 2 * 65536 + 2 * 512 + 64 + 1024);
+        assert_eq!(flash_prefill_wgs_record_bytes(256), 132096);
+        assert_eq!(flash_prefill_wgs_dynamic_shared_bytes(128), 2 * 16384 + 2 * 32768 + 2 * 512 + 64 + 1024);
+        assert_eq!(flash_prefill_wgs_record_bytes(128), 2 * 32768 + 1024);
         has("matmul_fp8_wgmma_swap_n64b64", &["#define BRAIN_FS_STAGES 4", "#define BRAIN_FS_X_BYTES (BRAIN_FS_NX * 128)", "#define BRAIN_FS_W_BYTES (BRAIN_FS_BN * 128)", "#define BRAIN_FS_S_BYTES 512"]);
         assert_eq!(fp8_wgmma_swap_dynamic_shared_bytes(128, 64, 4), 4 * (128 * 128 + 64 * 128 + 512) + 1024);
         assert_eq!(fp8_wgmma_tma_dynamic_shared_bytes(5), 5 * (128 * 128 * 2 + 1024 + 16) + 1024);

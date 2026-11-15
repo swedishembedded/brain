@@ -958,6 +958,20 @@ the ~7,800 stream operations (a launch and a parameter upload per step).
 - `head_dim != 256`, `dk/dv != 128`, group-16 (Q6_K) scales and chunks above 64
   decline to the portable path by construction.
 
+### Prefill attention at head_dim 128 on the staged warpgroup kernel (2026-11-15)
+
+The staged warpgroup prefill (`flash_prefill_f16_hd{128,256}_wgs*`, one source compiled per width) serves head_dim 128
+over every KV tier; version 1 stays the kernel of parts without `wgmma`. GH200 (gpu3), 32 heads, 8 kv heads, causal
+TFLOPS best / sustained, the widen pass included (knowledge #471):
+
+| round | int8 v1 | int8 staged | bf16 staged | fp32 staged |
+|---|---|---|---|---|
+| 8192 rows, no context | 77 / 76 | 403 / 358 | 485 / 398 | 463 / 376 |
+| 512 rows behind 31.5K | 66 / 66 | 359 / 334 | 426 / 382 | 384 / 340 |
+
+Open: the tensor pipe is 50 % active at the 8K int8 round (73-83 % at head_dim 256); the softmax and the per-key scales
+are twice the share of the work at this width.
+
 ### Dense convolution training - YOLOv8n fine-tune, P40 (cc 6.1)
 
 `brain yolov8 fine-tune` at batch 8, 512 x 512 spent nearly all of its device
