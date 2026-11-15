@@ -349,9 +349,10 @@ These apply to serving (`brain serve` flags):
   fp32 file fp32. A checkpoint of 6B parameters or more falls to int8 only
   where those weights plus 8 GiB of serving headroom do not fit the largest
   card (or no card reports its memory). The SDK pipeline and `brain perf`
-  targets decide by the same rule. On Qwen3-4B (GH200, 32K context, int8 KV)
-  bf16 decodes at 7.9 ms per step for one stream against 10.6 ms for fp32 and
-  admits 35 sequences against 30; its next-token KL from the exact fp32
+  targets decide by the same rule. Holding half the bytes, bf16 decodes faster
+  than fp32 and leaves room for more sequences at a long context
+  (`brain perf run longctx --target qwen:<dir>` measures both on a card); its
+  next-token KL from the exact fp32
   reference is 3.1e-4 / 5.7e-4 mean on two 96-prompt texts against 2.7e-4 /
   4.8e-4 for fp32 weights on tensor cores (`qwen_bench serve-accuracy`).
 - `--weight-format f32` / `bf16` / `f16` / `int8` - hold the linears (and
