@@ -1460,13 +1460,13 @@ impl Graph {
         let np = grid.0 * grid.1;
         let seq = pre + np;
         let n = b * seq;
-        // `attn_apply_cross` has no output-offset Param, so each span's `ctx`
-        // binding is sliced at `row0 * D` and that must be 64-float (256 B)
+        // The attention backward's `d_ctx` binding has no offset Param, so it
+        // is sliced at each span's `row0 * D` and that must be 64-float (256 B)
         // aligned. Checked here, with the shape that produced it, rather than as
         // an opaque wgpu validation failure at submit.
         assert!(
             b == 1 || (seq as u64 * d as u64).is_multiple_of(64),
-            "batch > 1 needs seq*D = {seq}*{d} to be a multiple of 64 floats (the ctx binding alignment)"
+            "batch > 1 needs seq*D = {seq}*{d} to be a multiple of 64 floats (the d_ctx binding alignment)"
         );
         let sh = model::vit::VitShape { dim: d, heads: cfg.heads(), mlp: cfg.mlp_hidden(), eps: cfg.eps() };
         let (dl, nl, npl, seql) = (d as u64, n as u64, np as u64, seq as u64);

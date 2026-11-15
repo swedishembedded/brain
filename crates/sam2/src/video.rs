@@ -278,7 +278,7 @@ impl Sam2 {
                         self.ids.cross.apply,
                         &[&probs, &v, &ctxb],
                         &[(0, 0), (0, 0), (off, 0)],
-                        &[1, heads, rows, tk, hd, d, 0, d],
+                        &[1, heads, rows, tk, hd, d, 0, d, 0],
                         heads * rows * hd,
                     ),
                 ],

@@ -277,11 +277,11 @@ impl<'a> RowEmit<'a> {
         // `attn_softmax_cross` Params: [bsz, n_heads, t_dec, t_enc]
         s.push(self.g.step(self.k.xsoftmax, &[scores, probs], &[1, h, td, te], h * td));
         // `attn_apply_cross` Params:
-        //   [bsz, n_heads, t_dec, t_enc, head_dim, kv_stride, v_off, d_model]
+        //   [bsz, n_heads, t_dec, t_enc, head_dim, kv_stride, v_off, d_model, out_off]
         s.push(self.g.step(
             self.k.xapply,
             &[probs, kv, ctx],
-            &[1, h, td, te, hd, 2 * inner, inner, inner],
+            &[1, h, td, te, hd, 2 * inner, inner, inner, 0],
             h * td * hd,
         ));
     }

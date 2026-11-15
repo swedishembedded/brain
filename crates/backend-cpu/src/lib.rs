@@ -825,13 +825,11 @@ backend_api::check_binding_offsets(&self.shared.names[kind], offsets);
         }
         if Some(kind) == f.attn_apply_cross && bufs.len() >= 3 {
             unsafe {
-                let pu = std::slice::from_raw_parts(uniform, 8);
-                let (b, h, tq, tk, hd) = (pu[0] as usize, pu[1] as usize, pu[2] as usize, pu[3] as usize, pu[4] as usize);
-                let (kvs, vo, dm) = (pu[5] as usize, pu[6] as usize, pu[7] as usize);
-                let p = std::slice::from_raw_parts(bufs[0] as *const f32, b * h * tq * tk);
-                let kv = std::slice::from_raw_parts(bufs[1] as *const f32, span_len(b * tk, kvs, vo, h, hd));
-                let o = std::slice::from_raw_parts_mut(bufs[2] as *mut f32, b * tq * dm);
-                fast_ops::attn_apply_cross(p, kv, o, b, h, tq, tk, hd, kvs, vo, dm);
+                let a = fast_ops::CrossApply::from_params(&*(uniform as *const [u32; 9]));
+                let p = std::slice::from_raw_parts(bufs[0] as *const f32, a.bsz * a.heads * a.tq * a.tk);
+                let kv = std::slice::from_raw_parts(bufs[1] as *const f32, span_len(a.bsz * a.tk, a.kv_stride, a.v_off, a.heads, a.hd));
+                let o = std::slice::from_raw_parts_mut(bufs[2] as *mut f32, a.out_len());
+                fast_ops::attn_apply_cross(p, kv, o, a);
             }
             return;
         }
@@ -882,7 +880,8 @@ backend_api::check_binding_offsets(&self.shared.names[kind], offsets);
                 let p = std::slice::from_raw_parts(bufs[0] as *const f32, b * h * t * t);
                 let v = std::slice::from_raw_parts(bufs[1] as *const f32, span_len(b * t, vs, 0, h, hd));
                 let o = std::slice::from_raw_parts_mut(bufs[2] as *mut f32, b * t * dm);
-                fast_ops::attn_apply_cross(p, v, o, b, h, t, t, hd, vs, 0, dm);
+                let a = fast_ops::CrossApply { bsz: b, heads: h, tq: t, tk: t, hd, kv_stride: vs, v_off: 0, d_model: dm, out_off: 0 };
+                fast_ops::attn_apply_cross(p, v, o, a);
             }
             return;
         }

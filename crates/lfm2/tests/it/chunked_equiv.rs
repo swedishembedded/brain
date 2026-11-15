@@ -139,13 +139,10 @@ fn chunked_matches_materialized_b1() {
 }
 
 /// The tiny config (`d_model` 16) batched: the second sequence starts at row 42, so its q rows start at 42 * 16 words
-/// (2688 bytes) and its k and v rows at 42 * 8, neither on the 256-byte storage-binding grain. Whichever accelerated
-/// attention (flash or GEMM) the device selects for the chunked regime, the batched forward must bind only aligned
-/// views and reproduce the materialized forward. The cross trio a device without workgroup reductions runs requires
-/// widths on the grain (`block::chunked_bidir_fwd`) and refuses this shape at the call.
-#[test]
-fn chunked_matches_materialized_for_a_narrow_batch() {
-    let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+/// (2688 bytes) and its k and v rows at 42 * 8, neither on the 256-byte storage-binding grain. Whichever attention the
+/// device selects for the chunked regime (flash or GEMM where it has workgroup reductions, the cross trio where it does
+/// not), the batched forward must bind only aligned views and reproduce the materialized forward.
+fn narrow_batch_matches_materialized() {
     let cfg = LfmConfig::tiny();
     let (b, t) = (2u32, 42u32);
     let n = (b * t) as usize;
@@ -158,12 +155,6 @@ fn chunked_matches_materialized_for_a_narrow_batch() {
         m.forward();
         m.read_hidden()
     };
-    // The materialized model built the process's device, so its caps are known now.
-    if !gpu_core::device_caps().is_some_and(|caps| caps.workgroup_reductions) {
-        brain_testutil::skip_unavailable("narrow batched chunked forward: flash and GEMM attention need workgroup reductions (a GPU)");
-        return;
-    }
-
     let budget = cfg.n_heads as u64 * 64 * t as u64 * 4;
     let m = Lfm::new_chunked(cfg.clone(), b, t, &init, budget, 1);
     assert_eq!(m.chunk(), Some(t), "one chunk covers each sequence");
@@ -172,4 +163,18 @@ fn chunked_matches_materialized_for_a_narrow_batch() {
     m.forward();
     let d_h = max_abs_diff(&hidden_m, &m.read_hidden());
     assert!(d_h <= 1e-5, "narrow batched chunked hidden diverges: {d_h:.2e}");
+}
+
+#[test]
+fn chunked_matches_materialized_for_a_narrow_batch() {
+    let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    narrow_batch_matches_materialized();
+}
+
+/// The same on the CPU backend, which has no workgroup reductions, so the chunked regime runs the cross trio
+/// (`block::chunked_bidir_fwd`) whatever device the process selected.
+#[test]
+fn chunked_matches_materialized_for_a_narrow_batch_on_the_cpu_backend() {
+    let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    gpu_core::devices::with_host_tier(narrow_batch_matches_materialized);
 }

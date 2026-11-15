@@ -543,7 +543,7 @@ fn push_cross(
             K_XAPPLY,
             &[&scr.xprobs, v, out],
             &[(0, 0), (0, 0), (qoff, qlen)],
-            &[1, nh, qn, te, hd, dim, 0, dim],
+            &[1, nh, qn, te, hd, dim, 0, dim, 0],
             nh * qn * hd,
         ));
         q0 += qn;

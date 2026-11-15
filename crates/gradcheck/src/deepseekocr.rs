@@ -42,7 +42,7 @@
 //! everywhere, so **every span is multi-chunk**: the `q0` threading through
 //! `attn_relpos_add` / `_drh` / `_drw` is exercised rather than assumed.
 //! `(row0 + q0) * C` is a multiple of 64 for every dispatch, which is what
-//! `attn_apply_cross`'s offset-less `ctx` binding requires.
+//! the backward's offset-less `d_ctx` binding requires.
 //!
 //! ## The objective
 //!

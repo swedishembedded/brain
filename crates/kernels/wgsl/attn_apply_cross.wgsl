@@ -12,7 +12,9 @@
 //
 // Cross-attention output: out[b,i,h,d] = sum_{j<T_enc} probs[b,h,i,j] * v[b,j,h,d].
 // V comes from the ENCODER-MEMORY buffer `kv` (fused KV layout, stride kv_stride =
-// 2*d_model, v region at v_off = d_model). out written contiguous [B*T_dec, d_model].
+// 2*d_model, v region at v_off = d_model). out written contiguous [B*T_dec, d_model]
+// from word out_off on, so a caller writes a window of rows into a whole buffer instead
+// of binding a slice (a slice's offset must sit on the storage-binding grain).
 // probs layout: ((b*H + h)*T_dec + i)*T_enc + j. One invocation per (b,h,i,d).
 
 struct Params {
@@ -24,6 +26,7 @@ struct Params {
     kv_stride: u32,    // 2*d_model
     v_off: u32,        // d_model
     d_model: u32,
+    out_off: u32,      // first word of the output rows
 };
 
 @group(0) @binding(0) var<uniform> p: Params;
@@ -56,5 +59,5 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
         let v = kv[(b * Tk + j) * p.kv_stride + p.v_off + h * hd + d];
         acc = acc + probs[p_base + j] * v;
     }
-    out[(b * Tq + i) * p.d_model + h * hd + d] = acc;
+    out[p.out_off + (b * Tq + i) * p.d_model + h * hd + d] = acc;
 }

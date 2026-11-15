@@ -274,8 +274,8 @@ impl AttnCache {
     /// `[bsz, heads, t_dec, t_enc, head_dim, kv_stride, v_off, d_model]` — the
     /// `attn_apply_cross` / `attn_bwd_{dscores,dv}_cross` uniform. The decoder's
     /// v buffer is compact `[tk, io]`, hence `kv_stride = io`, `v_off = 0`.
-    fn p_v(&self) -> [u32; 8] {
-        [1, self.heads, self.tq, self.tk, self.hd(), self.io, 0, self.io]
+    fn p_v(&self) -> [u32; 9] {
+        [1, self.heads, self.tq, self.tk, self.hd(), self.io, 0, self.io, 0]
     }
     /// `[bsz, heads, t_dec, t_enc, head_dim, q_stride, kv_stride, q_off, k_off]`
     /// — the `attn_scores_cross` / `attn_bwd_{dq,dk}_cross` uniform.

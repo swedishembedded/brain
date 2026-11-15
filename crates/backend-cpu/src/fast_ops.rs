@@ -2282,23 +2282,40 @@ fn transpose_rows_tiled(src: &[f32], stride: usize, off: usize, tk: usize, hd: u
     }
 }
 
+/// One `attn_apply_cross` dispatch's shape: its params block, in its order
+/// (`[bsz, heads, t_dec, t_enc, head_dim, kv_stride, v_off, d_model, out_off]`).
+#[derive(Clone, Copy, Debug)]
+pub struct CrossApply {
+    pub bsz: usize,
+    pub heads: usize,
+    pub tq: usize,
+    pub tk: usize,
+    pub hd: usize,
+    pub kv_stride: usize,
+    pub v_off: usize,
+    pub d_model: usize,
+    /// First word of the output rows in `out`.
+    pub out_off: usize,
+}
+
+impl CrossApply {
+    /// Read the shape from the kernel's params block.
+    pub fn from_params(p: &[u32; 9]) -> CrossApply {
+        let [bsz, heads, tq, tk, hd, kv_stride, v_off, d_model, out_off] = p.map(|w| w as usize);
+        CrossApply { bsz, heads, tq, tk, hd, kv_stride, v_off, d_model, out_off }
+    }
+
+    /// Words of `out` the dispatch writes up to (its offset plus every row).
+    pub fn out_len(&self) -> usize {
+        self.out_off + self.bsz * self.tq * self.d_model
+    }
+}
+
 /// `attn_apply_cross`: out[b,i,h,:] = Σ_j probs[b,h,i,j]·kv_v[b,j,h,:], written
-/// into the contiguous `[rows, d_model]` context at column h·hd.
-/// params = [bsz, heads, t_dec, t_enc, head_dim, kv_stride, v_off, d_model].
-#[allow(clippy::too_many_arguments)]
-pub fn attn_apply_cross(
-    probs: &[f32],
-    kv: &[f32],
-    out: &mut [f32],
-    bsz: usize,
-    heads: usize,
-    tq: usize,
-    tk: usize,
-    hd: usize,
-    kv_stride: usize,
-    v_off: usize,
-    d_model: usize,
-) {
+/// into the contiguous `[rows, d_model]` context at column h·hd, from word
+/// `a.out_off` of `out` on.
+pub fn attn_apply_cross(probs: &[f32], kv: &[f32], out: &mut [f32], a: CrossApply) {
+    let CrossApply { bsz, heads, tq, tk, hd, kv_stride, v_off, d_model, out_off } = a;
     let mut vt = vec![0f32; hd * tk]; // v transposed: vt[d, j]
     let mut ctxh = vec![0f32; tq * hd];
     for b in 0..bsz {
@@ -2309,7 +2326,7 @@ pub fn attn_apply_cross(
             // ctx[i,d] = Σ_j P[i,j]·V[j,d] = abt(P[tq,tk], Vᵀ[hd,tk]).
             matmul_abt(p, &vt, &mut ctxh, tq, tk, hd);
             for i in 0..tq {
-                let dst = (b * tq + i) * d_model + h * hd;
+                let dst = out_off + (b * tq + i) * d_model + h * hd;
                 out[dst..dst + hd].copy_from_slice(&ctxh[i * hd..i * hd + hd]);
             }
         }
@@ -2945,10 +2962,8 @@ mod tests {
 
         // Naive reference: the pre-tiling transpose this file used to run
         // (`vt[d*tk+j] = kv[..]`, one `j` at a time, `hd` scattered writes each).
-        fn attn_apply_cross_naive(
-            probs: &[f32], kv: &[f32], out: &mut [f32], bsz: usize, heads: usize, tq: usize, tk: usize, hd: usize,
-            kv_stride: usize, v_off: usize, d_model: usize,
-        ) {
+        fn attn_apply_cross_naive(probs: &[f32], kv: &[f32], out: &mut [f32], a: CrossApply) {
+            let CrossApply { bsz, heads, tq, tk, hd, kv_stride, v_off, d_model, .. } = a;
             let mut vt = vec![0f32; hd * tk];
             let mut ctxh = vec![0f32; tq * hd];
             for b in 0..bsz {
@@ -2970,17 +2985,18 @@ mod tests {
         }
 
         let iters = 8;
-        attn_apply_cross(&probs, &kv, &mut out, bsz, heads, tq, tk, hd, kv_stride, v_off, d_model); // warm
+        let a = CrossApply { bsz, heads, tq, tk, hd, kv_stride, v_off, d_model, out_off: 0 };
+        attn_apply_cross(&probs, &kv, &mut out, a); // warm
         let t = std::time::Instant::now();
         for _ in 0..iters {
-            attn_apply_cross(&probs, &kv, &mut out, bsz, heads, tq, tk, hd, kv_stride, v_off, d_model);
+            attn_apply_cross(&probs, &kv, &mut out, a);
         }
         let tiled = t.elapsed().as_secs_f64() / iters as f64;
 
-        attn_apply_cross_naive(&probs, &kv, &mut out, bsz, heads, tq, tk, hd, kv_stride, v_off, d_model); // warm
+        attn_apply_cross_naive(&probs, &kv, &mut out, a); // warm
         let t = std::time::Instant::now();
         for _ in 0..iters {
-            attn_apply_cross_naive(&probs, &kv, &mut out, bsz, heads, tq, tk, hd, kv_stride, v_off, d_model);
+            attn_apply_cross_naive(&probs, &kv, &mut out, a);
         }
         let naive = t.elapsed().as_secs_f64() / iters as f64;
 
@@ -3885,10 +3901,14 @@ mod tests {
                     }
                 }
             }
-            let mut got_o = vec![0f32; bsz * seq * stride];
-            attn_apply_cross(&want_p, &v, &mut got_o, bsz, heads, seq, seq, hd, stride, 0, stride);
-            for i in 0..got_o.len() {
-                assert!((got_o[i] - want_o[i]).abs() < 1e-5, "apply_full {bsz}/{heads}/{seq}/{hd} i={i}: got {} want {}", got_o[i], want_o[i]);
+            // Written from a word offset into a larger buffer: the words before it are left alone.
+            let out_off = 7;
+            let mut got_o = vec![-1f32; out_off + bsz * seq * stride];
+            let a = CrossApply { bsz, heads, tq: seq, tk: seq, hd, kv_stride: stride, v_off: 0, d_model: stride, out_off };
+            attn_apply_cross(&want_p, &v, &mut got_o, a);
+            assert!(got_o[..out_off].iter().all(|&x| x == -1.0), "apply_full wrote before its out_off");
+            for (i, (got, want)) in got_o[out_off..].iter().zip(&want_o).enumerate() {
+                assert!((got - want).abs() < 1e-5, "apply_full {bsz}/{heads}/{seq}/{hd} i={i}: got {got} want {want}");
             }
         }
     }

@@ -52,8 +52,8 @@ use clip::model::{ClipVision, PatchSource, CLIP_VISION_PIPELINES};
 /// native grid `5x5` (26 learned positions), 2 blocks.
 ///
 /// The one arithmetic constraint the fixture must respect is the attention
-/// `ctx` binding: `attn_apply_cross` has no output-offset Param, so each
-/// sample's span is bound at `si*seq*D` and that must be 64-float aligned.
+/// backward's `d_ctx` binding, which has no offset Param, so each sample's
+/// span is bound at `si*seq*D` and that must be 64-float aligned.
 /// `26*32 = 832 = 13*64` (pixels path) and `22*32 = 704 = 11*64` (tokens path),
 /// which is what lets the fixture run `B = 2` instead of a single sample.
 fn tiny(act: TextAct) -> ClipVisionConfig {

@@ -151,7 +151,7 @@ impl BartAttn {
         let s2 = vec![
             gpu.step(k.scores, &[&self.q, &self.k, &self.scores], &sp, self.heads * tq * tkv),
             gpu.step(softmax_kind, &[&self.scores, &self.probs], &softmax_params, self.heads * tq),
-            gpu.step(k.apply, &[&self.probs, &self.v, &self.ctx], &[1, self.heads, tq, tkv, self.head_dim, d, 0, d], self.heads * tq * self.head_dim),
+            gpu.step(k.apply, &[&self.probs, &self.v, &self.ctx], &[1, self.heads, tq, tkv, self.head_dim, d, 0, d, 0], self.heads * tq * self.head_dim),
         ];
         gpu.submit(&[], &s2);
 
@@ -209,7 +209,7 @@ impl BartAttn {
         let s2 = vec![
             gpu.step(k.scores, &[&self.q, &self.k, &self.scores], &sp, self.heads * tq * tkv),
             gpu.step(softmax_kind, &[&self.scores, &self.probs], &softmax_params, self.heads * tq),
-            gpu.step(k.apply, &[&self.probs, &self.v, &self.ctx], &[1, self.heads, tq, tkv, self.head_dim, d, 0, d], self.heads * tq * self.head_dim),
+            gpu.step(k.apply, &[&self.probs, &self.v, &self.ctx], &[1, self.heads, tq, tkv, self.head_dim, d, 0, d, 0], self.heads * tq * self.head_dim),
         ];
         gpu.submit(&[], &s2);
 

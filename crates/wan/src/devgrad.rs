@@ -491,7 +491,7 @@ impl BlockDev {
         } else {
             s.push(self.gpu.step(K_SOFTMAX, &[self.g(scores), self.g(probs)], &[1, nh, nq, nk], nh * nq));
         }
-        s.push(self.gpu.step(K_APPLY, &[self.g(probs), self.g(v), self.g(out)], &[1, nh, nq, nk, hd, dim, 0, dim], nh * nq * hd));
+        s.push(self.gpu.step(K_APPLY, &[self.g(probs), self.g(v), self.g(out)], &[1, nh, nq, nk, hd, dim, 0, dim, 0], nh * nq * hd));
     }
 
     #[allow(clippy::too_many_arguments)]

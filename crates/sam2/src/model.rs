@@ -130,11 +130,8 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("rope_interleave_table", kernels::ROPE_INTERLEAVE_TABLE),
 ];
 
-/// Query rows per `chunked_bidir_fwd` dispatch. A multiple of 64 is REQUIRED,
-/// not preferred: that path binds `qkv` sliced at `(row0 + q0) * 3 * dim_out`
-/// floats, and wgpu rejects a storage binding whose offset is not 256-byte
-/// aligned. 256 also caps the largest score slab (a 4096-token global-attention
-/// block at 8 heads) at 32 MiB.
+/// Query rows per `chunked_bidir_fwd` dispatch. 256 caps the largest score
+/// slab (a 4096-token global-attention block at 8 heads) at 32 MiB.
 const ATTN_CHUNK: u32 = 256;
 
 /// Largest `N*C*H*W` one `maxpool2d` dispatch may cover. The kernel records the
@@ -1308,7 +1305,7 @@ impl Sam2 {
         steps.push(g.step(self.ids.key_minor.0, &[&k, &kt], &[tk, io, io, 0], io * tk));
         steps.push(g.step(self.ids.key_minor.1, &[&q, &kt, &scores], &[1, heads, tq, tk, hd, io, 0], heads * tq * tk));
         steps.push(g.step(self.ids.cross.softmax, &[&scores, &probs], &[1, heads, tq, tk], heads * tq));
-        steps.push(g.step(self.ids.cross.apply, &[&probs, &v, &ctxb], &[1, heads, tq, tk, hd, io, 0, io], heads * tq * hd));
+        steps.push(g.step(self.ids.cross.apply, &[&probs, &v, &ctxb], &[1, heads, tq, tk, hd, io, 0, io, 0], heads * tq * hd));
         self.linear(&mut steps, &ctxb, out, tq, io, d, &format!("{prefix}.out_proj.weight"), &format!("{prefix}.out_proj.bias"));
         g.submit(&[], &steps);
     }

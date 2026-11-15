@@ -73,8 +73,8 @@ fn forward(gpu: &Gpu, s: &Shape, q_dec: &[f32], kv_enc: &[f32]) -> Vec<f32> {
     // softmax: {bsz,n_heads,t_dec,t_enc}
     let p_sm = [s.b, s.h, s.t_dec, s.t_enc];
     let st1 = gpu.step(1, &[&scores, &probs], &p_sm, s.b * s.h * s.t_dec);
-    // apply: {bsz,n_heads,t_dec,t_enc,head_dim,kv_stride,v_off,d_model}
-    let p_ap = [s.b, s.h, s.t_dec, s.t_enc, s.hd, 2 * d, d, d];
+    // apply: {bsz,n_heads,t_dec,t_enc,head_dim,kv_stride,v_off,d_model,out_off}
+    let p_ap = [s.b, s.h, s.t_dec, s.t_enc, s.hd, 2 * d, d, d, 0];
     let st2 = gpu.step(2, &[&probs, &kvb, &out], &p_ap, s.out_len() as u32);
 
     gpu.submit(&[], &[st0, st1, st2]);

@@ -386,7 +386,7 @@ impl Head {
 
         // Cross-attention: every option queries every state token.
         let p_qk = [1, heads, s, r, hd, h, 2 * h, 0, 0];
-        let p_v = [1, heads, s, r, hd, 2 * h, h, h];
+        let p_v = [1, heads, s, r, hd, 2 * h, h, h, 0];
         st.push(g.step(self.k.scores_cross, &[&self.q, &self.kv, &self.scores_attn], &p_qk, heads * s * r));
         st.push(g.step(self.k.softmax_cross, &[&self.scores_attn, &self.probs], &[1, heads, s, r], heads * s));
         st.push(g.step(self.k.apply_cross, &[&self.probs, &self.kv, &self.ctx], &p_v, heads * s * hd));

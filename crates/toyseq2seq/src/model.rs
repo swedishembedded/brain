@@ -722,7 +722,7 @@ impl Seq2Seq {
         // cross scores/softmax/apply: q_stride=d, kv_stride=2d, q_off=0, k_off=0, v_off=d
         s.push(self.gpu.step(ATTN_SCORES_CROSS, &[&lb.cq, &lb.ckv, &lb.cscores], &[b, h, td, te, hd, d, 2 * d, 0, 0], b * h * td * te));
         s.push(self.gpu.step(ATTN_SOFTMAX_CROSS, &[&lb.cscores, &lb.cprobs], &[b, h, td, te], b * h * td));
-        s.push(self.gpu.step(ATTN_APPLY_CROSS, &[&lb.cprobs, &lb.ckv, &lb.cctx], &[b, h, td, te, hd, 2 * d, d, d], b * h * td * hd));
+        s.push(self.gpu.step(ATTN_APPLY_CROSS, &[&lb.cprobs, &lb.ckv, &lb.cctx], &[b, h, td, te, hd, 2 * d, d, d, 0], b * h * td * hd));
         s.push(self.gpu.step(MATMUL, &[&lb.cctx, self.w(&p("cross.out.weight")), &lb.ca_proj], &[nd, d, d], nd * d));
         s.push(self.gpu.step(BIAS_ADD, &[&lb.ca_proj, self.w(&p("cross.out.bias"))], &[nd, d], nd * d));
         s.push(self.gpu.step(ADD2, &[&lb.xa, &lb.ca_proj, &lb.xc], &[nd * d], nd * d));

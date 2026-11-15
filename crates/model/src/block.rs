@@ -1637,9 +1637,9 @@ pub(crate) fn key_minor_step(
 /// leaves the dispatch sequence byte-for-byte what it was; there is deliberately
 /// no second copy of this loop for the biased case.
 ///
-/// **Alignment:** a span or chunk starts at a sliced binding of `qkv` (`row * stride`) and `ctx` (`row * d_out`), so
-/// `stride` and `d_out` must be multiples of 64 words (256 B, `backend_api::STORAGE_BINDING_OFFSET_ALIGN_BYTES`),
-/// which every ViT width is. A call whose windows do not start on the grain panics at the call, naming the width ([`assert_row_windows_bindable`]).
+/// Every dispatch binds `qkv` and `ctx` whole and reaches a span's or chunk's rows through the kernels' word offsets
+/// (`q_off`/`k_off`/`v_off` and `attn_apply_cross`'s `out_off`), so any width works: a sliced binding's offset would
+/// have to sit on the storage-binding grain.
 ///
 /// `km` swaps the score dispatch for the coalesced [`KeyMinor`] pair. This loop
 /// is the best case for it: the transpose is hoisted to once per SPAN while the
@@ -1666,41 +1666,48 @@ pub fn chunked_bidir_fwd(
     rel: Option<&crate::vit::RelPos>,
     steps: &mut Vec<Step>,
 ) {
-    assert_row_windows_bindable("chunked_bidir_fwd", spans, chunk, &[("stride", stride), ("d_out", d_out)]);
     for &(row0, len) in spans {
         if let Some(r) = rel {
             r.check_span(len);
             // The hoist covers the WHOLE span; the chunk loop only folds the
             // rows it owns, addressed by `q0`.
-            r.qr_steps(g, heads, head_dim, qkv, stride, row0 * stride + q_off, (r.rel_h, r.rel_w), (0, 0), 1, steps);
+            r.qr_steps(g, heads, head_dim, qkv, stride, row_param(row0, stride, q_off), (r.rel_h, r.rel_w), (0, 0), 1, steps);
         }
-        let kv_row_off = row0 as u64 * stride as u64;
+        // The span's keys and values start at row `row0`.
+        let (ko, vo) = (row_param(row0, stride, k_off), row_param(row0, stride, v_off));
         if let Some(km) = km {
             // Once per span, outside the chunk loop - see [`KeyMinor`].
-            steps.push(key_minor_step(g, km, d_out, qkv, (kv_row_off, 0), stride, k_off, len));
+            steps.push(key_minor_step(g, km, d_out, qkv, (0, 0), stride, ko, len));
         }
         let mut q0 = 0u32;
         while q0 < len {
             let qn = chunk.min(len - q0);
-            // q view: rows [row0+q0 ..); kv view + ctx view: rows [row0 ..).
-            let q_row_off = (row0 + q0) as u64 * stride as u64;
-            let ctx_off = (row0 + q0) as u64 * d_out as u64;
-            let sa = CrossScoreArgs { heads, head_dim, q_stride: stride, q_off, kv_stride: stride, k_off, qn, kn: len };
-            steps.push(cross_scores_step(g, k, km, sa, qkv, (q_row_off, 0), qkv, (kv_row_off, 0), scores));
+            // The chunk's queries and context rows start at row `row0 + q0`.
+            let (qo, co) = (row_param(row0 + q0, stride, q_off), row_param(row0 + q0, d_out, 0));
+            let sa = CrossScoreArgs { heads, head_dim, q_stride: stride, q_off: qo, kv_stride: stride, k_off: ko, qn, kn: len };
+            steps.push(cross_scores_step(g, k, km, sa, qkv, (0, 0), qkv, (0, 0), scores));
             if let Some(r) = rel {
                 steps.push(r.add_step(g, heads, qn, len, q0, scores));
             }
             steps.push(g.step(k.softmax, &[scores, probs], &[1, heads, qn, len], heads * qn));
-            steps.push(g.step_sliced(
+            steps.push(g.step(
                 k.apply,
                 &[probs, qkv, ctx],
-                &[(0, 0), (kv_row_off, 0), (ctx_off, 0)],
-                &[1, heads, qn, len, head_dim, stride, v_off, d_out],
+                &[1, heads, qn, len, head_dim, stride, vo, d_out, co],
                 heads * qn * head_dim,
             ));
             q0 += qn;
         }
     }
+}
+
+/// A row offset folded into a kernel's own `q_off`/`k_off`/`v_off`/`out_off` Param: row `rows` of a buffer `stride`
+/// words wide, plus `region`. Params are `u32` and the kernels index `array<f32>` with `u32`, so this is the same
+/// ceiling the kernel already has - asserted where the shape that produced it is still in scope.
+pub(crate) fn row_param(rows: u32, stride: u32, region: u32) -> u32 {
+    let v = rows as u64 * stride as u64 + region as u64;
+    assert!(v <= u32::MAX as u64, "attention row offset {v} overflows the kernels' u32 addressing");
+    v as u32
 }
 
 /// Windowed twin of [`CrossIds`]'s materialized scores kernel - what
@@ -1799,45 +1806,25 @@ pub fn chunked_bidir_fwd_win(
     chunk: u32,
     steps: &mut Vec<Step>,
 ) {
-    assert_row_windows_bindable("chunked_bidir_fwd_win", spans, chunk, &[("stride", stride), ("d_out", d_out)]);
+    // Whole buffers reached through word offsets, as in [`chunked_bidir_fwd`].
     for &(row0, len) in spans {
-        let kv_row_off = row0 as u64 * stride as u64;
+        let (ko, vo) = (row_param(row0, stride, k_off), row_param(row0, stride, v_off));
         if let Some(km) = km {
             // Once per span, outside the chunk loop - see [`KeyMinor`]'s own
             // doc for why the transpose is hoisted this way.
-            steps.push(g.step_sliced(
-                km.transpose,
-                &[qkv, km.kt],
-                &[(kv_row_off, 0), (0, 0)],
-                &[len, d_out, stride, k_off],
-                d_out * len,
-            ));
+            steps.push(g.step(km.transpose, &[qkv, km.kt], &[len, d_out, stride, ko], d_out * len));
         }
         let mut q0 = 0u32;
         while q0 < len {
             let qn = chunk.min(len - q0);
-            let q_row_off = (row0 + q0) as u64 * stride as u64;
-            let ctx_off = (row0 + q0) as u64 * d_out as u64;
-            let sa = CrossScoreArgs { heads, head_dim, q_stride: stride, q_off, kv_stride: stride, k_off, qn, kn: len };
-            steps.push(cross_scores_win_step(
-                g,
-                k,
-                km,
-                sa,
-                q0,
-                window,
-                qkv,
-                (q_row_off, 0),
-                qkv,
-                (kv_row_off, 0),
-                scores,
-            ));
+            let (qo, co) = (row_param(row0 + q0, stride, q_off), row_param(row0 + q0, d_out, 0));
+            let sa = CrossScoreArgs { heads, head_dim, q_stride: stride, q_off: qo, kv_stride: stride, k_off: ko, qn, kn: len };
+            steps.push(cross_scores_win_step(g, k, km, sa, q0, window, qkv, (0, 0), qkv, (0, 0), scores));
             steps.push(g.step(softmax, &[scores, probs], &[1, heads, qn, len], heads * qn));
-            steps.push(g.step_sliced(
+            steps.push(g.step(
                 apply,
                 &[probs, qkv, ctx],
-                &[(0, 0), (kv_row_off, 0), (ctx_off, 0)],
-                &[1, heads, qn, len, head_dim, stride, v_off, d_out],
+                &[1, heads, qn, len, head_dim, stride, vo, d_out, co],
                 heads * qn * head_dim,
             ));
             q0 += qn;
@@ -3053,8 +3040,9 @@ pub fn dscores_variant(g: &Gpu, k: &CrossBwdIds, rows: u32, cols: u32) -> (usize
 ///    accumulates the dense-table adjoint across spans - every window of a
 ///    windowed block shares one table.
 ///
-/// **Alignment:** as [`chunked_bidir_fwd`]: `d_ctx`, `d_qkv` and `qkv` windows start at `row * d_out` and
-/// `row * stride`, so `stride` and `d_out` must be multiples of 64 words; a call that breaks it panics, naming the width.
+/// **Alignment:** `d_ctx`, `d_qkv` and `qkv` windows are sliced bindings at `row * d_out` and `row * stride` (the
+/// backward kernels have no offset Param for `d_ctx`), so `stride` and `d_out` must be multiples of 64 words; a call
+/// that breaks it panics, naming the width ([`assert_row_windows_bindable`]).
 pub fn chunked_bidir_bwd(
     g: &Gpu,
     fwd: &CrossIds,

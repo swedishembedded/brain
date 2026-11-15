@@ -1846,8 +1846,8 @@ impl<'a> Builder<'a> {
         self.steps.push(self.gpu.step(ids.scores, &[q, kv, &scores], &[1, heads, tq, tkv, head_dim, c, 2 * c, 0, 0], heads * tq * tkv));
         // `attn_softmax_cross` Params: [bsz, heads, t_dec, t_enc]
         self.steps.push(self.gpu.step(ids.softmax, &[&scores, &probs], &[1, heads, tq, tkv], heads * tq));
-        // `attn_apply_cross`   Params: [bsz, heads, t_dec, t_enc, head_dim, kv_stride, v_off, d_model]
-        self.steps.push(self.gpu.step(ids.apply, &[&probs, kv, ctx], &[1, heads, tq, tkv, head_dim, 2 * c, c, c], heads * tq * head_dim));
+        // `attn_apply_cross`   Params: [bsz, heads, t_dec, t_enc, head_dim, kv_stride, v_off, d_model, out_off]
+        self.steps.push(self.gpu.step(ids.apply, &[&probs, kv, ctx], &[1, heads, tq, tkv, head_dim, 2 * c, c, c, 0], heads * tq * head_dim));
         if self.train {
             self.tape.push(Op::Cross {
                 c,

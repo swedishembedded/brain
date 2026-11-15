@@ -86,13 +86,17 @@ against the NPU export via OpenVINO.
       bitwise equal to the same sequence alone on a GPU;
       `chunked_matches_materialized_for_a_narrow_batch` in
       `crates/lfm2/tests/it/chunked_equiv.rs`)
-- [ ] The chunked regime on a device without workgroup reductions (the CPU
-      backend) runs the cross trio (`block::chunked_bidir_fwd`), which
-      requires `3 * d_model` and `d_model` to be multiples of 64 words and
-      refuses a narrower batched build at the call: `attn_apply_cross` has no
-      output offset param, so the second sequence's context rows cannot be
-      written without a sliced binding. Real LFM2.5 widths are multiples of
-      64; the tiny encoder runs batched on the CPU backend only materialized
+- [x] The chunked regime on a device without workgroup reductions (the CPU
+      backend) runs the cross trio (`block::chunked_bidir_fwd`) at any
+      `d_model`: `attn_apply_cross` takes an `out_off` param, and the
+      forward binds `qkv` and `ctx` whole, reaching each span's and chunk's
+      rows through the kernels' word offsets. Verified at the tiny `d_model`
+      16 encoder at batch 2 on the CPU backend
+      (`chunked_matches_materialized_for_a_narrow_batch_on_the_cpu_backend`
+      in `crates/lfm2/tests/it/chunked_equiv.rs`). The chunked backward
+      (`block::chunked_bidir_bwd`) still slices `d_ctx` and needs the widths
+      on the 64-word grain: `attn_bwd_dscores_cross` and `attn_bwd_dv_cross`
+      have no offset param for it.
 
 Bidirectional attention has no causal mask to hide padded positions, so
 mixing sequence lengths in one batch requires either exact-length builds or

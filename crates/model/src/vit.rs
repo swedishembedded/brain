@@ -22,6 +22,7 @@
 
 use gpu_core::provider::library::{LibraryGemmProvider, Operand};
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
+use crate::block::row_param;
 
 /// Kernel-pipeline indices a model supplies from its own PIPELINES list.
 /// Only the kernels a given configuration dispatches need valid indices.
@@ -877,17 +878,18 @@ pub fn vit_block_bwd(
 //     bit already for UNIFORM spans.)
 //   * `q` / `kv` / `d_q` / `d_kv` - SOLVED here: the row offset rides in the
 //     kernels' own `q_off`/`k_off`/`v_off` Params and the buffers bind whole.
-//   * `ctx` / `d_ctx` - NOT solvable without a kernel ABI change:
-//     `attn_apply_cross` writes `out[(b*Tq + i)*d_model + ...]` and has no
-//     output-offset Param, so the binding must carry `q0*C` and that offset
-//     must be 64-aligned. [`WindowPlan::ctx_bindable`] answers this for a plan;
-//     [`aligned_ctx`] is the loud failure otherwise.
-// So: shifted/ragged windows run whenever every span's `q0*C` is 64-aligned -
-// always true for `C % 64 == 0`, and for many smaller `C`/window combinations.
-// It is NOT unconditional. Lifting the last case means adding an `out_off`
-// Param to `attn_apply_cross`/`attn_bwd_dscores_cross`/`attn_bwd_dv_cross`,
-// which is an ABI change shared with `seq2seq` and `fastvlm` - a deliberate
-// kernel task, not something to slip in here.
+//   * `ctx` - SOLVED here: `attn_apply_cross`'s `out_off` Param carries the
+//     span's `q0*C` and `ctx` binds whole.
+//   * `d_ctx` - NOT solvable without a kernel ABI change:
+//     `attn_bwd_dscores_cross` and `attn_bwd_dv_cross` read
+//     `d_ctx[(b*Tq + i)*d_model + ...]` and have no offset Param, so the
+//     binding must carry `q0*C` and that offset must be 64-aligned.
+//     [`WindowPlan::ctx_bindable`] answers this for a plan; [`aligned_ctx`] is
+//     the loud failure otherwise.
+// So: the forward runs any partition, and shifted/ragged windows train
+// whenever every span's `q0*C` is 64-aligned - always true for `C % 64 == 0`,
+// and for many smaller `C`/window combinations. Lifting the last case means
+// adding a `d_ctx` offset Param to those two backward kernels.
 
 /// The two row-permutation kernels. `embed` gathers, `row_scatter` scatters;
 /// for a permutation index vector they are exact inverses and exact adjoints.
@@ -1182,12 +1184,12 @@ impl WindowPlan {
     /// ([`vit_block_fwd_cached`] / [`vit_block_bwd`] / [`cross_q_fwd`]) at
     /// channel width `dim`?
     ///
-    /// `ctx` is the one binding those still slice per span (the apply kernel
-    /// has no output-offset Param), so every span's `row0*dim` must be
-    /// 64-float aligned. Always true for `dim % 64 == 0`; check it before
-    /// building a shifted plan rather than meeting [`aligned_ctx`] at
-    /// step-build time. The unchunked inference path [`vit_block_fwd`] does not
-    /// slice `ctx` per span and is unaffected.
+    /// `d_ctx` is the one binding [`vit_block_bwd`] / [`cross_q_bwd`] still
+    /// slice per span (the backward kernels that read it have no offset
+    /// Param), so every span's `row0*dim` must be 64-float aligned. Always
+    /// true for `dim % 64 == 0`; check it before building a shifted plan rather
+    /// than meeting [`aligned_ctx`] at step-build time. The forwards bind
+    /// `ctx` whole and are unaffected.
     pub fn ctx_bindable(&self, dim: u32) -> bool {
         self.spans.iter().all(|&(row0, _)| (row0 as u64 * dim as u64).is_multiple_of(BIND_ALIGN))
     }
@@ -1510,21 +1512,11 @@ pub fn max_slab(spans: &[AttnSpan], heads: u32) -> u64 {
     spans.iter().map(|s| heads as u64 * s.qn as u64 * s.kn as u64).max().unwrap_or(0)
 }
 
-/// A row offset folded into a kernel's own `q_off`/`k_off`/`v_off` Param.
-/// Params are `u32` and the kernels index `array<f32>` with `u32`, so this is
-/// the same ceiling the kernel already has - asserted where the shape that
-/// produced it is still in scope.
-fn row_param(rows: u32, stride: u32, region: u32) -> u32 {
-    let v = rows as u64 * stride as u64 + region as u64;
-    assert!(v <= u32::MAX as u64, "attention row offset {v} overflows the kernels' u32 addressing");
-    v as u32
-}
-
-/// `ctx`/`d_ctx` is the ONE buffer of the cross trio with no offset Param -
-/// `attn_apply_cross` writes `out[(b*Tq + i)*d_model + …]` - so it must be
-/// bound sliced, and its offset must satisfy [`BIND_ALIGN`]. Checked here, with
-/// the shape that produced it, because the driver's complaint arrives at submit
-/// with no hint of which span caused it.
+/// `d_ctx` is the ONE buffer of the cross backward with no offset Param -
+/// `attn_bwd_dscores_cross`/`attn_bwd_dv_cross` read `d_ctx[(b*Tq + i)*d_model + …]` -
+/// so it must be bound sliced, and its offset must satisfy [`BIND_ALIGN`].
+/// Checked here, with the shape that produced it, because the driver's
+/// complaint arrives at submit with no hint of which span caused it.
 fn aligned_ctx(q0: u32, d_out: u32) -> u64 {
     let off = q0 as u64 * d_out as u64;
     assert!(
@@ -1567,8 +1559,8 @@ fn num_gcd(a: u64, b: u64) -> u64 {
 /// and the span's row offset is folded into the kernels' own `q_off`/`k_off`/
 /// `v_off`. Slicing them instead - `(q0*q_stride, 0)` - imposes a 256-byte
 /// alignment on `row0 * stride` that a ragged partition does not satisfy, which
-/// is a hard wgpu validation failure, not a slow path. `ctx` has no offset
-/// Param and is the one binding still sliced (see [`aligned_ctx`]).
+/// is a hard wgpu validation failure, not a slow path. `ctx` is bound whole
+/// too, its rows reached through `attn_apply_cross`'s `out_off`.
 ///
 /// Kernel Params (`CrossIds`), per span:
 ///   * `attn_scores_cross`  `[1, heads, qn, kn, hd, q_stride, kv_stride,
@@ -1581,8 +1573,8 @@ fn num_gcd(a: u64, b: u64) -> u64 {
 ///   * `attn_softmax_cross` `[1, heads, qn, kn]`, bufs `[scores, probs]`,
 ///     slices `[(0,0), (probs_at,0)]`, threads `heads*qn`
 ///   * `attn_apply_cross`   `[1, heads, qn, kn, hd, kv_stride,
-///     k0*kv_stride + v_off, d_out]`, bufs `[probs, kv, ctx]`,
-///     slices `[(probs_at,0), (0,0), (q0*d_out,0)]`, threads `heads*qn*hd`
+///     k0*kv_stride + v_off, d_out, q0*d_out]`, bufs `[probs, kv, ctx]`,
+///     slices `[(probs_at,0), (0,0), (0,0)]`, threads `heads*qn*hd`
 ///
 /// `km` swaps the score dispatch for the coalesced pair
 /// (`crate::block::KeyMinor`). There is no query chunking here, so the
@@ -1613,7 +1605,7 @@ pub fn cross_q_fwd(
         let qo = row_param(s.q0, q_stride, q_off);
         let ko = row_param(s.k0, kv_stride, k_off);
         let vo = row_param(s.k0, kv_stride, v_off);
-        let cs = aligned_ctx(s.q0, d_out);
+        let co = row_param(s.q0, d_out, 0);
         let ps = at[i];
         if let Some(km) = km {
             steps.push(crate::block::key_minor_step(g, km, d_out, kv, (0, 0), kv_stride, ko, s.kn));
@@ -1633,8 +1625,8 @@ pub fn cross_q_fwd(
         steps.push(g.step_sliced(
             ids.apply,
             &[probs, kv, ctx],
-            &[(ps, 0), (0, 0), (cs, 0)],
-            &[1, heads, s.qn, s.kn, hd, kv_stride, vo, d_out],
+            &[(ps, 0), (0, 0), (0, 0)],
+            &[1, heads, s.qn, s.kn, hd, kv_stride, vo, d_out, co],
             heads * s.qn * hd,
         ));
     }
@@ -1649,8 +1641,8 @@ pub fn cross_q_fwd(
 /// needs pre-zeroing when the spans partition the rows.
 ///
 /// Row offsets ride in the Params exactly as in [`cross_q_fwd`], so `q`, `kv`,
-/// `d_q` and `d_kv` are all bound whole and only `d_ctx` (no offset Param) and
-/// `probs` are sliced.
+/// `d_q` and `d_kv` are all bound whole and only `d_ctx` (no offset Param in
+/// the backward kernels that read it) and `probs` are sliced.
 ///
 /// Kernel Params (`VitBwdIds`), per span, with `vo = k0*kv_stride + v_off`,
 /// `ko = k0*kv_stride + k_off`, `qo = q0*q_stride + q_off`:

@@ -690,7 +690,7 @@ fn attn_context_materialized(
     }
     let probs = gpu.storage((heads * nq * nk) as u64);
     attn_softmax(gpu, s, &scores, &probs, heads, nq, nk);
-    s.push(gpu.step(K_ATTN_APPLY, &[&probs, v, ctx], &[1, heads, nq, nk, head_dim, inner_dim, 0, inner_dim], heads * nq * head_dim));
+    s.push(gpu.step(K_ATTN_APPLY, &[&probs, v, ctx], &[1, heads, nq, nk, head_dim, inner_dim, 0, inner_dim, 0], heads * nq * head_dim));
 }
 
 /// RMSNorm over the full row width (`dim`, never per-head) - `w` is either a
