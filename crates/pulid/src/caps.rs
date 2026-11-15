@@ -180,13 +180,35 @@ fn req_from(inv: &Invocation) -> Result<Req, String> {
     })
 }
 
-/// `PulidCa`'s device footprint - resident for the whole DiT lifetime (unlike
-/// ArcFace/EVA-CLIP/IDFormer, which only run once per identity) - so it is
-/// folded into the "dit" placement `Need` via
-/// [`flux1::pipeline::plan_flux1`]'s `dit_extra_bytes`, never costed
-/// separately. Always fp32 (no kernel here is quantized, per the module docs).
+/// `PulidCa`'s device footprint - resident for the whole DiT lifetime. Always
+/// fp32 (no kernel here is quantized, per the module docs).
 fn pulid_ca_bytes(cfg: &PulidConfig, n_ca: usize) -> u64 {
     cfg.ca_manifest(n_ca).iter().map(|(_, shape)| shape.iter().product::<usize>() as u64 * 4).sum()
+}
+
+/// The face-identity stack's device footprint: ArcFace and its SCRFD detector,
+/// the BiSeNet face parser, the EVA-CLIP tower and IDFormer, each from its own
+/// crate's account of what its build allocates (weights as built, plus the
+/// buffers its graph writes). The stack is pinned to the DiT's card
+/// ([`Bundle::load`]), so [`dit_extra_bytes`] charges it to the `dit` part.
+fn identity_stack_bytes(pulid_cfg: &PulidConfig, arcface_root: &str, bisenet_root: &str) -> Result<u64, String> {
+    let bisenet_path = std::path::Path::new(bisenet_root).join(BISENET_FILE);
+    let bisenet_p = bisenet_path.to_str().ok_or("pulid: non-UTF8 BiSeNet checkpoint path")?;
+    let bisenet_weights = bisenet::import::read(bisenet_p).map_err(|e| format!("pulid: reading {bisenet_p}: {e}"))?;
+    Ok(ArcFaceSession::device_bytes(arcface_root)?
+        + bisenet::BiSeNet::device_bytes(&bisenet::BiSeNetConfig::bisenet(), &bisenet_weights)
+        + EvaVision::device_bytes(&EvaVisionConfig::eva02_l336(), 1)
+        + IdFormer::device_bytes(pulid_cfg))
+}
+
+/// What a PuLID-conditioned FLUX.1 puts on the DiT's card on top of the bare
+/// DiT: the `PulidCa` module (resident for the whole generation) and the
+/// identity stack pinned beside it. The `dit_extra_bytes` argument of
+/// [`flux1::pipeline::plan_flux1`] for this pipeline.
+pub fn dit_extra_bytes(fcfg: &Flux1Config, arcface_root: &str, bisenet_root: &str) -> Result<u64, String> {
+    let pulid_cfg = PulidConfig::v0_9_1();
+    let n_ca = pulid_cfg.num_ca(fcfg.depth_double, fcfg.depth_single);
+    Ok(pulid_ca_bytes(&pulid_cfg, n_ca) + identity_stack_bytes(&pulid_cfg, arcface_root, bisenet_root)?)
 }
 
 // ===================== the pipeline =====================
@@ -230,9 +252,10 @@ impl Bundle {
         // `PulidCa` built on a device with a DIFFERENT kernel list resolves
         // its injected steps against the wrong pipeline indices. Placed via
         // the SAME plan `flux1::pipeline::load_with` would use for a bare
-        // FLUX.1, with PulidCa's own resident bytes folded into the "dit" part
-        // so the plan prices what actually gets built.
-        let dit_extra = pulid_ca_bytes(&pulid_cfg, w_pulid.num_ca);
+        // FLUX.1, with everything this pipeline adds to the DiT's card folded
+        // into the "dit" part so the plan prices what actually gets built:
+        // PulidCa's resident bytes and the identity stack pinned below.
+        let dit_extra = dit_extra_bytes(&fcfg, arcface_root, bisenet_root)?;
         let homes = flux1::pipeline::plan_flux1(&fcfg, precision, Flux1::n_max(h, w)? as u64, dit_extra)?;
         eprintln!("pulid: placement {}", homes.describe());
         let dit_gpu = homes.run("dit", || Gpu::new(crate::model::joint_kernels()))?;
@@ -240,16 +263,13 @@ impl Bundle {
         let ca = PulidCa::new_on(dit_gpu, pulid_cfg.clone(), crate::model::joint_kernels(), w_pulid.num_ca, n_gen, w_pulid.ca);
 
         // ArcFace/EVA-CLIP/IDFormer/BiSeNet each run once per identity, not
-        // once per step - they keep their own independent kernel sets (never
-        // pushed into the DiT's dispatch list, unlike `PulidCa`), so they are
-        // not part of the "dit"/"te" `Need`s `plan_flux1` sizes. They still
-        // need an EXPLICIT home, though: left unscoped, `Gpu::new` lands on
-        // whatever the ambient default device is, which is not guaranteed to
-        // avoid "te" - on a 2-card box with the fp32 T5-XXL built there, an
-        // unpinned identity stack landing on the SAME card OOMs. Pinning to
-        // "dit" instead is safe because this stack is modest - ArcFace +
-        // BiSeNet + EVA-CLIP-L + IDFormer together are well under the DiT
-        // part's own remaining headroom on a 24 GiB card. Every handle below
+        // once per step, and keep their own independent kernel sets (never
+        // pushed into the DiT's dispatch list, unlike `PulidCa`). They are
+        // pinned to the "dit" card, which is why `dit_extra_bytes` charges
+        // them to that part: left unscoped, `Gpu::new` lands on whatever the
+        // ambient default device is, which is not guaranteed to avoid "te" -
+        // on a 2-card box with the fp32 T5-XXL built there, an unpinned
+        // identity stack landing on the SAME card OOMs. Every handle below
         // comes from `gpu.new_like`, which opens `gpu`'s own card, so the
         // whole stack follows this one scoped build.
         let gpu = homes.run("dit", || Gpu::new(crate::model::KERNELS))?;

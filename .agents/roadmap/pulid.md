@@ -84,8 +84,8 @@ The image → `id_cond` path exists (`idcond::IdCond::from_image` /
          ambient default device was rather than an explicit home - on a
          2-card box this coincided with "te" (a ~21 GiB fp32 T5-XXL), and
          the two together OOM'd. Fixed by pinning this stack to "dit"'s home
-         via the same `Homes` `plan_flux1` already computed (real headroom:
-         an int8 DiT + resident `PulidCa` is ~17.5 GiB against 24). On the
+         via the same `Homes` `plan_flux1` already computed (the plan now
+         charges the stack, see the placement item below). On the
          CUDA backend the pin did not hold until `CudaBackend::new_like`
          existed: the stack's `gpu.new_like(..)` handles fell back to the
          ambient card (knowledge #461).
@@ -122,6 +122,22 @@ The image → `id_cond` path exists (`idcond::IdCond::from_image` /
       checkpoint or a reference dump; this only makes the variant name
       accepted and architecturally plausible, same honest status
       `kontext-dev`/`schnell` already carried before this.
+- [x] The plan prices the DiT card's whole PuLID load - `plan_flux1`'s
+      `dit_extra_bytes` is `pulid::caps::dit_extra_bytes`: the resident
+      `PulidCa` plus the identity stack pinned to that card (ArcFace with its
+      SCRFD detector, BiSeNet, EVA-CLIP, IDFormer). Each component's own crate
+      answers for what its build allocates (`ArcFace::device_bytes`,
+      `Scrfd::device_bytes`, `BiSeNet::device_bytes`,
+      `EvaVision::device_bytes`, `IdFormer::device_bytes`), from the loaded
+      tensor sizes or the manifest plus the shapes its graph walks, with the
+      conv nets' per-unit buffers counted once in `vision::Footprint`.
+      `crates/pulid/tests/it/placement_real.rs` (ignored, real weights) pins
+      the DiT card's measured peak to the charge within the same band
+      `crates/flux1/tests/it/placement_real.rs` uses
+      (`gpu_core::capacity::estimate_bounds`). The estimate counts the
+      allocations themselves; the allocator's own granularity on the many
+      mid-size activation buffers is what the headroom's overhead share is
+      for, and it is the whole of the gap the test measures.
 - [ ] Backward pass / gradient check for the adapter (`check_pulid`)
 - [ ] Batch > 1 - serial `run_batch`, same reason as `flux1`'s (one
       multi-step sample per request)
