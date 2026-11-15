@@ -213,3 +213,288 @@ brain_moe_i8_grouped_mma(const unsigned int* params, const unsigned int* xq, con
         brain_moe_grouped<false>(params, xq, sx, tab, perm, wq, sw, out);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Runs of tiles on staged weight rows (`brain_moe_i8_grouped_mma_runs*`)
+// ---------------------------------------------------------------------------
+//
+// The kernel above reads a weight row once per 8-slot tile, so a prefill round,
+// where an expert holds tens of tiles, streams every expert's rows once per tile:
+// each weight byte meets 8 slots, and the GEMM is bound by those reads at a few
+// percent of the tensor cores' rate. Here a block takes 32 weight rows and a RUN
+// of up to BRAIN_MGR_RUN consecutive tiles: it copies the rows (all of K) and their
+// scales into shared memory once per expert the run touches, and every tile of the
+// run reads them there. Warp w computes rows 16 * (w & 1) .. + 16 of the tiles of
+// parity w >> 1.
+//
+// Every output is computed by exactly the arithmetic above - the same MMA per
+// group, the same 16 lane accumulators taken in ascending group order, the same
+// fold - so the result is the WGSL kernel's to the last bit. Only where the
+// weight words come from changes.
+//
+// Shared layout: the 32 rows at a stride of `kg` rounded so the stride is 8 mod 32
+// words (a half-warp's 8-byte reads of four rows then cover the 32 banks once),
+// then the scales at a stride of `ng + 1`. The registration's dynamic shared
+// memory is sized for a largest `kg` (`kernels_cuda::moe_grouped_runs_shared_bytes`); the selection serves no wider
+// `kg` than the registration was sized for.
+
+#define BRAIN_MGR_ROWS 32
+#define BRAIN_MGR_RUN 8
+#define BRAIN_MGR_UNROLL 2                    // groups whose loads are issued together: registers, not latency, bound this form
+// Each warp stages its tile's activations a chunk of 16 groups (512 elements) at a time, in two buffers: the copy of
+// chunk c + 1 is in flight while chunk c is multiplied. A chunk is 8 slot rows of 128 words at a stride of 136 (8 mod
+// 32, as the weight rows), then their 8 x 16 group scales.
+#define BRAIN_MGR_CHUNK_WORDS 128
+#define BRAIN_MGR_XSTRIDE 136
+#define BRAIN_MGR_XBUF (8 * BRAIN_MGR_XSTRIDE + 8 * 16)
+
+__device__ __forceinline__ unsigned int brain_mgr_stride(unsigned int kg) {
+    return kg + ((8u - (kg & 31u)) & 31u);
+}
+
+__device__ __forceinline__ void brain_cp_async16(void* smem, const void* gmem) {
+    const unsigned int s = static_cast<unsigned int>(__cvta_generic_to_shared(smem));
+    asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" ::"r"(s), "l"(gmem));
+}
+
+__device__ __forceinline__ void brain_cp_async4(void* smem, const void* gmem) {
+    const unsigned int s = static_cast<unsigned int>(__cvta_generic_to_shared(smem));
+    asm volatile("cp.async.ca.shared.global [%0], [%1], 4;\n" ::"r"(s), "l"(gmem));
+}
+
+__device__ __forceinline__ void brain_cp_async_commit() { asm volatile("cp.async.commit_group;\n" ::); }
+
+template <int N>
+__device__ __forceinline__ void brain_cp_async_wait() { asm volatile("cp.async.wait_group %0;\n" ::"n"(N)); }
+
+// Copy chunk `c` of the tile's 8 activation rows (`xrows`, one per lane group of 4) and their scales into `buf`.
+// `X16`: every row starts on 16 bytes (the buffer does and `kg` is a multiple of 4), so a row's 128 words go as 32
+// copies of 16 bytes; otherwise word by word.
+template <bool X16>
+__device__ __forceinline__ void brain_mgr_stage_x(unsigned int* buf, const unsigned int* xq, const float* sx, const unsigned int (&xrows)[8],
+                                                  unsigned int c, unsigned int kg, unsigned int ng, unsigned int lane) {
+    const unsigned int w0 = c * BRAIN_MGR_CHUNK_WORDS;
+    const unsigned int words = min(BRAIN_MGR_CHUNK_WORDS, kg - w0);
+#pragma unroll
+    for (int r = 0; r < 8; ++r) {
+        const unsigned int* src = xq + static_cast<unsigned long long>(xrows[r]) * kg + w0;
+        unsigned int* dst = buf + r * BRAIN_MGR_XSTRIDE;
+        if (X16) {
+            if (lane * 4u < words) { brain_cp_async16(dst + lane * 4u, src + lane * 4u); }
+        } else {
+            for (unsigned int i = lane; i < words; i += 32u) { brain_cp_async4(dst + i, src + i); }
+        }
+    }
+    const unsigned int g0 = c * 16u;
+    const unsigned int groups = min(16u, ng - g0);
+    float* sdst = reinterpret_cast<float*>(buf + 8 * BRAIN_MGR_XSTRIDE);
+#pragma unroll
+    for (int j = 0; j < 4; ++j) {
+        const unsigned int i = lane + 32u * j;   // 128 = 8 rows x 16 groups
+        const unsigned int r = i >> 4, gi = i & 15u;
+        if (gi < groups) { brain_cp_async4(sdst + i, sx + static_cast<unsigned long long>(xrows[r]) * ng + g0 + gi); }
+    }
+}
+
+template <bool W16, bool X16>
+__device__ __forceinline__ void brain_moe_grouped_runs(const unsigned int* params, const unsigned int* xq, const float* sx,
+                                                       const unsigned int* tab, const unsigned int* perm,
+                                                       const unsigned int* wq, const float* sw, float* out) {
+    extern __shared__ uint4 brain_mgr_smem[];
+    unsigned int* ws = reinterpret_cast<unsigned int*>(brain_mgr_smem);
+
+    const unsigned int kg = params[1];
+    const unsigned int n = params[2];
+    const unsigned int xdiv = params[3];
+    const unsigned int ne = params[4];
+    const unsigned int ng = kg >> 3;
+    const unsigned int stride = brain_mgr_stride(kg);
+    const unsigned int sstride = ng + 1u;
+    float* ss = reinterpret_cast<float*>(ws + BRAIN_MGR_ROWS * stride);
+
+    const unsigned int blk = blockIdx.y * gridDim.x + blockIdx.x;
+    const unsigned int col_blocks = (n + BRAIN_MGR_ROWS - 1u) / BRAIN_MGR_ROWS;
+    if (col_blocks == 0u) { return; }
+    const unsigned int run = blk / col_blocks;
+    const unsigned int cb = blk - run * col_blocks;
+    const unsigned int total = tab[2u * ne + 1u];
+    const unsigned int tile0 = run * BRAIN_MGR_RUN;
+    if (tile0 >= total) { return; }  // block-uniform
+    const unsigned int tile_end = min(tile0 + BRAIN_MGR_RUN, total);
+
+    const unsigned int tid = threadIdx.x;
+    const unsigned int warp = tid >> 5;
+    const unsigned int lane = tid & 31u;
+    const unsigned int g = lane >> 2;
+    const unsigned int tq = lane & 3u;
+    const unsigned int rb = warp & 1u;      // which 16 of the block's 32 rows
+    const unsigned int parity = warp >> 1;  // which tiles of the run
+    const unsigned int rowbase = cb * BRAIN_MGR_ROWS;
+    const unsigned int colbase = rowbase + rb * 16u;
+    const bool active = colbase < n;        // warp-uniform; an idle warp still stages and synchronises
+    const unsigned int col0 = colbase + g, col1 = colbase + g + 8u;
+    const bool ok0 = col0 < n, ok1 = col1 < n;
+    const unsigned int* w0 = ws + (rb * 16u + g) * stride + tq * 2u;
+    const unsigned int* w1 = ws + (rb * 16u + g + 8u) * stride + tq * 2u;
+    const float* s0p = ss + (rb * 16u + g) * sstride;
+    const float* s1p = ss + (rb * 16u + g + 8u) * sstride;
+    // This warp's two activation buffers, after the staged rows and their scales (16-byte aligned: the stride and
+    // the scales' rows are whole words, rounded up below).
+    const unsigned int a_words = (BRAIN_MGR_ROWS * (stride + sstride) + 3u) & ~3u;
+    unsigned int* xbuf = ws + a_words + warp * 2u * BRAIN_MGR_XBUF;
+    const unsigned int chunks = (kg + BRAIN_MGR_CHUNK_WORDS - 1u) / BRAIN_MGR_CHUNK_WORDS;
+
+    unsigned int t = tile0;
+    while (t < tile_end) {
+        // The expert whose tile range holds `t`, and where its tiles end within this run.
+        unsigned int lo = 0u, hi = ne;
+        while (hi - lo > 1u) {
+            const unsigned int mid = (lo + hi) >> 1;
+            if (tab[ne + 1u + mid] <= t) { lo = mid; } else { hi = mid; }
+        }
+        const unsigned int e = lo;
+        const unsigned int seg_end = min(tile_end, tab[ne + 2u + e]);
+
+        // Stage the expert's 32 rows and their scales (a row past the matrix stages the last real row; its
+        // results are dropped).
+        // Every copy is issued before any is waited for (a load-then-store loop waits a memory latency per word).
+        __syncthreads();  // the previous expert's readers are done
+        const unsigned int vecs = kg >> 2;  // 16-byte vectors of a row
+        for (unsigned int i = tid; i < BRAIN_MGR_ROWS * vecs; i += blockDim.x) {
+            const unsigned int r = i / vecs, c = (i - r * vecs) * 4u;
+            const unsigned long long row = static_cast<unsigned long long>(e) * n + min(rowbase + r, n - 1u);
+            if (W16) {
+                brain_cp_async16(ws + r * stride + c, wq + row * kg + c);
+            } else {
+#pragma unroll
+                for (int j = 0; j < 4; ++j) { brain_cp_async4(ws + r * stride + c + j, wq + row * kg + c + j); }
+            }
+        }
+        for (unsigned int i = tid; i < BRAIN_MGR_ROWS * ng; i += blockDim.x) {
+            const unsigned int r = i / ng, c = i - r * ng;
+            const unsigned long long row = static_cast<unsigned long long>(e) * n + min(rowbase + r, n - 1u);
+            brain_cp_async4(ss + r * sstride + c, sw + row * ng + c);
+        }
+        brain_cp_async_commit();
+        brain_cp_async_wait<0>();
+        __syncthreads();
+
+        for (unsigned int tile = t + parity; active && tile < seg_end; tile += 2u) {
+            const unsigned int first = tab[e] + (tile - tab[ne + 1u + e]) * BRAIN_MG_MR;
+            const unsigned int cnt = min(BRAIN_MG_MR, tab[e + 1u] - first);
+            // The tile's 8 activation rows (an empty slot reads slot 0's).
+            unsigned int xrows[8];
+#pragma unroll
+            for (int r = 0; r < 8; ++r) { xrows[r] = perm[first + (static_cast<unsigned int>(r) < cnt ? static_cast<unsigned int>(r) : 0u)] / xdiv; }
+
+            float acc[BRAIN_MG_LANES][4];
+#pragma unroll
+            for (int l = 0; l < BRAIN_MG_LANES; ++l) {
+#pragma unroll
+                for (int i = 0; i < 4; ++i) { acc[l][i] = 0.0f; }
+            }
+            __syncwarp();  // the previous tile's readers of both buffers are done
+            brain_mgr_stage_x<X16>(xbuf, xq, sx, xrows, 0u, kg, ng, lane);
+            brain_cp_async_commit();
+            for (unsigned int c = 0; c < chunks; ++c) {
+                if (c + 1u < chunks) {
+                    brain_mgr_stage_x<X16>(xbuf + ((c + 1u) & 1u) * BRAIN_MGR_XBUF, xq, sx, xrows, c + 1u, kg, ng, lane);
+                    brain_cp_async_commit();
+                    brain_cp_async_wait<1>();
+                } else {
+                    brain_cp_async_wait<0>();
+                }
+                __syncwarp();
+                const unsigned int* xb_s = xbuf + (c & 1u) * BRAIN_MGR_XBUF;
+                const unsigned int* xp = xb_s + g * BRAIN_MGR_XSTRIDE + tq * 2u;
+                const float* xsa = reinterpret_cast<const float*>(xb_s + 8 * BRAIN_MGR_XSTRIDE) + (2u * tq) * 16u;
+                const float* xsb = xsa + 16;
+                const unsigned int sb = c * BRAIN_MG_LANES;
+#pragma unroll
+                for (int blk4 = 0; blk4 < BRAIN_MG_LANES / BRAIN_MGR_UNROLL; ++blk4) {
+                    uint2 wa[BRAIN_MGR_UNROLL], wb[BRAIN_MGR_UNROLL], xb[BRAIN_MGR_UNROLL];
+                    float sa[BRAIN_MGR_UNROLL], sbv[BRAIN_MGR_UNROLL], xa[BRAIN_MGR_UNROLL], xbs[BRAIN_MGR_UNROLL];
+#pragma unroll
+                    for (int u = 0; u < BRAIN_MGR_UNROLL; ++u) {
+                        const unsigned int gl = blk4 * BRAIN_MGR_UNROLL + u;   // the group within the chunk
+                        const unsigned int gi = sb + gl;
+                        if (gi < ng) {
+                            wa[u] = *reinterpret_cast<const uint2*>(w0 + gi * 8u);
+                            wb[u] = *reinterpret_cast<const uint2*>(w1 + gi * 8u);
+                            xb[u] = *reinterpret_cast<const uint2*>(xp + gl * 8u);
+                            sa[u] = s0p[gi];
+                            sbv[u] = s1p[gi];
+                            xa[u] = xsa[gl];
+                            xbs[u] = xsb[gl];
+                        }
+                    }
+#pragma unroll
+                    for (int u = 0; u < BRAIN_MGR_UNROLL; ++u) {
+                        const unsigned int gi = sb + blk4 * BRAIN_MGR_UNROLL + u;
+                        if (gi < ng) {
+                            const unsigned int a[4] = {wa[u].x, wb[u].x, wa[u].y, wb[u].y};
+                            unsigned int d[4];
+                            brain_mma_s8(d, a, xb[u].x, xb[u].y);
+                            const int l = blk4 * BRAIN_MGR_UNROLL + u;
+                            acc[l][0] = __fadd_rn(acc[l][0], __fmul_rn(__fsub_rn(__uint_as_float(d[0]), FLOAT_BIAS), __fmul_rn(sa[u], xa[u])));
+                            acc[l][1] = __fadd_rn(acc[l][1], __fmul_rn(__fsub_rn(__uint_as_float(d[1]), FLOAT_BIAS), __fmul_rn(sa[u], xbs[u])));
+                            acc[l][2] = __fadd_rn(acc[l][2], __fmul_rn(__fsub_rn(__uint_as_float(d[2]), FLOAT_BIAS), __fmul_rn(sbv[u], xa[u])));
+                            acc[l][3] = __fadd_rn(acc[l][3], __fmul_rn(__fsub_rn(__uint_as_float(d[3]), FLOAT_BIAS), __fmul_rn(sbv[u], xbs[u])));
+                        }
+                    }
+                }
+                __syncwarp();  // this buffer is refilled two chunks on
+            }
+            float total4[4];
+#pragma unroll
+            for (int i = 0; i < 4; ++i) {
+                float s = 0.0f;
+#pragma unroll
+                for (int l = 0; l < BRAIN_MG_LANES; ++l) { s = __fadd_rn(s, acc[l][i]); }
+                total4[i] = s;
+            }
+#pragma unroll
+            for (int j = 0; j < 2; ++j) {
+                const unsigned int s = 2u * tq + j;
+                if (s < cnt) {
+                    float* o = out + static_cast<unsigned long long>(perm[first + s]) * n;
+                    if (ok0) { o[col0] = total4[j]; }
+                    if (ok1) { o[col1] = total4[2 + j]; }
+                }
+            }
+        }
+        t = seg_end;
+    }
+}
+
+__device__ __forceinline__ void brain_moe_grouped_runs_any(const unsigned int* params, const unsigned int* xq, const float* sx,
+                                                           const unsigned int* tab, const unsigned int* perm,
+                                                           const unsigned int* wq, const float* sw, float* out) {
+    // A buffer's rows all start on 16 bytes when the buffer does and a row is a whole number of 4-word vectors (`kg`
+    // is a multiple of 8 for every dispatch served).
+    const bool w16 = (reinterpret_cast<unsigned long long>(wq) & 15ull) == 0ull;
+    const bool x16 = (reinterpret_cast<unsigned long long>(xq) & 15ull) == 0ull;
+    if (w16) {
+        if (x16) { brain_moe_grouped_runs<true, true>(params, xq, sx, tab, perm, wq, sw, out); }
+        else { brain_moe_grouped_runs<true, false>(params, xq, sx, tab, perm, wq, sw, out); }
+    } else {
+        if (x16) { brain_moe_grouped_runs<false, true>(params, xq, sx, tab, perm, wq, sw, out); }
+        else { brain_moe_grouped_runs<false, false>(params, xq, sx, tab, perm, wq, sw, out); }
+    }
+}
+
+// One entry per registration: a native kernel's launch configuration (here its dynamic shared memory) is fixed by
+// the first registration of its name (knowledge 412).
+extern "C" __global__ void __launch_bounds__(BRAIN_MG_THREADS, 4)
+brain_moe_i8_grouped_mma_runs(const unsigned int* params, const unsigned int* xq, const float* sx,
+                              const unsigned int* tab, const unsigned int* perm,
+                              const unsigned int* wq, const float* sw, float* out) {
+    brain_moe_grouped_runs_any(params, xq, sx, tab, perm, wq, sw, out);
+}
+
+extern "C" __global__ void __launch_bounds__(BRAIN_MG_THREADS, 4)
+brain_moe_i8_grouped_mma_runs_k512(const unsigned int* params, const unsigned int* xq, const float* sx,
+                                   const unsigned int* tab, const unsigned int* perm,
+                                   const unsigned int* wq, const float* sw, float* out) {
+    brain_moe_grouped_runs_any(params, xq, sx, tab, perm, wq, sw, out);
+}

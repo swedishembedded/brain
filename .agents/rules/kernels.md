@@ -374,6 +374,12 @@ existing caller. Assume nothing about units.
     copied both halves out, normed and rotated the query in two passes, and ran the gate through a decode-regime kernel (506 + 435 us at 4096 rows, 22-45 % of the byte roof). One
     pass that normalises, rotates and writes the query (the gate stays) and one that reads the gate in place and writes E4M3 rows are 104 + 71 us (knowledge 402). Reproduce a reduction
     order exactly by giving the fused kernel the same lane map as the chain (`rmsnorm_rows`' 64 lanes), and hold it to the chain bit for bit.
+30. **Staging weights in shared memory pays only if the staging copies are in flight together.** The int8 grouped expert GEMM read an expert's rows once per 8-slot tile; a variant that
+    staged 32 rows of all of K once for a run of 8 tiles ran SLOWER (3.3 against 2.8 ms on the 35B-A3B's 4096-row gate) because each thread copied ~64 words in a load-then-store
+    loop, a memory latency per word (ncu: long scoreboard 3x the issued cycles). The same staging as `cp.async` copies issued together and waited for once, with the activations
+    double-buffered the same way: 2.55 / 2.63 ms against 2.78 / 2.81 ms (gate, down), bit-identical. What is left is occupancy, not bytes: the WGSL tier's 16 lane accumulators
+    per output are 64 registers a thread for four outputs, so 3-4 blocks of 4 warps an SM, 12-18 % occupancy, DRAM at 4 %. The next form spends a register-light accumulation
+    (and so a tolerance gate, item 10), not more staging.
 
 ## D. Constraints that will bite you
 

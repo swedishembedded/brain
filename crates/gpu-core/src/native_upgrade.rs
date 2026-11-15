@@ -560,6 +560,18 @@ fn serves_moe_i8_grouped(p: &[u32]) -> bool {
     }
 }
 
+/// Whether a `moe_i8_grouped` dispatch is a round dense enough for the staged runs and narrow enough for a
+/// registration sized for `kg_max`: at least two full tiles an expert on average (the host sizes `tiles` as `ne` plus
+/// the slots' full tiles), so a run of an expert's tiles shares its staged rows. A decode step (a slot or two an expert)
+/// keeps `moe_i8_grouped_mma`, which reads each row once per tile and stages nothing.
+fn serves_moe_i8_grouped_runs<const KG_MAX: u32>(p: &[u32]) -> bool {
+    serves_moe_i8_grouped(p) && matches!(p, [tiles, kg, _, _, ne, ..] if *kg <= KG_MAX && tiles.saturating_sub(*ne) >= 2 * *ne)
+}
+
+const fn moe_grouped_runs_launch(kg_max: u32) -> CudaLaunch {
+    CudaLaunch { dynamic_shared_bytes: kernels_cuda::moe_grouped_runs_shared_bytes(kg_max), shared_opt_in: true, ..CudaLaunch::NONE }
+}
+
 /// The dense conv family's bindings (`conv2d.wgsl`, `conv2d_dx.wgsl`): params,
 /// two read operands, the written output.
 const CONV2D_BINDINGS: &[BindKind] = &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageReadWrite];
@@ -2159,6 +2171,30 @@ pub(crate) const ROWS: &[Row] = &[
         align_words: 1,
         input: Input::PACKED,
         launch: CudaLaunch::NONE,
+    },
+    // A prefill round: an expert's rows staged once for a run of its tiles. First, and the narrower registration
+    // first: `apply` takes the first row that serves.
+    Row {
+        slow: "moe_i8_grouped",
+        target: Target::Named("moe_i8_grouped_mma_runs_k512"),
+        bindings: MOE_I8_GROUPED_BINDINGS,
+        serves: serves_moe_i8_grouped_runs::<{ kernels_cuda::MOE_GROUPED_RUNS_KG[0] }>,
+        blocks: gemm_blocks,
+        requires_wgsl_upgrade: false,
+        align_words: 1,
+        input: Input::PACKED,
+        launch: moe_grouped_runs_launch(kernels_cuda::MOE_GROUPED_RUNS_KG[0]),
+    },
+    Row {
+        slow: "moe_i8_grouped",
+        target: Target::Named("moe_i8_grouped_mma_runs"),
+        bindings: MOE_I8_GROUPED_BINDINGS,
+        serves: serves_moe_i8_grouped_runs::<{ kernels_cuda::MOE_GROUPED_RUNS_KG[1] }>,
+        blocks: gemm_blocks,
+        requires_wgsl_upgrade: false,
+        align_words: 1,
+        input: Input::PACKED,
+        launch: moe_grouped_runs_launch(kernels_cuda::MOE_GROUPED_RUNS_KG[1]),
     },
     Row {
         slow: "moe_i8_grouped",
@@ -3820,13 +3856,16 @@ mod tests {
 
     #[test]
     fn the_grouped_moe_row_names_a_registry_entry_with_its_own_bindings() {
-        let row = ROWS.iter().find(|r| r.slow == "moe_i8_grouped").expect("the row");
-        let k = kernels_cuda::get("moe_i8_grouped_mma").expect("registry entry");
-        assert_eq!(row.target.resolve(kernels_cuda::MMA_S8_MIN_CC).map(|r| r.name), Some(k.name));
+        let rows: Vec<&Row> = ROWS.iter().filter(|r| r.slow == "moe_i8_grouped").collect();
+        let names: Vec<_> = rows.iter().map(|r| r.target.resolve(kernels_cuda::MMA_S8_MIN_CC).map(|k| k.name)).collect();
+        // The staged runs first (the narrower registration first), then the one-pass-a-tile kernel every other round takes.
+        assert_eq!(names, [Some("moe_i8_grouped_mma_runs_k512"), Some("moe_i8_grouped_mma_runs"), Some("moe_i8_grouped_mma")]);
         let declared = kernels::MOE_I8_GROUPED.lines().filter(|l| l.trim_start().starts_with("@group(")).count();
-        assert_eq!(declared, row.bindings.len());
-        // No WGSL sibling exists to upgrade to, so the row must not wait for one.
-        assert!(!row.requires_wgsl_upgrade);
+        for row in &rows {
+            assert_eq!(declared, row.bindings.len());
+            // No WGSL sibling exists to upgrade to, so the row must not wait for one.
+            assert!(!row.requires_wgsl_upgrade);
+        }
         assert!(serves_moe_i8_grouped(&[40, 512, 2048, 9, 257]));
         assert!(!serves_moe_i8_grouped(&[40, 516, 2048, 9, 257]), "K not a whole number of scale groups");
         assert!(!serves_moe_i8_grouped(&[40, 512, 2048]), "short params");

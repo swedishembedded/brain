@@ -121,6 +121,14 @@ fn the_native_kernel_is_selected_exactly_for_the_shapes_it_serves() {
     }
     assert_eq!(gpu.native_kernel_for(K_GROUPED, &[40, 512, 2048, 9, 257]), Some("moe_i8_grouped_mma"));
     assert_eq!(gpu.native_kernel_for(K_GROUPED, &[40, 516, 2048, 9, 257]), None, "K not a whole number of scale groups");
+    // A prefill round has many tiles of each expert: its weight rows are staged once and every tile of a run of the
+    // expert reads them there. The 35B-A3B's 4096-row round is 36864 slots over 257 experts, its gate/up K 2048 and its
+    // down K 512; a decode step of 64 rows (576 slots) keeps one pass of the weights per tile.
+    let dense = 257 + 36864 / MR;
+    assert_eq!(gpu.native_kernel_for(K_GROUPED, &[dense, 512, 512, 9, 257]), Some("moe_i8_grouped_mma_runs"));
+    assert_eq!(gpu.native_kernel_for(K_GROUPED, &[dense, 128, 2048, 1, 257]), Some("moe_i8_grouped_mma_runs_k512"));
+    assert_eq!(gpu.native_kernel_for(K_GROUPED, &[257 + 576 / MR, 512, 512, 9, 257]), Some("moe_i8_grouped_mma"));
+    assert_eq!(gpu.native_kernel_for(K_GROUPED, &[dense, 520, 512, 9, 257]), Some("moe_i8_grouped_mma"), "K past the staged rows' room");
     // The reference alias is deliberately not upgraded; it is what makes the
     // comparison a comparison.
     assert_eq!(gpu.native_kernel_for(K_REF, &[40, 512, 2048, 9, 257]), None);
@@ -154,6 +162,13 @@ fn the_native_kernel_is_byte_identical_to_the_wgsl_tier() {
         Case { slots: 1, k: 96, n: 1, xdiv: 1, ne: 1, skew: 0 },
         Case { slots: 8, k: 64, n: 17, xdiv: 1, ne: 2, skew: 100 },
         Case { slots: 64, k: 1056, n: 70, xdiv: 1, ne: 4, skew: 0 },
+        // Rounds dense enough for the staged runs: the real 4096-row gate/up and down, a hot expert beside thin
+        // ones, and experts of two or three tiles each, so runs span expert boundaries and end mid-expert.
+        Case { slots: 36864, k: 2048, n: 512, xdiv: 9, ne: 257, skew: 0 },
+        Case { slots: 36864, k: 512, n: 2048, xdiv: 1, ne: 257, skew: 0 },
+        Case { slots: 9000, k: 2048, n: 512, xdiv: 9, ne: 257, skew: 50 },
+        Case { slots: 1000, k: 544, n: 70, xdiv: 3, ne: 50, skew: 0 },
+        Case { slots: 333, k: 96, n: 33, xdiv: 1, ne: 7, skew: 10 },
     ];
     for (i, c) in cases.iter().enumerate() {
         let (got, want) = run(&gpu, c, 9000 + i as u64);

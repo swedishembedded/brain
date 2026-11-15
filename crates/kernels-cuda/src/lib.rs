@@ -216,6 +216,16 @@ pub const fn fp8_gemv_f16_dynamic_shared_bytes(at: u32, warps: u32, stages: u32)
 }
 /// Rows of x the widest dequantize-in-register streaming candidates (`matmul_i8_dq_stream_q*`) serve per launch.
 pub const I8_DQ_STREAM_WIDE_ROWS: u32 = 128;
+/// The widest `kg` (K / 4 words of a weight row) each `moe_i8_grouped_mma_runs*` registration stages: the 35B-A3B's
+/// down projection (K 512) and its gate and up (K 2048).
+pub const MOE_GROUPED_RUNS_KG: [u32; 2] = [128, 512];
+/// Dynamic shared memory per block of `moe_i8_grouped_mma_runs*` sized for `kg_max`: 32 staged weight rows at the
+/// kernel's widest stride (`kg_max + 8` words, `kg_max` a multiple of 32) and their group scales at `kg_max / 8 + 1`,
+/// rounded to 16 bytes, then each of the 4 warps' two activation buffers (8 rows of 136 words and 8 x 16 scales).
+pub const fn moe_grouped_runs_shared_bytes(kg_max: u32) -> u32 {
+    let staged = (32 * ((kg_max + 8) + (kg_max / 8 + 1)) + 3) & !3;
+    4 * (staged + 4 * 2 * (8 * 136 + 8 * 16))
+}
 /// The splits of K over a cluster the streaming candidate is registered at.
 pub const I8_STREAM_SPLITS: [u32; 4] = [1, 2, 4, 8];
 
@@ -2627,6 +2637,43 @@ pub const ALL: &[CudaKernel] = &[
         // One tile of the router's tables (8 slots of one expert) by 64 weight
         // rows per block (four warps of 16), tile-major.
         tile: (1, 64),
+        shared_bytes: 0,
+        programmatic: false,
+        src: include_str!("../cu/moe_i8_grouped_mma.cu"),
+    },
+    CudaKernel {
+        name: "moe_i8_grouped_mma_runs_k512",
+        // `moe_i8_grouped_mma` for a round whose experts hold several tiles each: a block stages 32 weight rows of
+        // an expert once and runs a run of up to 8 of its tiles on them, redirected to by name by
+        // `gpu_core::native_upgrade` for K <= 512 (shared memory sized by `moe_grouped_runs_shared_bytes`).
+        op: Op::MoeExpertLinear,
+        weight: Dtype::I8,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: MMA_S8_MIN_CC,
+        entry: "brain_moe_i8_grouped_mma_runs_k512",
+        what: "sparse-MoE int8 GEMM over a fused expert bank, runs of 8 tiles of one expert on 32 weight rows staged in shared memory once (K <= 512), int8 tensor cores (mma.sync m16n8k32); bit-identical to moe_i8_grouped",
+        reported: "native:moe_i8_grouped_mma_runs_k512",
+        block_dim: 128,
+        // A run of 8 tiles by 32 weight rows per block, run-major.
+        tile: (8, 32),
+        shared_bytes: 0,
+        programmatic: false,
+        src: include_str!("../cu/moe_i8_grouped_mma.cu"),
+    },
+    CudaKernel {
+        name: "moe_i8_grouped_mma_runs",
+        // `moe_i8_grouped_mma_runs_k512` with room for K <= 2048.
+        op: Op::MoeExpertLinear,
+        weight: Dtype::I8,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: MMA_S8_MIN_CC,
+        entry: "brain_moe_i8_grouped_mma_runs",
+        what: "sparse-MoE int8 GEMM over a fused expert bank, runs of 8 tiles of one expert on 32 weight rows staged in shared memory once (K <= 2048), int8 tensor cores (mma.sync m16n8k32); bit-identical to moe_i8_grouped",
+        reported: "native:moe_i8_grouped_mma_runs",
+        block_dim: 128,
+        tile: (8, 32),
         shared_bytes: 0,
         programmatic: false,
         src: include_str!("../cu/moe_i8_grouped_mma.cu"),

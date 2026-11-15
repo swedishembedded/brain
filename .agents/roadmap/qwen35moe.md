@@ -275,11 +275,13 @@ intervals between the first and the last `moe_i8_grouped_mma` of a 16K prefill (
 | 1. no allocation, free or wait inside a round | 4265 | 4249 | 93.2 % | 5.67 / 16.59 / 40.87 |
 | 2. 4096-row rounds on tensor cores | 6242 | 6255 | 98.8 % | 5.67 / 16.62 / 40.38 |
 | 3. the dense engine's GDN segment kernels | 11087 | 11055 | ~100 % (device-timed) | 4.53 / 12.63 / 29.67 (*) |
+| 4. the expert GEMM on staged runs | 11786 | 11622 | ~100 % (device-timed) | 4.55 / 12.64 / 29.66 |
 
 (*) Step 3's tree includes the shared fused GQA decode attention landed beside it (knowledge 469); none of this
-lane's changes is on the decode path. nsys stopped recording CUDA activity on the node for step 3 ("No CUDA events
-collected", also on runs that recorded before), so its busy figure is the engine's own: 1503 ms of device time a
-16K prefill pass (`qwen35moe_decode_profile`, kernel timing on) against 1488 ms of wall time.
+lane's changes is on the decode path. nsys stopped recording CUDA activity on the node from step 3 on ("No CUDA events
+collected", the base binary included), so the later busy figure is the engine's own (`qwen35moe_decode_profile`,
+kernel timing on, `BRAIN_DEVICE=gpu3`): step 4's 16K prefill pass is 1425.3 ms of device time in 1425.9 ms of wall
+time.
 
 - [x] Step 1: a round's per-layer `poll_wait` (2514 `cuStreamSynchronize`, 1.63 s of host time over a 16K prompt)
   is owed only where submissions are not ordered (`qwen35`'s rule); the `Ops` handle holds its freed blocks (10.1K
@@ -287,19 +289,30 @@ collected", also on runs that recorded before), so its busy figure is the engine
   each layer is one pass (one parameter upload). Gate: `tests/it/prefill_round_census.rs` (no `cuMemAlloc` and one
   host wait, the hidden-state read, per steady-state prefill; `CallTotals::host_waits`).
 - [x] Step 2: the round size is the dense engine's policy (`model::serve::prefill_round_rows_for`, 4096 rows on
-  tensor cores, 256 elsewhere), moved to `model::serve` and taken by both engines. Swept first on the 16K prompt
-  (`qwen35moe_decode_profile`, kernel timing on): 256 / 1024 / 2048 / 4096 rows 1991 / 3038 / 5850 / 6234 tok/s. The
+  tensor cores, 256 elsewhere), moved to `model::serve` and taken by both engines. Swept on the 16K prompt on the
+  step-4 tree (`qwen35moe_decode_profile`, production passes, gpu3): 256 / 1024 / 2048 / 4096 / 8192 rows 6256 / 9476 /
+  10790 / 11486 / 11452 tok/s, activation peaks 0.23 / 0.65 / 1.20 / 2.19 / 4.15 GiB: 4096 is the knee. The
   activation charge was a seventh of what a round allocates (knowledge 470) and is now measured: 4.39 GiB charged
   against a 3.42 GiB peak at 4096 rows.
 - [x] Step 3: the round's Gated-DeltaNet layers run `model::gdn_segments` (convolution, chunk prep, warpgroup
   recurrence, gated norm: one launch each) on the sequence's state row, as the dense serving rounds do; the model
   measures the prefill form at placement and opts in to the tensor-core GDN kernels (knowledge 473). The GDN share of
-  a 16K prefill 1.1 s -> 0.08 s. Gate: `chunked_prefill::a_round_on_the_segment_kernels_leaves_the_state_a_token_
+  a 16K prefill 1.1 s -> 0.07 s (gpu3, the four segment kernels). Gate: `chunked_prefill::a_round_on_the_segment_kernels_leaves_the_state_a_token_
   replay_leaves` (3.8e-7 against the replay; a round leaving half its rows to no kernel reads 1.2e-3).
   On the real checkpoint (`fast_path_parity_real`, which ran no reference child since the crate's tests became one
   binary: its `--exact` name lacked the module path) the bf16 form moves prompts 0-2 from bit-equal to the portable
   reference to 3.7-4.5e-2 prefill-hidden rel-L2 and 2.2-2.5e-2 decode top-k logit rel-L2, with 0 clear flips and 2
   near-tie flips over 3 x 24 steps: the size knowledge 456 gives for two int8 paths parting once a code flips. Prompt
   3 fails the gate's floor before (5.06e-2) and after (5.54e-2), the open item above.
-- [ ] Step 4: `moe_i8_grouped_mma` (1.07 s of a 1.50 s 16K prefill, 71 % of device time): an 8-slot tile re-reads
-  the expert's weights per tile.
+- [x] Step 4 (first form): a round with at least two tiles an expert takes `moe_i8_grouped_mma_runs` /
+  `_runs_k512` (`gpu_core::native_upgrade`, selected by the dispatch's tiles per expert and K): a block stages 32 rows
+  of an expert by `cp.async` once for a run of 8 of its tiles and double-buffers each warp's activations; bit-identical
+  to the WGSL tier (`gpu-core` `moe_i8_grouped_native`, the real 4096-row gate/up/down among its cases). ncu on that
+  binary (gpu3, the 4096-row gate / down): 2.78 / 2.81 ms -> 2.55 / 2.63 ms. A decode step keeps `moe_i8_grouped_mma`.
+- [ ] The expert GEMM is still 70 % of a 16K prefill (991 ms of 1425, gpu3) and latency-bound at 12-18 % occupancy:
+  the WGSL tier's 16 lane accumulators per output cost 64 registers a thread (kernels.md F item 30). The next form is a
+  register-light accumulation (several 8-slot tiles a warp sharing each weight fragment) under a tolerance gate
+  (kernels.md F item 10), and tuner coverage of the MoE GEMM candidates (`MOE_GROUPED_MIN_ROWS` and the runs threshold
+  are fixed choices today).
+- [ ] What else a 16K prefill spends (gpu3, step 4): `matmul_i8_dq_wgmma` ~140 ms, `moe_swiglu_quant` ~50 ms, the
+  flash prefill ~34 ms, `moe_slot_combine` ~24 ms, the f32 router GEMM ~14 ms, the GDN kernels ~80 ms together.
