@@ -37,7 +37,7 @@ const BATCH: usize = 32;
 const RESERVE: u64 = 2 << 30;
 
 fn devices() -> Vec<(Device, u64)> {
-    qwen35::int8_gguf_resident::budgeted_gpus(&gpu_core::devices::ambient_compute_set().gpus, RESERVE)
+    qwen35::int8_gguf_resident::budgeted_gpus(&gpu_core::select_compute_from_args(&std::env::args().collect::<Vec<_>>()).unwrap_or_else(|e| panic!("{e}")).gpus, RESERVE)
 }
 
 /// Greedy tokens per second of `adapters.len()` requests (`None`: base) run as
@@ -64,7 +64,7 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let grouped = args.iter().any(|a| a == "--grouped");
     let (Some(gguf), Some(adapter_path)) = (args.get(1).cloned(), args.get(2).cloned()) else {
-        eprintln!("usage: qwen35_adapter_serve_check <Q8_0.gguf> <adapter.safetensors> [--grouped]");
+        eprintln!("usage: qwen35_adapter_serve_check <Q8_0.gguf> <adapter.safetensors> [--grouped] [--device SPEC] [--backend NAME]");
         std::process::exit(2);
     };
     let devices = devices();

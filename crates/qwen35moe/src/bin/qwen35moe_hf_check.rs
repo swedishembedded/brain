@@ -38,6 +38,8 @@ fn argmax(row: &[f32]) -> usize {
 }
 
 fn main() {
+    // `--device`/`--backend` (or `BRAIN_DEVICE`/`BRAIN_BACKEND`): the one card every handle below opens.
+    gpu_core::select_single_device_from_args(&std::env::args().collect::<Vec<_>>()).unwrap_or_else(|e| panic!("{e}"));
     let (Some(hf_dir), Some(gguf)) = (flag("--hf-dir"), flag("--gguf")) else {
         eprintln!("usage: qwen35moe_hf_check --hf-dir DIR --gguf FILE [--layers N] [--text \"...\"]");
         std::process::exit(2);

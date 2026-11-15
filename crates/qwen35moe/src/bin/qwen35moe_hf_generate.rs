@@ -29,6 +29,8 @@ fn flag(name: &str) -> Option<String> {
 }
 
 fn main() {
+    // `--device`/`--backend` (or `BRAIN_DEVICE`/`BRAIN_BACKEND`): the one card every handle below opens.
+    gpu_core::select_single_device_from_args(&std::env::args().collect::<Vec<_>>()).unwrap_or_else(|e| panic!("{e}"));
     let Some(hf_dir) = flag("--hf-dir") else {
         eprintln!("usage: qwen35moe_hf_generate --hf-dir DIR [--prompt TEXT] [--chat] [--max-new N] [--layers N] [--ctx N]");
         std::process::exit(2);

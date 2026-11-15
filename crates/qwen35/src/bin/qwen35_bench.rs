@@ -407,6 +407,8 @@ fn banner(gpu: &Gpu) -> Option<Roofs> {
 }
 
 fn main() {
+    // `--device`/`--backend` (or `BRAIN_DEVICE`/`BRAIN_BACKEND`): the one card every handle below opens.
+    gpu_core::select_single_device_from_args(&std::env::args().collect::<Vec<_>>()).unwrap_or_else(|e| panic!("{e}"));
     let a: Vec<String> = std::env::args().collect();
     let mode = a.get(1).map(|s| s.as_str()).unwrap_or("all");
     let t: u32 = a.get(2).and_then(|s| s.parse().ok()).unwrap_or(128);

@@ -32,10 +32,10 @@ fn main() {
     let rounds: u32 = a.get(3).and_then(|s| s.parse().ok()).unwrap_or(6);
 
     let Some(path) = a.get(1).filter(|s| s.ends_with(".gguf") || std::path::Path::new(s).is_file()).cloned() else {
-        eprintln!("usage: qwen35_chunk_round_profile <path to Qwen3.8-27B*.gguf> [rows] [rounds]");
+        eprintln!("usage: qwen35_chunk_round_profile <path to Qwen3.8-27B*.gguf> [rows] [rounds] [--device SPEC] [--backend NAME]");
         std::process::exit(2);
     };
-    let devices = qwen35::int8_gguf_resident::budgeted_gpus(&gpu_core::devices::ambient_compute_set().gpus, RESERVE);
+    let devices = qwen35::int8_gguf_resident::budgeted_gpus(&gpu_core::select_compute_from_args(&std::env::args().collect::<Vec<_>>()).unwrap_or_else(|e| panic!("{e}")).gpus, RESERVE);
     if devices.is_empty() {
         eprintln!("no GPU with queryable VRAM - this resident is GPU-only");
         std::process::exit(2);

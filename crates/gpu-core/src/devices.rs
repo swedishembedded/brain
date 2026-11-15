@@ -1456,6 +1456,72 @@ pub fn select_compute(device: &str, backend: Option<&str>) -> Result<ComputeSet,
     Ok(set)
 }
 
+/// The `--device` and `--backend` values among a program's arguments (`--flag value` or `--flag=value`): what a
+/// profiling or check binary passes to [`select_compute_from_args`]. A flag with no value, or given twice, is refused
+/// rather than read as absent.
+pub fn device_flags(args: &[String]) -> Result<(Option<String>, Option<String>), String> {
+    let mut found: [Option<String>; 2] = [None, None];
+    let mut i = 0;
+    while i < args.len() {
+        for (slot, name) in ["--device", "--backend"].iter().enumerate() {
+            let value = if args[i] == *name {
+                i += 1;
+                match args.get(i) {
+                    Some(v) if !v.starts_with("--") => Some(v.clone()),
+                    _ => return Err(format!("{name} needs a value")),
+                }
+            } else {
+                args[i].strip_prefix(name).and_then(|rest| rest.strip_prefix('=')).map(str::to_string)
+            };
+            if let Some(v) = value {
+                if found[slot].replace(v).is_some() {
+                    return Err(format!("{name} given twice"));
+                }
+                break;
+            }
+        }
+        i += 1;
+    }
+    let [device, backend] = found;
+    Ok((device, backend))
+}
+
+/// The compute set a program that is not the CLI (a profiling or check binary) runs on: its `--device` and `--backend`
+/// flags in the CLI's grammar, resolved and published by [`select_compute`], or with neither flag the ambient set
+/// (`BRAIN_DEVICE`/`BRAIN_BACKEND`). A tool that took no device flags silently ran wherever the ambient set put it, a
+/// card another process owned included.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn select_compute_from_args(args: &[String]) -> Result<ComputeSet, String> {
+    match device_flags(args)? {
+        (None, None) => Ok(ambient_compute_set().clone()),
+        (device, backend) => select_compute(device.as_deref().unwrap_or("gpu"), backend.as_deref()),
+    }
+}
+
+/// The one card a selection names, `None` when it names none (a CPU or software run), and an error naming the cards
+/// when it names several: a tool that builds one device does not pick one of them for the caller.
+fn single_card(set: &ComputeSet) -> Result<Option<u32>, String> {
+    match set.gpus[..] {
+        [] => Ok(None),
+        [one] => Ok(Some(one)),
+        ref many => Err(format!(
+            "this tool runs on one card and the selection is gpus {}: pass --device gpuN",
+            many.iter().map(u32::to_string).collect::<Vec<_>>().join(", ")
+        )),
+    }
+}
+
+/// [`select_compute_from_args`] for a program that builds ONE device: the selection must be one card (or none), which
+/// becomes the ambient pin, so every `Gpu::new` after this lands on it. Returns the set.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn select_single_device_from_args(args: &[String]) -> Result<ComputeSet, String> {
+    let set = select_compute_from_args(args)?;
+    if let Some(card) = single_card(&set)? {
+        set_ambient_gpu(Some(card));
+    }
+    Ok(set)
+}
+
 /// The backend a library caller asked for with [`request_backend`], if any.
 #[cfg(not(target_arch = "wasm32"))]
 static REQUESTED_BACKEND: std::sync::Mutex<Option<Backend>> = std::sync::Mutex::new(None);
@@ -1577,6 +1643,33 @@ impl fmt::Display for ComputeSet {
 
 #[cfg(test)]
 mod tests {
+
+    fn args(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a_tool_reads_device_and_backend_in_either_flag_form() {
+        assert_eq!(device_flags(&args(&["8", "--device", "gpu3", "--backend=cuda"])).unwrap(), (Some("gpu3".into()), Some("cuda".into())));
+        assert_eq!(device_flags(&args(&["--device=gpu1,gpu2"])).unwrap(), (Some("gpu1,gpu2".into()), None));
+        assert_eq!(device_flags(&args(&["--layers", "8"])).unwrap(), (None, None));
+    }
+
+    #[test]
+    fn a_device_flag_without_a_value_or_given_twice_is_refused() {
+        assert!(device_flags(&args(&["--device"])).unwrap_err().contains("--device"));
+        assert!(device_flags(&args(&["--device", "--backend", "cuda"])).unwrap_err().contains("--device"));
+        assert!(device_flags(&args(&["--device", "gpu0", "--device=gpu3"])).unwrap_err().contains("twice"));
+    }
+
+    #[test]
+    fn a_single_card_tool_refuses_a_selection_of_several_cards() {
+        let set = |gpus: Vec<u32>| ComputeSet { gpus, cpu_cores: vec![], npus: vec![], backend: Backend::Cpu, source: "gpu".into(), explicit: false, software: false };
+        assert_eq!(single_card(&set(vec![3])), Ok(Some(3)));
+        assert_eq!(single_card(&set(vec![])), Ok(None));
+        let err = single_card(&set(vec![0, 1, 2, 3])).unwrap_err();
+        assert!(err.contains("--device gpuN") && err.contains("0, 1, 2, 3"), "{err}");
+    }
 
     #[test]
     fn a_kernel_cpu_list_parses_to_its_cores() {

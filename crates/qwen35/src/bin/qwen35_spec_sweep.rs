@@ -27,7 +27,7 @@
 //!       [--ctx 4096] [--kv bf16] [--batches 1,8,16,32,64,128]
 //!       [--workload code|agent|both|random] [--new 128] [--dump FILE]
 //!       [--batch-limit N] [--raw-hidden] [--equivalence] [--temp T]
-//!       [--prefill-slice N] [--prefill-batch N] [--mix LEN:NEW,LEN:NEW,...] [--backend cuda|vulkan|wgpu]
+//!       [--prefill-slice N] [--prefill-batch N] [--mix LEN:NEW,LEN:NEW,...] [--device SPEC] [--backend cuda|vulkan|wgpu]
 //!
 //! `--equivalence` replaces the timing: for every workload and batch size it
 //! generates the same requests twice on the same scheduler, once with
@@ -81,8 +81,6 @@ struct Args {
     /// Greedy-decode this many long prompts (`--identity-prompts N,P`: N prompts of about P tokens)
     /// and write their tokens to `--dump`, to compare sliced against whole-prompt prefill.
     identity: Option<(usize, usize)>,
-    /// `--backend`: the compute backend to run on (default: the process default).
-    backend: Option<String>,
 }
 
 fn parse_args() -> Args {
@@ -109,7 +107,6 @@ fn parse_args() -> Args {
         mixed: false,
         mix: Vec::new(),
         identity: None,
-        backend: None,
     };
     while let Some(flag) = it.next() {
         let mut value = |name: &str| it.next().unwrap_or_else(|| panic!("{name} needs a value"));
@@ -134,7 +131,8 @@ fn parse_args() -> Args {
             "--equivalence" => a.equivalence = true,
             "--profile-verify" => a.profile_verify = true,
             "--kernel-table" => a.kernel_table = true,
-            "--backend" => a.backend = Some(value("--backend")),
+            // Read by `gpu_core::select_compute_from_args` in `main`.
+            "--device" | "--backend" => drop(value(&flag)),
             "--mixed" => a.mixed = true,
             "--mix" => {
                 a.mix = value("--mix")
@@ -160,7 +158,7 @@ fn parse_args() -> Args {
         }
     }
     if a.gguf.is_empty() {
-        eprintln!("usage: qwen35_spec_sweep <Qwen3.8-27B*.gguf> --speculative off|auto|mtp|ngram [--ctx N] [--kv f32|bf16|int8|fp8] [--batches a,b,c] [--workload code|agent|both|random] [--new N] [--dump FILE]");
+        eprintln!("usage: qwen35_spec_sweep <Qwen3.8-27B*.gguf> --speculative off|auto|mtp|ngram [--ctx N] [--kv f32|bf16|int8|fp8] [--batches a,b,c] [--workload code|agent|both|random] [--new N] [--dump FILE] [--device SPEC] [--backend NAME]");
         std::process::exit(2);
     }
     a
@@ -238,11 +236,8 @@ fn prompt_ids(tok: &data::qwen_tokenizer::QwenBpe, workload: &str, i: usize) -> 
 
 fn main() {
     let a = parse_args();
-    if let Some(backend) = &a.backend {
-        gpu_core::select_compute("gpu", Some(backend)).unwrap_or_else(|e| panic!("{e}"));
-    }
     let max_batch = *a.batches.iter().max().expect("a batch size");
-    let devices = qwen35::int8_gguf_resident::budgeted_gpus(&gpu_core::devices::ambient_compute_set().gpus, RESERVE);
+    let devices = qwen35::int8_gguf_resident::budgeted_gpus(&gpu_core::select_compute_from_args(&std::env::args().collect::<Vec<_>>()).unwrap_or_else(|e| panic!("{e}")).gpus, RESERVE);
     if devices.is_empty() {
         eprintln!("no GPU with queryable VRAM - this resident is GPU-only");
         std::process::exit(2);

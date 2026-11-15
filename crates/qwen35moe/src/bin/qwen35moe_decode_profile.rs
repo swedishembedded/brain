@@ -18,8 +18,11 @@
 //! weight-streaming roofline the pass is read against.
 //!
 //! Usage:
-//!   BRAIN_QWEN35MOE_GGUF=<Q8_0.gguf> qwen35moe_decode_profile [passes]
-//!   qwen35moe_decode_profile [passes] --hf-dir <release dir> [--layers N]
+//!   BRAIN_QWEN35MOE_GGUF=<Q8_0.gguf> qwen35moe_decode_profile [passes] [--device gpuN] [--backend NAME]
+//!   qwen35moe_decode_profile [passes] --hf-dir <release dir> [--layers N] [--device gpuN] [--backend NAME]
+//!
+//! `--device`/`--backend` take `brain serve`'s grammar (without them, `BRAIN_DEVICE`/`BRAIN_BACKEND`) and must name
+//! one card: the engine is built on it, and a selection of several cards is refused rather than narrowed to one.
 //!
 //! `--hf-dir` profiles a HuggingFace release (a ModelOpt FP8/NVFP4 export, bf16 safetensors) read where it lies,
 //! every tensor in its stored format; `--layers N` keeps only its first N layers (the embedding and head stay), to
@@ -52,6 +55,8 @@ fn flag(name: &str) -> Option<String> {
 }
 
 fn main() {
+    // `--device`/`--backend` (or `BRAIN_DEVICE`/`BRAIN_BACKEND`): the one card every handle below opens.
+    gpu_core::select_single_device_from_args(&std::env::args().collect::<Vec<_>>()).unwrap_or_else(|e| panic!("{e}"));
     let passes: u32 = std::env::args().nth(1).and_then(|s| s.parse().ok()).unwrap_or(8);
     let hf_dir = flag("--hf-dir");
     let path = std::env::var(gguf_load::GGUF_ENV).unwrap_or_default();
@@ -96,7 +101,8 @@ fn main() {
     };
     let mut engine = Engine::from_source(cfg.clone(), &*src, opts.clone());
     let chunk = engine.max_prefill_tokens();
-    println!("weight tier {}, kv {kv}, backend {}", tier.describe(), gpu_core::backend_name());
+    let card = gpu_core::devices::current_gpu().map_or_else(|| "no card".to_string(), |i| format!("gpu{i}"));
+    println!("weight tier {}, kv {kv}, backend {} on {card}", tier.describe(), gpu_core::backend_name());
     println!("cold load {:.1} s, KV pool + recurrent state {:.2} GiB", t0.elapsed().as_secs_f64(), engine.kv_pool_bytes() as f64 / (1u64 << 30) as f64);
 
     let resident = engine.gpu().memory_usage().map(|m| m.live);

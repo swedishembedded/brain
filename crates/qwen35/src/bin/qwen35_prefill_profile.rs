@@ -36,6 +36,8 @@ use qwen35::config::Qwen35Config;
 use qwen35::model::{pipelines, Qwen35};
 
 fn main() {
+    // `--device`/`--backend` (or `BRAIN_DEVICE`/`BRAIN_BACKEND`): the one card every handle below opens.
+    gpu_core::select_single_device_from_args(&std::env::args().collect::<Vec<_>>()).unwrap_or_else(|e| panic!("{e}"));
     let a: Vec<String> = std::env::args().collect();
     let prompt_len: u32 = a.get(1).and_then(|s| s.parse().ok()).unwrap_or(512);
     let chunk: u32 = a.get(2).and_then(|s| s.parse().ok()).unwrap_or(256);

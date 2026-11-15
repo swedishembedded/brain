@@ -76,12 +76,14 @@ fn parse_args() -> Args {
             "--e2e-new" => args.e2e_new = value("--e2e-new").parse().expect("--e2e-new N"),
             "--steps" => args.steps = value("--steps").parse().expect("--steps N"),
             "--batches" => args.batches = value("--batches").split(',').map(|s| s.trim().parse().expect("--batches a,b,c")).collect(),
+            // Read by `gpu_core::select_compute_from_args` in `main`.
+            "--device" | "--backend" => drop(value(&flag)),
             other if !other.starts_with("--") && args.gguf.is_empty() => args.gguf = other.to_string(),
             other => panic!("unknown argument {other}"),
         }
     }
     if args.gguf.is_empty() || args.batches.is_empty() {
-        eprintln!("usage: qwen35_batch_sweep <Qwen3.8-27B*.gguf> [--ctx N] [--kv f32|bf16|int8|fp8] [--prompt-tokens N] [--steps N] [--batches a,b,c] [--sampled]");
+        eprintln!("usage: qwen35_batch_sweep <Qwen3.8-27B*.gguf> [--ctx N] [--kv f32|bf16|int8|fp8] [--prompt-tokens N] [--steps N] [--batches a,b,c] [--sampled] [--device SPEC] [--backend NAME]");
         std::process::exit(2);
     }
     args
@@ -95,7 +97,7 @@ fn main() {
     let args = parse_args();
     let max_batch = args.batches.iter().chain(&args.e2e).copied().max().expect("non-empty");
     assert!(args.prompt_tokens as u64 + (args.steps as u64).max(args.e2e_new as u64) + 2 <= args.ctx as u64, "prompt + steps must fit --ctx");
-    let devices = qwen35::int8_gguf_resident::budgeted_gpus(&gpu_core::devices::ambient_compute_set().gpus, RESERVE);
+    let devices = qwen35::int8_gguf_resident::budgeted_gpus(&gpu_core::select_compute_from_args(&std::env::args().collect::<Vec<_>>()).unwrap_or_else(|e| panic!("{e}")).gpus, RESERVE);
     if devices.is_empty() {
         eprintln!("no GPU with queryable VRAM - this resident is GPU-only");
         std::process::exit(2);
