@@ -19,7 +19,7 @@
 //! the whole-pass number should be read against.
 //!
 //! Usage:
-//!   qwen35_decode_profile <path to Qwen3.8-27B*.gguf> [steps] [json-out]
+//!   qwen35_decode_profile <Qwen3.8-27B checkpoint: a .gguf or an HF directory> [steps] [json-out]
 //!       [--device gpu0,gpu1] [--backend wgpu|vulkan|cuda] [--weight-format SPEC]
 //!
 //! `steps` defaults to 8 profiled decode passes per region. `--weight-format`
@@ -45,10 +45,15 @@
 
 use std::time::Instant;
 
-use checkpoint::gguf::MmapGguf;
-use qwen35::int8_gguf_resident::{layer_cost, resident_config, Qwen35GgufResident};
+use qwen35::int8_gguf_resident::{layer_cost, Qwen35GgufResident};
+use qwen35::resident_checkpoint::ResidentCheckpoint;
 use residency::multi::MultiDeviceResidentModel;
 use residency::{Device, ResidentModel};
+
+/// The resident configuration of the checkpoint at `path` (a GGUF file or an HF directory) at `cap` positions.
+fn config_at(path: &str, cap: u32) -> qwen35::Qwen35Config {
+    ResidentCheckpoint::open(path).and_then(|c| c.config(cap)).unwrap_or_else(|e| panic!("open the checkpoint {path}: {e}"))
+}
 
 /// `prompt + max_new` capacity to build the caches at - the same figure
 /// `tests/gguf_resident_real.rs` plans against, so the profile describes the
@@ -81,8 +86,8 @@ fn main() {
     let context: Option<u32> = flag("--context").map(|v| v.parse().unwrap_or_else(|_| panic!("--context takes a token count, got {v:?}")));
     let set = gpu_core::select_compute(flag("--device").as_deref().unwrap_or("gpu"), flag("--backend").as_deref()).unwrap_or_else(|e| panic!("{e}"));
 
-    let Some(path) = a.get(1).filter(|s| s.ends_with(".gguf") || std::path::Path::new(s).is_file()).cloned() else {
-        eprintln!("usage: qwen35_decode_profile <path to Qwen3.8-27B*.gguf> [steps] [json-out] [--kv f32|bf16|int8|fp8] [--weight-format int8|q4|...] [--batches 1,8,12] [--context N] [--kernels]");
+    let Some(path) = a.get(1).filter(|s| std::path::Path::new(s).exists()).cloned() else {
+        eprintln!("usage: qwen35_decode_profile <Qwen3.8-27B checkpoint: a .gguf or an HF directory> [steps] [json-out] [--kv f32|bf16|int8|fp8] [--weight-format int8|q4|...] [--batches 1,8,12] [--context N] [--kernels]");
         std::process::exit(2);
     };
     let devices = real_devices(&set.gpus);
@@ -103,11 +108,9 @@ fn main() {
         return synthetic_sweep(&path, devices, &tier, kv, context.unwrap_or(CAP), &batches.unwrap_or_else(|| vec![1]), steps, kernels);
     }
 
-    let mg = MmapGguf::open(&path).unwrap_or_else(|e| panic!("open the checkpoint: {e}"));
-    let cfg = resident_config(&mg, CAP).expect("resident_config");
+    let cfg = config_at(&path, CAP);
     let cost = layer_cost(&cfg, CAP, &tier, model::kv_tier::KvTier::F32, 1);
     let weight_bytes = cost.total();
-    drop(mg);
 
     let r = Qwen35GgufResident::new(path, devices.clone(), CAP, tier.clone());
     let placed: Vec<Device> = r.estimate_multi(&r.instance_key("generate", &capability::Invocation::new())).devices().collect();
@@ -175,7 +178,7 @@ fn main() {
 /// the head, read once for the whole batch. The per-sequence decode state is
 /// excluded - it scales with the batch and is not what batching amortises.
 fn weights_streamed_per_step(path: &str, context: u32, tier: &model::ops::TierPolicy) -> u64 {
-    let cfg = resident_config(&MmapGguf::open(path).expect("open the checkpoint"), context).expect("resident_config");
+    let cfg = config_at(path, context);
     let head = layer_cost(&cfg, context, tier, model::kv_tier::KvTier::F32, 1).head;
     head + cfg.layer_types().into_iter().map(|ty| cfg.layer_weight_bytes(ty, tier)).sum::<u64>()
 }
@@ -183,7 +186,7 @@ fn weights_streamed_per_step(path: &str, context: u32, tier: &model::ops::TierPo
 /// The head's resident bytes, the part of [`weights_streamed_per_step`] the
 /// separately-profiled head reads.
 fn head_bytes(path: &str, context: u32, tier: &model::ops::TierPolicy) -> u64 {
-    let cfg = resident_config(&MmapGguf::open(path).expect("open the checkpoint"), context).expect("resident_config");
+    let cfg = config_at(path, context);
     layer_cost(&cfg, context, tier, model::kv_tier::KvTier::F32, 1).head
 }
 
