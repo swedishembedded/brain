@@ -35,9 +35,10 @@ reporting is a `not-run` row.
 
 ## What is, and is not, in the tiers today
 
-- **Static tier.** `check/generated/book` is not clean on the tree: the book figure check reports existing
-  findings. `ci/static` runs every gate that is clean, listed in `ci/static/scripts`, and a gate rejoins the
-  tier when its findings are fixed. A required gate that is red from its first run gates nothing.
+- **Static tier.** `check/generated/book` is clean on the tree but stays out of the tier: a runner starts
+  without the worked-example cache (`build/book/`), and recomputing every worked example from cold takes more
+  than half an hour. Run it locally, where the cache holds; `ci/static` runs every other clean gate, listed in
+  `ci/static/scripts`.
 - **CPU unit tests.** They run over `CI_CPU_CRATES`, the crates whose tests are
   deterministic on the CPU backend with no model files and skip nothing; the
   whole workspace lane (`make test`) needs more disk and time than a hosted

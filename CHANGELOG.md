@@ -24,6 +24,9 @@ see CONTRIBUTING or AGENTS.md for the commit-message convention.
 - The HTTP surfaces speak HTTP/1.1 only
 - `BRAIN_OV_CACHE` is gone: the OpenVINO compiled-graph cache of the ASR encoders lives in this user's private scratch root (`<tmp>/brain-<uid>/openvino-cache`), never in a directory other users can write to
 - A `--runtime-dir` (and the default state directory) must be a directory only the serving user can enter: one others may read or write is refused, since it holds the log, the lock and the connection records
+- A chat request whose content brain would not read is refused with a 400 naming the part, instead of looking answered: a second audio clip, more images than the model's action declares, an Anthropic image given by URL, a media part without its payload, or an unknown part type (an OpenAI file, an Anthropic document). Model cards report `max_images_per_request` from the model's declared inputs and list audio among a chat model's input modalities when it takes a clip
+- A decoder that can only read back a top-k candidate list refuses sampling that reaches past the list (`top_p`, `min_p`, penalties, no `top_k` within it) with `RejectReason::InexactSampling`, instead of sampling a truncated distribution while reporting the requested one. Every served decoder reads the full row back, so served sampling is unchanged
+- `gpu_core::DeviceCaps` has a `workgroup_mem_opt_in_bytes` field: the shared memory one workgroup may use when its kernel opts in (CUDA's dynamic shared memory ceiling, the plain limit elsewhere). A struct literal that names every field needs it; the CUDA backend's `native_shared_optin_bytes` accessor is gone
 
 ### Added
 
@@ -39,6 +42,15 @@ see CONTRIBUTING or AGENTS.md for the commit-message convention.
 - Ripple-65B is served: `brain serve` lists `ricursiveAI/Ripple-65B-Preview`, its NVFP4 release and any local directory of that layout through the shared paths (the checkpoint's `tokenizer.json` and `chat_template.jinja`, reasoning and OpenAI tool calls in responses and streams, `--weight-format`, `--kv-cache`, `--sparse-attention`, `--ctx`, `--max-batch`), with the layers staged over the fewest selected cards that hold the memory plan and `brain ricursive generate`; `--speculative ngram` verifies prompt-lookup proposals in one batched step
 - A chat template's own variables reach it through `chat_template_kwargs`, a tool schema reaches it in the order the client wrote it, and a template that serializes a call's arguments (`arguments | tojson`) is given them as the object they encode
 - `brain serve --device software` serves models on the software Vulkan adapter (it budgets the host's RAM, which it left at zero)
+- `brain serve --worker-hosted FAMILY` serves a model family (`decision`, `lfm`, `qwen3`) from a supervised worker that is brain itself re-executed: a device call that never returns costs that worker, not the server. Groups, late joiners, adapters, multi-card models, metrics, demotion and promotion cross into the worker; `--worker-deadline-s` (900 by default) bounds its load and each job
+- `brain serve --exact-decode` for Qwen3: a decode row's tokens and log-probabilities do not depend on what else is in its batch (row-invariant kernels, consecutive exact groups, prefix reuse on prefill-chunk boundaries)
+- `/v1/videos` jobs survive a restart: each job's record is kept beside its clip under `--video-jobs-dir`, a finished job still answers by id and `Idempotency-Key`, and a job that was running is failed with the reason rather than rendered again; `--video-spool-gb` bounds the clips kept
+- Training storage is bounded: `--artifact-max-bytes`, `--artifact-store-max-bytes`, `--job-staging-max-bytes` and `--min-free-bytes` cap a publish, the artifact store, a job's staged inputs and the free disk work is admitted under; a publish claims its whole size before it copies
+- One admission contract for every queued job: a deadline (the caller's, or `--queue-deadline-ms`) after which it is answered with a timeout, and a served training workload that has waited `--train-max-wait-ms` gets the devices it can run on held for it until one drains
+- `/v1/models` cards carry `"support": "production"` or `"preview"`, the level the capability matrix gives the model's architecture
+- Streamed generations use bounded queues with backpressure: a slow reader holds the generation back, and a client that reads nothing for the stall deadline (30 s by default) has its generation cancelled with a timeout event
+- Every long-running action observes cancellation (declared with `ActionSpec::cancellable`, proved by one conformance harness): a disconnected or cancelled request stops at its next step, and concurrent requests for a model being fetched share one cancellable download
+- `gpu_core::with_backend(backend, f)` selects the backend for one thread's scope, and `gpu_core::selected_backend()` names the explicit choice; `set_default_backend` stays the CLI's process-wide choice
 
 ### Fixed
 
@@ -46,6 +58,9 @@ see CONTRIBUTING or AGENTS.md for the commit-message convention.
 - The `ricursive` registry row declares the training capabilities the capability matrix records (the architecture/matrix test was failing); a pulled draft model in the model dir is reported as loaded by the model it drafts for, not as an unservable family
 - A release that ships `chat_template.jinja` beside an older template inline in `tokenizer_config.json` is rendered with the file, as `transformers` does, and a pull fetches the file
 - The closing brace of a JSON tool call is no longer reported as a discarded tool-call tail on every call
+- FP8 decode on GPUs without bf16 tensor cores (Pascal, a Tesla P40) no longer decodes every FP8 weight to f32 on every step above two sequences, Pascal cubins cache global loads in L1, and the CUDA code generator reads an aligned storage vector in one access. Qwen3.8-27B-FP8 on two P40s: 990 to 174 ms a token at one sequence, 4.84 to 0.51 s a step at four
+- An in-process device wait past `--gpu-wait-s` quarantines the card before its caller is answered, so a caller acting on the error never sees the card healthy
+- A test binary's tests no longer change each other's backend: tests that set the process backend to the CPU moved every device built after them onto it, so bit-exact gates compared a CUDA build with a CPU one in the full run
 
 ### Security
 
