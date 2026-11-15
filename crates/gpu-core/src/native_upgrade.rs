@@ -694,25 +694,35 @@ const FLASH_DECODE_KV8_BINDINGS: &[BindKind] = &[
 const FLASH_DECODE_BINDINGS: &[BindKind] =
     &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageReadWrite];
 
-/// The chunk stages of the 8-bit decode kernels are dynamic shared memory, opted in.
-const FLASH_DECODE_KV8_LAUNCH: CudaLaunch =
-    CudaLaunch { dynamic_shared_bytes: kernels_cuda::FLASH_DECODE_KV8_DYNAMIC_SHARED_BYTES, shared_opt_in: true, ..CudaLaunch::NONE };
+/// The chunk stages of the 8-bit decode kernels are dynamic shared memory, opted in; their size follows the head width.
+const fn flash_decode_kv8_launch(hd: u32) -> CudaLaunch {
+    CudaLaunch { dynamic_shared_bytes: kernels_cuda::flash_decode_kv8_dynamic_shared_bytes(hd), shared_opt_in: true, ..CudaLaunch::NONE }
+}
 
-/// The ring of the bf16 decode kernel is dynamic shared memory, opted in.
-const FLASH_DECODE_BF16_LAUNCH: CudaLaunch =
-    CudaLaunch { dynamic_shared_bytes: kernels_cuda::FLASH_DECODE_BF16_DYNAMIC_SHARED_BYTES, shared_opt_in: true, ..CudaLaunch::NONE };
+/// The ring of the bf16 decode kernels is dynamic shared memory, opted in; its size follows the head width.
+const fn flash_decode_bf16_launch(hd: u32) -> CudaLaunch {
+    CudaLaunch { dynamic_shared_bytes: kernels_cuda::flash_decode_bf16_dynamic_shared_bytes(hd), shared_opt_in: true, ..CudaLaunch::NONE }
+}
 
-/// The query heads per kv head the native int8 decode kernel is compiled for
-/// (`BRAIN_GRP` in its registry entry).
-const FLASH_DECODE_GROUP: u32 = 6;
+/// The most query heads per kv head the tensor-core decode kernels take: the value product's 8 columns.
+const FLASH_DECODE_MAX_GROUP: u32 = 8;
 
-/// `[batch, n_heads, n_kv_heads, head_dim, group, block_size, max_bt,
-/// n_splits, tiles_per_split]` at head_dim 256 and the compiled group, with a
-/// grid the 32-bit block index covers.
-fn serves_flash_decode(p: &[u32]) -> bool {
-    matches!(p, [batch, heads, nkv, 256, FLASH_DECODE_GROUP, bs, bt, splits, per]
-        if *batch >= 1 && *nkv >= 1 && *heads == nkv * FLASH_DECODE_GROUP && *bs >= 1 && *bt >= 1 && *splits >= 1 && *per >= 1
+/// `[batch, n_heads, n_kv_heads, head_dim, group, block_size, max_bt, n_splits, tiles_per_split]` at head width `hd`
+/// and a group of at most [`FLASH_DECODE_MAX_GROUP`] (a runtime value of the 8-bit kernels), with a grid the 32-bit
+/// block index covers.
+fn serves_flash_decode_any_group(p: &[u32], hd: u32) -> bool {
+    matches!(p, [batch, heads, nkv, head_dim, group, bs, bt, splits, per]
+        if *head_dim == hd && (1..=FLASH_DECODE_MAX_GROUP).contains(group) && *batch >= 1 && *nkv >= 1 && *heads == nkv * group
+            && *bs >= 1 && *bt >= 1 && *splits >= 1 && *per >= 1
             && u64::from(*batch) * u64::from(*nkv) * u64::from(*splits) <= u64::from(u32::MAX))
+}
+
+fn serves_flash_decode_hd256(p: &[u32]) -> bool {
+    serves_flash_decode_any_group(p, 256)
+}
+
+fn serves_flash_decode_hd128(p: &[u32]) -> bool {
+    serves_flash_decode_any_group(p, 128)
 }
 
 /// One block per (sequence, kv head, key split).
@@ -1310,6 +1320,120 @@ pub(crate) const FP8_ROWS: &[Row] = &[
 /// what [`crate::native_tune`] times against it. Every row states the capability it needs through its registry
 /// entry's floor, so a device only ever sees the candidates it can run. `slow` names the kernel a handle must
 /// register for these rows to exist: the provider's reference kernel.
+/// Rows that serve EVERY compile-time specialisation of a templated WGSL kernel: `slow` is the kernel's registered name with
+/// its constants section (the `#GRP=..,HD=..` that `kernels::template::variant_name` adds) left out and any storage-tier
+/// suffix kept, so one row answers each specialisation a model registers ([`template_family`]); `serves` checks the
+/// dispatch's own uniform for the shapes the native kernel takes. The fused GQA decode attention is specialised per head
+/// width and group, and its native kernels per head width alone.
+pub(crate) const TEMPLATE_ROWS: &[Row] = &[
+    Row {
+        slow: "paged_flash_decode_gqa_hd256#kv=int8",
+        target: Target::Named("paged_flash_decode_gqa_hd256_kv8"),
+        bindings: FLASH_DECODE_KV8_BINDINGS,
+        serves: serves_flash_decode_hd256,
+        blocks: flash_decode_blocks,
+        requires_wgsl_upgrade: false,
+        align_words: 1,
+        input: Input::PACKED,
+        launch: flash_decode_kv8_launch(256),
+    },
+    Row {
+        slow: "paged_flash_decode_gqa_hd256#kv=fp8",
+        target: Target::Named("paged_flash_decode_gqa_hd256_kvfp8"),
+        bindings: FLASH_DECODE_KV8_BINDINGS,
+        serves: serves_flash_decode_hd256,
+        blocks: flash_decode_blocks,
+        requires_wgsl_upgrade: false,
+        align_words: 1,
+        input: Input::PACKED,
+        launch: flash_decode_kv8_launch(256),
+    },
+    Row {
+        slow: "paged_flash_decode_gqa_hd256#kv=int8",
+        target: Target::Named("paged_flash_decode_gqa_hd128_kv8"),
+        bindings: FLASH_DECODE_KV8_BINDINGS,
+        serves: serves_flash_decode_hd128,
+        blocks: flash_decode_blocks,
+        requires_wgsl_upgrade: false,
+        align_words: 1,
+        input: Input::PACKED,
+        launch: flash_decode_kv8_launch(128),
+    },
+    Row {
+        slow: "paged_flash_decode_gqa_hd256#kv=fp8",
+        target: Target::Named("paged_flash_decode_gqa_hd128_kvfp8"),
+        bindings: FLASH_DECODE_KV8_BINDINGS,
+        serves: serves_flash_decode_hd128,
+        blocks: flash_decode_blocks,
+        requires_wgsl_upgrade: false,
+        align_words: 1,
+        input: Input::PACKED,
+        launch: flash_decode_kv8_launch(128),
+    },
+    Row {
+        slow: "paged_flash_decode_gqa_hd256#kv=bf16",
+        target: Target::Named("paged_flash_decode_gqa_hd256_kvbf16"),
+        bindings: FLASH_DECODE_BINDINGS,
+        serves: serves_flash_decode_hd256,
+        blocks: flash_decode_blocks,
+        requires_wgsl_upgrade: false,
+        align_words: 1,
+        input: Input::PACKED,
+        launch: flash_decode_bf16_launch(256),
+    },
+    Row {
+        slow: "paged_flash_decode_gqa_hd256#kv=bf16",
+        target: Target::Named("paged_flash_decode_gqa_hd128_kvbf16"),
+        bindings: FLASH_DECODE_BINDINGS,
+        serves: serves_flash_decode_hd128,
+        blocks: flash_decode_blocks,
+        requires_wgsl_upgrade: false,
+        align_words: 1,
+        input: Input::PACKED,
+        launch: flash_decode_bf16_launch(128),
+    },
+    Row {
+        slow: "paged_flash_decode_gqa_hd256",
+        target: Target::Named("paged_flash_decode_gqa_hd256_f32"),
+        bindings: FLASH_DECODE_BINDINGS,
+        serves: serves_flash_decode_hd256,
+        blocks: flash_decode_blocks,
+        requires_wgsl_upgrade: false,
+        align_words: 1,
+        input: Input::PACKED,
+        launch: CudaLaunch::NONE,
+    },
+    Row {
+        slow: "paged_flash_decode_gqa_hd256",
+        target: Target::Named("paged_flash_decode_gqa_hd128_f32"),
+        bindings: FLASH_DECODE_BINDINGS,
+        serves: serves_flash_decode_hd128,
+        blocks: flash_decode_blocks,
+        requires_wgsl_upgrade: false,
+        align_words: 1,
+        input: Input::PACKED,
+        launch: CudaLaunch::NONE,
+    },
+];
+
+/// `name` without its constants section: the `#K=v,K=v` segment of upper-case keys `kernels::template::variant_name`
+/// appends, wherever it sits among the `#`-separated segments. A name with none is returned whole.
+pub(crate) fn template_family(name: &str) -> std::borrow::Cow<'_, str> {
+    let constants = |seg: &str| !seg.is_empty() && seg.split(',').all(|kv| kv.split_once('=').is_some_and(|(k, _)| !k.is_empty() && k.bytes().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == b'_')));
+    let mut segs = name.split('#');
+    let base = segs.next().unwrap_or_default();
+    let rest: Vec<&str> = segs.collect();
+    if !rest.iter().any(|seg| constants(seg)) {
+        return std::borrow::Cow::Borrowed(name);
+    }
+    let mut out = String::from(base);
+    for seg in rest.into_iter().filter(|seg| !constants(seg)) {
+        out.push('#');
+        out.push_str(seg);
+    }
+    std::borrow::Cow::Owned(out)
+}
+
 pub(crate) const PREFILL_ROWS: &[Row] = &[
     Row {
         slow: "matmul_i8_dyn",
@@ -1704,50 +1828,6 @@ pub(crate) const ROWS: &[Row] = &[
         align_words: 4,
         input: Input::PACKED,
         launch: CudaLaunch::NONE,
-    },
-    Row {
-        slow: "paged_flash_decode_gqa_hd256#GRP=6#kv=int8",
-        target: Target::Named("paged_flash_decode_gqa_hd256_kv8"),
-        bindings: FLASH_DECODE_KV8_BINDINGS,
-        serves: serves_flash_decode,
-        blocks: flash_decode_blocks,
-        requires_wgsl_upgrade: false,
-        align_words: 1,
-        input: Input::PACKED,
-        launch: FLASH_DECODE_KV8_LAUNCH,
-    },
-    Row {
-        slow: "paged_flash_decode_gqa_hd256#GRP=6",
-        target: Target::Named("paged_flash_decode_gqa_hd256_f32"),
-        bindings: FLASH_DECODE_BINDINGS,
-        serves: serves_flash_decode,
-        blocks: flash_decode_blocks,
-        requires_wgsl_upgrade: false,
-        align_words: 1,
-        input: Input::PACKED,
-        launch: CudaLaunch::NONE,
-    },
-    Row {
-        slow: "paged_flash_decode_gqa_hd256#GRP=6#kv=bf16",
-        target: Target::Named("paged_flash_decode_gqa_hd256_kvbf16"),
-        bindings: FLASH_DECODE_BINDINGS,
-        serves: serves_flash_decode,
-        blocks: flash_decode_blocks,
-        requires_wgsl_upgrade: false,
-        align_words: 1,
-        input: Input::PACKED,
-        launch: FLASH_DECODE_BF16_LAUNCH,
-    },
-    Row {
-        slow: "paged_flash_decode_gqa_hd256#GRP=6#kv=fp8",
-        target: Target::Named("paged_flash_decode_gqa_hd256_kvfp8"),
-        bindings: FLASH_DECODE_KV8_BINDINGS,
-        serves: serves_flash_decode,
-        blocks: flash_decode_blocks,
-        requires_wgsl_upgrade: false,
-        align_words: 1,
-        input: Input::PACKED,
-        launch: FLASH_DECODE_KV8_LAUNCH,
     },
     Row {
         slow: "paged_flash_decode_gqa_combine",
@@ -3477,6 +3557,8 @@ enum Virtual {
     No,
     Prefill,
     Fp8,
+    /// A [`TEMPLATE_ROWS`] row bound to the specialisation registered at this index.
+    Template(usize),
 }
 
 /// One resolved redirect for a handle.
@@ -3519,11 +3601,15 @@ pub(crate) fn resolve(
         .map(|row| (row, Virtual::No))
         .chain(PREFILL_ROWS.iter().filter(|_| prefill).map(|row| (row, Virtual::Prefill)))
         .chain(FP8_ROWS.iter().filter(|_| fp8 && !disabled()).map(|row| (row, Virtual::Fp8)))
+        .chain(TEMPLATE_ROWS.iter().filter(|_| !disabled()).flat_map(|row| {
+            names.iter().enumerate().filter(|(_, n)| template_family(n) == row.slow).map(move |(i, _)| (row, Virtual::Template(i)))
+        }))
         .filter_map(|(row, virtual_slot)| {
             let slow = match virtual_slot {
                 Virtual::No => names.iter().position(|n| n == row.slow)?,
                 Virtual::Prefill => PREFILL_KIND,
                 Virtual::Fp8 => FP8_KIND,
+                Virtual::Template(i) => i,
             };
             if row.requires_wgsl_upgrade {
                 wgsl_upgrades.iter().find(|a| a.slow == slow)?;
@@ -3539,7 +3625,7 @@ pub(crate) fn resolve(
                 launch: CudaLaunch { programmatic: k.programmatic, ..row.launch },
             })?;
             let slot = match virtual_slot {
-                Virtual::No => row.slow,
+                Virtual::No | Virtual::Template(_) => row.slow,
                 Virtual::Prefill => PREFILL_SLOT,
                 Virtual::Fp8 => FP8_SLOT,
             };
@@ -3830,5 +3916,30 @@ mod tests {
         // Large planes keep a block per run of one plane.
         assert_eq!(chan_window_blocks(&[8, 64, 32, 0, 64, 64], tile), 8 * 32 * 4);
         assert_eq!(concat2_blocks(&[8, 64, 128, 16, 16], tile), 8 * 192);
+    }
+
+    /// A templated kernel's native rows answer every specialisation of its constants, and only the storage tier they read: the
+    /// fused GQA decode at any head width and group maps to its tier's family, and the tier suffix is never dropped.
+    #[test]
+    fn template_rows_answer_every_specialisation_of_their_tier() {
+        let family = |n: &str| template_family(n).into_owned();
+        assert_eq!(family("paged_flash_decode_gqa_hd256#GRP=6"), "paged_flash_decode_gqa_hd256");
+        assert_eq!(family("paged_flash_decode_gqa_hd256#GRP=4,HD=128,HD4=32,HDS=7#kv=int8"), "paged_flash_decode_gqa_hd256#kv=int8");
+        assert_eq!(family("paged_flash_decode_gqa_hd256#GRP=2,HD=128,HD4=32,HDS=7#kv=bf16"), "paged_flash_decode_gqa_hd256#kv=bf16");
+        // Lower-case segments are storage rewrites, not constants, and a name without constants is its own family.
+        assert_eq!(family("paged_decode_scores_batched#pool_k=kvfp8"), "paged_decode_scores_batched#pool_k=kvfp8");
+        assert_eq!(family("matmul_i8_gemv"), "matmul_i8_gemv");
+        // Every template row names a registry entry and serves exactly one head width at groups 1 to 8.
+        for row in TEMPLATE_ROWS {
+            let Target::Named(name) = row.target else { panic!("{}: a template row names its entry", row.slow) };
+            assert!(kernels_cuda::get(name).is_some(), "{name} is a registry entry");
+            let hd = if name.contains("_hd128_") { 128 } else { 256 };
+            for group in 1..=8u32 {
+                let p = [16, 8 * group, 8, hd, group, 64, 512, 4, 8];
+                assert!((row.serves)(&p), "{name} serves group {group}");
+                assert!(!(row.serves)(&[16, 8 * group, 8, 384 - hd, group, 64, 512, 4, 8]), "{name} serves only head width {hd}");
+            }
+            assert!(!(row.serves)(&[16, 72, 8, hd, 9, 64, 512, 4, 8]), "{name}: a group past the value product's 8 columns");
+        }
     }
 }

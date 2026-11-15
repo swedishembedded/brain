@@ -5,17 +5,18 @@
 // card carries. If your team needs expertise in decode attention that runs at the memory roofline over a bf16 KV
 // cache, you can procure our services by sending an email to info@swedishembedded.com.
 //
-// Split-key fused GQA decode attention at head_dim 256 over a bf16 paged pool, on bf16 TENSOR CORES: the CUDA form of
-// the `kv=bf16` variant of `paged_flash_decode_gqa_hd256.wgsl` at GRP = BRAIN_GRP (at most 8), with its whole
+// Split-key fused GQA decode attention at head_dim HD = BRAIN_HD (128 or 256) over a bf16 paged pool, on bf16 TENSOR CORES:
+// the CUDA form of the `kv=bf16` variant of `paged_flash_decode_gqa_hd256.wgsl` at that head width and any GRP of at most 8
+// (a RUNTIME value: the products pad the group to 8 columns whatever it is), with its whole
 // contract - the same uniform, bindings, grid and partial records - so `paged_flash_decode_gqa_combine` merges
 // its output like any other decode kernel's.
 //
-//   params       : [batch, n_heads, n_kv_heads, head_dim (256), group (BRAIN_GRP), block_size, max_bt, n_splits,
+//   params       : [batch, n_heads, n_kv_heads, head_dim (HD), group (<= 8), block_size, max_bt, n_splits,
 //                   tiles_per_split] u32
-//   q            : [batch, n_heads * 256]                          f32
-//   pool_k/pool_v: [num_blocks * block_size, n_kv_heads * 256]     bf16 (element 2w the low half of word w)
+//   q            : [batch, n_heads * HD]                          f32
+//   pool_k/pool_v: [num_blocks * block_size, n_kv_heads * HD]     bf16 (element 2w the low half of word w)
 //   block_tables : [batch, max_bt] u32       seq_lens : [batch] u32 (live keys, the new token included)
-//   part         : [batch, n_heads, n_splits, 258] f32  the unnormalised output (256), the running max, the sum
+//   part         : [batch, n_heads, n_splits, HD + 2] f32  the unnormalised output (HD), the running max, the sum
 //
 // WHY. The TF32 form of this kernel (`paged_flash_decode_gqa_hd256_tf32.cu`) reads each bf16 element into a TF32
 // operand through registers and runs `m16n8k8` products at half the tensor rate: 224 us a layer at 8K keys x 16
@@ -24,8 +25,8 @@
 //
 // THE MAP (the 8-bit kernel's, with the operands swapped). One block per (sequence, kv head, key split), 4 warps; each
 // warp walks its own 16-key chunks with its own running softmax and the four warps merge once at the end. Per chunk:
-//   S^T[keys (16), heads (8, the group padded)] = K[keys, 256] . Q^T[256, heads]    16 k-steps, ONE product a step
-//   O^T[256, heads] += V^T[256, 16 keys] . P^T[16 keys, heads]                      16 channel tiles
+//   S^T[keys (16), heads (8, the group padded)] = K[keys, HD] . Q^T[HD, heads]      HD / 16 k-steps, ONE product a step
+//   O^T[HD, heads] += V^T[HD, 16 keys] . P^T[16 keys, heads]                        HD / 16 channel tiles
 // Keys are the rows of the first product, so the 6 heads of a group pad to 8 columns, not 16 rows: half the tensor
 // instructions of the 8-bit kernel's form. Its accumulator holds (key gid | gid + 8, heads 2 tig | 2 tig + 1), which is
 // the TRANSPOSE of the second product's B operand (key 2 tig .. | head gid); `movmatrix` turns one into the other in
@@ -36,7 +37,7 @@
 // lanes of a row read 64 contiguous bytes) and of its four value rows (piece p at bytes 128 p + 16 gid, so the eight
 // lanes of a row read 128 contiguous bytes).
 //
-// THE PIPELINE. A chunk's keys (8 KiB) and its values (8 KiB) are two units; a warp's ring holds BRAIN_DECODE_STAGES
+// THE PIPELINE. A chunk's keys (32 HD bytes) and its values (as many) are two units; a warp's ring holds BRAIN_DECODE_STAGES
 // of them, and the units after the one being computed are in flight by `cp.async` (the keys of chunk i + 1 while the
 // values of chunk i are consumed). A lane reads back the keys it copied itself and the values of its warp (the lanes copy for each other, see the value
 // fetch), so the only synchronisation is the warp's wait on its copies and a `__syncwarp`. Past the live keys a copy of size 0 zero-fills, so dead keys and values are
@@ -50,8 +51,8 @@
 //
 // No `__restrict__`: brain's device buffers alias by design.
 
-#ifndef BRAIN_GRP
-#define BRAIN_GRP 6
+#ifndef BRAIN_HD
+#define BRAIN_HD 256
 #endif
 // bf16 parts of the query and of the probabilities (1 to 3).
 #ifndef BRAIN_QP
@@ -60,7 +61,7 @@
 #ifndef BRAIN_PP
 #define BRAIN_PP 3
 #endif
-// Units (8 KiB each) in a warp's ring; blocks resident on a multiprocessor are bounded by it.
+// Units (UNIT_BYTES each) in a warp's ring; blocks resident on a multiprocessor are bounded by it.
 #ifndef BRAIN_DECODE_STAGES
 #define BRAIN_DECODE_STAGES 3
 #endif
@@ -68,14 +69,23 @@
 #define BRAIN_BLOCKS_PER_SM 2
 #endif
 
-#define HD 256
+#define HD BRAIN_HD
+static_assert(HD == 128 || HD == 256, "the fragment maps below are written for a head width of 128 or 256");
 #define TILE 128
 #define WARPS 4
 #define THREADS (WARPS * 32)
 #define CHUNK 16
 #define NEG_BIG (-3.4e38f)
-#define UNIT_BYTES 8192
 #define ROW_BYTES (HD * 2)
+// A unit is a chunk's 16 key (or value) rows: HD / 16 rows of 512 bytes of lane-interleaved 16-byte pieces.
+#define UNIT_BYTES (CHUNK * ROW_BYTES)
+// k-steps of the score product (16 channels each); 16-byte pieces a lane copies of each of its rows (4 lanes a row, 64
+// contiguous bytes a piece index); 64-channel groups of the value product (four channel tiles each).
+#define KSTEPS (HD / 16)
+#define PIECES (HD / 32)
+#define VGROUPS (HD / 64)
+// 1 / sqrt(HD), the score scale.
+#define SCORE_SCALE (HD == 256 ? 0.0625f : 0.08838834764831845f)
 
 // f32 -> nearest bf16 -> f32.
 __device__ __forceinline__ float brain_bf16_round(float x) {
@@ -140,17 +150,18 @@ extern "C" __global__ void __launch_bounds__(THREADS, BRAIN_BLOCKS_PER_SM) brain
     const unsigned int* params, const float* q, const unsigned char* pool_k, const unsigned char* pool_v, const unsigned int* block_tables,
     const unsigned int* seq_lens, float* part) {
     BRAIN_PDL_ENTRY();
-    const unsigned int batch = params[0], n_heads = params[1], n_kv = params[2], block_size = params[5], max_bt = params[6];
+    const unsigned int batch = params[0], n_heads = params[1], n_kv = params[2], group = params[4], block_size = params[5], max_bt = params[6];
     const unsigned int n_splits = params[7], tiles_per_split = params[8];
-    // The row is the fastest-varying part of the block index: the rows of one sequence in a speculative verify round are
+    // The kv head is the fastest-varying part of the block index, the row next: the kv heads of one key range read adjacent
+    // bytes of the same token slots at the same time, and the rows of one sequence in a speculative verify round are
     // consecutive and read the same keys, so their blocks run at the same time and the second read of a tile is served by the
     // L2 the first filled.
     const unsigned int wg = blockIdx.y * gridDim.x + blockIdx.x;
-    const unsigned int b = wg % batch;
-    const unsigned int wg2 = wg / batch;
-    const unsigned int s = wg2 % n_splits;
-    const unsigned int kvh = wg2 / n_splits;
-    if (kvh >= n_kv) { return; }  // block-uniform
+    const unsigned int kvh = wg % n_kv;
+    const unsigned int wg2 = wg / n_kv;
+    const unsigned int b = wg2 % batch;
+    const unsigned int s = wg2 / batch;
+    if (s >= n_splits) { return; }  // block-uniform
 
     const unsigned int tid = threadIdx.x, lane = tid & 31u, warp = tid >> 5;
     const unsigned int gid = lane >> 2, tig = lane & 3u;
@@ -158,19 +169,19 @@ extern "C" __global__ void __launch_bounds__(THREADS, BRAIN_BLOCKS_PER_SM) brain
 
     // The query as the first product's B fragments: [k-step][part][lane] -> (b0, b1), the bf16 pairs of head gid at
     // channels 32 (st / 2) + 8 tig + 4 (st mod 2) + 0 .. 1 and + 2 .. 3. Heads past the group are zero and never stored.
-    __shared__ uint2 qf[16 * BRAIN_QP][32];
+    __shared__ uint2 qf[KSTEPS * BRAIN_QP][32];
     __shared__ float red_m[WARPS][8], red_l[WARPS][8];
     // The key and value ring (BRAIN_DECODE_STAGES units a warp); after the loop the same bytes hold the merge of the four warps.
     extern __shared__ __align__(16) unsigned char ring[];
     float(*red_o)[8][HD] = reinterpret_cast<float(*)[8][HD]>(ring);
 
-    const float* qb = q + (static_cast<unsigned long long>(b) * n_heads + kvh * BRAIN_GRP) * HD;
-    for (unsigned int e = tid; e < 16u * 32u; e += THREADS) {
+    const float* qb = q + (static_cast<unsigned long long>(b) * n_heads + kvh * group) * HD;
+    for (unsigned int e = tid; e < KSTEPS * 32u; e += THREADS) {
         const unsigned int st = e >> 5, ln = e & 31u, g = ln >> 2, t = ln & 3u;
         unsigned int pa[BRAIN_QP], pb[BRAIN_QP];
 #pragma unroll
         for (int i = 0; i < BRAIN_QP; ++i) { pa[i] = pb[i] = 0u; }
-        if (g < BRAIN_GRP) {
+        if (g < group) {
             const float4 x = *reinterpret_cast<const float4*>(qb + g * HD + (st >> 1) * 32u + t * 8u + (st & 1u) * 4u);
             brain_split_bf16<BRAIN_QP>(x.x, x.y, pa);
             brain_split_bf16<BRAIN_QP>(x.z, x.w, pb);
@@ -187,9 +198,9 @@ extern "C" __global__ void __launch_bounds__(THREADS, BRAIN_BLOCKS_PER_SM) brain
 
     // O^T accumulators of channel tile t (p = t / 4, jj = t mod 4): rows gid and gid + 8 are channels 64 p + 8 gid + 2 jj
     // and + 1, columns the heads 2 tig and 2 tig + 1.
-    float o[16][4];
+    float o[4 * VGROUPS][4];
 #pragma unroll
-    for (int t = 0; t < 16; ++t) {
+    for (int t = 0; t < 4 * VGROUPS; ++t) {
 #pragma unroll
         for (int i = 0; i < 4; ++i) { o[t][i] = 0.f; }
     }
@@ -203,42 +214,69 @@ extern "C" __global__ void __launch_bounds__(THREADS, BRAIN_BLOCKS_PER_SM) brain
     const unsigned char* my_ring_ptr = ring + warp * (BRAIN_DECODE_STAGES * UNIT_BYTES);
 
     // Unit u goes to this lane's slots of ring slot (u mod STAGES). Past the live keys a copy of size 0 zero-fills.
+    //
+    // What a copy needs that does not change from chunk to chunk is computed once here: the byte offset of each of the lane's key
+    // and value rows from the chunk's first row, and the shared-memory slot each of its value pieces lands in. The values are
+    // fetched as the keys are: eight rows an instruction, a row's 64 contiguous bytes read by four adjacent lanes (piece P = 4 w + b
+    // of the row's 16-byte pieces). Eight lanes of one row reading 128 bytes made the memory system return every sector twice
+    // (ncu: L2 to L1 bytes 2.15 GB for 1.08 GB of values), and so did a layout that put the two halves of a sector in distant
+    // slots; here the two halves of a 32-byte sector (b = 0, 1 and 2, 3) land in ADJACENT slots (`brain_value_slot`), and the
+    // lanes read their pieces back from there after the warp's wait and `__syncwarp`. The piece goes to the slot of its consumer:
+    // gid_v = P mod 8 (a channel group), tig_v = a / 2 (the key pair), p = P / 8, key r = 2 h + a mod 2, at row r * VGROUPS + p.
+    const unsigned int va = lane >> 2, vb = lane & 3u;
+    const unsigned long long slot_bytes = static_cast<unsigned long long>(n_kv) * ROW_BYTES;
+    unsigned long long k_off[2], v_off[2];
+#pragma unroll
+    for (int r = 0; r < 2; ++r) {
+        k_off[r] = (gid + 8u * r) * slot_bytes + tig * 16u;
+        v_off[r] = (8u * r + va) * slot_bytes + vb * 16u;
+    }
+    unsigned int v_dst[PIECES];
+#pragma unroll
+    for (int w = 0; w < PIECES; ++w) {
+        const unsigned int piece = 4u * w + vb;
+        v_dst[w] = ((va & 1u) * VGROUPS + (piece >> 3)) * 512u + brain_value_slot(piece & 7u, va >> 1) * 16u;
+    }
+    // The 16 keys of a chunk are in one pool block when the block size is a multiple of 16 (the served 64): one table lookup for
+    // the chunk (at its keys' unit, kept for its values'), and a row is the first row plus the key offset times the heads. The
+    // chunk's block and offset in it advance by WARPS * CHUNK keys a chunk, so no division runs in the loop, and the table entry
+    // of the NEXT chunk is loaded while this one's copies are issued.
+    const bool in_block = (block_size & 15u) == 0u;
+    unsigned int next_blk = first / block_size, next_off = first % block_size;
+    unsigned int next_page = in_block && n_mine > 0u ? bt[next_blk] : 0u;
+    unsigned int chunk_row0 = 0u;
     unsigned int issue_slot = 0;
     auto issue = [&](unsigned int u) {
         if (u < 2u * n_mine) {
             const unsigned int c0 = first + (u >> 1) * (WARPS * CHUNK);
             const unsigned int at = my_ring + issue_slot * UNIT_BYTES;
-            // The 16 keys of a chunk are in one pool block when the block size is a multiple of 16 (the served 64): one table
-            // lookup and one division for the chunk, then a row is the first row plus the key offset times the heads.
-            const bool in_block = (block_size & 15u) == 0u;
-            const unsigned int row0 = in_block ? (bt[c0 / block_size] * block_size + (c0 % block_size)) * n_kv + kvh : 0u;
-            auto row_of = [&](unsigned int d) { return in_block ? row0 + d * n_kv : brain_row(bt, c0 + d, block_size, n_kv, kvh); };
-            if ((u & 1u) == 0u) {
-#pragma unroll
-                for (int r = 0; r < 2; ++r) {
-                    const unsigned int j = c0 + gid + 8u * r;
-                    const bool ok = j < k_end;
-                    const unsigned char* src = ok ? pool_k + static_cast<unsigned long long>(row_of(j - c0)) * ROW_BYTES + tig * 16u : pool_k;
-#pragma unroll
-                    for (int w = 0; w < 8; ++w) { brain_copy16(at + (r * 8 + w) * 512u + lane * 16u, src + w * 64, ok); }
+            const unsigned int live_keys = k_end - c0;  // > 0: the chunk starts inside the split
+            if (in_block && (u & 1u) == 0u) {
+                chunk_row0 = (next_page * block_size + next_off) * n_kv + kvh;
+                next_off += WARPS * CHUNK;
+                while (next_off >= block_size) {
+                    next_off -= block_size;
+                    ++next_blk;
                 }
-            } else {
-                // The values are fetched as the keys are: eight rows an instruction, a row's 64 contiguous bytes read by four
-                // adjacent lanes (piece P = 4 w + b of the row's 32 pieces of 16 bytes). Eight lanes of one row reading 128 bytes
-                // made the memory system return every sector twice (ncu: L2 to L1 bytes 2.15 GB for 1.08 GB of values), and so did
-                // a layout that put the two halves of a sector in distant slots; here the two halves of a 32-byte sector (b = 0, 1
-                // and 2, 3) land in ADJACENT slots (`brain_value_slot`), and the lanes read their pieces back from there after the
-                // warp's wait and `__syncwarp`. The piece goes to the slot of its consumer: gid_v = P mod 8 (a channel group),
-                // tig_v = a / 2 (the key pair), p = P / 8, r = 2 h + a mod 2.
-                const unsigned int a = lane >> 2, b = lane & 3u;
-                const unsigned int lane_slot = (a & 1u) * 2048u + (((b >> 1) * 4u + (a >> 1)) * 2u + (b & 1u)) * 16u;
+                next_page = (u >> 1) + 1u < n_mine ? bt[next_blk] : 0u;
+            }
 #pragma unroll
-                for (int h = 0; h < 2; ++h) {
-                    const unsigned int j = c0 + 8u * h + a;
-                    const bool ok = j < k_end;
-                    const unsigned char* src = ok ? pool_v + static_cast<unsigned long long>(row_of(j - c0)) * ROW_BYTES + b * 16u : pool_v;
+            for (int r = 0; r < 2; ++r) {
+                // A block size that is not a multiple of 16: every key row is looked up on its own.
+                if ((u & 1u) == 0u) {
+                    const bool ok = gid + 8u * r < live_keys;
+                    const unsigned long long row = in_block ? static_cast<unsigned long long>(chunk_row0) * ROW_BYTES + k_off[r]
+                                                            : static_cast<unsigned long long>(brain_row(bt, c0 + gid + 8u * r, block_size, n_kv, kvh)) * ROW_BYTES + tig * 16u;
+                    const unsigned char* src = ok ? pool_k + row : pool_k;
 #pragma unroll
-                    for (int w = 0; w < 8; ++w) { brain_copy16(at + h * 4096u + (w >> 1) * 512u + (w & 1) * 256u + lane_slot, src + w * 64, ok); }
+                    for (int w = 0; w < PIECES; ++w) { brain_copy16(at + (r * PIECES + w) * 512u + lane * 16u, src + w * 64, ok); }
+                } else {
+                    const bool ok = 8u * r + va < live_keys;
+                    const unsigned long long row = in_block ? static_cast<unsigned long long>(chunk_row0) * ROW_BYTES + v_off[r]
+                                                            : static_cast<unsigned long long>(brain_row(bt, c0 + 8u * r + va, block_size, n_kv, kvh)) * ROW_BYTES + vb * 16u;
+                    const unsigned char* src = ok ? pool_v + row : pool_v;
+#pragma unroll
+                    for (int w = 0; w < PIECES; ++w) { brain_copy16(at + v_dst[w] + r * (2u * VGROUPS * 512u), src + w * 64, ok); }
                 }
             }
         }
@@ -273,9 +311,9 @@ extern "C" __global__ void __launch_bounds__(THREADS, BRAIN_BLOCKS_PER_SM) brain
             }
         }
 #pragma unroll
-        for (int w = 0; w < 8; ++w) {
-            const uint4 k0 = *reinterpret_cast<const uint4*>(kbuf + w * 512u + lane * 16u);        // key gid
-            const uint4 k1 = *reinterpret_cast<const uint4*>(kbuf + (8 + w) * 512u + lane * 16u);  // key gid + 8
+        for (int w = 0; w < PIECES; ++w) {
+            const uint4 k0 = *reinterpret_cast<const uint4*>(kbuf + w * 512u + lane * 16u);             // key gid
+            const uint4 k1 = *reinterpret_cast<const uint4*>(kbuf + (PIECES + w) * 512u + lane * 16u);  // key gid + 8
 #pragma unroll
             for (int h = 0; h < 2; ++h) {
                 const int st = 2 * w + h;
@@ -294,7 +332,7 @@ extern "C" __global__ void __launch_bounds__(THREADS, BRAIN_BLOCKS_PER_SM) brain
             float tot = 0.f;
 #pragma unroll
             for (int p = BRAIN_QP - 1; p >= 0; --p) { tot += sacc[p][0][e] + sacc[p][1][e]; }
-            sc[e] = tot * 0.0625f;
+            sc[e] = tot * SCORE_SCALE;
         }
         const bool live_a = c0 + gid < k_end, live_b = c0 + gid + 8u < k_end;
         sc[0] = live_a ? sc[0] : NEG_BIG;
@@ -330,20 +368,23 @@ extern "C" __global__ void __launch_bounds__(THREADS, BRAIN_BLOCKS_PER_SM) brain
             pb[p] = brain_transpose8(pb[p]);
         }
 
-        // ---- values: rescale by the lane's own heads' corrections, then accumulate (smallest part first).
+        // ---- values: rescale by the lane's own heads' corrections, then accumulate (smallest part first). Once the running
+        // maxima have settled every correction is exactly 1 and the rescale changes no bit: the warp skips it.
+        if (__any_sync(0xffffffffu, corr[0] != 1.f || corr[1] != 1.f)) {
 #pragma unroll
-        for (int t = 0; t < 16; ++t) {
-            o[t][0] *= corr[0];
-            o[t][1] *= corr[1];
-            o[t][2] *= corr[0];
-            o[t][3] *= corr[1];
+            for (int t = 0; t < 4 * VGROUPS; ++t) {
+                o[t][0] *= corr[0];
+                o[t][1] *= corr[1];
+                o[t][2] *= corr[0];
+                o[t][3] *= corr[1];
+            }
         }
         const unsigned char* vbuf = next_unit(2u * i + 1u);
 #pragma unroll
-        for (int p = 0; p < 4; ++p) {
+        for (int p = 0; p < VGROUPS; ++p) {
             uint4 x[4];
 #pragma unroll
-            for (int r = 0; r < 4; ++r) { x[r] = *reinterpret_cast<const uint4*>(vbuf + (r * 4 + p) * 512u + vslot * 16u); }
+            for (int r = 0; r < 4; ++r) { x[r] = *reinterpret_cast<const uint4*>(vbuf + (r * VGROUPS + p) * 512u + vslot * 16u); }
 #pragma unroll
             for (int jj = 0; jj < 4; ++jj) {
                 const unsigned int w0 = jj == 0 ? x[0].x : jj == 1 ? x[0].y : jj == 2 ? x[0].z : x[0].w;
@@ -364,7 +405,7 @@ extern "C" __global__ void __launch_bounds__(THREADS, BRAIN_BLOCKS_PER_SM) brain
     asm volatile("cp.async.wait_group 0;\n" ::: "memory");
     __syncthreads();
 #pragma unroll
-    for (int t = 0; t < 16; ++t) {
+    for (int t = 0; t < 4 * VGROUPS; ++t) {
         const unsigned int ch = 64u * (t >> 2) + 8u * gid + 2u * (t & 3);
         red_o[warp][2u * tig][ch] = o[t][0];
         red_o[warp][2u * tig + 1u][ch] = o[t][1];
@@ -387,8 +428,7 @@ extern "C" __global__ void __launch_bounds__(THREADS, BRAIN_BLOCKS_PER_SM) brain
         }
     }
     __syncthreads();
-#pragma unroll
-    for (int g = 0; g < BRAIN_GRP; ++g) {
+    for (unsigned int g = 0; g < group; ++g) {
         float mw[WARPS], m = NEG_BIG;
 #pragma unroll
         for (int w = 0; w < WARPS; ++w) {
@@ -401,10 +441,10 @@ extern "C" __global__ void __launch_bounds__(THREADS, BRAIN_BLOCKS_PER_SM) brain
             f[w] = expf(mw[w] - m);
             l += red_l[w][g] * f[w];
         }
-        const unsigned long long base = ((static_cast<unsigned long long>(b) * n_heads + kvh * BRAIN_GRP + g) * n_splits + s) * (HD + 2u);
+        const unsigned long long base = ((static_cast<unsigned long long>(b) * n_heads + kvh * group + g) * n_splits + s) * (HD + 2u);
 #pragma unroll
-        for (int h = 0; h < 2; ++h) {
-            const unsigned int ch = tid * 2u + h;
+        for (int h = 0; h < HD / THREADS; ++h) {
+            const unsigned int ch = tid * (HD / THREADS) + h;
             float acc = 0.f;
 #pragma unroll
             for (int w = 0; w < WARPS; ++w) { acc = fmaf(red_o[w][g][ch], f[w], acc); }

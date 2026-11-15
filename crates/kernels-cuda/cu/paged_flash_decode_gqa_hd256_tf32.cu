@@ -5,18 +5,19 @@
 // card carries. If your team needs expertise in decode attention that runs at the memory roofline over any KV cache
 // format, you can procure our services by sending an email to info@swedishembedded.com.
 //
-// Split-key fused GQA decode attention at head_dim 256 over an f32 paged pool, on
-// TF32 TENSOR CORES: the CUDA form of `paged_flash_decode_gqa_hd256.wgsl` at GRP =
-// BRAIN_GRP, with its whole contract - the same uniform, bindings, grid and partial records - so
+// Split-key fused GQA decode attention at head_dim HD = BRAIN_HD (128 or 256) over an f32 paged pool, on
+// TF32 TENSOR CORES: the CUDA form of `paged_flash_decode_gqa_hd256.wgsl` at that head width and any GRP of at most 8
+// (a RUNTIME value: the products pad the group to 16 rows and 8 columns whatever it is), with its whole contract - the
+// same uniform, bindings, grid and partial records - so
 // `paged_flash_decode_gqa_combine` merges either kernel's output. The bf16 pool has its own kernel
 // (`paged_flash_decode_gqa_hd256_kvbf16.cu`).
 //
-//   params       : [batch, n_heads, n_kv_heads, head_dim (256), group (BRAIN_GRP), block_size, max_bt, n_splits,
+//   params       : [batch, n_heads, n_kv_heads, head_dim (HD), group (<= 8), block_size, max_bt, n_splits,
 //                   tiles_per_split] u32
-//   q            : [batch, n_heads * 256]                          f32
-//   pool_k/pool_v: [num_blocks * block_size, n_kv_heads * 256]     f32
+//   q            : [batch, n_heads * HD]                          f32
+//   pool_k/pool_v: [num_blocks * block_size, n_kv_heads * HD]     f32
 //   block_tables : [batch, max_bt] u32       seq_lens : [batch] u32 (live keys, the new token included)
-//   part         : [batch, n_heads, n_splits, 258] f32  the unnormalised output (256), the running max, the sum
+//   part         : [batch, n_heads, n_splits, HD + 2] f32  the unnormalised output (HD), the running max, the sum
 //
 // The structure is `paged_flash_decode_gqa_hd256_kv8.cu`'s (read that file's header for the map): each warp walks
 // its own 16-key chunks with its own running softmax, S = Q . K^T with the group padded to 16 rows, then
@@ -31,11 +32,19 @@
 //
 // No `__restrict__`: brain's device buffers alias by design.
 
-#ifndef BRAIN_GRP
-#define BRAIN_GRP 6
+#ifndef BRAIN_HD
+#define BRAIN_HD 256
 #endif
 
-#define HD 256
+#define HD BRAIN_HD
+static_assert(HD == 128 || HD == 256, "the fragment maps below are written for a head width of 128 or 256");
+// k-steps of the score product (8 channels each); halves of 32 key channels and of 16 value channels a lane loads at a
+// time (a lane owns HD / 4 channels of each key row and HD / 8 of each value row); channel tiles of the value product.
+#define KSTEPS (HD / 8)
+#define HALVES (HD / 128)
+#define CTILES (HD / 16)
+// 1 / sqrt(HD), the score scale.
+#define SCORE_SCALE (HD == 256 ? 0.0625f : 0.08838834764831845f)
 #define TILE 128
 #define WARPS 4
 #define THREADS (WARPS * 32)
@@ -85,7 +94,7 @@ extern "C" __global__ void __launch_bounds__(THREADS) brain_paged_flash_decode_g
     const unsigned int* params, const float* q, const float* pool_k, const float* pool_v, const unsigned int* block_tables,
     const unsigned int* seq_lens, float* part) {
     BRAIN_PDL_ENTRY();
-    const unsigned int batch = params[0], n_heads = params[1], n_kv = params[2], block_size = params[5], max_bt = params[6];
+    const unsigned int batch = params[0], n_heads = params[1], n_kv = params[2], group = params[4], block_size = params[5], max_bt = params[6];
     const unsigned int n_splits = params[7], tiles_per_split = params[8];
     const unsigned int wg = blockIdx.y * gridDim.x + blockIdx.x;
     const unsigned int s = wg % n_splits;
@@ -97,8 +106,8 @@ extern "C" __global__ void __launch_bounds__(THREADS) brain_paged_flash_decode_g
     const unsigned int tid = threadIdx.x, lane = tid & 31u, warp = tid >> 5;
     const unsigned int gid = lane >> 2, tig = lane & 3u;
 
-    // The query as the first product's A fragments at k-step st (logical k tig <-> channel 64 tig + 2 st, tig + 4 <->
-    // 64 tig + 2 st + 1): (hi a0, hi a2, lo a0, lo a2) per lane; rows gid + 8 (the padding of the group) are zero.
+    // The query as the first product's A fragments at k-step st (logical k tig <-> channel (HD / 4) tig + 2 st, tig + 4 <->
+    // (HD / 4) tig + 2 st + 1): (hi a0, hi a2, lo a0, lo a2) per lane; rows gid + 8 (the padding of the group) are zero.
     // The query fragments are dead once the walk is over, so the merge tile reuses their bytes (the two together
     // would pass the 48 KiB of static shared memory).
     __shared__ __align__(16) unsigned char smem[WARPS * 8 * HD * 4];
@@ -106,12 +115,12 @@ extern "C" __global__ void __launch_bounds__(THREADS) brain_paged_flash_decode_g
     float (*red_o)[8][HD] = reinterpret_cast<float (*)[8][HD]>(smem);
     __shared__ float red_m[WARPS][8], red_l[WARPS][8];
 
-    const float* qb = q + (static_cast<unsigned long long>(b) * n_heads + kvh * BRAIN_GRP) * HD;
-    for (unsigned int e = tid; e < 32u * 32u; e += THREADS) {
+    const float* qb = q + (static_cast<unsigned long long>(b) * n_heads + kvh * group) * HD;
+    for (unsigned int e = tid; e < KSTEPS * 32u; e += THREADS) {
         const unsigned int st = e >> 5, ln = e & 31u, g = ln >> 2, t = ln & 3u;
         uint4 f = make_uint4(0u, 0u, 0u, 0u);
-        if (g < BRAIN_GRP) {
-            const float2 x = *reinterpret_cast<const float2*>(qb + g * HD + t * 64u + st * 2u);
+        if (g < group) {
+            const float2 x = *reinterpret_cast<const float2*>(qb + g * HD + t * (HD / 4u) + st * 2u);
             brain_split_tf32(x.x, f.x, f.z);
             brain_split_tf32(x.y, f.y, f.w);
         }
@@ -125,18 +134,18 @@ extern "C" __global__ void __launch_bounds__(THREADS) brain_paged_flash_decode_g
     const unsigned int* bt = block_tables + static_cast<unsigned long long>(b) * max_bt;
     const unsigned long long row_elems = HD;
 
-    // O^T accumulators: channel tile t, rows gid (channel 32 gid + 2t) and gid + 8 (32 gid + 2t + 1), columns heads
-    // 2 tig and 2 tig + 1.
-    float o[16][4];
+    // O^T accumulators: channel tile t, rows gid (channel (HD / 8) gid + 2t) and gid + 8 (+ 1), columns heads 2 tig and
+    // 2 tig + 1.
+    float o[CTILES][4];
 #pragma unroll
-    for (int t = 0; t < 16; ++t) {
+    for (int t = 0; t < CTILES; ++t) {
 #pragma unroll
         for (int i = 0; i < 4; ++i) { o[t][i] = 0.f; }
     }
     float m_run = NEG_BIG, l_run = 0.f;
 
     for (unsigned int c0 = k_begin + warp * CHUNK; c0 < k_end; c0 += WARPS * CHUNK) {
-        // ---- scores: key rows gid and gid + 8; this lane's channels 64 tig .. 64 tig + 63, in two halves.
+        // ---- scores: key rows gid and gid + 8; this lane's channels (HD / 4) tig .. + HD / 4 - 1, in halves of 32.
         const float* krow[2];
         bool klive[2];
 #pragma unroll
@@ -147,7 +156,7 @@ extern "C" __global__ void __launch_bounds__(THREADS) brain_paged_flash_decode_g
         }
         float s0[4] = {0.f, 0.f, 0.f, 0.f}, s1[4] = {0.f, 0.f, 0.f, 0.f};
 #pragma unroll
-        for (int half = 0; half < 2; ++half) {
+        for (int half = 0; half < HALVES; ++half) {
             float kv[2][32];
 #pragma unroll
             for (int r = 0; r < 2; ++r) {
@@ -155,7 +164,7 @@ extern "C" __global__ void __launch_bounds__(THREADS) brain_paged_flash_decode_g
                 for (int p = 0; p < 4; ++p) {
                     float v8[8];
                     if (klive[r]) {
-                        brain_load8(krow[r], tig * 64u + half * 32u + p * 8u, v8);
+                        brain_load8(krow[r], tig * (HD / 4u) + half * 32u + p * 8u, v8);
                     } else {
 #pragma unroll
                         for (int i = 0; i < 8; ++i) { v8[i] = 0.f; }
@@ -189,7 +198,7 @@ extern "C" __global__ void __launch_bounds__(THREADS) brain_paged_flash_decode_g
 #pragma unroll
         for (int r = 0; r < 4; ++r) {
             live[r] = c0 + 2u * tig + (r & 1) + 8u * (r >> 1) < k_end;
-            sc[r] = live[r] ? sc[r] * 0.0625f : NEG_BIG;
+            sc[r] = live[r] ? sc[r] * SCORE_SCALE : NEG_BIG;
             mx = fmaxf(mx, sc[r]);
         }
         mx = fmaxf(mx, __shfl_xor_sync(0xffffffffu, mx, 1));
@@ -210,17 +219,20 @@ extern "C" __global__ void __launch_bounds__(THREADS) brain_paged_flash_decode_g
 #pragma unroll
         for (int r = 0; r < 4; ++r) { brain_split_tf32(p[r], ph[r], pl[r]); }
 
-        const float ca = __shfl_sync(0xffffffffu, corr, (2u * tig) * 4u), cb = __shfl_sync(0xffffffffu, corr, (2u * tig + 1u) * 4u);
+        // Once the running maxima have settled every correction is exactly 1 and the rescale changes no bit: the warp skips it.
+        if (__any_sync(0xffffffffu, corr != 1.f)) {
+            const float ca = __shfl_sync(0xffffffffu, corr, (2u * tig) * 4u), cb = __shfl_sync(0xffffffffu, corr, (2u * tig + 1u) * 4u);
 #pragma unroll
-        for (int t = 0; t < 16; ++t) {
-            o[t][0] *= ca;
-            o[t][1] *= cb;
-            o[t][2] *= ca;
-            o[t][3] *= cb;
+            for (int t = 0; t < CTILES; ++t) {
+                o[t][0] *= ca;
+                o[t][1] *= cb;
+                o[t][2] *= ca;
+                o[t][3] *= cb;
+            }
         }
 
-        // ---- values: rows of keys 2 tig, 2 tig + 1, 2 tig + 8, 2 tig + 9; this lane's channels 32 gid .. + 31, in
-        // two halves of 16 (channel tiles 8 h .. 8 h + 7).
+        // ---- values: rows of keys 2 tig, 2 tig + 1, 2 tig + 8, 2 tig + 9; this lane's channels (HD / 8) gid .. + HD / 8 - 1,
+        // in halves of 16 (channel tiles 8 h .. 8 h + 7).
         const float* vrow[4];
         bool vlive[4];
 #pragma unroll
@@ -230,7 +242,7 @@ extern "C" __global__ void __launch_bounds__(THREADS) brain_paged_flash_decode_g
             vrow[r] = pool_v + (vlive[r] ? static_cast<unsigned long long>(brain_row(bt, j, block_size, n_kv, kvh)) * row_elems : 0ull);
         }
 #pragma unroll
-        for (int half = 0; half < 2; ++half) {
+        for (int half = 0; half < HALVES; ++half) {
             float vv[4][16];
 #pragma unroll
             for (int r = 0; r < 4; ++r) {
@@ -238,7 +250,7 @@ extern "C" __global__ void __launch_bounds__(THREADS) brain_paged_flash_decode_g
                 for (int pp = 0; pp < 2; ++pp) {
                     float v8[8];
                     if (vlive[r]) {
-                        brain_load8(vrow[r], gid * 32u + half * 16u + pp * 8u, v8);
+                        brain_load8(vrow[r], gid * (HD / 8u) + half * 16u + pp * 8u, v8);
                     } else {
 #pragma unroll
                         for (int i = 0; i < 8; ++i) { v8[i] = 0.f; }
@@ -268,11 +280,11 @@ extern "C" __global__ void __launch_bounds__(THREADS) brain_paged_flash_decode_g
         }
     }
 
-    // ---- merge the four warps. This lane holds heads 2 tig, 2 tig + 1 of channels 32 gid + 2t (+ 1).
+    // ---- merge the four warps. This lane holds heads 2 tig, 2 tig + 1 of channels (HD / 8) gid + 2t (+ 1).
     __syncthreads();  // every warp is past its last read of the query fragments the merge tile overwrites
 #pragma unroll
-    for (int t = 0; t < 16; ++t) {
-        const unsigned int ch = gid * 32u + 2u * t;
+    for (int t = 0; t < CTILES; ++t) {
+        const unsigned int ch = gid * (HD / 8u) + 2u * t;
         red_o[warp][2u * tig][ch] = o[t][0];
         red_o[warp][2u * tig + 1u][ch] = o[t][1];
         red_o[warp][2u * tig][ch + 1u] = o[t][2];
@@ -285,8 +297,7 @@ extern "C" __global__ void __launch_bounds__(THREADS) brain_paged_flash_decode_g
         red_l[warp][gid] = l_quad;
     }
     __syncthreads();
-#pragma unroll
-    for (int g = 0; g < BRAIN_GRP; ++g) {
+    for (unsigned int g = 0; g < group; ++g) {
         float mw[WARPS], m = NEG_BIG;
 #pragma unroll
         for (int w = 0; w < WARPS; ++w) {
@@ -299,10 +310,10 @@ extern "C" __global__ void __launch_bounds__(THREADS) brain_paged_flash_decode_g
             f[w] = expf(mw[w] - m);
             l += red_l[w][g] * f[w];
         }
-        const unsigned long long base = ((static_cast<unsigned long long>(b) * n_heads + kvh * BRAIN_GRP + g) * n_splits + s) * (HD + 2u);
+        const unsigned long long base = ((static_cast<unsigned long long>(b) * n_heads + kvh * group + g) * n_splits + s) * (HD + 2u);
 #pragma unroll
-        for (int h = 0; h < 2; ++h) {
-            const unsigned int ch = tid * 2u + h;
+        for (int h = 0; h < HD / THREADS; ++h) {
+            const unsigned int ch = tid * (HD / THREADS) + h;
             float acc = 0.f;
 #pragma unroll
             for (int w = 0; w < WARPS; ++w) { acc = fmaf(red_o[w][g][ch], f[w], acc); }

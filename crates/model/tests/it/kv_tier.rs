@@ -29,7 +29,7 @@
 use data::rng::Lcg;
 use gpu_core::{DeviceBuffer, Gpu};
 use model::block::paged_attention_fused;
-use model::kv_tier::{kernel_list_for, FlashDecodeShape, KvAppend, KvElement, KvKernels, KvPlane, KvTier, PrefillShape};
+use model::kv_tier::{flash_decode_name, kernel_list_for, FlashDecodeShape, KvAppend, KvElement, KvKernels, KvPlane, KvTier, PrefillShape};
 use model::ops::PagedDecodeShape;
 
 /// Real-device tests share one adapter; see `kv_bf16_roundtrip.rs`.
@@ -37,8 +37,9 @@ static DEVICE_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn kernels() -> &'static [(&'static str, &'static str)] {
     static LIST: std::sync::OnceLock<Vec<(&'static str, &'static str)>> = std::sync::OnceLock::new();
-    // The built-in fused shapes and Ripple's (80 query heads over 8 kv heads of 128: a group of 10).
-    LIST.get_or_init(|| kernel_list_for(&[], &[(256, 6), (256, 8), (256, 4), (128, 1), (128, 10), (64, 12)]))
+    // The built-in fused shapes, Ripple's (80 query heads over 8 kv heads of 128: a group of 10) and the dense Qwen3
+    // family's (head width 128 at groups 2, 4, 5 and 8).
+    LIST.get_or_init(|| kernel_list_for(&[], &[(256, 6), (256, 8), (256, 4), (128, 1), (128, 10), (64, 12), (128, 2), (128, 4), (128, 5), (128, 8)]))
 }
 
 struct Shape {
@@ -534,7 +535,42 @@ fn fused_decode_reads_compact_planes_as_exact_attention_reads_their_decoded_valu
 /// SAME physical blocks, the way the prefix cache shares them). The output equals exact attention over the decoded
 /// planes at the bound the WGSL tier is held to.
 fn native_decode_is_exact_at_agent_contexts(g: &Gpu, tier: KvTier, lens: &[u32], shared_blocks: u32) {
-    native_decode_is_exact_at(g, tier, lens, shared_blocks, Magnitudes::UNIT);
+    native_decode_is_exact_at(g, tier, Heads::QWEN38, lens, shared_blocks, Magnitudes::UNIT);
+}
+
+/// The attention shape of a decode: query heads, kv heads and head width.
+#[derive(Clone, Copy, Debug)]
+struct Heads {
+    n_heads: u32,
+    n_kv: u32,
+    head_dim: u32,
+}
+
+impl Heads {
+    /// Qwen3.8-27B's GQA layers: 24 query heads over 4 kv heads of 256.
+    const QWEN38: Heads = Heads { n_heads: 24, n_kv: 4, head_dim: 256 };
+    /// The dense Qwen3 family's head width of 128 at each of its groups: 0.6B-1.7B (2), 4B-8B (4), 14B (5), 32B (8).
+    const QWEN3: [Heads; 4] = [
+        Heads { n_heads: 16, n_kv: 8, head_dim: 128 },
+        Heads { n_heads: 32, n_kv: 8, head_dim: 128 },
+        Heads { n_heads: 40, n_kv: 8, head_dim: 128 },
+        Heads { n_heads: 64, n_kv: 8, head_dim: 128 },
+    ];
+
+    fn group(self) -> u32 {
+        self.n_heads / self.n_kv
+    }
+
+    /// The registry entry the native decode of `tier` at this head width is.
+    fn native(self, tier: KvTier) -> String {
+        let suffix = match tier.element() {
+            KvElement::Int8 => "kv8",
+            KvElement::Fp8E4m3 => "kvfp8",
+            KvElement::Bf16 => "kvbf16",
+            KvElement::F32 => "f32",
+        };
+        format!("paged_flash_decode_gqa_hd{}_{suffix}", self.head_dim)
+    }
 }
 
 /// Factors on the query, the keys and the values of [`native_decode_is_exact_at`]: `UNIT` is the agent-context spec;
@@ -550,9 +586,10 @@ impl Magnitudes {
     const UNIT: Magnitudes = Magnitudes { q: 1.0, k: 1.0, v: 1.0 };
 }
 
-fn native_decode_is_exact_at(g: &Gpu, tier: KvTier, lens: &[u32], shared_blocks: u32, mag: Magnitudes) {
-    let (n_heads, n_kv, block_size) = (24u32, 4u32, 64u32);
-    let label = format!("{tier} lens {lens:?}, {shared_blocks} shared blocks, q x{} k x{} v x{}", mag.q, mag.k, mag.v);
+fn native_decode_is_exact_at(g: &Gpu, tier: KvTier, heads: Heads, lens: &[u32], shared_blocks: u32, mag: Magnitudes) {
+    let Heads { n_heads, n_kv, head_dim: hd32 } = heads;
+    let block_size = 64u32;
+    let label = format!("{tier} {heads:?} lens {lens:?}, {shared_blocks} shared blocks, q x{} k x{} v x{}", mag.q, mag.k, mag.v);
     let own_blocks: u32 = lens.iter().enumerate().map(|(b, &len)| len.div_ceil(block_size) - if b == 0 { 0 } else { shared_blocks }).sum();
     let num_blocks = (shared_blocks + own_blocks) * 2 + 1;
     let mut next = 0u32;
@@ -576,7 +613,7 @@ fn native_decode_is_exact_at(g: &Gpu, tier: KvTier, lens: &[u32], shared_blocks:
             t
         })
         .collect();
-    let s = Shape { n_heads, n_kv, head_dim: 256, block_size, num_blocks };
+    let s = Shape { n_heads, n_kv, head_dim: hd32, block_size, num_blocks };
     let stride = s.kv_stride() as usize;
     let prefix_tokens = (shared_blocks * block_size) as usize;
     let scaled = |mut v: Vec<f32>, by: f32| {
@@ -609,32 +646,27 @@ fn native_decode_is_exact_at(g: &Gpu, tier: KvTier, lens: &[u32], shared_blocks:
     for (b, t) in tables.iter().enumerate() {
         table_h[b * max_bt as usize..b * max_bt as usize + t.len()].copy_from_slice(t);
     }
-    let q_h = scaled(random(0xC0FFEE, (batch * n_heads * 256) as usize), 0.5 * mag.q);
+    let q_h = scaled(random(0xC0FFEE, (batch * n_heads * hd32) as usize), 0.5 * mag.q);
     let (q, table, seq_lens) = (g.storage_init("q", &q_h), u32s(g, &table_h), u32s(g, lens));
     // NaN-poisoned: a row the merge does not write fails the comparison instead of passing on a zero.
-    let ctx = g.storage_init("ctx", &vec![f32::NAN; (batch * n_heads * 256) as usize]);
-    let kernels = KvKernels::resolve(g, tier).unwrap();
-    let shape = FlashDecodeShape { batch, n_heads, n_kv_heads: n_kv, head_dim: 256, block_size, max_bt, cap: *lens.iter().max().unwrap(), pin_splits: false };
-    assert!(kernels.flash_decode_available(g, 256, n_heads / n_kv), "{label}: the fused decode must be available");
-    let (slow, native) = match () {
-        _ if tier == KvTier::INT8 => ("paged_flash_decode_gqa_hd256#GRP=6#kv=int8", "paged_flash_decode_gqa_hd256_kv8"),
-        _ if tier == KvTier::FP8 => ("paged_flash_decode_gqa_hd256#GRP=6#kv=fp8", "paged_flash_decode_gqa_hd256_kvfp8"),
-        _ if tier == KvTier::BF16 => ("paged_flash_decode_gqa_hd256#GRP=6#kv=bf16", "paged_flash_decode_gqa_hd256_kvbf16"),
-        _ => ("paged_flash_decode_gqa_hd256#GRP=6", "paged_flash_decode_gqa_hd256_f32"),
-    };
-    let kernel = g.kernel_index(slow).expect("the decode kernel is registered");
-    let params = [batch, n_heads, n_kv, 256, n_heads / n_kv, block_size, max_bt, 1, 1];
-    assert_eq!(g.native_kernel_for(kernel, &params), Some(native), "{label}: the decode attention must run the native kernel");
+    let ctx = g.storage_init("ctx", &vec![f32::NAN; (batch * n_heads * hd32) as usize]);
+    let kernels = KvKernels::resolve_for(g, tier, &[(hd32, heads.group())]).unwrap();
+    let shape = FlashDecodeShape { batch, n_heads, n_kv_heads: n_kv, head_dim: hd32, block_size, max_bt, cap: *lens.iter().max().unwrap(), pin_splits: false };
+    assert!(kernels.flash_decode_available(g, hd32, heads.group()), "{label}: the fused decode must be available");
+    let kernel = g.kernel_index(&flash_decode_name(tier, hd32, heads.group())).expect("the decode kernel is registered");
+    let params = [batch, n_heads, n_kv, hd32, heads.group(), block_size, max_bt, 1, 1];
+    assert_eq!(g.native_kernel_for(kernel, &params), Some(heads.native(tier).as_str()), "{label}: the decode attention must run the native kernel");
     let combine = g.kernel_index("paged_flash_decode_gqa_combine").expect("the combine is registered");
-    assert_eq!(g.native_kernel_for(combine, &[batch, n_heads, 256, 64]), Some("paged_flash_decode_gqa_combine"), "{label}: the merge of the splits must run the native kernel");
+    assert_eq!(g.native_kernel_for(combine, &[batch, n_heads, hd32, 64]), Some("paged_flash_decode_gqa_combine"), "{label}: the merge of the splits must run the native kernel");
     g.submit(&[], &kernels.flash_decode(g, &q, &kc, &vc, &table, &seq_lens, &ctx, shape));
-    let got = g.read(&ctx, (batch * n_heads * 256) as usize);
+    let got = g.read(&ctx, (batch * n_heads * hd32) as usize);
 
-    let (hd, group, scale) = (256usize, (n_heads / n_kv) as usize, 1.0 / 16.0f64);
+    let (hd, group, scale) = (hd32 as usize, heads.group() as usize, 1.0 / (hd32 as f64).sqrt());
     let mut worst = 0f64;
     for (b, &len) in lens.iter().enumerate() {
-        // Every kv head's planes, the first and last head of a group among them.
-        for h in [0usize, group - 1, group + 2, 2 * group + 3, 4 * group - 1] {
+        // The first and the last kv head's planes, the first and last head of a group among them, and heads inside groups.
+        let heads_checked: std::collections::BTreeSet<usize> = [0usize, group - 1, group + 1, 2 * group + group / 2, n_heads as usize - 1].into_iter().filter(|&h| h < n_heads as usize).collect();
+        for h in heads_checked {
             let kvh = h / group;
             let qh = &q_h[(b * n_heads as usize + h) * hd..][..hd];
             let row = |j: usize| -> usize {
@@ -698,6 +730,25 @@ fn native_decode_of_every_tier_is_exact_at_agent_contexts_over_a_shared_prefix_o
     }
 }
 
+/// The native decode is one implementation over head width and group: the dense Qwen3 family's head width of 128 at every
+/// group it ships (2, 4, 5, 8) runs the native kernel of each tier and is exact at a long single context, a batch over a
+/// shared prefix and short sequences with partly empty splits.
+#[test]
+fn native_decode_of_every_tier_is_exact_at_the_qwen3_head_shapes_on_cuda() {
+    let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    if brain_testutil::gpu_tests_skipped() {
+        return;
+    }
+    let Some(g) = native_decode_gpu("native decode attention") else { return };
+    for heads in Heads::QWEN3 {
+        for tier in KvTier::ALL {
+            native_decode_is_exact_at(&g, tier, heads, &[32_768], 0, Magnitudes::UNIT);
+            native_decode_is_exact_at(&g, tier, heads, &[1024, 13_000, 9_000], 128, Magnitudes::UNIT);
+            native_decode_is_exact_at(&g, tier, heads, &[1, 129, 64, 65, 300, 127, 128, 700, 5, 200, 333, 1000, 63, 2, 900, 450], 0, Magnitudes::UNIT);
+        }
+    }
+}
+
 /// A bf16 pool's operands are stored as they are, so its kernel must keep two ranges the scaled tiers never see: scores in
 /// the tens (the exponent's absolute error is the score's relative error times its size, so an operand split that keeps too
 /// few bits shows here) and stored elements beyond the f16 range (a kernel that narrows a bf16 element to f16 turns 1e5 into
@@ -711,8 +762,8 @@ fn native_decode_of_the_bf16_tier_is_exact_at_large_scores_and_beyond_the_f16_ra
     let Some(g) = native_decode_gpu("native decode attention") else { return };
     // Scores in the tens; keys, then values, beyond the f16 range (the query shrunk so the scores stay moderate).
     for mag in [Magnitudes { q: 10.0, k: 1.0, v: 1.0 }, Magnitudes { q: 1e-5, k: 1e5, v: 1.0 }, Magnitudes { q: 1.0, k: 1.0, v: 1e5 }] {
-        native_decode_is_exact_at(&g, KvTier::BF16, &[13_000, 2047, 129, 1], 0, mag);
-        native_decode_is_exact_at(&g, KvTier::BF16, &[4096, 1100, 3000, 1025], 16, mag);
+        native_decode_is_exact_at(&g, KvTier::BF16, Heads::QWEN38, &[13_000, 2047, 129, 1], 0, mag);
+        native_decode_is_exact_at(&g, KvTier::BF16, Heads::QWEN38, &[4096, 1100, 3000, 1025], 16, mag);
     }
 }
 
@@ -802,25 +853,26 @@ fn native_decode_survives_back_to_back_launches_at_served_shapes() {
 /// Device time of the 27B's int8 decode attention (split pass plus merge) per layer at agent context lengths, with the
 /// achieved rate on the KV bytes it must read, for the native kernel and for the generated WGSL tier.
 fn time_decode(g: &Gpu, tier: KvTier, batch: u32, len: u32) -> f64 {
-    time_decode_parts(g, tier, batch, len).0
+    time_decode_parts(g, tier, Heads::QWEN38, batch, len).0
 }
 
-/// [`time_decode`] with the best iteration's time per kernel (name, ms).
-fn time_decode_parts(g: &Gpu, tier: KvTier, batch: u32, len: u32) -> (f64, Vec<(String, f64)>) {
-    let (n_heads, n_kv, block_size) = (24u32, 4u32, 64u32);
+/// [`time_decode`] at the attention shape `heads`, with the best iteration's time per kernel (name, ms).
+fn time_decode_parts(g: &Gpu, tier: KvTier, heads: Heads, batch: u32, len: u32) -> (f64, Vec<(String, f64)>) {
+    let Heads { n_heads, n_kv, head_dim } = heads;
+    let block_size = 64u32;
     let per = len.div_ceil(block_size);
     let num_blocks = batch * per;
-    let s = Shape { n_heads, n_kv, head_dim: 256, block_size, num_blocks };
+    let s = Shape { n_heads, n_kv, head_dim, block_size, num_blocks };
     // Whatever the fresh planes hold: the rate does not depend on the values.
     let plane = || KvPlane::new(g, tier, s.rows(), s.kv_stride() as u64, s.head_dim as u64);
     let (kc, vc) = (plane(), plane());
     // Sequence b owns blocks b, b + batch, b + 2 batch, ...: interleaved, as a busy pool leaves them.
     let table_h: Vec<u32> = (0..batch).flat_map(|b| (0..per).map(move |i| i * batch + b)).collect();
-    let q_h = random(0xC0FFEE, (batch * n_heads * 256) as usize);
+    let q_h = random(0xC0FFEE, (batch * n_heads * head_dim) as usize);
     let (q, table, seq_lens) = (g.storage_init("q", &q_h), u32s(g, &table_h), u32s(g, &vec![len; batch as usize]));
-    let ctx = g.storage((batch * n_heads * 256) as u64);
-    let kernels = KvKernels::resolve(g, tier).unwrap();
-    let shape = FlashDecodeShape { batch, n_heads, n_kv_heads: n_kv, head_dim: 256, block_size, max_bt: per, cap: len, pin_splits: false };
+    let ctx = g.storage((batch * n_heads * head_dim) as u64);
+    let kernels = KvKernels::resolve_for(g, tier, &[(head_dim, heads.group())]).unwrap();
+    let shape = FlashDecodeShape { batch, n_heads, n_kv_heads: n_kv, head_dim, block_size, max_bt: per, cap: len, pin_splits: false };
     let steps = kernels.flash_decode(g, &q, &kc, &vc, &table, &seq_lens, &ctx, shape);
     g.submit(&[], &steps);
     g.poll_wait();
@@ -848,7 +900,7 @@ fn time_decode_parts(g: &Gpu, tier: KvTier, batch: u32, len: u32) -> (f64, Vec<(
 fn decode_attention_profile_cell() {
     let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let Some(g) = cuda_gpu("decode profile: no CUDA device") else { return };
-    let _ = time_decode_parts(&g, KvTier::BF16, 64, 8192);
+    let _ = time_decode_parts(&g, KvTier::BF16, Heads::QWEN38, 64, 8192);
 }
 
 /// The rate of the bf16 decode attention at the lengths just past a split boundary: a served 8K run decodes at 7.9K to
@@ -861,7 +913,7 @@ fn decode_attention_split_boundary_report() {
     for batch in [16u32, 64] {
         for len in [7936u32, 8192, 8193, 8320, 8448, 8704, 9216, 12_288] {
             let bytes = 2.0 * batch as f64 * len as f64 * 4.0 * 512.0;
-            let (t, parts) = time_decode_parts(&g, KvTier::BF16, batch, len);
+            let (t, parts) = time_decode_parts(&g, KvTier::BF16, Heads::QWEN38, batch, len);
             let parts: Vec<String> = parts.iter().map(|(name, ms)| format!("{name} {:.1}", ms * 1e3)).collect();
             eprintln!("bf16 decode attention batch {batch:2} x {len:6} keys: {:8.1} us, {:6.0} GB/s; us per kernel: {}", t * 1e3, bytes / (t * 1e-3) / 1e9, parts.join(", "));
         }
@@ -896,24 +948,29 @@ fn decode_attention_timing_report() {
 }
 
 /// The native decode attention (split pass plus merge) per layer at the served matrix cells, with the rate on the bytes it must
-/// read against the card's streaming roof, for the bf16, int8 and FP8 pools at 1, 4, 16 and 64 rows of 8K, 32K and 64K keys.
+/// read against the card's streaming roof, for every KV tier at 1, 4, 16 and 64 rows of 8K, 32K and 64K keys: the 27B's
+/// heads (24 over 4 kv heads of 256) and the dense Qwen3 4B's (32 over 8 of 128). `--ignored decode_attention_matrix_cell_report`.
 #[test]
 #[ignore = "a timing report for kernel work, not a spec"]
 fn decode_attention_matrix_cell_report() {
     let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let Some(g) = cuda_gpu("decode timing: no CUDA device") else { return };
     const ROOF_GBS: f64 = 3400.0;
-    for tier in [KvTier::BF16, KvTier::INT8, KvTier::FP8] {
-        let row_bytes = match tier.element() {
-            KvElement::Bf16 => 2.0 * 256.0,
-            _ => 256.0 + 4.0,
-        };
-        for (batch, len) in [1u32, 4, 16, 64].into_iter().flat_map(|b| [8192u32, 32_768, 65_536].map(|l| (b, l))) {
-            let bytes = 2.0 * batch as f64 * len as f64 * 4.0 * row_bytes;
-            let (t, parts) = time_decode_parts(&g, tier, batch, len);
-            let gbs = bytes / (t * 1e-3) / 1e9;
-            let parts: Vec<String> = parts.iter().map(|(name, ms)| format!("{name} {:.1}", ms * 1e3)).collect();
-            eprintln!("{tier} decode attention batch {batch:2} x {len:6} keys: {:8.1} us, {:6.0} GB/s ({:.0} % of {ROOF_GBS}); us per kernel: {}", t * 1e3, gbs, 100.0 * gbs / ROOF_GBS, parts.join(", "));
+    for heads in [Heads::QWEN38, Heads::QWEN3[1]] {
+        for tier in KvTier::ALL {
+            // A key or value row of one kv head: its elements, plus the f32 row scale of a scaled tier.
+            let row_bytes = match tier.element() {
+                KvElement::F32 => 4.0 * heads.head_dim as f64,
+                KvElement::Bf16 => 2.0 * heads.head_dim as f64,
+                KvElement::Int8 | KvElement::Fp8E4m3 => heads.head_dim as f64 + 4.0,
+            };
+            for (batch, len) in [1u32, 4, 16, 64].into_iter().flat_map(|b| [8192u32, 32_768, 65_536].map(|l| (b, l))) {
+                let bytes = 2.0 * batch as f64 * len as f64 * heads.n_kv as f64 * row_bytes;
+                let (t, parts) = time_decode_parts(&g, tier, heads, batch, len);
+                let gbs = bytes / (t * 1e-3) / 1e9;
+                let parts: Vec<String> = parts.iter().map(|(name, ms)| format!("{name} {:.1}", ms * 1e3)).collect();
+                eprintln!("{heads:?} {tier} decode attention batch {batch:2} x {len:6} keys: {:8.1} us, {:6.0} GB/s ({:.0} % of {ROOF_GBS}); us per kernel: {}", t * 1e3, gbs, 100.0 * gbs / ROOF_GBS, parts.join(", "));
+            }
         }
     }
 }

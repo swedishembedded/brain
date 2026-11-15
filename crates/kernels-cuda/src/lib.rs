@@ -122,14 +122,20 @@ pub const FP8_DQ_WGMMA_DYNAMIC_SHARED_BYTES: u32 = I8_DQ_WGMMA_DYNAMIC_SHARED_BY
 /// Dynamic shared memory per block of `matmul_fp8_wgmma`: a ring of 4 stages (a 128-row activation tile and a 128-row weight
 /// tile of 128-byte rows, then 1 KiB of scales: 33792 bytes each) and 1 KiB to align the ring to the 128-byte swizzle pattern.
 /// A test holds it to the source.
-/// Dynamic shared memory per block of `paged_flash_decode_gqa_hd256_kv8`/`_kvfp8`: `BRAIN_DECODE_STAGES` stages of 4 warps' chunks
-/// (the source's `STAGE_BYTES`: 16 pieces of 512 bytes and 32 scales a warp). The merge of the four warps reuses the bytes.
-pub const FLASH_DECODE_KV8_DYNAMIC_SHARED_BYTES: u32 = FLASH_DECODE_KV8_STAGES * 4 * (16 * 512 + 128);
+/// Dynamic shared memory per block of the 8-bit decode kernels (`paged_flash_decode_gqa_hd{128,256}_kv8`/`_kvfp8`) at head
+/// width `hd`: `BRAIN_DECODE_STAGES` stages of 4 warps' chunks (the source's `STAGE_BYTES`: `hd / 16` pieces of 512 bytes and
+/// 32 scales a warp). The merge of the four warps reuses the bytes.
+pub const fn flash_decode_kv8_dynamic_shared_bytes(hd: u32) -> u32 {
+    FLASH_DECODE_KV8_STAGES * 4 * (hd / 16 * 512 + 128)
+}
 /// Chunks a warp of the 8-bit decode kernels keeps in flight plus the one it computes (`BRAIN_DECODE_STAGES`).
 const FLASH_DECODE_KV8_STAGES: u32 = 2;
-/// Dynamic shared memory per block of `paged_flash_decode_gqa_hd256_kvbf16`: a ring of `BRAIN_DECODE_STAGES` units (a chunk's keys
-/// or its values, 16 pieces of 512 bytes) for each of 4 warps. The merge of the four warps reuses the bytes.
-pub const FLASH_DECODE_BF16_DYNAMIC_SHARED_BYTES: u32 = FLASH_DECODE_BF16_STAGES * 4 * 16 * 512;
+/// Dynamic shared memory per block of the bf16 decode kernels (`paged_flash_decode_gqa_hd{128,256}_kvbf16`) at head width `hd`:
+/// a ring of `BRAIN_DECODE_STAGES` units (a chunk's keys or its values, `hd / 16` rows of 512 bytes) for each of 4 warps. The
+/// merge of the four warps reuses the bytes.
+pub const fn flash_decode_bf16_dynamic_shared_bytes(hd: u32) -> u32 {
+    FLASH_DECODE_BF16_STAGES * 4 * (hd / 16) * 512
+}
 /// Units a warp of the bf16 decode kernel keeps in its ring (`BRAIN_DECODE_STAGES`).
 const FLASH_DECODE_BF16_STAGES: u32 = 3;
 pub const FP8_WGMMA_DYNAMIC_SHARED_BYTES: u32 = 4 * (2 * 128 * 128 + 1024) + 1024;
@@ -1048,7 +1054,7 @@ pub const ALL: &[CudaKernel] = &[
     },
     CudaKernel {
         name: "paged_flash_decode_gqa_hd256_kv8",
-        // Redirected to by name from the WGSL `paged_flash_decode_gqa_hd256#GRP=6#kv=int8` (`gpu_core::native_upgrade`).
+        // Redirected to by name from every group's WGSL `paged_flash_decode_gqa_hd256#GRP=g#kv=int8` (`gpu_core::native_upgrade`).
         op: Op::PagedAttentionFused,
         weight: Dtype::I8,
         by_name: true,
@@ -1056,20 +1062,20 @@ pub const ALL: &[CudaKernel] = &[
         // mma.sync.m16n8k16 with f16 inputs: the floor every fp16 tensor-core kernel here shares.
         min_cc: MMA_S8_MIN_CC,
         entry: "brain_paged_flash_decode_gqa_hd256_kv8",
-        what: "split-key GQA decode attention at head_dim 256 and group 6 over an int8 paged pool on f16 tensor cores (int8 exact in f16, query and probabilities split into two f16 parts): each warp runs its own 16-key chunks, every head of the group from one read of each row; the partial records of the WGSL kernel",
+        what: "split-key GQA decode attention at head_dim 256 and any group of at most 8 over an int8 paged pool on f16 tensor cores (int8 exact in f16, query and probabilities split into two f16 parts): each warp runs its own 16-key chunks, every head of the group from one read of each row; the partial records of the WGSL kernel",
         reported: "native:paged_flash_decode_gqa_hd256_kv8",
         block_dim: 128,
         // One block per (sequence, kv head, key split).
         tile: (1, 1),
-        // The query fragments (16 k-steps x 32 lanes x 16 bytes) plus the merge's max and sum of 4 warps x 8 heads; the chunk stages
-        // and the merge's outputs are dynamic (`FLASH_DECODE_KV8_DYNAMIC_SHARED_BYTES`).
+        // The query fragments (16 k-steps x 32 lanes x 16 bytes) plus the merge's max and sum of 4 warps x 8 heads; the chunk
+        // stages and the merge's outputs are dynamic (`flash_decode_kv8_dynamic_shared_bytes`).
         shared_bytes: 16 * 32 * 16 + 2 * 4 * 8 * 4,
         programmatic: true,
-        src: concat!("#define BRAIN_GRP 6\n#define BRAIN_DECODE_STAGES 2\n", include_str!("../cu/paged_flash_decode_gqa_hd256_kv8.cu")),
+        src: concat!("#define BRAIN_HD 256\n#define BRAIN_DECODE_STAGES 2\n", include_str!("../cu/paged_flash_decode_gqa_hd256_kv8.cu")),
     },
     CudaKernel {
         name: "paged_flash_decode_gqa_hd256_kvfp8",
-        // Redirected to by name from the WGSL `paged_flash_decode_gqa_hd256#GRP=6#kv=fp8` (`gpu_core::native_upgrade`).
+        // Redirected to by name from every group's WGSL `paged_flash_decode_gqa_hd256#GRP=g#kv=fp8` (`gpu_core::native_upgrade`).
         op: Op::PagedAttentionFused,
         weight: Dtype::F8E4M3,
         by_name: true,
@@ -1080,17 +1086,59 @@ pub const ALL: &[CudaKernel] = &[
         what: "paged_flash_decode_gqa_hd256_kv8 over an FP8 E4M3 pool with one scale per (token, kv head) row: the elements widen to f16 exactly",
         reported: "native:paged_flash_decode_gqa_hd256_kvfp8",
         block_dim: 128,
+        // One block per (sequence, kv head, key split).
         tile: (1, 1),
+        // The query fragments (16 k-steps x 32 lanes x 16 bytes) plus the merge's max and sum of 4 warps x 8 heads; the chunk
+        // stages and the merge's outputs are dynamic (`flash_decode_kv8_dynamic_shared_bytes`).
         shared_bytes: 16 * 32 * 16 + 2 * 4 * 8 * 4,
         programmatic: true,
-        src: concat!(
-            "#define BRAIN_GRP 6\n#define BRAIN_DECODE_STAGES 2\n#define BRAIN_KV_FP8 1\n#define brain_paged_flash_decode_gqa_hd256_kv8 brain_paged_flash_decode_gqa_hd256_kvfp8\n",
-            include_str!("../cu/paged_flash_decode_gqa_hd256_kv8.cu")
-        ),
+        src: concat!("#define BRAIN_HD 256\n#define BRAIN_DECODE_STAGES 2\n#define BRAIN_KV_FP8 1\n#define brain_paged_flash_decode_gqa_hd256_kv8 brain_paged_flash_decode_gqa_hd256_kvfp8\n", include_str!("../cu/paged_flash_decode_gqa_hd256_kv8.cu")),
+    },
+    CudaKernel {
+        name: "paged_flash_decode_gqa_hd128_kv8",
+        // Redirected to by name from every group's WGSL `paged_flash_decode_gqa_hd256#GRP=g,HD=128,HD4=32,HDS=7#kv=int8` (`gpu_core::native_upgrade`).
+        op: Op::PagedAttentionFused,
+        weight: Dtype::I8,
+        by_name: true,
+        source: ImplSource::Tuned,
+        // mma.sync.m16n8k16 with f16 inputs: the floor every fp16 tensor-core kernel here shares.
+        min_cc: MMA_S8_MIN_CC,
+        entry: "brain_paged_flash_decode_gqa_hd128_kv8",
+        what: "split-key GQA decode attention at head_dim 128 and any group of at most 8 over an int8 paged pool on f16 tensor cores (int8 exact in f16, query and probabilities split into two f16 parts): each warp runs its own 16-key chunks, every head of the group from one read of each row; the partial records of the WGSL kernel",
+        reported: "native:paged_flash_decode_gqa_hd128_kv8",
+        block_dim: 128,
+        // One block per (sequence, kv head, key split).
+        tile: (1, 1),
+        // The query fragments (8 k-steps x 32 lanes x 16 bytes) plus the merge's max and sum of 4 warps x 8 heads; the chunk
+        // stages and the merge's outputs are dynamic (`flash_decode_kv8_dynamic_shared_bytes`).
+        shared_bytes: 8 * 32 * 16 + 2 * 4 * 8 * 4,
+        programmatic: true,
+        src: concat!("#define BRAIN_HD 128\n#define BRAIN_DECODE_STAGES 2\n#define brain_paged_flash_decode_gqa_hd256_kv8 brain_paged_flash_decode_gqa_hd128_kv8\n", include_str!("../cu/paged_flash_decode_gqa_hd256_kv8.cu")),
+    },
+    CudaKernel {
+        name: "paged_flash_decode_gqa_hd128_kvfp8",
+        // Redirected to by name from every group's WGSL `paged_flash_decode_gqa_hd256#GRP=g,HD=128,HD4=32,HDS=7#kv=fp8` (`gpu_core::native_upgrade`).
+        op: Op::PagedAttentionFused,
+        weight: Dtype::F8E4M3,
+        by_name: true,
+        source: ImplSource::Tuned,
+        // mma.sync.m16n8k16 with f16 inputs, and the E4M3 pair conversion (`cvt.rn.f16x2.e4m3x2`, sm_89).
+        min_cc: FP8_CVT_MIN_CC,
+        entry: "brain_paged_flash_decode_gqa_hd128_kvfp8",
+        what: "paged_flash_decode_gqa_hd128_kv8 over an FP8 E4M3 pool with one scale per (token, kv head) row: the elements widen to f16 exactly",
+        reported: "native:paged_flash_decode_gqa_hd128_kvfp8",
+        block_dim: 128,
+        // One block per (sequence, kv head, key split).
+        tile: (1, 1),
+        // The query fragments (8 k-steps x 32 lanes x 16 bytes) plus the merge's max and sum of 4 warps x 8 heads; the chunk
+        // stages and the merge's outputs are dynamic (`flash_decode_kv8_dynamic_shared_bytes`).
+        shared_bytes: 8 * 32 * 16 + 2 * 4 * 8 * 4,
+        programmatic: true,
+        src: concat!("#define BRAIN_HD 128\n#define BRAIN_DECODE_STAGES 2\n#define BRAIN_KV_FP8 1\n#define brain_paged_flash_decode_gqa_hd256_kv8 brain_paged_flash_decode_gqa_hd128_kvfp8\n", include_str!("../cu/paged_flash_decode_gqa_hd256_kv8.cu")),
     },
     CudaKernel {
         name: "paged_flash_decode_gqa_hd256_f32",
-        // Redirected to by name from the WGSL `paged_flash_decode_gqa_hd256#GRP=6` (`gpu_core::native_upgrade`).
+        // Redirected to by name from every group's WGSL `paged_flash_decode_gqa_hd256#GRP=g` (`gpu_core::native_upgrade`).
         op: Op::PagedAttentionFused,
         weight: Dtype::F32,
         by_name: true,
@@ -1098,7 +1146,7 @@ pub const ALL: &[CudaKernel] = &[
         // mma.sync.m16n8k8 with TF32 operands.
         min_cc: MMA_S8_MIN_CC,
         entry: "brain_paged_flash_decode_gqa_hd256_f32",
-        what: "split-key GQA decode attention at head_dim 256 and group 6 over an f32 paged pool on TF32 tensor cores (operands split hi/lo, three products): each warp runs its own 16-key chunks, every head of the group from one read; the partial records of the WGSL kernel",
+        what: "split-key GQA decode attention at head_dim 256 and any group of at most 8 over an f32 paged pool on TF32 tensor cores (operands split hi/lo, three products): each warp runs its own 16-key chunks, every head of the group from one read; the partial records of the WGSL kernel",
         reported: "native:paged_flash_decode_gqa_hd256_f32",
         block_dim: 128,
         tile: (1, 1),
@@ -1106,13 +1154,35 @@ pub const ALL: &[CudaKernel] = &[
         shared_bytes: 4 * 8 * 256 * 4 + 2 * 4 * 8 * 4,
         programmatic: true,
         src: concat!(
-            "#define BRAIN_GRP 6\n#define brain_paged_flash_decode_gqa_hd256_tf32 brain_paged_flash_decode_gqa_hd256_f32\n",
+            "#define BRAIN_HD 256\n#define brain_paged_flash_decode_gqa_hd256_tf32 brain_paged_flash_decode_gqa_hd256_f32\n",
+            include_str!("../cu/paged_flash_decode_gqa_hd256_tf32.cu")
+        ),
+    },
+    CudaKernel {
+        name: "paged_flash_decode_gqa_hd128_f32",
+        // Redirected to by name from every group's WGSL `paged_flash_decode_gqa_hd256#GRP=g,HD=128,HD4=32,HDS=7` (`gpu_core::native_upgrade`).
+        op: Op::PagedAttentionFused,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        // mma.sync.m16n8k8 with TF32 operands.
+        min_cc: MMA_S8_MIN_CC,
+        entry: "brain_paged_flash_decode_gqa_hd128_f32",
+        what: "split-key GQA decode attention at head_dim 128 and any group of at most 8 over an f32 paged pool on TF32 tensor cores (operands split hi/lo, three products): each warp runs its own 16-key chunks, every head of the group from one read; the partial records of the WGSL kernel",
+        reported: "native:paged_flash_decode_gqa_hd128_f32",
+        block_dim: 128,
+        tile: (1, 1),
+        // The query fragments and, reusing their bytes, the merge of 4 warps x 8 heads x 128 outputs; the maxima and sums.
+        shared_bytes: 4 * 8 * 128 * 4 + 2 * 4 * 8 * 4,
+        programmatic: true,
+        src: concat!(
+            "#define BRAIN_HD 128\n#define brain_paged_flash_decode_gqa_hd256_tf32 brain_paged_flash_decode_gqa_hd128_f32\n",
             include_str!("../cu/paged_flash_decode_gqa_hd256_tf32.cu")
         ),
     },
     CudaKernel {
         name: "paged_flash_decode_gqa_hd256_kvbf16",
-        // Redirected to by name from the WGSL `paged_flash_decode_gqa_hd256#GRP=6#kv=bf16` (`gpu_core::native_upgrade`).
+        // Redirected to by name from every group's WGSL `paged_flash_decode_gqa_hd256#GRP=g#kv=bf16` (`gpu_core::native_upgrade`).
         op: Op::PagedAttentionFused,
         weight: Dtype::BF16,
         by_name: true,
@@ -1120,16 +1190,37 @@ pub const ALL: &[CudaKernel] = &[
         // mma.sync.m16n8k16 with bf16 inputs and `movmatrix`: sm_80.
         min_cc: MMA_S8_MIN_CC,
         entry: "brain_paged_flash_decode_gqa_hd256_kvbf16",
-        what: "split-key GQA decode attention at head_dim 256 and group 6 over a bf16 paged pool on bf16 tensor cores (bf16 exact as an operand, query and probabilities split into three bf16 parts): keys are the rows of the score product, each warp runs its own 16-key chunks through a cp.async ring, every head of the group from one read; the partial records of the WGSL kernel",
+        what: "split-key GQA decode attention at head_dim 256 and any group of at most 8 over a bf16 paged pool on bf16 tensor cores (bf16 exact as an operand, query and probabilities split into three bf16 parts): keys are the rows of the score product, each warp runs its own 16-key chunks through a cp.async ring, every head of the group from one read; the partial records of the WGSL kernel",
         reported: "native:paged_flash_decode_gqa_hd256_kvbf16",
         block_dim: 128,
         // One block per (sequence, kv head, key split).
         tile: (1, 1),
         // The query fragments (16 k-steps x 3 parts x 32 lanes x 8 bytes) plus the merge's max and sum of 4 warps x 8 heads; the
-        // cp.async ring and the merge's outputs are dynamic (`FLASH_DECODE_BF16_DYNAMIC_SHARED_BYTES`).
+        // cp.async ring and the merge's outputs are dynamic (`flash_decode_bf16_dynamic_shared_bytes`).
         shared_bytes: 16 * 3 * 32 * 8 + 2 * 4 * 8 * 4,
         programmatic: true,
-        src: concat!("#define BRAIN_GRP 6\n#define BRAIN_DECODE_STAGES 3\n", include_str!("../cu/paged_flash_decode_gqa_hd256_kvbf16.cu")),
+        src: concat!("#define BRAIN_HD 256\n#define BRAIN_DECODE_STAGES 3\n#define BRAIN_BLOCKS_PER_SM 2\n", include_str!("../cu/paged_flash_decode_gqa_hd256_kvbf16.cu")),
+    },
+    CudaKernel {
+        name: "paged_flash_decode_gqa_hd128_kvbf16",
+        // Redirected to by name from every group's WGSL `paged_flash_decode_gqa_hd256#GRP=g,HD=128,HD4=32,HDS=7#kv=bf16` (`gpu_core::native_upgrade`).
+        op: Op::PagedAttentionFused,
+        weight: Dtype::BF16,
+        by_name: true,
+        source: ImplSource::Tuned,
+        // mma.sync.m16n8k16 with bf16 inputs and `movmatrix`: sm_80.
+        min_cc: MMA_S8_MIN_CC,
+        entry: "brain_paged_flash_decode_gqa_hd128_kvbf16",
+        what: "split-key GQA decode attention at head_dim 128 and any group of at most 8 over a bf16 paged pool on bf16 tensor cores (bf16 exact as an operand, query and probabilities split into three bf16 parts): keys are the rows of the score product, each warp runs its own 16-key chunks through a cp.async ring, every head of the group from one read; the partial records of the WGSL kernel",
+        reported: "native:paged_flash_decode_gqa_hd128_kvbf16",
+        block_dim: 128,
+        // One block per (sequence, kv head, key split).
+        tile: (1, 1),
+        // The query fragments (8 k-steps x 3 parts x 32 lanes x 8 bytes) plus the merge's max and sum of 4 warps x 8 heads; the
+        // cp.async ring and the merge's outputs are dynamic (`flash_decode_bf16_dynamic_shared_bytes`).
+        shared_bytes: 8 * 3 * 32 * 8 + 2 * 4 * 8 * 4,
+        programmatic: true,
+        src: concat!("#define BRAIN_HD 128\n#define BRAIN_DECODE_STAGES 3\n#define BRAIN_BLOCKS_PER_SM 4\n#define brain_paged_flash_decode_gqa_hd256_kvbf16 brain_paged_flash_decode_gqa_hd128_kvbf16\n", include_str!("../cu/paged_flash_decode_gqa_hd256_kvbf16.cu")),
     },
     CudaKernel {
         name: "paged_flash_decode_gqa_combine",

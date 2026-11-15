@@ -491,7 +491,7 @@ fn decode_params(head_dim: u32, group: u32) -> Vec<(&'static str, u32)> {
 /// The pipeline name of the fused decode for `tier` at `head_dim` and GQA group `group`:
 /// the constants' specialisation first, then the tier's storage rewrite - the names
 /// `kernels::template::interned` and `kv_tier_variant` give them.
-fn decode_name(tier: KvTier, head_dim: u32, group: u32) -> String {
+pub fn flash_decode_name(tier: KvTier, head_dim: u32, group: u32) -> String {
     let base = kernels::template::variant_name("paged_flash_decode_gqa_hd256", &decode_params(head_dim, group));
     match tier.element {
         KvElement::F32 => base,
@@ -740,12 +740,20 @@ fn flash_splits_pinned(cap: u32, n_kv_heads: u32) -> (u32, u32) {
 /// measured no gain from it: knowledge 350). The f32 and bf16 kernels.
 const FLASH_NATIVE_BLOCKS_PER_SM: u32 = 2;
 
-/// Blocks per multiprocessor the 8-bit kernels keep resident (168 registers and two chunk stages bound it at three: `ptxas -v`
-/// and `FLASH_DECODE_KV8_DYNAMIC_SHARED_BYTES`).
+/// Blocks per multiprocessor the 8-bit kernels keep resident at head width 256 (168 registers and two chunk stages bound it at
+/// three: `cuobjdump -res-usage` and `kernels_cuda::flash_decode_kv8_dynamic_shared_bytes`).
 const FLASH_KV8_BLOCKS_PER_SM: u32 = 3;
 
-/// Blocks per multiprocessor the bf16 kernel keeps resident: its ring of 96 KiB bounds it at two (`FLASH_DECODE_BF16_DYNAMIC_SHARED_BYTES`).
+/// Blocks per multiprocessor the 8-bit kernels keep resident at head width 128: 79 registers and two chunk stages of 33 KiB
+/// bound it at five. Measured on a GH200 at 16 x 32K keys: 414 us at five against 439 us cut for three.
+const FLASH_KV8_HD128_BLOCKS_PER_SM: u32 = 5;
+
+/// Blocks per multiprocessor the bf16 kernel keeps resident at head width 256: its ring of 96 KiB bounds it at two
+/// (`kernels_cuda::flash_decode_bf16_dynamic_shared_bytes`).
 const FLASH_BF16_BLOCKS_PER_SM: u32 = 2;
+
+/// Blocks per multiprocessor the bf16 kernel keeps resident at head width 128: its 48 KiB ring and 126 registers bound it at four.
+const FLASH_BF16_HD128_BLOCKS_PER_SM: u32 = 4;
 
 /// Most tiles a split of the 8-bit decode kernels walk.
 const FLASH_KV8_MAX_TILES_PER_SPLIT: u32 = 32;
@@ -807,7 +815,7 @@ impl KvKernels {
             apply: find(names.apply)?,
             prefill_hd256: find(names.prefill_hd256)?,
             native_prefill: true,
-            decode: FLASH_SHAPES.iter().chain(shapes).filter_map(|&(hd, group)| gpu.kernel_index(&decode_name(tier, hd, group)).map(|i| (hd, group, i))).collect(),
+            decode: FLASH_SHAPES.iter().chain(shapes).filter_map(|&(hd, group)| gpu.kernel_index(&flash_decode_name(tier, hd, group)).map(|i| (hd, group, i))).collect(),
             decode_combine: gpu.kernel_index(FLASH_COMBINE),
         })
     }
@@ -895,8 +903,13 @@ impl KvKernels {
         // writes its own record, and the combine merges any number of them).
         let sms = g.caps().compute_units;
         match g.native_kernel_for(decode, &params) {
-            Some(name @ ("paged_flash_decode_gqa_hd256_kv8" | "paged_flash_decode_gqa_hd256_kvfp8" | "paged_flash_decode_gqa_hd256_kvbf16")) => {
-                let per_sm = if name.ends_with("bf16") { FLASH_BF16_BLOCKS_PER_SM } else { FLASH_KV8_BLOCKS_PER_SM };
+            Some(name) if name.ends_with("_kv8") || name.ends_with("_kvfp8") || name.ends_with("_kvbf16") => {
+                let per_sm = match (name.ends_with("bf16"), s.head_dim) {
+                    (true, 128) => FLASH_BF16_HD128_BLOCKS_PER_SM,
+                    (true, _) => FLASH_BF16_BLOCKS_PER_SM,
+                    (false, 128) => FLASH_KV8_HD128_BLOCKS_PER_SM,
+                    (false, _) => FLASH_KV8_BLOCKS_PER_SM,
+                };
                 let slots = sms.map_or(FLASH_TARGET_WORKGROUPS, |cu| cu * per_sm);
                 (params[7], params[8]) = flash_splits_kv8(slots, s.cap, s.batch, s.n_kv_heads, s.pin_splits);
             }
