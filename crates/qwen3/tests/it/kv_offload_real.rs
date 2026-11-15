@@ -79,7 +79,7 @@ fn host_kv_offload_swap_cost_and_concurrency_on_a_real_checkpoint() {
     // small workload instead of a long one.
     let num_blocks = 320u32;
     let t0 = Instant::now();
-    let mut eng = Engine::load(&path, BLOCK, num_blocks, SESSIONS as u32, BLOCKS_PER_SEQ, 512, true, true);
+    let mut eng = Engine::load(&path, BLOCK, num_blocks, SESSIONS as u32, BLOCKS_PER_SEQ, 512, true, &model::ops::TierPolicy::uniform(qwen3::Dtype::I8));
     let load_s = t0.elapsed().as_secs_f64();
     let vocab = PagedDecoder::vocab(&eng) as u32;
     let per_token = eng.kv_offload_bytes_per_token();

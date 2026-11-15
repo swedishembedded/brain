@@ -568,18 +568,13 @@ impl Default for QwenServeConfig {
 }
 
 /// The weight tiers the Qwen3 checkpoint at `path` is served at: the operator's `explicit` `--weight-format`,
-/// else [`qwen3::footprint::default_weight_tier`] of the tier the checkpoint stores its linears in, for
-/// `device_bytes` (the memory the weights may use on the largest card, `None` when unknown). The one answer
-/// `brain serve`, the SDK and `brain perf` give; a checkpoint that cannot be opened yet is planned at fp32 and
-/// `activate` reports the real error.
+/// else [`qwen3::footprint::default_weight_policy`] (the tier the checkpoint stores its linears in, under the card
+/// rule, for `device_bytes`). The one answer `brain serve`, the SDK and `brain perf` give; a checkpoint that cannot
+/// be opened yet is planned at fp32 and `activate` reports the real error.
 pub fn qwen3_weight_policy(path: &str, explicit: Option<&model::ops::TierPolicy>, device_bytes: Option<u64>) -> model::ops::TierPolicy {
-    use model::ops::TierPolicy;
-    if let Some(explicit) = explicit {
-        return explicit.clone();
-    }
-    match qwen3::open_checkpoint(path) {
-        Ok((checkpoint, src)) => TierPolicy::uniform(qwen3::footprint::default_weight_tier(&checkpoint, qwen3::source_weight_tier(&checkpoint, &*src), device_bytes)),
-        Err(_) => TierPolicy::uniform(gpu_core::select::Dtype::F32),
+    match explicit {
+        Some(explicit) => explicit.clone(),
+        None => qwen3::footprint::default_weight_policy(path, device_bytes),
     }
 }
 
@@ -2339,7 +2334,7 @@ mod tests {
         let expected_pool_bytes = qwen3::serve::kv_pool_bytes(&cfg, block_size, num_blocks, true);
 
         let before = perf::scenarios::soak::host_mem_mb();
-        let eng = qwen3::serve::Engine::load(path.to_str().unwrap(), block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, true, false);
+        let eng = qwen3::serve::Engine::load(path.to_str().unwrap(), block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, true, &model::ops::TierPolicy::uniform(gpu_core::select::Dtype::F32));
         let after = perf::scenarios::soak::host_mem_mb();
 
         assert_eq!(eng.kv_pool_bytes(), expected_pool_bytes, "the engine must allocate exactly what the pure function predicts -- no drift");

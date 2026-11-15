@@ -528,7 +528,7 @@ pub fn run_faults(spec: &SynthSpec, opt: &Options) -> Result<Artifact, String> {
     {
         let t = Instant::now();
         let r = std::panic::catch_unwind(|| {
-            qwen3::serve::Engine::load("/nonexistent/brain-fault-inject.safetensors", 16, 32, 2, 8, 16, false, false)
+            qwen3::serve::Engine::load("/nonexistent/brain-fault-inject.safetensors", 16, 32, 2, 8, 16, false, &model::ops::TierPolicy::uniform(gpu_core::select::Dtype::F32))
         });
         report.injections.push(faults::Injection {
             fault: faults::Fault::WeightReadFailure.name(),

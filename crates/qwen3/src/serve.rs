@@ -1644,14 +1644,12 @@ impl Engine {
         }
     }
 
-    /// Load a serving engine from a brain Qwen checkpoint (fp32 tensors;
-    /// `weights_int8` quantizes the linears + head at load where the device
-    /// has a packed-int8 path).
+    /// Load a serving engine from the Qwen checkpoint at `path` with its linears and head held at `tiers` (the
+    /// checkpoint's default is [`crate::footprint::default_weight_policy`]).
     #[allow(clippy::too_many_arguments)]
-    pub fn load(path: &str, block_size: u32, num_blocks: u32, max_batch: u32, max_blocks_per_seq: u32, max_prefill: u32, kv_int8: bool, weights_int8: bool) -> Engine {
+    pub fn load(path: &str, block_size: u32, num_blocks: u32, max_batch: u32, max_blocks_per_seq: u32, max_prefill: u32, kv_int8: bool, tiers: &TierPolicy) -> Engine {
         let (cfg, src) = crate::open_checkpoint(path).unwrap_or_else(|e| panic!("{e}"));
-        let tier = if weights_int8 { Dtype::I8 } else { Dtype::F32 };
-        Engine::from_source_tier(cfg, &*src, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, kv_int8, tier)
+        Engine::from_source_tiers(cfg, &*src, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, kv_int8, tiers)
     }
 
     /// Install a calibrated KV clip table, uploading its per-layer ceilings

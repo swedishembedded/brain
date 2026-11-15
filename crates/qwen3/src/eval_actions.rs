@@ -208,7 +208,7 @@ pub(crate) fn calib(resolved: &Resolved, inv: &Invocation, progress: &mut dyn Fn
 
     progress(Progress::step(1, 2, format!("running {} prompts through the fp32-KV engine", prompts.len())));
     let collector = guarded("calib", || {
-        let mut engine = crate::serve::Engine::load(&weights, CALIB_BLOCK, num_blocks, max_batch, blocks_per_seq, max_len.max(1), false, false);
+        let mut engine = crate::serve::Engine::load(&weights, CALIB_BLOCK, num_blocks, max_batch, blocks_per_seq, max_len.max(1), false, &crate::footprint::default_weight_policy(&weights, None));
         engine.calibrate_kv_while(&prompts, &mut inv.keep_going(progress, prompts.len() as u32, "prompt"))
     })?
     .ok_or(capability::failure::CANCELLED)?;

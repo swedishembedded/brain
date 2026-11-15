@@ -275,6 +275,16 @@ pub fn default_weight_tier(cfg: &QwenConfig, stored: Dtype, device_bytes: Option
     }
 }
 
+/// The weight tiers the Qwen3 checkpoint at `path` is served at by default: [`default_weight_tier`] of the tier the
+/// checkpoint stores its linears in, for `device_bytes` (the memory the weights may use on the largest card, `None`
+/// when unknown). A checkpoint that cannot be opened yet is planned at fp32; opening it later reports the real error.
+pub fn default_weight_policy(path: &str, device_bytes: Option<u64>) -> model::ops::TierPolicy {
+    match crate::open_checkpoint(path) {
+        Ok((checkpoint, src)) => model::ops::TierPolicy::uniform(default_weight_tier(&checkpoint, crate::source_weight_tier(&checkpoint, &*src), device_bytes)),
+        Err(_) => model::ops::TierPolicy::uniform(Dtype::F32),
+    }
+}
+
 /// Declares [`estimate_vram_bytes`]'s figure to [`gpu_core::devices::place`]
 /// before `f` builds anything, so an over-budget checkpoint is refused BY
 /// NAME (which part, how many bytes, what each card has free - see
