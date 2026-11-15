@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Live-resource accounting: how many driver objects this process currently
-//! owns through `backend-cuda`, by kind.
+//! Live-resource accounting: how many driver objects a handle family (a
+//! handle opened on its own and the handles shared from it) and the whole
+//! process currently own through `backend-cuda`, by kind; and the host-call
+//! totals and device-byte tallies, scoped the same way.
 //!
 //! Swedish Embedded AB implements long-running GPU services for its clients,
 //! where a leaked device allocation is an outage rather than a nuisance. If
@@ -16,67 +18,25 @@
 //! can only ever be a tolerance check. These counters are exact: each is
 //! incremented when the driver confirms a create and decremented when the
 //! driver confirms the matching free, so a nonzero difference against a
-//! baseline taken before a workload is a leak in this process, by kind, with no
-//! tolerance. A free the driver REFUSES is deliberately not decremented - the
-//! object is still live, and hiding that would defeat the point.
+//! baseline taken before a workload is a leak, by kind, with no tolerance. A
+//! free the driver REFUSES is deliberately not decremented - the object is
+//! still live, and hiding that would defeat the point.
 //!
-//! Cost: one relaxed atomic add per create and per free. Nothing is on a
-//! dispatch path.
+//! # Why per handle as well as per process
+//!
+//! A model's leak check reads its own handle's tally
+//! (`backend_api::Backend::live_tally`): the process-wide figure moves with
+//! every other test or model the process runs, so a check on it fails beside a
+//! sibling that is still allocating. The process-wide figure stays for tools
+//! that mean the whole process, and for the leak tests that run in a process of
+//! their own because they also ask the driver.
+//!
+//! Cost: two relaxed atomic adds per create and per free (the handle's and the
+//! process's). Nothing is on a dispatch path.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// A point-in-time reading of every kind of driver object this crate owns.
-///
-/// Compare two readings with `==` (or field by field) to prove a workload
-/// returned everything it took. Concurrent workloads in the same process make
-/// the absolute values move; take both readings while the process is otherwise
-/// idle.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct LiveResources {
-    /// Outstanding `cuMemAlloc` blocks.
-    pub device_allocs: u64,
-    /// Bytes in those blocks, as requested (a zero-byte request counts as 1).
-    pub device_bytes: u64,
-    /// Outstanding `cuMemAllocHost` blocks.
-    pub pinned_allocs: u64,
-    /// Bytes in those blocks, as requested.
-    pub pinned_bytes: u64,
-    /// Outstanding `CUevent`s.
-    pub events: u64,
-    /// Outstanding `CUstream`s.
-    pub streams: u64,
-    /// Outstanding `CUgraph`s (recorded, not instantiated).
-    pub graphs: u64,
-    /// Outstanding `CUgraphExec`s.
-    pub graph_execs: u64,
-    /// Outstanding loaded `CUmodule`s.
-    pub modules: u64,
-    /// Outstanding `cuDevicePrimaryCtxRetain` retains not yet released.
-    pub primary_retains: u64,
-    /// Outstanding `CUmemoryPool`s (stream-ordered allocation pools).
-    pub mem_pools: u64,
-    /// Outstanding blocks handed out from a pool and not yet freed. A freed
-    /// block stays in its pool, bounded by the pool's release threshold, and
-    /// goes back to the driver when the pool is trimmed or destroyed.
-    pub pool_allocs: u64,
-    /// Bytes in those blocks, as requested (a zero-byte request counts as 1).
-    pub pool_bytes: u64,
-    /// Outstanding managed (`cuMemAllocManaged`) blocks.
-    pub managed_allocs: u64,
-    /// Bytes in those blocks, as requested.
-    pub managed_bytes: u64,
-    /// Outstanding system-memory blocks: host allocations brain made for a
-    /// kernel to use directly (an explicit placement policy).
-    pub system_allocs: u64,
-    /// Bytes in those blocks, as requested.
-    pub system_bytes: u64,
-    /// Outstanding sparse buffers: reserved address ranges whose parts are backed on demand.
-    pub sparse_allocs: u64,
-    /// Bytes of physical memory currently mapped into those ranges.
-    pub sparse_backed_bytes: u64,
-}
-
-pub use backend_api::CallTotals;
+pub use backend_api::{CallTotals, LiveResources};
 
 // The process-wide `CallTotals`: every handle's calls together. A figure that has to be one model's own is read from
 // its handle instead (`backend_api::Backend::call_totals`, kept by `Calls`); this sum moves whenever any other handle
@@ -194,85 +154,6 @@ pub fn zeroed_by_size() -> Vec<(u64, u64)> {
         .collect()
 }
 
-struct Counters {
-    device_allocs: AtomicU64,
-    device_bytes: AtomicU64,
-    pinned_allocs: AtomicU64,
-    pinned_bytes: AtomicU64,
-    events: AtomicU64,
-    streams: AtomicU64,
-    graphs: AtomicU64,
-    graph_execs: AtomicU64,
-    modules: AtomicU64,
-    primary_retains: AtomicU64,
-    mem_pools: AtomicU64,
-    pool_allocs: AtomicU64,
-    pool_bytes: AtomicU64,
-    managed_allocs: AtomicU64,
-    sparse_allocs: AtomicU64,
-    sparse_backed_bytes: AtomicU64,
-    managed_bytes: AtomicU64,
-    system_allocs: AtomicU64,
-    system_bytes: AtomicU64,
-}
-
-static COUNTERS: Counters = Counters {
-    device_allocs: AtomicU64::new(0),
-    device_bytes: AtomicU64::new(0),
-    pinned_allocs: AtomicU64::new(0),
-    pinned_bytes: AtomicU64::new(0),
-    events: AtomicU64::new(0),
-    streams: AtomicU64::new(0),
-    graphs: AtomicU64::new(0),
-    graph_execs: AtomicU64::new(0),
-    modules: AtomicU64::new(0),
-    primary_retains: AtomicU64::new(0),
-    mem_pools: AtomicU64::new(0),
-    pool_allocs: AtomicU64::new(0),
-    pool_bytes: AtomicU64::new(0),
-    managed_allocs: AtomicU64::new(0),
-    sparse_allocs: AtomicU64::new(0),
-    sparse_backed_bytes: AtomicU64::new(0),
-    managed_bytes: AtomicU64::new(0),
-    system_allocs: AtomicU64::new(0),
-    system_bytes: AtomicU64::new(0),
-};
-
-/// What this process currently holds through `backend-cuda`. See
-/// [`LiveResources`].
-pub fn live_resources() -> LiveResources {
-    let c = &COUNTERS;
-    LiveResources {
-        device_allocs: c.device_allocs.load(Ordering::Relaxed),
-        device_bytes: c.device_bytes.load(Ordering::Relaxed),
-        pinned_allocs: c.pinned_allocs.load(Ordering::Relaxed),
-        pinned_bytes: c.pinned_bytes.load(Ordering::Relaxed),
-        events: c.events.load(Ordering::Relaxed),
-        streams: c.streams.load(Ordering::Relaxed),
-        graphs: c.graphs.load(Ordering::Relaxed),
-        graph_execs: c.graph_execs.load(Ordering::Relaxed),
-        modules: c.modules.load(Ordering::Relaxed),
-        primary_retains: c.primary_retains.load(Ordering::Relaxed),
-        mem_pools: c.mem_pools.load(Ordering::Relaxed),
-        pool_allocs: c.pool_allocs.load(Ordering::Relaxed),
-        pool_bytes: c.pool_bytes.load(Ordering::Relaxed),
-        managed_allocs: c.managed_allocs.load(Ordering::Relaxed),
-        sparse_allocs: c.sparse_allocs.load(Ordering::Relaxed),
-        sparse_backed_bytes: c.sparse_backed_bytes.load(Ordering::Relaxed),
-        managed_bytes: c.managed_bytes.load(Ordering::Relaxed),
-        system_allocs: c.system_allocs.load(Ordering::Relaxed),
-        system_bytes: c.system_bytes.load(Ordering::Relaxed),
-    }
-}
-
-fn up(n: &AtomicU64) {
-    n.fetch_add(1, Ordering::Relaxed);
-}
-
-fn down(n: &AtomicU64) {
-    n.fetch_sub(1, Ordering::Relaxed);
-}
-
 /// Bytes in the device blocks (from the driver, the block cache or a pool) that owners of one handle's allocations
 /// hold, and the most they have been since the peak was last reset: the accounting behind
 /// `backend_api::Backend::memory_usage`.
@@ -311,97 +192,217 @@ impl InUse {
     }
 }
 
-pub(crate) fn device_alloc(bytes: usize) {
-    up(&COUNTERS.device_allocs);
-    COUNTERS.device_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
+
+/// One set of [`LiveResources`] counters, as atomics.
+struct Counters {
+    device_allocs: AtomicU64,
+    device_bytes: AtomicU64,
+    pinned_allocs: AtomicU64,
+    pinned_bytes: AtomicU64,
+    events: AtomicU64,
+    streams: AtomicU64,
+    graphs: AtomicU64,
+    graph_execs: AtomicU64,
+    modules: AtomicU64,
+    primary_retains: AtomicU64,
+    mem_pools: AtomicU64,
+    pool_allocs: AtomicU64,
+    pool_bytes: AtomicU64,
+    managed_allocs: AtomicU64,
+    managed_bytes: AtomicU64,
+    system_allocs: AtomicU64,
+    system_bytes: AtomicU64,
+    sparse_allocs: AtomicU64,
+    sparse_backed_bytes: AtomicU64,
 }
-pub(crate) fn device_free(bytes: usize) {
-    down(&COUNTERS.device_allocs);
-    COUNTERS.device_bytes.fetch_sub(bytes as u64, Ordering::Relaxed);
+
+impl Counters {
+    const fn new() -> Counters {
+        Counters {
+            device_allocs: AtomicU64::new(0),
+            device_bytes: AtomicU64::new(0),
+            pinned_allocs: AtomicU64::new(0),
+            pinned_bytes: AtomicU64::new(0),
+            events: AtomicU64::new(0),
+            streams: AtomicU64::new(0),
+            graphs: AtomicU64::new(0),
+            graph_execs: AtomicU64::new(0),
+            modules: AtomicU64::new(0),
+            primary_retains: AtomicU64::new(0),
+            mem_pools: AtomicU64::new(0),
+            pool_allocs: AtomicU64::new(0),
+            pool_bytes: AtomicU64::new(0),
+            managed_allocs: AtomicU64::new(0),
+            managed_bytes: AtomicU64::new(0),
+            system_allocs: AtomicU64::new(0),
+            system_bytes: AtomicU64::new(0),
+            sparse_allocs: AtomicU64::new(0),
+            sparse_backed_bytes: AtomicU64::new(0),
+        }
+    }
+
+    fn read(&self) -> LiveResources {
+        let at = |n: &AtomicU64| n.load(Ordering::Relaxed);
+        LiveResources {
+            device_allocs: at(&self.device_allocs),
+            device_bytes: at(&self.device_bytes),
+            pinned_allocs: at(&self.pinned_allocs),
+            pinned_bytes: at(&self.pinned_bytes),
+            events: at(&self.events),
+            streams: at(&self.streams),
+            graphs: at(&self.graphs),
+            graph_execs: at(&self.graph_execs),
+            modules: at(&self.modules),
+            primary_retains: at(&self.primary_retains),
+            mem_pools: at(&self.mem_pools),
+            pool_allocs: at(&self.pool_allocs),
+            pool_bytes: at(&self.pool_bytes),
+            managed_allocs: at(&self.managed_allocs),
+            managed_bytes: at(&self.managed_bytes),
+            system_allocs: at(&self.system_allocs),
+            system_bytes: at(&self.system_bytes),
+            sparse_allocs: at(&self.sparse_allocs),
+            sparse_backed_bytes: at(&self.sparse_backed_bytes),
+        }
+    }
 }
-pub(crate) fn pinned_alloc(bytes: usize) {
-    up(&COUNTERS.pinned_allocs);
-    COUNTERS.pinned_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
+
+// The process-wide `LiveResources`: every handle's objects together, for whole-process tools and for the leak tests
+// that run in a process of their own. One model's objects are its handle's (`Live`).
+static PROCESS: Counters = Counters::new();
+
+/// What this process holds through `backend-cuda`, every handle together. It moves whenever any other handle of the
+/// process creates or frees an object; what one model holds is its handle's tally
+/// (`backend_api::Backend::live_tally`).
+pub fn live_resources() -> LiveResources {
+    PROCESS.read()
 }
-pub(crate) fn pinned_free(bytes: usize) {
-    down(&COUNTERS.pinned_allocs);
-    COUNTERS.pinned_bytes.fetch_sub(bytes as u64, Ordering::Relaxed);
+
+/// One handle's [`LiveResources`], scoped as [`InUse`] is: a handle opened on its own starts its own, a handle `share`
+/// gives counts into its parent's. Every object remembers the tally it was counted into (through the context share it
+/// holds) and is counted down from that one, whichever handle drops it. Every count also lands in the process-wide
+/// figure, so the two can never disagree about what was counted.
+pub(crate) struct Live(Counters);
+
+impl Default for Live {
+    fn default() -> Live {
+        Live(Counters::new())
+    }
 }
-pub(crate) fn event_created() {
-    up(&COUNTERS.events);
+
+impl std::fmt::Debug for Live {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.read().fmt(f)
+    }
 }
-pub(crate) fn event_destroyed() {
-    down(&COUNTERS.events);
-}
-pub(crate) fn stream_created() {
-    up(&COUNTERS.streams);
-}
-pub(crate) fn stream_destroyed() {
-    down(&COUNTERS.streams);
-}
-pub(crate) fn graph_created() {
-    up(&COUNTERS.graphs);
-}
-pub(crate) fn graph_destroyed() {
-    down(&COUNTERS.graphs);
-}
-pub(crate) fn graph_exec_created() {
-    up(&COUNTERS.graph_execs);
-}
-pub(crate) fn graph_exec_destroyed() {
-    down(&COUNTERS.graph_execs);
-}
-pub(crate) fn module_loaded() {
-    up(&COUNTERS.modules);
-}
-pub(crate) fn module_unloaded() {
-    down(&COUNTERS.modules);
-}
-pub(crate) fn primary_retained() {
-    up(&COUNTERS.primary_retains);
-}
-pub(crate) fn primary_released() {
-    down(&COUNTERS.primary_retains);
-}
-pub(crate) fn mem_pool_created() {
-    up(&COUNTERS.mem_pools);
-}
-pub(crate) fn mem_pool_destroyed() {
-    down(&COUNTERS.mem_pools);
-}
-pub(crate) fn pool_alloc(bytes: usize) {
-    up(&COUNTERS.pool_allocs);
-    COUNTERS.pool_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
-}
-pub(crate) fn pool_free(bytes: usize) {
-    down(&COUNTERS.pool_allocs);
-    COUNTERS.pool_bytes.fetch_sub(bytes as u64, Ordering::Relaxed);
-}
-pub(crate) fn managed_alloc(bytes: usize) {
-    up(&COUNTERS.managed_allocs);
-    COUNTERS.managed_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
-}
-pub(crate) fn managed_free(bytes: usize) {
-    down(&COUNTERS.managed_allocs);
-    COUNTERS.managed_bytes.fetch_sub(bytes as u64, Ordering::Relaxed);
-}
-pub(crate) fn sparse_alloc() {
-    up(&COUNTERS.sparse_allocs);
-}
-pub(crate) fn sparse_free() {
-    down(&COUNTERS.sparse_allocs);
-}
-pub(crate) fn sparse_backed(bytes: usize) {
-    COUNTERS.sparse_backed_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
-}
-pub(crate) fn sparse_unbacked(bytes: usize) {
-    COUNTERS.sparse_backed_bytes.fetch_sub(bytes as u64, Ordering::Relaxed);
-}
-pub(crate) fn system_alloc(bytes: usize) {
-    up(&COUNTERS.system_allocs);
-    COUNTERS.system_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
-}
-pub(crate) fn system_free(bytes: usize) {
-    down(&COUNTERS.system_allocs);
-    COUNTERS.system_bytes.fetch_sub(bytes as u64, Ordering::Relaxed);
+
+impl Live {
+    pub(crate) fn read(&self) -> LiveResources {
+        self.0.read()
+    }
+
+    fn up(&self, field: fn(&Counters) -> &AtomicU64, n: u64) {
+        field(&self.0).fetch_add(n, Ordering::Relaxed);
+        field(&PROCESS).fetch_add(n, Ordering::Relaxed);
+    }
+
+    fn down(&self, field: fn(&Counters) -> &AtomicU64, n: u64) {
+        field(&self.0).fetch_sub(n, Ordering::Relaxed);
+        field(&PROCESS).fetch_sub(n, Ordering::Relaxed);
+    }
+
+    pub(crate) fn device_alloc(&self, bytes: usize) {
+        self.up(|c| &c.device_allocs, 1);
+        self.up(|c| &c.device_bytes, bytes as u64);
+    }
+    pub(crate) fn device_free(&self, bytes: usize) {
+        self.down(|c| &c.device_allocs, 1);
+        self.down(|c| &c.device_bytes, bytes as u64);
+    }
+    pub(crate) fn pinned_alloc(&self, bytes: usize) {
+        self.up(|c| &c.pinned_allocs, 1);
+        self.up(|c| &c.pinned_bytes, bytes as u64);
+    }
+    pub(crate) fn pinned_free(&self, bytes: usize) {
+        self.down(|c| &c.pinned_allocs, 1);
+        self.down(|c| &c.pinned_bytes, bytes as u64);
+    }
+    pub(crate) fn event_created(&self) {
+        self.up(|c| &c.events, 1);
+    }
+    pub(crate) fn event_destroyed(&self) {
+        self.down(|c| &c.events, 1);
+    }
+    pub(crate) fn stream_created(&self) {
+        self.up(|c| &c.streams, 1);
+    }
+    pub(crate) fn stream_destroyed(&self) {
+        self.down(|c| &c.streams, 1);
+    }
+    pub(crate) fn graph_created(&self) {
+        self.up(|c| &c.graphs, 1);
+    }
+    pub(crate) fn graph_destroyed(&self) {
+        self.down(|c| &c.graphs, 1);
+    }
+    pub(crate) fn graph_exec_created(&self) {
+        self.up(|c| &c.graph_execs, 1);
+    }
+    pub(crate) fn graph_exec_destroyed(&self) {
+        self.down(|c| &c.graph_execs, 1);
+    }
+    pub(crate) fn module_loaded(&self) {
+        self.up(|c| &c.modules, 1);
+    }
+    pub(crate) fn module_unloaded(&self) {
+        self.down(|c| &c.modules, 1);
+    }
+    pub(crate) fn primary_retained(&self) {
+        self.up(|c| &c.primary_retains, 1);
+    }
+    pub(crate) fn primary_released(&self) {
+        self.down(|c| &c.primary_retains, 1);
+    }
+    pub(crate) fn mem_pool_created(&self) {
+        self.up(|c| &c.mem_pools, 1);
+    }
+    pub(crate) fn mem_pool_destroyed(&self) {
+        self.down(|c| &c.mem_pools, 1);
+    }
+    pub(crate) fn pool_alloc(&self, bytes: usize) {
+        self.up(|c| &c.pool_allocs, 1);
+        self.up(|c| &c.pool_bytes, bytes as u64);
+    }
+    pub(crate) fn pool_free(&self, bytes: usize) {
+        self.down(|c| &c.pool_allocs, 1);
+        self.down(|c| &c.pool_bytes, bytes as u64);
+    }
+    pub(crate) fn managed_alloc(&self, bytes: usize) {
+        self.up(|c| &c.managed_allocs, 1);
+        self.up(|c| &c.managed_bytes, bytes as u64);
+    }
+    pub(crate) fn managed_free(&self, bytes: usize) {
+        self.down(|c| &c.managed_allocs, 1);
+        self.down(|c| &c.managed_bytes, bytes as u64);
+    }
+    pub(crate) fn sparse_alloc(&self) {
+        self.up(|c| &c.sparse_allocs, 1);
+    }
+    pub(crate) fn sparse_free(&self) {
+        self.down(|c| &c.sparse_allocs, 1);
+    }
+    pub(crate) fn sparse_backed(&self, bytes: usize) {
+        self.up(|c| &c.sparse_backed_bytes, bytes as u64);
+    }
+    pub(crate) fn sparse_unbacked(&self, bytes: usize) {
+        self.down(|c| &c.sparse_backed_bytes, bytes as u64);
+    }
+    pub(crate) fn system_alloc(&self, bytes: usize) {
+        self.up(|c| &c.system_allocs, 1);
+        self.up(|c| &c.system_bytes, bytes as u64);
+    }
+    pub(crate) fn system_free(&self, bytes: usize) {
+        self.down(|c| &c.system_allocs, 1);
+        self.down(|c| &c.system_bytes, bytes as u64);
+    }
 }

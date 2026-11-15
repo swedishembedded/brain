@@ -559,3 +559,44 @@ fn call_totals_count_this_handle_and_its_shares_only() {
     assert!(allocs(&after) >= allocs(&start) + 3, "an allocation on a shared handle is the parent's");
     assert_eq!(shared.call_totals(), Some(after), "a shared handle reads the same totals");
 }
+
+/// `live_tally` is scoped as `memory_usage` and `call_totals` are (`backend_api::LiveResources`): driver objects a
+/// handle opened on its own, or one for another kernel set, takes never move it, while those a handle `share` gave
+/// from it takes do, its own context retain and stream included, and the shared handle reads the same tally. The
+/// reader outlives the handles, and once they are all gone it reads zero of everything. The process-wide counter
+/// (`backend_cuda::live_resources`) fails the first assertion whenever anything else in the process holds an object,
+/// which is how a model's leak check failed beside a sibling test that was still allocating.
+#[test]
+fn live_tally_counts_this_handle_and_its_shares_only() {
+    let Some(own) = backend() else { return };
+    let tally = own.live_tally().expect("the CUDA backend counts its driver objects");
+    let other = CudaBackend::try_new(KERNELS).expect("a second handle");
+    let like = own.new_like(KERNELS).expect("a handle for another kernel set");
+    let start = tally.read();
+    assert_eq!((start.primary_retains, start.streams), (1, 1), "a fresh handle holds its own context retain and stream");
+
+    let work = |b: &dyn backend_api::Backend| {
+        let bufs = (b.storage(64), b.storage(64), b.storage(64));
+        b.submit(&[], &[b.step(ADD2, &[&bufs.0, &bufs.1, &bufs.2], &[64], 64)]);
+        b.poll_wait();
+        bufs
+    };
+    let elsewhere = (work(&other), work(&*like));
+    assert_eq!(tally.read(), start, "objects on other handles are not this handle's");
+    let theirs = other.live_tally().expect("the other handle's tally").read();
+    assert!(theirs.device_allocs >= 3 && theirs.modules >= 1, "the other handle counts its own objects: {theirs:?}");
+
+    let shared = own.share().expect("a shared handle");
+    let mine = work(&*shared);
+    let held = tally.read();
+    assert_eq!(held.primary_retains, start.primary_retains + 1, "a shared handle's context retain is the parent's");
+    assert!(held.device_allocs >= start.device_allocs + 3, "a buffer on a shared handle is the parent's");
+    assert!(held.modules > start.modules, "a module a shared handle loads is the parent's");
+    assert_eq!(shared.live_tally().map(|t| t.read()), Some(held), "a shared handle reads the same tally");
+
+    drop(mine);
+    drop(shared);
+    drop(own);
+    assert_eq!(tally.read(), backend_api::LiveResources::default(), "the handle and its shares returned every object they took");
+    drop(elsewhere);
+}

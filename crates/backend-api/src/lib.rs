@@ -1831,6 +1831,13 @@ pub trait Backend: Send + Sync {
         None
     }
 
+    /// The driver objects ([`LiveResources`]) that this handle and every handle shared from it (`share`,
+    /// `share_urgent`) hold, as a reader that stays valid after all of them are gone: what a model built on this handle
+    /// still holds, whatever other handles of the process hold meanwhile. `None` where the backend does not count them.
+    fn live_tally(&self) -> Option<LiveTally> {
+        None
+    }
+
     /// How this device reaches `peer`'s memory directly. The default has no such path, for the stated reason.
     fn peer_link(&self, _peer: &GpuIdentity) -> PeerLink {
         PeerLink::none(format!("the {} backend has no device-to-device path", self.kind()))
@@ -2223,6 +2230,81 @@ impl std::ops::Add for CallTotals {
             uninit_calls: self.uninit_calls + o.uninit_calls,
             uninit_bytes: self.uninit_bytes + o.uninit_bytes,
         }
+    }
+}
+
+/// How many driver objects of each kind are outstanding: a reading that is back where it started, exactly and by kind,
+/// once a workload has returned everything it took. Each count goes up when the driver confirms a create and down when
+/// it confirms the matching free; a free the driver refuses is not counted down, because the object is still live.
+///
+/// Read through [`Backend::live_tally`] it is scoped like the device-memory tally behind [`Backend::memory_usage`]:
+/// one handle opened on its own and the handles shared from it count together, and an object is counted down from the
+/// tally it was counted into, whichever handle drops it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LiveResources {
+    /// Outstanding device allocations from the driver (`cuMemAlloc` on CUDA), including freed blocks a cache holds.
+    pub device_allocs: u64,
+    /// Bytes in those blocks, as requested (a zero-byte request counts as 1).
+    pub device_bytes: u64,
+    /// Outstanding page-locked host blocks from the driver (`cuMemAllocHost`).
+    pub pinned_allocs: u64,
+    /// Bytes in those blocks, as requested.
+    pub pinned_bytes: u64,
+    /// Outstanding events.
+    pub events: u64,
+    /// Outstanding streams.
+    pub streams: u64,
+    /// Outstanding recorded (not instantiated) graphs.
+    pub graphs: u64,
+    /// Outstanding instantiated graphs.
+    pub graph_execs: u64,
+    /// Outstanding loaded modules.
+    pub modules: u64,
+    /// Outstanding retains of the device's primary context, one per open handle.
+    pub primary_retains: u64,
+    /// Outstanding stream-ordered allocation pools.
+    pub mem_pools: u64,
+    /// Outstanding blocks handed out from a pool and not yet freed. A freed block stays in its pool, bounded by the
+    /// pool's release threshold, and goes back to the driver when the pool is trimmed or destroyed.
+    pub pool_allocs: u64,
+    /// Bytes in those blocks, as requested (a zero-byte request counts as 1).
+    pub pool_bytes: u64,
+    /// Outstanding managed (migrating) blocks.
+    pub managed_allocs: u64,
+    /// Bytes in those blocks, as requested.
+    pub managed_bytes: u64,
+    /// Outstanding system-memory blocks: host allocations made for a kernel to use directly (an explicit placement
+    /// policy).
+    pub system_allocs: u64,
+    /// Bytes in those blocks, as requested.
+    pub system_bytes: u64,
+    /// Outstanding sparse buffers: reserved address ranges whose parts are backed on demand.
+    pub sparse_allocs: u64,
+    /// Bytes of physical memory currently mapped into those ranges.
+    pub sparse_backed_bytes: u64,
+}
+
+/// A reader of one handle family's [`LiveResources`] ([`Backend::live_tally`]). It keeps the tally alive, not the
+/// handles, so a leak check reads it after the model and its device handle are dropped: everything they took has been
+/// returned exactly when it reads [`LiveResources::default`].
+#[derive(Clone)]
+pub struct LiveTally(Arc<dyn Fn() -> LiveResources + Send + Sync>);
+
+impl LiveTally {
+    /// A reader over `read`, which returns the tally's current figure.
+    pub fn new(read: impl Fn() -> LiveResources + Send + Sync + 'static) -> LiveTally {
+        LiveTally(Arc::new(read))
+    }
+
+    /// The objects the handle family holds now.
+    pub fn read(&self) -> LiveResources {
+        (self.0)()
+    }
+}
+
+impl std::fmt::Debug for LiveTally {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("LiveTally").field(&self.read()).finish()
     }
 }
 

@@ -23,8 +23,9 @@
 //! `dyn`, and async device init / read-back via `new_async` / `read_async`).
 
 pub use backend_api::{
-    f, AllocPolicy, BufUsage, DeviceBuffer, DeviceCaps, DeviceClass, DeviceOutOfMemory, DeviceStats, MemAdvice, MemoryLimits, MemoryUsage,
-    Lowering, NumericSupport, PlacementFacts, PortableDispatch, PrefetchTarget, Step, StepMeta, STORAGE_BINDING_OFFSET_ALIGN_BYTES,
+    f, AllocPolicy, BufUsage, DeviceBuffer, DeviceCaps, DeviceClass, DeviceOutOfMemory, DeviceStats, LiveResources, LiveTally,
+    MemAdvice, MemoryLimits, MemoryUsage, Lowering, NumericSupport, PlacementFacts, PortableDispatch, PrefetchTarget, Step, StepMeta,
+    STORAGE_BINDING_OFFSET_ALIGN_BYTES,
 };
 pub use backend_api::hardware;
 pub use backend_api::runtime;
@@ -1619,6 +1620,15 @@ mod native_facade {
         /// backend does not count them.
         pub fn call_totals(&self) -> Option<backend_api::CallTotals> {
             self.inner.call_totals()
+        }
+
+        /// The driver objects (allocations, streams, modules, graphs, ...) this handle, the handles shared from it and
+        /// the one it was shared from hold ([`backend_api::LiveResources`]), as a reader that outlives them: a model's
+        /// leak check takes it from the model's handle, drops the model and the handle, and expects it to read zero
+        /// of everything, whatever other handles of the process hold meanwhile. `None` where the backend does not
+        /// count them.
+        pub fn live_tally(&self) -> Option<backend_api::LiveTally> {
+            self.inner.live_tally()
         }
 
         /// Print the per-kernel `--kernel-profile` table now - the resident-model

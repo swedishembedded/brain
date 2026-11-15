@@ -2251,10 +2251,9 @@ impl backend_api::Backend for CudaBackend {
     /// pool, staging and graph cache. Cheap by design: nothing is recompiled
     /// and no device memory moves.
     fn share_urgent(&self) -> Option<Box<dyn backend_api::Backend>> {
-        let mut ctx = exec::Context::open_urgent(self.ordinal)
+        let ctx = self.ctx.share(true)
             .map_err(|e| tracing::warn!(reason = %e, "backend-cuda: cannot open an urgent handle on this device"))
             .ok()?;
-        ctx.charge_to(&self.ctx);
         let graph = self.graph.as_ref().map(|_| Mutex::new(GraphCache::default()));
         Some(Box::new(CudaBackend::assemble(
             ctx,
@@ -2285,10 +2284,9 @@ impl backend_api::Backend for CudaBackend {
     }
 
     fn share(&self) -> Option<Box<dyn backend_api::Backend>> {
-        let mut ctx = exec::Context::open(self.ordinal)
+        let ctx = self.ctx.share(false)
             .map_err(|e| tracing::warn!(reason = %e, "backend-cuda: cannot open a second handle on this device"))
             .ok()?;
-        ctx.charge_to(&self.ctx);
         let graph = self.graph.as_ref().map(|_| Mutex::new(GraphCache::default()));
         Some(Box::new(CudaBackend::assemble(
             ctx,
@@ -2361,6 +2359,11 @@ impl backend_api::Backend for CudaBackend {
 
     fn call_totals(&self) -> Option<backend_api::CallTotals> {
         Some(self.ctx.calls().read())
+    }
+
+    fn live_tally(&self) -> Option<backend_api::LiveTally> {
+        let live = self.ctx.live().clone();
+        Some(backend_api::LiveTally::new(move || live.read()))
     }
 
     fn stats(&self) -> Option<DeviceStats> {

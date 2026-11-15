@@ -28,6 +28,12 @@ the contract requires. `deepseek2ocr` sums three towers' handles and so counted 
   scoped like `memory_usage`. Read process-wide, `decode_steady_state` saw a sibling test's `cuMemAlloc` calls as its
   own steady-state token's, and every launch-count comparison moved with whatever ran beside it; their per-module
   locks serialised them only against each other.
+- And for the live driver objects by kind: `Backend::live_tally` is a reader of the handle family's tally that
+  outlives the handles, so a model's leak check drops the model and its handle and expects it to read zero. Every
+  object counts down from the tally it was counted into, which it reaches through the primary-context share it already
+  holds. Read process-wide, `qwen35`'s `cuda_leaks` and `qwen35moe`'s `decode_tapes` saw a sibling test's buffers,
+  modules and streams as their model's leak. The process-wide figure stays for whole-process tools and for
+  `backend-cuda`'s leak binary, which also asks the driver and so must run alone.
 
 ## Evidence
 
@@ -36,4 +42,5 @@ the contract requires. `deepseek2ocr` sums three towers' handles and so counted 
 `streamed_construction`, `layer_streamed` and `recompute` tests of `lfm2`, `toyseq2seq`, `clip`, `florence2` and
 `sam1` passing at default parallelism. For the call totals: `call_totals_count_this_handle_and_its_shares_only` in
 the same file (red against the process-wide totals), and `qwen35`'s `decode_steady_state` passing beside the rest of
-its binary.
+its binary. For the live objects: `live_tally_counts_this_handle_and_its_shares_only` (red against the process-wide
+counter), and `qwen35`'s `cuda_leaks` and `qwen35moe`'s `decode_tapes` passing beside the rest of their binaries.

@@ -282,9 +282,13 @@ the object that owns it is dropped, including while the device handle lives on
 to serve the next model. A loaded Qwen3.8-27B returns its ~28 GiB when the
 instance is dropped.
 
-`backend_cuda::live_resources()` reports what the process currently holds, by
-kind; two readings around a workload must be equal once everything the workload
-created is gone. `cargo test -p brain-backend-cuda --test leaks` runs that check
+`Gpu::live_tally()` reads what one device handle and the handles shared from it
+currently hold, by kind, whatever other handles of the process hold; the reader
+outlives the handles, so once a model and its handle are dropped it must read
+zero of everything. `backend_cuda::live_resources()` is the same count for the
+whole process: two readings around a workload must be equal once everything
+the workload created is gone, provided nothing else in the process runs
+meanwhile. `cargo test -p brain-backend-cuda --test leaks` runs that check
 over every owner, and `compute-sanitizer --leak-check full` over the same test
 binaries reports no leaked allocations.
 

@@ -84,7 +84,6 @@ pub struct Cubin {
     pub cached: bool,
 }
 
-/// One device with its primary context retained.
 /// One retain of a device's primary context, released when the LAST holder
 /// drops. The handle that made an allocation, an event or a pinned block is
 /// routinely gone before it is (a model drops its device handle ahead of its
@@ -93,9 +92,15 @@ pub struct Cubin {
 /// is a crash inside the driver, not an error code - so every object that needs
 /// the context to be alive holds a share of this rather than trusting the
 /// handle that created it.
+///
+/// Because every such object holds one, it also names the live-resource tally
+/// the object was counted into (`live`), so its free is counted down from that
+/// tally whichever handle drops it.
 pub(crate) struct PrimaryRef {
     fns: &'static ExecFns,
     dev: std::ffi::c_int,
+    /// The tally of the handle that retained this, or of the handle it was shared from.
+    live: Arc<crate::live::Live>,
 }
 
 impl Drop for PrimaryRef {
@@ -104,8 +109,16 @@ impl Drop for PrimaryRef {
         unsafe {
             (self.fns.primary_ctx_release)(self.dev);
         }
-        crate::live::primary_released();
+        self.live.primary_released();
     }
+}
+
+/// The tallies a [`Context`] counts into: fresh ones for a handle opened on its own, its parent's for a shared one.
+#[derive(Default)]
+struct Tallies {
+    in_use: Arc<crate::live::InUse>,
+    calls: Arc<crate::live::Calls>,
+    live: Arc<crate::live::Live>,
 }
 
 /// The compute capability that introduced bf16 tensor-core products.
@@ -147,11 +160,10 @@ pub struct Context {
     graph_epoch: Arc<AtomicU64>,
     /// Freed device blocks held for reuse - see [`BlockCache`].
     cache: Arc<BlockCache>,
-    /// The live device bytes this handle's allocations hold - see [`crate::live::InUse`]. Its own unless
-    /// [`Context::charge_to`] joined it to another handle's.
+    /// The live device bytes this handle's allocations hold - see [`crate::live::InUse`]. Its own, or the parent's
+    /// for a handle opened by [`Context::share`]; so are `calls` and the live-resource tally `primary` names.
     in_use: Arc<crate::live::InUse>,
-    /// The host calls this handle makes - see [`crate::live::Calls`]. Joined to another handle's with `in_use` by
-    /// [`Context::charge_to`].
+    /// The host calls this handle makes - see [`crate::live::Calls`].
     calls: Arc<crate::live::Calls>,
     /// The stream-ordered pool backing held blocks, created on first use - see
     /// [`PoolRef`].
@@ -186,18 +198,22 @@ impl Context {
     /// a particular physical card resolve it through the device registry's
     /// UUID first.
     pub fn open(ordinal: u32) -> Result<Context, String> {
-        Context::open_with(ordinal, false)
+        Context::open_with(ordinal, false, Tallies::default())
     }
 
-    /// [`Context::open`] with a stream at the device's greatest priority: when
-    /// it and other handles' streams all have blocks ready, the device starts
-    /// this one's first. Work already running is not preempted, so another
-    /// stream's long kernel delays it by a block, not by the whole kernel.
-    pub fn open_urgent(ordinal: u32) -> Result<Context, String> {
-        Context::open_with(ordinal, true)
+    /// A second handle on this one's device, counted into this one's tallies: its live device bytes
+    /// ([`Context::memory_in_use`]), its host calls ([`Context::calls`]) and its driver objects
+    /// ([`Context::live`]), its own context retain and stream included, so a handle shared from another reports what
+    /// the two hold and did together. `urgent` gives its stream the device's greatest priority: when it and other
+    /// handles' streams all have blocks ready, the device starts this one's first. Work already running is not
+    /// preempted, so another stream's long kernel delays it by a block, not by the whole kernel.
+    pub(crate) fn share(&self, urgent: bool) -> Result<Context, String> {
+        let tallies = Tallies { in_use: self.in_use.clone(), calls: self.calls.clone(), live: self.primary.live.clone() };
+        Context::open_with(self.info.ordinal, urgent, tallies)
     }
 
-    fn open_with(ordinal: u32, urgent: bool) -> Result<Context, String> {
+    fn open_with(ordinal: u32, urgent: bool, tallies: Tallies) -> Result<Context, String> {
+        let Tallies { in_use, calls, live } = tallies;
         let d = crate::driver::driver().map_err(str::to_string)?;
         let fns = d.exec().map_err(str::to_string)?;
         let devices = d.devices()?;
@@ -209,13 +225,13 @@ impl Context {
         // SAFETY: `ctx` is a valid out-parameter and `dev` came from
         // `cuDeviceGet`. The retain is released in `Drop`.
         d.check(unsafe { (fns.primary_ctx_retain)(&mut ctx, dev) }, "cuDevicePrimaryCtxRetain")?;
-        crate::live::primary_retained();
+        live.primary_retained();
         // Counted as soon as there is a `Context` to drop, because `Drop`
         // un-counts it: an early `?` below used to run `Drop` for a handle that
         // had never been counted, wrapping the counter and leaving every later
         // submission fencing against a second handle that did not exist.
         let others = OPEN_CONTEXTS.fetch_add(1, Ordering::AcqRel);
-        let primary = Arc::new(PrimaryRef { fns, dev });
+        let primary = Arc::new(PrimaryRef { fns, dev, live });
         let mut c = Context {
             d,
             fns,
@@ -233,8 +249,8 @@ impl Context {
             holding: std::sync::atomic::AtomicBool::new(false),
             pool_wanted: std::sync::atomic::AtomicBool::new(backend_api::runtime::stream_pool()),
             cache: Arc::new(BlockCache::new(d, fns, ctx, primary, 0)),
-            in_use: Arc::default(),
-            calls: Arc::default(),
+            in_use,
+            calls,
             capture_gate: Arc::new(Mutex::new(())),
             blas: std::sync::OnceLock::new(),
         };
@@ -252,8 +268,8 @@ impl Context {
         } else {
             d.check(unsafe { (fns.stream_create)(&mut c.stream, CU_STREAM_NON_BLOCKING) }, "cuStreamCreate")?;
         }
-        crate::live::stream_created();
-        c.stream_guard = Some(Arc::new(StreamGuard { fns, ctx, stream: c.stream, _primary: c.primary.clone() }));
+        c.primary.live.stream_created();
+        c.stream_guard = Some(Arc::new(StreamGuard { fns, ctx, stream: c.stream, primary: c.primary.clone() }));
         // The count went up BEFORE this drain, so any handle that submits after
         // this point already fences. The drain covers work another handle
         // issued before it could know a second handle would exist: its buffers
@@ -297,15 +313,12 @@ impl Context {
         Ok(())
     }
 
-    /// Charge this handle's allocations to `parent`'s tally of live device bytes, and its host calls to `parent`'s call
-    /// totals, from now on, so a handle shared from another reports what the two hold and did together
-    /// ([`Context::memory_in_use`], [`Context::calls`]).
-    pub(crate) fn charge_to(&mut self, parent: &Context) {
-        self.in_use = parent.in_use.clone();
-        self.calls = parent.calls.clone();
+    /// The driver objects this handle and the handles shared from it hold, counted by kind.
+    pub(crate) fn live(&self) -> &Arc<crate::live::Live> {
+        &self.primary.live
     }
 
-    /// The host-call totals this handle counts into (its own, or the parent's it was charged to).
+    /// The host-call totals this handle counts into (its own, or its parent's for a handle [`Context::share`] opened).
     pub(crate) fn calls(&self) -> &crate::live::Calls {
         &self.calls
     }
@@ -452,7 +465,7 @@ impl Context {
                     rc = unsafe { (self.fns.mem_alloc)(&mut ptr, len) };
                 }
                 self.d.check(rc, "cuMemAlloc")?;
-                crate::live::device_alloc(len);
+                self.primary.live.device_alloc(len);
                 self.calls.device_allocated();
                 (ptr, Fences::default())
             }
@@ -470,7 +483,7 @@ impl Context {
             fence: std::sync::Mutex::new(fence),
             rows_shared: std::sync::atomic::AtomicBool::new(false),
             origin: Origin::Driver { cache: self.cache.clone(), in_use: self.in_use.clone() },
-            _primary: self.primary.clone(),
+            primary: self.primary.clone(),
         })
     }
 
@@ -527,7 +540,7 @@ impl Context {
             fence: std::sync::Mutex::new(Fences::default()),
             rows_shared: std::sync::atomic::AtomicBool::new(false),
             origin: Origin::Pool { pool: pool.clone(), in_use: self.in_use.clone() },
-            _primary: self.primary.clone(),
+            primary: self.primary.clone(),
         })
     }
 
@@ -548,7 +561,7 @@ impl Context {
         let mut ptr: CuDevicePtr = 0;
         // SAFETY: `ptr` is a valid out-parameter.
         self.d.check(unsafe { (pf.alloc_managed)(&mut ptr, len, MEM_ATTACH_GLOBAL) }, "cuMemAllocManaged")?;
-        crate::live::managed_alloc(len);
+        self.primary.live.managed_alloc(len);
         // SAFETY: the block is `len` bytes of managed memory the host may write
         // while no kernel uses it, which is the case for a block not yet handed out.
         unsafe { std::ptr::write_bytes(ptr as *mut u8, 0, len) };
@@ -596,7 +609,7 @@ impl Context {
                 return Err(e);
             }
         }
-        crate::live::system_alloc(len);
+        self.primary.live.system_alloc(len);
         let stream = self.stream_guard.clone().ok_or("no stream")?;
         Ok(self.placed(p as CuDevicePtr, bytes, Origin::System { layout, stream, pinned }))
     }
@@ -633,7 +646,7 @@ impl Context {
         let mut ptr: CuDevicePtr = 0;
         // SAFETY: `ptr` is a valid out-parameter; alignment 0 asks for the default, which is at least the granule.
         self.d.check(unsafe { (vmm.address_reserve)(&mut ptr, len, 0, 0, 0) }, "cuMemAddressReserve")?;
-        crate::live::sparse_alloc();
+        self.primary.live.sparse_alloc();
         let stream = self.stream_guard.clone().ok_or("no stream")?;
         let backing = SparseBacking { granule, handles: std::sync::Mutex::new(vec![0; len / granule]), prop: self.sparse_prop()?, stream };
         Ok(self.placed(ptr, len, Origin::Sparse(backing)))
@@ -652,7 +665,7 @@ impl Context {
             fence: std::sync::Mutex::new(Fences::default()),
             rows_shared: std::sync::atomic::AtomicBool::new(false),
             origin,
-            _primary: self.primary.clone(),
+            primary: self.primary.clone(),
         }
     }
 
@@ -750,7 +763,7 @@ impl Context {
 
     /// Bytes of freed device blocks this context is holding for reuse. They are
     /// still allocated from the driver (and counted by
-    /// [`crate::live_resources`]) until reissued, trimmed, or the context and
+    /// [`Context::live`]) until reissued, trimmed, or the context and
     /// every block it handed out are gone.
     pub fn cached_bytes(&self) -> u64 {
         self.cache.bytes() + self.pool.get().and_then(|p| p.as_ref()).map(|p| p.idle_bytes()).unwrap_or(0)
@@ -781,8 +794,8 @@ impl Context {
         let mut p: *mut c_void = std::ptr::null_mut();
         // SAFETY: `p` is a valid out-parameter; the block is released in Drop.
         self.d.check(unsafe { (self.fns.mem_alloc_host)(&mut p, bytes) }, "cuMemAllocHost")?;
-        crate::live::pinned_alloc(bytes);
-        Ok(PinnedMem { d: self.d, fns: self.fns, ctx: self.ctx, ptr: p as *mut u32, words, _primary: self.primary.clone() })
+        self.primary.live.pinned_alloc(bytes);
+        Ok(PinnedMem { d: self.d, fns: self.fns, ctx: self.ctx, ptr: p as *mut u32, words, primary: self.primary.clone() })
     }
 
     /// Copy host bytes into a device allocation.
@@ -1023,8 +1036,8 @@ impl Context {
         let mut ev: CuEvent = std::ptr::null_mut();
         // SAFETY: `ev` is a valid out-parameter; the flags are driver constants.
         self.d.check(unsafe { (self.fns.event_create)(&mut ev, flags) }, "cuEventCreate")?;
-        crate::live::event_created();
-        Ok(Event { d: self.d, fns: self.fns, ctx: self.ctx, ev, _primary: self.primary.clone() })
+        self.primary.live.event_created();
+        Ok(Event { d: self.d, fns: self.fns, ctx: self.ctx, ev, primary: self.primary.clone() })
     }
 
     /// Work enqueued on [`Self::stream`] after this call starts only once
@@ -1186,8 +1199,8 @@ impl Context {
             unsafe { (self.fns.module_load_data)(&mut m, cubin.as_ptr() as *const c_void) },
             "cuModuleLoadData",
         )?;
-        crate::live::module_loaded();
-        Ok(Module { d: self.d, fns: self.fns, ctx: self.ctx, m, _primary: self.primary.clone() })
+        self.primary.live.module_loaded();
+        Ok(Module { d: self.d, fns: self.fns, ctx: self.ctx, m, primary: self.primary.clone() })
     }
 
     /// Launch `f` over `grid` blocks of `block` threads with one pointer
@@ -1400,8 +1413,8 @@ impl Context {
         // SAFETY: `e` is a valid out-parameter and `graph` is a complete graph
         // built on this context. No instantiation flags are requested.
         self.d.check(unsafe { (g.graph_instantiate)(&mut e, graph.graph, 0) }, "cuGraphInstantiate")?;
-        crate::live::graph_exec_created();
-        Ok(GraphExec { d: self.d, g, ctx: self.ctx, e, _primary: self.primary.clone() })
+        self.primary.live.graph_exec_created();
+        Ok(GraphExec { d: self.d, g, ctx: self.ctx, e, primary: self.primary.clone() })
     }
 
     /// Enqueue a whole instantiated graph on [`Self::stream`] - one driver
@@ -1560,8 +1573,8 @@ impl Capture<'_> {
         if graph.is_null() {
             return Err("cuStreamEndCapture produced no graph".into());
         }
-        crate::live::graph_created();
-        Ok(Graph { d: self.ctx.d, g: self.g, graph, _primary: self.ctx.primary.clone() })
+        self.ctx.primary.live.graph_created();
+        Ok(Graph { d: self.ctx.d, g: self.g, graph, primary: self.ctx.primary.clone() })
     }
 }
 
@@ -1588,7 +1601,7 @@ pub struct Graph {
     d: &'static Driver,
     g: &'static GraphFns,
     graph: CuGraph,
-    _primary: Arc<PrimaryRef>,
+    primary: Arc<PrimaryRef>,
 }
 
 impl Drop for Graph {
@@ -1600,7 +1613,7 @@ impl Drop for Graph {
             if rc != 0 {
                 tracing::warn!("cuGraphDestroy failed: {}", self.d.error_text(rc));
             } else {
-                crate::live::graph_destroyed();
+                self.primary.live.graph_destroyed();
             }
         }
     }
@@ -1615,7 +1628,7 @@ pub struct GraphExec {
     g: &'static GraphFns,
     ctx: CuContext,
     e: CuGraphExec,
-    _primary: Arc<PrimaryRef>,
+    primary: Arc<PrimaryRef>,
 }
 
 impl Drop for GraphExec {
@@ -1627,7 +1640,7 @@ impl Drop for GraphExec {
             if rc != 0 {
                 tracing::warn!("cuGraphExecDestroy failed: {}", self.d.error_text(rc));
             } else {
-                crate::live::graph_exec_destroyed();
+                self.primary.live.graph_exec_destroyed();
             }
             let _ = self.ctx;
         }
@@ -1721,7 +1734,7 @@ pub struct Event {
     fns: &'static ExecFns,
     ctx: CuContext,
     ev: CuEvent,
-    _primary: Arc<PrimaryRef>,
+    primary: Arc<PrimaryRef>,
 }
 
 impl Event {
@@ -1765,7 +1778,7 @@ impl Drop for Event {
                 if rc != 0 {
                     tracing::warn!("cuEventDestroy failed: {}", self.d.error_text(rc));
                 } else {
-                    crate::live::event_destroyed();
+                    self.primary.live.event_destroyed();
                 }
             }
         }
@@ -1784,7 +1797,7 @@ pub struct PinnedMem {
     ctx: CuContext,
     ptr: *mut u32,
     words: usize,
-    _primary: Arc<PrimaryRef>,
+    primary: Arc<PrimaryRef>,
 }
 
 impl PinnedMem {
@@ -1852,7 +1865,7 @@ impl Drop for PinnedMem {
                 if rc != 0 {
                     tracing::warn!("cuMemFreeHost failed: {}", self.d.error_text(rc));
                 } else {
-                    crate::live::pinned_free((self.words * 4).max(4));
+                    self.primary.live.pinned_free((self.words * 4).max(4));
                 }
             }
         }
@@ -1888,7 +1901,7 @@ pub struct DeviceMem {
     /// Where this block goes when dropped.
     origin: Origin,
     /// Keeps the context this allocation lives in alive until it is freed.
-    _primary: Arc<PrimaryRef>,
+    primary: Arc<PrimaryRef>,
 }
 
 impl DeviceMem {
@@ -1975,7 +1988,7 @@ impl DeviceMem {
         }
         for &(g, handle) in &mapped {
             handles[g] = handle;
-            crate::live::sparse_backed(b.granule);
+            self.primary.live.sparse_backed(b.granule);
         }
         Ok(mapped.len())
     }
@@ -2009,7 +2022,7 @@ impl DeviceMem {
                 self.d.check((vmm.unmap)(at, b.granule), "cuMemUnmap")?;
                 self.d.check((vmm.release)(handle), "cuMemRelease")?;
             }
-            crate::live::sparse_unbacked(b.granule);
+            self.primary.live.sparse_unbacked(b.granule);
             freed += 1;
         }
         Ok(freed)
@@ -2093,7 +2106,7 @@ impl Drop for DeviceMem {
                             if rc != 0 {
                                 tracing::warn!("cuMemFree failed: {}", self.d.error_text(rc));
                             } else {
-                                crate::live::device_free(len);
+                                self.primary.live.device_free(len);
                             }
                         }
                     }
@@ -2112,7 +2125,7 @@ impl Drop for DeviceMem {
                         if rc != 0 {
                             tracing::warn!("cuMemFree of managed memory failed: {}", self.d.error_text(rc));
                         } else {
-                            crate::live::managed_free(len);
+                            self.primary.live.managed_free(len);
                         }
                     }
                 }
@@ -2132,12 +2145,12 @@ impl Drop for DeviceMem {
                                 if *handle != 0 {
                                     (vmm.unmap)(self.ptr + (g * b.granule) as CuDevicePtr, b.granule);
                                     (vmm.release)(*handle);
-                                    crate::live::sparse_unbacked(b.granule);
+                                    self.primary.live.sparse_unbacked(b.granule);
                                     *handle = 0;
                                 }
                             }
                             (vmm.address_free)(self.ptr, len);
-                            crate::live::sparse_free();
+                            self.primary.live.sparse_free();
                         }
                         _ => tracing::warn!("a sparse allocation could not be waited for and was left mapped"),
                     }
@@ -2161,7 +2174,7 @@ impl Drop for DeviceMem {
                     }
                     if idle {
                         std::alloc::dealloc(self.ptr as *mut u8, *layout);
-                        crate::live::system_free(len);
+                        self.primary.live.system_free(len);
                     } else {
                         tracing::warn!("a system-memory block could not be waited for and was left allocated");
                     }
@@ -2187,16 +2200,16 @@ struct StreamGuard {
     fns: &'static ExecFns,
     ctx: CuContext,
     stream: CuStream,
-    _primary: Arc<PrimaryRef>,
+    primary: Arc<PrimaryRef>,
 }
 
 impl Drop for StreamGuard {
     fn drop(&mut self) {
         // SAFETY: the stream was created on this context and is destroyed once;
-        // `_primary` keeps the context alive until after this.
+        // `primary` keeps the context alive until after this.
         unsafe {
             if (self.fns.ctx_set_current)(self.ctx) == 0 && (self.fns.stream_destroy)(self.stream) == 0 {
-                crate::live::stream_destroyed();
+                self.primary.live.stream_destroyed();
             }
         }
     }
@@ -2231,7 +2244,7 @@ pub(crate) struct PoolRef {
     pool: CuMemPool,
     stream: Arc<StreamGuard>,
     stream_id: u64,
-    _primary: Arc<PrimaryRef>,
+    primary: Arc<PrimaryRef>,
 }
 
 unsafe impl Send for PoolRef {}
@@ -2257,7 +2270,7 @@ impl PoolRef {
         // SAFETY: `props` is a fully initialised struct at least as large as
         // any driver's `CUmemPoolProps`; `pool` is a valid out-parameter.
         c.d.check(unsafe { (pf.pool_create)(&mut pool, &props) }, "cuMemPoolCreate")?;
-        crate::live::mem_pool_created();
+        c.primary.live.mem_pool_created();
         let this = PoolRef {
             d: c.d,
             fns: c.fns,
@@ -2266,7 +2279,7 @@ impl PoolRef {
             pool,
             stream,
             stream_id: c.stream_id,
-            _primary: c.primary.clone(),
+            primary: c.primary.clone(),
         };
         let mut threshold: u64 = c.cache.cap();
         // SAFETY: the attribute takes a `cuuint64_t`, which `threshold` is.
@@ -2320,14 +2333,14 @@ impl PoolRef {
         // SAFETY: `ptr` is a valid out-parameter; the pool and stream live as
         // long as `self`.
         self.d.check(unsafe { (self.pf.alloc_from_pool_async)(&mut ptr, len, self.pool, self.stream.stream) }, "cuMemAllocFromPoolAsync")?;
-        crate::live::pool_alloc(len);
+        self.primary.live.pool_alloc(len);
         Ok(ptr)
     }
 
     /// Enqueue the free on the pool's stream, after any work another handle's
     /// stream did on the block.
     fn free(&self, ptr: CuDevicePtr, len: usize, fence: Vec<Fence>) {
-        // SAFETY: the context outlives the pool (`_primary`), the stream lives
+        // SAFETY: the context outlives the pool (`primary`), the stream lives
         // as long as `self`, and `ptr` came from this pool.
         unsafe {
             if (self.fns.ctx_set_current)(self.ctx) != 0 {
@@ -2343,7 +2356,7 @@ impl PoolRef {
             if rc != 0 {
                 tracing::warn!("cuMemFreeAsync failed: {}", self.d.error_text(rc));
             } else {
-                crate::live::pool_free(len);
+                self.primary.live.pool_free(len);
             }
         }
     }
@@ -2379,7 +2392,7 @@ impl Drop for PoolRef {
                 if rc != 0 {
                     tracing::warn!("cuMemPoolDestroy failed: {}", self.d.error_text(rc));
                 } else {
-                    crate::live::mem_pool_destroyed();
+                    self.primary.live.mem_pool_destroyed();
                 }
             }
         }
@@ -2417,7 +2430,7 @@ impl Drop for PoolRef {
 ///   them and retries, so the cache can never be what runs the card out.
 ///
 /// Held blocks are still allocated from the driver, so they are still counted by
-/// [`crate::live_resources`] until they are reissued or freed.
+/// the context's live-resource tally ([`Context::live`]) until they are reissued or freed.
 struct BlockCache {
     d: &'static Driver,
     fns: &'static ExecFns,
@@ -2427,7 +2440,7 @@ struct BlockCache {
     enabled: std::sync::atomic::AtomicBool,
     held: std::sync::Mutex<Held>,
     /// Keeps the primary context alive until the last held block is freed.
-    _primary: Arc<PrimaryRef>,
+    primary: Arc<PrimaryRef>,
 }
 
 #[derive(Default)]
@@ -2453,7 +2466,7 @@ fn cache_cap_for(total: u64) -> u64 {
 
 impl BlockCache {
     fn new(d: &'static Driver, fns: &'static ExecFns, ctx: CuContext, primary: Arc<PrimaryRef>, cap: u64) -> BlockCache {
-        BlockCache { d, fns, ctx, cap: AtomicU64::new(cap), enabled: std::sync::atomic::AtomicBool::new(false), held: Default::default(), _primary: primary }
+        BlockCache { d, fns, ctx, cap: AtomicU64::new(cap), enabled: std::sync::atomic::AtomicBool::new(false), held: Default::default(), primary }
     }
 
     fn set_enabled(&self, on: bool) {
@@ -2508,7 +2521,7 @@ impl BlockCache {
         let mut freed = 0u64;
         for (len, blocks) in all {
             for b in blocks {
-                // SAFETY: the context is kept alive by `_primary`, and `ptr`
+                // SAFETY: the context is kept alive by `primary`, and `ptr`
                 // came from `cuMemAlloc` on it and is held by nobody else.
                 unsafe {
                     if (self.fns.ctx_set_current)(self.ctx) == 0 {
@@ -2516,7 +2529,7 @@ impl BlockCache {
                         if rc != 0 {
                             tracing::warn!("cuMemFree of a held block failed: {}", self.d.error_text(rc));
                         } else {
-                            crate::live::device_free(len);
+                            self.primary.live.device_free(len);
                             freed += len as u64;
                         }
                     }
@@ -2550,7 +2563,7 @@ pub struct Module {
     fns: &'static ExecFns,
     ctx: CuContext,
     m: CuModule,
-    _primary: Arc<PrimaryRef>,
+    primary: Arc<PrimaryRef>,
 }
 
 impl Module {
@@ -2574,7 +2587,7 @@ impl Drop for Module {
         // SAFETY: the module was loaded in this context and is unloaded once.
         unsafe {
             if (self.fns.ctx_set_current)(self.ctx) == 0 && (self.fns.module_unload)(self.m) == 0 {
-                crate::live::module_unloaded();
+                self.primary.live.module_unloaded();
             }
         }
     }
