@@ -292,6 +292,17 @@ impl ChatFullFineTune {
     }
 
     /// The architecture of the base in `model_dir`: the one named, else the checkpoint's own, else `qwen3`.
+    /// Refuses, by name, an option the architecture's trainer does not take.
+    fn refuse_options(&self, chat: &crate::chat_trainer::ChatEntry) -> Result<()> {
+        if self.native_sparse.is_some() && !chat.native_sparse {
+            return Err(Error::Backend("ChatFullFineTune: native sparse attention training is not available for this architecture".to_string()));
+        }
+        if self.stages > 0 && !chat.pipelined {
+            return Err(Error::Backend(format!("{}: {} stages asked for, and this architecture's trainer lays itself out over the cards and takes no stage count", "ChatFullFineTune", self.stages)));
+        }
+        Ok(())
+    }
+
     fn arch_of<'a>(&'a self, model_dir: &Path) -> &'a str {
         match self.arch.as_deref() {
             Some(named) => named,
@@ -309,19 +320,15 @@ impl ChatFullFineTune {
     /// checkpoint.
     pub fn run_with(&self, cancel: &CancelToken, mut on_progress: impl FnMut(&FineTuneProgress)) -> Result<ChatFullFineTuneOutcome> {
         let run_clock = std::time::Instant::now();
-        // A named architecture is refused before anything is read.
+        // A named architecture, and every option it refuses, are refused before anything is read; an
+        // architecture read from the checkpoint is held to the same refusals once the base is resolved.
         if let Some(named) = self.arch.as_deref() {
-            chat_entry(named)?;
+            self.refuse_options(&chat_entry(named)?)?;
         }
         let store_root = loader::model_dir::resolve(self.models_dir.as_deref());
         let (weights, model_dir, base_id) = loader::model_dir::resolve_base(&self.base, store_root.as_deref()).map_err(Error::ModelNotFound)?;
         let chat = chat_entry(self.arch_of(&model_dir))?;
-        if self.native_sparse.is_some() && !chat.native_sparse {
-            return Err(Error::Backend("ChatFullFineTune: native sparse attention training is not available for this architecture".to_string()));
-        }
-        if self.stages > 0 && !chat.pipelined {
-            return Err(Error::Backend(format!("{}: {} stages asked for, and this architecture's trainer lays itself out over the cards and takes no stage count", "ChatFullFineTune", self.stages)));
-        }
+        self.refuse_options(&chat)?;
         let dataset = self.dataset.as_deref().ok_or_else(|| Error::MissingArgument("ChatFullFineTune: no dataset; call .dataset(path)".to_string()))?;
         let out_dir = self.out_dir.as_deref().ok_or_else(|| Error::MissingArgument("ChatFullFineTune: no out directory; call .out_dir(path)".to_string()))?;
         if self.grad_accum == 0 {
