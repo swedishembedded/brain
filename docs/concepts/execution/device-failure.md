@@ -53,6 +53,11 @@ it is not a command and refuses to run when started by hand. A model answers
 the same in a worker as in process: its inputs, outputs, progress (streamed
 tokens and steps) and cancellation cross the process boundary, and its
 images and audio travel in shared memory rather than over the socket.
+Its metrics are reported as in process, and a model that can leave its card
+without being rebuilt (demoted when another model needs the room) does so
+inside its worker. The worker keeps its device context on the card while
+the model is demoted, so that context (about 150 MiB on a P40 <!-- perf-number: measured device context of a worker, see the gpu-supervisor ledger -->) stays counted
+against the card until the model is promoted back there or dropped.
 
 Two families can be hosted this way: `decision` (the decide and Laya
 models) and `lfm` (LFM2.5 encoders served from the model store). Every other

@@ -26,7 +26,7 @@ use capability::{failure, ActionResult, ActionSpec, Blob, CancelToken, Invocatio
 use gpu_supervisor::{BreakerPolicy, BreakerState, Health, Worker, WorkerCommand};
 use residency::budget::Budgets;
 use residency::supervised::{device_label, Deadlines, HostSpec, HostedFamily, Probe, SupervisedModel, Supervision};
-use residency::{Device, Executor, Instance, InstanceKey, Job, JobFeed, MemCost, Policy, ResidentModel};
+use residency::{Device, Executor, Instance, InstanceKey, Job, JobFeed, MemCost, Policy, ResidentModel, Tier};
 use serde_json::{json, Value};
 
 const GB: u64 = 1 << 30;
@@ -58,17 +58,53 @@ impl ResidentModel for TestModel {
         MemCost::new(20 * GB, 0)
     }
 
+    /// Demotable: its Warm tier holds a host copy, as a parked model's does.
+    fn estimate_at(&self, key: &InstanceKey, tier: Tier) -> MemCost {
+        match tier {
+            Tier::Hot => self.estimate(key),
+            Tier::Warm | Tier::Cold => MemCost::new(0, GB),
+        }
+    }
+
     fn activate(&self, _key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
-        Ok(Box::new(TestInstance { device }))
+        Ok(Box::new(TestInstance { device, runs: 0, parked: None }))
     }
 }
 
 struct TestInstance {
     device: Device,
+    /// Jobs run since the instance was built, reported as a metric.
+    runs: u64,
+    /// The tier a demotion left it at, until a promotion.
+    parked: Option<Tier>,
 }
 
 impl Instance for TestInstance {
+    fn metrics(&self) -> Vec<(String, Value)> {
+        vec![("runs".into(), json!(self.runs)), ("pid".into(), json!(std::process::id())), ("parked".into(), json!(self.parked.map(|t| format!("{t:?}"))))]
+    }
+
+    fn demote(&mut self, tier: Tier) -> Result<(), String> {
+        if tier == Tier::Hot {
+            return Err("Hot is not a demotion target".into());
+        }
+        self.parked = Some(tier);
+        Ok(())
+    }
+
+    fn promote(&mut self, device: Device) -> Result<(), String> {
+        if device != self.device {
+            return Err(format!("built on {:?}, asked to promote onto {device:?}", self.device));
+        }
+        self.parked = None;
+        Ok(())
+    }
+
     fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        if let Some(tier) = self.parked {
+            return Err(format!("parked at {tier:?}"));
+        }
+        self.runs += 1;
         match action {
             // What the worker saw, and every blob back reversed.
             "echo" => {
@@ -503,6 +539,49 @@ fn a_panic_in_model_code_fails_the_job_without_quarantining_the_card() {
     exec.shutdown();
 }
 
+fn metric(instance: &dyn Instance, name: &str) -> Value {
+    instance.metrics().into_iter().find(|(k, _)| k == name).map(|(_, v)| v).unwrap_or_else(|| panic!("no metric {name:?} in {:?}", instance.metrics()))
+}
+
+/// A hosted instance's metrics come back with each of its worker's answers, so reading them never reaches the
+/// worker; a demotion and a promotion run in the worker that holds the instance, its worker's metrics say so, and a
+/// promotion onto another card rebuilds the instance there in a new worker. A demotion the model refuses fails
+/// without touching the card's health.
+fn metrics_demotion_and_promotion_reach_the_hosted_instance() {
+    let health = health();
+    let model = hosted("m", &health, DEADLINES);
+    let key = InstanceKey::new("m", "default");
+    assert_eq!(model.estimate_at(&key, Tier::Warm).context, residency::supervised::WORKER_DEVICE_CONTEXT_BYTES, "a demoted hosted instance keeps its worker's context on its card");
+    assert_eq!(model.estimate_at(&key, Tier::Warm).vram, residency::supervised::WORKER_DEVICE_CONTEXT_BYTES);
+    let mut instance = model.activate(&key, Device::Gpu(0)).expect("the worker opens");
+    assert_eq!(metric(&*instance, "runs"), json!(0), "the open answer carries the built instance's metrics");
+    let worker = metric(&*instance, "pid");
+    assert_ne!(worker, json!(std::process::id()), "the metrics are the worker's instance's");
+    instance.run("echo", &Invocation::new(), &mut |_| {}).expect("echo runs");
+    assert_eq!(metric(&*instance, "runs"), json!(1));
+
+    instance.demote(Tier::Warm).expect("the worker's instance demotes");
+    assert_eq!(metric(&*instance, "parked"), json!("Warm"));
+    let err = instance.run("echo", &Invocation::new(), &mut |_| {}).expect_err("a demoted instance runs nothing");
+    assert!(err.contains("parked at Warm"), "{err}");
+    instance.promote(Device::Gpu(0)).expect("promoted on its own card");
+    assert_eq!((metric(&*instance, "parked"), metric(&*instance, "pid")), (Value::Null, worker.clone()), "in the same worker");
+    instance.run("echo", &Invocation::new(), &mut |_| {}).expect("a promoted instance runs");
+    assert_eq!(metric(&*instance, "runs"), json!(2), "the same instance, not a rebuild");
+
+    let err = instance.demote(Tier::Hot).expect_err("the model refuses");
+    assert!(err.contains("Hot is not a demotion target"), "{err}");
+    instance.demote(Tier::Cold).expect("demoted again");
+    instance.promote(Device::Gpu(1)).expect("promoted onto another card");
+    assert_ne!(metric(&*instance, "pid"), worker, "a worker owns one card: the instance was rebuilt in a new one");
+    let out = instance.run("echo", &Invocation::new(), &mut |_| {}).expect("runs on the new card");
+    assert_eq!(out.outputs["device"], json!("gpu1"));
+    assert_eq!(metric(&*instance, "runs"), json!(1), "rebuilt from its spec");
+    for card in [0, 1] {
+        assert_eq!(health.status(&Device::Gpu(card)).faults, 0, "no fault on gpu{card}");
+    }
+}
+
 fn the_worker_mode_serves_only_a_supervisor_that_greets_it() {
     // Not a socket: refused before anything is read.
     let out = std::process::Command::new(std::env::current_exe().unwrap()).arg("worker").stdin(std::process::Stdio::null()).output().expect("run the worker mode");
@@ -534,6 +613,7 @@ const TESTS: &[(&str, fn())] = &[
     ("a_worker_killed_mid_group_fails_its_unfinished_jobs_once", a_worker_killed_mid_group_fails_its_unfinished_jobs_once),
     ("a_job_that_keeps_reporting_outlives_the_run_deadline_and_a_silent_one_is_killed_at_it", a_job_that_keeps_reporting_outlives_the_run_deadline_and_a_silent_one_is_killed_at_it),
     ("a_panic_in_model_code_fails_the_job_without_quarantining_the_card", a_panic_in_model_code_fails_the_job_without_quarantining_the_card),
+    ("metrics_demotion_and_promotion_reach_the_hosted_instance", metrics_demotion_and_promotion_reach_the_hosted_instance),
     ("the_worker_mode_serves_only_a_supervisor_that_greets_it", the_worker_mode_serves_only_a_supervisor_that_greets_it),
 ];
 

@@ -142,7 +142,7 @@ Choices the design above left open, and what was chosen:
 * `cargo test -p brain-gpu-worker` (2 tests, real card, skip with a printed
   reason where no card opens): a quarantined card is readmitted by a real
   probe; the per-request cost (below).
-* `cargo test -p brain-residency --test hosted` (10 tests; the test binary is
+* `cargo test -p brain-residency --test hosted` (11 tests; the test binary is
   its own worker, `harness = false`): an 8 MiB blob and a 2 MiB parameter
   cross in memfds, the caller's scope reaches the worker; three progress
   frames arrive in order and a cancellation fired from a progress callback
@@ -166,9 +166,35 @@ Choices the design above left open, and what was chosen:
   parent's feed, by its ticket and with the model's reason; a job that keeps
   reporting runs
   past a 600 ms run deadline in the same worker, and one that goes silent
-  fails at it and quarantines its card; the worker mode refuses a
-  non-socket stdin, a first request that is not `hello`, another protocol
-  version and an unknown family.
+  fails at it and quarantines its card; the instance's metrics come back on
+  the `open` answer and on every later answer (the worker's, not the
+  parent's), a demotion and a promotion run in the worker that holds the
+  instance (a demoted one runs nothing, a promoted one is the same instance
+  in the same worker), a demotion the model refuses fails without a fault,
+  and a promotion onto another card rebuilds the instance there in a new
+  worker; the worker mode refuses a non-socket stdin, a first request that
+  is not `hello`, another protocol version and an unknown family.
+* `cargo test -p brain-residency --lib demotion_that_keeps
+  a_warm_instance_that_kept` (2 tests): an instance whose demotion keeps a
+  device context on its card (`MemCost::context`) stays Warm on that card
+  charged the context and nothing on the host, the eviction planner counts
+  a Hot one's demotion as freeing only the rest (counting all of it would
+  over-commit the card), evicting the Warm one again drops it, and a Warm
+  one is promoted back on its own card when it fits there, before an
+  emptier card.
+* `cargo test -p brain-residency --test it hosted_tier` (2 tests): an
+  exhaustive model of a hosted instance moving between tiers on two cards
+  beside another tenant (about 2.5 thousand states over up to three jobs,
+  two demotions and one worker fault): no card holds more than it is
+  charged (but for the context of a worker the lane is about to kill, whose
+  charge moved with the claim), a job runs only on a Hot instance in a
+  worker on the card it was placed on, the parent's metrics are the
+  worker's between requests, and at the end every card holds exactly what
+  it is charged and no worker outlives its instance; five deliberate bugs
+  are each caught (a demoted instance charged to the host, a Warm instance
+  handed over Hot without a promotion, a promotion onto another card sent
+  to the old worker, the new worker opened before the old one is killed,
+  the metrics of a new worker's `open` not kept).
 * `cargo test -p brain-residency --test it host_exchange` (2 tests): an
   exhaustive model of one lane's jobs crossing the worker socket with
   progress, caller cancellation, a deadline that progress renews, and a
@@ -376,7 +402,18 @@ steps), screening the jobs waiting to join (`screen` answered `waiting`
 with the jobs not screened yet, the worker's instance checks each and
 `refused` has the parent's feed turn the doomed ones away at once; one more
 round trip per step for a family that screens every step), caller cancellation, blobs in and out through memfds, envelopes and answers of
-any size, panics answered as job errors.
+any size, panics answered as job errors, and metrics and tiers: every
+answer carries the instance's `metrics` after the request, which the parent
+keeps (the dispatcher's poll never reaches a worker); `demote warm|cold`
+runs the instance's own demotion in its worker, bounded by the run deadline
+because the dispatcher waits for it (an in-process demotion it waits for
+unbounded); `promote <device>` runs its promotion there when the card is
+the worker's, and onto another card the old worker is killed first and a
+new one opened. A worker cannot give its device context back while it
+lives, so a demoted hosted instance stays Warm on its card charged that
+context (`MemCost::context`, set by `SupervisedModel::estimate` only for a
+model that demotes), the planner counts a Hot one's demotion as freeing
+only the rest, and a promotion goes back to that card first.
 
 * **Adapters.** The adapter registry, bank and release following live in
   the serving process, and every family that serves adapters (the Qwen3 and
@@ -415,5 +452,3 @@ any size, panics answered as job errors.
   over `QwenProvider`, which loads on first use and keeps the model inside
   the provider; hosting it needs a `HostedFamily` that rebuilds the provider
   from its weights and tokenizer, and its estimate to charge the card.
-* **Metrics, demotion.** `Instance::metrics`, `demote` and `promote` are not
-  forwarded; a hosted instance reports nothing and is only ever dropped.

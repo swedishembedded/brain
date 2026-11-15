@@ -1002,7 +1002,10 @@ impl ResidencyManager {
             let hot_cost = self.hot_cost(&*m, &key);
             let held = host_part(&self.single_charges(&entry.cost, entry.device));
             self.refuse_host_short(&key, &hot_cost, None, held)?;
-            let device = match pick_device(&hot_cost, &self.budgets, exclude) {
+            // An instance that kept a device context on its card (a worker's) goes back to that card when it fits
+            // there: the worker that holds it promotes in place, where another card needs a new worker built.
+            let kept_home = entry.cost.context > 0 && !exclude.contains(&entry.device) && self.budgets.fits_on(entry.device, hot_cost.resident_on(entry.device).saturating_sub(entry.cost.resident_on(entry.device)));
+            let device = match kept_home.then_some(entry.device).or_else(|| pick_device(&hot_cost, &self.budgets, exclude)) {
                 Some(d) => d,
                 None => {
                     self.refuse_unfittable(&key, &hot_cost)?;
@@ -1697,12 +1700,16 @@ impl ResidencyManager {
                     // a warm copy is only an optimization. What the Hot
                     // entry already holds on the host is freed by the same
                     // move, so only the difference has to fit.
+                    //
+                    // An instance whose demotion keeps a device context of its own (a worker process's) stays Warm
+                    // on its card, charged that context there: the context is what is left of it on the card.
+                    let home = if warm_cost.context > 0 { entry.device } else { Device::Cpu };
                     let held = host_part(&self.single_charges(&entry.cost, entry.device));
-                    let need = host_part(&self.single_charges(&warm_cost, Device::Cpu)).saturating_sub(held);
+                    let need = host_part(&self.single_charges(&warm_cost, home)).saturating_sub(held);
                     if self.budgets.fits_on(Device::Cpu, need) && handle.lock().unwrap().demote(Tier::Warm).is_ok() {
                         self.refund(&entry.cost, entry.device);
-                        self.charge(&warm_cost, Device::Cpu);
-                        self.residents.retier(key, warm_cost, Device::Cpu, Tier::Warm);
+                        self.charge(&warm_cost, home);
+                        self.residents.retier(key, warm_cost, home, Tier::Warm);
                         self.event(format!("demote {key} <- {:?} (warm)", entry.device));
                         return;
                     }
@@ -2000,6 +2007,8 @@ mod tests {
         name: String,
         vram: u64,
         warm_ram: u64,
+        /// A device context of the instance's own that its demotion keeps on its card (a worker process's).
+        context: u64,
         live: Arc<AtomicU32>,
         hot: Arc<AtomicU32>,
     }
@@ -2020,11 +2029,12 @@ mod tests {
             InstanceKey::new(&self.name, "default")
         }
         fn estimate(&self, _k: &InstanceKey) -> MemCost {
-            MemCost::new(self.vram, 0)
+            MemCost::new(self.vram + self.context, 0).with_kept_context(self.context)
         }
-        fn estimate_at(&self, _k: &InstanceKey, tier: Tier) -> MemCost {
+        fn estimate_at(&self, k: &InstanceKey, tier: Tier) -> MemCost {
             match tier {
-                Tier::Hot => MemCost::new(self.vram, 0),
+                Tier::Hot => self.estimate(k),
+                Tier::Warm | Tier::Cold if self.context > 0 => MemCost::new(self.context, self.warm_ram).with_kept_context(self.context),
                 Tier::Warm | Tier::Cold => MemCost::new(0, self.warm_ram),
             }
         }
@@ -2067,7 +2077,7 @@ mod tests {
         budgets.set(Device::Gpu(0), 24 * GB, 2 * GB); // 22 GB usable
         budgets.set(Device::Cpu, 64 * GB, 0);
         let mut mgr = ResidencyManager::new(budgets);
-        mgr.register(Arc::new(DemotableFake { name: "a".into(), vram: 10 * GB, warm_ram: GB, live: live.clone(), hot: hot.clone() }));
+        mgr.register(Arc::new(DemotableFake { name: "a".into(), vram: 10 * GB, warm_ram: GB, context: 0, live: live.clone(), hot: hot.clone() }));
         mgr.register(Arc::new(Fake { name: "b".into(), vram: 10 * GB, live: live.clone() }));
         mgr.register(Arc::new(Fake { name: "c".into(), vram: 10 * GB, live: live.clone() }));
 
@@ -2104,6 +2114,70 @@ mod tests {
         assert_eq!(tiers.get("a"), Some(&Tier::Hot));
     }
 
+    /// An instance whose demotion keeps a device context of its own on its card (a worker process hosting it) is
+    /// Warm on that card, charged the context there and nothing on the host, so the card is never over-committed by
+    /// what the demotion could not free; the eviction planner counts a Hot one's demotion as freeing only the rest,
+    /// and evicting the Warm one again drops it and frees the context.
+    #[test]
+    fn a_demotion_that_keeps_a_device_context_keeps_it_charged_on_its_card() {
+        let live = Arc::new(AtomicU32::new(0));
+        let hot = Arc::new(AtomicU32::new(0));
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(0), 24 * GB, 0);
+        budgets.set(Device::Cpu, 64 * GB, 0);
+        let mut mgr = ResidencyManager::new(budgets);
+        mgr.register(Arc::new(DemotableFake { name: "a".into(), vram: 10 * GB, warm_ram: GB, context: GB, live: live.clone(), hot: hot.clone() }));
+        mgr.register(Arc::new(Fake { name: "b".into(), vram: 11 * GB, live: live.clone() }));
+        mgr.register(Arc::new(Fake { name: "c".into(), vram: 13 * GB, live: live.clone() }));
+        mgr.run("a", "run", &Invocation::new(), &mut |_| {}).unwrap();
+        mgr.run("c", "run", &Invocation::new(), &mut |_| {}).unwrap();
+        assert_eq!(mgr.budgets.get(Device::Gpu(0)).unwrap().used, 24 * GB, "the card is full");
+
+        // b needs 11 GB and none are free. a's demotion frees 10 of its 11: counting all 11 the planner would take
+        // a alone and the card would hold 25 GiB, so it takes c as well.
+        mgr.run("b", "run", &Invocation::new(), &mut |_| {}).unwrap();
+        let used = mgr.budgets.get(Device::Gpu(0)).unwrap().used;
+        assert!(used <= 24 * GB, "the card is charged {} GiB of its 24", used >> 30);
+        let tiers: HashMap<String, (Device, Tier)> = mgr.residency().into_iter().map(|(k, d, t)| (k.model, (d, t))).collect();
+        assert_eq!(tiers.get("a"), Some(&(Device::Gpu(0), Tier::Warm)), "a is Warm on the card its context stays on: {tiers:?}");
+        assert_eq!(mgr.budgets.get(Device::Cpu).unwrap().used, 0, "a's worker holds its host bytes; the host is not charged them");
+        assert_eq!(used, 11 * GB + GB, "b and a's context");
+        assert_eq!(hot.load(Ordering::SeqCst), 0, "a's device buffers were released");
+
+        // A claim that needs the context's room too drops a, which frees it.
+        mgr.register(Arc::new(Fake { name: "d".into(), vram: 12 * GB + GB / 2, live: live.clone() }));
+        mgr.run("d", "run", &Invocation::new(), &mut |_| {}).unwrap();
+        assert!(mgr.residency().iter().all(|(k, _, _)| k.model != "a"), "a was dropped: {:?}", mgr.residency());
+        assert!(mgr.budgets.get(Device::Gpu(0)).unwrap().used <= 24 * GB);
+    }
+
+    /// A Warm instance that kept a device context on its card is promoted back onto that card when it fits there,
+    /// even with an emptier card beside it: its worker promotes in place, where another card needs a new worker.
+    #[test]
+    fn a_warm_instance_that_kept_a_context_is_promoted_on_its_own_card() {
+        let live = Arc::new(AtomicU32::new(0));
+        let hot = Arc::new(AtomicU32::new(0));
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(0), 24 * GB, 0);
+        budgets.set(Device::Gpu(1), 24 * GB, 0);
+        let mut mgr = ResidencyManager::new(budgets);
+        mgr.register(Arc::new(DemotableFake { name: "a".into(), vram: 10 * GB, warm_ram: GB, context: GB, live: live.clone(), hot: hot.clone() }));
+        mgr.register(Arc::new(Fake { name: "b".into(), vram: 6 * GB, live: live.clone() }));
+        mgr.register(Arc::new(Fake { name: "c".into(), vram: 3 * GB, live: live.clone() }));
+        // Placement prefers the card with the most free: c on gpu0, a on gpu1, and once a is Warm b beside it.
+        mgr.run("c", "run", &Invocation::new(), &mut |_| {}).unwrap();
+        mgr.run("a", "run", &Invocation::new(), &mut |_| {}).unwrap();
+        let (home, other) = (Device::Gpu(1), Device::Gpu(0));
+        assert!(mgr.evict(&InstanceKey::new("a", "default")));
+        assert_eq!(mgr.residency().into_iter().find(|(k, _, _)| k.model == "a").map(|(_, d, t)| (d, t)), Some((home, Tier::Warm)));
+        mgr.run("b", "run", &Invocation::new(), &mut |_| {}).unwrap();
+        assert!(mgr.budgets.free_on(other) > mgr.budgets.free_on(home), "the other card is the emptier one");
+        mgr.run("a", "run", &Invocation::new(), &mut |_| {}).unwrap();
+        let tiers: HashMap<String, (Device, Tier)> = mgr.residency().into_iter().map(|(k, d, t)| (k.model, (d, t))).collect();
+        assert_eq!(tiers.get("a"), Some(&(home, Tier::Hot)), "a came back to the card its worker holds, not {other:?}: {tiers:?}");
+        assert_eq!(hot.load(Ordering::SeqCst), 1);
+    }
+
     /// SPEC (audit F2): a Warm demotion charges host RAM, so it must CHECK the
     /// host budget first. When the warm bytes don't fit, eviction falls through
     /// to a full drop - never an unrefused overcommit (the swap cliff on
@@ -2116,7 +2190,7 @@ mod tests {
         budgets.set(Device::Gpu(0), 24 * GB, 2 * GB); // 22 GB usable
         budgets.set(Device::Cpu, 4 * GB, 0); // too small for an 8 GB warm cache
         let mut mgr = ResidencyManager::new(budgets);
-        mgr.register(Arc::new(DemotableFake { name: "a".into(), vram: 20 * GB, warm_ram: 8 * GB, live: live.clone(), hot: hot.clone() }));
+        mgr.register(Arc::new(DemotableFake { name: "a".into(), vram: 20 * GB, warm_ram: 8 * GB, context: 0, live: live.clone(), hot: hot.clone() }));
         mgr.register(Arc::new(Fake { name: "c".into(), vram: 20 * GB, live: live.clone() }));
 
         mgr.run("a", "run", &Invocation::new(), &mut |_| {}).unwrap();

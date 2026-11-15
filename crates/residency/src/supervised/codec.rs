@@ -193,24 +193,68 @@ fn result_from(v: &Value, blobs: &mut BlobsIn, extra: &[&str]) -> Result<ActionR
     Ok(Ok(Outcome { outputs, blobs: blobs.read(map.get("blobs"))? }))
 }
 
-/// The answer to a group: `{"results": [...]}`, one per job.
-pub(super) fn encode_results(results: &[ActionResult], fds: &mut Vec<OwnedFd>) -> Result<String, String> {
+/// An instance's metrics ([`crate::Instance::metrics`]) as an answer carries them: `[[name, value], ...]`, in order.
+fn metrics_json(metrics: &Metrics) -> Value {
+    Value::Array(metrics.iter().map(|(name, value)| json!([name, value])).collect())
+}
+
+/// The metrics [`metrics_json`] wrote; none when the answer carries none.
+fn metrics_from(v: Option<&Value>) -> Result<Metrics, String> {
+    let Some(v) = v else { return Ok(Vec::new()) };
+    v.as_array()
+        .ok_or("the metrics are not a list")?
+        .iter()
+        .map(|pair| match pair.as_array().map(Vec::as_slice) {
+            Some([Value::String(name), value]) => Ok((name.clone(), value.clone())),
+            _ => Err(format!("a metric is not a [name, value] pair: {pair}")),
+        })
+        .collect()
+}
+
+/// What an instance reports about itself ([`crate::Instance::metrics`]).
+pub(super) type Metrics = Vec<(String, Value)>;
+
+/// The answer to a request that runs no job (`open`, `demote`, `promote`): the instance's metrics after it,
+/// `{"metrics": [...]}`.
+pub(super) fn encode_control(metrics: &Metrics, fds: &mut Vec<OwnedFd>) -> Result<String, String> {
+    pack(json!({ "metrics": metrics_json(metrics) }).to_string(), fds)
+}
+
+/// The metrics [`encode_control`] wrote.
+pub(super) fn decode_control(payload: &str, fds: Vec<OwnedFd>) -> Result<Metrics, String> {
+    let mut fds = VecDeque::from(fds);
+    let v = unpack(payload, &mut fds)?;
+    if !fds.is_empty() {
+        return Err("the answer carries descriptors nothing in it names".into());
+    }
+    metrics_from(object(&v, "the answer", &["metrics"])?.get("metrics"))
+}
+
+/// The answer to a group: `{"results": [...], "metrics": [...]}`, one result per job and the instance's metrics
+/// after the group.
+pub(super) fn encode_results(results: &[ActionResult], metrics: &Metrics, fds: &mut Vec<OwnedFd>) -> Result<String, String> {
     let mut blobs = BlobsOut::default();
     let list: Vec<Value> = results.iter().map(|r| result_json(r, &mut blobs)).collect();
     blobs.seal(fds)?;
-    pack(json!({ "results": list }).to_string(), fds)
+    pack(json!({ "results": list, "metrics": metrics_json(metrics) }).to_string(), fds)
 }
 
-/// The results [`encode_results`] wrote. A worker that broke the protocol is
-/// the outer error; a job that failed is its own `Err`.
-pub(super) fn decode_results(payload: &str, fds: Vec<OwnedFd>) -> Result<Vec<ActionResult>, String> {
+/// The results and metrics [`encode_results`] wrote. A worker that broke the protocol is the outer error; a job
+/// that failed is its own `Err`.
+pub(super) fn decode_results(payload: &str, fds: Vec<OwnedFd>) -> Result<(Vec<ActionResult>, Metrics), String> {
     let mut fds = VecDeque::from(fds);
     let v = unpack(payload, &mut fds)?;
     let mut blobs = BlobsIn::take(fds)?;
-    let list = object(&v, "the answer", &["results"])?.get("results").and_then(Value::as_array).ok_or("the results are not a list")?;
+    let answer = object(&v, "the answer", &["results", "metrics"])?;
+    let list = answer.get("results").and_then(Value::as_array).ok_or("the results are not a list")?;
     let results = list.iter().map(|r| result_from(r, &mut blobs, &[])).collect::<Result<Vec<_>, String>>()?;
     blobs.done()?;
-    Ok(results)
+    Ok((results, metrics_from(answer.get("metrics"))?))
+}
+
+/// The answer to a `group`: whether the worker's instance ran it open, and its metrics after it.
+pub(super) fn encode_opened(open: bool, metrics: &Metrics, fds: &mut Vec<OwnedFd>) -> Result<String, String> {
+    pack(json!({ "open": open, "metrics": metrics_json(metrics) }).to_string(), fds)
 }
 
 /// An open group's finished job as a `done` frame's payload: `{"job": i}`
@@ -260,13 +304,16 @@ pub(super) fn decode_refused(payload: &str, fds: Vec<OwnedFd>) -> Result<Vec<(us
         .collect()
 }
 
-/// The answer to a `group`: whether the worker's instance ran it open.
-pub(super) fn decode_opened(payload: &str, fds: Vec<OwnedFd>) -> Result<bool, String> {
+/// What [`encode_opened`] wrote.
+pub(super) fn decode_opened(payload: &str, fds: Vec<OwnedFd>) -> Result<(bool, Metrics), String> {
+    let mut fds = VecDeque::from(fds);
+    let v = unpack(payload, &mut fds)?;
     if !fds.is_empty() {
-        return Err("a group's answer carries descriptors".into());
+        return Err("a group's answer carries descriptors nothing in it names".into());
     }
-    let v: Value = serde_json::from_str(payload).map_err(|e| format!("not JSON ({e})"))?;
-    object(&v, "the group's answer", &["open"])?.get("open").and_then(Value::as_bool).ok_or_else(|| "the group's answer does not say whether it ran open".to_string())
+    let answer = object(&v, "the group's answer", &["open", "metrics"])?;
+    let open = answer.get("open").and_then(Value::as_bool).ok_or("the group's answer does not say whether it ran open")?;
+    Ok((open, metrics_from(answer.get("metrics"))?))
 }
 
 /// A progress frame's job and update.
@@ -340,15 +387,26 @@ mod tests {
             Err("job 1 failed".into()),
             Ok(Outcome::new().blob("b", Blob::new(Media::Image, vec![7; 3]))),
         ];
+        let metrics = vec![("hits".to_string(), json!(3)), ("rate".to_string(), json!(0.5))];
         let mut fds = Vec::new();
-        let text = encode_results(&results, &mut fds).unwrap();
+        let text = encode_results(&results, &metrics, &mut fds).unwrap();
         assert_eq!((text.as_str(), fds.len()), ("-", 2), "the answer and the blobs each in one descriptor");
-        let back = decode_results(&text, fds).unwrap();
+        let (back, back_metrics) = decode_results(&text, fds).unwrap();
+        assert_eq!(back_metrics, metrics, "the instance's metrics ride on the answer, in order");
         assert_eq!(back[0].as_ref().unwrap().outputs["text"].as_str().map(str::len), Some(gpu_supervisor::MAX_REQUEST_BYTES));
         assert_eq!(back[0].as_ref().unwrap().blobs["a"].bytes, vec![9; 5]);
         assert_eq!(back[1].as_ref().err().map(String::as_str), Some("job 1 failed"));
         assert_eq!(back[2].as_ref().unwrap().blobs["b"].bytes, vec![7; 3]);
         assert!(decode_results(r#"{"results": [{"outputs": {}, "extra": 1}]}"#, Vec::new()).is_err(), "an unknown field is refused");
         assert!(decode_results(r#"{"results": [{"blobs": [{"name": "x", "media": "image", "len": 4}]}]}"#, Vec::new()).is_err(), "a blob with no bytes behind it is refused");
+        assert!(decode_results(r#"{"results": [], "metrics": [["x"]]}"#, Vec::new()).is_err(), "a metric without its value is refused");
+
+        let mut fds = Vec::new();
+        let text = encode_control(&metrics, &mut fds).unwrap();
+        assert_eq!(decode_control(&text, fds).unwrap(), metrics);
+        assert_eq!(decode_control("{}", Vec::new()).unwrap(), Vec::new(), "an answer without metrics reports none");
+        let mut fds = Vec::new();
+        let text = encode_opened(true, &metrics, &mut fds).unwrap();
+        assert_eq!(decode_opened(&text, fds).unwrap(), (true, metrics));
     }
 }

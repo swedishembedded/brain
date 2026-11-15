@@ -311,7 +311,10 @@ pub fn plan_eviction_with(policy: &dyn EvictionPolicy, cost: &MemCost, budgets: 
                 if keep.contains(&key) {
                     continue;
                 }
-                let vbytes = entry.cost.resident_on(d);
+                // A Hot instance that demotes may keep a device context on the card ([`MemCost::context`]):
+                // only the rest is sure to be freed. A Warm one is dropped, which frees all of it.
+                let kept = if entry.tier == crate::Tier::Hot { entry.cost.context } else { 0 };
+                let vbytes = entry.cost.resident_on(d).saturating_sub(kept);
                 victims.push(key);
                 freed += vbytes;
                 if vbytes >= deficit {

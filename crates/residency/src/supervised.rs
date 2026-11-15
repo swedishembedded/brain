@@ -33,10 +33,20 @@
 //! | request | answer payload |
 //! |---|---|
 //! | `hello <PROTOCOL>` | `{"protocol": n, "pid": p}`; must be the first request |
-//! | `open <device> <spec>` | `{}`; the instance is built on `<device>` |
-//! | `batch[+<n>] <action> <k> <jobs>` | `{"results": [...]}`, one per job: `{"outputs", "blobs"}` or `{"error"}` |
-//! | `group[+<n>] <action> <k> <jobs>` | `{"open": bool}`; the jobs were finished through `done` frames |
+//! | `open <device> <spec>` | `{"metrics"}`; the instance is built on `<device>` |
+//! | `batch[+<n>] <action> <k> <jobs>` | `{"results": [...], "metrics"}`, one result per job: `{"outputs", "blobs"}` or `{"error"}` |
+//! | `group[+<n>] <action> <k> <jobs>` | `{"open": bool, "metrics"}`; the jobs were finished through `done` frames |
+//! | `demote warm\|cold` | `{"metrics"}`; the instance released its device buffers, the worker keeps its device context |
+//! | `promote <device>` | `{"metrics"}`; the instance is Hot again on `<device>`, which must be the card it was opened on |
 //! | `probe <device>` | anything; the device works (sent to a fresh probe worker) |
+//!
+//! `"metrics"` is the instance's [`Instance::metrics`] after the request, as
+//! `[[name, value], ...]`: the parent keeps the last one it read, so the
+//! dispatcher's poll of a hosted instance's metrics never reaches its worker.
+//! A demotion keeps the worker and so its device context, which is why a Warm
+//! hosted instance stays charged that context on its card
+//! ([`MemCost::context`]); a promotion onto another card kills the worker and
+//! opens a new one there.
 //!
 //! `<jobs>` is `{"jobs": [{"params", "scope", "blobs"}, ...]}` and `<k>` how
 //! many it holds, so the worker's reader registers a cancellation token for
@@ -88,7 +98,7 @@ use serde_json::{json, Value};
 use crate::{AdapterIdentity, Device, Instance, InstanceKey, JobFeed, MemCost, ResidentModel, Tier};
 
 /// The protocol version a worker and its parent must agree on (`hello`).
-pub const PROTOCOL: u32 = 3;
+pub const PROTOCOL: u32 = 4;
 
 #[cfg(unix)]
 mod codec;
@@ -254,13 +264,30 @@ impl ResidentModel for SupervisedModel {
     }
 
     /// The model's own estimate plus its worker's device context and host memory: each instance is one worker on one
-    /// card.
+    /// card. For a model that demotes, the context is also what its demotion keeps on the card ([`MemCost::context`]).
     fn estimate(&self, key: &InstanceKey) -> MemCost {
-        self.inner.estimate(key).with_device_context(WORKER_DEVICE_CONTEXT_BYTES).with_process_host(WORKER_HOST_BYTES)
+        let hot = self.inner.estimate(key);
+        let placed = hot.with_device_context(WORKER_DEVICE_CONTEXT_BYTES).with_process_host(WORKER_HOST_BYTES);
+        if self.demotes(key) {
+            placed.with_kept_context(placed.vram - hot.vram)
+        } else {
+            placed
+        }
     }
 
+    /// Hot is [`Self::estimate`]. Warm and Cold keep the worker, whose device context stays on the card and whose
+    /// process stays on the host: they are charged that context there and the worker's host memory, which covers the
+    /// host copy it keeps. A model that never demotes is never asked about them.
     fn estimate_at(&self, key: &InstanceKey, tier: Tier) -> MemCost {
-        self.inner.estimate_at(key, tier).with_device_context(WORKER_DEVICE_CONTEXT_BYTES).with_process_host(WORKER_HOST_BYTES)
+        let hot = self.estimate(key);
+        if tier == Tier::Hot || !self.demotes(key) {
+            return hot;
+        }
+        let warm = self.inner.estimate_at(key, tier);
+        if hot.context == 0 {
+            return warm.with_process_host(hot.process_host);
+        }
+        MemCost::new(hot.context, 0).with_mapped(warm.mapped).with_kept_context(hot.context).with_process_host(hot.process_host)
     }
 
     fn replicas(&self) -> usize {
@@ -290,21 +317,87 @@ impl ResidentModel for SupervisedModel {
     /// Runs on the device's lane, which outlives the worker it starts (the
     /// worker is killed when the thread that spawned it exits).
     fn activate(&self, key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
-        let mut worker = Worker::spawn_with(&self.command, self.deadlines.reap).map_err(|e| format!("{key}: could not start worker {} ({e})", self.command.program().display()))?;
         let open = json!({ "family": self.spec.family, "args": self.spec.args, "key": { "model": key.model, "config": key.config } });
-        for request in [format!("hello {PROTOCOL}"), format!("open {} {open}", device_label(device))] {
-            self.health.call(&device, &mut worker, &request, self.deadlines.open).map_err(|e| format!("{key}: {e}"))?;
+        let start = WorkerStart { command: self.command.clone(), open, key: key.to_string(), health: self.health.clone(), deadlines: self.deadlines };
+        let (worker, metrics) = start.open_on(device)?;
+        Ok(Box::new(SupervisedInstance { worker: Some(worker), device, start, lost: None, closed_only: std::collections::BTreeSet::new(), metrics }))
+    }
+}
+
+impl SupervisedModel {
+    /// Whether the model opts into demotion: a model that never demotes keeps the default
+    /// [`ResidentModel::estimate_at`], its Hot estimate at every tier.
+    fn demotes(&self, key: &InstanceKey) -> bool {
+        self.inner.estimate_at(key, Tier::Warm) != self.inner.estimate(key)
+    }
+}
+
+/// How an instance's worker is started and its instance built: what activation does, and what a promotion onto
+/// another card does again (a worker owns one card).
+struct WorkerStart {
+    command: WorkerCommand,
+    /// The `open` request's spec.
+    open: Value,
+    /// The instance key, for errors.
+    key: String,
+    health: Arc<Health<Device>>,
+    deadlines: Deadlines,
+}
+
+impl WorkerStart {
+    /// A new worker with the instance built on `device`, and the instance's metrics.
+    fn open_on(&self, device: Device) -> Result<(Worker, Vec<(String, Value)>), String> {
+        let key = &self.key;
+        let mut worker = Worker::spawn_with(&self.command, self.deadlines.reap).map_err(|e| format!("{key}: could not start worker {} ({e})", self.command.program().display()))?;
+        self.health.call(&device, &mut worker, &format!("hello {PROTOCOL}"), self.deadlines.open).map_err(|e| format!("{key}: {e}"))?;
+        let metrics = control(&self.health, device, &mut worker, &format!("open {} {}", device_label(device), self.open), self.deadlines.open).map_err(|e| format!("{key}: {}", e.why))?;
+        Ok((worker, metrics))
+    }
+}
+
+/// Why a request that runs no job failed, and whether the worker is gone with it.
+struct ControlError {
+    why: String,
+    lost: bool,
+}
+
+/// A request that runs no job (`open`, `demote`, `promote`) on `worker`: the instance's metrics after it. A model
+/// panic is answered and ends the worker, so it loses the worker as a fault does.
+#[cfg(unix)]
+fn control(health: &Health<Device>, device: Device, worker: &mut Worker, request: &str, deadline: Duration) -> Result<Vec<(String, Value)>, ControlError> {
+    use gpu_supervisor::{CallError, Exchange};
+    match health.exchange(&device, worker, request, deadline, Exchange::default()) {
+        Ok((payload, fds)) => codec::decode_control(&payload, fds).map_err(|e| ControlError { why: format!("the worker's answer breaks the protocol ({e})"), lost: true }),
+        Err(CallError::Failed(message)) => {
+            let lost = message.starts_with(PANICKED);
+            Err(ControlError { why: message, lost })
         }
-        Ok(Box::new(SupervisedInstance { worker, device, health: self.health.clone(), run: self.deadlines.run, lost: None, closed_only: std::collections::BTreeSet::new() }))
+        Err(e @ (CallError::Fault(_) | CallError::Refused { .. })) => Err(ControlError { why: e.to_string(), lost: true }),
+        Err(e @ CallError::Invalid(_)) => Err(ControlError { why: e.to_string(), lost: false }),
+    }
+}
+
+#[cfg(not(unix))]
+fn control(_health: &Health<Device>, _device: Device, _worker: &mut Worker, _request: &str, _deadline: Duration) -> Result<Vec<(String, Value)>, ControlError> {
+    Err(ControlError { why: "supervised device workers need a Unix host".into(), lost: true })
+}
+
+/// The word a `demote` request names `tier` by.
+fn tier_label(tier: Tier) -> &'static str {
+    match tier {
+        Tier::Hot => "hot",
+        Tier::Warm => "warm",
+        Tier::Cold => "cold",
     }
 }
 
 /// An instance whose state lives in its worker process.
 struct SupervisedInstance {
-    worker: Worker,
+    /// `None` only while [`Self::lost`] says why: between the old worker of a promotion onto another card being
+    /// killed and its new one opening, or when that opening failed.
+    worker: Option<Worker>,
     device: Device,
-    health: Arc<Health<Device>>,
-    run: Duration,
+    start: WorkerStart,
     /// Why the worker is gone. Every later run fails with it at once: a run
     /// is not idempotent, so nothing is retried on a replacement worker; the
     /// executor drops this instance and a later job builds a fresh one.
@@ -316,9 +409,42 @@ struct SupervisedInstance {
     /// depend on more, a remembered answer would only make it batch a closed
     /// group, which every model answers correctly.
     closed_only: std::collections::BTreeSet<String>,
+    /// The worker's instance's metrics as its last answer carried them: the dispatcher reads them between runs
+    /// ([`Instance::metrics`]) and never waits on the worker for them.
+    metrics: Vec<(String, Value)>,
 }
 
 impl Instance for SupervisedInstance {
+    fn metrics(&self) -> Vec<(String, Value)> {
+        self.metrics.clone()
+    }
+
+    /// `demote <tier>` in the worker, bounded like a job by the run deadline: the dispatcher calls it, so a worker
+    /// wedged in it holds the dispatcher at most that long, and is then killed and its card quarantined.
+    fn demote(&mut self, tier: Tier) -> Result<(), String> {
+        let deadline = self.start.deadlines.run;
+        self.control(&format!("demote {}", tier_label(tier)), deadline)
+    }
+
+    /// `promote <device>` in the worker when `device` is its card. Onto another card, or after its worker was lost,
+    /// the instance is rebuilt in a new worker there (the old one is killed): a worker owns one card, and the
+    /// rebuild is the activation the model would get anyway.
+    fn promote(&mut self, device: Device) -> Result<(), String> {
+        if self.lost.is_some() || device != self.device {
+            // The old worker goes first: its device context is no longer charged to its card.
+            self.worker = None;
+            let (worker, metrics) = self.start.open_on(device).map_err(|e| self.lose(e))?;
+            self.worker = Some(worker);
+            self.device = device;
+            self.lost = None;
+            self.closed_only.clear();
+            self.metrics = metrics;
+            return Ok(());
+        }
+        let deadline = self.start.deadlines.open;
+        self.control(&format!("promote {}", device_label(device)), deadline)
+    }
+
     fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         let mut results = self.run_batch(action, std::slice::from_ref(inv), &mut |_, p| progress(p));
         match results.pop() {
@@ -356,6 +482,21 @@ impl Instance for SupervisedInstance {
 }
 
 impl SupervisedInstance {
+    /// A request that runs no job, its answer's metrics kept.
+    fn control(&mut self, request: &str, deadline: Duration) -> Result<(), String> {
+        let (Some(worker), None) = (self.worker.as_mut(), &self.lost) else {
+            return Err(self.lost.clone().unwrap_or_else(|| "the worker is gone".into()));
+        };
+        match control(&self.start.health, self.device, worker, request, deadline) {
+            Ok(metrics) => {
+                self.metrics = metrics;
+                Ok(())
+            }
+            Err(ControlError { why, lost: true }) => Err(self.lose(why)),
+            Err(ControlError { why, lost: false }) => Err(why),
+        }
+    }
+
     /// One group as one exchange with the worker: the jobs (and their blobs
     /// in a memfd) out, each job's progress and cancellation while it runs,
     /// every job's result back.
@@ -371,13 +512,17 @@ impl SupervisedInstance {
         let verb = if fds.is_empty() { "batch".to_string() } else { format!("batch+{}", fds.len()) };
         let request = format!("{verb} {action} {} {envelope}", invs.len());
 
+        let Some(worker) = self.worker.as_mut() else { return every("the worker is gone".into()) };
         let borrowed: Vec<_> = fds.iter().map(std::os::fd::AsFd::as_fd).collect();
         let mut talk = JobsTalk::new(invs, progress);
         let x = Exchange { fds: &borrowed, talk: Some(&mut talk), renew: true };
-        let answer = self.health.exchange(&self.device, &mut self.worker, &request, self.run, x);
+        let answer = self.start.health.exchange(&self.device, worker, &request, self.start.deadlines.run, x);
         match answer {
             Ok((payload, fds)) => match codec::decode_results(&payload, fds) {
-                Ok(results) => results,
+                Ok((results, metrics)) => {
+                    self.metrics = metrics;
+                    results
+                }
                 Err(e) => every(self.lose(format!("{action}: the worker's answer breaks the protocol ({e})"))),
             },
             Err(CallError::Failed(message)) => match message.strip_prefix(PANICKED) {
@@ -413,17 +558,24 @@ impl SupervisedInstance {
         };
         let verb = if fds.is_empty() { "group".to_string() } else { format!("group+{}", fds.len()) };
         let request = format!("{verb} {action} {} {envelope}", invs.len());
+        let Some(worker) = self.worker.as_mut() else {
+            talk.fail_unfinished("the worker is gone");
+            return true;
+        };
         let borrowed: Vec<_> = fds.iter().map(std::os::fd::AsFd::as_fd).collect();
         let x = Exchange { fds: &borrowed, talk: Some(&mut talk), renew: true };
-        let answer = self.health.exchange(&self.device, &mut self.worker, &request, self.run, x);
+        let answer = self.start.health.exchange(&self.device, worker, &request, self.start.deadlines.run, x);
         let why = match answer {
             Ok((payload, fds)) => match codec::decode_opened(&payload, fds) {
-                Ok(true) => return true,
-                Ok(false) if !talk.touched() => {
+                Ok((true, metrics)) => {
+                    self.metrics = metrics;
+                    return true;
+                }
+                Ok((false, _)) if !talk.touched() => {
                     self.closed_only.insert(action.to_string());
                     return false;
                 }
-                Ok(false) => self.lose(format!("{action}: the worker said it ran no open group after it had run one")),
+                Ok((false, _)) => self.lose(format!("{action}: the worker said it ran no open group after it had run one")),
                 Err(e) => self.lose(format!("{action}: the worker's answer breaks the protocol ({e})")),
             },
             Err(CallError::Failed(message)) => match message.strip_prefix(PANICKED) {

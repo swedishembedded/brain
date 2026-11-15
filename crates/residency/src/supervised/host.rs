@@ -18,9 +18,9 @@ use std::sync::{Arc, Mutex};
 use capability::{CancelToken, Progress};
 use serde_json::{json, Value};
 
-use super::codec::{decode_jobs, encode_done, encode_progress, encode_refused, encode_results, object};
+use super::codec::{decode_jobs, encode_control, encode_done, encode_opened, encode_progress, encode_refused, encode_results, object};
 use super::{parse_device_label, HostedFamily, PANICKED, PROTOCOL};
-use crate::{Instance, InstanceKey};
+use crate::{Device, Instance, InstanceKey, Tier};
 
 /// The worker side: host the model a supervisor asks for on the socket this
 /// process was started with (its stdin), until the supervisor closes it.
@@ -80,7 +80,7 @@ pub fn host_on(sock: UnixStream, families: &[HostedFamily]) -> i32 {
         eprintln!("brain worker: cannot start its reader: {e}");
         return 2;
     }
-    let mut host = Host { sock, current, rx, families, greeted: false, instance: None };
+    let mut host = Host { sock, current, rx, families, greeted: false, instance: None, device: None };
     loop {
         let incoming = match host.rx.recv() {
             Ok(Ok(incoming)) => incoming,
@@ -202,6 +202,8 @@ struct Host<'a> {
     families: &'a [HostedFamily],
     greeted: bool,
     instance: Option<Box<dyn Instance>>,
+    /// The device `open` built the instance on: the only one this worker ever opens.
+    device: Option<Device>,
 }
 
 impl Host<'_> {
@@ -260,17 +262,19 @@ impl Host<'_> {
         match verb.as_str() {
             "open" => {
                 let opened = self.open(&rest);
-                let failed = opened.as_ref().err().is_some_and(|e| e.starts_with(PANICKED));
-                let step = self.answer(id, opened.map(|()| ("{}".to_string(), Vec::new())));
-                if failed {
-                    Step::Exit(101)
-                } else {
-                    step
-                }
+                self.control_answer(id, opened)
+            }
+            "demote" => {
+                let demoted = self.demote(&rest);
+                self.control_answer(id, demoted)
+            }
+            "promote" => {
+                let promoted = self.promote(&rest);
+                self.control_answer(id, promoted)
             }
             "batch" => self.batch(id, &rest, fds, tokens),
             "group" => self.group(id, &rest, fds, tokens),
-            other => self.answer(id, Err(format!("a hosted model takes hello, open, batch and group, not {other:?}"))),
+            other => self.answer(id, Err(format!("a hosted model takes hello, open, demote, promote, batch and group, not {other:?}"))),
         }
     }
 
@@ -295,10 +299,55 @@ impl Host<'_> {
         match built {
             Ok(instance) => {
                 self.instance = Some(instance?);
+                self.device = Some(device);
                 Ok(())
             }
             Err(p) => Err(format!("{PANICKED} {}", panic_text(p.as_ref()))),
         }
+    }
+
+    /// The answer to a request that runs no job: the instance's metrics after it, or why it failed. A panic in
+    /// model code ends the worker once it is answered, as in a job.
+    fn control_answer(&mut self, id: u64, done: Result<(), String>) -> Step {
+        let panicked = done.as_ref().err().is_some_and(|e| e.starts_with(PANICKED));
+        let reply = done.and_then(|()| {
+            let mut fds = Vec::new();
+            encode_control(&self.metrics(), &mut fds).map(|payload| (payload, fds))
+        });
+        let step = self.answer(id, reply);
+        if panicked {
+            Step::Exit(101)
+        } else {
+            step
+        }
+    }
+
+    fn metrics(&self) -> super::codec::Metrics {
+        self.instance.as_ref().map(|i| i.metrics()).unwrap_or_default()
+    }
+
+    /// `demote warm|cold`: the instance releases its device buffers and keeps what it holds on the host. The
+    /// worker keeps its device context, which is why a demoted hosted instance stays charged it on its card.
+    fn demote(&mut self, rest: &str) -> Result<(), String> {
+        let tier = match rest {
+            "warm" => Tier::Warm,
+            "cold" => Tier::Cold,
+            "hot" => Tier::Hot,
+            other => return Err(format!("demote {other:?}: the tier is warm or cold")),
+        };
+        let instance = self.instance.as_mut().ok_or("no instance is open; send `open` first")?;
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| instance.demote(tier))).unwrap_or_else(|p| Err(format!("{PANICKED} {}", panic_text(p.as_ref()))))
+    }
+
+    /// `promote <device>`: the instance rebuilds what its demotion released, on the card this worker owns. Another
+    /// card is refused: a worker opens one, and the parent moves an instance by starting a new worker.
+    fn promote(&mut self, rest: &str) -> Result<(), String> {
+        let device = parse_device_label(rest)?;
+        if self.device != Some(device) {
+            return Err(format!("this worker owns {:?}; promoting onto {rest} needs a worker of its own", self.device));
+        }
+        let instance = self.instance.as_mut().ok_or("no instance is open; send `open` first")?;
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| instance.promote(device))).unwrap_or_else(|p| Err(format!("{PANICKED} {}", panic_text(p.as_ref()))))
     }
 
     /// A job's progress as a frame; once the supervisor is gone nothing more is sent.
@@ -338,7 +387,7 @@ impl Host<'_> {
             Ok(results) => {
                 self.instance = Some(instance);
                 let mut fds = Vec::new();
-                let reply = encode_results(&results, &mut fds).map(|payload| (payload, fds));
+                let reply = encode_results(&results, &self.metrics(), &mut fds).map(|payload| (payload, fds));
                 self.answer(id, reply)
             }
             Err(p) => {
@@ -382,7 +431,9 @@ impl Host<'_> {
         match result {
             Ok(open) => {
                 self.instance = Some(instance);
-                self.answer(id, Ok((json!({ "open": open }).to_string(), Vec::new())))
+                let mut fds = Vec::new();
+                let reply = encode_opened(open, &self.metrics(), &mut fds).map(|payload| (payload, fds));
+                self.answer(id, reply)
             }
             Err(p) => {
                 let _ = self.answer(id, Err(format!("{PANICKED} {}", panic_text(p.as_ref()))));

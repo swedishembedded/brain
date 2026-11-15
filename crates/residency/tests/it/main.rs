@@ -11,6 +11,7 @@ mod activation;
 mod admission;
 mod fairness_model;
 mod host_exchange_model;
+mod hosted_tier_model;
 mod late_join_model;
 mod plan;
 mod sibling_models;

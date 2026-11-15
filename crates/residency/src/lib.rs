@@ -103,11 +103,16 @@ pub struct MemCost {
     /// whatever the instance is charged wherever it is placed. `0` for an
     /// instance that runs in the serving process.
     pub process_host: u64,
+    /// Device bytes, counted in [`Self::vram`] while Hot, of a device context of the instance's own that stays on
+    /// its card when the instance is demoted: the worker process that hosts it holds that context for as long as it
+    /// lives ([`Self::with_kept_context`]). Its demotion then frees `vram` less these, and a Warm or Cold instance
+    /// stays charged them on its card. Zero for an instance whose demotion frees its card.
+    pub context: u64,
 }
 
 impl MemCost {
     pub fn new(vram: u64, ram: u64) -> MemCost {
-        MemCost { vram, ram, npu: 0, mapped: 0, activation: None, process_host: 0 }
+        MemCost { vram, ram, npu: 0, mapped: 0, activation: None, process_host: 0, context: 0 }
     }
     /// Declare the instance's peak activation bytes, beyond [`Self::vram`]
     /// (see [`Self::activation`]). `0` declares that `vram` already covers
@@ -136,6 +141,11 @@ impl MemCost {
     /// Add `bytes` of host memory a process of the instance's own holds beside it (see [`Self::process_host`]).
     pub fn with_process_host(mut self, bytes: u64) -> MemCost {
         self.process_host += bytes;
+        self
+    }
+    /// Declare `bytes` of [`Self::vram`] that a demotion keeps on the instance's card (see [`Self::context`]).
+    pub fn with_kept_context(mut self, bytes: u64) -> MemCost {
+        self.context = bytes;
         self
     }
     /// Add an NPU footprint (marks the instance as NPU-placeable). The NPU's compiled
