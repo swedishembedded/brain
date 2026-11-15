@@ -17,7 +17,7 @@ use std::process::{Command, Stdio};
 
 /// Run `brain <verb...>`; returns (exit code, stderr).
 fn brain(verb: &[&str]) -> (i32, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_brain"))
+    let out = Command::new(brain_testutil::package_bin("brain"))
         .args(verb)
         .stdin(Stdio::null())
         .output()

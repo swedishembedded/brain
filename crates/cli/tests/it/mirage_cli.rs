@@ -18,8 +18,8 @@ use serde_json::{json, Value};
 const MODEL: &str = "Cactus-Compute/mirage";
 const FORM: &str = r#"{"animal": {"enum": ["cat", "dog", "bird"]}, "count": {"type": "integer", "minimum": 0, "maximum": 6}}"#;
 
-fn bin() -> &'static str {
-    env!("CARGO_BIN_EXE_brain")
+fn bin() -> std::path::PathBuf {
+    brain_testutil::package_bin("brain")
 }
 
 /// The cats photograph as a PNG in a scratch directory, plus the scratch directory.

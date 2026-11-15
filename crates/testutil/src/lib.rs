@@ -210,6 +210,21 @@ fn append_capability_ledger(cap: &str, reason: &str, location: &str) {
     }
 }
 
+/// The binary `name` of the package under test, as cargo built it for this
+/// integration test: an integration test's executable lives in
+/// `target/<profile>/deps/`, and cargo builds the package's binaries into
+/// `target/<profile>/` before it runs the test. Found from the running
+/// executable's own path, so nothing is read from the environment. Panics,
+/// naming the path, when the binary is not there (the test was not started by
+/// cargo, or `name` is not a binary of its package).
+pub fn package_bin(name: &str) -> std::path::PathBuf {
+    let exe = std::env::current_exe().expect("the running test executable's path");
+    let profile_dir = exe.parent().and_then(std::path::Path::parent).unwrap_or_else(|| panic!("{} is not under target/<profile>/deps", exe.display()));
+    let bin = profile_dir.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+    assert!(bin.is_file(), "{} does not exist: run the test through cargo, which builds the package's binary `{name}` first", bin.display());
+    bin
+}
+
 /// The path to a testdata fixture, `<testdata-root>/<rel>`. The root is
 /// `$BRAIN_TESTDATA` if set (and non-empty), else `<repo>/testdata`.
 pub fn testdata(rel: &str) -> String {

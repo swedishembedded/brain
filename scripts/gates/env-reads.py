@@ -15,7 +15,8 @@ check-env-docs.sh (which documents each BRAIN_* name) and check-env-reads.sh
      other argument: a literal name is reported as is, a computed name as
      `<expression>` (so a new indirect read in an already-listed file is
      still a new line). Cargo-provided compile-time variables (`CARGO_*`,
-     `OUT_DIR`) are not user input and are skipped.
+     `OUT_DIR`) are not user input and are skipped, except `CARGO_BIN_EXE_*`:
+     a test finds its package's binary with `brain_testutil::package_bin`.
 
 usage: env-reads.py [--root DIR] [GLOB ...]
   --root DIR  tree to scan (default: the repository root)
@@ -30,7 +31,7 @@ BRAIN_CALL = re.compile(r'\(\s*"(BRAIN_[A-Z0-9_]+)"')
 STD_READ = re.compile(r'\benv::(?:var|var_os)\s*\(\s*("([^"]*)"|[^)]*)')
 STD_VARS = re.compile(r'\benv::vars(?:_os)?\s*\(')
 BUILD_READ = re.compile(r'\b(?:option_)?env!\s*\(\s*"([^"]*)"')
-COMPILE_TIME_BUILTIN = re.compile(r'^(CARGO_.*|OUT_DIR)$')
+COMPILE_TIME_BUILTIN = re.compile(r'^(CARGO_(?!BIN_EXE_).*|OUT_DIR)$')
 
 
 def reads_in(text: str):

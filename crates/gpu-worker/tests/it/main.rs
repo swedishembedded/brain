@@ -22,7 +22,7 @@ const DEADLINE: Duration = Duration::from_secs(120);
 const REAP: Duration = Duration::from_secs(20);
 
 fn worker() -> WorkerCommand {
-    WorkerCommand::new(env!("CARGO_BIN_EXE_brain-gpu-worker"))
+    WorkerCommand::new(brain_testutil::package_bin("brain-gpu-worker"))
 }
 
 fn health() -> Health<Device> {

@@ -8,7 +8,7 @@
 use std::process::Command;
 
 fn brain(args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_brain")).args(args).output().expect("run brain")
+    Command::new(brain_testutil::package_bin("brain")).args(args).output().expect("run brain")
 }
 
 #[test]

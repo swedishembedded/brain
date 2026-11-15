@@ -49,6 +49,9 @@ if [ -n "$new" ]; then
   printf '%s\n' "$new" | awk -F'\t' '{ printf "  NEW READ: %s reads %s\n", $1, $2 }'
   echo "  Environment variables are being phased out: add a CLI flag (or pass a"
   echo "  value in), do not read a variable."
+  if printf '%s\n' "$new" | grep -q $'\tCARGO_BIN_EXE_'; then
+    echo "  A test finds its package's binary with brain_testutil::package_bin(name)."
+  fi
 fi
 if [ -n "$stale" ]; then
   fail=1

@@ -15,7 +15,7 @@
 //! what a worker costs per job and per card is measured. Every test needs a
 //! GPU and skips, saying so, without one.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::mpsc::channel;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -61,7 +61,7 @@ fn resident(c: &Checkpoint, batch: u32) -> LfmResident {
 }
 
 fn hosting(supervision: &Supervision) -> WorkerHosting {
-    serving::supervision::worker_hosting(Path::new(brain()), &[], &[catalog::resident_lfm::FAMILY.to_string()], Duration::from_secs(300), supervision.health.clone()).expect("LFM2.5 encoders can be hosted")
+    serving::supervision::worker_hosting(&brain(), &[], &[catalog::resident_lfm::FAMILY.to_string()], Duration::from_secs(300), supervision.health.clone()).expect("LFM2.5 encoders can be hosted")
 }
 
 /// The encoder in process, or in a worker when `hosting` is given.

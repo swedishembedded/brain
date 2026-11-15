@@ -52,3 +52,12 @@ gate() {
   gate
   [ "$status" -eq 0 ]
 }
+
+@test "a test binary found through CARGO_BIN_EXE is a read and points at package_bin" {
+  mkdir -p "$TREE/crates/a/tests"
+  printf 'fn t() { let _ = std::process::Command::new(env!("CARGO_BIN_EXE_brain")); }\n' >"$TREE/crates/a/tests/cli.rs"
+  gate
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"NEW READ"*"CARGO_BIN_EXE_brain"* ]]
+  [[ "$output" == *"brain_testutil::package_bin"* ]]
+}

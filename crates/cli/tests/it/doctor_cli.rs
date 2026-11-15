@@ -22,7 +22,7 @@ fn scratch(tag: &str) -> PathBuf {
 }
 
 fn doctor(args: &[&str]) -> (i32, String, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_brain"))
+    let out = Command::new(brain_testutil::package_bin("brain"))
         .arg("doctor")
         .args(args)
         .stdin(Stdio::null())

@@ -13,7 +13,6 @@
 //! the healthy card, and what a worker costs per job is measured. Every test
 //! but the first needs a GPU and skips, saying so, without one.
 
-use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::mpsc::channel;
 use std::sync::Arc;
@@ -37,8 +36,8 @@ const QUESTIONS: &str = r#"[
 /// Both sides build the same graph on the same card.
 const TOLERANCE: f64 = 1e-5;
 
-pub(super) fn brain() -> &'static str {
-    env!("CARGO_BIN_EXE_brain")
+pub(super) fn brain() -> std::path::PathBuf {
+    brain_testutil::package_bin("brain")
 }
 
 #[test]
@@ -73,7 +72,7 @@ pub(super) fn supervision() -> Supervision {
 }
 
 fn hosting(supervision: &Supervision) -> WorkerHosting {
-    serving::supervision::worker_hosting(Path::new(brain()), &[], &["decision".to_string()], Duration::from_secs(300), supervision.health.clone()).expect("decision models can be hosted")
+    serving::supervision::worker_hosting(&brain(), &[], &["decision".to_string()], Duration::from_secs(300), supervision.health.clone()).expect("decision models can be hosted")
 }
 
 /// The store's decision models in process, or each in a worker.

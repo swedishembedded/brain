@@ -11,7 +11,7 @@ use std::process::{Command, Output};
 const N_IMAGES: usize = 20;
 
 fn brain(args: &[&str]) -> Output {
-    let out = Command::new(env!("CARGO_BIN_EXE_brain"))
+    let out = Command::new(brain_testutil::package_bin("brain"))
         .args(args)
         .args(["--device", "cpu"])
         .output()
@@ -73,7 +73,7 @@ fn eval_reports_both_maps_per_class_ap_and_dumps_predictions() {
 
 #[test]
 fn eval_rejects_an_unknown_split() {
-    let out = Command::new(env!("CARGO_BIN_EXE_brain"))
+    let out = Command::new(brain_testutil::package_bin("brain"))
         .args(["yolov8", "eval", "--weights", "w", "--data", "d", "--split", "train"])
         .output()
         .unwrap();

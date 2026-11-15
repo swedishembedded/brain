@@ -15,7 +15,7 @@
 use std::process::{Command, Output};
 
 fn brain(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_brain")).args(args).output().expect("run the brain binary")
+    Command::new(brain_testutil::package_bin("brain")).args(args).output().expect("run the brain binary")
 }
 
 fn stderr(output: &Output) -> String {

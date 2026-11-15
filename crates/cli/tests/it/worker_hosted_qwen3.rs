@@ -54,7 +54,7 @@ fn checkpoint() -> Option<(String, String)> {
 }
 
 fn hosting(supervision: &Supervision) -> WorkerHosting {
-    serving::supervision::worker_hosting(Path::new(brain()), &[], &[catalog::resident_llm::FAMILY.to_string()], Duration::from_secs(300), supervision.health.clone()).expect("Qwen3 can be hosted")
+    serving::supervision::worker_hosting(&brain(), &[], &[catalog::resident_llm::FAMILY.to_string()], Duration::from_secs(300), supervision.health.clone()).expect("Qwen3 can be hosted")
 }
 
 /// How the tests serve the decoder: a short context and a batch of eight; `bank` gives it an adapter bank, and
