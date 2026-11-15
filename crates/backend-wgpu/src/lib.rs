@@ -1958,6 +1958,7 @@ impl WgpuBackend {
             compute_units: None, // wgpu exposes no SM/CU count
             max_workgroup_size: l.max_compute_invocations_per_workgroup,
             workgroup_mem_bytes: l.max_compute_workgroup_storage_size,
+            workgroup_mem_opt_in_bytes: l.max_compute_workgroup_storage_size,
             subgroup_size,
             unified_memory: unified,
             workgroup_reductions: true, // real barrier semantics on every wgpu target

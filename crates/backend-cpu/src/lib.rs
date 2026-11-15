@@ -1406,6 +1406,7 @@ impl Backend for CpuBackend {
             // kernels are the largest in the tree.
             max_workgroup_size: 256,
             workgroup_mem_bytes: 32 * 1024,
+            workgroup_mem_opt_in_bytes: 32 * 1024,
             subgroup_size: None, // no SIMD width is surfaced to WGSL
             unified_memory: true,
             // The split-at-barrier JIT mis-executes the workgroup-cooperative

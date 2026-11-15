@@ -86,7 +86,14 @@ fn the_native_sweep_matches_the_f64_reference_to_the_summation_bound() {
         let (ddk, dvn, dg) = (gpu.storage((rows * D) as u64), gpu.storage_init("dvn", &dvn0), gpu.storage_init("dg", &dg0));
         let dinit = gpu.storage((bh * D * D) as u64);
         let bufs = [&ins[0], &ins[1], &ins[2], &ins[3], &ins[4], &ins[5], &ins[6], &ins[7], &ddk, &dvn, &dg, &dinit];
-        let step = gpu_core::provider::cuda::gdn_bwd_sweep_step(&gpu, &bufs, bh as u32, c as u32, D as u32, D as u32, n as u32).expect("the native sweep must be offered on a CUDA device");
+        let step = gpu_core::provider::cuda::gdn_bwd_sweep_step(&gpu, &bufs, bh as u32, c as u32, D as u32, D as u32, n as u32);
+        // The sweep keeps a head's state gradient in shared memory: it is offered exactly where one block may hold it.
+        let fits = gpu_core::provider::cuda::GDN_BWD_SWEEP_DYNAMIC_SHARED_BYTES <= gpu.caps().workgroup_mem_opt_in_bytes;
+        assert_eq!(step.is_some(), fits, "offered {} with {} B of opt-in shared memory", step.is_some(), gpu.caps().workgroup_mem_opt_in_bytes);
+        let Some(step) = step else {
+            brain_testutil::skip_unavailable("the device cannot give one block the sweep's shared memory");
+            return;
+        };
         gpu.submit(&[], &[step]);
         gpu.poll_wait();
 

@@ -1071,6 +1071,9 @@ pub struct DeviceCaps {
     pub max_workgroup_size: u32,
     /// Workgroup (shared) memory per workgroup, bytes.
     pub workgroup_mem_bytes: u32,
+    /// Workgroup memory one workgroup may use when its kernel opts in to more than [`Self::workgroup_mem_bytes`]
+    /// (CUDA's dynamic shared memory opt-in), bytes; equal to it where there is no such opt-in.
+    pub workgroup_mem_opt_in_bytes: u32,
     /// SIMD/subgroup width. `None` = not exposed (the WebGPU baseline).
     pub subgroup_size: Option<u32>,
     /// No host<->device copy cost (integrated GPUs, CPU).
@@ -1136,6 +1139,7 @@ impl DeviceCaps {
             // default) unless the adapter reports more.
             max_workgroup_size: 256,
             workgroup_mem_bytes: 16 * 1024,
+            workgroup_mem_opt_in_bytes: 16 * 1024,
             subgroup_size: None,
             unified_memory: false,
             // WebGPU-conformant devices execute workgroup barriers correctly —

@@ -991,6 +991,7 @@ impl VulkanBackend {
             compute_units: None, // core Vulkan exposes no SM/CU count
             max_workgroup_size: props.limits.max_compute_work_group_invocations,
             workgroup_mem_bytes: props.limits.max_compute_shared_memory_size,
+            workgroup_mem_opt_in_bytes: props.limits.max_compute_shared_memory_size,
             subgroup_size: (sub.subgroup_size > 0).then_some(sub.subgroup_size),
             unified_memory: matches!(
                 props.device_type,

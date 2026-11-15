@@ -697,12 +697,6 @@ impl CudaBackend {
         self.native.lock().unwrap_or_else(|e| e.into_inner()).get(idx).cloned()
     }
 
-    /// The most shared memory per block a kernel may opt in to on this device,
-    /// bytes; 0 where the driver does not report it.
-    pub fn native_shared_optin_bytes(&self) -> u32 {
-        self.ctx.device_info().shared_mem_optin
-    }
-
     /// The first `kind` value that names a [`backend_api::Backend::register_native`]d
     /// kernel rather than a WGSL catalogue entry.
     fn native_base(&self) -> usize {
@@ -1476,6 +1470,7 @@ fn query_caps(ctx: &exec::Context) -> Result<DeviceCaps, String> {
         compute_units: Some(i.multiprocessors),
         max_workgroup_size: i.max_threads_per_block,
         workgroup_mem_bytes: i.shared_mem_per_block,
+        workgroup_mem_opt_in_bytes: i.shared_mem_optin.max(i.shared_mem_per_block),
         subgroup_size: Some(i.warp_size),
         unified_memory: i.integrated,
         // One work-group is one block and `__syncthreads()` is emitted for
@@ -1784,7 +1779,7 @@ impl backend_api::Backend for CudaBackend {
         // refuse the launch, so the kernel is declined here, by name, instead.
         let total_shared = u64::from(*shared_bytes) + u64::from(launch.dynamic_shared_bytes);
         let shared_limit = if launch.shared_opt_in {
-            u64::from(self.ctx.device_info().shared_mem_optin.max(self.caps.workgroup_mem_bytes))
+            u64::from(self.caps.workgroup_mem_opt_in_bytes)
         } else {
             u64::from(self.caps.workgroup_mem_bytes)
         };

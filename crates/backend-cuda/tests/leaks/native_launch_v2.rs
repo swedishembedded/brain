@@ -130,7 +130,7 @@ fn supports_clusters(b: &CudaBackend) -> bool {
 fn dynamic_shared_memory_past_the_default_limit_needs_the_opt_in() {
     let _s = serial();
     let Some(b) = backend() else { return };
-    let optin = b.native_shared_optin_bytes();
+    let optin = b.caps().workgroup_mem_opt_in_bytes;
     if optin < N * 4 {
         brain_testutil::skip_unavailable("the device grants less than 128 KiB of opt-in shared memory");
         return;
@@ -202,7 +202,7 @@ fn occupancy_is_the_drivers_answer_for_the_kernels_own_shared_memory() {
     let small = b.register_native(&spec("brain_dsmem_scalar", launch(4 * 1024, false, None))).expect("small");
     let many = b.native_max_active_blocks(small).expect("the driver answers");
     assert!(many >= 2, "a 4 KiB kernel of 128 threads must fit several blocks per multiprocessor, got {many}");
-    if b.native_shared_optin_bytes() >= N * 4 {
+    if b.caps().workgroup_mem_opt_in_bytes >= N * 4 {
         let big = b.register_native(&spec("brain_dsmem_scalar", launch(N * 4, true, None))).expect("big");
         let few = b.native_max_active_blocks(big).expect("the driver answers");
         assert!(few >= 1 && few < many, "128 KiB per block must lower occupancy ({few} vs {many})");
