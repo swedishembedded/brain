@@ -249,7 +249,7 @@ pub fn no_default_checkpoint_doc(arch: &str, role: &str) -> String {
 /// Every artifact's own path is already absolute (see
 /// [`ArtifactRecord::path`]), so today's specs derive everything from a
 /// record's own path instead; this exists for a future spec that needs the
-/// scan root itself, and for [`resolve_all`]'s own per-candidate model id.
+/// scan root itself, and as [`resolve`]'s root when the caller has no store root.
 pub fn common_root(records: &[ArtifactRecord]) -> PathBuf {
     let mut paths = records.iter().map(|r| r.path.as_path());
     let Some(first) = paths.next() else { return PathBuf::new() };
@@ -582,26 +582,30 @@ pub fn model_id_from_path(path: &Path, root: &Path) -> Option<String> {
 /// `tokenizer` published anywhere else exactly as [`resolve`] already lets
 /// it.
 ///
-/// Falls back to `vec![(format!("local/{arch}"), resolve(...))]` - today's
-/// exact single-instance behavior, unchanged - when `spec` names no instance
-/// role, or the caller already named one via `overrides` (an operator who
-/// pinned it explicitly gets exactly that one, not a scan of every other
-/// candidate on disk).
+/// Falls back to `vec![(format!("local/{arch}"), resolve_under(root, ...))]` -
+/// the single-instance behavior - when `spec` names no instance role, or the
+/// caller already named one via `overrides` (an operator who pinned it
+/// explicitly gets exactly that one, not a scan of every other candidate on
+/// disk).
+///
+/// `root` is the store the records were scanned from: each instance's id is
+/// its path relative to it ([`model_id_from_path`]), so two repos of one
+/// vendor are still `<vendor>/<repo>` rather than relative to the deepest
+/// directory the records happen to share.
 ///
 /// # Panics
 /// Same as [`resolve`]: `specs` must name an `ArchSpec` for `arch`.
-pub fn resolve_all(arch: &str, records: &[ArtifactRecord], specs: &[&dyn ArchSpec], overrides: &BTreeMap<String, String>) -> Vec<(String, Resolution)> {
+pub fn resolve_all(arch: &str, root: &Path, records: &[ArtifactRecord], specs: &[&dyn ArchSpec], overrides: &BTreeMap<String, String>) -> Vec<(String, Resolution)> {
     let spec = *specs.iter().find(|s| s.arch() == arch).unwrap_or_else(|| panic!("resolve_all: no ArchSpec registered for arch {arch:?}"));
-    let single = || vec![(format!("local/{arch}"), resolve(arch, records, specs, overrides))];
+    let single = || vec![(format!("local/{arch}"), resolve_under(root, arch, records, specs, overrides))];
     let Some(instance_role) = spec.instance_role() else { return single() };
     if overrides.contains_key(instance_role) {
         return single();
     }
 
-    let root = common_root(records);
     let mut seen: BTreeSet<&Path> = BTreeSet::new();
     let mut candidates: Vec<usize> = spec
-        .classify(records, &root)
+        .classify(records, root)
         .into_iter()
         .filter(|(_, role, conf)| role == instance_role && *conf > Confidence::Guessed)
         .filter_map(|(idx, _, _)| seen.insert(records[idx].path.as_path()).then_some(idx))
@@ -616,8 +620,8 @@ pub fn resolve_all(arch: &str, records: &[ArtifactRecord], specs: &[&dyn ArchSpe
         .map(|idx| {
             let mut forced = overrides.clone();
             forced.insert(instance_role.to_string(), records[idx].path.to_string_lossy().into_owned());
-            let id = model_id_from_path(&records[idx].path, &root).unwrap_or_else(|| format!("local/{arch}"));
-            (id, resolve(arch, records, specs, &forced))
+            let id = model_id_from_path(&records[idx].path, root).unwrap_or_else(|| format!("local/{arch}"));
+            (id, resolve_under(root, arch, records, specs, &forced))
         })
         .collect()
 }
@@ -1708,7 +1712,7 @@ mod tests {
         let records = vec![rec(dir.join("a.dit").to_str().unwrap()), rec(dir.join("b.dit").to_str().unwrap())];
         let spec = ToySpec { classify_confidence: Confidence::Declared, validate_ok: true };
         let specs: [&dyn ArchSpec; 1] = [&spec];
-        let got = resolve_all("toy", &records, &specs, &BTreeMap::new());
+        let got = resolve_all("toy", &common_root(&records), &records, &specs, &BTreeMap::new());
         assert_eq!(got.len(), 1, "{got:?}");
         assert!(matches!(got[0].1, Resolution::Ambiguous(_)), "must match resolve()'s own single-instance answer: {got:?}");
     }
@@ -1752,7 +1756,7 @@ mod tests {
         let records = vec![rec(a.to_str().unwrap()), rec(b.to_str().unwrap())];
         let spec = InstanceRoleSpec;
         let specs: [&dyn ArchSpec; 1] = [&spec];
-        let mut got = resolve_all("toy", &records, &specs, &BTreeMap::new());
+        let mut got = resolve_all("toy", &common_root(&records), &records, &specs, &BTreeMap::new());
         got.sort_by(|x, y| x.0.cmp(&y.0));
         assert_eq!(got.len(), 2, "{:?}", got.iter().map(|(id, _)| id).collect::<Vec<_>>());
         assert_eq!(got[0].0, "black-forest-labs/FLUX.2-klein-9B");
@@ -1776,7 +1780,7 @@ mod tests {
         let spec = InstanceRoleSpec;
         let specs: [&dyn ArchSpec; 1] = [&spec];
         let overrides = BTreeMap::from([("dit".to_string(), a.to_str().unwrap().to_string())]);
-        let got = resolve_all("toy", &records, &specs, &overrides);
+        let got = resolve_all("toy", &common_root(&records), &records, &specs, &overrides);
         assert_eq!(got.len(), 1, "an explicit override must not fan out into per-candidate instances: {got:?}");
     }
 }

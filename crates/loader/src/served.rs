@@ -237,7 +237,7 @@ pub fn served_assemblies(store: &ServedStore, arch: &str, spec: &dyn ArchSpec, d
     let specs: [&dyn ArchSpec; 1] = [spec];
     let placeholder = format!("local/{arch}");
     let mut out = Vec::new();
-    for (id, resolution) in brain_modelstore::resolve::resolve_all(arch, &records, &specs, &named) {
+    for (id, resolution) in brain_modelstore::resolve::resolve_all(arch, root, &records, &specs, &named) {
         let mut assembly = match resolution {
             Resolution::Resolved(assembly) => *assembly,
             Resolution::Ambiguous(a) => {
@@ -450,6 +450,22 @@ mod tests {
         assert_eq!(got[0].roles["weights"], a);
         assert_eq!(got[1].id, "vendor-b/model");
         assert_eq!(got[1].roles["weights"], b);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A served id is `<vendor>/<repo>` under the STORE root, also when every
+    /// candidate in the store sits under one vendor, so the deepest directory
+    /// the records share is not the root the id is read from.
+    #[test]
+    fn served_assemblies_names_repos_of_one_vendor_by_vendor_and_repo() {
+        let root = store("multi-instance-one-vendor");
+        write_candidate(&root, "Qwen/Qwen3-VL", "model.safetensors");
+        write_candidate(&root, "Qwen/Qwen3-VL-4B", "model.safetensors");
+
+        let mut ids: Vec<String> = served_assemblies(&unpinned(&root), "servedtest", &MultiServedSpec, "default/servedtest").into_iter().map(|a| a.id).collect();
+        ids.sort();
+        assert_eq!(ids, ["Qwen/Qwen3-VL", "Qwen/Qwen3-VL-4B"]);
 
         std::fs::remove_dir_all(&root).ok();
     }
