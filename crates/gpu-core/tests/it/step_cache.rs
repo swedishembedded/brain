@@ -76,7 +76,6 @@ fn devices(pipes: &'static [(&'static str, &'static str)]) -> Vec<DeviceFactory>
     let mut v: Vec<DeviceFactory> = Vec::new();
     if !brain_testutil::gpu_tests_skipped() {
         v.push(("default", Box::new(move || gpu_core::testgpu::dev(pipes))));
-    } else {
     }
     v.push(("cpu-jit", Box::new(move || Gpu::new_cpu(pipes))));
     v
