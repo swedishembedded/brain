@@ -21,7 +21,7 @@ use std::process::Command;
 fn bin() -> PathBuf {
     // Cargo names the binary it built for this test; a path derived from the test
     // executable's own location breaks whenever cargo moves its build directory.
-    PathBuf::from(env!("CARGO_BIN_EXE_brain"))
+    brain_testutil::package_bin("brain")
 }
 
 /// Run a `--smoke` longctx on `target` and return the artifact.

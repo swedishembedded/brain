@@ -212,16 +212,32 @@ fn append_capability_ledger(cap: &str, reason: &str, location: &str) {
 
 /// The binary `name` of the package under test, as cargo built it for this
 /// integration test: an integration test's executable lives in
-/// `target/<profile>/deps/`, and cargo builds the package's binaries into
-/// `target/<profile>/` before it runs the test. Found from the running
-/// executable's own path, so nothing is read from the environment. Panics,
-/// naming the path, when the binary is not there (the test was not started by
-/// cargo, or `name` is not a binary of its package).
+/// `<target>/<profile>/deps/`, and cargo builds the package's binaries into
+/// `<target>/<profile>/` before it runs the test. Found from the running
+/// executable's own path, so nothing is read from the environment.
+///
+/// Panics with what to fix when the layout is not that one: a cargo whose
+/// build directory is configured apart from its target directory keeps test
+/// executables away from the binaries they spawn, and the test cannot know
+/// where to look. Point cargo's `build-dir` at the target directory (or leave it
+/// unset) and run the test through cargo.
 pub fn package_bin(name: &str) -> std::path::PathBuf {
     let exe = std::env::current_exe().expect("the running test executable's path");
-    let profile_dir = exe.parent().and_then(std::path::Path::parent).unwrap_or_else(|| panic!("{} is not under target/<profile>/deps", exe.display()));
+    let deps = exe.parent().filter(|d| d.file_name().is_some_and(|n| n == "deps"));
+    let Some(profile_dir) = deps.and_then(std::path::Path::parent) else {
+        panic!(
+            "{} is not in a <target>/<profile>/deps directory, so the `{name}` binary cannot be found beside it: \
+             configure cargo so its build-dir is the target directory (or unset), then run the test through cargo",
+            exe.display()
+        );
+    };
     let bin = profile_dir.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
-    assert!(bin.is_file(), "{} does not exist: run the test through cargo, which builds the package's binary `{name}` first", bin.display());
+    assert!(
+        bin.is_file(),
+        "{} does not exist: run the test through cargo, which builds the package's binary `{name}` before its tests \
+         (a cargo whose build-dir is apart from the target directory puts it elsewhere; configure build-dir to the target directory)",
+        bin.display()
+    );
     bin
 }
 

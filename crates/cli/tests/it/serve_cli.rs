@@ -23,7 +23,7 @@ use std::process::{Command, Stdio};
 fn bin() -> String {
     // Cargo names the binary it built for this test; a path derived from the test
     // executable's own location breaks whenever cargo moves its build directory.
-    env!("CARGO_BIN_EXE_brain").to_string()
+    brain_testutil::package_bin("brain").to_string_lossy().into_owned()
 }
 
 fn run(args: &[&str]) -> std::process::Output {
