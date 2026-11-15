@@ -646,7 +646,7 @@ fn fleet_pool_tokens(checkpoint: &qwen3::config::QwenConfig, weight_bytes: u64, 
 struct PoolProfile {
     /// Whole KV pool: every layer's K and V, plus int8 scales.
     kv_bytes: u64,
-    /// Paged-attention scratch (`scores` + `probs`).
+    /// Paged-attention scratch (`scores` + `probs`) and the prefill attention's workspace.
     scratch_bytes: u64,
     /// The widest step's forward buffers and a wide decode batch's launch
     /// workspace, from the model's own widths
@@ -671,14 +671,15 @@ struct PoolProfile {
 impl PoolProfile {
     fn new(cfg: &qwen3::config::QwenConfig, block_size: u32, num_blocks: u32, max_batch: u32, max_prefill: u32, cap: u32, kv_int8: bool, fused: qwen3::serve::FusedAttention) -> PoolProfile {
         let kv_bytes = qwen3::serve::kv_pool_bytes(cfg, block_size, num_blocks, kv_int8);
-        let scratch_bytes = qwen3::serve::paged_attn_scratch_bytes(cfg, max_batch, max_prefill, cap, fused);
+        let slab_bytes = qwen3::serve::paged_attn_scratch_bytes(cfg, max_batch, max_prefill, cap, fused);
+        let scratch_bytes = slab_bytes + qwen3::serve::prefill_attention_workspace_bytes(cfg, max_batch, max_prefill, cap, fused);
         // The per-layer KV figure comes from `qwen3::serve`, which owns the
         // pool layout -- the same function the engine itself checks against
         // the real device limit, so this pre-flight and that authoritative
         // check cannot disagree about the size of the buffer in question.
         let per_layer_kv = qwen3::serve::kv_binding_bytes(cfg, block_size, num_blocks, kv_int8);
         let step_bytes = cfg.decoder_widths().serve_peak_bytes(max_batch, max_prefill);
-        PoolProfile { kv_bytes, scratch_bytes, step_bytes, swap_staging_bytes: 0, sparse_attention_bytes: 0, largest_binding: per_layer_kv.max(scratch_bytes / 2) }
+        PoolProfile { kv_bytes, scratch_bytes, step_bytes, swap_staging_bytes: 0, sparse_attention_bytes: 0, largest_binding: per_layer_kv.max(slab_bytes / 2) }
     }
 
     /// This sizing with the swap staging a host-RAM KV offload needs counted

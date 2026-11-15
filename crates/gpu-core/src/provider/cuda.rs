@@ -1645,6 +1645,17 @@ impl WgPrefillScratch {
     }
 }
 
+/// Whether this device can run the warpgroup prefill at `head_dim` ([`paged_flash_prefill_wg_steps`] may still decline a
+/// round of the decode regime): what a caller asks before it allocates a [`WgPrefillScratch`] to share.
+pub fn flash_prefill_wg_available(gpu: &crate::Gpu, head_dim: u32) -> bool {
+    let wg_kernel = || gpu.caps().arch.compute_capability.is_some_and(|cc| kernels_cuda::get(&format!("flash_prefill_f16_hd{head_dim}_wgs")).is_some_and(|k| k.min_cc <= cc));
+    matches!(head_dim, 128 | 256)
+        && FLASH_PREFILL_WG.load(std::sync::atomic::Ordering::Relaxed)
+        && !FLASH_PREFILL_PORTABLE.load(std::sync::atomic::Ordering::Relaxed)
+        && tensor_core_kernels_enabled(gpu)
+        && wg_kernel()
+}
+
 /// The steps of the warpgroup tensor-core prefill at head_dim 256 or 128 over an fp32, bf16, int8 or FP8 KV cache (`bufs` and
 /// `params` as [`paged_flash_prefill_kv8_step`]'s, or [`paged_flash_prefill_step`]'s six for an fp32 or bf16 cache; its
 /// `blocks` is derived here; `keys` is the longest key count of the round, the last row's sequence length, or for a tape that

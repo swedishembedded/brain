@@ -969,6 +969,10 @@ TFLOPS best / sustained, the widen pass included (knowledge #471):
 | 8192 rows, no context | 77 / 76 | 403 / 358 | 485 / 398 | 463 / 376 |
 | 512 rows behind 31.5K | 66 / 66 | 359 / 334 | 426 / 382 | 384 / 340 |
 
+The Qwen3 serving engine prefills on it with one `WgPrefillScratch` for all its layers. `brain perf run longctx --target
+qwen:Qwen3-4B --context 32768 --prefill 4096,16384` (fp32 weights, int8 KV, gpu3, two runs each): 4096-token prompt
+15.4-15.5K -> 19.6K tok/s, 16384-token prompt 8.0-8.6K -> 16.1-16.7K tok/s.
+
 Open: the tensor pipe is 50 % active at the 8K int8 round (73-83 % at head_dim 256); the softmax and the per-key scales
 are twice the share of the work at this width.
 

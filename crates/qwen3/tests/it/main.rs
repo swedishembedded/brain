@@ -23,6 +23,7 @@ mod encoder_parity;
 mod engine_adapter_bank;
 mod engine_exact_decode;
 mod engine_half_weights;
+mod engine_prefill_hd128;
 mod engine_prefill_mixed;
 mod engine_rollout;
 mod engine_score_continuation;

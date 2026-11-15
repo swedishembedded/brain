@@ -442,7 +442,8 @@ impl QwenPagedEngine {
 
     fn scratch_bytes(&self, batch: u32, context: u32, fused: qwen3::serve::FusedAttention) -> u64 {
         let (per_seq, _, chunk) = Self::geometry(batch, context);
-        qwen3::serve::paged_attn_scratch_bytes(&self.cfg, batch, chunk, per_seq * BLOCK_SIZE, fused)
+        let cap = per_seq * BLOCK_SIZE;
+        qwen3::serve::paged_attn_scratch_bytes(&self.cfg, batch, chunk, cap, fused) + qwen3::serve::prefill_attention_workspace_bytes(&self.cfg, batch, chunk, cap, fused)
     }
 }
 

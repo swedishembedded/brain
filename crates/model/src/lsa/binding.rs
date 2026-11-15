@@ -311,13 +311,13 @@ impl LsaBinding {
     ///
     /// * `place(start, rows)`: write the positions, live lengths and block
     ///   tables of `rows` rows at `start..` into its forward buffers;
-    /// * `dense(rows)`: the dense chunk attention step it would run instead;
+    /// * `dense(rows)`: the dense chunk attention steps it would run instead;
     /// * `buffers()`: the layer's [`LayerBuffers`].
     ///
     /// An engine with no dense fused prefill to compare against passes
     /// `compare: false` and gets 0 (sparse from the start).
     #[allow(clippy::too_many_arguments)]
-    pub fn measure_crossover<'b>(&mut self, g: &Gpu, layer: usize, rows: u32, max_seq_len: u32, compare: bool, mut place: impl FnMut(u32, u32), mut dense: impl FnMut(u32) -> Step, buffers: impl Fn() -> LayerBuffers<'b>) {
+    pub fn measure_crossover<'b>(&mut self, g: &Gpu, layer: usize, rows: u32, max_seq_len: u32, compare: bool, mut place: impl FnMut(u32, u32), mut dense: impl FnMut(u32) -> Vec<Step>, buffers: impl Fn() -> LayerBuffers<'b>) {
         let dense_until = (|| {
             if !compare {
                 return 0;
@@ -328,7 +328,7 @@ impl LsaBinding {
             let mut start = 1024u32;
             while start + rows <= max_seq_len {
                 place(start, rows);
-                let dense_time = gpu_core::profile::best_of(g, &[dense(rows)], 2);
+                let dense_time = gpu_core::profile::best_of(g, &dense(rows), 2);
                 // The sparse side as a real chunk reads it: index queries and the read over `start / cb`
                 // closed blocks, then attention over a full-width selection spread over the cached keys.
                 self.attn.write_page_tables_for_timing(g, rows, start / cb);

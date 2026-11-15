@@ -732,6 +732,17 @@ pub fn paged_attn_scratch_bytes(cfg: &QwenConfig, max_batch: u32, max_prefill: u
     words * 2 * 4 // scores + probs, 4 bytes/word
 }
 
+/// Device bytes of the warpgroup prefill attention's staging buffer and split scratch at this sizing
+/// ([`gpu_core::provider::cuda::WgPrefillScratch`], one for every layer): charged wherever prefill is fused, whether or not
+/// the card turns out to have the kernel, so a planner that sizes memory before the device is known never charges less
+/// than the engine allocates.
+pub fn prefill_attention_workspace_bytes(cfg: &QwenConfig, max_batch: u32, max_prefill: u32, cap: u32, fused: FusedAttention) -> u64 {
+    if !fused.prefill || !matches!(cfg.head_dim, 128 | 256) {
+        return 0;
+    }
+    gpu_core::provider::cuda::WgPrefillScratch::bytes(cfg.head_dim, cfg.n_heads, cfg.n_kv_heads, max_batch.max(max_prefill), cap)
+}
+
 /// The largest `head_dim` this engine has a fused paged-attention kernel
 /// registered for. The fused family is one WGSL file per head_dim TIER, and
 /// [`PIPELINES`] carries only the `HD = 128` tier - `paged_flash_prefill` and
@@ -881,6 +892,10 @@ struct Scratch {
     sched_buf: DeviceBuffer,
     /// `[DECODE_WINDOW, max_batch]` window token history (greedy indices).
     hist_buf: DeviceBuffer,
+    /// The staging buffer and split scratch of the warpgroup prefill attention, ONE for every layer (the layers' rounds
+    /// run in tape order on one queue), sized for a round of the scratch rows over the whole context; `None` where the
+    /// device has no such kernel.
+    wg_prefill: Option<gpu_core::provider::cuda::WgPrefillScratch>,
 }
 
 /// Paged, batched Qwen3 serving engine.
@@ -1421,6 +1436,7 @@ impl Engine {
             bt_buf: st(b * max_blocks_per_seq as u64),
             sched_buf: st((DECODE_WINDOW as u64 - 1) * max_batch as u64 * 3),
             hist_buf: st(DECODE_WINDOW as u64 * max_batch as u64),
+            wg_prefill: (fused_attention.prefill && gpu_core::provider::cuda::flash_prefill_wg_available(&gpu, cfg.head_dim)).then(|| gpu_core::provider::cuda::WgPrefillScratch::new(&gpu, cfg.head_dim, cfg.n_heads, cfg.n_kv_heads, b as u32, cap)),
         };
         gpu_core::profile::stage_time("qwen engine build: kv pool + scratch buffer alloc", stage_t0);
         let stage_t0 = std::time::Instant::now();
@@ -1878,7 +1894,7 @@ impl Engine {
     /// (`paged_flash_prefill`, its int8/fp8 twin, or the native tensor-core
     /// kernel where the device has one): the dense prefill read, shared by the
     /// forward and the sparse-attention crossover measurement.
-    fn dense_chunk_attention(&self, l: usize, b: u32) -> Step {
+    fn dense_chunk_attention(&self, l: usize, b: u32) -> Vec<Step> {
         let (g, sc, c) = (&self.gpu, &self.sc, &self.cfg);
         let (nh, nkv, hd) = (c.n_heads, c.n_kv_heads, c.head_dim);
         // BR = 64 is the kernels' own query tile, @workgroup_size(256) their
@@ -1886,7 +1902,26 @@ impl Engine {
         let ntiles_q = b.div_ceil(64);
         let params = [b, nh, nkv, hd, nh / nkv, self.block_size, self.max_blocks_per_seq];
         let native = !self.gemm.is_reference_pinned();
-        if self.kv_int8 {
+        if native {
+            // The staged warpgroup kernels where the device has them: a widen pass of the context's keys, the attention and
+            // the merge of its key splits. The tape is replayed at every context length, so the round is sized for the
+            // whole context (the widen pass skips the tiles past the round's own keys, read on the device).
+            use gpu_core::provider::cuda::{Scaled8, WgKv};
+            let kv = match (self.kv_int8, self.kv_fp8.is_some()) {
+                (false, _) => WgKv::F32,
+                (true, false) => WgKv::Scaled(Scaled8::Int8),
+                (true, true) => WgKv::Scaled(Scaled8::Fp8E4m3),
+            };
+            let mut bufs = vec![&sc.q, &self.pool_k[l], &self.pool_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.ctx];
+            if self.kv_int8 {
+                bufs.extend([&self.scales_k[l], &self.scales_v[l]]);
+            }
+            let keys = self.block_size * self.max_blocks_per_seq;
+            if let Some(steps) = gpu_core::provider::cuda::paged_flash_prefill_wg_steps(g, hd, &bufs, &params, keys, kv, sc.wg_prefill.as_ref()) {
+                return steps;
+            }
+        }
+        vec![if self.kv_int8 {
             let bufs = [&sc.q, &self.pool_k[l], &self.pool_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.ctx, &self.scales_k[l], &self.scales_v[l]];
             let tc = native
                 .then(|| if self.kv_fp8.is_some() { block::native_paged_flash_prefill_kvfp8(g, hd, &bufs, &params, nh * ntiles_q) } else { block::native_paged_flash_prefill_kv8(g, hd, &bufs, &params, nh * ntiles_q) })
@@ -1903,7 +1938,7 @@ impl Engine {
             let bufs = [&sc.q, &self.pool_k[l], &self.pool_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.ctx];
             let tc = native.then(|| block::native_paged_flash_prefill(g, hd, &bufs, &params, nh * ntiles_q)).flatten();
             tc.unwrap_or_else(|| g.dispatch(PAGED_FLASH_PREFILL, &bufs, &params, gpu_core::Dispatch::Workgroups(nh * ntiles_q)))
-        }
+        }]
     }
 
     /// Measure where sparse attention starts to pay on this device: for a
@@ -2976,7 +3011,7 @@ impl Engine {
                     let bufs = model::lsa::engine::LayerBuffers { q: &sc.q, pos: &sc.pos_buf, seqlen: &sc.seqlen_buf, block_tables: &sc.bt_buf, pool_k: &self.pool_k[l], pool_v: &self.pool_v[l], scales: Some((&self.scales_k[l], &self.scales_v[l])), ctx: &sc.ctx };
                     lsa.record_layer(g, &mut s, l, b, &bufs).unwrap_or_else(|e| panic!("qwen3: latent sparse attention: {e}"));
                 } else if causal_chunk && fused_paged_attention(g, true, true, hd, b) {
-                        s.push(self.dense_chunk_attention(l, b));
+                        s.extend(self.dense_chunk_attention(l, b));
                     } else if let (false, Some(flash)) = (causal_chunk, &self.flash) {
                         // The fused GQA decode attention: one workgroup per (row, kv head, key split) reads each K/V byte
                         // once per group and walks only the row's live keys - `seqlen_buf` is read on the device, so this
@@ -3028,7 +3063,7 @@ impl Engine {
                     let bufs = model::lsa::engine::LayerBuffers { q: &sc.q, pos: &sc.pos_buf, seqlen: &sc.seqlen_buf, block_tables: &sc.bt_buf, pool_k: &self.pool_k[l], pool_v: &self.pool_v[l], scales: None, ctx: &sc.ctx };
                     lsa.record_layer(g, &mut s, l, b, &bufs).unwrap_or_else(|e| panic!("qwen3: latent sparse attention: {e}"));
                 } else if causal_chunk && fused_paged_attention(g, true, false, hd, b) {
-                        s.push(self.dense_chunk_attention(l, b));
+                        s.extend(self.dense_chunk_attention(l, b));
                     } else if let (false, Some(flash)) = (causal_chunk, &self.flash) {
                         // The fused GQA decode attention, as the packed tiers run it (see there).
                         let shape = decode_shape(c, b, bs, mbt, exact.is_some());
