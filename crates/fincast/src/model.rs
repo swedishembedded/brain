@@ -210,6 +210,12 @@ impl Fincast {
     /// The transformer core + head over an explicit additive `[s,s]` mask. This is
     /// the parity reference for the NPU export (`emb`+`amask` → `qhead`).
     pub fn core_forward_amask(&self, emb: &[f32], amask: &[f32]) -> Vec<f32> {
+        self.core_forward_with_moe(emb, amask, false)
+    }
+
+    /// [`core_forward_amask`](Self::core_forward_amask) with the MoE strategy chosen: `dense_moe` runs the reference
+    /// dense-compute-then-mask path, which the parity test holds the gathered one to.
+    fn core_forward_with_moe(&self, emb: &[f32], amask: &[f32], dense_moe: bool) -> Vec<f32> {
         let cfg = &self.cfg;
         let d = cfg.hidden_size;
         let s = (amask.len() as f64).sqrt() as usize;
@@ -217,10 +223,8 @@ impl Fincast {
         assert_eq!(emb.len(), s * d, "emb must be [s, d]");
         // MoE strategy: the default gathers each expert's routed tokens and runs
         // the expert MLP on just that subset (top_n/num_experts of the dense work,
-        // bit-identical because every expert op is row-independent). Set
-        // `FINCAST_MOE_DENSE=1` to force the reference dense-compute-then-mask path
-        // (used by the parity test).
-        let dense_moe = std::env::var("FINCAST_MOE_DENSE").map(|v| v != "0").unwrap_or(false);
+        // bit-identical because every expert op is row-independent); `dense_moe`
+        // is the reference dense-compute-then-mask path.
         let emb_buf = self.gpu.storage_init("emb", emb);
         for b in 0..cfg.num_layers {
             self.block(b, &emb_buf, s, amask, dense_moe);
@@ -473,7 +477,7 @@ mod tests {
     use super::*;
 
     fn skip() -> bool {
-        std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+        brain_testutil::gpu_tests_skipped()
     }
 
     /// With all weights zero, every linear/bias/gate is zero. The MoE gate logits
@@ -559,11 +563,8 @@ mod tests {
         let context: Vec<f32> = (0..40).map(|i| 10.0 + (i as f32 * 0.3).sin() * 2.0).collect();
         let horizon = 6;
 
-        std::env::set_var("FINCAST_MOE_DENSE", "1");
-        let dense = model.forecast_full(&context, 0, horizon);
-        std::env::set_var("FINCAST_MOE_DENSE", "0");
+        let dense = model.forecast_full_with_core(&context, 0, horizon, |emb, amask| model.core_forward_with_moe(emb, amask, true));
         let sparse = model.forecast_full(&context, 0, horizon);
-        std::env::remove_var("FINCAST_MOE_DENSE");
 
         assert_eq!(dense.len(), sparse.len());
         let worst = dense.iter().zip(&sparse).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);

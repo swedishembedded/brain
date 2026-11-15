@@ -51,7 +51,6 @@ crates/diamond/tests/it/reset.rs	1
 crates/diamond/tests/it/train.rs	8
 crates/eval/src/tts.rs	1
 crates/fincast/src/forecaster.rs	1
-crates/fincast/src/model.rs	1
 crates/florence2/tests/it/train_overfit.rs	1
 crates/fly/tests/it/cpg.rs	2
 crates/fly/tests/it/gait.rs	3

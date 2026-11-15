@@ -175,8 +175,6 @@ crates/fastvlm/src/captioner.rs	BRAIN_FASTVLM_WEIGHTS
 crates/fastvlm/src/parity.rs	BRAIN_DEVICE
 crates/fastvlm/src/train_smoke.rs	BRAIN_DEVICE
 crates/fincast/src/forecaster.rs	MOE_SKIP_GPU_TESTS
-crates/fincast/src/model.rs	FINCAST_MOE_DENSE
-crates/fincast/src/model.rs	MOE_SKIP_GPU_TESTS
 crates/fincast/tests/it/parity.rs	FINCAST_CKPT
 crates/fincast/tests/it/t0_param_layout.rs	FINCAST_CKPT
 crates/florence2/src/tokenizer.rs	FLORENCE2_DIR
@@ -201,7 +199,6 @@ crates/flux2/src/bin/flux2_bench.rs	BRAIN_FLUX2_DIT
 crates/flux2/src/bin/flux2_bench.rs	BRAIN_FLUX2_VAE
 crates/flux2/src/bin/flux2_latent.rs	BRAIN_FLUX2_VAE
 crates/flux2/src/model.rs	BRAIN_FLUX2_I8_KEEP_F32
-crates/flux2/src/model.rs	BRAIN_FLUX2_TIME_FORWARD
 crates/flux2/src/model.rs	SMOKE_STEPS
 crates/flux2/src/pipeline.rs	BRAIN_FLUX2_DUMP_LATENT
 crates/flux2/tests/it/batch_time.rs	BRAIN_FLUX2_BATCH_LADDER
@@ -530,7 +527,6 @@ crates/modernbert/tests/it/parity.rs	MODERNBERT_FIXTURE_DIR
 crates/moondream3/src/model.rs	MOE_SKIP_GPU_TESTS
 crates/mujoco/src/sys.rs	<var>
 crates/mujoco/tests/it/binding.rs	BRAIN_FLYBODY_XML
-crates/nemotronasr/src/encoder.rs	NEM_TIMING
 crates/nemotronasr/src/stream.rs	BRAIN_NO_FASTCONV
 crates/npu/build.rs	<k>
 crates/npu/build.rs	CARGO_CFG_TARGET_ARCH
@@ -892,7 +888,6 @@ crates/vqgan/src/train.rs	MOE_SKIP_GPU_TESTS
 crates/vqgan/tests/it/parity.rs	BRAIN_VQGAN_DEVICE
 crates/vqgan/tests/it/parity.rs	BRAIN_VQGAN_WEIGHTS
 crates/vulkan/build.rs	OUT_DIR
-crates/vulkan/src/context.rs	BRAIN_VK_ALLOC_DEBUG
 crates/vulkan/src/context.rs	BRAIN_VK_DEVICE
 crates/vulkan/src/context.rs	BRAIN_VK_VALIDATE
 crates/vulkan/src/shader.rs	BRAIN_GPU_CHECKED

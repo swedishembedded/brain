@@ -1062,11 +1062,9 @@ impl Flux2Model {
             }
         }
 
-        // Debug aid (batch profiling): BRAIN_FLUX2_TIME_FORWARD=1 splits the
-        // forward into host conditioning / input upload / step recording /
-        // device execution, which is how the B≥4 batch-scaling plateau
-        // was attributed to a specific stage.
-        let timed = std::env::var("BRAIN_FLUX2_TIME_FORWARD").is_ok();
+        // Under --kernel-profile the forward is split into host conditioning /
+        // input upload / step recording / device execution: the stage a batch
+        // size's time goes to.
         let t_start = std::time::Instant::now();
 
         let ts: Vec<f32> = samples.iter().map(|s| s.t).collect();
@@ -1257,7 +1255,7 @@ impl Flux2Model {
         gpu_core::profile::program_table(&self.gpu, "flux2 dit forward", &s);
         self.gpu.submit(&[], &s[..take.min(s.len())]);
         let flat = self.gpu.read(&self.scr.out, bsz as usize * n_pred * cfg.in_channels);
-        if timed {
+        if gpu_core::profile::enabled() {
             let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
             eprintln!(
                 "flux2 forward B={bsz} n={n} steps={nsteps}: modulation {:.1} ms, upload {:.1} ms, record {:.1} ms, device {:.1} ms, total {:.1} ms",

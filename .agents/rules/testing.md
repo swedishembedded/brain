@@ -476,7 +476,7 @@ scratch for every conv lowering - 1D (`audio::conv`), 2D and 3D (`vae::blocks`,
 **Per-model dev/debug knobs:** `BRAIN_VAE_TAPS`,
 `BRAIN_QWEN3OMNIMOE_DEBUG_LOGITS`, `BRAIN_OMNI_DEBUG_LOGITS` (top-3 logit dump
 from the Qwen3-Omni int8 resident), `BRAIN_FLUX2_BENCH_BASELINE`,
-`BRAIN_FLUX2_TIME_FORWARD`, `BRAIN_MINIMAXMUSIC3_DEPTH`, `BRAIN_MINIMAXMUSIC3_DIT`,
+`BRAIN_MINIMAXMUSIC3_DEPTH`, `BRAIN_MINIMAXMUSIC3_DIT`,
 `BRAIN_MINIMAXMUSIC3_VOCODER` (the MiniMax Music 3 component directories the
 `mm3_bench` binary and the depth decoder's real-weight test load), `BRAIN_S3DIT_DIT` (the Z-Image DiT the
 `zimage_bench` binary and the parity tests load), `BRAIN_S3DIT_LAYERS`
@@ -530,9 +530,11 @@ five tokens: separates a plumbing bug from a weights bug;
 `BRAIN_PROFILE_GROUPED_MIN_ROWS=<rows>` (the row count from which its expert
 GEMMs group their slots).
 
-**Backend internals:** `BRAIN_VK_ALLOC_DEBUG` (verbose Vulkan allocator
-logging), `BRAIN_WGPU_SERIAL` / `BRAIN_WGPU_NO_SERIAL` (force / disable the
+**Backend internals:** `BRAIN_WGPU_SERIAL` / `BRAIN_WGPU_NO_SERIAL` (force / disable the
 serialised-submit path the wgpu backend otherwise selects per adapter).
+
+**Stage timings** (the FLUX.2 forward's host and device stages, the Nemotron ASR encode and decode) print under
+`--kernel-profile`, beside its per-kernel tables.
 
 **Ad-hoc dev benchmarks (needs a Python + HuggingFace Transformers
 environment, unlike `brain perf`):** `tools/bench/bench_qwen_inference.py`

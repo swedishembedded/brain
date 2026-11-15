@@ -573,14 +573,10 @@ impl Encoder {
         let mel_valid = wav.len() as u32 / 160; // floor(L/hop) — the extractor's valid length
         let te = std::time::Instant::now();
         let (pooler, valid) = self.encode(&mel, t as u32, mel_valid, prompt_id);
-        if std::env::var("NEM_TIMING").is_ok() {
-            eprintln!("  encode: {:?}", te.elapsed());
-        }
+        gpu_core::profile::stage_time("nemotron transcribe: encode", te);
         let td = std::time::Instant::now();
         let out = self.rnnt_greedy_until(&pooler, valid as usize, cancel);
-        if std::env::var("NEM_TIMING").is_ok() {
-            eprintln!("  decode: {:?}", td.elapsed());
-        }
+        gpu_core::profile::stage_time("nemotron transcribe: decode", td);
         out
     }
 
