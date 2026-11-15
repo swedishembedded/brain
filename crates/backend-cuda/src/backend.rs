@@ -866,8 +866,12 @@ impl CudaBackend {
         } else {
             None
         };
-        for (mem, off) in &st.bufs {
-            args.push(mem.device_ptr() + off);
+        for (binding, (mem, off)) in st.bufs.iter().enumerate() {
+            let at = mem.device_ptr() + off;
+            // The generated tier reads an aligned storage vector in one 16-byte access, and the native kernels load
+            // 16 bytes at a time: a binding off that boundary would fault the context instead of failing here.
+            assert!(at % 16 == 0, "backend-cuda: kernel '{name}' binding {binding} is at {at:#x}, not on a 16-byte boundary");
+            args.push(at);
         }
         if c.takes_lengths {
             // The kernel reads the low 64 bits as `unsigned long long`.

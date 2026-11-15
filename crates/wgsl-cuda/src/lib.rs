@@ -267,6 +267,23 @@ fn clamped(index: &str, nel: &str) -> String {
     format!("__brain_clamp({index}, (size_t)({nel}))")
 }
 
+/// Whether an element of a vector array loads as one CUDA vector: a storage binding's `vec2` or `vec4` of 32-bit
+/// scalars laid out at its own width, so every element is aligned to its size.
+fn wide_vector(storage: bool, n: u32, stride: u32, elem: Ty) -> bool {
+    storage && stride == n && matches!(n, 2 | 4) && elem != Ty::Bool
+}
+
+/// The CUDA vector type of `n` 32-bit `ty` lanes (`float4`, `uint2`, ...).
+fn cuda_vector(ty: Ty, n: u32) -> String {
+    let lane = match ty {
+        Ty::F32 => "float",
+        Ty::U32 => "uint",
+        Ty::I32 => "int",
+        Ty::Bool => unreachable!("a bool vector is never stored in device memory"),
+    };
+    format!("{lane}{n}")
+}
+
 /// Component `c` of a vector whose first component is the lvalue `base`.
 fn vec_comp(base: &str, c: usize) -> String {
     format!("(&{base})[{c}u]")
@@ -320,10 +337,15 @@ enum Place {
     /// element of an array of vectors is a window into the array, so in both
     /// cases a component can be chosen at run time (`v[i]` with `i` a variable)
     /// as well as at translation time.
-    VecRef { base: String, n: u32, ty: Ty },
+    ///
+    /// `wide` marks an element of a storage array of 2- or 4-wide vectors of 32-bit scalars whose stride is their
+    /// width: such an element starts on its own 8- or 16-byte boundary (bindings are 16-byte aligned, which the
+    /// backend checks at launch), so a load of the whole vector is one vector load ([`Generator::emit_expr`]).
+    VecRef { base: String, n: u32, ty: Ty, wide: bool },
     /// An array whose elements are vectors, awaiting an index. `stride` is the
     /// element's size in 32-bit words, which WGSL rounds `vec3` up to four.
-    VecArrayBase { ident: String, elem: Ty, n: u32, stride: u32, nel: String },
+    /// `storage` is set for a storage binding (device memory), whose elements may load as whole vectors.
+    VecArrayBase { ident: String, elem: Ty, n: u32, stride: u32, nel: String, storage: bool },
     /// A storage array of `atomic<T>`, awaiting an index.
     AtomicArrayBase(String, Ty, String),
     /// One `atomic<T>` element: read and written only through CUDA's atomic
@@ -774,7 +796,7 @@ impl<'a> Gen<'a> {
                             let v = coerce(&v, vt, ty)?;
                             let _ = writeln!(out, "{pad}{lv} = {v};");
                         }
-                        Place::VecRef { base, n, ty } => {
+                        Place::VecRef { base, n, ty, .. } => {
                             let v = self.lanes(*value, out)?;
                             if !v.vector || v.comps.len() != n as usize {
                                 return Err("a vector store needs a vector of the same width".into());
@@ -1005,7 +1027,7 @@ impl<'a> Gen<'a> {
                     let ty = Ty::from_scalar(*scalar)?;
                     let n = *size as u32;
                     self.decls.push(format!("{} {ident}[{n}] = {{}};", ty.c()));
-                    locals.insert(h, Place::VecRef { base: format!("{ident}[0]"), n, ty });
+                    locals.insert(h, Place::VecRef { base: format!("{ident}[0]"), n, ty, wide: false });
                 }
                 TypeInner::Struct { .. } => {
                     let cpp = self.cpp_type(lv.ty)?;
@@ -1031,7 +1053,7 @@ impl<'a> Gen<'a> {
                     let v = coerce(&v, vt, ty)?;
                     let _ = writeln!(out, "  {ident} = {v};");
                 }
-                Place::VecRef { base, n, ty } => {
+                Place::VecRef { base, n, ty, .. } => {
                     let v = self.lanes(init, out)?;
                     if !v.vector || v.comps.len() != n as usize {
                         return Err("a vector local needs a vector initialiser of the same width".into());
@@ -1153,6 +1175,20 @@ impl<'a> Gen<'a> {
         if self.cache.contains_key(&h) {
             return Ok(());
         }
+        // A whole aligned vector read from device memory is one vector load rather than a load per lane: the same
+        // bytes, at the same point in the source's order.
+        if let Expression::Load { pointer } = self.func.expressions[h] {
+            if let Eval::Place(Place::VecRef { base, n, ty, wide: true }) = self.eval(pointer, out, depth)? {
+                let name = format!("__e{}", self.n_tmp);
+                self.n_tmp += 1;
+                let vt = cuda_vector(ty, n);
+                self.decls.push(format!("{vt} {name};"));
+                let _ = writeln!(out, "{}{name} = *reinterpret_cast<const {vt}*>(&{base});", "  ".repeat(depth));
+                let comps = COMPONENTS[..n as usize].iter().map(|c| format!("{name}.{c}")).collect();
+                self.cache.insert(h, Eval::Vector(comps, ty));
+                return Ok(());
+            }
+        }
         let e = self.eval(h, out, depth)?;
         match e {
             Eval::Value(text, ty) => {
@@ -1229,7 +1265,7 @@ impl<'a> Gen<'a> {
             Eval::Value(v, t) => Ok(vector::Lanes::scalar(v, t)),
             Eval::Place(Place::Lvalue(lv, t)) => Ok(vector::Lanes::scalar(lv, t)),
             Eval::Vector(c, t) => Ok(vector::Lanes::vector(c, t)),
-            Eval::Place(Place::VecRef { base, n, ty }) => Ok(vector::Lanes::vector((0..n as usize).map(|c| vec_comp(&base, c)).collect(), ty)),
+            Eval::Place(Place::VecRef { base, n, ty, .. }) => Ok(vector::Lanes::vector((0..n as usize).map(|c| vec_comp(&base, c)).collect(), ty)),
             Eval::Agg(..) | Eval::Place(Place::Struct { .. }) | Eval::Place(Place::Array { .. }) => {
                 Err("expected a scalar or vector, got a struct or an array".into())
             }
@@ -1242,7 +1278,7 @@ impl<'a> Gen<'a> {
     fn matrix_operand(&mut self, e: Eval) -> Result<Eval, String> {
         match e {
             Eval::Matrix(..) | Eval::Vector(..) => Ok(e),
-            Eval::Place(Place::VecRef { base, n, ty }) => {
+            Eval::Place(Place::VecRef { base, n, ty, .. }) => {
                 Ok(Eval::Vector((0..n as usize).map(|c| vec_comp(&base, c)).collect(), ty))
             }
             _ => Err("a matrix product with an operand that is neither a matrix nor a vector".into()),
@@ -1281,12 +1317,14 @@ impl<'a> Gen<'a> {
             Expression::ZeroValue(ty) => self.zero_value(*ty),
             Expression::Constant(c) => self.constant(self.m.constants[*c].init),
             Expression::GlobalVariable(g) => match self.globals.get(g).cloned() {
-                Some(GlobalKind::Storage { ident, elem, vec, nel }) | Some(GlobalKind::WorkGroup { ident, elem, vec, nel }) => {
-                    Ok(Eval::Place(match vec {
-                        Some((n, stride)) => Place::VecArrayBase { ident, elem, n, stride, nel },
-                        None => Place::ArrayBase(ident, elem, nel),
-                    }))
-                }
+                Some(GlobalKind::Storage { ident, elem, vec, nel }) => Ok(Eval::Place(match vec {
+                    Some((n, stride)) => Place::VecArrayBase { ident, elem, n, stride, nel, storage: true },
+                    None => Place::ArrayBase(ident, elem, nel),
+                })),
+                Some(GlobalKind::WorkGroup { ident, elem, vec, nel }) => Ok(Eval::Place(match vec {
+                    Some((n, stride)) => Place::VecArrayBase { ident, elem, n, stride, nel, storage: false },
+                    None => Place::ArrayBase(ident, elem, nel),
+                })),
                 Some(GlobalKind::WorkGroupScalar { ident, ty }) => Ok(Eval::Place(Place::Lvalue(ident, ty))),
                 Some(GlobalKind::Uniform(ty)) => Ok(Eval::Place(self.mem_place("__params".to_string(), "0".to_string(), ty)?)),
                 Some(GlobalKind::StorageMem { ident, elem, stride, nel }) => {
@@ -1353,15 +1391,16 @@ impl<'a> Gen<'a> {
                     }
                     // An element of an array of vectors: its components are
                     // `stride` words apart, starting at element `idx`.
-                    Place::VecArrayBase { ident, elem, n, stride, nel } => Ok(Eval::Place(Place::VecRef {
+                    Place::VecArrayBase { ident, elem, n, stride, nel, storage } => Ok(Eval::Place(Place::VecRef {
                         base: format!("{ident}[{} * {stride}u]", clamped(&format!("(size_t)({idx})"), &nel)),
                         n,
                         ty: elem,
+                        wide: wide_vector(storage, n, stride, elem),
                     })),
                     // A component chosen at run time: components are
                     // consecutive, so the index is a pointer offset, clamped to
                     // the vector's width like every other index.
-                    Place::VecRef { base, n, ty } => {
+                    Place::VecRef { base, n, ty, .. } => {
                         Ok(Eval::Place(Place::Lvalue(format!("(&{base})[{}]", clamped(&format!("(size_t)({idx})"), &n.to_string())), ty)))
                     }
                     Place::Array { lv, ty } => Ok(Eval::Place(self.array_element(&lv, ty, &idx)?)),
@@ -1396,16 +1435,17 @@ impl<'a> Gen<'a> {
                 match b {
                     // A component of a vector value or a vector lvalue.
                     Eval::Vector(comps, t) => Ok(Eval::Value(self.component(&comps, *index)?, t)),
-                    Eval::Place(Place::VecRef { base, n, ty }) => {
+                    Eval::Place(Place::VecRef { base, n, ty, .. }) => {
                         if *index >= n {
                             return Err(format!("vector component {index} out of range"));
                         }
                         Ok(Eval::Place(Place::Lvalue(vec_comp(&base, *index as usize), ty)))
                     }
-                    Eval::Place(Place::VecArrayBase { ident, elem, n, stride, nel }) => Ok(Eval::Place(Place::VecRef {
+                    Eval::Place(Place::VecArrayBase { ident, elem, n, stride, nel, storage }) => Ok(Eval::Place(Place::VecRef {
                         base: format!("{ident}[{} * {stride}u]", clamped(&format!("(size_t)({index}u)"), &nel)),
                         n,
                         ty: elem,
+                        wide: wide_vector(storage, n, stride, elem),
                     })),
                     // A struct value's member, and a member of a kernel-private
                     // struct.
@@ -2146,6 +2186,34 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
     }
 
     /// Hazard 5: never, for any kernel.
+    /// A whole `vec2`/`vec4` read from a storage array is one vector load; a `vec3` (whose elements are not aligned to
+    /// their size) and a workgroup array (whose base alignment is the compiler's) keep a load per lane.
+    #[test]
+    fn an_aligned_storage_vector_loads_in_one_access() {
+        const SRC: &str = r#"
+@group(0) @binding(0) var<storage, read> a: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read> b: array<vec2<u32>>;
+@group(0) @binding(2) var<storage, read> c: array<vec3<f32>>;
+@group(0) @binding(3) var<storage, read_write> o: array<f32>;
+var<workgroup> s: array<vec4<f32>, 64>;
+@compute @workgroup_size(64)
+fn main(@builtin(local_invocation_id) li: vec3<u32>) {
+    s[li.x] = a[li.x];
+    workgroupBarrier();
+    let v = a[li.x];
+    let u = b[li.x];
+    let w = c[li.x];
+    let t = s[63u - li.x];
+    o[li.x] = v.x + v.w + f32(u.y) + w.z + t.y;
+}
+"#;
+        let k = generate("wide_loads", SRC).expect("generate");
+        assert!(k.source.contains("*reinterpret_cast<const float4*>(&__b0["), "{}", k.source);
+        assert!(k.source.contains("*reinterpret_cast<const uint2*>(&__b1["), "{}", k.source);
+        assert!(!k.source.contains("reinterpret_cast<const float3*>"), "{}", k.source);
+        assert!(!k.source.contains("reinterpret_cast<const float4*>(&__wg_"), "{}", k.source);
+    }
+
     #[test]
     fn no_kernel_promises_its_pointers_do_not_alias() {
         for (name, src) in [("add2", kernels::ADD2), ("add_inplace", kernels::ADD_INPLACE)] {

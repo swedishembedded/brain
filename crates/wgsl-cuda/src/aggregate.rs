@@ -128,7 +128,7 @@ impl Gen<'_> {
         match &self.m.types[ty].inner {
             TypeInner::Scalar(s) => Ok(Place::Lvalue(lv, Ty::from_scalar(*s)?)),
             TypeInner::Vector { size, scalar } => {
-                Ok(Place::VecRef { base: format!("{lv}[0]"), n: *size as u32, ty: Ty::from_scalar(*scalar)? })
+                Ok(Place::VecRef { base: format!("{lv}[0]"), n: *size as u32, ty: Ty::from_scalar(*scalar)?, wide: false })
             }
             TypeInner::Struct { .. } => {
                 self.cpp_type(ty)?;
@@ -172,7 +172,7 @@ impl Gen<'_> {
             // `atomicLoad`: a volatile read, so it is re-read every time and
             // never served from a register.
             Place::Atomic(lv, t) => Ok(Eval::Value(format!("(*(volatile {} *)&{lv})", t.c()), t)),
-            Place::VecRef { base, n, ty } => Ok(Eval::Vector((0..n as usize).map(|c| super::vec_comp(&base, c)).collect(), ty)),
+            Place::VecRef { base, n, ty, .. } => Ok(Eval::Vector((0..n as usize).map(|c| super::vec_comp(&base, c)).collect(), ty)),
             Place::Struct { lv, ty } | Place::Array { lv, ty } => Ok(Eval::Agg(lv, ty)),
             Place::MemScalar { ptr, off, ty } => Ok(Eval::Value(format!("{}({ptr}, {off})", read_helper(ty)?), ty)),
             Place::Mem { ptr, off, ty } => match &self.m.types[ty].inner {
@@ -471,7 +471,7 @@ impl Gen<'_> {
             TypeInner::Scalar(s) => Ok(Place::Lvalue(format!("{lv}.v[{at}]"), Ty::from_scalar(*s)?)),
             TypeInner::Vector { .. } => {
                 let (t, n, stride) = vector_shape(self.m, base).expect("a vector")?;
-                Ok(Place::VecRef { base: format!("{lv}.v[{at} * {stride}u]"), n, ty: t })
+                Ok(Place::VecRef { base: format!("{lv}.v[{at} * {stride}u]"), n, ty: t, wide: false })
             }
             TypeInner::Struct { .. } => Ok(Place::Struct { lv: format!("{lv}.v[{at}]"), ty: base }),
             other => Err(format!("an array of {other:?} is unsupported")),
