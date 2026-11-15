@@ -345,8 +345,20 @@ charges each: a hosted resident's estimate is its model's plus
 added only where the instance holds device memory), so `hot_cost` and
 every placement, eviction plan and release see it. The constant is the
 measured context rounded up, and the test above fails when a worker's
-context grows past it. The worker's host memory is not charged: a
-GPU-placed instance is charged device bytes only.
+context grows past it. The worker's host memory is charged the same way:
+the estimate also carries `supervised::WORKER_HOST_BYTES`
+(`MemCost::with_process_host`), which the manager charges to the host
+budget beside the card (`single_charges`, refunded through the same list
+on every eviction, unwind and abandonment) whenever the host is budgeted,
+the rule a multi-device model's host bytes follow. A host that cannot
+hold it is refused before any eviction (`TooLarge` past the host's
+ceiling, else `Starved`: nothing is evicted for host memory, so the
+claim fails now and is retried on the next request rather than waiting),
+and `plan` reports the same refusal. The constant is the measured
+resident set rounded up, and the same test fails when a worker holds
+more. What it does not cover: a large checkpoint's host copy in the
+worker grows with the model, and a model's own `ram` is not charged for a
+GPU-placed instance, in process or hosted.
 
 ### What each next family needs
 
@@ -390,8 +402,12 @@ any size, panics answered as job errors.
 * **Memory accounting per device.** The worker's device context is
   charged as one constant measured on a P40; a card whose driver holds a
   larger context needs it measured there (a probe worker could report its
-  own context's footprint at startup), and a worker's host memory is not
-  charged at all.
+  own context's footprint at startup). The worker's host memory is one
+  constant too, measured with the tiny encoder: a hosted large checkpoint
+  keeps its converted weights in the worker, which the constant does not
+  cover (the worker could report its resident set after `open`, or the
+  estimate could add the model's own `ram`), and a host short of memory
+  refuses the claim rather than evicting idle residents to make room.
 * **Models supplied on demand.** `resident_for_local` (the `StoreSupplier`
   path that builds a model a request names but the scan did not serve)
   builds in process; it needs the scan's `worker_hosting`.

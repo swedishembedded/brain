@@ -210,7 +210,7 @@ impl std::error::Error for Unplaceable {}
 /// phases, and a group joining a card is charged only how far that peak
 /// GROWS (its marginal). This is a contract, not magic - the caller evicts
 /// phase k's weights before phase k+1's allocate, or the charge is a lie.
-pub fn plan(parts: &[Part], budgets: &Budgets) -> Result<Placement, Unplaceable> {
+pub fn plan(parts: &[Part], budgets: &Budgets) -> Result<Placement, Box<Unplaceable>> {
     let mut b = budgets.clone();
     let index_of = |name: &str| parts.iter().position(|p| p.name == name);
 
@@ -413,7 +413,7 @@ pub fn plan(parts: &[Part], budgets: &Budgets) -> Result<Placement, Unplaceable>
     for g in &groups {
         // What the group is placed BY on the flat paths (see `UNSIZED_FLOOR`):
         // its peak, not its sum - the sum over phases is never live at once.
-        let probe = MemCost { vram: g.peak_vram, ram: g.cost.ram, npu: g.cost.npu, mapped: 0, activation: None };
+        let probe = MemCost { vram: g.peak_vram, ram: g.cost.ram, npu: g.cost.npu, ..MemCost::default() };
         // `allow_host` is what keeps [`Affinity::Apart`] meaning what it says.
         // Apart is a preference between CARDS ("do not stack the DiT and its
         // text encoder"), and the host tier is not a card - it is the fallback
@@ -476,7 +476,7 @@ pub fn plan(parts: &[Part], budgets: &Budgets) -> Result<Placement, Unplaceable>
             // Name the biggest member: a group is an implementation detail of
             // the constraint, the part is what the operator declared.
             let biggest = g.members.iter().copied().max_by_key(|&m| parts[m].cost.vram.max(parts[m].cost.ram)).unwrap_or(g.root);
-            return Err(Unplaceable {
+            return Err(Box::new(Unplaceable {
                 part: if g.members.len() > 1 {
                     let names: Vec<&str> = g.members.iter().map(|&m| parts[m].name.as_str()).collect();
                     format!("{} (with {})", parts[biggest].name, names.join("+"))
@@ -486,7 +486,7 @@ pub fn plan(parts: &[Part], budgets: &Budgets) -> Result<Placement, Unplaceable>
                 cost: probe,
                 free,
                 placed: parts.iter().zip(&placed).filter_map(|(p, d)| d.map(|d| (p.name.clone(), d))).collect(),
-            });
+            }));
         };
         match dev {
             Device::Gpu(_) if !g.unsized_ => {

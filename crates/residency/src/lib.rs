@@ -96,11 +96,18 @@ pub struct MemCost {
     /// operator's measured fallback in its place
     /// ([`crate::budget::Budgets::activation_fallback`]).
     pub activation: Option<u64>,
+    /// Host bytes a process of the instance's own holds (the worker that hosts
+    /// it: its binary's mappings, its runtime, its own copy of what the model
+    /// keeps on the host), [`Self::with_process_host`]. None of it is shared
+    /// with the serving process, so it is charged to the host budget beside
+    /// whatever the instance is charged wherever it is placed. `0` for an
+    /// instance that runs in the serving process.
+    pub process_host: u64,
 }
 
 impl MemCost {
     pub fn new(vram: u64, ram: u64) -> MemCost {
-        MemCost { vram, ram, npu: 0, mapped: 0, activation: None }
+        MemCost { vram, ram, npu: 0, mapped: 0, activation: None, process_host: 0 }
     }
     /// Declare the instance's peak activation bytes, beyond [`Self::vram`]
     /// (see [`Self::activation`]). `0` declares that `vram` already covers
@@ -124,6 +131,11 @@ impl MemCost {
         if self.vram > 0 || self.activation.is_some_and(|a| a > 0) {
             self.vram += bytes;
         }
+        self
+    }
+    /// Add `bytes` of host memory a process of the instance's own holds beside it (see [`Self::process_host`]).
+    pub fn with_process_host(mut self, bytes: u64) -> MemCost {
+        self.process_host += bytes;
         self
     }
     /// Add an NPU footprint (marks the instance as NPU-placeable). The NPU's compiled

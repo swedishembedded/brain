@@ -108,6 +108,13 @@ pub use host::host_on;
 /// brain CLI's `worker_hosted_lfm` tests) measures it on a real card and fails when a worker holds more.
 pub const WORKER_DEVICE_CONTEXT_BYTES: u64 = 192 << 20;
 
+/// Host memory a worker process holds of its own: the `brain` binary's mappings, its runtime and its copy of what the
+/// model keeps on the host, none of it shared with the serving process, so every hosted instance is charged it against
+/// the host budget beside its card ([`MemCost::with_process_host`]). It is the worker's resident set with its instance
+/// built and run, rounded up to a whole 64 MiB; the same `worker_hosted_lfm` test measures it and fails when a worker
+/// holds more.
+pub const WORKER_HOST_BYTES: u64 = 320 << 20;
+
 /// The first word of an answer whose model code panicked in the worker.
 #[cfg(unix)]
 const PANICKED: &str = "panicked:";
@@ -246,13 +253,14 @@ impl ResidentModel for SupervisedModel {
         self.inner.instance_key(action, inv)
     }
 
-    /// The model's own estimate plus its worker's device context: each instance is one worker on one card.
+    /// The model's own estimate plus its worker's device context and host memory: each instance is one worker on one
+    /// card.
     fn estimate(&self, key: &InstanceKey) -> MemCost {
-        self.inner.estimate(key).with_device_context(WORKER_DEVICE_CONTEXT_BYTES)
+        self.inner.estimate(key).with_device_context(WORKER_DEVICE_CONTEXT_BYTES).with_process_host(WORKER_HOST_BYTES)
     }
 
     fn estimate_at(&self, key: &InstanceKey, tier: Tier) -> MemCost {
-        self.inner.estimate_at(key, tier).with_device_context(WORKER_DEVICE_CONTEXT_BYTES)
+        self.inner.estimate_at(key, tier).with_device_context(WORKER_DEVICE_CONTEXT_BYTES).with_process_host(WORKER_HOST_BYTES)
     }
 
     fn replicas(&self) -> usize {

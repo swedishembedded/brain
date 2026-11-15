@@ -350,6 +350,11 @@ fn a_worker_hosted_encoder_costs_a_round_trip_per_group_and_a_context_per_card()
         let charged = (residency::supervised::WORKER_DEVICE_CONTEXT_BYTES >> 20) as i64;
         assert!(worker - instance <= charged, "a worker's device context holds {} MiB, placement charges {charged} MiB", worker - instance);
     }
+    // And what it charges the host for the worker's own process must cover its resident set.
+    if let Some(resident) = worker_host {
+        let charged = residency::supervised::WORKER_HOST_BYTES >> 20;
+        assert!(resident <= charged, "a worker holds {resident} MiB resident on the host, placement charges {charged} MiB");
+    }
     assert!(worker_job < local_job + Duration::from_millis(50), "a worker added {:?} per job", worker_job.saturating_sub(local_job));
     assert!(worker_group < local_group + Duration::from_millis(50), "a worker added {:?} per group", worker_group.saturating_sub(local_group));
 }

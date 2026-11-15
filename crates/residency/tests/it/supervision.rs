@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 use capability::{ActionResult, ActionSpec, Invocation, Manifest};
 use gpu_supervisor::{BreakerPolicy, BreakerState, DeviceStatus, Health, WorkerCommand};
 use residency::budget::Budgets;
-use residency::supervised::{Deadlines, HostSpec, Probe, SupervisedModel, Supervision, WORKER_DEVICE_CONTEXT_BYTES};
+use residency::supervised::{Deadlines, HostSpec, Probe, SupervisedModel, Supervision, WORKER_DEVICE_CONTEXT_BYTES, WORKER_HOST_BYTES};
 use residency::{Device, Executor, Instance, InstanceKey, Job, MemCost, MultiDeviceCost, MultiDeviceResidentModel, Policy, ResidentModel};
 use serde_json::json;
 
@@ -464,6 +464,34 @@ fn a_card_that_fits_the_instance_but_not_its_workers_context_refuses_it() {
     let err = reply.recv_timeout(Duration::from_secs(10)).expect("e is answered").0.expect_err("the worker's context does not fit beside e");
     assert!(err.contains("budget"), "the refusal names the budget: {err}");
     assert!(exec.residency().placements.is_empty(), "nothing was placed on the card");
+    exec.shutdown();
+}
+
+/// A worker is a process of its own, whose host memory the serving process's budget does not otherwise see: a hosted
+/// instance on a card is charged it against the host budget while resident, and a host that cannot hold it beside the
+/// card refuses the instance at once, naming host memory, with nothing placed.
+#[test]
+fn a_hosted_instance_charges_its_workers_host_memory_to_the_host_budget() {
+    let health = health();
+    let mut budgets = two_gpus();
+    budgets.set(Device::Cpu, 2 * WORKER_HOST_BYTES, 0);
+    let exec = start(vec![model("g", "normal", &health)], budgets, &health, "normal");
+    let (_, reply) = submit(&exec, "g", "ok");
+    reply.recv_timeout(Duration::from_secs(10)).expect("g is answered").0.expect("g runs");
+    let report = exec.residency();
+    assert!(report.placements.iter().any(|p| p.key.model == "g" && matches!(p.device, Device::Gpu(_))), "{:?}", report.placements);
+    let host = report.budgets.iter().find(|b| b.device == Device::Cpu).expect("the host is budgeted");
+    assert_eq!(host.used, WORKER_HOST_BYTES, "the worker's host memory is charged to the host");
+    exec.shutdown();
+
+    let health = self::health();
+    let mut budgets = two_gpus();
+    budgets.set(Device::Cpu, WORKER_HOST_BYTES / 2, 0);
+    let exec = start(vec![model("h", "normal", &health)], budgets, &health, "normal");
+    let (_, reply) = submit(&exec, "h", "ok");
+    let err = reply.recv_timeout(Duration::from_secs(10)).expect("h is answered").0.expect_err("the worker's host memory does not fit");
+    assert!(err.contains("host"), "the refusal names host memory: {err}");
+    assert!(exec.residency().placements.is_empty(), "nothing was placed");
     exec.shutdown();
 }
 

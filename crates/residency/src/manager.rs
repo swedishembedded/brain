@@ -623,6 +623,22 @@ impl ResidencyManager {
             });
         }
 
+        // The host memory its own process holds must fit beside any device, as `claim` refuses it otherwise.
+        if let Err(refused) = self.refuse_host_short(&key, &cost, None, 0) {
+            return Ok(RunPlan {
+                model: model.to_string(),
+                action: action.to_string(),
+                instance_key: key.config.clone(),
+                required: cost,
+                resident_on: None,
+                device: None,
+                evict: Vec::new(),
+                supported_devices: supported,
+                estimated_transfer: 0,
+                refusal: Some(refused.to_string()),
+            });
+        }
+
         // Fits as things stand: no eviction, no disruption.
         if let Some(device) = pick_device(&cost, &self.budgets, &exclude) {
             return Ok(RunPlan {
@@ -984,6 +1000,8 @@ impl ResidencyManager {
             // `Claimed::Promote` so the caller reuses the existing
             // `Instance` via `promote()` instead of rebuilding it.
             let hot_cost = self.hot_cost(&*m, &key);
+            let held = host_part(&self.single_charges(&entry.cost, entry.device));
+            self.refuse_host_short(&key, &hot_cost, None, held)?;
             let device = match pick_device(&hot_cost, &self.budgets, exclude) {
                 Some(d) => d,
                 None => {
@@ -1000,8 +1018,9 @@ impl ResidencyManager {
                     }
                 }
             };
-            self.budgets.release(entry.device, entry.cost.resident_on(entry.device));
-            self.budgets.alloc(device, hot_cost.resident_on(device));
+            self.refuse_host_short(&key, &hot_cost, Some(device), held)?;
+            self.refund(&entry.cost, entry.device);
+            self.charge(&hot_cost, device);
             self.residents.retier(&key, hot_cost, device, Tier::Hot);
             self.residents.set_pinned(&key, true);
             self.event(format!("promote {key} -> {device:?} (warm->hot)"));
@@ -1024,6 +1043,7 @@ impl ResidencyManager {
             )));
         }
         let cost = self.hot_cost(&*m, &key);
+        self.refuse_host_short(&key, &cost, None, 0)?;
         let device = match pick_device(&cost, &self.budgets, exclude) {
             Some(d) => d,
             None => {
@@ -1043,7 +1063,8 @@ impl ResidencyManager {
                 }
             }
         };
-        self.budgets.alloc(device, cost.resident_on(device));
+        self.refuse_host_short(&key, &cost, Some(device), 0)?;
+        self.charge(&cost, device);
         self.residents.insert(key.clone(), cost, device);
         self.residents.set_pinned(&key, true);
         self.event(format!("promote {key} -> {device:?} (building)"));
@@ -1070,7 +1091,7 @@ impl ResidencyManager {
         };
         self.residents.remove(key);
         self.event(format!("build-failed {key} (instance abandoned)"));
-        Some(Abandoned { key: key.clone(), charges: vec![(entry.device, entry.cost.resident_on(entry.device))], instance })
+        Some(Abandoned { key: key.clone(), charges: self.single_charges(&entry.cost, entry.device), instance })
     }
 
     /// [`Self::unwind_failed`]'s multi-device sibling.
@@ -1105,7 +1126,7 @@ impl ResidencyManager {
         self.residents.remove(key);
         self.evictions += 1;
         self.event(format!("abandon {key} <- {:?}", entry.device));
-        Some(Abandoned { key: key.clone(), charges: vec![(entry.device, entry.cost.resident_on(entry.device))], instance })
+        Some(Abandoned { key: key.clone(), charges: self.single_charges(&entry.cost, entry.device), instance })
     }
 
     /// An [`Abandoned`] instance was dropped: give back what it was charged.
@@ -1120,7 +1141,7 @@ impl ResidencyManager {
     /// The claim is over - do NOT also call [`release`](Self::release).
     pub fn build_failed(&mut self, key: &InstanceKey) {
         if let Some(entry) = self.residents.remove(key) {
-            self.budgets.release(entry.device, entry.cost.resident_on(entry.device));
+            self.refund(&entry.cost, entry.device);
         }
         self.instances.remove(key);
         self.event(format!("build-failed {key}"));
@@ -1591,6 +1612,65 @@ impl ResidencyManager {
         }
     }
 
+    /// What a single-device instance of `cost` resident on `device` is charged, device by device: its bytes there
+    /// ([`MemCost::resident_on`]) and the host memory a process of its own holds ([`MemCost::process_host`]), which
+    /// goes to the host on the same condition as a multi-device model's host bytes
+    /// ([`Self::charges_multi_host`]). Every charge and its refund go through this one list, so they cannot drift.
+    fn single_charges(&self, cost: &MemCost, device: Device) -> Vec<(Device, u64)> {
+        let mut charges = vec![(device, cost.resident_on(device))];
+        let process = self.process_host_charge(cost);
+        if process > 0 {
+            charges.push((Device::Cpu, process));
+        }
+        charges
+    }
+
+    /// The part of [`Self::single_charges`] that is the instance's own process: the same on every device.
+    fn process_host_charge(&self, cost: &MemCost) -> u64 {
+        if self.budgets.get(Device::Cpu).is_some_and(|b| b.total > 0) {
+            cost.process_host
+        } else {
+            0
+        }
+    }
+
+    fn charge(&mut self, cost: &MemCost, device: Device) {
+        for (d, bytes) in self.single_charges(cost, device) {
+            self.budgets.alloc(d, bytes);
+        }
+    }
+
+    /// The exact inverse of [`Self::charge`].
+    fn refund(&mut self, cost: &MemCost, device: Device) {
+        for (d, bytes) in self.single_charges(cost, device) {
+            self.budgets.release(d, bytes);
+        }
+    }
+
+    /// Refuse a claim whose host charge does not fit beside it: on `device` once one is chosen, else the part that
+    /// any device needs (the instance's own process). `held` is what the key already holds on the host and gives back
+    /// by moving. Checked before anything is charged; the first check also runs before any eviction, so a claim the
+    /// host cannot take never costs another resident its place. Nothing is evicted for host memory, so a shortage
+    /// fails the claim now rather than leaving it queued: [`ClaimError::TooLarge`] when the host could never hold it,
+    /// else [`ClaimError::Starved`], retried on the next request.
+    fn refuse_host_short(&self, key: &InstanceKey, cost: &MemCost, device: Option<Device>, held: u64) -> Result<(), ClaimError> {
+        let need = match device {
+            Some(d) => host_part(&self.single_charges(cost, d)),
+            None => self.process_host_charge(cost),
+        };
+        let need = need.saturating_sub(held);
+        if need == 0 || self.budgets.fits_on(Device::Cpu, need) {
+            return Ok(());
+        }
+        let (mib, free, ceiling) = (need >> 20, self.budgets.free_on(Device::Cpu) >> 20, self.budgets.ceiling_on(Device::Cpu) >> 20);
+        if need > self.budgets.ceiling_on(Device::Cpu) {
+            return Err(ClaimError::TooLarge(format!("{key} needs {mib} MiB of host memory beside its device, more than the host budget's {ceiling} MiB")));
+        }
+        Err(ClaimError::Starved(format!(
+            "{key} needs {mib} MiB of host memory beside its device and the host budget has {free} MiB free; nothing is evicted for host memory, so it is retried on the next request"
+        )))
+    }
+
     /// Whether a multi-device model's host bytes are accounted against
     /// `Device::Cpu` at all: only when it declares some and the host has a
     /// budget (`total > 0`) to account them in. A CPU excluded from compute
@@ -1614,13 +1694,14 @@ impl ResidencyManager {
                     // cliff memauth's doc warns about. When it doesn't fit,
                     // fall through to the full drop below - freeing the
                     // device slot is the caller's actual requirement; keeping
-                    // a warm copy is only an optimization. (Conservative for
-                    // a CPU-Hot instance, whose own Hot bytes are not counted
-                    // as freed here; demoting CPU→CPU-warm is not a shape any
-                    // current caller produces.)
-                    if self.budgets.fits_on(Device::Cpu, warm_cost.resident_on(Device::Cpu)) && handle.lock().unwrap().demote(Tier::Warm).is_ok() {
-                        self.budgets.release(entry.device, entry.cost.resident_on(entry.device));
-                        self.budgets.alloc(Device::Cpu, warm_cost.resident_on(Device::Cpu));
+                    // a warm copy is only an optimization. What the Hot
+                    // entry already holds on the host is freed by the same
+                    // move, so only the difference has to fit.
+                    let held = host_part(&self.single_charges(&entry.cost, entry.device));
+                    let need = host_part(&self.single_charges(&warm_cost, Device::Cpu)).saturating_sub(held);
+                    if self.budgets.fits_on(Device::Cpu, need) && handle.lock().unwrap().demote(Tier::Warm).is_ok() {
+                        self.refund(&entry.cost, entry.device);
+                        self.charge(&warm_cost, Device::Cpu);
                         self.residents.retier(key, warm_cost, Device::Cpu, Tier::Warm);
                         self.event(format!("demote {key} <- {:?} (warm)", entry.device));
                         return;
@@ -1632,12 +1713,17 @@ impl ResidencyManager {
         // `demote` isn't supported, the entry was already below Hot, or the
         // model/instance lookup above came up empty.
         if let Some(entry) = self.residents.remove(key) {
-            self.budgets.release(entry.device, entry.cost.resident_on(entry.device));
+            self.refund(&entry.cost, entry.device);
             self.instances.remove(key); // drops the Instance → frees the GPU
             self.evictions += 1;
             self.event(format!("evict {key} <- {:?}", entry.device));
         }
     }
+}
+
+/// The bytes of a charge list that land on the host.
+fn host_part(charges: &[(Device, u64)]) -> u64 {
+    charges.iter().filter(|(d, _)| *d == Device::Cpu).map(|&(_, b)| b).sum()
 }
 
 #[cfg(test)]
@@ -1726,6 +1812,42 @@ mod tests {
         mgr.run("job", "run", &Invocation::new(), &mut |_| {}).unwrap();
         assert_eq!(live.load(Ordering::SeqCst), 0);
         assert_eq!(mgr.budgets.get(Device::Gpu(0)).unwrap().used, 0);
+    }
+
+    /// An instance whose own process holds host memory is charged it on the host beside its card, and every way
+    /// it leaves the card (evicted for another, evicted outright) gives both charges back.
+    #[test]
+    fn an_instance_with_a_process_of_its_own_charges_the_host_beside_its_card_until_it_leaves() {
+        struct OwnProcess(Fake);
+        impl ResidentModel for OwnProcess {
+            fn manifest(&self) -> Manifest {
+                self.0.manifest()
+            }
+            fn instance_key(&self, a: &str, i: &Invocation) -> InstanceKey {
+                self.0.instance_key(a, i)
+            }
+            fn estimate(&self, k: &InstanceKey) -> MemCost {
+                self.0.estimate(k).with_process_host(GB)
+            }
+            fn activate(&self, k: &InstanceKey, d: Device) -> Result<Box<dyn crate::Instance>, String> {
+                self.0.activate(k, d)
+            }
+        }
+        let live = Arc::new(AtomicU32::new(0));
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(0), 24 * GB, 0).set(Device::Cpu, 4 * GB, 0);
+        let mut mgr = ResidencyManager::new(budgets);
+        for n in ["a", "b"] {
+            mgr.register(Arc::new(OwnProcess(Fake { name: n.into(), vram: 20 * GB, live: live.clone() })));
+        }
+        let used = |mgr: &ResidencyManager, d: Device| mgr.budgets.get(d).unwrap().used;
+
+        mgr.run("a", "run", &Invocation::new(), &mut |_| {}).unwrap();
+        assert_eq!((used(&mgr, Device::Gpu(0)), used(&mgr, Device::Cpu)), (20 * GB, GB), "a on the card, its process on the host");
+        mgr.run("b", "run", &Invocation::new(), &mut |_| {}).unwrap();
+        assert_eq!((used(&mgr, Device::Gpu(0)), used(&mgr, Device::Cpu)), (20 * GB, GB), "a evicted for b gives its host charge back");
+        assert!(mgr.evict(&InstanceKey::new("b", "default")));
+        assert_eq!((used(&mgr, Device::Gpu(0)), used(&mgr, Device::Cpu)), (0, 0), "nothing stays charged once b is gone");
     }
 
     /// The whole point of `plan`: the prediction it makes is the decision
