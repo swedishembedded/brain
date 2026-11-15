@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 
 use glmdsa::{init_weights, Glm, GlmConfig};
-use gpu_core::{set_default_backend, Backend};
+use gpu_core::Backend;
 
 /// d_model 256, seq 160 → every forward linear has m=160, nout ∈ {256, …} ≥ 128,
 /// so `mm()` selects `matmul_reg3`.
@@ -33,9 +33,10 @@ fn logits(backend: Backend, naive: bool, c: &GlmConfig, init: &HashMap<String, V
     } else {
         std::env::remove_var("BRAIN_GLMDSA_NAIVE_MM");
     }
-    set_default_backend(backend);
-    let m = Glm::new_on(gpu_core::testgpu::dev(glmdsa::model::PIPELINES), c.clone(), 1, x.len() as u32, init);
-    m.logits_all(x)
+    gpu_core::with_backend(backend, || {
+        let m = Glm::new_on(gpu_core::testgpu::dev(glmdsa::model::PIPELINES), c.clone(), 1, x.len() as u32, init);
+        m.logits_all(x)
+    })
 }
 
 fn rel(a: &[f32], b: &[f32]) -> (f32, f32) {

@@ -63,6 +63,7 @@ mod gemv_reg_upgrade_step_buf;
 mod glue_roof_bench;
 mod gqa_qk_prep_native;
 mod host_tier;
+mod scoped_backend;
 mod i8_decode_batch_bench;
 mod i8_dequant_native;
 mod i8_dyn_native_bench;

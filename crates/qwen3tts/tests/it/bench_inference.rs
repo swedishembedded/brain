@@ -25,7 +25,7 @@
 
 use std::time::Instant;
 
-use gpu_core::{set_default_backend, Backend};
+use gpu_core::Backend;
 use qwen3tts::{config::TalkerConfig, TalkerModel};
 
 /// The real 0.6B Talker: 28 layers, d_model 1024, q_dim 2048 (16×128), 8 KV
@@ -56,18 +56,19 @@ fn frames(cfg: &TalkerConfig) -> Vec<u32> {
 /// Build the 0.6B Talker on `backend`, return (min-of-`reps` ms, logits) for a
 /// T-frame forward.
 fn forward(backend: Backend, reps: usize) -> (f64, Vec<f32>) {
-    set_default_backend(backend);
-    let cfg = talker_0_6b();
-    let m = TalkerModel::new_trainable(cfg.clone(), 1, T as u32, 1234);
-    let x = frames(&cfg);
-    let logits = m.logits_all(&x); // warm + captured for parity
-    let mut best = f64::INFINITY;
-    for _ in 0..reps {
-        let t0 = Instant::now();
-        let _ = m.logits_all(&x);
-        best = best.min(t0.elapsed().as_secs_f64() * 1e3);
-    }
-    (best, logits)
+    gpu_core::with_backend(backend, || {
+        let cfg = talker_0_6b();
+        let m = TalkerModel::new_trainable(cfg.clone(), 1, T as u32, 1234);
+        let x = frames(&cfg);
+        let logits = m.logits_all(&x); // warm + captured for parity
+        let mut best = f64::INFINITY;
+        for _ in 0..reps {
+            let t0 = Instant::now();
+            let _ = m.logits_all(&x);
+            best = best.min(t0.elapsed().as_secs_f64() * 1e3);
+        }
+        (best, logits)
+    })
 }
 
 #[test]

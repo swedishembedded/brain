@@ -36,6 +36,13 @@ skip that cargo reports as a pass certifies nothing. Use `brain_testutil::skip`
 `#[ignore = "needs a GPU"]`. `make check/test-skips` fails on a new silent skip
 and the legacy ones in `scripts/gates/test-skips.allow` only shrink.
 
+A test binary runs its tests side by side, so a test changes no process-wide
+selection. One that needs a backend or a tile budget scopes it to its own
+thread with `gpu_core::with_backend` or `model::block::with_tile_budget_words`;
+`gpu_core::set_default_backend` is the CLI's. A test that set the process
+backend to the CPU once moved every device built after it in the binary onto
+the CPU, and tests comparing two builds failed only in the full run.
+
 ### `testdata/` - fixture inputs and goldens, not a model store
 
 Parity/import tests across many crates (`fastvlm`, `moondream`, `qwenvl`, `nemotron`,

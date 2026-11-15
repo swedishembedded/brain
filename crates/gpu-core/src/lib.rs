@@ -624,9 +624,10 @@ pub mod testgpu {
         PrivateGpu { gpu: Gpu::new(kernels), _exclusive: guard }
     }
 
-    /// Keyed by the kernel slice's address: kernel sets are `'static` consts,
-    /// so the pointer is a stable identity.
-    static POOL: OnceLock<Mutex<HashMap<usize, WeakGpu>>> = OnceLock::new();
+    /// Keyed by the backend the caller's thread builds on (see
+    /// [`crate::with_backend`]) and the kernel slice's address: kernel sets are
+    /// `'static` consts, so the pointer is a stable identity.
+    static POOL: OnceLock<Mutex<HashMap<(&'static str, usize), WeakGpu>>> = OnceLock::new();
 
     /// A handle for `kernels` on this test binary's shared device.
     ///
@@ -636,16 +637,18 @@ pub mod testgpu {
     /// device that survives into process exit (leaked static) crashed the
     /// driver's worker threads intermittently, and tearing one down from an
     /// `atexit` hook crashed every run. Overlapping tests share one device;
-    /// a gap in the schedule lets it die and the next test rebuilds it.
+    /// a gap in the schedule lets it die and the next test rebuilds it. A test
+    /// inside a [`crate::with_backend`] scope shares the device of that backend.
     pub fn dev(kernels: &'static [(&'static str, &'static str)]) -> Gpu {
         let cell = POOL.get_or_init(|| Mutex::new(HashMap::new()));
         let mut map = cell.lock().unwrap_or_else(|e| e.into_inner());
-        let key = kernels.as_ptr() as usize;
+        let backend = crate::backend_name();
+        let key = (backend, kernels.as_ptr() as usize);
         if let Some(g) = map.get(&key).and_then(|w| w.upgrade()) {
             return g;
         }
-        // Any live entry can parent a new kernel set on the same device.
-        let parent = map.values().find_map(|w| w.upgrade());
+        // Any live entry of the same backend can parent a new kernel set on the same device.
+        let parent = map.iter().filter(|((b, _), _)| *b == backend).find_map(|(_, w)| w.upgrade());
         let g = match parent {
             Some(p) => p.new_like(kernels),
             None => Gpu::new(kernels),
@@ -818,26 +821,74 @@ mod native_facade {
     }
 
     /// Set the process-wide default backend that `Gpu::new` builds. The CLI sets
-    /// this from its `--device` flag. When unset, `BRAIN_DEVICE=cpu|vulkan`
-    /// selects that backend; otherwise the default is wgpu.
+    /// this from its `--device` flag; it is a process entry point's choice, and
+    /// code that shares its process with other work scopes its own choice with
+    /// [`with_backend`] instead. When unset, the ambient compute set selects it
+    /// (`BRAIN_DEVICE`, else the detected hardware's default backend).
     pub fn set_default_backend(b: Backend) {
-        DEFAULT_BACKEND.store(
-            match b {
-                Backend::Wgpu => 1,
-                Backend::Cpu => 2,
-                Backend::Vulkan => 3,
-                Backend::Cuda => 4,
-            },
-            Ordering::Relaxed,
-        );
+        DEFAULT_BACKEND.store(backend_code(b), Ordering::Relaxed);
     }
 
-    /// True iff a backend was explicitly selected via [`set_default_backend`]
-    /// (i.e. the CLI saw a `--device` flag). Lets callers that historically
-    /// defaulted to CPU (yolo) opt into the selected backend only when one was
-    /// actually chosen.
+    /// The code [`DEFAULT_BACKEND`] and [`SCOPED_BACKEND`] store for `b`; 0 means unset.
+    fn backend_code(b: Backend) -> u8 {
+        match b {
+            Backend::Wgpu => 1,
+            Backend::Cpu => 2,
+            Backend::Vulkan => 3,
+            Backend::Cuda => 4,
+        }
+    }
+
+    thread_local! {
+        /// The backend a [`with_backend`] scope on this thread selects; 0 outside any scope.
+        static SCOPED_BACKEND: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+    }
+
+    /// Run `f` with every `Gpu::new` on this thread building on `b`, whatever the process default says; other
+    /// threads keep theirs. The thread-scoped form of [`set_default_backend`] for code that shares its process with
+    /// other work: a test binary runs its tests side by side, and a test that set the process default moved every
+    /// device built after it, in every other test, onto its backend. Scopes nest, and the outer choice returns when
+    /// `f` ends or unwinds.
+    pub fn with_backend<R>(b: Backend, f: impl FnOnce() -> R) -> R {
+        struct Restore(u8);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                SCOPED_BACKEND.with(|s| s.set(self.0));
+            }
+        }
+        let _restore = Restore(SCOPED_BACKEND.with(|s| s.replace(backend_code(b))));
+        f()
+    }
+
+    /// True iff a backend was explicitly selected, via [`set_default_backend`]
+    /// (i.e. the CLI saw a `--device` flag) or a [`with_backend`] scope on this
+    /// thread. Lets callers that historically defaulted to CPU (yolo) opt into
+    /// the selected backend only when one was actually chosen.
     pub fn backend_selected() -> bool {
-        DEFAULT_BACKEND.load(Ordering::Relaxed) != 0
+        selected_backend().is_some()
+    }
+
+    /// The backend explicitly selected for this thread: its [`with_backend`] scope, else the process's
+    /// [`set_default_backend`]. `None` when neither chose one. Work handed to other threads carries this into a
+    /// [`with_backend`] scope of their own, since a scope does not cross threads.
+    pub fn selected_backend() -> Option<Backend> {
+        scoped_backend().or_else(|| backend_of(DEFAULT_BACKEND.load(Ordering::Relaxed)))
+    }
+
+    /// The backend of this thread's innermost [`with_backend`] scope, if any.
+    fn scoped_backend() -> Option<Backend> {
+        backend_of(SCOPED_BACKEND.with(std::cell::Cell::get))
+    }
+
+    /// The backend a stored code names ([`backend_code`]'s inverse); `None` for 0, unset.
+    fn backend_of(code: u8) -> Option<Backend> {
+        match code {
+            1 => Some(Backend::Wgpu),
+            2 => Some(Backend::Cpu),
+            3 => Some(Backend::Vulkan),
+            4 => Some(Backend::Cuda),
+            _ => None,
+        }
     }
 
     /// The registry name of the backend that will be (or was) selected -
@@ -922,7 +973,8 @@ mod native_facade {
         let _ = CAPS.set(inner.caps());
     }
 
-    /// The registry name of the selected backend.
+    /// The registry name of the selected backend: this thread's [`with_backend`]
+    /// scope first, then the host tier, then the process's selection.
     ///
     /// When no backend was explicitly selected via [`set_default_backend`]
     /// (the CLI's `--device` path), this goes through
@@ -933,6 +985,10 @@ mod native_facade {
     /// understand only `"cpu"`/`"vulkan"` and silently mangled everything
     /// else (`gpu0`, `npu`, `cpu0-7`, …) to "just use wgpu, ambient card".
     fn resolve_backend_name() -> &'static str {
+        // A thread's own explicit choice outranks everything the process decided for it.
+        if let Some(b) = scoped_backend() {
+            return registry_name(b);
+        }
         // A part the placer put on the HOST TIER runs on the CPU backend, and
         // that decision outranks the ambient selection: the host tier is only
         // ever chosen when no card can hold the part, so honouring a `--device
@@ -943,12 +999,16 @@ mod native_facade {
         if crate::devices::on_host_tier() && !crate::devices::software_adapter_selected() {
             return "cpu";
         }
-        match DEFAULT_BACKEND.load(Ordering::Relaxed) {
-            1 => "wgpu",
-            2 => "cpu",
-            3 => "vulkan",
-            4 => "cuda",
-            _ => crate::devices::ambient_compute_set().backend.name(),
+        selected_backend().map_or_else(|| crate::devices::ambient_compute_set().backend.name(), registry_name)
+    }
+
+    /// The registry name of `b`.
+    fn registry_name(b: Backend) -> &'static str {
+        match b {
+            Backend::Wgpu => "wgpu",
+            Backend::Cpu => "cpu",
+            Backend::Vulkan => "vulkan",
+            Backend::Cuda => "cuda",
         }
     }
 
@@ -3286,7 +3346,7 @@ mod native_facade {
 #[cfg(not(target_arch = "wasm32"))]
 pub use native_facade::{
     adapter_info, backend_name, backend_selected, device_caps, discrete_gpu_count,
-    available_gpu_backends, set_default_backend, visible_gpu_count, wgpu_visible_gpus, Backend, Gpu, PassScope, ScratchMark,
+    available_gpu_backends, selected_backend, set_default_backend, visible_gpu_count, with_backend, wgpu_visible_gpus, Backend, Gpu, PassScope, ScratchMark,
     ScratchScope, TapeRecording, WeakGpu,
 };
 

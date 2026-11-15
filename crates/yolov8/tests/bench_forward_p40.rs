@@ -16,7 +16,7 @@
 
 use std::collections::HashMap;
 
-use gpu_core::{set_default_backend, Backend};
+use gpu_core::Backend;
 use yolov8::{Yolo, YoloConfig};
 
 fn randimg(n: usize) -> Vec<f32> {
@@ -25,23 +25,24 @@ fn randimg(n: usize) -> Vec<f32> {
 
 fn forward_ms(gemm: bool, init: &HashMap<String, Vec<f32>>, reps: usize) -> f64 {
     std::env::set_var("BRAIN_CONV_GEMM", if gemm { "1" } else { "0" });
-    set_default_backend(Backend::Wgpu);
-    let cfg = YoloConfig::yolov8n();
-    let m = Yolo::new_on(gpu_core::testgpu::dev(yolov8::net::PIPELINES), cfg.clone(), 1, cfg.input, init);
-    m.set_eval(true);
-    let img = randimg((3 * cfg.input * cfg.input) as usize);
-    m.set_image(&img);
-    m.forward_net_pub();
-    m.gpu.poll_wait(); // warm
-
-    let mut best = f64::INFINITY;
-    for _ in 0..reps {
-        let t = std::time::Instant::now();
+    gpu_core::with_backend(Backend::Wgpu, || {
+        let cfg = YoloConfig::yolov8n();
+        let m = Yolo::new_on(gpu_core::testgpu::dev(yolov8::net::PIPELINES), cfg.clone(), 1, cfg.input, init);
+        m.set_eval(true);
+        let img = randimg((3 * cfg.input * cfg.input) as usize);
+        m.set_image(&img);
         m.forward_net_pub();
-        m.gpu.poll_wait();
-        best = best.min(t.elapsed().as_secs_f64() * 1e3);
-    }
-    best
+        m.gpu.poll_wait(); // warm
+
+        let mut best = f64::INFINITY;
+        for _ in 0..reps {
+            let t = std::time::Instant::now();
+            m.forward_net_pub();
+            m.gpu.poll_wait();
+            best = best.min(t.elapsed().as_secs_f64() * 1e3);
+        }
+        best
+    })
 }
 
 #[test]

@@ -14,7 +14,7 @@
 use std::time::Instant;
 
 use gpt2::{Gpt, GptConfig};
-use gpu_core::{set_default_backend, Backend};
+use gpu_core::Backend;
 
 fn cfg() -> GptConfig {
     GptConfig { vocab: 8192, block_size: 256, n_layers: 6, d_model: 384, n_heads: 6, d_ff: 1536 }
@@ -26,27 +26,28 @@ const T: usize = 256;
 fn run(naive: bool, reps: usize) -> (f64, Vec<f32>) {
     if naive { std::env::set_var("BRAIN_GPT2_NAIVE_MM", "1"); }
     else { std::env::remove_var("BRAIN_GPT2_NAIVE_MM"); }
-    set_default_backend(Backend::Wgpu);
-    let c = cfg();
-    let init = gpt2::init_weights(&c, 1234);
-    let m = Gpt::new_on(gpu_core::testgpu::dev(gpt2::model::PIPELINES), c.clone(), B as u32, T as u32, &init);
-    let x: Vec<u32> = (0..B * T).map(|i| ((i * 131 + 7) as u32) % c.vocab).collect();
-    let y: Vec<u32> = (0..B * T).map(|i| ((i * 131 + 8) as u32) % c.vocab).collect();
-    m.set_batch(&x, &y);
+    gpu_core::with_backend(Backend::Wgpu, || {
+        let c = cfg();
+        let init = gpt2::init_weights(&c, 1234);
+        let m = Gpt::new_on(gpu_core::testgpu::dev(gpt2::model::PIPELINES), c.clone(), B as u32, T as u32, &init);
+        let x: Vec<u32> = (0..B * T).map(|i| ((i * 131 + 7) as u32) % c.vocab).collect();
+        let y: Vec<u32> = (0..B * T).map(|i| ((i * 131 + 8) as u32) % c.vocab).collect();
+        m.set_batch(&x, &y);
 
-    m.zero_grads(); m.forward(); m.backward(); m.gpu.poll_wait(); // warm
-    let grad = m.read_grad("blocks.0.mlp.fc.weight"); // a representative dW
+        m.zero_grads(); m.forward(); m.backward(); m.gpu.poll_wait(); // warm
+        let grad = m.read_grad("blocks.0.mlp.fc.weight"); // a representative dW
 
-    let mut best = f64::INFINITY;
-    for _ in 0..reps {
-        let t = Instant::now();
-        m.zero_grads();
-        m.forward();
-        m.backward();
-        m.gpu.poll_wait();
-        best = best.min(t.elapsed().as_secs_f64() * 1e3);
-    }
-    (best, grad)
+        let mut best = f64::INFINITY;
+        for _ in 0..reps {
+            let t = Instant::now();
+            m.zero_grads();
+            m.forward();
+            m.backward();
+            m.gpu.poll_wait();
+            best = best.min(t.elapsed().as_secs_f64() * 1e3);
+        }
+        (best, grad)
+    })
 }
 
 #[test]

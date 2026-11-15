@@ -22,20 +22,19 @@ use std::path::{Path, PathBuf};
 use data::qwen_tokenizer::QwenBpe;
 use data::tokenizer::Tokenizer;
 use data::toolcall;
-use gpu_core::{set_default_backend, Backend};
+use gpu_core::Backend;
 use qwen3::{Qwen, QwenConfig};
 
 fn dir() -> Option<PathBuf> {
     std::env::var("QWEN3_DIR").ok().map(PathBuf::from)
 }
 
-/// Pin the GPU backend and make the 151936-vocab lm_head a SINGLE reg2 tile.
+/// Run `f` on the GPU backend with the 151936-vocab lm_head a SINGLE reg2 tile.
 /// Qwen's default vocab-tile budget splits the lm_head into ~7 tiles that run on
 /// the naive `matmul_tile` (~4 s/forward); one tile (622 MB weight < the 2 GB
 /// binding cap) uses the fast `matmul_reg3` (~40 ms). Turns a ~60 s step into ~1 s.
-fn setup() {
-    set_default_backend(Backend::Wgpu);
-    model::block::set_tile_budget_words(Some(200_000_000));
+fn on_gpu<R>(f: impl FnOnce() -> R) -> R {
+    gpu_core::with_backend(Backend::Wgpu, || model::block::with_tile_budget_words(200_000_000, f))
 }
 fn weights(d: &Path) -> PathBuf {
     d.join("brain/qwen3-0.6b.safetensors")
@@ -88,18 +87,19 @@ fn qwen3_inference_coherent() {
         brain_testutil::skip("QWEN3_DIR unset");
         return;
     };
-    setup();
-    let t = tok(&d);
-    let m = Qwen::load_inference(weights(&d).to_str().unwrap(), 1, 64);
+    on_gpu(|| {
+        let t = tok(&d);
+        let m = Qwen::load_inference(weights(&d).to_str().unwrap(), 1, 64);
 
-    // Factual, unambiguous: the base model must complete this correctly.
-    let prompt = "The capital of France is the city of";
-    let ids = t.encode(prompt);
-    let mut rng = data::rng::Rng::random();
-    let out = qwen3::sample::generate(&m, &ids, 4, 0.0, 0, 1.0, &[], &mut rng); // greedy
-    let text = t.decode(&out);
-    println!("inference: {prompt:?} -> {text:?}");
-    assert!(text.to_lowercase().contains("paris"), "base model failed a basic factual completion: {text:?}");
+        // Factual, unambiguous: the base model must complete this correctly.
+        let prompt = "The capital of France is the city of";
+        let ids = t.encode(prompt);
+        let mut rng = data::rng::Rng::random();
+        let out = qwen3::sample::generate(&m, &ids, 4, 0.0, 0, 1.0, &[], &mut rng); // greedy
+        let text = t.decode(&out);
+        println!("inference: {prompt:?} -> {text:?}");
+        assert!(text.to_lowercase().contains("paris"), "base model failed a basic factual completion: {text:?}");
+    })
 }
 
 #[test]
@@ -109,42 +109,43 @@ fn qwen3_training_validity() {
         brain_testutil::skip("QWEN3_DIR unset");
         return;
     };
-    setup();
-    let t = tok(&d);
+    on_gpu(|| {
+        let t = tok(&d);
 
-    // Memorise a single distinctive assistant response — loss must drop sharply,
-    // proving the forward+backward+optimizer loop trains the real 0.6B weights.
-    let ex = data::chat::ChatExample::new(
-        "Repeat the secret phrase.",
-        "The secret phrase is: velvet thunder over the quiet harbor.",
-    );
-    // Repeated: forty rows of the same example, one example per row.
-    let corpus: Vec<_> = std::iter::repeat_n(ex.clone(), 40).collect();
-    let out = std::env::temp_dir().join("qwen3_train_validity");
-    data::chat::prepare_chat(&corpus, &corpus, &t, &chat_template(&d), 151936, &out).unwrap();
+        // Memorise a single distinctive assistant response - loss must drop sharply,
+        // proving the forward+backward+optimizer loop trains the real 0.6B weights.
+        let ex = data::chat::ChatExample::new(
+            "Repeat the secret phrase.",
+            "The secret phrase is: velvet thunder over the quiet harbor.",
+        );
+        // Repeated: forty rows of the same example, one example per row.
+        let corpus: Vec<_> = std::iter::repeat_n(ex.clone(), 40).collect();
+        let out = std::env::temp_dir().join("qwen3_train_validity");
+        data::chat::prepare_chat(&corpus, &corpus, &t, &chat_template(&d), 151936, &out).unwrap();
 
-    let cfg = QwenConfig::from_json(&checkpoint::load(weights_ft(&d).to_str().unwrap()).header["config"]);
-    let steps = env_usize("QWEN3_TV_STEPS", 40);
-    let opts = model::FitOpts {
-        steps: steps as u32,
-        batch_size: 1,
-        block_size: 512,
-        lr: 1e-4,
-        warmup: 5,
-        decay_iters: steps as u32,
-        min_lr: 1e-5,
-        weight_decay: 0.0,
-        grad_clip: 1.0,
-        grad_accum: 1,
-        eval_interval: (steps / 4).max(1) as u32,
-        eval_batches: 1,
-        ..Default::default()
-    };
-    let ckpt = out.join("ft.safetensors");
-    std::fs::copy(weights_ft(&d), &ckpt).unwrap();
-    let (l0, l1) = model::fit::<Qwen>(&out, cfg, &opts, Some(&ckpt)).expect("fit");
-    println!("training validity: loss {l0:.4} -> {l1:.4} over {steps} steps");
-    assert!(l1 < l0 * 0.5, "loss did not drop enough: {l0:.4} -> {l1:.4}");
+        let cfg = QwenConfig::from_json(&checkpoint::load(weights_ft(&d).to_str().unwrap()).header["config"]);
+        let steps = env_usize("QWEN3_TV_STEPS", 40);
+        let opts = model::FitOpts {
+            steps: steps as u32,
+            batch_size: 1,
+            block_size: 512,
+            lr: 1e-4,
+            warmup: 5,
+            decay_iters: steps as u32,
+            min_lr: 1e-5,
+            weight_decay: 0.0,
+            grad_clip: 1.0,
+            grad_accum: 1,
+            eval_interval: (steps / 4).max(1) as u32,
+            eval_batches: 1,
+            ..Default::default()
+        };
+        let ckpt = out.join("ft.safetensors");
+        std::fs::copy(weights_ft(&d), &ckpt).unwrap();
+        let (l0, l1) = model::fit::<Qwen>(&out, cfg, &opts, Some(&ckpt)).expect("fit");
+        println!("training validity: loss {l0:.4} -> {l1:.4} over {steps} steps");
+        assert!(l1 < l0 * 0.5, "loss did not drop enough: {l0:.4} -> {l1:.4}");
+    })
 }
 
 #[test]
@@ -154,58 +155,59 @@ fn qwen3_toolcall_finetune() {
         brain_testutil::skip("QWEN3_DIR unset");
         return;
     };
-    setup();
-    let t = tok(&d);
+    on_gpu(|| {
+        let t = tok(&d);
 
-    // Data: generate tool-call cases (target tool + distractors + arg routing).
-    let n_train = env_usize("QWEN3_TC_TRAIN", 240);
-    let train = toolcall::generate(n_train, 3, 1);
-    let held = toolcall::generate(24, 3, 999); // disjoint seed -> held-out
-    let train_ex: Vec<_> = train.iter().map(|c| c.to_chat_example()).collect();
-    let val_ex: Vec<_> = held.iter().map(|c| c.to_chat_example()).collect();
+        // Data: generate tool-call cases (target tool + distractors + arg routing).
+        let n_train = env_usize("QWEN3_TC_TRAIN", 240);
+        let train = toolcall::generate(n_train, 3, 1);
+        let held = toolcall::generate(24, 3, 999); // disjoint seed -> held-out
+        let train_ex: Vec<_> = train.iter().map(|c| c.to_chat_example()).collect();
+        let val_ex: Vec<_> = held.iter().map(|c| c.to_chat_example()).collect();
 
-    let out = std::env::temp_dir().join("qwen3_toolcall");
-    data::chat::prepare_chat(&train_ex, &val_ex, &t, &chat_template(&d), 151936, &out).unwrap();
+        let out = std::env::temp_dir().join("qwen3_toolcall");
+        data::chat::prepare_chat(&train_ex, &val_ex, &t, &chat_template(&d), 151936, &out).unwrap();
 
-    // Eval BEFORE.
-    let base = Qwen::load_inference(weights(&d).to_str().unwrap(), 1, 512);
-    let (ex0, ta0) = qwen3::toolcall_eval::eval(&base, &t, &chat_template(&d), &held);
-    println!("tool-call BEFORE finetune: exact-match {:.1}%  token-acc {:.1}%", ex0 * 100.0, ta0 * 100.0);
-    drop(base);
+        // Eval BEFORE.
+        let base = Qwen::load_inference(weights(&d).to_str().unwrap(), 1, 512);
+        let (ex0, ta0) = qwen3::toolcall_eval::eval(&base, &t, &chat_template(&d), &held);
+        println!("tool-call BEFORE finetune: exact-match {:.1}%  token-acc {:.1}%", ex0 * 100.0, ta0 * 100.0);
+        drop(base);
 
-    // Fine-tune (assistant span only — the mask pipeline).
-    let steps = env_usize("QWEN3_TC_STEPS", 200);
-    let cfg = QwenConfig::from_json(&checkpoint::load(weights_ft(&d).to_str().unwrap()).header["config"]);
-    let opts = model::FitOpts {
-        steps: steps as u32,
-        batch_size: 1,
-        block_size: 512,
-        lr: 1e-4,
-        warmup: 20,
-        decay_iters: steps as u32,
-        min_lr: 1e-5,
-        weight_decay: 0.0,
-        grad_clip: 1.0,
-        grad_accum: 4,
-        eval_interval: (steps / 5).max(1) as u32,
-        eval_batches: 4,
-        ..Default::default()
-    };
-    let ckpt = out.join("ft.safetensors");
-    std::fs::copy(weights_ft(&d), &ckpt).unwrap();
-    let (l0, l1) = model::fit::<Qwen>(&out, cfg, &opts, Some(&ckpt)).expect("fit");
-    println!("tool-call finetune: loss {l0:.4} -> {l1:.4}");
+        // Fine-tune (assistant span only - the mask pipeline).
+        let steps = env_usize("QWEN3_TC_STEPS", 200);
+        let cfg = QwenConfig::from_json(&checkpoint::load(weights_ft(&d).to_str().unwrap()).header["config"]);
+        let opts = model::FitOpts {
+            steps: steps as u32,
+            batch_size: 1,
+            block_size: 512,
+            lr: 1e-4,
+            warmup: 20,
+            decay_iters: steps as u32,
+            min_lr: 1e-5,
+            weight_decay: 0.0,
+            grad_clip: 1.0,
+            grad_accum: 4,
+            eval_interval: (steps / 5).max(1) as u32,
+            eval_batches: 4,
+            ..Default::default()
+        };
+        let ckpt = out.join("ft.safetensors");
+        std::fs::copy(weights_ft(&d), &ckpt).unwrap();
+        let (l0, l1) = model::fit::<Qwen>(&out, cfg, &opts, Some(&ckpt)).expect("fit");
+        println!("tool-call finetune: loss {l0:.4} -> {l1:.4}");
 
-    // Eval AFTER.
-    let ft = Qwen::load_inference(ckpt.to_str().unwrap(), 1, 512);
-    let (ex1, ta1) = qwen3::toolcall_eval::eval(&ft, &t, &chat_template(&d), &held);
-    println!("tool-call AFTER  finetune: exact-match {:.1}%  token-acc {:.1}%", ex1 * 100.0, ta1 * 100.0);
+        // Eval AFTER.
+        let ft = Qwen::load_inference(ckpt.to_str().unwrap(), 1, 512);
+        let (ex1, ta1) = qwen3::toolcall_eval::eval(&ft, &t, &chat_template(&d), &held);
+        println!("tool-call AFTER  finetune: exact-match {:.1}%  token-acc {:.1}%", ex1 * 100.0, ta1 * 100.0);
 
-    // The pipeline must produce a large, real improvement in the model's ability
-    // to emit correct tool calls on held-out requests.
-    assert!(l1 < l0, "finetune loss did not decrease ({l0:.4} -> {l1:.4})");
-    assert!(ex1 >= 0.6, "held-out tool-call exact-match too low after finetune: {:.1}%", ex1 * 100.0);
-    assert!(ex1 > ex0 + 0.3, "tool-call exact-match did not improve enough: {:.1}% -> {:.1}%", ex0 * 100.0, ex1 * 100.0);
+        // The pipeline must produce a large, real improvement in the model's ability
+        // to emit correct tool calls on held-out requests.
+        assert!(l1 < l0, "finetune loss did not decrease ({l0:.4} -> {l1:.4})");
+        assert!(ex1 >= 0.6, "held-out tool-call exact-match too low after finetune: {:.1}%", ex1 * 100.0);
+        assert!(ex1 > ex0 + 0.3, "tool-call exact-match did not improve enough: {:.1}% -> {:.1}%", ex0 * 100.0, ex1 * 100.0);
+    })
 }
 
 
@@ -260,43 +262,44 @@ fn eval_reasoning(model: &Qwen, t: &QwenBpe, tmpl: &data::chat_template::ChatTem
 #[ignore]
 fn qwen3_reasoning_finetune() {
     let Some(d) = dir() else { eprintln!("QWEN3_DIR unset; skipping"); return; };
-    setup();
-    let t = tok(&d);
+    on_gpu(|| {
+        let t = tok(&d);
 
-    // seed: the training problems the reported before/after accuracy was measured against (ignored real-model experiment)
-    let mut rng = data::rng::Rng::new(7);
-    let mk = |rng: &mut data::rng::Rng| (rng.gen_range_inclusive(2, 9), rng.gen_range_inclusive(2, 9), rng.gen_range_inclusive(2, 9));
-    let n_train = env_usize("QWEN3_RS_TRAIN", 240);
-    let train: Vec<_> = (0..n_train).map(|_| { let (a,b,c)=mk(&mut rng); arith_case(a,b,c) }).collect();
-    // seed: the held-out problems: one fixed set so the before and after accuracy compare on the same questions
-    let held_nums: Vec<(i64,i64,i64)> = { let mut r = data::rng::Rng::new(4242); (0..24).map(|_| mk(&mut r)).collect() };
-    let held: Vec<_> = held_nums.iter().map(|&(a,b,c)| arith_case(a,b,c)).collect();
+        // seed: the training problems the reported before/after accuracy was measured against (ignored real-model experiment)
+        let mut rng = data::rng::Rng::new(7);
+        let mk = |rng: &mut data::rng::Rng| (rng.gen_range_inclusive(2, 9), rng.gen_range_inclusive(2, 9), rng.gen_range_inclusive(2, 9));
+        let n_train = env_usize("QWEN3_RS_TRAIN", 240);
+        let train: Vec<_> = (0..n_train).map(|_| { let (a,b,c)=mk(&mut rng); arith_case(a,b,c) }).collect();
+        // seed: the held-out problems: one fixed set so the before and after accuracy compare on the same questions
+        let held_nums: Vec<(i64,i64,i64)> = { let mut r = data::rng::Rng::new(4242); (0..24).map(|_| mk(&mut r)).collect() };
+        let held: Vec<_> = held_nums.iter().map(|&(a,b,c)| arith_case(a,b,c)).collect();
 
-    let out = std::env::temp_dir().join("qwen3_reasoning");
-    data::chat::prepare_chat(&train, &held, &t, &chat_template(&d), 151936, &out).unwrap();
+        let out = std::env::temp_dir().join("qwen3_reasoning");
+        data::chat::prepare_chat(&train, &held, &t, &chat_template(&d), 151936, &out).unwrap();
 
-    let base = Qwen::load_inference(weights(&d).to_str().unwrap(), 1, 512);
-    let acc0 = eval_reasoning(&base, &t, &chat_template(&d), &held_nums);
-    println!("reasoning BEFORE finetune: answer-acc {:.1}%", acc0 * 100.0);
-    drop(base);
+        let base = Qwen::load_inference(weights(&d).to_str().unwrap(), 1, 512);
+        let acc0 = eval_reasoning(&base, &t, &chat_template(&d), &held_nums);
+        println!("reasoning BEFORE finetune: answer-acc {:.1}%", acc0 * 100.0);
+        drop(base);
 
-    let steps = env_usize("QWEN3_RS_STEPS", 150);
-    let cfg = QwenConfig::from_json(&checkpoint::load(weights_ft(&d).to_str().unwrap()).header["config"]);
-    let opts = model::FitOpts {
-        steps: steps as u32, batch_size: 1, block_size: 512, lr: 1e-4, warmup: 15,
-        decay_iters: steps as u32, min_lr: 1e-5, weight_decay: 0.0, grad_clip: 1.0, grad_accum: 4,
-        eval_interval: (steps / 5).max(1) as u32, eval_batches: 4, ..Default::default()
-    };
-    let ckpt = out.join("ft.safetensors");
-    std::fs::copy(weights_ft(&d), &ckpt).unwrap();
-    let (l0, l1) = model::fit::<Qwen>(&out, cfg, &opts, Some(&ckpt)).expect("fit");
-    println!("reasoning finetune: loss {l0:.4} -> {l1:.4}");
+        let steps = env_usize("QWEN3_RS_STEPS", 150);
+        let cfg = QwenConfig::from_json(&checkpoint::load(weights_ft(&d).to_str().unwrap()).header["config"]);
+        let opts = model::FitOpts {
+            steps: steps as u32, batch_size: 1, block_size: 512, lr: 1e-4, warmup: 15,
+            decay_iters: steps as u32, min_lr: 1e-5, weight_decay: 0.0, grad_clip: 1.0, grad_accum: 4,
+            eval_interval: (steps / 5).max(1) as u32, eval_batches: 4, ..Default::default()
+        };
+        let ckpt = out.join("ft.safetensors");
+        std::fs::copy(weights_ft(&d), &ckpt).unwrap();
+        let (l0, l1) = model::fit::<Qwen>(&out, cfg, &opts, Some(&ckpt)).expect("fit");
+        println!("reasoning finetune: loss {l0:.4} -> {l1:.4}");
 
-    let ft = Qwen::load_inference(ckpt.to_str().unwrap(), 1, 512);
-    let acc1 = eval_reasoning(&ft, &t, &chat_template(&d), &held_nums);
-    println!("reasoning AFTER  finetune: answer-acc {:.1}%", acc1 * 100.0);
-    assert!(l1 < l0, "reasoning finetune loss did not decrease");
-    assert!(acc1 > acc0 + 0.2, "reasoning accuracy did not improve enough: {:.1}% -> {:.1}%", acc0*100.0, acc1*100.0);
+        let ft = Qwen::load_inference(ckpt.to_str().unwrap(), 1, 512);
+        let acc1 = eval_reasoning(&ft, &t, &chat_template(&d), &held_nums);
+        println!("reasoning AFTER  finetune: answer-acc {:.1}%", acc1 * 100.0);
+        assert!(l1 < l0, "reasoning finetune loss did not decrease");
+        assert!(acc1 > acc0 + 0.2, "reasoning accuracy did not improve enough: {:.1}% -> {:.1}%", acc0*100.0, acc1*100.0);
+    })
 }
 
 /// Full (optimizer-offloaded) vs LoRA fine-tuning on the SAME tool-call data:
@@ -311,54 +314,55 @@ fn qwen3_reasoning_finetune() {
 fn qwen3_microbatch_pipeline_throughput() {
     use std::time::Instant;
     let Some(d) = dir() else { eprintln!("QWEN3_DIR unset; skipping"); return; };
-    setup();
-    let path = weights_ft(&d);
-    let c = checkpoint::load(path.to_str().unwrap());
-    let cfg = QwenConfig::from_json(&c.header["config"]);
-    let init = c.by_role("");
-    let (b, t) = (1u32, 512u32);
-    let k = env_usize("QWEN3_MB", 4);
-    let mk = |j: usize| -> (Vec<u32>, Vec<u32>) {
-        let x = (0..t).map(|i| ((i * 131 + 7 + j as u32 * 97) % cfg.vocab) as u32).collect::<Vec<u32>>();
-        let y = (0..t).map(|i| ((i * 131 + 8 + j as u32 * 97) % cfg.vocab) as u32).collect::<Vec<u32>>();
-        (x, y)
-    };
-    let raw: Vec<(Vec<u32>, Vec<u32>)> = (0..k).map(mk).collect();
-    let batches: Vec<model::Batch> = raw.iter().map(|(x, y)| model::Batch::Lm { tokens: x, targets: y }).collect();
-    let steps = env_usize("QWEN3_MB_STEPS", 2);
+    on_gpu(|| {
+        let path = weights_ft(&d);
+        let c = checkpoint::load(path.to_str().unwrap());
+        let cfg = QwenConfig::from_json(&c.header["config"]);
+        let init = c.by_role("");
+        let (b, t) = (1u32, 512u32);
+        let k = env_usize("QWEN3_MB", 4);
+        let mk = |j: usize| -> (Vec<u32>, Vec<u32>) {
+            let x = (0..t).map(|i| ((i * 131 + 7 + j as u32 * 97) % cfg.vocab) as u32).collect::<Vec<u32>>();
+            let y = (0..t).map(|i| ((i * 131 + 8 + j as u32 * 97) % cfg.vocab) as u32).collect::<Vec<u32>>();
+            (x, y)
+        };
+        let raw: Vec<(Vec<u32>, Vec<u32>)> = (0..k).map(mk).collect();
+        let batches: Vec<model::Batch> = raw.iter().map(|(x, y)| model::Batch::Lm { tokens: x, targets: y }).collect();
+        let steps = env_usize("QWEN3_MB_STEPS", 2);
 
-    let mut pipe = qwen3::Pipeline::<Qwen>::new(cfg, b, t, &init, &[0, 1]);
-    eprintln!("shards: {:?}", pipe.shards());
+        let mut pipe = qwen3::Pipeline::<Qwen>::new(cfg, b, t, &init, &[0, 1]);
+        eprintln!("shards: {:?}", pipe.shards());
 
-    // Naive: sequential stages, one microbatch at a time (grads accumulate).
-    let naive = |pipe: &mut qwen3::Pipeline<Qwen>| {
-        pipe.zero_grads();
-        for bt in &batches {
-            pipe.forward(match bt { model::Batch::Lm { tokens, targets } => model::Batch::Lm { tokens, targets }, _ => unreachable!() });
-            pipe.backward();
+        // Naive: sequential stages, one microbatch at a time (grads accumulate).
+        let naive = |pipe: &mut qwen3::Pipeline<Qwen>| {
+            pipe.zero_grads();
+            for bt in &batches {
+                pipe.forward(match bt { model::Batch::Lm { tokens, targets } => model::Batch::Lm { tokens, targets }, _ => unreachable!() });
+                pipe.backward();
+            }
+        };
+        naive(&mut pipe); // warmup
+        let t0 = Instant::now();
+        for _ in 0..steps {
+            naive(&mut pipe);
         }
-    };
-    naive(&mut pipe); // warmup
-    let t0 = Instant::now();
-    for _ in 0..steps {
-        naive(&mut pipe);
-    }
-    let naive_ms = t0.elapsed().as_secs_f64() * 1e3 / steps as f64;
+        let naive_ms = t0.elapsed().as_secs_f64() * 1e3 / steps as f64;
 
-    // Micro-batched: concurrent stages + recompute.
-    pipe.zero_grads();
-    pipe.pipelined_fwd_bwd(&batches); // warmup
-    let t1 = Instant::now();
-    for _ in 0..steps {
+        // Micro-batched: concurrent stages + recompute.
         pipe.zero_grads();
-        pipe.pipelined_fwd_bwd(&batches);
-    }
-    let mb_ms = t1.elapsed().as_secs_f64() * 1e3 / steps as f64;
+        pipe.pipelined_fwd_bwd(&batches); // warmup
+        let t1 = Instant::now();
+        for _ in 0..steps {
+            pipe.zero_grads();
+            pipe.pipelined_fwd_bwd(&batches);
+        }
+        let mb_ms = t1.elapsed().as_secs_f64() * 1e3 / steps as f64;
 
-    println!("\n=== Qwen3-0.6B micro-batched pipeline ({k} microbatches, 2 P40s) ===");
-    println!("  naive sequential pipeline: {naive_ms:.0} ms/step");
-    println!("  concurrent GPipe+recompute: {mb_ms:.0} ms/step   speedup {:.2}x", naive_ms / mb_ms);
-    println!("  per-card memory: {}", gpu_mem());
+        println!("\n=== Qwen3-0.6B micro-batched pipeline ({k} microbatches, 2 P40s) ===");
+        println!("  naive sequential pipeline: {naive_ms:.0} ms/step");
+        println!("  concurrent GPipe+recompute: {mb_ms:.0} ms/step   speedup {:.2}x", naive_ms / mb_ms);
+        println!("  per-card memory: {}", gpu_mem());
+    })
 }
 
 /// Data-parallel training **speedup** on the real 0.6B: time one optimiser step
@@ -369,94 +373,95 @@ fn qwen3_microbatch_pipeline_throughput() {
 fn qwen3_dataparallel_speedup() {
     use std::time::Instant;
     let Some(d) = dir() else { eprintln!("QWEN3_DIR unset; skipping"); return; };
-    setup();
-    let path = weights_ft(&d);
-    let ps = path.to_str().unwrap();
-    let c = checkpoint::load(ps);
-    let cfg = QwenConfig::from_json(&c.header["config"]);
-    let init = c.by_role("");
-    let (b, t) = (1u32, 512u32);
-    let k = env_usize("QWEN3_DP_MB", 4); // micro-batches per step
-    let mk = |j: usize| -> (Vec<u32>, Vec<u32>) {
-        let x = (0..t).map(|i| ((i * 131 + 7 + j as u32 * 97) % cfg.vocab) as u32).collect::<Vec<u32>>();
-        let y = (0..t).map(|i| ((i * 131 + 8 + j as u32 * 97) % cfg.vocab) as u32).collect::<Vec<u32>>();
-        (x, y)
-    };
-    let mbs: Vec<(Vec<u32>, Vec<u32>)> = (0..k).map(mk).collect();
-    let batches: Vec<model::Batch> = mbs.iter().map(|(x, y)| model::Batch::Lm { tokens: x, targets: y }).collect();
-    let steps = env_usize("QWEN3_DP_STEPS", 3);
-    let inv_k = 1.0 / k as f32;
+    on_gpu(|| {
+        let path = weights_ft(&d);
+        let ps = path.to_str().unwrap();
+        let c = checkpoint::load(ps);
+        let cfg = QwenConfig::from_json(&c.header["config"]);
+        let init = c.by_role("");
+        let (b, t) = (1u32, 512u32);
+        let k = env_usize("QWEN3_DP_MB", 4); // micro-batches per step
+        let mk = |j: usize| -> (Vec<u32>, Vec<u32>) {
+            let x = (0..t).map(|i| ((i * 131 + 7 + j as u32 * 97) % cfg.vocab) as u32).collect::<Vec<u32>>();
+            let y = (0..t).map(|i| ((i * 131 + 8 + j as u32 * 97) % cfg.vocab) as u32).collect::<Vec<u32>>();
+            (x, y)
+        };
+        let mbs: Vec<(Vec<u32>, Vec<u32>)> = (0..k).map(mk).collect();
+        let batches: Vec<model::Batch> = mbs.iter().map(|(x, y)| model::Batch::Lm { tokens: x, targets: y }).collect();
+        let steps = env_usize("QWEN3_DP_STEPS", 3);
+        let inv_k = 1.0 / k as f32;
 
-    // --- single-GPU baseline (offload AdamW = host grad-norm, the fast optimiser
-    // here; on-GPU clip's single-threaded gradnorm_sq is far slower over 152k vocab) ---
-    let single = model::offload::with_adam_offloaded(true, || Qwen::load(ps, b, t));
-    let mut single_fb = 0f64;
-    let mut one_step_single = |step: u32, meas: bool| {
-        single.zero_grads();
-        let a = Instant::now();
-        for (x, y) in &mbs {
-            single.set_batch(x, y);
-            single.forward();
-            single.backward();
+        // --- single-GPU baseline (offload AdamW = host grad-norm, the fast optimiser
+        // here; on-GPU clip's single-threaded gradnorm_sq is far slower over 152k vocab) ---
+        let single = model::offload::with_adam_offloaded(true, || Qwen::load(ps, b, t));
+        let mut single_fb = 0f64;
+        let mut one_step_single = |step: u32, meas: bool| {
+            single.zero_grads();
+            let a = Instant::now();
+            for (x, y) in &mbs {
+                single.set_batch(x, y);
+                single.forward();
+                single.backward();
+            }
+            single.poll_wait();
+            let fb = a.elapsed().as_secs_f64();
+            single.adamw_step(step, 1e-4, 0.0, Default::default(), Some(1.0), inv_k);
+            single.poll_wait();
+            if meas {
+                single_fb += fb;
+            }
+        };
+        one_step_single(1, false); // warmup (builds optimiser, compiles pipelines)
+        let t0 = Instant::now();
+        for s in 0..steps {
+            one_step_single(s as u32 + 2, true);
         }
-        single.poll_wait();
-        let fb = a.elapsed().as_secs_f64();
-        single.adamw_step(step, 1e-4, 0.0, Default::default(), Some(1.0), inv_k);
-        single.poll_wait();
-        if meas {
-            single_fb += fb;
-        }
-    };
-    one_step_single(1, false); // warmup (builds optimiser, compiles pipelines)
-    let t0 = Instant::now();
-    for s in 0..steps {
-        one_step_single(s as u32 + 2, true);
-    }
-    let single_ms = t0.elapsed().as_secs_f64() * 1e3 / steps as f64;
-    single_fb = single_fb * 1e3 / steps as f64;
-    drop(single);
+        let single_ms = t0.elapsed().as_secs_f64() * 1e3 / steps as f64;
+        single_fb = single_fb * 1e3 / steps as f64;
+        drop(single);
 
-    // --- data-parallel across both P40s (fused all-reduce + host AdamW) ---
-    let mut dp = DataParallel::<Qwen>::new(cfg.clone(), b, t, &init, &[0, 1]);
-    let (mut t_fb, mut t_opt) = (0f64, 0f64);
-    let mut one_step_dp = |dp: &mut DataParallel<Qwen>, step: u32, meas: bool| {
-        dp.zero_grads();
-        let a = Instant::now();
-        dp.forward_backward(&batches);
-        let fb = a.elapsed().as_secs_f64();
-        let a = Instant::now();
-        dp.adamw_step(step, 1e-4, 0.0, Default::default(), Some(1.0), inv_k); // fused reduce+opt+broadcast
-        let op = a.elapsed().as_secs_f64();
-        if meas {
-            t_fb += fb;
-            t_opt += op;
+        // --- data-parallel across both P40s (fused all-reduce + host AdamW) ---
+        let mut dp = DataParallel::<Qwen>::new(cfg.clone(), b, t, &init, &[0, 1]);
+        let (mut t_fb, mut t_opt) = (0f64, 0f64);
+        let mut one_step_dp = |dp: &mut DataParallel<Qwen>, step: u32, meas: bool| {
+            dp.zero_grads();
+            let a = Instant::now();
+            dp.forward_backward(&batches);
+            let fb = a.elapsed().as_secs_f64();
+            let a = Instant::now();
+            dp.adamw_step(step, 1e-4, 0.0, Default::default(), Some(1.0), inv_k); // fused reduce+opt+broadcast
+            let op = a.elapsed().as_secs_f64();
+            if meas {
+                t_fb += fb;
+                t_opt += op;
+            }
+        };
+        one_step_dp(&mut dp, 1, false); // warmup
+        let t1 = Instant::now();
+        for s in 0..steps {
+            one_step_dp(&mut dp, s as u32 + 2, true);
         }
-    };
-    one_step_dp(&mut dp, 1, false); // warmup
-    let t1 = Instant::now();
-    for s in 0..steps {
-        one_step_dp(&mut dp, s as u32 + 2, true);
-    }
-    let dp_ms = t1.elapsed().as_secs_f64() * 1e3 / steps as f64;
-    println!(
-        "  DP breakdown/step: fwd+bwd {:.0} ms | fused reduce+opt {:.0} ms",
-        t_fb * 1e3 / steps as f64,
-        t_opt * 1e3 / steps as f64
-    );
+        let dp_ms = t1.elapsed().as_secs_f64() * 1e3 / steps as f64;
+        println!(
+            "  DP breakdown/step: fwd+bwd {:.0} ms | fused reduce+opt {:.0} ms",
+            t_fb * 1e3 / steps as f64,
+            t_opt * 1e3 / steps as f64
+        );
 
-    let dp_fb = t_fb * 1e3 / steps as f64;
-    println!("\n=== Qwen3-0.6B data-parallel training speedup (two P40s) ===");
-    println!("  {k} micro-batches/step, block {t}");
-    println!("  single-GPU: {single_ms:.0} ms/step  (fwd+bwd {single_fb:.0} ms)");
-    println!("  2-GPU DP:   {dp_ms:.0} ms/step  (fwd+bwd {dp_fb:.0} ms)  end-to-end {:.2}x", single_ms / dp_ms);
-    println!("  compute (fwd+bwd) speedup: {:.2}x", single_fb / dp_fb);
-    println!("  per-card memory: {}", gpu_mem());
-    // The parallelisable part (fwd+bwd) speeds up across the two cards, and — with
-    // the fused reduce+optimiser keeping the fixed per-step cost low — the
-    // end-to-end step is faster too (the fixed all-reduce amortises further at
-    // higher micro-batch counts: QWEN3_DP_MB).
-    assert!(dp_fb < single_fb * 0.75, "fwd+bwd did not parallelise: {single_fb:.0} vs {dp_fb:.0} ms");
-    assert!(dp_ms < single_ms, "data-parallel not faster end-to-end: {single_ms:.0} vs {dp_ms:.0} ms");
+        let dp_fb = t_fb * 1e3 / steps as f64;
+        println!("\n=== Qwen3-0.6B data-parallel training speedup (two P40s) ===");
+        println!("  {k} micro-batches/step, block {t}");
+        println!("  single-GPU: {single_ms:.0} ms/step  (fwd+bwd {single_fb:.0} ms)");
+        println!("  2-GPU DP:   {dp_ms:.0} ms/step  (fwd+bwd {dp_fb:.0} ms)  end-to-end {:.2}x", single_ms / dp_ms);
+        println!("  compute (fwd+bwd) speedup: {:.2}x", single_fb / dp_fb);
+        println!("  per-card memory: {}", gpu_mem());
+        // The parallelisable part (fwd+bwd) speeds up across the two cards, and - with
+        // the fused reduce+optimiser keeping the fixed per-step cost low - the
+        // end-to-end step is faster too (the fixed all-reduce amortises further at
+        // higher micro-batch counts: QWEN3_DP_MB).
+        assert!(dp_fb < single_fb * 0.75, "fwd+bwd did not parallelise: {single_fb:.0} vs {dp_fb:.0} ms");
+        assert!(dp_ms < single_ms, "data-parallel not faster end-to-end: {single_ms:.0} vs {dp_ms:.0} ms");
+    })
 }
 
 use qwen3::DataParallel;
@@ -470,86 +475,88 @@ use qwen3::DataParallel;
 #[ignore]
 fn qwen3_shard_real_2gpu() {
     let Some(d) = dir() else { eprintln!("QWEN3_DIR unset; skipping"); return; };
-    setup();
-    let path = weights_ft(&d);
-    let ps = path.to_str().unwrap();
-    let c = checkpoint::load(ps);
-    let cfg = QwenConfig::from_json(&c.header["config"]);
-    let init = c.by_role("");
-    let (b, t) = (1u32, 32u32);
-    let toks: Vec<u32> = (0..t).map(|i| ((i * 131 + 7) % cfg.vocab) as u32).collect();
-    let y: Vec<u32> = (0..t).map(|i| toks[((i + 1) % t) as usize]).collect();
+    on_gpu(|| {
+        let path = weights_ft(&d);
+        let ps = path.to_str().unwrap();
+        let c = checkpoint::load(ps);
+        let cfg = QwenConfig::from_json(&c.header["config"]);
+        let init = c.by_role("");
+        let (b, t) = (1u32, 32u32);
+        let toks: Vec<u32> = (0..t).map(|i| ((i * 131 + 7) % cfg.vocab) as u32).collect();
+        let y: Vec<u32> = (0..t).map(|i| toks[((i + 1) % t) as usize]).collect();
 
-    // Single-device reference on GPU 0.
-    let single = Qwen::load_inference(ps, b, t);
-    single.set_batch(&toks, &y);
-    let l0 = single.forward();
-    single.poll_wait();
-    drop(single); // free GPU 0 before the pipeline claims it as stage 0
+        // Single-device reference on GPU 0.
+        let single = Qwen::load_inference(ps, b, t);
+        single.set_batch(&toks, &y);
+        let l0 = single.forward();
+        single.poll_wait();
+        drop(single); // free GPU 0 before the pipeline claims it as stage 0
 
-    // Two-stage inference pipeline across GPUs 0 and 1 from the same weights.
-    let pipe = qwen3::Pipeline::<Qwen>::new(cfg.clone(), b, t, &init, &[0, 1]);
-    let l1 = pipe.forward(model::Batch::Lm { tokens: &toks, targets: &y });
-    let mem = gpu_mem();
+        // Two-stage inference pipeline across GPUs 0 and 1 from the same weights.
+        let pipe = qwen3::Pipeline::<Qwen>::new(cfg.clone(), b, t, &init, &[0, 1]);
+        let l1 = pipe.forward(model::Batch::Lm { tokens: &toks, targets: &y });
+        let mem = gpu_mem();
 
-    let rel = (l0 - l1).abs() / l0.abs().max(1e-6);
-    println!("\n=== Qwen3-0.6B sharded across 2 P40s (pipeline-parallel) ===");
-    println!("  layers split: {} stages over {} layers", pipe.n_stages(), cfg.n_layers);
-    println!("  loss  single-GPU={l0:.6}  2-GPU-sharded={l1:.6}  rel={rel:.2e}");
-    println!("  per-card memory: {mem}");
-    assert_eq!(pipe.n_stages(), 2);
-    assert!(rel < 1e-4, "sharded loss diverged from single-GPU: {l0} vs {l1}");
+        let rel = (l0 - l1).abs() / l0.abs().max(1e-6);
+        println!("\n=== Qwen3-0.6B sharded across 2 P40s (pipeline-parallel) ===");
+        println!("  layers split: {} stages over {} layers", pipe.n_stages(), cfg.n_layers);
+        println!("  loss  single-GPU={l0:.6}  2-GPU-sharded={l1:.6}  rel={rel:.2e}");
+        println!("  per-card memory: {mem}");
+        assert_eq!(pipe.n_stages(), 2);
+        assert!(rel < 1e-4, "sharded loss diverged from single-GPU: {l0} vs {l1}");
+    })
 }
 
 #[test]
 #[ignore]
 fn qwen3_full_vs_lora_toolcall() {
     let Some(d) = dir() else { eprintln!("QWEN3_DIR unset; skipping"); return; };
-    setup();
-    let t = tok(&d);
+    on_gpu(|| {
+        let t = tok(&d);
 
-    let n_train = env_usize("QWEN3_TC_TRAIN", 200);
-    let train = toolcall::generate(n_train, 3, 1);
-    let held = toolcall::generate(24, 3, 999);
-    let train_ex: Vec<_> = train.iter().map(|c| c.to_chat_example()).collect();
-    let val_ex: Vec<_> = held.iter().map(|c| c.to_chat_example()).collect();
-    let out = std::env::temp_dir().join("qwen3_fvl");
-    data::chat::prepare_chat(&train_ex, &val_ex, &t, &chat_template(&d), 151936, &out).unwrap();
+        let n_train = env_usize("QWEN3_TC_TRAIN", 200);
+        let train = toolcall::generate(n_train, 3, 1);
+        let held = toolcall::generate(24, 3, 999);
+        let train_ex: Vec<_> = train.iter().map(|c| c.to_chat_example()).collect();
+        let val_ex: Vec<_> = held.iter().map(|c| c.to_chat_example()).collect();
+        let out = std::env::temp_dir().join("qwen3_fvl");
+        data::chat::prepare_chat(&train_ex, &val_ex, &t, &chat_template(&d), 151936, &out).unwrap();
 
-    let base = weights_ft(&d);
-    let base_s = base.to_str().unwrap();
-    let steps = env_usize("QWEN3_FVL_STEPS", 60);
-    let opts = |lr: f32| model::FitOpts {
-        steps: steps as u32, batch_size: 1, block_size: 512, lr, warmup: (steps / 6).max(1) as u32,
-        decay_iters: steps as u32, min_lr: lr * 0.1, weight_decay: 0.0, grad_clip: 1.0, grad_accum: 4,
-        checkpoint_secs: 0, ..Default::default()
-    };
+        let base = weights_ft(&d);
+        let base_s = base.to_str().unwrap();
+        let steps = env_usize("QWEN3_FVL_STEPS", 60);
+        let opts = |lr: f32| model::FitOpts {
+            steps: steps as u32, batch_size: 1, block_size: 512, lr, warmup: (steps / 6).max(1) as u32,
+            decay_iters: steps as u32, min_lr: lr * 0.1, weight_decay: 0.0, grad_clip: 1.0, grad_accum: 4,
+            checkpoint_secs: 0, ..Default::default()
+        };
 
-    // Baseline held-out score.
-    let (ex0, _) = qwen3::toolcall_eval::eval(&Qwen::load_inference(base_s, 1, 512), &t, &chat_template(&d), &held);
+        // Baseline held-out score.
+        let (ex0, _) = qwen3::toolcall_eval::eval(&Qwen::load_inference(base_s, 1, 512), &t, &chat_template(&d), &held);
 
-    // Full (offloaded) fine-tune.
-    let full_ckpt = out.join("full.safetensors");
-    let (fl0, fl1) = qwen3::finetune::finetune(base_s, &out, &opts(1e-4), &qwen3::finetune::Mode::FullOffload, full_ckpt.to_str().unwrap()).unwrap();
-    let (exf, _) = qwen3::toolcall_eval::eval(&Qwen::load_inference(full_ckpt.to_str().unwrap(), 1, 512), &t, &chat_template(&d), &held);
+        // Full (offloaded) fine-tune.
+        let full_ckpt = out.join("full.safetensors");
+        let (fl0, fl1) = qwen3::finetune::finetune(base_s, &out, &opts(1e-4), &qwen3::finetune::Mode::FullOffload, full_ckpt.to_str().unwrap()).unwrap();
+        let (exf, _) = qwen3::toolcall_eval::eval(&Qwen::load_inference(full_ckpt.to_str().unwrap(), 1, 512), &t, &chat_template(&d), &held);
 
-    // LoRA fine-tune (adapters only). Same LR as full and scale 1.0 (alpha==rank)
-    // for a fair comparison — aggressive scale/LR makes the adapters memorise the
-    // tiny synthetic set (train loss -> 0) without generalising.
-    let lora_ckpt = out.join("lora.safetensors");
-    let (ll0, ll1) = qwen3::finetune::finetune(base_s, &out, &opts(1e-4), &qwen3::finetune::Mode::Lora { rank: 16, alpha: 16.0, targets: qwen3::finetune::default_lora_targets(), tuning: Default::default() }, lora_ckpt.to_str().unwrap()).unwrap();
-    let (exl, _) = qwen3::toolcall_eval::eval(&Qwen::load_inference(lora_ckpt.to_str().unwrap(), 1, 512), &t, &chat_template(&d), &held);
+        // LoRA fine-tune (adapters only). Same LR as full and scale 1.0 (alpha==rank)
+        // for a fair comparison - aggressive scale/LR makes the adapters memorise the
+        // tiny synthetic set (train loss -> 0) without generalising.
+        let lora_ckpt = out.join("lora.safetensors");
+        let (ll0, ll1) = qwen3::finetune::finetune(base_s, &out, &opts(1e-4), &qwen3::finetune::Mode::Lora { rank: 16, alpha: 16.0, targets: qwen3::finetune::default_lora_targets(), tuning: Default::default() }, lora_ckpt.to_str().unwrap()).unwrap();
+        let (exl, _) = qwen3::toolcall_eval::eval(&Qwen::load_inference(lora_ckpt.to_str().unwrap(), 1, 512), &t, &chat_template(&d), &held);
 
-    println!("\n=== Qwen3-0.6B tool-call: FULL (offload) vs LoRA, {steps} steps ===");
-    println!("  baseline held-out exact-match: {:.1}%", ex0 * 100.0);
-    println!("  FULL  loss {fl0:.3}->{fl1:.3}   held-out exact-match {:.1}%", exf * 100.0);
-    println!("  LoRA  loss {ll0:.3}->{ll1:.3}   held-out exact-match {:.1}%", exl * 100.0);
+        println!("\n=== Qwen3-0.6B tool-call: FULL (offload) vs LoRA, {steps} steps ===");
+        println!("  baseline held-out exact-match: {:.1}%", ex0 * 100.0);
+        println!("  FULL  loss {fl0:.3}->{fl1:.3}   held-out exact-match {:.1}%", exf * 100.0);
+        println!("  LoRA  loss {ll0:.3}->{ll1:.3}   held-out exact-match {:.1}%", exl * 100.0);
 
-    // Both must train (loss down); the offload FULL path must additionally
-    // generalise on held-out tool-calls — that is what this test proves. LoRA's
-    // held-out score is reported for comparison (it is hyperparameter-sensitive
-    // on this tiny synthetic set), not gated.
-    assert!(fl1 < fl0 && ll1 < ll0, "a finetune did not reduce loss");
-    assert!(exf > ex0 + 0.2, "full finetune did not improve tool-calls: {:.1}%->{:.1}%", ex0*100.0, exf*100.0);
-    assert!(exl >= ex0, "lora finetune regressed below baseline: {:.1}%->{:.1}%", ex0*100.0, exl*100.0);
+        // Both must train (loss down); the offload FULL path must additionally
+        // generalise on held-out tool-calls - that is what this test proves. LoRA's
+        // held-out score is reported for comparison (it is hyperparameter-sensitive
+        // on this tiny synthetic set), not gated.
+        assert!(fl1 < fl0 && ll1 < ll0, "a finetune did not reduce loss");
+        assert!(exf > ex0 + 0.2, "full finetune did not improve tool-calls: {:.1}%->{:.1}%", ex0*100.0, exf*100.0);
+        assert!(exl >= ex0, "lora finetune regressed below baseline: {:.1}%->{:.1}%", ex0*100.0, exl*100.0);
+    })
 }

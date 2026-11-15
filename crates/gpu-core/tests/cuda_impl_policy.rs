@@ -221,37 +221,38 @@ fn every_skipped_provider_records_why_it_declined() {
 /// the only trace is a `tracing::warn` nobody has a subscriber for. It must
 /// appear on the record as a decline carrying the error.
 fn a_failed_lower_is_recorded_on_the_choice_not_only_warned() {
-    gpu_core::set_default_backend(gpu_core::Backend::Cpu);
-    static KERNELS: &[(&str, &str)] = &[("matmul", kernels::MATMUL)];
-    let gpu = gpu_core::testgpu::dev(KERNELS);
-    let caps = gpu.caps();
+    gpu_core::with_backend(gpu_core::Backend::Cpu, || {
+        static KERNELS: &[(&str, &str)] = &[("matmul", kernels::MATMUL)];
+        let gpu = gpu_core::testgpu::dev(KERNELS);
+        let caps = gpu.caps();
 
-    let (m, n, k) = (8u32, 8u32, 8u32);
-    let x = gpu.storage_init("x", &vec![0.5f32; (m * k) as usize]);
-    let w = gpu.storage_init("w", &vec![0.25f32; (n * k) as usize]);
-    let y = gpu.storage((m * n) as u64);
-    let operands = [
-        Operand { role: Role::Act, buf: &x, range: (0, (m * k) as u64), dtype: DType::F32 },
-        Operand { role: Role::Weight, buf: &w, range: (0, (n * k) as u64), dtype: DType::F32 },
-        Operand { role: Role::Out, buf: &y, range: (0, (m * n) as u64), dtype: DType::F32 },
-    ];
-    let attrs = [m, k, n];
-    let req = request(&operands, &attrs);
+        let (m, n, k) = (8u32, 8u32, 8u32);
+        let x = gpu.storage_init("x", &vec![0.5f32; (m * k) as usize]);
+        let w = gpu.storage_init("w", &vec![0.25f32; (n * k) as usize]);
+        let y = gpu.storage((m * n) as u64);
+        let operands = [
+            Operand { role: Role::Act, buf: &x, range: (0, (m * k) as u64), dtype: DType::F32 },
+            Operand { role: Role::Weight, buf: &w, range: (0, (n * k) as u64), dtype: DType::F32 },
+            Operand { role: Role::Out, buf: &y, range: (0, (m * n) as u64), dtype: DType::F32 },
+        ];
+        let attrs = [m, k, n];
+        let req = request(&operands, &attrs);
 
-    let reg = ProviderRegistry::reference(selector()).prefer(fixture("fixture-broken", ImplSource::Tuned));
-    let mut steps = Vec::new();
-    let mut ctx = LowerCtx { gpu: &gpu, caps: &caps, steps: &mut steps, capture: false };
-    let lowered = reg.dispatch(&mut ctx, &req);
+        let reg = ProviderRegistry::reference(selector()).prefer(fixture("fixture-broken", ImplSource::Tuned));
+        let mut steps = Vec::new();
+        let mut ctx = LowerCtx { gpu: &gpu, caps: &caps, steps: &mut steps, capture: false };
+        let lowered = reg.dispatch(&mut ctx, &req);
 
-    let choice = lowered.choice.expect("every dispatch must carry its ImplChoice");
-    assert_eq!(choice.provider, "wgsl", "the record must name the provider that RAN, not the one that was chosen");
-    assert_eq!(choice.source, ImplSource::Reference);
-    match choice.declined.iter().find(|d| d.provider == "fixture-broken").map(|d| &d.reason) {
-        Some(DeclineReason::LowerFailed(msg)) => {
-            assert!(msg.contains("fixture"), "the decline must carry the provider's own error: {msg}")
+        let choice = lowered.choice.expect("every dispatch must carry its ImplChoice");
+        assert_eq!(choice.provider, "wgsl", "the record must name the provider that RAN, not the one that was chosen");
+        assert_eq!(choice.source, ImplSource::Reference);
+        match choice.declined.iter().find(|d| d.provider == "fixture-broken").map(|d| &d.reason) {
+            Some(DeclineReason::LowerFailed(msg)) => {
+                assert!(msg.contains("fixture"), "the decline must carry the provider's own error: {msg}")
+            }
+            other => panic!("a failed lower must be recorded as a LowerFailed decline, got {other:?}"),
         }
-        other => panic!("a failed lower must be recorded as a LowerFailed decline, got {other:?}"),
-    }
+    })
 }
 
 /// The ratchet over the SHIPPED policy, modelled on `gpu_core::cost`'s

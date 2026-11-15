@@ -20,7 +20,7 @@
 use std::time::Instant;
 
 use gpt2::{Gpt, GptConfig};
-use gpu_core::{set_default_backend, Backend};
+use gpu_core::Backend;
 
 /// A gpt-small-ish config: d_model 384, 6 layers, ff 1536 — the size where every
 /// forward linear clears the 128×128 tile threshold and takes the register GEMM.
@@ -47,24 +47,25 @@ fn run(backend: Backend, naive_mm: bool, reps: usize) -> (Vec<f32>, f64) {
     } else {
         std::env::remove_var("BRAIN_GPT2_NAIVE_MM");
     }
-    set_default_backend(backend);
-    let c = cfg();
-    let init = gpt2::init_weights(&c, 1234);
-    let m = Gpt::new_on(gpu_core::testgpu::dev(gpt2::model::PIPELINES), c.clone(), B as u32, T as u32, &init);
-    let (x, y) = tokens(&c);
+    gpu_core::with_backend(backend, || {
+        let c = cfg();
+        let init = gpt2::init_weights(&c, 1234);
+        let m = Gpt::new_on(gpu_core::testgpu::dev(gpt2::model::PIPELINES), c.clone(), B as u32, T as u32, &init);
+        let (x, y) = tokens(&c);
 
-    m.set_batch(&x, &y);
-    m.forward_submit();
-    let logits = m.logits_host(); // warm
-
-    let mut best = f64::INFINITY;
-    for _ in 0..reps {
-        let t0 = Instant::now();
+        m.set_batch(&x, &y);
         m.forward_submit();
-        m.gpu.poll_wait();
-        best = best.min(t0.elapsed().as_secs_f64() * 1e3);
-    }
-    (logits, best)
+        let logits = m.logits_host(); // warm
+
+        let mut best = f64::INFINITY;
+        for _ in 0..reps {
+            let t0 = Instant::now();
+            m.forward_submit();
+            m.gpu.poll_wait();
+            best = best.min(t0.elapsed().as_secs_f64() * 1e3);
+        }
+        (logits, best)
+    })
 }
 
 fn rel(a: &[f32], b: &[f32]) -> (f32, f32) {

@@ -8,21 +8,22 @@
 //! grads == finite differences) and the TTS NPU==CPU parity tests, this is the
 //! CPU == GPU == NPU parity gate.
 //!
-//! The backend is chosen per `Gpu` via `set_default_backend`, so we build the
+//! The backend is chosen per build via `gpu_core::with_backend`, so we build the
 //! same model once per backend in one process and diff the logits against the
 //! CPU's. A backend the machine does not have is skipped by name rather than
 //! asked for and panicked on.
 
 use std::collections::HashMap;
 
-use gpu_core::{set_default_backend, Backend};
+use gpu_core::Backend;
 use qwen3::{Qwen, QwenConfig};
 
 fn logits_on(backend: Backend, cfg: &QwenConfig, init: &HashMap<String, Vec<f32>>, x: &[u32]) -> Vec<f32> {
-    set_default_backend(backend);
-    // batch 1 (logits_all requires it); the model + its Gpu drop at end of scope.
-    let m = Qwen::new(cfg.clone(), 1, x.len() as u32, init);
-    m.logits_all(x)
+    gpu_core::with_backend(backend, || {
+        // batch 1 (logits_all requires it); the model + its Gpu drop at end of scope.
+        let m = Qwen::new(cfg.clone(), 1, x.len() as u32, init);
+        m.logits_all(x)
+    })
 }
 
 #[test]
