@@ -26,8 +26,8 @@
 #   BRAIN_BIN  the binary `e2e` serves with (default ./target/debug/brain)
 #
 # Cards belong to other jobs while the node is shared: a gpu device is refused in
-# a shell that hides the cards (CUDA_VISIBLE_DEVICES set empty by
-# ~/tmp/no-gpu-env.sh), so a CPU-only session cannot start a card run by accident.
+# a shell that hides the cards (CUDA_VISIBLE_DEVICES set empty, as a no-GPU
+# environment file leaves it), so a CPU-only session cannot start a card run by accident.
 # Taking a card (lock, free memory) is the caller's step: step 0 of the ledger.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
