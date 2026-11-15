@@ -17,7 +17,7 @@
 
 use gpu_core::{f, DeviceBuffer, Gpu};
 use paramstore::ParamStore;
-use vision::{Act, Conv, ConvKernelIds, ConvNames, ConvSpec, Ctx, MaxPool, Norm, PoolSpec, Shape};
+use vision::{Act, Conv, ConvKernelIds, ConvNames, ConvSpec, Ctx, Footprint, MaxPool, Norm, PoolSpec, Shape};
 
 use crate::config::{BiSeNetConfig, ARM16, ARM32, FFM, OUTPUT_MID, RESNET18_STAGES};
 use crate::import::Tensors;
@@ -521,6 +521,50 @@ impl BiSeNet {
 
         let ps = ParamStore::frozen(&gpu, weights, "bisenet");
         BiSeNet { gpu, cfg, ps, in_shape, cp, ffm, conv_out, conv_out_final }
+    }
+
+    /// Device bytes [`BiSeNet::new`] allocates for `cfg` over `weights`, plus
+    /// what one [`BiSeNet::forward`] holds at its peak: the frozen fp32
+    /// weights, every unit's buffers, and the input and upsampled logit maps
+    /// the call allocates. What a placement plan charges for the face parser.
+    pub fn device_bytes(cfg: &BiSeNetConfig, weights: &Tensors) -> u64 {
+        let input = Shape::new(1, 3, cfg.input_size, cfg.input_size);
+        let mut fp = Footprint::new();
+        let stem = fp.conv(input, bn_spec(64, 7, 2, 3, Act::Relu));
+        let mut shape = fp.maxpool(stem, PoolSpec { k: 3, stride: 2, pad: 1 });
+        let mut stage_out = Vec::new();
+        for (i, &(cout, blocks)) in RESNET18_STAGES.iter().enumerate() {
+            for b in 0..blocks {
+                let stride = if b == 0 && i > 0 { 2 } else { 1 };
+                let c1 = fp.conv(shape, bn_spec(cout, 3, stride, 1, Act::Relu));
+                let out = fp.conv(c1, bn_spec(cout, 3, 1, 1, Act::None));
+                if stride != 1 || shape.c != cout {
+                    fp.conv(shape, bn_spec(cout, 1, stride, 0, Act::None));
+                }
+                shape = out;
+            }
+            stage_out.push(shape);
+        }
+        let (s16, s32) = (stage_out[2], stage_out[3]);
+        fp.conv(Shape::new(1, s32.c, 1, 1), bn_spec(128, 1, 1, 0, Act::Relu));
+        for (arm, io) in [(s16, ARM16), (s32, ARM32)] {
+            fp.conv(arm, bn_spec(io.1, 3, 1, 1, Act::Relu));
+            fp.conv(Shape::new(1, io.1, 1, 1), bn_spec(io.1, 1, 1, 0, Act::Sigmoid));
+        }
+        fp.conv(Shape::new(1, 128, s16.h, s16.w), bn_spec(128, 3, 1, 1, Act::Relu));
+        let s8 = stage_out[1];
+        fp.conv(Shape::new(1, 128, s8.h, s8.w), bn_spec(128, 3, 1, 1, Act::Relu));
+
+        let fused = Shape::new(1, FFM.0, s8.h, s8.w);
+        let blk = fp.conv(fused, bn_spec(FFM.1, 1, 1, 0, Act::Relu));
+        let gate = fp.conv(Shape::new(1, FFM.1, 1, 1), raw_spec(FFM.1 / 4, 1, 1, 0, Act::Relu));
+        fp.conv(gate, raw_spec(FFM.1, 1, 1, 0, Act::Sigmoid));
+        let mid = fp.conv(blk, bn_spec(OUTPUT_MID, 3, 1, 1, Act::Relu));
+        fp.conv(mid, raw_spec(cfg.num_class, 1, 1, 0, Act::None));
+
+        fp.map(input);
+        fp.map(Shape::new(1, cfg.num_class, cfg.input_size, cfg.input_size));
+        ParamStore::frozen_bytes(weights) + fp.bytes()
     }
 
     pub fn config(&self) -> &BiSeNetConfig {

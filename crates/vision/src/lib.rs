@@ -52,6 +52,7 @@
 
 pub mod blocks;
 pub mod bn;
+pub mod footprint;
 pub mod fold;
 pub mod ids;
 pub mod net;
@@ -65,6 +66,7 @@ pub use blocks::{
 };
 pub use bn::{BatchNorm, BnNames};
 pub use fold::{fold_bn, BN_EPS};
+pub use footprint::Footprint;
 pub use ids::{ConvKernelIds, NONE};
 pub use net::{ActTap, Ctx, Shape};
 pub use plumbing::{Acc, Cat, Up};

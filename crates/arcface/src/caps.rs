@@ -141,6 +141,15 @@ pub struct ArcFaceSession {
 }
 
 impl ArcFaceSession {
+    /// Device bytes [`ArcFaceSession::load`] builds for the checkpoints in
+    /// `dir`: the embedder, plus the detector when it is there. From the
+    /// checkpoints' own tensor sizes and the configs' shapes.
+    pub fn device_bytes(dir: &str) -> Result<u64, String> {
+        let embedder = ArcFace::device_bytes(&ArcFaceConfig::iresnet100(), &crate::import::import_dir(std::path::Path::new(dir))?);
+        let detector = if std::path::Path::new(dir).join(DETECTOR_FILE).exists() { ScrfdSession::device_bytes(dir)? } else { 0 };
+        Ok(embedder + detector)
+    }
+
     /// Import `glintr100.onnx` from `dir` and build it on `gpu`, plus the
     /// detector from the same directory when it is there (the antelopev2 release
     /// ships both files together).

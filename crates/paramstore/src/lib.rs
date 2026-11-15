@@ -181,6 +181,13 @@ impl ParamStore {
         Self::new_with_roles_src(gpu, roles, source)
     }
 
+    /// The device bytes [`Self::frozen`] holds for `tensors`: every element
+    /// as one fp32 word. What a placement plan charges for an inference
+    /// model's weights before it builds them.
+    pub fn frozen_bytes(tensors: &HashMap<String, (Vec<usize>, Vec<f32>)>) -> u64 {
+        tensors.values().map(|(shape, _)| shape.iter().product::<usize>() as u64 * 4).sum()
+    }
+
     /// An all-`Frozen` (inference) store from imported tensors, name ->
     /// `(shape, data)`, checking every tensor's element count against its
     /// shape. `what` names the model in the panic. Names are sorted, so the

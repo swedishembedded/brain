@@ -103,6 +103,13 @@ pub struct ScrfdSession {
 }
 
 impl ScrfdSession {
+    /// Device bytes [`ScrfdSession::load`] builds for the detector in `dir`,
+    /// from the checkpoint's own tensor sizes and the config's shapes.
+    pub fn device_bytes(dir: &str) -> Result<u64, String> {
+        let w = crate::import::import_dir(std::path::Path::new(dir))?;
+        Ok(Scrfd::device_bytes(&ScrfdConfig::scrfd_10g_bnkps(), &w))
+    }
+
     /// Import `scrfd_10g_bnkps.onnx` from `dir` and build it on `gpu`.
     ///
     /// `gpu` is passed in rather than built here: a process holds ONE device

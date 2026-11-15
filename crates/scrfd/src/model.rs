@@ -25,7 +25,7 @@ use std::sync::OnceLock;
 use gpu_core::{f, DeviceBuffer, Gpu};
 use paramstore::ParamStore;
 use vision::{
-    Act, AvgPool, Conv, ConvKernelIds, ConvNames, ConvSpec, Ctx, MaxPool, Norm, PoolSpec, Shape,
+    Act, AvgPool, Conv, ConvKernelIds, ConvNames, ConvSpec, Ctx, Footprint, MaxPool, Norm, PoolSpec, Shape,
 };
 
 use crate::config::ScrfdConfig;
@@ -456,6 +456,71 @@ impl Scrfd {
         let ps = ParamStore::frozen(&gpu, weights, "scrfd");
         let input = gpu.storage((3 * sz * sz) as u64);
         Scrfd { gpu, cfg, ps, input, stem, stem_pool, stages, lateral, up, fpn_add, fpn, down, pa_add, pafpn, heads }
+    }
+
+    /// Device bytes [`Scrfd::new`] allocates for `cfg` over `weights`: the
+    /// frozen fp32 weights plus every unit's buffers, from the same shapes
+    /// the build walks. What a placement plan charges for the detector.
+    pub fn device_bytes(cfg: &ScrfdConfig, weights: &Tensors) -> u64 {
+        let sz = cfg.image_size;
+        let mut fp = Footprint::new();
+        fp.buffer(3 * sz as u64 * sz as u64);
+        let mut shape = Shape::new(1, 3, sz, sz);
+        for i in 0..3usize {
+            let stride = if i == 0 { 2 } else { 1 };
+            shape = fp.conv(shape, folded(cfg.stem_channels[i], 3, stride, 1, Act::Relu));
+        }
+        shape = fp.maxpool(shape, PoolSpec::half());
+
+        let mut c_out = Vec::new();
+        for s in 0..4usize {
+            for b in 0..cfg.layers[s] as usize {
+                let cout = cfg.channels[s];
+                let stride = if b == 0 && cfg.stage_stride2[s] { 2 } else { 1 };
+                let c1 = fp.conv(shape, folded(cout, 3, stride, 1, Act::Relu));
+                let out = fp.conv(c1, folded(cout, 3, 1, 1, Act::None));
+                if stride != 1 || shape.c != cout {
+                    let pooled = if stride != 1 { fp.avgpool_half(shape) } else { shape };
+                    fp.conv(pooled, folded(cout, 1, 1, 0, Act::None));
+                }
+                // The residual sum and the block output.
+                fp.map(out);
+                fp.map(out);
+                shape = out;
+            }
+            c_out.push(shape);
+        }
+
+        let nk = cfg.neck_channels;
+        let lat: Vec<Shape> = (0..3).map(|i| fp.conv(c_out[i + 1], folded(nk, 1, 1, 0, Act::None))).collect();
+        let (l3, l4, l5) = (lat[0], lat[1], lat[2]);
+        // The two top-down upsamples and their sums.
+        fp.map(l4);
+        fp.map(l3);
+        fp.map(l4);
+        fp.map(l3);
+        let fpn: Vec<Shape> = [l3, l4, l5].into_iter().map(|s| fp.conv(s, folded(nk, 3, 1, 1, Act::None))).collect();
+        fp.conv(fpn[0], folded(nk, 3, 2, 1, Act::None));
+        fp.conv(l4, folded(nk, 3, 2, 1, Act::None));
+        // The two bottom-up sums.
+        fp.map(l4);
+        fp.map(l5);
+        let pafpn: Vec<Shape> = [l4, l5].into_iter().map(|s| fp.conv(s, folded(nk, 3, 1, 1, Act::None))).collect();
+
+        let na = cfg.num_anchors;
+        for neck in [fpn[0], pafpn[0], pafpn[1]] {
+            let mut h = neck;
+            for _ in 0..cfg.head_depth {
+                h = fp.conv(h, folded(cfg.head_channels, 3, 1, 1, Act::Relu));
+            }
+            let cls = fp.conv(h, folded(na, 3, 1, 1, Act::None));
+            let reg = fp.conv(h, folded(4 * na, 3, 1, 1, Act::None));
+            fp.conv(h, folded(10 * na, 3, 1, 1, Act::None));
+            // The head's sigmoid and scaled-regression outputs.
+            fp.map(cls);
+            fp.map(reg);
+        }
+        ParamStore::frozen_bytes(weights) + fp.bytes()
     }
 
     pub fn config(&self) -> &ScrfdConfig {

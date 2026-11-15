@@ -855,6 +855,32 @@ pub struct EvaVision {
 }
 
 impl EvaVision {
+    /// Device bytes [`EvaVision::new_on`] allocates for `cfg` at batch `b`:
+    /// the frozen fp32 weights plus every buffer the graph writes. What a
+    /// placement plan charges for the tower, from the same shapes the build
+    /// allocates.
+    pub fn device_bytes(cfg: &EvaVisionConfig, b: u32) -> u64 {
+        let weights: u64 = cfg.tensor_manifest().iter().map(|(_, s)| s.iter().product::<usize>() as u64).sum();
+        let (w, m) = (cfg.width as u64, cfg.mlp_hidden as u64);
+        let seq = cfg.seq_len() as u64;
+        let n = b as u64 * seq;
+        let np = b as u64 * cfg.num_patches() as u64;
+        let slab = b as u64 * cfg.heads as u64 * seq * seq;
+        let rope = 2 * cfg.grid() as u64 * cfg.grid() as u64 * cfg.rope_half() as u64; // cos and sin
+        let per_block = n * (10 * w + 4 * m);
+        let words = weights
+            + per_block * cfg.layers as u64
+            + rope
+            + b as u64 * 3 * cfg.image_size as u64 * cfg.image_size as u64
+            + cfg.embed_dim as u64 // l2_ones
+            + np * w // patch_nchw
+            + (cfg.layers as u64 + 1) * n * w // x
+            + 2 * slab // scores, probs
+            + n * w // norm_out
+            + 2 * b as u64 * cfg.embed_dim as u64; // head_out, cls_l2
+        words * 4
+    }
+
     pub fn new_on(
         gpu: Gpu,
         cfg: EvaVisionConfig,

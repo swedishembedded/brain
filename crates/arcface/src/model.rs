@@ -26,7 +26,7 @@ use std::sync::OnceLock;
 use gpu_core::{DeviceBuffer, Gpu};
 use paramstore::ParamStore;
 use vision::{
-    Act, BatchNorm, BnNames, Conv, ConvKernelIds, ConvNames, ConvSpec, Ctx, Norm, PReLU, Shape,
+    Act, BatchNorm, BnNames, Conv, ConvKernelIds, ConvNames, ConvSpec, Ctx, Footprint, Norm, PReLU, Shape,
 };
 
 use crate::config::ArcFaceConfig;
@@ -341,6 +341,37 @@ impl ArcFace {
         let ps = ParamStore::frozen(&gpu, weights, "arcface");
         let input = gpu.storage(in_shape.numel() as u64);
         ArcFace { gpu, cfg, ps, input, stem_conv, stem_prelu, blocks, stage_last, bn2, fc_out, features }
+    }
+
+    /// Device bytes [`ArcFace::new`] allocates for `cfg` over `weights`: the
+    /// frozen fp32 weights plus every unit's buffers, from the same shapes
+    /// the build walks. What a placement plan charges for the embedder.
+    pub fn device_bytes(cfg: &ArcFaceConfig, weights: &Tensors) -> u64 {
+        let sz = cfg.image_size;
+        let input = Shape::new(1, 3, sz, sz);
+        let mut fp = Footprint::new();
+        fp.map(input);
+        let stem = fp.conv(input, folded(cfg.stem_channels, 3, 1, 1, Act::None));
+        fp.prelu(stem);
+        let mut shape = stem;
+        for (s, &blocks) in cfg.layers.iter().enumerate() {
+            for b in 0..blocks {
+                let (cout, stride) = (cfg.channels[s], if b == 0 { 2 } else { 1 });
+                fp.batchnorm(shape);
+                let c1 = fp.conv(shape, folded(cout, 3, 1, 1, Act::None));
+                fp.prelu(c1);
+                let out = fp.conv(c1, folded(cout, 3, stride, 1, Act::None));
+                if stride != 1 || shape.c != cout {
+                    fp.conv(shape, folded(cout, 1, stride, 0, Act::None));
+                }
+                fp.map(out);
+                shape = out;
+            }
+        }
+        fp.batchnorm(shape);
+        fp.buffer(cfg.embedding as u64);
+        fp.batchnorm(Shape::new(1, cfg.embedding, 1, 1));
+        ParamStore::frozen_bytes(weights) + fp.bytes()
     }
 
     pub fn config(&self) -> &ArcFaceConfig {

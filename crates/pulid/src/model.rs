@@ -211,6 +211,35 @@ pub struct IdFormer {
 }
 
 impl IdFormer {
+    /// Device bytes [`IdFormer::new_on`] allocates for `cfg`: the frozen fp32
+    /// weights plus every buffer the graph writes. What a placement plan
+    /// charges for the encoder, from the same shapes the build allocates.
+    pub fn device_bytes(cfg: &PulidConfig) -> u64 {
+        let weights: u64 = cfg.encoder_manifest().iter().map(|(_, s)| s.iter().product::<usize>() as u64).sum();
+        let d = cfg.dim as u64;
+        let (lr, cr, kr) = (cfg.latent_rows() as u64, cfg.ctx_rows() as u64, cfg.kv_rows() as u64);
+        let vt = cfg.vit_tokens as u64;
+        let (inner, ff, nid, heads) = (cfg.inner_dim() as u64, cfg.ff_hidden() as u64, cfg.num_id_token as u64, cfg.heads as u64);
+        let words = weights
+            + cfg.id_cond_dim as u64
+            + cfg.scales as u64 * vt * d // vit
+            + 2 * nid * d // s0, s1
+            + 2 * vt * d // t0, t1
+            + cr * d // ctxf
+            + 2 * lr * d // lat_a, lat_b
+            + kr * d // nkv
+            + lr * inner // q
+            + kr * 2 * inner // kv
+            + 2 * heads * lr * kr // scores, probs
+            + inner * kr // xkt
+            + lr * inner // actx
+            + lr * d // aout
+            + 2 * lr * ff // fh, fg
+            + lr * d // fo
+            + cfg.num_queries as u64 * cfg.output_dim as u64; // out
+        words * 4
+    }
+
     /// Build on a handle whose pipeline list is `kernel_names` (either
     /// [`KERNELS`] or [`joint_kernels`]).
     pub fn new_on(gpu: Gpu, cfg: PulidConfig, kernel_names: &[(&str, &str)], w: Tensors) -> IdFormer {
