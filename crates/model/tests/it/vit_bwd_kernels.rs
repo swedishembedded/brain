@@ -3,8 +3,8 @@
 
 //! Kernel-level gradcheck for the new ViT-trunk backward kernels
 //! (rope2d sign=-1, ln_head_dx/dgb, scale_chan_dg): analytic grads vs central
-//! finite differences of the forward kernels — all smooth ops, so plain
-//! finite differences are exact here. CPU backend (no GPU needed).
+//! finite differences of the forward kernels - all smooth ops, so finite
+//! differences are exact here. CPU backend (no GPU needed).
 
 use data::rng::{random_seed, Lcg};
 use gpu_core::{f, DeviceBuffer, Gpu};
@@ -27,16 +27,20 @@ fn buf(g: &Gpu, d: &[f32]) -> DeviceBuffer {
     g.storage_init("t", d)
 }
 
-/// dL/dx via central differences of a scalar loss L = <fwd(x), w>.
+/// dL/dx by the five-point central difference of a scalar loss L = <fwd(x), w>.
+///
+/// The forward runs in f32, so a difference carries the forward's rounding divided by the step as well as its
+/// truncation error. The five-point stencil's truncation shrinks with the step to the fourth power, so a step of 1e-2
+/// keeps both small. A two-point difference cannot: even at its best step (about 5e-3) it misses a layer-norm gradient of
+/// a head with small variance by more than the 2 % bound in about one seed in a thousand.
 fn numeric_grad(fwd: &dyn Fn(&[f32]) -> Vec<f32>, x: &[f32], w: &[f32], i: usize) -> f32 {
-    let eps = 1e-3;
-    let mut xp = x.to_vec();
-    xp[i] += eps;
-    let mut xm = x.to_vec();
-    xm[i] -= eps;
-    let lp: f64 = fwd(&xp).iter().zip(w).map(|(a, b)| (a * b) as f64).sum();
-    let lm: f64 = fwd(&xm).iter().zip(w).map(|(a, b)| (a * b) as f64).sum();
-    ((lp - lm) / (2.0 * eps as f64)) as f32
+    let h = 1e-2f32;
+    let loss = |d: f32| -> f64 {
+        let mut xs = x.to_vec();
+        xs[i] += d;
+        fwd(&xs).iter().zip(w).map(|(a, b)| (a * b) as f64).sum()
+    };
+    ((-loss(2.0 * h) + 8.0 * loss(h) - 8.0 * loss(-h) + loss(-2.0 * h)) / (12.0 * h as f64)) as f32
 }
 
 fn assert_close(name: &str, a: f32, n: f32) {
