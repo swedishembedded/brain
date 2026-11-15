@@ -2278,7 +2278,6 @@ version = "5.1.0"
 dependencies = [
  "brain-audio",
  "brain-backend-cpu",
- "brain-backend-cuda",
  "brain-capability",
  "brain-capability-mock",
  "brain-checkpoint",
@@ -2700,7 +2699,6 @@ name = "brain-qwen35moe"
 version = "5.1.0"
 dependencies = [
  "brain-audio",
- "brain-backend-cuda",
  "brain-capability",
  "brain-checkpoint",
  "brain-data",

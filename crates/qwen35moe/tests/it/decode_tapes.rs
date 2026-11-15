@@ -17,7 +17,6 @@
 //! one that can be recorded (the fp32 decode reads routing back mid-step).
 
 use std::collections::HashMap;
-use std::sync::{Mutex, MutexGuard};
 
 use data::rng::Rng;
 use gpu_core::select::Dtype;
@@ -25,15 +24,6 @@ use model::ops::TierPolicy;
 use model::paged::BlockTable;
 use qwen35moe::config::Qwen35Config;
 use qwen35moe::serve::{Engine, EngineOptions};
-
-/// The live-resource counters are process-global, so the tests of this file must
-/// not overlap (the comparison test's engines would be counted as leaked by the
-/// lifetime test).
-static SERIAL: Mutex<()> = Mutex::new(());
-
-fn serial() -> MutexGuard<'static, ()> {
-    SERIAL.lock().unwrap_or_else(|e| e.into_inner())
-}
 
 /// `model_i8_smoke`'s config: every quantised width a multiple of 32, a shared
 /// expert of the routed experts' shape, both mixer types, several experts.
@@ -83,7 +73,6 @@ fn engine(w: &HashMap<String, Vec<f32>>, tapes: bool) -> Engine {
 
 #[test]
 fn a_replayed_step_is_the_step_built_every_token() {
-    let _s = serial();
     let c = cfg();
     let w = weights(&c);
     let probe = Engine::from_source(c.clone(), &w, EngineOptions::new(24, 1).with_tier(TierPolicy::uniform(Dtype::I8)));
@@ -152,20 +141,19 @@ fn a_replayed_step_is_the_step_built_every_token() {
 /// the tapes pin whole steps' scratch, and none of it may outlive the engine.
 #[test]
 fn an_engine_that_recorded_tapes_returns_every_cuda_object() {
-    let _s = serial();
-    use backend_cuda::exec::Context;
-    use backend_cuda::live_resources;
-    let Ok(_probe) = Context::open(0) else {
-        return brain_testutil::skip_unavailable("no usable CUDA device");
-    };
     let c = cfg();
     let w = weights(&c);
-    let baseline = live_resources();
     for round in 0..3 {
         let mut e = engine(&w, true);
         if !e.gpu().caps().numeric.int8_dot {
             return brain_testutil::skip_unavailable("no packed int8 dot on this device");
         }
+        // The engine's handle is its own, so its tally sees nothing the other
+        // tests of this binary hold, and it outlives the engine for the check
+        // after the drop.
+        let Some(tally) = e.gpu().live_tally() else {
+            return brain_testutil::skip_unavailable(&format!("the {} backend counts no driver objects", e.gpu().kind()));
+        };
         // More shapes than the cache keeps, so eviction runs too.
         let mut tables: Vec<BlockTable> = (0..4)
             .map(|i| {
@@ -186,6 +174,6 @@ fn an_engine_that_recorded_tapes_returns_every_cuda_object() {
             e.release_table(t);
         }
         drop(e);
-        assert_eq!(live_resources(), baseline, "round {round}: dropping the engine left CUDA objects behind");
+        assert_eq!(tally.read(), gpu_core::LiveResources::default(), "round {round}: dropping the engine left CUDA objects behind");
     }
 }

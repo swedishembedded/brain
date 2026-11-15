@@ -16,20 +16,28 @@
 //! - the real `Qwen3.8-27B` Q8_0 GGUF through `Qwen35GgufResident` - the whole
 //!   serving path - which self-skips unless `BRAIN_QWEN35_GGUF` names it.
 //!
-//! Both read `backend_cuda::live_resources` (exact, by kind) and `cuMemGetInfo`
-//! (the driver's own opinion, within a tolerance because the card is shared).
-//! They run on the CUDA backend only and skip elsewhere.
+//! Both read the model's own handles' live-resource tallies
+//! (`gpu_core::Gpu::live_tally`: exact, by kind, and blind to every other
+//! handle of the process), so they hold while the other tests of this binary
+//! allocate beside them. The first real-checkpoint gate also asks the driver
+//! (`cuMemGetInfo`, or what it attributes to this process), which counts the
+//! whole process and the whole card, within a tolerance; the two
+//! real-checkpoint gates hold [`serial`] so that it does not count the other's
+//! 27B model. That every owner in
+//! `backend-cuda` registers its objects with the tally at all is the driver
+//! check of `backend-cuda`'s own leak binary, which runs in a process of its
+//! own. They run on the CUDA backend only and skip elsewhere.
 
 use backend_cuda::exec::Context;
-use backend_cuda::{live_resources, LiveResources};
 use gpu_core::select::Dtype;
-use gpu_core::Gpu;
+use gpu_core::{Gpu, LiveResources, LiveTally};
 use model::ops::TierPolicy;
 use qwen35::config::Qwen35Config;
 use qwen35::model::{pipelines, Qwen35};
 use std::sync::{Mutex, MutexGuard};
 
-/// The counters are process-global, so the two gates must not overlap.
+/// The driver's figures are the process's and the card's, so the two
+/// real-checkpoint gates that read them must not overlap.
 static SERIAL: Mutex<()> = Mutex::new(());
 
 fn serial() -> MutexGuard<'static, ()> {
@@ -40,8 +48,8 @@ fn serial() -> MutexGuard<'static, ()> {
 /// returned everything.
 const FREE_TOLERANCE: u64 = 96 << 20;
 
-struct Baseline {
-    live: LiveResources,
+/// What the driver says before a workload.
+struct DriverBaseline {
     /// Device-wide free memory, the fallback when the driver will not say what
     /// this process holds.
     free: u64,
@@ -49,17 +57,16 @@ struct Baseline {
     own_mib: Option<u64>,
 }
 
-fn baseline(probe: &Context) -> Baseline {
-    Baseline { live: live_resources(), free: probe.mem_info().expect("cuMemGetInfo").0, own_mib: brain_testutil::own_gpu_memory_mib() }
+fn driver_baseline(probe: &Context) -> DriverBaseline {
+    DriverBaseline { free: probe.mem_info().expect("cuMemGetInfo").0, own_mib: brain_testutil::own_gpu_memory_mib() }
 }
 
-/// The exact counters, then the driver's opinion - about THIS process when it
-/// can say (`brain_testutil::own_gpu_memory_mib`). The card is shared, and
-/// another process loading a model moves device-wide free memory by gigabytes,
-/// which a gate on it reports as a leak that is not ours; only where the
-/// per-process figure is unavailable does this fall back to free memory.
-fn assert_returned(probe: &Context, base: &Baseline, what: &str) {
-    assert_eq!(live_resources(), base.live, "{what}: live CUDA objects did not return to baseline");
+/// The driver's opinion, about THIS process when it can say
+/// (`brain_testutil::own_gpu_memory_mib`). The card is shared, and another
+/// process loading a model moves device-wide free memory by gigabytes, which a
+/// gate on it reports as a leak that is not ours; only where the per-process
+/// figure is unavailable does this fall back to free memory.
+fn assert_driver_returned(probe: &Context, base: &DriverBaseline, what: &str) {
     let tolerance_mib = FREE_TOLERANCE >> 20;
     if let Some(own_before) = base.own_mib {
         let mut own = own_before;
@@ -97,6 +104,23 @@ fn assert_returned(probe: &Context, base: &Baseline, what: &str) {
     );
 }
 
+/// `gpu`'s live-resource tally, or `None` (after saying so) on a backend that
+/// keeps none.
+fn tally_of(gpu: &Gpu) -> Option<LiveTally> {
+    let tally = gpu.live_tally();
+    if tally.is_none() {
+        brain_testutil::skip_unavailable(&format!("the {} backend counts no driver objects", gpu.kind()));
+    }
+    tally
+}
+
+/// Every object the tallies count was returned.
+fn assert_all_returned(tallies: &[LiveTally], what: &str) {
+    for (stage, t) in tallies.iter().enumerate() {
+        assert_eq!(t.read(), LiveResources::default(), "{what}: stage {stage}'s handles left CUDA objects behind");
+    }
+}
+
 /// One model's life on `gpu`: build an INT8 decoder on a shared handle, run a
 /// prefill and enough decode steps for graphs to form, drop it.
 fn model_lifetime(gpu: &Gpu) {
@@ -121,30 +145,24 @@ fn model_lifetime(gpu: &Gpu) {
 
 #[test]
 fn a_synthetic_decoder_returns_everything_while_its_device_handle_lives_on() {
-    let _s = serial();
-    let all_before = live_resources();
-    let Ok(probe) = Context::open(0) else {
-        brain_testutil::skip_unavailable("no usable CUDA device");
-        return;
-    };
     let Ok(gpu) = Gpu::try_new_cuda(pipelines()) else {
         brain_testutil::skip_unavailable("no usable CUDA backend");
         return;
     };
+    let Some(tally) = tally_of(&gpu) else { return };
     model_lifetime(&gpu); // warm-up: driver-lazy state and reusable staging
     gpu.poll_wait();
-    let base = baseline(&probe);
+    let base = tally.read();
     for _ in 0..4 {
         model_lifetime(&gpu);
         gpu.poll_wait();
     }
-    assert_returned(&probe, &base, "synthetic decoder on a surviving handle");
+    assert_eq!(tally.read(), base, "synthetic decoder on a surviving handle: live CUDA objects did not return to baseline");
 
     // And when the handle goes too, nothing at all is left: modules unloaded,
     // streams destroyed, the context released.
     drop(gpu);
-    drop(probe);
-    assert_eq!(live_resources(), all_before, "dropping the device handle left CUDA objects behind");
+    assert_all_returned(&[tally], "dropping the device handle");
 }
 
 /// A paged engine in every KV tier, built, prefilled, decoded and dropped. The
@@ -161,30 +179,37 @@ fn a_paged_engine_in_every_kv_tier_returns_every_device_object_it_took() {
     use model::paged::BlockTable;
     use qwen35::serve::Engine;
 
-    let _s = serial();
-    let Ok(_probe) = Context::open(0) else {
-        brain_testutil::skip_unavailable("no usable CUDA device");
-        return;
-    };
-    // The probe holds a stream and a primary-context retain of its own.
-    let baseline = live_resources();
     let cfg = Qwen35Config::tiny_i8();
     let init = qwen35::init::init_weights(&cfg, 7);
-    let lifetime = |tier: KvTier| {
+    // The engine's handle is its own; its tally outlives it, which is what the
+    // check after the drop reads.
+    let lifetime = |tier: KvTier| -> Option<LiveTally> {
         let mut engine = Engine::from_map_kv(cfg.clone(), &init, 64, 2, tier);
+        let tally = tally_of(engine.gpu())?;
         let mut table = BlockTable::new();
         let hidden = model::serve::PagedDecoder::prefill(&mut engine, &mut table, &[3, 8, 1, 4, 1, 5, 9, 2, 6]);
         assert!(hidden.iter().all(|x| x.is_finite()), "{tier}: prefill hidden state is not finite");
         let next = engine.forward_batched_greedy(&mut [&mut table], &[7]);
         assert_eq!(next.len(), 1);
         engine.release_table(&mut table);
+        Some(tally)
     };
     for tier in KvTier::ALL {
         for round in 0..3 {
-            lifetime(tier);
-            assert_eq!(live_resources(), baseline, "{tier}, round {round}: dropping the engine and its device handle left CUDA objects behind");
+            let Some(tally) = lifetime(tier) else { return };
+            assert_all_returned(&[tally], &format!("{tier}, round {round}: dropping the engine and its device handle"));
         }
     }
+}
+
+/// The tallies of an instance's stages, each its card's handle and the handles
+/// shared from it.
+fn stage_tallies(inst: &qwen35::int8_gguf_resident::Qwen35GgufInstance) -> Vec<LiveTally> {
+    (0..inst.stages()).map(|s| inst.stage_gpu(s).live_tally().expect("a CUDA stage counts its driver objects")).collect()
+}
+
+fn device_bytes(tallies: &[LiveTally]) -> u64 {
+    tallies.iter().map(|t| t.read().device_bytes).sum()
 }
 
 /// The whole serving path on the real checkpoint: plan, load, prefill, decode,
@@ -218,13 +243,14 @@ fn dropping_a_real_gguf_instance_returns_all_device_memory() {
     let key = r.instance_key("generate", &capability::Invocation::new());
     let placed: Vec<Device> = r.estimate_multi(&key).devices().collect();
 
-    let base = baseline(&probe);
+    let base = driver_baseline(&probe);
     for round in 0..2 {
         let inst = r.activate_owned(&placed).expect("activate the real checkpoint");
-        // What the model holds, by this process's own exact counter: the card's
+        let tallies = stage_tallies(&inst);
+        // What the model holds, by its own handles' exact tallies: the card's
         // free memory moves with every other tenant's allocations and cannot say
         // whether THIS model occupied anything.
-        let held = live_resources().device_bytes.saturating_sub(base.live.device_bytes);
+        let held = device_bytes(&tallies);
         assert!(held > 1 << 30, "round {round}: the model did not occupy any device memory, so this proves nothing");
         println!("round {round}: model holds {} MiB of device memory", held >> 20);
         inst.prefill_timed(&[1, 2, 3, 4, 5, 6, 7, 8]).expect("prefill");
@@ -232,14 +258,15 @@ fn dropping_a_real_gguf_instance_returns_all_device_memory() {
             inst.decode_batch_at(&[pos + 1], &[pos]).expect("decode");
         }
         drop(inst);
-        assert_returned(&probe, &base, &format!("round {round}: real GGUF instance"));
+        assert_all_returned(&tallies, &format!("round {round}: real GGUF instance"));
+        assert_driver_returned(&probe, &base, &format!("round {round}: real GGUF instance"));
     }
 }
 
 /// The same on the real checkpoint with a compact KV cache and a batch: the
 /// planes' packed words, row scales and append ceilings, and the fused decode's
-/// per-layer partial-state scratch, all returned - exactly, by the process's own
-/// counters.
+/// per-layer partial-state scratch, all returned - exactly, by the instance's
+/// own tallies.
 #[test]
 fn dropping_a_real_gguf_instance_with_a_compact_kv_cache_returns_every_device_object() {
     use model::kv_tier::KvTier;
@@ -265,7 +292,6 @@ fn dropping_a_real_gguf_instance_with_a_compact_kv_cache_returns_every_device_ob
         brain_testutil::skip_unavailable("no GPU with queryable VRAM");
         return;
     }
-    let baseline = live_resources();
     for tier in [KvTier::BF16, KvTier::INT8] {
         let r = Qwen35GgufResident::new(path.clone(), devices.clone(), 4096, TierPolicy::uniform(Dtype::I8)).with_kv_tier(tier).with_max_batch(2);
         let placed: Vec<Device> = r.estimate_multi(&r.instance_key("generate", &capability::Invocation::new())).devices().collect();
@@ -275,12 +301,13 @@ fn dropping_a_real_gguf_instance_with_a_compact_kv_cache_returns_every_device_ob
         }
         let inst = r.activate_owned(&placed).expect("activate the real checkpoint");
         assert_eq!(inst.kv_tier(), tier);
+        let tallies = stage_tallies(&inst);
         inst.prefill_timed(&[1, 2, 3, 4, 5, 6, 7, 8]).expect("prefill");
         for pos in 8..12u32 {
             inst.decode_batch_at(&[pos + 1, pos + 2], &[pos, pos + 20]).expect("batched decode");
         }
-        assert!(live_resources().device_bytes > baseline.device_bytes + (1 << 30), "{tier}: the model occupied no device memory, so this proves nothing");
+        assert!(device_bytes(&tallies) > 1 << 30, "{tier}: the model occupied no device memory, so this proves nothing");
         drop(inst);
-        assert_eq!(live_resources(), baseline, "{tier}: dropping the instance left CUDA objects behind");
+        assert_all_returned(&tallies, &format!("{tier}: dropping the instance"));
     }
 }

@@ -12,9 +12,10 @@
 //!   BRAIN_BACKEND=cuda gpu cargo test -p brain-model --test gdn_mixer_train_cost \
 //!       -- --ignored --nocapture one_shot_2048
 //!
-//! The peak is the maximum, over a sampler thread polling the CUDA backend's
-//! exact outstanding-allocation counter, of device + pool bytes minus the
-//! baseline taken before the layer's inputs were uploaded.
+//! The peak is the maximum, over a sampler thread polling the exact
+//! live-resource tally of the layer's own device handle (`Gpu::live_tally`),
+//! of device + pool + managed bytes minus the baseline taken after the layer's
+//! inputs were uploaded.
 //!
 //! Swedish Embedded AB implements solutions for training long-context
 //! linear-attention models on a single accelerator for its clients. If your
@@ -28,13 +29,13 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use gdn_kit::{mixer_ids, DeviceWeights, Host, KERNELS};
-use gpu_core::Gpu;
+use gpu_core::{Gpu, LiveTally};
 use model::gdn::GdnShape;
 use model::gdn_mixer::{gdn_mixer_bwd, gdn_mixer_fwd, GdnMixerShape};
 use model::gdn_segment::{gdn_mixer_seg_bwd, gdn_mixer_seg_fwd, GdnMixerInputs};
 
-fn live_bytes() -> u64 {
-    let r = backend_cuda::live::live_resources();
+fn live_bytes(tally: &LiveTally) -> u64 {
+    let r = tally.read();
     r.device_bytes + r.pool_bytes + r.managed_bytes
 }
 
@@ -46,12 +47,12 @@ struct PeakSampler {
 }
 
 impl PeakSampler {
-    fn start() -> PeakSampler {
+    fn start(tally: LiveTally) -> PeakSampler {
         let (stop, peak) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicU64::new(0)));
         let (s, p) = (stop.clone(), peak.clone());
         let thread = std::thread::spawn(move || {
             while !s.load(Ordering::Relaxed) {
-                p.fetch_max(live_bytes(), Ordering::Relaxed);
+                p.fetch_max(live_bytes(&tally), Ordering::Relaxed);
                 std::thread::sleep(std::time::Duration::from_micros(200));
             }
         });
@@ -93,9 +94,10 @@ fn cost(t: u32, segment_tokens: Option<u32>) {
     let d_gated = g.storage_init("d_gated", &host.d_gated);
     let inputs = GdnMixerInputs { mixed_qkv: &mixed, bproj: &b, aproj: &a, z: &z };
     let _ = g.read(&z, 1);
-    let baseline = live_bytes();
+    let tally = g.live_tally().expect("the CUDA backend counts its driver objects");
+    let baseline = live_bytes(&tally);
 
-    let sampler = PeakSampler::start();
+    let sampler = PeakSampler::start(tally);
     let launched = || g.call_totals().map_or(0, |t| t.host_launches);
     let launches0 = launched();
     let t0 = Instant::now();

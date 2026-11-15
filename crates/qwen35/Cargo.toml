@@ -39,7 +39,7 @@ pollster = "0.4"
 [dev-dependencies]
 brain-testutil.workspace = true
 brain-capability-mock.workspace = true
-# Live-resource counters and free-memory reads for the CUDA lifetime gates.
+# The driver's free-memory reads (`exec::Context::mem_info`) for the real-checkpoint CUDA lifetime gates.
 brain-backend-cuda.workspace = true
 
 [[test]]

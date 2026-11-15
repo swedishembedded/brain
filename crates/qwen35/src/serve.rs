@@ -296,6 +296,12 @@ impl Engine {
         Self::from_map_with_gpu(parent.new_like(pipelines()), cfg, weights, max_seq_len, max_concurrent, kv, tier)
     }
 
+    /// The engine's device handle: what reads its own figures (memory, host calls, live driver objects) while other
+    /// handles of the process work.
+    pub fn gpu(&self) -> &Gpu {
+        &self.model.gpu
+    }
+
     /// The tier of the weight called `name` (a linear), `None` for a tensor
     /// held outside the `Weight` table (embeddings, norms).
     pub fn weight_tier(&self, name: &str) -> Option<gpu_core::select::Dtype> {
