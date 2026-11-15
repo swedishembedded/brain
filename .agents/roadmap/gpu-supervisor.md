@@ -485,16 +485,51 @@ context (`MemCost::context`, set by `SupervisedModel::estimate` only for a
 model that demotes), the planner counts a Hot one's demotion as freeing
 only the rest, and a promotion goes back to that card first.
 
-* **Adapters in a family.** The protocol is built (above); a family that
-  serves adapters (the Qwen3 and Qwen3.8 decoders) still needs its two ends
-  over `llmserve::adapter_registry`: an `AdapterSource` over the serving
-  process's `AdapterRegistry` (each entry's `release` is the id, digest and
-  path a worker needs, the registry's generation the source's), and in the
-  worker an `AdapterSink` that `load_adapter`s the path, refuses a digest
-  that is not the one offered, and holds the `AdapterLease` of each attached
-  id in its own registry, which the worker's `AdaptedInstance` syncs from
-  (its `OpenGroup::Refresh` then picks a change up in a running group as in
-  process).
+* **The first text-generation family: Qwen3 (next, not started).** Every
+  protocol piece it needs is built (streaming progress, open groups and late
+  joins, screening, cancellation, adapters, metrics); what is left is the
+  family itself, in this order, each its own change:
+  1. *A host spec that rebuilds the identical engine.* `QwenResident` is
+     built from a `QwenServeConfig` of about 25 fields, none serializable
+     (`model::ops::TierPolicy`, `GemmPrecision`, `AdapterBankSettings`,
+     `sparse_attention`, `refused` among them), and `build` resolves `ctx`
+     and `kv_tokens` from budgets only the serving process knows. The spec
+     must carry the resolved values (`ctx`, `kv_tokens`, the chosen weight
+     tiers), not the budgets, or the worker sizes a different engine. Needs
+     `QwenResident::host_spec` and a config JSON codec in `catalog` (each
+     tier type already has a flag spelling to parse and print), refusing an
+     unknown field, and a test that a rebuilt resident's `estimate` and
+     manifest equal the original's for every flag combination the policy
+     tests cover.
+  2. *The adapter ends* in `llmserve::adapter_registry`: an `AdapterSource`
+     over the serving process's `AdapterRegistry` (each entry's `release`
+     is the id, digest and path; the registry's generation is the
+     source's), and in the worker an `AdapterSink` that `load_adapter`s the
+     path, refuses a digest other than the one offered, and holds each
+     attached id's `AdapterLease` in the worker resident's own registry,
+     which its `AdaptedInstance` syncs from (`OpenGroup::Refresh` then picks
+     a change up in a running group as in process). Unit-testable with
+     `write_adapter` fixtures, no GPU.
+  3. *Views over a hosted base.* `AdapterView<R: AdapterHost>` builds and
+     places through the concrete `Arc<QwenResident>` (`activate`,
+     `estimate`), so a job for an adapter would build the base in process
+     beside its hosted copy. The view needs the served base (the
+     `SupervisedModel` wrapping it) for `activate`/`estimate`/`estimate_at`
+     while keeping the concrete one for `adapters()`; `model_dir`'s
+     `qwen_bases` and `LiveAdapters` then register views over that pair, and
+     `Built::Qwen` gets a hosted form (`WorkerHosting::serve` with
+     `SupervisedModel::with_adapters`). A test that a view's activation
+     goes to the worker, as the encoder's scan test does.
+  4. *The GPU proof* (`crates/cli/tests/it/worker_hosted_qwen3.rs`, the
+     store's `Qwen/Qwen3-0.6B`, skipped with a reason where it or a card is
+     missing): greedy tokens identical in a worker and in process for a
+     batch of prompts; the same streamed deltas; a cancel mid-stream
+     answered `cancelled` with the worker serving on; `SIGKILL` at the
+     fifth streamed token failing the job naming signal 9 and quarantining
+     the card; an adapter offered while a group runs used by the next
+     request and an unknown one refused. Measured: tokens per second for
+     one stream and a batch of eight, and time to first token, both ways,
+     and the worker's host memory.
 * **A multi-device family.** The hosting is built (above); no served
   multi-device family is hosted yet. Each needs its `HostedFamily` returning
   `HostedModel::multi`, its registration through
