@@ -302,8 +302,11 @@ impl GdnPool {
             .map(|l| gpu.step(self.scatter, &[&slot.state[l], &slot.hist[l], &ids, &self.state[l], &self.hist[l]], &[1, sl, hl], sl + hl))
             .collect();
         gpu.submit(&[], &steps);
-        // The slot is about to be freed; its scatters must have read it.
-        gpu.poll_wait();
+        // The slot is about to be freed and its scatters must have read it first: in submission order on a
+        // backend that runs it so (a freed block is only handed to work queued behind them), by a drain elsewhere.
+        if !gpu.submissions_ordered() {
+            gpu.poll_wait();
+        }
         self.live.insert(phys);
     }
 
@@ -498,6 +501,9 @@ impl Engine {
         model.set_gemm_precision(opts.gemm_precision);
         model.set_moe_grouped_min_rows(opts.moe_grouped_min_rows);
         model.set_decode_fusion(opts.decode_fusion);
+        // The activations the placement charges this engine (`catalog::resident_qwen35moe`): the larger of a decode
+        // step over every resident sequence and one prefill round. Their freed blocks stay with the handles.
+        model.retain_freed_blocks(cfg.decoder_widths().serve_peak_bytes(opts.max_concurrent, opts.prefill_chunk));
         let n_layers = cfg.n_layers as usize;
         let mut gqa_kv: Vec<KvLayer> = Vec::with_capacity(n_layers);
         for ty in cfg.layer_types() {

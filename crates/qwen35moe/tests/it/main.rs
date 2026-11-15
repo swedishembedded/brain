@@ -21,6 +21,7 @@ mod lora_real_weight_smoke;
 mod model_i8_smoke;
 mod model_smoke;
 mod optimizer_state;
+mod prefill_round_census;
 mod real_decode_parity;
 mod recompute;
 mod reference_forward_real;

@@ -47,6 +47,7 @@ static TOTAL_GRAPH_REPLAYS: AtomicU64 = AtomicU64::new(0);
 static TOTAL_POOL_ALLOC_CALLS: AtomicU64 = AtomicU64::new(0);
 static TOTAL_SUBMIT_NANOS: AtomicU64 = AtomicU64::new(0);
 static TOTAL_WAIT_NANOS: AtomicU64 = AtomicU64::new(0);
+static TOTAL_HOST_WAITS: AtomicU64 = AtomicU64::new(0);
 static TOTAL_ZERO_CALLS: AtomicU64 = AtomicU64::new(0);
 static TOTAL_ZEROED_BYTES: AtomicU64 = AtomicU64::new(0);
 static TOTAL_UNINIT_CALLS: AtomicU64 = AtomicU64::new(0);
@@ -62,6 +63,7 @@ pub fn call_totals() -> CallTotals {
         pool_alloc_calls: TOTAL_POOL_ALLOC_CALLS.load(Ordering::Relaxed),
         submit_nanos: TOTAL_SUBMIT_NANOS.load(Ordering::Relaxed),
         wait_nanos: TOTAL_WAIT_NANOS.load(Ordering::Relaxed),
+        host_waits: TOTAL_HOST_WAITS.load(Ordering::Relaxed),
         zero_calls: TOTAL_ZERO_CALLS.load(Ordering::Relaxed),
         zeroed_bytes: TOTAL_ZEROED_BYTES.load(Ordering::Relaxed),
         uninit_calls: TOTAL_UNINIT_CALLS.load(Ordering::Relaxed),
@@ -80,6 +82,7 @@ pub(crate) struct Calls {
     pool_alloc_calls: AtomicU64,
     submit_nanos: AtomicU64,
     wait_nanos: AtomicU64,
+    host_waits: AtomicU64,
     zero_calls: AtomicU64,
     zeroed_bytes: AtomicU64,
     uninit_calls: AtomicU64,
@@ -100,6 +103,7 @@ impl Calls {
             pool_alloc_calls: self.pool_alloc_calls.load(Ordering::Relaxed),
             submit_nanos: self.submit_nanos.load(Ordering::Relaxed),
             wait_nanos: self.wait_nanos.load(Ordering::Relaxed),
+            host_waits: self.host_waits.load(Ordering::Relaxed),
             zero_calls: self.zero_calls.load(Ordering::Relaxed),
             zeroed_bytes: self.zeroed_bytes.load(Ordering::Relaxed),
             uninit_calls: self.uninit_calls.load(Ordering::Relaxed),
@@ -126,6 +130,7 @@ impl Calls {
     }
     pub(crate) fn host_waited(&self, nanos: u64) {
         bump(&self.wait_nanos, &TOTAL_WAIT_NANOS, nanos);
+        bump(&self.host_waits, &TOTAL_HOST_WAITS, 1);
     }
     pub(crate) fn left_uninitialised(&self, bytes: usize) {
         bump(&self.uninit_calls, &TOTAL_UNINIT_CALLS, 1);

@@ -2246,6 +2246,9 @@ pub struct CallTotals {
     /// Nanoseconds the host spent blocked in `poll_wait` for the device to drain. A step's wall time minus this is
     /// the time the host was busy; a step whose busy time is close to its wall time is host-bound.
     pub wait_nanos: u64,
+    /// Times the host blocked for the device to drain (each `poll_wait`, and the one every read-back starts with): a
+    /// loop that should leave the device running shows a wait per iteration here, whatever each wait cost.
+    pub host_waits: u64,
     /// Clears of a fresh allocation or a graph clear, and the bytes they cleared: device work no kernel table shows.
     pub zero_calls: u64,
     pub zeroed_bytes: u64,
@@ -2266,6 +2269,7 @@ impl std::ops::Add for CallTotals {
             pool_alloc_calls: self.pool_alloc_calls + o.pool_alloc_calls,
             submit_nanos: self.submit_nanos + o.submit_nanos,
             wait_nanos: self.wait_nanos + o.wait_nanos,
+            host_waits: self.host_waits + o.host_waits,
             zero_calls: self.zero_calls + o.zero_calls,
             zeroed_bytes: self.zeroed_bytes + o.zeroed_bytes,
             uninit_calls: self.uninit_calls + o.uninit_calls,

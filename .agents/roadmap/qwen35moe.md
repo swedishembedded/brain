@@ -260,3 +260,27 @@ this corrected baseline before it is chased further.
 Open (found 2026-10-29, CUDA on gpu1, unchanged by the fix): `tests/serve.rs`
 `batched_decode_matches_each_sequence_decoded_alone` fails - sequence 1 of a
 batch of 4 picks a different token at decode step 5 than alone.
+
+## Prefill at the device's rate (2026-11-15)
+
+Goal: the int8 35B-A3B prefills at least 3x its 2026-11-15 rate at 4K and 16K prompts with the card >= 90 % busy,
+decode unchanged. Measured on gpu3 (GH200) with `brain perf run longctx --target qwen35moe:<Q8_0 gguf>:kvbf16
+--context 32768 --ladder 1,16,64 --prefill 4096,16384 --steps 4`; busy % is the union of kernel, copy and clear
+intervals between the first and the last `moe_i8_grouped_mma` of a 16K prefill (nsys `-t cuda,nvtx
+--cuda-graph-trace=node`).
+
+| step | 4K tok/s | 16K tok/s | busy | decode ms/step at 1 / 16 / 64 |
+|---|---|---|---|---|
+| base (10ce4f488) | 3747 | 3744 | 80.0 % | 5.66 / 16.56 / 40.30 |
+| 1. no allocation, free or wait inside a round | 4265 | 4249 | 93.2 % | 5.67 / 16.59 / 40.87 |
+
+- [x] Step 1: a round's per-layer `poll_wait` (2514 `cuStreamSynchronize`, 1.63 s of host time over a 16K prompt)
+  is owed only where submissions are not ordered (`qwen35`'s rule); the `Ops` handle holds its freed blocks (10.1K
+  `cuMemFree`, 1.6 s, each waiting for the device); both handles retain up to the activations the placement charges;
+  each layer is one pass (one parameter upload). Gate: `tests/it/prefill_round_census.rs` (no `cuMemAlloc` and one
+  host wait, the hidden-state read, per steady-state prefill; `CallTotals::host_waits`).
+- [ ] Step 2: the round size from measurement, within the activations the planner charges.
+- [ ] Step 3: the dense engine's GDN prefill form (bf16, warpgroup recurrence) instead of the f32 chunk chain
+  (`gdn_chunk_loop_f32` + `gdn_ut_fwd` + `bmm_tiled` + `l2norm_scale` + layout copies: ~0.9 s of 3.2 s kernel time).
+- [ ] Step 4: `moe_i8_grouped_mma` (1.28 s, 40 % of kernel time): an 8-slot tile re-reads the expert's weights per
+  tile.

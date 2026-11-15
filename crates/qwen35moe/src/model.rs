@@ -3838,6 +3838,16 @@ impl Qwen35 {
         self.ops.set_gemm_precision(precision);
     }
 
+    /// Let both of this model's handles (its own and the `Ops` one) keep up to `bytes` of freed device blocks: what
+    /// the placement keeps free for a prefill round's and a decode step's activations. Under the backend's default
+    /// bound a long round's scratch goes back to the driver at every synchronisation and the next layer waits for it
+    /// to be mapped again (knowledge 431).
+    pub fn retain_freed_blocks(&self, bytes: u64) {
+        for handle in [&self.gpu, self.ops.gpu()] {
+            handle.retain_freed_blocks(bytes);
+        }
+    }
+
     pub fn set_chunk_arena_min_rows(&self, rows: u32) {
         assert!(rows > 0, "qwen35moe::set_chunk_arena_min_rows: 0 would open a scope for an empty round; 1 is 'always pool'");
         self.chunk_arena_min_rows.set(rows);
@@ -3905,6 +3915,18 @@ impl Qwen35 {
         g.write(&seq_lens, &(0..n).map(|i| pos_start + i + 1).collect::<Vec<u32>>());
 
         let pooled = n >= self.chunk_arena_min_rows.get();
+        if pooled {
+            // The quantised activations and the GEMM outputs are allocated by the
+            // `Ops` handle, a `share` of `g` with its own allocator: the arena scope
+            // below covers only `g`, so that handle keeps its freed blocks too, or
+            // every layer frees to the driver (a `cuMemFree` waits for the device).
+            self.ops.gpu().hold_freed_blocks(true);
+        }
+        // The arena hands a slot back to the next layer while the device may still
+        // be reading it: a backend that runs submissions in order has the reuse
+        // behind the read by construction, any other drains before the next
+        // layer's writes reach the device (`qwen35`'s rule, the same loop).
+        let drain_pooled = !g.submissions_ordered();
         // What an UNPOOLED round owes instead of the arena's drain: nothing is
         // recycled there, but every layer's temporaries are still DROPPED as
         // the next layer's are taken, and the backend refuses an allocation once
@@ -3918,6 +3940,10 @@ impl Qwen35 {
             // requested in the same call order whatever the layer's own type,
             // each dead the moment its one consumer's dispatch is recorded.
             let _scope = pooled.then(|| g.scratch_scope());
+            // The layer's dispatches are held and issued as one batch when it ends (before the scope above, which
+            // drops after it): the backend uploads their parameters with one copy instead of one in front of every
+            // kernel (knowledge 381).
+            let _pass = g.pass_scope();
 
             let xn1 = g.storage((n * d) as u64);
             g.submit(&[], &[rmsnorm_fwd(g, &kernel_ids(), &res, self.w(&format!("blocks.{l}.ln1.weight")), &xn1, d, n, c.rms_eps)]);
@@ -3956,7 +3982,7 @@ impl Qwen35 {
             // layer's device work, while the `poll_wait` proves no recycled slot
             // is still being read before `flush` lets this layer's writes
             // reach the device.
-            if pooled || g.reclaim_due() {
+            if (pooled && drain_pooled) || g.reclaim_due() {
                 g.poll_wait();
             }
             g.flush();
