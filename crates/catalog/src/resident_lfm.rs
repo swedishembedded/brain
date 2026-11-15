@@ -46,7 +46,7 @@ pub const FAMILY: &str = "lfm";
 /// tokenizer (and a downloaded directory's config), never the weights; the
 /// worker reads those when it activates the resident on its card.
 pub fn hosted() -> HostedFamily {
-    HostedFamily { name: FAMILY, open: open_hosted }
+    HostedFamily { name: FAMILY, open: |args| open_hosted(args).map(residency::supervised::HostedModel::new) }
 }
 
 fn open_hosted(args: &Value) -> Result<Arc<dyn ResidentModel>, String> {

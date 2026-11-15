@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 use capability::{failure, ActionResult, ActionSpec, Blob, CancelToken, Invocation, Manifest, Media, Outcome, Progress};
 use gpu_supervisor::{BreakerPolicy, BreakerState, Health, Worker, WorkerCommand};
 use residency::budget::Budgets;
-use residency::supervised::{device_label, Deadlines, HostSpec, HostedFamily, Probe, SupervisedModel, Supervision};
+use residency::supervised::{device_label, AdapterSink, AdapterSource, Deadlines, HostSpec, HostedAdapter, HostedFamily, HostedModel, Probe, SupervisedModel, Supervision};
 use residency::{Device, Executor, Instance, InstanceKey, Job, JobFeed, MemCost, Policy, ResidentModel, Tier};
 use serde_json::{json, Value};
 
@@ -35,18 +35,85 @@ const DEADLINES: Deadlines = Deadlines { open: Duration::from_secs(30), run: Dur
 
 const FAMILIES: &[HostedFamily] = &[HostedFamily { name: "test", open: open_test }];
 
-fn open_test(args: &Value) -> Result<Arc<dyn ResidentModel>, String> {
+fn open_test(args: &Value) -> Result<HostedModel, String> {
     let id = args.get("id").and_then(Value::as_str).ok_or("the test family needs an id")?;
-    Ok(Arc::new(TestModel(id.to_string())))
+    let model = Arc::new(TestModel(id.to_string(), Arc::new(TestAdapters::default())));
+    Ok(HostedModel::new(model.clone()).with_adapters(model.1.clone()))
 }
 
-/// The test family's model. The serving process uses it for its manifest,
-/// key and estimate; the worker activates it.
-struct TestModel(String);
+/// The test family's model and the adapter registry its instances route by.
+/// The serving process uses it for its manifest, key and estimate; the
+/// worker activates it.
+struct TestModel(String, Arc<TestAdapters>);
+
+/// A worker's adapter registry: the offered ids and their digests, and a
+/// generation that moves with every change. An adapter's file holds its
+/// digest, which `attach` checks, as a real registry checks the bytes.
+#[derive(Default)]
+struct TestAdapters(Mutex<(u64, std::collections::BTreeMap<String, String>)>);
+
+impl AdapterSink for TestAdapters {
+    fn attach(&self, adapter: &HostedAdapter) -> Result<(), String> {
+        let read = std::fs::read_to_string(&adapter.path).map_err(|e| format!("{}: {e}", adapter.path.display()))?;
+        if read != adapter.digest {
+            return Err(format!("{} holds {read}, not {}", adapter.path.display(), adapter.digest));
+        }
+        let mut state = self.0.lock().unwrap();
+        state.0 += 1;
+        state.1.insert(adapter.id.clone(), adapter.digest.clone());
+        Ok(())
+    }
+
+    fn detach(&self, id: &str) {
+        let mut state = self.0.lock().unwrap();
+        state.0 += 1;
+        state.1.remove(id);
+    }
+}
+
+impl TestAdapters {
+    fn generation(&self) -> u64 {
+        self.0.lock().unwrap().0
+    }
+
+    fn snapshot(&self) -> (u64, Vec<String>) {
+        let state = self.0.lock().unwrap();
+        (state.0, state.1.keys().cloned().collect())
+    }
+}
+
+/// The adapters a test base offers in the serving process.
+#[derive(Default)]
+struct TestSource(Mutex<(u64, Vec<HostedAdapter>)>);
+
+impl TestSource {
+    fn offer(&self, adapter: HostedAdapter) {
+        let mut state = self.0.lock().unwrap();
+        state.0 += 1;
+        state.1.retain(|a| a.id != adapter.id);
+        state.1.push(adapter);
+    }
+
+    fn withdraw(&self, id: &str) {
+        let mut state = self.0.lock().unwrap();
+        state.0 += 1;
+        state.1.retain(|a| a.id != id);
+    }
+}
+
+impl AdapterSource for TestSource {
+    fn generation(&self) -> u64 {
+        self.0.lock().unwrap().0
+    }
+
+    fn offered(&self) -> (u64, Vec<HostedAdapter>) {
+        self.0.lock().unwrap().clone()
+    }
+}
 
 impl ResidentModel for TestModel {
     fn manifest(&self) -> Manifest {
-        let actions = ["echo", "stream", "slow", "wait", "block", "panic", "batch", "open"].map(|a| ActionSpec::new(a, a)).to_vec();
+        let actions = ["echo", "stream", "slow", "wait", "block", "panic", "batch", "open", "adapted"].map(|a| ActionSpec::new(a, a)).to_vec();
         Manifest::new(&self.0, "a model hosted in a test worker", actions)
     }
 
@@ -67,16 +134,40 @@ impl ResidentModel for TestModel {
     }
 
     fn activate(&self, _key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
-        Ok(Box::new(TestInstance { device, runs: 0, parked: None }))
+        Ok(Box::new(TestInstance { device, runs: 0, parked: None, adapters: self.1.clone(), routes: (0, Vec::new()) }))
     }
 }
 
 struct TestInstance {
     device: Device,
+    adapters: Arc<TestAdapters>,
+    /// The adapters a job can be routed to, as the registry was when the
+    /// instance last refreshed: at the start of every group, and when an open
+    /// group is idle while the registry has moved, as a real instance does.
+    routes: (u64, Vec<String>),
     /// Jobs run since the instance was built, reported as a metric.
     runs: u64,
     /// The tier a demotion left it at, until a promotion.
     parked: Option<Tier>,
+}
+
+impl TestInstance {
+    fn refresh(&mut self) {
+        self.routes = self.adapters.snapshot();
+    }
+
+    fn stale(&self) -> bool {
+        self.routes.0 != self.adapters.generation()
+    }
+
+    /// The adapter a job names, if its routes know it.
+    fn route(&self, inv: &Invocation) -> Result<Option<String>, String> {
+        match inv.params.get("adapter").and_then(Value::as_str) {
+            None => Ok(None),
+            Some(id) if self.routes.1.iter().any(|r| r == id) => Ok(Some(id.to_string())),
+            Some(id) => Err(format!("no model '{id}'")),
+        }
+    }
 }
 
 impl Instance for TestInstance {
@@ -147,6 +238,7 @@ impl Instance for TestInstance {
                 }
             }
             "panic" => panic!("the model hit a bug"),
+            "adapted" => Ok(Outcome::new().set("adapter", json!(self.route(inv)?))),
             other => Err(format!("no action {other}")),
         }
     }
@@ -161,7 +253,13 @@ impl Instance for TestInstance {
         }
         let mut jobs: Vec<Invocation> = invs.to_vec();
         let mut finished = 0;
+        let mut refreshes = 0;
+        self.refresh();
         loop {
+            if finished == jobs.len() && self.stale() {
+                self.refresh();
+                refreshes += 1;
+            }
             jobs.extend(feed.take(4));
             feed.screen(&mut |inv| inv.params.get("never").map(|_| format!("job {} can never run here", inv.params["n"])));
             for (i, inv) in jobs.iter().enumerate().skip(finished) {
@@ -179,7 +277,9 @@ impl Instance for TestInstance {
                         std::thread::sleep(Duration::from_millis(5));
                     }
                 }
-                let result = inv.cancel.check().map(|()| Outcome::new().set("index", json!(i)).set("pid", json!(std::process::id())).set("params", inv.params.clone()));
+                let result = inv.cancel.check().and_then(|()| self.route(inv)).map(|adapter| {
+                    Outcome::new().set("index", json!(i)).set("pid", json!(std::process::id())).set("params", inv.params.clone()).set("adapter", json!(adapter)).set("refreshes", json!(refreshes))
+                });
                 feed.finish(i, result);
             }
             finished = jobs.len();
@@ -193,6 +293,7 @@ impl Instance for TestInstance {
     /// job reports under its own index, and a job asked to `wait` waits for
     /// its own cancellation.
     fn run_batch(&mut self, action: &str, invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress)) -> Vec<ActionResult> {
+        self.refresh();
         if action != "batch" {
             return invs.iter().enumerate().map(|(i, inv)| inv.cancel.check().and_then(|()| self.run(action, inv, &mut |p| progress(i, p)))).collect();
         }
@@ -226,9 +327,13 @@ fn health() -> Arc<Health<Device>> {
     Arc::new(Health::new(policy, REAP))
 }
 
-fn hosted(id: &str, health: &Arc<Health<Device>>, deadlines: Deadlines) -> Arc<dyn ResidentModel> {
+fn supervised(id: &str, health: &Arc<Health<Device>>, deadlines: Deadlines) -> SupervisedModel {
     let spec = HostSpec { family: "test".into(), args: json!({ "id": id }) };
-    Arc::new(SupervisedModel::new(Arc::new(TestModel(id.to_string())), spec, worker_command(), health.clone(), deadlines))
+    SupervisedModel::new(Arc::new(TestModel(id.to_string(), Arc::new(TestAdapters::default()))), spec, worker_command(), health.clone(), deadlines)
+}
+
+fn hosted(id: &str, health: &Arc<Health<Device>>, deadlines: Deadlines) -> Arc<dyn ResidentModel> {
+    Arc::new(supervised(id, health, deadlines))
 }
 
 fn gpus(n: u32) -> Budgets {
@@ -384,17 +489,22 @@ struct TestFeed {
     /// Jobs waiting behind the group, by ticket, handed out to be screened once.
     waiting: Vec<(u64, Invocation)>,
     refused: Vec<(u64, String)>,
+    /// Run at the first take: what the serving process does while the group runs.
+    on_take: Option<Box<dyn FnOnce()>>,
 }
 
 impl TestFeed {
     fn new(rounds: Vec<Vec<Invocation>>, refuse_closes: usize) -> TestFeed {
-        TestFeed { rounds, refuse_closes, finished: Vec::new(), closes: 0, waiting: Vec::new(), refused: Vec::new() }
+        TestFeed { rounds, refuse_closes, finished: Vec::new(), closes: 0, waiting: Vec::new(), refused: Vec::new(), on_take: None }
     }
 }
 
 impl JobFeed for TestFeed {
     fn take(&mut self, max: usize) -> Vec<Invocation> {
         assert!(max > 0);
+        if let Some(on_take) = self.on_take.take() {
+            on_take();
+        }
         if self.rounds.is_empty() {
             Vec::new()
         } else {
@@ -582,6 +692,51 @@ fn metrics_demotion_and_promotion_reach_the_hosted_instance() {
     }
 }
 
+/// An adapter file holding `digest`, offered as `id`.
+fn adapter_file(dir: &std::path::Path, id: &str, digest: &str) -> HostedAdapter {
+    let path = dir.join(format!("{id}.safetensors"));
+    std::fs::write(&path, digest).unwrap();
+    HostedAdapter { id: id.into(), digest: digest.into(), path }
+}
+
+/// The adapters a base offers in the serving process reach its worker: one
+/// offered before the instance was built routes its first job, one offered
+/// while an open group runs reaches the worker before the job that joins
+/// after it and the group refreshes its routes for it, a withdrawn one and
+/// one never offered are refused as no model, and one whose file does not
+/// hold its digest is refused by the worker.
+fn adapters_offered_in_the_serving_process_reach_the_worker_and_a_running_group_refreshes() {
+    let health = health();
+    let dir = std::env::temp_dir().join(format!("hosted-adapters-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let source = Arc::new(TestSource::default());
+    source.offer(adapter_file(&dir, "before", "sha256:b"));
+    let model = supervised("m", &health, DEADLINES).with_adapters(source.clone());
+    let mut instance = model.activate(&InstanceKey::new("m", "default"), Device::Gpu(0)).expect("the worker opens");
+    let routed = |instance: &mut Box<dyn Instance>, id: &str| instance.run("adapted", &Invocation::new().set("adapter", json!(id)), &mut |_| {});
+    assert_eq!(routed(&mut instance, "before").expect("routed").outputs["adapter"], json!("before"), "offered before the build");
+    assert_eq!(routed(&mut instance, "nope").expect_err("never offered"), "no model 'nope'");
+
+    let mut feed = TestFeed::new(vec![Vec::new(), vec![Invocation::new().set("n", json!(1)).set("adapter", json!("during"))]], 1);
+    let offering = source.clone();
+    let during = adapter_file(&dir, "during", "sha256:d");
+    feed.on_take = Some(Box::new(move || offering.offer(during)));
+    assert!(instance.run_open("open", &[Invocation::new().set("n", json!(0))], &mut |_, _| {}, &mut feed), "the worker ran the group");
+    let out = result_of(&feed, 1).as_ref().expect("the job that joined after the offer is routed to it");
+    assert_eq!(out.outputs["adapter"], json!("during"));
+    assert_eq!(out.outputs["refreshes"], json!(1), "the running group refreshed its routes once it went idle");
+
+    source.withdraw("before");
+    assert_eq!(routed(&mut instance, "before").expect_err("withdrawn"), "no model 'before'");
+    let mut forged = adapter_file(&dir, "forged", "sha256:f");
+    forged.digest = "sha256:other".into();
+    source.offer(forged);
+    assert_eq!(routed(&mut instance, "forged").expect_err("the worker refused the file"), "no model 'forged'");
+    assert_eq!(routed(&mut instance, "during").expect("still offered").outputs["adapter"], json!("during"));
+    assert_eq!(health.status(&Device::Gpu(0)).faults, 0);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 fn the_worker_mode_serves_only_a_supervisor_that_greets_it() {
     // Not a socket: refused before anything is read.
     let out = std::process::Command::new(std::env::current_exe().unwrap()).arg("worker").stdin(std::process::Stdio::null()).output().expect("run the worker mode");
@@ -614,6 +769,7 @@ const TESTS: &[(&str, fn())] = &[
     ("a_job_that_keeps_reporting_outlives_the_run_deadline_and_a_silent_one_is_killed_at_it", a_job_that_keeps_reporting_outlives_the_run_deadline_and_a_silent_one_is_killed_at_it),
     ("a_panic_in_model_code_fails_the_job_without_quarantining_the_card", a_panic_in_model_code_fails_the_job_without_quarantining_the_card),
     ("metrics_demotion_and_promotion_reach_the_hosted_instance", metrics_demotion_and_promotion_reach_the_hosted_instance),
+    ("adapters_offered_in_the_serving_process_reach_the_worker_and_a_running_group_refreshes", adapters_offered_in_the_serving_process_reach_the_worker_and_a_running_group_refreshes),
     ("the_worker_mode_serves_only_a_supervisor_that_greets_it", the_worker_mode_serves_only_a_supervisor_that_greets_it),
 ];
 

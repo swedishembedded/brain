@@ -38,6 +38,8 @@
 //! | `group[+<n>] <action> <k> <jobs>` | `{"open": bool, "metrics"}`; the jobs were finished through `done` frames |
 //! | `demote warm\|cold` | `{"metrics"}`; the instance released its device buffers, the worker keeps its device context |
 //! | `promote <device>` | `{"metrics"}`; the instance is Hot again on `<device>`, which must be the card it was opened on |
+//! | `attach {"id", "digest", "path"}` | `{"metrics"}`; the model's registry offers the adapter the file holds, once its digest checks ([`AdapterSink`]) |
+//! | `detach <id>` | `{"metrics"}`; the registry no longer offers `<id>` |
 //! | `probe <device>` | anything; the device works (sent to a fresh probe worker) |
 //!
 //! `"metrics"` is the instance's [`Instance::metrics`] after the request, as
@@ -47,6 +49,14 @@
 //! hosted instance stays charged that context on its card
 //! ([`MemCost::context`]); a promotion onto another card kills the worker and
 //! opens a new one there.
+//!
+//! A base that serves adapters ([`SupervisedModel::with_adapters`]) tells its
+//! worker every change of what the serving process offers
+//! ([`AdapterSource`]): before a group as `attach`/`detach` requests, and while
+//! one runs as `<id> attach ...`/`<id> detach ...` frames sent at a poll and
+//! before the reply to each `take`, which the worker's reader applies at once.
+//! A job that joins after a change therefore never reaches the worker before
+//! the change does; the group refreshes its routes as it does in process.
 //!
 //! `<jobs>` is `{"jobs": [{"params", "scope", "blobs"}, ...]}` and `<k>` how
 //! many it holds, so the worker's reader registers a cancellation token for
@@ -100,10 +110,14 @@ use crate::{AdapterIdentity, Device, Instance, InstanceKey, JobFeed, MemCost, Re
 /// The protocol version a worker and its parent must agree on (`hello`).
 pub const PROTOCOL: u32 = 4;
 
+mod adapters;
 #[cfg(unix)]
 mod codec;
 #[cfg(unix)]
 mod host;
+
+pub use adapters::{AdapterSink, AdapterSource, HostedAdapter};
+use adapters::AdapterFeed;
 
 #[cfg(target_os = "linux")]
 pub use host::host;
@@ -199,7 +213,28 @@ pub struct HostSpec {
 #[derive(Clone, Copy)]
 pub struct HostedFamily {
     pub name: &'static str,
-    pub open: fn(&Value) -> Result<Arc<dyn ResidentModel>, String>,
+    pub open: fn(&Value) -> Result<HostedModel, String>,
+}
+
+/// What a worker rebuilt from a [`HostSpec`]: the resident it activates, and
+/// for a base that serves adapters, the registry its parent's `attach` and
+/// `detach` rebuild ([`AdapterSink`]).
+pub struct HostedModel {
+    pub resident: Arc<dyn ResidentModel>,
+    pub adapters: Option<Arc<dyn AdapterSink>>,
+}
+
+impl HostedModel {
+    /// A model that serves no adapters.
+    pub fn new(resident: Arc<dyn ResidentModel>) -> HostedModel {
+        HostedModel { resident, adapters: None }
+    }
+
+    /// A base whose adapters the parent offers reach `adapters`.
+    pub fn with_adapters(mut self, adapters: Arc<dyn AdapterSink>) -> HostedModel {
+        self.adapters = Some(adapters);
+        self
+    }
 }
 
 /// Worker hosting for the model families an operator chose: how to start a
@@ -244,13 +279,21 @@ pub struct SupervisedModel {
     command: WorkerCommand,
     health: Arc<Health<Device>>,
     deadlines: Deadlines,
+    adapters: Option<Arc<dyn AdapterSource>>,
 }
 
 impl SupervisedModel {
     /// `inner` answers everything the scheduler asks without a device; a
     /// worker started from `command` rebuilds it from `spec` and runs it.
     pub fn new(inner: Arc<dyn ResidentModel>, spec: HostSpec, command: WorkerCommand, health: Arc<Health<Device>>, deadlines: Deadlines) -> SupervisedModel {
-        SupervisedModel { inner, spec, command, health, deadlines }
+        SupervisedModel { inner, spec, command, health, deadlines, adapters: None }
+    }
+
+    /// A base whose adapters `adapters` offers: every worker of it is told each change (`attach`, `detach`), and
+    /// rebuilds its own registry from what it is told ([`HostedModel::with_adapters`]).
+    pub fn with_adapters(mut self, adapters: Arc<dyn AdapterSource>) -> SupervisedModel {
+        self.adapters = Some(adapters);
+        self
     }
 }
 
@@ -320,7 +363,8 @@ impl ResidentModel for SupervisedModel {
         let open = json!({ "family": self.spec.family, "args": self.spec.args, "key": { "model": key.model, "config": key.config } });
         let start = WorkerStart { command: self.command.clone(), open, key: key.to_string(), health: self.health.clone(), deadlines: self.deadlines };
         let (worker, metrics) = start.open_on(device)?;
-        Ok(Box::new(SupervisedInstance { worker: Some(worker), device, start, lost: None, closed_only: std::collections::BTreeSet::new(), metrics }))
+        let adapters = self.adapters.clone().map(AdapterFeed::new);
+        Ok(Box::new(SupervisedInstance { worker: Some(worker), device, start, lost: None, closed_only: std::collections::BTreeSet::new(), metrics, adapters }))
     }
 }
 
@@ -412,6 +456,8 @@ struct SupervisedInstance {
     /// The worker's instance's metrics as its last answer carried them: the dispatcher reads them between runs
     /// ([`Instance::metrics`]) and never waits on the worker for them.
     metrics: Vec<(String, Value)>,
+    /// What the worker was told of its base's adapters, for a base that serves them.
+    adapters: Option<AdapterFeed>,
 }
 
 impl Instance for SupervisedInstance {
@@ -439,6 +485,9 @@ impl Instance for SupervisedInstance {
             self.lost = None;
             self.closed_only.clear();
             self.metrics = metrics;
+            if let Some(feed) = self.adapters.as_mut() {
+                feed.reset();
+            }
             return Ok(());
         }
         let deadline = self.start.deadlines.open;
@@ -497,6 +546,22 @@ impl SupervisedInstance {
         }
     }
 
+    /// Tell the worker what its base's adapters changed since it was last told, as requests, before a group
+    /// starts. A change the worker refuses (a file whose digest is not the release's) is logged: requests naming
+    /// that adapter are answered as for no model.
+    fn sync_adapters(&mut self) -> Result<(), String> {
+        let Some(changes) = self.adapters.as_mut().map(AdapterFeed::changes) else { return Ok(()) };
+        for change in changes {
+            if let Err(why) = self.control(&change.line(), self.start.deadlines.open) {
+                if self.lost.is_some() {
+                    return Err(why);
+                }
+                crate::log::warn(&format!("{}: {why}", self.start.key));
+            }
+        }
+        Ok(())
+    }
+
     /// One group as one exchange with the worker: the jobs (and their blobs
     /// in a memfd) out, each job's progress and cancellation while it runs,
     /// every job's result back.
@@ -504,6 +569,9 @@ impl SupervisedInstance {
     fn batch_in_worker(&mut self, action: &str, invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress)) -> Vec<ActionResult> {
         use gpu_supervisor::{CallError, Exchange};
         let every = |why: String| invs.iter().map(|_| Err(why.clone())).collect::<Vec<_>>();
+        if let Err(why) = self.sync_adapters() {
+            return every(why);
+        }
         let mut fds = Vec::new();
         let envelope = match codec::encode_jobs(invs, &mut fds) {
             Ok(e) => e,
@@ -515,6 +583,7 @@ impl SupervisedInstance {
         let Some(worker) = self.worker.as_mut() else { return every("the worker is gone".into()) };
         let borrowed: Vec<_> = fds.iter().map(std::os::fd::AsFd::as_fd).collect();
         let mut talk = JobsTalk::new(invs, progress);
+        talk.adapters = self.adapters.as_mut();
         let x = Exchange { fds: &borrowed, talk: Some(&mut talk), renew: true };
         let answer = self.start.health.exchange(&self.device, worker, &request, self.start.deadlines.run, x);
         match answer {
@@ -546,9 +615,14 @@ impl SupervisedInstance {
     #[cfg(unix)]
     fn group_in_worker(&mut self, action: &str, invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress), feed: &mut dyn JobFeed) -> bool {
         use gpu_supervisor::{CallError, Exchange};
+        let synced = self.sync_adapters();
         let mut fds = Vec::new();
         let mut talk = JobsTalk::new(invs, progress);
         talk.feed = Some(feed);
+        if let Err(why) = synced {
+            talk.fail_unfinished(&why);
+            return true;
+        }
         let envelope = match codec::encode_jobs(invs, &mut fds) {
             Ok(e) => e,
             Err(e) => {
@@ -562,9 +636,15 @@ impl SupervisedInstance {
             talk.fail_unfinished("the worker is gone");
             return true;
         };
+        talk.adapters = self.adapters.as_mut();
         let borrowed: Vec<_> = fds.iter().map(std::os::fd::AsFd::as_fd).collect();
         let x = Exchange { fds: &borrowed, talk: Some(&mut talk), renew: true };
         let answer = self.start.health.exchange(&self.device, worker, &request, self.start.deadlines.run, x);
+        // `talk` borrows the adapter feed until the group's jobs are finished, so the worker is marked lost by its field.
+        let lose = |lost: &mut Option<String>, why: String| {
+            *lost = Some(why.clone());
+            why
+        };
         let why = match answer {
             Ok((payload, fds)) => match codec::decode_opened(&payload, fds) {
                 Ok((true, metrics)) => {
@@ -575,8 +655,8 @@ impl SupervisedInstance {
                     self.closed_only.insert(action.to_string());
                     return false;
                 }
-                Ok((false, _)) => self.lose(format!("{action}: the worker said it ran no open group after it had run one")),
-                Err(e) => self.lose(format!("{action}: the worker's answer breaks the protocol ({e})")),
+                Ok((false, _)) => lose(&mut self.lost, format!("{action}: the worker said it ran no open group after it had run one")),
+                Err(e) => lose(&mut self.lost, format!("{action}: the worker's answer breaks the protocol ({e})")),
             },
             Err(CallError::Failed(message)) => match message.strip_prefix(PANICKED) {
                 // The same unwind an in-process panic takes; the lane answers
@@ -588,7 +668,7 @@ impl SupervisedInstance {
                 }
                 None => message,
             },
-            Err(e @ (CallError::Fault(_) | CallError::Refused { .. })) => self.lose(e.to_string()),
+            Err(e @ (CallError::Fault(_) | CallError::Refused { .. })) => lose(&mut self.lost, e.to_string()),
             Err(e @ CallError::Invalid(_)) => e.to_string(),
         };
         talk.fail_unfinished(&why);
@@ -632,12 +712,15 @@ struct JobsTalk<'a> {
     /// The feed's tickets for the waiting jobs the last `waiting` frame
     /// carried, by their index in it, until the worker's verdicts on them.
     screening: Vec<u64>,
+    /// The base's adapters, for a base that serves them: each change made while the group runs is sent as a frame,
+    /// before the reply to the worker's next `take`, so no job that joins after it reaches the worker first.
+    adapters: Option<&'a mut AdapterFeed>,
 }
 
 #[cfg(unix)]
 impl<'a> JobsTalk<'a> {
     fn new(invs: &[Invocation], progress: &'a mut dyn FnMut(usize, Progress)) -> JobsTalk<'a> {
-        let mut talk = JobsTalk { tokens: Vec::new(), cancel_sent: Vec::new(), finished: Vec::new(), own: invs.len(), progress, feed: None, screening: Vec::new() };
+        let mut talk = JobsTalk { tokens: Vec::new(), cancel_sent: Vec::new(), finished: Vec::new(), own: invs.len(), progress, feed: None, screening: Vec::new(), adapters: None };
         talk.know(invs);
         talk
     }
@@ -662,6 +745,11 @@ impl<'a> JobsTalk<'a> {
                 feed.finish(job, Err(why.to_string()));
             }
         }
+    }
+
+    /// The adapter changes made since the worker was last told, as frames.
+    fn adapter_changes(&mut self) -> Vec<gpu_supervisor::Outgoing> {
+        self.adapters.as_mut().map(|feed| feed.changes()).unwrap_or_default().iter().map(|c| gpu_supervisor::Outgoing::line(c.line())).collect()
     }
 
     fn feed(&mut self, kind: &str) -> Result<&mut dyn JobFeed, String> {
@@ -695,7 +783,10 @@ impl gpu_supervisor::Conversation for JobsTalk<'_> {
                 let envelope = codec::encode_jobs(&joined, &mut fds)?;
                 let verb = if fds.is_empty() { "joined".to_string() } else { format!("joined+{}", fds.len()) };
                 self.know(&joined);
-                Ok(vec![Outgoing { line: format!("{verb} {} {envelope}", joined.len()), fds }])
+                // The adapters first: a job that joined after a change was made must find it in the worker.
+                let mut out = self.adapter_changes();
+                out.push(Outgoing { line: format!("{verb} {} {envelope}", joined.len()), fds });
+                Ok(out)
             }
             "done" => {
                 let (job, result) = codec::decode_done(payload, fds)?;
@@ -735,7 +826,7 @@ impl gpu_supervisor::Conversation for JobsTalk<'_> {
     }
 
     fn poll(&mut self) -> Vec<gpu_supervisor::Outgoing> {
-        let mut out = Vec::new();
+        let mut out = self.adapter_changes();
         for (job, token) in self.tokens.iter().enumerate() {
             if !self.cancel_sent[job] && !self.finished[job] && token.is_cancelled() {
                 self.cancel_sent[job] = true;
@@ -746,7 +837,7 @@ impl gpu_supervisor::Conversation for JobsTalk<'_> {
     }
 
     fn polls(&self) -> bool {
-        self.cancel_sent.iter().zip(&self.finished).any(|(&sent, &finished)| !sent && !finished)
+        self.adapters.is_some() || self.cancel_sent.iter().zip(&self.finished).any(|(&sent, &finished)| !sent && !finished)
     }
 }
 

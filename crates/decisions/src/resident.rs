@@ -92,7 +92,7 @@ pub fn serve_all(config: &DecisionServeConfig, models_dir: Option<&Path>, hostin
 /// How a worker rebuilds a decision model: from the id and directory its
 /// [`DecisionResident::host_spec`] carries.
 pub fn hosted() -> HostedFamily {
-    HostedFamily { name: FAMILY, open: open_hosted }
+    HostedFamily { name: FAMILY, open: |args| open_hosted(args).map(residency::supervised::HostedModel::new) }
 }
 
 fn open_hosted(args: &Value) -> Result<Arc<dyn ResidentModel>, String> {
@@ -195,7 +195,7 @@ mod tests {
         let r = DecisionResident::new("acme/laya", "/nonexistent/acme/laya");
         let spec = r.host_spec();
         assert_eq!(spec.family, FAMILY);
-        let rebuilt = (hosted().open)(&spec.args).expect("a decision host spec opens");
+        let rebuilt = (hosted().open)(&spec.args).expect("a decision host spec opens").resident;
         assert_eq!(rebuilt.manifest().model, "acme/laya");
         assert_eq!(rebuilt.estimate(&InstanceKey::new("acme/laya", "default")), r.estimate(&InstanceKey::new("acme/laya", "default")));
         for bad in [json!({"id": "a"}), json!({"id": "a", "dir": "/d", "extra": 1}), json!(["a", "/d"])] {

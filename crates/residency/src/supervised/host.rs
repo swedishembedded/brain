@@ -19,7 +19,8 @@ use capability::{CancelToken, Progress};
 use serde_json::{json, Value};
 
 use super::codec::{decode_jobs, encode_control, encode_done, encode_opened, encode_progress, encode_refused, encode_results, object};
-use super::{parse_device_label, HostedFamily, PANICKED, PROTOCOL};
+use super::adapters::Change;
+use super::{parse_device_label, AdapterSink, HostedFamily, PANICKED, PROTOCOL};
 use crate::{Device, Instance, InstanceKey, Tier};
 
 /// The worker side: host the model a supervisor asks for on the socket this
@@ -57,6 +58,10 @@ struct Incoming {
 /// at a time, so there is at most one.
 type Current = Arc<Mutex<Option<(u64, Vec<CancelToken>)>>>;
 
+/// The hosted model's adapter registry, once `open` built a base that serves adapters: the request loop applies
+/// `attach` and `detach` requests to it, the reader thread the frames that arrive while a group runs.
+type Adapters = Arc<Mutex<Option<Arc<dyn AdapterSink>>>>;
+
 /// [`host`] on a socket the caller already holds: the worker's request loop.
 /// The calling thread runs every request and writes every frame (one writer);
 /// a reader thread reads frames and delivers a `cancel <job>` to the job it
@@ -66,6 +71,7 @@ type Current = Arc<Mutex<Option<(u64, Vec<CancelToken>)>>>;
 /// so one that arrives after the group ended reaches nothing.
 pub fn host_on(sock: UnixStream, families: &[HostedFamily]) -> i32 {
     let current: Current = Arc::new(Mutex::new(None));
+    let adapters: Adapters = Arc::new(Mutex::new(None));
     let (tx, rx) = std::sync::mpsc::channel::<Result<Incoming, String>>();
     let reading = match sock.try_clone() {
         Ok(s) => s,
@@ -75,12 +81,13 @@ pub fn host_on(sock: UnixStream, families: &[HostedFamily]) -> i32 {
         }
     };
     let cancels = current.clone();
-    let spawned = std::thread::Builder::new().name("brain-worker-reader".into()).spawn(move || read_requests(reading, &cancels, &tx));
+    let sink = adapters.clone();
+    let spawned = std::thread::Builder::new().name("brain-worker-reader".into()).spawn(move || read_requests(reading, &cancels, &sink, &tx));
     if let Err(e) = spawned {
         eprintln!("brain worker: cannot start its reader: {e}");
         return 2;
     }
-    let mut host = Host { sock, current, rx, families, greeted: false, instance: None, device: None };
+    let mut host = Host { sock, current, adapters, rx, families, greeted: false, instance: None, device: None };
     loop {
         let incoming = match host.rx.recv() {
             Ok(Ok(incoming)) => incoming,
@@ -108,9 +115,16 @@ fn announced_jobs(verb: &str, rest: &str) -> Option<usize> {
 }
 
 /// The reader thread: frames in, requests to the host loop, cancellations to
-/// the job they name. Ends at end of stream or a broken frame.
-fn read_requests(sock: UnixStream, current: &Current, tx: &std::sync::mpsc::Sender<Result<Incoming, String>>) {
+/// the job they name, and an adapter change sent as a frame about a request
+/// already read (a group that runs, or one that just ended) to the model's
+/// registry at once, so changes apply in the order they were sent and a
+/// running group refreshes from them as it would in process. Ends at end of
+/// stream or a broken frame.
+fn read_requests(sock: UnixStream, current: &Current, adapters: &Adapters, tx: &std::sync::mpsc::Sender<Result<Incoming, String>>) {
     let mut reader = gpu_supervisor::wire::Reader::new(gpu_supervisor::MAX_REQUEST_BYTES);
+    // The newest request id read: a supervisor numbers its requests in order, so an id up to it names a request
+    // already read, and the frame is about that request.
+    let mut newest = 0u64;
     loop {
         let line = match reader.line() {
             Ok(Some(line)) => line,
@@ -156,9 +170,22 @@ fn read_requests(sock: UnixStream, current: &Current, tx: &std::sync::mpsc::Send
             return;
         };
         let tokens: Vec<CancelToken> = (0..jobs).map(|_| CancelToken::armed()).collect();
+        let fresh = id > newest;
+        newest = newest.max(id);
         {
             let mut current = current.lock().unwrap_or_else(|e| e.into_inner());
             match verb {
+                "attach" | "detach" if !fresh => {
+                    let sink = adapters.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                    let applied = Change::parse(verb, &rest).and_then(|change| match sink {
+                        Some(sink) => change.apply(&*sink),
+                        None => Err("this worker's model serves no adapters".into()),
+                    });
+                    if let Err(why) = applied {
+                        eprintln!("brain worker: {why}");
+                    }
+                    continue;
+                }
                 "cancel" => {
                     if let (Some((running, held)), Ok(job)) = (current.as_ref(), rest.parse::<usize>()) {
                         if *running == id {
@@ -198,6 +225,7 @@ enum Step {
 struct Host<'a> {
     sock: UnixStream,
     current: Current,
+    adapters: Adapters,
     rx: Receiver<Result<Incoming, String>>,
     families: &'a [HostedFamily],
     greeted: bool,
@@ -272,9 +300,17 @@ impl Host<'_> {
                 let promoted = self.promote(&rest);
                 self.control_answer(id, promoted)
             }
+            "attach" | "detach" => {
+                let sink = self.adapters.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                let applied = Change::parse(&verb, &rest).and_then(|change| match sink {
+                    Some(sink) => change.apply(&*sink),
+                    None => Err("this worker's model serves no adapters".into()),
+                });
+                self.control_answer(id, applied)
+            }
             "batch" => self.batch(id, &rest, fds, tokens),
             "group" => self.group(id, &rest, fds, tokens),
-            other => self.answer(id, Err(format!("a hosted model takes hello, open, demote, promote, batch and group, not {other:?}"))),
+            other => self.answer(id, Err(format!("a hosted model takes hello, open, demote, promote, attach, detach, batch and group, not {other:?}"))),
         }
     }
 
@@ -295,11 +331,13 @@ impl Host<'_> {
             format!("this worker hosts no family {family:?} (it hosts {known:?})")
         })?;
         let args = spec.get("args").cloned().unwrap_or(Value::Null);
-        let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (hosted.open)(&args).and_then(|resident| resident.activate(&key, device))));
+        let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (hosted.open)(&args).and_then(|model| model.resident.activate(&key, device).map(|instance| (instance, model.adapters)))));
         match built {
-            Ok(instance) => {
-                self.instance = Some(instance?);
+            Ok(built) => {
+                let (instance, adapters) = built?;
+                self.instance = Some(instance);
                 self.device = Some(device);
+                *self.adapters.lock().unwrap_or_else(|e| e.into_inner()) = adapters;
                 Ok(())
             }
             Err(p) => Err(format!("{PANICKED} {}", panic_text(p.as_ref()))),

@@ -142,7 +142,7 @@ Choices the design above left open, and what was chosen:
 * `cargo test -p brain-gpu-worker` (2 tests, real card, skip with a printed
   reason where no card opens): a quarantined card is readmitted by a real
   probe; the per-request cost (below).
-* `cargo test -p brain-residency --test hosted` (11 tests; the test binary is
+* `cargo test -p brain-residency --test hosted` (12 tests; the test binary is
   its own worker, `harness = false`): an 8 MiB blob and a 2 MiB parameter
   cross in memfds, the caller's scope reaches the worker; three progress
   frames arrive in order and a cancellation fired from a progress callback
@@ -172,8 +172,14 @@ Choices the design above left open, and what was chosen:
   instance (a demoted one runs nothing, a promoted one is the same instance
   in the same worker), a demotion the model refuses fails without a fault,
   and a promotion onto another card rebuilds the instance there in a new
-  worker; the worker mode refuses a non-socket stdin, a first request that
-  is not `hello`, another protocol version and an unknown family.
+  worker; the adapters a base offers in the serving process reach its
+  worker: one offered before the build routes the first job, one offered
+  while an open group runs reaches the worker before the job that joins
+  after it and the idle group refreshes its routes for it, a withdrawn one
+  and one never offered are answered as no model, and one whose file does
+  not hold its digest is refused by the worker; the worker mode refuses a
+  non-socket stdin, a first request that is not `hello`, another protocol
+  version and an unknown family.
 * `cargo test -p brain-residency --lib demotion_that_keeps
   a_warm_instance_that_kept` (2 tests): an instance whose demotion keeps a
   device context on its card (`MemCost::context`) stays Warm on that card
@@ -182,6 +188,21 @@ Choices the design above left open, and what was chosen:
   over-commit the card), evicting the Warm one again drops it, and a Warm
   one is promoted back on its own card when it fits there, before an
   emptier card.
+* `cargo test -p brain-residency --test it hosted_adapter` (2 tests): an
+  exhaustive model of a hosted base's adapter offered and withdrawn at any
+  time while the lane runs open groups that late jobs join, with a worker
+  that may die and be replaced (about 22 thousand states over up to three
+  changes, two groups, two late jobs and one fault): a group starts with
+  the worker's registry at least as new as the lane brought it before
+  sending it, a job joins only after every change made before it was handed
+  out reached the worker, the worker's registry is always one the parent
+  offered and never goes back, and at the end a live worker holds what its
+  parent believes it told it; five deliberate bugs are each caught (no
+  sync before a group, changes sent after `joined`, a late frame dropped, a
+  late frame handed to the request loop, a new worker's feed not started
+  over). The fourth is why the reader applies a late frame itself: handed
+  to the request loop, a frame about a group that just ended can land after
+  a newer frame the reader applied.
 * `cargo test -p brain-residency --test it hosted_tier` (2 tests): an
   exhaustive model of a hosted instance moving between tiers on two cards
   beside another tenant (about 2.5 thousand states over up to three jobs,
@@ -405,7 +426,20 @@ steps), screening the jobs waiting to join (`screen` answered `waiting`
 with the jobs not screened yet, the worker's instance checks each and
 `refused` has the parent's feed turn the doomed ones away at once; one more
 round trip per step for a family that screens every step), caller cancellation, blobs in and out through memfds, envelopes and answers of
-any size, panics answered as job errors, and metrics and tiers: every
+any size, panics answered as job errors, adapters: a base hosted with an
+`AdapterSource` (`SupervisedModel::with_adapters`) tells each of its
+workers every change of the adapters the serving process offers, as
+`attach {id, digest, path}`/`detach <id>` requests before a group
+(`sync_adapters`) and as frames while one runs, sent at each poll and
+before the reply to each `take` (`JobsTalk::adapter_changes`), so a job that
+joins after a change never reaches the worker first; the worker's reader
+applies every adapter frame about a request it already read at once (in
+the order they were sent) to the `AdapterSink` its family's `HostedModel`
+returned, and the model refreshes its routes from it as it does in process.
+A worker is told lazily, before it next runs anything, not the moment the
+registry changes: a worker that runs nothing needs no adapter, and no
+thread has to push to workers that may be busy. A new worker of an instance
+is told everything again (`AdapterFeed::reset`). And metrics and tiers: every
 answer carries the instance's `metrics` after the request, which the parent
 keeps (the dispatcher's poll never reaches a worker); `demote warm|cold`
 runs the instance's own demotion in its worker, bounded by the run deadline
@@ -418,17 +452,16 @@ context (`MemCost::context`, set by `SupervisedModel::estimate` only for a
 model that demotes), the planner counts a Hot one's demotion as freeing
 only the rest, and a promotion goes back to that card first.
 
-* **Adapters.** The adapter registry, bank and release following live in
-  the serving process, and every family that serves adapters (the Qwen3 and
-  Qwen3.8 decoders, through `llmserve::adapter_registry` and its
-  `AdapterSync`) resolves the `stamp`ed selection against that registry
-  inside `run_open`. The `stamp` already runs in the parent and the selection
-  crosses as a param; what the worker lacks is the registry itself. It needs
-  an `attach`/`detach` request pair the parent sends to every live worker of
-  the base when the registry changes (with the adapter weights in a memfd or
-  a path the worker reads), the worker's own registry rebuilt from those
-  requests, and a group refresh (`OpenGroup::Refresh`) triggered by them, so
-  a running group picks up a new adapter as it does in process.
+* **Adapters in a family.** The protocol is built (above); a family that
+  serves adapters (the Qwen3 and Qwen3.8 decoders) still needs its two ends
+  over `llmserve::adapter_registry`: an `AdapterSource` over the serving
+  process's `AdapterRegistry` (each entry's `release` is the id, digest and
+  path a worker needs, the registry's generation the source's), and in the
+  worker an `AdapterSink` that `load_adapter`s the path, refuses a digest
+  that is not the one offered, and holds the `AdapterLease` of each attached
+  id in its own registry, which the worker's `AdaptedInstance` syncs from
+  (its `OpenGroup::Refresh` then picks a change up in a running group as in
+  process).
 * **Multi-device instances.** `MultiDeviceResidentModel` has no hosted form.
   It needs a `HostedFamily` variant that rebuilds a multi-device resident and
   an `open` that names a device list (`open gpu0,gpu1 <spec>`), so one worker
