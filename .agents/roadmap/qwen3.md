@@ -240,7 +240,8 @@ The per-kernel timer adds a few microseconds a launch; nsys showed the int8 batc
 merge at 4.2 us a layer (62 % of the roof together).
 
 - [ ] Batch 1 at 32K is 60 % of the roof (int8, split pass alone): one wave of 512 blocks of eight 16-key chunks a
-      warp, with the merge a fixed 4 us a layer. A persistent split or a merge folded into the split's last block.
+      warp, with the merge a fixed 4 us a layer. Folding the merge into the last split block, and cutting the merge's
+      split sum over four threads a channel, both measured slower (knowledge #472); the split pass itself is the gap.
 - [ ] bf16 KV and an FP8 target in `perf run longctx` for this engine (the kernels are registered at FP8; bf16 is
       not an engine tier).
 

@@ -549,6 +549,8 @@ struct Heads {
 impl Heads {
     /// Qwen3.8-27B's GQA layers: 24 query heads over 4 kv heads of 256.
     const QWEN38: Heads = Heads { n_heads: 24, n_kv: 4, head_dim: 256 };
+    /// Qwen3.6-35B-A3B's GQA layers: 16 query heads over 2 kv heads of 256 (a group of 8).
+    const QWEN36_MOE: Heads = Heads { n_heads: 16, n_kv: 2, head_dim: 256 };
     /// The dense Qwen3 family's head width of 128 at each of its groups: 0.6B-1.7B (2), 4B-8B (4), 14B (5), 32B (8).
     const QWEN3: [Heads; 4] = [
         Heads { n_heads: 16, n_kv: 8, head_dim: 128 },
@@ -731,7 +733,7 @@ fn native_decode_of_every_tier_is_exact_at_agent_contexts_over_a_shared_prefix_o
 }
 
 /// The native decode is one implementation over head width and group: the dense Qwen3 family's head width of 128 at every
-/// group it ships (2, 4, 5, 8) runs the native kernel of each tier and is exact at a long single context, a batch over a
+/// group it ships (2, 4, 5, 8), and the 35B-A3B's 256 at a group of 8, runs the native kernel of each tier and is exact at a long single context, a batch over a
 /// shared prefix and short sequences with partly empty splits.
 #[test]
 fn native_decode_of_every_tier_is_exact_at_the_qwen3_head_shapes_on_cuda() {
@@ -740,7 +742,7 @@ fn native_decode_of_every_tier_is_exact_at_the_qwen3_head_shapes_on_cuda() {
         return;
     }
     let Some(g) = native_decode_gpu("native decode attention") else { return };
-    for heads in Heads::QWEN3 {
+    for heads in Heads::QWEN3.into_iter().chain([Heads::QWEN36_MOE]) {
         for tier in KvTier::ALL {
             native_decode_is_exact_at(&g, tier, heads, &[32_768], 0, Magnitudes::UNIT);
             native_decode_is_exact_at(&g, tier, heads, &[1024, 13_000, 9_000], 128, Magnitudes::UNIT);
@@ -949,14 +951,14 @@ fn decode_attention_timing_report() {
 
 /// The native decode attention (split pass plus merge) per layer at the served matrix cells, with the rate on the bytes it must
 /// read against the card's streaming roof, for every KV tier at 1, 4, 16 and 64 rows of 8K, 32K and 64K keys: the 27B's
-/// heads (24 over 4 kv heads of 256) and the dense Qwen3 4B's (32 over 8 of 128). `--ignored decode_attention_matrix_cell_report`.
+/// heads (24 over 4 kv heads of 256), the dense Qwen3 4B's (32 over 8 of 128) and the 35B-A3B's (16 over 2 of 256). `--ignored decode_attention_matrix_cell_report`.
 #[test]
 #[ignore = "a timing report for kernel work, not a spec"]
 fn decode_attention_matrix_cell_report() {
     let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let Some(g) = cuda_gpu("decode timing: no CUDA device") else { return };
     const ROOF_GBS: f64 = 3400.0;
-    for heads in [Heads::QWEN38, Heads::QWEN3[1]] {
+    for heads in [Heads::QWEN38, Heads::QWEN3[1], Heads::QWEN36_MOE] {
         for tier in KvTier::ALL {
             // A key or value row of one kv head: its elements, plus the f32 row scale of a scaled tier.
             let row_bytes = match tier.element() {
