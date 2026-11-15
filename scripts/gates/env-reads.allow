@@ -4,7 +4,7 @@ crates/backend-cpu/src/fast_conv.rs	BRAIN_WINOGRAD
 crates/backend-cpu/src/lib.rs	BRAIN_NO_FASTCONV
 crates/backend-cuda/src/nvrtc.rs	<ENV_CUDA_PATH>
 crates/backend-cuda/tests/catalogue_coverage.rs	BRAIN_CUDA_COVERAGE_OUT
-crates/backend-cuda/tests/it/mem_pool.rs	BRAIN_PRINT_POOL_BENCH
+crates/backend-cuda/tests/leaks/mem_pool.rs	BRAIN_PRINT_POOL_BENCH
 crates/backend-cuda/tests/it/tensormap_template.rs	BRAIN_DEVICE
 crates/backend-vulkan/src/lib.rs	BRAIN_VK_NO_SERIAL
 crates/backend-vulkan/src/lib.rs	BRAIN_VK_SERIAL

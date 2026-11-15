@@ -41,17 +41,12 @@
 //! The counters are process-global, so every test holds [`serial`]. Skipped
 //! when there is no CUDA device.
 
-use std::sync::{Mutex, MutexGuard};
 
 use backend_api::Backend as _;
 use backend_cuda::exec::Context;
 use backend_cuda::{live_resources, CudaBackend};
 
-static SERIAL: Mutex<()> = Mutex::new(());
-
-fn serial() -> MutexGuard<'static, ()> {
-    SERIAL.lock().unwrap_or_else(|e| e.into_inner())
-}
+use super::serial;
 
 const MIB: usize = 1 << 20;
 

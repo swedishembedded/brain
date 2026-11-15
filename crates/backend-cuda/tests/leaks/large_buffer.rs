@@ -64,6 +64,7 @@ fn peek(b: &CudaBackend, x: &backend_api::DeviceBuffer, out: &backend_api::Devic
 
 #[test]
 fn a_buffer_past_4_gib_is_addressed_without_a_32_bit_wrap() {
+    let _g = super::serial();
     let before = live_resources();
     let Ok(b) = CudaBackend::try_new(KERNELS) else {
         brain_testutil::skip_unavailable("no usable CUDA backend");

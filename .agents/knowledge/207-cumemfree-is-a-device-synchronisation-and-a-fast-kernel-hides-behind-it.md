@@ -37,7 +37,7 @@ What it taught, in the order it should be applied:
    free without waiting, and a round frees two thousand of those, at several microseconds a driver
    call each way.
 4. **A cache must not break the leak contract.** Holding freed blocks on a live context made
-   `tests/leaks.rs` fail (it frees on a live context and expects the counters back at once).
+   `tests/leaks/main.rs` fail (it frees on a live context and expects the counters back at once).
    - The cache is opt-in per handle for the duration of a repeated pass
      (`Backend::hold_freed_blocks`, switched on by `Gpu::scratch_scope`), bounded, and returned
      when the handle goes; every other owner frees exactly as before.

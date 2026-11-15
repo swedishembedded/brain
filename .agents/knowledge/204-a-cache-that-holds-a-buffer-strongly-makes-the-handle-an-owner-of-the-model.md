@@ -17,7 +17,7 @@ Neither sees a *retention*: memory that is reachable, freed eventually, and unus
 graphs, graph execs, modules and primary-context retains. Each is incremented when the driver
 confirms a create and decremented only when it confirms the free, so a refused free stays visible.
 
-`tests/leaks.rs` runs create/drop loops of every owner and asserts the counters return EXACTLY,
+`tests/leaks/main.rs` runs create/drop loops of every owner and asserts the counters return EXACTLY,
 then `cuMemGetInfo` within a tolerance (which catches an owner that forgot to register).
 
 ## Why

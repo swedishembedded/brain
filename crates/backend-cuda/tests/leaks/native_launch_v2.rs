@@ -25,13 +25,8 @@ use backend_api::{
     ArchFeatures, Backend as _, BindKind, CudaLaunch, DeviceBuffer, NativeId, NativeSpec, ScalarKind,
 };
 use backend_cuda::{live_resources, CudaBackend};
-use std::sync::{Mutex, MutexGuard};
 
-static SERIAL: Mutex<()> = Mutex::new(());
-
-fn serial() -> MutexGuard<'static, ()> {
-    SERIAL.lock().unwrap_or_else(|e| e.into_inner())
-}
+use super::serial;
 
 /// `out[block * n + i] = (block * n + i) * scale + bias`, staged through
 /// dynamic shared memory and read back reversed, so the shared memory is

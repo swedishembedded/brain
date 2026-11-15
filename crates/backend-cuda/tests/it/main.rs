@@ -10,16 +10,9 @@
 mod aot_driver_only;
 mod arch_specific;
 mod backend_contract;
-mod block_cache;
 mod concurrent_open;
 mod cuda_graphs;
 mod cuda_pass;
-mod large_buffer;
-mod mem_pool;
-mod native_launch_v2;
-mod placement;
-mod sparse;
-mod staged_writes;
 mod tensormap_template;
 mod wgsl_cuda_bounds;
 mod wgsl_cuda_golden;

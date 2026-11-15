@@ -26,6 +26,18 @@
 //!
 //! Skip-if-absent, like the rest of this crate's device tests.
 
+// The device tests that assert these process-global counters or free memory
+// live in this binary, a process of their own, and every one of them holds the
+// one `serial` lock below: in a binary with the other device tests, those tests'
+// allocations would land in their measurements.
+mod block_cache;
+mod large_buffer;
+mod mem_pool;
+mod native_launch_v2;
+mod placement;
+mod sparse;
+mod staged_writes;
+
 use std::sync::{Mutex, MutexGuard};
 
 use backend_api::{Backend as _, BufUsage, DeviceBuffer};
@@ -41,9 +53,9 @@ const AXPY: usize = 0;
 /// tests is hundreds of MiB.
 const FREE_TOLERANCE: u64 = 48 << 20;
 
-static SERIAL: Mutex<()> = Mutex::new(());
+pub(crate) static SERIAL: Mutex<()> = Mutex::new(());
 
-fn serial() -> MutexGuard<'static, ()> {
+pub(crate) fn serial() -> MutexGuard<'static, ()> {
     SERIAL.lock().unwrap_or_else(|e| e.into_inner())
 }
 

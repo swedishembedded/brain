@@ -42,6 +42,7 @@ fn read_bits(b: &CudaBackend, buf: &backend_api::DeviceBuffer, words: usize) -> 
 
 #[test]
 fn staged_writes_land_the_written_bytes_whatever_the_chunking() {
+    let _g = super::serial();
     let Some(compute) = backend() else { return };
     let transfer = CudaBackend::try_new(KERNELS).expect("a second handle");
     // 64 KiB of staging against a 1.5 MiB tensor written in uneven pieces: every write spans several slots and
@@ -72,6 +73,7 @@ fn staged_writes_land_the_written_bytes_whatever_the_chunking() {
 
 #[test]
 fn staging_is_exactly_the_requested_pinned_budget() {
+    let _g = super::serial();
     let Some(h) = backend() else { return };
     let before = backend_cuda::live::live_resources().pinned_bytes;
     assert!(h.enable_staged_writes(256 << 10).expect("enable"));
@@ -87,6 +89,7 @@ fn staging_is_exactly_the_requested_pinned_budget() {
 
 #[test]
 fn a_budget_too_small_to_stage_is_refused() {
+    let _g = super::serial();
     let Some(h) = backend() else { return };
     assert!(h.enable_staged_writes(0).is_err());
 }

@@ -29,17 +29,12 @@
 //! Skip-if-absent, and tiny: it must not contend with anything resident on the
 //! card. Counters are process-global, so every test holds [`serial`].
 
-use std::sync::{Mutex, MutexGuard};
 
 use backend_api::{AllocPolicy, Backend as _, MemAdvice, PrefetchTarget};
 use backend_cuda::exec::Context;
 use backend_cuda::{live_resources, CudaBackend};
 
-static SERIAL: Mutex<()> = Mutex::new(());
-
-fn serial() -> MutexGuard<'static, ()> {
-    SERIAL.lock().unwrap_or_else(|e| e.into_inner())
-}
+use super::serial;
 
 const KERNELS: &[(&str, &str)] = &[("axpy", kernels::AXPY)];
 const AXPY: usize = 0;

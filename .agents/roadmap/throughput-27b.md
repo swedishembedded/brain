@@ -534,7 +534,7 @@ Each one replaces 2-5 launches and 2-4 tensor passes.
 - **Gain (DERIVED).** After K6 there are about 25 K launches at 5-10 us, which is 0.12-0.25 s
   per step (15-30 us/token). Graphs bring that to a few us/token. It is the last 3-10%.
 - **Risk.** High (backend internals, a shared engine used by every model).
-- **Gates.** `crates/backend-cuda/tests/it/block_cache.rs`, `crates/qwen35/tests/it/cuda_leaks.rs`,
+- **Gates.** `crates/backend-cuda/tests/leaks/block_cache.rs`, `crates/qwen35/tests/it/cuda_leaks.rs`,
   the CUDA graph tests in `crates/backend-cuda`, and the trajectory gate with graphs on and off
   (`BRAIN_CUDA_GRAPHS=0`), which must be bit-identical.
 
