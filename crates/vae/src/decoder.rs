@@ -431,14 +431,37 @@ impl VaeEncoder {
 /// intermediate. That multiple is what these are, rounded UP: an estimate that
 /// is high reserves a little too much, an estimate that is low is a driver
 /// out-of-memory.
-const DECODE_LIVE_BUFFERS_PER_LEVEL: u64 = 11;
-const ENCODE_LIVE_BUFFERS_PER_LEVEL: u64 = 8;
+///
+/// Measured on the FLUX.2 VAE (the graph's own allocation count), with the
+/// mid-block attention's score matrices taken out ([`MID_ATTENTION_COPIES`]):
+/// the decoder holds 6.5 buffers a level from a 16x16 to a 160x120 latent, the
+/// encoder 5.8 to 6.0 from 512x512 to 1280x960.
+// perf-number: measured live-buffer multiples of the FLUX.2 VAE graphs, rounded up
+const DECODE_LIVE_BUFFERS_PER_LEVEL: u64 = 7;
+const ENCODE_LIVE_BUFFERS_PER_LEVEL: u64 = 7;
 
-/// The size-independent floor: the chunked-GEMM `col` scratch (capped, see
-/// `blocks::COL_BUDGET_MIB`), the staging a large weight upload leaves
-/// resident, and the driver's own per-context allocation. Flat by nature - it
-/// is what stops the per-pixel term from being asked to explain a constant.
-const FIXED_SCRATCH: u64 = 768 << 20;
+/// `[tokens, tokens]` f32 matrices the mid block's self-attention holds at the
+/// latent resolution, `(decoder, encoder)`: the decoder keeps the scores and
+/// their softmax, the encoder one of them. Quadratic in the latent, so at a
+/// large frame it is the term that dominates (2.8 GiB of the decoder's 10 GiB at
+/// a 160x120 latent) and a per-pixel multiple cannot stand in for it.
+const MID_ATTENTION_COPIES: (u64, u64) = (2, 1);
+
+/// Bytes of the mid-block attention's score matrices for `px` output pixels,
+/// `copies` of them; nothing for a VAE without the attention.
+fn mid_attention_bytes(cfg: &VaeConfig, px: u64, copies: u64) -> u64 {
+    if !cfg.mid_block_add_attention {
+        return 0;
+    }
+    let tokens = px / (cfg.upscale_factor() as u64 * cfg.upscale_factor() as u64);
+    copies * tokens * tokens * 4
+}
+
+/// The size-independent floor: the first chunk of the `col` scratch and the
+/// staging a weight upload leaves resident. The driver's per-context
+/// allocation is not the graph's: residency charges it to the process that
+/// holds the device.
+const FIXED_SCRATCH: u64 = 64 << 20;
 
 /// Bytes of activation per OUTPUT pixel for one live buffer at each level of
 /// `cfg`'s channel schedule.
@@ -543,7 +566,7 @@ pub fn decoder_device_bytes(cfg: &VaeConfig, lh: u32, lw: u32) -> u64 {
 /// not yet its shape - a pipeline sizing itself for "at most N image tokens"
 /// before any request has said what aspect ratio those are.
 pub fn decoder_device_bytes_for_pixels(cfg: &VaeConfig, px: u64) -> u64 {
-    decoder_weight_bytes(cfg) + DECODE_LIVE_BUFFERS_PER_LEVEL * level_bytes_per_pixel(cfg) * px + FIXED_SCRATCH
+    decoder_weight_bytes(cfg) + DECODE_LIVE_BUFFERS_PER_LEVEL * level_bytes_per_pixel(cfg) * px + mid_attention_bytes(cfg, px, MID_ATTENTION_COPIES.0) + FIXED_SCRATCH
 }
 
 /// Device bytes an encode graph will hold, for an image of `h x w`.
@@ -554,7 +577,7 @@ pub fn encoder_device_bytes(cfg: &VaeConfig, h: u32, w: u32) -> u64 {
 /// [`encoder_device_bytes`] by pixel count - see
 /// [`decoder_device_bytes_for_pixels`].
 pub fn encoder_device_bytes_for_pixels(cfg: &VaeConfig, px: u64) -> u64 {
-    encoder_weight_bytes(cfg) + ENCODE_LIVE_BUFFERS_PER_LEVEL * level_bytes_per_pixel(cfg) * px + FIXED_SCRATCH
+    encoder_weight_bytes(cfg) + ENCODE_LIVE_BUFFERS_PER_LEVEL * level_bytes_per_pixel(cfg) * px + mid_attention_bytes(cfg, px, MID_ATTENTION_COPIES.1) + FIXED_SCRATCH
 }
 
 /// A device carrying the VAE kernel set, for a caller that wants ONE of them

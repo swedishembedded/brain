@@ -153,14 +153,13 @@ impl Tiling {
 ///
 /// A card-sized constant, and it says so: 18 GiB is what leaves real headroom
 /// on a 24 GiB card once the driver's own context and the pipeline's other
-/// resident parts are counted. At FLUX.2's schedule it keeps 1024x1024
-/// (10.9 GiB) and 1024x1536 (15.9 GiB) on the exact path and sends 1536x1536
-/// (23.4 GiB) and 2048x2048 (40.8 GiB) to the tiled one.
+/// resident parts are counted. At FLUX.2's schedule it keeps a 1024x1024
+/// (8.6 GiB) and a 1024x1536 (14.3 GiB) decode on the exact path and sends
+/// 1536x1536 (24.6 GiB) and 2048x2048 (57.6 GiB) to the tiled one.
 ///
 /// It is a FALLBACK, not the policy. A constant cannot see what a card is
-/// already carrying, and the failure that taught us so is specific: a
-/// 2048x1152 img2img encode predicts ~17.4 GiB, passes this ceiling, and then
-/// cannot allocate on a 24 GiB card holding a quantised 9.4 GiB DiT - which is
+/// already carrying: a 1792x1024 img2img encode predicts 14.4 GiB, passes this
+/// ceiling, and cannot allocate on a 24 GiB card holding a quantised 9.4 GiB DiT - which is
 /// what every `--ref`/`--strength` generation puts there. Model sizes,
 /// quantisation and hardware all move; what a device has free right now is the
 /// only figure that moves with them, so [`whole_graph_budget`] reads it and

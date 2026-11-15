@@ -179,9 +179,11 @@ fn the_tiled_reservation_describes_one_real_tile() {
     let ts = zeros::decoder(&c);
     // 2048x2048 out: ~43 GiB whole, which no card here has.
     let pred = vae::decoder_device_bytes_tiled(&c, 256, 256, vae::Tiling::AUTO);
-    let (tile, _) = vae::Tiling::AUTO.latent(c.upscale_factor());
-    let real = VaeDecoder::from_diffusers(c.clone(), &ts, tile as u32, tile as u32, Some(&dev)).device_bytes();
-    println!("tiled 2048x2048: predicted {:.1} MiB, one {tile}x{tile}-latent tile really allocates {:.1} MiB", mib(pred), mib(real));
+    // The largest tile of the cover, halo included: the graph a tiled decode of this latent really builds.
+    let (tile, overlap) = vae::Tiling::AUTO.latent(c.upscale_factor());
+    let (th, tw) = vae::tiling2d::TilePlan2d::decode(256, 256, tile, overlap, 1).max_src_shape();
+    let real = VaeDecoder::from_diffusers(c.clone(), &ts, th as u32, tw as u32, Some(&dev)).device_bytes();
+    println!("tiled 2048x2048: predicted {:.1} MiB, its largest {th}x{tw}-latent tile really allocates {:.1} MiB", mib(pred), mib(real));
     assert!(pred >= real, "the tiled estimate must never under-report: {:.1} < {:.1} MiB", mib(pred), mib(real));
     assert!(pred <= real * 5 / 4, "and must be close, not merely safe: {:.1} vs {:.1} MiB", mib(pred), mib(real));
     // The point of the whole mechanism, on the real numbers: the tile is a
@@ -260,3 +262,5 @@ fn the_weight_sum_matches_a_built_graph() {
         );
     }
 }
+
+

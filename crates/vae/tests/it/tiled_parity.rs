@@ -354,7 +354,7 @@ fn a_forced_choice_overrides_the_budget_policy() {
 
 /// The out-of-memory this closes, as arithmetic.
 ///
-/// A 2048x1152 img2img encode predicts ~17.4 GiB - comfortably INSIDE the
+/// A 1792x1024 img2img encode predicts 14.4 GiB (and its decode 17.5) - INSIDE the
 /// card-sized constant, so the old decision ran it as one whole-image graph -
 /// and it cannot run at all on a 24 GiB card that is already carrying a
 /// quantised 9.4 GiB DiT, which is what every `--ref`/`--strength` generation
@@ -363,7 +363,7 @@ fn a_forced_choice_overrides_the_budget_policy() {
 #[test]
 fn a_graph_the_constant_allows_is_tiled_when_the_card_is_already_full() {
     let cfg = VaeConfig::flux2();
-    let px = 2048u64 * 1152;
+    let px = 1792u64 * 1024;
     let want = vae::encoder_device_bytes_for_pixels(&cfg, px);
     assert!(
         want < vae::tiled::WHOLE_GRAPH_MAX_BYTES,
