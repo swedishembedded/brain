@@ -24,7 +24,7 @@ use qwen35::config::Qwen35Config;
 use qwen35::model::{pipelines, Qwen35};
 
 use crate::common;
-use common::fused_decode::{assert_logits_agree, decode, serial};
+use common::fused_decode::{assert_logits_agree, decode, offers_fused_projections, serial, NO_FUSED_PROJECTIONS};
 use common::hf_fixture::fp8_resident_cfg;
 
 /// The recurrent geometry the streaming kernels serve (128-wide key and value heads, a 4-tap conv) at FP8-sized widths:
@@ -40,6 +40,9 @@ fn the_two_projections_are_one_fp8_weight_that_answers_for_each() {
     let Ok(gpu) = Gpu::try_new_cuda(pipelines()) else {
         return brain_testutil::skip_unavailable("no usable CUDA backend");
     };
+    if !offers_fused_projections(&gpu, true) {
+        return brain_testutil::skip_unavailable(NO_FUSED_PROJECTIONS);
+    }
     let cfg = cfg();
     let init = qwen35::init::init_weights(&cfg, 7);
     let m = Qwen35::new_on_dt(gpu, cfg.clone(), 1, cfg.block_size, &init, &TierPolicy::uniform(Dtype::F8E4M3));
@@ -69,9 +72,12 @@ fn a_decode_step_is_one_product_over_the_fused_weight_and_computes_what_the_two_
     if !gpu_core::native_kernels_enabled() {
         return brain_testutil::skip_unavailable("native kernels are withheld in this process");
     }
-    let Ok(_gpu) = Gpu::try_new_cuda(pipelines()) else {
+    let Ok(gpu) = Gpu::try_new_cuda(pipelines()) else {
         return brain_testutil::skip_unavailable("no usable CUDA backend");
     };
+    if !offers_fused_projections(&gpu, true) {
+        return brain_testutil::skip_unavailable(NO_FUSED_PROJECTIONS);
+    }
     // One streaming candidate for every width: a dot product is summed in the same order whatever the width of the weight.
     gpu_core::force_candidate("matmul_fp8_native", "matmul_fp8_dq_stream_r4");
     let (one, one_launches) = decode(&cfg(), true, "qkvz_one", 2, KvTier::F32);

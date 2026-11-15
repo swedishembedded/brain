@@ -135,6 +135,10 @@ fn the_gdn_step_is_one_launch_with_128_wide_heads() {
         brain_testutil::skip_unavailable("no usable CUDA backend");
         return;
     };
+    if !gpu.has_fused(gpu_core::Fused::GdnDecode) {
+        brain_testutil::skip_unavailable("the device is not offered the native GDN decode step (it needs cp.async)");
+        return;
+    }
     let (narrow, wide) = (tiny(), wide_gdn());
     let saved = |cfg: &Qwen35Config| launches(&gpu, cfg, false) - launches(&gpu, cfg, true);
     let gdn_layers = 3u64;

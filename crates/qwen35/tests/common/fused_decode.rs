@@ -26,6 +26,17 @@ pub fn serial() -> MutexGuard<'static, ()> {
     SERIAL.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Whether `gpu` is offered what an FP8 build needs to hold a layer's projections as one weight: the native FP8 products
+/// on row windows and, for `in_proj_qkv | in_proj_z` (`gdn`), the streaming GDN decode and verify kernels that read the
+/// fused product in place. A device below their floor (they need `mma.sync` and `cp.async`) holds every projection on
+/// its own, so the specs of these tests have nothing to check there.
+pub fn offers_fused_projections(gpu: &gpu_core::Gpu, gdn: bool) -> bool {
+    gpu.has_fp8_linear() && (!gdn || (gpu.has_fused(gpu_core::Fused::GdnDecodePoolStreamBf16) && gpu.has_fused(gpu_core::Fused::GdnVerifyPoolStreamBf16)))
+}
+
+/// The skip of a device [`offers_fused_projections`] declines.
+pub const NO_FUSED_PROJECTIONS: &str = "the device is not offered the native FP8 products (and streaming GDN kernels) a fused projection needs";
+
 pub fn rel_l2(got: &[f32], want: &[f32]) -> f64 {
     let num: f64 = got.iter().zip(want).map(|(a, b)| f64::from(a - b).powi(2)).sum();
     let den: f64 = want.iter().map(|b| f64::from(*b).powi(2)).sum();
