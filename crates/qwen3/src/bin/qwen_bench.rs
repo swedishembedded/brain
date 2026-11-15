@@ -104,7 +104,7 @@
 //!                                          # down, at `batch` sequences: the
 //!                                          # INT8 triad against the unsplit
 //!                                          # `paged_flash_decode_i8` and the
-//!                                          # batched GQA split-key pair
+//!                                          # fused GQA decode
 //!   qwen_bench flash-prefill [start] [cc] [reps]
 //!                                          # M2.4's per-kernel delta:
 //!                                          # `paged_flash_prefill` (M2.3)
@@ -895,23 +895,23 @@ fn quantize_pool_i8(pool: &[f32], n_kv: u32, hd: u32) -> (Vec<u32>, Vec<f32>) {
 /// in an engine whose capacity is `cap` tokens each, `cfg`'s head geometry.
 /// The int8 triad (`paged_decode_scores_i8_batched` -> `decode_softmax_batched`
 /// -> `paged_decode_apply_i8_batched`) is the reference and the baseline; the
-/// unsplit `paged_flash_decode_i8` and the batched GQA pair
-/// `paged_flash_decode_split_i8` -> `paged_flash_decode_combine_i8` (with the
-/// split count `qwen3::serve` would record) are timed against it, and the pair
-/// is checked against the triad's context. Every row owns its own physical
+/// unsplit `paged_flash_decode_i8` and the fused GQA decode the serving engine
+/// records (`model::kv_tier::FlashDecode`: split pass and merge) are timed
+/// against it, and the fused decode is checked against the triad's context. Every row owns its own physical
 /// blocks, so no two sequences share cache lines. Bandwidth percentages are
 /// against the ideal traffic: every live K and V byte once per kv head.
 ///
 /// `qwen_bench flash-decode-i8 [seq] [reps] [batch] [--cap N]`.
 pub fn flash_decode_i8_bench(cfg: &QwenConfig, seq: u32, reps: usize, batch: u32, cap_tokens: u32) {
-    let gpu = Gpu::new(&[
+    let shape = [(cfg.head_dim, cfg.n_heads / cfg.n_kv_heads)];
+    let mut pipelines = vec![
         ("paged_decode_scores_i8_batched", kernels::PAGED_DECODE_SCORES_I8_BATCHED),
         ("decode_softmax_batched", kernels::DECODE_SOFTMAX_BATCHED),
         ("paged_decode_apply_i8_batched", kernels::PAGED_DECODE_APPLY_I8_BATCHED),
         ("paged_flash_decode_i8", kernels::PAGED_FLASH_DECODE_I8),
-        ("paged_flash_decode_split_i8", kernels::PAGED_FLASH_DECODE_SPLIT_I8),
-        ("paged_flash_decode_combine_i8", kernels::PAGED_FLASH_DECODE_COMBINE_I8),
-    ]);
+    ];
+    pipelines.extend(model::kv_tier::flash_decode_pipelines(&shape, &[model::kv_tier::KvTier::INT8]));
+    let gpu = Gpu::new(&pipelines);
     let roofs = banner(&gpu);
 
     let (n_heads, n_kv_heads, head_dim, bs) = (cfg.n_heads, cfg.n_kv_heads, cfg.head_dim, 16u32);
@@ -973,23 +973,17 @@ pub fn flash_decode_i8_bench(cfg: &QwenConfig, seq: u32, reps: usize, batch: u32
     )];
     let t_flash = gpu_core::profile::best_of(&gpu, &flash_steps, reps);
 
-    let n_splits = qwen3::serve::int8_decode_splits(cfg, batch, cap);
-    let slabs = group.div_ceil(4); // paged_flash_decode_split_i8's own SLAB
-    let part = gpu.storage((batch * n_heads * n_splits * (2 + 128)) as u64);
+    let flash = model::kv_tier::FlashDecode::resolve(&gpu, model::kv_tier::KvTier::INT8, &shape);
     let ctx_split = gpu.storage((batch * n_heads * head_dim) as u64);
-    let split_steps = vec![
-        gpu.dispatch(
-            4,
-            &[&qb, &poolk, &poolv, &scales_k, &scales_v, &btb, &sl, &part],
-            &[batch, n_heads, n_kv_heads, head_dim, group, bs, mbs_cap, n_splits],
-            gpu_core::Dispatch::Workgroups(batch * n_kv_heads * slabs * n_splits),
-        ),
-        gpu.step(5, &[&part, &sl, &ctx_split], &[batch, n_heads, head_dim, n_splits], batch * n_heads * 128),
-    ];
-    let t_split = gpu_core::profile::best_of(&gpu, &split_steps, reps);
+    let t_split = flash.available(&gpu, head_dim, group).then(|| {
+        let fshape = model::kv_tier::FlashDecodeShape { batch, n_heads, n_kv_heads, head_dim, block_size: bs, max_bt: mbs_cap, cap, pin_splits: false };
+        let part = gpu.storage(flash.part_words(&gpu, fshape));
+        let steps = flash.dispatch(&gpu, &qb, &poolk, &poolv, Some((&scales_k, &scales_v)), &btb, &sl, &part, &ctx_split, fshape);
+        gpu_core::profile::best_of(&gpu, &steps, reps)
+    });
 
-    // The native batched kernel the serving tape takes ahead of the split pair
-    // where the backend has one (CUDA, two or more rows); absent elsewhere.
+    // The native batched kernel the serving tape falls back to where the fused
+    // decode is not registered (CUDA, two or more rows); absent elsewhere.
     let ctx_native = gpu.storage((batch * n_heads * head_dim) as u64);
     let native = gpu_core::provider::cuda::paged_decode_batched_step(
         &gpu,
@@ -1001,17 +995,16 @@ pub fn flash_decode_i8_bench(cfg: &QwenConfig, seq: u32, reps: usize, batch: u32
 
     let want = gpu.read(&ctx_ref, (batch * n_heads * head_dim) as usize);
     let max_diff = |ctx: &DeviceBuffer| want.iter().zip(&gpu.read(ctx, (batch * n_heads * head_dim) as usize)).fold(0f32, |m, (a, b)| m.max((a - b).abs()));
-    let worst = max_diff(&ctx_split);
+    let worst = t_split.map(|_| max_diff(&ctx_split));
 
     let bytes = batch as u64 * n_kv_heads as u64 * seq as u64 * head_dim as u64 * 2; // int8: 1 byte/element, K+V once each
     let pct = |secs: f64| roofs.and_then(|r| r.utilisation_of(0, 0, bytes, secs)).map(|p| format!("{p:.1}% of mem roof")).unwrap_or_else(|| "roof unmeasured".into());
-    println!(
-        "\npaged attention int8 @ batch={batch} seq={seq} cap={cap}: triad (scores_i8+softmax+apply_i8) {:>8.4} ms  vs  paged_flash_decode_i8 {:>8.4} ms  vs  split_i8+combine_i8 ({n_splits} splits) {:>8.4} ms",
-        t_ref * 1e3,
-        t_flash * 1e3,
-        t_split * 1e3,
-    );
-    println!("triad {}  |  flash {}  |  split {}  |  split vs triad max|diff| {worst:.2e}", pct(t_ref), pct(t_flash), pct(t_split));
+    println!("\npaged attention int8 @ batch={batch} seq={seq} cap={cap}: triad (scores_i8+softmax+apply_i8) {:>8.4} ms  vs  paged_flash_decode_i8 {:>8.4} ms", t_ref * 1e3, t_flash * 1e3);
+    println!("triad {}  |  flash {}", pct(t_ref), pct(t_flash));
+    match (t_split, worst) {
+        (Some(t), Some(worst)) => println!("fused GQA decode {:>8.4} ms  {}  |  fused vs triad max|diff| {worst:.2e}", t * 1e3, pct(t)),
+        _ => println!("fused GQA decode: not available for this shape or device"),
+    }
     match native {
         Some(t) => println!("native batched decode {:>8.4} ms  {}  |  native vs triad max|diff| {:.2e}", t * 1e3, pct(t), max_diff(&ctx_native)),
         None => println!("native batched decode: not available on this backend or batch"),

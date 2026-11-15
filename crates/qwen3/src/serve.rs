@@ -24,6 +24,7 @@ use model::block::{self, KernelIds};
 use model::dispatch::I8Scratch;
 use model::ops::{Ops, TierPolicy, Weight};
 use model::kv_offload::{HostKvPool, KvOffload, KvOffloadError, OffloadStats};
+use model::kv_tier::{FlashDecode, FlashDecodeShape, KvTier};
 use model::paged::{BlockAllocator, BlockTable, KvNamespace, PrefixCache, BASE_KV_NAMESPACE};
 use paramstore::ParamStore;
 
@@ -145,20 +146,12 @@ const EMBED_TILE: usize = 37;
 // reason; this ports it here, generalised to `m > 1` rows (a batched decode
 // step's `bsz`, not just a single decode row).
 const MATMUL_TILE: usize = 38;
-// M2.7: split-key two-pass FlashDecode - `paged_flash_decode_split` writes a
-// PARTIAL online-softmax state per (sequence, head, key-split),
-// `paged_flash_decode_combine` merges them into the normalised context. Live
-// ONLY at `bsz == 1` (`Op::PagedAttentionFused`'s own doc has the measured
-// A/B: a real, repeatable win over the triad there, a clear loss at
-// `bsz >= 4`) - see `Engine::batched_tape`'s own decode dispatch.
-const PAGED_FLASH_DECODE_SPLIT: usize = 39;
-const PAGED_FLASH_DECODE_COMBINE: usize = 40;
 // M8.15: `matmul_reg3`'s IDENTICAL register-tiled algorithm retiled to a
 // 64x64 output tile (`Schedule`/`TileShape::Narrow64`) - fewer wasted lanes
 // on an M/N that does not fill a 128-row/col tile, traded against more
 // (cheaper) workgroups. Measured, not assumed - see `Engine::gemm_schedule`'s
 // own doc for the actual numbers.
-const MATMUL_REG3_64: usize = 41;
+const MATMUL_REG3_64: usize = 39;
 // The INT8-KV twin of `PAGED_FLASH_PREFILL`, dispatched by causal-chunk
 // prefill when `kv_int8` - the SERVING DEFAULT, so this is the arm most
 // served requests actually take. Same selector (`Op::PagedAttentionFused` via
@@ -166,20 +159,14 @@ const MATMUL_REG3_64: usize = 41;
 // dispatch-per-(head, query-tile) shape, and the same consequence for
 // `Scratch::{scores,probs}`: with it reachable, `paged_attn_scratch_bytes`
 // sheds the `max_prefill^2 * n_heads` causal-chunk term at int8 KV too.
-const PAGED_FLASH_PREFILL_I8: usize = 42;
+const PAGED_FLASH_PREFILL_I8: usize = 40;
 // `ROPE_PAGED`'s YaRN twin, taking its per-channel angular frequencies from a
 // `head_dim/2` table (`Engine::yarn`) instead of an analytic base theta. Only
 // reachable when the config carries `rope_scaling` - see `Engine::qk_norm_rope`.
-const ROPE_PAGED_YARN: usize = 43;
-// The int8-KV decode attention: a batched, GQA-aware split-key pair (see
-// `paged_flash_decode_split_i8.wgsl`) used at every batch size, so int8 decode
-// never materialises a `[bsz, n_heads, cap]` scores/probs slab. Its split
-// count comes from [`int8_decode_splits`].
-const PAGED_FLASH_DECODE_SPLIT_I8: usize = 44;
-const PAGED_FLASH_DECODE_COMBINE_I8: usize = 45;
+const ROPE_PAGED_YARN: usize = 41;
 /// The packed q/k/v bias of a Qwen2-shaped config, added to the fused WQKV
 /// output. Appended at the end so every index above stays put.
-const BIAS_ADD: usize = 46;
+const BIAS_ADD: usize = 42;
 
 const PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
@@ -221,13 +208,9 @@ const PIPELINES: &[(&str, &str)] = &[
     ("kv_block_scatter", kernels::KV_BLOCK_SCATTER),
     ("embed_tile", kernels::EMBED_TILE),
     ("matmul_tile", kernels::MATMUL_TILE),
-    ("paged_flash_decode_split", kernels::PAGED_FLASH_DECODE_SPLIT),
-    ("paged_flash_decode_combine", kernels::PAGED_FLASH_DECODE_COMBINE),
     ("matmul_reg3_64", kernels::MATMUL_REG3_64),
     ("paged_flash_prefill_i8", kernels::PAGED_FLASH_PREFILL_I8),
     ("rope_paged_yarn", kernels::ROPE_PAGED_YARN),
-    ("paged_flash_decode_split_i8", kernels::PAGED_FLASH_DECODE_SPLIT_I8),
-    ("paged_flash_decode_combine_i8", kernels::PAGED_FLASH_DECODE_COMBINE_I8),
     ("bias_add", kernels::BIAS_ADD),
     // The per-row-adapter LoRA bank kernels (`adapters`); resolved by name
     // (`LoraBankKernels::resolve`), so their position carries no meaning.
@@ -282,11 +265,18 @@ fn pipelines() -> &'static [(&'static str, &'static str)] {
             }
         }
         v.extend(model::kv_tier::fp8_pool_pipelines());
+        v.extend(model::kv_tier::flash_decode_pipelines(&DECODE_SHAPES, &[KvTier::F32, KvTier::INT8, KvTier::FP8]));
         v.push(("splice", kernels::SPLICE));
         v.extend(model::lsa::binding::kernel_pipelines(&LSA_SHAPES, &LSA_EXTRA_GROUPS, &[model::paged_sparse::PackedKv::Int8, model::paged_sparse::PackedKv::Fp8], true));
         v
     })
 }
+
+/// The `(head_dim, group)` shapes of the dense Qwen3 family whose fused decode attention ([`model::kv_tier::FlashDecode`])
+/// this engine registers at its KV tiers: 0.6B/1.7B (group 2), 4B/8B (4), 14B (5) and 32B (8), all of head width 128. The
+/// device's kernel list is fixed before the model is known, so the family's shapes are registered; a shape outside them
+/// decodes through the triad (or the native batched decode).
+const DECODE_SHAPES: [(u32, u32); 4] = [(128, 2), (128, 4), (128, 5), (128, 8)];
 
 /// The attention shapes of the Qwen3 family (head width 128) whose per-KV-head and whole-row sparse kernels this
 /// engine registers: 0.6B/1.7B (16 heads, group 2), 4B/8B (32 heads, group 4) and 14B (40 heads, group 5). The
@@ -711,8 +701,8 @@ pub struct FusedAttention {
     /// Causal-chunk prefill (and speculative verification) is one fused
     /// dispatch per head and query tile.
     pub prefill: bool,
-    /// Decode is fused at EVERY batch size. The fp32 tier fuses only a single
-    /// row, so it never sets this: its batched steps still run the triad.
+    /// Decode runs the fused GQA decode attention ([`model::kv_tier::FlashDecode`]) at EVERY batch size, at
+    /// every KV tier of this engine.
     pub decode: bool,
 }
 
@@ -744,9 +734,9 @@ pub fn paged_attn_scratch_bytes(cfg: &QwenConfig, max_batch: u32, max_prefill: u
 
 /// The largest `head_dim` this engine has a fused paged-attention kernel
 /// registered for. The fused family is one WGSL file per head_dim TIER, and
-/// [`PIPELINES`] carries only the `HD = 128` tier - `paged_flash_prefill`,
-/// `paged_flash_prefill_i8`, and the `paged_flash_decode_split`/`_combine`
-/// pair, all of which size their shared K/V tile for "up to 128".
+/// [`PIPELINES`] carries only the `HD = 128` tier - `paged_flash_prefill` and
+/// `paged_flash_prefill_i8`, which size their shared K/V tile for "up to 128".
+/// Decode's fused attention is the GQA decode of [`DECODE_SHAPES`].
 pub const FUSED_MAX_HEAD_DIM: u32 = 128;
 
 /// [`model::block::paged_attention_fused`] narrowed to the head_dim tier THIS
@@ -767,76 +757,62 @@ fn fused_paged_attention(g: &Gpu, causal_chunk: bool, kv_int8: bool, head_dim: u
     head_dim <= FUSED_MAX_HEAD_DIM && model::block::paged_attention_fused(g, causal_chunk, kv_int8, head_dim, bsz)
 }
 
-/// The attention paths an engine with this `head_dim` and KV tier fuses on a
-/// device with `caps`, asked through the same selector (and head_dim tier) as
-/// [`fused_paged_attention`] - the answer [`paged_attn_scratch_bytes`] is
-/// sized from. Decode counts as fused only where it is at every batch size,
-/// which today is the int8 tier alone.
-pub fn fused_attention_on(caps: &DeviceCaps, head_dim: u32, kv_int8: bool) -> FusedAttention {
-    let fused = |causal_chunk: bool, kv_int8: bool| head_dim <= FUSED_MAX_HEAD_DIM && model::block::paged_attention_fused_on(caps, causal_chunk, kv_int8, head_dim, 1);
-    FusedAttention { prefill: fused(true, kv_int8), decode: kv_int8 && fused(false, true) }
+/// The attention paths an engine with this config and KV tier fuses on a device with `caps`: causal-chunk prefill
+/// through the same selector (and head_dim tier) as [`fused_paged_attention`], decode through the same selector's
+/// decode arm and the fused GQA decode's registered shapes ([`DECODE_SHAPES`]) - the answer [`paged_attn_scratch_bytes`]
+/// is sized from. An engine built on a device that did not register the decode ([`pipelines`]) narrows `decode` to
+/// what it resolved there.
+pub fn fused_attention_on(caps: &DeviceCaps, cfg: &QwenConfig, kv_int8: bool) -> FusedAttention {
+    let head_dim = cfg.head_dim;
+    let prefill = head_dim <= FUSED_MAX_HEAD_DIM && model::block::paged_attention_fused_on(caps, true, kv_int8, head_dim, 1);
+    let decode = decode_shape_registered(cfg) && model::block::paged_attention_fused_on(caps, false, kv_int8, head_dim, 1);
+    FusedAttention { prefill, decode }
 }
 
 /// [`fused_attention_on`] for any GPU backend, for planners that size memory
 /// before a device is chosen. Every GPU backend runs workgroup reductions, so
 /// this is what the engine will decide there; the CPU JIT fuses nothing.
-pub fn fused_attention_on_gpu(head_dim: u32, kv_int8: bool) -> FusedAttention {
-    fused_attention_on(&DeviceCaps::portable_baseline(DeviceClass::DiscreteGpu), head_dim, kv_int8)
+pub fn fused_attention_on_gpu(cfg: &QwenConfig, kv_int8: bool) -> FusedAttention {
+    fused_attention_on(&DeviceCaps::portable_baseline(DeviceClass::DiscreteGpu), cfg, kv_int8)
 }
 
-/// M2.7: `(n_splits, tiles_per_split)` for `paged_flash_decode_split`'s key
-/// range at this engine's `cap` - the ONE place this arithmetic lives, so
-/// `Engine::from_map_with_gpu`'s scratch sizing and `Engine::batched_tape`'s
-/// dispatch parameters can never drift apart (the same discipline
-/// `kv_pool_words` already uses for the KV pool). `desired_splits = 8`
-/// targets a roughly FIXED split count regardless of `cap` (not a fixed
-/// tokens-per-split, which would silently shrink the occupancy boost as
-/// `cap` grows) - the same choice `paged_flash_decode_split_speed_bench.rs`'s
-/// own main sweep measured this milestone's A/B with.
-fn decode_split_shape(cap: u32) -> (u32, u32) {
-    const BC: u32 = 8; // paged_flash_decode_split's own const BC
-    const DESIRED_SPLITS: u32 = 8;
-    let ntiles = cap.div_ceil(BC).max(1);
-    let tiles_per_split = ntiles.div_ceil(DESIRED_SPLITS).max(1);
-    let n_splits = ntiles.div_ceil(tiles_per_split).max(1);
-    (n_splits, tiles_per_split)
+/// Whether `cfg`'s attention shape is one this engine registers the fused decode for ([`DECODE_SHAPES`]).
+fn decode_shape_registered(cfg: &QwenConfig) -> bool {
+    cfg.n_kv_heads > 0 && cfg.n_heads.is_multiple_of(cfg.n_kv_heads) && DECODE_SHAPES.contains(&(cfg.head_dim, cfg.n_heads / cfg.n_kv_heads))
 }
 
-/// Query heads one workgroup of `paged_flash_decode_split_i8` attends to (its
-/// `SLAB`); a kv head serving more than this many is read once per slab.
-const INT8_DECODE_SLAB: u32 = 4;
-/// Keys per chunk of `paged_flash_decode_split_i8` (its `CHUNK`): the unit a
-/// sequence's live length is divided over the splits in.
-const INT8_DECODE_CHUNK: u32 = 128;
-/// Workgroups the int8 decode attention aims to have in flight. A recorded
-/// decode tape cannot see sequence lengths, so the split count is chosen from
-/// the batch size alone: enough splits per (sequence, kv head, slab) to reach
-/// this many workgroups when sequences are long, one when the batch already
-/// reaches it. A short sequence simply uses fewer of its splits - the kernel
-/// retires the others at once.
-const INT8_DECODE_TARGET_WORKGROUPS: u32 = 1024;
-/// Width of one partial-state record of `paged_flash_decode_split_i8`:
-/// `[m, l, o_0..o_127]`.
-const INT8_DECODE_PART_STRIDE: u64 = 2 + 128;
-
-/// Splits per (sequence, kv head, slab) of `paged_flash_decode_split_i8` for a
-/// decode step of `bsz` rows at capacity `cap`. The ONE place this arithmetic
-/// lives, shared by the tape's dispatch and the partial buffer's sizing.
-pub fn int8_decode_splits(cfg: &QwenConfig, bsz: u32, cap: u32) -> u32 {
-    let slabs = (cfg.n_heads / cfg.n_kv_heads).div_ceil(INT8_DECODE_SLAB);
-    let groups = bsz.max(1) * cfg.n_kv_heads * slabs;
-    let most_useful = cap.div_ceil(INT8_DECODE_CHUNK).max(1);
-    INT8_DECODE_TARGET_WORKGROUPS.div_ceil(groups).clamp(1, most_useful)
+/// The KV tier the engine's pools hold: f32, or the packed 8-bit pools as int8 or FP8.
+fn engine_kv_tier(kv_int8: bool, kv_fp8: bool) -> KvTier {
+    match (kv_int8, kv_fp8) {
+        (false, _) => KvTier::F32,
+        (true, false) => KvTier::INT8,
+        (true, true) => KvTier::FP8,
+    }
 }
 
-/// Words of partial state the int8 decode attention needs for any batch of at
-/// most `max_rows` rows: the largest `rows * n_heads * splits` records over
-/// every batch size, which the split rule keeps near
-/// `INT8_DECODE_TARGET_WORKGROUPS * group` records instead of growing with
-/// `cap`.
-fn int8_decode_part_words(cfg: &QwenConfig, max_rows: u32, cap: u32) -> u64 {
-    let records = (1..=max_rows.max(1)).map(|b| b as u64 * cfg.n_heads as u64 * int8_decode_splits(cfg, b, cap) as u64).max().unwrap_or(1);
-    records * INT8_DECODE_PART_STRIDE
+/// The fused decode's shape for a step of `bsz` rows of `cfg` over pools of `block_size` rows a block and sequences of
+/// up to `max_blocks_per_seq` blocks. `pin_splits` is the exact-decode regime: every row splits its keys as a single
+/// sequence's are split, whatever else shares the step.
+fn decode_shape(cfg: &QwenConfig, bsz: u32, block_size: u32, max_blocks_per_seq: u32, pin_splits: bool) -> FlashDecodeShape {
+    FlashDecodeShape {
+        batch: bsz,
+        n_heads: cfg.n_heads,
+        n_kv_heads: cfg.n_kv_heads,
+        head_dim: cfg.head_dim,
+        block_size,
+        max_bt: max_blocks_per_seq,
+        cap: max_blocks_per_seq * block_size,
+        pin_splits,
+    }
+}
+
+/// Words of partial records the fused decode needs for any decode step of 1 to `max_rows` rows and, with `pinned`
+/// above zero, for an exact-decode group of that many rows at the single-sequence split count: the largest over those
+/// shapes, since a recorded tape is replayed at its own row count only.
+fn decode_part_words(flash: &FlashDecode, g: &Gpu, cfg: &QwenConfig, block_size: u32, max_blocks_per_seq: u32, max_rows: u32, pinned: u32) -> u64 {
+    let free = (1..=max_rows.max(1)).map(|b| flash.part_words(g, decode_shape(cfg, b, block_size, max_blocks_per_seq, false)));
+    let pinned = (pinned > 0).then(|| flash.part_words(g, decode_shape(cfg, pinned, block_size, max_blocks_per_seq, true)));
+    free.chain(pinned).max().unwrap_or(1).max(1)
 }
 
 /// Whether `cfg` can take int8 KV at all: the append kernels pack 4 int8
@@ -890,17 +866,9 @@ struct Scratch {
     xn_final: DeviceBuffer,
     scores: DeviceBuffer,
     probs: DeviceBuffer,
-    /// M2.7: `paged_flash_decode_split`'s partial online-softmax state,
-    /// sized for `bsz == 1` only (`[n_heads, n_splits]`/`[n_heads, n_splits,
-    /// head_dim]`) - the ONLY batch size `Op::PagedAttentionFused`'s decode
-    /// arm ever picks the fused kernel at, per [`decode_split_shape`].
-    part_m: DeviceBuffer,
-    part_l: DeviceBuffer,
-    part_o: DeviceBuffer,
-    /// `paged_flash_decode_split_i8`'s merged partial state, one
-    /// [`INT8_DECODE_PART_STRIDE`]-word record per (row, head, split); sized
-    /// by [`int8_decode_part_words`] for every batch size the engine runs.
-    part_i8: DeviceBuffer,
+    /// The fused decode attention's partial records, one `head_dim + 2`-word record per (row, head, split); sized by
+    /// [`decode_part_words`] for every decode batch size the engine runs (one word when decode is not fused).
+    part: DeviceBuffer,
     // per-step metadata (uploaded each iteration)
     tok_buf: DeviceBuffer,
     pos_buf: DeviceBuffer,
@@ -985,6 +953,8 @@ pub struct Engine {
     /// Which attention paths run a fused kernel (and so need no slab in
     /// `scratch_bytes`), as decided once at construction.
     fused_attention: FusedAttention,
+    /// The fused GQA decode attention of the pools' tier, `Some` exactly when `fused_attention.decode`.
+    flash: Option<FlashDecode>,
     /// `Some` uploads real calibrated ceilings into `clip_k`/`clip_v`; `None`
     /// (the default) keeps the f32::MAX sentinel there, which the append
     /// kernel's contract documents as bit-identical to the deleted unclipped
@@ -1361,12 +1331,16 @@ impl Engine {
         // config the dispatch would then have to serve with the triad; `bsz`
         // is the only field prefill's arm never reads, so it alone is a
         // placeholder there, and the int8 decode arm does not depend on it.
-        let fused_attention = fused_attention_on(&gpu.caps(), cfg.head_dim, kv_int8);
+        // Decode is fused where the engine resolved the GQA decode for its shape and tier on THIS device (a device
+        // without the registered pipelines keeps the triad and its slab).
+        let flash = Some(FlashDecode::resolve(&gpu, engine_kv_tier(kv_int8, false), &DECODE_SHAPES)).filter(|f| f.available(&gpu, cfg.head_dim, cfg.n_heads / cfg.n_kv_heads.max(1)));
+        let mut fused_attention = fused_attention_on(&gpu.caps(), &cfg, kv_int8);
+        fused_attention.decode &= flash.is_some();
+        let flash = flash.filter(|_| fused_attention.decode);
         // `/2/4` undoes `paged_attn_scratch_bytes`'s own "scores+probs, 4
         // bytes/word" to recover the per-buffer WORD count `st` (below) wants.
         let scratch_bytes_val = paged_attn_scratch_bytes(&cfg, max_batch, max_prefill, cap, fused_attention);
         let bcap = scratch_bytes_val / 2 / 4;
-        let (decode_split_n_splits, _) = decode_split_shape(cap);
         let st = |x: u64| gpu.storage(x);
         let stage_t0 = std::time::Instant::now();
 
@@ -1438,10 +1412,7 @@ impl Engine {
             xn_final: st(b * d),
             scores: st(bcap),
             probs: st(bcap),
-            part_m: st(cfg.n_heads as u64 * decode_split_n_splits as u64),
-            part_l: st(cfg.n_heads as u64 * decode_split_n_splits as u64),
-            part_o: st(cfg.n_heads as u64 * decode_split_n_splits as u64 * cfg.head_dim as u64),
-            part_i8: st(int8_decode_part_words(&cfg, b as u32, cap)),
+            part: st(flash.as_ref().map_or(1, |f| decode_part_words(f, &gpu, &cfg, block_size, max_blocks_per_seq, b as u32, 0))),
             tok_buf: st(b),
             pos_buf: st(b),
             seqlen_buf: st(b),
@@ -1638,6 +1609,7 @@ impl Engine {
             kv_pool_bytes: kv_pool_bytes_val,
             scratch_bytes: scratch_bytes_val,
             fused_attention,
+            flash,
             kv_calib: None,
             kv_fp8: None,
             clip_k,
@@ -1777,7 +1749,25 @@ impl Engine {
             return Err("set_kv_fp8 must run before the engine has served a sequence".into());
         }
         self.kv_fp8 = Some(model::kv_tier::Fp8PoolKernels::resolve(&self.gpu)?);
+        if self.flash.is_some() {
+            let flash = FlashDecode::resolve(&self.gpu, KvTier::FP8, &DECODE_SHAPES);
+            if !flash.available(&self.gpu, self.cfg.head_dim, self.cfg.n_heads / self.cfg.n_kv_heads) {
+                return Err("fp8 KV: the fused decode attention is not registered for this shape (add model::kv_tier::flash_decode_pipelines at the FP8 tier)".into());
+            }
+            self.flash = Some(flash);
+            self.size_decode_part();
+        }
         Ok(())
+    }
+
+    /// Size `sc.part` for every decode step the engine can record at its current KV tier and, under the exact-decode
+    /// regime, for a group of its rows at the single-sequence split count. Recorded tapes hold the old buffer, so a
+    /// caller clears the tape cache (or has none yet).
+    pub(crate) fn size_decode_part(&mut self) {
+        let Some(flash) = &self.flash else { return };
+        let pinned = self.exact.as_ref().map_or(0, |e| e.group_rows);
+        let words = decode_part_words(flash, &self.gpu, &self.cfg, self.block_size, self.max_blocks_per_seq, self.max_batch.max(self.max_prefill), pinned);
+        self.sc.part = self.gpu.storage(words);
     }
 
     /// True when the packed pools hold FP8 E4M3 ([`Self::set_kv_fp8`]).
@@ -2977,46 +2967,31 @@ impl Engine {
                 let append = self.kv_fp8.map_or(APPEND_I8_CLIPPED, |k| k.append);
                 s.push(g.step(append, &[&sc.k, &sc.blk_buf, &sc.off_buf, &self.clip_k[l], &self.pool_k[l], &self.scales_k[l]], &[b, hkv, bs, hd], b * nkv));
                 s.push(g.step(append, &[&sc.v, &sc.blk_buf, &sc.off_buf, &self.clip_v[l], &self.pool_v[l], &self.scales_v[l]], &[b, hkv, bs, hd], b * nkv));
-                // The SAME `Op::PagedAttentionFused` question the fp32 branch
-                // below asks, only at `Dtype::I8`: `paged_flash_prefill_i8`
-                // serves causal-chunk prefill and the batched split-key pair
-                // serves decode at every batch size, so `fused` answers
-                // `true` in both regimes; asking once and branching mirrors
-                // the fp32 arm.
+                // The SAME `Op::PagedAttentionFused` prefill question the fp32
+                // branch below asks, only at `Dtype::I8`: `paged_flash_prefill_i8`
+                // serves causal-chunk prefill; decode runs the fused GQA decode
+                // wherever the engine resolved it (`Engine::flash`).
                 if let Some(lsa) = self.lsa.as_ref().filter(|a| a.reads_sparsely(l)) {
                     // Latent sparse attention over the packed pool: the same three
                     // shape-only dispatches as the f32 arm, the sparse read
                     // dequantising each selected key against its scale.
                     let bufs = model::lsa::engine::LayerBuffers { q: &sc.q, pos: &sc.pos_buf, seqlen: &sc.seqlen_buf, block_tables: &sc.bt_buf, pool_k: &self.pool_k[l], pool_v: &self.pool_v[l], scales: Some((&self.scales_k[l], &self.scales_v[l])), ctx: &sc.ctx };
                     lsa.record_layer(g, &mut s, l, b, &bufs).unwrap_or_else(|e| panic!("qwen3: latent sparse attention: {e}"));
-                } else {
-                    let fused = fused_paged_attention(g, causal_chunk, true, hd, b);
-                    if fused && causal_chunk {
+                } else if causal_chunk && fused_paged_attention(g, true, true, hd, b) {
                         s.push(self.dense_chunk_attention(l, b));
-                    } else if fused {
-                        // Batched GQA split-key decode: one workgroup per
-                        // (row, kv head, 4-head slab, split) reads each K/V byte
-                        // once per slab, and walks only the row's live chunks -
-                        // `seqlen_buf` is read on the device, so this tape's
-                        // dispatch size and parameters depend on `b` alone and
-                        // stay valid for every step it is replayed at. The
-                        // combine pass merges the splits that did work.
-                        // Under the exact-decode regime every row splits its keys as a single sequence's are split.
-                        let n_splits = int8_decode_splits(c, if exact.is_some() { 1 } else { b }, cap);
-                        let slabs = group.div_ceil(INT8_DECODE_SLAB);
-                        s.push(g.dispatch(
-                            self.kv_fp8.map_or(PAGED_FLASH_DECODE_SPLIT_I8, |k| k.decode_split),
-                            &[&sc.q, &self.pool_k[l], &self.pool_v[l], &self.scales_k[l], &self.scales_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.part_i8],
-                            &[b, nh, nkv, hd, group, bs, mbt, n_splits],
-                            gpu_core::Dispatch::Workgroups(b * nkv * slabs * n_splits),
-                        ));
-                        s.push(g.step(PAGED_FLASH_DECODE_COMBINE_I8, &[&sc.part_i8, &sc.seqlen_buf, &sc.ctx], &[b, nh, hd, n_splits], b * nh * 128));
+                    } else if let (false, Some(flash)) = (causal_chunk, &self.flash) {
+                        // The fused GQA decode attention: one workgroup per (row, kv head, key split) reads each K/V byte
+                        // once per group and walks only the row's live keys - `seqlen_buf` is read on the device, so this
+                        // tape's dispatches depend on `b` alone and stay valid for every step it is replayed at. Under the
+                        // exact-decode regime every row splits its keys as a single sequence's are split.
+                        let shape = decode_shape(c, b, bs, mbt, exact.is_some());
+                        let scales = Some((&self.scales_k[l], &self.scales_v[l]));
+                        s.extend(flash.dispatch(g, &sc.q, &self.pool_k[l], &self.pool_v[l], scales, &sc.bt_buf, &sc.seqlen_buf, &sc.part, &sc.ctx, shape));
                     } else if let Some(step) = (!causal_chunk && exact.is_none() && !self.gemm.is_reference_pinned() && self.kv_fp8.is_none())
                         .then(|| block::native_paged_decode_batched(g, true, &[&sc.q, &self.pool_k[l], &self.pool_v[l], &self.scales_k[l], &self.scales_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.ctx], &[b, nh, nkv, hd, group, bs, mbt]))
                         .flatten()
                     {
-                        // The whole triad as one launch for two or more sequences where the split-key pair above is not
-                        // selected; that pair is faster where both run (`qwen_bench flash-decode-i8` times the two).
+                        // The whole triad as one launch where the fused GQA decode above is not registered for this shape.
                         s.push(step);
                     } else {
                         let sp = [b, nh, group, hd, bs, hkv, cap, mbt, fb(scale)];
@@ -3031,7 +3006,6 @@ impl Engine {
                             s.push(g.step(APPLY_I8, &[&sc.probs, &self.pool_v[l], &sc.bt_buf, &sc.seqlen_buf, &self.scales_v[l], &sc.ctx], &sp[..8], b * nh * hd));
                         }
                     }
-                }
             } else {
                 // K's norm+RoPE+append collapse into ONE dispatch here (the
                 // fp32-KV branch has no quantization reduction blocking the
@@ -3040,22 +3014,14 @@ impl Engine {
                 // `self.pool_k[l]` gets the same values at their paged slot.
                 self.qk_norm_rope_append(&mut s, k_src, k_norm, &sc.k, &self.pool_k[l], hd, nkv, b * nkv, theta, bs);
                 s.push(g.step(KV_APPEND_B, &[&sc.v, &sc.blk_buf, &sc.off_buf, &self.pool_v[l]], &[b, hkv, bs], b * hkv));
-                // M2.4/M2.7: whole-triad-vs-single-fused-dispatch choice,
-                // through `Op::PagedAttentionFused` (a SEPARATE Op from
-                // `Op::PagedAttention` below - see its own doc for why),
-                // factored into `model::block::paged_attention_fused` rather
-                // than inlined here - `no_kernel_names.rs`'s own gate bans
-                // this function's body from naming the selector's return
-                // enum directly, the same reason `paged_scores_variant`
-                // below already lives in `model::block` instead of here. KV
-                // storage dtype is always F32 in this branch (the `kv_int8`
-                // arm above never reaches here). One selector call either
-                // way (`causal_chunk` decides which PHYSICAL kernel(s) a
-                // `true` answer means, per that Op's own doc - prefill's
-                // single fused dispatch vs decode's split-key PAIR) rather
-                // than asking twice, since the selector is pure per
-                // `(Op, OpShape)` but a call still costs a `DeviceCaps`
-                // filter.
+                // M2.4: causal-chunk prefill's whole-triad-vs-single-fused-dispatch
+                // choice, through `Op::PagedAttentionFused` (a SEPARATE Op from
+                // `Op::PagedAttention` below - see its own doc for why), factored
+                // into `model::block::paged_attention_fused` rather than inlined
+                // here - `no_kernel_names.rs`'s own gate bans this function's body
+                // from naming the selector's return enum directly. Decode runs the
+                // fused GQA decode wherever the engine resolved it (`Engine::flash`,
+                // sized through the same Op's decode arm in `fused_attention_on`).
                 if let Some(lsa) = self.lsa.as_ref().filter(|a| a.reads_sparsely(l)) {
                     // Latent sparse attention: index queries from the rotated
                     // queries, the read over this layer's index pages, and
@@ -3063,30 +3029,12 @@ impl Engine {
                     // only, so a cached decode tape stays valid.
                     let bufs = model::lsa::engine::LayerBuffers { q: &sc.q, pos: &sc.pos_buf, seqlen: &sc.seqlen_buf, block_tables: &sc.bt_buf, pool_k: &self.pool_k[l], pool_v: &self.pool_v[l], scales: None, ctx: &sc.ctx };
                     lsa.record_layer(g, &mut s, l, b, &bufs).unwrap_or_else(|e| panic!("qwen3: latent sparse attention: {e}"));
-                } else {
-                    // The fused decode serves a single row and the native batched one two or more, so the exact
-                    // regime keeps every batch size on the triad below, chosen as for one row.
-                    let fused = exact.is_none() && fused_paged_attention(g, causal_chunk, false, hd, b);
-                    if fused && causal_chunk {
+                } else if causal_chunk && fused_paged_attention(g, true, false, hd, b) {
                         s.push(self.dense_chunk_attention(l, b));
-                    } else if fused {
-                        // M2.7: split-key FlashDecode - the selector's decode
-                        // arm only ever answers `true` at `bsz == 1` (`Op::
-                        // PagedAttentionFused`'s own doc has the measured A/B:
-                        // a real, repeatable win there, a clear loss at
-                        // `bsz >= 4`), so `sc.part_{m,l,o}` (sized for `bsz == 1`
-                        // at construction, `Engine::decode_split_shape`) are
-                        // always wide enough here. Two dispatches replace the
-                        // triad's three, and neither materialises a
-                        // `[bsz, nh, cap]` scores/probs slab.
-                        let (n_splits, tiles_per_split) = decode_split_shape(cap);
-                        s.push(g.dispatch(
-                            PAGED_FLASH_DECODE_SPLIT,
-                            &[&sc.q, &self.pool_k[l], &self.pool_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.part_m, &sc.part_l, &sc.part_o],
-                            &[b, nh, nkv, hd, group, bs, mbt, n_splits, tiles_per_split],
-                            gpu_core::Dispatch::Workgroups(b * nh * n_splits),
-                        ));
-                        s.push(g.step(PAGED_FLASH_DECODE_COMBINE, &[&sc.part_m, &sc.part_l, &sc.part_o, &sc.ctx], &[b, nh, hd, n_splits], b * nh * 128));
+                    } else if let (false, Some(flash)) = (causal_chunk, &self.flash) {
+                        // The fused GQA decode attention, as the packed tiers run it (see there).
+                        let shape = decode_shape(c, b, bs, mbt, exact.is_some());
+                        s.extend(flash.dispatch(g, &sc.q, &self.pool_k[l], &self.pool_v[l], None, &sc.bt_buf, &sc.seqlen_buf, &sc.part, &sc.ctx, shape));
                     } else if let Some(step) = (!causal_chunk && exact.is_none() && !self.gemm.is_reference_pinned())
                         .then(|| block::native_paged_decode_batched(g, false, &[&sc.q, &self.pool_k[l], &self.pool_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.ctx], &[b, nh, nkv, hd, group, bs, mbt]))
                         .flatten()
@@ -3108,7 +3056,6 @@ impl Engine {
                         s.push(g.step(SOFTMAX_B, &[&sc.scores, &sc.seqlen_buf, &sc.probs], &[b, nh, cap], b * nh));
                         s.push(g.step(APPLY_B, &[&sc.probs, &self.pool_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.ctx], &[b, nh, group, hd, bs, hkv, cap, mbt], b * nh * hd));
                     }
-                }
             }
             self.quant_once(&mut s, &sc.ctx, hq, b);
             self.linear(&mut s, &self.lin_weights[&p("attn.wo.weight")], &sc.ctx, &sc.proj, b, exact);
@@ -4741,32 +4688,28 @@ mod tests {
     /// `paged_attn_scratch_shrinks_only_when_fused_prefill_is_actually_
     /// reachable` below pins directly.
     ///
-    /// Only the int8 tier fuses decode at every batch size, and only at a
-    /// `head_dim` the kernel reads (a multiple of 16), so the sizing differs
-    /// by storage tier exactly there: at `head_dim` 16 the int8 engine
-    /// carries no slab, the fp32 one still carries decode's.
+    /// Decode is fused at a head shape the engine registers the GQA decode for ([`DECODE_SHAPES`]: width 128 in a
+    /// group of the family), at both KV tiers, so the sizing differs by head shape exactly there: at width 128 neither
+    /// engine carries decode's slab, at width 8 both do.
     #[test]
     fn engine_paged_attn_scratch_bytes_matches_the_free_function() {
-        for head_dim in [8u32, 16] {
-            let cfg = QwenConfig { head_dim, ..QwenConfig::tiny() };
+        for (head_dim, n_heads, n_kv_heads) in [(8u32, 4u32, 2u32), (128, 8, 2)] {
+            let cfg = QwenConfig { head_dim, n_heads, n_kv_heads, ..QwenConfig::tiny() };
             let map = tiny_weights(&cfg);
             let mut recorded = Vec::new();
             for kv_int8 in [false, true] {
                 let (bs, num_blocks, max_batch, mbt, max_prefill) = (4u32, 64u32, 4u32, 8u32, 16u32);
-                let eng = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, bs, num_blocks, max_batch, mbt, max_prefill, kv_int8, false);
+                let eng = Engine::from_map_with_gpu(gpu_core::testgpu::dev(pipelines()), cfg.clone(), &map, bs, num_blocks, max_batch, mbt, max_prefill, kv_int8, false);
                 let cap = mbt * bs;
                 let fused = eng.fused_attention();
                 let cooperative = eng.gpu().caps().workgroup_reductions;
                 assert_eq!(fused.prefill, cooperative, "head_dim={head_dim} kv_int8={kv_int8}: prefill is fused wherever barriers run");
-                assert_eq!(fused.decode, cooperative && kv_int8 && head_dim == 16, "head_dim={head_dim} kv_int8={kv_int8}");
+                assert_eq!(fused.decode, cooperative && head_dim == 128, "head_dim={head_dim} kv_int8={kv_int8}");
+                assert_eq!(fused, fused_attention_on(&eng.gpu().caps(), &cfg, kv_int8), "head_dim={head_dim} kv_int8={kv_int8}: the planner's answer is the engine's");
                 assert_eq!(eng.paged_attn_scratch_bytes(), paged_attn_scratch_bytes(&cfg, max_batch, max_prefill, cap, fused), "head_dim={head_dim} kv_int8={kv_int8}");
                 recorded.push(eng.paged_attn_scratch_bytes());
             }
-            if head_dim == 8 {
-                assert_eq!(recorded[0], recorded[1], "without a fused int8 decode kernel both tiers size this buffer identically");
-            } else if gpu_core::testgpu::dev(PIPELINES).caps().workgroup_reductions {
-                assert!(recorded[1] < recorded[0], "fused int8 decode sheds decode's slab");
-            }
+            assert_eq!(recorded[0], recorded[1], "head_dim={head_dim}: decode fuses alike at both tiers, so both size this buffer identically");
         }
     }
 
@@ -7136,7 +7079,7 @@ mod tests {
     /// [`dispatched_kinds`] for an explicit config.
     fn dispatched_kinds_for(cfg: QwenConfig, kv_int8: bool, cc: u32, causal_chunk: bool) -> (Vec<usize>, bool) {
         let map = tiny_weights(&cfg);
-        let gpu = gpu_core::testgpu::dev(PIPELINES);
+        let gpu = gpu_core::testgpu::dev(pipelines());
         let cooperative = gpu.caps().workgroup_reductions;
         let eng = Engine::from_map_with_gpu(gpu, cfg.clone(), &map, 4, 64, 4, 8, 32, kv_int8, false);
         let (positions, seqlens, blocks, offsets, bt) = causal_chunk_metadata(cc);
@@ -7156,62 +7099,6 @@ mod tests {
             assert_eq!(triad, 0, "the triad must not run when the fused kernel does");
         } else {
             assert_eq!(fused, 0, "a device without workgroup reductions cannot run the fused kernel");
-            assert!(triad > 0, "the triad is the fallback without workgroup reductions");
-        }
-    }
-
-    /// M2.1's own finding (the unsplit fused decode kernel never wins) still
-    /// holds at every `bsz` M2.7's fresh profile did NOT find a split-key win
-    /// at (`bsz >= 2` - see `Op::PagedAttentionFused`'s own doc for the
-    /// measured A/B) - `bsz == 1` is `decode_bsz_one_dispatches_the_split_
-    /// key_fused_kernel_not_the_triad` below, a different regime with a
-    /// different expected dispatch, not a relaxation of this one.
-    #[test]
-    fn decode_regime_above_bsz_one_never_dispatches_a_fused_kernel() {
-        let cfg = QwenConfig::tiny();
-        let map = tiny_weights(&cfg);
-        let eng = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 64, 4, 8, 32, false, false);
-        // Decode shape: independent single-token rows, NOT a causal chunk -
-        // `causal_chunk_metadata`'s own construction happens to build valid
-        // decode metadata too (one row per position, its own block), which is
-        // exactly the point: only the CALL SITE's own `causal_chunk` flag
-        // decides the regime, not anything inferable from the shape alone.
-        // `cc = 3` (bsz = 3): deliberately ABOVE the split-key kernel's own
-        // `bsz == 1` gate, so this pins the "still no fused kernel" regime
-        // distinctly from the new `bsz == 1` one.
-        let cc = 3u32;
-        let (positions, seqlens, blocks, offsets, bt) = causal_chunk_metadata(cc);
-        let tokens: Vec<u32> = (0..cc).map(|i| i % cfg.vocab).collect();
-        let (steps, _) = eng.run_batched_steps(cc, Input::Tokens(&tokens), &positions, &seqlens, &blocks, &offsets, &bt, false);
-        let kinds: Vec<usize> = steps.iter().filter_map(|s| s.meta().map(|m| m.kernel)).collect();
-        assert_eq!(kinds.iter().filter(|&&k| k == PAGED_FLASH_PREFILL).count(), 0, "decode must never pick the prefill fused kernel");
-        assert_eq!(kinds.iter().filter(|&&k| k == PAGED_FLASH_DECODE_SPLIT || k == PAGED_FLASH_DECODE_COMBINE).count(), 0, "bsz=3 must not pick the split-key decode kernel (M2.7's own gate is bsz==1 only)");
-        let triad = kinds.iter().filter(|&&k| k == SCORES_B || k == SCORES_B_WG || k == SOFTMAX_B || k == APPLY_B).count();
-        assert!(triad > 0, "decode must still run the triad");
-    }
-
-    /// M2.7: `bsz == 1` decode dispatches the split-key fused kernel PAIR
-    /// (`paged_flash_decode_split` -> `paged_flash_decode_combine`, one of
-    /// each per layer) instead of the triad - the dispatch-count pin this
-    /// milestone's own gate requires, matching `causal_chunk_fp32_kv_
-    /// dispatches_the_fused_kernel_not_the_triad`'s own idiom for prefill.
-    /// The kernel-level numerical agreement is already gated separately
-    /// (`model::paged::flash_tests::paged_flash_decode_split_matches_
-    /// batched_triad`); this test's whole job is proving `batched_tape`
-    /// actually PICKS the split-key pair at this one batch size.
-    #[test]
-    fn decode_bsz_one_dispatches_the_split_key_fused_kernel_not_the_triad() {
-        let n_layers = QwenConfig::tiny().n_layers as usize;
-        let (kinds, cooperative) = dispatched_kinds(false, 1, false);
-        let split = kinds.iter().filter(|&&k| k == PAGED_FLASH_DECODE_SPLIT).count();
-        let combine = kinds.iter().filter(|&&k| k == PAGED_FLASH_DECODE_COMBINE).count();
-        let triad = kinds.iter().filter(|&&k| k == SCORES_B || k == SCORES_B_WG || k == SOFTMAX_B || k == APPLY_B).count();
-        if cooperative {
-            assert_eq!(split, n_layers, "one split dispatch per layer, bsz=1 decode");
-            assert_eq!(combine, n_layers, "one combine dispatch per layer, bsz=1 decode");
-            assert_eq!(triad, 0, "the triad must not run when the split-key fused kernel does");
-        } else {
-            assert_eq!(split + combine, 0, "a device without workgroup reductions cannot run the split-key kernel");
             assert!(triad > 0, "the triad is the fallback without workgroup reductions");
         }
     }
@@ -7241,40 +7128,62 @@ mod tests {
         }
     }
 
-    /// Int8-KV decode dispatches the batched GQA split-key pair
-    /// (`paged_flash_decode_split_i8` -> `paged_flash_decode_combine_i8`, one
-    /// of each per layer) at EVERY batch size and never the int8 triad - unlike
-    /// the fp32 tier, whose split-key kernel only wins at `bsz == 1`. The
-    /// kernel-level numerical agreement is gated separately
-    /// (`model::paged::flash_tests::paged_flash_decode_split_i8_matches_
-    /// int8_triad`); this test's whole job is proving `batched_tape` actually
-    /// PICKS the pair, at a `head_dim` the kernel can read.
+    /// The fused GQA decode's split pass and merge on the engine's device at `tier` for `cfg`'s shape: `None` when the
+    /// device did not resolve them.
+    fn flash_kinds(gpu: &Gpu, tier: KvTier, cfg: &QwenConfig) -> Option<(usize, usize)> {
+        let split = gpu.kernel_index(&model::kv_tier::flash_decode_name(tier, cfg.head_dim, cfg.n_heads / cfg.n_kv_heads))?;
+        Some((split, gpu.kernel_index("paged_flash_decode_gqa_combine")?))
+    }
+
+    /// Decode at a dense Qwen3 head shape (width 128, a group of the family) dispatches the fused GQA decode - one split
+    /// pass and one merge per layer - at every batch size and every KV tier, and none of the triad's three kernels; a
+    /// device without workgroup reductions keeps the triad. The kernel's numerics are gated in `model`
+    /// (`kv_tier::native_decode_of_every_tier_is_exact_at_the_qwen3_head_shapes_on_cuda`); this pins that
+    /// `batched_tape` picks it.
     #[test]
-    fn decode_int8_kv_dispatches_the_batched_gqa_kernel_at_every_bsz() {
-        let cfg = QwenConfig { head_dim: 16, ..QwenConfig::tiny() };
-        for bsz in [1u32, 3] {
-            let (kinds, cooperative) = dispatched_kinds_for(cfg.clone(), true, bsz, false);
-            let split = kinds.iter().filter(|&&k| k == PAGED_FLASH_DECODE_SPLIT_I8).count();
-            let combine = kinds.iter().filter(|&&k| k == PAGED_FLASH_DECODE_COMBINE_I8).count();
-            let triad = kinds.iter().filter(|&&k| k == SCORES_I8 || k == SOFTMAX_B || k == APPLY_I8).count();
-            if cooperative {
-                assert_eq!(split, cfg.n_layers as usize, "bsz={bsz}: one int8 split dispatch per layer");
-                assert_eq!(combine, cfg.n_layers as usize, "bsz={bsz}: one int8 combine dispatch per layer");
-                assert_eq!(triad, 0, "bsz={bsz}: the int8 triad must not run when the batched kernel does");
-            } else {
-                assert_eq!(split + combine, 0, "a device without workgroup reductions cannot run the int8 split-key kernel");
-                assert!(triad > 0, "the int8 triad is the fallback without workgroup reductions");
+    fn decode_at_a_qwen3_head_shape_dispatches_the_fused_gqa_decode_at_every_bsz_and_tier() {
+        let cfg = QwenConfig { n_heads: 8, n_kv_heads: 2, head_dim: 128, ..QwenConfig::tiny() };
+        for (kv_int8, fp8) in [(false, false), (true, false), (true, true)] {
+            let tier = engine_kv_tier(kv_int8, fp8);
+            for bsz in [1u32, 3] {
+                let map = tiny_weights(&cfg);
+                let gpu = gpu_core::testgpu::dev(pipelines());
+                let cooperative = gpu.caps().workgroup_reductions;
+                let kinds_of = flash_kinds(&gpu, tier, &cfg);
+                let mut eng = Engine::from_map_with_gpu(gpu, cfg.clone(), &map, 4, 64, 4, 8, 32, kv_int8, false);
+                if fp8 {
+                    eng.set_kv_fp8().expect("fp8 KV");
+                }
+                let (positions, seqlens, blocks, offsets, bt) = causal_chunk_metadata(bsz);
+                let tokens: Vec<u32> = (0..bsz).map(|i| i % cfg.vocab).collect();
+                let (steps, _) = eng.run_batched_steps(bsz, Input::Tokens(&tokens), &positions, &seqlens, &blocks, &offsets, &bt, false);
+                let kinds: Vec<usize> = steps.iter().filter_map(|s| s.meta().map(|m| m.kernel)).collect();
+                let triad = kinds.iter().filter(|&&k| [SCORES_B, SCORES_B_WG, SOFTMAX_B, APPLY_B, SCORES_I8, APPLY_I8].contains(&k)).count();
+                let (split, combine) = kinds_of.expect("pipelines() registers the family's decode");
+                let count = |kind: usize| kinds.iter().filter(|&&k| k == kind).count();
+                if cooperative {
+                    assert_eq!(count(split), cfg.n_layers as usize, "{tier} bsz={bsz}: one split pass per layer");
+                    assert_eq!(count(combine), cfg.n_layers as usize, "{tier} bsz={bsz}: one merge per layer");
+                    assert_eq!(triad, 0, "{tier} bsz={bsz}: the triad must not run when the fused decode does");
+                    assert!(eng.fused_attention().decode, "{tier}: the scratch was sized without the decode slab");
+                } else {
+                    assert_eq!(count(split) + count(combine), 0, "a device without workgroup reductions cannot run the fused decode");
+                    assert!(triad > 0, "the triad is the fallback without workgroup reductions");
+                }
             }
         }
     }
 
-    /// A `head_dim` that is not a multiple of 16 cannot be read as 16-byte
-    /// key pieces, so int8 decode keeps the triad there.
+    /// A head shape the engine registers no fused decode for (the tiny config's width of 8) keeps the triad, and the
+    /// engine keeps the triad's decode slab for it.
     #[test]
-    fn decode_int8_kv_keeps_the_triad_when_head_dim_is_not_a_multiple_of_16() {
-        let (kinds, _) = dispatched_kinds(true, 1, false);
-        assert_eq!(kinds.iter().filter(|&&k| k == PAGED_FLASH_DECODE_SPLIT_I8 || k == PAGED_FLASH_DECODE_COMBINE_I8).count(), 0);
-        assert!(kinds.contains(&SCORES_I8), "head_dim 8: int8 decode must run the int8 triad");
+    fn decode_keeps_the_triad_at_a_head_shape_with_no_fused_decode() {
+        for kv_int8 in [false, true] {
+            let (kinds, _) = dispatched_kinds(kv_int8, 1, false);
+            let triad = if kv_int8 { SCORES_I8 } else { SOFTMAX_B };
+            assert!(kinds.contains(&triad), "kv_int8={kv_int8}, head_dim 8: decode must run the triad");
+            assert!(!kinds.iter().any(|&k| gpu_core::testgpu::dev(pipelines()).kernel_name(k).is_some_and(|n| n.starts_with("paged_flash_decode_gqa"))), "kv_int8={kv_int8}: no fused decode at head_dim 8");
+        }
     }
 
     /// A config whose `tok.weight` is deliberately sized past `wgpu`'s

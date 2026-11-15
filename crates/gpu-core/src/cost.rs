@@ -709,13 +709,20 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
         // lives in a storage buffer, so each row is costed at the capacity the
         // block table spans, `max_bt * block_size`. Bytes are the ideal
         // traffic: q and ctx once, K and V once per KV head (a byte per
-        // element, plus a per-block scale that is negligible, for the int8
-        // pool).
+        // element, plus a per-block scale that is negligible, for the 8-bit
+        // pools; two for bf16). The fused GQA decode names its pool tier in its
+        // variant (`#kv=int8`, `#kv=fp8`, `#kv=bf16`).
         "paged_flash_prefill" | "paged_flash_prefill_hd256" | "paged_flash_prefill_i8" | "paged_flash_decode"
-        | "paged_flash_decode_i8" | "paged_flash_decode_split" | "paged_flash_decode_split_i8" => {
+        | "paged_flash_decode_i8" | "paged_flash_decode_gqa" => {
             let (rows, nh, nkv, hd, bs, max_bt) = (p(0)?, p(1)?, p(2)?, p(3)?, p(5)?, p(6)?);
             let cap = max_bt * bs;
-            let kv_elem_bytes = if base.ends_with("_i8") { 1 } else { 4 };
+            let kv_elem_bytes = if base.ends_with("_i8") || name.contains("#kv=int8") || name.contains("#kv=fp8") {
+                1
+            } else if name.contains("#kv=bf16") {
+                2
+            } else {
+                4
+            };
             // A prefill chunk is one sequence whose rows share its K/V; every
             // decode row is a sequence of its own.
             let sequences = if base.starts_with("paged_flash_prefill") { 1 } else { rows };
@@ -835,7 +842,7 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
         }
         // Merge of the split-KV partials: params [batch, n_heads, head_dim,
         // n_splits]; a rescaled weighted sum of n_splits partial contexts.
-        "paged_flash_decode_combine" | "paged_flash_decode_combine_i8" => {
+        "paged_flash_decode_gqa_combine" => {
             let (b, nh, hd, ns) = (p(0)?, p(1)?, p(2)?, p(3)?);
             f(3 * b * nh * hd * ns, 4 * (b * nh * ns * (hd + 2) + b * nh * hd))
         }
@@ -2371,8 +2378,7 @@ mod tests {
             "argmax_part", "argmax_final", "topk_extract_step", "pool_rows_gather2", "pool_rows_scatter2",
             // the fused flash-style paged attention the serving tape selects
             "paged_flash_prefill", "paged_flash_prefill_hd256", "paged_flash_prefill_i8",
-            "paged_flash_decode", "paged_flash_decode_i8", "paged_flash_decode_split",
-            "paged_flash_decode_split_i8", "paged_flash_decode_combine", "paged_flash_decode_combine_i8",
+            "paged_flash_decode", "paged_flash_decode_i8", "paged_flash_decode_gqa", "paged_flash_decode_gqa_combine",
             "paged_sparse_flash_decode", "paged_sparse_flash_gqa", "paged_sparse_flash_gqa_i8", "paged_sparse_flash_rows_i8",
             // the latent-sparse-attention index
             "lsa_read", "lsa_read_tree", "lsa_ward", "lsa_index_vectors", "lsa_index_keys_i8", "add_index_mask",
@@ -2383,6 +2389,11 @@ mod tests {
         }
         assert_eq!(cost("conv1d_dw", &[2, 6, 10, 4, 3, 1, 1, 1, 2, 10], 36).flops, 1440);
         // The entropy loss's four kernels at R = 4 tokens, K = 8 codes, D = 3: each formula written out.
+        // The fused GQA decode's K and V traffic follows the pool tier its variant names.
+        let gqa = |tier: &str| cost(&format!("paged_flash_decode_gqa#GRP=4,HD=128,HD4=32,HDS=7{tier}"), &[2, 32, 8, 128, 4, 64, 16, 4, 2], 1).bytes;
+        let qctx = 8 * 2 * 32 * 128;
+        let kv = 2 * 2 * 8 * 64 * 16 * 128;
+        assert_eq!((gqa(""), gqa("#kv=bf16"), gqa("#kv=int8"), gqa("#kv=fp8")), (qctx + 4 * kv, qctx + 2 * kv, qctx + kv, qctx + kv));
         assert_eq!(cost("entropy_logp", &[4, 8, 3], 4).flops, 4 * (8 * 19 + 2));
         assert_eq!(cost("entropy_logp", &[4, 8, 3], 4).bytes, 4 * (12 + 24 + 160 + 4));
         assert_eq!(cost("entropy_cols", &[4, 8], 8).flops, 8 * 16);

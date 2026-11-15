@@ -12,7 +12,8 @@
 //! What is timed, and why these:
 //!
 //! * the portable (WGSL) ops, on every backend that can run them: the FP8 GEMV at decode widths 1 and 8, the
-//!   paged flash prefill at a 4096-row round, and the split-key decode attention. The CPU JIT cannot run these
+//!   paged flash prefill at a 4096-row round, and the fused GQA decode attention (its native candidate where the
+//!   device has one). The CPU JIT cannot run these
 //!   cooperative kernels (its attention and int8 paths are native fast paths of the CPU backend, not WGSL), so
 //!   for the CPU the gate times the f32 GEMM it does run; every backend times that GEMM.
 //! * on CUDA the native candidates the autotuner may pick, by the same shapes and the best of what serves each:
@@ -42,12 +43,17 @@ fn kernel_set() -> &'static [(&'static str, &'static str)] {
         let mut v: Vec<(&'static str, &'static str)> = vec![
             ("matmul", kernels::MATMUL),
             ("paged_flash_prefill_hd256", kernels::PAGED_FLASH_PREFILL_HD256),
-            ("paged_flash_decode_split", kernels::PAGED_FLASH_DECODE_SPLIT),
-            ("paged_flash_decode_combine", kernels::PAGED_FLASH_DECODE_COMBINE),
+            ("paged_flash_decode_gqa_combine", kernels::PAGED_FLASH_DECODE_GQA_COMBINE),
+            gqa_decode(),
         ];
         v.extend(gemv_variants().into_iter().filter(|(name, _)| name.starts_with(FP8)));
         v
     })
+}
+
+/// The fused GQA decode attention's split pass at the production decode shape (head width 128, a group of 2).
+fn gqa_decode() -> (&'static str, &'static str) {
+    kernels::template::interned("paged_flash_decode_gqa", kernels::PAGED_FLASH_DECODE_GQA, &[("GRP", 2), ("HD", 128), ("HD4", 32), ("HDS", 7)]).expect("the decode kernel declares its constants")
 }
 
 /// A deterministic word stream for filler, whose bytes are valid finite E4M3 codes (no NaN, no infinity).
@@ -196,8 +202,9 @@ fn flash_prefill(gpu: &Gpu, n: u32, out: &mut Out) {
     }
 }
 
-/// Decode attention for `batch` sequences of `seq` cached tokens at head width 128 (the production decode shape):
-/// the portable split-key pair on every backend with cooperative kernels, the batched native kernel on CUDA.
+/// Decode attention for `batch` sequences of `seq` cached tokens at head width 128 (the production decode shape): the
+/// fused GQA decode (split pass and merge; the native candidate where the device has one) on every backend with
+/// cooperative kernels, the batched native kernel on CUDA.
 fn decode_attention(gpu: &Gpu, out: &mut Out) {
     let (batch, n_heads, n_kv, hd, bs, seq) = (16u32, 16u32, 8u32, 128u32, 16u32, 2048u32);
     let group = n_heads / n_kv;
@@ -214,18 +221,17 @@ fn decode_attention(gpu: &Gpu, out: &mut Out) {
     // Both K and V planes are read once: the bytes the step must move.
     let bytes = 2.0 * f64::from(batch) * f64::from(seq) * f64::from(kv_stride) * 4.0;
     if gpu.caps().workgroup_reductions {
-        let tiles_per_split = 16u32;
-        let n_splits = (seq / 8).div_ceil(tiles_per_split).max(1);
-        let (pm, pl) = (gpu.storage(u64::from(batch * n_heads * n_splits)), gpu.storage(u64::from(batch * n_heads * n_splits)));
-        let po = gpu.storage(u64::from(batch * n_heads * n_splits * hd));
+        // 128-key tiles, two a split: 8 splits a (sequence, kv head), 1024 workgroups.
+        let tiles_per_split = 2u32;
+        let n_splits = seq.div_ceil(128 * tiles_per_split);
+        let part = gpu.storage(u64::from(batch * n_heads * n_splits * (hd + 2)));
         let sp = [batch, n_heads, n_kv, hd, group, bs, mbs, n_splits, tiles_per_split];
-        let cp = [batch, n_heads, hd, n_splits];
-        let split = gpu.dispatch(gpu.kernel_index("paged_flash_decode_split").expect("registered"), &[&q, &pk, &pv, &bt, &sl, &pm, &pl, &po], &sp, Dispatch::Workgroups(batch * n_heads * n_splits));
-        let combine = gpu.step(gpu.kernel_index("paged_flash_decode_combine").expect("registered"), &[&pm, &pl, &po, &ctx], &cp, batch * n_heads * 128);
+        let split = gpu.dispatch(gpu.kernel_index(gqa_decode().0).expect("registered"), &[&q, &pk, &pv, &bt, &sl, &part], &sp, Dispatch::Workgroups(batch * n_kv * n_splits));
+        let combine = gpu.step(gpu.kernel_index("paged_flash_decode_gqa_combine").expect("registered"), &[&part, &ctx], &[batch, n_heads, hd, n_splits], batch * n_heads * 256);
         let secs = best_secs(gpu, &[split, combine], 8, 5);
-        out.rate(&format!("decode_attn_portable_b{batch}_s{seq}"), bytes / secs / 1e9, "GB/s");
+        out.rate(&format!("decode_attn_gqa_b{batch}_s{seq}"), bytes / secs / 1e9, "GB/s");
     } else {
-        println!("PERF-SKIP decode_attn_portable the cooperative decode kernels cannot run on this device");
+        println!("PERF-SKIP decode_attn_gqa the cooperative decode kernels cannot run on this device");
     }
     if gpu.kind() == "cuda" {
         let params = [batch, n_heads, n_kv, hd, group, bs, mbs];

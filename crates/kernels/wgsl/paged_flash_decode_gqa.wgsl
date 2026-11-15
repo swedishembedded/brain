@@ -33,14 +33,12 @@
 // A compact KV cache saves memory either way; it only saves TIME once the
 // attention reads those bytes at bandwidth.
 //
-// THE SHAPE. split-key flash decoding (the same two-pass
-// shape `paged_flash_decode_split.wgsl` documents - no code from either is
-// transcribed): the sequence's keys are cut into splits of `tiles_per_split`
-// 128-key tiles, one workgroup per (sequence, kv head, split), so even ONE
-// sequence fills the machine; each workgroup writes its partial `(o, m, l)`
-// online-softmax state and `paged_flash_decode_gqa_combine` merges them. What
-// is new against that kernel is that a workgroup owns a KV head and attends
-// ALL `group` (<= 8) query heads that share it, so each key and value is read
+// THE SHAPE. split-key flash decoding: the sequence's keys are cut into
+// splits of `tiles_per_split` 128-key tiles, one workgroup per (sequence, kv
+// head, split), so even ONE sequence fills the machine; each workgroup writes
+// its partial `(o, m, l)` online-softmax state and
+// `paged_flash_decode_gqa_combine` merges them. A workgroup owns a KV head and
+// attends ALL `group` query heads that share it, so each key and value is read
 // from memory once per group rather than once per head.
 //
 // THE THREAD MAP (128 threads, 128-key tiles).

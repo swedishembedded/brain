@@ -164,22 +164,15 @@ pub enum Op {
     /// clearly slower than the int8 triad at every context length swept). Neither
     /// unsplit kernel is ever a [`candidates`] member for `k = 0`.
     ///
-    /// The split-key design (`paged_flash_decode_split` -> `_combine`) fixes
-    /// that same occupancy problem for F32 KV by chopping the serialised tile
-    /// walk across MORE independent workgroups, and WINS at `bsz == 1` (a
-    /// real, repeatable win there, a clear loss at `bsz >= 4` - the measured
-    /// A/B `Op::PagedAttentionFused`'s `(0, F32)` arm's `m == 1` gate
-    /// encodes). `Reference` (the triad) remains the only F32 candidate at
-    /// `bsz >= 2`.
-    ///
-    /// The I8 tier has no such gate. `paged_flash_decode_split_i8` ->
-    /// `paged_flash_decode_combine_i8` is batched and GQA-aware: one
-    /// workgroup serves four query heads of a kv head, so K and V are read
-    /// once per slab instead of once per query head, and its work follows
-    /// the live sequence lengths rather than the block table's capacity. It
-    /// beats the int8 triad at every batch size, so `(0, Dtype::I8)` is
-    /// `FusedFlash` for any `shape.m` once `head_dim` is a multiple of 16 up
-    /// to 128 (the key rows are read as 16-byte pieces).
+    /// Decode's fused form is the split-key GQA decode (`paged_flash_decode_gqa`
+    /// -> `paged_flash_decode_gqa_combine`, `model::kv_tier::FlashDecode`): one
+    /// workgroup per (sequence, kv head, key split) attends every query head of
+    /// the group, so K and V are read once per group, and the split count fills
+    /// the device whatever the batch. Its native forms read the pool at the HBM
+    /// roof at 16 sequences and more (knowledge 465), so `(0, F32 | I8)` is
+    /// `FusedFlash` at every `shape.m` for a power-of-two `head_dim` from 16 to
+    /// 256 (the kernel's specialisations; the caller also needs one registered
+    /// for its group). The I8 tier stands for both 8-bit pools (int8, FP8).
     ///
     /// Causal-chunk prefill's `k = 1` arm is where `FusedFlash` is actually
     /// reachable, at BOTH KV storage tiers: `paged_flash_prefill` measured
@@ -1281,36 +1274,8 @@ pub fn candidates(op: Op, shape: OpShape, caps: &DeviceCaps) -> Vec<KernelVarian
         // `causal_chunk` (via `shape.k`) already disambiguates prefill from
         // decode within this one Op.
         //
-        // M2.7's decode arm (`k = 0`): M2.1/M2.2 measured the UNSPLIT fused
-        // decode kernel (`paged_flash_decode`) losing to the triad at every
-        // batch size on a Tesla P40, so decode stayed `Reference`-only ever
-        // since. A genuinely fresh profile on THIS repo's Intel Arc Xe-LPG
-        // iGPU (decision-4: stale results from different hardware are not a
-        // blocker), interleaved min-of-N against both the triad and the
-        // unsplit kernel with a DVFS ramp
-        // (`crates/gpu-core/tests/it/paged_flash_decode_split_speed_bench.rs`),
-        // found the SPLIT-key two-pass kernel (`paged_flash_decode_split` ->
-        // `paged_flash_decode_combine`) a real, repeatable win over the
-        // triad ONLY at `batch (shape.m) == 1`, confirmed across three
-        // independent measurement runs at both `seq=512` and `seq=4096`
-        // (the measured ratios are recorded in this milestone's own
-        // roadmap ledger entry, not duplicated here - a number nothing
-        // re-checks is a number that goes stale). `batch == 2` was
-        // measured MIXED (a marginal win at `seq=512`, a marginal loss at
-        // `seq=4096`) and `batch >= 4` a clear, growing loss - the triad's
-        // own far larger per-score parallelism (M2.1's own root-cause
-        // finding) still wins once there is more than one sequence's
-        // independent workgroups to fill the device with. `shape.m == 1`
-        // is therefore the gate, not "decode, unconditionally" - a
-        // narrower win than prefill's, stated honestly rather than rounded
-        // up. `shape.n` reuses the SAME
-        // head_dim ceiling `paged_flash_decode`'s own `HD=128` tile has
-        // (`paged_flash_decode_split` shares that exact tile) - no `n=256`
-        // arm exists for decode (no such kernel was built; M2.5's own
-        // hd256 sibling is prefill-only).
-        // The I8 decode arm is a different, batched GQA kernel and carries no
-        // batch gate: see the Op's own doc. It needs `n % 16 == 0` because
-        // it reads each key row as 16-byte pieces.
+        // The decode arm (`k = 0`) is the split-key GQA decode at every batch size (see the Op's own doc): its
+        // specialisations are the power-of-two head widths from 16 to 256 (`model::kv_tier::check_flash_shape`).
         // The I8 prefill arm has NO `n == 256` tier: `paged_flash_prefill_i8`
         // is the int8 twin of the `HD=128` kernel only, and M2.5's streamed
         // two-fragment hd256 sibling has no int8 counterpart - so a
@@ -1319,8 +1284,7 @@ pub fn candidates(op: Op, shape: OpShape, caps: &DeviceCaps) -> Vec<KernelVarian
         Op::PagedAttentionFused => match (shape.k, shape.dtype) {
             (1, Dtype::F32) if shape.n <= 128 || shape.n == 256 => vec![FusedFlash, Reference],
             (1, Dtype::I8) if shape.n <= 128 => vec![FusedFlash, Reference],
-            (0, Dtype::F32) if shape.m == 1 && shape.n <= 128 => vec![FusedFlash, Reference],
-            (0, Dtype::I8) if shape.n > 0 && shape.n <= 128 && shape.n.is_multiple_of(16) => vec![FusedFlash, Reference],
+            (0, Dtype::F32 | Dtype::I8) if shape.n.is_power_of_two() && (16..=256).contains(&shape.n) => vec![FusedFlash, Reference],
             _ => vec![Reference],
         },
         // No portable fused form: see the variant's own doc.
@@ -2205,11 +2169,9 @@ mod tests {
     /// exists, hence the missing `n == 256` tier there). A prefill `n`
     /// outside those sets, and every remaining prefill storage tier (no
     /// fused kernel exists there), stays `Reference`-only. Decode (`k = 0`)
-    /// is `FusedFlash` for F32 only at `shape.m == 1 && shape.n <= 128` (the
-    /// split-key kernel loses to the triad at larger batches), and for I8 at
-    /// every `shape.m` when `shape.n` is a multiple of 16 up to 128 (the
-    /// batched GQA kernel reads key rows as 16-byte pieces); `Reference`
-    /// everywhere else. Every `FusedFlash` case stays `Reference` on the CPU
+    /// is `FusedFlash` for F32 and I8 at every `shape.m` when `shape.n` is a
+    /// power of two from 16 to 256 (the split-key GQA decode's
+    /// specialisations); `Reference` everywhere else. Every `FusedFlash` case stays `Reference` on the CPU
     /// JIT (`workgroup_reductions` is false there, the SAME correctness gate
     /// `Op::PagedAttention`'s own `WorkgroupPerOutput` arm uses).
     ///
@@ -2222,7 +2184,7 @@ mod tests {
     fn paged_attention_fused_only_offers_the_fused_kernel_at_causal_chunk_f32_or_i8() {
         let s = DefaultSelector;
         for m in [1u32, 128, 2048] {
-            for n in [16u32, 24, 128, 512, 8192] {
+            for n in [16u32, 24, 128, 256, 512, 8192] {
                 let prefill_f32 = shape(m, n, 1, Dtype::F32);
                 let prefill_wins = n <= 128 || n == 256;
                 assert_eq!(
@@ -2264,15 +2226,11 @@ mod tests {
                         "m={m} n={n} dtype={dtype:?}: no fused prefill kernel at this storage tier yet"
                     );
                 }
-                // Decode: F32 wins only at bsz==1 with n<=128; I8 wins at every
-                // bsz for n a multiple of 16 up to 128.
+                // Decode: the split-key GQA decode at every bsz for a power-of-two
+                // head width from 16 to 256, at the F32 and 8-bit tiers.
                 for dtype in [Dtype::F32, Dtype::BF16, Dtype::F16, Dtype::I8, Dtype::Q4] {
                     let decode = shape(m, n, 0, dtype);
-                    let wins = match dtype {
-                        Dtype::F32 => m == 1 && n <= 128,
-                        Dtype::I8 => n <= 128 && n % 16 == 0,
-                        _ => false,
-                    };
+                    let wins = matches!(dtype, Dtype::F32 | Dtype::I8) && n.is_power_of_two() && (16..=256).contains(&n);
                     assert_eq!(
                         s.select(Op::PagedAttentionFused, decode, &gpu_caps()),
                         if wins { KernelVariant::FusedFlash } else { KernelVariant::Reference },

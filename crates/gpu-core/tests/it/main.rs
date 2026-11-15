@@ -91,7 +91,6 @@ mod moe_nvfp4;
 mod native_f16_provider;
 mod native_helpers_decline_off_cuda;
 mod nvfp4_wgmma_native;
-mod paged_flash_decode_split_speed_bench;
 mod params_guard_per_handle;
 mod pcie_handoff;
 mod peer_copy;

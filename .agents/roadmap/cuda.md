@@ -1010,8 +1010,8 @@ statistics are re-associated) and is identical run to run.
   once built. Spread of repeated runs on an idle card: within 12 % (the tolerance
   covers a card shared with a light neighbour, not a served benchmark).
 - What it times: the f32 GEMM (every backend), the FP8 GEMV at m=1/8,
-  4096-row flash prefill and split-key decode attention (the WGSL kernels, on
-  Vulkan and CUDA), and on CUDA the native FP8 candidates (m=1/16/64 and a
+  4096-row flash prefill and the fused GQA decode attention (the WGSL kernels on
+  Vulkan, its native candidate on CUDA: `decode_attn_gqa_*`), and on CUDA the native FP8 candidates (m=1/16/64 and a
   4096-row round), tensor-core flash prefill, batched decode attention and GDN
   chunk forward. The CPU backend runs none of the cooperative WGSL kernels (its
   attention and int8 paths are native fast paths with no single op to time), so

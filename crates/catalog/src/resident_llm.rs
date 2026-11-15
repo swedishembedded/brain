@@ -1411,7 +1411,7 @@ impl ResidentModel for QwenResident {
             // reductions (only the CPU JIT lacks them, the same gate
             // `Op::PagedAttentionFused` itself checks), so this predicts the
             // real dispatch instead of assuming the never-fused worst case.
-            let fused = if device == Device::Cpu { qwen3::serve::FusedAttention::default() } else { qwen3::serve::fused_attention_on_gpu(checkpoint_cfg.head_dim, kv_int8) };
+            let fused = if device == Device::Cpu { qwen3::serve::FusedAttention::default() } else { qwen3::serve::fused_attention_on_gpu(&checkpoint_cfg, kv_int8) };
             QwenResident::check_buffers_fit_one_binding(
                 &checkpoint_cfg,
                 block_size,
@@ -2168,7 +2168,7 @@ mod tests {
             "this test's premise is the real reported refusal under the never-fused worst case"
         );
         assert!(
-            QwenResident::check_buffers_fit_one_binding(&cfg, block_size, num_blocks, max_batch, max_prefill, cap, true, 32768, "test.safetensors", qwen3::serve::fused_attention_on_gpu(cfg.head_dim, true)).is_ok(),
+            QwenResident::check_buffers_fit_one_binding(&cfg, block_size, num_blocks, max_batch, max_prefill, cap, true, 32768, "test.safetensors", qwen3::serve::fused_attention_on_gpu(&cfg, true)).is_ok(),
             "the fused kernel's real scratch buffer must fit, once activate() actually knows the device supports it"
         );
     }
@@ -2210,7 +2210,7 @@ mod tests {
             QwenResident::pool_sizing(ctx, max_batch, max_prefill_cap, None);
         let cap = max_blocks_per_seq * block_size;
         QwenResident::check_buffers_fit_one_binding(
-            &cfg, block_size, num_blocks, mb, max_prefill, cap, true, ctx, "qwen3-0.6b", qwen3::serve::fused_attention_on_gpu(cfg.head_dim, true),
+            &cfg, block_size, num_blocks, mb, max_prefill, cap, true, ctx, "qwen3-0.6b", qwen3::serve::fused_attention_on_gpu(&cfg, true),
         )
         .unwrap_or_else(|e| panic!("auto-sizing chose ctx={ctx}, which its own guard refuses: {e}"));
     }
@@ -2261,7 +2261,7 @@ mod tests {
         assert!(profile.largest_binding > 128 * (1 << 20), "too big for a 128 MiB device");
         assert!(profile.largest_binding < WGPU_MAX_REPORTABLE_BINDING_BYTES, "but fine on a desktop card");
         QwenResident::check_buffers_fit_one_binding(
-            &cfg, block_size, num_blocks, mb, max_prefill, cap, true, ctx, "qwen3-0.6b", qwen3::serve::fused_attention_on_gpu(cfg.head_dim, true),
+            &cfg, block_size, num_blocks, mb, max_prefill, cap, true, ctx, "qwen3-0.6b", qwen3::serve::fused_attention_on_gpu(&cfg, true),
         )
         .expect("the early ceiling must not refuse a sizing real hardware runs");
     }

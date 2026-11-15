@@ -18,9 +18,7 @@
 //
 // The second pass of `paged_flash_decode_gqa`: each thread owns one
 // `(b, h, d)` output channel and folds the `n_splits` records of its
-// sequence-head with the two-term online-softmax merge
-// `paged_flash_decode_combine.wgsl` documents (same identity, a different
-// record layout):
+// sequence-head with the two-term online-softmax merge:
 //
 //   m_new = max(m, m_i);  corr = exp(m - m_new);  corr_i = exp(m_i - m_new)
 //   l = l * corr + l_i * corr_i;  o = o * corr + o_i * corr_i;  m = m_new

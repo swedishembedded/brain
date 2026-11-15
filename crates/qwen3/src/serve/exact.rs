@@ -16,8 +16,7 @@
 //!   per weight shape through the autotuner, never the per-bucket choice or a library GEMM;
 //! - a step carries at most [`ExactDecode::group_rows`] rows (`select::exact_decode_group_rows`, the rows over which
 //!   that variant keeps its arithmetic); a larger batch is decoded as consecutive groups, each a whole step;
-//! - the int8 attention splits every row's keys as a single sequence's are split, and the f32-KV attention runs the
-//!   one form that serves every batch size;
+//! - the fused decode attention splits every row's keys as a single sequence's are split, at every KV tier;
 //! - a prompt reuses only cached blocks of whole prefill chunks at the cold prompt's chunk boundaries, so a cached
 //!   prefix holds the arithmetic a cold prefill of it computes, and the rest of the prompt is the cold prompt's
 //!   remaining chunks;
@@ -32,7 +31,7 @@ use std::collections::HashMap;
 use gpu_core::select::{AutoTuner, Dtype, KernelVariant, Op, OpShape, DECODE_REGIME_MAX_ROWS};
 use model::paged::BlockTable;
 
-use super::{i8_shapes, int8_decode_part_words, int8_decode_splits, Engine, INT8_DECODE_PART_STRIDE};
+use super::{i8_shapes, Engine};
 
 /// What the exact-decode regime pins, chosen once when it is turned on.
 pub(super) struct ExactDecode {
@@ -109,13 +108,10 @@ impl Engine {
                 i8.insert((n, k), v);
             }
         }
-        // Every row splits its keys as a single sequence's are split, so the partial buffer holds a whole group at
-        // the single-sequence split count.
-        let words = u64::from(group_rows) * u64::from(self.cfg.n_heads) * u64::from(int8_decode_splits(&self.cfg, 1, self.cap)) * INT8_DECODE_PART_STRIDE;
-        if self.kv_int8 && words > int8_decode_part_words(&self.cfg, self.max_batch.max(self.max_prefill), self.cap) {
-            self.sc.part_i8 = self.gpu.storage(words);
-        }
         self.exact = Some(ExactDecode { group_rows, i8 });
+        // Every row splits its keys as a single sequence's are split, so the partial buffer also holds a whole group
+        // at the single-sequence split count.
+        self.size_decode_part();
         Ok(())
     }
 

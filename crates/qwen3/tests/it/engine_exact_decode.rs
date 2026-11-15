@@ -135,6 +135,21 @@ fn exact_decode_keeps_a_request_on_its_solo_output_with_f32_kv() {
     assert_batch_invariant(engine(Dtype::F32, false, true), cfg().vocab, "f32 weights, f32 KV");
 }
 
+/// The same contract at a dense Qwen3 head shape (width 128, a group of 4), where decode runs the fused GQA decode
+/// attention: under the regime every row splits its keys as a single sequence's are, at both KV tiers.
+#[test]
+fn exact_decode_keeps_a_request_on_its_solo_output_through_the_fused_decode() {
+    for kv_int8 in [true, false] {
+        let cfg = QwenConfig { n_heads: 8, n_kv_heads: 2, head_dim: 128, ..cfg() };
+        let weights = qwen3::init_weights(&cfg, 3);
+        let gpu = gpu_core::testgpu::dev(&[]);
+        let mut e = Engine::from_map_tier_on(&gpu, cfg.clone(), &weights, BLOCK, 2048, MAX_BATCH, BLOCKS_PER_SEQ, MAX_PREFILL, kv_int8, Dtype::F32);
+        assert_eq!(e.fused_attention().decode, gpu.caps().workgroup_reductions, "kv_int8={kv_int8}: decode runs the fused GQA decode wherever the device runs barrier kernels");
+        e.set_exact_decode(true).expect("the engine takes the exact-decode regime");
+        assert_batch_invariant(e, cfg.vocab, &format!("f32 weights, {} KV, head width 128", if kv_int8 { "int8" } else { "f32" }));
+    }
+}
+
 /// A regime the engine cannot make batch-invariant is refused by name, never served approximately.
 #[test]
 fn exact_decode_is_refused_where_a_row_cannot_be_kept_independent() {
