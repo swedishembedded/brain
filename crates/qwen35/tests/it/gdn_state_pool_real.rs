@@ -12,21 +12,20 @@
 //! The pool is the path that matters: a served sequence's state lives in the per-slot pool between decode steps, so a
 //! bf16 pool rounds every sequence's state to bf16 after every token and carries that rounding forward through the whole
 //! generation. (The working copy a prefill or the single-sequence parity tool reads is always f32, so
-//! `qwen35_fp8_parity` cannot see this.) The gate therefore runs several sequences through the pooled batched decode:
+//! `qwen35_fp8_parity` cannot see this.) The gate therefore runs several sequences through the pooled batched decode,
+//! one pass per precision:
 //!
-//! 1. the f32-pool engine serves [`SEQS`] long prompts to [`NEW_TOKENS`] greedy tokens each (the Scheduler's served
-//!    path); that stream is the reference;
-//! 2. the f32 pool and the bf16 pool each score that SAME stream teacher-forced through the pooled batched decode
-//!    (`teacher_forced_logits_batch`: prefill into the pool, then one batched step per position), so their logits
-//!    compare position for position even where free-running generation would have diverged;
-//! 3. the bf16 pool is also served free-running, and the length of the identical prefix of each sequence is reported.
+//! 1. the f32-pool engine decodes [`SEQS`] long prompts greedily for [`NEW_TOKENS`] positions each
+//!    (`greedy_logits_batch`), keeping every position's logits: that stream and those rows are the reference;
+//! 2. the bf16 pool scores the SAME stream teacher-forced through the same pooled batched decode
+//!    (`teacher_forced_logits_batch`), so the two compare position for position even where free-running generation
+//!    would have diverged.
 //!
-//! Reported: top-1 agreement of bf16 against f32 over all positions, the mean KL(f32 || bf16) in nats, and the worst
-//! sequence. Self-skips when the checkpoint is not in the model store (`brain pull Qwen/Qwen3.8-27B-FP8`).
+//! Reported: top-1 agreement of bf16 against f32 over all positions, the mean KL(f32 || bf16) in nats, the worst
+//! sequence, and the mean KL of each quarter of the positions (whether the rounding still grows late in a sequence). Self-skips when the checkpoint is not in the model store (`brain pull Qwen/Qwen3.8-27B-FP8`).
 
 use model::kv_tier::KvTier;
 use model::policy::GdnState;
-use model::serve::{Request, Scheduler};
 use qwen35::int8_gguf_resident::{budgeted_gpus, held_tiers_at, Qwen35GgufEngine, Qwen35GgufResident};
 
 const STORE: &str = "Qwen/Qwen3.8-27B-FP8";
@@ -83,15 +82,6 @@ fn prompts(engine: &Qwen35GgufEngine) -> Vec<Vec<u32>> {
         .collect()
 }
 
-/// The served greedy continuations (no stop tokens: every sequence runs the whole budget).
-fn serve(engine: Qwen35GgufEngine, prompts: &[Vec<u32>]) -> (Qwen35GgufEngine, Vec<Vec<u32>>) {
-    let mut sched = Scheduler::new(engine, SEQS);
-    let ids: Vec<u64> = prompts.iter().map(|p| sched.submit(Request { prompt: p.clone(), max_new: NEW_TOKENS, stop: Vec::new() })).collect();
-    let mut done = sched.run();
-    let streams = ids.iter().map(|id| done.remove(id).expect("the request completes")).collect();
-    (sched.into_decoder(), streams)
-}
-
 fn argmax(v: &[f32]) -> usize {
     v.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).map(|(i, _)| i).unwrap_or(0)
 }
@@ -121,28 +111,28 @@ fn a_bf16_state_pool_serves_long_generations_like_the_f32_pool() {
     let Some(f32_engine) = engine(&path, GdnState::F32) else { return };
     assert!(!f32_engine.instance().gdn_state_is_bf16());
     let prompts = prompts(&f32_engine);
-    let (f32_engine, reference) = serve(f32_engine, &prompts);
-    assert!(reference.iter().all(|s| s.len() == NEW_TOKENS), "every sequence ran the whole budget");
-    let f32_rows = f32_engine.instance().teacher_forced_logits_batch(&prompts, &reference).expect("f32 pooled logits");
+    let (reference, f32_rows) = f32_engine.instance().greedy_logits_batch(&prompts, NEW_TOKENS).expect("f32 pooled greedy decode");
     drop(f32_engine);
 
     let bf16_engine = engine(&path, GdnState::Bf16).expect("the same cards");
     assert!(bf16_engine.instance().gdn_state_is_bf16());
     let bf16_rows = bf16_engine.instance().teacher_forced_logits_batch(&prompts, &reference).expect("bf16 pooled logits");
-    let (bf16_engine, free) = serve(bf16_engine, &prompts);
     drop(bf16_engine);
 
-    let (mut agree, mut kl_sum, mut worst_seq) = (0usize, 0f64, (1f64, 0usize));
+    const QUARTERS: usize = 4;
+    let (mut agree, mut kl_sum, mut worst_seq, mut quarter_kl) = (0usize, 0f64, (1f64, 0usize), [0f64; QUARTERS]);
     for (seq, (f, b)) in f32_rows.iter().zip(&bf16_rows).enumerate() {
+        assert_eq!(f.len(), NEW_TOKENS, "sequence {seq} decoded every position");
         let (mut seq_agree, mut seq_kl) = (0usize, 0f64);
-        for (x, y) in f.iter().zip(b) {
+        for (pos, (x, y)) in f.iter().zip(b).enumerate() {
             assert!(y.iter().all(|v| v.is_finite()), "sequence {seq} has non-finite bf16-pool logits");
             seq_agree += usize::from(argmax(x) == argmax(y));
-            seq_kl += kl(x, y);
+            let d = kl(x, y);
+            seq_kl += d;
+            quarter_kl[pos * QUARTERS / f.len()] += d;
         }
         let top1 = seq_agree as f64 / f.len() as f64;
-        let prefix = free[seq].iter().zip(&reference[seq]).take_while(|(a, b)| a == b).count();
-        println!("sequence {seq}: {} positions, top-1 {:.2} %, mean KL {:.3e} nats, free-running bf16 pool matches the f32 stream for {prefix} tokens", f.len(), 100.0 * top1, seq_kl / f.len() as f64);
+        println!("sequence {seq}: {} positions, top-1 {:.2} %, mean KL {:.3e} nats", f.len(), 100.0 * top1, seq_kl / f.len() as f64);
         agree += seq_agree;
         kl_sum += seq_kl;
         if top1 < worst_seq.0 {
@@ -152,6 +142,8 @@ fn a_bf16_state_pool_serves_long_generations_like_the_f32_pool() {
     let positions = (SEQS * NEW_TOKENS) as f64;
     let (top1, mean_kl) = (agree as f64 / positions, kl_sum / positions);
     println!("bf16 pool vs f32 pool: {positions} positions, top-1 agreement {:.2} %, mean KL {mean_kl:.3e} nats, worst sequence {} at {:.2} %", 100.0 * top1, worst_seq.1, 100.0 * worst_seq.0);
+    let per_quarter: Vec<String> = quarter_kl.iter().map(|k| format!("{:.3e}", k * QUARTERS as f64 / positions)).collect();
+    println!("mean KL by quarter of the positions: {}", per_quarter.join(", "));
     assert!(top1 >= MIN_TOP1, "top-1 agreement {top1:.4} is under {MIN_TOP1}");
     assert!(mean_kl <= MAX_MEAN_KL, "mean KL {mean_kl:.3e} nats is over {MAX_MEAN_KL:.3e}");
 }

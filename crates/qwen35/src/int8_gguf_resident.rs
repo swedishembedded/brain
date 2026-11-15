@@ -378,6 +378,9 @@ pub fn layer_cost(cfg: &Qwen35Config, cap: u32, tier: &TierPolicy, kv: KvTier, m
     serving_cost(cfg, &ServingShape::new(cap, tier.clone(), kv, max_batch))
 }
 
+/// Logit rows of a batched decode run: `[sequence][position][vocab]`.
+pub type BatchLogits = Vec<Vec<Vec<f32>>>;
+
 /// Everything a serving configuration holds on the cards besides the model's
 /// own weights - the one request the cost model ([`serving_cost`]), the sizing
 /// check ([`sizing_refusal`]) and the automatic context ([`auto_cap`]) answer.
@@ -3039,28 +3042,49 @@ impl Qwen35GgufInstance {
     /// path a server's decode batch takes, and the one whose projections run the batch-sized GEMV kernels (the
     /// single-sequence method only ever runs one row). Row `j` of sequence `i` is the logits after `prompts[i]` and
     /// `forced[i][..j]`; every `forced[i]` has the same length.
-    pub fn teacher_forced_logits_batch(&self, prompts: &[Vec<u32>], forced: &[Vec<u32>]) -> Result<Vec<Vec<Vec<f32>>>, String> {
+    pub fn teacher_forced_logits_batch(&self, prompts: &[Vec<u32>], forced: &[Vec<u32>]) -> Result<BatchLogits, String> {
+        if forced.len() != prompts.len() || forced.iter().any(|f| f.is_empty() || f.len() != forced[0].len()) {
+            return Err(format!("{MODEL}: a batched teacher-forced run needs equally long non-empty forced streams, one per prompt"));
+        }
+        self.decode_logits_batch(prompts, forced.first().map_or(0, Vec::len), |slot, step, _| forced[slot][step])
+    }
+
+    /// The greedy continuation of several sequences decoded TOGETHER, through the same batched decode as
+    /// [`Self::teacher_forced_logits_batch`]: `(streams, rows)` where `streams[i]` is the `positions` greedy tokens of
+    /// sequence `i` and `rows[i][j]` the logits after `prompts[i]` and `streams[i][..j]`, so `streams[i][j]` is the
+    /// argmax of `rows[i][j]`. Scoring `streams` teacher-forced on this instance reproduces `rows` position for
+    /// position, which makes it the reference pass of a comparison against another precision.
+    pub fn greedy_logits_batch(&self, prompts: &[Vec<u32>], positions: usize) -> Result<(Vec<Vec<u32>>, BatchLogits), String> {
+        let greedy = |row: &[f32]| crate::sample::argmax(row) as u32;
+        let rows = self.decode_logits_batch(prompts, positions, |_, _, last| greedy(last))?;
+        let streams = rows.iter().map(|seq| seq.iter().map(|row| greedy(row)).collect()).collect();
+        Ok((streams, rows))
+    }
+
+    /// Prefill sequence `i` into slot `i`, then run `positions - 1` batched decode steps, each feeding sequence `i`
+    /// the token `next(i, step, last row)` names. Returns `positions` logit rows per sequence.
+    fn decode_logits_batch(&self, prompts: &[Vec<u32>], positions: usize, mut next: impl FnMut(usize, usize, &[f32]) -> u32) -> Result<BatchLogits, String> {
         let n = prompts.len();
-        if n == 0 || n != forced.len() || forced.iter().any(|f| f.len() != forced[0].len() || f.is_empty()) || prompts.iter().any(|p| p.is_empty()) {
-            return Err(format!("{MODEL}: a batched teacher-forced run needs equally long non-empty forced streams and prompts, one per sequence"));
+        if n == 0 || positions == 0 || prompts.iter().any(|p| p.is_empty()) {
+            return Err(format!("{MODEL}: a batched decode run needs at least one position and non-empty prompts, one per sequence"));
         }
         if n > self.max_batch as usize {
             return Err(format!("{MODEL}: batch of {n} exceeds this instance's max_batch {}", self.max_batch));
         }
         self.reset();
-        let mut rows: Vec<Vec<Vec<f32>>> = vec![Vec::with_capacity(forced[0].len()); n];
-        let mut positions: Vec<u32> = Vec::with_capacity(n);
+        let mut rows: BatchLogits = vec![Vec::with_capacity(positions); n];
+        let mut at: Vec<u32> = Vec::with_capacity(n);
         for (slot, prompt) in prompts.iter().enumerate() {
             let hidden = self.prefill_hidden(prompt, 0, prompt.len(), slot as u32, false, None)?;
             rows[slot].push(self.head_logits_rows(&hidden, 1));
-            positions.push(prompt.len() as u32);
+            at.push(prompt.len() as u32);
         }
-        for step in 0..forced[0].len() - 1 {
-            let tokens: Vec<u32> = forced.iter().map(|f| f[step]).collect();
-            let logits = self.stack_step_batch(&tokens, &positions)?;
+        for step in 0..positions - 1 {
+            let tokens: Vec<u32> = rows.iter().enumerate().map(|(slot, seq)| next(slot, step, &seq[step])).collect();
+            let logits = self.stack_step_batch(&tokens, &at)?;
             for (slot, l) in logits.into_iter().enumerate() {
                 rows[slot].push(l);
-                positions[slot] += 1;
+                at[slot] += 1;
             }
         }
         Ok(rows)
