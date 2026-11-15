@@ -246,8 +246,8 @@ impl Weight {
 /// instead of the tile decode: the weight's bytes are streamed once for all of the rows.
 pub const GEMV_MAX_ROWS: u32 = 8;
 /// The FP8 GEMV's row cap: it is decode-bound, and past two rows the tile decode feeding the bf16 tensor-core product reads
-/// the weight once for all of the rows. A recording that holds no library product has no such tile product, so there the
-/// GEMVs serve up to [`GEMV_MAX_ROWS`].
+/// the weight once for all of the rows. Where there is no such tile product (`Ops::library_tile_product`) the GEMVs serve
+/// up to [`GEMV_MAX_ROWS`].
 const LIBRARY_GEMV_MAX_ROWS: u32 = 2;
 /// The NVFP4 GEMV's row cap where the tensor-core product ([`Ops::nvfp4_mma`]) is offered: the register-blocked GEMV reads the
 /// stored bytes once and takes 38 us for the decode token (17408 x 5120), the tensor-core product 55 us; from two rows the
@@ -339,6 +339,14 @@ impl Ops {
         s.push(self.gpu.dispatch_sliced(kernel(&name), &[&rotated, codes, norms, book, y], &[WHOLE, WHOLE, WHOLE, WHOLE, out], &params, grid));
     }
 
+    /// Whether a tile decode here feeds the vendor library's bf16 tensor-core product, the form the GEMV row caps hand
+    /// over to. Without it (the library declines while a recording runs, the device is below its tensor-core floor, or
+    /// the fp32 reference tier is pinned) the tile decode writes the whole weight out as f32 for the fp32 kernels at
+    /// every row count, and the GEMV serves all of [`GEMV_MAX_ROWS`].
+    fn library_tile_product(&self) -> bool {
+        !self.gpu.declines_library() && matches!(self.gemm.path(), gpu_core::provider::library::GemmPath::Bf16TensorCore)
+    }
+
     /// The decode-regime product of an FP8 (E4M3, block or tensor scales) or NVFP4 weight against `act`'s few rows by
     /// the kernel that reads the stored bytes directly. `false` when the weight, its shape, the row count or the
     /// registered kernels do not allow it; the caller then takes the tile decode.
@@ -351,8 +359,8 @@ impl Ops {
         }
         let max_rows = match w {
             Weight::Micro { kind: MicroScaled::Nvfp4, .. } if self.gpu.has_fused(gpu_core::Fused::MatmulNvfp4Mma8) => NVFP4_GEMV_MAX_ROWS_WITH_MMA,
-            Weight::Micro { kind: MicroScaled::Nvfp4, .. } if !self.gpu.declines_library() => LIBRARY_NVFP4_GEMV_MAX_ROWS,
-            _ if self.gpu.declines_library() => GEMV_MAX_ROWS,
+            _ if !self.library_tile_product() => GEMV_MAX_ROWS,
+            Weight::Micro { kind: MicroScaled::Nvfp4, .. } => LIBRARY_NVFP4_GEMV_MAX_ROWS,
             _ => LIBRARY_GEMV_MAX_ROWS,
         };
         // A workgroup covers 4 weight rows per round and amortises its decode table over `rpw` rounds, as many as keep

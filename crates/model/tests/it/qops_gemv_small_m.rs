@@ -11,7 +11,8 @@
 //! answers instead and agrees. Where the vendor library has the tile product (the default) the FP8 cap is two rows, since
 //! the tile product reads the weight once for more rows than that (an NVFP4 weight: one where the tensor-core product takes over
 //! from the second row, four without it, since the tile product writes the whole weight as bf16 first); while the library
-//! declines (a recording that is replayed as a graph) the other GEMVs serve all `GEMV_MAX_ROWS`.
+//! declines (a recording that is replayed as a graph), or has no tensor-core product at all (a device below its floor, the
+//! fp32 reference tier), the other GEMVs serve all `GEMV_MAX_ROWS`.
 
 use checkpoint::packed::{CodecRegistry, QuantEncoding, TensorDescriptor, TensorSink, Tile};
 use data::rng::Lcg;
@@ -46,7 +47,7 @@ fn check(ops: &Ops, w: &Weight, label: &str) {
     // second row, and four where it does not (the tile product writes the whole weight as bf16 first).
     let gemv_rows = match w {
         Weight::Micro { .. } if ops.gpu().has_fused(gpu_core::Fused::MatmulNvfp4Mma8) => 1,
-        _ if ops.gpu().declines_library() => GEMV_MAX_ROWS as usize,
+        _ if ops.gpu().declines_library() || !matches!(ops.gemm_path(), gpu_core::provider::library::GemmPath::Bf16TensorCore) => GEMV_MAX_ROWS as usize,
         Weight::Micro { .. } => 4,
         _ => 2,
     };
@@ -112,5 +113,39 @@ fn check_shapes(ops: &Ops) {
         CodecRegistry::reference().decoder(&enc).unwrap().decode_tile(&desc, &tile, &mut want).unwrap();
         assert!(decode_weight(ops, &nvfp4).iter().zip(&want).all(|(a, b)| a.to_bits() == b.to_bits()));
         check(ops, &nvfp4, &format!("nvfp4 [{n}, {k}]"));
+    }
+}
+
+/// Without the library's bf16 tensor-core tile product (a device below its floor, or the fp32 reference tier pinned),
+/// the tile decode writes the whole weight out as f32 and multiplies it by the fp32 kernels at every row count, so the
+/// FP8 GEMV serves every decode row count up to `GEMV_MAX_ROWS`. Capped at two rows there, a four-sequence decode step of
+/// an FP8 checkpoint decoded every weight on every step.
+#[test]
+fn without_the_tensor_core_tile_product_the_fp8_gemv_serves_every_decode_row_count() {
+    let mut ops = Ops::new(Gpu::new(training_kernel_list())).expect("Ops::new");
+    if !ops.gpu().caps().workgroup_reductions {
+        return brain_testutil::skip_unavailable("the GEMV kernels need workgroup barriers (not the CPU JIT)");
+    }
+    ops.set_gemm_precision(gpu_core::provider::library::GemmPrecision::Fp32Reference);
+    assert!(!matches!(ops.gemm_path(), gpu_core::provider::library::GemmPath::Bf16TensorCore));
+    let g = ops.gpu();
+    if !g.set_kernel_timing(true) {
+        return brain_testutil::skip_unavailable("the backend cannot name the kernels it ran");
+    }
+    let (n, k) = (64usize, 512usize);
+    let raw = Lcg::new(data::rng::random_seed()).vec_scaled(n * k, 0.5);
+    let w = Weight::upload(&ops, &raw, n, k, gpu_core::select::Dtype::F8E4M3);
+    assert!(matches!(w, Weight::FP8 { .. }));
+    for m in [4usize, GEMV_MAX_ROWS as usize] {
+        let x = g.storage_init("x", &Lcg::new(data::rng::random_seed()).vec_scaled(m * k, 1.0));
+        let y = g.storage((m * n) as u64);
+        let mut steps = Vec::new();
+        ops.matmul_rows(&mut steps, &w, (0, n as u32), &ops.act_f32(&x, 0, m as u32, k as u32), &y, 0);
+        g.reset_kernel_times();
+        g.submit(&[], &steps);
+        g.poll_wait();
+        let ran: Vec<String> = g.kernel_times().unwrap_or_default().into_iter().map(|(name, _, _)| name).collect();
+        assert!(ran.iter().any(|name| name.contains("fp8_gemv")), "m={m}: the FP8 GEMV did not run: {ran:?}");
+        assert!(!ran.iter().any(|name| name.starts_with("weight_decode")), "m={m}: the weight was decoded first: {ran:?}");
     }
 }
