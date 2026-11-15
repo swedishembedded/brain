@@ -273,8 +273,8 @@ fn encode_text(
     let t5cfg = t5encoder::config::T5Config::umt5_xxl();
     let src = read_any(&paths.t5)?;
     let imported = t5encoder::import::import_wan(src, &t5cfg)?;
-    // The request's `te_device`, else the CPU: 22.72 GB of fp32 weights plus
-    // ~4 GB of activations do not fit a 24 GB card.
+    // The request's `te_device`, else the CPU: 22.72 GB of fp32 weights
+    // leave a 24 GB card no room for the encoder's activations.
     let gpu = match o.te_device.as_deref().unwrap_or("cpu") {
         "cpu" => gpu_core::Gpu::new_cpu(t5encoder::model::PIPELINES),
         "gpu" | "wgpu" => gpu_core::Gpu::new_gpu(t5encoder::model::PIPELINES),
@@ -282,7 +282,7 @@ fn encode_text(
         // what a caller who knows their card holds 22.72 GB would use.
         _ => gpu_core::Gpu::new(t5encoder::model::PIPELINES),
     };
-    let enc = t5encoder::model::T5Encoder::new_on(gpu, t5cfg, 2, cfg.text_len as u32, &t5encoder::import::to_init(imported));
+    let enc = t5encoder::model::T5Encoder::new_with(gpu, t5cfg, 2, cfg.text_len as u32, &t5encoder::import::to_init(imported), t5encoder::model::Taps::Output);
     enc.set_tokens(&ids);
     enc.set_mask(&mask);
     enc.forward();

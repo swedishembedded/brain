@@ -161,7 +161,7 @@ impl Session {
             });
             // `Gpu::share` - one device for every variant, the same rule
             // `clip::caps::Session` follows.
-            let m = T5Encoder::new_on(self.gpu.share(), cfg, b, max_len, &init);
+            let m = T5Encoder::new_with(self.gpu.share(), cfg, b, max_len, &init, crate::model::Taps::Output);
             guard.insert(key.clone(), m);
         }
         Ok(f(guard.get(&key).expect("built above")))

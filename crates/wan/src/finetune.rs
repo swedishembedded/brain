@@ -235,7 +235,7 @@ pub fn encode_samples(
             "gpu" | "wgpu" => gpu_core::Gpu::new_gpu(t5encoder::model::PIPELINES),
             _ => gpu_core::Gpu::new(t5encoder::model::PIPELINES),
         };
-        let enc = t5encoder::model::T5Encoder::new_on(gpu, t5cfg, 1, cfg.text_len as u32, &t5encoder::import::to_init(imported));
+        let enc = t5encoder::model::T5Encoder::new_with(gpu, t5cfg, 1, cfg.text_len as u32, &t5encoder::import::to_init(imported), t5encoder::model::Taps::Output);
         // A real clip set repeats a handful of caption templates across many
         // clips (e.g. `data::gen_clips`'s paraphrase pool), and umT5-XXL is a
         // CPU-minutes-scale forward - so an exact-string cache turns "one

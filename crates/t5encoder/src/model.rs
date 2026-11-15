@@ -73,7 +73,9 @@
 //!
 //! SSA: every stage writes a fresh buffer, which doubles as the activation
 //! cache the deferred backward needs. The two shared score slabs are the
-//! documented exception, at their allocation site.
+//! documented exception, at their allocation site. A caller that reads only the
+//! encoder's output builds with [`Taps::Output`] instead, and every block then
+//! reuses one block's buffers (see [`Taps`]).
 
 use std::collections::HashMap;
 
@@ -136,6 +138,53 @@ pub struct BlockBufs {
     pub ff_out: DeviceBuffer,
 }
 
+/// Which intermediates a built encoder keeps readable.
+///
+/// The per-block buffers are most of the encoder's device scratch (T5-XXL at
+/// FLUX's 512 tokens: 24 blocks of `[T, 9*d_model + 4*d_ff]` f32), and nothing
+/// that only conditions on the output reads them. No backward runs on this
+/// graph (training builds its own, `crate::train`), so reusing one block's
+/// buffers across blocks changes no value: the blocks run in submission order
+/// and each one has consumed its inputs before the next one writes over them,
+/// the same order the shared score slabs already rely on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Taps {
+    /// Every block keeps its own buffers: [`T5Encoder::read_x`],
+    /// [`T5Encoder::read_block_tap`] and [`T5Encoder::read_block_bias`] answer
+    /// for any block. What the parity gates replay.
+    Every,
+    /// One block's buffers, two residual-stream buffers and one bias slab,
+    /// reused by every block: only [`T5Encoder::read_hidden`] and
+    /// [`T5Encoder::read_context`] are meaningful, and a per-block read panics.
+    Output,
+}
+
+/// Device bytes [`T5Encoder::new_with`] allocates for `cfg` at batch `b`,
+/// length `t`: its f32 weights plus every buffer the graph writes. What a
+/// placement plan charges for the encoder, from the same shapes the build
+/// allocates.
+pub fn device_bytes(cfg: &T5Config, b: u32, t: u32, taps: Taps) -> u64 {
+    let n = b as u64 * t as u64;
+    let (d, inner, ff, heads) = (cfg.d_model as u64, cfg.inner() as u64, cfg.d_ff as u64, cfg.heads as u64);
+    let tt = t as u64 * t as u64;
+    let layers = cfg.layers as u64;
+    let (blocks, residuals, biases) = match taps {
+        Taps::Every => (layers, layers + 1, if cfg.per_block_rel_bias { layers } else { 1 }),
+        Taps::Output => (1, 2, 1),
+    };
+    let block = n * (5 * d + 4 * inner + 4 * ff);
+    let words = n // tokens
+        + tt // buckets
+        + if cfg.masked { n } else { 0 }
+        + blocks * block
+        + tt * heads // bias_gather
+        + biases * heads * tt
+        + residuals * n * d
+        + 2 * b as u64 * heads * tt // scores, probs
+        + n * d; // hidden
+    (cfg.param_count() as u64 + words) * 4
+}
+
 /// Per-block taps the parity test replays (block 0 in the goldens).
 #[derive(Clone, Copy, Debug)]
 pub enum Tap {
@@ -181,7 +230,8 @@ pub struct T5Encoder {
     /// `read_block_bias` can gate block 0 and block 23 independently, which is
     /// the only thing that can tell a shared-bias port from a correct one.
     bias: Vec<DeviceBuffer>,
-    /// `x[0]` = embedding output; `x[i+1]` = output of block `i`.
+    /// `x[0]` = embedding output; `x[i+1]` = output of block `i` (two
+    /// alternating buffers under [`Taps::Output`], see [`T5Encoder::residual`]).
     x: Vec<DeviceBuffer>,
     blocks: Vec<BlockBufs>,
     /// Shared score/probability slabs — the only non-SSA buffers here, and
@@ -192,19 +242,34 @@ pub struct T5Encoder {
     scores: DeviceBuffer,
     probs: DeviceBuffer,
     hidden: DeviceBuffer,
+    taps: Taps,
     steps: Vec<Step>,
 }
 
 impl T5Encoder {
     /// Build an inference encoder on an existing device (tests pass
-    /// `gpu_core::testgpu::dev`). Every parameter is `Frozen`: no gradient
-    /// buffers, no reverse step list.
+    /// `gpu_core::testgpu::dev`), every block's intermediates readable
+    /// ([`Taps::Every`]). Every parameter is `Frozen`: no gradient buffers, no
+    /// reverse step list.
     pub fn new_on(
         gpu: Gpu,
         cfg: T5Config,
         b: u32,
         t: u32,
         init: &HashMap<String, Vec<f32>>,
+    ) -> T5Encoder {
+        T5Encoder::new_with(gpu, cfg, b, t, init, Taps::Every)
+    }
+
+    /// [`T5Encoder::new_on`] keeping only what `taps` names readable; its
+    /// device footprint is [`device_bytes`].
+    pub fn new_with(
+        gpu: Gpu,
+        cfg: T5Config,
+        b: u32,
+        t: u32,
+        init: &HashMap<String, Vec<f32>>,
+        taps: Taps,
     ) -> T5Encoder {
         let roles: Vec<(String, usize, Role)> = cfg
             .tensor_manifest()
@@ -242,7 +307,11 @@ impl T5Encoder {
             gpu.write(&b, &vec![1u32; n as usize]);
             b
         });
-        let blocks: Vec<BlockBufs> = (0..cfg.layers)
+        let (n_blocks, n_residuals, n_bias) = match taps {
+            Taps::Every => (cfg.layers, cfg.layers + 1, if cfg.per_block_rel_bias { cfg.layers } else { 1 }),
+            Taps::Output => (1, 2, 1),
+        };
+        let blocks: Vec<BlockBufs> = (0..n_blocks)
             .map(|_| BlockBufs {
                 attn_norm: gpu.storage(n * d),
                 qkv: gpu.storage(n * 3 * inner),
@@ -257,15 +326,15 @@ impl T5Encoder {
                 ff_out: gpu.storage(n * d),
             })
             .collect();
-        let n_bias = if cfg.per_block_rel_bias { cfg.layers } else { 1 };
         let mut m = T5Encoder {
             bias_gather: gpu.storage(tt * cfg.heads as u64),
             bias: (0..n_bias).map(|_| gpu.storage(cfg.heads as u64 * tt)).collect(),
-            x: (0..=cfg.layers).map(|_| gpu.storage(n * d)).collect(),
+            x: (0..n_residuals).map(|_| gpu.storage(n * d)).collect(),
             blocks,
             scores: gpu.storage(slab),
             probs: gpu.storage(slab),
             hidden: gpu.storage(n * d),
+            taps,
             mask: std::cell::RefCell::new(vec![1u32; n as usize]),
             tokens,
             keep,
@@ -283,6 +352,26 @@ impl T5Encoder {
 
     fn w(&self, name: &str) -> &DeviceBuffer {
         self.ps.w(name)
+    }
+
+    /// Block `l`'s buffers, the residual stream entering block `i` (`x[0]` is
+    /// the embedding), and block `l`'s bias slab. Each is its own buffer under
+    /// [`Taps::Every`]; under [`Taps::Output`] the blocks share one set, the
+    /// residual alternates between two buffers so a block never reads the one
+    /// it writes, and the one bias slab is rewritten per block when the config
+    /// owns a table per block.
+    fn block(&self, l: usize) -> &BlockBufs {
+        &self.blocks[l % self.blocks.len()]
+    }
+    fn residual(&self, i: usize) -> &DeviceBuffer {
+        &self.x[i % self.x.len()]
+    }
+    fn bias_of(&self, l: usize) -> &DeviceBuffer {
+        &self.bias[l % self.bias.len()]
+    }
+
+    fn assert_every(&self, what: &str) {
+        assert_eq!(self.taps, Taps::Every, "t5encoder: {what} needs an encoder built with Taps::Every");
     }
 
     fn gemm(&self, m: u32, n: u32) -> (usize, gpu_core::Dispatch) {
@@ -324,7 +413,7 @@ impl T5Encoder {
         for (v0, cnt) in block::vocab_tiles_on(g, c.vocab as u64, dw) {
             s.push(g.step_sliced(
                 K_EMBED_TILE,
-                &[&self.tokens, self.w("shared.weight"), &self.x[0]],
+                &[&self.tokens, self.w("shared.weight"), self.residual(0)],
                 &[(0, 0), (v0 as u64 * dw, cnt as u64 * dw), (0, 0)],
                 &[d, n, v0, cnt],
                 n * d,
@@ -344,7 +433,7 @@ impl T5Encoder {
         // covers both, and the shared case still emits exactly one pair.
         let bias_step = |s: &mut Vec<Step>, l: usize| {
             let table = self.w(&c.rel_bias_name(l));
-            let out = &self.bias[if c.per_block_rel_bias { l } else { 0 }];
+            let out = self.bias_of(l);
             s.push(g.step(K_EMBED, &[&self.buckets, table, &self.bias_gather], &[heads, tt], tt * heads));
             s.push(g.step(K_NLC_NCHW, &[&self.bias_gather, out], &[heads * tt, heads, tt], heads * tt));
         };
@@ -353,12 +442,12 @@ impl T5Encoder {
         }
 
         for l in 0..c.layers as usize {
-            let bb = &self.blocks[l];
+            let bb = self.block(l);
             let p = format!("blocks.{l}");
             if c.per_block_rel_bias {
                 bias_step(&mut s, l);
             }
-            s.push(self.rmsnorm(&self.x[l], self.w(&format!("{p}.attn_norm.weight")), &bb.attn_norm, n));
+            s.push(self.rmsnorm(self.residual(l), self.w(&format!("{p}.attn_norm.weight")), &bb.attn_norm, n));
 
             let (mk, mt) = self.gemm(n, 3 * inner);
             s.push(g.dispatch(
@@ -373,7 +462,7 @@ impl T5Encoder {
             //   [bsz, n_heads, tcols, head_dim, qkv_stride, q_off, k_off, scale(f32 bits)]
             s.push(g.step(
                 K_SCORES,
-                &[&bb.qkv, &self.bias[if c.per_block_rel_bias { l } else { 0 }], &self.scores],
+                &[&bb.qkv, self.bias_of(l), &self.scores],
                 &[b, heads, t, hd, 3 * inner, 0, inner, f(1.0)],
                 b * heads * t * t,
             ));
@@ -400,7 +489,7 @@ impl T5Encoder {
             s.push(g.dispatch(mk, &[&bb.ctx, self.w(&format!("{p}.o.weight")), &bb.attn_out], &[n, inner, d], mt));
             // `add2` Params: a single `total`. The residual is UNSCALED — T5
             // does not rescale the stream at a block boundary.
-            s.push(g.step(K_ADD2, &[&self.x[l], &bb.attn_out, &bb.res], &[n * d], n * d));
+            s.push(g.step(K_ADD2, &[self.residual(l), &bb.attn_out, &bb.res], &[n * d], n * d));
 
             s.push(self.rmsnorm(&bb.res, self.w(&format!("{p}.ff_norm.weight")), &bb.ff_norm, n));
             let (mk, mt) = self.gemm(n, ff);
@@ -414,10 +503,10 @@ impl T5Encoder {
             s.push(g.step(K_MUL, &[&bb.act, &bb.wi1, &bb.gated], &[n * ff], n * ff));
             let (mk, mt) = self.gemm(n, d);
             s.push(g.dispatch(mk, &[&bb.gated, self.w(&format!("{p}.wo.weight")), &bb.ff_out], &[n, ff, d], mt));
-            s.push(g.step(K_ADD2, &[&bb.res, &bb.ff_out, &self.x[l + 1]], &[n * d], n * d));
+            s.push(g.step(K_ADD2, &[&bb.res, &bb.ff_out, self.residual(l + 1)], &[n * d], n * d));
         }
 
-        s.push(self.rmsnorm(&self.x[c.layers as usize], self.w("final_norm.weight"), &self.hidden, n));
+        s.push(self.rmsnorm(self.residual(c.layers as usize), self.w("final_norm.weight"), &self.hidden, n));
         s
     }
 
@@ -466,8 +555,10 @@ impl T5Encoder {
     /// `position_bias[0]`) of block `l`. With a shared table every block
     /// returns the same buffer.
     pub fn read_block_bias(&self, l: usize) -> Vec<f32> {
-        let i = if self.cfg.per_block_rel_bias { l } else { 0 };
-        self.gpu.read(&self.bias[i], (self.cfg.heads * self.t * self.t) as usize)
+        if self.cfg.per_block_rel_bias {
+            self.assert_every("read_block_bias");
+        }
+        self.gpu.read(self.bias_of(l), (self.cfg.heads * self.t * self.t) as usize)
     }
 
     /// Block 0's attention bias - the shared one when the config shares it.
@@ -477,10 +568,12 @@ impl T5Encoder {
 
     /// `x[0]` = embedding output; `x[i+1]` = output of block `i`.
     pub fn read_x(&self, i: usize) -> Vec<f32> {
+        self.assert_every("read_x");
         self.gpu.read(&self.x[i], self.n() * self.cfg.d_model as usize)
     }
 
     pub fn read_block_tap(&self, l: usize, tap: Tap) -> Vec<f32> {
+        self.assert_every("read_block_tap");
         let bb = &self.blocks[l];
         let c = &self.cfg;
         let (buf, w) = match tap {

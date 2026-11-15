@@ -268,3 +268,26 @@ fn masking_the_pad_keys_equals_never_having_padded() {
         }
     }
 }
+
+/// An encoder built for its output alone (`Taps::Output`: one block's
+/// scratch and two residual buffers reused by every block) answers exactly
+/// what the per-block build answers, for the shared position bias (T5 v1.1)
+/// and the per-block one (umT5), and its device figure is the smaller one.
+#[test]
+fn an_output_only_build_matches_the_per_block_build_bit_for_bit() {
+    use t5encoder::model::{device_bytes, Taps};
+    force_tiled_embedding();
+    for cfg in [T5Config { layers: 3, ..tiny() }, T5Config { layers: 3, per_block_rel_bias: true, ..tiny() }] {
+        let (b, t) = (2u32, 8u32);
+        let init = fake_init(&cfg);
+        let ids: Vec<u32> = (0..b * t).map(|i| (i * 5 + 1) % cfg.vocab).collect();
+        let hidden = |taps: Taps| {
+            let m = T5Encoder::new_with(gpu_core::testgpu::dev(t5encoder::model::PIPELINES), cfg.clone(), b, t, &init, taps);
+            m.set_tokens(&ids);
+            m.forward();
+            m.read_hidden()
+        };
+        assert_eq!(hidden(Taps::Output), hidden(Taps::Every), "per_block_rel_bias={}", cfg.per_block_rel_bias);
+        assert!(device_bytes(&cfg, b, t, Taps::Output) < device_bytes(&cfg, b, t, Taps::Every));
+    }
+}
