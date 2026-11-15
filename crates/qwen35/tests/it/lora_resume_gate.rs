@@ -37,6 +37,10 @@ const ALPHA: f32 = 8.0;
 /// that cycle 1 alone has NOT yet reached this task's loss floor, leaving
 /// cycle 2 room to show a real further drop (see `avg_loss`'s doc comment).
 const CYCLE_STEPS: u32 = 8;
+/// The rate a cycle warms up to. Each cycle spends all its steps in the linear
+/// warmup (`warmup == decay_iters == steps`), so it ends at this rate without
+/// decaying, gently enough that cycle 1 stops short of the loss floor.
+const PEAK_LR: f32 = 2.5e-2;
 
 /// `PROMPT ++ [TARGET]`, repeated `reps` times back to back. Mask is `true`
 /// only at each repetition's target position.
@@ -69,9 +73,9 @@ fn opts(seed: u64, steps: u32, block_size: u32) -> model::FitOpts {
         steps,
         batch_size: 1,
         block_size,
-        lr: 5e-2,
+        lr: PEAK_LR,
         min_lr: 5e-3,
-        warmup: 15,
+        warmup: steps,
         decay_iters: steps,
         weight_decay: 0.0,
         grad_clip: 1.0,
