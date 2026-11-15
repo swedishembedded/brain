@@ -213,6 +213,36 @@ pub(super) fn decode_results(payload: &str, fds: Vec<OwnedFd>) -> Result<Vec<Act
     Ok(results)
 }
 
+/// An open group's finished job as a `done` frame's payload: `{"job": i}`
+/// and its result.
+pub(super) fn encode_done(job: usize, result: &ActionResult, fds: &mut Vec<OwnedFd>) -> Result<String, String> {
+    let mut blobs = BlobsOut::default();
+    let mut v = result_json(result, &mut blobs);
+    v["job"] = json!(job);
+    blobs.seal(fds)?;
+    pack(v.to_string(), fds)
+}
+
+/// The job and result [`encode_done`] wrote.
+pub(super) fn decode_done(payload: &str, fds: Vec<OwnedFd>) -> Result<(usize, ActionResult), String> {
+    let mut fds = VecDeque::from(fds);
+    let v = unpack(payload, &mut fds)?;
+    let mut blobs = BlobsIn::take(fds)?;
+    let job = v.get("job").and_then(Value::as_u64).and_then(|n| usize::try_from(n).ok()).ok_or("a finished job without its index")?;
+    let result = result_from(&v, &mut blobs, &["job"])?;
+    blobs.done()?;
+    Ok((job, result))
+}
+
+/// The answer to a `group`: whether the worker's instance ran it open.
+pub(super) fn decode_opened(payload: &str, fds: Vec<OwnedFd>) -> Result<bool, String> {
+    if !fds.is_empty() {
+        return Err("a group's answer carries descriptors".into());
+    }
+    let v: Value = serde_json::from_str(payload).map_err(|e| format!("not JSON ({e})"))?;
+    object(&v, "the group's answer", &["open"])?.get("open").and_then(Value::as_bool).ok_or_else(|| "the group's answer does not say whether it ran open".to_string())
+}
+
 /// A progress frame's job and update.
 pub(super) fn decode_progress(payload: &str, fds: Vec<OwnedFd>) -> Result<(usize, Progress), String> {
     let mut fds = VecDeque::from(fds);

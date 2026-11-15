@@ -35,6 +35,7 @@
 //! | `hello <PROTOCOL>` | `{"protocol": n, "pid": p}`; must be the first request |
 //! | `open <device> <spec>` | `{}`; the instance is built on `<device>` |
 //! | `batch[+<n>] <action> <k> <jobs>` | `{"results": [...]}`, one per job: `{"outputs", "blobs"}` or `{"error"}` |
+//! | `group[+<n>] <action> <k> <jobs>` | `{"open": bool}`; the jobs were finished through `done` frames |
 //! | `probe <device>` | anything; the device works (sent to a fresh probe worker) |
 //!
 //! `<jobs>` is `{"jobs": [{"params", "scope", "blobs"}, ...]}` and `<k>` how
@@ -45,7 +46,21 @@
 //! it), each of which renews the deadline, and the parent sends one
 //! `<id> cancel <job>` for each job whose caller asks, which fires that job's
 //! [`capability::CancelToken`] in the worker and no other. A single job is a
-//! group of one. A frame's blobs travel in one sealed memfd beside it, never
+//! group of one.
+//!
+//! An open group (`Instance::run_open`, continuous batching) is `group[+<n>]
+//! <action> <k> <jobs>`, answered `{"open": bool}`: false when the worker's
+//! instance runs the action only as closed groups, having done nothing (the
+//! parent then sends the group as a `batch`, and does not ask again for that
+//! action). While it runs the worker reaches the executor's `JobFeed` through
+//! the parent: `<id> take <max>` is answered `<id> joined[+<n>] <k> <jobs>`
+//! with the jobs that joined (numbered after the group's own, in order; the
+//! reader registers their tokens as it reads them), `<id> done[+<n>] <json>`
+//! (`{"job": i}` and its result) finishes one job at once, and `<id> close`
+//! is answered `<id> closed true|false`. A worker that dies mid-group fails
+//! every job the group had not finished, the joined ones included, once.
+//!
+//! A frame's blobs travel in one sealed memfd beside it, never
 //! on the line; an envelope or answer too long for a line travels the same
 //! way, as the first descriptor, with `-` in its place. `<device>` is `gpu<i>`,
 //! `npu<i>` or `cpu` ([`device_label`]).
@@ -63,7 +78,7 @@ use capability::{ActionResult, Invocation, Manifest, Progress};
 use gpu_supervisor::{Health, Worker, WorkerCommand};
 use serde_json::{json, Value};
 
-use crate::{AdapterIdentity, Device, Instance, InstanceKey, MemCost, ResidentModel, Tier};
+use crate::{AdapterIdentity, Device, Instance, InstanceKey, JobFeed, MemCost, ResidentModel, Tier};
 
 /// The protocol version a worker and its parent must agree on (`hello`).
 pub const PROTOCOL: u32 = 2;
@@ -256,7 +271,7 @@ impl ResidentModel for SupervisedModel {
         for request in [format!("hello {PROTOCOL}"), format!("open {} {open}", device_label(device))] {
             self.health.call(&device, &mut worker, &request, self.deadlines.open).map_err(|e| format!("{key}: {e}"))?;
         }
-        Ok(Box::new(SupervisedInstance { worker, device, health: self.health.clone(), run: self.deadlines.run, lost: None }))
+        Ok(Box::new(SupervisedInstance { worker, device, health: self.health.clone(), run: self.deadlines.run, lost: None, closed_only: std::collections::BTreeSet::new() }))
     }
 }
 
@@ -270,6 +285,13 @@ struct SupervisedInstance {
     /// is not idempotent, so nothing is retried on a replacement worker; the
     /// executor drops this instance and a later job builds a fresh one.
     lost: Option<String>,
+    /// Actions the worker's instance runs only as closed groups: its
+    /// `run_open` said so, having done nothing, so it is not asked again and
+    /// such a group costs one request, not two. Whether a model runs a group
+    /// open depends on the action alone in every model that does; were it to
+    /// depend on more, a remembered answer would only make it batch a closed
+    /// group, which every model answers correctly.
+    closed_only: std::collections::BTreeSet<String>,
 }
 
 impl Instance for SupervisedInstance {
@@ -293,6 +315,19 @@ impl Instance for SupervisedInstance {
             return every(format!("{action:?} is not an action name"));
         }
         self.batch_in_worker(action, invs, progress)
+    }
+
+    /// The group as one `group` request the worker's instance runs with its
+    /// own `run_open`: the jobs that join while it runs cross as the worker
+    /// takes them, and each is finished through `feed` the moment the worker
+    /// finishes it. False, having done nothing, when the worker's instance
+    /// runs this action only as closed groups (or the worker is lost; the
+    /// closed batch then answers every job with why).
+    fn run_open(&mut self, action: &str, invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress), feed: &mut dyn JobFeed) -> bool {
+        if self.lost.is_some() || self.closed_only.contains(action) || action.is_empty() || action.contains(char::is_whitespace) {
+            return false;
+        }
+        self.group_in_worker(action, invs, progress, feed)
     }
 }
 
@@ -336,6 +371,59 @@ impl SupervisedInstance {
         }
     }
 
+    /// One open group as one exchange with the worker. Whatever ends the
+    /// exchange, every job of the group that was not finished yet is
+    /// finished with why, once.
+    #[cfg(unix)]
+    fn group_in_worker(&mut self, action: &str, invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress), feed: &mut dyn JobFeed) -> bool {
+        use gpu_supervisor::{CallError, Exchange};
+        let mut fds = Vec::new();
+        let mut talk = JobsTalk::new(invs, progress);
+        talk.feed = Some(feed);
+        let envelope = match codec::encode_jobs(invs, &mut fds) {
+            Ok(e) => e,
+            Err(e) => {
+                talk.fail_unfinished(&format!("{action}: {e}"));
+                return true;
+            }
+        };
+        let verb = if fds.is_empty() { "group".to_string() } else { format!("group+{}", fds.len()) };
+        let request = format!("{verb} {action} {} {envelope}", invs.len());
+        let borrowed: Vec<_> = fds.iter().map(std::os::fd::AsFd::as_fd).collect();
+        let x = Exchange { fds: &borrowed, talk: Some(&mut talk), renew: true };
+        let answer = self.health.exchange(&self.device, &mut self.worker, &request, self.run, x);
+        let why = match answer {
+            Ok((payload, fds)) => match codec::decode_opened(&payload, fds) {
+                Ok(true) => return true,
+                Ok(false) if !talk.touched() => {
+                    self.closed_only.insert(action.to_string());
+                    return false;
+                }
+                Ok(false) => self.lose(format!("{action}: the worker said it ran no open group after it had run one")),
+                Err(e) => self.lose(format!("{action}: the worker's answer breaks the protocol ({e})")),
+            },
+            Err(CallError::Failed(message)) => match message.strip_prefix(PANICKED) {
+                // The same unwind an in-process panic takes; the lane answers
+                // every job the group had not finished.
+                Some(what) => {
+                    let what = format!("{action}: the worker panicked:{what}");
+                    self.lost = Some(what.clone());
+                    panic!("{what}");
+                }
+                None => message,
+            },
+            Err(e @ (CallError::Fault(_) | CallError::Refused { .. })) => self.lose(e.to_string()),
+            Err(e @ CallError::Invalid(_)) => e.to_string(),
+        };
+        talk.fail_unfinished(&why);
+        true
+    }
+
+    #[cfg(not(unix))]
+    fn group_in_worker(&mut self, _action: &str, _invs: &[Invocation], _progress: &mut dyn FnMut(usize, Progress), _feed: &mut dyn JobFeed) -> bool {
+        false
+    }
+
     #[cfg(not(unix))]
     fn batch_in_worker(&mut self, _action: &str, invs: &[Invocation], _progress: &mut dyn FnMut(usize, Progress)) -> Vec<ActionResult> {
         invs.iter().map(|_| Err("supervised device workers need a Unix host".into())).collect()
@@ -349,25 +437,66 @@ impl SupervisedInstance {
 }
 
 /// The lane's side of a group while it is in flight: each job's progress to
-/// its own caller, and one `cancel <job>` for each job whose caller asks.
+/// its own caller, and one `cancel <job>` for each job whose caller asks. For
+/// an open group also the executor's [`JobFeed`]: the worker's `take` is
+/// answered `joined` with the jobs the feed gave, its `done` finishes a job
+/// through the feed, and its `close` is answered with the feed's verdict.
+/// Jobs are numbered as the feed numbers them: the group's own first, then
+/// each that joined, in order.
 #[cfg(unix)]
 struct JobsTalk<'a> {
     /// The cancellation token of each job the worker knows, by index.
     tokens: Vec<capability::CancelToken>,
     cancel_sent: Vec<bool>,
+    /// Finished through the feed (an open group's jobs only).
+    finished: Vec<bool>,
+    own: usize,
     progress: &'a mut dyn FnMut(usize, Progress),
+    feed: Option<&'a mut dyn JobFeed>,
 }
 
 #[cfg(unix)]
 impl<'a> JobsTalk<'a> {
     fn new(invs: &[Invocation], progress: &'a mut dyn FnMut(usize, Progress)) -> JobsTalk<'a> {
-        JobsTalk { tokens: invs.iter().map(|inv| inv.cancel.clone()).collect(), cancel_sent: vec![false; invs.len()], progress }
+        let mut talk = JobsTalk { tokens: Vec::new(), cancel_sent: Vec::new(), finished: Vec::new(), own: invs.len(), progress, feed: None };
+        talk.know(invs);
+        talk
+    }
+
+    fn know(&mut self, invs: &[Invocation]) {
+        self.tokens.extend(invs.iter().map(|inv| inv.cancel.clone()));
+        self.cancel_sent.resize(self.tokens.len(), false);
+        self.finished.resize(self.tokens.len(), false);
+    }
+
+    /// Whether the worker took a joiner or finished a job.
+    fn touched(&self) -> bool {
+        self.tokens.len() > self.own || self.finished.iter().any(|&f| f)
+    }
+
+    /// Finish every job of an open group not finished yet with `why`.
+    fn fail_unfinished(&mut self, why: &str) {
+        let Some(feed) = self.feed.as_mut() else { return };
+        for (job, finished) in self.finished.iter_mut().enumerate() {
+            if !*finished {
+                *finished = true;
+                feed.finish(job, Err(why.to_string()));
+            }
+        }
+    }
+
+    fn feed(&mut self, kind: &str) -> Result<&mut dyn JobFeed, String> {
+        match self.feed.as_deref_mut() {
+            Some(feed) => Ok(feed),
+            None => Err(format!("a closed group takes progress frames, not {kind:?}")),
+        }
     }
 }
 
 #[cfg(unix)]
 impl gpu_supervisor::Conversation for JobsTalk<'_> {
     fn frame(&mut self, kind: &str, payload: &str, fds: Vec<std::os::fd::OwnedFd>) -> Result<Vec<gpu_supervisor::Outgoing>, String> {
+        use gpu_supervisor::Outgoing;
         match kind {
             "progress" => {
                 let (job, p) = codec::decode_progress(payload, fds).map_err(|e| format!("the worker's progress breaks the protocol ({e})"))?;
@@ -377,15 +506,42 @@ impl gpu_supervisor::Conversation for JobsTalk<'_> {
                 (self.progress)(job, p);
                 Ok(Vec::new())
             }
-            other => Err(format!("a batch takes progress frames, not {other:?}")),
+            "take" => {
+                let max: usize = payload.parse().map_err(|_| format!("take {payload:?} is not a count"))?;
+                let joined = self.feed(kind)?.take(max);
+                if joined.len() > max {
+                    return Err(format!("the feed gave {} jobs for a take of {max}", joined.len()));
+                }
+                let mut fds = Vec::new();
+                let envelope = codec::encode_jobs(&joined, &mut fds)?;
+                let verb = if fds.is_empty() { "joined".to_string() } else { format!("joined+{}", fds.len()) };
+                self.know(&joined);
+                Ok(vec![Outgoing { line: format!("{verb} {} {envelope}", joined.len()), fds }])
+            }
+            "done" => {
+                let (job, result) = codec::decode_done(payload, fds)?;
+                match self.finished.get(job) {
+                    Some(false) => {}
+                    Some(true) => return Err(format!("job {job} finished twice")),
+                    None => return Err(format!("job {job} finished in a group of {}", self.tokens.len())),
+                }
+                self.finished[job] = true;
+                self.feed(kind)?.finish(job, result);
+                Ok(Vec::new())
+            }
+            "close" => {
+                let closed = self.feed(kind)?.close();
+                Ok(vec![Outgoing::line(format!("closed {closed}"))])
+            }
+            other => Err(format!("a group takes progress, take, done and close frames, not {other:?}")),
         }
     }
 
     fn poll(&mut self) -> Vec<gpu_supervisor::Outgoing> {
         let mut out = Vec::new();
-        for (job, (token, sent)) in self.tokens.iter().zip(&mut self.cancel_sent).enumerate() {
-            if !*sent && token.is_cancelled() {
-                *sent = true;
+        for (job, token) in self.tokens.iter().enumerate() {
+            if !self.cancel_sent[job] && !self.finished[job] && token.is_cancelled() {
+                self.cancel_sent[job] = true;
                 out.push(gpu_supervisor::Outgoing::line(format!("cancel {job}")));
             }
         }
@@ -393,10 +549,9 @@ impl gpu_supervisor::Conversation for JobsTalk<'_> {
     }
 
     fn polls(&self) -> bool {
-        self.cancel_sent.iter().any(|sent| !sent)
+        self.cancel_sent.iter().zip(&self.finished).any(|(&sent, &finished)| !sent && !finished)
     }
 }
-
 
 #[cfg(test)]
 mod tests {

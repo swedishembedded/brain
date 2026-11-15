@@ -28,7 +28,8 @@ use serde_json::json;
 const GB: u64 = 1 << 30;
 
 /// `open` and `probe` answer unless the worker was started as `crash-open` or
-/// `bad-probe`; a run hangs (in a grandchild, as a driver thread would) or
+/// `bad-probe`; a `group` is declined (the fake runs closed batches only); a
+/// run hangs (in a grandchild, as a driver thread would) or
 /// aborts when its parameters say so.
 const FAKE: &str = r#"
 role=$1
@@ -37,6 +38,7 @@ while IFS= read -r line; do
   req=${line#* }
   case "$req" in
     open*) if [ "$role" = crash-open ]; then kill -ABRT $$; fi; echo "$id ok {}" ;;
+    group*) echo "$id ok {\"open\":false}" ;;
     probe*) if [ "$role" = bad-probe ]; then echo "$id err the device did not answer"; else echo "$id ok {}"; fi ;;
     *hang*) sleep 3600 ;;
     *crash*) kill -ABRT $$ ;;

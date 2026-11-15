@@ -26,7 +26,7 @@ use capability::{failure, ActionResult, ActionSpec, Blob, CancelToken, Invocatio
 use gpu_supervisor::{BreakerPolicy, BreakerState, Health, Worker, WorkerCommand};
 use residency::budget::Budgets;
 use residency::supervised::{device_label, Deadlines, HostSpec, HostedFamily, Probe, SupervisedModel, Supervision};
-use residency::{Device, Executor, Instance, InstanceKey, Job, MemCost, Policy, ResidentModel};
+use residency::{Device, Executor, Instance, InstanceKey, Job, JobFeed, MemCost, Policy, ResidentModel};
 use serde_json::{json, Value};
 
 const GB: u64 = 1 << 30;
@@ -46,7 +46,7 @@ struct TestModel(String);
 
 impl ResidentModel for TestModel {
     fn manifest(&self) -> Manifest {
-        let actions = ["echo", "stream", "slow", "wait", "block", "panic", "batch"].map(|a| ActionSpec::new(a, a)).to_vec();
+        let actions = ["echo", "stream", "slow", "wait", "block", "panic", "batch", "open"].map(|a| ActionSpec::new(a, a)).to_vec();
         Manifest::new(&self.0, "a model hosted in a test worker", actions)
     }
 
@@ -112,6 +112,43 @@ impl Instance for TestInstance {
             }
             "panic" => panic!("the model hit a bug"),
             other => Err(format!("no action {other}")),
+        }
+    }
+
+    /// `open` is a model that batches continuously: between steps it takes
+    /// the jobs that joined, finishes each job as it is done, and ends once
+    /// the feed closes. A job asked to `wait` waits for its cancellation; one
+    /// asked to `block` never returns, as a wedged driver call.
+    fn run_open(&mut self, action: &str, invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress), feed: &mut dyn JobFeed) -> bool {
+        if action != "open" {
+            return false;
+        }
+        let mut jobs: Vec<Invocation> = invs.to_vec();
+        let mut finished = 0;
+        loop {
+            jobs.extend(feed.take(4));
+            for (i, inv) in jobs.iter().enumerate().skip(finished) {
+                let mut step = Progress::step(1, 1, format!("job {i}"));
+                step.event = Some(json!({ "pid": std::process::id() }));
+                progress(i, step);
+                if inv.params.get("block").is_some() {
+                    loop {
+                        std::thread::sleep(Duration::from_secs(3600));
+                    }
+                }
+                if inv.params.get("wait").is_some() {
+                    let until = Instant::now() + Duration::from_secs(30);
+                    while !inv.cancel.is_cancelled() && Instant::now() < until {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                }
+                let result = inv.cancel.check().map(|()| Outcome::new().set("index", json!(i)).set("pid", json!(std::process::id())).set("params", inv.params.clone()));
+                feed.finish(i, result);
+            }
+            finished = jobs.len();
+            if feed.close() {
+                return true;
+            }
         }
     }
 
@@ -297,6 +334,107 @@ fn a_group_crosses_as_one_batch_with_per_job_progress_results_and_cancellation()
     assert_eq!(health.status(&Device::Gpu(0)).faults, 0);
 }
 
+/// The lane's side of an open group, as the executor's inbox would be:
+/// rounds of late jobs handed out one round per `take`, each job's result as
+/// it finished, and how often a close was refused because a job had slipped
+/// in.
+struct TestFeed {
+    rounds: Vec<Vec<Invocation>>,
+    /// A close is refused while this is above zero, once per count.
+    refuse_closes: usize,
+    finished: Vec<(usize, ActionResult)>,
+    closes: usize,
+}
+
+impl JobFeed for TestFeed {
+    fn take(&mut self, max: usize) -> Vec<Invocation> {
+        assert!(max > 0);
+        if self.rounds.is_empty() {
+            Vec::new()
+        } else {
+            self.rounds.remove(0)
+        }
+    }
+
+    fn finish(&mut self, index: usize, result: ActionResult) {
+        assert!(self.finished.iter().all(|(i, _)| *i != index), "job {index} was finished twice");
+        self.finished.push((index, result));
+    }
+
+    fn close(&mut self) -> bool {
+        self.closes += 1;
+        if self.refuse_closes > 0 {
+            self.refuse_closes -= 1;
+            return false;
+        }
+        true
+    }
+}
+
+fn result_of(feed: &TestFeed, index: usize) -> &ActionResult {
+    &feed.finished.iter().find(|(i, _)| *i == index).unwrap_or_else(|| panic!("job {index} was never finished")).1
+}
+
+/// An open group runs in the worker's `run_open`: jobs that join while it
+/// runs cross as they are taken, each is finished through the parent's feed
+/// the moment it is done, a close the parent refuses (a job slipped in)
+/// keeps the group going, and a late job's cancellation reaches it. A model
+/// that only batches closed groups says so, having done nothing.
+fn an_open_group_takes_late_joiners_and_finishes_each_job_through_the_feed() {
+    let health = health();
+    let mut instance = hosted("m", &health, DEADLINES).activate(&InstanceKey::new("m", "default"), Device::Gpu(0)).expect("the worker opens");
+    let mut cancelled = Invocation::new().set("n", json!(3)).set("wait", json!(true));
+    cancelled.cancel = CancelToken::armed();
+    cancelled.cancel.cancel();
+    let mut feed = TestFeed {
+        rounds: vec![vec![Invocation::new().set("n", json!(2)), cancelled], vec![Invocation::new().set("n", json!(4))]],
+        refuse_closes: 1,
+        finished: Vec::new(),
+        closes: 0,
+    };
+    let own = [Invocation::new().set("n", json!(0)), Invocation::new().set("n", json!(1))];
+    let mut seen: Vec<(usize, String)> = Vec::new();
+    assert!(instance.run_open("open", &own, &mut |i, p| seen.push((i, p.message)), &mut feed), "the worker ran the group");
+    assert_eq!(feed.finished.len(), 5, "every job, own and late, was finished: {:?}", feed.finished.iter().map(|(i, _)| *i).collect::<Vec<_>>());
+    for (i, n) in [(0, 0), (1, 1), (2, 2), (4, 4)] {
+        let out = result_of(&feed, i).as_ref().unwrap_or_else(|e| panic!("job {i}: {e}"));
+        assert_eq!((out.outputs["index"].clone(), out.outputs["params"]["n"].clone()), (json!(i), json!(n)), "job {i} is the one that joined as {i}");
+        assert_ne!(out.outputs["pid"].as_u64(), Some(u64::from(std::process::id())));
+        assert!(seen.contains(&(i, format!("job {i}"))), "job {i}'s progress reached its caller");
+    }
+    assert_eq!(result_of(&feed, 3).as_ref().err().map(String::as_str), Some(failure::CANCELLED), "the late job asked to cancel was cancelled");
+    assert_eq!(feed.closes, 2, "the refused close kept the group going");
+
+    let mut feed = TestFeed { rounds: Vec::new(), refuse_closes: 0, finished: Vec::new(), closes: 0 };
+    assert!(!instance.run_open("batch", &own, &mut |_, _| {}, &mut feed), "a model that only batches closed groups runs none open");
+    assert!(feed.finished.is_empty() && feed.closes == 0, "and did nothing");
+    assert_eq!(health.status(&Device::Gpu(0)).faults, 0);
+}
+
+/// A worker killed while an open group runs fails every job of the group
+/// that was not finished yet, the late ones included, and only those, and
+/// quarantines its card.
+fn a_worker_killed_mid_group_fails_its_unfinished_jobs_once() {
+    let health = health();
+    let mut instance = hosted("m", &health, DEADLINES).activate(&InstanceKey::new("m", "default"), Device::Gpu(0)).expect("the worker opens");
+    let mut feed = TestFeed { rounds: vec![vec![Invocation::new().set("block", json!(true))]], refuse_closes: 0, finished: Vec::new(), closes: 0 };
+    let own = [Invocation::new().set("n", json!(0))];
+    let handled = instance.run_open("open", &own, &mut |i, p| {
+        if i == 1 {
+            // The late job is inside its blocked step: the worker dies there.
+            let worker = p.event.as_ref().and_then(|e| e["pid"].as_u64()).expect("the step names its worker");
+            let killed = std::process::Command::new("kill").arg("-KILL").arg(worker.to_string()).status();
+            assert!(killed.is_ok_and(|s| s.success()), "kill {worker}");
+        }
+    }, &mut feed);
+    assert!(handled);
+    assert!(result_of(&feed, 0).is_ok(), "the job finished before the crash keeps its answer");
+    let err = result_of(&feed, 1).as_ref().expect_err("the job the worker died in fails");
+    assert!(err.contains("lost its worker") && err.contains("quarantined"), "{err}");
+    assert_eq!(feed.finished.len(), 2);
+    assert!(!health.admits(&Device::Gpu(0)), "the card is quarantined");
+}
+
 /// The run deadline bounds a worker's silence: a job that keeps reporting
 /// progress runs past it, and one that goes silent is killed at it and
 /// quarantines its card.
@@ -359,6 +497,8 @@ const TESTS: &[(&str, fn())] = &[
     ("progress_and_cancellation_cross_the_boundary", progress_and_cancellation_cross_the_boundary),
     ("killing_the_worker_mid_job_fails_that_job_and_the_next_rebuilds_on_a_healthy_card", killing_the_worker_mid_job_fails_that_job_and_the_next_rebuilds_on_a_healthy_card),
     ("a_group_crosses_as_one_batch_with_per_job_progress_results_and_cancellation", a_group_crosses_as_one_batch_with_per_job_progress_results_and_cancellation),
+    ("an_open_group_takes_late_joiners_and_finishes_each_job_through_the_feed", an_open_group_takes_late_joiners_and_finishes_each_job_through_the_feed),
+    ("a_worker_killed_mid_group_fails_its_unfinished_jobs_once", a_worker_killed_mid_group_fails_its_unfinished_jobs_once),
     ("a_job_that_keeps_reporting_outlives_the_run_deadline_and_a_silent_one_is_killed_at_it", a_job_that_keeps_reporting_outlives_the_run_deadline_and_a_silent_one_is_killed_at_it),
     ("a_panic_in_model_code_fails_the_job_without_quarantining_the_card", a_panic_in_model_code_fails_the_job_without_quarantining_the_card),
     ("the_worker_mode_serves_only_a_supervisor_that_greets_it", the_worker_mode_serves_only_a_supervisor_that_greets_it),

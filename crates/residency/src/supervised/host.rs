@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 use capability::{CancelToken, Progress};
 use serde_json::{json, Value};
 
-use super::codec::{decode_jobs, encode_progress, encode_results, object};
+use super::codec::{decode_jobs, encode_done, encode_progress, encode_results, object};
 use super::{parse_device_label, HostedFamily, PANICKED, PROTOCOL};
 use crate::{Instance, InstanceKey};
 
@@ -97,10 +97,12 @@ pub fn host_on(sock: UnixStream, families: &[HostedFamily]) -> i32 {
 }
 
 /// How many jobs a frame announces before its JSON: `<k>` in
-/// `batch <action> <k> <jobs>`.
+/// `batch <action> <k> <jobs>`, `group <action> <k> <jobs>` and
+/// `joined <k> <jobs>`.
 fn announced_jobs(verb: &str, rest: &str) -> Option<usize> {
     match verb {
-        "batch" => rest.split(' ').nth(1)?.parse().ok(),
+        "batch" | "group" => rest.split(' ').nth(1)?.parse().ok(),
+        "joined" => rest.split(' ').next()?.parse().ok(),
         _ => Some(0),
     }
 }
@@ -167,7 +169,16 @@ fn read_requests(sock: UnixStream, current: &Current, tx: &std::sync::mpsc::Send
                     }
                     continue;
                 }
-                "batch" => *current = Some((id, tokens.clone())),
+                "batch" | "group" => *current = Some((id, tokens.clone())),
+                // The jobs that joined a running group follow its own, in
+                // the order they joined, as the parent numbers them.
+                "joined" => {
+                    if let Some((running, held)) = current.as_mut() {
+                        if *running == id {
+                            held.extend(tokens.iter().cloned());
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -256,7 +267,8 @@ impl Host<'_> {
                 }
             }
             "batch" => self.batch(id, &rest, fds, tokens),
-            other => self.answer(id, Err(format!("a hosted model takes hello, open and batch, not {other:?}"))),
+            "group" => self.group(id, &rest, fds, tokens),
+            other => self.answer(id, Err(format!("a hosted model takes hello, open, batch and group, not {other:?}"))),
         }
     }
 
@@ -332,6 +344,150 @@ impl Host<'_> {
                 let _ = self.answer(id, Err(format!("{PANICKED} {}", panic_text(p.as_ref()))));
                 Step::Exit(101)
             }
+        }
+    }
+}
+
+impl Host<'_> {
+    /// `group <action> <k> <jobs>`: the instance's own `run_open` over the
+    /// group, with a [`WorkerFeed`] that reaches the parent's. The answer says
+    /// whether it ran the group open; when not, it did nothing and the parent
+    /// sends the group again as a closed batch.
+    fn group(&mut self, id: u64, rest: &str, fds: Vec<OwnedFd>, tokens: Vec<CancelToken>) -> Step {
+        let prepared = (|| {
+            let mut words = rest.splitn(3, ' ');
+            let (Some(action), Some(_), Some(jobs)) = (words.next(), words.next(), words.next()) else {
+                return Err("group needs an action, a job count and the jobs".to_string());
+            };
+            Ok((action.to_string(), decode_jobs(jobs, fds, tokens)?))
+        })();
+        let (action, invs) = match prepared {
+            Ok(p) => p,
+            Err(why) => return self.answer(id, Err(why)),
+        };
+        let Some(mut instance) = self.instance.take() else {
+            return self.answer(id, Err("no instance is open; send `open` first".into()));
+        };
+        let gone = Cell::new(false);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut feed = WorkerFeed { host: self, id, gone: &gone };
+            let mut progress = |job: usize, p: Progress| self.progress(id, job, &p, &gone);
+            instance.run_open(&action, &invs, &mut progress, &mut feed)
+        }));
+        if gone.get() {
+            return Step::Exit(0);
+        }
+        match result {
+            Ok(open) => {
+                self.instance = Some(instance);
+                self.answer(id, Ok((json!({ "open": open }).to_string(), Vec::new())))
+            }
+            Err(p) => {
+                let _ = self.answer(id, Err(format!("{PANICKED} {}", panic_text(p.as_ref()))));
+                Step::Exit(101)
+            }
+        }
+    }
+
+    /// The parent's reply to a frame this worker sent about request `id`:
+    /// the next frame the reader hands over, which must be `verb` for `id`.
+    /// `None` once the supervisor is gone or broke the protocol; the worker
+    /// then sends nothing more and exits after the group.
+    fn reply(&self, id: u64, verb: &str, gone: &Cell<bool>) -> Option<Incoming> {
+        if gone.get() {
+            return None;
+        }
+        match self.rx.recv() {
+            Ok(Ok(incoming)) if incoming.id == id && incoming.verb == verb => Some(incoming),
+            Ok(Ok(other)) => {
+                eprintln!("brain worker: request {id} waited for {verb:?} and got {:?} for request {}", other.verb, other.id);
+                gone.set(true);
+                None
+            }
+            Ok(Err(why)) => {
+                eprintln!("brain worker: {why}");
+                gone.set(true);
+                None
+            }
+            Err(_) => {
+                gone.set(true);
+                None
+            }
+        }
+    }
+}
+
+/// The worker's side of the parent's [`crate::JobFeed`] for one open group:
+/// `take` and `close` are round trips to the parent's feed (`take <max>`
+/// answered `joined`, `close` answered `closed`), `finish` is one `done`
+/// frame. Every frame is about the group's request and written by the
+/// request loop, the socket's one writer.
+struct WorkerFeed<'h, 'a> {
+    host: &'h Host<'a>,
+    id: u64,
+    gone: &'h Cell<bool>,
+}
+
+impl crate::JobFeed for WorkerFeed<'_, '_> {
+    fn take(&mut self, max: usize) -> Vec<capability::Invocation> {
+        if max == 0 || self.gone.get() {
+            return Vec::new();
+        }
+        if self.host.send(&format!("{} take {max}", self.id), &[]).is_err() {
+            self.gone.set(true);
+            return Vec::new();
+        }
+        let Some(Incoming { rest, fds, tokens, .. }) = self.host.reply(self.id, "joined", self.gone) else { return Vec::new() };
+        let Some((_, jobs)) = rest.split_once(' ') else {
+            eprintln!("brain worker: a joined frame without its jobs");
+            self.gone.set(true);
+            return Vec::new();
+        };
+        match decode_jobs(jobs, fds, tokens) {
+            Ok(invs) => invs,
+            Err(why) => {
+                eprintln!("brain worker: the jobs that joined break the protocol ({why})");
+                self.gone.set(true);
+                Vec::new()
+            }
+        }
+    }
+
+    fn finish(&mut self, index: usize, result: capability::ActionResult) {
+        if self.gone.get() {
+            return;
+        }
+        let mut fds = Vec::new();
+        let sent = match encode_done(index, &result, &mut fds) {
+            Ok(payload) => self.host.send_frame(self.id, "done", &payload, &fds),
+            Err(e) => {
+                let mut fds = Vec::new();
+                match encode_done(index, &Err(format!("the result could not cross to the server: {e}")), &mut fds) {
+                    Ok(payload) => self.host.send_frame(self.id, "done", &payload, &fds),
+                    Err(_) => Err(Step::Exit(0)),
+                }
+            }
+        };
+        self.gone.set(sent.is_err());
+    }
+
+    fn close(&mut self) -> bool {
+        if self.gone.get() || self.host.send(&format!("{} close", self.id), &[]).is_err() {
+            self.gone.set(true);
+            return true;
+        }
+        match self.host.reply(self.id, "closed", self.gone) {
+            Some(incoming) => match incoming.rest.as_str() {
+                "true" => true,
+                "false" => false,
+                other => {
+                    eprintln!("brain worker: closed {other:?} is neither true nor false");
+                    self.gone.set(true);
+                    true
+                }
+            },
+            // Nobody to ask: end the group.
+            None => true,
         }
     }
 }
