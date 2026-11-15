@@ -108,9 +108,14 @@ release on the early return, and the bit declared.
 
 - minicpmv `export_peft`'s stop is proved only with the real checkpoint
   (`peft_export.rs`); a tiny MiniCPM-V fixture would prove it everywhere.
-- Real-weight mid-run proofs still open, for want of a checkpoint: llava
-  caption (no `liuhaotian/llava-v1.5-13b`) and cosyvoice's flow loop (no
-  CosyVoice checkpoint).
+- llava caption and cosyvoice's flow loop: the real-weight proofs are skipped
+  because the checkpoints are not available here. `brain pull
+  FunAudioLLM/CosyVoice2-0.5B` now fetches exactly the files the cosyvoice spec
+  resolves, so the flow-loop proof needs only that pull. `brain pull
+  liuhaotian/llava-v1.5-13b` refuses before downloading: the upstream release
+  is PyTorch `.bin` shards with no vision tower and no `tokenizer.json`, and the
+  llava loader reads a single `model.safetensors` plus `tokenizer.json`; the
+  llava proof needs a checkpoint directory in that layout.
 - s3dit's `text2image` mid-run proof (the resident pipeline path) is not
   covered by the edit-action test.
 - The C2 test proves admission only for providers that build without

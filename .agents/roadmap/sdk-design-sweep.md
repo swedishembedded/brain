@@ -1639,8 +1639,9 @@ CosyVoice2-0.5B` (the same layout every other architecture in this workspace
 uses) and calls `TtsPipeline::from_pretrained` would hit the exact same
 failure with real weights sitting right there. Fixed IN THIS CRATE ONLY
 (not `brain_modelstore`'s shared recipe/plan machinery, out of scope here -
-a cosyvoice `FilesRecipe` that can actually FETCH a checkpoint is real,
-separate future work) by reordering `TtsPipelineBuilder::load` to try
+`brain_modelstore` now also carries a cosyvoice `FilesRecipe`, so `brain
+pull FunAudioLLM/CosyVoice2-0.5B` fetches a checkpoint this resolution
+accepts) by reordering `TtsPipelineBuilder::load` to try
 `resolve_arch` FIRST - a real, content-based scan that reads raw file
 content directly (`CosyVoiceSpec::classify`'s own per-file torch-checkpoint
 reads), a strictly wider net than `Store::local`'s narrow "converted
