@@ -34,7 +34,10 @@ fn cfg() -> Qwen35Config {
 fn weights(cfg: &Qwen35Config) -> HashMap<String, Vec<f32>> {
     let mut w = qwen35::init::init_weights(cfg, 11);
     let mut rng = data::rng::Lcg::new(0x3d0f_1234); // seed: fixed so a failure reproduces
-    for (name, v) in w.iter_mut() {
+    // Drawn in the config's parameter order: a map's iteration order differs from process to process, and with it
+    // which tensor would get which draws.
+    for (name, _) in cfg.param_list() {
+        let v = w.get_mut(&name).expect("init_weights holds every parameter");
         if (name.contains(".memory.") && !name.ends_with("_norm.weight")) || name == "tok.weight" || name.starts_with("blocks.3.self_attn.") && name.ends_with("_proj.weight") {
             v.iter_mut().for_each(|x| *x = rng.scaled(if name.ends_with("admission_up.weight") { 2.0 } else { 0.4 }));
         }
@@ -102,11 +105,13 @@ fn training_reduces_the_loss_and_the_memory_is_load_bearing() {
     let (x, y) = batch(2, 3);
     let m = model(&cfg, &init, 2, &x, &y);
     let first = m.forward();
+    // A rate the run is stable at: at 3e-2 the trajectory is chaotic (the CPU and CUDA backends, equal at the first
+    // step, part within a few, and some fixtures end above where they started), so its outcome was the fixture's luck.
     for step in 1..=60 {
         m.zero_grads();
         m.forward();
         m.backward();
-        m.adamw_step(step, 3e-2, 0.0, Default::default(), Some(1.0), 1.0);
+        m.adamw_step(step, 1e-2, 0.0, Default::default(), Some(1.0), 1.0);
         m.poll_wait();
     }
     let trained = m.forward();
