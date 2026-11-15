@@ -15,8 +15,8 @@
 //! model's own resident for everything the scheduler asks without a device
 //! (manifest, instance key, estimate, admission checks); activation starts a
 //! worker, which rebuilds that same resident from a [`HostSpec`] and
-//! activates it on the assigned device ([`host`]), and every run is one
-//! request with a deadline. A wedged or crashed worker is killed and reaped
+//! activates it on the assigned device ([`host`]), and every group of jobs is
+//! one request with a deadline that the worker's progress renews. A wedged or crashed worker is killed and reaped
 //! by the supervisor, so a stuck activation or run returns to its lane with a
 //! definitive error instead of holding the lane forever, and the executor
 //! unwinds the claim (budget, slot, instance) as for any failed group.
@@ -34,15 +34,20 @@
 //! |---|---|
 //! | `hello <PROTOCOL>` | `{"protocol": n, "pid": p}`; must be the first request |
 //! | `open <device> <spec>` | `{}`; the instance is built on `<device>` |
-//! | `run[+<n>] <action> <envelope>` | `{"outputs": {...}, "blobs": [...]}`, with `ok+<n>` for `n` blobs |
+//! | `batch[+<n>] <action> <k> <jobs>` | `{"results": [...]}`, one per job: `{"outputs", "blobs"}` or `{"error"}` |
 //! | `probe <device>` | anything; the device works (sent to a fresh probe worker) |
 //!
-//! While a run is in flight the worker sends `<id> progress[+<n>] <json>`
-//! frames ([`Progress`], a chunk blob in a descriptor) and the parent may send
-//! one `<id> cancel`, which fires the run's [`capability::CancelToken`] in the
-//! worker. Blobs travel in sealed memfds beside their frame, never on the
-//! line; an envelope or answer too long for a line travels the same way, as
-//! the first descriptor, with `-` in its place. `<device>` is `gpu<i>`,
+//! `<jobs>` is `{"jobs": [{"params", "scope", "blobs"}, ...]}` and `<k>` how
+//! many it holds, so the worker's reader registers a cancellation token for
+//! each job as it reads the request, before the job starts. While a group is
+//! in flight the worker sends `<id> progress[+<n>] <json>` frames
+//! ([`Progress`] and the index of the job it is about, a chunk blob beside
+//! it), each of which renews the deadline, and the parent sends one
+//! `<id> cancel <job>` for each job whose caller asks, which fires that job's
+//! [`capability::CancelToken`] in the worker and no other. A single job is a
+//! group of one. A frame's blobs travel in one sealed memfd beside it, never
+//! on the line; an envelope or answer too long for a line travels the same
+//! way, as the first descriptor, with `-` in its place. `<device>` is `gpu<i>`,
 //! `npu<i>` or `cpu` ([`device_label`]).
 //!
 //! Model code that panics in the worker answers `err panicked: <message>`;
@@ -61,7 +66,7 @@ use serde_json::{json, Value};
 use crate::{AdapterIdentity, Device, Instance, InstanceKey, MemCost, ResidentModel, Tier};
 
 /// The protocol version a worker and its parent must agree on (`hello`).
-pub const PROTOCOL: u32 = 1;
+pub const PROTOCOL: u32 = 2;
 
 #[cfg(unix)]
 mod codec;
@@ -269,36 +274,53 @@ struct SupervisedInstance {
 
 impl Instance for SupervisedInstance {
     fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        let mut results = self.run_batch(action, std::slice::from_ref(inv), &mut |_, p| progress(p));
+        match results.pop() {
+            Some(result) if results.is_empty() => result,
+            _ => Err(format!("{action}: the worker answered {} results for one job", results.len() + 1)),
+        }
+    }
+
+    /// The whole group as one `batch` request: the worker's instance runs
+    /// its own `run_batch` over it, so a model that batches does so in the
+    /// worker as it does in process.
+    fn run_batch(&mut self, action: &str, invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress)) -> Vec<ActionResult> {
+        let every = |why: String| invs.iter().map(|_| Err(why.clone())).collect();
         if let Some(lost) = &self.lost {
-            return Err(lost.clone());
+            return every(lost.clone());
         }
         if action.is_empty() || action.contains(char::is_whitespace) {
-            return Err(format!("{action:?} is not an action name"));
+            return every(format!("{action:?} is not an action name"));
         }
-        self.run_in_worker(action, inv, progress)
+        self.batch_in_worker(action, invs, progress)
     }
 }
 
 impl SupervisedInstance {
-    /// One run as one exchange with the worker: the envelope (and the blobs
-    /// in memfds) out, progress and a cancellation while it runs, the
-    /// outcome back.
+    /// One group as one exchange with the worker: the jobs (and their blobs
+    /// in a memfd) out, each job's progress and cancellation while it runs,
+    /// every job's result back.
     #[cfg(unix)]
-    fn run_in_worker(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+    fn batch_in_worker(&mut self, action: &str, invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress)) -> Vec<ActionResult> {
         use gpu_supervisor::{CallError, Exchange};
+        let every = |why: String| invs.iter().map(|_| Err(why.clone())).collect::<Vec<_>>();
         let mut fds = Vec::new();
-        let blobs = codec::write_blobs(&inv.blobs, &mut fds).map_err(|e| format!("{action}: {e}"))?;
-        let envelope = json!({ "params": inv.params, "scope": inv.scope, "blobs": blobs }).to_string();
-        let envelope = codec::pack(envelope, &mut fds).map_err(|e| format!("{action}: {e}"))?;
-        let verb = if fds.is_empty() { "run".to_string() } else { format!("run+{}", fds.len()) };
-        let request = format!("{verb} {action} {envelope}");
+        let envelope = match codec::encode_jobs(invs, &mut fds) {
+            Ok(e) => e,
+            Err(e) => return every(format!("{action}: {e}")),
+        };
+        let verb = if fds.is_empty() { "batch".to_string() } else { format!("batch+{}", fds.len()) };
+        let request = format!("{verb} {action} {} {envelope}", invs.len());
 
         let borrowed: Vec<_> = fds.iter().map(std::os::fd::AsFd::as_fd).collect();
-        let mut talk = RunTalk { inv, progress, cancel_sent: false };
+        let mut talk = JobsTalk::new(invs, progress);
         let x = Exchange { fds: &borrowed, talk: Some(&mut talk), renew: true };
         let answer = self.health.exchange(&self.device, &mut self.worker, &request, self.run, x);
         match answer {
-            Ok((payload, fds)) => codec::decode_outcome(&payload, fds).map_err(|e| self.lose(format!("{action}: the worker's answer breaks the protocol ({e})"))),
+            Ok((payload, fds)) => match codec::decode_results(&payload, fds) {
+                Ok(results) => results,
+                Err(e) => every(self.lose(format!("{action}: the worker's answer breaks the protocol ({e})"))),
+            },
             Err(CallError::Failed(message)) => match message.strip_prefix(PANICKED) {
                 // The same unwind an in-process panic takes: the lane fails
                 // the group and the executor rebuilds the instance.
@@ -307,54 +329,16 @@ impl SupervisedInstance {
                     self.lost = Some(what.clone());
                     panic!("{what}");
                 }
-                None => Err(message),
+                None => every(message),
             },
-            Err(e @ (CallError::Fault(_) | CallError::Refused { .. })) => Err(self.lose(e.to_string())),
-            Err(e @ CallError::Invalid(_)) => Err(e.to_string()),
+            Err(e @ (CallError::Fault(_) | CallError::Refused { .. })) => every(self.lose(e.to_string())),
+            Err(e @ CallError::Invalid(_)) => every(e.to_string()),
         }
     }
 
-}
-
-/// The lane's side of one run while it is in flight: progress to the job's
-/// caller, and one `cancel` once the caller asks.
-#[cfg(unix)]
-struct RunTalk<'a> {
-    inv: &'a Invocation,
-    progress: &'a mut dyn FnMut(Progress),
-    cancel_sent: bool,
-}
-
-#[cfg(unix)]
-impl gpu_supervisor::Conversation for RunTalk<'_> {
-    fn frame(&mut self, kind: &str, payload: &str, fds: Vec<std::os::fd::OwnedFd>) -> Result<Vec<gpu_supervisor::Outgoing>, String> {
-        match kind {
-            "progress" => {
-                let p = codec::decode_progress(payload, fds).map_err(|e| format!("the worker's progress breaks the protocol ({e})"))?;
-                (self.progress)(p);
-                Ok(Vec::new())
-            }
-            other => Err(format!("a run takes progress frames, not {other:?}")),
-        }
-    }
-
-    fn poll(&mut self) -> Vec<gpu_supervisor::Outgoing> {
-        if self.cancel_sent || !self.inv.cancel.is_cancelled() {
-            return Vec::new();
-        }
-        self.cancel_sent = true;
-        vec![gpu_supervisor::Outgoing::line("cancel".to_string())]
-    }
-
-    fn polls(&self) -> bool {
-        !self.cancel_sent
-    }
-}
-
-impl SupervisedInstance {
     #[cfg(not(unix))]
-    fn run_in_worker(&mut self, _action: &str, _inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        Err("supervised device workers need a Unix host".into())
+    fn batch_in_worker(&mut self, _action: &str, invs: &[Invocation], _progress: &mut dyn FnMut(usize, Progress)) -> Vec<ActionResult> {
+        invs.iter().map(|_| Err("supervised device workers need a Unix host".into())).collect()
     }
 
     /// Mark the worker unusable for every later run, and say why.
@@ -363,6 +347,56 @@ impl SupervisedInstance {
         why
     }
 }
+
+/// The lane's side of a group while it is in flight: each job's progress to
+/// its own caller, and one `cancel <job>` for each job whose caller asks.
+#[cfg(unix)]
+struct JobsTalk<'a> {
+    /// The cancellation token of each job the worker knows, by index.
+    tokens: Vec<capability::CancelToken>,
+    cancel_sent: Vec<bool>,
+    progress: &'a mut dyn FnMut(usize, Progress),
+}
+
+#[cfg(unix)]
+impl<'a> JobsTalk<'a> {
+    fn new(invs: &[Invocation], progress: &'a mut dyn FnMut(usize, Progress)) -> JobsTalk<'a> {
+        JobsTalk { tokens: invs.iter().map(|inv| inv.cancel.clone()).collect(), cancel_sent: vec![false; invs.len()], progress }
+    }
+}
+
+#[cfg(unix)]
+impl gpu_supervisor::Conversation for JobsTalk<'_> {
+    fn frame(&mut self, kind: &str, payload: &str, fds: Vec<std::os::fd::OwnedFd>) -> Result<Vec<gpu_supervisor::Outgoing>, String> {
+        match kind {
+            "progress" => {
+                let (job, p) = codec::decode_progress(payload, fds).map_err(|e| format!("the worker's progress breaks the protocol ({e})"))?;
+                if job >= self.tokens.len() {
+                    return Err(format!("progress for job {job} of a group of {}", self.tokens.len()));
+                }
+                (self.progress)(job, p);
+                Ok(Vec::new())
+            }
+            other => Err(format!("a batch takes progress frames, not {other:?}")),
+        }
+    }
+
+    fn poll(&mut self) -> Vec<gpu_supervisor::Outgoing> {
+        let mut out = Vec::new();
+        for (job, (token, sent)) in self.tokens.iter().zip(&mut self.cancel_sent).enumerate() {
+            if !*sent && token.is_cancelled() {
+                *sent = true;
+                out.push(gpu_supervisor::Outgoing::line(format!("cancel {job}")));
+            }
+        }
+        out
+    }
+
+    fn polls(&self) -> bool {
+        self.cancel_sent.iter().any(|sent| !sent)
+    }
+}
+
 
 #[cfg(test)]
 mod tests {

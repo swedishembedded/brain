@@ -194,8 +194,13 @@ impl Reader {
 
 /// `bytes` in a new memfd sealed against writing, growing and shrinking, so
 /// the receiver can trust its size and that it will not change. Linux only.
-#[cfg(target_os = "linux")]
 pub fn seal(name: &str, bytes: &[u8]) -> std::io::Result<OwnedFd> {
+    seal_parts(name, &[bytes])
+}
+
+/// [`seal`] of `parts` one after another, without joining them first.
+#[cfg(target_os = "linux")]
+pub fn seal_parts(name: &str, parts: &[&[u8]]) -> std::io::Result<OwnedFd> {
     let cname = std::ffi::CString::new(name.replace('\0', "")).unwrap_or_default();
     // SAFETY: memfd_create takes a NUL-terminated name and flags.
     let raw = unsafe { libc::memfd_create(cname.as_ptr(), libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING) };
@@ -205,7 +210,9 @@ pub fn seal(name: &str, bytes: &[u8]) -> std::io::Result<OwnedFd> {
     // SAFETY: memfd_create returned a fresh descriptor this function owns.
     let fd = unsafe { OwnedFd::from_raw_fd(raw) };
     let mut file = std::fs::File::from(fd);
-    file.write_all(bytes)?;
+    for part in parts {
+        file.write_all(part)?;
+    }
     let fd = OwnedFd::from(file);
     // SAFETY: fcntl on a descriptor this function owns.
     if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_ADD_SEALS, libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE | libc::F_SEAL_SEAL) } != 0 {
@@ -215,7 +222,7 @@ pub fn seal(name: &str, bytes: &[u8]) -> std::io::Result<OwnedFd> {
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn seal(_name: &str, _bytes: &[u8]) -> std::io::Result<OwnedFd> {
+pub fn seal_parts(_name: &str, _parts: &[&[u8]]) -> std::io::Result<OwnedFd> {
     Err(std::io::Error::new(ErrorKind::Unsupported, "sealed memfds need Linux"))
 }
 

@@ -8,23 +8,28 @@
 // sending an email to info@swedishembedded.com.
 
 //! Exhaustive model check of one hosted model's jobs crossing the worker
-//! boundary: the lane's exchange (`SupervisedInstance::run_in_worker`,
+//! boundary: the lane's exchange (`SupervisedInstance::batch_in_worker`,
 //! `Worker::exchange`), the two sockets' frame queues, and the worker's
 //! reader thread and request loop (`supervised::host`), with progress
-//! frames, cancellation and a worker that may die at any point.
+//! frames, per-job cancellation and a worker that may die at any point.
 //!
-//! Jobs run one after another on one lane, as `run_batch` runs them. The
-//! caller of each job may ask to cancel it at any time; the worker may be
-//! killed, or wedge (its request loop stops inside the driver while its
-//! reader thread runs on), at any time within a fault budget, after which the
-//! next job starts a fresh worker on a fresh socket.
+//! The lane's jobs go to the worker in groups of up to `batch`, one `batch`
+//! request per group, as the executor hands a group to `run_batch`; the
+//! worker's own `run_batch` works on the group's jobs in any order (one
+//! after another, as the default does, or interleaved, as a model that
+//! batches does), skipping a job whose token fired before it ran, and
+//! answers once with every job's result. The caller of each job may ask to
+//! cancel it at any time; the worker may be killed, or wedge (its request
+//! loop stops inside the driver while its reader thread runs on), at any
+//! time within a fault budget, after which the next group starts a fresh
+//! worker on a fresh socket.
 //!
 //! Time is ticks of the lane's deadline, which every frame the lane reads
-//! about the job in flight renews (`Exchange::renew`): a job may run far
-//! longer than one deadline as long as it keeps reporting. The environment
-//! is fair to a healthy worker: it reports within one deadline, so time
-//! stops one tick short of the deadline until its next frame is read. A
-//! wedged worker reports nothing, and time runs out.
+//! about the request in flight renews (`Exchange::renew`): a request may run
+//! far longer than one deadline as long as it keeps reporting. The
+//! environment is fair to a healthy worker: it reports within one deadline,
+//! so time stops one tick short of the deadline until its next frame is
+//! read. A wedged worker reports nothing, and time runs out.
 //!
 //! In every state:
 //!
@@ -50,19 +55,20 @@
 //!
 //! | action | code |
 //! |---|---|
-//! | `Send` | `run_in_worker` writing `run <action> <envelope>` (`wire::send`); a dead worker's successor is spawned by the next activation |
+//! | `Send` | `batch_in_worker` writing `batch <action> <k> <envelope>` (`wire::send`); a dead worker's successor is spawned by the next activation |
 //! | `CallerCancel` | the caller firing the job's `CancelToken` |
-//! | `SendCancel` | `Worker::exchange` seeing `cancelled()` and writing `<id> cancel` once |
-//! | `Receive` | `Worker::exchange` reading a frame: progress for the job in flight is forwarded and renews the deadline, its answer ends the exchange |
-//! | `SkipCancelled` | `Instance::run_batch` answering a job cancelled before its turn without running it |
-//! | `Eof` | `Worker::exchange` reading end of stream: the job's fault answer |
+//! | `SendCancel` | `JobsTalk::poll` seeing a job's token fired and writing `<id> cancel <job>` once |
+//! | `Receive` | `Worker::exchange` reading a frame: a job's progress is forwarded and renews the deadline, the answer ends the exchange with every job's result |
+//! | `Eof` | `Worker::exchange` reading end of stream: every job of the request gets the fault |
 //! | `Tick` | time passing while `Worker::exchange` waits on the socket |
-//! | `Timeout` | `Worker::exchange` finding its deadline passed: the worker is killed, the job's fault answer |
+//! | `Timeout` | `Worker::exchange` finding its deadline passed: the worker is killed, every job gets the fault |
 //! | `Wedge` | the environment: the worker's request loop stops inside the driver |
-//! | `ReaderStep` | `host::read_requests`: a run registers its token as `Current` and is queued; a cancel fires the token of the run it names |
-//! | `Start` | `Host::run` taking the queued run |
-//! | `Progress` | the model's progress callback writing `<id> progress` |
-//! | `Finish` | `Host::run` answering, then `Host::handle` clearing `Current` if it still names this run |
+//! | `ReaderStep` | `host::read_requests`: a request registers one token per job as `Current` and is queued; a cancel fires the token of the job it names in the request it names |
+//! | `Start` | `Host::batch` taking the queued request |
+//! | `Progress` | the model's progress callback writing `<id> progress {"job": j}` |
+//! | `Finish` | the model's `run_batch` finishing one job (cancelled only if its token fired) |
+//! | `Answer` | `Host::batch` answering with every result |
+//! | `Cleared` | `Host::handle` clearing `Current` if it still names this request |
 //! | `Crash` | the environment: the worker dies |
 
 use std::collections::{HashMap, VecDeque};
@@ -74,6 +80,8 @@ enum Answer {
     Fault,
 }
 
+/// A request is named by its index; request `r` holds jobs
+/// `r * batch .. (r + 1) * batch`, as many as there are.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum ToWorker {
     Run(usize),
@@ -83,15 +91,15 @@ enum ToWorker {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum ToParent {
     Progress(usize),
-    Answer(usize, Answer),
+    /// The request's answer: each of its jobs' results, as `produced` holds them.
+    Answer(usize),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Exec {
     Idle,
-    /// Running job `j`; `progressed` once it sent its one progress frame.
-    Running { job: usize, progressed: bool },
-    /// Answered `j`, has not cleared `Current` yet.
+    Running(usize),
+    /// Answered the request, has not cleared `Current` yet.
     Clearing(usize),
 }
 
@@ -99,28 +107,32 @@ enum Exec {
 struct State {
     answers: Vec<u8>,
     answered: Vec<Option<Answer>>,
-    /// The job the lane is exchanging, if any.
+    /// The request the lane is exchanging, if any.
     in_flight: Option<usize>,
-    /// The next job to send.
+    /// The next request to send.
     next: usize,
     asked: Vec<bool>,
     cancel_sent: Vec<bool>,
     to_worker: VecDeque<ToWorker>,
     to_parent: VecDeque<ToParent>,
-    /// The reader has queued these runs for the request loop.
+    /// The reader has queued these requests for the request loop.
     queued: VecDeque<usize>,
-    /// `Current`: the run read last and not finished, and its token.
-    current: Option<(usize, bool)>,
-    /// Tokens of runs the request loop holds (queued or running), fired or not.
+    /// `Current`: the request read last and not finished; its jobs' tokens
+    /// are `registered`.
+    current: Option<usize>,
+    /// The job's token is in `Current`, so a cancel naming it fires it.
+    registered: Vec<bool>,
+    /// The job's token fired in the worker.
     fired: Vec<bool>,
+    /// The job sent its one progress frame.
+    progressed: Vec<bool>,
     exec: Exec,
-    /// `None` when the worker is dead (its socket is closed).
     alive: bool,
     /// What the worker produced for each job, if it ran to its end.
     produced: Vec<Option<Answer>>,
-    /// A cancellation the reader read for a run it held and did not deliver.
+    /// A cancellation the reader read for a job it held and did not deliver.
     dropped_cancel: bool,
-    /// Ticks since the lane last read a frame about the job in flight (or sent it).
+    /// Ticks since the lane last read a frame about the request in flight (or sent it).
     since_heard: u8,
     /// Ticks the lane's deadline has counted; equal to `since_heard` when
     /// every frame renews it.
@@ -135,28 +147,48 @@ struct State {
 #[derive(Clone, Copy, Debug)]
 struct Bounds {
     jobs: usize,
+    /// Jobs per request.
+    batch: usize,
     /// Crashes and wedges together.
     faults: u8,
     /// Ticks in one deadline.
     deadline: u8,
 }
 
+impl Bounds {
+    fn requests(&self) -> usize {
+        self.jobs.div_ceil(self.batch)
+    }
+
+    fn jobs_of(&self, r: usize) -> std::ops::Range<usize> {
+        r * self.batch..((r + 1) * self.batch).min(self.jobs)
+    }
+
+    fn request_of(&self, j: usize) -> usize {
+        j / self.batch
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mutation {
     None,
-    /// The token is registered when the run starts, not when it is read.
+    /// The tokens are registered when the request starts, not when it is read.
     LateRegistration,
     /// `Current` is cleared unconditionally, after the answer was sent.
     ClearAnyAfterAnswer,
-    /// The lane answers `cancelled` as soon as it sends the cancel frame.
+    /// The lane answers a job `cancelled` as soon as it sends its cancel frame.
     AnswerAtCancel,
-    /// End of stream frees the lane without answering the job.
+    /// End of stream frees the lane without answering the request's jobs.
     NoAnswerOnEof,
     /// The deadline counts from the request, as before progress renewed it.
     AbsoluteDeadline,
     /// The deadline starts over at every wake-up of the wait (the poll for a
     /// cancellation), not only at a frame from the worker.
     RenewOnPoll,
+    /// A cancel fires every token of the request, not only its job's.
+    CancelWholeRequest,
+    /// Only the request's first job gets a token a cancel can reach.
+    FirstTokenOnly,
 }
 
 fn answer(t: &mut State, job: usize, a: Answer) {
@@ -168,31 +200,25 @@ fn successors(s: &State, b: Bounds, m: Mutation) -> Vec<(String, State)> {
     let mut out = Vec::new();
 
     // The lane.
-    if s.in_flight.is_none() && s.next < b.jobs {
+    if s.in_flight.is_none() && s.next < b.requests() {
         let mut t = s.clone();
-        let j = t.next;
+        let r = t.next;
         t.next += 1;
-        if t.asked[j] {
-            // `run_batch` answers a job cancelled before its turn without running it.
-            answer(&mut t, j, Answer::Cancelled);
-            out.push((format!("SkipCancelled(j{j})"), t));
-        } else {
-            if !t.alive {
-                // A fresh worker on a fresh socket.
-                t.alive = true;
-                t.wedged = false;
-                t.to_worker.clear();
-                t.to_parent.clear();
-                t.queued.clear();
-                t.current = None;
-                t.exec = Exec::Idle;
-            }
-            t.to_worker.push_back(ToWorker::Run(j));
-            t.in_flight = Some(j);
-            t.since_heard = 0;
-            t.timer = 0;
-            out.push((format!("Send(j{j})"), t));
+        if !t.alive {
+            // A fresh worker on a fresh socket.
+            t.alive = true;
+            t.wedged = false;
+            t.to_worker.clear();
+            t.to_parent.clear();
+            t.queued.clear();
+            t.current = None;
+            t.exec = Exec::Idle;
         }
+        t.to_worker.push_back(ToWorker::Run(r));
+        t.in_flight = Some(r);
+        t.since_heard = 0;
+        t.timer = 0;
+        out.push((format!("Send(r{r})"), t));
     }
     for j in 0..b.jobs {
         if !s.asked[j] && s.answers[j] == 0 {
@@ -201,35 +227,39 @@ fn successors(s: &State, b: Bounds, m: Mutation) -> Vec<(String, State)> {
             out.push((format!("CallerCancel(j{j})"), t));
         }
     }
-    if let Some(j) = s.in_flight {
-        if s.asked[j] && !s.cancel_sent[j] && s.alive {
-            let mut t = s.clone();
-            t.cancel_sent[j] = true;
-            t.to_worker.push_back(ToWorker::Cancel(j));
-            if m == Mutation::AnswerAtCancel {
-                answer(&mut t, j, Answer::Cancelled);
-                t.in_flight = None;
+    if let Some(r) = s.in_flight {
+        for j in b.jobs_of(r) {
+            if s.asked[j] && !s.cancel_sent[j] && s.answers[j] == 0 && s.alive {
+                let mut t = s.clone();
+                t.cancel_sent[j] = true;
+                t.to_worker.push_back(ToWorker::Cancel(j));
+                if m == Mutation::AnswerAtCancel {
+                    answer(&mut t, j, Answer::Cancelled);
+                }
+                out.push((format!("SendCancel(j{j})"), t));
             }
-            out.push((format!("SendCancel(j{j})"), t));
         }
         if let Some(&frame) = s.to_parent.front() {
             let mut t = s.clone();
             t.to_parent.pop_front();
             match frame {
-                // Forwarded to the job in flight: frames are read in order
-                // and a job's answer is its last frame, so it is that job's.
-                ToParent::Progress(i) if i == j => {
+                // Frames are read in order and a request's answer is its last
+                // frame, so a job's progress is about the request in flight.
+                ToParent::Progress(j) if b.request_of(j) == r => {
                     t.since_heard = 0;
                     if m != Mutation::AbsoluteDeadline {
                         t.timer = 0;
                     }
                 }
                 ToParent::Progress(_) => {}
-                ToParent::Answer(i, a) if i == j => {
-                    answer(&mut t, j, a);
+                ToParent::Answer(i) if i == r => {
+                    for j in b.jobs_of(r) {
+                        let a = t.produced[j].expect("an answered request produced every result");
+                        answer(&mut t, j, a);
+                    }
                     t.in_flight = None;
                 }
-                ToParent::Answer(..) => {}
+                ToParent::Answer(_) => {}
             }
             out.push((format!("Receive({frame:?})"), t));
         } else if s.alive {
@@ -247,21 +277,20 @@ fn successors(s: &State, b: Bounds, m: Mutation) -> Vec<(String, State)> {
                 let mut t = s.clone();
                 t.killed_healthy |= !t.wedged;
                 kill(&mut t);
-                answer(&mut t, j, Answer::Fault);
-                t.in_flight = None;
-                out.push((format!("Timeout(j{j})"), t));
+                fail_request(&mut t, b, r);
+                out.push((format!("Timeout(r{r})"), t));
             }
         } else {
             let mut t = s.clone();
             if m != Mutation::NoAnswerOnEof {
-                answer(&mut t, j, Answer::Fault);
+                fail_request(&mut t, b, r);
             }
             t.in_flight = None;
-            out.push((format!("Eof(j{j})"), t));
+            out.push((format!("Eof(r{r})"), t));
         }
     } else if let Some(&frame) = s.to_parent.front() {
-        // Frames about a job the lane already finished: read and discarded
-        // by the next exchange.
+        // Frames about a request the lane already finished: read and
+        // discarded by the next exchange.
         let mut t = s.clone();
         t.to_parent.pop_front();
         out.push((format!("Discard({frame:?})"), t));
@@ -276,25 +305,30 @@ fn successors(s: &State, b: Bounds, m: Mutation) -> Vec<(String, State)> {
         let mut t = s.clone();
         t.to_worker.pop_front();
         match frame {
-            ToWorker::Run(j) => {
-                t.queued.push_back(j);
+            ToWorker::Run(r) => {
+                t.queued.push_back(r);
                 if m != Mutation::LateRegistration {
-                    t.current = Some((j, false));
+                    register(&mut t, b, r, m);
                 }
             }
-            ToWorker::Cancel(j) => match t.current {
-                Some((c, _)) if c == j => {
-                    t.current = Some((c, true));
-                    t.fired[j] = true;
-                }
-                _ => {
-                    // Dropped: a real loss only if the request loop still holds that run.
-                    let held = t.queued.contains(&j) || matches!(t.exec, Exec::Running { job, .. } if job == j);
+            ToWorker::Cancel(j) => {
+                let r = b.request_of(j);
+                if t.current == Some(r) && t.registered[j] {
+                    if m == Mutation::CancelWholeRequest {
+                        for k in b.jobs_of(r) {
+                            t.fired[k] = true;
+                        }
+                    } else {
+                        t.fired[j] = true;
+                    }
+                } else {
+                    // Dropped: a real loss only if the request loop still holds that job.
+                    let held = t.queued.contains(&r) || (t.exec == Exec::Running(r) && t.produced[j].is_none());
                     if held {
                         t.dropped_cancel = true;
                     }
                 }
-            },
+            }
         }
         out.push((format!("ReaderStep({frame:?})"), t));
     }
@@ -318,45 +352,72 @@ fn successors(s: &State, b: Bounds, m: Mutation) -> Vec<(String, State)> {
     }
     match s.exec {
         Exec::Idle => {
-            if let Some(&j) = s.queued.front() {
+            if let Some(&r) = s.queued.front() {
                 let mut t = s.clone();
                 t.queued.pop_front();
                 if m == Mutation::LateRegistration {
-                    t.current = Some((j, false));
+                    register(&mut t, b, r, m);
                 }
-                t.exec = Exec::Running { job: j, progressed: false };
-                out.push((format!("Start(j{j})"), t));
+                t.exec = Exec::Running(r);
+                out.push((format!("Start(r{r})"), t));
             }
         }
-        Exec::Running { job, progressed } => {
-            if !progressed {
-                let mut t = s.clone();
-                t.to_parent.push_back(ToParent::Progress(job));
-                t.exec = Exec::Running { job, progressed: true };
-                out.push((format!("Progress(j{job})"), t));
+        Exec::Running(r) => {
+            let unfinished: Vec<usize> = b.jobs_of(r).filter(|&j| s.produced[j].is_none()).collect();
+            for &j in &unfinished {
+                if !s.progressed[j] {
+                    let mut t = s.clone();
+                    t.to_parent.push_back(ToParent::Progress(j));
+                    t.progressed[j] = true;
+                    out.push((format!("Progress(j{j})"), t));
+                }
+                // A job observes its token between steps (or before it starts):
+                // a fired token may still be seen too late, an unfired one is
+                // never seen.
+                let outcomes: &[Answer] = if s.fired[j] { &[Answer::Ok, Answer::Cancelled] } else { &[Answer::Ok] };
+                for &a in outcomes {
+                    let mut t = s.clone();
+                    t.produced[j] = Some(a);
+                    out.push((format!("Finish(j{j},{a:?})"), t));
+                }
             }
-            // A run observes its token between steps: a fired token may still
-            // be seen too late, an unfired one is never seen.
-            let outcomes: &[Answer] = if s.fired[job] { &[Answer::Ok, Answer::Cancelled] } else { &[Answer::Ok] };
-            for &a in outcomes {
+            if unfinished.is_empty() {
                 let mut t = s.clone();
-                t.produced[job] = Some(a);
-                t.to_parent.push_back(ToParent::Answer(job, a));
-                t.exec = Exec::Clearing(job);
-                out.push((format!("Finish(j{job},{a:?})"), t));
+                t.to_parent.push_back(ToParent::Answer(r));
+                t.exec = Exec::Clearing(r);
+                out.push((format!("Answer(r{r})"), t));
             }
         }
-        Exec::Clearing(job) => {
+        Exec::Clearing(r) => {
             let mut t = s.clone();
-            let mine = t.current.is_some_and(|(c, _)| c == job);
-            if mine || m == Mutation::ClearAnyAfterAnswer {
+            if t.current == Some(r) || m == Mutation::ClearAnyAfterAnswer {
                 t.current = None;
+                t.registered.iter_mut().for_each(|x| *x = false);
             }
             t.exec = Exec::Idle;
-            out.push((format!("Cleared(j{job})"), t));
+            out.push((format!("Cleared(r{r})"), t));
         }
     }
     out
+}
+
+/// The reader makes request `r` current, with a token for each of its jobs.
+fn register(t: &mut State, b: Bounds, r: usize, m: Mutation) {
+    t.current = Some(r);
+    t.registered.iter_mut().for_each(|x| *x = false);
+    for j in b.jobs_of(r) {
+        t.registered[j] = m != Mutation::FirstTokenOnly || j == b.jobs_of(r).start;
+    }
+}
+
+/// Every job of request `r` not answered yet gets the worker's fault.
+fn fail_request(t: &mut State, b: Bounds, r: usize) {
+    for j in b.jobs_of(r) {
+        if t.answers[j] == 0 {
+            answer(t, j, Answer::Fault);
+        }
+    }
+    t.in_flight = None;
 }
 
 /// The worker dies (or is killed). What it wrote before stays readable; what
@@ -367,6 +428,7 @@ fn kill(t: &mut State) {
     t.to_worker.clear();
     t.queued.clear();
     t.current = None;
+    t.registered.iter_mut().for_each(|x| *x = false);
     t.exec = Exec::Idle;
 }
 
@@ -383,7 +445,7 @@ fn check_invariants(s: &State) -> Result<(), String> {
         }
     }
     if s.dropped_cancel {
-        return Err("a cancellation reached the worker while it held the run and was dropped".into());
+        return Err("a cancellation reached the worker while it held the job and was dropped".into());
     }
     if s.killed_healthy {
         return Err("a deadline killed a worker that kept reporting".into());
@@ -415,7 +477,9 @@ fn explore(b: Bounds, m: Mutation) -> Result<usize, String> {
         to_parent: VecDeque::new(),
         queued: VecDeque::new(),
         current: None,
+        registered: vec![false; b.jobs],
         fired: vec![false; b.jobs],
+        progressed: vec![false; b.jobs],
         exec: Exec::Idle,
         alive: true,
         produced: vec![None; b.jobs],
@@ -492,9 +556,9 @@ fn explore(b: Bounds, m: Mutation) -> Result<usize, String> {
 
 fn explore_all(m: Mutation) -> Result<usize, String> {
     let mut states = 0;
-    for jobs in 1..=3 {
+    for (jobs, batch) in [(1, 1), (2, 1), (3, 1), (2, 2), (3, 2)] {
         for faults in 0..=1 {
-            states += explore(Bounds { jobs, faults, deadline: 2 }, m)?;
+            states += explore(Bounds { jobs, batch, faults, deadline: 2 }, m)?;
         }
     }
     Ok(states)
@@ -516,6 +580,8 @@ fn every_mutation_of_the_exchange_is_caught() {
         Mutation::NoAnswerOnEof,
         Mutation::AbsoluteDeadline,
         Mutation::RenewOnPoll,
+        Mutation::CancelWholeRequest,
+        Mutation::FirstTokenOnly,
     ];
     for m in mutations {
         let why = explore_all(m).err().unwrap_or_else(|| panic!("{m:?} broke the exchange and the model did not notice"));

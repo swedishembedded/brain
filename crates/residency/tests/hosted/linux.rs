@@ -46,7 +46,7 @@ struct TestModel(String);
 
 impl ResidentModel for TestModel {
     fn manifest(&self) -> Manifest {
-        let actions = ["echo", "stream", "slow", "wait", "block", "panic"].map(|a| ActionSpec::new(a, a)).to_vec();
+        let actions = ["echo", "stream", "slow", "wait", "block", "panic", "batch"].map(|a| ActionSpec::new(a, a)).to_vec();
         Manifest::new(&self.0, "a model hosted in a test worker", actions)
     }
 
@@ -113,6 +113,33 @@ impl Instance for TestInstance {
             "panic" => panic!("the model hit a bug"),
             other => Err(format!("no action {other}")),
         }
+    }
+
+    /// `batch` is a model that batches: one call sees the whole group, each
+    /// job reports under its own index, and a job asked to `wait` waits for
+    /// its own cancellation.
+    fn run_batch(&mut self, action: &str, invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress)) -> Vec<ActionResult> {
+        if action != "batch" {
+            return invs.iter().enumerate().map(|(i, inv)| inv.cancel.check().and_then(|()| self.run(action, inv, &mut |p| progress(i, p)))).collect();
+        }
+        invs.iter()
+            .enumerate()
+            .map(|(i, inv)| {
+                progress(i, Progress::step(1, 1, format!("job {i}")));
+                if inv.params.get("wait").is_some() {
+                    let until = Instant::now() + Duration::from_secs(30);
+                    while !inv.cancel.is_cancelled() && Instant::now() < until {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    inv.cancel.check()?;
+                }
+                let mut out = Outcome::new().set("index", json!(i)).set("group", json!(invs.len())).set("pid", json!(std::process::id())).set("params", inv.params.clone());
+                for (name, blob) in &inv.blobs {
+                    out = out.blob(&format!("out_{name}"), Blob::new(blob.media, blob.bytes.iter().rev().copied().collect()).with_meta(blob.meta.clone()));
+                }
+                Ok(out)
+            })
+            .collect()
     }
 }
 
@@ -234,6 +261,42 @@ fn killing_the_worker_mid_job_fails_that_job_and_the_next_rebuilds_on_a_healthy_
     exec.shutdown();
 }
 
+/// A group crosses as one request: the worker's model sees all of it in one
+/// `run_batch` call, each job's progress, result and blobs come back under
+/// its own index (more blobs than one frame may carry descriptors), and a
+/// cancellation reaches only the job it was asked for.
+fn a_group_crosses_as_one_batch_with_per_job_progress_results_and_cancellation() {
+    let health = health();
+    let mut instance = hosted("m", &health, DEADLINES).activate(&InstanceKey::new("m", "default"), Device::Gpu(0)).expect("the worker opens");
+    const JOBS: usize = 40;
+    let invs: Vec<Invocation> = (0..JOBS)
+        .map(|i| {
+            let mut inv = Invocation::new().set("n", json!(i)).blob("payload", Blob::new(Media::Bytes, vec![i as u8, 1, 2]));
+            if i == 7 {
+                inv = inv.set("wait", json!(true));
+                inv.cancel = CancelToken::armed();
+                inv.cancel.cancel();
+            }
+            inv
+        })
+        .collect();
+    let mut seen: Vec<Vec<String>> = vec![Vec::new(); JOBS];
+    let results = instance.run_batch("batch", &invs, &mut |i, p| seen[i].push(p.message));
+    assert_eq!(results.len(), JOBS);
+    for (i, r) in results.iter().enumerate() {
+        assert_eq!(seen[i], [format!("job {i}")], "job {i}'s progress went to its own caller");
+        if i == 7 {
+            assert_eq!(r.as_ref().err().map(String::as_str), Some(failure::CANCELLED), "the job asked to cancel was cancelled");
+            continue;
+        }
+        let out = r.as_ref().unwrap_or_else(|e| panic!("job {i}: {e}"));
+        assert_eq!((out.outputs["index"].clone(), out.outputs["group"].clone(), out.outputs["params"]["n"].clone()), (json!(i), json!(JOBS), json!(i)), "one run_batch call saw the whole group");
+        assert_ne!(out.outputs["pid"].as_u64(), Some(u64::from(std::process::id())));
+        assert_eq!(out.blobs["out_payload"].bytes, [2, 1, i as u8], "job {i}'s blob came back to job {i}");
+    }
+    assert_eq!(health.status(&Device::Gpu(0)).faults, 0);
+}
+
 /// The run deadline bounds a worker's silence: a job that keeps reporting
 /// progress runs past it, and one that goes silent is killed at it and
 /// quarantines its card.
@@ -280,13 +343,13 @@ fn the_worker_mode_serves_only_a_supervisor_that_greets_it() {
     let mut w = Worker::spawn_with(&worker_command(), REAP).unwrap();
     let err = w.request("open gpu0 {}", wait).expect("answered").expect_err("no greeting, no service");
     assert!(err.contains("hello"), "{err}");
-    assert!(w.request("hello 1", wait).is_err(), "the worker ended after refusing");
+    assert!(w.request(&format!("hello {}", residency::supervised::PROTOCOL), wait).is_err(), "the worker ended after refusing");
 
     let mut w = Worker::spawn_with(&worker_command(), REAP).unwrap();
     let err = w.request("hello 999", wait).expect("answered").expect_err("another protocol version is refused");
-    assert!(err.contains("hello 1"), "{err}");
+    assert!(err.contains(&format!("hello {}", residency::supervised::PROTOCOL)), "{err}");
     let mut w = Worker::spawn_with(&worker_command(), REAP).unwrap();
-    w.request("hello 1", wait).expect("answered").expect("greeted");
+    w.request(&format!("hello {}", residency::supervised::PROTOCOL), wait).expect("answered").expect("greeted");
     let err = w.request("open gpu0 {\"family\":\"other\",\"args\":{},\"key\":{\"model\":\"m\",\"config\":\"c\"}}", wait).expect("answered").expect_err("an unknown family");
     assert!(err.contains("\"other\""), "{err}");
 }
@@ -295,6 +358,7 @@ const TESTS: &[(&str, fn())] = &[
     ("a_hosted_model_runs_in_its_worker_with_blobs_through_memfds", a_hosted_model_runs_in_its_worker_with_blobs_through_memfds),
     ("progress_and_cancellation_cross_the_boundary", progress_and_cancellation_cross_the_boundary),
     ("killing_the_worker_mid_job_fails_that_job_and_the_next_rebuilds_on_a_healthy_card", killing_the_worker_mid_job_fails_that_job_and_the_next_rebuilds_on_a_healthy_card),
+    ("a_group_crosses_as_one_batch_with_per_job_progress_results_and_cancellation", a_group_crosses_as_one_batch_with_per_job_progress_results_and_cancellation),
     ("a_job_that_keeps_reporting_outlives_the_run_deadline_and_a_silent_one_is_killed_at_it", a_job_that_keeps_reporting_outlives_the_run_deadline_and_a_silent_one_is_killed_at_it),
     ("a_panic_in_model_code_fails_the_job_without_quarantining_the_card", a_panic_in_model_code_fails_the_job_without_quarantining_the_card),
     ("the_worker_mode_serves_only_a_supervisor_that_greets_it", the_worker_mode_serves_only_a_supervisor_that_greets_it),

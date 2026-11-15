@@ -40,7 +40,7 @@ while IFS= read -r line; do
     probe*) if [ "$role" = bad-probe ]; then echo "$id err the device did not answer"; else echo "$id ok {}"; fi ;;
     *hang*) sleep 3600 ;;
     *crash*) kill -ABRT $$ ;;
-    *) echo "$id ok {\"outputs\":{\"done\":true}}" ;;
+    *) echo "$id ok {\"results\":[{\"outputs\":{\"done\":true}}]}" ;;
   esac
 done
 "#;

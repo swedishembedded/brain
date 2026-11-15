@@ -9,15 +9,16 @@
 //! The worker side of a hosted model: the request loop a supervised worker
 //! runs ([`host`]), over any [`ResidentModel`] a [`HostedFamily`] rebuilds.
 
-use std::collections::VecDeque;
+use std::cell::Cell;
 use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;
+use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 
-use capability::{CancelToken, Invocation, Progress};
+use capability::{CancelToken, Progress};
 use serde_json::{json, Value};
 
-use super::codec::{encode_progress, no_leftovers, object, pack, read_blobs, unpack, write_blobs};
+use super::codec::{decode_jobs, encode_progress, encode_results, object};
 use super::{parse_device_label, HostedFamily, PANICKED, PROTOCOL};
 use crate::{Instance, InstanceKey};
 
@@ -41,27 +42,28 @@ pub fn host(families: &[HostedFamily]) -> i32 {
     }
 }
 
-/// One request a worker read, with the descriptors it declared and, for a
-/// run, the token its cancellation fires.
+/// One frame a worker read, with the descriptors it declared and, for a
+/// group, the token of each job it carries.
 struct Incoming {
     id: u64,
     verb: String,
     rest: String,
     fds: Vec<OwnedFd>,
-    cancel: CancelToken,
+    tokens: Vec<CancelToken>,
 }
 
-/// The run read last and not finished yet, for a cancel frame to reach. One
-/// request is in flight at a time, so there is at most one.
-type Current = Arc<Mutex<Option<(u64, CancelToken)>>>;
+/// The group read last and not finished yet, for a cancel frame to reach:
+/// its request id and one token per job, by index. One request is in flight
+/// at a time, so there is at most one.
+type Current = Arc<Mutex<Option<(u64, Vec<CancelToken>)>>>;
 
 /// [`host`] on a socket the caller already holds: the worker's request loop.
 /// The calling thread runs every request and writes every frame (one writer);
-/// a reader thread reads frames and delivers a `cancel` to the run it names,
-/// and only to that one. A run's token is registered as the reader reads the
-/// run, so a cancellation that arrives before the run starts still reaches
-/// it, and the host clears only its own entry when the run ends, so one that
-/// arrives after its run ended reaches nothing.
+/// a reader thread reads frames and delivers a `cancel <job>` to the job it
+/// names, and only to that one. A group's tokens are registered as the reader
+/// reads the group, so a cancellation that arrives before a job starts still
+/// reaches it, and the host clears only its own entry when the group ends,
+/// so one that arrives after the group ended reaches nothing.
 pub fn host_on(sock: UnixStream, families: &[HostedFamily]) -> i32 {
     let current: Current = Arc::new(Mutex::new(None));
     let (tx, rx) = std::sync::mpsc::channel::<Result<Incoming, String>>();
@@ -78,25 +80,33 @@ pub fn host_on(sock: UnixStream, families: &[HostedFamily]) -> i32 {
         eprintln!("brain worker: cannot start its reader: {e}");
         return 2;
     }
-    let mut host = Host { sock, current, families, greeted: false, instance: None };
-    while let Ok(next) = rx.recv() {
-        let Incoming { id, verb, rest, fds, cancel } = match next {
-            Ok(incoming) => incoming,
-            Err(why) => {
+    let mut host = Host { sock, current, rx, families, greeted: false, instance: None };
+    loop {
+        let incoming = match host.rx.recv() {
+            Ok(Ok(incoming)) => incoming,
+            Ok(Err(why)) => {
                 eprintln!("brain worker: {why}");
                 return 2;
             }
+            Err(_) => return 0,
         };
-        match host.handle(id, &verb, &rest, fds, cancel) {
-            Step::Continue => {}
-            Step::Exit(code) => return code,
+        if let Step::Exit(code) = host.handle(incoming) {
+            return code;
         }
     }
-    0
+}
+
+/// How many jobs a frame announces before its JSON: `<k>` in
+/// `batch <action> <k> <jobs>`.
+fn announced_jobs(verb: &str, rest: &str) -> Option<usize> {
+    match verb {
+        "batch" => rest.split(' ').nth(1)?.parse().ok(),
+        _ => Some(0),
+    }
 }
 
 /// The reader thread: frames in, requests to the host loop, cancellations to
-/// the run they name. Ends at end of stream or a broken frame.
+/// the job they name. Ends at end of stream or a broken frame.
 fn read_requests(sock: UnixStream, current: &Current, tx: &std::sync::mpsc::Sender<Result<Incoming, String>>) {
     let mut reader = gpu_supervisor::wire::Reader::new(gpu_supervisor::MAX_REQUEST_BYTES);
     loop {
@@ -139,23 +149,29 @@ fn read_requests(sock: UnixStream, current: &Current, tx: &std::sync::mpsc::Send
                 return;
             }
         };
-        let cancel = CancelToken::armed();
+        let Some(jobs) = announced_jobs(verb, &rest) else {
+            let _ = tx.send(Err(format!("request {id} does not say how many jobs it carries")));
+            return;
+        };
+        let tokens: Vec<CancelToken> = (0..jobs).map(|_| CancelToken::armed()).collect();
         {
             let mut current = current.lock().unwrap_or_else(|e| e.into_inner());
             match verb {
                 "cancel" => {
-                    if let Some((running, token)) = current.as_ref() {
+                    if let (Some((running, held)), Ok(job)) = (current.as_ref(), rest.parse::<usize>()) {
                         if *running == id {
-                            token.cancel();
+                            if let Some(token) = held.get(job) {
+                                token.cancel();
+                            }
                         }
                     }
                     continue;
                 }
-                "run" => *current = Some((id, cancel.clone())),
+                "batch" => *current = Some((id, tokens.clone())),
                 _ => {}
             }
         }
-        if tx.send(Ok(Incoming { id, verb: verb.to_string(), rest, fds, cancel })).is_err() {
+        if tx.send(Ok(Incoming { id, verb: verb.to_string(), rest, fds, tokens })).is_err() {
             return;
         }
     }
@@ -169,6 +185,7 @@ enum Step {
 struct Host<'a> {
     sock: UnixStream,
     current: Current,
+    rx: Receiver<Result<Incoming, String>>,
     families: &'a [HostedFamily],
     greeted: bool,
     instance: Option<Box<dyn Instance>>,
@@ -183,10 +200,18 @@ impl Host<'_> {
         gpu_supervisor::wire::send(&self.sock, frame.as_bytes(), &borrowed).map_err(|_| Step::Exit(0))
     }
 
+    /// `<id> <kind>[+<n>] <payload>` with `fds` beside it.
+    fn send_frame(&self, id: u64, kind: &str, payload: &str, fds: &[OwnedFd]) -> Result<(), Step> {
+        if fds.is_empty() {
+            self.send(&format!("{id} {kind} {payload}"), &[])
+        } else {
+            self.send(&format!("{id} {kind}+{} {payload}", fds.len()), fds)
+        }
+    }
+
     fn answer(&self, id: u64, result: Result<(String, Vec<OwnedFd>), String>) -> Step {
         let sent = match result {
-            Ok((payload, fds)) if fds.is_empty() => self.send(&format!("{id} ok {payload}"), &[]),
-            Ok((payload, fds)) => self.send(&format!("{id} ok+{} {payload}", fds.len()), &fds),
+            Ok((payload, fds)) => self.send_frame(id, "ok", &payload, &fds),
             Err(message) => self.send(&format!("{id} err {message}"), &[]),
         };
         match sent {
@@ -195,8 +220,9 @@ impl Host<'_> {
         }
     }
 
-    fn handle(&mut self, id: u64, verb: &str, rest: &str, fds: Vec<OwnedFd>, cancel: CancelToken) -> Step {
-        let step = self.dispatch(id, verb, rest, fds, cancel);
+    fn handle(&mut self, incoming: Incoming) -> Step {
+        let id = incoming.id;
+        let step = self.dispatch(incoming);
         // The request is answered: a cancel naming it from now on reaches nothing.
         let mut current = self.current.lock().unwrap_or_else(|e| e.into_inner());
         if current.as_ref().is_some_and(|(running, _)| *running == id) {
@@ -205,7 +231,8 @@ impl Host<'_> {
         step
     }
 
-    fn dispatch(&mut self, id: u64, verb: &str, rest: &str, fds: Vec<OwnedFd>, cancel: CancelToken) -> Step {
+    fn dispatch(&mut self, incoming: Incoming) -> Step {
+        let Incoming { id, verb, rest, fds, tokens } = incoming;
         if !self.greeted {
             let want = PROTOCOL.to_string();
             return if verb == "hello" && rest == want {
@@ -217,9 +244,9 @@ impl Host<'_> {
                 Step::Exit(2)
             };
         }
-        match verb {
+        match verb.as_str() {
             "open" => {
-                let opened = self.open(rest);
+                let opened = self.open(&rest);
                 let failed = opened.as_ref().err().is_some_and(|e| e.starts_with(PANICKED));
                 let step = self.answer(id, opened.map(|()| ("{}".to_string(), Vec::new())));
                 if failed {
@@ -228,8 +255,8 @@ impl Host<'_> {
                     step
                 }
             }
-            "run" => self.run(id, rest, fds, cancel),
-            other => self.answer(id, Err(format!("a hosted model takes hello, open and run, not {other:?}"))),
+            "batch" => self.batch(id, &rest, fds, tokens),
+            other => self.answer(id, Err(format!("a hosted model takes hello, open and batch, not {other:?}"))),
         }
     }
 
@@ -260,56 +287,44 @@ impl Host<'_> {
         }
     }
 
-    fn run(&mut self, id: u64, rest: &str, fds: Vec<OwnedFd>, cancel: CancelToken) -> Step {
+    /// A job's progress as a frame; once the supervisor is gone nothing more is sent.
+    fn progress(&self, id: u64, job: usize, p: &Progress, gone: &Cell<bool>) {
+        if gone.get() {
+            return;
+        }
+        let mut fds = Vec::new();
+        match encode_progress(job, p, &mut fds) {
+            Ok(payload) => gone.set(self.send_frame(id, "progress", &payload, &fds).is_err()),
+            Err(e) => eprintln!("brain worker: a progress update could not be sent: {e}"),
+        }
+    }
+
+    /// `batch <action> <k> <jobs>`: the instance's own `run_batch` over the group.
+    fn batch(&mut self, id: u64, rest: &str, fds: Vec<OwnedFd>, tokens: Vec<CancelToken>) -> Step {
         let prepared = (|| {
-            let (action, envelope) = rest.split_once(' ').ok_or("run needs an action and an envelope")?;
-            let mut fds = VecDeque::from(fds);
-            let v = unpack(envelope, &mut fds)?;
-            let map = object(&v, "the run envelope", &["params", "scope", "blobs"])?;
-            let blobs = read_blobs(map.get("blobs"), &mut fds)?;
-            no_leftovers(&fds)?;
-            let params = map.get("params").cloned().unwrap_or_else(|| json!({}));
-            let scope = map.get("scope").and_then(Value::as_str).unwrap_or("").to_string();
-            Ok::<_, String>((action.to_string(), Invocation { params, blobs, cancel, scope }))
+            let mut words = rest.splitn(3, ' ');
+            let (Some(action), Some(_), Some(jobs)) = (words.next(), words.next(), words.next()) else {
+                return Err("batch needs an action, a job count and the jobs".to_string());
+            };
+            Ok((action.to_string(), decode_jobs(jobs, fds, tokens)?))
         })();
-        let (action, inv) = match prepared {
+        let (action, invs) = match prepared {
             Ok(p) => p,
             Err(why) => return self.answer(id, Err(why)),
         };
         let Some(mut instance) = self.instance.take() else {
             return self.answer(id, Err("no instance is open; send `open` first".into()));
         };
-        let mut gone = false;
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let mut progress = |p: Progress| {
-                if gone {
-                    return;
-                }
-                let mut fds = Vec::new();
-                let sent = match encode_progress(&p, &mut fds) {
-                    Ok(payload) if fds.is_empty() => self.send(&format!("{id} progress {payload}"), &[]),
-                    Ok(payload) => self.send(&format!("{id} progress+{} {payload}", fds.len()), &fds),
-                    Err(e) => {
-                        eprintln!("brain worker: a progress update could not be sent: {e}");
-                        Ok(())
-                    }
-                };
-                gone = sent.is_err();
-            };
-            instance.run(&action, &inv, &mut progress)
-        }));
-        if gone {
+        let gone = Cell::new(false);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| instance.run_batch(&action, &invs, &mut |job, p| self.progress(id, job, &p, &gone))));
+        if gone.get() {
             return Step::Exit(0);
         }
         match result {
-            Ok(outcome) => {
+            Ok(results) => {
                 self.instance = Some(instance);
-                let reply = outcome.and_then(|o| {
-                    let mut fds = Vec::new();
-                    let blobs = write_blobs(&o.blobs, &mut fds)?;
-                    let payload = pack(json!({ "outputs": o.outputs, "blobs": blobs }).to_string(), &mut fds)?;
-                    Ok((payload, fds))
-                });
+                let mut fds = Vec::new();
+                let reply = encode_results(&results, &mut fds).map(|payload| (payload, fds));
                 self.answer(id, reply)
             }
             Err(p) => {
@@ -324,4 +339,3 @@ impl Host<'_> {
 fn panic_text(p: &(dyn std::any::Any + Send)) -> String {
     p.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| p.downcast_ref::<String>().cloned()).unwrap_or_else(|| "a panic without a message".into())
 }
-

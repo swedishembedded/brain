@@ -65,8 +65,8 @@ worker.
 | `Health` | `crates/gpu-supervisor/src/health.rs` | the registry every supervised call goes through: refuses work for a quarantined device without sending anything, records each fault once, logs the trip once, parks unreaped workers and holds the device's probes back until they are reaped, runs probes in fresh workers |
 | executor integration | `crates/residency/src/executor.rs` (`start_supervised`, `assign`, `refuse_quarantined`, `start_probes`, `lane_loop`) | quarantined devices are excluded from placement like busy ones; work no healthy device can ever host is refused once the breaker tripped; a group that faulted its device fails and its claim (budget, slot, instance) is unwound; due probes run on the device's own lane, which is busy meanwhile; an in-process wait past `--gpu-wait-s` (`backend_api::hardware::WAIT_TIMEOUT_MARK`) quarantines the card too, whether it panicked, failed the activation or came back as a job's error |
 | `wire` | `crates/gpu-supervisor/src/wire.rs` | frames with descriptors beside them (`SCM_RIGHTS`, close-on-exec, truncation refused), sealed memfds for bulk data (`seal`, `read_sealed`: refuses an unsealed or oversized descriptor), `take_worker_socket` (the worker's end: stdin must be a socket, then stdin reads `/dev/null` and stdout goes to stderr so model code cannot write into the protocol) |
-| `SupervisedModel` | `crates/residency/src/supervised.rs` | a resident whose instance is a worker process; it wraps the model's own resident, which answers the manifest, instance key, estimate and job checks in the serving process. Activation sends `hello <PROTOCOL>` then `open <device> <spec>`; each job is one `run[+<n>] <action> <envelope>` exchange with blobs in memfds, progress forwarded to the job's caller and the caller's cancellation sent as a frame; an envelope or answer too long for a line moves into a memfd. A lost worker answers every later job of its batch with the same definitive error; a worker's `err panicked:` answer is raised again on the lane, so the group fails and the instance is rebuilt exactly as for an in-process panic, with no quarantine |
-| host loop | `crates/residency/src/supervised/host.rs` (`host`, `host_on`), frame JSON in `supervised/codec.rs` | the worker side over any `ResidentModel` a `HostedFamily` rebuilds from a `HostSpec`: refuses (exit 2, nothing served) unless stdin is a socket and the first request is `hello` with this protocol; `open` activates on the named device; `run` runs one job under `catch_unwind`; a reader thread registers each run's cancel token as it reads the run and fires it only for a `cancel` naming that run; the request loop is the socket's only writer |
+| `SupervisedModel` | `crates/residency/src/supervised.rs` | a resident whose instance is a worker process; it wraps the model's own resident, which answers the manifest, instance key, estimate and job checks in the serving process. Activation sends `hello <PROTOCOL>` then `open <device> <spec>`; each group of jobs `run_batch` is handed is one `batch[+<n>] <action> <k> <jobs>` exchange with the group's blobs in one memfd, each job's progress forwarded to its own caller (renewing the deadline) and each caller's cancellation sent as `cancel <job>`; a single job is a group of one; an envelope or answer too long for a line moves into a memfd. A lost worker answers every later job of its batch with the same definitive error; a worker's `err panicked:` answer is raised again on the lane, so the group fails and the instance is rebuilt exactly as for an in-process panic, with no quarantine |
+| host loop | `crates/residency/src/supervised/host.rs` (`host`, `host_on`), frame JSON in `supervised/codec.rs` | the worker side over any `ResidentModel` a `HostedFamily` rebuilds from a `HostSpec`: refuses (exit 2, nothing served) unless stdin is a socket and the first request is `hello` with this protocol; `open` activates on the named device; `batch` runs the instance's own `run_batch` over the group under `catch_unwind`, so a model that batches batches in the worker; a reader thread registers one cancel token per job as it reads the group and fires only the one a `cancel <job>` names; the request loop is the socket's only writer |
 | worker hosting | `WorkerHosting` (residency), `serving::supervision::worker_hosting`, `catalog::hosted_families`, `crates/cli` (`--worker-hosted`, `--worker-deadline-s`, the `__worker` arm in `main`) | `brain serve --worker-hosted FAMILY` wraps that family's residents in `SupervisedModel`s whose worker is `/proc/self/exe <device flags> __worker`: the server's own executable (an upgrade on disk never mixes versions) with the device flags `select_backend` consumed (`crate::device_flags`). A family no worker can host stops the server at startup. `decisions::resident` (moved out of the catalog) is the one certified family; `residency::on_device` (moved out of the catalog) is how it binds its card in either process |
 | `brain-gpu-worker` | `crates/gpu-worker` | the real worker: opens card `gpu<i>` through `backend-wgpu`, compiles the probe kernel, and answers `probe` with a real dispatch whose result it checks |
 | `brain serve` supervision | `crates/serving/src/supervision.rs`, `ServeKnobs::supervision`, `crates/cli` `serve_supervision` | the serving executor runs with `Supervision`; probes run in the `brain-gpu-worker` found beside the `brain` executable (bounded by `--gpu-wait-s`); a missing or non-executable worker is named at startup and probes become `Probe::Elapsed` (the breaker paces readmission without touching the card); shipped in the Linux release artifacts and the `.deb` (`/usr/bin/brain-gpu-worker`) |
@@ -139,7 +139,7 @@ Choices the design above left open, and what was chosen:
 * `cargo test -p brain-gpu-worker` (2 tests, real card, skip with a printed
   reason where no card opens): a quarantined card is readmitted by a real
   probe; the per-request cost (below).
-* `cargo test -p brain-residency --test hosted` (6 tests; the test binary is
+* `cargo test -p brain-residency --test hosted` (7 tests; the test binary is
   its own worker, `harness = false`): an 8 MiB blob and a 2 MiB parameter
   cross in memfds, the caller's scope reaches the worker; three progress
   frames arrive in order and a cancellation fired from a progress callback
@@ -147,7 +147,11 @@ Choices the design above left open, and what was chosen:
   killed with `SIGKILL` mid-job fails that job within the deadline naming
   the signal, quarantines its card, and the next job is built in a new
   worker on the other card; a panic in model code fails the job, records no
-  fault and is rebuilt in a new worker; a job that keeps reporting runs
+  fault and is rebuilt in a new worker; a group of 40 jobs crosses as one
+  request whose single `run_batch` call in the worker sees all of it, each
+  job's progress, result and blob (more blobs than a frame carries
+  descriptors) return under its own index, and the one job asked to cancel
+  is cancelled while the others answer; a job that keeps reporting runs
   past a 600 ms run deadline in the same worker, and one that goes silent
   fails at it and quarantines its card; the worker mode refuses a
   non-socket stdin, a first request that is not `hello`, another protocol
@@ -155,16 +159,18 @@ Choices the design above left open, and what was chosen:
 * `cargo test -p brain-residency --test it host_exchange` (2 tests): an
   exhaustive model of one lane's jobs crossing the worker socket with
   progress, caller cancellation, a deadline that progress renews, and a
-  worker that may die or wedge (about 41 thousand states over up to three
-  jobs and one fault): every job answered once, `cancelled` only when its
+  worker that may die or wedge, with jobs sent one per request or two to a
+  `batch` request (about 414 thousand states over up to three jobs and one
+  fault): every job answered once, `cancelled` only when its
   caller asked and never for a job that ran to completion, no cancellation
   that reached the worker dropped, a deadline kills only a silent worker,
-  and from every state an end is reachable (no cycle starves a job); six
+  and from every state an end is reachable (no cycle starves a job); eight
   deliberate bugs are each caught (registering the token when the run
   starts rather than when it is read, clearing it unconditionally after the
   answer, answering `cancelled` when the cancel is sent, freeing the lane at
   end of stream without an answer, a deadline counted from the request, a
-  deadline restarted at every poll).
+  deadline restarted at every poll, a cancel firing every job of its group,
+  a token registered for only the group's first job).
 * `cargo test -p brain-cli --test it worker_hosted` (4 tests, the three
   device ones skip without a GPU): the worker mode is absent from `brain
   help` and refused from a terminal; a tiny Laya and a tiny decide
@@ -258,13 +264,12 @@ request loop could read the socket itself while idle).
 Built for every family: progress frames (a chunk blob included) that renew
 the run deadline (`Exchange::renew`: it bounds a job's silence, so a
 streaming job of minutes runs on; only the job's own frames renew it, never
-a heartbeat thread that would beat on while the job is stuck), caller
+a heartbeat thread that would beat on while the job is stuck), real
+batching (a group is one `batch` request and the worker's own `run_batch`
+runs it, with per-job progress, cancellation and results), caller
 cancellation, blobs in and out through memfds, envelopes and answers of
 any size, panics answered as job errors.
 
-* **Real batching.** `SupervisedInstance` runs `run_batch`'s serial default,
-  one exchange per job; a family that batches (`run_batch` overrides) needs
-  a `run_batch` frame carrying the group and per-job progress and answers.
 * **Late joins into running groups.** `run_open` (continuous batching, every
   LLM family) needs the `JobFeed` across the socket: a frame for each job
   that joins the running group, and one per finished job, while the group
