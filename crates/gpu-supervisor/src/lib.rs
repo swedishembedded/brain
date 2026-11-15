@@ -24,8 +24,10 @@
 //! * [`Worker`]: one child process speaking a line protocol over a Unix
 //!   socket pair, with one request in flight at a time, an explicit deadline
 //!   per request, and group kill plus bounded reaping on every failure path.
-//!   A request may stream progress frames back and be cancelled while it is
-//!   in flight ([`Worker::exchange`]). Dropping one kills its group and
+//!   While a request is in flight both sides may send frames about it
+//!   (progress, a cancellation, a protocol's own kinds; [`Conversation`]),
+//!   and its deadline may bound the worker's silence rather than the whole
+//!   request ([`Exchange::renew`]). Dropping one kills its group and
 //!   leaves the reaping to a reaper thread, so the dropping thread never
 //!   waits for an exit.
 //! * `wire`: the frames both ends write and read, with descriptors passed
@@ -52,8 +54,8 @@ mod worker;
 
 pub use breaker::{Breaker, BreakerPolicy, BreakerState};
 pub use health::{CallError, DeviceStatus, Fault, Health};
-pub use worker::{Exchange, FaultKind, Reply, Worker, WorkerCommand, WorkerFailure, MAX_REPLY_BYTES, MAX_REQUEST_BYTES};
+pub use worker::{Exchange, FaultKind, Reply, Worker, WorkerCommand, WorkerFailure, MAX_REPLY_BYTES, MAX_REQUEST_BYTES, POLL};
 #[cfg(unix)]
-pub use worker::OnProgress;
+pub use worker::{Conversation, Outgoing};
 #[cfg(target_os = "linux")]
 pub use worker::take_worker_socket;

@@ -451,7 +451,9 @@ WORKER HOSTING  (a model's code in a supervised worker process on its card,
                          until a health probe passes, and the next job is built
                          in a new worker on a healthy card.
   --worker-deadline-s SECS  the longest a worker may take to load its model,
-                         and to answer one job (default 900).
+                         and the longest a job may go without reporting
+                         progress (default 900): a streaming job runs as
+                         long as it keeps reporting.
 
 DECISION MODELS  (decide + Laya; every servable one in the model store is
                  served under its store id, e.g. convaiinnovations/laya)

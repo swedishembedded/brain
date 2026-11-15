@@ -46,7 +46,7 @@ struct TestModel(String);
 
 impl ResidentModel for TestModel {
     fn manifest(&self) -> Manifest {
-        let actions = ["echo", "stream", "wait", "block", "panic"].map(|a| ActionSpec::new(a, a)).to_vec();
+        let actions = ["echo", "stream", "slow", "wait", "block", "panic"].map(|a| ActionSpec::new(a, a)).to_vec();
         Manifest::new(&self.0, "a model hosted in a test worker", actions)
     }
 
@@ -86,6 +86,14 @@ impl Instance for TestInstance {
                 }
                 Ok(Outcome::new().set("steps", json!(steps)))
             }
+            // A long job that keeps reporting: longer in all than a short run deadline.
+            "slow" => {
+                for i in 1..=8 {
+                    std::thread::sleep(Duration::from_millis(150));
+                    progress(Progress::step(i, 8, "working"));
+                }
+                Ok(Outcome::new().set("steps", json!(8)))
+            }
             // Waits for its cancellation, as a long generation observes one between steps.
             "wait" => {
                 progress(Progress::step(0, 1, "waiting"));
@@ -117,9 +125,9 @@ fn health() -> Arc<Health<Device>> {
     Arc::new(Health::new(policy, REAP))
 }
 
-fn hosted(id: &str, health: &Arc<Health<Device>>) -> Arc<dyn ResidentModel> {
+fn hosted(id: &str, health: &Arc<Health<Device>>, deadlines: Deadlines) -> Arc<dyn ResidentModel> {
     let spec = HostSpec { family: "test".into(), args: json!({ "id": id }) };
-    Arc::new(SupervisedModel::new(Arc::new(TestModel(id.to_string())), spec, worker_command(), health.clone(), DEADLINES))
+    Arc::new(SupervisedModel::new(Arc::new(TestModel(id.to_string())), spec, worker_command(), health.clone(), deadlines))
 }
 
 fn gpus(n: u32) -> Budgets {
@@ -138,8 +146,12 @@ fn failing_probe() -> Probe {
 }
 
 fn start(health: &Arc<Health<Device>>, cards: u32) -> Executor {
+    start_with(health, cards, DEADLINES)
+}
+
+fn start_with(health: &Arc<Health<Device>>, cards: u32, deadlines: Deadlines) -> Executor {
     let supervision = Supervision { health: health.clone(), probe: failing_probe() };
-    Executor::start_supervised(vec![hosted("m", health)], gpus(cards), Policy::default(), None, Some(supervision))
+    Executor::start_supervised(vec![hosted("m", health, deadlines)], gpus(cards), Policy::default(), None, Some(supervision))
 }
 
 /// Run one job and wait for its answer, handing every progress update to `on_progress`.
@@ -222,6 +234,28 @@ fn killing_the_worker_mid_job_fails_that_job_and_the_next_rebuilds_on_a_healthy_
     exec.shutdown();
 }
 
+/// The run deadline bounds a worker's silence: a job that keeps reporting
+/// progress runs past it, and one that goes silent is killed at it and
+/// quarantines its card.
+fn a_job_that_keeps_reporting_outlives_the_run_deadline_and_a_silent_one_is_killed_at_it() {
+    let health = health();
+    let deadline = Duration::from_millis(600);
+    let exec = start_with(&health, 1, Deadlines { run: deadline, ..DEADLINES });
+    let (_, pid) = echo(&exec);
+    let started = Instant::now();
+    let out = run(&exec, "slow", Invocation::new(), |_| {}).expect("a job that reports progress is not wedged");
+    assert_eq!(out.outputs["steps"], json!(8));
+    assert!(started.elapsed() > deadline, "the job ran {:?}, not past one deadline", started.elapsed());
+    assert_eq!(echo(&exec).1, pid, "the same worker serves on");
+
+    let started = Instant::now();
+    let err = run(&exec, "block", Invocation::new(), |_| {}).expect_err("a silent job is wedged");
+    assert!(started.elapsed() < deadline + Duration::from_secs(5), "the failure took {:?}", started.elapsed());
+    assert!(err.contains("deadline") && err.contains("quarantined"), "{err}");
+    assert!(!health.admits(&Device::Gpu(0)), "the card is quarantined");
+    exec.shutdown();
+}
+
 fn a_panic_in_model_code_fails_the_job_without_quarantining_the_card() {
     let health = health();
     let exec = start(&health, 1);
@@ -261,6 +295,7 @@ const TESTS: &[(&str, fn())] = &[
     ("a_hosted_model_runs_in_its_worker_with_blobs_through_memfds", a_hosted_model_runs_in_its_worker_with_blobs_through_memfds),
     ("progress_and_cancellation_cross_the_boundary", progress_and_cancellation_cross_the_boundary),
     ("killing_the_worker_mid_job_fails_that_job_and_the_next_rebuilds_on_a_healthy_card", killing_the_worker_mid_job_fails_that_job_and_the_next_rebuilds_on_a_healthy_card),
+    ("a_job_that_keeps_reporting_outlives_the_run_deadline_and_a_silent_one_is_killed_at_it", a_job_that_keeps_reporting_outlives_the_run_deadline_and_a_silent_one_is_killed_at_it),
     ("a_panic_in_model_code_fails_the_job_without_quarantining_the_card", a_panic_in_model_code_fails_the_job_without_quarantining_the_card),
     ("the_worker_mode_serves_only_a_supervisor_that_greets_it", the_worker_mode_serves_only_a_supervisor_that_greets_it),
 ];

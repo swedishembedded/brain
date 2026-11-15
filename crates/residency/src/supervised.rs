@@ -103,7 +103,10 @@ pub enum Probe {
 pub struct Deadlines {
     /// Starting the worker and building the instance (`hello`, `open`).
     pub open: Duration,
-    /// One run.
+    /// How long a run may go without a frame from its worker: each progress
+    /// frame renews it, so a long job that keeps reporting runs on and one
+    /// that goes silent (wedged in the driver) is killed this long after its
+    /// last report.
     pub run: Duration,
     /// How long a killed worker is waited for before it is kept for later polling.
     pub reap: Duration,
@@ -291,22 +294,9 @@ impl SupervisedInstance {
         let request = format!("{verb} {action} {envelope}");
 
         let borrowed: Vec<_> = fds.iter().map(std::os::fd::AsFd::as_fd).collect();
-        let cancelled = || inv.cancel.is_cancelled();
-        let mut broken: Option<String> = None;
-        let mut forward = |payload: &str, fds: Vec<std::os::fd::OwnedFd>| {
-            if broken.is_some() {
-                return;
-            }
-            match codec::decode_progress(payload, fds) {
-                Ok(p) => progress(p),
-                Err(e) => broken = Some(format!("{action}: the worker's progress breaks the protocol ({e})")),
-            }
-        };
-        let x = Exchange { fds: &borrowed, cancelled: Some(&cancelled), progress: Some(&mut forward) };
+        let mut talk = RunTalk { inv, progress, cancel_sent: false };
+        let x = Exchange { fds: &borrowed, talk: Some(&mut talk), renew: true };
         let answer = self.health.exchange(&self.device, &mut self.worker, &request, self.run, x);
-        if let Some(why) = broken {
-            return Err(self.lose(why));
-        }
         match answer {
             Ok((payload, fds)) => codec::decode_outcome(&payload, fds).map_err(|e| self.lose(format!("{action}: the worker's answer breaks the protocol ({e})"))),
             Err(CallError::Failed(message)) => match message.strip_prefix(PANICKED) {
@@ -324,6 +314,44 @@ impl SupervisedInstance {
         }
     }
 
+}
+
+/// The lane's side of one run while it is in flight: progress to the job's
+/// caller, and one `cancel` once the caller asks.
+#[cfg(unix)]
+struct RunTalk<'a> {
+    inv: &'a Invocation,
+    progress: &'a mut dyn FnMut(Progress),
+    cancel_sent: bool,
+}
+
+#[cfg(unix)]
+impl gpu_supervisor::Conversation for RunTalk<'_> {
+    fn frame(&mut self, kind: &str, payload: &str, fds: Vec<std::os::fd::OwnedFd>) -> Result<Vec<gpu_supervisor::Outgoing>, String> {
+        match kind {
+            "progress" => {
+                let p = codec::decode_progress(payload, fds).map_err(|e| format!("the worker's progress breaks the protocol ({e})"))?;
+                (self.progress)(p);
+                Ok(Vec::new())
+            }
+            other => Err(format!("a run takes progress frames, not {other:?}")),
+        }
+    }
+
+    fn poll(&mut self) -> Vec<gpu_supervisor::Outgoing> {
+        if self.cancel_sent || !self.inv.cancel.is_cancelled() {
+            return Vec::new();
+        }
+        self.cancel_sent = true;
+        vec![gpu_supervisor::Outgoing::line("cancel".to_string())]
+    }
+
+    fn polls(&self) -> bool {
+        !self.cancel_sent
+    }
+}
+
+impl SupervisedInstance {
     #[cfg(not(unix))]
     fn run_in_worker(&mut self, _action: &str, _inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
         Err("supervised device workers need a Unix host".into())

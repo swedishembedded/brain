@@ -60,7 +60,7 @@ worker.
 
 | piece | where | what it does |
 |---|---|---|
-| `Worker` | `crates/gpu-supervisor/src/worker.rs` | `execve` of a worker program in its own process group with `PR_SET_PDEATHSIG = SIGKILL`; one `AF_UNIX` stream socket pair as its stdin/stdout; one line request and one line answer per call with a fresh id (a stale frame is discarded); while a request is in flight (`exchange`) the worker may send `<id> progress` frames and the parent one `<id> cancel`, and a frame may pass descriptors it declares (`ok+<n>`); an explicit deadline per request as a socket read timeout (no helper thread); on a missed deadline, end of stream or malformed reply, `SIGKILL` to the group and a bounded reap; a worker still in uninterruptible driver sleep after the bound is handed back, never waited on forever; drop sends the group `SIGKILL` and hands the worker to the process's reaper thread (`brain-gpu-reaper`), so dropping an instance (an eviction on the scheduler's thread) never waits for an exit |
+| `Worker` | `crates/gpu-supervisor/src/worker.rs` | `execve` of a worker program in its own process group with `PR_SET_PDEATHSIG = SIGKILL`; one `AF_UNIX` stream socket pair as its stdin/stdout; one line request and one line answer per call with a fresh id (a stale frame is discarded); while a request is in flight (`exchange`) both sides send frames about it under its id (`progress`, `cancel`, and kinds a `Conversation` agrees on), and a frame may pass descriptors it declares (`ok+<n>`); an explicit deadline per request as a socket read timeout (no helper thread), which the worker's frames renew when the caller asks (`Exchange::renew`); on a missed deadline, end of stream or malformed reply, `SIGKILL` to the group and a bounded reap; a worker still in uninterruptible driver sleep after the bound is handed back, never waited on forever; drop sends the group `SIGKILL` and hands the worker to the process's reaper thread (`brain-gpu-reaper`), so dropping an instance (an eviction on the scheduler's thread) never waits for an exit |
 | `Breaker` | `crates/gpu-supervisor/src/breaker.rs` | per-device circuit breaker with time passed in: a fault opens it with an immediate probe (a restart); the third fault within 600 s trips it, after which a probe runs every 300 s and two clean probes close it (`BreakerPolicy`, every value a parameter) |
 | `Health` | `crates/gpu-supervisor/src/health.rs` | the registry every supervised call goes through: refuses work for a quarantined device without sending anything, records each fault once, logs the trip once, parks unreaped workers and holds the device's probes back until they are reaped, runs probes in fresh workers |
 | executor integration | `crates/residency/src/executor.rs` (`start_supervised`, `assign`, `refuse_quarantined`, `start_probes`, `lane_loop`) | quarantined devices are excluded from placement like busy ones; work no healthy device can ever host is refused once the breaker tripped; a group that faulted its device fails and its claim (budget, slot, instance) is unwound; due probes run on the device's own lane, which is busy meanwhile; an in-process wait past `--gpu-wait-s` (`backend_api::hardware::WAIT_TIMEOUT_MARK`) quarantines the card too, whether it panicked, failed the activation or came back as a job's error |
@@ -90,7 +90,7 @@ Choices the design above left open, and what was chosen:
 
 ## Verification
 
-* `cargo test -p brain-gpu-supervisor` (20 integration tests, 1 unit test): a hung request fails
+* `cargo test -p brain-gpu-supervisor` (22 integration tests, 1 unit test): a hung request fails
   within its deadline with the worker and its whole process group gone
   from `/proc` and no thread left behind; an abort is reported with its
   signal and reaped; an open breaker refuses work until a probe passes; a
@@ -103,7 +103,11 @@ Choices the design above left open, and what was chosen:
   and spaced-probe rules; progress frames reach the caller in order and a
   cancel reaches the worker naming the request in flight; an earlier
   request's progress is discarded; an answer declaring descriptors that
-  never came is a protocol fault; each frame gets its own descriptors and an
+  never came is a protocol fault; a frame kind the request's conversation
+  knows is answered under the request's id, and without one it is a protocol
+  fault; a renewing deadline lets a request that keeps reporting outlive it,
+  a fixed one ends the same request as wedged, and a silent worker under a
+  renewing one is killed at it; each frame gets its own descriptors and an
   8 MiB blob travels in a memfd; an unsealed or oversized descriptor is
   refused. The fakes are a POSIX shell that hangs in a grandchild or aborts.
 * `cargo test -p brain-residency --test it supervision` (7 tests): through
@@ -135,7 +139,7 @@ Choices the design above left open, and what was chosen:
 * `cargo test -p brain-gpu-worker` (2 tests, real card, skip with a printed
   reason where no card opens): a quarantined card is readmitted by a real
   probe; the per-request cost (below).
-* `cargo test -p brain-residency --test hosted` (5 tests; the test binary is
+* `cargo test -p brain-residency --test hosted` (6 tests; the test binary is
   its own worker, `harness = false`): an 8 MiB blob and a 2 MiB parameter
   cross in memfds, the caller's scope reaches the worker; three progress
   frames arrive in order and a cancellation fired from a progress callback
@@ -143,19 +147,24 @@ Choices the design above left open, and what was chosen:
   killed with `SIGKILL` mid-job fails that job within the deadline naming
   the signal, quarantines its card, and the next job is built in a new
   worker on the other card; a panic in model code fails the job, records no
-  fault and is rebuilt in a new worker; the worker mode refuses a
+  fault and is rebuilt in a new worker; a job that keeps reporting runs
+  past a 600 ms run deadline in the same worker, and one that goes silent
+  fails at it and quarantines its card; the worker mode refuses a
   non-socket stdin, a first request that is not `hello`, another protocol
   version and an unknown family.
 * `cargo test -p brain-residency --test it host_exchange` (2 tests): an
   exhaustive model of one lane's jobs crossing the worker socket with
-  progress, caller cancellation and a worker that may die (about 16
-  thousand states over up to three jobs and one crash): every job answered
-  once, `cancelled` only when its caller asked and never for a job that ran
-  to completion, no cancellation that reached the worker dropped; four
+  progress, caller cancellation, a deadline that progress renews, and a
+  worker that may die or wedge (about 41 thousand states over up to three
+  jobs and one fault): every job answered once, `cancelled` only when its
+  caller asked and never for a job that ran to completion, no cancellation
+  that reached the worker dropped, a deadline kills only a silent worker,
+  and from every state an end is reachable (no cycle starves a job); six
   deliberate bugs are each caught (registering the token when the run
   starts rather than when it is read, clearing it unconditionally after the
   answer, answering `cancelled` when the cancel is sent, freeing the lane at
-  end of stream without an answer).
+  end of stream without an answer, a deadline counted from the request, a
+  deadline restarted at every poll).
 * `cargo test -p brain-cli --test it worker_hosted` (4 tests, the three
   device ones skip without a GPU): the worker mode is absent from `brain
   help` and refused from a terminal; a tiny Laya and a tiny decide
@@ -246,13 +255,13 @@ request loop could read the socket itself while idle).
 
 ### What each next family needs
 
-Built for every family: progress frames (a chunk blob included), caller
+Built for every family: progress frames (a chunk blob included) that renew
+the run deadline (`Exchange::renew`: it bounds a job's silence, so a
+streaming job of minutes runs on; only the job's own frames renew it, never
+a heartbeat thread that would beat on while the job is stuck), caller
 cancellation, blobs in and out through memfds, envelopes and answers of
 any size, panics answered as job errors.
 
-* **Long jobs.** `--worker-deadline-s` bounds a whole job; a streaming
-  generation of minutes needs the deadline renewed by progress (a heartbeat)
-  rather than one bound per job.
 * **Real batching.** `SupervisedInstance` runs `run_batch`'s serial default,
   one exchange per job; a family that batches (`run_batch` overrides) needs
   a `run_batch` frame carrying the group and per-job progress and answers.

@@ -43,14 +43,15 @@ const REAP: Duration = Duration::from_secs(2);
 pub const WORKER_MODE: &str = "__worker";
 
 /// `--worker-deadline-s` unset: how long a worker may take to load its model,
-/// and to answer one job, before it counts as wedged.
+/// and how long a job may go without reporting progress, before it counts as
+/// wedged.
 pub const DEFAULT_WORKER_DEADLINE: Duration = Duration::from_secs(900);
 
 /// Worker hosting for the model `families` an operator named, each worker
 /// being `executable` re-executed as `<executable> <device_flags> __worker`:
 /// the server's own device flags (`--backend`, `--gpu-wait-s`, ...), so a
 /// worker selects and bounds its card as the server does. `deadline` bounds
-/// a worker's load and each of its jobs. A family no worker can host is
+/// a worker's load and the silence of each of its jobs. A family no worker can host is
 /// refused, naming the ones it can.
 pub fn worker_hosting(executable: &Path, device_flags: &[String], families: &[String], deadline: Duration, health: Arc<Health<Device>>) -> Result<WorkerHosting, String> {
     let known: Vec<&str> = catalog::hosted_families().iter().map(|f| f.name).collect();

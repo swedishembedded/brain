@@ -56,7 +56,9 @@ Today one family can be hosted this way: `decision` (the decide and Laya
 models). Every other family runs in the serving process; naming one in the
 flag stops the server at startup with the list of families that can be
 hosted. `--worker-deadline-s SECS` (900 by default <!-- perf-number: the flag's default, a configured bound not a measurement -->) bounds how
-long a worker may take to load its model and to answer one job.
+long a worker may take to load its model, and how long a job may go without
+reporting progress: a job that streams tokens or steps runs as long as it
+keeps reporting, and one that goes silent for that long counts as wedged.
 
 What a worker changes when something goes wrong:
 
@@ -79,8 +81,9 @@ executor started with `residency::Executor::start_supervised`) runs in a
 child process that owns one card's device and answers one request at a
 time. Then:
 
-- **Every request has a deadline.** A request that misses it, or a worker
-  that dies, fails the job within the deadline with an error that names the
+- **Every request has a deadline.** For a job it bounds the worker's
+  silence: each progress report starts it over. A request that misses it, or
+  a worker that dies, fails the job within the deadline with an error that names the
   device, the operation, the deadline or the signal, and the worker's
   process id. The job is not retried: a dispatch is not idempotent.
 - **The worker is terminated, not abandoned.** Its whole process group is

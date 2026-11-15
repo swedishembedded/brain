@@ -15,7 +15,7 @@
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use gpu_supervisor::{BreakerPolicy, BreakerState, CallError, Exchange, FaultKind, Health, Worker, WorkerCommand};
+use gpu_supervisor::{BreakerPolicy, BreakerState, CallError, Conversation, Exchange, FaultKind, Health, Outgoing, Worker, WorkerCommand};
 
 /// The fake worker. `hang` sleeps in a child of the shell, so killing only the
 /// shell would leave the sleeper holding the socket: the group kill is what
@@ -32,6 +32,8 @@ while IFS= read -r line; do
     *stream*) echo "$id progress {\"step\":1}"; echo "$id progress {\"step\":2}"; IFS= read -r c; echo "$id err got $c" ;;
     *stale*) echo "$((id - 1)) progress {\"old\":true}"; echo "$id ok {}" ;;
     *ghostfd*) echo "$id ok+1 {}" ;;
+    *slow*) for i in 1 2 3 4 5 6; do sleep 0.15; echo "$id progress {\"step\":$i}"; done; echo "$id ok {}" ;;
+    *ask*) echo "$id take 2"; IFS= read -r r; echo "$id ok $r" ;;
     *) echo "$id ok {\"done\":true}" ;;
   esac
 done
@@ -262,18 +264,92 @@ fn dropping_a_worker_terminates_and_reaps_it() {
 #[test]
 fn progress_reaches_the_caller_and_a_cancel_reaches_the_worker() {
     let mut w = spawn();
-    let mut seen: Vec<String> = Vec::new();
-    let frames = std::cell::Cell::new(0usize);
-    let cancelled = || frames.get() >= 2;
-    let mut progress = |payload: &str, fds: Vec<std::os::fd::OwnedFd>| {
-        assert!(fds.is_empty(), "the fake sends no descriptors");
-        seen.push(payload.to_string());
-        frames.set(frames.get() + 1);
-    };
-    let x = Exchange { cancelled: Some(&cancelled), progress: Some(&mut progress), ..Exchange::default() };
+    let mut talk = Talk { cancel_after: Some(2), ..Talk::default() };
+    let x = Exchange { talk: Some(&mut talk), ..Exchange::default() };
     let reply = w.exchange("run stream", Duration::from_secs(5), x).expect("the worker answers");
     assert_eq!(reply.result, Err("got 1 cancel".to_string()), "the cancel frame names request 1");
-    assert_eq!(seen, [r#"{"step":1}"#, r#"{"step":2}"#]);
+    let progress: Vec<&str> = talk.seen.iter().map(|(_, p)| p.as_str()).collect();
+    assert_eq!(progress, [r#"{"step":1}"#, r#"{"step":2}"#]);
+}
+
+/// What a test's conversation saw, and when it cancels.
+#[derive(Default)]
+struct Talk {
+    seen: Vec<(String, String)>,
+    /// Cancel once this many frames arrived.
+    cancel_after: Option<usize>,
+    cancelled: bool,
+}
+
+impl Conversation for Talk {
+    fn frame(&mut self, kind: &str, payload: &str, fds: Vec<std::os::fd::OwnedFd>) -> Result<Vec<Outgoing>, String> {
+        assert!(fds.is_empty(), "the fake sends no descriptors");
+        self.seen.push((kind.to_string(), payload.to_string()));
+        match kind {
+            "progress" => Ok(Vec::new()),
+            "take" => Ok(vec![Outgoing::line(format!("joined {payload}"))]),
+            other => Err(format!("no frame {other:?}")),
+        }
+    }
+
+    fn poll(&mut self) -> Vec<Outgoing> {
+        if !self.cancelled && self.cancel_after.is_some_and(|n| self.seen.len() >= n) {
+            self.cancelled = true;
+            return vec![Outgoing::line("cancel".to_string())];
+        }
+        Vec::new()
+    }
+
+    fn polls(&self) -> bool {
+        self.cancel_after.is_some() && !self.cancelled
+    }
+}
+
+/// A frame of a kind the two ends agreed on is handed to the conversation,
+/// and what it answers goes back to the worker under the request's id.
+#[test]
+fn a_conversation_answers_the_workers_frames_while_the_request_is_in_flight() {
+    let mut w = spawn();
+    let mut talk = Talk::default();
+    let reply = w.exchange("run ask", Duration::from_secs(5), Exchange { talk: Some(&mut talk), ..Exchange::default() }).expect("answered");
+    assert_eq!(reply.result, Ok("1 joined 2".to_string()));
+    assert_eq!(talk.seen, [("take".to_string(), "2".to_string())]);
+
+    // Without a conversation, such a frame breaks the protocol.
+    let health = health();
+    let mut w = spawn();
+    let err = health.call(&"gpu0", &mut w, "run ask", Duration::from_secs(5)).expect_err("nobody answers a take");
+    assert!(matches!(&err, CallError::Fault(f) if matches!(f.kind, FaultKind::Protocol { .. })), "{err}");
+}
+
+/// A renewing deadline bounds the worker's silence, not the whole request:
+/// a request that keeps reporting progress outlives it, the same request
+/// under a fixed deadline is killed as wedged, and a silent worker under a
+/// renewing deadline is killed at that deadline.
+#[test]
+fn progress_renews_a_renewing_deadline_and_a_fixed_one_still_ends_the_request() {
+    let deadline = Duration::from_millis(500);
+    let mut w = spawn();
+    let mut talk = Talk::default();
+    let started = Instant::now();
+    let reply = w.exchange("run slow", deadline, Exchange { talk: Some(&mut talk), renew: true, ..Exchange::default() }).expect("a worker that keeps reporting is not wedged");
+    assert_eq!(reply.result, Ok("{}".to_string()));
+    assert!(started.elapsed() > deadline, "the request ran past one deadline ({:?})", started.elapsed());
+    assert_eq!(talk.seen.len(), 6);
+
+    let health = health();
+    let mut w = spawn();
+    let pid = w.pid();
+    let mut talk = Talk::default();
+    let err = health.exchange(&"gpu0", &mut w, "run slow", deadline, Exchange { talk: Some(&mut talk), ..Exchange::default() }).expect_err("a fixed deadline covers the whole request");
+    assert!(matches!(&err, CallError::Fault(f) if f.kind == FaultKind::Wedged { deadline }), "{err}");
+    assert_reaped(pid);
+
+    let mut w = spawn();
+    let started = Instant::now();
+    let err = health.exchange(&"gpu1", &mut w, "run hang", deadline, Exchange { renew: true, ..Exchange::default() }).expect_err("silence past the deadline");
+    assert!(matches!(&err, CallError::Fault(f) if f.kind == FaultKind::Wedged { deadline }), "{err}");
+    assert!(started.elapsed() < deadline + Duration::from_secs(1), "{:?}", started.elapsed());
 }
 
 /// A progress frame about an earlier request is not handed to the current one.
@@ -281,12 +357,10 @@ fn progress_reaches_the_caller_and_a_cancel_reaches_the_worker() {
 fn progress_of_an_earlier_request_is_discarded() {
     let mut w = spawn();
     w.request("run ok", Duration::from_secs(5)).expect("answered").expect("ok");
-    let mut seen = 0;
-    let mut progress = |_: &str, _: Vec<std::os::fd::OwnedFd>| seen += 1;
-    let x = Exchange { progress: Some(&mut progress), ..Exchange::default() };
-    let reply = w.exchange("run stale", Duration::from_secs(5), x).expect("answered");
+    let mut talk = Talk::default();
+    let reply = w.exchange("run stale", Duration::from_secs(5), Exchange { talk: Some(&mut talk), ..Exchange::default() }).expect("answered");
     assert_eq!(reply.result, Ok("{}".to_string()));
-    assert_eq!(seen, 0, "request 1's progress was given to request 2");
+    assert!(talk.seen.is_empty(), "request 1's progress was given to request 2: {:?}", talk.seen);
 }
 
 /// An answer that declares descriptors which never arrived is a broken

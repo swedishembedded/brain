@@ -19,13 +19,21 @@
 //! interleave with another.
 //!
 //! While a request is in flight ([`Worker::exchange`]) the worker may send
-//! any number of `<id> progress <payload>` frames before its answer, and the
-//! parent may send one `<id> cancel` frame. A frame passes descriptors beside
-//! its line when it says so (`ok+<n>`, `progress+<n>`; [`crate::wire`]): bulk
-//! data travels in sealed memfds, never on the socket.
+//! any number of `<id> <kind> <payload>` frames before its answer
+//! (`progress`, or a kind the protocol on top agreed on), and the parent may
+//! send frames about the same request (`<id> cancel`, a reply to one of the
+//! worker's); a [`Conversation`] decides what each side says. A frame passes
+//! descriptors beside its line when it says so (`ok+<n>`, `progress+<n>`;
+//! [`crate::wire`]): bulk data travels in sealed memfds, never on the socket.
 //!
 //! The deadline is a socket read timeout: no helper thread waits on the
-//! worker, so nothing is left running when the worker is abandoned. On a
+//! worker, so nothing is left running when the worker is abandoned. It covers
+//! the whole request, or with [`Exchange::renew`] the worker's silence: each
+//! frame it sends about the request starts the deadline over, so a long job
+//! that keeps reporting runs on and a wedged one, which sends nothing, is
+//! still killed one deadline after its last frame. A heartbeat from another
+//! thread of the worker would defeat that (it beats while the job is stuck
+//! in the driver), so only the job's own frames renew it. On a
 //! missed deadline, an end of stream or a malformed reply the worker's whole
 //! process group is sent `SIGKILL` and the worker is reaped within a bound.
 //! `SIGKILL` is what makes the kernel reclaim every file descriptor, mapping
@@ -117,25 +125,61 @@ impl std::fmt::Display for FaultKind {
     }
 }
 
-/// What a progress frame is handed to: its payload and the descriptors it carried.
+/// A frame the parent sends about the request in flight: `<id> <line>`, with
+/// the descriptors the line declares beside it.
 #[cfg(unix)]
-pub type OnProgress<'a> = dyn FnMut(&str, Vec<std::os::fd::OwnedFd>) + 'a;
+pub struct Outgoing {
+    pub line: String,
+    pub fds: Vec<std::os::fd::OwnedFd>,
+}
+
+#[cfg(unix)]
+impl Outgoing {
+    /// A frame that carries no descriptors.
+    pub fn line(line: String) -> Outgoing {
+        Outgoing { line, fds: Vec::new() }
+    }
+}
+
+/// The parent's side of one request while it is in flight: what it does with
+/// the frames the worker sends before its answer, and what it sends on its
+/// own. One implementation per protocol on top of this one (a hosted model's
+/// runs, groups and their late joins); this crate only frames and delivers.
+#[cfg(unix)]
+pub trait Conversation {
+    /// A frame about the request in flight other than its answer: its kind
+    /// (`progress`, or any word both ends agreed on), its payload and the
+    /// descriptors it declared. Returns the frames to send in reply, in
+    /// order. An error is a protocol fault: the worker is killed.
+    fn frame(&mut self, kind: &str, payload: &str, fds: Vec<std::os::fd::OwnedFd>) -> Result<Vec<Outgoing>, String>;
+
+    /// Asked whenever the answer is pending (a cancellation the caller asked
+    /// for, say): the frames to send now. Asked at least every [`POLL`] while
+    /// [`Self::polls`] says so, else only after a frame arrived.
+    fn poll(&mut self) -> Vec<Outgoing>;
+
+    /// Whether [`Self::poll`] may have something to send that no frame from
+    /// the worker would prompt.
+    fn polls(&self) -> bool;
+}
 
 /// What one [`Worker::exchange`] carries beside its request line. The default
-/// is a plain request: no descriptors, no progress, no cancellation.
+/// is a plain request: no descriptors, nothing said while it is in flight, a
+/// deadline that covers the whole exchange.
 #[derive(Default)]
 pub struct Exchange<'a> {
     /// Descriptors sent with the request (sealed memfds holding its blobs).
     #[cfg(unix)]
     pub fds: &'a [std::os::fd::BorrowedFd<'a>],
-    /// Asked while the answer is pending; once it returns true, one
-    /// `<id> cancel` frame is sent. The worker decides what a cancellation
-    /// does; the request still gets exactly one answer.
-    pub cancelled: Option<&'a dyn Fn() -> bool>,
-    /// Called with each progress frame's payload and the descriptors it
-    /// carried, in the order they arrive.
+    /// Handed every frame about the request before its answer. Without one a
+    /// progress frame is dropped and any other kind breaks the protocol.
     #[cfg(unix)]
-    pub progress: Option<&'a mut OnProgress<'a>>,
+    pub talk: Option<&'a mut dyn Conversation>,
+    /// Whether every frame the worker sends about the request renews the
+    /// deadline: it then bounds how long the worker may stay silent, not how
+    /// long the request may take. A wedged worker sends nothing, so it is
+    /// still killed one deadline after its last frame.
+    pub renew: bool,
 }
 
 /// A worker's answer to one [`Worker::exchange`].
@@ -148,9 +192,9 @@ pub struct Reply {
     pub fds: Vec<std::os::fd::OwnedFd>,
 }
 
-/// How often a pending answer looks whether its caller cancelled.
-#[cfg(unix)]
-const CANCEL_POLL: Duration = Duration::from_millis(10);
+/// How often a pending answer asks its [`Conversation`] what to send, while
+/// [`Conversation::polls`] says it may have something (a cancellation).
+pub const POLL: Duration = Duration::from_millis(10);
 
 /// What [`Worker::request`] returns instead of an answer.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -243,10 +287,10 @@ impl Worker {
     }
 
     /// [`Self::request`] with what may cross the boundary beside the line:
-    /// descriptors sent with the request, progress frames handed to the
-    /// caller while the answer is pending, one `<id> cancel` frame once the
-    /// caller asks for it, and the descriptors the answer carries. The
-    /// deadline covers the whole exchange; progress does not extend it.
+    /// descriptors sent with the request, the frames both sides send about
+    /// it while the answer is pending ([`Conversation`]), and the descriptors
+    /// the answer carries. The deadline covers the whole exchange unless
+    /// [`Exchange::renew`] makes each frame from the worker renew it.
     #[cfg(unix)]
     pub fn exchange(&mut self, request: &str, deadline: Duration, mut x: Exchange<'_>) -> Result<Reply, WorkerFailure> {
         if self.terminated {
@@ -258,7 +302,7 @@ impl Worker {
         if x.fds.len() > crate::wire::MAX_FDS {
             return Err(WorkerFailure::Invalid(format!("a request carries at most {} descriptors", crate::wire::MAX_FDS)));
         }
-        let until = Instant::now() + deadline;
+        let mut until = Instant::now() + deadline;
         let id = self.next_id;
         self.next_id += 1;
         let frame = format!("{id} {request}\n");
@@ -266,7 +310,6 @@ impl Worker {
         if let Err(e) = crate::wire::send(&self.sock, frame.as_bytes(), x.fds) {
             return Err(WorkerFailure::Fault(self.fail(write_fault(&e, deadline))));
         }
-        let mut cancel_sent = false;
         loop {
             let line = match self.reader.line() {
                 Ok(line) => line,
@@ -280,9 +323,18 @@ impl Worker {
                 };
                 match frame {
                     Frame::Stale => {}
-                    Frame::Progress(payload) => {
-                        if let Some(progress) = x.progress.as_mut() {
-                            progress(&payload, fds);
+                    Frame::Note { kind, payload } => {
+                        if x.renew {
+                            until = Instant::now() + deadline;
+                        }
+                        let replies = match x.talk.as_mut() {
+                            Some(talk) => talk.frame(&kind, &payload, fds),
+                            None if kind == "progress" => Ok(Vec::new()),
+                            None => Err(format!("a {kind:?} frame for a request that expects none")),
+                        };
+                        match replies {
+                            Ok(replies) => self.send_all(id, replies, deadline)?,
+                            Err(detail) => return Err(WorkerFailure::Fault(self.fail(FaultKind::Protocol { detail }))),
                         }
                     }
                     Frame::Answer(result) => {
@@ -296,19 +348,17 @@ impl Worker {
                 }
                 continue;
             }
-            if !cancel_sent && x.cancelled.is_some_and(|cancelled| cancelled()) {
-                cancel_sent = true;
-                if let Err(e) = crate::wire::send(&self.sock, format!("{id} cancel\n").as_bytes(), &[]) {
-                    return Err(WorkerFailure::Fault(self.fail(write_fault(&e, deadline))));
-                }
+            if let Some(talk) = x.talk.as_mut() {
+                let frames = talk.poll();
+                self.send_all(id, frames, deadline)?;
             }
             let left = until.saturating_duration_since(Instant::now());
             if left.is_zero() {
                 return Err(WorkerFailure::Fault(self.fail(FaultKind::Wedged { deadline })));
             }
-            // While a cancellation may still be asked for, the wait wakes on a
-            // short period to look.
-            let wait = if x.cancelled.is_some() && !cancel_sent { left.min(CANCEL_POLL) } else { left };
+            // While the conversation may have something to send, the wait
+            // wakes on a short period to ask.
+            let wait = if x.talk.as_ref().is_some_and(|t| t.polls()) { left.min(POLL) } else { left };
             let _ = self.sock.set_read_timeout(Some(wait));
             match self.reader.fill(&self.sock) {
                 Ok(0) => return Err(WorkerFailure::Fault(self.fail(FaultKind::Crashed { status: String::new() }))),
@@ -318,6 +368,25 @@ impl Worker {
                 Err(_) => return Err(WorkerFailure::Fault(self.fail(FaultKind::Crashed { status: String::new() }))),
             }
         }
+    }
+
+    /// Send a conversation's frames about request `id`, in order. A frame that
+    /// would break the framing is the caller's bug: it is refused unsent, and
+    /// the worker, left inside a request nobody can finish, is killed. A write
+    /// that fails means the worker is gone or wedged.
+    #[cfg(unix)]
+    fn send_all(&mut self, id: u64, frames: Vec<Outgoing>, deadline: Duration) -> Result<(), WorkerFailure> {
+        for Outgoing { line, fds } in frames {
+            if line.is_empty() || line.len() > MAX_REQUEST_BYTES || line.contains(['\n', '\r']) || fds.len() > crate::wire::MAX_FDS {
+                self.terminate(Duration::ZERO);
+                return Err(WorkerFailure::Invalid(format!("a frame about request {id} must be one non-empty line of at most {MAX_REQUEST_BYTES} bytes with at most {} descriptors", crate::wire::MAX_FDS)));
+            }
+            let borrowed: Vec<_> = fds.iter().map(std::os::fd::AsFd::as_fd).collect();
+            if let Err(e) = crate::wire::send(&self.sock, format!("{id} {line}\n").as_bytes(), &borrowed) {
+                return Err(WorkerFailure::Fault(self.fail(write_fault(&e, deadline))));
+            }
+        }
+        Ok(())
     }
 
     #[cfg(not(unix))]
@@ -447,8 +516,9 @@ fn set_parent_death_signal(_command: &mut Command) {}
 enum Frame {
     /// A frame about an earlier request this worker gave up on.
     Stale,
-    /// `<id> progress[+<n>] <payload>` for the request in flight.
-    Progress(String),
+    /// `<id> <kind>[+<n>] <payload>` for the request in flight, before its
+    /// answer: `progress`, or a kind its [`Conversation`] knows.
+    Note { kind: String, payload: String },
     /// `<id> ok[+<n>] <payload>` or `<id> err <message>`.
     Answer(Result<String, String>),
     Broken(String),
@@ -480,8 +550,8 @@ fn parse_frame(line: &str, want: u64) -> (Frame, usize) {
     let frame = match kind {
         "ok" => Frame::Answer(Ok(payload)),
         "err" => Frame::Answer(Err(payload)),
-        "progress" => Frame::Progress(payload),
-        other => Frame::Broken(format!("status {:?} is neither ok, err nor progress", truncate(other))),
+        kind if !kind.is_empty() && kind.bytes().all(|b| b.is_ascii_lowercase()) => Frame::Note { kind: kind.to_string(), payload },
+        other => Frame::Broken(format!("status {:?} is neither ok, err nor a frame kind", truncate(other))),
     };
     (frame, fds)
 }
