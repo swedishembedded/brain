@@ -441,18 +441,22 @@ pub fn best_of(gpu: &Gpu, steps: &[Step], reps: usize) -> f64 {
     best
 }
 
-/// Contiguous runs of one kernel kind, in submit order: `(kind, start, len)`.
+/// Contiguous runs of one kernel kind, in submit order: `(row name, start, len)`.
 ///
 /// Grouping by *contiguous run* rather than by kind keeps graph order, so the
 /// sum of the parts is comparable with the whole — a scatter of the same kind
 /// across the graph would otherwise be timed as one artificial block.
-pub fn groups(steps: &[Step]) -> Vec<(usize, usize, usize)> {
-    let mut g: Vec<(usize, usize, usize)> = Vec::new();
+///
+/// The row name is [`crate::cost::step_cost`]'s: a portable step's kernel, and
+/// for a step a provider lowered, the kernel that physically ran (whose cost
+/// is the portable work it replaced).
+pub fn groups<'a>(gpu: &'a Gpu, steps: &'a [Step]) -> Vec<(&'a str, usize, usize)> {
+    let mut g: Vec<(&str, usize, usize)> = Vec::new();
     for (i, s) in steps.iter().enumerate() {
-        let k = s.meta().map(|m| m.kernel).unwrap_or(usize::MAX);
+        let (name, _) = crate::cost::step_cost(s, |k| gpu.kernel_name(k));
         match g.last_mut() {
-            Some((gk, _, len)) if *gk == k => *len += 1,
-            _ => g.push((k, i, 1)),
+            Some((gk, _, len)) if *gk == name => *len += 1,
+            _ => g.push((name, i, 1)),
         }
     }
     g
@@ -466,7 +470,7 @@ pub fn profile(gpu: &Gpu, label: &str, steps: &[Step], reps: usize) -> PassProfi
     // Whole-pass time is always the un-timed production flush: it is what a
     // change is judged by, and it must not include the timestamp resolve.
     let total = best_of(gpu, steps, reps);
-    let gs = groups(steps);
+    let gs = groups(gpu, steps);
 
     // DEVICE time where the backend can give it - host-bracketed timing
     // inflates a small kernel by more than an order of magnitude. One timed
@@ -490,11 +494,11 @@ pub fn profile(gpu: &Gpu, label: &str, steps: &[Step], reps: usize) -> PassProfi
     // nothing — treating it as device-timed would zero every row and render
     // each share as NaN%. Fall through to the host-timed path instead.
     if let Some(d) = device_times.as_ref().filter(|d| !d.is_empty()) {
-        let mut per: HashMap<usize, (f64, usize, u64, u64, u64, bool)> = HashMap::new();
+        let mut per: HashMap<&str, (f64, usize, u64, u64, u64, bool)> = HashMap::new();
         for (k, start, len) in &gs {
-            accumulate(gpu, &mut per, *k, &steps[*start..*start + *len], 0.0);
+            accumulate(gpu, &mut per, k, &steps[*start..*start + *len], 0.0);
         }
-        let mut rows = finish_rows(gpu, per);
+        let mut rows = finish_rows(per);
         // Overwrite the (unused) host times with the measured device ones.
         // Rows carry the CALLER's kernel name, but the backend's timing map is
         // keyed by the PHYSICAL pipeline that ran — for an upgrade-redirected
@@ -503,7 +507,9 @@ pub fn profile(gpu: &Gpu, label: &str, steps: &[Step], reps: usize) -> PassProfi
         // while inflating every other row's share. Translate through the
         // upgrade maps (WGSL and native) first. (If two caller slots redirect to one physical
         // kernel their combined time lands on each row — a visible
-        // over-attribution rather than an invisible zero.)
+        // over-attribution rather than an invisible zero.) A provider-lowered
+        // row already carries its physical name, which no slot has, so it is
+        // looked up as it stands.
         for r in rows.iter_mut() {
             let physical = match gpu.kernel_index(&r.name) {
                 Some(k) => gpu.timed_kernel_names(k),
@@ -536,13 +542,13 @@ pub fn profile(gpu: &Gpu, label: &str, steps: &[Step], reps: usize) -> PassProfi
         }
     }
 
-    let mut per: HashMap<usize, (f64, usize, u64, u64, u64, bool)> = HashMap::new();
+    let mut per: HashMap<&str, (f64, usize, u64, u64, u64, bool)> = HashMap::new();
     for (k, start, len) in &gs {
         let t = best_of(gpu, &steps[*start..*start + *len], reps);
-        accumulate(gpu, &mut per, *k, &steps[*start..*start + *len], t);
+        accumulate(gpu, &mut per, k, &steps[*start..*start + *len], t);
     }
 
-    let mut rows = finish_rows(gpu, per);
+    let mut rows = finish_rows(per);
     rows.sort_by(|a, b| b.secs.partial_cmp(&a.secs).unwrap());
 
     let summed = rows.iter().map(|r| r.secs).sum();
@@ -681,21 +687,13 @@ pub fn profile_live(gpu: &Gpu, label: &str, reps: usize, mut run: impl FnMut()) 
     }
 }
 
-/// Fold one group's `cost` volume (and `t` seconds) into the per-kernel map.
-fn accumulate(
-    gpu: &Gpu,
-    per: &mut HashMap<usize, (f64, usize, u64, u64, u64, bool)>,
-    k: usize,
-    slice: &[Step],
-    t: f64,
-) {
-    let name = gpu.kernel_name(k).unwrap_or("?");
+/// Fold one group's `cost` volume (and `t` seconds) into the per-kernel map:
+/// the group's steps share the row `name`, each priced by
+/// [`crate::cost::step_cost`].
+fn accumulate<'a>(gpu: &'a Gpu, per: &mut HashMap<&'a str, (f64, usize, u64, u64, u64, bool)>, name: &'a str, slice: &'a [Step], t: f64) {
     let (mut fl, mut io, mut by, mut covered) = (0u64, 0u64, 0u64, true);
     for st in slice {
-        let m = st.meta();
-        let params = m.as_ref().and_then(|m| m.params.as_deref());
-        let threads = m.as_ref().map(|m| m.threads).unwrap_or(0);
-        match crate::cost::kernel_cost(name, params, threads) {
+        match crate::cost::step_cost(st, |k| gpu.kernel_name(k)).1 {
             Some(c) => {
                 fl += c.flops;
                 io += c.int_ops;
@@ -704,7 +702,7 @@ fn accumulate(
             None => covered = false,
         }
     }
-    let e = per.entry(k).or_insert((0.0, 0, 0, 0, 0, true));
+    let e = per.entry(name).or_insert((0.0, 0, 0, 0, 0, true));
     e.0 += t;
     e.1 += slice.len();
     e.2 += fl;
@@ -713,17 +711,9 @@ fn accumulate(
     e.5 &= covered;
 }
 
-fn finish_rows(gpu: &Gpu, per: HashMap<usize, (f64, usize, u64, u64, u64, bool)>) -> Vec<KernelRow> {
+fn finish_rows(per: HashMap<&str, (f64, usize, u64, u64, u64, bool)>) -> Vec<KernelRow> {
     per.into_iter()
-        .map(|(k, (secs, calls, flops, int_ops, bytes, covered))| KernelRow {
-            name: gpu.kernel_name(k).unwrap_or("?").to_string(),
-            secs,
-            calls,
-            flops,
-            int_ops,
-            bytes,
-            covered,
-        })
+        .map(|(name, (secs, calls, flops, int_ops, bytes, covered))| KernelRow { name: name.to_string(), secs, calls, flops, int_ops, bytes, covered })
         .collect()
 }
 

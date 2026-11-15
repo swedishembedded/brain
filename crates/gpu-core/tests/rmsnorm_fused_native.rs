@@ -28,10 +28,20 @@ fn case(gpu: &Gpu, d: usize, rows: usize) {
     let (ba, bb, bw) = (up("a", &a), up("b", &b), up("w", &w));
     let (sum, out) = (poison(n), poison(n));
     let step = gpu_core::provider::cuda::add_rmsnorm_fwd_step(gpu, &[&ba, &bb, &bw, &sum, &out], d as u32, rows as u32, EPS as f32).expect("add_rmsnorm_fwd must be offered");
+    // Each launch is priced as the pair of portable dispatches it replaces.
+    let (norm, pair) = ([d as u32, rows as u32, (EPS as f32).to_bits()], [n as u32]);
+    let portable = |name: &str, params: &[u32]| gpu_core::cost::kernel_cost(name, Some(params), 1).expect("the portable kernel is priced");
+    let priced = |s: &gpu_core::Step| gpu_core::cost::step_cost(s, |_| None).1.expect("a fused launch is priced");
+    let mut want = portable("add2", &pair);
+    want.add(portable("rmsnorm", &norm));
+    assert_eq!(priced(&step), want, "add_rmsnorm_fwd costs add2 + rmsnorm");
     gpu.submit(&[], &[step]);
     let (bx, bdy, bres) = (up("x", &a), up("dy", &dy), up("res", &res));
     let dx = poison(n);
     let step = gpu_core::provider::cuda::rmsnorm_dx_add_step(gpu, &[&bx, &bw, &bdy, &bres, &dx], d as u32, rows as u32, EPS as f32).expect("rmsnorm_dx_add must be offered");
+    let mut want = portable("rmsnorm_dx", &norm);
+    want.add(portable("add2", &pair));
+    assert_eq!(priced(&step), want, "rmsnorm_dx_add costs rmsnorm_dx + add2");
     gpu.submit(&[], &[step]);
     gpu.poll_wait();
     let (got_sum, got_out, got_dx) = (gpu.read(&sum, n), gpu.read(&out, n), gpu.read(&dx, n));

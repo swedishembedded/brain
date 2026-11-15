@@ -184,6 +184,12 @@ pub struct LowerCtx<'a> {
 /// a slice of at that granularity without leaking one per call. An owned
 /// `Vec` of `'static` string references is the direct, allocation-cheap
 /// fix.
+///
+/// A provider other than the reference names one kernel per pushed step, in
+/// push order, under the name the backend times it by, and pushes the step
+/// that writes the operation's output LAST: [`ProviderRegistry::dispatch`]
+/// prices that step as the portable dispatch it replaces and the ones before
+/// it (casts, quantizers) as zero-cost helpers (see `backend_api::Lowering`).
 pub struct Lowered {
     pub pushed: usize,
     pub kernels: Vec<&'static str>,
@@ -363,6 +369,9 @@ pub struct ProviderRegistry {
     /// element - [`Self::prefer`] maintains this invariant by inserting
     /// before it, never after.
     chain: Vec<Arc<dyn OperatorProvider>>,
+    /// The chain's last element, typed: what every other provider's lowering
+    /// is priced as ([`Self::portable`]).
+    reference: Arc<wgsl::WgslProvider>,
     disabled: Vec<String>,
 }
 
@@ -371,7 +380,16 @@ impl ProviderRegistry {
     /// through `selector` - what an empty registry means: `Ops::with_selector`
     /// builds exactly this today.
     pub fn reference(selector: Arc<dyn select::KernelSelector>) -> ProviderRegistry {
-        ProviderRegistry { chain: vec![Arc::new(wgsl::WgslProvider::new(selector))], disabled: disabled_providers() }
+        let reference = Arc::new(wgsl::WgslProvider::new(selector));
+        ProviderRegistry { chain: vec![reference.clone()], reference, disabled: disabled_providers() }
+    }
+
+    /// The portable dispatch the reference provider would push for `req` on
+    /// `gpu`: the cost any other implementation of the same request carries,
+    /// so the operation is priced alike on every device. `Err` for an operator
+    /// the reference provider does not implement.
+    pub fn portable(&self, gpu: &Gpu, caps: &DeviceCaps, req: &OpRequest) -> Result<backend_api::PortableDispatch, String> {
+        self.reference.portable(gpu, caps, req)
     }
 
     /// This registry with the providers named in `names` disabled as well ([`set_disabled_providers`] for one registry).
@@ -515,10 +533,18 @@ impl ProviderRegistry {
     /// the provider that actually RAN - after a failed lower that is the
     /// reference provider, with the failure itself recorded as that
     /// provider's decline.
+    ///
+    /// A provider other than the reference lowers into steps that run no
+    /// catalogue kernel; each is given its `backend_api::Lowering` here, the
+    /// one place that holds both the provider's answer and the reference
+    /// dispatch it replaces (see [`Lowered`] for the order this relies on).
     pub fn dispatch(&self, ctx: &mut LowerCtx, req: &OpRequest) -> Lowered {
         let (chosen, mut choice) = self.resolve_choice(req, ctx.caps, ctx.capture);
         match chosen.lower(ctx, req) {
             Ok(mut l) => {
+                if !std::ptr::addr_eq(chosen, self.reference.as_ref()) {
+                    self.price_lowered(ctx, req, chosen.name(), &l);
+                }
                 l.choice = Some(choice);
                 l
             }
@@ -556,6 +582,22 @@ impl ProviderRegistry {
                 l.choice = Some(choice);
                 l
             }
+        }
+    }
+
+    /// Give the `l.pushed` steps `provider` just pushed their
+    /// `backend_api::Lowering`: each named by the kernel it reported, the last
+    /// priced as the reference dispatch for `req`, the rest as zero-cost
+    /// helpers. A request the reference cannot plan leaves them as they are
+    /// (uncovered), never priced at a guess.
+    fn price_lowered(&self, ctx: &mut LowerCtx, req: &OpRequest, provider: &'static str, l: &Lowered) {
+        let Ok(product) = self.portable(ctx.gpu, ctx.caps, req) else { return };
+        let first = ctx.steps.len().saturating_sub(l.pushed);
+        let last = ctx.steps.len().saturating_sub(1);
+        for (i, step) in ctx.steps.iter_mut().enumerate().skip(first) {
+            let physical = l.kernels.get(i - first).copied().unwrap_or(provider);
+            let lowering = if i == last { backend_api::Lowering::priced(physical, vec![product.clone()]) } else { backend_api::Lowering::helper(physical) };
+            *step = step.clone().with_lowering(lowering);
         }
     }
 }
@@ -661,5 +703,93 @@ mod tests {
         assert_eq!(reg.chain.len(), 2);
         assert_eq!(reg.chain[0].name(), "dummy");
         assert_eq!(reg.chain[1].name(), "wgsl");
+    }
+
+    /// A provider that lowers a product into steps of its own (here bare
+    /// records, as a native kernel's would be: no catalogue kernel, no
+    /// `StepMeta`). `helpers` steps come first, then the product.
+    struct Lowers {
+        helpers: usize,
+    }
+
+    impl OperatorProvider for Lowers {
+        fn name(&self) -> &'static str {
+            "lowers"
+        }
+        fn source(&self, _req: &OpRequest) -> ImplSource {
+            ImplSource::Tuned
+        }
+        fn requires(&self, _req: &OpRequest) -> select::Requirement {
+            select::Requirement::default()
+        }
+        fn accepts(&self, req: &OpRequest, _capture: bool) -> bool {
+            req.op == select::Op::MatMul
+        }
+        fn lower(&self, ctx: &mut LowerCtx, _req: &OpRequest) -> Result<Lowered, String> {
+            let mut kernels = vec!["lowers_cast"; self.helpers];
+            kernels.push("lowers_gemm");
+            for _ in 0..=self.helpers {
+                ctx.steps.push(Step::new(()));
+            }
+            Ok(Lowered::new(self.helpers + 1, kernels))
+        }
+    }
+
+    /// A product a provider lowers costs what the portable dispatch it replaces
+    /// costs, once however many steps the provider takes, and every one of
+    /// those steps is accounted under the name of what physically runs.
+    #[test]
+    fn a_provider_lowered_matmul_is_priced_like_the_portable_one() {
+        static KERNELS: &[(&str, &str)] = &[("matmul", kernels::MATMUL), ("matmul_gemv", kernels::MATMUL_GEMV)];
+        let gpu = crate::testgpu::dev(KERNELS);
+        let bind = |v: select::KernelVariant| -> (usize, &'static str) {
+            match v {
+                select::KernelVariant::Reference => (0, "matmul"),
+                _ => (1, "matmul_gemv"),
+            }
+        };
+        let (m, n, k) = (8u32, 6u32, 4u32);
+        let (x, w, y) = (gpu.storage((m * k) as u64), gpu.storage((n * k) as u64), gpu.storage((m * n) as u64));
+        let operands = [
+            Operand { role: Role::Act, buf: &x, range: (0, (m * k) as u64), dtype: backend_api::DType::F32 },
+            Operand { role: Role::Weight, buf: &w, range: (0, 0), dtype: backend_api::DType::F32 },
+            Operand { role: Role::Out, buf: &y, range: (0, (m * n) as u64), dtype: backend_api::DType::F32 },
+        ];
+        let req = OpRequest {
+            op: select::Op::MatMul,
+            shape: shape(m, n, k),
+            pass: Pass::Forward,
+            operands: &operands,
+            attrs: &[m, k, n],
+            group: 32,
+            bind: &bind,
+        };
+        let caps = gpu.caps();
+        let sel = || -> Arc<dyn select::KernelSelector> { Arc::new(select::CachedSelector::new(select::DefaultSelector)) };
+        let lower = |reg: &ProviderRegistry| {
+            let mut steps = Vec::new();
+            let lowered = reg.dispatch(&mut LowerCtx { gpu: &gpu, caps: &caps, steps: &mut steps, capture: false }, &req);
+            (gpu.cost_of(&steps), lowered.choice.expect("dispatch records its choice").provider)
+        };
+
+        let (portable, by) = lower(&ProviderRegistry::reference(sel()));
+        assert_eq!(by, "wgsl");
+        assert_eq!(portable.coverage(), 1.0);
+        assert_eq!(portable.total.flops, 2 * u64::from(m * n * k));
+
+        for helpers in [0, 2] {
+            let (priced, by) = lower(&ProviderRegistry::reference(sel()).prefer(Arc::new(Lowers { helpers })));
+            assert_eq!(by, "lowers");
+            assert_eq!(priced.steps, helpers as u64 + 1);
+            assert_eq!(priced.coverage(), 1.0, "every lowered step is accounted: {:?}", priced.uncovered);
+            assert_eq!(priced.total, portable.total, "{helpers} helper steps: the product is priced once, as the portable dispatch");
+            assert_eq!(priced.by_kernel["lowers_gemm"].calls, 1);
+            assert_eq!(priced.by_kernel["lowers_gemm"].cost, portable.total);
+            if helpers > 0 {
+                assert_eq!(priced.by_kernel["lowers_cast"].calls, helpers as u64);
+                assert_eq!(priced.by_kernel["lowers_cast"].cost, crate::cost::Cost::default());
+            }
+            assert!(!priced.by_kernel.contains_key("matmul") && !priced.by_kernel.contains_key("matmul_gemv"), "rows name what ran, not what it replaced");
+        }
     }
 }

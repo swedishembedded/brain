@@ -577,6 +577,28 @@ pub struct LibraryGemm {
     pub tf32: bool,
 }
 
+impl LibraryGemm {
+    /// The name a library product is timed and reported under: the shape and operand types, so a profile separates
+    /// the large base products from the skinny LoRA ones instead of averaging them
+    /// (`library_gemm 5120x8192x17408 bf16.bf16.f32 b1`).
+    pub fn label(&self) -> String {
+        format!(
+            "library_gemm {}x{}x{} {:?}.{:?}.{:?}{}{}{} b{}",
+            self.m,
+            self.n,
+            self.k,
+            self.a,
+            self.b,
+            self.c,
+            if self.trans_a { " tA" } else { "" },
+            if self.trans_b { " tB" } else { "" },
+            // A binary32 product is a CUDA-core product unless it is allowed to multiply as TF32.
+            if self.tf32 { " tf32" } else { "" },
+            self.batch
+        )
+    }
+}
+
 /// A provider's own compiled kernel, handed to [`Backend::register_native`] -
 /// the wave-2 (native f16, cooperative-matrix, CPU ISA pack) counterpart of
 /// the `(name, wgsl_source)` pair every WGSL kernel registers with today.
@@ -1255,6 +1277,53 @@ pub struct StepMeta {
     pub threads: u32,
 }
 
+/// One dispatch of a portable (WGSL catalogue) kernel, named rather than
+/// indexed: a kernel a provider replaces need not be registered on the handle
+/// that runs the replacement.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PortableDispatch {
+    /// The catalogue name of the kernel.
+    pub kernel: &'static str,
+    /// Its uniform params, in the kernel's own `Params` layout.
+    pub params: Vec<u32>,
+    /// Its dispatch thread count.
+    pub threads: u32,
+}
+
+/// Backend-neutral record of a step a provider built in place of portable work
+/// (a native CUDA kernel, a vendor-library GEMM, a cooperative-matrix or CPU
+/// ISA pack). Such a step runs no catalogue kernel, so it carries no
+/// [`StepMeta`]; this record keeps the two facts apart that a portable step
+/// holds in one: what physically runs, and what work it does.
+#[derive(Clone, Debug)]
+pub struct Lowering {
+    /// The name the step's launches are timed and reported under.
+    pub physical: std::borrow::Cow<'static, str>,
+    /// The portable dispatches whose result this step computes: what it is
+    /// priced as. Empty for a step that serves an operation priced on a sibling
+    /// step, or that the portable path has no counterpart for (a cast, a
+    /// quantize, a scale reduction): it costs nothing and is still accounted.
+    /// `None` until the site that knows which portable work the step replaces
+    /// says so ([`Step::priced_as`]): what ran is named, its cost is unknown.
+    pub portable: Option<Vec<PortableDispatch>>,
+}
+
+impl Lowering {
+    /// A step that runs `physical` and replaces the portable `work`.
+    pub fn priced(physical: impl Into<std::borrow::Cow<'static, str>>, work: Vec<PortableDispatch>) -> Lowering {
+        Lowering { physical: physical.into(), portable: Some(work) }
+    }
+    /// A step that runs `physical` in support of an operation priced on
+    /// another step, or with no portable counterpart: zero cost, accounted.
+    pub fn helper(physical: impl Into<std::borrow::Cow<'static, str>>) -> Lowering {
+        Lowering::priced(physical, Vec::new())
+    }
+    /// A step that runs `physical`, its portable work not yet stated.
+    pub fn unpriced(physical: impl Into<std::borrow::Cow<'static, str>>) -> Lowering {
+        Lowering { physical: physical.into(), portable: None }
+    }
+}
+
 /// An opaque recorded program: a run of submissions frozen at their current
 /// parameters by [`Backend::freeze`] and launched with [`Backend::launch_program`]
 /// for the price of one driver call. Tagged by the backend that built it, like
@@ -1281,12 +1350,13 @@ impl Program {
 pub struct Step {
     inner: Arc<Erased>,
     meta: Option<Arc<StepMeta>>,
+    lowering: Option<Arc<Lowering>>,
 }
 
 impl Step {
     /// Wrap a backend-native dispatch record.
     pub fn new<T: Any + ThreadSafe>(inner: T) -> Step {
-        Step { inner: Arc::new(inner), meta: None }
+        Step { inner: Arc::new(inner), meta: None, lowering: None }
     }
     /// Attach the neutral dispatch record (facade `step*` does this; backends
     /// never need to).
@@ -1297,6 +1367,23 @@ impl Step {
     /// The neutral dispatch record, if the step came through the facade.
     pub fn meta(&self) -> Option<&StepMeta> {
         self.meta.as_deref()
+    }
+    /// Record what a provider-built step runs and what it computes (the site
+    /// that replaced portable work does this; backends never need to).
+    pub fn with_lowering(mut self, lowering: Lowering) -> Step {
+        self.lowering = Some(Arc::new(lowering));
+        self
+    }
+    /// The provider record, if one was attached.
+    pub fn lowering(&self) -> Option<&Lowering> {
+        self.lowering.as_deref()
+    }
+    /// State the portable work an unpriced provider step replaces, keeping the
+    /// name of what runs. `None` when the step has no [`Lowering`] or is
+    /// already priced: a cost is stated once, by the one site that knows it.
+    pub fn priced_as(&self, work: Vec<PortableDispatch>) -> Option<Step> {
+        let l = self.lowering().filter(|l| l.portable.is_none())?;
+        Some(self.clone().with_lowering(Lowering::priced(l.physical.clone(), work)))
     }
     /// Recover the native dispatch record. Panics on a backend mismatch.
     pub fn downcast_ref<T: Any>(&self) -> &T {

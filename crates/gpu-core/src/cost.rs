@@ -352,17 +352,42 @@ pub fn covers(name: &str) -> bool {
 }
 
 /// Fold `steps` into `report`, resolving kernel indices through `names` (the
-/// pipeline set the recording `Gpu` was built with). Steps without meta (built
-/// behind the facade's back) count as uncovered.
+/// pipeline set the recording `Gpu` was built with). See [`step_cost`].
 pub fn tally(report: &mut CostReport, names: &[String], steps: &[Step]) {
     for s in steps {
-        match s.meta() {
-            Some(m) => {
-                let name = names.get(m.kernel).map(|s| s.as_str()).unwrap_or("<unknown-kernel>");
-                report.record(name, kernel_cost(name, m.params.as_deref(), m.threads));
-            }
-            None => report.record("<no-meta>", None),
+        let (name, cost) = step_cost(s, |k| names.get(k).map(String::as_str));
+        report.record(name, cost);
+    }
+}
+
+/// The row one step is accounted under, and its cost: the one rule the online
+/// counters, the offline `cost_of` and the per-kernel profile share.
+///
+/// * A portable step ([`backend_api::StepMeta`]) is its kernel, priced by that
+///   kernel's formula; `kernel_name` resolves the slot.
+/// * A provider-lowered step ([`backend_api::Lowering`]) is named by what
+///   physically runs and priced as the portable dispatches it replaces, so one
+///   operation costs the same on every device whichever implementation served
+///   it. No portable dispatch is a zero cost, still covered; one without a
+///   formula, or work not yet stated, leaves the step uncovered.
+/// * A step with neither record (built behind the facade's back) is
+///   `"<no-meta>"`, uncovered.
+pub fn step_cost<'a>(step: &'a Step, kernel_name: impl FnOnce(usize) -> Option<&'a str>) -> (&'a str, Option<Cost>) {
+    if let Some(l) = step.lowering() {
+        let cost = l.portable.as_ref().and_then(|work| {
+            work.iter().try_fold(Cost::default(), |mut sum, d| {
+                sum.add(kernel_cost(d.kernel, Some(&d.params), d.threads)?);
+                Some(sum)
+            })
+        });
+        return (&l.physical, cost);
+    }
+    match step.meta() {
+        Some(m) => {
+            let name = kernel_name(m.kernel).unwrap_or("<unknown-kernel>");
+            (name, kernel_cost(name, m.params.as_deref(), m.threads))
         }
+        None => ("<no-meta>", None),
     }
 }
 

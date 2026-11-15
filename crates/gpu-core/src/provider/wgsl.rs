@@ -9,7 +9,7 @@
 //! `Self::threads` below is `model::ops::Ops::threads`, moved verbatim: a
 //! pure function of `(variant, dtype, m, n)` with no dependency on any
 //! model-crate kernel-name table, so it could move down into `gpu-core`
-//! unchanged. `Self::lower_matmul`'s dispatch shape - ask the selector, bind
+//! unchanged. `Self::lower_one`'s dispatch shape - ask the selector, bind
 //! the kernel, compute the thread count, push one `step_sliced` - is
 //! `Ops::matmul`'s own dispatch body; what moved is *which operand bundle it
 //! reads its buffers from* (an [`super::Operand`] slice instead of a `&Weight`/
@@ -24,7 +24,7 @@
 //! `F32`/`BF16`/`F16`/`I8`/`Q4`/affine K-quant), plus `Op::Embed`,
 //! `Op::MoeExpertLinear`, `Op::MatMulDx` and `Op::MatMulDw`.
 //!
-//! The split between `lower_matmul` and `lower_fixed` is not about which
+//! The two grid formulas in `Self::plan` are not about which
 //! operators matter: `Op::MatMul` is the one with a real WGSL variant
 //! CHOICE, and so with a thread count that depends on which variant the
 //! selector returned. The other four have one kernel shape per dtype, so
@@ -124,10 +124,44 @@ impl WgslProvider {
         }
     }
 
+    /// Which kernel this provider binds for `req` on `caps`, and at what grid:
+    /// the dispatch [`Self::lower`] pushes, without pushing it.
+    ///
+    /// The selector is consulted for every operator, including the four with a
+    /// single candidate today (`Op::Embed`/`Op::MoeExpertLinear`/
+    /// `Op::MatMulDx`/`Op::MatMulDw`): the caller's `bind` closure maps
+    /// whatever comes back to a kernel name, so a cooperative sibling landing
+    /// for any of them is a `candidates` arm plus a `bind` arm, with nothing
+    /// to change here. Skipping the selector would instead hard-wire
+    /// `Reference` at this layer, which is the thing this layer exists not to
+    /// do.
+    fn plan(&self, req: &OpRequest, caps: &backend_api::DeviceCaps) -> Result<(usize, &'static str, crate::Dispatch), String> {
+        let variant = self.selector.select(req.op, req.shape, caps);
+        let grid = match req.op {
+            select::Op::MatMul => Self::threads(variant, req.shape.dtype, req.shape.m, req.shape.n),
+            select::Op::Embed | select::Op::MoeExpertLinear | select::Op::MatMulDx | select::Op::MatMulDw => Self::fixed_threads(req.op, req.shape),
+            other => {
+                return Err(format!(
+                    "wgsl::WgslProvider::lower: {other:?} is not migrated onto the OperatorProvider \
+                     seam -- see the `provider` module's top-level doc comment for which operators are"
+                ))
+            }
+        };
+        let (kind, name) = (req.bind)(variant);
+        Ok((kind, name, grid))
+    }
+
+    /// The portable dispatch this provider would push for `req` on `gpu`: what
+    /// another provider's lowering of the same request is priced as.
+    pub(crate) fn portable(&self, gpu: &crate::Gpu, caps: &backend_api::DeviceCaps, req: &OpRequest) -> Result<backend_api::PortableDispatch, String> {
+        let (kind, name, grid) = self.plan(req, caps)?;
+        Ok(backend_api::PortableDispatch { kernel: name, params: req.attrs.to_vec(), threads: gpu.threads_for(kind, grid) })
+    }
+
     /// The one dispatch body all of this provider's operators share: resolve
     /// a variant, bind it, bind every operand's own sub-range, push one step.
-    fn lower_one(&self, ctx: &mut LowerCtx, req: &OpRequest, grid: crate::Dispatch, variant: KernelVariant) -> Result<Lowered, String> {
-        let (kind, name) = (req.bind)(variant);
+    fn lower_one(&self, ctx: &mut LowerCtx, req: &OpRequest) -> Result<Lowered, String> {
+        let (kind, name, grid) = self.plan(req, ctx.caps)?;
         if req.operands.last().map(|o| o.role) != Some(Role::Out) {
             return Err(format!(
                 "wgsl::WgslProvider::lower: an OpRequest for {:?} must end with the Role::Out \
@@ -139,27 +173,6 @@ impl WgslProvider {
         let offsets: Vec<(u64, u64)> = req.operands.iter().map(|o| o.range).collect();
         ctx.steps.push(ctx.gpu.dispatch_sliced(kind, &bufs, &offsets, req.attrs, grid));
         Ok(Lowered::new(1, vec![name]))
-    }
-
-    fn lower_matmul(&self, ctx: &mut LowerCtx, req: &OpRequest) -> Result<Lowered, String> {
-        let variant = self.selector.select(req.op, req.shape, ctx.caps);
-        let threads = Self::threads(variant, req.shape.dtype, req.shape.m, req.shape.n);
-        self.lower_one(ctx, req, threads, variant)
-    }
-
-    /// `Op::Embed`/`Op::MoeExpertLinear`/`Op::MatMulDx`/`Op::MatMulDw`.
-    ///
-    /// The selector is still consulted, even though every one of these has a
-    /// single candidate today: the caller's `bind` closure maps whatever
-    /// comes back to a kernel name, so a cooperative sibling landing for any
-    /// of them is a `candidates` arm plus a `bind` arm, with nothing to
-    /// change here. Skipping the selector would instead hard-wire
-    /// `Reference` at this layer, which is the thing this layer exists not to
-    /// do.
-    fn lower_fixed(&self, ctx: &mut LowerCtx, req: &OpRequest) -> Result<Lowered, String> {
-        let variant = self.selector.select(req.op, req.shape, ctx.caps);
-        let threads = Self::fixed_threads(req.op, req.shape);
-        self.lower_one(ctx, req, threads, variant)
     }
 }
 
@@ -198,17 +211,7 @@ impl OperatorProvider for WgslProvider {
     }
 
     fn lower(&self, ctx: &mut LowerCtx, req: &OpRequest) -> Result<Lowered, String> {
-        match req.op {
-            select::Op::MatMul => self.lower_matmul(ctx, req),
-            select::Op::Embed
-            | select::Op::MoeExpertLinear
-            | select::Op::MatMulDx
-            | select::Op::MatMulDw => self.lower_fixed(ctx, req),
-            other => Err(format!(
-                "wgsl::WgslProvider::lower: {other:?} is not migrated onto the OperatorProvider \
-                 seam -- see the `provider` module's top-level doc comment for which operators are"
-            )),
-        }
+        self.lower_one(ctx, req)
     }
 }
 

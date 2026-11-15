@@ -3186,6 +3186,11 @@ impl Fused {
     }
 
     /// The registry entry this kernel resolves to on a device of capability `cc`.
+    /// The name the form of this op that runs at capability `cc` is timed and reported under.
+    pub(crate) fn reported_on(self, cc: kernels_cuda::Cc) -> Option<&'static str> {
+        kernels_cuda::get(self.registry_name_on(cc)).map(|k| k.reported)
+    }
+
     fn registry_name_on(self, cc: kernels_cuda::Cc) -> &'static str {
         if self.cluster_blocks(cc).is_some() && self == Fused::QuantEpilogue { "quant_epilogue_cluster" } else { self.registry_name() }
     }

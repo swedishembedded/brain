@@ -177,6 +177,13 @@ pub struct BatchedProduct {
     pub alpha: f32,
 }
 
+/// A cast or quantiser that changes an operand's number format for a native product: the portable products read the
+/// fp32 values as they are, so it has no portable counterpart and costs nothing in the operation's price (see
+/// `backend_api::Lowering`); it is still accounted, under the kernel's own name.
+fn operand_prep(step: Step, kernel: &kernels_cuda::CudaKernel) -> Step {
+    step.with_lowering(backend_api::Lowering::helper(kernel.reported))
+}
+
 /// Round `count` fp32 values of `x` to a new bf16 buffer (round to nearest even, two to a word) and push the cast step.
 /// This is the activation operand of every bf16 tensor-core product - the vendor library's and the int8 weights'
 /// dequantize-in-register candidates - and does not depend on the library being active. `None` when the device
@@ -190,7 +197,7 @@ pub fn cast_bf16(gpu: &Gpu, steps: &mut Vec<Step>, x: &Operand, count: u64) -> O
     // The cast writes all `count` values (an even multiple of ALIGN_ELEMS), so the scratch is not cleared.
     let scratch = gpu.storage_uninit(count.div_ceil(2));
     let step = gpu.step_native_sliced(id, &[x.buf, &scratch], &[(x.range.0, count), (0, 0)], &[count as u32], kernel.blocks_for(1, count as u32))?;
-    steps.push(step);
+    steps.push(operand_prep(step, kernel));
     Some(scratch)
 }
 
@@ -204,7 +211,7 @@ pub fn widen_bf16(gpu: &Gpu, steps: &mut Vec<Step>, x: &DeviceBuffer, count: u64
     let id = gpu.native_kernel(kernel, CAST_BINDINGS)?;
     let wide = gpu.storage_uninit(count);
     let step = gpu.step_native_sliced(id, &[x, &wide], &[(0, 0), (0, 0)], &[count as u32], kernel.blocks_for(1, count as u32))?;
-    steps.push(step);
+    steps.push(operand_prep(step, kernel));
     Some(wide)
 }
 
@@ -237,7 +244,7 @@ pub fn quantize_e4m3_rows_into(gpu: &Gpu, steps: &mut Vec<Step>, x: &Operand, ro
     let kernel = kernels_cuda::get("quant_e4m3_128")?;
     let id = gpu.native_kernel(kernel, QUANT_E4M3_BINDINGS)?;
     let step = gpu.step_native_sliced(id, &[x.buf, q, s], &[(x.range.0, elems), (0, 0), (0, 0)], &[rows, k], kernel.blocks_for(1, elems as u32))?;
-    steps.push(step);
+    steps.push(operand_prep(step, kernel));
     Some(())
 }
 
@@ -254,7 +261,7 @@ pub fn quantize_e4m3_row_scaled(gpu: &Gpu, steps: &mut Vec<Step>, x: &Operand, r
     let q = gpu.storage_uninit(elems.div_ceil(4));
     let s = gpu.storage_uninit(u64::from(rows));
     let step = gpu.step_native_sliced(id, &[x.buf, &q, &s], &[(x.range.0, elems), (0, 0), (0, 0)], &[rows, k], rows)?;
-    steps.push(step);
+    steps.push(operand_prep(step, kernel));
     Some((q, s))
 }
 

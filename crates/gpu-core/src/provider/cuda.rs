@@ -1286,7 +1286,23 @@ fn rmsnorm_fused_kernel(gpu: &crate::Gpu, name: &str, d: u32, rows: u32) -> Opti
 pub fn add_rmsnorm_fwd_step(gpu: &crate::Gpu, bufs: &[&backend_api::DeviceBuffer; 5], d: u32, rows: u32, eps: f32) -> Option<crate::Step> {
     let kernel = rmsnorm_fused_kernel(gpu, "add_rmsnorm_fwd", d, rows)?;
     let id = gpu.native_kernel(kernel, &ADD_RMSNORM_BINDINGS)?;
-    gpu.step_native_sliced(id, bufs, &[(0, 0); 5], &[d, rows, eps.to_bits()], rows)
+    let params = [d, rows, eps.to_bits()];
+    let step = gpu.step_native_sliced(id, bufs, &[(0, 0); 5], &params, rows)?;
+    Some(step.with_lowering(rmsnorm_fused_lowering(kernel, &params, [("add2", None), ("rmsnorm", Some(rows))])))
+}
+
+/// What a fused RMSNorm launch replaces: the portable `add2` over the `rows x d` elements and the portable norm
+/// kernel at the same `[d, rows, eps]` uniform, in `order` (each with its thread count, `None` for one per element).
+fn rmsnorm_fused_lowering(kernel: &kernels_cuda::CudaKernel, params: &[u32; 3], order: [(&'static str, Option<u32>); 2]) -> backend_api::Lowering {
+    let elems = params[0] * params[1];
+    let portable = order
+        .into_iter()
+        .map(|(name, threads)| match threads {
+            None => backend_api::PortableDispatch { kernel: name, params: vec![elems], threads: elems },
+            Some(t) => backend_api::PortableDispatch { kernel: name, params: params.to_vec(), threads: t },
+        })
+        .collect();
+    backend_api::Lowering::priced(kernel.reported, portable)
 }
 
 /// `dx = res + rmsnorm_dx(x, w, dy)` as one launch (`rmsnorm_dx_add`). `bufs` is `x, w, dy, res` (read) and
@@ -1294,7 +1310,9 @@ pub fn add_rmsnorm_fwd_step(gpu: &crate::Gpu, bufs: &[&backend_api::DeviceBuffer
 pub fn rmsnorm_dx_add_step(gpu: &crate::Gpu, bufs: &[&backend_api::DeviceBuffer; 5], d: u32, rows: u32, eps: f32) -> Option<crate::Step> {
     let kernel = rmsnorm_fused_kernel(gpu, "rmsnorm_dx_add", d, rows)?;
     let id = gpu.native_kernel(kernel, &RMSNORM_DX_ADD_BINDINGS)?;
-    gpu.step_native_sliced(id, bufs, &[(0, 0); 5], &[d, rows, eps.to_bits()], rows)
+    let params = [d, rows, eps.to_bits()];
+    let step = gpu.step_native_sliced(id, bufs, &[(0, 0); 5], &params, rows)?;
+    Some(step.with_lowering(rmsnorm_fused_lowering(kernel, &params, [("rmsnorm_dx", Some(rows)), ("add2", None)])))
 }
 
 /// The native tensor-core paged flash-prefill step for `head_dim = 256` or `128`, or

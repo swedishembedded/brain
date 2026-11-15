@@ -471,6 +471,19 @@ existing caller. Assume nothing about units.
   exception. WGSL has no bf16 type, so no file under `crates/kernels/wgsl/`
   may contain `enable bf16` or claim a bf16 compute tier; bf16 compute belongs
   to a non-WGSL provider.
+- **A step a non-WGSL provider builds is priced as the portable work it
+  replaces, and named by what physically runs.** It carries a
+  `backend_api::Lowering` (no `StepMeta`): the kernel's reported name, and the
+  portable dispatches whose result it computes, which `gpu_core::cost` prices
+  with their own formulas, so an operation costs the same on every device.
+  The site that knows the portable fallback states it:
+  `ProviderRegistry::dispatch` for every `OperatorProvider` (the last pushed
+  step carries the reference dispatch, earlier ones are zero-cost helpers),
+  `Ops` for the products it routes past the registry, the native helper for a
+  fused launch with a fixed portable chain. A cast or quantizer the portable
+  path has no counterpart for is a helper (`Lowering::helper`); a step whose
+  portable work nobody stated stays uncovered under its own name, never a
+  guessed formula.
 - **Weight-only quantization is group-wise, never whole-channel.** One
   outlier in a channel-wide scale sets the step for every weight in that
   channel (knowledge #65). `model::int8::GROUP` (32) is the one granularity

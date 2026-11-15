@@ -1054,7 +1054,7 @@ impl CudaBackend {
         crate::live::host_launched(1);
         if let Some(start) = start {
             if let Some(end) = self.stamp() {
-                self.kernel_times.lock().unwrap_or_else(|e| e.into_inner()).pending.push((library_gemm_label(gemm), start, end));
+                self.kernel_times.lock().unwrap_or_else(|e| e.into_inner()).pending.push((gemm.label(), start, end));
             }
         }
     }
@@ -1486,25 +1486,6 @@ fn query_caps(ctx: &exec::Context) -> Result<DeviceCaps, String> {
         numeric: NumericSupport { fp8_storage: true, ..arch.numeric_view() },
         arch,
     })
-}
-
-/// The timing row of a library GEMM: the shape and operand types, so a profile separates the large base products from the
-/// skinny LoRA ones instead of averaging them (`library_gemm 5120x8192x17408 bf16.bf16.f32 b1`).
-fn library_gemm_label(g: &backend_api::LibraryGemm) -> String {
-    format!(
-        "library_gemm {}x{}x{} {:?}.{:?}.{:?}{}{}{} b{}",
-        g.m,
-        g.n,
-        g.k,
-        g.a,
-        g.b,
-        g.c,
-        if g.trans_a { " tA" } else { "" },
-        if g.trans_b { " tB" } else { "" },
-        // A binary32 product is a CUDA-core product unless it is allowed to multiply as TF32.
-        if g.tf32 { " tf32" } else { "" },
-        g.batch
-    )
 }
 
 impl backend_api::Backend for CudaBackend {

@@ -100,10 +100,9 @@ fn main() {
     // The shapes behind the top kernel. A per-kind total says WHAT is slow; the
     // shape histogram says WHY, and whether a faster sibling could have taken it.
     if let Some(top) = rows.first().map(|r| r.name.clone()) {
-        let ki = gpu.kernel_index(&top);
         let mut hist: HashMap<Vec<u32>, (usize, f64)> = HashMap::new();
-        for (k, start, len) in &gpu_core::profile::groups(steps) {
-            if Some(*k) != ki {
+        for (row, start, len) in &gpu_core::profile::groups(&gpu, steps) {
+            if *row != top {
                 continue;
             }
             let t = gpu_core::profile::best_of(&gpu, &steps[*start..*start + *len], 1) / *len as f64;
