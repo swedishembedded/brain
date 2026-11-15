@@ -23,7 +23,7 @@ fn measured_peak_gflops(gpu: &gpu_core::Gpu) -> Option<f64> {
     gpu_core::roof::ensure(gpu).map(|r| r.gflops as f64)
 }
 
-/// `"12.3% of ..."`-style utilisation, or `-` without a measured roof.
+/// The rate as a percentage of the measured peak (one decimal), or `-` without a measured roof.
 fn pct_of(rate_gflops: f64, peak_gflops: Option<f64>) -> String {
     peak_gflops.map_or_else(|| "-".into(), |p| format!("{:.1}%", 100.0 * rate_gflops / p))
 }
