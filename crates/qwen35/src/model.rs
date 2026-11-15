@@ -500,6 +500,11 @@ pub(crate) const DECODE_ARENA: &str = "qwen35.decode";
 /// sequence of requests and every row count asks for a different one.
 const ROUND_ARENAS: [&str; 7] = ["qwen35.round.2", "qwen35.round.3", "qwen35.round.4", "qwen35.round.5", "qwen35.round.6", "qwen35.round.7", "qwen35.round.8"];
 
+/// The most rows one pass of a round of one sequence's consecutive tokens takes: a scratch arena per row count up to
+/// it ([`ROUND_ARENAS`]), and the multi-row recurrent kernel (`Fused::GdnDecode`) serves as many. A round of more rows
+/// runs as several passes, however wide a group the int8 GEMV keeps exact.
+const ROUND_MAX_ROWS: usize = ROUND_ARENAS.len() + 1;
+
 /// The arena a round of `rows` consecutive tokens of one sequence replays.
 fn round_arena(rows: u32) -> &'static str {
     match rows {
@@ -6508,11 +6513,12 @@ impl Qwen35 {
 
     /// Rows of one group of an exact round: [`gpu_core::select::exact_decode_group_rows`],
     /// the widest group whose int8 GEMV is the same arithmetic at every row
-    /// count. A round of more rows costs one more pass over the weights per
-    /// group, and stays bit-identical to the decode steps it stands for
+    /// count, and no more than [`ROUND_MAX_ROWS`], the widest one pass of a
+    /// round takes. A round of more rows costs one more pass over the weights
+    /// per group, and stays bit-identical to the decode steps it stands for
     /// (`tests/chunk_tape_decode_parity.rs`).
     fn exact_group_rows(&self) -> usize {
-        gpu_core::select::exact_decode_group_rows(&self.gpu.caps(), gpu_core::select::Dtype::I8) as usize
+        (gpu_core::select::exact_decode_group_rows(&self.gpu.caps(), gpu_core::select::Dtype::I8) as usize).min(ROUND_MAX_ROWS)
     }
 
     /// Whether a round of `n` rows runs as plain decode steps
