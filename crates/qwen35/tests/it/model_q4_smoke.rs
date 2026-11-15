@@ -18,8 +18,14 @@ use model::ops::TierPolicy;
 use qwen35::config::{LayerType, Qwen35Config};
 use qwen35::model::{pipelines, Qwen35};
 
+/// Fresh init weights with the tables at the 16 bits a sub-fp32 inference build holds them in (see
+/// `model_i8_smoke.rs`'s `init_weights`), so an fp32 build and a Q4 build differ only in their linears.
 fn init_weights(cfg: &Qwen35Config, seed: u64) -> std::collections::HashMap<String, Vec<f32>> {
-    qwen35::init::init_weights(cfg, seed)
+    let mut w = qwen35::init::init_weights(cfg, seed);
+    for table in ["tok.weight", cfg.head_weight()] {
+        w.get_mut(table).expect("the init holds both tables").iter_mut().for_each(|x| *x = crate::common::round_bf16(*x));
+    }
+    w
 }
 
 fn tiny_i8() -> Qwen35Config {
@@ -69,9 +75,9 @@ fn q4_forward_tracks_fp32_within_quant_tolerance_default_backend() {
 
 /// The Q4 twin of `model_i8_smoke.rs`'s own CPU-demotion test: on a backend
 /// without `int8_dot`, `Weight::upload`'s `want.promote(caps)` narrows a
-/// requested Q4 tier all the way back to F32, so a "q4" CPU build is
-/// actually a complete fp32 demotion and should be near bit-identical to a
-/// real fp32 build, not merely close.
+/// requested Q4 tier all the way back to F32, so a "q4" CPU build demotes
+/// every linear and keeps only its 16-bit tables, which the reference shares:
+/// the two differ by binary32 round-off alone, held to its derived bound.
 #[test]
 fn q4_forward_matches_fp32_almost_exactly_on_cpu_backend_full_demotion() {
     let cfg = tiny_i8();
@@ -86,9 +92,11 @@ fn q4_forward_matches_fp32_almost_exactly_on_cpu_backend_full_demotion() {
     let logits_fp32 = fp32.logits_all(&tokens);
     let logits_q4 = q4.logits_all(&tokens);
 
-    let cos = cosine(&logits_q4, &logits_fp32);
-    eprintln!("qwen35 q4 vs fp32 (tiny_i8, CPU backend, full fp32 demotion): cosine={cos:.9}");
-    assert!(cos > 0.999999, "qwen35 CPU q4 build should be an almost-exact fp32 demotion: cosine={cos:.9} (want > 0.999999)");
+    assert_eq!(q4.linear_dtype("blocks.0.mlp.gate.weight"), Some(Dtype::F32), "the CPU backend demotes a Q4 linear to fp32");
+    let rel = brain_testutil::parity::rel_l2(&logits_q4, &logits_fp32);
+    let bound = crate::model_i8_smoke::demoted_logits_rel_l2_bound(&cfg);
+    eprintln!("qwen35 q4 vs fp32 (tiny_i8, CPU backend, full fp32 demotion): rel_l2={rel:.3e} (round-off bound {bound:.3e})");
+    assert!(rel <= bound, "qwen35 CPU q4 build should be an fp32 demotion: rel_l2={rel:.3e} is past the binary32 round-off bound {bound:.3e}");
 }
 
 /// A MIXED policy (Q4 on the MLP, F32 on the two GDN state-sensitive gates -

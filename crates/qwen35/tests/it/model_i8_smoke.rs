@@ -10,7 +10,12 @@
 //! computation `crates/qwen35/tests/it/model_smoke.rs` already exercises, not a
 //! different one: build both an fp32 and an int8 `Qwen35` from the IDENTICAL
 //! fresh init weights, run `forward`, and confirm the outputs track each
-//! other within a generous but real tolerance.
+//! other. The default-backend tolerance is this init's, not the tier's:
+//! `init_weights` makes every branch small against the residual stream, so
+//! quantization barely reaches the logits here, where weights whose branches
+//! carry the residual move them by a large fraction (knowledge #456). The CPU
+//! backend runs no quantized linear at all, and its comparison is held to the
+//! binary32 round-off bound ([`demoted_logits_rel_l2_bound`]).
 //!
 //! ## Why this test does NOT use `Qwen35Config::tiny()` verbatim
 //!
@@ -30,8 +35,16 @@ use gpu_core::Gpu;
 use qwen35::config::{LayerType, Qwen35Config};
 use qwen35::model::{pipelines, Qwen35};
 
+/// Fresh init weights with the embedding table and the LM head rounded to bf16. An inference build below fp32 holds
+/// both tables in bf16 (`train_base::table_tier`), so an fp32 build from these weights multiplies by the same table
+/// values the quantized build does, and the two differ only where the quantized linears do. On a backend that demotes
+/// every quantized linear to fp32 that leaves binary32 round-off alone.
 fn init_weights(cfg: &Qwen35Config, seed: u64) -> std::collections::HashMap<String, Vec<f32>> {
-    qwen35::init::init_weights(cfg, seed)
+    let mut w = qwen35::init::init_weights(cfg, seed);
+    for table in ["tok.weight", cfg.head_weight()] {
+        w.get_mut(table).expect("the init holds both tables").iter_mut().for_each(|x| *x = crate::common::round_bf16(*x));
+    }
+    w
 }
 
 /// See this file's module doc for why this exists instead of `tiny()`. The
@@ -41,6 +54,26 @@ fn init_weights(cfg: &Qwen35Config, seed: u64) -> std::collections::HashMap<Stri
 /// below is its contract test.
 fn tiny_i8() -> Qwen35Config {
     Qwen35Config::tiny_i8()
+}
+
+/// The relative L2 two binary32 evaluations of [`tiny_i8`]'s logits may lie apart when they compute the same function in
+/// different association orders: the agreement bound `2 gamma_k` ([`brain_testutil::rounding::agreement_bound`]) with
+/// `k` the rounded operations on the longest chain from a token to a logit, counted as `qwen35moe`'s reference parity
+/// counts them (each stage passes relative error on with gain at most one). Per layer: the norm (`d`), the mixer (its
+/// input projection `d`, then the causal conv and the delta-rule recurrence over every position, or the head norm,
+/// scores and weighted sum over every position), its output projection, the residual add, the second norm and the
+/// MLP's two products; then the final norm and the head (`d` each).
+pub(crate) fn demoted_logits_rel_l2_bound(cfg: &Qwen35Config) -> f64 {
+    let (d, t) = (cfg.d_model as usize, cfg.block_size as usize);
+    let layer = |ty: &LayerType| {
+        let mixer = match ty {
+            LayerType::Linear => d + cfg.linear_conv_kernel_dim as usize + 2 * t * cfg.linear_key_head_dim as usize + cfg.linear_value_head_dim as usize + cfg.linear_value_dim() as usize,
+            LayerType::Full => d + cfg.head_dim as usize + 2 * t + cfg.q_dim() as usize,
+        };
+        d + mixer + 1 + d + d + cfg.intermediate_size as usize + 1
+    };
+    let k = cfg.layer_types().iter().map(layer).sum::<usize>() + 2 * d;
+    brain_testutil::rounding::agreement_bound(k, 1.0)
 }
 
 fn cosine(a: &[f32], b: &[f32]) -> f64 {
@@ -53,16 +86,6 @@ fn cosine(a: &[f32], b: &[f32]) -> f64 {
         nb += (*y as f64).powi(2);
     }
     dot / (na.sqrt() * nb.sqrt()).max(1e-12)
-}
-
-fn rel_l2(got: &[f32], want: &[f32]) -> f64 {
-    let mut num = 0f64;
-    let mut den = 0f64;
-    for (a, b) in got.iter().zip(want.iter()) {
-        num += ((a - b) as f64).powi(2);
-        den += (*b as f64).powi(2);
-    }
-    (num / den.max(1e-12)).sqrt()
 }
 
 /// Sanity check on [`tiny_i8`] itself, independent of any device: every
@@ -122,7 +145,7 @@ fn run_parity(gpu_fp32: Gpu, gpu_i8: Gpu) -> (f64, f64) {
     assert!(logits_fp32.iter().any(|&v| v.abs() > 1e-6), "fp32 reference is degenerate (all ~0) -- test shape/init is uninformative");
 
     let cos = cosine(&logits_i8, &logits_fp32);
-    let rel = rel_l2(&logits_i8, &logits_fp32);
+    let rel = brain_testutil::parity::rel_l2(&logits_i8, &logits_fp32);
     (cos, rel)
 }
 
@@ -144,26 +167,29 @@ fn int8_forward_tracks_fp32_within_quant_tolerance_default_backend() {
 /// `model::ops::Weight::upload`, whose contract narrows the REQUESTED dtype
 /// down to whatever the device can actually execute
 /// (`want.promote(&ops.caps.numeric)`): on a backend whose caps don't
-/// support the DP4A path (like this engine's CPU JIT), it silently builds
+/// support the DP4A path (like this engine's CPU JIT), it builds
 /// `Weight::F32` instead of `Weight::I8`. Unlike `qwen35moe` (which still has
 /// a genuinely-quantized MoE-expert path on CPU, via a separate kernel that
 /// IS CPU-JIT'able), `qwen35` has no such fallback path at all - EVERY
 /// quantizable linear in this model lives on `self.ops`/`self.weights`, so
-/// an "int8" CPU build is actually a COMPLETE fp32 demotion. The two outputs
-/// should therefore be identical or extremely close (cosine ~= 1.0, not
-/// merely greater than 0.99) - asserting a much tighter bound here than the
-/// default-backend test makes that CPU-demotion behaviour an explicit,
-/// checked fact rather than accidentally reusing a loose GPU-appropriate
-/// tolerance that would silently pass even if CPU-demotion regressed (e.g.
-/// if a future change made the CPU JIT support DP4A and this model started
-/// actually quantizing there without anyone noticing this test's assumption
-/// had changed).
+/// an "int8" CPU build demotes every linear to fp32 and keeps only the
+/// tables at the 16 bits every sub-fp32 inference build holds them in, which
+/// the reference shares ([`init_weights`]). What separates the two builds is
+/// then binary32 round-off, held to its derived bound
+/// ([`demoted_logits_rel_l2_bound`]). That bound does not see quantization on
+/// this init (its branches are small against the residual stream, so even a
+/// real int8 build lands close to fp32, knowledge #456): the demotion itself
+/// is asserted on the weights' dtypes.
 #[test]
 fn int8_forward_matches_fp32_almost_exactly_on_cpu_backend_full_demotion() {
+    let cfg = tiny_i8();
+    let i8 = Qwen35::new_on_i8(Gpu::new_cpu(pipelines()), cfg.clone(), 1, cfg.block_size, &init_weights(&cfg, 7));
+    assert_eq!(i8.linear_dtype("blocks.0.mlp.gate.weight"), Some(gpu_core::select::Dtype::F32), "the CPU backend demotes an int8 linear to fp32");
+    assert_eq!(i8.linear_dtype(cfg.head_weight()), Some(gpu_core::select::Dtype::BF16), "the head is held at 16 bits");
     let (cos, rel) = run_parity(Gpu::new_cpu(pipelines()), Gpu::new_cpu(pipelines()));
-    eprintln!("qwen35 int8 vs fp32 (tiny_i8, CPU backend, full fp32 demotion): cosine={cos:.9} rel_l2={rel:.9}");
-    assert!(cos > 0.999999, "qwen35 CPU int8 build should be an almost-exact fp32 demotion: cosine={cos:.9} (want > 0.999999)");
-    assert!(rel < 1e-4, "qwen35 CPU int8 build should be an almost-exact fp32 demotion: rel_l2={rel:.9} (want < 1e-4)");
+    let bound = demoted_logits_rel_l2_bound(&cfg);
+    eprintln!("qwen35 int8 vs fp32 (tiny_i8, CPU backend, full fp32 demotion): cosine={cos:.9} rel_l2={rel:.3e} (round-off bound {bound:.3e})");
+    assert!(rel <= bound, "qwen35 CPU int8 build should be an fp32 demotion: rel_l2={rel:.3e} is past the binary32 round-off bound {bound:.3e}");
 }
 
 /// The int8 build must exclude every `is_i8_linear` name from the fp32
@@ -172,7 +198,9 @@ fn int8_forward_matches_fp32_almost_exactly_on_cpu_backend_full_demotion() {
 /// must be strictly SHORTER than the fp32 model's, by exactly the count of
 /// quantizable leaves `tiny_i8()`'s own shape implies: 5 GDN leaves * 3 GDN
 /// layers + 4 GQA leaves * 1 GQA layer + 3 MLP leaves * 4 layers (every
-/// layer, both mixer types) = 15 + 4 + 12 = 31.
+/// layer, both mixer types) = 15 + 4 + 12 = 31, plus the embedding table and
+/// the untied head, which a sub-fp32 inference build holds as 16-bit device
+/// weights rather than store tensors.
 #[test]
 fn int8_model_excludes_quantized_names_from_the_fp32_param_store() {
     let cfg = tiny_i8();
@@ -190,7 +218,8 @@ fn int8_model_excludes_quantized_names_from_the_fp32_param_store() {
     let n_gdn = types.iter().filter(|t| **t == LayerType::Linear).count();
     let n_gqa = types.iter().filter(|t| **t == LayerType::Full).count();
     assert_eq!(n_gdn + n_gqa, cfg.n_layers as usize);
-    let expected_quantized = n_gdn * 5 + n_gqa * 4 + (cfg.n_layers as usize) * 3;
+    let tables = if cfg.head_weight() == "tok.weight" { 1 } else { 2 };
+    let expected_quantized = n_gdn * 5 + n_gqa * 4 + (cfg.n_layers as usize) * 3 + tables;
 
     assert!(expected_quantized > 0, "tiny_i8() must have at least one quantized linear to make this check meaningful");
     assert_eq!(i8_names.len(), fp32_names.len() - expected_quantized);
@@ -210,6 +239,7 @@ fn int8_model_excludes_quantized_names_from_the_fp32_param_store() {
         "down.weight",
     ];
     assert!(i8_names.iter().all(|n| !LEAVES.iter().any(|leaf| n.ends_with(leaf))), "int8 model's fp32 store must contain zero quantized names");
+    assert!(i8_names.iter().all(|n| n != "tok.weight" && n != cfg.head_weight()), "the tables are device weights, not store tensors");
 }
 
 /// The concrete risk this milestone's `mtp.layers.0.*` upload guards against:
