@@ -68,7 +68,7 @@ fn matches_the_real_hf_greedy_generation() {
         brain_testutil::skip("BRAIN_QWEN3OMNIMOE_HF_DIR unset");
         return;
     };
-    let golden_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/golden/omni/omni_generate.safetensors");
+    let golden_path = std::path::PathBuf::from(brain_testutil::crate_path("")).join("../../testdata/golden/omni/omni_generate.safetensors");
     if !golden_path.exists() {
         brain_testutil::skip(&format!("{golden_path:?} missing (run tools/goldens/qwen3omnimoe_dump_generate.py against the real checkpoint)"));
         return;

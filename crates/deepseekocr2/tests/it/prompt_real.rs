@@ -18,8 +18,7 @@ use data::tokenizer::Tokenizer;
 use deepseekocr2::prompt::{self, build_prompt};
 use deepseekocr2::rows::{row_plan, TileGrid};
 
-#[path = "../common/real_vision.rs"]
-mod real_vision;
+use crate::real_vision;
 
 use real_vision::real_files;
 

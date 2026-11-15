@@ -47,8 +47,7 @@ const PROMPT_ROWS: usize = 283;
 const STEPS: u32 = 32;
 
 /// The model-store lookup, the one-off fp32 expansion and the inference build.
-#[path = "../common/real_lm.rs"]
-mod real_lm;
+use crate::real_lm;
 
 struct Run {
     ids: Vec<u32>,

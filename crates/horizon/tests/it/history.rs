@@ -63,7 +63,7 @@ fn numbers(f: &RiskForecast) -> (String, String) {
 
 #[test]
 fn a_new_checkup_changes_the_forecast_and_a_repeat_or_a_reordering_does_not() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let (train, _) = population(300, 61);
@@ -99,7 +99,7 @@ fn a_new_checkup_changes_the_forecast_and_a_repeat_or_a_reordering_does_not() {
 
 #[test]
 fn the_future_never_reaches_the_model() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let (train, _) = population(300, 62);
@@ -119,7 +119,7 @@ fn the_future_never_reaches_the_model() {
 
 #[test]
 fn units_are_checked_against_the_model_and_a_malformed_one_never_gets_that_far() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let (mut train, _) = population(300, 63);
@@ -142,7 +142,7 @@ fn units_are_checked_against_the_model_and_a_malformed_one_never_gets_that_far()
 
 #[test]
 fn a_forecast_reports_its_coverage_horizons_and_identity_and_refuses_what_it_cannot_say() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let (train, _) = population(1500, 64);
@@ -196,7 +196,7 @@ fn one_with(saved: &Saved, horizons: &[f64]) -> RiskForecast {
 
 #[test]
 fn a_history_outside_the_training_support_gets_no_numbers() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let (train, _) = population(1500, 66);
@@ -221,7 +221,7 @@ fn a_history_outside_the_training_support_gets_no_numbers() {
 
 #[test]
 fn an_ensemble_averages_its_members_and_reports_their_range() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let (train, _) = population(300, 67);
@@ -240,7 +240,7 @@ fn an_ensemble_averages_its_members_and_reports_their_range() {
 
 #[test]
 fn evaluation_reports_what_it_can_and_leaves_out_what_has_too_few_events() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let (train, _) = population(300, 68);

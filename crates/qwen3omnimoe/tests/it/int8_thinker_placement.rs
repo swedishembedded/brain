@@ -22,8 +22,7 @@
 use qwen3omnimoe::int8_thinker_resident::{Int8ThinkerResident, EMBED_TENSOR, MODEL};
 use residency::{Device, InstanceKey, MultiDeviceResidentModel};
 
-#[path = "../common/int8_thinker_fixture.rs"]
-mod fixture;
+use crate::fixture;
 use fixture::{caps_for_split, tiny_cfg, write_synthetic_checkpoint};
 
 struct Ckpt {

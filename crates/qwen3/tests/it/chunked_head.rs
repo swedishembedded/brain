@@ -43,8 +43,7 @@ fn max_rel(a: &[f32], b: &[f32]) -> f32 {
 
 #[test]
 fn a_chunked_head_trains_exactly_like_a_whole_one() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
-        brain_testutil::skip_unavailable("MOE_SKIP_GPU_TESTS set");
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     // 200 rows: three full 64-row chunks and a partial one.

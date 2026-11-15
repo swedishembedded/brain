@@ -44,7 +44,7 @@ fn write_dataset(dir: &std::path::Path) {
 
 #[test]
 fn every_evaluation_of_a_lora_run_leaves_a_loadable_adapter() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let scratch = tmp("run");

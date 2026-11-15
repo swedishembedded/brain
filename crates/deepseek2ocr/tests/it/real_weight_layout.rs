@@ -52,8 +52,7 @@ use brain_testutil::mem;
 
 /// The model-store lookup, the CPU pin, the mmproj import, the synthetic page
 /// and `describe` - shared with the other three real-weight binaries.
-#[path = "../common/real_vision.rs"]
-mod real_vision;
+use crate::real_vision;
 
 use real_vision::{mem_available_gib, synthetic_page, DECODER_GIB, SRC_H, SRC_W};
 

@@ -21,7 +21,7 @@ enum Weight {
 }
 
 fn gpu_disabled() -> bool {
-    std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+    brain_testutil::gpu_tests_skipped()
 }
 
 fn dx(gpu: &Gpu, kernel: &str, dispatch: impl Fn(u32, u32) -> Dispatch, weight: &Weight, dy: &[f32], (m, k, n): (u32, u32, u32), prior: &[f32], accumulate: u32) -> Vec<f32> {

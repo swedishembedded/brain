@@ -614,7 +614,7 @@ mod tests {
     /// THE CONTRACT. Not a tolerance — the bits.
     #[test]
     fn unselected_pixels_are_bit_identical() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let (w, h) = (32u32, 24u32);
@@ -651,7 +651,7 @@ mod tests {
     /// refining a mask is not an edit.
     #[test]
     fn a_mask_only_pipeline_returns_the_input_untouched() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let (w, h) = (16u32, 16u32);

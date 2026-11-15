@@ -47,7 +47,7 @@ use gpt2::{train, GptConfig, TrainOpts};
 
 /// Skip the whole test when no accelerator is wanted.
 fn skip() -> bool {
-    std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+    brain_testutil::gpu_tests_skipped()
 }
 
 /// Fresh temp dir for one dataset, cleaned up front. `tag` keeps concurrent

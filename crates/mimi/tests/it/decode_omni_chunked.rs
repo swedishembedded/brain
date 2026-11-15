@@ -194,7 +194,7 @@ fn decode_omni_chunked_rejects_empty_codes() {
 /// the CPU backend, where the comparison is vacuous.
 #[test]
 fn decode_omni_agrees_between_the_cpu_backend_and_the_ambient_device() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     if gpu_core::backend_name() == "cpu" {

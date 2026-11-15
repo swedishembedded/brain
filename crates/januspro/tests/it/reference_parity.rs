@@ -42,8 +42,8 @@ fn ids(m: &serde_json::Value, key: &str) -> Vec<u32> {
 
 #[test]
 fn janus_pro_matches_the_reference() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
-        return brain_testutil::skip_unavailable("MOE_SKIP_GPU_TESTS set");
+    if brain_testutil::gpu_tests_skipped() {
+        return;
     }
     let Some(dir) = brain_testutil::model_dir(REPO).filter(|d| Path::new(d).join("pytorch_model.bin.index.json").exists()) else {
         return brain_testutil::skip(&format!("{REPO} not in the model store"));

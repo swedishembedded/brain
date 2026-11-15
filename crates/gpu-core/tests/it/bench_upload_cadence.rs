@@ -53,7 +53,7 @@ fn block_tensors() -> Vec<(&'static str, usize)> {
 }
 
 fn gpu() -> Option<Gpu> {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return None;
     }
     Some(Gpu::new_gpu(KERNELS))

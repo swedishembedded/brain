@@ -234,7 +234,7 @@ fn bad_frame_emits_error_not_panic() {
 
 #[test]
 fn real_tiny_gpt_pumps_without_panicking() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     // Random-weight tiny GPT (no training): the pump must advance tokens and the

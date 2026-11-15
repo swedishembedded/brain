@@ -95,7 +95,7 @@ fn tiled_matches_reference_cpu() {
 
 #[test]
 fn tiled_matches_reference_gpu() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let g = gpu_core::testgpu::dev(splat::PIPELINES);

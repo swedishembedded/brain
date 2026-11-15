@@ -40,7 +40,7 @@ const CHECKPOINTS: &[&str] = &[
 const COS_FLOOR: f64 = 0.9999;
 
 fn gpu_disabled() -> bool {
-    std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+    brain_testutil::gpu_tests_skipped()
 }
 
 /// The smallest row-wise cosine between `got` and `want`, both `[rows, width]`.

@@ -15,7 +15,7 @@ fn forecast_timing() {
         brain_testutil::skip("CHRONOS2_WEIGHTS unset");
         return;
     };
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let ctx: usize = std::env::var("CTX").ok().and_then(|s| s.parse().ok()).unwrap_or(512);

@@ -44,5 +44,5 @@ fn check_dx(cin: u32) {
         "conv2d_dx cin={cin}: analytic {analytic} vs FD {numeric}");
 }
 
-#[test] fn conv2d_dx_cin8() { if std::env::var("MOE_SKIP_GPU_TESTS").is_ok(){return;} check_dx(8); }
-#[test] fn conv2d_dx_cin64() { if std::env::var("MOE_SKIP_GPU_TESTS").is_ok(){return;} check_dx(64); }
+#[test] fn conv2d_dx_cin8() { if brain_testutil::gpu_tests_skipped(){return;} check_dx(8); }
+#[test] fn conv2d_dx_cin64() { if brain_testutil::gpu_tests_skipped(){return;} check_dx(64); }

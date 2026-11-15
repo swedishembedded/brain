@@ -287,7 +287,7 @@ mod tests {
 
     #[test]
     fn f32_upload_is_chunk_bounded_and_bit_exact() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let gpu = gpu_core::testgpu::dev(KERNELS);
@@ -306,7 +306,7 @@ mod tests {
 
     #[test]
     fn packed_upload_is_chunk_bounded_and_bit_exact_without_zero_copy() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let gpu = gpu_core::testgpu::dev(KERNELS);
@@ -326,7 +326,7 @@ mod tests {
 
     #[test]
     fn packed_upload_prefers_the_zero_copy_view_when_available() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let gpu = gpu_core::testgpu::dev(KERNELS);
@@ -340,7 +340,7 @@ mod tests {
 
     #[test]
     fn a_missing_or_mis_sized_tensor_is_a_clean_error_not_a_partial_buffer() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let gpu = gpu_core::testgpu::dev(KERNELS);

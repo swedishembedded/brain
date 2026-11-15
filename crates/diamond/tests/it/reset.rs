@@ -45,7 +45,7 @@ fn random_tensors(cfg: &DiamondConfig, seed: u64) -> Tensors {
 
 #[test]
 fn reset_initial_rewinds_context_and_noise() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() { return; }
+    if brain_testutil::gpu_tests_skipped() { return; }
     let cfg = cfg();
     let frame_len = (cfg.img_channels * cfg.h * cfg.w) as usize;
     let nsc = cfg.num_steps_conditioning as usize;

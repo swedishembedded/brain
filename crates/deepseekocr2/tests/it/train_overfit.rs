@@ -125,7 +125,7 @@ fn overfit(lora: bool, seeds: &[u64], epochs: u32) -> (f32, f32) {
 /// a single example's loss to near zero.
 #[test]
 fn full_finetune_overfits_a_single_example() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let (first, last) = overfit(false, &[7], 150);
@@ -138,7 +138,7 @@ fn full_finetune_overfits_a_single_example() {
 /// losses down together by coincidence.
 #[test]
 fn full_finetune_overfits_a_small_batch() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     // 250 epochs was the original budget, calibrated before a rebase pulled
@@ -176,7 +176,7 @@ fn full_finetune_overfits_a_small_batch() {
 /// genuinely useful base - the scenario LoRA is actually built for.
 #[test]
 fn lora_overfits_a_single_example_against_a_real_base() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let (vision_cfg, decoder_cfg) = tiny_configs(false);
@@ -299,7 +299,7 @@ fn lora_overfits_a_single_example_against_a_real_base() {
 /// EXISTING checkpoint that cannot be regenerated).
 #[test]
 fn a_fresh_adapter_is_a_composite_wide_no_op() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let (vision_cfg, decoder_cfg) = tiny_configs(false);

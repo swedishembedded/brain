@@ -28,7 +28,7 @@ use brain_arch::{by_id, Arch, BaseTier, Caps, ARCHS};
 const LORA_ROWS: [&str; 5] = ["lora_f32", "lora_bf16", "lora_int8", "lora_nf4", "lora_fp8"];
 
 fn matrix() -> BTreeMap<String, BTreeSet<String>> {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../scripts/gates/training-capabilities.tsv");
+    let path = &brain_testutil::repo_path("scripts/gates/training-capabilities.tsv");
     let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{path}: {e}"));
     let mut rows: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for line in text.lines() {

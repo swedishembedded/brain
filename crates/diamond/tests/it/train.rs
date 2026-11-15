@@ -102,7 +102,7 @@ fn fixture(cfg: &DiamondConfig) -> Fixture {
 
 #[test]
 fn train_forward_matches_inference_graph() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let cfg = tiny_cfg();
@@ -130,7 +130,7 @@ fn train_forward_matches_inference_graph() {
 
 #[test]
 fn train_gradcheck_finite_differences() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let cfg = tiny_cfg();
@@ -172,7 +172,7 @@ fn train_gradcheck_finite_differences() {
 
 #[test]
 fn train_tiny_overfit_reduces_loss() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let cfg = tiny_cfg();
@@ -200,7 +200,7 @@ fn train_tiny_overfit_reduces_loss() {
 /// reading state that persists across steps (the t=166 NaN divergence).
 #[test]
 fn train_backward_is_repeatable() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let cfg = tiny_cfg();
@@ -294,14 +294,14 @@ fn gradcheck_cfg(cfg: DiamondConfig, seed: u64, names: &[&str]) {
 
 #[test]
 fn train_gradcheck_multihead() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() { return; }
+    if brain_testutil::gpu_tests_skipped() { return; }
     gradcheck_cfg(h2_cfg(), 41, &["unet.d_blocks.0.resblocks.0.conv1.weight", "unet.mid_blocks.resblocks.0.attn.qkv_proj.weight",
         "unet.mid_blocks.resblocks.0.attn.out_proj.weight", "conv_out.weight"]);
 }
 
 #[test]
 fn train_gradcheck_multigroup() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() { return; }
+    if brain_testutil::gpu_tests_skipped() { return; }
     gradcheck_cfg(g2_cfg(), 43, &["unet.d_blocks.0.resblocks.0.conv1.weight",
         "unet.mid_blocks.resblocks.0.attn.qkv_proj.weight", "conv_in.weight"]);
 }
@@ -314,7 +314,7 @@ fn depth2_cfg() -> DiamondConfig {
 
 #[test]
 fn train_forward_matches_inference_depth2() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() { return; }
+    if brain_testutil::gpu_tests_skipped() { return; }
     let cfg = depth2_cfg();
     let tensors = random_tensors(&cfg, 5);
     let tr = DiamondTrainer::from_tensors(cfg.clone(), &tensors, Some("cpu"));
@@ -358,7 +358,7 @@ fn attn_cfg() -> DiamondConfig {
 
 #[test]
 fn train_forward_matches_inference_with_attention_and_changing_widths() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() { return; }
+    if brain_testutil::gpu_tests_skipped() { return; }
     let cfg = attn_cfg();
     let tensors = random_tensors(&cfg, 5);
     let tr = DiamondTrainer::from_tensors(cfg.clone(), &tensors, Some("cpu"));

@@ -77,7 +77,7 @@ const MODEL_RS: &str = "src/model.rs";
 const SERVE_RS: &str = "src/serve.rs";
 
 fn read(path: &str) -> String {
-    let full = format!("{}/{path}", env!("CARGO_MANIFEST_DIR"));
+    let full = brain_testutil::crate_path(path);
     fs::read_to_string(&full).unwrap_or_else(|e| panic!("no_kernel_names: cannot read {full}: {e}"))
 }
 
@@ -85,7 +85,7 @@ fn read(path: &str) -> String {
 /// crate has no submodule directories), for the crate-wide instance-
 /// inspection ban (check 1).
 fn all_src_files() -> Vec<(String, String)> {
-    let dir = format!("{}/src", env!("CARGO_MANIFEST_DIR"));
+    let dir = brain_testutil::crate_path("src");
     let mut out = Vec::new();
     for entry in fs::read_dir(&dir).unwrap_or_else(|e| panic!("no_kernel_names: cannot list {dir}: {e}")) {
         let entry = entry.unwrap();

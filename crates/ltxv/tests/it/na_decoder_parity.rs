@@ -63,7 +63,7 @@ fn weights_path() -> Option<String> {
     if let Some(p) = brain_testutil::model_dir("Lightricks/LTX-2.5").map(|d| format!("{d}/ltx-2.5-video-vae-bf16.safetensors")).filter(|p| Path::new(p).exists()) {
         return Some(p);
     }
-    let p = concat!(env!("CARGO_MANIFEST_DIR"), "/../../resources/ltxv/weights/vae/ltx-2.5-video-vae-bf16.safetensors");
+    let p = &brain_testutil::repo_path("resources/ltxv/weights/vae/ltx-2.5-video-vae-bf16.safetensors");
     Path::new(p).exists().then(|| p.to_string())
 }
 
@@ -74,7 +74,7 @@ fn conv_weights_path() -> Option<String> {
     if let Some(p) = brain_testutil::model_dir("Lightricks/LTX-2.5").map(|d| format!("{d}/ltx-2.5-video-vae-conv-bf16.safetensors")).filter(|p| Path::new(p).exists()) {
         return Some(p);
     }
-    let p = concat!(env!("CARGO_MANIFEST_DIR"), "/../../resources/ltxv/weights/vae/ltx-2.5-video-vae-conv-bf16.safetensors");
+    let p = &brain_testutil::repo_path("resources/ltxv/weights/vae/ltx-2.5-video-vae-conv-bf16.safetensors");
     Path::new(p).exists().then(|| p.to_string())
 }
 

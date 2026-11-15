@@ -53,7 +53,7 @@ fn run(naive: bool, reps: usize) -> (f64, Vec<f32>) {
 #[test]
 #[ignore]
 fn train_step_speed() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() { return; }
+    if brain_testutil::gpu_tests_skipped() { return; }
     let reps = 15;
     let (naive_ms, gn) = run(true, reps);
     let (reg_ms, gr) = run(false, reps);

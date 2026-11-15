@@ -74,7 +74,7 @@ fn make_attn(dim: usize, inner: usize, hd: usize) -> AttnWeights {
 }
 
 fn run_attn(causal: bool) {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() { return; }
+    if brain_testutil::gpu_tests_skipped() { return; }
     let (b, n, dim, heads, hd) = (2usize, 4usize, 16usize, 2usize, 8usize);
     let inner = heads*hd;
     let gpu = Gpu::new_cpu(&kernel_sources());
@@ -92,7 +92,7 @@ fn run_attn(causal: bool) {
 
 #[test]
 fn genie_geglu() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() { return; }
+    if brain_testutil::gpu_tests_skipped() { return; }
     let (rows, dim, inner) = (6usize, 16usize, 32usize);
     let gpu = Gpu::new_cpu(&kernel_sources());
     let x = rand(1, rows*dim);

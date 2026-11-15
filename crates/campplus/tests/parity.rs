@@ -42,7 +42,7 @@ fn weights_dir() -> Option<PathBuf> {
         let pb = PathBuf::from(p);
         return pb.join(RELEASE_FILE).is_file().then_some(pb);
     }
-    let p = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../resources/cosyvoice/weights"));
+    let p = PathBuf::from(brain_testutil::repo_path("resources/cosyvoice/weights"));
     p.join(RELEASE_FILE).is_file().then_some(p)
 }
 

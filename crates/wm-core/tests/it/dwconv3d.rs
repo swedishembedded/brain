@@ -63,7 +63,7 @@ fn host_fwd(x: &[f32], wt: &[f32], bias: &[f32]) -> Vec<f32> {
 
 #[test]
 fn dwconv3d_forward_matches_host_reference() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let gpu = Gpu::new_cpu(&K);
@@ -84,7 +84,7 @@ fn dwconv3d_forward_matches_host_reference() {
 
 #[test]
 fn dwconv3d_backward_finite_differences() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let gpu = Gpu::new_cpu(&K);

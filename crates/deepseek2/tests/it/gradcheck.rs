@@ -182,7 +182,7 @@ fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
 /// - `routed_scaling` must move both, at either shape.
 #[test]
 fn router_policy_flags_are_live() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let (sparse_raw, g_raw) = loss_and_expert_grad(cfg_of(5, 2, false, 1.0));
@@ -244,7 +244,7 @@ fn router_policy_flags_are_live() {
 /// gated here too.
 #[test]
 fn grads_match_finite_differences_smooth() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let report = directional_check(&harness(7, cfg_of(4, 4, false, 1.0)), 5e-3, 4, 7 ^ 0x1234);
@@ -286,7 +286,7 @@ fn grads_match_finite_differences_smooth() {
 /// inventing a different rule.
 #[test]
 fn grads_match_finite_differences_lora() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let cfg = DeepseekV2Config { lora: Some(deepseek2::config::lora_cfg(2, 4.0)), ..cfg_of(4, 4, false, 1.0) };
@@ -312,7 +312,7 @@ fn grads_match_finite_differences_lora() {
 /// absorb.
 #[test]
 fn grads_match_finite_differences_smooth_with_routed_scaling() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let report = directional_check(&harness(7, cfg_of(4, 4, false, 2.5)), 5e-3, 4, 7 ^ 0x1234);
@@ -331,7 +331,7 @@ fn grads_match_finite_differences_smooth_with_routed_scaling() {
 /// most experts here.
 #[test]
 fn grads_match_finite_differences_sparse_raw_router() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let full = directional_check(&harness(7, cfg_of(5, 2, false, 1.0)), 5e-3, 4, 7 ^ 0x1234);
@@ -349,7 +349,7 @@ fn grads_match_finite_differences_sparse_raw_router() {
 /// one above are not the same computation.
 #[test]
 fn grads_match_finite_differences_sparse_renormalised_router() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let full = directional_check(&harness(7, cfg_of(5, 2, true, 1.0)), 5e-3, 4, 7 ^ 0x1234);
@@ -365,7 +365,7 @@ fn grads_match_finite_differences_sparse_renormalised_router() {
 /// away.
 #[test]
 fn forward_is_finite_and_deterministic() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let m = harness(11, cfg_of(5, 2, false, 1.0));
@@ -385,7 +385,7 @@ fn forward_is_finite_and_deterministic() {
 /// the previous call.
 #[test]
 fn logits_all_is_stable_across_lengths() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let cfg = DeepseekV2Config::tiny();

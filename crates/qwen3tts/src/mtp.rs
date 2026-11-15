@@ -1622,7 +1622,7 @@ mod tests {
     use super::*;
 
     fn gpu_disabled() -> bool {
-        std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+        brain_testutil::gpu_tests_skipped()
     }
 
     /// Every forward-slot const in this module indexes BOTH tables, and the

@@ -50,13 +50,11 @@ use residency::budget::Budgets;
 use residency::{Device, Executor, InstanceKey, MultiDeviceResidentModel, Policy, ResidentModel};
 use std::sync::Arc;
 
-#[path = "../common/int8_thinker_fixture.rs"]
-mod fixture;
+use crate::fixture;
 use fixture::{caps_for_split, tiny_cfg, write_synthetic_checkpoint};
 
 fn skip() -> bool {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
-        brain_testutil::skip_unavailable("MOE_SKIP_GPU_TESTS set");
+    if brain_testutil::gpu_tests_skipped() {
         return true;
     }
     if gpu_core::testgpu::cards().len() < 2 {

@@ -140,7 +140,7 @@ fn h_stblock(x: &[f32], w: &StBlockWeights, b: usize, t: usize, h: usize, wd: us
 }
 
 fn run_stblock(temporal_first: bool) {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() { return; }
+    if brain_testutil::gpu_tests_skipped() { return; }
     let (b, t, h, w, dim, heads, hd) = (2usize, 3usize, 2usize, 2usize, 16usize, 2usize, 8usize);
     let inner = heads*hd;
     let ffi = ff_inner(dim as u32) as usize;

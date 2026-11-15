@@ -6,7 +6,7 @@
 //! with `tower::ServiceExt::oneshot` against `apiserve::router(state)` — no socket,
 //! no GPU. `Executor::start(...).manifests()` works CPU-only.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -304,7 +304,7 @@ const ALL: [Provider; 3] = [Provider::OpenAI, Provider::Anthropic, Provider::Ope
 // ------------------------------------------------------------- jsonschema help
 
 fn spec(file: &str) -> Value {
-    let p: PathBuf = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/specs").join(file);
+    let p: PathBuf = std::path::PathBuf::from(brain_testutil::crate_path("")).join("tests/specs").join(file);
     let mut root: Value = serde_json::from_slice(&std::fs::read(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()))).unwrap();
     sanitize(&mut root);
     root

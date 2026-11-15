@@ -36,8 +36,7 @@ use residency::manager::ClaimedMulti;
 use residency::{Device, Instance, InstanceKey, MultiDeviceResidentModel, ResidencyManager};
 use std::sync::Arc;
 
-#[path = "../common/int8_thinker_fixture.rs"]
-mod fixture;
+use crate::fixture;
 use fixture::{caps_for_split, tiny_cfg, write_synthetic_checkpoint};
 
 #[test]

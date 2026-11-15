@@ -278,7 +278,7 @@ mod tests {
     /// for this to actually test "LoRA-only".
     #[test]
     fn lora_only_training_reduces_loss() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         use data::rng::Rng;

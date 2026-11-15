@@ -33,10 +33,7 @@ fn weights_path() -> Option<PathBuf> {
         let pb = PathBuf::from(p);
         return pb.is_file().then_some(pb);
     }
-    let p = PathBuf::from(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../resources/supir/supir_v0q/SUPIR/SUPIR-v0Q_fp32.safetensors"
-    ));
+    let p = PathBuf::from(brain_testutil::repo_path("resources/supir/supir_v0q/SUPIR/SUPIR-v0Q_fp32.safetensors"));
     p.is_file().then_some(p)
 }
 

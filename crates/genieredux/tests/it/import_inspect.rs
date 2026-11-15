@@ -7,10 +7,7 @@
 #![allow(clippy::print_stderr)]
 #![allow(non_snake_case)] // uppercase test-path locals (AGENTS.md: no absolute paths)
 
-#[allow(dead_code)]
-fn repo_path(rel: &str) -> String {
-    format!("{}/../../{rel}", env!("CARGO_MANIFEST_DIR"))
-}
+use brain_testutil::repo_path;
 
 
 #[test]

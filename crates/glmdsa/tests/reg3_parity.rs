@@ -47,7 +47,7 @@ fn rel(a: &[f32], b: &[f32]) -> (f32, f32) {
 
 #[test]
 fn glm_reg3_matches_naive_and_cpu() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let Some(gpu) = gpu_core::available_gpu_backends().first().copied() else {

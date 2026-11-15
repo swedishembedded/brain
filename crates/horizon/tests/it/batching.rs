@@ -76,7 +76,7 @@ fn assert_same(a: &Value, b: &Value, what: &str) {
 
 #[test]
 fn batched_requests_equal_each_request_alone_and_fail_alone() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let (subjects, _) = population(60, 4);
@@ -117,7 +117,7 @@ fn batched_requests_equal_each_request_alone_and_fail_alone() {
 
 #[test]
 fn a_subjects_prediction_ignores_its_neighbours_and_padding() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let (subjects, _) = population(40, 5);

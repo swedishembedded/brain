@@ -27,7 +27,7 @@ use timesfm3::config::Timesfm3Config;
 use timesfm3::train::{init_weights, fixed_input, LoraCfg, Timesfm3Train, LORA_TARGETS, TRAIN_PIPELINES};
 
 fn skip() -> bool {
-    std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+    brain_testutil::gpu_tests_skipped()
 }
 
 const B: usize = 1;

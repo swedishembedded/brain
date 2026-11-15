@@ -63,7 +63,7 @@ fn glm_onnx_graph_is_well_formed() {
 /// MOE_SKIP_GPU_TESTS (brain's reference forward needs a backend).
 #[test]
 fn glm_onnx_matches_brain_forward() {
-    if std::env::var("BRAIN_OV_PROBE").is_err() || std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if std::env::var("BRAIN_OV_PROBE").is_err() || brain_testutil::gpu_tests_skipped() {
         return;
     }
     use glmdsa::model::Glm;
@@ -113,7 +113,7 @@ fn glm_onnx_matches_brain_forward() {
 /// Gated on BRAIN_OV_PROBE + a working backend.
 #[test]
 fn glm_onnx_runs_on_npu() {
-    if std::env::var("BRAIN_OV_PROBE").is_err() || std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if std::env::var("BRAIN_OV_PROBE").is_err() || brain_testutil::gpu_tests_skipped() {
         return;
     }
     use glmdsa::model::Glm;
@@ -167,7 +167,7 @@ fn glm_onnx_runs_on_npu() {
 /// parity). Validates the in-graph DequantizeLinear path. Gated on BRAIN_OV_PROBE.
 #[test]
 fn glm_onnx_int8_runs() {
-    if std::env::var("BRAIN_OV_PROBE").is_err() || std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if std::env::var("BRAIN_OV_PROBE").is_err() || brain_testutil::gpu_tests_skipped() {
         return;
     }
     use glmdsa::model::Glm;

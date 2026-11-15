@@ -108,7 +108,7 @@ fn gpu_fwd_bwd(r: &Run, ks_idx: usize) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
 }
 
 fn run_case(causal: bool) {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() { return; }
+    if brain_testutil::gpu_tests_skipped() { return; }
     let (b, heads, t, hd) = (2usize, 4usize, 6usize, 8usize);
     let c = heads * hd;
     let scale = 8.0f32; // GenieRedux constant scale, not 1/sqrt(hd)

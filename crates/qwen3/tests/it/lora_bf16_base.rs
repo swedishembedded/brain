@@ -20,7 +20,7 @@ use data::rng::Rng;
 use qwen3::{Dtype, LoraCfg, Qwen, QwenConfig};
 
 fn gpu_disabled() -> bool {
-    std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+    brain_testutil::gpu_tests_skipped()
 }
 
 fn round_bf16(v: f32) -> f32 {

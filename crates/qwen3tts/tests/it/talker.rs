@@ -11,7 +11,7 @@
 use qwen3tts::{TalkerConfig, TalkerModel};
 
 fn gpu_disabled() -> bool {
-    std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+    brain_testutil::gpu_tests_skipped()
 }
 
 #[test]
@@ -98,7 +98,7 @@ fn talker_real_import_and_forward() {
     };
     let dir = paths.ckpt_dir;
     if gpu_disabled() {
-        return brain_testutil::skip_unavailable("MOE_SKIP_GPU_TESTS set");
+        return;
     }
     let out = std::env::temp_dir().join("brain_talker_test.safetensors");
     let out = out.to_str().unwrap();

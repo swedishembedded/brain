@@ -460,10 +460,6 @@ mod loader_tests {
 mod tests {
 
 use brain_testutil::model_dir;
-#[allow(dead_code)]
-fn repo_path(rel: &str) -> String {
-    format!("{}/../../{rel}", env!("CARGO_MANIFEST_DIR"))
-}
     use super::*;
 
     fn cfg() -> MoondreamConfig {

@@ -53,7 +53,7 @@ fn matches_the_real_audio_tower() {
         return;
     };
     let golden_path =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/golden/omni/omni_audio.safetensors");
+        std::path::PathBuf::from(brain_testutil::crate_path("")).join("../../testdata/golden/omni/omni_audio.safetensors");
     if !golden_path.exists() {
         brain_testutil::skip(&format!("{golden_path:?} missing (run `make testdata/fetch`)"));
         return;

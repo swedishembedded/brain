@@ -15,7 +15,7 @@ use bench::Benchmark;
 
 /// Skip the whole test when no accelerator is wanted (same gate as the rest).
 fn skip() -> bool {
-    std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+    brain_testutil::gpu_tests_skipped()
 }
 
 fn tmpdir(tag: &str) -> std::path::PathBuf {

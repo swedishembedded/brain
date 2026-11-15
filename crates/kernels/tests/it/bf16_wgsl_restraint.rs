@@ -17,7 +17,7 @@
 use std::path::PathBuf;
 
 fn wgsl_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("wgsl")
+    std::path::PathBuf::from(brain_testutil::crate_path("")).join("wgsl")
 }
 
 /// No on-disk WGSL kernel source may enable or declare bf16 - checked
@@ -71,7 +71,7 @@ fn no_on_disk_wgsl_kernel_enables_or_declares_bf16() {
 /// is restrained, since that is the one WGSL structurally cannot satisfy.
 #[test]
 fn no_wgsl_backed_requirement_claims_bf16_compute() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+    let root = brain_testutil::repo_root().to_path_buf();
     let mut checked = 0usize;
     for rel in [
         "crates/backend-api/src/select.rs",

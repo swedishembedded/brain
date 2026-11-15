@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use glmdsa::{Glm, GlmConfig};
 
 fn skip() -> bool {
-    std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+    brain_testutil::gpu_tests_skipped()
 }
 
 /// A small config that trains quickly but still exercises MLA + a MoE layer.

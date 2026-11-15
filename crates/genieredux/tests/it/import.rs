@@ -7,10 +7,7 @@
 //!   cargo test -p brain-genieredux --test import -- --ignored --nocapture
 use genieredux::import::import_tokenizer;
 
-#[allow(dead_code)]
-fn repo_path(rel: &str) -> String {
-    format!("{}/../../{rel}", env!("CARGO_MANIFEST_DIR"))
-}
+use brain_testutil::repo_path;
 
 
 #[test]

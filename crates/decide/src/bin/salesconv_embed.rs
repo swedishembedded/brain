@@ -33,10 +33,8 @@ fn main() {
         format!("{home}/.local/share/brain/models/sentence-transformers/all-MiniLM-L6-v2")
     });
     let data = std::env::args().nth(1).unwrap_or_else(|| "testdata/decide/salesconv".into());
-    // Repo-relative, so the default resolves wherever the checkout is.
-    let out = std::env::args()
-        .nth(2)
-        .unwrap_or_else(|| concat!(env!("CARGO_MANIFEST_DIR"), "/../../out/salesconv-embeddings.tsv").into());
+    // Relative to the checkout it runs from, like the dataset default above.
+    let out = std::env::args().nth(2).unwrap_or_else(|| "out/salesconv-embeddings.tsv".into());
     let limit: usize = std::env::args().nth(3).and_then(|s| s.parse().ok()).unwrap_or(4000);
 
     let dir = Path::new(&enc_dir);

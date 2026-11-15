@@ -367,7 +367,7 @@ fn a_tile_past_one_band_is_split_across_bands_cpu() {
 /// independently, so the same check has to run on the device.
 #[test]
 fn a_frame_past_the_record_ceiling_is_differentiated_in_bands_gpu() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let g = gpu_core::testgpu::dev(splat::PIPELINES);

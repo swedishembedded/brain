@@ -16,7 +16,7 @@ fn rand(seed: u64, n: usize) -> Vec<f32> {
 
 #[test]
 fn gn_stats_serial_vs_parallel_agree_multigroup() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() { return; }
+    if brain_testutil::gpu_tests_skipped() { return; }
     let (n, c, h, w, g, gp) = (1u32, 64u32, 8u32, 8u32, 2u32, 64u32);
     let gpu = Gpu::new_cpu(&[
         ("gn_stats", kernels::GN_STATS),
@@ -44,7 +44,7 @@ fn gn_stats_serial_vs_parallel_agree_multigroup() {
 /// FD-checked at C=64,G=2 — the trainer's exact sequence and shape.
 #[test]
 fn gn_multigroup_backward_fd() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() { return; }
+    if brain_testutil::gpu_tests_skipped() { return; }
     let (n, c, h, w, g, gp) = (1u32, 64u32, 8u32, 8u32, 2u32, 64u32);
     let ne = (n*c*h*w) as usize;
     let gpu = Gpu::new_cpu(&[

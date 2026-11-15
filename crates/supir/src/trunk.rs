@@ -103,7 +103,7 @@ mod tests {
     /// needed.
     #[test]
     fn tiny_trunk_forward_is_finite_and_the_right_shapes() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let cfg = UNetConfig::tiny();

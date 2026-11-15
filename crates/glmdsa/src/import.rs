@@ -416,7 +416,7 @@ pub(crate) mod tests {
     /// nothing is written beside the download.
     #[test]
     fn the_downloaded_directory_serves_as_its_import_does() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let dir = build_tiny_hf_dir("served");

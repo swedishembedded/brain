@@ -42,7 +42,7 @@ fn run(naive: bool, reps: usize) -> (f64, Vec<f32>) {
 #[test]
 #[ignore]
 fn qwen_train_step() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() { return; }
+    if brain_testutil::gpu_tests_skipped() { return; }
     let reps = 12;
     let (nm, gn) = run(true, reps);
     let (rm, gr) = run(false, reps);

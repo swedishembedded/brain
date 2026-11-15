@@ -11,11 +11,11 @@
 //! conv2d_dw compute.
 
 const CONV2D: &str =
-    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../kernels/wgsl/conv2d.wgsl"));
+    kernels::CONV2D;
 const CONV2D_DX: &str =
-    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../kernels/wgsl/conv2d_dx.wgsl"));
+    kernels::CONV2D_DX;
 const CONV2D_DW: &str =
-    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../kernels/wgsl/conv2d_dw.wgsl"));
+    kernels::CONV2D_DW;
 
 #[derive(Clone, Copy)]
 struct Cfg {

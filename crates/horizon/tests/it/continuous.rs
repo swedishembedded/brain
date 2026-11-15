@@ -100,7 +100,7 @@ fn error(saved: &Saved, subjects: &[Subject], best: &[Posterior]) -> f64 {
 
 #[test]
 fn the_state_across_visits_extrapolates_over_long_gaps() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let (train_s, _) = drifting::population(12_000, 1, &TRAIN_GAPS, 10.0);

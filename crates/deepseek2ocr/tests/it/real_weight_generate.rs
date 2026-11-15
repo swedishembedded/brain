@@ -46,8 +46,7 @@ use deepseek2ocr::model::DeepseekOcr;
 
 /// The model-store lookup, the CPU-backend pin and the one-pass mmproj import -
 /// shared with this crate's other real-weight binaries.
-#[path = "../common/real_vision.rs"]
-mod real_vision;
+use crate::real_vision;
 
 use real_vision::{encoder_weights, pin_cpu_backend, store_dir, EXPANDED};
 

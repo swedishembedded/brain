@@ -70,7 +70,7 @@ fn sdxl_ldm_weights_path() -> Option<std::path::PathBuf> {
         let pb = std::path::PathBuf::from(p);
         return pb.is_file().then_some(pb);
     }
-    let p = std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../resources/supir/sdxl_base/sd_xl_base_1.0_0.9vae.safetensors"));
+    let p = std::path::PathBuf::from(brain_testutil::repo_path("resources/supir/sdxl_base/sd_xl_base_1.0_0.9vae.safetensors"));
     p.is_file().then_some(p)
 }
 

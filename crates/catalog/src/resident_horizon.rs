@@ -158,7 +158,7 @@ mod tests {
     /// a request that cannot be answered fails alone.
     #[test]
     fn run_batch_answers_each_request_as_run_does() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let (subjects, _) = population(30, 9);

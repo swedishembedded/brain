@@ -393,7 +393,7 @@ mod tests {
     use super::*;
 
     fn skip() -> bool {
-        std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+        brain_testutil::gpu_tests_skipped()
     }
 
     #[test]

@@ -17,8 +17,7 @@ use backend_wgpu::WgpuBackend;
 /// A device compiled with `kernels`, or `None` after naming the skip when this
 /// machine has no wgpu adapter or `MOE_SKIP_GPU_TESTS` is set.
 pub fn backend(kernels: &[(&str, &str)]) -> Option<WgpuBackend> {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
-        brain_testutil::skip_unavailable("MOE_SKIP_GPU_TESTS is set");
+    if brain_testutil::gpu_tests_skipped() {
         return None;
     }
     if !backend_wgpu::adapter_available() {

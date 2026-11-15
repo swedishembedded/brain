@@ -56,7 +56,7 @@ mod tests {
 
     #[test]
     fn save_and_fold_round_trips_a_trained_adapter() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let mut cfg = Qwen35Config::tiny();

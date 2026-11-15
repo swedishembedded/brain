@@ -40,7 +40,7 @@ use data::binio::{self, Meta};
 use qwen3::{Qwen, QwenConfig};
 
 fn skip() -> bool {
-    std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+    brain_testutil::gpu_tests_skipped()
 }
 
 fn tmp(name: &str) -> PathBuf {
@@ -160,7 +160,6 @@ fn train_adapter(base_path: &str, target: u32, out_dir: &Path, adapter_out: &Pat
 #[test]
 fn lora_adapters_trained_on_different_targets_diverge_and_match_their_own_data_after_a_reload() {
     if skip() {
-        brain_testutil::skip_unavailable("MOE_SKIP_GPU_TESTS set");
         return;
     }
     assert_ne!(TARGET_A, TARGET_B);

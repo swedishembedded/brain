@@ -41,8 +41,7 @@ use deepseek2ocr::config::DeepseekOcrConfig;
 use deepseek2ocr::model::DeepseekOcr;
 use deepseek2ocr::prompt::{build_prompt, tokenizer_from_gguf};
 
-#[path = "../common/real_vision.rs"]
-mod real_vision;
+use crate::real_vision;
 
 use real_vision::{encoder_weights, mem_available_gib, pin_cpu_backend, store_dir, DECODER_GIB, EXPANDED};
 

@@ -28,8 +28,7 @@ use brain::{Environment, Improve, ImproveOptions, Reward, Step, Task, Verifier};
 use qwen3::config::QwenConfig;
 
 fn skip() -> bool {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
-        brain_testutil::skip_unavailable("MOE_SKIP_GPU_TESTS is set: an improve cycle needs a real training/decode backend");
+    if brain_testutil::gpu_tests_skipped() {
         return true;
     }
     false

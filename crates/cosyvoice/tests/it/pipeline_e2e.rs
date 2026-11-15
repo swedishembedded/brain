@@ -48,7 +48,7 @@ const COS_FLOOR: f64 = 0.9999;
 const REL_CEIL: f64 = 1e-3;
 
 fn repo_dir(rel: &str) -> PathBuf {
-    PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")).join(rel)
+    PathBuf::from(brain_testutil::repo_path("crates/..")).join(rel)
 }
 
 /// `env_var`, else the repo-relative `resources/cosyvoice/weights` -

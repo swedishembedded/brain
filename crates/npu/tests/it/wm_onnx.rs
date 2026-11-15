@@ -176,7 +176,7 @@ fn wm_onnx_graph_is_well_formed() {
 /// glm_onnx_matches_brain_forward.
 #[test]
 fn wm_onnx_matches_brain_forward() {
-    if std::env::var("BRAIN_OV_PROBE").is_err() || std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if std::env::var("BRAIN_OV_PROBE").is_err() || brain_testutil::gpu_tests_skipped() {
         return;
     }
     use npu::openvino::{NpuConfig, NpuDevice};
@@ -227,7 +227,7 @@ fn wm_onnx_matches_brain_forward() {
 /// vs brain. Reports the device it landed on. Gated like the CPU parity test.
 #[test]
 fn wm_onnx_runs_on_npu() {
-    if std::env::var("BRAIN_OV_PROBE").is_err() || std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if std::env::var("BRAIN_OV_PROBE").is_err() || brain_testutil::gpu_tests_skipped() {
         return;
     }
     use npu::openvino::{NpuConfig, NpuDevice};

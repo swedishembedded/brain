@@ -8,7 +8,7 @@ use gpu_core::Gpu;
 
 #[test]
 fn gelu_erf_matches_torch_values() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() { return; }
+    if brain_testutil::gpu_tests_skipped() { return; }
     let gpu = Gpu::new_cpu(&[("gelu_erf", kernels::GELU_ERF)]);
     // x, F.gelu(x) from torch (exact erf).
     let cases: [(f32, f32); 9] = [

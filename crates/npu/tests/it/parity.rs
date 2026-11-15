@@ -10,7 +10,7 @@
 use yolov8::{Yolo, YoloConfig};
 
 fn skip() -> bool {
-    std::env::var("MOE_SKIP_GPU_TESTS").map(|v| !v.is_empty()).unwrap_or(false)
+    brain_testutil::gpu_tests_skipped()
 }
 
 fn tmp(name: &str) -> String {
@@ -85,7 +85,7 @@ fn onnxruntime_first_output(bytes: &[u8], chw: &[f32], side: usize, name: &str) 
     let input = tmp(&format!("{name}.bin"));
     std::fs::write(&model, bytes).expect("write model");
     std::fs::write(&input, chw.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<u8>>()).expect("write input");
-    let script = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tools/goldens/onnx_eval.py");
+    let script = &brain_testutil::repo_path("tools/goldens/onnx_eval.py");
     let out = std::process::Command::new("python3").arg(script).arg(&model).arg(&input).args(["--shape", &format!("1,3,{side},{side}")]).output();
     std::fs::remove_file(&model).ok();
     std::fs::remove_file(&input).ok();

@@ -271,7 +271,7 @@ fn info_lists_every_tensor_with_its_own_dtype_and_marks_adapter_tensors() {
 // -------------------------------------------------- flops/models sharing --
 
 fn skip_gpu() -> bool {
-    std::env::var("MOE_SKIP_GPU_TESTS").map(|v| v != "0").unwrap_or(false)
+    brain_testutil::gpu_tests_skipped()
 }
 
 /// A FULLY real, loadable qwen3 checkpoint - every tensor `Qwen::new_shard`

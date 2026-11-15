@@ -209,7 +209,7 @@ mod tests {
     /// this one just returns rather than calling `skip()`).
     #[test]
     fn import_hift_pt_from_the_real_checkpoint_covers_every_tensor() {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../resources/cosyvoice/weights/hift.pt");
+        let path = &brain_testutil::repo_path("resources/cosyvoice/weights/hift.pt");
         if !std::path::Path::new(path).is_file() {
             return;
         }

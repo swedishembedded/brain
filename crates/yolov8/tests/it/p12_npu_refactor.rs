@@ -19,7 +19,7 @@ use yolov8::net::ActTap;
 use yolov8::{YoloConfig, Yolo};
 
 fn skip() -> bool {
-    std::env::var("MOE_SKIP_GPU_TESTS").map(|v| !v.is_empty()).unwrap_or(false)
+    brain_testutil::gpu_tests_skipped()
 }
 
 /// Deterministic pseudo-random fill in [0,1).

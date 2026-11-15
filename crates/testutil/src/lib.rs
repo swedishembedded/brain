@@ -4,14 +4,12 @@
 //! The one implementation of brain's testdata fixture path helper.
 //!
 //! Every crate with a parity/goldens test resolves its fixtures the same way:
-//! `$BRAIN_TESTDATA` if set, else `<repo>/testdata` - computed from **this**
-//! crate's own `CARGO_MANIFEST_DIR`, not the caller's. That is safe (not a bug)
-//! specifically because every crate in the workspace lives at the same depth,
-//! `<repo>/crates/<name>/`, so `<this-crate>/../../testdata` and
-//! `<caller-crate>/../../testdata` are the identical path. Before this crate
-//! existed, that four-line function was copy-pasted, byte-for-byte, into 36
-//! separate files - the "one implementation" invariant in `AGENTS.md` exists
-//! precisely because of drift risk like that.
+//! `$BRAIN_TESTDATA` if set, else `<repo>/testdata`, where `<repo>` is the
+//! checkout found from the working directory cargo runs every test in
+//! ([`repo_root`]), so no crate needs to know its own depth in the tree and no
+//! build path is compiled in. A path under the checkout is [`repo_path`], one
+//! under the package under test [`crate_path`]: one implementation each,
+//! instead of a copy in every test file.
 //!
 //! See `AGENTS.md`'s "No absolute paths in source" section and
 //! `scripts/data/fetch-testdata.sh` for how the tree gets populated. A test whose
@@ -194,7 +192,7 @@ pub fn capability_ledger_path() -> std::path::PathBuf {
         .filter(|s| !s.is_empty())
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| {
-            std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../out/capability-ledger.tsv"))
+            repo_root().join("out/capability-ledger.tsv")
         })
 }
 
@@ -213,6 +211,33 @@ fn append_capability_ledger(cap: &str, reason: &str, location: &str) {
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
         let _ = f.write_all(row.as_bytes());
     }
+}
+
+/// The root of the brain checkout: the nearest directory, from the working
+/// directory up, whose `Cargo.toml` declares the `[workspace]`. Cargo runs
+/// every test with the working directory at its package's root, which lies
+/// inside the checkout, so nothing is read from the environment. Panics, saying
+/// so, when the process does not run inside a checkout.
+pub fn repo_root() -> &'static std::path::Path {
+    static ROOT: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    ROOT.get_or_init(|| {
+        let cwd = std::env::current_dir().expect("the working directory");
+        cwd.ancestors()
+            .find(|d| std::fs::read_to_string(d.join("Cargo.toml")).is_ok_and(|t| t.lines().any(|l| l.trim() == "[workspace]")))
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| panic!("{} is not inside a brain checkout (no Cargo.toml with [workspace] above it): run the test through cargo from the checkout", cwd.display()))
+    })
+}
+
+/// `rel` under the checkout's root ([`repo_root`]), as a `String`.
+pub fn repo_path(rel: &str) -> String {
+    repo_root().join(rel).to_string_lossy().into_owned()
+}
+
+/// `rel` under the package under test: the working directory cargo gives every
+/// test is its package's root.
+pub fn crate_path(rel: &str) -> String {
+    std::env::current_dir().expect("the working directory").join(rel).to_string_lossy().into_owned()
 }
 
 /// The binary `name` of the package under test, as cargo built it for this
@@ -252,7 +277,7 @@ pub fn testdata(rel: &str) -> String {
     let root = std::env::var("BRAIN_TESTDATA")
         .ok()
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata").to_string());
+        .unwrap_or_else(|| repo_path("testdata"));
     format!("{root}/{rel}")
 }
 
@@ -426,7 +451,7 @@ mod tests {
             out
         };
         let dir = p.parent().unwrap().parent().unwrap().parent().unwrap(); // .../testdata
-        let expect = lexical(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata")));
+        let expect = lexical(&repo_root().join("testdata"));
         assert_eq!(lexical(dir), expect);
     }
 

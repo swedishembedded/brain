@@ -57,8 +57,7 @@ use brain_testutil::parity::compare;
 /// The model-store lookup, the CPU pin, the mmproj import, the synthetic page,
 /// the `MemAvailable` guard and `describe` - shared with the other three
 /// real-weight binaries in this crate.
-#[path = "../common/real_vision.rs"]
-mod real_vision;
+use crate::real_vision;
 
 use real_vision::{mem_available_gib, synthetic_page, DECODER_GIB, SRC_H, SRC_W};
 

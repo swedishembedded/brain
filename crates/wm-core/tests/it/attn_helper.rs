@@ -56,7 +56,7 @@ fn host(qkv: &[f32], bias: &[f32], gq: &[f32], gk: &[f32],
 }
 
 fn run(causal: bool) {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() { return; }
+    if brain_testutil::gpu_tests_skipped() { return; }
     let (b, heads, t, hd) = (2usize, 3usize, 5usize, 8usize);
     let c = heads*hd;
     let scale = 8.0f32;

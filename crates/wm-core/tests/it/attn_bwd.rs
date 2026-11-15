@@ -15,7 +15,7 @@ fn rand(seed: u64, n: usize) -> Vec<f32> {
 
 #[test]
 fn attn_multihead_backward_matches_reference() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() { return; }
+    if brain_testutil::gpu_tests_skipped() { return; }
     let (heads, t, hd) = (8usize, 16usize, 8usize);
     let c = heads * hd;
     let gpu = Gpu::new_cpu(&[

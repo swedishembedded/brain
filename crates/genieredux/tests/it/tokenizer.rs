@@ -11,7 +11,7 @@ use genieredux::{kernel_sources, tokenizer_forward};
 
 #[test]
 fn tokenizer_forward_end_to_end() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() { return; }
+    if brain_testutil::gpu_tests_skipped() { return; }
     let (b, c, f, hh, ww, p) = (1usize, 3usize, 3usize, 8usize, 8usize, 4usize);
     let (dim, heads, hd) = (16usize, 2usize, 8usize);
     let (cd, k) = (8usize, 16usize);

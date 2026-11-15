@@ -21,7 +21,7 @@ use florence2::text::{BartConfig, LoraCfg};
 use florence2::train::{self, Florence2Trainer};
 
 fn skip_gpu() -> bool {
-    std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+    brain_testutil::gpu_tests_skipped()
 }
 
 struct Example {
@@ -49,7 +49,6 @@ fn build(cfg: &BartConfig, t_prompt: u32, max_t: u32, lora: Option<LoraCfg>, ini
 #[test]
 fn full_finetune_overfits_a_single_example() {
     if skip_gpu() {
-        brain_testutil::skip_unavailable("florence2 overfit: MOE_SKIP_GPU_TESTS set");
         return;
     }
     let cfg = BartConfig::tiny();
@@ -85,7 +84,6 @@ fn full_finetune_overfits_a_single_example() {
 #[test]
 fn full_finetune_overfits_a_small_batch() {
     if skip_gpu() {
-        brain_testutil::skip_unavailable("florence2 overfit: MOE_SKIP_GPU_TESTS set");
         return;
     }
     let cfg = BartConfig::tiny();
@@ -129,7 +127,6 @@ fn full_finetune_overfits_a_small_batch() {
 #[test]
 fn lora_makes_large_progress_against_a_real_base() {
     if skip_gpu() {
-        brain_testutil::skip_unavailable("florence2 overfit: MOE_SKIP_GPU_TESTS set");
         return;
     }
     let cfg = BartConfig::tiny();
@@ -187,7 +184,6 @@ fn lora_makes_large_progress_against_a_real_base() {
 #[test]
 fn a_fresh_adapter_is_a_no_op() {
     if skip_gpu() {
-        brain_testutil::skip_unavailable("florence2 overfit: MOE_SKIP_GPU_TESTS set");
         return;
     }
     let cfg = BartConfig::tiny();

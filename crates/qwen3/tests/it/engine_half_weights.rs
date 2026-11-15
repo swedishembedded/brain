@@ -15,7 +15,7 @@ use qwen3::serve::Engine;
 use qwen3::{Dtype, QwenConfig};
 
 fn gpu_disabled() -> bool {
-    std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+    brain_testutil::gpu_tests_skipped()
 }
 
 /// The linears and the head at `dt`; the embedding table and norms, which

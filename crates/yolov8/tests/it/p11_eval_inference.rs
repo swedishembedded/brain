@@ -33,7 +33,7 @@ use yolov8::boxmath::{iou, xywhn_to_xyxy};
 use yolov8::{GtBox, LossMode, Yolo, YoloConfig};
 
 fn skip() -> bool {
-    std::env::var("MOE_SKIP_GPU_TESTS").map(|v| !v.is_empty()).unwrap_or(false)
+    brain_testutil::gpu_tests_skipped()
 }
 
 /// Build GtBoxes for image `img` from a slice of normalized DetectBoxes.

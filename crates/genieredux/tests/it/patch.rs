@@ -48,7 +48,7 @@ fn h_patchify(video: &[f32]) -> Vec<f32> {
 
 #[test]
 fn patch_embed_matches_host() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() { return; }
+    if brain_testutil::gpu_tests_skipped() { return; }
     let (h, w) = (HH/P, WW/P);
     let gpu = Gpu::new_cpu(&kernel_sources());
     let video = rand(1, B*C*T*HH*WW);
@@ -69,7 +69,7 @@ fn patch_embed_matches_host() {
 
 #[test]
 fn to_pixels_matches_host() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() { return; }
+    if brain_testutil::gpu_tests_skipped() { return; }
     let (h, w) = (HH/P, WW/P);
     let gpu = Gpu::new_cpu(&kernel_sources());
     let tokens = rand(1, B*T*h*w*DIM);

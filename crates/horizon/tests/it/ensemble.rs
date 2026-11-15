@@ -22,7 +22,7 @@ use horizon::HorizonConfig;
 use serde_json::{json, Value};
 
 fn skip_gpu() -> bool {
-    std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+    brain_testutil::gpu_tests_skipped()
 }
 
 fn scratch(name: &str) -> std::path::PathBuf {

@@ -19,7 +19,7 @@ use fincast::{Fincast, FincastConfig};
 use std::collections::HashMap;
 
 fn read_golden() -> serde_json::Value {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/golden_meta.json");
+    let path = &brain_testutil::crate_path("tests/golden/golden_meta.json");
     let bytes = std::fs::read(path).expect("read golden_meta.json");
     serde_json::from_slice(&bytes).unwrap()
 }

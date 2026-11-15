@@ -604,7 +604,7 @@ mod tests {
     /// exactly as the brain checkpoint imported from it.
     #[test]
     fn a_gguf_decodes_exactly_as_its_import() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let dir = scratch("open-decode");

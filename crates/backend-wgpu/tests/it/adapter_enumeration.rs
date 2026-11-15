@@ -25,8 +25,7 @@ const ROUNDS: usize = 24;
 
 #[test]
 fn repeated_enumeration_keeps_finding_the_same_physical_cards() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
-        brain_testutil::skip_unavailable("MOE_SKIP_GPU_TESTS is set");
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let first = backend_wgpu::enumerate_gpus();

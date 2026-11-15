@@ -10,3 +10,6 @@ name = "brain_arch"
 path = "src/lib.rs"
 
 [dependencies]
+
+[dev-dependencies]
+brain-testutil.workspace = true

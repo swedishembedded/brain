@@ -392,7 +392,7 @@ mod tests {
     /// upstream nested schema is read correctly and not just assumed.
     #[test]
     fn from_hf_config_json_matches_the_real_checkpoints_config() {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/hf_config.json");
+        let path = &brain_testutil::crate_path("tests/golden/hf_config.json");
         let v: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
         let c = Timesfm3Config::from_hf_config_json(&v).unwrap();
         assert_eq!(c, Timesfm3Config::default());

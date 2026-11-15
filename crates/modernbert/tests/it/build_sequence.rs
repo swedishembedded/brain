@@ -33,7 +33,7 @@ fn fixture_dir() -> std::path::PathBuf {
     if let Ok(d) = std::env::var("MODERNBERT_SEQ_FIXTURE_DIR") {
         return std::path::PathBuf::from(d);
     }
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/laya_seq")
+    std::path::PathBuf::from(brain_testutil::crate_path("")).join("tests/fixtures/laya_seq")
 }
 
 /// Reconstruct an [`OrderedJson`] from the fixture's `{"__obj__": [[k,v],...]}`

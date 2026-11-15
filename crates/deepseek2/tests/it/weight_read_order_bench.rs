@@ -39,8 +39,7 @@ use checkpoint::weightio::WeightReader;
 use checkpoint::TensorSource;
 use deepseek2::DeepseekV2Config;
 
-#[path = "../common/real_lm.rs"]
-mod real_lm;
+use crate::real_lm;
 
 /// Touch every word of every named tensor (construction or file order),
 /// without allocating a destination buffer -- isolates the SOURCE read cost

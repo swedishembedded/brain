@@ -148,7 +148,7 @@ mod real_weights {
         if let Some(p) = brain_testutil::model_dir("Lightricks/LTX-2.5").map(|d| format!("{d}/{name}")).filter(|p| Path::new(p).exists()) {
             return Some(p);
         }
-        let p = format!("{}/../../resources/ltxv/weights/{rel}", env!("CARGO_MANIFEST_DIR"));
+        let p = brain_testutil::repo_path(&format!("resources/ltxv/weights/{rel}"));
         Path::new(&p).exists().then_some(p)
     }
 

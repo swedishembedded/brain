@@ -15,7 +15,7 @@ use data::gen_tts::TtsGenConfig;
 use qwen3tts::{FinetuneOpts, TalkerConfig};
 
 fn skip() -> bool {
-    std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+    brain_testutil::gpu_tests_skipped()
 }
 
 fn tmp(name: &str) -> PathBuf {
@@ -35,7 +35,6 @@ fn gen_cfg() -> TtsGenConfig {
 #[test]
 fn talker_from_scratch_overfits() {
     if skip() {
-        brain_testutil::skip_unavailable("MOE_SKIP_GPU_TESTS set");
         return;
     }
     let dir = tmp("scratch_data");
@@ -68,7 +67,6 @@ fn talker_from_scratch_overfits() {
 #[test]
 fn talker_lora_finetune_decreases_loss() {
     if skip() {
-        brain_testutil::skip_unavailable("MOE_SKIP_GPU_TESTS set");
         return;
     }
     let dir = tmp("lora_data");

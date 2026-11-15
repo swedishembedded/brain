@@ -40,7 +40,7 @@ use yolov8::{GtBox, LossMode, Yolo, YoloConfig};
 /// value (`MOE_SKIP_GPU_TESTS=`) does NOT skip — that is the documented way to
 /// force the overfit to actually train; only a non-empty value skips.
 fn skip() -> bool {
-    std::env::var("MOE_SKIP_GPU_TESTS").map(|v| !v.is_empty()).unwrap_or(false)
+    brain_testutil::gpu_tests_skipped()
 }
 
 fn sigmoid(z: f32) -> f32 {

@@ -30,5 +30,6 @@ pollster.workspace = true
 wgpu = { version = "29", default-features = false, features = ["webgpu", "wgsl"] }
 
 [dev-dependencies]
+brain-testutil.workspace = true
 brain-seed.workspace = true
 brain-capability-mock.workspace = true

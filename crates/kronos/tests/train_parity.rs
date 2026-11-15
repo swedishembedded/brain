@@ -73,8 +73,7 @@ impl Rng {
 }
 
 fn skip_gpu() -> bool {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
-        brain_testutil::skip_unavailable("MOE_SKIP_GPU_TESTS is set");
+    if brain_testutil::gpu_tests_skipped() {
         return true;
     }
     false

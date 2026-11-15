@@ -37,7 +37,7 @@ fn weights_dir() -> Option<std::path::PathBuf> {
         let p = std::path::PathBuf::from(p);
         return (p.join(RELEASE_FILE).exists()).then_some(p);
     }
-    let p = std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../resources/cosyvoice/weights"));
+    let p = std::path::PathBuf::from(brain_testutil::repo_path("resources/cosyvoice/weights"));
     p.join(RELEASE_FILE).exists().then_some(p)
 }
 

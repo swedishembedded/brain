@@ -10,7 +10,7 @@ use gpu_core::Backend;
 
 #[test]
 fn cpu_register_equals_cpu_naive() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() { return; } // uses gpu_core (CPU here), gated like siblings
+    if brain_testutil::gpu_tests_skipped() { return; } // uses gpu_core (CPU here), gated like siblings
     gpu_core::with_backend(Backend::Cpu, || {
         let c = GptConfig { vocab: 512, block_size: 128, n_layers: 2, d_model: 256, n_heads: 4, d_ff: 1024 }.with_ff_default();
         let init = gpt2::init_weights(&c, 7);

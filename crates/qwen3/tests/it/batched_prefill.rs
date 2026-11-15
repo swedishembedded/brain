@@ -21,8 +21,7 @@ use qwen3::model::PrefillInput;
 use qwen3::{Dtype, LoraCfg, Qwen, QwenConfig, Shard};
 
 fn skip() -> bool {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
-        brain_testutil::skip_unavailable("MOE_SKIP_GPU_TESTS set");
+    if brain_testutil::gpu_tests_skipped() {
         return true;
     }
     false

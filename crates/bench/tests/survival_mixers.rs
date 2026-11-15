@@ -22,7 +22,7 @@ fn seeds() -> Vec<u64> {
 }
 
 fn ablate(data: MixerData) {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     for seed in seeds() {

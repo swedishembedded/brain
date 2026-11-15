@@ -87,7 +87,7 @@ fn inputs(m: &Unet) -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>) {
 
 #[test]
 fn a_zero_contribution_adapter_is_bit_identical_to_none() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let (cfg, w) = cfg_w();
@@ -109,7 +109,7 @@ fn a_zero_contribution_adapter_is_bit_identical_to_none() {
 
 #[test]
 fn an_installed_adapter_reaches_every_site_once_in_order() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let (cfg, w) = cfg_w();

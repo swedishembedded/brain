@@ -181,7 +181,7 @@ mod tests {
     /// on the mechanism, not an overfit gate.
     #[test]
     fn adaptor_only_freezes_the_encoder_and_trains_the_rest() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let (cfg, trainer) = new_trainer(41);
@@ -254,7 +254,7 @@ mod tests {
 
     #[test]
     fn adaptor_only_overfits_a_single_sample() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let (l0, last, tail_max) = overfit_single(false, 101, 120, LR);
@@ -265,7 +265,7 @@ mod tests {
 
     #[test]
     fn full_backbone_overfits_a_single_sample() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let (l0, last, tail_max) = overfit_single(true, 202, 120, LR);
@@ -286,7 +286,7 @@ mod tests {
     /// does not remove them.
     #[test]
     fn adaptor_only_overfits_a_small_dataset() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let (cfg, trainer) = new_trainer(303);

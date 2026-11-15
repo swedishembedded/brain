@@ -780,7 +780,7 @@ mod tests {
     /// own. It is `CodeFormer::new` that needs all 515 — not the recorder.
     #[test]
     fn trainer_forward_matches_inference_graph_bitwise() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         use vae::blocks::{BlockNames, Builder, Tensors};
@@ -826,7 +826,7 @@ mod tests {
     /// over the same logits — the objective, checked separately from the graph.
     #[test]
     fn trainer_forward_matches_inference_graph() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let cfg = tiny_config();

@@ -13,7 +13,7 @@ use horizon::{Horizon, HorizonConfig};
 
 #[test]
 fn each_subjects_nll_equals_scoring_it_alone_and_averages_to_the_total() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let (subjects, _) = population(40, 5);

@@ -28,10 +28,7 @@ const NEVER: &str = "an unarmed cancel token never fires";
 
 #[allow(dead_code)]
 use brain_testutil::testdata;
-#[allow(dead_code)]
-fn repo_path(rel: &str) -> String {
-    format!("{}/../../{rel}", env!("CARGO_MANIFEST_DIR"))
-}
+use brain_testutil::repo_path;
 
 
 fn maxabs(a: &[f32], b: &[f32]) -> f32 {
@@ -50,8 +47,7 @@ fn ready() -> bool {
         let CKPT = testdata("tts/ckpt/Qwen3-TTS-12Hz-0.6B-Base");
         let TALKER = repo_path("out/tts/talker.safetensors");
         let MTP = repo_path("out/tts/mtp.safetensors");
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
-        brain_testutil::skip_unavailable("MOE_SKIP_GPU_TESTS set");
+    if brain_testutil::gpu_tests_skipped() {
         return false;
     }
     for (what, p) in [("talker.safetensors", &TALKER), ("mtp.safetensors", &MTP)] {

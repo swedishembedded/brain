@@ -12,7 +12,7 @@
 use yolov8::{init_weights, Yolo, YoloConfig};
 
 fn skip() -> bool {
-    std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+    brain_testutil::gpu_tests_skipped()
 }
 
 // Deterministic LCG -> (-1,1), matching the other yolo tests.
@@ -29,7 +29,6 @@ fn randvec(seed: u64, n: usize) -> Vec<f32> {
 #[test]
 fn detect_runs_end_to_end_finite() {
     if skip() {
-        brain_testutil::skip_unavailable("detect smoke (MOE_SKIP_GPU_TESTS)");
         return;
     }
     let cfg = YoloConfig::tiny(2);

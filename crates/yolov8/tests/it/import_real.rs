@@ -60,7 +60,7 @@ fn a_real_yolov8n_pt_serves_as_its_conversion_does() {
         brain_testutil::skip("a_real_yolov8n_pt_serves_as_its_conversion_does: set YOLO_RAW_PT to a real yolov8n.pt");
         return;
     };
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let tensors = yolov8::import::import_yolov8n(&path).unwrap();

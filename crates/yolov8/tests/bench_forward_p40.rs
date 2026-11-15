@@ -48,7 +48,7 @@ fn forward_ms(gemm: bool, init: &HashMap<String, Vec<f32>>, reps: usize) -> f64 
 #[test]
 #[ignore]
 fn yolov8n_forward_p40() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let cfg = YoloConfig::yolov8n();

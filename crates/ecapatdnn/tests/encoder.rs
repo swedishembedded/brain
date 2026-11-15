@@ -27,10 +27,6 @@ const COS_FLOOR: f64 = 0.999;
 // still catches a uniformly mis-scaled embedding, which cosine cannot see at
 // any floor.
 const REL_CEIL: f64 = 1e-4;
-#[allow(dead_code)]
-fn repo_path(rel: &str) -> String {
-    format!("{}/../../{rel}", env!("CARGO_MANIFEST_DIR"))
-}
 
 
 fn ckpt_available() -> bool {

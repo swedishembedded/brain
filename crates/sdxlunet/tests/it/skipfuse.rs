@@ -85,7 +85,7 @@ fn n_joins(cfg: &UNetConfig) -> usize {
 
 #[test]
 fn a_noop_skipfuse_is_bit_identical_to_none() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let (cfg, w) = cfg_w();
@@ -107,7 +107,7 @@ fn a_noop_skipfuse_is_bit_identical_to_none() {
 
 #[test]
 fn a_broken_skipfuse_fails_the_identity_check() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let (cfg, w) = cfg_w();

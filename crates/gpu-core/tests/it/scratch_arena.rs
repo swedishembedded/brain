@@ -31,7 +31,7 @@ const KERNELS: [(&str, &str); 1] = [("add2", kernels::ADD2)];
 /// handle on the shared device (`WeakGpu::upgrade` builds a fresh one), so no
 /// serialisation is needed here.
 fn dev() -> Option<Gpu> {
-    (std::env::var("MOE_SKIP_GPU_TESTS").is_err()).then(|| gpu_core::testgpu::dev(&KERNELS))
+    (!brain_testutil::gpu_tests_skipped()).then(|| gpu_core::testgpu::dev(&KERNELS))
 }
 
 /// Within one scope every request is a DIFFERENT allocation. A cursor that

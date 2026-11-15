@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use qwen3::{LoraCfg, Qwen, QwenConfig};
 
 fn skip() -> bool {
-    std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+    brain_testutil::gpu_tests_skipped()
 }
 
 fn tmp(name: &str) -> std::path::PathBuf {
@@ -91,7 +91,6 @@ fn assert_fp32_close(got: &[f32], want: &[f32], what: &str) {
 #[test]
 fn attached_adapter_matches_the_fold_and_detach_restores_the_base_exactly() {
     if skip() {
-        brain_testutil::skip_unavailable("MOE_SKIP_GPU_TESTS set");
         return;
     }
     let (_trained, base, adapter) = trained_adapter("decode");
@@ -122,7 +121,6 @@ fn attached_adapter_matches_the_fold_and_detach_restores_the_base_exactly() {
 #[test]
 fn attached_adapter_applies_in_the_batched_forward() {
     if skip() {
-        brain_testutil::skip_unavailable("MOE_SKIP_GPU_TESTS set");
         return;
     }
     let (_trained, base, adapter) = trained_adapter("batched");
@@ -142,7 +140,6 @@ fn attached_adapter_applies_in_the_batched_forward() {
 #[test]
 fn a_lora_build_decodes_with_its_own_trainable_adapter() {
     if skip() {
-        brain_testutil::skip_unavailable("MOE_SKIP_GPU_TESTS set");
         return;
     }
     let (trained, base, adapter) = trained_adapter("trainable");
@@ -156,7 +153,6 @@ fn a_lora_build_decodes_with_its_own_trainable_adapter() {
 #[test]
 fn attach_refuses_an_adapter_for_another_shape_and_keeps_serving_the_base() {
     if skip() {
-        brain_testutil::skip_unavailable("MOE_SKIP_GPU_TESTS set");
         return;
     }
     let (_trained, _base, adapter) = trained_adapter("refuse");
@@ -187,7 +183,6 @@ fn attach_refuses_an_adapter_for_another_shape_and_keeps_serving_the_base() {
 #[test]
 fn a_training_build_serves_any_adapter_or_none_and_trains_after_detach() {
     if skip() {
-        brain_testutil::skip_unavailable("MOE_SKIP_GPU_TESTS set");
         return;
     }
     let (mut trained, base, adapter) = trained_adapter("shared");

@@ -42,8 +42,7 @@ use deepseekocr2::model::DeepseekOcr2;
 use deepseekocr2::rows::{row_plan, TileGrid};
 use sam1::SamEncoder;
 
-#[path = "../common/real_vision.rs"]
-mod real_vision;
+use crate::real_vision;
 
 use real_vision::{describe, pin_cpu_backend, real_files};
 

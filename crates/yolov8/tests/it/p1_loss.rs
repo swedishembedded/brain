@@ -12,21 +12,21 @@
 use gpu_core::Gpu;
 
 const DFL_DECODE: &str =
-    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../kernels/wgsl/dfl_decode.wgsl"));
+    kernels::DFL_DECODE;
 const DFL_GRAD: &str =
-    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../kernels/wgsl/dfl_grad.wgsl"));
+    kernels::DFL_GRAD;
 const DFL_LOSS: &str =
-    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../kernels/wgsl/dfl_loss.wgsl"));
+    kernels::DFL_LOSS;
 const DFL_LOSS_GRAD: &str =
-    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../kernels/wgsl/dfl_loss_grad.wgsl"));
+    kernels::DFL_LOSS_GRAD;
 const CIOU: &str =
-    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../kernels/wgsl/ciou.wgsl"));
+    kernels::CIOU;
 const CIOU_GRAD: &str =
-    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../kernels/wgsl/ciou_grad.wgsl"));
+    kernels::CIOU_GRAD;
 const BCE: &str =
-    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../kernels/wgsl/bce_logits.wgsl"));
+    kernels::BCE_LOGITS;
 const BCE_GRAD: &str =
-    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../kernels/wgsl/bce_logits_grad.wgsl"));
+    kernels::BCE_LOGITS_GRAD;
 
 const K_DFL_DECODE: usize = 0;
 const K_DFL_GRAD: usize = 1;

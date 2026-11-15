@@ -21,7 +21,7 @@ use deepseek2::model::DeepseekV2;
 use model::{Batch, Pipeline};
 
 fn gpu_disabled() -> bool {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return true;
     }
     if let Err(why) = stage_cards() {

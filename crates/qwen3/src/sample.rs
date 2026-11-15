@@ -451,7 +451,7 @@ mod kv_gen_tests {
     }
 
     fn gpu_disabled() -> bool {
-        std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+        brain_testutil::gpu_tests_skipped()
     }
 
     /// Chunked, cancel-aware prefill must be numerically the single-call

@@ -16,7 +16,7 @@ fn fixture_dir() -> PathBuf {
     if let Ok(d) = std::env::var("WM_FIXTURE_DIR") {
         return PathBuf::from(d);
     }
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/diamond")
+    std::path::PathBuf::from(brain_testutil::crate_path("")).join("tests/fixtures/diamond")
 }
 
 fn read_f32(path: &Path) -> Vec<f32> {
@@ -82,8 +82,7 @@ impl Fixture {
 
 #[test]
 fn parity_tiny_unet_forward_matches_reference() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
-        brain_testutil::skip_unavailable("MOE_SKIP_GPU_TESTS set");
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let Some(fx) = Fixture::load() else { return };
@@ -156,7 +155,7 @@ fn parity_host_cond_path_matches_reference() {
 /// whose output differs from the reference beyond 1e-4.
 #[test]
 fn parity_first_divergent_module_report() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let Some(fx) = Fixture::load() else { return };

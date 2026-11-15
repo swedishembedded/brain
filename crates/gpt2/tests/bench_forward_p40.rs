@@ -77,7 +77,7 @@ fn rel(a: &[f32], b: &[f32]) -> (f32, f32) {
 #[test]
 #[ignore]
 fn bench_forward_p40() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let reps: usize = std::env::var("BRAIN_BENCH_REPS").ok().and_then(|v| v.parse().ok()).unwrap_or(20);

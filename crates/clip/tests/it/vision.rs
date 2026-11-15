@@ -104,13 +104,10 @@ impl Dev {
 /// the CPU Cranelift JIT.
 fn devices() -> Vec<(&'static str, Dev)> {
     let mut v: Vec<(&'static str, Dev)> = Vec::new();
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_err() {
+    // A machine opt-out reports itself (gpu_tests_skipped prints the skip), so the matrix never drops its GPU half in
+    // silence.
+    if !brain_testutil::gpu_tests_skipped() {
         v.push(("default", Dev::Default));
-    } else {
-        // A machine opt-out, not a missing fixture: it stays a skip under
-        // BRAIN_REQUIRE_FIXTURES, but it must not drop half the matrix in
-        // silence.
-        brain_testutil::skip_unavailable("MOE_SKIP_GPU_TESTS set: the default (GPU) device is not exercised");
     }
     v.push(("cpu-jit", Dev::CpuJit));
     v

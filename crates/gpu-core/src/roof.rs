@@ -1104,7 +1104,7 @@ mod tests {
     }
 
     fn skip_gpu() -> bool {
-        std::env::var("MOE_SKIP_GPU_TESTS").map(|v| v != "0").unwrap_or(false)
+        brain_testutil::gpu_tests_skipped()
     }
 
     /// The f16 probe (B11-shaped, `enable f16;` real registers) through the

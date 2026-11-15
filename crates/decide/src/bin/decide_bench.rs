@@ -96,7 +96,8 @@ fn main() {
     // observation costs in this repository's DOOM sample.
     let state_len: usize = args.get(3).and_then(|a| a.parse().ok()).unwrap_or(1);
 
-    let tok_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata/decide/tokenizer/tokenizer.json");
+    // Relative to the checkout it runs from, like the tool's other defaults.
+    let tok_path = "testdata/decide/tokenizer/tokenizer.json";
     let tok = match data::wordpiece::WordPiece::from_file(tok_path) {
         Ok(t) => t,
         Err(e) => {

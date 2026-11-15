@@ -33,8 +33,8 @@ fn calendar_shifts_the_forecast_toward_the_official() {
     let (Ok(tok), Ok(dec)) = (std::env::var("BRAIN_KRONOS_TOKENIZER"), std::env::var("BRAIN_KRONOS_DECODER")) else {
         return brain_testutil::skip("BRAIN_KRONOS_TOKENIZER / BRAIN_KRONOS_DECODER unset; no calendar e2e");
     };
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
-        return brain_testutil::skip_unavailable("MOE_SKIP_GPU_TESTS is set");
+    if brain_testutil::gpu_tests_skipped() {
+        return;
     }
     let Ok(csv) = std::env::var("KRONOS_AAPL_CSV") else {
         return brain_testutil::skip("KRONOS_AAPL_CSV unset; no calendar e2e");

@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use qwen3::{LoraCfg, Qwen, QwenConfig};
 
 fn skip() -> bool {
-    std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+    brain_testutil::gpu_tests_skipped()
 }
 
 fn tmp(name: &str) -> std::path::PathBuf {
@@ -48,7 +48,6 @@ fn trained_model() -> (Qwen, Vec<u32>) {
 #[test]
 fn adapter_file_contains_only_lora_tensors_and_is_far_smaller_than_a_full_checkpoint() {
     if skip() {
-        brain_testutil::skip_unavailable("MOE_SKIP_GPU_TESTS set");
         return;
     }
     let (trained, _x) = trained_model();
@@ -94,7 +93,6 @@ fn adapter_file_contains_only_lora_tensors_and_is_far_smaller_than_a_full_checkp
 #[test]
 fn folding_the_adapter_into_the_base_reproduces_the_live_lora_forward() {
     if skip() {
-        brain_testutil::skip_unavailable("MOE_SKIP_GPU_TESTS set");
         return;
     }
     let (trained, x) = trained_model();
@@ -139,7 +137,6 @@ fn folding_the_adapter_into_the_base_reproduces_the_live_lora_forward() {
 #[test]
 fn an_adapter_survives_a_full_checkpoint_round_trip() {
     if skip() {
-        brain_testutil::skip_unavailable("MOE_SKIP_GPU_TESTS set");
         return;
     }
     let (trained, _x) = trained_model();

@@ -18,7 +18,7 @@ use data::rng::Rng;
 use qwen3::{LoraCfg, Qwen, QwenConfig};
 
 fn skip() -> bool {
-    std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+    brain_testutil::gpu_tests_skipped()
 }
 
 fn tmp(name: &str) -> std::path::PathBuf {
@@ -31,7 +31,6 @@ fn tmp(name: &str) -> std::path::PathBuf {
 #[test]
 fn decode_only_model_from_folded_tensors_matches_the_live_trained_forward() {
     if skip() {
-        brain_testutil::skip_unavailable("MOE_SKIP_GPU_TESTS set");
         return;
     }
 

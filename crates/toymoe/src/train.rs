@@ -1197,7 +1197,7 @@ mod tests {
     /// 1's weights move. This is the "train experts separately" guarantee.
     #[test]
     fn train_scope_freezes_backbone_and_trains_one_expert() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let cfg = Config {

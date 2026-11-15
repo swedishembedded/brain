@@ -65,7 +65,7 @@ fn matches_the_real_code2wav() {
         brain_testutil::skip("index doesn't (yet) have the shard holding code2wav.*");
         return;
     };
-    let golden_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/golden/omni/omni_code2wav.safetensors");
+    let golden_path = std::path::PathBuf::from(brain_testutil::crate_path("")).join("../../testdata/golden/omni/omni_code2wav.safetensors");
     if !golden_path.exists() {
         brain_testutil::skip(&format!("{golden_path:?} missing (run `make testdata/fetch`)"));
         return;

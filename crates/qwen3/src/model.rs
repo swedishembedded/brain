@@ -4630,7 +4630,7 @@ mod tests {
     }
 
     fn gpu_disabled() -> bool {
-        std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+        brain_testutil::gpu_tests_skipped()
     }
 
     /// `b * n_heads * t * t` computed in `u32` before widening overflows at
@@ -5538,7 +5538,7 @@ mod kv_tests {
     use std::collections::HashMap;
 
     fn gpu_disabled() -> bool {
-        std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+        brain_testutil::gpu_tests_skipped()
     }
 
     fn maxabs(a: &[f32], b: &[f32]) -> f32 {
@@ -6021,7 +6021,7 @@ mod rmsnorm_dx_variant_agreement {
     /// a row count that is not a multiple of anything.
     #[test]
     fn the_fused_ce_rows_kernel_matches_the_per_row_pair() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let gpu = gpu_core::testgpu::dev(pipelines());
@@ -6061,7 +6061,7 @@ mod rmsnorm_dx_variant_agreement {
 
     #[test]
     fn the_backward_tape_norms_match_the_host_reference() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         // Every `(rows, dim)` `build_backward_steps` dispatches an RMSNorm
@@ -6097,7 +6097,7 @@ mod rollout_tests {
     use data::rng::Rng;
 
     fn gpu_disabled() -> bool {
-        std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+        brain_testutil::gpu_tests_skipped()
     }
 
     fn tiny_model() -> Qwen {
@@ -6147,7 +6147,7 @@ mod loss_denominator_tests {
 
     #[test]
     fn a_named_denominator_scales_the_loss_and_its_gradient() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let cfg = QwenConfig::tiny();

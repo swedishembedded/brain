@@ -741,7 +741,7 @@ mod tests {
     /// computes.
     #[test]
     fn trainer_forward_matches_inference_graph() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let cfg = tiny_config();

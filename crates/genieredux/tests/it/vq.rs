@@ -24,7 +24,7 @@ const N: usize = 20; const DIM: usize = 16; const CD: usize = 8; const K: usize 
 
 #[test]
 fn vq_quantize_matches_host() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() { return; }
+    if brain_testutil::gpu_tests_skipped() { return; }
     let gpu = Gpu::new_cpu(&kernel_sources());
     let x = rand(1, N*DIM);
     let w = VqWeights {

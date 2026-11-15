@@ -14,11 +14,6 @@
 
 use gpu_core::Gpu;
 
-macro_rules! wgsl {
-    ($f:literal) => {
-        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../kernels/wgsl/", $f))
-    };
-}
 
 // ---------------------------------------------------------------------------
 // Deterministic LCG (no rand crate) — produces values in (-1, 1).
@@ -51,7 +46,7 @@ fn randvec(seed: u64, n: usize) -> Vec<f32> {
 // ===========================================================================
 #[test]
 fn silu_forward() {
-    let gpu = Gpu::new_cpu(&[("silu", wgsl!("silu.wgsl"))]);
+    let gpu = Gpu::new_cpu(&[("silu", kernels::SILU)]);
     let x = randvec(1, 257); // odd, > 64 to exercise the grid mask
     let xb = gpu.storage_init("x", &x);
     let ob = gpu.storage(x.len() as u64);
@@ -73,7 +68,7 @@ fn silu_backward_fd() {
     let x = randvec(2, n);
     let dy = randvec(3, n);
 
-    let gpu = Gpu::new_cpu(&[("silu_bwd", wgsl!("silu_bwd.wgsl"))]);
+    let gpu = Gpu::new_cpu(&[("silu_bwd", kernels::SILU_BWD)]);
     let xb = gpu.storage_init("x", &x);
     let dyb = gpu.storage_init("dy", &dy);
     let dxb = gpu.storage(n as u64);
@@ -137,7 +132,7 @@ fn maxpool2d_forward_and_argmax() {
     // Distinct values so the argmax is unambiguous.
     let x: Vec<f32> = randvec(7, total);
 
-    let gpu = Gpu::new_cpu(&[("maxpool2d", wgsl!("maxpool2d.wgsl"))]);
+    let gpu = Gpu::new_cpu(&[("maxpool2d", kernels::MAXPOOL2D)]);
     let xb = gpu.storage_init("x", &x);
     let yb = gpu.storage(total as u64);
     let amb = gpu.storage(total as u64);
@@ -180,8 +175,8 @@ fn maxpool2d_dx_exact() {
 
     // Run the gather kernel (uses the GPU-produced argmax for self-consistency).
     let gpu = Gpu::new_cpu(&[
-        ("maxpool2d", wgsl!("maxpool2d.wgsl")),
-        ("maxpool2d_dx", wgsl!("maxpool2d_dx.wgsl")),
+        ("maxpool2d", kernels::MAXPOOL2D),
+        ("maxpool2d_dx", kernels::MAXPOOL2D_DX),
     ]);
     let xb = gpu.storage_init("x", &x);
     let yb = gpu.storage(total as u64);
@@ -221,7 +216,7 @@ fn upsample2_forward() {
     let total_out = n * c * oh * ow;
     let x: Vec<f32> = randvec(17, total_in);
 
-    let gpu = Gpu::new_cpu(&[("upsample2", wgsl!("upsample2.wgsl"))]);
+    let gpu = Gpu::new_cpu(&[("upsample2", kernels::UPSAMPLE2)]);
     let xb = gpu.storage_init("x", &x);
     let yb = gpu.storage(total_out as u64);
     let params = [n as u32, c as u32, h as u32, w as u32];
@@ -274,7 +269,7 @@ fn upsample2_dx_exact() {
         }
     }
 
-    let gpu = Gpu::new_cpu(&[("upsample2_dx", wgsl!("upsample2_dx.wgsl"))]);
+    let gpu = Gpu::new_cpu(&[("upsample2_dx", kernels::UPSAMPLE2_DX)]);
     let dyb = gpu.storage_init("dy", &dy);
     let dxb = gpu.storage(total_in as u64);
     let params = [n as u32, c as u32, h as u32, w as u32];
@@ -301,7 +296,7 @@ fn concat2_forward() {
     let a: Vec<f32> = randvec(23, na);
     let b: Vec<f32> = randvec(29, nb);
 
-    let gpu = Gpu::new_cpu(&[("concat2", wgsl!("concat2.wgsl"))]);
+    let gpu = Gpu::new_cpu(&[("concat2", kernels::CONCAT2)]);
     let ab = gpu.storage_init("a", &a);
     let bb = gpu.storage_init("b", &b);
     let yb = gpu.storage(ny as u64);
@@ -339,7 +334,7 @@ fn concat_split_reconstructs() {
     let ny = n * ctot * h * w;
     let dy: Vec<f32> = randvec(31, ny);
 
-    let gpu = Gpu::new_cpu(&[("concat_split", wgsl!("concat_split.wgsl"))]);
+    let gpu = Gpu::new_cpu(&[("concat_split", kernels::CONCAT_SPLIT)]);
     let dyb = gpu.storage_init("dy", &dy);
 
     // Split into `da` (Csrc=Ca, c_off=0).

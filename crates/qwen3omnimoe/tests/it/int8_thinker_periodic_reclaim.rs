@@ -50,8 +50,7 @@ use qwen3omnimoe::config::MoeTextConfig;
 use qwen3omnimoe::int8_thinker_resident::Int8ThinkerResident;
 use residency::{Device, InstanceKey, MultiDeviceResidentModel};
 
-#[path = "../common/int8_thinker_fixture.rs"]
-mod fixture;
+use crate::fixture;
 use fixture::{caps_for_split, tiny_cfg, write_synthetic_checkpoint};
 
 fn total_reclaim_events(instance: &dyn residency::Instance) -> u64 {

@@ -90,7 +90,7 @@ fn shifted(k: usize, n: usize) -> (Vec<Subject>, Vec<Truth>) {
 
 #[test]
 fn a_saved_ensemble_predicts_what_it_did_and_its_spread_rises_with_the_shift() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let (train, _) = population(6000, 1);

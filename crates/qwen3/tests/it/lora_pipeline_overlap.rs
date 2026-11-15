@@ -18,7 +18,7 @@ use model::{Model, Pipeline, PipelineModel};
 use qwen3::{Dtype, LoraCfg, Qwen, QwenConfig};
 
 fn gpu_disabled() -> bool {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return true;
     }
     let have = gpu_core::testgpu::cards().len();

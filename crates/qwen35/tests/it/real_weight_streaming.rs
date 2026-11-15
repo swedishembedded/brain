@@ -36,7 +36,7 @@
 //!     cargo test -p brain-qwen35 --test real_weight_streaming -- --ignored --nocapture
 //! ```
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use checkpoint::mmap::MmapSafetensors;
 use gpu_core::Gpu;
@@ -217,7 +217,7 @@ fn checkpoint_dir() -> Option<PathBuf> {
 }
 
 fn golden_dir(l: usize) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/golden/qwen35").join(format!("real_layer_{l}"))
+    std::path::PathBuf::from(brain_testutil::crate_path("")).join("../../testdata/golden/qwen35").join(format!("real_layer_{l}"))
 }
 
 fn run_layer_parity(l: usize) {
@@ -433,7 +433,7 @@ fn embed_and_lm_head_rows_match_the_real_reference() {
         return;
     }
     let golden_path =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/golden/qwen35/embed_lm_head/rows.safetensors");
+        std::path::PathBuf::from(brain_testutil::crate_path("")).join("../../testdata/golden/qwen35/embed_lm_head/rows.safetensors");
     if !golden_path.exists() {
         brain_testutil::skip(&format!(
             "{} missing - run: python tools/goldens/qwen35_dump_embed_lm_head_rows.py --dir {}",

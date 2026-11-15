@@ -31,7 +31,7 @@ fn fixture_dir() -> PathBuf {
     if let Ok(d) = std::env::var("MODERNBERT_FIXTURE_DIR") {
         return PathBuf::from(d);
     }
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/modernbert")
+    std::path::PathBuf::from(brain_testutil::crate_path("")).join("tests/fixtures/modernbert")
 }
 
 fn read_f32(path: &Path) -> Vec<f32> {

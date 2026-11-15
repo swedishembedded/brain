@@ -31,8 +31,8 @@ const FLOOR: f64 = 0.9999;
 
 #[test]
 fn deepseek_vl_matches_the_reference_end_to_end() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
-        return brain_testutil::skip_unavailable("MOE_SKIP_GPU_TESTS set");
+    if brain_testutil::gpu_tests_skipped() {
+        return;
     }
     let Some(dir) = brain_testutil::model_dir(REPO).filter(|d| Path::new(d).join("model.safetensors.index.json").exists()) else {
         return brain_testutil::skip(&format!("{REPO} not in the model store"));

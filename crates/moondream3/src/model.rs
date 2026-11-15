@@ -755,7 +755,7 @@ mod tests {
     /// the two builds would be the same backend and the comparison vacuous.
     #[test]
     fn a_gpu_build_computes_the_same_function_as_the_cpu_build() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() || gpu_core::testgpu::cards().is_empty() {
+        if brain_testutil::gpu_tests_skipped() || gpu_core::testgpu::cards().is_empty() {
             brain_testutil::skip_unavailable("no GPU to place a moondream build on");
             return;
         }

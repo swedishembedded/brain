@@ -22,7 +22,7 @@ use std::cell::RefCell;
 use qwen3tts::{MtpConfig, MtpModel};
 
 fn gpu_disabled() -> bool {
-    std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+    brain_testutil::gpu_tests_skipped()
 }
 
 /// Local newtype so we can implement the external `CheckModel` trait (orphan
@@ -204,8 +204,8 @@ fn mtp_real_import_and_forward() {
         return;
     };
     let dir = paths.ckpt_dir;
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
-        return brain_testutil::skip_unavailable("MOE_SKIP_GPU_TESTS set");
+    if brain_testutil::gpu_tests_skipped() {
+        return;
     }
     let out = std::env::temp_dir().join("brain_mtp_test.safetensors");
     let out = out.to_str().unwrap();

@@ -1075,7 +1075,7 @@ mod sampling_tests {
     use super::*;
 
     fn gpu_disabled() -> bool {
-        std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+        brain_testutil::gpu_tests_skipped()
     }
 
     // The codebook-0 filter chain's own tests (suppress mask, repetition
@@ -1179,7 +1179,7 @@ mod cancel_tests {
     use std::time::{Duration, Instant};
 
     fn gpu_disabled() -> bool {
-        std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+        brain_testutil::gpu_tests_skipped()
     }
 
     fn group_width() -> usize {

@@ -48,7 +48,7 @@ fn write_dataset(dir: &std::path::Path) {
 
 #[test]
 fn an_adapter_trains_on_a_bf16_base_read_from_a_transformers_directory() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let scratch = tmp("run");

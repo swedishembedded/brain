@@ -123,7 +123,7 @@ fn weights(cfg: &NemotronConfig) -> HashMap<String, Vec<f32>> {
 
 #[test]
 fn encoder_head_matches_reference_on_cpu() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     if available_devices().map(|d| d.is_empty()).unwrap_or(true) {

@@ -139,7 +139,7 @@ fn device_naive_matches_oracle_cpu() {
 
 #[test]
 fn device_naive_matches_oracle_gpu() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let g = gpu_core::testgpu::dev(splat::PIPELINES);

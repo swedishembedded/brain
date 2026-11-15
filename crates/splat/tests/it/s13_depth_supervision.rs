@@ -288,7 +288,7 @@ fn the_depth_vjp_matches_finite_differences_cpu() {
 
 #[test]
 fn the_depth_vjp_matches_finite_differences_gpu() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     depth_gradcheck(&gpu_core::testgpu::dev(splat::PIPELINES));
@@ -305,7 +305,7 @@ fn the_depth_vjp_matches_finite_differences_gpu() {
 /// gradient record invites, and one that is silent otherwise.
 #[test]
 fn the_depth_gradients_are_the_same_on_both_backends() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let ks = Kernels::at(0);

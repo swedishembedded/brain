@@ -10,7 +10,7 @@ use brain::timeline::{synthetic, TimelineModel, TimelineSpec};
 
 #[test]
 fn train_save_load_predict() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let (train, _) = synthetic::population(6000, 1);
@@ -76,7 +76,7 @@ fn train_save_load_predict() {
 /// curves as the trained one.
 #[test]
 fn visit_backbones_save_and_load() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     use brain::timeline::synthetic::drifting::{self, Gaps};
@@ -110,7 +110,7 @@ fn visit_backbones_save_and_load() {
 /// predicts exactly the curves the trained one does.
 #[test]
 fn stack_mixers_save_and_load() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     use brain::timeline::synthetic::drifting::{self, Gaps};
@@ -145,7 +145,7 @@ fn stack_mixers_save_and_load() {
 /// reported is the outcome codes' alone.
 #[test]
 fn next_events_train_save_load_and_predict() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let (train, _) = synthetic::population(6000, 1);
@@ -194,7 +194,7 @@ fn next_events_train_save_load_and_predict() {
 /// weights, and is absent - never zero - where it was not fitted.
 #[test]
 fn calibration_repairs_an_overconfident_model_and_persists() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     use brain::survival::calibration::at_horizon;
@@ -320,7 +320,7 @@ fn history_of(s: &brain::timeline::Subject) -> brain::timeline::PatientHistory {
 /// population.
 #[test]
 fn forecast_history_and_evaluate_a_trained_model() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     use brain::survival::estimate::censoring;
@@ -440,7 +440,7 @@ fn spearman(a: &[f64], b: &[f64]) -> f64 {
 /// population it was trained on is hardly flagged at all.
 #[test]
 fn the_ood_score_rises_with_the_error_under_covariate_shift() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     use brain::timeline::synthetic::{population_shifted, Shift};

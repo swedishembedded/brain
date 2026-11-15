@@ -72,7 +72,7 @@ mod tests {
 
     #[test]
     fn trains_calculator_and_reduces_loss() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         // Prepare a tiny calculator dataset.

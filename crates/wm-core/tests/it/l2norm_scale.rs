@@ -34,7 +34,7 @@ fn host_fwd(x: &[f32], g: &[f32]) -> Vec<f32> {
 
 #[test]
 fn l2norm_scale_forward_and_grads() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() { return; }
+    if brain_testutil::gpu_tests_skipped() { return; }
     let gpu = Gpu::new_cpu(&K);
     let x = rand(1, N*D);
     let g = rand(2, D).iter().map(|v| v+1.5).collect::<Vec<_>>(); // keep g away from 0

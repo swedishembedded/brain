@@ -61,7 +61,7 @@ fn matches_the_real_thinker_layer0() {
         brain_testutil::skip("BRAIN_QWEN3OMNIMOE_HF_DIR unset, or its index doesn't (yet) have the shard holding thinker.model.layers.0");
         return;
     };
-    let golden_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/golden/omni/omni_layer0.safetensors");
+    let golden_path = std::path::PathBuf::from(brain_testutil::crate_path("")).join("../../testdata/golden/omni/omni_layer0.safetensors");
     if !golden_path.exists() {
         brain_testutil::skip(&format!("{golden_path:?} missing (run `make testdata/fetch`)"));
         return;

@@ -17,10 +17,6 @@ use brain_testutil::testdata;
 
 /// Regenerates the golden this suite compares against, quoted in every skip.
 const DUMPER: &str = "tools/goldens/qwen3tts_codec_dump_reference.py";
-#[allow(dead_code)]
-fn repo_path(rel: &str) -> String {
-    format!("{}/../../{rel}", env!("CARGO_MANIFEST_DIR"))
-}
 
 
 fn ckpt_available() -> bool {

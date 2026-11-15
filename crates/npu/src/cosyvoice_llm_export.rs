@@ -64,7 +64,7 @@ mod tests {
     /// numerical parity gate. Skips cleanly when the checkpoint is absent.
     #[test]
     fn export_against_the_real_checkpoint_if_present() {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../resources/cosyvoice/weights/llm.pt");
+        let path = &brain_testutil::repo_path("resources/cosyvoice/weights/llm.pt");
         if !std::path::Path::new(path).is_file() {
             return;
         }

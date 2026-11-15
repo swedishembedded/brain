@@ -20,7 +20,7 @@ fn h_layernorm(x: &[f32], g: &[f32], dim: usize) -> Vec<f32> {
 }
 #[test]
 fn sttransformer_stacks_blocks_and_norms() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() { return; }
+    if brain_testutil::gpu_tests_skipped() { return; }
     let (b, t, h, w, dim, heads, hd) = (1usize, 3usize, 2usize, 2usize, 16usize, 2usize, 8usize);
     let gpu = Gpu::new_cpu(&kernel_sources());
     let x = rand(1, b*t*h*w*dim);

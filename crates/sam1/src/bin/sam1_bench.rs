@@ -22,6 +22,9 @@
 //! time across every submit in one forward -- the same accounting
 //! `--kernel-profile`'s table uses -- so that is the per-kernel breakdown source.
 //!
+//! Usage: `sam1_bench [reps] [--cpu-only]` (`--cpu-only` stops after the CPU
+//! backend), or `sam1_bench profile`.
+//!
 //! **Windowed vs global, isolated by a one-block tower.** A block's own
 //! per-forward cost cannot be read off the 12-block real config directly (patch
 //! embed / neck / compressor cost is shared, and blocks 0..11 differ only in
@@ -189,8 +192,8 @@ fn main() {
 
     bench_backend("CPU", Gpu::new_cpu(PIPELINES), reps);
 
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
-        println!("\nMOE_SKIP_GPU_TESTS set -- skipping the wgpu comparison.");
+    if std::env::args().any(|a| a == "--cpu-only") {
+        println!("\n--cpu-only: skipping the wgpu comparison.");
         return;
     }
     // wgpu is known to CORRUPT this tower's output at 3+ blocks

@@ -7,6 +7,8 @@
 //! process-wide state (the current directory, environment variables): the
 //! others run beside it.
 
+#[path = "../common/real_vision.rs"]
+mod real_vision;
 mod prompt_real;
 mod real_weight;
 mod real_weight_generate;

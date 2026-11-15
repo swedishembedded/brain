@@ -35,7 +35,7 @@ fn param_list_is_well_formed() {
 /// This grounds the layout in the real checkpoint even in CI (no download).
 #[test]
 fn param_list_matches_golden_header() {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/header.json");
+    let path = &brain_testutil::crate_path("tests/golden/header.json");
     let bytes = std::fs::read(path).expect("read golden header.json");
     let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     let golden: HashMap<String, Vec<usize>> = v["tensors"]

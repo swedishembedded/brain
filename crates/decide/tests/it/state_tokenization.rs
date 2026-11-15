@@ -26,7 +26,7 @@
 
 /// The tokenizer every checkpoint of this family ships.
 fn tokenizer() -> Option<data::wordpiece::WordPiece> {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata/decide/tokenizer/tokenizer.json");
+    let path = &brain_testutil::repo_path("testdata/decide/tokenizer/tokenizer.json");
     match data::wordpiece::WordPiece::from_file(path) {
         Ok(t) => Some(t),
         Err(e) => {

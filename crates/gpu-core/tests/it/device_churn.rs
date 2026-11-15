@@ -32,7 +32,7 @@ static DEVICE_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 #[test]
 fn building_and_dropping_devices_in_sequence_does_not_exhaust_the_driver() {
     let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     const KERNELS: [(&str, &str); 1] = [("add2", kernels::ADD2)];
@@ -59,7 +59,7 @@ fn building_and_dropping_devices_in_sequence_does_not_exhaust_the_driver() {
 #[ignore = "diagnostic, assertion-free: builds 12 live devices and only eprintln!s the count -- run by hand when investigating driver exhaustion, not in the default lane"]
 fn building_devices_while_holding_the_previous_ones_does_not_exhaust_the_driver() {
     let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     const KERNELS: [(&str, &str); 1] = [("add2", kernels::ADD2)];
@@ -78,7 +78,7 @@ fn building_devices_while_holding_the_previous_ones_does_not_exhaust_the_driver(
 #[test]
 fn devices_that_did_real_work_can_still_be_rebuilt() {
     let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     const KERNELS: [(&str, &str); 1] = [("add2", kernels::ADD2)];
@@ -119,7 +119,7 @@ fn devices_that_did_real_work_can_still_be_rebuilt() {
 #[test]
 fn repeated_device_opens_keep_landing_on_the_physical_card() {
     let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let Some(dev) = gpu_core::testgpu::cards().into_iter().next() else {
@@ -160,7 +160,7 @@ fn repeated_device_opens_keep_landing_on_the_physical_card() {
 #[test]
 fn repeated_native_vulkan_contexts_keep_finding_the_physical_card() {
     let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let Some(dev) = gpu_core::testgpu::cards().into_iter().next() else {

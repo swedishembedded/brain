@@ -45,7 +45,7 @@ fn scratch(name: &str) -> std::path::PathBuf {
 
 #[test]
 fn a_calibration_survives_save_and_load_and_is_served() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let (validation, _) = population(1500, 21);
@@ -118,7 +118,7 @@ fn a_calibration_survives_save_and_load_and_is_served() {
 
 #[test]
 fn a_calibration_of_other_weights_is_refused_and_an_old_directory_loads_uncalibrated() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let (validation, _) = population(1500, 22);
@@ -159,7 +159,7 @@ fn a_calibration_of_other_weights_is_refused_and_an_old_directory_loads_uncalibr
 
 #[test]
 fn too_few_events_calibrate_nothing_and_a_bad_request_is_refused() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let (validation, _) = population(300, 23);
@@ -179,7 +179,7 @@ fn too_few_events_calibrate_nothing_and_a_bad_request_is_refused() {
 
 #[test]
 fn a_logistic_calibration_survives_save_and_load_and_is_served_without_an_interval() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let (validation, _) = population(1500, 24);

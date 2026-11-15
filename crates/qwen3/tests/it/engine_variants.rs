@@ -15,7 +15,7 @@ use qwen3::model::PrefillInput;
 use qwen3::{Qwen, QwenConfig};
 
 fn gpu_disabled() -> bool {
-    std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+    brain_testutil::gpu_tests_skipped()
 }
 
 const PROMPT: [u32; 6] = [2, 9, 4, 11, 7, 3];

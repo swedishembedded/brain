@@ -25,7 +25,7 @@ use qwen35moe::config::Qwen35Config;
 use qwen35moe::model::Qwen35;
 
 fn gpu_disabled() -> bool {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return true;
     }
     if let Err(why) = stage_cards() {

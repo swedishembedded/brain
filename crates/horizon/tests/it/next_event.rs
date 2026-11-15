@@ -16,7 +16,7 @@ use horizon::vocab::{FitOptions, Vocab};
 use horizon::{Horizon, HorizonConfig};
 
 fn skip_gpu() -> bool {
-    std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+    brain_testutil::gpu_tests_skipped()
 }
 
 fn names(v: &[&str]) -> Vec<String> {

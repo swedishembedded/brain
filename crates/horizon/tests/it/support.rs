@@ -52,7 +52,7 @@ fn kinds(saved: &Saved, s: &Subject) -> Vec<Warning> {
 
 #[test]
 fn what_is_outside_the_training_support_is_flagged_and_what_is_inside_is_not() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let (train, _) = population(1500, 41);
@@ -156,7 +156,7 @@ fn lines(out: &capability::Outcome) -> Vec<Json> {
 
 #[test]
 fn an_unsupported_subject_gets_no_probability_and_the_support_travels_with_the_model() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let (train, _) = population(1500, 43);

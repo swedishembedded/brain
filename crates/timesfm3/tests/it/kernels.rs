@@ -15,7 +15,7 @@
 use gpu_core::Gpu;
 
 fn skip() -> bool {
-    std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+    brain_testutil::gpu_tests_skipped()
 }
 
 /// 3 tokens, 1 head, head_dim=2: `q[i] = k[i]` = `[1,0]`, `[0,1]`, `[1,1]`, so

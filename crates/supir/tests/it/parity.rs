@@ -136,7 +136,7 @@ fn supir_weights_path() -> Option<PathBuf> {
         let pb = PathBuf::from(p);
         return pb.is_file().then_some(pb);
     }
-    let p = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../resources/supir/supir_v0q/SUPIR/SUPIR-v0Q_fp32.safetensors"));
+    let p = PathBuf::from(brain_testutil::repo_path("resources/supir/supir_v0q/SUPIR/SUPIR-v0Q_fp32.safetensors"));
     p.is_file().then_some(p)
 }
 
@@ -150,7 +150,7 @@ fn sdxl_ldm_weights_path() -> Option<PathBuf> {
         let pb = PathBuf::from(p);
         return pb.is_file().then_some(pb);
     }
-    let p = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../resources/supir/sdxl_base/sd_xl_base_1.0_0.9vae.safetensors"));
+    let p = PathBuf::from(brain_testutil::repo_path("resources/supir/sdxl_base/sd_xl_base_1.0_0.9vae.safetensors"));
     p.is_file().then_some(p)
 }
 

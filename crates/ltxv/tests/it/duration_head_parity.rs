@@ -72,11 +72,8 @@ fn weights_path() -> Option<String> {
     if let Some(p) = ltxv::spec::default_store_paths().and_then(|p| p.duration_head) {
         return Some(p);
     }
-    let p = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../resources/ltxv/weights/model_patches/ltx-2.5-duration-head-bf16.safetensors"
-    );
-    Path::new(p).exists().then(|| p.to_string())
+    let p = brain_testutil::repo_path("resources/ltxv/weights/model_patches/ltx-2.5-duration-head-bf16.safetensors");
+    Path::new(&p).exists().then_some(p)
 }
 
 struct Fixture {

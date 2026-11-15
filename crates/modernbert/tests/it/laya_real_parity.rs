@@ -43,7 +43,7 @@ fn fixture_dir() -> std::path::PathBuf {
     if let Ok(d) = std::env::var("MODERNBERT_REAL_FIXTURE_DIR") {
         return std::path::PathBuf::from(d);
     }
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/laya_real")
+    std::path::PathBuf::from(brain_testutil::crate_path("")).join("tests/fixtures/laya_real")
 }
 
 /// The three `(state, question)` cases, transcribed BY HAND from

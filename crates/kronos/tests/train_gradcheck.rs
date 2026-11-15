@@ -54,7 +54,7 @@ fn init_weights(cfg: &KronosConfig, seed: u64) -> HashMap<String, Vec<f32>> {
 }
 
 fn skip() -> bool {
-    std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+    brain_testutil::gpu_tests_skipped()
 }
 
 struct Batch {

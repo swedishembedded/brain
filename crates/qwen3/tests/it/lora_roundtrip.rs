@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use qwen3::{LoraCfg, Qwen, QwenConfig};
 
 fn skip() -> bool {
-    std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+    brain_testutil::gpu_tests_skipped()
 }
 
 fn tmp(name: &str) -> std::path::PathBuf {
@@ -29,7 +29,6 @@ fn tmp(name: &str) -> std::path::PathBuf {
 #[test]
 fn lora_adapter_survives_save_and_reload() {
     if skip() {
-        brain_testutil::skip_unavailable("MOE_SKIP_GPU_TESTS set");
         return;
     }
     let base_cfg = QwenConfig::tiny();
@@ -91,7 +90,6 @@ fn lora_adapter_survives_save_and_reload() {
 #[test]
 fn checkpoint_without_lora_key_loads_as_plain_model() {
     if skip() {
-        brain_testutil::skip_unavailable("MOE_SKIP_GPU_TESTS set");
         return;
     }
     let cfg = QwenConfig::tiny();

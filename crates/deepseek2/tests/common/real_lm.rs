@@ -47,8 +47,7 @@ pub fn cpu() -> Gpu {
 /// discrete card - on a software rasteriser a "GPU" run would compare the host
 /// against itself and prove nothing.
 pub fn wgpu() -> Option<Gpu> {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
-        brain_testutil::skip("MOE_SKIP_GPU_TESTS");
+    if brain_testutil::gpu_tests_skipped() {
         return None;
     }
     if gpu_core::testgpu::cards().is_empty() {

@@ -68,8 +68,7 @@ const BATCH: u32 = 4;
 const BLOCK: u32 = 64;
 
 fn skip() -> bool {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
-        brain_testutil::skip_unavailable("MOE_SKIP_GPU_TESTS is set: a document study needs a real training/decode backend");
+    if brain_testutil::gpu_tests_skipped() {
         return true;
     }
     false

@@ -32,8 +32,8 @@ fn read_f32(path: &str) -> Option<Vec<f32>> {
 fn talker_logits_match_reference() {
     let ckpt = testdata("tts/ckpt/Qwen3-TTS-12Hz-0.6B-Base");
     let dump = testdata("tts/dumps/talker_ref");
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
-        return brain_testutil::skip_unavailable("MOE_SKIP_GPU_TESTS set");
+    if brain_testutil::gpu_tests_skipped() {
+        return;
     }
     let (Some(tokens), Some(ref_logits)) =
         (read_u32(&format!("{dump}/tokens.u32")), read_f32(&format!("{dump}/logits.f32")))

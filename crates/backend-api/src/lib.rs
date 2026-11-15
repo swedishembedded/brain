@@ -2629,7 +2629,8 @@ fn main() {}\n";
 mod no_graph_concept {
     #[test]
     fn backend_api_names_no_graph_concept() {
-        let src_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
+        // Cargo runs a crate's tests from its package root.
+        let src_dir = std::env::current_dir().expect("the working directory").join("src");
         // Split so this array's own source text never spells a banned word
         // contiguously - otherwise the scan below would flag this very file.
         let banned = [concat!("on", "nx"), concat!("open", "vino"), concat!("graph", "back", "end")];

@@ -85,7 +85,7 @@ fn the_cli_ignores_brain_device_in_the_environment_and_says_so() {
 /// symbol, not any runtime behaviour.
 #[test]
 fn npu_requested_sidecar_has_zero_occurrences() {
-    let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
+    let root = &brain_testutil::repo_path("crates/..");
     let mut offenders = Vec::new();
     for entry in walk(std::path::Path::new(root)) {
         // Skip build output / vendored dirs - only source is in scope.

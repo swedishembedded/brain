@@ -1195,7 +1195,7 @@ mod tests {
     /// backward half is `gradcheck::check_vqgan`.
     #[test]
     fn straight_through_forward_equals_the_raw_gather() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let cfg = tiny();
@@ -1239,7 +1239,7 @@ mod tests {
     /// against whatever forward was emitted - so this pins the forward.
     #[test]
     fn llamagen_trainer_forward_matches_the_inference_graph() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let cfg = tiny_llamagen();
@@ -1266,7 +1266,7 @@ mod tests {
     /// scales the codebook gradient by exactly `1/beta`.
     #[test]
     fn beta_weights_the_term_its_config_names() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let s = tiny().img_size;

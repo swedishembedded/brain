@@ -136,7 +136,7 @@ mod tests {
 
     #[test]
     fn load_config_reads_the_real_checkpoints_config_json() {
-        let src = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/hf_config.json");
+        let src = &brain_testutil::crate_path("tests/golden/hf_config.json");
         let pid = std::process::id();
         let dir = std::env::temp_dir().join(format!("timesfm3-import-cfg-{pid}"));
         std::fs::create_dir_all(&dir).unwrap();

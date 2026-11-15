@@ -18,6 +18,7 @@ path = "src/lib.rs"
 brain-backend-api.workspace = true
 
 [dev-dependencies]
+brain-testutil.workspace = true
 # `record_width` gates the splat gradient-record stride against the host
 # constant that sizes the buffer; the check is meaningless without both sides.
 brain-splat.workspace = true

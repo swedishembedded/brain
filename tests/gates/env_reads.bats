@@ -47,10 +47,18 @@ gate() {
   [[ "$output" == *"STALE"*"BRAIN_GONE"* ]]
 }
 
-@test "compile-time cargo variables are not env reads" {
-  printf 'const D: &str = env!("CARGO_MANIFEST_DIR");\n' >>"$TREE/crates/a/src/lib.rs"
+@test "compile-time package metadata is not an env read" {
+  printf 'const V: &str = env!("CARGO_PKG_VERSION");\n' >>"$TREE/crates/a/src/lib.rs"
   gate
   [ "$status" -eq 0 ]
+}
+
+@test "a path cargo compiles in is a read and points at the testutil path helpers" {
+  printf 'fn d() -> &%sstatic str { env!("CARGO_MANIFEST_DIR") }\n' "'" >>"$TREE/crates/a/src/lib.rs"
+  gate
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"NEW READ"*"CARGO_MANIFEST_DIR"* ]]
+  [[ "$output" == *"brain_testutil::repo_path"* ]]
 }
 
 @test "a test binary found through CARGO_BIN_EXE is a read and points at package_bin" {

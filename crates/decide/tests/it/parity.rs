@@ -54,14 +54,14 @@ impl Golden {
 }
 
 fn load() -> Option<(Golden, EncoderConfig, HashMap<String, Vec<f32>>)> {
-    let dir = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden"));
+    let dir = std::path::PathBuf::from(brain_testutil::crate_path("tests/golden"));
     let dump = dir.join("minilm.safetensors");
     let dumper = "tools/goldens/minilm_dump_reference.py";
     if !dump.exists() {
         brain_testutil::skip(&format!("{} missing - run {dumper}", dump.display()));
         return None;
     }
-    let src = brain_testutil::golden::Source::open(dir, dumper)?;
+    let src = brain_testutil::golden::Source::open(&dir, dumper)?;
 
     let hf = brain_testutil::model_dir("sentence-transformers/all-MiniLM-L6-v2")?;
     let cfg_path = Path::new(&hf).join("config.json");

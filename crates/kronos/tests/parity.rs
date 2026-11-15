@@ -78,8 +78,8 @@ fn tokenizer_and_decoder_match_the_reference() {
     else {
         return brain_testutil::skip("BRAIN_KRONOS_TOKENIZER / BRAIN_KRONOS_DECODER unset; no Kronos parity");
     };
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
-        return brain_testutil::skip_unavailable("MOE_SKIP_GPU_TESTS is set");
+    if brain_testutil::gpu_tests_skipped() {
+        return;
     }
     let golden = testdata_path("golden/kronos");
     let ctx_p = golden.join("t_context.f32");

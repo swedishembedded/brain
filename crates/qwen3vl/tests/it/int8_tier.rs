@@ -80,8 +80,7 @@ fn asking_for_int8_gets_int8_and_does_not_reuse_the_fp32_resident() {
         brain_testutil::skip("BRAIN_QWEN3VL_WEIGHTS not set / checkpoint absent");
         return;
     }
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
-        brain_testutil::skip("MOE_SKIP_GPU_TESTS set");
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     // A small budget: this test is about the tier, not about image detail, and

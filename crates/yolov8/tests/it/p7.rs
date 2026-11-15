@@ -25,7 +25,7 @@ use yolov8::{init_weights, Detection, GtBox, LossMode, Yolo, YoloConfig};
 /// NOT skip (the documented way to force training, matching `p5_overfit`); only a
 /// non-empty value skips.
 pub fn skip() -> bool {
-    std::env::var("MOE_SKIP_GPU_TESTS").map(|v| !v.is_empty()).unwrap_or(false)
+    brain_testutil::gpu_tests_skipped()
 }
 
 /// One generated scene paired with its CHW image blob.

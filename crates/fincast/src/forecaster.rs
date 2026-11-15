@@ -205,7 +205,7 @@ mod tests {
 
     #[test]
     fn forecast_through_the_seam_returns_quantiles() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         use forecast::Variate;

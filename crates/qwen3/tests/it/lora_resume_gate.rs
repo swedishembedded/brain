@@ -29,7 +29,7 @@ use data::rng::Rng;
 use qwen3::{Qwen, QwenConfig, IGNORE};
 
 fn skip() -> bool {
-    std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+    brain_testutil::gpu_tests_skipped()
 }
 
 fn tmp(name: &str) -> PathBuf {
@@ -179,7 +179,6 @@ fn tracked_leaf_delta_norm(ckpt_path: &str) -> f64 {
 #[test]
 fn lora_resume_continues_the_same_adapter_instead_of_resetting_it() {
     if skip() {
-        brain_testutil::skip_unavailable("MOE_SKIP_GPU_TESTS set");
         return;
     }
 
@@ -266,7 +265,6 @@ fn lora_resume_continues_the_same_adapter_instead_of_resetting_it() {
 #[test]
 fn resume_with_mismatched_lora_rank_panics() {
     if skip() {
-        brain_testutil::skip_unavailable("MOE_SKIP_GPU_TESTS set");
         return;
     }
     let scratch = tmp("mismatch");

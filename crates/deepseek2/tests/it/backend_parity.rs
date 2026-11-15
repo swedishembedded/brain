@@ -63,8 +63,7 @@ fn maxabs(a: &[f32], b: &[f32]) -> f32 {
 
 /// `Some(gpu)` when a real wgpu device is worth comparing against.
 fn wgpu_or_skip() -> Option<Gpu> {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
-        brain_testutil::skip("MOE_SKIP_GPU_TESTS");
+    if brain_testutil::gpu_tests_skipped() {
         return None;
     }
     if gpu_core::testgpu::cards().is_empty() {

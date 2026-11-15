@@ -194,7 +194,7 @@ mod tests {
             brain_testutil::skip("BRAIN_KRONOS_DECODER unset");
             return;
         };
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let (cfg, w) = kronos::import::load_decoder(&dir).expect("load kronos decoder");
@@ -243,7 +243,7 @@ mod tests {
             brain_testutil::skip("BRAIN_KRONOS_DECODER unset");
             return;
         };
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let (cfg, w) = kronos::import::load_decoder(&dir).expect("load kronos decoder");

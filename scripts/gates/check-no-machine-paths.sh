@@ -117,7 +117,7 @@ In crates/, resolve it from the environment instead:
   - model weights   -> the architecture's own BRAIN_*_ env var, else
                        BRAIN_MODELS_DIR (the model store root)
   - test fixtures   -> brain_testutil::testdata, which honours BRAIN_TESTDATA
-  - in-repo outputs -> concat!(env!("CARGO_MANIFEST_DIR"), "/../../out/...")
+  - in-repo outputs -> brain_testutil::repo_path("out/...")
 
 In docs/.agents/, show a placeholder instead: [path/to/qwen3.8], not a
 literal that only resolves on the machine that wrote it.

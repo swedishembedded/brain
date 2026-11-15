@@ -160,7 +160,7 @@ mod tests {
         checkpoint::save(path.to_str().unwrap(), cfg.to_json(), &tensors);
 
         let loaded = Chronos2::load(path.to_str().unwrap()).unwrap();
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_err() {
+        if !brain_testutil::gpu_tests_skipped() {
             let ctx: Vec<f32> = (0..30).map(|i| 2.0 + i as f32 * 0.1).collect();
             let mean = ctx.iter().sum::<f32>() / ctx.len() as f32;
             let out = loaded.forecast_quantiles(&ctx, 4);

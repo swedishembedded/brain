@@ -37,8 +37,7 @@ use deepseekocr2::prompt::build_prompt;
 use deepseekocr2::rows::TileGrid;
 use sam1::SamEncoder;
 
-#[path = "../common/real_vision.rs"]
-mod real_vision;
+use crate::real_vision;
 
 use real_vision::{pin_cpu_backend, real_files};
 

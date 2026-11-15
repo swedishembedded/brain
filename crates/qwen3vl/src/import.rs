@@ -205,10 +205,6 @@ pub fn partition(hf: HashMap<String, Vec<f32>>, n_deepstack: usize) -> ImportedW
 mod tests {
 
 use brain_testutil::model_dir;
-#[allow(dead_code)]
-fn repo_path(rel: &str) -> String {
-    format!("{}/../../{rel}", env!("CARGO_MANIFEST_DIR"))
-}
     use super::*;
 
     #[test]

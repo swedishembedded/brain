@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn skip() -> bool {
-    std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+    brain_testutil::gpu_tests_skipped()
 }
 
 fn bin() -> PathBuf {
@@ -67,7 +67,6 @@ fn write_base(dir: &std::path::Path) -> String {
 #[test]
 fn finetune_timesfm3_runs_to_a_gate_verdict() {
     if skip() {
-        brain_testutil::skip_unavailable("timesfm3 finetune: MOE_SKIP_GPU_TESTS set");
         return;
     }
     let dir = tmp("run");
@@ -135,7 +134,6 @@ fn finetune_timesfm3_runs_to_a_gate_verdict() {
 #[test]
 fn a_horizon_past_one_forecast_patch_is_refused() {
     if skip() {
-        brain_testutil::skip_unavailable("timesfm3 finetune: MOE_SKIP_GPU_TESTS set");
         return;
     }
     let dir = tmp("horizon");
@@ -196,7 +194,6 @@ fn the_forecast_verb_is_gone_and_each_model_lists_its_finetune_parameters() {
 #[test]
 fn predict_scores_timesfm3_against_the_baselines_on_held_out_bars() {
     if skip() {
-        brain_testutil::skip_unavailable("timesfm3 predict: MOE_SKIP_GPU_TESTS set");
         return;
     }
     let dir = tmp("predict");

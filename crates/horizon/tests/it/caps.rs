@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 
 #[test]
 fn predict_serves_what_the_saved_model_predicts() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let (subjects, _) = population(300, 4);
@@ -117,7 +117,7 @@ const HISTORY: &str = r#"{"id": "p1", "as_of": 55.0, "calendar": 2000.5, "events
 /// while a request beside it in the same batch is answered.
 #[test]
 fn predict_takes_a_patient_history_and_answers_with_a_forecast() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let (dir, saved) = saved_in("history", "mmol/L");

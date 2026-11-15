@@ -31,7 +31,7 @@ fn tmp(name: &str) -> PathBuf {
 
 #[test]
 fn a_full_fine_tune_of_a_transformers_directory_trains_every_weight_and_saves_one_checkpoint() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let scratch = tmp("run");

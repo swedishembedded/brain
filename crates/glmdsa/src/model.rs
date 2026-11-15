@@ -2022,7 +2022,7 @@ mod kv_step_tests {
     /// the source init exactly. GPU-gated (testgpu / MOE_SKIP_GPU).
     #[test]
     fn streaming_load_matches_eager() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let cfg = GlmConfig::tiny();
@@ -2124,7 +2124,7 @@ mod compact_forward_tests {
     /// some experts route zero rows (`expert_fwd_compact`'s `count == 0` path).
     #[test]
     fn logits_all_compact_matches_logits_all() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let cfg = GlmConfig::tiny();

@@ -607,7 +607,7 @@ mod tests {
 
     #[test]
     fn init_readback_and_zero_grads() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         static KERNELS: &[(&str, &str)] = &[("add2", kernels::ADD2)];
@@ -734,7 +734,7 @@ mod tests {
     /// `with_tensor_called_for`).
     #[test]
     fn param_store_upload_peak_is_one_chunk_not_one_tensor() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         static KERNELS: &[(&str, &str)] = &[("add2", kernels::ADD2)];
@@ -768,7 +768,7 @@ mod tests {
     /// already-f32 case.
     #[test]
     fn param_store_prefers_raw_words_when_available() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         static KERNELS: &[(&str, &str)] = &[("add2", kernels::ADD2)];

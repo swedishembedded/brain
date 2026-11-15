@@ -125,7 +125,7 @@ fn the_emitted_graph_matches_the_host_formula() {
     let raw: Vec<u8> = x.iter().flat_map(|v| v.to_le_bytes()).collect();
     std::fs::write(&xin, &raw).expect("write input");
 
-    let script = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tools/goldens/onnx_eval.py");
+    let script = &brain_testutil::repo_path("tools/goldens/onnx_eval.py");
     let out = std::process::Command::new("python3")
         .arg(script)
         .arg(&model)

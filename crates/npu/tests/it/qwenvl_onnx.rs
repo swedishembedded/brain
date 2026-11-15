@@ -113,7 +113,7 @@ fn merger_weights(in_dim: u32, merge: u32, out_dim: u32, seed: u64) -> HashMap<S
 
 #[test]
 fn vision_head_matches_reference_on_cpu() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     if available_devices().map(|d| d.is_empty()).unwrap_or(true) {

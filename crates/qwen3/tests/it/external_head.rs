@@ -15,7 +15,7 @@
 use qwen3::{LoraCfg, Qwen, QwenConfig, IGNORE};
 
 fn gpu_disabled() -> bool {
-    std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+    brain_testutil::gpu_tests_skipped()
 }
 
 const TOKENS: [u32; 8] = [1, 5, 9, 2, 7, 3, 11, 4];

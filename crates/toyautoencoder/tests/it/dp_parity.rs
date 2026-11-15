@@ -14,7 +14,7 @@ use toyautoencoder::{Autoencoder, AutoencoderConfig};
 use model::{Batch, DataParallel, Model};
 
 fn gpu_disabled() -> bool {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return true;
     }
     // Skip rather than fault when this box lacks the cards the test pins to.

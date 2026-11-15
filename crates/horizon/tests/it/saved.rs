@@ -56,7 +56,7 @@ fn round_trip(name: &str, configure: impl Fn(&mut HorizonConfig)) {
 
 #[test]
 fn the_additive_baseline_survives_save_and_load() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     round_trip("additive", |c| c.additive = true);
@@ -64,7 +64,7 @@ fn the_additive_baseline_survives_save_and_load() {
 
 #[test]
 fn the_forecast_head_survives_save_and_load() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     round_trip("forecast", |c| {
@@ -75,7 +75,7 @@ fn the_forecast_head_survives_save_and_load() {
 
 #[test]
 fn the_set_encoder_survives_save_and_load() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     round_trip("set", |_| {});

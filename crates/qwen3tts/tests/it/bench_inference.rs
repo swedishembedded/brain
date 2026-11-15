@@ -74,7 +74,7 @@ fn forward(backend: Backend, reps: usize) -> (f64, Vec<f32>) {
 #[test]
 #[ignore]
 fn talker_inference_speed() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let reps = 5;

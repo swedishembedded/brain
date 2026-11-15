@@ -7,6 +7,8 @@
 //! process-wide state (the current directory, environment variables): the
 //! others run beside it.
 
+#[path = "../common/int8_thinker_fixture.rs"]
+mod fixture;
 mod audio_parity;
 mod caps_conformance;
 mod code2wav_parity;

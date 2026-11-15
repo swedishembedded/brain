@@ -8,38 +8,14 @@
 
 use gpu_core::{f, Gpu};
 
-const BN_STATS: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../kernels/wgsl/bn_stats.wgsl"
-));
-const BN_TRAIN: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../kernels/wgsl/bn_train.wgsl"
-));
-const BN_EVAL: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../kernels/wgsl/bn_eval.wgsl"
-));
-const BN_RUNNING: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../kernels/wgsl/bn_running.wgsl"
-));
-const BN_DSTATS: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../kernels/wgsl/bn_dstats.wgsl"
-));
-const BN_DX: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../kernels/wgsl/bn_dx.wgsl"
-));
-const BN_DGAMMA: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../kernels/wgsl/bn_dgamma.wgsl"
-));
-const BN_DBETA: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../kernels/wgsl/bn_dbeta.wgsl"
-));
+use kernels::BN_STATS;
+use kernels::BN_TRAIN;
+use kernels::BN_EVAL;
+use kernels::BN_RUNNING;
+use kernels::BN_DSTATS;
+use kernels::BN_DX;
+use kernels::BN_DGAMMA;
+use kernels::BN_DBETA;
 
 // Kernel indices into the JIT set (order passed to new_cpu).
 const K_STATS: usize = 0;

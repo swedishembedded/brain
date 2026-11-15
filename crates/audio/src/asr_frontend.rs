@@ -492,10 +492,6 @@ mod tests {
 
 #[allow(dead_code)]
 use brain_testutil::testdata;
-#[allow(dead_code)]
-fn repo_path(rel: &str) -> String {
-    format!("{}/../../{rel}", env!("CARGO_MANIFEST_DIR"))
-}
     use super::*;
     use data::rng::Lcg;
     use std::io::Read;

@@ -21,7 +21,7 @@
 //! one card" shape this file exists to rule out, just never exercised here.
 
 fn skip() -> bool {
-    std::env::var("MOE_SKIP_GPU_TESTS").is_ok() || !matches!(gpu_core::backend_name(), "wgpu" | "vulkan")
+    brain_testutil::gpu_tests_skipped() || !matches!(gpu_core::backend_name(), "wgpu" | "vulkan")
 }
 
 const K: &[(&str, &str)] = &[("add2", kernels::ADD2)];

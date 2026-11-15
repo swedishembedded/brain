@@ -334,7 +334,7 @@ mod tests {
     /// finite and the right length. No real checkpoint needed.
     #[test]
     fn tiny_forward_is_finite() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let cfg = SupirConfig::tiny();

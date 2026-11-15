@@ -43,7 +43,7 @@ fn model(train: &[Subject]) -> Saved {
 
 #[test]
 fn a_mismatched_unit_is_rejected_by_name_and_survives_save_and_load() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let (train, _) = population(300, 51);
@@ -69,7 +69,7 @@ fn a_mismatched_unit_is_rejected_by_name_and_survives_save_and_load() {
 
 #[test]
 fn a_unit_for_an_unitless_variable_is_an_advisory_and_never_withholds() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let (train, _) = population(300, 53);

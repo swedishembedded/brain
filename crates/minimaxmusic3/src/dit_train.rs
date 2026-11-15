@@ -1037,8 +1037,7 @@ mod tests {
     /// covering the naive arm twice.
     #[test]
     fn gradients_match_between_the_cpu_and_the_pooled_test_device() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
-            brain_testutil::skip_unavailable("dit_train cross-backend gradients: MOE_SKIP_GPU_TESTS set");
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         for (label, cfg, length) in [("below the tile crossover", DitConfig::tiny(), 3usize), ("above it", tiled_config().0, tiled_config().1)] {

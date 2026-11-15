@@ -78,7 +78,7 @@ fn digest(y: &[f32]) -> (f64, f64, f32, f32) {
 
 #[test]
 fn the_forward_graph_still_computes_what_it_computed_before() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let cfg = cfg();

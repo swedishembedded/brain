@@ -38,6 +38,7 @@ serde_json.workspace = true
 brain-qwen3tts = { workspace = true, optional = true }
 
 [dev-dependencies]
+brain-testutil.workspace = true
 # Integration tests drive the controller with a real tiny GPT, a real tiny YOLO,
 # and the codec helpers (base64/PPM) for synthetic frames.
 brain-gpt2.workspace = true

@@ -61,7 +61,7 @@ fn models(visits: u32, backbone: Backbone) -> (Horizon, Horizon) {
 
 #[test]
 fn the_selected_device_matches_the_cpu() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     for (visits, backbone) in [

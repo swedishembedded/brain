@@ -17,7 +17,7 @@ use horizon::{Horizon, HorizonConfig};
 
 #[test]
 fn the_forecast_head_recovers_a_known_trajectory() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let (train, _) = population_with_followup(20_000, 1);

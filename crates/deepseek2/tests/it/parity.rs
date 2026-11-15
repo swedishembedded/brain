@@ -88,8 +88,7 @@ use deepseek2::DeepseekV2;
 
 /// The model-store lookup, the one-off fp32 expansion, the CPU-backend pin and
 /// the inference build - shared with `tests/generate.rs`.
-#[path = "../common/real_lm.rs"]
-mod real_lm;
+use crate::real_lm;
 
 /// Same reasoning as `sam1`'s: identical Q8_0 blocks on both sides.
 const FLOOR: f64 = 0.999;

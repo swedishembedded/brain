@@ -52,6 +52,9 @@ if [ -n "$new" ]; then
   if printf '%s\n' "$new" | grep -q $'\tCARGO_BIN_EXE_'; then
     echo "  A test finds its package's binary with brain_testutil::package_bin(name)."
   fi
+  if printf '%s\n' "$new" | grep -q $'\tCARGO_MANIFEST_DIR$'; then
+    echo "  A file of the checkout is brain_testutil::repo_path(rel), one of the package brain_testutil::crate_path(rel)."
+  fi
 fi
 if [ -n "$stale" ]; then
   fail=1

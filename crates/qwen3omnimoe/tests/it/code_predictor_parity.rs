@@ -70,7 +70,7 @@ fn matches_the_real_code_predictor() {
         brain_testutil::skip("index doesn't (yet) have the shard holding talker.code_predictor.lm_head");
         return;
     };
-    let golden_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/golden/omni/omni_code_predictor.safetensors");
+    let golden_path = std::path::PathBuf::from(brain_testutil::crate_path("")).join("../../testdata/golden/omni/omni_code_predictor.safetensors");
     if !golden_path.exists() {
         brain_testutil::skip(&format!("{golden_path:?} missing (run `make testdata/fetch`)"));
         return;

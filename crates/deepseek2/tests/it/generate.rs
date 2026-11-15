@@ -61,8 +61,7 @@
 
 /// The model-store lookup, the one-off fp32 expansion, the CPU-backend pin and
 /// the inference build - shared with `tests/parity.rs`.
-#[path = "../common/real_lm.rs"]
-mod real_lm;
+use crate::real_lm;
 
 /// llama.cpp's greedy continuation of `"Hello"` under this checkpoint, prompt
 /// included: `result[i + 1]` is the greedy argmax after `result[0..=i]`.

@@ -1921,7 +1921,7 @@ mod tests {
     /// the source init exactly. GPU-gated (testgpu / MOE_SKIP_GPU).
     #[test]
     fn streaming_load_matches_eager() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let cfg = LfmConfig::tiny();
@@ -1985,7 +1985,7 @@ mod tests {
     /// buffer" seam the way qwen3's paged decode scratch does).
     #[test]
     fn rope_yarn_kernel_matches_a_host_computed_rotation() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let gpu = gpu_core::testgpu::dev(PIPELINES);
@@ -2034,7 +2034,7 @@ mod tests {
     /// drift from it.
     #[test]
     fn yarn_at_factor_one_reproduces_the_plain_path_exactly() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let cfg = LfmConfig::tiny();
@@ -2060,7 +2060,7 @@ mod tests {
     /// never read.
     #[test]
     fn yarn_scaling_above_one_changes_the_forward_output() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let cfg = LfmConfig::tiny();
@@ -2086,7 +2086,7 @@ mod tests {
     /// `rope_scaling` are the "32k" part under test here.
     #[test]
     fn a_32k_configured_checkpoint_builds_and_runs_a_forward_pass() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let mut cfg = LfmConfig::tiny();

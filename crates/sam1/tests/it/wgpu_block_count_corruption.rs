@@ -163,7 +163,7 @@ fn assert_prefix_unaffected_by_a_later_block(backend_name: &str, gpu_a: Gpu, n_a
 }
 
 fn skip() -> bool {
-    std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+    brain_testutil::gpu_tests_skipped()
 }
 
 /// Control: the CPU backend must hold the invariant. If this fails the

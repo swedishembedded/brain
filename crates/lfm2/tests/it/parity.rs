@@ -40,7 +40,7 @@ fn rel_l2(got: &[f32], want: &[f32]) -> f64 {
 /// override the root with `BRAIN_TESTDATA`).
 fn fixture(name: &str) -> String {
     let root = std::env::var("BRAIN_TESTDATA")
-        .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata").to_string());
+        .unwrap_or_else(|_| brain_testutil::repo_path("testdata").to_string());
     format!("{root}/golden/lfm/{name}.safetensors")
 }
 

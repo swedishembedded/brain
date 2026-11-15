@@ -41,7 +41,7 @@
 //!     cargo test -p brain-qwen35 --test streaming_forward -- --ignored --nocapture --test-threads=1
 //! ```
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use checkpoint::mmap::MmapSafetensors;
 use gpu_core::Gpu;
@@ -53,7 +53,7 @@ fn checkpoint_dir() -> Option<PathBuf> {
 }
 
 fn golden_dir(l: usize) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/golden/qwen35").join(format!("real_layer_{l}"))
+    std::path::PathBuf::from(brain_testutil::crate_path("")).join("../../testdata/golden/qwen35").join(format!("real_layer_{l}"))
 }
 
 /// Current process `VmHWM` (peak resident set), GiB - same `/proc/self/status`

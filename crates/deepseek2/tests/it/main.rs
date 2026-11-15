@@ -7,6 +7,8 @@
 //! process-wide state (the current directory, environment variables): the
 //! others run beside it.
 
+#[path = "../common/real_lm.rs"]
+mod real_lm;
 mod backend_parity;
 mod chunked_prefill;
 mod decode_throughput;

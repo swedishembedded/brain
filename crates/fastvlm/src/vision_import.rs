@@ -183,10 +183,6 @@ pub fn build_vision_weights(tensors: &[(String, Vec<f32>)]) -> HashMap<String, V
 mod tests {
 
 use brain_testutil::model_dir;
-#[allow(dead_code)]
-fn repo_path(rel: &str) -> String {
-    format!("{}/../../{rel}", env!("CARGO_MANIFEST_DIR"))
-}
     use super::*;
     use crate::encoder::{ctx, Encoder, PIPELINES};
     use gpu_core::Gpu;

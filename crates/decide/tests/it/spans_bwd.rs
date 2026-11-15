@@ -23,7 +23,7 @@ use decide::decide::{Decide, Limits};
 use decide::primitives::{Opt, Question};
 
 fn model() -> Option<Decide> {
-    let tok_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata/decide/tokenizer/tokenizer.json");
+    let tok_path = &brain_testutil::repo_path("testdata/decide/tokenizer/tokenizer.json");
     let tok = match data::wordpiece::WordPiece::from_file(tok_path) {
         Ok(t) => t,
         Err(e) => {

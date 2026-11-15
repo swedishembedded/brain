@@ -10,7 +10,7 @@ use runtime::{Controller, FakeInferModel, GenConfig, Registry, YoloDetect};
 
 #[test]
 fn real_tiny_yolo_emits_object_detected() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     // Random-weight tiny YOLO (no training): we only assert the controller emits

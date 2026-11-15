@@ -64,7 +64,7 @@ fn checkpoint() -> Option<String> {
 /// The reference photographs, already at the model's own 518x392 grid so the
 /// test measures the reconstruction rather than a resampling of it.
 fn photographs() -> Option<Vec<imaging::Rgb8>> {
-    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata/worldmirror2");
+    let dir = &brain_testutil::repo_path("testdata/worldmirror2");
     let Ok(rd) = std::fs::read_dir(dir) else {
         brain_testutil::skip(&format!("{dir} absent (reference photographs are not committed here)"));
         return None;

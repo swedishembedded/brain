@@ -53,7 +53,7 @@ mod tests {
         use fincast::model::Fincast;
         use std::collections::HashMap;
 
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return; // building the device model needs a backend
         }
         let cfg = FincastConfig::tiny();

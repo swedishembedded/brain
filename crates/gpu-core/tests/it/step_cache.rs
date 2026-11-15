@@ -74,10 +74,9 @@ type DeviceFactory = (&'static str, Box<dyn Fn() -> Gpu>);
 /// `Gpu::new` (which deadlocks the driver under `--test-threads`).
 fn devices(pipes: &'static [(&'static str, &'static str)]) -> Vec<DeviceFactory> {
     let mut v: Vec<DeviceFactory> = Vec::new();
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_err() {
+    if !brain_testutil::gpu_tests_skipped() {
         v.push(("default", Box::new(move || gpu_core::testgpu::dev(pipes))));
     } else {
-        brain_testutil::skip_unavailable("MOE_SKIP_GPU_TESTS set: the default (GPU) device is not exercised");
     }
     v.push(("cpu-jit", Box::new(move || Gpu::new_cpu(pipes))));
     v

@@ -63,7 +63,7 @@ fn lfm_onnx_graph_is_well_formed() {
 /// Parity: exported graph through OpenVINO (CPU plugin) vs brain's forward.
 #[test]
 fn lfm_onnx_matches_brain_forward() {
-    if std::env::var("BRAIN_OV_PROBE").is_err() || std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if std::env::var("BRAIN_OV_PROBE").is_err() || brain_testutil::gpu_tests_skipped() {
         brain_testutil::skip_unavailable("set BRAIN_OV_PROBE (and a working backend) for OpenVINO parity");
         return;
     }

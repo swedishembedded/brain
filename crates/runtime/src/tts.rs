@@ -157,7 +157,7 @@ mod tests {
     /// (`Qwen/Qwen3-TTS-12Hz-0.6B-Base`). Overridable with
     /// `BRAIN_QWEN3TTS_WEIGHTS`; the HF checkpoint dir has no in-repo default and
     /// must come from `BRAIN_QWEN3TTS_CKPT`.
-    const DEFAULT_WEIGHTS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../out/tts-base06");
+    const DEFAULT_WEIGHTS: &str = brain_testutil::repo_path("out/tts-base06");
 
     /// The codec runs at 12.5 Hz against a 24 kHz waveform, so one codec frame
     /// decodes to exactly 1920 samples.

@@ -171,7 +171,7 @@ fn pair(stack: StackConfig, visits: u32) -> (Horizon, Horizon) {
 
 #[test]
 fn the_selected_device_matches_the_cpu() {
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     // 3 visit slots fit one chunk; 20 span two.

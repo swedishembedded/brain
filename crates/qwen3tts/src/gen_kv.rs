@@ -567,7 +567,7 @@ mod tests {
     use std::time::Instant;
 
     fn gpu_disabled() -> bool {
-        std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+        brain_testutil::gpu_tests_skipped()
     }
 
     /// The SIMD `dot` must agree with the strictly-scalar reference within a few

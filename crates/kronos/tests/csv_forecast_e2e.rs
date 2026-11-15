@@ -38,7 +38,9 @@ use forecast::ForecastModel;
 
 /// The committed example series, resolved repo-relative (an in-repo artifact,
 /// never an absolute machine path).
-const CSV: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/synthetic_hourly.csv");
+fn csv_path() -> String {
+    brain_testutil::crate_path("tests/data/synthetic_hourly.csv")
+}
 
 /// The scored configuration. Eight disjoint held-out windows rather than four:
 /// coverage is strongly correlated WITHIN a window (a forecast either brackets
@@ -56,8 +58,9 @@ const ORIGINS: usize = 8;
 const SAMPLES: usize = 16;
 
 fn series() -> forecast::OhlcvSeries {
-    let text = std::fs::read_to_string(CSV).unwrap_or_else(|e| panic!("read {CSV}: {e}"));
-    forecast::parse_ohlcv(&text).unwrap_or_else(|e| panic!("{CSV}: {e}"))
+    let csv = csv_path();
+    let text = std::fs::read_to_string(&csv).unwrap_or_else(|e| panic!("read {csv}: {e}"));
+    forecast::parse_ohlcv(&text).unwrap_or_else(|e| panic!("{csv}: {e}"))
 }
 
 /// The committed CSV must stay parseable and long enough for the scored
@@ -151,8 +154,8 @@ fn forecasting_the_example_csv_yields_a_calibrated_widening_band() {
     let (Some(tok), Some(dec)) = (env("BRAIN_KRONOS_TOKENIZER"), env("BRAIN_KRONOS_DECODER")) else {
         return brain_testutil::skip("BRAIN_KRONOS_TOKENIZER / BRAIN_KRONOS_DECODER unset; no CSV-to-forecast e2e");
     };
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
-        return brain_testutil::skip_unavailable("MOE_SKIP_GPU_TESTS is set");
+    if brain_testutil::gpu_tests_skipped() {
+        return;
     }
     let model = kronos::KronosForecaster::load(&tok, &dec).expect("load kronos");
     let s = series();
@@ -258,8 +261,8 @@ fn the_chart_renders_from_a_real_forecast() {
     if !forecast::chart::gnuplot_available() {
         return brain_testutil::skip_unavailable("gnuplot is not installed on this machine");
     }
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
-        return brain_testutil::skip_unavailable("MOE_SKIP_GPU_TESTS is set");
+    if brain_testutil::gpu_tests_skipped() {
+        return;
     }
     let model = kronos::KronosForecaster::load(&tok, &dec).expect("load kronos");
     let s = series();

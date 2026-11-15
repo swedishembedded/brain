@@ -25,8 +25,8 @@ fn dump_embedding_tables() {
     let Ok(dec) = std::env::var("BRAIN_KRONOS_DECODER") else {
         return brain_testutil::skip("BRAIN_KRONOS_DECODER unset; no embedding tables to dump");
     };
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
-        return brain_testutil::skip_unavailable("MOE_SKIP_GPU_TESTS is set");
+    if brain_testutil::gpu_tests_skipped() {
+        return;
     }
     let (cfg, w) = import::load_decoder(&dec).expect("load kronos decoder");
     let d = cfg.d_model;
@@ -53,8 +53,8 @@ fn cached_matches_uncached_and_is_faster() {
     let (Ok(tok), Ok(dec)) = (std::env::var("BRAIN_KRONOS_TOKENIZER"), std::env::var("BRAIN_KRONOS_DECODER")) else {
         return brain_testutil::skip("BRAIN_KRONOS_TOKENIZER / BRAIN_KRONOS_DECODER unset; no KV-cache parity");
     };
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
-        return brain_testutil::skip_unavailable("MOE_SKIP_GPU_TESTS is set");
+    if brain_testutil::gpu_tests_skipped() {
+        return;
     }
     let m = import::load_model(&tok, &dec).expect("load kronos model");
     let feat = m.feat();

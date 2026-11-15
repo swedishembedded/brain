@@ -265,8 +265,8 @@ mod tests {
     /// `BRAIN_QWEN3TTS_SPEAKER` and GPU tests enabled.
     #[test]
     fn speaker_similarity_identical_is_one_gated() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
-            return brain_testutil::skip_unavailable("MOE_SKIP_GPU_TESTS set");
+        if brain_testutil::gpu_tests_skipped() {
+            return;
         }
         let weights = match std::env::var("BRAIN_QWEN3TTS_SPEAKER") {
             Ok(p) => p,

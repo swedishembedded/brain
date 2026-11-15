@@ -170,7 +170,7 @@ mod tests {
 
     #[test]
     fn vq_argmin_matches_brute_force() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let (m, k, d) = (37usize, 19usize, 8usize);
@@ -192,7 +192,7 @@ mod tests {
 
     #[test]
     fn vq_argmin_ties_pick_lowest_index() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         // Two identical codebook rows: the query must map to the LOWER index.
@@ -211,7 +211,7 @@ mod tests {
 
     #[test]
     fn vq_argmax_dot_is_scale_invariant_after_norm() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         // Cosine picks the best-aligned code regardless of magnitude when

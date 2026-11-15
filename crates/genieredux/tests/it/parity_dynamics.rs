@@ -12,10 +12,7 @@ use gpu_core::Gpu;
 use genieredux::import::{import_dynamics, import_tokenizer};
 use genieredux::{dynamics_forward, kernel_sources};
 
-#[allow(dead_code)]
-fn repo_path(rel: &str) -> String {
-    format!("{}/../../{rel}", env!("CARGO_MANIFEST_DIR"))
-}
+use brain_testutil::repo_path;
 
 
 fn read_f32(p: &str) -> Vec<f32> {

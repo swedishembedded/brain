@@ -13,7 +13,7 @@ use onnx::onnx::ModelProto;
 use yolov8::{Yolo, YoloConfig};
 
 fn skip() -> bool {
-    std::env::var("MOE_SKIP_GPU_TESTS").map(|v| !v.is_empty()).unwrap_or(false)
+    brain_testutil::gpu_tests_skipped()
 }
 
 fn tmp(name: &str) -> String {

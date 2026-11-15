@@ -33,7 +33,7 @@ use model::{cosine_lr, Batch, FitOpts, Model};
 use toyseq2seq::{Seq2Seq, Seq2SeqConfig};
 
 fn skip() -> bool {
-    std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+    brain_testutil::gpu_tests_skipped()
 }
 
 /// Alphabet of `n_sym` symbols, plus a dedicated BOS id = `n_sym`. Vocab is

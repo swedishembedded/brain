@@ -53,7 +53,7 @@ fn full_forward_matches_the_reference() {
         brain_testutil::skip("CHRONOS2_WEIGHTS unset");
         return;
     };
-    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let golden = testdata_path("golden/chronos2");

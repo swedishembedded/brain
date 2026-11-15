@@ -5195,7 +5195,7 @@ mod rmsnorm_dx_variant_agreement {
 
     #[test]
     fn the_backward_tape_norms_match_the_host_reference() {
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        if brain_testutil::gpu_tests_skipped() {
             return;
         }
         let c = crate::config::Qwen35Config::qwen35_35b_a3b();
