@@ -76,44 +76,11 @@ pub struct LiveResources {
     pub sparse_backed_bytes: u64,
 }
 
-/// Monotonic, process-wide totals of the calls whose per-step repetition is a
-/// performance defect - the counterpart of [`LiveResources`], which proves
-/// balance but cannot see an allocate-and-free pair per step.
-///
-/// A steady-state decode token that allocates, launches one kernel at a time or
-/// fails to replay shows here by differencing two readings around it; none of
-/// these ever decreases.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct CallTotals {
-    /// `cuMemAlloc` calls made, whether or not freed since.
-    pub device_alloc_calls: u64,
-    /// Individual kernel launch calls the host made into the driver
-    /// (a graph capture counts the launches it records).
-    pub host_launches: u64,
-    /// Captured graphs replayed.
-    pub graph_replays: u64,
-    /// Blocks taken from a stream-ordered pool (`cuMemAllocFromPoolAsync`),
-    /// whether or not freed since: the pooled counterpart of
-    /// [`Self::device_alloc_calls`].
-    pub pool_alloc_calls: u64,
-    /// Nanoseconds the host spent recording, resolving and issuing
-    /// submissions: everything inside `submit`, `flush` and the end of a pass,
-    /// never the time spent waiting for the device.
-    pub submit_nanos: u64,
-    /// Nanoseconds the host spent blocked in `poll_wait` for the device to
-    /// drain. A step's wall time minus this is the time the host was busy; a
-    /// step whose busy time is close to its wall time is host-bound.
-    pub wait_nanos: u64,
-    /// `cuMemsetD8Async` calls that cleared a fresh allocation or a graph
-    /// clear, and the bytes they cleared. Device work no kernel table shows.
-    pub zero_calls: u64,
-    pub zeroed_bytes: u64,
-    /// Allocations handed out without a clear (`Backend::storage_uninit`), and their bytes: the clears
-    /// the caller's full-overwrite promise saved.
-    pub uninit_calls: u64,
-    pub uninit_bytes: u64,
-}
+pub use backend_api::CallTotals;
 
+// The process-wide `CallTotals`: every handle's calls together. A figure that has to be one model's own is read from
+// its handle instead (`backend_api::Backend::call_totals`, kept by `Calls`); this sum moves whenever any other handle
+// of the process works.
 static TOTAL_DEVICE_ALLOC_CALLS: AtomicU64 = AtomicU64::new(0);
 static TOTAL_HOST_LAUNCHES: AtomicU64 = AtomicU64::new(0);
 static TOTAL_GRAPH_REPLAYS: AtomicU64 = AtomicU64::new(0);
@@ -125,7 +92,8 @@ static TOTAL_ZEROED_BYTES: AtomicU64 = AtomicU64::new(0);
 static TOTAL_UNINIT_CALLS: AtomicU64 = AtomicU64::new(0);
 static TOTAL_UNINIT_BYTES: AtomicU64 = AtomicU64::new(0);
 
-/// See [`CallTotals`].
+/// The process-wide [`CallTotals`]: every handle's calls together, so it moves whenever any other handle of the process
+/// works. One model's own figure is its handle's (`backend_api::Backend::call_totals`).
 pub fn call_totals() -> CallTotals {
     CallTotals {
         device_alloc_calls: TOTAL_DEVICE_ALLOC_CALLS.load(Ordering::Relaxed),
@@ -141,22 +109,75 @@ pub fn call_totals() -> CallTotals {
     }
 }
 
-pub(crate) fn host_launched(n: u64) {
-    TOTAL_HOST_LAUNCHES.fetch_add(n, Ordering::Relaxed);
+/// One handle's [`CallTotals`], scoped as [`InUse`] is: a handle opened on its own starts its own, a handle `share`
+/// gives counts into its parent's. Every count also lands in the process-wide totals, so the two can never disagree
+/// about what was counted.
+#[derive(Debug, Default)]
+pub(crate) struct Calls {
+    device_alloc_calls: AtomicU64,
+    host_launches: AtomicU64,
+    graph_replays: AtomicU64,
+    pool_alloc_calls: AtomicU64,
+    submit_nanos: AtomicU64,
+    wait_nanos: AtomicU64,
+    zero_calls: AtomicU64,
+    zeroed_bytes: AtomicU64,
+    uninit_calls: AtomicU64,
+    uninit_bytes: AtomicU64,
 }
-pub(crate) fn host_submitted(nanos: u64) {
-    TOTAL_SUBMIT_NANOS.fetch_add(nanos, Ordering::Relaxed);
+
+fn bump(own: &AtomicU64, total: &AtomicU64, n: u64) {
+    own.fetch_add(n, Ordering::Relaxed);
+    total.fetch_add(n, Ordering::Relaxed);
 }
-pub(crate) fn left_uninitialised(bytes: usize) {
-    TOTAL_UNINIT_CALLS.fetch_add(1, Ordering::Relaxed);
-    TOTAL_UNINIT_BYTES.fetch_add(bytes as u64, Ordering::Relaxed);
-}
-pub(crate) fn zeroed(bytes: usize) {
-    TOTAL_ZERO_CALLS.fetch_add(1, Ordering::Relaxed);
-    TOTAL_ZEROED_BYTES.fetch_add(bytes as u64, Ordering::Relaxed);
-    let bucket = (bytes.max(1).ilog2() as usize).min(ZERO_BUCKETS - 1);
-    ZERO_CALLS_BY_SIZE[bucket].fetch_add(1, Ordering::Relaxed);
-    ZERO_BYTES_BY_SIZE[bucket].fetch_add(bytes as u64, Ordering::Relaxed);
+
+impl Calls {
+    pub(crate) fn read(&self) -> CallTotals {
+        CallTotals {
+            device_alloc_calls: self.device_alloc_calls.load(Ordering::Relaxed),
+            host_launches: self.host_launches.load(Ordering::Relaxed),
+            graph_replays: self.graph_replays.load(Ordering::Relaxed),
+            pool_alloc_calls: self.pool_alloc_calls.load(Ordering::Relaxed),
+            submit_nanos: self.submit_nanos.load(Ordering::Relaxed),
+            wait_nanos: self.wait_nanos.load(Ordering::Relaxed),
+            zero_calls: self.zero_calls.load(Ordering::Relaxed),
+            zeroed_bytes: self.zeroed_bytes.load(Ordering::Relaxed),
+            uninit_calls: self.uninit_calls.load(Ordering::Relaxed),
+            uninit_bytes: self.uninit_bytes.load(Ordering::Relaxed),
+        }
+    }
+
+    /// A `cuMemAlloc` the driver granted.
+    pub(crate) fn device_allocated(&self) {
+        bump(&self.device_alloc_calls, &TOTAL_DEVICE_ALLOC_CALLS, 1);
+    }
+    /// A block taken from a stream-ordered pool.
+    pub(crate) fn pool_allocated(&self) {
+        bump(&self.pool_alloc_calls, &TOTAL_POOL_ALLOC_CALLS, 1);
+    }
+    pub(crate) fn host_launched(&self, n: u64) {
+        bump(&self.host_launches, &TOTAL_HOST_LAUNCHES, n);
+    }
+    pub(crate) fn graph_replayed(&self) {
+        bump(&self.graph_replays, &TOTAL_GRAPH_REPLAYS, 1);
+    }
+    pub(crate) fn host_submitted(&self, nanos: u64) {
+        bump(&self.submit_nanos, &TOTAL_SUBMIT_NANOS, nanos);
+    }
+    pub(crate) fn host_waited(&self, nanos: u64) {
+        bump(&self.wait_nanos, &TOTAL_WAIT_NANOS, nanos);
+    }
+    pub(crate) fn left_uninitialised(&self, bytes: usize) {
+        bump(&self.uninit_calls, &TOTAL_UNINIT_CALLS, 1);
+        bump(&self.uninit_bytes, &TOTAL_UNINIT_BYTES, bytes as u64);
+    }
+    pub(crate) fn zeroed(&self, bytes: usize) {
+        bump(&self.zero_calls, &TOTAL_ZERO_CALLS, 1);
+        bump(&self.zeroed_bytes, &TOTAL_ZEROED_BYTES, bytes as u64);
+        let bucket = (bytes.max(1).ilog2() as usize).min(ZERO_BUCKETS - 1);
+        ZERO_CALLS_BY_SIZE[bucket].fetch_add(1, Ordering::Relaxed);
+        ZERO_BYTES_BY_SIZE[bucket].fetch_add(bytes as u64, Ordering::Relaxed);
+    }
 }
 
 const ZERO_BUCKETS: usize = 48;
@@ -171,12 +192,6 @@ pub fn zeroed_by_size() -> Vec<(u64, u64)> {
     (0..ZERO_BUCKETS)
         .map(|i| (ZERO_CALLS_BY_SIZE[i].load(Ordering::Relaxed), ZERO_BYTES_BY_SIZE[i].load(Ordering::Relaxed)))
         .collect()
-}
-pub(crate) fn host_waited(nanos: u64) {
-    TOTAL_WAIT_NANOS.fetch_add(nanos, Ordering::Relaxed);
-}
-pub(crate) fn graph_replayed() {
-    TOTAL_GRAPH_REPLAYS.fetch_add(1, Ordering::Relaxed);
 }
 
 struct Counters {
@@ -297,7 +312,6 @@ impl InUse {
 }
 
 pub(crate) fn device_alloc(bytes: usize) {
-    TOTAL_DEVICE_ALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
     up(&COUNTERS.device_allocs);
     COUNTERS.device_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
 }
@@ -356,7 +370,6 @@ pub(crate) fn mem_pool_destroyed() {
     down(&COUNTERS.mem_pools);
 }
 pub(crate) fn pool_alloc(bytes: usize) {
-    TOTAL_POOL_ALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
     up(&COUNTERS.pool_allocs);
     COUNTERS.pool_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
 }

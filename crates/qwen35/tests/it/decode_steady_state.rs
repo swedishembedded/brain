@@ -22,25 +22,19 @@
 //!   once (in a few chunks, so the card starts before the host has built the
 //!   rest) and replayed, the same chunks every token.
 //!
+//! The calls are the model's own handle's (`Gpu::call_totals`), so the other
+//! tests of the binary may run on the card meanwhile.
+//!
 //! The second test is what keeps the first two honest: reusing buffers without
 //! zeroing them is only legal if no kernel reads what it did not write, so the
 //! same token sequence decoded twice through the same recycled buffers must be
 //! BIT-identical, not close.
 
-use backend_cuda::call_totals;
 use gpu_core::select::Dtype;
 use gpu_core::Gpu;
 use model::ops::TierPolicy;
 use qwen35::config::Qwen35Config;
 use qwen35::model::{pipelines, Qwen35};
-use std::sync::{Mutex, MutexGuard};
-
-/// The call totals are process-global.
-static SERIAL: Mutex<()> = Mutex::new(());
-
-fn serial() -> MutexGuard<'static, ()> {
-    SERIAL.lock().unwrap_or_else(|e| e.into_inner())
-}
 
 fn model(gpu: Gpu) -> (Qwen35, Vec<u32>) {
     let cfg = Qwen35Config::tiny_i8();
@@ -53,7 +47,6 @@ fn model(gpu: Gpu) -> (Qwen35, Vec<u32>) {
 
 #[test]
 fn a_steady_state_decode_token_allocates_nothing_and_only_replays_graphs() {
-    let _s = serial();
     let Ok(gpu) = Gpu::try_new_cuda(pipelines()) else {
         brain_testutil::skip_unavailable("no usable CUDA backend");
         return;
@@ -65,12 +58,13 @@ fn a_steady_state_decode_token_allocates_nothing_and_only_replays_graphs() {
     for &t in &tokens[..4] {
         m.step(t);
     }
-    let before = call_totals();
+    let calls = || m.gpu.call_totals().expect("the CUDA backend counts its host calls");
+    let before = calls();
     let measured = 6;
     for &t in &tokens[4..4 + measured] {
         m.step(t);
     }
-    let after = call_totals();
+    let after = calls();
     assert_eq!(after.device_alloc_calls - before.device_alloc_calls, 0, "a steady-state token called cuMemAlloc");
     assert_eq!(after.host_launches - before.host_launches, 0, "a steady-state token launched kernels one at a time");
     // A token is a few graphs, not one: the layer stack is issued in chunks so
@@ -83,7 +77,6 @@ fn a_steady_state_decode_token_allocates_nothing_and_only_replays_graphs() {
 
 #[test]
 fn a_decode_through_recycled_buffers_is_bit_identical_to_the_first() {
-    let _s = serial();
     let Ok(gpu) = Gpu::try_new_cuda(pipelines()) else {
         brain_testutil::skip_unavailable("no usable CUDA backend");
         return;

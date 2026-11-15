@@ -96,27 +96,28 @@ fn cost(t: u32, segment_tokens: Option<u32>) {
     let baseline = live_bytes();
 
     let sampler = PeakSampler::start();
-    let launches0 = gpu_core::cuda_call_totals().host_launches;
+    let launched = || g.call_totals().map_or(0, |t| t.host_launches);
+    let launches0 = launched();
     let t0 = Instant::now();
     let (fwd_peak, fwd_secs, fwd_launches);
     let outputs = match segment_tokens {
         None => {
             let (gated, acts) = gdn_mixer_fwd(&g, &ids, &shape, &dw.weights(), &mixed, &b, &a, &z, t, true);
             let _ = g.read(&gated, 1);
-            (fwd_peak, fwd_secs, fwd_launches) = (sampler.peak(), t0.elapsed().as_secs_f64(), gpu_core::cuda_call_totals().host_launches - launches0);
+            (fwd_peak, fwd_secs, fwd_launches) = (sampler.peak(), t0.elapsed().as_secs_f64(), launched() - launches0);
             let acts = acts.expect("acts");
             gdn_mixer_bwd(&g, &ids, &shape, &dw.weights(), &dw.grads(), &acts, &d_gated, t)
         }
         Some(s) => {
             let (gated, bounds) = gdn_mixer_seg_fwd(&g, &ids, &shape, &dw.weights(), &inputs, s);
             let _ = g.read(&gated, 1);
-            (fwd_peak, fwd_secs, fwd_launches) = (sampler.peak(), t0.elapsed().as_secs_f64(), gpu_core::cuda_call_totals().host_launches - launches0);
+            (fwd_peak, fwd_secs, fwd_launches) = (sampler.peak(), t0.elapsed().as_secs_f64(), launched() - launches0);
             gdn_mixer_seg_bwd(&g, &ids, &shape, &dw.weights(), &dw.grads(), &inputs, &bounds, &d_gated)
         }
     };
     let _ = g.read(&outputs.3, 1);
     let total_secs = t0.elapsed().as_secs_f64();
-    let launches = gpu_core::cuda_call_totals().host_launches - launches0;
+    let launches = launched() - launches0;
     let peak = sampler.peak();
     println!(
         "GDN-COST t={t} segment={segment_tokens:?} fwd_peak_mib={:.0} peak_mib={:.0} peak_kib_per_token={:.1} fwd_launches={fwd_launches} launches={launches} fwd_secs={fwd_secs:.2} secs={total_secs:.2}",

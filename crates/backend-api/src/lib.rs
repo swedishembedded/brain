@@ -1825,6 +1825,12 @@ pub trait Backend: Send + Sync {
         None
     }
 
+    /// The host-side call totals ([`CallTotals`]) of this handle and of every handle shared from it (`share`,
+    /// `share_urgent`), since the first of them was opened. `None` where the backend does not count them.
+    fn call_totals(&self) -> Option<CallTotals> {
+        None
+    }
+
     /// How this device reaches `peer`'s memory directly. The default has no such path, for the stated reason.
     fn peer_link(&self, _peer: &GpuIdentity) -> PeerLink {
         PeerLink::none(format!("the {} backend has no device-to-device path", self.kind()))
@@ -2166,6 +2172,58 @@ pub struct DeviceStats {
     /// multi-tensor optimizer's whole point is collapsing this from O(P)
     /// (one write per tensor per step) to O(1).
     pub writes: u64,
+}
+
+/// Monotonic totals of the host calls whose per-step repetition is a performance defect: a steady-state decode token
+/// that allocates from the driver, launches kernels one at a time or fails to replay shows by differencing two readings
+/// around it; none of these ever decreases.
+///
+/// Scoped like the device-memory tally behind [`Backend::memory_usage`]: one handle opened on its own and the handles
+/// shared from it count together, and nothing another handle does moves them, so a test or a benchmark reads its own
+/// model's figure while other models run on the same card in the same process.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CallTotals {
+    /// Allocations requested from the driver (`cuMemAlloc` on CUDA), whether or not freed since.
+    pub device_alloc_calls: u64,
+    /// Individual kernel launch calls the host made into the driver (a graph capture counts the launches it records).
+    pub host_launches: u64,
+    /// Captured graphs replayed.
+    pub graph_replays: u64,
+    /// Blocks taken from a stream-ordered pool, whether or not freed since: the pooled counterpart of
+    /// [`Self::device_alloc_calls`].
+    pub pool_alloc_calls: u64,
+    /// Nanoseconds the host spent recording, resolving and issuing submissions: everything inside `submit`, `flush`
+    /// and the end of a pass, never the time spent waiting for the device.
+    pub submit_nanos: u64,
+    /// Nanoseconds the host spent blocked in `poll_wait` for the device to drain. A step's wall time minus this is
+    /// the time the host was busy; a step whose busy time is close to its wall time is host-bound.
+    pub wait_nanos: u64,
+    /// Clears of a fresh allocation or a graph clear, and the bytes they cleared: device work no kernel table shows.
+    pub zero_calls: u64,
+    pub zeroed_bytes: u64,
+    /// Allocations handed out without a clear ([`Backend::storage_uninit`]), and their bytes: the clears the caller's
+    /// full-overwrite promise saved.
+    pub uninit_calls: u64,
+    pub uninit_bytes: u64,
+}
+
+/// The totals of two handle families together: what a model spread over several cards cost the host.
+impl std::ops::Add for CallTotals {
+    type Output = CallTotals;
+    fn add(self, o: CallTotals) -> CallTotals {
+        CallTotals {
+            device_alloc_calls: self.device_alloc_calls + o.device_alloc_calls,
+            host_launches: self.host_launches + o.host_launches,
+            graph_replays: self.graph_replays + o.graph_replays,
+            pool_alloc_calls: self.pool_alloc_calls + o.pool_alloc_calls,
+            submit_nanos: self.submit_nanos + o.submit_nanos,
+            wait_nanos: self.wait_nanos + o.wait_nanos,
+            zero_calls: self.zero_calls + o.zero_calls,
+            zeroed_bytes: self.zeroed_bytes + o.zeroed_bytes,
+            uninit_calls: self.uninit_calls + o.uninit_calls,
+            uninit_bytes: self.uninit_bytes + o.uninit_bytes,
+        }
+    }
 }
 
 /// wasm variant: no `Send + Sync` (WebGPU is single-threaded) and no blocking

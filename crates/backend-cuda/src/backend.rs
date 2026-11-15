@@ -1033,7 +1033,7 @@ impl CudaBackend {
         };
         launched.unwrap_or_else(|e| panic!("backend-cuda: launching kernel '{}' failed: {e}", r.compiled.name));
         self.counters.host_launches.fetch_add(1, Ordering::Relaxed);
-        crate::live::host_launched(1);
+        self.ctx.calls().host_launched(1);
         if let Some(start) = start {
             if let Some(end) = self.stamp() {
                 self.kernel_times.lock().unwrap_or_else(|e| e.into_inner()).pending.push((r.compiled.name.clone(), start, end));
@@ -1051,7 +1051,7 @@ impl CudaBackend {
             .library_gemm(gemm, r.args[0], r.args[1], r.args[2])
             .unwrap_or_else(|e| panic!("backend-cuda: the library GEMM {}x{}x{} failed: {e}", gemm.m, gemm.n, gemm.k));
         self.counters.host_launches.fetch_add(1, Ordering::Relaxed);
-        crate::live::host_launched(1);
+        self.ctx.calls().host_launched(1);
         if let Some(start) = start {
             if let Some(end) = self.stamp() {
                 self.kernel_times.lock().unwrap_or_else(|e| e.into_inner()).pending.push((gemm.label(), start, end));
@@ -1206,10 +1206,10 @@ impl CudaBackend {
     }
 
     /// Add `nanos` of host time spent inside a submission to this handle's
-    /// total and to the process-wide one ([`crate::live::CallTotals`]).
+    /// total and to the call totals it counts into ([`crate::live::CallTotals`]).
     fn bill_host(&self, nanos: u64) {
         self.counters.host_nanos.fetch_add(nanos, Ordering::Relaxed);
-        crate::live::host_submitted(nanos);
+        self.ctx.calls().host_submitted(nanos);
     }
 
     /// What this handle's submissions have cost the host so far - see
@@ -1294,7 +1294,7 @@ impl CudaBackend {
                         // paid, so a capture reads as a one-off cost rather
                         // than as free.
                         self.counters.host_launches.fetch_add(resolved.len() as u64, Ordering::Relaxed);
-                        crate::live::host_launched(resolved.len() as u64);
+                        self.ctx.calls().host_launched(resolved.len() as u64);
                         // Index 0 is the capture that just happened - a
                         // capture records the work but does not run it, so the
                         // submission is still owed its execution.
@@ -1502,7 +1502,7 @@ impl backend_api::Backend for CudaBackend {
         // Nothing clears the allocation: the caller promises a kernel writes every word first. A debug
         // build (every `cargo test`) fills it with 0xFF bytes instead, an f32 NaN and an i32 -1, so a
         // read of a word nobody wrote shows up in a test rather than as whatever the last tenant left.
-        crate::live::left_uninitialised(mem.len());
+        self.ctx.calls().left_uninitialised(mem.len());
         if cfg!(debug_assertions) {
             self.ctx.poison(&mem).unwrap_or_else(|e| panic!("backend-cuda: poisoning new storage failed: {e}"));
         }
@@ -2094,7 +2094,7 @@ impl backend_api::Backend for CudaBackend {
         self.refuse_during_capture("poll_wait");
         let waited = std::time::Instant::now();
         self.drain_staging();
-        crate::live::host_waited(waited.elapsed().as_nanos() as u64);
+        self.ctx.calls().host_waited(waited.elapsed().as_nanos() as u64);
         // The device has drained, so an ordering event no buffer names any more has nothing left to order.
         self.fence_events.lock().unwrap_or_else(|e| e.into_inner()).retain(|e| Arc::strong_count(e) > 1);
         if self.timing.load(Ordering::Acquire) {
@@ -2357,6 +2357,10 @@ impl backend_api::Backend for CudaBackend {
 
     fn release_held(&self) {
         self.issue_held();
+    }
+
+    fn call_totals(&self) -> Option<backend_api::CallTotals> {
+        Some(self.ctx.calls().read())
     }
 
     fn stats(&self) -> Option<DeviceStats> {

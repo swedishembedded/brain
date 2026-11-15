@@ -527,3 +527,35 @@ fn memory_usage_counts_this_handle_and_its_shares_only() {
     assert_eq!(usage().peak_live, 0, "a reset peak starts from the live bytes");
     drop(elsewhere);
 }
+
+/// `call_totals` is scoped as `memory_usage` is (`backend_api::CallTotals`): allocations and launches on a handle opened
+/// on its own, or on one for another kernel set, never move it, while those on a handle `share` gave from it do, and the
+/// shared handle reads the same totals. The process-wide totals (`backend_cuda::call_totals`) fail the first assertion
+/// whenever anything else in the process works, which is how a steady-state decode measured under a sibling test was
+/// charged the sibling's allocations.
+#[test]
+fn call_totals_count_this_handle_and_its_shares_only() {
+    let Some(own) = backend() else { return };
+    let other = CudaBackend::try_new(KERNELS).expect("a second handle");
+    let like = own.new_like(KERNELS).expect("a handle for another kernel set");
+    let shared = own.share().expect("a shared handle");
+    let totals = || own.call_totals().expect("the CUDA backend counts its host calls");
+    let start = totals();
+    let allocs = |t: &backend_api::CallTotals| t.device_alloc_calls + t.pool_alloc_calls;
+
+    let work = |b: &dyn backend_api::Backend| {
+        let (a, c, out) = (b.storage(64), b.storage(64), b.storage(64));
+        b.submit(&[], &[b.step(ADD2, &[&a, &c, &out], &[64], 64)]);
+        b.poll_wait();
+    };
+    work(&other);
+    work(&*like);
+    assert_eq!(totals(), start, "calls on other handles are not this handle's");
+    assert!(other.call_totals().is_some_and(|t| t.host_launches >= 1 && allocs(&t) >= 3), "the other handle counts its own calls");
+
+    work(&*shared);
+    let after = totals();
+    assert!(after.host_launches > start.host_launches, "a launch on a shared handle is the parent's");
+    assert!(allocs(&after) >= allocs(&start) + 3, "an allocation on a shared handle is the parent's");
+    assert_eq!(shared.call_totals(), Some(after), "a shared handle reads the same totals");
+}

@@ -23,21 +23,11 @@
 //! actually engaged - without it the identity above would hold trivially on a
 //! device that was never offered the kernels.
 
-use backend_cuda::call_totals;
 use gpu_core::select::Dtype;
 use gpu_core::Gpu;
 use model::ops::TierPolicy;
 use qwen35::config::Qwen35Config;
 use qwen35::model::{pipelines, Qwen35};
-use std::sync::{Mutex, MutexGuard};
-
-/// The call totals are process-global.
-static SERIAL: Mutex<()> = Mutex::new(());
-
-fn serial() -> MutexGuard<'static, ()> {
-    SERIAL.lock().unwrap_or_else(|e| e.into_inner())
-}
-
 /// The tiny int8 shape, and the same shape with the real model's 128-wide
 /// linear-attention heads - the only width the native GDN decode kernel serves,
 /// so the only one on which its wiring in the decode tape is exercised.
@@ -63,7 +53,6 @@ fn decode(m: &Qwen35, tokens: &[u32]) -> Vec<Vec<f32>> {
 }
 
 fn bit_identical(cfg: Qwen35Config) {
-    let _s = serial();
     let Ok(gpu) = Gpu::try_new_cuda(pipelines()) else {
         brain_testutil::skip_unavailable("no usable CUDA backend");
         return;
@@ -106,16 +95,16 @@ fn launches(gpu: &Gpu, cfg: &Qwen35Config, fusion: bool) -> u64 {
     let (m, tokens, _) = model(gpu.share(), cfg.clone());
     m.set_decode_fusion(fusion);
     m.reset_decode_cache();
-    let before = call_totals().host_launches;
+    let launches = || m.gpu.call_totals().expect("the CUDA backend counts its host calls").host_launches;
+    let before = launches();
     for &t in &tokens[..2] {
         m.step(t);
     }
-    call_totals().host_launches - before
+    launches() - before
 }
 
 #[test]
 fn the_fused_decode_tape_launches_fewer_kernels() {
-    let _s = serial();
     if withheld() {
         brain_testutil::skip_unavailable("native kernels are withheld in this process");
         return;
@@ -138,7 +127,6 @@ fn the_fused_decode_tape_launches_fewer_kernels() {
 /// step too: each of the three GDN layers drops its nineteen-kernel chain.
 #[test]
 fn the_gdn_step_is_one_launch_with_128_wide_heads() {
-    let _s = serial();
     if withheld() {
         brain_testutil::skip_unavailable("native kernels are withheld in this process");
         return;

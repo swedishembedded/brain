@@ -150,6 +150,9 @@ pub struct Context {
     /// The live device bytes this handle's allocations hold - see [`crate::live::InUse`]. Its own unless
     /// [`Context::charge_to`] joined it to another handle's.
     in_use: Arc<crate::live::InUse>,
+    /// The host calls this handle makes - see [`crate::live::Calls`]. Joined to another handle's with `in_use` by
+    /// [`Context::charge_to`].
+    calls: Arc<crate::live::Calls>,
     /// The stream-ordered pool backing held blocks, created on first use - see
     /// [`PoolRef`].
     pool: std::sync::OnceLock<Option<Arc<PoolRef>>>,
@@ -231,6 +234,7 @@ impl Context {
             pool_wanted: std::sync::atomic::AtomicBool::new(backend_api::runtime::stream_pool()),
             cache: Arc::new(BlockCache::new(d, fns, ctx, primary, 0)),
             in_use: Arc::default(),
+            calls: Arc::default(),
             capture_gate: Arc::new(Mutex::new(())),
             blas: std::sync::OnceLock::new(),
         };
@@ -293,10 +297,17 @@ impl Context {
         Ok(())
     }
 
-    /// Charge this handle's allocations to `parent`'s tally of live device bytes from now on, so a handle shared from
-    /// another reports what the two hold together ([`Context::memory_in_use`]).
+    /// Charge this handle's allocations to `parent`'s tally of live device bytes, and its host calls to `parent`'s call
+    /// totals, from now on, so a handle shared from another reports what the two hold and did together
+    /// ([`Context::memory_in_use`], [`Context::calls`]).
     pub(crate) fn charge_to(&mut self, parent: &Context) {
         self.in_use = parent.in_use.clone();
+        self.calls = parent.calls.clone();
+    }
+
+    /// The host-call totals this handle counts into (its own, or the parent's it was charged to).
+    pub(crate) fn calls(&self) -> &crate::live::Calls {
+        &self.calls
     }
 
     /// `(live device bytes this handle's allocations hold, their peak since [`Context::reset_memory_peak`])`.
@@ -442,6 +453,7 @@ impl Context {
                 }
                 self.d.check(rc, "cuMemAlloc")?;
                 crate::live::device_alloc(len);
+                self.calls.device_allocated();
                 (ptr, Fences::default())
             }
         };
@@ -501,6 +513,7 @@ impl Context {
                 pool.alloc(len)?
             }
         };
+        self.calls.pool_allocated();
         self.in_use.alloc(len);
         Ok(DeviceMem {
             d: self.d,
@@ -832,7 +845,7 @@ impl Context {
             return Ok(());
         }
         self.make_current()?;
-        crate::live::zeroed(mem.len);
+        self.calls.zeroed(mem.len);
         // SAFETY: `mem.ptr` names `mem.len` bytes on this context, and `mem`
         // outlives the enqueue; the caller keeps it alive until the stream has
         // drained (every caller here holds an `Arc` to it).

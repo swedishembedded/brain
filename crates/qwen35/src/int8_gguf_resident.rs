@@ -3317,6 +3317,13 @@ impl Qwen35GgufInstance {
         })
     }
 
+    /// The host calls this instance's stages have made (each stage's handle and those shared from it), summed over its
+    /// cards: what a profile charges the instance, whatever else the process runs meanwhile. Zero on a backend that does
+    /// not count them.
+    fn host_calls(&self) -> gpu_core::CudaCallTotals {
+        self.shards.iter().filter_map(|s| s.qwen35.gpu.call_totals()).fold(Default::default(), |sum, stage| sum + stage)
+    }
+
     /// [`Self::profile_decode`]'s two regions over `step`, called once per
     /// profiled pass with the pass index: the production flush path timed on
     /// the wall, then the same passes with per-dispatch timestamps armed.
@@ -3325,7 +3332,7 @@ impl Qwen35GgufInstance {
         // than a sampled id - the cost of a decode step is its shapes, which do
         // not depend on WHICH token it is, and reusing one id keeps the profile
         // from wandering into an EOS.
-        let totals0 = gpu_core::cuda_call_totals();
+        let totals0 = self.host_calls();
         let t0 = std::time::Instant::now();
         let mut step_s = Vec::with_capacity(steps as usize);
         for i in 0..steps {
@@ -3335,7 +3342,7 @@ impl Qwen35GgufInstance {
         }
         self.poll_wait();
         let wall_s = t0.elapsed().as_secs_f64();
-        let totals1 = gpu_core::cuda_call_totals();
+        let totals1 = self.host_calls();
 
         // Region 2: the same work with timestamp queries armed. A backend that
         // cannot time kernels reports no rows rather than a table of zeros.
@@ -3462,7 +3469,7 @@ impl Qwen35GgufInstance {
         self.head_argmax_rows(&hidden, batch);
         self.poll_wait();
 
-        let totals0 = gpu_core::cuda_call_totals();
+        let totals0 = self.host_calls();
         let t0 = std::time::Instant::now();
         let mut step_s = Vec::with_capacity(steps as usize);
         for _ in 0..steps {
@@ -3472,7 +3479,7 @@ impl Qwen35GgufInstance {
         }
         self.poll_wait();
         let wall_s = t0.elapsed().as_secs_f64();
-        let totals1 = gpu_core::cuda_call_totals();
+        let totals1 = self.host_calls();
 
         let timed = g.set_kernel_timing(true);
         g.reset_kernel_times();

@@ -1613,6 +1613,14 @@ mod native_facade {
             self.inner.stats()
         }
 
+        /// The host-call totals (driver allocations, kernel launches, graph replays, ...) of this handle together
+        /// with the handles shared from it and the one it was shared from ([`backend_api::CallTotals`]): what a model
+        /// built on this handle cost the host, whatever other handles of the process do meanwhile. `None` where the
+        /// backend does not count them.
+        pub fn call_totals(&self) -> Option<backend_api::CallTotals> {
+            self.inner.call_totals()
+        }
+
         /// Print the per-kernel `--kernel-profile` table now - the resident-model
         /// escape hatch for a profile that otherwise only prints at drop.
         pub fn dump_profile(&self) {

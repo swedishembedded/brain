@@ -11,7 +11,6 @@
 
 #![allow(dead_code)]
 
-use backend_cuda::call_totals;
 use gpu_core::select::Dtype;
 use model::kv_tier::KvTier;
 use qwen35::config::Qwen35Config;
@@ -20,7 +19,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use super::hf_fixture::{write_checkpoint_conditioned, write_tokenizer};
 
-/// The pinned candidate and the call totals are process-global.
+/// The pinned candidate is process-global.
 static SERIAL: Mutex<()> = Mutex::new(());
 
 pub fn serial() -> MutexGuard<'static, ()> {
@@ -51,13 +50,16 @@ pub fn decode(cfg: &Qwen35Config, fused: bool, tag: &str, rows: u32, kv: KvTier)
     let (inst, dir) = instance(cfg, tag, rows.max(4), kv);
     inst.set_fused_projections_decode(fused);
     inst.prefill_timed(&[3, 9, 4, 1, 7, 7, 2, 5, 8, 6, 1, 3]).expect("prefill");
-    let before = call_totals().host_launches;
+    // The instance is resident on one card: its one stage's handle counts every launch of the step.
+    assert_eq!(inst.stages(), 1, "the harness activates one card");
+    let launched = || inst.stage_gpu(0).call_totals().expect("the CUDA backend counts its host calls").host_launches;
+    let before = launched();
     let mut logits = Vec::new();
     let mut launches = 0;
     for step in 0..3u32 {
         logits.push(inst.decode_batch_at(&(0..rows).map(|i| (11 + step + 10 * i) % 60).collect::<Vec<_>>(), &(0..rows).map(|i| 12 + step - 2 * (i % 4) + i).collect::<Vec<_>>()).expect("batched decode"));
         if step == 0 {
-            launches = call_totals().host_launches - before;
+            launches = launched() - before;
         }
     }
     drop(inst);

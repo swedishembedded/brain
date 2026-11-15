@@ -24,10 +24,16 @@ the contract requires. `deepseek2ocr` sums three towers' handles and so counted 
   a `share`d handle charges its parent's, and a block is uncharged from the tally it was charged to.
 - A figure that has to be the model's own is read from the model's own handle; serialising tests is not a substitute
   for a tally that cannot see other handles.
+- The same holds for the host-call totals (driver allocations, launches, graph replays): `Backend::call_totals` is
+  scoped like `memory_usage`. Read process-wide, `decode_steady_state` saw a sibling test's `cuMemAlloc` calls as its
+  own steady-state token's, and every launch-count comparison moved with whatever ran beside it; their per-module
+  locks serialised them only against each other.
 
 ## Evidence
 
 `crates/backend-cuda/tests/it/backend_contract.rs`
 (`memory_usage_counts_this_handle_and_its_shares_only`, red against the process-wide tally), and the
 `streamed_construction`, `layer_streamed` and `recompute` tests of `lfm2`, `toyseq2seq`, `clip`, `florence2` and
-`sam1` passing at default parallelism.
+`sam1` passing at default parallelism. For the call totals: `call_totals_count_this_handle_and_its_shares_only` in
+the same file (red against the process-wide totals), and `qwen35`'s `decode_steady_state` passing beside the rest of
+its binary.

@@ -16,21 +16,11 @@
 //!
 //! CUDA backend only; skips elsewhere.
 
-use backend_cuda::call_totals;
 use gpu_core::select::Dtype;
 use gpu_core::Gpu;
 use model::ops::TierPolicy;
 use qwen35::config::Qwen35Config;
 use qwen35::model::{pipelines, Qwen35};
-use std::sync::{Mutex, MutexGuard};
-
-/// The call totals are process-global.
-static SERIAL: Mutex<()> = Mutex::new(());
-
-fn serial() -> MutexGuard<'static, ()> {
-    SERIAL.lock().unwrap_or_else(|e| e.into_inner())
-}
-
 const ROWS: u32 = 24;
 
 fn model(gpu: Gpu, cfg: &Qwen35Config) -> (Qwen35, Vec<u32>) {
@@ -50,7 +40,6 @@ fn prefill(m: &Qwen35, tokens: &[u32], fusion: bool) -> Vec<f32> {
 
 #[test]
 fn the_fused_prefill_round_is_bit_identical_to_the_unfused_one() {
-    let _s = serial();
     let Ok(gpu) = Gpu::try_new_cuda(pipelines()) else {
         brain_testutil::skip_unavailable("no usable CUDA backend");
         return;
@@ -64,7 +53,6 @@ fn the_fused_prefill_round_is_bit_identical_to_the_unfused_one() {
 
 #[test]
 fn the_fused_prefill_round_launches_fewer_kernels() {
-    let _s = serial();
     if !gpu_core::native_kernels_enabled() {
         brain_testutil::skip_unavailable("native kernels are withheld in this process");
         return;
@@ -77,9 +65,10 @@ fn the_fused_prefill_round_launches_fewer_kernels() {
     let (m, tokens) = model(gpu, &cfg);
     let launches = |fusion: bool| {
         prefill(&m, &tokens, fusion); // the first round pays kernel compilation and capture; count the next
-        let before = call_totals().host_launches;
+        let launched = || m.gpu.call_totals().expect("the CUDA backend counts its host calls").host_launches;
+        let before = launched();
         prefill(&m, &tokens, fusion);
-        call_totals().host_launches - before
+        launched() - before
     };
     let (fused, unfused) = (launches(true), launches(false));
     // Each layer folds away at least the three launches its second norm front is, and the first layer's front is

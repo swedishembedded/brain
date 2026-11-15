@@ -7,13 +7,12 @@
 // by sending an email to info@swedishembedded.com.
 
 //! What the host does per chunked-prefill round of the INT8 decoder on CUDA:
-//! driver launch calls, graph replays and allocations, from the process-wide
-//! call totals. A served 27B prompt is hundreds of such rounds, and the
+//! driver launch calls, graph replays and allocations, from the call totals of
+//! the model's own handle. A served 27B prompt is hundreds of such rounds, and the
 //! dispatch thread, not the card, bounds them once a round costs the host more
 //! than the device; this census is where a round that starts allocating, or
 //! stops replaying, shows up as a number.
 
-use backend_cuda::live::call_totals;
 use gpu_core::select::Dtype;
 use gpu_core::Gpu;
 use model::ops::TierPolicy;
@@ -37,13 +36,14 @@ fn a_steady_state_prefill_round_allocates_nothing_on_the_device() {
     m.prefill_chunked(&tokens[..ROUND], ROUND as u32);
 
     let rounds = tokens.len().div_ceil(ROUND) as u64;
+    let calls = || m.gpu.call_totals().expect("the CUDA backend counts its host calls");
     for pass in 0..3 {
         m.reset_decode_cache();
-        let before = call_totals();
+        let before = calls();
         let t = std::time::Instant::now();
         m.prefill_chunked(&tokens, ROUND as u32);
         let wall = t.elapsed();
-        let after = call_totals();
+        let after = calls();
         let per = |a: u64, b: u64| (a - b) / rounds;
         if pass > 0 {
             assert_eq!(after.device_alloc_calls, before.device_alloc_calls, "pass {pass}: a steady-state prefill round called cuMemAlloc, which synchronises the device");

@@ -707,7 +707,7 @@ impl GraphCache {
         ctx.record(&live.launched)?;
         self.in_flight = true;
         counters.replays.fetch_add(1, Ordering::Relaxed);
-        crate::live::graph_replayed();
+        ctx.calls().graph_replayed();
         Ok(())
     }
 
