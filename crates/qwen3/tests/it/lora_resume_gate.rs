@@ -96,14 +96,19 @@ fn write_dataset(dir: &Path) {
     std::fs::write(dir.join("meta.json"), Meta::vocab_only(VOCAB as usize)).unwrap();
 }
 
+/// The rate a cycle warms up to. Each cycle spends all its steps in the linear
+/// warmup (`warmup == decay_iters == steps`), so it ends at this rate without
+/// decaying, gently enough that cycle 1 stops short of the loss floor.
+const PEAK_LR: f32 = 2.5e-2;
+
 fn opts(seed: u64, steps: u32) -> model::FitOpts {
     model::FitOpts {
         steps,
         batch_size: 1,
         block_size: 16,
-        lr: 5e-2,
+        lr: PEAK_LR,
         min_lr: 5e-3,
-        warmup: 15,
+        warmup: steps,
         decay_iters: steps,
         weight_decay: 0.0,
         grad_clip: 1.0,
