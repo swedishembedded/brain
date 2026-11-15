@@ -308,6 +308,22 @@ pub fn model_dir(reference: &str) -> Option<String> {
     Some(brain_modelstore::Store::new(root).repo_dir(&r).to_string_lossy().into_owned())
 }
 
+/// The Qwen3-TTS speech codec in the model store, as `brain qwen3tts import`
+/// lays it out (`<repo>/brain_tts/codec.safetensors`; every size ships the same
+/// codec), or `None` after a skip naming the repositories looked in.
+pub fn qwen3tts_codec() -> Option<String> {
+    const REPOS: [&str; 2] = ["Qwen/Qwen3-TTS-12Hz-1.7B-Base", "Qwen/Qwen3-TTS-12Hz-0.6B-Base"];
+    let found = REPOS
+        .iter()
+        .filter_map(|r| model_dir(r))
+        .map(|d| format!("{d}/brain_tts/codec.safetensors"))
+        .find(|p| std::path::Path::new(p).is_file());
+    if found.is_none() {
+        skip(&format!("no imported Qwen3-TTS codec in the model store ({}; brain pull, then brain qwen3tts import)", REPOS.join(", ")));
+    }
+    found
+}
+
 /// Print the process's current resident set (`VmRSS`) and its peak
 /// (`VmHWM`) in GiB, under `label`.
 ///

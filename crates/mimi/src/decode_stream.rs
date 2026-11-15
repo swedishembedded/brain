@@ -711,12 +711,12 @@ mod tests {
 
     /// End-to-end parity: the pure-CPU streaming decoder vs the real gpu_core
     /// `Codec::decode`, on real weights. Run explicitly:
-    ///   BRAIN_MIMI_WEIGHTS=out/tts-1b7/codec.safetensors \
-    ///   cargo test -p brain-codec --lib e2e_parity_vs_codec -- --ignored --nocapture
+    /// (the model store's Qwen3-TTS codec):
+    ///   cargo test -p brain-mimi --lib e2e_parity_vs_codec -- --ignored --nocapture
     #[test]
     #[ignore]
     fn e2e_parity_vs_codec() {
-        let path = std::env::var("BRAIN_MIMI_WEIGHTS").expect("set BRAIN_MIMI_WEIGHTS");
+        let Some(path) = brain_testutil::qwen3tts_codec() else { return };
         let dec = StreamingCodecDecoder::load(&path);
         let nq = dec.cfg.num_quantizers as usize;
         // Small T (< sliding_window) so the sliding-window and plain causal
@@ -777,7 +777,7 @@ mod tests {
     #[test]
     #[ignore]
     fn windowed_parity_vs_codec_on_real_weights() {
-        let path = std::env::var("BRAIN_MIMI_WEIGHTS").expect("set BRAIN_MIMI_WEIGHTS");
+        let Some(path) = brain_testutil::qwen3tts_codec() else { return };
         // One checkpoint read (646 MB), reused for all four decodes.
         let ck = checkpoint::load(&path);
         let base_cfg = CodecConfig::from_json(&ck.header["config"]);
@@ -840,12 +840,12 @@ mod tests {
     }
 
     /// Wall-clock of the rayon decoder. Run in RELEASE:
-    ///   BRAIN_MIMI_WEIGHTS=.../codec.safetensors \
-    ///   cargo test --release -p brain-codec --lib bench_decode -- --ignored --nocapture
+    /// (the model store's Qwen3-TTS codec):
+    ///   cargo test --release -p brain-mimi --lib bench_decode -- --ignored --nocapture
     #[test]
     #[ignore]
     fn bench_decode() {
-        let path = std::env::var("BRAIN_MIMI_WEIGHTS").expect("set BRAIN_MIMI_WEIGHTS");
+        let Some(path) = brain_testutil::qwen3tts_codec() else { return };
         let dec = StreamingCodecDecoder::load(&path);
         let nq = dec.cfg().num_quantizers as usize;
         let t = 48usize;

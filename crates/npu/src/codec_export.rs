@@ -78,12 +78,12 @@ pub fn export_codec_back_stream_fp32(
 mod tests {
     /// Structural check: the front + streaming-back graphs build and emit valid
     /// ONNX, and the back exposes the expected per-conv state buffers. Run:
-    ///   BRAIN_MIMI_WEIGHTS=.../codec.safetensors (or .../speech_tokenizer) \
+    /// (the model store's Qwen3-TTS codec):
     ///   cargo test -p brain-npu export_streaming_graphs -- --ignored --nocapture
     #[test]
     #[ignore]
     fn export_streaming_graphs() {
-        let path = std::env::var("BRAIN_MIMI_WEIGHTS").expect("set BRAIN_MIMI_WEIGHTS");
+        let Some(path) = brain_testutil::qwen3tts_codec() else { return };
         let reader = mimi::import::open(&path).unwrap();
         let dir = std::env::temp_dir();
         let front = dir.join("codec_front.onnx");

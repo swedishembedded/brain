@@ -371,7 +371,6 @@ crates/ltxv/tests/it/av_lora_reload.rs	<SEED_ENV>
 crates/ltxv/tests/vae_parity.rs	BRAIN_VAE3D_SPLIT_NORM
 crates/memauth/src/limits.rs	<ENV_COHERENT_TIER>
 crates/memauth/src/limits.rs	<key>
-crates/mimi/src/decode_stream.rs	BRAIN_MIMI_WEIGHTS
 crates/mimi/tests/it/decode_stream_parity.rs	BRAIN_QWEN3TTS_WEIGHTS
 crates/minimaxmusic3/src/bin/mm3_bench.rs	<var>
 crates/minimaxmusic3/src/bin/mm3_bench.rs	BRAIN_MINIMAXMUSIC3_DEPTH
@@ -420,7 +419,6 @@ crates/npu/build.rs	CARGO_CFG_TARGET_OS
 crates/npu/src/chronos2_export.rs	CHRONOS2_ONNX_OUT
 crates/npu/src/chronos2_export.rs	CHRONOS2_PARITY_DIR
 crates/npu/src/chronos2_export.rs	CHRONOS2_WEIGHTS
-crates/npu/src/codec_export.rs	BRAIN_MIMI_WEIGHTS
 crates/npu/src/kronos_export.rs	BRAIN_KRONOS_DECODER
 crates/npu/src/kronos_export.rs	KRONOS_DEP_ONNX_OUT
 crates/npu/src/kronos_export.rs	KRONOS_ONNX_OUT

@@ -1498,7 +1498,7 @@ limit on how far a max-abs host-vs-device comparison can be pushed for THIS
 architecture, independent of this work item.
 
 `mimi::decode_stream::tests::windowed_parity_vs_codec_on_real_weights`
-(opt-in, `--ignored`, needs `BRAIN_MIMI_WEIGHTS`) shrinks the WINDOW instead
+(opt-in, `--ignored`, over the model store's Qwen3-TTS codec) shrinks the WINDOW instead
 of lengthening the clip: real weights and real architecture at
 `sliding_window = 4`, T=20, which puts four fifths of the queries under a
 truncated key set - a harder mask test than 72 would be at any clip length

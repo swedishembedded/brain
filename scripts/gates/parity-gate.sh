@@ -11,9 +11,8 @@
 #      cross-backend forward-logit check (tests/backend_parity.rs, which compares
 #      CPU vs GPU logits in one process) and the device-local codec/MSE tests.
 #   3. The TTS NPU codec path matches the CPU reference (npu_stream_matches_cpu) —
-#      NPU == CPU for inference. Runs on the OpenVINO CPU device by default (set
-#      BRAIN_QWEN3TTS_NPU_DEVICE=npu to exercise the real NPU); skipped without codec
-#      weights.
+#      NPU == CPU for inference. Runs on the OpenVINO CPU device, over the model store's
+#      Qwen3-TTS codec, with the OpenVINO runtime of the active virtualenv.
 #   4. The same gradcheck suite and the model FD suites on the CUDA backend
 #      (BRAIN_BACKEND=cuda on the card `cuda-device.sh` picks; BRAIN_DEVICE=gpuN
 #      chooses it) - CPU == Vulkan == CUDA. Skipped with a message where no
@@ -101,13 +100,10 @@ run "qwen serve suite — CPU backend (int8 KV is the serving default)" \
 run "CUDA tuned kernels == WGSL reference (skips without a CUDA device)" \
     cargo test --release -q -p brain-gpu-core --test cuda_provider_matmul
 
-codec="${BRAIN_MIMI_WEIGHTS:-$PWD/out/tts-1b7/codec.weights}"
-if [ -f "$codec" ]; then
-    run "TTS codec: NPU graph == CPU reference" \
-        env BRAIN_MIMI_WEIGHTS="$codec" cargo test --release -q -p brain-qwen3tts npu_stream_matches_cpu -- --ignored
-else
-    echo "=== TTS NPU==CPU: SKIP (no codec weights at $codec) ==="; echo
-fi
+# The codec comes from the model store's Qwen3-TTS (the test says so when there is none); OpenVINO is loaded from
+# the active virtualenv (`make environment/requirements`), and its absence fails the run with that instruction.
+run "TTS codec: NPU graph == CPU reference" \
+    cargo test --release -q -p brain-qwen3tts npu_stream_matches_cpu -- --ignored
 
 if [ "$fail" -eq 0 ]; then
     echo "PARITY GATE: PASS (CPU == Vulkan${CUDA_DEVICE:+ == CUDA} == NPU == CUDA tuned)"
