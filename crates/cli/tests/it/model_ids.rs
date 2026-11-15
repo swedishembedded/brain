@@ -13,13 +13,9 @@ use std::process::Command;
 use brain_modelref::{alias, ModelRef};
 
 fn bin() -> String {
-    let mut p = std::env::current_exe().unwrap();
-    p.pop();
-    if p.ends_with("deps") {
-        p.pop();
-    }
-    p.push("brain");
-    p.to_string_lossy().into_owned()
+    // Cargo names the binary it built for this test; a path derived from the test
+    // executable's own location breaks whenever cargo moves its build directory.
+    env!("CARGO_BIN_EXE_brain").to_string()
 }
 
 /// `brain caps --json` lists every statically-known model with no weights

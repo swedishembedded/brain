@@ -20,13 +20,9 @@ fn skip() -> bool {
 }
 
 fn bin() -> PathBuf {
-    let mut p = std::env::current_exe().unwrap();
-    p.pop();
-    if p.ends_with("deps") {
-        p.pop();
-    }
-    p.push("brain");
-    p
+    // Cargo names the binary it built for this test; a path derived from the test
+    // executable's own location breaks whenever cargo moves its build directory.
+    PathBuf::from(env!("CARGO_BIN_EXE_brain"))
 }
 
 fn tmp(name: &str) -> PathBuf {

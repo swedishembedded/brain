@@ -17,13 +17,9 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 fn bin() -> String {
-    let mut path = std::env::current_exe().unwrap();
-    path.pop();
-    if path.ends_with("deps") {
-        path.pop();
-    }
-    path.push("brain");
-    path.to_string_lossy().into_owned()
+    // Cargo names the binary it built for this test; a path derived from the test
+    // executable's own location breaks whenever cargo moves its build directory.
+    env!("CARGO_BIN_EXE_brain").to_string()
 }
 
 fn run(args: &[&str]) -> (bool, String, String, Duration) {
