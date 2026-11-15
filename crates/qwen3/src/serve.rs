@@ -36,6 +36,8 @@ mod exact;
 pub use adapters::{AdapterBankConfig, AdapterError, AdapterInfo, LoraSite, UnloadStatus, VerifiedAdapter};
 use model::adapter::bank::AdapterBank;
 
+/// The replay arena an unrecorded forward's layers draw their temporaries from ([`Engine::batched_steps`]).
+const PREFILL_LAYER_ARENA: &str = "qwen3.serve.layer";
 // The untiled whole-table gather `Self::embed_tiled`/`EMBED_TILE` replaced in
 // `Self::batched_tape` - kept registered (and named) only as the oracle
 // `embed_tiled_matches_the_plain_embed_kernel` dispatches directly, at a
@@ -2898,6 +2900,16 @@ impl Engine {
     /// `lora = false` is the tape an engine without a bank records, byte for
     /// byte. The key of the decode tape cache is `(bsz, lora)`.
     fn batched_tape(&self, bsz: u32, input: Input, causal_chunk: bool, lora: bool) -> Vec<Step> {
+        self.batched_steps(bsz, input, causal_chunk, lora, false)
+    }
+
+    /// [`Self::batched_tape`], or with `per_layer` each layer submitted as it is built, its temporaries drawn from
+    /// [`PREFILL_LAYER_ARENA`]: a layer's bf16 activation casts and attention scratch are dead once the next layer
+    /// runs, so the next layer is handed the same blocks. Built as one tape, a prefill chunk held every layer's
+    /// temporaries at once (36 layers of an 8K-row Qwen3-4B chunk are gigabytes), so the pool grew by the whole stack
+    /// before the first kernel and gave it back to the driver at the next synchronise; the card also waited for the
+    /// whole tape to be built (knowledge 476). Returns what is left to submit (the final norm).
+    fn batched_steps(&self, bsz: u32, input: Input, causal_chunk: bool, lora: bool, per_layer: bool) -> Vec<Step> {
         let c = &self.cfg;
         let (d, ff, hd) = (c.d_model, c.d_ff, c.head_dim);
         let (hq, hkv) = (c.q_dim(), c.kv_dim());
@@ -2947,7 +2959,18 @@ impl Engine {
             }
         };
         let mut ln1_done = false;   // the previous layer's closing add already produced this layer's `xn1`
+        // The arena hands a layer's blocks to the next while the device may still be reading them: a backend that runs
+        // submissions in order has the reuse behind the read by construction, any other drains between layers.
+        // The first layer follows the last layer of the previous forward, which may not have been read back.
+        let drain_between_layers = per_layer && !g.submissions_ordered();
         for l in 0..c.n_layers as usize {
+            if drain_between_layers {
+                g.poll_wait();
+            }
+            // The arena scope first, so the pass (the layer's dispatches issued as one batch, knowledge 381) ends
+            // before it.
+            let _scope = per_layer.then(|| g.scratch_scope_in(PREFILL_LAYER_ARENA));
+            let _pass = per_layer.then(|| g.pass_scope());
             let p = |name: &str| format!("blocks.{l}.{name}");
             // M4.3: RMSNorm fused with its own activation quant on an
             // all-int8-weight engine (`Self::rms_quant`) - `sc.xn1`'s fp32
@@ -3131,6 +3154,11 @@ impl Engine {
             if !ln1_done {
                 s.push(g.step(ADD2, &[&sc.xmid, &sc.mlp_out, &sc.res[l + 1]], &[b * d], b * d));
             }
+            if per_layer {
+                // Dropping the layer's steps leaves the arena the last holder of its blocks.
+                g.submit(&[], &s);
+                s.clear();
+            }
         }
         let last = c.n_layers as usize;
         if !ln1_done {
@@ -3193,7 +3221,7 @@ impl Engine {
             self.gpu.replay_tape(cached);
             return bsz;
         }
-        let s = self.batched_tape(bsz, input, causal_chunk, lora);
+        let s = self.batched_steps(bsz, input, causal_chunk, lora, true);
         self.gpu.submit(&[], &s);
         bsz
     }
@@ -3535,12 +3563,18 @@ impl Engine {
                 }
             }
             let input = if embeds { Input::Embeds(&rows) } else { Input::Tokens(&tokens) };
-            let hidden = self.run_batched(&meta, input, true);
+            self.run_batched_submit(&meta, input, true);
+            start += cc;
+            // Only the prompt's last row is the answer: reading the chunk's whole `[rows, d_model]` block faulted a
+            // fresh host buffer of that size in page by page while the card sat idle, and a read between chunks kept
+            // the host from building the next chunk while the card ran this one (knowledge 476).
+            if start >= n || self.lsa.is_some() {
+                last.resize(d, 0.0);
+                self.gpu.read_into(&self.sc.xn_final, ((run - 1) * d) as u64, &mut last);
+            }
             if let Some(lsa) = &self.lsa {
                 lsa.end_forward();
             }
-            last = hidden[(run - 1) * d..run * d].to_vec();
-            start += cc;
         }
         // Index this prompt's freshly-computed full leading-token blocks for
         // later prompts.

@@ -245,6 +245,21 @@ merge at 4.2 us a layer (62 % of the roof together).
 - [ ] bf16 KV and an FP8 target in `perf run longctx` for this engine (the kernels are registered at FP8; bf16 is
       not an engine tier).
 
+## Serving keeps the card busy (2026-11-16)
+
+Qwen3-4B, bf16 weights, int8 KV, GH200 gpu3, `perf run serve --target qwen:<4B> --input 8192 --output 128 --warmup 2
+--seed 1` (c=16: 32 requests, c=64: 128); card busy is the union of kernels, copies and memsets inside the `serve.*`
+NVTX window of an nsys `-t cuda,nvtx --cuda-graph-trace=node` run; client numbers from runs without the profiler.
+
+| step | c=16 req/s | c=16 TTFT p50 / p95 | c=16 busy (gaps > 1 ms) | c=64 req/s | c=64 TTFT p50 / p95 |
+|---|---|---|---|---|---|
+| main 86d37a54c | 2.42 | 604 / 5070 ms | 79.2 % (1.97 s) | 2.66 | 12.1 / 20.1 s |
+| per-layer prefill submission, last-row read (#476) | 2.75 | 524 / 4262 ms | 90.5 % (0.21 s) | 3.08 | 10.5 / 17.2 s |
+
+- [ ] The card is still idle a tenth of the window, in gaps under 1 ms (decode steps).
+- [ ] Glue kernels in that window (c=16): `concat_split` 1.32 s over 69K launches, `silu_mul` 1.01 s,
+      `paged_flash_decode_gqa_combine` 0.92 s, `qknorm_rope_fused` 0.74 s, `cast_f32_bf16` 0.46 s.
+
 ## Not yet done
 
 - [ ] Faster KV swap-out: the gather side runs at about half the measured
