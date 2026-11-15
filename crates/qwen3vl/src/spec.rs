@@ -62,6 +62,14 @@ impl ArchSpec for Qwen3VlSpec {
         ROLES
     }
 
+    /// Each checkpoint is a whole model (a 4B and an 8B release, an official
+    /// directory and a third-party GGUF), so several in one store are
+    /// several served models under their own `<vendor>/<repo>` ids, not one
+    /// ambiguous choice.
+    fn instance_role(&self) -> Option<&'static str> {
+        Some("weights")
+    }
+
     fn classify(&self, records: &[ArtifactRecord], _inventory_root: &Path) -> Vec<(usize, String, Confidence)> {
         let mut out = Vec::new();
         for (idx, rec) in records.iter().enumerate() {

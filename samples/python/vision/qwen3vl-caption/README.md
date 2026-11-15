@@ -1,7 +1,10 @@
 # sample: vision/qwen3vl-caption (D-Bus)
 
-`qwen3vl_caption.py` drives `brain/qwen3vl`'s streaming `generate` action:
-an image plus a prompt in, generated text out, streamed token by token.
+`qwen3vl_caption.py` drives a served Qwen3-VL model's streaming `generate`
+action: an image plus a prompt in, generated text out, streamed token by
+token. Every Qwen3-VL checkpoint in the server's model store is its own
+served model under its own `<vendor>/<repo>` id; `--model` names one, and
+omitted, the only one the server lists is used.
 
 ```bash
 tools/dbus-session.sh --serve "--dbus" -- \
@@ -44,5 +47,6 @@ is a binary PPM (P6).
 | `--image PATH` | *required* |
 | `--prompt TEXT` | `Describe this image.` |
 | `--max-new N` | `64` |
+| `--model ID` | the only served Qwen3-VL model |
 | `--precision` | `fp32` (exact); `int8` (lossy, ~4x less weight traffic) |
 | `--max-pixels N` | resident's own default |

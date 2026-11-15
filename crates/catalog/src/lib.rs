@@ -197,15 +197,18 @@ pub enum ResidentCtor {
     Multi(MultiCtor),
 }
 
-/// Builds a single-device adapter, or `None` when its weights are not configured.
+/// Builds the single-device adapters of one entry: none when its weights are
+/// not configured, one per checkpoint otherwise (an architecture whose spec
+/// names an instance role serves every checkpoint the store holds, each under
+/// its own id).
 ///
 /// The argument is the serving process's model store and role pins
 /// (`--models-dir`, `--pin`), so an adapter that resolves its weights through
 /// the store reads the SAME store as every other resolver in that process.
 /// An adapter configured purely from its own environment variables ignores it
 /// ([`resident!`]); one that consults the store takes it
-/// ([`resident_in_store!`]).
-pub type SingleCtor = fn(&ServedStore) -> Option<Arc<dyn ResidentModel>>;
+/// ([`resident_in_store!`], or [`residents_in_store!`] for every checkpoint).
+pub type SingleCtor = fn(&ServedStore) -> Vec<Arc<dyn ResidentModel>>;
 
 /// Builds a multi-device adapter from an already-resolved [`Assembly`] (see
 /// [`ModelEntry::provider`]'s doc - the same contract, for the multi-device
@@ -319,7 +322,7 @@ pub fn role_dir(assembly: &Assembly, role: &str) -> Result<String, String> {
 macro_rules! resident {
     ($ctor:path) => {
         Some($crate::ResidentCtor::Single(
-            (|_store: &$crate::__reexport::ServedStore| $ctor().map(|r| std::sync::Arc::new(r) as std::sync::Arc<dyn $crate::__reexport::ResidentModel>)) as $crate::SingleCtor,
+            (|_store: &$crate::__reexport::ServedStore| $ctor().map(|r| std::sync::Arc::new(r) as std::sync::Arc<dyn $crate::__reexport::ResidentModel>).into_iter().collect()) as $crate::SingleCtor,
         ))
     };
 }
@@ -331,7 +334,18 @@ macro_rules! resident {
 macro_rules! resident_in_store {
     ($ctor:path) => {
         Some($crate::ResidentCtor::Single(
-            (|store: &$crate::__reexport::ServedStore| $ctor(store).map(|r| std::sync::Arc::new(r) as std::sync::Arc<dyn $crate::__reexport::ResidentModel>)) as $crate::SingleCtor,
+            (|store: &$crate::__reexport::ServedStore| $ctor(store).map(|r| std::sync::Arc::new(r) as std::sync::Arc<dyn $crate::__reexport::ResidentModel>).into_iter().collect()) as $crate::SingleCtor,
+        ))
+    };
+}
+
+/// [`resident_in_store!`] for an adapter whose `$ctor` returns a `Vec`: one
+/// resident per checkpoint the store holds, each its own model id.
+#[macro_export]
+macro_rules! residents_in_store {
+    ($ctor:path) => {
+        Some($crate::ResidentCtor::Single(
+            (|store: &$crate::__reexport::ServedStore| $ctor(store).into_iter().map(|r| std::sync::Arc::new(r) as std::sync::Arc<dyn $crate::__reexport::ResidentModel>).collect()) as $crate::SingleCtor,
         ))
     };
 }
@@ -359,7 +373,7 @@ macro_rules! resident_multi_family {
     };
 }
 
-/// Re-exports [`always!`]/[`from_env!`]/[`resident!`]/[`resident_in_store!`]/[`resident_multi!`] need
+/// Re-exports [`always!`]/[`from_env!`]/[`resident!`]/[`resident_in_store!`]/[`residents_in_store!`]/[`resident_multi!`] need
 /// to resolve `Provider`/`ResidentModel`/`MultiDeviceResidentModel` from a
 /// caller crate without that caller needing its own
 /// `use` of `capability`/`residency` just to invoke these macros.
@@ -593,8 +607,9 @@ pub fn models() -> Vec<ModelEntry> {
             resident: None,
         },
         // `weights` is resolved through `qwen3vl::spec::Qwen3VlSpec` (see that
-        // module's doc) instead of `BRAIN_QWEN3VL_WEIGHTS` - same shape as
-        // fastvlm's own entry above.
+        // module's doc). The served residents are one per checkpoint the
+        // store holds, each under its own `<vendor>/<repo>` id (the spec's
+        // instance role), so two repos are two models.
         ModelEntry {
             manifest: qwen3vl::caps::manifest,
             provider: |assembly: &Assembly| {
@@ -602,7 +617,7 @@ pub fn models() -> Vec<ModelEntry> {
                 Ok(Arc::new(qwen3vl::caps::QwenVlProvider::new(weights)) as Arc<dyn Provider>)
             },
             spec: Some(("qwen3vl", &qwen3vl::spec::Qwen3VlSpec)),
-            resident: crate::resident_in_store!(crate::resident_qwen3vl::Qwen3VlResident::from_store),
+            resident: crate::residents_in_store!(crate::resident_qwen3vl::Qwen3VlResident::all_from_store),
         },
         ModelEntry {
             manifest: yolov8::caps::manifest,

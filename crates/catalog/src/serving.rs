@@ -61,11 +61,11 @@ fn resolved_assembly_for(store: &ServedStore, model: &str) -> Option<Result<Asse
 pub fn residents(store: &ServedStore) -> Vec<Arc<dyn ResidentModel>> {
     models()
         .into_iter()
-        .filter_map(|e| {
+        .flat_map(|e| {
             let architecture = architecture_of(&e);
             match e.resident {
-                Some(ResidentCtor::Single(f)) => f(store).map(|r| declared(architecture, r)),
-                _ => None,
+                Some(ResidentCtor::Single(f)) => f(store).into_iter().map(|r| declared(architecture, r)).collect(),
+                _ => Vec::new(),
             }
         })
         .collect()

@@ -75,25 +75,34 @@ const INT8_BYTES: u64 = 13u64 << 30;
 /// half, or the directory holding it plus its `mmproj-*.gguf` sibling) - see
 /// `qwen3vl::caps::classify_source`.
 pub struct Qwen3VlResident {
+    /// The served model id: the checkpoint's own `<vendor>/<repo>` when the
+    /// store resolved it, [`MODEL`] when the operator pinned it.
+    id: String,
     dir: String,
 }
 
 impl Qwen3VlResident {
-    /// The checkpoint `store` resolves (or pins) for `qwen3vl`; `None` when
-    /// there is none or the path is absent - registering a model whose every
-    /// call would fail is worse than not serving it.
-    pub fn from_store(store: &loader::served::ServedStore) -> Option<Qwen3VlResident> {
-        Self::new(loader::served::served_assembly(store, "qwen3vl", &qwen3vl::spec::Qwen3VlSpec)?.role_path("weights").ok()?)
+    /// One resident per Qwen3-VL checkpoint the store holds, each under its
+    /// own `<vendor>/<repo>` id (`qwen3vl::spec::Qwen3VlSpec::instance_role`):
+    /// two repos are two models, not one ambiguous choice. A pinned
+    /// `qwen3vl.weights` serves exactly that checkpoint, as [`MODEL`].
+    pub fn all_from_store(store: &loader::served::ServedStore) -> Vec<Qwen3VlResident> {
+        loader::served::served_assemblies(store, "qwen3vl", &qwen3vl::spec::Qwen3VlSpec, MODEL)
+            .into_iter()
+            .filter_map(|assembly| Self::new(assembly.id.clone(), assembly.role_path("weights").ok()?))
+            .collect()
     }
 
-    /// Direct constructor for a caller that already holds the directory.
-    pub fn new(dir: impl Into<String>) -> Option<Qwen3VlResident> {
-        let dir = dir.into();
+    /// Direct constructor for a caller that already holds the checkpoint;
+    /// `None` when the path is absent - registering a model whose every call
+    /// would fail is worse than not serving it.
+    pub fn new(id: impl Into<String>, dir: impl Into<String>) -> Option<Qwen3VlResident> {
+        let (id, dir) = (id.into(), dir.into());
         if !std::path::Path::new(&dir).exists() {
-            residency::log::not_served(&format!("brain: qwen3vl not served ({dir} does not exist)"));
+            residency::log::not_served(&format!("brain: {id} not served ({dir} does not exist)"));
             return None;
         }
-        Some(Qwen3VlResident { dir })
+        Some(Qwen3VlResident { id, dir })
     }
 
     /// The precision a request asks for, defaulting to the one that fits
@@ -115,7 +124,7 @@ impl ResidentModel for Qwen3VlResident {
         // caller must never be told a `weights` param exists to set - see
         // `qwen3vl::caps::manifest_resident`'s doc. `run` below never reads
         // `weights` from `inv` either (`Resident::generate` takes none).
-        qwen3vl::caps::manifest_resident()
+        Manifest { model: self.id.clone(), ..qwen3vl::caps::manifest_resident() }
     }
 
     fn instance_key(&self, _action: &str, inv: &Invocation) -> InstanceKey {
@@ -126,7 +135,7 @@ impl ResidentModel for Qwen3VlResident {
         // working instance to build a differently-shaped one.
         let Capacity { max_pixels, ctx } = Capacity::of(inv);
         let p = Self::precision_of(inv).name();
-        InstanceKey::new(MODEL, format!("{}|{max_pixels}|{ctx}|{p}", self.dir))
+        InstanceKey::new(&self.id, format!("{}|{max_pixels}|{ctx}|{p}", self.dir))
     }
 
     fn estimate(&self, key: &InstanceKey) -> MemCost {
@@ -209,11 +218,57 @@ impl Instance for Qwen3VlInstance {
 mod tests {
     use super::*;
 
+    /// A weight-free llama.cpp release at `<store>/<repo>`: the language half
+    /// `lm` beside its projector, headers only (one 1-element tensor each).
+    fn write_gguf_release(store: &std::path::Path, repo: &str, lm: &str, mmproj: &str) -> std::path::PathBuf {
+        use checkpoint::gguf::{GgmlType, GgufValue};
+        let dir = store.join(repo);
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |file: &str, kv: &[(&str, &str)]| {
+            let tensor = checkpoint::gguf_write::TensorOut { name: "w".to_string(), shape: vec![1], ty: GgmlType::F32.id(), data: vec![0u8; 4] };
+            let kv: Vec<_> = kv.iter().map(|(k, v)| (k.to_string(), GgufValue::String(v.to_string()))).collect();
+            checkpoint::gguf_write::write(dir.join(file).to_str().unwrap(), &kv, &[tensor], 32).unwrap();
+        };
+        write(lm, &[("general.architecture", qwen3vl::gguf_import::GGUF_ARCHITECTURE)]);
+        write(mmproj, &[("general.architecture", "clip"), ("clip.projector_type", qwen3vl::gguf_import::PROJECTOR_TYPE)]);
+        dir.join(lm)
+    }
+
+    /// Two Qwen3-VL repos in one store are two served models, each under its
+    /// own `<vendor>/<repo>` id and bound to its own checkpoint, with nothing
+    /// pinned. Resolving them as one role would be ambiguous and serve
+    /// neither.
+    #[test]
+    fn every_qwen3vl_repo_in_the_store_is_its_own_served_model() {
+        let store = std::env::temp_dir().join(format!("brain-resident-qwen3vl-two-repos-{}", std::process::id()));
+        std::fs::remove_dir_all(&store).ok();
+        let small = write_gguf_release(&store, "unsloth/Qwen3-VL-4B-Instruct-GGUF", "Q8_0.gguf", "mmproj-F16.gguf");
+        let large = write_gguf_release(&store, "Qwen/Qwen3-VL", "Qwen3-VL-8B-Instruct-abliterated-v2.Q8_0.gguf", "Qwen3-VL-8B-Instruct-abliterated-v2.mmproj-Q8_0.gguf");
+
+        let served = crate::residents(&loader::served::ServedStore::new(Some(store.clone())));
+        let mut listed: Vec<(String, Option<String>)> = served.iter().map(|m| m.manifest()).filter(|m| m.architecture.as_deref() == Some("qwen3vl")).map(|m| (m.model, m.architecture)).collect();
+        listed.sort();
+        assert_eq!(
+            listed,
+            [("Qwen/Qwen3-VL".to_string(), Some("qwen3vl".to_string())), ("unsloth/Qwen3-VL-4B-Instruct-GGUF".to_string(), Some("qwen3vl".to_string()))],
+            "both repos are listed, each under its own id"
+        );
+
+        let mut bound: Vec<(String, String)> = Qwen3VlResident::all_from_store(&loader::served::ServedStore::new(Some(store.clone()))).into_iter().map(|r| (r.id, r.dir)).collect();
+        bound.sort();
+        assert_eq!(
+            bound,
+            [("Qwen/Qwen3-VL".to_string(), large.to_string_lossy().into_owned()), ("unsloth/Qwen3-VL-4B-Instruct-GGUF".to_string(), small.to_string_lossy().into_owned())],
+            "each model resolves to its own checkpoint"
+        );
+        std::fs::remove_dir_all(&store).ok();
+    }
+
     /// An unconfigured checkpoint yields no resident at all, rather than one
     /// that fails every call.
     #[test]
     fn a_missing_checkpoint_is_not_registered() {
-        assert!(Qwen3VlResident::new("/definitely/not/a/qwen3vl/dir").is_none());
+        assert!(Qwen3VlResident::new(MODEL, "/definitely/not/a/qwen3vl/dir").is_none());
     }
 
     /// `max_pixels` and `precision` are both part of the instance identity.
@@ -221,7 +276,7 @@ mod tests {
     /// request evict a working fp32 instance built for a different capacity.
     #[test]
     fn max_pixels_and_precision_key_separate_instances() {
-        let r = Qwen3VlResident { dir: "/tmp".into() };
+        let r = Qwen3VlResident { id: MODEL.into(), dir: "/tmp".into() };
         let k_default = r.instance_key("generate", &Invocation::new());
         let k_i8 = r.instance_key("generate", &Invocation::new().set("precision", serde_json::json!("int8")));
         let k_bigger = r.instance_key("generate", &Invocation::new().set("max_pixels", serde_json::json!(2_000_000)));
@@ -237,7 +292,7 @@ mod tests {
     /// larger one - the whole point of the int8 tier existing.
     #[test]
     fn the_two_precisions_are_budgeted_apart() {
-        let r = Qwen3VlResident { dir: "/tmp".into() };
+        let r = Qwen3VlResident { id: MODEL.into(), dir: "/tmp".into() };
         let c32 = r.estimate(&r.instance_key("generate", &Invocation::new()));
         let c8 = r.estimate(&r.instance_key("generate", &Invocation::new().set("precision", serde_json::json!("int8"))));
         assert!(c32.vram > 0, "this model is GPU-placeable; a zero vram would hide it from the GPU class");
@@ -251,17 +306,17 @@ mod tests {
     /// for.
     #[test]
     fn an_npu_assignment_is_refused() {
-        let r = Qwen3VlResident { dir: "/tmp".into() };
+        let r = Qwen3VlResident { id: MODEL.into(), dir: "/tmp".into() };
         let e = r.activate(&r.instance_key("generate", &Invocation::new()), Device::Npu(0)).err().unwrap_or_default();
         assert!(e.contains("no NPU export path"), "{e}");
     }
 
     /// The resident manifest must never advertise `weights` as a settable
     /// param - a served caller cannot point this instance at a different
-    /// checkpoint, only the operator (via `BRAIN_QWEN3VL_WEIGHTS`) can.
+    /// checkpoint, only the operator (the model store or a `qwen3vl.weights` pin) can.
     #[test]
     fn the_resident_manifest_has_no_weights_param() {
-        let r = Qwen3VlResident { dir: "/tmp".into() };
+        let r = Qwen3VlResident { id: MODEL.into(), dir: "/tmp".into() };
         let m = r.manifest();
         let a = &m.actions[0];
         assert_eq!(a.name, "generate");
@@ -286,7 +341,7 @@ mod tests {
     /// `/v1/models`) without needing a real checkpoint.
     #[test]
     fn brain_qwen3vl_is_auto_exposed_on_openai_and_anthropic_model_lists() {
-        let resident = Qwen3VlResident { dir: "/nonexistent/qwen3vl".to_string() };
+        let resident = Qwen3VlResident { id: MODEL.into(), dir: "/nonexistent/qwen3vl".to_string() };
         let models: Vec<std::sync::Arc<dyn ResidentModel>> = vec![std::sync::Arc::new(resident)];
         let mut budgets = residency::budget::Budgets::new();
         budgets.set(Device::Cpu, 8 << 30, 0);
@@ -297,7 +352,7 @@ mod tests {
         // the one source both transports read.
         assert!(
             exec.manifests().iter().any(|m| m.model == MODEL),
-            "qwen3vl must be registered in the executor's manifest set once BRAIN_QWEN3VL_WEIGHTS names a resident"
+            "qwen3vl must be registered in the executor's manifest set once a resident is built for a checkpoint"
         );
 
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();

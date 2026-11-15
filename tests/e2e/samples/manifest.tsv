@@ -47,7 +47,7 @@ samples/python/vision/deepseek-multimodal/deepseek_multimodal.py	run	--model bra
 samples/python/vision/minicpmv-chat/minicpmv_chat.py	run	--model brain/mock exercises chat with an image against the shared harness server
 samples/python/vision/mirage-perception/mirage_perception.py	skip	hardcodes Cactus-Compute/mirage (no --model override); needs the pulled checkpoint, real run in tests/e2e/mirage.bats
 samples/python/vision/moondream3-caption/moondream3_caption.py	skip	hardcodes brain/moondream3 (no --model override); needs a Moondream 3 checkpoint in the model store
-samples/python/vision/qwen3vl-caption/qwen3vl_caption.py	skip	hardcodes brain/qwen3vl (no --model override); needs a Qwen3-VL checkpoint in the model store
+samples/python/vision/qwen3vl-caption/qwen3vl_caption.py	skip	needs a Qwen3-VL checkpoint in the model store
 samples/python/vision/segment-image/segment_image.py	skip	needs a SAM 2.1 checkpoint in the model store; the mock model serves no segment
 samples/python/vision/splat/splat_fit.py	skip	brain/splat itself needs no weights, but needs real posed-view PPMs + a cameras.json the harness doesn't have on hand
 samples/python/vision/splat/splat_render.py	skip	brain/splat itself needs no weights, but needs a real fitted .ply scene the harness doesn't have on hand

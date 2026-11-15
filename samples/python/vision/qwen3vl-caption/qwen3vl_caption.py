@@ -12,6 +12,11 @@ still declared `.streaming()` and this example still uses `Subscribe`, but for
 the ordinary reason - seeing partial output as it is produced - rather than
 because the alternative would hide a quadratic cost.
 
+**Model.** Every Qwen3-VL checkpoint in the server's model store is its own
+served model, under its own `<vendor>/<repo>` id. `--model` names one; omitted,
+the one Qwen3-VL model the server lists is used, and a server listing several
+is asked to choose.
+
 **Precision.** `--precision fp32` (the default) is the exact decoder tier;
 `--precision int8` is explicitly LOSSY (~4x less weight traffic per token) and
 must be asked for by name - it never arrives by falling back. The scheduler
@@ -44,8 +49,25 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "brain-py"))
 from brain_py.dbus import BrainDBus  # noqa: E402
 from brain_py.image import load_ppm  # noqa: E402
 
-MODEL = "brain/qwen3vl"
+ARCHITECTURE = "qwen3vl"
 DEFAULT_PROMPT = "Describe this image."
+
+
+def pick_model(brain: BrainDBus, asked: str | None) -> str | None:
+    """The served Qwen3-VL model to call: `asked`, or the only one listed."""
+    served = sorted(m["model"] for m in brain.manifests() if m.get("architecture") == ARCHITECTURE)
+    if asked is not None:
+        if asked in served:
+            return asked
+        print(f"FATAL: '{asked}' is not a served Qwen3-VL model (served: {served})", file=sys.stderr)
+        return None
+    if len(served) == 1:
+        return served[0]
+    if not served:
+        print("FATAL: no Qwen3-VL model served (put a Qwen3-VL checkpoint in the model store, or brain serve --pin qwen3vl.weights=PATH)", file=sys.stderr)
+    else:
+        print(f"FATAL: several Qwen3-VL models are served, name one with --model: {served}", file=sys.stderr)
+    return None
 
 
 def main() -> int:
@@ -53,17 +75,17 @@ def main() -> int:
     ap.add_argument("--image", required=True, help="binary PPM (P6) to describe")
     ap.add_argument("--prompt", default=DEFAULT_PROMPT, help="the instruction after the image")
     ap.add_argument("--max-new", type=int, default=64, help="max tokens to generate")
+    ap.add_argument("--model", default=None, help="served Qwen3-VL model id; default: the only one the server lists")
     ap.add_argument("--precision", default="fp32", choices=["fp32", "int8"], help="fp32 (default, exact) or int8 (lossy)")
     ap.add_argument("--max-pixels", type=int, default=None, help="resident capacity override (pixels); default is this resident's own")
     args = ap.parse_args()
 
     img, w, h = load_ppm(args.image)
-    print(f"image {w}x{h}, prompt {args.prompt!r}, max_new {args.max_new}, precision {args.precision}", flush=True)
-
     brain = BrainDBus()
-    if MODEL not in brain.models():
-        print(f"FATAL: '{MODEL}' not served (put a Qwen3-VL checkpoint in the model store, or brain serve --pin qwen3vl.weights=PATH)", file=sys.stderr)
+    model = pick_model(brain, args.model)
+    if model is None:
         return 2
+    print(f"model {model}, image {w}x{h}, prompt {args.prompt!r}, max_new {args.max_new}, precision {args.precision}", flush=True)
 
     params = {"prompt": args.prompt, "max_new": args.max_new, "precision": args.precision}
     if args.max_pixels is not None:
@@ -78,7 +100,7 @@ def main() -> int:
         last[0] = now
 
     out = brain.subscribe(
-        MODEL,
+        model,
         "generate",
         params,
         blobs={"image": img},

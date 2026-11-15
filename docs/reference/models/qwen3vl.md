@@ -22,8 +22,10 @@ single image. For dedicated single-purpose captioning instead, see
 
 ## Getting the weights
 
-Model id: `brain/qwen3vl` (the served id itself is never fetched, per this
-project's naming grammar) - but `Qwen/Qwen3-VL-4B-Instruct` auto-fetches (⤓, opt-in
+Model id: a checkpoint the model store holds is served under its own
+`<vendor>/<repo>` (see "Running it" below); `brain/qwen3vl` names a pinned
+checkpoint and the CLI's `brain qwen3vl` (that id itself is never fetched, per
+this project's naming grammar) - but `Qwen/Qwen3-VL-4B-Instruct` auto-fetches (⤓, opt-in
 `--autofetch`) on first CLI use, no env var needed. Either checkpoint layout
 below, dropped anywhere under the models directory, is discovered
 automatically through `qwen3vl::spec::Qwen3VlSpec`: a HuggingFace directory by
@@ -79,10 +81,12 @@ brain qwen3vl generate --prompt "Describe this image." --max_new 64 \
 ```
 
 It is also **served**: `brain serve --dbus` registers a residency adapter
-(`crates/catalog/src/resident_qwen3vl.rs`, over the checkpoint the same
-model-store resolver `generate`/`lora_train` use finds, or `--pin
-qwen3vl.weights=DIR`) that
-builds the checkpoint ONCE (device-placed, GPU or CPU) and reuses it across
+(`crates/catalog/src/resident_qwen3vl.rs`) for every Qwen3-VL checkpoint the
+model store holds, each under its own `<vendor>/<repo>` id: a store holding
+both `unsloth/Qwen3-VL-4B-Instruct-GGUF` and `Qwen/Qwen3-VL` serves both,
+under those two names, with nothing pinned. `--pin qwen3vl.weights=PATH`
+serves exactly that one checkpoint instead, as `brain/qwen3vl`. Each adapter
+builds its checkpoint ONCE (device-placed, GPU or CPU) and reuses it across
 requests, reachable over D-Bus (`Run`/`Subscribe` -
 `samples/python/vision/qwen3vl-caption/qwen3vl_caption.py`) and, because `generate` matches the
 chat-capable shape `apiserve::catalog::api_caps` looks for, automatically on
