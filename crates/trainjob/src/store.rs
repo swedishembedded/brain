@@ -216,27 +216,38 @@ impl ArtifactStore {
     }
 
     /// Publishes the file `src` to the store and returns its digest and size. Atomic: the artifact appears
-    /// under its digest complete, or not at all. Publishing what the store already holds changes nothing. The bytes
-    /// are claimed against the store's maximum as they are copied (the digest is only known at the end), so a publish
-    /// needs room for its whole size even when it turns out to be a duplicate.
+    /// under its digest complete, or not at all. Publishing what the store already holds changes nothing. The file's
+    /// size is claimed against the store's maximum before it is copied (the digest is only known at the end), so a
+    /// publish needs room for its whole size even when it turns out to be a duplicate.
     pub fn publish(&self, src: &Path) -> Result<(Digest, u64), StoreError> {
         let mut input = File::open(src).map_err(|e| io_error("opening", src, &e))?;
-        self.publish_from(&mut input)
+        let size = input.metadata().map_err(|e| io_error("reading the size of", src, &e))?.len();
+        self.publish_from(&mut input, size)
     }
 
     /// [`Self::publish`] of bytes held in memory.
     pub fn publish_bytes(&self, bytes: &[u8]) -> Result<Digest, StoreError> {
-        self.publish_from(&mut &bytes[..]).map(|(digest, _)| digest)
+        self.publish_from(&mut &bytes[..], bytes.len() as u64).map(|(digest, _)| digest)
     }
 
-    fn publish_from(&self, input: &mut dyn Read) -> Result<(Digest, u64), StoreError> {
-        let store_full = StoreError::StoreQuota { limit: self.ledger.limit() };
-        let mut claim = self.ledger.begin(&self.root).map_err(|_| store_full)?;
+    /// Publishes what `input` yields, `expected` bytes by its source's own account (a file's length).
+    fn publish_from(&self, input: &mut dyn Read, expected: u64) -> Result<(Digest, u64), StoreError> {
+        let store_full = || StoreError::StoreQuota { limit: self.ledger.limit() };
+        let mut claim = self.ledger.begin(&self.root).map_err(|_| store_full())?;
+        // The expected size is claimed whole before a byte is copied: claimed chunk by chunk, concurrent publishes
+        // could each hold part of the room and all be refused, though any one of them alone fits. A source that
+        // yields more than it said claims the rest as it goes, so the bytes of concurrent publishes together never
+        // pass the maximum either way.
+        let mut claimed = expected.min(self.max_artifact_bytes);
+        claim.grow(claimed).map_err(|_| store_full())?;
         let temp = TempFile(self.root.join(format!(".publishing-{}-{}", std::process::id(), PUBLISHED.fetch_add(1, Ordering::Relaxed))));
         let mut out = create_new(&temp.0, 0o640).map_err(|e| io_error("creating", &temp.0, &e))?;
-        // Every chunk is claimed against the store before it is written, so the bytes of concurrent publishes
-        // together never pass the maximum, and a refusal leaves only the temporary, which `temp` removes.
-        let mut reserve = |bytes: u64| claim.grow(bytes).map_err(|_| StoreError::StoreQuota { limit: self.ledger.limit() });
+        // A refusal leaves only the temporary, which `temp` removes.
+        let mut reserve = |bytes: u64| {
+            let covered = bytes.min(claimed);
+            claimed -= covered;
+            claim.grow(bytes - covered).map_err(|_| store_full())
+        };
         let (hash, size) = copy_hashing(input, &mut out, self.max_artifact_bytes, &mut reserve).map_err(|e| match e {
             CopyError::Io(e) => io_error("writing", &temp.0, &e),
             CopyError::TooLong => StoreError::ArtifactQuota { limit: self.max_artifact_bytes },
@@ -480,10 +491,62 @@ mod tests {
             }
         }
         let (_dir, store) = quota_store(10 * MIB, 2 * MIB);
-        let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| store.publish_from(&mut Panics(false))));
+        let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| store.publish_from(&mut Panics(false), 0)));
         assert!(crashed.is_err());
         assert!(names(&store).is_empty(), "the unwinding publish removed its temporary: {:?}", names(&store));
         assert!(store.publish_bytes(&vec![2u8; 2 * MIB as usize]).is_ok(), "the unwinding publish released its claim");
+    }
+
+    /// A reader of `left` bytes that, after its first chunk, waits (up to a deadline) until every other such reader
+    /// has also read its first chunk: the interleaving under which publishes that claim chunk by chunk each hold
+    /// part of the room and none can finish.
+    struct Rendezvous<'a> {
+        left: usize,
+        fill: u8,
+        reads: usize,
+        arrived: &'a (std::sync::Mutex<usize>, std::sync::Condvar),
+        expected: usize,
+    }
+
+    impl Read for Rendezvous<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.reads == 1 {
+                let (count, cv) = self.arrived;
+                let mut n = count.lock().unwrap();
+                *n += 1;
+                cv.notify_all();
+                let deadline = std::time::Duration::from_secs(2);
+                let _ = cv.wait_timeout_while(n, deadline, |n| *n < self.expected).unwrap();
+            }
+            self.reads += 1;
+            let n = buf.len().min(self.left).min(MIB as usize);
+            buf[..n].fill(self.fill);
+            self.left -= n;
+            Ok(n)
+        }
+    }
+
+    /// Spec: publishes whose sizes are known claim them whole before copying, so of two 2 MiB artifacts racing for
+    /// 2.5 MiB one is published and the other refused; claimed chunk by chunk, both stalled holding 1 MiB each and
+    /// both were refused, though either alone fits.
+    #[test]
+    fn of_two_publishes_racing_for_room_for_one_exactly_one_is_published() {
+        let (_dir, store) = quota_store(10 * MIB, 5 * MIB / 2);
+        let arrived = (std::sync::Mutex::new(0usize), std::sync::Condvar::new());
+        let results: Vec<_> = std::thread::scope(|scope| {
+            let jobs: Vec<_> = (1..=2u8)
+                .map(|fill| {
+                    let (store, arrived) = (&store, &arrived);
+                    scope.spawn(move || {
+                        let mut input = Rendezvous { left: 2 * MIB as usize, fill, reads: 0, arrived, expected: 2 };
+                        store.publish_from(&mut input, 2 * MIB)
+                    })
+                })
+                .collect();
+            jobs.into_iter().map(|j| j.join().unwrap()).collect()
+        });
+        assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1, "exactly one of two 2 MiB artifacts fits in 2.5 MiB: {results:?}");
+        assert_eq!(names(&store).len(), 1, "one artifact and no temporaries: {:?}", names(&store));
     }
 
     #[test]
