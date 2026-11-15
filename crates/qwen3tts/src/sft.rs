@@ -365,8 +365,8 @@ mod tests {
         let codes = synthetic_codes(frames, num_q);
         let lab = MultiCodebookLabels::build(&codes, num_q);
         assert_eq!(lab.cb0_targets.len(), frames - 1);
-        for p in 0..frames - 1 {
-            let (frame, cb) = decode(lab.cb0_targets[p]);
+        for (p, &target) in lab.cb0_targets.iter().enumerate() {
+            let (frame, cb) = decode(target);
             assert_eq!(cb, 0, "cb0 target must be codebook 0");
             assert_eq!(frame, p as u32 + 1, "cb0 must be a SINGLE shift (frame p+1)");
             // Guard rails: the two classic bugs would decode to these frames.
@@ -383,10 +383,10 @@ mod tests {
         let codes = synthetic_codes(frames, num_q);
         let lab = MultiCodebookLabels::build(&codes, num_q);
         assert_eq!(lab.residual_targets.len(), frames);
-        for f in 0..frames {
-            assert_eq!(lab.residual_targets[f].len(), num_q - 1);
+        for (f, residual) in lab.residual_targets.iter().enumerate() {
+            assert_eq!(residual.len(), num_q - 1);
             for k in 1..num_q {
-                let tgt = lab.residual_targets[f][k - 1];
+                let tgt = residual[k - 1];
                 let (frame, cb) = decode(tgt);
                 assert_eq!(frame, f as u32, "residual must be SAME frame (no time shift)");
                 assert_eq!(cb, k as u32, "residual codebook order must be 1..num_q");

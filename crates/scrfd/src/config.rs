@@ -96,8 +96,8 @@ impl ScrfdConfig {
     /// Stem = /2 (conv) then /2 (max-pool) = /4; stages 1..3 halve again.
     pub fn stage_out_hw(&self, s: usize) -> u32 {
         let mut hw = self.image_size / 4;
-        for i in 1..=s {
-            if self.stage_stride2[i] {
+        for &stride2 in &self.stage_stride2[1..=s] {
+            if stride2 {
                 hw /= 2;
             }
         }

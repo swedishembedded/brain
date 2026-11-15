@@ -346,9 +346,8 @@ fn quant_classes(graph: &Graph, calibration: &Calibration, input_q: QParams) -> 
         }
     }
     let mut class_range = vec![(f32::INFINITY, f32::NEG_INFINITY); n];
-    for t in 0..n {
+    for (t, &(lo, hi)) in calibration.ranges.iter().enumerate().take(n) {
         let r = find(&mut parent, t);
-        let (lo, hi) = calibration.ranges[t];
         class_range[r] = (class_range[r].0.min(lo), class_range[r].1.max(hi));
     }
     let input_class = find(&mut parent, graph.input());

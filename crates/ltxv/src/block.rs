@@ -2587,7 +2587,6 @@ impl LtxBlockQ {
     /// Only which handle recorded the dispatch changes, which no kernel can
     /// observe.
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
     pub fn forward_on(&self, scratch: &Gpu, x: &[f32], adaln_table: &[f32], context: &[f32], prompt_kv: &[f32], cos_bufs: &[DeviceBuffer], sin_bufs: &[DeviceBuffer], t: u32) -> (Vec<f32>, BlockTaps) {
         self.forward_timed(scratch, x, adaln_table, context, prompt_kv, cos_bufs, sin_bufs, t, &mut BlockTimings::default())
     }
@@ -3613,7 +3612,6 @@ impl EmbeddingsConnector {
     /// even though the real checkpoint happens to size them equal per
     /// stream (`crate::config::LtxDitConfig::connector_attention_head_dim`'s
     /// doc).
-    #[allow(clippy::too_many_arguments)]
     ///
     /// A [`Transient`] for the same reason [`LtxBlock::on`] is one: the whole
     /// connector stack's weights are uploaded here, used for one call, and

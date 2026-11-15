@@ -242,9 +242,9 @@ impl MushroomBody {
         for comp in &self.compartments {
             let m = comp.mbon as usize;
             let (lo, hi) = (c.csc.indptr[m] as usize, c.csc.indptr[m + 1] as usize);
-            for k in lo..hi {
-                if kc.contains(&c.csc.pre[k]) {
-                    out.insert((c.csc.pre[k], comp.mbon));
+            for &pre in &c.csc.pre[lo..hi] {
+                if kc.contains(&pre) {
+                    out.insert((pre, comp.mbon));
                 }
             }
         }

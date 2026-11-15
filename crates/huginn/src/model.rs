@@ -752,11 +752,11 @@ impl Huginn {
         g.push(block::rmsnorm_fwd(&self.gpu, &k, state, self.ps.w("ln_f.weight"), &tape.latent, d, n, cfg.norm_eps));
         let n_coda = cfg.n_coda as usize;
         let mut cur = &tape.latent;
-        for i in 0..n_coda {
+        for (i, out) in tape.coda.iter().enumerate().take(n_coda) {
             passes.segment(&mut g, None);
-            self.block_steps(&mut g, &format!("coda.{i}"), cur, &tape.coda[i]);
+            self.block_steps(&mut g, &format!("coda.{i}"), cur, out);
             passes.segment(&mut g, Some(block_layer(&self.cfg, "coda", i)));
-            cur = &tape.coda[i];
+            cur = out;
         }
         g.push(block::rmsnorm_fwd(&self.gpu, &k, cur, self.ps.w("ln_f.weight"), &tape.coda[n_coda], d, n, cfg.norm_eps));
         self.linear(&mut g, &tape.coda[n_coda], "tok.weight", &tape.logits, n, d, cfg.vocab);

@@ -1180,7 +1180,6 @@ impl Engine {
         Self::from_map_with_gpu(parent.new_like(pipelines()), cfg, weights, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, kv_int8, weights_int8)
     }
 
-    #[allow(clippy::too_many_arguments)]
     /// [`Self::from_map`] with the linears (and head) stored at `tier`:
     /// `F32`, `I8` (quantized, where the device has the packed-int8 path), or
     /// `BF16`/`F16`, which keep a half-precision checkpoint's own values at

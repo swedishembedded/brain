@@ -51,10 +51,7 @@ const K_DX: usize = 1;
 /// Expensive/physical-GPU work is skipped by presence of the variable, never by
 /// its value — the repo-wide idiom.
 fn skip() -> bool {
-    if brain_testutil::gpu_tests_skipped() {
-        return true;
-    }
-    false
+    brain_testutil::gpu_tests_skipped()
 }
 
 fn dot(a: &[f32], b: &[f32]) -> f64 {

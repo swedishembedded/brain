@@ -314,9 +314,9 @@ fn check_invariants(s: &State) -> Result<(), String> {
 }
 
 fn check_terminal(s: &State, b: Bounds) -> Result<(), String> {
-    for j in 0..b.jobs {
-        if s.answers[j] != 1 {
-            return Err(format!("j{j} ended with {} answers", s.answers[j]));
+    for (j, &answers) in s.answers.iter().enumerate().take(b.jobs) {
+        if answers != 1 {
+            return Err(format!("j{j} ended with {answers} answers"));
         }
     }
     if s.alive && !(s.to_worker.is_empty() && s.to_parent.is_empty() && s.queued.is_empty()) {

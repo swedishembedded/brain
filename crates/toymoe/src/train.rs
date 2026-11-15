@@ -556,8 +556,8 @@ impl Trainer {
 
             // ===== MoE backward (d_moe_acc = dres[l+1]) =====
             // Phase A: per-expert gate gradient
-            for ei in 0..e as usize {
-                s.push(self.gpu.step(SCALE_ADD_DGATE, &[&lb.expert_out[ei], &self.dres[l + 1], &self.d_gate], &[n, d, e, ei as u32], n));
+            for (ei, expert_out) in lb.expert_out.iter().enumerate().take(e as usize) {
+                s.push(self.gpu.step(SCALE_ADD_DGATE, &[expert_out, &self.dres[l + 1], &self.d_gate], &[n, d, e, ei as u32], n));
             }
             // Phase B: router gradient -> d_xn (init), grad_Wrouter
             s.push(self.gpu.step(EXPERT_COUNTS, &[&lb.gate, &self.fe], &[n, e, c.top_k], e));

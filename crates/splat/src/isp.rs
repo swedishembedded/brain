@@ -1059,14 +1059,14 @@ impl DeviceIsp {
         w.extend_from_slice(&[cells[0] as u32, cells[1] as u32, cells[2] as u32, 0]);
         let vec4 = |w: &mut Vec<u32>, v: [f32; 3]| w.extend_from_slice(&[f(v[0]), f(v[1]), f(v[2]), 0]);
         vec4(&mut w, res.gain);
-        for k in 0..3 {
-            vec4(&mut w, res.vig[k]);
+        for &v in &res.vig[..3] {
+            vec4(&mut w, v);
         }
-        for r in 0..3 {
-            vec4(&mut w, res.ccm[r]);
+        for &row in &res.ccm[..3] {
+            vec4(&mut w, row);
         }
-        for j in 0..RESPONSE_SEGMENTS {
-            vec4(&mut w, res.slope[j]);
+        for &slope in &res.slope[..RESPONSE_SEGMENTS] {
+            vec4(&mut w, slope);
         }
         debug_assert_eq!(w.len(), PARAM_WORDS);
         w

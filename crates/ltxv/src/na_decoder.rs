@@ -342,8 +342,8 @@ pub fn import_na_decoder(tensors: Vec<StTensor>, cfg: &NaDecoderConfig) -> Resul
 
 fn split_fused_qkv(mut map: Tensors, cfg: &NaDecoderConfig) -> Tensors {
     let mut prefixes: Vec<String> = Vec::new();
-    for stage in 0..4usize {
-        for i in 0..cfg.stage_depths[stage] {
+    for (stage, &depth) in cfg.stage_depths.iter().enumerate().take(4) {
+        for i in 0..depth {
             prefixes.push(format!("decoder.det_stages.{stage}.{i}"));
         }
     }

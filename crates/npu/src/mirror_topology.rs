@@ -507,11 +507,11 @@ pub fn build_dpt_head_graph(
 
     let dims: [(i64, i64); 4] = [(4 * ph, 4 * pw), (2 * ph, 2 * pw), (ph, pw), ((ph + 1) / 2, (pw + 1) / 2)];
     let mut rn: Vec<String> = Vec::new();
-    for i in 0..4usize {
+    for (i, &proj_channels) in cfg.dpt_proj.iter().enumerate().take(4) {
         let ln = tp.layernorm_d(&format!("tap{i}"), &nm("norm.weight"), &nm("norm.bias"), c2, "mir_eps5");
         let tr = tp.transpose(&ln, &[0, 2, 1]); // [1, 2C, p]
         let feat = tp.reshape_to(&tr, &[1, c2, ph, pw]);
-        let oc = cfg.dpt_proj[i] as i64;
+        let oc = proj_channels as i64;
         let proj = conv(&mut tp, &feat, &nm(&format!("projects.{i}.weight")), Some(&nm(&format!("projects.{i}.bias"))), &[oc, c2, 1, 1], 1, 1, 0);
         let pos_name = format!("mir_{prefix}_pos{i}");
         tp.g.init_f32(&pos_name, &[1, oc, ph, pw], worldmirror2::dpt::pos_embed_chw(oc as usize, hp, wp, 0.1));

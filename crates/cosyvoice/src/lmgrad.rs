@@ -758,8 +758,8 @@ pub fn forward_saved<T: Fp>(d: &LmDims, w: &LmWeights<T>, ex: &Example, saved: S
         x[t * dm..(t + 1) * dm].copy_from_slice(row);
     }
     let mut layer_caches = BlockStack::new("cosyvoice", saved)?;
-    for l in 0..d.n_layers {
-        let (out, c) = layer_forward(d, &w.layers[l], &x, n);
+    for layer in w.layers.iter().take(d.n_layers) {
+        let (out, c) = layer_forward(d, layer, &x, n);
         layer_caches.push(&x, c);
         x = out;
     }

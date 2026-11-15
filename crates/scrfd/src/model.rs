@@ -323,14 +323,14 @@ impl Scrfd {
         let mut shape = Shape::new(1, 3, sz, sz);
 
         let mut stem = Vec::new();
-        for i in 0..3usize {
+        for (i, &channels) in cfg.stem_channels.iter().enumerate().take(3) {
             let stride = if i == 0 { 2 } else { 1 };
             let c = Conv::with_names(
                 &ctx,
                 &format!("backbone.stem.{i}"),
                 ConvNames::torch_flat(&format!("backbone.stem.{i}")),
                 shape,
-                folded(cfg.stem_channels[i], 3, stride, 1, Act::Relu),
+                folded(channels, 3, stride, 1, Act::Relu),
                 false,
             );
             shape = c.out_shape;
