@@ -2972,7 +2972,9 @@ impl Qwen35 {
     /// record padded to the longest one's block cost its own length, and a
     /// micro-batch of several records cost the longest record in it. Rounded up
     /// to whole GDN chunks (the same padding `new_impl_on` applies to an awkward
-    /// `t`), and never past the caller's own row length. MTP builds (their head
+    /// `t`), and never past the device row `t`: a row whose supervision reaches
+    /// past the last whole chunk of an awkward `t_user` runs the padded `t`,
+    /// never `t_user` itself, which would be a chunk of one token. MTP builds (their head
     /// shifts across the whole row), weighted-loss builds (their weights are laid
     /// out at `t`) and inference builds keep the full row.
     fn needed_len(&self, targets: &[u32]) -> u32 {
@@ -2985,7 +2987,7 @@ impl Qwen35 {
             .map(|s| targets[s * row..(s + 1) * row].iter().rposition(|&v| v != model::IGNORE).map_or(0, |i| i + 1))
             .max()
             .expect("a batch has at least one row") as u32;
-        last.max(1).next_multiple_of(GDN_PAD_QUANTUM).min(self.t_user)
+        last.max(1).next_multiple_of(GDN_PAD_QUANTUM).min(self.t)
     }
 
     /// Upload the token ids every forward embeds, and on a training build the distinct-id list the embedding
