@@ -5,7 +5,7 @@
 one scheduler, and exposes them over one or more transports at once.
 
 ```
-brain serve [--openai[:PORT]] [--anthropic[:PORT]] [--openrouter[:PORT]] \
+brain serve [--openai [ADDR]] [--anthropic [ADDR]] [--openrouter [ADDR]] \
             [--dbus] [--models-dir DIR] [--api-keys-out FILE] \
             [--api-key-file FILE] [--runtime-dir DIR] [--ready-file PATH] \
             [--tls-cert PEM --tls-key PEM | --insecure-plaintext] \
@@ -19,12 +19,15 @@ brain serve [--openai[:PORT]] [--anthropic[:PORT]] [--openrouter[:PORT]] \
 With no surface flag, `brain serve` serves the OpenAI-compatible API on
 `127.0.0.1:8788`; `brain serve --stdio` is the event-driven stdio controller.
 
-- `--openai[:PORT]` - serve an OpenAI-compatible HTTP API (default port if
-  omitted). Every route is served both with and without the `/v1` prefix -
-  either works as a client's `base_url`.
-- `--anthropic[:PORT]` - serve an Anthropic-compatible HTTP API (`/v1` only).
-- `--openrouter[:PORT]` - serve an OpenRouter-compatible HTTP API (with and
-  without `/v1`, same as OpenAI).
+- `--openai [ADDR]` - serve an OpenAI-compatible HTTP API on `ADDR`: a port
+  (on loopback), an IP (on the default port, 8788), `IP:PORT`, or a
+  comma-separated list of those; without `ADDR`, `127.0.0.1:8788`. Every
+  route is served both with and without the `/v1` prefix - either works as a
+  client's `base_url`.
+- `--anthropic [ADDR]` - serve an Anthropic-compatible HTTP API (`/v1` only;
+  default port 8787).
+- `--openrouter [ADDR]` - serve an OpenRouter-compatible HTTP API (with and
+  without `/v1`, same as OpenAI; default port 8789).
 - `--dbus` - serve the D-Bus control surface (`com.swedishembedded.Brain1`).
 - `--models-dir DIR` - the model store: scanned at startup, and the one store
   every served model's weights are resolved from (overrides

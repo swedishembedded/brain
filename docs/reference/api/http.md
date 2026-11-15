@@ -9,7 +9,7 @@ same scheduling/residency/batching, different wire protocol.
 ## Running
 
 ```bash
-brain serve --dbus --openai[:PORT] --anthropic[:PORT] --openrouter[:PORT] \
+brain serve --dbus --openai [ADDR] --anthropic [ADDR] --openrouter [ADDR] \
             [--models-dir DIR] [--api-keys-out FILE]
 ```
 
