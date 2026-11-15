@@ -318,13 +318,21 @@ fn copy_slice_parallel<T: Copy + Send + Sync>(dst: &mut [T], src: &[T]) {
     dst.copy_from_slice(src);
 }
 
-/// Replace `dst` with `src`, copied across the CPU pool. A buffer that is already the right length is overwritten in
-/// place; any other is replaced by zeroed pages the parallel copy touches first (a `resize` would write them all here).
+/// Replace `dst` with `src`, copied across the CPU pool (see [`sized_for_fill`] for the buffer it writes into).
 pub(crate) fn copy_parallel(dst: &mut Vec<u8>, src: &[u8]) {
-    if dst.len() != src.len() {
-        *dst = vec![0u8; src.len()];
-    }
+    sized_for_fill(dst, src.len());
     copy_slice_parallel(dst, src);
+}
+
+/// Make `buf` exactly `len` elements long for a fill that writes every one of them on the CPU pool. A buffer that is
+/// already that long is kept as it is. Any other is replaced by zeroed pages, which the parallel fill touches first (a
+/// `resize` would write them all on this thread); the buffer it replaces is released before they are taken, so a tile
+/// never holds its old and its new values at once.
+pub(crate) fn sized_for_fill<T: Copy + Default>(buf: &mut Vec<T>, len: usize) {
+    if buf.len() != len {
+        *buf = Vec::new();
+        *buf = vec![T::default(); len];
+    }
 }
 
 /// The shape-carrying eager map several model crates use for a small,

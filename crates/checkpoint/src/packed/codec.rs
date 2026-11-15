@@ -205,11 +205,8 @@ const DECODE_CHUNK: usize = 1 << 16;
 /// CPU scheduler's pool; the values are the serial loop's.
 fn fill_decoded<const W: usize>(payload: &[u8], n: usize, out: &mut Vec<f32>, decode: impl Fn([u8; W]) -> f32 + Sync) {
     let codes = &payload.as_chunks::<W>().0[..n.min(payload.len() / W)];
-    // Every element is written below, so a buffer of the right length is reused as it is. A fresh one comes from the
-    // allocator's zeroed pages, which the parallel fill touches first: `resize` would write them all on this thread.
-    if out.len() != codes.len() {
-        *out = vec![0f32; codes.len()];
-    }
+    // Every element is written below.
+    crate::sized_for_fill(out, codes.len());
     #[cfg(not(target_arch = "wasm32"))]
     backend_cpu::par::chunks_mut(out, DECODE_CHUNK, |c, dst| {
         for (d, &code) in dst.iter_mut().zip(&codes[c * DECODE_CHUNK..]) {
@@ -526,5 +523,26 @@ mod tests {
             scales.extend_from_slice(&part.scales[0]);
         }
         assert!(whole.payload == payload && whole.scales[0] == scales);
+    }
+
+    /// Spec: decoding a tile into a buffer reserved for it (what a whole-tensor read does) holds the decoded values
+    /// once: the buffer it replaces is released before the zeroed pages are taken, never alongside them.
+    #[test]
+    fn a_decoded_tile_is_live_once() {
+        let n = 4 * DECODE_CHUNK;
+        let desc = TensorDescriptor::new("w", vec![1, n as u64], QuantEncoding::bf16());
+        let payload = bytes(3, 2 * n);
+        let tile = Tile { elems: 0..n as u64, payload: &payload, scales: Vec::new() };
+        let reg = CodecRegistry::reference();
+        let codec = reg.decoder(&desc.encoding).unwrap();
+        let (len, peak) = crate::testalloc::peak_live(|| {
+            let mut out = Vec::new();
+            out.reserve_exact(n);
+            codec.decode_tile(&desc, &tile, &mut out).unwrap();
+            out.len()
+        });
+        assert_eq!(len, n);
+        let one = n * std::mem::size_of::<f32>();
+        assert!(peak < one + one / 4, "decoding {one} B of values peaked at {peak} B");
     }
 }
