@@ -302,11 +302,21 @@ struct Inbox {
     /// limit); fixed at creation, so a group that never does skips the inbox.
     admits_late_jobs: bool,
     state: Mutex<InboxState>,
-    /// The first job result that reports an in-process device wait past
-    /// `--gpu-wait-s`, so the lane quarantines the card even when the model
-    /// turned the wedge into an error instead of panicking. Its own lock:
-    /// replies run while [`Self::state`] is held.
-    wait_timeout: Mutex<Option<String>>,
+    /// Where an in-process device wait past `--gpu-wait-s` in a job's result
+    /// is recorded, when the executor is supervised.
+    wedge: Option<WedgeWatch>,
+}
+
+/// Quarantines a group's cards on the first job result that reports an
+/// in-process device wait past `--gpu-wait-s`, even when the model turned the
+/// wedge into an error instead of panicking. The fault is recorded before that
+/// job's caller is answered, so whatever the caller asks next already sees the
+/// card out of placement.
+struct WedgeWatch {
+    health: Arc<Health<Device>>,
+    devices: Vec<Device>,
+    /// One fault per group, however many of its jobs report the wedge.
+    noted: std::sync::atomic::AtomicBool,
 }
 
 struct InboxState {
@@ -323,16 +333,17 @@ struct InboxState {
 }
 
 impl Inbox {
-    fn new(open: bool, room: usize) -> Arc<Inbox> {
-        Arc::new(Inbox { admits_late_jobs: open, state: Mutex::new(InboxState { open, room, jobs: Vec::new(), late_slots: Vec::new(), taken: 0 }), wait_timeout: Mutex::new(None) })
+    fn new(open: bool, room: usize, health: Option<&Arc<Health<Device>>>, devices: &[Device]) -> Arc<Inbox> {
+        let wedge = health.map(|h| WedgeWatch { health: h.clone(), devices: devices.to_vec(), noted: std::sync::atomic::AtomicBool::new(false) });
+        Arc::new(Inbox { admits_late_jobs: open, state: Mutex::new(InboxState { open, room, jobs: Vec::new(), late_slots: Vec::new(), taken: 0 }), wedge })
     }
 
-    /// Note `result` if it is the group's first in-process wait timeout.
+    /// Called with each job's result before its caller is answered: the
+    /// group's first in-process wait timeout quarantines its cards.
     fn note_result(&self, result: &ActionResult) {
-        if let Err(e) = result {
-            if backend_api::hardware::is_wait_timeout(e) {
-                self.wait_timeout.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(|| e.clone());
-            }
+        let (Some(w), Err(e)) = (&self.wedge, result) else { return };
+        if backend_api::hardware::is_wait_timeout(e) && !w.noted.swap(true, std::sync::atomic::Ordering::AcqRel) {
+            note_in_process_wedge(&w.health, &w.devices, e);
         }
     }
 
@@ -1321,8 +1332,8 @@ fn note_unservable(stats: &Arc<Mutex<Stats>>, key: &InstanceKey, reason: Option<
 impl Dispatcher {
     /// Assign as many runnable groups as there are free device lanes.
     fn assign(&mut self) {
-        let Dispatcher { queue, mgr, policy, lanes, done, running, busy, stats, running_jobs, open_groups, health, holds, .. } = self;
-        let health = health.as_deref();
+        let Dispatcher { queue, mgr, policy, lanes, done, running, busy, stats, running_jobs, open_groups, health: supervised, holds, .. } = self;
+        let health = supervised.as_deref();
         let contract = policy.admission;
         // Quarantined devices are excluded exactly like busy ones, so a group is
         // placed on a healthy device when one can take it; what no healthy device
@@ -1561,7 +1572,7 @@ impl Dispatcher {
             // up to that limit (an instance that cannot admit them mid-run closes
             // the inbox at once and the lane runs whatever slipped in).
             let limit = mgr.batch_limit(&model);
-            let inbox = Inbox::new(limit.is_some(), limit.map_or(0, |l| l.saturating_sub(jobs.len())));
+            let inbox = Inbox::new(limit.is_some(), limit.map_or(0, |l| l.saturating_sub(jobs.len())), supervised.as_ref(), &group_devices);
             if limit.is_some() {
                 open_groups.insert(ckey.clone(), OpenGroup { action: action.clone(), inbox: inbox.clone(), devices: group_devices });
             }
@@ -1926,11 +1937,11 @@ fn lane_loop(rx: Receiver<LaneMsg>, done: Sender<Msg>, supervision: Option<Super
             0
         };
         let batch = batch + late_jobs;
-        if let Some(h) = &health {
-            let ran_past_wait = inbox.wait_timeout.lock().unwrap_or_else(|e| e.into_inner()).take();
-            if let Some(msg) = failed_jobs.as_ref().map(|(_, msg)| msg).or(ran_past_wait.as_ref()) {
-                note_in_process_wedge(h, &devices, msg);
-            }
+        // A build that ran past the wait is recorded here, before `Done` and
+        // the replies after it; a job that did is recorded by its inbox
+        // before that job's reply ([`WedgeWatch`]).
+        if let (Some(h), Some((_, msg))) = (&health, &failed_jobs) {
+            note_in_process_wedge(h, &devices, msg);
         }
         let faulted = health.as_ref().is_some_and(|h| devices.iter().zip(&faults_before).any(|(d, &n)| h.faults(d) > n));
         let failed = failed || faulted;

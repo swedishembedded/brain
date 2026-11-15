@@ -19,7 +19,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use capability::{ActionResult, ActionSpec, Invocation, Manifest};
-use gpu_supervisor::{BreakerPolicy, BreakerState, Health, WorkerCommand};
+use gpu_supervisor::{BreakerPolicy, BreakerState, DeviceStatus, Health, WorkerCommand};
 use residency::budget::Budgets;
 use residency::supervised::{Deadlines, HostSpec, Probe, SupervisedModel, Supervision, WORKER_DEVICE_CONTEXT_BYTES};
 use residency::{Device, Executor, Instance, InstanceKey, Job, MemCost, MultiDeviceCost, MultiDeviceResidentModel, Policy, ResidentModel};
@@ -238,29 +238,43 @@ impl Instance for InProcessInstance {
     }
 }
 
+/// Submit to the in-process model and return its reply with `device`'s health
+/// read inside the reply callback: what a caller acting on the answer sees.
+fn submit_seen(exec: &Executor, health: &Arc<Health<Device>>, device: Device, mode: &str) -> Receiver<(ActionResult, DeviceStatus)> {
+    let (rtx, rrx) = channel();
+    let health = health.clone();
+    let inv = Invocation::new().set("mode", json!(mode));
+    exec.submit(Job::new("in-process", "run", inv).reply(move |r| { let _ = rtx.send((r, health.status(&device))); }));
+    rrx
+}
+
 #[test]
 fn without_a_worker_an_in_process_wait_timeout_still_quarantines_the_card_until_the_breaker_readmits_it() {
-    let policy = BreakerPolicy { window: Duration::from_secs(600), trip_after: 2, probe_interval: Duration::from_millis(300), probes_to_close: 2 };
+    // A tripped card is readmitted after `probes_to_close` probe intervals.
+    // They are long against a stalled test thread on a loaded host, so the
+    // refusal below is asked for while the card is certainly still out.
+    let policy = BreakerPolicy { window: Duration::from_secs(600), trip_after: 2, probe_interval: Duration::from_secs(2), probes_to_close: 2 };
     let health = Arc::new(Health::new(policy, REAP));
     let mut one = Budgets::new();
     one.set(Device::Gpu(0), 24 * GB, 0);
     let exec = Executor::start_supervised(vec![Arc::new(InProcess)], one, Policy::default(), None, Some(Supervision { health: health.clone(), probe: Probe::Elapsed }));
     let gpu0 = Device::Gpu(0);
 
-    // A first wait timeout is a restart: the card is quarantined, and with no
-    // worker to probe it the due probe readmits it without touching it.
-    let (_, r) = submit(&exec, "in-process", "wedge");
-    r.recv_timeout(Duration::from_secs(10)).expect("answered").0.expect_err("the wedged run fails");
-    assert_eq!(health.faults(&gpu0), 1, "the wait timeout is recorded against the card");
+    // A first wait timeout is a restart: the card is quarantined before the
+    // caller hears of the failure, and with no worker to probe it the due
+    // probe readmits it without touching it.
+    let (r, seen) = submit_seen(&exec, &health, gpu0, "wedge").recv_timeout(Duration::from_secs(10)).expect("answered");
+    r.expect_err("the wedged run fails");
+    assert_eq!(seen.faults, 1, "the wait timeout is recorded against the card before its caller is answered: {seen:?}");
     wait_until("the card to be readmitted", Duration::from_secs(15), || health.admits(&gpu0));
     let (_, r) = submit(&exec, "in-process", "ok");
     r.recv_timeout(Duration::from_secs(10)).expect("answered").0.expect("the readmitted card serves");
 
     // A second inside the window trips the breaker: work is refused at once
     // until the spaced readmissions have passed, then served again.
-    let (_, r) = submit(&exec, "in-process", "wedge");
-    r.recv_timeout(Duration::from_secs(10)).expect("answered").0.expect_err("the wedged run fails");
-    assert!(health.status(&gpu0).tripped, "{:?}", health.status(&gpu0));
+    let (r, seen) = submit_seen(&exec, &health, gpu0, "wedge").recv_timeout(Duration::from_secs(10)).expect("answered");
+    r.expect_err("the wedged run fails");
+    assert!(seen.tripped, "the breaker trips before the caller is answered: {seen:?}");
     let (_, r) = submit(&exec, "in-process", "ok");
     let err = r.recv_timeout(Duration::from_secs(5)).expect("a refusal, not a wait").0.expect_err("a tripped card takes no work");
     assert!(err.contains("quarantined"), "{err}");
