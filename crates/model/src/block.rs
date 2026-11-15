@@ -2324,13 +2324,18 @@ pub fn flash_bidir_fwd(
 ) {
     assert!(head_dim <= 128, "flash_attn_bidir: head_dim {head_dim} > 128");
     let (kind, br) = flash_bidir_variant(ids, &g.caps());
-    for &(row0, len) in spans {
-        let nwg = heads * len.div_ceil(br);
+    // A run of back-to-back spans of one length is one sample-major dispatch (bit-identical to one per span, see
+    // [`flash_bidir_step`]) bound at the run's first row, so a batch of equal sequences binds only offset 0 however
+    // narrow its rows are; a span after a length change still binds its own start and must sit on the grain.
+    for run in spans.chunk_by(|a, b| b.1 == a.1 && b.0 == a.0 + a.1) {
+        let (row0, len) = run[0];
+        let bsz = run.len() as u32;
+        let nwg = bsz * heads * len.div_ceil(br);
         steps.push(g.dispatch_sliced(
             kind,
             &[qkv, ctx],
             &[(row0 as u64 * stride as u64, 0), (row0 as u64 * d_out as u64, 0)],
-            &[1, heads, len, head_dim, stride, q_off, k_off, v_off, d_out],
+            &[bsz, heads, len, head_dim, stride, q_off, k_off, v_off, d_out],
             gpu_core::Dispatch::Workgroups(nwg),
         ));
     }
@@ -2809,6 +2814,11 @@ pub struct GemmAttnIds {
 /// projections; no expanded buffer exists). Scores/probs slabs stay
 /// `[H, chunk, len]`; `ctx_pack` collects per-head context, unpacked into
 /// the row-major `[rows, d_out]` `ctx` at the end of each span.
+///
+/// A span's rows start at `row0 * stride` words of `q`, `kv` and `ctx`, which for a narrow model is off the
+/// storage-binding grain, so the pack and unpack kernels take that start as their `src_off`/`dst_off` param and bind
+/// the whole buffer. Every other view starts at a padded per-head stride plus `q0 * head_dim` for the query chunk
+/// starting at row `q0`, which is why a chunk shorter than its span must keep `chunk * head_dim` on the grain.
 pub fn gemm_bidir_fwd(
     g: &Gpu,
     k: &GemmAttnIds,
@@ -2833,30 +2843,33 @@ pub fn gemm_bidir_fwd(
     let hd = head_dim;
     let scale = 1.0 / (hd as f32).sqrt();
     let (kbuf, vbuf) = kv;
+    let grain_words = gpu_core::STORAGE_BINDING_OFFSET_ALIGN_BYTES / 4;
+    let row_start = |row0: u32, stride: u32| {
+        u32::try_from(u64::from(row0) * u64::from(stride)).expect("gemm_bidir_fwd: a span's start word exceeds the u32 kernel param")
+    };
     for &(row0, len) in spans {
+        assert!(
+            chunk >= len || (u64::from(chunk) * u64::from(hd)) % grain_words == 0,
+            "gemm_bidir_fwd: query chunks of {chunk} rows of head_dim {hd} start off the storage-binding grain; \
+             make chunk * head_dim a multiple of {grain_words} words or cover the {len}-row span in one chunk"
+        );
         let hstride = pad64(len as u64 * hd as u64); // padded per-head stride: keeps every h*hstride offset 256B-aligned
         let seg = heads as u64 * hstride; // one pack region, f32 words
         let total = heads * len * hd;
-        // Pack q (scale folded), k, vᵀ for this span.
-        steps.push(g.step_sliced(
-            k.head_pack,
-            &[q, packs],
-            &[(row0 as u64 * q_stride as u64, 0), (0, 0)],
-            &[len, heads, 1, hd, q_stride, 0, f(scale), hstride as u32],
-            total,
-        ));
+        // Pack q (scale folded), k, vᵀ for this span, read from its first row through the kernels' source offset.
+        steps.push(g.step(k.head_pack, &[q, packs], &[len, heads, 1, hd, q_stride, row_start(row0, q_stride), f(scale), hstride as u32], total));
         steps.push(g.step_sliced(
             k.head_pack,
             &[kbuf, packs],
-            &[(row0 as u64 * kv_stride as u64, 0), (seg, 0)],
-            &[len, heads, group, hd, kv_stride, 0, f(1.0), hstride as u32],
+            &[(0, 0), (seg, 0)],
+            &[len, heads, group, hd, kv_stride, row_start(row0, kv_stride), f(1.0), hstride as u32],
             total,
         ));
         steps.push(g.step_sliced(
             k.head_pack_t,
             &[vbuf, packs],
-            &[(row0 as u64 * kv_stride as u64, 0), (2 * seg, 0)],
-            &[len, heads, group, hd, kv_stride, 0, f(1.0), hstride as u32],
+            &[(0, 0), (2 * seg, 0)],
+            &[len, heads, group, hd, kv_stride, row_start(row0, kv_stride), f(1.0), hstride as u32],
             total,
         ));
         let mut q0 = 0u32;
@@ -2894,13 +2907,7 @@ pub fn gemm_bidir_fwd(
             q0 += qn;
         }
         // Scatter the span's per-head context back to row-major [len, d_out].
-        steps.push(g.step_sliced(
-            k.head_unpack,
-            &[ctx_pack, ctx],
-            &[(0, 0), (row0 as u64 * d_out as u64, 0)],
-            &[len, heads, hd, d_out, 0, hstride as u32],
-            total,
-        ));
+        steps.push(g.step(k.head_unpack, &[ctx_pack, ctx], &[len, heads, hd, d_out, row_start(row0, d_out), hstride as u32], total));
     }
 }
 

@@ -700,7 +700,9 @@ impl Lfm {
                 let heads = cfg.n_heads as u64;
                 let hd = cfg.head_dim as u64;
                 let per_row = heads * t as u64 * 4;
-                let chunk = ((budget / per_row.max(1)) as u32).clamp(64, 4096).min(t);
+                // Whole 64-row chunks: a chunk shorter than the sequence starts its GEMM-attention views at
+                // `q0 * head_dim` words, which stays on the binding grain for any head_dim only at 64-row steps.
+                let chunk = (((budget / per_row.max(1)) as u32).clamp(64, 4096) / 64 * 64).min(t);
                 // gemm_bidir_fwd pads every per-head stride to 64 words (step_sliced's
                 // 256B offset-alignment contract), so these scratch buffers (reused as
                 // `packs`/`ctx_pack`/scores-probs) must be sized for the PADDED, not

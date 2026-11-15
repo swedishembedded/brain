@@ -75,13 +75,24 @@ against the NPU export via OpenVINO.
       supported today
 - [ ] Registering the bidirectional/MLM encoder in the (currently
       causal-only) generic benchmarking harness
-- [ ] Fixing the buffer-offset alignment violation in the GEMM attention
-      fallback path at its source - it's currently just avoided because the
-      faster flash-attention kernel is selected by default; a device that
-      falls back to the GEMM path can still hit it, and so does a batched
-      forward of a model whose `d_model` is not a multiple of 64 (a tiny
-      `d_model` 16 encoder at batch 2 binds offset 2688 bytes on a P40), which
-      is why the worker-hosting tests use `d_model` 64
+- [x] Batched chunked attention binds only aligned views at any `d_model`:
+      `block::gemm_bidir_fwd` passes each sequence's start row to
+      `head_pack`/`head_pack_t`/`head_unpack` as their offset param and binds
+      the whole q/k/v/ctx buffers, `block::flash_bidir_fwd` dispatches a run of
+      equal back-to-back sequences as one sample-major dispatch bound at row 0,
+      and the chunked regime's chunk is whole 64-row steps. Verified at the
+      tiny `d_model` 16 encoder at batch 2 (`gemm_bidir_spans` in
+      `crates/model/tests/it`: recorded on the CPU backend, and each sequence
+      bitwise equal to the same sequence alone on a GPU;
+      `chunked_matches_materialized_for_a_narrow_batch` in
+      `crates/lfm2/tests/it/chunked_equiv.rs`)
+- [ ] The chunked regime on a device without workgroup reductions (the CPU
+      backend) runs the cross trio (`block::chunked_bidir_fwd`), which
+      requires `3 * d_model` and `d_model` to be multiples of 64 words and
+      refuses a narrower batched build at the call: `attn_apply_cross` has no
+      output offset param, so the second sequence's context rows cannot be
+      written without a sliced binding. Real LFM2.5 widths are multiples of
+      64; the tiny encoder runs batched on the CPU backend only materialized
 
 Bidirectional attention has no causal mask to hide padded positions, so
 mixing sequence lengths in one batch requires either exact-length builds or

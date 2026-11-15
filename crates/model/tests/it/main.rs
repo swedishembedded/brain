@@ -64,6 +64,7 @@ mod gdn_recurrent_step;
 mod gdn_segments;
 mod gdn_ut_fwd;
 mod gdn_verify_native;
+mod gemm_bidir_spans;
 mod gqa_chunk_step_hd256;
 mod gqa_decode_batched;
 mod gqa_decode_prep_native;
