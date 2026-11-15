@@ -50,3 +50,6 @@ brain-modelstore.workspace = true
 serde_json.workspace = true
 brain-testutil.workspace = true
 brain-capability-mock.workspace = true   # testdata() + the skip()/skip_unavailable() split
+# The production placement policy, so a real-weight test runs on the plan
+# `brain` itself would make rather than on the no-policy default.
+brain-loader.workspace = true

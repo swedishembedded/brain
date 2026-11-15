@@ -59,7 +59,7 @@ use diffusion::scheduler::time_shift_exponential;
 use gpu_core::devices::{Homes, Need};
 use gpu_core::Gpu;
 use t5encoder::config::T5Config;
-use t5encoder::model::T5Encoder;
+use t5encoder::model::{T5Encoder, Taps};
 use vae::config::VaeConfig;
 use vae::VaeDecoder;
 
@@ -211,23 +211,17 @@ pub fn dit_bytes(cfg: &Flux1Config, precision: Precision, n_joint: u64, dit_extr
 /// for N joint tokens, got M" panic this constant exists to prevent.
 pub const MAX_TXT_LEN: u32 = 512;
 
-/// T5-XXL's device footprint - always fp32 (`t5encoder` has no int8 tier) -
-/// weights plus the per-layer scratch `T5Encoder::new_on` allocates (see
-/// `crates/flux1/src/pipeline.rs`'s module docs on why this cannot share the
-/// DiT's card at `max_len=512`).
-fn te_bytes(max_len: u64) -> u64 {
-    let c = T5Config::xxl();
-    let (d, ff, layers) = (c.d_model as u64, c.d_ff as u64, c.layers as u64);
-    // The authoritative tensor manifest, not an ad-hoc re-derivation: a
-    // T5 block has THREE feed-forward matrices (`wi_0`/`wi_1`/`wo`), and a
-    // formula that only counted two silently undercounted real weight bytes
-    // by one `d_ff x d_model` matrix per layer (3.75 GiB for XXL at fp32) -
-    // `te` then planned onto a card with room for the underestimate, and the
-    // real `T5Encoder::new_on` allocation, sized off this same manifest,
-    // did not fit.
-    let weights = c.param_count() as u64 * 4;
-    let scratch = layers * max_len * (11 * d + 4 * ff) * 4;
-    weights + scratch
+/// How [`Flux1::t5_xxl`] builds T5-XXL: only its output is read, so the
+/// blocks share one block's scratch rather than keeping every block's.
+pub const TE_TAPS: Taps = Taps::Output;
+
+/// T5-XXL's device footprint at [`MAX_TXT_LEN`] tokens - always fp32
+/// (`t5encoder` has no int8 tier) - from the encoder crate's own account of
+/// what [`Flux1::t5_xxl`]'s build allocates, so the charge and the build
+/// cannot drift apart. Pinned against the measured peak by
+/// `tests/it/placement_real.rs`.
+fn te_bytes() -> u64 {
+    t5encoder::model::device_bytes(&T5Config::xxl(), 1, MAX_TXT_LEN, TE_TAPS)
 }
 
 /// The pipeline stage the text towers are live in. T5-XXL and CLIP-L are
@@ -245,7 +239,8 @@ const PHASE_ENCODE: u32 = 1;
 
 /// The two parts this pipeline ever needs placed: the DiT (`dit`, including
 /// any `dit_extra_bytes` a conditioning adapter adds) and T5-XXL (`te`,
-/// CLIP-L rides with the DiT - ~0.5 GB, not worth its own part). `.apart()`
+/// CLIP-L rides with T5-XXL - ~0.5 GB, built and dropped before T5-XXL is, so
+/// never beside it). `.apart()`
 /// on both so the placer never puts them on one card when two are available;
 /// with one card (or none installed) [`gpu_core::devices::place`] falls back
 /// to the ambient device for everything, unchanged from today's behavior.
@@ -257,7 +252,7 @@ const PHASE_ENCODE: u32 = 1;
 pub fn part_needs(cfg: &Flux1Config, precision: Precision, n_joint: u64, dit_extra_bytes: u64) -> Vec<Need> {
     vec![
         Need::sized("dit", dit_bytes(cfg, precision, n_joint, dit_extra_bytes), 0).apart(),
-        Need::sized("te", te_bytes(MAX_TXT_LEN as u64), 0).apart().phase(PHASE_ENCODE),
+        Need::sized("te", te_bytes(), 0).apart().phase(PHASE_ENCODE),
     ]
 }
 
@@ -441,7 +436,10 @@ impl Flux1 {
         Flux1::build(root, variant, h, w, cfg, n_max, gpu, precision, homes)
     }
 
-    fn n_max(h: u32, w: u32) -> Result<u32, String> {
+    /// The DiT's joint-token budget for an `h x w` generation: its image
+    /// tokens plus [`MAX_TXT_LEN`] text rows - the `n_joint` a caller planning
+    /// this pipeline's parts ([`plan_flux1`]) prices the DiT's scratch at.
+    pub fn n_max(h: u32, w: u32) -> Result<u32, String> {
         let scale = 16u32; // VAE downscale 8 * DiT 2x2 patchify
         if !h.is_multiple_of(scale) || !w.is_multiple_of(scale) {
             return Err(format!("flux1: {w}x{h} is not a multiple of {scale}"));
@@ -518,7 +516,7 @@ impl Flux1 {
         let tensors = t5encoder::import::read_encoder(&dir)?;
         let init: std::collections::HashMap<String, Vec<f32>> =
             t5encoder::import::import_hf(tensors, &cfg)?.into_iter().map(|(k, (_, d))| (k, d)).collect();
-        run_on_home(home, || T5Encoder::new_on(Gpu::new(t5encoder::model::PIPELINES), cfg, 1, max_len as u32, &init))
+        run_on_home(home, || T5Encoder::new_with(Gpu::new(t5encoder::model::PIPELINES), cfg, 1, max_len as u32, &init, TE_TAPS))
     }
 
     /// `(pooled[768], ctx[max_len*4096])` - CLIP-L's pooled EOS row (it does
@@ -679,39 +677,36 @@ mod placement_tests {
         assert!(i8_bytes < f32_bytes / 3, "int8 ({i8_bytes}) should be well under 1/3 of fp32 ({f32_bytes})");
     }
 
-    /// `te_bytes` used to hand-derive T5-XXL's weight bytes instead of
-    /// reading `T5Config::xxl().param_count()` (the crate's own count,
-    /// tested against a real reference dump: "4.762 B - matches the
-    /// reference dump"), and the ad-hoc formula counted only two of the
-    /// three feed-forward matrices a T5 block actually has
-    /// (`wi_0`/`wi_1`/`wo` - `t5encoder::config`'s own `tensor_manifest`),
-    /// undercounting real weight bytes by roughly one `d_ff x d_model`
-    /// matrix per layer (3.75 GiB at fp32). This is exactly the shape of the
-    /// production failure it caused: `te` planned onto a card with 22.9 GiB
-    /// free on an estimate that fit, and the real `T5Encoder::new_on`
-    /// allocation - correctly sized off the authoritative manifest - did
-    /// not. Pinned against this module's own "~21 GB T5-XXL" doc figure
-    /// (`dit_and_te_are_placed_apart`, above) rather than a fresh number, so
-    /// the two cannot silently drift apart again.
-    #[test]
-    fn te_bytes_weight_component_matches_the_authoritative_param_count() {
-        let measured_weight_bytes = t5encoder::config::T5Config::xxl().param_count() as u64 * 4;
-        let gib = te_bytes(0) as f64 / (1024.0 * 1024.0 * 1024.0);
-        let measured_gib = measured_weight_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
-        assert!(
-            (measured_gib - 0.1..measured_gib + 0.1).contains(&gib),
-            "te_bytes(0) = {gib:.2} GiB, expected ~{measured_gib:.2} GiB (T5Config::xxl().param_count() * 4)"
-        );
-    }
-
     /// `part_needs` keeps the DiT and T5-XXL `.apart()` so a 2-card box never
-    /// stacks a ~17 GB DiT and a ~21 GB T5-XXL on one card.
+    /// stacks them on one card.
     #[test]
     fn dit_and_te_are_placed_apart() {
         let cfg = Flux1Config::dev();
         let needs = part_needs(&cfg, Precision::Int8, 1024, 0);
         assert_eq!(needs.len(), 2);
         assert!(needs.iter().all(|n| n.affinity == gpu_core::devices::Affinity::Apart));
+    }
+
+    /// What the production placement policy makes of the declared parts for
+    /// an int8 256 px run, on idle 24 GiB cards (the free figure `nvidia-smi`
+    /// reports for an idle Tesla P40). Two cards: the DiT and T5-XXL each get
+    /// one, neither the host tier. One card: the DiT keeps it and T5-XXL,
+    /// which cannot sit beside it, takes the host tier rather than the card
+    /// running out of memory. `tests/it/placement_real.rs` pins the two
+    /// estimates against measured peaks, so this arithmetic is the plan the
+    /// real run gets.
+    #[test]
+    fn an_int8_run_splits_over_two_idle_cards_and_spills_the_encoder_on_one() {
+        use gpu_core::devices::{Home, Placer};
+        const IDLE_P40_FREE: u64 = 24_439 << 20;
+        let needs = part_needs(&Flux1Config::dev(), Precision::Int8, Flux1::n_max(256, 256).expect("size") as u64, 0);
+        let place = |cards: &[(u32, u64)]| loader::BudgetPlacer::new(loader::placement::budgets(cards, 128 << 30, true)).place(&needs).expect("plan");
+
+        let two = place(&[(0, IDLE_P40_FREE), (1, IDLE_P40_FREE)]);
+        assert!(two.iter().all(|h| matches!(h, Home::Gpu(_))) && two[0] != two[1], "dit and te each take a card: {two:?}");
+
+        let one = place(&[(0, IDLE_P40_FREE)]);
+        assert_eq!(one, vec![Home::Gpu(0), Home::Cpu], "dit keeps the card, te takes the host tier");
     }
 }
 

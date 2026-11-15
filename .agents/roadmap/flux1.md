@@ -14,6 +14,18 @@ contract: `flux1::caps` (`text2image`), `resident_flux1::Flux1Resident`
 Forward parity is verified against the reference implementation at reduced
 depth (fp32) and full depth (int8, single GPU).
 
+## Placement
+
+`pipeline::part_needs` prices the DiT and T5-XXL for the production placement
+policy. Measured on a Tesla P40 (`tests/it/placement_real.rs`, driver figure
+less the context): int8 DiT at 256 px 13,948 MiB against a 12,978 MiB
+estimate (the difference is the driver's block rounding, inside the
+headroom's allocator share); T5-XXL at 512 tokens, built output-only
+(`t5encoder::model::Taps::Output`), 18,600 MiB against 18,600 MiB. On two
+idle 24 GiB cards the plan puts each part on its own card; on one card the
+DiT keeps it and T5-XXL takes the host tier. Knowledge #458 records why the
+mid-run cancellation proof used to need a `te_device` pin.
+
 ## Not yet done
 
 - [ ] Backward / gradient check (`check_flux1`)

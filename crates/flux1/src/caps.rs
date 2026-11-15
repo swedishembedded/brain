@@ -228,6 +228,7 @@ mod caps_tests {
             brain_testutil::skip("flux1 mid-run cancel needs the black-forest-labs/FLUX.1-dev diffusers checkpoint in the model store");
             return;
         };
+        loader::install_default_placer(None, true);
         let provider = Flux1Provider::new(root);
         let action = provider.action("text2image").expect("declared action");
         let request = || {
@@ -237,7 +238,6 @@ mod caps_tests {
                 .set("height", json!(256))
                 .set("steps", json!(4))
                 .set("precision", json!("int8"))
-                .set("te_device", json!("gpu1"))
                 .set("seed", json!(7))
         };
         capability_mock::cancellation::mid_run("flux1 text2image", &request, &|inv, p| action.run(inv, p), capability_mock::cancellation::Bound { fire_after: 2, within: 1 });

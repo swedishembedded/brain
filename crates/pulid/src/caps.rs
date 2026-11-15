@@ -233,7 +233,7 @@ impl Bundle {
         // FLUX.1, with PulidCa's own resident bytes folded into the "dit" part
         // so the plan prices what actually gets built.
         let dit_extra = pulid_ca_bytes(&pulid_cfg, w_pulid.num_ca);
-        let homes = flux1::pipeline::plan_flux1(&fcfg, precision, n_gen as u64, dit_extra)?;
+        let homes = flux1::pipeline::plan_flux1(&fcfg, precision, Flux1::n_max(h, w)? as u64, dit_extra)?;
         eprintln!("pulid: placement {}", homes.describe());
         let dit_gpu = homes.run("dit", || Gpu::new(crate::model::joint_kernels()))?;
         let flux1 = Flux1::load_shared(flux1_root, variant, h, w, dit_gpu.share(), precision, homes.clone())?;
@@ -245,13 +245,13 @@ impl Bundle {
         // not part of the "dit"/"te" `Need`s `plan_flux1` sizes. They still
         // need an EXPLICIT home, though: left unscoped, `Gpu::new` lands on
         // whatever the ambient default device is, which is not guaranteed to
-        // avoid "te" - on a 2-card box with a ~21 GiB fp32 T5-XXL resident
-        // there, an unpinned identity stack landing on the SAME card OOMs
-        // (confirmed: forcing the ambient device to the DiT's own card with
-        // `--device gpu<i>` removes the OOM). Pinning to "dit" instead is
-        // safe because this stack is modest - ArcFace + BiSeNet + EVA-CLIP-L
-        // + IDFormer together are well under the DiT part's own remaining
-        // headroom on a 24 GiB card.
+        // avoid "te" - on a 2-card box with the fp32 T5-XXL built there, an
+        // unpinned identity stack landing on the SAME card OOMs. Pinning to
+        // "dit" instead is safe because this stack is modest - ArcFace +
+        // BiSeNet + EVA-CLIP-L + IDFormer together are well under the DiT
+        // part's own remaining headroom on a 24 GiB card. Every handle below
+        // comes from `gpu.new_like`, which opens `gpu`'s own card, so the
+        // whole stack follows this one scoped build.
         let gpu = homes.run("dit", || Gpu::new(crate::model::KERNELS))?;
         let arcface = ArcFaceSession::load(arcface_root, gpu.new_like(&arcface::caps::SERVING_PIPELINES))?;
 
@@ -536,6 +536,7 @@ mod caps_tests {
         let photo = imaging::load(&photo_path).unwrap_or_else(|e| panic!("reading {photo_path}: {e}"));
         let face = capability::blob::image_blob(&photo.to_hwc_unit(), photo.w, photo.h, 3);
 
+        loader::install_default_placer(None, true);
         let provider = PulidProvider::new(flux1, adapter, arcface, clip, bisenet);
         let action = provider.action("text2image").expect("declared action");
         let request = || {
@@ -545,7 +546,6 @@ mod caps_tests {
                 .set("height", json!(256))
                 .set("steps", json!(4))
                 .set("precision", json!("int8"))
-                .set("te_device", json!("gpu1"))
                 .set("seed", json!(7))
                 .blob("face_image", face.clone())
         };

@@ -9,3 +9,4 @@
 
 mod dit_parity;
 mod model_smoke;
+mod placement_real;

@@ -129,11 +129,12 @@ pub struct BudgetPlacer {
 }
 
 impl BudgetPlacer {
-    /// A placer pinned to `budgets` - never re-probes. Test-only: production
-    /// always probes, because a frozen capacity snapshot is precisely the
-    /// defect [`SNAPSHOT_TTL`] documents. Tests want a machine that holds
-    /// still, and get one here rather than by mocking `nvidia-smi`.
-    #[cfg(test)]
+    /// A placer pinned to `budgets` - never re-probes. For a test that
+    /// states a machine (a model crate checking what this policy makes of its
+    /// declared parts on a given set of cards) rather than mocking
+    /// `nvidia-smi`; a running process always probes ([`BudgetPlacer::probing`]),
+    /// because a frozen capacity snapshot is precisely the defect
+    /// [`SNAPSHOT_TTL`] documents.
     pub fn new(budgets: Budgets) -> BudgetPlacer {
         // Irrelevant once `fixed` is set - `self.budgets()` returns `fixed`
         // straight back and never calls the free `budgets()` fn again - but

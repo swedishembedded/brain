@@ -85,7 +85,10 @@ The image → `id_cond` path exists (`idcond::IdCond::from_image` /
          2-card box this coincided with "te" (a ~21 GiB fp32 T5-XXL), and
          the two together OOM'd. Fixed by pinning this stack to "dit"'s home
          via the same `Homes` `plan_flux1` already computed (real headroom:
-         an int8 DiT + resident `PulidCa` is ~17.5 GiB against 24).
+         an int8 DiT + resident `PulidCa` is ~17.5 GiB against 24). On the
+         CUDA backend the pin did not hold until `CudaBackend::new_like`
+         existed: the stack's `gpu.new_like(..)` handles fell back to the
+         ambient card (knowledge #461).
       With all four fixed, `brain pulid text2image` now runs a real
       generation end to end for the first time: FLUX.1-dev `dev` + PuLID
       v0.9.1, 512x512, 8 steps, int8 DiT on one P40, fp32 T5-XXL on the
