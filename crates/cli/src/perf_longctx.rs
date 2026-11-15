@@ -60,18 +60,17 @@ fn selected_budget(gpus: &[(u32, String, u64)], selected: Option<&[u32]>) -> Vec
         .collect()
 }
 
-/// Device memory in use right now, summed over the GPUs, as the driver's own
-/// tool reports it - or `None` where that tool is absent.
+/// Device memory in use right now on the cards this run selected, as the driver reports it - or `None` where no
+/// selected card has a reading. Another process's cards are not counted: the run owns only its `--device` set.
 pub(crate) fn driver_used_bytes() -> Option<u64> {
-    let out = std::process::Command::new("nvidia-smi").args(["--query-gpu=memory.used", "--format=csv,noheader,nounits"]).output().ok()?;
-    let text = String::from_utf8(out.stdout).ok()?;
-    let mut total = 0u64;
-    let mut any = false;
-    for line in text.lines() {
-        total += line.trim().parse::<u64>().ok()? << 20;
-        any = true;
-    }
-    any.then_some(total)
+    let selected: Vec<u32> = gpu_budget().iter().map(|g| g.0).collect();
+    used_bytes_on(&gpu_core::capacity::probe_gpus(), &selected)
+}
+
+/// The bytes in use on the `selected` cards of `mem`, summed over the ones the driver measured.
+fn used_bytes_on(mem: &[gpu_core::capacity::GpuMem], selected: &[u32]) -> Option<u64> {
+    let measured: Vec<_> = mem.iter().filter(|g| g.measured && selected.contains(&g.index)).collect();
+    (!measured.is_empty()).then(|| measured.iter().map(|g| g.total.saturating_sub(g.free)).sum())
 }
 
 fn elapsed_ms(started: Instant) -> f64 {
@@ -643,6 +642,18 @@ mod tests {
         assert_eq!(one.iter().map(|g| g.0).collect::<Vec<_>>(), vec![1], "--device gpu1 never counts gpu0's memory");
         assert_eq!(one[0].2, (96 << 30) - RESERVE);
         assert_eq!(selected_budget(&gpus, None).len(), 2, "no selection yet is every card");
+    }
+
+    /// A shared machine's other cards are another process's memory: a sweep on `--device gpu3` reported ~280 GiB
+    /// "used" on a 96 GB card by summing every card the driver lists.
+    #[test]
+    fn device_memory_in_use_counts_only_the_selected_cards() {
+        let card = |index, total: u64, free: u64, measured| gpu_core::capacity::GpuMem { index, total, free, measured };
+        let mem = [card(0, 96 << 30, 10 << 30, true), card(3, 96 << 30, 60 << 30, true), card(5, 96 << 30, 96 << 30, false)];
+        assert_eq!(used_bytes_on(&mem, &[3]), Some(36 << 30), "only gpu3's own use");
+        assert_eq!(used_bytes_on(&mem, &[0, 3]), Some((86 << 30) + (36 << 30)));
+        assert_eq!(used_bytes_on(&mem, &[5]), None, "an unmeasured card has no reading, not a zero");
+        assert_eq!(used_bytes_on(&mem, &[7]), None);
     }
 
     #[test]
