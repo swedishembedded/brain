@@ -2290,6 +2290,17 @@ impl backend_api::Backend for CudaBackend {
         self.ctx.stream_idle().unwrap_or_else(|e| panic!("backend-cuda: asking whether the stream is idle failed: {e}"))
     }
 
+    /// A handle for `kernels` on THIS handle's card. Without it the facade
+    /// falls back to a fresh backend on the ambient card, which need not be
+    /// this one: a sub-model built from a handle the placement put on one
+    /// card then allocates on another.
+    fn new_like(&self, kernels: &[(&str, &str)]) -> Option<Box<dyn backend_api::Backend>> {
+        CudaBackend::try_new_on_ordinal(kernels, self.ordinal)
+            .map_err(|e| tracing::warn!(reason = %e, "backend-cuda: cannot open a handle for another kernel set on this device"))
+            .ok()
+            .map(|b| Box::new(b) as Box<dyn backend_api::Backend>)
+    }
+
     fn share(&self) -> Option<Box<dyn backend_api::Backend>> {
         let ctx = exec::Context::open(self.ordinal)
             .map_err(|e| tracing::warn!(reason = %e, "backend-cuda: cannot open a second handle on this device"))

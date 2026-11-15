@@ -40,6 +40,7 @@ mod cuda_flash_prefill_hd128;
 mod cuda_library_attention;
 mod cuda_library_bench;
 mod cuda_library_gemm;
+mod cuda_new_like;
 mod cuda_placement;
 mod cuda_placement_tier;
 mod cuda_silu_mul_bf16;
