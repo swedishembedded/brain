@@ -995,4 +995,6 @@ product (no dense int8 GEMM).
 - Found while closing item 6 (2026-11-11): gpu-core's `the_tuned_cuda_matmul_is_faster_than_the_generated_tier_and_still_agrees_with_it`
   fails on an IDLE gpu1 at 2.35x against its 8x floor - and equally at the commit before the skinny-kernel change
   (2.41-2.44x, measured in a scratch worktree), so it is pre-existing and not caused by this campaign (512x512x512 is
-  outside the skinny range). The floor or the tuned tile needs a decision in the shared CUDA layer.
+  outside the skinny range). Resolved in `cuda.md` ("A speedup floor's reference side can change under it"): the
+  reference side had become the native `matmul_f32_reg`, and the test is now
+  `the_tuned_cuda_matmul_clears_its_roof_floor_and_agrees_with_the_dispatch_it_displaces`, a floor on the device's roof.

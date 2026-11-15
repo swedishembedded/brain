@@ -2,9 +2,10 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! The first native CUDA kernel has to earn its place: it must be
-//! **faster than the generated tier it displaces** and it must still agree
-//! with the portable WGSL reference to the absolute bar this project asserts
-//! everywhere else.
+//! **faster than the dispatch it displaces**, run at a stated fraction
+//! of the device's own measured roof, and still agree with the portable WGSL
+//! reference within the binary32 round-off bound of its reduction
+//! (`brain_testutil::rounding`).
 //!
 //! Swedish Embedded AB implements measured performance contracts for GPU
 //! compute stacks. If your team needs expertise in proving that a tuned
@@ -19,11 +20,17 @@
 //! will happily believe. Neither half alone is a reason to ship a kernel, so
 //! neither half is asserted alone here.
 //!
-//! The reference side of both halves is the SAME device's generated tier -
-//! `wgsl_cuda`'s translation of `matmul.wgsl`, which
-//! `backend-cuda`'s own golden gate already holds to `wgsl-cpu`. Comparing
-//! against it in-process means the two sides differ in exactly one thing
-//! (which kernel ran), not in device, driver, allocation or input.
+//! The reference side of both halves is the reference provider's `matmul`
+//! dispatch as the SAME device serves it: what the tuned kernel displaces.
+//! On a CUDA device that is not `wgsl_cuda`'s translation of `matmul.wgsl`
+//! but the native register-tiled `matmul_f32_reg` `gpu_core::native_upgrade`
+//! substitutes for it, bit for bit (`tests/f32_reg_native.rs`); the
+//! translation itself runs only under `--no-native-kernels`. A ratio against
+//! that side therefore measures one native kernel against another, and says
+//! nothing card-independent; the floor is the tuned kernel's own fraction of
+//! the device's ceiling, and against the displaced dispatch it must only be
+//! faster. Comparing in-process means the two sides differ in exactly one
+//! thing (which kernel ran), not in device, driver, allocation or input.
 //!
 //! # Skipped without a device, by design
 //!
@@ -36,58 +43,77 @@
 //!
 //! # Deliberately small
 //!
-//! One shape, a few hundred kilobytes of device memory, a handful of
-//! milliseconds of device time. This is a contract check, not a benchmark:
-//! the floor below is set well under what was measured so that it states
-//! "the tuned tier is materially faster", not "this box was idle".
+//! One timed shape sized to the device's multiprocessor count, a few
+//! megabytes of device memory, a handful of milliseconds of device time. This
+//! is a contract check, not a benchmark: the floor is the compute-bound
+//! defect line against the device's measured roof, not a ratio taken on one
+//! card.
 
 use std::sync::Arc;
 
 use backend_api::select::{self, Dtype, KernelSelector};
 use backend_api::{DType, ImplSource};
-use gpu_core::provider::cuda::CudaProvider;
+use gpu_core::provider::cuda::{CudaProvider, SKINNY_MAX_ROWS, SKINNY_MIN_ROWS};
 use gpu_core::provider::parity::{self, ParityCase, Tolerance};
 use gpu_core::provider::{LowerCtx, Operand, OpRequest, OperatorProvider, Pass, Role};
 use gpu_core::Gpu;
 
 static KERNELS: &[(&str, &str)] = &[("matmul", kernels::MATMUL)];
 
-/// How much faster than the generated tier the tuned kernel must be, as a
-/// ratio of DEVICE time (the driver's own events around each launch) for the
-/// identical dispatch.
+/// The tuned kernel's floor is a fraction of the device's own fp32 ceiling, measured by `gpu_core::roof`, at a
+/// shape that fills that device: the one statement about a GEMM that means the same thing on every card. A ratio
+/// against the displaced dispatch does not: it is bounded by how far below the ceiling that dispatch sits, which
+/// depends on which kernel serves it on the device (a native upgrade or a mechanical translation) and on the card's
+/// memory system. Where the displaced dispatch already reaches a large fraction of the ceiling, no tuned kernel can
+/// clear a ratio taken where it reaches a small one.
 ///
-/// Measured on a GH200, repeatedly, with a tight spread; the
-/// floor is set well below that so it states "a native kernel replaced a
-/// mechanical translation and it was worth doing", not "this box was idle".
-///
-/// Device time rather than host wall time, and the reason is a measurement:
-/// the same dispatches read a large ratio by wall clock on an idle host and a much smaller one on a
-/// loaded one. The tuned side is eight launches of a ~45 microsecond kernel, so
-/// its wall time is mostly the host thread waiting for a core between
-/// launches - a property of the machine, not of the kernel - while its device
-/// time did not move. A floor on the wall ratio therefore tested how busy the
-/// host was. The wall ratio is still printed, next to the device one.
-// perf-number: the asserted floor of this gate IS this constant, and the
-// ratio actually achieved against it is printed by the run itself.
-const SPEEDUP_FLOOR: f64 = 8.0;
-
-/// The absolute agreement bar this project asserts across backends
-/// (`deepseek2/tests/backend_parity.rs`, `gpt2/tests/cuda_backend_parity.rs`).
-/// Bit-identity is deliberately NOT the bar: a tuned kernel is free to
-/// reassociate, and the moment one does, a zero-delta assertion would have to
-/// be weakened under pressure rather than having been honest from the start.
-const MAXABS: f32 = 1e-6;
-
-/// The absolute bar for a sum of `k` terms that may be added in a different order than the reference's: `MAXABS`
-/// scaled by `sqrt(k)`, the growth of the rounding error of a sum.
-fn sum_bar(k: u32) -> f32 {
-    MAXABS * (k as f32).sqrt().max(1.0)
+/// The fraction is the compute-bound defect line (`roof::Bound::defect_pct`): below it a kernel is a defect, not
+/// untuned. The tuned kernel must also beat the displaced dispatch at that shape outright.
+// perf-number: the floor is derived from the device's measured roof; the fraction achieved is printed by the run.
+fn roof_floor_pct() -> f32 {
+    gpu_core::roof::Bound::Compute.defect_pct()
 }
 
-/// `(m, n, k)` for the timed comparison. Small enough that the whole run is a
-/// few milliseconds and under a megabyte of device memory, large enough that
-/// the generated tier's uncoalesced weight reads actually cost something.
-const SHAPE: (u32, u32, u32) = (512, 512, 512);
+/// The fp32 rate a kernel that keeps the reference's rounding can reach, GFLOP/s: half the fused roof. The backend
+/// compiles with `--fmad=false`, so the kernel's `acc + a * b` rounds twice, as the reference does, and issues a
+/// multiply and an add where a fused kernel issues one instruction; the roof probe (`roof_fma.wgsl`) times explicit
+/// fused multiply-adds, which is the rate of one instruction per two FLOPs.
+fn unfused_ceiling_gflops(roofs: &gpu_core::roof::Roofs) -> f64 {
+    f64::from(roofs.gflops) / 2.0
+}
+
+/// Output tiles (64 x 64, the tuned kernel's block) per multiprocessor the timed shape provides, so that the last
+/// partial wave of blocks costs a small part of the run on any card: the shape follows the device, not one card.
+const TILES_PER_UNIT: u32 = 8;
+
+/// The reduction depth of the timed shape: long enough that each block's staged loads are amortized over many
+/// multiply-adds, short enough that the run is a few milliseconds.
+const TIMED_K: u32 = 512;
+
+/// `(m, n, k)` for the timed comparison: square, with at least [`TILES_PER_UNIT`] output tiles per multiprocessor.
+fn timed_shape(units: u32) -> (u32, u32, u32) {
+    let side_tiles = ((TILES_PER_UNIT * units) as f64).sqrt().ceil() as u32;
+    (side_tiles * 64, side_tiles * 64, TIMED_K)
+}
+
+/// The binary32 bound on the distance between two evaluations of `out = x @ W^T` (`x` is `[m, k]`, `w` is `[n, k]`),
+/// each a length-`k` dot product summed in any order: `brain_testutil::rounding::agreement_bound` at that output's
+/// own `S = sum |x_i w_i|`, the largest over the outputs (the bound grows with `S`, so the largest one covers all).
+fn dot_agreement_bound(xs: &[f32], ws: &[f32], m: usize, n: usize, k: usize) -> f64 {
+    brain_testutil::rounding::agreement_bound(k, max_abs_dot(xs, ws, m, n, k))
+}
+
+/// The largest `sum_i |x[r, i] * w[c, i]|` over every output `(r, c)`.
+fn max_abs_dot(xs: &[f32], ws: &[f32], m: usize, n: usize, k: usize) -> f64 {
+    let mut worst = 0f64;
+    for r in 0..m {
+        for c in 0..n {
+            let s: f64 = (0..k).map(|i| f64::from((xs[r * k + i] * ws[c * k + i]).abs())).sum();
+            worst = worst.max(s);
+        }
+    }
+    worst
+}
 
 /// Timed repetitions per trial, and trials per side. The fastest trial is
 /// compared, not the mean or the median: a machine shared with other work
@@ -121,11 +147,20 @@ struct Timed {
     device: std::time::Duration,
 }
 
+/// The `x`, `w`, `out` buffers of one `(m, n, k)` product.
+struct Product<'a> {
+    shape: (u32, u32, u32),
+    x: &'a backend_api::DeviceBuffer,
+    w: &'a backend_api::DeviceBuffer,
+    y: &'a backend_api::DeviceBuffer,
+}
+
 /// Lower one `Op::MatMul` through `p`, then submit it `REPS` times and
 /// synchronise - `REPS` identical dispatches, timed on the host and on the
 /// device.
-fn time_provider(gpu: &Gpu, p: &dyn OperatorProvider, x: &backend_api::DeviceBuffer, w: &backend_api::DeviceBuffer, y: &backend_api::DeviceBuffer) -> Timed {
-    let (m, n, k) = SHAPE;
+fn time_provider(gpu: &Gpu, p: &dyn OperatorProvider, product: &Product) -> Timed {
+    let (m, n, k) = product.shape;
+    let (x, w, y) = (product.x, product.w, product.y);
     let caps = gpu.caps();
     let bind = |v: select::KernelVariant| -> (usize, &'static str) {
         assert_eq!(v, select::KernelVariant::Reference, "this test's selector is AlwaysReference");
@@ -183,9 +218,10 @@ fn fastest(runs: &[Timed]) -> Timed {
 
 /// **The milestone's red test.** One native CUDA `Op::MatMul` kernel,
 /// selected against the compute capability the driver was ASKED for, must
-/// clear a measured speedup floor against the generated tier and still agree
-/// with it to `MAXABS`.
-fn the_tuned_cuda_matmul_is_faster_than_the_generated_tier_and_still_agrees_with_it() {
+/// reach [`roof_floor_pct`] of the device's measured fp32 roof at a shape that
+/// fills the device, beat the dispatch it displaces there, and still agree with it
+/// within the binary32 bound of the reduction.
+fn the_tuned_cuda_matmul_clears_its_roof_floor_and_agrees_with_the_dispatch_it_displaces() {
     let Ok(gpu) = Gpu::try_new_cuda(KERNELS) else {
         brain_testutil::skip_unavailable("cuda_provider_matmul: no CUDA device on this box");
         return;
@@ -197,7 +233,9 @@ fn the_tuned_cuda_matmul_is_faster_than_the_generated_tier_and_still_agrees_with
     let provider = CudaProvider::for_gpu(&gpu).expect("a CUDA handle must yield a CUDA provider");
     eprintln!("cuda_provider_matmul: compute capability {}.{}", cc.0, cc.1);
 
-    let (m, n, k) = SHAPE;
+    let roofs = gpu_core::roof::ensure(&gpu).expect("a CUDA device's fp32 roof is measurable");
+    let units = caps.compute_units.expect("a CUDA device reports its multiprocessors");
+    let (m, n, k) = timed_shape(units);
     let shape = select::OpShape { m, n, k, dtype: Dtype::F32 };
     let scratch = gpu.storage(1);
     let bind = |_: select::KernelVariant| -> (usize, &'static str) { (0, "matmul") };
@@ -219,10 +257,13 @@ fn the_tuned_cuda_matmul_is_faster_than_the_generated_tier_and_still_agrees_with
     assert_eq!(provider.source(&probe), ImplSource::Tuned, "a native kernel is the Tuned tier");
     eprintln!("cuda_provider_matmul: tuned kernel {:?}", provider.kernel_name(select::Op::MatMul, Dtype::F32));
 
-    let x = gpu.storage_init("x", &seeded(1, (m * k) as usize));
-    let w = gpu.storage_init("w", &seeded(2, (n * k) as usize));
+    let (xs, ws) = (seeded(1, (m * k) as usize), seeded(2, (n * k) as usize));
+    let x = gpu.storage_init("x", &xs);
+    let w = gpu.storage_init("w", &ws);
     let y_ref = gpu.storage((m as u64) * n as u64);
     let y_got = gpu.storage((m as u64) * n as u64);
+    let displaced = Product { shape: (m, n, k), x: &x, w: &w, y: &y_ref };
+    let tuned = Product { shape: (m, n, k), x: &x, w: &w, y: &y_got };
 
     let reference_selector: Arc<dyn KernelSelector> =
         Arc::new(select::CachedSelector::new(select::AlwaysReference));
@@ -231,16 +272,22 @@ fn the_tuned_cuda_matmul_is_faster_than_the_generated_tier_and_still_agrees_with
     let mut t_ref = Vec::new();
     let mut t_got = Vec::new();
     for _ in 0..TRIALS {
-        t_ref.push(time_provider(&gpu, &reference, &x, &w, &y_ref));
-        t_got.push(time_provider(&gpu, &provider, &x, &w, &y_got));
+        t_ref.push(time_provider(&gpu, &reference, &displaced));
+        t_got.push(time_provider(&gpu, &provider, &tuned));
     }
     let (t_ref, t_got) = (fastest(&t_ref), fastest(&t_got));
     let speedup = t_ref.device.as_secs_f64() / t_got.device.as_secs_f64();
+    let flops = 2 * u64::from(m) * u64::from(n) * u64::from(k) * u64::from(REPS);
+    let ceiling = unfused_ceiling_gflops(&roofs);
+    let pct = |t: &Timed| 100.0 * flops as f64 / t.device.as_secs_f64() / 1e9 / ceiling;
     eprintln!(
-        "cuda_provider_matmul: {m}x{n}x{k} f32, {REPS} dispatches - device time: generated {:?}, tuned {:?}, speedup {speedup:.2}x \
-         (host wall time: generated {:?}, tuned {:?}, {:.2}x)",
+        "cuda_provider_matmul: {m}x{n}x{k} f32, {REPS} dispatches - device time: displaced {:?} ({:.1}% of the {:.0} GFLOP/s unfused ceiling), \
+         tuned {:?} ({:.1}%), speedup {speedup:.2}x (host wall time: displaced {:?}, tuned {:?}, {:.2}x)",
         t_ref.device,
+        pct(&t_ref),
+        ceiling,
         t_got.device,
+        pct(&t_got),
         t_ref.wall,
         t_got.wall,
         t_ref.wall.as_secs_f64() / t_got.wall.as_secs_f64()
@@ -248,14 +295,18 @@ fn the_tuned_cuda_matmul_is_faster_than_the_generated_tier_and_still_agrees_with
 
     let expect = gpu.read(&y_ref, (m * n) as usize);
     let got = gpu.read(&y_got, (m * n) as usize);
-    let maxabs = expect.iter().zip(got.iter()).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
-    eprintln!("cuda_provider_matmul: maxabs vs the generated tier {maxabs:e} over {} outputs", expect.len());
+    let maxabs = expect.iter().zip(got.iter()).map(|(a, b)| f64::from((a - b).abs())).fold(0f64, f64::max);
+    let bar = dot_agreement_bound(&xs, &ws, m as usize, n as usize, k as usize);
+    eprintln!("cuda_provider_matmul: maxabs vs the displaced dispatch {maxabs:e} over {} outputs (bound {bar:e})", expect.len());
 
-    assert!(maxabs < MAXABS, "tuned CUDA matmul disagrees with the generated tier by {maxabs:e} (bar {MAXABS:e})");
+    assert!(maxabs <= bar, "tuned CUDA matmul disagrees with the dispatch it displaces by {maxabs:e} (bound {bar:e})");
+    assert!(speedup > 1.0, "tuned CUDA matmul is {speedup:.2}x the dispatch it displaces: not faster");
+    let floor = f64::from(roof_floor_pct());
     assert!(
-        speedup >= SPEEDUP_FLOOR,
-        "tuned CUDA matmul is only {speedup:.2}x the generated tier (floor {SPEEDUP_FLOOR:.2}x) - \
-         a native kernel that is not materially faster is a maintenance cost with a Tuned tier claim attached"
+        pct(&t_got) >= floor,
+        "tuned CUDA matmul reaches {:.1}% of this device's unfused fp32 ceiling at {m}x{n}x{k} (floor {floor:.0}%) - \
+         a native kernel below the defect line is a maintenance cost with a Tuned tier claim attached",
+        pct(&t_got)
     );
 }
 
@@ -322,14 +373,15 @@ fn the_production_registry_routes_a_real_matmul_to_the_tuned_kernel() {
     let got = gpu.read(&y, (m * n) as usize);
     let xs = seeded(7, (m * k) as usize);
     let ws = seeded(8, (n * k) as usize);
-    let mut maxabs = 0f32;
+    let mut maxabs = 0f64;
     for r in 0..m as usize {
         for c in 0..n as usize {
-            let want: f32 = (0..k as usize).map(|i| xs[r * k as usize + i] * ws[c * k as usize + i]).sum();
-            maxabs = maxabs.max((want - got[r * n as usize + c]).abs());
+            let want: f64 = (0..k as usize).map(|i| f64::from(xs[r * k as usize + i]) * f64::from(ws[c * k as usize + i])).sum();
+            maxabs = maxabs.max((want - f64::from(got[r * n as usize + c])).abs());
         }
     }
-    assert!(maxabs < MAXABS, "production dispatch disagrees with a host oracle by {maxabs:e}");
+    let bar = brain_testutil::rounding::accumulation_bound(k as usize, max_abs_dot(&xs, &ws, m as usize, n as usize, k as usize));
+    assert!(maxabs <= bar, "production dispatch is {maxabs:e} from an f64 oracle (bound {bar:e})");
 }
 
 /// The shared cross-provider parity harness, driven by the tuned provider
@@ -338,7 +390,7 @@ fn the_production_registry_routes_a_real_matmul_to_the_tuned_kernel() {
 /// crossover, a multi-tile shape, a non-tile-multiple shape and a non-zero
 /// row offset. Same oracle (the WGSL reference provider), same seeded
 /// inputs, tolerance widened from the table's own `BitIdentical` to the
-/// absolute `MAXABS` bar a tuned kernel is held to.
+/// binary32 agreement bound of a length-`k` dot product.
 fn the_tuned_cuda_matmul_clears_every_shared_parity_case() {
     let Ok(gpu) = Gpu::try_new_cuda(KERNELS) else {
         brain_testutil::skip_unavailable("cuda_provider_matmul: no CUDA device on this box");
@@ -349,8 +401,13 @@ fn the_tuned_cuda_matmul_clears_every_shared_parity_case() {
     for case in parity::cases_for(select::Op::MatMul) {
         let case = ParityCase {
             // The skinny kernel splits the contraction over warps, so it differs from the reference's single ascending
-            // sum by the summation error, which grows with the number of terms.
-            tol: Tolerance::Numeric { atol: sum_bar(case.shape.k), rtol: 0.0, cosine_min: 0.999_999 },
+            // sum by the summation error: the agreement bound of `k` terms, each `|x w| <= 1` because the harness
+            // seeds every input in [-1, 1), so `S <= k`.
+            tol: Tolerance::Numeric {
+                atol: brain_testutil::rounding::agreement_bound(case.shape.k as usize, f64::from(case.shape.k)) as f32,
+                rtol: 0.0,
+                cosine_min: 0.999_999,
+            },
             ..*case
         };
         let bind = |_: select::KernelVariant| -> (usize, &'static str) { (0, "matmul") };
@@ -419,24 +476,38 @@ fn a_starved_tile_grid_runs_the_skinny_kernel_and_agrees_with_an_f64_oracle() {
             let mut ctx = LowerCtx { gpu: &gpu, caps: &caps, steps: &mut steps, capture: false };
             registry.dispatch(&mut ctx, &req)
         };
-        let starved = (16..=128).contains(&m) && m.div_ceil(64) * n.div_ceil(64) < units / 2;
-        let want_kernel = if starved { "native:matmul_f32_skinny" } else { "native:matmul_f32_tiled" };
+        let starved = (SKINNY_MIN_ROWS..=SKINNY_MAX_ROWS).contains(&m) && m.div_ceil(64) * n.div_ceil(64) < units / 2;
+        // A decode-regime product whose tile grid fills the device is the portable decode GEMV's (`matmul` through
+        // this test's binding): the tiled kernel declines it, and the skinny one is claimed only for a starved grid.
+        let want_kernel = match (starved, m > select::DECODE_REGIME_MAX_ROWS) {
+            (true, _) => "native:matmul_f32_skinny",
+            (false, true) => "native:matmul_f32_tiled",
+            (false, false) => "matmul",
+        };
         assert_eq!(lowered.kernels, vec![want_kernel], "m={m} n={n} k={k} on {units} multiprocessors");
         gpu.submit(&[], &steps);
         let got = gpu.read(&y, (m * n) as usize);
-        let mut maxabs = 0f64;
+        // Each output against its own binary32 bound, `gamma_k * sum |x_i w_i|`: the error of a sum grows with the
+        // magnitude of its terms, so one bar for every output is too tight for the large ones or too loose for the rest.
+        let mut worst: Option<(f64, f64)> = None;
         for r in 0..m as usize {
             for c in (0..n as usize).step_by(if n > 4096 { 97 } else { 1 }) {
-                let want: f64 = (0..k as usize).map(|i| f64::from(xs[r * k as usize + i]) * f64::from(ws[c * k as usize + i])).sum();
-                maxabs = maxabs.max((want - f64::from(got[r * n as usize + c])).abs());
+                let terms = (0..k as usize).map(|i| f64::from(xs[r * k as usize + i]) * f64::from(ws[c * k as usize + i]));
+                let (want, s) = terms.fold((0f64, 0f64), |(sum, s), t| (sum + t, s + t.abs()));
+                let err = (want - f64::from(got[r * n as usize + c])).abs();
+                let bar = brain_testutil::rounding::accumulation_bound(k as usize, s);
+                if worst.is_none_or(|(e, b)| err * b > e * bar) {
+                    worst = Some((err, bar));
+                }
             }
         }
-        assert!(maxabs < f64::from(sum_bar(k)), "m={m} n={n} k={k}: {maxabs:e} from an f64 oracle");
+        let (err, bar) = worst.expect("every case has an output");
+        assert!(err <= bar, "m={m} n={n} k={k}: {err:e} from an f64 oracle (bound {bar:e})");
     }
 }
 
 gpu_core::card_tests!(
-    the_tuned_cuda_matmul_is_faster_than_the_generated_tier_and_still_agrees_with_it,
+    the_tuned_cuda_matmul_clears_its_roof_floor_and_agrees_with_the_dispatch_it_displaces,
     the_production_registry_routes_a_real_matmul_to_the_tuned_kernel,
     the_tuned_cuda_matmul_clears_every_shared_parity_case,
     a_starved_tile_grid_runs_the_skinny_kernel_and_agrees_with_an_f64_oracle,

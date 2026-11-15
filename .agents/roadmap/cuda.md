@@ -403,10 +403,17 @@ transposing stores do not serialise on a bank.
 running an unrelated job throughout), 512x512x512 f32, median of five trials
 of eight dispatches:** the generated tier took 33.6 ms and the tuned kernel
 779 us - a **43.1x** ratio. A second run under heavier contention measured
-27.4x. The gate asserts a floor of 8x, well under both, because the number
-worth defending is "the native kernel was worth adding", not one box's
-best minute; both sides contend equally so the RATIO is far steadier than
-either absolute.
+27.4x. That ratio was taken against the mechanical translation of
+`matmul.wgsl`. Since `native_upgrade` serves the plain `matmul` with the
+native register-tiled `matmul_f32_reg` (979165c8f), the dispatch the tuned
+kernel displaces is that native kernel, and the old 8x floor compared two
+native kernels (1.8x on a P40 at 512^3; `mirage.md` records 2.35x on
+another card). Under `--no-native-kernels` the translation is back and the
+ratio is again in the tens. The gate now holds the tuned kernel to the compute
+defect line (`roof::Bound::defect_pct`) of the device's own unfused fp32
+ceiling (half the measured FMA roof, since `--fmad=false` issues a multiply
+and an add) at a shape sized to the device's multiprocessor count, and
+requires it to beat the displaced dispatch there (see the gate below).
 
 **And the delta was exactly 0 over 262144 outputs.** Not the tolerance the
 milestone was planned around. The generated tier's problem at this shape is
@@ -415,10 +422,10 @@ their weight addresses are `k` floats apart and every lane of a warp touches
 a different cache line on each of the `k` iterations. Fixing the access
 pattern needed no reassociation, so the tuned kernel accumulates in exactly
 the reference's order - one register, k ascending - and both tiers compile
-with the same `--fmad=false`. The assertion is still the project-wide 1e-6
-absolute bar rather than the zero observed: a later tuned kernel may
-legitimately reassociate, and pinning the observed value would make that look
-like a regression (lesson #119).
+with the same `--fmad=false`. The assertion is the binary32 agreement bound
+of a length-`k` dot product (`brain_testutil::rounding`) rather than the zero
+observed: a later tuned kernel may legitimately reassociate, and pinning the
+observed value would make that look like a regression (lesson #119).
 
 Registry metadata grew what a launcher needs and cannot read out of CUDA C++:
 `block_dim`, the output `tile` a block covers, declared `shared_bytes`, and
@@ -503,11 +510,13 @@ checked on hardware that admits it, and none of the three has one.
 
 ### Gate - the tuned tier earns its place
 
-`crates/gpu-core/tests/cuda_provider_matmul.rs`, three tests, skip-if-absent:
+`crates/gpu-core/tests/cuda_provider_matmul.rs`, four tests, skip-if-absent:
 
-- the speedup floor AND the 1e-6 agreement, in one test, because a tuned
-  kernel that is wrong is worthless and one that is right but no faster is a
-  maintenance cost with a `Tuned` claim attached;
+- the roof floor (the compute defect line of the device's unfused fp32
+  ceiling, at a square shape with eight 64x64 tiles per multiprocessor),
+  beating the dispatch it displaces, AND agreement within the binary32 bound,
+  in one test, because a tuned kernel that is wrong is worthless and one that
+  is right but no faster is a maintenance cost with a `Tuned` claim attached;
 - the shared `provider::parity` case table (decode-shaped, the tile
   crossover, a multi-tile shape, a non-tile-multiple shape, a non-zero row
   offset), driven through the tuned provider against the WGSL oracle;
@@ -515,10 +524,16 @@ checked on hardware that admits it, and none of the three has one.
   "cuda"`, `source == Tuned`, `arch.compute_capability` equal to what the
   device was queried for, `kernels == ["native:matmul_f32_tiled"]` - plus a
   host oracle on the output, because a record naming a kernel that produced
-  garbage is worse than no record.
+  garbage is worse than no record;
+- the skinny-kernel case table against an f64 oracle, each output within its
+  own `gamma_k * sum |x_i w_i|`, the kernel expected from the provider's own
+  row bounds and the device's multiprocessor count.
 
-Largest allocation in the whole file is 1 MiB; the timed region is a few
-milliseconds of device time.
+Every tolerance is derived from the accumulation length and the inputs, never
+hand-set: the earlier `1e-6 * sqrt(k)` bar is a statistical guess, and a
+correct tiled kernel at 64x1120x512 exceeded it (2.9e-5) against an f64
+oracle while sitting far inside the round-off bound. The timed region is a
+few milliseconds of device time.
 
 ### Four more operators onto the `OperatorProvider` seam
 
@@ -1296,16 +1311,12 @@ again at the point it is used.
   `make test CARGO_TEST="cargo test --release --offline -p brain-gpu-core" TEST_THREADS="1 cuda"`.
 - Keep GPU tests at the existing tiny-shape gradcheck/parity scale. This is a
   shared box; a sustained benchmark contends with whatever else is resident.
-- **`cuda_provider_matmul`'s speedup floor is sensitive to the FIRST run of a
-  freshly built binary.** Measured, not suspected: back-to-back alternating
-  runs with graph capture forced on and forced off gave 5.57 / 5.13 on the
-  first pair and then 34.80 / 36.21 and 34.87 / 37.11 - the two settings agree
-  with each other every time, and the first invocation after a rebuild is slow
-  whichever one is in force. Five trials and a median are not enough to
-  absorb it, because the whole test is about a second long and all five trials
-  land inside the slow window. If that test fails at around 5x, re-run it
-  before concluding anything; the floor has NOT been lowered to accommodate
-  this, because a floor moved to fit a flake stops being a floor.
+- **A speedup floor's reference side can change under it.** The old
+  `cuda_provider_matmul` 8x floor was taken against the mechanical
+  translation; once `native_upgrade` served plain `matmul` natively, the same
+  test compared two native kernels and failed on every card. A floor is a
+  fraction of the device's measured roof, and a reference side is named by the
+  kernel that physically ran (`nsys stats -r cuda_gpu_kern_sum` shows it).
 - Captured graphs are keyed on `Arc` identity, so a test that wants to force a
   re-capture must actually free a buffer (`drop`), not merely build a
   same-shaped submission.
