@@ -19,6 +19,10 @@ output is the new V row alone, so the K pool was the first output to show the no
 With `gpu_core::set_kernel_upgrade(false)` the chain went back to `rmsnorm` and the unchanged kernel matched it
 bit for bit, which isolated the cause to the selection, not the kernel's rotation or append.
 
+The exact Gated DeltaNet decode bodies (`gdn_decode`, `gdn_decode_pool`, `gdn_recur_pool`, `gdn_recur_verify_pool`) had
+the same defect in their gated RMSNorm (`gdn_decode_native`: "layer output differs" while the state and the window
+matched), hidden on a part below compute 8.0 because the kernels were not offered there.
+
 ## What to do
 
 - A fused kernel names the exact kernel of each link it reproduces, and its dispatch asks the chain's own selection

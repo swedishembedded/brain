@@ -70,7 +70,8 @@
 // How it stays bit-identical to the chain it replaces
 // ---------------------------------------------------
 // Every reduction is written in the reference's own order: the conv taps
-// 0..3, the L2 and RMS sums over 0..127 by one thread in ascending order, the
+// 0..3, the L2 sum over 0..127 by one thread in ascending order, the RMS sum
+// in the order of the cooperative `rmsnorm_rows` the chain's norm runs on, the
 // two state contractions over the key index ascending (the reference `bmm`
 // accumulates `acc + a * b` for kk = 0.. into one f32), and each product and
 // sum is an explicit round-to-nearest operation (`--fmad=false` is the
@@ -151,6 +152,24 @@ __device__ __forceinline__ float brain_sum_sq(const float* v) {
         ss = __fadd_rn(ss, __fmul_rn(x.y, x.y));
         ss = __fadd_rn(ss, __fmul_rn(x.z, x.z));
         ss = __fadd_rn(ss, __fmul_rn(x.w, x.w));
+    }
+    return ss;
+}
+
+// The sum of squares of a head of 128 values as the chain's gated RMSNorm forms it: `rmsnorm` dispatches the cooperative
+// `rmsnorm_rows` wherever the device has a workgroup reduction (`model::block::rms_variant`), whose 64 lanes each sum the
+// squares of channels i, i + 64 in that order and whose partials are then folded in lane order. One thread walks the same
+// order here; the normalised value is then `(x * inv) * weight`, that kernel's product order. A caller whose chain keeps
+// the per-element `rmsnorm` declines these kernels (`model::gdn_mixer`).
+#define BRAIN_GDN_NORM_LANES 64
+__device__ __forceinline__ float brain_rms_sum_sq(const float* v) {
+    float ss = 0.0f;
+#pragma unroll
+    for (int i = 0; i < BRAIN_GDN_NORM_LANES; ++i) {
+        float acc = 0.0f;
+#pragma unroll
+        for (int c = i; c < BRAIN_GDN_HD; c += BRAIN_GDN_NORM_LANES) { acc = __fadd_rn(acc, __fmul_rn(v[c], v[c])); }
+        ss = __fadd_rn(ss, acc);
     }
     return ss;
 }
@@ -378,11 +397,11 @@ __device__ __forceinline__ void brain_gdn_decode_body(const unsigned int* params
     __syncthreads();
 
     // Phase D. The gated RMSNorm's inverse RMS of every (row, value head): the
-    // sum of squares is one thread's ascending walk over the head.
+    // sum of squares is one thread's walk over the head in the chain's order.
     if (t < rows * group) {
         const unsigned int r = t / group;
         const unsigned int sl = t % group;
-        inv_rms[r][sl] = __fdiv_rn(1.0f, __fsqrt_rn(__fadd_rn(__fdiv_rn(brain_sum_sq(vo[r][sl]), static_cast<float>(BRAIN_GDN_HD)), rms_eps)));
+        inv_rms[r][sl] = __fdiv_rn(1.0f, __fsqrt_rn(__fadd_rn(__fdiv_rn(brain_rms_sum_sq(vo[r][sl]), static_cast<float>(BRAIN_GDN_HD)), rms_eps)));
     }
     __syncthreads();
 
@@ -393,7 +412,7 @@ __device__ __forceinline__ void brain_gdn_decode_body(const unsigned int* params
         for (int r = 0; r < BRAIN_GDN_MAX_ROWS; ++r) {
             if (static_cast<unsigned int>(r) < rows) {
                 const float zin = z[(unsigned long long)r * value_dim + (unsigned long long)vh * BRAIN_GDN_HD + j];
-                const float nrm = __fmul_rn(__fmul_rn(nw, vo[r][slot][j]), inv_rms[r][slot]);
+                const float nrm = __fmul_rn(__fmul_rn(vo[r][slot][j], inv_rms[r][slot]), nw);
                 gated[(unsigned long long)r * value_dim + (unsigned long long)vh * BRAIN_GDN_HD + j] = __fmul_rn(nrm, brain_silu(zin));
             }
         }
@@ -931,12 +950,12 @@ __device__ __forceinline__ void brain_gdn_recur_pool_entry(const unsigned int* p
     uint4* dst = reinterpret_cast<uint4*>(gtile);
     for (unsigned int c = j; c < TILE_BYTES / 16u; c += BRAIN_GDN_HD) { dst[c] = src[c]; }
 
-    // The gated RMSNorm: the inverse RMS of the head is one thread's ascending walk.
-    if (j == 0) { inv_rms = __fdiv_rn(1.0f, __fsqrt_rn(__fadd_rn(__fdiv_rn(brain_sum_sq(vo), static_cast<float>(BRAIN_GDN_HD)), rms_eps))); }
+    // The gated RMSNorm: the inverse RMS of the head is one thread's walk in the chain's order.
+    if (j == 0) { inv_rms = __fdiv_rn(1.0f, __fsqrt_rn(__fadd_rn(__fdiv_rn(brain_rms_sum_sq(vo), static_cast<float>(BRAIN_GDN_HD)), rms_eps))); }
     const float nw = norm_w[j];
     const float zin = z[bi * value_dim + static_cast<unsigned long long>(vh) * BRAIN_GDN_HD + j];
     __syncthreads();
-    const float nrm = __fmul_rn(__fmul_rn(nw, vo[j]), inv_rms);
+    const float nrm = __fmul_rn(__fmul_rn(vo[j], inv_rms), nw);
     gated[bi * value_dim + static_cast<unsigned long long>(vh) * BRAIN_GDN_HD + j] = __fmul_rn(nrm, brain_silu(zin));
 }
 
@@ -1104,11 +1123,11 @@ brain_gdn_recur_verify_pool(const unsigned int* params, const float* conv_out, c
             uint4* snap = reinterpret_cast<uint4*>(snap_state + (off + r) * state_len + static_cast<unsigned long long>(vh) * BRAIN_GDN_HD * BRAIN_GDN_HD);
             for (unsigned int c = j; c < TILE_BYTES / 16u; c += BRAIN_GDN_HD) { __stcs(snap + c, src[c]); }
         }
-        if (j == 0) { inv_rms = __fdiv_rn(1.0f, __fsqrt_rn(__fadd_rn(__fdiv_rn(brain_sum_sq(vo), static_cast<float>(BRAIN_GDN_HD)), rms_eps))); }
+        if (j == 0) { inv_rms = __fdiv_rn(1.0f, __fsqrt_rn(__fadd_rn(__fdiv_rn(brain_rms_sum_sq(vo), static_cast<float>(BRAIN_GDN_HD)), rms_eps))); }
         const float nw = norm_w[j];
         const float zin = z[(off + r) * value_dim + static_cast<unsigned long long>(vh) * BRAIN_GDN_HD + j];
         __syncthreads();
-        const float nrm = __fmul_rn(__fmul_rn(nw, vo[j]), inv_rms);
+        const float nrm = __fmul_rn(__fmul_rn(vo[j], inv_rms), nw);
         gated[(off + r) * value_dim + static_cast<unsigned long long>(vh) * BRAIN_GDN_HD + j] = __fmul_rn(nrm, brain_silu(zin));
         __syncthreads();   // vo, inv_rms and q/k are free for the next row
     }

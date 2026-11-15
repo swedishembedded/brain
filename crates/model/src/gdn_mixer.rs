@@ -845,10 +845,18 @@ fn rows_fused_shape_ok(shape: &GdnMixerShape) -> bool {
     gdn.b == 1 && gdn.dk == 128 && gdn.dv == 128 && shape.conv_kernel == 4 && shape.nkh != 0 && gdn.h.is_multiple_of(shape.nkh) && (1..=3).contains(&shape.group())
 }
 
+/// Whether the chain's gated RMSNorm over `rows` rows of the layer's value heads is the cooperative `rmsnorm_rows`, whose
+/// reduction the exact native bodies (`gdn_decode`, `gdn_decode_pool`, `gdn_recur_pool`) reproduce. Where the chain keeps the
+/// per-element `rmsnorm` they would compute another rounding of the same norm, so they are declined.
+fn exact_norm_matches(g: &Gpu, shape: &GdnMixerShape, rows: u32) -> bool {
+    crate::block::rms_rows_selected(g, rows * shape.gdn.h, shape.gdn.dv)
+}
+
 /// Whether [`gdn_mixer_rows_fused`] will be taken for this `shape` on `g`: the
-/// device is offered the kernel and the shape is one it serves.
+/// device is offered the kernel, the shape is one it serves and the chain's norm
+/// is the one it reproduces.
 pub fn rows_fused_offered(g: &Gpu, shape: &GdnMixerShape) -> bool {
-    g.has_fused(gpu_core::Fused::GdnDecode) && rows_fused_shape_ok(shape)
+    g.has_fused(gpu_core::Fused::GdnDecode) && rows_fused_shape_ok(shape) && exact_norm_matches(g, shape, shape.gdn.t.max(1))
 }
 
 /// [`gdn_mixer_decode_fused`] for `rows` CONSECUTIVE tokens of one sequence in a
@@ -873,7 +881,7 @@ pub fn gdn_mixer_rows_fused(
     rows: u32,
 ) -> Option<DeviceBuffer> {
     let gdn = shape.gdn;
-    if rows == 0 || gdn.t != rows || !rows_fused_shape_ok(shape) {
+    if rows == 0 || gdn.t != rows || !rows_fused_shape_ok(shape) || !exact_norm_matches(g, shape, rows) {
         return None;
     }
     let gated = g.storage(rows as u64 * shape.value_dim() as u64);
@@ -951,6 +959,9 @@ pub fn gdn_mixer_decode_pooled_fused_into(
     }
     // The exact body as two launches: the conv of every channel, then a block per (sequence, value head) for the rest. The
     // single-launch body keeps one block per key head (16 of the card's 132 SMs at one sequence) and runs several times slower at 16.
+    if !exact_norm_matches(g, shape, gdn.b) {
+        return false;
+    }
     let (conv, recur) = if pool.bf16 { (gpu_core::Fused::GdnConvPoolBf16, gpu_core::Fused::GdnRecurPoolBf16) } else { (gpu_core::Fused::GdnConvPool, gpu_core::Fused::GdnRecurPool) };
     if g.has_fused(conv) && g.has_fused(recur) && conv.serves(&[shape.nkh, gdn.h, gdn.b, 0]) && recur.serves(&params) {
         let conv_out = g.storage_uninit(gdn.b as u64 * shape.conv_dim() as u64);
