@@ -51,97 +51,96 @@ fn fake_init(cfg: &T5Config) -> HashMap<String, Vec<f32>> {
         .collect()
 }
 
-/// Force the embedding gather to tile, so the multi-tile `embed_tile` path
-/// (sliced bindings, not one whole-table binding) is exercised at toy size too.
-///
-/// The tile budget is process-global and libtest runs this binary's tests on
-/// concurrent threads, so every test calls this as its FIRST action and the
-/// `Once` sets the budget exactly once, before any forward reads it.
-fn force_tiled_embedding() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| model::block::set_tile_budget_words(Some(4096)));
+/// Run `f` with the embedding gather forced to tile, so the multi-tile
+/// `embed_tile` path (sliced bindings, not one whole-table binding) is
+/// exercised at toy size too. The budget is scoped to this thread: the parity
+/// tests beside these in the binary keep the device's own.
+fn tiled_embedding<R>(f: impl FnOnce() -> R) -> R {
+    model::block::with_tile_budget_words(4096, f)
 }
 
 #[test]
 fn tiny_forward_runs_every_step_kind() {
-    force_tiled_embedding();
-    let cfg = tiny();
-    let (b, t) = (2u32, 8u32);
-    assert!(model::block::vocab_tiles(cfg.vocab as u64, cfg.d_model as u64).len() > 1);
+    tiled_embedding(|| {
+        let cfg = tiny();
+        let (b, t) = (2u32, 8u32);
+        assert!(model::block::vocab_tiles(cfg.vocab as u64, cfg.d_model as u64).len() > 1);
 
-    let init = fake_init(&cfg);
-    let m = T5Encoder::new_on(gpu_core::testgpu::dev(t5encoder::model::PIPELINES), cfg.clone(), b, t, &init);
-    let ids: Vec<u32> = (0..b * t).map(|i| (i * 7 + 3) % cfg.vocab).collect();
-    m.set_tokens(&ids);
-    m.forward();
+        let init = fake_init(&cfg);
+        let m = T5Encoder::new_on(gpu_core::testgpu::dev(t5encoder::model::PIPELINES), cfg.clone(), b, t, &init);
+        let ids: Vec<u32> = (0..b * t).map(|i| (i * 7 + 3) % cfg.vocab).collect();
+        m.set_tokens(&ids);
+        m.forward();
 
-    let n = (b * t) as usize;
-    let d = cfg.d_model as usize;
-    let finite = |what: &str, v: &[f32]| {
-        assert!(v.iter().all(|x| x.is_finite()), "{what}: non-finite value");
-        assert!(v.iter().any(|&x| x != 0.0), "{what}: all zero");
-    };
-    finite("embed", &m.read_x(0));
-    for l in 0..cfg.layers as usize {
-        for tap in [
-            Tap::AttnNorm,
-            Tap::Qkv,
-            Tap::Ctx,
-            Tap::AttnOut,
-            Tap::AttnRes,
-            Tap::FfNorm,
-            Tap::Wi0,
-            Tap::Wi1,
-            Tap::Gated,
-            Tap::FfOut,
-        ] {
-            finite(&format!("block{l} {tap:?}"), &m.read_block_tap(l, tap));
+        let n = (b * t) as usize;
+        let d = cfg.d_model as usize;
+        let finite = |what: &str, v: &[f32]| {
+            assert!(v.iter().all(|x| x.is_finite()), "{what}: non-finite value");
+            assert!(v.iter().any(|&x| x != 0.0), "{what}: all zero");
+        };
+        finite("embed", &m.read_x(0));
+        for l in 0..cfg.layers as usize {
+            for tap in [
+                Tap::AttnNorm,
+                Tap::Qkv,
+                Tap::Ctx,
+                Tap::AttnOut,
+                Tap::AttnRes,
+                Tap::FfNorm,
+                Tap::Wi0,
+                Tap::Wi1,
+                Tap::Gated,
+                Tap::FfOut,
+            ] {
+                finite(&format!("block{l} {tap:?}"), &m.read_block_tap(l, tap));
+            }
+            finite(&format!("block{l}_out"), &m.read_x(l + 1));
         }
-        finite(&format!("block{l}_out"), &m.read_x(l + 1));
-    }
-    let hidden = m.read_hidden();
-    assert_eq!(hidden.len(), n * d);
-    finite("last_hidden_state", &hidden);
+        let hidden = m.read_hidden();
+        assert_eq!(hidden.len(), n * d);
+        finite("last_hidden_state", &hidden);
 
-    // The residual is a plain add: block output == res + ff_out, exactly.
-    let res = m.read_block_tap(0, Tap::AttnRes);
-    let ff = m.read_block_tap(0, Tap::FfOut);
-    let out = m.read_x(1);
-    for i in 0..n * d {
-        assert_eq!(out[i], res[i] + ff[i], "residual at {i}");
-    }
+        // The residual is a plain add: block output == res + ff_out, exactly.
+        let res = m.read_block_tap(0, Tap::AttnRes);
+        let ff = m.read_block_tap(0, Tap::FfOut);
+        let out = m.read_x(1);
+        for i in 0..n * d {
+            assert_eq!(out[i], res[i] + ff[i], "residual at {i}");
+        }
+    })
 }
 
 #[test]
 fn position_bias_is_the_bucket_gather_permuted() {
-    force_tiled_embedding();
-    let cfg = tiny();
-    let (b, t) = (1u32, 8u32);
-    let mut init = fake_init(&cfg);
-    // rel_bias[bucket, head] = bucket*10 + head — every element identifiable.
-    let heads = cfg.heads as usize;
-    init.insert(
-        "rel_bias.weight".into(),
-        (0..cfg.rel_buckets as usize)
-            .flat_map(|bk| (0..heads).map(move |h| (bk * 10 + h) as f32))
-            .collect(),
-    );
-    let m = T5Encoder::new_on(gpu_core::testgpu::dev(t5encoder::model::PIPELINES), cfg.clone(), b, t, &init);
-    m.set_tokens(&vec![1u32; (b * t) as usize]);
-    m.forward();
+    tiled_embedding(|| {
+        let cfg = tiny();
+        let (b, t) = (1u32, 8u32);
+        let mut init = fake_init(&cfg);
+        // rel_bias[bucket, head] = bucket*10 + head - every element identifiable.
+        let heads = cfg.heads as usize;
+        init.insert(
+            "rel_bias.weight".into(),
+            (0..cfg.rel_buckets as usize)
+                .flat_map(|bk| (0..heads).map(move |h| (bk * 10 + h) as f32))
+                .collect(),
+        );
+        let m = T5Encoder::new_on(gpu_core::testgpu::dev(t5encoder::model::PIPELINES), cfg.clone(), b, t, &init);
+        m.set_tokens(&vec![1u32; (b * t) as usize]);
+        m.forward();
 
-    let got = m.read_position_bias();
-    let buckets = t5encoder::hostbias::buckets(t, cfg.rel_buckets, cfg.rel_max_distance);
-    assert_eq!(got.len(), heads * (t * t) as usize);
-    for h in 0..heads {
-        for i in 0..t as usize {
-            for j in 0..t as usize {
-                let want = (buckets[i * t as usize + j] as usize * 10 + h) as f32;
-                let idx = (h * t as usize + i) * t as usize + j;
-                assert_eq!(got[idx], want, "bias[h={h}, i={i}, j={j}]");
+        let got = m.read_position_bias();
+        let buckets = t5encoder::hostbias::buckets(t, cfg.rel_buckets, cfg.rel_max_distance);
+        assert_eq!(got.len(), heads * (t * t) as usize);
+        for h in 0..heads {
+            for i in 0..t as usize {
+                for j in 0..t as usize {
+                    let want = (buckets[i * t as usize + j] as usize * 10 + h) as f32;
+                    let idx = (h * t as usize + i) * t as usize + j;
+                    assert_eq!(got[idx], want, "bias[h={h}, i={i}, j={j}]");
+                }
             }
         }
-    }
+    })
 }
 
 // -------------------------------------------------------------- umT5 (Wan)
@@ -167,38 +166,39 @@ fn tiny_umt5() -> T5Config {
 /// exactly what makes the bug survive an eyeball and a rough cosine.
 #[test]
 fn each_block_uses_its_own_relative_position_table() {
-    force_tiled_embedding();
-    let cfg = tiny_umt5();
-    let (b, t) = (1u32, 8u32);
-    let heads = cfg.heads as usize;
-    let mut init = fake_init(&cfg);
-    for l in 0..cfg.layers as usize {
-        init.insert(
-            cfg.rel_bias_name(l),
-            (0..cfg.rel_buckets as usize)
-                .flat_map(|bk| (0..heads).map(move |h| (bk * 10 + h + 100 * l) as f32))
-                .collect(),
-        );
-    }
-    let m = T5Encoder::new_on(gpu_core::testgpu::dev(t5encoder::model::PIPELINES), cfg.clone(), b, t, &init);
-    m.set_tokens(&vec![1u32; (b * t) as usize]);
-    m.set_mask(&vec![1u32; (b * t) as usize]);
-    m.forward();
+    tiled_embedding(|| {
+        let cfg = tiny_umt5();
+        let (b, t) = (1u32, 8u32);
+        let heads = cfg.heads as usize;
+        let mut init = fake_init(&cfg);
+        for l in 0..cfg.layers as usize {
+            init.insert(
+                cfg.rel_bias_name(l),
+                (0..cfg.rel_buckets as usize)
+                    .flat_map(|bk| (0..heads).map(move |h| (bk * 10 + h + 100 * l) as f32))
+                    .collect(),
+            );
+        }
+        let m = T5Encoder::new_on(gpu_core::testgpu::dev(t5encoder::model::PIPELINES), cfg.clone(), b, t, &init);
+        m.set_tokens(&vec![1u32; (b * t) as usize]);
+        m.set_mask(&vec![1u32; (b * t) as usize]);
+        m.forward();
 
-    let buckets = t5encoder::hostbias::buckets(t, cfg.rel_buckets, cfg.rel_max_distance);
-    for l in 0..cfg.layers as usize {
-        let got = m.read_block_bias(l);
-        assert_eq!(got.len(), heads * (t * t) as usize);
-        for h in 0..heads {
-            for i in 0..t as usize {
-                for j in 0..t as usize {
-                    let want = (buckets[i * t as usize + j] as usize * 10 + h + 100 * l) as f32;
-                    let idx = (h * t as usize + i) * t as usize + j;
-                    assert_eq!(got[idx], want, "block {l} bias[h={h}, i={i}, j={j}]");
+        let buckets = t5encoder::hostbias::buckets(t, cfg.rel_buckets, cfg.rel_max_distance);
+        for l in 0..cfg.layers as usize {
+            let got = m.read_block_bias(l);
+            assert_eq!(got.len(), heads * (t * t) as usize);
+            for h in 0..heads {
+                for i in 0..t as usize {
+                    for j in 0..t as usize {
+                        let want = (buckets[i * t as usize + j] as usize * 10 + h + 100 * l) as f32;
+                        let idx = (h * t as usize + i) * t as usize + j;
+                        assert_eq!(got[idx], want, "block {l} bias[h={h}, i={i}, j={j}]");
+                    }
                 }
             }
         }
-    }
+    })
 }
 
 /// Masking a right-padded run must be **the same computation** as never having
@@ -213,60 +213,61 @@ fn each_block_uses_its_own_relative_position_table() {
 /// of which a cosine on a real prompt reliably separates from rounding.
 #[test]
 fn masking_the_pad_keys_equals_never_having_padded() {
-    force_tiled_embedding();
-    let cfg = tiny_umt5();
-    let (b, keep, pad) = (2u32, 8u32, 4u32);
-    let init = fake_init(&cfg);
-    let dev = || gpu_core::testgpu::dev(t5encoder::model::PIPELINES);
-    let content: Vec<u32> = (0..b * keep).map(|i| (i * 7 + 3) % cfg.vocab).collect();
+    tiled_embedding(|| {
+        let cfg = tiny_umt5();
+        let (b, keep, pad) = (2u32, 8u32, 4u32);
+        let init = fake_init(&cfg);
+        let dev = || gpu_core::testgpu::dev(t5encoder::model::PIPELINES);
+        let content: Vec<u32> = (0..b * keep).map(|i| (i * 7 + 3) % cfg.vocab).collect();
 
-    let short = T5Encoder::new_on(dev(), cfg.clone(), b, keep, &init);
-    short.set_tokens(&content);
-    short.set_mask(&vec![1u32; (b * keep) as usize]);
-    short.forward();
+        let short = T5Encoder::new_on(dev(), cfg.clone(), b, keep, &init);
+        short.set_tokens(&content);
+        short.set_mask(&vec![1u32; (b * keep) as usize]);
+        short.forward();
 
-    let t = keep + pad;
-    let mut ids = vec![0u32; (b * t) as usize];
-    let mut mask = vec![0u32; (b * t) as usize];
-    for r in 0..b as usize {
-        for i in 0..keep as usize {
-            ids[r * t as usize + i] = content[r * keep as usize + i];
-            mask[r * t as usize + i] = 1;
-        }
-    }
-    let long = T5Encoder::new_on(dev(), cfg.clone(), b, t, &init);
-    long.set_tokens(&ids);
-    long.set_mask(&mask);
-    long.forward();
-
-    let d = cfg.d_model as usize;
-    let a = short.read_hidden();
-    let c = long.read_hidden();
-    let mut worst = 0.0f32;
-    for r in 0..b as usize {
-        for i in 0..keep as usize {
-            for k in 0..d {
-                let x = a[(r * keep as usize + i) * d + k];
-                let y = c[(r * t as usize + i) * d + k];
-                worst = worst.max((x - y).abs());
+        let t = keep + pad;
+        let mut ids = vec![0u32; (b * t) as usize];
+        let mut mask = vec![0u32; (b * t) as usize];
+        for r in 0..b as usize {
+            for i in 0..keep as usize {
+                ids[r * t as usize + i] = content[r * keep as usize + i];
+                mask[r * t as usize + i] = 1;
             }
         }
-    }
-    eprintln!("masked T={t} vs unmasked T={keep}: max_abs {worst:.3e} on the content rows");
-    assert_eq!(worst, 0.0, "the key-padding mask is not equivalent to truncation");
+        let long = T5Encoder::new_on(dev(), cfg.clone(), b, t, &init);
+        long.set_tokens(&ids);
+        long.set_mask(&mask);
+        long.forward();
 
-    // ...and `read_context` hands the DiT hard zeros at the pad rows, not the
-    // encoder's (perfectly nonzero) output there.
-    let ctx = long.read_context();
-    for r in 0..(b * t) as usize {
-        let row = &ctx[r * d..(r + 1) * d];
-        if mask[r] == 1 {
-            assert!(row.iter().any(|&v| v != 0.0), "content row {r} is zero");
-        } else {
-            assert!(row.iter().all(|&v| v == 0.0), "pad row {r} is not zeroed");
-            assert!(c[r * d..(r + 1) * d].iter().any(|&v| v != 0.0), "pad row {r} was already zero");
+        let d = cfg.d_model as usize;
+        let a = short.read_hidden();
+        let c = long.read_hidden();
+        let mut worst = 0.0f32;
+        for r in 0..b as usize {
+            for i in 0..keep as usize {
+                for k in 0..d {
+                    let x = a[(r * keep as usize + i) * d + k];
+                    let y = c[(r * t as usize + i) * d + k];
+                    worst = worst.max((x - y).abs());
+                }
+            }
         }
-    }
+        eprintln!("masked T={t} vs unmasked T={keep}: max_abs {worst:.3e} on the content rows");
+        assert_eq!(worst, 0.0, "the key-padding mask is not equivalent to truncation");
+
+        // ...and `read_context` hands the DiT hard zeros at the pad rows, not the
+        // encoder's (perfectly nonzero) output there.
+        let ctx = long.read_context();
+        for r in 0..(b * t) as usize {
+            let row = &ctx[r * d..(r + 1) * d];
+            if mask[r] == 1 {
+                assert!(row.iter().any(|&v| v != 0.0), "content row {r} is zero");
+            } else {
+                assert!(row.iter().all(|&v| v == 0.0), "pad row {r} is not zeroed");
+                assert!(c[r * d..(r + 1) * d].iter().any(|&v| v != 0.0), "pad row {r} was already zero");
+            }
+        }
+    })
 }
 
 /// An encoder built for its output alone (`Taps::Output`: one block's
@@ -276,18 +277,19 @@ fn masking_the_pad_keys_equals_never_having_padded() {
 #[test]
 fn an_output_only_build_matches_the_per_block_build_bit_for_bit() {
     use t5encoder::model::{device_bytes, Taps};
-    force_tiled_embedding();
-    for cfg in [T5Config { layers: 3, ..tiny() }, T5Config { layers: 3, per_block_rel_bias: true, ..tiny() }] {
-        let (b, t) = (2u32, 8u32);
-        let init = fake_init(&cfg);
-        let ids: Vec<u32> = (0..b * t).map(|i| (i * 5 + 1) % cfg.vocab).collect();
-        let hidden = |taps: Taps| {
-            let m = T5Encoder::new_with(gpu_core::testgpu::dev(t5encoder::model::PIPELINES), cfg.clone(), b, t, &init, taps);
-            m.set_tokens(&ids);
-            m.forward();
-            m.read_hidden()
-        };
-        assert_eq!(hidden(Taps::Output), hidden(Taps::Every), "per_block_rel_bias={}", cfg.per_block_rel_bias);
-        assert!(device_bytes(&cfg, b, t, Taps::Output) < device_bytes(&cfg, b, t, Taps::Every));
-    }
+    tiled_embedding(|| {
+        for cfg in [T5Config { layers: 3, ..tiny() }, T5Config { layers: 3, per_block_rel_bias: true, ..tiny() }] {
+            let (b, t) = (2u32, 8u32);
+            let init = fake_init(&cfg);
+            let ids: Vec<u32> = (0..b * t).map(|i| (i * 5 + 1) % cfg.vocab).collect();
+            let hidden = |taps: Taps| {
+                let m = T5Encoder::new_with(gpu_core::testgpu::dev(t5encoder::model::PIPELINES), cfg.clone(), b, t, &init, taps);
+                m.set_tokens(&ids);
+                m.forward();
+                m.read_hidden()
+            };
+            assert_eq!(hidden(Taps::Output), hidden(Taps::Every), "per_block_rel_bias={}", cfg.per_block_rel_bias);
+            assert!(device_bytes(&cfg, b, t, Taps::Output) < device_bytes(&cfg, b, t, Taps::Every));
+        }
+    })
 }
