@@ -48,11 +48,14 @@ fn a_peft_export_folds_as_the_adapter_brain_trained() {
     qwen3::lora::fold_adapter_into(&mut brain_folded, adapter.to_str().unwrap()).unwrap();
     // ...and the PEFT file's, over the HF names it targets.
     let names = qwen3::hf::HfNames::CAUSAL_LM;
+    let saved = checkpoint::weightio::WeightReader::open(out.join("adapter_model.safetensors").to_str().unwrap()).unwrap();
+    assert!(saved.names().all(|n| n.starts_with("base_model.model.")), "every key carries PEFT's wrapper");
+    // The reader takes PEFT's wrapper off, so each pair names the HF tensor it targets.
     let pairs = model::lora::read_external_adapter(out.join("adapter_model.safetensors").to_str().unwrap()).unwrap();
     assert_eq!(pairs.len(), 3 * cfg.n_layers as usize, "one pair per targeted linear");
     let mut peft_folded = base.clone();
     for p in &pairs {
-        let hf = p.base_key.strip_prefix("base_model.model.").expect("PEFT's prefix");
+        let hf = p.base_key.as_str();
         let brain = base.keys().find(|b| names.from_brain(b).as_deref() == Some(hf)).unwrap_or_else(|| panic!("{hf} targets no base weight"));
         p.add_delta(1.0, peft_folded.get_mut(brain).unwrap());
     }
