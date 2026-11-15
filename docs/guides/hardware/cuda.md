@@ -19,7 +19,9 @@ Hopper systems.
 - **The NVIDIA driver.** That is all a model needs to *run* once its kernels
   are compiled.
 - **NVRTC** (`libnvrtc`, part of the CUDA toolkit) to compile kernels the first
-  time each is used; the result is cached on disk (`--cache-dir`).
+  time each is used; the result is cached on disk (`--cache-dir`). A cache
+  directory that cannot be created (for example a link into a removed drive)
+  is reported once at start, and every start then compiles and tunes again.
   Without it a machine can still run every catalogue kernel and native kernel
   from ahead-of-time images (below); a kernel with no image and no NVRTC is
   reported by name.

@@ -2123,8 +2123,18 @@ pub fn set_cache_dir(dir: Option<std::path::PathBuf>) {
 /// pipeline blobs, autotune records, cubins - and a second copy of this ladder
 /// is a second answer to "where is the cache", which shows up as a cache that
 /// silently stops being read after an environment change.
+///
+/// The directory is answered only once it exists (it is created on first ask). One that cannot be created - a link
+/// into a wiped data drive, a read-only home - is reported once on stderr and answered as `None`, so the stores under
+/// it are skipped by name instead of each failing in silence while every start recompiles and re-tunes.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn cache_dir() -> Option<std::path::PathBuf> {
+    let dir = configured_cache_dir()?;
+    usable_cache_dir(dir)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn configured_cache_dir() -> Option<std::path::PathBuf> {
     if let Some(d) = CACHE_DIR.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone() {
         return Some(d);
     }
@@ -2132,6 +2142,33 @@ pub fn cache_dir() -> Option<std::path::PathBuf> {
         return Some(std::path::Path::new(&d).join("brain"));
     }
     std::env::var("HOME").ok().map(|h| std::path::Path::new(&h).join(".cache/brain"))
+}
+
+/// The last directory checked and whether it could hold files: a cache lookup happens per compiled kernel, the
+/// filesystem check once per directory.
+#[cfg(not(target_arch = "wasm32"))]
+static CHECKED_CACHE_DIR: std::sync::Mutex<Option<(std::path::PathBuf, bool)>> = std::sync::Mutex::new(None);
+
+#[cfg(not(target_arch = "wasm32"))]
+fn usable_cache_dir(dir: std::path::PathBuf) -> Option<std::path::PathBuf> {
+    let mut checked = CHECKED_CACHE_DIR.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((seen, usable)) = checked.as_ref() {
+        if *seen == dir && (!*usable || dir.is_dir()) {
+            return usable.then_some(dir);
+        }
+    }
+    let usable = match std::fs::create_dir_all(&dir) {
+        Ok(()) => true,
+        Err(e) => {
+            eprintln!(
+                "brain: warning: the cache directory {} cannot be created ({e}); compiled kernels, tuned kernel choices and measured rooflines are not kept and are redone on every start (fix the path or pass --cache-dir)",
+                dir.display()
+            );
+            false
+        }
+    };
+    *checked = Some((dir.clone(), usable));
+    usable.then_some(dir)
 }
 
 /// How one device reaches another device's memory directly, as the driver reports it. A topology fact only:
