@@ -35,7 +35,9 @@ const STEPS: usize = 24;
 const TOPK: usize = 16;
 const ROLE_ENV: &str = "BRAIN_PARITY_ROLE";
 const OUT_ENV: &str = "BRAIN_PARITY_OUT";
-const TEST_NAME: &str = "the_fast_path_follows_the_portable_reference_on_the_real_checkpoint";
+/// The test the reference child runs, as the harness of the crate's one test binary names it (`--exact` matches the
+/// whole path: the bare function name matches nothing, and the child then writes no reference).
+const TEST_NAME: &str = "fast_path_parity_real::the_fast_path_follows_the_portable_reference_on_the_real_checkpoint";
 
 /// Prompts of different lengths: all above the grouped-MoE row threshold, so
 /// prefill takes the grouped kernels, and distinct, so a batch routes differently

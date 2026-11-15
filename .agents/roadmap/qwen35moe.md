@@ -296,5 +296,10 @@ collected", also on runs that recorded before), so its busy figure is the engine
   measures the prefill form at placement and opts in to the tensor-core GDN kernels (knowledge 473). The GDN share of
   a 16K prefill 1.1 s -> 0.08 s. Gate: `chunked_prefill::a_round_on_the_segment_kernels_leaves_the_state_a_token_
   replay_leaves` (3.8e-7 against the replay; a round leaving half its rows to no kernel reads 1.2e-3).
+  On the real checkpoint (`fast_path_parity_real`, which ran no reference child since the crate's tests became one
+  binary: its `--exact` name lacked the module path) the bf16 form moves prompts 0-2 from bit-equal to the portable
+  reference to 3.7-4.5e-2 prefill-hidden rel-L2 and 2.2-2.5e-2 decode top-k logit rel-L2, with 0 clear flips and 2
+  near-tie flips over 3 x 24 steps: the size knowledge 456 gives for two int8 paths parting once a code flips. Prompt
+  3 fails the gate's floor before (5.06e-2) and after (5.54e-2), the open item above.
 - [ ] Step 4: `moe_i8_grouped_mma` (1.07 s of a 1.50 s 16K prefill, 71 % of device time): an 8-slot tile re-reads
   the expert's weights per tile.
