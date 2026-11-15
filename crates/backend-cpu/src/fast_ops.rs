@@ -1713,12 +1713,15 @@ pub fn moe_linear_gated_dx(
         if !acc {
             dxr.iter_mut().for_each(|v| *v = 0.0);
         }
+        // Multiply then add, as `matmul_dx` and the kernel's own WGSL do (see `moe_linear_gated_dw`).
         for nn in 0..n {
             let dyv = dyr[nn];
             if dyv == 0.0 {
                 continue;
             }
-            axpy(dxr, dyv, &w[nn * k..nn * k + k]);
+            for (dstv, &wv) in dxr.iter_mut().zip(&w[nn * k..nn * k + k]) {
+                *dstv += dyv * wv;
+            }
         }
     };
     if m * n * k < 262_144 {
@@ -1765,7 +1768,11 @@ pub fn moe_linear_gated_dw(
             if dyv == 0.0 {
                 continue;
             }
-            axpy(dwr, dyv, &x[mm * k..mm * k + k]);
+            // Multiply then add, as `matmul_dw` and the kernel's own WGSL do: the gradient is then bit-identical to the
+            // dense one, which a fused multiply-add (one rounding where the reference has two) is not.
+            for (dstv, &xv) in dwr.iter_mut().zip(&x[mm * k..mm * k + k]) {
+                *dstv += dyv * xv;
+            }
         }
     };
     if m * n * k < 262_144 {
