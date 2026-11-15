@@ -155,7 +155,7 @@ impl WgslProvider {
     /// another provider's lowering of the same request is priced as.
     pub(crate) fn portable(&self, gpu: &crate::Gpu, caps: &backend_api::DeviceCaps, req: &OpRequest) -> Result<backend_api::PortableDispatch, String> {
         let (kind, name, grid) = self.plan(req, caps)?;
-        Ok(backend_api::PortableDispatch { kernel: name, params: req.attrs.to_vec(), threads: gpu.threads_for(kind, grid) })
+        Ok(backend_api::PortableDispatch { kernel: name.into(), params: req.attrs.to_vec(), threads: gpu.threads_for(kind, grid) })
     }
 
     /// The one dispatch body all of this provider's operators share: resolve

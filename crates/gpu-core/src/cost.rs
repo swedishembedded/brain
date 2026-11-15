@@ -351,6 +351,50 @@ pub fn covers(name: &str) -> bool {
     kernel_cost(name, Some(&[1; 32]), 1).is_some()
 }
 
+/// The portable work `steps` do, as the dispatches a [`backend_api::Lowering`] is priced as, resolving kernel indices
+/// through `names` (the pipeline set the steps were built on): each portable step is its own kernel at its recorded
+/// uniform, each priced lowered step contributes the work it states. `None` when a step's work cannot be stated (a
+/// `step_buf` dispatch, an unpriced lowered step, a step built behind the facade), so the step that replaces them stays
+/// unpriced rather than under-priced.
+pub fn portable_work(names: &[String], steps: &[Step]) -> Option<Vec<backend_api::PortableDispatch>> {
+    let mut work = Vec::with_capacity(steps.len());
+    for s in steps {
+        if let Some(l) = s.lowering() {
+            work.extend(l.portable.as_ref()?.iter().cloned());
+            continue;
+        }
+        let m = s.meta()?;
+        let kernel = names.get(m.kernel)?.clone();
+        work.push(backend_api::PortableDispatch { kernel: kernel.into(), params: m.params.clone()?, threads: m.threads });
+    }
+    Some(work)
+}
+
+/// `step` (an unpriced native launch) priced as the [`portable_work`] of `chain`; `step` unchanged when it is already
+/// priced or the chain's work cannot be stated.
+pub fn priced_as_chain(names: &[String], step: Step, chain: &[Step]) -> Step {
+    match portable_work(names, chain).and_then(|work| step.priced_as(work)) {
+        Some(priced) => priced,
+        None => step,
+    }
+}
+
+/// Price the launches one native operation pushed as the portable `work` it replaces: the last unpriced launch
+/// carries the work, the unpriced ones before it are zero-cost helpers of the same operation (the
+/// `ProviderRegistry::dispatch` rule). Launches already priced are left as they are.
+pub fn price_lowered(steps: &mut [Step], work: Vec<backend_api::PortableDispatch>) {
+    let unpriced = |s: &Step| s.lowering().is_some_and(|l| l.portable.is_none());
+    let Some(last) = steps.iter().rposition(unpriced) else { return };
+    for s in &mut steps[..last] {
+        if let Some(helper) = unpriced(s).then(|| s.priced_as(Vec::new())).flatten() {
+            *s = helper;
+        }
+    }
+    if let Some(priced) = steps[last].priced_as(work) {
+        steps[last] = priced;
+    }
+}
+
 /// Fold `steps` into `report`, resolving kernel indices through `names` (the
 /// pipeline set the recording `Gpu` was built with). See [`step_cost`].
 pub fn tally(report: &mut CostReport, names: &[String], steps: &[Step]) {
@@ -376,7 +420,7 @@ pub fn step_cost<'a>(step: &'a Step, kernel_name: impl FnOnce(usize) -> Option<&
     if let Some(l) = step.lowering() {
         let cost = l.portable.as_ref().and_then(|work| {
             work.iter().try_fold(Cost::default(), |mut sum, d| {
-                sum.add(kernel_cost(d.kernel, Some(&d.params), d.threads)?);
+                sum.add(kernel_cost(&d.kernel, Some(&d.params), d.threads)?);
                 Some(sum)
             })
         });
@@ -1498,6 +1542,25 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
         }
         // params [rows, width, row_stride, off]: pure movement of rows*width elements.
         "region_copy" => f(0, 8 * p(0)? * p(1)?),
+        // Row-wise argmax in two stages, params [m, n, p, chunk] then [m, p]: one comparison per element read, the
+        // partial (value, index) pairs written and folded.
+        "argmax_part" => {
+            let (m, n, parts) = (p(0)?, p(1)?, p(2)?);
+            f(m * n, 4 * (m * n + 2 * m * parts))
+        }
+        "argmax_final" => {
+            let (m, parts) = (p(0)?, p(1)?);
+            f(m * parts, 4 * (2 * m * parts + m))
+        }
+        // One top-K extraction step, params [bsz, vocab, k_max, col]: per row the winner's index read, its logit
+        // read and masked, its value and index written.
+        "topk_extract_step" => f(0, 20 * p(0)?),
+        // Rows of two pools to and from contiguous batch slabs, params [b, len_a, len_b]: a copy of every element of
+        // both, and the row index per batch row.
+        "pool_rows_gather2" | "pool_rows_scatter2" => {
+            let (b, len_a, len_b) = (p(0)?, p(1)?, p(2)?);
+            f(0, 8 * b * (len_a + len_b) + 4 * b)
+        }
         // A strided column-block copy; params [rows, cnt, src_stride,
         // src_off, dst_stride, dst_off]: pure data movement.
         "copy_cols" => {
@@ -2304,6 +2367,8 @@ mod tests {
             "paged_kv_append_batched", "decode_softmax_batched", "rope_paged", "rope_paged_yarn",
             "paged_decode_scores_i8_batched", "paged_decode_apply_i8_batched",
             "paged_kv_append_i8_clipped_batched",
+            // the served step's greedy head and the recurrent-state pools
+            "argmax_part", "argmax_final", "topk_extract_step", "pool_rows_gather2", "pool_rows_scatter2",
             // the fused flash-style paged attention the serving tape selects
             "paged_flash_prefill", "paged_flash_prefill_hd256", "paged_flash_prefill_i8",
             "paged_flash_decode", "paged_flash_decode_i8", "paged_flash_decode_split",

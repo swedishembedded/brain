@@ -2969,6 +2969,86 @@ const CONV2D_DW_PARTIAL_BINDINGS: &[BindKind] = CONV2D_BINDINGS;
 /// `conv2d_dw_reduce`'s bindings: params, `part`, `dw`.
 const CONV2D_DW_REDUCE_BINDINGS: &[BindKind] = &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageReadWrite];
 
+/// One Gated DeltaNet decode step of `b` sequences as the portable dispatches `model::gdn_mixer::gdn_mixer_decode_state_fwd`
+/// issues, at the head shape the fused decode kernels serve (128-wide key and value heads, a 4-tap conv): what each of
+/// them is priced as. Epsilons and the query scale are f32 bits, as in the kernels' params.
+struct GdnDecodeChain {
+    nkh: u32,
+    nvh: u32,
+    b: u32,
+    l2_eps: u32,
+    rms_eps: u32,
+    q_scale: u32,
+}
+
+impl GdnDecodeChain {
+    /// The head width the fused decode kernels serve, for keys and values alike.
+    const HEAD: u32 = 128;
+    /// Their conv taps.
+    const TAPS: u32 = 4;
+
+    /// From a pooled launch's params `[nkh, nvh, group, l2_eps, rms_eps, q_scale, b, ..]`.
+    fn pooled(params: &[u32]) -> Option<GdnDecodeChain> {
+        Some(GdnDecodeChain { nkh: *params.first()?, nvh: *params.get(1)?, l2_eps: *params.get(3)?, rms_eps: *params.get(4)?, q_scale: *params.get(5)?, b: *params.get(6)? })
+    }
+
+    fn dims(&self) -> (u32, u32, u32) {
+        let (key_dim, value_dim) = (self.nkh * Self::HEAD, self.nvh * Self::HEAD);
+        (key_dim, value_dim, 2 * key_dim + value_dim)
+    }
+
+    fn d(kernel: &'static str, params: Vec<u32>, threads: u32) -> backend_api::PortableDispatch {
+        backend_api::PortableDispatch { kernel: kernel.into(), params, threads }
+    }
+
+    /// The streaming causal conv and its SiLU.
+    fn conv(&self) -> Vec<backend_api::PortableDispatch> {
+        let (b, conv_dim) = (self.b, self.dims().2);
+        vec![Self::d("causal_conv1d_step", vec![b, conv_dim, Self::TAPS], b * conv_dim), Self::d("silu", vec![b * conv_dim], b * conv_dim)]
+    }
+
+    /// Everything after the conv: the q/k/v split, the L2 norms, the gates, the key-head expansion, the delta-rule update
+    /// (`model::gdn::gdn_recurrent_step`) and the gated RMSNorm.
+    fn recurrence(&self) -> Vec<backend_api::PortableDispatch> {
+        let (b, nkh, nvh, hd) = (self.b, self.nkh, self.nvh, Self::HEAD);
+        let (key_dim, value_dim, conv_dim) = self.dims();
+        let group = nvh / nkh.max(1);
+        let bh = b * nvh;
+        let split = |width: u32, off: u32| Self::d("concat_split", vec![b, conv_dim, width, off, 1, 1], b * width);
+        let l2 = || Self::d("l2norm_scale", vec![b * nkh, hd, self.l2_eps], b * key_dim);
+        let expand = || Self::d("kv_expand", vec![b, nvh, group, hd, nvh / group.max(1) * hd, nvh * hd, 0], b * nvh * hd);
+        let bmm = |kernel: &'static str, m: u32, k: u32, alpha: u32| Self::d(kernel, vec![bh, m, k, hd, 0, 0, alpha, 0, 0, 0], bh * m * hd);
+        let n = b * value_dim;
+        vec![
+            split(key_dim, 0),
+            split(key_dim, key_dim),
+            split(value_dim, 2 * key_dim),
+            l2(),
+            l2(),
+            Self::d("sigmoid", vec![bh], bh),
+            Self::d("gdn_decay_gate", vec![b, nvh], bh),
+            expand(),
+            expand(),
+            Self::d("gdn_state_decay", vec![bh, hd, hd, 1, 0], bh * hd * hd),
+            bmm("bmm", 1, hd, crate::f(1.0)),
+            Self::d("sub", vec![bh * hd, 0, 0], bh * hd),
+            Self::d("scale_row", vec![bh * hd, hd], bh * hd),
+            bmm("bmm_acc", hd, 1, crate::f(1.0)),
+            bmm("bmm", 1, hd, self.q_scale),
+            Self::d("rmsnorm", vec![hd, bh, self.rms_eps], bh),
+            Self::d("silu", vec![n], n),
+            Self::d("mul", vec![n], n),
+        ]
+    }
+
+    /// `work` between the staging of the batch's pool rows in and out.
+    fn staged(&self, work: Vec<backend_api::PortableDispatch>) -> Vec<backend_api::PortableDispatch> {
+        let (state_len, hist_len) = (self.nvh * Self::HEAD * Self::HEAD, self.dims().2 * (Self::TAPS - 1));
+        let stage = |kernel: &'static str| Self::d(kernel, vec![self.b, state_len, hist_len], self.b * (state_len + hist_len));
+        std::iter::once(stage("pool_rows_gather2")).chain(work).chain([stage("pool_rows_scatter2")]).collect()
+    }
+}
+
 impl Fused {
     /// The `kernels_cuda` registry entry's name.
     pub fn registry_name(self) -> &'static str {
@@ -3045,6 +3125,99 @@ impl Fused {
             Fused::I8wDx => I8W_DX_BINDINGS,
             Fused::F32Fma | Fused::F32DxFma | Fused::F32DwFma | Fused::SoftmaxRowsDx => F32_GEMM_BINDINGS,
             Fused::FlashGqaKmask => FLASH_GQA_KMASK_BINDINGS,
+        }
+    }
+
+    /// The portable chain a launch with `params` replaces, as the dispatches it is priced as (`gpu_core::cost`), for a
+    /// kernel whose chain its params fix: the WGSL kernels every caller's fallback dispatches at the same uniforms.
+    /// `None` for a kernel whose chain depends on what only its caller knows (a product's weight tier, a model's
+    /// layout), which that caller prices ([`backend_api::Step::priced_as`]). A cast or quantisation the portable path
+    /// does not run (bf16 or E4M3 rows a float-reading product takes as they are) is not in the chain.
+    pub fn portable(self, params: &[u32]) -> Option<Vec<backend_api::PortableDispatch>> {
+        let d = |kernel: &'static str, params: Vec<u32>, threads: u32| backend_api::PortableDispatch { kernel: kernel.into(), params, threads };
+        // The int8 activation packing `model::int8::quant_rows_steps` dispatches: per-group scales, then the pack.
+        let pack = |rows: u32, k: u32| [d("max_abs_row", vec![rows, k], rows), d("quant_pack", vec![rows, k], rows * k / 4)];
+        match self {
+            // flags bit 0: `sum = a + b` first; bit 1: no int8 packing; bit 2: bf16 rows of `xn` (a cast).
+            Fused::AddRmsQuant => {
+                let [dm, rows, eps, flags] = *params else { return None };
+                let mut work = Vec::new();
+                if flags & 1 != 0 {
+                    work.push(d("add2", vec![rows * dm], rows * dm));
+                }
+                work.push(d("rmsnorm", vec![dm, rows, eps], rows));
+                if flags & 2 == 0 {
+                    work.extend(pack(rows, dm));
+                }
+                Some(work)
+            }
+            // flags bit 0: the add; the E4M3 rows are what the float-reading FP8 product takes as it is.
+            Fused::AddRmsQuantE4m3 | Fused::AddRmsQuantE4m3Block | Fused::AddRmsQuantE4m3Cluster => {
+                let [dm, rows, eps, flags] = *params else { return None };
+                let add = (flags & 1 != 0).then(|| d("add2", vec![rows * dm], rows * dm));
+                Some(add.into_iter().chain([d("rmsnorm", vec![dm, rows, eps], rows)]).collect())
+            }
+            // mode 0 the activation as it is, 1 `silu(a) * b`, 2 `a * sigmoid(b)`; flags bit 0: no int8 packing.
+            Fused::QuantEpilogue => {
+                let (k, rows, mode, flags) = (*params.first()?, *params.get(1)?, *params.get(2)?, *params.get(3)?);
+                let n = rows * k;
+                let mut work = match mode {
+                    0 => Vec::new(),
+                    1 => vec![d("silu_mul", vec![n], n)],
+                    2 => vec![d("sigmoid", vec![n], n), d("mul", vec![n], n)],
+                    _ => return None,
+                };
+                if flags & 1 == 0 {
+                    work.extend(pack(rows, k));
+                }
+                Some(work)
+            }
+            // `model::gqa_mixer::qkv_prepare_query` on the interleaved query (the per-head split, the QK norms, the partial
+            // rotations) and the two KV appends of `model::block::gqa_decode_batched_step_kv`.
+            Fused::GqaDecodePrep | Fused::GqaDecodePrepI8 => {
+                let [nh, nkv, hd, half, eps, block_size, rows, _] = *params else { return None };
+                let (qd, kvd) = (nh * hd, nkv * hd);
+                let rope = |heads: u32, stride: u32| d("rope2d_partial", vec![rows, heads, half, stride, 0, rows, crate::f(1.0), hd], rows * heads * half);
+                let append = if self == Fused::GqaDecodePrepI8 {
+                    d("paged_kv_append_i8_clipped_batched", vec![rows, kvd, block_size, hd], rows * nkv)
+                } else {
+                    d("paged_kv_append_batched", vec![rows, kvd, block_size], rows * kvd)
+                };
+                Some(vec![
+                    d("concat_split", vec![rows * nh, 2, 1, 0, 1, hd], rows * nh * hd),
+                    d("concat_split", vec![rows * nh, 2, 1, 1, 1, hd], rows * nh * hd),
+                    d("rmsnorm", vec![hd, rows * nh, eps], rows * nh),
+                    d("rmsnorm", vec![hd, rows * nkv, eps], rows * nkv),
+                    rope(nh, qd),
+                    rope(nkv, kvd),
+                    append.clone(),
+                    append,
+                ])
+            }
+            // `rows` decode steps of one sequence: the chain of `model::gdn_mixer::gdn_mixer_decode_state_fwd` on its own
+            // buffers, once a step.
+            Fused::GdnDecode => {
+                let (nkh, nvh, l2_eps, rms_eps, q_scale, rows) = (*params.first()?, *params.get(1)?, *params.get(3)?, *params.get(4)?, *params.get(5)?, *params.get(6)?);
+                let step = GdnDecodeChain { nkh, nvh, b: 1, l2_eps, rms_eps, q_scale };
+                Some((0..rows).flat_map(|_| step.conv().into_iter().chain(step.recurrence())).collect())
+            }
+            // One step of each of `b` sequences whose state and window are pool rows: the same chain with the rows
+            // staged in (`pool_rows_gather2`) and out (`pool_rows_scatter2`). The split pair is priced as its halves,
+            // the staging on the recurrence.
+            Fused::GdnDecodePool | Fused::GdnDecodePoolBf16 | Fused::GdnDecodePoolWide | Fused::GdnDecodePoolWideBf16 | Fused::GdnDecodePoolStreamBf16 => {
+                let step = GdnDecodeChain::pooled(params)?;
+                Some(step.staged(step.conv().into_iter().chain(step.recurrence()).collect()))
+            }
+            Fused::GdnRecurPool | Fused::GdnRecurPoolBf16 | Fused::GdnRecurPoolStream => {
+                let step = GdnDecodeChain::pooled(params)?;
+                Some(step.staged(step.recurrence()))
+            }
+            Fused::GdnConvPool | Fused::GdnConvPoolBf16 => {
+                let (nkh, nvh, b) = (*params.first()?, *params.get(1)?, *params.get(2)?);
+                // Only the conv's shape is read; the norms' epsilons and the scale belong to the recurrence.
+                Some(GdnDecodeChain { nkh, nvh, b, l2_eps: 0, rms_eps: 0, q_scale: 0 }.conv())
+            }
+            _ => None,
         }
     }
 

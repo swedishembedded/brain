@@ -2528,7 +2528,11 @@ impl Qwen {
                 // content, and it needs no materialised scores.
                 let fused = if self.kmask_on.get() {
                     let p = [ga.b, ga.n_heads, ga.n_kv_heads, ga.t, ga.head_dim, ga.group()];
-                    self.gpu.fused_step(gpu_core::Fused::FlashGqaKmask, &[q_buf, k_buf, &self.kmask, &lb.v, &lb.ctx], &p)
+                    // Priced as the materialised chain it replaces, built over the layer's own scratch and never submitted.
+                    self.gpu.fused_step(gpu_core::Fused::FlashGqaKmask, &[q_buf, k_buf, &self.kmask, &lb.v, &lb.ctx], &p).map(|step| {
+                        let chain = self.gqa_kmask_steps(&ga, q_buf, k_buf, &lb.v, &self.scores, &lb.probs, &lb.ctx);
+                        self.gpu.priced_as_chain(step, &chain)
+                    })
                 } else {
                     None
                 };

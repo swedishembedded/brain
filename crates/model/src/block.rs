@@ -886,10 +886,13 @@ pub fn gqa_chunk_step(
         // (`gpu_core::provider::cuda::paged_flash_prefill_step`: identical
         // buffers, uniform and launch geometry); anything else - and any
         // decline - keeps the portable kernel registered above.
+        let portable = || g.dispatch(fused, &[q, kcache, vcache, block_ids, seq_lens, ctx], &params, gpu_core::Dispatch::Workgroups(blocks));
         let native = native_paged_flash_prefill(g, head_dim, &[q, kcache, vcache, block_ids, seq_lens, ctx], &params, blocks);
-        steps.push(native.unwrap_or_else(|| {
-            g.dispatch(fused, &[q, kcache, vcache, block_ids, seq_lens, ctx], &params, gpu_core::Dispatch::Workgroups(blocks))
-        }));
+        // The native launch is priced as the portable dispatch at the same uniform, built and never submitted.
+        steps.push(match native {
+            Some(native) => g.priced_as_chain(native, &[portable()]),
+            None => portable(),
+        });
         return steps;
     }
     steps.push(g.step(k.scores_batched, &[q, kcache, block_ids, seq_lens, scores], &[n, n_heads, group, head_dim, cap, hkv, t_max, 1, f(scale)], n * n_heads * t_max));
@@ -1033,14 +1036,18 @@ pub fn gqa_chunk_attend_steps_kv_paged(
     if head_dim == 256 && paged_attention_fused(g, true, false, head_dim, 0) {
         return kv.flash_prefill_hd256(g, q, &layer.k, &layer.v, tables, seq_lens, ctx, PrefillShape { n, n_heads, n_kv_heads, head_dim, block_size, max_bt, keys: t_max });
     }
-    // Head width 128 has no portable fused kernel, but the native tensor-core one covers it on every tier that has one.
+    let shape = PagedDecodeShape { batch: n, n_heads, group: n_heads / n_kv_heads, head_dim, block_size, kv_stride, cap: t_max, max_bt, scale: 1.0 / (head_dim as f32).sqrt() };
+    // Head width 128 has no portable fused kernel, but the native tensor-core one covers it on every tier that has one;
+    // it is priced as the triad below.
     if head_dim == 128 {
-        let shape = PrefillShape { n, n_heads, n_kv_heads, head_dim, block_size, max_bt, keys: t_max };
-        if let Some(native) = kv.native_flash_prefill(g, q, &layer.k, &layer.v, tables, seq_lens, ctx, shape) {
+        let prefill = PrefillShape { n, n_heads, n_kv_heads, head_dim, block_size, max_bt, keys: t_max };
+        if let Some(mut native) = kv.native_flash_prefill(g, q, &layer.k, &layer.v, tables, seq_lens, ctx, prefill) {
+            if let Some(work) = kv.triad_work(g, softmax, shape) {
+                gpu_core::cost::price_lowered(&mut native, work);
+            }
             return native;
         }
     }
-    let shape = PagedDecodeShape { batch: n, n_heads, group: n_heads / n_kv_heads, head_dim, block_size, kv_stride, cap: t_max, max_bt, scale: 1.0 / (head_dim as f32).sqrt() };
     let scores = g.storage(n as u64 * n_heads as u64 * t_max as u64);
     let probs = g.storage(n as u64 * n_heads as u64 * t_max as u64);
     vec![

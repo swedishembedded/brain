@@ -751,7 +751,7 @@ impl Ops {
         let pushed = s.len();
         if self.gemm.dw_tf32(&self.gpu, s, &dy_op, &x_op, &library::Operand { buf: dw, range }, m, n, k, true) {
             // Priced as the reference weight gradient it replaces (`Self::matmul_dw`'s kernel and uniform).
-            Self::price_unpriced(&mut s[pushed..], || PortableDispatch { kernel: kname::MATMUL_DW, params: vec![m, k, n], threads: n * k });
+            Self::price_unpriced(&mut s[pushed..], || PortableDispatch { kernel: kname::MATMUL_DW.into(), params: vec![m, k, n], threads: n * k });
             return;
         }
         assert_eq!(row0, 0, "Ops::dw_f32: the portable kernel writes whole gradients");

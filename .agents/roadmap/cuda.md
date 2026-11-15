@@ -1167,16 +1167,38 @@ tuned kernel are deferred.**
   (library GEMMs, the int8 dequantize-in-register and FP8 linears, the fused
   group GEMVs, the NVFP4 products, the library `dx`/`dw`), the activation
   casts and E4M3 quantizers as zero-cost helpers, and `add_rmsnorm_fwd`/
-  `rmsnorm_dx_add`. Library GEMMs and `Gpu::fused_step` launches are named by
-  their reported kernel even before a caller prices them. **Still unpriced**
-  (uncovered, named where they come through `fused_step` or the library,
-  `<no-meta>` where a raw `step_native` builds them): the fused attention,
-  paged decode and GDN kernels in `provider/cuda.rs` and `model::gdn_*`, the
-  `Fused` launches models call directly (`AddRmsQuant`, `QuantEpilogue`, the
-  GDN decode pools), and the `library.rs` fused helpers with a portable chain
-  (`silu_mul_quant_e4m3`, `gate_mul_quant_e4m3`, `qkv_split`, `gqa_qk_prep`,
-  `weight_dequant_bf16`). Each needs its call site to state the chain it
-  replaces; qwen35's tiny exact pricer reaches none of them.
+  `rmsnorm_dx_add`. Every native step is named by the kernel that runs it: a
+  raw `Gpu::step_native` by the name it was registered under, a
+  `Gpu::fused_step` by its reported kernel, a library GEMM by its label; none
+  is `<no-meta>`. Also priced now: the `Fused` launches whose params fix their
+  chain, in `Fused::portable` (`AddRmsQuant` and its E4M3 forms, `QuantEpilogue`,
+  `GqaDecodePrep`/`GqaDecodePrepI8`, `GdnDecode`, the GDN decode pools and the
+  split conv/recurrence pair, the last held to the staged chain on any device by
+  `model` `gdn_decode_native::a_fused_decode_launch_is_priced_as_the_chain_it_replaces`);
+  the `library.rs` helpers (`silu_mul_quant_e4m3`, `gate_mul_quant_e4m3`,
+  `qkv_split`, `gqa_qk_prep`, `weight_dequant_bf16`, `silu_mul_bf16`); and the
+  launches whose fallback is a chain built over buffers the site already holds,
+  priced by building it unsubmitted (`Gpu::priced_as_chain`,
+  `cost::price_lowered`): the GDN chunk prefix and loop in `gdn_chunk_fwd`, the
+  paged flash prefill (`block::gqa_chunk_step`, `KvKernels::flash_prefill_hd256`,
+  and the head-128 form as the triad), the native top-k readout and
+  `FlashGqaKmask`. `qwen35` `serve_step_cost` holds a served prefill and batched
+  decode on CUDA to coverage 1.0 and the FLOPs of the same steps with every
+  native kernel and the CUDA provider withheld. **Still unpriced** (uncovered,
+  under their own names): the speculative-verify and commit GDN pools (each
+  sequence's row count is in a device buffer, so the params do not fix the
+  chain; the verify caller holds the counts and has to state it), the
+  token-major GDN prefill (`gdn_chunk_prep_tok*` with its loop, and the
+  `gdn_segments` launches), whose portable sequence is its caller's whole
+  fallback, the GDN and attention training kernels (`gdn_chunk_*_train`,
+  `gdn_bwd_sweep*`, `gdn_chunk_bwd_post_tc`, `gdn_qk_bwd_tok`,
+  `gdn_conv_*_tok`, `gdn_gated_norm`, `swiglu_bwd_fused`,
+  `flash_causal_gqa_fwd`/`_bwd`), and the remaining `Fused` training forms
+  (`Conv2dDw*`, `I8wDx`, `F32*Fma`, `SoftmaxRowsDx`). The GDN pools, the
+  tensor-core prefill and loops and the E4M3 helpers need compute capability
+  8.0 or later, so `serve_step_cost` reaches them only on such a card; on an
+  sm_61 card it reaches `add_rms_quant`, `quant_epilogue`, `gqa_decode_prep`
+  and `gdn_chunk_loop_f32`.
 - **memauth**: a CUDA and a Vulkan handle on one physical card both charge
   `Device::Gpu(i)`, and under `--limit-vram-total` every GPU shares one pool, so
   they do not double-count. What is still wrong: `Gpu::try_new_cuda` opens CUDA

@@ -480,7 +480,12 @@ existing caller. Assume nothing about units.
   `ProviderRegistry::dispatch` for every `OperatorProvider` (the last pushed
   step carries the reference dispatch, earlier ones are zero-cost helpers),
   `Ops` for the products it routes past the registry, the native helper for a
-  fused launch with a fixed portable chain. A cast or quantizer the portable
+  fused launch with a fixed portable chain (`Fused::portable` for a `Fused`
+  launch whose params fix it), and a site whose fallback is a chain over
+  buffers it already holds builds that chain unsubmitted and prices the launch
+  as it (`Gpu::priced_as_chain`, `cost::price_lowered`), so the price follows
+  the fallback; a raw `Gpu::step_native` step is named by its registered
+  kernel until its site prices it. A cast or quantizer the portable
   path has no counterpart for is a helper (`Lowering::helper`); a step whose
   portable work nobody stated stays uncovered under its own name, never a
   guessed formula.

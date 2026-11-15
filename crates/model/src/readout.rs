@@ -122,7 +122,7 @@ pub fn topk_rows_steps(g: &Gpu, k: ReadoutKernels, logits: &DeviceBuffer, vals: 
     assert!(count > 0 && count <= stride, "topk_rows: {count} candidates in {stride} columns");
     if count == stride {
         if let Some(step) = native_topk(g, logits, vals, idx, rows, vocab, stride) {
-            return vec![step];
+            return vec![rounds_work(g, k, rows, vocab, stride, count).and_then(|work| step.priced_as(work)).unwrap_or(step)];
         }
     }
     let chunk = vocab.div_ceil(ARGMAX_CHUNKS);
@@ -135,6 +135,22 @@ pub fn topk_rows_steps(g: &Gpu, k: ReadoutKernels, logits: &DeviceBuffer, vals: 
         steps.push(g.step(k.extract, &[&arg, logits, vals, idx], &[rows, vocab, stride, col], rows));
     }
     steps
+}
+
+/// The portable work of [`topk_rows_steps`]'s rounds, what its single native launch is priced as: per candidate the two
+/// argmax stages and the extraction, at the uniforms the rounds dispatch.
+fn rounds_work(g: &Gpu, k: ReadoutKernels, rows: u32, vocab: u32, stride: u32, count: u32) -> Option<Vec<gpu_core::PortableDispatch>> {
+    let name = |kind: usize| g.kernel_name(kind).map(|n| std::borrow::Cow::<'static, str>::Owned(n.to_string()));
+    let (part, fin, extract) = (name(k.part)?, name(k.fin)?, name(k.extract)?);
+    let chunk = vocab.div_ceil(ARGMAX_CHUNKS);
+    let round = |col: u32| {
+        [
+            gpu_core::PortableDispatch { kernel: part.clone(), params: vec![rows, vocab, ARGMAX_CHUNKS, chunk], threads: rows * ARGMAX_CHUNKS },
+            gpu_core::PortableDispatch { kernel: fin.clone(), params: vec![rows, ARGMAX_CHUNKS], threads: rows },
+            gpu_core::PortableDispatch { kernel: extract.clone(), params: vec![rows, vocab, stride, col], threads: rows },
+        ]
+    };
+    Some((0..count).flat_map(round).collect())
 }
 
 #[cfg(not(target_arch = "wasm32"))]

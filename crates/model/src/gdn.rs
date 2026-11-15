@@ -1168,61 +1168,64 @@ pub fn gdn_chunk_fwd(
     } else {
         None
     };
+    let prefix = || gdn_chunk_fwd_prefix(g, ids, shape, query, key, value, raw_g, beta, &whole);
     let mut steps = match fused {
-        Some(step) => vec![step],
-        None => gdn_chunk_fwd_prefix(g, ids, shape, query, key, value, raw_g, beta, &whole),
+        // Priced as the whole-tensor sequence it replaces, built over the same scratch and never submitted.
+        Some(step) => vec![g.priced_as_chain(step, &prefix())],
+        None => prefix(),
     };
 
-    // ---- step 10 in one launch, where the device has a kernel for it ----
-    // The kernel reads `initial_state` and writes `final_state` itself, so the
-    // state copy and the whole chunk loop below are what it replaces.
+    // ---- step 10: sequential across-chunk loop ----
+    // `final_state` is the loop's own working buffer, seeded from `initial_state`.
+    let chunk_loop = || {
+        let mut steps = vec![g.step(ids.region_copy, &[initial_state, final_state], &[1, bh * dk * dv, bh * dk * dv, 0], bh * dk * dv)];
+        for ci in 0..n_chunks {
+            // Chunk `ci`'s flat element offset into a `[n_chunks, bh, C, D]`
+            // (or `[n_chunks, bh, C]`/`[n_chunks, bh, C, C]`) chunk-major buffer
+            // - see this module's "Layout" doc for why this is a plain offset.
+            let off_d = |d: u32| ci * bh * c * d;
+            let off_g = ci * bh * c;
+            let off_cc = ci * bh * c * c;
+
+            // v_prime = w_c @ state  (state BEFORE this chunk's decay/update)
+            steps.push(bmm(ids.bmm, bh, c, dk, dv, false, false, 1.0, scratch.w, off_d(dk), final_state, 0, scratch.v_prime, 0));
+            // v_new = u_c - v_prime -- NOTE: the reference reassigns its "value"
+            // variable to `u = T_mat @ v_beta` (step 8) BEFORE this line, so "v_c"
+            // here means `u`'s chunk slice, NOT the original raw `value` tensor
+            // (`torch_chunk_gated_delta_rule`'s `value = attn @ v_beta` shadows the
+            // function's own `value` parameter; easy to miss, called out explicitly
+            // in this module's doc and worth double-checking against the reference
+            // source, not just this comment).
+            steps.push(g.step(ids.sub, &[scratch.u, scratch.v_prime, scratch.v_new], &[bh * c * dv, off_d(dv), 0], bh * c * dv));
+            // decay_scale[i] = exp(g_cs_c[-1] - g_cs_c[i])
+            steps.push(g.step(ids.decay_scale, &[scratch.g_cs, scratch.decay_scale], &[bh, c, off_g], bh * c));
+            // decayed_k = key_c * decay_scale
+            steps.push(g.step(ids.row_scale_off, &[key, scratch.decay_scale, scratch.decayed_k], &[bh * c * dk, dk, off_d(dk), 0, f(1.0)], bh * c * dk));
+            // q_scaled = query_c * exp(g_cs_c) * (1/sqrt(dk))
+            steps.push(g.step(ids.row_scale_off, &[query, scratch.exp_g_cs, scratch.q_scaled], &[bh * c * dk, dk, off_d(dk), off_g, f(scale)], bh * c * dk));
+            // out[chunk ci] = attn_inter = q_scaled @ state  (still the OLD state)
+            steps.push(bmm(ids.bmm, bh, c, dk, dv, false, false, 1.0, scratch.q_scaled, 0, final_state, 0, out, off_d(dv)));
+            // out[chunk ci] += intra_scores_c @ v_new
+            steps.push(bmm(ids.bmm_acc, bh, c, c, dv, false, false, 1.0, scratch.intra_scores, off_cc, scratch.v_new, 0, out, off_d(dv)));
+            // state *= exp(g_cs_c[-1])
+            steps.push(g.step(ids.state_decay, &[scratch.g_cs, final_state], &[bh, dk, dv, c, off_g], bh * dk * dv));
+            // state += decayed_k^T @ v_new
+            steps.push(bmm(ids.bmm_acc, bh, dk, c, dv, true, false, 1.0, scratch.decayed_k, 0, scratch.v_new, 0, final_state, 0));
+        }
+        steps
+    };
+
+    // Step 10 in one launch, where the device has a kernel for it. The kernel reads `initial_state` and writes
+    // `final_state` itself, so the state copy and the whole chunk loop are what it replaces, and what it is priced as.
     if ids.fast.is_some() && use_fast_kernels(g) {
         let bufs = [key, query, scratch.w, scratch.u, scratch.g_cs, scratch.exp_g_cs, scratch.intra_scores, initial_state, out, final_state];
         let tc = if tensor_core_enabled(g, ids) { native_chunk_loop_tc(g, &bufs, bh, c, dk, dv, n_chunks, scale, 0) } else { None };
         if let Some(step) = tc.or_else(|| native_chunk_loop(g, &bufs, bh, c, dk, dv, n_chunks, scale)) {
-            steps.push(step);
+            steps.push(g.priced_as_chain(step, &chunk_loop()));
             return steps;
         }
     }
-
-    // ---- step 10: sequential across-chunk loop ----
-    // `final_state` is the loop's own working buffer, seeded from `initial_state`.
-    steps.push(g.step(ids.region_copy, &[initial_state, final_state], &[1, bh * dk * dv, bh * dk * dv, 0], bh * dk * dv));
-
-    for ci in 0..n_chunks {
-        // Chunk `ci`'s flat element offset into a `[n_chunks, bh, C, D]`
-        // (or `[n_chunks, bh, C]`/`[n_chunks, bh, C, C]`) chunk-major buffer
-        // - see this module's "Layout" doc for why this is a plain offset.
-        let off_d = |d: u32| ci * bh * c * d;
-        let off_g = ci * bh * c;
-        let off_cc = ci * bh * c * c;
-
-        // v_prime = w_c @ state  (state BEFORE this chunk's decay/update)
-        steps.push(bmm(ids.bmm, bh, c, dk, dv, false, false, 1.0, scratch.w, off_d(dk), final_state, 0, scratch.v_prime, 0));
-        // v_new = u_c - v_prime -- NOTE: the reference reassigns its "value"
-        // variable to `u = T_mat @ v_beta` (step 8) BEFORE this line, so "v_c"
-        // here means `u`'s chunk slice, NOT the original raw `value` tensor
-        // (`torch_chunk_gated_delta_rule`'s `value = attn @ v_beta` shadows the
-        // function's own `value` parameter; easy to miss, called out explicitly
-        // in this module's doc and worth double-checking against the reference
-        // source, not just this comment).
-        steps.push(g.step(ids.sub, &[scratch.u, scratch.v_prime, scratch.v_new], &[bh * c * dv, off_d(dv), 0], bh * c * dv));
-        // decay_scale[i] = exp(g_cs_c[-1] - g_cs_c[i])
-        steps.push(g.step(ids.decay_scale, &[scratch.g_cs, scratch.decay_scale], &[bh, c, off_g], bh * c));
-        // decayed_k = key_c * decay_scale
-        steps.push(g.step(ids.row_scale_off, &[key, scratch.decay_scale, scratch.decayed_k], &[bh * c * dk, dk, off_d(dk), 0, f(1.0)], bh * c * dk));
-        // q_scaled = query_c * exp(g_cs_c) * (1/sqrt(dk))
-        steps.push(g.step(ids.row_scale_off, &[query, scratch.exp_g_cs, scratch.q_scaled], &[bh * c * dk, dk, off_d(dk), off_g, f(scale)], bh * c * dk));
-        // out[chunk ci] = attn_inter = q_scaled @ state  (still the OLD state)
-        steps.push(bmm(ids.bmm, bh, c, dk, dv, false, false, 1.0, scratch.q_scaled, 0, final_state, 0, out, off_d(dv)));
-        // out[chunk ci] += intra_scores_c @ v_new
-        steps.push(bmm(ids.bmm_acc, bh, c, c, dv, false, false, 1.0, scratch.intra_scores, off_cc, scratch.v_new, 0, out, off_d(dv)));
-        // state *= exp(g_cs_c[-1])
-        steps.push(g.step(ids.state_decay, &[scratch.g_cs, final_state], &[bh, dk, dv, c, off_g], bh * dk * dv));
-        // state += decayed_k^T @ v_new
-        steps.push(bmm(ids.bmm_acc, bh, dk, c, dv, true, false, 1.0, scratch.decayed_k, 0, scratch.v_new, 0, final_state, 0));
-    }
-
+    steps.extend(chunk_loop());
     steps
 }
 

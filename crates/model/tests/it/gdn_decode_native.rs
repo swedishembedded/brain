@@ -734,3 +734,57 @@ fn gdn_decode_pool_production_shape() {
         println!("{} batch {b:3}: the state traffic ({:.1} MB) in {state_kernel:.1} us is {:.0} % of 3.4 TB/s", if bf16 { "bf16" } else { "f32 " }, state_bytes / 1e6, 100.0 * state_bytes / (state_kernel * 1e-6) / 3.4e12);
     }
 }
+
+/// The cost of `work` by the portable kernels' own formulas, one row per dispatch: what a fused step stating that work
+/// is accounted as.
+fn priced(work: &[gpu_core::PortableDispatch]) -> gpu_core::cost::CostReport {
+    let mut report = gpu_core::cost::CostReport::default();
+    for d in work {
+        report.record(&d.kernel, gpu_core::cost::kernel_cost(&d.kernel, Some(&d.params), d.threads));
+    }
+    report
+}
+
+/// The work a fused decode launch is priced as (`gpu_core::Fused::portable`) is the work of the chain it replaces, on any
+/// device: the same dispatch count and the same totals as the staged chain recorded without running, for one sequence
+/// over its own buffers (`gdn_decode`, one row) and for a batch over pool rows (`gdn_decode_pool` and the split pair).
+#[test]
+fn a_fused_decode_launch_is_priced_as_the_chain_it_replaces() {
+    let g = gpu_core::testgpu::dev(KERNELS);
+    let (dk, dv, kw) = (128u32, 128u32, 4u32);
+    for (nkh, group, b) in [(1u32, 1u32, 1u32), (2, 3, 1), (2, 2, 3)] {
+        let nvh = nkh * group;
+        let shape = GdnMixerShape { gdn: GdnShape { b, h: nvh, t: 1, dk, dv, chunk: 1 }, nkh, conv_kernel: kw, rms_eps: 1e-6 };
+        let (value_dim, conv_dim) = (shape.value_dim(), shape.conv_dim());
+        let (state_len, hist_len) = ((nvh * dk * dv) as u64, (conv_dim * (kw - 1)) as u64);
+        let (conv_w, a_log, dt_bias, norm_w, ones) = (g.storage((conv_dim * kw) as u64), g.storage(nvh as u64), g.storage(nvh as u64), g.storage(dv as u64), g.storage(dk as u64));
+        let w = GdnMixerWeights { conv1d_weight: &conv_w, a_log: &a_log, dt_bias: &dt_bias, norm_weight: &norm_w, ones_khd: &ones };
+        let (mixed, bp, ap, z) = (g.storage((b * conv_dim) as u64), g.storage((b * nvh) as u64), g.storage((b * nvh) as u64), g.storage((b * value_dim) as u64));
+        let (st, hi, rows) = (g.storage(b as u64 * state_len), g.storage(b as u64 * hist_len), g.storage(b as u64));
+        let params = [nkh, nvh, group, gpu_core::f(1e-6), gpu_core::f(shape.rms_eps), gpu_core::f(1.0 / (dk as f32).sqrt()), b, 0];
+        let chain = |state: &GdnDecodeState| {
+            let rec = gpu_core::cost::Recording::dry();
+            gdn_mixer_decode_state_fwd(&g, &ids(&g), &dec_ids(&g), &shape, &w, &mixed, &bp, &ap, &z, state);
+            rec.take()
+        };
+        let alike = |got: &gpu_core::cost::CostReport, want: &gpu_core::cost::CostReport, what: &str| {
+            let ctx = format!("{what}: nkh={nkh} group={group} batch={b}");
+            assert_eq!(want.coverage(), 1.0, "{ctx}: the chain has dispatches without a formula: {:?}", want.uncovered);
+            assert_eq!(got.coverage(), 1.0, "{ctx}: the stated work names kernels without a formula: {:?}", got.uncovered);
+            assert_eq!((got.steps, got.total), (want.steps, want.total), "{ctx}: the stated work is not the chain's");
+        };
+
+        let pool = GdnPoolRows { state: &st, hist: &hi, rows: &rows, gather: idx(&g, "pool_rows_gather2"), scatter: idx(&g, "pool_rows_scatter2"), fuse: false, bf16: false, wide: false };
+        let staged = chain(&GdnDecodeState::Pool(pool));
+        let pooled = gpu_core::Fused::GdnDecodePool.portable(&params).expect("the pooled decode states its chain");
+        alike(&priced(&pooled), &staged, "gdn_decode_pool");
+        let split: Vec<_> = gpu_core::Fused::GdnConvPool.portable(&[nkh, nvh, b, 0]).into_iter().chain(gpu_core::Fused::GdnRecurPool.portable(&params)).flatten().collect();
+        alike(&priced(&split), &staged, "gdn_conv_pool + gdn_recur_pool");
+
+        if b == 1 {
+            let own = chain(&GdnDecodeState::Streams(&[GdnStream { state: &st, hist: &hi }]));
+            let single = gpu_core::Fused::GdnDecode.portable(&[nkh, nvh, group, params[3], params[4], params[5], 1, 0]).expect("the single-sequence decode states its chain");
+            alike(&priced(&single), &own, "gdn_decode");
+        }
+    }
+}

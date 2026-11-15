@@ -1283,7 +1283,7 @@ pub struct StepMeta {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PortableDispatch {
     /// The catalogue name of the kernel.
-    pub kernel: &'static str,
+    pub kernel: std::borrow::Cow<'static, str>,
     /// Its uniform params, in the kernel's own `Params` layout.
     pub params: Vec<u32>,
     /// Its dispatch thread count.

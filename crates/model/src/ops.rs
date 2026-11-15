@@ -1631,7 +1631,7 @@ impl Ops {
     fn portable_product(&self, w: &Weight, m: u32, count: u32) -> PortableDispatch {
         let (k, dt, group) = (w.k(), w.dtype(), w.group());
         if matches!(w, Weight::NF4 { .. } | Weight::FP8 { .. } | Weight::Micro { .. } | Weight::Cq { .. }) {
-            return PortableDispatch { kernel: kname::MATMUL, params: vec![m, k, count], threads: m * count };
+            return PortableDispatch { kernel: kname::MATMUL.into(), params: vec![m, k, count], threads: m * count };
         }
         // The int8 kernels take the packed word count, every other tier the logical K (see `packed_product`).
         let param_k = if dt == Dtype::I8 { k / Dtype::I8.per_word() } else { k };
@@ -1827,7 +1827,7 @@ impl Ops {
         Self::price_unpriced(&mut s[pushed..], || {
             let k = w.k();
             let kernel = if w.dtype() == Dtype::BF16 { kname::MATMUL_DX_BF16 } else { kname::MATMUL_DX };
-            PortableDispatch { kernel, params: vec![m, k, rows.1, accumulate as u32], threads: m * k }
+            PortableDispatch { kernel: kernel.into(), params: vec![m, k, rows.1, accumulate as u32], threads: m * k }
         });
         true
     }

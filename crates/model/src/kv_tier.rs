@@ -966,16 +966,34 @@ impl KvKernels {
     /// every tier; the compact ones read their planes in place): the native kernel where there is one, else the portable
     /// `head_dim = 256` pipeline.
     pub fn flash_prefill_hd256(&self, g: &Gpu, q: &DeviceBuffer, k: &KvPlane, v: &KvPlane, block_ids: &DeviceBuffer, seq_lens: &DeviceBuffer, ctx: &DeviceBuffer, s: PrefillShape) -> Vec<Step> {
-        if let Some(native) = self.native_flash_prefill(g, q, k, v, block_ids, seq_lens, ctx, s) {
-            return native;
-        }
         let params = [s.n, s.n_heads, s.n_kv_heads, s.head_dim, s.n_heads / s.n_kv_heads, s.block_size, s.max_bt];
         let grid = Dispatch::Workgroups(s.n_heads * s.n.div_ceil(64));
-        vec![match (&k.scales, &v.scales) {
+        let portable = || match (&k.scales, &v.scales) {
             (None, None) => g.dispatch(self.prefill_hd256, &[q, &k.data, &v.data, block_ids, seq_lens, ctx], &params, grid),
             (Some(ks), Some(vs)) => g.dispatch(self.prefill_hd256, &[q, &k.data, &v.data, block_ids, seq_lens, ctx, ks, vs], &params, grid),
             _ => unreachable!("check() pinned both planes to one tier"),
-        }]
+        };
+        if let Some(mut native) = self.native_flash_prefill(g, q, k, v, block_ids, seq_lens, ctx, s) {
+            // Priced as the portable dispatch at the same uniform, built and never submitted.
+            if let Some(work) = g.portable_work(&[portable()]) {
+                gpu_core::cost::price_lowered(&mut native, work);
+            }
+            return native;
+        }
+        vec![portable()]
+    }
+
+    /// The portable work of the scores, softmax and apply triad over a paged cache at `s` (the uniforms
+    /// [`Self::scores`] and [`Self::apply`] dispatch, and `softmax`'s `[batch, n_heads, cap]`): what a native attention
+    /// that replaces the triad is priced as.
+    pub fn triad_work(&self, g: &Gpu, softmax: usize, s: PagedDecodeShape) -> Option<Vec<gpu_core::PortableDispatch>> {
+        let name = |kind: usize| g.kernel_name(kind).map(|n| std::borrow::Cow::<'static, str>::Owned(n.to_string()));
+        let shared = [s.batch, s.n_heads, s.group, s.head_dim, s.block_size, s.kv_stride, s.cap, s.max_bt];
+        Some(vec![
+            gpu_core::PortableDispatch { kernel: name(self.scores)?, params: [&shared[..], &[s.scale.to_bits()]].concat(), threads: s.batch * s.n_heads * s.cap },
+            gpu_core::PortableDispatch { kernel: name(softmax)?, params: vec![s.batch, s.n_heads, s.cap], threads: s.batch * s.n_heads },
+            gpu_core::PortableDispatch { kernel: name(self.apply)?, params: shared.to_vec(), threads: s.batch * s.n_heads * s.head_dim },
+        ])
     }
 }
 

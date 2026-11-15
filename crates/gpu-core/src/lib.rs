@@ -1068,6 +1068,9 @@ mod native_facade {
         /// Native kernels already offered to this handle's backend, by registry
         /// name, with the backend's answer - see [`Gpu::native_kernel`].
         natives: Mutex<std::collections::HashMap<&'static str, Option<backend_api::NativeId>>>,
+        /// The name each native kernel registered through [`Gpu::register_native`] is reported under, so a raw
+        /// [`Gpu::step_native`] step is accounted under what runs rather than as `"<no-meta>"`.
+        native_names: Mutex<std::collections::HashMap<backend_api::NativeId, &'static str>>,
         /// Whether [`Gpu::step`] consults [`Self::memo`] at all. OFF until
         /// [`Gpu::enable_step_cache`], and read as a relaxed atomic so a
         /// handle that never opted in pays one load, not a lock, per
@@ -1126,6 +1129,7 @@ mod native_facade {
                 arena: Mutex::new(Vec::new()),
                 urgent: std::sync::OnceLock::new(),
                 natives: Mutex::new(Default::default()),
+                native_names: Mutex::new(Default::default()),
                 memo_enabled: std::sync::atomic::AtomicBool::new(false),
                 memo: Mutex::new(None),
                 tape: Mutex::new(None),
@@ -2427,6 +2431,18 @@ mod native_facade {
             self.names.grid(kind)
         }
 
+        /// `step` (an unpriced native launch) priced as the portable `chain` of this handle's dispatches it replaces
+        /// ([`crate::cost::portable_work`]): the site builds that chain without submitting it, so the price follows
+        /// the fallback as it is. `step` unchanged when it is already priced or the chain's work cannot be stated.
+        pub fn priced_as_chain(&self, step: Step, chain: &[Step]) -> Step {
+            crate::cost::priced_as_chain(&self.names, step, chain)
+        }
+
+        /// [`crate::cost::portable_work`] of `steps` built on this handle.
+        pub fn portable_work(&self, steps: &[Step]) -> Option<Vec<backend_api::PortableDispatch>> {
+            crate::cost::portable_work(&self.names, steps)
+        }
+
         /// The thread count [`Self::dispatch`] records for slot `kind` at `grid`.
         pub fn threads_for(&self, kind: usize, grid: crate::Dispatch) -> u32 {
             match grid {
@@ -2650,7 +2666,21 @@ mod native_facade {
         /// of, so there is nothing here for it to consult or attribute cost
         /// against.
         pub fn register_native(&self, spec: &backend_api::NativeSpec) -> Option<backend_api::NativeId> {
-            self.inner.register_native(spec)
+            let id = self.inner.register_native(spec)?;
+            if let backend_api::NativeSpec::Cuda { name, .. } = spec {
+                self.native_names.lock().unwrap_or_else(|e| e.into_inner()).insert(id, name);
+            }
+            Some(id)
+        }
+
+        /// A raw native step named by the kernel registered under `id`, unpriced: the caller that chose it states the
+        /// portable work it replaces ([`Step::priced_as`]). A step whose kernel this handle never registered is left
+        /// as the backend built it.
+        fn native_named(&self, id: backend_api::NativeId, step: Step) -> Step {
+            match self.native_names.lock().unwrap_or_else(|e| e.into_inner()).get(&id) {
+                Some(name) => step.with_lowering(backend_api::Lowering::unpriced(*name)),
+                None => step,
+            }
         }
 
         /// [`backend_api::Backend::native_max_active_blocks`]: how many blocks of
@@ -2688,8 +2718,9 @@ mod native_facade {
         /// derived from `params`.
         ///
         /// Carries no [`StepMeta`], like [`Self::step_native`]: the kernel is not
-        /// in the WGSL catalogue, and what it is priced as is the caller's to
-        /// state ([`backend_api::Lowering`]).
+        /// in the WGSL catalogue. It is priced as the portable chain its params
+        /// fix ([`crate::Fused::portable`]), or left for the caller to price
+        /// ([`Step::priced_as`]) where the chain is the caller's knowledge.
         pub fn fused_step(&self, which: crate::native_upgrade::Fused, bufs: &[&DeviceBuffer], params: &[u32]) -> Option<Step> {
             if !which.serves(params) {
                 return None;
@@ -2697,15 +2728,17 @@ mod native_facade {
             let which = which.form_for(params, self.caps().arch.compute_capability);
             let id = self.fused_id(which)?;
             let step = self.step_native(id, bufs, params, which.blocks_on(params, self.caps().arch.compute_capability))?;
-            Some(self.fused_named(which, step))
+            Some(self.fused_named(which, params, step))
         }
 
-        /// A fused step named by the kernel that runs it, unpriced: the caller
-        /// that chose it over a chain of portable dispatches states which
-        /// ([`Step::priced_as`]).
-        fn fused_named(&self, which: crate::native_upgrade::Fused, step: Step) -> Step {
+        /// A fused step named by the kernel that runs it, priced as the portable chain `params` fix
+        /// ([`crate::Fused::portable`]), unpriced where only the caller knows the chain ([`Step::priced_as`]).
+        fn fused_named(&self, which: crate::native_upgrade::Fused, params: &[u32], step: Step) -> Step {
             match self.caps().arch.compute_capability.and_then(|cc| which.reported_on(cc)) {
-                Some(name) => step.with_lowering(backend_api::Lowering::unpriced(name)),
+                Some(name) => step.with_lowering(match which.portable(params) {
+                    Some(work) => backend_api::Lowering::priced(name, work),
+                    None => backend_api::Lowering::unpriced(name),
+                }),
                 None => step,
             }
         }
@@ -2721,7 +2754,7 @@ mod native_facade {
             let which = which.form_for(params, self.caps().arch.compute_capability);
             let id = self.fused_id(which)?;
             let step = self.step_native_sliced(id, bufs, offsets, params, which.blocks_on(params, self.caps().arch.compute_capability))?;
-            Some(self.fused_named(which, step))
+            Some(self.fused_named(which, params, step))
         }
 
         /// How the native dense-conv weight gradient of `params` (the ten-word
@@ -2822,14 +2855,15 @@ mod native_facade {
         /// above, this does NOT attach a [`StepMeta`]: a native id indexes a
         /// per-backend table `self.names`/`crate::cost` know nothing about,
         /// so there is no `kernel: usize` this facade could honestly report.
-        /// The caller that chose the native kernel knows what it runs and which
-        /// portable work it replaces, and states both as a
-        /// [`backend_api::Lowering`] (`Step::with_lowering`); a step without
-        /// one is `"<no-meta>"` to `crate::cost`, uncovered, never a made-up
-        /// formula. `None` when this backend does not recognise `id`.
+        /// The step is named by the kernel registered under `id` and unpriced
+        /// ([`backend_api::Lowering::unpriced`]): the caller that chose the
+        /// native kernel knows which portable work it replaces and states it
+        /// ([`Step::priced_as`]); until then `crate::cost` lists it uncovered
+        /// under its own name, never under a made-up formula. `None` when this
+        /// backend does not recognise `id`.
         pub fn step_native(&self, id: backend_api::NativeId, bufs: &[&DeviceBuffer], params: &[u32], threads: u32) -> Option<Step> {
             crate::assert_no_output_alias(bufs);
-            self.be().step_native(id, bufs, params, threads)
+            Some(self.native_named(id, self.be().step_native(id, bufs, params, threads)?))
         }
 
         /// [`backend_api::Backend::step_library_gemm`]: one product served by the
@@ -2866,7 +2900,7 @@ mod native_facade {
             threads: u32,
         ) -> Option<Step> {
             crate::assert_no_output_alias(bufs);
-            self.be().step_native_sliced(id, bufs, offsets, params, threads)
+            Some(self.native_named(id, self.be().step_native_sliced(id, bufs, offsets, params, threads)?))
         }
 
         pub fn submit(&self, clears: &[&DeviceBuffer], steps: &[Step]) {
@@ -3335,6 +3369,14 @@ mod wasm_facade {
         /// This handle's thread mapping for kernel slot `kind`.
         pub fn kernel_grid_at(&self, kind: usize) -> Option<crate::KernelGrid> {
             self.names.grid(kind)
+        }
+        /// See the native facade's `Gpu::priced_as_chain`.
+        pub fn priced_as_chain(&self, step: Step, chain: &[Step]) -> Step {
+            crate::cost::priced_as_chain(&self.names, step, chain)
+        }
+        /// See the native facade's `Gpu::portable_work`.
+        pub fn portable_work(&self, steps: &[Step]) -> Option<Vec<backend_api::PortableDispatch>> {
+            crate::cost::portable_work(&self.names, steps)
         }
         /// See the native facade's `Gpu::threads_for`.
         pub fn threads_for(&self, kind: usize, grid: crate::Dispatch) -> u32 {

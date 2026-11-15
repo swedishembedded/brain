@@ -308,8 +308,28 @@ fn silu_mul_quantize_e4m3_strided(gpu: &Gpu, steps: &mut Vec<Step>, gate: &Devic
     let flags = u32::from(product.is_some()) | if input == crate::ActPrecision::Bf16 { 2 } else { 0 };
     // Without a product the binding is still required; it aliases the bytes the pass writes anyway and is never stored to.
     let step = gpu.step_native(id, &[gate, up, product.unwrap_or(&q), &q, &s], &[rows, k, flags, stride, up_offset], kernel.blocks_for(1, elems as u32))?;
-    steps.push(step);
+    // The portable `silu_mul`; the E4M3 rows are what the float-reading FP8 product takes as it is.
+    steps.push(priced(step, vec![portable("silu_mul", vec![rows * k], rows * k)]));
     Some((q, s))
+}
+
+/// One portable dispatch a native helper is priced as.
+fn portable(kernel: &'static str, params: Vec<u32>, threads: u32) -> backend_api::PortableDispatch {
+    backend_api::PortableDispatch { kernel: kernel.into(), params, threads }
+}
+
+/// `step` (named, unpriced) priced as the portable `work` it replaces.
+fn priced(step: Step, work: Vec<backend_api::PortableDispatch>) -> Step {
+    match step.priced_as(work) {
+        Some(priced) => priced,
+        None => step,
+    }
+}
+
+/// `concat_split` taking the query values (`half` 0) or the gates (`half` 1) of `rows` rows of `heads` heads of
+/// `head_dim` out of the interleaved query projection, as `model::gqa_mixer::qkv_prepare_query` dispatches it.
+fn query_half_split(rows: u32, heads: u32, head_dim: u32, half: u32) -> backend_api::PortableDispatch {
+    portable("concat_split", vec![rows * heads, 2, 1, half, 1, head_dim], rows * heads * head_dim)
 }
 
 /// Bindings of `gate_mul_quant_e4m3_128`: params, the attention output, the query projection's output (the gate is read in
@@ -343,7 +363,10 @@ pub fn gate_mul_quantize_e4m3_rows(gpu: &Gpu, steps: &mut Vec<Step>, ctx: &Devic
     let q = gpu.storage_uninit(elems.div_ceil(4));
     let s = gpu.storage_uninit(elems / 128);
     let step = gpu.step_native(id, &[ctx, q_full, product.unwrap_or(&q), &q, &s], &[rows, k, u32::from(product.is_some()), head_dim], kernel.blocks_for(1, elems as u32))?;
-    steps.push(step);
+    // The gates the portable front half splits out of the query projection (this pass reads them in place), and the
+    // portable gate `sigmoid` then `mul` (`model::gqa_mixer::gate_ctx`); the E4M3 rows are the FP8 product's to take.
+    let n = rows * k;
+    steps.push(priced(step, vec![query_half_split(rows, k / head_dim, head_dim, 1), portable("sigmoid", vec![n], n), portable("mul", vec![n], n)]));
     Some((q, s))
 }
 
@@ -419,7 +442,11 @@ pub fn qkv_split_rows(gpu: &Gpu, steps: &mut Vec<Step>, product: &DeviceBuffer, 
         QkvParts::Interleaved { q_full, k, v } => gpu.step_native(id, &[product, q_full, k, v, &gpu.storage_uninit(1)], &params, kernel.blocks_for(1, elems))?,
         QkvParts::Split { q_value, q_gate, k, v } => gpu.step_native(id, &[product, q_value, q_gate, k, v], &params, kernel.blocks_for(1, elems))?,
     };
-    steps.push(step);
+    // The portable path multiplies q, k and v apart, so the layout copy alone has no counterpart; the query's values and
+    // gates taken apart are its two `concat_split` launches.
+    let heads = q_dim / head_dim;
+    let work = if deinterleave { vec![query_half_split(rows, heads, head_dim, 0), query_half_split(rows, heads, head_dim, 1)] } else { Vec::new() };
+    steps.push(priced(step, work));
     Some(parts)
 }
 
@@ -465,7 +492,11 @@ pub fn gqa_qk_prepare(gpu: &Gpu, steps: &mut Vec<Step>, shape: &GqaQkShape, q_fu
     let k_out = gpu.storage_uninit(u64::from(rows) * u64::from(n_kv_heads * head_dim));
     let heads = rows * (n_heads + n_kv_heads);
     let step = gpu.step_native(id, &[q_full, k, q_norm, k_norm, cos, sin, &q_out, &k_out], &[rows, n_heads, n_kv_heads, head_dim, rotary_half, rms_eps.to_bits(), rows], kernel.blocks_for(1, heads))?;
-    steps.push(step);
+    // `model::gqa_mixer::qkv_prepare_query` up to the gates: the query values split out, the two QK norms, the two partial
+    // rotations (`model::block::rope2d_partial_fwd`'s uniform).
+    let rope = |heads: u32| portable("rope2d_partial", vec![rows, heads, rotary_half, heads * head_dim, 0, rows, crate::f(1.0), head_dim], rows * heads * rotary_half);
+    let norm = |heads: u32| portable("rmsnorm", vec![head_dim, rows * heads, rms_eps.to_bits()], rows * heads);
+    steps.push(priced(step, vec![query_half_split(rows, n_heads, head_dim, 0), norm(n_heads), norm(n_kv_heads), rope(n_heads), rope(n_kv_heads)]));
     Some((q_out, k_out))
 }
 
@@ -573,7 +604,9 @@ impl LibraryGemmProvider {
         );
         match step {
             Some(step) => {
-                steps.push(step);
+                // The portable tile decode (`weight_decode` at the uniform `model::ops::tiled` dispatches it with).
+                let decode = portable("weight_decode", params[1..].to_vec(), d.rows * d.k);
+                steps.push(priced(step, vec![decode]));
                 true
             }
             None => false,
@@ -737,7 +770,8 @@ impl LibraryGemmProvider {
         let id = gpu.native_kernel(kernel, SILU_MUL_BF16_BINDINGS)?;
         let bf16 = gpu.storage_uninit(count.div_ceil(2)); // the kernel writes every value, as `cast_bf16` does
         let step = gpu.step_native_sliced(id, &[gate, up, h, &bf16], &[(0, 0); 4], &[count as u32], kernel.blocks_for(1, count as u32))?;
-        steps.push(step);
+        // The portable `silu_mul`; its bf16 rounding is a cast.
+        steps.push(priced(step, vec![portable("silu_mul", vec![count as u32], count as u32)]));
         Some(bf16)
     }
 

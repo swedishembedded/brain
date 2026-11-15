@@ -1298,8 +1298,8 @@ fn rmsnorm_fused_lowering(kernel: &kernels_cuda::CudaKernel, params: &[u32; 3], 
     let portable = order
         .into_iter()
         .map(|(name, threads)| match threads {
-            None => backend_api::PortableDispatch { kernel: name, params: vec![elems], threads: elems },
-            Some(t) => backend_api::PortableDispatch { kernel: name, params: params.to_vec(), threads: t },
+            None => backend_api::PortableDispatch { kernel: name.into(), params: vec![elems], threads: elems },
+            Some(t) => backend_api::PortableDispatch { kernel: name.into(), params: params.to_vec(), threads: t },
         })
         .collect();
     backend_api::Lowering::priced(kernel.reported, portable)
