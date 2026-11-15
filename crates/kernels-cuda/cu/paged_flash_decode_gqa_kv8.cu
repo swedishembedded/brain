@@ -7,7 +7,7 @@
 //
 // Split-key fused GQA decode attention at head_dim HD = BRAIN_HD (128 or 256) over an 8-bit paged pool (int8, or FP8
 // E4M3 with BRAIN_KV_FP8), on TENSOR CORES: the CUDA form of the `kv=int8` and `kv=fp8` variants of
-// `paged_flash_decode_gqa_hd256.wgsl` at that head width and any GRP of at most 8, with their whole contract - the same
+// `paged_flash_decode_gqa.wgsl` at that head width and any GRP of at most 8, with their whole contract - the same
 // uniform, bindings, grid and partial records - so `paged_flash_decode_gqa_combine` merges either kernel's output and
 // the host cannot tell them apart. The group is a RUNTIME value: the score product pads it to 16 rows and the value
 // product to 8 columns whatever it is, so only the staging of the query and the merge loop over its heads read it.
@@ -161,7 +161,7 @@ __device__ __forceinline__ unsigned int brain_row(const unsigned int* bt, unsign
 #endif
 #endif
 
-extern "C" __global__ void __launch_bounds__(THREADS) brain_paged_flash_decode_gqa_hd256_kv8(
+extern "C" __global__ void __launch_bounds__(THREADS) brain_paged_flash_decode_gqa_kv8(
     const unsigned int* params, const float* q, const signed char* pool_k, const signed char* pool_v, const unsigned int* block_tables,
     const unsigned int* seq_lens, float* part, const float* k_scales, const float* v_scales) {
     BRAIN_PDL_ENTRY();

@@ -6,7 +6,7 @@
 // cache, you can procure our services by sending an email to info@swedishembedded.com.
 //
 // Split-key fused GQA decode attention at head_dim HD = BRAIN_HD (128 or 256) over a bf16 paged pool, on bf16 TENSOR CORES:
-// the CUDA form of the `kv=bf16` variant of `paged_flash_decode_gqa_hd256.wgsl` at that head width and any GRP of at most 8
+// the CUDA form of the `kv=bf16` variant of `paged_flash_decode_gqa.wgsl` at that head width and any GRP of at most 8
 // (a RUNTIME value: the products pad the group to 8 columns whatever it is), with its whole
 // contract - the same uniform, bindings, grid and partial records - so `paged_flash_decode_gqa_combine` merges
 // its output like any other decode kernel's.
@@ -18,9 +18,9 @@
 //   block_tables : [batch, max_bt] u32       seq_lens : [batch] u32 (live keys, the new token included)
 //   part         : [batch, n_heads, n_splits, HD + 2] f32  the unnormalised output (HD), the running max, the sum
 //
-// WHY. The TF32 form of this kernel (`paged_flash_decode_gqa_hd256_tf32.cu`) reads each bf16 element into a TF32
+// WHY. The TF32 form of this kernel (`paged_flash_decode_gqa_tf32.cu`) reads each bf16 element into a TF32
 // operand through registers and runs `m16n8k8` products at half the tensor rate: 224 us a layer at 8K keys x 16
-// sequences against 77 us for the bytes. The 8-bit kernel (`paged_flash_decode_gqa_hd256_kv8.cu`) reaches 112 us for
+// sequences against 77 us for the bytes. The 8-bit kernel (`paged_flash_decode_gqa_kv8.cu`) reaches 112 us for
 // half the bytes with `cp.async` stages and whole-sector loads; this is that design for a 16-bit element.
 //
 // THE MAP (the 8-bit kernel's, with the operands swapped). One block per (sequence, kv head, key split), 4 warps; each
@@ -146,7 +146,7 @@ __device__ __forceinline__ unsigned int brain_row(const unsigned int* bt, unsign
 #endif
 #endif
 
-extern "C" __global__ void __launch_bounds__(THREADS, BRAIN_BLOCKS_PER_SM) brain_paged_flash_decode_gqa_hd256_kvbf16(
+extern "C" __global__ void __launch_bounds__(THREADS, BRAIN_BLOCKS_PER_SM) brain_paged_flash_decode_gqa_kvbf16(
     const unsigned int* params, const float* q, const unsigned char* pool_k, const unsigned char* pool_v, const unsigned int* block_tables,
     const unsigned int* seq_lens, float* part) {
     BRAIN_PDL_ENTRY();

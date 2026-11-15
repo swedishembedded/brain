@@ -762,7 +762,7 @@ Profile first: `engine_bench --batch 1 --steps 40 --prompt N` (GH200, CUDA, fast
 peer's jobs, so only same-window ratios are quoted) put one decode step at 38 / 69 / 113 ms for a context of 283 / 1300 /
 2500 tokens - the step cost grew with the context several times faster than the bytes it reads. The cause is the
 batched decode triad's softmax (one thread per (sequence, head) walking every key) and its apply kernel; the
-`paged_flash_decode_gqa_hd256` kernel documents the same defect at 128k tokens and fixes it for Qwen3.8's head_dim 256.
+`paged_flash_decode_gqa` kernel documents the same defect at 128k tokens and fixes it for Qwen3.8's head_dim 256.
 That kernel is now specialised at head_dim 128 with one head per kv head (`HD`/`HD4` constants, the upper half of the
 workgroup owns no output channel) and `deepseek2::serve::Engine` runs it in the fast tier with the splits pinned to the
 configured context (a row's attention does not depend on its batch-mates). Exactness against f64 attention at

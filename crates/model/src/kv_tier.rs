@@ -492,7 +492,7 @@ fn decode_params(head_dim: u32, group: u32) -> Vec<(&'static str, u32)> {
 /// the constants' specialisation first, then the tier's storage rewrite - the names
 /// `kernels::template::interned` and `kv_tier_variant` give them.
 pub fn flash_decode_name(tier: KvTier, head_dim: u32, group: u32) -> String {
-    let base = kernels::template::variant_name("paged_flash_decode_gqa_hd256", &decode_params(head_dim, group));
+    let base = kernels::template::variant_name("paged_flash_decode_gqa", &decode_params(head_dim, group));
     match tier.element {
         KvElement::F32 => base,
         KvElement::Bf16 => format!("{base}#kv=bf16"),
@@ -568,7 +568,7 @@ pub fn kernel_list_for(existing: &[(&str, &str)], shapes: &[(u32, u32)]) -> Vec<
         if check_flash_shape(head_dim, group).is_err() {
             continue;
         }
-        let base = interned("paged_flash_decode_gqa_hd256", kernels::PAGED_FLASH_DECODE_GQA_HD256, &decode_params(head_dim, group)).expect("the decode kernel declares its constants");
+        let base = interned("paged_flash_decode_gqa", kernels::PAGED_FLASH_DECODE_GQA, &decode_params(head_dim, group)).expect("the decode kernel declares its constants");
         decode.push(base);
         decode.push(kv_tier_variant(base.0, base.1, CompactKv::Bf16).expect("the decode kernel marks its kv-tier blocks"));
         decode.push(kv_tier_variant(base.0, base.1, CompactKv::Int8).expect("the decode kernel marks its kv-tier blocks"));
@@ -709,7 +709,7 @@ pub struct FlashDecodeShape {
     pub pin_splits: bool,
 }
 
-/// Keys per tile of the fused decode kernel (`paged_flash_decode_gqa_hd256`'s
+/// Keys per tile of the fused decode kernel (`paged_flash_decode_gqa`'s
 /// `TILE`) and tiles per split: a split covers 1024 keys, so a 128k context is
 /// 128 splits per (sequence, kv head) and even one sequence fills the device.
 const FLASH_TILE: u32 = 128;
@@ -889,7 +889,7 @@ impl KvKernels {
     /// query row (`q`, `[batch, n_heads * 256]`) against its `seq_lens[b]`
     /// keys and writes `ctx` (`[batch, n_heads * 256]`). Two dispatches - the
     /// split-key pass and the merge - and no score slab. See
-    /// `paged_flash_decode_gqa_hd256.wgsl` for the design and why it exists.
+    /// `paged_flash_decode_gqa.wgsl` for the design and why it exists.
     #[allow(clippy::too_many_arguments)]
     pub fn flash_decode(&self, g: &Gpu, q: &DeviceBuffer, k: &KvPlane, v: &KvPlane, block_tables: &DeviceBuffer, seq_lens: &DeviceBuffer, ctx: &DeviceBuffer, s: FlashDecodeShape) -> Vec<Step> {
         self.check(k);

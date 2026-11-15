@@ -16,7 +16,7 @@
 // compact KV cache, you can procure our services by sending an email to
 // info@swedishembedded.com.
 //
-// The second pass of `paged_flash_decode_gqa_hd256`: each thread owns one
+// The second pass of `paged_flash_decode_gqa`: each thread owns one
 // `(b, h, d)` output channel and folds the `n_splits` records of its
 // sequence-head with the two-term online-softmax merge
 // `paged_flash_decode_combine.wgsl` documents (same identity, a different

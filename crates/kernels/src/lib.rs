@@ -462,14 +462,6 @@ pub const EDM_WRAP: &str = include_str!("../wgsl/edm_wrap.wgsl");
 pub const ELU: &str = include_str!("../wgsl/elu.wgsl");
 /// `wgsl/elu_bwd.wgsl`
 pub const ELU_BWD: &str = include_str!("../wgsl/elu_bwd.wgsl");
-/// `wgsl/entropy_cols.wgsl`
-pub const ENTROPY_COLS: &str = include_str!("../wgsl/entropy_cols.wgsl");
-/// `wgsl/entropy_dcb.wgsl`
-pub const ENTROPY_DCB: &str = include_str!("../wgsl/entropy_dcb.wgsl");
-/// `wgsl/entropy_dz.wgsl`
-pub const ENTROPY_DZ: &str = include_str!("../wgsl/entropy_dz.wgsl");
-/// `wgsl/entropy_logp.wgsl`
-pub const ENTROPY_LOGP: &str = include_str!("../wgsl/entropy_logp.wgsl");
 /// `wgsl/emb_bwd.wgsl`
 pub const EMB_BWD: &str = include_str!("../wgsl/emb_bwd.wgsl");
 /// `wgsl/emb_bwd_part.wgsl`
@@ -482,6 +474,14 @@ pub const EMB_BWD_UNIQ_BF16: &str = include_str!("../wgsl/emb_bwd_uniq_bf16.wgsl
 pub const EMBED: &str = include_str!("../wgsl/embed.wgsl");
 /// `wgsl/embed_tile.wgsl`
 pub const EMBED_TILE: &str = include_str!("../wgsl/embed_tile.wgsl");
+/// `wgsl/entropy_cols.wgsl`
+pub const ENTROPY_COLS: &str = include_str!("../wgsl/entropy_cols.wgsl");
+/// `wgsl/entropy_dcb.wgsl`
+pub const ENTROPY_DCB: &str = include_str!("../wgsl/entropy_dcb.wgsl");
+/// `wgsl/entropy_dz.wgsl`
+pub const ENTROPY_DZ: &str = include_str!("../wgsl/entropy_dz.wgsl");
+/// `wgsl/entropy_logp.wgsl`
+pub const ENTROPY_LOGP: &str = include_str!("../wgsl/entropy_logp.wgsl");
 /// `wgsl/exp.wgsl`
 pub const EXP: &str = include_str!("../wgsl/exp.wgsl");
 /// `wgsl/expert_counts.wgsl`
@@ -1273,10 +1273,10 @@ pub const PAGED_FLASH_DECODE: &str = include_str!("../wgsl/paged_flash_decode.wg
 pub const PAGED_FLASH_DECODE_COMBINE: &str = include_str!("../wgsl/paged_flash_decode_combine.wgsl");
 /// `wgsl/paged_flash_decode_combine_i8.wgsl`
 pub const PAGED_FLASH_DECODE_COMBINE_I8: &str = include_str!("../wgsl/paged_flash_decode_combine_i8.wgsl");
+/// `wgsl/paged_flash_decode_gqa.wgsl`
+pub const PAGED_FLASH_DECODE_GQA: &str = include_str!("../wgsl/paged_flash_decode_gqa.wgsl");
 /// `wgsl/paged_flash_decode_gqa_combine.wgsl`
 pub const PAGED_FLASH_DECODE_GQA_COMBINE: &str = include_str!("../wgsl/paged_flash_decode_gqa_combine.wgsl");
-/// `wgsl/paged_flash_decode_gqa_hd256.wgsl`
-pub const PAGED_FLASH_DECODE_GQA_HD256: &str = include_str!("../wgsl/paged_flash_decode_gqa_hd256.wgsl");
 /// `wgsl/paged_flash_decode_i8.wgsl`
 pub const PAGED_FLASH_DECODE_I8: &str = include_str!("../wgsl/paged_flash_decode_i8.wgsl");
 /// `wgsl/paged_flash_decode_split.wgsl`
@@ -1933,16 +1933,16 @@ pub const ALL: &[(&str, &str)] = &[
     ("edm_wrap", EDM_WRAP),
     ("elu", ELU),
     ("elu_bwd", ELU_BWD),
-    ("entropy_cols", ENTROPY_COLS),
-    ("entropy_dcb", ENTROPY_DCB),
-    ("entropy_dz", ENTROPY_DZ),
-    ("entropy_logp", ENTROPY_LOGP),
     ("emb_bwd", EMB_BWD),
     ("emb_bwd_part", EMB_BWD_PART),
     ("emb_bwd_uniq", EMB_BWD_UNIQ),
     ("emb_bwd_uniq_bf16", EMB_BWD_UNIQ_BF16),
     ("embed", EMBED),
     ("embed_tile", EMBED_TILE),
+    ("entropy_cols", ENTROPY_COLS),
+    ("entropy_dcb", ENTROPY_DCB),
+    ("entropy_dz", ENTROPY_DZ),
+    ("entropy_logp", ENTROPY_LOGP),
     ("exp", EXP),
     ("expert_counts", EXPERT_COUNTS),
     ("film_chan", FILM_CHAN),
@@ -2321,8 +2321,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("paged_flash_decode", PAGED_FLASH_DECODE),
     ("paged_flash_decode_combine", PAGED_FLASH_DECODE_COMBINE),
     ("paged_flash_decode_combine_i8", PAGED_FLASH_DECODE_COMBINE_I8),
+    ("paged_flash_decode_gqa", PAGED_FLASH_DECODE_GQA),
     ("paged_flash_decode_gqa_combine", PAGED_FLASH_DECODE_GQA_COMBINE),
-    ("paged_flash_decode_gqa_hd256", PAGED_FLASH_DECODE_GQA_HD256),
     ("paged_flash_decode_i8", PAGED_FLASH_DECODE_I8),
     ("paged_flash_decode_split", PAGED_FLASH_DECODE_SPLIT),
     ("paged_flash_decode_split_i8", PAGED_FLASH_DECODE_SPLIT_I8),

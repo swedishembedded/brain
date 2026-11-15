@@ -364,7 +364,7 @@ shared host-side tables, and no ricursive special case touches the binding.
 
 Pages are per stage, so the index pool costs the same bytes per global layer wherever the layer sits.
 
-Step 5b, fused attention. `paged_flash_decode_gqa_hd256` took at most 8 query heads per kv head and only
+Step 5b, fused attention. `paged_flash_decode_gqa` took at most 8 query heads per kv head and only
 256-wide rows at the compact tiers. Its per-head arrays are now sized by `GMAX` (specialised when the group
 passes 8), the softmax runs 8 heads per round of its 128 threads, and the compact tiers' row scale follows the
 head width (`HDS`); `kv_tier::kernel_list_for` and `KvKernels::resolve_for` register a model's own shape

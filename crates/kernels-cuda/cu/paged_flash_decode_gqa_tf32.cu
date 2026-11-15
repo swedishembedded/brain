@@ -6,11 +6,11 @@
 // format, you can procure our services by sending an email to info@swedishembedded.com.
 //
 // Split-key fused GQA decode attention at head_dim HD = BRAIN_HD (128 or 256) over an f32 paged pool, on
-// TF32 TENSOR CORES: the CUDA form of `paged_flash_decode_gqa_hd256.wgsl` at that head width and any GRP of at most 8
+// TF32 TENSOR CORES: the CUDA form of `paged_flash_decode_gqa.wgsl` at that head width and any GRP of at most 8
 // (a RUNTIME value: the products pad the group to 16 rows and 8 columns whatever it is), with its whole contract - the
 // same uniform, bindings, grid and partial records - so
 // `paged_flash_decode_gqa_combine` merges either kernel's output. The bf16 pool has its own kernel
-// (`paged_flash_decode_gqa_hd256_kvbf16.cu`).
+// (`paged_flash_decode_gqa_kvbf16.cu`).
 //
 //   params       : [batch, n_heads, n_kv_heads, head_dim (HD), group (<= 8), block_size, max_bt, n_splits,
 //                   tiles_per_split] u32
@@ -19,7 +19,7 @@
 //   block_tables : [batch, max_bt] u32       seq_lens : [batch] u32 (live keys, the new token included)
 //   part         : [batch, n_heads, n_splits, HD + 2] f32  the unnormalised output (HD), the running max, the sum
 //
-// The structure is `paged_flash_decode_gqa_hd256_kv8.cu`'s (read that file's header for the map): each warp walks
+// The structure is `paged_flash_decode_gqa_kv8.cu`'s (read that file's header for the map): each warp walks
 // its own 16-key chunks with its own running softmax, S = Q . K^T with the group padded to 16 rows, then
 // O^T += V^T . P^T with the first product's accumulator as the second's B operand. What differs is the element:
 // the products run on `mma.sync.m16n8k8` with TF32 operands, an f32 split into a TF32 high part and the TF32
@@ -90,7 +90,7 @@ __device__ __forceinline__ void brain_load8(const float* row, unsigned int e0, f
 #endif
 #endif
 
-extern "C" __global__ void __launch_bounds__(THREADS) brain_paged_flash_decode_gqa_hd256_tf32(
+extern "C" __global__ void __launch_bounds__(THREADS) brain_paged_flash_decode_gqa_tf32(
     const unsigned int* params, const float* q, const float* pool_k, const float* pool_v, const unsigned int* block_tables,
     const unsigned int* seq_lens, float* part) {
     BRAIN_PDL_ENTRY();

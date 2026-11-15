@@ -24,7 +24,7 @@ rate.
 
 ## What to do
 
-### What the kernel is (`paged_flash_decode_gqa_hd256_kvbf16.cu`)
+### What the kernel is (`paged_flash_decode_gqa_kvbf16.cu`)
 
 - **Operands.** A bf16 key or value is an exact `mma.sync.m16n8k16 ... bf16` operand; nothing is
   rounded. Q and P are the f32 side, split into bf16 parts. Never to f16 (|x| > 65504 would be

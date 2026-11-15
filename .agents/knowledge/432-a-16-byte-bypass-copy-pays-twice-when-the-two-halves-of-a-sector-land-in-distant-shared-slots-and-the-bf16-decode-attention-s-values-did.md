@@ -48,7 +48,7 @@ s window. Where, and what is the largest part?
 
 ### The 8-bit kernels had the same value copy
 
-The int8 and FP8 kernel (`paged_flash_decode_gqa_hd256_kv8.cu`) got the same fetch. int8 / FP8 us a
+The int8 and FP8 kernel (`paged_flash_decode_gqa_kv8.cu`) got the same fetch. int8 / FP8 us a
 layer, before -> after: 16 x 8K 119.8 / 119.3 -> 109.7 / 108.4; 16 x 32K 402 / 396 -> 364 / 363; 64
 x 8K 403 / 401.5 -> 364.5 / 365.3; 64 x 32K 1486 / 1483 -> 1342 / 1348; 64 x 64K 2905 / 2900 -> 2640
 / 2638 (97 % of 3.4 TB/s); 1 x 8K 24 us. Same specs and 2,000 back-to-back launches, unchanged.

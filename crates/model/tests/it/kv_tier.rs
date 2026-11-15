@@ -695,7 +695,7 @@ fn native_decode_is_exact_at(g: &Gpu, tier: KvTier, heads: Heads, lens: &[u32], 
 /// capability 8.0); skipped, naming `what`, on a card below that.
 fn native_decode_gpu(what: &str) -> Option<Gpu> {
     let g = cuda_gpu(what)?;
-    let decode = g.kernel_index("paged_flash_decode_gqa_hd256#GRP=6").expect("the decode kernel is registered");
+    let decode = g.kernel_index("paged_flash_decode_gqa#GRP=6").expect("the decode kernel is registered");
     if g.native_kernel_for(decode, &[1, 6, 1, 256, 6, 16, 1, 1, 1]).is_none() {
         brain_testutil::skip_unavailable(&format!("{what}: this card is below the native decode kernels' floor"));
         return None;
@@ -794,7 +794,7 @@ fn native_bf16_decode_writes_every_partial_record_including_splits_past_the_live
     let (kc, vc) = (filled(&g, tier, &s, &rows(1), &blocks, &offsets), filled(&g, tier, &s, &rows(2), &blocks, &offsets));
     let q = g.storage_init("q", &random(3, (batch * n_heads * hd) as usize));
     let (table, seq_lens) = (u32s(&g, &table_h), u32s(&g, &lens));
-    let kernel = g.kernel_index("paged_flash_decode_gqa_hd256#GRP=6#kv=bf16").expect("the decode kernel is registered");
+    let kernel = g.kernel_index("paged_flash_decode_gqa#GRP=6#kv=bf16").expect("the decode kernel is registered");
     let (n_splits, tiles_per_split) = (9u32, 1u32);
     let params = [batch, n_heads, n_kv, hd, n_heads / n_kv, block_size, max_bt, n_splits, tiles_per_split];
     assert_eq!(g.native_kernel_for(kernel, &params), Some("paged_flash_decode_gqa_hd256_kvbf16"));

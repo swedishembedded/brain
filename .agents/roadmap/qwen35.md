@@ -2768,7 +2768,7 @@ per (sequence, head) walking 131072 keys (721-1438 ms) and
 `paged_decode_apply_batched` one thread per channel doing the same (610-1010 ms)
 - against ~6 ms for the bytes the step reads. A smaller KV cache saves memory
 either way and saves time only once the attention reads it at bandwidth, so
-`paged_flash_decode_gqa_hd256` (+ `_combine`) replaces the triad: a workgroup
+`paged_flash_decode_gqa` (+ `_combine`) replaces the triad: a workgroup
 per (sequence, kv head, 1024-key split) attends all 6 (or 8) query heads that
 share the head, so K and V are read once per group, not once per head. Its
 first version was bound at 95% of the L1/TEX pipe with DRAM at 8% (scalar loads,

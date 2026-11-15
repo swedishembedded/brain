@@ -1054,7 +1054,7 @@ pub const ALL: &[CudaKernel] = &[
     },
     CudaKernel {
         name: "paged_flash_decode_gqa_hd256_kv8",
-        // Redirected to by name from every group's WGSL `paged_flash_decode_gqa_hd256#GRP=g#kv=int8` (`gpu_core::native_upgrade`).
+        // Redirected to by name from every group's WGSL `paged_flash_decode_gqa#GRP=g#kv=int8` (`gpu_core::native_upgrade`).
         op: Op::PagedAttentionFused,
         weight: Dtype::I8,
         by_name: true,
@@ -1071,11 +1071,11 @@ pub const ALL: &[CudaKernel] = &[
         // stages and the merge's outputs are dynamic (`flash_decode_kv8_dynamic_shared_bytes`).
         shared_bytes: 16 * 32 * 16 + 2 * 4 * 8 * 4,
         programmatic: true,
-        src: concat!("#define BRAIN_HD 256\n#define BRAIN_DECODE_STAGES 2\n", include_str!("../cu/paged_flash_decode_gqa_hd256_kv8.cu")),
+        src: concat!("#define BRAIN_HD 256\n#define BRAIN_DECODE_STAGES 2\n#define brain_paged_flash_decode_gqa_kv8 brain_paged_flash_decode_gqa_hd256_kv8\n", include_str!("../cu/paged_flash_decode_gqa_kv8.cu")),
     },
     CudaKernel {
         name: "paged_flash_decode_gqa_hd256_kvfp8",
-        // Redirected to by name from every group's WGSL `paged_flash_decode_gqa_hd256#GRP=g#kv=fp8` (`gpu_core::native_upgrade`).
+        // Redirected to by name from every group's WGSL `paged_flash_decode_gqa#GRP=g#kv=fp8` (`gpu_core::native_upgrade`).
         op: Op::PagedAttentionFused,
         weight: Dtype::F8E4M3,
         by_name: true,
@@ -1092,11 +1092,11 @@ pub const ALL: &[CudaKernel] = &[
         // stages and the merge's outputs are dynamic (`flash_decode_kv8_dynamic_shared_bytes`).
         shared_bytes: 16 * 32 * 16 + 2 * 4 * 8 * 4,
         programmatic: true,
-        src: concat!("#define BRAIN_HD 256\n#define BRAIN_DECODE_STAGES 2\n#define BRAIN_KV_FP8 1\n#define brain_paged_flash_decode_gqa_hd256_kv8 brain_paged_flash_decode_gqa_hd256_kvfp8\n", include_str!("../cu/paged_flash_decode_gqa_hd256_kv8.cu")),
+        src: concat!("#define BRAIN_HD 256\n#define BRAIN_DECODE_STAGES 2\n#define BRAIN_KV_FP8 1\n#define brain_paged_flash_decode_gqa_kv8 brain_paged_flash_decode_gqa_hd256_kvfp8\n", include_str!("../cu/paged_flash_decode_gqa_kv8.cu")),
     },
     CudaKernel {
         name: "paged_flash_decode_gqa_hd128_kv8",
-        // Redirected to by name from every group's WGSL `paged_flash_decode_gqa_hd256#GRP=g,HD=128,HD4=32,HDS=7#kv=int8` (`gpu_core::native_upgrade`).
+        // Redirected to by name from every group's WGSL `paged_flash_decode_gqa#GRP=g,HD=128,HD4=32,HDS=7#kv=int8` (`gpu_core::native_upgrade`).
         op: Op::PagedAttentionFused,
         weight: Dtype::I8,
         by_name: true,
@@ -1113,11 +1113,11 @@ pub const ALL: &[CudaKernel] = &[
         // stages and the merge's outputs are dynamic (`flash_decode_kv8_dynamic_shared_bytes`).
         shared_bytes: 8 * 32 * 16 + 2 * 4 * 8 * 4,
         programmatic: true,
-        src: concat!("#define BRAIN_HD 128\n#define BRAIN_DECODE_STAGES 2\n#define brain_paged_flash_decode_gqa_hd256_kv8 brain_paged_flash_decode_gqa_hd128_kv8\n", include_str!("../cu/paged_flash_decode_gqa_hd256_kv8.cu")),
+        src: concat!("#define BRAIN_HD 128\n#define BRAIN_DECODE_STAGES 2\n#define brain_paged_flash_decode_gqa_kv8 brain_paged_flash_decode_gqa_hd128_kv8\n", include_str!("../cu/paged_flash_decode_gqa_kv8.cu")),
     },
     CudaKernel {
         name: "paged_flash_decode_gqa_hd128_kvfp8",
-        // Redirected to by name from every group's WGSL `paged_flash_decode_gqa_hd256#GRP=g,HD=128,HD4=32,HDS=7#kv=fp8` (`gpu_core::native_upgrade`).
+        // Redirected to by name from every group's WGSL `paged_flash_decode_gqa#GRP=g,HD=128,HD4=32,HDS=7#kv=fp8` (`gpu_core::native_upgrade`).
         op: Op::PagedAttentionFused,
         weight: Dtype::F8E4M3,
         by_name: true,
@@ -1134,11 +1134,11 @@ pub const ALL: &[CudaKernel] = &[
         // stages and the merge's outputs are dynamic (`flash_decode_kv8_dynamic_shared_bytes`).
         shared_bytes: 8 * 32 * 16 + 2 * 4 * 8 * 4,
         programmatic: true,
-        src: concat!("#define BRAIN_HD 128\n#define BRAIN_DECODE_STAGES 2\n#define BRAIN_KV_FP8 1\n#define brain_paged_flash_decode_gqa_hd256_kv8 brain_paged_flash_decode_gqa_hd128_kvfp8\n", include_str!("../cu/paged_flash_decode_gqa_hd256_kv8.cu")),
+        src: concat!("#define BRAIN_HD 128\n#define BRAIN_DECODE_STAGES 2\n#define BRAIN_KV_FP8 1\n#define brain_paged_flash_decode_gqa_kv8 brain_paged_flash_decode_gqa_hd128_kvfp8\n", include_str!("../cu/paged_flash_decode_gqa_kv8.cu")),
     },
     CudaKernel {
         name: "paged_flash_decode_gqa_hd256_f32",
-        // Redirected to by name from every group's WGSL `paged_flash_decode_gqa_hd256#GRP=g` (`gpu_core::native_upgrade`).
+        // Redirected to by name from every group's WGSL `paged_flash_decode_gqa#GRP=g` (`gpu_core::native_upgrade`).
         op: Op::PagedAttentionFused,
         weight: Dtype::F32,
         by_name: true,
@@ -1154,13 +1154,13 @@ pub const ALL: &[CudaKernel] = &[
         shared_bytes: 4 * 8 * 256 * 4 + 2 * 4 * 8 * 4,
         programmatic: true,
         src: concat!(
-            "#define BRAIN_HD 256\n#define brain_paged_flash_decode_gqa_hd256_tf32 brain_paged_flash_decode_gqa_hd256_f32\n",
-            include_str!("../cu/paged_flash_decode_gqa_hd256_tf32.cu")
+            "#define BRAIN_HD 256\n#define brain_paged_flash_decode_gqa_tf32 brain_paged_flash_decode_gqa_hd256_f32\n",
+            include_str!("../cu/paged_flash_decode_gqa_tf32.cu")
         ),
     },
     CudaKernel {
         name: "paged_flash_decode_gqa_hd128_f32",
-        // Redirected to by name from every group's WGSL `paged_flash_decode_gqa_hd256#GRP=g,HD=128,HD4=32,HDS=7` (`gpu_core::native_upgrade`).
+        // Redirected to by name from every group's WGSL `paged_flash_decode_gqa#GRP=g,HD=128,HD4=32,HDS=7` (`gpu_core::native_upgrade`).
         op: Op::PagedAttentionFused,
         weight: Dtype::F32,
         by_name: true,
@@ -1176,13 +1176,13 @@ pub const ALL: &[CudaKernel] = &[
         shared_bytes: 4 * 8 * 128 * 4 + 2 * 4 * 8 * 4,
         programmatic: true,
         src: concat!(
-            "#define BRAIN_HD 128\n#define brain_paged_flash_decode_gqa_hd256_tf32 brain_paged_flash_decode_gqa_hd128_f32\n",
-            include_str!("../cu/paged_flash_decode_gqa_hd256_tf32.cu")
+            "#define BRAIN_HD 128\n#define brain_paged_flash_decode_gqa_tf32 brain_paged_flash_decode_gqa_hd128_f32\n",
+            include_str!("../cu/paged_flash_decode_gqa_tf32.cu")
         ),
     },
     CudaKernel {
         name: "paged_flash_decode_gqa_hd256_kvbf16",
-        // Redirected to by name from every group's WGSL `paged_flash_decode_gqa_hd256#GRP=g#kv=bf16` (`gpu_core::native_upgrade`).
+        // Redirected to by name from every group's WGSL `paged_flash_decode_gqa#GRP=g#kv=bf16` (`gpu_core::native_upgrade`).
         op: Op::PagedAttentionFused,
         weight: Dtype::BF16,
         by_name: true,
@@ -1199,11 +1199,11 @@ pub const ALL: &[CudaKernel] = &[
         // cp.async ring and the merge's outputs are dynamic (`flash_decode_bf16_dynamic_shared_bytes`).
         shared_bytes: 16 * 3 * 32 * 8 + 2 * 4 * 8 * 4,
         programmatic: true,
-        src: concat!("#define BRAIN_HD 256\n#define BRAIN_DECODE_STAGES 3\n#define BRAIN_BLOCKS_PER_SM 2\n", include_str!("../cu/paged_flash_decode_gqa_hd256_kvbf16.cu")),
+        src: concat!("#define BRAIN_HD 256\n#define BRAIN_DECODE_STAGES 3\n#define BRAIN_BLOCKS_PER_SM 2\n#define brain_paged_flash_decode_gqa_kvbf16 brain_paged_flash_decode_gqa_hd256_kvbf16\n", include_str!("../cu/paged_flash_decode_gqa_kvbf16.cu")),
     },
     CudaKernel {
         name: "paged_flash_decode_gqa_hd128_kvbf16",
-        // Redirected to by name from every group's WGSL `paged_flash_decode_gqa_hd256#GRP=g,HD=128,HD4=32,HDS=7#kv=bf16` (`gpu_core::native_upgrade`).
+        // Redirected to by name from every group's WGSL `paged_flash_decode_gqa#GRP=g,HD=128,HD4=32,HDS=7#kv=bf16` (`gpu_core::native_upgrade`).
         op: Op::PagedAttentionFused,
         weight: Dtype::BF16,
         by_name: true,
@@ -1220,7 +1220,7 @@ pub const ALL: &[CudaKernel] = &[
         // cp.async ring and the merge's outputs are dynamic (`flash_decode_bf16_dynamic_shared_bytes`).
         shared_bytes: 8 * 3 * 32 * 8 + 2 * 4 * 8 * 4,
         programmatic: true,
-        src: concat!("#define BRAIN_HD 128\n#define BRAIN_DECODE_STAGES 3\n#define BRAIN_BLOCKS_PER_SM 4\n#define brain_paged_flash_decode_gqa_hd256_kvbf16 brain_paged_flash_decode_gqa_hd128_kvbf16\n", include_str!("../cu/paged_flash_decode_gqa_hd256_kvbf16.cu")),
+        src: concat!("#define BRAIN_HD 128\n#define BRAIN_DECODE_STAGES 3\n#define BRAIN_BLOCKS_PER_SM 4\n#define brain_paged_flash_decode_gqa_kvbf16 brain_paged_flash_decode_gqa_hd128_kvbf16\n", include_str!("../cu/paged_flash_decode_gqa_kvbf16.cu")),
     },
     CudaKernel {
         name: "paged_flash_decode_gqa_combine",

@@ -275,7 +275,7 @@ What it does differently:
   the f32 source), on every backend. The planner charges the real bytes, so one
   97 GiB GH200 admits 4 / 8 / 15 sequences of 128k at f32 / bf16 / int8. Decode
   attention at head_dim 256 is the fused split-key kernel
-  (`paged_flash_decode_gqa_hd256`, a GQA group of 6 or 8) in every tier - one
+  (`paged_flash_decode_gqa`, a GQA group of 6 or 8) in every tier - one
   layer at 128k is 0.83 / 0.54 / 0.42 ms for one sequence against 63 ms for the <!-- perf-number: measured result; reproduced by the named model binary/test (`brain perf run` for timings) -->
   scores/softmax/apply triad it replaced (`.agents/roadmap/qwen35.md` M30). The
   recurrent state of the 48 GDN layers (150 MiB per sequence) is not part of the

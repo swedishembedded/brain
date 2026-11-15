@@ -675,7 +675,7 @@ fn kv_append_bf16_blocks(p: &[u32], tile: (u32, u32)) -> u32 {
     (p[0] * (p[1] / 4)).div_ceil(tile.0)
 }
 
-/// `paged_flash_decode_gqa_hd256.wgsl`'s bindings for a scaled 8-bit tier (int8, FP8): params, `q`, the two pools,
+/// `paged_flash_decode_gqa.wgsl`'s bindings for a scaled 8-bit tier (int8, FP8): params, `q`, the two pools,
 /// `block_tables`, `seq_lens`, the written partial records, then the key and value row scales.
 const FLASH_DECODE_KV8_BINDINGS: &[BindKind] = &[
     BindKind::Uniform,
@@ -689,7 +689,7 @@ const FLASH_DECODE_KV8_BINDINGS: &[BindKind] = &[
     BindKind::StorageRead,
 ];
 
-/// `paged_flash_decode_gqa_hd256.wgsl`'s bindings for an unscaled tier (f32, bf16): params, `q`, the two pools,
+/// `paged_flash_decode_gqa.wgsl`'s bindings for an unscaled tier (f32, bf16): params, `q`, the two pools,
 /// `block_tables`, `seq_lens`, the written partial records.
 const FLASH_DECODE_BINDINGS: &[BindKind] =
     &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageReadWrite];
@@ -1327,7 +1327,7 @@ pub(crate) const FP8_ROWS: &[Row] = &[
 /// width and group, and its native kernels per head width alone.
 pub(crate) const TEMPLATE_ROWS: &[Row] = &[
     Row {
-        slow: "paged_flash_decode_gqa_hd256#kv=int8",
+        slow: "paged_flash_decode_gqa#kv=int8",
         target: Target::Named("paged_flash_decode_gqa_hd256_kv8"),
         bindings: FLASH_DECODE_KV8_BINDINGS,
         serves: serves_flash_decode_hd256,
@@ -1338,7 +1338,7 @@ pub(crate) const TEMPLATE_ROWS: &[Row] = &[
         launch: flash_decode_kv8_launch(256),
     },
     Row {
-        slow: "paged_flash_decode_gqa_hd256#kv=fp8",
+        slow: "paged_flash_decode_gqa#kv=fp8",
         target: Target::Named("paged_flash_decode_gqa_hd256_kvfp8"),
         bindings: FLASH_DECODE_KV8_BINDINGS,
         serves: serves_flash_decode_hd256,
@@ -1349,7 +1349,7 @@ pub(crate) const TEMPLATE_ROWS: &[Row] = &[
         launch: flash_decode_kv8_launch(256),
     },
     Row {
-        slow: "paged_flash_decode_gqa_hd256#kv=int8",
+        slow: "paged_flash_decode_gqa#kv=int8",
         target: Target::Named("paged_flash_decode_gqa_hd128_kv8"),
         bindings: FLASH_DECODE_KV8_BINDINGS,
         serves: serves_flash_decode_hd128,
@@ -1360,7 +1360,7 @@ pub(crate) const TEMPLATE_ROWS: &[Row] = &[
         launch: flash_decode_kv8_launch(128),
     },
     Row {
-        slow: "paged_flash_decode_gqa_hd256#kv=fp8",
+        slow: "paged_flash_decode_gqa#kv=fp8",
         target: Target::Named("paged_flash_decode_gqa_hd128_kvfp8"),
         bindings: FLASH_DECODE_KV8_BINDINGS,
         serves: serves_flash_decode_hd128,
@@ -1371,7 +1371,7 @@ pub(crate) const TEMPLATE_ROWS: &[Row] = &[
         launch: flash_decode_kv8_launch(128),
     },
     Row {
-        slow: "paged_flash_decode_gqa_hd256#kv=bf16",
+        slow: "paged_flash_decode_gqa#kv=bf16",
         target: Target::Named("paged_flash_decode_gqa_hd256_kvbf16"),
         bindings: FLASH_DECODE_BINDINGS,
         serves: serves_flash_decode_hd256,
@@ -1382,7 +1382,7 @@ pub(crate) const TEMPLATE_ROWS: &[Row] = &[
         launch: flash_decode_bf16_launch(256),
     },
     Row {
-        slow: "paged_flash_decode_gqa_hd256#kv=bf16",
+        slow: "paged_flash_decode_gqa#kv=bf16",
         target: Target::Named("paged_flash_decode_gqa_hd128_kvbf16"),
         bindings: FLASH_DECODE_BINDINGS,
         serves: serves_flash_decode_hd128,
@@ -1393,7 +1393,7 @@ pub(crate) const TEMPLATE_ROWS: &[Row] = &[
         launch: flash_decode_bf16_launch(128),
     },
     Row {
-        slow: "paged_flash_decode_gqa_hd256",
+        slow: "paged_flash_decode_gqa",
         target: Target::Named("paged_flash_decode_gqa_hd256_f32"),
         bindings: FLASH_DECODE_BINDINGS,
         serves: serves_flash_decode_hd256,
@@ -1404,7 +1404,7 @@ pub(crate) const TEMPLATE_ROWS: &[Row] = &[
         launch: CudaLaunch::NONE,
     },
     Row {
-        slow: "paged_flash_decode_gqa_hd256",
+        slow: "paged_flash_decode_gqa",
         target: Target::Named("paged_flash_decode_gqa_hd128_f32"),
         bindings: FLASH_DECODE_BINDINGS,
         serves: serves_flash_decode_hd128,
@@ -3923,9 +3923,9 @@ mod tests {
     #[test]
     fn template_rows_answer_every_specialisation_of_their_tier() {
         let family = |n: &str| template_family(n).into_owned();
-        assert_eq!(family("paged_flash_decode_gqa_hd256#GRP=6"), "paged_flash_decode_gqa_hd256");
-        assert_eq!(family("paged_flash_decode_gqa_hd256#GRP=4,HD=128,HD4=32,HDS=7#kv=int8"), "paged_flash_decode_gqa_hd256#kv=int8");
-        assert_eq!(family("paged_flash_decode_gqa_hd256#GRP=2,HD=128,HD4=32,HDS=7#kv=bf16"), "paged_flash_decode_gqa_hd256#kv=bf16");
+        assert_eq!(family("paged_flash_decode_gqa#GRP=6"), "paged_flash_decode_gqa");
+        assert_eq!(family("paged_flash_decode_gqa#GRP=4,HD=128,HD4=32,HDS=7#kv=int8"), "paged_flash_decode_gqa#kv=int8");
+        assert_eq!(family("paged_flash_decode_gqa#GRP=2,HD=128,HD4=32,HDS=7#kv=bf16"), "paged_flash_decode_gqa#kv=bf16");
         // Lower-case segments are storage rewrites, not constants, and a name without constants is its own family.
         assert_eq!(family("paged_decode_scores_batched#pool_k=kvfp8"), "paged_decode_scores_batched#pool_k=kvfp8");
         assert_eq!(family("matmul_i8_gemv"), "matmul_i8_gemv");

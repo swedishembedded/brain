@@ -1827,18 +1827,18 @@ mod tests {
     /// without the markers is refused rather than half-rewritten.
     #[test]
     fn the_kv_tier_variants_swap_the_marked_blocks_and_nothing_else() {
-        let base = crate::PAGED_FLASH_DECODE_GQA_HD256;
+        let base = crate::PAGED_FLASH_DECODE_GQA;
         let body_of = |s: &str| s[s.find("var<workgroup> qs:").unwrap()..].to_string();
         for (tier, tag) in [(CompactKv::Bf16, "bf16"), (CompactKv::Int8, "int8")] {
-            let (name, src) = kv_tier_variant("paged_flash_decode_gqa_hd256", base, tier).unwrap();
-            assert_eq!(name, format!("paged_flash_decode_gqa_hd256#kv={tag}"));
+            let (name, src) = kv_tier_variant("paged_flash_decode_gqa", base, tier).unwrap();
+            assert_eq!(name, format!("paged_flash_decode_gqa#kv={tag}"));
             assert_eq!(body_of(src), body_of(base), "{tag}: the shared body must be untouched");
             assert!(!src.contains("array<vec4<f32>>") && !src.contains("array<vec2<f32>>"), "{tag}: the f32 pool bindings must be gone");
             assert!(src.contains("fn k4(") && src.contains("fn v2(") && src.contains("fn k_scale(") && src.contains("fn v_scale("), "{tag}: a tier supplies every loader");
             // The same call is the same variant.
-            assert_eq!(kv_tier_variant("paged_flash_decode_gqa_hd256", base, tier).unwrap().1.as_ptr(), src.as_ptr());
+            assert_eq!(kv_tier_variant("paged_flash_decode_gqa", base, tier).unwrap().1.as_ptr(), src.as_ptr());
         }
-        let int8 = kv_tier_variant("paged_flash_decode_gqa_hd256", base, CompactKv::Int8).unwrap().1;
+        let int8 = kv_tier_variant("paged_flash_decode_gqa", base, CompactKv::Int8).unwrap().1;
         assert!(int8.contains("@binding(7)") && int8.contains("@binding(8)"), "int8 adds the two scale bindings");
         assert!(kv_tier_variant("matmul", crate::MATMUL, CompactKv::Bf16).unwrap_err().contains("kv-tier-begin"), "an unmarked kernel is refused");
     }

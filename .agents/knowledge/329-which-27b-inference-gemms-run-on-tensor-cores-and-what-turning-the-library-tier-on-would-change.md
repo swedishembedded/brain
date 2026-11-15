@@ -19,7 +19,7 @@ tier on. For the served 27B (Q8_0 GGUF, `TierPolicy::uniform(I8)`, int8 paged KV
 | the same linears at decode batch 1-8 | `matmul_i8_gemv`, `_gemv_multi` | no: dp4a on CUDA cores, memory bound; from batch 16 `matmul_i8_mma_m16` |
 | paged flash prefill, head_dim 256 | `flash_prefill_f16_hd256(_kv8)` (version 2 opt-in) | yes (fp16 `mma.sync`, fp32 accumulate) |
 | GDN chunk recurrence and prep (prefill) | `gdn_chunk_loop_tc`, `gdn_chunk_prep_tok_tc` | yes (three-pass TF32) |
-| paged flash decode | `paged_flash_decode_gqa_hd256` | no: fp32 CUDA cores |
+| paged flash decode | `paged_flash_decode_gqa` | no: fp32 CUDA cores |
 | GDN decode step, norms, activations, quant epilogues | native/portable elementwise | no (not GEMMs) |
 
 ## Why
