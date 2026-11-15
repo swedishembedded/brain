@@ -106,14 +106,35 @@ pub fn publish_ceiling() {
 /// printed. `Gpu::charged_bytes` is the device-bytes-requested accounting and
 /// reports 0 unless a ceiling exists; the ceiling is a process-wide
 /// `OnceLock`, so the measurement needs its own process.
-pub fn measure_in_child(helper: &str) -> HashMap<String, u64> {
+///
+/// Called as `measure_in_child!(helper)` from the module that defines `helper`, so the name the child is asked to run
+/// is the one libtest lists: the helper's module path below the binary's root. The child must run exactly that one
+/// test, or its markers are not the ones asked for.
+// Shared by every test binary that includes this module, as the module's `dead_code` allowance says; only some measure.
+#[allow(unused_macros)]
+macro_rules! measure_in_child {
+    ($helper:ident) => {{
+        let _: fn() = $helper;
+        $crate::common::measure_in_child_at(module_path!(), stringify!($helper))
+    }};
+}
+#[allow(unused_imports)]
+pub(crate) use measure_in_child;
+
+/// [`measure_in_child!`]'s body: `module` is the helper's `module_path!()`.
+pub fn measure_in_child_at(module: &str, helper: &str) -> HashMap<String, u64> {
     static ONE_CHILD_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _serialised = ONE_CHILD_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let test = match module.split_once("::") {
+        Some((_, below_root)) => format!("{below_root}::{helper}"),
+        None => helper.to_string(),
+    };
     let mut cmd = std::process::Command::new(std::env::current_exe().expect("current_exe"));
-    cmd.args(["--exact", helper, "--ignored", "--nocapture", "--test-threads=1"]);
+    cmd.args(["--exact", &test, "--ignored", "--nocapture", "--test-threads=1"]);
     let out = cmd.output().expect("spawn child");
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-    assert!(out.status.success(), "child {helper} exited {:?}\nstdout:\n{stdout}\nstderr:\n{}", out.status.code(), String::from_utf8_lossy(&out.stderr));
+    assert!(out.status.success(), "child {test} exited {:?}\nstdout:\n{stdout}\nstderr:\n{}", out.status.code(), String::from_utf8_lossy(&out.stderr));
+    assert!(stdout.lines().any(|l| l.trim() == "running 1 test"), "child {test} did not run exactly that one test\nstdout:\n{stdout}");
     stdout
         .lines()
         .filter_map(|l| l.strip_prefix("MARK "))
@@ -122,7 +143,7 @@ pub fn measure_in_child(helper: &str) -> HashMap<String, u64> {
         .collect()
 }
 
-/// Print one marker for [`measure_in_child`] (on a line of its own: libtest
+/// Print one marker for [`measure_in_child!`] (on a line of its own: libtest
 /// leaves its `test name ... ` prefix on the line a `--nocapture` test starts
 /// printing on).
 pub fn mark(name: &str, bytes: u64) {

@@ -63,7 +63,7 @@ fn child_charged_bytes_at_two_lengths() {
 /// buffers a training step does need.
 #[test]
 fn a_training_build_keeps_no_per_token_decode_cache() {
-    let m = measure_in_child("child_charged_bytes_at_two_lengths");
+    let m = measure_in_child!(child_charged_bytes_at_two_lengths);
     let per_token = (m["long"] - m["short"]) / 256;
     let c = all_gqa();
     let (d, v, r) = (c.d_model as u64, c.vocab as u64, 3u64);
@@ -90,7 +90,7 @@ fn child_charged_bytes_wide_gdn() {
 /// The GDN recurrent state and conv history are decode-only too.
 #[test]
 fn a_training_build_keeps_no_recurrent_decode_state() {
-    let m = measure_in_child("child_charged_bytes_wide_gdn");
+    let m = measure_in_child!(child_charged_bytes_wide_gdn);
     let (charged, params, state) = (m["charged"], m["params"], m["state"]);
     // Weights, the adapters' grads/moments and a few small buffers, but not `state`.
     assert!(charged < params + state / 2, "requested {charged} B for {params} B of parameters: the {state} B recurrent state is being kept");

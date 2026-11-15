@@ -112,7 +112,7 @@ fn child_charged_bytes_at_two_lengths_with_a_wide_vocab() {
 /// slope of what the build asks for stays far below it.
 #[test]
 fn a_training_build_never_holds_tokens_times_vocab_logits() {
-    let m = measure_in_child("child_charged_bytes_at_two_lengths_with_a_wide_vocab");
+    let m = measure_in_child!(child_charged_bytes_at_two_lengths_with_a_wide_vocab);
     let per_token = (m["long"] - m["short"]) / 256;
     assert!(per_token < 16 * 1024, "{per_token} B per token requested: a tokens x vocab buffer (32 KiB per token) is back");
 }

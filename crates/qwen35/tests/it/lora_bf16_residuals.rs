@@ -84,7 +84,7 @@ fn child_charged_bytes_per_residual_mode() {
 
 #[test]
 fn narrower_residuals_shrink_the_per_token_memory_of_the_boundary_stream() {
-    let m = measure_in_child("child_charged_bytes_per_residual_mode");
+    let m = measure_in_child!(child_charged_bytes_per_residual_mode);
     let cfg = deep();
     // fp32: (L + 1) boundaries of d floats; bf16: the same count of half-size
     // packed buffers plus the two fp32 working buffers.
