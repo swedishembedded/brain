@@ -211,7 +211,10 @@ fn calibration_repairs_an_overconfident_model_and_persists() {
         .steps(1500)
         .patience(1000)
         .batch(128)
-        .lr(3e-3);
+        .lr(3e-3)
+        // seed: how overconfident 600 subjects leave the model, and so how far a recalibration slope moves, is a
+        // property of one training run; an unseeded run lands outside the bands below about every other time.
+        .seed(7);
     let (mut model, _) = TimelineModel::train(&train, &stop, &spec).unwrap();
     assert!(model.calibration().is_none());
     let preds = model.predict(&test).unwrap();
