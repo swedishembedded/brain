@@ -3788,7 +3788,7 @@ impl Qwen35 {
     /// tape's [`DecodeMeta`], rewritten by each replay. Needs the int8 tier: the
     /// fp32 decode's sparse expert dispatch reads the router's choice back to the
     /// host mid-step, which a recording cannot do.
-    pub(crate) fn record_decode(&self, tokens: &[u32], caches: &BatchDecodeCaches, head: DecodeHead) -> DecodeTape {
+    pub(crate) fn record_decode(&self, tokens: &[u32], caches: &BatchDecodeCaches, head: DecodeHead, scratch: &gpu_core::tape::TapeScratch) -> DecodeTape {
         let bsz = tokens.len() as u32;
         assert!(self.moe_device_routed(), "qwen35moe::record_decode needs a device-routed expert tier (int8 or NVFP4): the fp32 decode reads routing back to the host mid-step");
         assert!(bsz > 0 && tokens.len() == caches.seqs.len(), "qwen35moe::record_decode: {} tokens for {} sequences", tokens.len(), caches.seqs.len());
@@ -3797,7 +3797,9 @@ impl Qwen35 {
         let g = &self.gpu;
         // The NVFP4 tier records without vendor-library products (see `Gpu::set_declines_library`).
         self.ops.gpu().set_declines_library(self.moe_nvfp4_active());
-        let recording = g.record_tape();
+        // Every recorded step of this model takes its temporaries from one shared set: steps of different batch sizes
+        // never run at once, so the card holds the widest step's working set, not one per recorded size.
+        let recording = g.record_tape_on(scratch);
         let hidden = self.decode_layers(&meta, bsz, caches, caches.gqa_cap);
         let out = match head {
             DecodeHead::Greedy => TapeOut::Greedy(self.head_argmax_rows_record(&hidden, bsz)),

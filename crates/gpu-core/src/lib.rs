@@ -2035,6 +2035,9 @@ mod native_facade {
         }
 
         fn storage_with(&self, n: u64, uninit: bool) -> DeviceBuffer {
+            if let Some(b) = crate::tape::routed_storage(self.mem_device, n, |words| self.fresh_storage(words, uninit)) {
+                return b;
+            }
             let mut g = self.arena.lock().unwrap_or_else(|e| e.into_inner());
             let lane = crate::lane::current();
             if let Some((_, _, a)) = g.iter_mut().find(|(l, _, a)| *l == lane && a.active()) {
@@ -2234,6 +2237,7 @@ mod native_facade {
             Ok(self.be().uniform_dynamic(len))
         }
         pub fn write(&self, buf: &DeviceBuffer, data: &[u32]) {
+            crate::tape::refuse_write_into_routed(buf);
             self.count_upload(data.len() as u64 * 4);
             self.be().write(buf, data)
         }
@@ -2274,6 +2278,7 @@ mod native_facade {
         /// a large upload should chunk through this (or [`Self::write_f32_chunked`])
         /// instead of one `write_f32` for the whole tensor.
         pub fn write_at(&self, buf: &DeviceBuffer, offset_words: u64, data: &[u32]) {
+            crate::tape::refuse_write_into_routed(buf);
             self.count_upload(data.len() as u64 * 4);
             self.be().write_at(buf, offset_words, data)
         }
@@ -2297,6 +2302,7 @@ mod native_facade {
         /// arrives in. Asynchronous on a handle from [`Self::upload_handle`]; see
         /// `backend_api::Backend::write_bytes_at`.
         pub fn write_bytes_at(&self, buf: &DeviceBuffer, offset_words: u64, data: &[u8]) {
+            crate::tape::refuse_write_into_routed(buf);
             self.count_upload(data.len() as u64);
             self.be().write_bytes_at(buf, offset_words, data)
         }
@@ -3077,7 +3083,16 @@ mod native_facade {
         /// process restarted.
         pub fn record_tape(&self) -> TapeRecording<'_> {
             self.begin_tape();
-            TapeRecording { gpu: self, open: true }
+            TapeRecording { gpu: self, open: true, route: None }
+        }
+
+        /// [`Self::record_tape`] with every scratch buffer the recording allocates on this device, through any handle,
+        /// taken from `scratch`: the recordings made against one [`crate::tape::TapeScratch`] share one working set
+        /// (see `gpu_core::tape` for the contract).
+        pub fn record_tape_on(&self, scratch: &crate::tape::TapeScratch) -> TapeRecording<'_> {
+            let route = crate::tape::Route::open(self.mem_device, scratch);
+            self.begin_tape();
+            TapeRecording { gpu: self, open: true, route: Some(route) }
         }
 
         /// Drop an open recording and what it recorded, if one is open (nothing recorded has run).
@@ -3327,12 +3342,15 @@ mod native_facade {
     pub struct TapeRecording<'g> {
         pub(super) gpu: &'g Gpu,
         pub(super) open: bool,
+        /// The shared scratch this recording's allocations are routed to, until it ends.
+        pub(super) route: Option<crate::tape::Route>,
     }
 
     impl TapeRecording<'_> {
         /// Stop recording and return what was recorded.
         pub fn finish(mut self) -> crate::tape::Tape {
             self.open = false;
+            self.route = None;
             self.gpu.end_tape()
         }
     }

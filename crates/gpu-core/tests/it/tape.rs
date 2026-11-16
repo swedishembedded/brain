@@ -159,3 +159,53 @@ fn a_tape_returns_every_device_object_it_held_alone() {
     assert_eq!(after.graph_execs, baseline.graph_execs, "graph executables");
     assert_eq!(after.events, baseline.events, "events");
 }
+
+/// One recorded step of `rows` rows: `out = (a + b) * c` through a scratch sum the recording allocates, the shape of a
+/// decode step whose temporaries scale with its batch. The inputs and the output are allocated before it opens.
+fn record_rows(g: &Gpu, scratch: &gpu_core::tape::TapeScratch, rows: u32) -> (gpu_core::tape::Tape, [gpu_core::DeviceBuffer; 4]) {
+    let (a, b, c, out) = (g.storage(rows as u64), g.storage(rows as u64), g.storage(rows as u64), g.storage(rows as u64));
+    let recording = g.record_tape_on(scratch);
+    let sum = g.storage(rows as u64);
+    g.submit(&[], &[g.step(ADD2, &[&a, &b, &sum], &[rows], rows)]);
+    g.submit(&[], &[g.step(MUL, &[&sum, &c, &out], &[rows], rows)]);
+    (recording.finish(), [a, b, c, out])
+}
+
+/// Recordings of different batch sizes made against one shared scratch bind one working set, the widest one's, and
+/// each still computes its own step when they are replayed in turn.
+#[test]
+fn recordings_against_one_scratch_share_the_widest_working_set() {
+    let _s = serial();
+    let g = gpu();
+    let scratch = gpu_core::tape::TapeScratch::new();
+    let wide = record_rows(&g, &scratch, 512);
+    let held = scratch.held_bytes();
+    assert_eq!(held, 512 * 4, "the widest recording's scratch");
+    let narrow: Vec<_> = (0..7).map(|i| record_rows(&g, &scratch, 64 + 64 * i)).collect();
+    assert_eq!(scratch.held_bytes(), held, "narrower recordings take the slots the widest one made");
+    assert_eq!(scratch.replacements(), 0);
+    for round in 0..2 {
+        for (rows, (tape, [a, b, c, out])) in std::iter::once((512u32, &wide)).chain(narrow.iter().enumerate().map(|(i, t)| (64 + 64 * i as u32, t))) {
+            let seed = rows as f32 + round as f32;
+            g.write_f32(a, &vec![seed; rows as usize]);
+            g.write_f32(b, &vec![1.0; rows as usize]);
+            g.write_f32(c, &vec![2.0; rows as usize]);
+            g.replay_tape(tape);
+            assert!(g.read(out, rows as usize).iter().all(|v| *v == (seed + 1.0) * 2.0), "{rows} rows, round {round}");
+        }
+    }
+    // A wider request grows its slot; the recordings made before it keep the old buffer and are dropped by their cache.
+    let _wider = record_rows(&g, &scratch, 1024);
+    assert_eq!((scratch.held_bytes(), scratch.replacements()), (1024 * 4, 1));
+}
+
+/// A host write into shared scratch while recording is refused: another recording would overwrite it before a replay.
+#[test]
+#[should_panic(expected = "a host write into shared recording scratch")]
+fn a_host_write_into_shared_scratch_is_refused() {
+    let g = gpu();
+    let scratch = gpu_core::tape::TapeScratch::new();
+    let _recording = g.record_tape_on(&scratch);
+    let sum = g.storage(16);
+    g.write_f32(&sum, &[1.0; 16]);
+}

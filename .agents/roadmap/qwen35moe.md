@@ -357,14 +357,15 @@ decode equals decoding alone.
 - [ ] An exact-decode regime (`--exact-decode`, #457) for batches past a few rows: the int8 GEMV's tensor-core block
   from 5 rows, its tuned row buckets and the fp32 skinny GEMM from 33 rows part a sequence's logits by 1.2e-2 to
   2.7e-2 from 7 rows.
-- [ ] The plan does not charge the decode tapes' pinned scratch: at 64 rows a recorded step holds about 3 GiB
-  (`serve_peak_bytes(64)`; 0.02 GiB at 16) and up to `MAX_DECODE_TAPES` = 8 shapes are kept, beside a 4.4 GiB prefill
-  round. The c=64 run below hit a refused 288 MiB allocation (a 4096-row round's expert slots) and the scheduler
-  backed off to 14 sequences at once (knowledge #435), so nothing failed but the planned 64 did not run. Bound the
-  tapes by the bytes the plan charges, or charge them.
-- [ ] Admission gaps: in the c=16 serving window below the card idles 20 %, 4.8 s in 378 gaps over 1 ms, the largest
-  share between buffer clears (1.7 s in 93 gaps, median 6 ms): each admitted sequence allocates and zeroes a private
-  recurrent slot (30 layers of state and conv history) on the host path. A pool of slots would remove it.
+- [x] Recorded decode steps of every batch size share one working set, the widest step's (`gpu_core::tape::
+  TapeScratch`, knowledge #487), and the plan charges it beside a prefill round (`serve::decode_step_bytes`). The eight
+  kept tapes of a batch shrinking from 64 to 57 rows held 5.6 GiB, now 0.89 GiB. c=64 x 8K, 64 requests (gpu3): peak
+  sequences at once 29 -> 64 (memory.peak_running_sequences), completed 4 -> 64 (60 refused before), 1.23 req/s,
+  TTFT p50 / p99 23.8 / 45.8 s. The plan's context for 64 sequences 75520 -> 73984 tokens.
+- [x] The serving idle at c=16 was the recordings, not admission: each new batch size recorded with fresh zeroed
+  allocations. Busy 79.5 -> 96.8 % (nsys, the 32-request serving window), gaps over 1 ms 4.8 -> 0.26 s; req/s 1.19 ->
+  1.27, TTFT p50 669 ms either way. A recurrent-state slot held for the prompt instead of allocated per admission was
+  measured and changed nothing (its blocks come from the retained free blocks); not landed.
 - [ ] Paged KV with blocks smaller than a sequence (the dense resident's shared pool): until then a long `--ctx` costs
   every resident sequence its whole context.
 - [ ] Parking a GGUF instance off the card (the brain-checkpoint resident's `ParkableInstance`), replicas over several

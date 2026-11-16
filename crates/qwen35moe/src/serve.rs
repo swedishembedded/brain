@@ -170,14 +170,46 @@ const TOPK_CAPACITY: usize = 32;
 const SERVING_T: u32 = 64;
 
 /// The activation bytes an engine built with `opts` allocates beyond its weights, KV pool and recurrent state: the
-/// larger of a decode step over every resident sequence and one prefill round. What a placement keeps free for it
+/// working set of a decode step over every resident sequence, which the recorded steps hold between steps
+/// ([`decode_step_bytes`]), and beside it one prefill round. What a placement keeps free for it
 /// (`catalog::resident_qwen35moe`), and what the engine's handles keep of their freed blocks.
 ///
 /// The device is not known when a placement asks, so a round size left to the device is charged at the widest the
 /// policy chooses ([`model::serve::TENSOR_CORE_PREFILL_ROUND_ROWS`]).
 pub fn activation_bytes(cfg: &Qwen35Config, opts: &EngineOptions) -> u64 {
     let rows = opts.prefill_chunk.unwrap_or(model::serve::TENSOR_CORE_PREFILL_ROUND_ROWS);
-    cfg.decoder_widths().serve_peak_bytes(opts.max_concurrent, 0).max(prefill_round_bytes(cfg, rows))
+    decode_step_bytes(cfg, opts.max_concurrent) + prefill_round_bytes(cfg, rows)
+}
+
+/// A recorded decode step keeps every temporary of every layer (nothing inside one recording is reused), as a ratio of
+/// a layer's words a row ([`prefill_round_bytes`]). Measured on gpu3 (GH200, int8 35B-A3B, int8 KV, the shared
+/// recording scratch): 0.021 / 0.218 / 0.892 GiB at 1 / 16 / 64 rows, 1.37 of the layer's words a row and layer beyond
+/// the head's logits. Charged as 3/2.
+const DECODE_STEP_LAYER_WORDS: (u64, u64) = (3, 2);
+
+/// Fixed device bytes of a recorded decode step whatever its rows (the routing tables, the per-layer metadata): the
+/// one-row step measured above, with a margin.
+const DECODE_STEP_FIXED_BYTES: u64 = 32 << 20;
+
+/// Device bytes the working set of one decode step of `rows` rows holds: every layer's temporaries and the head's
+/// logits and candidates. The recorded steps of every batch size share one such set, the widest step's
+/// ([`gpu_core::tape::TapeScratch`]), so this at the engine's widest batch is what they hold.
+pub fn decode_step_bytes(cfg: &Qwen35Config, rows: u32) -> u64 {
+    let (num, den) = DECODE_STEP_LAYER_WORDS;
+    let layers = u64::from(cfg.n_layers) * layer_words(cfg) * 4 * num / den;
+    let head = 2 * u64::from(cfg.vocab) * 4;
+    DECODE_STEP_FIXED_BYTES + u64::from(rows) * (layers + head)
+}
+
+/// f32 words of one layer's intermediates a row: the residual pair, the larger of the recurrent and the attention
+/// mixer's projections, and the expert sublayer's per-slot gate, up and product (the routed experts and the shared one).
+fn layer_words(cfg: &Qwen35Config) -> u64 {
+    let w = u64::from;
+    let d = w(cfg.d_model);
+    let recurrent = d + 3 * w(cfg.linear_conv_dim()) + 3 * w(cfg.linear_value_dim()) + d;
+    let attention = d + w(cfg.q_proj_dim()) + 2 * w(cfg.kv_dim()) + 2 * w(cfg.q_dim()) + d;
+    let experts = d + 3 * w(cfg.top_k + 1) * w(cfg.moe_intermediate_size) + d;
+    2 * d + recurrent.max(attention) + experts
 }
 
 /// Layers' worth of one layer's intermediates a prefill round holds at its peak, as a ratio. Measured on gpu3 (GH200,
@@ -190,16 +222,10 @@ const PREFILL_LIVE_LAYERS: (u64, u64) = (9, 2);
 
 /// Device bytes one prefill round of `rows` rows allocates beyond the weights, the KV pool and the state pool: the
 /// sequence's private recurrent slot (the prompt runs over it before it becomes the pool row) and
-/// [`PREFILL_LIVE_LAYERS`] of a layer's f32 intermediates a row - the residual pair, the larger of the recurrent and
-/// the attention mixer's projections, and the expert sublayer's per-slot gate, up and product (the routed experts and
-/// the shared one).
+/// [`PREFILL_LIVE_LAYERS`] of a layer's f32 intermediates a row ([`layer_words`]).
 pub fn prefill_round_bytes(cfg: &Qwen35Config, rows: u32) -> u64 {
     let w = u64::from;
-    let d = w(cfg.d_model);
-    let recurrent = d + 3 * w(cfg.linear_conv_dim()) + 3 * w(cfg.linear_value_dim()) + d;
-    let attention = d + w(cfg.q_proj_dim()) + 2 * w(cfg.kv_dim()) + 2 * w(cfg.q_dim()) + d;
-    let experts = d + 3 * w(cfg.top_k + 1) * w(cfg.moe_intermediate_size) + d;
-    let layer_words = 2 * d + recurrent.max(attention) + experts;
+    let layer_words = layer_words(cfg);
     let (num, den) = PREFILL_LIVE_LAYERS;
     let slot = gdn_slot_shape(cfg);
     let slot_bytes = 4 * slot.is_recurrent.iter().filter(|&&r| r).count() as u64 * (slot.state_len + slot.hist_len);
@@ -383,9 +409,9 @@ pub fn weight_bytes(cfg: &Qwen35Config, tier: &TierPolicy) -> u64 {
         .sum()
 }
 
-/// Recorded decode steps kept per engine. A tape pins the scratch of a whole
-/// step (megabytes at a few rows, hundreds at a few hundred), so the cache is
-/// bounded and the least recently used shape is dropped first.
+/// Recorded decode steps kept per engine. Their temporaries are one shared set (the widest step's,
+/// [`Engine::tape_scratch_bytes`]), so a tape costs its small per-step inputs and its graph; the cache is still bounded
+/// and the least recently used shape is dropped first.
 const MAX_DECODE_TAPES: usize = 8;
 
 /// What a recorded decode step is bound to: how many rows it carries and what
@@ -458,7 +484,10 @@ pub struct Engine {
     /// Recorded decode steps by shape, least recently used first. Declared
     /// before `model` so the buffers a tape pins are released before the device
     /// handle that owns them.
-    tapes: Vec<(TapeKey, DecodeTape)>,
+    /// Each with the [`gpu_core::tape::TapeScratch::replacements`] count it was recorded at.
+    tapes: Vec<(TapeKey, DecodeTape, u64)>,
+    /// The temporaries every recorded step binds, shared: steps never run at once.
+    tape_scratch: gpu_core::tape::TapeScratch,
     decode_tapes: bool,
     /// Owns the device handle, the weights, and the decode/prefill primitives
     /// (`Qwen35::run_decode_batch`, `Qwen35::run_prefill_chunk`) this whole engine
@@ -549,6 +578,7 @@ impl Engine {
         let gdn = GdnPool::new(&model.gpu, gdn_slot_shape(&cfg), opts.max_concurrent);
         Engine {
             tapes: Vec::new(),
+            tape_scratch: gpu_core::tape::TapeScratch::new(),
             decode_tapes,
             model,
             alloc: BlockAllocator::new(opts.max_concurrent, opts.max_seq_len),
@@ -645,7 +675,7 @@ impl Engine {
             };
         }
         let key = TapeKey { rows: inputs.len() as u32, topk: match head { DecodeHead::Greedy => None, DecodeHead::TopK(k) => Some(k) } };
-        match self.tapes.iter().position(|(k, _)| *k == key) {
+        match self.tapes.iter().position(|(k, _, _)| *k == key) {
             // Most recently used last.
             Some(i) => {
                 let hit = self.tapes.remove(i);
@@ -655,15 +685,19 @@ impl Engine {
                 let tape = {
                     let seqs = self.seqs_for(&coords);
                     let caches = self.batch_caches(&seqs);
-                    self.model.record_decode(inputs, &caches, head)
+                    self.model.record_decode(inputs, &caches, head, &self.tape_scratch)
                 };
                 if self.tapes.len() >= MAX_DECODE_TAPES {
                     self.tapes.remove(0);
                 }
-                self.tapes.push((key, tape));
+                // A step wider than any before grew a shared slot: the tapes recorded earlier bind the old buffer and
+                // would hold it beside the set, so they go (and are recorded again against the grown set when used).
+                let generation = self.tape_scratch.replacements();
+                self.tapes.retain(|(_, _, g)| *g == generation);
+                self.tapes.push((key, tape, generation));
             }
         }
-        let (_, tape) = self.tapes.last().expect("the tape for this shape was just found or recorded");
+        let (_, tape, _) = self.tapes.last().expect("the tape for this shape was just found or recorded");
         let seqs = self.seqs_for(&coords);
         self.model.replay_decode(tape, inputs, &seqs)
     }
@@ -695,6 +729,11 @@ impl Engine {
 
     pub fn free_blocks(&self) -> u32 {
         self.alloc.free_blocks()
+    }
+
+    /// Device bytes the recorded decode steps' shared temporaries hold: the widest recorded step's working set.
+    pub fn tape_scratch_bytes(&self) -> u64 {
+        self.tape_scratch.held_bytes()
     }
 
     /// The hard `prompt + max_new` cap for one sequence - `block_size` (see
@@ -874,7 +913,7 @@ impl Engine {
             // launches carries the host's launch latency, which the tape removes.
             if self.decode_tapes {
                 let key = TapeKey { rows: batch, topk: None };
-                if let Some((_, tape)) = self.tapes.iter().find(|(k, _)| *k == key) {
+                if let Some((_, tape, _)) = self.tapes.iter().find(|(k, _, _)| *k == key) {
                     if let Some(rows) = self.model.gpu.profile_tape(tape.tape(), passes) {
                         profile.rows = rows.into_iter().map(|(n, ms, calls)| (n, ms * passes as f64, calls * passes as u64)).collect();
                     }

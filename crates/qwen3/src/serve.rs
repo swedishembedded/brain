@@ -1075,6 +1075,9 @@ pub struct Engine {
     /// different shape at the same `bsz`) - both keep rebuilding via
     /// `Self::run_batched_steps`.
     tape_cache: HashMap<(u32, bool), gpu_core::tape::Tape>,
+    /// The temporaries every cached tape binds, shared: tapes never run at once (`gpu_core::tape`). Paired with the
+    /// [`gpu_core::tape::TapeScratch::replacements`] count the cache was filled at: a grown slot drops the older tapes.
+    tape_scratch: gpu_core::tape::TapeScratch,
     /// Latent sparse attention ([`Engine::set_lsa`]): the layers it covers
     /// read a per-query selection of keys instead of every cached key.
     lsa: Option<model::lsa::binding::LsaBinding>,
@@ -1663,6 +1666,7 @@ impl Engine {
             topk_vals_dev,
             topk_idx_dev,
             tape_cache: HashMap::new(),
+            tape_scratch: gpu_core::tape::TapeScratch::new(),
             lsa: None,
             capture: None,
             bank: None,
@@ -3359,10 +3363,17 @@ impl Engine {
         self.write_batch_input(input);
         if !causal_chunk && bsz <= DECODE_REGIME_MAX_ROWS && !matches!(input, Input::Embeds(_)) {
             if !self.tape_cache.contains_key(&(bsz, lora)) {
+                // Built inside the recording, so the temporaries the steps allocate are the shared set's.
+                let before = self.tape_scratch.replacements();
+                let recording = self.gpu.record_tape_on(&self.tape_scratch);
                 let s = self.batched_tape(bsz, input, causal_chunk, lora);
-                let recording = self.gpu.record_tape();
                 self.gpu.submit(&[], &s);
-                self.tape_cache.insert((bsz, lora), recording.finish());
+                let tape = recording.finish();
+                if self.tape_scratch.replacements() != before {
+                    // A slot grew: the older tapes bind the buffer it replaced.
+                    self.tape_cache.clear();
+                }
+                self.tape_cache.insert((bsz, lora), tape);
             }
             let cached = self.tape_cache.get(&(bsz, lora)).expect("just inserted or already present");
             self.gpu.replay_tape(cached);
@@ -3381,12 +3392,13 @@ impl Engine {
     pub fn record_decode_tapes(&mut self, max_rows: u32) {
         let top = max_rows.min(self.max_batch).min(DECODE_REGIME_MAX_ROWS);
         let (started, before) = (std::time::Instant::now(), self.tape_cache.len());
-        for bsz in 1..=top {
+        // Widest first: every narrower tape then fits the shared scratch's slots, and none is dropped for a grown one.
+        for bsz in (1..=top).rev() {
             if self.tape_cache.contains_key(&(bsz, false)) {
                 continue;
             }
+            let recording = self.gpu.record_tape_on(&self.tape_scratch);
             let s = self.batched_tape(bsz, Input::Tokens(&[]), false, false);
-            let recording = self.gpu.record_tape();
             self.gpu.submit(&[], &s);
             let tape = recording.finish();
             self.gpu.prepare_tape(&tape);

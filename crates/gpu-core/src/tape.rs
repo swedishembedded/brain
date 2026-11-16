@@ -34,8 +34,26 @@
 //!
 //! Host writes ARE allowed while recording and take effect immediately - they are
 //! how the initial contents of the buffers a replay will rewrite are set.
+//!
+//! ## One working set for every recording of a step
+//!
+//! A tape keeps the scratch its recording allocated alive, and an engine keeps a recording per batch size, so a cache
+//! of eight tapes held eight steps' working sets although two of them never run at once. A [`TapeScratch`] is one
+//! set of scratch buffers that every recording made against it ([`Gpu::record_tape_on`](crate::Gpu::record_tape_on))
+//! binds: while such a recording is open on a thread, every `Gpu::storage` call on that device takes the next slot
+//! of the set in call order (a slot at least as large as the request; a larger request replaces the slot), so the
+//! device holds the widest recorded step's scratch once. The caller's side of that contract, beyond a tape's own:
+//!
+//! * no two recordings of one [`TapeScratch`] run concurrently, and nothing reads a recording's scratch after another
+//!   recording of the same set has been replayed (a step's outputs are read before the next step);
+//! * nothing a recording needs survives in its scratch from one replay to the next unless the recording rewrites it:
+//!   a host write into a slot while recording is refused, because another recording would overwrite it. Inputs a
+//!   replay reads are allocated before the recording opens;
+//! * a slot replaced by a larger buffer leaves the recordings made before it bound to the old one
+//!   ([`TapeScratch::replacements`]): they stay correct, but hold their own copy until dropped.
 
-use std::sync::{Arc, OnceLock};
+use std::cell::RefCell;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use backend_api::{DeviceBuffer, Program, Step};
 
@@ -105,4 +123,98 @@ impl Tape {
     pub(crate) fn segments(&self) -> impl Iterator<Item = (Vec<&DeviceBuffer>, &[Step])> {
         self.segments.iter().map(|s| (s.clears.iter().collect(), s.steps.as_slice()))
     }
+}
+
+/// One set of scratch buffers shared by every recording made against it (see the module doc). Cloning shares the set.
+#[derive(Clone, Default)]
+pub struct TapeScratch(Arc<Mutex<Slots>>);
+
+#[derive(Default)]
+struct Slots {
+    /// `(words, buffer)` in the call order a recording asks for them.
+    slots: Vec<(u64, DeviceBuffer)>,
+    cursor: usize,
+    replacements: u64,
+}
+
+impl TapeScratch {
+    pub fn new() -> TapeScratch {
+        TapeScratch::default()
+    }
+
+    /// Device bytes the set holds: what every recording made against it shares.
+    pub fn held_bytes(&self) -> u64 {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).slots.iter().map(|(w, _)| w.max(&1) * 4).sum()
+    }
+
+    /// How many times a slot has been replaced by a larger buffer. A recording made while this was lower binds the
+    /// replaced buffer of its own: correct, but held beside the set until the recording is dropped, so a cache drops
+    /// such recordings (they are recorded again against the grown set on next use).
+    pub fn replacements(&self) -> u64 {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).replacements
+    }
+}
+
+thread_local! {
+    /// The set this thread's open recording takes its scratch from, and the device it is on.
+    static ROUTED: RefCell<Option<(memauth::Device, TapeScratch)>> = const { RefCell::new(None) };
+}
+
+/// While alive, `Gpu::storage` calls on this thread for `device` take slots of the set. Ends on drop.
+pub(crate) struct Route;
+
+impl Route {
+    pub(crate) fn open(device: memauth::Device, scratch: &TapeScratch) -> Route {
+        ROUTED.with(|r| {
+            let mut r = r.borrow_mut();
+            assert!(r.is_none(), "gpu_core::tape: a recording against a TapeScratch is already open on this thread");
+            scratch.0.lock().unwrap_or_else(|e| e.into_inner()).cursor = 0;
+            *r = Some((device, scratch.clone()));
+        });
+        Route
+    }
+}
+
+impl Drop for Route {
+    fn drop(&mut self) {
+        ROUTED.with(|r| *r.borrow_mut() = None);
+    }
+}
+
+/// The next slot of the routed set for a request of `words` on `device`, made by `fresh` when the slot is missing or
+/// too small; `None` when no recording on this thread routes this device.
+pub(crate) fn routed_storage(device: memauth::Device, words: u64, fresh: impl FnOnce(u64) -> DeviceBuffer) -> Option<DeviceBuffer> {
+    let scratch = ROUTED.with(|r| r.borrow().as_ref().filter(|(d, _)| *d == device).map(|(_, s)| s.clone()))?;
+    let mut g = scratch.0.lock().unwrap_or_else(|e| e.into_inner());
+    let i = g.cursor;
+    g.cursor += 1;
+    match g.slots.get(i) {
+        Some((have, buf)) if *have >= words => Some(buf.clone()),
+        Some(&(have, _)) => {
+            // Grown to the larger of the two, so the recordings that asked for less at this slot still fit it.
+            let words = words.max(have);
+            let buf = fresh(words);
+            g.slots[i] = (words, buf.clone());
+            g.replacements += 1;
+            Some(buf)
+        }
+        None => {
+            let buf = fresh(words);
+            g.slots.push((words, buf.clone()));
+            Some(buf)
+        }
+    }
+}
+
+/// Refuse a host write into a slot of the set a recording on this thread is routed to (see the module doc).
+pub(crate) fn refuse_write_into_routed(buf: &DeviceBuffer) {
+    ROUTED.with(|r| {
+        if let Some((_, scratch)) = r.borrow().as_ref() {
+            let g = scratch.0.lock().unwrap_or_else(|e| e.into_inner());
+            assert!(
+                !g.slots.iter().any(|(_, b)| b.alloc_id() == buf.alloc_id()),
+                "gpu_core::tape: a host write into shared recording scratch: another recording of the set would overwrite it; allocate a replay's inputs before the recording opens"
+            );
+        }
+    });
 }

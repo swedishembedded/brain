@@ -148,10 +148,13 @@ pub(crate) struct DecodePlan {
     /// `[rows]` where each row of the hidden block goes in the drafter's pending store, rewritten before every replay
     /// (`u32::MAX`: nowhere); the step's last dispatch writes the rows there.
     pub tap: Option<DeviceBuffer>,
+    /// The [`gpu_core::tape::TapeScratch::replacements`] count of its cache's scratch when it was recorded.
+    pub generation: u64,
 }
 
 /// Recordings kept per instance. A serving batch moves between a handful of row counts and, slowly, context buckets, so
-/// the working set of recordings is small; each holds a step's activations (the logits block dominates), so it is bounded.
+/// the working set of recordings is small. Their temporaries are one set shared by the cache ([`DecodePlans::scratch`]),
+/// the widest step's, so a recording costs its inputs, outputs and graph; the count is still bounded.
 pub(crate) const MAX_PLANS: usize = 8;
 
 /// Consecutive steps with one key before it is recorded: a key seen once or twice (a batch that grows with every
@@ -163,6 +166,9 @@ pub(crate) const RECORD_PLAN_AFTER: u32 = 3;
 pub(crate) struct DecodePlans {
     plans: Vec<DecodePlan>,
     run: Option<(PlanKey, u32)>,
+    /// The temporaries every recording of this cache binds: its steps never run at once, and each step's outputs are
+    /// read before the next of them is replayed (`gpu_core::tape`).
+    scratch: gpu_core::tape::TapeScratch,
 }
 
 impl DecodePlans {
@@ -178,12 +184,21 @@ impl DecodePlans {
         }
     }
 
-    /// Put a recording back as the most recently used, dropping the least recently used beyond [`MAX_PLANS`].
+    /// Put a recording back as the most recently used, dropping the least recently used beyond [`MAX_PLANS`], and the
+    /// recordings made before a slot of the shared scratch grew (they bind the old buffer and would hold it beside the
+    /// set; they are recorded again when used).
     pub fn put(&mut self, plan: DecodePlan) {
         if self.plans.len() >= MAX_PLANS {
             self.plans.remove(0);
         }
+        let generation = self.scratch.replacements();
+        self.plans.retain(|p| p.generation == generation);
         self.plans.push(plan);
+    }
+
+    /// The temporaries every recording of this cache takes ([`gpu_core::Gpu::record_tape_on`]).
+    pub fn scratch(&self) -> &gpu_core::tape::TapeScratch {
+        &self.scratch
     }
 
     /// Drop every recording (the buffers they bind are about to change or go).

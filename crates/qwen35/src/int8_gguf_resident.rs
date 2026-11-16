@@ -2159,13 +2159,14 @@ impl Qwen35GgufInstance {
             Err(false) => return None,
             Err(true) => {
                 let tap_buf = (!tap.is_empty()).then(|| s.qwen35.gpu.storage(u64::from(rows)));
-                let (tape, inputs, out) = s.qwen35.record_decode_step(tokens, &caches, |hidden| {
+                let scratch = self.plans.borrow().scratch().clone();
+                let (tape, inputs, out) = s.qwen35.record_decode_step(tokens, &caches, &scratch, |hidden| {
                     if let Some(buf) = &tap_buf {
                         s.qwen35.gpu.submit(&[], &[self.mtp_tap_step(&s.qwen35.gpu, buf, hidden, rows)]);
                     }
                     self.record_head(hidden, rows, kind)
                 });
-                DecodePlan { key, tape, inputs, out, verify: None, tap: tap_buf }
+                DecodePlan { key, tape, inputs, out, verify: None, tap: tap_buf, generation: scratch.replacements() }
             }
         };
         let g = &s.qwen35.gpu;
@@ -2225,13 +2226,16 @@ impl Qwen35GgufInstance {
             Err(false) => return None,
             Err(true) => {
                 let tap_buf = (!tap.is_empty()).then(|| g.storage(u64::from(total)));
-                let (tape, inputs, layout, hidden, out) = s.qwen35.record_verify_step(&tokens, &caches, &verify, |hidden| {
+                // A verify round's own set: its hidden block is read by the drafter after the round, so it must not
+                // share slots with the plain steps' recordings.
+                let scratch = self.verify_plans.borrow().scratch().clone();
+                let (tape, inputs, layout, hidden, out) = s.qwen35.record_verify_step(&tokens, &caches, &verify, &scratch, |hidden| {
                     if let Some(buf) = &tap_buf {
                         g.submit(&[], &[self.mtp_tap_step(g, buf, hidden, total)]);
                     }
                     self.record_head(hidden, total, kind)
                 });
-                DecodePlan { key, tape, inputs, out, verify: Some((layout, hidden)), tap: tap_buf }
+                DecodePlan { key, tape, inputs, out, verify: Some((layout, hidden)), tap: tap_buf, generation: scratch.replacements() }
             }
         };
         if let Some(buf) = &plan.tap {

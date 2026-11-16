@@ -7063,10 +7063,11 @@ impl Qwen35 {
     /// the returned [`DecodeInputs`]. The recording is for every step of the same `(rows, `[`Self::paged_step_shape`]`)`:
     /// before each replay the caller rewrites the inputs ([`Self::write_decode_inputs`]), and nothing but those buffers
     /// differs between steps. Nothing has run when this returns (a recording launches nothing): the caller replays it.
-    pub(crate) fn record_decode_step<R>(&self, tokens: &[u32], caches: &BatchDecodeCaches, tail: impl FnOnce(&DeviceBuffer) -> R) -> (Tape, DecodeInputs, R) {
+    /// The recording's temporaries are taken from `scratch`, shared with every other recording made against it.
+    pub(crate) fn record_decode_step<R>(&self, tokens: &[u32], caches: &BatchDecodeCaches, scratch: &gpu_core::tape::TapeScratch, tail: impl FnOnce(&DeviceBuffer) -> R) -> (Tape, DecodeInputs, R) {
         let g = &self.gpu;
         let inputs = self.alloc_decode_inputs_at(tokens.len() as u32, self.paged_step_shape(caches).1);
-        let recording = g.record_tape();
+        let recording = g.record_tape_on(scratch);
         let hidden = self.decode_batch_dispatches(tokens, caches, None, None, Some(&inputs), None);
         let out = tail(&hidden);
         (recording.finish(), inputs, out)
@@ -7077,11 +7078,11 @@ impl Qwen35 {
     /// sequence and [`Self::paged_step_shape`]: before each replay the caller rewrites the inputs
     /// ([`Self::write_decode_inputs`]) and the layout ([`verify::VerifyBatch::write_layout`]), and the snapshots the round leaves are the
     /// pass's own. Returns the tape, the inputs and the layout it binds, the hidden block it leaves, and `tail`'s answer.
-    pub(crate) fn record_verify_step<R>(&self, tokens: &[u32], caches: &BatchDecodeCaches, verify: &verify::VerifyBatch, tail: impl FnOnce(&DeviceBuffer) -> R) -> (Tape, DecodeInputs, verify::VerifyLayout, DeviceBuffer, R) {
+    pub(crate) fn record_verify_step<R>(&self, tokens: &[u32], caches: &BatchDecodeCaches, verify: &verify::VerifyBatch, scratch: &gpu_core::tape::TapeScratch, tail: impl FnOnce(&DeviceBuffer) -> R) -> (Tape, DecodeInputs, verify::VerifyLayout, DeviceBuffer, R) {
         let g = &self.gpu;
         let inputs = self.alloc_decode_inputs_at(tokens.len() as u32, self.paged_step_shape(caches).1);
         let layout = verify.upload(g);
-        let recording = g.record_tape();
+        let recording = g.record_tape_on(scratch);
         let hidden = self.decode_batch_dispatches(tokens, caches, None, Some(verify), Some(&inputs), Some(&layout));
         let out = tail(&hidden);
         (recording.finish(), inputs, layout, hidden, out)

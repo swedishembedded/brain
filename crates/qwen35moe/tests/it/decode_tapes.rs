@@ -57,6 +57,10 @@ fn cfg() -> Qwen35Config {
     }
 }
 
+/// The two tests that read an engine's driver-object tally do not overlap, as `gpu-core`'s tape tests do not: run
+/// beside the held-memory test the leak check failed once in seven runs (cause not isolated).
+static TALLY: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn weights(c: &Qwen35Config) -> HashMap<String, Vec<f32>> {
     qwen35moe::init::init_weights(c, 31)
 }
@@ -141,6 +145,7 @@ fn a_replayed_step_is_the_step_built_every_token() {
 /// the tapes pin whole steps' scratch, and none of it may outlive the engine.
 #[test]
 fn an_engine_that_recorded_tapes_returns_every_cuda_object() {
+    let _tally = TALLY.lock().unwrap_or_else(|e| e.into_inner());
     let c = cfg();
     let w = weights(&c);
     for round in 0..3 {
@@ -175,5 +180,48 @@ fn an_engine_that_recorded_tapes_returns_every_cuda_object() {
         }
         drop(e);
         assert_eq!(tally.read(), gpu_core::LiveResources::default(), "round {round}: dropping the engine left CUDA objects behind");
+    }
+}
+
+/// Recorded steps of every batch size bind one set of temporaries, the widest step's: recording seven narrower sizes
+/// after the widest adds none to what the shared set holds, and the engine's device bytes grow by a small part of one
+/// step's working set (each tape's own inputs, outputs and graph), not by one working set per recorded size.
+#[test]
+fn recorded_steps_of_every_batch_size_hold_one_working_set() {
+    let _tally = TALLY.lock().unwrap_or_else(|e| e.into_inner());
+    let c = cfg();
+    let w = weights(&c);
+    let rows = 16u32;
+    let mut e = Engine::from_source(c.clone(), &w, EngineOptions::new(24, rows).with_tier(TierPolicy::uniform(Dtype::I8)).with_prefill_chunk(4));
+    if !e.gpu().caps().numeric.int8_dot {
+        return brain_testutil::skip_unavailable("no packed int8 dot on this device");
+    }
+    let Some(tally) = e.gpu().live_tally() else {
+        return brain_testutil::skip_unavailable(&format!("the {} backend counts no driver objects", e.gpu().kind()));
+    };
+    let mut tables: Vec<BlockTable> = (0..rows)
+        .map(|i| {
+            let mut t = BlockTable::new();
+            e.prefill(&mut t, &prompt(&c, 40 + i as u64, 3));
+            t
+        })
+        .collect();
+    let toks = vec![1u32; rows as usize];
+    e.forward_batched_greedy(&mut tables.iter_mut().collect::<Vec<_>>(), &toks);
+    e.poll_wait();
+    let one = e.tape_scratch_bytes();
+    let before = tally.read().device_bytes;
+    assert!(one > 0, "the widest step recorded its temporaries in the shared set");
+    assert!(one <= qwen35moe::serve::decode_step_bytes(&c, rows), "the plan charges {} for what the recorded steps hold ({one})", qwen35moe::serve::decode_step_bytes(&c, rows));
+    for bsz in (rows - 7..rows).rev() {
+        let n = bsz as usize;
+        e.forward_batched_greedy(&mut tables[..n].iter_mut().collect::<Vec<_>>(), &toks[..n]);
+    }
+    e.poll_wait();
+    assert_eq!(e.tape_scratch_bytes(), one, "narrower steps take the widest one's slots");
+    let grown = tally.read().device_bytes.saturating_sub(before);
+    assert!(grown * 2 < one, "seven more recorded sizes grew the engine by {grown} bytes against one working set of {one}");
+    for mut t in tables {
+        e.release_table(&mut t);
     }
 }
