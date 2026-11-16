@@ -27,6 +27,7 @@
 use checkpoint::gguf::MmapGguf;
 use data::tokenizer::Tokenizer;
 use model::paged::BlockTable;
+use model::serve::PagedDecoder;
 use qwen35moe::gguf_load;
 use qwen35moe::serve::{Engine, EngineOptions};
 use serde_json::{json, Value};
@@ -297,3 +298,44 @@ const DECODE_REL_L2: f64 = 1e-1;
 /// A reference top-2 logit gap, relative to the top logit, below which either token
 /// is a legitimate argmax: the logits themselves are only good to `DECODE_REL_L2`.
 const TIE_REL_GAP: f32 = 0.05;
+
+/// The served contract on the released checkpoint: a sequence's next-token logits are bit-identical whether it decodes
+/// alone or beside other sequences at other positions, at the widths a serving fidelity probe runs (two and three
+/// rows). The fp32 router took the vendor library's TF32 GEMM from two rows, and its top-k turned the rounding into a
+/// different expert (a 2.8e-2 logit difference at two rows); a decode step now keeps fp32 products on the fp32
+/// kernels. Wider batches still cross the int8 GEMV's own row buckets, which only an exact-decode regime pins.
+#[test]
+fn a_sequence_decodes_alike_alone_and_beside_others_on_the_real_checkpoint() {
+    let Some((_, mg, prompts)) = gguf() else {
+        return brain_testutil::skip_unavailable("BRAIN_QWEN35MOE_GGUF is not set");
+    };
+    let cfg = gguf_load::resident_config(&mg, 1024).expect("config");
+    let src = gguf_load::source(&mg, &cfg).expect("source");
+    let opts = EngineOptions::new(1024, 4).with_tier(model::ops::TierPolicy::uniform(gpu_core::select::Dtype::I8)).with_kv_tier(model::kv_tier::KvTier::BF16);
+    let mut engine = Engine::from_source(cfg, &src, opts);
+    let probe = &prompts[0];
+    for rows in [2usize, 3] {
+        let mut alone = BlockTable::new();
+        let hidden = engine.prefill(&mut alone, probe);
+        let first = engine.admit_greedy(&hidden);
+        let want = engine.forward_batched_logit_rows(&mut [&mut alone], &[first]).pop().expect("one row");
+        // The probe again, beside prompts of other lengths, so each row decodes at its own position.
+        let mut tables = vec![BlockTable::new()];
+        let _ = engine.prefill(&mut tables[0], probe);
+        let mut inputs = vec![first];
+        for other in &prompts[1..rows] {
+            let mut t = BlockTable::new();
+            let h = engine.prefill(&mut t, other);
+            inputs.push(engine.admit_greedy(&h));
+            tables.push(t);
+        }
+        let mut refs: Vec<&mut BlockTable> = tables.iter_mut().collect();
+        let got = engine.forward_batched_logit_rows(&mut refs, &inputs).swap_remove(0);
+        let differ = got.iter().zip(&want).filter(|(a, b)| a.to_bits() != b.to_bits()).count();
+        assert_eq!(differ, 0, "at {rows} rows the probe's logits differ from decoding it alone in {differ} of {} entries", want.len());
+        engine.release_table(&mut alone);
+        for t in tables.iter_mut() {
+            engine.release_table(t);
+        }
+    }
+}

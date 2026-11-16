@@ -620,6 +620,12 @@ impl Engine {
     /// ~1600 dispatches. Otherwise the step is built each time, its scratch drawn
     /// from the replay arena so the backend can still replay what repeats.
     fn decode(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32], head: DecodeHead) -> DecodeOut {
+        // A sequence's tokens must not change with which sequences share its step through an fp32 product: the router
+        // (a hard top-k) on the library's TF32 GEMM rounds a row differently at two rows than at one.
+        model::ops::fp32_kernels(|| self.decode_rows(tables, inputs, head))
+    }
+
+    fn decode_rows(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32], head: DecodeHead) -> DecodeOut {
         assert_eq!(tables.len(), inputs.len(), "qwen35moe::serve::Engine: tables/inputs length mismatch");
         let coords = self.advance_tables(tables);
         // A recording holds no vendor-library product, so the NVFP4 tier's stored-format GEMVs (up to GEMV_MAX_ROWS rows)
@@ -970,8 +976,11 @@ impl Engine {
         let seqs = self.seqs_for(&coords);
         let caches = self.batch_caches(&seqs);
         let _scope = self.model.gpu.scratch_scope();
-        let hidden = self.model.run_decode_batch(inputs, &caches);
-        let logits = self.model.head_logits_rows_of(&hidden, rows);
+        // On the arithmetic of every other decode step ([`Engine::decode`]).
+        let logits = model::ops::fp32_kernels(|| {
+            let hidden = self.model.run_decode_batch(inputs, &caches);
+            self.model.head_logits_rows_of(&hidden, rows)
+        });
         let vocab = self.model.cfg.vocab as usize;
         self.model.gpu.read(&logits, rows as usize * vocab).chunks(vocab).map(<[f32]>::to_vec).collect()
     }

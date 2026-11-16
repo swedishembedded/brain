@@ -257,9 +257,9 @@ packs into room of its own (`engine_tiers::a_prefill_round_wider_than_the_decode
 The 6-9 % prefill gap of the step-1 port above should be re-measured against
 this corrected baseline before it is chased further.
 
-Open (found 2026-10-29, CUDA on gpu1, unchanged by the fix): `tests/serve.rs`
-`batched_decode_matches_each_sequence_decoded_alone` fails - sequence 1 of a
-batch of 4 picks a different token at decode step 5 than alone.
+Fixed 2026-11-16 (knowledge #481): `tests/serve.rs`
+`batched_decode_matches_each_sequence_decoded_alone` failed on CUDA - the fp32
+products took the library's TF32 GEMM from two rows.
 
 ## Prefill at the device's rate (2026-11-15)
 
@@ -346,6 +346,17 @@ decode equals decoding alone.
   sequence makes the batch multiply the context, which is why the batch is a planned choice here and a fixed default
   on the dense paged resident. On a GH200 at the 2 GiB reserve: int8 KV, 64 sequences, 75520 tokens each (bf16 KV:
   38400).
+- [x] Batched greedy decode equals decoding alone at the widths the serving fidelity probe runs (knowledge #481): a
+  decode step keeps its fp32 products (the router and shared gate) on the fp32 kernels; the TF32 library GEMM took
+  them from two rows and the router's top-k turned its rounding into other experts (2.8e-2 logit rel-L2 at two rows).
+  `perf run serve` is valid again. Cost on gpu3, decode at 32K: 4.54 / 12.62 / 28.76 -> 4.83 / 13.02 / 29.12 ms per
+  step at 1 / 16 / 64 rows; prefill unchanged.
+- [ ] Win the router's decode cost back: `matmul_f32_gemv` reads the `[257, 2048]` router at 14.4 us a call against
+  the library's 6 us (17 blocks of 16 weight rows); a one-row form with the reference's 64 virtual lanes on 64
+  threads a row keeps its bits and puts the weight in flight at once.
+- [ ] An exact-decode regime (`--exact-decode`, #457) for batches past a few rows: the int8 GEMV's tensor-core block
+  from 5 rows, its tuned row buckets and the fp32 skinny GEMM from 33 rows part a sequence's logits by 1.2e-2 to
+  2.7e-2 from 7 rows.
 - [ ] Paged KV with blocks smaller than a sequence (the dense resident's shared pool): until then a long `--ctx` costs
   every resident sequence its whole context.
 - [ ] Parking a GGUF instance off the card (the brain-checkpoint resident's `ParkableInstance`), replicas over several

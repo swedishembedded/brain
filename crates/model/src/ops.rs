@@ -1415,6 +1415,28 @@ pub struct Act {
 
 thread_local! {
     static ROW_COUNT_INVARIANT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static FP32_KERNELS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Run `f` with every fp32-weight product dispatched from this thread on the fp32 kernels, never the vendor library's
+/// TF32 GEMM: the library rounds the operands to TF32 and picks its algorithm by shape, so the same row of a product
+/// changes with how many rows share the call, while the fp32 kernels compute a row the same way whatever the row
+/// count (on the products a decode step dispatches; an exact regime still has to pin the int8 kernels' own row
+/// buckets). A decode step uses it so a sequence's tokens do not change with its co-batch through an fp32 leaf (a
+/// router, whose top-k turns a rounding into a different expert). Thread-scoped like [`row_count_invariant`].
+pub fn fp32_kernels<R>(f: impl FnOnce() -> R) -> R {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            FP32_KERNELS.with(|c| c.set(self.0));
+        }
+    }
+    let _restore = Restore(FP32_KERNELS.with(|c| c.replace(true)));
+    f()
+}
+
+fn fp32_kernels_active() -> bool {
+    FP32_KERNELS.with(std::cell::Cell::get)
 }
 
 /// Run `f` with every int8-weight product dispatched from this thread on arithmetic that does not depend on how many
@@ -1680,6 +1702,9 @@ impl Ops {
     /// `false` (nothing pushed) when the fp32 kernels must run instead.
     fn library_forward(&self, s: &mut Vec<Step>, w: &Weight, rows: (u32, u32), act: &Act, y: &DeviceBuffer, yoff: u64) -> bool {
         if let Weight::F32 { w: wb, n, k } = w {
+            if fp32_kernels_active() {
+                return false;
+            }
             // The TF32 tier reads the fp32 weight and activation as they are stored.
             let window = if rows.0 == 0 && rows.1 == *n { WHOLE } else { Self::row_window(rows.0, rows.1, *n, *k, 1) };
             let m = act.m;
