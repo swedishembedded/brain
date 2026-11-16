@@ -313,6 +313,29 @@ impl Context {
         Ok(())
     }
 
+    /// Destroy this handle's GEMM library handle, with the context current and no other handle's stream capturing.
+    ///
+    /// `cublasDestroy` synchronises the whole context (`cuCtxSynchronize`), which waits on every stream of the device
+    /// including another handle's while it is being captured: the driver faults there (a SIGSEGV inside
+    /// `cuCtxSynchronize` in about one run in four of a test binary whose other threads capture graphs while one engine
+    /// build drops its scratch handle). So this is a drain like [`Self::drain_other_handles`]: every other handle's
+    /// [`Context::capture_gate`] is held across the destroy, which waits for a capture in progress to end and keeps a
+    /// new one from starting, and [`OPEN_STREAMS`] stays locked so no stream is destroyed underneath it.
+    fn destroy_blas(&self, blas: crate::cublas::Blas) {
+        let open = OPEN_STREAMS.lock().unwrap_or_else(|p| p.into_inner());
+        let _not_capturing: Vec<_> = open
+            .iter()
+            .filter(|o| o.ctx == self.ctx as usize && o.stream != self.stream as usize)
+            .map(|o| o.capture_gate.lock().unwrap_or_else(|p| p.into_inner()))
+            .collect();
+        // A failure leaves the handle to the driver's teardown: destroying it under another context would be worse.
+        if self.make_current().is_ok() {
+            drop(blas);
+        } else {
+            std::mem::forget(blas);
+        }
+    }
+
     /// The driver objects this handle and the handles shared from it hold, counted by kind.
     pub(crate) fn live(&self) -> &Arc<crate::live::Live> {
         &self.primary.live
@@ -410,7 +433,8 @@ impl Context {
             .get_or_init(|| {
                 self.make_current()?;
                 // SAFETY: `self.stream` belongs to the context just made current
-                // and lives as long as `self`, which owns `blas` and drops it first.
+                // and lives as long as `self`, whose `Drop` destroys `blas` before
+                // any field (see `Context::destroy_blas`).
                 unsafe { crate::cublas::Blas::new(self.stream) }
             })
             .as_ref()
@@ -1487,6 +1511,11 @@ impl Context {
 
 impl Drop for Context {
     fn drop(&mut self) {
+        // Before any field: the library handle is bound to `stream`, which the
+        // field order would otherwise destroy first.
+        if let Some(Ok(blas)) = self.blas.take() {
+            self.destroy_blas(blas);
+        }
         // The stream itself is destroyed by `stream_guard`, when the last holder
         // (possibly a pooled block outliving this handle) goes; the primary
         // context is released by `PrimaryRef`, likewise.
