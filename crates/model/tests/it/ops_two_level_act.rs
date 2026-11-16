@@ -52,14 +52,19 @@ fn bound(x: &[f32], w: &[f32], k: usize, r: usize, j: usize) -> f64 {
 }
 
 /// How many outputs miss the second level's bound, for a two-level or a
-/// single-level activation.
-fn misses(dtype: Dtype, two_level: bool, m: usize, n: usize, k: usize) -> usize {
+/// single-level activation; `None` when the device does not hold `dtype` (an
+/// int8 weight is widened to fp32 on a device without the packed int8 dot, and
+/// reads no activation level at all).
+fn misses(dtype: Dtype, two_level: bool, m: usize, n: usize, k: usize) -> Option<usize> {
     let ops = Ops::new(gpu_core::testgpu::dev(model::ops::two_level_kernel_list())).expect("Ops::new");
     let g = ops.gpu();
     let mut rng = Lcg::new(data::rng::random_seed());
     let w = exact_weights(&mut rng, n, k);
     let x: Vec<f32> = (0..m * k).map(|_| (rng.next_u32() % 2001) as f32 / 1000.0 - 1.0).collect();
     let weight = Weight::upload(&ops, &w, n, k, dtype);
+    if weight.dtype() != dtype {
+        return None;
+    }
     let xb = g.storage_init("x", &x);
     let y = g.storage((m * n) as u64);
     let mut steps = Vec::new();
@@ -77,14 +82,17 @@ fn misses(dtype: Dtype, two_level: bool, m: usize, n: usize, k: usize) -> usize 
             }
         }
     }
-    missed
+    Some(missed)
 }
 
 #[test]
 fn a_two_level_activation_is_exact_to_its_second_level() {
     let m = model::ops::TWO_LEVEL_PASS_ROWS as usize * 2 + 77;
     for dtype in [Dtype::I8, Dtype::Q4] {
-        assert_eq!(misses(dtype, true, m, 48, 256), 0, "{dtype:?}: two-level products past the second level's bound");
+        let Some(missed) = misses(dtype, true, m, 48, 256) else {
+            return brain_testutil::skip_unavailable(&format!("{dtype:?}: this device holds the weight at another tier, which reads no int8 activation level"));
+        };
+        assert_eq!(missed, 0, "{dtype:?}: two-level products past the second level's bound");
     }
-    assert!(misses(Dtype::I8, false, 40, 48, 256) > 0, "a single-level activation meets the second level's bound - the gate above would be vacuous");
+    assert!(misses(Dtype::I8, false, 40, 48, 256).expect("held above") > 0, "a single-level activation meets the second level's bound - the gate above would be vacuous");
 }

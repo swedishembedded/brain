@@ -461,6 +461,9 @@ fn dyn_matches_host_oracle_both_code_bits() {
         let mut kernels_list = Vec::new();
         let dn = dyn_variant(&mut kernels_list, bits);
         let g = Gpu::new(&kernels_list);
+        if crate::barrier_kernels::unavailable(&g, "matmul_kq_dyn/matmul_kq_gemv") {
+            return;
+        }
         let sc = Scenario::random(0xB0_0000 | bits as u64, 192, 256, 176, bits, 32, true);
         let bufs = sc.upload(&g);
         let got = run_dyn(&g, dn, &sc, &bufs);
@@ -476,6 +479,9 @@ fn gemv_matches_host_oracle_both_code_bits() {
         let mut kernels_list = Vec::new();
         let gn = gemv_variant(&mut kernels_list, bits);
         let g = Gpu::new(&kernels_list);
+        if crate::barrier_kernels::unavailable(&g, "matmul_kq_dyn/matmul_kq_gemv") {
+            return;
+        }
         let sc = Scenario::random(0xB1_0000 | bits as u64, 24, 256, 48, bits, 32, true);
         let bufs = sc.upload(&g);
         let got = run_gemv(&g, gn, &sc, &bufs);
@@ -532,6 +538,9 @@ fn case1_dmin_zero_vs_nonzero_are_genuinely_different() {
     let mut kernels_list = Vec::new();
     let dn = dyn_variant(&mut kernels_list, bits);
     let g = Gpu::new(&kernels_list);
+        if crate::barrier_kernels::unavailable(&g, "matmul_kq_dyn/matmul_kq_gemv") {
+            return;
+        }
 
     let sc_zero = Scenario {
         m,
@@ -597,6 +606,9 @@ fn case2_sub_block_scale_variation_across_groups() {
     let mut kernels_list = Vec::new();
     let dn = dyn_variant(&mut kernels_list, bits);
     let g = Gpu::new(&kernels_list);
+        if crate::barrier_kernels::unavailable(&g, "matmul_kq_dyn/matmul_kq_gemv") {
+            return;
+        }
     let sc = Scenario { m, k, n, bits, group, codes_x, sx_h, codes_w, sc: sc_bytes, mn, d_super, dmin_super };
     let got = run_dyn(&g, dn, &sc, &sc.upload(&g));
     assert_matches_oracle("case2 sub-block scale variation", &got, &sc.oracle(), &sc.tolerance(false));
@@ -637,6 +649,9 @@ fn case3_mixed_sign_activation_full_range_codes() {
     let mut kernels_list = Vec::new();
     let dn = dyn_variant(&mut kernels_list, bits);
     let g = Gpu::new(&kernels_list);
+        if crate::barrier_kernels::unavailable(&g, "matmul_kq_dyn/matmul_kq_gemv") {
+            return;
+        }
     let sc = Scenario { m, k, n, bits, group, codes_x, sx_h, codes_w, sc: sc_bytes, mn, d_super, dmin_super };
     let got = run_dyn(&g, dn, &sc, &sc.upload(&g));
     assert_matches_oracle("case3 mixed-sign activation, full-range codes", &got, &sc.oracle(), &sc.tolerance(false));
@@ -671,6 +686,9 @@ fn case4_all_zero_subblock_no_nan() {
     let mut kernels_list = Vec::new();
     let dn = dyn_variant(&mut kernels_list, bits);
     let g = Gpu::new(&kernels_list);
+        if crate::barrier_kernels::unavailable(&g, "matmul_kq_dyn/matmul_kq_gemv") {
+            return;
+        }
     let sc = Scenario { m, k, n, bits, group, codes_x, sx_h, codes_w, sc: sc_bytes, mn, d_super, dmin_super };
     let got = run_dyn(&g, dn, &sc, &sc.upload(&g));
     assert_matches_oracle("case4 all-zero sub-block", &got, &sc.oracle(), &sc.tolerance(false));
@@ -700,6 +718,9 @@ fn case5_subrectangle_nonzero_origin_two_superblocks() {
     let mut kernels_list = Vec::new();
     let dn = dyn_variant(&mut kernels_list, bits);
     let g = Gpu::new(&kernels_list);
+        if crate::barrier_kernels::unavailable(&g, "matmul_kq_dyn/matmul_kq_gemv") {
+            return;
+        }
     let sc = Scenario { m, k, n, bits, group, codes_x, sx_h, codes_w, sc: sc_bytes, mn, d_super, dmin_super };
     let got = run_dyn(&g, dn, &sc, &sc.upload(&g));
     let want = sc.oracle();
@@ -732,6 +753,9 @@ fn case6_ragged_tiles_dyn() {
         let mut kernels_list = Vec::new();
         let dn = dyn_variant(&mut kernels_list, bits);
         let g = Gpu::new(&kernels_list);
+        if crate::barrier_kernels::unavailable(&g, "matmul_kq_dyn/matmul_kq_gemv") {
+            return;
+        }
         let sc = Scenario::random(0xC6_0000 | bits as u64, m, k, n, bits, group, true);
         let got = run_dyn(&g, dn, &sc, &sc.upload(&g));
         assert_matches_oracle(&format!("case6 ragged dyn CODE_BITS={bits}"), &got, &sc.oracle(), &sc.tolerance(false));
@@ -747,6 +771,9 @@ fn case6_ragged_gemv() {
             let mut kernels_list = Vec::new();
             let gn = gemv_variant(&mut kernels_list, bits);
             let g = Gpu::new(&kernels_list);
+        if crate::barrier_kernels::unavailable(&g, "matmul_kq_dyn/matmul_kq_gemv") {
+            return;
+        }
             let sc = Scenario::random(0xC6_1000 | (bits as u64) << 8 | m as u64, m, k, n, bits, group, true);
             let got = run_gemv(&g, gn, &sc, &sc.upload(&g));
             assert_matches_oracle(&format!("case6 ragged gemv CODE_BITS={bits} m={m}"), &got, &sc.oracle(), &sc.tolerance(false));
@@ -773,6 +800,9 @@ fn case7_x_and_w_word_densities_genuinely_differ() {
     let mut kernels_list = Vec::new();
     let dn = dyn_variant(&mut kernels_list, bits);
     let g = Gpu::new(&kernels_list);
+        if crate::barrier_kernels::unavailable(&g, "matmul_kq_dyn/matmul_kq_gemv") {
+            return;
+        }
     let sc = Scenario::random(0xC7_0000, m, k, n, bits, group, true);
     let got = run_dyn(&g, dn, &sc, &sc.upload(&g));
     assert_matches_oracle("case7 differing word densities", &got, &sc.oracle(), &sc.tolerance(false));
@@ -792,6 +822,9 @@ fn cross_kernel_dyn_and_gemv_agree() {
         let dn = dyn_variant(&mut kernels_list, bits);
         let gn = gemv_variant(&mut kernels_list, bits);
         let g = Gpu::new(&kernels_list);
+        if crate::barrier_kernels::unavailable(&g, "matmul_kq_dyn/matmul_kq_gemv") {
+            return;
+        }
         let sc = Scenario::random(0xD0_0000 | bits as u64, m, k, n, bits, group, true);
         let bufs = sc.upload(&g);
         let got_dyn = run_dyn(&g, dn, &sc, &bufs);

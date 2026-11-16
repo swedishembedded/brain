@@ -46,6 +46,9 @@ fn idx(g: &Gpu, name: &str) -> usize {
 #[test]
 fn fused_prefill_hd256_matches_the_triad_through_gqa_chunk_step() {
     let g = gpu_core::testgpu::dev(PIPES);
+    if crate::barrier_kernels::unavailable(&g, "paged_flash_prefill_hd256") {
+        return;
+    }
     let (nh, nkv, hd) = (4u32, 2u32, 256u32); // qwen38_27b's own head_dim
     let kv_stride = nkv * hd;
     let hq = nh * hd;
@@ -123,6 +126,9 @@ fn fused_prefill_hd256_matches_the_triad_through_gqa_chunk_step() {
 #[test]
 fn fused_prefill_hd256_matches_the_triad_at_a_real_long_context_depth() {
     let g = gpu_core::testgpu::dev(PIPES);
+    if crate::barrier_kernels::unavailable(&g, "paged_flash_prefill_hd256") {
+        return;
+    }
     let (nh, nkv, hd) = (24u32, 4u32, 256u32); // qwen38_27b's own GQA shape
     let kv_stride = nkv * hd;
     let hq = nh * hd;
@@ -190,6 +196,9 @@ fn fused_prefill_hd256_matches_the_triad_at_a_real_long_context_depth() {
 #[test]
 fn the_fused_branch_really_dispatches_one_kernel_not_the_triad() {
     let g = gpu_core::testgpu::dev(PIPES);
+    if crate::barrier_kernels::unavailable(&g, "paged_flash_prefill_hd256") {
+        return;
+    }
     let (nh, nkv, hd) = (4u32, 2u32, 256u32);
     let kv_stride = nkv * hd;
     let hq = nh * hd;

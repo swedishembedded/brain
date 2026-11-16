@@ -93,6 +93,9 @@ fn assert_close(what: &str, got: &[f32], want: &[f32], rel: f32) {
 #[test]
 fn flash_trio_matches_the_materialised_chain_at_every_head_width() {
     let g = gpu_core::testgpu::dev(KERNELS);
+    if crate::barrier_kernels::unavailable(&g, "the flash attention trio") {
+        return;
+    }
     let ids = kernel_ids(&g);
     let flash = flash_ids(&g);
     // (b, t, n_heads, n_kv_heads, head_dim): ratio 6 at 256 (the 27B's own),
@@ -232,6 +235,9 @@ fn run_mixer(g: &Gpu, shape: &GqaMixerShape, x: &MixerInputs, flash: bool, backw
 #[test]
 fn mixer_flash_path_matches_the_materialised_path_at_head_dim_256() {
     let g = gpu_core::testgpu::dev(KERNELS);
+    if crate::barrier_kernels::unavailable(&g, "the flash attention trio") {
+        return;
+    }
     let shape = GqaMixerShape { b: 1, t: 137, n_heads: 12, n_kv_heads: 2, head_dim: 256, rotary_half: 32, rms_eps: 1e-6 };
     let x = MixerInputs::draw(&shape, &mut Lcg::new(0x00fa_57a3)); // seed: fixed so a failure reproduces
     let want = run_mixer(&g, &shape, &x, false, true);
@@ -281,6 +287,9 @@ fn mixer_gradcheck(g: &Gpu, flash: bool, hd: u32) {
 #[test]
 fn mixer_flash_path_gradcheck_wide_and_narrow_heads() {
     let g = gpu_core::testgpu::dev(KERNELS);
+    if crate::barrier_kernels::unavailable(&g, "the flash attention trio") {
+        return;
+    }
     for hd in [136u32, 40] {
         mixer_gradcheck(&g, true, hd);
     }
@@ -301,6 +310,9 @@ fn cpu_backend_falls_back_to_the_materialised_chain_and_stays_correct() {
 #[test]
 fn training_gate_selects_flash_only_for_long_supported_sequences() {
     let g = gpu_core::testgpu::dev(KERNELS);
+    if crate::barrier_kernels::unavailable(&g, "the flash attention trio") {
+        return;
+    }
     let flash = flash_ids(&g);
     assert!(flash.for_training(&g, 256, FlashGqaIds::MIN_TRAIN_T).is_some());
     assert!(flash.for_training(&g, 256, FlashGqaIds::MIN_TRAIN_T - 1).is_none());

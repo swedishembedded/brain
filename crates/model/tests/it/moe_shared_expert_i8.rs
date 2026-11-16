@@ -61,6 +61,9 @@ fn rel_l2(got: &[f32], want: &[f32]) -> f64 {
 #[test]
 fn shared_expert_i8_matches_fp32_within_quant_tolerance() {
     let g = gpu_core::testgpu::dev(PIPES);
+    if crate::barrier_kernels::unavailable(&g, "matmul_i8_dyn") {
+        return;
+    }
     let ids = SharedExpertIds { matmul: idx(&g, "matmul"), silu_mul: idx(&g, "silu_mul"), sigmoid: idx(&g, "sigmoid"), scale_row: idx(&g, "scale_row"), add2: idx(&g, "add2") };
     let ids8 = SharedExpertIds8 {
         matmul_i8: idx(&g, "matmul_i8_dyn"),
@@ -149,6 +152,9 @@ fn shared_expert_i8_matches_fp32_within_quant_tolerance() {
 #[test]
 fn shared_expert_i8_unweighted_matches_fp32_within_quant_tolerance() {
     let g = gpu_core::testgpu::dev(PIPES);
+    if crate::barrier_kernels::unavailable(&g, "matmul_i8_dyn") {
+        return;
+    }
     let ids = SharedExpertIds { matmul: idx(&g, "matmul"), silu_mul: idx(&g, "silu_mul"), sigmoid: idx(&g, "sigmoid"), scale_row: idx(&g, "scale_row"), add2: idx(&g, "add2") };
     let ids8 = SharedExpertIds8 {
         matmul_i8: idx(&g, "matmul_i8_dyn"),

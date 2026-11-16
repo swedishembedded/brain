@@ -242,6 +242,9 @@ fn moe_matches_dyn_and_gemv_when_fully_routed_both_code_bits() {
         kernels_list.push((dyn_name, dyn_src));
         kernels_list.push((gemv_name, gemv_src));
         let g = Gpu::new(&kernels_list);
+        if crate::barrier_kernels::unavailable(&g, "moe_linear_gated_kq, matmul_kq_dyn") {
+            return;
+        }
 
         let codes_x = rand_i8_codes(0xB0_0000 | bits as u64, m * k, -100, 100);
         let sx = rand_pos_f32(0xB0_0001 | bits as u64, m * (k / 32), 0.3, 1.7);

@@ -89,6 +89,9 @@ fn the_bidirectional_flash_trio_matches_the_full_matrix_reference() {
         all.extend(flash_bidir_kernels(unit_scale));
     }
     let g = gpu_core::testgpu::dev(Box::leak(all.into_boxed_slice()));
+    if crate::barrier_kernels::unavailable(&g, "the bidirectional flash attention trio") {
+        return;
+    }
     let cases = [
         Case { b: 1, t: 37, nh: 2, nkv: 2, hd: 40, unit_scale: false },
         Case { b: 2, t: 70, nh: 4, nkv: 2, hd: 64, unit_scale: false },

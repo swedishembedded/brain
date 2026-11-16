@@ -157,6 +157,9 @@ fn check_kquant(dtype: Dtype, bits: u32, dyn_kname: &'static str, gemv_kname: &'
     assert_eq!(dn, dyn_kname, "interned name must match Ops::bind's own literal");
     assert_eq!(gn, gemv_kname, "interned name must match Ops::bind's own literal");
     let g = Gpu::new(kernel_list());
+    if crate::barrier_kernels::unavailable(&g, "matmul_kq_dyn/matmul_kq_gemv") {
+        return;
+    }
     let ops = Ops::new(g).expect("Ops::new");
     let g = ops.gpu();
 

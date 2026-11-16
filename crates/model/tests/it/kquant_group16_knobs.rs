@@ -209,6 +209,9 @@ fn upload_weight(g: &Gpu, seed: u64, n: usize, k: usize, group: usize) -> (Vec<i
 fn matmul_i8_dyn_qpg2_default_is_bit_identical_to_pre_qpg_kernel() {
     let kernels: &[(&str, &str)] = &[("matmul_i8_dyn", kernels::MATMUL_I8_DYN), ("matmul_i8_dyn_orig", ORIGINAL_MATMUL_I8_DYN)];
     let g = dev(kernels);
+    if crate::barrier_kernels::unavailable(&g, "matmul_i8_dyn") {
+        return;
+    }
 
     let (m, k, n) = (160usize, 256usize, 176usize);
     let (_, xq, sx) = upload_activation(&g, 0xD11_0000, m, k);
@@ -244,6 +247,9 @@ fn matmul_i8_dyn_register_block_variants_are_bit_identical_to_default_tile() {
     for &(tm, tn) in &[(8u32, 4u32), (4, 4), (8, 2)] {
         let (name, src) = interned("matmul_i8_dyn", kernels::MATMUL_I8_DYN, &[("TM", tm), ("TN", tn)]).unwrap();
         let g = dev(&[("matmul_i8_dyn", kernels::MATMUL_I8_DYN), (name, src)]);
+        if crate::barrier_kernels::unavailable(&g, "matmul_i8_dyn") {
+            return;
+        }
         for (i, &(m, k, n)) in shapes.iter().enumerate() {
             let (codes_x, xq, sx) = upload_activation(&g, 0xA11_0000 + i as u64, m, k);
             let (codes_w, wq, sw) = upload_weight(&g, 0xA11_1111 + i as u64, n, k, 32);
@@ -279,6 +285,9 @@ fn matmul_i8_dyn_register_block_variants_are_bit_identical_to_default_tile() {
 fn matmul_i8_dyn_qpg1_group16_matches_host_oracle() {
     let (name, src) = interned("matmul_i8_dyn", kernels::MATMUL_I8_DYN, &[("QPG", 1)]).unwrap();
     let g = dev(&[(name, src)]);
+    if crate::barrier_kernels::unavailable(&g, "matmul_i8_dyn") {
+        return;
+    }
 
     let (m, k, n) = (160usize, 256usize, 176usize);
     let (codes_x, xq, sx) = upload_activation(&g, 0x671_0000, m, k);

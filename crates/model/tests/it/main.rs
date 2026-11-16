@@ -22,6 +22,7 @@ mod adapter_pool_roundtrip;
 mod adapter_rslora;
 mod anchor_memory;
 mod attn_scores_cross_win;
+mod barrier_kernels;
 mod bf16_roundtrip;
 mod bmm_tiled;
 mod causal_conv1d_step;

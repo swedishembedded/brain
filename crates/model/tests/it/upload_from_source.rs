@@ -58,6 +58,11 @@ fn write_fp8_checkpoint(dir: &std::path::Path) {
 
 fn decoded(ops: &Ops, w: &Weight) -> Vec<f32> {
     let g = ops.gpu();
+    // A tier the device does not hold is uploaded as fp32 (an int8 weight on a device without the int8 dot): its values
+    // are the buffer itself.
+    if let Weight::F32 { w, n, k } = w {
+        return g.read(w, (*n as usize) * (*k as usize));
+    }
     let out = g.storage((w.n() * w.k()) as u64);
     let mut steps = Vec::new();
     ops.decode_tile(&mut steps, w, 0, w.n(), &out);

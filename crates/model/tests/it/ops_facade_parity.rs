@@ -237,6 +237,10 @@ fn check_q4(m: usize, n: usize, k: usize) {
 /// 256B-aligned, and both are cheap (no real checkpoint needed).
 #[test]
 fn matmul_matches_dispatch_rs_bit_identically_across_tiers_and_m() {
+    // The oracle is the GPU tiers' hand-dispatched GEMV and tiled kernels, which a device without them does not choose.
+    if crate::barrier_kernels::unavailable(&gpu_core::testgpu::dev(kernel_list()), "matmul_gemv, matmul_reg2, matmul_i8_dyn") {
+        return;
+    }
     let (n, k) = (64usize, 128usize);
     for &m in &[1usize, 8, 64, 512] {
         check_f32(m, n, k);
@@ -250,6 +254,9 @@ fn matmul_matches_dispatch_rs_bit_identically_across_tiers_and_m() {
 /// (256B) storage-binding alignment requirement.
 #[test]
 fn matmul_row_offset_is_correct_for_i8_and_q4() {
+    if crate::barrier_kernels::unavailable(&gpu_core::testgpu::dev(kernel_list()), "matmul_i8_dyn, matmul_q4_dyn_reg") {
+        return;
+    }
     let (n, k) = (64usize, 128usize);
     let (xr0, m) = (64u32, 8usize);
     let total_rows = xr0 as usize + m;
