@@ -245,6 +245,10 @@ struct FastIdx {
     upsample2: Option<usize>,
     silu_mul: Option<usize>,
     scale_add: Option<usize>,
+    /// The masked cross-entropy pair, matched by their WGSL source rather than by name: a model registers them under
+    /// a name of its own (`ce_grad`, `ce_value`), which other models give to the unmasked kernels.
+    ce_grad_masked: Option<usize>,
+    ce_value_masked: Option<usize>,
 }
 
 /// Bind group for one dispatch: the uniform stream plus the storage buffers in
@@ -353,6 +357,8 @@ impl CpuBackend {
                 upsample2: find("upsample2"),
                 silu_mul: find("silu_mul"),
                 scale_add: find("scale_add"),
+                ce_grad_masked: kernels.iter().position(|(_, src)| *src == ::kernels::CE_GRAD_MASKED).filter(|&i| all_native || !jit.is_compiled(i)),
+                ce_value_masked: kernels.iter().position(|(_, src)| *src == ::kernels::CE_VALUE_MASKED).filter(|&i| all_native || !jit.is_compiled(i)),
             }
         };
         let wgsizes = backend_api::workgroup_sizes(kernels);
@@ -951,6 +957,26 @@ backend_api::check_binding_offsets(&self.shared.names[kind], offsets);
                 let k = std::slice::from_raw_parts(bufs[1] as *const f32, b * t * hkv * hd);
                 let sc = std::slice::from_raw_parts_mut(bufs[2] as *mut f32, b * h * t * t);
                 fast_ops::gqa_scores(q, k, sc, b, h, hkv, t, hd, group);
+            }
+            return;
+        }
+        // ce_grad_masked / ce_value_masked: params = [n_rows, u_bins, ignore(, count)]; bufs = [logits, targets, out].
+        // The WGSL kernels recompute a row's softmax for every element of it (one invocation per element); the native
+        // routes reduce each row once.
+        if (Some(kind) == f.ce_grad_masked || Some(kind) == f.ce_value_masked) && bufs.len() >= 3 {
+            unsafe {
+                let grad = Some(kind) == f.ce_grad_masked;
+                let pu = std::slice::from_raw_parts(uniform, if grad { 4 } else { 3 });
+                let (rows, bins, ignore) = (pu[0] as usize, pu[1] as usize, pu[2]);
+                let logits = std::slice::from_raw_parts(bufs[0] as *const f32, rows * bins);
+                let targets = std::slice::from_raw_parts(bufs[1] as *const u32, rows);
+                if grad {
+                    let out = std::slice::from_raw_parts_mut(bufs[2] as *mut f32, rows * bins);
+                    fast_ops::ce_grad_masked(logits, targets, out, bins, ignore, f32::from_bits(pu[3]));
+                } else {
+                    let out = std::slice::from_raw_parts_mut(bufs[2] as *mut f32, rows);
+                    fast_ops::ce_value_masked(logits, targets, out, bins, ignore);
+                }
             }
             return;
         }

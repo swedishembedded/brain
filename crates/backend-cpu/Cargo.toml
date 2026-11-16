@@ -16,11 +16,12 @@ brain-wgsl-cpu.workspace = true
 rayon = "1"
 # Linux CPU affinity for `par::with_cores` (the same pure-Rust binding `gpu-core` pins `--device cpu<N>` with).
 libc.workspace = true
+# The WGSL sources a native route is matched by when a model registers the kernel under a name of its own.
+brain-kernels.workspace = true
 
 [dev-dependencies]
 brain-testutil.workspace = true
 brain-gpu-core.workspace = true
-brain-kernels.workspace = true
 
 # `data::rng::Lcg` — the one deterministic test PRNG (tests only).
 brain-data.workspace = true

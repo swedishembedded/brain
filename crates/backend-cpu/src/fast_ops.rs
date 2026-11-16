@@ -2482,6 +2482,32 @@ mod tests {
     /// `n` not a multiple of 4 (so the narrow column tail is exercised at the
     /// LAST task rather than the last column of a whole matrix) and `k` not a
     /// multiple of 8 (so the scalar k-tail runs inside every task).
+    /// The masked cross-entropy natives compute what `ce_grad_masked.wgsl` and `ce_value_masked.wgsl` compute (the
+    /// formula transcribed per element, row statistics recomputed for each as the kernels do), ignored rows included.
+    #[test]
+    fn masked_cross_entropy_matches_the_kernels_formula() {
+        let (rows, bins, ignore, count) = (37usize, 513usize, u32::MAX, 29.0f32);
+        let mut rng = data::rng::Lcg::random();
+        let logits: Vec<f32> = (0..rows * bins).map(|_| rng.scaled(8.0)).collect();
+        let targets: Vec<u32> = (0..rows).map(|r| if r % 5 == 3 { ignore } else { (r * 97 % bins) as u32 }).collect();
+        let mut grad = vec![9.0f32; rows * bins];
+        let mut value = vec![9.0f32; rows];
+        super::ce_grad_masked(&logits, &targets, &mut grad, bins, ignore, count);
+        super::ce_value_masked(&logits, &targets, &mut value, bins, ignore);
+        for r in 0..rows {
+            let row = &logits[r * bins..(r + 1) * bins];
+            let mx = row.iter().fold(-3.4e38f32, |a, &v| a.max(v));
+            let sum: f32 = row.iter().map(|&v| (v - mx).exp()).sum();
+            let tgt = targets[r];
+            let want_v = if tgt == ignore { 0.0 } else { (mx + sum.ln()) - row[tgt as usize] };
+            assert!((value[r] - want_v).abs() <= 1e-5 * (1.0 + want_v.abs()), "row {r}: {} vs {want_v}", value[r]);
+            for v in 0..bins {
+                let want = if tgt == ignore { 0.0 } else { ((row[v] - mx).exp() / sum - if v as u32 == tgt { 1.0 } else { 0.0 }) / count };
+                assert!((grad[r * bins + v] - want).abs() <= 1e-6, "({r},{v}): {} vs {want}", grad[r * bins + v]);
+            }
+        }
+    }
+
     #[test]
     fn gemv_column_split_is_bit_identical() {
         let mut s = 23u32;
@@ -3941,6 +3967,42 @@ mod tests {
             }
         }
     }
+}
+
+/// The row's maximum and `Σ exp(x - max)`, the softmax statistics both masked cross-entropy kernels reduce.
+fn softmax_stats(row: &[f32]) -> (f32, f32) {
+    let mx = row.iter().fold(-3.4e38f32, |a, &v| a.max(v));
+    (mx, row.iter().map(|&v| (v - mx).exp()).sum())
+}
+
+/// `ce_grad_masked.wgsl`: `d_logits[n,v] = (softmax(logits[n])_v - [v == target[n]]) / count`, zero for a row whose
+/// target is `ignore`. Each row's statistics are reduced once (the kernel re-reduces them for every element).
+pub fn ce_grad_masked(logits: &[f32], targets: &[u32], dlogits: &mut [f32], bins: usize, ignore: u32, count: f32) {
+    dlogits.par_chunks_mut(bins).zip(logits.par_chunks(bins)).zip(targets.par_iter()).for_each(|((d, row), &tgt)| {
+        if tgt == ignore {
+            d.fill(0.0);
+            return;
+        }
+        let (mx, sum) = softmax_stats(row);
+        for (dv, &x) in d.iter_mut().zip(row) {
+            *dv = (x - mx).exp() / sum / count;
+        }
+        if let Some(dv) = d.get_mut(tgt as usize) {
+            *dv -= 1.0 / count;
+        }
+    });
+}
+
+/// `ce_value_masked.wgsl`: `out[n] = logsumexp(logits[n]) - logits[n, target[n]]`, zero for an ignored row.
+pub fn ce_value_masked(logits: &[f32], targets: &[u32], out: &mut [f32], bins: usize, ignore: u32) {
+    out.par_iter_mut().zip(logits.par_chunks(bins)).zip(targets.par_iter()).for_each(|((o, row), &tgt)| {
+        if tgt == ignore {
+            *o = 0.0;
+            return;
+        }
+        let (mx, sum) = softmax_stats(row);
+        *o = (mx + sum.ln()) - row.get(tgt as usize).copied().unwrap_or(0.0);
+    });
 }
 
 /// `src[rows, cols]` row-major as `[cols, rows]`, blocked so both sides stay in cache, threaded over row blocks.
