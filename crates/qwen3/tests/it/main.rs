@@ -22,6 +22,7 @@ mod dp_parity;
 mod encoder_parity;
 mod engine_adapter_bank;
 mod engine_exact_decode;
+mod engine_glue;
 mod engine_half_weights;
 mod engine_prefill_census;
 mod engine_prefill_hd128;

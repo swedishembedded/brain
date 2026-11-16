@@ -813,6 +813,19 @@ impl Weight {
         }
     }
 
+    /// The buffer of a bf16 weight and the `(word offset, word length)` its rows `[first, first + count)` occupy (two
+    /// values a word; the whole buffer is `(0, 0)`), as a library product binds them; `None` for every other tier. A
+    /// fused weight's parts are row ranges of it.
+    pub fn bf16_rows(&self, first: u32, count: u32) -> Option<(&DeviceBuffer, (u64, u64))> {
+        match self {
+            Weight::BF16 { w, n, k } => {
+                let window = if first == 0 && count == *n { WHOLE } else { (first as u64 * *k as u64 / 2, count as u64 * *k as u64 / 2) };
+                Some((w, window))
+            }
+            _ => None,
+        }
+    }
+
     pub fn n(&self) -> u32 {
         match self {
             Weight::F32 { n, .. }
@@ -1803,15 +1816,7 @@ impl Ops {
         if !self.gemm.is_active() {
             return None;
         }
-        let (first, count) = rows;
-        let (n, k) = (w.n(), w.k());
-        match w {
-            Weight::BF16 { w: wb, .. } => {
-                let window = if first == 0 && count == n { WHOLE } else { (first as u64 * k as u64 / 2, count as u64 * k as u64 / 2) };
-                Some((wb.clone(), window))
-            }
-            _ => None,
-        }
+        w.bf16_rows(rows.0, rows.1).map(|(wb, window)| (wb.clone(), window))
     }
 
     /// `dx[dx_row0.., :] (+)= dy[m, count] @ W[first.., :]` on the library path

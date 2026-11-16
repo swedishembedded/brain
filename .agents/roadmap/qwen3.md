@@ -248,17 +248,29 @@ merge at 4.2 us a layer (62 % of the roof together).
 ## Serving keeps the card busy (2026-11-16)
 
 Qwen3-4B, bf16 weights, int8 KV, GH200 gpu3, `perf run serve --target qwen:<4B> --input 8192 --output 128 --warmup 2
---seed 1` (c=16: 32 requests, c=64: 128); card busy is the union of kernels, copies and memsets inside the `serve.*`
-NVTX window of an nsys `-t cuda,nvtx --cuda-graph-trace=node` run; client numbers from runs without the profiler.
+--seed 1` (c=16: 32 requests, c=64: 128); client numbers from runs without the profiler. Card busy is the union of
+kernels, copies and memsets from the first `serve.*` NVTX range to the last kernel of an nsys
+`-t cuda,nvtx --cuda-graph-trace=node` run (the trace loses the kernel records of its last ~0.9 s, while the host is
+still waiting on graph launches, so the NVTX end overstates idle time). Glue is `concat_split`, `silu_mul*`,
+`cast_f32_bf16`, `qknorm_rope_*`, `add_rmsnorm_fwd`, the KV appends, norms, embedding and argmax kernels, by the NVTX
+phase their launch ran in.
 
-| step | c=16 req/s | c=16 TTFT p50 / p95 | c=16 busy (gaps > 1 ms) | c=64 req/s | c=64 TTFT p50 / p95 |
-|---|---|---|---|---|---|
-| main 86d37a54c | 2.42 | 604 / 5070 ms | 79.2 % (1.97 s) | 2.66 | 12.1 / 20.1 s |
-| per-layer prefill submission, last-row read (#476) | 2.75 | 524 / 4262 ms | 90.5 % (0.21 s) | 3.08 | 10.5 / 17.2 s |
+| step | c=16 req/s | c=16 TTFT p50 / p95 | c=16 busy | c=64 req/s | c=64 TTFT p50 / p95 | c=64 busy | c=64 glue: per prefill token, per decode step |
+|---|---|---|---|---|---|---|---|
+| main 86d37a54c | 2.42 | 604 / 5070 ms | 84.2 % | 2.66 | 12.1 / 20.1 s | 79.0 % | 12.1 ns, 2.04 ms |
+| per-layer prefill submission, last-row read (#476) | 2.75 | 524 / 4262 ms | 97.1 % | 3.08 | 10.5 / 17.2 s | 96.4 % | 12.2 ns, 2.06 ms |
+| per-part library products, SwiGLU writes the bf16 operand (#478) | 3.07 | 493 / 3626 ms | 93.0 % | 3.46 | 9.3 / 15.2 s | 95.2 % | 5.8 ns, 1.22 ms |
 
-- [ ] The card is still idle a tenth of the window, in gaps under 1 ms (decode steps).
-- [ ] Glue kernels in that window (c=16): `concat_split` 1.32 s over 69K launches, `silu_mul` 1.01 s,
-      `paged_flash_decode_gqa_combine` 0.92 s, `qknorm_rope_fused` 0.74 s, `cast_f32_bf16` 0.46 s.
+- [ ] c=16 busy fell with the shorter kernels: of its 0.74 s idle, 0.35 s is the first capture of a decode tape at each
+      new batch size (one instantiation of 0.19-0.21 s), ~2 ms per prompt is building the chunk's per-row block table
+      (`chunk_meta`, every row a copy of the sequence's table) and the rest is gaps under 1 ms.
+- [ ] `serve_conformance` (six tests in parallel on one card) crashes with SIGSEGV in about one run in four when the
+      kernel cache is cold, on main before this work too: `cublasDestroy` (an engine dropped at the end of a test)
+      synchronises the context inside the driver while other threads load and unload modules and instantiate graphs.
+      Destroying the library handle first, with its context current, did not change the rate.
+- [ ] Glue left per 8K-row prefill layer (c=16 trace): `qknorm_rope_fused` 0.43 + 0.14 ms (a fifth of the copy
+      roof), `silu_mul_bf16` 0.33 ms (at the roof, but writes an fp32 `h` no reader needs without an adapter),
+      `add_rmsnorm_fwd` 2 x 0.09 ms and the `cast_f32_bf16` of each norm output 2 x 0.04 ms.
 
 ## Not yet done
 

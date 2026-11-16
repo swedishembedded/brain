@@ -2463,6 +2463,63 @@ impl Engine {
         }
     }
 
+    /// Whether `w`'s product runs on the bf16 library path at `rows` (what [`Self::linear`] would pick for it).
+    fn library_bf16(&self, w: &Weight, rows: u32, exact: Option<&exact::ExactDecode>) -> bool {
+        exact.is_none() && rows >= self.library_min_rows && w.dtype() == Dtype::BF16 && self.gemm.is_active()
+    }
+
+    /// The parts of a fused bf16 weight (`outs`, each `(buffer, rows of the weight)` in weight order) as one library
+    /// product each into the buffer its reader takes, sharing one bf16 cast of `x`. One product into a wide scratch
+    /// that `concat_split` then copied apart moved the product's output three more times. `false`, with nothing
+    /// pushed, where the fused weight does not run on that path; the caller runs the fused product.
+    #[allow(clippy::too_many_arguments)]
+    fn linear_parts(&self, s: &mut Vec<Step>, w: &Weight, x: &DeviceBuffer, outs: &[(&DeviceBuffer, u32)], rows: u32, exact: Option<&exact::ExactDecode>) -> bool {
+        if !self.library_bf16(w, rows, exact) {
+            return false;
+        }
+        let k = w.k();
+        assert_eq!(outs.iter().map(|o| o.1).sum::<u32>(), w.n(), "qwen3 serve: the parts must tile the fused weight");
+        let g = &self.gpu;
+        let mut steps = Vec::new();
+        let Some(xb) = self.gemm.cast_bf16(g, &mut steps, &library::Operand { buf: x, range: (0, 0) }, rows as u64 * k as u64) else {
+            return false;
+        };
+        // Part `i` is the weight's rows from the previous parts' end.
+        let mut first = 0u32;
+        for &(out, part) in outs {
+            let Some((wbuf, range)) = w.bf16_rows(first, part) else {
+                return false;
+            };
+            if !self.gemm.forward_bf16(g, &mut steps, &xb, &library::Operand { buf: wbuf, range }, &library::Operand { buf: out, range: (0, 0) }, rows, part, k) {
+                return false;
+            }
+            first += part;
+        }
+        s.append(&mut steps);
+        true
+    }
+
+    /// `h = silu(gate) * up` and the down product over it, with the bf16 operand the product reads written by the
+    /// SwiGLU's own pass instead of a cast re-reading `h` (`h` is still written, for an adapter correction). `false`,
+    /// with nothing pushed, where the down weight does not run on the bf16 library path.
+    #[allow(clippy::too_many_arguments)]
+    fn swiglu_into_bf16_down(&self, s: &mut Vec<Step>, wdown: &Weight, gate: &DeviceBuffer, up: &DeviceBuffer, h: &DeviceBuffer, out: &DeviceBuffer, rows: u32, exact: Option<&exact::ExactDecode>) -> bool {
+        let (n, k) = (wdown.n(), wdown.k());
+        let Some((w, range)) = wdown.bf16_rows(0, n).filter(|_| self.library_bf16(wdown, rows, exact)) else {
+            return false;
+        };
+        let g = &self.gpu;
+        let mut steps = Vec::new();
+        let Some(hb) = self.gemm.silu_mul_bf16(g, &mut steps, gate, up, h, rows as u64 * k as u64) else {
+            return false;
+        };
+        if !self.gemm.forward_bf16(g, &mut steps, &hb, &library::Operand { buf: w, range }, &library::Operand { buf: out, range: (0, 0) }, rows, n, k) {
+            return false;
+        }
+        s.append(&mut steps);
+        true
+    }
+
     /// One int8 linear: the MEASURED choice for this device where one exists
     /// (S5, tuned at build, keyed by row bucket), else the static policy. The
     /// packed GEMV owns few rows, the 128x128 tile owns prefill shapes; the
@@ -2986,25 +3043,29 @@ impl Engine {
             // `concat_split` narrows the wide `[b, hq+2*hkv]` output back
             // into the same compact `q_pre`/`k_pre`/`v` buffers QK-norm/
             // RoPE/KV-append already require.
-            self.linear(&mut s, &self.lin_weights[&p(WQKV)], &sc.xn1, &sc.qkv_pre, b, exact);
-            let qkv_width = hq + 2 * hkv;
-            if lora {
-                // The corrections land in the fused output's own columns
-                // (q, then k, then v), so no gather or split changes.
-                for (site, col0) in [(LoraSite::Wq, 0), (LoraSite::Wk, hq), (LoraSite::Wv, hq + hkv)] {
-                    self.lora_correct(&mut s, l, site, &sc.xn1, &sc.qkv_pre, b, qkv_width, col0);
-                }
-            }
-            if let Some(bias) = self.qkv_bias.get(l) {
-                s.push(g.step(BIAS_ADD, &[&sc.qkv_pre, bias], &[b, qkv_width], b * qkv_width));
-            }
             // Without QK-norm, Q and K go straight into the buffers RoPE
             // rotates in place; with it, into the pre-norm ones it reads.
             let (q_src, k_src) = if c.qk_norm { (&sc.q_pre, &sc.k_pre) } else { (&sc.q, &sc.k) };
             let (q_norm, k_norm) = if c.qk_norm { (Some(w(&p("attn.q_norm.weight"))), Some(w(&p("attn.k_norm.weight")))) } else { (None, None) };
-            s.push(concat_split_step(g, &sc.qkv_pre, q_src, b, qkv_width, hq, 0));
-            s.push(concat_split_step(g, &sc.qkv_pre, k_src, b, qkv_width, hkv, hq));
-            s.push(concat_split_step(g, &sc.qkv_pre, &sc.v, b, qkv_width, hkv, hq + hkv));
+            // The adapter corrections and the bias address the fused product's columns, so those keep it.
+            let wqkv = &self.lin_weights[&p(WQKV)];
+            if lora || self.qkv_bias.get(l).is_some() || !self.linear_parts(&mut s, wqkv, &sc.xn1, &[(q_src, hq), (k_src, hkv), (&sc.v, hkv)], b, exact) {
+                self.linear(&mut s, wqkv, &sc.xn1, &sc.qkv_pre, b, exact);
+                let qkv_width = hq + 2 * hkv;
+                if lora {
+                    // The corrections land in the fused output's own columns
+                    // (q, then k, then v), so no gather or split changes.
+                    for (site, col0) in [(LoraSite::Wq, 0), (LoraSite::Wk, hq), (LoraSite::Wv, hq + hkv)] {
+                        self.lora_correct(&mut s, l, site, &sc.xn1, &sc.qkv_pre, b, qkv_width, col0);
+                    }
+                }
+                if let Some(bias) = self.qkv_bias.get(l) {
+                    s.push(g.step(BIAS_ADD, &[&sc.qkv_pre, bias], &[b, qkv_width], b * qkv_width));
+                }
+                s.push(concat_split_step(g, &sc.qkv_pre, q_src, b, qkv_width, hq, 0));
+                s.push(concat_split_step(g, &sc.qkv_pre, k_src, b, qkv_width, hkv, hq));
+                s.push(concat_split_step(g, &sc.qkv_pre, &sc.v, b, qkv_width, hkv, hq + hkv));
+            }
             // M4.2: QK-norm + RoPE fused into one dispatch each for Q and K
             // (`Self::qk_norm_rope`) instead of the four separate `self.rms`/
             // `ROPE_PAGED` dispatches this used to be - see that method's own
@@ -3133,17 +3194,23 @@ impl Engine {
             // time) instead of two, `concat_split` narrowing its `[b, 2*ff]`
             // output back into the compact `gate_pre`/`up` buffers
             // `swiglu_fwd` requires.
-            self.linear(&mut s, &self.lin_weights[&p(WGATEUP)], &sc.xn2, &sc.gateup_pre, b, exact);
-            if lora {
-                for (site, col0) in [(LoraSite::Gate, 0), (LoraSite::Up, ff)] {
-                    self.lora_correct(&mut s, l, site, &sc.xn2, &sc.gateup_pre, b, 2 * ff, col0);
+            let wgateup = &self.lin_weights[&p(WGATEUP)];
+            if lora || !self.linear_parts(&mut s, wgateup, &sc.xn2, &[(&sc.gate_pre, ff), (&sc.up, ff)], b, exact) {
+                self.linear(&mut s, wgateup, &sc.xn2, &sc.gateup_pre, b, exact);
+                if lora {
+                    for (site, col0) in [(LoraSite::Gate, 0), (LoraSite::Up, ff)] {
+                        self.lora_correct(&mut s, l, site, &sc.xn2, &sc.gateup_pre, b, 2 * ff, col0);
+                    }
                 }
+                s.push(concat_split_step(g, &sc.gateup_pre, &sc.gate_pre, b, 2 * ff, ff, 0));
+                s.push(concat_split_step(g, &sc.gateup_pre, &sc.up, b, 2 * ff, ff, ff));
             }
-            s.push(concat_split_step(g, &sc.gateup_pre, &sc.gate_pre, b, 2 * ff, ff, 0));
-            s.push(concat_split_step(g, &sc.gateup_pre, &sc.up, b, 2 * ff, ff, ff));
-            s.push(block::swiglu_fwd(g, &kids, &sc.gate_pre, &sc.up, &sc.h, b * ff));
-            self.quant_once(&mut s, &sc.h, ff, b);
-            self.linear(&mut s, &self.lin_weights[&p("mlp.down.weight")], &sc.h, &sc.mlp_out, b, exact);
+            let wdown = &self.lin_weights[&p("mlp.down.weight")];
+            if !self.swiglu_into_bf16_down(&mut s, wdown, &sc.gate_pre, &sc.up, &sc.h, &sc.mlp_out, b, exact) {
+                s.push(block::swiglu_fwd(g, &kids, &sc.gate_pre, &sc.up, &sc.h, b * ff));
+                self.quant_once(&mut s, &sc.h, ff, b);
+                self.linear(&mut s, wdown, &sc.h, &sc.mlp_out, b, exact);
+            }
             if lora {
                 self.lora_correct(&mut s, l, LoraSite::Down, &sc.h, &sc.mlp_out, b, d, 0);
             }

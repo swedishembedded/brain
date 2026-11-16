@@ -11,7 +11,8 @@ arena hand a layer's blocks to the next; and read back only the rows the caller 
 ## What happened
 
 Serving Qwen3-4B (bf16 weights, int8 KV) at `perf run serve --concurrency 16 --input 8192 --output 128 --requests 32`
-on a GH200 left the card 79 % busy inside the serving window, with 1.97 s of gaps over 1 ms. Two kinds of gap made up
+on a GH200 left the card 84 % busy inside the serving window (79 % at `--concurrency 64`), with 1.97 s of gaps over
+1 ms. Two kinds of gap made up
 nearly all of it (nsys with CPU sampling):
 
 - **Before every prompt's first kernel** (after the previous decode step's `argmax_final`, 39 gaps, 1.25 s): the host
@@ -43,14 +44,16 @@ nearly all of it (nsys with CPU sampling):
 ## Evidence
 
 Same command, gpu3 of a GH200 node, `--warmup 2 --seed 1`, no profiler for the client numbers, nsys
-`-t cuda,nvtx --cuda-graph-trace=node` for the busy share (union of kernels, copies and memsets inside the `serve.*`
-NVTX window):
+`-t cuda,nvtx --cuda-graph-trace=node` for the busy share (union of kernels, copies and memsets from the first
+`serve.*` NVTX range to the last kernel: the trace loses the kernel records of its last ~0.9 s while the host still
+waits on graph launches, so the NVTX end overstates idle time):
 
 | | before | after |
 |---|---|---|
 | c=16: req/s, output tok/s | 2.42, 310 | 2.75, 352 |
 | c=16: TTFT p50 / p95 | 604 / 5070 ms | 524 / 4262 ms |
-| c=16: card busy, gaps over 1 ms | 79.2 %, 1.97 s | 90.5 %, 0.21 s |
+| c=16: card busy (to the last kernel), gaps over 1 ms | 84.2 %, 1.97 s | 97.1 %, 0.21 s |
+| c=64: card busy, gaps over 1 ms | 79.0 %, 9.92 s | 96.4 %, 0.85 s |
 | c=64 (128 requests): req/s, TTFT p50 / p95 | 2.66, 12.1 / 20.1 s | 3.08, 10.5 / 17.2 s |
 
 The perf harness reports both runs valid. `serve_conformance`, `engine_exact_decode`, `engine_half_weights`,
