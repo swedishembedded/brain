@@ -16,6 +16,13 @@ use crate::{Device, Error, Result};
 /// set back so a caller that needs it (placement, diagnostics) doesn't have
 /// to resolve a second time.
 pub(crate) fn resolve(device: &Device) -> Result<gpu_core::devices::ComputeSet> {
+    // The default device asks for nothing beyond what the process already runs on (its `BRAIN_DEVICE`/`BRAIN_BACKEND`,
+    // or the CLI's flags), so it is that selection, and nothing is applied: re-resolving "every device" here published
+    // the probe's GPU backend for the whole process, under every other thread building a model, as the CLI does not
+    // for a default `--device` either.
+    if device.is_all() && !gpu_core::devices::backend_requested() {
+        return Ok(gpu_core::devices::ambient_compute_set().clone());
+    }
     let probe = gpu_core::Inventory::probe();
     let mut set = device.resolve(&probe).map_err(Error::Backend)?;
     gpu_core::devices::apply_requested_backend(&mut set).map_err(Error::Backend)?;
@@ -94,5 +101,18 @@ mod tests {
         assert_eq!(GpuMemory::from(card), GpuMemory { index: 1, total_bytes: 24 << 30, free_bytes: 3 << 30, measured: true });
         let guessed = gpu_core::capacity::GpuMem { measured: false, ..card };
         assert!(!GpuMemory::from(guessed).measured);
+    }
+
+    /// A pipeline built with the default device runs where the process already runs: building it changes no other
+    /// thread's backend. It used to resolve "every device" afresh and publish the probe's GPU backend for the whole
+    /// process, so a test binary run under `BRAIN_BACKEND=cpu` moved the tests beside a decision pipeline onto a GPU
+    /// mid-run (an engine's CPU buffers then reached a step on another backend).
+    #[test]
+    fn the_default_device_leaves_the_process_selection_alone() {
+        let ambient = gpu_core::devices::ambient_compute_set().backend;
+        let before = gpu_core::backend_name();
+        let set = resolve(&Device::default()).expect("the default device resolves");
+        assert_eq!(set.backend, ambient, "the default device is the process's own selection");
+        assert_eq!(gpu_core::backend_name(), before, "building a default-device pipeline moved the process's backend");
     }
 }

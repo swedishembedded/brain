@@ -1536,6 +1536,12 @@ pub fn request_backend(name: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether a backend was asked for with [`request_backend`].
+#[cfg(not(target_arch = "wasm32"))]
+pub fn backend_requested() -> bool {
+    REQUESTED_BACKEND.lock().unwrap_or_else(|e| e.into_inner()).is_some()
+}
+
 /// Layer the backend asked for with [`request_backend`] onto `set`, so a
 /// library caller that resolved its own [`DeviceSpec`] does not silently run on
 /// whatever the probe preferred (Vulkan on a CUDA host). An unsatisfiable
