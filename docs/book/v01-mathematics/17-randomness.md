@@ -36,7 +36,7 @@ The recipes below lean on six older ideas, from remainders to prefix sums: clock
 
 ## A generator is a state machine
 
-Start with the smallest possible machine. It holds one number, its **state**, an integer from $0$ to $15$. To produce a new number it applies a fixed rule to the state, keeps the result as the new state, and also hands it out. Take the rule "multiply by $5$, add $3$, and keep only the remainder after dividing by $16$". We write the remainder operation $\bmod$ as in Chapter 1: $38 \bmod 16 = 6$.
+Start with the smallest possible machine. It holds one number, its **state**, an integer from $0$ to $15$. To produce a new number it applies a fixed rule to the state, keeps the result as the new state, and also hands it out. Take the rule "multiply by $5$, add $3$, and keep only the remainder after dividing by $16$". We write the remainder operation as $a \bmod n$, as in Chapter 1: $38 \bmod 16 = 6$.
 
 <!-- worked: randomness.tiny_lcg -->
 | step i | state x_i | a x_i + c | mod 16 = x_(i+1) |
