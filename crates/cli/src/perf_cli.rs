@@ -126,7 +126,8 @@ OPTIONS
                         --top-k <K> (default 0, every token) and --min-p <M> (default 0) the
                         served API's sampling fields. A target that cannot sample refuses.
   --requests <N>        measured requests per level (default 64)
-  --input <N>           override the workload's prompt length
+  --input <N>[,<N>...]  override the workload's prompt length; a list mixes them, each length its
+                        own class of equal weight (`--input 2048,8192,32768`)
   --output <N>          override the workload's output length. THIS is what
                         bounds run time: 256 outputs at 90ms/token is 23s per
                         request no matter how few requests you run. Rates stay
@@ -444,7 +445,17 @@ fn run(args: &[String]) {
             "--horizon" => forecast.horizon = parse_flag(args, &mut i, "--horizon"),
             "--samples" => forecast.samples = parse_flag(args, &mut i, "--samples"),
             "--requests" => opt.num_requests = val(args, &mut i, "--requests").parse().unwrap_or(opt.num_requests),
-            "--input" => opt.input_override = val(args, &mut i, "--input").parse().ok(),
+            "--input" => {
+                let raw = val(args, &mut i, "--input");
+                let lengths: Vec<usize> = raw.split(',').map(|n| n.trim().parse().ok().filter(|&n| n > 0)).collect::<Option<_>>().unwrap_or_else(|| {
+                    eprintln!("perf run: --input takes a prompt length or a comma-separated list of them, got {raw:?}");
+                    std::process::exit(2);
+                });
+                match lengths[..] {
+                    [n] => opt.input_override = Some(n),
+                    _ => opt.input_mix = lengths,
+                }
+            }
             "--output" => opt.output_override = val(args, &mut i, "--output").parse().ok(),
             "--warmup" => opt.warmup_requests = val(args, &mut i, "--warmup").parse().unwrap_or(opt.warmup_requests),
             "--best-of" => opt.best_of = val(args, &mut i, "--best-of").parse().unwrap_or(opt.best_of),
@@ -494,7 +505,7 @@ fn run(args: &[String]) {
                     .as_deref()
                     .and_then(|s| s.strip_prefix("qwen-synth:"))
                     .ok_or_else(|| format!("`{other}` needs --target qwen-synth:<L>x<D>x<H>[xV]"))
-                    .and_then(|sh| SynthSpec::parse(sh, &workload, opt.input_override, opt.output_override, longctx.weight_format.as_ref()));
+                    .and_then(|sh| SynthSpec::parse(sh, &workload, opt.longest_input(), opt.output_override, longctx.weight_format.as_ref()));
                 match shape {
                     Ok(sp) => match other {
                         "startup" => crate::perf_engine::run_startup(&sp, opt.best_of.max(2), &opt),
@@ -521,7 +532,7 @@ fn run(args: &[String]) {
         eprintln!("perf run: --target is required (no default - see `brain perf list` or `brain perf --help`)");
         std::process::exit(2);
     };
-    let mut target = match build_target(&target_spec, &workload, opt.input_override, opt.output_override, forecast, longctx.weight_format.as_ref(), max_batch) {
+    let mut target = match build_target(&target_spec, &workload, opt.longest_input(), opt.output_override, forecast, longctx.weight_format.as_ref(), max_batch) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("perf: {e}");

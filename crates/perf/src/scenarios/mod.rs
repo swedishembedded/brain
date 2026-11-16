@@ -61,6 +61,9 @@ pub struct Options {
     /// Skip the post-run correctness gate (it costs one short reference run).
     pub no_gate: bool,
     pub input_override: Option<usize>,
+    /// Prompt lengths to mix in place of the workload's one: each its own class of equal weight, the workload's output
+    /// and SLO kept. Empty keeps the workload's input (or [`Self::input_override`]).
+    pub input_mix: Vec<usize>,
     /// Override the workload's output length.
     ///
     /// Run time is dominated by output length × per-artifact cost, not by
@@ -92,6 +95,7 @@ impl Default for Options {
             soak_seconds: 60.0,
             device_rate: None,
             input_override: None,
+            input_mix: Vec::new(),
             output_override: None,
             admission: None,
         }
@@ -99,6 +103,12 @@ impl Default for Options {
 }
 
 impl Options {
+    /// The longest prompt a run sends: the override, else the longest of the mix; `None` keeps the workload's. What an
+    /// engine the harness sizes must hold.
+    pub fn longest_input(&self) -> Option<usize> {
+        self.input_override.or(self.input_mix.iter().copied().max())
+    }
+
     /// Shrink everything so the suite is CI-runnable in seconds. Smoke artifacts
     /// are marked and never compared against full runs.
     pub fn smoke(mut self) -> Options {
@@ -116,6 +126,7 @@ impl Options {
         // input length regardless of how few output tokens follow it -- smoke
         // shrinking output alone did nothing for it.
         self.input_override = Some(self.input_override.unwrap_or(8).min(8));
+        self.input_mix.clear();
         self.output_override = Some(self.output_override.unwrap_or(8).min(8));
         self.soak_seconds = self.soak_seconds.min(2.0);
         self
@@ -170,6 +181,15 @@ pub(crate) fn workload_for(scenario: &str, name: &str, opt: &Options, concurrenc
             c.input = crate::workload::Lengths::Fixed(n.max(1));
         }
         w.name = format!("{}/in{n}", w.name);
+    }
+    if !opt.input_mix.is_empty() {
+        let base = w.classes[0].clone();
+        w.classes = opt
+            .input_mix
+            .iter()
+            .map(|&n| crate::workload::Class { name: format!("{}/in{n}", base.name), input: crate::workload::Lengths::Fixed(n.max(1)), weight: 1.0, ..base.clone() })
+            .collect();
+        w.name = format!("{}/in{}", w.name, opt.input_mix.iter().map(usize::to_string).collect::<Vec<_>>().join("+"));
     }
     if let Some(n) = opt.output_override {
         for c in &mut w.classes {
@@ -615,6 +635,20 @@ mod tests {
             assert_eq!(c.input, crate::workload::Lengths::Fixed(8), "smoke must cap chat's 1024-token prompt too, not just its output");
         }
         assert!(w.name.contains("in8"), "the workload name must record the input override: {}", w.name);
+    }
+
+    /// A list of prompt lengths makes one class per length, of equal weight, each with the workload's output: a run
+    /// draws every length, and the name records the mix.
+    #[test]
+    fn an_input_mix_draws_each_length_as_its_own_class() {
+        let o = Options { input_mix: vec![2048, 8192, 32768], num_requests: 300, ..Default::default() };
+        let w = workload_for("serve", "chat", &o, 64).expect("chat builds");
+        let lengths: Vec<_> = w.classes.iter().map(|c| (c.input, c.output, c.weight)).collect();
+        let out = crate::workload::Lengths::Fixed(256);
+        assert_eq!(lengths, [2048, 8192, 32768].map(|n| (crate::workload::Lengths::Fixed(n), out, 1.0)).to_vec());
+        let drawn: std::collections::HashSet<usize> = w.requests().iter().map(|r| r.input_artifacts).collect();
+        assert_eq!(drawn, [2048, 8192, 32768].into_iter().collect(), "every length is drawn");
+        assert!(w.name.ends_with("/in2048+8192+32768"), "{}", w.name);
     }
 
     #[test]
