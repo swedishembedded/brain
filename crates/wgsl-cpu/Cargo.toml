@@ -14,11 +14,11 @@ path = "src/lib.rs"
 naga.workspace = true
 
 # Cranelift JIT: translate naga IR -> Cranelift IR -> native code at startup.
-cranelift-codegen = "0.130"
-cranelift-frontend = "0.130"
-cranelift-jit = "0.130"
-cranelift-module = "0.130"
-cranelift-native = "0.130"
+cranelift-codegen = "0.137"
+cranelift-frontend = "0.137"
+cranelift-jit = "0.137"
+cranelift-module = "0.137"
+cranelift-native = "0.137"
 
 [dev-dependencies]
 brain-kernels.workspace = true

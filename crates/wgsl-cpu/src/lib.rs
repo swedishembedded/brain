@@ -49,7 +49,7 @@ mod shape;
 
 use cranelift_codegen::ir::{
     condcodes::{FloatCC, IntCC},
-    types, AbiParam, BlockArg, FuncRef, InstBuilder, MemFlags, Signature, Value,
+    types, AbiParam, BlockArg, FuncRef, InstBuilder, MemFlagsData, Signature, Value,
 };
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
@@ -554,11 +554,11 @@ enum LocalSlot {
 
 /// Load/store flags: the uniform buffer is immutable for a whole dispatch, so
 /// its loads may be merged, hoisted or dropped when unused.
-fn mem_flags(readonly: bool) -> MemFlags {
+fn mem_flags(readonly: bool) -> MemFlagsData {
     if readonly {
-        MemFlags::trusted().with_readonly().with_can_move()
+        MemFlagsData::trusted().with_readonly().with_can_move()
     } else {
-        MemFlags::trusted()
+        MemFlagsData::trusted()
     }
 }
 
@@ -607,15 +607,15 @@ fn emit_checks(
     use cranelift_codegen::ir::{StackSlotData, StackSlotKind};
     let mut buf_len = HashMap::new();
     for (binding, _) in storage_bindings(nmod) {
-        let addr = builder.ins().iadd_imm(lens_ptr, (binding as i64 - 1) * 8);
-        buf_len.insert(binding, builder.ins().load(types::I64, MemFlags::trusted(), addr, 0));
+        let addr = builder.ins().iadd_imm_s(lens_ptr, (binding as i64 - 1) * 8);
+        buf_len.insert(binding, builder.ins().load(types::I64, MemFlagsData::trusted(), addr, 0));
     }
     let scratch = |builder: &mut FunctionBuilder| {
         let slot = builder.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 16, 3));
         let addr = builder.ins().stack_addr(ptr_ty, slot, 0);
         let zero = builder.ins().iconst(types::I64, 0);
-        builder.ins().store(MemFlags::trusted(), zero, addr, 0);
-        builder.ins().store(MemFlags::trusted(), zero, addr, 8);
+        builder.ins().store(MemFlagsData::trusted(), zero, addr, 0);
+        builder.ins().store(MemFlagsData::trusted(), zero, addr, 8);
         addr
     };
     let zero = scratch(builder);
@@ -679,8 +679,8 @@ fn compile_one(
             AddressSpace::Uniform => {}
             AddressSpace::Storage { .. } => {
                 let slot = (binding - 1) as i64;
-                let addr = builder.ins().iadd_imm(bufs_ptr, slot * 8);
-                let base = builder.ins().load(ptr_ty, MemFlags::trusted(), addr, 0);
+                let addr = builder.ins().iadd_imm_s(bufs_ptr, slot * 8);
+                let base = builder.ins().load(ptr_ty, MemFlagsData::trusted(), addr, 0);
                 buf_base.insert(binding, base);
             }
             other => return Err(format!("unsupported address space {other:?}").into()),
@@ -703,7 +703,7 @@ fn compile_one(
     builder.switch_to_block(body);
     // Synthesise the builtin components so the shader's own index math reproduces
     // our linear `gidx`: nwg=(gx,gy,1); gid=(gidx % (gx*64), gidx / (gx*64), 0).
-    let gx64 = builder.ins().imul_imm(gx, 64);
+    let gx64 = builder.ins().imul_imm_s(gx, 64);
     let gx64_64 = builder.ins().uextend(types::I64, gx64);
     let gid_x64 = builder.ins().urem(gidx, gx64_64);
     let gid_y64 = builder.ins().udiv(gidx, gx64_64);
@@ -748,14 +748,14 @@ fn compile_one(
     }
 
     builder.switch_to_block(latch);
-    let next = builder.ins().iadd_imm(gidx, 1);
+    let next = builder.ins().iadd_imm_s(gidx, 1);
     builder.ins().jump(header, &[BlockArg::from(next)]);
 
     builder.switch_to_block(exit);
     builder.ins().return_(&[]);
 
     builder.seal_all_blocks();
-    builder.finalize();
+    builder.finalize(module.target_config());
     Ok(Compiled { wg: None, bindings })
 }
 
@@ -948,8 +948,8 @@ fn compile_one_wg(
             AddressSpace::Storage { .. } => {
                 let binding = gv.binding.as_ref().map(|b| b.binding).ok_or("storage without binding")?;
                 let slot = (binding - 1) as i64;
-                let addr = builder.ins().iadd_imm(bufs_ptr, slot * 8);
-                let base = builder.ins().load(ptr_ty, MemFlags::trusted(), addr, 0);
+                let addr = builder.ins().iadd_imm_s(bufs_ptr, slot * 8);
+                let base = builder.ins().load(ptr_ty, MemFlagsData::trusted(), addr, 0);
                 buf_base.insert(binding, base);
             }
             AddressSpace::WorkGroup => {
@@ -1048,13 +1048,13 @@ fn compile_one_wg(
     builder.ins().jump(wg_latch, &[]);
 
     builder.switch_to_block(wg_latch);
-    let next = builder.ins().iadd_imm(wg, 1);
+    let next = builder.ins().iadd_imm_s(wg, 1);
     builder.ins().jump(wg_header, &[BlockArg::from(next)]);
 
     builder.switch_to_block(exit);
     builder.ins().return_(&[]);
     builder.seal_all_blocks();
-    builder.finalize();
+    builder.finalize(module.target_config());
     Ok(())
 }
 
@@ -1076,10 +1076,10 @@ fn emit_fill(builder: &mut FunctionBuilder, base: Value, count: i64, value: Valu
     builder.ins().brif(done, exit, &[], body, &[]);
 
     builder.switch_to_block(body);
-    let off = builder.ins().imul_imm(i, 4);
+    let off = builder.ins().imul_imm_s(i, 4);
     let addr = builder.ins().iadd(base, off);
-    builder.ins().store(MemFlags::trusted(), value, addr, 0);
-    let next = builder.ins().iadd_imm(i, 1);
+    builder.ins().store(MemFlagsData::trusted(), value, addr, 0);
+    let next = builder.ins().iadd_imm_s(i, 1);
     builder.ins().jump(header, &[BlockArg::from(next)]);
 
     builder.switch_to_block(exit);
@@ -1152,18 +1152,18 @@ fn emit_invocation_loop(
 
     // This lane's slot in the mask.
     let lid64 = builder.ins().uextend(types::I64, lid);
-    let active_off = builder.ins().imul_imm(lid64, 4);
+    let active_off = builder.ins().imul_imm_s(lid64, 4);
     let active_addr = builder.ins().iadd(active_base, active_off);
     if first {
         let alive = builder.ins().iconst(types::I32, 1);
-        builder.ins().store(MemFlags::trusted(), alive, active_addr, 0);
+        builder.ins().store(MemFlagsData::trusted(), alive, active_addr, 0);
     } else {
         // An invocation that returned before the barrier does not run this
         // segment either. Without this the surplus invocations of a padded
         // grid - exactly the ones every `if (w >= p.n_wg) { return; }` guard
         // exists to exclude - would write their output anyway.
-        let a = builder.ins().load(types::I32, MemFlags::trusted(), active_addr, 0);
-        let dead = builder.ins().icmp_imm(IntCC::Equal, a, 0);
+        let a = builder.ins().load(types::I32, MemFlagsData::trusted(), active_addr, 0);
+        let dead = builder.ins().icmp_imm_s(IntCC::Equal, a, 0);
         let run = builder.create_block();
         builder.ins().brif(dead, lid_latch, &[], run, &[]);
         builder.switch_to_block(run);
@@ -1200,7 +1200,7 @@ fn emit_invocation_loop(
     }
 
     builder.switch_to_block(lid_latch);
-    let nxt = builder.ins().iadd_imm(lid, 1);
+    let nxt = builder.ins().iadd_imm_s(lid, 1);
     builder.ins().jump(lid_header, &[BlockArg::from(nxt)]);
 
     builder.switch_to_block(lid_exit);
@@ -1346,7 +1346,7 @@ impl<'a, 'b> Tr<'a, 'b> {
                     // done so the segment after the barrier skips it too.
                     if let Some(addr) = self.env.active_addr {
                         let dead = self.b.ins().iconst(types::I32, 0);
-                        self.b.ins().store(MemFlags::trusted(), dead, addr, 0);
+                        self.b.ins().store(MemFlagsData::trusted(), dead, addr, 0);
                     }
                     self.b.ins().jump(self.env.latch, &[]);
                     return Ok(false);
@@ -1418,13 +1418,13 @@ impl<'a, 'b> Tr<'a, 'b> {
         let (Some(binding), Some(ck)) = (guard, self.env.checks) else { return addr };
         let (base, len) = (self.env.buf_base[&binding], ck.buf_len[&binding]);
         let off = self.b.ins().isub(addr, base);
-        let end = self.b.ins().iadd_imm(off, size as i64);
+        let end = self.b.ins().iadd_imm_s(off, size as i64);
         // Unsigned, so an address below the base (a wrapped negative offset) fails the same test.
         let inside = self.b.ins().icmp(IntCC::UnsignedLessThanOrEqual, end, len);
-        let masked = self.b.ins().band_imm(off, FAULT_OFFSET_MASK);
-        let code = self.b.ins().bor_imm(masked, (binding as i64) << FAULT_BINDING_SHIFT);
+        let masked = self.b.ins().band_imm_s(off, FAULT_OFFSET_MASK);
+        let code = self.b.ins().bor_imm_s(masked, (binding as i64) << FAULT_BINDING_SHIFT);
         let record_at = self.b.ins().select(inside, ck.sink, ck.fault);
-        self.b.ins().store(MemFlags::trusted(), code, record_at, 0);
+        self.b.ins().store(MemFlagsData::trusted(), code, record_at, 0);
         self.b.ins().select(inside, addr, if store { ck.sink } else { ck.zero })
     }
 
@@ -1440,7 +1440,7 @@ impl<'a, 'b> Tr<'a, 'b> {
                 let v = self.scalar(value)?;
                 let v = self.coerce(v, elem)?;
                 let addr = self.guarded_addr(guard, addr, cl_ty(elem).bytes(), true);
-                self.b.ins().store(MemFlags::trusted(), v, addr, 0);
+                self.b.ins().store(MemFlagsData::trusted(), v, addr, 0);
             }
             _ => {
                 let (vals, _) = self.value(value)?;
@@ -1837,10 +1837,10 @@ impl<'a, 'b> Tr<'a, 'b> {
                 let mut acc = self.b.ins().iconst(types::I32, 0);
                 for i in 0..4 {
                     let up = 24 - 8 * i;
-                    let ai = self.b.ins().ishl_imm(a, up);
-                    let ai = self.b.ins().sshr_imm(ai, 24);
-                    let bi = self.b.ins().ishl_imm(b2, up);
-                    let bi = self.b.ins().sshr_imm(bi, 24);
+                    let ai = self.b.ins().ishl_imm_s(a, up);
+                    let ai = self.b.ins().sshr_imm_s(ai, 24);
+                    let bi = self.b.ins().ishl_imm_s(b2, up);
+                    let bi = self.b.ins().sshr_imm_s(bi, 24);
                     let p = self.b.ins().imul(ai, bi);
                     acc = self.b.ins().iadd(acc, p);
                 }
@@ -1863,8 +1863,8 @@ impl<'a, 'b> Tr<'a, 'b> {
         if convert.is_none() {
             // Bitcast (reinterpret), same width.
             let v = match (t, target) {
-                (Ty::F32, _) => self.b.ins().bitcast(types::I32, MemFlags::new(), v),
-                (_, Ty::F32) => self.b.ins().bitcast(types::F32, MemFlags::new(), v),
+                (Ty::F32, _) => self.b.ins().bitcast(types::I32, MemFlagsData::new(), v),
+                (_, Ty::F32) => self.b.ins().bitcast(types::F32, MemFlagsData::new(), v),
                 _ => v, // int<->int reinterpret is a no-op
             };
             return Ok((v, target));

@@ -21,7 +21,7 @@
 //! broadcast, the three linear-algebra products for `*`, and sums of products
 //! accumulated left to right (`m * v = m[0] v.x + m[1] v.y + ...`).
 
-use cranelift_codegen::ir::{condcodes::FloatCC, condcodes::IntCC, InstBuilder, MemFlags, Value};
+use cranelift_codegen::ir::{condcodes::FloatCC, condcodes::IntCC, InstBuilder, MemFlagsData, Value};
 use naga::{
     AddressSpace, BinaryOperator, Expression, Handle, MathFunction, RelationalFunction, ScalarKind,
     SwizzleComponent, UnaryOperator, VectorSize,
@@ -130,7 +130,7 @@ impl<'a, 'b> Tr<'a, 'b> {
             Place::Mem { addr, elem, guard, .. } => {
                 let v = self.coerce(one(vals)?, elem)?;
                 let addr = self.guarded_addr(guard, addr, cl_ty(elem).bytes(), true);
-                self.b.ins().store(MemFlags::trusted(), v, addr, 0);
+                self.b.ins().store(MemFlagsData::trusted(), v, addr, 0);
             }
             Place::Ptr { addr, off, shape, guard, .. } => {
                 let mut offs = Vec::new();
@@ -141,9 +141,9 @@ impl<'a, 'b> Tr<'a, 'b> {
                     if guard.is_some() {
                         let a = self.offset_addr(addr, o);
                         let at = self.guarded_addr(guard, a, cl_ty(t).bytes(), true);
-                        self.b.ins().store(MemFlags::trusted(), v, at, 0);
+                        self.b.ins().store(MemFlagsData::trusted(), v, at, 0);
                     } else {
-                        self.b.ins().store(MemFlags::trusted(), v, addr, o as i32);
+                        self.b.ins().store(MemFlagsData::trusted(), v, addr, o as i32);
                     }
                 }
             }
@@ -160,7 +160,7 @@ impl<'a, 'b> Tr<'a, 'b> {
                 check_len(flat_len(m, shape)? as usize, vals.len())?;
                 let vars = self.var_groups[group as usize].clone();
                 for j in 0..n {
-                    let hit = self.b.ins().icmp_imm(IntCC::Equal, idx, j as i64);
+                    let hit = self.b.ins().icmp_imm_s(IntCC::Equal, idx, j as i64);
                     for (c, v) in vals.iter().enumerate() {
                         let (var, t) = vars[(lo + j * step) as usize + c];
                         let v = self.coerce(*v, t)?;
@@ -179,7 +179,7 @@ impl<'a, 'b> Tr<'a, 'b> {
     fn select_among(&mut self, idx: Value, pick: &[Value]) -> Value {
         let mut acc = pick[0];
         for (j, v) in pick.iter().enumerate().skip(1) {
-            let hit = self.b.ins().icmp_imm(IntCC::Equal, idx, j as i64);
+            let hit = self.b.ins().icmp_imm_s(IntCC::Equal, idx, j as i64);
             acc = self.b.ins().select(hit, *v, acc);
         }
         acc
@@ -190,7 +190,7 @@ impl<'a, 'b> Tr<'a, 'b> {
         if off == 0 {
             addr
         } else {
-            self.b.ins().iadd_imm(addr, off as i64)
+            self.b.ins().iadd_imm_s(addr, off as i64)
         }
     }
 
@@ -267,7 +267,7 @@ impl<'a, 'b> Tr<'a, 'b> {
                     Place::Ptr { addr, off, shape, readonly, guard } => {
                         let el = element(m, shape)?;
                         let idx64 = self.emit_i64(idx);
-                        let scaled = self.b.ins().imul_imm(idx64, el.mem_stride as i64);
+                        let scaled = self.b.ins().imul_imm_s(idx64, el.mem_stride as i64);
                         let a = self.b.ins().iadd(addr, scaled);
                         self.mem_place(a, off, el.shape, readonly, guard)
                     }
@@ -282,7 +282,7 @@ impl<'a, 'b> Tr<'a, 'b> {
                         let el = element(m, shape)?;
                         let count = el.count.ok_or("runtime-sized array in a register local")?;
                         debug_assert_eq!(step, count * el.flat_stride);
-                        let scaled = self.b.ins().imul_imm(outer, count as i64);
+                        let scaled = self.b.ins().imul_imm_s(outer, count as i64);
                         let combined = self.b.ins().iadd(scaled, idx);
                         Place::VarsDyn {
                             group,
