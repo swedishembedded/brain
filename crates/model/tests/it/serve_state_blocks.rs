@@ -93,8 +93,10 @@ impl PagedDecoder for Mock {
     fn prefill_interleave_tokens(&self) -> Option<usize> {
         Some(4)
     }
+    /// Rows enough for every prompt of the burst in one call, so every admitted sequence starts its prefill (and takes
+    /// its state row) in the same iteration.
     fn prefill_batch_tokens(&self) -> Option<usize> {
-        Some(64)
+        Some(96)
     }
     fn prefill_chunk(&mut self, table: &mut BlockTable, prompt: &[u32], budget: usize) -> PrefillProgress {
         if table.is_empty() {

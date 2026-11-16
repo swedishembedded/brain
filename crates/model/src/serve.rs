@@ -429,9 +429,10 @@ pub trait PagedDecoder {
         false
     }
 
-    /// Advance the prompts of `jobs` (every sequence still being prefilled,
-    /// oldest first; `table` empty on a sequence's first call, `budget` its
-    /// tokens still to read): start, continue or finish them on the decoder's
+    /// Advance the prompts of `jobs` (every sequence still being prefilled, in
+    /// the order the scheduler wants them read: a decoder that reads one prompt
+    /// at a time starts the first job not yet answered; `table` empty on a
+    /// sequence's first call, `budget` its tokens still to read): start, continue or finish them on the decoder's
     /// background work, without waiting for it while `wait` is false - the
     /// scheduler decodes this iteration. `wait` is true when nothing decodes:
     /// the decoder then waits until a job has advanced, so the scheduler never
@@ -1369,6 +1370,10 @@ pub struct StepReport {
     pub recomputed: Vec<u64>,
 }
 
+/// The oldest prefilling sequence's share of an iteration's prompt rows is one part in this many (see
+/// [`Scheduler::oldest_floor`]).
+const OLDEST_SHARE: usize = 8;
+
 /// A submitted request that has not been admitted yet.
 struct Waiting {
     id: u64,
@@ -1642,12 +1647,18 @@ pub struct Scheduler<D: PagedDecoder> {
     step_cost: StepCost,
     /// How many sequences the card has shown it can hold - see [`MemoryPressure`].
     pressure: MemoryPressure,
+    /// The oldest prefilling sequence and the prompt rows it has earned by being passed over, on a decoder that reads
+    /// whole prompts (see [`Scheduler::oldest_due`]).
+    oldest_credit: Option<(u64, usize)>,
+    /// Token rows of one KV block of the decoder's pool.
+    block_rows: u32,
 }
 
 impl<D: PagedDecoder> Scheduler<D> {
     pub fn new(mut dec: D, max_running: usize) -> Scheduler<D> {
         let max_running = dec.max_batch().map_or(max_running, |m| max_running.min(m));
         dec.prepare_decode(max_running);
+        let block_rows = dec.alloc_mut().block_size();
         // Default budget: two full prefill chunks per iteration. Enough to keep
         // admission moving under load, small enough that running sequences see
         // a decode step between arrivals.
@@ -1677,6 +1688,8 @@ impl<D: PagedDecoder> Scheduler<D> {
             },
             step_cost: StepCost::default(),
             pressure: MemoryPressure::default(),
+            oldest_credit: None,
+            block_rows,
         }
     }
 
@@ -2558,18 +2571,15 @@ impl<D: PagedDecoder> Scheduler<D> {
     }
 
     /// One iteration's prefill for a decoder that takes rows across sequences
-    /// ([`PagedDecoder::prefill_batch_tokens`]): admit every waiting request that fits,
-    /// then hand the decoder the next slices of the oldest prefilling sequences in a
-    /// single call. Each gets at most [`PagedDecoder::prefill_interleave_tokens`] of the
-    /// budget while later ones wait for theirs; what is left over after every
-    /// sequence has had its share goes to the oldest ones, so a lone sequence uses the
-    /// whole budget.
+    /// ([`PagedDecoder::prefill_batch_tokens`]): admit every waiting request that fits, then hand the decoder the
+    /// next slices of the prefilling sequences in a single call, shared out in the scheduler's one order
+    /// ([`Self::allot_prefill`]), the oldest's floor a slice of [`PagedDecoder::prefill_interleave_tokens`].
     fn prefill_batched(&mut self, report: &mut StepReport) {
         while self.admit_one(report, |_| true) {}
         if self.prefilling.is_empty() {
             return;
         }
-        let takes = self.allot_prefill(self.prefill_budget as usize);
+        let takes = self.allot_prefill(self.prefill_budget as usize, self.oldest_floor(), false);
         let mut jobs: Vec<PrefillJob<'_>> =
             self.prefilling.iter_mut().zip(&takes).filter(|(_, &take)| take > 0).map(|(p, &take)| PrefillJob { table: &mut p.table, prompt: &p.prompt, budget: take, embeds: p.embeds.as_deref() }).collect();
         let progress = catch_device_oom(|| self.dec.prefill_chunks(&mut jobs));
@@ -2580,46 +2590,132 @@ impl<D: PagedDecoder> Scheduler<D> {
         }
     }
 
-    /// Split `budget` prompt rows over the prefilling sequences, oldest first: each gets at most
-    /// [`PagedDecoder::prefill_interleave_tokens`] while later ones wait for theirs, and what is left after every
-    /// sequence has had its share goes to the oldest. One entry per prefilling sequence; O(prefilling).
-    fn allot_prefill(&self, budget: usize) -> Vec<usize> {
-        let share = self.dec.prefill_interleave_tokens().unwrap_or(usize::MAX).max(1);
-        let mut left = budget;
+    /// One iteration's prefill for a decoder that reads one sequence's prompt per call
+    /// ([`PagedDecoder::prefill_chunk`]): admit every waiting request that fits, then read in what
+    /// [`Self::allot_prefill`] gives this iteration's budget, one call a sequence. A decoder that cannot read a prompt
+    /// in part ([`PagedDecoder::prefill_interleave_tokens`] `None`) reads whole prompts.
+    fn prefill_sequential(&mut self, report: &mut StepReport) {
+        while self.admit_one(report, |_| true) {}
+        if self.prefilling.is_empty() {
+            return;
+        }
+        let whole = self.dec.prefill_interleave_tokens().is_none();
+        let takes = self.allot_prefill(self.prefill_budget as usize, self.oldest_floor(), whole);
+        let mut answered = vec![0usize; takes.len()];
+        let mut progress = Vec::new();
+        for (idx, &take) in takes.iter().enumerate() {
+            if take == 0 {
+                continue;
+            }
+            let p = &mut self.prefilling[idx];
+            let answer = catch_device_oom(|| match p.embeds.as_deref() {
+                Some(e) => self.dec.prefill_chunk_embeds(&mut p.table, &p.prompt, e, take),
+                None => self.dec.prefill_chunk(&mut p.table, &p.prompt, take),
+            });
+            match answer {
+                Ok(answer) => {
+                    answered[idx] = take;
+                    progress.push(answer);
+                }
+                Err(oom) => {
+                    // What was read in before the failure is lost with the requeue of every prefilling sequence.
+                    return self.recover_from_oom(report, oom, &[]);
+                }
+            }
+        }
+        self.settle_prefill(&answered, progress, Vec::new(), report);
+    }
+
+    /// Rows the oldest prefilling sequence is given each iteration on a decoder that reads prompts in parts: an
+    /// eighth of the iteration's prefill budget, the share of the mixed rounds (`MixedLimits::min_prompt_rows`, 512 of
+    /// 4096 rows on the hybrid decoders, knowledge 400); on one that reads whole prompts, the rows it earns each
+    /// iteration it is passed over: one prefill round ([`PagedDecoder::max_prefill_tokens`]).
+    fn oldest_floor(&self) -> usize {
+        match self.dec.prefill_interleave_tokens() {
+            Some(_) => self.prefill_budget as usize / OLDEST_SHARE,
+            None => self.dec.max_prefill_tokens() as usize,
+        }
+        .max(1)
+    }
+
+    /// Rows the oldest prefilling sequence is owed this iteration before the rest are served by length: `floor` rows
+    /// where the decoder reads a prompt in parts (`whole` false); where it reads whole prompts, its whole prompt
+    /// once the iterations it was passed over have earned it that many rows (`floor` each), else none.
+    fn oldest_due(&mut self, floor: usize, whole: bool) -> usize {
+        let Some(oldest) = self.prefilling.front() else {
+            self.oldest_credit = None;
+            return 0;
+        };
+        let left = oldest.prompt.len() - oldest.done;
+        if !whole {
+            return left.min(floor);
+        }
+        let earned = match self.oldest_credit {
+            Some((id, rows)) if id == oldest.id => rows,
+            _ => 0,
+        };
+        if earned >= left {
+            self.oldest_credit = None;
+            left
+        } else {
+            self.oldest_credit = Some((oldest.id, earned + floor));
+            0
+        }
+    }
+
+    /// The one order the scheduler reads prompts in, on every prefill path: split `budget` prompt rows over the
+    /// prefilling sequences so the prompt with the fewest rows left finishes first (ties go to the older), each
+    /// taking everything it can use before the next gets a row. A prompt that is read in whole starts decoding
+    /// sooner than one read in alongside many others, which lowers the median time to first token at the same total
+    /// rate, and a round that is mostly one prompt's rows runs fewer, longer segments through the attention and
+    /// recurrent kernels. The oldest prefilling sequence is never starved: it is served first what
+    /// [`Self::oldest_due`] owes it (`floor` rows a round).
+    ///
+    /// `whole`: the decoder reads a sequence's whole prompt in one call. A take is then that sequence's whole prompt,
+    /// and after the first a prompt is taken only when it fits what the budget has left.
+    ///
+    /// One entry per prefilling sequence; O(prefilling log prefilling).
+    fn allot_prefill(&mut self, budget: usize, floor: usize, whole: bool) -> Vec<usize> {
         let mut takes = vec![0usize; self.prefilling.len()];
-        for pass_cap in [share, usize::MAX] {
-            for (p, take) in self.prefilling.iter().zip(&mut takes) {
-                let room = (p.prompt.len() - p.done - *take).min(pass_cap.saturating_sub(*take)).min(left);
-                *take += room;
-                left -= room;
+        let due = self.oldest_due(floor, whole);
+        let mut left = budget;
+        if due > 0 {
+            takes[0] = if whole { due } else { due.min(left) };
+            left = left.saturating_sub(takes[0]);
+        }
+        for i in self.shortest_first() {
+            let room = self.prefilling[i].prompt.len() - self.prefilling[i].done - takes[i];
+            if room == 0 {
+                continue;
+            }
+            if whole {
+                // Longer prompts follow: none of them fits either.
+                if takes.iter().any(|&t| t > 0) && room > left {
+                    break;
+                }
+                takes[i] = room;
+                left = left.saturating_sub(room);
+            } else {
+                let rows = room.min(left);
+                takes[i] += rows;
+                left -= rows;
             }
         }
         takes
     }
 
-    /// Split `budget` prompt rows over the prefilling sequences so the prompt with the fewest rows left finishes
-    /// first (ties go to the older), each taking everything it can use before the next gets a row. A prompt that
-    /// is read in whole starts decoding sooner than one read in alongside many others, which lowers the mean
-    /// time to first token at the same total rate, and a round that is mostly one prompt's rows runs fewer, longer
-    /// segments through the attention and recurrent kernels. The oldest prefilling sequence is given `floor` rows
-    /// first, so a long prompt behind a stream of short ones still advances. One entry per prefilling sequence;
-    /// O(prefilling log prefilling).
-    fn allot_prefill_shortest_first(&self, budget: usize, floor: usize) -> Vec<usize> {
-        let mut takes = vec![0usize; self.prefilling.len()];
-        let mut left = budget;
-        if let Some(oldest) = self.prefilling.front() {
-            takes[0] = (oldest.prompt.len() - oldest.done).min(floor).min(left);
-            left -= takes[0];
-        }
+    /// Positions in `prefilling` by the rows each has left to compute, fewest first, ties to the older.
+    fn shortest_first(&self) -> Vec<usize> {
         let mut order: Vec<usize> = (0..self.prefilling.len()).collect();
-        order.sort_by_key(|&i| self.prefilling[i].prompt.len() - self.prefilling[i].done - takes[i]);
-        for i in order {
-            let p = &self.prefilling[i];
-            let room = (p.prompt.len() - p.done - takes[i]).min(left);
-            takes[i] += room;
-            left -= room;
-        }
-        takes
+        order.sort_by_key(|&i| self.rows_to_compute(&self.prefilling[i]));
+        order
+    }
+
+    /// Prompt rows `p` has left to compute: before it starts, a prompt less the prefix it adopts from the cache (a
+    /// conversation's next turn is a short prompt however long its history), else what it has not read in yet.
+    fn rows_to_compute(&self, p: &Prefilling) -> usize {
+        let cached = if p.done == 0 { (p.adopted as usize).saturating_mul(self.block_rows as usize) } else { 0 };
+        p.prompt.len() - p.done.max(cached.min(p.prompt.len().saturating_sub(1)))
     }
 
     /// Record what a prefill call answered for the sequences `takes` gave rows to (one answer per non-zero
@@ -2664,17 +2760,35 @@ impl<D: PagedDecoder> Scheduler<D> {
             return;
         }
         let wait = self.running.iter().all(|r| r.done);
-        let mut jobs: Vec<PrefillJob<'_>> =
-            self.prefilling.iter_mut().map(|p| PrefillJob { table: &mut p.table, prompt: &p.prompt, budget: p.prompt.len() - p.done, embeds: p.embeds.as_deref() }).collect();
+        // The jobs go in the one order (`Self::allot_prefill`): the decoder reads one prompt at a time, so the oldest
+        // goes first once it has earned its prompt's rows, and the rest by the rows they have left.
+        let oldest_first = self.oldest_due(self.oldest_floor(), true) > 0;
+        let mut order: Vec<usize> = self.shortest_first();
+        if oldest_first {
+            order.retain(|&i| i != 0);
+            order.insert(0, 0);
+        }
+        let mut slots: Vec<Option<&mut Prefilling>> = self.prefilling.iter_mut().map(Some).collect();
+        let mut jobs: Vec<PrefillJob<'_>> = order
+            .iter()
+            .map(|&i| {
+                let p = slots[i].take().expect("each prefilling sequence once");
+                PrefillJob { table: &mut p.table, prompt: &p.prompt, budget: p.prompt.len() - p.done, embeds: p.embeds.as_deref() }
+            })
+            .collect();
         let progress = catch_device_oom(|| self.dec.prefill_background(&mut jobs, wait));
-        drop(jobs);
+        drop((jobs, slots));
         let progress = match progress {
             Ok(progress) => progress,
             Err(oom) => return self.recover_from_oom(report, oom, &[]),
         };
         assert_eq!(progress.len(), self.prefilling.len(), "prefill_background answers every job");
+        let mut answers: Vec<Option<PrefillProgress>> = (0..order.len()).map(|_| None).collect();
+        for (&i, answer) in order.iter().zip(progress) {
+            answers[i] = Some(answer);
+        }
         let mut finished = Vec::new();
-        for (idx, (p, answer)) in self.prefilling.iter_mut().zip(progress).enumerate() {
+        for (idx, (p, answer)) in self.prefilling.iter_mut().zip(answers.into_iter().map(|a| a.expect("one answer a job"))).enumerate() {
             match answer {
                 PrefillProgress::Partial { consumed } => p.done += consumed,
                 PrefillProgress::Done(hidden) => finished.push((idx, hidden)),
@@ -2779,69 +2893,21 @@ impl<D: PagedDecoder> Scheduler<D> {
             self.dec.set_spec_prefill(prepare);
         }
 
-        // 1. Admit while there's batch room, enough free blocks for the prompt,
-        //    and prefill budget left this iteration (head-of-line guard: decode
-        //    must run between bursts of admissions). Nothing new is admitted
-        //    while a preempted sequence is still waiting for its blocks - see
-        //    `Scheduler::swapped`.
+        // 1. Admit while there's batch room and enough free blocks for the prompt, then read prompts in on the
+        //    decoder's path, in the one order (`Scheduler::allot_prefill`) and within this iteration's prefill budget,
+        //    so decode runs between rounds. Nothing new is admitted while a preempted sequence is still waiting for
+        //    its blocks - see `Scheduler::swapped`.
         let prefill_range = gpu_core::markers::range(c"serve.admit_prefill");
-        let interleaved = self.dec.prefill_interleave_tokens().is_some();
-        let mut budget_left = self.prefill_budget as usize;
-        let mut worked = false;
-        let batched = self.dec.prefill_batch_tokens().is_some();
         let mixed = self.dec.mixed_step();
         if mixed.is_some() {
             // The prompts are read in by the iteration's one forward (below), beside the decode rows.
             while self.admit_one(report, |_| true) {}
         } else if self.dec.background_prefill() {
             self.prefill_in_background(report);
-        } else if batched {
+        } else if self.dec.prefill_batch_tokens().is_some() {
             self.prefill_batched(report);
         } else {
-            loop {
-                // The oldest request still being prefilled gets the budget first.
-                if let Some(p) = self.prefilling.front_mut() {
-                    if worked && budget_left == 0 {
-                        break;
-                    }
-                    let slice = budget_left.max(1);
-                    let progress = catch_device_oom(|| match p.embeds.as_deref() {
-                        Some(e) => self.dec.prefill_chunk_embeds(&mut p.table, &p.prompt, e, slice),
-                        None => self.dec.prefill_chunk(&mut p.table, &p.prompt, slice),
-                    });
-                    let progress = match progress {
-                        Ok(progress) => progress,
-                        Err(oom) => {
-                            self.recover_from_oom(report, oom, &[]);
-                            break;
-                        }
-                    };
-                    let consumed = match progress {
-                        PrefillProgress::Partial { consumed } => {
-                            p.done += consumed;
-                            consumed
-                        }
-                        PrefillProgress::Done(hidden) => {
-                            let consumed = p.prompt.len() - p.done;
-                            let p = self.prefilling.pop_front().expect("the front was just prefilled");
-                            self.start_running(p, hidden, Vec::new(), report);
-                            consumed
-                        }
-                    };
-                    worked = true;
-                    budget_left = budget_left.saturating_sub(consumed);
-                    continue;
-                }
-                // Admit while there's batch room and enough free blocks for the prompt.
-                //
-                // Always start at least one request per iteration (no starvation); after
-                // that, stop once the budget is spent. A decoder that prefills in slices
-                // spends it slice by slice.
-                let (worked_now, left) = (worked, budget_left);
-                if !self.admit_one(report, |need| !(worked_now && (left == 0 || (!interleaved && need > left)))) {
-                    break;
-                }
-            }
+            self.prefill_sequential(report);
         }
 
         // 2. Make room for this iteration's decode. Admission only checks that
@@ -3063,7 +3129,7 @@ impl<D: PagedDecoder> Scheduler<D> {
     /// **One mixed iteration** ([`PagedDecoder::mixed_step`]): the next token of every sequence in `active` and
     /// a slice of the prompts still being read in, as one forward. The slice is sized from the decoder's
     /// latency target and the cost of the iterations timed so far ([`StepCost::prompt_rows`]), and shared out
-    /// over the prefilling sequences as [`Self::allot_prefill`] does. A decoder that speculates has the decode rows verify
+    /// over the prefilling sequences in the one order ([`Self::allot_prefill`]). A decoder that speculates has the decode rows verify
     /// their drafts in the same forward ([`PagedDecoder::forward_mixed_verify`]).
     fn mixed_iteration(&mut self, limits: MixedLimits, active: &[usize], in_batch: &[bool], report: &mut StepReport) {
         let target = self.dec.mixed_latency_target().map(|t| t.as_secs_f64());
@@ -3073,7 +3139,7 @@ impl<D: PagedDecoder> Scheduler<D> {
         let decode_rows = proposals.as_ref().map_or(active.len(), |p| p.rows.iter().map(Vec::len).sum());
         let started = (self.clock)();
         let prompt_rows = self.step_cost.prompt_rows(limits, decode_rows, target);
-        let takes = self.allot_prefill_shortest_first(prompt_rows, limits.min_prompt_rows);
+        let takes = self.allot_prefill(prompt_rows, limits.min_prompt_rows, false);
         let inputs: Vec<u32> = active.iter().map(|&i| self.running[i].next_input).collect();
         let (mut all_greedy, banned_max) = self.sampling_mode(active);
         // A prompt that ends in this iteration has its first token taken from the same head pass as the decode rows'

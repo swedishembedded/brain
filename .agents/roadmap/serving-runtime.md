@@ -974,3 +974,27 @@ the clients waited a whole request in the queue. The default batch of the 27B is
 (`catalog::serve_defaults::MAX_BATCH_DEFAULTS`, the widest batch that leaves one sequence the 32K floor; 64 on a GH200).
 
 - [x] the 27B's default batch chosen for the card (`resident_qwen35::gguf_resident_banked`), one rule with the MoE's
+- [x] one prefill order on every scheduler path (`Scheduler::allot_prefill`, knowledge #501): shortest prompt
+      first, the oldest never starved; the 27B engine's own background order removed
+- [x] `brain serve` reads Qwen3 prompts in the engine's measured round (`qwen3::serve::prefill_round_rows`, knowledge
+      #500) instead of 512-row rounds: 16 x 32K through HTTP 0.50 -> 0.64 req/s, TTFT p50 18.0 -> 14.4 s
+- [ ] a round width measured for the dense Qwen3 engine: whole prompts are about 8 % faster at 32K on the 4B but cost
+      the 8B half its fleet pool on a 94 GB card
+
+After, `brain perf run serve`, 128 output tokens, gpu3 (before: the shared measurement of e146b033d):
+
+| model | load | req/s before -> after | TTFT p50 | TTFT p95 | ITL p95 |
+|---|---|---|---|---|---|
+| 27B FP8 | c16 x 8K | 1.10 -> 1.33 | 7407 -> 1147 ms | 11957 -> 9380 ms | 292 -> 287 ms |
+| 27B FP8 | c64 x 8K | 1.18 -> 1.53 | 27304 -> 19191 ms | 48594 -> 36647 ms | 293 -> 299 ms |
+| 27B FP8 | c16 x 32K | 0.33 -> 0.34 | 24597 -> 22351 ms | 43885 -> 43177 ms | 356 -> 363 ms |
+| Qwen3-4B | c16 x 8K | 3.09 -> 3.27 | 438 -> 217 ms | 3418 -> 3198 ms | 80 -> 215 ms |
+| Qwen3-4B | c64 x 8K | 3.63 (after) | 8.7 s -> 8532 ms | 14532 ms | 220 ms |
+| Qwen3-4B | c16 x 32K | 0.60 | 10.5 s -> 11107 ms | 22344 ms | 1391 ms |
+| 35B-A3B MoE | c16 x 8K | 1.18 -> 1.20 | 673 -> 661 ms | 10210 -> 10067 ms | 683 -> 660 ms |
+| 35B-A3B MoE | c64 x 8K | 1.33 -> 1.33 | 21583 -> 21523 ms | 41387 -> 41315 ms | 683 -> 685 ms |
+| 35B-A3B MoE | c16 x 32K | 0.32 -> 0.33 | 22526 -> 21945 ms | 44980 -> 43964 ms | 2723 ms |
+
+With equal prompt lengths a burst's median first token is half its total prefill under any order; what remains at
+c64 and 32K is the prefill row rate (knowledge 400). The 4B's ITL p95 at 8K and 32K is one prompt's round, read in
+between decode steps instead of before them.

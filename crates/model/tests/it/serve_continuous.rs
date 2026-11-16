@@ -199,8 +199,8 @@ fn a_cancelled_half_prefilled_request_returns_its_blocks() {
     assert!(!sched.pending());
 }
 
-/// Eight 100-token prompts arrive together; the decoder takes 64 rows per forward and a
-/// sequence gets at most 16 of them while others wait.
+/// Eight 100-token prompts arrive together; the decoder takes 64 rows per forward, shared out in the scheduler's
+/// one prefill order (the oldest's share first, then the prompt with the fewest rows left).
 fn run_prefill_batched(batch_rows: Option<usize>) -> (Vec<(usize, usize)>, Vec<Vec<u32>>, u64) {
     let clock = Rc::new(Cell::new(0));
     let mut toy = Toy::new(clock.clone(), true);
@@ -225,7 +225,7 @@ fn a_decoder_that_takes_rows_across_sequences_is_handed_several_prompts_slices_i
     assert_eq!(batched_tokens, one_by_one_tokens, "batching the prefill must not change any answer");
     assert!(!calls.is_empty(), "the scheduler never called prefill_chunks");
     assert!(calls.iter().all(|&(_, rows)| rows <= 64), "no call carries more than the decoder's row limit: {calls:?}");
-    assert!(calls.iter().any(|&(jobs, rows)| jobs == 4 && rows == 64), "full calls gather four 16-row slices: {calls:?}");
+    assert!(calls.iter().any(|&(jobs, rows)| jobs >= 2 && rows == 64), "full calls gather several prompts' slices: {calls:?}");
     // 800 prompt tokens at 64 rows a call is 13 calls, not the 50 one-slice calls of 16 rows.
     assert!(calls.len() <= 14, "{} calls for 800 rows", calls.len());
     assert_eq!(calls.iter().map(|c| c.1).sum::<usize>(), 800, "every prompt token goes in exactly once");
