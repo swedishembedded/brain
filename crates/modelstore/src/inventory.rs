@@ -636,11 +636,8 @@ fn hfdir_completeness(dir: &Path, shards: &[String]) -> Completeness {
 mod tests {
     use super::*;
 
-    fn scratch_root(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("brain-inventory-test-{name}-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    fn scratch_root(name: &str) -> brain_testutil::Scratch {
+        brain_testutil::Scratch::dir(&format!("brain-inventory-test-{name}"))
     }
 
     fn tiny_gguf(path: &Path) {

@@ -494,12 +494,7 @@ mod tests {
     }
     use crate::hub::FakeHub;
 
-    fn store(tmp_name: &str) -> Store {
-        let dir = std::env::temp_dir().join(tmp_name);
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
-        Store::new(dir)
-    }
+    use crate::test_store::test_store;
 
     fn write_base_fixture(st: &Store, vendor: &str, repo: &str) {
         let dir = st.repo_dir(&ModelRef::new(vendor, repo, None));
@@ -554,7 +549,7 @@ mod tests {
     /// or never reaches the end.
     #[test]
     fn remaining_download_sums_the_plan_and_excludes_what_is_already_on_disk() {
-        let st = store("modelstore-remaining-test-skip");
+        let st = test_store("modelstore-remaining-test-skip");
         let hub = sharded_hub();
         let reference = ModelRef::new("Qwen", "Qwen3-0.6B", None);
         let p = plan(&reference, &st, &hub).unwrap();
@@ -589,7 +584,7 @@ mod tests {
     /// -- which a caller would otherwise divide by.
     #[test]
     fn remaining_download_flags_a_host_that_withholds_sizes() {
-        let st = store("modelstore-remaining-test-nosize");
+        let st = test_store("modelstore-remaining-test-nosize");
         let hub = NoSizes(sharded_hub());
         let reference = ModelRef::new("Qwen", "Qwen3-0.6B", None);
         let p = plan(&reference, &st, &hub).unwrap();
@@ -634,7 +629,7 @@ mod tests {
     fn on_disk_ref_plans_to_serve_with_no_hub_calls() {
         // A hub with nothing registered would error on any call, so a Serve
         // plan proves plan() never touched it.
-        let st = store("modelstore-plan-test-serve");
+        let st = test_store("modelstore-plan-test-serve");
         write_base_fixture(&st, "Qwen", "Qwen3-0.6B");
         let hub = FakeHub::new();
         let r = ModelRef::new("Qwen", "Qwen3-0.6B", None);
@@ -644,7 +639,7 @@ mod tests {
 
     #[test]
     fn reserved_vendor_not_on_disk_is_not_fetchable() {
-        let st = store("modelstore-plan-test-reserved");
+        let st = test_store("modelstore-plan-test-reserved");
         let hub = FakeHub::new();
         let reserved = ModelRef::new("brain", "mock", None);
         let err = plan(&reserved, &st, &hub).unwrap_err();
@@ -653,7 +648,7 @@ mod tests {
 
     #[test]
     fn non_reserved_ref_with_no_hub_entry_and_nothing_on_disk_errors() {
-        let st = store("modelstore-plan-test-missing");
+        let st = test_store("modelstore-plan-test-missing");
         let hub = FakeHub::new();
         let r = ModelRef::new("Qwen", "Qwen3-0.6B", None);
         let err = plan(&r, &st, &hub).unwrap_err();
@@ -662,7 +657,7 @@ mod tests {
 
     #[test]
     fn base_ref_with_single_safetensors_file_plans_config_tokenizer_weights_convert() {
-        let st = store("modelstore-plan-test-base-single");
+        let st = test_store("modelstore-plan-test-base-single");
         let mut hub = FakeHub::new();
         hub.add_file("Qwen", "Qwen3-0.6B", "main", "config.json", br#"{"architectures":["Qwen3ForCausalLM"]}"#.to_vec());
         hub.add_file("Qwen", "Qwen3-0.6B", "main", "tokenizer.json", b"{}".to_vec());
@@ -689,7 +684,7 @@ mod tests {
         // it needs no extra Hub::read_file call either (unlike transformers'
         // config.json gate), so an empty FakeHub with only list_files
         // registered (via add_file's directory side effect) is enough.
-        let st = store("modelstore-plan-test-zimage-base");
+        let st = test_store("modelstore-plan-test-zimage-base");
         let mut hub = FakeHub::new();
         for f in [
             "model_index.json",
@@ -725,7 +720,7 @@ mod tests {
 
     #[test]
     fn base_ref_with_sharded_weights_plans_index_then_each_shard_sorted() {
-        let st = store("modelstore-plan-test-base-sharded");
+        let st = test_store("modelstore-plan-test-base-sharded");
         let mut hub = FakeHub::new();
         hub.add_file("nvidia", "big-model", "main", "config.json", br#"{"model_type":"qwen3"}"#.to_vec());
         hub.add_file("nvidia", "big-model", "main", "model.safetensors.index.json", b"{}".to_vec());
@@ -763,7 +758,7 @@ mod tests {
     /// names the model's stop tokens.
     #[test]
     fn a_bin_only_repo_plans_its_bin_shards_and_generation_config() {
-        let st = store("modelstore-plan-test-bin-sharded");
+        let st = test_store("modelstore-plan-test-bin-sharded");
         let mut hub = FakeHub::new();
         hub.add_file("deepseek-ai", "deepseek-llm-7b-base", "main", "config.json", br#"{"architectures":["LlamaForCausalLM"]}"#.to_vec());
         hub.add_file("deepseek-ai", "deepseek-llm-7b-base", "main", "generation_config.json", b"{}".to_vec());
@@ -776,7 +771,7 @@ mod tests {
             vec!["config.json", "generation_config.json", "pytorch_model.bin.index.json", "pytorch_model-00001-of-00002.bin", "pytorch_model-00002-of-00002.bin"]
         );
 
-        let st = store("modelstore-plan-test-bin-single");
+        let st = test_store("modelstore-plan-test-bin-single");
         let mut hub = FakeHub::new();
         hub.add_file("deepseek-ai", "deepseek-coder-1.3b-base", "main", "config.json", br#"{"architectures":["LlamaForCausalLM"]}"#.to_vec());
         hub.add_file("deepseek-ai", "deepseek-coder-1.3b-base", "main", "pytorch_model.bin", vec![0u8; 4]);
@@ -787,7 +782,7 @@ mod tests {
     /// A repo that ships both formats is fetched once, as safetensors.
     #[test]
     fn safetensors_wins_over_bin() {
-        let st = store("modelstore-plan-test-both-formats");
+        let st = test_store("modelstore-plan-test-both-formats");
         let mut hub = FakeHub::new();
         hub.add_file("deepseek-ai", "deepseek-coder-6.7b-base", "main", "config.json", br#"{"architectures":["LlamaForCausalLM"]}"#.to_vec());
         hub.add_file("deepseek-ai", "deepseek-coder-6.7b-base", "main", "model.safetensors.index.json", b"{}".to_vec());
@@ -800,7 +795,7 @@ mod tests {
 
     #[test]
     fn unsupported_architecture_aborts_before_any_weight_step() {
-        let st = store("modelstore-plan-test-unsupported-arch");
+        let st = test_store("modelstore-plan-test-unsupported-arch");
         let mut hub = FakeHub::new();
         hub.add_file("someone", "exotic-model", "main", "config.json", br#"{"architectures":["MambaForCausalLM"]}"#.to_vec());
         hub.add_file("someone", "exotic-model", "main", "model.safetensors", vec![0u8; 8]);
@@ -812,7 +807,7 @@ mod tests {
 
     #[test]
     fn missing_config_json_errors_before_any_weight_step() {
-        let st = store("modelstore-plan-test-no-config");
+        let st = test_store("modelstore-plan-test-no-config");
         let mut hub = FakeHub::new();
         hub.add_file("someone", "no-config", "main", "model.safetensors", vec![0u8; 8]);
 
@@ -823,7 +818,7 @@ mod tests {
 
     #[test]
     fn quant_ref_with_upstream_gguf_repo_plans_a_single_download() {
-        let st = store("modelstore-plan-test-quant-upstream");
+        let st = test_store("modelstore-plan-test-quant-upstream");
         let mut hub = FakeHub::new();
         hub.add_file("Qwen", "Qwen3-0.6B-GGUF", "main", "Qwen3-0.6B-Q8_0.gguf", vec![0u8; 16]);
 
@@ -848,7 +843,7 @@ mod tests {
         // table must be tried before the same-vendor conventions (which
         // would otherwise silently fall through to a local-quantize plan
         // that then OOMs materializing the 35B fp32 base).
-        let st = store("modelstore-plan-test-quant-cross-vendor");
+        let st = test_store("modelstore-plan-test-quant-cross-vendor");
         let mut hub = FakeHub::new();
         hub.add_file("bartowski", "Qwen_Qwen3.5-35B-A3B-GGUF", "main", "Qwen3.5-35B-A3B-Q8_0.gguf", vec![0u8; 16]);
 
@@ -871,7 +866,7 @@ mod tests {
 
     #[test]
     fn quant_ref_with_no_upstream_artifact_falls_back_to_base_plus_quantize() {
-        let st = store("modelstore-plan-test-quant-fallback");
+        let st = test_store("modelstore-plan-test-quant-fallback");
         let mut hub = FakeHub::new();
         hub.add_file("Qwen", "Qwen3-0.6B", "main", "config.json", br#"{"architectures":["Qwen3ForCausalLM"]}"#.to_vec());
         hub.add_file("Qwen", "Qwen3-0.6B", "main", "model.safetensors", vec![0u8; 8]);
@@ -887,7 +882,7 @@ mod tests {
 
     #[test]
     fn execute_runs_downloads_and_defers_convert_and_quantize() {
-        let st = store("modelstore-plan-test-execute");
+        let st = test_store("modelstore-plan-test-execute");
         let mut hub = FakeHub::new();
         hub.add_file("Qwen", "Qwen3-0.6B", "main", "config.json", br#"{"architectures":["Qwen3ForCausalLM"]}"#.to_vec());
         hub.add_file("Qwen", "Qwen3-0.6B", "main", "model.safetensors", vec![7u8; 32]);
@@ -923,7 +918,7 @@ mod tests {
     /// puts the hub's bytes back and the sentinel is gone.
     #[test]
     fn execute_does_not_redownload_a_file_already_on_disk() {
-        let st = store("modelstore-plan-test-execute-resume");
+        let st = test_store("modelstore-plan-test-execute-resume");
         let mut hub = FakeHub::new();
         hub.add_file("Qwen", "Qwen3-0.6B", "main", "config.json", br#"{"architectures":["Qwen3ForCausalLM"]}"#.to_vec());
         hub.add_file("Qwen", "Qwen3-0.6B", "main", "model.safetensors", vec![7u8; 32]);
@@ -951,7 +946,7 @@ mod tests {
     /// fetches only what is missing.
     #[test]
     fn execute_stops_mid_file_and_leaves_no_partial_file() {
-        let st = store("modelstore-plan-test-execute-stop");
+        let st = test_store("modelstore-plan-test-execute-stop");
         let mut hub = FakeHub::new();
         hub.add_file("Qwen", "Qwen3-0.6B", "main", "config.json", br#"{"architectures":["Qwen3ForCausalLM"]}"#.to_vec());
         // Several 64 KiB chunks, so the stop lands inside the transfer.
@@ -983,7 +978,7 @@ mod tests {
     /// test above while never completing a partially-fetched repo.
     #[test]
     fn execute_still_fetches_the_files_that_are_missing() {
-        let st = store("modelstore-plan-test-execute-partial");
+        let st = test_store("modelstore-plan-test-execute-partial");
         let mut hub = FakeHub::new();
         hub.add_file("Qwen", "Qwen3-0.6B", "main", "config.json", br#"{"architectures":["Qwen3ForCausalLM"]}"#.to_vec());
         hub.add_file("Qwen", "Qwen3-0.6B", "main", "model.safetensors", vec![7u8; 32]);
@@ -1018,7 +1013,7 @@ mod tests {
     /// than making it silently.
     #[test]
     fn a_gguf_only_repo_plans_exactly_one_quantization_and_reports_which() {
-        let st = store("modelstore-plan-gguf-default");
+        let st = test_store("modelstore-plan-gguf-default");
         let hub = gguf_release_hub();
         let reference = ModelRef::new("unsloth", "FLUX.2-klein-9B-GGUF", None);
         let p = plan(&reference, &st, &hub).unwrap();
@@ -1035,7 +1030,7 @@ mod tests {
     /// naming ladder off to guess at `<repo>-GGUF`.
     #[test]
     fn a_quant_suffix_selects_a_file_inside_the_named_gguf_repo() {
-        let st = store("modelstore-plan-gguf-named");
+        let st = test_store("modelstore-plan-gguf-named");
         let hub = gguf_release_hub();
         let reference = ModelRef::new("unsloth", "FLUX.2-klein-9B-GGUF", Some(Quant::Q4KM));
         let p = plan(&reference, &st, &hub).unwrap();

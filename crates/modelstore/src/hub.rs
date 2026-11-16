@@ -607,12 +607,10 @@ mod tests {
     fn fake_hub_download_streams_to_dest() {
         let mut hub = FakeHub::new();
         hub.add_file("Qwen", "Qwen3-0.6B-GGUF", "main", "Qwen3-0.6B-Q8_0.gguf", vec![9, 9, 9]);
-        let dir = std::env::temp_dir().join("modelstore-hub-test-download");
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = brain_testutil::Scratch::dir("modelstore-hub-test-download");
         let dest = dir.join("Q8_0.gguf");
         hub.download("Qwen", "Qwen3-0.6B-GGUF", "main", "Qwen3-0.6B-Q8_0.gguf", &dest, &|| false, &mut |_, _| {}).unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), vec![9, 9, 9]);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

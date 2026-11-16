@@ -27,3 +27,6 @@ libc.workspace = true
 # checkpoint is otherwise the longest step of a fine-tune that is not training.
 [target.'cfg(target_arch = "aarch64")'.dependencies]
 sha2 = { workspace = true, features = ["asm"] }
+
+[dev-dependencies]
+brain-testutil.workspace = true

@@ -456,8 +456,7 @@ mod tests {
     /// it declared is refused.
     #[test]
     fn a_failed_download_leaves_nothing_behind() {
-        let dir = std::env::temp_dir().join(format!("brain-fetch-part-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = brain_testutil::Scratch::dir("brain-fetch-part");
         let dest = dir.join("w.safetensors");
         let err = stream_to_file(&b"0123456789"[..], &dest, Some(4), None, &|| false, &mut |_, _| {}).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
@@ -466,7 +465,6 @@ mod tests {
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0, "no .part and no destination remain");
         stream_to_file(&b"abc"[..], &dest, Some(3), None, &|| false, &mut |_, _| {}).unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), b"abc");
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Spec: a stream that ends before the size it declared is not the file:
@@ -474,20 +472,17 @@ mod tests {
     /// destination, so a dropped connection cannot pass as a complete file.
     #[test]
     fn a_download_shorter_than_declared_is_refused() {
-        let dir = std::env::temp_dir().join(format!("brain-fetch-short-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = brain_testutil::Scratch::dir("brain-fetch-short");
         let dest = dir.join("w.safetensors");
         let err = stream_to_file(&b"abc"[..], &dest, Some(10), None, &|| false, &mut |_, _| {}).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof, "{err}");
         assert!(err.to_string().contains("3 of its declared 10"), "{err}");
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0, "no .part and no destination remain");
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn streams_bytes_to_dest_atomically_via_rename() {
-        let dir = std::env::temp_dir().join("modelstore-fetch-test-basic");
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = brain_testutil::Scratch::dir("modelstore-fetch-test-basic");
         let dest = dir.join("weights.bin");
         let data = b"hello model weights";
         let mut seen = Vec::new();
@@ -498,41 +493,35 @@ mod tests {
         assert_eq!(std::fs::read(&dest).unwrap(), data);
         assert!(!dest.with_extension("bin.part").exists());
         assert_eq!(seen.last(), Some(&(data.len() as u64, Some(data.len() as u64))));
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn sha256_mismatch_is_rejected_and_leaves_no_dest_file() {
-        let dir = std::env::temp_dir().join("modelstore-fetch-test-sha-mismatch");
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = brain_testutil::Scratch::dir("modelstore-fetch-test-sha-mismatch");
         let dest = dir.join("weights.bin");
         let data = b"payload";
         let err = stream_to_file(&data[..], &dest, None, Some("0000000000000000000000000000000000000000000000000000000000000000"), &|| false, &mut |_, _| {})
             .unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
         assert!(!dest.exists());
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn sha256_match_renames_into_place() {
-        let dir = std::env::temp_dir().join("modelstore-fetch-test-sha-ok");
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = brain_testutil::Scratch::dir("modelstore-fetch-test-sha-ok");
         let dest = dir.join("weights.bin");
         let data = b"";
         // sha256("") -- a known vector.
         let expected = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
         stream_to_file(&data[..], &dest, None, Some(expected), &|| false, &mut |_, _| {}).unwrap();
         assert!(dest.exists());
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// A file hashes to the digest of its bytes, and a file that is not
     /// there is an error, not a digest.
     #[test]
     fn a_file_hashes_to_the_digest_of_its_bytes() {
-        let dir = std::env::temp_dir().join(format!("modelstore-fetch-test-sha-file-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = brain_testutil::Scratch::dir("modelstore-fetch-test-sha-file");
         let path = dir.join("weights.bin");
         std::fs::write(&path, b"abc").unwrap();
         // sha256("abc") -- the FIPS 180-2 example vector.
@@ -541,7 +530,6 @@ mod tests {
         // The algorithm-tagged form every identity and record carries.
         assert_eq!(file_digest(&path).unwrap(), "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
         assert!(file_digest(&dir.join("absent.bin")).is_err());
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// A base is named by its file's digest, or for a `transformers`
@@ -550,9 +538,7 @@ mod tests {
     /// part of the name.
     #[test]
     fn a_base_directory_is_named_by_its_config_and_weights() {
-        let dir = std::env::temp_dir().join(format!("modelstore-fetch-test-base-digest-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = brain_testutil::Scratch::dir("modelstore-fetch-test-base-digest");
         std::fs::write(dir.join("config.json"), b"{}").unwrap();
         std::fs::write(dir.join("model.safetensors"), b"weights").unwrap();
         let file = dir.join("model.safetensors");
@@ -567,7 +553,6 @@ mod tests {
         std::fs::write(dir.join("config.json"), b"{\"layers\":1}").unwrap();
         assert_ne!(base_digest(&dir).unwrap(), named, "a config change is another base");
         assert!(base_digest(&dir.join("absent")).is_err());
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// A base is read and hashed once: the digest is kept in the cache file
@@ -576,9 +561,7 @@ mod tests {
     /// digest.
     #[test]
     fn a_base_is_hashed_once_and_again_only_when_its_file_changes() {
-        let dir = std::env::temp_dir().join(format!("modelstore-fetch-test-digest-cache-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = brain_testutil::Scratch::dir("modelstore-fetch-test-digest-cache");
         let (file, cache) = (dir.join("weights.bin"), dir.join("cache").join("digests.txt"));
         std::fs::write(&file, b"abc").unwrap();
         let real = file_digest(&file).unwrap();
@@ -605,7 +588,6 @@ mod tests {
         std::fs::write(dir.join("config.json"), b"{}").unwrap();
         assert_eq!(base_digest_cached(&dir, &cache).unwrap(), base_digest(&dir).unwrap());
         assert_eq!(base_digest_cached(&file, &file.join("not-a-dir").join("digests.txt")).unwrap(), file_digest(&file).unwrap());
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Rewrite every record line (sidecar or cache) to carry `digest`, with its
@@ -629,9 +611,7 @@ mod tests {
     /// bytes' digest.
     #[test]
     fn a_same_size_rewrite_within_one_second_is_detected() {
-        let dir = std::env::temp_dir().join(format!("modelstore-fetch-test-same-tick-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = brain_testutil::Scratch::dir("modelstore-fetch-test-same-tick");
         let (file, cache) = (dir.join("model.safetensors"), dir.join("digests.txt"));
         std::fs::write(&file, b"abc").unwrap();
         let first = marker_of(&file);
@@ -643,7 +623,6 @@ mod tests {
         let rewritten = file_digest(&file).unwrap();
         assert_eq!(base_digest_cached(&file, &cache).unwrap(), rewritten, "the cache served the old bytes' digest");
         assert_eq!(file_digest_sidecar(&file).unwrap(), rewritten, "the sidecar served the old bytes' digest");
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Read and set the marker a sidecar test asserts against.
@@ -665,9 +644,7 @@ mod tests {
     /// content digest.
     #[test]
     fn a_sidecar_is_written_on_the_first_call_and_records_the_digest() {
-        let dir = std::env::temp_dir().join(format!("modelstore-fetch-test-sidecar-first-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = brain_testutil::Scratch::dir("modelstore-fetch-test-sidecar-first");
         let file = dir.join("weights.bin");
         std::fs::write(&file, b"abc").unwrap();
         let real = file_digest(&file).unwrap();
@@ -679,7 +656,6 @@ mod tests {
         let fields: Vec<&str> = text.trim_end().split('\t').collect();
         assert_eq!(fields.len(), 7, "{text:?}");
         assert!(fields[6].parse::<i128>().unwrap() >= begun, "{text:?}");
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// A recorded digest answers only for the stamp it was taken at, and only
@@ -688,9 +664,7 @@ mod tests {
     /// file was not read. A moved stamp is hashed again.
     #[test]
     fn a_sidecar_is_reused_only_for_its_stamp_once_settled() {
-        let dir = std::env::temp_dir().join(format!("modelstore-fetch-test-sidecar-reuse-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = brain_testutil::Scratch::dir("modelstore-fetch-test-sidecar-reuse");
         let file = dir.join("weights.bin");
         std::fs::write(&file, b"abc").unwrap();
         let real = file_digest(&file).unwrap();
@@ -705,7 +679,6 @@ mod tests {
 
         set_marker(&file, marker_of(&file) + std::time::Duration::from_secs(5));
         assert_eq!(file_digest_sidecar(&file).unwrap(), real, "a moved stamp is hashed again");
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// A sidecar that is not a well-formed record for this exact file is
@@ -713,9 +686,7 @@ mod tests {
     /// stale stamp all cost one re-hash and never a wrong digest.
     #[test]
     fn a_corrupt_or_mismatched_sidecar_is_ignored_and_rewritten() {
-        let dir = std::env::temp_dir().join(format!("modelstore-fetch-test-sidecar-corrupt-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = brain_testutil::Scratch::dir("modelstore-fetch-test-sidecar-corrupt");
         let file = dir.join("weights.bin");
         std::fs::write(&file, b"abc").unwrap();
         let real = file_digest(&file).unwrap();
@@ -737,7 +708,6 @@ mod tests {
             let repaired = std::fs::read_to_string(&sidecar).unwrap();
             assert!(repaired.starts_with(&record_prefix(&file, &real)), "{corrupt:?} was replaced: {repaired:?}");
         }
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Several writers hashing the same file at once leave one complete sidecar
@@ -745,9 +715,7 @@ mod tests {
     /// calls, and the rename publishes only a whole record.
     #[test]
     fn concurrent_writers_leave_one_complete_sidecar() {
-        let dir = std::env::temp_dir().join(format!("modelstore-fetch-test-sidecar-concurrent-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = brain_testutil::Scratch::dir("modelstore-fetch-test-sidecar-concurrent");
         let file = dir.join("weights.bin");
         std::fs::write(&file, b"concurrent writers").unwrap();
         let real = file_digest(&file).unwrap();
@@ -774,22 +742,18 @@ mod tests {
             .filter(|name| name.ends_with(".tmp"))
             .collect();
         assert!(temporaries.is_empty(), "temporaries left behind: {temporaries:?}");
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// A base directory reuses each file's sidecar while answering exactly the
     /// digest the uncached form gives.
     #[test]
     fn a_directory_base_reuses_each_files_sidecar() {
-        let dir = std::env::temp_dir().join(format!("modelstore-fetch-test-base-sidecar-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = brain_testutil::Scratch::dir("modelstore-fetch-test-base-sidecar");
         std::fs::write(dir.join("config.json"), b"{}").unwrap();
         std::fs::write(dir.join("model.safetensors"), b"weights").unwrap();
         assert_eq!(base_digest_sidecar(&dir).unwrap(), base_digest(&dir).unwrap());
         assert!(sidecar_path(&dir.join("config.json")).is_file());
         assert!(sidecar_path(&dir.join("model.safetensors")).is_file());
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

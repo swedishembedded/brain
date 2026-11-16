@@ -39,6 +39,8 @@ pub mod plan;
 pub mod recipe;
 pub mod refurl;
 pub mod resolve;
+#[cfg(test)]
+mod test_store;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -617,14 +619,8 @@ fn open_local(reference: ModelRef, dir: PathBuf, weights: PathBuf, format: Forma
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_store::test_store;
     use serde_json::json;
-
-    fn scratch_store(name: &str) -> Store {
-        let dir = std::env::temp_dir().join(name);
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
-        Store::new(dir)
-    }
 
     /// A checkpoint downloaded some other way than `brain pull` - a complete
     /// Hugging Face directory with no manifest - is local exactly as the
@@ -632,7 +628,7 @@ mod tests {
     /// missing a declared shard is not local at all.
     #[test]
     fn a_downloaded_checkpoint_directory_is_local_without_a_manifest() {
-        let store = scratch_store("brain-modelstore-hf-dir-no-manifest");
+        let store = test_store("brain-modelstore-hf-dir-no-manifest");
         let r = ModelRef::new("deepseek-ai", "tiny-coder", None);
         let dir = store.repo_dir(&r);
         std::fs::create_dir_all(&dir).unwrap();
@@ -691,7 +687,7 @@ mod tests {
 
     #[test]
     fn repo_dir_is_vendor_slash_repo_regardless_of_quant() {
-        let store = scratch_store("modelstore-lib-test-repo-dir");
+        let store = test_store("modelstore-lib-test-repo-dir");
         let base = ModelRef::new("Qwen", "Qwen3-0.6B", None);
         let quantized = ModelRef::new("Qwen", "Qwen3-0.6B", Some(Quant::Q4KM));
         assert_eq!(store.repo_dir(&base), store.repo_dir(&quantized));
@@ -700,7 +696,7 @@ mod tests {
 
     #[test]
     fn local_finds_a_real_base_model_and_reads_its_card_and_tokenizer() {
-        let store = scratch_store("modelstore-lib-test-local-base");
+        let store = test_store("modelstore-lib-test-local-base");
         write_base_fixture(&store, "Qwen", "Qwen3-0.6B");
 
         let r = ModelRef::new("Qwen", "Qwen3-0.6B", None);
@@ -730,7 +726,7 @@ mod tests {
 
     #[test]
     fn local_finds_a_compound_model_via_its_manifest_and_resolves_every_role() {
-        let store = scratch_store("modelstore-lib-test-compound-local");
+        let store = test_store("modelstore-lib-test-compound-local");
         write_compound_fixture(&store, "Tongyi-MAI", "Z-Image-Turbo");
 
         let r = ModelRef::new("Tongyi-MAI", "Z-Image-Turbo", None);
@@ -748,7 +744,7 @@ mod tests {
 
     #[test]
     fn local_compound_is_none_when_a_role_path_is_missing_incomplete_fetch() {
-        let store = scratch_store("modelstore-lib-test-compound-incomplete");
+        let store = test_store("modelstore-lib-test-compound-incomplete");
         write_compound_fixture(&store, "Tongyi-MAI", "Z-Image-Turbo");
         // Simulate an interrupted fetch: the manifest is there, but one of its
         // role paths never landed.
@@ -760,7 +756,7 @@ mod tests {
 
     #[test]
     fn local_compound_rejects_a_role_path_that_escapes_the_repo_dir() {
-        let store = scratch_store("modelstore-lib-test-compound-traversal");
+        let store = test_store("modelstore-lib-test-compound-traversal");
         let dir = store.repo_dir(&ModelRef::new("Tongyi-MAI", "Z-Image-Turbo", None));
         std::fs::create_dir_all(&dir).unwrap();
         let manifest = CompoundManifest {
@@ -784,7 +780,7 @@ mod tests {
 
     #[test]
     fn local_detailed_names_the_missing_role_instead_of_a_bare_not_found() {
-        let store = scratch_store("modelstore-lib-test-compound-detailed-missing");
+        let store = test_store("modelstore-lib-test-compound-detailed-missing");
         write_compound_fixture(&store, "Tongyi-MAI", "Z-Image-Turbo");
         let dir = store.repo_dir(&ModelRef::new("Tongyi-MAI", "Z-Image-Turbo", None));
         // Simulate an interrupted fetch: the manifest is there, but the "vae"
@@ -804,7 +800,7 @@ mod tests {
 
     #[test]
     fn local_detailed_names_an_unsafe_role_path_the_same_as_local_compound() {
-        let store = scratch_store("modelstore-lib-test-compound-detailed-traversal");
+        let store = test_store("modelstore-lib-test-compound-detailed-traversal");
         let dir = store.repo_dir(&ModelRef::new("Tongyi-MAI", "Z-Image-Turbo", None));
         std::fs::create_dir_all(&dir).unwrap();
         let manifest = CompoundManifest {
@@ -827,7 +823,7 @@ mod tests {
 
     #[test]
     fn scan_finds_a_compound_model_alongside_a_single_file_one() {
-        let store = scratch_store("modelstore-lib-test-compound-scan");
+        let store = test_store("modelstore-lib-test-compound-scan");
         write_base_fixture(&store, "Qwen", "Qwen3-0.6B");
         write_compound_fixture(&store, "Tongyi-MAI", "Z-Image-Turbo");
 
@@ -860,7 +856,7 @@ mod tests {
     /// part 1's path - the one `MmapGguf::open` needs to find every sibling.
     #[test]
     fn local_finds_a_split_quant_and_resolves_to_part_1() {
-        let store = scratch_store("modelstore-lib-test-split-quant-local");
+        let store = test_store("modelstore-lib-test-split-quant-local");
         let dir = store.repo_dir(&ModelRef::new("unsloth", "FLUX.2-klein-9B-GGUF", None));
         std::fs::create_dir_all(&dir).unwrap();
         checkpoint::gguf_write::write_split(dir.to_str().unwrap(), "Q4_K_M", &[], &three_split_parts(), 32).unwrap();
@@ -876,7 +872,7 @@ mod tests {
     /// dedup that would register the same `LocalModel` three times.
     #[test]
     fn scan_dedupes_a_split_quants_parts_into_one_local_model() {
-        let store = scratch_store("modelstore-lib-test-split-quant-scan");
+        let store = test_store("modelstore-lib-test-split-quant-scan");
         let dir = store.repo_dir(&ModelRef::new("unsloth", "FLUX.2-klein-9B-GGUF", None));
         std::fs::create_dir_all(&dir).unwrap();
         checkpoint::gguf_write::write_split(dir.to_str().unwrap(), "Q4_K_M", &[], &three_split_parts(), 32).unwrap();
@@ -941,14 +937,14 @@ mod tests {
 
     #[test]
     fn local_returns_none_when_nothing_is_on_disk() {
-        let store = scratch_store("modelstore-lib-test-local-missing");
+        let store = test_store("modelstore-lib-test-local-missing");
         let r = ModelRef::new("Qwen", "Qwen3-0.6B", None);
         assert!(store.local(&r).is_none());
     }
 
     #[test]
     fn scan_finds_the_base_model_and_ignores_unrelated_files() {
-        let store = scratch_store("modelstore-lib-test-scan");
+        let store = test_store("modelstore-lib-test-scan");
         write_base_fixture(&store, "Qwen", "Qwen3-0.6B");
         // A stray file that must not be picked up as a quant artifact.
         std::fs::write(store.repo_dir(&ModelRef::new("Qwen", "Qwen3-0.6B", None)).join("README.md"), b"hi").unwrap();
@@ -960,7 +956,7 @@ mod tests {
 
     #[test]
     fn scan_across_two_vendors_returns_both_sorted_by_reference() {
-        let store = scratch_store("modelstore-lib-test-scan-multi");
+        let store = test_store("modelstore-lib-test-scan-multi");
         write_base_fixture(&store, "Qwen", "Qwen3-0.6B");
         write_base_fixture(&store, "LiquidAI", "LFM2.5-350M");
 
@@ -999,7 +995,7 @@ mod tests {
 
     #[test]
     fn local_resolves_an_adapter_ref_to_base_weights_plus_the_adapter_file() {
-        let store = scratch_store("modelstore-lib-test-adapter-local");
+        let store = test_store("modelstore-lib-test-adapter-local");
         write_base_fixture(&store, "Qwen", "Qwen3-0.6B");
         write_adapter_fixture(&store, "Qwen", "Qwen3-0.6B", "swedishembedded-com", "generic-sft", "latest");
 
@@ -1018,7 +1014,7 @@ mod tests {
 
     #[test]
     fn local_is_none_when_the_base_is_missing_even_if_the_adapter_exists() {
-        let store = scratch_store("modelstore-lib-test-adapter-no-base");
+        let store = test_store("modelstore-lib-test-adapter-no-base");
         write_adapter_fixture(&store, "Qwen", "Qwen3-0.6B", "owner", "name", "latest");
         let r = ModelRef::parse("Qwen/Qwen3-0.6B:owner:name:latest").unwrap();
         assert!(store.local(&r).is_none());
@@ -1026,7 +1022,7 @@ mod tests {
 
     #[test]
     fn local_is_none_when_the_adapter_is_missing_even_if_the_base_exists() {
-        let store = scratch_store("modelstore-lib-test-adapter-no-adapter");
+        let store = test_store("modelstore-lib-test-adapter-no-adapter");
         write_base_fixture(&store, "Qwen", "Qwen3-0.6B");
         let r = ModelRef::parse("Qwen/Qwen3-0.6B:owner:name:latest").unwrap();
         assert!(store.local(&r).is_none());
@@ -1039,7 +1035,7 @@ mod tests {
     /// base's family so the resident that serves the base serves it.
     #[test]
     fn an_adapter_on_a_downloaded_checkpoint_directory_is_its_own_servable_entry() {
-        let store = scratch_store("modelstore-lib-test-scan-adapter-on-hf-dir");
+        let store = test_store("modelstore-lib-test-scan-adapter-on-hf-dir");
         let base = ModelRef::new("someone", "llama-ish", None);
         let dir = store.repo_dir(&base);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1064,7 +1060,7 @@ mod tests {
 
     #[test]
     fn scan_finds_a_base_model_and_its_adapter_as_two_distinct_entries() {
-        let store = scratch_store("modelstore-lib-test-scan-adapter");
+        let store = test_store("modelstore-lib-test-scan-adapter");
         write_base_fixture(&store, "Qwen", "Qwen3-0.6B");
         write_adapter_fixture(&store, "Qwen", "Qwen3-0.6B", "swedishembedded-com", "generic-sft", "latest");
 

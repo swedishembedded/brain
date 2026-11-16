@@ -117,7 +117,7 @@ mod tests {
     /// under.
     #[test]
     fn a_directory_is_classified_by_the_architecture_its_config_declares() {
-        let root = std::env::temp_dir().join(format!("family-spec-{}", std::process::id()));
+        let root = brain_testutil::Scratch::dir("family-spec");
         let ours = root.join("vendor").join("huginn-0125");
         let other = root.join("vendor").join("something-else");
         for (dir, class) in [(&ours, "RavenForCausalLM"), (&other, "LlamaForCausalLM")] {
@@ -132,6 +132,5 @@ mod tests {
         let chosen = BTreeMap::from([("weights".to_string(), 0usize)]);
         let AssembleOutcome::Assembled(v) = spec.assemble(&chosen, &records, &BTreeMap::new()).unwrap() else { panic!("assembled") };
         assert_eq!(v.id, "vendor/huginn-0125");
-        let _ = std::fs::remove_dir_all(&root);
     }
 }

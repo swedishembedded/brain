@@ -68,8 +68,7 @@ mod tests {
     /// and leaves nothing else in the directory.
     #[test]
     fn publishing_replaces_the_manifest_and_leaves_nothing_beside_it() {
-        let dir = std::env::temp_dir().join(format!("brain-adapter-manifest-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = brain_testutil::Scratch::dir("brain-adapter-manifest");
         let path = dir.join("release.json");
         let first = AdapterManifest { adapter: "releases/one.safetensors".into(), digest: format!("sha256:{}", "a".repeat(64)) };
         let second = AdapterManifest { adapter: "releases/two.safetensors".into(), digest: format!("sha256:{}", "b".repeat(64)) };
@@ -78,6 +77,5 @@ mod tests {
         assert_eq!(serde_json::from_slice::<AdapterManifest>(&std::fs::read(&path).unwrap()).unwrap(), second);
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
         assert!(AdapterManifest::write_atomically(&first, Path::new("/")).is_err());
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

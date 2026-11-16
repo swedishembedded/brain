@@ -880,15 +880,13 @@ mod tests {
     /// tokenizer changes it.
     #[test]
     fn a_rewritten_tokenizer_is_sized_again() {
-        let dir = std::env::temp_dir().join(format!("brain-vocab-memo-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = brain_testutil::Scratch::dir("brain-vocab-memo");
         let path = dir.join("tokenizer.json");
         std::fs::write(&path, br#"{"model":{"vocab":{"a":0}}}"#).unwrap();
         assert_eq!(tokenizer_vocab_count(&path), Some(1));
         assert_eq!(tokenizer_vocab_count(&path), Some(1));
         std::fs::write(&path, br#"{"model":{"vocab":{"a":0,"b":1,"c":2}}}"#).unwrap();
         assert_eq!(tokenizer_vocab_count(&path), Some(3));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn rec(path: &str) -> ArtifactRecord {
@@ -899,10 +897,8 @@ mod tests {
         ArtifactRecord { path: PathBuf::from(path), size: 1, mtime_ns: 0, kind: crate::inventory::ArtifactKind::Opaque, completeness: Completeness::Partial { final_path: PathBuf::from(final_path) } }
     }
 
-    fn tmp(tag: &str) -> PathBuf {
-        static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        std::env::temp_dir().join(format!("brain-modelstore-resolve-test-{tag}-{}-{n}", std::process::id()))
+    fn tmp(tag: &str) -> brain_testutil::Scratch {
+        brain_testutil::Scratch::dir(&format!("brain-modelstore-resolve-test-{tag}"))
     }
 
     fn complete(path: PathBuf, kind: crate::inventory::ArtifactKind) -> ArtifactRecord {
@@ -969,12 +965,10 @@ mod tests {
     /// slots) - within 5% must still match.
     #[test]
     fn a_brain_checkpoint_file_declares_its_vocabulary_in_its_header() {
-        let dir = std::env::temp_dir().join(format!("resolve-brain-vocab-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = brain_testutil::Scratch::dir("resolve-brain-vocab");
         let file = dir.join("model.brain.safetensors");
         checkpoint::st::save_safetensors(file.to_str().unwrap(), &[("w".into(), vec![1u64], vec![0.0f32])], &serde_json::json!({"vocab_size": 4096}), None).unwrap();
         assert_eq!(checkpoint_vocab_size(&file), Some(4096), "a tokenizer beside a brain checkpoint is paired by the header's vocabulary");
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
