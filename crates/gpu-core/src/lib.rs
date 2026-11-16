@@ -3126,6 +3126,14 @@ mod native_facade {
             }
         }
 
+        /// Freeze `tape` into the backend's program now (a CUDA graph is captured and instantiated) without running it, so
+        /// its first [`Self::replay_tape`] launches at once instead of doing that host work while the device waits. A
+        /// backend that does not freeze recordings does nothing.
+        pub fn prepare_tape(&self, tape: &crate::tape::Tape) {
+            assert!(!self.taping.load(std::sync::atomic::Ordering::Relaxed), "Gpu::prepare_tape while a tape is being recorded");
+            let _ = tape.frozen(|segs| self.be().freeze(segs));
+        }
+
         /// Per-kernel DEVICE time of a recorded tape: it is run `reps` times as one
         /// program and each dispatch is timed from the previous one's completion,
         /// minimised over the runs (`(kernel, ms per run, dispatches per run)`,

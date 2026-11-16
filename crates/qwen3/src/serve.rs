@@ -3373,6 +3373,37 @@ impl Engine {
         bsz
     }
 
+    /// Record the decode tape of every row count up to `max_rows` (and the engine's batch and the decode regime) that is
+    /// not recorded yet, the tape [`Self::run_batched_submit`] would record on first use, frozen into the backend's program
+    /// (`Gpu::prepare_tape`): recording and freezing are host work the device waits behind, so a server pays them at start
+    /// instead of in front of the first step at each batch size.
+    /// The adapter variant is recorded on first use, as before.
+    pub fn record_decode_tapes(&mut self, max_rows: u32) {
+        let top = max_rows.min(self.max_batch).min(DECODE_REGIME_MAX_ROWS);
+        let (started, before) = (std::time::Instant::now(), self.tape_cache.len());
+        for bsz in 1..=top {
+            if self.tape_cache.contains_key(&(bsz, false)) {
+                continue;
+            }
+            let s = self.batched_tape(bsz, Input::Tokens(&[]), false, false);
+            let recording = self.gpu.record_tape();
+            self.gpu.submit(&[], &s);
+            let tape = recording.finish();
+            self.gpu.prepare_tape(&tape);
+            self.tape_cache.insert((bsz, false), tape);
+        }
+        let recorded = self.tape_cache.len() - before;
+        if recorded > 0 {
+            eprintln!("serve: recorded and froze {recorded} decode tapes (1..={top} rows) in {} ms before the first request", started.elapsed().as_millis());
+        }
+    }
+
+    /// `(recorded, frozen)` decode tapes of base rows: what a decode step at a new row count would have to record.
+    pub fn decode_tapes(&self) -> (usize, usize) {
+        let base = self.tape_cache.iter().filter(|((_, lora), _)| !lora);
+        (base.clone().count(), base.filter(|(_, t)| t.is_frozen()).count())
+    }
+
     /// One batched decode step that returns the **greedy next token per row**,
     /// with the LM head evaluated on the device.
     ///
@@ -4393,6 +4424,9 @@ impl model::serve::rows::RowsForward for Engine {
 }
 
 impl model::serve::PagedDecoder for Engine {
+    fn prepare_decode(&mut self, max_rows: usize) {
+        self.record_decode_tapes(u32::try_from(max_rows).unwrap_or(u32::MAX));
+    }
     fn alloc_mut(&mut self) -> &mut BlockAllocator {
         &mut self.alloc
     }

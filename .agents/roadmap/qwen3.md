@@ -264,25 +264,25 @@ phase their launch ran in.
 | residual norms write the bf16 operand of the products that read them | 3.23 (3.21-3.24) | 425 / 3442 ms | 96.4 % | 3.70 | 8.8 / 13.9 s | 96.2 % | 4.4 ns, 1.11 ms |
 | query+key norm and K+V append one launch each, SwiGLU without fp32 `h`, one block-table row copied (#485) | 3.09 (3.08-3.10)* | 447 / 3595 ms | 95.3 % | 3.53* | 9.2 / 14.6 s | 96.6 % | 4.0 ns, 0.87 ms |
 
+| decode tapes of 1..=32 rows recorded and frozen when the scheduler is made | (see below) | | 96.4 % | | | 96.7 % | 4.1 ns, 0.88 ms |
+
 \* Client runs taken while another lane's compiler held the cores the benchmark is pinned to; the traced c=64 run of
 the same binary served its 128 requests in 33.9 s against 34.9 s for the row above, prefill kernels 200 against 203 ms
-a prompt.
+a prompt. The last row's client runs (c=16 2.99-3.25, c=64 3.28 req/s) ran under the same load with every kernel of the
+traced run ~10 % slower than the row above's (the module's shared power budget); its own gain is the idle time behind
+first captures, 0.11-0.27 s (c=16) and 0.19 s (c=64) -> 0, for 0.2-0.5 s of recording at start. The graphs are the
+ones a server instantiated on first use anyway.
 
-- [ ] c=16 busy fell with the shorter kernels: of its 0.74 s idle, 0.35 s is the first capture of a decode tape at each
-      new batch size (one instantiation of 0.19-0.21 s), ~2 ms per prompt is building the chunk's per-row block table
-      (`chunk_meta`, every row a copy of the sequence's table) and the rest is gaps under 1 ms.
-- [ ] `serve_conformance` (six tests in parallel on one card) crashes with SIGSEGV in about one run in four when the
-      kernel cache is cold, on main before this work too: `cublasDestroy` (an engine dropped at the end of a test)
-      synchronises the context inside the driver while other threads load and unload modules and instantiate graphs.
-      Destroying the library handle first, with its context current, did not change the rate.
-- [ ] Glue left per 8K-row prefill layer: `silu_mul_bf16` 0.33 ms (at the roof, but writes an fp32 `h` no reader
-      needs without an adapter), `add_rmsnorm_fwd_bf16` 2 x 0.09 ms (writes the products' bf16 operand directly since
-      2026-11-16), the attention output's `cast_f32_bf16`, `qknorm_rope_rows` (a block per token was faster at prefill
-      but starved decode, knowledge 479).
+- [ ] Glue left per 8K-row prefill layer: `silu_mul_to_bf16` 0.25 ms, `add_rmsnorm_fwd_bf16` 2 x 0.09 ms, the
+      attention output's `cast_f32_bf16`, `qknorm_rope_qk` 0.36 ms (a block per token was faster at prefill but starved
+      decode, knowledge 479).
 - [ ] The fused `qkv_pre` / `gateup_pre` scratch is still allocated for the largest round although the bf16 library
       path never writes it (the GEMV and adapter paths do).
-- [ ] A decode step spends ~1.1 ms of its ~13 ms (c=64) in glue launches of a few microseconds each (norms, appends,
-      QK norm, casts): fewer launches per layer, not faster kernels.
+- [ ] A decode step spends ~0.9 ms of its ~13 ms (c=64) in glue launches of a few microseconds each (two norms, the
+      QK norm, the append, the attention-output cast and the SwiGLU per layer): the residual add into the down and o
+      products' epilogue, or the cast into the attention merge, are the next launches to remove.
+- [ ] Prefill chunks still upload a per-row copy of the block table (17 MB at 8K rows); the attention kernels could
+      take one table per sequence and a row-to-sequence map.
 
 ## Not yet done
 

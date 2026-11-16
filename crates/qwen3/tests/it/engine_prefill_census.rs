@@ -55,3 +55,37 @@ fn a_steady_state_prefill_does_not_allocate_from_the_driver() {
         assert_eq!(after.pool_alloc_calls, before.pool_alloc_calls, "pass {pass}: a steady-state prefill took blocks from the pool, so a layer's temporaries were not the next layer's");
     }
 }
+
+/// A server records and freezes its decode steps before the first request (`PagedDecoder::prepare_decode`): a decode
+/// step at a prepared row count then records and freezes nothing, where the first step at each new row count used to
+/// capture and instantiate a graph while the card waited.
+#[test]
+fn a_decode_step_at_a_prepared_row_count_records_nothing() {
+    let Ok(gpu) = gpu_core::Gpu::try_new_cuda(qwen3::model::pipelines()) else {
+        brain_testutil::skip_unavailable("no usable CUDA backend");
+        return;
+    };
+    let cfg = QwenConfig { d_model: 64, d_ff: 128, n_heads: 4, n_kv_heads: 2, head_dim: 16, vocab: 64, block_size: 256, max_position_embeddings: 256, tie_embeddings: false, ..QwenConfig::tiny() };
+    let w = qwen3::init_weights(&cfg, 13); // seed: any weights serve
+    let mut e = Engine::from_map_tier_on(&gpu, cfg.clone(), &w, 16, 64, 4, 16, 32, true, Dtype::BF16);
+    e.prepare_decode(4);
+    assert_eq!(e.decode_tapes(), (4, 4), "every row count up to the engine's batch is recorded and frozen");
+    let mut tables: Vec<BlockTable> = (0..3).map(|_| BlockTable::new()).collect();
+    for (i, t) in tables.iter_mut().enumerate() {
+        let prompt: Vec<u32> = (0..(5 + i as u32)).map(|j| (j * 7 + i as u32) % cfg.vocab).collect();
+        e.prefill_for_perf(t, &prompt);
+    }
+    let mut refs: Vec<&mut BlockTable> = tables.iter_mut().collect();
+    let prepared = e.forward_batched_greedy(&mut refs, &[1, 2, 3]);
+    assert_eq!(e.decode_tapes(), (4, 4), "the step recorded a tape");
+
+    // The same step on an engine that records on first use gives the same tokens.
+    let mut fresh = Engine::from_map_tier_on(&gpu, cfg.clone(), &w, 16, 64, 4, 16, 32, true, Dtype::BF16);
+    let mut tables: Vec<BlockTable> = (0..3).map(|_| BlockTable::new()).collect();
+    for (i, t) in tables.iter_mut().enumerate() {
+        let prompt: Vec<u32> = (0..(5 + i as u32)).map(|j| (j * 7 + i as u32) % cfg.vocab).collect();
+        fresh.prefill_for_perf(t, &prompt);
+    }
+    let mut refs: Vec<&mut BlockTable> = tables.iter_mut().collect();
+    assert_eq!(fresh.forward_batched_greedy(&mut refs, &[1, 2, 3]), prepared, "a prepared tape decodes as a tape recorded on first use");
+}

@@ -69,6 +69,12 @@ impl Tape {
         self.len() == 0
     }
 
+    /// Whether the backend's frozen form has been made ([`crate::Gpu::prepare_tape`] or a first replay), so a replay
+    /// launches it without capturing anything.
+    pub fn is_frozen(&self) -> bool {
+        self.frozen.get().is_some()
+    }
+
     pub(crate) fn push(&mut self, clears: &[&DeviceBuffer], steps: &[Step]) {
         if clears.is_empty() && steps.is_empty() {
             return;

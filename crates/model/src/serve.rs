@@ -62,6 +62,13 @@ pub trait PagedDecoder {
         None
     }
 
+    /// Get every decode step of up to `max_rows` rows ready before the first request (record its replay where the
+    /// decoder replays steps), so the first step at each new row count does not leave the device idle while the host
+    /// records it. [`Scheduler::new`] calls it once. The default does nothing.
+    fn prepare_decode(&mut self, max_rows: usize) {
+        let _ = max_rows;
+    }
+
     /// KV blocks currently free in the pool.
     fn free_blocks(&self) -> u32;
 
@@ -1550,8 +1557,9 @@ pub struct Scheduler<D: PagedDecoder> {
 }
 
 impl<D: PagedDecoder> Scheduler<D> {
-    pub fn new(dec: D, max_running: usize) -> Scheduler<D> {
+    pub fn new(mut dec: D, max_running: usize) -> Scheduler<D> {
         let max_running = dec.max_batch().map_or(max_running, |m| max_running.min(m));
+        dec.prepare_decode(max_running);
         // Default budget: two full prefill chunks per iteration. Enough to keep
         // admission moving under load, small enough that running sequences see
         // a decode step between arrivals.
