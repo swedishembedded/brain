@@ -1292,7 +1292,7 @@ impl MoeProblem {
     /// Slots in the synthetic round: a real prefill round's (a 4096-row round of a top-8 model is 32768 routed slots),
     /// since the ranking of the candidates follows the round's block count: on 8192 slots over at most 64 experts the
     /// staged runs led the gate and up projections that a 257-expert round of 36864 runs faster on the four-tile form
-    /// (gpu3, GH200: 2.59 against 2.29 ms). Only sampled outputs are graded on the host.
+    /// (measured on a GH200; the qwen35moe roadmap ledger holds the figures). Only sampled outputs are graded on the host.
     const SLOTS: u32 = 32768;
     /// Experts in the synthetic round at most: a 256-expert release's.
     const MAX_EXPERTS: u32 = 256;
