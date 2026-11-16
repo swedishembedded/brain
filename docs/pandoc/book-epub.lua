@@ -13,7 +13,8 @@
 --
 -- A table is set smaller when even its narrowest layout (each column as
 -- wide as its longest word or number, which cannot wrap) is wider than a
--- phone's or a tablet column's line, down to 60% of its size. It is never
+-- phone's or a tablet column's line, down to 60% of its size; one still too
+-- wide at that size may break its cells inside a word. It is never
 -- put in a box that scrolls: a reading system that pages the book cannot
 -- split a scrolling box across pages, and some draw nothing of the part
 -- that falls on the next page, leaving the page blank above what follows.
@@ -142,7 +143,11 @@ return {
       local width = table_min_width(t)
       if width <= TABLE_LIMIT_EM then return nil end
       local scale = math.max(TABLE_MIN_SCALE, TABLE_LIMIT_EM / width)
-      return pandoc.Div({ t }, pandoc.Attr("", { "table-fit" },
+      -- A table that does not fit even at the smallest size may break its
+      -- cells inside a word or number, so it still fits the line.
+      local classes = { "table-fit" }
+      if width * TABLE_MIN_SCALE > TABLE_LIMIT_EM then classes[2] = "table-tight" end
+      return pandoc.Div({ t }, pandoc.Attr("", classes,
         { style = string.format("font-size: %d%%", math.floor(scale * 100)) })), false
     end,
   },

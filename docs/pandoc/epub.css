@@ -65,6 +65,8 @@ img.portrait { width: 60%; }
  * on its block). Nothing in the book scrolls: a paging reading system cannot
  * split a scrolling box across pages and may leave the rest of it blank. */
 div.table-fit { margin: 1em 0; }
+/* A table too wide even at the smallest size breaks inside its cells' words. */
+div.table-tight td, div.table-tight th { overflow-wrap: anywhere; word-break: break-word; }
 table { border-collapse: collapse; font-size: 0.85em; margin: 0 auto;
         border-top: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; }
 th, td { padding: 0.25em 0.6em; vertical-align: top; }

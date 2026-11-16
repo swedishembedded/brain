@@ -29,7 +29,7 @@
 -- but where its lines end.
 --
 -- A formula with no place left to break that is still too wide is set
--- smaller, down to MIN_SCALE of the text size, so it fits the column.
+-- smaller, down to half the text size, so it fits the column.
 --
 -- An equation number, \tag{N}, is set as "(N)" at the end of the formula's
 -- last row: the MathML converter drops \tag, and the text cites equations
@@ -639,12 +639,14 @@ break_rows = function(tex, reserve)
   return "\\begin{gathered}" .. table.concat(rows, " \\\\ ") .. "\\end{gathered}"
 end
 
--- Smallest a formula is set, as a fraction of the text size.
-local MIN_SCALE = 0.6
+-- Smallest a formula is set, as a fraction of the text size: the widest
+-- formula that cannot be broken (a boxed set of three equations) needs it
+-- to fit a 340 px phone line.
+local MIN_SCALE = 0.5
 -- The width a formula that cannot be broken further is scaled to: below
 -- LIMIT_EM by the estimate's error (it is within 13% of what a browser sets
 -- for 98% of the formulas), so the scaled formula also fits a phone.
-local SCALE_TARGET_EM = 15.9
+local SCALE_TARGET_EM = 15.3
 
 -- The estimated width of `tex` as set: for an aligned or gathered block,
 -- the widest left column plus the widest right column of its rows (the

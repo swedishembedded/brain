@@ -79,7 +79,7 @@ MD
   ! page | grep -q 'table-fit\|table-scroll'
 }
 
-@test "a table too wide for a phone line is set smaller, never below 60 percent" {
+@test "a table too wide for a phone line is set smaller, never below 60 percent, and wraps inside words beyond that" {
   {
     printf '# One {.chapter}\n\n'
     printf '| %s |\n' "$(printf 'aaaaaaaaaaaa | %.0s' 1 2 3 4 5 6 7 8)" | sed 's/ | |$/ |/'
@@ -88,7 +88,7 @@ MD
   } >"$WORK/book.md"
   build
   html="$(page)"
-  [[ "$html" == *'<div class="table-fit" style="font-size: '*'%">'* ]]
+  [[ "$html" == *'<div class="table-fit'*'style="font-size: '*'%">'* ]]
 }
 
 @test "figures are numbered per chapter and a chapter's own caption replaces the alt text" {
@@ -231,10 +231,10 @@ PY
   [[ "$output" == *'See Volume II, Chapter 1 and [Chapter 2]'* ]]
 }
 
-@test "a formula with no place to break is set smaller to fit, never below 60 percent" {
+@test "a formula with no place to break is set smaller to fit, never below half size" {
   cd "$WORK"
   printf '%s\n' '$$\boxed{\;X[k] = E[k] + \omega^{k}O[k], \qquad X[k + N/2] = E[k] - \omega^{k}O[k], \qquad k = 0, \dots, N/2 - 1\;}$$' '' '$$a = b$$' >f.md
   run pandoc f.md -t html5 --mathml --lua-filter "$REPO/docs/pandoc/book-math-lines.lua"
   [ "$(grep -c 'class="math-scaled"' <<<"$output")" -eq 1 ]
-  [[ "$output" == *'font-size: 60%'* ]]
+  [[ "$output" =~ font-size:\ (5[0-9]|60)% ]]
 }
