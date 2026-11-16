@@ -42,9 +42,12 @@
 //! the replay files and their shares are [`crate::ChatFineTune`]'s, validated
 //! against the base's own template before a device is claimed.
 //!
-//! **Cancellation.** A run whose [`crate::CancelToken`] fires stops at the
-//! next step boundary and writes no checkpoint: the optimizer state a resume
-//! needs is three times the model, so a cancelled full fine-tune starts over.
+//! **Cancellation and resume.** A run whose [`crate::CancelToken`] fires stops at
+//! the next step boundary and writes no checkpoint. With a
+//! [`ChatFullFineTune::resume_state`] it first writes its exact training state
+//! there (weights, AdamW moments, schedule position, batch order; about three
+//! times the model), and the same fine-tune run again continues it; without
+//! one, a cancelled full fine-tune starts over.
 
 use std::path::{Path, PathBuf};
 
@@ -94,6 +97,8 @@ pub struct ChatFullFineTune {
     placed: bool,
     thinking: bool,
     precision: model::TrainPrecision,
+    resume_state: Option<PathBuf>,
+    checkpoint_every: u32,
 }
 
 impl ChatFullFineTune {
@@ -124,7 +129,27 @@ impl ChatFullFineTune {
             placed: false,
             thinking: true,
             precision: model::TrainPrecision::default(),
+            resume_state: None,
+            checkpoint_every: 0,
         }
+    }
+
+    /// Exact resume through the training-state file `path`: a run stopped at a step boundary (cancelled, or its
+    /// process killed after a periodic save) leaves the optimised weights, their AdamW moments, the schedule position
+    /// and the batch order there, and running the same fine-tune again with the same file continues it to the
+    /// checkpoint an uninterrupted run would have written. A state written by a run over other data, another base or
+    /// other options is refused, never continued. Removed once the checkpoint is exported. Unset (the default), a
+    /// stopped run starts over.
+    pub fn resume_state(mut self, path: impl Into<PathBuf>) -> Self {
+        self.resume_state = Some(path.into());
+        self
+    }
+
+    /// Also save the [`Self::resume_state`] every this-many steps (default 0: only when the run is stopped), so a
+    /// process that dies loses at most this many.
+    pub fn checkpoint_every(mut self, steps: u32) -> Self {
+        self.checkpoint_every = steps;
+        self
     }
 
     /// What the run stores each trainable parameter as: the format of the AdamW state (f32, bf16, int8 or logarithmic
@@ -369,25 +394,25 @@ impl ChatFullFineTune {
         };
         plan_before_load(&open, block, &set)?;
 
-        let seed = resolve_seed(self.seed, None)?;
+        let seed = resolve_seed(self.seed, self.resume_state.as_deref())?;
         let requested = model::FitOpts { grad_accum: self.grad_accum, strict_updates: self.strict_updates, weight_decay: self.weight_decay, precision: self.precision.clone(), stages: self.stages, native_sparse: self.native_sparse, ..fit_opts(self.steps, block, self.lr, seed) };
         let opts = model::training_plan::ValidatedTrainingPlan::build(requested, &[]).map_err(|e| Error::Backend(format!("ChatFullFineTune: {e}")))?.into_opts();
         let digest_clock = std::time::Instant::now();
         let base_digest = base_digest(&open)?;
         model::finetune::stage_time("sdk: digest the base weights", digest_clock);
-        let mut on_step = |s: &model::StepReport| {
-            on_progress(&FineTuneProgress::of(s));
-            !cancel.is_cancelled()
-        };
-        let control = model::FitControl { on_step: Some(&mut on_step), ..Default::default() };
-        let tuned = out_dir.join(TUNED_FILE);
-        let train_clock = std::time::Instant::now();
-        let state = optimizer_state_for(&open, block, &set, &self.precision)?;
-        let report = (chat.full)(&open, &prepared_dir, &opts, &tuned, state, control).map_err(|e| Error::Backend(format!("training: {e}")))?;
-        model::finetune::stage_time("sdk: train (open, upload, steps, save)", train_clock);
-
+        let identity = serde_json::json!({
+            "objective": "chat_full",
+            "base": base_digest,
+            "dataset": digest(dataset)?,
+            "replay": self.replay.iter().map(|p| digest(p)).collect::<Result<Vec<_>>>()?,
+            "replay_share_bits": self.replay_share.map(f32::to_bits),
+            "weighted_replay": self.weighted_replay.iter().map(|(p, share)| Ok((digest(p)?, share.to_bits()))).collect::<Result<Vec<_>>>()?,
+            "thinking": self.thinking,
+        });
+        let run = FullRun { chat: &chat, open: &open, tokenizer_dir: &model_dir, prepared_dir: &prepared_dir, out_dir, opts: &opts, set: &set, precision: &self.precision, resume_state: self.resume_state.as_deref(), checkpoint_every: self.checkpoint_every, identity };
+        let trained = run.train_and_export(cancel, &mut on_progress)?;
         let mut outcome = ChatFullFineTuneOutcome {
-            status: FineTuneStatus::Completed,
+            status: trained.status,
             checkpoint: None,
             weights: None,
             weights_digest: None,
@@ -395,27 +420,90 @@ impl ChatFullFineTune {
             seed,
             record: None,
             steps: self.steps,
-            steps_completed: report.steps_completed,
-            initial_loss: Some(report.initial_loss),
-            final_loss: report.final_loss,
+            steps_completed: trained.report.steps_completed,
+            resumed_at: trained.report.resumed_at,
+            initial_loss: Some(trained.report.initial_loss),
+            final_loss: trained.report.final_loss,
             train_records: dataset_records,
             replay_records,
             block,
             lr: self.lr,
         };
-        if report.interrupted {
-            std::fs::remove_file(&tuned).ok();
-            outcome.status = FineTuneStatus::Cancelled;
+        if trained.status != FineTuneStatus::Completed {
             return Ok(outcome);
         }
+        outcome.weights_digest = trained.weights_digest;
+        outcome.weights = trained.weights;
+        outcome.checkpoint = trained.checkpoint;
 
-        let checkpoint = out_dir.join(CHECKPOINT_DIR);
+        let record_path = out_dir.join(RECORD_FILE);
+        std::fs::write(&record_path, serde_json::to_vec_pretty(&outcome.record_json(&base_id)).map_err(|e| Error::Backend(e.to_string()))?)
+            .map_err(|e| Error::Backend(format!("{}: {e}", record_path.display())))?;
+        outcome.record = Some(record_path);
+        Ok(outcome)
+    }
+}
+
+/// One run of a family's full-parameter trainer over a prepared dataset, then the export of what it trained: the part a
+/// chat fine-tune ([`ChatFullFineTune`]) and raw-text pretraining ([`crate::Pretrain`]) share. Only the dataset each
+/// prepares and the options each sets differ.
+pub(crate) struct FullRun<'a> {
+    pub chat: &'a crate::chat_trainer::ChatEntry,
+    /// The checkpoint the trainer opens.
+    pub open: &'a Path,
+    /// The directory whose tokenizer files the exported checkpoint carries.
+    pub tokenizer_dir: &'a Path,
+    pub prepared_dir: &'a Path,
+    pub out_dir: &'a Path,
+    pub opts: &'a model::FitOpts,
+    pub set: &'a gpu_core::devices::ComputeSet,
+    pub precision: &'a model::TrainPrecision,
+    pub resume_state: Option<&'a Path>,
+    pub checkpoint_every: u32,
+    /// What else a saved state must agree with to be continued (digests of the base and data, settings).
+    pub identity: serde_json::Value,
+}
+
+/// What a [`FullRun`] produced.
+pub(crate) struct FullTrained {
+    pub status: FineTuneStatus,
+    pub report: model::FitReport,
+    pub checkpoint: Option<PathBuf>,
+    pub weights: Option<PathBuf>,
+    pub weights_digest: Option<String>,
+}
+
+impl FullRun<'_> {
+    /// Train, reporting every step and stopping at the next boundary once `cancel` fires (the resume state is written
+    /// first when there is one), then export the checkpoint directory and digest its weights. A stopped run exports
+    /// nothing and leaves its state for the next call.
+    pub(crate) fn train_and_export(&self, cancel: &CancelToken, on_progress: &mut dyn FnMut(&FineTuneProgress)) -> Result<FullTrained> {
+        let mut on_step = |s: &model::StepReport| {
+            on_progress(&FineTuneProgress::of(s));
+            !cancel.is_cancelled()
+        };
+        let control = model::FitControl { on_step: Some(&mut on_step), state: self.resume_state, state_every: self.checkpoint_every, identity: self.identity.clone(), ..Default::default() };
+        let tuned = self.out_dir.join(TUNED_FILE);
+        let train_clock = std::time::Instant::now();
+        let state = optimizer_state_for(self.open, self.opts.block_size, self.set, self.precision)?;
+        let report = (self.chat.full)(self.open, self.prepared_dir, self.opts, &tuned, state, control).map_err(|e| match e.kind() {
+            std::io::ErrorKind::InvalidData if self.resume_state.is_some_and(Path::exists) => Error::Backend(format!("the saved training state cannot be continued by this run: {e}")),
+            _ => Error::Backend(format!("training: {e}")),
+        })?;
+        model::finetune::stage_time("sdk: train (open, upload, steps, save)", train_clock);
+        let mut trained = FullTrained { status: FineTuneStatus::Completed, report, checkpoint: None, weights: None, weights_digest: None };
+        if trained.report.interrupted {
+            std::fs::remove_file(&tuned).ok();
+            trained.status = FineTuneStatus::Cancelled;
+            return Ok(trained);
+        }
+        let checkpoint = self.out_dir.join(CHECKPOINT_DIR);
         let export_clock = std::time::Instant::now();
-        match export_trained(&chat, &tuned, &model_dir, &checkpoint, None, &mut || !cancel.is_cancelled()) {
+        match export_trained(self.chat, &tuned, self.tokenizer_dir, &checkpoint, None, &mut || !cancel.is_cancelled()) {
             Err(Error::Cancelled) => {
                 std::fs::remove_file(&tuned).ok();
-                outcome.status = FineTuneStatus::Cancelled;
-                return Ok(outcome);
+                trained.status = FineTuneStatus::Cancelled;
+                return Ok(trained);
             }
             exported => exported?,
         }
@@ -425,17 +513,15 @@ impl ChatFullFineTune {
         // `model.safetensors`.
         let brain_file = checkpoint.join(model::finetune::BRAIN_WEIGHTS_FILE);
         let weights = if brain_file.exists() { brain_file } else { checkpoint.join(WEIGHTS_FILE) };
-        let digest_clock = std::time::Instant::now();
-        outcome.weights_digest = Some(digest(&weights)?);
-        model::finetune::stage_time("sdk: digest the exported weights", digest_clock);
-        outcome.weights = Some(weights);
-        outcome.checkpoint = Some(checkpoint);
-
-        let record_path = out_dir.join(RECORD_FILE);
-        std::fs::write(&record_path, serde_json::to_vec_pretty(&outcome.record_json(&base_id)).map_err(|e| Error::Backend(e.to_string()))?)
-            .map_err(|e| Error::Backend(format!("{}: {e}", record_path.display())))?;
-        outcome.record = Some(record_path);
-        Ok(outcome)
+        trained.weights_digest = Some(digest(&weights)?);
+        trained.weights = Some(weights);
+        trained.checkpoint = Some(checkpoint);
+        // The run is exported; its state would only resume into the same checkpoint again.
+        if let Some(state) = self.resume_state {
+            std::fs::remove_file(state).ok();
+            std::fs::remove_dir_all(state.with_extension("offdevice")).ok();
+        }
+        Ok(trained)
     }
 }
 
@@ -460,8 +546,10 @@ pub struct ChatFullFineTuneOutcome {
     pub seed: u64,
     /// Optimizer steps asked for.
     pub steps: u32,
-    /// Steps completed.
+    /// Steps completed, those before a resume included.
     pub steps_completed: u32,
+    /// The step this call continued a saved [`ChatFullFineTune::resume_state`] at, when it did.
+    pub resumed_at: Option<u32>,
     /// The training loss estimated before the first step.
     pub initial_loss: Option<f32>,
     /// The last step's training loss.
@@ -485,6 +573,7 @@ impl ChatFullFineTuneOutcome {
             "seed": self.seed,
             "steps": self.steps,
             "steps_completed": self.steps_completed,
+            "resumed_at": self.resumed_at,
             "initial_loss": self.initial_loss,
             "final_loss": self.final_loss,
             "train_records": self.train_records,

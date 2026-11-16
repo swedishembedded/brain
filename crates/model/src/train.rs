@@ -1368,6 +1368,8 @@ pub struct StepReport {
     pub grad_norm: Option<f32>,
     /// What the step measured: its phases' seconds, its token accounting and its device memory.
     pub work: StepWork,
+    /// The held-out loss measured right after this step, when an evaluation was due ([`FitOpts::eval_interval`]).
+    pub eval_loss: Option<f32>,
     /// What the objective measured in the step, by name ([`Objective::metrics`]): the policy-gradient
     /// objective's clip fraction, KL and importance ratio, for example. Empty for an objective with none.
     pub metrics: Vec<(&'static str, f32)>,
@@ -2025,8 +2027,10 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
         let last = step + 1 == opts.steps;
         let cooled = selection.cooldown.is_some_and(|c| c.ends_at(step));
         let due = opts.eval_interval > 0 && ((step + 1) % opts.eval_interval == 0 || ((last || cooled) && selection.selecting()));
+        let mut step_eval = None;
         if due {
             if let Some(eval_loss) = agreed_eval(&mut obj, &model, &rng, opts.eval_batches, grad_sync.as_ref())? {
+                step_eval = Some(eval_loss);
                 let train_loss = selection.take_interval();
                 selection.evaluations.push(Evaluation { step: step + 1, train_loss, eval_loss });
                 eprintln!("step {:>6}  lr {:.2e}  train {:.4}  eval {:.4}", step + 1, lr, loss, eval_loss);
@@ -2137,13 +2141,15 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
         }
 
         let keep_going = match control.on_step.as_mut() {
-            Some(on_step) => on_step(&StepReport { step: completed, steps: opts.steps, loss, lr, grad_norm, work, metrics: obj.metrics() }),
+            Some(on_step) => on_step(&StepReport { step: completed, steps: opts.steps, loss, lr, grad_norm, eval_loss: step_eval, work, metrics: obj.metrics() }),
             None => true,
         };
         if let Some(state) = control.state {
             let periodic = control.state_every > 0 && completed.is_multiple_of(control.state_every);
             if !keep_going || periodic {
-                save_train_state(&model, state, completed, applied, &rng, opts, &control.identity, selection.selecting().then_some(&selection), obj.cursor())?;
+                // The selection record holds the evaluations too: saved whether or not the run selects, so a resumed run
+                // reports every evaluation of the whole run, those before the resume included.
+                save_train_state(&model, state, completed, applied, &rng, opts, &control.identity, Some(&selection), obj.cursor())?;
             }
         }
         if !keep_going {

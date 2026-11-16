@@ -10,12 +10,13 @@
 #![cfg(feature = "study")]
 
 //! The from-scratch sequence over every architecture that declares it, on the CPU backend: a vocabulary and chat
-//! template with a random initialization ([`brain::ModelInit`]). The same calls run on each family; only the tiny
-//! configuration differs.
+//! template with a random initialization ([`brain::ModelInit`]), raw-text pretraining with held-out evaluation and an
+//! exact resume ([`brain::Pretrain`]), and a chat full fine-tune on tool-call records ([`brain::ChatFullFineTune`]).
+//! The same calls run on each family; only the tiny configuration differs.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use brain::ModelInit;
+use brain::{ChatFullFineTune, FineTuneStatus, ModelInit, Pretrain};
 
 use crate::chat_fixture::TempDir;
 
@@ -78,6 +79,26 @@ pub fn write_corpus(path: &Path, docs: usize, offset: usize) {
     std::fs::write(path, lines.join("\n")).unwrap();
 }
 
+/// Tool-call chat records: the assistant reads a file through a tool and answers with what it held.
+pub fn write_tool_records(path: &Path) {
+    let tools = serde_json::json!([{"type": "function", "function": {"name": "read_file", "description": "read a file", "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}}}]);
+    let lines: Vec<String> = ["a", "b", "c"]
+        .iter()
+        .enumerate()
+        .map(|(i, f)| {
+            serde_json::json!({"tools": tools, "messages": [
+                {"role": "system", "content": "use tools", "train": false},
+                {"role": "user", "content": format!("what is in {f}.txt"), "train": false},
+                {"role": "assistant", "content": "", "tool_calls": [{"id": "call_0", "type": "function", "function": {"name": "read_file", "arguments": format!("{{\"path\": \"{f}.txt\"}}")}}], "train": true},
+                {"role": "tool", "content": format!("{i}"), "tool_call_id": "call_0", "train": false},
+                {"role": "assistant", "content": format!("the number is {i}"), "train": true}
+            ]})
+            .to_string()
+        })
+        .collect();
+    std::fs::write(path, lines.join("\n")).unwrap();
+}
+
 /// The from-scratch model of `arch` the sequence starts from.
 pub fn init(arch: &str, corpus: &Path, out: &Path, seed: u64) -> brain::Result<brain::ModelInitOutcome> {
     ModelInit::new(arch)
@@ -90,6 +111,22 @@ pub fn init(arch: &str, corpus: &Path, out: &Path, seed: u64) -> brain::Result<b
         .seed(seed)
         .out_dir(out)
         .run()
+}
+
+fn pretrain(base: &Path, dir: &TempDir, out: &str, steps: u32) -> Pretrain {
+    Pretrain::from_pretrained(base.to_str().unwrap())
+        .corpus(dir.join("corpus.jsonl"))
+        .held_out(dir.join("held.jsonl"))
+        .steps(steps)
+        .batch(2)
+        .block(32)
+        .lr(5e-3)
+        .eval_every(3)
+        .eval_batches(2)
+        // seed: a fixed draw order, so a resumed run and a straight one are comparable.
+        .seed(3)
+        .device(crate::chat_fixture::cpu())
+        .out_dir(dir.join(out))
 }
 
 fn files(dir: &Path) -> Vec<(String, Vec<u8>)> {
@@ -106,6 +143,8 @@ fn every_from_scratch_architecture_runs_the_whole_sequence() {
         assert!(tiny_config(arch).is_some(), "{arch} declares a from-scratch initialization: give it a tiny config here");
         let dir = TempDir::new(&format!("from-scratch-{arch}"));
         write_corpus(&dir.join("corpus.jsonl"), 300, 0);
+        write_corpus(&dir.join("held.jsonl"), 40, 5);
+        write_tool_records(&dir.join("tools.jsonl"));
 
         // A vocabulary, a chat format and random weights, the same bytes for the same seed.
         let made = init(arch, &dir.join("corpus.jsonl"), &dir.join("base"), 7).unwrap_or_else(|e| panic!("{arch}: {e}"));
@@ -115,6 +154,45 @@ fn every_from_scratch_architecture_runs_the_whole_sequence() {
         assert_eq!((made.vocab_size, made.seed), (256 + SPECIALS.len() + 120, 7));
         assert!(files(&made.checkpoint).iter().any(|(n, _)| n == "tokenizer.json") && made.params > 0);
 
+        // Pretraining with evaluations, stopped after a periodic save and continued, ends where a straight run ends.
+        let straight = pretrain(&made.checkpoint, &dir, "straight", 6).run().unwrap_or_else(|e| panic!("{arch}: {e}"));
+        assert_eq!((straight.status, straight.steps_completed, straight.resumed_at), (FineTuneStatus::Completed, 6, None));
+        assert_eq!(straight.evaluations.iter().map(|e| e.0).collect::<Vec<_>>(), [3, 6], "{arch}: evaluated every 3 steps");
+        assert!(straight.evaluations.iter().all(|e| e.2.is_finite()) && straight.final_loss.is_some_and(f32::is_finite));
+        let state = dir.join("pretrain.state");
+        let cancel = brain::CancelToken::armed();
+        let first = pretrain(&made.checkpoint, &dir, "resumed", 6).resume_state(&state).checkpoint_every(2).run_with(&cancel, |p| {
+            if p.step == 3 {
+                cancel.cancel();
+            }
+        });
+        assert_eq!(first.unwrap().status, FineTuneStatus::Cancelled);
+        assert!(state.exists(), "{arch}: a stopped run leaves its state");
+        let resumed = pretrain(&made.checkpoint, &dir, "resumed", 6).resume_state(&state).checkpoint_every(2).run().unwrap();
+        assert_eq!((resumed.status, resumed.resumed_at), (FineTuneStatus::Completed, Some(3)));
+        assert_eq!(resumed.weights_digest, straight.weights_digest, "{arch}: the resumed run trains the same weights as the straight one");
+        assert_eq!(resumed.evaluations, straight.evaluations);
+        assert!(!state.exists(), "{arch}: an exported run removes its state");
+        // A state of another run is refused, never continued.
+        let other = pretrain(&made.checkpoint, &dir, "other", 6).resume_state(&state).checkpoint_every(1).run_with(&cancel, |_| {});
+        assert_eq!(other.unwrap().status, FineTuneStatus::Cancelled);
+        let refused = pretrain(&made.checkpoint, &dir, "other", 6).lr(1e-3).resume_state(&state).run().unwrap_err().to_string();
+        assert!(refused.contains("cannot be continued"), "{arch}: {refused}");
+
+        // The pretrained checkpoint takes a chat full fine-tune on tool-call records.
+        let pretrained: PathBuf = straight.checkpoint.clone().unwrap();
+        let tuned = ChatFullFineTune::from_pretrained(pretrained.to_str().unwrap())
+            .dataset(dir.join("tools.jsonl"))
+            .steps(3)
+            .lr(5e-3)
+            .seed(3)
+            .thinking(false)
+            .device(crate::chat_fixture::cpu())
+            .out_dir(dir.join("chat"))
+            .run()
+            .unwrap_or_else(|e| panic!("{arch}: {e}"));
+        assert_eq!((tuned.status, tuned.steps_completed), (FineTuneStatus::Completed, 3), "{arch}");
+        assert!(tuned.checkpoint.as_deref().is_some_and(|c| c.join("tokenizer_config.json").exists()));
     }
 }
 

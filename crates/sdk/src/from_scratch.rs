@@ -8,10 +8,10 @@
 // info@swedishembedded.com.
 
 //! A model from nothing: [`ModelInit`] trains a byte-level BPE vocabulary on a corpus, declares its special tokens and
-//! chat template and writes a randomly initialised checkpoint of a declared configuration. It is
-//! architecture-generic: the architecture is a registry id whose trainer declares the capability
-//! ([`model::finetune::ChatTrainer::FROM_SCRATCH`]), and every other one is refused by name;
-//! [`crate::from_scratch_architectures`] lists those that declare it.
+//! chat template and writes a randomly initialised checkpoint of a declared configuration; [`Pretrain`] trains any
+//! checkpoint on raw text. Both are architecture-generic: the architecture is a registry id whose trainer declares
+//! the capability ([`model::finetune::ChatTrainer::FROM_SCRATCH`] for an initialization, a full-parameter trainer
+//! for pretraining), and every other one is refused by name. [`crate::from_scratch_architectures`] lists the first.
 //!
 //! ```no_run
 //! # fn main() -> brain::Result<()> {
@@ -26,12 +26,15 @@
 //!     .chat_template(std::fs::read_to_string("template.jinja")?)
 //!     .out_dir("models/local/tiny")
 //!     .run()?;
-//! println!("{} parameters in {}", made.params, made.checkpoint.display());
-//! # Ok(()) }
+//! let trained = brain::Pretrain::from_pretrained(made.checkpoint.to_str().unwrap()).corpus("corpus.jsonl").steps(1000).out_dir("runs/pretrain").run()?;
+//! # let _ = trained; Ok(()) }
 //! ```
 //!
 //! **The corpus** is JSONL, one document per line as `{"text": "..."}` (unknown fields refused, blank lines skipped).
-//! The vocabulary is learned from its first [`ModelInit::tokenizer_bytes`] bytes, the special tokens cut out first.
+//! For pretraining each document is encoded with the checkpoint's own tokenizer, special tokens matched whole (so a
+//! conversation serialized in the model's chat template trains the template's own tokens), and followed by the
+//! separator token; the documents are concatenated into one stream and the run draws windows of `block + 1` tokens
+//! from it, every position supervised. A held-out corpus is encoded the same way and scored every `eval_every` steps.
 //!
 //! **The template contract** a from-scratch model meets is checked before a weight is written: the template compiles,
 //! a conversation renders with its last assistant turn a suffix of the prompt the model is asked from (the boundary
@@ -44,9 +47,9 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::finetune::{digest, Asked};
-use crate::full_finetune::chat_entry;
-use crate::{Error, Result};
+use crate::finetune::{base_digest, digest, fit_opts, resolve_seed, Asked};
+use crate::full_finetune::{chat_entry, plan_before_load, FullRun};
+use crate::{CancelToken, Device, Error, FineTuneProgress, FineTuneStatus, Result};
 
 /// The fewest tokens a vocabulary holds beyond its 256 bytes and special tokens: one merge.
 const MIN_MERGES: usize = 1;
@@ -59,6 +62,8 @@ pub const MAX_SPECIAL_TOKEN_BYTES: usize = 128;
 pub const MAX_TEMPLATE_BYTES: usize = 64 * 1024;
 /// The corpus text a vocabulary is learned from by default: the first this-many bytes of documents.
 pub const DEFAULT_TOKENIZER_BYTES: u64 = 64 << 20;
+/// The separator a pretraining corpus's documents are followed by unless the run names one.
+pub const DEFAULT_SEPARATOR: &str = data::bytebpe::END_OF_TEXT;
 
 /// One document of a text corpus.
 #[derive(Deserialize)]
@@ -112,7 +117,7 @@ pub struct ModelInit {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ModelInitOutcome {
     /// The checkpoint directory: the family's weights beside `tokenizer.json`, `tokenizer_config.json` and
-    /// `generation_config.json`. A base like any other: [`crate::ChatFullFineTune`] trains it and
+    /// `generation_config.json`. A base like any other: [`Pretrain`] and [`crate::ChatFullFineTune`] train it and
     /// `brain serve` serves it.
     pub checkpoint: PathBuf,
     pub arch: String,
@@ -383,4 +388,333 @@ fn check_template(dir: &Path, eos: &str) -> Result<bool> {
         seen.push(text);
     }
     Err(refuse(format!("writes the tool-call turn as {seen:?}, which the serving parser does not read back as the call (it reads <tool_call>{{\"name\": ..., \"arguments\": {{...}}}}</tool_call>)")))
+}
+
+/// Raw-text pretraining of a checkpoint. See the module doc.
+#[derive(Clone, Debug)]
+pub struct Pretrain {
+    base: String,
+    arch: Option<String>,
+    models_dir: Option<String>,
+    corpus: Option<PathBuf>,
+    held_out: Option<PathBuf>,
+    separator: Option<String>,
+    steps: u32,
+    batch: u32,
+    block: u32,
+    lr: f32,
+    min_lr: Option<f32>,
+    warmup: Option<u32>,
+    weight_decay: f32,
+    grad_clip: f32,
+    grad_accum: u32,
+    eval_every: u32,
+    eval_batches: u32,
+    strict_updates: bool,
+    seed: Option<u64>,
+    out_dir: Option<PathBuf>,
+    device: Device,
+    placed: bool,
+    resume_state: Option<PathBuf>,
+    checkpoint_every: u32,
+}
+
+/// What one pretraining run did.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PretrainOutcome {
+    pub status: FineTuneStatus,
+    /// The trained checkpoint directory; `None` unless completed.
+    pub checkpoint: Option<PathBuf>,
+    /// `sha256:<hex>` of its weights file.
+    pub weights_digest: Option<String>,
+    pub base_digest: String,
+    pub seed: u64,
+    pub steps: u32,
+    pub steps_completed: u32,
+    pub resumed_at: Option<u32>,
+    pub initial_loss: f32,
+    pub final_loss: Option<f32>,
+    /// `(step, train loss over the interval, held-out loss)` of every evaluation, those before a resume included.
+    pub evaluations: Vec<(u32, f32, f32)>,
+    pub documents: usize,
+    pub tokens: usize,
+    pub held_out_documents: usize,
+    pub held_out_tokens: usize,
+    /// The separator token and its id.
+    pub separator: String,
+    pub separator_id: u32,
+    pub batch: u32,
+    pub block: u32,
+    pub lr: f32,
+}
+
+impl Pretrain {
+    /// Pretraining of `base`: a checkpoint file or directory, or a `vendor/repo` reference in the model store.
+    pub fn from_pretrained(base: impl Into<String>) -> Pretrain {
+        Pretrain {
+            base: base.into(),
+            arch: None,
+            models_dir: None,
+            corpus: None,
+            held_out: None,
+            separator: None,
+            steps: 100,
+            batch: 8,
+            block: 256,
+            lr: 1e-3,
+            min_lr: None,
+            warmup: None,
+            weight_decay: 0.1,
+            grad_clip: 1.0,
+            grad_accum: 1,
+            eval_every: 0,
+            eval_batches: 8,
+            strict_updates: false,
+            seed: None,
+            out_dir: None,
+            device: Device::default(),
+            placed: false,
+            resume_state: None,
+            checkpoint_every: 0,
+        }
+    }
+
+    /// The architecture of the base when the checkpoint does not tell it.
+    pub fn arch(mut self, id: impl Into<String>) -> Self {
+        self.arch = Some(id.into());
+        self
+    }
+    /// The models directory a `vendor/repo` base resolves in.
+    pub fn models_dir(mut self, dir: impl Into<String>) -> Self {
+        self.models_dir = Some(dir.into());
+        self
+    }
+    /// The JSONL training corpus (required).
+    pub fn corpus(mut self, path: impl Into<PathBuf>) -> Self {
+        self.corpus = Some(path.into());
+        self
+    }
+    /// A JSONL held-out corpus, scored every [`Self::eval_every`] steps and never trained on.
+    pub fn held_out(mut self, path: impl Into<PathBuf>) -> Self {
+        self.held_out = Some(path.into());
+        self
+    }
+    /// The special token every document is followed by (default `<|endoftext|>`; the vocabulary must hold it).
+    pub fn separator(mut self, token: impl Into<String>) -> Self {
+        self.separator = Some(token.into());
+        self
+    }
+    /// Optimizer steps (default 100).
+    pub fn steps(mut self, steps: u32) -> Self {
+        self.steps = steps;
+        self
+    }
+    /// Rows per micro-batch (default 8).
+    pub fn batch(mut self, rows: u32) -> Self {
+        self.batch = rows;
+        self
+    }
+    /// Tokens per row (default 256), at most the model's positions.
+    pub fn block(mut self, tokens: u32) -> Self {
+        self.block = tokens;
+        self
+    }
+    /// The peak learning rate (default 1e-3).
+    pub fn lr(mut self, lr: f32) -> Self {
+        self.lr = lr;
+        self
+    }
+    /// The rate the cosine decays to (default a tenth of the peak).
+    pub fn min_lr(mut self, lr: f32) -> Self {
+        self.min_lr = Some(lr);
+        self
+    }
+    /// Linear warmup steps (default a twentieth of the run).
+    pub fn warmup(mut self, steps: u32) -> Self {
+        self.warmup = Some(steps);
+        self
+    }
+    /// AdamW's decoupled weight decay (default 0.1).
+    pub fn weight_decay(mut self, decay: f32) -> Self {
+        self.weight_decay = decay;
+        self
+    }
+    /// The global gradient-norm clip (default 1; 0 turns it off).
+    pub fn grad_clip(mut self, clip: f32) -> Self {
+        self.grad_clip = clip;
+        self
+    }
+    /// Micro-batches summed into one optimizer step (default 1).
+    pub fn grad_accum(mut self, micro_batches: u32) -> Self {
+        self.grad_accum = micro_batches;
+        self
+    }
+    /// Score the held-out corpus every this-many steps (default 0: never; needs [`Self::held_out`]).
+    pub fn eval_every(mut self, steps: u32) -> Self {
+        self.eval_every = steps;
+        self
+    }
+    /// Batches of held-out windows one evaluation averages (default 8).
+    pub fn eval_batches(mut self, batches: u32) -> Self {
+        self.eval_batches = batches;
+        self
+    }
+    /// Abort at the first step whose loss or gradient is not finite (default: skip it).
+    pub fn strict_updates(mut self, strict: bool) -> Self {
+        self.strict_updates = strict;
+        self
+    }
+    /// The seed of the window draws (default a random draw, or the one a resumed state was saved with).
+    pub fn seed(mut self, seed: u64) -> Self {
+        self.seed = Some(seed);
+        self
+    }
+    /// Where the prepared corpus and the checkpoint go (required). One directory per run.
+    pub fn out_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.out_dir = Some(dir.into());
+        self
+    }
+    /// The device the run is placed on.
+    pub fn device(mut self, device: Device) -> Self {
+        self.device = device;
+        self
+    }
+    /// Run on the device this thread is already scoped to (see [`crate::ChatFullFineTune::placed`]).
+    pub fn placed(mut self, on: bool) -> Self {
+        self.placed = on;
+        self
+    }
+    /// Exact resume through this training-state file (see [`crate::ChatFullFineTune::resume_state`]).
+    pub fn resume_state(mut self, path: impl Into<PathBuf>) -> Self {
+        self.resume_state = Some(path.into());
+        self
+    }
+    /// Also save the resume state every this-many steps (default 0: only when stopped).
+    pub fn checkpoint_every(mut self, steps: u32) -> Self {
+        self.checkpoint_every = steps;
+        self
+    }
+
+    /// Run to completion.
+    pub fn run(&self) -> Result<PretrainOutcome> {
+        self.run_with(&CancelToken::default(), |_| {})
+    }
+
+    /// Run, reporting every optimizer step (and every evaluation, on its step) and stopping at the next step boundary
+    /// once `cancel` fires.
+    pub fn run_with(&self, cancel: &CancelToken, mut on_progress: impl FnMut(&FineTuneProgress)) -> Result<PretrainOutcome> {
+        let corpus = self.corpus.as_deref().ok_or_else(|| Error::MissingArgument("Pretrain: no corpus; call .corpus(path)".to_string()))?;
+        let out_dir = self.out_dir.as_deref().ok_or_else(|| Error::MissingArgument("Pretrain: no out directory; call .out_dir(path)".to_string()))?;
+        if self.eval_every > 0 && self.held_out.is_none() {
+            return Err(Error::Backend("Pretrain: eval_every needs a held-out corpus".to_string()));
+        }
+        if self.batch == 0 || self.block < 2 || self.grad_accum == 0 {
+            return Err(Error::Backend("Pretrain: batch and grad_accum must be at least 1 and block at least 2".to_string()));
+        }
+        let store_root = loader::model_dir::resolve(self.models_dir.as_deref());
+        let (weights, model_dir, _) = loader::model_dir::resolve_base(&self.base, store_root.as_deref()).map_err(Error::ModelNotFound)?;
+        let arch = match self.arch.as_deref() {
+            Some(named) => named,
+            None => crate::study::arch_of_checkpoint(&model_dir).map_or("qwen3", |a| a.id),
+        };
+        let chat = chat_entry(arch)?;
+        let open = (chat.checkpoint_path)(&weights, &model_dir);
+        if let Some(positions) = positions_of(&open) {
+            if u64::from(self.block) > positions {
+                return Err(Error::Backend(format!("Pretrain: block {} is longer than the model's {positions} positions", self.block)));
+            }
+        }
+        let tok_path = model_dir.join("tokenizer.json");
+        let tok = data::qwen_tokenizer::QwenBpe::from_file(crate::finetune::utf8(&tok_path)?).map_err(|e| Error::Backend(format!("{}: {e}", tok_path.display())))?;
+        let separator = self.separator.clone().unwrap_or_else(|| DEFAULT_SEPARATOR.to_string());
+        let separator_id = tok.special_id(&separator).ok_or_else(|| Error::Backend(format!("Pretrain: the vocabulary has no special token {separator:?} to separate documents with; name one with separator")))?;
+        let vocab = (chat.vocab)(&open).map_err(Error::Backend)?;
+        let encode = |path: &Path| -> Result<(usize, Vec<u32>)> {
+            let docs = read_text_corpus(path, None)?;
+            let mut ids = Vec::new();
+            for doc in &docs {
+                ids.extend(data::tokenizer::Tokenizer::encode(&tok, doc));
+                ids.push(separator_id);
+            }
+            if let Some(id) = ids.iter().find(|id| **id as usize >= vocab) {
+                return Err(Error::Backend(format!("{}: encodes to token {id}, past the model's vocabulary of {vocab}", path.display())));
+            }
+            Ok((docs.len(), ids))
+        };
+        let (documents, train) = encode(corpus)?;
+        let (held_out_documents, val) = match &self.held_out {
+            Some(path) => encode(path)?,
+            None => (0, Vec::new()),
+        };
+        let prepared = out_dir.join("prepared");
+        std::fs::create_dir_all(&prepared).map_err(|e| Error::Backend(format!("{}: {e}", prepared.display())))?;
+        let io = |e: std::io::Error| Error::Backend(format!("{}: {e}", prepared.display()));
+        data::binio::write_u32_bin(&prepared.join("train.u32.bin"), &train).map_err(io)?;
+        data::binio::write_u32_bin(&prepared.join("val.u32.bin"), &val).map_err(io)?;
+        std::fs::write(prepared.join("meta.json"), data::binio::Meta::vocab_only(vocab)).map_err(io)?;
+
+        let set = if self.placed {
+            gpu_core::devices::ComputeSet { gpus: gpu_core::devices::current_gpu().into_iter().collect(), ..gpu_core::devices::ambient_compute_set().clone() }
+        } else {
+            crate::device::resolve(&self.device)?
+        };
+        plan_before_load(&open, self.block, &set)?;
+        let seed = resolve_seed(self.seed, self.resume_state.as_deref())?;
+        let requested = model::FitOpts {
+            batch_size: self.batch,
+            min_lr: self.min_lr.unwrap_or(self.lr / 10.0),
+            warmup: self.warmup.unwrap_or((self.steps / 20).max(1)),
+            weight_decay: self.weight_decay,
+            grad_clip: self.grad_clip,
+            grad_accum: self.grad_accum,
+            eval_interval: self.eval_every,
+            eval_batches: self.eval_batches,
+            strict_updates: self.strict_updates,
+            ..fit_opts(self.steps, self.block, self.lr, seed)
+        };
+        let opts = model::training_plan::ValidatedTrainingPlan::build(requested, &[]).map_err(|e| Error::Backend(format!("Pretrain: {e}")))?.into_opts();
+        let base_digest = base_digest(&open)?;
+        let identity = serde_json::json!({
+            "objective": "pretrain",
+            "base": base_digest,
+            "corpus": digest(corpus)?,
+            "held_out": self.held_out.as_deref().map(digest).transpose()?,
+            "separator": separator,
+        });
+        let precision = model::TrainPrecision::default();
+        let run = FullRun { chat: &chat, open: &open, tokenizer_dir: &model_dir, prepared_dir: &prepared, out_dir, opts: &opts, set: &set, precision: &precision, resume_state: self.resume_state.as_deref(), checkpoint_every: self.checkpoint_every, identity };
+        let trained = run.train_and_export(cancel, &mut on_progress)?;
+        Ok(PretrainOutcome {
+            status: trained.status,
+            checkpoint: trained.checkpoint,
+            weights_digest: trained.weights_digest,
+            base_digest,
+            seed,
+            steps: self.steps,
+            steps_completed: trained.report.steps_completed,
+            resumed_at: trained.report.resumed_at,
+            initial_loss: trained.report.initial_loss,
+            final_loss: trained.report.final_loss,
+            evaluations: trained.report.evaluations.iter().map(|e| (e.step, e.train_loss, e.eval_loss)).collect(),
+            documents,
+            tokens: train.len(),
+            held_out_documents,
+            held_out_tokens: val.len(),
+            separator,
+            separator_id,
+            batch: self.batch,
+            block: self.block,
+            lr: self.lr,
+        })
+    }
+}
+
+/// The positions the checkpoint at `open` holds (`max_position_embeddings`), when its configuration says.
+fn positions_of(open: &Path) -> Option<u64> {
+    let config: serde_json::Value = if open.is_dir() {
+        serde_json::from_slice(&std::fs::read(open.join("config.json")).ok()?).ok()?
+    } else {
+        checkpoint::weightio::WeightReader::open(open.to_str()?).ok()?.config()
+    };
+    config.get("max_position_embeddings").and_then(|v| v.as_u64())
 }

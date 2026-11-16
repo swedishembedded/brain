@@ -210,7 +210,7 @@ pub use full_finetune::{merge_adapter, ChatFullFineTune, ChatFullFineTuneOutcome
 #[cfg(feature = "study")]
 pub mod from_scratch;
 #[cfg(feature = "study")]
-pub use from_scratch::{ModelInit, ModelInitOutcome};
+pub use from_scratch::{ModelInit, ModelInitOutcome, Pretrain, PretrainOutcome};
 #[cfg(feature = "study")]
 mod optimize;
 #[cfg(feature = "study")]

@@ -433,6 +433,9 @@ pub fn step_frame(progress: &brain::FineTuneProgress, seconds: f64) -> Value {
         "grad_norm": progress.grad_norm.map(finite),
         "seconds": seconds,
     });
+    if let Some(eval) = progress.eval_loss {
+        frame["eval_loss"] = finite(eval);
+    }
     let pg: serde_json::Map<String, Value> = progress.metrics.iter().filter_map(|(name, value)| name.strip_prefix("pg_").map(|n| (n.to_string(), finite(*value)))).collect();
     if !pg.is_empty() {
         frame["pg"] = Value::Object(pg);

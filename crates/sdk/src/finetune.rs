@@ -1409,6 +1409,8 @@ pub struct FineTuneProgress {
     pub lr: f32,
     /// The global gradient norm of the step, when the model reports it.
     pub grad_norm: Option<f32>,
+    /// The held-out loss measured after this step, when the run evaluated at it.
+    pub eval_loss: Option<f32>,
     /// What the objective measured in this step, by name: a policy-gradient run's `pg_loss`, `pg_clip_fraction`,
     /// `pg_kl`, `pg_ratio_mean`/`min`/`max`, `pg_mean_advantage`, the teacher-advantage statistics of a
     /// self-distillation run and `pg_scoring_seconds` (the time the step spent scoring examples it drew for the
@@ -1419,7 +1421,7 @@ pub struct FineTuneProgress {
 impl FineTuneProgress {
     /// The progress of the optimiser step `s` just completed.
     pub(crate) fn of(s: &model::StepReport) -> FineTuneProgress {
-        FineTuneProgress { step: s.step, steps: s.steps, loss: s.loss, lr: s.lr, grad_norm: s.grad_norm, metrics: s.metrics.iter().map(|(name, value)| (name.to_string(), *value)).collect() }
+        FineTuneProgress { step: s.step, steps: s.steps, loss: s.loss, lr: s.lr, grad_norm: s.grad_norm, eval_loss: s.eval_loss, metrics: s.metrics.iter().map(|(name, value)| (name.to_string(), *value)).collect() }
     }
 }
 
