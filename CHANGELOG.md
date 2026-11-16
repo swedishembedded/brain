@@ -6,6 +6,8 @@ see CONTRIBUTING or AGENTS.md for the commit-message convention.
 
 ## [Unreleased]
 
+## [6.0.0] - 2026-11-16
+
 ### Breaking Changes
 
 - A sampled request with no logit processor (temperature with any `top_k`, `top_p` and `min_p`) is drawn by the Gumbel-max rule with noise keyed by its seed and the position being drawn (`model::serve::draw_row`), on the device where the decoder's logits are (Qwen3, Qwen3.8, Qwen3.6-35B-A3B, DeepSeek-V2, Ripple; a nucleus over the threshold a search over the row finds, a `top_k` up to 1024 from the row's best candidates) and on the CPU pool elsewhere: the distribution and the reported log-probability are unchanged, but a given seed draws a different token stream than before. A seed now draws the same tokens whatever else shares the batch and wherever the row is drawn. On Qwen3-4B (GH200, 64 streams at temperature 1) sampled decode goes from 688 to 2484 tokens/s against 2548 greedy, and on Qwen3.8-27B-FP8 from 368 to 1385 against 1482.
