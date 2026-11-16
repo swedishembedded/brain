@@ -107,6 +107,11 @@ gate and a pass-selected or exit-weighted head.
   [496](../knowledge/496-a-chat-fine-tune-moved-a-looped-decoders-exit-mass-to-its-first-pass-and-the-server-read-the-last-one.md)):
   a chat fine-tune moves the exit mass to the first pass, and serving the last pass (1.0) read the pass it stopped
   training. Held-out whole-call accuracy of the served pass after the fine-tune: 0.03 at 1.0, 0.56 at the median.
+- The objective takes the reference's entropy regularisation of the exit distribution (`exit_entropy`, default 0.1
+  for pretraining and 0.05 for a fine-tune, [497](../knowledge/497-without-the-exit-entropy-term-a-from-scratch-looped-decoder-left-its-second-pass-unused-and-its-chat-fine-tune-collapsed.md)):
+  the exit mass stays near uniform, the second pass carries the better pretraining predictions, and a chat
+  fine-tune improves held-out calls (0.71 -> 0.79 on the first pass) where without it they collapsed.
+- Stage II of the reference (gates trained with the language model frozen, for adaptive exit) is not built.
 
 ## Left to do
 
