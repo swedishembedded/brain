@@ -2022,16 +2022,17 @@ docs/pdf:
 
 # The textbook under docs/book: published with the docs (its own part of
 # docs/manifest.yaml) and typeset as its own PDF, in the reading order of
-# docs/book/book.yaml. Requires pandoc, xelatex and rsvg-convert.
+# docs/book/book.yaml, named after the book, its author and brain's version
+# (Cargo.toml). Requires pandoc, xelatex and rsvg-convert.
 ## book - default: the whole textbook and each written volume as its own PDF (build/book/)
 book:
 	scripts/book/pdf.py
 
-## book/pdf - typeset the whole textbook (pandoc + xelatex) -> build/book/brain-book.{md,pdf}
+## book/pdf - typeset the whole textbook (pandoc + xelatex) -> build/book/From-First-Principles-To-Intelligent-Machines-<Author>-vX.Y.pdf
 book/pdf:
 	scripts/book/pdf.py --whole
 
-## book/volumes - typeset each written volume on its own -> build/book/volumes/FFPIM-Volume-NN-<Title>.pdf
+## book/volumes - typeset each written volume on its own -> build/book/volumes/FFPIM-Volume-NN-<Title>-<Author>-vX.Y.pdf
 book/volumes:
 	scripts/book/pdf.py --volumes
 

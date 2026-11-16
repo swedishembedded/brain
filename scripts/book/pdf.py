@@ -5,13 +5,13 @@
 """Typeset the book as PDFs, separate from the engineering manual: the whole
 book as one file, and each volume with written chapters as a file of its own.
 
-Reading order comes from docs/book/book.yaml (the same specification the
-published navigation is generated from): front matter, then each volume with
-written chapters as a LaTeX part (its introduction first), then the appendices.
-A volume's file has the same front matter, the volume's introduction and its
-chapters numbered from 1 (as the text refers to them, "Volume V, chapter 2"),
-and the glossary and author page; links between chapters are plain text in
-every PDF, so a volume on its own has none that dangle.
+Which files are built and the pages each holds come from edition.py, shared
+with the EPUB build (epub.py): front matter, then each volume with written
+chapters as a LaTeX part (its introduction first), then the appendices. A
+volume's file has the same front matter, the volume's introduction and its
+chapters numbered from 1, and the glossary and author page; links between
+chapters are plain text in every PDF, so a volume on its own has none that
+dangle.
 Page transforms and the pandoc invocation are the documentation build's own
 (docs/pandoc/build-docs.py), so the two PDFs are typeset by one
 implementation; the book adds the book class and docs/pandoc/book.tex.
@@ -33,21 +33,12 @@ sending an email to info@swedishembedded.com.
 import importlib.util
 import re
 from concurrent.futures import ProcessPoolExecutor
-import subprocess
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bookspec import BOOK, ROOT, load  # noqa: E402
-
-OUT = ROOT / "build" / "book"
-ABOUT = "about-the-author.md"
-# The author's portrait: a full page before the contents, captioned with the
-# author's name, and again under the heading of the author page, sized so that
-# page stays one page. Grayscale JPEG, the smallest format xelatex reads for a
-# photograph.
-AUTHOR_PHOTO = BOOK / "img" / "author.jpg"
-ROMAN = ["I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X", "XI", "XII", "XIII", "XIV", "XV", "XVI"]
+from edition import ABOUT, AUTHOR_PHOTO, OUT, Edition, output, parse, read, select, source_date, source_revision  # noqa: E402
 
 spec = importlib.util.spec_from_file_location("build_docs", ROOT / "docs" / "pandoc" / "build-docs.py")
 docs = importlib.util.module_from_spec(spec)
@@ -60,9 +51,7 @@ def latex(cmd: str) -> str:
 
 def page(rel: str, unnumbered=False, drop_title=False) -> str:
     """One page of docs/book, with its links and images rewritten for the PDF."""
-    path = BOOK / rel
-    text = path.read_text(encoding="utf-8")
-    text = re.sub(r"<!--.*?-->\n?", "", text, flags=re.S)
+    text = read(rel)
     if drop_title:
         text = re.sub(r"^# .*\n", "", text, count=1, flags=re.M)
     elif unnumbered:
@@ -75,12 +64,6 @@ def page(rel: str, unnumbered=False, drop_title=False) -> str:
     return docs.transform(f"docs/book/{rel}", text).strip() + "\n\n"
 
 
-def source_date() -> str:
-    r = subprocess.run(["git", "log", "-1", "--format=%cd", "--date=format:%B %Y", "--", "docs/book"],
-                       cwd=ROOT, capture_output=True, text=True)
-    return r.stdout.strip() or docs.FALLBACK_DATE
-
-
 def tex(s: str) -> str:
     return s.replace("\\", "\\textbackslash{}").replace("&", "\\&").replace("%", "\\%").replace("#", "\\#")
 
@@ -88,11 +71,7 @@ def tex(s: str) -> str:
 def title_header(book, out: Path, title: str, subtitle: str) -> Path:
     """The title page and its reverse (the colophon), from book.yaml: `title`
     and `subtitle` are the book's own, or a volume's title over the book's."""
-    # The last commit that changed what the book is built from, not HEAD: a
-    # commit elsewhere in the repository leaves the PDFs as they were.
-    rev = subprocess.run(["git", "log", "-1", "--format=%h", "--abbrev=9", "--",
-                          "docs/book", "docs/pandoc", "scripts/book"], cwd=ROOT,
-                         capture_output=True, text=True).stdout.strip() or "unknown"
+    rev = source_revision()
     out.write_text(rf"""\makeatletter
 \renewcommand{{\bookauthor}}{{{tex(book.author)}}}
 \renewcommand{{\maketitle}}{{%
@@ -170,20 +149,11 @@ def volume_title_page(volume) -> str:
         rf"\addcontentsline{{toc}}{{chapter}}{{{title}}}\markboth{{{title}}}{{}}\cleardoublepage")
 
 
-# The reference pages every volume relies on. The whole book carries them as
-# appendices; the volumes leave them to one appendix PDF of their own
-# (REFERENCE) instead of repeating them in each file.
-SHARED_REFERENCE = ("notation.md", "pseudocode.md")
-REFERENCE = "reference"
-
-
-def build_markdown(book, out: Path, title: str, subtitle: str, volume=None) -> Path:
-    """The markdown of one PDF: the whole book, `volume` alone, or the shared
-    reference pages when `volume` is REFERENCE."""
-    reference = volume == REFERENCE
+def build_markdown(book, edition: Edition, out: Path) -> Path:
+    """The markdown of one PDF, with the LaTeX that sets its divisions."""
     parts = [f"""---
-title: "{title}"
-subtitle: "{subtitle}"
+title: "{edition.title}"
+subtitle: "{edition.subtitle}"
 author: "{book.author}"
 date: "{source_date()}"
 toc-title: "Contents"
@@ -193,33 +163,22 @@ toc-title: "Contents"
     # Front-matter sections are unnumbered; numbering resumes with Volume I
     # (or with the volume's first chapter).
     parts.append(latex("\\frontmatter\\setcounter{secnumdepth}{-2}"))
-    parts += [page(rel, unnumbered=True) for rel in ([] if reference else book.front)]
-    if volume is not None and not reference:
-        parts.append(volume_title_page(volume))
-        parts.append(page(volume.intro_rel, drop_title=True))
+    parts += [page(rel, unnumbered=True) for rel in edition.front]
+    if edition.kind == "volume":
+        parts.append(volume_title_page(edition.volumes[0]))
+        parts.append(page(edition.volumes[0].intro_rel, drop_title=True))
     parts.append(latex("\\mainmatter\\setcounter{secnumdepth}{3}"))
-    for v in [] if reference else [volume] if volume is not None else book.volumes:
-        written = [ch for ch in v.chapters if ch.written]
-        if not written:
-            continue
-        if volume is None:
+    for v in edition.volumes:
+        if edition.kind == "book":
             parts.append(latex(f"\\part{{{v.title}}}"))
             parts.append(page(v.intro_rel, drop_title=True))
-        parts += [page(ch.rel) for ch in written]
+        parts += [page(ch.rel) for ch in edition.written(v)]
     # Reference material becomes lettered appendices; the author page closes
-    # the book unnumbered. The chronology covers the whole engine, so only the
-    # whole book carries it; a volume leaves the shared reference pages to the
-    # reference PDF, which carries those alone.
-    if reference:
-        back = [rel for rel in book.back if rel in SHARED_REFERENCE or rel == ABOUT]
-    elif volume is not None:
-        back = [rel for rel in book.back if rel != "history/chronology.md" and rel not in SHARED_REFERENCE]
-    else:
-        back = list(book.back)
+    # the book unnumbered.
     parts.append(latex("\\appendix"))
-    parts += [page(rel) for rel in back if rel != ABOUT]
+    parts += [page(rel) for rel in edition.back]
     parts.append(latex("\\backmatter"))
-    parts += [about_page() for rel in back if rel == ABOUT]
+    parts.append(about_page())
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text("".join(parts), encoding="utf-8")
     print(f"wrote {out.relative_to(ROOT)} ({out.stat().st_size // 1024} KiB)", flush=True)
@@ -250,21 +209,20 @@ def overflow_report(log: str, report: Path = REPORT) -> list[str]:
     return found
 
 
-def typeset(name: str, title: str, subtitle: str, volume=None) -> list[str]:
-    """Build one PDF, `<name>.pdf`, and return its problems (none when clean)."""
+def typeset(edition: Edition) -> list[str]:
+    """Build one PDF and return its problems (none when clean)."""
     book = load()
-    base = OUT / name
-    md = build_markdown(book, base.with_suffix(".md"), title, subtitle, volume)
-    header = title_header(book, base.with_name(base.name + ".title.tex"), title, subtitle)
+    md = build_markdown(book, edition, output(edition, ".md"))
+    header = title_header(book, output(edition, ".title.tex"), edition.title, edition.subtitle)
     docs.build_pdf(
-        str(md), pdf=str(base.with_suffix(".pdf")),
+        str(md), pdf=str(output(edition, ".pdf")),
         extra=("--toc-depth=1", "--top-level-division=chapter", "-V", "documentclass=book",
                "-V", "classoption=openright", "-V", "mainfont=P052", "-V", "mathfont=Latin Modern Math",
                "-H", str(ROOT / "docs" / "pandoc" / "book.tex"), "-H", str(header),
                "--lua-filter", str(ROOT / "docs" / "pandoc" / "book-tables.lua")))
-    log = base.with_suffix(".pandoc.log").read_text(encoding="utf-8", errors="replace")
+    log = output(edition, ".pandoc.log").read_text(encoding="utf-8", errors="replace")
     problems = []
-    report = REPORT if volume is None else base.with_name(base.name + ".overflow.txt")
+    report = REPORT if edition.kind == "book" else output(edition, ".overflow.txt")
     overflows = overflow_report(log, report)
     if overflows:
         problems.append(f"{len(overflows)} line(s) run past the margin; see {report.relative_to(ROOT)}")
@@ -277,62 +235,18 @@ def typeset(name: str, title: str, subtitle: str, volume=None) -> list[str]:
     too_wide = re.findall(r"book-tables: (.+)", log)
     if too_wide:
         problems.append("tables too wide to typeset (split or narrow them):\n  " + "\n  ".join(too_wide))
-    return [f"{name}: {p}" for p in problems]
-
-
-def volume_file(book, n: int) -> str:
-    """The file name of volume `n` (from 0) without its extension: the
-    initials of the book's title, the volume number in two digits so the
-    files sort in reading order, and the volume's title in capitalized
-    words, e.g. FFPIM-Volume-02-What-Does-It-Mean-To-Learn."""
-    acronym = "".join(w[0] for w in book.title.split() if w[0].isupper())
-    words = re.findall(r"[A-Za-z0-9]+", book.volumes[n].title)
-    return f"{acronym}-Volume-{n + 1:02d}-" + "-".join(w[0].upper() + w[1:] for w in words)
-
-
-def jobs(args: list[str]) -> list[tuple]:
-    """(name, title, subtitle, volume) of every PDF the arguments ask for."""
-    book = load()
-    whole = ("brain-book", book.title, book.subtitle, None)
-    written = [v for v in book.volumes if any(ch.written for ch in v.chapters)]
-    def of(v):
-        n = book.volumes.index(v)
-        return (f"volumes/{volume_file(book, n)}", f"Volume {ROMAN[n]}: {v.title}", book.title, v)
-    acronym = volume_file(book, 0).split("-")[0]
-    reference = (f"volumes/{acronym}-Appendix-Notation-And-Pseudocode-Conventions",
-                 "Appendix: Notation and Pseudocode Conventions", book.title, REFERENCE)
-    if "--whole" in args:
-        return [whole]
-    if "--reference" in args:
-        return [reference]
-    if "--volumes" in args:
-        return [of(v) for v in written] + [reference]
-    if "--volume" in args:
-        want = args[args.index("--volume") + 1]
-        hit = [v for v in written if v.id == want or v.dir == want]
-        if not hit:
-            sys.exit(f"no written volume {want!r}; written: {', '.join(v.id for v in written)}")
-        return [of(hit[0])]
-    return [whole] + [of(v) for v in written] + [reference]
+    return [f"{edition.name}: {p}" for p in problems]
 
 
 def main() -> int:
     args = sys.argv[1:]
-    # A mistyped option must not fall through to building the whole book.
-    valued = {"--volume", "-j"}
-    known = {"--whole", "--volumes", "--reference"} | valued
-    i = 0
-    while i < len(args):
-        if args[i] not in known:
-            print(f"pdf.py: unknown argument {args[i]}", file=sys.stderr)
-            print("usage: pdf.py [--whole | --volumes | --volume ID | --reference] [-j N]", file=sys.stderr)
-            return 2
-        i += 2 if args[i] in valued else 1
+    workers = parse(args, "pdf.py")
+    if workers is None:
+        return 2
+    todo = select(args)
     # Each PDF is one single-threaded xelatex chain; a few run side by side.
-    workers = int(args[args.index("-j") + 1]) if "-j" in args else 2
-    todo = jobs(args)
     with ProcessPoolExecutor(max_workers=max(1, min(workers, len(todo)))) as pool:
-        problems = [p for found in pool.map(typeset, *zip(*todo)) for p in found]
+        problems = [p for found in pool.map(typeset, todo) for p in found]
     for p in problems:
         print(p, file=sys.stderr)
     return 1 if problems else 0
