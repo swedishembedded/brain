@@ -1199,17 +1199,25 @@ pub(crate) struct DecodeMeta {
     max_bt: u32,
 }
 
-/// What a recorded decode step's head produces.
-pub(crate) enum DecodeHead {
+/// What a decode step's head produces.
+#[derive(Clone, Copy)]
+pub(crate) enum DecodeHead<'a> {
     /// The greedy token of every row.
     Greedy,
     /// Every row's top-`cap` (token, logit) candidates.
     TopK(u32),
+    /// Every row's whole `[vocab]` logits.
+    Rows,
+    /// Each keyed row drawn where its logits are, the rows without a draw read back whole
+    /// (`model::serve::PagedDecoder::forward_batched_drawn`).
+    Drawn(&'a [Option<model::serve::RowDraw>]),
 }
 
 enum TapeOut {
     Greedy(DeviceBuffer),
     TopK { vals: DeviceBuffer, idx: DeviceBuffer, cap: u32 },
+    /// The `[rows, vocab]` logits, read or drawn from after each replay ([`Qwen35::read_logits`]).
+    Logits(DeviceBuffer),
 }
 
 /// One decode step recorded whole (`Qwen35::record_decode`): the dispatches, the
@@ -1230,10 +1238,12 @@ impl DecodeTape {
     }
 }
 
-/// What a replayed decode step read back.
+/// What a decode step read back.
 pub(crate) enum DecodeOut {
     Greedy(Vec<u32>),
     TopK(Vec<Vec<(u32, f32)>>),
+    Rows(Vec<Vec<f32>>),
+    Drawn(Vec<model::serve::Drawn>),
 }
 
 /// One sequence's coordinates in a [`Qwen35::run_decode_batch`] call: where its
@@ -3866,6 +3876,7 @@ impl Qwen35 {
                 let (vals, idx) = self.head_topk_rows_record(&hidden, bsz, cap);
                 TapeOut::TopK { vals, idx, cap }
             }
+            DecodeHead::Rows | DecodeHead::Drawn(_) => TapeOut::Logits(self.head_logits_rows_of(&hidden, bsz)),
         };
         let tape = recording.finish();
         self.ops.gpu().set_declines_library(false);
@@ -3874,14 +3885,27 @@ impl Qwen35 {
 
     /// Run a recorded decode step for `tokens` at the positions in `seqs` (the
     /// SAME sequences the tape was recorded for, in the same order), and read
-    /// back what the recorded head produced. See [`Self::record_decode`].
-    pub(crate) fn replay_decode(&self, tape: &DecodeTape, tokens: &[u32], seqs: &[BatchSeq]) -> DecodeOut {
+    /// back what the recorded head produced - for a step that ends in the
+    /// logits, what `head` reads or draws from them. See [`Self::record_decode`].
+    pub(crate) fn replay_decode(&self, tape: &DecodeTape, tokens: &[u32], seqs: &[BatchSeq], head: DecodeHead) -> DecodeOut {
         assert_eq!(tokens.len(), tape.bsz as usize, "qwen35moe::replay_decode: a tape recorded for {} rows replayed with {}", tape.bsz, tokens.len());
         self.write_decode_meta(&tape.meta, tokens, seqs, tape.block_size);
         self.gpu.replay_tape(&tape.tape);
         match &tape.out {
             TapeOut::Greedy(out) => DecodeOut::Greedy(self.gpu.read(out, tape.bsz as usize).into_iter().map(|x| x as u32).collect()),
             TapeOut::TopK { vals, idx, cap } => DecodeOut::TopK(self.read_topk(vals, idx, tape.bsz, *cap)),
+            TapeOut::Logits(logits) => self.read_logits(logits, tape.bsz, head),
+        }
+    }
+
+    /// What `head` (a [`DecodeHead::Rows`] or [`DecodeHead::Drawn`]) reads from a step's `[rows, vocab]` logits: the rows
+    /// themselves, or each keyed row's draw where the logits are and the others' rows.
+    pub(crate) fn read_logits(&self, logits: &DeviceBuffer, rows: u32, head: DecodeHead) -> DecodeOut {
+        let vocab = self.cfg.vocab;
+        match head {
+            DecodeHead::Rows => DecodeOut::Rows(self.gpu.read(logits, rows as usize * vocab as usize).chunks(vocab as usize).map(<[f32]>::to_vec).collect()),
+            DecodeHead::Drawn(draws) => DecodeOut::Drawn(model::readout::draw_rows(&self.gpu, logits, draws, vocab)),
+            DecodeHead::Greedy | DecodeHead::TopK(_) => unreachable!("a greedy or top-k head reduces its logits on the device"),
         }
     }
 

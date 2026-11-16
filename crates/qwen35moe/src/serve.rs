@@ -439,8 +439,27 @@ const MAX_DECODE_TAPES: usize = 8;
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct TapeKey {
     rows: u32,
-    topk: Option<u32>,
+    head: HeadKey,
     cap: u32,
+}
+
+/// The head a recorded step ends in: a greedy pick, top-`k` candidates, or the logits themselves (one recording for
+/// every step whose rows the host reads or draws from after the step).
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum HeadKey {
+    Greedy,
+    TopK(u32),
+    Logits,
+}
+
+impl HeadKey {
+    fn of(head: DecodeHead) -> HeadKey {
+        match head {
+            DecodeHead::Greedy => HeadKey::Greedy,
+            DecodeHead::TopK(k) => HeadKey::TopK(k),
+            DecodeHead::Rows | DecodeHead::Drawn(_) => HeadKey::Logits,
+        }
+    }
 }
 
 /// The shortest context a recorded step's attention is sized for: steps over short sequences share one recording.
@@ -725,10 +744,11 @@ impl Engine {
             return match head {
                 DecodeHead::Greedy => DecodeOut::Greedy(self.model.head_argmax_rows_dev(&hidden, rows)),
                 DecodeHead::TopK(k) => DecodeOut::TopK(self.model.head_topk_rows_dev(&hidden, rows, k)),
+                DecodeHead::Rows | DecodeHead::Drawn(_) => self.model.read_logits(&self.model.head_logits_rows_of(&hidden, rows), rows, head),
             };
         }
         let cap = self.decode_cap(&coords);
-        let key = TapeKey { rows: inputs.len() as u32, topk: match head { DecodeHead::Greedy => None, DecodeHead::TopK(k) => Some(k) }, cap };
+        let key = TapeKey { rows: inputs.len() as u32, head: HeadKey::of(head), cap };
         match self.tapes.iter().position(|(k, _, _)| *k == key) {
             // Most recently used last.
             Some(i) => {
@@ -753,7 +773,7 @@ impl Engine {
         }
         let (_, tape, _) = self.tapes.last().expect("the tape for this shape was just found or recorded");
         let seqs = Self::seqs_for(tables, &coords);
-        self.model.replay_decode(tape, inputs, &seqs)
+        self.model.replay_decode(tape, inputs, &seqs, head)
     }
 
     /// `logits = hidden @ head^T` for one `[d_model]` hidden row, on the device
@@ -765,6 +785,7 @@ impl Engine {
         let logits = self.model.head_logits_rows_dev(&h, 1);
         g.read(&logits, self.model.cfg.vocab as usize)
     }
+
 
     /// Turn the fused native decode kernels on or off for the steps that follow
     /// ([`Qwen35::set_decode_fusion`]). Recorded steps keep the kernels they were
@@ -966,7 +987,7 @@ impl Engine {
             // back - not dispatch by dispatch: per-dispatch timing of eager
             // launches carries the host's launch latency, which the tape removes.
             if self.decode_tapes {
-                if let Some((_, tape, _)) = self.tapes.iter().rev().find(|(k, _, _)| k.rows == batch && k.topk.is_none()) {
+                if let Some((_, tape, _)) = self.tapes.iter().rev().find(|(k, _, _)| k.rows == batch && k.head == HeadKey::Greedy) {
                     if let Some(rows) = self.model.gpu.profile_tape(tape.tape(), passes) {
                         profile.rows = rows.into_iter().map(|(n, ms, calls)| (n, ms * passes as f64, calls * passes as u64)).collect();
                     }
@@ -1051,30 +1072,21 @@ impl Engine {
         }
         match self.decode(tables, inputs, DecodeHead::Greedy) {
             DecodeOut::Greedy(ids) => ids,
-            DecodeOut::TopK(_) => unreachable!("a greedy decode returns greedy picks"),
+            _ => unreachable!("a greedy decode returns greedy picks"),
         }
     }
 
     /// One batched decode step returning each row's whole `[vocab]` logits: the step of
-    /// [`Engine::forward_batched_topk`] with the row read back instead of its best `k`. It builds the step
-    /// each time rather than replaying a recorded one, since the recorded tapes end in a greedy or top-k head.
+    /// [`Engine::forward_batched_topk`] with the rows read back instead of their best `k`.
     pub fn forward_batched_logit_rows(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32]) -> Vec<Vec<f32>> {
         assert_eq!(tables.len(), inputs.len(), "forward_batched_logit_rows: tables/inputs length mismatch");
         if tables.is_empty() {
             return Vec::new();
         }
-        let rows = inputs.len() as u32;
-        let coords = self.advance_tables(tables);
-        let seqs = Self::seqs_for(tables, &coords);
-        let caches = self.batch_caches(&seqs, self.max_seq_len);
-        let _scope = self.model.gpu.scratch_scope();
-        // On the arithmetic of every other decode step ([`Engine::decode`]).
-        let logits = model::ops::fp32_kernels(|| {
-            let hidden = self.model.run_decode_batch(inputs, &caches);
-            self.model.head_logits_rows_of(&hidden, rows)
-        });
-        let vocab = self.model.cfg.vocab as usize;
-        self.model.gpu.read(&logits, rows as usize * vocab).chunks(vocab).map(<[f32]>::to_vec).collect()
+        match self.decode(tables, inputs, DecodeHead::Rows) {
+            DecodeOut::Rows(rows) => rows,
+            _ => unreachable!("a logit-row decode returns rows"),
+        }
     }
 
     /// [`Engine::forward_batched_logit_rows`] with each keyed row drawn where the logits are
@@ -1082,19 +1094,14 @@ impl Engine {
     /// are read back.
     pub fn forward_batched_drawn(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32], draws: &[Option<model::serve::RowDraw>]) -> Vec<model::serve::Drawn> {
         assert_eq!(tables.len(), inputs.len(), "forward_batched_drawn: tables/inputs length mismatch");
+        assert_eq!(draws.len(), inputs.len(), "forward_batched_drawn: draws/inputs length mismatch");
         if tables.is_empty() {
             return Vec::new();
         }
-        let rows = inputs.len() as u32;
-        let coords = self.advance_tables(tables);
-        let seqs = Self::seqs_for(tables, &coords);
-        let caches = self.batch_caches(&seqs, self.max_seq_len);
-        let _scope = self.model.gpu.scratch_scope();
-        let logits = model::ops::fp32_kernels(|| {
-            let hidden = self.model.run_decode_batch(inputs, &caches);
-            self.model.head_logits_rows_of(&hidden, rows)
-        });
-        model::readout::draw_rows(&self.model.gpu, &logits, draws, self.model.cfg.vocab)
+        match self.decode(tables, inputs, DecodeHead::Drawn(draws)) {
+            DecodeOut::Drawn(drawn) => drawn,
+            _ => unreachable!("a drawn decode returns draws"),
+        }
     }
 
     /// [`Engine::forward_batched_greedy`], repeated `k` times per sequence,
@@ -1126,7 +1133,7 @@ impl Engine {
         }
         match self.decode(tables, inputs, DecodeHead::TopK(k as u32)) {
             DecodeOut::TopK(c) => c,
-            DecodeOut::Greedy(_) => unreachable!("a top-k decode returns candidates"),
+            _ => unreachable!("a top-k decode returns candidates"),
         }
     }
 }

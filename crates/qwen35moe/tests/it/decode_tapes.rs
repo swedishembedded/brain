@@ -226,3 +226,73 @@ fn recorded_steps_of_every_batch_size_hold_one_working_set() {
         e.release_table(&mut t);
     }
 }
+
+/// A sampled step (rows drawn where their logits are, or read back whole) replays a recording as the greedy and top-k
+/// steps do, and answers what the step built every token answers: the same drawn tokens and log-probabilities, the same
+/// logit rows to the bit, through a batch that changes shape. Before, every sampled step was built dispatch by
+/// dispatch (about 1600 launches a step on the 35B-A3B), which held the serving thread for the step.
+#[test]
+fn a_sampled_step_replays_its_recording_and_draws_what_the_built_step_draws() {
+    use model::serve::{draw_key, Drawn, RowDraw};
+    let c = cfg();
+    let w = weights(&c);
+    let (mut taped, mut built) = (engine(&w, true), engine(&w, false));
+    if !taped.gpu().caps().numeric.int8_dot {
+        return brain_testutil::skip_unavailable("no packed int8 dot on this device");
+    }
+    let prompts = [prompt(&c, 11, 6), prompt(&c, 12, 4), prompt(&c, 13, 8)];
+    let mk = |e: &mut Engine| -> Vec<BlockTable> {
+        prompts
+            .iter()
+            .map(|p| {
+                let mut t = BlockTable::new();
+                e.prefill(&mut t, p);
+                t
+            })
+            .collect()
+    };
+    let (mut ta, mut tb) = (mk(&mut taped), mk(&mut built));
+    let draw = |row: usize, step: usize| RowDraw { temp: 0.9, min_p: 0.0, top_p: 1.0, top_k: 0, key: draw_key(row as u64 + 1, step as u64, 0) };
+    let mut toks = vec![4u32, 9, 2];
+    for step in 0..6 {
+        if step == 3 {
+            let mut gone = ta.remove(0);
+            taped.release_table(&mut gone);
+            let mut gone = tb.remove(0);
+            built.release_table(&mut gone);
+            toks.remove(0);
+        }
+        // One row read back whole (a request the keyed draw does not cover), the others drawn on the device.
+        let draws: Vec<Option<RowDraw>> = (0..toks.len()).map(|r| (r != 1).then(|| draw(r, step))).collect();
+        let a = taped.forward_batched_drawn(&mut ta.iter_mut().collect::<Vec<_>>(), &toks, &draws);
+        let b = built.forward_batched_drawn(&mut tb.iter_mut().collect::<Vec<_>>(), &toks, &draws);
+        let bits = |d: &[Drawn]| -> Vec<(u32, Vec<u32>)> {
+            d.iter()
+                .map(|x| match x {
+                    Drawn::Token(t, lp) => (*t, vec![lp.to_bits()]),
+                    Drawn::Row(row) => (u32::MAX, row.iter().map(|v| v.to_bits()).collect()),
+                })
+                .collect()
+        };
+        assert_eq!(bits(&a), bits(&b), "step {step}: the recorded sampled step answered otherwise than the built one");
+        toks = a
+            .iter()
+            .map(|x| match x {
+                Drawn::Token(t, _) => *t,
+                Drawn::Row(row) => model::hostmath::argmax_row(row),
+            })
+            .collect();
+    }
+    let rows_a = taped.forward_batched_logit_rows(&mut ta.iter_mut().collect::<Vec<_>>(), &toks);
+    let rows_b = built.forward_batched_logit_rows(&mut tb.iter_mut().collect::<Vec<_>>(), &toks);
+    let bits = |r: &[Vec<f32>]| r.iter().map(|x| x.iter().map(|v| v.to_bits()).collect::<Vec<_>>()).collect::<Vec<_>>();
+    assert_eq!(bits(&rows_a), bits(&rows_b), "the recorded logit rows differ from the built ones");
+    taped.poll_wait();
+    assert!(taped.tape_scratch_bytes() > 0, "the sampled steps replayed no recording: they were built dispatch by dispatch");
+    for mut t in ta {
+        taped.release_table(&mut t);
+    }
+    for mut t in tb {
+        built.release_table(&mut t);
+    }
+}
