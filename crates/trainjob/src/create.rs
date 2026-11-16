@@ -41,6 +41,7 @@ pub fn spec() -> ActionSpec {
         .param(ParamSpec::new("config", ParamType::Str, "the model's configuration, a JSON object in the architecture's config.json spelling; `vocab_size` may be left out (the tokenizer's is written)").required())
         .param(ParamSpec::new("tokenizer", ParamType::Str, "JSON document: {\"vocab_size\": N, \"special_tokens\": [...], \"eos_token\": T, \"bos_token\"?: T, \"pad_token\"?: T, \"split_digits\"?: bool}; the vocabulary is 256 bytes, the learned merges, then the special tokens in declared order; `split_digits` makes every digit its own token").required())
         .param(ParamSpec::new("chat_template", ParamType::Str, "the chat template (Jinja); without one the model is a base model that serves raw prompts"))
+        .param(ParamSpec::new("sampling", ParamType::Str, "JSON object: the sampling the model is served with when a request names none, written into its generation_config.json (`do_sample`, `temperature`, `top_k`, `top_p`, `min_p`, `repetition_penalty`); without it a chat model is served with the chat fallback (temperature 0.7, top-k 20, top-p 0.95)"))
         .param(ParamSpec::new("corpus_digest", ParamType::Str, "the text corpus (JSONL, one {\"text\": ...} document per line), as a blake3 digest of the server's artifact store (or attach it as the input blob `corpus`; exactly one of the two)"))
         .param(ParamSpec::new("tokenizer_bytes", ParamType::Int, "learn the vocabulary from at most this many bytes of the corpus's first documents").default(json!(brain::from_scratch::DEFAULT_TOKENIZER_BYTES)).min(1.0).max(MAX_TOKENIZER_BYTES).step(1.0))
         .param(ParamSpec::new("seed", ParamType::Int, "seed of the initialization (random when omitted; the report carries the one used)").min(0.0).max(capability::bounds::EXACT_INTEGER))
@@ -71,6 +72,7 @@ pub struct Params {
     pub config: String,
     pub tokenizer: String,
     pub chat_template: Option<String>,
+    pub sampling: Option<String>,
     pub corpus_digest: Option<String>,
     pub tokenizer_bytes: u64,
     pub seed: Option<u64>,
@@ -133,6 +135,9 @@ impl Request {
         }
         if let Some(seed) = params.seed {
             init = init.seed(seed);
+        }
+        if let Some(text) = &params.sampling {
+            init = init.sampling(document("sampling", text)?);
         }
         let (_, params_count) = init.plan().map_err(|e| format!("{ACTION}: {e}"))?;
         if params_count > MAX_PARAMS {

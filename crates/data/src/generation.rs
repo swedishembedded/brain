@@ -85,16 +85,26 @@ impl SamplingDefaults {
         let path = dir.join("generation_config.json");
         let Ok(text) = std::fs::read_to_string(&path) else { return Ok(SamplingDefaults::default()) };
         let v: Value = serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+        SamplingDefaults::from_json(&v).map_err(|e| format!("{}: {e}", path.display()))
+    }
+
+    /// The keys of a `generation_config.json` that declare sampling, the ones [`SamplingDefaults::from_json`] reads.
+    pub const KEYS: [&'static str; 6] = ["do_sample", "temperature", "top_k", "top_p", "min_p", "repetition_penalty"];
+
+    /// The settings a `generation_config.json` object `v` declares ([`SamplingDefaults::from_generation_config`]):
+    /// `do_sample: false` is greedy decoding, a zero temperature. A malformed value is an error naming the key.
+    pub fn from_json(v: &Value) -> Result<SamplingDefaults, String> {
         let number = |key: &str| -> Result<Option<f64>, String> {
             match &v[key] {
                 Value::Null => Ok(None),
-                x => x.as_f64().map(Some).ok_or_else(|| format!("{}: {key} {x} is not a number", path.display())),
+                x => x.as_f64().map(Some).ok_or_else(|| format!("{key} {x} is not a number")),
             }
         };
-        let mut d = SamplingDefaults::from_values(number("temperature")?, number("top_k")?, number("top_p")?, number("min_p")?, number("repetition_penalty")?)
-            .map_err(|e| format!("{}: {e}", path.display()))?;
-        if v["do_sample"] == Value::Bool(false) {
-            d.temp = Some(0.0);
+        let mut d = SamplingDefaults::from_values(number("temperature")?, number("top_k")?, number("top_p")?, number("min_p")?, number("repetition_penalty")?)?;
+        match &v["do_sample"] {
+            Value::Null | Value::Bool(true) => {}
+            Value::Bool(false) => d.temp = Some(0.0),
+            x => return Err(format!("do_sample {x} is not a boolean")),
         }
         Ok(d)
     }

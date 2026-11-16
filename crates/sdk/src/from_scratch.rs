@@ -110,6 +110,7 @@ pub struct ModelInit {
     bos_token: Option<String>,
     pad_token: Option<String>,
     chat_template: Option<String>,
+    sampling: serde_json::Map<String, serde_json::Value>,
     seed: Option<u64>,
     out_dir: Option<PathBuf>,
 }
@@ -156,6 +157,7 @@ impl ModelInit {
             bos_token: None,
             pad_token: None,
             chat_template: None,
+            sampling: serde_json::Map::new(),
             seed: None,
             out_dir: None,
         }
@@ -226,6 +228,16 @@ impl ModelInit {
         self
     }
 
+    /// The sampling the model is served with when a request names none, written into its `generation_config.json`
+    /// in that file's spelling (`do_sample`, `temperature`, `top_k`, `top_p`, `min_p`, `repetition_penalty`; checked
+    /// by [`ModelInit::plan`]). Every checkpoint trained from it carries it; without it a chat model is served with
+    /// the chat fallback ([`data::generation::SamplingDefaults::CHAT_FALLBACK`]), which a tiny model trained to act
+    /// greedily may not survive.
+    pub fn sampling(mut self, settings: serde_json::Map<String, serde_json::Value>) -> Self {
+        self.sampling = settings;
+        self
+    }
+
     /// The seed of the initialization (default: a random draw, reported on the outcome).
     pub fn seed(mut self, seed: u64) -> Self {
         self.seed = Some(seed);
@@ -264,6 +276,10 @@ impl ModelInit {
                 return Err(Error::Backend(format!("ModelInit: {what} {token:?} is not one of the special tokens")));
             }
         }
+        if let Some(key) = self.sampling.keys().find(|k| !data::generation::SamplingDefaults::KEYS.contains(&k.as_str())) {
+            return Err(Error::Backend(format!("ModelInit: sampling: {key:?} is not a sampling setting (those are {})", data::generation::SamplingDefaults::KEYS.join(", "))));
+        }
+        data::generation::SamplingDefaults::from_json(&serde_json::Value::Object(self.sampling.clone())).map_err(|e| Error::Backend(format!("ModelInit: sampling: {e}")))?;
         let floor = 256 + specials.len() + MIN_MERGES;
         if self.vocab_size < floor || self.vocab_size > MAX_VOCAB {
             return Err(Error::Backend(format!("ModelInit: vocab_size {} must be {floor} to {MAX_VOCAB} (256 bytes, {} special tokens and at least one merge)", self.vocab_size, specials.len())));
@@ -328,7 +344,10 @@ impl ModelInit {
             tokenizer_config["chat_template"] = serde_json::json!(t);
         }
         write("tokenizer_config.json", &serde_json::to_vec_pretty(&tokenizer_config).map_err(|e| Error::Backend(e.to_string()))?)?;
-        let generation = serde_json::json!({"eos_token_id": [id_of(eos)], "bos_token_id": self.bos_token.as_deref().and_then(id_of), "pad_token_id": self.pad_token.as_deref().and_then(id_of)});
+        let mut generation = serde_json::json!({"eos_token_id": [id_of(eos)], "bos_token_id": self.bos_token.as_deref().and_then(id_of), "pad_token_id": self.pad_token.as_deref().and_then(id_of)});
+        for (k, v) in &self.sampling {
+            generation[k] = v.clone();
+        }
         write("generation_config.json", &serde_json::to_vec_pretty(&generation).map_err(|e| Error::Backend(e.to_string()))?)?;
         let tool_calls = match &self.chat_template {
             Some(_) => check_template(out, eos)?,

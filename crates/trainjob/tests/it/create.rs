@@ -95,6 +95,23 @@ fn a_tokenizer_with_digits_split_reads_numbers_one_digit_a_token() {
     assert_reservation_returned(&rig);
 }
 
+/// The sampling a request declares is the installed model's default: written into its `generation_config.json`, which
+/// serving reads for a request that names none.
+#[test]
+fn the_declared_sampling_is_the_models_default() {
+    let rig = rig_qwen3("init-sampling", 16 << 30);
+    let digest = data_digest(&rig, &corpus(400)).hex();
+    let mut params = init_params(&digest, "greedy-1");
+    params["sampling"] = json!(json!({"do_sample": false, "top_k": 1}).to_string());
+    run_action(&rig, ACTION, &spec(), params, &[], &Frames::default()).expect("the model is created");
+    let dir = rig.dir.join("models").join("local").join("greedy-1");
+    let declared = data::generation::SamplingDefaults::from_generation_config(&dir).unwrap();
+    assert_eq!((declared.temp, declared.top_k), (Some(0.0), Some(1)), "do_sample false is greedy");
+    let written: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("generation_config.json")).unwrap()).unwrap();
+    assert!(written["eos_token_id"].is_array(), "the end-of-sequence ids stay: {written}");
+    assert_reservation_returned(&rig);
+}
+
 #[test]
 fn init_model_refuses_what_it_cannot_create_before_any_work() {
     let rig = rig_qwen3("init-door", 16 << 30);
@@ -125,6 +142,9 @@ fn init_model_refuses_what_it_cannot_create_before_any_work() {
         (json!({"config": json!({"model_type": "ouro", "hidden_size": 65536, "num_hidden_layers": 64, "num_attention_heads": 1, "num_key_value_heads": 1, "head_dim": 65536, "intermediate_size": 65536, "max_position_embeddings": 2048, "rope_theta": 1e4, "rms_norm_eps": 1e-6, "total_ut_steps": 4}).to_string()}), "parameters"),
         (json!({"seed": -1}), "seed"),
         (json!({"tokenizer_bytes": 0}), "tokenizer_bytes"),
+        (json!({"sampling": json!({"temperature": 7000}).to_string()}), "temperature"),
+        (json!({"sampling": json!({"beam": 4}).to_string()}), "not a sampling setting"),
+        (json!({"sampling": json!({"do_sample": "no"}).to_string()}), "do_sample"),
         (json!({"path": "/etc/passwd"}), "unknown param"),
         (json!({"out": "elsewhere"}), "unknown param"),
     ] {
