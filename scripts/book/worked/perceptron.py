@@ -78,8 +78,8 @@ def _table(headers, rows, align=None):
     return "\n".join(out)
 
 
-def _seed_line(name):
-    return f"Generator: the book's SplitMix64, seed 0x{bookrng.seed_of(name):016x} ({bookrng.seed_of(name)})."
+def _generator_line(name):
+    return f"Generator: `{name}` (the book's SplitMix64)."
 
 
 def _vec(v, d=2):
@@ -251,7 +251,7 @@ def convergence_bound():
     counts = _mistakes_over_orders(TRACE_DATA, bookrng.generator(ORDERS_NAME))
     norm = math.sqrt(sum(c * c for c in TRACE_SEPARATOR))
     lines = [
-        _seed_line(ORDERS_NAME),
+        _generator_line(ORDERS_NAME),
         f"Draw order: for each of the {N_ORDERS} runs, shuffle(list [0, 1, 2, 3, 4, 5]) with the book's Fisher-Yates shuffle, "
         "then run the rule from w = 0, b = 0 over that order each pass until a pass has no mistake.",
         "",
@@ -288,10 +288,10 @@ def gap_scaling():
         counts = _mistakes_over_orders(pts, bookrng.generator(GAP_ORDER_NAME))
         assert max(counts) <= bound
         rows.append((f"{g:g}", f"{gamma:.4f}", f"{r:.4f}", f"{bound:.1f}", min(counts), f"{sum(counts) / len(counts):.1f}", max(counts)))
-    head = (f"Data: {GAP_N} points per row. {_seed_line(GAP_DATA_NAME)} The data generator is restarted from this seed for each row. Draw order: candidate after candidate, "
+    head = (f"Data: {GAP_N} points per row. {_generator_line(GAP_DATA_NAME)} The data generator is restarted for each row. Draw order: candidate after candidate, "
             f"first u1 = uniform() then u2 = uniform(), x1 = 2 u1 - 1, x2 = 2 u2 - 1; a candidate is kept when |x1| >= g / 2, with label +1 if x1 > 0 and -1 otherwise, until {GAP_N} are kept. "
             "The separator is w* = (1, 0), b = 0.\n"
-            f"Orders: {_seed_line(GAP_ORDER_NAME)} {N_ORDERS} orders per row, each one shuffle of a fresh list [0, ..., {GAP_N - 1}], the order generator restarted from this seed for each row. Both generators therefore start afresh in every row.\n\n")
+            f"Orders: {_generator_line(GAP_ORDER_NAME)} {N_ORDERS} orders per row, each one shuffle of a fresh list [0, ..., {GAP_N - 1}], the order generator restarted for each row. Both generators therefore start afresh in every row.\n\n")
     return head + _table(["gap g", "gamma", "R", "bound (R/gamma)^2", "fewest", "mean", "most"], rows)
 
 

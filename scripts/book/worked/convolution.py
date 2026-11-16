@@ -21,7 +21,7 @@ the `*_data` functions supply the numbers of the chapter's figures, so a picture
 
 Arithmetic is the language's 64-bit floating point unless a table is made of integers. Every table that compares two routes prints
 the criterion the comparison meets, not the rounding noise below it. Random inputs come from `bookrng.generator(name)` with the
-names, seeds and draw orders printed beside each table.
+names and draw orders printed beside each table.
 
 Swedish Embedded AB implements solutions for convolution kernels that match a reference and run at the speed of the hardware. If
 your team needs expertise in convolutional networks and their gradients, you can procure our services by sending an email to
@@ -47,10 +47,6 @@ def _grid(rows, width=None):
     """A matrix of numbers as a fixed-width text block."""
     width = width or max(len(str(v)) for r in rows for v in r)
     return "\n".join(" ".join(f"{v:{width}}" for v in r) for r in rows)
-
-
-def _seed(name):
-    return f"{bookrng.seed_of(name):#018x}"
 
 
 def _zeros(*shape):
@@ -546,7 +542,7 @@ def grouped_check():
     solo = [corr2d([x[c]], [wd[c]], pad=1)[0] for c in range(cin)]
     d2 = _maxdiff(yd, solo)
     assert d1 < 1e-12 and d2 < 1e-12
-    return (f"Generator `bookrng.generator(\"{name}\")`, seed {_seed(name)}. Draws in order: x of shape [4, 5, 5] (channel, row, "
+    return (f"Generator `bookrng.generator(\"{name}\")`. Draws in order: x of shape [4, 5, 5] (channel, row, "
             "column; every entry normal()), then w of shape [6, 2, 3, 3] (every entry normal() times 0.5), then the depthwise weight "
             "[4, 1, 3, 3] (normal() times 0.5). Stride 1, padding 1, dilation 1.\n\n"
             + _table(["comparison", "largest difference", "criterion"],
@@ -719,7 +715,7 @@ def backward_checks():
                 n_checked += 1
         assert bad == 0 and worst < 1e-8
         rows.append((label, f"[{cout}, {ho}, {ho}]", "below 1e-12", "below 1e-12", f"{n_checked} of {n_checked} pass", "below 1e-8"))
-    return (f"Generator `bookrng.generator(\"{name}\")`, seed {_seed(name)}. Draws in order: x of shape [2, 5, 5] (channel, row, column; "
+    return (f"Generator `bookrng.generator(\"{name}\")`. Draws in order: x of shape [2, 5, 5] (channel, row, column; "
             "every entry normal()), w of shape [3, 2, 3, 3] (every entry normal() times 0.5), then for each row of the table in "
             "turn the upstream gradient dY of shape [3, Ho, Wo] (every entry normal()). Each sum runs over the loops in the order "
             "of the definition; the comparisons below are to criteria that do not depend on that order. 'routes' compares the "
@@ -744,7 +740,7 @@ def backward_stride1_identity():
         d = max(_maxdiff(a[0], b[0]), _maxdiff(a[1], b[1]))
         assert d < 1e-12
         rows.append((p, f"{k - 1 - p}", f"[{cout}, {ho}, {ho}]", "below 1e-12"))
-    return (f"Generator `bookrng.generator(\"{name}.stride1\")`, seed {_seed(name + '.stride1')}. Draws in order: x of shape [2, 6, 6] "
+    return (f"Generator `bookrng.generator(\"{name}.stride1\")`. Draws in order: x of shape [2, 6, 6] "
             "(every entry normal()), w of shape [3, 2, 3, 3] (every entry normal()), then dY of shape [3, Ho, Wo] (every entry "
             "normal()) for padding 0, 1 and 2 in turn. dX from the correlation of the padded dY with the turned, channel-exchanged "
             "kernel, and dW from the correlation of the padded X with dY, against the scatter form.\n\n"
@@ -834,7 +830,7 @@ def transposed_adjoint():
                         acc += y[0][i][j] * w[0][kh][kw]
             ty2[0][oh][ow] = acc
     assert _maxdiff(ty, ty2) < 1e-12
-    return (f"Generator `bookrng.generator(\"{name}\")`, seed {_seed(name)}. Draws in order: the kernel w of shape [3, 3] (every entry "
+    return (f"Generator `bookrng.generator(\"{name}\")`. Draws in order: the kernel w of shape [3, 3] (every entry "
             "normal()), the vector y of shape [3, 3] (every entry normal()), then x of shape [5, 5] (every entry normal()). The "
             "strided convolution (k = 3, stride 2, padding 1) of a 5 by 5 map is a matrix A of shape [9, 25], built column by column "
             "by convolving the 25 unit maps.\n\n"

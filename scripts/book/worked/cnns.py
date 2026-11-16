@@ -9,7 +9,7 @@ function without arguments returns a markdown string that the chapter embeds bet
 
 * two 8 by 8 images with the same pixels in a different arrangement, and what two difference filters say about them;
 * max, average and global average pooling with their backward passes, including the tie rule and overlapping windows;
-* a toy image set (stripes, checkerboards, blobs) drawn from a stated rule and seed, and a small convolutional network for it:
+* a toy image set (stripes, checkerboards, blobs) drawn from a stated rule and generator, and a small convolutional network for it:
   the parameters and multiply-adds of each layer, the receptive field, a gradient check, an Adam run checked for the digits that
   survive a change of 1e-12 in one weight, and what a shift of the input does to the output;
 * a plain and a residual stack of convolutions at several depths on the same data, trained the same way;
@@ -19,7 +19,7 @@ function without arguments returns a markdown string that the chapter embeds bet
 * a feature pyramid on a stated input: the shapes, parameters and multiply-adds of the top-down and bottom-up paths.
 
 Arithmetic is the language's 64-bit floating point unless a table says otherwise. Random inputs come from `bookrng.generator(name)`
-with the names, seeds and draw orders printed beside each table. Sums over taps run in the order (input channel, kernel row, kernel
+with the names and draw orders printed beside each table. Sums over taps run in the order (input channel, kernel row, kernel
 column), over positions in row-major order and over images in index order; the digits of a trained number are printed only when they
 survive the nudges of `stable.py`.
 
@@ -65,11 +65,6 @@ def _g(v, d=4):
     if v == 0:
         return f"{0:.{d}f}"
     return f"{v:.{d}f}" if 1e-3 <= abs(v) < 1e4 else _sci(v)
-
-
-def _seed(name):
-    s = bookrng.seed_of(name)
-    return f"seed 0x{s:016x} ({s})"
 
 
 def _numm(v, ws, d=4):
@@ -273,8 +268,8 @@ def toy_set():
     lo = min(min(x) for x, _ in d)
     hi = max(max(x) for x, _ in d)
     return (f"Image n has class n mod 3 (0 stripes, 1 checkerboard, 2 blobs); n = 0 .. 59 is the training set (20 of each class) and "
-            f"n = 60 .. 149 the test set (30 of each). One generator for all of them: the book's SplitMix64, {_seed(DATA_NAME)}, "
-            f"the name {DATA_NAME}. Draws for one image, in order:\n\n"
+            f"n = 60 .. 149 the test set (30 of each). One generator for all of them: the book's SplitMix64, "
+            f"`{DATA_NAME}`. Draws for one image, in order:\n\n"
             "- stripes: `integer(2)` (0 for stripes that vary along the columns, 1 along the rows), `integer(2) + 1` for the stripe "
             "width, `integer(2 * width)` for the phase; pixel = 1 when floor((t + phase) / width) is even, t being the column or the row;\n"
             "- checkerboard: `integer(2) + 1` for the cell size, `integer(2 * size)` for the row offset oy, `integer(2 * size)` for the "
@@ -568,7 +563,7 @@ def gradient_check():
         per_group[name] = (sum(len(r) for r in rows), gw)
         worst = max(worst, gw)
     rows = [(n, c, "below 1e-7" if w < 1e-7 else _sci(w)) for n, (c, w) in per_group.items()]
-    return (f"The initialized network ({INIT_NAME}, {_seed(INIT_NAME)}) on the training images n = 0 .. {GC_IMAGES - 1} (two of each class): "
+    return (f"The initialized network (`{INIT_NAME}`) on the training images n = 0 .. {GC_IMAGES - 1} (two of each class): "
             f"mean cross-entropy, analytic gradient from the backward pass of the chapter against the central difference "
             f"(L(w + h) - L(w - h)) / (2h) with h = {GC_STEP:g} in 64-bit arithmetic, one weight at a time. The gate of Volume III, "
             f"Chapter 6 is |analytic - numeric| <= 1e-7 + 1e-5 max(|analytic|, |numeric|).\n\n"
@@ -842,7 +837,7 @@ def depth_setup():
     return (f"Stem (3x3 conv, 4 filters, ReLU, 2x2 max pool, from the 8 by 8 image to 4 by 4 maps), then the body, then global average "
             f"pooling and a linear layer (4 to 3, no bias). The body is d convolutions 4 to 4 of 3 by 3 with padding 1 and ReLU after "
             f"each (plain), or d / 2 residual blocks relu(x + conv(relu(conv(x)))) with the same d convolutions. No biases, no "
-            f"normalization. Initialization: one generator per seed, the book's SplitMix64 with the names {names} ({'; '.join(_seed(f'{DEPTH_NAME}.{s}') for s in SEEDS)}); "
+            f"normalization. Initialization: one generator per seed, the book's SplitMix64 with the names {names}; "
             f"draws in order the stem (4 filters of 9 taps), then the d body convolutions (4 filters of 36 taps each, in layer order), then the "
             f"read-out (3 rows of 4); the same draws for the plain and the residual stack of one depth and seed; standard deviation sqrt(2 / 9) for "
             f"the stem and sqrt(2 / 36) for the body, times {DEPTH_BRANCH_SCALE} for the second convolution of each residual block, 0.5 for the read-out. "

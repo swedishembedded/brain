@@ -16,7 +16,7 @@ Plain Python 3 on floats (IEEE double precision), standard library only, written
 The record example reads the JSON files under papers/spectral-lm/data/primary/ of the repository; every value it uses
 from them is printed in the chapter, so a reader without the repository can repeat the arithmetic from the page.
 
-Randomness comes only from the book's SplitMix64 (`bookrng.generator(name)`); each block prints its seed and draw order.
+Randomness comes only from the book's SplitMix64 (`bookrng.generator(name)`); each block names its generator and draw order.
 Sums are plain left-to-right additions in a loop (never Python's `sum`, which compensates). The Student t distribution
 function for a real number of degrees of freedom is computed from the regularized incomplete beta function by its
 continued fraction (modified Lentz), with the library `lgamma`, `exp` and `log`.
@@ -209,8 +209,8 @@ def rule_pass_rates():
         rows.append(cells)
     head = (f"The claim: the candidate's bits per byte exceed the baseline's by at most {MARGIN} (the margin). A simulated "
             f"experiment trains n runs of each arm; run i of the candidate scores delta + {SIGMA} z and run i of the baseline "
-            f"{SIGMA} z, z a standard normal draw. Generator `research.rule_pass_rates` "
-            f"({bookrng.seed_of('research.rule_pass_rates'):#018x}), one generator for the whole table, `rng.normal()` "
+            f"{SIGMA} z, z a standard normal draw. Generator `research.rule_pass_rates`, "
+            f"one generator for the whole table, `rng.normal()` "
             f"(Box-Muller, the sine partner held for the next call) in this order: n = 3 before n = 8, the true differences "
             f"top to bottom, {EXPERIMENTS:,} experiments per cell, and in each experiment the n candidate draws before the n "
             f"baseline draws. The mean rule passes when the difference of the two means is at most {MARGIN}; in brackets, its "
@@ -405,7 +405,7 @@ def replication():
     head = (f"Suppose the true bits per byte of each model and its spread from seed to seed were exactly what the three "
             f"records show: spectral mixer mean {_fx(ms, 6)}, standard deviation {_fx(ss, 6)}; SwiGLU f = 24 mean "
             f"{_fx(mq, 6)}, standard deviation {_fx(sq, 6)} (these six-decimal values are the simulation's inputs). A replication trains n new seeds of each, run i scoring mean + sd z. "
-            f"Generator `research.replication` ({bookrng.seed_of('research.replication'):#018x}), `rng.normal()`, n = 3, 6, 10 "
+            f"Generator `research.replication`, `rng.normal()`, n = 3, 6, 10 "
             f"in turn, {EXPERIMENTS:,} replications each, the n spectral draws before the n SwiGLU draws. Each column is the "
             f"share of replications reaching that verdict on H1 (Monte Carlo standard error at most 0.005); 'superiority' "
             f"means the upper end of the Welch 95% interval of the difference lies below 0, tested as "

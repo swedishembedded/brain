@@ -57,8 +57,8 @@ def _f32(x):
     return struct.unpack("<f", struct.pack("<f", x))[0]
 
 
-def _seed_note(name):
-    return f"Generator: the book's SplitMix64, seed {bookrng.seed_of(name):#018x} (the seed of the name `{name}`)."
+def _generator_note(name):
+    return f"Generator: `{name}` (the book's SplitMix64)."
 
 
 # ------------------------------------------------------------ cache model
@@ -393,7 +393,7 @@ def hsum_trace():
              ("after the 4 tail elements (16 .. 19), one at a time", f"{total:.9g}"),
              ("left to right, one accumulator", f"{ref:.9g}"),
              ("exact sum of the exact products of the stored x and y", f"{float(exact):.9g}")]
-    return (f"{_seed_note(name)} n = {n}. Draw order: the 20 values of x, each `2 * uniform() - 1` rounded to f32, "
+    return (f"{_generator_note(name)} n = {n}. Draw order: the 20 values of x, each `2 * uniform() - 1` rounded to f32, "
             "then the 20 values of y the same way. Every product and every sum is rounded to f32 (no fused "
             "multiply-add). Lane j of the 8 accumulators adds the products j, j + 8 (elements 0..15 only). The "
             "horizontal sum is s[j] = lane j + lane j + 4, then (s[0] + s[1]) + (s[2] + s[3]); the last four "
@@ -435,7 +435,7 @@ def simd_sum_order():
         results.add(v)
         rel = abs(Fraction(v) - exact) / abs(exact)
         rows.append((w, f"{v:.9g}", f"{float(rel):.2e}"))
-    return (f"{_seed_note(name)} n = {n}. Draw order: the 4096 values of x, each `2 * uniform() - 1` rounded to f32, "
+    return (f"{_generator_note(name)} n = {n}. Draw order: the 4096 values of x, each `2 * uniform() - 1` rounded to f32, "
             "then the 4096 of y. The products are rounded to f32 and then added in f32, one addition at a time. With "
             "w lanes, lane j adds the products j, j + w, j + 2w, ... in order, and the lanes are then combined by "
             "the horizontal sum (while more than 4 lanes remain, lane j + h is added to lane j for h = half "

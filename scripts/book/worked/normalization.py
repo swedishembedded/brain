@@ -72,8 +72,7 @@ def _vec(v, d=4):
 
 
 def _gen_note(name):
-    s = bookrng.seed_of(name)
-    return f"Generator: the book's SplitMix64, seed 0x{s:016x} ({s})"
+    return f"Generator: the book's SplitMix64, `{name}`"
 
 
 def _loss(v):
@@ -232,9 +231,8 @@ def stack_run(kind, lr, steps=STACK_STEPS, nudge=0.0):
 
 def _stack_setup(extra=""):
     return (f"Setup: the deep stack of the initialization chapter (10 layers of 64 units, a read-out; ReLU), He start "
-            f"(the stream `initialization.weights` of that chapter, seed 0x{bookrng.seed_of(ini.WEIGHTS_NAME):016x}, scale sqrt(2 / 64) times each normal() in the order of that chapter's table: layer by layer, row by row, read-out last), "
-            f"biases 0, the first {ini.N_TRAIN} inputs and targets of the stream `initialization.data` "
-            f"(seed 0x{bookrng.seed_of(ini.DATA_NAME):016x}), mean squared error, full batch, plain gradient "
+            f"(the generator `initialization.weights` of that chapter, scale sqrt(2 / 64) times each normal() in the order of that chapter's table: layer by layer, row by row, read-out last), "
+            f"biases 0, the first {ini.N_TRAIN} inputs and targets of the generator `initialization.data`, mean squared error, full batch, plain gradient "
             f"descent{extra}.")
 
 
@@ -344,7 +342,6 @@ def running_statistics():
     for s in RUN_RECORD:
         bm, bv, rm, rv = series[s]
         rows.append((s, _g(bm), _g(bv), _g(rm), _g(rv), _g(BETA_RUN ** s, 4)))
-    s0 = bookrng.seed_of(RUN_NAME)
     return (f"Setup: one feature whose values are 3 + 2 * normal() (mean 3, variance 4). {_gen_note(RUN_NAME)}; "
             f"batch t takes the next 8 draws in order. Running averages start at mean 0 and variance 1 and update "
             f"as run = beta_run * run + (1 - beta_run) * batch with beta_run = 0.9 (weight 0.1 on the new batch), batch variance with divisor 8.\n\n" +

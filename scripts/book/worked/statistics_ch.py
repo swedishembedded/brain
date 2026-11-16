@@ -13,7 +13,7 @@ exactly (fractions or enumeration), areas under the bell with the error
 function, the Student t multiplier by integrating its density, and every
 simulation draws from the book's SplitMix64 through `bookrng.generator(name)`
 (`uniform()`, `integer(n)` and `normal()` as the randomness chapter specifies
-them); each simulated table prints the seed and the order of its draws. The module is named
+them); each simulated table names its generator and the order of its draws. The module is named
 `statistics_ch` because `statistics` is a standard-library module.
 
 Swedish Embedded AB implements solutions for deciding, from finite test sets,
@@ -97,8 +97,8 @@ def _binom(rng, n, p):
 
 
 def _generator_line(name):
-    """The sentence that makes a simulated table reproducible: generator and seed."""
-    return f"Generator: the book's SplitMix64, seed {bookrng.seed_of(name):#018x} ({bookrng.seed_of(name)})."
+    """The sentence that makes a simulated table reproducible: the generator's name."""
+    return f"Generator: `{name}` (the book's SplitMix64)."
 
 
 def _tail_ge(n, k):
@@ -415,8 +415,8 @@ def unpaired_test():
             ("test statistic z", _fx(z, 3)),
             ("two-sided p-value from the Gaussian", _fx(_p_two_sided(z), 3)),
             ("share of 2000 simulated null experiments with |gap| >= 4 questions", _fx(sim, 3))]
-    return (f"The simulated share uses the 2000 runs of the first table of this chapter (same generator, seed "
-            f"{bookrng.seed_of(NULL_NAME):#018x}).\n\n" + _table(["quantity", "value"], rows, "ll"))
+    return (f"The simulated share uses the 2000 runs of the first table of this chapter (same generator, "
+            f"`{NULL_NAME}`).\n\n" + _table(["quantity", "value"], rows, "ll"))
 
 
 def test_error_rates():
@@ -648,8 +648,8 @@ def bootstrap_median():
     se_mean = math.sqrt(_sample_var(x) / n)
     out = [f"Latencies (ms): 25 values, value k = exp(4.0 + 0.6 z) rounded to one decimal with z the k-th `rng.normal()` of the "
            f"generator below; sorted ascending: " + ", ".join(f"{v:.1f}" for v in x) + ".",
-           f"Latency generator: seed {bookrng.seed_of(LATENCY_NAME):#018x} ({bookrng.seed_of(LATENCY_NAME)}).",
-           f"Bootstrap generator: seed {bookrng.seed_of(MEDIAN_NAME):#018x} ({bookrng.seed_of(MEDIAN_NAME)}). {MEDIAN_RESAMPLES:,} resamples; a resample is 25 calls of "
+           f"Latency generator: `{LATENCY_NAME}`.",
+           f"Bootstrap generator: `{MEDIAN_NAME}`. {MEDIAN_RESAMPLES:,} resamples; a resample is 25 calls of "
            "`rng.integer(25)`, each the index into the ascending latencies above. The median of 25 values is "
            "the 13th smallest. Interval ends: the 2.5th and 97.5th percentiles of the sorted replicates by linear "
            "interpolation at position q (R - 1). The Gaussian row for the mean is the estimate plus or minus 1.959964 times s/sqrt(25), s the standard deviation with "

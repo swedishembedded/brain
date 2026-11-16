@@ -49,8 +49,8 @@ def _table(headers, rows, align=None):
     return "\n".join(out)
 
 
-def _seed(name):
-    return f"`{name}` (seed 0x{bookrng.seed_of(name):016x})"
+def _stream(name):
+    return f"`{name}`"
 
 
 def _int(n):
@@ -182,7 +182,7 @@ def degradations():
         "dark top-left 4 by 4 corner; pixel (i, j) is row i, column j, and the bright side is i + j >= 8) and its blur by (1, 2, 1) / 4 along each row and then "
         f"along each column with the edge value repeated beyond the border.\n\n{t1}\n\n"
         "The degraded 4 by 4 pictures. 'Box mean only' averages each non-overlapping 2 by 2 block of x; 'blur, then box mean' does so "
-        f"after the blur; '+ noise' adds {NOISE_SD:g} times one draw of `normal()` of the stream {_seed(DEGRADE)} to each of the 16 "
+        f"after the blur; '+ noise' adds {NOISE_SD:g} times one draw of `normal()` of the stream {_stream(DEGRADE)} to each of the 16 "
         f"pixels in row-major order; '+ quantised' takes each 2 by 2 block (p00 p01 / p10 p11) of the noisy picture as a mean "
         f"m = (p00 + p01 + p10 + p11) / 4 and three differences h = (p00 + p01 - p10 - p11) / 4, v = (p00 - p01 + p10 - p11) / 4 and "
         f"d = (p00 - p01 - p10 + p11) / 4, rounds m to a multiple of {STEP_DC:g} and each of h, v, d to a multiple of {STEP_AC:g} "
@@ -627,7 +627,7 @@ def sr_setup():
     ]
     t1 = _table(["tensor", "shape", "numbers", "initial value, in draw order"], rows, "llrl")
     t2 = _table(["quantity", "value"], [
-        ["streams", f"{_seed(SR_TRAIN)} (256 pictures), {_seed(SR_TEST)} (256), {_seed(SR_INIT)}"],
+        ["streams", f"{_stream(SR_TRAIN)} (256 pictures), {_stream(SR_TEST)} (256), {_stream(SR_INIT)}"],
         ["first training picture: a, b, c", f"{a:.6f}, {b:.6f}, {c:.6f}"],
         ["its low-resolution row 0", _row(first[1][0], 6)],
         ["mean squared error of the initial network on the training set", f"{start[0]:.6f}"],
@@ -686,7 +686,7 @@ def sr_training():
         f"for every picture, since the three patterns of a block are orthogonal and each carries a sign of size 0.08, so a block's four "
         f"pixels have squared values adding to 12 x 0.08^2 and half the pixels of a picture are in such blocks (1.5 x 0.08^2 = {1.5 * DELTA ** 2:.6f}). "
         "The last row adds to the network's picture a fresh texture drawn by `draw_texture` from the stream "
-        f"{_seed(SR_SAMPLE)}, one per test picture.\n\n{t2}\n\n"
+        f"{_stream(SR_SAMPLE)}, one per test picture.\n\n{t2}\n\n"
         "The detail energy of a picture is the mean over its pixels of the squared difference between a pixel and the mean of its 2 by 2 block, "
         "measured separately on the left half (no texture) and the right half (texture) and averaged over the 256 test pictures.\n\n" + t3
     )
@@ -706,7 +706,7 @@ def blind_restoration():
     return (
         "The same network (the same 142 initial numbers, the same 300 steps) trained twice: on the clean low-resolution pictures, and on the "
         "same pictures with noise added to each: its level one of 0, 0.02, 0.05, 0.1 chosen by one `integer(4)` draw per picture from the stream "
-        f"{_seed(SR_LEVELS)}, then the noise of each picture drawn row-major from {_seed(SR_NOISE_TRAIN)} (16 draws per picture, every "
+        f"{_stream(SR_LEVELS)}, then the noise of each picture drawn row-major from {_stream(SR_NOISE_TRAIN)} (16 draws per picture, every "
         "picture included, each multiplied by the level of its picture, so that a picture of level 0 is unchanged). Mean squared error on "
         "the 256 test pictures when 4 by 4 pixels of noise of the given standard deviation are added to every low-resolution picture "
         "(from the stream `restoration.sr.noise.test.<level>` with the level written as in the table, 0.02, 0.05 or 0.1: "
@@ -806,9 +806,9 @@ def codebook_prior():
                  "whole-face read, wrong (not a template)"], rows)
     return (
         "A codebook of 8 vectors of the plane and a prior of 16 faces of 8 positions each. The codes are the points "
-        f"(1.5 cos(2 pi k / 8), 1.5 sin(2 pi k / 8)); face m is the list of 8 codes drawn from the stream {_seed(CB_TEMPLATES)} "
+        f"(1.5 cos(2 pi k / 8), 1.5 sin(2 pi k / 8)); face m is the list of 8 codes drawn from the stream {_stream(CB_TEMPLATES)} "
         "(`integer(8)`, m = 0 .. 15, positions 0 .. 7). A degraded face has, at each position, the vector of its code plus the noise level times two "
-        f"`normal()` draws (x then y) from the stream {_seed(CB_FACES)}, which draws first 2,000 face numbers (`integer(16)`), then the "
+        f"`normal()` draws (x then y) from the stream {_stream(CB_FACES)}, which draws first 2,000 face numbers (`integer(16)`), then the "
         "codes of 2,000 faces that are not templates (`integer(8)` for each of 8 positions), then the noise (two draws per position, "
         "faces in order); the noise draws of face i are the same for the face i that is a template and for the face i that is not, so the "
         "two sets of columns share their 2,000 x 16 noise numbers. 'Nearest code' replaces each position's vector by the index of the nearest code; the whole-face read picks "
@@ -854,10 +854,10 @@ def fidelity_dial():
     w_star = DIAL_DETAIL ** 2 / (DIAL_DETAIL ** 2 + DIAL_SIGMA ** 2)
     return (
         "The fidelity dial on the toy faces. The encoder's feature e is the true feature f plus noise of standard deviation "
-        f"{DIAL_SIGMA:g} (the noise of the previous table, stream {_seed(CB_FACES)}); d is the codes of the whole-face read of e; "
+        f"{DIAL_SIGMA:g} (the noise of the previous table, stream {_stream(CB_FACES)}); d is the codes of the whole-face read of e; "
         "the output is out(w) = d + w (e - d). 'On the prior' faces have f equal to their template's codes; 'with detail' faces have "
         f"f equal to those codes plus a personal offset, two `normal()` draws of standard deviation {DIAL_DETAIL:g} per position, from the "
-        f"stream {_seed(DIAL_STREAM)} (drawn per position, x then y, faces in order). Mean squared error per coordinate against f, and for "
+        f"stream {_stream(DIAL_STREAM)} (drawn per position, x then y, faces in order). Mean squared error per coordinate against f, and for "
         "the faces with detail the mean squared distance to the degraded input e.\n\n"
         + _table(["w", "error, on the prior", "error, with detail", "distance to e, with detail"], rows)
         + f"\n\nWith d equal to the codes, the error per coordinate is {DIAL_SIGMA ** 2:g} w^2 on the prior and {DIAL_DETAIL ** 2:g} (1 - w)^2 "
@@ -995,7 +995,7 @@ def diffusion_toy():
         "The sampler of the previous table run on a world of two pixels: the pair average is known to be 0.5, the half-difference t of "
         "the true pair is +1 or -1 with probability 1/2, and the denoiser is the exact posterior mean. The reference that the pull aims at "
         f"is the pair (0.9, 0.1), whose half-difference is +{TOY_CENTER:g}. {TOY_N:,} runs of {TOY_STEPS} steps on the equal-spaced grid, every "
-        f"configuration from the stream {_seed(TOY_STREAM)} read from its start (two `normal()` draws for the first latent, then two per "
+        f"configuration from the stream {_stream(TOY_STREAM)} read from its start (two `normal()` draws for the first latent, then two per "
         "step when the churn is on), so the first latents are the same in every row. A run: x is the sigma_max = 14.6146 times the two first draws. "
         f"At each step with level sigma and next level sigma': sigma-hat = sigma (1 + gamma); with churn, add {S_NOISE:g} "
         "sqrt(sigma-hat^2 - sigma^2) times two fresh draws, one to each pixel (s_noise = 1.01); the estimate d is the exact denoiser "

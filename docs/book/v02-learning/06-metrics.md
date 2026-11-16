@@ -100,7 +100,7 @@ Each number protects against a different failure. Low recall means defects ship 
 The examples that follow use one model on one data source, so that every table can be compared with the others. The source is again a screening problem. Each part has twenty measurements, and only the first two carry any information about whether the part is defective; the other eighteen are noise. About one part in ten is defective. A logistic model with all twenty measurements (chapter 3) is fitted to a small training set, which is exactly the situation of chapter 5 in which a model with many weights memorizes: there are $21$ weights and $100$ training parts.
 
 <!-- worked: metrics.screen_data -->
-Generator: the book's SplitMix64, seed 0x2aa0719b44b5c9e5 (3071579857553312229).
+Generator: `metrics.screen` (the book's SplitMix64).
 Draw order, part by part: x1, ..., x20 = rng.normal() in that order (so ten Box-Muller pairs, none held over), then u = rng.uniform(); y = 1 (defective) when u < sigmoid(-4.5 + 2.5 x1 + 1.8 x2). 100 training parts, then 1000 validation parts, then 3000 test parts, all from this one generator.
 
 | split | parts | defective | fraction defective |
@@ -646,7 +646,7 @@ The rule that flags everything costs $0.8980$ per part on the test parts and the
 Every number above was computed from a finite test set, so it carries a sampling error (Volume I, chapter 12). For the accuracy there is a formula, the standard error $\sqrt{p(1-p)/n}$; for the $\mathrm{AUC}$, the $F_1$ score or the $\mathrm{ECE}$ the easiest honest tool is the bootstrap of that chapter: resample the test parts with replacement, recompute the metric, and read the interval from the spread of the replicates. The cut for $F_1$ is chosen on the validation parts first and then held fixed, so that the interval describes the test sample and not the choice of the cut.
 
 <!-- worked: metrics.bootstrap_intervals -->
-Generator: the book's SplitMix64, seed 0x6a94e644937c3834 (7680016446780094516).
+Generator: `metrics.bootstrap_intervals` (the book's SplitMix64).
 The 3000 test parts (306 defective). The cut on z is chosen on the validation parts (the lowest of the cuts c_k = -15 + 0.05 k, k = 0 .. 600, computed by that multiplication, with the largest F1 on the validation parts, a part being flagged when z >= c_k; on equal F1 the lowest cut): z >= -1.15, which is held fixed. The estimate column is the metric on the original 3000 test parts in their given order. 1000 resamples drawn one after the other from this one generator; a resample is 3000 calls of rng.integer(3000), each the index of a test part (rows in the order drawn). Interval ends are the 2.5th and 97.5th percentiles of the sorted replicates by linear interpolation at position q x (1000 - 1), q = 0.025 and 0.975, in the ascending list of the 1000 replicates; the standard error is the standard deviation of the replicates (divisor 1000).
 
 | metric | estimate | standard error | 95% lower | 95% upper |

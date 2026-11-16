@@ -169,8 +169,8 @@ def classifier_joint():
 # --------------------------------------------------- frequencies and counting
 
 def _generator_line(name):
-    """The sentence that makes a simulated table reproducible: generator, seed, and the rule for what it draws."""
-    return f"Generator: the book's SplitMix64, seed {bookrng.seed_of(name):#018x} ({bookrng.seed_of(name)})."
+    """The sentence that makes a simulated table reproducible: the generator's name (the seed is `seed_of` of it)."""
+    return f"Generator: `{name}` (the book's SplitMix64)."
 
 def coin_frequencies():
     """Relative frequency of heads in a growing run of fair-coin flips."""

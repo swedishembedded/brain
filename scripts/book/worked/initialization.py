@@ -63,18 +63,16 @@ def _sci(v, d=2):
 
 
 def _gen_note(name):
-    s = bookrng.seed_of(name)
-    return f"Generator: the book's SplitMix64, seed 0x{s:016x} ({s})"
+    return f"Generator: the book's SplitMix64, `{name}`"
 
 
 def stack_note():
     """The complete recipe of the deep stack's weights and data, printed with the first training table."""
-    ws, ds = bookrng.seed_of(WEIGHTS_NAME), bookrng.seed_of(DATA_NAME)
-    return (f"Weights: one generator `{WEIGHTS_NAME}` (seed 0x{ws:016x}, {ws}). The 10 hidden weight matrices (shape [64, 64], row j holds the weights of unit j) and then the read-out vector (64 entries) "
+    return (f"Weights: one generator `{WEIGHTS_NAME}`. The 10 hidden weight matrices (shape [64, 64], row j holds the weights of unit j) and then the read-out vector (64 entries) "
             "are drawn in this order, layer by layer, row by row, entry i = 0, ..., 63 within a row; each weight is scale * normal(), and every scheme draws every normal() (a zero scale still consumes it), "
             f"so all schemes see the same standard normals. Scales: zeros 0; small {SMALL_STD:g}; large {LARGE_STD:g}; Xavier sqrt(2 / (n_in + n_out)) with n_in = n_out = 64 in the hidden layers and "
             "n_in = 64, n_out = 1 in the read-out, so sqrt(2 / 65); He sqrt(2 / n_in) = sqrt(2 / 64) in every layer. "
-            f"Data: one generator `{DATA_NAME}` (seed 0x{ds:016x}, {ds}). First the direction a: 64 draws of normal() each multiplied by 3/16 = 0.1875; then the examples, example after example, "
+            f"Data: one generator `{DATA_NAME}`. First the direction a: 64 draws of normal() each multiplied by 3/16 = 0.1875; then the examples, example after example, "
             "each 64 consecutive normal() draws (so the 128 inputs of the later tables extend the 32 training inputs, which are their first 32); the target of an example x is t = 1 + sin(a . x) (radians). "
             "The loss is the mean over the examples of (y - t)^2, with y = w_out . a_10 + b_out.")
 
@@ -353,7 +351,7 @@ def start_gradients():
     return (f"Setup: the deep stack (10 layers of 64 units, a read-out), the first {N_TRAIN} inputs of the data, all biases 0, "
             f"loss = mean of (y - t)^2. Entries are the Euclidean norm of the gradient of each layer's weight matrix and bias vector "
             f"at step 0. Weights: all zero (tanh and ReLU), or He normal (ReLU); weights and data are those of the first training table "
-            f"(generators `{WEIGHTS_NAME}` and `{DATA_NAME}`, seeds 0x{bookrng.seed_of(WEIGHTS_NAME):016x} and 0x{bookrng.seed_of(DATA_NAME):016x}).\n\n"
+            f"(generators `{WEIGHTS_NAME}` and `{DATA_NAME}`).\n\n"
             + _table(["layer", "tanh, zeros: norm of dW", "tanh, zeros: norm of db", "ReLU, zeros: norm of dW", "ReLU, zeros: norm of db",
                       "ReLU, He: norm of dW", "ReLU, He: norm of db"], rows))
 
@@ -475,8 +473,8 @@ def _forward_rms(act):
         rows.append((_scheme_label(scheme), *[_sci(fz[l - 1]) for l in LAYERS_SHOWN]))
     return (f"Setup: the deep stack with {act} units, {N_MEASURE} inputs (rms of the inputs {x_rms:.3f}), biases 0. "
             f"Entries: the root mean square of z_l over all {N_MEASURE} x 64 pre-activations of layer l. "
-            f"Weights and data: as in the first training table of the chapter (weights generator `{WEIGHTS_NAME}`, seed 0x{bookrng.seed_of(WEIGHTS_NAME):016x}; data generator `{DATA_NAME}`, "
-            f"seed 0x{bookrng.seed_of(DATA_NAME):016x}, the {N_MEASURE} inputs being the first {N_MEASURE} examples of that stream); scale * normal(), the same draws for every row.\n\n"
+            f"Weights and data: as in the first training table of the chapter (weights generator `{WEIGHTS_NAME}`; data generator `{DATA_NAME}`, "
+            f"the {N_MEASURE} inputs being the first {N_MEASURE} examples of that stream); scale * normal(), the same draws for every row.\n\n"
             + _table(["start"] + [f"z_{l}" for l in LAYERS_SHOWN], rows))
 
 
@@ -646,9 +644,9 @@ def draw_shapes():
 
 def shape_in_network():
     rows = []
-    seeds = []
+    names = []
     for shape in ("normal", "uniform", "truncated"):
-        seeds.append(f"`initialization.shape-net.{shape}` = 0x{bookrng.seed_of(f'initialization.shape-net.{shape}'):016x}")
+        names.append(f"`initialization.shape-net.{shape}`")
         g = bookrng.generator(f"initialization.shape-net.{shape}")
         X, _ = make_data(N_MEASURE)
         a = X
@@ -661,8 +659,8 @@ def shape_in_network():
             a = [[max(0.0, v) for v in r] for r in Z]
         rows.append((shape, *[_sci(zr[l - 1], 3) for l in (1, 5, 10)]))
     return ("Setup: the ReLU deep stack with He scale sigma = sqrt(2/fan_in), but each weight drawn with the named shape "
-            f"(one generator per row: {', '.join(seeds)}; weights layer by layer, row by row, one draw per weight in the shape's rule, the truncated shape redrawing a normal() until it passes). "
-            f"{N_MEASURE} inputs, the first {N_MEASURE} examples of the data stream of the first training table (generator `{DATA_NAME}`, seed 0x{bookrng.seed_of(DATA_NAME):016x}), biases 0. The predicted rms of z_1 is sqrt(2 q_0) with q_0 the mean of x^2.\n\n"
+            f"(one generator per row: {', '.join(names)}; weights layer by layer, row by row, one draw per weight in the shape's rule, the truncated shape redrawing a normal() until it passes). "
+            f"{N_MEASURE} inputs, the first {N_MEASURE} examples of the data stream of the first training table (generator `{DATA_NAME}`), biases 0. The predicted rms of z_1 is sqrt(2 q_0) with q_0 the mean of x^2.\n\n"
             + _table(["weight shape", "rms z_1", "rms z_5", "rms z_10"], rows))
 
 
@@ -678,7 +676,7 @@ def training_table(act):
     return (f"Setup: the deep stack with {act} units, {N_TRAIN} training examples (full batch), mean squared error, "
             f"plain gradient descent with rate {TRAIN_LR:g}, {TRAIN_STEPS} steps, biases start at 0. The target is "
             f"t = 1 + sin(a . x) with mean of t^2 = {e_t2:.4f}; predicting the mean of the targets gives the loss "
-            f"{var_t:.4f}. {stack_note() if act == "tanh" else "Weights and data exactly as in the tanh table above (same generators, seeds, draw order and scales)."} " + stable.RULE + "\n\n"
+            f"{var_t:.4f}. {stack_note() if act == "tanh" else "Weights and data exactly as in the tanh table above (same generators, draw order and scales)."} " + stable.RULE + "\n\n"
             + _table(["start"] + [f"step {s}" for s in TRAIN_RECORD], rows))
 
 
@@ -699,11 +697,11 @@ def seed_table():
     for k, name in enumerate(names):
         run = train_run("relu", "he", name)
         label = f"{k}" if k < REPEAT_RUNS else "0 again"
-        rows.append((label, f"0x{bookrng.seed_of(name):016x}", _loss(run[0]), _loss(run[30]), _loss(run[TRAIN_STEPS])))
+        rows.append((label, _loss(run[0]), _loss(run[30]), _loss(run[TRAIN_STEPS])))
     return (f"Setup: the ReLU deep stack, He normal start, the training run of the previous tables, but the weights come from the "
             f"generator named `initialization.seed-run.<k>` (k = 0 .. {REPEAT_RUNS - 1}); the last row repeats k = 0. "
             f"The data and everything else are unchanged.\n\n"
-            + _table(["run k", "seed", "loss at step 0", "loss at step 30", f"loss at step {TRAIN_STEPS}"], rows, align="lrrrr"))
+            + _table(["run k", "loss at step 0", "loss at step 30", f"loss at step {TRAIN_STEPS}"], rows, align="lrrr"))
 
 
 def output_scale():

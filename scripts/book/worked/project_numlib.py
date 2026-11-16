@@ -14,8 +14,8 @@ chapter embeds between `<!-- worked: project_numlib.<name> -->` markers: the
 acceptance tests, every expected value computed here by the library itself.
 
 Randomness: the library carries its own generator (SplitMix64). Every test that
-draws random numbers takes its seed from `bookrng.seed_of("project_numlib.<test>")`
-and prints it with its draw order; no module in the book carries a seed literal.
+draws random numbers takes its generator from `bookrng.generator("project_numlib.<test>")`
+and prints that name with its draw order; no module in the book carries a seed literal.
 The one literal state, zero, is the edge
 case a generator must handle and not a choice of seed.
 
@@ -53,7 +53,7 @@ def _seed(name):
 
 
 def _gen(name):
-    """The book's generator for the test `name`, started at its printed seed."""
+    """The book's generator for the test `name`, started at the seed of its name."""
     return bookrng.generator("project_numlib." + name)
 
 
@@ -355,7 +355,7 @@ def matmul_float_agreement():
     c3, _ = matmul_p_descending(a, b)
     same = max(abs(x - y) for x, y in zip(c1.to_list(), c2.to_list()))
     other = max(abs(x - y) for x, y in zip(c1.to_list(), c3.to_list()))
-    return (f"Two [16, 16] matrices from the generator seeded with {_hex(_seed('matmul_float'))}: each entry is "
+    return (f"Two [16, 16] matrices from the generator `project_numlib.matmul_float`: each entry is "
             f"`uniform()` - 0.5, drawn in row-major order, all 256 entries of A first and then all 256 of B. "
             f"Each output element is a sum of 16 products.\n\n"
             f"- Loop orders i, j, p (`matmul_naive`) and i, p, j (`matmul`): every element accumulates its products in the "
@@ -604,7 +604,7 @@ def shuffle_scripts():
         o = tuple(rng.shuffle([0, 1, 2]))
         counts[o] = counts.get(o, 0) + 1
     rows = [(" ".join(map(str, o)), c, f"{c / trials:.4f}") for o, c in sorted(counts.items())]
-    out += (f"\n\nSix orders of three items, {trials:,} shuffles one after the other, each of a fresh [0, 1, 2], from one generator seeded with {_hex(_seed('shuffle_counts'))}; "
+    out += (f"\n\nSix orders of three items, {trials:,} shuffles one after the other, each of a fresh [0, 1, 2], from one generator, `project_numlib.shuffle_counts`; "
             f"each count must lie within 5 standard deviations ({5 * math.sqrt(trials / 6 * 5 / 6):.0f}) of "
             f"{trials // 6:,}:\n\n" + _table(["order", "count", "frequency"], rows, "lrr"))
     return out
@@ -620,7 +620,7 @@ def normal_moments():
     rows = [("mean", f"{mean:.6f}", "0", f"{4 / math.sqrt(n):.4f} (4 standard errors)"),
             ("variance", f"{var:.6f}", "1", f"{4 * math.sqrt(2 / n):.4f}"),
             ("share with absolute value at most 1", f"{within1:.5f}", "0.68269", "0.0066")]
-    return (f"{n:,} consecutive calls of normal() on one generator seeded with {_hex(_seed('moments'))}. The mean is the "
+    return (f"{n:,} consecutive calls of normal() on the generator `project_numlib.moments`. The mean is the "
             f"plain left-to-right sum divided by n; the variance is the plain sum of (x - mean)^2 divided by n - 1 "
             f"(divisor n - 1); the share is the fraction of values with |x| <= 1. The measured column is what this "
             f"reference produced: a bit-exact generator must match it to half a unit of the last printed digit "
@@ -769,8 +769,8 @@ def statistics_cases():
             ("standard error of the mean", _g(se)),
             ("normal-formula 95 percent interval mean -+ 1.96 se", f"[{_g(m - 1.96 * se)}, {_g(m + 1.96 * se)}]"),
             ("median (position 0.5 (n - 1), interpolated)", _g(median(xs))),
-            (f"bootstrap interval of the mean, 2000 resamples, seed {_hex(seed)}", f"[{_g(lo)}, {_g(hi)}]"),
-            (f"bootstrap interval of the median, same seed", f"[{_g(mlo)}, {_g(mhi)}]")]
+            (f"bootstrap interval of the mean, 2000 resamples, generator `project_numlib.bootstrap`", f"[{_g(lo)}, {_g(hi)}]"),
+            (f"bootstrap interval of the median, same generator, restarted", f"[{_g(mlo)}, {_g(mhi)}]")]
     out = (f"Twenty-five latencies in milliseconds: {_flist(xs)}\n\n"
            + _table(["quantity", "value"], rows, "lr"))
     ys = [3.0] * 10
@@ -832,7 +832,7 @@ def integration_run():
     ana = line_gradient(start, xs, ys)
     num = gradient(lambda q: line_loss(q, xs, ys), start)
     out = (f"Data: n = {N_POINTS} points, x_i = 4 i / 49, y_i = 2 x_i + 1 + 0.5 z_i, where z_0, z_1, ... are the "
-           f"first fifty normal() draws of the generator seeded with {_hex(seed)}, taken in order; x_i is computed as "
+           f"first fifty normal() draws of the generator `project_numlib.integration`, taken in order; x_i is computed as "
            f"4.0 * i / 49 and y_i as ((2 x_i) + 1) + 0.5 z_i. Every sum below (the means, the loss, the gradient, the "
            f"closed-form sums) is a plain left-to-right sum starting from 0.0 in index order, not `kahan_sum`, and a mean "
            f"is such a sum divided by n. The residual of point i is r_i = (a x_i + b) - y_i; the loss is the mean of r_i^2; "
@@ -860,6 +860,6 @@ def integration_run():
 
     lo, hi = bootstrap_interval(pairs, slope_of, 2000, 0.95, _gen("integration.bootstrap"))
     out += (f"\n- 95 percent bootstrap interval of the slope, resampling whole (x, y) pairs, 2000 resamples, generator "
-            f"seeded with {_hex(_seed('integration.bootstrap'))}: [{_g(lo)}, {_g(hi)}]; it "
+            f"`project_numlib.integration.bootstrap`: [{_g(lo)}, {_g(hi)}]; it "
             f"{'contains' if lo <= TRUE_SLOPE <= hi else 'does not contain'} the true slope 2.")
     return out

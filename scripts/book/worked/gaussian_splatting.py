@@ -773,7 +773,7 @@ def gradient_check():
             "whole scene (quaternions are normalized on use):\n\n"
             + _table(["i", "mean", "scales", "quaternion (w, x, y, z)", "opacity", "colour"], scene_rows, "rlllrl")
             + f"\n\nThe loss is L = sum over pixels and channels of W C, with 192 weights W drawn in "
-            f"order (pixel row, pixel column, channel) from `normal()` of the generator `{GC_NAME}`, seed {bookrng.seed_of(GC_NAME)}, so "
+            f"order (pixel row, pixel column, channel) from `normal()` of the generator `{GC_NAME}`, so "
             f"dL/dC = W exactly. L = {_g(loss, 8)}. The analytic gradient is compared with the central difference "
             "(L(theta + h) - L(theta - h)) / 2h, h = 1e-6, for each of the 42 numbers; an entry passes when "
             "|analytic - difference| <= 1e-6 max(|analytic|, 1).\n\n"
@@ -966,7 +966,7 @@ def fit_toy():
             "180, 270 degrees with the heights h = -1.2, -1.5, -1.0, -1.7, and one held-out camera at (2.8, -2.6, -2.6), all looking at "
             "the origin with up = (0, -1, 0) (`make_camera`, principal point at the middle of the image). "
             f"The start disturbs the target: for each Gaussian in turn, 3 mean numbers by 0.15 z, 3 log scales by 0.2 z and 4 quaternion "
-            f"numbers by 0.15 z, with z the next `normal()` of the generator `{FIT_NAME}` (seed {bookrng.seed_of(FIT_NAME)}), in that order, "
+            f"numbers by 0.15 z, with z the next `normal()` of the generator `{FIT_NAME}`, in that order, "
             "then every opacity is set to 0.5 and every colour to (0.5, 0.5, 0.5). Full-batch Adam (beta_1 = 0.9, beta_2 = 0.999, epsilon = "
             f"1e-8, bias correction) with the rates mean 0.02, log scale 0.03, quaternion 0.01, opacity logit 0.1, colour 0.03; the loss of an "
             f"update is the mean over the four training views of the mean squared error over pixels and channels; {FIT_STEPS} updates. The "

@@ -17,7 +17,7 @@ and attention of `transformer_block` and `self_attention`.
 * patch merging, a hierarchical pyramid (Swin-T) and the stages of brain's hybrid encoder, with the token budget of a language model;
 * a small vision transformer trained on the toy images of the convolutions chapter, against that chapter's network.
 
-Arithmetic is 64-bit floating point. Random inputs come from `bookrng.generator(name)` with the names, seeds and draw orders printed
+Arithmetic is 64-bit floating point. Random inputs come from `bookrng.generator(name)` with the names and draw orders printed
 beside each table. Sums of products run left to right; the digits of a trained number are printed only when they survive the nudges of
 `stable.py`.
 
@@ -65,9 +65,8 @@ def _sci(v, d=2):
     return f"{v:.{d}e}"
 
 
-def _seed(name):
-    s = bookrng.seed_of(name)
-    return f"seed 0x{s:016x} ({s})"
+def _generator(name):
+    return f"Generator `{name}`"
 
 
 def _round1(x):
@@ -215,7 +214,7 @@ def embedding_equivalence():
     wd = _maxdiff(m, wrong)
     wrows = [(f"o = {o}", *[f"{v:.1f}" for v in w[o]], f"{b[o]:.1f}") for o in range(EMB_D)]
     trows = [(t, *[_fx(v, 4) for v in c[t]]) for t in range(len(c))]
-    return (f"{_seed(EMB_NAME)}. Draws, in this order: the 3 * 8 * 8 = 192 pixels x[c][i][j] (channel, row, column), each `round(normal(), 1)`; "
+    return (f"{_generator(EMB_NAME)}. Draws, in this order: the 3 * 8 * 8 = 192 pixels x[c][i][j] (channel, row, column), each `round(normal(), 1)`; "
             "then the matrix W of 4 rows (output o) and 12 columns, row by row, each `round(0.5 * normal(), 1)`, whose column "
             "index is (c * 2 + i) * 2 + j for the pixel (i, j) of channel c in the patch; then the bias b, 4 numbers, each "
             "`round(0.5 * normal(), 1)`.\n\n"
@@ -238,7 +237,7 @@ def merging_equivalence():
     zero = [0.0] * d_out
     by_matrix = embed_by_matrix(x, w, zero, p=2)
     by_conv = embed_by_conv(x, w, zero, p=2)
-    return (f"{_seed('vision_transformers.patch_merge')}. A feature map of 4 channels on a 4 by 4 grid: the 64 values x[c][i][j] "
+    return (f"{_generator('vision_transformers.patch_merge')}. A feature map of 4 channels on a 4 by 4 grid: the 64 values x[c][i][j] "
             "(channel, row, column), each `round(normal(), 1)`, then a matrix of 8 rows and 16 columns, row by row, each "
             "`round(0.5 * normal(), 1)`, no bias. Merging concatenates the 4 channels of each 2 by 2 group of positions in "
             "the order (channel, row, column) into 16 numbers and multiplies by the matrix.\n\n"
@@ -388,7 +387,7 @@ def rope_2d_scores():
         s = _dot(rope_2d(q, hq, wq), rope_2d(k, hk, wk))
         rows.append((f"({hq}, {wq})", f"({hk}, {wk})", f"({hk - hq}, {wk - wq})", _fx(s, 6)))
     ws = positions.omegas(4)
-    return (f"{_seed(ROPE_NAME)}. Draws: the 8 entries of q, then the 8 of k, each `round(normal(), 1)`; "
+    return (f"{_generator(ROPE_NAME)}. Draws: the 8 entries of q, then the 8 of k, each `round(normal(), 1)`; "
             f"q = {[f'{v:.1f}' for v in q]}, k = {[f'{v:.1f}' for v in k]}. Head width 8, base 10000, half-split pairs "
             f"(m, m + 4); pairs 0 and 1 turn by the row times the rates {ws[0]:g} and {ws[1]:g}, pairs 2 and 3 by the column times "
             "the same two rates. The score is the dot product of the rotated query at (row, column) with the rotated key.\n\n"
@@ -477,7 +476,7 @@ def position_resample():
     trows = [(o, _fx(s, 4), f"{idx[0]} .. {idx[3]}", *[_fx(w, 4) for w in ws], _fx(_sum(ws), 4)) for o, (s, _, idx, ws) in enumerate(keys)]
     brow = [(f"row {i}", *[_fx(v, 3) for v in r]) for i, r in enumerate(big)]
     trow = [(f"row {i}", *[f"{v:.1f}" for v in r]) for i, r in enumerate(tab)]
-    return (f"{_seed(POS_NAME)}. A learned table for a 4 by 4 grid with one channel: 16 values, row by row, each `round(normal(), 1)`.\n\n"
+    return (f"{_generator(POS_NAME)}. A learned table for a 4 by 4 grid with one channel: 16 values, row by row, each `round(normal(), 1)`.\n\n"
             + _table(["table", "col 0", "col 1", "col 2", "col 3"], trow)
             + "\n\nResampled to 6 by 6 as the CLIP tower does (cubic convolution with a = -0.75, source coordinate "
             "(o + 0.5) * 4 / 6 - 0.5, the four taps floor(s) - 1 .. floor(s) + 2 with indices clamped to the table, no "
@@ -599,7 +598,7 @@ def shifted_window_mask():
             f"```text\n{mask}\n```\n\n"
             f"The tokens of one region are exactly the groups of the ragged partition that cuts each axis at [0, s), then every m, "
             f"i.e. at rows and columns {{0}}, {{1, 2}}, {{3}}: its {len(groups)} groups have sizes {sizes}. Single-head attention "
-            f"(width 4, scale 1/2) on random q, k, v ({_seed(SW_NAME)}; draws: the 64 entries of q, then of k, then of v, token by "
+            f"(width 4, scale 1/2) on random q, k, v (the generator `{SW_NAME}`; draws: the 64 entries of q, then of k, then of v, token by "
             f"token, each `round(normal(), 1)`), computed once by the rolled windows with the mask and once by the ragged groups "
             f"with no mask: the largest absolute difference of the 16 outputs is {_below(_maxdiff(out_a, out_b), 1e-12)}. "
             f"Against the unshifted 2 by 2 windows the outputs differ by at most {_fx(_maxdiff(out_a, out_c), 3)}, and against "
@@ -1058,10 +1057,6 @@ def vit_gradient_check():
 
 
 def vit_setup():
-    rows = []
-    for r in READOUTS:
-        p = vit_init(0)
-        rows.append((r, _int(vit_n_params(p, r)), *[ _seed(_vit_name(run)).split(" (")[0] for run in (0,)]))
     t = TOY_T
     d, ff = TOY_D, TOY_FF
     macs = t * 4 * d + 4 * t * d * d + 2 * TOY_H * t * t * (d // TOY_H) + 2 * t * d * ff + d * cnns.NCLS
@@ -1086,8 +1081,8 @@ def vit_training():
             l0, ws = _vit_twins(r, 0, lambda x, t=t: x["seen"][t][0])
             a0, wa = _vit_twins(r, 0, lambda x, t=t: x["seen"][t][1])
             rows.append((r, t, cnns_text(l0, ws), cnns_text(a0, wa)))
-    return (f"Both readouts, run 0 (the generator of the name {_vit_name(0)}, {_seed(_vit_name(0))}; run r uses the name "
-            f"vision_transformers.vit_init.r), trained on the 60 training images by full-batch Adam exactly as for the "
+    return (f"Both readouts, run 0 (the generator `{_vit_name(0)}`; run r uses the generator "
+            f"`vision_transformers.vit_init.r`), trained on the 60 training images by full-batch Adam exactly as for the "
             f"network of Chapter 3 (beta_1 = 0.9, beta_2 = 0.999, epsilon = 1e-8, learning rate {TOY_LR}, {TOY_STEPS} updates, mean "
             f"cross-entropy, sums over images in index order). Initialization: every entry is `normal() * scale` from that one "
             f"generator, matrix by matrix and row by row, in this order: We [4, 8] with scale 0.5, the position table E [16, 8] with "
@@ -1113,9 +1108,9 @@ def vit_against_cnn():
             tr, wtr = _vit_twins(r, run, lambda x: x["seen"][TOY_STEPS][1])
             tl, wtl = _vit_twins(r, run, lambda x: x["test"][0])
             ta, wta = _vit_twins(r, run, lambda x: x["test"][1])
-            rows.append((f"vision transformer, {r}", f"{run} ({_seed(_vit_name(run)).split(' (')[0].replace('seed ', '')})",
+            rows.append((f"vision transformer, {r}", f"{run}",
                          _int(vit_n_params(vit_init(run), r)), cnns_text(tr, wtr), cnns_text(tl, wtl), cnns_text(ta, wta)))
     return (f"After {TOY_STEPS} updates on the same 60 training images, scored on the same 90 test images (30 of each class), same optimizer "
-            f"and rate. The vision transformer is trained from three initializations (runs 0, 1, 2, generators of the printed seeds), "
+            f"and rate. The vision transformer is trained from three initializations (runs 0, 1, 2, from the generators `vision_transformers.vit_init.0` to `.2`), "
             f"each with both readouts; the convolutional network is the single run of Chapter 3. {stab.RULE}\n\n"
-            + _table(["model", "run (seed)", "parameters", "training accuracy", "test cross-entropy", "test accuracy"], rows, "llrrrr"))
+            + _table(["model", "run", "parameters", "training accuracy", "test cross-entropy", "test accuracy"], rows, "llrrrr"))

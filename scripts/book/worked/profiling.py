@@ -19,7 +19,7 @@ wait itself. Every number is a property of that model and of its stated
 parameters; none is an observation of hardware.
 
 Randomness comes from the book's own generator
-(`bookrng.generator("profiling.<example>")`), is printed with its seed, and is
+(`bookrng.generator("profiling.<example>")`), is named on the page, and is
 drawn in an order the chapter states.
 
 Swedish Embedded AB implements solutions for measuring machine learning
@@ -48,7 +48,7 @@ def _n(v):
 
 
 def _seed_line(name):
-    return f"Generator: the book's SplitMix64, seed {bookrng.seed_of(name):#018x} (`seed_of` of the name `{name}`, defined on the pseudocode page)."
+    return f"Generator: `{name}` (the book's SplitMix64)."
 
 
 def _median(v):
@@ -292,8 +292,7 @@ def warmup_series():
     rows.append(("runs", len(all_), len(after)))
     bias = _mean(all_) / _mean(after) - 1.0
     lines = [
-        # perf-number: hex prefix of a printed seed, not a multiplier
-        f"The 200 runs of `profiling.warmup_runs` (the same series, the same seed 0x{bookrng.seed_of(name):016x}). Left: all 200 runs. Right: runs "
+        f"The 200 runs of `profiling.warmup_runs` (the same series, the same generator `{name}`). Left: all 200 runs. Right: runs "
         f"{end} to 199, after the warm-up detected by the rule of the text. Units: floors. The noise factor's expected value "
         f"is (1 + 0.04 / 2) (1 + 0.2 x 0.25) = {FACTOR_MEAN:.3f}, so a steady mean near that is the right answer.",
         "",

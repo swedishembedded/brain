@@ -16,7 +16,7 @@ chapter's figures.
   cosine similarities, neighbours and analogies of its learned rows;
 * counts: parameters of a table against a whole model, the scale of the rows at initialisation.
 
-Every random quantity comes from the book's SplitMix64 (`bookrng.generator(name)`); each block prints the seed.
+Every random quantity comes from the book's SplitMix64 (`bookrng.generator(name)`); each block names its generator.
 
 Swedish Embedded AB implements solutions for sizing and training the token tables of language models. If your
 team needs expertise in embedding tables, tied output heads and their memory cost, you can procure our services
@@ -52,7 +52,7 @@ def _int(n):
 
 
 def _seed_line(name):
-    return f"Generator: the book's SplitMix64, seed {bookrng.seed_of(name):#018x} (`seed_of` of the name `{name}`)."
+    return f"Generator: `{name}` (the book's SplitMix64)."
 
 
 def _dot(a, b):

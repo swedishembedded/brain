@@ -138,7 +138,7 @@ Generated inputs A[i, j] = (3 i + 2 j) mod 5 - 2 with shape [4, 3] and B[j, k] =
 <!-- /worked -->
 
 <!-- worked: project_numlib.matmul_float_agreement -->
-Two [16, 16] matrices from the generator seeded with 0x9c5e17297e131301: each entry is `uniform()` - 0.5, drawn in row-major order, all 256 entries of A first and then all 256 of B. Each output element is a sum of 16 products.
+Two [16, 16] matrices from the generator `project_numlib.matmul_float`: each entry is `uniform()` - 0.5, drawn in row-major order, all 256 entries of A first and then all 256 of B. Each output element is a sum of 16 products.
 
 - Loop orders i, j, p (`matmul_naive`) and i, p, j (`matmul`): every element accumulates its products in the same order p = 0, 1, ..., 15 starting from 0, so the two results are identical bit for bit; largest difference 0.0 (must be exactly 0).
 - A third version that accumulates each element from p = 15 down to p = 0 changes the order of the additions; largest difference from `matmul_naive` 2.220e-16 (must be below 1e-14; a different order of additions may or may not change a given element, so the size printed is that of this reference only).
@@ -285,7 +285,7 @@ A scripted source replays the listed raw values in order for `next`; "consuming"
 <!-- worked: project_numlib.shuffle_scripts -->
 shuffle of 0, 1, 2, 3 when the three calls integer(4), integer(3), integer(2) are all fed the raw value 4 (the remainders are 0, 1, 0, so the swaps are with j = 0, 1, 0): [2, 3, 1, 0], using 3 raw values.
 
-Six orders of three items, 60,000 shuffles one after the other, each of a fresh [0, 1, 2], from one generator seeded with 0xfbdd73e5b79c0300; each count must lie within 5 standard deviations (456) of 10,000:
+Six orders of three items, 60,000 shuffles one after the other, each of a fresh [0, 1, 2], from one generator, `project_numlib.shuffle_counts`; each count must lie within 5 standard deviations (456) of 10,000:
 
 | order | count | frequency |
 |---|---:|---:|
@@ -300,7 +300,7 @@ Six orders of three items, 60,000 shuffles one after the other, each of a fresh 
 The statistical test is a safeguard, not a proof: it checks that the mean and variance of the Gaussian are right to within what chance allows, and the share within one standard deviation matches $\operatorname{erf}(1/\sqrt{2})$. The printed digits fix the tolerance of the bit-exact comparison: half a unit of the last printed digit, so $5 \times 10^{-7}$ for the mean and the variance (six decimals, variance with divisor $n - 1$) and $5 \times 10^{-6}$ for the share (five decimals).
 
 <!-- worked: project_numlib.normal_moments -->
-100,000 consecutive calls of normal() on one generator seeded with 0xa2728c3aacc691ca. The mean is the plain left-to-right sum divided by n; the variance is the plain sum of (x - mean)^2 divided by n - 1 (divisor n - 1); the share is the fraction of values with |x| <= 1. The measured column is what this reference produced: a bit-exact generator must match it to half a unit of the last printed digit (5e-7 for the mean and the variance, 5e-6 for the share), and any generator must lie within the stated distance of the exact value.
+100,000 consecutive calls of normal() on the generator `project_numlib.moments`. The mean is the plain left-to-right sum divided by n; the variance is the plain sum of (x - mean)^2 divided by n - 1 (divisor n - 1); the share is the fraction of values with |x| <= 1. The measured column is what this reference produced: a bit-exact generator must match it to half a unit of the last printed digit (5e-7 for the mean and the variance, 5e-6 for the share), and any generator must lie within the stated distance of the exact value.
 
 | quantity | measured | exact | allowed distance |
 |---|---:|---:|---:|
@@ -414,8 +414,8 @@ Twenty-five latencies in milliseconds: [18.9, 19.8, 22.7, 23.5, 25.9, 27.5, 28.3
 | standard error of the mean | 5.2047597446952345 |
 | normal-formula 95 percent interval mean -+ 1.96 se | [42.56667090039734, 62.96932909960266] |
 | median (position 0.5 (n - 1), interpolated) | 52.3 |
-| bootstrap interval of the mean, 2000 resamples, seed 0x50f69f39ba1345b4 | [42.7829, 63.20119999999999] |
-| bootstrap interval of the median, same seed | [36.4, 67.0] |
+| bootstrap interval of the mean, 2000 resamples, generator `project_numlib.bootstrap` | [42.7829, 63.20119999999999] |
+| bootstrap interval of the median, same generator, restarted | [36.4, 67.0] |
 
 Ten identical values (3.0): standard error 0.0, bootstrap interval [3.0, 3.0].
 
@@ -458,7 +458,7 @@ This is the shape of every experiment in the rest of the book, in miniature: gen
 The run to reproduce is this one.
 
 <!-- worked: project_numlib.integration_run -->
-Data: n = 50 points, x_i = 4 i / 49, y_i = 2 x_i + 1 + 0.5 z_i, where z_0, z_1, ... are the first fifty normal() draws of the generator seeded with 0xee2df5014fee1a4d, taken in order; x_i is computed as 4.0 * i / 49 and y_i as ((2 x_i) + 1) + 0.5 z_i. Every sum below (the means, the loss, the gradient, the closed-form sums) is a plain left-to-right sum starting from 0.0 in index order, not `kahan_sum`, and a mean is such a sum divided by n. The residual of point i is r_i = (a x_i + b) - y_i; the loss is the mean of r_i^2; the gradient entries are 2 times the mean of r_i x_i and 2 times the mean of r_i; a step replaces a by a - 0.05 g_a and b by b - 0.05 g_b, both gradient entries having been computed before either value changes. The numerical gradient uses the step rule of `derivative` on each coordinate. The lines about sizes below are tested by their stated bounds, not digit for digit.
+Data: n = 50 points, x_i = 4 i / 49, y_i = 2 x_i + 1 + 0.5 z_i, where z_0, z_1, ... are the first fifty normal() draws of the generator `project_numlib.integration`, taken in order; x_i is computed as 4.0 * i / 49 and y_i as ((2 x_i) + 1) + 0.5 z_i. Every sum below (the means, the loss, the gradient, the closed-form sums) is a plain left-to-right sum starting from 0.0 in index order, not `kahan_sum`, and a mean is such a sum divided by n. The residual of point i is r_i = (a x_i + b) - y_i; the loss is the mean of r_i^2; the gradient entries are 2 times the mean of r_i x_i and 2 times the mean of r_i; a step replaces a by a - 0.05 g_a and b by b - 0.05 g_b, both gradient entries having been computed before either value changes. The numerical gradient uses the step rule of `derivative` on each coordinate. The lines about sizes below are tested by their stated bounds, not digit for digit.
 
 - first three points: [0.0, 0.09260678228575903], [0.08163265306122448, 1.454014127758748], [0.16326530612244897, 0.4866118588985201]
 - mean of y: 4.992342863230464
@@ -466,7 +466,7 @@ Data: n = 50 points, x_i = 4 i / 49, y_i = 2 x_i + 1 + 0.5 z_i, where z_0, z_1, 
 - after 3000 steps of size 0.05 against the gradient from (0, 0): slope 2.002278724593641, intercept 0.9877854140431813, mean squared residual 0.2960145940850941
 - the closed-form slope and intercept (slope = sum (x - mean x)(y - mean y) / sum (x - mean x)^2): 2.0022787245936398, 0.9877854140431843; largest difference from the stepped values 2.998e-15 (must be below 1e-12)
 - gradient at the stepped values: [3.2862601528904635e-15, -8.881784197001252e-16] (both entries must be below 1e-12 in absolute value)
-- 95 percent bootstrap interval of the slope, resampling whole (x, y) pairs, 2000 resamples, generator seeded with 0x04b462cf8895c323: [1.8749999057354618, 2.121799586388773]; it contains the true slope 2.
+- 95 percent bootstrap interval of the slope, resampling whole (x, y) pairs, 2000 resamples, generator `project_numlib.integration.bootstrap`: [1.8749999057354618, 2.121799586388773]; it contains the true slope 2.
 <!-- /worked -->
 
 Four slips are common here.

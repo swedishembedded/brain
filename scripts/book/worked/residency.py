@@ -24,10 +24,6 @@ _table = nf._table
 GIB = 1 << 30
 
 
-def _seed(name):
-    return f"{bookrng.seed_of(name):#018x}"
-
-
 # ---------------------------------------------------------------------------------------------------------------------
 # A device's budget and a pool of devices that share memory
 # ---------------------------------------------------------------------------------------------------------------------
@@ -196,8 +192,8 @@ def eviction_stream():
                  [(n, s, w, f"{100 * w / sum(x for _, _, x in _SCENARIO):.1f}") for n, s, w in _SCENARIO], "lrrr")
     return (
         f"Six models share one device of 22 GiB usable. A stream of {N_STREAM} requests, one claim and release each: request "
-        f"k asks for model m with probability proportional to its weight. Generator: the book's SplitMix64, seed "
-        f"{_seed(NAME_STREAM)} (`seed_of` of the name `{NAME_STREAM}`), one draw `integer(W)` per request with W = "
+        f"k asks for model m with probability proportional to its weight. Generator: `{NAME_STREAM}` "
+        f"(the book's SplitMix64), one draw `integer(W)` per request with W = "
         f"{sum(w for _, _, w in _SCENARIO)} the sum of the weights, mapped by walking the models in the order listed and "
         "subtracting each model's weight from the draw until the draw is smaller than the weight of the model reached, which is the one chosen. One generator runs once through the "
         "stream and both policies replay the same stream. Everything else is the rule of the previous example: the clock "

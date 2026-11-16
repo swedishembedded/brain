@@ -56,8 +56,8 @@ def _sci(v, d=3):
     return f"{v:.{d - 1}e}"
 
 
-def _seed_line(name):
-    return f"`{name}` (seed {bookrng.seed_of(name)})"
+def _gen_line(name):
+    return f"`{name}`"
 
 
 def _uniform_matrix(g, rows, cols, lim, r):
@@ -221,8 +221,8 @@ def component():
             ["W_up", f"[{F0}, {D0}]", "(2u - 1) / sqrt(6)", F0 * D0, _digest(p["Wu"])],
             ["W_down", f"[{D0}, {F0}]", "(2u - 1) / sqrt(10)", D0 * F0, _digest(p["Wd"])],
             ["inputs x", f"[{T0}, {D0}]", "2u - 1", T0 * D0, _digest(x)]]
-    head = (f"The weights come from the generator {_seed_line('project_reproduction.weights')}, the inputs from "
-            f"{_seed_line('project_reproduction.inputs')}. Each number is one uniform() u put through the rule of its row and then "
+    head = (f"The weights come from the generator {_gen_line('project_reproduction.weights')}, the inputs from "
+            f"{_gen_line('project_reproduction.inputs')}. Each number is one uniform() u put through the rule of its row and then "
             "rounded to the nearest 32-bit number (ties to even); the square roots are the correctly rounded 64-bit ones. The "
             "weights are drawn in the order of the rows, each matrix row-major ([outputs, inputs]), so the gain takes draws 0 to "
             f"5, W_gate 6 to 65, W_up 66 to 125 and W_down 126 to 185; the inputs are drawn position by position. The digest is "
@@ -270,7 +270,7 @@ def import_checks():
         port = forward(xin, got, r32)
         rows.append([label, "loads", _sci(im.rel_l2(port["y"], ref["y"]))])
     head = ("The mapping of the published tensors onto the port, at the 6 x 10 component and at a square 8 x 8 one (weights "
-            f"from {_seed_line('project_reproduction.square')}, inputs from {_seed_line('project_reproduction.square_inputs')}, "
+            f"from {_gen_line('project_reproduction.square')}, inputs from {_gen_line('project_reproduction.square_inputs')}, "
             "5 positions, the same rules and draw order). rel_l2 compares the port's y with the unrounded 64-bit reference of the same "
             "weights (not with the golden, whose y is rounded to 32 bits).\n\n")
     return head + _table(["configuration and mapping", "shape check", "rel_l2 of y"], rows, "llr")
@@ -468,7 +468,7 @@ def gradient_check():
     n = len(_entries())
     head = ("The backward pass against central differences, in 64-bit arithmetic, on the component of the tables above and "
             "its unit inputs. The loss is the sum over positions t and coordinates i of c[t][i] y[t][i], with c drawn from "
-            f"{_seed_line('project_reproduction.probe')} as 2u - 1, position by position (no rounding to 32 bits). Each of "
+            f"{_gen_line('project_reproduction.probe')} as 2u - 1, position by position (no rounding to 32 bits). Each of "
             f"the {n} numbers (30 inputs, 6 gains, 60 + 60 + 60 weights) is moved by +1e-6 and -1e-6; the deviation is "
             "|numeric - analytic| / max(1, |analytic|) and the criterion is that its largest value is below 1e-6. 'Where' "
             "is the number with the largest deviation, [row, column] counted from 0.\n\n")
@@ -633,16 +633,16 @@ def quality():
     cols = _quality_columns()
     rows = []
     for k in range(N_DRAWS):
-        rows.append([k, bookrng.seed_of(_draw_name(k)), _sci(cols["group"][k]), _sci(cols["row"][k]),
+        rows.append([k, _sci(cols["group"][k]), _sci(cols["row"][k]),
                      _sci(cols["row_clean"][k]), _sci(cols["group_y"][k])])
     stats = {c: _interval_text(v) for c, v in cols.items()}
     order = ("group", "row", "row_clean", "group_y")
-    rows.append(["mean", "", *[_sci(stats[c][0]) for c in order]])
-    rows.append(["sample standard deviation", "", *[_sci(stats[c][1]) for c in order]])
-    rows.append(["95% interval, lower end", "", *[_sci(stats[c][2]) for c in order]])
-    rows.append(["95% interval, upper end", "", *[_sci(stats[c][3]) for c in order]])
+    rows.append(["mean", *[_sci(stats[c][0]) for c in order]])
+    rows.append(["sample standard deviation", *[_sci(stats[c][1]) for c in order]])
+    rows.append(["95% interval, lower end", *[_sci(stats[c][2]) for c in order]])
+    rows.append(["95% interval, upper end", *[_sci(stats[c][3]) for c in order]])
     head = (f"The quality of 8-bit weights on the component at D = {D1}, F = {F1}, {T1} positions, eight draws. Draw k uses "
-            "the generator `project_reproduction.draw.k` with the seed printed in its row, and draws in this order: the gain, "
+            "the generator `project_reproduction.draw.<k>`, and draws in this order: the gain, "
             "W_gate, W_up and W_down by the rules of the first component (with 1/sqrt(256) and 1/sqrt(768)), then, for every "
             f"row of W_gate, of W_up and of W_down in that order, one integer(k) c over the row's k columns, and the weight at "
             f"column c is multiplied by {OUTLIER:g} (the outlier of the row); then the {T1} x {D1} inputs as 2u - 1. Weights "
@@ -653,8 +653,8 @@ def quality():
             "included, where the others measure f, the down projection. The interval is the mean plus or minus "
             "t s / sqrt(8) with s the sample standard deviation (divisor 7) and t = 2.36462, the 0.975 quantile of "
             "Student's t with 7 degrees of freedom.\n\n")
-    return head + _table(["draw", "seed", "f, group of 32", "f, one scale per row", "f, one per row, no outliers",
-                          "y, group of 32"], rows, "lrrrrr")
+    return head + _table(["draw", "f, group of 32", "f, one scale per row", "f, one per row, no outliers",
+                          "y, group of 32"], rows, "lrrrr")
 
 
 # ------------------------------------------------------------------ counting the work of a decoding step

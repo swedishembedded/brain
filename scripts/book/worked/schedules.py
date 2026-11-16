@@ -52,11 +52,6 @@ def _sci(v, d=2):
     return f"{v:.{d}e}"
 
 
-def _seed(name):
-    s = bookrng.seed_of(name)
-    return f"0x{s:016x}"
-
-
 # ------------------------------------------------------------------ the schedules
 #
 # A step index t is 0-based: step t uses the rate eta(t). The warmup is W steps long, the run T steps long.
@@ -262,10 +257,10 @@ def _unstable_note():
 
 def _setup_text():
     net, xs, ys, theta = problem()
-    return (f"The network, data and starting weights are those of Chapter 7 (generator `optimizers.mlp`, seed {_seed('optimizers.mlp')}; "
+    return (f"The network, data and starting weights are those of Chapter 7 (generator `optimizers.mlp`; "
             f"starting loss {_fx(net.loss(theta, xs, ys), 4)}). AdamW with beta1 = 0.9, beta2 = 0.999, epsilon = 1e-8 and decoupled decay "
-            f"lambda = {LAMBDA:g}; {RUN_STEPS} steps of batch size {BATCH}; batches from the generator `schedules.batches` "
-            f"(seed {_seed('schedules.batches')}): shuffle the list 0 .. {opt.MLP_N - 1}, cut it into consecutive batches of {BATCH}, "
+            f"lambda = {LAMBDA:g}; {RUN_STEPS} steps of batch size {BATCH}; batches from the generator `schedules.batches`: "
+            f"shuffle the list 0 .. {opt.MLP_N - 1}, cut it into consecutive batches of {BATCH}, "
             "reshuffle at the end of each epoch.")
 
 
@@ -325,8 +320,8 @@ def adam_early_steps():
         rows.append([t, _fx(analytic, 4), _fx(math.sqrt(ssq[t] / ES_K), 4), _fx(math.sqrt(max(var_root, 0.0)) / mean_root, 3),
                      _fx(limit0 / analytic, 4), _fx(min(1.0, t / 50), 4)])
     limit = math.sqrt((1 - BETA1) / (1 + BETA1))
-    head = (f"{ES_K} independent coordinates, each with gradients g_1, g_2, ... drawn from the standard normal distribution by the generator `{name}` "
-            f"(seed {_seed(name)}): coordinate by coordinate, {ES_T} calls of normal() each, in time order. Adam with beta1 = 0.9, beta2 = 0.999, "
+    head = (f"{ES_K} independent coordinates, each with gradients g_1, g_2, ... drawn from the standard normal distribution by the generator `{name}`: "
+            f"coordinate by coordinate, {ES_T} calls of normal() each, in time order. Adam with beta1 = 0.9, beta2 = 0.999, "
             "epsilon = 1e-8 and bias correction. Columns: the exact RMS of the corrected first moment, sqrt((1 - beta1)/(1 + beta1) (1 - beta1^(2t))) / (1 - beta1^t) "
             "(unit gradient variance); the measured RMS of the whole Adam ratio mhat / (sqrt(vhat) + epsilon) over the coordinates (its sampling error is about 1.2%); "
             "the measured relative spread (standard deviation with divisor 4000, the number of coordinates, over the mean) of sqrt(vhat) across the coordinates (a few percent of sampling error); the learning rate, as a fraction of its final value, that would keep the typical step at its "
@@ -494,8 +489,7 @@ def schedule_comparison():
     rows = []
     for name, runs in res.items():
         rows.append([name, cell(lambda q: worst(q, 1, 50), runs, 3), cell(lambda q: worst(q, 301, RUN_STEPS), runs, 3), cell(tail, runs), span_cell(tail, runs)])
-    seeds = ", ".join(_seed(s) for s in ORDERS)
-    head = (_setup_text() + f" The same run on five batch orders (generators `schedules.batches`, `schedules.batches.1` .. `schedules.batches.4`; seeds {seeds}). "
+    head = (_setup_text() + f" The same run on five batch orders (generators `schedules.batches`, `schedules.batches.1` .. `schedules.batches.4`). "
             "Peak 1 (ten times the rate that is best for a constant), floor 0.01, T = 600. Entries are means over the five orders: the largest loss over steps 1 to 50; "
             "the largest loss over steps 301 to 600 (recorded every 10 steps); the tail (mean loss at steps 550, 560, ..., 600); and the range of the tail over the orders. " + _unstable_note() + "\n\n")
     return head + _table(["schedule", "worst, steps 1-50", "worst, steps 301-600", "tail (mean of 5)", "tail range"], rows)
@@ -776,7 +770,7 @@ def norm_accumulation():
         [f"chunks of {NORM_CHUNK} in 32 bits, chunk sums added in 64 bits", f"{partial_sum_f64:.9e}", f"{abs(partial_sum_f64 - exact) / exact:.2e}"],
         ["one 64-bit accumulator, in order", f"{f64_serial:.9e}", _below_floor(abs(f64_serial - exact) / exact)],
     ]
-    head = (f"The sum of squares of N = {NORM_N:,} gradient entries: entry i is the 32-bit rounding of 0.01 * z_i, with z_i from normal() of the generator `{name}` (seed {_seed(name)}), "
+    head = (f"The sum of squares of N = {NORM_N:,} gradient entries: entry i is the 32-bit rounding of 0.01 * z_i, with z_i from normal() of the generator `{name}`, "
             "i = 0 .. N - 1 in order. In the two 32-bit rows every operation (the square, each addition inside a chunk or inside the single accumulator) is rounded to the nearest 32-bit float. "
             "In the 'exact' and 'one 64-bit accumulator' rows the square of a 32-bit entry is formed in double precision (it is exact there) and summed in double precision in order of index, with Python's compensated fsum for the exact row; "
             "the chunk sums of the third row are added in double precision in order of chunk. The last row's relative error is rounding noise of that double-precision sum and is printed as a bound.\n\n")

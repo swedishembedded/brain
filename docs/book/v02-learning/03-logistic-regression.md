@@ -12,7 +12,7 @@ Linear regression predicted a number on a scale: a temperature. Here the answer 
 Twelve parts were measured and inspected. The values below come from the generator of Volume I, chapter 17 (its seed and the order of its draws are printed with the table). The draw order mentions the function `sigmoid`, $\sigma(z) = 1/(1 + e^{-z})$, which turns any number $z$ into a number between $0$ and $1$; here it is the chance that a part with this measurement is rejected. It is derived below, in "The sigmoid: undoing the logit"; until then it is only a smooth S-shaped curve from $0$ to $1$. The part numbers are positions after sorting by $x$, not positions in the draw.
 
 <!-- worked: logistic_regression.one_feature_table -->
-Generator: the book's SplitMix64, seed 0x7b350638aa531ef5 (8878009080876310261).
+Generator: `logistic_regression.one_feature` (the book's SplitMix64).
 Draw order, part by part (N = 12): x = round(5 u1, 1) with u1 = uniform(), then u2 = uniform(); y = 1 (rejected) when u2 < sigmoid(-5.5 + 2.2 x). Rows are shown sorted by x and numbered in that order.
 
 | part | x (0.01 mm) | y |
@@ -332,7 +332,7 @@ The sixty parts are the data of the next section, where the second measurement j
 A single measurement can only give a threshold. The workshop in fact measures a second quantity on every part, the surface roughness in micrometres, and the two together decide the inspection. Here are the sixty parts (the draw order is given so you can generate them yourself).
 
 <!-- worked: logistic_regression.parts_table -->
-Generator: the book's SplitMix64, seed 0x9b6efb5e5166b958 (11200165705828186456).
+Generator: `logistic_regression.parts` (the book's SplitMix64).
 Draw order, part by part (N = 60): x1 = round(5 u1, 1), x2 = round(5 u2, 1), u3, each u = uniform(); y = 1 (rejected) when u3 < sigmoid(-6.0 + 1.2 x1 + 1.0 x2). First ten rows, then the totals.
 
 | part | x1 (0.01 mm) | x2 (micrometres) | y |

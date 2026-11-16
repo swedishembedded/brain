@@ -21,7 +21,7 @@ so a picture and the table beside it cannot disagree.
 * the Ward-merged bucket index of latent sparse attention on the toy, its read, and its sizes at the default configuration;
 * the keys a selection touches in a paged cache, the bytes of the sparse kernels, and the index pages.
 
-Every random quantity comes from the book's SplitMix64 (`bookrng.generator(name)`); each block prints the seed. Sums of products
+Every random quantity comes from the book's SplitMix64 (`bookrng.generator(name)`); each block names its generators. Sums of products
 are plain left-to-right additions, the order a C loop would use (never Python's `sum`, which may compensate).
 
 Swedish Embedded AB implements solutions for serving long-context language models whose attention cost is set by what a token
@@ -55,10 +55,6 @@ def _table(headers, rows, align=None):
     out = ["| " + " | ".join(headers) + " |", "|" + "|".join(sep) + "|"]
     out += ["| " + " | ".join(str(c) for c in r) + " |" for r in rows]
     return "\n".join(out)
-
-
-def _seed_line(name):
-    return f"`{name}` (seed {bookrng.seed_of(name):#018x})"
 
 
 # ------------------------------------------------------------------------------------------------ arithmetic
@@ -165,13 +161,13 @@ def measure(name, i, sel):
 
 def _setup_text():
     return (f"A toy layer of one head: {T} positions, head width d_h = {D}, {TOPICS} topics. Draw order: the {TOPICS} topic "
-            f"centers from {_seed_line(MODEL)}, {D} normal draws per center, row by row, each row divided by its length. A "
+            f"centers from `{MODEL}`, {D} normal draws per center, row by row, each row divided by its length. A "
             f"sequence from its own generator, in this order: {T} key topics (integer draws below {TOPICS}); the key noise "
             f"({T} x {D} normals, key by key); the values ({T} x {D} normals, key by key); {T} query topics (integer draws "
             f"below {TOPICS}); the query noise ({T} x {D} normals, query by query). Key j is {GAIN:g} c[z_j] + {NOISE:g} n_j, "
             f"query i is {GAIN:g} c[w_i] + {NOISE:g} n_i, the value is the draw itself. Scores are s_ij = q_i . k_j / "
-            f"sqrt({D}) for j <= i, softmax in the stable form. Sequence A is {_seed_line(SEQ_A)}, sequence B is "
-            f"{_seed_line(SEQ_B)}.")
+            f"sqrt({D}) for j <= i, softmax in the stable form. Sequence A is `{SEQ_A}`, sequence B is "
+            f"`{SEQ_B}`.")
 
 
 # ------------------------------------------------------------------------------------------------ 1. how concentrated
@@ -270,7 +266,7 @@ def fixed_patterns():
             "16th key: i - 16, i - 32, ... down to the first non-negative position. Blocks: position j is in block j // 8; "
             "a query reads its own block up to itself, the whole previous block and block 0. Random keys: 16 distinct "
             f"positions of 0 .. i by the first 16 steps of a Fisher-Yates shuffle of [0 .. i] (step t swaps entries t and t + "
-            f"integer(i + 1 - t)), queries in ascending order, generator {_seed_line('sparse_attention.random_keys')}. The last "
+            f"integer(i + 1 - t)), queries in ascending order, generator `sparse_attention.random_keys`. The last "
             "column is the mass of the best choice of as many keys as the pattern reads, query by query (the top k of the true "
             "weights). Tolerance: 4 decimals.\n\n"
             + _table(["pattern", "mean keys read", "mean mass kept", "mass kept by the best keys of the same number"], rows))
@@ -447,7 +443,7 @@ def indexer_training():
             _assert_stable(got, [t["trace"][step]["kl"], t["trace"][step]["eval"][8][0], t["trace"][step]["eval"][32][0]])
         rows.append([step] + [_fx(x, 3) for x in got])
     return (f"Indexer: s'_ij = (Wq q_i) . (Wk k_j) / sqrt({DI}) with Wq, Wk of shape [{DI}, {D}], entries drawn as normals "
-            f"divided by sqrt({D}) from {_seed_line('sparse_attention.indexer_init')}, Wq first and then Wk, row by row. "
+            f"divided by sqrt({D}) from `sparse_attention.indexer_init`, Wq first and then Wk, row by row. "
             f"Trained on sequence A, the {len(TRAIN_QUERIES)} queries i = 64, 66, ..., 254, by {STEPS} steps of full-batch "
             f"gradient descent at rate {LR:g} on the mean over those queries of the cross-entropy between the dense weights "
             "p_i and softmax_j(s'_ij) over j <= i; the table's KL is that cross-entropy minus the mean entropy of the dense "

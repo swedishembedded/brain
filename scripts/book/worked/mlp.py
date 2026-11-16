@@ -410,7 +410,7 @@ def relu_sparsity():
         total += active
         norm = math.sqrt(sum(w * w for w in W[u]))
         rows.append((u, f"{norm:.3f}", f"{b[u]:+.1f}", active, f"{active / SPARSITY_N:.3f}"))
-    return (f"Generator: the book's SplitMix64, seed 0x{bookrng.seed_of(name):016x} ({bookrng.seed_of(name)}). "
+    return (f"Generator: `{name}` (the book's SplitMix64). "
             f"Draw order: {SPARSITY_UNITS} x {SPARSITY_D} weights W[u, j] with normal(), row by row, then "
             f"{SPARSITY_N} x {SPARSITY_D} inputs X[n, j] with normal(), row by row. Unit u computes relu(W[u] . x + b[u]) "
             f"with b = 0 except b[{SPARSITY_UNITS - 1}] = {SPARSITY_DEAD_BIAS:g}.\n\n"

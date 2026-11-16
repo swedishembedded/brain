@@ -730,7 +730,7 @@ def homography_noise():
         med = {k: sorted(v)[9] / 2 + sorted(v)[10] / 2 for k, v in errs.items()}
         rows.append([_g(sigma), f"{med[False]:.3f}", _g(max(errs[False]), 3), f"{med[True]:.3f}", _g(max(errs[True]), 3)])
     return (f"The twelve grid pixels of the previous table with Gaussian noise of standard deviation sigma added to each coordinate, "
-            f"20 trials. The generator is `bookrng.generator(\"{HOM_NOISE_NAME}\")` (seed {bookrng.seed_of(HOM_NOISE_NAME)}); trial by "
+            f"20 trials. The generator is `bookrng.generator(\"{HOM_NOISE_NAME}\")`; trial by "
             "trial, 24 draws of `normal()`, in the order of the grid, u before v, are taken once and multiplied by sigma for each row. "
             "The error of a trial is the root mean square, over the twelve grid points, of the distance in pixels between H applied "
             "to the grid point and the noise-free pixel; the table gives the median (mean of the 10th and 11th smallest) and the largest of "
@@ -907,7 +907,7 @@ def calibration_noisy():
             for n, key, (i, j) in (("f_x", "fx", (0, 0)), ("f_y", "fy", (1, 1)), ("c_x", "cx", (0, 2)), ("c_y", "cy", (1, 2)))]
     rows.append(["skew", "0", f"{K[0][1]:.2f}"])
     return (f"The same five views with Gaussian noise of standard deviation {SIGMA_PX} pixel added to every corner coordinate. The "
-            f"generator is `bookrng.generator(\"{CAL_NAME}\")` (seed {bookrng.seed_of(CAL_NAME)}); the draws are taken view by view, "
+            f"generator is `bookrng.generator(\"{CAL_NAME}\")`; the draws are taken view by view, "
             "corner by corner in the order of the board (row by row, the column index fastest), the u coordinate before the v "
             "coordinate, one `normal()` call each (70 a view, 350 in all). "
             "Values are printed to two decimals; the runs of the closed form are stable to that.\n\n"

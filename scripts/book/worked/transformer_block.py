@@ -19,7 +19,7 @@ cannot disagree.
 * the forward and backward pass of a whole block, checked against central differences, and three wrong backward passes;
 * a gate and an up projection exchanged, an epsilon that is too small to matter, and a decoder trained on a two-hop task.
 
-Every random quantity comes from the book's SplitMix64 (`bookrng.generator(name)`); each block prints the seed. Sums of
+Every random quantity comes from the book's SplitMix64 (`bookrng.generator(name)`); each block names its generators. Sums of
 products are plain left-to-right additions, the order a C loop would use (never Python's `sum`, which may compensate).
 Numbers of trained models are printed by the stable-digits rule of `stable.py`.
 
@@ -61,8 +61,8 @@ def _vec(v, d=3):
     return "(" + ", ".join(_fx(x, d) for x in v) + ")"
 
 
-def _seed_line(name):
-    return f"Generator: the book's SplitMix64, seed {bookrng.seed_of(name):#018x} (`seed_of` of the name `{name}`)."
+def _generator_line(name):
+    return f"Generator: the book's SplitMix64, `{name}`."
 
 
 def _round1(x):
@@ -320,7 +320,7 @@ def tiny_inputs():
     wrows = [(f"row {r + 1}", *[_vec(p[n][r], 1) for n in ("Wq", "Wk", "Wv", "Wo")]) for r in range(TINY_D)]
     frows = [(f"row {r + 1}", _vec(p["Wg"][r], 1), _vec(p["Wu"][r], 1)) for r in range(TINY_D)]
     drows = [(f"row {r + 1}", _vec(p["Wd"][r], 1)) for r in range(TINY_FF)]
-    return (_seed_line(NAME_TINY) + " Draws, in this order: the 12 entries of X (3 tokens of 4 numbers), each `round(normal(), 1)`; "
+    return (_generator_line(NAME_TINY) + " Draws, in this order: the 12 entries of X (3 tokens of 4 numbers), each `round(normal(), 1)`; "
             "then W_Q, W_K, W_V, W_O (4 by 4 each), W_gate and W_up (4 by 6 each) and W_down (6 by 4), each row by row and each "
             "`round(0.5 * normal(), 1)` (`round` to one decimal, ties away from zero). Both gains are 1 and the epsilon of the "
             "normalization is 1e-6. The block has H = 2 heads of width 2, a causal mask and no position information, and a "
@@ -632,14 +632,13 @@ _CHECK_NAMES = {"Wq": "W_Q", "Wk": "W_K", "Wv": "W_V", "Wo": "W_O", "g1": "gain 
 def gradient_check():
     res = check_results()
     rows = [(_CHECK_NAMES[k], n, _under_criterion(a), _under_criterion(r)) for k, (n, a, r) in res[("pre", "swiglu")].items()]
-    seed_of = {"swiglu": f"{bookrng.seed_of(NAME_CHECK + '.swiglu'):#018x}", "gelu": f"{bookrng.seed_of(NAME_CHECK + '.gelu'):#018x}"}
     summary = []
     for (layout, ffn), r in res.items():
-        summary.append((layout, ffn, seed_of[ffn], sum(v[0] for v in r.values()), _under_criterion(max(v[1] for v in r.values())),
+        summary.append((layout, ffn, sum(v[0] for v in r.values()), _under_criterion(max(v[1] for v in r.values())),
                         _under_criterion(max(v[2] for v in r.values()))))
-    return (f"Generator: the book's SplitMix64, seeds {seed_of['swiglu']} (`seed_of` of the name "
-            f"`{NAME_CHECK}.swiglu`, used by every row with a SwiGLU network: the pre-norm, post-norm and no-skip wirings share these parameters) "
-            f"and {seed_of['gelu']} (`{NAME_CHECK}.gelu`, for the GELU network)."
+    return (f"Generators: the book's SplitMix64, `{NAME_CHECK}.swiglu` "
+            f"(used by every row with a SwiGLU network: the pre-norm, post-norm and no-skip wirings share these parameters) "
+            f"and `{NAME_CHECK}.gelu` (for the GELU network)."
             +f" T = {CHECK_T} positions, D = {CHECK_D}, H = {CHECK_H} heads of width {CHECK_D // CHECK_H}, hidden width {CHECK_FF}, "
             f"{CHECK_CLASSES} classes, causal mask. Draws, in this order: X (5 by 6, each `normal()`), W_Q, W_K, W_V, W_O (6 by 6, each "
             "row by row with `0.5 * normal()`), the two gains (6 numbers each, `1 + 0.1 * normal()`), the feed-forward matrices "
@@ -653,8 +652,8 @@ def gradient_check():
             "|a - n| / max(|a|, |n|) is taken over the entries whose gradient is above 1e-4.\n\n"
             + _table(["tensor (pre-norm SwiGLU block)", "entries checked", "largest absolute difference", "largest relative difference"], rows)
             + "\n\nThe same check on every wiring and both feed-forward networks, all tensors together:\n\n"
-            + _table(["wiring", "feed-forward network", "seed", "entries checked", "largest absolute difference",
-                      "largest relative difference"], summary, "lllrrr"))
+            + _table(["wiring", "feed-forward network", "entries checked", "largest absolute difference",
+                      "largest relative difference"], summary, "llrrr"))
 
 
 BUGS = (("the block's backward pass", None),
@@ -692,8 +691,7 @@ def wrong_backward_passes():
 def depth_setup():
     return (f"{DEPTH_STACKS} random stacks of {DEPTH_L} blocks, T = {DEPTH_T} positions of width D = {DEPTH_D}, H = {DEPTH_H} heads of width "
             f"{DEPTH_D // DEPTH_H}, SwiGLU hidden width {DEPTH_FF}, causal mask, RMS norm with epsilon 1e-6 and both gains 1. Stack s "
-            f"draws from `{NAME_DEPTH}.<s>` for s = 0 .. {DEPTH_STACKS - 1} (the seed is `seed_of` of that name; for s = 0 it is "
-            f"{bookrng.seed_of(NAME_DEPTH + '.0'):#018x}), in this order: the input X ({DEPTH_T} by {DEPTH_D}, each `normal()`), the "
+            f"draws from `{NAME_DEPTH}.<s>` for s = 0 .. {DEPTH_STACKS - 1} in this order: the input X ({DEPTH_T} by {DEPTH_D}, each `normal()`), the "
             f"gradient arriving at the top of the stack (same shape, each `normal()`), then the {DEPTH_L} blocks, each drawn as "
             "W_Q, W_K, W_V, W_O (D by D), W_gate, W_up (D by hidden width) and W_down (hidden width by D), row by row, every entry "
             "`normal() / sqrt(fan_in)` (the fan-in is the number of rows of the matrix). The variant with scaled output matrices "
@@ -1041,7 +1039,7 @@ def two_hop_task():
             "to {0, 1, 2, 3} written as four pairs, and a query. Draws, in this order: `shuffle([0, 1, 2, 3], rng)`, the order in "
             "which the four pairs appear; `integer(4)` four times, the values f(0), f(1), f(2), f(3); `integer(4)`, the asked x. The "
             "input is the four pair tokens in that order followed by the query token (T = 5); the target is f(f(x)). Three examples "
-            f"from `transformer_block.train.examples` ({bookrng.seed_of('transformer_block.train.examples'):#018x}):\n\n"
+            f"from `transformer_block.train.examples`:\n\n"
             + _table(["input (T = 5 tokens)", "target f(f(x))"], rows, "ll")
             + "\n\nA model that guesses has loss ln 4 = " + _fx(math.log(4), 4) + " nats and accuracy 0.25. A model that finds f(x) and sees which "
             "values occur among the pairs, but cannot compose the two lookups, can reach at most "
@@ -1069,12 +1067,12 @@ def two_hop_training():
         acc = _stable_cell(key, lambda r: r["right"] / N_TEST, 3)
         base, twins = train_results()[key]
         good = sum(1 for r in [base, *twins] if r["right"] / N_TEST > 0.9)
-        rows.append((L, label, lr, f"{bookrng.seed_of(f'transformer_block.train.init.{lay}.{L}'):#018x}", *cells, acc,
+        rows.append((L, label, lr, *cells, acc,
                      _count_cell(good, 1 + len(twins))))
     d, f_, v = TRAIN_D, TRAIN_FF, VOCAB
     return (
         f"Initialization. The parameters of a model are drawn from `transformer_block.train.init.<wiring>.<L>` (wiring names pre, "
-        f"pre_scaled, post, plain; seeds in the table; the two rates of one wiring start from the same parameters), every matrix row by "
+        f"pre_scaled, post, plain; the two rates of one wiring start from the same parameters), every matrix row by "
         f"row, in this order: the embedding table E [{v}, {d}], each entry `normal()` (no scale); then, for each block in turn, W_Q, W_K, W_V, "
         f"W_O ({d} by {d}) and W_gate, W_up ({d} by {f_}), each entry `normal() / sqrt({d})`, and W_down ({f_} by {d}), each entry "
         f"`normal() / sqrt({f_})` (the square root of the number of rows of the matrix); then, after the last block, the head W_C ({d} by "
@@ -1084,7 +1082,7 @@ def two_hop_training():
         f"wirings, not in post-norm. The read-out is logits = x W_C, with x the final stream row of the last position (no bias), and the "
         f"loss of an example is the softmax cross-entropy -ln p[target] of these {N_KEYS} logits. Only the last position has a loss.\n\n"
         f"Training. An example is a sequence of T = 5 ids processed on its own (no padding, causal mask, no position information). "
-        f"Every model reads the generator `{NAME_TRAIN_DATA}` ({bookrng.seed_of(NAME_TRAIN_DATA):#018x}) from its start with the draw order of the "
+        f"Every model reads the generator `{NAME_TRAIN_DATA}` from its start with the draw order of the "
         f"task above, one example after another: step s of {STEPS} takes the examples numbered {BATCH} (s - 1) to {BATCH} s - 1 of that stream "
         f"(counting from 0), so all models see the same examples. "
         f"The gradient of a step is the mean of the {BATCH} example gradients (each divided by {BATCH} and added in example order), computed "
@@ -1093,7 +1091,7 @@ def two_hop_training():
         f"table: m <- {BETA1} m + {1 - BETA1:.1f} g, v <- {BETA2} v + {1 - BETA2:.3f} g^2 (both zero at the start), and at step s = 1 .. {STEPS} "
         f"p <- p - rate (m / (1 - {BETA1}^s)) / (sqrt(v / (1 - {BETA2}^s)) + {EPS_ADAM:g}). "
         f"A loss column is the mean of the {WINDOW} step losses of the steps s - {WINDOW - 1} .. s. Accuracy is measured after step {STEPS}: "
-        f"the fraction of the {N_TEST} test examples (the first {N_TEST} draws of `{NAME_TRAIN_TEST}`, {bookrng.seed_of(NAME_TRAIN_TEST):#018x}) "
+        f"the fraction of the {N_TEST} test examples (the first {N_TEST} draws of `{NAME_TRAIN_TEST}`) "
         f"whose largest logit (the lowest id on a tie) is the target.\n\n"
         "The last column counts, among the run and its four copies, those with an accuracy above 0.9. 'None' and 'all' are outcomes "
         "that survive the copies; 'mixed' means the run sits at a fork, the five copies split, and a reimplementation should expect its "
@@ -1101,5 +1099,5 @@ def two_hop_training():
         "The first weight of the nudged copies is E[0][0] (row 0, column 0 of the embedding table, the first number of the first tensor "
         "drawn), the first coordinate of the token `A0B0`, which stands in about a quarter of the examples and so enters the computation in "
         "the first steps. " + stable.RULE + "\n\n"
-        + _table(["L", "wiring", "rate", "seed of the initial parameters"] + [f"loss, step {c}" for c in CHECKPOINTS] + ["test accuracy", "runs above 0.9"],
-                 rows, "llrr" + "r" * 6))
+        + _table(["L", "wiring", "rate"] + [f"loss, step {c}" for c in CHECKPOINTS] + ["test accuracy", "runs above 0.9"],
+                 rows, "llr" + "r" * 6))

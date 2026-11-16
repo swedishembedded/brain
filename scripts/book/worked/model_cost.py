@@ -20,7 +20,7 @@ What this module adds:
   training memory (bytes per parameter by recipe, saved activations per token with and without recomputation);
 * a log-log regression of a power law on stated synthetic points, and the compute-optimal split of a budget.
 
-Every random quantity comes from the book's SplitMix64 (`bookrng.generator(name)`); each block prints the seed. Sums are exact
+Every random quantity comes from the book's SplitMix64 (`bookrng.generator(name)`); each block names its generators. Sums are exact
 integer sums or plain left-to-right additions. Sizes in bytes use GiB = 2^30 bytes unless a table says GB (10^9).
 
 Swedish Embedded AB implements solutions for sizing language models before they are run. If your team needs expertise in
@@ -59,8 +59,8 @@ def _table(headers, rows, align=None):
     return "\n".join(out)
 
 
-def _seed_line(name):
-    return f"Generator: the book's SplitMix64, seed {bookrng.seed_of(name):#018x} (`seed_of` of the name `{name}`)."
+def _generator_line(name):
+    return f"Generator: the book's SplitMix64, `{name}`."
 
 
 def _gib(b):
@@ -958,7 +958,7 @@ def power_law_fit():
     big = FIT_SIZES[-1] * 10
     pred = math.exp(a + b * math.log(big))
     truth = FIT_C * big ** (-FIT_A)
-    return (_seed_line(NAME_FIT) + f" Synthetic points, not measurements of any model: loss = {FIT_C} P^(-{FIT_A}) (1 + {FIT_NOISE} z) at the eight sizes "
+    return (_generator_line(NAME_FIT) + f" Synthetic points, not measurements of any model: loss = {FIT_C} P^(-{FIT_A}) (1 + {FIT_NOISE} z) at the eight sizes "
             "P = 1,000,000 x 4^i, i = 0 .. 7, with one standard normal z drawn per size in increasing order of size (the generator's `normal()`, "
             "Box-Muller). The fit is ordinary least squares of ln(loss) on ln(P) (natural logarithms, the library `log`), closed form, sums added "
             "left to right.\n\n"

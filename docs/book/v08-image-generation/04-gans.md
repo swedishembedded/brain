@@ -191,7 +191,7 @@ Here `grad_omega(omega, x, u)` is $u\,\partial \ell_\omega(x)/\partial \omega$ a
 Two hand-written backward passes are two chances for a sign error, and every result below depends on them. The gradient check of Volume III compares each against central differences of the loss it claims to differentiate:
 
 <!-- worked: gans.gradient_check -->
-Both networks start from their `gans.gradcheck` (seed 0x588abed21845e06c) initialisation (init_net, then 0.1 normal() added to every entry in order, generator first), a batch of 4 reals and 4 noise vectors drawn real, real, ..., then noise, noise, ..., and central differences of step 1e-05. An entry fails when |analytic - numerical| exceeds 1e-6 + 1e-6 max(|analytic|, |numerical|).
+Both networks start from their `gans.gradcheck` initialisation (init_net, then 0.1 normal() added to every entry in order, generator first), a batch of 4 reals and 4 noise vectors drawn real, real, ..., then noise, noise, ..., and central differences of step 1e-05. An entry fails when |analytic - numerical| exceeds 1e-6 + 1e-6 max(|analytic|, |numerical|).
 
 | gradient | parameters checked | entries failing the gate | worst absolute difference |
 |---|---:|---:|---:|
@@ -202,7 +202,7 @@ Both networks start from their `gans.gradcheck` (seed 0x588abed21845e06c) initia
 The generator's gradient passes the gate through the discriminator, which is the path the whole method rests on. Now train, with $n_g = 1$, for $400$ discriminator steps, and read the generator out on a fixed set of $1000$ noise vectors: how many samples lie within $0.75$ (three cluster standard deviations) of each centre, how many lie elsewhere, and the standard deviation of all $1000$ samples.
 
 <!-- worked: gans.training_run -->
-Stream `gans.run1` (seed 0x058945312771b996), initialisation and every draw in the order of the chapter. The generator is read out on the 1000 evaluation noise vectors (`gans.evaluation` (seed 0xa020842a95759dde), 2 normal() each, drawn in order and used for every read-out): the columns count the samples within 0.75 of each centre, 'elsewhere' is the rest, and the spread is the standard deviation of all 1000 samples (the data's is 2.462). Digits are those shared by the run and four copies with the first generator weight changed by +1e-12, -1e-12, +3e-12 and -3e-12.
+Stream `gans.run1`, initialisation and every draw in the order of the chapter. The generator is read out on the 1000 evaluation noise vectors (`gans.evaluation`, 2 normal() each, drawn in order and used for every read-out): the columns count the samples within 0.75 of each centre, 'elsewhere' is the rest, and the spread is the standard deviation of all 1000 samples (the data's is 2.462). Digits are those shared by the run and four copies with the first generator weight changed by +1e-12, -1e-12, +3e-12 and -3e-12.
 
 one generator step per discriminator step:
 
@@ -240,11 +240,11 @@ Five streams, each trained under both schedules for 400 discriminator steps and 
 
 | stream | one: collapsed | one: all three covered | twenty: collapsed | twenty: all three covered |
 |---|---:|---:|---:|---:|
-| `gans.run1` (0x058945312771b996) | 0 | 28 | 25 | 3 |
-| `gans.run2` (0x8276b6865f702a7a) | 0 | 30 | 27 | 1 |
-| `gans.run3` (0x54e1585730b5fddb) | 5 | 24 | 16 | 6 |
-| `gans.run4` (0x84c39a2877944ee3) | 0 | 30 | 16 | 3 |
-| `gans.run5` (0xe787ef1243a61e00) | 0 | 30 | 25 | 1 |
+| `gans.run1` | 0 | 28 | 25 | 3 |
+| `gans.run2` | 0 | 30 | 27 | 1 |
+| `gans.run3` | 5 | 24 | 16 | 6 |
+| `gans.run4` | 0 | 30 | 16 | 3 |
+| `gans.run5` | 0 | 30 | 25 | 1 |
 <!-- /worked -->
 
 With one generator step per discriminator step, four of the five streams are never collapsed after step $100$ and the fifth is for $5$ of $30$ read-outs; all three clusters are covered at $24$ to $30$ of the $30$. With twenty, the generator is collapsed at $16$ to $27$ of the $30$ read-outs and covers all three at $1$ to $6$. These are counts of a dynamical process, so the exact numbers belong to these five seeds, but each count is the same in the run and in its four nudged copies. The toy does not tell us how often an image GAN collapses; it shows that the schedule alone can move a training run between the two regimes, and what the collapsed regime looks like in the numbers.
@@ -252,7 +252,7 @@ With one generator step per discriminator step, four of the five streams are nev
 Why does a generator that runs ahead collapse? Freeze the discriminator and let the generator alone train for longer. What it minimizes is the expected loss of its samples under a fixed judge, and an expected loss is never smaller than the loss at its best point: the generator does best by sending every noise vector to the point where the judge's logit is highest. Start from the generator and discriminator of the first run after its $400$ steps, freeze the discriminator, and keep stepping the generator:
 
 <!-- worked: gans.frozen_judge -->
-The discriminator and generator of the run `gans.run1` after 400 steps of one generator step per discriminator step (first table of the previous example). The discriminator is now frozen and only the generator trains: Adam with the same settings and a fresh state, 32 noise vectors per step from `gans.frozen` (seed 0x7730aa9be9ea01fe) (2 normal() each, in order), the non-saturating loss. Read out on the 1000 evaluation noise vectors: the mean discriminator logit of the samples, their mean and spread, and how many lie within 0.75 of a centre. Shared digits with the four nudged copies.
+The discriminator and generator of the run `gans.run1` after 400 steps of one generator step per discriminator step (first table of the previous example). The discriminator is now frozen and only the generator trains: Adam with the same settings and a fresh state, 32 noise vectors per step from `gans.frozen` (2 normal() each, in order), the non-saturating loss. Read out on the 1000 evaluation noise vectors: the mean discriminator logit of the samples, their mean and spread, and how many lie within 0.75 of a centre. Shared digits with the four nudged copies.
 
 | generator-only steps | mean logit of the samples | mean of the samples | spread of the samples | samples near a centre |
 |---|---:|---:|---:|---:|
@@ -272,7 +272,7 @@ A discriminator cannot repair this by looking harder, because it scores one samp
 The opposite failure is the one that the first section's table foreshadowed. When the discriminator is far ahead, the saturating loss gives the generator almost nothing to learn from. The next experiment sets this up by hand. A generator is given an output bias of $-8$, so that its samples start far to the left of every cluster. The discriminator trains alone for $600$ steps against it, until it is confident that those samples are fake. Then it is frozen, and the generator takes $100$ steps of plain gradient descent (no Adam, so that the size of the gradient is not rescaled away) on each of the three generator losses in turn, from the same start and with the same noise:
 
 <!-- worked: gans.dark_start -->
-A generator and a discriminator from the stream `gans.dark` (seed 0xd6eedb6549f6ec1b) (init_net for each, generator first), with -8 added to the generator's output bias so that its samples start near -8. The discriminator trains alone for 600 Adam steps (rate 0.002, betas (0.5, 0.999), epsilon 1e-8, no weight decay, as in the training runs of this chapter) against that generator (each step: 32 items, for each item a real draw `real_sample` then a noise draw of 2 `normal()` values, all from the same stream, which continues after the two initialisations; the discriminator's gradient is the mean over the 32 items of the loss -log D(real) - log(1 - D(fake)), and the generator is not updated) and is then frozen; its mean logit on the generator's samples at the start, over the 256 noise vectors of the read-out below, is -3.80. The generator then takes 100 steps of plain gradient descent, rate 0.05, on each loss in turn, from the same start and the same noise (the stream `gans.dark.generator` (seed 0x58e303f0d019c5bb), restarted for each loss: 32 vectors of 2 `normal()` values per step, the gradient the mean over them), read out (the 'mean sample' and 'mean logit' columns) on 256 noise vectors drawn in order from `gans.dark.evaluation` (seed 0x49799e7170c489bd); the norm is that of the generator's full gradient at the first step.
+A generator and a discriminator from the stream `gans.dark` (init_net for each, generator first), with -8 added to the generator's output bias so that its samples start near -8. The discriminator trains alone for 600 Adam steps (rate 0.002, betas (0.5, 0.999), epsilon 1e-8, no weight decay, as in the training runs of this chapter) against that generator (each step: 32 items, for each item a real draw `real_sample` then a noise draw of 2 `normal()` values, all from the same stream, which continues after the two initialisations; the discriminator's gradient is the mean over the 32 items of the loss -log D(real) - log(1 - D(fake)), and the generator is not updated) and is then frozen; its mean logit on the generator's samples at the start, over the 256 noise vectors of the read-out below, is -3.80. The generator then takes 100 steps of plain gradient descent, rate 0.05, on each loss in turn, from the same start and the same noise (the stream `gans.dark.generator`, restarted for each loss: 32 vectors of 2 `normal()` values per step, the gradient the mean over them), read out (the 'mean sample' and 'mean logit' columns) on 256 noise vectors drawn in order from `gans.dark.evaluation`; the norm is that of the generator's full gradient at the first step.
 
 | generator loss | norm of its gradient at step 1 | mean sample at start | after 25 steps | after 100 steps | mean logit after 100 steps |
 |---|---:|---:|---:|---:|---:|

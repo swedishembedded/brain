@@ -62,8 +62,7 @@ def _table(headers, rows, align=None):
 
 
 def _generator_line(name):
-    seed = bookrng.seed_of(name)
-    return f"Generator: the book's SplitMix64, seed {seed:#018x} ({seed})."
+    return f"Generator: `{name}` (the book's SplitMix64)."
 
 
 def sigmoid(z):

@@ -20,7 +20,7 @@ serving (tokenizer, base, adapter, manifest) with the checks a loader applies to
 policies and the work each one does, the planted mistakes at every seam, and the comparison of the whole system with the
 simplest run that computes the same answers.
 
-Every random quantity comes from the book's SplitMix64 (`bookrng.generator(name)`); each block prints its seeds. Sums of
+Every random quantity comes from the book's SplitMix64 (`bookrng.generator(name)`); each block names its generators. Sums of
 products are plain left-to-right additions, the order a C loop would use. Trained numbers are printed by the stable-digits rule
 of `stable.py`: each run is repeated from four starting points that differ by 1e-12 or 3e-12 in one weight.
 
@@ -57,10 +57,6 @@ def _table(headers, rows, align=None):
 
 def _int(n):
     return f"{n:,}"
-
-
-def _seed(name):
-    return f"{bookrng.seed_of(name)} (seed_of '{name}')"
 
 
 def _hex(blob):
@@ -165,7 +161,7 @@ def raw_and_clean():
     itr, iva = _index_split(raw)
     leak = len(iva & itr)
     listing = "\n".join(td.normalise(d) for d in tr).encode()
-    return (f"The generator `{NAME_RAW}` (seed {bookrng.seed_of(NAME_RAW)}) writes {N_RAW} raw documents; for each, in this order, "
+    return (f"The generator `{NAME_RAW}` writes {N_RAW} raw documents; for each, in this order, "
             f"integer(6) picks a name of {NAMES}, integer(5) a colour of {COLOURS}, integer(6) a thing of {THINGS}, integer(3) the case "
             f"(0 as written, 1 the first letter upper case, 2 every letter upper case) and integer(3) the spacing (0 single spaces, 1 two "
             f"spaces after the first full stop, 2 one space before the text and two after it). The text before the dirt is "
@@ -174,8 +170,8 @@ def raw_and_clean():
             f"the 64-bit FNV-1a digest of its UTF-8 bytes is 0 modulo {VAL_MOD}. A space is written `_` in the table.\n\n"
             + _table(["raw document", "as drawn", "cleaned", "split"], rows, "rlll")
             + f"\n\n| corpus | raw documents | duplicates dropped | training | held out |\n|---|---:|---:|---:|---:|\n"
-            f"| base (`{NAME_RAW}`, seed {bookrng.seed_of(NAME_RAW)}) | {N_RAW} | {dup} | {len(tr)} | {len(va)} |\n"
-            f"| fine-tuning (`{NAME_RAW_FT}`, seed {bookrng.seed_of(NAME_RAW_FT)}, second sentence 'a <thing> is <colour>.') | {N_RAW_FT} | "
+            f"| base (`{NAME_RAW}`) | {N_RAW} | {dup} | {len(tr)} | {len(va)} |\n"
+            f"| fine-tuning (`{NAME_RAW_FT}`, second sentence 'a <thing> is <colour>.') | {N_RAW_FT} | "
             f"{fdup} | {len(ftr)} | {len(fva)} |\n\n"
             f"The {len(tr)} cleaned training documents of the base corpus, joined by one newline byte (10) in their order, have the "
             f"FNV-1a digest {_hex(listing)}. No held-out document is also a training document, in either corpus, since a document's "
@@ -437,7 +433,7 @@ def model_and_check():
     return (f"The GPT of Volume V, Chapter 10 with V = {cfg['V']}, D = {cfg['D']}, H = {cfg['H']}, F = {cfg['FF']}, L = {cfg['L']} and T = "
             f"{cfg['T']}: token embedding plus learned position, {cfg['L']} pre-norm blocks (RMS norm with epsilon 1e-6, causal attention, "
             f"SwiGLU), a final RMS norm and a head tied to E; {_int(len(base))} numbers. `init_gpt` of Volume V, Chapter 14 with every "
-            f"0.02 replaced by {STD}: the generator `{NAME_INIT}` (seed {bookrng.seed_of(NAME_INIT)}) draws normal() for every entry, "
+            f"0.02 replaced by {STD}: the generator `{NAME_INIT}` draws normal() for every entry, "
             f"row by row, in the order E, P, then for each block W_Q, W_K, W_V, W_O, W_gate, W_up, W_down, each entry times {STD} and "
             f"W_O and W_down also times 1/sqrt(2 L) = 0.5; the gains start at 1.0 and take no draw. The flat vector holds the tensors in "
             f"the order E, P, then for each block W_Q, W_K, W_V, W_O, g1, g2, W_gate, W_up, W_down, then g_f, each row by row; written as "
@@ -445,16 +441,16 @@ def model_and_check():
             f"{', '.join(f'{x:.8f}' for x in base[:3])}.\n\n" + inv
             + f"\n\nThe adapters (rank r = {RANK}, alpha = {ALPHA:g}, scale s = alpha / r = {SCALE:g}) sit on W_O and W_down of both blocks. "
             f"A has shape [r, in] and B [out, r] in the orientation of Volume XIII, Chapter 4, so the stored matrix becomes "
-            f"W0 + s (B A)^T. The generator `{NAME_ADAPTERS}` (seed {bookrng.seed_of(NAME_ADAPTERS)}) draws, site by site in the order of "
+            f"W0 + s (B A)^T. The generator `{NAME_ADAPTERS}` draws, site by site in the order of "
             f"the table, normal() / sqrt(in) for every entry of A, row by row; B starts at 0.0. The adapter vector is A then B of each site, "
             f"row-major: {n_ad} numbers.\n\n"
             + _table(["site", "A", "B", "numbers"], ad_rows, "lllr")
             + f"\n\nGradient checks, by central differences of step {GC_STEP:g} on the loss of one row (the first draw of the first epoch "
             f"of the order `{NAME_ORDER}`), the deviation being |numeric - analytic| / max(1, |analytic|), criterion below 1e-7. The base: "
-            f"{GC_COORDS} coordinates of the initial network, drawn from `{NAME_GC}` (seed {bookrng.seed_of(NAME_GC)}) as integer(21) "
+            f"{GC_COORDS} coordinates of the initial network, drawn from `{NAME_GC}` as integer(21) "
             f"for the tensor (in the order of the flat vector), then integer(rows) and integer(columns) of that tensor (a tensor of one row, a gain, still draws integer(1)): "
             f"{_crit(wb, 1e-7)}. The adapters: all {n_ad} adapter numbers on the initial network, with A drawn as above and B drawn, "
-            f"site by site and row by row, as normal() / 10 from `{NAME_GC_B}` (seed {bookrng.seed_of(NAME_GC_B)}) (a B of zero would "
+            f"site by site and row by row, as normal() / 10 from `{NAME_GC_B}` (a B of zero would "
             f"make the gradient of A zero and test nothing): {_crit(wa, 1e-7)}. The planted mistake forms (dA, dB) from G instead of G^T: {bad}.")
 
 
@@ -661,7 +657,7 @@ def training_stages():
                 f"{', '.join(kf['on_disk'])}; the reader accepts {kf['gen']}, and the resumed adapter numbers are "
                 f"{'the same 64-bit patterns as' if _bits(kf['resumed']['p'], ref['ad']) else 'NOT the same bits as'} the straight run's.")
     return (f"The base run: {PRE_STEPS} updates, each of {B} draws, draw d being entry d mod n of `training_data.epoch_order` of epoch "
-            f"d // n over the n = {len(rows()['pre'])} training rows, with the seed {_seed(NAME_ORDER)}. A row is one document (the "
+            f"d // n over the n = {len(rows()['pre'])} training rows, with the seed `seed_of('{NAME_ORDER}')`. A row is one document (the "
             f"separator, then its tokens; targets shifted by one, the last target the closing separator, padding beyond with loss mask 0). "
             f"The loss of an update is the mean cross-entropy (natural log) over the supervised positions of its {B} rows together, its "
             f"gradient that of `training_gpt.batch_loss`, and the update is `adam_update` of Volume XIII, Chapter 4 at the rate {PRE_LR} "
@@ -671,7 +667,7 @@ def training_stages():
             f"logit, the lowest id on a tie; EOT ends the answer and is not kept, and so does a full row of {T}, whose logits still choose a last token that is kept) decodes to the held-out second "
             f"sentence. {stable.RULE} All five runs agree on every count of answers (the resume without moments included: each run is also resumed without its moments from its own generation 100).\n\n" + t1
             + f"\n\nThe adapter run on the frozen base after {PRE_STEPS} updates: {FT_STEPS} updates of {B} draws from the "
-            f"{len(rows()['ft'])} fine-tuning rows (seed {_seed(NAME_ORDER_FT)}), the forward pass with every adapted matrix merged "
+            f"{len(rows()['ft'])} fine-tuning rows (the seed `seed_of('{NAME_ORDER_FT}')`), the forward pass with every adapted matrix merged "
             f"as W0 + s (B A)^T, the adapter gradient (dA, dB) = (s B^T G^T, s G^T A^T) from the gradient G of the stored matrix, Adam "
             f"at the rate {FT_LR} on the {len(ref['ad'])} adapter numbers only. 'New form' is the held-out fine-tuning corpus ("
             f"'... a <thing> is <colour>.'), 'old form' the held-out base corpus ('... the <thing> is <colour>.').\n\n" + t2

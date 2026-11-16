@@ -151,8 +151,7 @@ def clip_table():
             pix, vis, full = tr[k]
             cells.append(f"{len(pix)} / {_ibox(vis) if vis else 'hidden'}")
         rows.append([t] + cells + [frame_digest(t)[:12]])
-    seed = bookrng.seed_of(SCENE)
-    return (f"seed 0x{seed:016x} ({seed}), generator `{SCENE}`. The clip has {T} frames of {W} by {H} pixels. Each object is a "
+    return (f"Generator `{SCENE}`. The clip has {T} frames of {W} by {H} pixels. Each object is a "
             "solid rectangle painted over a background of (40, 44, 48); objects are painted in the order A, C, B, so B covers A and C "
             "where they meet. Every one of the 3 * 61 * 96 samples of a frame, in the order frame, row, column, channel, gets one "
             "`integer(4)` added to the base colour of its pixel. Rectangles: A is 10 by 8 at y = 22 with x = 8 + 4t, colour "

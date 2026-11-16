@@ -619,8 +619,8 @@ def seam_toy():
         rows.append([c, f"{err[c]:.3f}", f"{pred:.3f}", f"{8 * err[c]:.2f}"])
     return (f"A dot moves {SEAM_VELOCITY} cells per latent frame. A window has produced eight latent frames, y_j = {SEAM_VELOCITY} j + {SEAM_NOISE} z_j for j = 0 .. 7. The next window "
             f"is given the last c of them and has to continue the motion. With c = 1 (a still) it sees a position and nothing else, so it draws a velocity {SEAM_PRIOR} z' from its prior; "
-            f"with c >= 2 it adopts the slope of the least-squares line through the c frames. The error of a seam is |adopted velocity - {SEAM_VELOCITY}|. Draws from `{SEAM_NAME}` "
-            f"(seed {bookrng.seed_of(SEAM_NAME):#018x}): for each of {SEAM_TRIALS} trials, in order, z_0 .. z_7 and then z', each one `normal()` of the book's generator; the means "
+            f"with c >= 2 it adopts the slope of the least-squares line through the c frames. The error of a seam is |adopted velocity - {SEAM_VELOCITY}|. Draws from `{SEAM_NAME}`: "
+            f"for each of {SEAM_TRIALS} trials, in order, z_0 .. z_7 and then z', each one `normal()` of the book's generator; the means "
             f"add the {SEAM_TRIALS} errors left to right. The prediction is the mean of |X| for the exact distribution of the adopted velocity minus the truth: "
             f"X is normal with mean {SEAM_VELOCITY} and spread {SEAM_PRIOR} for c = 1 (the draw, sign aside), and for c >= 2 normal with mean 0 and spread "
             f"{SEAM_NOISE} sqrt(12 / (c (c^2 - 1))), the spread of a least-squares slope. Eight frames after the seam the dot is off by eight times the velocity error.\n\n"

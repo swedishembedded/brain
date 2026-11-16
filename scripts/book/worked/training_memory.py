@@ -207,11 +207,10 @@ def saved_by_backward():
                      "dW1 (reads X)" if key[0] == "X" else "dW2 and dZ = dA (1 - A^2) (read A)"])
     total = sum(len(tape[k]) * len(tape[k][0]) for k in set(reads))
     assert total == blocks * n * (d + f)
-    seed = bookrng.seed_of(name)
     head = (f"A stack of {blocks} residual blocks with D = {d}, F = {f} on n = {n} tokens (rows). The forward is Z = X W1^T "
             "(W1 is [F, D]), A = tanh(Z) (the correctly rounded library tanh), Y = X + A W2^T (W2 is [D, F]); the loss is half the sum "
             "of the squares of the last output, so the gradient entering the last block is that output. The weights are drawn from one "
-            f"generator seeded {seed} (seed_of '{name}'), as normal() times 0.5 in this order: for each block W1 row by row, then W2 row "
+            f"generator `{name}`, as normal() times 0.5 in this order: for each block W1 row by row, then W2 row "
             "by row; then X row by row with normal() times 1. The backward of a block is written to take only the saved arrays X and A "
             "(and the weights, which are parameters); the table lists what it read. All "
             f"{sum(len(W1) * len(W1[0]) + len(W2) * len(W2[0]) for W1, W2 in Ws)} weights' gradients agree with central differences "
@@ -294,9 +293,7 @@ def recompute_exact():
     for pol in ("keep", "recompute"):
         _, g, _ = _run_stack(_copy_ws(Ws), X0, pol, 1, perturb=update)
         mixed.append((pol, distance(g, ref_g), distance(g, fresh)))
-    seed = bookrng.seed_of(name)
-    head = (f"A stack of {blocks} blocks (D = {d}, F = {f}, n = {n}) drawn as in the first table from the generator seeded {seed} "
-            f"(seed_of '{name}'); the loss is half the sum of squares of the last output, in float64. 'caches alive' is the most blocks "
+    head = (f"A stack of {blocks} blocks (D = {d}, F = {f}, n = {n}) drawn as in the first table from the generator `{name}`; the loss is half the sum of squares of the last output, in float64. 'caches alive' is the most blocks "
             "whose X and A exist at once. 'bit-identical loss' compares the 64-bit patterns; the last column counts gradient entries, "
             "of both weight matrices of every block, whose 64-bit pattern differs from the keep run.\n\n")
     t1 = _table(["policy", "caches alive", "bit-identical loss", "gradient entries that differ"], rows, "lrrr")
@@ -421,15 +418,15 @@ def boundary_rounding():
         mats = [(gl[w], g0l[w]) for gl, g0l in zip(g, g0) for w in (0, 1)]
         mincos = min(cos([v for r in a for v in r], [v for r in b for v in r]) for a, b in mats)
         t2rows.append([kind, f"{abs(loss - loss0) / abs(loss0):.3g}", f"{cos(_flat(g), v0):.6f}", f"{mincos:.6f}"])
-    head = (f"Three rows of 8 numbers, drawn from the generator seeded {bookrng.seed_of(name)} (seed_of '{name}') as normal() in order, row "
+    head = (f"Three rows of 8 numbers, drawn from the generator `{name}` as normal() in order, row "
             "by row; entry 3 of row 2 (counting from 0) is then multiplied by 20, so it is the largest entry of its row. Each row is stored "
             "in bf16 (nearest even) or fp8 (the row's own scale s = amax / 448, then E4M3 rounding to nearest even with a subnormal "
             "step of 2^-9 and saturation at 448, then multiplication by s) and read back. 'relative error' is the largest |error| / |x| over the "
             "row; 'error / row max' is the largest |error| / amax.\n\n")
     t1 = _table(["row", "amax", "bf16, relative error", "bf16, error / row max", "fp8, relative error", "fp8, error / row max"],
                 t1rows, "lrrrrr")
-    mid = (f"\n\nA stack of {blocks} blocks (D = {d}, F = {f}, n = {n}), drawn as in the first table from the generator seeded "
-           f"{bookrng.seed_of(name + '.stack')} (seed_of '{name}.stack') with entries of W1 and W2 scaled by 0.25 in place of 0.5 (each entry normal() times 0.25, W1 then W2 of block 0, then of block 1, and so on, then the {n} x {d} entries of X as normal() times 1 in row-major order), run with recompute in segments of 1. Each block's input is "
+    mid = (f"\n\nA stack of {blocks} blocks (D = {d}, F = {f}, n = {n}), drawn as in the first table from the generator "
+           f"`{name}.stack` with entries of W1 and W2 scaled by 0.25 in place of 0.5 (each entry normal() times 0.25, W1 then W2 of block 0, then of block 1, and so on, then the {n} x {d} entries of X as normal() times 1 in row-major order), run with recompute in segments of 1. Each block's input is "
            "stored in the format and the block reads it back, in the forward and in the rebuild, so the forward continues from the "
            "rounded value. Compared with the fp32 boundaries: the relative change of the loss, the cosine between the two complete "
            "gradients, and the smallest cosine over the 12 weight matrices.\n\n")
@@ -705,8 +702,8 @@ def block_codes():
     for label, mm_, vm_ in cases:
         zm, zv, wrong, big = stats(mm_, vm_)
         rows.append([label, zm, zv, wrong, f"{big:.3g}"])
-    head = (f"One block of {BLOCK_N} gradients g_i = a_i exp(2 b_i), a_i and b_i from normal() of the generator seeded "
-            f"{bookrng.seed_of(name)} (seed_of '{name}'), in the order a_0, b_0, a_1, b_1, ...; they span |g| from {gmin:.3g} to {gmax:.3g}. "
+    head = (f"One block of {BLOCK_N} gradients g_i = a_i exp(2 b_i), a_i and b_i from normal() of the generator "
+            f"`{name}`, in the order a_0, b_0, a_1, b_1, ...; they span |g| from {gmin:.3g} to {gmax:.3g}. "
             "After one Adam step from zero (bias-corrected) the first moment is m = g and the second moment v = g^2, so the exact update "
             "m / (sqrt(v) + epsilon) is sign(g), of size 1 (epsilon = 1e-8). Each slot is encoded to nearest with its own block scale "
             "(the block maximum) and decoded, and the update is formed from the decoded values. The linear rows are the unclamped baseline of the previous table: a value that "
@@ -750,8 +747,8 @@ def ema_decay():
             f"the other {n} elements start at the value of code 214, (214 / 255)^4 = {start:.5f} (the code nearest to 0.5), and receive a "
             f"gradient of zero, so the exact update is v <- {EMA_BETA} v. "
             "Each element is stored with the fourth-root map, code = clamp(floor(255 v^(1/4) + u), 1, 255) and v = (code / 255)^4, "
-            "and re-encoded after every step: u = 0.5 is rounding to nearest, and u = uniform() from the generator seeded "
-            f"{bookrng.seed_of(name)} (seed_of '{name}') is stochastic rounding, one draw per element per step, step by step, the elements "
+            "and re-encoded after every step: u = 0.5 is rounding to nearest, and u = uniform() from the generator "
+            f"`{name}` is stochastic rounding, one draw per element per step, step by step, the elements "
             "in order 1 to 63 (element 0 is not rounded). The columns are the exact value, start x 0.999^step, the mean over the 63 "
             "elements, and for the stochastic run the standard deviation of the 63 (divisor 62) and the standard error of their mean "
             "(that deviation over sqrt(63)).\n\n")
@@ -802,10 +799,9 @@ def int8_training():
         ws = [_q_run(mode, d) for d in stable.NUDGES]
         cells = [stable.text(base[s], [x[s] for x in ws], lambda x: f"{x:.4g}") for s in (10, 50, 100, Q_STEPS)]
         rows.append([label] + cells)
-    seed = bookrng.seed_of("training_memory.int8_training")
     head = (f"AdamW (beta1 = {Q_B1}, beta2 = {Q_B2}, epsilon = {Q_EPS:g}, rate {Q_LR}, no weight decay, bias-corrected) on "
             f"L = sum_i h_i (w_i - t_i)^2 / 2 over {Q_N} weights from w = 0, with curvature h_i = 10^(-1 + 2 i / {Q_N - 1}) and targets "
-            f"t_i = normal() in order i = 0 .. {Q_N - 1} from one generator seeded {seed} (seed_of 'training_memory.int8_training'). "
+            f"t_i = normal() in order i = 0 .. {Q_N - 1} from one generator `training_memory.int8_training`. "
             "In the 8-bit rows both moments are re-encoded after every update, the first with the square-root map and the second with "
             f"the fourth-root map, each in blocks of {Q_BLOCK} weights with the block maximum as scale; the stochastic rounding uses "
             "the counter draw of Chapter 2, u = counter_uniform(key, i) for weight i, with key = mix32(2 t + slot) at step t = 1, 2, ... and "
@@ -876,7 +872,7 @@ def tile_independence():
     rows.append(["100, used as requested", "100", f"{20 * 100:,}", f"{diff} of {T_N}"])
     head = (f"{T_STEPS} AdamW steps (beta1 = 0.9, beta2 = 0.999, epsilon = 1e-8, rate {T_LR}, no weight decay, bias-corrected) over "
             f"{T_N} weights from w = 0 on L = sum_i h_i (w_i - t_i)^2 / 2 with h_i = 1 + (i mod 7) and t_i = normal() in order from "
-            f"the generator seeded {bookrng.seed_of('training_memory.tile_independence')} (seed_of 'training_memory.tile_independence'). Both moments are held in "
+            f"the generator `training_memory.tile_independence`. Both moments are held in "
             f"8-bit blocks of {T_BLOCK} (square-root map for the first, fourth-root map for the second) with stochastic rounding by the "
             "counter draw, u = counter_uniform(key, i) with i the absolute index and key = mix32(2 t + slot) (t the step from 1, slot 0 "
             "or 1). The update walks the weights in tiles: decode the tile's moments, apply the rule, encode them. The requested tile is "

@@ -684,7 +684,7 @@ def polynomial_fit():
                      f"{_mse(xf, fy, w):.3f}", _sci(cond_raw, 2), _sci(cond_z, 2)))
     return ("Polynomial features of the voltage (columns 1, v, v^2, ...), fitted by the normal equations on the ten rows. "
             "Weights are (w0, w1, ...) from the constant term up. The fresh rows are the 2000 rows of the source of the previous chapter, "
-            f"drawn from the book's SplitMix64 with seed {bookrng.seed_of(lp.FRESH_NAME):#018x} ({bookrng.seed_of(lp.FRESH_NAME)}). Each row is made by two draws in this order: v = {lp.V_LO} + {lp.V_HI - lp.V_LO:.1f} * "
+            f"drawn from the book's SplitMix64 as the generator `{lp.FRESH_NAME}`. Each row is made by two draws in this order: v = {lp.V_LO} + {lp.V_HI - lp.V_LO:.1f} * "
             f"rng.uniform(), then z = rng.normal(); y = {lp.LAW[0]:g} + {lp.LAW[1]:g} v - {-lp.LAW[2]:g} v^2 + {lp.NOISE_SD} z "
             "computed from the unrounded v; then v is rounded to 2 decimals and y to 1. The fits are not repeated on them: the "
             "weights found on the ten rows are scored on the fresh rows. MSE is shown to 3 decimals. cond(X^T X) is the largest "

@@ -75,11 +75,6 @@ KIND_NAMES = {"naive": "naive", "sn": "seasonal naive", "ar": "seasonal AR(1)", 
 Z = pf.Z
 
 
-def _seed(name):
-    s = bookrng.seed_of(name)
-    return f"{s:#018x}"
-
-
 def fx(x, d=4):
     return f"{x:.{d}f}"
 
@@ -525,10 +520,6 @@ def _ci(get_lo, get_hi, d=3):
     return f"[{_cs(get_lo, d)}, {_cs(get_hi, d)}]"
 
 
-def _seeds():
-    return ", ".join(f"{n.split('.', 1)[1]} {_seed(n)}" for n in (PANEL_NAME, EVENT_NAME, PLACEBO_NAME, SPLIT_NAME, BOOT_NAME))
-
-
 def _bars(origins, labels_only):
     out = set()
     for o in origins:
@@ -579,11 +570,11 @@ def panel_setup():
     ev_total = sum(sum(sr["ev"]) for sr in panel)
     bars = lambda lo, hi: sum(sum(sr["ev"][lo:hi]) for sr in panel)
     moved = lambda last: sum(1 for sr in panel if sr["change"] <= last)
-    head = (f"The panel has {S} series of {N} bars. Generator `{PANEL_NAME}` (SplitMix64, seed {_seed(PANEL_NAME)}), series after series; for series i the draws, in this order, are "
+    head = (f"The panel has {S} series of {N} bars. Generator `{PANEL_NAME}` (the book's SplitMix64), series after series; for series i the draws, in this order, are "
             f"seven values (six calls of uniform() and one of integer(200)) and then {N} calls of normal(): u1 for level = 20 * 5^u1; u2 for slope = 0.0005 + 0.0025 u2; u3 for amp = 0.05 + 0.20 u3; u4 for phase = 2 pi u4; "
             f"u5 for shock = 0.01 + 0.03 u5; integer(200) for change = 100 + that integer; u6 for jump = -0.25 + 0.50 u6. Then v_t = 0.7 v_(t-1) + shock normal() with "
             f"v_(-1) = 0, and y_t = level (1 + slope t + amp sin(2 pi t / 12 + phase) + v_t) (1 + jump [t >= change]) for t = 0 .. {N - 1} (the library sine; the {N} "
-            f"calls of normal() are an even number, so no Gaussian value is held from one series to the next). Events: generator `{EVENT_NAME}` (seed {_seed(EVENT_NAME)}), "
+            f"calls of normal() are an even number, so no Gaussian value is held from one series to the next). Events: generator `{EVENT_NAME}`, "
             f"series after series, one uniform b for the intercept b = {EVENT_B0} + {EVENT_BW} u and then one uniform per bar t = 0 .. {N - 1}; with z_t = (y_(t-1) - mean) / "
             f"(sd + 1e-5) over the {C} bars y_(t-{C}) .. y_(t-1) (mean and sd with divisor {C}; 0 for t < {C}), age_t the bars since the last event capped at 12 and divided by 12 "
             f"(age_0 = 0, 0 after an event) the bar is an event when its uniform is below sigmoid(b + {EVENT_Z} z_t + {EVENT_AGE} age_t + {EVENT_SHIFT} [t >= change]).\n\n"
@@ -624,7 +615,7 @@ def split_table():
             f"floor({STUDY} * 0.7) = {int(STUDY * (TRAIN_FRAC + VAL_FRAC))}, the validation side of the rule is the calibration block. The deployment block is the origins "
             f"{STUDY} .. {N - H}, whose forecast bars are bars {STUDY} .. {N - 1}. Every block contains all {S} series. Second table: for each block, how many of its "
             f"distinct forecast bars are also a bar (context or forecast) of a window of the earlier block named in the column. Third table: the same count for the "
-            f"test block against the fit block under the forward split and under the random split `{SPLIT_NAME}` (seed {_seed(SPLIT_NAME)}): the origins "
+            f"test block against the fit block under the forward split and under the random split `{SPLIT_NAME}`: the origins "
             f"{C} .. {STUDY - H} in increasing order are shuffled by the book's `shuffle`, the first {len(fit)} (sorted) are the fit origins, the next {len(cal)} the "
             f"calibration origins and the next {len(test)} the test origins; the first five shuffled origins are {', '.join(map(str, order[:5]))}.\n\n")
     return head + t1 + "\n\n" + t2 + "\n\n" + t3
@@ -672,7 +663,7 @@ def evaluation():
             f"bars (divisor {C}); the loss of an origin is the mean over the {S} series, and the tables use the mean over the {len(split_forward()[2])} origins. 'Raw' quantiles are "
             f"point + d sigma_h z_tau; 'recalibrated' ones use the multipliers of milestone 6. Skill is 1 - mean loss / mean loss of the seasonal naive forecast with the same "
             f"kind of head. The interval is the block bootstrap of Chapter 4 with blk = {BLOCK} and {RESAMPLES} resamples over the {len(split_forward()[2])} origins, 2.5th and "
-            f"97.5th percentiles, generator `{BOOT_NAME}` (seed {_seed(BOOT_NAME)}) drawing the rows of the third table in its order and then the four rows of the control "
+            f"97.5th percentiles, generator `{BOOT_NAME}` drawing the rows of the third table in its order and then the four rows of the control "
             f"table of milestone 5. 'Inside' is the share of the {H * S * len(split_forward()[2])} outcomes (rows times horizons) between the two quantile "
             f"forecasts.\n\n")
     return head + t1 + "\n\n" + t2 + "\n\n" + t3
@@ -683,7 +674,7 @@ def control():
     for name in ("honest", "future scaler", "random split", "recalibration on the test block"):
         rows.append((name, _cs(lambda r, n=name: r["control"][n]["skill"], 4), _ci(lambda r, n=name: r["control"][n]["lo"], lambda r, n=name: r["control"][n]["hi"], 4),
                      _cp(lambda r, n=name: r["control"][n]["cover"])))
-    head = (f"{S} driftless random walks of {N} bars, generator `{PLACEBO_NAME}` (seed {_seed(PLACEBO_NAME)}), series after series: x_0 = normal(), x_t = x_(t-1) + normal() "
+    head = (f"{S} driftless random walks of {N} bars, generator `{PLACEBO_NAME}`, series after series: x_0 = normal(), x_t = x_(t-1) + normal() "
             f"(the {N} calls are an even number). The same splits, windows, ridge map, heads and recalibrations as milestones 2 to 6; the naive forecast is the best "
             f"forecast there is. The skill is that of the recalibrated learned model against the recalibrated naive forecast on the test block, with the block-bootstrap "
             f"interval of milestone 5 (the generator continues from the rows of that table); the rows differ in the way the system was built, as in the opening table. "

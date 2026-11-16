@@ -97,7 +97,7 @@ def _ibits(x):
 
 
 def _seed_note(name):
-    return f"Generator: the book's SplitMix64, seed {bookrng.seed_of(name):#018x} (the seed of the name `{name}`)."
+    return f"Generator: the book's SplitMix64, `{name}`."
 
 
 def _lg(n):
@@ -564,7 +564,7 @@ def launch_shape_bits():
             f"count as 0), then the same tree. The three 'one cell' rows model an unordered accumulate: the updates arrive in the "
             f"order of a shuffle of 0 .. n - 1 (the book's Fisher-Yates), each shuffle starting from a fresh array 0, 1, ..., n - 1 (not "
             f"from the result of the previous one), three shuffles drawn one after another from the "
-            f"generator of the name `{oname}` (seed {bookrng.seed_of(oname):#018x}); the cell starts at 0 and the updates are "
+            f"generator of the name `{oname}`; the cell starts at 0 and the updates are "
             f"acc = fl(acc + x[i]) for i in the order of the shuffle. 'Left fold' is acc = fl(acc + x[i]) for i = 0 .. n - 1; "
             f"'tree of adjacent pairs' adds x[0] + x[1], x[2] + x[3], ... and then adjacent pairs of the results, layer by layer, "
             f"until one value is left. 'Same on rerun' repeats the whole computation.\n\n"

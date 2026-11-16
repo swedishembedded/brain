@@ -54,11 +54,6 @@ def _sci(v, d=2):
     return f"{v:.{d}e}"
 
 
-def _seed(name):
-    s = bookrng.seed_of(name)
-    return f"seed 0x{s:016x} ({s})"
-
-
 def _pt(p, d=1):
     return f"({p[0]:.{d}f}, {p[1]:.{d}f})"
 
@@ -144,7 +139,7 @@ def photos():
     dist = [(f"{a} and {b}", _f(rms_distance(lm[a], lm[b]))) for a, b in pairs]
     return ("Landmarks of three photographs, in pixels of each photograph (x to the right, y down), rounded to 0.1. A1 and A2 are two "
             "photographs of person A, B is person B photographed with the pose of A1. The generator is "
-            f"`{LANDMARK_NAME}` ({_seed(LANDMARK_NAME)}): each landmark is the canonical shape of the person moved by the pose "
+            f"`{LANDMARK_NAME}`: each landmark is the canonical shape of the person moved by the pose "
             "of the photograph plus a jitter. The canonical shape of a person is the 112-pixel template of the recognition network "
             "(printed further on, where the fit is derived) plus a fixed offset for each point, in the order of the table: person A "
             f"{', '.join(_pt(o) for o in SHAPE_A)}; person B {', '.join(_pt(o) for o in SHAPE_B)}. A photograph with scale k, rotation "
@@ -726,7 +721,7 @@ def verification_threshold():
             fa = sum(1 for c in imp if c >= t)
             err.append((_f(rho, 1), _f(t, 1), f"{fr} of {len(gen)}", f"{fa} of {len(imp)}"))
     return (f"Simulated embeddings, not a trained network: {ids} identities, {per} photographs each, vectors of width {d}. "
-            f"The generator is `{name}` ({_seed(name)}). Draw order: the {ids} centres (identity 0 to 19, 16 standard normals "
+            f"The generator is `{name}`. Draw order: the {ids} centres (identity 0 to 19, 16 standard normals "
             f"each, each divided by its length), then the noise (identity, photograph, 16 standard normals). A photograph of "
             "identity i is its centre plus rho / sqrt(16) times the noise vector, divided by its length. The same noise is used for "
             "both spreads rho. Cosines are dot products of the unit vectors, summed over the 16 components in order. "

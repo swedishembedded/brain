@@ -469,7 +469,7 @@ Kaplan and colleagues (2020) trained transformer language models over a range of
 How does one read such a result, and how far can it be trusted? The demonstration below fits a power law to points that are synthetic and known, so that the fit can be judged against the truth. It is not a claim about any real model.
 
 <!-- worked: model_cost.power_law_fit -->
-Generator: the book's SplitMix64, seed 0xafa155acb4a885b5 (`seed_of` of the name `model_cost.power_law`). Synthetic points, not measurements of any model: loss = 15.0 P^(-0.08) (1 + 0.01 z) at the eight sizes P = 1,000,000 x 4^i, i = 0 .. 7, with one standard normal z drawn per size in increasing order of size (the generator's `normal()`, Box-Muller). The fit is ordinary least squares of ln(loss) on ln(P) (natural logarithms, the library `log`), closed form, sums added left to right.
+Generator: the book's SplitMix64, `model_cost.power_law`. Synthetic points, not measurements of any model: loss = 15.0 P^(-0.08) (1 + 0.01 z) at the eight sizes P = 1,000,000 x 4^i, i = 0 .. 7, with one standard normal z drawn per size in increasing order of size (the generator's `normal()`, Box-Muller). The fit is ordinary least squares of ln(loss) on ln(P) (natural logarithms, the library `log`), closed form, sums added left to right.
 
 | P | loss | fitted | deviation |
 |---|---:|---:|---:|

@@ -22,7 +22,7 @@ The table turns out to be a one-hot layer in disguise and its gradient a sum, so
 The smallest table that shows everything has six tokens, `the`, `cat`, `dog`, `sat`, `ran` and `.`, and three numbers for each. It is filled with random numbers, so nothing in it means anything yet; the drawing rule is printed so that you can fill your own.
 
 <!-- worked: embeddings.lookup -->
-Generator: the book's SplitMix64, seed 0x581f79d29c854a7f (`seed_of` of the name `embeddings.table`).
+Generator: `embeddings.table` (the book's SplitMix64).
 The table has V = 6 rows (one per token) and D = 3 columns. It is filled row by row, three draws a row, each entry `0.5 * rng.normal()` rounded to two decimals (18 draws of `normal`, so nine pairs of Box-Muller).
 
 | id | token | col 0 | col 1 | col 2 |
@@ -273,7 +273,7 @@ So far the table is a store. The rows start random, and the earlier sections sai
 The claim can be tested here, on a language small enough to print whole. Its sentences have one of six nouns (three singular, `cat`, `dog` and `fox`, and their plurals `cats`, `dogs` and `foxes`), a verb that agrees in number with the noun (`sees` or `chases` after a singular noun, `see` or `chase` after a plural one), one of three objects (`ball`, `bone` or `fish`) and a full stop. Within each position, the words are interchangeable as far as the grammar goes: it allows `cat` where it allows `dog`. Whether a model that has only seen the sentences learns that is the question.
 
 <!-- worked: embeddings.corpus -->
-Generator: the book's SplitMix64, seed 0xf05bd75dcaf8ac3e (`seed_of` of the name `embeddings.corpus`).
+Generator: `embeddings.corpus` (the book's SplitMix64).
 The vocabulary has V = 15 tokens with ids 0 to 14 in this order: 0 `<s>`, 1 `cat`, 2 `dog`, 3 `fox`, 4 `cats`, 5 `dogs`, 6 `foxes`, 7 `sees`, 8 `chases`, 9 `see`, 10 `chase`, 11 `ball`, 12 `bone`, 13 `fish`, 14 `.`.
 A sentence is a noun, a verb that agrees with it in number, an object and a full stop. Draw order for each of the 60 sentences: `n = rng.integer(6)` picks the noun (ids 1 to 6 in the order above, so n = 0 is `cat` and n = 5 is `foxes`), `v = rng.integer(2)` picks the verb of the noun's number (for a singular noun `sees` or `chases`, for a plural one `see` or `chase`), `o = rng.integer(3)` picks the object (`ball`, `bone` or `fish`).
 
@@ -315,7 +315,7 @@ function train_step(Wemb: inout array<real>[V, D], Wout: inout array<real>[V, D]
 Every start is a draw of the book's generator, the embedding table first and the output table after it. The run is 300 steps of full-batch gradient descent, so every pair of the corpus is in every step, and the learning rate is fixed and printed.
 
 <!-- worked: embeddings.training -->
-Generator: the book's SplitMix64, seed 0xa36699001469a03b (`seed_of` of the name `embeddings.train`).
+Generator: `embeddings.train` (the book's SplitMix64).
 Model: logits z = W_out e, where e is row x of the embedding table (the current token x) and W_out is a second table of the same shape; the next token is predicted with softmax(z). Both tables have 15 rows and D = 6 columns. Start: the 90 entries of the embedding table are drawn first, row by row, as 0.5 * `rng.normal()`, then the entries of W_out the same way. Loss: the mean over the N = 299 pairs of -log softmax(z)[next]. Training: 300 steps of full-batch gradient descent, learning rate 2.0, every pair in every step, no regularisation.
 
 | step | mean loss |
@@ -443,7 +443,7 @@ The tied model reaches a loss of 2.2435 and not the 0.68 of the separate one; th
 A table of random numbers needs a scale, and Volume III, Chapter 9 explained why scales matter. For an embedding the scale is directly visible in the loss at step 0. Draw a table with entries of standard deviation $s$ in $D$ columns, and a hidden vector $\mathbf{h}$ with entries of standard deviation 1, which is what a normalization layer hands the head. The logit of each token has standard deviation $s\sqrt{D}$, and for $s$ large the softmax is saturated before any training.
 
 <!-- worked: embeddings.scale -->
-Generator: the book's SplitMix64, seed 0xb626db5631673638 (`seed_of` of the name `embeddings.scale`).
+Generator: `embeddings.scale` (the book's SplitMix64).
 A table of V = 256 rows and D = 64 columns with entries s * rng.normal(), drawn row by row (16384 draws), then 100 pairs of a hidden vector h (D draws of `normal`, so entries of standard deviation 1, as after a normalisation layer) and a target token (`rng.integer(256)`), drawn in that order. The logits are z = h W^T over the V rows; each scale s reuses the same draws. The loss is the mean over the 100 pairs of -log softmax(z)[target]; a model that knows nothing has loss log V = 5.545.
 
 | s | s sqrt(D) | mean row length | standard deviation of the logits | mean loss |

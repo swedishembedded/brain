@@ -16,24 +16,13 @@ Task: x ~ uniform on [0, 1), y = sin(2 pi x) + 0.3 * normal(); the noise floor o
 
 Loss: mean squared error over the 16 training points. Optimizer: AdamW, full batch, learning rate 0.01, beta1 0.9, beta2 0.999, epsilon 1e-08, 3000 steps, no schedule; the validation loss (200 points) is computed every 10 steps.
 
-Generators (the book's SplitMix64; k is the seed number 0 .. 7; a generator named `regularization_nn.<stream>.k` is seeded with the seed printed in the table below, so each of the eight seeds has its own seed for each of the three streams):
+Generators (the book's SplitMix64; k is the seed number 0 .. 7; each of the eight seeds has its own generator `regularization_nn.<stream>.k` for each of the three streams):
 
 - `train.k`: for i = 0 .. 15, x_i = uniform() then e_i = normal(); y_i = sin(2 pi x_i) + 0.3 e_i (for a training set of N > 16 points the same rule continues to i = N - 1).
 - `init.k`: w_j = normal() for j = 0 .. 63, then b_j = normal() for j = 0 .. 63, then v_j = normal() / 8 for j = 0 .. 63; c = 0.
 - `noise.k`: masks and augmentations (draw order in the examples that use them).
 
-| k | train.k | init.k | noise.k |
-|---:|---|---|---|
-| 0 | 0xafafb1e96dba2278 | 0x9b92927c65f97bf1 | 0x506586d6384f3f45 |
-| 1 | 0x90ba10dda9accf97 | 0x0001027ff18cec5b | 0x069b3c226268c598 |
-| 2 | 0x35a921376df1cf6c | 0x1478f0047523ca96 | 0x181fa71de7dd6fc4 |
-| 3 | 0xe8662c575fa3f4ad | 0xb02ce4fe574c7374 | 0x5cbccc886012e023 |
-| 4 | 0x7307018ffbb216a9 | 0xbace3f74e1f1a969 | 0x36e69cdf840ca544 |
-| 5 | 0x426710f3906aaa42 | 0x29108e5cef0fedae | 0xb99d5e622872d4cf |
-| 6 | 0xacc80cf5dc9ed1d9 | 0x54f44750ba20751f | 0x410f414e3a9c8298 |
-| 7 | 0xcde1d06cdfc4d1d0 | 0x3b8db135575bd159 | 0x1d58f0f3d2a6bd9b |
-
-- `regularization_nn.validation` seed 0x20ff207307b8362f: 200 validation points, drawn like the training points. `regularization_nn.test` seed 0x2fecc37ae6bdd0af: 1000 test points, same rule.
+- `regularization_nn.validation`: 200 validation points, drawn like the training points. `regularization_nn.test`: 1000 test points, same rule.
 
 Training points of seed 0:
 
@@ -153,7 +142,7 @@ Weight decay restrains the weights. Dropout restrains something else: it prevent
 Start with the smallest case. A layer produces six activations $a = (1, -0.5, 2, 0.5, -1.5, 0.25)$. During training, for each unit independently, a coin decides whether the unit is **dropped**: with probability $p_{\mathrm{drop}}$ its output is replaced by 0. The array of zeros and ones that records the decision (1 for a kept unit) is the **mask** $\mathbf{M}$. Take $p_{\mathrm{drop}} = 0.5$, and send the kept units on at twice their value:
 
 <!-- worked: regularization_nn.dropout_masks -->
-Six activations a = (1, -0.5, 2, 0.5, -1.5, 0.25) and p = 0.5, so the scale is 1 / (1 - p) = 2. Each mask is six uniform() draws in the order of the units (`regularization_nn.three-masks` seed 0xfb485ddaf0a12250); a unit is dropped (mask 0) when its draw is below 0.5. The output of the layer is a_j m_j / (1 - p).
+Six activations a = (1, -0.5, 2, 0.5, -1.5, 0.25) and p = 0.5, so the scale is 1 / (1 - p) = 2. Each mask is six uniform() draws in the order of the units (`regularization_nn.three-masks`); a unit is dropped (mask 0) when its draw is below 0.5. The output of the layer is a_j m_j / (1 - p).
 
 |  | draws | mask m | output a_j m_j / (1 - p) | sum |
 |---|---|---|---|---|
@@ -194,7 +183,7 @@ $$
 The variance grows without bound as $p_{\mathrm{drop}} \to 1$, which is why large dropout rates are rare. A table of one activation, $a = 2$, over 100,000 masks per rate checks the three formulas:
 
 <!-- worked: regularization_nn.dropout_expectation -->
-One activation a = 2.0, dropped with probability p. For each p in the order of the table, 100000 masks: 100000 uniform() draws from one generator (`regularization_nn.expectation` seed 0x11fa18e00be6eb1f); the activation is dropped when the draw is below p. 'raw' is the activation times the mask (0 or a); 'scaled' is the raw value times 1 / (1 - p). Variances use divisor n. The values in the columns 'expected' are the formulas of the text.
+One activation a = 2.0, dropped with probability p. For each p in the order of the table, 100000 masks: 100000 uniform() draws from one generator (`regularization_nn.expectation`); the activation is dropped when the draw is below p. 'raw' is the activation times the mask (0 or a); 'scaled' is the raw value times 1 / (1 - p). Variances use divisor n. The values in the columns 'expected' are the formulas of the text.
 
 | p | 1 / (1 - p) | mean of raw | expected (1 - p) a | mean of scaled | expected a | variance of scaled | expected a^2 p / (1 - p) |
 |---|---:|---:|---:|---:|---:|---:|---:|
@@ -211,7 +200,7 @@ The unscaled mean is $(1-p_{\mathrm{drop}})a$ (1.7986 against 1.8000 at $p_{\mat
 Dropout is the second layer of this volume with two modes, and a simpler one than batch normalization (chapter 10): in train mode it draws a mask and scales, in eval mode it is the identity and keeps no state at all, so nothing needs to be stored in a checkpoint. The bugs are the same kind. Train mode left on at prediction time gives a different answer on every call. Take the network of seed 0 trained with dropout $p_{\mathrm{drop}} = 0.3$ and ask it for $\sin(2\pi\cdot 0.75) = -1$:
 
 <!-- worked: regularization_nn.train_vs_eval -->
-The network of seed 0 trained with dropout p = 0.3 on its hidden layer (3000 steps, otherwise the recipe of the chapter), evaluated at x = 0.75. Each train-mode output uses 64 fresh uniform() draws, one per unit, from `regularization_nn.predict` seed 0x00b4c16b234a4d23: the five rows, then 2000 more.
+The network of seed 0 trained with dropout p = 0.3 on its hidden layer (3000 steps, otherwise the recipe of the chapter), evaluated at x = 0.75. Each train-mode output uses 64 fresh uniform() draws, one per unit, from `regularization_nn.predict`: the five rows, then 2000 more.
 
 | output | value |
 |---|---:|
@@ -273,7 +262,7 @@ $$
 A dropped unit gets gradient 0, and every parameter below it is untouched by this example; a kept one passes the gradient on, multiplied by the scale. The same mask must be used, which means it must be kept from the forward pass or recomputed identically. A test with a four-unit network and one example checks the formula against central differences (chapter 6) with the forward mask held fixed, and shows what happens if the backward pass draws its own mask:
 
 <!-- worked: regularization_nn.dropout_backward -->
-A network of 4 hidden units, one example x = 0.7 (u = (x - 0.5) sqrt(12) = 0.6928), y = 0.3, L = (o - y)^2, p = 0.25 so the scale is 1.3333. Parameters from `regularization_nn.dropout-gradient` seed 0xf98006af225457e2: w_j (4 normal() draws), then b_j (4), then v_j (4); c = 0.1. Then the mask used in the forward pass: 4 uniform() draws (kept when the draw is at least p); then a second mask of 4 draws, used only in the last column, where the forward pass uses the first mask and the backward pass the second. Forward mask m = [1, 1, 0, 0] (times the scale); second mask = [0, 1, 1, 1]. Central differences with step 1e-06 on the loss with the forward mask held fixed.
+A network of 4 hidden units, one example x = 0.7 (u = (x - 0.5) sqrt(12) = 0.6928), y = 0.3, L = (o - y)^2, p = 0.25 so the scale is 1.3333. Parameters from `regularization_nn.dropout-gradient`: w_j (4 normal() draws), then b_j (4), then v_j (4); c = 0.1. Then the mask used in the forward pass: 4 uniform() draws (kept when the draw is at least p); then a second mask of 4 draws, used only in the last column, where the forward pass uses the first mask and the backward pass the second. Forward mask m = [1, 1, 0, 0] (times the scale); second mask = [0, 1, 1, 1]. Central differences with step 1e-06 on the loss with the forward mask held fixed.
 
 | parameter | backward, mask reused | central difference | difference | backward with a fresh mask |
 |---|---:|---:|---:|---:|
@@ -357,7 +346,7 @@ $$
 because the cross term has mean zero and $\mathbb{E}[(\mathbf{w}\cdot\boldsymbol{\varepsilon})^2] = \sum_i w_i^2 s_{\mathrm{aug}}^2$. Summed over $N$ examples this is the squared error plus $N s_{\mathrm{aug}}^2\lVert\mathbf{w}\rVert^2$: **L2 regularization with strength $\lambda = N s_{\mathrm{aug}}^2$** in the form of Volume II, chapter 4 ($\frac12\sum r^2 + \frac\lambda2\lVert\mathbf{w}\rVert^2$ up to the factor 2 on both). Noise on the inputs penalizes the weights that read them. A check by sampling: fit the least squares model on $K$ noisy copies of each of 12 examples and compare with the ridge solution of strength $N s_{\mathrm{aug}}^2$.
 
 <!-- worked: regularization_nn.augmentation_ridge -->
-A linear model y = w . x with 3 features on 12 examples, features and noise from one generator (`regularization_nn.ridge` seed 0x6509d1b4d5518d57): first all 12 feature rows, row by row (3 normal() draws per row, 36 draws in all), and only then the 12 label noises (one normal() each, in the order of the rows), so that y_i = 1 x_i0 - 2 x_i1 + 0.5 x_i2 + 0.5 e_i with e_i the i-th noise draw. Least squares without any augmentation: w = (1.2028, -1.9723, 0.6152). 'Ridge' solves (X^T X + N s^2 I) w = X^T y. 'K copies' replaces each example by K noisy copies x + s * (three normal() draws), with the same label, and solves ordinary least squares on the 12 K rows (the draws continue the same generator: first all rows of s = 0.3 with K = 10, then K = 1000, then s = 0.6 with K = 10, then K = 1000; within one setting example after example, K copies of an example one after the other, each copy three normal() draws, one per feature). 'Max difference' is the largest difference of an entry from the ridge solution.
+A linear model y = w . x with 3 features on 12 examples, features and noise from one generator (`regularization_nn.ridge`): first all 12 feature rows, row by row (3 normal() draws per row, 36 draws in all), and only then the 12 label noises (one normal() each, in the order of the rows), so that y_i = 1 x_i0 - 2 x_i1 + 0.5 x_i2 + 0.5 e_i with e_i the i-th noise draw. Least squares without any augmentation: w = (1.2028, -1.9723, 0.6152). 'Ridge' solves (X^T X + N s^2 I) w = X^T y. 'K copies' replaces each example by K noisy copies x + s * (three normal() draws), with the same label, and solves ordinary least squares on the 12 K rows (the draws continue the same generator: first all rows of s = 0.3 with K = 10, then K = 1000, then s = 0.6 with K = 10, then K = 1000; within one setting example after example, K copies of an example one after the other, each copy three normal() draws, one per feature). 'Max difference' is the largest difference of an entry from the ridge solution.
 
 | noise sd s | ridge strength N s^2 | ridge w | K = 10 copies: w | max difference | K = 1000 copies: w | max difference |
 |---|---:|---|---:|---:|---:|---:|
@@ -372,7 +361,7 @@ With $K = 1000$ copies the fitted weights are within 0.0137 (for $s_{\mathrm{aug
 Three augmentations on the task, all online (a fresh draw at every step for every example) and all keeping the label: additive noise on $x$ at three sizes, a multiplicative gain on $x$ (the "sensor calibration" of the list above), and a shift of $x$ by half a period of the curve half the time. The last is a deliberate mistake. The label of the training point $(x, y)$ is the value of $\sin(2\pi x)$ plus noise, so moving $x$ by half a period without changing $y$ asserts that $\sin(2\pi(x + 0.5)) = \sin(2\pi x)$, which is false: it flips the sign. The table measures the **label drift** of each, the root mean square change of the true curve at the altered input, which is the amount of wrong label the augmentation adds.
 
 <!-- worked: regularization_nn.augmentation_table -->
-Augmentation by changing the input of a training example, with its label kept, a fresh draw at every step for every example (online). Draw order of the stream `regularization_nn.noise.k`: for each step, for each example in order, one draw, then (when dropout is on, which it is not here) the 64 mask draws. 'noise' adds sd * normal() to x; 'gain' multiplies x by 1 + 0.1 (2 uniform() - 1); 'shift' adds 0.5 to x when uniform() < 0.5. 'Label drift' is sqrt(E (sin(2 pi x') - sin(2 pi x))^2), the change in the true label that the augmentation causes, over 20000 points x = uniform() with the augmentation drawn from `regularization_nn.drift` seed 0xbf24634ffb7de612 (one generator, rows in the order of the table, per point first x then the augmentation draw). Training loss is eval mode on the unaugmented training points. Means over 8 seeds; the difference is the test loss minus that of no augmentation, per seed, 3000 steps.
+Augmentation by changing the input of a training example, with its label kept, a fresh draw at every step for every example (online). Draw order of the stream `regularization_nn.noise.k`: for each step, for each example in order, one draw, then (when dropout is on, which it is not here) the 64 mask draws. 'noise' adds sd * normal() to x; 'gain' multiplies x by 1 + 0.1 (2 uniform() - 1); 'shift' adds 0.5 to x when uniform() < 0.5. 'Label drift' is sqrt(E (sin(2 pi x') - sin(2 pi x))^2), the change in the true label that the augmentation causes, over 20000 points x = uniform() with the augmentation drawn from `regularization_nn.drift` (one generator, rows in the order of the table, per point first x then the augmentation draw). Training loss is eval mode on the unaugmented training points. Means over 8 seeds; the difference is the test loss minus that of no augmentation, per seed, 3000 steps.
 
 | augmentation | label drift | training loss | validation loss | test loss | mean difference in test loss | paired t |
 |---|---:|---:|---:|---:|---:|---:|
@@ -486,7 +475,7 @@ $$
 **the number of steps is a stand-in for the inverse of the penalty**, twice the steps being half the penalty. A table follows the correspondence on a problem with two correlated features (20 rows; the loss $\frac{1}{2N}\sum(\mathbf{w}\cdot\mathbf{x} - y)^2$, so that $\mathbf{H} = \mathbf{X}^\top\mathbf{X}/N$), reading the gradient descent weights after $t$ steps and the ridge weights at $\lambda = 1/(\eta t)$.
 
 <!-- worked: regularization_nn.quadratic_paths -->
-Twenty rows with two correlated features from `regularization_nn.quadratic` seed 0x147ea8f974abded0: for i = 0 .. 19, x1 = normal(), then x2 = 0.9 x1 + 0.3 normal(), then y = x1 - 0.5 x2 + 0.5 normal(). Loss (1/2N) sum (w . x - y)^2 with N = 20, so the Hessian is H = X^T X / N and the gradient H w - b with b = X^T y / N. H = [[1.5768, 1.3725], [1.3725, 1.2605]] with eigenvalues 2.8002 and 0.0370; the least squares solution is w* = (0.9568, -0.3774). Gradient descent starts at w = (0, 0) with eta = 0.25 and is read after t steps. Ridge regression minimises the loss plus (lam / 2) ||w||^2, that is (H + lam I) w = b, at lam = 1 / (eta t).
+Twenty rows with two correlated features from `regularization_nn.quadratic`: for i = 0 .. 19, x1 = normal(), then x2 = 0.9 x1 + 0.3 normal(), then y = x1 - 0.5 x2 + 0.5 normal(). Loss (1/2N) sum (w . x - y)^2 with N = 20, so the Hessian is H = X^T X / N and the gradient H w - b with b = X^T y / N. H = [[1.5768, 1.3725], [1.3725, 1.2605]] with eigenvalues 2.8002 and 0.0370; the least squares solution is w* = (0.9568, -0.3774). Gradient descent starts at w = (0, 0) with eta = 0.25 and is read after t steps. Ridge regression minimises the loss plus (lam / 2) ||w||^2, that is (H + lam I) w = b, at lam = 1 / (eta t).
 
 | t | lam = 1 / (eta t) | gradient descent w | norm | ridge w | norm | distance between them |
 |---:|---:|---|---:|---|---:|---:|

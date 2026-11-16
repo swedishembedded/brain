@@ -25,7 +25,7 @@ roundoff u = 2^-24, so it is reproducible digit for digit in any language that
 rounds to nearest even in float32 and has exact rational arithmetic. The few
 parameters of the startup model (kernels, bytes, compiler steps per byte) are
 labelled as parameters. Randomness comes from the book's own generator
-(`bookrng.generator("backends.<example>")`) and is printed with its seed.
+(`bookrng.generator("backends.<example>")`) and is named beside each block.
 
 Swedish Embedded AB implements solutions for running one set of compute
 kernels on every device a client owns and proving that the devices agree. If
@@ -65,7 +65,7 @@ def _n(v):
 
 
 def _seed_note(name):
-    return f"Generator: the book's SplitMix64, seed {bookrng.seed_of(name):#018x} (`seed_of` of the name `{name}`, defined on the pseudocode page)."
+    return f"Generator: `{name}` (the book's SplitMix64)."
 
 
 def _yes(flag):

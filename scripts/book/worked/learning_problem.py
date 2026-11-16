@@ -51,9 +51,8 @@ def _table(headers, rows, align=None):
 
 
 def _generator_line(name):
-    """The sentence that makes a random table reproducible: generator and seed."""
-    seed = bookrng.seed_of(name)
-    return f"Generator: the book's SplitMix64, seed {seed:#018x} ({seed})."
+    """The sentence that makes a random table reproducible: the generator's name."""
+    return f"Generator: `{name}` (the book's SplitMix64)."
 
 
 def _round(x, places):
@@ -185,12 +184,12 @@ def data_source():
             f"`rng.normal()` call, the held value is used by every second row, and it stays held across the "
             f"row boundary and across the ten-row blocks of the last line below (it is never discarded or reset); only a "
             f"new generator starts with nothing held.\n\n"
-            + _table(["dataset", "generator seed", "rows", "how they are used"],
-                     [("sensor table", f"{bookrng.seed_of(SENSOR_NAME):#018x}", N_TRAIN,
+            + _table(["dataset", "generator", "rows", "how they are used"],
+                     [("sensor table", f"`{SENSOR_NAME}`", N_TRAIN,
                        "the ten known rows, sorted by (v, y) for display"),
-                      ("fresh rows", f"{bookrng.seed_of(FRESH_NAME):#018x}", N_FRESH,
+                      ("fresh rows", f"`{FRESH_NAME}`", N_FRESH,
                        "scoring only, never used to choose parameters"),
-                      ("five resampled datasets", f"{bookrng.seed_of(RESAMPLE_NAME):#018x}", 5 * N_TRAIN,
+                      ("five resampled datasets", f"`{RESAMPLE_NAME}`", 5 * N_TRAIN,
                        "one generator; dataset 1 takes the first 10 rows, dataset 2 the next 10, and so on")],
                      "lrrl"))
 
@@ -262,7 +261,7 @@ def hypothesis_spaces():
     body = [(name, k, f"{_mean_abs_error(f, rows):.2f}", f"{_mean_abs_error(f, fresh):.2f}") for name, k, f in entries]
     return (f"Best member of each space found on the {len(rows)} known rows (the line and parabola by the grids of the "
             f"text, the lookup table by storing the rows); then scored on {len(fresh)} fresh rows from the same source "
-            f"(seed {bookrng.seed_of(FRESH_NAME):#018x}). The lookup table answers with the label of the stored row whose "
+            f"(the generator `{FRESH_NAME}`). The lookup table answers with the label of the stored row whose "
             f"voltage is closest to the question (distances compared in hundredths of a volt, so that equal distances are exact); a "
             f"question exactly between two stored voltages goes to the lower one; stored rows with equal voltage (none occur here) would be tried in order of increasing label, so "
             f"the lowest label would answer. Averages are shown to 2 decimals.\n\n"

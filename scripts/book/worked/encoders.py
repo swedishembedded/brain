@@ -22,7 +22,7 @@ encoder is written here:
   scanning an index) and the two brain details that are pure arithmetic: T5's relative-position buckets and the scale at which
   a gate that is swapped with its up projection cannot be seen.
 
-Every random quantity comes from the book's SplitMix64 (`bookrng.generator(name)`); each block prints its seeds. Sums of
+Every random quantity comes from the book's SplitMix64 (`bookrng.generator(name)`); each block names its generators. Sums of
 products are plain left-to-right additions, the order a C loop would use. Numbers of trained models are printed by the
 stable-digits rule of `stable.py`: each run is repeated from five starting points that differ by 1e-12 in one weight.
 
@@ -66,10 +66,6 @@ def _table(headers, rows, align=None):
     out = ["| " + " | ".join(headers) + " |", "|" + "|".join(sep) + "|"]
     out += ["| " + " | ".join(str(c) for c in r) + " |" for r in rows]
     return "\n".join(out)
-
-
-def _seed(name):
-    return f"{bookrng.seed_of(name):#018x}"
 
 
 def _sci(x, d=2):
@@ -191,7 +187,7 @@ def blank_example():
     return (f"Tokens `{' '.join(BLANK_EXAMPLE)}` (positions 0 to {n - 1}); row i lists the positions the mask lets position i read.\n\n"
             + _table(["i", "token", "causal mask reads", "full mask reads"], rows, "rlll")
             + f"\n\nAllowed pairs: {pairs[0]} for the causal mask (n (n + 1) / 2 for n = {n}) and {pairs[1]} for the full mask "
-            f"(n^2). Now a model with random weights ({_seed(NAME_A_INIT)} for `{NAME_A_INIT}`, D = 16, one block of 2 heads, learned "
+            f"(n^2). Now a model with random weights (`{NAME_A_INIT}`, D = 16, one block of 2 heads, learned "
             "positions) reads the two ten-token inputs `" + pieces(a) + "` and `" + pieces(b) + "`, which differ only to the right of "
             "the blank (the verb, the place). The Euclidean distance between the two final vectors at the blank (position 2):\n\n"
             + _table(["mask", "distance between the two vectors at position 2"], out, "lr"))
@@ -264,8 +260,8 @@ def corruption_example():
             ids2 = ids_a(gr.integer(6), gr.integer(4))
             _, _, m2, _ = corrupt(ids2, gr, rate)
             s += sum(m2)
-        rows_c.append((rate_name, f"`{rate_name_seed}`", _seed(rate_name_seed), _fx(s / n, 3), _fx(s / n / 8, 3)))
-    return (f"{_seed(NAME_CORRUPT)} for `{NAME_CORRUPT}`. Draws: for each sentence `integer(6)` (the noun) then `integer(4)` (the place); "
+        rows_c.append((rate_name, f"`{rate_name_seed}`", _fx(s / n, 3), _fx(s / n / 8, 3)))
+    return (f"Generator `{NAME_CORRUPT}`. Draws: for each sentence `integer(6)` (the noun) then `integer(4)` (the place); "
             "then, positions in order with the specials `[CLS]` and `[SEP]` skipped, one `uniform()` for selection (selected when below "
             f"the rate, here {RATE_TOY}), and for a selected position a second `uniform()` r (r < 0.8: `[MASK]`; r < 0.9: the input becomes "
             "`integer(25)`, which may by chance be the true id; otherwise unchanged). The first sentence of the stream in which all "
@@ -277,7 +273,7 @@ def corruption_example():
             f"sentence, of the 8 that are not special, for {n:,} sentences each, drawn as above (noun, place, then the corruption draws) from the "
             "stream named `" + NAME_CORRUPT + ".rate.` followed by the rate written as the shortest decimal (0.15, 0.3, 0.4, not the "
             "0.30 and 0.40 of the first column):\n\n"
-            + _table(["rate", "stream", "seed", "selected per sentence", "share of the 8 positions"], rows_c, "llrrr"))
+            + _table(["rate", "stream", "selected per sentence", "share of the 8 positions"], rows_c, "llrr"))
 
 
 def seen_token_odds():
@@ -444,9 +440,8 @@ def slot_table():
                      _fx(slot_floor("causal", slot), 3), cell_a("causal", lambda r, s=slot: r["per"][s])))
     cfg = CFG_A
     return (f"Both models: V = {V_A}, T = {T_A}, D = {cfg['D']}, {cfg['H']} heads, one block of Chapter 9 (RMS norm, SwiGLU of width "
-            f"{cfg['FF']}), learned positions, head tied to the embedding table, initial weights from `{NAME_A_INIT}` "
-            f"({_seed(NAME_A_INIT)}); sentences from `{NAME_A_SENT}` ({_seed(NAME_A_SENT)}), corruption draws from `{NAME_A_MASK}` "
-            f"({_seed(NAME_A_MASK)}). {TRAIN_A['steps']} steps of {TRAIN_A['B']} sentences, AdamW (peak {TRAIN_A['peak']}, floor "
+            f"{cfg['FF']}), learned positions, head tied to the embedding table, initial weights from `{NAME_A_INIT}`; "
+            f"sentences from `{NAME_A_SENT}`, corruption draws from `{NAME_A_MASK}`. {TRAIN_A['steps']} steps of {TRAIN_A['B']} sentences, AdamW (peak {TRAIN_A['peak']}, floor "
             f"{TRAIN_A['floor']}, {TRAIN_A['warmup']} warmup steps, cosine decay, weight decay {TRAIN_A['wd']}, betas "
             f"{TRAIN_A['b1']} and {TRAIN_A['b2']}, epsilon {TRAIN_A['eps']}, global clip {TRAIN_A['clip']}). The training stream: "
             f"every step takes {TRAIN_A['B']} sentences in turn from `{NAME_A_SENT}`, each as `integer(6)` (the noun) then `integer(4)` "
@@ -583,7 +578,7 @@ def vocabulary_b():
             + ", ".join(str(ab) for ab in HELD_OUT)
             + f" are held out: no training pair has them. The collection used for retrieval has {len(docs)} documents (two per "
             f"meaning, always the first synonym of each group, wa = wb = 0) and {len(queries)} queries (one per meaning, always the second "
-            f"synonym, wa = wb = 1), from `{NAME_B_EVAL}` ({_seed(NAME_B_EVAL)}). Draws: the four noise indices of each document in turn "
+            f"synonym, wa = wb = 1), from `{NAME_B_EVAL}`. Draws: the four noise indices of each document in turn "
             "(meaning 0 twice, meaning 1 twice, and so on up to meaning 15: 32 documents), and then the four noise indices of each "
             "query for the meanings 0 to 15 in order; nothing else is drawn. A document is relevant to the query of its meaning.")
 
@@ -660,7 +655,7 @@ def padding_example():
         over_real = [_sum([r[j] for r in xn[:n]]) / n for j in range(16)]
         over_all = [_sum([r[j] for r in xn]) / 10 for j in range(16)]
         prow.append((name, _fx(_cos(alone_v, over_real), 4), _fx(_cos(alone_v, over_all), 4)))
-    return (f"Sentence `{text_b(PAD_EXAMPLE)}` (with `[CLS]`, 7 tokens). Random weights from `{NAME_PAD_INIT}` ({_seed(NAME_PAD_INIT)}): "
+    return (f"Sentence `{text_b(PAD_EXAMPLE)}` (with `[CLS]`, 7 tokens). Random weights from `{NAME_PAD_INIT}`: "
             "`init_gpt` with T = 10, V = 25, D = 16, one block of 2 heads, the same weights in all three encodings (the alone "
             "encoding uses the first 7 rows of the position table). Padded: three `[PAD]` tokens (id 0) after the sentence. "
             "Largest absolute difference, over the 7 real positions and the 16 coordinates, between the final normalised stream of the "
@@ -857,8 +852,8 @@ def contrastive_training():
         rows.append((str(s), cell_b(c, s, lambda m: m["loss"]), cell_b(c, s, lambda m: m["pos"]), cell_b(c, s, lambda m: m["neg"]),
                      cell_b(c, s, lambda m: m["r2"]), cell_b(c, s, lambda m: m["r2_held"])))
     return (f"Language B, one block (V = {cfg['V']}, T = {cfg['T']}, D = {cfg['D']}, {cfg['H']} heads, SwiGLU width {cfg['FF']}) with mean "
-            f"pooling and tau = 0.1, initial weights from `{NAME_B_INIT}` ({_seed(NAME_B_INIT)}), pairs from `{NAME_B_STREAM}` "
-            f"({_seed(NAME_B_STREAM)}), {o['steps']} steps of {o['B']} pairs, AdamW (peak {o['peak']}, floor {o['floor']}, {o['warmup']} "
+            f"pooling and tau = 0.1, initial weights from `{NAME_B_INIT}`, pairs from `{NAME_B_STREAM}`, "
+            f"{o['steps']} steps of {o['B']} pairs, AdamW (peak {o['peak']}, floor {o['floor']}, {o['warmup']} "
             f"warmup steps, cosine decay, decay {o['wd']}, betas {o['b1']} and {o['b2']}, epsilon {o['eps']}, clip {o['clip']}; the update "
             "rule, the learning-rate curve and the clip coefficient are those of the training stream of language A). Each step: one "
             f"`shuffle` of the 12 training meanings from `{NAME_B_STREAM}` (the permutation of the indices 0 to 11, then the first 8 "
@@ -946,7 +941,7 @@ def pca_summary():
         rows.append((stage + " training", _fx(100 * kept, 1) + "%", _fx(_sum(spread) / 4, 3), _fx(dmin, 3)))
     names = ", ".join(f"{ANIMALS_B[MEANINGS[m][0]][0]} in the {PLACES_B[MEANINGS[m][1]][0]}" for m in PCA_MEANINGS)
     return (f"Four meanings (animal group, place group) = (0,0), (1,1), (2,2), (3,3), named by the first synonym: {names}. Eight sentences "
-            f"each: the four combinations of synonyms, two draws of the noise each, from `{NAME_PCA}` ({_seed(NAME_PCA)}). Each sentence "
+            f"each: the four combinations of synonyms, two draws of the noise each, from `{NAME_PCA}`. Each sentence "
             "is encoded with the full mask and mean-pooled (the run of the training table, un-nudged, and the same weights before "
             "training); the pooled vectors are the raw means of 16 numbers, not scaled to length 1. Draws: for each of the four meanings "
             "in order, for (wa, wb) = (0,0), (0,1), (1,0), (1,1) in order, two repetitions each of the four noise indices (so wa and wb "
@@ -1057,7 +1052,7 @@ def probe_table():
             f"(a 16 by 4 matrix and 4 biases, zeros at the start) on the mean-pooled vector scaled to length 1, fitted by {PROBE_STEPS} "
             f"full-batch gradient steps of rate {PROBE_LR:g} on the mean cross-entropy of the first n labelled sentences, and scored on 200 test "
             f"sentences. Sentences: per sentence `integer(16)` for the meaning, `integer(2)` for wa, `integer(2)` for wb, then the four noise "
-            f"indices (determiner `integer(2)`, verb `integer(3)`, preposition `integer(2)`, determiner `integer(2)`), from `{NAME_PROBE}.train` ({_seed(NAME_PROBE + '.train')}) and `{NAME_PROBE}.test` ({_seed(NAME_PROBE + '.test')}). "
+            f"indices (determiner `integer(2)`, verb `integer(3)`, preposition `integer(2)`, determiner `integer(2)`), from `{NAME_PROBE}.train` and `{NAME_PROBE}.test`. "
             "Accuracy on the test sentences; chance is 0.25. The trained encoder is the contrastive run above (mean pooling, tau = 0.1).\n\n"
             + _table(["labelled sentences", "encoder with random weights", "contrastive encoder"], rows, "rrr"))
 
@@ -1241,7 +1236,7 @@ def geglu_swap():
         diff = _sum([abs(tb.gelu(s * a) * s * b - tb.gelu(s * b) * s * a) for a, b in z]) / n
         ref = _sum([abs(tb.gelu(s * a) * s * b) for a, b in z]) / n
         rows.append((f"{s:g}", _sci(ref, 3), _sci(diff, 3), _sci(diff / ref, 3)))
-    return (f"{_seed(NAME_GEGLU)} for `{NAME_GEGLU}`. Draws: {n:,} pairs, each `normal()` for a then `normal()` for b; the pair used at "
+    return (f"Generator `{NAME_GEGLU}`. Draws: {n:,} pairs, each `normal()` for a then `normal()` for b; the pair used at "
             "scale s is (s a, s b). GELU is the exact Gaussian-cumulative form (library `erf`).\n\n"
             + _table(["s", "mean |gelu(a) b|", "mean |gelu(a) b - gelu(b) a|", "ratio"], rows, "rrrr"))
 

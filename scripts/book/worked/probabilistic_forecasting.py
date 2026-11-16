@@ -27,7 +27,7 @@ from functools import lru_cache
 import bookrng
 import stable
 import time_series as ts
-from time_series import _mean, _seed_text, _table
+from time_series import _mean, _table
 
 # ------------------------------------------------------------------ constants
 
@@ -121,7 +121,7 @@ def newsvendor():
         c_point = _mean([(cu_over + cu_short) * pinball(m, y, tau) for m, s, y in rows])
         c_quant = _mean([(cu_over + cu_short) * pinball(m + zt * s, y, tau) for m, s, y in rows])
         table.append((cu_over, cu_short, f"{tau:.1f}", f"{zt:+.4f}", f"{c_point:.3f}", f"{c_quant:.3f}"))
-    head = (f"The 200 series of Chapter 1 ({_seed_text(ts.REPLICATES_NAME)}), each cut at bar {ts.CUT}. For each series the forecast of bar "
+    head = (f"The 200 series of Chapter 1 (the generator `{ts.REPLICATES_NAME}`), each cut at bar {ts.CUT}. For each series the forecast of bar "
             f"{ts.CUT} (horizon 1) is the AR(1) forecast on seasonal differences of Chapter 1, mu; the spread sigma is the root mean square "
             f"of that model's {ts.CUT - ts.SEASON - 1} one-step training residuals (divisor: their number). The demand is the series' value "
             f"y_{ts.CUT}. An order q costs c_over (q - y) when q > y and c_short (y - q) when y > q. 'order mu' is q = mu; 'order the quantile' "
@@ -281,7 +281,7 @@ def head_fits():
     burst_note = (f"The data are the {N_BARS} bars x_0 .. x_{N_BARS - 1} of x_t = 0.7 x_(t-1) + c_t e_t with x_(-1) = 0, where c_t = {SHOCK} for "
                   f"t < {SHIFT_BAR} and {SHIFTED_SHOCK} from bar {SHIFT_BAR} on, and the shock e_t is drawn per bar as uniform() first and then "
                   f"normal(), e_t = normal() when the uniform is at least {BURST_P} and {BURST_SCALE:g} normal() when it is below. "
-                  f"Generator: the book's SplitMix64, {_seed_text(HEADS_NAME)}; a normal() call that finds a held value returns it without drawing. ")
+                  f"Generator: the book's SplitMix64, `{HEADS_NAME}`; a normal() call that finds a held value returns it without drawing. ")
     head = (burst_note +
             f"A row is (feature x_(t-1), target x_t). Training rows are t = {TRAIN_ROWS[0]} .. {TRAIN_ROWS[1]} ({TRAIN_ROWS[1] - TRAIN_ROWS[0] + 1} rows), "
             f"validation rows t = {VAL_ROWS[0]} .. {VAL_ROWS[1]} ({VAL_ROWS[1] - VAL_ROWS[0] + 1} rows); bar t = {TRAIN_ROWS[1] + 1} is dropped between them. "
@@ -383,7 +383,7 @@ def ensemble_table():
     for n in (4, 20, 200, 1000):
         samples = [g.normal() for _ in range(n)]
         rows.append((n, f"{crps_ensemble(samples, 0.0):.4f}", f"{crps_ensemble(samples, 0.0, True):.4f}"))
-    head = (f"The CRPS of N(0, 1) at r = 0 is {truth:.4f}. An ensemble of n draws of normal() from one generator ({_seed_text(ENSEMBLE_NAME)}), "
+    head = (f"The CRPS of N(0, 1) at r = 0 is {truth:.4f}. An ensemble of n draws of normal() from one generator (`{ENSEMBLE_NAME}`), "
             f"the four ensembles drawn one after the other, is scored with E|X - 0| - 0.5 E|X - X'|: 'divisor n^2' averages |X - X'| over all n^2 ordered "
             f"pairs, the diagonal included; 'divisor n(n-1)' leaves the diagonal out.\n\n")
     return head + _table(["n", "divisor n^2", "divisor n(n-1)"], rows)
@@ -421,7 +421,7 @@ def derived_samples():
     head = (f"The quantile levels of the grid, with the exact standard Gaussian quantiles as values, are turned into {n} samples by the piecewise-linear "
             f"inverse cumulative distribution that is flat outside the first and last level (the value at the first level for u at or below it, the value at "
             f"the last level for u at or above it). The uniforms u_1 .. u_{n} are drawn in order by uniform() from one generator "
-            f"({_seed_text(DERIVED_NAME)}) and the same u are used for all three grids. The grids are 0.1, 0.5, 0.9; 0.1, 0.2, ..., 0.9; and 0.01, 0.05, 0.10, 0.15, ..., 0.90, 0.95, 0.99. Each column scores the ensemble with E|X - r| - 0.5 E|X - X'| "
+            f"(`{DERIVED_NAME}`) and the same u are used for all three grids. The grids are 0.1, 0.5, 0.9; 0.1, 0.2, ..., 0.9; and 0.01, 0.05, 0.10, 0.15, ..., 0.90, 0.95, 0.99. Each column scores the ensemble with E|X - r| - 0.5 E|X - X'| "
             f"(average over the n(n-1) pairs of different draws, evaluated on the sorted ensemble) at the observation r; the first column is the CRPS "
             f"of N(0, 1).\n\n")
     tail = (f"\n\nShare of the samples that sit exactly on the first or last quantile value: {atoms['3 levels']:.3f} for the 3-level grid, "
@@ -626,9 +626,9 @@ def paths_vs_marginals():
         rows.append((name, f"{mu:.3f}", f"{sd:.3f}", f"{lo:.3f}", f"{hi:.3f}", f"{ex:.4f}"))
     head = (f"The remainder of Chapter 1, u_t = 0.7 u_(t-1) + 0.6 e_t, observed at u_(-1) = {PATH_X0} just before the origin; the {PATH_H} bars after it. "
             f"Forecast of bar h (h = 0 .. {PATH_H - 1}): Gaussian with mean m_h = {PATH_X0} 0.7^(h+1) and variance v_h = 0.36 (1 - 0.49^(h+1)) / (1 - 0.49). "
-            f"'sample paths': {PATHS} paths, each drawing its {PATH_H} shocks in order from one generator ({_seed_text(PATH_NAME)}), u_h = 0.7 u_(h-1) + 0.6 normal(), "
+            f"'sample paths': {PATHS} paths, each drawing its {PATH_H} shocks in order from one generator (`{PATH_NAME}`), u_h = 0.7 u_(h-1) + 0.6 normal(), "
             f"and summing the {PATH_H} values. 'independent marginals': {PATHS} samples, each the sum over h of m_h + sqrt(v_h) normal() with the "
-            f"normal() calls in the order h = 0 .. {PATH_H - 1} from a second generator ({_seed_text(MARGINAL_NAME)}). The sample standard deviation has divisor "
+            f"normal() calls in the order h = 0 .. {PATH_H - 1} from a second generator (`{MARGINAL_NAME}`). The sample standard deviation has divisor "
             f"{PATHS} - 1; the 5 and 95 percent values are the interpolated percentile of the pseudocode chapter. The last column is the probability that "
             f"the sum exceeds {thresh:g}. 'exact' is the Gaussian with the mean sum_h m_h and the variance sum_(i,j) Cov(u_i, u_j) of the exact covariance "
             f"0.36 (1 - 0.49^(min(i,j)+1)) / (1 - 0.49) * 0.7^|i-j|.\n\n")
@@ -716,13 +716,13 @@ def interval_coverage():
     n = COVER_SERIES
     cov_rows = [(h, *(f"{hits[m][h - 1] / n:.3f}" for m in hits)) for h in COVER_HORIZONS]
     wid_rows = [(h, *(f"{wid[m][h - 1] / n:.2f}" for m in hits)) for h in COVER_HORIZONS]
-    head = (f"{COVER_SERIES} series drawn by the recipe of Chapter 1 from one generator ({_seed_text(COVER_NAME)}), each with its {ts.N} draws in turn, cut at {ts.CUT}. "
+    head = (f"{COVER_SERIES} series drawn by the recipe of Chapter 1 from one generator (`{COVER_NAME}`), each with its {ts.N} draws in turn, cut at {ts.CUT}. "
             f"The point forecast is the AR(1) forecast on seasonal differences of Chapter 1; sigma is the root mean square of the {ts.CUT - ts.SEASON - 1} one-step "
             f"training residuals. 'constant' is the interval point +- 1.2816 sigma at every horizon; 'growing' uses the standard deviation sigma_h of the forecast "
             f"error of the fitted model, sigma times the root of the sum of squared weights w_j of the shocks e_0 .. e_h in the error, where the error of the "
             f"difference z at step k is sum_(j<=k) phi^(k-j) e_j with the fitted phi, and the error of y at horizon h + 1 is the sum of the errors of z at "
             f"steps h, h - 12, h - 24, ... (those that are not negative). 'conformal' uses, at each horizon, the half-width that is the k-th smallest of the "
-            f"absolute errors |y - point| of {COVER_SERIES} other series (the same recipe, from a second generator, {_seed_text(COVER_NAME + '.calibration')}), "
+            f"absolute errors |y - point| of {COVER_SERIES} other series (the same recipe, from a second generator, `{COVER_NAME}.calibration`), "
             f"with k = ceil((n + 1)(1 - alpha)) = {k} for n = {COVER_SERIES} and alpha = {alpha}. 'constant' and 'growing' use the standard Gaussian quantile 1.2816 "
             f"at 0.9. All three intervals are nominally 80 percent. The first table gives the share of the {COVER_SERIES} series whose value lies inside the interval "
             f"at the horizon h (1 = bar {ts.CUT}); the second the mean width of the whole interval.\n\n")
@@ -756,7 +756,7 @@ def conformal_finite():
                 if abs(g.normal()) <= cal[k - 1]:
                     hit += 1
             rows.append((n, label, k, f"{k / (n + 1):.4f}", f"{hit / trials:.4f}"))
-    head = (f"Calibration scores s_1 .. s_n and one new score are drawn independently as |normal()| from one generator ({_seed_text(CONFORMAL_NAME)}); "
+    head = (f"Calibration scores s_1 .. s_n and one new score are drawn independently as |normal()| from one generator (`{CONFORMAL_NAME}`); "
             f"the generator is created once and runs through the four rows below in the order printed, never restarted between rows or trials (a held value of "
             f"normal() is carried across the boundaries); in each of {trials} trials the draws are the n calibration scores in order and then the new one, and the new score is 'covered' when it is at "
             f"most the k-th smallest calibration score (k counted from 1). Nominal level 1 - alpha = 0.9. Exact coverage is k / (n + 1) "

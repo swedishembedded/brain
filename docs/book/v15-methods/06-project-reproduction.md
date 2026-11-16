@@ -19,7 +19,7 @@ The steps use the whole volume: the porting workflow and the golden of Chapter 1
 
 ## Seeds, roundings and digests
 
-Every random input comes from the book's SplitMix64 generator ([Volume I, Chapter 17](../v01-mathematics/17-randomness.md)) started at the seed `seed_of(name)` printed beside its table, with `uniform()` and `integer(n)` as the pseudocode page defines them; each named generator is started once and never restarted, and the order of its draws is printed with it. Every weight and every input is rounded to the nearest 32-bit number (ties to even) as it is drawn, so that a 32-bit implementation and a 64-bit one start from the same bytes. Two arithmetics are used. The 64-bit one is ordinary double precision. The 32-bit one, which the port uses, rounds the result of every addition, subtraction, multiplication, division and square root to 32 bits, one operation at a time as the pseudocode page defines, with no fused multiply-add; `exp` is the library's 64-bit value rounded once to 32 bits, and the constant $\epsilon = 10^{-6}$ is rounded to 32 bits before it is used. A sum starts from its first term and adds the others left to right, in increasing index; a dot product rounds its first product, then each further product and each addition. Matrices are row-major with shape [outputs, inputs], indices count from 0, and positions are processed one at a time and independently.
+Every random input comes from the book's SplitMix64 generator ([Volume I, Chapter 17](../v01-mathematics/17-randomness.md)) named beside its table (the generator `x.y` starts at `seed_of("x.y")`), with `uniform()` and `integer(n)` as the pseudocode page defines them; each named generator is started once and never restarted, and the order of its draws is printed with it. Every weight and every input is rounded to the nearest 32-bit number (ties to even) as it is drawn, so that a 32-bit implementation and a 64-bit one start from the same bytes. Two arithmetics are used. The 64-bit one is ordinary double precision. The 32-bit one, which the port uses, rounds the result of every addition, subtraction, multiplication, division and square root to 32 bits, one operation at a time as the pseudocode page defines, with no fused multiply-add; `exp` is the library's 64-bit value rounded once to 32 bits, and the constant $\epsilon = 10^{-6}$ is rounded to 32 bits before it is used. A sum starts from its first term and adds the others left to right, in increasing index; a dot product rounds its first product, then each further product and each addition. Matrices are row-major with shape [outputs, inputs], indices count from 0, and positions are processed one at a time and independently.
 
 The tables print errors to three significant digits. Nothing in this project is trained or sampled chaotically, so every printed digit is stable; the only library function behind a printed number is `exp`, whose last bit can differ between libraries, and no printed digit depends on it. Digests are the 64-bit FNV-1a hash of Volume XIII, Chapter 7, over the bytes of the 32-bit numbers in little-endian order and in the order stated. The worked module is `scripts/book/worked/project_reproduction.py`; it imports the 32-bit rounding, the three comparison measures and the ordered sums of Volume VI, Chapter 2 (`importing_models`), the digest of Volume XIII, Chapter 7 (`checkpoints_and_recovery.fnv1a64`) and the 95 percent interval of Volume II, Chapter 8 (`experiments._interval`), and implements the rest itself.
 
@@ -40,7 +40,7 @@ with $\mathrm{silu}(z) = z\,\sigma(z)$ and $\epsilon = 10^{-6}$. Write $\mathbf{
 The printable component has $D = 6$, $F = 10$ and $T = 5$ positions: three sizes that differ from each other and from 1, so that a mistake that confuses two of them changes a shape or a number (the test-dimension choice of Volume III, Chapter 6). The weights are drawn at the scales of a freshly initialized block: the gain near 1, the matrices uniform with a bound of one over the square root of their input width.
 
 <!-- worked: project_reproduction.component -->
-The weights come from the generator `project_reproduction.weights` (seed 13960080960163087327), the inputs from `project_reproduction.inputs` (seed 9232453125161690418). Each number is one uniform() u put through the rule of its row and then rounded to the nearest 32-bit number (ties to even); the square roots are the correctly rounded 64-bit ones. The weights are drawn in the order of the rows, each matrix row-major ([outputs, inputs]), so the gain takes draws 0 to 5, W_gate 6 to 65, W_up 66 to 125 and W_down 126 to 185; the inputs are drawn position by position. The digest is the FNV-1a 64 of the 32-bit numbers, little-endian, in that order. The second set of inputs, the probe, is each input times 0.001 rounded to 32 bits.
+The weights come from the generator `project_reproduction.weights`, the inputs from `project_reproduction.inputs`. Each number is one uniform() u put through the rule of its row and then rounded to the nearest 32-bit number (ties to even); the square roots are the correctly rounded 64-bit ones. The weights are drawn in the order of the rows, each matrix row-major ([outputs, inputs]), so the gain takes draws 0 to 5, W_gate 6 to 65, W_up 66 to 125 and W_down 126 to 185; the inputs are drawn position by position. The digest is the FNV-1a 64 of the 32-bit numbers, little-endian, in that order. The second set of inputs, the probe, is each input times 0.001 rounded to 32 bits.
 
 | tensor | shape | rule | numbers | FNV-1a 64 |
 |---|---|---|---:|---|
@@ -93,7 +93,7 @@ The golden is complete when your reference, run on your inputs, reproduces the f
 A mapping can be wrong in two ways that a loader feels very differently. A missed transpose of the down projection gives a matrix of shape [10, 6] where the port expects [6, 10], and the shape check refuses it by name before a single number is computed. A cut of the fused matrix in the wrong order gives two matrices of shape [10, 6] each, exactly the shapes the port expects, and the block loads and runs and computes another function.
 
 <!-- worked: project_reproduction.import_checks -->
-The mapping of the published tensors onto the port, at the 6 x 10 component and at a square 8 x 8 one (weights from `project_reproduction.square` (seed 1622393052264195514), inputs from `project_reproduction.square_inputs` (seed 14767466789678329543), 5 positions, the same rules and draw order). rel_l2 compares the port's y with the unrounded 64-bit reference of the same weights (not with the golden, whose y is rounded to 32 bits).
+The mapping of the published tensors onto the port, at the 6 x 10 component and at a square 8 x 8 one (weights from `project_reproduction.square`, inputs from `project_reproduction.square_inputs`, 5 positions, the same rules and draw order). rel_l2 compares the port's y with the unrounded 64-bit reference of the same weights (not with the golden, whose y is rounded to 32 bits).
 
 | configuration and mapping | shape check | rel_l2 of y |
 |---|---|---:|
@@ -233,7 +233,7 @@ function block_backward(c: array<real>[T, D], x: array<real>[T, D], g: array<rea
 ```
 
 <!-- worked: project_reproduction.gradient_check -->
-The backward pass against central differences, in 64-bit arithmetic, on the component of the tables above and its unit inputs. The loss is the sum over positions t and coordinates i of c[t][i] y[t][i], with c drawn from `project_reproduction.probe` (seed 16796600673050480404) as 2u - 1, position by position (no rounding to 32 bits). Each of the 216 numbers (30 inputs, 6 gains, 60 + 60 + 60 weights) is moved by +1e-6 and -1e-6; the deviation is |numeric - analytic| / max(1, |analytic|) and the criterion is that its largest value is below 1e-6. 'Where' is the number with the largest deviation, [row, column] counted from 0.
+The backward pass against central differences, in 64-bit arithmetic, on the component of the tables above and its unit inputs. The loss is the sum over positions t and coordinates i of c[t][i] y[t][i], with c drawn from `project_reproduction.probe` as 2u - 1, position by position (no rounding to 32 bits). Each of the 216 numbers (30 inputs, 6 gains, 60 + 60 + 60 weights) is moved by +1e-6 and -1e-6; the deviation is |numeric - analytic| / max(1, |analytic|) and the criterion is that its largest value is below 1e-6. 'Where' is the number with the largest deviation, [row, column] counted from 0.
 
 | backward pass | largest deviation | where |
 |---|---:|---|
@@ -381,22 +381,22 @@ The first is about work. **Claim 1:** with the feed-forward weights in 8-bit cod
 The second is about the numbers. **Claim 2:** the 8-bit block's branch $\mathbf{f}$ differs from the 32-bit block's by a relative error below 2 percent; the measurement is the relative error over eight independent draws of the weights and inputs, and the claim is refuted if the upper end of its 95 percent interval reaches 2 percent. The margin comes from an error model, not from the run, and the model is approximate: it treats the rounding errors as independent, adds them in quadrature and ignores how the SiLU and the product with the up projection reshape them. A weight rounded to a step $s$ is off by an error spread evenly over $[-s/2, s/2]$, whose root mean square is $s/\sqrt{12}$; for weights spread evenly over $[-a, a]$ the step is $a/127$ and their root mean square is $a/\sqrt{3}$, so each matrix carries a relative error of about $1/(2 \cdot 127) = 0.39$ percent, and three matrices with independent errors about $\sqrt{3} \times 0.39 = 0.68$ percent. The margin allows three times that, because trained weights are not spread evenly: a row can hold a few entries far larger than the rest, and the scale of a group is set by its largest entry. The draws plant one such entry in every row, a weight multiplied by 16.
 
 <!-- worked: project_reproduction.quality -->
-The quality of 8-bit weights on the component at D = 256, F = 768, 4 positions, eight draws. Draw k uses the generator `project_reproduction.draw.k` with the seed printed in its row, and draws in this order: the gain, W_gate, W_up and W_down by the rules of the first component (with 1/sqrt(256) and 1/sqrt(768)), then, for every row of W_gate, of W_up and of W_down in that order, one integer(k) c over the row's k columns, and the weight at column c is multiplied by 16 (the outlier of the row); then the 4 x 256 inputs as 2u - 1. Weights and inputs are rounded to 32 bits; everything after is 64-bit. Each cell is the rel_l2 of the 8-bit block against the same block with the weights as drawn. 'Group of 32' has one scale per 32 consecutive weights of a row; 'one scale per row' has one for the whole row; the column without outliers redraws the same weights and skips the multiplication (the integers are still drawn); the last column measures the block output y, residual included, where the others measure f, the down projection. The interval is the mean plus or minus t s / sqrt(8) with s the sample standard deviation (divisor 7) and t = 2.36462, the 0.975 quantile of Student's t with 7 degrees of freedom.
+The quality of 8-bit weights on the component at D = 256, F = 768, 4 positions, eight draws. Draw k uses the generator `project_reproduction.draw.<k>`, and draws in this order: the gain, W_gate, W_up and W_down by the rules of the first component (with 1/sqrt(256) and 1/sqrt(768)), then, for every row of W_gate, of W_up and of W_down in that order, one integer(k) c over the row's k columns, and the weight at column c is multiplied by 16 (the outlier of the row); then the 4 x 256 inputs as 2u - 1. Weights and inputs are rounded to 32 bits; everything after is 64-bit. Each cell is the rel_l2 of the 8-bit block against the same block with the weights as drawn. 'Group of 32' has one scale per 32 consecutive weights of a row; 'one scale per row' has one for the whole row; the column without outliers redraws the same weights and skips the multiplication (the integers are still drawn); the last column measures the block output y, residual included, where the others measure f, the down projection. The interval is the mean plus or minus t s / sqrt(8) with s the sample standard deviation (divisor 7) and t = 2.36462, the 0.975 quantile of Student's t with 7 degrees of freedom.
 
-| draw | seed | f, group of 32 | f, one scale per row | f, one per row, no outliers | y, group of 32 |
-|---|---:|---:|---:|---:|---:|
-| 0 | 14186093670461477176 | 1.51e-02 | 5.05e-02 | 6.65e-03 | 6.58e-03 |
-| 1 | 3588567796689332234 | 1.50e-02 | 5.08e-02 | 6.70e-03 | 6.33e-03 |
-| 2 | 8114807110829101766 | 1.61e-02 | 4.87e-02 | 7.22e-03 | 6.20e-03 |
-| 3 | 9599345445007377170 | 1.46e-02 | 5.08e-02 | 6.81e-03 | 5.91e-03 |
-| 4 | 7194242738548454826 | 1.47e-02 | 5.12e-02 | 6.81e-03 | 5.92e-03 |
-| 5 | 13413291850499546480 | 1.51e-02 | 4.59e-02 | 6.91e-03 | 6.60e-03 |
-| 6 | 18416395511386013294 | 1.48e-02 | 4.61e-02 | 6.45e-03 | 6.29e-03 |
-| 7 | 2753681920705353910 | 1.39e-02 | 4.55e-02 | 6.42e-03 | 5.83e-03 |
-| mean |  | 1.49e-02 | 4.87e-02 | 6.75e-03 | 6.21e-03 |
-| sample standard deviation |  | 6.17e-04 | 2.49e-03 | 2.59e-04 | 2.99e-04 |
-| 95% interval, lower end |  | 1.44e-02 | 4.66e-02 | 6.53e-03 | 5.96e-03 |
-| 95% interval, upper end |  | 1.54e-02 | 5.08e-02 | 6.96e-03 | 6.46e-03 |
+| draw | f, group of 32 | f, one scale per row | f, one per row, no outliers | y, group of 32 |
+|---|---:|---:|---:|---:|
+| 0 | 1.51e-02 | 5.05e-02 | 6.65e-03 | 6.58e-03 |
+| 1 | 1.50e-02 | 5.08e-02 | 6.70e-03 | 6.33e-03 |
+| 2 | 1.61e-02 | 4.87e-02 | 7.22e-03 | 6.20e-03 |
+| 3 | 1.46e-02 | 5.08e-02 | 6.81e-03 | 5.91e-03 |
+| 4 | 1.47e-02 | 5.12e-02 | 6.81e-03 | 5.92e-03 |
+| 5 | 1.51e-02 | 4.59e-02 | 6.91e-03 | 6.60e-03 |
+| 6 | 1.48e-02 | 4.61e-02 | 6.45e-03 | 6.29e-03 |
+| 7 | 1.39e-02 | 4.55e-02 | 6.42e-03 | 5.83e-03 |
+| mean | 1.49e-02 | 4.87e-02 | 6.75e-03 | 6.21e-03 |
+| sample standard deviation | 6.17e-04 | 2.49e-03 | 2.59e-04 | 2.99e-04 |
+| 95% interval, lower end | 1.44e-02 | 4.66e-02 | 6.53e-03 | 5.96e-03 |
+| 95% interval, upper end | 1.54e-02 | 5.08e-02 | 6.96e-03 | 6.46e-03 |
 <!-- /worked -->
 
 With a scale per 32 weights the error is 1.49 percent on average over the eight draws, and the upper end of the interval, 1.54 percent, is below the margin: the claim stands. The other three columns are three ways to defend a different block with the same numbers.
@@ -405,7 +405,7 @@ The column without outliers is the error model's own case, and it measures 0.675
 
 The last column measures the same 8-bit block at $\mathbf{y}$ instead of $\mathbf{f}$. The residual adds $\mathbf{x}$, which no change of the block can touch, to both sides of the comparison, and the relative error falls to 0.621 percent, 2.4 times smaller. The quantity was the branch the change makes; measuring it after the residual would make any block look good, and Chapter 2's scale traps are of the same family, a denominator chosen so that the error is small.
 
-The interval is there because a single draw would also have been a choice. The best of the eight draws in the group column is 1.39 percent and the worst 1.61 percent; reporting only the best is the selection that the reporting rules of Volume II, Chapter 8 exist to prevent, and the interval states what the eight draws can and cannot support. The claim, its generators and seeds, its margin and its decision rule written beside its result are, at the scale of one table, what the reproducibility package of Chapter 4 holds for a whole report: the result becomes a function of records that anyone can run again.
+The interval is there because a single draw would also have been a choice. The best of the eight draws in the group column is 1.39 percent and the worst 1.61 percent; reporting only the best is the selection that the reporting rules of Volume II, Chapter 8 exist to prevent, and the interval states what the eight draws can and cannot support. The claim, its generators, its margin and its decision rule written beside its result are, at the scale of one table, what the reproducibility package of Chapter 4 holds for a whole report: the result becomes a function of records that anyone can run again.
 
 Your claims are reproduced when your eight draws give the four columns of the table to the digits printed, and your interval the four summary rows.
 

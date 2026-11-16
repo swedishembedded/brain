@@ -16,7 +16,7 @@ the loop around them:
   objective trained on the toy (three passes, a gate on the final-normed state of the last position);
 * a state that is pulled towards the input at every step (the injection of the recurrent-depth design), iterated past the range.
 
-Every random quantity comes from the book's SplitMix64 (`bookrng.generator(name)`); each block prints the seed. Sums of
+Every random quantity comes from the book's SplitMix64 (`bookrng.generator(name)`); each block names its generators. Sums of
 products are plain left-to-right additions (never Python's `sum`, which may compensate). Numbers of trained models are
 printed by the stable-digits rule of `stable.py`.
 
@@ -55,10 +55,6 @@ def _table(headers, rows, align=None):
     out = ["| " + " | ".join(headers) + " |", "|" + "|".join(sep) + "|"]
     out += ["| " + " | ".join(str(c) for c in r) + " |" for r in rows]
     return "\n".join(out)
-
-
-def _seed(name):
-    return f"{bookrng.seed_of(name):#018x}"
 
 
 def _msum(xs):
@@ -719,11 +715,11 @@ def loop_training():
         stp = _cell("loop", lambda r, k=k: r["step"][k - 1], 2)
         rows.append((k, acc, _fx(chase[k - 1], 3), chg, rms, stp))
     curve = [_cell("loop", lambda r, c=c: r["curve"][c], 3) for c in CHECKPOINTS]
-    text = (f"Initialization: draws from `{NAME_LOOP}.init` ({_seed(NAME_LOOP + '.init')}) in the order of the setup table. Training: the examples of the stream "
-            f"`{NAME_LOOP}.data` ({_seed(NAME_LOOP + '.data')}), step s of {STEPS_LOOP} takes the examples 16 (s - 1) to 16 s - 1; the gradient of a step "
+    text = (f"Initialization: draws from `{NAME_LOOP}.init` in the order of the setup table. Training: the examples of the stream "
+            f"`{NAME_LOOP}.data`, step s of {STEPS_LOOP} takes the examples 16 (s - 1) to 16 s - 1; the gradient of a step "
             f"is the mean of the 16 example gradients, with the block's gradient the sum over its two uses; Adam on every tensor at rate {LR}, "
             f"beta 0.9 and 0.999, epsilon 1e-8, no weight decay, clipping or warmup. Mean training loss over the 20 steps up to step 100, 200, 400: "
-            f"{curve[0]}, {curve[1]}, {curve[2]}. Test: the first {N_TEST} examples of `{NAME_TEST}` ({_seed(NAME_TEST)}), the largest logit "
+            f"{curve[0]}, {curve[1]}, {curve[2]}. Test: the first {N_TEST} examples of `{NAME_TEST}`, the largest logit "
             "(lowest id on a tie) against the target, with k = 1 .. 8 applications of the block. The relative change is the mean over the test "
             "examples of ||x_k - x_(k-1)|| / ||x_(k-1)|| for the stream matrices [5, 16] (x_0 the embeddings), the RMS of the stream the mean over the "
             "test examples of the root mean square of the 80 entries of x_k of that example (an average of per-example RMS values, not the RMS of "
@@ -756,8 +752,8 @@ def exit_training():
     text = (f"The same task and decoder with the objective of Ouro: {PASSES_EXIT} passes of the one block, pass t > 1 starting from the final-normed "
             f"output of pass t - 1, each pass ending in the shared gain-only RMS norm, the head on the last position and the gate "
             f"z = w . h + b of the last position (w [16] drawn as 0.1 normal() after W_C, b = {GATE_BIAS0}); q from the gates of passes 1 and 2 as in "
-            f"the hand example; the loss of an example is sum q_t c_t. Initialization from `{NAME_EXIT}.init` ({_seed(NAME_EXIT + '.init')}), "
-            f"the data stream `{NAME_EXIT}.data` ({_seed(NAME_EXIT + '.data')}), {STEPS_EXIT} steps, the optimizer and the test examples of the previous "
+            f"the hand example; the loss of an example is sum q_t c_t. Initialization from `{NAME_EXIT}.init`, "
+            f"the data stream `{NAME_EXIT}.data`, {STEPS_EXIT} steps, the optimizer and the test examples of the previous "
             f"table. Mean training loss over the 20 steps up to step 100, 200, 400: {curve[0]}, {curve[1]}, {curve[2]}. Of the {N_TEST} test examples, "
             f"{easy} have a fixed point at f(x) ('one hop enough'); the last two columns are the mean exit probability of that group and of the rest. "
             + stable.RULE + " The test numbers of this run scatter in their first digit (the copies differ by far more than the nudge: the run is "
@@ -853,7 +849,7 @@ def shared_gradient_check():
         bad = lossgrad(p, ids, y, passes, bug="last_use_only")[1]
         n_ent = sum(len(_entries(t)) for t in tensors(p))
         rows.append((label, n_ent, "below 1e-6" if _worst(p, loss_only, good) < 1e-6 else "FAILS", f"{_worst(p, loss_only, bad):.2f}"))
-    return ("One example of the two-hop task from `recurrent_depth.check.example` (" + _seed("recurrent_depth.check.example") + "), parameters from "
+    return ("One example of the two-hop task from `recurrent_depth.check.example`, parameters from "
             "`recurrent_depth.check.loop` and `recurrent_depth.check.exit`, three entries of every tensor (the first, the middle and the last). "
             "Conventions. Parameters: drawn as in the training initialization (the embedding table E [20, 16], each entry `normal()`; then W_Q, W_K, "
             "W_V, W_O [16, 16], W_gate, W_up [16, 24] and W_down [24, 16], each row by row with `normal() / sqrt(rows)`; then W_C [16, 4] with "

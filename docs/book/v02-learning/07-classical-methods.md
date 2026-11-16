@@ -10,7 +10,7 @@ A workshop has ninety machines, and each has been inspected by a technician who 
 The ninety machines are the shared example of this chapter. Every method below is run on exactly these rows, so that the pictures and the accuracies can be compared. The rows come from the generator of Volume I, chapter 17, which plays the part of nature here, and the recipe is printed so that you can regenerate them: the three groups come from three Gaussian-like blobs with different centres and shapes, one of them (class C) stretched along a diagonal, and they overlap.
 
 <!-- worked: classical.dataset_head -->
-Generator: the book's SplitMix64, seed 0x5ff3181ac5f6e1d8 (6913896356213350872). Three classes A, B, C. Each point is two draws, z1 = rng.normal() then z2 = rng.normal(); with the class's standard deviations (s1, s2) and angle (in degrees, converted to radians for cos and sin), a = s1 z1 and b = s2 z2, x1 = c1 + a cos(angle) - b sin(angle) and x2 = c2 + a sin(angle) + b cos(angle), rounded to 2 decimals. Rows are drawn in order, the class cycling A, B, C, A, ...: first 90 training rows, then 300 validation rows, then 600 test rows, from one generator without reseeding.
+Generator: the book's SplitMix64, `classical.dataset`. Three classes A, B, C. Each point is two draws, z1 = rng.normal() then z2 = rng.normal(); with the class's standard deviations (s1, s2) and angle (in degrees, converted to radians for cos and sin), a = s1 z1 and b = s2 z2, x1 = c1 + a cos(angle) - b sin(angle) and x2 = c2 + a sin(angle) + b cos(angle), rounded to 2 decimals. Rows are drawn in order, the class cycling A, B, C, A, ...: first 90 training rows, then 300 validation rows, then 600 test rows, from one generator without reseeding.
 
 | class | training rows | centre (c1, c2) | s1, s2, angle | average of training rows |
 |---|---:|---|---|---|
@@ -143,7 +143,7 @@ Test accuracy of k = 9 with L2 (600 test rows, looked at once): 89.0%.
 The norms differ by a point or two, which on 300 rows is about five rows and no more than noise. The scale of the features matters far more, because a distance adds the coordinates up and so lets the feature with the biggest numbers decide. To see it, add a useless third feature, a uniform random number multiplied by a scale $s$, to every row:
 
 <!-- worked: classical.knn_irrelevant_feature -->
-Generator: the book's SplitMix64, seed 0x53bf905884356fa6 (6034700735549370278). A third feature x3 = s u is added to every row, with u = rng.uniform(): first one draw for each of the 90 training rows in order, then one for each of the 300 validation rows in order. k = 5, L2 distance. Standardised: each of the three features minus its training average and divided by its training standard deviation (divisor N).
+Generator: the book's SplitMix64, `classical.knn_extra_feature`. A third feature x3 = s u is added to every row, with u = rng.uniform(): first one draw for each of the 90 training rows in order, then one for each of the 300 validation rows in order. k = 5, L2 distance. Standardised: each of the three features minus its training average and divided by its training standard deviation (divisor N).
 
 | scale s of the useless feature | validation accuracy, raw | validation accuracy, standardised |
 |---:|---:|---:|
@@ -160,7 +160,7 @@ A useless feature of scale $1$ costs a little ($88.0\%$ to $86.7\%$) and one of 
 The assumption that near rows share labels needs rows that are near. In many dimensions there are none. Take 200 points drawn uniformly in the unit cube of $d$ dimensions, pick one as the query and look at its distances to the other 199:
 
 <!-- worked: classical.distance_concentration -->
-Generator: the book's SplitMix64, seed 0xf09d6076a9b38554 (17338120203215799636). For each dimension d in turn (2, 10, 100, 1000), 200 points with d coordinates drawn by rng.uniform(), point after point, coordinate after coordinate, from one generator. The first point is the query; the L2 distances to the other 199 are summarised (standard deviation with divisor 199).
+Generator: the book's SplitMix64, `classical.concentration`. For each dimension d in turn (2, 10, 100, 1000), 200 points with d coordinates drawn by rng.uniform(), point after point, coordinate after coordinate, from one generator. The first point is the query; the L2 distances to the other 199 are summarised (standard deviation with divisor 199).
 
 | d | mean distance | std / mean | (max - min) / min | nearest / mean |
 |---|---:|---:|---:|---:|
@@ -300,7 +300,7 @@ function kmeanspp_seed(X: array<real>[N, d], k: int, rng: inout Generator) -> ar
 The values of $\mathcal{J}$ depend on the start. On the ninety training rows with their labels hidden, take $k = 3$ and compare a poor start, the three rows with the smallest $x_1$ (all in the left-hand cluster), with one k-means++ start:
 
 <!-- worked: classical.kmeans_objective_by_round -->
-Poor start: the three training rows with the smallest x1, (-3.66, -0.71), (-3.04, -1.52), (-3.02, -0.56). k-means++ start: generator seed 0x4e56adacbd1489c9 (5644890140373715401); one draw `rng.integer(90)`, then two draws of `rng.uniform()`; the centres chosen are (0.20, -1.98), (2.90, 2.94), (3.12, -0.23). The rounds are Lloyd's, the last one being the round whose assignment equals the previous round's.
+Poor start: the three training rows with the smallest x1, (-3.66, -0.71), (-3.04, -1.52), (-3.02, -0.56). k-means++ start: generator `classical.kmeans_init.single`; one draw `rng.integer(90)`, then two draws of `rng.uniform()`; the centres chosen are (0.20, -1.98), (2.90, 2.94), (3.12, -0.23). The rounds are Lloyd's, the last one being the round whose assignment equals the previous round's.
 
 | round | poor start: J after assigning | J after moving | k-means++ start: J after assigning | J after moving |
 |---|---:|---:|---:|---:|
@@ -324,7 +324,7 @@ Both reach $168.58$ in the end, but the poor start begins at $\mathcal{J} = 1251
 A start can also end somewhere worse. Run Lloyd's algorithm from $100$ random starts (three random rows as centres) and $100$ k-means++ starts for $k = 3$, and then for $k = 6$:
 
 <!-- worked: classical.kmeans_restarts -->
-Generator: the book's SplitMix64, seed 0x272400305f1b8863 (2820379474394843235). Points: the 90 training rows without their labels. In order, from one generator: 100 random starts and 100 k-means++ starts for k = 3, then the same for k = 6. A random start shuffles the numbers 0 .. 89 with `shuffle` and takes the first k rows as centres. A k-means++ start draws the first centre as row `rng.integer(90)`, then each further centre with one `rng.uniform()`: target = uniform x (sum of D2), walk the rows in order subtracting each D2(row) from target, and take the first row at which target <= 0 (D2 = squared distance from the row to the nearest centre chosen so far). Lloyd's rounds follow until the assignment repeats; the rounds counted include the last, confirming one, and 'mean rounds' is their average over the 100 runs of the row. J is the sum of squared distances to the assigned centre. 'Lowest' is the lowest J found by any of the 200 runs at that k (both starts together); a run 'reaches the lowest' when its J is less than 0.005 above that value. 'Median J' of the 100 runs of a row is the average of the 50th and 51st smallest values (the median of the book's pseudocode page). Mean J is the average of the 100 values.
+Generator: the book's SplitMix64, `classical.kmeans_init`. Points: the 90 training rows without their labels. In order, from one generator: 100 random starts and 100 k-means++ starts for k = 3, then the same for k = 6. A random start shuffles the numbers 0 .. 89 with `shuffle` and takes the first k rows as centres. A k-means++ start draws the first centre as row `rng.integer(90)`, then each further centre with one `rng.uniform()`: target = uniform x (sum of D2), walk the rows in order subtracting each D2(row) from target, and take the first row at which target <= 0 (D2 = squared distance from the row to the nearest centre chosen so far). Lloyd's rounds follow until the assignment repeats; the rounds counted include the last, confirming one, and 'mean rounds' is their average over the 100 runs of the row. J is the sum of squared distances to the assigned centre. 'Lowest' is the lowest J found by any of the 200 runs at that k (both starts together); a run 'reaches the lowest' when its J is less than 0.005 above that value. 'Median J' of the 100 runs of a row is the average of the 50th and 51st smallest values (the median of the book's pseudocode page). Mean J is the average of the 100 values.
 
 | k | start | lowest J | median J | highest J | mean J | runs reaching the lowest | mean rounds |
 |---:|---|---:|---:|---:|---:|---:|---:|
@@ -341,7 +341,7 @@ With $k = 3$ most runs from either start reach the lowest value $168.58$ ($81$ o
 $\mathcal{J}$ always falls when $k$ grows (more centres cannot be worse; at $k = N$ it is zero), so it cannot choose $k$ by itself. What can be read from it is where adding a group stops paying.
 
 <!-- worked: classical.kmeans_choose_k -->
-Generator: the book's SplitMix64, seed 0xcb016a648831aefc (14628090044690312956). For each k = 1 .. 8 in turn, 10 k-means++ starts (each: `rng.integer(90)`, then k - 1 draws of `rng.uniform()`), the lowest final J is kept. Points: the 90 training rows. Relative drop = (J(k - 1) - J(k)) / J(k - 1), with J the lowest of 10 starts at each k.
+Generator: the book's SplitMix64, `classical.kmeans_init.choose_k`. For each k = 1 .. 8 in turn, 10 k-means++ starts (each: `rng.integer(90)`, then k - 1 draws of `rng.uniform()`), the lowest final J is kept. Points: the 90 training rows. Relative drop = (J(k - 1) - J(k)) / J(k - 1), with J the lowest of 10 starts at each k.
 
 | k | lowest J of 10 starts | J / N | relative drop from k - 1 |
 |---|---:|---:|---:|
@@ -464,7 +464,7 @@ The scores of the rows on the principal directions are uncorrelated, because, wi
 Two hundred points from a stretched, tilted cloud (the recipe is in the table), and the principal directions drawn from the sample mean with a length of two standard deviations each:
 
 <!-- worked: classical.pca_cloud -->
-Generator: the book's SplitMix64, seed 0x1403b86a7f392896 (1442199073229187222). 200 points; each is two draws a = 2.0 rng.normal(), b = 0.5 rng.normal(), then x1 = 3.0 + a cos(angle) - b sin(angle), x2 = 2.0 + a sin(angle) + b cos(angle) with angle = 30 degrees, rounded to 2 decimals. Covariance with divisor N; eigenvectors signed so that the entry of largest magnitude is positive. An entry that is zero up to rounding error (magnitude below 0.00005) is printed as 0.0000, whatever its sign. Average point (2.98, 1.97).
+Generator: the book's SplitMix64, `classical.pca_cloud`. 200 points; each is two draws a = 2.0 rng.normal(), b = 0.5 rng.normal(), then x1 = 3.0 + a cos(angle) - b sin(angle), x2 = 2.0 + a sin(angle) + b cos(angle) with angle = 30 degrees, rounded to 2 decimals. Covariance with divisor N; eigenvectors signed so that the entry of largest magnitude is positive. An entry that is zero up to rounding error (magnitude below 0.00005) is printed as 0.0000, whatever its sign. Average point (2.98, 1.97).
 
 | quantity | value |
 |---|---|
@@ -485,7 +485,7 @@ The cloud was built with standard deviations $2$ and $0.5$ (variances $4$ and $0
 With more features the question is how many components to keep. Here six features are generated from two hidden factors plus a little noise of standard deviation $0.3$:
 
 <!-- worked: classical.pca_two_factors -->
-Generator: the book's SplitMix64, seed 0x73212898cbe9201f (8295956625314357279). 300 rows of 6 features. Draw order: first the 6 x 2 matrix W of loadings, row by row, 12 calls of rng.normal(); then, for each row, 2 calls (the hidden factors z) and 6 calls (noise); feature j is the dot product of row j of W with z, plus 0.3 times its noise draw. Covariance with divisor N.
+Generator: the book's SplitMix64, `classical.pca_latent`. 300 rows of 6 features. Draw order: first the 6 x 2 matrix W of loadings, row by row, 12 calls of rng.normal(); then, for each row, 2 calls (the hidden factors z) and 6 calls (noise); feature j is the dot product of row j of W with z, plus 0.3 times its noise draw. Covariance with divisor N.
 
 | component | eigenvalue | explained variance | cumulative |
 |---|---:|---:|---:|
@@ -516,7 +516,7 @@ Two eigenvalues, $7.0801$ and $2.1420$, stand out; the other four are all near $
 PCA assumes that the data lie near a flat subspace (a line, a plane, a hyperplane), and that the directions of large variance are the ones that matter. Flat means linear: a ring of points has no good low-dimensional linear summary. It fails in three ways. Variance depends on units, so features on larger scales dominate the first components; standardise unless the units are comparable. A few outliers contribute their squared deviations and can capture a whole component. And large variance is not relevance. Take 400 rows with a feature $x_1$ of standard deviation $3$ that carries no information about the class and a feature $x_2$ of standard deviation $0.3$ around two class means $\pm 1$:
 
 <!-- worked: classical.pca_wrong_direction -->
-Generator: the book's SplitMix64, seed 0x058c42da3fa4fdf4 (399767972067212788). 400 rows; row i has class y = i mod 2; the two draws per row are x1 = 3 rng.normal() (no information about y) and x2 = (+1 if y = 1 else -1) + 0.3 rng.normal(). Each component is scored as a one-dimensional classifier: the threshold is the midpoint of the two class averages of the score, the side of the larger class average is called class 1.
+Generator: the book's SplitMix64, `classical.pca_wrong_direction`. 400 rows; row i has class y = i mod 2; the two draws per row are x1 = 3 rng.normal() (no information about y) and x2 = (+1 if y = 1 else -1) + 0.3 rng.normal(). Each component is scored as a one-dimensional classifier: the threshold is the midpoint of the two class averages of the score, the side of the larger class average is called class 1.
 
 | component | eigenvalue | explained variance | accuracy of the 1-D classifier |
 |---|---:|---:|---:|
@@ -698,7 +698,7 @@ The narrow orange strip inside the green region is the single row of class B at 
 A tree draws boundaries made of axis-parallel pieces: every region is a rectangle (a box in more dimensions) with one constant answer, and the output is a step function. Two things follow. The tree is unaffected by any monotone change of a feature (taking logarithms, rescaling, changing units), because only the order of the values enters the questions; no standardising is needed, and one feature in dollars and one in millimetres sit together without trouble. And a boundary that is not axis-parallel must be approximated by steps. For points uniform in the unit square labelled $1$ when $x_1 > x_2$ (a single straight line), 200 training rows and 200 test rows:
 
 <!-- worked: classical.tree_diagonal -->
-Generator: the book's SplitMix64, seed 0xb6143d1cc535c862 (13120178808214112354). 400 points (x1, x2), each two draws of rng.uniform(), label 1 if x1 > x2 else 0. The first 200 are the training rows, the last 200 the test rows. Entropy criterion.
+Generator: the book's SplitMix64, `classical.tree_diagonal`. 400 points (x1, x2), each two draws of rng.uniform(), label 1 if x1 > x2 else 0. The first 200 are the training rows, the last 200 the test rows. Entropy criterion.
 
 | max depth | leaves | test accuracy |
 |---|---:|---:|
@@ -752,7 +752,7 @@ function forest_predict(trees: array<Node>[M], x: array<real>[d], C: int) -> int
 The order of the draws matters for a reproduction: within one call the generator is used first for the $N$ bootstrap rows of tree 0, then for the feature draws of tree 0 (random forest only; one draw per node that is not pure, before its search, also when the search finds no question; nodes in depth-first order, the yes branch before the no branch), then for the bootstrap rows of tree 1, and so on. Cost: $M$ times the cost of one tree, and the trees are independent, so they can be grown in parallel (with a generator per tree; the single generator here fixes the order for reproduction). On the shared data, validation accuracy for ensembles of $M$ trees (the table says exactly how the draws are ordered):
 
 <!-- worked: classical.forest_accuracy -->
-Generator: the book's SplitMix64, seed 0x95d509e6da88768d (10796546568804136589). Draw order: 100 bagged trees, then 100 random-forest trees, from one generator. For each tree: a bootstrap sample of the 90 training rows (90 calls of `rng.integer(90)`, the rows taken in the order drawn); then the tree is grown to purity (entropy). In a random-forest tree, each node that is not pure (a pure node is a leaf and draws nothing) first draws one `rng.integer(2)`, the only feature considered there, also when no question at the node gains anything; nodes are visited depth-first, the yes branch before the no branch. An ensemble of B trees uses the first B trees of its 100; the vote is the plurality of the trees, a tie going to the smaller class label.
+Generator: the book's SplitMix64, `classical.forest`. Draw order: 100 bagged trees, then 100 random-forest trees, from one generator. For each tree: a bootstrap sample of the 90 training rows (90 calls of `rng.integer(90)`, the rows taken in the order drawn); then the tree is grown to purity (entropy). In a random-forest tree, each node that is not pure (a pure node is a leaf and draws nothing) first draws one `rng.integer(2)`, the only feature considered there, also when no question at the node gains anything; nodes are visited depth-first, the yes branch before the no branch. An ensemble of B trees uses the first B trees of its 100; the vote is the plurality of the trees, a tie going to the smaller class label.
 
 | B trees | bagging: validation accuracy | random forest: validation accuracy |
 |---|---:|---:|
@@ -769,7 +769,7 @@ A single bootstrap tree is a little worse than the tree grown on all rows ($79.3
 The cleaner measurement is of the variance itself. Draw $60$ independent training sets of $90$ rows from the source (generated data allow what a practitioner cannot do), grow a single tree and a bag of $25$ trees on each, and record, at $300$ fixed probe rows, the fraction of votes for class A, which is $0$ or $1$ for the single tree:
 
 <!-- worked: classical.ensemble_variance -->
-Generator: the book's SplitMix64, seed 0x97e87fd30c3ba1a3 (10946139438744052131). 60 independent training sets of 90 rows (the dataset's recipe, class cycling A, B, C), from one generator: for each set, its 90 rows (two normals each), then 25 bootstrap samples of 90 `rng.integer(90)` draws, one per tree. The probes are the first 300 test rows. At each probe the quantity followed is the fraction of the model's votes for class A (0 or 1 for one tree). The table gives the variance of that fraction across the training sets (divisor 60), averaged over the probes, and the average test accuracy on the probes.
+Generator: the book's SplitMix64, `classical.ensemble_variance`. 60 independent training sets of 90 rows (the dataset's recipe, class cycling A, B, C), from one generator: for each set, its 90 rows (two normals each), then 25 bootstrap samples of 90 `rng.integer(90)` draws, one per tree. The probes are the first 300 test rows. At each probe the quantity followed is the fraction of the model's votes for class A (0 or 1 for one tree). The table gives the variance of that fraction across the training sets (divisor 60), averaged over the probes, and the average test accuracy on the probes.
 
 | model | average variance of the class-A vote | average accuracy on the probes |
 |---|---:|---:|
@@ -1197,7 +1197,7 @@ On the shared ninety rows all of them land within one standard error of each oth
 
 6. **[Calculate]** Three classes each have $5$ word occurrences in total over a vocabulary of $V = 3$ words. One particular word occurs $0$, $2$ and $3$ times in the three classes. Give its probability in each class without smoothing, and with Laplace smoothing $\alpha = 1$ (the denominator becomes the class total plus $\alpha V$). Which classes could a message consisting of this word alone be assigned to in each case (the three classes have equal priors)?
 
-7. **[Implement]** Implement the generator recipe of `classical.dataset_head` (the book's SplitMix64, seed printed there) and $k$-nearest neighbours. Reproduce `classical.dataset_head` (the six rows and the class means), `classical.knn_k_sweep` (training and validation accuracy for each $k$) and the three distances and the test accuracy of `classical.knn_norms_and_test`, to the digits printed.
+7. **[Implement]** Implement the generator recipe of `classical.dataset_head` (the book's SplitMix64, named there) and $k$-nearest neighbours. Reproduce `classical.dataset_head` (the six rows and the class means), `classical.knn_k_sweep` (training and validation accuracy for each $k$) and the three distances and the test accuracy of `classical.knn_norms_and_test`, to the digits printed.
 
 8. **[Implement]** Implement Lloyd's algorithm with the stated tie and empty-group rules, the random start and the k-means++ start. Reproduce `classical.kmeans_trace`, then `classical.kmeans_restarts` (the generator, the draw order and the counting rules are in its header; all $400$ runs; the median of the $100$ values of a row is the average of the 50th and 51st smallest, and a run reaches the lowest value when it is within $0.005$ of it).
 

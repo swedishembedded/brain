@@ -597,7 +597,7 @@ shows 64 samples over one second: a hum at $3$ Hz of amplitude $2$, a tone at $1
 amplitude $1$, and Gaussian noise of standard deviation $0.3$ (Chapter 11). The sample at index
 $n = 0, \dots, 63$ is $2\cos(2\pi\cdot 3n/64) + \cos(2\pi\cdot 11n/64 + 1) + 0.3\,z_n$ with
 $z_n$ the $n$-th call of `rng.normal()`, 64 calls in sample order from the book's
-SplitMix64 generator with seed `0ad16a14ce1679e1` (hexadecimal; 779520848101276129).
+SplitMix64 generator `fourier.noisy_signal`.
 In the time domain nothing is evident. In the spectrum, two
 stems stand far above a low floor, at the planted frequencies and with
 amplitudes close to the planted ones (the table below, in which every $k$ from 1 to 32 is scored as $2\,|X[k]|/N$, $k = 32$ included): the noise is spread evenly
@@ -1001,7 +1001,7 @@ exactly with these formulas. The multiplications counted include the trivial one
 $\omega^0 = 1$ (for $N = 8$, $7$ of the $12$ multiplications are by $\omega^0$), so the count
 is $\tfrac{N}{2}\log_2 N$ and not the smaller number a program would get by skipping them. The
 input of each row is $N$ calls of `rng.normal()` in turn (the counts do not depend on the values), from one
-generator, seed `f4c93e94fc6813c8` (hexadecimal; 17638698225184019400), rows in the order $N = 8, 16, 64, 256, 1024, 4096$:
+generator `fourier.operation_counts`, rows in the order $N = 8, 16, 64, 256, 1024, 4096$:
 
 <!-- worked: fourier.operation_counts -->
 Complex multiplications by the definition (N rows of N products), and multiplications and additions counted while the recursive FFT ran, trivial twiddle multiplications by w^0 = 1 included; they equal (N/2) log2 N and N log2 N exactly.
@@ -1080,8 +1080,8 @@ well onto hardware.
 
 The fast transform is the same function as the slow one, not an approximation
 of it. The two differ only by rounding. Each row's signal is $N$ calls of
-`rng.normal()` in turn, one generator for all rows in the order $N = 8, 64, 256, 1024$, seed
-`daebf9d60e1ad71f` (hexadecimal; 15774976817550251807); the tolerance reported is
+`rng.normal()` in turn, one generator for all rows in the order $N = 8, 64, 256, 1024$, the
+generator `fourier.fft_accuracy`; the tolerance reported is
 $10^{-12}$ for the largest absolute difference over all entries:
 
 <!-- worked: fourier.fft_accuracy -->

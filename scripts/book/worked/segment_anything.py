@@ -19,7 +19,7 @@ product and sums of `self_attention`, the exact GELU of `transformer_block`.
 * the memory bank of the video path: which frames and object pointers frame t reads, the cost of reading them, and a small
   memory attention with a rotary position encoding on a 3 by 3 grid.
 
-Arithmetic is 64-bit floating point. Random inputs come from `bookrng.generator(name)` with the names, seeds and draw orders printed
+Arithmetic is 64-bit floating point. Random inputs come from `bookrng.generator(name)` with the names and draw orders printed
 beside each table. Sums of products run left to right.
 
 Swedish Embedded AB implements solutions for interactive segmentation and video tracking whose cost is counted before it is paid.
@@ -60,9 +60,8 @@ def _vec(v, d=3):
     return "(" + ", ".join(_fx(x, d) for x in v) + ")"
 
 
-def _seed(name):
-    s = bookrng.seed_of(name)
-    return f"seed 0x{s:016x} ({s})"
+def _generator_text(name):
+    return f"Generator `{name}`"
 
 
 def _round1(x):
@@ -197,7 +196,7 @@ def fourier_encoding():
         x, y = 2 * u - 1, 2 * v - 1
         rows.append((f"({u}, {v})", f"({_fx(x, 1)}, {_fx(y, 1)})") + tuple(_fx(e, 3) for e in fourier_encode(G, x, y)))
     sim = lambda a, b: _dot(fourier_encode(G, 2 * a[0] - 1, 2 * a[1] - 1), fourier_encode(G, 2 * b[0] - 1, 2 * b[1] - 1)) / 4.0
-    return (f"{_seed(NAME_FOURIER)}. Draws, in this order: the 4 entries of row 0 of G (the x frequencies), then the 4 of row 1 "
+    return (f"{_generator_text(NAME_FOURIER)}. Draws, in this order: the 4 entries of row 0 of G (the x frequencies), then the 4 of row 1 "
             "(the y frequencies), each one `normal()` (scale 1). "
             f"G row 0 = {_vec(G[0])}, row 1 = {_vec(G[1])}.\n\n"
             + _table(["point (u, v) in the picture", "(x, y) = (2u - 1, 2v - 1)", "sin 0", "sin 1", "sin 2", "sin 3", "cos 0", "cos 1",
@@ -226,7 +225,7 @@ def fourier_kernel_rows(features=128, sigmas=(1.0, 4.0), deltas=(0.0, 0.05, 0.1,
 def fourier_kernel():
     features = 128
     rows = fourier_kernel_rows(features)
-    return (f"{_seed(NAME_FOURIER + '.kernel')}. Draws: the 128 entries of row 0 of Z, then the 128 of row 1, each one `normal()`; "
+    return (f"{_generator_text(NAME_FOURIER + '.kernel')}. Draws: the 128 entries of row 0 of Z, then the 128 of row 1, each one `normal()`; "
             "G = sigma Z for sigma = 1 and 4. The two points are (x, y) = (-0.2, 0.1) and (-0.2 + delta, 0.1), "
             "estimate = (phi(p) . phi(p')) / 128 with the 256-channel encoding, exact = exp(-(2 pi sigma delta)^2 / 2) "
             "(library exp).\n\n"
@@ -351,7 +350,7 @@ def toy_setup():
         ("hypernetwork of mask token i = 0..3: layer 1, layer 2", f"{D} x {D}, {D} x {D // 4}", "1/sqrt(fan-in)"),
         ("IoU head: layer 1, layer 2", f"{D} x {D}, {D} x 4", "1/sqrt(fan-in)"),
     ]
-    return (f"{_seed(NAME_TOY)}. One generator draws every tensor, each entry one `normal()` times the scale shown, tensors in the "
+    return (f"{_generator_text(NAME_TOY)}. One generator draws every tensor, each entry one `normal()` times the scale shown, tensors in the "
             "order of the table, each row-major (a weight [in, out] is drawn row by row; `y = x W`). All biases are 0, "
             "all LayerNorm gains 1 and offsets 0 (epsilon 1e-5).\n\n"
             + _table(["tensor (draw order, top to bottom)", "shape", "scale"], items, "lll")
@@ -568,7 +567,7 @@ def relative_bias():
     t_glob = 64 * 64
     slab = 12 * t_glob * t_glob * 4
     hoisted = 12 * t_glob * (64 + 64) * 4
-    return (f"{_seed(NAME_RELPOS)}. Window of {w} by {w} tokens, head width {hd}. Draws, in this order: the table Rh "
+    return (f"{_generator_text(NAME_RELPOS)}. Window of {w} by {w} tokens, head width {hd}. Draws, in this order: the table Rh "
             f"({2 * w - 1} rows of {hd}), the table Rw ({2 * w - 1} rows of {hd}), then the query q ({hd}), each entry `round(normal(), 1)`. "
             f"Rh = {[list(map(float, r)) for r in Rh]}, Rw = {[list(map(float, r)) for r in Rw]}, q = {list(map(float, q))}. "
             f"The query sits at row {qh}, column {qw} of the window. The bias it adds to the score of the key at (kh, kw) is "
@@ -608,7 +607,7 @@ def pad_keys():
     out = lambda w, vs: [_sum([w[i] * vs[i][c] for i in range(len(w))]) for c in range(2)]
     rows = [("masked pad (3 keys)", _vec(w_real, 3) + ", 0", _vec(out(w_real, vals), 3)),
             ("pad as the layer computes it (4 keys)", _vec(w_pad, 3), _vec(out(w_pad, vals_pad), 3))]
-    return (f"{_seed(NAME_PAD)}. Draws, in this order: the 6 entries of the three tokens x (row by row) and the 2 of the query q, each `round(normal(), 1)`; "
+    return (f"{_generator_text(NAME_PAD)}. Draws, in this order: the 6 entries of the three tokens x (row by row) and the 2 of the query q, each `round(normal(), 1)`; "
             "Wk (2 x 2) as `round(0.5 * normal(), 1)`, then bk (2) as `round(normal(), 1)`; Wv as Wk, then bv as bk. "
             f"x = {[list(map(float, r)) for r in x]}, q = {list(map(float, q))}, Wk = {[list(map(float, r)) for r in Wk]}, "
             f"bk = {list(map(float, bk))}, Wv = {[list(map(float, r)) for r in Wv]}, bv = {list(map(float, bv))}. A key is "

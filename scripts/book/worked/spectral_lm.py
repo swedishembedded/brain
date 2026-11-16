@@ -29,7 +29,7 @@ UNDECIDED when it straddles the margin.
       result by less than the margin: |S minus R| < 0.02, an equivalence needing the whole interval inside the margin.
       (Prediction: supported.)
 
-Every random quantity comes from the book's SplitMix64 (`bookrng.generator(name)`); each block prints the seeds. Sums of
+Every random quantity comes from the book's SplitMix64 (`bookrng.generator(name)`); each block names its generators. Sums of
 products are plain left-to-right additions (never Python's `sum`, which may compensate). Numbers of trained models are
 printed by the stable-digits rule of `stable.py`.
 
@@ -72,10 +72,6 @@ def _table(headers, rows, align=None):
     out = ["| " + " | ".join(headers) + " |", "|" + "|".join(sep) + "|"]
     out += ["| " + " | ".join(str(c) for c in r) + " |" for r in rows]
     return "\n".join(out)
-
-
-def _seed(name):
-    return f"{bookrng.seed_of(name):#018x}"
 
 
 def _dot(a, b):
@@ -170,7 +166,7 @@ def basis_check():
     rows = [(j, _fx(z[j], 4) if j < M_TOY else "", _fx(dense[j], 4), _fx(fast[j], 4)) for j in range(D_TOY)]
     note = ("D = 16, m = 8: the retained functions are the constant, the cosine and sine at frequencies 1, 2 and 3, and the cosine at "
             "frequency 4 (its sine partner, index 8, is cut off). "
-            f"Draw order: z[0] .. z[7] from `spectral_lm.basis_check` ({_seed('spectral_lm.basis_check')}), z[i] = rng.normal(). "
+            f"Draw order: z[0] .. z[7] from `spectral_lm.basis_check`, z[i] = rng.normal(). "
             f"Largest deviation of S^T S from the identity: below 1e-12 ({'yes' if worst_gram < 1e-12 else 'NO'}). "
             f"Largest difference between the dense product S z and the FFT synthesis: below 1e-12 ({'yes' if diff < 1e-12 else 'NO'}). "
             f"|z|^2 = {_fx(nz, 4)}, |S z|^2 = {_fx(nx, 4)} (Parseval). The FFT used {cnt['mul']} complex multiplications "
@@ -300,7 +296,7 @@ def leak_table():
     worst_upper_c = max(abs(j_causal[i][j]) for i in range(T_LEAK) for j in range(i + 1, T_LEAK))
     leaked = sum(1 for i in range(T_LEAK) for j in range(i + 1, T_LEAK) if abs(j_seq[i][j]) > 1e-12)
     pairs = T_LEAK * (T_LEAK - 1) // 2
-    return (f"Sequence length T = {T_LEAK}. Generator `spectral_lm.leak` ({_seed('spectral_lm.leak')}), in this order: the gains g[0] .. g[4] are rng.uniform() + 0.5, "
+    return (f"Sequence length T = {T_LEAK}. Generator `spectral_lm.leak`, in this order: the gains g[0] .. g[4] are rng.uniform() + 0.5, "
             f"and g[5], g[6], g[7] are copies of g[3], g[2], g[1]; then the causal kernel k[0] .. k[7] is eight rng.uniform() draws; then the token vectors, "
             f"64 rng.normal() draws, row by row (the mixer is the spectral mixer of this chapter's toy model with the initial weights of "
             f"run 0, applied to the RMS-normalised vector of each token: the RMS norm has no gain and its epsilon is {EPS_NORM:g}, inside the root). 'Sequence transform' is y = Re IDFT(g * DFT(x)) over the sequence axis of a scalar "
@@ -800,7 +796,7 @@ def source_table():
         for b in range(2):
             rows.append((f"({a}, {b})", _fx(pi[a][b], 4), *[_fx(x, 3) for x in p[a][b]]))
     return (f"The source: an order-2 Markov chain on V = {V} symbols, p(c | a, b) = softmax over c of {BETA} g[a][b][c] with g[a][b][c] drawn "
-            f"from `spectral_lm.source` ({_seed('spectral_lm.source')}) by rng.normal(), in the order a, b, c with c fastest. The stationary distribution over "
+            f"from `spectral_lm.source` by rng.normal(), in the order a, b, c with c fastest. The stationary distribution over "
             f"the pair (a, b) (probability that two consecutive tokens are a then b) is found by iterating the chain from the uniform pair distribution until "
             f"it moves by less than 1e-16 or 5000 times. First four of the 36 contexts:\n\n"
             + _table(["context (a, b)", "stationary probability", "p(0)", "p(1)", "p(2)", "p(3)", "p(4)", "p(5)"], rows)
@@ -857,17 +853,10 @@ def gradient_check():
                     n += 1
         rows.append((arm, ARM_LABELS[arm], _int(n), "below 1e-6" if worst < 1e-6 else f"{worst:.1e}"))
     return ("Every entry of every trainable tensor, central difference with step 1e-5 of the empirical loss (the mean cross-entropy of the "
-            f"1200-token training sequence of run 0, `spectral_lm.run0.data` {_seed('spectral_lm.run0.data')}) at the initial parameters of run 0 "
-            f"(`spectral_lm.run0.init` {_seed('spectral_lm.run0.init')}). Relative error |numerical - analytic| / max(|numerical|, |analytic|, 1e-3); "
+            f"1200-token training sequence of run 0, `spectral_lm.run0.data`) at the initial parameters of run 0 "
+            f"(`spectral_lm.run0.init`). Relative error |numerical - analytic| / max(|numerical|, |analytic|, 1e-3); "
             "the criterion is below 1e-6. The SwiGLU arm of equal arithmetic runs the same code as `Q_par` with f = 72 instead of 4.\n\n"
             + _table(["arm", "sublayer", "entries checked", "largest relative error"], rows))
-
-
-def seeds_table():
-    rows = []
-    for s in range(1, N_RUNS + 1):
-        rows.append((s, _seed(f"spectral_lm.run{s}.data"), _seed(f"spectral_lm.run{s}.init")))
-    return _table(["run", "data seed (`spectral_lm.run<i>.data`)", "init seed (`spectral_lm.run<i>.init`)"], rows)
 
 
 def _lr_table(cfg):
@@ -917,7 +906,7 @@ def _final_table(cfg):
 def final_losses():
     _, _, h = _source()
     return (f"Population cross-entropy (nats per token, computed exactly against the source) after {STEPS} full-batch Adam steps, the rate annealed from the arm's "
-            f"peak rate over the {STEPS} steps, for runs 1 to {N_RUNS} (seeds in the table above); the source's entropy rate is {_fx(h, 4)}. "
+            f"peak rate over the {STEPS} steps, for runs 1 to {N_RUNS}; the source's entropy rate is {_fx(h, 4)}. "
             "Mean and sd (divisor n - 1) are over the eight runs. " + SHORT + "\n\n" + _final_table("main"))
 
 
@@ -1125,7 +1114,7 @@ def absorption():
             w, _ = context_forward(p2, a, b)
             worst = max(worst, max(abs(x - y) for x, y in zip(u, w)))
     changed = max(abs(p["Wg"][0][j] - p2["Wg"][0][j]) for j in range(m))
-    return (f"The dense model of arm Q_par at the initial parameters of run 0 (`spectral_lm.run0.init`, {_seed('spectral_lm.run0.init')}), and the model whose "
+    return (f"The dense model of arm Q_par at the initial parameters of run 0 (`spectral_lm.run0.init`), and the model whose "
             f"E1, E2, Wg, Wu are multiplied on the right by the 8 x 8 real Fourier basis Q (the full basis, D = m = 8) and whose Wd is multiplied on the left by Q^T. "
             f"Largest difference between the two models' predicted probabilities over all 36 contexts and 6 next tokens: below 1e-12 "
             f"({'yes' if worst < 1e-12 else 'NO'}). The weights themselves are different (the first row of Wg changes by up to {_fx(changed, 3)} in an entry), "

@@ -22,7 +22,7 @@ cannot disagree.
 
 Arithmetic is the language's 64-bit floating point (correctly rounded library sqrt, exp, log, tanh, cos, erf) unless a block says
 otherwise. Sums are accumulated left to right in index order. Random numbers come from the book's SplitMix64 (`bookrng.generator`);
-every stream name and seed is printed by the block that uses it. Nothing here is a chaotic training run: the fits are solved
+every stream name is printed by the block that uses it. Nothing here is a chaotic training run: the fits are solved
 directly, the clusters are a discrete procedure and the policy is a grid search, so the digits printed are the digits of any correct
 implementation. A FLOP is one multiply or one add, so a multiply-add is two.
 
@@ -39,10 +39,6 @@ import images as im
 _table = im._table
 
 M64 = (1 << 64) - 1
-
-
-def _seed(name):
-    return f"0x{bookrng.seed_of(name):016x}"
 
 
 def _int(n):
@@ -257,7 +253,7 @@ def track_fit():
     roll = [(k, f"{err[k]:.3f}", f"{100 * outside[k]:.1f}%") for k in ks]
     return "\n".join([
         f"The real cart: v' = 0.9 v + 0.5 a, x' = x + v' on a track [0, 10], and a wall stops it (when x' < 0 the cart is put at x' = 0, and when x' > 10 at 10, with v' = 0 in both cases). "
-        f"Data: {N_FIT} transitions from the stream `{FIT_NAME}` (seed {_seed(FIT_NAME)}); for each, in order, x = 10 u, "
+        f"Data: {N_FIT} transitions from the stream `{FIT_NAME}`; for each, in order, x = 10 u, "
         f"v = -2 + 4 u (two `uniform()` draws) and a = `integer(3)` - 1; {hits} of the {N_FIT} end on a wall. The model is the "
         "least-squares solution of the normal equations (Gauss-Jordan, partial pivoting) for x' and for v' on the features "
         "(x, v, a, 1); each sum runs over the transitions in order.",
@@ -266,7 +262,7 @@ def track_fit():
         "",
         eig,
         "",
-        f"Free-running error: {ROLL_N} rollouts of {ROLL_K} steps from the stream `{ROLL_NAME}` (seed {_seed(ROLL_NAME)}); "
+        f"Free-running error: {ROLL_N} rollouts of {ROLL_K} steps from the stream `{ROLL_NAME}`; "
         "for each rollout, in order, x = 10 u (v starts at 0), then for each step a = `integer(3)` - 1. The real cart and the model "
         "take the same actions; the model is fed its own output and is never clamped (it knows no walls), and 'off the track' counts the model rollouts whose position is below 0 or above 10 at step k. The error is |x_model - x_real|, averaged over the rollouts. "
         f"Fed the true state at every step instead, the model's mean one-step position error over all {ROLL_N * ROLL_K} steps is "
@@ -366,10 +362,10 @@ def latent_action_toy():
         cent.append((j, f"({cs[j][0]:+.3f}, {cs[j][1]:+.3f})", sum(c), f"{_NAMES[major]} ({c[major]} of {sum(c)})"))
     return "\n".join([
         f"A square wanders an 8 by 8 torus for {LAT_N} steps under random actions 0 .. 4 (0 noop, 1 up, 2 left, 3 down, 4 right, "
-        f"the order of the first block), drawn as `integer(5)` from the stream `{LAT_NAME}.actions` (seed "
-        f"{_seed(LAT_NAME + '.actions')}), starting at (0, 0). A localizer reports each of the {LAT_N + 1} positions plus normal noise "
-        f"of the stated spread on both coordinates, two `normal()` draws per position (x then y) from `{LAT_NAME}.noise` (seed "
-        f"{_seed(LAT_NAME + '.noise')}). All {LAT_N} actions are drawn first, then the noise. An action moves the square by (dx, dy) = noop (0, 0), up (0, -1), left (-1, 0), down (0, +1), right (+1, 0), "
+        f"the order of the first block), drawn as `integer(5)` from the stream `{LAT_NAME}.actions`, "
+        f"starting at (0, 0). A localizer reports each of the {LAT_N + 1} positions plus normal noise "
+        f"of the stated spread on both coordinates, two `normal()` draws per position (x then y) from `{LAT_NAME}.noise`. "
+        f"All {LAT_N} actions are drawn first, then the noise. An action moves the square by (dx, dy) = noop (0, 0), up (0, -1), left (-1, 0), down (0, +1), right (+1, 0), "
         "with the coordinates taken mod 8 (y grows downward). The displacement of a step is the difference of two reports with each coordinate wrapped into "
         "[-4, 4) by d - 8 floor(d / 8 + 1/2). The displacements are clustered by k-means with a farthest-point start (the first point "
         "and then, k - 1 times, the point farthest from its nearest chosen centre, the first on a tie) and Lloyd rounds (assign each point to "

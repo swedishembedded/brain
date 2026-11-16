@@ -53,7 +53,7 @@ def _table(headers, rows, align=None):
 
 
 def _seed_line(name):
-    return f"Generator: the book's SplitMix64, seed 0x{bookrng.seed_of(name):016x} ({bookrng.seed_of(name)})."
+    return f"Generator: the book's SplitMix64, `{name}`."
 
 
 def _pt(p, d=2):
@@ -469,7 +469,7 @@ def kmeans_objective_by_round():
         d = f"{rq[r][3]:.2f}" if r < len(rq) else ""
         rows.append((r + 1, a, b, c, d))
     return ("Poor start: the three training rows with the smallest x1, " + ", ".join(_pt(p) for p in poor) + ". "
-            f"k-means++ start: generator seed 0x{bookrng.seed_of(INIT_NAME + '.single'):016x} ({bookrng.seed_of(INIT_NAME + '.single')}); one draw `rng.integer(90)`, then two draws of `rng.uniform()`; the centres chosen are "
+            f"k-means++ start: generator `{INIT_NAME}.single`; one draw `rng.integer(90)`, then two draws of `rng.uniform()`; the centres chosen are "
             + ", ".join(_pt(p) for p in plus) + ". The rounds are Lloyd's, the last one being the round whose assignment equals the previous round's.\n\n"
             + _table(["round", "poor start: J after assigning", "J after moving", "k-means++ start: J after assigning", "J after moving"], rows)
             + f"\n\nFinal J: poor start {jp:.2f}, k-means++ start {jq:.2f}.")

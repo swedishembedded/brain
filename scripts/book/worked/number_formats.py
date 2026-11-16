@@ -446,9 +446,8 @@ def loss_scaling():
             z, s, o, e = stats([S * g for g in gs], f)
             rows.append([f, f"2^{int(math.log2(S))}" if S > 1 else "1", f"{100 * z:.2f}%", f"{100 * s:.2f}%", f"{100 * o:.2f}%",
                          f"{100 * (1 - z - o):.2f}%", _num(e, 3)])
-    seed = bookrng.seed_of("number_formats.loss_scaling")
     head = (f"{LOSS_SCALE_DRAWS} stand-in gradient magnitudes g_i = 10^(-12 + 10 u_i), u_i = uniform() drawn in order i = 0, 1, ... "
-            f"from the generator seeded {seed} (seed_of 'number_formats.loss_scaling'); the scaled values S g_i are rounded to the "
+            f"from the generator `number_formats.loss_scaling`; the scaled values S g_i are rounded to the "
             "format once, ties to even. 'zero' is the share stored as 0, 'subnormal' the share stored with fewer than the full "
             "significand bits, 'inf' the share that overflows, 'kept' the share stored as a nonzero finite number; "
             "'mean rel. error' is the mean of |stored - S g| / (S g) over the kept values. Shares are printed with two decimals "
@@ -566,9 +565,8 @@ def bf16_rounding_bias():
         rows.append([name, f"{100 * mean_rel:+.4f}%", f"{100 * worst:.4f}%", f"{100 * toward:.1f}%", f"{100 * s1:+.4f}%", f"{100 * s2:+.4f}%"])
     # agreement of the integer shortcut with the exact rule on the first 2000 draws
     agree = sum(1 for x in xs[:2000] if encode(x, "bf16") == bf16_rne_bits(f32_bits(x)))
-    seed = bookrng.seed_of("number_formats.bf16_rounding_bias")
-    head = (f"{ROUNDING_DRAWS} values x_i = f32(normal()) drawn in order from the generator seeded {seed} (seed_of "
-            "'number_formats.bf16_rounding_bias'), each rounded to bf16. 'mean change of |x|' is the mean of (|y| - |x|) / |x|; "
+    head = (f"{ROUNDING_DRAWS} values x_i = f32(normal()) drawn in order from the generator "
+            "`number_formats.bf16_rounding_bias`, each rounded to bf16. 'mean change of |x|' is the mean of (|y| - |x|) / |x|; "
             "'worst relative error' is the largest |y - x| / |x|; 'moved toward zero' is the share with |y| < |x|; "
             "the last two columns are the relative error of the sums of |x_i| and of x_i^2. "
             f"The integer rule agreed with the exact rounding rule on {agree} of the first 2000 values.\n\n")

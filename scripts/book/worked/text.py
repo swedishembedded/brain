@@ -8,7 +8,7 @@ patterns of the four sequence lengths, the bit arithmetic that fills them, and a
 of states (`DECODER_TABLE`, the same table the chapter's state-machine figure draws). Python's own codecs
 (`str.encode`, `bytes.decode`) and `unicodedata` appear only as the reference the independent
 implementation is checked against; every check that draws random inputs uses the book's SplitMix64
-(`bookrng.generator`) and prints its seed. Tables are plain ASCII so that they typeset: a character is
+(`bookrng.generator`) and names it. Tables are plain ASCII so that they typeset: a character is
 named by its code point, never printed, because the book's fonts lack most scripts.
 
 Swedish Embedded AB implements solutions for getting text into models without silent corruption. If your
@@ -71,9 +71,8 @@ def cp_list(values):
     return " ".join(f"{v:04X}" if v <= 0xFFFF else f"{v:X}" for v in values)
 
 
-def _seed_line(name):
-    return (f"Generator: the book's SplitMix64, seed {bookrng.seed_of(name):#018x} "
-            f"(`seed_of` of the name `{name}`, defined on the pseudocode page).")
+def _generator_line(name):
+    return f"Generator: `{name}` (the book's SplitMix64)."
 
 
 def _name(cp):
@@ -437,7 +436,7 @@ def check_encoder():
         [f"boundary values {', '.join(cp_hex(c) for c in edge)}", f"{edge_ok} of {len(edge)} equal"],
         ["encoder refuses U+D800, U+DFFF, U+110000, -1", f"{rejected} of {len(inv)} refused"],
     ]
-    return (_seed_line(name) + " Each draw is `k = integer(1112064)`, then the scalar value `k` if `k < 0xD800` and `k + 0x800` otherwise "
+    return (_generator_line(name) + " Each draw is `k = integer(1112064)`, then the scalar value `k` if `k < 0xD800` and `k + 0x800` otherwise "
             "(which skips the 2,048 surrogates and is uniform over the 1,112,064 scalar values).\n\n" +
             _table(["check", "result"], rows, "ll"))
 
@@ -519,7 +518,7 @@ def check_decoder():
         ["decoding with replacement equals Python's", f"{same:,} of {n:,}"],
         ["strict verdict (accept or reject) equals Python's", f"{same_verdict:,} of {n:,}"],
     ]
-    return (_seed_line(name) + " Each string has length `1 + integer(8)`; each byte draws `kind = integer(4)` and then "
+    return (_generator_line(name) + " Each string has length `1 + integer(8)`; each byte draws `kind = integer(4)` and then "
             "`integer(128)` (kind 0), `128 + integer(64)` (kind 1), `192 + integer(64)` (kind 2) or `integer(256)` (kind 3).\n\n" +
             _table(["check", "result"], rows, "ll"))
 
@@ -550,7 +549,7 @@ def check_stream():
         ["chunked decoding equals one-shot decoding", f"{same:,} of {n:,}"],
     ]
     held_rows = [[p, e, s] for p, e, s in held]
-    return (_seed_line(name) + " Each string is drawn by the rule of `text.check_decoder`; then chunk sizes `1 + integer(3)` "
+    return (_generator_line(name) + " Each string is drawn by the rule of `text.check_decoder`; then chunk sizes `1 + integer(3)` "
             "are drawn, one per chunk, until the string is used up: the draws of one string are made in this order, first its length and "
             "bytes, then one chunk size at a time as the string is consumed (the last chunk is cut short when the string ends, but "
             "its size is still drawn), and the next string's draws follow at once on the same generator.\n\n" + _table(["check", "result"], rows, "ll") +
@@ -566,7 +565,7 @@ def order_preserved():
     for _ in range(n):
         a, b = _scalar_draw(gen), _scalar_draw(gen)
         agree += (a < b) == (encode_utf8([a]) < encode_utf8([b])) and (a == b) == (encode_utf8([a]) == encode_utf8([b]))
-    return (_seed_line(name) + f"\n\nPairs (a, b) of scalar values, each scalar value drawn as in `text.check_encoder` (`k = integer(1112064)`, then `k` if `k < 0xD800` and `k + 0x800` otherwise; a first, then b): {n:,}. "
+    return (_generator_line(name) + f"\n\nPairs (a, b) of scalar values, each scalar value drawn as in `text.check_encoder` (`k = integer(1112064)`, then `k` if `k < 0xD800` and `k + 0x800` otherwise; a first, then b): {n:,}. "
             f"`a < b` agrees with comparing the two byte strings byte by byte in {agree:,} of {n:,}.")
 
 

@@ -466,7 +466,7 @@ function log_mel_spectrogram(x: array<real>[L], N: int, H: int, w: array<real>[N
 All these choices can be put to work on one fully specified signal. The clip has 8000 samples at 16000 Hz, half a second, and is the sum of three things, with $t = n/16000$: a chirp $0.5\sin(2\pi(200\,t + 3200\,t^2))$ whose frequency rises from 200 Hz to 3400 Hz, a steady tone $0.1\sin(2\pi\,6000\,t)$, and noise $0.01(2u_n - 1)$ where $u_n$ is the $n$-th draw of the book's `uniform()` from the generator seeded by `bookrng.seed_of("spectrograms.clip")`, one draw for each $n = 0, 1, \dots$ in order. The noise keeps every mel energy far above the floors, so that the numbers below depend on the conventions and on nothing else.
 
 <!-- worked: spectrograms.clip_check -->
-The clip: 8000 samples at 16000 Hz, seed 6749870757344927309, one `uniform()` draw per sample in order of n. Check values:
+The clip: 8000 samples at 16000 Hz, from the generator `spectrograms.clip`, one `uniform()` draw per sample in order of n. Check values:
 
 | n | x[n] |
 |---|---:|

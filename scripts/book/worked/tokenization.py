@@ -74,9 +74,8 @@ def _table(headers, rows, align=None):
     return "\n".join(out)
 
 
-def _seed_line(name):
-    return (f"Generator: the book's SplitMix64, seed {bookrng.seed_of(name):#018x} "
-            f"(`seed_of` of the name `{name}`, defined on the pseudocode page).")
+def _generator_line(name):
+    return f"Generator: the book's SplitMix64, `{name}`."
 
 
 def show_byte(b):
@@ -946,7 +945,7 @@ def check_heap_equals_rounds():
         ops += c2["pushes"] + c2["pops"]
         total += length
         longest = max(longest, length)
-    return (_seed_line(name) + " Draw order: 3,000 letters `integer(3)` for the training piece (letters a, b, c); then for each "
+    return (_generator_line(name) + " Draw order: 3,000 letters `integer(3)` for the training piece (letters a, b, c); then for each "
             "of 2,000 test pieces its length `1 + integer(200)` followed by one `integer(3)` per letter.\n\n"
             + _table(["check", "result"], [
                 ["merges learned from the training piece", len(merges)],
@@ -1091,7 +1090,7 @@ def check_escape():
         unescaped = tok.encode(chatml([("user", content)]))
         unescaped_forged += sum(i >= tok.first_special for i in unescaped) != 2
         roundtrip += tok.decode(ids) == chatml([("user", content.replace(MARK, "�"))])
-    return (_seed_line(name) + f" Each of {n:,} contents is drawn as follows: first the count `1 + integer(10)`, then, one by one, that many "
+    return (_generator_line(name) + f" Each of {n:,} contents is drawn as follows: first the count `1 + integer(10)`, then, one by one, that many "
             "indices `integer(16)`, each choosing an item of this list of 16 (0-indexed, in this order): the three special literals "
             "`<|im_start|>`, `<|im_end|>`, `<|endoftext|>` (indices 0 to 2), then the 13 fragments `<`, `|`, `im`, `_`, `start`, `end`, "
             "`>`, the mark U+E000, a line feed, `a`, `bread`, a space and U+00E9 (indices 3 to 15); the content is the chosen items "
@@ -1160,7 +1159,7 @@ def check_pretokenizer():
         covered += b"".join(pretokenize(data)) == data
         for g, pat in PATTERN_DIGIT_GROUPS.items():
             groups[g] += pretokenize(data, g) == re.findall(pat, data)
-    return (_seed_line(name) + f" Each of {n:,} byte strings has length `integer(40)` and each byte is `pool[integer(len(pool))]` for the "
+    return (_generator_line(name) + f" Each of {n:,} byte strings has length `integer(40)` and each byte is `pool[integer(len(pool))]` for the "
             f"{len(pool)}-byte pool: the bytes of `abcXYZ019 ,.!`, a tab and a line feed, then C3, A9, E4, B8, AD and 80, in that order "
             "(the length is drawn first, then the bytes). The variants with digit groups replace the digit alternative by `[0-9]` "
             "(at most 1) or `[0-9]{1,3}` (at most 3), with no space in front of it: a space before a digit is then a piece of "
@@ -1209,7 +1208,7 @@ def check_roundtrip():
         except UnicodeDecodeError:
             pass
         longest = max(longest, len(ids))
-    return (_seed_line(name) + f" Each of {n:,} byte strings has length `integer(60)` (drawn first) and then its bytes, each an `integer(256)` draw, in "
+    return (_generator_line(name) + f" Each of {n:,} byte strings has length `integer(60)` (drawn first) and then its bytes, each an `integer(256)` draw, in "
             "order. They are encoded with the corpus's byte-level BPE of this chapter (256 bytes and its 70 merges, "
             "pretokenization by the four rules of the section on pretokenization, no special tokens) and decoded by joining the byte strings of the ids.\n\n"
             + _table(["check", "result"], [

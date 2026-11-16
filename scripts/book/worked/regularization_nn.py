@@ -58,11 +58,6 @@ GAIN_SPREAD = 0.1                               # multiplicative gain 1 + 0.1 (2
 N_SWEEP = (8, 16, 32, 64, 128)
 
 
-def _seed_line(name):
-    s = bookrng.seed_of(name)
-    return f"`{name}` seed 0x{s:016x}"
-
-
 def _table(headers, rows, align=None):
     align = align or ("l" + "r" * (len(headers) - 1))
     sep = ["---:" if a == "r" else "---" for a in align]
@@ -342,16 +337,13 @@ def task_setup():
         f"Loss: mean squared error over the {N_TRAIN} training points. Optimizer: AdamW, full batch, learning rate {LR}, "
         f"beta1 {BETA1}, beta2 {BETA2}, epsilon {EPS_DEN:g}, {STEPS} steps, no schedule; the validation loss ({N_VAL} points) is computed every {EVAL_EVERY} steps.",
         "",
-        "Generators (the book's SplitMix64; k is the seed number 0 .. 7; a generator named `regularization_nn.<stream>.k` is seeded with the seed printed in the table below, so each of the eight seeds has its own seed for each of the three streams):",
+        "Generators (the book's SplitMix64; k is the seed number 0 .. 7; each of the eight seeds has its own generator `regularization_nn.<stream>.k` for each of the three streams):",
         "",
         "- `train.k`: for i = 0 .. 15, x_i = uniform() then e_i = normal(); y_i = sin(2 pi x_i) + 0.3 e_i (for a training set of N > 16 points the same rule continues to i = N - 1).",
         "- `init.k`: w_j = normal() for j = 0 .. 63, then b_j = normal() for j = 0 .. 63, then v_j = normal() / 8 for j = 0 .. 63; c = 0.",
         "- `noise.k`: masks and augmentations (draw order in the examples that use them).",
         "",
-        _table(["k", "train.k", "init.k", "noise.k"],
-               [(k, *[f"0x{bookrng.seed_of(f'regularization_nn.{st}.{k}'):016x}" for st in ("train", "init", "noise")]) for k in SEEDS], "rlll"),
-        "",
-        f"- {_seed_line(HELD_VAL_NAME)}: {N_VAL} validation points, drawn like the training points. {_seed_line(HELD_TEST_NAME)}: {N_TEST} test points, same rule.",
+        f"- `{HELD_VAL_NAME}`: {N_VAL} validation points, drawn like the training points. `{HELD_TEST_NAME}`: {N_TEST} test points, same rule.",
         "",
         "Training points of seed 0:",
         "",
@@ -473,7 +465,7 @@ def dropout_expectation():
         rows.append((f"{p:g}", f"{scale:.4f}", _fmt(mr, 4), _fmt((1 - p) * a, 4), _fmt(ms, 4), _fmt(a, 4), _fmt(vs, 4), _fmt(a * a * p / (1 - p), 4)))
     out = [
         f"One activation a = {a}, dropped with probability p. For each p in the order of the table, {n} masks: {n} uniform() draws from one generator "
-        f"({_seed_line('regularization_nn.expectation')}); the activation is dropped when the draw is below p. "
+        f"(`{'regularization_nn.expectation'}`); the activation is dropped when the draw is below p. "
         "'raw' is the activation times the mask (0 or a); 'scaled' is the raw value times 1 / (1 - p). Variances use divisor n. "
         "The values in the columns 'expected' are the formulas of the text.",
         "",
@@ -506,7 +498,7 @@ def dropout_masks():
                      "(" + ", ".join(f"{x + 0.0:g}" for x in out_v) + ")", f"{sum(out_v):g}"))
     return "\n".join([
         f"Six activations a = (1, -0.5, 2, 0.5, -1.5, 0.25) and p = 0.5, so the scale is 1 / (1 - p) = 2. Each mask is six uniform() draws in the order of the units "
-        f"({_seed_line('regularization_nn.three-masks')}); a unit is dropped (mask 0) when its draw is below 0.5. The output of the layer is a_j m_j / (1 - p).",
+        f"(`{'regularization_nn.three-masks'}`); a unit is dropped (mask 0) when its draw is below 0.5. The output of the layer is a_j m_j / (1 - p).",
         "",
         _table(["", "draws", "mask m", "output a_j m_j / (1 - p)", "sum"], rows, "lllll"),
     ])
@@ -600,7 +592,7 @@ def dropout_backward():
         rows.append((name + dropped, _fmt(analytic[i], 6), _fmt(num, 6), f"{abs(analytic[i] - num):.1e}", _fmt(wrong[i], 6)))
     return "\n".join([
         f"A network of {n} hidden units, one example x = {x} (u = (x - 0.5) sqrt(12) = {u:.4f}), y = {y}, L = (o - y)^2, p = {p} so the scale is {scale:.4f}. "
-        f"Parameters from {_seed_line('regularization_nn.dropout-gradient')}: w_j (4 normal() draws), then b_j (4), then v_j (4); c = {c}. Then the mask used in the forward pass: "
+        f"Parameters from `{'regularization_nn.dropout-gradient'}`: w_j (4 normal() draws), then b_j (4), then v_j (4); c = {c}. Then the mask used in the forward pass: "
         f"4 uniform() draws (kept when the draw is at least p); then a second mask of 4 draws, used only in the last column, where the forward pass uses the first mask and the backward pass the second. "
         f"Forward mask m = {keep1} (times the scale); second mask = {keep2}. Central differences with step {eps:g} on the loss with the forward mask held fixed.",
         "",
@@ -639,7 +631,7 @@ def train_vs_eval():
     rows.append(("true value sin(2 pi x)", _fmt(_truth(x), 4)))
     return "\n".join([
         f"The network of seed 0 trained with dropout p = {p} on its hidden layer (3000 steps, otherwise the recipe of the chapter), evaluated at x = {x}. "
-        f"Each train-mode output uses 64 fresh uniform() draws, one per unit, from {_seed_line('regularization_nn.predict')}: the five rows, then 2000 more.",
+        f"Each train-mode output uses 64 fresh uniform() draws, one per unit, from `{'regularization_nn.predict'}`: the five rows, then 2000 more.",
         "",
         _table(["output", "value"], rows, "lr"),
     ])
@@ -725,7 +717,7 @@ def augmentation_ridge():
         out_rows.append(tuple(row))
     plain = normal_equations(xs, ys, 0.0)
     return "\n".join([
-        f"A linear model y = w . x with {d} features on {n} examples, features and noise from one generator ({_seed_line('regularization_nn.ridge')}): "
+        f"A linear model y = w . x with {d} features on {n} examples, features and noise from one generator (`{'regularization_nn.ridge'}`): "
         f"first all {n} feature rows, row by row (3 normal() draws per row, 36 draws in all), and only then the {n} label noises (one normal() each, in the order of the rows), so that y_i = 1 x_i0 - 2 x_i1 + 0.5 x_i2 + 0.5 e_i with e_i the i-th noise draw. Least squares without any augmentation: w = ({', '.join(_fmt(w, 4) for w in plain)}). "
         "'Ridge' solves (X^T X + N s^2 I) w = X^T y. 'K copies' replaces each example by K noisy copies x + s * (three normal() draws), with the same label, and solves ordinary least squares "
         "on the 12 K rows (the draws continue the same generator: first all rows of s = 0.3 with K = 10, then K = 1000, then s = 0.6 with K = 10, then K = 1000; within one setting example after example, K copies of an example one after the other, each copy three normal() draws, one per feature). "
@@ -772,7 +764,7 @@ def augmentation_table():
         "Augmentation by changing the input of a training example, with its label kept, a fresh draw at every step for every example (online). Draw order of the stream "
         "`regularization_nn.noise.k`: for each step, for each example in order, one draw, then (when dropout is on, which it is not here) the 64 mask draws. 'noise' adds sd * normal() to x; "
         "'gain' multiplies x by 1 + 0.1 (2 uniform() - 1); 'shift' adds 0.5 to x when uniform() < 0.5. 'Label drift' is sqrt(E (sin(2 pi x') - sin(2 pi x))^2), the change "
-        f"in the true label that the augmentation causes, over 20000 points x = uniform() with the augmentation drawn from {_seed_line('regularization_nn.drift')} (one generator, rows in the order of the table, "
+        f"in the true label that the augmentation causes, over 20000 points x = uniform() with the augmentation drawn from `{'regularization_nn.drift'}` (one generator, rows in the order of the table, "
         "per point first x then the augmentation draw). Training loss is eval mode on the unaugmented training points. Means over 8 seeds; the difference is the test loss minus that of no augmentation, per seed, 3000 steps.",
         "",
         _table(["augmentation", "label drift", "training loss", "validation loss", "test loss", "mean difference in test loss", "paired t"], rows),
@@ -888,7 +880,7 @@ def quadratic_paths():
         diff = math.hypot(w[0] - r[0], w[1] - r[1])
         rows.append((t, f"{alpha:.4f}", f"({w[0]:.4f}, {w[1]:.4f})", _fmt(nrm(w), 4), f"({r[0]:.4f}, {r[1]:.4f})", _fmt(nrm(r), 4), _fmt(diff, 4)))
     return "\n".join([
-        f"Twenty rows with two correlated features from {_seed_line('regularization_nn.quadratic')}: for i = 0 .. 19, x1 = normal(), then x2 = 0.9 x1 + 0.3 normal(), "
+        f"Twenty rows with two correlated features from `{'regularization_nn.quadratic'}`: for i = 0 .. 19, x1 = normal(), then x2 = 0.9 x1 + 0.3 normal(), "
         "then y = x1 - 0.5 x2 + 0.5 normal(). Loss (1/2N) sum (w . x - y)^2 with N = 20, so the Hessian is H = X^T X / N and the gradient H w - b with b = X^T y / N. "
         f"H = [[{h[0]:.4f}, {h[1]:.4f}], [{h[1]:.4f}, {h[2]:.4f}]] with eigenvalues {mu_hi:.4f} and {mu_lo:.4f}; the least squares solution is w* = ({w_star[0]:.4f}, {w_star[1]:.4f}). "
         f"Gradient descent starts at w = (0, 0) with eta = {QUAD_ETA} and is read after t steps. Ridge regression minimises the loss plus (lam / 2) ||w||^2, "

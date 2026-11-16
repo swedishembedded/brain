@@ -90,7 +90,7 @@ $$
 where $M$ is the extent of the span (the window, or the whole grid in a global block) and $\mathbf{U}^{\mathrm{r}}$, $\mathbf{U}^{\mathrm{c}}$ are two learned tables of $2M - 1$ rows, one row for each possible offset along an axis. It is the relative position of Chapter 6's discussion, split into a row part and a column part, and the split is what makes it affordable. A bias that depended on the pair of positions would be one number per head and (query, key) pair. Equation (1) needs only, for each query, its dot product with the rows of two small tables.
 
 <!-- worked: segment_anything.relative_bias -->
-seed 0x8894b1a8fb263ec6 (9841686425037586118). Window of 3 by 3 tokens, head width 4. Draws, in this order: the table Rh (5 rows of 4), the table Rw (5 rows of 4), then the query q (4), each entry `round(normal(), 1)`. Rh = [[-0.6, -0.7, 0.3, -0.1], [0.1, -1.1, -1.8, 0.4], [-1.0, 2.5, -1.1, -0.8], [-0.5, 0.2, 0.5, -1.6], [-0.6, -1.2, -1.2, -0.7]], Rw = [[0.1, -0.8, 3.1, 0.2], [-0.1, -1.1, -0.3, -1.4], [-0.9, -1.1, 1.7, -0.4], [-1.1, -1.0, 1.4, 1.1], [-1.7, -1.6, -0.3, -0.6]], q = [1.0, 1.8, 0.3, 0.5]. The query sits at row 1, column 1 of the window. The bias it adds to the score of the key at (kh, kw) is q . Rh[qh - kh + 2] + q . Rw[qw - kw + 2].
+Generator `segment_anything.relpos`. Window of 3 by 3 tokens, head width 4. Draws, in this order: the table Rh (5 rows of 4), the table Rw (5 rows of 4), then the query q (4), each entry `round(normal(), 1)`. Rh = [[-0.6, -0.7, 0.3, -0.1], [0.1, -1.1, -1.8, 0.4], [-1.0, 2.5, -1.1, -0.8], [-0.5, 0.2, 0.5, -1.6], [-0.6, -1.2, -1.2, -0.7]], Rw = [[0.1, -0.8, 3.1, 0.2], [-0.1, -1.1, -0.3, -1.4], [-0.9, -1.1, 1.7, -0.4], [-1.1, -1.0, 1.4, 1.1], [-1.7, -1.6, -0.3, -0.6]], q = [1.0, 1.8, 0.3, 0.5]. The query sits at row 1, column 1 of the window. The bias it adds to the score of the key at (kh, kw) is q . Rh[qh - kh + 2] + q . Rw[qw - kw + 2].
 
 The two small vectors, one entry per key row and per key column: rel_h = (-0.79, 2.77, -2.22), rel_w = (-1.93, -2.57, -2.87).
 
@@ -119,7 +119,7 @@ For a global block of the base tower the pair-by-pair slab would hold 805,306,36
 The second detail is the padding, and it is the kind of detail that looks like an implementation choice and is part of the model. The grid is padded after the normalization that precedes attention, so a padded token enters the key and value projections as the zero vector. Its key is then not zero but the projection's bias, and it takes a real share of every softmax in its window. The next table shows the size of the effect on a window of three real tokens and one pad, against the model in which the pad is masked out.
 
 <!-- worked: segment_anything.pad_keys -->
-seed 0xabd7bdd88b92148f (12382574438230660239). Draws, in this order: the 6 entries of the three tokens x (row by row) and the 2 of the query q, each `round(normal(), 1)`; Wk (2 x 2) as `round(0.5 * normal(), 1)`, then bk (2) as `round(normal(), 1)`; Wv as Wk, then bv as bk. x = [[-1.4, -0.4], [-0.7, -0.5], [0.3, 0.0]], q = [-1.3, 1.6], Wk = [[-0.1, -0.7], [0.7, 0.7]], bk = [0.6, 0.6], Wv = [[-0.5, -0.6], [-0.2, -0.5]], bv = [-1.7, -0.2]. A key is x Wk + bk, a value x Wv + bv, the score q . k / sqrt(2). The pad token's input is the zero vector, so its key is bk and its value bv.
+Generator `segment_anything.pad`. Draws, in this order: the 6 entries of the three tokens x (row by row) and the 2 of the query q, each `round(normal(), 1)`; Wk (2 x 2) as `round(0.5 * normal(), 1)`, then bk (2) as `round(normal(), 1)`; Wv as Wk, then bv as bk. x = [[-1.4, -0.4], [-0.7, -0.5], [0.3, 0.0]], q = [-1.3, 1.6], Wk = [[-0.1, -0.7], [0.7, 0.7]], bk = [0.6, 0.6], Wv = [[-0.5, -0.6], [-0.2, -0.5]], bv = [-1.7, -0.2]. A key is x Wk + bk, a value x Wv + bv, the score q . k / sqrt(2). The pad token's input is the zero vector, so its key is bk and its value bv.
 
 | window | weights on the 3 real tokens and the pad | output |
 |---|---|---|
@@ -181,7 +181,7 @@ $$
 a Gaussian kernel whose width is set by $\sigma_\Omega$. A large $\sigma_\Omega$ makes the similarity of two nearby points fall off quickly, so the code can tell apart positions that are close; a small one makes it fall off slowly, a smooth code. The approximation has the accuracy of an average of $n_\Omega$ terms each between $-1$ and $1$, an error near $1/\sqrt{n_\Omega}$ times a number below one.
 
 <!-- worked: segment_anything.fourier_encoding -->
-seed 0x75d09aae9528b657 (8489455372210845271). Draws, in this order: the 4 entries of row 0 of G (the x frequencies), then the 4 of row 1 (the y frequencies), each one `normal()` (scale 1). G row 0 = (1.443, 0.029, 3.349, 0.436), row 1 = (0.213, -1.229, -0.235, 1.149).
+Generator `segment_anything.fourier`. Draws, in this order: the 4 entries of row 0 of G (the x frequencies), then the 4 of row 1 (the y frequencies), each one `normal()` (scale 1). G row 0 = (1.443, 0.029, 3.349, 0.436), row 1 = (0.213, -1.229, -0.235, 1.149).
 
 | point (u, v) in the picture | (x, y) = (2u - 1, 2v - 1) | sin 0 | sin 1 | sin 2 | sin 3 | cos 0 | cos 1 | cos 2 | cos 3 |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -193,7 +193,7 @@ Dot product of the encodings divided by 4: (0.3, 0.7) with (0.3, 0.8) is 0.518, 
 <!-- /worked -->
 
 <!-- worked: segment_anything.fourier_kernel -->
-seed 0xaed366ba76c08952 (12597525533727689042). Draws: the 128 entries of row 0 of Z, then the 128 of row 1, each one `normal()`; G = sigma Z for sigma = 1 and 4. The two points are (x, y) = (-0.2, 0.1) and (-0.2 + delta, 0.1), estimate = (phi(p) . phi(p')) / 128 with the 256-channel encoding, exact = exp(-(2 pi sigma delta)^2 / 2) (library exp).
+Generator `segment_anything.fourier.kernel`. Draws: the 128 entries of row 0 of Z, then the 128 of row 1, each one `normal()`; G = sigma Z for sigma = 1 and 4. The two points are (x, y) = (-0.2, 0.1) and (-0.2 + delta, 0.1), estimate = (phi(p) . phi(p')) / 128 with the 256-channel encoding, exact = exp(-(2 pi sigma delta)^2 / 2) (library exp).
 
 | delta (in the [-1, 1] frame) | sigma 1, estimate | sigma 1, exact | sigma 4, estimate | sigma 4, exact |
 |---|---:|---:|---:|---:|
@@ -293,7 +293,7 @@ Positions enter only through the queries and the keys, never the values: `querie
 To see the shapes and the arithmetic without 256-wide matrices, here is the whole decoder with width 8, one head, one upscaling and a $4 \times 4$ image embedding on an $8 \times 8$ picture, all weights random. Every tensor and its scale is listed so that the draw order can be repeated.
 
 <!-- worked: segment_anything.toy_setup -->
-seed 0x352233ac9aa94763 (3828679449640519523). One generator draws every tensor, each entry one `normal()` times the scale shown, tensors in the order of the table, each row-major (a weight [in, out] is drawn row by row; `y = x W`). All biases are 0, all LayerNorm gains 1 and offsets 0 (epsilon 1e-5).
+Generator `segment_anything.toy_sam`. One generator draws every tensor, each entry one `normal()` times the scale shown, tensors in the order of the table, each row-major (a weight [in, out] is drawn row by row; `y = x W`). All biases are 0, all LayerNorm gains 1 and offsets 0 (epsilon 1e-5).
 
 | tensor (draw order, top to bottom) | shape | scale |
 |---|---|---|

@@ -926,7 +926,7 @@ def joint_attention():
     wt = "\n".join(
         "| " + " | ".join(f"({', '.join(f'{v + 0.0:g}' for v in W[m][r])})" for m in range(3)) + " |" for r in range(JOINT_D))
     return (
-        f"Generator: the book's SplitMix64, seed 0x{bookrng.seed_of(JOINT):016x} (`seed_of` of the name `{JOINT}`). Draws, in this "
+        f"Generator: `{JOINT}` (the book's SplitMix64). Draws, in this "
         "order: the 20 entries of X (5 tokens of 4 numbers, image tokens first), each `round(normal(), 1)`; then W_Q, W_K, W_V "
         "(4 by 4 each, row by row), each `round(0.5 * normal(), 1)` (`round` to one decimal, ties away from zero). One head of width "
         "4, scores divided by 2, no mask, no position information.\n\n"
@@ -1203,11 +1203,10 @@ def small_setup():
         for r in latent[c]:
             lat_lines.append("(" + ", ".join(f"{v + 0.0:g}" for v in r) + ")")
     return (
-        f"Weights: the book's SplitMix64, seed 0x{bookrng.seed_of(SMALL):016x} (`seed_of` of the name `{SMALL}`), one stream for all "
+        f"Weights: `{SMALL}` (the book's SplitMix64), one stream for all "
         "tensors, drawn tensor by tensor in the order below (the two blocks l = 0 and l = 1 in turn, each in the order listed; a matrix row by row, so that its "
         "`[out, in]` entry (o, i) is draw number o*in + i of the matrix; `normal()` is the generator's Box-Muller draw). "
-        # perf-number: hex prefix of a printed seed, not a multiplier
-        f"Inputs: seed 0x{bookrng.seed_of(SMALL_INPUT):016x} (`{SMALL_INPUT}`): the 32 entries of the latent (2 channels of 4 rows of 4 "
+        f"Inputs: generator `{SMALL_INPUT}`: the 32 entries of the latent (2 channels of 4 rows of 4 "
         "columns, channel slowest), then the 10 caption features (2 tokens of 5), each `round(normal(), 1)`. Width 24, 2 heads of width "
         "12, feed-forward width 64, conditioning width 24, timestep embedding of dimension 16, 2 blocks, patches of 2 by 2 "
         f"(8 values), RMS-norm epsilon 1e-5 (final layer norm 1e-6). {len(spec)} tensors, {_int(total)} parameters.\n\n"

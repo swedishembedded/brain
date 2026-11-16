@@ -17,7 +17,7 @@ chapter (`clip`), and the denoiser costs are those of the previous chapter (`den
 * the T5-XXL encoder counted from its configuration, the cost of encoding against the cost of denoising, and the weight-byte count
   that a hand-written formula once got wrong.
 
-Everything random comes from the book's SplitMix64 (`bookrng.generator(name)`); each block prints its stream names and seeds. The
+Everything random comes from the book's SplitMix64 (`bookrng.generator(name)`); each block names its streams. The
 toy encoder is evaluated, not trained, so its numbers are stable to the digits printed; sums are plain left-to-right additions.
 
 Swedish Embedded AB implements solutions for text-conditioned generators whose prompt interface is specified, counted and checked
@@ -164,7 +164,7 @@ def toy_setup():
         rows.append([f"`{text}`", str(n), " ".join(str(i) for i in ids)])
     vocab = ", ".join(f"{i} `{w}`" for i, w in enumerate(WORDS))
     return (
-        f"The toy encoder is `init_gpt` of Volume V (stream `{TOY}`, seed 0x{bookrng.seed_of(TOY):016x}) with V = 9, D = 8, "
+        f"The toy encoder is `init_gpt` of Volume V (stream `{TOY}`) with V = 9, D = 8, "
         "2 heads of width 4, SwiGLU width 12, L = 4 blocks and 16 learned positions, every matrix entry `0.5 * normal()` (instead "
         "of the 0.02 of a language model, so that attention has something to do), drawn row by row in the order embedding table, "
         "position table, then per block W_Q, W_K, W_V, W_O, W_gate, W_up, W_down (W_O and W_down multiplied by 1 / sqrt(2 L)); all "
@@ -334,7 +334,7 @@ def reader_mass():
     return (
         f"A reader of the encoder's rows that never masks (as the cross-attention of SDXL and the joint attention of the "
         f"transformers do not): `{SHORT}` in windows of 8, 12 and 16 through the four encoders of `text_conditioning.padding_matrix`, "
-        f"read by {n_q} queries of one head of width 8. Stream `{READER}` (seed 0x{bookrng.seed_of(READER):016x}); draws in this "
+        f"read by {n_q} queries of one head of width 8. Stream `{READER}`; draws in this "
         f"order: the {n_q} queries, each 8 values of `normal()`, then W_K (8 by 8, row by row, `0.5 * normal()`). The keys are the "
         "final normalised rows times W_K, the scores are the dot products over sqrt(8), the softmax runs over every row of the "
         "window, and the table gives the mean over the queries of the weight that falls on the pad rows (positions 5 and up).\n\n"

@@ -17,7 +17,7 @@ accuracy of the two real scores). Give each equal model its own $500$ questions,
 times over, and look at the gap.
 
 <!-- worked: statistics_ch.chance_gaps -->
-Generator: the book's SplitMix64, seed 0xe7fba0d33eee59c0 (16716131271070079424). Each of the 2000 runs draws A's 500 questions, then B's 500, one `rng.uniform()` per question (right when below 0.708); the first eight runs are listed.
+Generator: `statistics.chance_gaps` (the book's SplitMix64). Each of the 2000 runs draws A's 500 questions, then B's 500, one `rng.uniform()` per question (right when below 0.708); the first eight runs are listed.
 
 | run | A right | A % | B right | B % | B - A (points) |
 |---|---:|---:|---:|---:|---:|
@@ -162,7 +162,7 @@ We can watch the sampling distribution narrow. A model that is truly $70\%$ accu
 tested on $n$ questions, and the experiment is repeated $1000$ times:
 
 <!-- worked: statistics_ch.sampling_distribution -->
-Generator: the book's SplitMix64, seed 0x2e06fcb21770fbd8 (3316616017432607704). True accuracy p = 0.7. One generator, rows in the order n = 25, 100, 400, 1600; a row makes 1000 accuracies, each over n questions drawn in turn (one `rng.uniform()` per question, right when below 0.7). Spread: standard deviation with divisor 1000.
+Generator: `statistics.sampling_distribution` (the book's SplitMix64). True accuracy p = 0.7. One generator, rows in the order n = 25, 100, 400, 1600; a row makes 1000 accuracies, each over n questions drawn in turn (one `rng.uniform()` per question, right when below 0.7). Spread: standard deviation with divisor 1000.
 
 | questions n | average of 1000 accuracies | spread of the 1000 accuracies | sqrt(p(1-p)/n) | ratio |
 |---|---:|---:|---:|---:|
@@ -236,7 +236,7 @@ and the standard error of the mean is estimated by $s/\sqrt{n}$. A simulation sh
 law holding for larger samples, where the effect shrinks:
 
 <!-- worked: statistics_ch.variance_divisor_simulation -->
-Generator: the book's SplitMix64, seed 0x02efca81066ce338 (211610363017093944). One generator, rows in the order n = 2, 5, 10, 50. Each row makes 20,000 samples; a sample is n rolls, each `rng.integer(6) + 1`, drawn in turn; the variance of a sample is computed with each divisor and the 20,000 values averaged.
+Generator: `statistics.variance_divisor_simulation` (the book's SplitMix64). One generator, rows in the order n = 2, 5, 10, 50. Each row makes 20,000 samples; a sample is n rolls, each `rng.integer(6) + 1`, drawn in turn; the variance of a sample is computed with each divisor and the 20,000 values averaged.
 
 | n | average, divisor n | average, divisor n - 1 | true variance | (n - 1)/n x true variance |
 |---|---:|---:|---:|---:|
@@ -436,7 +436,7 @@ $0.7$ and run one hundred separate experiments of $100$ questions each:
 ![One hundred 95 percent confidence intervals for an accuracy, drawn as horizontal bars around a dashed line at the true value 0.7; the bars that miss the true value are drawn thicker and in red.](img/ci-coverage.svg)
 
 <!-- worked: statistics_ch.coverage_figure_summary -->
-Generator: the book's SplitMix64, seed 0xe7a106b2ff4ba985 (16690629059868862853). 100 experiments in turn, each 100 questions (one `rng.uniform()` each, right when below 0.7), 95 percent Wald intervals as in the previous table.
+Generator: `statistics.coverage_figure` (the book's SplitMix64). 100 experiments in turn, each 100 questions (one `rng.uniform()` each, right when below 0.7), 95 percent Wald intervals as in the previous table.
 
 | experiments | questions each | true accuracy | intervals that missed it |
 |---|---:|---:|---:|
@@ -450,7 +450,7 @@ random, so it is better to measure coverage on more experiments and to ask when 
 recipe holds up:
 
 <!-- worked: statistics_ch.coverage_table -->
-Generator: the book's SplitMix64, seed 0xfede0426393a6c94 (18365120892678859924). One generator, rows in the order listed (p = 0.7 then 0.1; n = 20, 100, 500 within each). A row makes 2000 experiments; an experiment draws its n questions in turn (one `rng.uniform()` each, right when below p) and forms the 95 percent Wald interval with z = 1.959964; 'contains it' is lower <= p <= upper.
+Generator: `statistics.coverage_table` (the book's SplitMix64). One generator, rows in the order listed (p = 0.7 then 0.1; n = 20, 100, 500 within each). A row makes 2000 experiments; an experiment draws its n questions in turn (one `rng.uniform()` each, right when below p) and forms the 95 percent Wald interval with z = 1.959964; 'contains it' is lower <= p <= upper.
 
 | true accuracy | questions n | share of 2000 intervals containing it | share with zero width |
 |---|---:|---:|---:|
@@ -539,7 +539,7 @@ is nearly standard Gaussian under the null, so the probability of a gap at least
 large in either direction is the area outside $\pm 0.278$:
 
 <!-- worked: statistics_ch.unpaired_test -->
-The simulated share uses the 2000 runs of the first table of this chapter (same generator, seed 0xe7fba0d33eee59c0).
+The simulated share uses the 2000 runs of the first table of this chapter (same generator, `statistics.chance_gaps`).
 
 | quantity | value |
 |---|---|
@@ -568,7 +568,7 @@ follows from the Gaussian approximation (the difference of two accuracies shifte
 true gap $\delta$ has $z$ centred at $\delta$ divided by the standard error):
 
 <!-- worked: statistics_ch.test_error_rates -->
-Generator: the book's SplitMix64, seed 0x728bde2f9b4f2901 (8253935038137051393). One generator; first row, then second. An experiment draws A's 500 questions, then B's 500 (one `rng.uniform()` each, right when below the model's true accuracy), and declares the models different when |z| > 1.959964 for the pooled-accuracy z-test (pooled accuracy = (pA + pB) / 2, z = (pB - pA) / sqrt(2 pooled (1 - pooled) / 500)); 1000 experiments per row. "3 points better" means B's true accuracy is 0.730 against A's 0.700. Second table, analytic: both accuracies taken as 0.70, so the standard error of the difference is sqrt(2 * 0.7 * 0.3 / n); the chance of detecting is the two-sided power P(|z| > 1.959964) when z is Gaussian with mean 0.03 / standard error and standard deviation 1, that is 1 - Phi(1.959964 - shift) + Phi(-1.959964 - shift) with shift = 0.03 / standard error.
+Generator: `statistics.test_error_rates` (the book's SplitMix64). One generator; first row, then second. An experiment draws A's 500 questions, then B's 500 (one `rng.uniform()` each, right when below the model's true accuracy), and declares the models different when |z| > 1.959964 for the pooled-accuracy z-test (pooled accuracy = (pA + pB) / 2, z = (pB - pA) / sqrt(2 pooled (1 - pooled) / 500)); 1000 experiments per row. "3 points better" means B's true accuracy is 0.730 against A's 0.700. Second table, analytic: both accuracies taken as 0.70, so the standard error of the difference is sqrt(2 * 0.7 * 0.3 / n); the chance of detecting is the two-sided power P(|z| > 1.959964) when z is Gaussian with mean 0.03 / standard error and standard deviation 1, that is 1 - Phi(1.959964 - shift) + Phi(-1.959964 - shift) with shift = 0.03 / standard error.
 
 | truth | questions | share of 1000 experiments declared different |
 |---|---:|---:|
@@ -681,7 +681,7 @@ $2p(1-p)(1-\rho)$ for a correlation $\rho$ of their answers, so
 $\mathrm{SE} = \sqrt{2p(1-p)(1-\rho)/n}$:
 
 <!-- worked: statistics_ch.pairing_vs_correlation -->
-Generator: the book's SplitMix64, seed 0x56ea512605656f61 (6262907455553236833). Two models of accuracy 0.7 each, answers correlated with coefficient rho; the four cells of one question (both right, A only, B only, neither) have probabilities 0.49 + 0.21 rho, 0.21 (1 - rho), 0.21 (1 - rho), 0.09 + 0.21 rho. One generator, rows in the order rho = 0, 0.3, 0.6, 0.9. A row makes 1000 experiments of 500 questions; a question is one `rng.uniform()` u: both right if u is below the first cell's probability, A only if below the sum of the first two, B only if below the sum of the first three, else neither. The gap is (B-only count minus A-only count) / 500; spread = standard deviation with divisor 1000.
+Generator: `statistics.pairing_vs_correlation` (the book's SplitMix64). Two models of accuracy 0.7 each, answers correlated with coefficient rho; the four cells of one question (both right, A only, B only, neither) have probabilities 0.49 + 0.21 rho, 0.21 (1 - rho), 0.21 (1 - rho), 0.09 + 0.21 rho. One generator, rows in the order rho = 0, 0.3, 0.6, 0.9. A row makes 1000 experiments of 500 questions; a question is one `rng.uniform()` u: both right if u is below the first cell's probability, A only if below the sum of the first two, B only if below the sum of the first three, else neither. The gap is (B-only count minus A-only count) / 500; spread = standard deviation with divisor 1000.
 
 | correlation of the two models' answers | share of questions where they disagree | SE of the gap, formula | spread of 1000 simulated gaps |
 |---|---:|---:|---:|
@@ -821,8 +821,8 @@ median and an interval for it:
 
 <!-- worked: statistics_ch.bootstrap_median -->
 Latencies (ms): 25 values, value k = exp(4.0 + 0.6 z) rounded to one decimal with z the k-th `rng.normal()` of the generator below; sorted ascending: 19.9, 27.1, 27.4, 28.6, 35.9, 36.0, 37.3, 38.0, 39.7, 41.6, 46.2, 48.4, 54.0, 58.4, 60.5, 60.6, 62.7, 66.5, 73.6, 74.4, 97.8, 99.2, 103.1, 122.5, 152.4.
-Latency generator: seed 0x8bde34327b21b500 (10078550407520564480).
-Bootstrap generator: seed 0x0e5e536ef546e792 (1035356700368365458). 10,000 resamples; a resample is 25 calls of `rng.integer(25)`, each the index into the ascending latencies above. The median of 25 values is the 13th smallest. Interval ends: the 2.5th and 97.5th percentiles of the sorted replicates by linear interpolation at position q (R - 1). The Gaussian row for the mean is the estimate plus or minus 1.959964 times s/sqrt(25), s the standard deviation with divisor n - 1. The mean and the median rows share the same resamples: each of the 10,000 resamples yields both its mean and its median.
+Latency generator: `statistics.latency_sample`.
+Bootstrap generator: `statistics.bootstrap_median`. 10,000 resamples; a resample is 25 calls of `rng.integer(25)`, each the index into the ascending latencies above. The median of 25 values is the 13th smallest. Interval ends: the 2.5th and 97.5th percentiles of the sorted replicates by linear interpolation at position q (R - 1). The Gaussian row for the mean is the estimate plus or minus 1.959964 times s/sqrt(25), s the standard deviation with divisor n - 1. The mean and the median rows share the same resamples: each of the 10,000 resamples yields both its mean and its median.
 
 | statistic | estimate (ms) | lower end of 95 percent interval | upper end | how |
 |---|---:|---:|---:|---|
@@ -868,7 +868,7 @@ second scenario:
 ![Histogram of the accuracy gap B minus A over 2000 bootstrap resamples of the 500 questions in scenario 2, with the 2.5 and 97.5 percent bounds as dashed lines and a red dashed line at zero, which lies just outside the interval on its left.](img/bootstrap-distribution.svg)
 
 <!-- worked: statistics_ch.bootstrap_intervals -->
-Generator: the book's SplitMix64, seed 0x6f5a53555ca2574d (8023817312205428557). One generator: scenario 1's 2000 resamples, then scenario 2's. A resample of a scenario's 500 questions makes 500 calls of `rng.integer(500)`, each giving the index of a question (questions in the order: both right, only A right, only B right, both wrong); its replicate is the average of the chosen B - A differences. The interval ends are the 2.5th and 97.5th percentiles of the sorted replicates by linear interpolation at position q (R - 1) for R replicates; the standard error is the standard deviation of the replicates (divisor R). The Gaussian rows use the paired standard error with divisor n - 1 for the differences and z = 1.959964.
+Generator: `statistics.bootstrap_intervals` (the book's SplitMix64). One generator: scenario 1's 2000 resamples, then scenario 2's. A resample of a scenario's 500 questions makes 500 calls of `rng.integer(500)`, each giving the index of a question (questions in the order: both right, only A right, only B right, both wrong); its replicate is the average of the chosen B - A differences. The interval ends are the 2.5th and 97.5th percentiles of the sorted replicates by linear interpolation at position q (R - 1) for R replicates; the standard error is the standard deviation of the replicates (divisor R). The Gaussian rows use the paired standard error with divisor n - 1 for the differences and z = 1.959964.
 
 | scenario | method | B - A | standard error | 95% lower | 95% upper |
 |---|---|---:|---:|---:|---:|
@@ -899,7 +899,7 @@ of bootstrapping reports, averaged over $100$ such data sets (a single data set 
 lucky or unlucky):
 
 <!-- worked: statistics_ch.cluster_bootstrap -->
-Generator: the book's SplitMix64, seed 0x7334c5097e1edaf0 (8301476657711995632). One generator. Experiment: 15 sequences of 16 frames; per sequence one `rng.uniform()` u gives its success probability 0.3 + 0.6 u, then 16 `rng.uniform()` calls give its frames (1 when below that probability). First 2000 fresh experiments (the target is the standard deviation of their overall accuracy, divisor 2000). Then 100 more experiments in turn, each a data set; each data set is generated immediately before its own 200 rounds (data set 1, its rounds, data set 2, its rounds, ...); a round makes 240 calls of `rng.integer(240)` over its frames in order, sequence by sequence ('frames': accuracy of the resampled frames) and then 15 calls of `rng.integer(15)` over its sequences ('whole sequences': accuracy of the resampled sequences). Each data set's standard error is the standard deviation of its 200 accuracies (divisor 200); the table averages the 100 standard errors.
+Generator: `statistics.cluster_bootstrap` (the book's SplitMix64). One generator. Experiment: 15 sequences of 16 frames; per sequence one `rng.uniform()` u gives its success probability 0.3 + 0.6 u, then 16 `rng.uniform()` calls give its frames (1 when below that probability). First 2000 fresh experiments (the target is the standard deviation of their overall accuracy, divisor 2000). Then 100 more experiments in turn, each a data set; each data set is generated immediately before its own 200 rounds (data set 1, its rounds, data set 2, its rounds, ...); a round makes 240 calls of `rng.integer(240)` over its frames in order, sequence by sequence ('frames': accuracy of the resampled frames) and then 15 calls of `rng.integer(15)` over its sequences ('whole sequences': accuracy of the resampled sequences). Each data set's standard error is the standard deviation of its 200 accuracies (divisor 200); the table averages the 100 standard errors.
 
 | method | standard error of the accuracy | ratio to the target |
 |---|---:|---:|
@@ -947,7 +947,7 @@ accurate, each configuration compared with the baseline on the same $500$ questi
 a paired test, repeated $400$ times:
 
 <!-- worked: statistics_ch.best_of_twenty -->
-Generator: the book's SplitMix64, seed 0xff4c3acb934cc04a (18396143223925686346). One generator, 400 repeats in turn. A repeat draws the baseline's 500 answers (one `rng.uniform()` each, right when below 0.7), then for each of the 20 configurations its 500 answers in the same question order. A test is one (repeat, configuration) pair, so 'a single test: share declared different' is the share over all 400 x 20 = 8000 tests. 'Best-looking' is the configuration with the largest signed gap (B wins minus A wins, divided by 500). The Bonferroni z is the exact two-sided quantile for the level 0.05/20, 3.0233 (the Gaussian value holding 1 - 0.0025 within -z and z). The test per configuration is the paired z (B wins minus A wins over discordant pairs; variance with divisor n - 1 of the per-question differences), compared with 1.959964, or with the Bonferroni z for the level 0.05/20.
+Generator: `statistics.best_of_twenty` (the book's SplitMix64). One generator, 400 repeats in turn. A repeat draws the baseline's 500 answers (one `rng.uniform()` each, right when below 0.7), then for each of the 20 configurations its 500 answers in the same question order. A test is one (repeat, configuration) pair, so 'a single test: share declared different' is the share over all 400 x 20 = 8000 tests. 'Best-looking' is the configuration with the largest signed gap (B wins minus A wins, divided by 500). The Bonferroni z is the exact two-sided quantile for the level 0.05/20, 3.0233 (the Gaussian value holding 1 - 0.0025 within -z and z). The test per configuration is the paired z (B wins minus A wins over discordant pairs; variance with divisor n - 1 of the per-question differences), compared with 1.959964, or with the Bonferroni z for the level 0.05/20.
 
 | 400 repeats of: baseline and 20 configurations, all truly 0.70 | simulated | independent-tests formula |
 |---|---:|---:|

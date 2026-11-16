@@ -74,7 +74,7 @@ def _num(v, d=4):
 def _task():
     """W0, the target W*, the Gram matrix M = X^T X / NS of the inputs, X, and the exact change W* - W0.
 
-    One generator, seeded seed_of('peft.task'), draws in this order: W0 (16 x 32, row-major, each normal() times 0.5), U (16 x 2,
+    One generator, `peft.task`, draws in this order: W0 (16 x 32, row-major, each normal() times 0.5), U (16 x 2,
     row-major), V (32 x 2, row-major), G (16 x 32, row-major) and the inputs X (128 x 32, row-major), all normal()."""
     g = bookrng.generator("peft.task")
     W0 = [[0.5 * g.normal() for _ in range(INN)] for _ in range(OUT)]
@@ -121,7 +121,7 @@ class _Adam:
 # ------------------------------------------------------------------ the adapter
 
 def _init_A(r, name="peft.rank_sweep"):
-    """A (r x 32): normal() / sqrt(32), row-major, from a generator seeded seed_of(name) that this run starts afresh."""
+    """A (r x 32): normal() / sqrt(32), row-major, from the generator `name` that this run starts afresh."""
     g = bookrng.generator(name)
     return [[g.normal() / math.sqrt(INN) for _ in range(INN)] for _ in range(r)]
 
@@ -186,8 +186,7 @@ def task_spectrum():
         trunc = dc._truncate(U, sig, V, r)
         kept = sum(x * x for x in sig[:r]) / total
         rows.append([r, _num(sig[r - 1], 4), f"{100 * kept:.3f}", r * (OUT + INN), _num(_loss(_add(W0, trunc), M, Wt), 4)])
-    seed = bookrng.seed_of("peft.task")
-    head = (f"The layer has {OUT} rows and {INN} columns ({OUT * INN} weights). One generator seeded {seed} (seed_of 'peft.task') draws, "
+    head = (f"The layer has {OUT} rows and {INN} columns ({OUT * INN} weights). The generator `peft.task` draws, "
             f"in this order and each by normal(): W0 ({OUT} x {INN}, row-major, every draw times 0.5), U ({OUT} x 2, row-major), "
             f"V ({INN} x 2, row-major), G ({OUT} x {INN}, row-major) and {NS} inputs x_n of {INN} numbers (row-major). "
             "The change the fine-tune needs is dW* = 0.02 u1 v1^T + 0.01 u2 v2^T + 0.004 G (u1, u2 the columns of U, v1, v2 the "
@@ -234,8 +233,7 @@ def lora_gradient_check():
     A0 = _init_A(r)
     B0 = [[0.0] * r for _ in range(OUT)]
     dA0, dB0 = _lora_gradients(_dw(_lora_weight(W0, A0, B0, s), M, Wt), A0, B0, s)
-    seed = bookrng.seed_of("peft.lora_gradient_check")
-    head = (f"Rank r = {r} and scale s = 2/3 (alpha = 2). One generator seeded {seed} (seed_of 'peft.lora_gradient_check') draws A "
+    head = (f"Rank r = {r} and scale s = 2/3 (alpha = 2). The generator `peft.lora_gradient_check` draws A "
             f"({r} x {INN}, row-major, each normal() divided by sqrt({INN})) and then B ({OUT} x {r}, row-major, each normal() times 0.1). "
             f"The analytic gradients dA = s B^T dW and dB = s dW A^T, with dW = (W - W*) M for W = W0 + s B A, are compared with "
             f"central differences of the loss with step {h:g} at every one of the {r * INN + OUT * r} entries; the deviation is "
@@ -259,10 +257,9 @@ def rank_sweep():
         rows.append([f"LoRA, rank {r}", r * (OUT + INN), f"{100 * r * (OUT + INN) / (OUT * INN):.2f}", loss, _num(floor, 4)])
     full = _stable_loss(lambda d: _train_full(d))
     rows.append(["every weight", OUT * INN, "100.00", full, "-"])
-    seed = bookrng.seed_of("peft.rank_sweep")
     head = (f"The task of the first table, {STEPS} Adam steps (beta1 0.9, beta2 0.999, epsilon 1e-8, bias-corrected, no weight decay, "
             f"rate {LR}) on the trainable numbers only. LoRA starts from B = 0 and A = normal() / sqrt({INN}) in row-major order, "
-            f"from a generator seeded {seed} (seed_of 'peft.rank_sweep') that every run starts afresh, so the rank-2 A begins with the rank-1 A; "
+            f"from the generator `peft.rank_sweep` that every run starts afresh, so the rank-2 A begins with the rank-1 A; "
             "the scale is s = alpha / r with alpha = r, that is s = 1. The full run starts from W0 and updates all weights. "
             "The loss column is the loss after the last step, and a loss below 1e-9 is printed as such. " + stable.RULE +
             " In the nudged runs the first entry of A (of the weight, in the full run) starts at the stated tiny amount above its "
@@ -356,9 +353,8 @@ def nf4_error():
         worst = max(abs(a - b) for rq, rw in zip(Q, W) for a, b in zip(rq, rw))
         rows.append([label, f"{bits:.2f}", f"{rel:.4f}", f"{worst:.5f}"])
     gaps = ", ".join(f"{NF4[c + 1] - NF4[c]:.4f}" for c in range(15))
-    seed = bookrng.seed_of("peft.nf4_error")
-    head = (f"A matrix of {rows_n} rows and {cols_n} columns, every entry 0.02 times normal(), drawn row-major from one generator seeded "
-            f"{seed} (seed_of 'peft.nf4_error'). Each row is cut into groups of {GROUP} consecutive entries with one scale each; the scale is "
+    head = (f"A matrix of {rows_n} rows and {cols_n} columns, every entry 0.02 times normal(), drawn row-major from the generator "
+            f"`peft.nf4_error`. Each row is cut into groups of {GROUP} consecutive entries with one scale each; the scale is "
             "the group's largest magnitude divided by 127, 7 or 1 (1 is the largest magnitude of the codebook), the integer formats round "
             "half away from zero and clamp, and the codebook format takes the nearest of the 16 values below, a tie going to the lower "
             "code. The codebook is " + ", ".join(f"{v:g}" for v in NF4) + f", and the gaps between neighbouring values are {gaps}. "
@@ -481,9 +477,8 @@ def merge_adapters():
     for r in (1, 2, 3, 4):
         rows.append([f"error of the best rank-{r} copy of the merged change, over its norm",
                      f"{_fro(_sub(sums, dc._truncate(U, sig, V, r))) / _fro(sums):.4f}"])
-    seed = bookrng.seed_of("peft.merge_adapters")
     head = (f"Two adapters on the 16 x 32 layer: A1 (2 x 32), B1 (16 x 2), A2 (3 x 32) and B2 (16 x 3), every entry 0.2 times normal(), drawn "
-            f"in the order A1, B1, A2, B2 (each row-major) from one generator seeded {seed} (seed_of 'peft.merge_adapters'). The strengths are "
+            f"in the order A1, B1, A2, B2 (each row-major) from the generator `peft.merge_adapters`. The strengths are "
             "s1 = 1 and s2 = 0.5 (the scale alpha / r of each adapter folded into its strength). The sum form is s1 B1 A1 + s2 B2 A2; the "
             "concatenated form is [s1 B1 | s2 B2] times A1 stacked over A2, a single product of rank 5. Singular values come from "
             "one-sided Jacobi rotations in float64.\n\n")
@@ -544,10 +539,9 @@ def bank_semantics():
         same = ys[i] == ys_bad[i]
         rows.append([i, "none (4294967295)" if z == NONE else z, "-" if z == NONE else BANK_RANKS[z],
                      "below 1e-12" if diff < 1e-12 else f"{diff:.1e}", "yes" if same else "no"])
-    seed = bookrng.seed_of("peft.bank")
-    head = (f"The 16 x 32 layer W0 of the task (the first 512 draws of the generator seeded seed_of 'peft.task', each normal() times 0.5, "
+    head = (f"The 16 x 32 layer W0 of the task (the first 512 draws of the generator `peft.task`, each normal() times 0.5, "
             f"row-major) and a bank of three adapters whose ranks are {BANK_RANKS[0]}, {BANK_RANKS[1]} and {BANK_RANKS[2]}, padded to "
-            f"r_max = {R_MAX} rows. One generator seeded {seed} (seed_of 'peft.bank') draws, for slot 0, 1, 2 in turn, A_k (r_k x 32, row-major) "
+            f"r_max = {R_MAX} rows. The generator `peft.bank` draws, for slot 0, 1, 2 in turn, A_k (r_k x 32, row-major) "
             "and then B_k (16 x r_k, row-major), every entry 0.2 times normal(), and after the three slots draws the six input rows "
             "(32 numbers each, row-major, each normal() with no factor). The bank stores A_k padded to r_max rows and the transposed (alpha / r_k) B_k, alpha = 4, "
             "padded the same way; in the 'poisoned' copy every padding row holds 1e6 instead of zero. A batch of six rows carries the slot vector "

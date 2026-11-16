@@ -16,7 +16,7 @@ that say what the sixteen codes mean (a step between neighbouring levels and the
 and see what that cost. We do it twice, once with a step only (the integer format of Chapter 1) and once with a step and an offset.
 
 <!-- worked: quantization.eight_weights -->
-Eight weights w_i = round(0.03 + 0.05 z_i, 4), z_i = normal() drawn in order i = 0 .. 7 from the generator, seed 17571350666410209559 (seed_of 'quantization.eight_weights', defined on the pseudocode page). Symmetric: Delta = max|w| / 7 = 0.0874 / 7 = 0.012486, q = clamp(round(w / Delta), -7, 7), w' = Delta q. Affine: range extended to contain 0, [-0.0401, +0.0874], Delta = (max - min) / 15 = 0.008500, q0 = round(-min / Delta) = 5, q = clamp(round(w / Delta) + q0, 0, 15), w' = Delta (q - q0).
+Eight weights w_i = round(0.03 + 0.05 z_i, 4), z_i = normal() drawn in order i = 0 .. 7 from the generator `quantization.eight_weights`. Symmetric: Delta = max|w| / 7 = 0.0874 / 7 = 0.012486, q = clamp(round(w / Delta), -7, 7), w' = Delta q. Affine: range extended to contain 0, [-0.0401, +0.0874], Delta = (max - min) / 15 = 0.008500, q0 = round(-min / Delta) = 5, q = clamp(round(w / Delta) + q0, 0, 15), w' = Delta (q - q0).
 
 | i | w | q sym | w' sym | error sym | q affine | w' affine | error affine |
 |---|---:|---:|---:|---:|---:|---:|---:|
@@ -91,7 +91,7 @@ The price of the zero point is paid in the product: $x\cdot w' = \Delta\,x\,(q -
 The figure shows what the sixteen codes mean for a bell-shaped tensor. The levels are evenly spaced, the weights are not: the outermost codes stand in the tails where there are almost no weights, and the central ones carry nearly all of them.
 
 <!-- worked: quantization.histogram_summary -->
-4096 weights 0.02 normal() in draw order from the generator, seed 11084680763937460601 (seed_of 'quantization.histogram', defined on the pseudocode page); max |w| = 0.07682. Symmetric levels: Delta = max|w| / 7 = 0.010974, 15 levels from -0.0768 to +0.0768. Affine levels: Delta = 0.009829, q0 = 8, 16 levels from -0.0786 to +0.0688. Weights within half a step of zero: 21.6% decode to 0 under the symmetric levels.
+4096 weights 0.02 normal() in draw order from the generator `quantization.histogram`; max |w| = 0.07682. Symmetric levels: Delta = max|w| / 7 = 0.010974, 15 levels from -0.0768 to +0.0768. Affine levels: Delta = 0.009829, q0 = 8, 16 levels from -0.0786 to +0.0688. Weights within half a step of zero: 21.6% decode to 0 under the symmetric levels.
 <!-- /worked -->
 
 Every weight between two neighbouring levels is moved to the nearer one. That move is the whole of the error, and the next section computes how large it is.
@@ -114,7 +114,7 @@ cover $[-A, A]$ with $2^{n_b}$ levels, $\Delta = 2A/2^{n_b}$ and $\mathrm{MSE} =
 **each added bit quarters the error power and adds $10\log_{10} 4 = 6.02$ decibels.** We test the claim on 100,000 normal weights, with the symmetric code and a scale from the largest weight:
 
 <!-- worked: quantization.uniform_error_model -->
-100000 weights w_i = normal() drawn in order from the generator, seed 9090619445670182624 (seed_of 'quantization.uniform_error', defined on the pseudocode page) (mean w^2 = 1.0023). One scale for all of them, Delta = max|w| / q_max with q_max = 2^(n-1) - 1, q = clamp(round(w / Delta), -q_max, q_max), w' = Delta q; 'predicted' is Delta^2 / 12, 'ratio' is measured over predicted, 'worst / (Delta/2)' the largest |error| in units of the bound, SQNR = 10 log10(mean w^2 / MSE) in dB, 'gain' its change from the row above.
+100000 weights w_i = normal() drawn in order from the generator `quantization.uniform_error` (mean w^2 = 1.0023). One scale for all of them, Delta = max|w| / q_max with q_max = 2^(n-1) - 1, q = clamp(round(w / Delta), -q_max, q_max), w' = Delta q; 'predicted' is Delta^2 / 12, 'ratio' is measured over predicted, 'worst / (Delta/2)' the largest |error| in units of the bound, SQNR = 10 log10(mean w^2 / MSE) in dB, 'gain' its change from the row above.
 
 | n bits | levels | Delta | predicted MSE | measured MSE | ratio | worst / (Delta/2) | SQNR dB | gain |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -141,7 +141,7 @@ as large (the seeded flags are drawn after the normals, as the table states). We
 look only at the weights that are not outliers, because those carry nearly all of the tensor's information.
 
 <!-- worked: quantization.outliers -->
-16384 weights, seed 9405317910815589369 (seed_of 'quantization.heavy_tailed', defined on the pseudocode page): first z_i = normal() for i = 0 .. 16383, then u_i = uniform() for i = 0 .. 16383; w_i = 0.02 z_i, and in the 'with outliers' rows w_i = 0.2 z_i where u_i < 0.004 (58 weights; the 'no outliers' rows ignore u). 4-bit symmetric codes -7 .. 7, scale = max|group| / 7 stored as f32. The columns after the scale are computed over the weights that are not outliers (the same indices in both datasets): the share that decode to 0, their MSE and their SQNR in dB. 'Delta' is the single tensor scale.
+16384 weights from the generator `quantization.heavy_tailed`: first z_i = normal() for i = 0 .. 16383, then u_i = uniform() for i = 0 .. 16383; w_i = 0.02 z_i, and in the 'with outliers' rows w_i = 0.2 z_i where u_i < 0.004 (58 weights; the 'no outliers' rows ignore u). 4-bit symmetric codes -7 .. 7, scale = max|group| / 7 stored as f32. The columns after the scale are computed over the weights that are not outliers (the same indices in both datasets): the share that decode to 0, their MSE and their SQNR in dB. 'Delta' is the single tensor scale.
 
 | data | scales | Delta | non-outliers decoded as 0 | MSE of non-outliers | SQNR of non-outliers dB |
 |---|---|---:|---:|---:|---:|
@@ -181,7 +181,7 @@ $$\mathrm{bpw} = n_b + \frac{\text{scale bits}}{G}.$$
 With a 16-bit scale and $G = 32$ this is $n_b + 0.5$: a 12.5% surcharge on 4-bit codes. The table shows both sides of the trade, for 4-bit codes on the heavy-tailed weights of the last section and on 16,384 Gaussian weights.
 
 <!-- worked: quantization.group_size_tradeoff -->
-4-bit symmetric codes -7 .. 7, scale max|group| / 7 stored as f16 (16 bits), so bits per weight = 4 + 16 / G. 'heavy-tailed': the 16384 weights of the previous example with outliers (seed 9405317910815589369 (seed_of 'quantization.heavy_tailed', defined on the pseudocode page)). 'gaussian': 16384 weights 0.02 normal() in draw order from the generator, seed 16290145298982480632 (seed_of 'quantization.group_gauss', defined on the pseudocode page). 'scale overhead' is the scale bits as a share of the 4 code bits. SQNR in dB over all weights.
+4-bit symmetric codes -7 .. 7, scale max|group| / 7 stored as f16 (16 bits), so bits per weight = 4 + 16 / G. 'heavy-tailed': the 16384 weights of the previous example with outliers (generator `quantization.heavy_tailed`). 'gaussian': 16384 weights 0.02 normal() in draw order from the generator `quantization.group_gauss`. 'scale overhead' is the scale bits as a share of the 4 code bits. SQNR in dB over all weights.
 
 | G | bits per weight | bytes per weight | scale overhead | SQNR heavy-tailed dB | SQNR gaussian dB |
 |---|---:|---:|---:|---:|---:|
@@ -233,7 +233,7 @@ The sum $\sum_j x_j q_j$ is the multiply-add that a product needs anyway, with t
 $\sum_j x_j$ does not depend on the row of the weight matrix at all, so it is computed once per group of activations and reused by every output row. The identity is exact in real arithmetic and agrees to rounding in floating point:
 
 <!-- worked: quantization.factored_dot -->
-One group of 32 weights w_j = round(0.05 z, 4) then 32 activations x_j = round(normal(), 4), all normal() in draw order from the generator, seed 9880860142518576437 (seed_of 'quantization.factored_dot', defined on the pseudocode page). 4-bit affine codes: Delta = 0.014680, q0 = 9. Every sum is in binary64 (double precision), added from j = 0 to 31 in order; each form is then rounded to the digits shown. The difference of the two quantized forms is a few units of the last place of a double (an implementation that adds in another order, or fuses a multiply-add, gets 0 or about 2.2e-16): the table prints only that it is below 1e-15.
+One group of 32 weights w_j = round(0.05 z, 4) then 32 activations x_j = round(normal(), 4), all normal() in draw order from the generator `quantization.factored_dot`. 4-bit affine codes: Delta = 0.014680, q0 = 9. Every sum is in binary64 (double precision), added from j = 0 to 31 in order; each form is then rounded to the digits shown. The difference of the two quantized forms is a few units of the last place of a double (an implementation that adds in another order, or fuses a multiply-add, gets 0 or about 2.2e-16): the table prints only that it is below 1e-15.
 
 | form | value |
 |---|---:|
@@ -282,7 +282,7 @@ and one f16 factor $d$, so $w' = d\,\mathrm{sc}_j\,(q - 32)$ with $q \in 0 \ldot
 Everything about Q4_K is in its 144 bytes. We build one from 256 seeded weights, whose eight sub-blocks have different spreads and different centres (so that scales and floors vary), and encode it with the rule below.
 
 <!-- worked: quantization.q4k_inputs -->
-One super-block of 256 weights, seed 8407793496796183675 (seed_of 'quantization.q4k_block', defined on the pseudocode page): for sub-block j = 0 .. 7 in order, 32 weights w = round(mu_j + sigma_j z, 4) with z = normal() drawn in order (256 draws in all), sigma_j = 0.02 (1 + j mod 3), mu_j = 0.01 (j - 3). Per sub-block: the smallest and largest weight, the floor m_j = max(0, -min) and the step D_j = (max + m_j) / 15 that would use all 16 codes.
+One super-block of 256 weights from the generator `quantization.q4k_block`: for sub-block j = 0 .. 7 in order, 32 weights w = round(mu_j + sigma_j z, 4) with z = normal() drawn in order (256 draws in all), sigma_j = 0.02 (1 + j mod 3), mu_j = 0.01 (j - 3). Per sub-block: the smallest and largest weight, the floor m_j = max(0, -min) and the step D_j = (max + m_j) / 15 that would use all 16 codes.
 
 | j | sigma_j | mu_j | min | max | floor m_j | step D_j |
 |---|---:|---:|---:|---:|---:|---:|
@@ -482,7 +482,7 @@ The usual Q4_K encoder does not stop at the min-max step of the sketch above: it
 All these formats store a tensor and read it back; they differ in the bits they spend on scales. On the 16,384 heavy-tailed weights, with every scale counted:
 
 <!-- worked: quantization.format_comparison -->
-The 16384 heavy-tailed weights of the outlier example (seed 9405317910815589369 (seed_of 'quantization.heavy_tailed', defined on the pseudocode page), outliers included; max |w| = 0.3739) stored in each format. 'Q4_0': per group of 32, d = (signed element of largest magnitude) / -8 rounded to f16 (nearest, ties to even), code = clamp(round_even(w / d) + 8, 0, 15) (round_even: nearest, ties to even), w' = d (code - 8); a group of zeros decodes to zeros. 'recipe': eight sub-blocks of 32 with a 6-bit step and 6-bit floor each, an f16 d and dmin per 256 weights, as derived in the chapter (n-bit codes, 128 bits of scales per 256 weights). Bits per weight count every stored scale.
+The 16384 heavy-tailed weights of the outlier example (generator `quantization.heavy_tailed`, outliers included; max |w| = 0.3739) stored in each format. 'Q4_0': per group of 32, d = (signed element of largest magnitude) / -8 rounded to f16 (nearest, ties to even), code = clamp(round_even(w / d) + 8, 0, 15) (round_even: nearest, ties to even), w' = d (code - 8); a group of zeros decodes to zeros. 'recipe': eight sub-blocks of 32 with a 6-bit step and 6-bit floor each, an f16 d and dmin per 256 weights, as derived in the chapter (n-bit codes, 128 bits of scales per 256 weights). Bits per weight count every stored scale.
 
 | format | bits per weight | SQNR dB | MSE | largest |error| |
 |---|---:|---:|---:|---:|
@@ -508,7 +508,7 @@ Both store a scale per group (here the group maximum divided by the format's lar
 for every magnitude. We measure it on the heavy-tailed weights, grouped by 32, by the position $t = |w|/\max|\mathrm{group}|$ of each weight under its group's largest:
 
 <!-- worked: quantization.fp8_vs_int -->
-The 16384 heavy-tailed weights (seed 9405317910815589369 (seed_of 'quantization.heavy_tailed', defined on the pseudocode page)), stored in groups of 32 with one scale each: int8 (scale max|group| / 127), E4M3 (scale max|group| / 448, saturating, ties to even, with the decode of Chapter 1), E5M2 (scale max|group| / 57344) and int4 (scale max|group| / 7). Rows are bins of t = |w| / max|group| (the position of the weight under its group's largest); each cell is the mean of |w' - w| / |w| over the weights of the bin. Scales are kept exactly here, to isolate the codes.
+The 16384 heavy-tailed weights (generator `quantization.heavy_tailed`), stored in groups of 32 with one scale each: int8 (scale max|group| / 127), E4M3 (scale max|group| / 448, saturating, ties to even, with the decode of Chapter 1), E5M2 (scale max|group| / 57344) and int4 (scale max|group| / 7). Rows are bins of t = |w| / max|group| (the position of the weight under its group's largest); each cell is the mean of |w' - w| / |w| over the weights of the bin. Scales are kept exactly here, to isolate the codes.
 
 | t of the weight | weights | int8 | E4M3 | E5M2 | int4 |
 |---|---:|---:|---:|---:|---:|
@@ -534,7 +534,7 @@ $k\,\mathrm{MSE}\,\mathbb{E}[x^2]$ for $k$ inputs, while the output power is $k\
 the SQNR of the output equals the SQNR of the weights, however wide the layer. We check the prediction on a seeded layer of 64 outputs and 256 inputs, quantized group-wise at 2 to 8 bits:
 
 <!-- worked: quantization.layer_output -->
-A linear layer y = W x with W of shape [64, 256], W_ij = 0.05 normal() drawn in row-major order, then 32 inputs x with entries normal() drawn in order, one input after another, from the generator, seed 112913310546379283 (seed_of 'quantization.layer_output', defined on the pseudocode page). W is stored in n-bit symmetric codes with one f16 scale per 32 weights along each row (bits per weight = n + 0.5). 'weight SQNR' is over the weights, 'output SQNR' over all 2048 output values; 'relative output error' is the RMS error over the RMS output; cosine between the exact and the quantized outputs, both taken over the flattened vector of all 2048 outputs (input after input, output unit within it); weight and output SQNR use the mean of the squared exact values as the signal power.
+A linear layer y = W x with W of shape [64, 256], W_ij = 0.05 normal() drawn in row-major order, then 32 inputs x with entries normal() drawn in order, one input after another, from the generator `quantization.layer_output`. W is stored in n-bit symmetric codes with one f16 scale per 32 weights along each row (bits per weight = n + 0.5). 'weight SQNR' is over the weights, 'output SQNR' over all 2048 output values; 'relative output error' is the RMS error over the RMS output; cosine between the exact and the quantized outputs, both taken over the flattened vector of all 2048 outputs (input after input, output unit within it); weight and output SQNR use the mean of the squared exact values as the signal power.
 
 | n bits | bits per weight | weight SQNR dB | output SQNR dB | difference | cosine | relative output error |
 |---|---:|---:|---:|---:|---:|---:|
@@ -562,7 +562,7 @@ $\sum_i E_{i n_i}$ within a byte budget. The problem is a multiple-choice knapsa
 We make the stated model concrete. The error of one width comes from the group-wise codes of the last sections, measured once on standard normals:
 
 <!-- worked: quantization.rel_table -->
-The error of one weight at each tier: n-bit symmetric codes, f16 scale per 32 (bits per weight n + 0.5), measured as MSE over variance, the variance being the mean of w^2 (the weights have mean about 0, and it is not centred), on 65536 standard normals normal() drawn in order from the generator, seed 14869717799698414631 (seed_of 'quantization.rel', defined on the pseudocode page). This relative MSE is the rel_n of the search below.
+The error of one weight at each tier: n-bit symmetric codes, f16 scale per 32 (bits per weight n + 0.5), measured as MSE over variance, the variance being the mean of w^2 (the weights have mean about 0, and it is not centred), on 65536 standard normals normal() drawn in order from the generator `quantization.rel`. This relative MSE is the rel_n of the search below.
 
 | n bits | bits per weight | rel_n | SQNR dB |
 |---|---:|---:|---:|
@@ -576,7 +576,7 @@ The error of one weight at each tier: n-bit symmetric codes, f16 scale per 32 (b
 And the tensors, drawn from the book's generator:
 
 <!-- worked: quantization.search_inputs -->
-Twelve tensors, i = 0 .. 11, each drawn in order from the generator, seed 6755556699504753404 (seed_of 'quantization.tensors', defined on the pseudocode page): size N_i = 4096 (1 + integer(4)), sigma_i = 0.02 * 2^(0.5 normal()), sensitivity sens_i = 10^(2 uniform()); the draws of one tensor are made in the order integer, normal, uniform, and sigma_i and sens_i are rounded to 3 significant digits before use (the table prints them rounded). normal() is the book's Box-Muller with the held partner: tensor 0's normal() draws two uniforms and holds the sine partner, tensor 1's normal() returns the held value without drawing, tensor 2's draws two uniforms again, and so on (the held value carries across tensors). The estimated loss increase of tensor i stored at n bits is E_in = (1/2) sens_i N_i sigma_i^2 rel_n, its bytes N_i (n + 0.5) / 8.
+Twelve tensors, i = 0 .. 11, each drawn in order from the generator `quantization.tensors`: size N_i = 4096 (1 + integer(4)), sigma_i = 0.02 * 2^(0.5 normal()), sensitivity sens_i = 10^(2 uniform()); the draws of one tensor are made in the order integer, normal, uniform, and sigma_i and sens_i are rounded to 3 significant digits before use (the table prints them rounded). normal() is the book's Box-Muller with the held partner: tensor 0's normal() draws two uniforms and holds the sine partner, tensor 1's normal() returns the held value without drawing, tensor 2's draws two uniforms again, and so on (the held value carries across tensors). The estimated loss increase of tensor i stored at n bits is E_in = (1/2) sens_i N_i sigma_i^2 rel_n, its bytes N_i (n + 0.5) / 8.
 
 | i | N_i | sigma_i | sensitivity sens_i |
 |---|---:|---:|---:|
@@ -652,7 +652,7 @@ In 8 of the 9 budgets the greedy plan is the exhaustive optimum. At 5.75 bits pe
 that a different set of steps would have used. For items whose benefit falls steadily with cost (convex options) and a budget that lands exactly on a step, greedy is optimal. Elsewhere it can be far from the optimum: the table above is a sample of nine budgets, and the finer sweep under it finds greedy off by up to a factor 1.75. The "within one upgrade" that is sometimes quoted for greedy is a statement about the linear relaxation of the problem, in which the last upgrade may be taken in part; it says nothing about the best whole assignment. On the twelve tensors:
 
 <!-- worked: quantization.greedy_plan -->
-The twelve tensors of the input table, tiers n in {2, 3, 4, 6, 8}, budget 4.5 bits per weight x 110,592 weights / 8 = 62,208 bytes. A random plan draws n for tensors 0 .. 11 in order as TIERS[integer(5)] with TIERS = (2, 3, 4, 6, 8) from the generator, seed 14439535479056496435 (seed_of 'quantization.random_plans', defined on the pseudocode page), and is kept when it fits (drawing until 200 are kept; 976 were drawn).
+The twelve tensors of the input table, tiers n in {2, 3, 4, 6, 8}, budget 4.5 bits per weight x 110,592 weights / 8 = 62,208 bytes. A random plan draws n for tensors 0 .. 11 in order as TIERS[integer(5)] with TIERS = (2, 3, 4, 6, 8) from the generator `quantization.random_plans`, and is kept when it fits (drawing until 200 are kept; 976 were drawn).
 
 | i | N_i | sens_i | sigma_i^2 sens_i | chosen bits | bytes | estimated error |
 |---|---:|---:|---:|---:|---:|---:|

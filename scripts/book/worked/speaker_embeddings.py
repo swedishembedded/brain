@@ -59,10 +59,6 @@ def _mega(v, d=1):
     return f"{v / 1e6:,.{d}f}"
 
 
-def _seed(name):
-    return f"seed 0x{bookrng.seed_of(name):016x} ({bookrng.seed_of(name)})"
-
-
 def _row(v, d=3):
     return "(" + ", ".join(_f(x, d) for x in v) + ")"
 
@@ -651,7 +647,7 @@ def scoring():
         frr, far = rates(gen, imp, tau8)
         rows2.append((sec, _f(tau8, 3), f"{100 * frr:.1f}%", f"{100 * far:.1f}%"))
     return (f"Simulated embeddings, not a trained network: {SC_SPEAKERS} speakers, {SC_UTT} utterances each, vectors of width {SC_D}. "
-            f"The generator is `{SC_NAME}` ({_seed(SC_NAME)}). Draw order: the {SC_SPEAKERS} centres (speaker 0 to {SC_SPEAKERS - 1}, "
+            f"The generator is `{SC_NAME}`. Draw order: the {SC_SPEAKERS} centres (speaker 0 to {SC_SPEAKERS - 1}, "
             f"{SC_D} standard normals each, each divided by its length), then the noise (speaker, utterance, {SC_D} standard "
             f"normals). An utterance of s seconds of speaker i is its centre plus {SC_RHO:g} times its noise vector divided by "
             f"sqrt({SC_D} * s), the whole divided by its length; the same noise is used for all four lengths. Cosines are dot products "

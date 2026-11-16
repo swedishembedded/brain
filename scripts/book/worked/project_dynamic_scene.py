@@ -712,19 +712,19 @@ def world_setup():
         "Ball A: x from x_0 = -0.7, v_0 = 0.12, k = 0.12, eta = 0.995, c = 0; z from z_0 = 4.6, v_0 = 0.05, k = 0.08, eta = 0.995, c = 5.2. Ball B (k = 0): "
         "x from -0.9 with v_0 = 0.10 and z from 4.5 with v_0 = 0.11, both with eta = 0.9. Ball C (k = 0, eta = 1): x = min(-0.9 + 0.15 t, 0.9), z = 6.0. "
         f"A frame is the render (`gaussian_splatting.render`, background {_vec(SKY, 2)}) of the true scene: 14 Gaussians for the wall and floor "
-        f"(`{TRUTH_NAME}`, seed {bookrng.seed_of(TRUTH_NAME)}: for each Gaussian in turn, wall (y = -0.8 then 0.6, x = -1.4, -0.1, 1.2, 2.5) "
+        f"(the generator `{TRUTH_NAME}`: for each Gaussian in turn, wall (y = -0.8 then 0.6, x = -1.4, -0.1, 1.2, 2.5) "
         "then floor (z = 4.8 then 5.8, x = -0.8, 0, 0.8), three `uniform()` draws for the colour, 0.15 + 0.7 u on the wall and 0.3 + 0.4 u on the "
         "floor), scales (0.9, 0.8, 0.1) on the wall at z = 8 and (0.5, 0.04, 0.5) on the floor at y = 1.5, opacity 0.95, identity quaternion, and "
         f"three balls of scale {BALL_R:g} on all axes, opacity 0.95 and colours (0.9, 0.2, 0.2), (0.2, 0.8, 0.3), (0.9, 0.8, 0.2).", "",
         _table(["Gaussian", "part", "mean", "scales", "colour"], srows, "rllll"), "",
-        f"The observed frames carry noise: `{IMG_NOISE_NAME}` (seed {bookrng.seed_of(IMG_NOISE_NAME)}), frame by frame, row by row, column by "
+        f"The observed frames carry noise: `{IMG_NOISE_NAME}`, frame by frame, row by row, column by "
         f"column, channel by channel, `normal()` times {IMG_SIGMA:g} added to the clean value. The sum of the 2,304 values of clean frame 0 is "
         f"{s0:.6f}, of clean frame 11 {s11:.6f}, of observed frame 0 {n0:.6f}.", "",
-        f"The feature tracks: 40 landmarks and the 3 ball centres (the points (x_t, {BALL_Y:g}, z_t)). The landmarks come from `{LAND_NAME}` "
-        f"(seed {bookrng.seed_of(LAND_NAME)}): 20 wall points, three `uniform()` draws each in the order x = -1.8 + 4.2 u, y = -1.6 + 2.6 u, "
+        f"The feature tracks: 40 landmarks and the 3 ball centres (the points (x_t, {BALL_Y:g}, z_t)). The landmarks come from `{LAND_NAME}`: "
+        f"20 wall points, three `uniform()` draws each in the order x = -1.8 + 4.2 u, y = -1.6 + 2.6 u, "
         "z = 7.8 + 0.4 u; then the four corners of the table in the order (xmin, zmin), (xmin, zmax), (xmax, zmin), (xmax, zmax); then 16 floor "
         "points, two draws each, x = -1.2 + 2.4 u, z = 4.0 + 2.4 u. The pixels are the projections plus noise from "
-        f"`{NOISE_NAME}` (seed {bookrng.seed_of(NOISE_NAME)}), {TRACK_SIGMA:g} pixel per coordinate, view by view, track by track, `normal()` for u "
+        f"`{NOISE_NAME}`, {TRACK_SIGMA:g} pixel per coordinate, view by view, track by track, `normal()` for u "
         f"then `normal()` for v. Landmark 0 is at {_vec(landmarks()[0], 5)}; its pixel in view 0 is ({pix[0][0][0]:.4f}, {pix[0][0][1]:.4f}) and "
         f"in view 11 ({pix[11][0][0]:.4f}, {pix[11][0][1]:.4f}); the pixel of ball A in view 0 is ({pix[0][40][0]:.4f}, {pix[0][40][1]:.4f})."])
 
@@ -768,7 +768,7 @@ def sparse_structure():
     return "\n".join([
         f"Frames {BASE_PAIR[0]} and {BASE_PAIR[1]} give the pair (the distance of their centres, {BASELINE:.4f} metres, is the one length the "
         f"reader is told). `structure_from_motion.ransac_essential` on the 43 normalized correspondences, threshold {PAIR_THRESH_PX:g} pixels, cap 500, "
-        f"generator `{RANSAC_NAME}` (seed {bookrng.seed_of(RANSAC_NAME)}): {two['iters']} iterations (the adaptive bound at the end is {nsamp}), "
+        f"generator `{RANSAC_NAME}`: {two['iters']} iterations (the adaptive bound at the end is {nsamp}), "
         f"{sum(two['mask'])} inliers of 43, the tracks outside the model are {[j for j in range(NTRACK) if not two['mask'][j]]} (tracks 40, 41, 42 are the "
         f"balls), the pose has the rotation angle {_rot_deg(two['R']):.3f} degrees (true {_rot_deg(cameras()[BASE_PAIR[1]][0]):.3f}) and the "
         f"translation direction {sfm.dir_error(two['t'], cameras()[BASE_PAIR[1]][1]):.3f} degrees from the true one. The inlier tracks are triangulated (`structure_from_motion."

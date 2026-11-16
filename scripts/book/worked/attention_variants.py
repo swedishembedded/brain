@@ -18,7 +18,7 @@ picture and the table beside it cannot disagree.
 * a softmax row that has nowhere to put its mass, and a stream where the first token leaves the window.
 
 The rotary rotation is the one of Volume V, Chapter 8 (`rotary`, implemented in `positions`), imported and not copied. Every random quantity comes
-from the book's SplitMix64 (`bookrng.generator(name)`); each block prints the seed. Sums of products are plain left-to-right
+from the book's SplitMix64 (`bookrng.generator(name)`); each block names its generator. Sums of products are plain left-to-right
 additions, the order a C loop would use (never Python's `sum`, which may compensate).
 
 Swedish Embedded AB implements solutions for serving language models within a memory budget. If your team needs expertise in
@@ -51,7 +51,7 @@ def _table(headers, rows, align=None):
 
 
 def _seed_line(name):
-    return f"Generator: the book's SplitMix64, seed {bookrng.seed_of(name):#018x} (`seed_of` of the name `{name}`)."
+    return f"Generator: `{name}` (the book's SplitMix64)."
 
 
 def _below(x, limit=1e-12):

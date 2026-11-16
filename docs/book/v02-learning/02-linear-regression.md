@@ -562,7 +562,7 @@ Case A: the third column is the voltage in millivolts, exactly 1000 v.
 
 The millivolt column is computed as 1000.0 * v in floating point. Elimination with partial pivoting on X^T X (the pivot of each column is the entry of largest size at or below the diagonal of the partly eliminated matrix; threshold 3.4e-05 = 1e-12 times the largest absolute entry of X^T X as formed): the first two pivots are 1.743e+04 and -2.223, and the third is rounding noise, below the threshold, so X^T X has no inverse. The rank is the number of eigenvalues of X^T X larger than 1e-9 times the largest eigenvalue: rank 2 of 3. Every (w1, w2) with w1 + 1000 w2 = 26.0240 gives the same predictions, for example (26.0240, 0) and (0, 0.0260240).
 
-Case B: the third column is a second meter reading the same voltage, differing by a few millivolts. Generator: the book's SplitMix64, seed 0xe44a83d6174254b9 (16450105544460620985). For the ten rows in table order, one `rng.normal()` each, the second meter reads v + 0.003 * rng.normal() rounded to 4 decimals. Labels of the second run: row 5 raised by 0.5.
+Case B: the third column is a second meter reading the same voltage, differing by a few millivolts. Generator: `linear_regression.second_meter` (the book's SplitMix64). For the ten rows in table order, one `rng.normal()` each, the second meter reads v + 0.003 * rng.normal() rounded to 4 decimals. Labels of the second run: row 5 raised by 0.5.
 
 | row n | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -1015,7 +1015,7 @@ parabola, found there by a grid search of $241{,}865$ settings, comes out of one
 $3 \times 3$ elimination.
 
 <!-- worked: linear_regression.polynomial_fit -->
-Polynomial features of the voltage (columns 1, v, v^2, ...), fitted by the normal equations on the ten rows. Weights are (w0, w1, ...) from the constant term up. The fresh rows are the 2000 rows of the source of the previous chapter, drawn from the book's SplitMix64 with seed 0x0fe67df3a852f39e (1145741640666903454). Each row is made by two draws in this order: v = 0.4 + 2.4 * rng.uniform(), then z = rng.normal(); y = -6 + 50 v - 8 v^2 + 1.2 z computed from the unrounded v; then v is rounded to 2 decimals and y to 1. The fits are not repeated on them: the weights found on the ten rows are scored on the fresh rows. MSE is shown to 3 decimals. cond(X^T X) is the largest eigenvalue over the smallest; the last column builds the columns 1, z, z^2, ... from the z-score z = (v - mean) / s of v (mean and standard deviation s of the ten voltages, divisor 9) instead of from v.
+Polynomial features of the voltage (columns 1, v, v^2, ...), fitted by the normal equations on the ten rows. Weights are (w0, w1, ...) from the constant term up. The fresh rows are the 2000 rows of the source of the previous chapter, drawn from the book's SplitMix64 as the generator `learning_problem.fresh`. Each row is made by two draws in this order: v = 0.4 + 2.4 * rng.uniform(), then z = rng.normal(); y = -6 + 50 v - 8 v^2 + 1.2 z computed from the unrounded v; then v is rounded to 2 decimals and y to 1. The fits are not repeated on them: the weights found on the ten rows are scored on the fresh rows. MSE is shown to 3 decimals. cond(X^T X) is the largest eigenvalue over the smallest; the last column builds the columns 1, z, z^2, ... from the z-score z = (v - mean) / s of v (mean and standard deviation s of the ten voltages, divisor 9) instead of from v.
 
 | model | weights | MSE, 10 known rows | MSE, 2000 fresh rows | cond(X^T X), raw v | cond(X^T X), z-scored v |
 |---|---:|---:|---:|---:|---:|
@@ -1052,7 +1052,7 @@ $R^2 = 1 - \mathrm{SS}_{\mathrm{res}}/\mathrm{SS}_{\mathrm{tot}}$ is $1$ for a l
 $0$ for a line no better than that mean (chapter 6 treats it properly):
 
 <!-- worked: linear_regression.power_law_log_fit -->
-Seven (size n_p, loss) points generated from loss = 0.5 + 10 n_p^-0.3 with multiplicative noise of one percent. Generator: the book's SplitMix64, seed 0x1377ca06b334a36f (1402811939074384751). For the sizes in the order listed, one `rng.normal()` each, the loss is (0.5 + 10 n_p^-0.3) * (1 + 0.01 * rng.normal()), shown to 4 decimals.
+Seven (size n_p, loss) points generated from loss = 0.5 + 10 n_p^-0.3 with multiplicative noise of one percent. Generator: `linear_regression.power_law` (the book's SplitMix64). For the sizes in the order listed, one `rng.normal()` each, the loss is (0.5 + 10 n_p^-0.3) * (1 + 0.01 * rng.normal()), shown to 4 decimals.
 
 | n_p | loss |
 |---|---:|

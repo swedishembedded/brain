@@ -159,7 +159,7 @@ the test once, then $A$ if any lane needs it, then $B$ if any lane needs it. The
 instructions times 32 lanes; the *useful* ones are what each lane needs for itself.
 
 <!-- worked: gpu.divergence -->
-1024 invocations i = 0 .. 1023 in 32 subgroups of 32. Every invocation runs the test (1 instruction), then path A (10 instructions) or path B (6). A subgroup issues the test once, path A if any lane takes it, path B if any lane takes it. Issue slots = issued instructions x 32 lanes; useful slots = the instructions each lane needs itself; utilization = useful / slots. Generator: the book's SplitMix64, seed 0x852873088c080294 (the seed of the name `gpu.divergence`); u_0 .. u_1023 are 1024 calls of `uniform` in index order, the same draws for the two random rows.
+1024 invocations i = 0 .. 1023 in 32 subgroups of 32. Every invocation runs the test (1 instruction), then path A (10 instructions) or path B (6). A subgroup issues the test once, path A if any lane takes it, path B if any lane takes it. Issue slots = issued instructions x 32 lanes; useful slots = the instructions each lane needs itself; utilization = useful / slots. Generator: the book's SplitMix64, `gpu.divergence`; u_0 .. u_1023 are 1024 calls of `uniform` in index order, the same draws for the two random rows.
 
 | rule | invocations on A | subgroups with both paths | instructions issued | useful lane-instructions | issue slots | utilization (%) |
 |---|---:|---:|---:|---:|---:|---:|
@@ -702,8 +702,8 @@ run it: the kernel, the dispatch, the buffers, and the discipline of describing 
    workgroup. Find $n_{\mathrm{res}}$, the limiting resource and the occupancy for this chapter's compute unit.
 5. **[Calculate]** For a $[2048, 2048]$ fp32 matrix, count the transactions to read it by rows, to read it by columns, and to transpose
    it naively and through $32 \times 32$ tiles in shared memory.
-6. **[Implement]** Reproduce `gpu.divergence`: draw $u_0, \ldots, u_{1023}$ with the book's generator from the seed
-   printed in the table, count the mixed subgroups for the two random rows and the utilization of every row.
+6. **[Implement]** Reproduce `gpu.divergence`: draw $u_0, \ldots, u_{1023}$ with the book's generator
+   named in the table, count the mixed subgroups for the two random rows and the utilization of every row.
 7. **[Implement]** Reproduce `gpu.occupancy_table` and `gpu.register_cliff` from the formula for $n_{\mathrm{res}}$, and extend the
    cliff table with workgroups of 128 and the registers 100 to 135.
 8. **[Implement]** Reproduce `gpu.coalescing_strides` and `gpu.layernorm_access` by listing the 32 byte addresses of a load and counting

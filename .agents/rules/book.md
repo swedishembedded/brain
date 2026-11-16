@@ -111,13 +111,17 @@ the chapter where a reader should first meet it.
   names exactly, all of its inputs: data, constants, starting values, step
   sizes and loop bounds. Random inputs come from `bookrng.generator(<name>)`
   (the book's own SplitMix64, as its randomness chapter specifies), and the
-  page states the seed (`bookrng.seed_of(<name>)`) and the order in which the
-  values are drawn; before that chapter, also print the drawn values when
-  they are few. Each table states its tolerance or prints enough digits to
+  page names the generator ("the generator `<name>`") and the order in which
+  the values are drawn; before that chapter, also print the drawn values when
+  they are few. The page never prints the seed: it is `seed_of(<name>)`,
+  defined with test values on the pseudocode page, and a 20-digit number
+  adds nothing the name does not give (`make check/book` fails a printed
+  `seed_of` value outside that page and the randomness chapter). Each table states its tolerance or prints enough digits to
   compare against, and every number quoted in prose matches the table it
   comes from.
 - **Only stable numbers get full digits.** Every run in a multi-run table
-  prints its seed. A run that diverges or is chaotic (a blow-up, a limit
+  names its generator (or its run seed, when the runs are seeded 0, 1, 2,
+  ...). A run that diverges or is chaotic (a blow-up, a limit
   cycle, NaN) is printed as its qualitative outcome or to its stable digits,
   never to full precision another implementation cannot match. A number
   that depends on a library function names it exactly.

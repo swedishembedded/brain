@@ -9,7 +9,7 @@ Flip a fair coin $30$ times and count the heads. Do it $5000$ times, each run
 fresh, and tally how often each count occurred:
 
 <!-- worked: distributions.coin_sum_counts -->
-Generator: the book's SplitMix64, seed 0x31c7c1ddde98256e (3587048786890335598). Run by run (5000 runs), each run is 30 flips; a flip is one `rng.uniform()` and is heads when it is below 0.5.
+Generator: `distributions.coin_sum_counts` (the book's SplitMix64). Run by run (5000 runs), each run is 30 flips; a flip is one `rng.uniform()` and is heads when it is below 0.5.
 
 | heads in 30 flips | runs of 5000 | bar (one # per 20 runs) |
 |---|---:|---|
@@ -146,7 +146,7 @@ mean $15$, variance $7.5$, standard deviation $2.74$. Counting how many of the
 $5000$ runs landed within one, two and three standard deviations of $15$:
 
 <!-- worked: distributions.coin_sum_sigma -->
-Mean 15 heads, variance 7.5, standard deviation 2.7386. The same 5000 runs as the previous table (same generator and seed, 0x31c7c1ddde98256e). A window k sigma wide is the whole numbers within floor(k sigma) of 15.
+Mean 15 heads, variance 7.5, standard deviation 2.7386. The same 5000 runs as the previous table (same generator, `distributions.coin_sum_counts`). A window k sigma wide is the whole numbers within floor(k sigma) of 15.
 
 | window | observed share of the 5000 runs | exact binomial share | bell-curve rule |
 |---|---:|---:|---:|
@@ -195,7 +195,7 @@ lists over many draws is the table of frequencies, which is why the mean of the 
 is the probability vector itself:
 
 <!-- worked: distributions.categorical_sampling -->
-Generator: the book's SplitMix64, seed 0xd3309acb11fd4fe5 (15217833337855758309). Each of the 20,000 draws is one `rng.uniform()` passed to the cumulative-table rule, with the cumulative sum taken in the row order of the softmax table. Variance of the indicators: f(1 - f) for the frequency f.
+Generator: `distributions.categorical_sampling` (the book's SplitMix64). Each of the 20,000 draws is one `rng.uniform()` passed to the cumulative-table rule, with the cumulative sum taken in the row order of the softmax table. Variance of the indicators: f(1 - f) for the frequency f.
 
 | token | p | draws of 20,000 | frequency = mean of indicator | p(1-p) | variance of the indicators |
 |---|---:|---:|---:|---:|---:|
@@ -362,7 +362,7 @@ the sum is again a Gaussian: the shape is preserved. The same holds for any
 shift and rescaling of a Gaussian, which we derived above for $\mu + \sigma Z$.
 
 <!-- worked: distributions.gaussian_sum -->
-Generator: the book's SplitMix64, seed 0x221e60acd1f15be3 (2458508741963766755). First the 40,000 values of X, each 1 + 2 z with z one `rng.normal()`; then the 40,000 values of Y, each -0.5 + 1.5 z; pair k of X and Y is summed. Sample variance: divisor 40,000.
+Generator: `distributions.gaussian_sum` (the book's SplitMix64). First the 40,000 values of X, each 1 + 2 z with z one `rng.normal()`; then the 40,000 values of Y, each -0.5 + 1.5 z; pair k of X and Y is summed. Sample variance: divisor 40,000.
 
 | variable | sample mean | sample variance | mean predicted | variance predicted |
 |---|---:|---:|---:|---:|
@@ -382,7 +382,7 @@ to remove noise: if $x_0$ is a number and $\varepsilon \sim
 mean $(1 - s)x_0$ and standard deviation $s$:
 
 <!-- worked: distributions.noised_coordinate -->
-Generator: the book's SplitMix64, seed 0xd99ff6d98e6f1575 (15681523841785337205). x0 = 2. The 20,000 noise values are `rng.normal()` calls, drawn once and reused for every noise level s: x = (1 - s) x0 + s * noise. Sample std: divisor 20,000.
+Generator: `distributions.noised_coordinate` (the book's SplitMix64). x0 = 2. The 20,000 noise values are `rng.normal()` calls, drawn once and reused for every noise level s: x = (1 - s) x0 + s * noise. Sample std: divisor 20,000.
 
 | noise level s | predicted mean (1-s) x0 | sample mean | predicted std s | sample std |
 |---|---:|---:|---:|---:|
@@ -459,7 +459,7 @@ changes by a factor of $100$ and the correlation does not. What correlation does
 see is only the linear relationship:
 
 <!-- worked: distributions.correlation_shapes -->
-Generator: the book's SplitMix64, seed 0xd68c52cc9bf33c90 (15459822659599285392). x takes 2000 equally spaced values from -2 to 2 inclusive (step 4/1999). The noise is `rng.normal()`, one generator for the whole table: the 2000 values added to x for the third relation are drawn first, in the order of x, then the 2000 values of the fourth relation. Covariance and variances use divisor 2000.
+Generator: `distributions.correlation_shapes` (the book's SplitMix64). x takes 2000 equally spaced values from -2 to 2 inclusive (step 4/1999). The noise is `rng.normal()`, one generator for the whole table: the 2000 values added to x for the third relation are drawn first, in the order of x, then the 2000 values of the fourth relation. Covariance and variances use divisor 2000.
 
 | relation between x and y | covariance | correlation |
 |---|---:|---:|
@@ -722,7 +722,7 @@ summed over all `j`. Draw $20{,}000$ points both ways and compute their sample
 mean and covariance matrix:
 
 <!-- worked: distributions.mvn_sampling -->
-Generator: the book's SplitMix64, seed 0x381299132efa1755 (4040460123376326485). One generator for the table: the Cholesky samples first, then the eigen samples. Each sample takes two `rng.normal()` calls, z1 then z2, and is mu + L z (Cholesky) or mu + A z (eigen); mu = (1, -0.5), Sigma = [[2, 1.2], [1.2, 1]]. Sample covariance: centre on the sample mean, divisor 20,000.
+Generator: `distributions.mvn_sampling` (the book's SplitMix64). One generator for the table: the Cholesky samples first, then the eigen samples. Each sample takes two `rng.normal()` calls, z1 then z2, and is mu + L z (Cholesky) or mu + A z (eigen); mu = (1, -0.5), Sigma = [[2, 1.2], [1.2, 1]]. Sample covariance: centre on the sample mean, divisor 20,000.
 
 | method (20,000 samples) | sample mean | Sigma_11 | Sigma_12 | Sigma_22 |
 |---|---:|---:|---:|---:|
@@ -772,7 +772,7 @@ $1/2\pi$). The one-dimensional "within one, two, three standard deviations" has 
 two-dimensional analogue:
 
 <!-- worked: distributions.mvn_ellipse_mass -->
-Generator: the book's SplitMix64, seed 0xcb8f069a102c7b73 (14667949770135075699). The 20,000 samples are the Cholesky samples of the previous table's recipe (two `rng.normal()` calls each, z1 then z2); the quadratic form uses the explicit 2x2 inverse of Sigma (adjugate divided by the determinant), which is safe for a fixed 2x2.
+Generator: `distributions.mvn_ellipse_mass` (the book's SplitMix64). The 20,000 samples are the Cholesky samples of the previous table's recipe (two `rng.normal()` calls each, z1 then z2); the quadratic form uses the explicit 2x2 inverse of Sigma (adjugate divided by the determinant), which is safe for a fixed 2x2.
 
 | c in (x-mu)^T Sigma^-1 (x-mu) <= c | half-length along v1 | half-length along v2 | share of 20,000 samples inside | 1 - e^(-c/2) |
 |---|---:|---:|---:|---:|
@@ -796,7 +796,7 @@ rather than derive). By the variance of a mean in Chapter 10, that average has
 variance $2/D$:
 
 <!-- worked: distributions.high_dim_norm -->
-Generator: the book's SplitMix64, seed 0x32ffccfba4ec6fa0 (3674881202133430176). One generator for the table, rows in the order d = 1, 10, 100, 1000, 10000. A row makes 400 vectors (100 for d = 10000); a vector is d calls of `rng.normal()`. The one generator runs on across all vectors and rows, so a sine value held by the Gaussian rule is carried into the next vector. Mean length: the average of the Euclidean norm sqrt(sum of squares) over the vectors of the row. Std: divisor equal to the number of vectors.
+Generator: `distributions.high_dim_norm` (the book's SplitMix64). One generator for the table, rows in the order d = 1, 10, 100, 1000, 10000. A row makes 400 vectors (100 for d = 10000); a vector is d calls of `rng.normal()`. The one generator runs on across all vectors and rows, so a sine value held by the Gaussian rule is carried into the next vector. Mean length: the average of the Euclidean norm sqrt(sum of squares) over the vectors of the row. Std: divisor equal to the number of vectors.
 
 | dimension d | mean of squared length / d | std of squared length / d | sqrt(2/d) | mean length | sqrt(d) |
 |---|---:|---:|---:|---:|---:|
@@ -843,7 +843,7 @@ Bernoulli variable with $p = 0.3$, so $\sigma^2 = 0.21$, taking $300$ repeats of
 average:
 
 <!-- worked: distributions.lln_bernoulli -->
-Generator: the book's SplitMix64, seed 0xa1936518d852eccb (11642760619065797835). One generator, rows in the order n = 10, 100, 1000, 10000. A row makes 300 means; a mean is n calls of `rng.uniform()`, each counted as 1 when below p = 0.3, averaged. RMS error: root of the mean squared distance of the 300 means from 0.3. The Chebyshev bound is capped at 1 (the raw value at n = 10 is 8.4).
+Generator: `distributions.lln_bernoulli` (the book's SplitMix64). One generator, rows in the order n = 10, 100, 1000, 10000. A row makes 300 means; a mean is n calls of `rng.uniform()`, each counted as 1 when below p = 0.3, averaged. RMS error: root of the mean squared distance of the 300 means from 0.3. The Chebyshev bound is capped at 1 (the raw value at n = 10 is 8.4).
 
 | n draws per mean | RMS error of the mean over 300 repeats | sigma / sqrt(n) | share of repeats with error > 0.05 | Chebyshev bound sigma^2 / (n * 0.05^2) |
 |---|---:|---:|---:|---:|
@@ -864,7 +864,7 @@ denominator lands near zero, and its expectation does not exist. Averages of suc
 draws never settle:
 
 <!-- worked: distributions.lln_heavy_tail -->
-Generator: the book's SplitMix64, seed 0x931fa52fd9201077 (10601373672778240119). One generator; run 1, then run 2, then run 3, each a continuous sequence of 100,000 steps read off at the listed n. A step makes three `rng.normal()` calls in this order: g (added to the Gaussian sum), then d (the denominator), then q; the ratio q/d is added to the ratio sum (nothing is added if d is exactly 0).
+Generator: `distributions.lln_heavy_tail` (the book's SplitMix64). One generator; run 1, then run 2, then run 3, each a continuous sequence of 100,000 steps read off at the listed n. A step makes three `rng.normal()` calls in this order: g (added to the Gaussian sum), then d (the denominator), then q; the ratio q/d is added to the ratio sum (nothing is added if d is exactly 0).
 
 | n | Gaussian, run 1 | run 2 | run 3 | ratio of two Gaussians, run 1 | run 2 | run 3 |
 |---|---:|---:|---:|---:|---:|---:|
@@ -916,7 +916,7 @@ distribution that approaches the standard Gaussian as $n$ grows, whatever the
 distribution of the draws. We state it without proof. The numbers say how fast:
 
 <!-- worked: distributions.clt_table -->
-Generator: the book's SplitMix64, seed 0x5b3b5029b5ecfb0b (6573936221153458955). One generator, sizes in the order n = 1, 2, 5, 30, 100. For each n: 10,000 sample means in turn, each the average of n draws of X, one `rng.uniform()` per draw mapped through the cumulative table (0.6, 0.85, 0.95, 1.0). z = (mean - E[X]) / (std[X] / sqrt(n)). Std and skewness of z use divisor 10,000 (skewness: the average of z cubed).
+Generator: `distributions.clt_table` (the book's SplitMix64). One generator, sizes in the order n = 1, 2, 5, 30, 100. For each n: 10,000 sample means in turn, each the average of n draws of X, one `rng.uniform()` per draw mapped through the cumulative table (0.6, 0.85, 0.95, 1.0). z = (mean - E[X]) / (std[X] / sqrt(n)). Std and skewness of z use divisor 10,000 (skewness: the average of z cubed).
 
 | n | mean of z | std of z | skewness of z | skewness of X / sqrt(n) | share with z in [-1, 1] | share with z in [-2, 2] |
 |---|---:|---:|---:|---:|---:|---:|
@@ -965,7 +965,7 @@ If the inputs are themselves standard Gaussian draws, $\lVert\mathbf{x}\rVert^2 
 output's variance grows with the width $n$ unless $\sigma_w^2$ shrinks like $1/n$:
 
 <!-- worked: distributions.init_variance -->
-Generator: the book's SplitMix64, seed 0xfaaff9906e080491 (18063931029122974865). One generator for the table. For n = 16, 64, 256, 1024 in turn: the input x is n calls of `rng.normal()`; then for weight std 1 and then 1/sqrt(n), 1500 outputs y = sum_i w_i x_i, each with n fresh weights w_i = std * `rng.normal()` drawn for i = 0, 1, ... in order. Measured variance: deviations from the sample mean of the 1500 outputs, divisor 1500.
+Generator: `distributions.init_variance` (the book's SplitMix64). One generator for the table. For n = 16, 64, 256, 1024 in turn: the input x is n calls of `rng.normal()`; then for weight std 1 and then 1/sqrt(n), 1500 outputs y = sum_i w_i x_i, each with n fresh weights w_i = std * `rng.normal()` drawn for i = 0, 1, ... in order. Measured variance: deviations from the sample mean of the 1500 outputs, divisor 1500.
 
 | inputs n | weight std | sum of x_i^2 | predicted Var[y] = std^2 * sum of x_i^2 | measured Var[y], 1500 weight draws |
 |---|---:|---:|---:|---:|
@@ -1104,7 +1104,7 @@ Answers are at the end of the chapter.
 6. **[Calculate]** Show that for independent $X \sim \mathcal{N}(\mu_1, \sigma_1^2)$ and $Y \sim \mathcal{N}(\mu_2, \sigma_2^2)$ the difference $X - Y$ has mean $\mu_1 - \mu_2$ and variance $\sigma_1^2 + \sigma_2^2$. Why does the variance not subtract?
 7. **[Implement]** Implement the covariance matrix, correlation as cosine similarity and the direction-variance check, and reproduce `distributions.covariance_table`, `distributions.correlation_cosine`, `distributions.covariance_matrix` and `distributions.direction_variance` exactly.
 8. **[Implement]** Implement the repeated-addition binomial table and the Gaussian areas by Simpson's rule (2000 intervals over $\pm 8$ standard deviations for the moments, 4000 over $[-k, k]$ for the areas), and reproduce `distributions.binomial_from_bernoullis`, `distributions.sigma_rule` and `distributions.gaussian_moments` exactly.
-9. **[Implement]** Implement the two-dimensional Cholesky factor and the eigen factor, and the two samplers, and reproduce `distributions.mvn_factors` exactly. Follow the eigenvector convention stated under `distributions.mvn_factors`. With the generator of Chapter 17, the printed seeds and the stated draw order (two `rng.normal()` calls per sample, $z_1$ then $z_2$), `distributions.mvn_sampling` and `distributions.mvn_ellipse_mass` reproduce to the printed digits; with another generator the sample covariance entries should fall within five standard errors of the target ($\sqrt{2/N}\,\Sigma_{ii}$ for a diagonal entry, $\sqrt{(\Sigma_{11}\Sigma_{22} + \Sigma_{12}^2)/N}$ for the off-diagonal one) and the ellipse shares within five standard errors $\sqrt{q(1-q)/N}$ of $q = 1 - e^{-c/2}$.
+9. **[Implement]** Implement the two-dimensional Cholesky factor and the eigen factor, and the two samplers, and reproduce `distributions.mvn_factors` exactly. Follow the eigenvector convention stated under `distributions.mvn_factors`. With the generator of Chapter 17, the named generators and the stated draw order (two `rng.normal()` calls per sample, $z_1$ then $z_2$), `distributions.mvn_sampling` and `distributions.mvn_ellipse_mass` reproduce to the printed digits; with another generator the sample covariance entries should fall within five standard errors of the target ($\sqrt{2/N}\,\Sigma_{ii}$ for a diagonal entry, $\sqrt{(\Sigma_{11}\Sigma_{22} + \Sigma_{12}^2)/N}$ for the off-diagonal one) and the ellipse shares within five standard errors $\sqrt{q(1-q)/N}$ of $q = 1 - e^{-c/2}$.
 10. **[Investigate]** Using `distributions.clt_table` as a guide, replace the lopsided variable by one with two values, $0$ with probability $0.99$ and $1$ with probability $0.01$. How large must $n$ be before the skewness of the standardised average falls below $0.5$? Use the $1/\sqrt{n}$ law first and then check by simulation.
 11. **[Investigate]** Repeat `distributions.high_dim_norm` for the vector $\mathbf{z}$ drawn uniformly from $[-\sqrt{3}, \sqrt{3}]$ instead of Gaussian. What are the mean and variance of one coordinate squared, and does the norm still concentrate at $\sqrt{D}$? What does that say about which facts of the section used the Gaussian shape and which used only the mean and variance?
 12. **[Investigate]** Modify `distributions.init_variance` to apply two layers in sequence, each with $n = 256$ inputs, with $\sigma_w = 1$ and then with $\sigma_w = 1/\sqrt{n}$. What is the output variance after the second layer in each case, and how does it compare with the prediction from the first layer alone?

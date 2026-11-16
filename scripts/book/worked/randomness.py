@@ -907,3 +907,16 @@ def seed_parse():
         rows.append((f"{v:,}", f"{signed:,}", "yes" if signed == v else "no"))
     out += _table(["seed", "read back as a signed 64-bit integer", "survives"], rows, "rrl")
     return out
+
+
+def seed_of_vectors():
+    """Test values for seed_of and the generator: a few names, their seeds in
+    hexadecimal and decimal, and the first raw u64 and uniform() of each."""
+    rows = []
+    for name in ("a", "kernel_selection.ranking", "long_context.entropy"):
+        s = bookrng.seed_of(name)
+        g = bookrng.SplitMix64(s)
+        raw = g.next_u64()
+        rows.append((f"`{name}`", _hex(s), s, _hex(raw), _fx((raw >> 11) / float(1 << 53), 17)))
+    return _table(["name", "seed_of (hex)", "seed_of (decimal)", "first raw u64", "first uniform()"], rows,
+                  "lrrrr")

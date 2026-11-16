@@ -119,7 +119,7 @@ One prompt (`17 + 25 =`), five complete answers: a0 = `42`; a1 = `The sum is 42.
 | a3 | 0.182 | 0.119 | 0.622 | - | 0.818 |
 | a4 | 0.047 | 0.029 | 0.269 | 0.182 | - |
 
-Generator: the book's SplitMix64, seed 0xbac244beddd62f4d (`seed_of` of the name `llm_alignment.pairs`, defined on the pseudocode page). Each of the 16 pairs draws, in this order, i = integer(5), j = integer(4) (raised by 1 when j >= i, so that j is another answer) and u = uniform(); the labeller chooses i when u < sigmoid(r_i - r_j) and j otherwise. The generator runs once across the 16 pairs.
+Generator: `llm_alignment.pairs` (the book's SplitMix64). Each of the 16 pairs draws, in this order, i = integer(5), j = integer(4) (raised by 1 when j >= i, so that j is another answer) and u = uniform(); the labeller chooses i when u < sigmoid(r_i - r_j) and j otherwise. The generator runs once across the 16 pairs.
 
 | pair | i | j | u | P(i preferred) | chosen | agrees with the reward |
 |---:|---|---|---:|---:|---|---:|
@@ -345,7 +345,7 @@ function rlhf_iteration(theta: array<real>[m], pi_ref: array<real>[m], r: array<
 The answers are drawn first, one `sample_index` each, in the order of the batch, and the batch mean is the baseline, summed in order. The behaviour probabilities `pi_old` and the advantages stay fixed during the epochs, the reference is frozen throughout, and the policy takes `epochs` steps on one batch (here $4$) before the next is drawn. The clip is the PPO clip of Chapter 3, applied to the ratio, and a clipped sample contributes nothing from its advantage but still contributes its penalty weight in the loss variant, as brain's `token_term_banded` does.
 
 <!-- worked: llm_alignment.rlhf_runs -->
-The five answers, pi_ref = (0.15, 0.10, 0.30, 0.20, 0.25), the labeller's reward r = (2.0, 2.5, 0.0, 0.5, -1.0) used as the reward model (so that the only error is the algorithm's), beta = 0.5. The target is the closed-form optimum pi* = (0.3425, 0.6208, 0.0125, 0.0227, 0.0014), with J_beta(pi*) = 1.5871. Each run starts from theta_ref and draws, per iteration, 64 answers y_i from pi_old (one uniform() each, inverse CDF over pi_old in answer order, the generator of the run continuing), forms the reward of each, subtracts the batch mean (summed in order, divisor 64) to get the advantage A_i, and takes 4 epochs of the clipped surrogate of the policy-gradient chapter on the whole batch (one minibatch, in drawing order) with the step 0.5 and the clip 0.2: the gradient on theta is the mean over the batch of w_i (e_(y_i) - pi_theta) with w_i = A_i rho_i for a sample that the clip leaves (raw term not above clipped term) and 0 otherwise, rho_i = pi_theta(y_i) / pi_old(y_i). Variant 'KL folded into the reward': the reward of a sample is r(y) - beta ln(pi_old(y) / pi_ref(y)). Variant 'k3 term in the loss': the reward is r(y), and every sample adds beta (pi_ref(y) / pi_theta(y) - 1) to its w_i, the weight of the gradient of the k3 term of the previous block with the current policy in the denominator, so the KL is never in the advantage. Variant 'k3 term against pi_old' (the check of the exercise on this block) is the previous one with pi_old(y) in the place of pi_ref(y), so that the penalty compares the policy with the one that sampled the batch and not with the reference. 10 runs per variant, every run restarting from its own seed (seeds below). 'J' is J_beta(pi) = E r - beta KL(pi || pi_ref) of the policy at the start of the iteration and 'KL to pi*' is KL(pi* || pi); each cell is the mean over the 10 runs (summed in run order).
+The five answers, pi_ref = (0.15, 0.10, 0.30, 0.20, 0.25), the labeller's reward r = (2.0, 2.5, 0.0, 0.5, -1.0) used as the reward model (so that the only error is the algorithm's), beta = 0.5. The target is the closed-form optimum pi* = (0.3425, 0.6208, 0.0125, 0.0227, 0.0014), with J_beta(pi*) = 1.5871. Each run starts from theta_ref and draws, per iteration, 64 answers y_i from pi_old (one uniform() each, inverse CDF over pi_old in answer order, the generator of the run continuing), forms the reward of each, subtracts the batch mean (summed in order, divisor 64) to get the advantage A_i, and takes 4 epochs of the clipped surrogate of the policy-gradient chapter on the whole batch (one minibatch, in drawing order) with the step 0.5 and the clip 0.2: the gradient on theta is the mean over the batch of w_i (e_(y_i) - pi_theta) with w_i = A_i rho_i for a sample that the clip leaves (raw term not above clipped term) and 0 otherwise, rho_i = pi_theta(y_i) / pi_old(y_i). Variant 'KL folded into the reward': the reward of a sample is r(y) - beta ln(pi_old(y) / pi_ref(y)). Variant 'k3 term in the loss': the reward is r(y), and every sample adds beta (pi_ref(y) / pi_theta(y) - 1) to its w_i, the weight of the gradient of the k3 term of the previous block with the current policy in the denominator, so the KL is never in the advantage. Variant 'k3 term against pi_old' (the check of the exercise on this block) is the previous one with pi_old(y) in the place of pi_ref(y), so that the penalty compares the policy with the one that sampled the batch and not with the reference. 10 runs per variant, every run restarting from its own generator, `llm_alignment.rlhf.<variant>.run<i>` for the run i = 0 .. 9 of the variant `reward`, `loss`, `old` (in the column order of the table). 'J' is J_beta(pi) = E r - beta KL(pi || pi_ref) of the policy at the start of the iteration and 'KL to pi*' is KL(pi* || pi); each cell is the mean over the 10 runs (summed in run order).
 
 | iteration | J, KL in the reward | KL to pi*, KL in the reward | J, k3 in the loss | KL to pi*, k3 in the loss | J, k3 against pi_old | KL to pi*, k3 against pi_old |
 |---:|---:|---:|---:|---:|---:|---:|
@@ -357,19 +357,6 @@ The five answers, pi_ref = (0.15, 0.10, 0.30, 0.20, 0.25), the labeller's reward
 | 200 | 1.587 | 0.0005 | 1.471 | 0.1891 | 1.355 | 1.7617 |
 
 Every number learned from samples is printed with the digits that the run and four copies of it share: the copies start with the first logit of the reference policy, theta_ref[0], changed by +1e-12, -1e-12, +3e-12 and -3e-12 (the nudges of stable.py), and a digit is printed only if all five agree on it ('about x' keeps the leading digits that survive, 'unstable' means that none does). The copies use the same generator and so draw the same numbers; they differ only if a nudge flips a comparison. A run is a deterministic computation, so another implementation reproduces the printed digits.
-
-| run | KL folded into the reward | k3 term in the loss | k3 term against pi_old |
-|---:|---:|---:|---:|
-| 0 | 0x2a55c7e09bc913d8 | 0x1e68daedfa91422c | 0x7d982395c62f4d44 |
-| 1 | 0xae8ab717a2d9b053 | 0x47ff50a37a59607d | 0x0dd3f0dce399ba50 |
-| 2 | 0x7e54777fd5665ea8 | 0x1238a33b0aae16dc | 0x23aa9a25a50580b9 |
-| 3 | 0xcb6bfaea549af4f1 | 0xce64ba19a5167e5c | 0x7e48dcb2fb736820 |
-| 4 | 0x3ab8ef57d85243bc | 0x1c1a00bd77a3728f | 0xafb30de6fde6673f |
-| 5 | 0x9976e477910012c7 | 0x0589ab6798f09c28 | 0x8ffdfdd214dc9916 |
-| 6 | 0x649348033fd1fef2 | 0xa2969379d60dade7 | 0x5799eee0276b1ea6 |
-| 7 | 0xd5bd7f69e26e8a77 | 0x3bfe7af9d1868c4f | 0x3b361297dc3d5d4f |
-| 8 | 0xef14e379c830fc74 | 0xf8b560a40fe64f85 | 0x2094c0c5438de87b |
-| 9 | 0x047e7603c7c5b08c | 0xabf3e9167e919dfb | 0x10b6722fc2d3145e |
 <!-- /worked -->
 
 With the penalty in the reward the runs reach $J_\beta = 1.587$ and are $0.0005$ nats from $\pi^\ast$ at iteration $200$, against a closed-form maximum of $1.5871$. With the $k_3$ term in the loss they stop at $1.471$, $0.1891$ nats from $\pi^\ast$, and do not move closer: they have found the maximum of another objective. The difference is large at $\beta = 0.5$ because the answers are few and the penalty is strong. At the small coefficient brain's trainer defaults to ($\beta = 0.02$ for `PolicyGradientConfig::kl_beta`) both penalties are weak next to the reward, and the choice of direction matters less than the choice of the coefficient. It matters whenever the solution of the regularized problem itself is wanted, as it is in the closed form.
@@ -584,7 +571,7 @@ The weak checker is wrong in both directions. It pays `40 41 42 43 44 45`, `42 o
 A policy trained on a reward optimizes the reward, and a reward that is only correlated with what was wanted is optimized away from it. The block trains GRPO on the five answers with each of the two checkers. The weak checker pays three of them: the two right ones, and `40 41 42 43 44 45`, the answer that spreads the bets.
 
 <!-- worked: llm_alignment.grpo_checker_runs -->
-The five answers, pi_ref = (0.15, 0.10, 0.30, 0.20, 0.25) (theta from theta_ref = ln pi_ref), group size n_g = 8. Each step draws 8 answers from the current policy (one uniform() each, inverse CDF in answer order, the generator of the run continuing), gives each the reward of the checker (the exact checker rewards a0 and a1, the weak one a0, a1 and a4), forms mean-centred advantages (0 for a group whose rewards are all equal), and moves theta by 0.5 times the mean over the group of A_i (e_(y_i) - pi); one update per group, so that the importance ratio is 1 and the clip never binds, and no KL term. 10 runs per checker, every run restarting from its own seed (seeds below). The cells are the mean over the 10 runs of three exact properties of the policy at the start of the step (not of the sampled group): 'weak reward' = pi(a0) + pi(a1) + pi(a4), 'exact accuracy' = pi(a0) + pi(a1), and pi(a4), the probability of the answer that lists many numbers (summed in answer order).
+The five answers, pi_ref = (0.15, 0.10, 0.30, 0.20, 0.25) (theta from theta_ref = ln pi_ref), group size n_g = 8. Each step draws 8 answers from the current policy (one uniform() each, inverse CDF in answer order, the generator of the run continuing), gives each the reward of the checker (the exact checker rewards a0 and a1, the weak one a0, a1 and a4), forms mean-centred advantages (0 for a group whose rewards are all equal), and moves theta by 0.5 times the mean over the group of A_i (e_(y_i) - pi); one update per group, so that the importance ratio is 1 and the clip never binds, and no KL term. 10 runs per checker, every run restarting from its own generator, `llm_alignment.grpo.<checker>.run<i>` for the run i = 0 .. 9 of the checker `exact`, `weak`. The cells are the mean over the 10 runs of three exact properties of the policy at the start of the step (not of the sampled group): 'weak reward' = pi(a0) + pi(a1) + pi(a4), 'exact accuracy' = pi(a0) + pi(a1), and pi(a4), the probability of the answer that lists many numbers (summed in answer order).
 
 | step | exact checker: weak reward | exact checker: exact accuracy | exact checker: pi(a4) | weak checker: weak reward | weak checker: exact accuracy | weak checker: pi(a4) |
 |---:|---:|---:|---:|---:|---:|---:|
@@ -598,19 +585,6 @@ The five answers, pi_ref = (0.15, 0.10, 0.30, 0.20, 0.25) (theta from theta_ref 
 Trained on the weak checker, the mean exact accuracy over the steps 0 .. 150 is largest at step 15, 0.306, and first falls below its starting value 0.250 at step 41.
 
 Every number learned from samples is printed with the digits that the run and four copies of it share: the copies start with the first logit of the reference policy, theta_ref[0], changed by +1e-12, -1e-12, +3e-12 and -3e-12 (the nudges of stable.py), and a digit is printed only if all five agree on it ('about x' keeps the leading digits that survive, 'unstable' means that none does). The copies use the same generator and so draw the same numbers; they differ only if a nudge flips a comparison. A run is a deterministic computation, so another implementation reproduces the printed digits.
-
-| run | exact checker | weak checker |
-|---:|---:|---:|
-| 0 | 0xa792bba0d4b1c65c | 0xac9a6e4a6080b158 |
-| 1 | 0xee91dc3bbcf485ab | 0x89b12390f25ef1f2 |
-| 2 | 0x6151c6ea5e34d0a8 | 0xbe67f4dffbc53971 |
-| 3 | 0x87311f9a296681f3 | 0x526bc0ba60487904 |
-| 4 | 0x61cc3b0355cfac53 | 0xfb79bc07b7d0cf1a |
-| 5 | 0x7386e8a2c12bdef7 | 0xd924ab9d28f0d27c |
-| 6 | 0x6bdb0acfc37a9f6d | 0x8cad0ae1e868486b |
-| 7 | 0x643ab72cb125534a | 0x19a4aed2c4469e59 |
-| 8 | 0xb92c9b2617dfad26 | 0x6673cdc90c256fd1 |
-| 9 | 0x9191844553bd0248 | 0x1e5a97746a673593 |
 <!-- /worked -->
 
 ![Three curves over 150 GRPO steps. Trained on the weak checker, the weak checker's reward rises from 0.50 to 0.985 while the exact accuracy rises to about 0.31 and falls to 0.12. Trained on the exact checker, the exact accuracy rises from 0.25 to 0.986.](img/reward-hacking.svg)

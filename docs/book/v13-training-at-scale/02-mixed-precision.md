@@ -29,7 +29,7 @@ Around 1 the gap is $2^{-7} = 0.0078125$. A sum $w + \Delta$ is rounded to the n
 The same loop run three more ways shows what the remedies will be. The first table repeats the thousand additions of 0.001 on a weight of 1.
 
 <!-- worked: mixed_precision.update_stream -->
-A weight starts at 1 and receives 1000 updates of 0.001, each applied as w = round(w + 0.001) where the sum is formed in exact arithmetic (float64 here) and rounded once. 'moved' counts the updates that changed the stored weight. The stochastic rows come from one generator seeded 7667754899416508645 (seed_of 'mixed_precision.update_stream') that runs across the eight runs, run after run, one uniform() per update in order; run r therefore starts where run r - 1 stopped. The fp32 row adds 0.001 rounded to fp32 at every step (ties to even). The mean of the eight stochastic finals is 1.99414.
+A weight starts at 1 and receives 1000 updates of 0.001, each applied as w = round(w + 0.001) where the sum is formed in exact arithmetic (float64 here) and rounded once. 'moved' counts the updates that changed the stored weight. The stochastic rows come from one generator `mixed_precision.update_stream` that runs across the eight runs, run after run, one uniform() per update in order; run r therefore starts where run r - 1 stopped. The fp32 row adds 0.001 rounded to fp32 at every step (ties to even). The mean of the eight stochastic finals is 1.99414.
 
 | storage and rounding | run | weight after 1000 updates | updates that moved it |
 |---|---:|---:|---:|
@@ -59,7 +59,7 @@ The loss is (w - t)^2 / 2 with target t = 3.1, so the gradient is w - t; plain g
 | bf16 weight, nearest even | 2.375 | 3.015625 | 3.03125 | 3.03125 | 0.0688 | 0.0688 |
 | fp32 master, bf16 working copy | 2.375 | 3.015625 | 3.09375 | 3.09375 | 0.00625 | 7.68e-04 |
 
-Stochastic rounding of the same descent, eight runs from one generator seeded 10792451604143238950 (seed_of 'mixed_precision.stall') that runs across the runs, one uniform() per step in order. 'mean of last 100' is the average weight over steps 201 to 300. The mean of the eight averages is 3.0993.
+Stochastic rounding of the same descent, eight runs from one generator `mixed_precision.stall` that runs across the runs, one uniform() per step in order. 'mean of last 100' is the average weight over steps 201 to 300. The mean of the eight averages is 3.0993.
 
 | run | w after step 300 | mean of last 100 | mean of last 100 minus t, absolute |
 |---|---:|---:|---:|
@@ -125,7 +125,7 @@ The routine takes a normal number (its exponent at least $-126$); the quotient `
 A table measures the same odds for $x = 1.001$, which fp32 holds as 1.00100005.
 
 <!-- worked: mixed_precision.sr_statistics -->
-x = 1.001 rounded to fp32 is 1.00100005. 100000 draws u_i = uniform() from the generator seeded 5779186313586945093 (seed_of 'mixed_precision.sr_statistics'), in order, each giving one stochastic rounding of x to bf16.
+x = 1.001 rounded to fp32 is 1.00100005. 100000 draws u_i = uniform() from the generator `mixed_precision.sr_statistics`, in order, each giving one stochastic rounding of x to bf16.
 
 | quantity | value |
 |---|---:|
@@ -195,7 +195,7 @@ function counter_uniform(key: u32, i: u32) -> real:
 The multiplications wrap modulo $2^{32}$ as the fixed-width types of the pseudocode do. Twelve values are rounded below in tiles of several sizes and orders; the table counts the elements that differ from the same rule applied in one tile, for the counter draw and for a stream.
 
 <!-- worked: mixed_precision.counter_draws -->
-Twelve values x_j = 1 + 0.001 (j + 1), j = 0 .. 11, are rounded to bf16 stochastically. The counter draw is u(j) = counter_uniform(0x1234abcd, j) (mix32 twice, as defined above); the stream draw takes the next uniform() of a generator seeded 1733272321624801833 (seed_of 'mixed_precision.counter_draws'), created afresh for each row, in the order the tiles are processed. Each row counts the elements whose rounded value differs from the same rule applied in one tile of 12 in order.
+Twelve values x_j = 1 + 0.001 (j + 1), j = 0 .. 11, are rounded to bf16 stochastically. The counter draw is u(j) = counter_uniform(0x1234abcd, j) (mix32 twice, as defined above); the stream draw takes the next uniform() of a generator `mixed_precision.counter_draws`, created afresh for each row, in the order the tiles are processed. Each row counts the elements whose rounded value differs from the same rule applied in one tile of 12 in order.
 
 | order of work | elements that differ, counter draw | elements that differ, stream draw |
 |---|---:|---:|
@@ -283,7 +283,7 @@ A matrix product is where the arithmetic is, and a product whose operands are 8 
 The scale has to be placed somewhere, and two choices decide the quality: how many values share one scale, and which tensor's largest magnitude, its amax, sets it. The first is a matter of range, and the next table measures it on a product $Y = XW$ whose rows of $X$ span more and more decades of magnitude, as the rows of activations of different tokens can.
 
 <!-- worked: mixed_precision.fp8_operands -->
-Y = X W with X of shape [32, 64] and W of shape [64, 16]. From the generator seeded 16545152137786851729 (seed_of 'mixed_precision.fp8_operands'): the 2048 entries of X as normal() in row-major order, then the 1024 entries of W in row-major order as 0.1 * normal(). Row i of X is then multiplied by 10^(-a i / 31) for the stated number of decades a, so the rows of X span a decades of magnitude. The reference Y is formed in float64 from the unrounded matrices; the rounded operands are multiplied and summed in float64 too (a wide accumulator). The cell is the mean over the 32 rows of ||row of the rounded product - row of Y|| / ||row of Y|| (2-norm, mean divisor 32). bf16 rounds each entry to nearest even. 'E4M3, one scale per tensor' divides each matrix by s = amax / 448, rounds to E4M3 (nearest even, saturating) and multiplies back; 'E4M3, X in blocks of 16' gives X one scale per 16 consecutive entries of a row (W keeps one per tensor); 'E5M2' is the tensor rule with 57344. Errors are printed to 4 decimals.
+Y = X W with X of shape [32, 64] and W of shape [64, 16]. From the generator `mixed_precision.fp8_operands`: the 2048 entries of X as normal() in row-major order, then the 1024 entries of W in row-major order as 0.1 * normal(). Row i of X is then multiplied by 10^(-a i / 31) for the stated number of decades a, so the rows of X span a decades of magnitude. The reference Y is formed in float64 from the unrounded matrices; the rounded operands are multiplied and summed in float64 too (a wide accumulator). The cell is the mean over the 32 rows of ||row of the rounded product - row of Y|| / ||row of Y|| (2-norm, mean divisor 32). bf16 rounds each entry to nearest even. 'E4M3, one scale per tensor' divides each matrix by s = amax / 448, rounds to E4M3 (nearest even, saturating) and multiplies back; 'E4M3, X in blocks of 16' gives X one scale per 16 consecutive entries of a row (W keeps one per tensor); 'E5M2' is the tensor rule with 57344. Errors are printed to 4 decimals.
 
 | decades spanned by the rows of X | bf16 | E4M3, one scale per tensor | E4M3, X in blocks of 16 | E5M2, one scale per tensor |
 |---|---:|---:|---:|---:|
@@ -298,7 +298,7 @@ The bf16 column is the floor of the 16-bit tier: a relative error of 0.0024 per 
 The same trade decides the format of the gradients. A tensor whose entries span six decades below its largest, an ordinary state for gradients, is scaled in each format and rounded.
 
 <!-- worked: mixed_precision.fp8_gradients -->
-5000 stand-in gradient magnitudes g_i = 10^(-6 u_i), u_i = uniform() drawn in order from the generator seeded 1973974073949404247 (seed_of 'mixed_precision.fp8_gradients'), so they span 6 decades below the largest. Each is divided by s = amax / (largest finite number of the format), rounded once to the format (nearest even, saturating) and multiplied back. 'zero' is the share stored as 0, 'subnormal' the share stored below the smallest normal number of the format, 'mean relative error' the mean of |stored - g| / g with a zero counted as 1, and 'error of the sum' the relative error of the sum of all stored values against the sum of all g.
+5000 stand-in gradient magnitudes g_i = 10^(-6 u_i), u_i = uniform() drawn in order from the generator `mixed_precision.fp8_gradients`, so they span 6 decades below the largest. Each is divided by s = amax / (largest finite number of the format), rounded once to the format (nearest even, saturating) and multiplied back. 'zero' is the share stored as 0, 'subnormal' the share stored below the smallest normal number of the format, 'mean relative error' the mean of |stored - g| / g with a zero counted as 1, and 'error of the sum' the relative error of the sum of all stored values against the sum of all g.
 
 | format | amax maps to | zero | subnormal | mean relative error | error of the sum |
 |---|---:|---:|---:|---:|---:|
@@ -322,7 +322,7 @@ function next_scale(history: list<real>, window: int, top: real) -> real:
 ```
 
 <!-- worked: mixed_precision.delayed_scale -->
-One tensor of 1000 entries per step, x = sigma_k * normal() drawn in order from the generator seeded 1099368341331773078 (seed_of 'mixed_precision.delayed_scale') for steps k = 0 .. 15; sigma_k is 1.05 times sigma_(k-1) from sigma_(-1) = 1, and at step 10 it is multiplied by a further 4. The current scale divides amax of this step's tensor by 448; the delayed scale divides the largest amax of the previous 4 steps by 448 (step 0 uses its own amax). 'clipped' counts the entries with |x| / s >= 464 (the midpoint between 448 and the next code, so a saturating conversion changes them); 'rms error' is sqrt(sum_i (x_i - q_i)^2 / sum_i x_i^2), where x_i are the original unrounded entries (the denominator uses them, not q) and q_i is x_i after dividing by the scale, rounding to E4M3 (nearest even, saturating) and multiplying back. The factor 4 at step 10 stays in sigma for every later step (1.05 times it at step 11, and so on).
+One tensor of 1000 entries per step, x = sigma_k * normal() drawn in order from the generator `mixed_precision.delayed_scale` for steps k = 0 .. 15; sigma_k is 1.05 times sigma_(k-1) from sigma_(-1) = 1, and at step 10 it is multiplied by a further 4. The current scale divides amax of this step's tensor by 448; the delayed scale divides the largest amax of the previous 4 steps by 448 (step 0 uses its own amax). 'clipped' counts the entries with |x| / s >= 464 (the midpoint between 448 and the next code, so a saturating conversion changes them); 'rms error' is sqrt(sum_i (x_i - q_i)^2 / sum_i x_i^2), where x_i are the original unrounded entries (the denominator uses them, not q) and q_i is x_i after dividing by the scale, rounding to E4M3 (nearest even, saturating) and multiplying back. The factor 4 at step 10 stays in sigma for every later step (1.05 times it at step 11, and so on).
 
 | step | sigma | amax of this step | amax the delayed scale uses | clipped, delayed | rms error, delayed | clipped, current | rms error, current |
 |---|---:|---:|---:|---:|---:|---:|---:|
@@ -422,7 +422,7 @@ Bytes were counted only in the policy table, and the master, the gradient and th
 8. **[Implement]** Reproduce `mixed_precision.sr_bit_rule`: for each value of the table, count the 65536 values of $r$ that carry and check the exact mean against the fp32 value with rational arithmetic.
 9. **[Implement]** Reproduce `mixed_precision.loss_scale_adam` and `mixed_precision.scale_trace`: the six-weight AdamW run with fp16 gradient storage and the dynamic scale, with the nudges of the stable-digits rule, and the list of scale events.
 10. **[Investigate]** In `mixed_precision.scale_trace` change `grow_after` from 20 to 5 and to 100. Report the number of skipped steps and the final scale for each and say what the interval trades.
-11. **[Investigate]** On the descent of `mixed_precision.stall` keep the master in bf16, and update it with round to nearest in one run and with stochastic rounding in another (one run, the generator seeded `seed_of 'mixed_precision.exercise11'`, one uniform per step). Report the error of the working copy after step 300 in each and say when a bf16 master is enough.
+11. **[Investigate]** On the descent of `mixed_precision.stall` keep the master in bf16, and update it with round to nearest in one run and with stochastic rounding in another (one run, the generator `mixed_precision.exercise11`, one uniform per step). Report the error of the working copy after step 300 in each and say when a bf16 master is enough.
 12. **[Investigate]** Repeat `mixed_precision.delayed_scale` with a window of 1 and of 16, and with the jump at step 10 replaced by a drop to a quarter (a factor 0.25 in place of 4). Report the clipped count and the rms error at step 10 in each of the six cases, and say why a drop is cheaper than a jump.
 
 ## Key terms

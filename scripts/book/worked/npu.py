@@ -55,8 +55,8 @@ def _table(headers, rows, align=None):
     return "\n".join(out)
 
 
-def _seed_line(name):
-    return f"seed {bookrng.seed_of(name)} (seed_of '{name}', defined on the pseudocode page)"
+def _gen(name):
+    return f"the generator `{name}`"
 
 
 def _v(values, nd=2):
@@ -138,7 +138,7 @@ def network_weights():
     rows2 = [[f"W2[{o}]"] + [f"{v:+.2f}" for v in w2[o]] + [f"{b2[o]:+.2f}"] for o in range(OUT)]
     t1 = _table(["row", "i=0", "i=1", "i=2", "i=3", "i=4", "i=5", "bias"], rows1)
     t2 = _table(["row", "i=0", "i=1", "i=2", "i=3", "bias"], rows2)
-    return (f"The weights of the network, {_seed_line('npu.network')}. Draw order: normal() for W1[0][0], W1[0][1], ... "
+    return (f"The weights of the network, from {_gen('npu.network')}. Draw order: normal() for W1[0][0], W1[0][1], ... "
             f"W1[3][5] (row-major, 24 draws), then b1[0..3], then W2[0][0] ... W2[2][3] (12 draws), then b2[0..2]; weights are "
             f"round(0.6 z, 2), biases round(0.2 z, 2). The printed values are the inputs of everything below.\n\n"
             f"Layer 1, W1 of shape [4, 6] and b1 of shape [4]:\n\n{t1}\n\nLayer 2, W2 of shape [3, 4] and b2 of shape [3]:\n\n{t2}")
@@ -150,7 +150,7 @@ def float_forward():
             ["h1 = W1 x + b1", _v(h1, 4)],
             ["a1 = relu(h1)", _v(a1, 4)],
             ["y = W2 a1 + b2", _v(y, 4)]]
-    return (f"One input, x_i = round(normal(), 3) for i = 0 .. 5 from the generator, {_seed_line('npu.example')}. "
+    return (f"One input, x_i = round(normal(), 3) for i = 0 .. 5 from {_gen('npu.example')}. "
             f"The float forward pass of the network above (binary64, dot products summed from index 0, bias added last).\n\n"
             + _table(["step", "value"], rows, "ll"))
 
@@ -228,8 +228,8 @@ def calibration_ranges():
     t = _tensors(cal)
     shapes = {"x": "[1, 6]", "h1": "[1, 4]", "a1": "[1, 4]", "y": "[1, 3]"}
     rows = [[k, shapes[k], len(v), f"{min(v):+.4f}", f"{max(v):+.4f}"] for k, v in t.items()]
-    return (f"A calibration set of {N_CAL} inputs, each x_i = round(normal(), 3) for i = 0 .. 5, drawn in order from the generator, "
-            f"{_seed_line('npu.calibration')}. Each float tensor is recorded for every input; 'values' counts all numbers recorded for the tensor.\n\n"
+    return (f"A calibration set of {N_CAL} inputs, each x_i = round(normal(), 3) for i = 0 .. 5, drawn in order from "
+            f"{_gen('npu.calibration')}. Each float tensor is recorded for every input; 'values' counts all numbers recorded for the tensor.\n\n"
             + _table(["tensor", "shape", "values", "min", "max"], rows, "llrrr"))
 
 
@@ -520,8 +520,8 @@ def exactness():
         ["SQNR of the decoded output against the float output, dB", f"{sq:.2f}"],
         ["values clamped when quantized (inputs, a1, y)", f"{100 * clamped:.2f}%"],
     ]
-    return (f"The network quantized from the 32-input calibration set run on {N_TEST} test inputs, x_i = round(normal(), 3) drawn in order, "
-            f"{_seed_line('npu.test')}. 'Compiled form' is the integer program of the chapter (raw codes, folded bias, fixed-point requantizer); "
+    return (f"The network quantized from the 32-input calibration set run on {N_TEST} test inputs, x_i = round(normal(), 3) drawn in order from "
+            f"{_gen('npu.test')}. 'Compiled form' is the integer program of the chapter (raw codes, folded bias, fixed-point requantizer); "
             f"'direct reference' subtracts the zero point before each product and rounds the requantization as an exact rational: with the same integer multiplier and shift as the compiled form, round half to even of (multiplier x accumulator) / 2^shift (so the equality in the table tests the folding of the zero points into the bias and the integer arithmetic, not the approximation of M by a 15-bit multiplier). 'Ideal requantizer': the same with the real factor M in place of the multiplier and the shift, rounded half to even.\n\n"
             + _table(["quantity", "value"], rows, "lr"))
 
@@ -543,8 +543,8 @@ def calibration_curve(sizes=(1, 2, 4, 8, 16, 32, 64, 128)):
 def calibration_size():
     rows = [[n, f"{a:.2f}", f"{100 * ca:.1f}%", f"{b:.2f}", f"{100 * cb:.1f}%"] for n, a, ca, b, cb in calibration_curve()]
     return ("Output SQNR (dB, against the float network) on the 256 test inputs of the previous block, as a function of the size of the calibration set. "
-            f"'representative' sets are the first n inputs of the calibration stream (128 inputs, " + _seed_line('npu.calibration') + "); "
-            f"'narrow' sets are the first n inputs of a stream of x_i = round(0.25 normal(), 3), {_seed_line('npu.calibration_narrow')} "
+            f"'representative' sets are the first n inputs of the calibration stream (128 inputs, " + _gen('npu.calibration') + "); "
+            f"'narrow' sets are the first n inputs of a stream of x_i = round(0.25 normal(), 3), {_gen('npu.calibration_narrow')} "
             "(an input a quarter of the size of the deployed ones). 'clamped' is the share of the quantized values (inputs, hidden activations, outputs) "
             "that fell outside the calibrated range and were clamped.\n\n"
             + _table(["calibration inputs", "SQNR representative", "clamped", "SQNR narrow", "clamped"], rows))
@@ -573,8 +573,8 @@ def clipping_curve():
 def clipping():
     rows = [[f"{100 * t:.2f}%", f"{100 * c:.2f}%", f"{med:.4f}", f"{p99:.4f}", f"{sq:.2f}"] for t, c, med, p99, sq in clipping_curve()]
     return ("A calibration range that ignores the tails of the recorded values. Inputs are 'spiky': for each, six normal() draws then one uniform(), "
-            "and when the uniform is below 0.02 all six values are multiplied by 6; each value is then rounded once to 3 decimals, x_i = round(k z_i, 3) with k = 6 or 1 (it is the product that is rounded, not z_i beforehand). The calibration set is 512 such inputs, "
-            f"{_seed_line('npu.spiky_calibration')}; the test set 1000, {_seed_line('npu.spiky_test')}. Each activation range is [percentile(v, tail), percentile(v, 1 - tail)] "
+            "and when the uniform is below 0.02 all six values are multiplied by 6; each value is then rounded once to 3 decimals, x_i = round(k z_i, 3) with k = 6 or 1 (it is the product that is rounded, not z_i beforehand). The calibration set is 512 such inputs from "
+            f"{_gen('npu.spiky_calibration')}; the test set is 1000 from {_gen('npu.spiky_test')}. Each activation range is [percentile(v, tail), percentile(v, 1 - tail)] "
             "of the values recorded for the tensor (the percentile of the book's pseudocode page; tail 0 is the minimum and maximum). "
             "'relative error' of an input is the norm of (decoded - float) over the norm of the float output; 'median' and '99th percentile' are over the 1000 test inputs; "
             "SQNR is over all their outputs.\n\n"

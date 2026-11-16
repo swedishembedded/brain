@@ -47,8 +47,7 @@ def _sci(v, d=2):
 
 
 def _seed(name):
-    s = bookrng.seed_of(name)
-    return f"the book's SplitMix64 with seed {s:#018x} ({s})"
+    return f"the generator `{name}` (the book's SplitMix64)"
 
 
 def _lse(z):
@@ -168,7 +167,7 @@ def _verdict(d):
 def degenerate_instances():
     head = (f"One causal attention head, Y = softmax(Q K^T / sqrt(d_k) + M) V, with M = 0 where key j <= query i and minus "
             f"infinity elsewhere (rows and columns numbered from 0), the softmax taken along each row, in double precision. "
-            f"One generator, {_seed(NAME_INSTANCES)}, draws the instances one after another in the order of the table; for "
+            f"One generator, `{NAME_INSTANCES}` (the book's SplitMix64), draws the instances one after another in the order of the table; for "
             f"each, Q (T x d_k), then K (T x d_k), then V (T x d_v), every entry normal() in row-major order, except for "
             f"'identical tokens', where one row of Q, one of K and one of V are drawn (d_k, d_k and d_v values) and repeated "
             f"T times. Each mutant (numbered m as in attention_variant) replaces one step: 1, the scale 1/sqrt(d_k) left "

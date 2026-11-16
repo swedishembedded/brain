@@ -19,7 +19,7 @@ The experiment uses one network throughout, called the **deep stack**. It reads 
 The standard normals are the same in every run, so two starts differ only in scale. Here is the mean squared error with tanh units:
 
 <!-- worked: initialization.training_tanh -->
-Setup: the deep stack with tanh units, 32 training examples (full batch), mean squared error, plain gradient descent with rate 0.01, 100 steps, biases start at 0. The target is t = 1 + sin(a . x) with mean of t^2 = 1.5965; predicting the mean of the targets gives the loss 0.4558. Weights: one generator `initialization.weights` (seed 0x1fd7def6cdf88dde, 2294547686767496670). The 10 hidden weight matrices (shape [64, 64], row j holds the weights of unit j) and then the read-out vector (64 entries) are drawn in this order, layer by layer, row by row, entry i = 0, ..., 63 within a row; each weight is scale * normal(), and every scheme draws every normal() (a zero scale still consumes it), so all schemes see the same standard normals. Scales: zeros 0; small 0.01; large 1; Xavier sqrt(2 / (n_in + n_out)) with n_in = n_out = 64 in the hidden layers and n_in = 64, n_out = 1 in the read-out, so sqrt(2 / 65); He sqrt(2 / n_in) = sqrt(2 / 64) in every layer. Data: one generator `initialization.data` (seed 0x155d7f43c18852c4, 1539526576617050820). First the direction a: 64 draws of normal() each multiplied by 3/16 = 0.1875; then the examples, example after example, each 64 consecutive normal() draws (so the 128 inputs of the later tables extend the 32 training inputs, which are their first 32); the target of an example x is t = 1 + sin(a . x) (radians). The loss is the mean over the examples of (y - t)^2, with y = w_out . a_10 + b_out. A number that comes from a chaotic run is printed with only the digits that are the same in the run and in four copies of it whose first weight is changed by +1e-12, -1e-12, +3e-12 and -3e-12: in full if all agree on it, as 'about x' with the leading digits on which all agree, or as 'unstable' when not even one digit survives; the other digits cannot be reproduced in another implementation.
+Setup: the deep stack with tanh units, 32 training examples (full batch), mean squared error, plain gradient descent with rate 0.01, 100 steps, biases start at 0. The target is t = 1 + sin(a . x) with mean of t^2 = 1.5965; predicting the mean of the targets gives the loss 0.4558. Weights: one generator `initialization.weights`. The 10 hidden weight matrices (shape [64, 64], row j holds the weights of unit j) and then the read-out vector (64 entries) are drawn in this order, layer by layer, row by row, entry i = 0, ..., 63 within a row; each weight is scale * normal(), and every scheme draws every normal() (a zero scale still consumes it), so all schemes see the same standard normals. Scales: zeros 0; small 0.01; large 1; Xavier sqrt(2 / (n_in + n_out)) with n_in = n_out = 64 in the hidden layers and n_in = 64, n_out = 1 in the read-out, so sqrt(2 / 65); He sqrt(2 / n_in) = sqrt(2 / 64) in every layer. Data: one generator `initialization.data`. First the direction a: 64 draws of normal() each multiplied by 3/16 = 0.1875; then the examples, example after example, each 64 consecutive normal() draws (so the 128 inputs of the later tables extend the 32 training inputs, which are their first 32); the target of an example x is t = 1 + sin(a . x) (radians). The loss is the mean over the examples of (y - t)^2, with y = w_out . a_10 + b_out. A number that comes from a chaotic run is printed with only the digits that are the same in the run and in four copies of it whose first weight is changed by +1e-12, -1e-12, +3e-12 and -3e-12: in full if all agree on it, as 'about x' with the leading digits on which all agree, or as 'unstable' when not even one digit survives; the other digits cannot be reproduced in another implementation.
 
 | start | step 0 | step 10 | step 30 | step 60 | step 100 |
 |---|---:|---:|---:|---:|---:|
@@ -33,7 +33,7 @@ Setup: the deep stack with tanh units, 32 training examples (full batch), mean s
 and with ReLU units:
 
 <!-- worked: initialization.training_relu -->
-Setup: the deep stack with relu units, 32 training examples (full batch), mean squared error, plain gradient descent with rate 0.01, 100 steps, biases start at 0. The target is t = 1 + sin(a . x) with mean of t^2 = 1.5965; predicting the mean of the targets gives the loss 0.4558. Weights and data exactly as in the tanh table above (same generators, seeds, draw order and scales). A number that comes from a chaotic run is printed with only the digits that are the same in the run and in four copies of it whose first weight is changed by +1e-12, -1e-12, +3e-12 and -3e-12: in full if all agree on it, as 'about x' with the leading digits on which all agree, or as 'unstable' when not even one digit survives; the other digits cannot be reproduced in another implementation.
+Setup: the deep stack with relu units, 32 training examples (full batch), mean squared error, plain gradient descent with rate 0.01, 100 steps, biases start at 0. The target is t = 1 + sin(a . x) with mean of t^2 = 1.5965; predicting the mean of the targets gives the loss 0.4558. Weights and data exactly as in the tanh table above (same generators, draw order and scales). A number that comes from a chaotic run is printed with only the digits that are the same in the run and in four copies of it whose first weight is changed by +1e-12, -1e-12, +3e-12 and -3e-12: in full if all agree on it, as 'about x' with the leading digits on which all agree, or as 'unstable' when not even one digit survives; the other digits cannot be reproduced in another implementation.
 
 | start | step 0 | step 10 | step 30 | step 60 | step 100 |
 |---|---:|---:|---:|---:|---:|
@@ -89,7 +89,7 @@ An update $\theta \leftarrow \theta - \eta\,\mathrm{d}L/\mathrm{d}\theta$ with a
 By induction on the step number, the units stay equal for ever, from step 0 to step $10^6$. A layer of $H$ identical units computes the same function as one unit whose outgoing weight is $H$ times larger: the layer has width $H$ on paper and width 1 in effect. The same argument applies to every layer, and to the rows of any weight matrix whose rows start equal. Breaking the tie is **symmetry-breaking**, and the only thing that can break it, since gradient descent is deterministic and symmetric in the units, is to start the units different. The table shows it on a small network with four hidden units and four training examples, from an identical start and from a random one:
 
 <!-- worked: initialization.symmetry_run -->
-Setup: four examples (x = (1, 2), t = 1; x = (-1, 0.5), t = 0; x = (0.5, -1), t = -1; x = (-2, -1), t = 0.5); a network with 4 tanh hidden units and no biases (y = sum_j W2_j tanh(W1_j . x)); mean squared error over the four examples; gradient descent with rate 0.1; the identical start has every weight 0.5. Generator: the book's SplitMix64, seed 0x3f59f414d0259c8b (4564948067545357451). The random start draws W1[j][i] = 0.5 * normal() for j = 0 .. 3, i = 0, 1 (row by row), then W2[j] = 0.5 * normal(). "Spread" is the largest difference between two units' entries (of W1 rows, or of W2).
+Setup: four examples (x = (1, 2), t = 1; x = (-1, 0.5), t = 0; x = (0.5, -1), t = -1; x = (-2, -1), t = 0.5); a network with 4 tanh hidden units and no biases (y = sum_j W2_j tanh(W1_j . x)); mean squared error over the four examples; gradient descent with rate 0.1; the identical start has every weight 0.5. Generator: the book's SplitMix64, `initialization.symmetry`. The random start draws W1[j][i] = 0.5 * normal() for j = 0 .. 3, i = 0, 1 (row by row), then W2[j] = 0.5 * normal(). "Spread" is the largest difference between two units' entries (of W1 rows, or of W2).
 
 | step | loss (identical) | spread W1 (identical) | spread W2 (identical) | loss (random) | spread W1 (random) | spread W2 (random) |
 |---|---:|---:|---:|---:|---:|---:|
@@ -107,7 +107,7 @@ The "spread" columns are exactly $0$ for the identical start at every step, to t
 Zero weights are the case where *all* units of *all* layers are equal, and also the case where there is nothing to differentiate. Look at the gradient of each layer of the deep stack at the first step:
 
 <!-- worked: initialization.start_gradients -->
-Setup: the deep stack (10 layers of 64 units, a read-out), the first 32 inputs of the data, all biases 0, loss = mean of (y - t)^2. Entries are the Euclidean norm of the gradient of each layer's weight matrix and bias vector at step 0. Weights: all zero (tanh and ReLU), or He normal (ReLU); weights and data are those of the first training table (generators `initialization.weights` and `initialization.data`, seeds 0x1fd7def6cdf88dde and 0x155d7f43c18852c4).
+Setup: the deep stack (10 layers of 64 units, a read-out), the first 32 inputs of the data, all biases 0, loss = mean of (y - t)^2. Entries are the Euclidean norm of the gradient of each layer's weight matrix and bias vector at step 0. Weights: all zero (tanh and ReLU), or He normal (ReLU); weights and data are those of the first training table (generators `initialization.weights` and `initialization.data`).
 
 | layer | tanh, zeros: norm of dW | tanh, zeros: norm of db | ReLU, zeros: norm of dW | ReLU, zeros: norm of db | ReLU, He: norm of dW | ReLU, He: norm of db |
 |---|---:|---:|---:|---:|---:|---:|
@@ -135,7 +135,7 @@ Symmetry is a property of units that share their incoming and outgoing weights. 
 With the weights random, there is a second question: how big are they? Measure first. Take 128 inputs of independent standard normals (so the rms of the input is about $1$), run the deep stack forward from each of the starts, and print the root mean square of the pre-activations $\mathbf{z}_\ell$ of layer $\ell$, taken over all examples and units. The weights are $\text{scale}\times\mathrm{normal}()$ from the generator `initialization.weights` and the inputs come from `initialization.data`, with the seeds and the draw order printed in the first table of the chapter (layer by layer, row by row, so every start sees the same standard normals). With tanh units:
 
 <!-- worked: initialization.forward_rms_tanh -->
-Setup: the deep stack with tanh units, 128 inputs (rms of the inputs 0.996), biases 0. Entries: the root mean square of z_l over all 128 x 64 pre-activations of layer l. Weights and data: as in the first training table of the chapter (weights generator `initialization.weights`, seed 0x1fd7def6cdf88dde; data generator `initialization.data`, seed 0x155d7f43c18852c4, the 128 inputs being the first 128 examples of that stream); scale * normal(), the same draws for every row.
+Setup: the deep stack with tanh units, 128 inputs (rms of the inputs 0.996), biases 0. Entries: the root mean square of z_l over all 128 x 64 pre-activations of layer l. Weights and data: as in the first training table of the chapter (weights generator `initialization.weights`; data generator `initialization.data`, the 128 inputs being the first 128 examples of that stream); scale * normal(), the same draws for every row.
 
 | start | z_1 | z_2 | z_3 | z_5 | z_7 | z_10 |
 |---|---:|---:|---:|---:|---:|---:|
@@ -149,7 +149,7 @@ Setup: the deep stack with tanh units, 128 inputs (rms of the inputs 0.996), bia
 and with ReLU units:
 
 <!-- worked: initialization.forward_rms_relu -->
-Setup: the deep stack with relu units, 128 inputs (rms of the inputs 0.996), biases 0. Entries: the root mean square of z_l over all 128 x 64 pre-activations of layer l. Weights and data: as in the first training table of the chapter (weights generator `initialization.weights`, seed 0x1fd7def6cdf88dde; data generator `initialization.data`, seed 0x155d7f43c18852c4, the 128 inputs being the first 128 examples of that stream); scale * normal(), the same draws for every row.
+Setup: the deep stack with relu units, 128 inputs (rms of the inputs 0.996), biases 0. Entries: the root mean square of z_l over all 128 x 64 pre-activations of layer l. Weights and data: as in the first training table of the chapter (weights generator `initialization.weights`; data generator `initialization.data`, the 128 inputs being the first 128 examples of that stream); scale * normal(), the same draws for every row.
 
 | start | z_1 | z_2 | z_3 | z_5 | z_7 | z_10 |
 |---|---:|---:|---:|---:|---:|---:|
@@ -189,7 +189,7 @@ $$
 The mean of $z$ is zero, so its variance equals its second moment. $n_{\mathrm{in}}$, the number of terms in the sum, is called the **fan-in** of the unit. Notice what the derivation used: the *weights* must be independent and centred; the inputs may be correlated. A check with four combinations, $n_{\mathrm{in}} = 64$, $\sigma_w^2 = 1/64$, $\mathbb{E}[x^2] = 1$:
 
 <!-- worked: initialization.variance_of_a_sum -->
-Generator: the book's SplitMix64, seed 0xff04ee1516c0d6bf (18376074153921926847). z = sum_i w_i x_i with n = 64 terms, weight standard deviation sigma_w = 1/sqrt(n) = 0.1250, E[x_i^2] = 1. Each of 4000 trials in turn draws x first (n calls of normal() for "independent" inputs, one call whose value is copied n times for "equal"), then w (n calls of normal() times sigma_w, or one call copied n times). The measured value is the mean of z^2 over the trials.
+Generator: the book's SplitMix64, `initialization.sum`. z = sum_i w_i x_i with n = 64 terms, weight standard deviation sigma_w = 1/sqrt(n) = 0.1250, E[x_i^2] = 1. Each of 4000 trials in turn draws x first (n calls of normal() for "independent" inputs, one call whose value is copied n times for "equal"), then w (n calls of normal() times sigma_w, or one call copied n times). The measured value is the mean of z^2 over the trials.
 
 | weights | inputs | prediction | measured E[z^2] |
 |---|---|---:|---:|
@@ -244,7 +244,7 @@ $$
 The second step uses the symmetry: by $z \mapsto -z$ the positive half and the negative half contribute equally to $\mathbb{E}[z^2]$. Is $z$ symmetric? It is a sum of $n_{\mathrm{in}}$ products of symmetric zero-mean weights with inputs, so yes, given the inputs. The identity does not depend on the scale or on the shape of the distribution; and it fails for tanh, whose ratio depends on the scale:
 
 <!-- worked: initialization.relu_second_moment -->
-Generator: the book's SplitMix64, seed 0x30b9619a95fae5fe (3510944701081118206). For each distribution in turn, 50000 draws, one call each (normal() times the standard deviation, or sqrt(3) * (2 * uniform() - 1)), all from one generator in the order of the rows.
+Generator: the book's SplitMix64, `initialization.relu-moment`. For each distribution in turn, 50000 draws, one call each (normal() times the standard deviation, or sqrt(3) * (2 * uniform() - 1)), all from one generator in the order of the rows.
 
 | distribution of z | E[z^2] | E[relu(z)^2] | ratio | E[tanh(z)^2] | ratio |
 |---|---:|---:|---:|---:|---:|
@@ -302,7 +302,7 @@ Compare the forward recursion $q_\ell = n_{\mathrm{in}}\sigma_w^2\kappa_g\,q_{\e
 Take a *funnel*: a linear network whose widths halve, $256 \to 128 \to 64 \to 32 \to 16 \to 8$, so that every layer has $n_{\mathrm{in}} = 2n_{\mathrm{out}}$ and the five layers have fan-ins $256, 128, 64, 32, 16$. The rules, with measured and predicted overall second-moment factors:
 
 <!-- worked: initialization.funnel -->
-Generator: the book's SplitMix64, seed 0x113ab9680a249782 (1241508503791900546). A linear network (identity activations, no biases) with widths 256 -> 128 -> 64 -> 32 -> 16 -> 8: five weight matrices W_l of shape [fan_out, fan_in]. For each rule in the order of the rows: first 128 inputs of 256 normal() draws (row by row), then the weights layer by layer (row by row, scale times normal()), then, for the backward pass, 128 upstream gradient vectors of 8 normal() draws. Forward: output second moment divided by input second moment. Backward: the upstream gradient is multiplied by W_5^T, ..., W_1^T and the second moment of the result divided by that of the upstream gradient. The prediction is the product over layers of fan_in Var(w) (forward) and of fan_out Var(w) (backward).
+Generator: the book's SplitMix64, `initialization.funnel`. A linear network (identity activations, no biases) with widths 256 -> 128 -> 64 -> 32 -> 16 -> 8: five weight matrices W_l of shape [fan_out, fan_in]. For each rule in the order of the rows: first 128 inputs of 256 normal() draws (row by row), then the weights layer by layer (row by row, scale times normal()), then, for the backward pass, 128 upstream gradient vectors of 8 normal() draws. Forward: output second moment divided by input second moment. Backward: the upstream gradient is multiplied by W_5^T, ..., W_1^T and the second moment of the result divided by that of the upstream gradient. The prediction is the product over layers of fan_in Var(w) (forward) and of fan_out Var(w) (backward).
 
 | Var(w) of each layer | forward: predicted | forward: measured | backward: predicted | backward: measured |
 |---|---:|---:|---:|---:|
@@ -383,7 +383,7 @@ Everything above used only the variance of a weight. The mean and the variance f
 The variances match and the tails do not:
 
 <!-- worked: initialization.draw_shapes -->
-Generator: the book's SplitMix64, seed 0x012db5d56d64c4cf (84923896257889487). sigma = 1. 100000 draws per shape, one after the other from one generator in the order of the rows. The variance of a standard normal conditioned on abs(z) <= 2 is 0.773741 (use this value or the formula, not a shorter one). Fourth moment = mean of w^4 divided by the squared variance (3 for a normal, 1.8 for a uniform). Variance is the mean of w^2 (the mean is 0 by symmetry).
+Generator: the book's SplitMix64, `initialization.shapes`. sigma = 1. 100000 draws per shape, one after the other from one generator in the order of the rows. The variance of a standard normal conditioned on abs(z) <= 2 is 0.773741 (use this value or the formula, not a shorter one). Fourth moment = mean of w^4 divided by the squared variance (3 for a normal, 1.8 for a uniform). Variance is the mean of w^2 (the mean is 0 by symmetry).
 
 | shape | draw | variance | fourth moment | largest absolute w |
 |---|---|---:|---:|---:|
@@ -395,7 +395,7 @@ Generator: the book's SplitMix64, seed 0x012db5d56d64c4cf (84923896257889487). s
 The fourth moment of a normal is $3$; of a uniform, $1.8$; the truncated normal is between. The largest weight shows the effect: $4.1$ standard deviations for the normal, $1.73$ for the uniform (a hard bound, $\sqrt3$), $2.27$ for the truncated one. What do the tails change? The central limit theorem of Volume I says the pre-activation $z$, a sum of 64 terms, is close to normal whatever the weights' shape, so the layer's output hardly notices. Network by network:
 
 <!-- worked: initialization.shape_in_network -->
-Setup: the ReLU deep stack with He scale sigma = sqrt(2/fan_in), but each weight drawn with the named shape (one generator per row: `initialization.shape-net.normal` = 0xd46492fdd4c58570, `initialization.shape-net.uniform` = 0xc8d73cb61fc60766, `initialization.shape-net.truncated` = 0x786739af9b79be90; weights layer by layer, row by row, one draw per weight in the shape's rule, the truncated shape redrawing a normal() until it passes). 128 inputs, the first 128 examples of the data stream of the first training table (generator `initialization.data`, seed 0x155d7f43c18852c4), biases 0. The predicted rms of z_1 is sqrt(2 q_0) with q_0 the mean of x^2.
+Setup: the ReLU deep stack with He scale sigma = sqrt(2/fan_in), but each weight drawn with the named shape (one generator per row: `initialization.shape-net.normal`, `initialization.shape-net.uniform`, `initialization.shape-net.truncated`; weights layer by layer, row by row, one draw per weight in the shape's rule, the truncated shape redrawing a normal() until it passes). 128 inputs, the first 128 examples of the data stream of the first training table (generator `initialization.data`), biases 0. The predicted rms of z_1 is sqrt(2 q_0) with q_0 the mean of x^2.
 
 | weight shape | rms z_1 | rms z_5 | rms z_10 |
 |---|---:|---:|---:|
@@ -465,7 +465,7 @@ At $m = 1$ the starting loss ($2.388$) is above the loss of predicting zero ($1.
 A residual block (chapter 12) adds a branch to its input: $\mathbf{x} \leftarrow \mathbf{x} + f(\mathbf{x})$. Variance-preservation then fails for a new reason: even if the branch preserves the size, the sum adds a second moment on top of the input. If the branch's output has second moment $\omega$ times the input's, and (weights being independent and centred) is uncorrelated with the input, the block multiplies the second moment by $1 + \omega$. After $L$ blocks that is $(1+\omega)^L$. The branch is a ReLU layer pair, $\mathbf{W}_2\,\mathrm{relu}(\mathbf{W}_1\mathbf{x})$, with $\mathbf{W}_1$ He and $\mathbf{W}_2$ of variance $\omega/n_{\mathrm{in}}$:
 
 <!-- worked: initialization.residual_growth -->
-Generator: the book's SplitMix64, seed 0xef3250c54935592a (17235927532167321898). A stack of L blocks x <- x + W2 relu(W1 x) on 64 units; W1 is He normal (sigma^2 = 2/64), W2 has sigma^2 = omega/64 (omega: the branch's share of the second moment), no biases. Cells in the order of the rows; for each cell, 128 inputs of 64 normal() draws (row by row), then for each block W1 and W2 (row by row, scale times normal()), all from one generator. Growth = mean of x^2 after the last block divided by the mean of x^2 at the input.
+Generator: the book's SplitMix64, `initialization.residual`. A stack of L blocks x <- x + W2 relu(W1 x) on 64 units; W1 is He normal (sigma^2 = 2/64), W2 has sigma^2 = omega/64 (omega: the branch's share of the second moment), no biases. Cells in the order of the rows; for each cell, 128 inputs of 64 normal() draws (row by row), then for each block W1 and W2 (row by row, scale times normal()), all from one generator. Growth = mean of x^2 after the last block divided by the mean of x^2 at the input.
 
 | blocks L | omega | omega value | predicted (1 + omega)^L | measured growth |
 |---:|---|---:|---:|---:|
@@ -513,7 +513,7 @@ $$
 Each factor's gradient is built from the *other*. If $\mathbf{A} = \mathbf{0}$ and $\mathbf{B} = \mathbf{0}$ both gradients are exactly zero for ever. If $\mathbf{B} = \mathbf{0}$ and $\mathbf{A}$ is random, $d\mathbf{B}$ is nonzero and $d\mathbf{A}$ is exactly zero at the first step; $\mathbf{B}$ moves, after which $d\mathbf{A}$ is no longer zero. This is symmetry-breaking again, with the randomness placed in the factor whose gradient does not pass through the zero:
 
 <!-- worked: initialization.lora_zero_start -->
-Generator: the book's SplitMix64, seed 0xd47045662f646831 (15307811438616406065). A frozen layer W (3 x 4) = [identity of size 3 | zero column] applied to x = (1, 2, 3, 4), so W x = (1, 2, 3); the target is (2, 1, 3.5). The adapter adds B (A x) with A of shape [2, 4] and B of shape [3, 2]; A = 0.5 * normal() (draws row by row) in the first start. Loss = squared distance of the output from the target, |y - target|^2 (its gradient with respect to y is 2 (y - target)); gradient descent on A and B with rate 0.05. Columns: loss, norm of B, norm of dL/dB, norm of dL/dA.
+Generator: the book's SplitMix64, `initialization.lora`. A frozen layer W (3 x 4) = [identity of size 3 | zero column] applied to x = (1, 2, 3, 4), so W x = (1, 2, 3); the target is (2, 1, 3.5). The adapter adds B (A x) with A of shape [2, 4] and B of shape [3, 2]; A = 0.5 * normal() (draws row by row) in the first start. Loss = squared distance of the output from the target, |y - target|^2 (its gradient with respect to y is 2 (y - target)); gradient descent on A and B with rate 0.05. Columns: loss, norm of B, norm of dL/dB, norm of dL/dA.
 
 | start | step | loss | norm of B | norm of dB | norm of dA |
 |---|---:|---:|---:|---:|---:|
@@ -539,14 +539,14 @@ The result of one start is a random variable, not a number. The same architectur
 <!-- worked: initialization.seed_table -->
 Setup: the ReLU deep stack, He normal start, the training run of the previous tables, but the weights come from the generator named `initialization.seed-run.<k>` (k = 0 .. 4); the last row repeats k = 0. The data and everything else are unchanged.
 
-| run k | seed | loss at step 0 | loss at step 30 | loss at step 100 |
-|---|---:|---:|---:|---:|
-| 0 | 0x29844ecb31da860a | 1.1362 | 0.0248 | 3.15e-04 |
-| 1 | 0xf9823387663fabc0 | 1.0664 | 0.0461 | 0.0024 |
-| 2 | 0x04418717e4886529 | 5.3339 | 0.0546 | 5.13e-04 |
-| 3 | 0x1bcf258513bfdad2 | 0.7274 | 0.0130 | 4.63e-05 |
-| 4 | 0x57d01544c55ea5da | 1.2260 | 0.0441 | 5.59e-04 |
-| 0 again | 0x29844ecb31da860a | 1.1362 | 0.0248 | 3.15e-04 |
+| run k | loss at step 0 | loss at step 30 | loss at step 100 |
+|---|---:|---:|---:|
+| 0 | 1.1362 | 0.0248 | 3.15e-04 |
+| 1 | 1.0664 | 0.0461 | 0.0024 |
+| 2 | 5.3339 | 0.0546 | 5.13e-04 |
+| 3 | 0.7274 | 0.0130 | 4.63e-05 |
+| 4 | 1.2260 | 0.0441 | 5.59e-04 |
+| 0 again | 1.1362 | 0.0248 | 3.15e-04 |
 <!-- /worked -->
 
 The repeated seed reproduces the loss to every digit printed (the draws and the arithmetic are the same, and both are deterministic); different seeds change the starting loss from $0.73$ to $5.33$ (one realisation of the read-out weights happens to be large) and the loss after 100 steps from $4.6\times10^{-5}$ to $2.4\times10^{-3}$, a factor of about 50. A claim that one start is better than another is a claim about a distribution over seeds, which needs several; this is the lesson of Volume I, chapter 17, on hard-coded seeds, and the reason this chapter's tables name their generators.
@@ -617,7 +617,7 @@ The limits are the ones named along the way. The derivations assume independent 
 3. **[Calculate]** Derive $\mathbb{E}[\mathrm{relu}(z)^2]$ for $z \sim \mathcal{N}(0, s^2)$ by integrating, and show it is $s^2/2$. Then do the same for $\mathbb{E}[g'(z)^2]$.
 4. **[Calculate]** For a residual stack with branch gain $\omega$ and $L$ blocks, find the $\omega$ that makes the total growth equal to 2. Compare with $1/(2L)$ for $L = 10$ and 40.
 5. **[Calculate]** For $\pi = 0.02$ compute the initial loss of a binary classifier with the bias at $0$ and at the log-odds, and the number of gradient steps of rate $0.5$ on the bias alone to get within $0.01$ (reproduce the method of `initialization.class_prior_bias`).
-6. **[Implement]** Implement `init_linear` from the pseudocode and the deep stack with 10 layers of 64 units, and reproduce the table of `initialization.forward_rms_relu` for the He and large rows, using the seeds, scales and draw order printed with the first training table. Print the rms of $z_\ell$ for every layer and plot it.
+6. **[Implement]** Implement `init_linear` from the pseudocode and the deep stack with 10 layers of 64 units, and reproduce the table of `initialization.forward_rms_relu` for the He and large rows, using the generators, scales and draw order printed with the first training table. Print the rms of $z_\ell$ for every layer and plot it.
 7. **[Implement]** Add a backward pass and reproduce `initialization.backward_rms_relu` and `initialization.start_gradients` (the zero start must give exactly zero everywhere except the read-out bias).
 8. **[Implement]** Reproduce `initialization.variance_of_a_sum` (four combinations, 4000 trials each, in the stated draw order) and `initialization.relu_second_moment`.
 9. **[Investigate]** Train the deep stack with ReLU and the He start for 100 steps at the rates $0.001$, $0.003$, $0.01$, $0.03$ and $0.1$. Which diverge? Repeat with Xavier and explain why the largest stable rate differs.

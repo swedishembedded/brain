@@ -17,8 +17,8 @@ The world is a set of 2 by 2 black-and-white images, so that a distribution over
 * ancestral sampling traced draw by draw, and checked by counting 10,000 draws; the chain rule as a pixel-by-pixel sampler;
 * the density of a continuous pixel against the probability of its 8-bit bin, and bits per dimension.
 
-Every printed number is a function of the stated inputs. The only randomness is the book's SplitMix64: the dataset, with seed
-`seed_of("generative_modeling.dataset")`, and the check of the sampler, with `seed_of("generative_modeling.ancestral")`. The
+Every printed number is a function of the stated inputs. The only randomness is the book's SplitMix64: the dataset, from the
+generator `generative_modeling.dataset`, and the check of the sampler, from `generative_modeling.ancestral`. The
 fitted numbers are exact sums or the limit of a convergent iteration run for a stated number of passes, so none depends on
 rounding noise at the printed digits.
 
@@ -64,8 +64,7 @@ def _table(headers, rows, align=None):
 
 
 def _generator_line(name):
-    seed = bookrng.seed_of(name)
-    return f"Generator: the book's SplitMix64, seed {seed:#018x} ({seed}), used as the state before the first draw."
+    return f"Generator: `{name}` (the book's SplitMix64)."
 
 
 def _f(x, d=4):

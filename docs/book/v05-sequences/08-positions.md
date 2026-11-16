@@ -23,7 +23,7 @@ Position codes lean on earlier chapters, which the questions below revisit.
 The test needs three words and three small matrices, and the numbers are printed so that every later table can be recomputed. The words are stand-ins for embeddings that a trained model would have; the numbers mean nothing yet.
 
 <!-- worked: positions.sentence_setup -->
-Generator: the book's SplitMix64, seed 0x1e0e3e56a1d5e823 (`seed_of` of the name `positions.sentence`). Draws, in this order: the 12 entries of X (one row for each of the words dog, bites, man; four numbers each), then the 8 entries of W_Q, the 8 of W_K and the 8 of W_V (each 4 by 2, row by row), every one `round(normal(), 1)` (`round` to one decimal, ties away from zero). The embeddings are random stand-ins for learned ones; d_k = d_v = 2.
+Generator: `positions.sentence` (the book's SplitMix64). Draws, in this order: the 12 entries of X (one row for each of the words dog, bites, man; four numbers each), then the 8 entries of W_Q, the 8 of W_K and the 8 of W_V (each 4 by 2, row by row), every one `round(normal(), 1)` (`round` to one decimal, ties away from zero). The embeddings are random stand-ins for learned ones; d_k = d_v = 2.
 
 | row of X | word | embedding x (4 numbers) |
 |---|---|---|
@@ -68,7 +68,7 @@ $$
 The position is called absolute because each row says "I am place $i$" and nothing else. The layer after it is unchanged. Here a four-row table is added to the words of the example, and the same two orders are run again:
 
 <!-- worked: positions.learned_positions -->
-Generator: the book's SplitMix64, seed 0x801e1f19a2a532b2 (`seed_of` of the name `positions.table`). Draws: the 16 entries of the table W_pos (shape [4, 4]), row by row, each `round(0.5 * normal(), 1)`. The input at place a is the embedding of its word plus row a of the table; the projections are those above.
+Generator: `positions.table` (the book's SplitMix64). Draws: the 16 entries of the table W_pos (shape [4, 4]), row by row, each `round(0.5 * normal(), 1)`. The input at place a is the embedding of its word plus row a of the table; the projections are those above.
 
 | row of W_pos | values |
 |---|---|
@@ -192,7 +192,7 @@ The two phase factors collapsed into one that holds the offset and nothing else.
 Here is the computation at width 8, with the numbers printed so that it can be done by hand. The rates are the geometric scale of the last section, $\omega_m = \mathrm{base}^{-2m/d}$ with base 10,000 and $d = 8$, computed with the library power function:
 
 <!-- worked: positions.rope_frequencies -->
-Generator: the book's SplitMix64, seed 0x3178a93b296b1e70 (`seed_of` of the name `positions.rope`). Draws: the 8 entries of the query q, then the 8 of the key k, each `round(normal(), 1)`. Width d = 8, base 10000: pair m is the channels (2m, 2m + 1) and turns by the angle i * w_m at position i, with w_m = 10000^(-2m/8) (library pow).
+Generator: `positions.rope` (the book's SplitMix64). Draws: the 8 entries of the query q, then the 8 of the key k, each `round(normal(), 1)`. Width d = 8, base 10000: pair m is the channels (2m, 2m + 1) and turns by the angle i * w_m at position i, with w_m = 10000^(-2m/8) (library pow).
 
 q = (-2.4, -0.1, -1.7, 0.5, 1.1, 1.4, 0.6, -0.1), k = (0.5, 0.6, 0.1, -0.1, 3.1, -0.2, -1.2, -1.9)
 
@@ -518,7 +518,7 @@ Both exist in brain. The Z-Image port (`crates/dit/src/rope.rs`) uses blocks, of
 The properties of the single axis carry over, and the check is again numerical. A query and a key of width 16, rotated by their triples, give a score that depends only on the offset triple, and with equal positions on the three axes the rotation is the plain one:
 
 <!-- worked: positions.mrope_offsets -->
-Generator: the book's SplitMix64, seed 0x03ca6b0ed89e64f5 (`seed_of` of the name `positions.mrope`). Draws: the 16 entries of q, then the 16 of k, each `round(normal(), 1)`. Head width 16, rates w_m = 10000^(-2m/16), half-split pairs (m, m + 8), interleaved sections (4, 2, 2): pair m turns by (position on its axis) * w_m. The score is the dot product of the rotated query at the first triple with the rotated key at the second.
+Generator: `positions.mrope` (the book's SplitMix64). Draws: the 16 entries of q, then the 16 of k, each `round(normal(), 1)`. Head width 16, rates w_m = 10000^(-2m/16), half-split pairs (m, m + 8), interleaved sections (4, 2, 2): pair m turns by (position on its axis) * w_m. The score is the dot product of the rotated query at the first triple with the rotated key at the second.
 
 | query triple | key triple | offset (t, h, w) | score |
 |---|---|---|---:|
@@ -663,7 +663,7 @@ The model now has everything it needs to look and to know where it is looking. W
 4. $\omega_m = 10{,}000^{-m/64}$ and one turn needs $2048\,\omega_m \ge 2\pi$, that is $\omega_m \ge 0.003068$, $m \le 40$. So pairs 41 to 63 complete less than one turn: 23 pairs, the first being pair 41.
 5. Rotation: $2 \cdot 32 \cdot 64 \cdot 6 = 24{,}576$ FLOPs. Attention: $32 \cdot 4 \cdot 8192 \cdot 128 = 134{,}217{,}728$ FLOPs. The attention does 5,461 times the work of the rotation.
 6. Words $(0,0,0)$, $(1,1,1)$, $(2,2,2)$; picture patches $(3,3,3)$, $(3,3,4)$, $(3,4,3)$, $(3,4,4)$, $(3,5,3)$, $(3,5,4)$; the counter after the picture is $3 + \max(1, 3, 2) = 6$, so the last word is $(6,6,6)$.
-7. Rates $1, 0.1, 0.01, 0.001$; q = (-2.4, -0.1, -1.7, 0.5, 1.1, 1.4, 0.6, -0.1), k = (0.5, 0.6, 0.1, -0.1, 3.1, -0.2, -1.2, -1.9) from the generator with seed `0x3178a93b296b1e70`; the score at offset 3 is 3.937064 at every position pair, and at offset $-3$ it is 3.334557.
+7. Rates $1, 0.1, 0.01, 0.001$; q = (-2.4, -0.1, -1.7, 0.5, 1.1, 1.4, 0.6, -0.1), k = (0.5, 0.6, 0.1, -0.1, 3.1, -0.2, -1.2, -1.9) from the generator `positions.rope`; the score at offset 3 is 3.937064 at every position pair, and at offset $-3$ it is 3.334557.
 8. At the pairs (2, 5), (10, 13) and (100, 103): adjacent, adjacent 3.937064 and half, half $-1.948934$ at all three; the mixed columns change from row to row. The reordered adjacent rotation matches the half-split scores to below $10^{-9}$.
 9. The correction range is [10, 23], the factor on cosine and sine is 1.0693147, 11 of the 32 pairs are unchanged and 9 are exactly halved, and the listed pairs have the rates printed in the table (for instance 0.02919 at pair 12 and 0.007692 at pair 16).
 10. The triples are those of the table, ending with the three words at $(5,5,5)$, $(6,6,6)$ and $(7,7,7)$. The pairs of rows 1 and 2 give the same score ($-0.734523$), those of rows 3 and 4 the same ($-0.535912$) and those of rows 5 and 6 the same ($-0.445754$), to the six decimals printed.

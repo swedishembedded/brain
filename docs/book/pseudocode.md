@@ -700,15 +700,24 @@ Gaussian value (initially empty). The calls are:
 | `Generator(s)` | a new generator whose state is the `u64` `s` before its first draw (a seed `s` below $2^{64}$; there is no held Gaussian value yet) |
 | `rng.state` | the current `u64` state of the generator. `Generator(rng.state)` continues the stream exactly where `rng` stands, provided no Gaussian value is held (`uniform`, `integer` and `shuffle` never hold one; after an odd number of `normal` calls the held value is also state and must be saved with it). Volume III, Chapter 14 stores it in a checkpoint |
 | `derive_seed(run_seed, name)` | the seed of the stream called `name` under a run seed: `h = mix(run_seed)`, then `h = mix(h xor b)` for each byte `b` of the UTF-8 name in order, and `h` is the result in `0 .. 2^64 - 1`, where `mix` is the three scrambling lines of the SplitMix64 step without the state advance (Volume I, chapter 17, which gives the code and printed values). `Generator(derive_seed(s, "init"))` is the stream "init" of run seed `s` |
-| `seed_of(name)` | the seed of the worked example called `name` (a text such as `kernel_selection.ranking`): the first 8 bytes of the SHA-256 digest of the UTF-8 bytes of `name`, read as one big-endian `u64`. Every worked example that draws random numbers prints this seed beside its name; `Generator(seed_of(name))` is its generator. It is a rule for naming the book's own examples and is not `derive_seed`, which mixes a run seed with a stream name (Volume I, chapter 17) |
+| `seed_of(name)` | the seed of the worked example called `name` (a text such as `kernel_selection.ranking`): the first 8 bytes of the SHA-256 digest of the UTF-8 bytes of `name`, read as one big-endian `u64`. Every worked example that draws random numbers names its generator, and "the generator `name`" is `Generator(seed_of(name))`; the table below gives test values. It is a rule for naming the book's own examples and is not `derive_seed`, which mixes a run seed with a stream name (Volume I, chapter 17) |
 
 Two runs with generators created from the same seed produce the same numbers.
 `os_entropy()` returns a `u64` taken from the operating system, the only
 nondeterministic call in the book (its name keeps it apart from the entropy of
 a distribution, `entropy(p)`, Chapter 13). The chapter on randomness gives the
 derivation of each rule and checks it on printed values; every worked example
-that draws random numbers prints its seed and the order of its draws so that
-you can reproduce it.
+that draws random numbers names its generator and the order of its draws so
+that you can reproduce it. These names, seeds and first draws check an
+implementation of `seed_of` and of the generator:
+
+<!-- worked: randomness.seed_of_vectors -->
+| name | seed_of (hex) | seed_of (decimal) | first raw u64 | first uniform() |
+|---|---:|---:|---:|---:|
+| `a` | 0xca978112ca1bbdca | 14598278634844962250 | 0xb743ba23031e31ad | 0.71587718348302398 |
+| `kernel_selection.ranking` | 0xbc12f335dfcc1d23 | 13552161641424756003 | 0x32f414fe8551ba97 | 0.19903689588438211 |
+| `long_context.entropy` | 0x53d323a0b0579206 | 6040210698294235654 | 0x909967d97b4117f2 | 0.56484078464132303 |
+<!-- /worked -->
 
 ## Errors
 

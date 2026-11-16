@@ -111,9 +111,8 @@ def _table(headers, rows, align=None):
     return vl._table(headers, rows, align)
 
 
-def _seed_line(name):
-    return (f"Generator: the book's SplitMix64, seed {bookrng.seed_of(name):#018x} "
-            f"(`seed_of` of the name `{name}`, defined on the pseudocode page).")
+def _generator_line(name):
+    return f"Generator: `{name}` (the book's SplitMix64)."
 
 
 def _mean_sd(vals):
@@ -369,7 +368,7 @@ def bradley_terry_pairs():
         f"One prompt (`17 + 25 =`), five complete answers: {names}. The labeller's reward of the answers is "
         f"r = {_row(R_TRUE, 1)} (a model never sees it, only choices made by it). The Bradley-Terry probability that a labeller "
         f"prefers answer i to answer j is sigmoid(r_i - r_j):\n\n{matrix}\n\n"
-        f"{_seed_line(PAIRS_NAME)} Each of the {PAIR_N} pairs draws, in this order, i = integer({K}), j = integer({K - 1}) (raised by 1 "
+        f"{_generator_line(PAIRS_NAME)} Each of the {PAIR_N} pairs draws, in this order, i = integer({K}), j = integer({K - 1}) (raised by 1 "
         f"when j >= i, so that j is another answer) and u = uniform(); the labeller chooses i when u < sigmoid(r_i - r_j) and j "
         f"otherwise. The generator runs once across the {PAIR_N} pairs.\n\n{table}\n\n"
         f"{upsets} of the {PAIR_N} labels disagree with the reward (the labeller chose the answer with the lower reward), which is what "
@@ -816,8 +815,6 @@ def rlhf_runs():
                     means.append(acc / RLHF_RUNS)
                 row.append(vl._cell(means, 3 if which == 0 else 4))
         rows.append(row)
-    seeds = _table(["run", "KL folded into the reward", "k3 term in the loss", "k3 term against pi_old"],
-                   [[i] + [f"{bookrng.seed_of(_rlhf_names(v)[i]):#018x}" for v, _l in RLHF_VARIANTS] for i in range(RLHF_RUNS)], "rrrr")
     return (
         f"The five answers, pi_ref = {_row(PI_REF, 2)}, the labeller's reward r = {_row(R_TRUE, 1)} used as the reward model (so that "
         f"the only error is the algorithm's), beta = {RLHF_BETA:g}. The target is the closed-form optimum pi* = {_row(star, 4)}, with "
@@ -833,11 +830,12 @@ def rlhf_runs():
         f"current policy in the denominator, so the KL is never in the advantage. Variant 'k3 term against pi_old' (the check of "
         f"the exercise on this block) is the previous one with pi_old(y) in the place of pi_ref(y), so that the penalty compares the "
         f"policy with the one that sampled the batch and not with the reference. {RLHF_RUNS} runs per variant, every run restarting from its "
-        f"own seed (seeds below). 'J' is J_beta(pi) = E r - beta KL(pi || pi_ref) of the policy at the start of the iteration and "
+        f"own generator, `llm_alignment.rlhf.<variant>.run<i>` for the run i = 0 .. {RLHF_RUNS - 1} of the variant "
+        f"{', '.join(f'`{v}`' for v, _l in RLHF_VARIANTS)} (in the column order of the table). 'J' is J_beta(pi) = E r - beta KL(pi || pi_ref) of the policy at the start of the iteration and "
         f"'KL to pi*' is KL(pi* || pi); each cell is the mean over the {RLHF_RUNS} runs (summed in run order).\n\n"
         + _table(["iteration", "J, KL in the reward", "KL to pi*, KL in the reward", "J, k3 in the loss", "KL to pi*, k3 in the loss",
                   "J, k3 against pi_old", "KL to pi*, k3 against pi_old"], rows, "rrrrrrr")
-        + f"\n\n{RULE_TEXT}\n\n{seeds}")
+        + f"\n\n{RULE_TEXT}")
 
 
 # ------------------------------------------------------------------ group-relative advantages
@@ -1075,8 +1073,6 @@ def grpo_checker_runs():
             for which in (0, 1, 2):
                 row.append(vl._cell([_grpo_mean(method, step, which, v) for v in range(len(vl.VARIANTS))], 3))
         rows.append(row)
-    seeds = _table(["run", "exact checker", "weak checker"],
-                   [[i] + [f"{bookrng.seed_of(_grpo_names(m)[i]):#018x}" for m, _c, _l in GRPO_METHODS] for i in range(GRPO_RUNS)], "rrr")
     headers = ["step"] + [f"{label}: {what}" for _m, _c, label in GRPO_METHODS for what in ("weak reward", "exact accuracy", "pi(a4)")]
     return (
         f"The five answers, pi_ref = {_row(PI_REF, 2)} (theta from theta_ref = ln pi_ref), group size n_g = {GROUP}. Each step draws "
@@ -1084,11 +1080,12 @@ def grpo_checker_runs():
         f"continuing), gives each the reward of the checker (the exact checker rewards a0 and a1, the weak one a0, a1 and a4), forms "
         f"mean-centred advantages (0 for a group whose rewards are all equal), and moves theta by {GRPO_LR:g} times the mean over the "
         f"group of A_i (e_(y_i) - pi); one update per group, so that the importance ratio is 1 and the clip never binds, and no KL "
-        f"term. {GRPO_RUNS} runs per checker, every run restarting from its own seed (seeds below). The cells are the mean over "
+        f"term. {GRPO_RUNS} runs per checker, every run restarting from its own generator, `llm_alignment.grpo.<checker>.run<i>` for the run i = 0 .. {GRPO_RUNS - 1} of the checker "
+        f"{', '.join(f'`{m}`' for m, _c, _l in GRPO_METHODS)}. The cells are the mean over "
         f"the {GRPO_RUNS} runs of three exact properties of the policy at the start of the step (not of the sampled group): "
         f"'weak reward' = pi(a0) + pi(a1) + pi(a4), 'exact accuracy' = pi(a0) + pi(a1), and pi(a4), the probability of the answer "
         f"that lists many numbers (summed in answer order).\n\n"
-        + _table(headers, rows, "r" * len(headers)) + f"\n\n{_grpo_weak_peak()}\n\n{RULE_TEXT}\n\n{seeds}")
+        + _table(headers, rows, "r" * len(headers)) + f"\n\n{_grpo_weak_peak()}\n\n{RULE_TEXT}")
 
 
 def _grpo_weak_peak():

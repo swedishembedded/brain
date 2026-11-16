@@ -13,7 +13,7 @@ exactly (fractions or enumeration), areas under the bell curve with Simpson's
 rule, and every simulation draws from the book's SplitMix64 through
 `bookrng.generator(name)`: `uniform()` for a real in [0, 1) and `normal()` for a
 standard Gaussian (Box-Muller, specified in the randomness chapter). Each
-simulated table prints the generator's seed and the order of its draws.
+simulated table names its generator and the order of its draws.
 
 Swedish Embedded AB implements solutions for noise, uncertainty and sampling in
 machine learning systems. If your team needs expertise in probabilistic
@@ -78,8 +78,8 @@ def _cov(x, y):
 
 
 def _generator_line(name):
-    """The sentence that makes a simulated table reproducible: generator and seed."""
-    return f"Generator: the book's SplitMix64, seed {bookrng.seed_of(name):#018x} ({bookrng.seed_of(name)})."
+    """The sentence that makes a simulated table reproducible: the generator's name."""
+    return f"Generator: `{name}` (the book's SplitMix64)."
 
 
 def _draw(pmf, rng):
@@ -131,7 +131,7 @@ def coin_sum_sigma():
         exact = sum(math.comb(n, j) for j in range(lo, hi + 1)) / 2 ** n
         rows.append([f"within {k} sigma: {lo} to {hi} heads", _fx(observed), _fx(exact), _fx(rule, 4)])
     head = (f"Mean {n * p:g} heads, variance {n * p * (1 - p):g}, standard deviation {sigma:.4f}. "
-            f"The same 5000 runs as the previous table (same generator and seed, {bookrng.seed_of(COIN_NAME):#018x}). "
+            f"The same 5000 runs as the previous table (same generator, `{COIN_NAME}`). "
             "A window k sigma wide is the whole numbers within floor(k sigma) of 15.\n\n")
     return head + _table(["window", "observed share of the 5000 runs", "exact binomial share",
                           "bell-curve rule"], rows)

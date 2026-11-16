@@ -21,7 +21,7 @@ numbers of the chapter's figures, so a picture and the table beside it cannot di
 
 Arithmetic is IEEE double precision except where a block says float32. Sums of products are plain left-to-right
 additions, the order a C loop would use (never Python's `sum`, which may compensate). Every random quantity comes from
-the book's SplitMix64 (`bookrng.generator(name)`); each block prints the seed.
+the book's SplitMix64 (`bookrng.generator(name)`); each block names its generator.
 
 Swedish Embedded AB implements solutions for attention kernels that fit long sequences in the memory of the device. If
 your team needs expertise in fused attention, its backward pass and its numerics, you can procure our services by
@@ -53,8 +53,8 @@ def _table(headers, rows, align=None):
     return "\n".join(out)
 
 
-def _seed(name):
-    return f"{bookrng.seed_of(name):#018x}"
+def _generator(name):
+    return f"Generator: `{name}` (the book's SplitMix64)."
 
 
 def _bound(x, floor=1e-12):
@@ -529,7 +529,7 @@ def simulated_forward():
         rows.append(("causal" if causal else "no mask", n_wg, f"{visited} of {full}", _int(c["global_loads"]),
                      _int(c["global_stores"]), _bound(_max_abs(O, want_o)), _bound(_max_abs(lse, want_lse))))
     biggest = max(sizes.values())
-    return (f"{('Generator: the book\'s SplitMix64, seed ' + _seed(NAME_SIM) + ' (`seed_of` of the name `' + NAME_SIM + '`).')} T = {t} rows, "
+    return (f"{_generator(NAME_SIM)} T = {t} rows, "
             f"d_h = {d}, query blocks of B_q = {bq} rows (one workgroup of {bq} invocations each) and key tiles of B_k = {bk} rows, so "
             f"{_ceil_div(t, bq)} workgroups and {_ceil_div(t, bk)} key tiles, neither a divisor of T. Draws, in this order: Q, K, V "
             f"(each {t} by {d}, row by row, `normal()`). The kernel runs on the simulator of Volume IV, Chapter 5, in double precision "
@@ -766,7 +766,7 @@ def backward_check():
         for name, a, b, which in (("dQ", got[0], ref[0], "Q"), ("dK", got[1], ref[1], "K"), ("dV", got[2], ref[2], "V")):
             fd = _central(Q, K, V, dO, causal, which)
             rows.append(("causal" if causal else "no mask", name, _bound(_max_abs(a, b)), _bound(_relative(a, fd)), _bound(row_term)))
-    return (f"{('Generator: the book\'s SplitMix64, seed ' + _seed(NAME_CHECK) + ' (`seed_of` of the name `' + NAME_CHECK + '`).')} T = {CHECK_T}, "
+    return (f"{_generator(NAME_CHECK)} T = {CHECK_T}, "
             f"d_h = {CHECK_D}, query blocks of {CHECK_BQ} rows and key tiles of {CHECK_BK} rows. Draws, in this order: Q, K, V and the incoming "
             f"gradient dO (each {CHECK_T} by {CHECK_D}, row by row, `normal()`). The loss is the sum over all entries of dO times O, so the "
             f"gradient of the loss with respect to O is dO. 'Tiled backward' recomputes every weight tile by tile from the saved O and "
@@ -889,7 +889,7 @@ def decode_split():
         got = combine(states)
         rows.append((length, _ceil_div(length, DEC_BC), live, n_splits - live, _bound(_max_abs(got, want)),
                      _bound(_max_abs(combine_tree(states), want)), f"{_max_abs(combine(states, True), want):.3f}"))
-    return (f"{('Generator: the book\'s SplitMix64, seed ' + _seed(NAME_DECODE) + ' (`seed_of` of the name `' + NAME_DECODE + '`).')} One query of "
+    return (f"{_generator(NAME_DECODE)} One query of "
             f"width d_h = {DEC_D} against a cache of up to {max(DEC_LENS)} rows (K and V each {max(DEC_LENS)} by {DEC_D}). Draws, in this order: the "
             f"query (`normal()` {DEC_D} times), then K and V row by row, `normal()`; a shorter cache is the first rows. Keys are read in tiles of "
             f"{DEC_BC}, each of the {n_splits} workgroups walks {DEC_TILES_PER_SPLIT} consecutive tiles and returns its state (m, l, o); "
@@ -1004,7 +1004,7 @@ def float32_numerics():
         tiled = attention_f32_tiled(Q, K, V, scale, bk)
         same = sum(1 for a, b in zip(tiled, mat) for x, y in zip(a, b) if _bits(x) == _bits(y))
         rows.append((f"tiled, B_k = {bk}", units(_max_abs(tiled, mat)), units(_max_abs(tiled, truth)), f"{same} of {n}"))
-    return (f"{('Generator: the book\'s SplitMix64, seed ' + _seed(NAME_F32) + ' (`seed_of` of the name `' + NAME_F32 + '`).')} Causal attention of one head, "
+    return (f"{_generator(NAME_F32)} Causal attention of one head, "
             f"T = {t}, d_h = {d}. Draws, in this order: Q, K, V (each {t} by {d}, row by row, `normal()` rounded to float32). Every product, "
             "sum, difference and quotient is rounded to float32 one operation at a time (no fused multiply-add: a product is rounded, then "
             "added), sums run left to right from 0.0 (a dot product over the head width, the normalizer, and the weighted sum over the keys), "

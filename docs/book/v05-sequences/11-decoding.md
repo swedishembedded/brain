@@ -54,7 +54,7 @@ Read the table as a reader of the language would. After `the` comes a noun, and 
 Draw from it the way Volume I taught, one uniform number and a walk along the cumulative probabilities.
 
 <!-- worked: decoding.sampling_junk -->
-Generator: the book's SplitMix64, seed 0xee8aaa94d40768a0 (`seed_of` of the name `decoding.junk`). Each of the 2,000 draws is one `uniform()`; the token is the first id, in increasing id order, whose cumulative probability exceeds it (the walk of Volume I, Chapter 17). The distribution is the one after `the` of the table above.
+Generator: the book's SplitMix64, `decoding.junk`. Each of the 2,000 draws is one `uniform()`; the token is the first id, in increasing id order, whose cumulative probability exceeds it (the walk of Volume I, Chapter 17). The distribution is the one after `the` of the table above.
 
 | draw | $u$ | token |
 |---:|---:|---|
@@ -93,7 +93,7 @@ Greedy decoding of the bigram model of the previous block from the start marker,
 
 The text repeats with period 6 from the first token. Mean log-probability per token of the greedy text: -1.0214. The smallest gap between the two largest probabilities over the 30 steps is 0.0146, so no step is a near tie.
 
-For contrast, three 30-token texts sampled from the full distribution at every step. Generator: seed 0xf907437323a5004d (`seed_of` of `decoding.docs`), 30 draws per text, one `uniform()` each, the three texts one after another from the same generator.
+For contrast, three 30-token texts sampled from the full distribution at every step. Generator: `decoding.docs`, 30 draws per text, one `uniform()` each, the three texts one after another from the same generator.
 
 | text | tokens | mean log-probability per token |
 |---:|---|---:|
@@ -284,7 +284,7 @@ The two rows at the bottom are about the penalties of the next section, and they
 What the settings do to complete sentences is measured next. Each setting draws 200 sentences from the order-4 model of Chapter 4, the model that reads three words, and the grammar of that chapter judges them.
 
 <!-- worked: decoding.decoding_quality -->
-Each setting draws 200 sentences from the order-4 interpolated model of Chapter 4 (interpolation ratio 2), starting from `<s>`, ending at the full stop or after 12 tokens; one `uniform()` per token, the token chosen by the id-order walk over the tokens left after the cuts (cuts applied in the order temperature, top-k, top-p, min-p, each renormalizing). One generator per setting, seeds: `decoding.quality.full` 0x793a5d9d84d3d736; `decoding.quality.t07` 0x14329edf85f51d01; `decoding.quality.t15` 0xe48a3ace95507e38; `decoding.quality.k4` 0x0afe1de104f05b50; `decoding.quality.p09` 0x938f2a2ef86a0292; `decoding.quality.m01` 0x38f7545031f6704c; `decoding.quality.t07p09` 0xb1e005a8219f411f; `decoding.quality.t15p09` 0x32a9a59bdc532a8f. 'accepted' is the share the grammar of Chapter 4 accepts (right shape, verb agreeing with the subject); 'distinct' counts different sentences; 'surprisal' is the mean of $-\ln p$ per token under the model itself (no cut, temperature 1) over all tokens of the sentences.
+Each setting draws 200 sentences from the order-4 interpolated model of Chapter 4 (interpolation ratio 2), starting from `<s>`, ending at the full stop or after 12 tokens; one `uniform()` per token, the token chosen by the id-order walk over the tokens left after the cuts (cuts applied in the order temperature, top-k, top-p, min-p, each renormalizing). One generator per setting, in the order of the table: `decoding.quality.full`, `decoding.quality.t07`, `decoding.quality.t15`, `decoding.quality.k4`, `decoding.quality.p09`, `decoding.quality.m01`, `decoding.quality.t07p09`, `decoding.quality.t15p09`. 'accepted' is the share the grammar of Chapter 4 accepts (right shape, verb agreeing with the subject); 'distinct' counts different sentences; 'surprisal' is the mean of $-\ln p$ per token under the model itself (no cut, temperature 1) over all tokens of the sentences.
 
 | setting | accepted | percent | distinct | surprisal |
 |---|---:|---:|---:|---:|
@@ -385,7 +385,7 @@ A text of 40 tokens at 0.1 each is already a subnormal number in 32 bits, and fr
 The numbers a decoder reports have to say which distribution they are of, because there are two.
 
 <!-- worked: decoding.logprob_report -->
-One sentence sampled from the order-4 model with $\tau = 0.7$ and top-p 0.9 (cuts in the order temperature, top-p). Generator: seed 0x769c128532f440a7 (`seed_of` of `decoding.report`), one `uniform()` per token, id-order walk. 'model $\ln p$' is the log-probability the model itself gives the sampled token (temperature 1, no cut); 'sampler $\ln q$' is the log-probability under the distribution the token was actually drawn from; 'next best' lists the two most probable other tokens by model $\ln p$.
+One sentence sampled from the order-4 model with $\tau = 0.7$ and top-p 0.9 (cuts in the order temperature, top-p). Generator: `decoding.report`, one `uniform()` per token, id-order walk. 'model $\ln p$' is the log-probability the model itself gives the sampled token (temperature 1, no cut); 'sampler $\ln q$' is the log-probability under the distribution the token was actually drawn from; 'next best' lists the two most probable other tokens by model $\ln p$.
 
 | position | token | model $\ln p$ | sampler $\ln q$ | next best, model $\ln p$ |
 |---:|---|---:|---:|---|
@@ -495,7 +495,7 @@ Why, then, is beam search standard in translation, where Sutskever, Vinyals and 
 A seeded sampler is a deterministic function, and "the same seed gives the same text" is true only if everything else the function depends on is also the same. The things it depends on are more than the seed. They are the generator itself, the number of random draws taken for each token, the order in which a draw walks along the tokens, the order of the cuts and the way ties are settled, the logits down to the last bit, and, in a program that serves several requests at once, which of them uses which generator. Volume I made the point about the generator (a seed names a stream, not a program); the next block makes it about the rest.
 
 <!-- worked: decoding.determinism -->
-Three requests A, B, C each sample 8 tokens from the bigram model of the first block, started from `<s>`, one `uniform()` per token, id-order walk, temperature 1 and no cut. The three advance in lock step (a token for the first request of the list, then for the second, then for the third, and again). Shared: one generator of seed 0x2b2465ad3c6bb03a (`decoding.shared`). Own: one generator each, seeds 0xc0f4b881ff6a0788 (`decoding.request.A`), 0x22552e5278d9a82f (`decoding.request.B`), 0x1c86f9bd835259b2 (`decoding.request.C`). The requests are served in the order A, B, C, and in the order B, C, A (every request then has a different place in the round).
+Three requests A, B, C each sample 8 tokens from the bigram model of the first block, started from `<s>`, one `uniform()` per token, id-order walk, temperature 1 and no cut. The three advance in lock step (a token for the first request of the list, then for the second, then for the third, and again). Shared: one generator, `decoding.shared`. Own: one generator each, `decoding.request.A`, `decoding.request.B` and `decoding.request.C`. The requests are served in the order A, B, C, and in the order B, C, A (every request then has a different place in the round).
 
 | generators | request | order A, B, C | order B, C, A |  |
 |---|---|---|---|---|
@@ -506,7 +506,7 @@ Three requests A, B, C each sample 8 tokens from the bigram model of the first b
 | one generator per request | B | `the foxes chase ball . foxes see big` | `the foxes chase ball . foxes see big` | same |
 | one generator per request | C | `the dogs sees big ball . fox sees` | `the dogs sees big ball . fox sees` | same |
 
-The same uniform numbers (seed 0x998eaf02e83500de, `decoding.walk`) applied to the distribution after `the`, walking the tokens in increasing id order or from the most probable to the least:
+The same uniform numbers (the generator `decoding.walk`) applied to the distribution after `the`, walking the tokens in increasing id order or from the most probable to the least:
 
 | draw | $u$ | id-order walk | walk by probability |
 |---:|---:|---|---|
@@ -521,7 +521,7 @@ The same uniform numbers (seed 0x998eaf02e83500de, `decoding.walk`) applied to t
 
 The two walks pick different tokens for 6 of the 8 numbers.
 
-Three requests that all use the seed of `decoding.constant` (0x04559d39a4d2b52c) produce: `the foxes see ball . big bone .`; `the foxes see ball . big bone .`; `the foxes see ball . big bone .`.
+Three requests that all use the generator `decoding.constant` produce: `the foxes see ball . big bone .`; `the foxes see ball . big bone .`; `the foxes see ball . big bone .`.
 <!-- /worked -->
 
 The first table is the one that matters for a server. When three requests share one generator and advance round by round, a request's draws come from wherever the stream happens to stand, which depends on who was served before it, so serving the same three in a different order changes the text of every one (all three differ). With a generator of its own for each request, the order is irrelevant and every request gives the same text both times. The second table is the draw itself. The same eight uniform numbers choose different tokens when the walk goes from the most probable token downward than when it goes by token id, for six of the eight; two correct samplers with the same seed can write different texts, and a seed is a promise made to one particular sampler. The last line shows what a constant seed does: three requests that all use the seed of `decoding.constant` write the same text.

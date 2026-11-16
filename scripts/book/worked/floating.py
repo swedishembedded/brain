@@ -327,7 +327,7 @@ def rounding_agreement():
         if (a == "inf" or a == "-inf") or Fraction(b) != a:
             bad += 1
     return (f"Exact rounding of {n} random doubles to 32 bits against the hardware conversion: {bad} disagreements. "
-            f"Generator: the book's SplitMix64, seed {bookrng.seed_of(name):#018x}. Each double is x = (2a - 1) * 10^(60b - 30) "
+            f"Generator: the book's SplitMix64, `{name}`. Each double is x = (2a - 1) * 10^(60b - 30) "
             f"from two draws, a then b, both `uniform()`.")
 
 
@@ -444,7 +444,7 @@ def sum_methods():
                          _sci(float(a)), _sci(float(b)), _sci(float(c))])
     return ("Relative error of a 32-bit sum of n terms, against the exact sum of the stored terms (exact rational "
             "arithmetic). Copies of 0.1: the 32-bit number nearest 0.1, n times. Uniform: the first n of 10^5 values "
-            f"`uniform()` drawn in order from the book's SplitMix64 with seed {bookrng.seed_of(UNIFORM_NAME):#018x}, "
+            f"`uniform()` drawn in order from the book's SplitMix64, `{UNIFORM_NAME}`, "
             "each rounded to 32 bits; the three row sizes use prefixes of the same list. Pairwise is the layer-by-layer "
             "algorithm below.\n\n"
             + _table(["terms", "n", "exact sum", "worst-case bound (n-1)u", "left to right", "pairwise", "Kahan"], rows,
@@ -530,7 +530,7 @@ def sterbenz():
             far_bad += 1
     return (f"Subtracting two 32-bit numbers x, y: when y/2 <= x <= 2y the stored difference was inexact in "
             f"{near_bad} of {n} random cases; when x is 4 to 5 times y it was inexact in {far_bad} of {n}. "
-            f"Generator: the book's SplitMix64, seed {bookrng.seed_of(name):#018x}. Each case draws, in this order, "
+            f"Generator: the book's SplitMix64, `{name}`. Each case draws, in this order, "
             f"`uniform()` a, `integer(41)` k, `uniform()` b, `uniform()` c: y = f32((1 + a) * 2^(k - 20)), "
             f"x = f32(y * (0.5 + 1.5 b)) (replaced by y if that falls outside [y/2, 2y]), "
             f"and for the second count x = f32(y * (4 + c)). The difference x - y is exact in 64 bits for these "
@@ -591,16 +591,15 @@ def variance():
             true = sum((x - mu) ** 2 for x in fr) / n
             a, b, c = _var_methods(data, rnd)
             rows.append([name, f"10^{round(math.log10(off))}", f"{float(true):.6f}", f"{a:.6g}", _sci(float(_rel(a, true))),
-                         _sci(float(_rel(b, true))), _sci(float(_rel(c, true))),
-                         f"{bookrng.seed_of(gen_name):#018x}"])
+                         _sci(float(_rel(b, true))), _sci(float(_rel(c, true))), f"`{gen_name}`"])
     return (f"Variance of {n} values offset + z, z standard normal, population form (divide by n). The values are "
-            f"rounded to the format after the addition. Each row has its own generator, the book's SplitMix64 with the "
-            f"seed in the last column; the {n} values are its first {n} `normal()` draws in order. The true variance and "
+            f"rounded to the format after the addition. Each row has its own generator, the book's SplitMix64 "
+            f"named in the last column; the {n} values are its first {n} `normal()` draws in order. The true variance and "
             f"all errors are against the exact rational variance of the stored values (mean of the squared deviations "
             f"from the exact mean). Each format's arithmetic rounds every operation to that format; the one-pass "
             f"formula accumulates sum x and sum x^2 left to right, divides both by n, and subtracts.\n\n"
             + _table(["format", "offset", "true variance", "E[X^2] - E[X]^2", "its error", "two-pass error",
-                      "Welford error", "seed"], rows))
+                      "Welford error", "generator"], rows))
 
 
 # ------------------------------------------------ conditioning
@@ -814,7 +813,7 @@ def cosine_accumulation():
             ["64-bit sums of the same 32-bit inputs, result rounded to 32 bits", _sci(sum(err64) / trials), _sci(max(err64))]]
     return (f"Cosine of {trials} pairs of 512-dimensional vectors (the second is the first plus noise of one tenth of its standard deviation, "
             f"cosine near 0.995), against the exact value (exact rational sums, one final evaluation in 64 bits). "
-            f"Generator: the book's SplitMix64, seed {bookrng.seed_of(name):#018x}; each trial draws {d} `normal()` values "
+            f"Generator: the book's SplitMix64, `{name}`; each trial draws {d} `normal()` values "
             f"for the first vector (rounded to 32 bits), then {d} for the noise, b = f32(a + 0.1 z). "
             f"The 32-bit row computes dot, na = a . a and nb = b . b by running f32 sums of f32 products, then "
             f"cos = dot / (sqrt(na) * sqrt(nb)) with both square roots, their product and the quotient rounded to f32 "

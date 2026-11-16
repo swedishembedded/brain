@@ -19,7 +19,7 @@ markers; the `*_data` functions supply the numbers of the chapter's figures, so 
   and of the BiSeNet context path, from the layer lists alone.
 
 Arithmetic is the language's 64-bit floating point unless a table says otherwise. Random inputs come from `bookrng.generator(name)`
-with the names, seeds and draw orders printed beside each table. Sums over taps run in the order (input channel, kernel row, kernel
+with the names and draw orders printed beside each table. Sums over taps run in the order (input channel, kernel row, kernel
 column), over positions row-major and over images in index order.
 
 Swedish Embedded AB implements solutions for per-pixel prediction models that are verified against a hand computation. If your
@@ -59,11 +59,6 @@ def _fx(v, d=4):
 
 def _sci(v, d=2):
     return f"{v:.{d}e}"
-
-
-def _seed(name):
-    s = bookrng.seed_of(name)
-    return f"seed 0x{s:016x} ({s})"
 
 
 def _frac(fr, d=4):
@@ -308,7 +303,7 @@ def shuffle_identity():
     diff = max(abs(y_t[c][i][j] - y_s[c][i][j]) for c in range(c_out) for i in range(n * r) for j in range(n * r))
     # the numbered layout
     lay = pixel_shuffle([[[10 * (k + 1) + 2 * i + j for j in range(2)] for i in range(2)] for k in range(4)], 2)
-    return (f"Generator `bookrng.generator(\"{name}\")`, {_seed(name)}. Draws in order: the input x of shape [3, 3, 3] (channel, row, "
+    return (f"Generator `{name}`. Draws in order: the input x of shape [3, 3, 3] (channel, row, "
             f"column; every entry normal()), then the transposed-convolution weight w of shape [3, 2, 2, 2] (input channel, output "
             f"channel, row, column; every entry normal()). Left: the transposed convolution with k = 2, stride 2, padding 0 "
             f"(`convolution.convT2d`) gives [2, 6, 6]. Right: a 1 by 1 convolution with weight V[c * 4 + m * 2 + n][ci] = w[ci][c][m][n] "
@@ -456,7 +451,7 @@ def seg_data_summary():
     ctr, cte = class_counts(train), class_counts(test)
     cw = class_weights(ctr)
     rows = [(CLASS_NAMES[c], ctr[c], _fx(ctr[c] / sum(ctr), 4), cte[c], _fx(cte[c] / sum(cte), 4), _fx(cw[c], 4)) for c in range(N_CLS)]
-    return (f"Generator `bookrng.generator(\"{DATA_NAME}\")`, {_seed(DATA_NAME)}. One stream makes the {N_TRAIN} training scenes and then "
+    return (f"Generator `{DATA_NAME}`. One stream makes the {N_TRAIN} training scenes and then "
             f"the {N_TEST} test scenes; a scene draws, in this order, the horizon row h0 = 2 + integer(3), the box width bw = 2 + integer(2) "
             f"and height bh = 2 + integer(2), the left column x1 = integer(8 - bw + 1), the lower edge y2 = h0 + 1 + integer(8 - h0) "
             f"(the top edge is max(0, y2 - bh)), and then 64 values normal() in row-major order. The pixel is "
@@ -506,9 +501,9 @@ def seg_init_recipe():
             fan = fan_in.get(name, c)
             scale = "1" if name == "Wp" else (f"sqrt(2/{fan})" if name in ("W1", "W2", "Wu") else f"1/sqrt({fan})")
             rows.append((kind, name, f"{r} x {c}", scale))
-    seeds = "; ".join(f"{k}: {_seed(INIT_PREFIX + k)[5:]}" for k in KINDS)
-    return ("Each model draws its weights from `bookrng.generator(\"dense_prediction.seg_init.<kind>\")`, with the seeds "
-            f"(seed_of of the full name) {seeds}. The tensors are drawn in the order of the table, each row-major, each entry one "
+    kinds = ", ".join(f"`{k}`" for k in KINDS)
+    return ("Each model draws its weights from its own generator, `dense_prediction.seg_init.<kind>` for the kinds "
+            f"{kinds}. The tensors are drawn in the order of the table, each row-major, each entry one "
             "`normal()` times the scale shown (the square root of 2 over the fan-in for the layers that feed a ReLU, the square root of "
             "1 over the fan-in for the last layer, and 1 for the 1 x 1 convolution of `pixel`); all biases are 0. Layouts: a "
             "convolution weight is [out, in, kernel row, kernel column], so a row of W1 is one output channel's 3 x 3 kernel and a "
@@ -947,7 +942,7 @@ def alignment():
     probes = []
     for da, db in ((0.01, 0.0), (-0.01, 0.0), (0.0, 0.01), (0.0, -0.01), (0.01, 0.01)):
         probes.append((f"({a + da:.6f}, {b + db:.6f})", _fx(sse(pred, nu, a + da, b + db), 6), _fx(sse(pred, nu, a + da, b + db) - best, 6)))
-    return (f"Generator `bookrng.generator(\"{PRED_NAME}\")`, {_seed(PRED_NAME)}. The predicted inverse depth u of the {n} non-sky pixels of the "
+    return (f"Generator `{PRED_NAME}`. The predicted inverse depth u of the {n} non-sky pixels of the "
             f"scene, in row-major order, is {PRED_SCALE} v + {PRED_SHIFT} + {PRED_NOISE} normal() (one draw per pixel in that order) "
             f"plus 0.1 on the 9 box pixels, where v is the true inverse depth. Sums over the pixels in that order: n = {n}, sum u = {su:.6f}, "
             f"sum v = {sv:.6f}, sum u u = {suu:.6f}, sum u v = {suv:.6f}.\n\n"
@@ -1192,7 +1187,7 @@ def reparam_demo():
     diff = max(abs(branches[o][i][j] - fused[o][i][j]) for o in range(c) for i in range(h) for j in range(w))
     before = c * c * 9 + c * c + 2 * (2 * c)
     after = c * c * 9 + c
-    return (f"Generator `bookrng.generator(\"{name}\")`, {_seed(name)}. Draws in order: x of shape [2, 4, 4] (channel, row, column), the 3 by 3 "
+    return (f"Generator `{name}`. Draws in order: x of shape [2, 4, 4] (channel, row, column), the 3 by 3 "
             f"weight w3 of shape [2, 2, 3, 3] (output, input, row, column), the 1 by 1 weight w1 of shape [2, 2], then for the 3 by 3 branch "
             f"and then the 1 by 1 branch the BatchNorm values gamma (2 values), beta (2), running mean (2), all normal(), and running "
             f"variance 0.5 + uniform() (2); epsilon = 1e-5. Left: relu(BN(w3 * x) + BN(w1 * x) + x) with zero padding, from the three "

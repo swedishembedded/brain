@@ -394,7 +394,7 @@ def random_directions():
             total += c
             big = max(big, c)
         rows.append((n, _g(total / pairs, 3), _g(big, 3), _g(math.sqrt(2 / (math.pi * n)), 3)))
-    head = (f"One generator, SplitMix64 with seed {bookrng.seed_of(name)} (0x{bookrng.seed_of(name):016X}), used for the whole table. "
+    head = (f"One generator, the book's SplitMix64, `{name}`, used for the whole table. "
             f"For each n in the order below and each of {pairs} pairs: draw n uniforms for the first vector, then n for the second; "
             "an entry is +1 when its uniform is below 0.5, otherwise -1.\n\n")
     return head + _table(["n", "mean abs(cos)", "largest abs(cos)", "sqrt(2 / (pi n))"], rows)

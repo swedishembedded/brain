@@ -108,7 +108,7 @@ $$
 Here is a numerical check on a picture of 3 channels, with the matrix applied to the flattened patches and the convolution `corr2d` of Chapter 2 applied to the whole picture, and what happens if the flattening order is not the one the convolution implies.
 
 <!-- worked: vision_transformers.embedding_equivalence -->
-seed 0x3018484de019d48a (3465599412571067530). Draws, in this order: the 3 * 8 * 8 = 192 pixels x[c][i][j] (channel, row, column), each `round(normal(), 1)`; then the matrix W of 4 rows (output o) and 12 columns, row by row, each `round(0.5 * normal(), 1)`, whose column index is (c * 2 + i) * 2 + j for the pixel (i, j) of channel c in the patch; then the bias b, 4 numbers, each `round(0.5 * normal(), 1)`.
+Generator `vision_transformers.patch_embed`. Draws, in this order: the 3 * 8 * 8 = 192 pixels x[c][i][j] (channel, row, column), each `round(normal(), 1)`; then the matrix W of 4 rows (output o) and 12 columns, row by row, each `round(0.5 * normal(), 1)`, whose column index is (c * 2 + i) * 2 + j for the pixel (i, j) of channel c in the patch; then the bias b, 4 numbers, each `round(0.5 * normal(), 1)`.
 
 | W | col 0 | col 1 | col 2 | col 3 | col 4 | col 5 | col 6 | col 7 | col 8 | col 9 | col 10 | col 11 | b |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -192,7 +192,7 @@ $$
 for the patch in row $r$ and column $c$. This is what the Qwen3-VL tower of brain computes (`vision_rope_tables` in `crates/qwen3vl/src/vision.rs`: the angle vector of a token is the row times the inverse frequencies followed by the column times the same inverse frequencies, $\theta = 10000$, applied half-split). As in one dimension, the dot product of a rotated query and a rotated key depends only on the offset, now an offset in rows and columns:
 
 <!-- worked: vision_transformers.rope_2d_scores -->
-seed 0xe1e8f397711fe5df (16278528684894184927). Draws: the 8 entries of q, then the 8 of k, each `round(normal(), 1)`; q = ['1.3', '-0.5', '-2.5', '1.7', '-2.5', '-0.3', '-0.4', '0.3'], k = ['-0.3', '0.3', '-0.5', '2.2', '1.9', '0.5', '0.4', '-0.1']. Head width 8, base 10000, half-split pairs (m, m + 4); pairs 0 and 1 turn by the row times the rates 1 and 0.01, pairs 2 and 3 by the column times the same two rates. The score is the dot product of the rotated query at (row, column) with the rotated key.
+Generator `vision_transformers.rope2d`. Draws: the 8 entries of q, then the 8 of k, each `round(normal(), 1)`; q = ['1.3', '-0.5', '-2.5', '1.7', '-2.5', '-0.3', '-0.4', '0.3'], k = ['-0.3', '0.3', '-0.5', '2.2', '1.9', '0.5', '0.4', '-0.1']. Head width 8, base 10000, half-split pairs (m, m + 4); pairs 0 and 1 turn by the row times the rates 1 and 0.01, pairs 2 and 3 by the column times the same two rates. The score is the dot product of the rotated query at (row, column) with the rotated key.
 
 | query at | key at | offset (rows, columns) | score |
 |---|---|---|---:|
@@ -238,7 +238,7 @@ function cubic_taps(n_in: int, n_out: int, a: real) -> list<list<(int, real)>>:
 The table is resampled along each row with these taps and then down each column.
 
 <!-- worked: vision_transformers.position_resample -->
-seed 0x1cd5e1b003ae31a9 (2077814949193593257). A learned table for a 4 by 4 grid with one channel: 16 values, row by row, each `round(normal(), 1)`.
+Generator `vision_transformers.pos_table`. A learned table for a 4 by 4 grid with one channel: 16 values, row by row, each `round(normal(), 1)`.
 
 | table | col 0 | col 1 | col 2 | col 3 |
 |---|---:|---:|---:|---:|
@@ -393,7 +393,7 @@ The mask of the last window (entry [u][v] is 1 when position u may read position
 0 0 0 1
 ```
 
-The tokens of one region are exactly the groups of the ragged partition that cuts each axis at [0, s), then every m, i.e. at rows and columns {0}, {1, 2}, {3}: its 9 groups have sizes [4, 2, 2, 2, 2, 1, 1, 1, 1]. Single-head attention (width 4, scale 1/2) on random q, k, v (seed 0xed71388a0ba3de1c (17109518624909155868); draws: the 64 entries of q, then of k, then of v, token by token, each `round(normal(), 1)`), computed once by the rolled windows with the mask and once by the ragged groups with no mask: the largest absolute difference of the 16 outputs is below 1e-12. Against the unshifted 2 by 2 windows the outputs differ by at most 2.391, and against global attention by at most 2.962.
+The tokens of one region are exactly the groups of the ragged partition that cuts each axis at [0, s), then every m, i.e. at rows and columns {0}, {1, 2}, {3}: its 9 groups have sizes [4, 2, 2, 2, 2, 1, 1, 1, 1]. Single-head attention (width 4, scale 1/2) on random q, k, v (the generator `vision_transformers.shifted_window`; draws: the 64 entries of q, then of k, then of v, token by token, each `round(normal(), 1)`), computed once by the rolled windows with the mask and once by the ragged groups with no mask: the largest absolute difference of the 16 outputs is below 1e-12. Against the unshifted 2 by 2 windows the outputs differ by at most 2.391, and against global attention by at most 2.962.
 <!-- /worked -->
 
 The two partitions of an $8 \times 8$ grid and the mask of the last rolled window, for $M = 4$ and $u = 2$:
@@ -426,7 +426,7 @@ Windows keep attention cheap at a fixed grid. They do not shrink it. A convoluti
 By the identity of the second section, patch merging is a convolution of kernel 2 and stride 2, in other words a patch embedding applied to a feature map instead of to a picture:
 
 <!-- worked: vision_transformers.merging_equivalence -->
-seed 0x72a196195c3c5b37 (8260048227240008503). A feature map of 4 channels on a 4 by 4 grid: the 64 values x[c][i][j] (channel, row, column), each `round(normal(), 1)`, then a matrix of 8 rows and 16 columns, row by row, each `round(0.5 * normal(), 1)`, no bias. Merging concatenates the 4 channels of each 2 by 2 group of positions in the order (channel, row, column) into 16 numbers and multiplies by the matrix.
+Generator `vision_transformers.patch_merge`. A feature map of 4 channels on a 4 by 4 grid: the 64 values x[c][i][j] (channel, row, column), each `round(normal(), 1)`, then a matrix of 8 rows and 16 columns, row by row, each `round(0.5 * normal(), 1)`, no bias. Merging concatenates the 4 channels of each 2 by 2 group of positions in the order (channel, row, column) into 16 numbers and multiplies by the matrix.
 
 Output: 4 tokens of 8 numbers, the map [8, 2, 2]. The same operation as a convolution with 8 filters of shape [4, 2, 2], stride 2: the largest absolute difference over the 32 numbers is below 1e-12.
 <!-- /worked -->
@@ -572,7 +572,7 @@ The class-token run checks the class token as well, so it has 8 parameters more.
 Then training, with the same optimizer as the convolutional network of Chapter 3:
 
 <!-- worked: vision_transformers.vit_training -->
-Both readouts, run 0 (the generator of the name vision_transformers.vit_init.0, seed 0x19862e4db422479e (1839208409096931230); run r uses the name vision_transformers.vit_init.r), trained on the 60 training images by full-batch Adam exactly as for the network of Chapter 3 (beta_1 = 0.9, beta_2 = 0.999, epsilon = 1e-8, learning rate 0.02, 100 updates, mean cross-entropy, sums over images in index order). Initialization: every entry is `normal() * scale` from that one generator, matrix by matrix and row by row, in this order: We [4, 8] with scale 0.5, the position table E [16, 8] with 0.3, Wq, Wk, Wv and Wo [8, 8] with 1/sqrt(8) each, W1 [8, 16] with 1/sqrt(8), W2 [16, 8] with 1/4, the classifier Wh [8, 3] with 1/sqrt(8), and last the class token [1, 8] with 0.3 (drawn, and unused, by the mean readout, so the two readouts share every other starting weight). The patch bias and the classifier bias are 0 and the three norm gains are 1. The nudge is added to We[0][0], the first weight of the patch embedding, which every image uses. A number that comes from a chaotic run is printed with only the digits that are the same in the run and in four copies of it whose first weight is changed by +1e-12, -1e-12, +3e-12 and -3e-12: in full if all agree on it, as 'about x' with the leading digits on which all agree, or as 'unstable' when not even one digit survives; the other digits cannot be reproduced in another implementation.
+Both readouts, run 0 (the generator `vision_transformers.vit_init.0`; run r uses the generator `vision_transformers.vit_init.r`), trained on the 60 training images by full-batch Adam exactly as for the network of Chapter 3 (beta_1 = 0.9, beta_2 = 0.999, epsilon = 1e-8, learning rate 0.02, 100 updates, mean cross-entropy, sums over images in index order). Initialization: every entry is `normal() * scale` from that one generator, matrix by matrix and row by row, in this order: We [4, 8] with scale 0.5, the position table E [16, 8] with 0.3, Wq, Wk, Wv and Wo [8, 8] with 1/sqrt(8) each, W1 [8, 16] with 1/sqrt(8), W2 [16, 8] with 1/4, the classifier Wh [8, 3] with 1/sqrt(8), and last the class token [1, 8] with 0.3 (drawn, and unused, by the mean readout, so the two readouts share every other starting weight). The patch bias and the classifier bias are 0 and the three norm gains are 1. The nudge is added to We[0][0], the first weight of the patch embedding, which every image uses. A number that comes from a chaotic run is printed with only the digits that are the same in the run and in four copies of it whose first weight is changed by +1e-12, -1e-12, +3e-12 and -3e-12: in full if all agree on it, as 'about x' with the leading digits on which all agree, or as 'unstable' when not even one digit survives; the other digits cannot be reproduced in another implementation.
 
 | readout | updates t | training loss | training accuracy |
 |---|---:|---:|---:|
@@ -589,17 +589,17 @@ Both readouts, run 0 (the generator of the name vision_transformers.vit_init.0, 
 Run 0 of each readout reaches a training accuracy of 1.0 within 50 updates, and every run has it after 100. That is a statement about the training set, and the test set decides the matter:
 
 <!-- worked: vision_transformers.vit_against_cnn -->
-After 100 updates on the same 60 training images, scored on the same 90 test images (30 of each class), same optimizer and rate. The vision transformer is trained from three initializations (runs 0, 1, 2, generators of the printed seeds), each with both readouts; the convolutional network is the single run of Chapter 3. A number that comes from a chaotic run is printed with only the digits that are the same in the run and in four copies of it whose first weight is changed by +1e-12, -1e-12, +3e-12 and -3e-12: in full if all agree on it, as 'about x' with the leading digits on which all agree, or as 'unstable' when not even one digit survives; the other digits cannot be reproduced in another implementation.
+After 100 updates on the same 60 training images, scored on the same 90 test images (30 of each class), same optimizer and rate. The vision transformer is trained from three initializations (runs 0, 1, 2, from the generators `vision_transformers.vit_init.0` to `.2`), each with both readouts; the convolutional network is the single run of Chapter 3. A number that comes from a chaotic run is printed with only the digits that are the same in the run and in four copies of it whose first weight is changed by +1e-12, -1e-12, +3e-12 and -3e-12: in full if all agree on it, as 'about x' with the leading digits on which all agree, or as 'unstable' when not even one digit survives; the other digits cannot be reproduced in another implementation.
 
-| model | run (seed) | parameters | training accuracy | test cross-entropy | test accuracy |
+| model | run | parameters | training accuracy | test cross-entropy | test accuracy |
 |---|---|---:|---:|---:|---:|
 | convolutional network (Chapter 3) | - | 283 | 1.0000 | 0.0997 | 0.9556 |
-| vision transformer, mean | 0 (0x19862e4db422479e) | 731 | 1.0000 | 0.3856 | 0.8556 |
-| vision transformer, mean | 1 (0x97992191bb0f964f) | 731 | 1.0000 | 0.6609 | 0.8222 |
-| vision transformer, mean | 2 (0xf20a07d74527d871) | 731 | 1.0000 | 1.1962 | 0.7556 |
-| vision transformer, cls | 0 (0x19862e4db422479e) | 739 | 1.0000 | 2.1916 | 0.6778 |
-| vision transformer, cls | 1 (0x97992191bb0f964f) | 739 | 1.0000 | 2.0309 | 0.6889 |
-| vision transformer, cls | 2 (0xf20a07d74527d871) | 739 | 1.0000 | 2.4469 | 0.6111 |
+| vision transformer, mean | 0 | 731 | 1.0000 | 0.3856 | 0.8556 |
+| vision transformer, mean | 1 | 731 | 1.0000 | 0.6609 | 0.8222 |
+| vision transformer, mean | 2 | 731 | 1.0000 | 1.1962 | 0.7556 |
+| vision transformer, cls | 0 | 739 | 1.0000 | 2.1916 | 0.6778 |
+| vision transformer, cls | 1 | 739 | 1.0000 | 2.0309 | 0.6889 |
+| vision transformer, cls | 2 | 739 | 1.0000 | 2.4469 | 0.6111 |
 <!-- /worked -->
 
 The convolutional network, with 283 parameters, scores 95.6 percent on the 90 test images (86 right). The transformers, with 731 or 739 parameters, fit the 60 training images perfectly and score 75.6 to 85.6 percent with the mean readout and 61.1 to 68.9 percent with the class token across the three initializations. The gap is not noise of the initialization: in each of the three runs the mean readout beats the class token by 13 to 18 points and the best transformer is 10 points under the convolutional network. That is the direction the cited findings predict for a small dataset, and it is all this experiment shows. It is one dataset of three classes, 60 images, one block, the learning rate of the convolutional network, not tuned for the transformer, 100 updates and three initializations. A larger or longer-trained transformer, a different patch size or a tuned recipe might narrow the gap; the experiment does not say. The readout comparison is as narrow: in this setting, with 60 images, averaging the patches is easier to fit than learning a class token that has to find its way to the patches, which is a plausible mechanism and not one that was isolated here.

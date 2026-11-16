@@ -86,11 +86,6 @@ def _table(headers, rows, align=None):
     return "\n".join(out)
 
 
-def _seed_text(name):
-    seed = bookrng.seed_of(name)
-    return f"seed {seed:#018x} ({seed})"
-
-
 def _demand_from(u):
     """Inverse of the demand distribution: one uniform() gives D = 0, 1 or 2."""
     if u < DEMAND[0]:
@@ -290,7 +285,7 @@ def trajectory_returns():
         rows.append([t, s, a, d, sold, left, _fmt(r, 1)] + [_fmt(G[g][t], 3) for g in gammas])
     out = [
         f"Policy: order one unit when the shelf is empty, nothing otherwise, written (1, 0, 0, 0) with one action per stock 0 .. 3. "
-        f"Start: s_0 = {TRAJ_START}. Generator: the book's SplitMix64, {_seed_text(TRAJ_NAME)}; one uniform() per day in order, "
+        f"Start: s_0 = {TRAJ_START}. Generator: the book's SplitMix64, `{TRAJ_NAME}`; one uniform() per day in order, "
         f"D = 0 if u < 0.3, D = 1 if u < 0.7, otherwise D = 2. The return G_t of day t is the sum over k = 0 .. {TRAJ_DAYS - 1} - t "
         f"of gamma^k r_(t+k); the days after day {TRAJ_DAYS - 1} are not simulated and count as reward 0 (so G_{TRAJ_DAYS} = 0 and "
         f"G_t = r_t + gamma G_(t+1)). The last four columns are G_t for gamma = 0, 0.5, 0.9 and 1.",
@@ -390,7 +385,7 @@ def monte_carlo_value():
     block = MC_EPISODES // MC_BLOCKS
     bmeans = [sum(returns[i * block:(i + 1) * block]) / block for i in range(MC_BLOCKS)]
     out = [
-        f"Policy (1, 0, 0, 0), gamma = {g}, start s_0 = 0. Generator: the book's SplitMix64, {_seed_text(MC_NAME)}; "
+        f"Policy (1, 0, 0, 0), gamma = {g}, start s_0 = 0. Generator: the book's SplitMix64, `{MC_NAME}`; "
         f"{MC_EPISODES} episodes of {MC_DAYS} days one after the other, one uniform() per day (the demand rule of the trajectory), "
         f"each return G = sum over t of gamma^t r_t with the running power gamma^t multiplied once per day, days after the "
         f"{MC_DAYS}th ignored (they weigh less than {g ** MC_DAYS * max(exact):.1e} in total). The mean is the plain sum over the "

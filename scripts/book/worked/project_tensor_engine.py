@@ -32,8 +32,8 @@ value is held in a Python float that is exactly a float32. A hash of a result is
 SHA-256 over the little-endian binary32 (or binary64, as stated) bytes of the
 values in row-major order, written as lowercase hexadecimal and cut to 16 digits.
 
-Randomness: every generator is the book's SplitMix64 and every seed comes from
-`bookrng.seed_of("project_tensor_engine.<name>")`, printed with its draw order.
+Randomness: every generator is the book's SplitMix64 and is named
+`project_tensor_engine.<name>`, printed with its draw order.
 
 Swedish Embedded AB implements solutions for tensor engines that run one set of
 kernels on every device a client owns and prove that the devices agree. If your
@@ -83,9 +83,8 @@ def _gen(n):
     return bookrng.generator(_name(n))
 
 
-def _seed(n):
-    s = bookrng.seed_of(_name(n))
-    return f"seed {s:#018x} ({s})"
+def _gname(n):
+    return f"`{_name(n)}`"
 
 
 def _yes(flag):
@@ -619,7 +618,7 @@ def tensor_views():
             f"shape and the strides exchanged; a row slice moves the offset and keeps the strides. Element (i, j) of a view is storage[offset + i s0 + j s1]; "
             f"the table reads the element at the index shown.\n\n"
             + _table(["view", "shape", "strides", "offset", "index", "storage position", "element", "flat() equals element by element"], rows, "lllrlrrl")
-            + f"\n\nA view in a product. {_seed('tensor_views')}. Draw order: the 20 entries of X (shape [4, 5]) then the 15 entries of W (shape [3, 5], stored "
+            + f"\n\nA view in a product. Generator {_gname('tensor_views')}. Draw order: the 20 entries of X (shape [4, 5]) then the 15 entries of W (shape [3, 5], stored "
             f"[n, k]), each `2 uniform() - 1` rounded to float32. The product X W^T taken through the transposed view of W has the digest "
             f"{digest(via_view, 'd')} (binary64, row-major, 12 values); the same product with W^T copied out first has "
             f"{digest(via_copy, 'd')}; identical: {_yes(via_view == via_copy)}.")
@@ -642,7 +641,7 @@ def oracle_cases():
     for (m_, n_, k_, a_, b_) in cases:
         c_ = matmul_oracle(a_, b_)
         rows.append((f"{m_} x {n_} x {k_}", _n(2 * m_ * n_ * k_), digest(a_.flat(), "d"), digest(b_.flat(), "d"), digest(c_, "d")))
-    return (f"Integer matrices for the oracle and the exact device tests. {_seed('exact_cases')}. Draw order: the shapes (m, n, k) in the order of the table; for each, the "
+    return (f"Integer matrices for the oracle and the exact device tests. Generator {_gname('exact_cases')}. Draw order: the shapes (m, n, k) in the order of the table; for each, the "
             f"m k entries of A row-major, then the k n entries of B row-major, each `integer(9) - 4` (so in -4 .. 4). The smallest case, m = {m}, n = {n}, k = {k}: "
             f"A = {[[int(x) for x in a.flat()[i * k:(i + 1) * k]] for i in range(m)]}, B = {[[int(x) for x in b.flat()[i * n:(i + 1) * n]] for i in range(k)]}, "
             f"so C = A B = {[[int(x) for x in c[i * n:(i + 1) * n]] for i in range(m)]}. 'FLOPs' is 2 m n k. Digests are SHA-256 over binary64 little-endian "
@@ -668,7 +667,7 @@ def backend_exact():
                      _n(rec["stores"].get("C", 0)), rec["load_blocks"], rec["store_blocks"], _n(2 * m * n * k),
                      _yes(out == ref)))
     return ("The naive kernel of Chapter 6 (one output per invocation, workgroups of 16, the guard `g >= m n` returns) on the CPU backend, device A "
-            "(left fold, no contraction), on the cases of `project_tensor_engine.oracle_cases` (same seed, same draws). Buffers are allocated in the order A, B, C, each starting at a "
+            "(left fold, no contraction), on the cases of `project_tensor_engine.oracle_cases` (same generator, same draws). Buffers are allocated in the order A, B, C, each starting at a "
             "multiple of 8 words (32 bytes) with -777 in the padding words; C starts as 1000. 'loads' and 'stores' count single words as the executor saw the kernel "
             "touch memory; 'blocks' are the 32-byte transactions of Chapter 5 (32-lane subgroups, one instruction per j-th access, one transaction per distinct block). "
             "'Expected' is 2 m n k loads and m n stores.\n\n"
@@ -705,7 +704,7 @@ def tiled_traffic():
                          _n(rec["loads"].get("B", 0)), _n(loads), _n(formula), _n(rec["stores"].get("C", 0)), rec["load_blocks"],
                          rec["store_blocks"], _yes(out == ref)))
     return ("Ragged products on the CPU backend, device A, integer matrices (`integer(9) - 4`; "
-            + "; ".join(f"{_seed(f'traffic.{m}x{n}x{k}')} for {m} x {n} x {k}" for (m, n, k) in TRAFFIC_SHAPES)
+            + "generators " + "; ".join(f"{_gname(f'traffic.{m}x{n}x{k}')} for {m} x {n} x {k}" for (m, n, k) in TRAFFIC_SHAPES)
             + "; draw order: the m k entries of A, then the k n entries of B, row-major). "
             "The tiled kernel is the blocked kernel with r = 1 and step depth bk = T; the blocked kernel uses q = 4 invocations per side, r = 2, step depth 4. Elements "
             "outside the matrices are not loaded (the guards sit around the loads). Expected loads: naive 2 m n k; tiled and blocked k (m ceil(n / T) + n ceil(m / T)), "
@@ -728,7 +727,7 @@ def summation_order_identity():
     s = abs_sums(a, b)
     out0, _ = Engine(DEVICE_A).matmul("naive", a, b)
     wu, wt, bad = error_report(out0, ref, s, k_rd_matmul(k, 1), k)
-    return (f"Real-valued ragged product, m = {m}, n = {n}, k = {k} (k is not a multiple of any step depth used). {_seed('order_identity')}. Draw order: the {m * k} entries of A, then the "
+    return (f"Real-valued ragged product, m = {m}, n = {n}, k = {k} (k is not a multiple of any step depth used). Generator {_gname('order_identity')}. Draw order: the {m * k} entries of A, then the "
             f"{k * n} entries of B, row-major, each `2 uniform() - 1` rounded to float32. Device A: every multiply-add is two float32 operations (the product rounded, then the sum), "
             "each output a left fold over k. Digest: SHA-256 of the binary32 little-endian bytes of C, row-major, first 16 hex digits.\n\n"
             + _table(["kernel", "digest of C", "global loads"], rows, "lrr")
@@ -804,7 +803,7 @@ def reductions():
     tot, recs, _ = global_sum(DEVICE_A, y, RED_GRP)
     words = sum(sum(r["loads"].values()) + sum(r["stores"].values()) for r in recs)
     return (f"Row sums of a [{RED_M}, {RED_N}] array X (one workgroup per row, each invocation adds the elements l, l + wg, ... of its row, then the tree of Chapter 7) and the "
-            f"two-pass sum of {RED_TOTAL} numbers Y (pass 1 over {RED_GRP} workgroups with a grid-stride loop, pass 2 one workgroup over the {RED_GRP} partials). {_seed('reductions')}. "
+            f"two-pass sum of {RED_TOTAL} numbers Y (pass 1 over {RED_GRP} workgroups with a grid-stride loop, pass 2 one workgroup over the {RED_GRP} partials). Generator {_gname('reductions')}. "
             f"Draw order: the {RED_M * RED_N} entries of X row-major, then the {RED_TOTAL} entries of Y, each `2 uniform() - 1` rounded to float32. Device A reduces with "
             f"workgroups of 8, device B with workgroups of 16. 'k_rd' counts the roundings on the longest chain (an invocation's loop adds ceil(N / (n_grp wg)) numbers to a zero "
             f"accumulator, the first addition being exact, then log2 wg levels of the tree; the global sum adds the chains of its two passes). 'Tolerance' is "
@@ -852,7 +851,7 @@ def epilogue_bytes():
     saved = words([rec_mm, r2, r3]) - words([rec_fu])
     assert saved == 4 * m * n, (saved, m, n)
     return (f"The epilogue of Chapter 8, bias then GELU (the nine operations of Chapter 8 in the order listed there, every one rounded to float32, the constants sqrt(2 / pi) and 0.044715 rounded to float32, tanh the library tanh of the float32 argument rounded to float32) on the output of the tiled kernel (T = 4), "
-            f"m = {m}, n = {n}, k = {k}. {_seed('epilogue')}. Draw order: the {m * k} entries of A, the {k * n} entries of B (each `2 uniform() - 1` rounded to float32), then the {n} "
+            f"m = {m}, n = {n}, k = {k}. Generator {_gname('epilogue')}. Draw order: the {m * k} entries of A, the {k * n} entries of B (each `2 uniform() - 1` rounded to float32), then the {n} "
             f"bias entries `0.5 normal()` rounded to float32. 'Words' is every single-word load and store the executor counted, over all dispatches; bytes are 4 times that; "
             f"'blocks' are 32-byte transactions. The two separate kernels are elementwise, one element per invocation, workgroups of 16 and ceil(m n / 16) workgroups, the guard `g >= m n` returns: "
             f"bias_add stores u[g] = f32(z[g] + bias[g mod n]) and gelu stores the GELU of u[g]; the matmul is the tiled kernel's own launch. Every buffer starts on a 32-byte boundary, so the order of allocation does not change a count. "
@@ -910,7 +909,7 @@ def parity_devices():
             "the longest chain has k_rd = ceil(k / lanes) + lanes - 1 roundings. The tolerance of a device against the float64 oracle (a left fold in float64) is "
             "(gamma(k_rd, 2^-24) + gamma(k, 2^-53)) S per output, gamma(j, u) = j u / (1 - j u), S = sum |a b|; the tolerance of two devices against each other is "
             "(gamma(k_rd,A, 2^-24) + gamma(k_rd,B, 2^-24)) S. Errors are in units of u S (u = 2^-24); 'worst ratio' is the largest error over the tolerance of its own entry. "
-            + "; ".join(f"{_seed(f'parity.{m}x{n}x{k}')} for {m} x {n} x {k}" for (m, n, k) in PARITY_SHAPES)
+            + "generators " + "; ".join(f"{_gname(f'parity.{m}x{n}x{k}')} for {m} x {n} x {k}" for (m, n, k) in PARITY_SHAPES)
             + ". Draw order: the m k entries of A, then the k n entries of B, row-major, each `2 uniform() - 1` rounded to float32. Digests: binary32 little-endian, first 16 hex digits.\n\n"
             + _table(["m x n x k", "kernel", "device", "k_rd", "tolerance (u S)", "largest error (u S)", "worst ratio", "outside tolerance", "digest or agreement"], rows, "lllrrrrrl"))
 
@@ -945,7 +944,7 @@ def broken_kernel():
     return ("The tiled kernel (T = 4, step depth 4) with and without the bound check of the k edge on its two tile loads (`ka < K` and `kb < K` removed; the checks on rows and "
             "columns remain), tested on device A against the float64 oracle with the derived tolerance (k_rd = k). Real-valued inputs, `2 uniform() - 1` rounded to float32, "
             "the m k entries of A then the k n entries of B, row-major, from the generator of the name `project_tensor_engine.broken.<m>x<n>x<k>` "
-            + "; ".join(f"{_seed(f'broken.{m}x{n}x{k}')} for {m} x {n} x {k}" for (m, n, k) in BROKEN_SHAPES)
+            + "generators " + "; ".join(f"{_gname(f'broken.{m}x{n}x{k}')} for {m} x {n} x {k}" for (m, n, k) in BROKEN_SHAPES)
             + ". Buffers A, B, C are allocated in this order at 32-byte boundaries with -777 in the padding and 1000 in C before the launch, and the workgroups run in ascending "
             "order, so that the words an unguarded load reads past the end of its buffer are defined. 'Outside' counts outputs beyond the tolerance or not finite, out of m n; "
             "'worst ratio' is the largest error over the tolerance (printed as 'above 1e6' when it is: its value depends on the words the load happened to read).\n\n"
@@ -1011,7 +1010,7 @@ def _quant_rows():
 def quantized_matmul():
     rows, rows2 = _quant_rows()
     return (f"The product C = A W, A of shape [{Q_M}, {Q_K}] (activations), W of shape [{Q_K}, {Q_N}] (weights), W quantized along k in groups of G = {Q_G} for each column "
-            f"(symmetric codes -qmax .. qmax, qmax = 2^(bits - 1) - 1, scale = amax / qmax stored as float32, code = clamp(round_even(w / scale), -qmax, qmax)). {_seed('quantized')}. "
+            f"(symmetric codes -qmax .. qmax, qmax = 2^(bits - 1) - 1, scale = amax / qmax stored as float32, code = clamp(round_even(w / scale), -qmax, qmax)). Generator {_gname('quantized')}. "
             f"Draw order: the {Q_K * Q_N} weights `0.05 normal()` rounded to float32, row-major over [k, n], then the {Q_M * Q_K} activations `normal()` rounded to float32, row-major. "
             f"Device A. 'Bits per weight' counts the {32}-bit scale of every group: bits + 32 / G. 'Weight SQNR' is 10 log10 (mean w^2 / MSE of the decoded weights); "
             "'output SQNR' and 'relative error' compare the kernel's C with the float64 product of the original weights (the error to expect from quantizing); "
@@ -1125,7 +1124,7 @@ def selection_gate():
         for (m, n, k), bad, wt in res:
             rows.append((name, f"{m} x {n} x {k}", f"{bad} of {m * n}", "above 1e6" if wt > 1e6 else f"{wt:.4f}", "admitted" if bad == 0 else "REFUSED"))
         rows.append((name, "gate verdict", "", "", "ADMITTED" if ok else "REFUSED"))
-    seeds = "; ".join(f"{_seed(f'gate.{m}x{n}x{k}')} for {m} x {n} x {k}" for (m, n, k) in sorted({s for nm, _ in CATALOGUE for s, _, _ in _gates()[nm][0]}))
+    seeds = "generators " + "; ".join(f"{_gname(f'gate.{m}x{n}x{k}')} for {m} x {n} x {k}" for (m, n, k) in sorted({s for nm, _ in CATALOGUE for s, _, _ in _gates()[nm][0]}))
     return ("The reference gate of Chapter 10 run on the engine: each candidate's kernel on the whole-tile shape (T, 16, 16) and the ragged shape (T + 1, 17, 19) of its tile T "
             "(T = 8 for the naive kernel, 32 for tiled, 128 for reg and reg-nok), device configuration A with one accumulator and no contraction (k_rd = k), real-valued inputs "
             f"`2 uniform() - 1` rounded to float32 (the m k entries of A, then the k n entries of B, row-major; {seeds}). The same seeded inputs are used by every candidate of a shape. "
@@ -1235,7 +1234,7 @@ def selection_report():
             "noise-free costs on run 0. Everything below is the output of this model, not a measurement of a machine. Protocol: "
             f"{RUNS} dispatches per candidate timed by the device's own stamps; the warm-up ends at the first run that starts 5 consecutive runs each within 5 percent of the minimum of "
             "runs 150 to 299, and those runs are discarded; the rest (at least 264 = 4 x 66, the runs for a 5 percent gap at four standard errors, Chapter 11) give the mean, its "
-            f"standard error s / sqrt(n) and the median; the winner is the admitted candidate with the lowest mean. {_seed('clock')}. Draw order: requests in the order of the table, "
+            f"standard error s / sqrt(n) and the median; the winner is the admitted candidate with the lowest mean. Generator {_gname('clock')}. Draw order: requests in the order of the table, "
             "candidates in catalogue order (those the unit can run), runs 0 .. 299, three uniforms each (u0, u1, u2). 'FLOPs executed' and 'bytes requested' are the counts of Chapter 10 "
             "for the candidate's tile (padded tiles included). Times are in microseconds of the model clock; the fraction is the roofline time of the problem on the measured roofline "
             "over the median (a fraction near 1 is the roofline).\n\n"

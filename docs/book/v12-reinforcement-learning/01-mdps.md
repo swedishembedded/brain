@@ -64,7 +64,7 @@ A **policy** $\pi$ is such a rule: it says which action to take in each state. I
 Run that chain and a **trajectory** appears: the states, actions and rewards in the order they happen, $s_0, a_0, r_0, s_1, a_1, r_1, \dots$, where the reward $r_t$ is the one paid for the action $a_t$ taken in $s_t$. Here is one, for the policy $(1, 0, 0, 0)$ starting from a shelf of two, with the demands drawn from the book's generator.
 
 <!-- worked: mdps.trajectory_returns -->
-Policy: order one unit when the shelf is empty, nothing otherwise, written (1, 0, 0, 0) with one action per stock 0 .. 3. Start: s_0 = 2. Generator: the book's SplitMix64, seed 0xaa77e877a9f056b2 (12283542109326169778); one uniform() per day in order, D = 0 if u < 0.3, D = 1 if u < 0.7, otherwise D = 2. The return G_t of day t is the sum over k = 0 .. 9 - t of gamma^k r_(t+k); the days after day 9 are not simulated and count as reward 0 (so G_10 = 0 and G_t = r_t + gamma G_(t+1)). The last four columns are G_t for gamma = 0, 0.5, 0.9 and 1.
+Policy: order one unit when the shelf is empty, nothing otherwise, written (1, 0, 0, 0) with one action per stock 0 .. 3. Start: s_0 = 2. Generator: the book's SplitMix64, `mdps.trajectory`; one uniform() per day in order, D = 0 if u < 0.3, D = 1 if u < 0.7, otherwise D = 2. The return G_t of day t is the sum over k = 0 .. 9 - t of gamma^k r_(t+k); the days after day 9 are not simulated and count as reward 0 (so G_10 = 0 and G_t = r_t + gamma G_(t+1)). The last four columns are G_t for gamma = 0, 0.5, 0.9 and 1.
 
 | t | s_t | a_t | D | sold | s_(t+1) | r_t | G (0) | G (0.5) | G (0.9) | G (1) |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -157,7 +157,7 @@ The second table settles the opening. From an empty shelf the keeper who never o
 An expectation is an average over what can happen, so it should be possible to check the table against what does happen. Run the policy $(1, 0, 0, 0)$ from an empty shelf for many days under random demand, discount the rewards and average the returns.
 
 <!-- worked: mdps.monte_carlo_value -->
-Policy (1, 0, 0, 0), gamma = 0.9, start s_0 = 0. Generator: the book's SplitMix64, seed 0xdf54ad9b776f4a6e (16092678251736943214); 2000 episodes of 100 days one after the other, one uniform() per day (the demand rule of the trajectory), each return G = sum over t of gamma^t r_t with the running power gamma^t multiplied once per day, days after the 100th ignored (they weigh less than 3.1e-04 in total). The mean is the plain sum over the episodes in order divided by 2000, the standard deviation uses the divisor 2000 - 1. The 5 block means are those of the consecutive blocks of 400 episodes.
+Policy (1, 0, 0, 0), gamma = 0.9, start s_0 = 0. Generator: the book's SplitMix64, `mdps.rollouts`; 2000 episodes of 100 days one after the other, one uniform() per day (the demand rule of the trajectory), each return G = sum over t of gamma^t r_t with the running power gamma^t multiplied once per day, days after the 100th ignored (they weigh less than 3.1e-04 in total). The mean is the plain sum over the episodes in order divided by 2000, the standard deviation uses the divisor 2000 - 1. The 5 block means are those of the consecutive blocks of 400 episodes.
 
 | quantity | value |
 |---|---:|

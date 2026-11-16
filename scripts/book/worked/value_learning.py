@@ -76,10 +76,6 @@ def _table(headers, rows, align=None):
     return mdps._table(headers, rows, align)
 
 
-def _seed_line(names):
-    return ", ".join(f"{n.rsplit('.', 1)[1]} {bookrng.seed_of(n):#018x}" for n in names)
-
-
 def _cell(vals, nd):
     """The digits of vals[0] that all of vals (the run and its copies) share, written with nd decimals."""
     text = stable.text(vals[0], vals[1:], lambda x: f"{x:.{nd}f}")
@@ -219,8 +215,8 @@ def ledger_updates():
         first.setdefault(s, t)
     mc = [mdps._fmt(G[first[s]], 3) if s in first else "none" for s in range(N)]
     out = [
-        f"The ten-day ledger of the previous chapter: policy (1, 0, 0, 0), start s_0 = {mdps.TRAJ_START}, generator the book's "
-        f"SplitMix64 with {mdps._seed_text(mdps.TRAJ_NAME)}, one uniform() per day in order and the demand rule of that chapter. "
+        f"The ten-day ledger of the previous chapter: policy (1, 0, 0, 0), start s_0 = {mdps.TRAJ_START}, generator `{mdps.TRAJ_NAME}` (the book's "
+        f"SplitMix64), one uniform() per day in order and the demand rule of that chapter. "
         f"The estimates start at V(s) = 0 for every s. Each day, in order, the target r + gamma V(s') is formed from the estimates as "
         f"they stand (gamma = {GAMMA}), the difference delta = target - V(s) is computed, and V(s) is replaced by V(s) + {alpha} * delta "
         f"before the next day is looked at; when s' = s the target uses the estimate of the day before.",
@@ -321,7 +317,7 @@ def bias_and_spread():
         rows.append([e] + cells)
     out = [
         f"{REPEATS} independent repeats, each with its own generator (run i has the generator named value_learning.repeat.run<i> for "
-        f"i = 0 .. {REPEATS - 1}, so its seed is seed_of of that name: the first three are {_seed_line(_run_names('repeat', 3))}). A repeat "
+        f"i = 0 .. {REPEATS - 1}). A repeat "
         f"draws {REPEAT_EPISODES} episodes of {EVAL_DAYS} days in order, each as in the table of learning curves (a start state "
         f"from integer({N}), then one uniform() per day), and both methods learn from the same episodes: first-visit Monte Carlo with "
         f"the step 1/n of the state, and TD(0) with the step n^-0.7 of the state, n counting the updates of that state from 1, "
@@ -340,12 +336,9 @@ def learning_curves():
     rows = []
     for e in EVAL_CHECKS:
         rows.append([e, e * EVAL_DAYS] + [_cell([c[m][e - 1] for c in variants], 3) for m in methods])
-    names = _run_names("evaluate", EVAL_RUNS)
-    seeds = _table(["run", "generator name", "seed"],
-                   [[i, n, f"{bookrng.seed_of(n):#018x}"] for i, n in enumerate(names)], align="rlr")
     out = [
         f"Policy (1, 0, 0, 0), gamma = {GAMMA}. A run is {EVAL_EPISODES} episodes of {EVAL_DAYS} days with its own generator, the "
-        f"SplitMix64 of the book seeded with the seed of its name (below); an episode draws one integer({N}) for its start state and "
+        f"SplitMix64 of the book named value_learning.evaluate.run<i> for run i = 0 .. {EVAL_RUNS - 1}; an episode draws one integer({N}) for its start state and "
         f"then, for each of its {EVAL_DAYS} days in order, one uniform() for the demand (the action is the policy's, so nothing else "
         f"is drawn). Every method learns from the same episodes of a run. All estimates start at 0 and no state is terminal: "
         f"the update on the last day of an episode uses the estimate of the state reached, and the days after an episode are "
@@ -362,8 +355,6 @@ def learning_curves():
         _table(["episodes", "days", "MC", "TD 1/n", "TD n^-0.7", "TD 0.5", "TD 0.1"], rows),
         "",
         RULE_TEXT,
-        "",
-        seeds,
     ]
     return "\n".join(out)
 
@@ -432,8 +423,8 @@ def every_visit_monte_carlo():
                            f"{(sd_g[s] / fsd) ** 2:.0f}", f"{(sd_g[s] / esd) ** 2:.0f}", f"{sum(kish) / EV_RUNS:.0f}"])
     out = [
         f"First-visit and every-visit Monte Carlo on the same episodes: policy (1, 0, 0, 0), gamma = {GAMMA}, {EV_RUNS} independent "
-        f"repeats (repeat i has the generator named value_learning.everyvisit.run<i>, i = 0 .. {EV_RUNS - 1}; the first seeds are "
-        f"{_seed_line(_run_names('everyvisit', 2))}), each {EV_EPISODES} episodes of {EVAL_DAYS} days drawn as in the table of learning "
+        f"repeats (repeat i has the generator named value_learning.everyvisit.run<i>, i = 0 .. {EV_RUNS - 1}), "
+        f"each {EV_EPISODES} episodes of {EVAL_DAYS} days drawn as in the table of learning "
         f"curves. Both estimates start at 0 and are running means with the step 1/n, n counting the returns averaged for that "
         f"state from 1 (the first step is 1, so the start value never matters). First visit averages the return of the first "
         f"visit of an episode, every visit the return of each of the first {EV_DAYS_USED} days of an episode (days 0 .. "
@@ -532,8 +523,7 @@ def exploration_lock_in():
     out = [
         f"Q-learning on the inventory problem of the previous chapter, gamma = {GAMMA}, from the shelf s_0 = {CONTROL_START}, "
         f"{CONTROL_DAYS} days per run and {CONTROL_RUNS} runs; run i of variant k has the generator named "
-        f"value_learning.exploration.v<k>.run<i> (k = 0, 1, 2 in the order of the rows, i = 0 .. {CONTROL_RUNS - 1}; the seeds of "
-        f"the first run of each are {', '.join(f'{bookrng.seed_of(f'value_learning.exploration.v{k}.run0'):#018x}' for k in range(3))}). "
+        f"value_learning.exploration.v<k>.run<i> (k = 0, 1, 2 in the order of the rows, i = 0 .. {CONTROL_RUNS - 1}). "
         f"Every day draws in this order: the demand uniform() of the day just played, then, for the action of the next day, one uniform() "
         f"u and, only when u < eps_t, one integer(m) over the m legal actions; eps_t = max({EPS_SCHEDULE[2]}, {EPS_SCHEDULE[0]:g} / "
         f"(1 + t / {EPS_SCHEDULE[1]:g})) for the action of day t in the second row and 0 in the other two (the uniform u is drawn "
@@ -623,8 +613,7 @@ def sarsa_and_q_learning():
     out = [
         f"A constant exploration rate eps = {PAIR_EPS} for every day (eps0 = floor = {PAIR_EPS}), Q starting at 0, {PAIR_DAYS} days per "
         f"run from s_0 = {CONTROL_START}, {PAIR_RUNS} runs of each algorithm (run i of SARSA has the generator named "
-        f"value_learning.pairs.sarsa.run<i>, of Q-learning value_learning.pairs.q.run<i>, i = 0 .. {PAIR_RUNS - 1}; the first seeds are "
-        f"{bookrng.seed_of('value_learning.pairs.sarsa.run0'):#018x} and {bookrng.seed_of('value_learning.pairs.q.run0'):#018x}), "
+        f"value_learning.pairs.sarsa.run<i>, of Q-learning value_learning.pairs.q.run<i>, i = 0 .. {PAIR_RUNS - 1}), "
         f"draws and update order as in the table above, the step n^-0.7. Q* is the optimal lookahead of the previous chapter; "
         f"Q_eps is the fixed point of Q(s, a) = R(s, a) + gamma sum_j P(j | s, a) [(1 - eps) max_b Q(j, b) + eps mean_b Q(j, b)], "
         f"the value of the best policy that must explore with probability eps, iterated until the change is below 1e-12. "
@@ -728,7 +717,7 @@ def maximisation_bias():
         _table(["n", "expected largest estimate at B", "value of every action at B"], rows_est),
         "",
         f"Learning it: {BIAS_RUNS} runs of {BIAS_EPISODES} episodes, run i with the generator named value_learning.maxbias.run<i> "
-        f"(i = 0 .. {BIAS_RUNS - 1}; run 0 has seed {bookrng.seed_of(names[0]):#018x}), the same generator name for both "
+        f"(i = 0 .. {BIAS_RUNS - 1}), the same generator name for both "
         f"algorithms. All values start at 0, the step is a constant {BIAS_ALPHA}, the exploration rate a constant {BIAS_EPS} "
         f"(one uniform() u per decision and, if u < {BIAS_EPS}, one integer over the actions), the greedy action the smallest "
         f"within {TIE:g} of the best. An episode chooses at A, updates the pair (A, chosen) when the step ends, and if it went left "
@@ -871,9 +860,8 @@ def linear_td():
         f"(one linear system); the weights that minimize the mu-weighted squared error sum_s mu(s) (x(s)^T w - V(s))^2 (the normal "
         f"equations); and the weights that semi-gradient TD(0) reaches. 'weighted error' is sum_s mu(s) (V_hat(s) - V(s))^2. "
         f"Sampled runs: {FA_RUNS} runs of {FA_DAYS} days from the shelf 0, run i of table f with the generator named "
-        f"value_learning.linear.<f>.run<i> with f one-hot, linear or quadratic (for example one-hot run 0 has seed "
-        f"{bookrng.seed_of('value_learning.linear.one-hot.run0'):#018x}, linear run 0 {bookrng.seed_of('value_learning.linear.linear.run0'):#018x}, "
-        f"quadratic run 0 {bookrng.seed_of('value_learning.linear.quadratic.run0'):#018x}), one uniform() per day for the demand; weights start at 0 and "
+        f"value_learning.linear.<f>.run<i> with f one-hot, linear or quadratic, "
+        f"one uniform() per day for the demand; weights start at 0 and "
         f"change every day in the order of the days, delta = r + gamma x(s')^T w - x(s)^T w computed from the weights before the "
         f"update, then w <- w + alpha_t delta x(s) with alpha_t = 0.02 / (1 + t / 1000)^0.75 for the day t counted from 0; "
         f"the weights shown are those after the last day, averaged over the runs (divisor {FA_RUNS}).",

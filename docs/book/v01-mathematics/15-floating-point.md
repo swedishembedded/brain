@@ -365,7 +365,7 @@ independent rounder written from the rule above with exact fractions can be
 compared with the hardware conversion:
 
 <!-- worked: floating.rounding_agreement -->
-Exact rounding of 20000 random doubles to 32 bits against the hardware conversion: 0 disagreements. Generator: the book's SplitMix64, seed 0xab72908388d0f139. Each double is x = (2a - 1) * 10^(60b - 30) from two draws, a then b, both `uniform()`.
+Exact rounding of 20000 random doubles to 32 bits against the hardware conversion: 0 disagreements. Generator: the book's SplitMix64, `floating.rounding_agreement`. Each double is x = (2a - 1) * 10^(60b - 30) from two draws, a then b, both `uniform()`.
 <!-- /worked -->
 
 ### Arithmetic: one rounding per operation
@@ -544,7 +544,7 @@ addition of the same $0.1$ is rounded to the same grid in the same direction,
 and the errors add up like the worst case. Here are the measurements.
 
 <!-- worked: floating.sum_methods -->
-Relative error of a 32-bit sum of n terms, against the exact sum of the stored terms (exact rational arithmetic). Copies of 0.1: the 32-bit number nearest 0.1, n times. Uniform: the first n of 10^5 values `uniform()` drawn in order from the book's SplitMix64 with seed 0x1715ad6d00aba70a, each rounded to 32 bits; the three row sizes use prefixes of the same list. Pairwise is the layer-by-layer algorithm below.
+Relative error of a 32-bit sum of n terms, against the exact sum of the stored terms (exact rational arithmetic). Copies of 0.1: the 32-bit number nearest 0.1, n times. Uniform: the first n of 10^5 values `uniform()` drawn in order from the book's SplitMix64, `floating.sum_uniform`, each rounded to 32 bits; the three row sizes use prefixes of the same list. Pairwise is the layer-by-layer algorithm below.
 
 | terms | n | exact sum | worst-case bound (n-1)u | left to right | pairwise | Kahan |
 |---|---|---:|---:|---:|---:|---:|
@@ -754,7 +754,7 @@ The subtraction itself is not guilty. There is a theorem (Sterbenz) that if $y/2
 *exactly*, with no rounding at all. A test on random 32-bit numbers:
 
 <!-- worked: floating.sterbenz -->
-Subtracting two 32-bit numbers x, y: when y/2 <= x <= 2y the stored difference was inexact in 0 of 100000 random cases; when x is 4 to 5 times y it was inexact in 71464 of 100000. Generator: the book's SplitMix64, seed 0xe348a8227d344ab3. Each case draws, in this order, `uniform()` a, `integer(41)` k, `uniform()` b, `uniform()` c: y = f32((1 + a) * 2^(k - 20)), x = f32(y * (0.5 + 1.5 b)) (replaced by y if that falls outside [y/2, 2y]), and for the second count x = f32(y * (4 + c)). The difference x - y is exact in 64 bits for these operands, and 'inexact' means it is not a 32-bit number.
+Subtracting two 32-bit numbers x, y: when y/2 <= x <= 2y the stored difference was inexact in 0 of 100000 random cases; when x is 4 to 5 times y it was inexact in 71464 of 100000. Generator: the book's SplitMix64, `floating.sterbenz`. Each case draws, in this order, `uniform()` a, `integer(41)` k, `uniform()` b, `uniform()` c: y = f32((1 + a) * 2^(k - 20)), x = f32(y * (0.5 + 1.5 b)) (replaced by y if that falls outside [y/2, 2y]), and for the second count x = f32(y * (4 + c)). The difference x - y is exact in 64 bits for these operands, and 'inexact' means it is not a 32-bit number.
 <!-- /worked -->
 
 Within a factor of two the stored difference was never inexact; outside it
@@ -807,17 +807,17 @@ lost to cancellation. Compare three methods on $1000$ numbers equal to an
 offset plus a standard normal variable, so that the true variance is about $1$:
 
 <!-- worked: floating.variance -->
-Variance of 1000 values offset + z, z standard normal, population form (divide by n). The values are rounded to the format after the addition. Each row has its own generator, the book's SplitMix64 with the seed in the last column; the 1000 values are its first 1000 `normal()` draws in order. The true variance and all errors are against the exact rational variance of the stored values (mean of the squared deviations from the exact mean). Each format's arithmetic rounds every operation to that format; the one-pass formula accumulates sum x and sum x^2 left to right, divides both by n, and subtracts.
+Variance of 1000 values offset + z, z standard normal, population form (divide by n). The values are rounded to the format after the addition. Each row has its own generator, the book's SplitMix64 named in the last column; the 1000 values are its first 1000 `normal()` draws in order. The true variance and all errors are against the exact rational variance of the stored values (mean of the squared deviations from the exact mean). Each format's arithmetic rounds every operation to that format; the one-pass formula accumulates sum x and sum x^2 left to right, divides both by n, and subtracts.
 
-| format | offset | true variance | E[X^2] - E[X]^2 | its error | two-pass error | Welford error | seed |
+| format | offset | true variance | E[X^2] - E[X]^2 | its error | two-pass error | Welford error | generator |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| 32-bit | 10^1 | 1.027065 | 1.02712 | 5.64e-05 | 9.85e-08 | 6.79e-07 | 0x2e4f8e4638e8c5c3 |
-| 32-bit | 10^2 | 1.034514 | 1.04297 | 8.17e-03 | 3.60e-07 | 7.06e-07 | 0xd9cd5d0d23999691 |
-| 32-bit | 10^3 | 1.011911 | 1.4375 | 4.21e-01 | 2.89e-07 | 1.94e-06 | 0xc4d5fa469bac185e |
-| 32-bit | 10^4 | 1.052178 | -56 | 5.42e+01 | 6.96e-06 | 1.56e-04 | 0x94cf2c25b2c19213 |
-| 64-bit | 10^4 | 1.006720 | 1.00672 | 2.27e-07 | 4.43e-16 | 1.55e-13 | 0xabd981c9e503f214 |
-| 64-bit | 10^8 | 0.991809 | -6 | 7.05e+00 | 9.46e-15 | 1.67e-09 | 0x7ed9e4d912c7d932 |
-| 64-bit | 10^9 | 0.959095 | 0 | 1.00e+00 | 1.48e-14 | 1.14e-08 | 0x9a3385ab0d905451 |
+| 32-bit | 10^1 | 1.027065 | 1.02712 | 5.64e-05 | 9.85e-08 | 6.79e-07 | `floating.variance.32-bit.10` |
+| 32-bit | 10^2 | 1.034514 | 1.04297 | 8.17e-03 | 3.60e-07 | 7.06e-07 | `floating.variance.32-bit.100` |
+| 32-bit | 10^3 | 1.011911 | 1.4375 | 4.21e-01 | 2.89e-07 | 1.94e-06 | `floating.variance.32-bit.1000` |
+| 32-bit | 10^4 | 1.052178 | -56 | 5.42e+01 | 6.96e-06 | 1.56e-04 | `floating.variance.32-bit.10000` |
+| 64-bit | 10^4 | 1.006720 | 1.00672 | 2.27e-07 | 4.43e-16 | 1.55e-13 | `floating.variance.64-bit.10000` |
+| 64-bit | 10^8 | 0.991809 | -6 | 7.05e+00 | 9.46e-15 | 1.67e-09 | `floating.variance.64-bit.1e+08` |
+| 64-bit | 10^9 | 0.959095 | 0 | 1.00e+00 | 1.48e-14 | 1.14e-08 | `floating.variance.64-bit.1e+09` |
 <!-- /worked -->
 
 In 32 bits the one-pass formula has lost everything by an offset of $10^3$
@@ -1211,7 +1211,7 @@ embedding holds the seven digits its reference test demands. The experiment, run
 vectors with a cosine near $0.995$ and 200 random trials:
 
 <!-- worked: floating.cosine_accumulation -->
-Cosine of 200 pairs of 512-dimensional vectors (the second is the first plus noise of one tenth of its standard deviation, cosine near 0.995), against the exact value (exact rational sums, one final evaluation in 64 bits). Generator: the book's SplitMix64, seed 0x75c7e1bcf07f2c79; each trial draws 512 `normal()` values for the first vector (rounded to 32 bits), then 512 for the noise, b = f32(a + 0.1 z). The 32-bit row computes dot, na = a . a and nb = b . b by running f32 sums of f32 products, then cos = dot / (sqrt(na) * sqrt(nb)) with both square roots, their product and the quotient rounded to f32 (not dot / sqrt(na * nb)); the 64-bit row accumulates dot, na, nb in 64 bits and rounds only the final cosine to f32.
+Cosine of 200 pairs of 512-dimensional vectors (the second is the first plus noise of one tenth of its standard deviation, cosine near 0.995), against the exact value (exact rational sums, one final evaluation in 64 bits). Generator: the book's SplitMix64, `floating.cosine`; each trial draws 512 `normal()` values for the first vector (rounded to 32 bits), then 512 for the noise, b = f32(a + 0.1 z). The 32-bit row computes dot, na = a . a and nb = b . b by running f32 sums of f32 products, then cos = dot / (sqrt(na) * sqrt(nb)) with both square roots, their product and the quotient rounded to f32 (not dot / sqrt(na * nb)); the 64-bit row accumulates dot, na, nb in 64 bits and rounds only the final cosine to f32.
 
 | accumulation | mean abs. error | max abs. error |
 |---|---:|---:|
@@ -1359,7 +1359,7 @@ against `max(1, nan)`, and the unsorted list) are the same fact in miniature.
 4. **[Calculate]** For $f(x) = 1 - \cos x$ at $x = 10^{-3}$ compute $\kappa_f$ and say whether the problem is well-conditioned. How many digits does the formula $1 - \cos x$ lose in 64 bits, and what stable rewriting (use $\cos x = 1 - 2\sin^2(x/2)$) avoids the loss?
 5. **[Calculate]** Compute $\mathrm{lse}(0, 0, 0, 0)$ and $\mathrm{lse}(5, 5)$ by hand and check against the two bounds of the section. Then show that $\mathrm{lse}(z + c) = \mathrm{lse}(z) + c$ for every constant $c$.
 6. **[Calculate]** For the central difference of $f(x) = \sin x$ at $x = 1$ in 32 bits, take $|f| = \sin 1$ and $M_3 = |f'''(1)| = \cos 1$ and compute the best step $h^*$ and the best error from the formulas of the section.
-7. **[Implement]** Emulate 32-bit arithmetic in your language (round every result to the nearest 32-bit float, using a cast or `struct`). Reproduce `floating.million_tenths` and `floating.sum_methods` for the $0.1$'s (the uniform rows are reproduced exactly with the generator and the draw order printed above the table: seed `0x1715ad6d00aba70a`, the first $n$ of $10^5$ draws, each rounded to 32 bits; the error is measured against the exact rational sum of the stored values).
+7. **[Implement]** Emulate 32-bit arithmetic in your language (round every result to the nearest 32-bit float, using a cast or `struct`). Reproduce `floating.million_tenths` and `floating.sum_methods` for the $0.1$'s (the uniform rows are reproduced exactly with the generator and the draw order printed above the table: the generator `floating.sum_uniform`, the first $n$ of $10^5$ draws, each rounded to 32 bits; the error is measured against the exact rational sum of the stored values).
 8. **[Implement]** Implement Kahan summation as in the pseudocode and reproduce `floating.kahan_trace`. Then compile or run it with the most aggressive optimisation your language offers and say whether the trace changes.
 9. **[Implement]** Implement the naive and the stable evaluations of `floating.one_plus_x` (use your language's `expm1` for the stable one) and of `floating.quadratic`, and reproduce their error columns to one significant digit. Take the true values from exact rational arithmetic or from decimal arithmetic with at least 40 digits, applied to the stored double $x$ (or $b$), not to the decimal text.
 10. **[Implement]** Implement the unshifted and shifted log-sum-exp in 32 and 64 bits and reproduce `floating.lse_table` and `floating.mixture_loglik`. Compute the 32-bit exp and log in 64 bits and round the result to 32 bits, and compare the table to 8 significant digits, allowing one unit in the last place in the 32-bit columns.

@@ -290,7 +290,7 @@ The left side grows like $k$ and the right like $\sqrt{k}$; a straight line cann
 A bound is a claim about every order of the data, so test it on many. For the six points of the trace we need $R$ and a margin $\gamma$. Any separating unit vector gives a valid bound; take the hand-chosen separator $(2, 1, -5.5)$ (the boundary $2x_1 + x_2 = 5.5$, with the bias last) normalised to length $1$. We then run the rule from zero over $200$ random orders of the six points and count updates. The generator is the book's SplitMix64 and its seed is printed, so you can reproduce the orders.
 
 <!-- worked: perceptron.convergence_bound -->
-Generator: the book's SplitMix64, seed 0x16ae51a8033bec53 (1634333496832683091).
+Generator: `perceptron.orders` (the book's SplitMix64).
 Draw order: for each of the 200 runs, shuffle(list [0, 1, 2, 3, 4, 5]) with the book's Fisher-Yates shuffle, then run the rule from w = 0, b = 0 over that order each pass until a pass has no mistake.
 
 Separator w* = (2.0, 1.0, -5.5) (last entry is the bias), |w*| = 5.9372.
@@ -311,8 +311,8 @@ The bound is $(R/\gamma)^2 = 74.82$, so no run may make more than $74$ updates. 
 To see that scaling, vary the gap. Take $20$ points in the square $[-1, 1]^2$, labelled by the sign of $x_1$, and discard every point with $|x_1| < g/2$, so that the classes are separated by an empty strip of width at least $g$. The separator $\mathbf{s} = (1, 0, 0)$ has margin $\gamma$ equal to the smallest $|x_1|$ present.
 
 <!-- worked: perceptron.gap_scaling -->
-Data: 20 points per row. Generator: the book's SplitMix64, seed 0x862eeb8ac633e870 (9668924431274338416). The data generator is restarted from this seed for each row. Draw order: candidate after candidate, first u1 = uniform() then u2 = uniform(), x1 = 2 u1 - 1, x2 = 2 u2 - 1; a candidate is kept when |x1| >= g / 2, with label +1 if x1 > 0 and -1 otherwise, until 20 are kept. The separator is w* = (1, 0), b = 0.
-Orders: Generator: the book's SplitMix64, seed 0x3c66e9384cac8056 (4352422517913976918). 200 orders per row, each one shuffle of a fresh list [0, ..., 19], the order generator restarted from this seed for each row. Both generators therefore start afresh in every row.
+Data: 20 points per row. Generator: `perceptron.gap_data` (the book's SplitMix64). The data generator is restarted for each row. Draw order: candidate after candidate, first u1 = uniform() then u2 = uniform(), x1 = 2 u1 - 1, x2 = 2 u2 - 1; a candidate is kept when |x1| >= g / 2, with label +1 if x1 > 0 and -1 otherwise, until 20 are kept. The separator is w* = (1, 0), b = 0.
+Orders: Generator: `perceptron.gap_orders` (the book's SplitMix64). 200 orders per row, each one shuffle of a fresh list [0, ..., 19], the order generator restarted for each row. Both generators therefore start afresh in every row.
 
 | gap g | gamma | R | bound (R/gamma)^2 | fewest | mean | most |
 |---|---:|---:|---:|---:|---:|---:|

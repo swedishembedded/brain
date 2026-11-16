@@ -41,10 +41,6 @@ def _pct(x, d=1):
     return f"{100.0 * x:.{d}f}"
 
 
-def _seed(name):
-    return f"{bookrng.seed_of(name):#018x}"
-
-
 def _ceil_div(a, b):
     return -(-a // b)
 
@@ -102,7 +98,7 @@ def reservation():
     mean = sum(ls) / len(ls)
     return (f"The pool holds 64 GiB = {_int(POOL_BYTES)} bytes, {_int(POOL_TOKENS)} token rows at {_int(BF16_TOKEN)} bytes per "
             "token (the 7.5-billion-parameter decoder of Volume V, Chapter 12, in bf16). The 256 conversations come from the "
-            f"generator `paged_kv.reservation` (seed {_seed(NAME_CONV)}): for each in turn, k = 1 + `integer(15)` and then "
+            f"generator `paged_kv.reservation`: for each in turn, k = 1 + `integer(15)` and then "
             "n = 2^(k - 1) + `integer(2^(k - 1))` tokens, k drawn first, so every octave from 1 to 32,767 tokens is "
             f"equally likely. The first eight are {first}; the shortest is {_int(min(ls))}, the longest {_int(max(ls))}, "
             f"the sum {_int(sum(ls))} and the mean {mean:,.2f} tokens. Conversations are admitted in arrival order at "
@@ -521,8 +517,8 @@ def clip_tradeoff():
                 tot += sum(x * x for x in r)
             rows.append((f"{m:g}", "absmax (no ceiling)" if c is None else f"{c:g}",
                          f"{e_out / N_ROWS:.3g}", f"{e_rest / N_ROWS:.3g}", f"{math.sqrt((e_out + e_rest) / tot):.3g}"))
-    return (f"{N_ROWS} rows of {D_ROW} elements for each outlier size m, from the generator `{NAME_CLIP}` (seed "
-            f"{_seed(NAME_CLIP)}), one generator across the whole table: for m = 3, 5, 10, 20 in turn and each row in turn, "
+    return (f"{N_ROWS} rows of {D_ROW} elements for each outlier size m, from the generator `{NAME_CLIP}`, "
+            f"one generator across the whole table: for m = 3, 5, 10, 20 in turn and each row in turn, "
             "63 `normal()` draws fill elements 1 to 63, then one `uniform()` gives the sign of element 0, + when it is below "
             "0.5, and element 0 is that sign times m (63 is odd, so the unused second value of a pair of `normal()` draws is held "
             "over into the next row, as in Volume I, Chapter 17). Each row is stored as int8 with scale = min(absmax, ceiling) / 127 "

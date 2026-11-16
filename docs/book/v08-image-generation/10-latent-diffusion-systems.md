@@ -168,7 +168,7 @@ Data: x0 given the class c is the standardized packed latent of prototype c plus
 | box | 7.1365 | 0.0000 | 7.2634 |
 | slash | 8.1946 | 7.2634 | 0.0000 |
 
-Text: the table of 6 tokens by 4 numbers from `latent_diffusion_systems.text` (seed 0x941ea2b1f6255b29), `normal()` in row-major order:
+Text: the table of 6 tokens by 4 numbers from `latent_diffusion_systems.text`, `normal()` in row-major order:
 
 | token | e0 | e1 | e2 | e3 |
 |---|---:|---:|---:|---:|
@@ -218,7 +218,7 @@ The codec, and the codec with the packing and the standardization after it: the 
 | slash | 0.0e+00 | 1.1e-16 |
 | bar plus texture (0.25) | 0.2500 | 0.2500 |
 
-The denoiser at sigma = 1 for the prompt `bar box` and the first noise draw of `latent_diffusion_systems.noise` (seed 0x51e5c8a881704c6b): the field must be x minus the mean of the class means weighted by the prompt, and the largest difference is 4.4e-16. The posterior weights there are the prompt's: 0.4964, 0.4964, 0.0072.
+The denoiser at sigma = 1 for the prompt `bar box` and the first noise draw of `latent_diffusion_systems.noise`: the field must be x minus the mean of the class means weighted by the prompt, and the largest difference is 4.4e-16. The posterior weights there are the prompt's: 0.4964, 0.4964, 0.0072.
 
 The schedule of 8 steps on FLUX.1's rule at 4 tokens (mu = 0.4573437 unrounded: 0.5 + (4 - 256) x 0.65 / 3840, and all these digits are used):
 
@@ -234,7 +234,7 @@ Four numbers carry the check. The text stage puts at least $0.9999$ on the right
 The whole pipeline can now be run many times. The table draws 100 starting noises, once, from a named stream, and runs the same noises through every setting.
 
 <!-- worked: latent_diffusion_systems.sampling_table -->
-100 starting noises (the first 100 draws of 32 numbers from `latent_diffusion_systems.noise` (seed 0x51e5c8a881704c6b), in order), the same for every row, sampled with 8 Euler steps of `toy_sigmas` and the guided field u_un + g (u_c - u_un). The columns count the samples whose nearest class mean is each class; the last is the mean distance of a sample to its nearest class mean (data have 0.2 sqrt(32) = 1.13 on average).
+100 starting noises (the first 100 draws of 32 numbers from `latent_diffusion_systems.noise`, in order), the same for every row, sampled with 8 Euler steps of `toy_sigmas` and the guided field u_un + g (u_c - u_un). The columns count the samples whose nearest class mean is each class; the last is the mean distance of a sample to its nearest class mean (data have 0.2 sqrt(32) = 1.13 on average).
 
 | prompt | g | bar | box | slash | mean distance to the nearest class mean |
 |---|---:|---:|---:|---:|---:|
@@ -338,7 +338,7 @@ $$
 where $\boldsymbol{\varepsilon}$ is the very noise draw that started the run. This is the rule of `crates/flux2/src/mask.rs`, which names its origin as blended latent diffusion, and it differs from the strength in the way the commit that introduced it said it did: the preserved region is not guided toward the source, it is the source, renoised to the level of the step and so a legal point on the source's own forward path, re-anchored at every step. At the last step $\sigma = 0$ it is $\mathbf{x}_0$ itself, and the code copies it rather than computing $x + 0\cdot\varepsilon$, which would differ from $x$ for a negative zero (commit 6813f0036). Two properties are exact on purpose: an all-white mask is bit for bit the unmasked run, and an all-black one reproduces the source latent bit for bit, which needs both the short circuits in `blend` and an integer area average in the resampler, so that a mask constant over a token is resampled to exactly that constant.
 
 <!-- worked: latent_diffusion_systems.mask_table -->
-A masked run of the toy: the source with the texture, the prompt `box`, g = 2, 8 steps, the first noise of `latent_diffusion_systems.noise` (seed 0x51e5c8a881704c6b), and the mask 0 on the two left tokens, at (row, column) = (0, 0) and (1, 0), raster indices 0 and 2, and 1 on the two right ones, raster indices 1 and 3, for all 8 packed channels of each. After every Euler step the kept tokens are replaced by (1 - sigma) x0 + sigma eps at the sigma just reached (x0 itself when it is 0). The largest difference between the final kept tokens and x0 is 0.0e+00. Decoded, the left half of the picture differs from the *source* by up to 0.2500, the amplitude of the texture, because the latent never held it; the left half equals the codec's round trip of the source to 0.0e+00; the right half is within 0.0911 (root mean square per pixel) of the box prototype's right half. A composite in pixel space, source + m (generated - source) per pixel column, keeps the source:
+A masked run of the toy: the source with the texture, the prompt `box`, g = 2, 8 steps, the first noise of `latent_diffusion_systems.noise`, and the mask 0 on the two left tokens, at (row, column) = (0, 0) and (1, 0), raster indices 0 and 2, and 1 on the two right ones, raster indices 1 and 3, for all 8 packed channels of each. After every Euler step the kept tokens are replaced by (1 - sigma) x0 + sigma eps at the sigma just reached (x0 itself when it is 0). The largest difference between the final kept tokens and x0 is 0.0e+00. Decoded, the left half of the picture differs from the *source* by up to 0.2500, the amplitude of the texture, because the latent never held it; the left half equals the codec's round trip of the source to 0.0e+00; the right half is within 0.0911 (root mean square per pixel) of the box prototype's right half. A composite in pixel space, source + m (generated - source) per pixel column, keeps the source:
 
 | pixel mask | largest change where the mask is 0 | largest change where the mask is between 0 and 1 |
 |---|---:|---:|

@@ -24,7 +24,7 @@ The task is the one of the opening. An input is a string of $T$ digits, each one
 <!-- worked: seq2seq.task -->
 The ids are `0 0`, `1 1`, `2 2`, `3 3`, `4 <s>` (the start marker fed to the decoder first) and `5 <end>`, so V = 6. An input is T digits with T between 1 and 10 in training (and 1 to 12 in the test), each digit uniform on 0 .. 3; the output is the digits in the opposite order followed by `<end>`.
 
-Generator: the book's SplitMix64, seed 0x87b9e70660e4b168 (`seed_of` of the name `seq2seq.example`). Draw order: for each of the four examples, T times `integer(4)`.
+Generator: the book's SplitMix64, `seq2seq.example`. Draw order: for each of the four examples, T times `integer(4)`.
 
 | input digits T | input | output | output tokens T + 1 | possible inputs 4^T |
 |---:|---|---|---:|---:|
@@ -127,12 +127,12 @@ Row $i$ of a stacked matrix is output unit $i$ of its block: rows $0$ to $H-1$ b
 The training conventions are these. Each update draws a batch of 16 sequences, one after the other, from the generator `seq2seq.train.<run>`: the length $1 + \mathrm{integer}(10)$ and then that many digits; both models of a run see the same batches. The loss of a batch is the sum of the token losses of all its sequences divided by the number of output tokens in the batch (the sum of the $T + 1$ of each sequence), and the gradient is that loss's gradient, summed over the sequences in batch order. The gradient of all parameters together is clipped to a global norm of 5 (all entries squared and added, square root, every entry multiplied by $\min(1, 5 / \text{norm})$) before Adam sees it. Adam has first and second moments that start at zero, a step counter $t$ that starts at 1 for the first update, the bias corrections $1 - \beta_1^t$ and $1 - \beta_2^t$, and no weight decay; every entry of the parameters then loses the learning rate times the corrected first moment divided by (the square root of the corrected second moment plus the printed epsilon). Greedy decoding takes the first index when two logits tie.
 
 <!-- worked: seq2seq.training_plain -->
-The model is the one of the text, H = 16 state numbers, embedding width 8, V = 6, the parameters drawn by the initialisation recipe of the text from the generator named `seq2seq.plain.<run>.init` with run 0 or 1 (`plain` is the model without attention; seeds in the table). Training is Adam (learning rate 0.01, beta1 0.9, beta2 0.999, epsilon 1e-08, with the bias correction of Volume III) on minibatches of 16 freshly drawn input sequences, 1500 updates (24,000 sequences), every gradient clipped to a global norm of 5. Batch element after batch element, the length is `1 + integer(10)` and then that many `integer(4)` digits, from the generator `seq2seq.train.<run>`, so that the two models of a run (this one and the one of the attention section) see the same sequences. The loss is the mean cross-entropy per output token over the batch; a checkpoint reports the mean over the 100 batches that end at it. The test set has 60 inputs for each length 1 to 12, drawn from `seq2seq.test` (seed 0x5689c1a770af5a30), length by length; an input counts as exact when the greedy output, run for T + 1 steps on its own previous outputs, equals the reversed input followed by `<end>`. Losses are rounded to 3 decimals. They and the counts are reproduced digit for digit only by an implementation that adds in the same order; a trained network is a chaotic function of its arithmetic, so a reimplementation should expect the same picture and not the same counts.
+The model is the one of the text, H = 16 state numbers, embedding width 8, V = 6, the parameters drawn by the initialisation recipe of the text from the generator named `seq2seq.plain.<run>.init` with run 0 or 1 (`plain` is the model without attention). Training is Adam (learning rate 0.01, beta1 0.9, beta2 0.999, epsilon 1e-08, with the bias correction of Volume III) on minibatches of 16 freshly drawn input sequences, 1500 updates (24,000 sequences), every gradient clipped to a global norm of 5. Batch element after batch element, the length is `1 + integer(10)` and then that many `integer(4)` digits, from the generator `seq2seq.train.<run>`, so that the two models of a run (this one and the one of the attention section) see the same sequences. The loss is the mean cross-entropy per output token over the batch; a checkpoint reports the mean over the 100 batches that end at it. The test set has 60 inputs for each length 1 to 12, drawn from `seq2seq.test`, length by length; an input counts as exact when the greedy output, run for T + 1 steps on its own previous outputs, equals the reversed input followed by `<end>`. Losses are rounded to 3 decimals. They and the counts are reproduced digit for digit only by an implementation that adds in the same order; a trained network is a chaotic function of its arithmetic, so a reimplementation should expect the same picture and not the same counts.
 
-| model | run | seed of the initial parameters | loss, step 100 | loss, step 300 | loss, step 600 | loss, step 1000 | loss, step 1500 | exact, T 1 to 4 | exact, T 5 to 10 | exact, T 11 to 12 |
-|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| no attention | 0 | 0x08827ad5638f9ffe | 1.251 | 0.586 | 0.397 | 0.318 | 0.211 | 239/240 | 149/360 | 0/120 |
-| no attention | 1 | 0x1f1a233e1b9c9ac6 | 1.235 | 0.604 | 0.363 | 0.238 | 0.157 | 237/240 | 195/360 | 4/120 |
+| model | run | loss, step 100 | loss, step 300 | loss, step 600 | loss, step 1000 | loss, step 1500 | exact, T 1 to 4 | exact, T 5 to 10 | exact, T 11 to 12 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| no attention | 0 | 1.251 | 0.586 | 0.397 | 0.318 | 0.211 | 239/240 | 149/360 | 0/120 |
+| no attention | 1 | 1.235 | 0.604 | 0.363 | 0.238 | 0.157 | 237/240 | 195/360 | 4/120 |
 <!-- /worked -->
 
 The loss falls steadily, and it falls far below what a decoder that ignores the input could reach, so information about the input is getting through. The loss is also still falling at the last checkpoint in both runs, at 0.211 and 0.157 per token, whereas a model that had learned the task would have none left to remove. The test accuracy says what the remainder is.
@@ -176,7 +176,7 @@ Inputs of T = 8 digits (the 60 test inputs of that length, for each of the two r
 Read the second column against the first. The digit read last, at the bottom of the table, is written first and is right 0.983 of the time. The digits read early are lost, and the loss is not even: the digits read in positions 2 to 4 are the worst, between 0.558 and 0.675, and the very first digit is a little better than its neighbours at 0.692. A single input shows what such a loss looks like.
 
 <!-- worked: seq2seq.plain_outputs -->
-Run 0 of the model without attention on three inputs of the generator `seq2seq.example.shown` (seed 0x248289037ab68664; draws, `integer(4)` for each digit, of the lengths [4, 8, 10] in that order), greedy output on its own previous outputs.
+Run 0 of the model without attention on three inputs of the generator `seq2seq.example.shown` (draws, `integer(4)` for each digit, of the lengths [4, 8, 10] in that order), greedy output on its own previous outputs.
 
 | T | input | target | output |
 |---:|---|---|---|
@@ -218,7 +218,7 @@ This is the one-hidden-layer network of Volume III, with a hidden layer whose pr
 A small case shows every step. Three encoder states of two numbers, a decoder state of two numbers, an attention layer with $A = 2$:
 
 <!-- worked: seq2seq.attention_step -->
-Generator: the book's SplitMix64, seed 0xfe86740daeb38479 (`seed_of` of the name `seq2seq.step`). Draws, in this order, each `0.8 * normal()`: Wa (4 values, row by row), Ua (4), v (2), the decoder state s (2), then the three encoder states h_1, h_2, h_3 (2 values each). Two numbers per state (H = 2) and two in the attention layer (A = 2). Tolerance: values are rounded to 4 decimals.
+Generator: the book's SplitMix64, `seq2seq.step`. Draws, in this order, each `0.8 * normal()`: Wa (4 values, row by row), Ua (4), v (2), the decoder state s (2), then the three encoder states h_1, h_2, h_3 (2 values each). Two numbers per state (H = 2) and two in the attention layer (A = 2). Tolerance: values are rounded to 4 decimals.
 
 Wa has rows (-0.3719, 1.1586), (0.2726, -0.2707), Ua has rows (1.1743, 0.0222), (-0.2207, -0.3846), v = (-0.6869, -0.9464), s = (-1.3284, 1.2105), so Wa s = (1.8965, -0.6899).
 
@@ -286,12 +286,12 @@ and $d\mathbf{a}_{ji}$ goes to two places, because the pre-activation is a sum: 
 That claim, and the pages of formulas behind it, must be checked against something other than themselves. The check of Volume III does it: perturb each parameter by a small $\pm\epsilon$, recompute the loss, and compare $(L(\theta + \epsilon) - L(\theta - \epsilon))/2\epsilon$ with the gradient the backward pass gives.
 
 <!-- worked: seq2seq.gradient_check -->
-Input [2, 0, 3] (T = 3, so the output has 4 tokens), H = 3, embedding width 2, A = 3. Parameters drawn by the initialisation recipe of the text from the generator named `seq2seq.check.plain` for the model without attention and `seq2seq.check.attention` for the one with it (seeds below), after which the three biases get `0.1 * normal()` entries drawn from the same generator, in the order encoder bias, decoder bias, output bias. Central differences with step 1e-05 on every entry of every parameter, against the gradient of the backward pass. Tolerance: the table prints the largest absolute difference and the largest relative difference |a - n| / max(|a|, |n|) over the entries whose gradient is above 1e-4.
+Input [2, 0, 3] (T = 3, so the output has 4 tokens), H = 3, embedding width 2, A = 3. Parameters drawn by the initialisation recipe of the text from the generator named `seq2seq.check.plain` for the model without attention and `seq2seq.check.attention` for the one with it, after which the three biases get `0.1 * normal()` entries drawn from the same generator, in the order encoder bias, decoder bias, output bias. Central differences with step 1e-05 on every entry of every parameter, against the gradient of the backward pass. Tolerance: the table prints the largest absolute difference and the largest relative difference |a - n| / max(|a|, |n|) over the entries whose gradient is above 1e-4.
 
-| model | seed | parameters checked | largest absolute difference | largest relative difference |
-|---|---|---:|---:|---:|
-| no attention (`seq2seq.check.plain`) | 0x0b22f029db37a8ed | 144 | 3.4e-11 | 8.8e-08 |
-| attention (`seq2seq.check.attention`) | 0x218c018931ab2bd7 | 192 | 3.0e-11 | 8.3e-08 |
+| model | parameters checked | largest absolute difference | largest relative difference |
+|---|---:|---:|---:|
+| no attention (`seq2seq.check.plain`) | 144 | 3.4e-11 | 8.8e-08 |
+| attention (`seq2seq.check.attention`) | 192 | 3.0e-11 | 8.3e-08 |
 <!-- /worked -->
 
 Both backward passes, with and without attention, agree with central differences to the precision the check can offer (relative differences near $10^{-7}$), on every parameter of the tiny model, the embedding table, both GRUs, the output layer and the attention parameters. The two models differ in size.
@@ -314,10 +314,10 @@ The attention model is trained by the same protocol, on the same sequences, run 
 <!-- worked: seq2seq.training_attention -->
 The model of the text with attention (A = 16), parameters drawn by the same initialisation recipe from the generator `seq2seq.attention.<run>.init` with run 0 or 1, trained by the protocol of the previous training block (same optimizer, batches, clipping, test set and counting; the sequences of run r are those of run r there). Same tolerance.
 
-| model | run | seed of the initial parameters | loss, step 100 | loss, step 300 | loss, step 600 | loss, step 1000 | loss, step 1500 | exact, T 1 to 4 | exact, T 5 to 10 | exact, T 11 to 12 |
-|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| attention | 0 | 0xc4b209d4984dd115 | 1.110 | 0.227 | 0.015 | 0.004 | 0.004 | 240/240 | 360/360 | 80/120 |
-| attention | 1 | 0x22e0c2ee06e76407 | 1.070 | 0.353 | 0.099 | 0.016 | 0.009 | 240/240 | 360/360 | 90/120 |
+| model | run | loss, step 100 | loss, step 300 | loss, step 600 | loss, step 1000 | loss, step 1500 | exact, T 1 to 4 | exact, T 5 to 10 | exact, T 11 to 12 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| attention | 0 | 1.110 | 0.227 | 0.015 | 0.004 | 0.004 | 240/240 | 360/360 | 80/120 |
+| attention | 1 | 1.070 | 0.353 | 0.099 | 0.016 | 0.009 | 240/240 | 360/360 | 90/120 |
 <!-- /worked -->
 
 Its loss falls below the other model's by step 600 (0.015 and 0.099, against 0.397 and 0.363) and ends at 0.004 and 0.009, close to zero. Both runs are right on every one of the 600 test inputs of 1 to 10 digits (240 + 360 each). The comparison at every length:
@@ -352,7 +352,7 @@ The curve of the attention model does bend beyond the training lengths: 0.933 at
 The weights $\alpha_{ji}$ of one output sequence form a matrix of $T + 1$ rows and $T$ columns, the **alignment**: the row of step $j$ is where the decoder looked while writing token $j$. For the attention model of run 0 on one input of six digits:
 
 <!-- worked: seq2seq.alignment -->
-The attention model of run 0 on the input `3 2 0 2 3 3` (T = 6, drawn by `integer(4)` from the generator `seq2seq.example.align`, seed 0x3dacce6ae3bc8d98). Row j holds the weights a_ji of output step j over the encoder positions, the token written at that step is in the second column; each row adds to 1. Tolerance: 2 decimals of a trained network (see the training block on what a reimplementation reproduces).
+The attention model of run 0 on the input `3 2 0 2 3 3` (T = 6, drawn by `integer(4)` from the generator `seq2seq.example.align`). Row j holds the weights a_ji of output step j over the encoder positions, the token written at that step is in the second column; each row adds to 1. Tolerance: 2 decimals of a trained network (see the training block on what a reimplementation reproduces).
 
 | output step j | token written | x1=3 | x2=2 | x3=0 | x4=2 | x5=3 | x6=3 | largest weight on |
 |---:|---|---:|---:|---:|---:|---:|---:|---|

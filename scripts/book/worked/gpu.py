@@ -184,7 +184,7 @@ def divergence():
             f"B ({DIV_COST_B}). A subgroup issues the test once, path A if any lane takes it, path B if any lane takes it. "
             "Issue slots = issued instructions x 32 lanes; useful slots = the instructions each lane needs itself; "
             "utilization = useful / slots. "
-            f"Generator: the book's SplitMix64, seed {bookrng.seed_of(name):#018x} (the seed of the name `{name}`); "
+            f"Generator: the book's SplitMix64, `{name}`; "
             f"u_0 .. u_{DIV_N - 1} are {DIV_N} calls of `uniform` in index order, the same draws for the two random rows.\n\n"
             + _table(["rule", "invocations on A", "subgroups with both paths", "instructions issued",
                       "useful lane-instructions", "issue slots", "utilization (%)"], rows)

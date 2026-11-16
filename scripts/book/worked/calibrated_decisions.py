@@ -56,8 +56,7 @@ def _fmt(x, d=4):
 
 
 def _seed_line():
-    seed = bookrng.seed_of(DATA_NAME)
-    return f"Generator: the book's SplitMix64, seed {seed:#018x} ({seed})." + HELD_GAUSSIAN
+    return f"Generator: the book's SplitMix64, `{DATA_NAME}`." + HELD_GAUSSIAN
 
 
 # ------------------------------------------------------------------ the data

@@ -70,8 +70,8 @@ def _table(headers, rows, align=None):
     return "\n".join(out)
 
 
-def _seed(name):
-    return f"`{name}` (seed 0x{bookrng.seed_of(name):016x})"
+def _stream(name):
+    return f"`{name}`"
 
 
 def _f(x, d=4):
@@ -335,7 +335,7 @@ def gradient_check():
             if diff > 1e-6 + 1e-6 * max(abs(grad[i]), abs(num)):
                 fails += 1
         rows.append((name, len(theta), fails, "below 1e-6" if worst < 1e-6 else f"{worst:.1e}"))
-    return (f"Both networks start from their {_seed(GRADCHECK)} initialisation (init_net, then 0.1 normal() added to every entry in "
+    return (f"Both networks start from their {_stream(GRADCHECK)} initialisation (init_net, then 0.1 normal() added to every entry in "
             f"order, generator first), a batch of {n} reals and {n} noise vectors drawn real, real, ..., then noise, noise, ..., and "
             f"central differences of step {FD_STEP:g}. An entry fails when |analytic - numerical| exceeds 1e-6 + 1e-6 max(|analytic|, "
             f"|numerical|).\n\n"
@@ -434,8 +434,8 @@ def training_run():
             cells.append(_shared([r["log"][t][1] for r in runs], lambda x: f"{x:.3f}"))
             rows.append(cells)
         out.append(f"{title}:\n\n" + _table(["discriminator steps", "near -3", "near 0", "near +3", "elsewhere", "spread of samples"], rows))
-    head = (f"Stream {_seed(RUN_NAMES[0])}, initialisation and every draw in the order of the chapter. The generator is read out on the "
-            f"1000 evaluation noise vectors ({_seed(EVAL_NAME)}, {DZ} normal() each, drawn in order and used for every read-out): the "
+    head = (f"Stream {_stream(RUN_NAMES[0])}, initialisation and every draw in the order of the chapter. The generator is read out on the "
+            f"1000 evaluation noise vectors ({_stream(EVAL_NAME)}, {DZ} normal() each, drawn in order and used for every read-out): the "
             f"columns count the samples within {NEAR:g} of each centre, 'elsewhere' is the rest, and the spread is the standard deviation "
             f"of all 1000 samples (the data's is {DATA_STD:.3f}). Digits are those shared by the run and four copies with the first "
             f"generator weight changed by +1e-12, -1e-12, +3e-12 and -3e-12.")
@@ -461,7 +461,7 @@ def spread_data():
 def collapse_counts():
     rows = []
     for name in RUN_NAMES:
-        cells = [f"`{name}` (0x{bookrng.seed_of(name):016x})"]
+        cells = [f"`{name}`"]
         for sched in SCHEDULES:
             runs = all_runs()[(name, sched)]
             late = [t for t in sorted(runs[0]["log"]) if t > SETTLED_AFTER]
@@ -529,7 +529,7 @@ def frozen_judge():
                      _shared([r[t][2] for r in res], lambda x: f"{x:.3f}"), _shared([r[t][3] for r in res], _int)))
     return (f"The discriminator and generator of the run `{RUN_NAMES[0]}` after {STEPS} steps of one generator step per discriminator step "
             f"(first table of the previous example). The discriminator is now frozen and only the generator trains: Adam with the same "
-            f"settings and a fresh state, 32 noise vectors per step from {_seed(FROZEN)} ({DZ} normal() each, in order), the "
+            f"settings and a fresh state, 32 noise vectors per step from {_stream(FROZEN)} ({DZ} normal() each, in order), the "
             f"non-saturating loss. Read out on the 1000 evaluation noise vectors: the mean discriminator logit of the samples, their "
             f"mean and spread, and how many lie within {NEAR:g} of a centre. Shared digits with the four nudged copies.\n\n"
             + _table(["generator-only steps", "mean logit of the samples", "mean of the samples", "spread of the samples", "samples near a centre"], rows))
@@ -594,16 +594,16 @@ def dark_start():
         d = dark_data(kind)
         rows.append((kind, _f(d[0][0], 4), _f(d[0][1], 2), _f(d[25][1], 2), _f(d[100][1], 2), _f(d[100][2], 2)))
     start = dark_data("saturating")[0]
-    return (f"A generator and a discriminator from the stream {_seed(DARK_NAME)} (init_net for each, generator first), with {DARK_SHIFT:g} "
+    return (f"A generator and a discriminator from the stream {_stream(DARK_NAME)} (init_net for each, generator first), with {DARK_SHIFT:g} "
             f"added to the generator's output bias so that its samples start near {DARK_SHIFT:g}. The discriminator trains alone "
             f"for {DARK_D_STEPS} Adam steps (rate {LR:g}, betas ({ADAM_B1}, 0.999), epsilon 1e-8, no weight decay, as in the training runs of this chapter) against that generator "
             f"(each step: 32 items, for each item a real draw `real_sample` then a noise draw of {DZ} `normal()` values, all from the same "
             f"stream, which continues after the two initialisations; the discriminator's gradient is the mean over the 32 items of the loss "
             f"-log D(real) - log(1 - D(fake)), and the generator is not updated) and is then frozen; its mean logit on the generator's "
             f"samples at the start, over the 256 noise vectors of the read-out below, is {start[2]:.2f}. The generator then takes {DARK_STEPS} steps of plain "
-            f"gradient descent, rate {DARK_RATE:g}, on each loss in turn, from the same start and the same noise (the stream {_seed(DARK_GEN)}, "
+            f"gradient descent, rate {DARK_RATE:g}, on each loss in turn, from the same start and the same noise (the stream {_stream(DARK_GEN)}, "
             f"restarted for each loss: {BATCH} vectors of {DZ} `normal()` values per step, the gradient the mean over them), read out (the 'mean sample' and 'mean logit' columns) on "
-            f"256 noise vectors drawn in order from {_seed(DARK_EVAL)}; the norm is that of the generator's full gradient at the first step.\n\n"
+            f"256 noise vectors drawn in order from {_stream(DARK_EVAL)}; the norm is that of the generator's full gradient at the first step.\n\n"
             + _table(["generator loss", "norm of its gradient at step 1", "mean sample at start", "after 25 steps", "after 100 steps",
                       "mean logit after 100 steps"], rows))
 

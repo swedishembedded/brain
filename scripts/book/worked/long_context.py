@@ -20,7 +20,7 @@ picture and the table beside it cannot disagree.
 * a single-head needle: the attention weight on one matching key among n random ones.
 
 The rotation rates and the YaRN table are those of Volume V, Chapter 8 (`positions.omegas`, `positions.yarn_table`, imported).
-Every random quantity comes from the book's SplitMix64 (`bookrng.generator(name)`); each block prints the seed. Sums are plain
+Every random quantity comes from the book's SplitMix64 (`bookrng.generator(name)`); each block names its generator. Sums are plain
 left-to-right additions (never Python's `sum`, which may compensate). Library functions are the C library's `exp`, `log`, `pow`,
 `sin` and `cos`.
 
@@ -60,10 +60,6 @@ def _table(headers, rows, align=None):
     out = ["| " + " | ".join(headers) + " |", "|" + "|".join(sep) + "|"]
     out += ["| " + " | ".join(str(c) for c in r) + " |" for r in rows]
     return "\n".join(out)
-
-
-def _seed(name):
-    return f"{bookrng.seed_of(name):#018x}"
 
 
 def _gib(b):
@@ -148,7 +144,7 @@ def entropy_data():
 def entropy_growth():
     rows = [(_int(n), _fx(h, 4), _fx(ln, 4), _fx(ap, 4), _fx(h - ap, 4)) for n, h, ln, ap in entropy_data()]
     return (f"One query, n keys, each score an independent draw of {SIGMA} x `normal()` (standard deviation {SIGMA}, variance "
-            f"{SIGMA ** 2}) from the generator seeded {_seed(NAME_ENT)} (`seed_of` of the name `{NAME_ENT}`); {max(N_ENT):,} values "
+            f"{SIGMA ** 2}) from the generator `{NAME_ENT}`; {max(N_ENT):,} values "
             "are drawn once in order and the first n of them are the scores of the row with n keys. H is the entropy of "
             "softmax(scores) in nats (natural logarithm, the maximum subtracted first, sums left to right); the last two columns "
             "are the large-n approximation ln n - variance / 2 derived in the text and the difference.\n\n"
@@ -511,7 +507,7 @@ def kv_error():
         rows.append((tier, _g(math.sqrt(rowerr / rowtot), 3), _g(math.sqrt(pred / rowtot), 3) if tier == "int8" else "",
                      _g(math.sqrt(num / den), 3)))
     return (f"{KV_HEADS} key-value heads of width {KV_DH}, {KV_N} cached tokens, {KV_Q} queries per head, all random from the "
-            f"generator seeded {_seed(NAME_KV)} (`seed_of` of the name `{NAME_KV}`). Draw order: the key rows of head 0 token by "
+            f"generator `{NAME_KV}`. Draw order: the key rows of head 0 token by "
             "token, then the other heads, then the value rows in the same order, then the query vectors (head, query, channel). "
             "Each key or value row is exp(`normal()`) times a vector of 64 `normal()` draws (the gain is drawn first), so row "
             "magnitudes differ by a factor of several; queries are 64 `normal()` draws. The attention output of a query is "
@@ -562,8 +558,8 @@ def chunk_equality():
             got += kc.extend(p, cfg, cache, ids[i:i + chunk], kc.Meter(), all_logits=True)
         worst = max(kc._max_abs(a, b) for a, b in zip(ref, got))
         rows.append((chunk, -(-len(ids) // chunk), "below 1e-12" if worst < 1e-12 else f"{worst:.3e}"))
-    return (f"The model of Volume V, Chapter 12 (`kv_cache.model`, seed {_seed(kc.NAME_MODEL)}) and a prompt of 12 token ids, each "
-            f"`integer(12)` from the generator seeded {_seed(NAME_CHUNK)} (`seed_of` of the name `{NAME_CHUNK}`): {ids}. The prompt is "
+    return (f"The model of Volume V, Chapter 12 (`kv_cache.model`) and a prompt of 12 token ids, each "
+            f"`integer(12)` from the generator `{NAME_CHUNK}`: {ids}. The prompt is "
             "run in one call and in chunks of c tokens on one cache; the logits of every position are compared. The difference is measured in double "
             "precision, and every row reads the same keys and values and adds them in the same order whatever the chunking, so the test is insensitive "
             "to the weights (any weights give the same result): it checks the bookkeeping of the cache (the positions written, the keys each row sees and "
@@ -650,7 +646,7 @@ def needle_dilution():
         s = n / L_TRAIN
         rows.append((_int(n), _g(s, 3), _fx(attention_factor(s) ** 2, 4), _fx(w1, 4), _fx(w2, 4)))
     return (f"One query. n noise keys each have a score of {SIGMA} x `normal()` (the first n of {max(N_NEEDLE):,} draws from the "
-            f"generator seeded {_seed(NAME_NEEDLE)}, `seed_of` of the name `{NAME_NEEDLE}`) and one needle has the score "
+            f"generator `{NAME_NEEDLE}`) and one needle has the score "
             f"{NEEDLE_SCORE:g}, which is 5 standard deviations above their mean of 0. The table is the softmax weight of the needle. 'Unscaled': the "
             "scores as they are. 'YaRN factor': every score multiplied by lambda = (0.1 ln s + 1)^2 with s = n / 4096.\n\n"
             + _table(["n noise keys", "s", "lambda", "needle weight, unscaled", "needle weight, YaRN factor"], rows))

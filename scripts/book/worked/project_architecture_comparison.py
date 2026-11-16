@@ -21,7 +21,7 @@ What this module writes is what makes them one engine:
 * a synthetic task that needs local and long-range information, a registered set of predictions and the paired comparison of the
   blocks and of a hybrid, each run repeated from slightly different starting points so that only the digits that survive are printed.
 
-Every random quantity comes from the book's SplitMix64 (`bookrng.generator(name)`); each block prints its seeds. A dot product is
+Every random quantity comes from the book's SplitMix64 (`bookrng.generator(name)`); each block names its generators. A dot product is
 `math.sumprod`, which accumulates in extended precision, so that its last bit does not depend on the order of the additions; every
 printed digit stays clear of that last bit.
 
@@ -69,10 +69,6 @@ def _table(headers, rows, align=None):
     out = ["| " + " | ".join(headers) + " |", "|" + "|".join(sep) + "|"]
     out += ["| " + " | ".join(str(c) for c in r) + " |" for r in rows]
     return "\n".join(out)
-
-
-def _seed(name):
-    return f"{bookrng.seed_of(name):#018x}"
 
 
 def _below(x, limit):
@@ -766,7 +762,7 @@ def blocks():
         rows.append((f"`{arm}`", BLOCK_LABELS[arm], " + ".join(_int(x) for x in layer), _int(n), f"{100 * (n - base) / base:+.2f}%"))
     return ("The five stacks of the project, two layers each, at width D = 16 and vocabulary 12 (the token table is tied to the "
             "head). Weights come from `bookrng.generator(\"" + NAME_BLOCKS + ".<arm>\")` in the order of the initialization routine "
-            "(seeds " + ", ".join(f"`{a}` {_seed(f'{NAME_BLOCKS}.{a}')}" for a in ARMS) + "). Parameters are counted by walking the "
+            "(the generators " + ", ".join(f"`{NAME_BLOCKS}.{a}`" for a in ARMS) + "). Parameters are counted by walking the "
             "tensors that were drawn.\n\n"
             + _table(["arm", "layers", "parameters in each layer", "parameters of the model", "against dense"], rows, "llrrr"))
 
@@ -817,7 +813,7 @@ def gradient_checks():
             big = max(big, abs(ana))
         rows.append((f"`{arm}`", f"{ce + aux:.4f}", len(by_path), len(pts), f"{big:.3f}", _below(worst, CRITERION)))
     return (f"Central differences with step {CHECK_STEP:g} against the hand-written backward pass, in double precision, for each stack on the "
-            f"reference sequence (ids {' '.join(str(i) for i in ref_ids())}, drawn from `{NAME_REF}`, seed {_seed(NAME_REF)}). "
+            f"reference sequence (ids {' '.join(str(i) for i in ref_ids())}, drawn from `{NAME_REF}`). "
             "The loss is the mean cross-entropy (nats) of the six scored predictions of milestone 4 plus the balancing loss. Two coordinates of every tensor are "
             "checked, drawn from the generator `" + NAME + ".gradcheck.<arm>`: for each tensor in storage order, a row `integer(rows)` "
             "then a column `integer(columns)`, twice. Storage order is the order of the draws of milestone 1 with the token table first and "
@@ -1321,7 +1317,7 @@ def task_statement():
     floor1, blind1 = swa_floor(1, CFG["WINDOW"])
     return ("The task needs two kinds of information. A sequence has 13 tokens: a header token $6 + h$ at position 0, with $h$ drawn from "
             "$\\{0, \\dots, 5\\}$, then six pairs $(x_i, y_i)$ in which $x_i$ is a symbol drawn from $\\{0, \\dots, 5\\}$ and $y_i = (x_i + h) \\bmod 6$. "
-            f"Draws from `bookrng.generator(\"{NAME}.data.<seed>\")` (the example below: `{NAME}.example`, seed {_seed(NAME + '.example')}), seven per sequence in this "
+            f"Draws from `bookrng.generator(\"{NAME}.data.<seed>\")` (the example below: `{NAME}.example`), seven per sequence in this "
             "order: `integer(6)` for $h$, then `integer(6)` for each of $x_1, \\dots, x_6$. The model reads the sequence and at the position of $x_i$ "
             "(positions 1, 3, 5, 7, 9, 11) predicts $y_i$; only these six predictions are trained and scored. The symbol $x_i$ is the previous token, "
             "the header is up to eleven positions back. A model that knows $x_i$ but not $h$ can do no better than $\\ln 6 = " + _fx(LN_SYMBOLS, 4) + "$ nats; "
@@ -1471,8 +1467,7 @@ def comparison():
         rows.append((f"`{arm}`", f"{selected_rate(arm):g}", _int(costs(ARMS[arm], CFG, 1)[0]), mu, sd, _interval(lo, hi), tr_))
     return (f"Held-out loss (mean cross-entropy of the six scored predictions, nats) after {RECIPE['steps']} steps, on the {len(SEEDS)} reported seeds "
             f"({', '.join(f'`{s}`' for s in SEEDS)}; data `{NAME}.data.<seed>`, held-out `{NAME}.eval.<seed>`, weights `{NAME}.init.<arm>.<seed>`, "
-            f"the seed of a stream is a function of its full name by the rule of Volume I, Chapter 17: `{NAME}.data.r1` has the seed {_seed(f'{NAME}.data.r1')}, "
-            f"`{NAME}.data.r2` {_seed(f'{NAME}.data.r2')}, and every other stream named here has the seed of its own name). All arms see the same sequences in the same order "
+            f"each stream is the generator of its full name, by the rule of Volume I, Chapter 17). All arms see the same sequences in the same order "
             "for a seed. Mean over seeds, sample standard deviation (divisor $n - 1$), the 95 percent interval of the mean (Student $t$ with "
             f"{len(SEEDS) - 1} degrees of freedom, multiplier {_fx(sl.ex._t95(len(SEEDS) - 1), 4)}), and the training loss: the batch cross-entropy of the last 10 steps (the balancing term excluded), averaged over the steps and the seeds. " + stable.RULE + "\n\n"
             + _table(["arm", "peak rate", "parameters", "mean", "sd", "95 percent interval of the mean", "training loss, last 10 steps"], rows))

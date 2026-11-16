@@ -68,10 +68,6 @@ def _i(n):
     return f"{n:,}"
 
 
-def _seed(name):
-    return f"0x{bookrng.seed_of(name):016x}"
-
-
 # ------------------------------------------------------------------------------------------------ the world
 
 FS_SYN = 12000          # rate of the synthesiser, Hz
@@ -623,10 +619,8 @@ def world():
             "The ids of the other two symbols are 0 for the blank and 1 for the space. The six words, in the order of the index "
             "`integer(6)` draws: " + ", ".join(f"`{w}`" for w in WORDS) + ".\n\n"
             + _table(["speaker", "g", "role", "letter `a` first / second frequency (Hz)"], spk_rows, "rrll")
-            + "\n\nThe first four training sentences, each from its own stream "
-            + f"`project_speech_pipeline.train.<n>` (`seed_of` of the name, as defined in Pseudocode Conventions: the first 8 bytes of the SHA-256 digest of its UTF-8 bytes, big-endian; the seeds of n = 0 to 3 are "
-            + ", ".join(f"0x{bookrng.seed_of(stream_name('train', n)):016x}" for n in range(4))
-            + "): the sentence, the speaker "
+            + "\n\nThe first four training sentences, each from its own generator "
+            + f"`project_speech_pipeline.train.<n>`: the sentence, the speaker "
             "(n mod 5 for the training sentences), the samples at 12 kHz, the samples after the resampler of milestone 2, the frames "
             "of milestone 2, the sum of the samples and the sum of their squares (6 decimals, tolerance 1e-6).\n\n"
             + _table(["n", "sentence", "speaker", "samples at 12 kHz", "samples at 8 kHz", "frames", "sum", "sum of squares"],
@@ -739,7 +733,7 @@ def recogniser():
     rows = [("W1", f"{HID} x {D_IN}", HID * D_IN, "N(0, 1 / 80)"), ("b1", f"{HID}", HID, "0"),
             ("W2", f"{K} x {HID}", K * HID, "N(0, 1 / 24)"), ("b2", f"{K}", K, "0"), ("all", "", N_PARAMS, "")]
     return (_table(["parameter", "shape", "values", "initial value"], rows, "lrrl")
-            + f"\n\nInitialised from `{INIT}` ({_seed(INIT)}): the {HID * D_IN} values of W1 in row-major order, each scale times one "
+            + f"\n\nInitialised from `{INIT}`: the {HID * D_IN} values of W1 in row-major order, each scale times one "
             f"normal(), then the {K * HID} of W2. The first three of W1 are {', '.join(_f(v, 6) for v in th[:3])}, the first three of W2 "
             f"are {', '.join(_f(v, 6) for v in th[HID * D_IN + HID:HID * D_IN + HID + 3])}. The softmax row of frame 0 of training sentence 0 at "
             f"this start is {', '.join(_f(v, 6) for v in row0)} (tolerance 1e-6).\n\n"
@@ -757,7 +751,7 @@ def training():
     rows = [(e, e * (N_TRAIN // BATCH), curve_cell(e, "clean"), curve_cell(e, "shifted")) for e in ep]
     return (f"{EPOCHS} epochs of {N_TRAIN // BATCH} steps at batch {BATCH}; one list `range({N_TRAIN})` is made once and "
             f"`shuffle`d in place at the start of every epoch (so epoch e's order is the shuffle of epoch e - 1's, not of the identity) "
-            f"with the one continuing stream `{ORDER}` ({_seed(ORDER)}), and four consecutive sentences are taken per step. AdamW (0.9, 0.999, 1e-8), rate {LR:g}, no "
+            f"with the one continuing stream `{ORDER}`, and four consecutive sentences are taken per step. AdamW (0.9, 0.999, 1e-8), rate {LR:g}, no "
             "decay, no clipping, the gradient the mean over the batch. The first weight W1[0][0] is the one the nudges move. The "
             "table is the mean over the epoch's sentences of the CTC loss each had when its batch was formed (so the weights moved "
             "during the epoch). 'Clean' uses the ids of the alphabet; 'shifted' is the planted mistake of milestone 7.\n\n"
@@ -793,7 +787,7 @@ def rvq_table():
             f"rounds on every {RVQ_EVERY}rd frame of the training sentences: the standardized frames of all {N_TRAIN} sentences are "
             f"concatenated in sentence order and the entries 0, {RVQ_EVERY}, {2 * RVQ_EVERY}, ... of that one list are taken, the "
             f"count never restarted per sentence ({n_fit} frames), starting centres from one `shuffle` of "
-            f"the rows per stage with `{RVQ_NAME}` ({_seed(RVQ_NAME)}). The test frames are quantized and summed back, stacked, and read "
+            f"the rows per stage with `{RVQ_NAME}`. The test frames are quantized and summed back, stacked, and read "
             "by the recogniser of milestone 4, unchanged. Bits are per frame; the squared error per frame is the sum over the 16 values "
             "of the squared difference, averaged over the test frames (q = 0 returns zeros).\n\n"
             + _table(["stages", "bits per frame", "bits per second", "squared error per frame", "word error", "character error"], rows,

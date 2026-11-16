@@ -55,7 +55,11 @@ E_ENERGY = 1.0 + (sum(m * m for m in MODES) / 3.0 + SD * SD)     # E (noise - x_
 SHIFT_DIMS, SHIFT_FACTORS, SHIFT_STEPS = (1, 4, 16, 64), (1, 2, 4, 8), 8
 KLEIN = dict(a1=8.73809524e-05, b1=1.89833333, a2=0.00016927, b2=0.45666666, knee=4300)
 
-_table, _seed, _f, _g = diffusion._table, diffusion._seed, diffusion._f, diffusion._g
+_table, _f, _g = diffusion._table, diffusion._f, diffusion._g
+
+
+def _stream(name):
+    return f"`{name}`"
 
 
 # ------------------------------------------------------------------ the exact field of the three clusters
@@ -278,7 +282,7 @@ def euler_exact():
         xs = [euler(e, uniform_grid(n), field) for e in eps]
         rows.append((n, _g(_distance(xs, ref), 3), *_counts(xs)))
     worst = max(abs(rk4(e, 200, field) - t) for e, t in zip(eps[:20], ref[:20]))
-    return (f"{SAMPLE_N} starting values x_1 = noise from the stream {_seed(SAMPLE)} (one normal() each, in order), carried from sigma = 1 to 0 "
+    return (f"{SAMPLE_N} starting values x_1 = noise from the stream {_stream(SAMPLE)} (one normal() each, in order), carried from sigma = 1 to 0 "
             f"by n Euler steps on the grid s_i = 1 - i/n with the exact velocity u at the left end of each step. 'Distance' is the mean of "
             f"|x_0 - T(noise)|, with T = F^-1(Phi(noise)) the exact transport map of one dimension (F the cumulative distribution of the data, "
             f"46 bisection steps on the bracket [-4.6, 4.6], keeping the lower half when F(mid) < Phi(noise), and the midpoint of the last bracket as the answer); the counts are the samples within {NEAR:g} of each centre and the rest.\n\n"
@@ -351,7 +355,7 @@ def straightness():
             worst = max(worst, abs(reflow_field((1.0 - s) * x0 + s * e, s) - (e - x0)))
     rows = [("independent (round 1)", cross_ind, _f(E_ENERGY, 4), _f(first, 4), _f(E_ENERGY - first, 4)),
             ("increasing map (round 2)", cross_mono, _f(second, 4), _f(second, 4), _f(0.0, 4))]
-    return (f"{PAIR_N} pairs (x_0, noise) from the stream {_seed(PAIRS)}: for each pair k = integer(3), then x_0 = m_k + 0.25 normal(), then "
+    return (f"{PAIR_N} pairs (x_0, noise) from the stream {_stream(PAIRS)}: for each pair k = integer(3), then x_0 = m_k + 0.25 normal(), then "
             f"noise = normal(). 'Round 2' keeps each noise and replaces its partner by T(noise). A pair of lines crosses inside the path when "
             f"(x_0i - x_0j)(noise_i - noise_j) < 0; there are {total} pairs of pairs. 'Chord energy' is E (noise - x_0)^2, for the independent "
             f"coupling 1 + E x_0^2 = {E_ENERGY:.4f} exactly, and for round 2 the midpoint rule with step 0.005 on [-8, 8]. 'Field energy' is the "
@@ -408,7 +412,7 @@ def targets_table():
               "on the noise weighs by SNR, the last chapter's loss on the velocity of the circular path by SNR + 1, and the loss on the velocity u "
               "of the straight path by 1/sigma^2 = (1 + sqrt(SNR))^2.\n\n"
             + _table(["sigma", "SNR", "noise loss", "circular velocity loss", "straight velocity loss"], wrows)
-            + f"\n\nCheck on 1000 draws from {_seed(TARGETS)} (per draw: sigma = uniform(), then x_0, noise and an error d = 0.1 normal(), each by "
+            + f"\n\nCheck on 1000 draws from {_stream(TARGETS)} (per draw: sigma = uniform(), then x_0, noise and an error d = 0.1 normal(), each by "
               f"normal(), in this order): the squared error of the clean value implied by a velocity off by d equals sigma^2 d^2 with a largest "
               f"relative difference " + ("below 1e-9." if rel < 1e-9 else f"{rel:.1e} (CHECK FAILED)."))
 
@@ -508,9 +512,9 @@ def training_table():
     for s in LOG_STEPS:
         rows.append((s, _shared([r["log"][s][0] for r in runs], _fixed(4)), _shared([r["log"][s][1] for r in runs], _fixed(4)),
                      _shared([r["log"][s][2] for r in runs], _fixed(4))))
-    return (f"One run: the network of `diffusion.init_net` from the stream {_seed(RUN)}, input (x_sigma, sigma), then batches of {BATCH} items drawn from "
+    return (f"One run: the network of `diffusion.init_net` from the stream {_stream(RUN)}, input (x_sigma, sigma), then batches of {BATCH} items drawn from "
             f"the same stream in the order of the chapter, Adam with beta1 0.9, beta2 0.999, epsilon 1e-8 and rate {LR:g} (1 - (i - 1) / {STEPS}) "
-            f"at step i. After each listed step the network and the exact field are scored on {EVAL_N} evaluation items ({_seed(EVAL)}, each "
+            f"at step i. After each listed step the network and the exact field are scored on {EVAL_N} evaluation items ({_stream(EVAL)}, each "
             f"drawn as in training): the mean of (network - target)^2, the mean of (exact - target)^2, and the mean of (network - exact)^2. "
             f"Digits are those shared by the run and four copies with the first weight changed by +1e-12, -1e-12, +3e-12 and -3e-12.\n\n"
             + _table(["step", "loss of the network", "loss of the exact field", "mean (network - exact)^2"], rows))
@@ -625,7 +629,7 @@ def shift_toy():
         x = [c + (sn - s) * ((c - (1.0 - s) * x0hat) / s - x0hat) for c in x]
     reduced = euler(sum(draws) / d, grid, toy_field(d))
     worst = max(abs(c - reduced) for c in x)
-    return (f"{SAMPLE_N} samples for each number d of copies, d = 1, 4, 16, 64 in this order, from the stream {_seed(SHIFT)}: for each sample d "
+    return (f"{SAMPLE_N} samples for each number d of copies, d = 1, 4, 16, 64 in this order, from the stream {_stream(SHIFT)}: for each sample d "
             f"normal() draws, summed in draw order and divided by sqrt(d), which gives z with a standard normal distribution; the mean noise "
             f"of the d copies is z / sqrt(d). The data x_0 is one value shared by all d coordinates, each coordinate has its own noise, so "
             f"the mean coordinate satisfies x = (1 - sigma) x_0 + sigma z / sqrt(d) and its exact velocity is (x - E[x_0 | x]) / sigma with the posterior mean taken for "

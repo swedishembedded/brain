@@ -20,7 +20,7 @@ model device of Volume IV (`roofline`). What makes the pipeline one pipeline is 
   the token budget of a GPT-2 small run, the fraction of a model device that a given utilisation means, and the memory of the
   weights, the optimizer and the activations.
 
-Every random quantity comes from the book's SplitMix64 (`bookrng.generator(name)`); each block prints its seeds. Sums of
+Every random quantity comes from the book's SplitMix64 (`bookrng.generator(name)`); each block names its generators. Sums of
 products are plain left-to-right additions, the order a C loop would use. Numbers of trained models are printed by the
 stable-digits rule of `stable.py`: each run is repeated from five starting points that differ by 1e-12 in one weight.
 
@@ -69,10 +69,6 @@ def _table(headers, rows, align=None):
     out = ["| " + " | ".join(headers) + " |", "|" + "|".join(sep) + "|"]
     out += ["| " + " | ".join(str(c) for c in r) + " |" for r in rows]
     return "\n".join(out)
-
-
-def _seed(name):
-    return f"{bookrng.seed_of(name):#018x}"
 
 
 # ------------------------------------------------------------------------------------------------ the corpus
@@ -214,8 +210,8 @@ def corpus_and_tokens():
     return (f"Slots (each drawn uniformly, in this order): determiner {DETS}, adjective {ADJS}, noun {NOUNS}, verb {VERBS}, "
             f"preposition {PREPS}, determiner {DETS}, place {PLACES}; the document is the seven words joined by single spaces "
             f"followed by a full stop. Draws: one `integer(n)` per slot, `n` the size of the slot's list, in the order above, "
-            f"for each document in turn. {N_TRAIN_DOCS} training documents from `{NAME_TRAIN}` (seed {_seed(NAME_TRAIN)}); "
-            f"{N_VAL_DOCS} validation documents from `{NAME_VAL}` (seed {_seed(NAME_VAL)}). A sentence has "
+            f"for each document in turn. {N_TRAIN_DOCS} training documents from `{NAME_TRAIN}`; "
+            f"{N_VAL_DOCS} validation documents from `{NAME_VAL}`. A sentence has "
             f"{math.prod(len(s) for s in SLOTS):,} possible spellings, so its entropy is ln of that, {_fx(SENTENCE_NATS)} nats, "
             f"and {leak} of the {N_VAL_DOCS} validation documents also occur among the training documents.\n\n"
             f"The tokenizer is the byte-pair encoder of Chapter 2 with its pre-tokenizer (every word but the first of a document carries "
@@ -859,7 +855,7 @@ def init_scales():
     for L in (2, 12, 24, 48):
         blocks.append((L, 2 * L, _fx(1 / math.sqrt(2 * L), 4), _fx(0.02 / math.sqrt(2 * L), 5), _fx(2 * L * (1 / math.sqrt(2 * L)) ** 2, 1)))
     return (f"The tiny model ({_int(parameter_count(init_gpt('training_gpt.count', cfg)))} parameters, V = {V}) with every matrix drawn "
-            f"as `std * normal()` from `training_gpt.init_scale` (seed {_seed('training_gpt.init_scale')}; the draw order is that of the "
+            f"as `std * normal()` from `training_gpt.init_scale` (the draw order is that of the "
             f"initialization section), no training. Loss: mean cross-entropy over the supervised positions of the first 8 training "
             f"rows. The final RMS norm gives a vector of root mean square 1 (squared length D), so a logit is a sum of D products "
             f"with an entry of W_emb and has standard deviation std sqrt(D); 'measured' is the root mean square of all logits.\n\n"
@@ -962,10 +958,10 @@ def gradient_check():
         b = res["block"][label]
         rows.append((label, _int(a[0]), tb._under_criterion(a[1]), tb._under_criterion(a[2]), tb._under_criterion(b[1]), tb._under_criterion(b[2])))
     return (f"A GPT with V = {cfg['V']}, T = {cfg['T']}, D = {cfg['D']}, {cfg['H']} heads, F = {cfg['FF']}, L = {cfg['L']}, every matrix "
-            f"`0.3 * normal()` from `{NAME_GC_INIT}` ({_seed(NAME_GC_INIT)}), in the draw order of the initialization section, with W_O and W_down of "
+            f"`0.3 * normal()` from `{NAME_GC_INIT}`, in the draw order of the initialization section, with W_O and W_down of "
             f"each block then multiplied by 1/sqrt(2 L) = {1 / math.sqrt(2 * cfg['L']):.4f} as in the main run (so their entries have standard "
             f"deviation {0.3 / math.sqrt(2 * cfg['L']):.2f}); all gains 1 and every RMS norm at epsilon 1e-6. Two rows "
-            f"from `{NAME_GC}` ({_seed(NAME_GC)}): x (6 draws of `integer(7)`) then y (6 draws), for row 0 then row 1; row 0 has documents "
+            f"from `{NAME_GC}`: x (6 draws of `integer(7)`) then y (6 draws), for row 0 then row 1; row 0 has documents "
             "0 0 0 1 1 1 and mask 1 everywhere; row 1 has documents 0 0 1 1 and two padding positions (document -1, mask 0). The "
             "loss is the mean cross-entropy over the 10 supervised positions. Central differences with step "
             f"{GC_STEP:g} on every entry of every parameter. A cell says 'below 1e-6' when the largest difference meets the criterion of 1e-6 "
@@ -986,9 +982,9 @@ def setup_text():
     o, cfg = TRAIN, config()
     d = data()
     return (f"Model: V = {cfg['V']}, T = {cfg['T']}, D = {cfg['D']}, L = {cfg['L']}, {cfg['H']} heads, SwiGLU width {cfg['FF']}, initialized "
-            f"from `{NAME_INIT}` ({_seed(NAME_INIT)}) with std {INIT_STD} (output matrices times 1/sqrt(2 L)). Batches: {o['B']} rows per step "
+            f"from `{NAME_INIT}` with std {INIT_STD} (output matrices times 1/sqrt(2 L)). Batches: {o['B']} rows per step "
             f"in shuffled epochs of the {len(d['train']['rows'])} training rows (one `shuffle` of 0 .. {len(d['train']['rows']) - 1} per epoch from "
-            f"`{NAME_ORDER}`, {_seed(NAME_ORDER)}; consecutive groups of {o['B']}; an incomplete last group is dropped), the same batches for every "
+            f"`{NAME_ORDER}`; consecutive groups of {o['B']}; an incomplete last group is dropped), the same batches for every "
             f"run below. {o['steps']} steps of AdamW (beta1 {o['b1']}, beta2 {o['b2']}, epsilon {o['eps']:g}, weight decay {o['wd']} on every "
             f"matrix except the gains), the learning rate warming up linearly over {o['warmup']} steps to {o['peak']} and following half a cosine "
             f"to {o['floor']} at step {o['steps']} (`schedules.cosine`, 0-based: step s uses the rate at index s - 1), the global gradient norm "
@@ -1089,10 +1085,9 @@ def copy_task():
             rows.append((COPY_LABEL[v] if s == COPY_EVAL[0] else "", s, copy_cell(v, lambda r, s=s: r["at"][s]["reported"], 4),
                          *per, copy_cell(v, lambda r, s=s: r["at"][s]["eval"][1], 3)))
     o = COPY_TRAIN
-    return (f"Lines `S=S` and a line feed, S three letters from `abcd` (draws: three `integer(4)` per line, in order, from `{NAME_COPY_TRAIN}`, "
-            f"{_seed(NAME_COPY_TRAIN)}); ids a .. d = 0 .. 3, `=` = 4, line feed = 5. A row is the 7 inputs `S = S` and the 7 targets that follow, so the "
+    return (f"Lines `S=S` and a line feed, S three letters from `abcd` (draws: three `integer(4)` per line, in order, from `{NAME_COPY_TRAIN}`); ids a .. d = 0 .. 3, `=` = 4, line feed = 5. A row is the 7 inputs `S = S` and the 7 targets that follow, so the "
             "targets are s2 s3 = a1 a2 a3 line-feed. Model: V = 6, T = 7, D = 16, one block, 2 heads, SwiGLU width 24, from "
-            f"`{NAME_COPY_INIT}` ({_seed(NAME_COPY_INIT)}), the same start for every row below, drawn as in the main run: standard deviation "
+            f"`{NAME_COPY_INIT}`, the same start for every row below, drawn as in the main run: standard deviation "
             f"{INIT_STD} for every matrix, W_O and W_down times 1/sqrt(2 L) = {1 / math.sqrt(2 * COPY_CFG['L']):.4f}, the table W_emb [6, 16] "
             "also the head, a position table of 7 rows, all gains 1, RMS norms at epsilon 1e-6. "
             f"{o['B']} fresh lines per step (a batch of 8 rows, loss and gradient averaged over the counted targets of the batch), {o['steps']} steps "
@@ -1102,7 +1097,7 @@ def copy_task():
             "differ only in which of the 7 targets count (1 = counted): 'every target' 1 1 1 1 1 1 1; 'the answer targets' (the four after the "
             "input `=`, a1 a2 a3 and the line feed) 0 0 0 1 1 1 1; 'off by one' (the mask of the answer tokens, which are tokens 4 to 7 of the "
             "line, laid on the input positions 4 to 6 instead of on the target positions 3 to 6) 0 0 0 0 1 1 1. 'Reported loss' is the training loss of the last 20 steps under the run's own mask. The "
-            f"other columns are measured on {N_COPY_TEST} held-out lines of `{NAME_COPY_TEST}` ({_seed(NAME_COPY_TEST)}), teacher forced, whatever "
+            f"other columns are measured on {N_COPY_TEST} held-out lines of `{NAME_COPY_TEST}`, teacher forced, whatever "
             "the mask: the cross-entropy at the four answer targets (a1, a2, a3, line feed) and the fraction of lines whose four answer targets "
             "all have the largest logit. Guessing a letter costs ln 4 = " + _fx(math.log(4), 3) + ". " + stable.RULE + "\n\n"
             + _table(["mask", "step", "reported loss", "a1", "a2", "a3", "line feed", "answers all right"], rows, "lrrrrrrr"))

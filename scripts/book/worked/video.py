@@ -383,7 +383,7 @@ def toy_table():
     out_rows.append(["total bytes", f"{tot[0] / 8:.1f}", f"{tot[1] / 8:.1f}", f"{tot[2] / 8:.1f}", "", ""])
     scene = toy_scene()
     return (f"The scene is a texture of {TOY_H} rows and {TOY_SCENE_W} columns of integers 0 .. 255, drawn by the book's SplitMix64 from the "
-            f"stream `{TOY_NAME}` (seed {bookrng.seed_of(TOY_NAME)}) with `integer(256)`, row by row (row 0 first, the columns of a row left to right); "
+            f"stream `{TOY_NAME}` with `integer(256)`, row by row (row 0 first, the columns of a row left to right); "
             f"its first row is {scene[0]}. Frame t shows columns t .. t + 15, so the picture pans one pixel to the left per frame; there are "
             f"{TOY_FRAMES} frames. Each frame is cut into 16 blocks of 4 by 4. The cost of a list of values is n times their plug-in entropy "
             f"-sum p log2 p (p the share of each distinct value in the list), in bits. 'Alone': values minus 128. 'Difference': minus the previous "

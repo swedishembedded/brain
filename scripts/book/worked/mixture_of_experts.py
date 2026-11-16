@@ -19,7 +19,7 @@ picture and the table beside it cannot disagree.
 * a tiny mixture of experts trained with three strengths of the balancing loss (the stable-digits rule of `stable.py`);
 * the bytes that expert parallelism exchanges, and the bytes a decode step reads as the batch grows.
 
-Every random quantity comes from the book's SplitMix64 (`bookrng.generator(name)`); each block prints the seed. Sums of products
+Every random quantity comes from the book's SplitMix64 (`bookrng.generator(name)`); each block names its generator. Sums of products
 are plain left-to-right additions, the order a C loop would use (never Python's `sum`, which may compensate).
 
 Swedish Embedded AB implements solutions for serving sparse language models within a memory budget. If your team needs expertise
@@ -52,8 +52,8 @@ def _table(headers, rows, align=None):
     return "\n".join(out)
 
 
-def _seed_line(name):
-    return f"Generator: the book's SplitMix64, seed {bookrng.seed_of(name):#018x} (`seed_of` of the name `{name}`)."
+def _generator_line(name):
+    return f"Generator: `{name}` (the book's SplitMix64)."
 
 
 def _vec(v, d=3):
@@ -424,7 +424,7 @@ def dispatch_trace():
     for e in range(DISP_E):
         sl = perm[offsets[e]:offsets[e] + counts[e]]
         group_rows.append([str(e), str(counts[e]), str(offsets[e]), ", ".join(str(q) for q in sl), ", ".join(str(q // k) for q in sl)])
-    return (_seed_line(NAME_DISPATCH) + f" A layer of E = {DISP_E} experts, k = {k}, model width D = {DISP_D}, expert hidden width F = "
+    return (_generator_line(NAME_DISPATCH) + f" A layer of E = {DISP_E} experts, k = {k}, model width D = {DISP_D}, expert hidden width F = "
             f"{DISP_F}, and a batch of n = {DISP_N} tokens. Draws, in order: the router $\\mathbf{{W}}_{{\\mathrm{{r}}}}$ ({DISP_D} x "
             f"{DISP_E}, row-major), then for e = 0 to {DISP_E - 1} the matrices $\\mathbf{{W}}_{{\\mathrm{{gate}}}}$ ({DISP_D} x "
             f"{DISP_F}), $\\mathbf{{W}}_{{\\mathrm{{up}}}}$ ({DISP_D} x {DISP_F}) and $\\mathbf{{W}}_{{\\mathrm{{down}}}}$ ({DISP_F} x "
@@ -475,7 +475,7 @@ def collapse():
         top2 = sum(sorted(c, reverse=True)[:2])
         starved = sum(1 for v in c if v < ideal / 4)
         rows.append([_fx(s, 1)] + [str(v) for v in c] + [_fx(max(c) / ideal, 2), f"{100 * top2 / (COL_N * COL_K):.1f}%", str(starved)])
-    return (_seed_line(NAME_COLLAPSE) + f" E = {COL_E}, k = {COL_K}, D = {COL_D}, n = {COL_N} tokens. Draws, in order: the router "
+    return (_generator_line(NAME_COLLAPSE) + f" E = {COL_E}, k = {COL_K}, D = {COL_D}, n = {COL_N} tokens. Draws, in order: the router "
             f"$\\mathbf{{W}}_{{\\mathrm{{r}}}}$ ({COL_D} x {COL_E}, row-major, `normal()`), the shared direction $\\mu$ ({COL_D} "
             f"values), then the noise $\\varepsilon_i$ of the {COL_N} tokens ({COL_N} x {COL_D}, row-major). Token $i$ is $x_i = s\\mu + "
             f"\\varepsilon_i$, and the same draws are used for every $s$. The selection is the top 2 of $x_i \\mathbf{{W}}_{{\\mathrm{{r}}}}$ "
@@ -613,7 +613,7 @@ def balance_gradient():
     worst = max(abs(a - b) for ra, rb in zip(ana, num) for a, b in zip(ra, rb))
     assert worst < 1e-6
     rows = [[str(e), _fx(f[e], 4), _fx(pbar[e], 4), _fx(logits[0][e], 4), _fx(ana[0][e], 6), _fx(num[0][e], 6)] for e in range(AUX_E)]
-    return (_seed_line(NAME_AUX) + f" n = {AUX_N} tokens, E = {AUX_E}, k = {AUX_K}; the logits are the {AUX_N} x {AUX_E} draws of "
+    return (_generator_line(NAME_AUX) + f" n = {AUX_N} tokens, E = {AUX_E}, k = {AUX_K}; the logits are the {AUX_N} x {AUX_E} draws of "
             f"`normal()`, row-major. $\\alpha_{{\\mathrm{{bal}}}} = {AUX_ALPHA}$ and the z-loss coefficient is {AUX_Z}. The shares $f_e$ "
             "are counted once and held fixed in the loss. Token 0's row of the gradient with respect to the logits, from the formula "
             "derived in the text and from central differences with step 1e-6.\n\n"
@@ -791,13 +791,12 @@ def balance_training():
             cells = [stable.text(base["loads"][e], [t["loads"][e] for t in twins], lambda x: f"{x:.0f}") for e in range(TR_E)]
             loss = stable.text(base["loss"], [t["loss"] for t in twins], lambda x: _fx(x, 4))
             rows.append([_fx(a, 2), str(s)] + cells + [loss])
-    return (_seed_line(NAME_TRAIN_DATA) + f" The data: 6 cluster centers, each 6 draws of `normal()` (scale {TR_SPREAD:g}); then 6 maps "
+    return (_generator_line(NAME_TRAIN_DATA) + f" The data: 6 cluster centers, each 6 draws of `normal()` (scale {TR_SPREAD:g}); then 6 maps "
             f"of 6 x 6 entries, each `normal() / sqrt(6)`, row by row; then for each of the {TR_N} tokens the cluster `integer(6)` and 6 "
             f"values of `{TR_NOISE:g} * normal()` added to the center. The initial weights are `{TR_INIT:g} * normal()`. "
             f"Slots per expert after {TR_STEPS} steps, on the {TR_N} training tokens, for three strengths of the balancing loss and "
-            f"three initializations (each initialization is the generator `mixture_of_experts.train_init.<seed>`, with seed "
-            + ", ".join(f"{s}: {bookrng.seed_of(train_init_name(s)):#018x}" for s in TR_SEEDS)
-            + f"). A balanced router has {ideal} slots per expert. The last column is the training loss, "
+            f"three initializations (each initialization is the generator `mixture_of_experts.train_init.<seed>` for the "
+            f"seeds {', '.join(str(s) for s in TR_SEEDS)}). A balanced router has {ideal} slots per expert. The last column is the training loss, "
             "half the squared error summed over the 6 outputs and averaged over tokens, as computed in the forward pass of step "
             f"{TR_STEPS} (with the weights before that step's update, not the final weights); the slots are counted with the final router. " + stable.RULE + "\n\n"
             + _table(["$\\alpha_{\\mathrm{bal}}$", "seed"] + [f"e{e}" for e in range(TR_E)] + ["loss"], rows))

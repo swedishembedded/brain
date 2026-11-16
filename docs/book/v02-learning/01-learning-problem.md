@@ -360,15 +360,15 @@ the datasets of the section after this one.
 <!-- worked: learning_problem.data_source -->
 The source (the learner never sees these lines): voltage v uniform on [0.4, 2.8], temperature y = -6 + 50 v - 8 v^2 + 1.2 z with z a standard Gaussian sample, evaluated left to right in double precision. A row is made by two draws in this order: v = 0.4 + 2.4 * rng.uniform(), then z = rng.normal(); v is then rounded to 2 decimals and y (computed from the unrounded v) to 1, with `round` of the pseudocode page (ties away from zero). `rng.normal()` is the Box-Muller sample defined on the pseudocode page: it draws two uniforms for every second call and holds the second result for the call after. Because a row makes one `rng.uniform()` call and one `rng.normal()` call, the held value is used by every second row, and it stays held across the row boundary and across the ten-row blocks of the last line below (it is never discarded or reset); only a new generator starts with nothing held.
 
-| dataset | generator seed | rows | how they are used |
+| dataset | generator | rows | how they are used |
 |---|---:|---:|---|
-| sensor table | 0xa95942cd28758354 | 10 | the ten known rows, sorted by (v, y) for display |
-| fresh rows | 0x0fe67df3a852f39e | 2000 | scoring only, never used to choose parameters |
-| five resampled datasets | 0x799f7c35126cfcea | 50 | one generator; dataset 1 takes the first 10 rows, dataset 2 the next 10, and so on |
+| sensor table | `learning_problem.sensor` | 10 | the ten known rows, sorted by (v, y) for display |
+| fresh rows | `learning_problem.fresh` | 2000 | scoring only, never used to choose parameters |
+| five resampled datasets | `learning_problem.resample` | 50 | one generator; dataset 1 takes the first 10 rows, dataset 2 the next 10, and so on |
 <!-- /worked -->
 
 <!-- worked: learning_problem.hypothesis_spaces -->
-Best member of each space found on the 10 known rows (the line and parabola by the grids of the text, the lookup table by storing the rows); then scored on 2000 fresh rows from the same source (seed 0x0fe67df3a852f39e). The lookup table answers with the label of the stored row whose voltage is closest to the question (distances compared in hundredths of a volt, so that equal distances are exact); a question exactly between two stored voltages goes to the lower one; stored rows with equal voltage (none occur here) would be tried in order of increasing label, so the lowest label would answer. Averages are shown to 2 decimals.
+Best member of each space found on the 10 known rows (the line and parabola by the grids of the text, the lookup table by storing the rows); then scored on 2000 fresh rows from the same source (the generator `learning_problem.fresh`). The lookup table answers with the label of the stored row whose voltage is closest to the question (distances compared in hundredths of a volt, so that equal distances are exact); a question exactly between two stored voltages goes to the lower one; stored rows with equal voltage (none occur here) would be tried in order of increasing label, so the lowest label would answer. Averages are shown to 2 decimals.
 
 | hypothesis space | numbers that define a member | average off by on the 10 known rows | average off by on 2000 fresh rows |
 |---|---:|---:|---:|
@@ -459,7 +459,7 @@ five different datasets of ten rows from the same source and pick the best line
 for each.
 
 <!-- worked: learning_problem.resampled_lines -->
-Generator: the book's SplitMix64, seed 0x799f7c35126cfcea (8763859967270517994). One generator; dataset k takes the next 10 rows (two draws per row, as in the source of the previous section), and the line is the best of the grid of this chapter (same grid, same tie rule). Fresh rows: the 2000 above.
+Generator: `learning_problem.resample` (the book's SplitMix64). One generator; dataset k takes the next 10 rows (two draws per row, as in the source of the previous section), and the line is the best of the grid of this chapter (same grid, same tie rule). Fresh rows: the 2000 above.
 
 | dataset | lowest voltage (V) | highest voltage (V) | best w | best b | off by on its own 10 rows | off by on 2000 fresh rows |
 |---|---:|---:|---:|---:|---:|---:|
@@ -531,7 +531,7 @@ two-feature vectors, with no labels, listed here with the recipe that produced
 them.
 
 <!-- worked: learning_problem.readings_table -->
-Generator: the book's SplitMix64, seed 0xe99380969c0c4dcd (16830937616765177293). Source: 6 rows around (1.0, 1.2), then 6 around (3.6, 3.0); each row is two draws in this order, x = cx + 0.45 * rng.normal() then y = cy + 0.45 * rng.normal(), rounded to 2 decimals (`round` of the pseudocode page); the 12 rows, in this generation order, are then permuted in place by `shuffle(rows, rng)` of the pseudocode page (Fisher-Yates, one `rng.integer(i + 1)` for i = 11 down to 1, continuing the same generator), and row n below is the element at position n - 1 after the shuffle. The learner is given only this table.
+Generator: `learning_problem.groups` (the book's SplitMix64). Source: 6 rows around (1.0, 1.2), then 6 around (3.6, 3.0); each row is two draws in this order, x = cx + 0.45 * rng.normal() then y = cy + 0.45 * rng.normal(), rounded to 2 decimals (`round` of the pseudocode page); the 12 rows, in this generation order, are then permuted in place by `shuffle(rows, rng)` of the pseudocode page (Fisher-Yates, one `rng.integer(i + 1)` for i = 11 down to 1, continuing the same generator), and row n below is the element at position n - 1 after the shuffle. The learner is given only this table.
 
 | n | feature 1 | feature 2 |
 |---|---:|---:|
@@ -666,7 +666,7 @@ buttons alternately for ten steps to find out, compares the average reward
 each one has paid, and then keeps pressing the one that looked better.
 
 <!-- worked: learning_problem.button_game -->
-Generator: the book's SplitMix64, seed 0x82293971ebaab7f0 (9379090860423690224). Button A pays with probability 0.3, button B with 0.7; one `rng.uniform()` per press, rewarded (1) when it is below the button's probability. Steps 1 to 10 alternate A, B, A, ...; the 10 later steps press the button with the larger average (A on a tie), one `rng.uniform()` each, continuing the same generator.
+Generator: `learning_problem.buttons` (the book's SplitMix64). Button A pays with probability 0.3, button B with 0.7; one `rng.uniform()` per press, rewarded (1) when it is below the button's probability. Steps 1 to 10 alternate A, B, A, ...; the 10 later steps press the button with the larger average (A on a tie), one `rng.uniform()` each, continuing the same generator.
 
 | step | button pressed | reward |
 |---|---:|---:|
@@ -695,7 +695,7 @@ reward per step the rule earns over a game of 200 steps, in which the
 exploration presses count too.
 
 <!-- worked: learning_problem.explore_study -->
-Generator: the book's SplitMix64, seed 0xdcc19debefc421a6 (15907168995514786214). One generator for the whole table. For each pair of probabilities (A, B), in the order listed, and for each exploration length L = 2, 10, 100 in that order, play 2000 games one after the other. A game presses A, B, A, ... for L presses, one `rng.uniform()` per press, rewarded when it is below the pressed button's probability, then compares the two reward totals (each button was pressed L / 2 times, so totals compare as averages do): it picks B only when B's total is strictly larger, and A otherwise (so a tie is a wrong pick, since B is the better button in both pairs). Only the exploration presses are drawn. The count column is reproduced exactly. The next column is the exact probability of a wrong pick (sums of binomial probabilities, no simulation), which the simulated rate matches up to sampling error. The last column is the expected reward per step of a game of 200 steps (the L exploration presses, then the rest on the picked button), from the exact probability. Four decimals.
+Generator: `learning_problem.explore` (the book's SplitMix64). One generator for the whole table. For each pair of probabilities (A, B), in the order listed, and for each exploration length L = 2, 10, 100 in that order, play 2000 games one after the other. A game presses A, B, A, ... for L presses, one `rng.uniform()` per press, rewarded when it is below the pressed button's probability, then compares the two reward totals (each button was pressed L / 2 times, so totals compare as averages do): it picks B only when B's total is strictly larger, and A otherwise (so a tie is a wrong pick, since B is the better button in both pairs). Only the exploration presses are drawn. The count column is reproduced exactly. The next column is the exact probability of a wrong pick (sums of binomial probabilities, no simulation), which the simulated rate matches up to sampling error. The last column is the expected reward per step of a game of 200 steps (the L exploration presses, then the rest on the picked button), from the exact probability. Four decimals.
 
 | probabilities of A and B | L | wrong picks in 2000 games | rate | exact probability | expected reward per step over 200 steps |
 |---|---:|---:|---:|---:|---:|

@@ -19,7 +19,7 @@ forms of the chapter (`flops_new`, `generation_flops`) are asserted equal to tho
 configurations are formulas of the shapes, evaluated, never measured. The reference the cached code is checked against is
 `training_gpt.forward`, which uses the mask of Chapter 7 and no cache.
 
-Every random quantity comes from the book's SplitMix64 (`bookrng.generator(name)`); each block prints the seed. Sums of
+Every random quantity comes from the book's SplitMix64 (`bookrng.generator(name)`); each block names its generator. Sums of
 products are plain left-to-right additions, the order a C loop would use, except where a block says it changes the order.
 
 Swedish Embedded AB implements solutions for serving language models without recomputing the past. If your team needs
@@ -55,10 +55,6 @@ def _table(headers, rows, align=None):
     out = ["| " + " | ".join(headers) + " |", "|" + "|".join(sep) + "|"]
     out += ["| " + " | ".join(str(c) for c in r) + " |" for r in rows]
     return "\n".join(out)
-
-
-def _seed(name):
-    return f"{bookrng.seed_of(name):#018x}"
 
 
 def _bound(x):
@@ -280,7 +276,7 @@ BYTES = 2    # bf16: bytes per stored weight or cache value
 def tiny_model():
     p, c = model(), CFG
     n = tg.parameter_count(p)
-    return (f"Generator: the book's SplitMix64, seed {_seed(NAME_MODEL)} (`seed_of` of the name `{NAME_MODEL}`). The model is the GPT of "
+    return (f"Generator: `{NAME_MODEL}` (the book's SplitMix64). The model is the GPT of "
             f"Chapter 10 with V = {c['V']} token ids, D = {c['D']}, {c['H']} heads of width {c['D'] // c['H']}, L = {c['L']} pre-norm blocks "
             f"with a SwiGLU network of hidden width F = {c['FF']}, at most T = {c['T']} positions, learned absolute positions, RMS norms, a head "
             f"tied to the embedding table and no biases. Every weight is {STD} x `normal()`, drawn row by row in the order E [V, D], P [T, D], then "
@@ -441,7 +437,7 @@ def summation_order():
         v = _sum32(xs, order)
         rows.append((order, f"{v:.9g}", f"{v - exact:.2e}"))
     vals = [_sum32(xs, o) for o in ("left to right", "right to left", "two lanes", "eight blocks of eight", "pairwise tree")]
-    return (f"Generator: the book's SplitMix64, seed {_seed(name)} (`seed_of` of the name `{name}`). Draws: 64 values `normal()`, each rounded to "
+    return (f"Generator: `{name}` (the book's SplitMix64). Draws: 64 values `normal()`, each rounded to "
             f"float32. They are added in float32, every addition rounded to float32, in five orders: left to right; right to left; the even-numbered "
             f"entries and the odd-numbered entries apart, then the two sums added; eight blocks of eight consecutive entries, each summed left to "
             f"right, the block sums added left to right; and a pairwise tree (entries 0 and 1, 2 and 3, ... then the pair sums in pairs). The exact "
@@ -554,7 +550,7 @@ def rope_cache():
     for label, sc in cases:
         wts = sa._softmax(sc)
         rows.append((label, " ".join(_fx(v, 3) for v in sc), _fx(max(abs(a - b) for a, b in zip(sc, ref)), 3), _argmax(wts)))
-    return (f"Generator: the book's SplitMix64, seed {_seed(NAME_ROPE)} (`seed_of` of the name `{NAME_ROPE}`). Draws: the 8 entries of the query q, then "
+    return (f"Generator: `{NAME_ROPE}` (the book's SplitMix64). Draws: the 8 entries of the query q, then "
             f"the 8 entries of each of 5 keys k_0 .. k_4, each `round(normal(), 1)`. One head of width 8, adjacent pairs, base 10000 (Chapter 8, "
             f"`positions.rotate`). The query is the token at position 5 and attends to the five cached keys; each score is the dot product of the "
             f"rotated query and the key as stored, without the scale 1/sqrt(8).\n\n"

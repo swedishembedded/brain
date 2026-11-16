@@ -110,7 +110,6 @@ def centre(R, t):
 
 def scene_setup():
     pts, poses, pix0, pix = scene()
-    seed_s, seed_n = bookrng.seed_of(SCENE_NAME), bookrng.seed_of(NOISE_NAME)
     rows = []
     for i, (R, t) in enumerate(poses):
         us = [p[0] for p in pix0[i]]
@@ -118,11 +117,11 @@ def scene_setup():
         rows.append([i, _vec(EYES[i], 3), "straight ahead (R = I)" if i == 0 else _vec(TARGET, 3),
                      f"{min(us):.1f} .. {max(us):.1f}", f"{min(vs):.1f} .. {max(vs):.1f}"])
     out = [f"Every camera has f = {F:g} pixels, principal point ({CX:g}, {CY:g}) and a {WIDTH} by {HEIGHT} image, with no lens "
-           f"distortion. The {NPOINTS} scene points come from `bookrng.generator(\"{SCENE_NAME}\")` (seed {seed_s}): for each "
+           f"distortion. The {NPOINTS} scene points come from `bookrng.generator(\"{SCENE_NAME}\")`: for each "
            "point in turn, three `uniform()` draws give X = 3.6 u - 1.8, Y = 2.4 u - 1.2 and Z = 4 + 3 u (metres, in the frame of "
            "camera 0, x right, y down, z forward). Camera 0 is the world frame; cameras 1 to 3 are placed with the `look_at` of "
            "the previous chapter at the eye positions below, looking at one target, with up = (0, -1, 0). The observed pixels "
-           f"are the projections plus noise from `bookrng.generator(\"{NOISE_NAME}\")` (seed {seed_n}), standard deviation "
+           f"are the projections plus noise from `bookrng.generator(\"{NOISE_NAME}\")`, standard deviation "
            f"{SIGMA:g} pixel per coordinate: for view 0 to 3 in turn and point 0 to {NPOINTS - 1} in turn, `normal()` for u "
            "and then `normal()` for v.", "",
            _table(["camera", "eye C (metres)", "looks at", "range of u over the 60 projections (without noise)", "range of v (without noise)"], rows, "lllll"), "",
@@ -206,7 +205,6 @@ def _pair_matches(v0, v1, ratio=None, mutual=True):
 
 def matching_table():
     kp = features()
-    seed = bookrng.seed_of(FEATURE_NAME)
     A, B = kp[0], kp[1]
     both = {k[3] for k in A if k[3] >= 0} & {k[3] for k in B if k[3] >= 0}
     rows = []
@@ -218,13 +216,13 @@ def matching_table():
         twin = sum(1 for i, j in good if A[i][3] < 2 * TWINS)
         rows.append([label, len(m), len(good), len(m) - len(good), f"{100.0 * len(good) / max(1, len(m)):.0f}%",
                      f"{100.0 * len(good) / len(both):.0f}%", twin])
-    return seed, len(both), rows
+    return len(both), rows
 
 
 def feature_matching():
-    seed, nboth, rows = matching_table()
-    out = [f"Toy features for the four views: {DESC}-number descriptors with unit length, from `bookrng.generator(\"{FEATURE_NAME}\")` "
-           f"(seed {seed}). Draw order: the base descriptors of points 0 to {NPOINTS - 1} ({DESC} `normal()` draws each, divided by "
+    nboth, rows = matching_table()
+    out = [f"Toy features for the four views: {DESC}-number descriptors with unit length, from `bookrng.generator(\"{FEATURE_NAME}\")`. "
+           f"Draw order: the base descriptors of points 0 to {NPOINTS - 1} ({DESC} `normal()` draws each, divided by "
            f"the length); then, for k = 0 .. {TWINS - 1}, point {TWINS} + k gets the descriptor of point k plus 0.04 `normal()` on "
            "every entry, renormalized (a repeated texture, so that ten pairs of points look alike); then for view 0, 1, 2, 3 in "
            f"turn, the {NPOINTS} keypoints of the scene points in point order (their pixels from the noisy observations; the "
@@ -578,11 +576,10 @@ def triangulation_data():
 def triangulation_error():
     trials, Z0 = 200, 5.0
     rows = [[f"{B:g}", "%.2f" % ang, "%.4f" % a, "%.4f" % b, "%.4f" % p] for B, ang, a, b, p in triangulation_data()]
-    seed = bookrng.seed_of(TRI_NAME)
     return "\n".join([f"A point at (0, 0, {Z0:g}) seen by a camera at the origin and one B metres to the right (same orientation, f = {F:g}); "
                       f"{trials} trials per baseline, each adding Gaussian noise of standard deviation {SIGMA:g} pixel to the four pixel "
-                      f"coordinates in the order u and v of camera 0, u and v of camera 1 (`bookrng.generator(\"{TRI_NAME}\")`, seed "
-                      f"{seed}, one stream through all five baselines in the order printed, B = 0.05 first). Root mean square error of "
+                      f"coordinates in the order u and v of camera 0, u and v of camera 1 (`bookrng.generator(\"{TRI_NAME}\")`, "
+                      f"one stream through all five baselines in the order printed, B = 0.05 first). Root mean square error of "
                       "the estimated depth, in metres, for the linear method, for the linear method followed by three Gauss-Newton "
                       "steps on the reprojection error, and the first-order prediction sqrt(2) sigma Z^2 / (f B). The angle is atan(B / Z) "
                       "(the ray of camera 0 is the z axis, the ray of the other camera leaves (B, 0, 0)):", "",
@@ -761,7 +758,6 @@ def two_view_ransac():
     tv = two_view()
     m, a, b, truth = tv["m"], tv["a"], tv["b"], tv["truth"]
     R0, t0 = true_pair(0, 1)
-    seed = bookrng.seed_of(RANSAC_NAME)
     n = len(m)
     allidx = list(range(n))
     Eall = eight_point(a, b)
@@ -778,7 +774,7 @@ def two_view_ransac():
     Elin = tv["cands"][tv["best"]]
     out = [f"The {n} matches of the nearest-neighbour-only rule between views 0 and 1 (the first row of the matching table) are the "
            f"input; {sum(truth)} are correct. The sample is 8 distinct matches, drawn with `bookrng.generator(\"{RANSAC_NAME}\")` "
-           f"(seed {seed}) as `integer({n})` draws, a repeated index discarded and drawn again; a hypothesis is the rank-two "
+           f"as `integer({n})` draws, a repeated index discarded and drawn again; a hypothesis is the rank-two "
            f"matrix of the eight-point algorithm on the sample. The inlier threshold is {THRESH_PX:g} pixel of Sampson distance, the "
            f"score is the sum over matches of min(d^2, {THRESH_PX:g}^2), and the iteration bound is the 99.9% formula of the "
            "chapter with the inlier fraction of the best hypothesis so far (cap 5000).", "",
@@ -848,7 +844,7 @@ def minimal_samples():
     rows = [["nearest essential matrix (singular values 1, 1, 0)", "%.1f" % med(ess), max(ess)],
             ["nearest rank-two matrix", "%.1f" % med(rk2), max(rk2)]]
     return "\n".join([f"The {len(good)} correct matches of the pair (0, 1) with their noisy pixels, and 100 samples of 8 of them from "
-                      f"`bookrng.generator(\"{MINIMAL_NAME}\")` (seed {bookrng.seed_of(MINIMAL_NAME)}; each sample is `integer({len(good)})` "
+                      f"`bookrng.generator(\"{MINIMAL_NAME}\")` (each sample is `integer({len(good)})` "
                       "draws, a repeated index discarded and drawn again, in the order of the good matches). Each sample gives two hypotheses by the eight-point algorithm (the essential matrix is cut to "
                       "singular values 1, 1, 0 after the similarities are undone, the rank-two matrix before); the table counts, for "
                       f"each kind, the matches within {THRESH_PX:g} pixel of Sampson distance of it (all {len(good)} are correct, so "
@@ -989,11 +985,10 @@ def absolute_pose():
         Rt, tt = true_pair(0, v)
         rows.append([v, n, ok, ransac_iterations(ok / n, 6, 10 ** 6), r["iters"], inl, inl_ok,
                      "%.2f" % rot_error(r["R"], Rt), "%.2f" % dir_error(r["t"], tt)])
-    seed = {v: bookrng.seed_of(PNP_NAME + "." + str(v)) for v in (2, 3)}
     out = ["For camera v = 2 and 3, each of the inlier matches of the pair (0, 1) gives a 3D point (triangulated with the refined "
            "pose, baseline 1) and a 2D keypoint: the nearest neighbour, among the keypoints of view v, of the match's view-0 "
            "descriptor. The RANSAC sample is 6 distinct correspondences from `integer(n)` draws on `bookrng.generator(\"" + PNP_NAME +
-           ".v\")` (v = 2: seed " + str(seed[2]) + ", v = 3: seed " + str(seed[3]) + "), a hypothesis is the DLT pose of the "
+           ".v\")` (v = 2 and v = 3), a hypothesis is the DLT pose of the "
            "sample, and the threshold is "
            f"{PNP_THRESH_PX:g} pixels of reprojection error with the same truncated score and adaptive bound as before (cap 2000). "
            "The DLT of a sample moves its 3D points so that their centroid is the origin and their mean distance from it is "
@@ -1431,7 +1426,7 @@ def bundle_adjustment():
     build = (f"The input is built as the pipeline leaves it. Number the 100 matches of the two-view block by the position of "
              f"their view-0 keypoint in the shuffled keypoint list of view 0. Camera 0 has the identity pose; camera 1 the refined "
              f"pose of the pair with its translation scaled to length 1; cameras 2 and 3 the poses of the RANSAC runs of the "
-             f"absolute-pose block (seeds `{PNP_NAME}.2` and `{PNP_NAME}.3` there), each refined by the Levenberg-Marquardt loop of this "
+             f"absolute-pose block (the generators `{PNP_NAME}.2` and `{PNP_NAME}.3` there), each refined by the Levenberg-Marquardt loop of this "
              f"section on its own six pose columns alone (the points of its inliers held fixed, Huber delta 2, lambda 1e-3, at most "
              f"30 iterations). Each of the {len(tv['inl'])} inlier matches of the pair is a track holding its two keypoints (views 0 "
              f"and 1); the keypoint that camera 2 or 3 matched to it is added when it was an inlier of that camera's RANSAC "
@@ -1934,7 +1929,6 @@ def sweep_curve(px, py, normal=(0.0, 0.0, -1.0), samples=64, rmin=2.5, rmax=8.0)
 
 def plane_sweep():
     imgs = stereo_images()
-    seed_t, seed_i = bookrng.seed_of(TEXTURE_NAME), bookrng.seed_of(IMAGE_NAME)
     e1, e2 = _plane_axes()
     rows = []
     for (px, py) in ((24, 18), (12, 10), (36, 26)):
@@ -1950,10 +1944,10 @@ def plane_sweep():
         f"Three {MVS_W} by {MVS_H} grey images from cameras with f = {MVS_F:g} pixels and principal point ({MVS_CX:g}, {MVS_CY:g}) at "
         f"the eyes {MVS_EYES[0]}, {MVS_EYES[1]} and {MVS_EYES[2]} (reference, right source, left source), all looking along +z. The "
         f"scene is the plane through {_vec(MVS_POINT, 1)} with unit normal {_vec(MVS_NORMAL, 6)}, tilted about the vertical axis. Its "
-        f"texture is a lattice of 37 by 25 uniform values 0.25 m apart (`bookrng.generator(\"{TEXTURE_NAME}\")`, seed {seed_t}, row "
+        f"texture is a lattice of 37 by 25 uniform values 0.25 m apart (`bookrng.generator(\"{TEXTURE_NAME}\")`, row "
         "by row, values in the order of increasing a within a row), interpolated bilinearly over the plane coordinates (a, b) along "
         "e1 = unit(n x (0, 1, 0)) and e2 = n x e1 measured from the plane point. Each pixel centre's ray meets the plane and reads the "
-        f"texture; Gaussian noise of standard deviation {IMAGE_NOISE:g} is added (`bookrng.generator(\"{IMAGE_NAME}\")`, seed {seed_i}; "
+        f"texture; Gaussian noise of standard deviation {IMAGE_NOISE:g} is added (`bookrng.generator(\"{IMAGE_NAME}\")`; "
         "views in order, rows top to bottom, left to right, one `normal()` each).", "",
         f"The cost of a hypothesis for the reference pixel is the mean over the two sources of 1 - NCC, the bilaterally weighted "
         f"normalized cross-correlation of the {len(range(-WIN_RADIUS, WIN_RADIUS + 1, WIN_STEP))} by "
@@ -2075,7 +2069,6 @@ def patchmatch(nudge=0.0, iters=PM_ITERS, name=PM_NAME):
 def patchmatch_table():
     rows, state = patchmatch()
     runs = [patchmatch(nu)[0] for nu in stable.NUDGES]
-    seed = bookrng.seed_of(PM_NAME)
     shown = []
     for k, row in enumerate(rows):
         ws = lambda c: [run[k][c] for run in runs]
@@ -2087,7 +2080,7 @@ def patchmatch_table():
     n_normals = round(2.0 * math.pi / math.radians(10.0) ** 2)
     n_ranges = round((1.0 / PM_RMIN - 1.0 / PM_RMAX) / (0.01 * 0.25))
     out = [f"PatchMatch on the reference image with the two sources, window and weights of the plane sweep. Generator "
-           f"`bookrng.generator(\"{PM_NAME}\")` (seed {seed}). Start: for every pixel in row-major order, three draws: the range "
+           f"`bookrng.generator(\"{PM_NAME}\")`. Start: for every pixel in row-major order, three draws: the range "
            f"(1 / (1/8 + (1/2.5 - 1/8) u)), then the two draws of a random direction (z = 2u - 1, phi = 2 pi u), the normal turned "
            f"to face the camera. Then {PM_ITERS} iterations of two half-iterations, colour (x + y) mod 2 = 0 and then 1, pixels of a "
            "colour in row-major order, each in turn: take the planes of its four neighbours (which have the other colour and are "

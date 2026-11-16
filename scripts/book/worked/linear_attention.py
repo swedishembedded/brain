@@ -19,7 +19,7 @@ and the table beside it cannot disagree.
 * the causal short convolution, whole-sequence and streaming, and the symmetric one of an encoder;
 * the discretisation of a state-space model, the scan form of a linear recurrence, and the cost of a hybrid stack against a pure one.
 
-Every random quantity comes from the book's SplitMix64 (`bookrng.generator(name)`); each block prints the seed. Sums of products are
+Every random quantity comes from the book's SplitMix64 (`bookrng.generator(name)`); each block names its generator. Sums of products are
 plain left-to-right additions, the order a C loop would use (never Python's `sum`, which may compensate).
 
 Swedish Embedded AB implements solutions for serving long-context language models within a memory budget. If your team needs
@@ -52,8 +52,8 @@ def _table(headers, rows, align=None):
     return "\n".join(out)
 
 
-def _seed_line(name):
-    return f"Generator: the book's SplitMix64, seed {bookrng.seed_of(name):#018x} (`seed_of` of the name `{name}`)."
+def _generator_line(name):
+    return f"Generator: the book's SplitMix64, `{name}`."
 
 
 def _vec(v, d=3):
@@ -235,7 +235,7 @@ def two_forms_random():
     rows = [["parallel: scores, then weighted sum of values", f"T(T+1)/2 (d_k + d_v)", _int(mp)],
             ["recurrent: state update, then read", "2 T d_k d_v", _int(mr)]]
     return (
-        _seed_line(name) + f" T = {T}, d_k = d_v = {dk}. Draws, in order, for t = 0 to {T - 1}: q_t ({dk} values of `normal()`), k_t ({dk}), v_t ({dv}); "
+        _generator_line(name) + f" T = {T}, d_k = d_v = {dk}. Draws, in order, for t = 0 to {T - 1}: q_t ({dk} values of `normal()`), k_t ({dk}), v_t ({dv}); "
         "no normalization of any vector. Multiply-adds are counted by the loops that perform them.\n\n"
         + _table(["form", "multiply-adds (formula)", "multiply-adds counted"], rows, align="llr")
         + f"\n\nLargest difference between the two outputs over all {T * dv} numbers: below 1e-12 (the bound the program asserts)."
@@ -276,7 +276,7 @@ def norm_growth():
                 sm[t + 1] += math.sqrt(_dot(acc, acc)) / runs
     rows = [[t, _fx(lin[t], 3), _fx(lin[t] / math.sqrt(t), 3), _fx(sm[t], 3)] for t in marks]
     return (
-        f"Seeds `{name}.run0` to `{name}.run{runs - 1}` (the seed of each is `seed_of` of its name). d_k = d_v = {d}, T = {T}. Draws per run, in order, for each "
+        f"Generators `{name}.run0` to `{name}.run{runs - 1}`, one per run. d_k = d_v = {d}, T = {T}. Draws per run, in order, for each "
         f"t: q_t, then k_t (each {d} values of `normal()`, then divided by its own length), then v_t ({d} values of `normal()`). Linear attention: o_t = "
         "S_t^T q_t with S_t the sum of k_s v_s^T. Softmax attention: scores sqrt(d_k) q.k (what the usual q.k / sqrt(d_k) gives for vectors "
         "of length sqrt(d_k)), then the softmax-weighted sum of the values. Mean over "
@@ -598,7 +598,7 @@ def chunk_equivalence():
         assert total == chunk_macs_formula(T, C, dk, dv), (C, total, chunk_macs_formula(T, C, dk, dv))
         rows.append([C, T // C, "below 1e-12", "below 1e-12", _int(total)])
     return (
-        _seed_line(name) + f" T = {T}, d_k = {dk}, d_v = {dv}, one head, zero initial state. Draws, in order, for t = 0 to {T - 1}: raw q_t ({dk} values of "
+        _generator_line(name) + f" T = {T}, d_k = {dk}, d_v = {dv}, one head, zero initial state. Draws, in order, for t = 0 to {T - 1}: raw q_t ({dk} values of "
         f"`normal()`), raw k_t ({dk}), v_t ({dv}), then u = `uniform()` for the decay ($g_t = -0.5\\,u$) and u = `uniform()` for the write strength "
         "($\\beta_t = 0.2 + 0.7\\,u$); q and k are L2-normalized (with the $10^{-6}$) and q scaled by $1/\\sqrt{d_k}$ as in the layer. The reference is the "
         f"token-by-token recurrence ({_int(tokenwise_macs(T, dk, dv))} multiply-adds).\n\n"
@@ -676,7 +676,7 @@ def neumann_failure():
     err = _max_abs_diff(_flat(prod), _flat(L))
     assert err > 1.0 and max(abs(x) for r in prod for x in r) > 1.0
     return (
-        _seed_line(name) + f" C = {C}, d_k = {dk}. Draws, in order: a base direction ({dk} values of `normal()`); then for each of the {C} tokens, {dk} values of "
+        _generator_line(name) + f" C = {C}, d_k = {dk}. Draws, in order: a base direction ({dk} values of `normal()`); then for each of the {C} tokens, {dk} values of "
         "`normal()` that are added after scaling by 0.06 to the base, the sum L2-normalized (with $10^{-6}$) into the key; $u$ = `uniform()` for the decay "
         "($g = -0.002\\,u$) and $u$ = `uniform()` for the write strength ($\\beta = 0.97 + 0.02\\,u$). $\\mathbf{N}_{ij} = \\beta_i\\exp(c_i - c_j)(\\mathbf{k}_i\\cdot\\mathbf{k}_j)$ "
         f"for $j < i$. Largest entry of $\\mathbf{{N}}$: {max(abs(x) for r in N for x in r):.3f}.\n\n"

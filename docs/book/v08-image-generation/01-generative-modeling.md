@@ -86,7 +86,7 @@ $$
 so no table does better than $\hat p$, which is the multi-outcome version of "seven heads in ten flips gives $0.7$". Maximum-likelihood learning of a table is counting. The first twenty images of the dataset used throughout the chapter (drawn by the procedure of a later section from a generator with the seed printed there) show what counting finds, and what it costs.
 
 <!-- worked: generative_modeling.the_dataset -->
-Generator: the book's SplitMix64, seed 0x9e53fe4ec7f80c2c (11408741895375424556), used as the state before the first draw. Each image is one call of the ancestral sampler of the chapter: `rng.uniform()` for the pattern, then one `rng.uniform()` per pixel in the order top left, top right, bottom left, bottom right. The training set of size N is the first N of 1000 images. The first 20 images (indices): 10, 12, 5, 4, 5, 10, 7, 4, 9, 1, 7, 5, 14, 12, 0, 5, 13, 13, 10, 15.
+Generator: `generative_modeling.dataset` (the book's SplitMix64). Each image is one call of the ancestral sampler of the chapter: `rng.uniform()` for the pattern, then one `rng.uniform()` per pixel in the order top left, top right, bottom left, bottom right. The training set of size N is the first N of 1000 images. The first 20 images (indices): 10, 12, 5, 4, 5, 10, 7, 4, 9, 1, 7, 5, 14, 12, 0, 5, 13, 13, 10, 15.
 
 | index | image | count in first 20 | count in 1000 | frequency in 1000 |
 |---|---:|---:|---:|---:|
@@ -290,7 +290,7 @@ function sample_image(prior: array<real>[K], patterns: array<int>[K, 4],
 `sample_discrete` is the cumulative-table rule of Volume I, Chapter 10: with the running sum of the prior taken in order, it returns the first bar whose running sum exceeds $u$. The sampler consumes exactly five uniform numbers per image, in a fixed order, which is what makes a run reproducible: the same seed gives the same images. The three images that begin the stream with seed `seed_of("generative_modeling.ancestral")`, shown draw by draw so that a reader can follow every decision:
 
 <!-- worked: generative_modeling.ancestral_trace -->
-Generator: the book's SplitMix64, seed 0x8ce09ce308bf915f (10151286059011379551), used as the state before the first draw. Draw order for each image: one uniform for the pattern, then one for each pixel in the order top left, top right, bottom left, bottom right.
+Generator: `generative_modeling.ancestral` (the book's SplitMix64). Draw order for each image: one uniform for the pattern, then one for each pixel in the order top left, top right, bottom left, bottom right.
 
 | image | u (pattern) | pattern | u (top left) | u (top right) | u (bottom left) | u (bottom right) | pixels |
 |---|---:|---|---:|---:|---:|---:|---|
@@ -302,7 +302,7 @@ Generator: the book's SplitMix64, seed 0x8ce09ce308bf915f (10151286059011379551)
 The first image is a top bar whose third pixel was flipped, because the draw $0.034445$ is below the flip probability $0.1$, and it reads $1110$; its pattern draw $0.865532$ fell in the interval $[0.7, 0.9)$ that belongs to the top bar. The proof that this sampler is right is the one for the table walk of Volume I, applied twice, and the evidence is the usual one for a sampler: count.
 
 <!-- worked: generative_modeling.ancestral_check -->
-Generator: the book's SplitMix64, seed 0x8ce09ce308bf915f (10151286059011379551), used as the state before the first draw. The 10,000 images are drawn by the same sampler, continuing the stream of the trace above (its first three images are the first three here).
+Generator: `generative_modeling.ancestral` (the book's SplitMix64). The 10,000 images are drawn by the same sampler, continuing the stream of the trace above (its first three images are the first three here).
 
 | index | image | p(x) | draws of 10,000 | frequency |
 |---|---:|---:|---:|---:|

@@ -82,10 +82,6 @@ def _g(x, d=3):
     return f"{x:,.{d}f}"
 
 
-def _seed(name):
-    return f"`{name}` (seed 0x{bookrng.seed_of(name):016x})"
-
-
 def _eng(x, unit, d=2):
     """x written with an SI prefix of `unit` (G, T, P)."""
     scale = {"G": 1e9, "T": 1e12, "P": 1e15}[unit]
@@ -462,7 +458,7 @@ def chunk_flow_toy():
             "melody $m_c(g) = 0.6 \\sin(2\\pi g / 10 + 0.5c)$ of channel $c$, the texture $z = x_1 - m$ of each channel of a "
             f"chunk is a Gaussian process with covariance $\\Sigma_{{ij}} = {TOY['sigma']}^2\\, {TOY['rho']}^{{|i-j|}}$ (neighbouring "
             "steps are correlated), the two channels independent, and the velocity is the exact one of the posterior. The noise "
-            f"is {_seed(TOY_NAME)}: four chunks in order, each 2 x 16 draws of `normal()`, channel 0's 16 first; both runs use "
+            f"is the generator `{TOY_NAME}`: four chunks in order, each 2 x 16 draws of `normal()`, channel 0's 16 first; both runs use "
             "the same draws. The table prints the texture of channel 0 at the six song positions "
             f"{seam1 - 2} to {seam1 + 3} around the first seam (the seam is at position {seam1}: the last kept step of "
             "chunk 0 is position "
@@ -500,9 +496,7 @@ def chunk_flow_trials(trials=100):
             "elsewhere; the table gives the ratio of the square roots of their averages over the songs (1 would be a boundary "
             "no one could find). The third run holds the carried prefix at its carried values at every step instead of "
             "renoising it. The noise of each hop is its own stream, "
-            f"`{TOY_NAME}.trials.hop<hop>` (seeds "
-            + ", ".join(f"0x{bookrng.seed_of(f'{TOY_NAME}.trials.hop{h}'):016x}" for h in (12, 8, 4))
-            + ", for hops 12, 8 and 4), songs one after the other, chunks in order, draws as above; the three runs of a hop "
+            f"`{TOY_NAME}.trials.hop<hop>` for hops 12, 8 and 4, songs one after the other, chunks in order, draws as above; the three runs of a hop "
               "replay the same draws. Cost counts denoiser steps for the whole song (one evaluation per step).\n\n"
             + _table(["hop", "prefix", "chunks", "steps", "independent chunks", "hold, renoised", "hold, clean"], rows,
                      "rrrrrrr"))
@@ -541,7 +535,7 @@ def ar_sampling_toy():
             f"is {thr:g}. The $k$ largest of the *unrestricted* guided logits would have been codes "
             f"{', '.join(str(i) for i in sorted(top_guided))}; after the conditional restriction the final top-$k$ keeps "
             f"{', '.join(str(i) for i in range(len(final)) if final[i] > -math.inf)}. The softmax of the survivors has no "
-            f"temperature. The uniform draw is the first of {_seed(name)}, $u = {u:.6f}$, and the inverse CDF returns code "
+            f"temperature. The uniform draw is the first of the generator `{name}`, $u = {u:.6f}$, and the inverse CDF returns code "
             f"{pick}.\n\n"
             + _table(["code", "conditional", "unconditional", "guided", "in the conditional top-3", "kept after the second top-3",
                       "probability"], rows, "rrrrrrr"))

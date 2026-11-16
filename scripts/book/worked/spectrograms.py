@@ -209,7 +209,7 @@ def clip():
 def clip_check():
     x = clip()
     rows = [(n, _f(x[n], 6)) for n in (0, 1, 2, 3, 4000, 7999)]
-    return (f"The clip: {CLIP_LENGTH} samples at {CLIP_RATE} Hz, seed {bookrng.seed_of(CLIP_NAME)}, one `uniform()` draw per sample in "
+    return (f"The clip: {CLIP_LENGTH} samples at {CLIP_RATE} Hz, from the generator `{CLIP_NAME}`, one `uniform()` draw per sample in "
             "order of n. Check values:\n\n" + _table(["n", "x[n]"], rows))
 
 

@@ -94,10 +94,10 @@ function generate(rng: Generator) -> (X: array<real>[1440, 5], fail: array<int>[
 
 Everything downstream depends on regenerating exactly these rows, and on knowing what the unit of independence is: the pump.
 
-To check the generator, seed it with the printed seed. The table gives rows you can compare, and the sums let you test the rest.
+To check the generator, start it as the name says. The table gives rows you can compare, and the sums let you test the rest.
 
 <!-- worked: project_predictor.dataset_fingerprint -->
-Generator: the book's SplitMix64, seed 0x6678aaee123fc739 (7383839528559036217); the draws are those of `generate` in the order printed in the chapter. Selected rows (x0 .. x4, then fail and wear):
+Generator: `project_predictor.data` (the book's SplitMix64); the draws are those of `generate` in the order printed in the chapter. Selected rows (x0 .. x4, then fail and wear):
 
 | row | pump | x0 | x1 | x2 | x3 | x4 | fail | wear |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -152,10 +152,10 @@ The standardiser (the z-score of Chapter 2) is fitted on a set of training rows 
 
 Every score in the report is a statement about pumps the model has not seen. If rows of one pump sit on both sides of a split, every later number is optimistic in a way that no later step can detect.
 
-Three checks confirm the work, in this order. First, the sizes and the folds: the table below prints the generator seeds, the sets, the shared-pump count (which must be zero for every pair) and the rows per fold. Second, the standardiser: applied to the training rows it gives columns of mean $0$ and root mean square $1$; applied to the test rows it gives columns whose mean is *not* $0$, which is what you want, because the test rows must not influence the numbers they are scaled by. Third, the **leakage probe**: a model that can only memorise (label each held-out row with the label of its nearest training row) is scored under two protocols, a random split of rows and a split of pumps. If the first is clearly better, rows of one pump are leaking across it.
+Three checks confirm the work, in this order. First, the sizes and the folds: the table below prints the generators, the sets, the shared-pump count (which must be zero for every pair) and the rows per fold. Second, the standardiser: applied to the training rows it gives columns of mean $0$ and root mean square $1$; applied to the test rows it gives columns whose mean is *not* $0$, which is what you want, because the test rows must not influence the numbers they are scaled by. Third, the **leakage probe**: a model that can only memorise (label each held-out row with the label of its nearest training row) is scored under two protocols, a random split of rows and a split of pumps. If the first is clearly better, rows of one pump are leaking across it.
 
 <!-- worked: project_predictor.split_and_probe -->
-Generator for the split: the book's SplitMix64, seed 0x149d40d46e5ee440 (1485414733231088704). The pump numbers 0 .. 299 are shuffled (299 integer draws, the book's shuffle); the first 180 shuffled numbers train, the next 60 validate, the last 60 test; each set is then sorted ascending. Rows of a set are those of its pumps in ascending row number.
+Generator for the split: `project_predictor.split` (the book's SplitMix64). The pump numbers 0 .. 299 are shuffled (299 integer draws, the book's shuffle); the first 180 shuffled numbers train, the next 60 validate, the last 60 test; each set is then sorted ascending. Rows of a set are those of its pumps in ascending row number.
 
 | set | pumps | rows | rows with fail = 1 | first six pumps |
 |---|---:|---:|---:|---|
@@ -166,9 +166,9 @@ Generator for the split: the book's SplitMix64, seed 0x149d40d46e5ee440 (1485414
 
 Pumps shared between training and validation, training and test, validation and test: 0, 0, 0.
 
-Folds of the 180 training pumps: the book's SplitMix64, seed 0xd36d816960b808bd (15234975404058478781); the training pumps, numbered 0 .. 179 in ascending pump order, are shuffled (179 integer draws) and the pump at shuffled position p goes to fold p mod 5. Pumps per fold: [36, 36, 36, 36, 36]. Rows per fold: [144, 144, 144, 144, 144]. First eight training pumps and their folds: 0: 3, 2: 1, 3: 2, 4: 4, 5: 1, 7: 1, 9: 0, 10: 2.
+Folds of the 180 training pumps: the generator `project_predictor.folds` (the book's SplitMix64); the training pumps, numbered 0 .. 179 in ascending pump order, are shuffled (179 integer draws) and the pump at shuffled position p goes to fold p mod 5. Pumps per fold: [36, 36, 36, 36, 36]. Rows per fold: [144, 144, 144, 144, 144]. First eight training pumps and their folds: 0: 3, 2: 1, 3: 2, 4: 4, 5: 1, 7: 1, 9: 0, 10: 2.
 
-Leakage probe. A model that can only memorise: label each held-out row with the label of its nearest training row (Euclidean distance on the training-standardised features, the standardiser fitted on the training rows of that protocol; on a tie the training row listed first wins; continuous data have no ties, so this never matters here). One draw of 240 scored rows is noisy, so the probe is repeated 20 times. Master generator: seed 0x90058fde7b56c620 (10377859102059972128); repetition r uses the r-th raw value (rng.next(), counting from 0) as the seed of its own SplitMix64, which draws, in order, the shuffle of the 1200 site A row numbers (1199 integer draws; random-row protocol: the first 720 shuffled rows train, listed in shuffled order, and the next 240 are scored) and then the shuffle of the 300 site A pump numbers (299 integer draws; pump protocol: the rows of the first 180 shuffled pumps train, listed in ascending row number, and the rows of the last 60 shuffled pumps, in ascending row number, are scored). The sd over repetitions has the divisor 20 - 1.
+Leakage probe. A model that can only memorise: label each held-out row with the label of its nearest training row (Euclidean distance on the training-standardised features, the standardiser fitted on the training rows of that protocol; on a tie the training row listed first wins; continuous data have no ties, so this never matters here). One draw of 240 scored rows is noisy, so the probe is repeated 20 times. Master generator: `project_predictor.probe`; repetition r uses the r-th raw value (rng.next(), counting from 0) as the seed of its own SplitMix64, which draws, in order, the shuffle of the 1200 site A row numbers (1199 integer draws; random-row protocol: the first 720 shuffled rows train, listed in shuffled order, and the next 240 are scored) and then the shuffle of the 300 site A pump numbers (299 integer draws; pump protocol: the rows of the first 180 shuffled pumps train, listed in ascending row number, and the rows of the last 60 shuffled pumps, in ascending row number, are scored). The sd over repetitions has the divisor 20 - 1.
 
 | protocol | mean accuracy of the nearest-row label | sd over repetitions | lowest | highest |
 |---|---:|---:|---:|---:|
@@ -596,7 +596,7 @@ The test rows (240 rows, 60 pumps), read once, with every choice already made on
 | logistic, temperature scaled | 0.5047 | 0.8173 | 0.0676 | 0.6050 | 0.9884 | 0.4792 |
 | k nearest neighbours, k = 61 | 0.5262 | 0.7969 | 0.0631 | 0.5952 | 1.0000 | 0.4875 |
 
-Cluster bootstrap over the 60 test pumps: seed 0x6e7dd69d0d03b2ee (7961755686277460718). One resample is 60 calls of rng.integer(60), in order, each the index (in ascending pump order) of a pump whose four rows are all taken, the pumps in draw order and the rows of a pump ascending; 1000 resamples from one generator, all six quantities of the table and the quantities they are differences of recomputed on the same resample (so the differences are paired). Interval ends are the `percentile` of the replicates at q = 0.025 and q = 0.975 (linear interpolation at position q (number of replicates - 1)); sd is the standard deviation of the replicates with divisor 1000 - 1.
+Cluster bootstrap over the 60 test pumps: generator `project_predictor.bootstrap`. One resample is 60 calls of rng.integer(60), in order, each the index (in ascending pump order) of a pump whose four rows are all taken, the pumps in draw order and the rows of a pump ascending; 1000 resamples from one generator, all six quantities of the table and the quantities they are differences of recomputed on the same resample (so the differences are paired). Interval ends are the `percentile` of the replicates at q = 0.025 and q = 0.975 (linear interpolation at position q (number of replicates - 1)); sd is the standard deviation of the replicates with divisor 1000 - 1.
 
 | quantity | estimate | sd of replicates | 95 percent lower | 95 percent upper |
 |---|---:|---:|---:|---:|
@@ -611,7 +611,7 @@ Cluster bootstrap over the 60 test pumps: seed 0x6e7dd69d0d03b2ee (7961755686277
 On $240$ test rows from $60$ pumps the logistic classifier reaches a ROC area of $0.8173$ and a log loss of $0.4939$, against $0.5000$ and $0.6535$ for the constant model and $0.7068$ and $0.5688$ for the four-bin table on one feature. The bootstrap says how far to trust the first two numbers: $0.7427$ to $0.8841$ for the area and $0.4081$ to $0.5759$ for the log loss. The paired differences are the sharper statement. Against the constant model the log loss is lower by $0.1596$ (interval $-0.2328$ to $-0.0930$), clear of zero. Against $k$ nearest neighbours it is lower by $0.0323$, with an interval, $-0.0644$ to $-0.0008$, that ends just short of zero; and the difference in area, $+0.0204$ (interval $-0.0063$ to $+0.0513$), contains it. On this test set the two models are close, and this table cannot rank them reliably. Two further things the table says. The temperature-scaled probabilities are worse on the test rows ($0.5047$ against $0.4939$ in log loss): a scale fitted on $240$ validation rows from $60$ pumps is itself an estimate, and here it moved the wrong way. And the cost per row at $t = 1/6$ is $0.4667$ for the raw logistic probabilities, against $0.6417$ for raising every alarm and $0.4750$ for the one-feature table, so the decision rule gains little over the simple baseline here.
 
 <!-- worked: project_predictor.regression_test -->
-The 240 test rows, read once, with the weights of milestone 3 (fitted on the training rows only). Interval: the cluster bootstrap over the 60 test pumps as in the classification report (seed 0xa65146519b753764 (11984437399724046180), 1000 resamples, 60 calls of rng.integer(60) each, taken as in the classification report; percentile interval of the RMSE at q = 0.025 and 0.975).
+The 240 test rows, read once, with the weights of milestone 3 (fitted on the training rows only). Interval: the cluster bootstrap over the 60 test pumps as in the classification report (generator `project_predictor.bootstrap_regression`, 1000 resamples, 60 calls of rng.integer(60) each, taken as in the classification report; percentile interval of the RMSE at q = 0.025 and 0.975).
 
 | model | test RMSE | R^2 (around the training mean) | RMSE 95 percent lower | RMSE 95 percent upper |
 |---|---:|---:|---:|---:|
@@ -629,40 +629,40 @@ For the continuous target the linear regression has a test RMSE of $0.6294$ (int
 One test set is one draw. The study below repeats the whole pipeline $16$ times, each with its own split of the $300$ pumps, so that the spread over runs includes the choice of test pumps, of folds and of the neighbour count.
 
 <!-- worked: project_predictor.seed_study -->
-16 runs. Master generator: seed 0x0ffb3472a2ba3e69 (1151571796684324457); run s uses the s-th raw value (rng.next(), counting from 0) as the seed of its own SplitMix64, which draws, in order: the shuffle of the 300 site A pump numbers (299 integer draws; 180 pumps train, 60 validate, 60 test, each set sorted ascending), the shuffle of the 180 training pumps for the grouped folds (179 integer draws; the pumps numbered 0 .. 179 in ascending pump order, the pump at shuffled position p goes to fold p mod 5), and the shuffle of the 720 training rows for the row folds used only by the ablation below (719 integer draws; the rows numbered 0 .. 719 in ascending row number, the row at shuffled position p goes to fold p mod 5). The 719 draws are made in every run, whether or not the ablation is read. In each run the penalty lambda and the neighbour count k are chosen by grouped five-fold cross-validation on the mean fold log loss (the smallest mean; the larger value on a tie, for lambda and for k alike), the models are refitted on the 720 training rows and scored on the 240 test rows and on the 240 rows of site B. The scale a of 'scaled' is fitted by the doubling-and-bisection routine of milestone 5 on the 240 validation rows of that run, and the 'constant' model is the share of ones among that run's 720 training rows.
+16 runs. Master generator: `project_predictor.seeds`; run s uses the s-th raw value (rng.next(), counting from 0) as the seed of its own SplitMix64, which draws, in order: the shuffle of the 300 site A pump numbers (299 integer draws; 180 pumps train, 60 validate, 60 test, each set sorted ascending), the shuffle of the 180 training pumps for the grouped folds (179 integer draws; the pumps numbered 0 .. 179 in ascending pump order, the pump at shuffled position p goes to fold p mod 5), and the shuffle of the 720 training rows for the row folds used only by the ablation below (719 integer draws; the rows numbered 0 .. 719 in ascending row number, the row at shuffled position p goes to fold p mod 5). The 719 draws are made in every run, whether or not the ablation is read. In each run the penalty lambda and the neighbour count k are chosen by grouped five-fold cross-validation on the mean fold log loss (the smallest mean; the larger value on a tie, for lambda and for k alike), the models are refitted on the 720 training rows and scored on the 240 test rows and on the 240 rows of site B. The scale a of 'scaled' is fitted by the doubling-and-bisection routine of milestone 5 on the 240 validation rows of that run, and the 'constant' model is the share of ones among that run's 720 training rows.
 
-| run | seed | lambda | k | test log loss, logistic | k-NN | constant | test AUC, logistic | k-NN | site B log loss | site B AUC |
-|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| 0 | 0x36c4c4ac98220070 | 0.01 | 61 | 0.5181 | 0.5406 | 0.6799 | 0.8118 | 0.8173 | 0.8783 | 0.5971 |
-| 1 | 0xe63eccf223012c78 | 0.01 | 61 | 0.5084 | 0.5394 | 0.6827 | 0.8263 | 0.8116 | 0.9973 | 0.5893 |
-| 2 | 0x8579437648e13e00 | 0.01 | 61 | 0.5210 | 0.5510 | 0.6572 | 0.7976 | 0.7798 | 0.9114 | 0.5893 |
-| 3 | 0xe45c2dcb082fadff | 0.01 | 31 | 0.5326 | 0.5704 | 0.6684 | 0.7926 | 0.7473 | 0.9295 | 0.5923 |
-| 4 | 0x09feb7be332b4744 | 0.01 | 31 | 0.4471 | 0.5060 | 0.6874 | 0.8746 | 0.8289 | 0.9512 | 0.5898 |
-| 5 | 0x2b057a0302f40a72 | 0.01 | 61 | 0.5449 | 0.5478 | 0.6654 | 0.7953 | 0.7913 | 0.9176 | 0.5911 |
-| 6 | 0x31b464d13eb96075 | 0.01 | 61 | 0.4751 | 0.5078 | 0.6618 | 0.8474 | 0.8471 | 0.9419 | 0.5805 |
-| 7 | 0x1cf9e8d19d406d15 | 0.01 | 61 | 0.5541 | 0.5515 | 0.6974 | 0.8098 | 0.7884 | 0.9366 | 0.5952 |
-| 8 | 0xfcfcacb61a996b2d | 0.01 | 31 | 0.5334 | 0.5354 | 0.6731 | 0.7907 | 0.8005 | 0.8635 | 0.6176 |
-| 9 | 0x62bbdeef4f4b92ea | 0.01 | 31 | 0.5873 | 0.5769 | 0.6865 | 0.7638 | 0.7530 | 1.0313 | 0.5898 |
-| 10 | 0x114c6e5250749323 | 0.01 | 61 | 0.5687 | 0.5632 | 0.6527 | 0.7652 | 0.7560 | 0.9331 | 0.5927 |
-| 11 | 0x3164c0a3fbbf9ddf | 0.01 | 31 | 0.5663 | 0.6142 | 0.6695 | 0.7692 | 0.7117 | 0.9573 | 0.5762 |
-| 12 | 0x1e139d382cb1c476 | 0.01 | 61 | 0.5109 | 0.5382 | 0.6713 | 0.8231 | 0.8220 | 0.9878 | 0.5788 |
-| 13 | 0xe12dcf4b21249c99 | 0.01 | 61 | 0.4670 | 0.5136 | 0.6582 | 0.8509 | 0.8354 | 0.8790 | 0.5837 |
-| 14 | 0x407c1f62a9485c1e | 0.03 | 61 | 0.4987 | 0.5202 | 0.6718 | 0.8415 | 0.8209 | 0.7953 | 0.6067 |
-| 15 | 0x552a42d5ef74a31d | 0.01 | 31 | 0.5583 | 0.5510 | 0.6554 | 0.7938 | 0.7588 | 0.9424 | 0.5969 |
+| run | lambda | k | test log loss, logistic | k-NN | constant | test AUC, logistic | k-NN | site B log loss | site B AUC |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 0 | 0.01 | 61 | 0.5181 | 0.5406 | 0.6799 | 0.8118 | 0.8173 | 0.8783 | 0.5971 |
+| 1 | 0.01 | 61 | 0.5084 | 0.5394 | 0.6827 | 0.8263 | 0.8116 | 0.9973 | 0.5893 |
+| 2 | 0.01 | 61 | 0.5210 | 0.5510 | 0.6572 | 0.7976 | 0.7798 | 0.9114 | 0.5893 |
+| 3 | 0.01 | 31 | 0.5326 | 0.5704 | 0.6684 | 0.7926 | 0.7473 | 0.9295 | 0.5923 |
+| 4 | 0.01 | 31 | 0.4471 | 0.5060 | 0.6874 | 0.8746 | 0.8289 | 0.9512 | 0.5898 |
+| 5 | 0.01 | 61 | 0.5449 | 0.5478 | 0.6654 | 0.7953 | 0.7913 | 0.9176 | 0.5911 |
+| 6 | 0.01 | 61 | 0.4751 | 0.5078 | 0.6618 | 0.8474 | 0.8471 | 0.9419 | 0.5805 |
+| 7 | 0.01 | 61 | 0.5541 | 0.5515 | 0.6974 | 0.8098 | 0.7884 | 0.9366 | 0.5952 |
+| 8 | 0.01 | 31 | 0.5334 | 0.5354 | 0.6731 | 0.7907 | 0.8005 | 0.8635 | 0.6176 |
+| 9 | 0.01 | 31 | 0.5873 | 0.5769 | 0.6865 | 0.7638 | 0.7530 | 1.0313 | 0.5898 |
+| 10 | 0.01 | 61 | 0.5687 | 0.5632 | 0.6527 | 0.7652 | 0.7560 | 0.9331 | 0.5927 |
+| 11 | 0.01 | 31 | 0.5663 | 0.6142 | 0.6695 | 0.7692 | 0.7117 | 0.9573 | 0.5762 |
+| 12 | 0.01 | 61 | 0.5109 | 0.5382 | 0.6713 | 0.8231 | 0.8220 | 0.9878 | 0.5788 |
+| 13 | 0.01 | 61 | 0.4670 | 0.5136 | 0.6582 | 0.8509 | 0.8354 | 0.8790 | 0.5837 |
+| 14 | 0.03 | 61 | 0.4987 | 0.5202 | 0.6718 | 0.8415 | 0.8209 | 0.7953 | 0.6067 |
+| 15 | 0.01 | 31 | 0.5583 | 0.5510 | 0.6554 | 0.7938 | 0.7588 | 0.9424 | 0.5969 |
 
-Over the 16 runs: mean, standard deviation (divisor n - 1) and a bootstrap 95 percent interval of the mean (resample the 16 runs with replacement, 2000 resamples, interval ends at the 2.5th and 97.5th percentiles of the replicated means; each row has its own generator, started at the seed in the last column; a resample is 16 calls of rng.integer(16), each the index of the next run to include).
+Over the 16 runs: mean, standard deviation (divisor n - 1) and a bootstrap 95 percent interval of the mean (resample the 16 runs with replacement, 2000 resamples, interval ends at the 2.5th and 97.5th percentiles of the replicated means; each row has its own generator, named in the last column; a resample is 16 calls of rng.integer(16), each the index of the next run to include).
 
-| quantity | mean | sd | 95 percent lower | 95 percent upper | bootstrap seed |
+| quantity | mean | sd | 95 percent lower | 95 percent upper | bootstrap generator |
 |---|---:|---:|---:|---:|---|
-| test log loss, logistic | 0.5245 | 0.0393 | 0.5053 | 0.5420 | 0x78c0a5fe3f7259f0 |
-| test log loss, scaled minus raw logistic | +0.0094 | 0.0160 | 0.0025 | 0.0179 | 0x3ed50322ed61cd2d |
-| test log loss, logistic minus constant | -0.1467 | 0.0414 | -0.1678 | -0.1267 | 0xef1431fb42271c5d |
-| test log loss, logistic minus k-NN | -0.0210 | 0.0219 | -0.0317 | -0.0111 | 0x5798c410d5146f19 |
-| test ROC AUC, logistic | 0.8096 | 0.0324 | 0.7953 | 0.8253 | 0x708d3f124f265b93 |
-| test ROC AUC, logistic minus k-NN | +0.0177 | 0.0194 | 0.0089 | 0.0274 | 0x54e67c895886be33 |
-| site B log loss, logistic | 0.9284 | 0.0566 | 0.8990 | 0.9528 | 0x8518ec8dc0260bb0 |
-| site B log loss, logistic minus constant | +0.2334 | 0.0580 | 0.2047 | 0.2586 | 0x025fdaab5aa89fd5 |
-| site B ROC AUC, logistic | 0.5917 | 0.0103 | 0.5870 | 0.5969 | 0xed27029b613d7831 |
+| test log loss, logistic | 0.5245 | 0.0393 | 0.5053 | 0.5420 | `project_predictor.seeds.ll` |
+| test log loss, scaled minus raw logistic | +0.0094 | 0.0160 | 0.0025 | 0.0179 | `project_predictor.seeds.sc` |
+| test log loss, logistic minus constant | -0.1467 | 0.0414 | -0.1678 | -0.1267 | `project_predictor.seeds.llc` |
+| test log loss, logistic minus k-NN | -0.0210 | 0.0219 | -0.0317 | -0.0111 | `project_predictor.seeds.llk` |
+| test ROC AUC, logistic | 0.8096 | 0.0324 | 0.7953 | 0.8253 | `project_predictor.seeds.auc` |
+| test ROC AUC, logistic minus k-NN | +0.0177 | 0.0194 | 0.0089 | 0.0274 | `project_predictor.seeds.auck` |
+| site B log loss, logistic | 0.9284 | 0.0566 | 0.8990 | 0.9528 | `project_predictor.seeds.sl` |
+| site B log loss, logistic minus constant | +0.2334 | 0.0580 | 0.2047 | 0.2586 | `project_predictor.seeds.slc` |
+| site B ROC AUC, logistic | 0.5917 | 0.0103 | 0.5870 | 0.5969 | `project_predictor.seeds.sauc` |
 
 Runs in which the logistic model has the smaller test log loss than k-NN: 12 of 16.
 <!-- /worked -->
@@ -674,18 +674,18 @@ The logistic classifier's mean test log loss over the $16$ runs is $0.5245$ (sd 
 Folds drawn at random over rows, instead of over pumps, put the sibling rows of a pump into the training folds of the round that scores it.
 
 <!-- worked: project_predictor.ablation_cv -->
-The 16 runs of the seed study. The design choice: how the folds that select lambda (logistic) and k (k-NN) are drawn (grouped folds: the folds of pumps of the seed study; random row folds: the 720 training rows dealt by the row-fold shuffle of the seed study). The chosen value is the one with the smallest mean fold log loss over the five folds of the drawn kind (the larger value on a tie). 'CV estimate' is that mean fold log loss of the chosen value, the number a report would claim; 'test' is the log loss of the refitted model on the 240 test rows of the same run, from pumps never seen; gap = CV estimate minus test. The interval is a bootstrap 95 percent interval of the mean gap over the runs (2000 resamples as in the seed study, each row with the generator seed of the last column).
+The 16 runs of the seed study. The design choice: how the folds that select lambda (logistic) and k (k-NN) are drawn (grouped folds: the folds of pumps of the seed study; random row folds: the 720 training rows dealt by the row-fold shuffle of the seed study). The chosen value is the one with the smallest mean fold log loss over the five folds of the drawn kind (the larger value on a tie). 'CV estimate' is that mean fold log loss of the chosen value, the number a report would claim; 'test' is the log loss of the refitted model on the 240 test rows of the same run, from pumps never seen; gap = CV estimate minus test. The interval is a bootstrap 95 percent interval of the mean gap over the runs (2000 resamples as in the seed study, each row with the generator named in the last column).
 
-| folds | model | mean CV estimate | mean test log loss | mean gap | 95 percent lower | 95 percent upper | bootstrap seed |
+| folds | model | mean CV estimate | mean test log loss | mean gap | 95 percent lower | 95 percent upper | bootstrap generator |
 |---|---|---:|---:|---:|---:|---:|---|
-| grouped folds (by pump) | logistic | 0.5227 | 0.5245 | -0.0018 | -0.0234 | 0.0191 | 0x76b31ef327924d57 |
-| grouped folds (by pump) | k-NN | 0.5419 | 0.5455 | -0.0036 | -0.0199 | 0.0128 | 0x6de21e2ac8f84e4d |
-| random row folds | logistic | 0.5131 | 0.5242 | -0.0112 | -0.0330 | 0.0086 | 0xda2bd5b028b76813 |
-| random row folds | k-NN | 0.5181 | 0.5845 | -0.0665 | -0.0968 | -0.0391 | 0x8c0c387249a59440 |
+| grouped folds (by pump) | logistic | 0.5227 | 0.5245 | -0.0018 | -0.0234 | 0.0191 | `project_predictor.ablation.group.logistic` |
+| grouped folds (by pump) | k-NN | 0.5419 | 0.5455 | -0.0036 | -0.0199 | 0.0128 | `project_predictor.ablation.group.k-NN` |
+| random row folds | logistic | 0.5131 | 0.5242 | -0.0112 | -0.0330 | 0.0086 | `project_predictor.ablation.row.logistic` |
+| random row folds | k-NN | 0.5181 | 0.5845 | -0.0665 | -0.0968 | -0.0391 | `project_predictor.ablation.row.k-NN` |
 
-Test log loss of the logistic model chosen with row folds minus the one chosen with grouped folds, over the runs: mean -0.00027, 95 percent interval -0.00241 to +0.00169 (bootstrap seed 0x9c0573f3fba8b3ba); chosen lambda differs in 13 runs.
+Test log loss of the logistic model chosen with row folds minus the one chosen with grouped folds, over the runs: mean -0.00027, 95 percent interval -0.00241 to +0.00169 (bootstrap generator `project_predictor.ablation.test.logistic`); chosen lambda differs in 13 runs.
 
-Test log loss of the k-NN model chosen with row folds minus the one chosen with grouped folds, over the runs: mean +0.03909, 95 percent interval +0.02340 to +0.05488 (bootstrap seed 0xeb6947b8a24d39f4); chosen k differs in 15 runs.
+Test log loss of the k-NN model chosen with row folds minus the one chosen with grouped folds, over the runs: mean +0.03909, 95 percent interval +0.02340 to +0.05488 (bootstrap generator `project_predictor.ablation.test.k-NN`); chosen k differs in 15 runs.
 <!-- /worked -->
 
 ![A scatter plot of the test log loss of the k-NN model against the cross-validation log loss of the chosen k, for 16 runs and two ways of drawing the folds, with a dashed diagonal where claim and test agree.](img/predictor-fold-ablation.svg)
@@ -773,7 +773,7 @@ Every block the milestones print is also a test, and the list gathers them. The 
 | 7 | ablation: gaps and intervals | as printed | $10^{-4}$ |
 | 7 | shift slice: scores, reliability rows, feature means, ranges | as printed | $10^{-4}$ |
 
-Two conventions apply to the whole list. A number computed from a generator started at a printed seed is reproduced only by a bit-exact generator, so test in order: the raw outputs, then the samplers, then the data, then the splits, then everything after them. A mismatch in the data table points at the generator or at the order of the draws; a mismatch in a later table with correct data points at the step that table tests. And where the table says "the stated margin", the criterion is part of the test and not a number to copy.
+Two conventions apply to the whole list. A number computed from a generator started from its name is reproduced only by a bit-exact generator, so test in order: the raw outputs, then the samplers, then the data, then the splits, then everything after them. A mismatch in the data table points at the generator or at the order of the draws; a mismatch in a later table with correct data points at the step that table tests. And where the table says "the stated margin", the criterion is part of the test and not a number to copy.
 
 A compact fingerprint of a correct pipeline, to check at the end:
 

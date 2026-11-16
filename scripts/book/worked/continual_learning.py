@@ -85,8 +85,7 @@ def _fmt(x, d=4):
 
 
 def _seed_line(name, normal=False):
-    seed = bookrng.seed_of(name)
-    return f"`{name}` (seed {seed:#018x}, {seed})" + (". A normal() call that finds a held value returns it without drawing." if normal else "")
+    return f"`{name}`" + (". A normal() call that finds a held value returns it without drawing." if normal else "")
 
 
 def _softplus(z):

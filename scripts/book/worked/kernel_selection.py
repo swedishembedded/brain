@@ -21,7 +21,7 @@ products of the reference gate are real arithmetic: float32 rounding after
 every operation, an exact reference, the tolerance of Chapter 9.
 
 Randomness comes from the book's own generator
-(`bookrng.generator("kernel_selection.<example>")`), is printed with its seed,
+(`bookrng.generator("kernel_selection.<example>")`), is named by the page,
 and is drawn in an order the chapter states.
 
 Swedish Embedded AB implements solutions for GPU kernels that choose
@@ -52,7 +52,7 @@ def _n(v):
 
 
 def _seed_line(name):
-    return f"Generator: the book's SplitMix64, seed {bookrng.seed_of(name):#018x} (`seed_of` of the name `{name}`, defined on the pseudocode page)."
+    return f"Generator: the book's SplitMix64, `{name}`."
 
 
 def _f32(x):
@@ -474,8 +474,7 @@ def calibration():
         "A run costs (launch + work / true rate) x its noise factor (three uniforms, as in the ranking). The "
         "hidden true rates are those of the units in `DEVICES` (GPU 36,000 and 664; CPU 640 and 60, in GFLOP/s and GB/s), "
         "launches are 5 and 2 microseconds. The rates are reported as the work of the accepted attempt divided by "
-        "its time. " + "Generators: the book's SplitMix64, seeds " + ", ".join(f"{bookrng.seed_of('kernel_selection.calibration.' + d):#018x} "
-        f"(`kernel_selection.calibration.{d}`)" for d in ("CPU", "GPU")) + ". Draw "
+        "its time. " + "Generators: the book's SplitMix64, " + ", ".join(f"`kernel_selection.calibration.{d}`" for d in ("CPU", "GPU")) + ". Draw "
         "order: the compute probe's runs, then the bandwidth probe's, 3 uniforms per run, attempts in order.\n\n"
         + _table(["device", "spec F (GFLOP/s)", "measured F", "% of spec", "spec BW (GB/s)", "measured BW",
                   "% of spec", "spec ridge", "measured ridge"], rows, "lrrrrrrrr")
@@ -507,8 +506,7 @@ def fraction_of_roofs():
         f"calibration whose compute probe ran on an idle device and measured {cold['flops']:,.0f} (its bandwidth is the "
         "calibrated one). "
         "The bound of a row is max(2 m n k / F, 4 (m k + k n + m n) / BW). The cold probe is "
-        "`kernel_selection.calibration.GPU.cold` (seed " + f"{bookrng.seed_of('kernel_selection.calibration.GPU.cold'):#018x}"
-        + "): the compute probe of the calibration, with the device's true compute rate multiplied by 0.4.\n\n"
+        "`kernel_selection.calibration.GPU.cold`: the compute probe of the calibration, with the device's true compute rate multiplied by 0.4.\n\n"
         + _table(["kernel, shape", "of the true roofline", "of the specification", "of the measured roofline",
                   "of the cold-probe roofline"], rows, "lrrrr")
     )
@@ -843,9 +841,8 @@ def bucket_tradeoff():
         f"exact m ({r['ideal'] / 1e9:.2f}); the work of serving one request is the noise-free device cost B_dev of the chosen candidate at the request's own m, and the best candidate "
         "for an m is the one of least noise-free device cost (naive, tiled or reg; a measurement may pick another, and that is what the excess counts). 'Measurement work' is the sum of the costs of the launches of the races, "
         "each launch charged its noisy cost, a capped launch its cap. "
-        "Measurement seeds, one generator per scheme and one race per bucket in the order of first request: "
-        + "; ".join(f"{label}: {bookrng.seed_of(f'kernel_selection.buckets.{label}'):#018x}" for label, _ in SCHEMES)
-        + ". The race is the one of the text and of `kernel_selection.pipeline_trace`: the first candidate of the model's preference order (by predicted cost at the bucket's representative) is the incumbent and gets 20 launches in 5 batches of 4; "
+        "Measurement generators, one per scheme (`kernel_selection.buckets.<scheme>`, the scheme being the label of the table's row) and one race per bucket in the order of first request. "
+        "The race is the one of the text and of `kernel_selection.pipeline_trace`: the first candidate of the model's preference order (by predicted cost at the bucket's representative) is the incumbent and gets 20 launches in 5 batches of 4; "
         "each other candidate gets up to 20 launches, each capped at twice the incumbent's mean of batch minima, and displaces the best so far when its mean of batch minima is lower by more than 2 sqrt(SE_best^2 + SE_c^2) (SE = sd / sqrt(5), sd with divisor 4); "
         "a candidate whose first batch of 4 is entirely capped is dropped.\n\n"
         + _table(["scheme", "buckets measured", "measurement work", "excess over the best, %", "excess work"], rows, "lrrrr")

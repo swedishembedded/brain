@@ -193,7 +193,7 @@ $$
 This is exactly the weight gradient of a linear layer in disguise: stacking the items into one tall matrix $\mathbf{A}$ of shape $[N m, k]$ turns the shared-weight product into a single matrix product, and $\mathbf{A}^\top d\mathbf{C}$ for the tall matrices is the same sum over $i$ (the inner dimension of the product now runs over items and rows together).
 
 <!-- worked: layer_gradients.batched_matmul -->
-Generator: the book's SplitMix64, seed 0xf98619dfe0b33d95 (17980087011661528469). Draw order: every entry is `integer(7) - 3`, so a value in -3 .. 3; first `A` (2 x 2 x 3 = 12 values, batch index slowest), then the shared `B` (3 x 4 = 12 values), then `dC` (2 x 2 x 4 = 16 values).
+Generator: the book's SplitMix64, `layer_gradients.bmm`. Draw order: every entry is `integer(7) - 3`, so a value in -3 .. 3; first `A` (2 x 2 x 3 = 12 values, batch index slowest), then the shared `B` (3 x 4 = 12 values), then `dC` (2 x 2 x 4 = 16 values).
 
 Forward: `C[i] = A[i] B` for batch item `i`, one weight matrix `B` shared by both items.
 
@@ -472,7 +472,7 @@ $$
 For equal sizes $B_j = B/K$ the weights are all $1/K$: accumulate the sum of the micro-batch gradients, then multiply by $1/K$. For unequal sizes the weights differ, and a flat $1/K$ is wrong. The least error-prone design avoids the issue: have each micro-batch compute the gradient of *its examples' sum divided by the total count* $B$, then a plain sum is the answer for any split.
 
 <!-- worked: layer_gradients.microbatch_accumulation -->
-Generator: the book's SplitMix64, seed 0x928f9c1584911240 (10560831267439448640). Draw order, all from `normal()`: `X` (8 x 3, row-major), `T` (8 x 2), then `W` (2 x 3) each multiplied by 0.5; the bias `b` is zero. Loss: the mean over all B O = 16 squared errors; micro-batches are consecutive rows. The one-batch gradient has norm 1.385759 (dW only).
+Generator: the book's SplitMix64, `layer_gradients.microbatch_accumulation`. Draw order, all from `normal()`: `X` (8 x 3, row-major), `T` (8 x 2), then `W` (2 x 3) each multiplied by 0.5; the bias `b` is zero. Loss: the mean over all B O = 16 squared errors; micro-batches are consecutive rows. The one-batch gradient has norm 1.385759 (dW only).
 
 | strategy | largest abs. difference of dW from the one-batch gradient | norm of dW / norm of one-batch dW |
 |---|---:|---:|
@@ -556,7 +556,7 @@ The sums, means, reshapes and slices save nothing but sizes; the maximum and the
 Finally the check. For every rule of the table we drew random inputs from the book's generator, computed the rule's gradient and the central difference of $L = \sum G\,f(\text{inputs})$ with respect to every entry of every input, and report the largest difference:
 
 <!-- worked: layer_gradients.rule_checks -->
-Generator: the book's SplitMix64, seed 0x4d60638aa31a997a (5575565785777740154). One generator for the whole table, `normal()` draws in table order: for each row its inputs in the order listed (row-major), then the output gradient (row-major), which has the shape of the row's output (a single number for the sum of all entries, [4] for the sum along axis 0, [3] for the mean and the max along axis 1). For the division the denominator is replaced by 1.5 plus the absolute value of its draw. Central-difference step 1e-6; the closest any ReLU or max input comes to its kink is 0.051 (a check on your draw order). The last column is rounding noise of the central difference: expect values below 1e-8, not these digits. [x > 0] in the ReLU rule is the Iverson bracket (1 when the condition holds, 0 otherwise). Phi and phi in the GELU rule are the standard Gaussian cumulative distribution, Phi(x) = (1 + erf(x / sqrt 2)) / 2, and density, phi(x) = exp(-x^2 / 2) / sqrt(2 pi).
+Generator: the book's SplitMix64, `layer_gradients.rule_checks`. One generator for the whole table, `normal()` draws in table order: for each row its inputs in the order listed (row-major), then the output gradient (row-major), which has the shape of the row's output (a single number for the sum of all entries, [4] for the sum along axis 0, [3] for the mean and the max along axis 1). For the division the denominator is replaced by 1.5 plus the absolute value of its draw. Central-difference step 1e-6; the closest any ReLU or max input comes to its kink is 0.051 (a check on your draw order). The last column is rounding noise of the central difference: expect values below 1e-8, not these digits. [x > 0] in the ReLU rule is the Iverson bracket (1 when the condition holds, 0 otherwise). Phi and phi in the GELU rule are the standard Gaussian cumulative distribution, Phi(x) = (1 + erf(x / sqrt 2)) / 2, and density, phi(x) = exp(-x^2 / 2) / sqrt(2 pi).
 
 | operation | backward rule | inputs | largest absolute difference |
 |---|---|---|---:|
@@ -711,7 +711,7 @@ We have taken each rule on trust from its derivation plus a quick numerical comp
 
 8. **[Implement]** Implement the softmax backward and reproduce `layer_gradients.softmax_backward`. Check that rows of $d\mathbf{x}$ sum to zero, and that adding $100$ to every logit changes neither $\mathbf{y}$ nor $d\mathbf{x}$ when softmax subtracts the row maximum.
 
-9. **[Implement]** Implement the SplitMix64 generator of Volume I, Chapter 17, draw the data of `layer_gradients.microbatch_accumulation` in the stated order from the stated seed, and reproduce the five strategies of its table, including the factor $4$ and the $4\%$ error.
+9. **[Implement]** Implement the SplitMix64 generator of Volume I, Chapter 17, draw the data of `layer_gradients.microbatch_accumulation` in the stated order from the named generator, and reproduce the five strategies of its table, including the factor $4$ and the $4\%$ error.
 
 10. **[Implement]** Implement the batched shared-weight product, the gather and the shared-weight example, and reproduce `layer_gradients.batched_matmul`, `layer_gradients.index_ops` and `layer_gradients.shared_weight`. In the last, run the "assign" variant and confirm that its error equals the missing term exactly.
 

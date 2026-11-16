@@ -30,7 +30,7 @@ import bookrng
 import time_series as ts
 import transformer_block as tb
 from generalization import _solve
-from time_series import _mean, _seed_text, _table
+from time_series import _mean, _table
 
 # ------------------------------------------------------------------ small helpers
 
@@ -55,7 +55,7 @@ def _flops(x):
 
 
 def _draws(name):
-    return f"Generator: the book's SplitMix64, seed {bookrng.seed_of(name):#018x} ({bookrng.seed_of(name)})."
+    return f"Generator: `{name}` (the book's SplitMix64)."
 
 
 # ------------------------------------------------------------------ patching a series into tokens
@@ -230,7 +230,7 @@ def scalers():
     for p, (n, m, s) in enumerate(stats):
         dm, ds = _pop_stats(x[:(p + 1) * SCALE_P])
         worst = max(worst, abs(m - dm), abs(s - ds))
-    head = (f"The first {SCALE_CTX} bars of the series of Chapter 1 (seed {bookrng.seed_of(ts.SERIES_NAME):#018x}), cut into {SCALE_CTX // SCALE_P} "
+    head = (f"The first {SCALE_CTX} bars of the series of Chapter 1 (generator `{ts.SERIES_NAME}`), cut into {SCALE_CTX // SCALE_P} "
             f"patches of {SCALE_P}. 'invariance' is the largest absolute difference between the scaled values of the series x and of "
             f"10 x + 100. 'earlier values changed' adds 50 to the {SCALE_P} bars of the last patch and counts how many of the "
             f"{early} scaled values of the earlier patches then move by more than 1e-12. The arcsinh is the library function; the "
@@ -1115,11 +1115,11 @@ def zero_shot():
     res = _zero_shot_results()
     names = list(res["in"])
     rows = [(n, *(_fx(_mean(res[f][n]), 3) for f in ("in", "out", "new"))) for n in names]
-    seeds = ", ".join(f"{k}: {bookrng.seed_of(v):#018x}" for k, v in ZS_NAMES.items())
+    streams = ", ".join(f"{k}: `{v}`" for k, v in ZS_NAMES.items())
     head = (f"A family of series: y_t = L (1 + s t + a sin(2 pi t / m + phi) + v_t) for t = 0 .. {ZS_LEN - 1}, with L = 5 * 100^u, s = -0.002 + 0.010 u, a = 0.05 + 0.25 u, "
             f"phi = 2 pi u and a shock size c = 0.02 + 0.04 u (each u one uniform() call, in this order), and then for t = 0 .. {ZS_LEN - 1} one normal() call each "
             f"for v_t = 0.7 v_(t-1) + c normal(), v_(-1) = 0. The period m is {ZS_M_IN} in the corpus and in the first test family, {ZS_M_OUT} in the second test family "
-            f"(and in the second corpus stream) and {ZS_M_NEW} in the third. Generators (SplitMix64, seeds): {seeds}; the series are drawn one after another from each "
+            f"(and in the second corpus stream) and {ZS_M_NEW} in the third. Generators (SplitMix64): {streams}; the series are drawn one after another from each "
             f"stream. A window is {ZS_CTX} context bars and {ZS_HOR} target bars; both are scaled by the mean and population standard deviation (plus 1e-5) of the "
             f"context. The shared map is the ridge regression (penalty {ZS_RIDGE} on every weight but the constant) from [1, the {ZS_CTX} scaled context bars] to the "
             f"{ZS_HOR} scaled target bars, fitted over every window of every corpus series with its context starting at bar 0 .. {ZS_LEN - ZS_HOR - ZS_CTX} (origins "
@@ -1194,10 +1194,10 @@ def _covariate_results():
 def covariate_gain():
     res, mean_promos = _covariate_results()
     rows = [(n, _fx(_mean(v), 3)) for n, v in res.items()]
-    seeds = ", ".join(f"{k}: {bookrng.seed_of(v):#018x}" for k, v in COV_NAMES.items())
+    streams = ", ".join(f"{k}: `{v}`" for k, v in COV_NAMES.items())
     head = (f"The family of the previous example (period {ZS_M_IN}) with a promotion indicator x_t: each series draws L, s, a, phi, c and d = 0.10 + 0.20 u (six uniform() "
             f"calls in this order), and then for each of the {ZS_LEN} bars one normal() (the shock of v_t) and one uniform() (a promotion, x_t = 1, when it is below "
-            f"{COV_PROMO}); y_t = L (1 + s t + a sin(2 pi t / 12 + phi) + v_t + d x_t). Generators (seeds): {seeds}; the corpus is the first {COV_CORPUS} series of its stream, "
+            f"{COV_PROMO}); y_t = L (1 + s t + a sin(2 pi t / 12 + phi) + v_t + d x_t). Generators: {streams}; the corpus is the first {COV_CORPUS} series of its stream, "
             f"the test is {COV_TEST} fresh series, and the third stream shuffles the list 0 .. {COV_TEST - 1} (Fisher-Yates of the book) to pick, for series i, the future "
             f"promotions of series list[i]. A window is as before, with origins {ZS_CTX}, {ZS_CTX + COV_STEP}, .. {ZS_LEN - ZS_HOR} for the corpus, so {len(range(ZS_CTX, ZS_LEN - ZS_HOR + 1, COV_STEP))} windows "
             f"per series. The map with a covariate is the ridge regression (penalty {ZS_RIDGE}) from [1, {ZS_CTX} scaled context bars, the {ZS_CTX} promotion bits of the context, "

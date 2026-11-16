@@ -74,6 +74,19 @@ IMAGE = re.compile(r"!\[[^\]]*\]\(([^)\s]+)\)")
 EM_DASH = chr(0x2014)  # the repository forbids it in prose
 MACHINE_PATH = re.compile(r"(?<![\w.])/(?:data|home|Users|mnt)/[\w.-]+/")
 KNOWLEDGE_DIR = ROOT / ".agents" / "knowledge"
+# A worked example's generator name, as the text writes it: dotted lowercase
+# words, such as `kernel_selection.ranking` or 'distillation.teacher'.
+GENERATOR_NAME = re.compile(r"(?<![\w.])[a-z][a-z0-9_]*(?:\.[a-z0-9_-]+)+(?![\w])")
+# The pages that print seed_of values on purpose: its definition, with test
+# vectors a reader checks their own seed_of against, and the chapter that
+# teaches seeding, where a seed is the subject.
+SEED_PAGES = {"pseudocode.md", "v01-mathematics/17-randomness.md"}
+# A 64-bit seed written out where its generator's name is not: "seed
+# 0x53d323a0b0579206", "seed 14314482791355729068". A seed that is data (a
+# historical run's seed) carries `<!-- seed-value: <reason> -->` on the line
+# before.
+PRINTED_SEED = re.compile(r"\bseed(?:ed(?: with)?)?:?\s+(?:0x[0-9a-f]{12,16}\b|[0-9]{17,20}\b)", re.I)
+SEED_VALUE = re.compile(r"<!-- seed-value: \S.* -->")
 
 
 def structure(book, errors):
@@ -306,6 +319,36 @@ def content(page_list, errors, owner=None):
             errors.append(f"{rel}: {svg.stat().st_size // 1024} KiB exceeds the {SVG_BUDGET // 1024} KiB budget")
 
 
+def seed_values(seed: int) -> list[str]:
+    """How a seed may be written: in decimal or hexadecimal, padded or not."""
+    return [str(seed), f"{seed:x}", f"{seed:016x}"]
+
+
+def printed_seeds(page_list, errors):
+    """A page names a worked example's generator; it never prints its seed.
+    The seed is seed_of(name), defined once in the pseudocode reference, so
+    a printed seed is a 20-digit number the reader gains nothing from."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent / "worked"))
+    from bookrng import seed_of
+    for path, _ in page_list:
+        rel = path.relative_to(BOOK).as_posix()
+        if rel in SEED_PAGES:
+            continue
+        text = path.read_text(encoding="utf-8")
+        lowered = text.lower()
+        lines = text.splitlines()
+        for n, line in enumerate(lines):
+            if PRINTED_SEED.search(line) and not (n and SEED_VALUE.search(lines[n - 1])):
+                errors.append(f"docs/book/{rel}:{n + 1}: prints a seed ({PRINTED_SEED.search(line).group(0)}); "
+                              "name the generator, or mark a seed that is data with <!-- seed-value: reason -->")
+        for name in sorted(set(GENERATOR_NAME.findall(text))):
+            seed = seed_of(name)
+            for form in seed_values(seed):
+                if re.search(rf"(?<![0-9a-f]){form}(?![0-9a-f])", lowered):
+                    errors.append(f"docs/book/{rel}: prints the seed of '{name}' ({form}); name the generator only")
+                    break
+
+
 def main() -> int:
     book = load()
     errors = []
@@ -314,6 +357,7 @@ def main() -> int:
     content(page_list, errors, introduced)
     recycled(page_list, errors)
     stock_sentences(page_list, errors)
+    printed_seeds(page_list, errors)
     if errors:
         print("\n".join(errors), file=sys.stderr)
         print(f"book check: {len(errors)} problem(s)", file=sys.stderr)

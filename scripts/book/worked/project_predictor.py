@@ -16,8 +16,8 @@ arguments returns a markdown string that the chapter embeds between
 `<!-- worked: project_predictor.<name> -->` markers: the acceptance tests, every
 expected value computed here by the reference itself.
 
-Randomness: every generator is the book's SplitMix64 and every seed comes from
-`bookrng.seed_of("project_predictor.<name>")`, printed with its draw order. The
+Randomness: every generator is the book's SplitMix64 and is
+named `project_predictor.<name>` (`bookrng.generator`), and the page gives its draw order. The
 multi-seed study draws its per-run seeds as raw values of one master generator.
 
 Swedish Embedded AB implements solutions for predictors whose claims can be
@@ -65,17 +65,13 @@ def _table(headers, rows, align=None):
     return "\n".join(out)
 
 
-def _seed(name):
-    return bookrng.seed_of(f"{NAME}.{name}")
-
-
 def _gen(name):
     return bookrng.generator(f"{NAME}.{name}")
 
 
-def _seed_line(name):
-    s = _seed(name)
-    return f"seed {s:#018x} ({s})"
+def _gname(name):
+    """The generator's name as the page writes it, in backticks."""
+    return f"`{NAME}.{name}`"
 
 
 def _f(v, digits=4):
@@ -618,7 +614,7 @@ def dataset_fingerprint():
     body = []
     for n in rows:
         body.append((n, d.pump[n], *(f"{v:+.6f}" for v in d.x[n]), d.c[n], f"{d.t[n]:+.6f}"))
-    out = (f"Generator: the book's SplitMix64, {_seed_line('data')}; the draws are those of `generate` in the order printed in "
+    out = (f"Generator: {_gname('data')} (the book's SplitMix64); the draws are those of `generate` in the order printed in "
            "the chapter. Selected rows (x0 .. x4, then fail and wear):\n\n")
     out += _table(["row", "pump", *[f"x{j}" for j in range(D)], "fail", "wear"], body)
     sums = [f"{sum(d.x[n][j] for n in range(d.n)):+.6f}" for j in range(D)]
@@ -647,7 +643,7 @@ def split_and_probe():
             ("validation", len(pumps[1]), len(sp.val), sum(_ys(sp.val)), pumps[1][:6]),
             ("test", len(pumps[2]), len(sp.test), sum(_ys(sp.test)), pumps[2][:6]),
             ("shift slice (site B)", G_SITE_B, len(sp.slice_b), sum(_ys(sp.slice_b)), list(range(G_SITE_A, G_SITE_A + 6)))]
-    out = (f"Generator for the split: the book's SplitMix64, {_seed_line('split')}. The pump numbers 0 .. 299 are shuffled "
+    out = (f"Generator for the split: {_gname('split')} (the book's SplitMix64). The pump numbers 0 .. 299 are shuffled "
            f"(299 integer draws, the book's shuffle); the first 180 shuffled numbers train, the next 60 validate, the last 60 "
            f"test; each set is then sorted ascending. Rows of a set are those of its pumps in ascending row number.\n\n"
            + _table(["set", "pumps", "rows", "rows with fail = 1", "first six pumps"],
@@ -658,7 +654,7 @@ def split_and_probe():
     # folds
     counts = [sum(1 for f in sp.fold_of_pump if f == j) for j in range(K_FOLDS)]
     row_counts = [sum(1 for f in sp.fold if f == j) for j in range(K_FOLDS)]
-    out += (f"\n\nFolds of the 180 training pumps: the book's SplitMix64, {_seed_line('folds')}; the training pumps, "
+    out += (f"\n\nFolds of the 180 training pumps: the generator {_gname('folds')} (the book's SplitMix64); the training pumps, "
             f"numbered 0 .. 179 in ascending pump order, are shuffled (179 integer draws) and the pump at shuffled "
             f"position p goes to fold p mod 5. Pumps per fold: {counts}. Rows per fold: {row_counts}. "
             f"First eight training pumps and their folds: "
@@ -682,7 +678,7 @@ def split_and_probe():
     out += ("\n\nLeakage probe. A model that can only memorise: label each held-out row with the label of its nearest training "
             "row (Euclidean distance on the training-standardised features, the standardiser fitted on the training rows of that protocol; "
             "on a tie the training row listed first wins; continuous data have no ties, so this never matters here). One draw of 240 scored rows is "
-            f"noisy, so the probe is repeated {N_PROBES} times. Master generator: {_seed_line('probe')}; repetition r uses the "
+            f"noisy, so the probe is repeated {N_PROBES} times. Master generator: {_gname('probe')}; repetition r uses the "
             "r-th raw value (rng.next(), counting from 0) as the seed of its own SplitMix64, which draws, in order, the shuffle "
             "of the 1200 site A row numbers (1199 integer draws; random-row protocol: the first 720 shuffled rows train, listed in "
             "shuffled order, and the next 240 are scored) and then the shuffle of the 300 site A pump numbers (299 integer "
@@ -1138,7 +1134,7 @@ def test_report():
             row("log loss, logistic minus k-NN", est_l - est_k, [a_ - b_ for a_, b_ in zip(reps["ll_l"], reps["ll_k"])]),
             row("ROC AUC, logistic minus k-NN", auc_rank(zt, yt) - auc_rank(pk, yt),
                 [a_ - b_ for a_, b_ in zip(reps["auc_l"], reps["auc_k"])])]
-    out += ("\n\nCluster bootstrap over the 60 test pumps: " + _seed_line("bootstrap") +
+    out += ("\n\nCluster bootstrap over the 60 test pumps: generator " + _gname("bootstrap") +
             f". One resample is 60 calls of rng.integer(60), in order, each the index (in ascending pump order) of a pump whose "
             f"four rows are all taken, the pumps in draw order and the rows of a pump ascending; {BOOT_RESAMPLES} resamples from one "
             "generator, all six quantities of the table and the quantities they are differences of recomputed on the same "
@@ -1184,7 +1180,7 @@ def regression_test():
         lo, hi = interval(reps[key])
         return (name, _f(r), _f(r_squared(pred, tte, tbar)), _f(lo), _f(hi))
     out = ("The 240 test rows, read once, with the weights of milestone 3 (fitted on the training rows only). Interval: the "
-           "cluster bootstrap over the 60 test pumps as in the classification report (" + _seed_line("bootstrap_regression")
+           "cluster bootstrap over the 60 test pumps as in the classification report (generator " + _gname("bootstrap_regression")
            + f", {BOOT_RESAMPLES} resamples, 60 calls of rng.integer(60) each, taken as in the classification report; percentile "
            "interval of the RMSE at q = 0.025 and 0.975).\n\n")
     out += _table(["model", "test RMSE", "R^2 (around the training mean)", "RMSE 95 percent lower", "RMSE 95 percent upper"],
@@ -1249,8 +1245,7 @@ def _boot_mean_interval(values, name):
 
 def seed_study():
     runs = _seed_runs()
-    master = _gen("seeds")
-    out = (f"{N_RUNS} runs. Master generator: {_seed_line('seeds')}; run s uses the s-th raw value (rng.next(), counting from 0) "
+    out = (f"{N_RUNS} runs. Master generator: {_gname('seeds')}; run s uses the s-th raw value (rng.next(), counting from 0) "
            "as the seed of its own SplitMix64, which draws, in order: the shuffle of the 300 site A pump numbers (299 integer "
            "draws; 180 pumps train, 60 validate, 60 test, each set sorted ascending), the shuffle of the 180 training pumps for the "
            "grouped folds (179 integer draws; the pumps numbered 0 .. 179 in ascending pump order, the pump at shuffled position p "
@@ -1265,15 +1260,15 @@ def seed_study():
     rows = []
     for i, r in enumerate(runs):
         g = r["group"]
-        rows.append((i, f"{r['seed']:#018x}", f"{g['lam']:g}", g["k"], _f(g["test_log"]), _f(g["test_knn"]), _f(r["const_test"]),
+        rows.append((i, f"{g['lam']:g}", g["k"], _f(g["test_log"]), _f(g["test_knn"]), _f(r["const_test"]),
                      _f(g["auc_log"]), _f(g["auc_knn"]), _f(r["slice_log"]), _f(r["slice_auc"])))
-    out += _table(["run", "seed", "lambda", "k", "test log loss, logistic", "k-NN", "constant", "test AUC, logistic", "k-NN",
-                   "site B log loss", "site B AUC"], rows, "lllrrrrrrrr")
+    out += _table(["run", "lambda", "k", "test log loss, logistic", "k-NN", "constant", "test AUC, logistic", "k-NN",
+                   "site B log loss", "site B AUC"], rows, "lrrrrrrrrr")
 
     def summary(name, vals, boot_name):
         lo, hi = _boot_mean_interval(vals, boot_name)
         return (name, _fs(mean(vals)) if "minus" in name else _f(mean(vals)), _f(sd(vals)), _f(lo), _f(hi),
-                f"{_seed(boot_name):#018x}")
+                _gname(boot_name))
 
     col = lambda key: [r["group"][key] for r in runs]
     rows = [summary("test log loss, logistic", col("test_log"), "seeds.ll"),
@@ -1287,9 +1282,9 @@ def seed_study():
             summary("site B ROC AUC, logistic", [r["slice_auc"] for r in runs], "seeds.sauc")]
     out += (f"\n\nOver the {N_RUNS} runs: mean, standard deviation (divisor n - 1) and a bootstrap 95 percent interval of the mean "
             f"(resample the {N_RUNS} runs with replacement, {RUN_BOOT_RESAMPLES} resamples, interval ends at the 2.5th and "
-            "97.5th percentiles of the replicated means; each row has its own generator, started at the seed in the last column; a resample is "
+            "97.5th percentiles of the replicated means; each row has its own generator, named in the last column; a resample is "
             f"{N_RUNS} calls of rng.integer({N_RUNS}), each the index of the next run to include).\n\n")
-    out += _table(["quantity", "mean", "sd", "95 percent lower", "95 percent upper", "bootstrap seed"], rows, "lrrrrl")
+    out += _table(["quantity", "mean", "sd", "95 percent lower", "95 percent upper", "bootstrap generator"], rows, "lrrrrl")
     wins = sum(1 for a, b in zip(col("test_log"), col("test_knn")) if a < b)
     out += f"\n\nRuns in which the logistic model has the smaller test log loss than k-NN: {wins} of {N_RUNS}."
     return out
@@ -1305,23 +1300,23 @@ def ablation_cv():
             gap = [a - b for a, b in zip(cv, te)]
             lo, hi = _boot_mean_interval(gap, f"ablation.{key}.{model}")
             rows.append((name, model, _f(mean(cv)), _f(mean(te)), _fs(mean(gap)), _f(lo), _f(hi),
-                         f"{_seed(f'ablation.{key}.{model}'):#018x}"))
+                         _gname(f'ablation.{key}.{model}')))
     out = (f"The {N_RUNS} runs of the seed study. The design choice: how the folds that select lambda (logistic) and k (k-NN) "
            "are drawn (grouped folds: the folds of pumps of the seed study; random row folds: the 720 training rows dealt by the "
            "row-fold shuffle of the seed study). The chosen value is the one with the smallest mean fold log loss over the five "
            "folds of the drawn kind (the larger value on a tie). 'CV estimate' is that mean fold log loss of the chosen value, the number a report would claim; 'test' is "
            "the log loss of the refitted model on the 240 test rows of the same run, from pumps never seen; gap = CV estimate "
            "minus test. The interval is a bootstrap 95 percent interval of the mean gap over the runs (2000 resamples as in the "
-           "seed study, each row with the generator seed of the last column).\n\n")
+           "seed study, each row with the generator named in the last column).\n\n")
     out += _table(["folds", "model", "mean CV estimate", "mean test log loss", "mean gap", "95 percent lower", "95 percent upper",
-                   "bootstrap seed"], rows, "llrrrrrl")
+                   "bootstrap generator"], rows, "llrrrrrl")
     g, r = runs, runs
     for model, cv_key, test_key in (("logistic", "cv_log", "test_log"), ("k-NN", "cv_knn", "test_knn")):
         diff = [a["row"][test_key] - a["group"][test_key] for a in runs]
         lo, hi = _boot_mean_interval(diff, f"ablation.test.{model}")
         out += (f"\n\nTest log loss of the {model} model chosen with row folds minus the one chosen with grouped folds, over the "
-                f"runs: mean {_fs(mean(diff), 5)}, 95 percent interval {_fs(lo, 5)} to {_fs(hi, 5)} (bootstrap seed "
-                f"{_seed(f'ablation.test.{model}'):#018x})"
+                f"runs: mean {_fs(mean(diff), 5)}, 95 percent interval {_fs(lo, 5)} to {_fs(hi, 5)} (bootstrap generator "
+                f"{_gname(f'ablation.test.{model}')})"
                 + (f"; chosen lambda differs in {sum(1 for a in runs if a['row']['lam'] != a['group']['lam'])} runs."
                    if model == "logistic" else
                    f"; chosen k differs in {sum(1 for a in runs if a['row']['k'] != a['group']['k'])} runs."))

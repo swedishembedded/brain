@@ -191,7 +191,7 @@ Both departures from the minimum cost something, as they should. Moving the mean
 Chapter 12 of Volume I showed that dividing by $n$ underestimates the variance on average: the deviations are measured from a mean fitted to the same data, so they come out too small by the factor $(n - 1)/n$. The next table checks that factor by simulation, and shows that the maximum likelihood estimate is biased and still the minimiser of the NLL.
 
 <!-- worked: likelihood.variance_bias -->
-Generator: the book's SplitMix64, seed 0x1ac5475f8760fcf7 (1929026491016871159).
+Generator: the book's SplitMix64, `likelihood.variance_bias`.
 One generator is created once and serves all 20000 repetitions. Draw order: for each repetition in turn, 5 calls of normal() (a sample from N(0, 1)); the true variance is 1. Because 5 is odd, the second value that Box-Muller produces with every other call is held and carries over into the next repetition (the generator is never re-created or re-seeded between repetitions). Each sample of 5 gives the sum of squared deviations from its own mean, divided by 5 and by 4; the table averages each over the 20000 repetitions.
 
 | divisor | average estimate | expected value |
@@ -360,7 +360,7 @@ It differs from chapter 2's normal equations by $\lambda$ on the diagonal. That 
 Eight points show the effect. A smooth curve $1 + 2x - 3x^2$ with Gaussian noise of standard deviation $0.3$ is sampled at eight values of $x$, and a polynomial of degree five, with six weights, is fitted to them. Six parameters for eight points is a model with room to follow the noise.
 
 <!-- worked: likelihood.ridge_data_table -->
-Generator: the book's SplitMix64, seed 0x73022d5a94d0abfc (8287236131382143996).
+Generator: the book's SplitMix64, `likelihood.ridge_data`.
 Draw order: for i = 0 .. 7 in turn, one call of normal(); y_i = 1 + 2 x_i - 3 x_i^2 + 0.3 * normal(); x_i = -1 + 2 i / 7.
 
 | i | x | true value | y |
@@ -469,7 +469,7 @@ A test of an implementation is that the objective never increases between update
 Twenty examples with eight features, of which only three matter, show both penalties on the same data. The ridge solution is the formula above; the lasso is the pseudocode above, run from $\mathbf{w} = \mathbf{0}$ afresh at every $\lambda$ with `tol` $= 10^{-12}$ and `max_sweeps` $= 100000$. In both, $\lambda$ increases down the table.
 
 <!-- worked: likelihood.lasso_path -->
-Generator: the book's SplitMix64, seed 0x41c428236c6fe664 (4738956840508843620).
+Generator: the book's SplitMix64, `likelihood.lasso_data`.
 Draw order: first the feature matrix X of shape [20, 8] row by row (one normal() per entry), then the 20 noise values, one normal() each; y_n = x_n . w_true + 0.5 * noise_n with w_true = (3.0, -2.0, 0.0, 0.0, 1.5, 0.0, 0.0, 0.0).
 
 Ridge: minimise 1/2 sum (y - X w)^2 + lambda/2 ||w||^2.

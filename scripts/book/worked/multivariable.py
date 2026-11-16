@@ -228,7 +228,7 @@ def cauchy_schwarz_gradient():
         d = _dot(g, [math.cos(th), math.sin(th)])
         worst, best = min(worst, d), max(best, d)
     return (f"Each direction is u = (cos t, sin t) with t = 2 pi times one uniform draw of the book's "
-            f"generator (Volume I, chapter 17), seed {bookrng.seed_of(name)}; 100000 draws in order.\n\n"
+            f"generator `{name}` (Volume I, chapter 17); 100000 draws in order.\n\n"
             + _table(["quantity", "value"], [
         ["length of the gradient", _fx(gn, 4)],
         ["largest grad . u over 100000 random unit u", _fx(best, 4)],
@@ -686,7 +686,7 @@ def gradcheck_toy():
                 bad += 1
         entry_caught += bad > 0
         frac_bad += bad / n
-    return ("One generator (Volume I, chapter 17), seed " + str(bookrng.seed_of(name)) + ", draws the "
+    return ("One generator, `" + name + "` (Volume I, chapter 17), draws the "
             "1000 problems one after another: for each, X row by row, then t, then w, all with normal(), "
             "then the four directions, each entry +1 when integer(2) is 1 and -1 otherwise (all four are always drawn). "
             "The loss is L(w) = 1/2 sum_k (x_k . w - t_k)^2; the \"analytic\" gradient omits example 0 (the first row of X); "

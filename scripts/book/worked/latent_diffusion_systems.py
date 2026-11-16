@@ -38,7 +38,12 @@ import flow_matching as fl
 import text_conditioning as tc
 import vae
 
-_table, _seed = diffusion._table, diffusion._seed
+_table = diffusion._table
+
+
+def _gen(name):
+    return f"`{name}`"
+
 
 GIB = 2 ** 30
 
@@ -779,7 +784,7 @@ def toy_setup():
         "ordered packed channel slowest and then token in raster order, so value k = 4 (packed channel) + 2 (token row) + (token column):\n\n" + t1 +
         f"\n\nData: x0 given the class c is the standardized packed latent of prototype c plus noise of standard deviation {SPREAD} in each of the "
         "32 values; the three classes are equally likely. Distances between the class means (32 values):\n\n" + t3 +
-        f"\n\nText: the table of 6 tokens by {WIDTH} numbers from {_seed(TEXT)}, `normal()` in row-major order:\n\n" + t4 +
+        f"\n\nText: the table of 6 tokens by {WIDTH} numbers from {_gen(TEXT)}, `normal()` in row-major order:\n\n" + t4 +
         f"\n\nA prompt is [`<s>`] + words + [`</s>`] padded with `<pad>` to {ROWS_R} rows; the pooled vector is the mean of the rows of the words; "
         f"the class weights are the softmax over the classes of -|pooled - row of the class word|^2/(2 x {TAU}^2); the empty prompt has "
         "weights 1/3 (what a model trained with the prompt dropped has learnt).")
@@ -813,7 +818,7 @@ def toy_stages():
         "The prototypes are in the codec's range, and the textured source is not; the source is the bar plus a texture that adds +0.25 to "
         "the pixel at row y and column x where x + y is even and -0.25 where it is odd (a checkerboard, amplitude 0.25 on both diagonals of every "
         "patch), which is exactly what the codec cannot keep, so the error is the texture's amplitude:\n\n" + t2 +
-        f"\n\nThe denoiser at sigma = 1 for the prompt `bar box` and the first noise draw of {_seed(NOISE)}: the field must be x minus the mean of "
+        f"\n\nThe denoiser at sigma = 1 for the prompt `bar box` and the first noise draw of {_gen(NOISE)}: the field must be x minus the mean of "
         f"the class means weighted by the prompt, and the largest difference is {e1:.1e}. The posterior weights there are the prompt's: "
         f"{w[0]:.4f}, {w[1]:.4f}, {w[2]:.4f}.\n\nThe schedule of 8 steps on FLUX.1's rule at 4 tokens (mu = {mu_flux1(4):.7f} unrounded: 0.5 + (4 - 256) x 0.65 / 3840, and all these digits are used):\n\n" + t3)
 
@@ -841,7 +846,7 @@ def sampling_table(n=100):
         rows2.append([str(steps), f"{sum(dd) / len(dd):.4f}", f"{max(dd):.4f}", f"{sum(sp) / len(sp):.4f}"])
     t2 = _table(["Euler steps", "mean distance to the 512-step result", "largest", "mean distance to the box mean"], rows2)
     return (
-        f"{n} starting noises (the first {n} draws of 32 numbers from {_seed(NOISE)}, in order), the same for every row, sampled with 8 Euler "
+        f"{n} starting noises (the first {n} draws of 32 numbers from {_gen(NOISE)}, in order), the same for every row, sampled with 8 Euler "
         "steps of `toy_sigmas` and the guided field u_un + g (u_c - u_un). The columns count the samples whose nearest class mean is "
         "each class; the last is the mean distance of a sample to its nearest class mean (data have 0.2 sqrt(32) = 1.13 on average).\n\n"
         + t1 + "\n\nConvergence of the steps for the prompt `box` at g = 2 on the first 20 noises, against the same sampler at 512 steps.\n\n" + t2)
@@ -895,7 +900,7 @@ def mask_table():
     right_err = _rms([r[4:] for r in gen], [r[4:] for r in prototype("box")])
     hard_img = [[src[y][xp] + hard[xp] * (gen[y][xp] - src[y][xp]) for xp in range(8)] for y in range(8)]
     return (
-        f"A masked run of the toy: the source with the texture, the prompt `box`, g = 2, 8 steps, the first noise of {_seed(NOISE)}, and the "
+        f"A masked run of the toy: the source with the texture, the prompt `box`, g = 2, 8 steps, the first noise of {_gen(NOISE)}, and the "
         "mask 0 on the two left tokens, at (row, column) = (0, 0) and (1, 0), raster indices 0 and 2, and 1 on the two right ones, "
         "raster indices 1 and 3, for all 8 packed channels of each. After every Euler step the kept "
         "tokens are replaced by (1 - sigma) x0 + sigma eps at the sigma just reached (x0 itself when it is 0). The largest difference between "

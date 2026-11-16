@@ -246,7 +246,7 @@ def single_sample_estimates():
     rows.append(["exact", "", "", "", "", "", _fmt(g[1], 3), _fmt(g[1], 3)])
     top = (
         f"Eight single-sample estimates of the gradient at theta_B = {THETA_B}, pi = ({', '.join(_fmt(p, 4) for p in pi)}), "
-        f"J = {_fmt(j, 4)}. Generator: the book's SplitMix64, seed {bookrng.seed_of(name):#018x} ({bookrng.seed_of(name)}), "
+        f"J = {_fmt(j, 4)}. Generator: the book's SplitMix64, `{name}`, "
         f"one generator for the whole table. Each sample draws, in this order, one uniform() ua for the action (inverse CDF: the "
         f"first a whose running sum of pi exceeds ua) and one uniform() ud for the demand (D = 0 if ud < 0.3, 1 if ud < 0.7, "
         f"otherwise 2). The estimate is (y - b)(e_a - pi), with e_a the vector that is 1 at a and 0 elsewhere; the table shows "
@@ -292,7 +292,7 @@ def estimator_moments():
         f"sum pi(a) p(d) y(a, d) |e_a - pi|^2 / sum pi(a) p(d) |e_a - pi|^2 = {_fmt(b_star, 4)}. 'Exact' columns enumerate "
         f"the twelve outcomes (a, d) with probability pi(a) p(d): the bias is the largest entry of |E[estimate] - gradient|, the "
         f"total variance is E|estimate|^2 - |gradient|^2 (the sum of the four entry variances). 'Sampled' columns use "
-        f"{MOMENT_DRAWS} draws of (a, d) from the generator of seed {bookrng.seed_of(name):#018x} (one uniform() for the action, "
+        f"{MOMENT_DRAWS} draws of (a, d) from the generator `{name}` (one uniform() for the action, "
         f"then one for the demand, in this order per draw; the same draws serve every b): the mean of entry k = 1 (summed in "
         f"draw order, divisor {MOMENT_DRAWS}) and the sample total variance (divisor {MOMENT_DRAWS} - 1)."
     )
@@ -528,17 +528,14 @@ def policy_gradient_runs():
         final.append(vl._same(counts) + f" of {RUN_RUNS}")
     rows.append(final)
     zero = [[0.0] * NA[s] for s in range(N)]
-    seeds = vl._table(["run", "REINFORCE", "REINFORCE with baseline", "actor-critic"],
-                      [[i] + [f"{bookrng.seed_of(_run_names(m)[i]):#018x}" for m, _l in RUN_METHODS] for i in range(RUN_RUNS)],
-                      align="rrrr")
     top = (
         f"The shop, gamma = {GAMMA}, tabular softmax policy with preferences theta[s][a] starting at 0 (the uniform policy over "
         f"the legal orders, J = {_fmt(_return_of(zero), 4)}); the best policy (1, 0, 0, 0) has J = {_fmt(J_STAR, 4)}. An "
         f"episode is {RUN_DAYS} days: a start shelf from integer({N}), then per day one uniform() for the action (inverse CDF "
         f"over pi(. | s)) and one for the demand, in this order. Three learners, {RUN_RUNS} runs each of {RUN_EPISODES} "
-        f"episodes, every run with its own generator (the SplitMix64 of the book seeded with seed_of of the name "
-        f"policy_gradients.runs.<method>.run<i>, method = reinforce, baseline or actor_critic, i = 0 .. {RUN_RUNS - 1}; every "
-        f"run restarts from its own seed, seeds below). REINFORCE: after an episode the return of day t is the reward-to-go "
+        f"episodes, every run with its own generator (the SplitMix64 of the book, named "
+        f"`policy_gradients.runs.<method>.run<i>`, method = reinforce, baseline or actor_critic, i = 0 .. {RUN_RUNS - 1}; every "
+        f"run restarts its own generator). REINFORCE: after an episode the return of day t is the reward-to-go "
         f"G_t = r_t + gamma G_(t+1) from G_{RUN_DAYS} = 0, the gradient is the sum over the days t = 0 .. {RUN_DAYS - 1} in order "
         f"of gamma^t (G_t - b) (e_(a_t) - pi(. | s_t)) added to the preferences of s_t (gamma^t is a running product, all "
         f"pi taken from the preferences as they stood at the start of the episode), and the preferences move by "
@@ -553,7 +550,7 @@ def policy_gradient_runs():
         f"largest preference of each shelf, the smaller action on a tie) is (1, 0, 0, 0)."
     )
     table = vl._table(["episodes", "days", "REINFORCE", "REINFORCE with baseline", "actor-critic"], rows, align="rrrrr")
-    return "\n".join([top, "", table, "", RULE_TEXT, "", seeds])
+    return "\n".join([top, "", table, "", RULE_TEXT])
 
 
 def _mean_curve(method):
@@ -656,7 +653,7 @@ def advantage_estimates():
         f"(gamma lambda)^k delta_k with delta_k = r_k + gamma Vhat(s_(k+1)) - Vhat(s_k) along a rollout that makes the order a on "
         f"day 0 and follows the policy afterwards, the critic's value of the state reached after the {GAE_DAYS}th day closing the "
         f"sum (computed backwards, A = delta + gamma lambda A). Sampled: {GAE_ROLLOUTS} rollouts for each a = 0 .. 3 in this order, "
-        f"from the generator of seed {bookrng.seed_of(name):#018x}; each day after the first draws one uniform() for the action "
+        f"from the generator `{name}`; each day after the first draws one uniform() for the action "
         f"(inverse CDF) and then one for the demand, and the first day only the demand; the same rollouts serve both critics and "
         f"every lambda. 'sd' is the root of the mean over the four orders of the variance of A_hat (divisor {GAE_ROLLOUTS} - 1). "
         f"'Bias' is exact, from the Markov chain (E[A_hat] - A for the infinite sum): the four columns are for the stale critic "
@@ -754,8 +751,8 @@ def ppo_batch():
     rows = [[a, d, n, _fmt(Y[a][d], 4), _fmt(Y[a][d] - mean, 4)] for (a, d), n in sorted(counts.items())]
     top = (
         f"One batch of {PPO_BATCH} samples from the behaviour policy pi_old = softmax{THETA_B} = "
-        f"({', '.join(_fmt(p, 4) for p in pi_old)}). Generator: the book's SplitMix64, seed {bookrng.seed_of(name):#018x} "
-        f"({bookrng.seed_of(name)}); per sample one uniform() for the action (inverse CDF) and then one for the demand "
+        f"({', '.join(_fmt(p, 4) for p in pi_old)}). Generator: the book's SplitMix64, `{name}`; "
+        f"per sample one uniform() for the action (inverse CDF) and then one for the demand "
         f"(D = 0 if below 0.3, 1 if below 0.7, otherwise 2), the samples in drawing order. The outcome is y(a, d) of the one-day "
         f"bandit and the advantage of a sample is y minus the batch mean {_fmt(mean, 4)} (summed in sample order, divisor "
         f"{PPO_BATCH}). The objective depends on a sample only through (a, A), so the table lists each outcome that occurs "
@@ -860,7 +857,7 @@ def clip_over_batches():
         rows.append([label, vl._same([f"{b} of {PPO_BATCHES}" for b in below]), _cell(mean, 4), _cell(worst, 4), _cell(kl, 4)])
     top = (
         f"{PPO_BATCHES} independent batches of {PPO_BATCH} samples, batch i drawn exactly as in the batch table but by the "
-        f"generator named policy_gradients.batches.batch<i> (seed_of of that name, i = 0 .. {PPO_BATCHES - 1}): per sample one "
+        f"generator named `policy_gradients.batches.batch<i>`, i = 0 .. {PPO_BATCHES - 1}: per sample one "
         f"uniform() for the action (inverse CDF over pi_old = softmax{THETA_B}) and then one for the demand, the advantage "
         f"the sample's y minus the batch's mean y. On each batch the run of the epochs table starts from theta_B and takes "
         f"{PPO_EPOCHS} steps (eta = {PPO_ETA}), clipped (eps = {PPO_EPS}) or unclipped. 'Below' counts the batches whose true "

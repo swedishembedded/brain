@@ -215,7 +215,7 @@ def hard_pixels(depth):
 def standin_rule():
     """The complete recipe of the room's stand-in as page text, from the constants the code uses."""
     nhard = sum(sum(hard_pixels(c["z"])) for c in room())
-    return (f"The stand-in (`bookrng.generator(\"{STAND_NAME}\")`, seed {bookrng.seed_of(STAND_NAME)}) is built as follows. Let z be the "
+    return (f"The stand-in (the generator `{STAND_NAME}`) is built as follows. Let z be the "
             f"true camera depth of a pixel, (x, y) = ((i + 0.5 - c_x) / f, (j + 0.5 - c_y) / f) its normalized coordinates, "
             f"s = {SCALE_UNKNOWN} the scale of its world, and a pixel *hard* when its true depth differs from that of a 4-neighbour "
             f"by more than {HARD_JUMP:g} of the smaller of the two (the silhouettes: {nhard} of the {3 * W * H} pixels). For camera v "
@@ -340,8 +340,7 @@ def camera_from_pointmap():
         f"the pose (R, C) is the rigid map from these points to the pointmap entries over all {W * H} pixels (the Umeyama fit with "
         "the scale held at 1; the pointmap of the stand-in is in the stand-in's units, so its centre error is divided by the scale "
         f"{SCALE_UNKNOWN} to read in metres). Columns: the rotation error in degrees and the centre error in metres of the pose "
-        "from exact maps, and of the pose from the stand-in's depth head and pointmap head (`feed_forward_3d.standin`, seed "
-        f"{bookrng.seed_of(STAND_NAME)}).", "", standin_rule(), "",
+        "from exact maps, and of the pose from the stand-in's depth head and pointmap head (the generator `feed_forward_3d.standin`).", "", standin_rule(), "",
         _table(["camera", "rotation error, exact (deg)", "centre error, exact (m)", "rotation error, stand-in (deg)",
                 "centre error, stand-in (m)"], rows, "rrrrr"), "",
         f"The intrinsics read back from the exact camera-frame points of camera 1 by the line u = c_x + f (X / Z) are f_x = {fx:.6f}, "
@@ -425,7 +424,7 @@ def scale_alignment():
     rows2.append(["rotated and shifted", "similarity, 7 numbers", f"s = {s7:.4f}", f"{rel_rms(best):.4f}"])
     back = mm(R7, Rg)                                  # the fitted rotation undoes the frame change: R7 Rg = the identity
     return "\n".join([
-        f"The depth head of the stand-in (`feed_forward_3d.standin`, seed {bookrng.seed_of(STAND_NAME)}) is {SCALE_UNKNOWN} of the "
+        f"The depth head of the stand-in (the generator `feed_forward_3d.standin`) is {SCALE_UNKNOWN} of the "
         "true depth on average, with a smooth bias per view and noise. AbsRel = mean |prediction - truth| / truth over the "
         f"{W * H} pixels of each view, under four ways of aligning it with the truth first. 'One scale for all three' is the median over "
         f"all {3 * W * H} pixels of truth / prediction; 'one scale per view' is the same median per view; the last row fits scale and "
@@ -1142,8 +1141,8 @@ def seed_or_replace():
         ["reference: true cameras and points, all 240 true observations", f"{npt} / {npt * nv}", fmt3(et, 0), fmt3(et, 1), f"{rmst:.4f}"],
     ]
     return "\n".join([
-        f"The sparse scene of Chapter 4 (seed {bookrng.seed_of(sfm.SCENE_NAME)} for the points, {bookrng.seed_of(sfm.NOISE_NAME)} for the pixel "
-        f"noise) with the stand-in's pointmaps at the 60 keypoints (`feed_forward_3d.sparse`, seed {bookrng.seed_of(SPARSE_NAME)}). "
+        f"The sparse scene of Chapter 4 (the generators `{sfm.SCENE_NAME}` for the points and `{sfm.NOISE_NAME}` for the pixel "
+        f"noise) with the stand-in's pointmaps at the 60 keypoints (the generator `{SPARSE_NAME}`). "
         "The sparse stand-in follows the rule of the room's (the first worked block of the section on cameras), with the 60 projections of "
         "the noise-free pixels in place of a pixel grid: for view v = 0 to 3 in turn, six `normal()` draws for the biases of the depth head "
         "and the pointmap head (standard deviations 0.02, 0.01, 0.01), then for each point j = 0 to 59 five `normal()` draws "

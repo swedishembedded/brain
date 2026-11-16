@@ -335,8 +335,8 @@ def _text_cell(vals):
     return str(vals[0]) if all(v == vals[0] for v in vals) else "unstable"
 
 
-def _seed_line(name):
-    return f"`{name}` (seed {bookrng.seed_of(name):#018x}, {bookrng.seed_of(name)})"
+def _gen_name(name):
+    return f"`{name}`"
 
 
 def _digits_text(v):
@@ -368,7 +368,7 @@ def tasks():
     return (
         f"The family: an input is a number m in 0 .. {N_INPUTS - 1} and its five digits are x_i = floor(m / 3^i) mod 3 for i = 0 .. 4, "
         f"least significant first. The target digit j is t_j = (x_j + j + 1) mod 3 (the planted generator bug of milestone 8 uses "
-        f"(x_j + j) mod 3). The generator {_seed_line(SPLIT)} shuffles the list 0, 1, ..., {N_INPUTS - 1} with the book's shuffle "
+        f"(x_j + j) mod 3). The generator {_gen_name(SPLIT)} shuffles the list 0, 1, ..., {N_INPUTS - 1} with the book's shuffle "
         f"(i from {N_INPUTS - 1} down to 1, j = integer(i + 1), swap positions i and j); the first {PROBES} numbers of the shuffled "
         f"list are the probe inputs, the next {AUDIT} the audit inputs and the next {POOL} the training pool, and the remaining "
         f"{N_INPUTS - PROBES - AUDIT - POOL} are not used. The pool in order: {', '.join(map(str, POOL_IN))}. The digest of a slice "
@@ -469,7 +469,7 @@ def policy():
         f"three digits, so the probability of the first `level` target digits is 3^-level.\n\n"
         + _table(["level", "success of input m = " + str(m), "3^-level", "mean over the 48 probe inputs"], rows, "rrrr")
         + f"\n\nA digit is drawn by the inverse CDF of Chapter 3: one `uniform()` from the generator, the first digit whose running "
-        f"sum of probabilities exceeds it. At theta = 0 the first six draws of the generator {_seed_line(DEMO)} are "
+        f"sum of probabilities exceeds it. At theta = 0 the first six draws of the generator {_gen_name(DEMO)} are "
         f"{', '.join(f'{u:.6f}' for u in us)}, which give the digits {', '.join(map(str, draws))} (the thresholds are 1/3 and 2/3; "
         f"the position-0 probabilities of input {m} are {', '.join(f'{v:.6f}' for v in p)}).\n\n"
         f"Gradient check. For the starting point theta_k = ((37 k) mod 101 - 50) / 500 for k = 0 .. {N_PARAM - 1}, the input m = {m}, level 3 and "
@@ -498,7 +498,7 @@ def one_step():
     before = probe_success(theta, PROBE_IN, level)
     after = probe_success(new, PROBE_IN, level)
     return (
-        f"One step from theta = 0 at level {level}. The generator is {_seed_line(STEP_DEMO)}, used as the training run uses it: first "
+        f"One step from theta = 0 at level {level}. The generator is {_gen_name(STEP_DEMO)}, used as the training run uses it: first "
         f"B = {TASKS_PER_STEP} draws `integer(24)` choose the pool entries (with replacement), then for each task in order and each of its "
         f"{GROUP} answers in order, level = {level} draws `uniform()`, one per output position. An answer is the digits that come out. "
         f"The group advantage is r - mean(r) (0 for a group whose rewards are all equal); every token of an answer carries the advantage "
@@ -570,7 +570,7 @@ def curriculum_run():
     flat_total = _int_cell([sum(r.flat) for r in rs])
     flat_fixed = _int_cell([sum(r.flat) for r in fx])
     return (
-        f"The headline run: generator {_seed_line(_run_name(0))}, the policy of milestone 2 from theta = 0 (theta[0] nudged in the four copies), the loop of "
+        f"The headline run: generator {_gen_name(_run_name(0))}, the policy of milestone 2 from theta = 0 (theta[0] nudged in the four copies), the loop of "
         f"milestones 3 to 5 for {STEPS} steps. Each step draws, in this order, {TASKS_PER_STEP} pool entries (`integer(24)` each) and then, task by "
         f"task, answer by answer and position by position, one `uniform()` per output digit, from one generator that is never restarted within the run. "
         f"The level starts at 1. After the update of step s the mean success of the {PROBES} probe inputs at the level used in step s is computed "
@@ -731,7 +731,7 @@ def rollback():
     return (
         f"The faulty candidate. Take the trainer's state at step {BUG_AT} (the snapshot of milestone 6, at level {_int_cell([o['level'] for o in out])}) and train it for "
         f"{BUG_STEPS} more steps with the loop of milestone 5 at that level, but with a sign error in the update: theta - eta x grad in place of theta + eta x grad "
-        f"in both epochs of every step (the sampling, the advantages and the clipping are unchanged). The generator is {_seed_line(BUG)}, "
+        f"in both epochs of every step (the sampling, the advantages and the clipping are unchanged). The generator is {_gen_name(BUG)}, "
         f"restarted for this candidate. It is judged against the version served when the snapshot of step {BUG_AT} was judged.\n\n"
         + _table(["", "level 1", "level 2", "level 3", "level 4", "level 5"], rows, "lrrrrr")
         + f"\n\nThe decision of the paired gate is '{_text_cell([fmt(o['g_paired']) for o in out])}', and that of the unpaired gate '{_text_cell([fmt(o['g_unpaired']) for o in out])}'. "
@@ -851,7 +851,7 @@ def opening():
                      _int_cell([sum(1 for q in p[0] if q["decision"] == "promote") for p in ps]),
                      _cell([_mean_scores(p[1][p[2]][2], 5) for p in ps], 3)])
     return (
-        f"Five builds of the agent, all from the generator {_seed_line(_run_name(0))}, each trained for {STEPS} steps. 'Reward seen' is the mean reward the trainer was "
+        f"Five builds of the agent, all from the generator {_gen_name(_run_name(0))}, each trained for {STEPS} steps. 'Reward seen' is the mean reward the trainer was "
         f"paid for the answers of its last 10 steps (steps {STEPS - 9} to {STEPS}), with the verifier that build uses; 'level' is the level the trainer used in step "
         f"{STEPS}; 'probe level 5' is the mean success of the exact probe bank at level 5, for the trainer's final policy; 'promoted' counts the snapshots (of "
         f"{STEPS // EVERY}) that the build's gate admitted as the served version, and 'served level 5' is the probe success at level 5 of the version served after the "

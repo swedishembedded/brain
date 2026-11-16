@@ -103,8 +103,7 @@ def _int(v):
 
 
 def _seed(name):
-    s = bookrng.seed_of(name)
-    return f"`{name}` (seed 0x{s:016x})"
+    return f"`{name}`"
 
 
 # ------------------------------------------------------------------ the network
@@ -571,8 +570,7 @@ def linear_vs_pca():
     sub_rows = [[f"principal direction {j + 1}", _fx(inside[j], 5)] for j in range(4)]
     cos_rows = [[f"decoder column {c + 1}"] + [_fx(cos[c][j], 3) for j in range(3)] for c in range(3)]
     return ("Linear autoencoders 16 -> k -> 16 (no activation), trained by the loop of the autoencoder's training log: AdamW (0.9, 0.999, 1e-8), batch 32, 400 epochs of 8 steps, clip 1.0, decay 0, "
-            "warmup of a tenth of the steps then cosine from 0.03 to 0.0003, the shuffle stream of that log (one shuffle of 0 .. 255 per epoch); weights N(0, 1/n_in) row by row, layer by layer, biases 0, from the generator `first_models.lin_init.k` with seeds "
-            + ", ".join(f"k = {k}: {_seed(f'first_models.lin_init.{k}')}" for k in (1, 2, 3, 4)) + ". The reported weights are those of the epoch with the lowest validation loss; training, validation and test errors are the mean squared error per entry on the three splits. "
+            "warmup of a tenth of the steps then cosine from 0.03 to 0.0003, the shuffle stream of that log (one shuffle of 0 .. 255 per epoch); weights N(0, 1/n_in) row by row, layer by layer, biases 0, from the generators `first_models.lin_init.k` for k = 1, 2, 3, 4. The reported weights are those of the epoch with the lowest validation loss; training, validation and test errors are the mean squared error per entry on the three splits. "
             "The PCA errors are those of the best rank-k reconstruction fitted on the training set.\n\n" + sweep +
             "\n\nBottleneck 3. Length of the projection of each principal direction (unit vector) onto the span of the decoder's three columns (1 means inside the span):\n\n" +
             _table(["direction", "length of projection"], sub_rows) +

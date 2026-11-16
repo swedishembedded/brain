@@ -65,14 +65,8 @@ HELD_GAUSSIAN = (" A normal() call that finds a held value returns it without dr
                  "of a series is carried into the next one (the generator is never reset).")
 
 
-def _seed_text(name):
-    seed = bookrng.seed_of(name)
-    return f"seed {seed:#018x} ({seed})"
-
-
 def _generator_line(name, normal=True):
-    seed = bookrng.seed_of(name)
-    return f"Generator: the book's SplitMix64, seed {seed:#018x} ({seed})." + (HELD_GAUSSIAN if normal else "")
+    return f"Generator: `{name}` (the book's SplitMix64)." + (HELD_GAUSSIAN if normal else "")
 
 
 def _mean(x):
@@ -386,7 +380,7 @@ def baselines():
             f"last {SEASON} values of the past, repeated. seasonal naive: y_({CUT - SEASON} + (h mod {SEASON})). seasonal naive with drift: that "
             f"value plus delta * {SEASON} * (floor(h / {SEASON}) + 1). The last two rows are defined in the next two sections. MAE and RMSE are "
             f"over the {HORIZON} forecast bars (divisor {HORIZON}). The last column is the MAE averaged over {REPLICATES} further series "
-            f"drawn by the same recipe from one SplitMix64 generator ({_seed_text(REPLICATES_NAME)}), "
+            f"drawn by the same recipe from one SplitMix64 generator, `{REPLICATES_NAME}`, "
             f"each with its {N} draws in turn, cut and forecast in the same way.\n\n")
     return head + _table(["forecast", "MAE", "RMSE", f"mean MAE over {REPLICATES} series"],
                          [(n, f"{a:.3f}", f"{b:.3f}", f"{c:.3f}") for n, a, b, c in rows])
@@ -442,7 +436,7 @@ def ar_horizons():
             for i, h in enumerate(hs):
                 errs[k][i].append(abs(p[h - 1] - future[h - 1]))
     rows = [(h, *(f"{_mean(errs[k][i]):.3f}" for k in cols)) for i, h in enumerate(hs)]
-    head = (f"The {REPLICATES} series of the baseline table (seed {bookrng.seed_of(REPLICATES_NAME):#018x}), each cut at {CUT}. For the "
+    head = (f"The {REPLICATES} series of the baseline table (generator `{REPLICATES_NAME}`), each cut at {CUT}. For the "
             f"horizon h (1 = the first forecast bar, y_{CUT}) the table gives the mean over the series of the absolute error |forecast - y| "
             f"at that one bar.\n\n")
     return head + _table(["horizon h (bars)", *cols], rows)
@@ -515,7 +509,7 @@ def window_policies():
             f"index of its first forecast bar: its context is bars o - {c} .. o - 1 and its forecast bars o .. o + {h - 1}, so the origins "
             f"are {c} .. {n - h} ({len(_origins())} windows). The train fraction is {TRAIN_FRAC} and the cut is floor({n} * {TRAIN_FRAC}) "
             f"= {train_end}; the purge-and-embargo rows follow the rule of the pseudocode above (temporal_split) with no validation set. The random row "
-            f"shuffles the {len(_origins())} origins (in increasing order before the shuffle; SplitMix64 {_seed_text(POLICY_NAME)}) "
+            f"shuffles the {len(_origins())} origins (in increasing order before the shuffle; SplitMix64 generator `{POLICY_NAME}`) "
             f"and takes the first {len(_policies()[2][1])} as training windows and the next {len(_policies()[2][2])} as holdout windows. "
             f"'holdout label bars' counts the distinct bars among the forecast bars of the holdout windows; the last two columns count "
             f"how many of them are also a forecast bar of a training window, and how many are a bar of the context or the forecast of a "
@@ -602,8 +596,7 @@ def _leak_runs():
 
 
 def _leak_head():
-    seed = bookrng.seed_of(LEAK_NAME)
-    return (f"Generator: the book's SplitMix64, seed {seed:#018x} ({seed}).{HELD_GAUSSIAN} {LEAK_REPS} series of the recipe of the first "
+    return (f"Generator: `{LEAK_NAME}` (the book's SplitMix64).{HELD_GAUSSIAN} {LEAK_REPS} series of the recipe of the first "
             f"table, each {N} calls of normal() in turn, followed by the shuffle of its {len(_origins())} origins {CONTEXT} .. {N - WINDOW_H} "
             f"(in increasing order before the shuffle). Windows have c = {CONTEXT} and h = {WINDOW_H}. The forward split is the "
             f"purge-and-embargo rule with embargo 0 and no validation set, so {len(_temporal_split(N, CONTEXT, WINDOW_H, TRAIN_FRAC, VAL_FRAC, 0)[0])} "
@@ -682,7 +675,7 @@ def scaling_panel():
         rows.append((level, f"{sdy:.3f}", f"{sdy / ps:.4f}", f"{st / ps:.5f}", f"{st / sdy:.4f}", f"{st * st / total:.6f}"))
     head = ("Three series of 120 bars, one per level L in 5, 50 and 500, each y_t = L (1 + 0.004 t + 0.25 sin(2 pi t / 12) + v_t) with "
             "v_t = 0.7 v_(t-1) + 0.04 normal(), v_(-1) = 0 and the 120 draws of normal() in turn from its own generator "
-            f"(seeds {', '.join(f'{bookrng.seed_of(f"time_series.panel.{lv}"):#018x}' for lv in PANEL_LEVELS)} for L = "
+            f"(the generators `time_series.panel.<L>` for L = "
             f"{', '.join(str(lv) for lv in PANEL_LEVELS)}). Only bars 0 .. {train_end - 1} are used. The pooled scaler subtracts the mean "
             f"({pm:.2f}) and divides by the standard deviation ({ps:.2f}, divisor n) of all {3 * train_end} of these values together; "
             "sd(y) and sd(step) are the standard deviations (divisor n) of the series and of its first differences in the units the "

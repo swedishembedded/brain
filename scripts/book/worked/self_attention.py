@@ -16,7 +16,7 @@ chapter's figures, so a picture and the table beside it cannot disagree.
 * the FLOPs of the projections and of the score and average products, the bytes of the score matrix and the depth;
 * a one-layer attention model trained on a lookup task, against the same model with uniform weights.
 
-Every random quantity comes from the book's SplitMix64 (`bookrng.generator(name)`); each block prints the seed. Sums of
+Every random quantity comes from the book's SplitMix64 (`bookrng.generator(name)`); each block names its generator. Sums of
 products are plain left-to-right additions, the order a C loop would use (never Python's `sum`, which may compensate).
 Numbers of trained models are printed by the stable-digits rule of `stable.py`.
 
@@ -56,7 +56,7 @@ def _vec(v, d=2):
 
 
 def _seed_line(name):
-    return f"Generator: the book's SplitMix64, seed {bookrng.seed_of(name):#018x} (`seed_of` of the name `{name}`)."
+    return f"Generator: the book's SplitMix64, `{name}`."
 
 
 def _round1(x):
@@ -790,7 +790,7 @@ def lookup_task():
             "draws, in this order: `shuffle([0, 1, 2, 3], rng)`, of which the first three entries are the keys of the three "
             f"pairs; `integer(4)` three times for their values; `integer(3)` for the index of the key that is asked. The input is "
             "the three pair tokens in that order followed by the query token (T = 4); the target is the value of the asked key. "
-            f"Three examples from `self_attention.lookup.examples` ({bookrng.seed_of('self_attention.lookup.examples'):#018x}):\n\n"
+            f"Three examples from `self_attention.lookup.examples`:\n\n"
             + _table(["input (T = 4 tokens)", "target"], rows, "ll")
             + f"\n\nA model that does not use the pairs can only guess one of 4 values: loss ln 4 = {_fx(math.log(4), 4)} nats, "
             f"accuracy 0.25. A model that sees which values occur among the three pairs but cannot tell which key each belongs to can "
@@ -813,22 +813,22 @@ def lookup_training():
         for run in RUNS:
             cells = [_stable_cell(model, run, lambda r, c=c: r["curve"][c], 4) for c in CHECKPOINTS]
             acc = _stable_cell(model, run, lambda r: r["right"] / N_TEST, 3)
-            rows.append((model, run, f"{bookrng.seed_of(f'self_attention.lookup.init.{model}.{run}'):#018x}", *cells, acc))
+            rows.append((model, run, *cells, acc))
     return (f"Training: Adam (learning rate {LR}, beta1 {BETA1}, beta2 {BETA2}, epsilon {EPS_ADAM:g}, with the bias correction of "
             f"Volume III), minibatches of {BATCH} fresh examples, {STEPS} updates, no clipping. Examples come from the generator "
             "`self_attention.lookup.train.<run>`, so the two models of a run see the same ones; the parameters are drawn "
-            "from `self_attention.lookup.init.<model>.<run>` (seeds in the table; the uniform model draws the same parameters, "
+            "from `self_attention.lookup.init.<model>.<run>` (the model and the run being those of the row; the uniform model draws the same parameters, "
             "including the W_Q and W_K it does not use). The 'uniform' model replaces every attention weight by 1 over the positions the "
             "mask allows, so the logits are W_O applied to the mean of the four value vectors x_t W_V of the whole input (weight 1/4 "
             "on each of the four positions, the query token included). In the uniform model the parameters that train are E, W_V and W_O; W_Q and W_K "
             "stay at their initial values, because the scores do not reach the output and the backward pass sets the gradient "
             "of the scores to zero; the gradient of E is the one through W_V alone. "
             f"A loss column is the mean of the {WINDOW} batch losses that end at that step. Accuracy is the "
-            f"fraction of the {N_TEST} test examples of `{NAME_LOOKUP_TEST}` ({bookrng.seed_of(NAME_LOOKUP_TEST):#018x}) "
+            f"fraction of the {N_TEST} test examples of `{NAME_LOOKUP_TEST}` "
             "whose largest logit (first on a tie) is the target. Rounding noise grows into any difference in a trained network. "
             + stable.RULE + "\n\n"
-            + _table(["model", "run", "seed of the initial parameters"] + [f"loss, step {c}" for c in CHECKPOINTS] + ["test accuracy"],
-                     rows, "llr" + "r" * 5)
+            + _table(["model", "run"] + [f"loss, step {c}" for c in CHECKPOINTS] + ["test accuracy"],
+                     rows, "ll" + "r" * 5)
             )
 
 
@@ -841,7 +841,7 @@ def lookup_attention():
         rows.append((model, *w, reorder))
     ids, y = _lookup_example(bookrng.generator("self_attention.lookup.shown"))
     names = " ".join(f"`{_token_name(t)}`" for t in ids)
-    return (f"Run 0 on the example from `self_attention.lookup.shown` ({bookrng.seed_of('self_attention.lookup.shown'):#018x}): "
+    return (f"Run 0 on the example from `self_attention.lookup.shown`: "
             f"the input {names}, so the target is `V{y}`. The row of attention weights of the query position (the last) over "
             "the positions 1 to 4, and the largest difference of the logits when the three pairs are reordered "
             "(pairs 3, 1, 2 in that order, query last). Weights are printed by the "

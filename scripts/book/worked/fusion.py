@@ -20,7 +20,7 @@ is stated in bytes: the larger of its bytes and its FLOPs divided by the ridge
 point (the time of Chapter 3's roofline multiplied by the bandwidth), plus the
 fixed costs of starting work, two labelled parameters. The kernel simulator is
 Chapter 5's. Randomness comes from the book's own generator
-(`bookrng.generator("fusion.<example>")`) and is printed with its seed.
+(`bookrng.generator("fusion.<example>")`) and is named in its block.
 
 Swedish Embedded AB implements solutions for removing the memory round trips
 between the small kernels of a machine learning workload. If your team needs
@@ -80,7 +80,7 @@ def _yes(flag):
 
 
 def _seed_note(name):
-    return f"Generator: the book's SplitMix64, seed {bookrng.seed_of(name):#018x} (the seed of the name `{name}`)."
+    return f"Generator: `{name}` (the book's SplitMix64)."
 
 
 def _f32(x):

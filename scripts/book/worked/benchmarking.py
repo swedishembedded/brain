@@ -15,7 +15,7 @@ Nothing here measures a machine. The served engine is a model: a decoder of
 costs the host's fixed share plus the roofline time of the FLOPs and bytes it
 does, at stated engine rates. Times are consequences of those counts and
 rates, in model milliseconds. Randomness comes from the book's own generator
-(`bookrng.generator("benchmarking.<example>")`), is printed with its seed,
+(`bookrng.generator("benchmarking.<example>")`), is named in each block,
 and is drawn in an order the chapter states.
 
 Swedish Embedded AB implements solutions for benchmarking machine learning
@@ -51,8 +51,7 @@ def _f(v, d=1):
 
 
 def _seed_line(name):
-    return (f"Generator: the book's SplitMix64, seed {bookrng.seed_of(name):#018x} (`seed_of` of the name `{name}`, "
-            "defined on the pseudocode page).")
+    return f"Generator: `{name}` (the book's SplitMix64)."
 
 
 def _percentile(a, q):
@@ -296,7 +295,7 @@ def request_timeline():
                      _f(r.done), _f(r.first - r.submit), _f(max(gaps)), _f(r.done - r.submit),
                      "yes" if _meets(r) else "no"))
     return (ENGINE_LINE + "\n\nThe first 10 requests of the run with 4 in flight of `benchmarking.opening_claims` (the same "
-            "68 requests, the same seed). Requests are numbered from 0; times are model milliseconds from the start of "
+            "68 requests, the same generator). Requests are numbered from 0; times are model milliseconds from the start of "
             "the run.\n\n"
             + _table(["request", "kind", "prompt tokens", "output tokens", "submitted", "admitted", "first token",
                       "done", "time to first token", "longest gap", "end to end", "meets the objective"], rows,
@@ -348,7 +347,7 @@ def concurrency_sweep():
             + (f"Highest goodput among the levels where at least 0.99 of the requests met the objective: "
                f"{_f(best[1]['good_s'])} tokens per second at {best[0]} in flight." if best else
                "No level held the objective for 0.99 of its requests."))
-    return ("A closed-loop ladder over the same 68 requests of `benchmarking.opening_claims` (the same seed, the same "
+    return ("A closed-loop ladder over the same 68 requests of `benchmarking.opening_claims` (the same generator, the same "
             "requests at every level, the engine reset between levels so that each level's first iteration pays the "
             "cold start, which falls on a warm-up request). Rates per second and times in milliseconds of the model engine, whose rates the author chose (no number here is a measurement).\n\n"
             + _table(["requests in flight", "output tokens per second", "goodput (tokens per second)",
@@ -654,27 +653,27 @@ def _stream_runs():
         reqs = _stream(name)
         a = _summary(_serve(reqs, "closed", STREAM_CONC))["tok_s"]
         b = _summary(_serve(reqs, "closed", STREAM_CONC, host=HOST_B))["tok_s"]
-        rows.append((k, bookrng.seed_of(name), a, b))
+        rows.append((k, a, b))
     return rows
 
 
 def stream_seeds():
     runs = _stream_runs()
     rows = []
-    for i, (k, seed, a, b) in enumerate(runs):
-        nb = runs[(i + 1) % STREAMS][3]
-        rows.append((k, f"{seed:#018x}", _f(a), _f(b), f"{b / a - 1:+.4f}", f"{nb / a - 1:+.4f}"))
-    paired = [b / a - 1 for _, _, a, b in runs]
-    unpaired = [runs[(i + 1) % STREAMS][3] / runs[i][2] - 1 for i in range(STREAMS)]
-    a_vals = [a for _, _, a, _ in runs]
+    for i, (k, a, b) in enumerate(runs):
+        nb = runs[(i + 1) % STREAMS][2]
+        rows.append((k, _f(a), _f(b), f"{b / a - 1:+.4f}", f"{nb / a - 1:+.4f}"))
+    paired = [b / a - 1 for _, a, b in runs]
+    unpaired = [runs[(i + 1) % STREAMS][2] / runs[i][1] - 1 for i in range(STREAMS)]
+    a_vals = [a for _, a, _ in runs]
     return ("Variant A is the engine of `benchmarking.opening_claims`; variant B is the same engine with 0.3 model "
             "milliseconds of host work per iteration in place of 0.4, nothing else changed. Both serve 8 in flight, "
-            "closed loop. Stream k (k = 0 .. 7) is 68 requests drawn as before from its own generator, seeded with "
-            "`seed_of` of the name `benchmarking.streams.k`, the seed printed in each row. 'Paired' compares B and A on "
+            "closed loop. Stream k (k = 0 .. 7) is 68 requests drawn as before from its own generator, "
+            "`benchmarking.streams.<k>`. 'Paired' compares B and A on "
             "the same stream; 'unpaired' compares B on stream k + 1 (stream 0 after stream 7) with A on stream k. Output "
             "rates in tokens per second of the model engine, whose rates the author chose (no number here is a measurement).\n\n"
-            + _table(["stream k", "seed", "A: output tokens per second", "B: output tokens per second",
-                      "paired B / A - 1", "unpaired B(k + 1) / A(k) - 1"], rows, "rlrrrr")
+            + _table(["stream k", "A: output tokens per second", "B: output tokens per second",
+                      "paired B / A - 1", "unpaired B(k + 1) / A(k) - 1"], rows, "rrrrr")
             + f"\n\nPaired: mean {_mean(paired):+.4f}, sample standard deviation {_sd(paired):.4f}. Unpaired: mean "
             f"{_mean(unpaired):+.4f}, sample standard deviation {_sd(unpaired):.4f}. Spread of A over the 8 streams, "
             f"(largest - smallest) / largest: {(max(a_vals) - min(a_vals)) / max(a_vals):.4f}. (Divisor n - 1 = 7.)")

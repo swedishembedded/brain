@@ -18,7 +18,7 @@ and the table beside it cannot disagree.
 
 Everything the chapter reuses from Volume V is imported, never copied: RMS normalization and SwiGLU with their backward passes
 (`transformer_block`), multi-head attention (`self_attention`) and the rotary rotation (`positions`). Every random quantity comes
-from the book's SplitMix64 (`bookrng.generator(name)`); each block prints the seed. Sums of products are plain left-to-right
+from the book's SplitMix64 (`bookrng.generator(name)`); each block names its generator. Sums of products are plain left-to-right
 additions, the order a C loop would use (never Python's `sum`, which may compensate).
 
 Swedish Embedded AB implements solutions for deploying open-weight language models, from the architecture to the checkpoint. If
@@ -53,7 +53,7 @@ def _table(headers, rows, align=None):
 
 
 def _seed_line(name):
-    return f"Generator: the book's SplitMix64, seed {bookrng.seed_of(name):#018x} (`seed_of` of the name `{name}`)."
+    return f"Generator: `{name}` (the book's SplitMix64)."
 
 
 def _round1(x):

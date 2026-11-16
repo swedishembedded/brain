@@ -542,7 +542,7 @@ a different, usually slightly better, answer. Here it is concretely, on 20 produ
 above (no fused multiply-add, to keep the arithmetic to one rounding per operation):
 
 <!-- worked: cpu.hsum_trace -->
-Generator: the book's SplitMix64, seed 0x123899b4aebbbb06 (the seed of the name `cpu.hsum_trace`). n = 20. Draw order: the 20 values of x, each `2 * uniform() - 1` rounded to f32, then the 20 values of y the same way. Every product and every sum is rounded to f32 (no fused multiply-add). Lane j of the 8 accumulators adds the products j, j + 8 (elements 0..15 only). The horizontal sum is s[j] = lane j + lane j + 4, then (s[0] + s[1]) + (s[2] + s[3]); the last four products are then added to it one at a time. The last row is the exact (unrounded) products of the stored f32 inputs summed in exact arithmetic, then shown to 9 digits.
+Generator: `cpu.hsum_trace` (the book's SplitMix64). n = 20. Draw order: the 20 values of x, each `2 * uniform() - 1` rounded to f32, then the 20 values of y the same way. Every product and every sum is rounded to f32 (no fused multiply-add). Lane j of the 8 accumulators adds the products j, j + 8 (elements 0..15 only). The horizontal sum is s[j] = lane j + lane j + 4, then (s[0] + s[1]) + (s[2] + s[3]); the last four products are then added to it one at a time. The last row is the exact (unrounded) products of the stored f32 inputs summed in exact arithmetic, then shown to 9 digits.
 
 | step | value |
 |---|---:|
@@ -571,7 +571,7 @@ differ from the exact sum in the ninth digit), which is luck: eight chains of tw
 are too short to lose much. On 4096 products the orders separate:
 
 <!-- worked: cpu.simd_sum_order -->
-Generator: the book's SplitMix64, seed 0x02074311ab966a02 (the seed of the name `cpu.simd_sum_order`). n = 4096. Draw order: the 4096 values of x, each `2 * uniform() - 1` rounded to f32, then the 4096 of y. The products are rounded to f32 and then added in f32, one addition at a time. With w lanes, lane j adds the products j, j + w, j + 2w, ... in order, and the lanes are then combined by the horizontal sum (while more than 4 lanes remain, lane j + h is added to lane j for h = half the lanes; then (a0 + a1) + (a2 + a3)); w = 1 is the plain left-to-right sum. The reference is the exact sum, in exact arithmetic, of the exact (unrounded) products of the stored f32 inputs: 7.77823008. (The exact sum of the f32-rounded products is 7.77822936; the two differ by the rounding of the products, which no order of additions can remove.) The error column is |f32 sum - reference| / |reference|.
+Generator: `cpu.simd_sum_order` (the book's SplitMix64). n = 4096. Draw order: the 4096 values of x, each `2 * uniform() - 1` rounded to f32, then the 4096 of y. The products are rounded to f32 and then added in f32, one addition at a time. With w lanes, lane j adds the products j, j + w, j + 2w, ... in order, and the lanes are then combined by the horizontal sum (while more than 4 lanes remain, lane j + h is added to lane j for h = half the lanes; then (a0 + a1) + (a2 + a3)); w = 1 is the plain left-to-right sum. The reference is the exact sum, in exact arithmetic, of the exact (unrounded) products of the stored f32 inputs: 7.77823008. (The exact sum of the f32-rounded products is 7.77822936; the two differ by the rounding of the products, which no order of additions can remove.) The error column is |f32 sum - reference| / |reference|.
 
 | lanes w | f32 sum | relative error against the reference |
 |---|---:|---:|

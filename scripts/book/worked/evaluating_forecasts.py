@@ -27,7 +27,13 @@ from functools import lru_cache
 
 import bookrng
 import time_series as ts
-from time_series import _generator_line, _mean, _seed_text, _table
+from time_series import _mean, _table
+
+
+
+def _generator_line(name):
+    return f"Generator: the book's SplitMix64, `{name}`." + ts.HELD_GAUSSIAN
+
 
 # ------------------------------------------------------------------ constants
 
@@ -279,7 +285,7 @@ def skill_matrix():
         for _, bcode in bases:
             row.append("-" if code == bcode else _fs(_skill(L[code], L[bcode])))
         rows.append(tuple(row))
-    head = (f"The 169 origins 60 .. 228 of the first example (series {_seed_text(SERIES_NAME)}). Each entry is the skill of the forecaster in the row "
+    head = (f"The 169 origins 60 .. 228 of the first example (series `{SERIES_NAME}`). Each entry is the skill of the forecaster in the row "
             f"against the baseline in the column, 1 - (mean MAE of the forecaster) / (mean MAE of the baseline) over all 169 origins.\n\n")
     return head + _table(["forecaster", "against naive", "against SN", "against SND"], rows)
 
@@ -322,11 +328,11 @@ def skill_intervals():
             m = model if sel is None else model[::sel]
             lo, hi = _boot_interval(rng, b, m, blk)
             rows.append((name, label, _fs(_skill(m, b)), _fs(lo, 4), _fs(hi, 4), "excludes 0" if lo > 0 or hi < 0 else "contains 0"))
-    head = (f"The losses of the previous example (series {_seed_text(SERIES_NAME)}). Skill of a model against a baseline is 1 - (mean model "
+    head = (f"The losses of the previous example (series `{SERIES_NAME}`). Skill of a model against a baseline is 1 - (mean model "
             f"loss) / (mean baseline loss) over the origins in the row. The interval is the 2.5th and 97.5th percentile (the book's `percentile`) "
             f"of the skill over {BOOT_RESAMPLES} resamples of the origins: a resample is ceil(K / blk) blocks of blk consecutive origins, each block "
             f"starting at rng.integer(K - blk + 1) in the row's list of K origins, laid end to end and cut to K; the same indices are used for model and "
-            f"baseline. One generator ({_seed_text(BOOT_NAME)}) draws every row in the table's order, row after row, resample after resample.\n\n")
+            f"baseline. One generator (`{BOOT_NAME}`) draws every row in the table's order, row after row, resample after resample.\n\n")
     return head + _table(["comparison", "origins and blocks", "skill", "2.5th percentile", "97.5th percentile", "interval"], rows)
 
 
@@ -413,7 +419,7 @@ def dm_on_series():
              ("rectangular weights, lag 11", rect[0], rect[1], rect[2]),
              ("Bartlett weights, lag 11", _fx(v_bart, 4), _fx(s["bart"], 2), _fx(_p_gauss(s["bart"]), 4))]
     t2 = _table(["estimate of the variance of d used", "long-run variance", "statistic", "two-sided p (Gaussian)"], rows2, "lrrr")
-    head = (f"The losses of the first example (series {_seed_text(SERIES_NAME)}), horizon h = 12. d_o = (MAE of SND at o) - (MAE of AR at o) for the "
+    head = (f"The losses of the first example (series `{SERIES_NAME}`), horizon h = 12. d_o = (MAE of SND at o) - (MAE of AR at o) for the "
             f"{n} origins o = 60 .. 228, positive when AR is better; its mean is {_fx(mean, 4)}. gamma_k is the autocovariance of d at lag k "
             f"with the mean of d removed and the divisor {n} at every lag. The long-run variance is gamma_0 + 2 (sum over k = 1 .. 11 of w_k gamma_k) "
             f"with w_k = 1 (rectangular) or w_k = 1 - k / 12 (Bartlett), and gamma_0 alone for independent origins; the statistic is the mean of d "
@@ -442,7 +448,7 @@ def dm_size():
                     rej[key] += 1
         rows.append((k, _fx(cv[k], 3)) + tuple(_fx(rej[key] / DM_REPS, 3) for key in ("iid", "rect", "hln", "bart")) + (undefined,))
     head = (f"Differentials with no true difference: d_t = (1 / sqrt(12)) (xi_t + xi_(t+1) + ... + xi_(t+11)) for t = 0 .. K - 1 with xi the "
-            f"standard Gaussian calls of one generator per row of the table ({_seed_text(DM_NAME)}, a fresh generator for each K), the K + 11 calls "
+            f"standard Gaussian calls of one generator per row of the table (`{DM_NAME}`, a fresh generator for each K), the K + 11 calls "
             f"of normal() of a replicate in order, {DM_REPS} replicates in turn; d has mean 0, variance 1 and autocovariance "
             f"(12 - k) / 12 at lag k < 12. Each statistic is that of the previous example with horizon 12 (the 'rectangular with factor' column is the rectangular statistic multiplied by "
             f"the Harvey-Leybourne-Newbold factor sqrt((K + 1 - 2h + h (h - 1) / K) / K) with h = 12); the Gaussian columns reject when its "
@@ -478,7 +484,7 @@ def stride_data():
 def stride_information():
     rows = [(s, k, _fx(sd, 4), _fx(iid, 4), _fx(nw, 4)) for s, k, sd, iid, nw, _ in stride_data()]
     head = (f"Differentials of 12-bar forecasts over a stretch of {STRIDE_SPAN} bars: xi_0 .. xi_{STRIDE_SPAN - 1} are {STRIDE_SPAN} calls of normal() "
-            f"({_seed_text(STRIDE_NAME)}, a fresh generator for each stride, {STRIDE_REPS} replicates in turn), the origin number t of stride s has "
+            f"(`{STRIDE_NAME}`, a fresh generator for each stride, {STRIDE_REPS} replicates in turn), the origin number t of stride s has "
             f"d_t = (1 / sqrt(12)) (xi_(s t) + ... + xi_(s t + 11)), and the origins are t = 0 .. K - 1 with K = floor(({STRIDE_SPAN} - 12) / s) + 1. "
             f"'Spread of the mean' is the standard deviation (divisor {STRIDE_REPS - 1}) of the mean of d over the replicates, the true size of the "
             f"error bar. The two error-bar columns are the mean over the replicates of sqrt(estimate / K) where the estimate is the independent-origins "
@@ -537,13 +543,13 @@ def how_many_series():
         m, s = _mean(diffs), _sd(diffs)
         need = math.ceil(((Z975 + z_power) * s / m) ** 2)
         rows.append((name, _fs(m), _fx(s), need) + tuple(_fx(p, 3) for p in power))
-    head = (f"{PANEL_SERIES} series drawn from one generator ({_seed_text(PANEL_NAME)}), each by the recipe of Chapter 1 with n = {N} (its {N} calls of "
+    head = (f"{PANEL_SERIES} series drawn from one generator (`{PANEL_NAME}`), each by the recipe of Chapter 1 with n = {N} (its {N} calls of "
             f"normal() in turn, series after series). On each series, SND and AR are evaluated at the origins of the row (h = 12, expanding past, as in "
             f"the first example); the series' difference is the mean over those origins of (MAE of SND) - (MAE of AR), positive when AR is better. "
             f"'Needed' is the number of series ceil(((1.959964 + 0.841621) * s / m)^2) for a two-sided test at the 5 percent level to find a mean "
             f"difference m with probability 0.8 when the differences have standard deviation s (divisor {PANEL_SERIES - 1}). The last columns are the "
             f"share of {POWER_REPS} draws of N series with replacement from the {PANEL_SERIES} differences for which mean / (sd / sqrt(N)) exceeds 1.959964 "
-            f"(sd with divisor N - 1); a fresh generator ({_seed_text(POWER_NAME)}) for each row, drawing the columns in order, N after N, each draw being N calls "
+            f"(sd with divisor N - 1); a fresh generator (`{POWER_NAME}`) for each row, drawing the columns in order, N after N, each draw being N calls "
             f"of rng.integer({PANEL_SERIES}) (rows do not share a stream).\n\n")
     return head + _table(["origins per series", "mean difference m", "s", "series needed"] + [f"share significant, N = {n}" for n in POWER_SIZES], rows)
 
@@ -563,7 +569,7 @@ def selection_spent():
              _fs(_mean([b[i] for i in top]), 4)),
             ("the 20 series with the smallest difference on the first 7 origins", _fs(_mean([a[i] for i in order[-20:]]), 4),
              _fs(_mean([b[i] for i in order[-20:]]), 4))]
-    head = (f"The {PANEL_SERIES} series of the previous example ({_seed_text(PANEL_NAME)}). For each series, a is the mean over the first 7 of its 15 "
+    head = (f"The {PANEL_SERIES} series of the previous example (`{PANEL_NAME}`). For each series, a is the mean over the first 7 of its 15 "
             f"origins (60, 72, ..., 120) of (MAE of SND) - (MAE of AR), and b the mean over the last 8 (132, 144, ..., 228); positive favours AR. Series are "
             f"ranked by a, largest first, a tie to the lower series number. Each row is the mean of a and of b over the series it names.\n\n")
     return head + _table(["series chosen", "mean of a (origins used to choose)", "mean of b (origins not used)"], rows)
@@ -622,7 +628,7 @@ def cherry_horizons():
              ("positive cells that Holm's rule keeps at the 5 percent level", holm),
              ("series with at least one horizon of positive skill", sum(1 for r in skills if max(r) > 0))]
     t2 = _table(["count over the 480 cells", "cells or series"], rows2)
-    head = (f"{CHERRY_SERIES} driftless random walks of {CHERRY_BARS} bars ({_seed_text(CHERRY_NAME)}, one generator, series after series): "
+    head = (f"{CHERRY_SERIES} driftless random walks of {CHERRY_BARS} bars (`{CHERRY_NAME}`, one generator, series after series): "
             f"s_0 = normal(), s_t = s_(t-1) + normal(). For a series and a horizon h = 1 .. 12, the origins are o = {CHERRY_FIRST} .. {CHERRY_BARS} - h; "
             f"naive forecasts bar o + h - 1 as y_(o-1), drift as y_(o-1) + h (y_(o-1) - y_0) / (o - 1), and the error of each is its absolute error. "
             f"Skill is 1 - (sum of drift errors) / (sum of naive errors) over the origins; the statistic of a cell is the rectangular statistic of "
@@ -658,7 +664,7 @@ def benchmark_selection():
         drift_only.append(1.0 - sum_drift / sum_naive)
     rows = [("drift, used as it is", _fs(_mean(drift_only))),
             ("the better of naive and drift, chosen window by window with the answer in hand", _fs(_mean(chosen)))]
-    head = (f"{SELECT_REPS} repetitions in turn from one generator ({_seed_text(SELECT_NAME)}); a repetition is {SEL_WINDOWS} windows in turn, "
+    head = (f"{SELECT_REPS} repetitions in turn from one generator (`{SELECT_NAME}`); a repetition is {SEL_WINDOWS} windows in turn, "
             f"each a driftless random walk of {SEL_CONTEXT + SEL_HORIZON} bars (s_0 = normal(), s_t = s_(t-1) + normal()), the first {SEL_CONTEXT} as the "
             f"context and the last {SEL_HORIZON} as the future. Naive repeats the last context value; drift continues the line through the first and last "
             f"context bars, last + k (last - first) / {SEL_CONTEXT - 1} for k = 1 .. {SEL_HORIZON}. A window's error is the mean absolute error over the "
@@ -706,7 +712,7 @@ def control_leak():
         diff = [a - b for a, b in zip(errs["naive"], e)]
         se = _sd(diff) / math.sqrt(len(diff))
         rows.append((name, _fx(_mean(e)), _fs(_skill(e, errs["naive"])), _fx(se, 3)))
-    head = (f"{CONTROL_SERIES} driftless random walks of {N} bars ({_seed_text(CONTROL_NAME)}, one generator, series after series): s_0 = normal(), "
+    head = (f"{CONTROL_SERIES} driftless random walks of {N} bars (`{CONTROL_NAME}`, one generator, series after series): s_0 = normal(), "
             f"s_t = s_(t-1) + normal(). On each, origins o = 96, 108, ..., {LAST_ORIGIN} (12 origins), horizon 12. The nearest-window forecaster of "
             f"Chapter 1 (context {CONTEXT} bars, raw values, squared Euclidean distance, the earliest origin on a tie) copies the 12 bars that followed "
             f"the nearest training window; its training windows have origins {CONTEXT} .. o - 1 (every window that starts before the forecast) or "

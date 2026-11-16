@@ -91,7 +91,7 @@ def _f16(x):
 
 
 def _seed_note(name):
-    return f"Generator: the book's SplitMix64, seed {bookrng.seed_of(name):#018x} (the seed of the name `{name}`)."
+    return f"Generator: `{name}` (the book's SplitMix64)."
 
 
 def _matrix_rows(m, label):

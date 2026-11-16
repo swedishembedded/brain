@@ -103,7 +103,7 @@ def shard_gradients():
         tot = [a + b for a, b in zip(tot, s)]
     tot = [a / R_SHARD for a in tot]
     rows.append(("3 replicas, 6 micro-batches of 2 rows dealt round-robin", "passes (below 1e-12)" if _dev(tot, full) < 1e-12 else "FAILS"))
-    head = (f"One generator seeded {bookrng.seed_of('parallelism.shards')} (seed_of 'parallelism.shards') draws, in this order and "
+    head = (f"One generator, `parallelism.shards`, draws, in this order and "
             f"each by normal(): the 12 rows x_i of 3 numbers (row-major), the 12 targets y_i and the 3 weights w (each times 0.5). "
             f"The loss of a batch is the mean over its rows of half the square of w . x_i - y_i, so its gradient is the mean of "
             f"(w . x_i - y_i) x_i; each component is accumulated in increasing row order from 0.0 and divided by the row count. "
@@ -250,7 +250,7 @@ def summation_order():
     for R in (2, 3, 4, 8):
         r, n, diff, worst = _order_row(R)
         rows.append((r, n, diff, f"{100 * diff / n:.1f}", f"{worst:.0f}"))
-    head = (f"{bookrng.seed_of('parallelism.order')} is seed_of 'parallelism.order'; each row starts this generator afresh and draws "
+    head = (f"The generator is `parallelism.order`; each row starts it afresh and draws "
             "R x 840 values by normal(), rank 0's 840 first, then rank 1's, and so on; every draw is rounded to the nearest float32, "
             "and every addition is done in float64 and rounded to the nearest float32 (ties to even). Element i is summed in "
             "the coordinator's order (0.0, then rank 0, rank 1, ...) and in the ring's order for its chunk c = floor(i / (840 / R)) "
@@ -351,7 +351,7 @@ def sharded_equivalence():
     same_ranks = all(reps[r][0] == reps[0][0] for r in range(SH_R))
     differ = sum(1 for a, b in zip(reps[0][0], w) if a != b)
     rows = [(i, _g(w0[i]), _g(reps[0][0][i]), _g(w[i])) for i in range(SH_N)]
-    head = (f"{bookrng.seed_of('parallelism.sharded')} is seed_of 'parallelism.sharded'. One generator draws, by normal(), the 8 starting "
+    head = (f"The generator is `parallelism.sharded`. It draws, by normal(), the 8 starting "
             "weights (each times 0.5) and then, for each of the 5 steps in turn, the gradients of the 4 ranks (rank 0's 8 numbers first), "
             "so the gradients are given and do not depend on the weights. Each step sums the four gradients in rank order from 0.0 and "
             "divides by 4. Adam is the adam_update of Chapter 4 (rate 0.01, beta1 0.9, beta2 0.999, epsilon 1e-8, bias-corrected, no weight decay, "
@@ -430,7 +430,7 @@ def tensor_split():
         Yw, dXw, _, _ = _tp_run(K, wrong=True)
         rows.append((K, 2 * TP_N * TP_D if K > 1 else 0, "passes (below 1e-12)" if ok else "FAILS",
                      "-" if K == 1 else _g(_max_abs(Yw, Yd), 4)))
-    head = (f"{bookrng.seed_of('parallelism.tensor')} is seed_of 'parallelism.tensor'. One generator draws, by the draw order of Chapter 3 "
+    head = (f"The generator is `parallelism.tensor`. It draws, by the draw order of Chapter 3 "
             f"(W1 [{TP_F}, {TP_D}] row-major, W2 [{TP_D}, {TP_F}] row-major, each normal() times 0.5, then X [{TP_N}, {TP_D}] row-major, each normal()), "
             "one block Y = X + tanh(X W1^T) W2^T with the loss L = 0.5 sum(Y^2), so dY = Y. Rank j of K takes the rows "
             f"j {TP_F}/K to (j + 1) {TP_F}/K - 1 of W1 and the same columns of W2; the K partial products A_j W2_j^T are added in rank order "
@@ -650,7 +650,7 @@ def pipeline_accumulation():
     rows = [row("accumulation, micro-batches 0, 1, 2, 3 (no cut)", sq, sq),
             row("pipeline of 2 stages, backward over micro-batches 3, 2, 1, 0", rev, sq),
             row("pipeline of 2 stages, backward over micro-batches 0, 1, 2, 3", fwd, sq)]
-    head = (f"{bookrng.seed_of('parallelism.pipeline')} is seed_of 'parallelism.pipeline'. One generator draws the 4 blocks and the input by the "
+    head = (f"The generator is `parallelism.pipeline`. It draws the 4 blocks and the input by the "
             f"draw order of Chapter 3 ({PA_BLOCKS} blocks with W1 [{PA_F}, {PA_D}] and W2 [{PA_D}, {PA_F}], each normal() times 0.5, then X [{PA_ROWS}, {PA_D}], each normal()). "
             "The loss is 0.5 sum(Y^2) over all 8 rows of the last block's output, so micro-batch gradients add with no scale. The 8 rows are cut "
             "into 4 micro-batches of 2 consecutive rows. The pipeline has 2 stages (blocks 0 and 1, then blocks 2 and 3); each stage keeps only the "

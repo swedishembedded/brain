@@ -65,10 +65,6 @@ def _sci(v, d=2):
     return f"{v:.{d}e}".replace("e-0", "e-").replace("e+0", "e+")
 
 
-def _seed_line(name):
-    return f"Generator: the book's SplitMix64, seed {bookrng.seed_of(name):#018x} (`seed_of` of the name `{name}`)."
-
-
 # ------------------------------------------------------------------------------------------------ safetensors by hand
 
 WIDTH = {"F32": 4, "F16": 2, "BF16": 2, "I32": 4}
@@ -706,7 +702,7 @@ def import_mistakes():
             "(ids 3, 9, 1, 7, 4, 4, 10, 2, eps 1e-6, the epsilon of the published configuration, base 100). The published numbers are the bf16 weights; the golden is the logits of "
             "those weights, and the three measures compare the 8 x 11 logits of the imported model with it (max_abs, rel_l2 and cosine "
             "are defined below, with the goldens). \"Square\" is a model whose matrices are all square (V = 11, D = 8, L = 2, H = HKV = 4, "
-            f"head width 2, F = 8; weights from the generator `{NAME_SQUARE}`, seed {bookrng.seed_of(NAME_SQUARE):#018x}, drawn in "
+            f"head width 2, F = 8; weights from the generator `{NAME_SQUARE}`, drawn in "
             "the order of Chapter 1). A plan checks the shape of each tensor it builds before it runs anything.\n\n"
             + _table(["mistake", "model", "outcome", "max_abs", "rel_l2", "cosine", "argmax agrees"], rows, "llllrrr"))
 
@@ -852,7 +848,7 @@ def error_budget():
             row.append(rel_l2(g32, stored))
         meas.append(row)
     worst = max(max(r[1:]) for r in meas)
-    mrows = [(f"{bookrng.seed_of(f'{NAME_DRAWS}.{r[0]}'):#018x}", _sci(r[1], 2), _sci(r[2], 2), _sci(r[3], 2)) for r in meas]
+    mrows = [(f"`{NAME_DRAWS}.{r[0]}`", _sci(r[1], 2), _sci(r[2], 2), _sci(r[3], 2)) for r in meas]
     return ("Roundings along the longest chain of dependent operations of the tiny decoder for the last of T = "
             f"{T} positions (D = 6, H = 4, head width 4, F = 10), counted by the rule that a sum of n products costs n roundings and "
             "each further operation on a result costs one. The RMS norm is the one of the book's pseudocode: `inv_std = 1 / sqrt(mean(x^2) + eps)`, "
@@ -872,7 +868,7 @@ def error_budget():
             "The 'left to right' order adds the terms of a sum one after another from the first; 'right to left' from the last; "
             "'pairwise' adds the sum of the first half to the sum of the second half, recursively, the middle of n terms being "
             "n // 2. rel_l2 of the "
-            "8 x 11 logits:\n\n" + _table(["seed of the draw", "left to right", "right to left", "pairwise"], mrows)
+            "8 x 11 logits:\n\n" + _table(["generator of the draw", "left to right", "right to left", "pairwise"], mrows)
             + f"\n\nThe largest measured error is {_sci(worst, 2)}, {bound_logits(cfg, T) / worst:.0f} times below the bound "
             f"and {worst / statistical_logits(cfg, T):.2f} times the random-walk estimate.")
 
@@ -973,7 +969,7 @@ def golden_contents():
         rows.append((f"`{name}`", dtype, " x ".join(str(d) for d in shape), b - a, what))
     total = sum(r[3] for r in rows)
     return ("The golden for a 6-layer version of the tiny decoder (V = 11, D = 6, H = 4, 2 key-value heads of width 4, F = 10, "
-            f"L = 6; weights from the generator `{NAME_BIS}`, seed {bookrng.seed_of(NAME_BIS):#018x}, drawn in the order of Chapter 1 "
+            f"L = 6; weights from the generator `{NAME_BIS}`, drawn in the order of Chapter 1 "
             "and rounded to bf16), written as one safetensors file. It holds the text, the hidden state "
             "after the embedding and after each layer, the output of the final norm and the logits, each tensor stored in the order "
             "listed below with the data back to back. The header is the compact JSON of the three-tensor file above (`__metadata__` first, "

@@ -1,4 +1,4 @@
-<!-- source-sha256: 27b3a2299056029b6929780bf10e062ec3491f66ce9100f852dcbbe9edd18aa8 -->
+<!-- source-sha256: 8f74109bd16a09f03cb5f4d489ed278a028d83faf079c5e8bb0ca7fd85eff613 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 442 402" width="442" height="402">
 <rect width="442" height="402" fill="#ffffff"/>
 <text x="274" y="20" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c" text-anchor="middle">Jacobian of the softmax, entry (i, j) = d p[i] / d z[j]</text>

@@ -103,10 +103,9 @@ def update_stream():
         finals.append(w)
         rows.append([f"bf16 weight, stochastic, run {r}", r, _num(w, 6), moved])
     mean = sum(finals) / len(finals)
-    seed = bookrng.seed_of("mixed_precision.update_stream")
     head = (f"A weight starts at 1 and receives {n} updates of {u}, each applied as w = round(w + {u}) where the sum is formed in exact "
             "arithmetic (float64 here) and rounded once. 'moved' counts the updates that changed the stored weight. The stochastic rows "
-            f"come from one generator seeded {seed} (seed_of 'mixed_precision.update_stream') that runs across the eight runs, run after "
+            f"come from one generator `mixed_precision.update_stream` that runs across the eight runs, run after "
             f"run, one uniform() per update in order; run r therefore starts where run r - 1 stopped. The fp32 row adds {u} "
             "rounded to fp32 at every step (ties to even). The mean of the eight stochastic finals is "
             f"{_num(mean, 6)}.\n\n")
@@ -172,7 +171,6 @@ def stall():
         tail = sum(tr[-100:]) / 100
         srows.append([r, _num(tr[-1], 7), _num(tail, 5), _num(abs(tail - t), 2)])
     mean_tail = sum(sum(tr[-100:]) / 100 for tr in sr) / len(sr)
-    seed = bookrng.seed_of("mixed_precision.stall")
     head = (f"The loss is (w - t)^2 / 2 with target t = {t}, so the gradient is w - t; plain gradient descent with rate eta = {eta} "
             f"from w = {STALL_START}, {STALL_STEPS} steps. Every step forms w - eta * (g) in exact arithmetic (float64) and rounds once to "
             "the storage format; fp32 rounds to fp32, ties to even. The master row evaluates the gradient at the bf16 working copy "
@@ -181,7 +179,7 @@ def stall():
             f"Gap of the bf16 numbers around 3: {_num(gap, 5)}; an update is absorbed when it is below half a gap, eta |w - t| < "
             f"{_num(gap / 2, 5)}, that is |w - t| < {_num(radius, 5)}.\n\n")
     t1 = _table(["rule", "after step 10", "after step 30", "after step 100", "after step 300", "|w - t| at 300", "|master - t| at 300"], rows)
-    shead = (f"\n\nStochastic rounding of the same descent, eight runs from one generator seeded {seed} (seed_of 'mixed_precision.stall') that "
+    shead = (f"\n\nStochastic rounding of the same descent, eight runs from one generator `mixed_precision.stall` that "
              "runs across the runs, one uniform() per step in order. 'mean of last 100' is the average weight over steps 201 to 300. "
              f"The mean of the eight averages is {_num(mean_tail, 5)}.\n\n")
     t2 = _table(["run", "w after step 300", "mean of last 100", "mean of last 100 minus t, absolute"], srows)
@@ -342,7 +340,6 @@ def sr_statistics():
     var_meas = sq / SR_STAT_DRAWS
     var_pred = phi * (1 - phi) * g * g
     near = rn_bf16(x)
-    seed = bookrng.seed_of("mixed_precision.sr_statistics")
     rows = [
         ["lower neighbour of x", _num(lo, 8)],
         ["upper neighbour of x (gap above)", f"{_num(lo + g, 8)} ({_num(g, 5)})"],
@@ -356,8 +353,7 @@ def sr_statistics():
         ["phi (1 - phi) gap^2, the predicted value", _num(var_pred, 4)],
         ["(nearest - x)^2 for nearest even rounding", _num((near - x) ** 2, 4)],
     ]
-    head = (f"x = {SR_STAT_X} rounded to fp32 is {_num(x, 9)}. {SR_STAT_DRAWS} draws u_i = uniform() from the generator seeded {seed} "
-            "(seed_of 'mixed_precision.sr_statistics'), in order, each giving one stochastic rounding of x to bf16.\n\n")
+    head = (f"x = {SR_STAT_X} rounded to fp32 is {_num(x, 9)}. {SR_STAT_DRAWS} draws u_i = uniform() from the generator `mixed_precision.sr_statistics`, in order, each giving one stochastic rounding of x to bf16.\n\n")
     return head + _table(["quantity", "value"], rows, "lr")
 
 
@@ -406,10 +402,9 @@ def counter_draws():
         b = _sr_vector(vals, tiles, lambda j: rng.uniform())
         ref_stream = _sr_vector(vals, whole, (lambda r: (lambda j: r.uniform()))(bookrng.generator("mixed_precision.counter_draws")))
         rows.append([name, sum(x != y for x, y in zip(a, ref)), sum(x != y for x, y in zip(b, ref_stream))])
-    seed = bookrng.seed_of("mixed_precision.counter_draws")
     head = (f"Twelve values x_j = 1 + 0.001 (j + 1), j = 0 .. 11, are rounded to bf16 stochastically. The counter draw is u(j) = "
             f"counter_uniform({COUNTER_KEY:#x}, j) (mix32 twice, as defined above); the stream draw takes the next uniform() "
-            f"of a generator seeded {seed} (seed_of 'mixed_precision.counter_draws'), created afresh for each row, in the order the "
+            f"of a generator `mixed_precision.counter_draws`, created afresh for each row, in the order the "
             "tiles are processed. Each row counts the elements whose rounded value differs from the same rule applied in one tile of 12 "
             "in order.\n\n")
     return head + _table(["order of work", "elements that differ, counter draw", "elements that differ, stream draw"], rows, "lrr")
@@ -466,9 +461,7 @@ def fp8_operands():
                      f"{row_error(_matmul(_quant_tensor(X, 'E4M3', E4M3_MAX), _quant_tensor(W, 'E4M3', E4M3_MAX))):.4f}",
                      f"{row_error(_matmul(_quant_blocks(X, 'E4M3', E4M3_MAX), _quant_tensor(W, 'E4M3', E4M3_MAX))):.4f}",
                      f"{row_error(_matmul(_quant_tensor(X, 'E5M2', E5M2_MAX), _quant_tensor(W, 'E5M2', E5M2_MAX))):.4f}"])
-    seed = bookrng.seed_of("mixed_precision.fp8_operands")
-    head = (f"Y = X W with X of shape [{FP8_M}, {FP8_K}] and W of shape [{FP8_K}, {FP8_N}]. From the generator seeded {seed} (seed_of "
-            f"'mixed_precision.fp8_operands'): the {FP8_M * FP8_K} entries of X as normal() in row-major order, then the {FP8_K * FP8_N} "
+    head = (f"Y = X W with X of shape [{FP8_M}, {FP8_K}] and W of shape [{FP8_K}, {FP8_N}]. From the generator `mixed_precision.fp8_operands`: the {FP8_M * FP8_K} entries of X as normal() in row-major order, then the {FP8_K * FP8_N} "
             "entries of W in row-major order as 0.1 * normal(). Row i of X is then multiplied by 10^(-a i / 31) for the stated number of "
             "decades a, so the rows of X span a decades of magnitude. The reference Y is formed in float64 from the unrounded matrices; "
             "the rounded operands are multiplied and summed in float64 too (a wide accumulator). The cell is the mean over the 32 rows "
@@ -497,9 +490,7 @@ def fp8_gradients():
         sub = sum(1 for y in q if 0 < abs(y / s) < mn)
         err_all = sum(1.0 if y == 0 else abs(y - x) / x for x, y in zip(g, q)) / len(g)
         rows.append([f, _num(top, 6), f"{100 * zero / GRAD_N:.2f}%", f"{100 * sub / GRAD_N:.2f}%", f"{err_all:.4f}", f"{sum(q) / sum(g) - 1:+.4f}"])
-    seed = bookrng.seed_of("mixed_precision.fp8_gradients")
-    head = (f"{GRAD_N} stand-in gradient magnitudes g_i = 10^(-{GRAD_DECADES} u_i), u_i = uniform() drawn in order from the generator seeded "
-            f"{seed} (seed_of 'mixed_precision.fp8_gradients'), so they span {GRAD_DECADES} decades below the largest. Each is divided by "
+    head = (f"{GRAD_N} stand-in gradient magnitudes g_i = 10^(-{GRAD_DECADES} u_i), u_i = uniform() drawn in order from the generator `mixed_precision.fp8_gradients`, so they span {GRAD_DECADES} decades below the largest. Each is divided by "
             "s = amax / (largest finite number of the format), rounded once to the format (nearest even, saturating) and multiplied back. "
             "'zero' is the share stored as 0, 'subnormal' the share stored below the smallest normal number of the format, 'mean "
             "relative error' the mean of |stored - g| / g with a zero counted as 1, and 'error of the sum' the relative error of the "
@@ -533,9 +524,7 @@ def delayed_scale():
         c1, e1 = stats(s_old)
         rows.append([step, _num(sigma, 4), _num(amax, 4), _num(s_old * E4M3_MAX, 4), c1, f"{e1:.4f}", c0, f"{e0:.4f}"])
         hist.append(amax)
-    seed = bookrng.seed_of("mixed_precision.delayed_scale")
-    head = (f"One tensor of {DELAY_N} entries per step, x = sigma_k * normal() drawn in order from the generator seeded {seed} (seed_of "
-            f"'mixed_precision.delayed_scale') for steps k = 0 .. {DELAY_STEPS - 1}; sigma_k is 1.05 times sigma_(k-1) from sigma_(-1) = 1, "
+    head = (f"One tensor of {DELAY_N} entries per step, x = sigma_k * normal() drawn in order from the generator `mixed_precision.delayed_scale` for steps k = 0 .. {DELAY_STEPS - 1}; sigma_k is 1.05 times sigma_(k-1) from sigma_(-1) = 1, "
             "and at step 10 it is multiplied by a further 4. The current scale divides amax of this step's tensor by 448; the "
             f"delayed scale divides the largest amax of the previous {DELAY_WINDOW} steps by 448 (step 0 uses its own amax). 'clipped' "
             "counts the entries with |x| / s >= 464 (the midpoint between 448 and the next code, so a saturating conversion changes "

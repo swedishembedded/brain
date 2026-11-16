@@ -56,8 +56,7 @@ def _int(v):
 
 
 def _seed_line(name):
-    s = bookrng.seed_of(name)
-    return f"Generator: the book's SplitMix64, seed 0x{s:016x} ({s})."
+    return f"Generator: `{name}` (the book's SplitMix64)."
 
 
 # ------------------------------------------------------------------ the update rules
@@ -813,12 +812,12 @@ def mlp_sweep():
             cell = "diverged" if v is None else mlp_cell(make, lr, v)
             cells.append(f"**{cell}**" if lr == best else cell)
         rows.append([name] + cells)
-    head = (f"Data and starting weights from one generator (seed 0x{bookrng.seed_of('optimizers.mlp'):016x}): for i = 0 .. {MLP_N - 1}, "
+    head = (f"Data and starting weights from one generator (`optimizers.mlp`): for i = 0 .. {MLP_N - 1}, "
             "two calls of uniform() give x1 = 2 u - 1 and x2 = 2 u - 1, and the label is 1 when x1 x2 > 0 and 0 otherwise; then 16 calls of "
             "normal() times 0.5 for W1 (row-major, 8 x 2), then 8 calls times 0.5 for W2; biases start at 0. "
             f"Network: 2 -> {MLP_H} tanh -> 1 sigmoid, mean binary cross-entropy. The loss at the starting weights is {_fx(start, 4)}. "
             f"Every rule runs {MLP_STEPS} steps of batch size {MLP_B}, with batches from a second generator "
-            f"(seed 0x{bookrng.seed_of('optimizers.mlp_batches'):016x}): shuffle the list 0 .. {MLP_N - 1}, cut it into consecutive batches of {MLP_B}, "
+            f"(`optimizers.mlp_batches`): shuffle the list 0 .. {MLP_N - 1}, cut it into consecutive batches of {MLP_B}, "
             "reshuffle when the epoch ends; the same batches for every rule and learning rate. "
             "Entries: the mean loss over all 200 examples, averaged over the six checkpoints at steps 250, 260, ..., 300 (the loss after k updates is the loss at step k); the best entry of each row is in bold. "
             "Rule details: momentum is the sum form m = 0.9 m + g, theta = theta - eta m; RMSProp uses beta2 = 0.9 and eps = 1e-8; Adam uses 0.9, 0.999, 1e-8; AdamW adds decoupled decay 0.05; Lion uses beta1 = 0.9, beta2 = 0.99, the three-way sign (0 at 0) and decay 0. "
@@ -934,9 +933,8 @@ def mlp_repeats():
         scores = [tail_loss(mlp_train(make, lr, stream)) for stream in REPEAT_STREAMS]
         mean = sum(scores) / len(scores)
         rows.append([name, f"{lr:g}", _fx(mean, 4), _fx(min(scores), 4), _fx(max(scores), 4)])
-    seeds = ", ".join(f"0x{bookrng.seed_of(n):016x}" for n in REPEAT_STREAMS)
     head = ("The same start, data, rule details and learning rates as the sweep, five more batch orders from the generators named "
-            f"optimizers.mlp_batches.1 .. optimizers.mlp_batches.5 (seeds {seeds}). Entries are the score of the sweep (mean full-data loss at steps 250, 260, ..., 300).\n\n")
+            "`optimizers.mlp_batches.1` .. `optimizers.mlp_batches.5`. Entries are the score of the sweep (mean full-data loss at steps 250, 260, ..., 300).\n\n")
     return head + _table(["rule", "eta", "mean of 5", "smallest", "largest"], rows)
 
 

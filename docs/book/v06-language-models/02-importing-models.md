@@ -242,7 +242,7 @@ This is the degenerate-dimension lesson of Volume III, Chapter 6 and knowledge #
 Each of the mistakes a mapping invites can now be made on purpose and measured. Each is a change to the import plan above; each run uses 64-bit arithmetic, so that the numbers below are the effect of the mistake alone. "Square" is a second tiny decoder, with every matrix square ($D = 8$ and four heads of width 2 over four key-value heads, so $\mathbf{W}_Q$, $\mathbf{W}_K$, $\mathbf{W}_V$ and $\mathbf{W}_O$ are 8 by 8, and $F = 8$) so that the shape check has nothing to object to.
 
 <!-- worked: importing_models.import_mistakes -->
-Each mistake of the mapping, made in the import plan and run through the 64-bit forward pass on the text of Chapter 1 (ids 3, 9, 1, 7, 4, 4, 10, 2, eps 1e-6, the epsilon of the published configuration, base 100). The published numbers are the bf16 weights; the golden is the logits of those weights, and the three measures compare the 8 x 11 logits of the imported model with it (max_abs, rel_l2 and cosine are defined below, with the goldens). "Square" is a model whose matrices are all square (V = 11, D = 8, L = 2, H = HKV = 4, head width 2, F = 8; weights from the generator `importing_models.square`, seed 0x39d64f12e64012f2, drawn in the order of Chapter 1). A plan checks the shape of each tensor it builds before it runs anything.
+Each mistake of the mapping, made in the import plan and run through the 64-bit forward pass on the text of Chapter 1 (ids 3, 9, 1, 7, 4, 4, 10, 2, eps 1e-6, the epsilon of the published configuration, base 100). The published numbers are the bf16 weights; the golden is the logits of those weights, and the three measures compare the 8 x 11 logits of the imported model with it (max_abs, rel_l2 and cosine are defined below, with the goldens). "Square" is a model whose matrices are all square (V = 11, D = 8, L = 2, H = HKV = 4, head width 2, F = 8; weights from the generator `importing_models.square`, drawn in the order of Chapter 1). A plan checks the shape of each tensor it builds before it runs anything.
 
 | mistake | model | outcome | max_abs | rel_l2 | cosine | argmax agrees |
 |---|---|---|---|---:|---:|---:|
@@ -325,7 +325,7 @@ The import is done when a model that has never seen the reference's code compute
 A **reference golden** is the stored output of the reference implementation for fixed inputs, kept as a file the implementation under test is compared against. For a model the golden holds the input, the outputs and, because the end of the pipeline tells you only that something is wrong and not where, the intermediate activations: the hidden state after the embedding and after every layer. Here is the golden of a six-layer version of the tiny decoder, written as one safetensors file:
 
 <!-- worked: importing_models.golden_contents -->
-The golden for a 6-layer version of the tiny decoder (V = 11, D = 6, H = 4, 2 key-value heads of width 4, F = 10, L = 6; weights from the generator `importing_models.deep`, seed 0x6b38c609eb7b8278, drawn in the order of Chapter 1 and rounded to bf16), written as one safetensors file. It holds the text, the hidden state after the embedding and after each layer, the output of the final norm and the logits, each tensor stored in the order listed below with the data back to back. The header is the compact JSON of the three-tensor file above (`__metadata__` first, then the tensors in that order), padded with spaces to a multiple of 8, and its `__metadata__` is exactly `{"generator":"importing_models.deep","eps":"1e-06","rope_base":"100","arithmetic":"64-bit, stored as 32-bit","tolerance_basis":"rounding count x 2^-24"}`, so the header is 840 bytes. The file is 2,768 bytes (1,920 of tensor data).
+The golden for a 6-layer version of the tiny decoder (V = 11, D = 6, H = 4, 2 key-value heads of width 4, F = 10, L = 6; weights from the generator `importing_models.deep`, drawn in the order of Chapter 1 and rounded to bf16), written as one safetensors file. It holds the text, the hidden state after the embedding and after each layer, the output of the final norm and the logits, each tensor stored in the order listed below with the data back to back. The header is the compact JSON of the three-tensor file above (`__metadata__` first, then the tensors in that order), padded with spaces to a multiple of 8, and its `__metadata__` is exactly `{"generator":"importing_models.deep","eps":"1e-06","rope_base":"100","arithmetic":"64-bit, stored as 32-bit","tolerance_basis":"rounding count x 2^-24"}`, so the header is 840 bytes. The file is 2,768 bytes (1,920 of tensor data).
 
 | tensor | dtype | shape | bytes | what |
 |---|---|---|---:|---|
@@ -414,16 +414,16 @@ Roundings along the longest chain of dependent operations of the tiny decoder fo
 
 Two layers, the head and the stored golden give N = 231 roundings, so the bound on the relative error of the logits is N u = 231 x 2^-24 = 1.38e-5, and the random-walk estimate sqrt(N) u is 9.06e-7. Measured: eight draws of the weights of the tiny model (generators `importing_models.draws.0` to `importing_models.draws.7`, same shapes, scales and draw order as Chapter 1, rounded to bf16), each run in 32-bit arithmetic with the three summation orders against the 64-bit logits stored in 32 bits. The 32-bit run rounds to the nearest 32-bit number after every operation: each product and each addition of every sum (the sum of squares of a norm, every dot product, the softmax denominator, the weighted sum of values), each division, square root and reciprocal (the gated product is fl(fl(g / fl(1 + fl(exp(-g)))) * up): the exp, the add, the divide, then the product with up, the four roundings of the table), each exp, cos and sin (the 64-bit library value rounded once), and the constants eps, the rotary rates and 1/sqrt(d_h) before they are used; the bf16 weights are exactly representable, and the maximum of the softmax is exact. The 'left to right' order adds the terms of a sum one after another from the first; 'right to left' from the last; 'pairwise' adds the sum of the first half to the sum of the second half, recursively, the middle of n terms being n // 2. rel_l2 of the 8 x 11 logits:
 
-| seed of the draw | left to right | right to left | pairwise |
+| generator of the draw | left to right | right to left | pairwise |
 |---|---:|---:|---:|
-| 0x6886c84cce118975 | 1.61e-7 | 1.75e-7 | 1.23e-7 |
-| 0xd97e1a73b4b25a0f | 2.39e-7 | 1.77e-7 | 2.31e-7 |
-| 0x0f513e21f133e079 | 1.70e-7 | 1.54e-7 | 1.24e-7 |
-| 0xacb2944e0b3cfc15 | 1.88e-7 | 1.37e-7 | 2.12e-7 |
-| 0xe9e1be578625515c | 1.31e-7 | 1.83e-7 | 1.36e-7 |
-| 0x0ee3ca3f44cc3174 | 2.66e-7 | 1.84e-7 | 3.16e-7 |
-| 0xb54d5dd123aa34f5 | 2.42e-7 | 2.15e-7 | 1.40e-7 |
-| 0x99bbac5c15de052b | 1.96e-7 | 1.67e-7 | 2.47e-7 |
+| `importing_models.draws.0` | 1.61e-7 | 1.75e-7 | 1.23e-7 |
+| `importing_models.draws.1` | 2.39e-7 | 1.77e-7 | 2.31e-7 |
+| `importing_models.draws.2` | 1.70e-7 | 1.54e-7 | 1.24e-7 |
+| `importing_models.draws.3` | 1.88e-7 | 1.37e-7 | 2.12e-7 |
+| `importing_models.draws.4` | 1.31e-7 | 1.83e-7 | 1.36e-7 |
+| `importing_models.draws.5` | 2.66e-7 | 1.84e-7 | 3.16e-7 |
+| `importing_models.draws.6` | 2.42e-7 | 2.15e-7 | 1.40e-7 |
+| `importing_models.draws.7` | 1.96e-7 | 1.67e-7 | 2.47e-7 |
 
 The largest measured error is 3.16e-7, 44 times below the bound and 0.35 times the random-walk estimate.
 <!-- /worked -->
@@ -510,7 +510,7 @@ The limits are those of the model of error. The bound assumes that stages do not
 5. **[Calculate]** For a decoder of $L = 24$ layers with $D = 1{,}024$, $H d_h = 2{,}048$, $F = 3{,}072$, $d_h = 128$ and $T = 512$ positions, use the stage counts of the error-budget table (a dot product of length $n$ costs $n$; an RMS norm costs $D + 6$; the QK-norm costs $d_h + 6$; the rotation 4; the scores $d_h + 1$; the softmax $T + 3$; the weighted sum $T$; the activation of the feed-forward network 4; each residual 1) to compute $N_{\mathrm{rnd}}$ of the layer stack, the bound $N_{\mathrm{rnd}} u$, and the random-walk estimate. Which stage is the largest?
 6. **[Calculate]** A relative error $\rho$ orthogonal to the reference gives $\cos = 1/\sqrt{1 + \rho^2}$. For which $\rho$ is $1 - \cos = 10^{-4}$? For which is it $10^{-7}$, the resolution of a 32-bit cosine?
 7. **[Implement]** Reproduce `importing_models.safetensors_file` and `importing_models.dtype_decoding`: write the three-tensor file byte by byte (header text, padding to a multiple of 8, data in the order given), print its bytes, parse it back with the two checks of `check_entry` and `read_header_length`, and decode the 16-bit patterns with your own conversion, to the digits printed.
-8. **[Implement]** Reproduce `importing_models.name_mapping` and `importing_models.import_mistakes`: build the published layout of the tiny decoder from the seed and draw order of Chapter 1 (rounded to bf16), write the plan, check it before it runs, and then make each mistake of the table and measure `max_abs`, `rel_l2` and cosine of the logits against the golden.
+8. **[Implement]** Reproduce `importing_models.name_mapping` and `importing_models.import_mistakes`: build the published layout of the tiny decoder from the generator and draw order of Chapter 1 (rounded to bf16), write the plan, check it before it runs, and then make each mistake of the table and measure `max_abs`, `rel_l2` and cosine of the logits against the golden.
 9. **[Implement]** Reproduce `importing_models.error_budget`: run the decoder in 32-bit arithmetic (round after every operation) with the three orders of summation, compare with the 64-bit logits stored in 32 bits on the eight draws named in the error-budget table, and compute the bound $N_{\mathrm{rnd}} u$.
 10. **[Implement]** Reproduce `importing_models.golden_contents` and `importing_models.bisection`: write the golden of the six-layer model, import it with gate and up exchanged in layer 3, and find the first hidden state above its bound with `first_divergence`.
 11. **[Investigate]** Add a bias to the fused query-key-value projection of the tiny decoder and publish it in the layout. Make the importer ignore it, as commit `0581928e9` describes. Which of the three measures see it at the parity tolerance, and does a synthetic gradient check on weights with a zero bias see it?

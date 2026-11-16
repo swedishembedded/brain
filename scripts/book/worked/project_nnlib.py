@@ -20,8 +20,8 @@ Layout of numbers: every tensor is a flat list in row-major order, so a
 parameter vector is one list and an optimizer needs no knowledge of layers.
 All arithmetic is IEEE double precision.
 
-Randomness: every generator is the book's SplitMix64 and every seed comes from
-`bookrng.seed_of("project_nnlib.<name>")` (printed with its draw order), except
+Randomness: every generator is the book's SplitMix64 and is named
+`project_nnlib.<name>` (each block gives its draw order), except
 the sensor data and the autoencoder's start, which are the streams of the
 chapter "First Complete Models" so that the project can be checked against that
 chapter's table.
@@ -65,9 +65,8 @@ def _gen(n):
     return bookrng.generator(_name(n))
 
 
-def _seed(n):
-    s = bookrng.seed_of(_name(n))
-    return f"seed {s:#018x} ({s})"
+def _gen_name(n):
+    return f"`{_name(n)}`"
 
 
 def _f(v, d=6):
@@ -738,7 +737,7 @@ def layer_values():
             f"phase 0.4, shape [3, out]; the layer's scalar loss is L = sum(y * R), so dy = R.\n"
             "linear: W[j, i] = 0.5 sin(0.9 k + 0.2) with k = 5 j + i, b[j] = 0.3 sin(1.3 j + 0.1). "
             "norms: gamma[i] = 1 + 0.3 sin(1.7 i + 0.5), beta[i] = 0.2 sin(2.3 i + 0.9), eps = 1e-5. "
-            f"dropout: p = 0.4 with Generator {_seed('dropout_fixture')}, 15 uniform() draws in row-major order, kept when the draw is at least p "
+            f"dropout: p = 0.4 with Generator {_gen_name('dropout_fixture')}, 15 uniform() draws in row-major order, kept when the draw is at least p "
             f"(mask times 1/0.6: {' '.join(str(int(round(v * 0.6))) for r in mask for v in r)}). "
             "residual: body = linear 5 -> 7 (the linear above), gelu, linear 7 -> 5 with W[j, i] = 0.5 sin(0.6 k + 0.7), "
             "b[j] = 0.2 sin(1.9 j + 0.3).\n\n")
@@ -799,7 +798,7 @@ def gradient_check_layers():
     return ("Fixtures of the previous table. Per-entry check: central difference with h = 1e-5 on every entry of the input and of "
             "every parameter tensor, gate |a - n| <= 1e-7 + 1e-5 max(|a|, |n|); 'worst' is the largest of |a - n| / (1e-7 + 1e-5 max(|a|, |n|)), "
             "which must stay below 1. Directional check: best of 4 random +-1 directions, h = 1e-5, directions from "
-            f"Generator {_seed('directions')} (one integer(2) per entry, tensors in the order of the table, 4 directions each; "
+            f"Generator {_gen_name('directions')} (one integer(2) per entry, tensors in the order of the table, 4 directions each; "
             "+1 when the draw is 1). The two losses are checked per entry only. The dropout rows hold the mask fixed by "
             "restarting the same generator before every evaluation.\n\n"
             + _table(["layer", "tensor", "entries", "failing", "worst ratio", "directional"], rows))
@@ -821,7 +820,7 @@ def broken_layer():
         loss(theta0)
     return ("The layer-norm fixture of the previous tables. The planted fault is the backward pass of RMS norm used for layer norm: "
             "dx = inv_std (dxhat - xhat mean(dxhat xhat)), the term mean(dxhat) is missing. Directions: "
-            f"Generator {_seed('directions_broken')}, 4 per tensor, in the order of the table, correct layer first.\n\n"
+            f"Generator {_gen_name('directions_broken')}, 4 per tensor, in the order of the table, correct layer first.\n\n"
             + _table(["backward pass", "tensor", "entries", "failing", "worst ratio", "directional"], rows))
 
 
@@ -899,9 +898,9 @@ def model_gradient_checks():
     L0, P, rows = _model_check_rows("classifier")
     L1, P1, rows1 = _model_check_rows("autoencoder")
     return ("Classifier of milestone 6 (hidden width 32, dropout p = 0.3 active, mask held fixed by restarting "
-            f"Generator {_seed('model_check_dropout')} before every evaluation) on training rows 0 to 4: loss {L0:.6f}, {P} parameters. "
+            f"Generator {_gen_name('model_check_dropout')} before every evaluation) on training rows 0 to 4: loss {L0:.6f}, {P} parameters. "
             "Tensors of at most 64 entries are checked per entry (gate ratio below 1 means pass), the larger ones by the directional check with 4 directions from "
-            f"Generator {_seed('directions_model_classifier')}.\n\n"
+            f"Generator {_gen_name('directions_model_classifier')}.\n\n"
             + _table(["tensor", "entries", "check", "failing", "worst ratio / verdict"], rows)
             + f"\n\nAutoencoder of milestone 6 on training readings 0 to 7: loss {L1:.6f}, {P1} parameters, every entry checked per entry; "
               f"failing entries in total: {sum(r[3] for r in rows1)}; the largest ratio of any tensor: {max(float(r[4]) for r in rows1):.2e}.")
@@ -970,11 +969,9 @@ def initialization_statistics():
         var = {"he": 2.0 / n_in, "xavier": 2.0 / (n_in + n_out), "fan_in": 1.0 / n_in}[scheme]
         rows.append([scheme, shape, ", ".join(f"{v:+.6f}" for v in W[:3]), f"{math.sqrt(var):.6f}", f"{sd:.6f}", f"{max(abs(v) for v in W):.4f}"])
     return ("A weight matrix with n_out = 128 and n_in = 96 (12288 entries, row-major), drawn from a fresh generator per row named "
-            "init.<scheme>.<shape> exactly, with nothing before it, e.g. the string init.he.normal (the seed of a stream is the first 8 bytes, read as a big-endian unsigned integer, of the SHA-256 digest of its name; the seeds are printed below, so no derivation is needed; the draw is the one call of the chapter-9 rule per entry, "
+            "init.<scheme>.<shape> exactly, with nothing before it, e.g. the string init.he.normal (the generator of a name is `Generator(seed_of(name))`, defined on the pseudocode page; the draw is the one call of the chapter-9 rule per entry, "
             "the truncated shape redrawing normal() until |z| <= 2). 'target sd' is sqrt(2/n_in), sqrt(2/(n_in+n_out)) or sqrt(1/n_in). 'sd of the 12288' is the population standard deviation with divisor n = 12288 after subtracting the mean of the entries (not the divisor n - 1 of the book's sd).\n\n"
-            + _table(["scheme", "shape", "first three weights", "target sd", "sd of the 12288 (divisor n)", "largest |w|"], rows, "llrrrr")
-            + "\n\nSeeds: " + "; ".join(f"init.{s}.{h} {_seed('init.' + s + '.' + h)}" for s, h in
-                                       (("he", "normal"), ("he", "uniform"), ("he", "truncated"), ("xavier", "normal"), ("fan_in", "normal"))))
+            + _table(["scheme", "shape", "first three weights", "target sd", "sd of the 12288 (divisor n)", "largest |w|"], rows, "llrrrr"))
 
 
 def early_stopping_rule():
@@ -1053,9 +1050,9 @@ def resume_identity():
     row("checkpoint without the shuffle order (sorted instead)", resumed(lambda s: s.__setitem__("order", sorted(s["order"]))))
     row("checkpoint without the dropout generator state", resumed(lambda s: s.__setitem__("rng_d", bookrng.seed_of(_name("resume_dropout")))))
     row("checkpoint without the optimizer moments", resumed(lambda s: (s.__setitem__("m", [0.0] * len(s["m"])), s.__setitem__("v", [0.0] * len(s["v"])))))
-    return ("Classifier of milestone 6 (dropout p = 0.3, initial weights from Generator " + _seed('classifier_init') + ") on the first 128 training rows (4 steps of 32 per epoch, the 256 validation rows for the log), "
+    return ("Classifier of milestone 6 (dropout p = 0.3, initial weights from Generator " + _gen_name('classifier_init') + ") on the first 128 training rows (4 steps of 32 per epoch, the 256 validation rows for the log), "
             "12 epochs, no early stopping; AdamW (0.9, 0.999, 1e-8) with decay 0.01, clip 1, and the schedule of milestone 3 with peak 3e-3, warmup 4 steps (a tenth of the 48 steps), floor 3e-5 and total 48 "
-            f"(hold 0). Streams: shuffles {_seed('resume_batches')}, dropout {_seed('resume_dropout')}. The three damaged checkpoints are made from the checkpoint saved after epoch 6: "
+            f"(hold 0). Streams: shuffles {_gen_name('resume_batches')}, dropout {_gen_name('resume_dropout')}. The three damaged checkpoints are made from the checkpoint saved after epoch 6: "
             "the order replaced by the sorted order 0 .. 127, the dropout generator replaced by a generator at its seed (the start of its stream), the moments m and v replaced by zeros (the step count kept). "
             "'Identical' means every parameter and every logged number equal with ==, not within a tolerance.\n\n"
             + _table(["run", "identical to the first row", "largest parameter difference", "training loss, epoch 12", "validation loss, epoch 12"], rows, "lrrrr"))
@@ -1110,7 +1107,7 @@ def classifier_task():
     g = _gen("task")
     u0 = [g.normal() for _ in range(3)]
     rows = [[name, len(lab), *[lab.count(k) for k in range(3)]] for name, lab in (("training", y), ("validation", yv), ("test", yt))]
-    return (f"Generator {_seed('task')}; draws in order: u_0, u_1, u_2, v_0, v_1, v_2 (8 normal() each), then 1024 inputs (8 normal() each, row by row). "
+    return (f"Generator {_gen_name('task')}; draws in order: u_0, u_1, u_2, v_0, v_1, v_2 (8 normal() each), then 1024 inputs (8 normal() each, row by row). "
             "Label = the first index of the largest of 2 (u_k . x) + (v_k . x)^2, k = 0, 1, 2. Rows 0 to 511 are the training set, 512 to 767 the validation set, "
             f"768 to 1023 the test set. u_0 starts ({u0[0]:+.6f}, {u0[1]:+.6f}, {u0[2]:+.6f}); training row 0 starts ({X[0][0]:+.6f}, {X[0][1]:+.6f}, {X[0][2]:+.6f}) with label {y[0]}; "
             f"training row 511 ends ({X[511][5]:+.6f}, {X[511][6]:+.6f}, {X[511][7]:+.6f}) with label {y[511]}; sum of the 4096 training inputs {sum(sum(r) for r in X):+.6f}.\n\n"
@@ -1137,14 +1134,14 @@ def classifier_training():
     nb = len(X) // CLS_RUN["batch"]
     total = CLS_RUN["epochs"] * nb
     head = (f"Model: Linear 8 -> 32 (He), GELU, residual block [layer norm 32, Linear 32 -> 32 (He), GELU, dropout 0.3], Linear 32 -> 3 "
-            f"(1/n_in scale times {READOUT_FACTOR}); {P} parameters, biases and layer-norm shifts 0, gains 1. Start draws: Generator {_seed('classifier_init')}, "
+            f"(1/n_in scale times {READOUT_FACTOR}); {P} parameters, biases and layer-norm shifts 0, gains 1. Start draws: Generator {_gen_name('classifier_init')}, "
             "weights of the three linear layers in order, row-major, one normal() each. "
-            f"Loop: batch 32 ({nb} steps per epoch, at most {CLS_RUN['epochs']} epochs = {total} steps), shuffles of 0 .. 511 from Generator {_seed('classifier_batches')} "
-            f"(one in-place shuffle per epoch), dropout draws from Generator {_seed('classifier_dropout')} (one uniform() per element of the 32 x 32 block, row-major, per step). "
+            f"Loop: batch 32 ({nb} steps per epoch, at most {CLS_RUN['epochs']} epochs = {total} steps), shuffles of 0 .. 511 from Generator {_gen_name('classifier_batches')} "
+            f"(one in-place shuffle per epoch), dropout draws from Generator {_gen_name('classifier_dropout')} (one uniform() per element of the 32 x 32 block, row-major, per step). "
             f"AdamW (0.9, 0.999, 1e-8), decay {CLS_RUN['lam']}, clip {CLS_RUN['tau']}, peak rate {CLS_RUN['peak']}, warmup {total // 10} steps, cosine to {CLS_RUN['peak'] / 100:.1e}, "
             f"early stopping with patience {CLS_RUN['patience']} on the validation loss. Losses and accuracy are computed in eval mode over the whole set after each epoch; "
             "'grad norm' is the mean norm before the clip, 'clipped' the number of clipped steps in the epoch, 'rate' the rate of the epoch's last step. "
-            f"Linear softmax baseline: one linear layer 8 -> 3 (weights N(0, 1/8) row-major from Generator {_seed('linear_init')}, biases 0), trained on the same data by the same loop (batch 32, shuffles from the classifier's shuffle stream, "
+            f"Linear softmax baseline: one linear layer 8 -> 3 (weights N(0, 1/8) row-major from Generator {_gen_name('linear_init')}, biases 0), trained on the same data by the same loop (batch 32, shuffles from the classifier's shuffle stream, "
             "no dropout, no early stopping) for 20 epochs of 16 steps with AdamW decay 0.01, clip 1 and peak rate 0.01 (warmup 32 steps, cosine to 1e-4); validation loss and accuracy in eval mode after epoch 20. "
             "Overfit one batch: the classifier above with dropout in eval mode (off), training rows 0 to 7, a constant rate 0.01 (no schedule), AdamW without clip and without decay, 150 steps, "
             "the loss before the first step and after the 150th and the accuracy on those 8 rows.\n\n")
@@ -1262,7 +1259,7 @@ def debug_diagnostics():
     ]
     return ("Checklist measurements of the shipped configuration against the healthy one (stage 3 of the previous table). Validation labels are never "
             "shifted. The linear baseline and the overfit-one-batch test have the settings of the milestone-6 table, trained on the shifted labels (training label i replaced by the label of row i + 1, the last by the first) in the shipped column. The determinism probe evaluates the final weights of the run of its own column (shipped: stage 0, healthy: stage 3) twice on the 256 validation rows, in train mode with a fresh generator "
-            f"{_seed('determinism_probe')} per column (the draws continue between the two calls) and then twice in eval mode.\n\n"
+            f"{_gen_name('determinism_probe')} per column (the draws continue between the two calls) and then twice in eval mode.\n\n"
             + _table(["measurement", "shipped", "healthy", "reading"], rows, "lrrl"))
 
 

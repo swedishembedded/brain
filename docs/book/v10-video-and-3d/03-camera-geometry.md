@@ -468,7 +468,7 @@ H = K [r_1 r_2 t], scaled to unit Frobenius norm with a positive last entry:
 On exact data both recover the homography to rounding (the largest entry error of $\mathbf{H}$ is at the $10^{-14}$ level), and the singular values show what normalization is for. Without it the ratio of the largest singular value to the eighth is about $2 \times 10^5$: the eighth singular value, the first that is not zero, is small enough to be of the size of what noise does to $\mathbf{A}$. With it the ratio is 3.4, and the null direction stands clear. Noise decides how much that matters.
 
 <!-- worked: camera_geometry.homography_noise -->
-The twelve grid pixels of the previous table with Gaussian noise of standard deviation sigma added to each coordinate, 20 trials. The generator is `bookrng.generator("camera_geometry.homography_noise")` (seed 14060465292947582985); trial by trial, 24 draws of `normal()`, in the order of the grid, u before v, are taken once and multiplied by sigma for each row. The error of a trial is the root mean square, over the twelve grid points, of the distance in pixels between H applied to the grid point and the noise-free pixel; the table gives the median (mean of the 10th and 11th smallest) and the largest of the 20 trials.
+The twelve grid pixels of the previous table with Gaussian noise of standard deviation sigma added to each coordinate, 20 trials. The generator is `bookrng.generator("camera_geometry.homography_noise")`; trial by trial, 24 draws of `normal()`, in the order of the grid, u before v, are taken once and multiplied by sigma for each row. The error of a trial is the root mean square, over the twelve grid points, of the distance in pixels between H applied to the grid point and the noise-free pixel; the table gives the median (mean of the 10th and 11th smallest) and the largest of the 20 trials.
 
 | sigma (pixels) | raw: median | raw: largest | normalized: median | normalized: largest |
 |---|---:|---:|---:|---:|
@@ -550,7 +550,7 @@ On exact corners the closed form recovers the camera, every pose and a reproject
 Real corners are not exact. The next table adds Gaussian noise of standard deviation 0.25 pixel to every coordinate of every corner, from the book's generator, and runs the same algorithm.
 
 <!-- worked: camera_geometry.calibration_noisy -->
-The same five views with Gaussian noise of standard deviation 0.25 pixel added to every corner coordinate. The generator is `bookrng.generator("camera_geometry.calibration_noise")` (seed 14097954219934708612); the draws are taken view by view, corner by corner in the order of the board (row by row, the column index fastest), the u coordinate before the v coordinate, one `normal()` call each (70 a view, 350 in all). Values are printed to two decimals; the runs of the closed form are stable to that.
+The same five views with Gaussian noise of standard deviation 0.25 pixel added to every corner coordinate. The generator is `bookrng.generator("camera_geometry.calibration_noise")`; the draws are taken view by view, corner by corner in the order of the board (row by row, the column index fastest), the u coordinate before the v coordinate, one `normal()` call each (70 a view, 350 in all). Values are printed to two decimals; the runs of the closed form are stable to that.
 
 | parameter | true | closed form |
 |---|---:|---:|

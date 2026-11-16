@@ -919,13 +919,13 @@ accumulates a long sum in a wider format than its inputs, as the last section sh
 unrelated vectors? In two dimensions it is often large: there are only so many
 directions. In many dimensions it is almost always near 0. The table draws pairs
 of vectors with entries $\pm 1$ from the book's generator (Chapter 17 builds
-it; the seed and the order of the draws are printed under the table) and
+it; the generator and the order of the draws are named under the table) and
 reports the average absolute cosine, the largest one seen among 300 pairs, and
 the value
 $\sqrt{2/(\pi n)}$, which is what theory predicts for the average:
 
 <!-- worked: vectors.random_directions -->
-One generator, SplitMix64 with seed 760955756825205139 (0x0A8F753AA75AD993), used for the whole table. For each n in the order below and each of 300 pairs: draw n uniforms for the first vector, then n for the second; an entry is +1 when its uniform is below 0.5, otherwise -1.
+One generator, the book's SplitMix64, `vectors.random_directions`, used for the whole table. For each n in the order below and each of 300 pairs: draw n uniforms for the first vector, then n for the second; an entry is +1 when its uniform is below 0.5, otherwise -1.
 
 | n | mean abs(cos) | largest abs(cos) | sqrt(2 / (pi n)) |
 |---|---:|---:|---:|

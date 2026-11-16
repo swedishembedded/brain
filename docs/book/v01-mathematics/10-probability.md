@@ -53,14 +53,14 @@ We want a number between $0$ and $1$ for "how likely". The most honest source is
 repetition: do the experiment many times and count. Flip a fair coin and record
 the fraction of heads as the flips accumulate. The random choices come from the
 book's own generator, SplitMix64, which Chapter 17 builds; `rng.uniform()` is its
-call for a real number in $[0, 1)$. Every simulated table in this book prints the
-generator's 64-bit seed and the order of its draws, so that once you have the
-generator you reproduce the table digit for digit (the seed is the first eight
-bytes of the SHA-256 hash of the example's name, read as a big-endian number, but
-you only need the printed value):
+call for a real number in $[0, 1)$. Every simulated table in this book names its
+generator and the order of its draws, so that once you have the
+generator you reproduce the table digit for digit (the generator named `x.y` is
+seeded with the first eight bytes of the SHA-256 hash of that name, read as a
+big-endian number; the Pseudocode Conventions page defines it with test values):
 
 <!-- worked: probability.coin_frequencies -->
-Generator: the book's SplitMix64, seed 0x60a34a2606b2623c (6963490976026485308). Flip k is the k-th call of `rng.uniform()` and counts as heads when it is below 0.5; one run of 100,000 flips, read off at the flip counts listed.
+Generator: `probability.coin_frequencies` (the book's SplitMix64). Flip k is the k-th call of `rng.uniform()` and counts as heads when it is below 0.5; one run of 100,000 flips, read off at the flip counts listed.
 
 | flips | heads | heads / flips | distance from 0.5 |
 |---|---:|---:|---:|
@@ -664,7 +664,7 @@ as the table below, each from its own generator seeded from the names
 ![Three jagged lines, the running average of the sum of two dice over 2000 rolls. They start far from 7, swing widely for the first few hundred rolls, and then flatten onto the dashed line at 7.](img/running-average.svg)
 
 <!-- worked: probability.long_run_average -->
-Generator: the book's SplitMix64, seed 0x2ef6cf49c8ba6c36 (3384120085822729270). Roll k uses two calls of `rng.integer(6)`, each plus 1: first the first die, then the second; the sum of the two is the roll. One run of 100,000 rolls, read off at the roll counts listed.
+Generator: `probability.long_run_average` (the book's SplitMix64). Roll k uses two calls of `rng.integer(6)`, each plus 1: first the first die, then the second; the sum of the two is the roll. One run of 100,000 rolls, read off at the roll counts listed.
 
 | rolls | average of the sum | distance from 7 |
 |---|---:|---:|
@@ -909,7 +909,7 @@ Check it by simulation: draw $4000$ such means for each $n$ and measure their
 variance.
 
 <!-- worked: probability.mean_variance_shrinks -->
-Generator: the book's SplitMix64, seed 0x3cbfc3b94f57ea13 (4377432563494939155). One generator for the whole table. A roll is `rng.integer(6) + 1`. Rows in the order n = 1, 4, 16, 64, 256; within a row 4000 means in turn, each the average of its n rolls drawn in turn. Variance of the means: average squared deviation from their average (divisor 4000).
+Generator: `probability.mean_variance_shrinks` (the book's SplitMix64). One generator for the whole table. A roll is `rng.integer(6) + 1`. Rows in the order n = 1, 4, 16, 64, 256; within a row 4000 means in turn, each the average of its n rolls drawn in turn. Variance of the means: average squared deviation from their average (divisor 4000).
 
 | rolls per mean n | average of the means | variance of the means | Var[X] / n | std of the means |
 |---|---:|---:|---:|---:|
@@ -993,7 +993,7 @@ $0.99999\ldots$, and a $u$ above it must still return a valid index rather than
 fall off the end. Check the sampler by counting:
 
 <!-- worked: probability.sampling_a_table -->
-Generator: the book's SplitMix64, seed 0xe8d9d1dc21d0d0bc (16778672630135836860). Each of the 20,000 draws is one `rng.uniform()` passed to the `sample_discrete` rule (first symbol whose cumulative probability exceeds u).
+Generator: `probability.sampling_a_table` (the book's SplitMix64). Each of the 20,000 draws is one `rng.uniform()` passed to the `sample_discrete` rule (first symbol whose cumulative probability exceeds u).
 
 | symbol | p | cumulative p | draws of 20,000 | frequency |
 |---|---:|---:|---:|---:|
@@ -1107,7 +1107,7 @@ Answers are at the end of the chapter.
 6. **[Calculate]** Prove that if $A$ and $B$ are independent then so are $A$ and $B^c$ (hint: $P(A) = P(A \cap B) + P(A \cap B^c)$).
 7. **[Implement]** Implement the counting functions behind the spam table: the joint, the marginals, and the conditionals $P(\text{spam} \mid \text{verdict})$ and $P(\text{verdict} \mid \text{spam})$ with the product-rule check. Reproduce `probability.spam_joint`, `probability.spam_conditionals` and `probability.spam_condition_on_verdict` exactly.
 8. **[Implement]** Implement Bayes' rule for a detector with a given prior, sensitivity and false-alarm rate, both by counting a population of $100000$ and by the formula, and reproduce `probability.bayes_rare_defect` (round each count to the nearest whole part), `probability.bayes_base_rate_sweep` and `probability.bayes_two_detectors` (a third detector with the same rates).
-9. **[Implement]** Implement `sample_discrete`, then reproduce the exact-count tables `probability.two_dice_sums` and `probability.variance_of_sums` by enumerating all $36$ outcomes, and the simulated `probability.sampling_a_table` and `probability.mean_variance_shrinks`. With the generator of Chapter 17, the printed seeds and the stated draw order, the counts and the printed digits reproduce exactly; with another generator, a frequency should fall within about four standard errors $\sqrt{p(1-p)/n}$ of the printed one, and a mean within four of $\sigma/\sqrt{n}$.
+9. **[Implement]** Implement `sample_discrete`, then reproduce the exact-count tables `probability.two_dice_sums` and `probability.variance_of_sums` by enumerating all $36$ outcomes, and the simulated `probability.sampling_a_table` and `probability.mean_variance_shrinks`. With the generator of Chapter 17, the named generators and the stated draw order, the counts and the printed digits reproduce exactly; with another generator, a frequency should fall within about four standard errors $\sqrt{p(1-p)/n}$ of the printed one, and a mean within four of $\sigma/\sqrt{n}$.
 10. **[Investigate]** Run the long-run average experiment (`probability.long_run_average`) for $20$ different generator seeds and record the distance from $7$ at $n = 100$, $1000$ and $10000$. Plot the typical distance against $n$ and compare with $\sigma/\sqrt{n}$, where $\sigma^2 = 35/6$ for the sum of two dice. How often is the distance more than $2\sigma/\sqrt{n}$?
 11. **[Investigate]** In the defect detector, keep the false-alarm rate at $10\%$ but let the sensitivity range from $0.5$ to $1$. At prevalence $1\%$, how much does the posterior after one alarm change? Then keep the sensitivity and vary the false-alarm rate from $0.1$ to $0.001$. Which improvement is worth more at this base rate, and why?
 12. **[Investigate]** Try to break the sampler: give `sample_discrete` a table that sums to $0.999$, then to $1.001$, then with a negative entry. Decide what the `require` line should do in each case, and what a silent clamp would have hidden.

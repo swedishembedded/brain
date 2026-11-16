@@ -90,8 +90,7 @@ def _num(v, d=4):
 
 
 def _gen_note(name):
-    s = bookrng.seed_of(name)
-    return f"Generator: the book's SplitMix64, seed 0x{s:016x} ({s})"
+    return f"Generator: the book's SplitMix64, `{name}`"
 
 
 # ------------------------------------------------------- IEEE arithmetic helpers
@@ -601,9 +600,9 @@ def gallery_setup():
                          f"ln 3 = {_num(LN3)}"),
         ("validation set", f"{N_VAL} examples, teacher labels"),
         ("step", f"plain gradient descent, minibatch of {BATCH} indices drawn with replacement by integer({N_TRAIN}) from the "
-                 f"stream {bookrng.seed_of(BATCH_NAME):#018x}; {STEPS} steps; learning rate {ETA}"),
-        ("overfitting task", f"{len(sx)} training examples, {N_VAL} validation examples with the teacher's labels; generator seed "
-                             f"{bookrng.seed_of(SMALL_DATA_NAME):#018x}; the draws are the 48 of the teacher, the {len(sx)} training inputs, the {N_VAL} validation inputs, "
+                 f"stream `{BATCH_NAME}`; {STEPS} steps; learning rate {ETA}"),
+        ("overfitting task", f"{len(sx)} training examples, {N_VAL} validation examples with the teacher's labels; generator "
+                             f"`{SMALL_DATA_NAME}`; the draws are the 48 of the teacher, the {len(sx)} training inputs, the {N_VAL} validation inputs, "
                              f"then for each training example in order one uniform() and, when it is below 0.25, one integer(2): the label moves by 1 + integer(2) classes (mod 3); "
                              f"the run uses the same start, minibatches of 8 indices drawn with replacement by integer(24) from the batch stream above, 600 steps at rate {ETA}"),
         ("evaluation", f"'loss after t updates' is the mean cross-entropy (log-sum-exp form) of the whole training set of the run, or of the {N_VAL} validation examples, "
@@ -974,10 +973,10 @@ def jacobian_table():
     note = (f"Plain stack of {STACK_MATRICES} layers of width {STACK_WIDTH} (start of training). {_gen_note(STACK_NAME)}; draws in the order: input layer "
             f"({STACK_WIDTH} x {IN_DIM}), the {STACK_MATRICES} hidden matrices, read-out (rows one after the other, biases 0). Weights of the input layer and of the hidden matrices = gain * c / sqrt(fan_in) * normal() "
             f"with c = 1 for sigmoid and tanh (fan_in {IN_DIM} for the input layer, {STACK_WIDTH} for the hidden matrices); the read-out is normal() / sqrt({STACK_WIDTH}), without gain. "
-            f"The spectral norm of a matrix (for the norm bound) is its largest singular value, found by 60 power iterations on W^T W from a start vector of {STACK_WIDTH} normal() draws of the generator `{SPECTRAL_NAME}` "
-            f"(seed {bookrng.seed_of(SPECTRAL_NAME):#018x}), restarted for each matrix, each iteration normalising the vector. "
+            f"The spectral norm of a matrix (for the norm bound) is its largest singular value, found by 60 power iterations on W^T W from a start vector of {STACK_WIDTH} normal() draws of the generator `{SPECTRAL_NAME}`, "
+            f"restarted for each matrix, each iteration normalising the vector. "
             f"Slopes use the activation's derivative at the pre-activation (sigmoid s(1 - s), tanh 1 - a^2). {JAC_PAIRS} pairs (first {JAC_PAIRS} training inputs, unit vector at the output of the last hidden layer "
-            f"from normal() draws normalised, stream {bookrng.seed_of(JAC_NAME):#018x}). Entries are geometric means over the pairs of the norm "
+            f"from normal() draws normalised, stream `{JAC_NAME}`). Entries are geometric means over the pairs of the norm "
             f"of the gradient after passing back through k layers, started from a vector of norm 1. The prediction for a pair and a depth k is (n sigma^2 s2)^(k/2) with n = {STACK_WIDTH}, "
             f"sigma^2 = gain^2 / {STACK_WIDTH} and s2 the mean of g'(z)^2 over all the units of the last k hidden layers (one pooled mean over the {STACK_WIDTH} k units, for that example); "
             "the table gives the geometric mean of that prediction over the pairs.")
@@ -1315,11 +1314,11 @@ def overfit_one_batch_table():
         rows.append((desc, where, "below 1e-8" if err < 1e-8 else _sci(err, 1), gc, _num(l0, 3), _num(l1, 4), _num(a1, 3), of))
     return (f"The first {OVERFIT_N} training examples as one batch (or random labels), network 8 -> 32 -> 32 -> 3 from the gallery start, {OVERFIT_STEPS} steps "
             f"of plain gradient descent at rate {OVERFIT_ETA} on the whole batch. Gradient check: one random unit direction over all {n_params(init_mlp([IN_DIM, HIDDEN, HIDDEN, CLASSES]))} "
-            f"parameters (normal() draws, stream {bookrng.seed_of(CHECK_NAME):#018x}), central difference with h = 1e-5, at the start; 'fails' when the relative "
-            f"error exceeds 1e-4. Random labels: {OVERFIT_N} draws of integer(3) from stream {bookrng.seed_of(LABEL_NAME):#018x}. "
+            f"parameters (normal() draws, stream `{CHECK_NAME}`), central difference with h = 1e-5, at the start; 'fails' when the relative "
+            f"error exceeds 1e-4. Random labels: {OVERFIT_N} draws of integer(3) from the stream `{LABEL_NAME}`. "
             "Loss and accuracy are the usual (correct) cross-entropy and argmax accuracy on the batch after the last update; overfit one batch passes "
             "when that loss is below 1% of the loss at step 0 and the accuracy is 1. A relative error under 1e-8 is rounding noise of the central difference and is printed as a bound. "
-            f"'The labels are reshuffled at every step': at each step the 8 labels, in their original order, are shuffled with the book's shuffle by the generator of the gallery's batch stream (seed {bookrng.seed_of(BATCH_NAME):#018x}), "
+            f"'The labels are reshuffled at every step': at each step the 8 labels, in their original order, are shuffled with the book's shuffle by the generator of the gallery's batch stream `{BATCH_NAME}`, "
             "which continues from step to step. 'The gradient of the first layer is dropped': the whole gradient of layer 1, weights and bias vector, is set to zero before the update.\n\n"
             + _table(["defect", "lives in", "gradient check: relative error", "gradient check", "loss at step 0", "loss after 300 steps", "accuracy",
                       "overfit one batch"], rows, "llrlrrrl"))
@@ -1370,7 +1369,7 @@ def _baseline_text():
     """How the linear softmax baseline of the checklist and of the misalignment table is trained."""
     return (f"The linear baseline is the softmax model {IN_DIM} -> {CLASSES} (weights sqrt(1 / {IN_DIM}) * normal() from the gallery's start generator `{INIT_NAME}`, "
             f"{IN_DIM * CLASSES} draws row by row, biases 0) trained by plain gradient descent at rate {ETA}, minibatches of {BATCH} indices from the gallery's batch stream "
-            f"(seed {bookrng.seed_of(BATCH_NAME):#018x}), {STEPS} steps, no clipping.")
+            f"`{BATCH_NAME}`, {STEPS} steps, no clipping.")
 
 
 def checklist_table():
@@ -1419,7 +1418,7 @@ def misalignment_table():
         r = train(layers, (X8, y8, X8, y8), eta=OVERFIT_ETA, batch=None, steps=OVERFIT_STEPS, n_pool=OVERFIT_N, eval_every=OVERFIT_STEPS)
         base = train(init_mlp([IN_DIM, CLASSES]), (Xt, labels, Xv, yv), eta=ETA, steps=STEPS, eval_every=STEPS)
         rows.append((label, _num(r["evals"][-1][1], 4), _num(r["evals"][-1][3], 3), _num(base["evals"][-1][3], 3), _num(base["evals"][-1][4], 3)))
-    return (f"Shuffle: Fisher-Yates of the {N_TRAIN} training labels with the stream {bookrng.seed_of('training_dynamics.misalignment'):#018x} "
+    return (f"Shuffle: Fisher-Yates of the {N_TRAIN} training labels with the stream `training_dynamics.misalignment` "
             f"(validation labels untouched). Overfit one batch: the first {OVERFIT_N} examples, {OVERFIT_STEPS} steps at rate {OVERFIT_ETA}. Baseline: the "
             f"linear softmax model of the checklist table, trained on all {N_TRAIN} (possibly shuffled) labels and scored against the true validation labels. {_baseline_text()}\n\n"
             + _table(["training labels", "overfit one batch: loss", "overfit one batch: accuracy", "linear baseline: training accuracy",

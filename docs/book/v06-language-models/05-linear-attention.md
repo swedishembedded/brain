@@ -73,7 +73,7 @@ The two forms agree exactly in all 8 numbers: yes.
 The recurrent form is the one whose cost per token does not grow: updating $\mathbf{S}$ and reading it are $2d_kd_v$ multiply-adds, whatever the position. A larger case counts both, with the loops that perform them. Every sum below is a plain left-to-right addition in double precision, and no printed digit depends on that order.
 
 <!-- worked: linear_attention.two_forms_random -->
-Generator: the book's SplitMix64, seed 0x868810fbe9d3d0c0 (`seed_of` of the name `linear_attention.two_forms`). T = 64, d_k = d_v = 8. Draws, in order, for t = 0 to 63: q_t (8 values of `normal()`), k_t (8), v_t (8); no normalization of any vector. Multiply-adds are counted by the loops that perform them.
+Generator: the book's SplitMix64, `linear_attention.two_forms`. T = 64, d_k = d_v = 8. Draws, in order, for t = 0 to 63: q_t (8 values of `normal()`), k_t (8), v_t (8); no normalization of any vector. Multiply-adds are counted by the loops that perform them.
 
 | form | multiply-adds (formula) | multiply-adds counted |
 |---|---|---:|
@@ -92,7 +92,7 @@ The counts say which form to use where. The parallel form costs $T(T+1)(d_k + d_
 The softmax did two jobs besides forcing the cache, and both are visible once it is gone. The first is scale. Softmax weights sum to 1, so each output is an average of values and cannot grow; a linear sum of $t$ terms has no such bound. The table draws unit-length queries and keys and random values, averages the output length over ten runs, and compares with softmax attention on the same vectors.
 
 <!-- worked: linear_attention.norm_growth -->
-Seeds `linear_attention.growth.run0` to `linear_attention.growth.run9` (the seed of each is `seed_of` of its name). d_k = d_v = 16, T = 256. Draws per run, in order, for each t: q_t, then k_t (each 16 values of `normal()`, then divided by its own length), then v_t (16 values of `normal()`). Linear attention: o_t = S_t^T q_t with S_t the sum of k_s v_s^T. Softmax attention: scores sqrt(d_k) q.k (what the usual q.k / sqrt(d_k) gives for vectors of length sqrt(d_k)), then the softmax-weighted sum of the values. Mean over 10 runs of the length of o_t.
+Generators `linear_attention.growth.run0` to `linear_attention.growth.run9`, one per run. d_k = d_v = 16, T = 256. Draws per run, in order, for each t: q_t, then k_t (each 16 values of `normal()`, then divided by its own length), then v_t (16 values of `normal()`). Linear attention: o_t = S_t^T q_t with S_t the sum of k_s v_s^T. Softmax attention: scores sqrt(d_k) q.k (what the usual q.k / sqrt(d_k) gives for vectors of length sqrt(d_k)), then the softmax-weighted sum of the values. Mean over 10 runs of the length of o_t.
 
 | t | length of o_t, linear | linear / sqrt(t) | length of o_t, softmax |
 |---|---:|---:|---:|
@@ -333,7 +333,7 @@ function gated_delta_chunk(Q: array<real>[C, dk], K: array<real>[C, dk], V: arra
 A whole sequence calls this routine once per chunk, passing the previous chunk's `Sout` as `Sin`, with the zero matrix for the first. The chunk size $C$ is a free choice that must divide the length; $C = 1$ has no triangle, $\mathbf{N}$ is empty, and the routine is the token recurrence with the order of its steps rearranged. Does the chunk size change the answer? Not in exact arithmetic, and the next table shows it in double precision: eight tokens, $d_k = 3$, $d_v = 4$, chunk sizes from 1 to 8, against the token-by-token recurrence of the previous section.
 
 <!-- worked: linear_attention.chunk_equivalence -->
-Generator: the book's SplitMix64, seed 0xc4d414b7a74db6f7 (`seed_of` of the name `linear_attention.chunk`). T = 8, d_k = 3, d_v = 4, one head, zero initial state. Draws, in order, for t = 0 to 7: raw q_t (3 values of `normal()`), raw k_t (3), v_t (4), then u = `uniform()` for the decay ($g_t = -0.5\,u$) and u = `uniform()` for the write strength ($\beta_t = 0.2 + 0.7\,u$); q and k are L2-normalized (with the $10^{-6}$) and q scaled by $1/\sqrt{d_k}$ as in the layer. The reference is the token-by-token recurrence (384 multiply-adds).
+Generator: the book's SplitMix64, `linear_attention.chunk`. T = 8, d_k = 3, d_v = 4, one head, zero initial state. Draws, in order, for t = 0 to 7: raw q_t (3 values of `normal()`), raw k_t (3), v_t (4), then u = `uniform()` for the decay ($g_t = -0.5\,u$) and u = `uniform()` for the write strength ($\beta_t = 0.2 + 0.7\,u$); q and k are L2-normalized (with the $10^{-6}$) and q scaled by $1/\sqrt{d_k}$ as in the layer. The reference is the token-by-token recurrence (384 multiply-adds).
 
 | chunk size C | chunks | largest absolute difference of the outputs | largest absolute difference of the final state | multiply-adds counted |
 |---|---:|---:|---:|---:|
@@ -384,7 +384,7 @@ which takes $\log_2 C$ matrix squarings and products, six at $C = 64$, in place 
 The cause is in the identity's evaluation, and a table reproduces it in double precision. Take a chunk of 64 tokens whose keys all point in nearly the same direction (a base direction plus 6 percent noise, as repetitive text produces), weak decay and $\beta$ near its maximum, the regime in which the entries of $\mathbf{N}$ approach 1.
 
 <!-- worked: linear_attention.neumann_failure -->
-Generator: the book's SplitMix64, seed 0x4a95f96999bae1b2 (`seed_of` of the name `linear_attention.neumann`). C = 64, d_k = 16. Draws, in order: a base direction (16 values of `normal()`); then for each of the 64 tokens, 16 values of `normal()` that are added after scaling by 0.06 to the base, the sum L2-normalized (with $10^{-6}$) into the key; $u$ = `uniform()` for the decay ($g = -0.002\,u$) and $u$ = `uniform()` for the write strength ($\beta = 0.97 + 0.02\,u$). $\mathbf{N}_{ij} = \beta_i\exp(c_i - c_j)(\mathbf{k}_i\cdot\mathbf{k}_j)$ for $j < i$. Largest entry of $\mathbf{N}$: 0.986.
+Generator: the book's SplitMix64, `linear_attention.neumann`. C = 64, d_k = 16. Draws, in order: a base direction (16 values of `normal()`); then for each of the 64 tokens, 16 values of `normal()` that are added after scaling by 0.06 to the base, the sum L2-normalized (with $10^{-6}$) into the key; $u$ = `uniform()` for the decay ($g = -0.002\,u$) and $u$ = `uniform()` for the write strength ($\beta = 0.97 + 0.02\,u$). $\mathbf{N}_{ij} = \beta_i\exp(c_i - c_j)(\mathbf{k}_i\cdot\mathbf{k}_j)$ for $j < i$. Largest entry of $\mathbf{N}$: 0.986.
 
 | power of N | largest absolute entry (3 digits) |
 |---|---:|
@@ -588,7 +588,7 @@ Attention is not the only cost that grows with the context in a decoder. The nex
 7. **[Calculate]** A scalar system has $A = -1$ and a step $\Delta = 2$. Give the exact $\bar A$ and the Euler value, and say which one can be used as a decay gate.
 8. **[Implement]** Reproduce `linear_attention.two_forms_random`: the draw order, the two forms, the counts of multiply-adds against the formulas, and the difference below $10^{-12}$.
 9. **[Implement]** Reproduce `linear_attention.chunk_equivalence`: the routine `gated_delta_chunk` for $C = 1, 2, 4, 8$, the draw order and normalization, the agreement with the token loop below $10^{-12}$, and the counted multiply-adds against the closed form.
-10. **[Implement]** Reproduce the row $m = 8$ of `linear_attention.memory_accuracy` for both workloads and the three writers, with the 20 trials and their seeds.
+10. **[Implement]** Reproduce the row $m = 8$ of `linear_attention.memory_accuracy` for both workloads and the three writers, with the 20 trials and their generators.
 11. **[Investigate]** Extend the memory experiment with a decay gate $\alpha$ applied before every write, in the rewritten workload, for $\alpha \in \{1, 0.99, 0.95, 0.9\}$ and $m = 16$. At what $\alpha$ does the accuracy peak, and what does that say about the choice of a decay for a memory that must keep recent values?
 12. **[Investigate]** Using `linear_attention.neumann_failure`, find the strength of the keys' alignment (the noise scale 0.06) above which the product of the six factors first has an error larger than 1 at $C = 64$, and below which both methods agree, and compare with $C = 16$.
 

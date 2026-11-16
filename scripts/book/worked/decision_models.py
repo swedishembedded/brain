@@ -70,9 +70,8 @@ def _fmt(x, d=4):
     return cd._fmt(x, d)
 
 
-def _seed_line(name, normal=False):
-    seed = bookrng.seed_of(name)
-    return f"`{name}` (seed {seed:#018x}, {seed})" + ("." + HELD_GAUSSIAN if normal else "")
+def _generator_line(name, normal=False):
+    return f"`{name}`" + ("." + HELD_GAUSSIAN if normal else "")
 
 
 @lru_cache(maxsize=None)
@@ -308,7 +307,7 @@ def world_rule():
     for i, r in enumerate(first):
         rows.append([i, ROUTES[r["y"]], " ".join(r["words"]), ", ".join(_fmt(v, 2) for v in r["raw"])])
     counts = [[name, n] + [sum(1 for r in splits[name] if r["y"] == k) for k in range(K)] for name, n in SPLITS]
-    text = ("The generator is " + _seed_line(WORLD, True) + " One generator runs across the whole world, in this order. "
+    text = ("The generator is " + _generator_line(WORLD, True) + " One generator runs across the whole world, in this order. "
             "First the four concept vectors, 6 `normal()` calls each, in route order. Then the word vectors: for each family in route "
             "order and each of its four words in the listed order, coordinate j is the concept coordinate plus 0.5 times one `normal()`; "
             "then the four filler words, each coordinate 0.5 times one `normal()`. Then the splits, train, validation, test and log, one "
@@ -350,7 +349,7 @@ def state_vector():
 # ------------------------------------------------------------------ the head
 
 def head_parameters():
-    seeds = [[h, _seed_line(f"{INIT}.{h}"), d] for h, d in HEADS]
+    seeds = [[h, _generator_line(f"{INIT}.{h}"), d] for h, d in HEADS]
     W0 = _init("both")
     runs = _runs("both")
     cols_t = [f"u{j}" for j in range(M)]
@@ -644,7 +643,7 @@ def logged_outcomes():
             sd = _st("both", lambda r, k=key, t=target: _block_stats(r, k, t)[1], _f4)
             rows.append([tlabel, label, whole, mean, sd])
     old = _st("both", lambda r: _estimates(r, 0, n_all)["old"], _f4)
-    return (f"The log is the {n_all} log requests, each routed by the old policy (generator {_seed_line(LOGGING)}; for each request in order one "
+    return (f"The log is the {n_all} log requests, each routed by the old policy (generator {_generator_line(LOGGING)}; for each request in order one "
             "`uniform()`, below 0.7 the numbers-only head's argmax, otherwise one `integer(4)` for a uniformly random route), with the "
             "outcome 1 when the route was right and 0 otherwise and the propensity P(a | s) = 0.7 [a = old argmax] + 0.075 of the route it "
             "chose. Two target policies are valued: the argmax of the head on the whole state, and the constant policy that routes everything "
@@ -727,8 +726,7 @@ def audit_record():
             + _table(["request", "words", "numbers", "logits z", "probabilities", "p_max", "action"], rec, "rllllrl")
             + f"\n\nReplay. The probabilities of request {i} recomputed from its logged state vector alone differ from the first computation by "
             f"{max(abs(a - b) for a, b in zip(p, again)):.1f} in every entry. The 1000 test requests scored again in the order of one "
-            "`shuffle` of the indices 0 to 999 (generator `decision_models.replay`, seed "
-            f"{bookrng.seed_of('decision_models.replay'):#018x}) give probabilities that differ from the first pass on {diff} requests (a "
+            f"`shuffle` of the indices 0 to 999 (generator `decision_models.replay`) give probabilities that differ from the first pass on {diff} requests (a "
             "request's answer does not depend on the others).\n\n"
             f"Why {ROUTES[top]} rather than {ROUTES[second]} for request {i}: the logit difference z[{ROUTES[top]}] - z[{ROUTES[second]}] "
             "splits exactly into one contribution per input group (the weight difference times the input, summed in input order) and the "

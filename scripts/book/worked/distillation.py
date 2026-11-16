@@ -224,25 +224,24 @@ def curve():
 
 
 def soft_versus_hard():
-    seeds = ", ".join(f"{bookrng.seed_of(f'distillation.train.{r}')}" for r in range(RUNS))
     rows = []
     for n in SIZES:
         rows.append([n, _stable_mean("hard", n), _stable_mean("top2", n), _stable_mean("soft", n)])
     head = (f"A teacher and a student, both softmax classifiers over {V_C} classes. The teacher reads {D_T} features: its "
-            f"{V_C} x {D_T} weight matrix is {SCALE_T} * normal() in row-major order from the generator seeded "
-            f"{bookrng.seed_of('distillation.teacher')} (seed_of 'distillation.teacher'). The student reads only the first {D_S} "
+            f"{V_C} x {D_T} weight matrix is {SCALE_T} * normal() in row-major order from the generator "
+            f"`distillation.teacher`. The student reads only the first {D_S} "
             f"features, so it cannot copy the teacher. Each of the {RUNS} runs (index r = 0 to {RUNS - 1}) restarts its own "
-            f"generator, named 'distillation.train.r' (seeds {seeds}), and draws the {N_MAX} training contexts first "
+            f"generator, named `distillation.train.r`, and draws the {N_MAX} training contexts first "
             f"({D_T} normal() each, in order) and then {N_MAX} uniform() values, one per context; a run with n contexts uses the "
             f"first n of both. The hard label of a context is the first class whose cumulative teacher probability exceeds its "
             f"uniform value (the last class if none does). The three targets are that one-hot label, the teacher's top 2 "
             f"classes renormalized, and the full teacher distribution. The student has no bias and starts at zero; it minimizes "
             f"the mean cross-entropy against its targets plus {LAMBDA}/2 times the sum of its squared weights by {STEPS} steps "
             f"of gradient descent with rate {LR}, from which every run ends with a largest gradient component below 1e-12 (checked). The score is the mean over "
-            f"{N_TEST} test contexts (generator 'distillation.test', seed {bookrng.seed_of('distillation.test')}, {D_T} normal() each) "
+            f"{N_TEST} test contexts (generator `distillation.test`, {D_T} normal() each) "
             f"of KL(q || p), q the teacher's and p the student's distribution, averaged over the {RUNS} runs. "
-            f"The student fitted to the full teacher distribution of {N_FLOOR} other contexts (generator 'distillation.floor', "
-            f"seed {bookrng.seed_of('distillation.floor')}) scores {_f(_floor())} on the same test set. " + stable.RULE
+            f"The student fitted to the full teacher distribution of {N_FLOOR} other contexts (generator `distillation.floor`) "
+            f"scores {_f(_floor())} on the same test set. " + stable.RULE
             + " The problem is convex and the runs converge, so every number below is printed in full.\n\n")
     return head + _table(["training contexts", "one-hot label sampled from the teacher", "top 2 of the teacher", "full teacher distribution"],
                          rows, "rrrr")
@@ -415,9 +414,8 @@ def normalisation():
                 dev = max(dev, abs((_norm_loss(wp, sub) - _norm_loss(wm, sub)) / 2e-6 - gm[v][j]))
         assert dev < 1e-7
         rows.append([n, _f(loss, 5), _f(summed, 5), _f(mean, 5), "passes (below 1e-7)"])
-    seed = bookrng.seed_of("distillation.normalisation")
     head = (f"A student that is one linear softmax: logits W x with W of shape [{V_N}, {D_N}] and x of {D_N} numbers, the same W at "
-            f"every position. One generator seeded {seed} (seed_of 'distillation.normalisation') draws, in this order: the {V_N * D_N} "
+            f"every position. One generator, `distillation.normalisation`, draws, in this order: the {V_N * D_N} "
             f"entries of W (row-major, each 0.5 * normal()), then for each of 4 positions its x ({D_N} normal()) and its teacher "
             f"logits ({V_N} values, each 1.5 * normal()), whose top 2 renormalized is the position's target. An example is its first "
             "n positions. The loss is the mean over the n positions of KL(q_K || p). The two gradients are with respect to W, "
@@ -561,13 +559,12 @@ def reverse_kl_estimator():
     assert dev < 1e-12 and devn < 1e-8
     rows = [[i, _f(p[i]), _f(q[i]), f"{math.log(q[i]) - math.log(p[i]):+.4f}", f"{exact[i]:+.4f}", f"{expect[i]:+.4f}", f"{mc[i]:+.4f}"]
             for i in range(4)]
-    seed = bookrng.seed_of("distillation.estimator")
     head = ("The student's logits are (0.5, 0.2, -0.3, 0.0) over four answers. The teacher is the same model shown a hint, which "
             f"we model as adding {HINT} to the logit of answer 2 (and nothing else), so its logits are (0.5, 0.2, 1.7, 0.0). "
             "The advantage of answer y is A_y = ln q_y - ln p_y. 'exact' is the gradient of KL(p || q) with respect to the "
             "student's logits, p_j (a_j - sum_i p_i a_i) with a = ln p - ln q. 'expected estimate' is the exact sum over the four "
             "answers of p_y x (-A_y) x (e_y - p), the expectation of the single-sample estimate. 'sample mean' averages that "
-            f"estimate over {n_draw} answers drawn from p by one generator seeded {seed} (seed_of 'distillation.estimator'): "
+            f"estimate over {n_draw} answers drawn from p by one generator, `distillation.estimator`: "
             "each draw is one uniform(), and the answer is the first whose cumulative p exceeds it.\n\n")
     tail = (f"\n\nThe exact and the expected columns agree to below 1e-12 (the criterion, checked), and a central finite "
             f"difference of KL(p || q) (step 1e-6) agrees with the exact column to below 1e-8 (checked). "

@@ -20,7 +20,7 @@ the numbers of the chapter's figures, so a picture and the table beside it canno
   their accuracy against the distance of the subject;
 * parameters and FLOPs of one step of each cell, and the work and the depth of a recurrent layer over T steps.
 
-Every random quantity comes from the book's SplitMix64 (`bookrng.generator(name)`); each block prints the seed.
+Every random quantity comes from the book's SplitMix64 (`bookrng.generator(name)`); each block names its generators.
 The sums of dot products are plain left-to-right additions, the order a C loop would use.
 
 Swedish Embedded AB implements solutions for sequence models that must remember across long inputs. If your team
@@ -66,8 +66,8 @@ def _vec(v, d=4):
     return "(" + ", ".join(_fx(x, d) for x in v) + ")"
 
 
-def _seed_line(name):
-    return f"Generator: the book's SplitMix64, seed {bookrng.seed_of(name):#018x} (`seed_of` of the name `{name}`)."
+def _generator_line(name):
+    return f"Generator: the book's SplitMix64, `{name}`."
 
 
 # ------------------------------------------------------------------------------------------------ the task
@@ -151,13 +151,12 @@ def task():
         "name the verb that comes next: one of `sees`, `chases` (singular subject, ids 1 to 3) or `see`, `chase` "
         "(plural subject, ids 4 to 6), the two verbs of the right number equally likely. The nouns of the phrases are "
         "drawn from all six nouns and have nothing to do with the subject.\n\n"
-        + _seed_line(NAME_TRAIN) + " Test: "
-        + f"seed {bookrng.seed_of(NAME_TEST):#018x} (`{NAME_TEST}`). Draw order per sequence: `integer(6)` the subject, "
+        + _generator_line(NAME_TRAIN) + " Test: "
+        + f"generator `{NAME_TEST}`. Draw order per sequence: `integer(6)` the subject, "
         "then k times `integer(6)` the nouns of the phrases, then `integer(2)` the verb among the two of the subject's number. "
         f"The training set has {N_TRAIN_PER_K} sequences for each k in {TRAIN_KS} in that order ({N_TRAIN_PER_K * len(TRAIN_KS)} in all), "
         f"the test set {N_TEST_PER_K} for each k in {TEST_KS} ({N_TEST_PER_K * len(TEST_KS)} in all). The four sequences below are "
-        "drawn from the generator `recurrent_networks.example` (seed "
-        f"{bookrng.seed_of('recurrent_networks.example'):#018x}), one for each k from 0 to 3.\n\n"
+        "drawn from the generator `recurrent_networks.example`, one for each k from 0 to 3.\n\n"
         + t1 + "\n\n"
         "The best accuracy a model can reach that sees only the last four tokens before the verb, found by listing all "
         "6^(k+1) equally likely combinations of subject and phrase nouns, grouping them by the window's contents and "
@@ -411,7 +410,7 @@ def unroll():
     tw = _table(["row", "W"], [(i, _vec(p["W"][i])) for i in range(2)], "rl")
     ts = _table(["t", "token", "W h(t-1)", "U x(t)", "a(t) = W h(t-1) + U x(t) + b", "h(t) = tanh(a(t))"], rows, "rlllll")
     return (
-        _seed_line(TINY_NAME) + " Draws, in this order: the 12 columns of U one after the other, 2 values each (each "
+        _generator_line(TINY_NAME) + " Draws, in this order: the 12 columns of U one after the other, 2 values each (each "
         "`0.8 * normal()`), then W row by row, 4 values (each `0.8 * normal()`). The bias b is (0, 0) and the "
         "start state h(0) is (0, 0). The input at step t is the one-hot vector of the token, so `U x(t)` is the column "
         "of the token.\n\n" + tu + "\n\n" + tw + "\n\n"
@@ -499,15 +498,15 @@ def gradient_check_cells():
                 worst = max(worst, abs((lp - lm) / 2e-6 - fg[j]))
                 count += 1
         name = f"recurrent_networks.check.{kind}"
-        rows.append((CELL_NAMES[kind], f"`{name}`", f"{bookrng.seed_of(name):#018x}", count, "yes" if worst < 1e-7 else "NO"))
+        rows.append((CELL_NAMES[kind], f"`{name}`", count, "yes" if worst < 1e-7 else "NO"))
     return (
         "Each cell has H = 3 units. Its parameters are drawn by the initialization recipe stated before the Jacobian table, from the generator "
-        "`recurrent_networks.check.<cell>` with `<cell>` equal to `rnn` (the vanilla cell), `lstm` or `gru` (seeds in the table), with W gain 1.5, forget-gate bias 0.5 (the update-gate bias of the GRU -0.5) and U entries "
+        "`recurrent_networks.check.<cell>` with `<cell>` equal to `rnn` (the vanilla cell), `lstm` or `gru` (the generators are in the table), with W gain 1.5, forget-gate bias 0.5 (the update-gate bias of the GRU -0.5) and U entries "
         "`0.7 * normal()`, and the readout bias set to (0.1, -0.2, 0.05, 0). The loss is the mean cross-entropy of two sequences, one of "
-        "k = 2 phrases (8 tokens) and one of k = 1 (5 tokens), in that order, from the generator `recurrent_networks.check.data` "
-        f"(seed {bookrng.seed_of('recurrent_networks.check.data'):#018x}). Every entry of every parameter is compared "
+        "k = 2 phrases (8 tokens) and one of k = 1 (5 tokens), in that order, from the generator `recurrent_networks.check.data`. "
+        "Every entry of every parameter is compared "
         "with a central difference of step 1e-6.\n\n"
-        + _table(["cell", "generator", "seed", "parameters compared", "largest absolute difference below 1e-7"], rows, "llrrr")
+        + _table(["cell", "generator", "parameters compared", "largest absolute difference below 1e-7"], rows, "llrr")
     )
 
 
@@ -574,9 +573,9 @@ def jacobian_product():
     clip_k = max(SENS_KS, key=lambda k: large["norms"][k])
     return (
         f"All models have H = {SENS_H} units and read the same {SENS_T} tokens, ids drawn by `integer({V})` from the generator "
-        f"`{SENS_TOKENS_NAME}` (seed {bookrng.seed_of(SENS_TOKENS_NAME):#018x}). Each model's parameters come from the generator "
+        f"`{SENS_TOKENS_NAME}`. Each model's parameters come from the generator "
         "`recurrent_networks.sens.<label>`, where the label is the full text of the first column (the generator of the first model is "
-        "`recurrent_networks.sens.vanilla, small W`, with the comma and the space; the seeds are listed after the table) in the order "
+        "`recurrent_networks.sens.vanilla, small W`, with the comma and the space; the generators are listed after the table) in the order "
         "U, W, readout (the readout is not used here), with U entries `0.5 * normal()`, W entries `gain * normal() / sqrt(16)` where the gain is "
         "0.25, 1 and 3 for the three vanilla models and 1 for the gated ones, and the biases of the initialization recipe "
         "of the text: LSTM forget bias 0, 1 or 3, GRU update-gate bias -1, all others 0. "
@@ -584,13 +583,12 @@ def jacobian_product():
         f"(for the LSTM the state is (h, c), a {SENS_H} by {2 * SENS_H} Jacobian), found by running the backward pass of "
         f"BPTT from each of the {SENS_H} unit vectors in h(40) and stacking the {SENS_H} gradients that arrive k steps back. "
         f"The spectral norm is `power_iteration` with {SPECTRAL_ITERS} iterations (the start vector, one `normal()` per column of the matrix, is not normalised first) from draws of the generator "
-        f"`{SPECTRAL_NAME}` (seed {bookrng.seed_of(SPECTRAL_NAME):#018x}), restarted for each entry; the second column is the same estimate for the "
+        f"`{SPECTRAL_NAME}`, restarted for each entry; the second column is the same estimate for the "
         "matrix W of a vanilla cell (a gated cell has no single recurrent matrix and shows a dash). Values are rounded to 3 significant digits "
         "and are stable to about that.\n\n"
         + _table(head, rows, "lr" + "r" * len(SENS_KS)) + "\n\n"
-        + _table(["model", "generator of the parameters", "seed"],
-                 [(label, f"`recurrent_networks.sens.{label}`", f"{bookrng.seed_of('recurrent_networks.sens.' + label):#018x}")
-                  for label, _, _, _ in SENS_MODELS], "llr") + "\n\n"
+        + _table(["model", "generator of the parameters"],
+                 [(label, f"`recurrent_networks.sens.{label}`") for label, _, _, _ in SENS_MODELS], "ll") + "\n\n"
         f"The bound ||W||_2^k for the small vanilla model is {', '.join(f'{b}' for b in bound)} at k = {', '.join(str(k) for k in SENS_KS)}. "
         f"The large vanilla model peaks at k = {clip_k} with {_sci(large['norms'][clip_k], 2)}; a global-norm clip with "
         f"threshold 5 would multiply a gradient of that norm by {_fx(5.0 / large['norms'][clip_k], 4)}."
@@ -637,10 +635,10 @@ def truncation():
         T = len(toks)
         rows.append((k, distance(k), T, T - sub, mag(full), mag(cut), f"{T}", f"{min(T, TRUNC_REACH)}"))
     return (
-        "A single LSTM with H = 12 units (parameters from the generator `recurrent_networks.trunc`, seed "
-        f"{bookrng.seed_of('recurrent_networks.trunc'):#018x}, forget bias 1) reads the task's sequence with the subject `cats` and k phrases, "
-        "the phrase nouns being `1 + integer(6)` draws, in order of the rows, from the generator `recurrent_networks.trunc_nouns` "
-        f"(seed {bookrng.seed_of('recurrent_networks.trunc_nouns'):#018x}); the loss is the cross-entropy of the verb `see` (class 2). "
+        "A single LSTM with H = 12 units (parameters from the generator `recurrent_networks.trunc`, "
+        "forget bias 1) reads the task's sequence with the subject `cats` and k phrases, "
+        "the phrase nouns being `1 + integer(6)` draws, in order of the rows, from the generator `recurrent_networks.trunc_nouns`; "
+        f"the loss is the cross-entropy of the verb `see` (class 2). "
         "The entry is the norm of the gradient (h and c together) that arrives at the state right after the subject "
         f"has been read, from full backpropagation through time and from backpropagation truncated to the last {TRUNC_REACH} steps.\n\n"
         + _table(["k", "d", "tokens T", "steps from the subject to the loss", "norm of the gradient at the subject, full",
@@ -818,7 +816,7 @@ def training():
     rows = []
     for kind in ("rnn", "lstm", "gru"):
         for seed in SEEDS:
-            rows.append((CELL_NAMES[kind], seed, f"{bookrng.seed_of(_run_name(kind, seed, 'init')):#018x}",
+            rows.append((CELL_NAMES[kind], seed,
                          *[_stable_cell(kind, seed, lambda curve, correct, e=e: curve[e], lambda x: _fx(x, 3)) for e in CHECKPOINT_EPOCHS],
                          *[_stable_count(kind, seed, lambda curve, correct, ks=ks: sum(correct[k] for k in ks), N_TEST_PER_K * len(ks))
                            for ks in groups]))
@@ -829,12 +827,12 @@ def training():
         shares = [sum(c.values()) / n_test for (kd, _, _), (_, c) in runs.items() if kd == kind]
         dist_rows.append((CELL_NAMES[kind], len(shares), sum(x == 1.0 for x in shares), sum(x >= 0.95 for x in shares),
                           sum(x < 0.7 for x in shares)))
-    head = (["cell", "run", "seed of the initial parameters"] + [f"loss, epoch {e}" for e in CHECKPOINT_EPOCHS]
+    head = (["cell", "run"] + [f"loss, epoch {e}" for e in CHECKPOINT_EPOCHS]
             + ["test, d <= 4", "test, d > 4 seen in training", "test, d beyond training"])
     return (
         f"Every cell has H = {TRAIN_H} units and reads the one-hot ids of the task; parameters are drawn by the initialization recipe "
         f"of the text (order U, W, readout; U entries `0.5 * normal()`, W gain 1, LSTM forget-gate bias 1, GRU update-gate bias -1) from the generator named "
-        "`recurrent_networks.<cell>.<run>.init` with cell `rnn`, `lstm` or `gru` and run 0, 1 or 2; the seed of each is in the table. "
+        "`recurrent_networks.<cell>.<run>.init` with cell `rnn`, `lstm` or `gru` and run 0, 1 or 2. "
         f"Training is Adam (learning rate {LR}, beta1 {BETA1}, beta2 {BETA2}, epsilon {EPS_ADAM:g}, with the bias correction of "
         f"Volume III) on minibatches of {BATCH} of the {N_TRAIN_PER_K * len(TRAIN_KS)} training sequences "
         f"(10 batches per epoch, {EPOCHS} epochs, {EPOCHS * 10} updates), the batches of an epoch being a new shuffle of "
@@ -858,7 +856,7 @@ def training():
         f"k in {[k for k in TEST_KS if k not in TRAIN_KS]}. Losses are rounded to 3 decimals. The runs are chaotic after "
         "the first few epochs (a change of 1e-12 in one weight moves the loss at epoch 40 in the second digit and can move a whole run from "
         "learned to not learned), so the stable-digits rule applies. " + stable.RULE + " A count is printed when all five runs give the same count and as 'unstable' otherwise.\n\n"
-        + _table(head, rows, "lrl" + "r" * (len(head) - 3)) + "\n\n"
+        + _table(head, rows, "lr" + "r" * (len(head) - 2)) + "\n\n"
         "What survives the chaos is the distribution over trainings. Each cell was trained 15 times (the 3 runs, each with its 4 nudged copies and itself); "
         f"the table counts them by the share of the {sum(N_TEST_PER_K for _ in TEST_KS)} test sequences of all distances that they name correctly. "
         "A reimplementation should expect similar fractions, not these counts.\n\n"

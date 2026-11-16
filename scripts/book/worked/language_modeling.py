@@ -19,7 +19,7 @@ the table beside it cannot disagree.
   trained by full-batch gradient descent, compared with the counting models, its work counted in FLOPs;
 * teacher forcing as a table of training pairs, the shift of the targets by one, and the bug of not shifting.
 
-Every random quantity comes from the book's SplitMix64 (`bookrng.generator(name)`); each block prints the seed.
+Every random quantity comes from the book's SplitMix64 (`bookrng.generator(name)`); each block names its generator.
 
 Swedish Embedded AB implements solutions for building and evaluating language models from first principles. If your
 team needs expertise in next-token training objectives, perplexity and the data pipelines behind them, you can
@@ -54,8 +54,8 @@ def _int(n):
     return f"{n:,}"
 
 
-def _seed_line(name):
-    return f"Generator: the book's SplitMix64, seed {bookrng.seed_of(name):#018x} (`seed_of` of the name `{name}`)."
+def _generator_line(name):
+    return f"Generator: `{name}` (the book's SplitMix64)."
 
 
 # --------------------------------------------------------------------------------------------- the toy language
@@ -198,8 +198,7 @@ def _true_prob(sentence):
 def corpus():
     h, length, floor = _process_stats()
     lines = [
-        _seed_line(NAME_TRAIN) + f" Dev: seed {bookrng.seed_of(NAME_DEV):#018x} (`{NAME_DEV}`), test: seed "
-        f"{bookrng.seed_of(NAME_TEST):#018x} (`{NAME_TEST}`).",
+        _generator_line(NAME_TRAIN) + f" Dev: `{NAME_DEV}`, test: `{NAME_TEST}`.",
         "",
         "The 18 tokens a model predicts have ids 0 to 17 in this order: " + ", ".join(
             f"{i} `{t}`" for i, t in enumerate(TOKENS[:V])) + ". Id 18, `<s>`, only ever pads the start of a sentence "
@@ -769,11 +768,11 @@ def sampling():
         rows.append([label, f"{100 * ok(sents) / len(sents):.1f}%", f"{ok(without)}/{len(without)}",
                      f"{ok(with_pp)}/{len(with_pp)}", f"{100 * unseen:.1f}%", f"{100 * real:.1f}%"])
         ex.append(f"- {label}: " + " | ".join(_words(s) for s in sents[:3]))
-    seeds = ", ".join(f"{bookrng.seed_of('language_modeling.sample.' + key):#018x} (`language_modeling.sample.{key}`, {lab})"
+    names = ", ".join(f"`language_modeling.sample.{key}` ({lab})"
                       for key, lab, _, _, _ in _samples())
     return "\n".join([
-        f"Each model draws {N_SAMPLES} sentences. Generator: the book's SplitMix64, one generator per model, with the seeds "
-        f"{seeds}. A sentence starts from four `<s>` tokens; "
+        f"Each model draws {N_SAMPLES} sentences. Generator: the book's SplitMix64, one generator per model, named "
+        f"{names}. A sentence starts from four `<s>` tokens; "
         "for each token one `uniform()` is drawn and the token is the first id (0 to 17) whose cumulative probability "
         f"exceeds it; the sentence ends at `.` or after {MAX_LEN} tokens. The models are those of the previous "
         "tables (counts from the printed corpus, interpolation settings chosen on the development set), and the networks "
@@ -942,7 +941,7 @@ def mlp_training():
             for s in steps]
     test_nll = _mlp_loss(model, _batch(test_set()))
     return "\n".join([
-        _seed_line(MLP_NAME),
+        _generator_line(MLP_NAME),
         f"Model: the last {CTX} tokens (ids 0 to 18, `<s>` padding the start) are looked up in an embedding table of "
         f"V = {V_IN} rows and D = {D_EMB} columns and concatenated into a vector of {CTX * D_EMB} numbers; a layer "
         f"of H = {H_HID} tanh units (the correctly rounded library `tanh`) with weights W1 of shape [{H_HID}, "
@@ -1002,7 +1001,7 @@ def data_size():
         "are the first 40 of the 320; draws are made in the order already given, so a larger set extends a smaller "
         "one). Everything else is as before: the settings of the counting models are chosen again on the development "
         f"set for each size (order 2 uses add-alpha, orders 3 and 5 interpolation), the network starts from the same "
-        f"seed, trains for {MLP_STEPS} steps at learning rate {MLP_LR} and is stopped at its lowest development "
+        f"initial weights, trains for {MLP_STEPS} steps at learning rate {MLP_LR} and is stopped at its lowest development "
         "perplexity. Test perplexity, same test set:",
         "",
         _table(["sentences", "training pairs", "order 2", "order 3", "order 5", "network"], rows),

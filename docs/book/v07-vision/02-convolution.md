@@ -412,7 +412,7 @@ Brain's engine has this shape in its code. A depthwise layer is a `ConvSpec` wit
 To see that a grouped layer is what it claims to be, it can be compared with its definition written the other way: $G$ independent dense convolutions, each on its own channel slice.
 
 <!-- worked: convolution.grouped_check -->
-Generator `bookrng.generator("convolution.grouped_check")`, seed 0x96cb117f4e87a662. Draws in order: x of shape [4, 5, 5] (channel, row, column; every entry normal()), then w of shape [6, 2, 3, 3] (every entry normal() times 0.5), then the depthwise weight [4, 1, 3, 3] (normal() times 0.5). Stride 1, padding 1, dilation 1.
+Generator `bookrng.generator("convolution.grouped_check")`. Draws in order: x of shape [4, 5, 5] (channel, row, column; every entry normal()), then w of shape [6, 2, 3, 3] (every entry normal() times 0.5), then the depthwise weight [4, 1, 3, 3] (normal() times 0.5). Stride 1, padding 1, dilation 1.
 
 | comparison | largest difference | criterion |
 |---|---|---|
@@ -470,7 +470,7 @@ The same two arrays come out of the scatter form, the gather form, the matrix pr
 Take $dw[0, 0] = 9$: it is the sum, over the nine positions, of $dy[i, j]\,x[i, j]$, which is $1 \cdot 1 + 0 \cdot 1 + (-1) \cdot 1 + 2 \cdot 1 + 1 \cdot 1 + 0 \cdot 2 + 0 \cdot 1 + (-1) \cdot 2 + 1 \cdot 8 = 9$. And $dx[0, 0] = -1$ is $dy[0, 0]$ times the kernel tap that read that pixel in the top-left window, $-1$; the pixel at $(2, 2)$ was read by all nine windows through all nine taps. The padding rule is the same one as before: how many zeros the identity needs is $k - 1 - p$.
 
 <!-- worked: convolution.backward_stride1_identity -->
-Generator `bookrng.generator("convolution.backward_checks.stride1")`, seed 0xf32758f0d538528f. Draws in order: x of shape [2, 6, 6] (every entry normal()), w of shape [3, 2, 3, 3] (every entry normal()), then dY of shape [3, Ho, Wo] (every entry normal()) for padding 0, 1 and 2 in turn. dX from the correlation of the padded dY with the turned, channel-exchanged kernel, and dW from the correlation of the padded X with dY, against the scatter form.
+Generator `bookrng.generator("convolution.backward_checks.stride1")`. Draws in order: x of shape [2, 6, 6] (every entry normal()), w of shape [3, 2, 3, 3] (every entry normal()), then dY of shape [3, Ho, Wo] (every entry normal()) for padding 0, 1 and 2 in turn. dX from the correlation of the padded dY with the turned, channel-exchanged kernel, and dW from the correlation of the padded X with dY, against the scatter form.
 
 | forward padding p | zeros added to dY per side (k - 1 - p) | dY shape | largest difference |
 |---:|---:|---|---|
@@ -524,7 +524,7 @@ function col2im(dcol: array<real>[R, T], C: int, H: int, W: int, k: int, s: int,
 Three routes now give $dx$ and $dw$: the definition as a scatter (every output gradient is added to the weight and the input it multiplied), the definition as a gather (one sum per element of the result: (8) for each weight and (9), with its divisibility test, for each pixel), and the matrix products (10) followed by `col2im`. All three can be compared on four settings, together with an adjoint test and a gradient check. The adjoint test uses a fact about linear maps. Because $y$ is bilinear in $(x, w)$, the three numbers $\langle y, dy\rangle$, $\langle x, dx\rangle$ and $\langle w, dw\rangle$ are equal, which is $\langle A x, v\rangle = \langle x, A^\top v\rangle$ for the linear map $x \mapsto y$; this is sharper than a finite difference, because it is exact up to rounding.
 
 <!-- worked: convolution.backward_checks -->
-Generator `bookrng.generator("convolution.backward_checks")`, seed 0x16256dc15d40af96. Draws in order: x of shape [2, 5, 5] (channel, row, column; every entry normal()), w of shape [3, 2, 3, 3] (every entry normal() times 0.5), then for each row of the table in turn the upstream gradient dY of shape [3, Ho, Wo] (every entry normal()). Each sum runs over the loops in the order of the definition; the comparisons below are to criteria that do not depend on that order. 'routes' compares the scatter, gather and matrix-product routes; 'adjoint' compares the three numbers <y, dY>, <x, dX> and <w, dW>; the gradient check perturbs every entry of x and w by +-1e-5, in 64-bit arithmetic, and applies the gate |a - n| <= 1e-7 + 1e-5 max(|a|, |n|) of Volume III, Chapter 6.
+Generator `bookrng.generator("convolution.backward_checks")`. Draws in order: x of shape [2, 5, 5] (channel, row, column; every entry normal()), w of shape [3, 2, 3, 3] (every entry normal() times 0.5), then for each row of the table in turn the upstream gradient dY of shape [3, Ho, Wo] (every entry normal()). Each sum runs over the loops in the order of the definition; the comparisons below are to criteria that do not depend on that order. 'routes' compares the scatter, gather and matrix-product routes; 'adjoint' compares the three numbers <y, dY>, <x, dX> and <w, dW>; the gradient check perturbs every entry of x and w by +-1e-5, in 64-bit arithmetic, and applies the gate |a - n| <= 1e-7 + 1e-5 max(|a|, |n|) of Volume III, Chapter 6.
 
 | case | dY shape | routes differ by | adjoint differs by | gradient check | largest |a - n| |
 |---|---|---|---|---|---|
@@ -623,7 +623,7 @@ The table shows it: from $n = 3$ the transposed convolution gives 5 with output 
 The transposed convolution is a strided convolution's adjoint in the strict sense, and the next table checks that, by building $\mathbf{A}$ for a $5 \times 5$ map with $k = 3$, stride 2, padding 1 (a matrix of shape $[9, 25]$), and comparing $\mathbf{A}^\top y$ with the stamping routine and with its gather form (one sum per output position, with the divisibility test of (9)).
 
 <!-- worked: convolution.transposed_adjoint -->
-Generator `bookrng.generator("convolution.transposed_adjoint")`, seed 0xd4f6bc437de7efb8. Draws in order: the kernel w of shape [3, 3] (every entry normal()), the vector y of shape [3, 3] (every entry normal()), then x of shape [5, 5] (every entry normal()). The strided convolution (k = 3, stride 2, padding 1) of a 5 by 5 map is a matrix A of shape [9, 25], built column by column by convolving the 25 unit maps.
+Generator `bookrng.generator("convolution.transposed_adjoint")`. Draws in order: the kernel w of shape [3, 3] (every entry normal()), the vector y of shape [3, 3] (every entry normal()), then x of shape [5, 5] (every entry normal()). The strided convolution (k = 3, stride 2, padding 1) of a 5 by 5 map is a matrix A of shape [9, 25], built column by column by convolving the 25 unit maps.
 
 | comparison | result | criterion |
 |---|---|---|
@@ -807,7 +807,7 @@ Stacks of these layers are what the next chapter builds: how pooling, depth and 
 8. **[Implement]** Reproduce `convolution.slide` and `convolution.convolution_vs_correlation`: the sliding sum, the true convolution of Volume I, and the identity of the valid block with the correlation of the turned kernel.
 9. **[Implement]** Reproduce `convolution.output_sizes` and `convolution.receptive_field`: formula (2) against a count of fitting windows, and recursion (4) against the traced positions.
 10. **[Implement]** Reproduce `convolution.unrolled`, `convolution.im2col_memory` and `convolution.panel_widths`: `im2col` as in (5) with the tap order $(c, a, b)$, the sizes of the unrolled matrix and the cache-panel rule.
-11. **[Implement]** Reproduce `convolution.backward_by_hand` and `convolution.backward_checks`: the scatter, gather and matrix-product routes, the adjoint identity, and the central-difference gate of Volume III, Chapter 6 with the generator, seed and draw order printed.
+11. **[Implement]** Reproduce `convolution.backward_by_hand` and `convolution.backward_checks`: the scatter, gather and matrix-product routes, the adjoint identity, and the central-difference gate of Volume III, Chapter 6 with the generator and draw order printed.
 12. **[Investigate]** Implement the transposed convolution as stamping and reproduce `convolution.stamping` and `convolution.checkerboard_grids`; then replace the stride-2 transposed convolution of $k = 3$ by nearest-neighbour doubling followed by an ordinary $3 \times 3$ convolution, and compare the two on a constant input and on the input of the stamping example.
 
 ## Key terms

@@ -67,7 +67,7 @@ def _table(headers, rows, align=None):
 
 
 def _seed(name):
-    return f"`{name}` (seed 0x{bookrng.seed_of(name):016x})"
+    return f"`{name}`"
 
 
 def _f(x, d=4):

@@ -58,8 +58,8 @@ def _g(v, d=4):
     return f"{v:.{d - 1}e}"
 
 
-def _seed_line(name):
-    return f"seed {bookrng.seed_of(name)} (seed_of '{name}', defined on the pseudocode page)"
+def _gen(name):
+    return f"`{name}`"
 
 
 # ---------------------------------------------------------------- number helpers
@@ -303,7 +303,7 @@ def eight_weights():
     t = _table(["i", "w", "q sym", "w' sym", "error sym", "q affine", "w' affine", "error affine"], rows)
     e_s = [ws[i] - w[i] for i in range(8)]
     e_a = [wa[i] - w[i] for i in range(8)]
-    head = (f"Eight weights w_i = round(0.03 + 0.05 z_i, 4), z_i = normal() drawn in order i = 0 .. 7 from the generator, {_seed_line(name)}. "
+    head = (f"Eight weights w_i = round(0.03 + 0.05 z_i, 4), z_i = normal() drawn in order i = 0 .. 7 from the generator {_gen(name)}. "
             f"Symmetric: Delta = max|w| / 7 = {amax:.4f} / 7 = {ds:.6f}, q = clamp(round(w / Delta), -7, 7), w' = Delta q. "
             f"Affine: range extended to contain 0, [{min(min(w), 0):+.4f}, {max(max(w), 0):+.4f}], Delta = (max - min) / 15 = {da:.6f}, "
             f"q0 = round(-min / Delta) = {q0}, q = clamp(round(w / Delta) + q0, 0, 15), w' = Delta (q - q0).\n\n")
@@ -330,7 +330,7 @@ def uniform_error_model():
         rows.append((nb, 2 * qmax + 1, f"{delta:.5f}", f"{pred:.4e}", f"{mse:.4e}", f"{mse / pred:.3f}",
                      f"{worst / (delta / 2):.3f}", f"{sq:.2f}", "" if prev is None else f"{sq - prev:+.2f}"))
         prev = sq
-    head = (f"{n} weights w_i = normal() drawn in order from the generator, {_seed_line(name)} (mean w^2 = {power:.4f}). One scale for all of them, "
+    head = (f"{n} weights w_i = normal() drawn in order from the generator {_gen(name)} (mean w^2 = {power:.4f}). One scale for all of them, "
             "Delta = max|w| / q_max with q_max = 2^(n-1) - 1, q = clamp(round(w / Delta), -q_max, q_max), w' = Delta q; "
             "'predicted' is Delta^2 / 12, 'ratio' is measured over predicted, 'worst / (Delta/2)' the largest |error| in units of the bound, "
             "SQNR = 10 log10(mean w^2 / MSE) in dB, 'gain' its change from the row above.\n\n")
@@ -354,7 +354,7 @@ def outliers():
             rows.append((label, scope, "" if top is None else f"{top:.5f}", f"{100 * zero:.1f}%", f"{mse_keep:.3e}",
                          f"{10 * math.log10((sum(x * x for x in wk) / len(wk)) / mse_keep):.2f}"))
     n_out = sum(1 for f in heavy_weights(name)[1] if f)
-    head = (f"{n} weights, {_seed_line(name)}: first z_i = normal() for i = 0 .. {n - 1}, then u_i = uniform() for i = 0 .. {n - 1}; "
+    head = (f"{n} weights from the generator {_gen(name)}: first z_i = normal() for i = 0 .. {n - 1}, then u_i = uniform() for i = 0 .. {n - 1}; "
             f"w_i = 0.02 z_i, and in the 'with outliers' rows w_i = 0.2 z_i where u_i < 0.004 ({n_out} weights; the 'no outliers' rows ignore u). "
             "4-bit symmetric codes -7 .. 7, scale = max|group| / 7 stored as f32. The columns after the scale are computed over the weights that are not outliers "
             "(the same indices in both datasets): the share that decode to 0, their MSE and their SQNR in dB. 'Delta' is the single tensor scale.\n\n")
@@ -374,8 +374,8 @@ def group_size_tradeoff():
         s_g = _sqnr_db(wg, symmetric_roundtrip(wg, 4, G, 16))
         rows.append((G, f"{bpw:.4f}", f"{bpw / 8:.5f}", f"{100 * (16 / G) / 4:.2f}%", f"{s_h:.2f}", f"{s_g:.2f}"))
     head = ("4-bit symmetric codes -7 .. 7, scale max|group| / 7 stored as f16 (16 bits), so bits per weight = 4 + 16 / G. "
-            f"'heavy-tailed': the {HEAVY_N} weights of the previous example with outliers ({_seed_line(name)}). "
-            f"'gaussian': {HEAVY_N} weights 0.02 normal() in draw order from the generator, {_seed_line('quantization.group_gauss')}. "
+            f"'heavy-tailed': the {HEAVY_N} weights of the previous example with outliers (generator {_gen(name)}). "
+            f"'gaussian': {HEAVY_N} weights 0.02 normal() in draw order from the generator {_gen('quantization.group_gauss')}. "
             "'scale overhead' is the scale bits as a share of the 4 code bits. SQNR in dB over all weights.\n\n")
     t = _table(["G", "bits per weight", "bytes per weight", "scale overhead", "SQNR heavy-tailed dB", "SQNR gaussian dB"], rows)
     return head + t
@@ -400,7 +400,7 @@ def factored_dot():
             ("factored: Delta (sum x_j q_j - q0 sum x_j)", f"{fact:.8f}"),
             ("sum x_j q_j", f"{sxq:.6f}"), ("sum x_j (shared by every row of W)", f"{sx:.6f}"),
             ("difference of the two quantized forms", "below 1e-15" if abs(direct - fact) < 1e-15 else f"{abs(direct - fact):.2e}")]
-    head = (f"One group of 32 weights w_j = round(0.05 z, 4) then 32 activations x_j = round(normal(), 4), all normal() in draw order from the generator, {_seed_line(name)}. "
+    head = (f"One group of 32 weights w_j = round(0.05 z, 4) then 32 activations x_j = round(normal(), 4), all normal() in draw order from the generator {_gen(name)}. "
             f"4-bit affine codes: Delta = {delta:.6f}, q0 = {q0}. Every sum is in binary64 (double precision), added from j = 0 to 31 in order; each form is then rounded to the digits shown. "
             "The difference of the two quantized forms is a few units of the last place of a double (an implementation that adds in another order, or fuses a multiply-add, gets 0 or about 2.2e-16): the table prints only that it is below 1e-15.\n\n")
     return head + _table(["form", "value"], rows, align="lr")
@@ -465,7 +465,7 @@ def q4k_inputs():
         sub = w[32 * j:32 * j + 32]
         rows.append((j, f"{sig[j]:.2f}", f"{mu[j]:+.2f}", f"{min(sub):+.4f}", f"{max(sub):+.4f}", f"{f['ideal_floor'][j]:.4f}",
                      f"{f['ideal_step'][j]:.6f}"))
-    head = (f"One super-block of 256 weights, {_seed_line(name)}: for sub-block j = 0 .. 7 in order, 32 weights w = round(mu_j + sigma_j z, 4) with z = normal() "
+    head = (f"One super-block of 256 weights from the generator {_gen(name)}: for sub-block j = 0 .. 7 in order, 32 weights w = round(mu_j + sigma_j z, 4) with z = normal() "
             "drawn in order (256 draws in all), sigma_j = 0.02 (1 + j mod 3), mu_j = 0.01 (j - 3). "
             "Per sub-block: the smallest and largest weight, the floor m_j = max(0, -min) and the step D_j = (max + m_j) / 15 that would use all 16 codes.\n\n")
     return head + _table(["j", "sigma_j", "mu_j", "min", "max", "floor m_j", "step D_j"], rows)
@@ -601,7 +601,7 @@ def format_comparison():
     name = "quantization.heavy_tailed"
     w, _ = heavy_weights(name)
     rows = [(l, f"{b:.4f}", f"{s:.2f}", f"{m:.3e}", f"{x:.5f}") for l, b, s, m, x in _fmt_points(w)]
-    head = (f"The {HEAVY_N} heavy-tailed weights of the outlier example ({_seed_line(name)}, outliers included; max |w| = {max(abs(x) for x in w):.4f}) "
+    head = (f"The {HEAVY_N} heavy-tailed weights of the outlier example (generator {_gen(name)}, outliers included; max |w| = {max(abs(x) for x in w):.4f}) "
             "stored in each format. 'Q4_0': per group of 32, d = (signed element of largest magnitude) / -8 rounded to f16 (nearest, ties to even), code = clamp(round_even(w / d) + 8, 0, 15) (round_even: nearest, ties to even), w' = d (code - 8); a group of zeros decodes to zeros. 'recipe': eight sub-blocks of 32 with a 6-bit step and 6-bit "
             "floor each, an f16 d and dmin per 256 weights, as derived in the chapter (n-bit codes, 128 bits of scales per 256 weights). "
             "Bits per weight count every stored scale.\n\n")
@@ -642,7 +642,7 @@ def histogram_data():
 def histogram_summary():
     w, delta, sym, da, q0, aff = histogram_data()
     name = "quantization.histogram"
-    return (f"4096 weights 0.02 normal() in draw order from the generator, {_seed_line(name)}; max |w| = {max(abs(x) for x in w):.5f}. "
+    return (f"4096 weights 0.02 normal() in draw order from the generator {_gen(name)}; max |w| = {max(abs(x) for x in w):.5f}. "
             f"Symmetric levels: Delta = max|w| / 7 = {delta:.6f}, 15 levels from {sym[0]:+.4f} to {sym[-1]:+.4f}. "
             f"Affine levels: Delta = {da:.6f}, q0 = {q0}, 16 levels from {aff[0]:+.4f} to {aff[-1]:+.4f}. "
             f"Weights within half a step of zero: {100 * sum(1 for x in w if abs(x) < delta / 2) / len(w):.1f}% decode to 0 under the symmetric levels.")
@@ -673,7 +673,7 @@ def layer_output():
         rows.append((nb, f"{nb + 0.5:.1f}", f"{sw:.2f}", f"{so:.2f}", f"{so - sw:+.2f}", f"{cos:.6f}",
                      f"{100 * math.sqrt(_mse(ys, yqs) / (sum(a * a for a in ys) / len(ys))):.2f}%"))
     head = (f"A linear layer y = W x with W of shape [{n_out}, {k}], W_ij = 0.05 normal() drawn in row-major order, then {n_in} inputs x with entries normal() "
-            f"drawn in order, one input after another, from the generator, {_seed_line(name)}. W is stored in n-bit symmetric codes with one f16 scale per 32 weights along each row "
+            f"drawn in order, one input after another, from the generator {_gen(name)}. W is stored in n-bit symmetric codes with one f16 scale per 32 weights along each row "
             "(bits per weight = n + 0.5). 'weight SQNR' is over the weights, 'output SQNR' over all "
             f"{n_out * n_in} output values; 'relative output error' is the RMS error over the RMS output; cosine between the exact and the quantized outputs, both taken over the flattened vector of all {n_out * n_in} outputs (input after input, output unit within it); weight and output SQNR use the mean of the squared exact values as the signal power.\n\n")
     return head + _table(["n bits", "bits per weight", "weight SQNR dB", "output SQNR dB", "difference", "cosine", "relative output error"], rows)
@@ -719,7 +719,7 @@ def fp8_vs_int():
         lab = f"[{b:.4g}, {a:.4g})" if a < 1.0 else f"[{b:.4g}, 1]"
         rows.append((lab, len(idx), *cells))
     summ = [("all weights, SQNR dB", "", *[f"{_sqnr_db(w, rt[k]):.2f}" for k in kinds])]
-    head = (f"The {n} heavy-tailed weights ({_seed_line(name)}), stored in groups of 32 with one scale each: int8 (scale max|group| / 127), E4M3 (scale max|group| / 448, "
+    head = (f"The {n} heavy-tailed weights (generator {_gen(name)}), stored in groups of 32 with one scale each: int8 (scale max|group| / 127), E4M3 (scale max|group| / 448, "
             "saturating, ties to even, with the decode of Chapter 1), E5M2 (scale max|group| / 57344) and int4 (scale max|group| / 7). "
             "Rows are bins of t = |w| / max|group| (the position of the weight under its group's largest); each cell is the mean of |w' - w| / |w| over the weights of the bin. "
             "Scales are kept exactly here, to isolate the codes.\n\n")
@@ -765,15 +765,15 @@ def rel_table():
     kap = _rels()
     rows = [(nb, f"{nb + SCALE_BITS / GROUP:.1f}", f"{kap[nb]:.4e}", f"{10 * math.log10(1 / kap[nb]):.2f}") for nb in TIER_BITS]
     head = ("The error of one weight at each tier: n-bit symmetric codes, f16 scale per 32 (bits per weight n + 0.5), measured as MSE over variance, the variance being the mean of w^2 (the weights have mean about 0, and it is not centred), on 65536 standard normals "
-            f"normal() drawn in order from the generator, {_seed_line('quantization.rel')}. This relative MSE is the rel_n of the search below.\n\n")
+            f"normal() drawn in order from the generator {_gen('quantization.rel')}. This relative MSE is the rel_n of the search below.\n\n")
     return head + _table(["n bits", "bits per weight", "rel_n", "SQNR dB"], rows)
 
 
 def search_inputs():
     ts = _tensors()
     rows = [(i, f"{size:,}", f"{sigma:.3g}", f"{sens:.3g}") for i, (size, sigma, sens) in enumerate(ts)]
-    head = ("Twelve tensors, i = 0 .. 11, each drawn in order from the generator, "
-            f"{_seed_line('quantization.tensors')}: size N_i = 4096 (1 + integer(4)), sigma_i = 0.02 * 2^(0.5 normal()), sensitivity sens_i = 10^(2 uniform()); "
+    head = ("Twelve tensors, i = 0 .. 11, each drawn in order from the generator "
+            f"{_gen('quantization.tensors')}: size N_i = 4096 (1 + integer(4)), sigma_i = 0.02 * 2^(0.5 normal()), sensitivity sens_i = 10^(2 uniform()); "
             "the draws of one tensor are made in the order integer, normal, uniform, and sigma_i and sens_i are rounded to 3 significant digits before use (the table prints them rounded). "
             "normal() is the book's Box-Muller with the held partner: tensor 0's normal() draws two uniforms and holds the sine partner, tensor 1's normal() returns the held value without drawing, tensor 2's draws two uniforms again, and so on (the held value carries across tensors). "
             "The estimated loss increase of tensor i stored at n bits is E_in = (1/2) sens_i N_i sigma_i^2 rel_n, its bytes N_i (n + 0.5) / 8.\n\n")
@@ -909,8 +909,8 @@ def greedy_plan():
                 f"{sum(_error(t, 8, kap) for t in ts):.4f}", "")]
     t2 = _table(["plan", "bytes", "bits per weight", "estimated error", "error / greedy"], summary, align="lrrrr")
     head = (f"The twelve tensors of the input table, tiers n in {{2, 3, 4, 6, 8}}, budget {bpw} bits per weight x {total_w:,} weights / 8 = {budget:,.0f} bytes. "
-            "A random plan draws n for tensors 0 .. 11 in order as TIERS[integer(5)] with TIERS = (2, 3, 4, 6, 8) from the generator, "
-            f"{_seed_line('quantization.random_plans')}, and is kept when it fits (drawing until 200 are kept; {tries} were drawn).\n\n")
+            "A random plan draws n for tensors 0 .. 11 in order as TIERS[integer(5)] with TIERS = (2, 3, 4, 6, 8) from the generator "
+            f"{_gen('quantization.random_plans')}, and is kept when it fits (drawing until 200 are kept; {tries} were drawn).\n\n")
     return head + t + "\n\n" + t2
 
 

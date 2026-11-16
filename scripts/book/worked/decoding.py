@@ -21,7 +21,7 @@ whole module runs in well under a second. The chapter's own subject is what is d
 * seeded sampling: shared against per-request random streams, and the order in which a draw walks the tokens;
 * what choosing a token costs, counted in operations and bytes against the forward pass.
 
-Every random quantity comes from the book's SplitMix64 (`bookrng.generator(name)`); each block prints its seeds.
+Every random quantity comes from the book's SplitMix64 (`bookrng.generator(name)`); each block names its generators.
 
 Swedish Embedded AB implements solutions for controlling what a language model says, from the sampler to the log-
 probabilities it reports. If your team needs expertise in decoding strategies for generative models, you can procure
@@ -56,10 +56,6 @@ def _f(x, nd=4):
 
 def _int(n):
     return f"{n:,}"
-
-
-def _seed(name):
-    return f"{bookrng.seed_of(name):#018x}"
 
 
 def _words(ids):
@@ -270,7 +266,7 @@ def sampling_junk():
     expect = sum(p[i] for i in range(V) if i not in NOUNS)
     by = ", ".join(f"`{TOKENS[i]}` {hits[i]}" for i in order_desc(p)[:6])
     return (
-        f"Generator: the book's SplitMix64, seed {_seed(name)} (`seed_of` of the name `{name}`). Each of the {n:,} draws is one `uniform()`; the "
+        f"Generator: the book's SplitMix64, `{name}`. Each of the {n:,} draws is one `uniform()`; the "
         "token is the first id, in increasing id order, whose cumulative probability exceeds it (the walk of Volume I, Chapter 17). The "
         "distribution is the one after `the` of the table above.\n\n"
         + _table(["draw", "$u$", "token"], us, "rrl")
@@ -316,7 +312,7 @@ def greedy_run():
         + _table(["step", "previous token", "largest", "$p$", "second", "$p$"], steps, "rlrrlr")
         + f"\n\nThe text repeats with period {period} from the first token. Mean log-probability per token of the greedy text: {_f(gp / n, 4)}. "
         f"The smallest gap between the two largest probabilities over the {n} steps is {_f(margin, 4)}, so no step is a near tie.\n\n"
-        f"For contrast, three {n}-token texts sampled from the full distribution at every step. Generator: seed {_seed(name)} (`seed_of` of `{name}`), "
+        f"For contrast, three {n}-token texts sampled from the full distribution at every step. Generator: `{name}`, "
         f"{n} draws per text, one `uniform()` each, the three texts one after another from the same generator.\n\n"
         + _table(["text", "tokens", "mean log-probability per token"], docs, "rlr")
     )
@@ -519,13 +515,13 @@ def _greedy_sentence(order):
 
 def decoding_quality():
     rows = _quality_rows()
-    seeds = "; ".join(f"`{n}` {_seed(n)}" for _, n, _, _, _ in rows if n)
+    names = ", ".join(f"`{n}`" for _, n, _, _, _ in rows if n)
     body = [(lab, f"{acc}/{N_SENT if n else 1}", _f(100 * acc / (N_SENT if n else 1), 1), str(dist), _f(s, 4)) for lab, n, acc, dist, s in rows]
     g = _greedy_sentence(4)
     return (
         f"Each setting draws {N_SENT} sentences from the order-4 interpolated model of Chapter 4 (interpolation ratio {_ratio(4):g}), starting from `<s>`, ending at the full stop or after {MAX_LEN} tokens; "
         "one `uniform()` per token, the token chosen by the id-order walk over the tokens left after the cuts (cuts applied in the order temperature, top-k, top-p, min-p, each renormalizing). "
-        f"One generator per setting, seeds: {seeds}. 'accepted' is the share the grammar of Chapter 4 accepts (right shape, verb agreeing with the subject); 'distinct' counts different sentences; "
+        f"One generator per setting, in the order of the table: {names}. 'accepted' is the share the grammar of Chapter 4 accepts (right shape, verb agreeing with the subject); 'distinct' counts different sentences; "
         "'surprisal' is the mean of $-\\ln p$ per token under the model itself (no cut, temperature 1) over all tokens of the sentences.\n\n"
         + _table(["setting", "accepted", "percent", "distinct", "surprisal"], body)
         + f"\n\nThe greedy sentence is `{_words(g)}`."
@@ -646,7 +642,7 @@ def logprob_report():
             break
     n = len(ctx)
     return (
-        f"One sentence sampled from the order-4 model with $\\tau = {tau}$ and top-p {pt} (cuts in the order temperature, top-p). Generator: seed {_seed(name)} (`seed_of` of `{name}`), one `uniform()` per token, "
+        f"One sentence sampled from the order-4 model with $\\tau = {tau}$ and top-p {pt} (cuts in the order temperature, top-p). Generator: `{name}`, one `uniform()` per token, "
         "id-order walk. 'model $\\ln p$' is the log-probability the model itself gives the sampled token (temperature 1, no cut); 'sampler $\\ln q$' is the log-probability under the "
         "distribution the token was actually drawn from; 'next best' lists the two most probable other tokens by model $\\ln p$.\n\n"
         + _table(["position", "token", "model $\\ln p$", "sampler $\\ln q$", "next best, model $\\ln p$"], rows, "rlrrl")
@@ -849,14 +845,14 @@ def determinism():
         consts.append(f"`{_words(ctx)}`")
     return (
         f"Three requests A, B, C each sample {n_tok} tokens from the bigram model of the first block, started from `<s>`, one `uniform()` per token, id-order walk, temperature 1 and no cut. "
-        "The three advance in lock step (a token for the first request of the list, then for the second, then for the third, and again). Shared: one generator of seed "
-        f"{_seed('decoding.shared')} (`decoding.shared`). Own: one generator each, seeds {_seed('decoding.request.A')} (`decoding.request.A`), {_seed('decoding.request.B')} (`decoding.request.B`), "
-        f"{_seed('decoding.request.C')} (`decoding.request.C`). The requests are served in the order A, B, C, and in the order B, C, A (every request then has a different place in the round).\n\n"
+        "The three advance in lock step (a token for the first request of the list, then for the second, then for the third, and again). Shared: one generator, "
+        "`decoding.shared`. Own: one generator each, `decoding.request.A`, `decoding.request.B` and "
+        "`decoding.request.C`. The requests are served in the order A, B, C, and in the order B, C, A (every request then has a different place in the round).\n\n"
         + _table(["generators", "request", "order A, B, C", "order B, C, A", ""], rows, "llllc")
-        + f"\n\nThe same uniform numbers (seed {_seed('decoding.walk')}, `decoding.walk`) applied to the distribution after `the`, walking the tokens in increasing id order or from the most probable to the least:\n\n"
+        + f"\n\nThe same uniform numbers (the generator `decoding.walk`) applied to the distribution after `the`, walking the tokens in increasing id order or from the most probable to the least:\n\n"
         + _table(["draw", "$u$", "id-order walk", "walk by probability"], walk, "rrll")
         + f"\n\nThe two walks pick different tokens for {differ} of the 8 numbers.\n\n"
-        f"Three requests that all use the seed of `decoding.constant` ({_seed('decoding.constant')}) produce: {consts[0]}; {consts[1]}; {consts[2]}."
+        f"Three requests that all use the generator `decoding.constant` produce: {consts[0]}; {consts[1]}; {consts[2]}."
     )
 
 

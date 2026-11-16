@@ -190,8 +190,7 @@ def blind_spots():
             "buffer and the second call's output on x is checked, both calls made by the implementation of that row. 'cosine' passes when the cosine similarity with "
             "the reference is at least 0.9999; 'elementwise' passes when the largest absolute difference is at most "
             "1e-9 times the largest absolute reference output. Each column changes one thing from the one before it. "
-            f"Inputs: generator seeded {bookrng.seed_of('failure_catalogue.blind_spots')} (seed_of "
-            "'failure_catalogue.blind_spots'), drawing W row by row, then x, then x_prev, each value 2 uniform() - 1 "
+            f"Inputs: generator `failure_catalogue.blind_spots`, drawing W row by row, then x, then x_prev, each value 2 uniform() - 1 "
             "(shown to 6 decimals; the computation uses the full doubles).")
     wrows = [[str(r)] + [f"{v:.6f}" for v in W[r]] for r in range(MAX_ROWS)]
     wtab = _table(["row of W", "col 0", "col 1", "col 2"], wrows)
@@ -232,7 +231,7 @@ def stale_clip():
     head = (f"A true gradient of norm {TRUE_NORM} in {CLIP_DIM} dimensions and a stale vector of norm s are added, "
             "and the sum is clipped to a global norm of at most 1 (multiplied by min(1, 1 / norm)). Directions: "
             f"{CLIP_DIM} normal() draws for the true gradient, then {CLIP_DIM} for the stale vector, of the generator "
-            f"seeded {bookrng.seed_of('failure_catalogue.stale_clip')} (seed_of 'failure_catalogue.stale_clip'), each "
+            f"`failure_catalogue.stale_clip`, each "
             "divided by its norm; the same two directions serve every row. 'true part of the step' is the clip factor "
             "times 0.98, the length of the true gradient inside the update; 'cosine' is the cosine similarity of the "
             f"update with the true gradient. The cosine of the two directions themselves is {_g(chance)}. Normal draws "
@@ -280,8 +279,7 @@ def scrambled_golden():
             "reverses its channels and moves them first; the seeded input is drawn directly as (c, h, w). The golden "
             "file stores each input by writing the memory under it and labelling it (c, h, w); the reference outputs "
             "are computed from the view, and the replay runs the network on the stored input. Draws, in order, of the "
-            f"generator seeded {bookrng.seed_of('failure_catalogue.scrambled_golden')} (seed_of "
-            "'failure_catalogue.scrambled_golden'): M row by row (2 uniform() - 1), the 48 photo values in memory "
+            f"generator `failure_catalogue.scrambled_golden`: M row by row (2 uniform() - 1), the 48 photo values in memory "
             "order (uniform()), the 48 seeded values in memory order (2 uniform() - 1). Sums run over c in increasing "
             "order from 0.")
     return head + "\n\n" + _table(["input", "stored input equals the input used", "cosine of replay and reference",
@@ -414,8 +412,7 @@ def collapsing_tolerance():
             "gamma_(n+2)(u) (S+ + S-) / (2 h) + (1/h) sum_i 3 |w_i| (|x_i| + h |v_i|)^2 u (|x_i| + 2 h |v_i|)(1 + u) "
             "+ h^2 sum_i |w_i v_i^3| + gamma_(n+3)(2^-53) sum_i |3 w_i x_i^2 v_i| + 2^-52 |numeric|, with u = 2^-24, "
             "gamma_k(u) = k u / (1 - k u) and S+- = sum_i |w_i z_i^3| over the two perturbed inputs z. "
-            f"{TOL_DRAWS} draws of the generator seeded {bookrng.seed_of('failure_catalogue.collapsing_tolerance')} "
-            "(seed_of 'failure_catalogue.collapsing_tolerance'); each draw takes the 32 x_i, then the 32 w_i, then "
+            f"{TOL_DRAWS} draws of the generator `failure_catalogue.collapsing_tolerance`; each draw takes the 32 x_i, then the 32 w_i, then "
             "the 32 v_i, every one 2 uniform() - 1 rounded to float32.")
     rows = [
         ["draws", TOL_DRAWS],

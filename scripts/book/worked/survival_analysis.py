@@ -81,8 +81,7 @@ def _fs(v, d=3):
 
 
 def _gen_line(name, draws):
-    seed = bookrng.seed_of(name)
-    return f"Generator: the book's SplitMix64, seed {seed:#018x} ({seed}). {draws}"
+    return f"Generator: the book's SplitMix64, `{name}`. {draws}"
 
 
 def _exp_draw(g, rate):

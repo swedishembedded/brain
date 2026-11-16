@@ -266,7 +266,7 @@ chance):
 | mean of those 10,000 | 1.5637 |
 <!-- /worked -->
 
-Generator: the book's SplitMix64, seed 0x54010653beeb681d. Each of the 10,000 random distributions takes four calls of `rng.uniform()` in turn, `u`, and turns each into the exponential weight `-ln(1 - u)`; the four weights are divided by their sum. Entropies are in bits.
+Generator: `information.uniform_is_largest` (the book's SplitMix64). Each of the 10,000 random distributions takes four calls of `rng.uniform()` in turn, `u`, and turns each into the exponential weight `-ln(1 - u)`; the four weights are divided by their sum. Entropies are in bits.
 
 No random distribution reaches $2$ bits, and the best of ten thousand comes
 within $0.0009$ of it. The picture of the coin says the same for two outcomes: the
@@ -509,7 +509,7 @@ normalising):
 KL(p || p) for one random p: 0.0000.
 <!-- /worked -->
 
-Generator: the book's SplitMix64, seed 0x53316817d2c2f7a6. One generator, rows in the order exponent 1, 2, 4. A distribution on five outcomes takes five calls of `rng.uniform()` in turn; each `u` gives the weight `(-ln(1 - u))^s` for the row's exponent `s`, and the weights are divided by their sum. A pair is `p` drawn first, then `q`; each row uses 5000 pairs in turn. The last line draws one more `p` (exponent 1) from the same generator after the third row. KL is in bits.
+Generator: `information.gibbs_random` (the book's SplitMix64). One generator, rows in the order exponent 1, 2, 4. A distribution on five outcomes takes five calls of `rng.uniform()` in turn; each `u` gives the weight `(-ln(1 - u))^s` for the row's exponent `s`, and the weights are divided by their sum. A pair is `p` drawn first, then `q`; each row uses 5000 pairs in turn. The last line draws one more `p` (exponent 1) from the same generator after the third row. KL is in bits.
 
 No pair is negative; the smallest values are tiny, and the divergence of a
 distribution from itself is exactly $0$. An experiment is evidence, not proof.

@@ -290,10 +290,9 @@ def digest():
             ["two different neighbouring bytes swapped", swaps, swap_same, "no"],
             ["the last k bytes cut off, k = 1 .. 16", len(cuts), sum(1 for _, s in cuts if s), "yes"],
             ["one zero byte appended", 1, int(zeros), "yes"]]
-    seed = bookrng.seed_of("checkpoints_and_recovery.payload")
     sha = hashlib.sha256(b"weights-v1").hexdigest()
-    head = (f"\n\nA payload of {PAYLOAD_BYTES} bytes, each `integer(256)` of the generator seeded {seed} (seed_of "
-            "'checkpoints_and_recovery.payload'), in order; its FNV-1a digest is "
+    head = (f"\n\nA payload of {PAYLOAD_BYTES} bytes, each `integer(256)` of the generator "
+            "`checkpoints_and_recovery.payload`, in order; its FNV-1a digest is "
             f"{ref:016x}. Each change below is applied to the payload and its digest is compared with the original. 'Length "
             "changes' says whether the recorded length alone would have caught it.\n\n")
     second = _table(["change", "cases", "same digest", "length changes"], rows, "lrrl")
@@ -482,18 +481,18 @@ def omitted_state():
         rows.append([name, "yes" if same else "no", _g(_max_dev(res, ref), 4), _g(res.loss(), 4)])
     st5 = _Run("counter").run(STOP)
     head = (f"The run: {DIM} weights, all starting at 0, held as bf16 numbers; {N_EX} examples x_i (each coordinate 2u - 1, u the next "
-            f"uniform() of the generator seeded {bookrng.seed_of('checkpoints_and_recovery.data')}, seed_of "
-            "'checkpoints_and_recovery.data', examples in order, coordinates in order) with target y_i = x_i . w* "
+            f"uniform() of the generator "
+            "`checkpoints_and_recovery.data`, examples in order, coordinates in order) with target y_i = x_i . w* "
             f"(w* = {W_STAR}, sum in coordinate order from 0.0). Each step draws {BATCH} examples (draw d is entry d mod {N_EX} of "
-            f"`epoch_order(seed, {N_EX}, d // {N_EX})`, seed = {_order_seed():#x}, seed_of 'checkpoints_and_recovery.order'), "
+            f"`epoch_order(seed, {N_EX}, d // {N_EX})`, seed = `seed_of` of `checkpoints_and_recovery.order`), "
             f"forms g = (2 / {BATCH}) sum_b (x_b . w - y_b) x_b (sum over the batch in draw order), and applies AdamW with "
             f"beta1 = {BETA1}, beta2 = {BETA2}, eps = {EPS}, weight decay {WD}, and rate lr_t = {LR0} ((12 - (t - 1)) / 12) "
             "after t applied updates: m = beta1 m + (1 - beta1) g, v = beta2 v + (1 - beta2)(g g), mhat = m / (1 - beta1^t), vhat "
             "= v / (1 - beta2^t) (the powers by repeated multiplication from 1.0), candidate = (w - (lr wd) w) - (lr mhat) / "
             "(sqrt(vhat) + eps). The candidate is rounded to bf16 stochastically with the draw counter_uniform(key, j) of "
-            f"coordinate j, key = mix32(seed32 xor mix32(t)), seed32 = {_rounding_seed32():#x} (the low 32 bits of seed_of "
-            "'checkpoints_and_recovery.rounding'; the row that replaces the seed uses the low 32 bits of seed_of "
-            f"'checkpoints_and_recovery.other', {bookrng.seed_of('checkpoints_and_recovery.other') & M32:#x}). The run has 12 updates; it is stopped after "
+            f"coordinate j, key = mix32(seed32 xor mix32(t)), seed32 = the low 32 bits of `seed_of` of "
+            "`checkpoints_and_recovery.rounding` (the row that replaces the seed uses the low 32 bits of `seed_of` of "
+            "`checkpoints_and_recovery.other`). The run has 12 updates; it is stopped after "
             f"{STOP}, its state is saved, and a second process loads the saved state, with the part named in the first column "
             f"changed, and does the remaining {STEPS - STOP}. After 5 updates w = {_wtext(st5.w)}; after 12 in the uninterrupted "
             f"run w = {_wtext(ref.w)} with mean squared error {_g(ref.loss(), 4)}, the plain mean over the 8 examples of (x_i . w - y_i)^2, without a factor 1/2. 'Largest deviation' is the "
@@ -528,8 +527,8 @@ def rounding_resume():
     st = _Run("stream").run(STOP).state()
     s = st["gen"]
     head = (f"The run of the previous example, with the draw of the stochastic rounding either the counter draw there or the next "
-            f"uniform() of one generator seeded {bookrng.seed_of('checkpoints_and_recovery.stream')} (seed_of "
-            f"'checkpoints_and_recovery.stream'), drawn in coordinate order, {DIM} per update. In each row the run is stopped "
+            f"uniform() of the generator "
+            f"`checkpoints_and_recovery.stream`, drawn in coordinate order, {DIM} per update. In each row the run is stopped "
             f"after {STOP} updates and resumed with the saved state changed as the first column says; the run it is compared "
             "with is the uninterrupted run that rounds the same way. After 5 updates the generator's state is the u64 "
             f"{s}; read through a 64-bit float it comes back as {int(float(s))}.\n\n")

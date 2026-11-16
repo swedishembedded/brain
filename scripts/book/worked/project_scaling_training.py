@@ -423,7 +423,7 @@ def data_and_network():
     for l, (i, ou) in enumerate(SIZES):
         inv.append((l, f"{ou} x {i}", ou * i, ou, ou * i + ou, OFF[l], "none" if l == LAYERS - 1 else "ReLU"))
     inv.append(("all", "", sum(o * i for i, o in SIZES), sum(o for _, o in SIZES), P_BASE, "", ""))
-    head = (f"The generator `{NAMES['data']}` (seed {_seed('data')}) draws, in this order and each by uniform(), the 4 coordinates of "
+    head = (f"The generator `{NAMES['data']}` draws, in this order and each by uniform(), the 4 coordinates of "
             f"example 0, then of example 1, and so on to example 39: x = 2u - 1. The targets are evaluated in this order of "
             f"operations: T0 = (x0 x1 + 0.5 x2) - x3 x3 and T1 = (T0 + 0.5 x0) - (0.25 x1) x2 (products first, then the sums left "
             f"to right). Each row prints an example, its four coordinates and its two targets to 6 decimals. The 160 "
@@ -433,7 +433,7 @@ def data_and_network():
     mid = (f"\n\nThe network has {LAYERS} layers, each y = W x + b followed by max(., 0) except the last, which is linear. A neuron's "
            f"sum starts at its bias and adds the products W[o][i] x[i] in increasing i. The flat vector of the {P_BASE} numbers "
            f"holds the layers in order, each as W (row-major, [outputs, inputs]) and then b. The generator `{NAMES['init']}` "
-           f"(seed {_seed('init')}) draws, layer by layer and row-major, one uniform() for every entry of W, W = (2u - 1) limit "
+           f"draws, layer by layer and row-major, one uniform() for every entry of W, W = (2u - 1) limit "
            f"with limit = sqrt(6 / (inputs + outputs)) (the square root correctly rounded); every b starts at 0.0 and takes no "
            f"draw, so {sum(o * i for i, o in SIZES)} numbers are drawn. The initial vector has the FNV-1a 64 digest {_digest(th)}, and its "
            f"first three numbers are {th[0]:.8f}, {th[1]:.8f}, {th[2]:.8f}.\n\n")
@@ -498,7 +498,7 @@ def reference_run():
         rows.append((t, stable.text(runs[0][t][0], [r[t][0] for r in runs[1:]], lambda x: f"{x:.6g}"),
                      stable.text(runs[0][t][1], [r[t][1] for r in runs[1:]], lambda x: f"{x:.6g}")))
     head = ("One device, one rank, every activation kept. Step t draws the 10 examples of draws 10 (t - 1) to 10 t - 1 from the "
-            f"order of `training_data.epoch_order` with the seed {_seed('order')} (seed_of '{NAMES['order']}'), computed afresh "
+            f"order of `training_data.epoch_order` with the seed of the name `{NAMES['order']}`, computed afresh "
             "from the epoch of each draw; the gradient is the sum over the 10 rows in draw order, from 0.0, divided by 10, and the "
             "update is `adam_update` of Chapter 4 with rate 0.01 and step count t (the bias corrections by repeated "
             "multiplication from 1.0; the second moment is v = 0.999 v + 0.001 g g evaluated left to right, as (0.001 g) g, with the "
@@ -716,7 +716,7 @@ def adapter_layout():
             f"of [{RANK}, in] and then B of [out, {RANK}] in the flat vector of the {P_AD} adapter numbers. In the forward pass "
             f"t = A x (sums from 0.0 in increasing index), and the neuron's sum is the base sum (as in milestone 1) plus s times "
             f"the sum over r in increasing order of B[o][r] t[r] (from 0.0), and then max(., 0). The generator "
-            f"`{NAMES['adapters']}` (seed {_seed('adapters')}) draws, for layers 1 to 4 in order, one uniform() for each entry of A "
+            f"`{NAMES['adapters']}` draws, for layers 1 to 4 in order, one uniform() for each entry of A "
             f"row-major, A = (2u - 1) x 0.5, so 64 numbers are drawn; B starts at zero (the planted mistake below draws B in the "
             f"same way right after the A of the same layer).\n\n")
     t1 = _table(["layer", "A shape", "B shape", "numbers", "offset"], rows, "rllrr")
@@ -754,7 +754,7 @@ def adapter_runs():
                 _stable(lambda n: _loss(_ft(n, train_base=True)[1]["p"][P_AD:], _ft(n, train_base=True)[1]["p"][:P_AD], T_FT))))
     head = ("The adapter run: the base is the trained vector of milestone 2 (after 120 updates, from the same nudged start), "
             "frozen; the 128 adapter numbers are trained for 60 updates against T1 with the Adam of milestone 2 (rate 0.01), the "
-            f"draws from the order of `{NAMES['order_ft']}` (seed {_seed('order_ft')}), batches of 10 as before. The deviation is "
+            f"draws from the order of `{NAMES['order_ft']}`, batches of 10 as before. The deviation is "
             "the largest absolute difference of the 128 adapter numbers from those of the one-rank run, and the criterion is "
             "that it is below 1e-9 for the run and its four nudged copies. After the 60 updates the digest of the base, written as "
             f"64-bit floats, is {'unchanged' if frozen else 'CHANGED'}. " + _RULE + "\n\n")

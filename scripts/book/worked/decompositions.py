@@ -849,11 +849,10 @@ def eckart_young_check():
             basis = _gram_schmidt([[rng.uniform() - 0.5 for _ in range(m)] for _ in range(r)])
             best = min(best, _fro(_sub(M, _project_columns(M, basis))))
         rows.append((r, _g(opt, 5), _g(a, 5), _g(b, 5), _g(best, 5)))
-    seed = bookrng.seed_of(name)
     return (f"Frobenius norm of M - X (the error) for rank-r matrices X built four ways (smaller is better), printed to 5 significant digits.\n\n"
             f"Column 2: orthonormalise (Gram-Schmidt, in order of decreasing column length) the r columns of M with the largest Euclidean norm, "
-            f"and project M onto their span in R^8. Columns 3 and 4 draw from ONE SplitMix64 generator with seed {seed} "
-            f"(0x{seed:016X}), seeded once and never reseeded, used for r = 1, 2, 3, 4 in turn. For each r: first the 48 noise values "
+            f"and project M onto their span in R^8. Columns 3 and 4 draw from ONE SplitMix64 generator `{name}`, "
+            f"seeded once and never reseeded, used for r = 1, 2, 3, 4 in turn. For each r: first the 48 noise values "
             f"0.6 * (uniform() - 0.5), row by row (row 0 first), added to M for column 3; then 2000 random subspaces for column 4, each "
             f"made of r vectors of 8 entries (uniform() - 0.5), drawn vector by vector and orthonormalised by Gram-Schmidt in the order drawn; "
             f"M is projected on the span and the smallest error of the 2000 is kept.\n\n"

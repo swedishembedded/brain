@@ -65,8 +65,8 @@ def _list(xs):
 # ------------------------------------------------- duplicates, three methods
 
 def _seed_note(name):
-    """The sentence every randomised example prints so that a reader can seed the same generator."""
-    return f"Generator: the book's SplitMix64, seed {bookrng.seed_of(name):#018x} (the seed of the name `{name}`)."
+    """The sentence every randomised example prints so that a reader can use the same generator."""
+    return f"Generator: `{name}` (the book's SplitMix64)."
 
 
 def _distinct_draws(rng, bound, count):
@@ -595,8 +595,8 @@ def scan_cdf():
             "\"while lo < hi\": mid = (lo + hi) // 2; if F_mid > u then hi = mid, else lo = mid + 1. The answer is lo "
             "when the loop ends, and the table counts the passes.\n\n"
             + _table(["u", "token drawn", "binary-search steps"], drows) + "\n\n"
-            + f"{_n(trials)} draws, each `uniform()` from the book's SplitMix64 with seed "
-            f"{bookrng.seed_of(name):#018x}, taken in order:\n\n"
+            + f"{_n(trials)} draws, each `uniform()` from the generator "
+            f"`{name}` (the book's SplitMix64), taken in order:\n\n"
             + _table(["token", "probability", "draws", "frequency"], frows))
 
 
@@ -899,7 +899,7 @@ def fingerprints():
             "bit of its first byte; the third replaces the last character `8` by `9`. SHA-256 is the standard "
             "function, used as a black box.\n\n"
             + _table(["message (SHA-256 of the bytes, first 32 of 64 hex digits)", "fingerprint", "bits differing from the original (of 256)"], rows, "llr")
-            + "\n\n" + f"The 1 MiB buffer is 131,072 raw draws of the book's SplitMix64 (seed {bookrng.seed_of(name):#018x}), "
+            + "\n\n" + f"The 1 MiB buffer is 131,072 raw draws of the generator `{name}` (the book's SplitMix64), "
             "each written as 8 bytes, most significant byte first. "
             f"Hashed whole and in 16 chunks of 64 KiB it gives the same fingerprint: {whole == h.hexdigest()}.\n\n"
             "The manifest files: weights.bin is the first 4096 bytes of that buffer, config.json is the "
@@ -977,8 +977,8 @@ def topk_costs():
         heap_count, heap_vals = _heap_topk_comparisons(logits, k)
         assert got == want == heap_vals
         rows.append((k, _n(c[0]), _n(passes), _n(heap_count), _n(vocab * 4), _n(k * 8)))
-    return (f"Logits of a vocabulary of {_n(vocab)} tokens: the first {_n(vocab)} `normal()` draws of the book's SplitMix64, "
-            f"seed {bookrng.seed_of(name):#018x}. Comparisons to find the k largest. Sort everything: the "
+    return (f"Logits of a vocabulary of {_n(vocab)} tokens: the first {_n(vocab)} `normal()` draws of the generator "
+            f"`{name}` (the book's SplitMix64). Comparisons to find the k largest. Sort everything: the "
             "comparisons of the chapter's merge sort. k scans: k (V - 1), each scan finds the maximum of the "
             "remaining logits with V - 1 comparisons. Heap of size k: a binary min-heap holding the k largest so far; "
             "a logit is first compared with the smallest (the root) once the heap is full and replaces it only if "

@@ -19,7 +19,7 @@ picture and the table beside it cannot disagree.
 * multi-axis rotary embeddings: position triples of an image between two pieces of text, and the score they give;
 * the work of the rotation against the work of the attention that follows it.
 
-Every random quantity comes from the book's SplitMix64 (`bookrng.generator(name)`); each block prints the seed. Sums of products
+Every random quantity comes from the book's SplitMix64 (`bookrng.generator(name)`); each block names its generator. Sums of products
 are plain left-to-right additions, the order a C loop would use (never Python's `sum`, which may compensate). Library functions
 are the correctly rounded-to-last-place `sin`, `cos`, `exp`, `log` and `pow` of the C library; rotation angles are products
 `position * omega` in double precision.
@@ -62,7 +62,7 @@ def _vec(v, d=2):
 
 
 def _seed_line(name):
-    return f"Generator: the book's SplitMix64, seed {bookrng.seed_of(name):#018x} (`seed_of` of the name `{name}`)."
+    return f"Generator: `{name}` (the book's SplitMix64)."
 
 
 def _round1(x):

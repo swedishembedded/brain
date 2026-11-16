@@ -198,9 +198,8 @@ def two_mistakes_table():
     gold = golden_taps(p, cfg, md.IDS)
     names = stage_names(cfg["L"])[1:]
     isolated_above = [names[s] for s in isolated_parity(stage_functions(two_mistakes(p), cfg), gold, isolated_bounds(cfg, T_TEXT)[1:])]
-    seed = bookrng.seed_of(im.NAME_BIS)
     return (f"The 6-layer tiny decoder (V = 11, D = 6, H = 4, 2 key-value heads of width 4, F = 10, L = 6, rotary base 100, eps 1e-6; "
-            f"weights from the generator `{im.NAME_BIS}`, seed {seed:#018x}, drawn in the order of Volume VI, Chapter 1 and rounded "
+            f"weights from the generator `{im.NAME_BIS}`, drawn in the order of Volume VI, Chapter 1 and rounded "
             "to bf16) on the 8-token text 3, 9, 1, 7, 4, 4, 10, 2. The golden is the 64-bit forward pass with every hidden state "
             "and the logits stored in 32 bits; each stored state is a tap, a state at which two runs can be compared. The implementation "
             "under test is the 32-bit forward pass (every operation rounded, the gated product of the feed-forward block evaluated as "
@@ -261,9 +260,8 @@ def golden_text():
     body.append(["parity tolerance of the logits"] + [_fmt(bounds[label]) for label, _ in GOLDEN_TEXTS])
     cfg, _, _ = im.published()
     counts = ", ".join(f"{im.bound_logits(cfg, len(ids)) / im.U32:.0f}" for _, ids in GOLDEN_TEXTS)
-    seed = bookrng.seed_of(md.NAME_TINY)
     return ("The published 2-layer tiny decoder of Volume VI, Chapter 2 (V = 11, D = 6, H = 4, 2 key-value heads of width 4, "
-            f"F = 10, rotary base 100, eps 1e-6; weights from the generator `{md.NAME_TINY}`, seed {seed:#018x}, drawn in the order "
+            f"F = 10, rotary base 100, eps 1e-6; weights from the generator `{md.NAME_TINY}`, drawn in the order "
             "of Volume VI, Chapter 1 and rounded to bf16). Three goldens are generated, one for each text in the columns (prefixes "
             "of the text 3, 9, 1, 7, 4, 4, 10, 2). Each row makes one mistake in every layer of the port and reports rel_l2 of its "
             "logits against the golden's, both in 64-bit arithmetic, so the number is the mistake alone. The query-norm gain is "
@@ -389,7 +387,7 @@ def pairing():
             f"digest beginning `{digest[:16]}`). Three checkpoints are offered to it. The identity is compared field by field "
             "and a mismatch refuses the pairing by name; the digest is compared only to say which file it is. When the identity "
             "agrees, the 32-bit port of that checkpoint is run on the text and compared with the golden (rel_l2). The redrawn "
-            f"weights come from the generator `{NAME_REDRAWN}`, seed {bookrng.seed_of(NAME_REDRAWN):#018x}, in the same order and "
+            f"weights come from the generator `{NAME_REDRAWN}`, in the same order and "
             "with the same scales, then rounded to bf16.\n\n"
             + _table(["checkpoint offered", "identity check", "file digest", "comparison"], body, "llll"))
 
@@ -426,10 +424,9 @@ def two_gates():
     B, D, H, O = GATE_DIMS
     rows = two_gates_data()
     body = [(lab, _fmt(par), "pass" if par == 0 else "FAIL", f"{f} of {n}", "pass" if f == 0 else "FAIL") for lab, par, f, n in rows]
-    seed = bookrng.seed_of(NAME_GATES)
     return (f"The two-layer network of Volume III, Chapter 6 (B = {B} examples, D = {D} inputs, H = {H} hidden units, O = {O} outputs, "
             f"{rows[0][3]} parameters, mean squared error), as the reference with tanh. Its inputs, targets and weights come from "
-            f"the generator `{NAME_GATES}`, seed {seed:#018x}, drawn in the order X (row by row), T (row by row), W1 (row by row), b1, "
+            f"the generator `{NAME_GATES}`, drawn in the order X (row by row), T (row by row), W1 (row by row), b1, "
             "W2 (row by row), b2, each entry `normal()`, and the four tensors W1, b1, W2, b2 (the last four of the six) multiplied "
             f"by 0.5; W1 has {H} rows of {D} entries and W2 has {O} rows of {H}, so the hidden layer is tanh(W1 x + b1) and "
             "the outputs are W2 a + b2, and the loss is the sum of the squared errors divided by B x O. Every port runs in 64-bit arithmetic in the same "
@@ -546,8 +543,7 @@ def scale():
     body = [(m, t, _fmt(v), _fmt(b), "above" if v > b else "within") for m, t, v, b in rows]
     cfg, _, _ = im.published()
     layer, _ = im.stages(cfg, T_TEXT)
-    seed = bookrng.seed_of(md.NAME_TINY)
-    return (f"The published 2-layer tiny decoder of the golden-text table (weights from `{md.NAME_TINY}`, seed {seed:#018x}, text of "
+    return (f"The published 2-layer tiny decoder of the golden-text table (weights from `{md.NAME_TINY}`, text of "
             f"{T_TEXT} tokens), reference and mistaken port both in 64-bit arithmetic, so each number is the mistake alone. The "
             f"mistake is a factor {SCALE_FACTOR:g} on the matrix named, in layer {SCALE_LAYER} only; the product with a matrix is "
             "linear, so a factor on W_O scales the attention output and a factor on W_Q scales the queries, exactly. Taps: the "

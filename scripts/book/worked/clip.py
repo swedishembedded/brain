@@ -17,7 +17,7 @@ are imported, never copied: the exact and the sigmoid-approximated GELU of `mlp`
 * a perceptual distance: pixel error against a distance on the features of a fixed filter bank, and the cost of the AlexNet trunk of
   LPIPS counted from its layer table.
 
-Arithmetic is 64-bit floating point. Random inputs come from `bookrng.generator(name)` with the names, seeds and draw orders printed
+Arithmetic is 64-bit floating point. Random inputs come from `bookrng.generator(name)` with the names and draw orders printed
 beside each table. Sums of products run left to right; the digits of a trained number are printed only when they survive the nudges of
 `stable.py`.
 
@@ -54,11 +54,6 @@ def _fx(v, d=4):
 
 def _sci(v, d=2):
     return f"{v:.{d}e}"
-
-
-def _seed(name):
-    s = bookrng.seed_of(name)
-    return f"seed 0x{s:016x} ({s})"
 
 
 def _dot(a, b):
@@ -626,7 +621,7 @@ def gradient_check():
     res = _pool_map(_gc_one, list(kinds))
     rows = [(k, _int(t), _below(w, 1e-8) if w < 1e-8 else _below(w, 1e-7) if w < 1e-7 else _sci(w), t - f) for k, (w, f, t) in zip(kinds, res)]
     return ("The initialized towers (run 0) on a batch of four pairs (classes 1, 6, 11, 12 with templates drawn from "
-            f"`bookrng.generator(\"clip.gradcheck\")`, {_seed('clip.gradcheck')}: for each pair in turn the template `integer(3)`, the "
+            f"`bookrng.generator(\"clip.gradcheck\")`: for each pair in turn the template `integer(3)`, the "
             "brightness `uniform()` and the 108 noise values), the logit scale a = exp(1.3) and, for the sigmoid loss, the bias -0.4. The "
             "analytic gradient of the loss with respect to every tower weight, to the log scale psi and (sigmoid) to the bias against the "
             "central difference (L(w + h) - L(w - h)) / (2h), h = 1e-6 in 64-bit arithmetic, with the gate |analytic - numeric| <= 1e-7 + "
@@ -688,7 +683,7 @@ def training_setup():
             f"{len(VOCAB)} rows of 4 numbers, the three rows are concatenated (12 numbers; the slot of a word is its position), a "
             f"linear layer to 12 units with a bias, tanh, and a linear projection without bias to 8 numbers, scaled to length 1. "
             f"Parameters: {_int(16 * NPIX + 16 + 8 * 16)} in the picture tower and {_int(len(VOCAB) * 4 + 12 * 12 + 12 + 8 * 12)} in the "
-            f"caption tower. Initialization of run r from `{_init_name('r')}` (run 0: {_seed(name)}; runs 1 and 2 use the names with 1 and 2), "
+            f"caption tower. Initialization of run r from `{_init_name('r')}` (run 0: `{name}`; runs 1 and 2 use the names with 1 and 2), "
             f"`normal() * scale` for every entry, matrix by matrix and row by row, in this order: W1 [16, 108] with scale 1/sqrt(108), "
             f"Wp [8, 16] with 1/sqrt(16), E [11, 4] with 0.5, V1 [12, 12] with 1/sqrt(12), Vp [8, 12] with 1/sqrt(12); both biases 0. "
             f"The logit scale is a = exp(psi) with psi starting at ln(1/0.07) = {PSI0:.4f} (a = {math.exp(PSI0):.3f}) and clamped to "
@@ -697,12 +692,12 @@ def training_setup():
             f"of a fresh `shuffle` of the 12 training classes, so that no two captions of a batch are equal. The training classes, "
             f"before each shuffle, are {list(TRAIN_CLASSES)} in ascending order (the held-out classes {list(HELD_OUT)} removed); the rows of "
             f"the embedding table E are the templates (rows 0 to 2), the colours (3 to 6) and the shapes (7 to 10). Pictures and "
-            f"templates come from `bookrng.generator(\"clip.stream.r.main\")` (run 0: {_seed('clip.stream.0.main')}), the same stream that "
+            f"templates come from `bookrng.generator(\"clip.stream.r.main\")` (run 0: `clip.stream.0.main`), the same stream that "
             f"does the shuffle: each step first shuffles, then, for each pair in the shuffled order, draws the template `integer(3)`, the "
             f"brightness `0.7 + 0.3 * uniform()` and the 108 noise values (channel-major, one `normal()` times {NOISE_SD} each). Adam "
             f"(beta_1 0.9, beta_2 0.999, epsilon 1e-8, bias correction, learning rate {LR}, no weight decay) on all tower weights and, "
             f"in the settings with a learned scale, on psi = ln a itself (the gradient is taken with respect to psi), {cfg['steps']} steps. "
-            f"The 128 test pictures (8 per class) come from `bookrng.generator(\"clip.test\")` ({_seed('clip.test')}): for class 0 to 15 "
+            f"The 128 test pictures (8 per class) come from `bookrng.generator(\"clip.test\")`: for class 0 to 15 "
             f"in order and 8 pictures each, the brightness and then the 108 noise values. A picture is classified by the class whose prompt "
             f"vector has the largest dot product with its vector (the first on a tie). {stab.RULE} The nudge is added to Wp[0][0], the "
             f"first weight of the picture projection, which every picture uses.")
@@ -750,11 +745,11 @@ def three_runs():
             v, ws = _twins(lambda r, idx=idx: r["curve"][last][2]["ensemble"][idx], run, "main")
             cells.append(_t3(v, ws))
         best_h, wb = _twins(lambda r: max(r["curve"][t][2]["ensemble"][2] for t in r["curve"]), run, "main")
-        rows.append((run, f"0x{bookrng.seed_of(name):016x}", *cells, _t3(best_h, wb)))
+        rows.append((run, *cells, _t3(best_h, wb)))
     return (f"The main configuration for the three initializations (the init generator of run r is `clip.init.r`, the stream generator "
-            f"`clip.stream.r.main`; seeds below are the init seeds), after {last} steps, ensemble accuracy; the last column is the best "
+            f"`clip.stream.r.main`), after {last} steps, ensemble accuracy; the last column is the best "
             f"held-out accuracy at any of the 31 recorded steps (every 10th). Chance on 16 classes: 0.0625.\n\n"
-            + _table(["run", "init seed", "training classes", "held-out classes", "best held-out"], rows))
+            + _table(["run", "training classes", "held-out classes", "best held-out"], rows))
 
 
 def template_table():
@@ -981,8 +976,8 @@ def pixel_vs_feature():
     s1, b1 = data["shifted right by 1"], data["blurred 1 time"]
     return ("Each distortion of the reference picture, scored by the pixel mean squared error (mean of the 144 squared differences) and "
             "by the feature distance of equation (4), with weights 1 on each channel, tap by tap and summed. Noise is "
-            "sd * z for one field z of 144 `normal()` values drawn row by row from `bookrng.generator(\"clip.perceptual.noise\")` "
-            f"({_seed('clip.perceptual.noise')}), added without clipping. A shift wraps around the border (a shift by 2 returns the reference, a shift by 3 equals a shift by 1); a blur is the separable "
+            "sd * z for one field z of 144 `normal()` values drawn row by row from `bookrng.generator(\"clip.perceptual.noise\")`, "
+            f"added without clipping. A shift wraps around the border (a shift by 2 returns the reference, a shift by 3 equals a shift by 1); a blur is the separable "
             "kernel [1, 2, 1] / 4 applied to rows then columns, wrapping; a contrast factor f maps v to 0.5 + f (v - 0.5).\n\n"
             + _table(["distortion", "pixel MSE", "feature distance, tap 1", "tap 2", "sum"], rows)
             + f"\n\nBy pixel error the picture shifted by 1 ({s1[2]:.4f}) is further from the original than the picture blurred once "

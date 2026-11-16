@@ -20,7 +20,7 @@ figures, so a picture and the table beside it cannot disagree.
 * the parameters of the encoder-decoder transformer of `crates/toyseq2seq` for its convergence test, counted from the
   shapes of its weights.
 
-Every random quantity comes from the book's SplitMix64 (`bookrng.generator(name)`); each block prints the seed. Sums of
+Every random quantity comes from the book's SplitMix64 (`bookrng.generator(name)`); each block names its generators. Sums of
 products are plain left-to-right additions, the order a C loop would use.
 
 Swedish Embedded AB implements solutions for models that turn one sequence into another, such as speech, translation
@@ -60,8 +60,8 @@ def _vec(v, d=4):
     return "(" + ", ".join(_fx(x, d) for x in v) + ")"
 
 
-def _seed_line(name):
-    return f"Generator: the book's SplitMix64, seed {bookrng.seed_of(name):#018x} (`seed_of` of the name `{name}`)."
+def _generator_line(name):
+    return f"Generator: the book's SplitMix64, `{name}`."
 
 
 # ------------------------------------------------------------------------------------------------ the task
@@ -105,7 +105,7 @@ def task():
         "The ids are `0 0`, `1 1`, `2 2`, `3 3`, `4 <s>` (the start marker fed to the decoder first) and `5 <end>`, so V = 6. "
         "An input is T digits with T between 1 and 10 in training (and 1 to 12 in the test), each digit uniform on 0 .. 3; "
         "the output is the digits in the opposite order followed by `<end>`.\n\n"
-        + _seed_line(NAME_EXAMPLE) + " Draw order: for each of the four examples, T times `integer(4)`.\n\n"
+        + _generator_line(NAME_EXAMPLE) + " Draw order: for each of the four examples, T times `integer(4)`.\n\n"
         + t1 + "\n\n"
         "A decoder that has no access to the input can only guess each digit uniformly: its cross-entropy is ln 4 nats on each "
         "digit. Suppose it were even told T, so that the `<end>` costs it nothing. Its loss per output token would then be, for "
@@ -389,7 +389,7 @@ def attention_step():
     assert all(abs(a - b) < 1e-15 for a, b in zip(cc + ww, c + w))
     t = _table(["i", "encoder state h_i", "keys_i = Ua h_i", "Wa s + keys_i", "tanh of that", "score e_i = v . tanh"], rows, "rlllll")
     return (
-        f"{_seed_line(STEP_NAME)} Draws, in this order, each `0.8 * normal()`: Wa (4 values, row by row), Ua (4), v (2), the decoder "
+        f"{_generator_line(STEP_NAME)} Draws, in this order, each `0.8 * normal()`: Wa (4 values, row by row), Ua (4), v (2), the decoder "
         "state s (2), then the three encoder states h_1, h_2, h_3 (2 values each). Two numbers per state (H = 2) and two in the "
         "attention layer (A = 2). Tolerance: values are rounded to 4 decimals.\n\n"
         f"Wa has rows {', '.join(_vec(r) for r in Wa)}, Ua has rows {', '.join(_vec(r) for r in Ua)}, v = {_vec(v)}, s = {_vec(s)}, so Wa s = {_vec(q)}.\n\n"
@@ -430,16 +430,16 @@ def gradient_check():
                     worst_rel = max(worst_rel, abs(num - gr[j]) / max(abs(num), abs(gr[j])))
                     smallest = min(smallest, max(abs(num), abs(gr[j])))
                 count += 1
-        rows.append((f"{'attention' if attention else 'no attention'} (`{name}`)", f"{bookrng.seed_of(name):#018x}", count, f"{worst_abs:.1e}",
+        rows.append((f"{'attention' if attention else 'no attention'} (`{name}`)", count, f"{worst_abs:.1e}",
                      f"{worst_rel:.1e}"))
     return (
         f"Input {CHECK_SRC} (T = {len(CHECK_SRC)}, so the output has {len(CHECK_SRC) + 1} tokens), H = {CHECK_H}, embedding width {CHECK_DM}, "
-        f"A = {CHECK_A}. Parameters drawn by the initialisation recipe of the text from the generator named `seq2seq.check.plain` for the model without attention and `seq2seq.check.attention` for the one with it (seeds below), "
+        f"A = {CHECK_A}. Parameters drawn by the initialisation recipe of the text from the generator named `seq2seq.check.plain` for the model without attention and `seq2seq.check.attention` for the one with it, "
         "after which the three biases get `0.1 * normal()` entries drawn from the same generator, in the order encoder bias, "
         f"decoder bias, output bias. Central differences with step {EPS:g} on every entry of every parameter, against the "
         "gradient of the backward pass. Tolerance: the table prints the largest absolute difference and the largest relative "
         "difference |a - n| / max(|a|, |n|) over the entries whose gradient is above 1e-4.\n\n"
-        + _table(["model", "seed", "parameters checked", "largest absolute difference", "largest relative difference"], rows, "llrrr")
+        + _table(["model", "parameters checked", "largest absolute difference", "largest relative difference"], rows, "lrrr")
     )
 
 
@@ -677,25 +677,25 @@ def _training_rows(variants):
             short = sum(r["correct"][L] for L in TEST_LENGTHS if L <= 4)
             mid = sum(r["correct"][L] for L in TEST_LENGTHS if 5 <= L <= LMAX_TRAIN)
             beyond = sum(r["correct"][L] for L in TEST_LENGTHS if L > LMAX_TRAIN)
-            rows.append((LABEL[variant], run, f"{bookrng.seed_of(_name(variant, run, 'init')):#018x}",
+            rows.append((LABEL[variant], run,
                          *[_fx(r["curve"][c], 3) for c in CHECKPOINTS],
                          f"{short}/{n(1, 4)}", f"{mid}/{n(5, LMAX_TRAIN)}", f"{beyond}/{n(LMAX_TRAIN + 1, 12)}"))
-    head = (["model", "run", "seed of the initial parameters"] + [f"loss, step {c}" for c in CHECKPOINTS]
+    head = (["model", "run"] + [f"loss, step {c}" for c in CHECKPOINTS]
             + ["exact, T 1 to 4", f"exact, T 5 to {LMAX_TRAIN}", f"exact, T {LMAX_TRAIN + 1} to 12"])
-    return _table(head, rows, "lrl" + "r" * (len(head) - 3))
+    return _table(head, rows, "lr" + "r" * (len(head) - 2))
 
 
 def training_plain():
     return (
         f"The model is the one of the text, H = {H_TRAIN} state numbers, embedding width {DM_TRAIN}, V = {V}, the parameters drawn by the initialisation recipe "
-        "of the text from the generator named `seq2seq.plain.<run>.init` with run 0 or 1 (`plain` is the model without attention; seeds in the table). "
+        "of the text from the generator named `seq2seq.plain.<run>.init` with run 0 or 1 (`plain` is the model without attention). "
         f"Training is Adam (learning rate {LR}, beta1 {BETA1}, beta2 {BETA2}, epsilon {EPS_ADAM:g}, with the bias correction of Volume III) "
         f"on minibatches of {BATCH} freshly drawn input sequences, {STEPS} updates ({STEPS * BATCH:,} sequences), every gradient clipped to a "
         f"global norm of {CLIP:g}. Batch element after batch element, the length is `1 + integer({LMAX_TRAIN})` and then that many "
         "`integer(4)` digits, from the generator `seq2seq.train.<run>`, so that the two models of a run (this one and the one of the "
         f"attention section) see the same sequences. The loss is the mean cross-entropy per output token over the batch; a checkpoint reports "
         f"the mean over the {WINDOW} batches that end at it. The test set has {N_TEST_PER_LENGTH} inputs for each length 1 to 12, drawn from "
-        f"`{NAME_TEST}` (seed {bookrng.seed_of(NAME_TEST):#018x}), length by length; an input counts as exact when the greedy output, run "
+        f"`{NAME_TEST}`, length by length; an input counts as exact when the greedy output, run "
         "for T + 1 steps on its own previous outputs, equals the reversed input followed by `<end>`. "
         "Losses are rounded to 3 decimals. They and the counts are reproduced digit for digit only by an implementation that adds in the "
         "same order; a trained network is a chaotic function of its arithmetic, so a reimplementation should expect the same picture "
@@ -769,7 +769,7 @@ def plain_outputs():
         src = res[("plain", 0)]["shown"][L][0]
         rows.append((L, f"`{_words(src)}`", f"`{_words(target_of(src))}`", f"`{_words(res[('plain', 0)]['shown'][L][1])}`"))
     return (
-        f"Run 0 of the model without attention on three inputs of the generator `{NAME_EXAMPLE}.shown` (seed {bookrng.seed_of(NAME_EXAMPLE + '.shown'):#018x}; "
+        f"Run 0 of the model without attention on three inputs of the generator `{NAME_EXAMPLE}.shown` ("
         f"draws, `integer(4)` for each digit, of the lengths {list(SHOWN_LENGTHS)} in that order), greedy output on its own previous outputs.\n\n"
         + _table(["T", "input", "target", "output"], rows, "rlll")
     )
@@ -790,7 +790,7 @@ def alignment():
         rows.append((j + 1, f"`{TOKEN_NAMES[out[j]]}`", *[_fx(x, 2) for x in row], f"x{peak + 1}"))
     return (
         f"The attention model of run 0 on the input `{_words(src)}` (T = {EXAMPLE_LENGTH}, drawn by `integer(4)` from the generator "
-        f"`{NAME_EXAMPLE}.align`, seed {bookrng.seed_of(NAME_EXAMPLE + '.align'):#018x}). Row j holds the weights a_ji of output step j over the "
+        f"`{NAME_EXAMPLE}.align`). Row j holds the weights a_ji of output step j over the "
         "encoder positions, the token written at that step is in the second column; each row adds to 1. Tolerance: 2 decimals "
         "of a trained network (see the training block on what a reimplementation reproduces).\n\n"
         + _table(["output step j", "token written"] + names + ["largest weight on"], rows, "rl" + "r" * len(src) + "l")

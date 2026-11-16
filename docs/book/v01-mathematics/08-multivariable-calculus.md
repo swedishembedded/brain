@@ -263,7 +263,7 @@ gradient direction reaches $7.6158$, which is $\lVert\nabla L\rVert$ at this
 point. A brute-force search confirms that no direction does better:
 
 <!-- worked: multivariable.cauchy_schwarz_gradient -->
-Each direction is u = (cos t, sin t) with t = 2 pi times one uniform draw of the book's generator (Volume I, chapter 17), seed 18266694207942227462; 100000 draws in order.
+Each direction is u = (cos t, sin t) with t = 2 pi times one uniform draw of the book's generator `multivariable.cauchy_schwarz_gradient` (Volume I, chapter 17); 100000 draws in order.
 
 | quantity | value |
 |---|---:|
@@ -1095,7 +1095,7 @@ random $\pm1$ directional check and a per-entry check with brain's tolerances
 ($4\times10^{-3}$ absolute, $8\times10^{-2}$ relative), over $1000$ random problems:
 
 <!-- worked: multivariable.gradcheck_toy -->
-One generator (Volume I, chapter 17), seed 10372158813470712557, draws the 1000 problems one after another: for each, X row by row, then t, then w, all with normal(), then the four directions, each entry +1 when integer(2) is 1 and -1 otherwise (all four are always drawn). The loss is L(w) = 1/2 sum_k (x_k . w - t_k)^2; the "analytic" gradient omits example 0 (the first row of X); the numeric value is a central difference of the true loss (all six examples) with h = 1e-4. A comparison passes when |a - n| <= atol + rtol max(|a|, |n|) with atol = 4e-3 and rtol = 8e-2, a the analytic and n the numeric value (this is not the close(a, b, ...) of the pseudocode page, which scales by |b| only); the directional check accepts the bug when any of its four directions passes; the per-entry check compares each of the 24 entries with the same gate and a central difference per entry (h = 1e-4).
+One generator, `multivariable.gradcheck_toy` (Volume I, chapter 17), draws the 1000 problems one after another: for each, X row by row, then t, then w, all with normal(), then the four directions, each entry +1 when integer(2) is 1 and -1 otherwise (all four are always drawn). The loss is L(w) = 1/2 sum_k (x_k . w - t_k)^2; the "analytic" gradient omits example 0 (the first row of X); the numeric value is a central difference of the true loss (all six examples) with h = 1e-4. A comparison passes when |a - n| <= atol + rtol max(|a|, |n|) with atol = 4e-3 and rtol = 8e-2, a the analytic and n the numeric value (this is not the close(a, b, ...) of the pseudocode page, which scales by |b| only); the directional check accepts the bug when any of its four directions passes; the per-entry check compares each of the 24 entries with the same gate and a central difference per entry (h = 1e-4).
 
 | check | result over 1000 random problems |
 |---|---:|

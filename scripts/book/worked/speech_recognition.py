@@ -863,8 +863,8 @@ def chunk_attention_toy():
         moved.append((name, ", ".join(map(str, rows))))
     return (f"A two-layer toy of the streaming identity: {TOY_T} rows of width {TOY_D}, one head per layer, the residual form y = x + attention(x) (no normalization, "
             "no relative positions, queries, keys and values from the layer's input), scores q . k / 2 over the allowed keys, softmax with the maximum subtracted, "
-            "sums left to right. Draws from the book's `Generator(seed_of(\"speech_recognition.chunk_attention\"))` "
-            f"(`seed_of` of the pseudocode page, here {bookrng.seed_of(TOY_NAME)}, the generator's starting state): first the {TOY_T * TOY_D} values of x as normals, row by row, then six {TOY_D} x {TOY_D} matrices "
+            "sums left to right. Draws from the generator `speech_recognition.chunk_attention`: "
+            f"first the {TOY_T * TOY_D} values of x as normals, row by row, then six {TOY_D} x {TOY_D} matrices "
             "(Wq, Wk, Wv of layer 1, then of layer 2), each row by row and each value 0.5 times a normal. Chunk 4, two chunks of left context.\n\n"
             f"Streamed chunk by chunk with a cache of at most {TOY_LEFT} chunks of each layer's own keys and values, against the whole-sequence masked computation: "
             f"largest difference of any output value {'below 1e-12' if worst < 1e-12 else f'{worst:.3e}'}; rows kept in each layer's cache after the last chunk, "

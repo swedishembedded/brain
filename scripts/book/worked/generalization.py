@@ -100,14 +100,13 @@ HELD_GAUSSIAN = (" A normal() call that finds a held value returns it without dr
 
 def _generator_line(name, normal=False):
     """The seed sentence of a block; `normal` adds the rule about the Gaussian value held by Box-Muller."""
-    seed = bookrng.seed_of(name)
-    return f"Generator: the book's SplitMix64, seed {seed:#018x} ({seed})." + (HELD_GAUSSIAN if normal else "")
+    return f"Generator: `{name}` (the book's SplitMix64)." + (HELD_GAUSSIAN if normal else "")
 
 
 def _fresh_rows_phrase(count=N_FRESH):
     """How a later block names the fresh rows of the first table."""
     which = f"the {count} fresh rows" if count == N_FRESH else f"the first {count} of the {N_FRESH} fresh rows"
-    return f"{which} of the first table (seed {bookrng.seed_of(FRESH_NAME):#018x})"
+    return f"{which} of the first table (generator `{FRESH_NAME}`)"
 
 
 def _num(x):
@@ -240,14 +239,14 @@ def sensor_source():
         f"The source: voltage v uniform on [{V_LO}, {V_HI}], temperature y = {LAW[0]:g} + {LAW[1]:g} v - {-LAW[2]:g} v^2 + "
         f"eps, where the noise is eps = {NOISE_SD} * (a standard Gaussian sample). A row is two draws in this order: "
         f"v = {V_LO} + {V_HI - V_LO:.1f} * rng.uniform(), then eps = {NOISE_SD} * rng.normal(); v and y are kept unrounded. "
-        f"Each dataset is drawn from its own generator (seeds below), rows in turn, and rng.normal() follows the rule of the "
+        f"Each dataset is drawn from its own generator (named below), rows in turn, and rng.normal() follows the rule of the "
         f"randomness chapter: a call that finds a held value returns it without drawing. Every model of this chapter uses the "
         f"feature x = (v - {X_CENTRE}) / {X_HALF}, which maps the voltage range to [-1, 1], and the columns 1, x, x^2, ..., "
         f"x^d. Wherever a later example scores on 'fresh' rows, these are the {N_FRESH} fresh rows of the second line of the "
         f"table below, in order.\n\n"
-        + _table(["dataset", "generator seed", "rows", "use"],
-                 [("training rows", f"{bookrng.seed_of(TRAIN_NAME):#018x}", N_TRAIN, "the rows every model below is fitted to"),
-                  ("fresh rows", f"{bookrng.seed_of(FRESH_NAME):#018x}", N_FRESH, "scoring only, never used to choose anything")],
+        + _table(["dataset", "generator", "rows", "use"],
+                 [("training rows", f"`{TRAIN_NAME}`", N_TRAIN, "the rows every model below is fitted to"),
+                  ("fresh rows", f"`{FRESH_NAME}`", N_FRESH, "scoring only, never used to choose anything")],
                  "llrl") + "\n\n")
     body = _table(["n", "voltage v (V)", "temperature y (deg C)"],
                   [(i + 1, f"{v:.4f}", f"{y:.3f}") for i, (v, y) in enumerate(rows)])
@@ -528,8 +527,8 @@ def cross_validation():
             f"the {CV_N // CV_K} held-out rows. 'CV' is the mean of the "
             f"{CV_K} fold MSEs; 'LOO' is leave-one-out ({CV_N} fits, one row held out each time, mean squared error over the "
             f"rows; fold j of the leave-one-out run is row j alone); 'fresh' is the MSE on {_fresh_rows_phrase()} of the fit to all "
-            f"{CV_N} rows. The rows are the first {CV_N} of the {sum(SPLIT_SIZES)} rows of the three-way example (seed "
-            f"{bookrng.seed_of(SPLIT_NAME):#018x}).\n\n")
+            f"{CV_N} rows. The rows are the first {CV_N} of the {sum(SPLIT_SIZES)} rows of the three-way example "
+            f"(generator `{SPLIT_NAME}`).\n\n")
     tail = f"\n\nSmallest CV: lambda = {best_cv:g}. Smallest LOO: lambda = {best_loo:g}."
     return head + _table(["lambda", *[f"fold {j + 1}" for j in range(CV_K)], "CV", "LOO", "fresh (all 30 rows)"], rows) + tail
 

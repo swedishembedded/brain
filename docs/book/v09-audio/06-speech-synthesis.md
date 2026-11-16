@@ -468,7 +468,7 @@ Its conditions are four tensors of the same length as the mel, and the network r
 That makes 320 channels per frame. A toy with one number in place of each 80-vector shows the assembly.
 
 <!-- worked: speech_synthesis.cfm_condition -->
-The conditions of the flow decoder for 3 toy tokens (5, 2, 7), the first of them the reference's: the level of token id i is [-0.5, -0.3, -0.1, 0.1, 0.3, 0.5, 0.7, 0.9][i], and each token becomes 2 frames. The 3-number speaker vector (3.0, 4.0, 0.0) is scaled to unit length, [0.6, 0.8, 0.0], and mapped by the weights (0.5, 0.25, -0.5) and the bias 0.1 to the one number 0.60, which is repeated at every frame. The two prompt frames carry their mel values [0.55, 0.45] in the condition channel and the rest carries 0. The starting values are 6 draws of normal() from `speech_synthesis.condition_noise` (seed 0x385843144e71a63e), in frame order. At t = 0 the network reads one row of four channels per frame:
+The conditions of the flow decoder for 3 toy tokens (5, 2, 7), the first of them the reference's: the level of token id i is [-0.5, -0.3, -0.1, 0.1, 0.3, 0.5, 0.7, 0.9][i], and each token becomes 2 frames. The 3-number speaker vector (3.0, 4.0, 0.0) is scaled to unit length, [0.6, 0.8, 0.0], and mapped by the weights (0.5, 0.25, -0.5) and the bias 0.1 to the one number 0.60, which is repeated at every frame. The two prompt frames carry their mel values [0.55, 0.45] in the condition channel and the rest carries 0. The starting values are 6 draws of normal() from `speech_synthesis.condition_noise`, in frame order. At t = 0 the network reads one row of four channels per frame:
 
 | frame | role | x (noise) | mu (from the tokens) | speaker | condition |
 |---|---|---:|---:|---:|---:|
@@ -536,7 +536,7 @@ u(x, t) = m + \frac{t\varsigma^2 - (1 - t)}{(1 - t)^2 + t^2\varsigma^2}\,(x - t 
 $$
 
 <!-- worked: speech_synthesis.cfm_toy -->
-One mel value, one frame. The target given the tokens and the speaker is N(1.5, 0.3^2) and the model without conditions knows only N(0, 1). Both fields are the exact marginal velocity of the straight path x_t = (1 - t) z + t y, u(x, t) = m + (t sd^2 - (1 - t)) / ((1 - t)^2 + t^2 sd^2) (x - t m) for a target of mean m and standard deviation sd, which makes the example free of any trained network. Guidance is u_un + 1.7 (u_c - u_un) (rate 0.7 in the form (1 + 0.7) u_c - 0.7 u_un). Starting values: 6 draws of normal() from `speech_synthesis.flow_start` (seed 0xdb48f279a4e7f2f8), in order; each row is one start, run through 10 Euler steps on the cosine grid.
+One mel value, one frame. The target given the tokens and the speaker is N(1.5, 0.3^2) and the model without conditions knows only N(0, 1). Both fields are the exact marginal velocity of the straight path x_t = (1 - t) z + t y, u(x, t) = m + (t sd^2 - (1 - t)) / ((1 - t)^2 + t^2 sd^2) (x - t m) for a target of mean m and standard deviation sd, which makes the example free of any trained network. Guidance is u_un + 1.7 (u_c - u_un) (rate 0.7 in the form (1 + 0.7) u_c - 0.7 u_un). Starting values: 6 draws of normal() from `speech_synthesis.flow_start`, in order; each row is one start, run through 10 Euler steps on the cosine grid.
 
 The first start, step by step (conditional only, then guided):
 

@@ -369,7 +369,7 @@ function encode_utf8(cps: list<u32>) -> bytes:
 The bytes then have the properties we asked for. Requirement 4 holds because a longer sequence has a larger lead byte than any shorter one (`11110xxx` is above `1110xxxx`, which is above `110xxxxx`, which is above `0xxxxxxx`) and, within one length, the bits are poured in from the most significant down, so the bytes sort as the numbers do. Requirement 3 holds because a lead byte is never a continuation byte and the reverse, so the bytes of one whole character can only be matched starting at a boundary. The encoder can be checked against an independently written reference:
 
 <!-- worked: text.check_encoder -->
-Generator: the book's SplitMix64, seed 0x47564153f8b89746 (`seed_of` of the name `text.check_encoder`, defined on the pseudocode page). Each draw is `k = integer(1112064)`, then the scalar value `k` if `k < 0xD800` and `k + 0x800` otherwise (which skips the 2,048 surrogates and is uniform over the 1,112,064 scalar values).
+Generator: `text.check_encoder` (the book's SplitMix64). Each draw is `k = integer(1112064)`, then the scalar value `k` if `k < 0xD800` and `k + 0x800` otherwise (which skips the 2,048 surrogates and is uniform over the 1,112,064 scalar values).
 
 | check | result |
 |---|---|
@@ -386,7 +386,7 @@ Python's own codec is only the reference it is compared with. And the ordering
 property, drawn the same way:
 
 <!-- worked: text.order_preserved -->
-Generator: the book's SplitMix64, seed 0x439ba62c885b0d55 (`seed_of` of the name `text.order_preserved`, defined on the pseudocode page).
+Generator: `text.order_preserved` (the book's SplitMix64).
 
 Pairs (a, b) of scalar values, each scalar value drawn as in `text.check_encoder` (`k = integer(1112064)`, then `k` if `k < 0xD800` and `k + 0x800` otherwise; a first, then b): 20,000. `a < b` agrees with comparing the two byte strings byte by byte in 20,000 of 20,000.
 <!-- /worked -->
@@ -541,7 +541,7 @@ becomes one replacement and then the `A`, because two valid-so-far bytes were
 interrupted. The last line of the block compares each row with Python's decoder, which is used only as the reference. The same comparison on random inputs, strings made of the kinds of byte that stress a decoder (ASCII, continuation bytes, lead bytes and anything at all):
 
 <!-- worked: text.check_decoder -->
-Generator: the book's SplitMix64, seed 0x333291d0349c0922 (`seed_of` of the name `text.check_decoder`, defined on the pseudocode page). Each string has length `1 + integer(8)`; each byte draws `kind = integer(4)` and then `integer(128)` (kind 0), `128 + integer(64)` (kind 1), `192 + integer(64)` (kind 2) or `integer(256)` (kind 3).
+Generator: `text.check_decoder` (the book's SplitMix64). Each string has length `1 + integer(8)`; each byte draws `kind = integer(4)` and then `integer(128)` (kind 0), `128 + integer(64)` (kind 1), `192 + integer(64)` (kind 2) or `integer(256)` (kind 3).
 
 | check | result |
 |---|---|
@@ -568,7 +568,7 @@ where a state other than the start means truncated input. The check is that cutt
 a stream into chunks at random changes nothing:
 
 <!-- worked: text.check_stream -->
-Generator: the book's SplitMix64, seed 0xb22a207a5b90f1a0 (`seed_of` of the name `text.check_stream`, defined on the pseudocode page). Each string is drawn by the rule of `text.check_decoder`; then chunk sizes `1 + integer(3)` are drawn, one per chunk, until the string is used up: the draws of one string are made in this order, first its length and bytes, then one chunk size at a time as the string is consumed (the last chunk is cut short when the string ends, but its size is still drawn), and the next string's draws follow at once on the same generator.
+Generator: `text.check_stream` (the book's SplitMix64). Each string is drawn by the rule of `text.check_decoder`; then chunk sizes `1 + integer(3)` are drawn, one per chunk, until the string is used up: the draws of one string are made in this order, first its length and bytes, then one chunk size at a time as the string is consumed (the last chunk is cut short when the string ends, but its size is still drawn), and the next string's draws follow at once on the same generator.
 
 | check | result |
 |---|---|

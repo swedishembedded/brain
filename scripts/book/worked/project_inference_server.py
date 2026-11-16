@@ -51,10 +51,6 @@ FLOOD = 40                      # requests of the flooding client
 NAMES = {k: f"project_inference_server.{k}" for k in ("workload", "flood")}
 
 
-def seed(name):
-    return bookrng.seed_of(NAMES[name])
-
-
 def model():
     return kc.model()
 
@@ -589,12 +585,12 @@ def requests():
         reply, gap = solo(r["prompt"], r["max_new"])
         gaps.append(gap)
         rows.append([r["id"], r["arrival"], r["client"], _toks(r["prompt"]), r["max_new"], _toks(reply), f"{gap:.3f}"])
-    return (f"Generator: the book's SplitMix64, seed {bookrng.seed_of(NAMES['workload'])} (`seed_of('{NAMES['workload']}')`), "
+    return (f"Generator: the book's SplitMix64, `{NAMES['workload']}`, "
             f"one generator for the whole workload, never restarted. Draws, request by request for requests 0 to {N_REQ - 1}: "
             f"the gap to the arrival of the previous request, integer(3) (not drawn for request 0, which arrives at step 0); the "
             f"client, integer(3); the prompt length n = 3 + integer(6); the n tokens, integer(12) each, in order; the budget "
             f"max_new = 6 + integer(11). 'Reply alone' is the greedy reply of the request served by itself with the dense cache of "
-            f"Volume V (`generate` of its Chapter 12 on the model of seed `seed_of('kv_cache.model')`), cut after the first token "
+            f"Volume V (`generate` of its Chapter 12 on the model `kv_cache.model`), cut after the first token "
             f"{STOP} or after max_new tokens. 'Gap' is the smallest difference, over the tokens of that reply, between the largest "
             f"and the second-largest logit, printed to 3 decimals; the smallest over the workload is {min(gaps):.3f}.\n\n"
             + _table(["request", "arrives at step", "client", "prompt", "max_new", "reply alone", "gap"], rows, "rrrlrlr"))
@@ -837,7 +833,7 @@ def flood_table():
                      srv.peak_waiting, "-" if wait is None else f"{wait:.1f}", srv.step_no])
     fr = flood()
     return (f"Client 3 sends {FLOOD} well-formed requests at step 0, just after request 0 (generator: the book's SplitMix64, "
-            f"seed {bookrng.seed_of(NAMES['flood'])}, `seed_of('{NAMES['flood']}')`, one generator, never restarted; each request "
+            f"`{NAMES['flood']}`, one generator, never restarted; each request "
             f"drawn as an honest one is, the prompt length 3 + integer(6), its tokens integer(12), max_new 6 + integer(11); the "
             f"first is {_toks(fr[0]['prompt'])} with max_new {fr[0]['max_new']}). 'Honest replies' counts the replies of requests 0 to 9 "
             f"equal to their replies alone, 'honest refused' those refused at arrival, 'peak waiting' the most requests waiting "

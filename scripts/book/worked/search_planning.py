@@ -435,7 +435,7 @@ def learned_heuristic():
         f"A network trained to predict the exact cost to go of the map above. Training set: all {len(CELLS)} enterable cells, "
         f"target CTG(x) / {int(SCALE)} where CTG is the cost of the cheapest path from the cell to G (CTG(S) = {int(SCALE)}). "
         "Network: inputs (row / 6, column / 11), 12 tanh units, one linear output; all biases start at 0; "
-        f"initial weights from the book's generator `{NET_NAME}`, {mdps._seed_text(NET_NAME)}: W1 (2 x 12, row-major, "
+        f"initial weights from the book's generator `{NET_NAME}`: W1 (2 x 12, row-major, "
         "each normal() divided by sqrt(2)), then W2 (12 values, each normal() divided by sqrt(12)). Loss: mean squared "
         "error over the 79 cells; full-batch gradient descent, learning rate 0.1, tanh the correctly rounded library tanh. "
         "The prediction of a cell is the output times 14. Each line is the network after the stated number of steps, except 'training loss', which is the loss computed on the network just before the last of those steps updated it (weights after steps - 1 updates); the other columns use the weights after all the steps. "
@@ -590,7 +590,7 @@ def uct_trace():
     return "\n".join([
         f"The first 12 iterations of Monte Carlo tree search on the take-away game from n = {PILE}, exploration constant "
         f"c = sqrt(2) = {UCT_C:.6f}. Player 0 moves at the root. Generator: the book's SplitMix64, "
-        f"`{UCT_NAME}` {mdps._seed_text(UCT_NAME)}; the only draws are the playouts, one rng.integer(k) for each move, "
+        f"`{UCT_NAME}`; the only draws are the playouts, one rng.integer(k) for each move, "
         "k = min(3, stones left), the move being 1 + the draw, consumed in iteration order. Selection: from the root, "
         "while every move of the node has a child, go to the child that maximizes W/N + c sqrt(ln N_parent / N) (a tie "
         "to the smaller move), where N is a node's visit count and W its number of visits whose playout was won by the "
@@ -629,8 +629,8 @@ def uct_visits():
                      "unstable" if len(set(counts)) > 1 or len(set(wins)) > 1 else _fmt(wins[0] / counts[0], 3)])
     chosen = [_best_root_move(tr) for tr in trees]
     return "\n".join([
-        f"The root of the same search after 1000 iterations from n = {PILE}, c = sqrt(2), a generator started from "
-        f"{mdps._seed_text(UCT_NAME + '.long')} (the name `{UCT_NAME}.long`; not the continuation of the run above). "
+        f"The root of the same search after 1000 iterations from n = {PILE}, c = sqrt(2), the generator "
+        f"`{UCT_NAME}.long` (not the continuation of the run above). "
         "'for the mover' says whether the move wins with best play (the table of the game); W / N is the share of visits "
         "whose playout the mover won. Counts follow the nudge rule (c changed by each nudge); a count is printed only if all "
         "five runs agree.",
@@ -676,9 +676,9 @@ def uct_budget():
         f"How often search from n = {PILE} picks the winning move 2: {UCT_RUNS} independent searches for every exploration "
         "constant and budget, the root move chosen by most visits (a tie to the smaller move). The row of a constant is "
         "its position i = 0 .. 3 in the table, the column of a budget its position j = 0 .. 6, and search number "
-        f"r = 0 .. {UCT_RUNS - 1} of that cell draws its playouts, as in the trace, from the book's generator whose seed "
-        f"is seed_of of the text `{UCT_BUDGET_NAME}.i.j.r` with the three numbers written in decimal (for instance "
-        f"`{UCT_BUDGET_NAME}.0.0.0` has {mdps._seed_text(UCT_BUDGET_NAME + '.0.0.0')}); every search restarts its own "
+        f"r = 0 .. {UCT_RUNS - 1} of that cell draws its playouts, as in the trace, from the book's generator "
+        f"named by the text `{UCT_BUDGET_NAME}.i.j.r` with the three numbers written in decimal (for instance "
+        f"`{UCT_BUDGET_NAME}.0.0.0`); every search restarts its own "
         "generator. Each entry is a count out of 100; counts follow the nudge rule (c changed by each nudge).",
         "",
         _table(["c \\ iterations"] + [str(b) for b in BUDGETS], rows),
@@ -821,9 +821,9 @@ def expert_iteration():
         f"the policy's largest probability (a tie to the smaller move) is a winning move; 'search with the policy' counts, "
         f"over {EI_EVALS} searches of {EI_BUDGET} iterations per pile in order of n, how many choose a winning move by "
         f"most visits (a tie to the smaller move). Every search has a generator of its own, "
-        f"the book's generator whose seed is seed_of of the text `{EI_NAME}.R.eval.n.r` for search r = 0 .. {EI_EVALS - 1} "
+        f"the book's generator named by the text `{EI_NAME}.R.eval.n.r` for search r = 0 .. {EI_EVALS - 1} "
         f"of the evaluation of pile n in round R, and of `{EI_NAME}.R.target.n` for the target search of pile n in round R, "
-        f"all numbers in decimal (for instance `{EI_NAME}.0.target.1` has {mdps._seed_text(EI_NAME + '.0.target.1')}). "
+        f"all numbers in decimal (for instance `{EI_NAME}.0.target.1`). "
         "Counts follow the nudge rule (c_puct changed by each nudge).",
         "",
         _table(["rounds of training", "policy alone", "search with the policy"], rows, "rrr"),
@@ -971,7 +971,7 @@ def quality_diversity_results():
         "are offered to the archive, then 1900 times: a cell drawn by integer(number of occupied cells) from the "
         "occupied cells in ascending (column-of-p_x, column-of-p_y) order, its elite mutated and offered; an offer "
         "fills an empty cell and replaces an elite only if its fitness is strictly higher. "
-        f"One generator, `{QD_NAME}` {mdps._seed_text(QD_NAME)}, serves all 60 runs: 20 hill climbs, then 20 "
+        f"One generator, `{QD_NAME}`, serves all 60 runs: 20 hill climbs, then 20 "
         "best-100 runs, then 20 MAP-Elites runs, each run continuing the stream. 'found B' counts runs whose best "
         "fitness exceeds 0.9 (the narrow peak). 'cells' is the mean number of distinct cells the final population "
         "occupies (1 for the single genome of the hill climber). Digits follow the nudge rule (mutation width changed "
@@ -1100,7 +1100,7 @@ def hindsight_relabelling():
         f"A goal-reaching task on an {HER_N} x {HER_N} grid without walls, cells numbered 8 r + c, four moves (up, right, "
         "down, left; a move into the border leaves the agent where it is) and a reward of 1 for the move after which the "
         "agent stands on the goal, 0 otherwise. Data: "
-        f"{HER_EPISODES} episodes by a random behaviour, from the book's generator `{HER_NAME}` {mdps._seed_text(HER_NAME)}. "
+        f"{HER_EPISODES} episodes by a random behaviour, from the book's generator `{HER_NAME}`. "
         "Per episode, in order: the start by integer(64), the goal by integer(63) with 1 added if it is at least the start "
         f"(so uniform over the other cells), then {HER_H} moves by integer(4) each. The episode is stored for its "
         "original goal up to and including the first move that reaches it (the rest of the walk is still drawn). "
@@ -1335,7 +1335,7 @@ def retraced_labels():
         "a walk of D moves from the goal in which a move equal to the one just played is redrawn (`rng.integer(4)` until "
         f"it differs), every state of the walk labelled with the move that undoes the last move, each walk depth 1 .. D "
         f"receiving its quota of {PUZ_ROWS} // D rows with the remainder added to the deepest depths, overflow dropped. "
-        f"{PUZ_ROWS} rows per depth, every depth restarting the book's generator `{PUZ_NAME}` {mdps._seed_text(PUZ_NAME)}. "
+        f"{PUZ_ROWS} rows per depth, every depth restarting the book's generator `{PUZ_NAME}`. "
         "The policy is the table: for every labelled state the label that most rows give it (a tie to the smaller move). "
         "'moves per example' is the number of moves applied to generate the rows divided by the rows, against the (D + 1) / 2 "
         "of a generator that keeps one endpoint per walk of a uniformly drawn length 1 .. D; 'states labelled' is the number "

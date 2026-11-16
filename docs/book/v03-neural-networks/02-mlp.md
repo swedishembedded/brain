@@ -362,7 +362,7 @@ The honest summary of why ReLU, GELU and SiLU won is therefore partly this arith
 The ReLU passes nothing for negative inputs, and it passes back nothing. Take a layer of eight ReLU units on four inputs with random weights, $1000$ random inputs and zero biases; then change the bias of the last unit to $-12$:
 
 <!-- worked: mlp.relu_sparsity -->
-Generator: the book's SplitMix64, seed 0xa1bef3f58a690e71 (11655021121596100209). Draw order: 8 x 4 weights W[u, j] with normal(), row by row, then 1000 x 4 inputs X[n, j] with normal(), row by row. Unit u computes relu(W[u] . x + b[u]) with b = 0 except b[7] = -12.
+Generator: `mlp.relu_sparsity` (the book's SplitMix64). Draw order: 8 x 4 weights W[u, j] with normal(), row by row, then 1000 x 4 inputs X[n, j] with normal(), row by row. Unit u computes relu(W[u] . x + b[u]) with b = 0 except b[7] = -12.
 
 | unit u | length of W[u] | b[u] | examples with output > 0 (of 1000) | share |
 |---|---:|---:|---:|---:|
@@ -621,7 +621,7 @@ What remains is the way to choose the weights. A network that can represent a fu
 7. **[Implement]** Implement `layer_forward` and `network_forward` from the pseudocode and reproduce `mlp.batch_forward`: the arrays $\mathbf{Z}_1$, $\mathbf{A}_1$ and $\mathbf{Y}$ for the three examples, to four decimals.
 8. **[Implement]** Implement `relu_interpolant` and reproduce `mlp.relu_approx_k4` and `mlp.relu_approx_error`: the output weights for $k = 4$ and the largest error against the bound for each $k$ in $\{2, 4, 8, 16, 32, 64\}$, evaluated on $x = i/4000$.
 9. **[Implement]** Build the tent network of the sawtooth section with hidden layers of width $2$ (first-layer weights $(1, 1)^\top$, biases $(0, -\tfrac12)$; later layers weights $\begin{pmatrix}2 & -4\\ 2 & -4\end{pmatrix}$, biases $(0, -\tfrac12)$; output weights $(2, -4)$) and reproduce `mlp.tent_values` and the piece counts of `mlp.tent_pieces` for $d \le 10$ by counting slope changes between neighbouring points $x = i/2^{d+1}$. Use binary floating point; every value is a dyadic rational and exact.
-10. **[Implement]** Reproduce `mlp.relu_sparsity` with the book's SplitMix64 generator (Volume I, chapter 17) at the printed seed, with the printed draw order, and the per-unit counts of positive outputs.
+10. **[Implement]** Reproduce `mlp.relu_sparsity` with the book's SplitMix64 generator (Volume I, chapter 17) named there, with the printed draw order, and the per-unit counts of positive outputs.
 11. **[Investigate]** In `mlp.relu_sparsity`, vary the bias of the last unit through $-9, -6, -3, 0$ and record how many of the $1000$ inputs activate it. Find the smallest magnitude of bias at which the count is zero, and relate it to the length of that unit's weights and the spread of its pre-activation.
 12. **[Investigate]** For $k = 8$, replace the equally spaced knots of `relu_interpolant` with knots spaced so that the chord's error is about the same on every interval (for the sine, closer together where the curvature is large). Compare the largest error with the $0.0704$ of the equally spaced network and say how much of the gain remains at $k = 64$.
 

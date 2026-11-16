@@ -64,7 +64,7 @@ def _table(headers, rows, align=None):
 
 
 def _generator_line(name):
-    return f"Generator: the book's SplitMix64, seed {bookrng.seed_of(name):#018x} ({bookrng.seed_of(name)})."
+    return f"Generator: the book's SplitMix64, `{name}`."
 
 
 def _sigmoid(z):
@@ -381,11 +381,11 @@ def _claim_rows(n=5):
 
 
 def one_seed_claims():
-    rows = [(k, f"{s:#018x}", _pts(a), _pts(b), _pts(b - a, 1, True)) for k, s, a, b in _claim_rows()]
-    return (f"{_generator_line(SEEDS_NAME)} The run seed of run k is the raw draw number k (`next()`, counting from 0) of this generator. "
+    rows = [(k, _pts(a), _pts(b), _pts(b - a, 1, True)) for k, _, a, b in _claim_rows()]
+    return (f"{_generator_line(SEEDS_NAME)} Run k is seeded by the k-th draw (`next()`, counting from 0) of this generator. "
             f"Each run trains on the {N_TRAIN} training rows with learning rate {LR:g}, {EPOCHS} epochs, one example per step, and scores the same "
             f"{N_TEST} test rows. Both pipelines use the same run seed, so they start from the same initial weights and visit the examples in the same order.\n\n"
-            + _table(["run", "run seed", "plain: test accuracy %", "centring + interaction: test accuracy %", "difference (points)"], rows, "rrrrr"))
+            + _table(["run", "plain: test accuracy %", "centring + interaction: test accuracy %", "difference (points)"], rows, "rrrr"))
 
 
 @lru_cache(maxsize=None)

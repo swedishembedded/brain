@@ -76,7 +76,7 @@ def _i(n):
 
 
 def _seed(name):
-    return f"`{name}` (seed 0x{bookrng.seed_of(name):016x})"
+    return f"`{name}`"
 
 
 def _ceil_div(a, b):
