@@ -137,7 +137,9 @@ fn a_scored_continuation_is_the_models_own_log_probability() {
         let max = row.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
         let lse = max + row.iter().map(|z| (z - max).exp()).sum::<f64>().ln();
         let want = row[seq[p] as usize] - lse;
-        assert!((scored[k] as f64 - want).abs() < 1e-4, "position {p}: scored {} vs the model's {want}", scored[k]);
+        // The served products run as TF32 where the device has it (the reference is pinned to fp32): a 10-bit
+        // mantissa moves a log-probability by a few 1e-4.
+        assert!((scored[k] as f64 - want).abs() < 1e-3, "position {p}: scored {} vs the model's {want}", scored[k]);
     }
     assert!(eng.score_continuation(::model::paged::BASE_KV_NAMESPACE, &seq, 0, 1.0).is_err(), "position 0 has no prediction");
     assert!(eng.score_continuation(::model::paged::BASE_KV_NAMESPACE, &seq, 2, 0.0).is_err(), "a temperature must be positive");
