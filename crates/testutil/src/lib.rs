@@ -98,9 +98,14 @@ pub fn gpu_tests_skipped() -> bool {
 /// binary must hold THIS one lock for its whole body. Tests that only read
 /// variables another test writes may also need it, when the value read is
 /// part of what is asserted.
+///
+/// The lock guards no data, only the order: the next holder takes a lock a
+/// panicking test left poisoned, rather than failing on the poison, so a
+/// failure is reported by the test that failed and not again by every test
+/// queued behind it.
 pub fn env_lock() -> std::sync::MutexGuard<'static, ()> {
     static ENV_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-    ENV_LOCK.get_or_init(|| std::sync::Mutex::new(())).lock().unwrap()
+    ENV_LOCK.get_or_init(|| std::sync::Mutex::new(())).lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Name what a test is skipping because this MACHINE cannot run it, and let no
