@@ -795,7 +795,11 @@ check/seed-literals/tests:
 
 # Spec for the gate above, run against throwaway trees (needs only bats).
 ## test/gates - default: every gate self-test (env-reads, env-writes, test-skips, seed-literals, group-kernels, crate-layers, whole-tensor-loads, format-logic, adapter-naming, placement-accounting, training-capabilities, model-flags, tier-gemm, suite-report, cancellable-actions)
-test/gates: test/gates/env-reads test/gates/env-writes test/gates/test-skips test/gates/seed-literals test/gates/group-kernels test/gates/crate-layers test/gates/whole-tensor-loads test/gates/format-logic test/gates/adapter-naming test/gates/placement-accounting test/gates/training-capabilities test/gates/model-flags test/gates/tier-gemm test/gates/suite-report test/gates/cancellable-actions
+test/gates: test/gates/env-reads test/gates/env-writes test/gates/test-skips test/gates/seed-literals test/gates/group-kernels test/gates/crate-layers test/gates/whole-tensor-loads test/gates/format-logic test/gates/adapter-naming test/gates/placement-accounting test/gates/training-capabilities test/gates/model-flags test/gates/tier-gemm test/gates/suite-report test/gates/cancellable-actions test/gates/book-epub
+
+## test/gates/book-epub - the book's EPUB numbers figures per chapter, adopts a chapter's own caption, breaks long formulas where a typesetter would, keeps equation numbers, and its verifier fails raw HTML, TeX left in a formula, a missing element and a dangling anchor
+test/gates/book-epub:
+	bats tests/gates/book_epub.bats
 
 ## test/gates/cancellable-actions - the cancellable-actions gate fails on a production action spec without .cancellable() (also through a helper), passes when declared, ignores tests, comments and strings
 test/gates/cancellable-actions:
@@ -2021,12 +2025,13 @@ docs/pdf:
 	python3 docs/pandoc/build-docs.py
 
 # The textbook under docs/book: published with the docs (its own part of
-# docs/manifest.yaml) and typeset as its own PDF, in the reading order of
+# docs/manifest.yaml) and built as PDF and EPUB files, in the reading order of
 # docs/book/book.yaml, named after the book, its author and brain's version
-# (Cargo.toml). Requires pandoc, xelatex and rsvg-convert.
-## book - default: the whole textbook and each written volume as its own PDF (build/book/)
+# (Cargo.toml). Requires pandoc, xelatex, rsvg-convert and epubcheck.
+## book - default: the whole textbook and each written volume as PDF and EPUB (build/book/)
 book:
 	scripts/book/pdf.py
+	scripts/book/epub.py
 
 ## book/pdf - typeset the whole textbook (pandoc + xelatex) -> build/book/From-First-Principles-To-Intelligent-Machines-<Author>-vX.Y.pdf
 book/pdf:
@@ -2035,6 +2040,10 @@ book/pdf:
 ## book/volumes - typeset each written volume on its own -> build/book/volumes/FFPIM-Volume-NN-<Title>-<Author>-vX.Y.pdf
 book/volumes:
 	scripts/book/pdf.py --volumes
+
+## book/epub - the whole textbook and each written volume as EPUB 3, each verified (math, tables, figures, links, epubcheck)
+book/epub:
+	scripts/book/epub.py
 
 # Research papers: one directory per paper under papers/, each with its own
 # Makefile over papers/paper.mk. Adding a directory adds its targets.
@@ -2333,7 +2342,7 @@ help:
         test/gpu test/gpu/ripple test/gpu/ripple/suites test/gpu/ripple/cargo test/gpu/ripple/e2e \
         test/e2e/claude-code test/e2e/scheduler test/e2e/quickstart test/e2e/deb \
         test/e2e/results-hygiene test/e2e/s3dit-int8 \
-        check check/workspace check/clippy check/scripts check/env-reads check/test-skips check/seed-literals check/seed-literals/tests check/serve-conformance test/gates test/gates/env-reads test/gates/test-skips test/gates/seed-literals test/gates/group-kernels _train/need-wrapper qwen35 qwen35/train qwen35/train/probe qwen35/train/step check/spdx check/copyright check/paths check/scope check/saved-policy check/hf-fixtures \
+        check check/workspace check/clippy check/scripts check/env-reads check/test-skips check/seed-literals check/seed-literals/tests check/serve-conformance test/gates test/gates/env-reads test/gates/test-skips test/gates/seed-literals test/gates/group-kernels test/gates/book-epub _train/need-wrapper qwen35 qwen35/train qwen35/train/probe qwen35/train/step check/spdx check/copyright check/paths check/scope check/saved-policy check/hf-fixtures \
         check/files check/samples check/sdk-features check/make-targets \
         ci ci/static ci/static/scripts ci/static/gate-specs ci/cpu ci/cpu/unit ci/cpu/e2e \
         ci/cpu/e2e/api-conformance ci/cpu/e2e/video-api ci/cpu/e2e/shutdown ci/cpu/e2e/ready ci/gpu ci/gpu/parity ci/matrix \
@@ -2358,7 +2367,7 @@ help:
         crates $(EXAMPLE_CRATE_TARGETS) $(EXAMPLE_GROUP_TARGETS) $(EXAMPLE_NAME_TARGETS) \
         $(EXAMPLE_BUILD_TARGETS) $(EXAMPLE_RUN_TARGETS) \
         docs docs/build docs/check docs/clean docs/pdf docs/quickstart \
-        papers papers/pdf $(PAPER_DIRS) $(PAPER_TARGETS) book book/pdf \
+        papers papers/pdf $(PAPER_DIRS) $(PAPER_TARGETS) book book/pdf book/epub \
         generate generate/kernels generate/kernels/registry generate/kernels/wgsl-table \
         generate/kernels/cuda-table generate/samples generate/samples/manifest \
         generate/knowledge generate/knowledge/index \

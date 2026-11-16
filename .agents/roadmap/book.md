@@ -18,7 +18,8 @@ reproduced its worked examples from the text alone in another language.
 - [x] Tooling: specification and concept-graph gate (`make check/book`),
       generated figures, worked examples, chronology and navigation
       (`make generate/book/*`, `make check/generated/book`), the book PDF
-      (`make book/pdf`) and the Book part of the published docs.
+      (`make book/pdf`), the verified EPUB of every edition (`make book/epub`)
+      and the Book part of the published docs.
 - [x] Evidence inventory: `scripts/book/history.py` extracts every commit on
       every ref (6576 commits, 5830 on main at the time of writing) with
       author and commit dates, touched crates and added knowledge entries.

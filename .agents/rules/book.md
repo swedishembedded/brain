@@ -9,9 +9,15 @@ Read this before you write or change anything under `docs/book/` or
 `docs/book/` is a textbook, *From First Principles to Intelligent Machines*:
 machine learning taught from arithmetic to a complete engine, with brain's
 implementation and history as the case study. It is published with the docs
-(its own part of `docs/manifest.yaml`) and typeset as PDFs: `make book`
-builds the whole book (`make book/pdf` alone) and each written volume as a
-file of its own (`make book/volumes`), all under `build/book/`. It is not
+(its own part of `docs/manifest.yaml`) and built as PDF and EPUB files:
+`make book` builds the whole book (`make book/pdf` alone) and each written
+volume as a file of its own (`make book/volumes`), each in both formats
+(`make book/epub` for the EPUBs alone), all under `build/book/`. The editions
+and their pages are `scripts/book/edition.py`'s, shared by both formats; file
+names end with the author and brain's major and minor version from
+`Cargo.toml` (`-Martin-Schroder-v5.1`). Every EPUB is verified as it is
+built: each formula is MathML (one left as TeX source fails), each table,
+figure and link of the source is in it, and epubcheck passes. It is not
 product documentation: it may explain internals,
 history and measurements that `docs/` must not, under the rules below.
 Status (which chapters are written, verified, open) lives in
@@ -172,7 +178,8 @@ the chapter where a reader should first meet it.
 ## Verifying a chapter
 
 A chapter is done when `make check/book check/generated/book docs/check` pass,
-`make book/pdf` typesets it without errors or overflow, its figures have been
+`make book/pdf` typesets it without errors or overflow, `make book/epub` builds
+and verifies it, its figures have been
 looked at, and an independent reader (a fresh agent given only the book, not
 the repository) has implemented its [Implement] exercises in a language other
 than Rust from the text alone and reproduced the worked examples. Record the

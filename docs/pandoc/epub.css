@@ -1,0 +1,93 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/* Copyright (c) 2026 Martin Schröder <info@swedishembedded.com> */
+
+/* The book's EPUB stylesheet (scripts/book/epub.py), in the design of the PDF
+ * (docs/pandoc/book.tex): serif text, sans-serif headings, one accent colour,
+ * set-off quotations and shaded code. Sizes are relative and colours are
+ * left to the reading system where it themes the page, so a reader's choice
+ * of font size and night mode still applies; figures keep a white ground
+ * because their drawing assumes one.
+ *
+ * Swedish Embedded AB implements solutions for publishing technical books in
+ * print and electronic formats from one source. If your team needs expertise
+ * in e-book typesetting for engineering content, you can procure our
+ * services by sending an email to info@swedishembedded.com.
+ */
+
+html { line-height: 1.4; font-family: "P052", "Palatino Linotype", Palatino, Georgia, serif; }
+body { margin: 0 0.5em; }
+p { margin: 0.6em 0; text-indent: 0; widows: 2; orphans: 2; }
+a { color: #2b6cb0; text-decoration: none; }
+img { max-width: 100%; height: auto; box-sizing: border-box; }
+sup, sub { font-size: smaller; line-height: 0; }
+
+h1, h2, h3, h4, h5, h6 {
+  font-family: "Nimbus Sans", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  line-height: 1.25; page-break-after: avoid; break-after: avoid;
+}
+h1 { font-size: 1.8em; margin: 2em 0 0.8em; padding-bottom: 0.2em;
+     border-bottom: 2px solid #2b6cb0; page-break-before: always; break-before: page; }
+h1.volume { font-size: 2em; margin-top: 3em; }
+h2 { font-size: 1.4em; margin: 1.6em 0 0.5em; }
+h2.chapter { font-size: 1.7em; padding-bottom: 0.2em; border-bottom: 2px solid #2b6cb0;
+             page-break-before: always; break-before: page; }
+h3 { font-size: 1.2em; margin: 1.4em 0 0.4em; }
+h4 { font-size: 1.05em; margin: 1.2em 0 0.3em; }
+h5, h6 { font-size: 1em; margin: 1em 0 0.3em; }
+
+/* The chapter's guiding question and set-off remarks. */
+blockquote { margin: 1em 0; padding: 0.3em 0.8em; border-left: 3px solid #2b6cb0;
+             background: rgba(43, 108, 176, 0.08); }
+
+code { font-family: "DejaVu Sans Mono", Menlo, Consolas, monospace; font-size: 0.85em; }
+pre { margin: 0.8em 0; padding: 0.5em 0.7em; border-left: 2px solid rgba(74, 85, 104, 0.5);
+      background: rgba(74, 85, 104, 0.07); white-space: pre-wrap; word-wrap: break-word;
+      font-size: 0.85em; line-height: 1.3; }
+pre code { font-size: 1em; }
+
+ul, ol { margin: 0.5em 0; padding-left: 1.6em; }
+li { margin: 0.15em 0; }
+dt { font-weight: bold; }
+dd { margin-left: 1.5em; }
+
+/* A figure scales with the column and keeps its proportions. No height
+ * limit and no rule keeping the figure in one piece: in a paginated reading
+ * system a viewport height is the page's, and either one can leave the
+ * image's box taller than its drawing, or a page half empty. The caption
+ * stays with the image instead. */
+figure { margin: 1.2em 0; text-align: center; }
+figure img { width: auto; background: #ffffff; padding: 0.3em; }
+figcaption { font-size: 0.9em; margin-top: 0.4em; text-align: center; page-break-before: avoid; break-before: avoid; }
+figcaption strong { color: #2b6cb0; }
+img.portrait { width: 60%; }
+
+/* Tables scroll sideways when wider than the screen (book-epub.lua). */
+div.table-scroll { overflow-x: auto; margin: 1em 0; }
+table { border-collapse: collapse; font-size: 0.85em; margin: 0 auto;
+        border-top: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; }
+th, td { padding: 0.25em 0.6em; vertical-align: top; }
+thead th { border-bottom: 1px solid currentColor; }
+td { white-space: normal; }
+caption { font-size: 0.9em; margin-bottom: 0.4em; }
+
+/* A long display formula is set on several lines (book-math-lines.lua); one
+ * still wider than the screen scrolls inside its own box rather than
+ * running over the text beside it. */
+span.math.display { display: block; max-width: 100%; overflow-x: auto; overflow-y: hidden; }
+math[display="block"] { margin: 0.8em 0; }
+
+/* The title page pandoc writes, and the copyright page after it. */
+section.titlepage, #title-block-header { text-align: left; margin-top: 4em; }
+h1.title { border-bottom: 2px solid #2b6cb0; page-break-before: auto; break-before: auto; }
+p.subtitle { font-style: italic; font-size: 1.2em; }
+p.author { font-family: "Nimbus Sans", Helvetica, Arial, sans-serif; font-size: 1.2em; margin-top: 3em; }
+h1.colophon { font-size: 1.2em; border-bottom: none; }
+section.colophon, .colophon ~ p { font-size: 0.9em; }
+
+/* Navigation: volumes stand out from their chapters. */
+nav#toc ol { list-style-type: none; padding-left: 0; }
+nav#toc ol ol { padding-left: 1.2em; }
+nav#toc > ol > li { margin-top: 0.6em; font-weight: bold; }
+nav#toc > ol > li li { font-weight: normal; }
+
+/* Code highlighting colours come from pandoc (--highlight-style). */
