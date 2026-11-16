@@ -1481,6 +1481,9 @@ pub struct Ops {
     /// The packed-activation scratch of [`Ops::act_shared_scratch`], one per (width, rows): every activation of that
     /// shape reuses it.
     shared_quant: std::sync::Mutex<HashMap<(u32, u64), Arc<I8Scratch>>>,
+    /// The bf16-rounded activation scratch of [`Ops::act_shared_scratch`], one per (width, rows), on the same terms as
+    /// [`Self::shared_quant`]: the rows a dequantize-in-register int8 candidate or a bf16 library product reads.
+    shared_bf16: std::sync::Mutex<HashMap<(u32, u32), DeviceBuffer>>,
 }
 
 /// A transfer [`Gpu`] handle (own stream, bounded pinned staging ring) and the pinned-pool lease that pays for
@@ -1588,7 +1591,7 @@ impl Ops {
             idx.insert(name, i);
         }
         let gemm = LibraryGemmProvider::for_gpu(&gpu, GemmPrecision::Auto);
-        Ok(Ops { gpu, caps, idx, selector, providers, gemm, linear_activations: Default::default(), cq_activations: Default::default(), tile_budget_bytes: DEFAULT_TILE_BUDGET_BYTES, decode_dummy: std::sync::OnceLock::new(), uploads: std::sync::OnceLock::new(), decoded: Default::default(), scratch: Default::default(), shared_quant: Default::default() })
+        Ok(Ops { gpu, caps, idx, selector, providers, gemm, linear_activations: Default::default(), cq_activations: Default::default(), tile_budget_bytes: DEFAULT_TILE_BUDGET_BYTES, decode_dummy: std::sync::OnceLock::new(), uploads: std::sync::OnceLock::new(), decoded: Default::default(), scratch: Default::default(), shared_quant: Default::default(), shared_bf16: Default::default() })
     }
 
     /// Choose the arithmetic of the GEMMs against bf16 weights: `Auto` takes
@@ -1689,18 +1692,9 @@ impl Ops {
         let k = w.k();
         let m = act.m;
         let (w_op, y_op) = (library::Operand { buf: &wb, range: window }, library::Operand { buf: y, range: (yoff, m as u64 * rows.1 as u64) });
-        // The activation rounded to bf16, from an earlier product on these rows or made now.
-        let shared = act.bf16.borrow().clone();
-        let (xb, fresh) = match shared {
-            Some(xb) => (xb, false),
-            None => {
-                let x_op = library::Operand { buf: &act.x, range: (act.xr0 as u64 * k as u64, m as u64 * k as u64) };
-                match self.gemm.cast_bf16(&self.gpu, &mut prep, &x_op, m as u64 * k as u64) {
-                    Some(xb) => (xb, true),
-                    None => return false,
-                }
-            }
-        };
+        // The activation rounded to bf16, from an earlier product on these rows or made now (`library_weight` has
+        // established that the library path is active).
+        let Some((xb, fresh)) = self.bf16_rows(act, &mut prep) else { return false };
         let ok = self.gemm.forward_bf16(&self.gpu, &mut prep, &xb, &w_op, &y_op, m, rows.1, k);
         if ok {
             s.append(&mut prep);
@@ -1801,13 +1795,22 @@ impl Ops {
     /// The rows of `act` rounded to bf16, from an earlier product on these rows or cast now (the cast step is pushed into
     /// `prep`; the second value is whether it is new, to be remembered on `act` once the product that needs it is kept).
     /// `None` when the device declines the cast.
+    ///
+    /// An activation of [`Self::act_shared_scratch`] is cast into the one bf16 scratch of its shape, as its packed int8
+    /// form is: a cast per activation put one bf16 copy of every int8 layer's activations on the card, more per layer
+    /// than the bf16 tier holds.
     fn bf16_rows(&self, act: &Act, prep: &mut Vec<Step>) -> Option<(DeviceBuffer, bool)> {
         if let Some(xb) = act.bf16.borrow().clone() {
             return Some((xb, false));
         }
-        let k = act.k;
-        let x_op = library::Operand { buf: &act.x, range: (act.xr0 as u64 * k as u64, act.m as u64 * k as u64) };
-        library::cast_bf16(&self.gpu, prep, &x_op, act.m as u64 * k as u64).map(|xb| (xb, true))
+        let (m, k) = (act.m, act.k);
+        let count = u64::from(m) * u64::from(k);
+        let x_op = library::Operand { buf: &act.x, range: (u64::from(act.xr0) * u64::from(k), count) };
+        if !act.shared_scratch {
+            return library::cast_bf16(&self.gpu, prep, &x_op, count).map(|xb| (xb, true));
+        }
+        let xb = self.shared_bf16.lock().unwrap_or_else(|e| e.into_inner()).entry((k, m)).or_insert_with(|| self.gpu.storage_uninit(count.div_ceil(2))).clone();
+        library::cast_bf16_into(&self.gpu, prep, &x_op, count, &xb).map(|()| (xb, true))
     }
 
     /// The bf16 weight rows `rows` of `w` as the library path reads them: the buffer and the range to bind.

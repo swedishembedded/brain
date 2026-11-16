@@ -189,16 +189,31 @@ fn operand_prep(step: Step, kernel: &kernels_cuda::CudaKernel) -> Step {
 /// dequantize-in-register candidates - and does not depend on the library being active. `None` when the device
 /// declines the cast kernel or the count / window is not one it takes.
 pub fn cast_bf16(gpu: &Gpu, steps: &mut Vec<Step>, x: &Operand, count: u64) -> Option<DeviceBuffer> {
-    if count == 0 || !count.is_multiple_of(ALIGN_ELEMS as u64) || count * 2 > MAX_SCRATCH_BYTES || !x.range.0.is_multiple_of(4) {
+    if !casts_bf16(count, x) {
+        return None;
+    }
+    // The cast writes all `count` values (an even multiple of ALIGN_ELEMS), so the scratch is not cleared.
+    let scratch = gpu.storage_uninit(count.div_ceil(2));
+    cast_bf16_into(gpu, steps, x, count, &scratch)?;
+    Some(scratch)
+}
+
+/// [`cast_bf16`] into the first `count` values of a bf16 buffer the caller holds (`count / 2` words or more): an
+/// activation scratch reused by every activation of one shape. `None` as there; nothing is pushed then.
+pub fn cast_bf16_into(gpu: &Gpu, steps: &mut Vec<Step>, x: &Operand, count: u64, out: &DeviceBuffer) -> Option<()> {
+    if !casts_bf16(count, x) {
         return None;
     }
     let kernel = kernels_cuda::get("cast_f32_bf16")?;
     let id = gpu.native_kernel(kernel, CAST_BINDINGS)?;
-    // The cast writes all `count` values (an even multiple of ALIGN_ELEMS), so the scratch is not cleared.
-    let scratch = gpu.storage_uninit(count.div_ceil(2));
-    let step = gpu.step_native_sliced(id, &[x.buf, &scratch], &[(x.range.0, count), (0, 0)], &[count as u32], kernel.blocks_for(1, count as u32))?;
+    let step = gpu.step_native_sliced(id, &[x.buf, out], &[(x.range.0, count), (0, 0)], &[count as u32], kernel.blocks_for(1, count as u32))?;
     steps.push(operand_prep(step, kernel));
-    Some(scratch)
+    Some(())
+}
+
+/// Whether the bf16 cast takes `count` values from `x`'s window.
+fn casts_bf16(count: u64, x: &Operand) -> bool {
+    count > 0 && count.is_multiple_of(ALIGN_ELEMS as u64) && count * 2 <= MAX_SCRATCH_BYTES && x.range.0.is_multiple_of(4)
 }
 
 /// Widen the first `count` elements of the bf16 buffer `x` (two to a word) to a new fp32 buffer (exact) and push the step. `None`
