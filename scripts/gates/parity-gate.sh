@@ -97,8 +97,13 @@ run "qwen serve suite — CPU backend (int8 KV is the serving default)" \
 # kernel catalogue and the backward kernels, and this backend has neither. The
 # tuned kernel is held to the reference by its own gate instead, which is where
 # the measured speedup floor is asserted too.
-run "CUDA tuned kernels == WGSL reference (skips without a CUDA device)" \
-    cargo test --release -q -p brain-gpu-core --test cuda_provider_matmul
+if [ -n "$CUDA_DEVICE" ]; then
+    # A device binary of gpu-core: its tests run only on the card they are told.
+    run "CUDA tuned kernels == WGSL reference on $CUDA_DEVICE" \
+        cargo test --release -q -p brain-gpu-core --test cuda_provider_matmul -- --device "$CUDA_DEVICE" --backend cuda
+else
+    echo "=== CUDA tuned kernels == WGSL reference: SKIP (no NVIDIA device on this machine) ==="; echo
+fi
 
 # The codec comes from the model store's Qwen3-TTS (the test says so when there is none); OpenVINO is loaded from
 # the active virtualenv (`make environment/requirements`), and its absence fails the run with that instruction.
