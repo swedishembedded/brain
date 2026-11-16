@@ -65,8 +65,8 @@ OPTIONS
                                                    the released Qwen3.8-27B GGUF,
                                                    built as `brain serve` builds it
                           qwen35moe:<gguf>[:kvf32|:kvbf16|:kvint8]
-                                                   the Qwen3.6-35B-A3B GGUF behind
-                                                   its serving engine
+                                                   the Qwen3.6-35B-A3B GGUF,
+                                                   built as `brain serve` builds it
                           lfm:<weights>:<tok.json> the LFM2.5 encoder behind the
                                                    residency executor (unit: sequence)
                           flux2[:<W>x<H>x<steps>[:<precision>]]
@@ -112,6 +112,8 @@ OPTIONS
                         --weight-format` grammar: f32, bf16, f16, int8, or per-leaf like i8,out_proj=f32);
                         default: what `brain serve` serves - for qwen: the checkpoint's stored tier
                         (int8 only where it does not fit the card), for qwen35moe: int8
+  --max-batch <N>       the served engine's batch for a qwen35: or qwen35moe: target (the `brain serve
+                        --max-batch` setting); default: what `brain serve` chooses
   --kernels             longctx: also profile each batch size's decode steps per kernel on
                         the device and roll the table up into phases (linear, experts,
                         attention, recurrent mixer, norm/epilogue, sampling) - the same
@@ -168,9 +170,10 @@ targets (--target):
                                      storage (the server's default when absent - `longctx`
                                      defaults to f32 instead). Also `longctx`.
   qwen35moe:<gguf>[:kvf32|:kvbf16|:kvint8]
-                                     the Qwen3.6-35B-A3B GGUF through the shared scheduler on the
-                                     first `--device` card (context 8192, 16 resident sequences,
-                                     int8 weights); also `longctx`.
+                                     the Qwen3.6-35B-A3B GGUF through the shared scheduler, built by
+                                     `brain serve`'s own resident (int8 weights; KV tier, batch and
+                                     context planned for the roomiest `--device` card); the `:kv`
+                                     suffix pins the GQA cache storage. Also `longctx`.
   qwen:<weights>[:kvf32]             the paged serving engine on a real checkpoint (also `longctx`), its
                                      weights at the tier `brain serve` picks (--weight-format overrides);
                                      :kvf32 opts OUT of int8 KV, which is ON by default.
@@ -392,6 +395,7 @@ fn run(args: &[String]) {
     let mut policy = "cost-aware".to_string();
     let mut longctx = crate::perf_longctx::Args::default();
     let mut forecast = ForecastShape::default();
+    let mut max_batch: Option<u32> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -416,6 +420,7 @@ fn run(args: &[String]) {
                     std::process::exit(2);
                 }));
             }
+            "--max-batch" => max_batch = Some(parse_flag(args, &mut i, "--max-batch")),
             "--horizon" => forecast.horizon = parse_flag(args, &mut i, "--horizon"),
             "--samples" => forecast.samples = parse_flag(args, &mut i, "--samples"),
             "--requests" => opt.num_requests = val(args, &mut i, "--requests").parse().unwrap_or(opt.num_requests),
@@ -496,7 +501,7 @@ fn run(args: &[String]) {
         eprintln!("perf run: --target is required (no default - see `brain perf list` or `brain perf --help`)");
         std::process::exit(2);
     };
-    let mut target = match build_target(&target_spec, &workload, opt.input_override, opt.output_override, forecast, longctx.weight_format.as_ref()) {
+    let mut target = match build_target(&target_spec, &workload, opt.input_override, opt.output_override, forecast, longctx.weight_format.as_ref(), max_batch) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("perf: {e}");
@@ -686,18 +691,21 @@ impl SynthSpec {
     }
 }
 
-fn build_target(spec: &str, workload: &str, input_override: Option<usize>, output_override: Option<usize>, forecast: ForecastShape, weight_format: Option<&model::ops::TierPolicy>) -> Result<Box<dyn PerfTarget>, String> {
+fn build_target(spec: &str, workload: &str, input_override: Option<usize>, output_override: Option<usize>, forecast: ForecastShape, weight_format: Option<&model::ops::TierPolicy>, max_batch: Option<u32>) -> Result<Box<dyn PerfTarget>, String> {
+    if let Some(rest) = spec.strip_prefix("qwen35:") {
+        return crate::perf_qwen35::build(rest, max_batch);
+    }
+    if let Some(rest) = spec.strip_prefix("qwen35moe:") {
+        return crate::perf_qwen35moe::build(rest, weight_format, max_batch);
+    }
+    if max_batch.is_some() {
+        return Err("--max-batch sizes the served engine of a qwen35: or qwen35moe: target; this target takes no batch setting".to_string());
+    }
     if let Some(shape) = spec.strip_prefix("qwen-synth:") {
         return build_qwen_synth(shape, workload, input_override, output_override, weight_format);
     }
     if let Some(weights) = spec.strip_prefix("qwen:") {
         return build_qwen(weights, workload, input_override, output_override, weight_format);
-    }
-    if let Some(rest) = spec.strip_prefix("qwen35:") {
-        return crate::perf_qwen35::build(rest);
-    }
-    if let Some(rest) = spec.strip_prefix("qwen35moe:") {
-        return crate::perf_qwen35moe::build(rest, &weight_format.cloned().unwrap_or_else(crate::perf_qwen35moe::default_tier));
     }
     if let Some(rest) = spec.strip_prefix("http:") {
         return build_http(rest, workload, input_override, output_override);

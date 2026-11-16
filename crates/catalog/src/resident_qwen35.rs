@@ -50,6 +50,7 @@ use qwen35::caps::with_template_flavor_default;
 use qwen35::config::{LayerType, Qwen35Config};
 use qwen35::serve::{Engine, Scheduler};
 use gpu_core::defaults::{Hardware, Rule};
+use crate::serve_defaults::{given_or_chosen, DEFAULT_CONTEXT_FLOOR, KV_DEFAULTS};
 use model::policy::GdnState;
 use std::sync::Arc;
 
@@ -80,6 +81,9 @@ pub use model::ops::TierPolicy as Qwen35TierPolicy;
 pub struct Qwen35ServeConfig {
     pub fp32: Qwen35Sizing,
     pub gguf: Qwen35GgufServeConfig,
+    /// Every released Qwen3.5/3.6 MoE GGUF resident (`crate::resident_qwen35moe::gguf_resident`): the same flags,
+    /// honoured as far as that engine can.
+    pub moe: crate::resident_qwen35moe::Qwen35MoeGgufServeConfig,
     /// Why the serving policy cannot be honoured by the fp32 resident (see [`Qwen35ServeConfig::apply_policy`]).
     pub fp32_refused: Option<String>,
 }
@@ -315,7 +319,7 @@ pub struct Qwen35GgufServeConfig {
     /// grammar). `None` holds every tensor as the checkpoint stores it
     /// (`qwen35::int8_gguf_resident::held_tiers`).
     pub tier: Option<model::ops::TierPolicy>,
-    /// GQA KV-cache storage tier. `None` takes the best of [`KV_DEFAULTS`]
+    /// GQA KV-cache storage tier. `None` takes the best of [`KV_DEFAULTS`](crate::serve_defaults::KV_DEFAULTS)
     /// that fits.
     pub kv: Option<model::kv_tier::KvTier>,
     /// How many sequences one batched decode step carries (the resident's
@@ -410,6 +414,8 @@ impl Qwen35ServeConfig {
     /// an error only when NO family can honour it. Returns notes.
     pub fn apply_policy(&mut self, p: &model::policy::ServePolicy) -> Result<Vec<String>, String> {
         let gguf = self.gguf.apply_policy(p);
+        // A choice the MoE engine cannot honour leaves that resident out (it records why); its notes join the others.
+        let moe = self.moe.apply_policy(p);
         let fp32 = QWEN35_FP32_POLICY.check(p);
         if let Err(e) = &fp32 {
             self.fp32_refused = Some(e.clone());
@@ -424,9 +430,14 @@ impl Qwen35ServeConfig {
             }
             self.fp32.exact_decode = p.exact_decode;
         }
-        match (gguf, fp32) {
-            (Err(a), Err(b)) => Err(format!("{a}; {b}")),
-            (g, _) => g,
+        match (gguf, moe, fp32) {
+            (Err(a), Err(m), Err(b)) => Err(format!("{a}; {m}; {b}")),
+            (Ok(mut notes), Ok(more), _) => {
+                notes.extend(more);
+                Ok(notes)
+            }
+            (Ok(notes), Err(_), _) | (Err(_), Ok(notes), _) => Ok(notes),
+            (Err(_), Err(_), Ok(())) => Ok(Vec::new()),
         }
     }
 }
@@ -488,15 +499,6 @@ impl Qwen35GgufServeConfig {
 /// a sequence at the default 2048 context with an f32 cache) leaves the
 /// two-24-GiB-card placement unchanged.
 pub const DEFAULT_MAX_BATCH: u32 = 8;
-
-/// The KV-cache tier a GGUF resident takes when `--kv-cache` is not given,
-/// fastest first. Decode reads every cached row of every GQA layer each step,
-/// so the most compact tier is also the fastest, and it holds the most context.
-pub const KV_DEFAULTS: &[Rule<model::kv_tier::KvTier>] = &[Rule {
-    when: |_| true,
-    ranked: &[model::kv_tier::KvTier::INT8, model::kv_tier::KvTier::BF16, model::kv_tier::KvTier::F32],
-    why: "decode reads every cached K/V row each step: the most compact tier is the fastest and holds the most context",
-}];
 
 /// Speculation a GGUF resident takes when `--speculative` is not given. Its
 /// verify kernels are CUDA's, so elsewhere the verify scratch would be memory
@@ -587,11 +589,6 @@ pub const PREFIX_SLOT_DEFAULTS: &[Rule<PrefixCache>] = &[Rule {
     ],
     why: "an agent resends its whole history every turn and waits on its tools between turns: a cached prompt saves its prefill",
 }];
-
-/// The shortest automatic context a default may leave (or the checkpoint's
-/// own trained window, when shorter): a default that would squeeze the
-/// context below it gives way to the next-ranked one.
-pub const DEFAULT_CONTEXT_FLOOR: u32 = 32_768;
 
 /// Build the multi-GPU resident for one released GGUF, to be registered with
 /// `Executor::register_multi` under `id`.
@@ -765,16 +762,6 @@ pub fn gguf_resident_banked(gguf_path: &str, id: &str, gpus: &[(u32, u64)], rese
 /// prefix does, so the refusal that follows names the whole box).
 fn card_group<T>(offered: &[T], mut holds: impl FnMut(&[T]) -> bool) -> usize {
     (1..=offered.len()).find(|&n| holds(&offered[..n])).unwrap_or(offered.len())
-}
-
-/// The operator's value, else the best-ranked default of `rules` that `fits`,
-/// recorded in `chosen` with the reason.
-fn given_or_chosen<T: Copy + std::fmt::Display>(given: Option<T>, knob: &str, rules: &[Rule<T>], hw: &Hardware, chosen: &mut Vec<String>, fits: impl FnMut(T) -> Result<(), String>) -> T {
-    given.unwrap_or_else(|| {
-        let c = gpu_core::defaults::choose_or_leanest(rules, hw, fits);
-        chosen.push(format!("{knob} {}: {}", c.value, c.why));
-        c.value
-    })
 }
 
 /// A released Qwen3.8 GGUF resident with the adapters offered beside it.

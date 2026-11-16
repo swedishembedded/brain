@@ -1,43 +1,29 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Resident-model adapter putting Qwen3.5-35B-A3B's paged serving engine
-//! (`qwen35moe::serve::Engine`/`Scheduler`) behind the residency [`Executor`],
-//! mirroring `crate::resident_llm::QwenResident`'s `Batched` arm — SCOPED
-//! DOWN to exactly what `qwen35moe::serve::Engine` actually is (see that
-//! module's own doc for the authoritative "deliberately deferred" list):
-//! **single-GPU**, **f32 or packed-int8 expert weights as the
-//! checkpoint stores them** (`serving_engine` reads the file through its packed
-//! view; a bf16 checkpoint is decoded one tensor at a time to f32), **fp32 KV** (no int8 KV path exists
-//! for this engine, unlike `qwen3::serve::Engine`'s `kv_int8` default).
-//! Every resident sequence's decode row goes through one batched forward per
-//! scheduler iteration (the generic `model::serve::Scheduler`, driven by
-//! `llmserve`).
+//! Resident-model adapters putting Qwen3.5/3.6-35B-A3B's paged serving engine
+//! (`qwen35moe::serve::Engine` under the generic `model::serve::Scheduler`, driven by `llmserve`) behind the
+//! residency [`Executor`](residency::Executor). The engine is single-GPU: every resident sequence's decode row goes through one batched
+//! forward per scheduler iteration, and each sequence holds one KV block of the whole per-sequence context (see
+//! `qwen35moe::serve`'s module doc for its scope).
 //!
-//! Not present, because they don't exist anywhere in this crate yet: LoRA
-//! adapter folding (`qwen3::lora::fold_adapter_into` has no `qwen35moe`
-//! counterpart), multi-GPU sharding, a prefix cache that survives past what
-//! `Scheduler`'s own `PrefixCache` already provides at the paged-block
-//! granularity `Engine`'s single-block-per-sequence layout allows (see
-//! `qwen35moe::serve`'s module doc on `block_size == max_seq_len`), and a
-//! `.gguf` serving path (`Engine` only loads brain-native safetensors via
-//! the packed source view of the file, unlike `QwenResident`'s `Legacy` GGUF arm) - so unlike
-//! `QwenResident` there is only ONE engine kind here, not a `Legacy`/`Batched`
-//! split.
+//! Three ways in, all found by the model-dir scan:
 //!
-//! Two ways in, both found by the model-dir scan: [`Qwen35Resident::from_card`]
-//! serves a brain checkpoint (family `"qwen35moe"` - what `brain import-gguf`'s
-//! conversion stamps, distinct from the dense sibling's own `"qwen35"` family,
-//! `crates/qwen35`) under its own card id with its sibling `tokenizer.json`, and
-//! [`Qwen35Resident::from_hf_dir`] a published HuggingFace directory in place.
+//! - [`gguf_resident`]: a released GGUF (`general.architecture = "qwen35moe"`) served from the file, int8 weights
+//!   read straight from its Q8_0 blocks. Its KV tier, batch and context are planned from the card it is placed on
+//!   ([`plan`]: the shared [`KV_DEFAULTS`] ranking by fit, the widest batch of [`MAX_BATCH_DEFAULTS`] that leaves the
+//!   shared [`DEFAULT_CONTEXT_FLOOR`], then the longest context the card holds), configured by
+//!   [`Qwen35MoeGgufServeConfig`] and reported line by line ([`Qwen35MoeGgufResident::chosen_defaults`]).
+//!   `brain perf run --target qwen35moe:<gguf>` builds exactly this resident.
+//! - [`Qwen35Resident::from_card`]: a brain checkpoint (family `"qwen35moe"`, what `brain import-gguf`'s conversion
+//!   stamps) under its own card id with its sibling `tokenizer.json`.
+//! - [`Qwen35Resident::from_hf_dir`]: a published HuggingFace directory, read in place.
 //!
-//! Sizing is the serving policy's ([`Qwen35Sizing`]: `brain serve --ctx`,
-//! `--max-batch`): `ctx` is the hard `prompt + max_new` cap for any ONE
-//! sequence (`Engine`'s `max_seq_len`, also its per-sequence block size - see
-//! `qwen35moe::serve`'s module doc), and `max_batch` how many sequences may be
-//! RESIDENT at once (`num_blocks`). Every block costs a WHOLE
-//! `max_seq_len`-sized GQA KV allocation per full-attention layer, so the
-//! defaults (4096, 4) are conservative.
+//! The last two are sized by the serving policy ([`Qwen35Sizing`]: `brain serve --ctx`, `--max-batch`, defaults
+//! 4096 and 4) with f32 weights or the packed int8 the checkpoint stores, and an fp32 KV cache.
+//!
+//! Not present: LoRA adapter folding, multi-GPU sharding, a prefix cache (the engine's one block per sequence offers
+//! no shared pages), speculative decoding, and parking a GGUF instance off the card.
 
 use capability::{Invocation, Manifest};
 use std::sync::Arc;
@@ -46,6 +32,11 @@ use qwen3::chat::parse_request;
 use qwen35moe::config::{LayerType, Qwen35Config};
 use qwen35moe::serve::{Engine, EngineOptions, Scheduler};
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel, Tier};
+use gpu_core::defaults::{Hardware, Rule};
+use model::kv_tier::KvTier;
+use model::ops::TierPolicy;
+
+use crate::serve_defaults::{given_or_chosen, DEFAULT_CONTEXT_FLOOR, KV_DEFAULTS};
 
 use crate::parkable::{Build, HostWeights, ParkableInstance};
 use crate::resident_qwen35::Qwen35Sizing;
@@ -54,9 +45,8 @@ use llmserve::generate_spec;
 use residency::on_device;
 use llmserve::{ScheduledInstance, TextFrontend};
 
-/// The Qwen3.5-35B-A3B hybrid Gated-DeltaNet/GQA sparse-MoE decoder behind
-/// the scheduler.
-/// See this module's own doc for the exact (single-GPU, fp32-only) scope.
+/// The Qwen3.5-35B-A3B hybrid Gated-DeltaNet/GQA sparse-MoE decoder of a brain checkpoint or a HuggingFace
+/// directory behind the scheduler. See this module's own doc for its scope.
 pub struct Qwen35Resident {
     id: String,
     path: String,
@@ -160,7 +150,7 @@ impl ResidentModel for Qwen35Resident {
         // maximum) — same reasoning as `QwenResident::manifest`.
         Manifest::new(
             &self.id,
-            "text generation (Qwen3.5-35B-A3B hybrid Gated-DeltaNet/GQA sparse-MoE decoder; single-GPU, f32 or packed-int8 weights as the checkpoint stores them + fp32 KV, one active sequence at a time -- see crate::resident_qwen35moe's module doc)",
+            "text generation (Qwen3.5-35B-A3B hybrid Gated-DeltaNet/GQA sparse-MoE decoder; single-GPU, f32 or packed-int8 weights as the checkpoint stores them + fp32 KV, up to --max-batch sequences per batched decode step -- see crate::resident_qwen35moe's module doc)",
             vec![generate_spec("generate text (Qwen3.5-35B-A3B; chat template optional)", true)],
         )
         .with_max_context_tokens(self.ctx() as u64)
@@ -256,9 +246,376 @@ fn engine_from(src: &dyn checkpoint::TensorSource, config: &serde_json::Value, c
     Ok(Engine::from_source(cfg, src, EngineOptions::new(ctx, max_concurrent).with_tier(tier)))
 }
 
+// ------------------------------------------------------------ released GGUF
+
+/// Server-wide settings of every released Qwen3.5/3.6 MoE GGUF the model scan serves, as parsed data (`brain serve`'s
+/// serving-policy flags, applied by [`crate::resident_qwen35::Qwen35ServeConfig::apply_policy`]). Every knob left
+/// `None` is chosen from the card the resident is planned for ([`plan`]).
+#[derive(Clone, Debug, Default)]
+pub struct Qwen35MoeGgufServeConfig {
+    /// Per-sequence `prompt + max_new` ceiling. `None` takes the longest the card holds for the chosen batch.
+    pub ctx: Option<u32>,
+    /// Per-leaf weight-tier policy. `None` serves int8, the tier a Q8_0 release stores.
+    pub tier: Option<TierPolicy>,
+    /// GQA KV-cache tier. `None` takes the best of [`KV_DEFAULTS`] that fits.
+    pub kv: Option<KvTier>,
+    /// Sequences decoded together in one batched step. `None` takes the most of [`MAX_BATCH_DEFAULTS`] that still
+    /// leaves [`DEFAULT_CONTEXT_FLOOR`] of context.
+    pub max_batch: Option<u32>,
+    /// Why the serving policy cannot be honoured by this resident (set by [`Self::apply_policy`]); building refuses
+    /// with it.
+    pub refused: Option<String>,
+}
+
+/// What the released-GGUF MoE resident honours of a [`model::policy::ServePolicy`].
+pub const QWEN35MOE_GGUF_POLICY: model::policy::PolicySupport = model::policy::PolicySupport {
+    model: "qwen35moe",
+    weights: &[gpu_core::select::Dtype::F32, gpu_core::select::Dtype::I8],
+    weight_rules: true,
+    kv_cache: &["f32", "bf16", "int8", "fp8"],
+    gemm: false,
+    fuse_norm: false,
+    kv_calibration: false,
+    exact_decode: false,
+    act_precision: false,
+    gdn_state: false,
+    linear_activations: false,
+    sparse_attention: false,
+    draft_model: false,
+};
+
+impl Qwen35MoeGgufServeConfig {
+    /// Apply the model-agnostic policy. A choice this engine cannot honour records why and refuses to build; a limit
+    /// it has no knob for is named in the returned notes, never dropped silently.
+    pub fn apply_policy(&mut self, p: &model::policy::ServePolicy) -> Result<Vec<String>, String> {
+        if let Err(e) = QWEN35MOE_GGUF_POLICY.check(p) {
+            self.refused = Some(e.clone());
+            return Err(e);
+        }
+        if p.weights.is_some() {
+            self.tier = p.weights.clone();
+        }
+        self.kv = p.kv_cache.or(self.kv);
+        let l = &p.limits;
+        self.ctx = l.ctx.or(self.ctx);
+        self.max_batch = l.max_batch.or(self.max_batch);
+        let ignored = [
+            (l.kv_offload_gb.is_some(), "--kv-offload-gb"),
+            (l.kv_tokens.is_some(), "kv-tokens"),
+            (l.max_prefill.is_some(), "max-prefill"),
+            (l.prefix_slots.is_some(), "prefix slots"),
+            (l.prefill_slice.is_some(), "the prefill-slice setting"),
+            (l.prefill_batch.is_some(), "the prefill-batch setting"),
+            (l.itl_target_ms.is_some(), "--itl-target-ms"),
+        ];
+        Ok(ignored.iter().filter(|(set, _)| *set).map(|(_, name)| format!("qwen35moe: {name} has no meaning for this engine and is ignored")).collect())
+    }
+}
+
+/// Sequences a released-GGUF MoE resident decodes together when `--max-batch` is not given, most first. A decode
+/// step's cost is the expert weights it reads, which every row of the batch shares, so the widest batch serves the
+/// most; but every resident sequence holds a whole context of KV (one block per sequence), so the batch is bought
+/// with context: the widest that still leaves [`DEFAULT_CONTEXT_FLOOR`] is taken.
+pub const MAX_BATCH_DEFAULTS: &[Rule<u32>] = &[Rule {
+    when: |_| true,
+    ranked: &[64, 32, 16, 8, 4, 2, 1],
+    why: "a decode step reads the routed experts once for every row it carries, and each resident sequence holds a whole context of KV: the widest batch that leaves the context floor",
+}];
+
+/// What the planner settled on for one card.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MoePlan {
+    /// Per-sequence `prompt + max_new` ceiling (the engine's block size).
+    pub ctx: u32,
+    pub max_batch: u32,
+    pub kv: KvTier,
+    /// Each default taken, as `knob value: why`.
+    pub chosen: Vec<String>,
+}
+
+/// Device bytes an engine of `max_batch` sequences of `ctx` tokens holds (weights, KV pool, recurrent state) and the
+/// activation peak beside them - the arithmetic the engine allocates from.
+pub fn footprint(cfg: &Qwen35Config, tier: &TierPolicy, kv: KvTier, max_batch: u32, ctx: u32) -> MemCost {
+    let opts = EngineOptions::new(ctx, max_batch).with_tier(tier.clone()).with_kv_tier(kv);
+    let held = qwen35moe::serve::weight_bytes(cfg, tier) + qwen35moe::serve::kv_pool_bytes(cfg, kv, max_batch, ctx);
+    MemCost::new(held, 0).with_activation(qwen35moe::serve::activation_bytes(cfg, &opts))
+}
+
+const GIB: f64 = (1u64 << 30) as f64;
+
+/// Whether `max_batch` sequences of `ctx` tokens fit `usable` device bytes, or why not.
+fn fits(cfg: &Qwen35Config, tier: &TierPolicy, usable: u64, kv: KvTier, max_batch: u32, ctx: u32) -> Result<(), String> {
+    if !KvTier::fits_addressing(max_batch as u64 * ctx as u64, cfg.kv_dim() as u64) {
+        return Err(format!("{max_batch} sequences of {ctx} tokens are more KV rows than the attention kernels address"));
+    }
+    let cost = footprint(cfg, tier, kv, max_batch, ctx);
+    let need = cost.vram + cost.activation.unwrap_or(0);
+    if need > usable {
+        return Err(format!("{max_batch} sequences of {ctx} tokens at {kv} KV need {:.1} GiB of the card's {:.1} GiB", need as f64 / GIB, usable as f64 / GIB));
+    }
+    Ok(())
+}
+
+/// Contexts are planned in whole multiples of this many tokens.
+const CONTEXT_GRAIN: u32 = 256;
+
+/// The longest context, at most the checkpoint's trained window, at which `max_batch` sequences fit `usable` bytes.
+pub fn longest_context(cfg: &Qwen35Config, tier: &TierPolicy, usable: u64, kv: KvTier, max_batch: u32) -> Result<u32, String> {
+    let top = cfg.max_position_embeddings.max(1);
+    fits(cfg, tier, usable, kv, max_batch, 1)?;
+    // The cost grows with the context, so the longest that fits is found by bisection.
+    let (mut lo, mut hi) = (1u32, top);
+    while lo < hi {
+        let mid = lo + (hi - lo).div_ceil(2);
+        if fits(cfg, tier, usable, kv, max_batch, mid).is_ok() {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    Ok(if lo >= CONTEXT_GRAIN { lo / CONTEXT_GRAIN * CONTEXT_GRAIN } else { lo })
+}
+
+/// Plan the KV tier, the batch and the context of one engine for a card with `usable` device bytes, in the order they
+/// matter to throughput, each with the ones not yet chosen at their leanest: the KV tier (one sequence), then the batch,
+/// then the context. An operator's value is kept as given; a given context that does not fit is refused with the
+/// arithmetic.
+pub fn plan(cfg: &Qwen35Config, tier: &TierPolicy, usable: u64, serve: &Qwen35MoeGgufServeConfig, hw: &Hardware) -> Result<MoePlan, String> {
+    let mut chosen = Vec::new();
+    let floor = DEFAULT_CONTEXT_FLOOR.min(cfg.max_position_embeddings.max(1));
+    let holds = |kv: KvTier, max_batch: u32| -> Result<(), String> {
+        match serve.ctx {
+            Some(ctx) => fits(cfg, tier, usable, kv, max_batch, ctx),
+            None => match longest_context(cfg, tier, usable, kv, max_batch)? {
+                c if c >= floor => Ok(()),
+                c => Err(format!("it leaves a {c}-token context, under {floor}")),
+            },
+        }
+    };
+    let kv = given_or_chosen(serve.kv, "--kv-cache", KV_DEFAULTS, hw, &mut chosen, |kv| holds(kv, 1));
+    let max_batch = given_or_chosen(serve.max_batch.map(|b| b.max(1)), "--max-batch", MAX_BATCH_DEFAULTS, hw, &mut chosen, |b| holds(kv, b));
+    let ctx = match serve.ctx {
+        Some(ctx) => ctx.max(1),
+        None => {
+            let ctx = longest_context(cfg, tier, usable, kv, max_batch)?;
+            chosen.push(format!("--ctx {ctx}: the longest context the card holds for {max_batch} sequences, each holding a whole context of KV"));
+            ctx
+        }
+    };
+    fits(cfg, tier, usable, kv, max_batch, ctx)?;
+    Ok(MoePlan { ctx, max_batch, kv, chosen })
+}
+
+/// The weight tier a released GGUF is served at when `--weight-format` is not given: uniform int8, what a Q8_0
+/// release stores (a byte repack of its blocks, no fp32 copy).
+pub fn default_tier() -> TierPolicy {
+    TierPolicy::uniform(gpu_core::select::Dtype::I8)
+}
+
+/// A released Qwen3.5/3.6 MoE GGUF served from the file on one card: int8 weights read straight from its Q8_0
+/// blocks, a KV tier, batch and context planned for the card ([`plan`]), and the generic continuous-batching
+/// scheduler over `qwen35moe::serve::Engine`. One instance per process: the engine is single-GPU.
+pub struct Qwen35MoeGgufResident {
+    id: String,
+    path: String,
+    tier: TierPolicy,
+    plan: MoePlan,
+    /// The card the plan was made for (the roomiest offered).
+    card: u32,
+}
+
+/// Build the resident for the released GGUF at `gguf_path`, to be registered under `id`.
+///
+/// `gpus` is the server's budgeted cards as `(index, total bytes)`, `reserved` the per-card headroom it keeps free.
+/// `Err` names why the model could never load (no card, not a qwen35moe GGUF, no embedded tokenizer, weights that do
+/// not fit), so the caller leaves it out and says so.
+pub fn gguf_resident(gguf_path: &str, id: &str, gpus: &[(u32, u64)], reserved: u64, cfg: &Qwen35MoeGgufServeConfig) -> Result<Qwen35MoeGgufResident, String> {
+    if let Some(why) = &cfg.refused {
+        return Err(why.clone());
+    }
+    let mg = checkpoint::gguf::MmapGguf::open(gguf_path).map_err(|e| format!("cannot open '{gguf_path}': {e}"))?;
+    let model_cfg = qwen35moe::import::config_from_gguf(&mg).map_err(|e| format!("'{gguf_path}' is not a servable Qwen3.5/3.6 MoE GGUF: {e}"))?;
+    if mg.tokenizer().is_none() {
+        return Err(format!("'{gguf_path}' carries no embedded tokenizer (tokenizer.ggml.*)"));
+    }
+    let (card, usable) = gpus.iter().map(|&(i, total)| (i, total.saturating_sub(reserved))).max_by_key(|&(_, usable)| usable).ok_or("no GPU is budgeted for it (its weights are device buffers; there is no CPU path)")?;
+    let mut chosen = Vec::new();
+    let tier = match &cfg.tier {
+        Some(tier) => tier.clone(),
+        None => {
+            chosen.push("--weight-format int8: the routed experts and linears as the Q8_0 release stores them".to_string());
+            default_tier()
+        }
+    };
+    let mut plan = plan(&model_cfg, &tier, usable, cfg, Hardware::detected()).map_err(|e| format!("does not fit gpu{card}: {e}"))?;
+    chosen.append(&mut plan.chosen);
+    plan.chosen = chosen;
+    Ok(Qwen35MoeGgufResident { id: id.to_string(), path: gguf_path.to_string(), tier, plan, card })
+}
+
+impl Qwen35MoeGgufResident {
+    /// Sequences decoded together in one batched step.
+    pub fn max_batch(&self) -> u32 {
+        self.plan.max_batch
+    }
+    /// The per-sequence `prompt + max_new` ceiling.
+    pub fn cap(&self) -> u32 {
+        self.plan.ctx
+    }
+    pub fn kv_tier(&self) -> KvTier {
+        self.plan.kv
+    }
+    /// Each setting the operator left unset, as `knob value: why`.
+    pub fn chosen_defaults(&self) -> &[String] {
+        &self.plan.chosen
+    }
+    /// The card the plan was made for.
+    pub fn planned_device(&self) -> Device {
+        Device::Gpu(self.card)
+    }
+
+    /// The scheduler `brain serve` runs for this checkpoint on `device`, with the embedded tokenizer and the stop ids
+    /// (the GGUF's eos and ChatML's end of turn).
+    pub fn activate_scheduler(&self, device: Device) -> Result<(Scheduler, QwenBpe, Vec<u32>), String> {
+        let mg = checkpoint::gguf::MmapGguf::open(&self.path).map_err(|e| format!("cannot open '{}': {e}", self.path))?;
+        let tok = qwen35moe::gguf_load::tokenizer(&mg)?;
+        let eos = mg.tokenizer().and_then(|t| t.eos);
+        let stop = data::generation::stop_ids(None, &tok, eos, Some("<|im_end|>")).map_err(|e| format!("qwen35moe: {e}"))?;
+        let cfg = qwen35moe::gguf_load::resident_config(&mg, self.plan.ctx)?;
+        let src = qwen35moe::gguf_load::source(&mg, &cfg)?;
+        let opts = EngineOptions::new(self.plan.ctx, self.plan.max_batch).with_tier(self.tier.clone()).with_kv_tier(self.plan.kv);
+        let engine = on_device(device, || Engine::from_source(cfg, &src, opts))?;
+        Ok((Scheduler::new(engine, self.plan.max_batch as usize), tok, stop))
+    }
+}
+
+impl ResidentModel for Qwen35MoeGgufResident {
+    fn manifest(&self) -> Manifest {
+        let summary = format!(
+            "generate text (Qwen3.5/3.6-35B-A3B hybrid Gated-DeltaNet/GQA sparse-MoE decoder from its released GGUF on one GPU: {} weights, {} KV, up to {} sequences per batched decode step, {} tokens per sequence)",
+            self.tier.describe(),
+            self.plan.kv,
+            self.plan.max_batch,
+            self.plan.ctx
+        );
+        Manifest::new(&self.id, "text generation (Qwen3.5/3.6-35B-A3B sparse-MoE decoder, released GGUF)", vec![generate_spec(&summary, true)])
+            .with_max_context_tokens(self.plan.ctx as u64)
+            .with_architecture(qwen35moe::spec::CARD_FAMILY)
+    }
+    fn instance_key(&self, _action: &str, _inv: &Invocation) -> InstanceKey {
+        InstanceKey::new(&self.id, "default")
+    }
+    fn batch_limit(&self) -> Option<usize> {
+        Some(self.plan.max_batch as usize)
+    }
+    fn estimate(&self, _key: &InstanceKey) -> MemCost {
+        let Ok(mg) = checkpoint::gguf::MmapGguf::open(&self.path) else {
+            return MemCost::new(std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0), 0);
+        };
+        match qwen35moe::import::config_from_gguf(&mg) {
+            Ok(cfg) => footprint(&cfg, &self.tier, self.plan.kv, self.plan.max_batch, self.plan.ctx),
+            Err(_) => MemCost::new(std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0), 0),
+        }
+    }
+    fn activate(&self, _key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
+        let (sched, tok, stop) = self.activate_scheduler(device)?;
+        let front = TextFrontend::new(tok, stop, "qwen35moe", Arc::new(parse_request));
+        Ok(Box::new(ScheduledInstance::new(front, sched, self.plan.max_batch as usize)))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const GIB: u64 = 1 << 30;
+
+    fn int8() -> TierPolicy {
+        TierPolicy::uniform(gpu_core::select::Dtype::I8)
+    }
+
+    fn need(cfg: &Qwen35Config, p: &MoePlan) -> u64 {
+        let cost = footprint(cfg, &int8(), p.kv, p.max_batch, p.ctx);
+        cost.vram + cost.activation.unwrap_or(0)
+    }
+
+    /// A 96 GB card with every knob left to the plan serves the widest batch at a long context: the compact KV tier,
+    /// 64 sequences, and the longest context that still fits beside the released 35B's weights - far past an 8K
+    /// prompt with its reply.
+    #[test]
+    fn a_roomy_card_plans_a_wide_batch_of_long_contexts() {
+        let cfg = Qwen35Config::qwen35_35b_a3b();
+        let usable = 92 * GIB;
+        let p = plan(&cfg, &int8(), usable, &Qwen35MoeGgufServeConfig::default(), &Hardware::default()).expect("the 35B fits a 96 GB card");
+        assert_eq!((p.kv, p.max_batch), (KvTier::INT8, 64), "{:?}", p.chosen);
+        assert!(p.ctx >= DEFAULT_CONTEXT_FLOOR, "{} leaves an 8K prompt and its reply room", p.ctx);
+        assert!(need(&cfg, &p) <= usable);
+        assert!(fits(&cfg, &int8(), usable, p.kv, p.max_batch, p.ctx + CONTEXT_GRAIN).is_err(), "the context is the longest the card holds");
+        for knob in ["--kv-cache int8", "--max-batch 64", "--ctx"] {
+            assert!(p.chosen.iter().any(|l| l.starts_with(knob)), "{knob} is reported: {:?}", p.chosen);
+        }
+    }
+
+    /// An operator's KV tier, context or batch is kept as given and the rest is planned around it.
+    #[test]
+    fn an_operators_choice_is_kept_and_the_rest_planned_around_it() {
+        let cfg = Qwen35Config::qwen35_35b_a3b();
+        let usable = 92 * GIB;
+        let given = Qwen35MoeGgufServeConfig { kv: Some(KvTier::BF16), ctx: Some(8320), ..Default::default() };
+        let p = plan(&cfg, &int8(), usable, &given, &Hardware::default()).unwrap();
+        assert_eq!((p.kv, p.ctx, p.max_batch), (KvTier::BF16, 8320, 64));
+        assert!(!p.chosen.iter().any(|l| l.starts_with("--kv-cache") || l.starts_with("--ctx")), "{:?}", p.chosen);
+
+        let narrow = Qwen35MoeGgufServeConfig { max_batch: Some(4), ..Default::default() };
+        let q = plan(&cfg, &int8(), usable, &narrow, &Hardware::default()).unwrap();
+        assert_eq!(q.max_batch, 4);
+        assert_eq!(q.ctx, cfg.max_position_embeddings, "four sequences take the checkpoint's whole window");
+    }
+
+    /// A card that cannot hold the weights, or a given context the card cannot hold for the batch, is refused with
+    /// the arithmetic.
+    #[test]
+    fn what_the_card_cannot_hold_is_refused_with_the_arithmetic() {
+        let cfg = Qwen35Config::qwen35_35b_a3b();
+        let e = plan(&cfg, &int8(), 24 * GIB, &Qwen35MoeGgufServeConfig::default(), &Hardware::default()).unwrap_err();
+        assert!(e.contains("GiB"), "{e}");
+        let too_long = Qwen35MoeGgufServeConfig { ctx: Some(262_144), max_batch: Some(64), ..Default::default() };
+        let e = plan(&cfg, &int8(), 92 * GIB, &too_long, &Hardware::default()).unwrap_err();
+        assert!(e.contains("64 sequences of 262144 tokens"), "{e}");
+    }
+
+    /// A choice the engine cannot honour leaves the resident out by name; a limit it has no knob for is a note.
+    #[test]
+    fn the_serving_policy_reaches_the_moe_resident() {
+        let mut p = model::policy::ServePolicy::default();
+        p.set("--kv-cache", "bf16").unwrap();
+        p.set("--max-batch", "16").unwrap();
+        p.set("--itl-target-ms", "40").unwrap();
+        let mut cfg = Qwen35MoeGgufServeConfig::default();
+        let notes = cfg.apply_policy(&p).unwrap();
+        assert_eq!((cfg.kv, cfg.max_batch), (Some(KvTier::BF16), Some(16)));
+        assert!(notes.iter().any(|n| n.contains("--itl-target-ms")), "{notes:?}");
+
+        let mut p = model::policy::ServePolicy::default();
+        p.set("--gdn-state", "bf16").unwrap();
+        let mut cfg = Qwen35MoeGgufServeConfig::default();
+        assert!(cfg.apply_policy(&p).is_err());
+        assert!(gguf_resident("none.gguf", "t/x", &[(0, 96 * GIB)], 0, &cfg).err().unwrap().contains("--gdn-state"), "a refused resident must not build");
+    }
+
+    /// A GGUF the resident could never serve is refused before any device work, naming why.
+    #[test]
+    fn a_gguf_that_cannot_be_served_is_refused_by_name() {
+        let dir = std::env::temp_dir().join(format!("qwen35moe-gguf-resident-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("synthetic.gguf").to_string_lossy().into_owned();
+        qwen35moe::import::testing::write_synthetic_gguf_without_mtp(&path);
+        let cfg = Qwen35MoeGgufServeConfig::default();
+        let e = gguf_resident(&path, "t/x", &[(0, 96 * GIB)], 0, &cfg).err().unwrap();
+        assert!(e.contains("no embedded tokenizer"), "{e}");
+        assert!(gguf_resident("/nonexistent/m.gguf", "t/x", &[(0, 96 * GIB)], 0, &cfg).err().unwrap().contains("cannot open"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     const MODEL: &str = qwen35moe::caps::MODEL;
 

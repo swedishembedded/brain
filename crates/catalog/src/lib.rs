@@ -96,6 +96,7 @@ pub mod resident_worldmirror2;
 pub mod resident_yolo;
 pub mod resident_zimage;
 pub mod sampling_defaults;
+pub mod serve_defaults;
 mod serving;
 
 pub use loader::served::ServedStore;

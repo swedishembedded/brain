@@ -3,11 +3,14 @@
 
 //! `--target qwen35moe:<gguf>[:kvf32|:kvbf16|:kvint8]` for the request-level
 //! `brain perf run` scenarios (`sweep`, `serve`, ...): the released
-//! Qwen3.6-35B-A3B GGUF behind `qwen35moe::serve::Engine` and the shared
-//! `model::serve::Scheduler`, so its goodput, TTFT and KV-pressure numbers are
-//! measured the way `qwen35:` measures the dense model and can be compared with
-//! it. The weight tier is `brain perf run --weight-format` (default int8) and
-//! the KV tier the spec's `:kv<tier>` suffix (default f32).
+//! Qwen3.6-35B-A3B GGUF served exactly as `brain serve` serves it.
+//!
+//! The engine is configured by `catalog::resident_qwen35moe::gguf_resident`
+//! (weight tier, KV tier, batch and context planned for the card) and put under
+//! the scheduler by `Qwen35MoeGgufResident::activate_scheduler`, the two
+//! functions the server calls, so goodput, TTFT and KV-pressure numbers are the
+//! served ones and compare with `qwen35:`'s. `--weight-format` and the `:kv<tier>`
+//! suffix pin what they name; everything else is the server's own default.
 //!
 //! Swedish Embedded AB implements solutions for measuring LLM serving
 //! performance against production behaviour for its clients. If your team needs
@@ -15,44 +18,36 @@
 //! GPUs then you can procure our services by sending an email to
 //! info@swedishembedded.com.
 
-use checkpoint::gguf::MmapGguf;
 use perf::target::{PerfTarget, TargetInfo};
+use residency::ResidentModel;
 
-/// Longest `prompt + max_new` of one sequence. This engine reserves a whole
-/// block of this many rows per resident sequence, so it is the sizing knob.
-const CONTEXT: u32 = 8192;
-
-/// Sequences resident at once; the sweep's concurrency ladder tops out here.
-const MAX_BATCH: u32 = 16;
-
-/// The engine target for one released GGUF, on the first `--device` card.
-pub(crate) fn build(rest: &str, weights: &model::ops::TierPolicy) -> Result<Box<dyn PerfTarget>, String> {
+/// The engine target for one released GGUF, on the card of the `--device` set the server would plan it for.
+pub(crate) fn build(rest: &str, weights: Option<&model::ops::TierPolicy>, max_batch: Option<u32>) -> Result<Box<dyn PerfTarget>, String> {
     let (path, kv) = crate::perf_qwen35::parse_spec(rest).map_err(|e| e.replace("qwen35:", "qwen35moe:"))?;
-    if !std::path::Path::new(path).is_file() {
+    let checkpoint = std::path::Path::new(path);
+    if !checkpoint.is_file() {
         return Err(format!("qwen35moe target: GGUF not found: {path}"));
     }
-    let kv_tier = kv.unwrap_or(model::kv_tier::KvTier::F32);
-    let tier = weights.clone();
-    let mg = MmapGguf::open(path).map_err(|e| format!("open {path}: {e}"))?;
-    let cfg = qwen35moe::gguf_load::resident_config(&mg, CONTEXT)?;
-    let src = qwen35moe::gguf_load::source(&mg, &cfg)?;
-    let opts = qwen35moe::serve::EngineOptions::new(CONTEXT, MAX_BATCH).with_tier(tier).with_kv_tier(kv_tier);
-    let engine = qwen35moe::serve::Engine::from_source(cfg, &src, opts);
-    let vocab = model::serve::PagedDecoder::vocab(&engine) as u32;
-    let info = TargetInfo::new("qwen35moe", "token")
+    let machine = serving::Machine::probe(crate::compute_set());
+    let id = checkpoint.file_stem().map_or_else(|| path.to_string(), |s| s.to_string_lossy().into_owned());
+    let cfg = catalog::resident_qwen35moe::Qwen35MoeGgufServeConfig { kv, tier: weights.cloned(), max_batch, ..Default::default() };
+    let served = catalog::resident_qwen35moe::gguf_resident(path, &id, &machine.gpus, crate::perf_qwen35::RESERVE_BYTES, &cfg)?;
+    let device = served.planned_device();
+    let (sched, _tokenizer, _stop) = served.activate_scheduler(device)?;
+    let vocab = model::serve::PagedDecoder::vocab(sched.decoder()) as u32;
+    let manifest = served.manifest();
+    let mut info = TargetInfo::new("qwen35moe", "token")
         .with("weights", path.into())
-        .with("max_batch", MAX_BATCH.into())
-        .with("ctx", CONTEXT.into())
-        .with("kv_dtype", kv_tier.as_str().into());
-    let sched = qwen35moe::serve::Scheduler::new(engine, MAX_BATCH as usize);
+        .with("max_batch", served.max_batch().into())
+        .with("ctx", served.cap().into())
+        .with("kv_dtype", served.kv_tier().as_str().into())
+        .with("devices", vec![format!("{device:?}")].into())
+        .with("summary", manifest.actions.first().map(|a| a.summary.clone()).unwrap_or_default().into());
+    for (i, line) in served.chosen_defaults().iter().enumerate() {
+        info = info.with(&format!("default_{i}"), line.as_str().into());
+    }
     // Synthetic runs must produce the requested length: no stop ids.
     Ok(Box::new(perf::targets::PagedLlmTarget::new(sched, info, Vec::new(), vocab)))
-}
-
-/// The weight tier a run that names no `--weight-format` measures: uniform
-/// int8, the tier the engine serves by default.
-pub(crate) fn default_tier() -> model::ops::TierPolicy {
-    model::ops::TierPolicy::uniform(gpu_core::select::Dtype::I8)
 }
 
 #[cfg(test)]
@@ -61,13 +56,13 @@ mod tests {
 
     #[test]
     fn a_spec_without_a_checkpoint_names_this_target_not_the_dense_one() {
-        let e = build(":kvint8", &default_tier()).err().expect("an empty path is refused");
+        let e = build(":kvint8", None, None).err().expect("an empty path is refused");
         assert!(e.contains("qwen35moe:") && !e.contains("qwen35:"), "{e}");
     }
 
     #[test]
     fn a_missing_checkpoint_is_reported_before_any_device_work() {
-        let e = build("/nonexistent/q.gguf", &default_tier()).err().expect("a missing file is refused");
+        let e = build("/nonexistent/q.gguf", None, None).err().expect("a missing file is refused");
         assert!(e.contains("GGUF not found"), "{e}");
     }
 }

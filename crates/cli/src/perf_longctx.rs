@@ -628,7 +628,7 @@ pub fn build_engine(spec: &str, args: &Args) -> Result<Box<dyn LongContextEngine
     }
     if let Some(rest) = spec.strip_prefix("qwen35moe:") {
         let (path, kv) = crate::perf_qwen35::parse_spec(rest).map_err(|e| e.replace("qwen35:", "qwen35moe:"))?;
-        let tier = args.weight_format.clone().unwrap_or_else(crate::perf_qwen35moe::default_tier);
+        let tier = args.weight_format.clone().unwrap_or_else(catalog::resident_qwen35moe::default_tier);
         return Ok(Box::new(Qwen35MoeEngine::open(path, tier, kv.unwrap_or(model::kv_tier::KvTier::F32))?));
     }
     if let Some(weights) = spec.strip_prefix("qwen:") {

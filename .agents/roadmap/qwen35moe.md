@@ -71,7 +71,7 @@ sequence (the 8K target reserves 335 MB of f32 KV per resident sequence: 10
 GQA layers x 2 x 512 x 4 B x 8192), the recurrent-state row is
 `table.blocks()[0]` so sequence identity IS the first KV page, no prefix cache
 (`reclaim_prefix` returns 0), no speculation, no adapter bank, no layer
-sharding, a decode window of 1, and no `brain serve` path for the GGUF at all
+sharding, a decode window of 1, and (until 2026-11-16, see "Served from the released GGUF" below) no `brain serve` path for the GGUF at all
 (`catalog::resident_qwen35moe` takes brain-native safetensors or an HF
 directory; a GGUF is only reachable through `perf` and the `qwen35moe` CLI).
 
@@ -327,3 +327,26 @@ time.
   choice.
 - [ ] What else a 16K prefill spends (gpu3, step 4): `matmul_i8_dq_wgmma` ~140 ms, `moe_swiglu_quant` ~50 ms, the
   flash prefill ~34 ms, `moe_slot_combine` ~24 ms, the f32 router GEMM ~14 ms, the GDN kernels ~80 ms together.
+
+## Served from the released GGUF (2026-11-16)
+
+Goal: the 35B-A3B GGUF is served by `brain serve` and measured by `brain perf` through one construction, its context,
+batch and KV tier planned from the card; 16-64 concurrent 8K-token requests are admitted and served; batched greedy
+decode equals decoding alone.
+
+- [x] `brain serve` serves a released `qwen35moe` GGUF from the file (`catalog::resident_qwen35moe::gguf_resident`,
+  registered by the model-store scan under its store reference); before, the scan answered it with `brain import-gguf`
+  advice and only `perf` and the `qwen35moe` CLI could reach the file. `perf run --target qwen35moe:<gguf>` builds the
+  same resident and its scheduler (`activate_scheduler`), so the fixed `CONTEXT = 8192` / `MAX_BATCH = 16` / f32-KV
+  engine the target used to build itself is gone: an 8192-token prompt plus 128 new tokens never fitted it, and every
+  request of a c=16 serve run was refused. `:kv<tier>` and `--max-batch` pin what they name.
+- [x] The plan (`plan`): the KV tier from the shared `serve_defaults::KV_DEFAULTS` by fit (the dense resident's
+  ranking, moved to the shared module), then the widest batch of `MAX_BATCH_DEFAULTS` (64 down to 1) that leaves the
+  shared 32K context floor, then the longest context the card holds; each printed as a `default` line. One block per
+  sequence makes the batch multiply the context, which is why the batch is a planned choice here and a fixed default
+  on the dense paged resident. On a GH200 at the 2 GiB reserve: int8 KV, 64 sequences, 75520 tokens each (bf16 KV:
+  38400).
+- [ ] Paged KV with blocks smaller than a sequence (the dense resident's shared pool): until then a long `--ctx` costs
+  every resident sequence its whole context.
+- [ ] Parking a GGUF instance off the card (the brain-checkpoint resident's `ParkableInstance`), replicas over several
+  cards, and the HF-directory resident's sizing from the card.

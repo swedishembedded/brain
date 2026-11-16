@@ -44,7 +44,10 @@
 //! [`Discovered::multi`] for `Executor::register_multi` rather than among the
 //! single-device residents. A file that could never load (no card to place it
 //! on, weights that do not fit, no embedded tokenizer) is not listed at all;
-//! the reason is logged.
+//! the reason is logged. A released `qwen35moe` GGUF is served from the file
+//! too, on one card, with its KV tier, batch and context planned for that card
+//! (`catalog::resident_qwen35moe::gguf_resident`); it is a single-device
+//! resident.
 //!
 //! Each family's own checkpoint-writing code must
 //! attach a real [`ModelCard`] (`checkpoint::save_carded`, not the plain
@@ -187,10 +190,10 @@ pub fn discover(dir: &Path, settings: &ScanSettings) -> Discovered {
     Discovered { residents: scan.out, multi: scan.multi, qwen, qwen35, ricursive: scan.ricursive, errors }
 }
 
-/// Whether `local` is a released Qwen3.8 GGUF: served from the file itself by
-/// the multi-card INT8 resident, not converted and not a safetensors engine.
+/// Whether `local` is a released Qwen3.8 or Qwen3.5/3.6 MoE GGUF: served from the file itself (the multi-card INT8
+/// resident, the MoE's single-card one), not converted and not a safetensors engine, under its store reference.
 fn is_released_qwen35(local: &brain_modelstore::LocalModel) -> bool {
-    local.weights.to_string_lossy().ends_with(".gguf") && local.card.as_ref().is_some_and(|c| brain_family(&c.family) == "qwen35")
+    local.weights.to_string_lossy().ends_with(".gguf") && local.card.as_ref().is_some_and(|c| matches!(brain_family(&c.family), "qwen35" | "qwen35moe"))
 }
 
 /// The HuggingFace directory of a released Qwen3.5/3.8 checkpoint (the FP8 release, or a bf16 one) that `local`
@@ -215,7 +218,7 @@ fn hf_ricursive_dir(local: &brain_modelstore::LocalModel) -> Option<PathBuf> {
     (dir.is_dir() && dir.join("config.json").is_file()).then(|| dir.clone())
 }
 
-/// How many released Qwen3.8 GGUFs each repo directory holds.
+/// How many released Qwen3.8 or Qwen3.5/3.6 MoE GGUFs each repo directory holds.
 fn released_qwen35_per_repo(bases: &[&brain_modelstore::LocalModel]) -> BTreeMap<PathBuf, usize> {
     let mut counts = BTreeMap::new();
     for local in bases.iter().filter(|l| is_released_qwen35(l)) {
@@ -388,6 +391,10 @@ impl Scan {
             self.register_released_qwen35(&wp, &card.id);
             return;
         }
+        if wp.ends_with(".gguf") && brain_family(&card.family) == "qwen35moe" {
+            self.register_released_qwen35moe(&wp, &card.id, dir);
+            return;
+        }
         // GGUF carries its tokenizer in KV; a safetensors model reuses a sibling
         // tokenizer.json (HF convention). Absent it, register anyway (limited chat).
         let sibling = dir.join("tokenizer.json");
@@ -449,6 +456,24 @@ impl Scan {
                 let resident = Arc::new(resident);
                 self.qwen35_bases.insert(id.to_string(), resident.clone());
                 self.multi.push(resident);
+            }
+            Err(reason) => {
+                eprintln!("brain: skip {id} ({weights}: {reason})");
+                self.seen.remove(id);
+            }
+        }
+    }
+
+    /// Serve the released Qwen3.5/3.6 MoE GGUF at `weights` as the model `id` on one card, its KV tier, batch and
+    /// context planned from the card (`catalog::resident_qwen35moe::gguf_resident`), or leave it out with the reason.
+    fn register_released_qwen35moe(&mut self, weights: &str, id: &str, dir: &Path) {
+        let ScanSettings { gpus, reserved, qwen35, .. } = &self.settings;
+        match catalog::resident_qwen35moe::gguf_resident(weights, id, gpus, *reserved, &qwen35.moe) {
+            Ok(resident) => {
+                for line in resident.chosen_defaults() {
+                    eprintln!("brain: {id}: default {line}");
+                }
+                self.keep(id, Built::Other(Arc::new(resident)), dir);
             }
             Err(reason) => {
                 eprintln!("brain: skip {id} ({weights}: {reason})");
@@ -766,8 +791,8 @@ fn resident_for(weights: &str, card: &ModelCard, tokenizer: Option<&str>, qwen_c
     // actionable import advice. Gating here rather than per-arm is what makes
     // the whole collision class impossible: an arm is reached by a `.gguf`
     // only if its family opted in via `family_reads_gguf`.
-    if weights.ends_with(".gguf") && family == "qwen35" {
-        eprintln!("brain: skip {} ({weights}: a released qwen35 GGUF is placed across the cards when `brain serve` starts; restart it to serve this one)", card.id);
+    if weights.ends_with(".gguf") && matches!(family, "qwen35" | "qwen35moe") {
+        eprintln!("brain: skip {} ({weights}: a released {family} GGUF is planned for the cards when `brain serve` starts; restart it to serve this one)", card.id);
         return None;
     }
     if weights.ends_with(".gguf") && !family_reads_gguf(family) {

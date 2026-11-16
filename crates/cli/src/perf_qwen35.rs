@@ -21,7 +21,7 @@ use residency::multi::MultiDeviceResidentModel;
 use residency::ResidentModel;
 
 /// Bytes `brain serve` keeps free per card (its `--reserve-gb` default of 2).
-const RESERVE_BYTES: u64 = 2 << 30;
+pub(crate) const RESERVE_BYTES: u64 = 2 << 30;
 
 /// Split `qwen35:<gguf>[:kvf32|:kvbf16|:kvint8]` (the part after `qwen35:`) into
 /// the checkpoint path and the KV tier it names. `None` leaves the tier to the
@@ -40,7 +40,7 @@ pub(crate) fn parse_spec(rest: &str) -> Result<(&str, Option<KvTier>), String> {
 
 /// The paged-engine target for one released GGUF. Devices are the cards
 /// `--device` makes schedulable, budgeted with `brain serve`'s reserve.
-pub(crate) fn build(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
+pub(crate) fn build(rest: &str, max_batch: Option<u32>) -> Result<Box<dyn PerfTarget>, String> {
     let (path, kv) = parse_spec(rest)?;
     let checkpoint = std::path::Path::new(path);
     if !checkpoint.is_file() && !checkpoint.is_dir() {
@@ -50,8 +50,8 @@ pub(crate) fn build(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
     // A directory's name is its id as it is (`Qwen3.8-27B-FP8` has dots); a file's loses its extension.
     let named = if checkpoint.is_dir() { checkpoint.file_name() } else { checkpoint.file_stem() };
     let id = named.map_or_else(|| path.to_string(), |s| s.to_string_lossy().into_owned());
-    // Everything but the KV tier the target names is left to the server's own defaults.
-    let cfg = catalog::resident_qwen35::Qwen35GgufServeConfig { kv, ..Default::default() };
+    // Everything but the KV tier and the batch the run names is left to the server's own defaults.
+    let cfg = catalog::resident_qwen35::Qwen35GgufServeConfig { kv, max_batch, ..Default::default() };
     let served = catalog::resident_qwen35::gguf_resident(path, &id, &machine.gpus, RESERVE_BYTES, &cfg)?;
     let key = served.instance_key("generate", &capability::Invocation::new());
     let devices: Vec<residency::Device> = served.estimate_multi(&key).devices().collect();
@@ -95,7 +95,7 @@ mod tests {
 
     #[test]
     fn a_missing_checkpoint_errors_naming_the_file() {
-        let e = build("/nonexistent/qwen35.gguf:kvint8").err().expect("must refuse");
+        let e = build("/nonexistent/qwen35.gguf:kvint8", None).err().expect("must refuse");
         assert!(e.contains("/nonexistent/qwen35.gguf"), "{e}");
     }
 }

@@ -16,7 +16,7 @@ PatchMerger as-is.
 | CLI                    | [x] |
 | HTTP API               | [x] |
 | D-Bus                  | [x] |
-| Batched serving        | [ ] |
+| Batched serving        | [x] (one batched decode step over every running sequence) |
 
 ## Getting the weights
 
@@ -56,6 +56,20 @@ of the fused tensor. The vision tower and the MTP head are not part of the text 
 The serving engine records a decode step once and replays it as a graph. On the NVFP4 tier a recording holds no vendor-library
 product (the library returned zeros inside a replayed graph, knowledge #356), so the stored-format GEMVs serve every row of a
 batch of up to 8 sequences; a taller batch decodes unrecorded.
+
+## From a released GGUF (no conversion)
+
+```bash
+brain pull https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF   # one quantization, Q8_0 by default
+brain serve --openai 8788
+```
+
+`brain serve` serves a released `qwen35moe` GGUF from the file on one card, int8 weights read straight from its Q8_0
+blocks. What `--kv-cache`, `--max-batch` and `--ctx` leave unset is planned for the card and printed at startup, one
+`default` line each: the most compact KV tier that fits, the widest batch (up to 64 sequences) that still leaves a 32K
+context, then the longest context the card holds for that batch. Every running sequence holds a whole context of KV, so
+a narrower `--max-batch` buys a longer `--ctx` and the reverse. `brain perf run --target qwen35moe:<gguf>` measures this
+same engine (`:kv<tier>` and `--max-batch` pin what they name).
 
 ## Running it
 
