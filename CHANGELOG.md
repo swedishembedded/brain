@@ -59,6 +59,7 @@ see CONTRIBUTING or AGENTS.md for the commit-message convention.
 
 ### Fixed
 
+- `brain serve` gives Qwen3-4B (and any 32-head Qwen3) its pretrained 32768-token context on a 96 GB card, where it auto-sized 24576 and refused every 32K prompt; `brain perf run serve --target qwen:` sizes its KV pool to the card beside the weights and its widest prefill round (16 concurrent 32K prompts of Qwen3-4B ran the card out while loading); the serving plan charges a tied head beside the fp32 embedding table it is uploaded from
 - `brain lsa --device cpu|software|gpuN` honours the flag (it was consumed by the global option parser and the command ran on the default `gpu`)
 - The `ricursive` registry row declares the training capabilities the capability matrix records (the architecture/matrix test was failing); a pulled draft model in the model dir is reported as loaded by the model it drafts for, not as an unservable family
 - A release that ships `chat_template.jinja` beside an older template inline in `tokenizer_config.json` is rendered with the file, as `transformers` does, and a pull fetches the file

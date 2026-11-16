@@ -236,21 +236,35 @@ pub const SERVE_HEADROOM_BYTES: u64 = 8 << 30;
 /// Device bytes of `cfg`'s weights with the linears and the head held at `tier` (one of the floating tiers or
 /// int8, with its group scales) and everything else (embeddings, norms) at fp32.
 pub fn held_weight_bytes(cfg: &QwenConfig, tier: Dtype) -> u64 {
+    held_weight_bytes_by(cfg, |_| tier)
+}
+
+/// Device bytes the serving engine holds for `cfg`'s weights with each linear and the head at the tier `tier_of`
+/// names for it (packed words plus the narrow tiers' group scales) and the embedding and norms at fp32. A tied head
+/// is the embedding table a second time: the engine gathers the embedding from the fp32 table and uploads the head
+/// from it at the head's tier.
+pub fn held_weight_bytes_by(cfg: &QwenConfig, tier_of: impl Fn(&str) -> Dtype) -> u64 {
+    let at = |tier: Dtype, n: u64| match tier {
+        Dtype::BF16 | Dtype::F16 => n * 2,
+        Dtype::I8 => n + (n / 32) * 4,
+        Dtype::NF4 | Dtype::Q4 => n / 2 + (n / 32) * 4,
+        _ => n * 4,
+    };
     let head = cfg.head_weight();
-    cfg.param_list()
+    let tables: u64 = cfg
+        .param_list()
         .into_iter()
         .map(|(name, n)| {
             let n = n as u64;
-            if !(crate::q8::Q8::is_i8_linear(&name) || name == head) {
-                return n * 4;
-            }
-            match tier {
-                Dtype::BF16 | Dtype::F16 => n * 2,
-                Dtype::I8 => n + (n / 32) * 4,
-                _ => n * 4,
+            if crate::q8::Q8::is_i8_linear(&name) || (name == head && !cfg.tie_embeddings) {
+                at(tier_of(&name), n)
+            } else {
+                n * 4
             }
         })
-        .sum()
+        .sum();
+    let tied_head = if cfg.tie_embeddings { at(tier_of(head), u64::from(cfg.vocab) * u64::from(cfg.d_model)) } else { 0 };
+    tables + tied_head
 }
 
 /// The tier a caller that did not choose one serves `cfg`'s linears at, given the floating tier the checkpoint

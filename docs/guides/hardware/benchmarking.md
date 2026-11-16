@@ -46,7 +46,11 @@ concurrency ladder); `longctx` has its own section below. `--target` names what 
 `qwen-synth:28x1024x16` (the real serving engine on randomly-initialized
 weights of that shape — no checkpoint needed, good for hardware comparison)
 or `qwen:out/qwen.safetensors` (a real checkpoint). Run `brain perf --help`
-for the full list of target specs (one per served model family).
+for the full list of target specs (one per served model family). A `qwen:`
+target reads each prompt in one round and sizes its KV pool for `--max-batch`
+whole requests, cut to what the first selected card holds beside the weights
+and that round (the run says so when it cuts it); a card that cannot hold one
+request beside them refuses the run before loading.
 
 A decoder target decodes greedily unless the run names the request sampling
 fields: `--temperature T` (and `--top-p`, `--top-k`, `--min-p`, which keep the

@@ -20,6 +20,7 @@ mod deepseek_refs_resolve;
 mod default_weight_tier;
 mod dp_parity;
 mod encoder_parity;
+mod engine_activation_charge;
 mod engine_adapter_bank;
 mod engine_device_oom;
 mod engine_exact_decode;

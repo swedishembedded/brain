@@ -747,6 +747,82 @@ pub fn prefill_attention_workspace_bytes(cfg: &QwenConfig, max_batch: u32, max_p
     gpu_core::provider::cuda::WgPrefillScratch::bytes(cfg.head_dim, cfg.n_heads, cfg.n_kv_heads, max_batch.max(max_prefill), cap)
 }
 
+/// Words of the engine's fixed batched scratch ([`Scratch`]) for rounds of up to `rows` rows (the wider of the decode
+/// batch and the prefill round), `max_batch` decode sequences and tables of `max_blocks_per_seq` blocks: every buffer
+/// [`Engine::build`] sizes by those. The fused products' wide outputs (`qkv_pre`/`gateup_pre`) are counted only where
+/// `fused_products` says a path writes them.
+fn scratch_words(cfg: &QwenConfig, rows: u64, max_batch: u64, max_blocks_per_seq: u64, fused_products: bool) -> u64 {
+    let (d, ff) = (cfg.d_model as u64, cfg.d_ff as u64);
+    let (hq, hkv) = (cfg.q_dim() as u64, cfg.kv_dim() as u64);
+    let b = rows;
+    // res (two), xn1, q_pre, q, k_pre, k, v, ctx, xmid, xn2
+    let attention = 2 * b * d + b * d + 2 * b * hq + 3 * b * hkv + b * hq + 2 * b * d;
+    // xn1_bf16, xn2_bf16, ctx_bf16: two bf16 values a word
+    let half = 2 * (b * d).div_ceil(2) + (b * hq).div_ceil(2);
+    // gate_pre, up, h, proj, mlp_out, xn_final
+    let mlp = 3 * b * ff + 3 * b * d;
+    // tok, pos, seqlen, blk, off, the block tables, the decode window's schedule and history
+    let meta = 5 * b + b * max_blocks_per_seq + (DECODE_WINDOW as u64 - 1) * max_batch * 3 + DECODE_WINDOW as u64 * max_batch;
+    let products = if fused_products { b * (hq + 2 * hkv) + b * 2 * ff } else { 0 };
+    attention + half + mlp + meta + products
+}
+
+/// Device bytes a serving engine of this sizing allocates beyond its weights and its KV pool: its attention scratch
+/// ([`paged_attn_scratch_bytes`], [`prefill_attention_workspace_bytes`]) and everything else a step holds
+/// ([`step_activation_bytes`]). The one charge a plan sizes the KV pool beside: under-charged, the pool leaves the card
+/// no room for the widest round and an allocation fails after the model loaded (knowledge 470).
+#[allow(clippy::too_many_arguments)]
+pub fn activation_bytes(cfg: &QwenConfig, block_size: u32, max_blocks_per_seq: u32, max_batch: u32, max_prefill: u32, kv_int8: bool, fused: FusedAttention, fused_products: bool) -> u64 {
+    let cap = max_blocks_per_seq * block_size;
+    paged_attn_scratch_bytes(cfg, max_batch, max_prefill, cap, fused)
+        + prefill_attention_workspace_bytes(cfg, max_batch, max_prefill, cap, fused)
+        + step_activation_bytes(cfg, block_size, max_blocks_per_seq, max_batch, max_prefill, kv_int8, fused_products)
+}
+
+/// [`activation_bytes`] less the attention scratch: the batched scratch of the widest round ([`scratch_words`]), the
+/// split-K partials, the fused decode's partial records at `kv_int8`'s tier (a decode step carries at most `max_batch`
+/// rows; `model::kv_tier::flash_part_words_bound`), the decode
+/// head's logits, and what a prefill round and the recorded decode steps take while they run
+/// ([`round_temporary_row_bytes`], [`decode_step_row_bytes`]).
+///
+/// `fused_products`: whether a path writes the fused QKV and gate-up products whole ([`writes_fused_products`]).
+pub fn step_activation_bytes(cfg: &QwenConfig, block_size: u32, max_blocks_per_seq: u32, max_batch: u32, max_prefill: u32, kv_int8: bool, fused_products: bool) -> u64 {
+    let rows = u64::from(max_batch.max(max_prefill));
+    let cap = max_blocks_per_seq * block_size;
+    let scratch = 4 * scratch_words(cfg, rows, u64::from(max_batch), u64::from(max_blocks_per_seq), fused_products);
+    let widest_n = u64::from(cfg.d_ff.max(cfg.q_dim()).max(cfg.d_model));
+    let splitk = 4 * (rows * widest_n * u64::from(SPLITK_MAX_SLICES)).min(SPLITK_SCRATCH_WORDS);
+    let decode_part = 4 * model::kv_tier::flash_part_words_bound(engine_kv_tier(kv_int8, false), max_batch, cfg.n_heads, cfg.n_kv_heads, cfg.head_dim, cap);
+    let vocab = u64::from(cfg.vocab);
+    let head = 4 * u64::from(max_batch) * (vocab + 1 + u64::from(ARGMAX_CHUNKS) * 2 + 2 * u64::from(TOPK_CAPACITY));
+    let running = rows * round_temporary_row_bytes(cfg) + u64::from(max_batch) * decode_step_row_bytes(cfg);
+    scratch + splitk + decode_part + head + running
+}
+
+/// Whether an engine of `cfg` at `tiers` writes the fused QKV and gate-up products whole, so their wide outputs are
+/// allocated: a tier the bf16 library does not serve (fp32, int8, the narrow ones), a QKV bias, an adapter bank or the
+/// exact-decode regime. A half tier otherwise writes the parts directly.
+pub fn writes_fused_products(cfg: &QwenConfig, tiers: &TierPolicy, adapters: bool, exact_decode: bool) -> bool {
+    adapters || exact_decode || cfg.attn_bias || tiers.dtypes().any(|t| !HALF_TIERS.contains(&t))
+}
+
+/// Device bytes a prefill round takes per row while it runs, beyond the fixed scratch ([`step_activation_bytes`]): one
+/// layer's temporaries drawn from [`PREFILL_LAYER_ARENA`] (the bf16 operands of the attention and the MLP's down product,
+/// the attention's own staging) and the pool's rounding of them, one fp32 word a row for every column of the query and
+/// feed-forward widths. Measured on Qwen3-4B (GH200, bf16 weights, int8 KV, `engine_activation_charge`): 51.1 KB a row
+/// against the 55.3 KB this charges.
+fn round_temporary_row_bytes(cfg: &QwenConfig) -> u64 {
+    4 * u64::from(cfg.q_dim() + cfg.d_ff)
+}
+
+/// Device bytes the recorded decode steps hold per decode row: a recorded step keeps the temporaries its recording
+/// allocated for as long as it is kept (knowledge 487), so every layer's bf16 operands of the query and feed-forward
+/// widths. Every recorded row count takes them from one shared working set (`gpu_core::tape::TapeScratch`), the widest
+/// step's.
+fn decode_step_row_bytes(cfg: &QwenConfig) -> u64 {
+    2 * u64::from(cfg.n_layers) * u64::from(cfg.q_dim() + cfg.d_ff)
+}
+
 /// The largest `head_dim` this engine has a fused paged-attention kernel
 /// registered for. The fused family is one WGSL file per head_dim TIER, and
 /// [`PIPELINES`] carries only the `HD = 128` tier - `paged_flash_prefill` and
@@ -1473,7 +1549,7 @@ impl Engine {
             xn_final: st(b * d),
             scores: st(bcap),
             probs: st(bcap),
-            part: st(flash.as_ref().map_or(1, |f| decode_part_words(f, &gpu, &cfg, block_size, max_blocks_per_seq, b as u32, 0))),
+            part: st(flash.as_ref().map_or(1, |f| decode_part_words(f, &gpu, &cfg, block_size, max_blocks_per_seq, max_batch, 0))),
             tok_buf: st(b),
             pos_buf: st(b),
             seqlen_buf: st(b),
@@ -1835,7 +1911,7 @@ impl Engine {
     pub(crate) fn size_decode_part(&mut self) {
         let Some(flash) = &self.flash else { return };
         let pinned = self.exact.as_ref().map_or(0, |e| e.group_rows);
-        let words = decode_part_words(flash, &self.gpu, &self.cfg, self.block_size, self.max_blocks_per_seq, self.max_batch.max(self.max_prefill), pinned);
+        let words = decode_part_words(flash, &self.gpu, &self.cfg, self.block_size, self.max_blocks_per_seq, self.max_batch, pinned);
         self.sc.part = self.gpu.storage(words);
     }
 
@@ -3069,6 +3145,8 @@ impl Engine {
         let sc = &self.sc;
         let w = |name: &str| self.ps.w(name);
         let b = bsz;
+        // The fused decode's partial records (`sc.part`) and the decode head are sized for `max_batch` rows.
+        assert!(causal_chunk || b <= self.max_batch, "qwen3 serve: a decode step of {b} rows on an engine sized for {} sequences", self.max_batch);
         // A decode step under the exact-decode regime pins every choice its row count would make.
         let exact = self.exact.as_ref().filter(|_| !causal_chunk);
         let mut s: Vec<Step> = Vec::new();
@@ -4352,9 +4430,12 @@ impl Engine {
     /// rolling the paged cache back over any rejected tokens. The output is
     /// identical to plain greedy target decoding - the win is fewer (expensive)
     /// target forwards when the draft guesses well. `draft(ctx, want) -> tokens`.
+    /// A verify forward is a decode step of `1 + proposals` rows, so `k` is held to `max_batch - 1` (the served
+    /// verify's own bound, `PagedDecoder::spec_max_draft`).
     /// Returns `(generated_tokens, target_forward_count)`.
     pub fn spec_decode<D: FnMut(&[u32], u32) -> Vec<u32>>(&mut self, prompt: &[u32], max_new: usize, k: u32, mut draft: D) -> (Vec<u32>, usize) {
         assert!(!prompt.is_empty() && k >= 1);
+        let k = k.min(self.max_batch.saturating_sub(1));
         let d = self.cfg.d_model as usize;
         let mut table = BlockTable::new();
         // Prefill all but the last prompt token; the last is the first `pending`.
@@ -7302,12 +7383,13 @@ mod tests {
             let full: Vec<u32> = prompt.iter().copied().chain(greedy.iter().copied()).collect();
 
             // Oracle draft: proposes the true continuation → all accepted.
-            let mut e1 = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 64, 1, 8, 32, kv_int8, false);
+            // Five sequences: a verify of four proposals is a five-row decode step.
+            let mut e1 = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 64, 5, 8, 32, kv_int8, false);
             let (out_oracle, fwd_oracle) = e1.spec_decode(&prompt, max_new, 4, |ctx, want| {
                 (0..want as usize).map(|i| full.get(ctx.len() + i).copied().unwrap_or(0)).collect()
             });
             // Bad draft: always proposes token 0 → mostly rejected.
-            let mut e2 = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 64, 1, 8, 32, kv_int8, false);
+            let mut e2 = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 64, 5, 8, 32, kv_int8, false);
             let (out_bad, fwd_bad) = e2.spec_decode(&prompt, max_new, 4, |_ctx, want| vec![0u32; want as usize]);
 
             println!("kv_int8={kv_int8}: spec decode: greedy={max_new} tokens | oracle-draft {fwd_oracle} target-forwards | bad-draft {fwd_bad} forwards");

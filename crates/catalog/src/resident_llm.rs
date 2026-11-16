@@ -73,7 +73,7 @@ pub type QwenAdapterView = AdapterView<QwenResident>;
 /// 24576 default context (`--ctx`), int8 KV: weights (1.3x a ~16 GiB bf16 file)
 /// ~20.8 GiB + KV pool ~3.5 GiB + paged-attention scratch ~3.0 GiB totals
 /// ~27.3 GiB - more than a single 24 GiB P40's ENTIRE capacity, before
-/// `--reserve-gb` even enters the picture. `weights_int8_bytes` below is the
+/// `--reserve-gb` even enters the picture. Int8 weights ([`weights_bytes_at`]) are the
 /// lever that actually closes that gap: quantizing the 7 per-layer linears
 /// (the dominant term) to int8 cuts the weights term to roughly a quarter,
 /// not a `--reserve-gb` adjustment.
@@ -82,35 +82,6 @@ pub(crate) fn est_vram(path: &str) -> MemCost {
     MemCost::new(bytes, 0)
 }
 
-/// The device byte footprint of a checkpoint matching `cfg`'s decoder
-/// weights UNDER int8 quantization of the 7 per-layer linears
-/// (`qwen3::q8::Q8::LINEARS`) - everything else (the token embedding, the
-/// LM head, norms) stays fp32, exactly as `Engine::from_map_with_gpu`'s own
-/// `w8_on` branch builds it.
-///
-/// Deliberately computed from `QwenConfig::param_list()` - the SAME
-/// config-derived, canonical-name list `qwen3::serve`'s own
-/// `decoder_param_list` builds the engine from - and NOT from
-/// `WeightReader::names()`/`shape()` (the checkpoint's raw on-disk tensor
-/// names). REGRESSION this closes: `checkpoint::load(path)`'s `Container::
-/// find` resolves/remaps a real checkpoint's raw tensor names onto these
-/// SAME canonical names before `Engine::load` ever sees them, so
-/// `Q8::is_i8_linear` matching against the RAW names (what `WeightReader`
-/// exposes) matched NOTHING on a real checkpoint whose on-disk names differ
-/// from brain's canonical `"blocks.N.leaf"` form - every tensor silently
-/// fell through to the fp32 branch, so this estimate reported the FULL
-/// fp32 total even with int8 weights requested and correctly applied at
-/// activation time (`37899 MiB` observed as `30.51 GiB` weights + KV +
-/// scratch - exactly the fp32 total, not the ~7.28 GiB int8 one). Deriving
-/// this from the config instead of the file makes it structurally
-/// impossible for the estimate to disagree with what `decoder_param_list`
-/// actually builds, regardless of the checkpoint's own raw naming.
-///
-/// A linear's total element count IS `n*k`; the packed layout's `n*(k/32)*4`
-/// group-scale term equals `elems/32*4` for exactly the same reason,
-/// whenever `k` (every real head_dim/d_model/d_ff here) is a multiple of 32
-/// -- true for every shipped Qwen3 config, so no separate `n`/`k` split is
-/// needed to compute it.
 /// The device byte footprint of `cfg`'s weights at fp32, with the same 1.3x
 /// allowance [`est_vram`] gives a file - derived from the config, since the
 /// checkpoint on disk may be a directory, or bf16 at half the device size.
@@ -118,55 +89,14 @@ pub fn weights_fp32_bytes(cfg: &qwen3::config::QwenConfig) -> u64 {
     cfg.param_list().into_iter().map(|(_, elems)| elems as u64 * 4).sum::<u64>() * 13 / 10
 }
 
-/// The device bytes of `cfg`'s weights with the linears and the head stored as bf16 (`--weight-format bf16`):
-/// a bf16 checkpoint's own values at half the fp32 size; embeddings and norms stay fp32.
-pub fn weights_bf16_bytes(cfg: &qwen3::config::QwenConfig) -> u64 {
-    cfg.param_list()
-        .into_iter()
-        .map(|(name, elems)| {
-            let elems = elems as u64;
-            if qwen3::q8::Q8::is_i8_linear(&name) || name == cfg.head_weight() {
-                elems * 2
-            } else {
-                elems * 4
-            }
-        })
-        .sum()
-}
-
-/// The device bytes of `cfg`'s weights with each linear and the head at the tier `tiers` names for it
-/// (packed words plus int8's group scales); embeddings and norms stay fp32.
+/// The device bytes of `cfg`'s weights with each linear and the head at the tier `tiers` names for it, the embedding
+/// and norms at fp32 (`qwen3::footprint::held_weight_bytes_by`, which the engine's own tier default decides by).
+///
+/// Computed from `QwenConfig::param_list()`, the canonical names `qwen3::serve`'s `decoder_param_list` builds the
+/// engine from, never from a checkpoint's raw tensor names: matched against raw names, `Q8::is_i8_linear` once
+/// matched nothing on a real checkpoint and the estimate reported fp32 with int8 applied.
 pub fn weights_bytes_at(cfg: &qwen3::config::QwenConfig, tiers: &model::ops::TierPolicy) -> u64 {
-    use gpu_core::select::Dtype;
-    cfg.param_list()
-        .into_iter()
-        .map(|(name, elems)| {
-            let elems = elems as u64;
-            if !(qwen3::q8::Q8::is_i8_linear(&name) || name == cfg.head_weight()) {
-                return elems * 4;
-            }
-            match tiers.want(&name) {
-                Dtype::I8 => elems + (elems / 32) * 4,
-                Dtype::BF16 | Dtype::F16 => elems * 2,
-                Dtype::NF4 | Dtype::Q4 => elems / 2 + (elems / 32) * 4,
-                _ => elems * 4,
-            }
-        })
-        .sum()
-}
-
-pub fn weights_int8_bytes(cfg: &qwen3::config::QwenConfig) -> u64 {
-    cfg.param_list()
-        .into_iter()
-        .map(|(name, elems)| {
-            let elems = elems as u64;
-            if qwen3::q8::Q8::is_i8_linear(&name) {
-                elems + (elems / 32) * 4
-            } else {
-                elems * 4
-            }
-        })
-        .sum()
+    qwen3::footprint::held_weight_bytes_by(cfg, |name| tiers.want(name))
 }
 
 /// The KV pool alone must not exceed this before `QwenResident::activate`
@@ -578,14 +508,11 @@ pub fn qwen3_weight_policy(path: &str, explicit: Option<&model::ops::TierPolicy>
     }
 }
 
-/// Device bytes of `cfg`'s weights at `weights`: a uniform fp32, half or int8 tier by its own estimate, a
-/// per-leaf or 4-bit policy leaf by leaf ([`weights_bytes_at`]).
+/// Device bytes of `cfg`'s weights at `weights`: a uniform fp32 tier with [`weights_fp32_bytes`]'s allowance, any
+/// other policy leaf by leaf ([`weights_bytes_at`]).
 pub fn weights_bytes_for(cfg: &qwen3::config::QwenConfig, weights: &model::ops::TierPolicy) -> u64 {
-    use gpu_core::select::Dtype;
     match (weights.rule_count(), weights.default_dtype()) {
-        (0, Dtype::F32) => weights_fp32_bytes(cfg),
-        (0, Dtype::BF16 | Dtype::F16) => weights_bf16_bytes(cfg),
-        (0, Dtype::I8) => weights_int8_bytes(cfg),
+        (0, gpu_core::select::Dtype::F32) => weights_fp32_bytes(cfg),
         _ => weights_bytes_at(cfg, weights),
     }
 }
@@ -617,10 +544,11 @@ const MAX_DEFAULT_POOL_TOKENS: u32 = 1 << 20;
 fn fleet_pool_tokens(checkpoint: &qwen3::config::QwenConfig, weight_bytes: u64, budget: u64, ctx: u32, cfg: &QwenServeConfig) -> Option<u32> {
     let max_batch = cfg.max_batch.max(1);
     let mut fleet = (u64::from(ctx) * u64::from(max_batch) / 2).min(u64::from(MAX_DEFAULT_POOL_TOKENS)) as u32;
+    // A GPU's budget: the attention scratch as every GPU backend runs it (see `auto_ctx_for_budget`).
+    let fused = qwen3::serve::fused_attention_on_gpu(checkpoint, cfg.kv_int8 && qwen3::serve::kv_int8_supported(checkpoint));
     while fleet > ctx.saturating_mul(2) {
-        let profile = PoolProfile::at_ctx(checkpoint, ctx, max_batch, cfg.max_prefill_cap.clamp(1, 512), Some(fleet), cfg.kv_int8, cfg.kv_offload_gb > 0.0, qwen3::serve::FusedAttention::default());
-        // The pool grows only the KV buffers. The scratch binding, which the
-        // unfused worst case of `PoolProfile` overstates at ctx 32768, does not
+        let profile = PoolProfile::at_ctx(checkpoint, ctx, max_batch, cfg.max_prefill_cap.clamp(1, 512), Some(fleet), cfg.kv_int8, cfg.kv_offload_gb > 0.0, fused);
+        // The pool grows only the KV buffers; the scratch binding does not
         // change with it, so only the KV binding is checked beside the total.
         let kv_binding = qwen3::serve::kv_binding_bytes(checkpoint, 16, fleet.div_ceil(16) + max_batch, cfg.kv_int8);
         if profile.fits_budget(weight_bytes, budget) && kv_binding <= WGPU_MAX_REPORTABLE_BINDING_BYTES {
@@ -648,9 +576,8 @@ struct PoolProfile {
     kv_bytes: u64,
     /// Paged-attention scratch (`scores` + `probs`) and the prefill attention's workspace.
     scratch_bytes: u64,
-    /// The widest step's forward buffers and a wide decode batch's launch
-    /// workspace, from the model's own widths
-    /// (`QwenConfig::decoder_widths`).
+    /// Everything else the engine holds for its widest round and its recorded decode steps
+    /// (`qwen3::serve::step_activation_bytes`).
     step_bytes: u64,
     /// Device staging for host-RAM KV offload (`0` with offload off): the
     /// buffers a preemption moves blocks through, allocated up front with the
@@ -678,7 +605,9 @@ impl PoolProfile {
         // the real device limit, so this pre-flight and that authoritative
         // check cannot disagree about the size of the buffer in question.
         let per_layer_kv = qwen3::serve::kv_binding_bytes(cfg, block_size, num_blocks, kv_int8);
-        let step_bytes = cfg.decoder_widths().serve_peak_bytes(max_batch, max_prefill);
+        // The engine's own charge for everything else a step holds, with the fused products' outputs counted whatever
+        // the tier: a served round is at most 512 rows, where they are small.
+        let step_bytes = qwen3::serve::step_activation_bytes(cfg, block_size, cap.div_ceil(block_size), max_batch, max_prefill, kv_int8, true);
         PoolProfile { kv_bytes, scratch_bytes, step_bytes, swap_staging_bytes: 0, sparse_attention_bytes: 0, largest_binding: per_layer_kv.max(slab_bytes / 2) }
     }
 
@@ -738,6 +667,49 @@ impl PoolProfile {
     }
 }
 
+/// How many KV blocks of `block_size` tokens a Qwen3 serving engine of this sizing may have so that the planner places
+/// it in `budget_bytes` of a GPU: at most `want_blocks`, and fewer where the weights at `tiers`, the engine's activation
+/// charge for its widest round ([`qwen3::serve::activation_bytes`]) and that pool would not fit. For a caller that sizes
+/// its engine from a workload instead of from [`QwenResident`]'s plan (a measurement); a pool sized past the card fails
+/// an allocation while the weights load.
+///
+/// # Errors
+///
+/// The card cannot hold one whole sequence of `max_blocks_per_seq` blocks beside the rest; the message carries the
+/// planner's arithmetic.
+#[allow(clippy::too_many_arguments)]
+pub fn kv_blocks_within(cfg: &qwen3::config::QwenConfig, tiers: &model::ops::TierPolicy, budget_bytes: u64, block_size: u32, max_blocks_per_seq: u32, max_batch: u32, max_prefill: u32, kv_int8: bool, want_blocks: u32) -> Result<u32, String> {
+    use model::memplan::{Category, Demand};
+    let fused = qwen3::serve::fused_attention_on_gpu(cfg, kv_int8);
+    let activation = qwen3::serve::activation_bytes(cfg, block_size, max_blocks_per_seq, max_batch, max_prefill, kv_int8, fused, qwen3::serve::writes_fused_products(cfg, tiers, false, false));
+    let demands = |blocks: u32| {
+        vec![
+            Demand::fixed(Category::Weights, "weights", weights_bytes_for(cfg, tiers)),
+            Demand::fixed(Category::Kv, "paged pool", qwen3::serve::kv_pool_bytes(cfg, block_size, blocks, kv_int8)),
+            Demand::fixed(Category::Activations, "activations of the widest round", activation),
+        ]
+    };
+    let fits = |blocks: u32| model::memplan::plan(&demands(blocks), model::memplan::Capacity { device_bytes: budget_bytes, host_bytes: u64::MAX }, &model::memplan::Authorized::none()).is_ok();
+    let least = max_blocks_per_seq + max_batch;
+    if !fits(least) {
+        return Err(format!("the card's {:.1} GiB do not hold one whole sequence: {}", budget_bytes as f64 / (1u64 << 30) as f64, model::memplan::summary(&demands(least))));
+    }
+    if fits(want_blocks) {
+        return Ok(want_blocks);
+    }
+    // The pool is the only demand that grows with the blocks, by the same bytes each.
+    let (mut lo, mut hi) = (least, want_blocks);
+    while hi - lo > 1 {
+        let mid = lo + (hi - lo) / 2;
+        if fits(mid) {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    Ok(lo)
+}
+
 /// The largest tier in [`AUTO_CTX_TIERS`] that both fits `budget_bytes` and
 /// stays bindable, given `weight_bytes` is fixed (independent of `ctx`).
 ///
@@ -754,13 +726,17 @@ impl PoolProfile {
 /// layer's buffer breaks the second. Both are monotonically increasing in
 /// `ctx`, so the first tier that fails either still ends the search.
 ///
-/// `FusedAttention::default()` (nothing fused) is passed here on purpose: this runs before a
-/// device is chosen, so the never-fused scratch worst case is the only honest
-/// assumption. `activate()` re-checks with the real answer.
+/// The budget is a GPU's (the server fills it from its cards), so the attention
+/// scratch is charged as every GPU backend runs it, fused
+/// ([`qwen3::serve::fused_attention_on_gpu`]): charged at the never-fused worst
+/// case, a 32-head model's score slab of a 32768-token context is past one
+/// binding, and Qwen3-4B on a 96 GB card was handed 24576 tokens. `activate()`
+/// re-checks with the device's own answer.
 fn auto_ctx_for_budget(weight_bytes: u64, budget_bytes: u64, cfg: &qwen3::config::QwenConfig, max_batch: u32, max_prefill_cap: u32, kv_tokens: Option<u32>, kv_int8: bool, offload: bool) -> u32 {
     let mut best = AUTO_CTX_TIERS[0];
+    let fused = qwen3::serve::fused_attention_on_gpu(cfg, kv_int8 && qwen3::serve::kv_int8_supported(cfg));
     for &ctx in AUTO_CTX_TIERS.iter().take_while(|&&t| t <= cfg.max_position_embeddings.max(AUTO_CTX_TIERS[0])) {
-        let profile = PoolProfile::at_ctx(cfg, ctx, max_batch, max_prefill_cap, kv_tokens, kv_int8, offload, qwen3::serve::FusedAttention::default());
+        let profile = PoolProfile::at_ctx(cfg, ctx, max_batch, max_prefill_cap, kv_tokens, kv_int8, offload, fused);
         if profile.fits_budget(weight_bytes, budget_bytes) && profile.bindings_fit() {
             best = ctx;
         } else {
@@ -1672,7 +1648,8 @@ mod tests {
 
         let shape = qwen3::QwenConfig::qwen3_0_6b();
         let bytes = weights_bytes_at(&shape, &tiers);
-        assert!(weights_int8_bytes(&shape) < bytes && bytes < weights_fp32_bytes(&shape) * 10 / 13, "between all-int8 and fp32: {bytes}");
+        let int8 = weights_bytes_at(&shape, &model::ops::TierPolicy::uniform(Dtype::I8));
+        assert!(int8 < bytes && bytes < weights_fp32_bytes(&shape) * 10 / 13, "between all-int8 and fp32: {bytes}");
 
         let mut p = model::policy::ServePolicy::default();
         p.set("--weight-format", "nf4").unwrap();
@@ -2047,10 +2024,34 @@ mod tests {
     /// source `decoder_param_list` uses) makes that class of drift
     /// structurally impossible - there is no raw file to disagree with.
     #[test]
-    fn weights_int8_bytes_quantizes_only_the_declared_linears() {
+    fn int8_weights_quantize_only_the_declared_linears_and_the_head() {
         let cfg = qwen3::config::QwenConfig::qwen3_8b();
-        let mut linear_elems = 0u64;
-        let mut other_elems = 0u64;
+        assert!(!cfg.tie_embeddings, "the 8B has its own head");
+        let (mut linear_elems, mut head_elems, mut other_elems) = (0u64, 0u64, 0u64);
+        for (name, n) in cfg.param_list() {
+            if qwen3::q8::Q8::is_i8_linear(&name) {
+                linear_elems += n as u64;
+            } else if name == cfg.head_weight() {
+                head_elems += n as u64;
+            } else {
+                other_elems += n as u64;
+            }
+        }
+        assert!(linear_elems > 0 && head_elems > 0 && other_elems > 0, "the real config must exercise every branch");
+        let int8 = |n: u64| n + (n / 32) * 4;
+        let tiers = model::ops::TierPolicy::uniform(gpu_core::select::Dtype::I8);
+        assert_eq!(weights_bytes_for(&cfg, &tiers), int8(linear_elems) + int8(head_elems) + other_elems * 4);
+    }
+
+    /// A model whose head is its embedding holds the table twice: the embedding gathered at fp32, and the head the
+    /// engine uploads from it at the head's tier. Charged once at the head's tier, Qwen3-4B's bf16 plan was 1.5 GB
+    /// under what its engine holds, and a pool sized to the card's last byte by that plan ran the card out.
+    #[test]
+    fn a_tied_head_is_charged_beside_the_fp32_embedding() {
+        use gpu_core::select::Dtype;
+        let cfg = qwen3::config::QwenConfig { n_layers: 36, d_model: 2560, n_heads: 32, n_kv_heads: 8, head_dim: 128, d_ff: 9728, tie_embeddings: true, ..qwen3::config::QwenConfig::qwen3_0_6b() };
+        let table = u64::from(cfg.vocab) * u64::from(cfg.d_model);
+        let (mut linear_elems, mut other_elems) = (0u64, 0u64);
         for (name, n) in cfg.param_list() {
             if qwen3::q8::Q8::is_i8_linear(&name) {
                 linear_elems += n as u64;
@@ -2058,10 +2059,9 @@ mod tests {
                 other_elems += n as u64;
             }
         }
-        assert!(linear_elems > 0 && other_elems > 0, "the real config must exercise both branches");
-        let expected = (linear_elems + (linear_elems / 32) * 4) + other_elems * 4;
-        assert_eq!(weights_int8_bytes(&cfg), expected);
-        assert!(weights_int8_bytes(&cfg) < other_elems * 4 + linear_elems * 4, "quantizing the linears must shrink the total below the full fp32 size");
+        let held = weights_bytes_for(&cfg, &model::ops::TierPolicy::uniform(Dtype::BF16));
+        assert_eq!(held, linear_elems * 2 + other_elems * 4 + table * 2, "the bf16 linears, the fp32 embedding and norms, and the bf16 head");
+        assert_eq!(qwen3::footprint::held_weight_bytes(&cfg, Dtype::BF16), held, "the tier default decides by the same bytes");
     }
 
     /// End to end through `estimate()`: opting in shrinks the total, opting
@@ -2227,12 +2227,46 @@ mod tests {
         }
     }
 
+    /// A server's budget is a GPU's, and every GPU backend fuses the paged attention, so auto-sizing charges the
+    /// fused scratch. Charged at the never-fused worst case, Qwen3-4B's 32-head score slab of a 32768-token context
+    /// is past one binding, and a 96 GB card was handed a 24576-token context that refuses every 32K prompt.
+    #[test]
+    fn auto_sizing_gives_qwen3_4b_its_pretrained_window_on_a_96_gb_card() {
+        let cfg = qwen3::config::QwenConfig { n_layers: 36, d_model: 2560, n_heads: 32, n_kv_heads: 8, head_dim: 128, d_ff: 9728, max_position_embeddings: 40960, ..qwen3::config::QwenConfig::qwen3_0_6b() };
+        let weights = weights_bytes_at(&cfg, &model::ops::TierPolicy::uniform(qwen3::Dtype::BF16));
+        let budget = 94u64 << 30;
+        let ctx = auto_ctx_for_budget(weights, budget, &cfg, 16, 512, None, true, false);
+        assert!(ctx >= 32768, "auto-sizing chose ctx {ctx} for Qwen3-4B on a 94 GiB budget");
+    }
+
+    /// A measurement that sizes its pool for 32 whole 32K-token contexts of Qwen3-4B and rounds of the whole prompt
+    /// gets the pool the card holds beside the weights and that round, not the pool it asked for: asked for, it ran
+    /// the card out while the weights were loading.
+    #[test]
+    fn a_workload_sized_pool_is_cut_to_what_the_card_holds_beside_the_widest_round() {
+        let cfg = qwen3::config::QwenConfig { n_layers: 36, d_model: 2560, n_heads: 32, n_kv_heads: 8, head_dim: 128, d_ff: 9728, max_position_embeddings: 40960, ..qwen3::config::QwenConfig::qwen3_0_6b() };
+        let tiers = model::ops::TierPolicy::uniform(qwen3::Dtype::BF16);
+        let (block, rows, max_batch) = (16u32, 32768u32, 32u32);
+        let per_seq = (rows + 128 + 8).div_ceil(block);
+        let want = per_seq * max_batch + max_batch;
+        let budget = 93u64 << 30;
+        let got = kv_blocks_within(&cfg, &tiers, budget, block, per_seq, max_batch, rows, true, want).expect("one sequence fits");
+        assert!(got < want, "32 whole 32K contexts beside a 32K-row round fit {} GiB", budget >> 30);
+        let fused = qwen3::serve::fused_attention_on_gpu(&cfg, true);
+        let total = |blocks: u32| weights_bytes_for(&cfg, &tiers) + qwen3::serve::kv_pool_bytes(&cfg, block, blocks, true) + qwen3::serve::activation_bytes(&cfg, block, per_seq, max_batch, rows, true, fused, false);
+        assert!(total(got) <= budget && total(got + 1) > budget, "the pool is the largest that fits: {} of {budget} bytes", total(got));
+        assert!(got >= 16 * per_seq, "16 whole contexts still fit: {got} blocks");
+        assert_eq!(kv_blocks_within(&cfg, &tiers, budget, block, per_seq, max_batch, rows, true, 16 * per_seq), Ok(16 * per_seq), "a pool that fits is kept");
+        let err = kv_blocks_within(&cfg, &tiers, 8 << 30, block, per_seq, max_batch, rows, true, want).unwrap_err();
+        assert!(err.contains("one whole sequence") && err.contains("GiB"), "{err}");
+    }
+
     #[test]
     fn auto_sizing_leaves_room_for_the_swap_staging_when_offload_is_on() {
         let mut cfg = qwen3::config::QwenConfig::qwen3_0_6b();
         cfg.max_position_embeddings = 262144;
         let (max_batch, max_prefill_cap) = (16u32, 512u32);
-        let fused = qwen3::serve::FusedAttention::default();
+        let fused = qwen3::serve::fused_attention_on_gpu(&cfg, true);
         let tier = AUTO_CTX_TIERS[3];
         // A budget that holds `tier` exactly, with nothing to spare.
         let budget = model::memplan::device_total(&PoolProfile::at_ctx(&cfg, tier, max_batch, max_prefill_cap, None, true, false, fused).demands(0, 0));
@@ -2410,14 +2444,14 @@ mod tests {
         let expected_scratch_bytes = qwen3::serve::paged_attn_scratch_bytes(&cfg, max_batch, max_prefill, cap, qwen3::serve::FusedAttention::default());
         let weights = weights_fp32_bytes(&cfg);
 
-        let step_bytes = cfg.decoder_widths().serve_peak_bytes(max_batch, max_prefill);
+        let step_bytes = qwen3::serve::step_activation_bytes(&cfg, block_size, max_blocks_per_seq, max_batch, max_prefill, kv_int8, true);
 
         let got = resident.estimate(&key);
         assert_eq!(got.vram, weights + expected_kv_bytes, "estimate() holds the fp32 weights + the KV pool resident, no more and no less");
         assert_eq!(
             got.activation,
             Some(expected_scratch_bytes + step_bytes),
-            "and declares the paged-attention scratch and the widest step's activations from the model's own widths as its peak activation"
+            "and declares the paged-attention scratch and the engine's own charge for the widest step as its peak activation"
         );
         assert!(step_bytes > 0, "the step activations must contribute a nonzero amount at these test dims");
         assert!(expected_kv_bytes > 0, "the KV pool must contribute a nonzero amount at these test dims");

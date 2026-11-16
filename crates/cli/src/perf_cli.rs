@@ -1995,15 +1995,28 @@ fn pool_for(workload: &str, input_override: Option<usize>, output_override: Opti
 }
 
 /// Size the KV pool for the workload so admission, not allocation failure, is
-/// what limits concurrency.
+/// what limits concurrency, within what the card holds beside the weights and
+/// the widest round (`catalog::resident_llm::kv_blocks_within`).
 fn build_qwen(weights: &str, workload: &str, input_override: Option<usize>, output_override: Option<usize>, weight_format: Option<&model::ops::TierPolicy>, max_batch: Option<u32>) -> Result<Box<dyn PerfTarget>, String> {
     let (weights, kv_fp32) = spec_flags(weights);
     let (block_size, max_batch, num_blocks, per_seq, max_prefill) = pool_for(workload, input_override, output_override, max_batch)?;
     let (cfg, src) = qwen3::open_checkpoint(weights)?;
     let kv_int8 = resolve_kv_int8(&cfg, kv_fp32, weights);
     // The tier `brain serve` serves this checkpoint at on the first selected card, unless --weight-format names one.
-    let tiers = catalog::resident_llm::qwen3_weight_policy(weights, weight_format, crate::perf_longctx::first_gpu_usable_bytes());
+    let card = crate::perf_longctx::first_gpu_usable_bytes();
+    let tiers = catalog::resident_llm::qwen3_weight_policy(weights, weight_format, card);
     qwen3::serve::Engine::check_tiers(&cfg, &tiers).map_err(|e| format!("--weight-format {}: {e}", tiers.describe()))?;
+    // The pool the workload asks for, cut to what the card holds beside the weights and the widest round.
+    let num_blocks = match card {
+        Some(budget) => {
+            let fit = catalog::resident_llm::kv_blocks_within(&cfg, &tiers, budget, block_size, per_seq, max_batch, max_prefill, kv_int8, num_blocks).map_err(|e| format!("qwen target {weights}: {e}"))?;
+            if fit < num_blocks {
+                eprintln!("perf: qwen: the card holds a KV pool of {fit} blocks ({} whole contexts) beside the weights and a {max_prefill}-row round, of the {num_blocks} the workload asks for", fit / per_seq);
+            }
+            fit
+        }
+        None => num_blocks,
+    };
     let eng = qwen3::serve::Engine::from_source_tiers(cfg, &*src, block_size, num_blocks, max_batch, per_seq, max_prefill, kv_int8, &tiers);
     let vocab = eng.vocab() as u32;
     let kv_dtype = if eng.kv_int8() { "int8" } else { "fp32" };
@@ -2013,6 +2026,7 @@ fn build_qwen(weights: &str, workload: &str, input_override: Option<usize>, outp
         .with("weights", weights.into())
         .with("block_size", block_size.into())
         .with("max_batch", max_batch.into())
+        .with("kv_blocks", num_blocks.into())
         .with("kv_dtype", kv_dtype.into())
         .with("weights_dtype", weights_dtype.into());
     Ok(Box::new(perf::targets::PagedLlmTarget::new(sched, info, Vec::new(), vocab)))

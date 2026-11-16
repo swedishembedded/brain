@@ -293,6 +293,29 @@ ones a server instantiated on first use anyway.
 - [ ] Prefill chunks still upload a per-row copy of the block table (17 MB at 8K rows); the attention kernels could
       take one table per sequence and a row-to-sequence map.
 
+## 16 concurrent 32K prompts (2026-11-16)
+
+Qwen3-4B, bf16 weights, int8 KV, GH200 gpu3, `perf run serve --target qwen:<4B> --concurrency 16 --input 32768
+--output 128 --requests 16 --warmup 1 --seed 7` (knowledge 498). Busy as in the section above, from an nsys
+`-t cuda,nvtx --cuda-graph-trace=node` run of the same command; the 27B and the MoE rows are the same measurement of
+their own targets (`~/tmp/perf/final`, re-read with the same busy script).
+
+| target | req/s | TTFT p50 / p95 | busy |
+|---|---|---|---|
+| Qwen3-4B before (pool of 32 whole contexts, no card in the sum) | exits 101 while loading | - | - |
+| Qwen3-4B, pool cut to the card (31 contexts), the plan's charges the engine's | 0.63 | 10.5 / 21.0 s | 95.5 % |
+| Qwen3.8-27B-FP8 | 0.33 | 24.6 / 43.9 s | 97.2 % |
+| Qwen3.6-35B-A3B Q8_0 | 0.32 | 22.5 / 45.0 s | 97.9 % |
+
+`brain serve` (HTTP, 16 streamed chat completions of 32.2-32.4K prompt tokens, 128 out, after one warm-up request):
+before, every request was refused (`needs 33498 tokens, engine capacity is 24576`: the auto context charged the
+never-fused attention slab); after, 16 of 16 complete, 0.46 req/s, TTFT p50 20.8 s, p95 34.1 s.
+
+- [ ] `brain serve` reads a Qwen3 prompt in rounds of at most 512 rows (`QwenServeConfig::max_prefill_cap`, which
+      bounds the never-fused attention slab), where the perf target reads it in one round of the whole prompt; on a GPU
+      the slab is fused away, so the served round could take the tensor-core round (`model::serve::
+      prefill_round_rows_for`) with its activation charge (`qwen3::serve::activation_bytes`) in the plan.
+
 ## Not yet done
 
 - [ ] Faster KV swap-out: the gather side runs at about half the measured
