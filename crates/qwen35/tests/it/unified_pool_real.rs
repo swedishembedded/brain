@@ -31,6 +31,11 @@ const BLOCK_ROWS: u32 = 1024;
 const CAP: u32 = 8192;
 const RESERVE: u64 = 2 << 30;
 
+/// The tests of this file hold the real model on one card in turn. Each places it against the free memory the card
+/// reports when it starts (`budgeted_gpus`), which does not see what a test beside it is about to load: run side by side,
+/// two or three of them placed a 27B engine on memory the others took, and one ran out of device memory.
+static ONE_MODEL_ON_THE_CARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// The resident and the card it is placed on.
 fn resident(path: &str, slots: u32, unified: bool, pool_blocks: u32) -> Option<(Qwen35GgufResident, residency::Device)> {
     let devices = budgeted_gpus(&gpu_core::devices::ambient_compute_set().gpus, RESERVE);
@@ -80,6 +85,7 @@ fn serve(engine: Qwen35GgufEngine, prompts: &[Vec<u32>], slots: usize, new_token
 
 #[test]
 fn a_unified_pool_serves_the_tokens_of_pools_that_reserve_a_state_row_per_slot() {
+    let _card = ONE_MODEL_ON_THE_CARD.lock().unwrap_or_else(|e| e.into_inner());
     let Some(path) = checkpoint() else { return };
     let Some(unified) = resident(&path, 2, true, 12) else { return };
     if !unified.0.unified() {
@@ -109,6 +115,7 @@ fn a_unified_pool_serves_the_tokens_of_pools_that_reserve_a_state_row_per_slot()
 
 #[test]
 fn a_running_sequence_takes_its_state_row_from_the_block_pool_and_gives_it_back() {
+    let _card = ONE_MODEL_ON_THE_CARD.lock().unwrap_or_else(|e| e.into_inner());
     let Some(path) = checkpoint() else { return };
     let Some(r) = resident(&path, 4, true, 16) else { return };
     if !r.0.unified() {
@@ -142,6 +149,7 @@ fn a_running_sequence_takes_its_state_row_from_the_block_pool_and_gives_it_back(
 
 #[test]
 fn a_row_released_while_others_run_stays_backed_for_the_next_sequence() {
+    let _card = ONE_MODEL_ON_THE_CARD.lock().unwrap_or_else(|e| e.into_inner());
     let Some(path) = checkpoint() else { return };
     let Some(r) = resident(&path, 4, true, 16) else { return };
     if !r.0.unified() {
@@ -174,6 +182,7 @@ fn a_row_released_while_others_run_stays_backed_for_the_next_sequence() {
 
 #[test]
 fn a_fresh_engine_holds_its_state_rows_backed_so_the_first_sequences_attach_no_memory() {
+    let _card = ONE_MODEL_ON_THE_CARD.lock().unwrap_or_else(|e| e.into_inner());
     let Some(path) = checkpoint() else { return };
     let Some(r) = resident(&path, 4, true, 16) else { return };
     if !r.0.unified() {
