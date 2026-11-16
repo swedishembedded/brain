@@ -2364,6 +2364,482 @@ pub fn attn_apply_cross(probs: &[f32], kv: &[f32], out: &mut [f32], a: CrossAppl
     }
 }
 
+/// The row's maximum and `Σ exp(x - max)`, the softmax statistics both masked cross-entropy kernels reduce.
+fn softmax_stats(row: &[f32]) -> (f32, f32) {
+    let mx = row.iter().fold(-3.4e38f32, |a, &v| a.max(v));
+    (mx, row.iter().map(|&v| (v - mx).exp()).sum())
+}
+
+/// `ce_grad_masked.wgsl`: `d_logits[n,v] = (softmax(logits[n])_v - [v == target[n]]) / count`, zero for a row whose
+/// target is `ignore`. Each row's statistics are reduced once (the kernel re-reduces them for every element).
+pub fn ce_grad_masked(logits: &[f32], targets: &[u32], dlogits: &mut [f32], bins: usize, ignore: u32, count: f32) {
+    dlogits.par_chunks_mut(bins).zip(logits.par_chunks(bins)).zip(targets.par_iter()).for_each(|((d, row), &tgt)| {
+        if tgt == ignore {
+            d.fill(0.0);
+            return;
+        }
+        let (mx, sum) = softmax_stats(row);
+        for (dv, &x) in d.iter_mut().zip(row) {
+            *dv = (x - mx).exp() / sum / count;
+        }
+        if let Some(dv) = d.get_mut(tgt as usize) {
+            *dv -= 1.0 / count;
+        }
+    });
+}
+
+/// `ce_value_masked.wgsl`: `out[n] = logsumexp(logits[n]) - logits[n, target[n]]`, zero for an ignored row.
+pub fn ce_value_masked(logits: &[f32], targets: &[u32], out: &mut [f32], bins: usize, ignore: u32) {
+    out.par_iter_mut().zip(logits.par_chunks(bins)).zip(targets.par_iter()).for_each(|((o, row), &tgt)| {
+        if tgt == ignore {
+            *o = 0.0;
+            return;
+        }
+        let (mx, sum) = softmax_stats(row);
+        *o = (mx + sum.ln()) - row.get(tgt as usize).copied().unwrap_or(0.0);
+    });
+}
+
+/// `src[rows, cols]` row-major as `[cols, rows]`, blocked so both sides stay in cache, threaded over row blocks.
+pub fn transpose(src: &[f32], rows: usize, cols: usize) -> Vec<f32> {
+    const T: usize = 32;
+    let mut dst = vec![0f32; rows * cols];
+    // Disjoint column bands of the source are disjoint row bands of the destination.
+    dst.par_chunks_mut(T * rows).enumerate().for_each(|(band, out)| {
+        let c0 = band * T;
+        let cn = (cols - c0).min(T);
+        let mut r0 = 0;
+        while r0 < rows {
+            let rn = (rows - r0).min(T);
+            for r in r0..r0 + rn {
+                let srow = &src[r * cols + c0..r * cols + c0 + cn];
+                for (cc, v) in srow.iter().enumerate() {
+                    out[cc * rows + r] = *v;
+                }
+            }
+            r0 += rn;
+        }
+    });
+    dst
+}
+
+/// `roof_fma.wgsl` natively: per element `s = inp[i]`, eight accumulators `s + j` each stepped `iters` times through
+/// `a = fma(a, c, d)`, and `out[i]` their pairwise sum - the kernel's arithmetic to the bit, since a fused multiply-add
+/// rounds once on every tier.
+///
+/// The probe is the compute half of the roofline, so it must reach the host's FMA rate, which its vector GEMM gets
+/// close to: the JIT runs one invocation per element through scalar code and measured a fifth of the NEON GEMM it
+/// grades. Each task walks its elements a vector block at a time with sixteen independent chains in registers
+/// (enough to cover the FMA latency on every pipe). The recurrence's addend is the constant `d`, so the NEON `fmla`
+/// (which accumulates into its destination) needs a register copy of `d` per step and caps a core at half its rate;
+/// SVE's `fmad` multiplies its destination instead and is the recurrence in one instruction, so an SVE host takes it
+/// (on 128-bit lanes, the NEON width) and reaches the full rate. x86's `vfmadd213ps` is the same form.
+pub fn roof_fma(inp: &[f32], out: &mut [f32], iters: u32, c: f32, d: f32) {
+    let n = inp.len().min(out.len());
+    if n == 0 {
+        return;
+    }
+    // One contiguous run per thread, a whole number of vector blocks (16 covers both tiers).
+    let chunk = n.div_ceil(rayon::current_num_threads()).next_multiple_of(16);
+    out[..n].par_chunks_mut(chunk).zip(inp[..n].par_chunks(chunk)).for_each(|(o, i)| roof_fma_run(i, o, iters, c, d));
+}
+
+fn roof_fma_run(inp: &[f32], out: &mut [f32], iters: u32, c: f32, d: f32) {
+    #[cfg(target_arch = "aarch64")]
+    if crate::fast_conv::neon_available() {
+        let whole = inp.len() / 8 * 8;
+        let sve = std::arch::is_aarch64_feature_detected!("sve");
+        unsafe { roof_fma_neon(&inp[..whole], &mut out[..whole], iters, c, d, sve) };
+        return roof_fma_scalar(&inp[whole..], &mut out[whole..], iters, c, d);
+    }
+    #[cfg(target_arch = "x86_64")]
+    if crate::fast_conv::isa_tier() != crate::fast_conv::IsaTier::Scalar {
+        let whole = inp.len() / 8 * 8;
+        unsafe { roof_fma_avx2(&inp[..whole], &mut out[..whole], iters, c, d) };
+        return roof_fma_scalar(&inp[whole..], &mut out[whole..], iters, c, d);
+    }
+    roof_fma_scalar(inp, out, iters, c, d)
+}
+
+/// The per-element reference, also the tail of the vector tiers.
+fn roof_fma_scalar(inp: &[f32], out: &mut [f32], iters: u32, c: f32, d: f32) {
+    for (o, &s) in out.iter_mut().zip(inp) {
+        let mut a: [f32; 8] = std::array::from_fn(|j| s + j as f32);
+        for _ in 0..iters {
+            for x in &mut a {
+                *x = x.mul_add(c, d);
+            }
+        }
+        *o = ((a[0] + a[1]) + (a[2] + a[3])) + ((a[4] + a[5]) + (a[6] + a[7]));
+    }
+}
+
+/// Eight elements (two 4-lane vectors) a block, eight accumulators each: sixteen independent chains in named
+/// registers. `sve` steps them with `fmad` (see [`roof_fma`]); otherwise with `fmla`, unrolled by two so the copy of
+/// `d` each step needs is the only one (a rolled loop also rotated every accumulator through a spare register).
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn roof_fma_neon(inp: &[f32], out: &mut [f32], iters: u32, c: f32, d: f32, sve: bool) {
+    use std::arch::aarch64::*;
+    let (cv, dv) = (vdupq_n_f32(c), vdupq_n_f32(d));
+    let k = |j: f32| vdupq_n_f32(j);
+    for (o, i) in out.as_chunks_mut::<8>().0.iter_mut().zip(inp.as_chunks::<8>().0) {
+        let (s, t) = (vld1q_f32(i.as_ptr()), vld1q_f32(i.as_ptr().add(4)));
+        let (mut a0, mut a1, mut a2, mut a3) = (s, vaddq_f32(s, k(1.0)), vaddq_f32(s, k(2.0)), vaddq_f32(s, k(3.0)));
+        let (mut a4, mut a5, mut a6, mut a7) = (vaddq_f32(s, k(4.0)), vaddq_f32(s, k(5.0)), vaddq_f32(s, k(6.0)), vaddq_f32(s, k(7.0)));
+        let (mut b0, mut b1, mut b2, mut b3) = (t, vaddq_f32(t, k(1.0)), vaddq_f32(t, k(2.0)), vaddq_f32(t, k(3.0)));
+        let (mut b4, mut b5, mut b6, mut b7) = (vaddq_f32(t, k(4.0)), vaddq_f32(t, k(5.0)), vaddq_f32(t, k(6.0)), vaddq_f32(t, k(7.0)));
+        if sve {
+            // z0-z15 alias the accumulators' v registers; only their low 128 bits are loaded, used and kept, so the
+            // result is the same at any SVE vector length.
+            std::arch::asm!(
+                ".arch_extension sve",
+                "ptrue p0.s",
+                "cbz {n:w}, 2f",
+                "1:",
+                "fmad z0.s, p0/m, z16.s, z17.s",
+                "fmad z1.s, p0/m, z16.s, z17.s",
+                "fmad z2.s, p0/m, z16.s, z17.s",
+                "fmad z3.s, p0/m, z16.s, z17.s",
+                "fmad z4.s, p0/m, z16.s, z17.s",
+                "fmad z5.s, p0/m, z16.s, z17.s",
+                "fmad z6.s, p0/m, z16.s, z17.s",
+                "fmad z7.s, p0/m, z16.s, z17.s",
+                "fmad z8.s, p0/m, z16.s, z17.s",
+                "fmad z9.s, p0/m, z16.s, z17.s",
+                "fmad z10.s, p0/m, z16.s, z17.s",
+                "fmad z11.s, p0/m, z16.s, z17.s",
+                "fmad z12.s, p0/m, z16.s, z17.s",
+                "fmad z13.s, p0/m, z16.s, z17.s",
+                "fmad z14.s, p0/m, z16.s, z17.s",
+                "fmad z15.s, p0/m, z16.s, z17.s",
+                "subs {n:w}, {n:w}, #1",
+                "b.ne 1b",
+                "2:",
+                n = inout(reg) iters => _,
+                inout("v0") a0,
+                inout("v1") a1,
+                inout("v2") a2,
+                inout("v3") a3,
+                inout("v4") a4,
+                inout("v5") a5,
+                inout("v6") a6,
+                inout("v7") a7,
+                inout("v8") b0,
+                inout("v9") b1,
+                inout("v10") b2,
+                inout("v11") b3,
+                inout("v12") b4,
+                inout("v13") b5,
+                inout("v14") b6,
+                inout("v15") b7,
+                in("v16") cv,
+                in("v17") dv,
+                out("p0") _,
+                options(nomem, nostack),
+            );
+        } else {
+            for _ in 0..iters / 2 {
+                a0 = vfmaq_f32(dv, a0, cv);
+                a1 = vfmaq_f32(dv, a1, cv);
+                a2 = vfmaq_f32(dv, a2, cv);
+                a3 = vfmaq_f32(dv, a3, cv);
+                a4 = vfmaq_f32(dv, a4, cv);
+                a5 = vfmaq_f32(dv, a5, cv);
+                a6 = vfmaq_f32(dv, a6, cv);
+                a7 = vfmaq_f32(dv, a7, cv);
+                b0 = vfmaq_f32(dv, b0, cv);
+                b1 = vfmaq_f32(dv, b1, cv);
+                b2 = vfmaq_f32(dv, b2, cv);
+                b3 = vfmaq_f32(dv, b3, cv);
+                b4 = vfmaq_f32(dv, b4, cv);
+                b5 = vfmaq_f32(dv, b5, cv);
+                b6 = vfmaq_f32(dv, b6, cv);
+                b7 = vfmaq_f32(dv, b7, cv);
+                a0 = vfmaq_f32(dv, a0, cv);
+                a1 = vfmaq_f32(dv, a1, cv);
+                a2 = vfmaq_f32(dv, a2, cv);
+                a3 = vfmaq_f32(dv, a3, cv);
+                a4 = vfmaq_f32(dv, a4, cv);
+                a5 = vfmaq_f32(dv, a5, cv);
+                a6 = vfmaq_f32(dv, a6, cv);
+                a7 = vfmaq_f32(dv, a7, cv);
+                b0 = vfmaq_f32(dv, b0, cv);
+                b1 = vfmaq_f32(dv, b1, cv);
+                b2 = vfmaq_f32(dv, b2, cv);
+                b3 = vfmaq_f32(dv, b3, cv);
+                b4 = vfmaq_f32(dv, b4, cv);
+                b5 = vfmaq_f32(dv, b5, cv);
+                b6 = vfmaq_f32(dv, b6, cv);
+                b7 = vfmaq_f32(dv, b7, cv);
+            }
+            if iters % 2 == 1 {
+                a0 = vfmaq_f32(dv, a0, cv);
+                a1 = vfmaq_f32(dv, a1, cv);
+                a2 = vfmaq_f32(dv, a2, cv);
+                a3 = vfmaq_f32(dv, a3, cv);
+                a4 = vfmaq_f32(dv, a4, cv);
+                a5 = vfmaq_f32(dv, a5, cv);
+                a6 = vfmaq_f32(dv, a6, cv);
+                a7 = vfmaq_f32(dv, a7, cv);
+                b0 = vfmaq_f32(dv, b0, cv);
+                b1 = vfmaq_f32(dv, b1, cv);
+                b2 = vfmaq_f32(dv, b2, cv);
+                b3 = vfmaq_f32(dv, b3, cv);
+                b4 = vfmaq_f32(dv, b4, cv);
+                b5 = vfmaq_f32(dv, b5, cv);
+                b6 = vfmaq_f32(dv, b6, cv);
+                b7 = vfmaq_f32(dv, b7, cv);
+            }
+        }
+        let sum = |x0, x1, x2, x3, x4, x5, x6, x7| vaddq_f32(vaddq_f32(vaddq_f32(x0, x1), vaddq_f32(x2, x3)), vaddq_f32(vaddq_f32(x4, x5), vaddq_f32(x6, x7)));
+        vst1q_f32(o.as_mut_ptr(), sum(a0, a1, a2, a3, a4, a5, a6, a7));
+        vst1q_f32(o.as_mut_ptr().add(4), sum(b0, b1, b2, b3, b4, b5, b6, b7));
+    }
+}
+
+/// Eight elements (one 8-lane vector) a block, eight accumulators: eight independent `vfmadd` chains.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn roof_fma_avx2(inp: &[f32], out: &mut [f32], iters: u32, c: f32, d: f32) {
+    use std::arch::x86_64::*;
+    let (cv, dv) = (_mm256_set1_ps(c), _mm256_set1_ps(d));
+    for (o, i) in out.as_chunks_mut::<8>().0.iter_mut().zip(inp.as_chunks::<8>().0) {
+        let s = _mm256_loadu_ps(i.as_ptr());
+        let mut a: [__m256; 8] = std::array::from_fn(|j| _mm256_add_ps(s, _mm256_set1_ps(j as f32)));
+        for _ in 0..iters {
+            for x in &mut a {
+                *x = _mm256_fmadd_ps(*x, cv, dv);
+            }
+        }
+        let sum = _mm256_add_ps(_mm256_add_ps(_mm256_add_ps(a[0], a[1]), _mm256_add_ps(a[2], a[3])), _mm256_add_ps(_mm256_add_ps(a[4], a[5]), _mm256_add_ps(a[6], a[7])));
+        _mm256_storeu_ps(o.as_mut_ptr(), sum);
+    }
+}
+
+/// The NEON f32 GEMM: `C[m,n] (+)= A[m,k]·B[n,k]ᵀ`, the one routine every f32 matmul kernel (`matmul*`,
+/// `matmul_dx*`, `matmul_dw*`, the attention trio's per-head products) reaches on an AArch64 host.
+///
+/// A 4x4 output tile keeps sixteen 4-lane accumulators, four A and four B vectors in registers (24 of the 32 `v`
+/// registers), sixteen independent FMA chains per step; `k` is walked in panels of [`neon_gemm::KC`] so a thread's
+/// strip of A and the B panel it sweeps stay in L1/L2 across the panel, and the threads take strips of four output
+/// rows. Each tile sums its `k` in 4-lane partial sums, so the result matches the scalar reference to rounding, not
+/// bit for bit (gated by tolerance in this module's tests).
+#[cfg(target_arch = "aarch64")]
+pub mod neon_gemm {
+    use rayon::prelude::*;
+    use std::arch::aarch64::*;
+
+    /// Floats of `k` one panel covers.
+    pub const KC: usize = 512;
+    /// Rows of C per thread task (a multiple of the tile height).
+    const MIN_ROWS: usize = 4;
+    /// The arithmetic one task is given before the product fans out further: about a tenth of a millisecond of one
+    /// core, the cost of waking it (measured by `neon_gemm_bench`).
+    const FLOPS_PER_TASK: usize = 4_000_000;
+
+    /// `C (+)= A·Bᵀ` over every row, threaded over strips of rows. `accumulate` adds into C instead of writing it.
+    pub fn abt(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n: usize, accumulate: bool) {
+        assert!(a.len() >= m * k && b.len() >= n * k && c.len() >= m * n, "neon gemm: operand too short");
+        if k == 0 {
+            if !accumulate {
+                c[..m * n].fill(0.0);
+            }
+            return;
+        }
+        // As many tasks as the work pays for: a task is worth waking a worker (on a many-socket host a fan-out to every
+        // thread costs more than a per-head attention product's whole arithmetic), and never more than the pool.
+        let tasks = ((2 * m * n * k) / FLOPS_PER_TASK).clamp(1, rayon::current_num_threads());
+        if tasks == 1 {
+            unsafe { block(a.as_ptr(), b.as_ptr(), c.as_mut_ptr(), m, k, n, accumulate) };
+            return;
+        }
+        // No fewer than a tile's rows a task.
+        let rows_per = (m.div_ceil(tasks)).div_ceil(MIN_ROWS).max(1) * MIN_ROWS;
+        // Too few rows to feed the pool (a decode step's GEMV, a small batch): split the columns instead, in multiples
+        // of the tile width, so every element is computed exactly as the unsplit block computes it.
+        if m < 2 * MIN_ROWS && n >= 8 {
+            let cols = n.div_ceil(tasks).div_ceil(4).max(1) * 4;
+            let (ap, bp) = (a.as_ptr() as usize, b.as_ptr() as usize);
+            let parts: Vec<(usize, usize, Vec<f32>)> = (0..n.div_ceil(cols))
+                .into_par_iter()
+                .map(|t| {
+                    let (j0, w) = (t * cols, cols.min(n - t * cols));
+                    let mut part: Vec<f32> = if accumulate { (0..m).flat_map(|i| c[i * n + j0..i * n + j0 + w].iter().copied()).collect() } else { vec![0f32; m * w] };
+                    // SAFETY: columns `j0..j0+w` of B exist (asserted above); `part` is `m * w`.
+                    unsafe { block(ap as *const f32, (bp as *const f32).add(j0 * k), part.as_mut_ptr(), m, k, w, accumulate) };
+                    (j0, w, part)
+                })
+                .collect();
+            for (j0, w, part) in parts {
+                for i in 0..m {
+                    c[i * n + j0..i * n + j0 + w].copy_from_slice(&part[i * w..i * w + w]);
+                }
+            }
+            return;
+        }
+        let (ap, bp) = (a.as_ptr() as usize, b.as_ptr() as usize);
+        c[..m * n].par_chunks_mut(rows_per * n).enumerate().for_each(|(ci, cc)| {
+            let rows = cc.len() / n;
+            // SAFETY: rows `ci*rows_per ..+rows` of A exist (asserted above); B is read whole.
+            unsafe { block((ap as *const f32).add(ci * rows_per * k), bp as *const f32, cc.as_mut_ptr(), rows, k, n, accumulate) };
+        });
+    }
+
+    /// [`abt`] in one piece on the calling thread: the reference a split is held bit-identical to.
+    pub fn abt_unsplit(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n: usize) {
+        assert!(a.len() >= m * k && b.len() >= n * k && c.len() >= m * n, "neon gemm: operand too short");
+        unsafe { block(a.as_ptr(), b.as_ptr(), c.as_mut_ptr(), m, k, n, false) };
+    }
+
+    /// One thread's `rows` rows of C, `k` in panels.
+    ///
+    /// Every element of C is reduced in the one order [`tile`] reduces it, whether it falls in a full 4x4 tile or on
+    /// an edge, so a product is bit-identical however its rows and columns are cut: a GEMV (`n == 1`) equals the
+    /// matching column of a GEMM over the same rows, and a split product equals [`abt_unsplit`].
+    ///
+    /// # Safety
+    /// `a` holds `rows*k`, `b` `n*k`, `c` `rows*n` floats.
+    unsafe fn block(a: *const f32, b: *const f32, c: *mut f32, rows: usize, k: usize, n: usize, accumulate: bool) {
+        let mut k0 = 0;
+        while k0 < k {
+            let kl = (k - k0).min(KC);
+            let add = accumulate || k0 > 0;
+            let mut i = 0;
+            while i < rows {
+                let r = (rows - i).min(4);
+                let mut j = 0;
+                while j < n {
+                    let (ap, bp, cp) = (a.add(i * k + k0), b.add(j * k + k0), c.add(i * n + j));
+                    // Each edge shape its own instance, so the loops over the tile unroll at every shape.
+                    match (r, (n - j).min(4)) {
+                        (4, 4) => tile::<4, 4>(ap, bp, cp, k, kl, n, add),
+                        (4, 3) => tile::<4, 3>(ap, bp, cp, k, kl, n, add),
+                        (4, 2) => tile::<4, 2>(ap, bp, cp, k, kl, n, add),
+                        (4, _) => tile::<4, 1>(ap, bp, cp, k, kl, n, add),
+                        (3, 4) => tile::<3, 4>(ap, bp, cp, k, kl, n, add),
+                        (3, 3) => tile::<3, 3>(ap, bp, cp, k, kl, n, add),
+                        (3, 2) => tile::<3, 2>(ap, bp, cp, k, kl, n, add),
+                        (3, _) => tile::<3, 1>(ap, bp, cp, k, kl, n, add),
+                        (2, 4) => tile::<2, 4>(ap, bp, cp, k, kl, n, add),
+                        (2, 3) => tile::<2, 3>(ap, bp, cp, k, kl, n, add),
+                        (2, 2) => tile::<2, 2>(ap, bp, cp, k, kl, n, add),
+                        (2, _) => tile::<2, 1>(ap, bp, cp, k, kl, n, add),
+                        (_, 4) => tile::<1, 4>(ap, bp, cp, k, kl, n, add),
+                        (_, 3) => tile::<1, 3>(ap, bp, cp, k, kl, n, add),
+                        (_, 2) => tile::<1, 2>(ap, bp, cp, k, kl, n, add),
+                        _ => tile::<1, 1>(ap, bp, cp, k, kl, n, add),
+                    }
+                    j += 4;
+                }
+                i += 4;
+            }
+            k0 += kl;
+        }
+    }
+
+    #[inline(always)]
+    unsafe fn put(c: *mut f32, v: f32, add: bool) {
+        if add {
+            *c += v;
+        } else {
+            *c = v;
+        }
+    }
+
+    /// An `R` x `C` tile (each at most 4) of `C (+)= A·Bᵀ` over `kl` floats of `k`: rows of A and B are `lda`
+    /// floats apart. Each element is one 4-lane FMA chain over the 4-aligned prefix, a lane sum, then the scalar tail.
+    #[inline(always)]
+    unsafe fn tile<const R: usize, const C: usize>(a: *const f32, b: *const f32, c: *mut f32, lda: usize, kl: usize, n: usize, add: bool) {
+        let (r, cols) = (R, C);
+        let mut acc = [vdupq_n_f32(0.0); 16];
+        let mut kk = 0;
+        while kk + 4 <= kl {
+            let mut av = [vdupq_n_f32(0.0); 4];
+            for (ri, v) in av.iter_mut().enumerate().take(r) {
+                *v = vld1q_f32(a.add(ri * lda + kk));
+            }
+            for cj in 0..cols {
+                let bv = vld1q_f32(b.add(cj * lda + kk));
+                for (ri, a_) in av.iter().enumerate().take(r) {
+                    acc[ri * 4 + cj] = vfmaq_f32(acc[ri * 4 + cj], *a_, bv);
+                }
+            }
+            kk += 4;
+        }
+        let mut out = [0f32; 16];
+        for (o, v) in out.iter_mut().zip(acc) {
+            *o = vaddvq_f32(v);
+        }
+        while kk < kl {
+            for ri in 0..r {
+                let x = *a.add(ri * lda + kk);
+                for cj in 0..cols {
+                    out[ri * 4 + cj] += x * *b.add(cj * lda + kk);
+                }
+            }
+            kk += 1;
+        }
+        for ri in 0..r {
+            for cj in 0..cols {
+                put(c.add(ri * n + cj), out[ri * 4 + cj], add);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        /// The scalar product every element of the GEMM must match, in f64.
+        fn reference(a: &[f32], b: &[f32], m: usize, k: usize, n: usize) -> Vec<f64> {
+            (0..m * n).map(|e| (0..k).map(|kk| a[(e / n) * k + kk] as f64 * b[(e % n) * k + kk] as f64).sum()).collect()
+        }
+
+        /// The GEMM's rate at a small decoder's training shapes (rows of 8 x 1024 tokens, width 256, FFN 704, vocabulary
+        /// 4096, attention heads of 64 over 1024 positions).
+        /// Run: `make test/one P=brain-backend-cpu ARGS="neon_gemm_bench --ignored --nocapture"`.
+        #[test]
+        #[ignore = "throughput measurement, not a correctness gate"]
+        fn neon_gemm_bench() {
+            let mut rng = data::rng::Lcg::random();
+            for &(label, m, k, n) in &[("qkv", 8192, 256, 768), ("ffn up", 8192, 256, 704), ("ffn down", 8192, 704, 256), ("head", 8192, 256, 4096), ("dw ffn", 704, 8192, 256), ("scores", 1024, 64, 1024), ("apply", 1024, 1024, 64), ("decode", 1, 256, 4096), ("gemv", 4096, 256, 1)] {
+                let a: Vec<f32> = (0..m * k).map(|_| rng.signed()).collect();
+                let b: Vec<f32> = (0..n * k).map(|_| rng.signed()).collect();
+                let mut c = vec![0f32; m * n];
+                super::abt(&a, &b, &mut c, m, k, n, false);
+                let mut best = f64::INFINITY;
+                for _ in 0..5 {
+                    let t = std::time::Instant::now();
+                    super::abt(&a, &b, &mut c, m, k, n, false);
+                    best = best.min(t.elapsed().as_secs_f64());
+                }
+                eprintln!("{label:<9} m={m:<5} k={k:<5} n={n:<5} {:>8.3} ms {:>8.1} GFLOP/s", best * 1e3, 2.0 * (m * k * n) as f64 / best / 1e9);
+            }
+        }
+
+        /// Every shape class (tile edges in both directions, a `k` tail, `k` past a panel, threaded and inline sizes)
+        /// matches the f64 reference to f32 rounding, writing and accumulating.
+        #[test]
+        fn the_neon_gemm_matches_the_reference_at_every_edge() {
+            let mut rng = data::rng::Lcg::random();
+            for &(m, k, n) in &[(1, 1, 1), (3, 5, 2), (4, 4, 4), (7, 13, 9), (17, 515, 6), (64, 1030, 33), (600, 64, 260), (5, 2049, 7)] {
+                let a: Vec<f32> = (0..m * k).map(|_| rng.signed()).collect();
+                let b: Vec<f32> = (0..n * k).map(|_| rng.signed()).collect();
+                let want = reference(&a, &b, m, k, n);
+                let mut c = vec![0f32; m * n];
+                super::abt(&a, &b, &mut c, m, k, n, false);
+                let tol = |w: f64| 1e-5 * (k as f64).sqrt() * (1.0 + w.abs());
+                for (got, w) in c.iter().zip(&want) {
+                    assert!((*got as f64 - w).abs() <= tol(*w), "({m},{k},{n}): {got} vs {w}");
+                }
+                super::abt(&a, &b, &mut c, m, k, n, true);
+                for (got, w) in c.iter().zip(&want) {
+                    assert!((*got as f64 - 2.0 * w).abs() <= 2.0 * tol(*w), "accumulating ({m},{k},{n}): {got} vs {}", 2.0 * w);
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3995,482 +4471,6 @@ mod tests {
             assert!(got_o[..out_off].iter().all(|&x| x == -1.0), "apply_full wrote before its out_off");
             for (i, (got, want)) in got_o[out_off..].iter().zip(&want_o).enumerate() {
                 assert!((got - want).abs() < 1e-5, "apply_full {bsz}/{heads}/{seq}/{hd} i={i}: got {got} want {want}");
-            }
-        }
-    }
-}
-
-/// The row's maximum and `Σ exp(x - max)`, the softmax statistics both masked cross-entropy kernels reduce.
-fn softmax_stats(row: &[f32]) -> (f32, f32) {
-    let mx = row.iter().fold(-3.4e38f32, |a, &v| a.max(v));
-    (mx, row.iter().map(|&v| (v - mx).exp()).sum())
-}
-
-/// `ce_grad_masked.wgsl`: `d_logits[n,v] = (softmax(logits[n])_v - [v == target[n]]) / count`, zero for a row whose
-/// target is `ignore`. Each row's statistics are reduced once (the kernel re-reduces them for every element).
-pub fn ce_grad_masked(logits: &[f32], targets: &[u32], dlogits: &mut [f32], bins: usize, ignore: u32, count: f32) {
-    dlogits.par_chunks_mut(bins).zip(logits.par_chunks(bins)).zip(targets.par_iter()).for_each(|((d, row), &tgt)| {
-        if tgt == ignore {
-            d.fill(0.0);
-            return;
-        }
-        let (mx, sum) = softmax_stats(row);
-        for (dv, &x) in d.iter_mut().zip(row) {
-            *dv = (x - mx).exp() / sum / count;
-        }
-        if let Some(dv) = d.get_mut(tgt as usize) {
-            *dv -= 1.0 / count;
-        }
-    });
-}
-
-/// `ce_value_masked.wgsl`: `out[n] = logsumexp(logits[n]) - logits[n, target[n]]`, zero for an ignored row.
-pub fn ce_value_masked(logits: &[f32], targets: &[u32], out: &mut [f32], bins: usize, ignore: u32) {
-    out.par_iter_mut().zip(logits.par_chunks(bins)).zip(targets.par_iter()).for_each(|((o, row), &tgt)| {
-        if tgt == ignore {
-            *o = 0.0;
-            return;
-        }
-        let (mx, sum) = softmax_stats(row);
-        *o = (mx + sum.ln()) - row.get(tgt as usize).copied().unwrap_or(0.0);
-    });
-}
-
-/// `src[rows, cols]` row-major as `[cols, rows]`, blocked so both sides stay in cache, threaded over row blocks.
-pub fn transpose(src: &[f32], rows: usize, cols: usize) -> Vec<f32> {
-    const T: usize = 32;
-    let mut dst = vec![0f32; rows * cols];
-    // Disjoint column bands of the source are disjoint row bands of the destination.
-    dst.par_chunks_mut(T * rows).enumerate().for_each(|(band, out)| {
-        let c0 = band * T;
-        let cn = (cols - c0).min(T);
-        let mut r0 = 0;
-        while r0 < rows {
-            let rn = (rows - r0).min(T);
-            for r in r0..r0 + rn {
-                let srow = &src[r * cols + c0..r * cols + c0 + cn];
-                for (cc, v) in srow.iter().enumerate() {
-                    out[cc * rows + r] = *v;
-                }
-            }
-            r0 += rn;
-        }
-    });
-    dst
-}
-
-/// `roof_fma.wgsl` natively: per element `s = inp[i]`, eight accumulators `s + j` each stepped `iters` times through
-/// `a = fma(a, c, d)`, and `out[i]` their pairwise sum - the kernel's arithmetic to the bit, since a fused multiply-add
-/// rounds once on every tier.
-///
-/// The probe is the compute half of the roofline, so it must reach the host's FMA rate, which its vector GEMM gets
-/// close to: the JIT runs one invocation per element through scalar code and measured a fifth of the NEON GEMM it
-/// grades. Each task walks its elements a vector block at a time with sixteen independent chains in registers
-/// (enough to cover the FMA latency on every pipe). The recurrence's addend is the constant `d`, so the NEON `fmla`
-/// (which accumulates into its destination) needs a register copy of `d` per step and caps a core at half its rate;
-/// SVE's `fmad` multiplies its destination instead and is the recurrence in one instruction, so an SVE host takes it
-/// (on 128-bit lanes, the NEON width) and reaches the full rate. x86's `vfmadd213ps` is the same form.
-pub fn roof_fma(inp: &[f32], out: &mut [f32], iters: u32, c: f32, d: f32) {
-    let n = inp.len().min(out.len());
-    if n == 0 {
-        return;
-    }
-    // One contiguous run per thread, a whole number of vector blocks (16 covers both tiers).
-    let chunk = n.div_ceil(rayon::current_num_threads()).next_multiple_of(16);
-    out[..n].par_chunks_mut(chunk).zip(inp[..n].par_chunks(chunk)).for_each(|(o, i)| roof_fma_run(i, o, iters, c, d));
-}
-
-fn roof_fma_run(inp: &[f32], out: &mut [f32], iters: u32, c: f32, d: f32) {
-    #[cfg(target_arch = "aarch64")]
-    if crate::fast_conv::neon_available() {
-        let whole = inp.len() / 8 * 8;
-        let sve = std::arch::is_aarch64_feature_detected!("sve");
-        unsafe { roof_fma_neon(&inp[..whole], &mut out[..whole], iters, c, d, sve) };
-        return roof_fma_scalar(&inp[whole..], &mut out[whole..], iters, c, d);
-    }
-    #[cfg(target_arch = "x86_64")]
-    if crate::fast_conv::isa_tier() != crate::fast_conv::IsaTier::Scalar {
-        let whole = inp.len() / 8 * 8;
-        unsafe { roof_fma_avx2(&inp[..whole], &mut out[..whole], iters, c, d) };
-        return roof_fma_scalar(&inp[whole..], &mut out[whole..], iters, c, d);
-    }
-    roof_fma_scalar(inp, out, iters, c, d)
-}
-
-/// The per-element reference, also the tail of the vector tiers.
-fn roof_fma_scalar(inp: &[f32], out: &mut [f32], iters: u32, c: f32, d: f32) {
-    for (o, &s) in out.iter_mut().zip(inp) {
-        let mut a: [f32; 8] = std::array::from_fn(|j| s + j as f32);
-        for _ in 0..iters {
-            for x in &mut a {
-                *x = x.mul_add(c, d);
-            }
-        }
-        *o = ((a[0] + a[1]) + (a[2] + a[3])) + ((a[4] + a[5]) + (a[6] + a[7]));
-    }
-}
-
-/// Eight elements (two 4-lane vectors) a block, eight accumulators each: sixteen independent chains in named
-/// registers. `sve` steps them with `fmad` (see [`roof_fma`]); otherwise with `fmla`, unrolled by two so the copy of
-/// `d` each step needs is the only one (a rolled loop also rotated every accumulator through a spare register).
-#[cfg(target_arch = "aarch64")]
-#[target_feature(enable = "neon")]
-unsafe fn roof_fma_neon(inp: &[f32], out: &mut [f32], iters: u32, c: f32, d: f32, sve: bool) {
-    use std::arch::aarch64::*;
-    let (cv, dv) = (vdupq_n_f32(c), vdupq_n_f32(d));
-    let k = |j: f32| vdupq_n_f32(j);
-    for (o, i) in out.as_chunks_mut::<8>().0.iter_mut().zip(inp.as_chunks::<8>().0) {
-        let (s, t) = (vld1q_f32(i.as_ptr()), vld1q_f32(i.as_ptr().add(4)));
-        let (mut a0, mut a1, mut a2, mut a3) = (s, vaddq_f32(s, k(1.0)), vaddq_f32(s, k(2.0)), vaddq_f32(s, k(3.0)));
-        let (mut a4, mut a5, mut a6, mut a7) = (vaddq_f32(s, k(4.0)), vaddq_f32(s, k(5.0)), vaddq_f32(s, k(6.0)), vaddq_f32(s, k(7.0)));
-        let (mut b0, mut b1, mut b2, mut b3) = (t, vaddq_f32(t, k(1.0)), vaddq_f32(t, k(2.0)), vaddq_f32(t, k(3.0)));
-        let (mut b4, mut b5, mut b6, mut b7) = (vaddq_f32(t, k(4.0)), vaddq_f32(t, k(5.0)), vaddq_f32(t, k(6.0)), vaddq_f32(t, k(7.0)));
-        if sve {
-            // z0-z15 alias the accumulators' v registers; only their low 128 bits are loaded, used and kept, so the
-            // result is the same at any SVE vector length.
-            std::arch::asm!(
-                ".arch_extension sve",
-                "ptrue p0.s",
-                "cbz {n:w}, 2f",
-                "1:",
-                "fmad z0.s, p0/m, z16.s, z17.s",
-                "fmad z1.s, p0/m, z16.s, z17.s",
-                "fmad z2.s, p0/m, z16.s, z17.s",
-                "fmad z3.s, p0/m, z16.s, z17.s",
-                "fmad z4.s, p0/m, z16.s, z17.s",
-                "fmad z5.s, p0/m, z16.s, z17.s",
-                "fmad z6.s, p0/m, z16.s, z17.s",
-                "fmad z7.s, p0/m, z16.s, z17.s",
-                "fmad z8.s, p0/m, z16.s, z17.s",
-                "fmad z9.s, p0/m, z16.s, z17.s",
-                "fmad z10.s, p0/m, z16.s, z17.s",
-                "fmad z11.s, p0/m, z16.s, z17.s",
-                "fmad z12.s, p0/m, z16.s, z17.s",
-                "fmad z13.s, p0/m, z16.s, z17.s",
-                "fmad z14.s, p0/m, z16.s, z17.s",
-                "fmad z15.s, p0/m, z16.s, z17.s",
-                "subs {n:w}, {n:w}, #1",
-                "b.ne 1b",
-                "2:",
-                n = inout(reg) iters => _,
-                inout("v0") a0,
-                inout("v1") a1,
-                inout("v2") a2,
-                inout("v3") a3,
-                inout("v4") a4,
-                inout("v5") a5,
-                inout("v6") a6,
-                inout("v7") a7,
-                inout("v8") b0,
-                inout("v9") b1,
-                inout("v10") b2,
-                inout("v11") b3,
-                inout("v12") b4,
-                inout("v13") b5,
-                inout("v14") b6,
-                inout("v15") b7,
-                in("v16") cv,
-                in("v17") dv,
-                out("p0") _,
-                options(nomem, nostack),
-            );
-        } else {
-            for _ in 0..iters / 2 {
-                a0 = vfmaq_f32(dv, a0, cv);
-                a1 = vfmaq_f32(dv, a1, cv);
-                a2 = vfmaq_f32(dv, a2, cv);
-                a3 = vfmaq_f32(dv, a3, cv);
-                a4 = vfmaq_f32(dv, a4, cv);
-                a5 = vfmaq_f32(dv, a5, cv);
-                a6 = vfmaq_f32(dv, a6, cv);
-                a7 = vfmaq_f32(dv, a7, cv);
-                b0 = vfmaq_f32(dv, b0, cv);
-                b1 = vfmaq_f32(dv, b1, cv);
-                b2 = vfmaq_f32(dv, b2, cv);
-                b3 = vfmaq_f32(dv, b3, cv);
-                b4 = vfmaq_f32(dv, b4, cv);
-                b5 = vfmaq_f32(dv, b5, cv);
-                b6 = vfmaq_f32(dv, b6, cv);
-                b7 = vfmaq_f32(dv, b7, cv);
-                a0 = vfmaq_f32(dv, a0, cv);
-                a1 = vfmaq_f32(dv, a1, cv);
-                a2 = vfmaq_f32(dv, a2, cv);
-                a3 = vfmaq_f32(dv, a3, cv);
-                a4 = vfmaq_f32(dv, a4, cv);
-                a5 = vfmaq_f32(dv, a5, cv);
-                a6 = vfmaq_f32(dv, a6, cv);
-                a7 = vfmaq_f32(dv, a7, cv);
-                b0 = vfmaq_f32(dv, b0, cv);
-                b1 = vfmaq_f32(dv, b1, cv);
-                b2 = vfmaq_f32(dv, b2, cv);
-                b3 = vfmaq_f32(dv, b3, cv);
-                b4 = vfmaq_f32(dv, b4, cv);
-                b5 = vfmaq_f32(dv, b5, cv);
-                b6 = vfmaq_f32(dv, b6, cv);
-                b7 = vfmaq_f32(dv, b7, cv);
-            }
-            if iters % 2 == 1 {
-                a0 = vfmaq_f32(dv, a0, cv);
-                a1 = vfmaq_f32(dv, a1, cv);
-                a2 = vfmaq_f32(dv, a2, cv);
-                a3 = vfmaq_f32(dv, a3, cv);
-                a4 = vfmaq_f32(dv, a4, cv);
-                a5 = vfmaq_f32(dv, a5, cv);
-                a6 = vfmaq_f32(dv, a6, cv);
-                a7 = vfmaq_f32(dv, a7, cv);
-                b0 = vfmaq_f32(dv, b0, cv);
-                b1 = vfmaq_f32(dv, b1, cv);
-                b2 = vfmaq_f32(dv, b2, cv);
-                b3 = vfmaq_f32(dv, b3, cv);
-                b4 = vfmaq_f32(dv, b4, cv);
-                b5 = vfmaq_f32(dv, b5, cv);
-                b6 = vfmaq_f32(dv, b6, cv);
-                b7 = vfmaq_f32(dv, b7, cv);
-            }
-        }
-        let sum = |x0, x1, x2, x3, x4, x5, x6, x7| vaddq_f32(vaddq_f32(vaddq_f32(x0, x1), vaddq_f32(x2, x3)), vaddq_f32(vaddq_f32(x4, x5), vaddq_f32(x6, x7)));
-        vst1q_f32(o.as_mut_ptr(), sum(a0, a1, a2, a3, a4, a5, a6, a7));
-        vst1q_f32(o.as_mut_ptr().add(4), sum(b0, b1, b2, b3, b4, b5, b6, b7));
-    }
-}
-
-/// Eight elements (one 8-lane vector) a block, eight accumulators: eight independent `vfmadd` chains.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2,fma")]
-unsafe fn roof_fma_avx2(inp: &[f32], out: &mut [f32], iters: u32, c: f32, d: f32) {
-    use std::arch::x86_64::*;
-    let (cv, dv) = (_mm256_set1_ps(c), _mm256_set1_ps(d));
-    for (o, i) in out.as_chunks_mut::<8>().0.iter_mut().zip(inp.as_chunks::<8>().0) {
-        let s = _mm256_loadu_ps(i.as_ptr());
-        let mut a: [__m256; 8] = std::array::from_fn(|j| _mm256_add_ps(s, _mm256_set1_ps(j as f32)));
-        for _ in 0..iters {
-            for x in &mut a {
-                *x = _mm256_fmadd_ps(*x, cv, dv);
-            }
-        }
-        let sum = _mm256_add_ps(_mm256_add_ps(_mm256_add_ps(a[0], a[1]), _mm256_add_ps(a[2], a[3])), _mm256_add_ps(_mm256_add_ps(a[4], a[5]), _mm256_add_ps(a[6], a[7])));
-        _mm256_storeu_ps(o.as_mut_ptr(), sum);
-    }
-}
-
-/// The NEON f32 GEMM: `C[m,n] (+)= A[m,k]·B[n,k]ᵀ`, the one routine every f32 matmul kernel (`matmul*`,
-/// `matmul_dx*`, `matmul_dw*`, the attention trio's per-head products) reaches on an AArch64 host.
-///
-/// A 4x4 output tile keeps sixteen 4-lane accumulators, four A and four B vectors in registers (24 of the 32 `v`
-/// registers), sixteen independent FMA chains per step; `k` is walked in panels of [`neon_gemm::KC`] so a thread's
-/// strip of A and the B panel it sweeps stay in L1/L2 across the panel, and the threads take strips of four output
-/// rows. Each tile sums its `k` in 4-lane partial sums, so the result matches the scalar reference to rounding, not
-/// bit for bit (gated by tolerance in this module's tests).
-#[cfg(target_arch = "aarch64")]
-pub mod neon_gemm {
-    use rayon::prelude::*;
-    use std::arch::aarch64::*;
-
-    /// Floats of `k` one panel covers.
-    pub const KC: usize = 512;
-    /// Rows of C per thread task (a multiple of the tile height).
-    const MIN_ROWS: usize = 4;
-    /// The arithmetic one task is given before the product fans out further: about a tenth of a millisecond of one
-    /// core, the cost of waking it (measured by `neon_gemm_bench`).
-    const FLOPS_PER_TASK: usize = 4_000_000;
-
-    /// `C (+)= A·Bᵀ` over every row, threaded over strips of rows. `accumulate` adds into C instead of writing it.
-    pub fn abt(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n: usize, accumulate: bool) {
-        assert!(a.len() >= m * k && b.len() >= n * k && c.len() >= m * n, "neon gemm: operand too short");
-        if k == 0 {
-            if !accumulate {
-                c[..m * n].fill(0.0);
-            }
-            return;
-        }
-        // As many tasks as the work pays for: a task is worth waking a worker (on a many-socket host a fan-out to every
-        // thread costs more than a per-head attention product's whole arithmetic), and never more than the pool.
-        let tasks = ((2 * m * n * k) / FLOPS_PER_TASK).clamp(1, rayon::current_num_threads());
-        if tasks == 1 {
-            unsafe { block(a.as_ptr(), b.as_ptr(), c.as_mut_ptr(), m, k, n, accumulate) };
-            return;
-        }
-        // No fewer than a tile's rows a task.
-        let rows_per = (m.div_ceil(tasks)).div_ceil(MIN_ROWS).max(1) * MIN_ROWS;
-        // Too few rows to feed the pool (a decode step's GEMV, a small batch): split the columns instead, in multiples
-        // of the tile width, so every element is computed exactly as the unsplit block computes it.
-        if m < 2 * MIN_ROWS && n >= 8 {
-            let cols = n.div_ceil(tasks).div_ceil(4).max(1) * 4;
-            let (ap, bp) = (a.as_ptr() as usize, b.as_ptr() as usize);
-            let parts: Vec<(usize, usize, Vec<f32>)> = (0..n.div_ceil(cols))
-                .into_par_iter()
-                .map(|t| {
-                    let (j0, w) = (t * cols, cols.min(n - t * cols));
-                    let mut part: Vec<f32> = if accumulate { (0..m).flat_map(|i| c[i * n + j0..i * n + j0 + w].iter().copied()).collect() } else { vec![0f32; m * w] };
-                    // SAFETY: columns `j0..j0+w` of B exist (asserted above); `part` is `m * w`.
-                    unsafe { block(ap as *const f32, (bp as *const f32).add(j0 * k), part.as_mut_ptr(), m, k, w, accumulate) };
-                    (j0, w, part)
-                })
-                .collect();
-            for (j0, w, part) in parts {
-                for i in 0..m {
-                    c[i * n + j0..i * n + j0 + w].copy_from_slice(&part[i * w..i * w + w]);
-                }
-            }
-            return;
-        }
-        let (ap, bp) = (a.as_ptr() as usize, b.as_ptr() as usize);
-        c[..m * n].par_chunks_mut(rows_per * n).enumerate().for_each(|(ci, cc)| {
-            let rows = cc.len() / n;
-            // SAFETY: rows `ci*rows_per ..+rows` of A exist (asserted above); B is read whole.
-            unsafe { block((ap as *const f32).add(ci * rows_per * k), bp as *const f32, cc.as_mut_ptr(), rows, k, n, accumulate) };
-        });
-    }
-
-    /// [`abt`] in one piece on the calling thread: the reference a split is held bit-identical to.
-    pub fn abt_unsplit(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n: usize) {
-        assert!(a.len() >= m * k && b.len() >= n * k && c.len() >= m * n, "neon gemm: operand too short");
-        unsafe { block(a.as_ptr(), b.as_ptr(), c.as_mut_ptr(), m, k, n, false) };
-    }
-
-    /// One thread's `rows` rows of C, `k` in panels.
-    ///
-    /// Every element of C is reduced in the one order [`tile`] reduces it, whether it falls in a full 4x4 tile or on
-    /// an edge, so a product is bit-identical however its rows and columns are cut: a GEMV (`n == 1`) equals the
-    /// matching column of a GEMM over the same rows, and a split product equals [`abt_unsplit`].
-    ///
-    /// # Safety
-    /// `a` holds `rows*k`, `b` `n*k`, `c` `rows*n` floats.
-    unsafe fn block(a: *const f32, b: *const f32, c: *mut f32, rows: usize, k: usize, n: usize, accumulate: bool) {
-        let mut k0 = 0;
-        while k0 < k {
-            let kl = (k - k0).min(KC);
-            let add = accumulate || k0 > 0;
-            let mut i = 0;
-            while i < rows {
-                let r = (rows - i).min(4);
-                let mut j = 0;
-                while j < n {
-                    let (ap, bp, cp) = (a.add(i * k + k0), b.add(j * k + k0), c.add(i * n + j));
-                    // Each edge shape its own instance, so the loops over the tile unroll at every shape.
-                    match (r, (n - j).min(4)) {
-                        (4, 4) => tile::<4, 4>(ap, bp, cp, k, kl, n, add),
-                        (4, 3) => tile::<4, 3>(ap, bp, cp, k, kl, n, add),
-                        (4, 2) => tile::<4, 2>(ap, bp, cp, k, kl, n, add),
-                        (4, _) => tile::<4, 1>(ap, bp, cp, k, kl, n, add),
-                        (3, 4) => tile::<3, 4>(ap, bp, cp, k, kl, n, add),
-                        (3, 3) => tile::<3, 3>(ap, bp, cp, k, kl, n, add),
-                        (3, 2) => tile::<3, 2>(ap, bp, cp, k, kl, n, add),
-                        (3, _) => tile::<3, 1>(ap, bp, cp, k, kl, n, add),
-                        (2, 4) => tile::<2, 4>(ap, bp, cp, k, kl, n, add),
-                        (2, 3) => tile::<2, 3>(ap, bp, cp, k, kl, n, add),
-                        (2, 2) => tile::<2, 2>(ap, bp, cp, k, kl, n, add),
-                        (2, _) => tile::<2, 1>(ap, bp, cp, k, kl, n, add),
-                        (_, 4) => tile::<1, 4>(ap, bp, cp, k, kl, n, add),
-                        (_, 3) => tile::<1, 3>(ap, bp, cp, k, kl, n, add),
-                        (_, 2) => tile::<1, 2>(ap, bp, cp, k, kl, n, add),
-                        _ => tile::<1, 1>(ap, bp, cp, k, kl, n, add),
-                    }
-                    j += 4;
-                }
-                i += 4;
-            }
-            k0 += kl;
-        }
-    }
-
-    #[inline(always)]
-    unsafe fn put(c: *mut f32, v: f32, add: bool) {
-        if add {
-            *c += v;
-        } else {
-            *c = v;
-        }
-    }
-
-    /// An `R` x `C` tile (each at most 4) of `C (+)= A·Bᵀ` over `kl` floats of `k`: rows of A and B are `lda`
-    /// floats apart. Each element is one 4-lane FMA chain over the 4-aligned prefix, a lane sum, then the scalar tail.
-    #[inline(always)]
-    unsafe fn tile<const R: usize, const C: usize>(a: *const f32, b: *const f32, c: *mut f32, lda: usize, kl: usize, n: usize, add: bool) {
-        let (r, cols) = (R, C);
-        let mut acc = [vdupq_n_f32(0.0); 16];
-        let mut kk = 0;
-        while kk + 4 <= kl {
-            let mut av = [vdupq_n_f32(0.0); 4];
-            for (ri, v) in av.iter_mut().enumerate().take(r) {
-                *v = vld1q_f32(a.add(ri * lda + kk));
-            }
-            for cj in 0..cols {
-                let bv = vld1q_f32(b.add(cj * lda + kk));
-                for (ri, a_) in av.iter().enumerate().take(r) {
-                    acc[ri * 4 + cj] = vfmaq_f32(acc[ri * 4 + cj], *a_, bv);
-                }
-            }
-            kk += 4;
-        }
-        let mut out = [0f32; 16];
-        for (o, v) in out.iter_mut().zip(acc) {
-            *o = vaddvq_f32(v);
-        }
-        while kk < kl {
-            for ri in 0..r {
-                let x = *a.add(ri * lda + kk);
-                for cj in 0..cols {
-                    out[ri * 4 + cj] += x * *b.add(cj * lda + kk);
-                }
-            }
-            kk += 1;
-        }
-        for ri in 0..r {
-            for cj in 0..cols {
-                put(c.add(ri * n + cj), out[ri * 4 + cj], add);
-            }
-        }
-    }
-
-    #[cfg(test)]
-    mod tests {
-        /// The scalar product every element of the GEMM must match, in f64.
-        fn reference(a: &[f32], b: &[f32], m: usize, k: usize, n: usize) -> Vec<f64> {
-            (0..m * n).map(|e| (0..k).map(|kk| a[(e / n) * k + kk] as f64 * b[(e % n) * k + kk] as f64).sum()).collect()
-        }
-
-        /// The GEMM's rate at a small decoder's training shapes (rows of 8 x 1024 tokens, width 256, FFN 704, vocabulary
-        /// 4096, attention heads of 64 over 1024 positions).
-        /// Run: `make test/one P=brain-backend-cpu ARGS="neon_gemm_bench --ignored --nocapture"`.
-        #[test]
-        #[ignore = "throughput measurement, not a correctness gate"]
-        fn neon_gemm_bench() {
-            let mut rng = data::rng::Lcg::random();
-            for &(label, m, k, n) in &[("qkv", 8192, 256, 768), ("ffn up", 8192, 256, 704), ("ffn down", 8192, 704, 256), ("head", 8192, 256, 4096), ("dw ffn", 704, 8192, 256), ("scores", 1024, 64, 1024), ("apply", 1024, 1024, 64), ("decode", 1, 256, 4096), ("gemv", 4096, 256, 1)] {
-                let a: Vec<f32> = (0..m * k).map(|_| rng.signed()).collect();
-                let b: Vec<f32> = (0..n * k).map(|_| rng.signed()).collect();
-                let mut c = vec![0f32; m * n];
-                super::abt(&a, &b, &mut c, m, k, n, false);
-                let mut best = f64::INFINITY;
-                for _ in 0..5 {
-                    let t = std::time::Instant::now();
-                    super::abt(&a, &b, &mut c, m, k, n, false);
-                    best = best.min(t.elapsed().as_secs_f64());
-                }
-                eprintln!("{label:<9} m={m:<5} k={k:<5} n={n:<5} {:>8.3} ms {:>8.1} GFLOP/s", best * 1e3, 2.0 * (m * k * n) as f64 / best / 1e9);
-            }
-        }
-
-        /// Every shape class (tile edges in both directions, a `k` tail, `k` past a panel, threaded and inline sizes)
-        /// matches the f64 reference to f32 rounding, writing and accumulating.
-        #[test]
-        fn the_neon_gemm_matches_the_reference_at_every_edge() {
-            let mut rng = data::rng::Lcg::random();
-            for &(m, k, n) in &[(1, 1, 1), (3, 5, 2), (4, 4, 4), (7, 13, 9), (17, 515, 6), (64, 1030, 33), (600, 64, 260), (5, 2049, 7)] {
-                let a: Vec<f32> = (0..m * k).map(|_| rng.signed()).collect();
-                let b: Vec<f32> = (0..n * k).map(|_| rng.signed()).collect();
-                let want = reference(&a, &b, m, k, n);
-                let mut c = vec![0f32; m * n];
-                super::abt(&a, &b, &mut c, m, k, n, false);
-                let tol = |w: f64| 1e-5 * (k as f64).sqrt() * (1.0 + w.abs());
-                for (got, w) in c.iter().zip(&want) {
-                    assert!((*got as f64 - w).abs() <= tol(*w), "({m},{k},{n}): {got} vs {w}");
-                }
-                super::abt(&a, &b, &mut c, m, k, n, true);
-                for (got, w) in c.iter().zip(&want) {
-                    assert!((*got as f64 - 2.0 * w).abs() <= 2.0 * tol(*w), "accumulating ({m},{k},{n}): {got} vs {}", 2.0 * w);
-                }
             }
         }
     }
