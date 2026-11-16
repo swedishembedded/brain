@@ -50,6 +50,30 @@ fn gradients<M: Model>(m: &M) -> Vec<(String, Vec<f32>)> {
     m.param_names().into_iter().map(|n| (n.clone(), m.read_grad(&n))).collect()
 }
 
+/// Two backward passes over the batch already set, with no zeroing between them, leave twice the gradient of one:
+/// gradient accumulation (`grad_accum` micro-batches into one optimizer step) adds every micro-batch's gradient
+/// instead of keeping the last. Returns the trainable tensors whose accumulated gradient is not twice the single one.
+pub fn backwards_accumulate<M: Model>(m: &M) -> Result<(), String> {
+    let once = gradients(m);
+    m.forward();
+    m.backward();
+    m.poll_wait();
+    let mut wrong = Vec::new();
+    for (name, g1) in &once {
+        let g2 = m.read_grad(name);
+        let scale = max_abs(g1).max(1e-12);
+        let off = g1.iter().zip(&g2).map(|(a, b)| (2.0 * a - b).abs()).fold(0.0f32, f32::max);
+        if off > 1e-3 * scale {
+            wrong.push(format!("{name} (|2 g1 - g2| = {off:e}, |g1| = {scale:e})"));
+        }
+    }
+    if wrong.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("a second backward does not add its gradient: {}", wrong.join(", ")))
+    }
+}
+
 fn max_abs(v: &[f32]) -> f32 {
     v.iter().fold(0.0, |m, x| m.max(x.abs()))
 }
