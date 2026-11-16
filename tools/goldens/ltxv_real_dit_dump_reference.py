@@ -107,7 +107,7 @@ sys.path.insert(0, str(_REFERENCE_ROOT / "packages" / "ltx-core" / "src"))
 
 import ltx_core.model.transformer.transformer_args as transformer_args_mod  # noqa: E402
 from ltx_core.model.transformer.model import LTXModel, LTXModelType  # noqa: E402
-from ltx_core.model.transformer.modality import Modality  # noqa: E402
+from ltx_core.model.transformer.modality import Modality, TokenTimesteps  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from golden_source import source_block  # noqa: E402
@@ -346,7 +346,7 @@ def det_video_modality(seed, grid, context_len, inner_dim, in_channels, keyframe
     keyframes_mask = torch.zeros(b, t, 1)
     keyframes_mask[:, keyframe_token, :] = 1.0
 
-    return Modality(latent=latent, sigma=sigma, timesteps=timesteps, positions=positions,
+    return Modality(latent=latent, sigma=sigma, timesteps=TokenTimesteps(timesteps), positions=positions,
                      context=context, keyframes_mask=keyframes_mask)
 
 
@@ -456,7 +456,7 @@ def main():
     # ---- self-validation 2: batch independence -------------------------------
     video_b2 = Modality(
         latent=video.latent.repeat(2, 1, 1), sigma=video.sigma.repeat(2),
-        timesteps=video.timesteps.repeat(2, 1, 1), positions=video.positions.repeat(2, 1, 1, 1),
+        timesteps=TokenTimesteps(video.timesteps.values.repeat(2, 1, 1)), positions=video.positions.repeat(2, 1, 1, 1),
         context=video.context.repeat(2, 1, 1), keyframes_mask=video.keyframes_mask.repeat(2, 1, 1))
     out_v_b2, _, _ = run_with_taps(model, video_b2, args.layers)
     agree("batch-independence row 0", out_v_b2[0], out_v[0], tol=1e-5)
@@ -471,7 +471,7 @@ def main():
     tensors = {
         "latent": video.latent[0],
         "context": video.context[0],
-        "timesteps": video.timesteps[0],
+        "timesteps": video.timesteps.values[0],
         "positions": video.positions[0],
         "keyframes_mask": video.keyframes_mask[0],
         "rope_cos": rope_cos[0],

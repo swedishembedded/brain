@@ -88,7 +88,7 @@ sys.path.insert(0, str(_REFERENCE_ROOT / "packages" / "ltx-core" / "src"))
 
 import ltx_core.model.transformer.transformer_args as transformer_args_mod  # noqa: E402
 from ltx_core.model.transformer.model import LTXModel, LTXModelType  # noqa: E402
-from ltx_core.model.transformer.modality import Modality  # noqa: E402
+from ltx_core.model.transformer.modality import Modality, TokenTimesteps  # noqa: E402
 from ltx_core.text_encoders.gemma.embeddings_connector import Embeddings1DConnector  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -290,7 +290,7 @@ def det_video_modality(seed, grid, context_len, inner_dim, in_channels, sigma_va
     keyframes_mask = torch.zeros(b, t, 1)
     keyframes_mask[:, keyframe_token, :] = 1.0
 
-    return Modality(latent=latent, sigma=sigma, timesteps=timesteps, positions=positions,
+    return Modality(latent=latent, sigma=sigma, timesteps=TokenTimesteps(timesteps), positions=positions,
                     context=context, keyframes_mask=keyframes_mask)
 
 
@@ -315,7 +315,7 @@ def det_audio_modality(seed, t_audio, context_len, inner_dim, in_channels, sigma
 
     context = 0.5 * torch.randn(b, context_len, inner_dim, generator=g)
 
-    return Modality(latent=latent, sigma=sigma, timesteps=timesteps, positions=positions,
+    return Modality(latent=latent, sigma=sigma, timesteps=TokenTimesteps(timesteps), positions=positions,
                     context=context, keyframes_mask=None)
 
 
@@ -430,7 +430,7 @@ def det_video_modality_with_context(seed, grid, context, in_channels, sigma_valu
     positions = einops.repeat(bounds, "c f h w bounds -> bs c (f h w) bounds", bs=b)
     keyframes_mask = torch.zeros(b, t, 1)
     keyframes_mask[:, keyframe_token, :] = 1.0
-    return Modality(latent=latent, sigma=sigma, timesteps=timesteps, positions=positions,
+    return Modality(latent=latent, sigma=sigma, timesteps=TokenTimesteps(timesteps), positions=positions,
                     context=context, keyframes_mask=keyframes_mask)
 
 
@@ -448,7 +448,7 @@ def det_audio_modality_with_context(seed, t_audio, context, in_channels, sigma_v
     ends = starts + 1.0
     bounds = torch.stack([starts, ends], dim=-1)
     positions = einops.repeat(bounds, "c t bounds -> bs c t bounds", bs=b)
-    return Modality(latent=latent, sigma=sigma, timesteps=timesteps, positions=positions,
+    return Modality(latent=latent, sigma=sigma, timesteps=TokenTimesteps(timesteps), positions=positions,
                     context=context, keyframes_mask=None)
 
 
@@ -520,11 +520,11 @@ def dump_gated(args):
     # ---- self-validation 2: batch independence ------------------------------
     video_b2 = Modality(
         latent=video.latent.repeat(2, 1, 1), sigma=video.sigma.repeat(2),
-        timesteps=video.timesteps.repeat(2, 1, 1), positions=video.positions.repeat(2, 1, 1, 1),
+        timesteps=TokenTimesteps(video.timesteps.values.repeat(2, 1, 1)), positions=video.positions.repeat(2, 1, 1, 1),
         context=video.context.repeat(2, 1, 1), keyframes_mask=video.keyframes_mask.repeat(2, 1, 1))
     audio_b2 = Modality(
         latent=audio.latent.repeat(2, 1, 1), sigma=audio.sigma.repeat(2),
-        timesteps=audio.timesteps.repeat(2, 1, 1), positions=audio.positions.repeat(2, 1, 1, 1),
+        timesteps=TokenTimesteps(audio.timesteps.values.repeat(2, 1, 1)), positions=audio.positions.repeat(2, 1, 1, 1),
         context=audio.context.repeat(2, 1, 1), keyframes_mask=None)
     out_v_b2, out_a_b2, _, _ = run_with_taps(model, video_b2, audio_b2)
     agree("gated batch-independence video row 0", out_v_b2[0], out_v[0], tol=1e-5)
@@ -545,7 +545,7 @@ def dump_gated(args):
         "video.raw_context": v_raw_context[0],
         "video.context_valid": v_context_valid,
         "video.connector_out": v_connector_out[0],
-        "video.timesteps": video.timesteps[0],
+        "video.timesteps": video.timesteps.values[0],
         "video.positions": video.positions[0],
         "video.keyframes_mask": video.keyframes_mask[0],
         "video.sigma": video.sigma,
@@ -553,7 +553,7 @@ def dump_gated(args):
         "audio.raw_context": a_raw_context[0],
         "audio.context_valid": a_context_valid,
         "audio.connector_out": a_connector_out[0],
-        "audio.timesteps": audio.timesteps[0],
+        "audio.timesteps": audio.timesteps.values[0],
         "audio.positions": audio.positions[0],
         "audio.sigma": audio.sigma,
         "video.rope_cos": v_rope_cos[0],
@@ -666,11 +666,11 @@ def main():
     # ---- self-validation 2: batch independence ------------------------------
     video_b2 = Modality(
         latent=video.latent.repeat(2, 1, 1), sigma=video.sigma.repeat(2),
-        timesteps=video.timesteps.repeat(2, 1, 1), positions=video.positions.repeat(2, 1, 1, 1),
+        timesteps=TokenTimesteps(video.timesteps.values.repeat(2, 1, 1)), positions=video.positions.repeat(2, 1, 1, 1),
         context=video.context.repeat(2, 1, 1), keyframes_mask=video.keyframes_mask.repeat(2, 1, 1))
     audio_b2 = Modality(
         latent=audio.latent.repeat(2, 1, 1), sigma=audio.sigma.repeat(2),
-        timesteps=audio.timesteps.repeat(2, 1, 1), positions=audio.positions.repeat(2, 1, 1, 1),
+        timesteps=TokenTimesteps(audio.timesteps.values.repeat(2, 1, 1)), positions=audio.positions.repeat(2, 1, 1, 1),
         context=audio.context.repeat(2, 1, 1), keyframes_mask=None)
     # tol is fp32 batched-matmul reassociation, not semantics - see the
     # video-only dumper's `agree` docstring for the same phenomenon.
@@ -691,13 +691,13 @@ def main():
     tensors = {
         "video.latent": video.latent[0],
         "video.context": video.context[0],
-        "video.timesteps": video.timesteps[0],
+        "video.timesteps": video.timesteps.values[0],
         "video.positions": video.positions[0],
         "video.keyframes_mask": video.keyframes_mask[0],
         "video.sigma": video.sigma,
         "audio.latent": audio.latent[0],
         "audio.context": audio.context[0],
-        "audio.timesteps": audio.timesteps[0],
+        "audio.timesteps": audio.timesteps.values[0],
         "audio.positions": audio.positions[0],
         "audio.sigma": audio.sigma,
         "video.rope_cos": v_rope_cos[0],
