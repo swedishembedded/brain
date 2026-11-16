@@ -211,7 +211,9 @@ impl Fitted {
             batch_size: batch,
             lr: 3e-3,
             min_lr: 3e-4,
-            warmup: 50,
+            // At most half the run: a smoke run is shorter than the full run's 50 warmup steps, and a warmup longer
+            // than the decay is refused.
+            warmup: 50.min((spec.steps / 2).max(1)),
             decay_iters: spec.steps,
             weight_decay: 0.1,
             eval_interval: 100,
