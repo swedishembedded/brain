@@ -1485,6 +1485,23 @@ pub const ALL: &[CudaKernel] = &[
         src: include_str!("../cu/kv_append_i8.cu"),
     },
     CudaKernel {
+        name: "kv_append_i8_clipped_kv",
+        op: Op::Elementwise,
+        weight: Dtype::I8,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_kv_append_i8_clipped_kv",
+        what: "kv_append_i8_clipped for the K and the V rows of the same tokens in one launch, one warp per (token, kv head) of each; bit-identical to two paged_kv_append_i8_clipped_batched dispatches",
+        reported: "native:kv_append_i8_clipped_kv",
+        block_dim: 128,
+        // Four (token, kv head) pairs per block.
+        tile: (4, 1),
+        shared_bytes: 0,
+        programmatic: true,
+        src: include_str!("../cu/kv_append_i8.cu"),
+    },
+    CudaKernel {
         name: "kv_append_bf16",
         // Redirected to by name from the generated `paged_kv_append_batched_word#pool=bf16` (`gpu_core::native_upgrade`).
         op: Op::Elementwise,
@@ -5374,6 +5391,23 @@ pub const ALL: &[CudaKernel] = &[
         // Four heads of one token a block.
         tile: (1, 4),
         // The angle tables, the 64 partial sums of four heads and their norms.
+        shared_bytes: 2 * 128 * 4 + 4 * 64 * 4 + 4 * 4,
+        programmatic: false,
+        src: include_str!("../cu/qknorm_rope_rows.cu"),
+    },
+    CudaKernel {
+        name: "qknorm_rope_qk",
+        op: Op::Elementwise,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_qknorm_rope_qk",
+        what: "qknorm_rope_rows for a layer's query and key heads of the same tokens in one launch; bit-identical to qknorm_rope_fused on each",
+        reported: "native:qknorm_rope_qk",
+        block_dim: 256,
+        // Four heads of one token a block.
+        tile: (1, 4),
         shared_bytes: 2 * 128 * 4 + 4 * 64 * 4 + 4 * 4,
         programmatic: false,
         src: include_str!("../cu/qknorm_rope_rows.cu"),

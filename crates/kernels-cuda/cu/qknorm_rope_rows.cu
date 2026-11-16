@@ -22,6 +22,8 @@
 //   positions : [rows / heads] u32
 //   out       : [rows, head_dim] f32
 //
+// `brain_qknorm_rope_qk` runs a layer's query and key heads in one launch (params gain heads_k; xk, wk, outk follow).
+//
 // BIT-IDENTICAL to `qknorm_rope_fused`: 64 lanes a head, lane t summing the squares of channels t, t + 64, ... in that order,
 // the 64 partials folded left in index order, `1 / sqrt(ss / head_dim + eps)`, a channel `(x * inv) * w`, the angle
 // `f32(pos) * pow(base, -f32(2m) / f32(head_dim))` and the rotation's two products and one sum each rounded on its own (the
@@ -33,22 +35,13 @@
 #define BRAIN_QKR_HEADS (BRAIN_QKR_THREADS / 64)  // heads a block runs at once, 64 lanes each
 #define BRAIN_QKR_MAX_HALF 128
 
-extern "C" __global__ void __launch_bounds__(BRAIN_QKR_THREADS)
-brain_qknorm_rope_rows(const unsigned int* params, const float* x, const float* w, const unsigned int* positions, float* out) {
-    const unsigned int rows = params[0], heads = params[1], d = params[2];
-    const float eps = __uint_as_float(params[3]), base = __uint_as_float(params[4]);
-    const unsigned int half = d / 2u;
-    // A block is one token's group of four heads: a decode step's few tokens still fill the card.
-    const unsigned int groups = (heads + BRAIN_QKR_HEADS - 1u) / BRAIN_QKR_HEADS;
-    const unsigned long long block = (unsigned long long)blockIdx.y * gridDim.x + blockIdx.x;
-    const unsigned long long token = block / groups;
-    const unsigned int h0 = (unsigned int)(block % groups) * BRAIN_QKR_HEADS;
-    // The whole block leaves together, before its first barrier.
-    if (token * heads >= rows) { return; }
-
+// Four heads `h0..h0 + 4` of `token` (of `heads` per token), by the whole block.
+__device__ __forceinline__ void norm_rope_heads(unsigned long long token, unsigned int h0, unsigned int heads, unsigned int d, float eps, float base,
+                                                const float* x, const float* w, const unsigned int* positions, float* out) {
     __shared__ float cos_t[BRAIN_QKR_MAX_HALF], sin_t[BRAIN_QKR_MAX_HALF];
     __shared__ float partial[BRAIN_QKR_HEADS][64];
     __shared__ float inv_s[BRAIN_QKR_HEADS];
+    const unsigned int half = d / 2u;
 
     const unsigned int pos = positions[token];
     for (unsigned int m = threadIdx.x; m < half; m += BRAIN_QKR_THREADS) {
@@ -86,5 +79,36 @@ brain_qknorm_rope_rows(const unsigned int* params, const float* x, const float* 
             out[row + m] = x0 * cs - x1 * sn;
             out[row + m + half] = x1 * cs + x0 * sn;
         }
+    }
+}
+
+extern "C" __global__ void __launch_bounds__(BRAIN_QKR_THREADS)
+brain_qknorm_rope_rows(const unsigned int* params, const float* x, const float* w, const unsigned int* positions, float* out) {
+    const unsigned int rows = params[0], heads = params[1], d = params[2];
+    const float eps = __uint_as_float(params[3]), base = __uint_as_float(params[4]);
+    // A block is one token's group of four heads: a decode step's few tokens still fill the card.
+    const unsigned int groups = (heads + BRAIN_QKR_HEADS - 1u) / BRAIN_QKR_HEADS;
+    const unsigned long long block = (unsigned long long)blockIdx.y * gridDim.x + blockIdx.x;
+    const unsigned long long token = block / groups;
+    // The whole block leaves together, before its first barrier.
+    if (token * heads >= rows) { return; }
+    norm_rope_heads(token, (unsigned int)(block % groups) * BRAIN_QKR_HEADS, heads, d, eps, base, x, w, positions, out);
+}
+
+// The query and the key heads of the same tokens in one launch: per token, the query's groups of four heads, then the
+// key's. params [tokens * heads_q, heads_q, head_dim, eps, base, heads_k]; each tensor its own x, w and out.
+extern "C" __global__ void __launch_bounds__(BRAIN_QKR_THREADS)
+brain_qknorm_rope_qk(const unsigned int* params, const float* xq, const float* wq, const unsigned int* positions, float* outq, const float* xk, const float* wk, float* outk) {
+    const unsigned int rows = params[0], heads_q = params[1], d = params[2], heads_k = params[5];
+    const float eps = __uint_as_float(params[3]), base = __uint_as_float(params[4]);
+    const unsigned int gq = (heads_q + BRAIN_QKR_HEADS - 1u) / BRAIN_QKR_HEADS, gk = (heads_k + BRAIN_QKR_HEADS - 1u) / BRAIN_QKR_HEADS;
+    const unsigned long long block = (unsigned long long)blockIdx.y * gridDim.x + blockIdx.x;
+    const unsigned long long token = block / (gq + gk);
+    const unsigned int g = (unsigned int)(block % (gq + gk));
+    if (token * heads_q >= rows) { return; }
+    if (g < gq) {
+        norm_rope_heads(token, g * BRAIN_QKR_HEADS, heads_q, d, eps, base, xq, wq, positions, outq);
+    } else {
+        norm_rope_heads(token, (g - gq) * BRAIN_QKR_HEADS, heads_k, d, eps, base, xk, wk, positions, outk);
     }
 }

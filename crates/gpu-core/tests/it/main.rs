@@ -64,6 +64,7 @@ mod glue_roof_bench;
 mod gqa_qk_prep_native;
 mod qknorm_rope_native;
 mod add_rmsnorm_bf16_native;
+mod kv_append_i8_pair_native;
 mod host_tier;
 mod scoped_backend;
 mod i8_decode_batch_bench;

@@ -2098,7 +2098,6 @@ impl Engine {
         let mbt = self.max_blocks_per_seq as usize;
         let slots = self.row_slots(std::iter::repeat_n(table.kv_namespace(), rows as usize));
         let (mut positions, mut seqlens, mut blocks, mut offsets) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-        let mut bt = vec![0u32; rows as usize * mbt];
         for i in 0..rows {
             let pos = start + i;
             let (bl, off) = table.locate(pos, bs);
@@ -2106,8 +2105,11 @@ impl Engine {
             seqlens.push(pos + 1); // causal: query i attends positions 0..=pos
             blocks.push(bl);
             offsets.push(off);
+        }
+        let mut bt = vec![0u32; rows as usize * mbt];
+        for i in 0..rows as usize {
             for (lb, &phys) in table.blocks().iter().enumerate() {
-                bt[i as usize * mbt + lb] = phys;
+                bt[i * mbt + lb] = phys;
             }
         }
         BatchMeta { bsz: rows, positions, seqlens, blocks, offsets, bt, slots }
@@ -2809,6 +2811,19 @@ impl Engine {
         }
     }
 
+    /// [`Self::qk_norm_rope`] of a layer's query (`nh` heads) and key (`nkv` heads) over `b` tokens as one native launch;
+    /// `false`, nothing pushed, where the native rows would not serve both (each tensor `(x, gain, out)`).
+    fn qk_norm_rope_pair(&self, s: &mut Vec<Step>, q: (&DeviceBuffer, Option<&DeviceBuffer>, &DeviceBuffer), k: (&DeviceBuffer, Option<&DeviceBuffer>, &DeviceBuffer), b: u32, theta: f32) -> bool {
+        let (Some(wq), Some(wk)) = (q.1, k.1) else {
+            return false;
+        };
+        if self.yarn.is_some() || !self.caps.workgroup_reductions || self.gemm.is_reference_pinned() {
+            return false;
+        }
+        let shape = library::QkNormRopeShape { tokens: b, heads: self.cfg.n_heads, head_dim: self.cfg.head_dim, rms_eps: self.cfg.rms_eps, rope_base: theta };
+        library::qk_norm_rope_pair(&self.gpu, s, &shape, self.cfg.n_kv_heads, [q.0, wq, q.2], [k.0, wk, k.2], &self.sc.pos_buf)
+    }
+
     /// M4.2: fused QK-norm + RoPE, one dispatch over `x`'s `rows = b * heads`
     /// per-head rows (`heads` is `nh` for Q, `nkv` for K - the SAME
     /// flattening `Self::rms`'s own `b * nh` / `b * nkv` row counts already
@@ -3110,7 +3125,11 @@ impl Engine {
             // (`Self::qk_norm_rope`) instead of the four separate `self.rms`/
             // `ROPE_PAGED` dispatches this used to be - see that method's own
             // doc for the derivation and the `workgroup_reductions` gate.
-            self.qk_norm_rope(&mut s, q_src, q_norm, &sc.q, hd, nh, b * nh, theta);
+            // The int8 tier norms and rotates K on its own before appending it: both heads' passes then go as one launch.
+            let qk_paired = self.kv_int8 && self.qk_norm_rope_pair(&mut s, (q_src, q_norm, &sc.q), (k_src, k_norm, &sc.k), b, theta);
+            if !qk_paired {
+                self.qk_norm_rope(&mut s, q_src, q_norm, &sc.q, hd, nh, b * nh, theta);
+            }
             if let Some((queries, base)) = &self.capture {
                 let splice = g.kernel_index("splice").expect("splice is registered");
                 s.push(g.step(splice, &[&sc.q, &queries[l]], &[b * hq, base.get() * hq], b * hq));
@@ -3122,14 +3141,27 @@ impl Engine {
                 // different shape than the fp32 append `Self::
                 // qk_norm_rope_append` folds in, so it is NOT merged into
                 // this milestone.
-                self.qk_norm_rope(&mut s, k_src, k_norm, &sc.k, hd, nkv, b * nkv, theta);
+                if !qk_paired {
+                    self.qk_norm_rope(&mut s, k_src, k_norm, &sc.k, hd, nkv, b * nkv, theta);
+                }
                 // ONE append kernel for both paths (audit F42): the clip
                 // buffers hold either the calibrated ceilings or the
                 // f32::MAX sentinel, which the kernel's contract documents
-                // as bit-identical to the old unclipped twin.
-                let append = self.kv_fp8.map_or(APPEND_I8_CLIPPED, |k| k.append);
-                s.push(g.step(append, &[&sc.k, &sc.blk_buf, &sc.off_buf, &self.clip_k[l], &self.pool_k[l], &self.scales_k[l]], &[b, hkv, bs, hd], b * nkv));
-                s.push(g.step(append, &[&sc.v, &sc.blk_buf, &sc.off_buf, &self.clip_v[l], &self.pool_v[l], &self.scales_v[l]], &[b, hkv, bs, hd], b * nkv));
+                // as bit-identical to the old unclipped twin. The int8 K and V appends go as one native launch where
+                // the device offers it.
+                let paired = (self.kv_fp8.is_none() && !self.gemm.is_reference_pinned())
+                    .then(|| {
+                        let bufs = [&sc.k, &sc.v, &sc.blk_buf, &sc.off_buf, &self.clip_k[l], &self.clip_v[l], &self.pool_k[l], &self.pool_v[l], &self.scales_k[l], &self.scales_v[l]];
+                        gpu_core::provider::cuda::kv_append_i8_kv_step(g, &bufs, [b, hkv, bs, hd])
+                    })
+                    .flatten();
+                if let Some(step) = paired {
+                    s.push(step);
+                } else {
+                    let append = self.kv_fp8.map_or(APPEND_I8_CLIPPED, |k| k.append);
+                    s.push(g.step(append, &[&sc.k, &sc.blk_buf, &sc.off_buf, &self.clip_k[l], &self.pool_k[l], &self.scales_k[l]], &[b, hkv, bs, hd], b * nkv));
+                    s.push(g.step(append, &[&sc.v, &sc.blk_buf, &sc.off_buf, &self.clip_v[l], &self.pool_v[l], &self.scales_v[l]], &[b, hkv, bs, hd], b * nkv));
+                }
                 // The SAME `Op::PagedAttentionFused` prefill question the fp32
                 // branch below asks, only at `Dtype::I8`: `paged_flash_prefill_i8`
                 // serves causal-chunk prefill; decode runs the fused GQA decode

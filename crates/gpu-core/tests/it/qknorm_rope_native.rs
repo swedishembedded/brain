@@ -12,7 +12,7 @@
 //! the same device from the same inputs. The native kernel keeps that kernel's 64-lane accumulation order, its left fold of the
 //! partials and its per-element arithmetic, so the outputs must be BIT-identical.
 
-use gpu_core::provider::library::{qk_norm_rope, QkNormRopeShape};
+use gpu_core::provider::library::{qk_norm_rope, qk_norm_rope_pair, QkNormRopeShape};
 use gpu_core::{Dispatch, Gpu};
 
 const KERNELS: &[(&str, &str)] = &[("qknorm_rope_fused", kernels::QKNORM_ROPE_FUSED)];
@@ -67,5 +67,33 @@ fn the_native_rows_equal_the_portable_fused_norm_and_rotation_bit_for_bit() {
         for spread in [1.0f32, 40.0] {
             check(&gpu, QkNormRopeShape { tokens, heads, head_dim, rms_eps: 1e-6, rope_base: 1_000_000.0 }, spread);
         }
+    }
+}
+
+/// A layer's query and key in one launch: each tensor's bits are the portable kernel's on that tensor.
+#[test]
+fn the_query_and_key_in_one_launch_equal_two_portable_dispatches_bit_for_bit() {
+    let gpu = gpu_core::testgpu::dev(KERNELS);
+    if !is_cuda(&gpu) {
+        brain_testutil::skip_unavailable("not a CUDA device");
+        return;
+    }
+    for (tokens, hq, hk, hd) in [(37u32, 32u32, 8u32, 128u32), (1, 32, 8, 128), (6, 5, 3, 64)] {
+        let shape = QkNormRopeShape { tokens, heads: hq, head_dim: hd, rms_eps: 1e-6, rope_base: 1_000_000.0 };
+        let pos = gpu.storage(u64::from(tokens));
+        gpu.write(&pos, &(0..tokens).map(|t| 3 * t + 700).collect::<Vec<u32>>());
+        let tensor = |heads: u32, seed: u64| {
+            let n = (tokens * heads * hd) as usize;
+            (gpu.storage_init("x", &values(n, seed, 20.0)), gpu.storage_init("w", &values(hd as usize, seed + 1, 2.0)), gpu.storage_init("out", &vec![f32::NAN; n]), gpu.storage(n as u64), n)
+        };
+        let (xq, wq, oq, rq, nq) = tensor(hq, 10);
+        let (xk, wk, ok, rk, nk) = tensor(hk, 20);
+        let fused = |x, w, out, heads: u32| gpu.dispatch(FUSED, &[x, w, &pos, out], &[tokens * heads, heads, hd, 1e-6f32.to_bits(), 1_000_000.0f32.to_bits()], Dispatch::Workgroups(tokens * heads));
+        gpu.submit(&[], &[fused(&xq, &wq, &rq, hq), fused(&xk, &wk, &rk, hk)]);
+        let mut native = Vec::new();
+        assert!(qk_norm_rope_pair(&gpu, &mut native, &shape, hk, [&xq, &wq, &oq], [&xk, &wk, &ok], &pos), "qknorm_rope_qk offered");
+        gpu.submit(&[], &native);
+        assert_eq!(bits(gpu.read(&oq, nq)), bits(gpu.read(&rq, nq)), "query differs: {shape:?}");
+        assert_eq!(bits(gpu.read(&ok, nk)), bits(gpu.read(&rk, nk)), "key differs: {shape:?} {hk} key heads");
     }
 }

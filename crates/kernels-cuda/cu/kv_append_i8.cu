@@ -13,6 +13,9 @@
 //   src     : [batch, kv_stride] f32          blocks, offsets : [batch] u32   clip : [n_kv] f32
 //   pool    : int8 packed four to a u32 word  scales : [num_blocks * block_size * n_kv] f32
 //
+// `brain_kv_append_i8_clipped_kv` appends a K and a V batch of the same tokens in one launch (each with its own src,
+// clip, pool and scales; the slots are shared).
+//
 // The reference's thread walks the head twice serially (a 128-step max, then a 128-step quantise); here the lanes
 // split both walks. Bit-identical to the reference: the absolute maximum is order-independent, the scale is
 // min(max, clip) / 127 (1 for zero), and each value is clamp(rint(src / scale), -127, 127) with a correctly rounded
@@ -33,13 +36,10 @@
 #endif
 #endif
 
-extern "C" __global__ void __launch_bounds__(WARPS * 32) brain_kv_append_i8_clipped(const unsigned int* params, const float* src, const unsigned int* blocks, const unsigned int* offsets, const float* clip, unsigned int* pool, float* scales) {
-    BRAIN_PDL_ENTRY();
-    const unsigned int batch = params[0], kv_stride = params[1], block_size = params[2], hd = params[3];
+// One (token, kv head) pair `idx` of a batch, by one warp.
+__device__ __forceinline__ void append_head(unsigned int idx, unsigned int batch, unsigned int kv_stride, unsigned int block_size, unsigned int hd, const float* src, const unsigned int* blocks, const unsigned int* offsets, const float* clip, unsigned int* pool, float* scales) {
     const unsigned int n_kv = kv_stride / hd;
     const unsigned int lane = threadIdx.x & 31u;
-    const unsigned int idx = blockIdx.x * WARPS + (threadIdx.x >> 5);
-    if (idx >= batch * n_kv) { return; }   // warp-uniform
     const unsigned int b = idx / n_kv, head = idx % n_kv;
     const unsigned long long kbase = (unsigned long long)b * kv_stride + (unsigned long long)head * hd;
 
@@ -60,5 +60,29 @@ extern "C" __global__ void __launch_bounds__(WARPS * 32) brain_kv_append_i8_clip
             packed |= (static_cast<unsigned int>(q) & 0xffu) << (8 * j);
         }
         pool[(base_i8 + i) / 4u] = packed;
+    }
+}
+
+extern "C" __global__ void __launch_bounds__(WARPS * 32) brain_kv_append_i8_clipped(const unsigned int* params, const float* src, const unsigned int* blocks, const unsigned int* offsets, const float* clip, unsigned int* pool, float* scales) {
+    BRAIN_PDL_ENTRY();
+    const unsigned int batch = params[0], kv_stride = params[1], block_size = params[2], hd = params[3];
+    const unsigned int idx = blockIdx.x * WARPS + (threadIdx.x >> 5);
+    if (idx >= batch * (kv_stride / hd)) { return; }   // warp-uniform
+    append_head(idx, batch, kv_stride, block_size, hd, src, blocks, offsets, clip, pool, scales);
+}
+
+// The K rows and the V rows of the same tokens in one launch: the warps of the first `batch * n_kv` pairs append K,
+// the rest V, each exactly as `brain_kv_append_i8_clipped` does. A decode step's layer launched the two appends back
+// to back, each too small to fill the card.
+extern "C" __global__ void __launch_bounds__(WARPS * 32) brain_kv_append_i8_clipped_kv(const unsigned int* params, const float* src_k, const float* src_v, const unsigned int* blocks, const unsigned int* offsets, const float* clip_k, const float* clip_v, unsigned int* pool_k, unsigned int* pool_v, float* scales_k, float* scales_v) {
+    BRAIN_PDL_ENTRY();
+    const unsigned int batch = params[0], kv_stride = params[1], block_size = params[2], hd = params[3];
+    const unsigned int pairs = batch * (kv_stride / hd);
+    const unsigned int idx = blockIdx.x * WARPS + (threadIdx.x >> 5);
+    if (idx >= 2u * pairs) { return; }   // warp-uniform
+    if (idx < pairs) {
+        append_head(idx, batch, kv_stride, block_size, hd, src_k, blocks, offsets, clip_k, pool_k, scales_k);
+    } else {
+        append_head(idx - pairs, batch, kv_stride, block_size, hd, src_v, blocks, offsets, clip_v, pool_v, scales_v);
     }
 }

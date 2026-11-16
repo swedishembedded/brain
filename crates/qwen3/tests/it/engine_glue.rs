@@ -46,8 +46,10 @@ fn a_bf16_tensor_core_forward_copies_no_fused_product_apart() {
         assert!(!names.is_empty(), "{what}: the tape names its kernels");
         assert_eq!(count(names, "concat_split"), 0, "{what}: a fused product was copied apart: {names:?}");
         assert_eq!(count(names, "silu_mul"), 0, "{what}: the SwiGLU's bf16 operand took a pass of its own: {names:?}");
-        // The native rows compute the rotation angles once for four heads of a token.
-        assert_eq!(count(names, "qknorm_rope_fused"), 0, "{what}: the QK norm and rotation ran a workgroup per head: {names:?}");
+        // The query's and key's norms and rotations run as one native launch (angles once for four heads of a token).
+        assert_eq!(names.iter().filter(|n| n.contains("qknorm_rope")).count(), cfg.n_layers as usize, "{what}: the query and key norms and rotations are one native launch a layer: {names:?}");
+        // The int8 K and V appends of a layer go as one launch.
+        assert_eq!(count(names, "paged_kv_append_i8_clipped_batched"), 0, "{what}: the K and V appends were two launches: {names:?}");
         // A residual norm read only by bf16 products writes their operand itself: what is left to cast is the first
         // layer's input norm and each layer's attention output.
         let casts = names.iter().filter(|n| n.contains("cast_f32_bf16")).count();

@@ -1324,6 +1324,27 @@ pub fn add_rmsnorm_fwd_bf16_step(gpu: &crate::Gpu, bufs: &[&backend_api::DeviceB
     Some(step.with_lowering(rmsnorm_fused_lowering(kernel, &params, [("add2", None), ("rmsnorm", Some(rows))])))
 }
 
+/// `kv_append_i8_clipped_kv`: src_k, src_v, blocks, offsets, clip_k, clip_v (read); pool_k, pool_v, scales_k, scales_v.
+static KV_APPEND_I8_KV_BINDINGS: [BindKind; 11] = bwd_tc_bindings(6);
+
+/// The int8 paged-KV appends of the K and the V rows of the same `batch` tokens as one launch: `bufs` is `src_k, src_v,
+/// blocks, offsets, clip_k, clip_v` (read) and `pool_k, pool_v, scales_k, scales_v`, `params` the portable
+/// `paged_kv_append_i8_clipped_batched`'s `[batch, kv_stride, block_size, head_dim]`. The bits of the two portable
+/// appends. `None` when the shape is not one the kernel takes, `cuda` is disabled, or the device declines.
+pub fn kv_append_i8_kv_step(gpu: &crate::Gpu, bufs: &[&backend_api::DeviceBuffer; 10], params: [u32; 4]) -> Option<crate::Step> {
+    let [batch, kv_stride, block_size, hd] = params;
+    if batch == 0 || block_size == 0 || hd < 4 || !hd.is_multiple_of(4) || kv_stride < hd || !kv_stride.is_multiple_of(hd) || super::disabled_providers().iter().any(|x| x == "cuda") {
+        return None;
+    }
+    let cc = gpu.caps().arch.compute_capability?;
+    let kernel = kernels_cuda::get("kv_append_i8_clipped_kv").filter(|k| k.min_cc <= cc)?;
+    let id = gpu.native_kernel(kernel, &KV_APPEND_I8_KV_BINDINGS)?;
+    let pairs = batch * (kv_stride / hd);
+    let step = gpu.step_native_sliced(id, bufs, &[(0, 0); 10], &params, (2 * pairs).div_ceil(kernel.tile.0))?;
+    let append = |threads| backend_api::PortableDispatch { kernel: "paged_kv_append_i8_clipped_batched".into(), params: params.to_vec(), threads };
+    Some(step.with_lowering(backend_api::Lowering::priced(kernel.reported, vec![append(pairs), append(pairs)])))
+}
+
 /// `dx = res + rmsnorm_dx(x, w, dy)` as one launch (`rmsnorm_dx_add`). `bufs` is `x, w, dy, res` (read) and
 /// `dx` (overwritten). `None` for the reasons of [`add_rmsnorm_fwd_step`].
 pub fn rmsnorm_dx_add_step(gpu: &crate::Gpu, bufs: &[&backend_api::DeviceBuffer; 5], d: u32, rows: u32, eps: f32) -> Option<crate::Step> {

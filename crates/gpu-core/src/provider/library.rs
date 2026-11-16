@@ -487,10 +487,10 @@ pub struct QkNormRopeShape {
 #[allow(clippy::too_many_arguments)]
 pub fn qk_norm_rope(gpu: &Gpu, steps: &mut Vec<Step>, shape: &QkNormRopeShape, x: &DeviceBuffer, w: &DeviceBuffer, positions: &DeviceBuffer, out: &DeviceBuffer) -> bool {
     let QkNormRopeShape { tokens, heads, head_dim, rms_eps, rope_base } = *shape;
-    let rows = u64::from(tokens) * u64::from(heads);
-    if tokens == 0 || heads == 0 || head_dim == 0 || !head_dim.is_multiple_of(2) || head_dim > 256 || rows * u64::from(head_dim) > u64::from(u32::MAX) {
+    if !qk_norm_rope_serves(shape) {
         return false;
     }
+    let rows = u64::from(tokens) * u64::from(heads);
     let Some(kernel) = kernels_cuda::get("qknorm_rope_rows") else {
         return false;
     };
@@ -506,6 +506,48 @@ pub fn qk_norm_rope(gpu: &Gpu, steps: &mut Vec<Step>, shape: &QkNormRopeShape, x
     };
     steps.push(priced(step, vec![portable("qknorm_rope_fused", params.clone(), rows)]));
     true
+}
+
+const QK_NORM_ROPE_QK_BINDINGS: &[BindKind] = &[
+    BindKind::Uniform,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageReadWrite,
+    BindKind::StorageRead,
+    BindKind::StorageRead,
+    BindKind::StorageReadWrite,
+];
+
+/// [`qk_norm_rope`] over a layer's query (`shape`, `q`) and key (`k_heads` heads of `k`) of the same tokens in one launch:
+/// `q` and `k` are `(x, w, out)`. The bits of the two separate calls. `false`, nothing pushed, where either is not served.
+#[allow(clippy::too_many_arguments)]
+pub fn qk_norm_rope_pair(gpu: &Gpu, steps: &mut Vec<Step>, shape: &QkNormRopeShape, k_heads: u32, q: [&DeviceBuffer; 3], k: [&DeviceBuffer; 3], positions: &DeviceBuffer) -> bool {
+    let QkNormRopeShape { tokens, heads, head_dim, rms_eps, rope_base } = *shape;
+    if !qk_norm_rope_serves(shape) || k_heads == 0 || !qk_norm_rope_serves(&QkNormRopeShape { heads: k_heads, ..*shape }) {
+        return false;
+    }
+    let Some(kernel) = kernels_cuda::get("qknorm_rope_qk") else {
+        return false;
+    };
+    let Some(id) = gpu.native_kernel(kernel, QK_NORM_ROPE_QK_BINDINGS) else {
+        return false;
+    };
+    let rows = tokens * heads;
+    let params = vec![rows, heads, head_dim, rms_eps.to_bits(), rope_base.to_bits(), k_heads];
+    let blocks = tokens * (kernel.blocks_for(1, heads) + kernel.blocks_for(1, k_heads));
+    let Some(step) = gpu.step_native(id, &[q[0], q[1], positions, q[2], k[0], k[1], k[2]], &params, blocks) else {
+        return false;
+    };
+    let portable_of = |h: u32| portable("qknorm_rope_fused", vec![tokens * h, h, head_dim, rms_eps.to_bits(), rope_base.to_bits()], tokens * h);
+    steps.push(priced(step, vec![portable_of(heads), portable_of(k_heads)]));
+    true
+}
+
+/// Whether the native QK norm and rotation take `shape`: an even head width of at most 256, a 32-bit element count.
+fn qk_norm_rope_serves(shape: &QkNormRopeShape) -> bool {
+    let rows = u64::from(shape.tokens) * u64::from(shape.heads);
+    shape.tokens > 0 && shape.heads > 0 && shape.head_dim > 0 && shape.head_dim.is_multiple_of(2) && shape.head_dim <= 256 && rows * u64::from(shape.head_dim) <= u64::from(u32::MAX)
 }
 
 /// The shape of a gated attention layer's front half over a block of rows (see [`gqa_qk_prepare`]).
