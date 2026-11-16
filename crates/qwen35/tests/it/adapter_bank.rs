@@ -139,9 +139,16 @@ fn mixed_batch_matches_training_forward_and_base_rows_are_untouched(make_gpu: fn
 
     // One sequence per adapter and one base sequence, prefilled alone.
     let mut tables = [BlockTable::with_namespace(id_a.kv_namespace()), BlockTable::new(), BlockTable::with_namespace(id_b.kv_namespace())];
-    let mut plain_base = BlockTable::new();
+    // The no-bank engine decodes a batch of the same three rows: a row's arithmetic may follow its batch's shape (the
+    // candidate tuned for the row class), so only the same shape isolates what the bank does to a base row.
+    let mut plain_tables = [BlockTable::new(), BlockTable::new(), BlockTable::new()];
     let hidden: Vec<Vec<f32>> = tables.iter_mut().map(|t| banked.prefill(t, &toks[..PREFIX])).collect();
-    let plain_hidden = plain.prefill(&mut plain_base, &toks[..PREFIX]);
+    // Its neighbours read prompts of their own (a shared prompt would share cached blocks with the compared row).
+    let shifted = |by: u32| toks[..PREFIX].iter().map(|&t| (t + by) % cfg.vocab).collect::<Vec<u32>>();
+    let [pa, pbase, pb] = &mut plain_tables;
+    plain.prefill(pa, &shifted(1));
+    let plain_hidden = plain.prefill(pbase, &toks[..PREFIX]);
+    plain.prefill(pb, &shifted(2));
     let last = (PREFIX - 1) * v..PREFIX * v;
     assert!(maxabs(&banked.logits(&hidden[0]), &want_a[last.clone()]) < TOL, "adapter a, prefill");
     assert!(maxabs(&banked.logits(&hidden[2]), &want_b[last.clone()]) < TOL, "adapter b, prefill");
@@ -151,14 +158,15 @@ fn mixed_batch_matches_training_forward_and_base_rows_are_untouched(make_gpu: fn
     for (i, &tok) in toks.iter().enumerate().skip(PREFIX) {
         let [ta, tbase, tb] = &mut tables;
         let got = banked.forward_batched_topk(&mut [ta, tbase, tb], &[tok; 3], 1);
-        let plain_got = plain.forward_batched_topk(&mut [&mut plain_base], &[tok], 1);
+        let [pa, pbase, pb] = &mut plain_tables;
+        let plain_got = plain.forward_batched_topk(&mut [pa, pbase, pb], &[tok; 3], 1);
         for (row, want) in [(0, &want_a), (2, &want_b), (1, &want_base)] {
             let truth = &want[i * v..(i + 1) * v];
             let (best, best_logit) = truth.iter().copied().enumerate().fold((0, f32::MIN), |m, (t, l)| if l > m.1 { (t, l) } else { m });
             assert_eq!(got[row][0].0, best as u32, "row {row} picks the training forward's token at position {i}");
             assert!((got[row][0].1 - best_logit).abs() < TOL, "row {row} logit at position {i}: {} vs {best_logit}", got[row][0].1);
         }
-        assert_eq!(bits(&got[1]), bits(&plain_got[0]), "the base row of a mixed batch equals the no-bank engine's, bit for bit (position {i})");
+        assert_eq!(bits(&got[1]), bits(&plain_got[1]), "the base row of a mixed batch equals the no-bank engine's in a batch of the same shape, bit for bit (position {i})");
     }
 }
 
