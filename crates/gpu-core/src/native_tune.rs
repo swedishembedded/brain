@@ -131,9 +131,43 @@ const FP8: Grid = Grid {
     fp8: true,
 };
 
+/// The grouped expert GEMM of a sparse MoE ([`MOE_SLOT`]): classes by the round's slots per expert (a decode step is
+/// one or two an expert and takes no class, so it keeps the untuned default; a 4096-row prefill of a top-8 model over
+/// 257 experts is about 140) and by `K` (the 35B-A3B's down 512, gate and up 2048), one output width per `K` (its own:
+/// 2048 rows of down, 512 of gate and up). Compute-bound: timed on one copy of the bank.
+const MOE: Grid = Grid {
+    rows: &[(16, 48), (49, 96), (97, 192), (193, 384)],
+    open_top: true,
+    k: [512, 2048],
+    bytes_bounds: &[],
+    n_reps: [&[2048], &[512]],
+    footprint_bytes: 0,
+    stream_max_rows: 0,
+    fp8: false,
+};
+
+/// The sparse-MoE grouped expert GEMM's slot (`moe_i8_grouped`, `Params { tiles, kg, n, xdiv, ne }`).
+pub(crate) const MOE_SLOT: &str = "moe_i8_grouped";
+
+/// The slots per expert of a `moe_i8_grouped` dispatch: the host sizes `tiles` as `ne` plus the slots' full tiles of 8.
+fn moe_slots_per_expert(tiles: u32, ne: u32) -> u32 {
+    tiles.saturating_sub(ne) * 8 / ne.max(1)
+}
+
+/// The class of a dispatch of `slot` with its caller params.
+fn class_of(slot: &str, params: &[u32]) -> Option<Class> {
+    match params {
+        [tiles, kg, n, _, ne, ..] if slot == MOE_SLOT => Class::of(grid(slot), moe_slots_per_expert(*tiles, *ne), *kg, *n),
+        [m, kg, n, ..] => Class::of(grid(slot), *m, *kg, *n),
+        _ => None,
+    }
+}
+
 /// The grid a slot is tuned on; a slot not named here is a decode-regime slot.
 fn grid(slot: &str) -> &'static Grid {
-    if slot == crate::native_upgrade::PREFILL_SLOT {
+    if slot == MOE_SLOT {
+        &MOE
+    } else if slot == crate::native_upgrade::PREFILL_SLOT {
         &PREFILL
     } else if slot == crate::native_upgrade::FP8_SLOT {
         &FP8
@@ -289,9 +323,9 @@ fn measure_int8_roof(gpu: &Gpu) -> Option<f32> {
 }
 
 /// The slots whose candidates this module knows how to build a synthetic problem and a reference for: the int8
-/// decode linear and the prefill-sized int8 GEMM. A slot with several rows that is not listed (the K-quant narrow
+/// decode linear, the prefill-sized int8 GEMM, the FP8 linear and the grouped expert GEMM of a sparse MoE. A slot with several rows that is not listed (the K-quant narrow
 /// and wide blocks) keeps its row-count rule until it has a problem generator here.
-const TUNABLE_SLOTS: [&str; 3] = ["matmul_i8_gemv", crate::native_upgrade::PREFILL_SLOT, crate::native_upgrade::FP8_SLOT];
+const TUNABLE_SLOTS: [&str; 4] = ["matmul_i8_gemv", crate::native_upgrade::PREFILL_SLOT, crate::native_upgrade::FP8_SLOT, MOE_SLOT];
 
 static AUTOTUNE: AtomicBool = AtomicBool::new(true);
 static FORCED: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
@@ -459,11 +493,7 @@ impl Tuned {
                 return Some(Cow::Owned(k.clone()));
             }
         }
-        let class = match params {
-            [m, kg, n, ..] => Class::of(grid(slot), *m, *kg, *n)?,
-            _ => return None,
-        };
-        let e = self.entry(slot, class)?;
+        let e = self.entry(slot, class_of(slot, params)?)?;
         if accepts(&e.best) {
             return Some(Cow::Borrowed(&e.best));
         }
@@ -942,7 +972,9 @@ fn device_key(gpu: &Gpu, slots: &[(usize, &'static str)]) -> String {
     sources.sort_unstable();
     sources.dedup();
     let srcs: Vec<&str> = sources.iter().filter_map(|n| kernels_cuda::get(n).map(|k| k.src)).collect();
-    let fp = fnv(&srcs) ^ fnv(&[env!("CARGO_PKG_VERSION"), &format!("admission-{ALPHA}"), &format!("{:?}", [&DECODE, &PREFILL, &FP8].map(|g| (g.rows, g.k, g.bytes_bounds, g.n_reps, g.footprint_bytes, g.stream_max_rows, g.fp8)))]);
+    // Every input of a measurement: the grids and the synthetic MoE round they are timed on.
+    let moe_round = format!("moe-round-{}-{}-{}", MoeProblem::SLOTS, MoeProblem::MAX_EXPERTS, MoeProblem::XDIV);
+    let fp = fnv(&srcs) ^ fnv(&[env!("CARGO_PKG_VERSION"), &format!("admission-{ALPHA}"), &format!("{:?}", [&DECODE, &PREFILL, &FP8, &MOE].map(|g| (g.rows, g.k, g.bytes_bounds, g.n_reps, g.footprint_bytes, g.stream_max_rows, g.fp8))), &moe_round]);
     let slug: String = format!("{desc}-{}-{cc}", gpu.kind()).chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
     format!("{slug}-{fp:016x}")
 }
@@ -1063,7 +1095,8 @@ fn measure(gpu: &Gpu, slots: &[(usize, &'static str)], prior: Option<&Tuned>) ->
         let g = grid(slot);
         for class in Class::all(g) {
             let (m, kg, n) = class.problem(g);
-            let params = [m, kg, n];
+            let moe = (slot == MOE_SLOT).then(|| MoeProblem::new(m, kg, n));
+            let params = moe.as_ref().map_or_else(|| vec![m, kg, n], |p| p.params().to_vec());
             let cands: Vec<&crate::native_upgrade::Active> = crate::native_upgrade::candidates(gpu.native_rows(), kind, &params).collect();
             if cands.is_empty() {
                 continue;
@@ -1075,11 +1108,16 @@ fn measure(gpu: &Gpu, slots: &[(usize, &'static str)], prior: Option<&Tuned>) ->
             }
             // Past the budget a class is left unmeasured (filled from its neighbours below) rather than delaying the
             // start further; the next start measures it.
-            let results = if started.elapsed() > BUDGET { Vec::new() } else {
+            let roofs = Roofs { gbs: roof_gbs, floor_us, int8_tops };
+            let results = if started.elapsed() > BUDGET {
+                Vec::new()
+            } else if let Some(p) = &moe {
+                time_moe_class(gpu, &cands, p, &roofs, timing)
+            } else {
                 if !acts.as_ref().is_some_and(|a| a.m == m && a.kg == kg) {
                     acts = Some(Acts::new(m, kg));
                 }
-                time_class(gpu, g, &cands, (m, kg, n), acts.as_ref().expect("built above"), &Roofs { gbs: roof_gbs, floor_us, int8_tops }, timing)
+                time_class(gpu, g, &cands, (m, kg, n), acts.as_ref().expect("built above"), &roofs, timing)
             };
             let mut best: Option<(&str, f64)> = None;
             for (name, v) in &results {
@@ -1207,20 +1245,10 @@ fn time_class(gpu: &Gpu, g: &Grid, cands: &[&crate::native_upgrade::Active], (m,
         // minimum over several makes a short kernel's figure the uncontended one.
         let launches = copies.max(MIN_LAUNCHES);
         let steps: Vec<_> = (0..launches).filter_map(|i| step(&weights[i % copies])).collect();
-        let time = |steps: &[crate::Step]| {
-            gpu.reset_kernel_times();
-            gpu.submit(&[], steps);
-            gpu.poll_wait();
-            gpu.kernel_times().map(|t| t.iter().filter(|r| r.0 == a.reported).map(|r| r.1).sum::<f64>() / steps.len() as f64)
-        };
-        let _ = time(&steps);
-        // Best over short runs of launches: another context time-sliced onto the card stretches whatever it
-        // interrupts and never shortens anything, so the minimum is the uncontended figure.
-        let best = (0..TRIALS).flat_map(|_| steps.chunks(steps.len().div_ceil(4).max(4))).filter_map(time).fold(f64::MAX, f64::min);
-        if !best.is_finite() || best <= 0.0 || best == f64::MAX {
+        let Some(best) = best_launch_ms(gpu, a.reported, &steps) else {
             results.push((a.kernel.to_owned(), Verdict::Rejected("no device timing".into())));
             continue;
-        }
+        };
         let gbs = wbytes as f64 / (best * 1e-3) / 1e9;
         // A decode-regime int8 linear moves its weights once and does far fewer operations than the roof allows per
         // byte, so its bound is the memory roof; a prefill-sized one is bound by the tensor cores. The fraction is the
@@ -1228,6 +1256,157 @@ fn time_class(gpu: &Gpu, g: &Grid, cands: &[&crate::native_upgrade::Active], (m,
         let ops = 2.0 * f64::from(m) * f64::from(n) * f64::from(k);
         let frac = roofs.bound_ms(!g.streams(m), ops, wbytes).map(|b| b / best);
         results.push((a.kernel.to_owned(), Verdict::Timed { us: best * 1e3, gbs, frac }));
+    }
+    results
+}
+
+/// The fastest launch (ms) of `steps`, all launches of the candidate the backend times as `reported`: best over short
+/// runs of launches, since another context time-sliced onto the card stretches whatever it interrupts and never
+/// shortens anything, so the minimum is the uncontended figure. `None` without device timing.
+fn best_launch_ms(gpu: &Gpu, reported: &str, steps: &[crate::Step]) -> Option<f64> {
+    let time = |steps: &[crate::Step]| {
+        gpu.reset_kernel_times();
+        gpu.submit(&[], steps);
+        gpu.poll_wait();
+        gpu.kernel_times().map(|t| t.iter().filter(|r| r.0 == reported).map(|r| r.1).sum::<f64>() / steps.len() as f64)
+    };
+    let _ = time(steps);
+    let best = (0..TRIALS).flat_map(|_| steps.chunks(steps.len().div_ceil(4).max(4))).filter_map(time).fold(f64::MAX, f64::min);
+    (best.is_finite() && best > 0.0 && best != f64::MAX).then_some(best)
+}
+
+/// The synthetic round of one [`MOE`] class: `ne` experts of `n` rows of `kg * 4` codes, `per` slots routed to each
+/// (slot `s` to expert `s % ne`, so the `xdiv` slots of an activation row go to distinct experts, as a top-k router's
+/// do), the routing tables `moe_route_*` would build for it, and the activations of its `slots / xdiv` rows.
+struct MoeProblem {
+    per: u32,
+    kg: u32,
+    n: u32,
+    ne: u32,
+    xdiv: u32,
+    tab: Vec<u32>,
+    perm: Vec<u32>,
+}
+
+impl MoeProblem {
+    /// Slots in the synthetic round: a real prefill round's (a 4096-row round of a top-8 model is 32768 routed slots),
+    /// since the ranking of the candidates follows the round's block count: on 8192 slots over at most 64 experts the
+    /// staged runs led the gate and up projections that a 257-expert round of 36864 runs faster on the four-tile form
+    /// (gpu3, GH200: 2.59 against 2.29 ms). Only sampled outputs are graded on the host.
+    const SLOTS: u32 = 32768;
+    /// Experts in the synthetic round at most: a 256-expert release's.
+    const MAX_EXPERTS: u32 = 256;
+    /// Slots per activation row: a top-8 router's.
+    const XDIV: u32 = 8;
+
+    fn new(per: u32, kg: u32, n: u32) -> MoeProblem {
+        let ne = (Self::SLOTS / per).clamp(Self::XDIV, Self::MAX_EXPERTS);
+        let slots = per * ne;
+        let tiles_each = per.div_ceil(8);
+        let mut tab: Vec<u32> = (0..=ne).map(|e| e * per).collect();
+        tab.extend((0..=ne).map(|e| e * tiles_each));
+        let perm = (0..slots).map(|i| (i % per) * ne + i / per).collect();
+        MoeProblem { per, kg, n, ne, xdiv: Self::XDIV, tab, perm }
+    }
+
+    fn slots(&self) -> u32 {
+        self.per * self.ne
+    }
+
+    fn expert(&self, slot: u32) -> u32 {
+        slot % self.ne
+    }
+
+    /// The dispatch's params, with `tiles` sized as the host sizes it (`ne` plus the slots' full tiles).
+    fn params(&self) -> [u32; 5] {
+        [self.ne + self.slots().div_ceil(8), self.kg, self.n, self.xdiv, self.ne]
+    }
+
+    /// Sampled outputs `(slot, column)`: the first and last slots of the round and of an expert's first and second
+    /// tiles, a slot mid-round, against the columns of the warp and block edges.
+    fn positions(&self) -> Vec<(u32, u32)> {
+        let (slots, n) = (self.slots(), self.n);
+        let rows = [0, 1, 7, 8, self.ne, 9 * self.ne, slots / 2, slots - 1];
+        let cols = [0, 1, 15, 16, 17, 63, 64, n / 3, n / 2, n.saturating_sub(17), n.saturating_sub(1)];
+        let mut out = Vec::new();
+        for &r in &rows {
+            for &c in &cols {
+                if r < slots && c < n && !out.contains(&(r, c)) {
+                    out.push((r, c));
+                }
+            }
+        }
+        out
+    }
+}
+
+/// [`time_class`] for the grouped expert GEMM: every candidate runs the round `p` once and is graded by [`admit`]
+/// against the f64 product of the activations as produced and the experts' weights as stored - within [`ALPHA`] times
+/// what rounding the activations to the int8 codes every candidate reads costs - then timed.
+///
+/// That bound is the right one for a kernel that reassociates the per-group f32 sum: the activations' int8 rounding
+/// is the resolution of the whole W8A8 function (knowledge 456: the int8 paths part by a few 1e-2 once one code of a
+/// 40-layer stack flips, while the fp32 forwards agree to 1e-5), so an accumulation order adding errors of the order of
+/// 2^-24 times the terms' size is far inside it, and an addressing or tiling defect (a wrong slot, row or group)
+/// moves an output by the size of the output, far outside.
+fn time_moe_class(gpu: &Gpu, cands: &[&crate::native_upgrade::Active], p: &MoeProblem, roofs: &Roofs, timing: bool) -> Vec<(String, Verdict)> {
+    let (kg, n, ne, slots) = (p.kg, p.n, p.ne, p.slots());
+    let groups = (kg / 8) as usize;
+    let acts = Acts::new(slots / p.xdiv, kg);
+    let w = packed_i8((ne * n * kg) as usize, 3);
+    let sw = scales((ne * n) as usize * groups, 4);
+    let upload = |v: &[u32]| {
+        let b = gpu.storage(v.len().max(1) as u64);
+        gpu.write(&b, v);
+        b
+    };
+    let (xq, tab, perm, wb) = (upload(&acts.xq), upload(&p.tab), upload(&p.perm), upload(&w));
+    let sxb = gpu.storage(acts.sx.len() as u64);
+    gpu.write_f32(&sxb, &acts.sx);
+    let sb = gpu.storage(sw.len() as u64);
+    gpu.write_f32(&sb, &sw);
+    let out = gpu.storage(u64::from(slots) * u64::from(n));
+    let poison = vec![f32::NAN; slots as usize * n as usize];
+    let stored = Stored { w: &w, sw: &sw, kg, fp8: false };
+    let positions = p.positions();
+    let at = |slot: u32, col: u32| (slot / p.xdiv, p.expert(slot) * n + col);
+    let reference: Vec<(f64, f64)> = positions.iter().map(|&(s, c)| { let (r, row) = at(s, c); dot(&acts, &stored, None, r, row) }).collect();
+    let input = Errors::of(&positions.iter().zip(&reference).map(|(&(s, c), (truth, _))| { let (r, row) = at(s, c); (dot(&acts, &stored, Some(Input::PACKED), r, row).0 - truth).abs() }).collect::<Vec<_>>());
+    let floor = Errors {
+        rms: F32_EPS * (reference.iter().map(|(_, abs)| abs * abs).sum::<f64>() / reference.len() as f64).sqrt(),
+        max: F32_EPS * reference.iter().fold(0.0f64, |a, (_, abs)| a.max(*abs)),
+    };
+    let params = p.params();
+    let wbytes = u64::from(ne * n * kg) * 4 + sw.len() as u64 * 4;
+    let mut results = Vec::new();
+    for a in cands {
+        let blocks = (a.blocks)(&params, a.tile);
+        let step = || gpu.native_step_raw(a.id, &[&xq, &sxb, &tab, &perm, &wb, &sb, &out], &params, blocks);
+        gpu.write_f32(&out, &poison);
+        let Some(check) = step() else {
+            results.push((a.kernel.to_owned(), Verdict::Rejected("backend declined the launch".into())));
+            continue;
+        };
+        gpu.submit(&[], &[check]);
+        gpu.poll_wait();
+        let got = gpu.read(&out, (slots * n) as usize);
+        let errors: Vec<f64> = positions.iter().zip(&reference).map(|(&(s, c), (truth, _))| (f64::from(got[(s * n + c) as usize]) - truth).abs()).collect();
+        if let Err(why) = admit(Errors::of(&errors), input, floor) {
+            results.push((a.kernel.to_owned(), Verdict::Rejected(why)));
+            continue;
+        }
+        if !timing {
+            results.push((a.kernel.to_owned(), Verdict::Timed { us: f64::NAN, gbs: 0.0, frac: None }));
+            continue;
+        }
+        let steps: Vec<_> = (0..MIN_LAUNCHES).filter_map(|_| step()).collect();
+        let Some(best) = best_launch_ms(gpu, a.reported, &steps) else {
+            results.push((a.kernel.to_owned(), Verdict::Rejected("no device timing".into())));
+            continue;
+        };
+        let ops = 2.0 * f64::from(slots) * f64::from(n) * f64::from(kg * 4);
+        let frac = roofs.bound_ms(true, ops, wbytes).map(|b| b / best);
+        results.push((a.kernel.to_owned(), Verdict::Timed { us: best * 1e3, gbs: wbytes as f64 / (best * 1e-3) / 1e9, frac }));
     }
     results
 }
@@ -1315,6 +1494,36 @@ pub fn report_for_default_device() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A decode step of the grouped expert GEMM takes no class, so it keeps the untuned default (the exact one-pass
+    /// kernel); a prefill round's slots per expert and `K` pick its class.
+    #[test]
+    fn a_moe_dispatch_is_classed_by_its_slots_per_expert_and_k() {
+        let class = |slots: u32, kg: u32, n: u32, ne: u32| class_of(MOE_SLOT, &[ne + slots.div_ceil(8), kg, n, 8, ne]);
+        assert_eq!(class(576, 512, 512, 257), None, "a 64-row decode step is two slots an expert");
+        assert_eq!(class(36864, 512, 512, 257).map(|c| (c.rows, c.k)), Some((2, 1)), "a 4096-row gate/up: ~143 an expert, K 2048");
+        assert_eq!(class(36864, 128, 2048, 257).map(|c| (c.rows, c.k)), Some((2, 0)), "its down: K 512");
+        assert_eq!(class(1 << 20, 512, 512, 257).map(|c| c.rows), Some(MOE.rows.len() - 1), "wider rounds take the top class");
+    }
+
+    /// The synthetic round's tables are the ones `moe_route_count/scan/emit` build: expert offsets, then each expert's
+    /// first tile and the total, and the slots grouped by expert.
+    #[test]
+    fn the_synthetic_moe_round_routes_like_the_router_tables() {
+        let p = MoeProblem::new(20, 128, 64);
+        let (ne, slots) = (p.ne, p.slots());
+        assert_eq!(p.tab.len() as u32, 2 * (ne + 1));
+        assert_eq!(p.tab[ne as usize], slots);
+        assert_eq!(p.tab[2 * ne as usize + 1], ne * 20u32.div_ceil(8), "three tiles an expert of 20 slots");
+        for e in 0..ne {
+            let (lo, hi) = (p.tab[e as usize] as usize, p.tab[e as usize + 1] as usize);
+            assert!(p.perm[lo..hi].iter().all(|&s| p.expert(s) == e), "expert {e}'s slots");
+        }
+        let mut seen = p.perm.clone();
+        seen.sort_unstable();
+        assert_eq!(seen, (0..slots).collect::<Vec<_>>(), "every slot once");
+        assert!(p.params()[0] - ne >= 2 * ne, "dense enough for the run candidates");
+    }
 
     #[test]
     fn every_decode_shape_falls_in_a_class_and_each_class_is_timed_inside_it() {

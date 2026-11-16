@@ -378,8 +378,10 @@ existing caller. Assume nothing about units.
     staged 32 rows of all of K once for a run of 8 tiles ran SLOWER (3.3 against 2.8 ms on the 35B-A3B's 4096-row gate) because each thread copied ~64 words in a load-then-store
     loop, a memory latency per word (ncu: long scoreboard 3x the issued cycles). The same staging as `cp.async` copies issued together and waited for once, with the activations
     double-buffered the same way: 2.55 / 2.63 ms against 2.78 / 2.81 ms (gate, down), bit-identical. What is left is occupancy, not bytes: the WGSL tier's 16 lane accumulators
-    per output are 64 registers a thread for four outputs, so 3-4 blocks of 4 warps an SM, 12-18 % occupancy, DRAM at 4 %. The next form spends a register-light accumulation
-    (and so a tolerance gate, item 10), not more staging.
+    per output are 64 registers a thread for four outputs, so 3-4 blocks of 4 warps an SM, 12-18 % occupancy, DRAM at 4 %. Four accumulators an output instead (the sum
+    reassociated, held to item 10's gate: 0.6-1.0x the reference tier's error) let a warp run four tiles on one weight fragment: 2.29 / 2.28 ms, once every load of a step
+    was issued before its first product (2.50 / 2.68 with each tile's activation load issued just before its MMA). Grade such a candidate against the quantised input's
+    resolution, and time it on a round of the real one's size: on a quarter-size round the tuner ranked the slower form first.
 
 ## D. Constraints that will bite you
 

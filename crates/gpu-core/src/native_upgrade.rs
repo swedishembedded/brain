@@ -565,7 +565,13 @@ fn serves_moe_i8_grouped(p: &[u32]) -> bool {
 /// the slots' full tiles), so a run of an expert's tiles shares its staged rows. A decode step (a slot or two an expert)
 /// keeps `moe_i8_grouped_mma`, which reads each row once per tile and stages nothing.
 fn serves_moe_i8_grouped_runs<const KG_MAX: u32>(p: &[u32]) -> bool {
-    serves_moe_i8_grouped(p) && matches!(p, [tiles, kg, _, _, ne, ..] if *kg <= KG_MAX && tiles.saturating_sub(*ne) >= 2 * *ne)
+    serves_moe_i8_grouped_dense(p) && p[1] <= KG_MAX
+}
+
+/// A `moe_i8_grouped` dispatch of a round dense in tiles per expert (see [`serves_moe_i8_grouped_runs`]): what the
+/// candidates that share an expert's weights across several of its tiles serve. A decode step is never one.
+fn serves_moe_i8_grouped_dense(p: &[u32]) -> bool {
+    serves_moe_i8_grouped(p) && matches!(p, [tiles, _, _, _, ne, ..] if tiles.saturating_sub(*ne) >= 2 * *ne)
 }
 
 const fn moe_grouped_runs_launch(kg_max: u32) -> CudaLaunch {
@@ -2195,6 +2201,19 @@ pub(crate) const ROWS: &[Row] = &[
         align_words: 1,
         input: Input::PACKED,
         launch: moe_grouped_runs_launch(kernels_cuda::MOE_GROUPED_RUNS_KG[1]),
+    },
+    // Four tiles of an expert a warp, the per-group sum reassociated: after the bit-identical rows, so a device that
+    // does not tune keeps an exact kernel; the tuner admits it against the int8 resolution and times it.
+    Row {
+        slow: "moe_i8_grouped",
+        target: Target::Named("moe_i8_grouped_mma_wide"),
+        bindings: MOE_I8_GROUPED_BINDINGS,
+        serves: serves_moe_i8_grouped_dense,
+        blocks: gemm_blocks,
+        requires_wgsl_upgrade: false,
+        align_words: 1,
+        input: Input::PACKED,
+        launch: CudaLaunch::NONE,
     },
     Row {
         slow: "moe_i8_grouped",
@@ -3859,7 +3878,7 @@ mod tests {
         let rows: Vec<&Row> = ROWS.iter().filter(|r| r.slow == "moe_i8_grouped").collect();
         let names: Vec<_> = rows.iter().map(|r| r.target.resolve(kernels_cuda::MMA_S8_MIN_CC).map(|k| k.name)).collect();
         // The staged runs first (the narrower registration first), then the one-pass-a-tile kernel every other round takes.
-        assert_eq!(names, [Some("moe_i8_grouped_mma_runs_k512"), Some("moe_i8_grouped_mma_runs"), Some("moe_i8_grouped_mma")]);
+        assert_eq!(names, [Some("moe_i8_grouped_mma_runs_k512"), Some("moe_i8_grouped_mma_runs"), Some("moe_i8_grouped_mma_wide"), Some("moe_i8_grouped_mma")]);
         let declared = kernels::MOE_I8_GROUPED.lines().filter(|l| l.trim_start().starts_with("@group(")).count();
         for row in &rows {
             assert_eq!(declared, row.bindings.len());

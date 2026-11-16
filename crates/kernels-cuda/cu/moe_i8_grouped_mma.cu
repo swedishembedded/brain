@@ -498,3 +498,179 @@ brain_moe_i8_grouped_mma_runs_k512(const unsigned int* params, const unsigned in
                                    const unsigned int* wq, const float* sw, float* out) {
     brain_moe_grouped_runs_any(params, xq, sx, tab, perm, wq, sw, out);
 }
+
+// ---------------------------------------------------------------------------
+// Four tiles a warp, four accumulators an output (`brain_moe_i8_grouped_mma_wide`)
+// ---------------------------------------------------------------------------
+//
+// The two kernels above keep the WGSL tier's 16 lane accumulators per output, which costs 64 registers a thread for
+// its four outputs and leaves 3-4 blocks an SM: they are latency-bound at 12-18 % occupancy. Here a warp computes its
+// 16 weight rows against FOUR 8-slot tiles of one expert at once - each weight fragment and its scales loaded once per
+// group serve four MMAs - and an output keeps four accumulators (groups g = 0, 1, 2, 3 mod 4, ascending), folded in
+// ascending order. Same registers for the accumulators, four times the outputs, four independent MMA chains a group.
+//
+// NOT bit-identical to the WGSL tier: the f32 sum of the per-group terms is reassociated (chains of ng/4 terms and a
+// fold of 4, against chains of ng/16 and a fold of 16; the same depth). Every group's integer dot product and its
+// scale product are exact or rounded exactly as there. Its admission is the tuner's (`gpu_core::native_tune`, the
+// `moe_i8_grouped` slot): against the f64 product of the activations as produced and the weights as stored, within
+// `ALPHA` times what rounding the activations to their int8 codes alone costs.
+//
+// A block is 4 warps x 16 rows = 64 weight rows by a run of 4 consecutive tiles of the routing table; tiles of the
+// run that belong to another expert are a second segment of the same loop.
+
+#define BRAIN_MGW_TILES 4
+#define BRAIN_MGW_ACC 4
+#define BRAIN_MGW_UNROLL 2
+
+template <bool VEC>
+__device__ __forceinline__ void brain_moe_grouped_wide(const unsigned int* params, const unsigned int* xq, const float* sx,
+                                                       const unsigned int* tab, const unsigned int* perm,
+                                                       const unsigned int* wq, const float* sw, float* out) {
+    const unsigned int kg = params[1];
+    const unsigned int n = params[2];
+    const unsigned int xdiv = params[3];
+    const unsigned int ne = params[4];
+    const unsigned int ng = kg >> 3;
+
+    const unsigned int blk = blockIdx.y * gridDim.x + blockIdx.x;
+    const unsigned int col_blocks = (n + BRAIN_MG_COLS - 1u) / BRAIN_MG_COLS;
+    if (col_blocks == 0u) { return; }
+    const unsigned int run = blk / col_blocks;
+    const unsigned int cb = blk - run * col_blocks;
+    const unsigned int total = tab[2u * ne + 1u];
+    const unsigned int tile0 = run * BRAIN_MGW_TILES;
+    if (tile0 >= total) { return; }
+    const unsigned int tile_end = min(tile0 + BRAIN_MGW_TILES, total);
+
+    const unsigned int warp = threadIdx.x >> 5;
+    const unsigned int lane = threadIdx.x & 31u;
+    const unsigned int g = lane >> 2;
+    const unsigned int tq = lane & 3u;
+    const unsigned int colbase = cb * BRAIN_MG_COLS + warp * 16u;
+    if (colbase >= n) { return; }  // warp-uniform; no barrier below
+    const unsigned int col0 = colbase + g, col1 = colbase + g + 8u;
+    const bool ok0 = col0 < n, ok1 = col1 < n;
+
+    unsigned int t = tile0;
+    while (t < tile_end) {
+        unsigned int lo = 0u, hi = ne;
+        while (hi - lo > 1u) {
+            const unsigned int mid = (lo + hi) >> 1;
+            if (tab[ne + 1u + mid] <= t) { lo = mid; } else { hi = mid; }
+        }
+        const unsigned int e = lo;
+        const unsigned int seg_end = min(tile_end, tab[ne + 2u + e]);
+        const unsigned int nt = seg_end - t;
+
+        const unsigned long long row0 = static_cast<unsigned long long>(e) * n + (ok0 ? col0 : n - 1u);
+        const unsigned long long row1 = static_cast<unsigned long long>(e) * n + (ok1 ? col1 : n - 1u);
+        const unsigned int* w0 = wq + row0 * kg + tq * 2u;
+        const unsigned int* w1 = wq + row1 * kg + tq * 2u;
+        const float* s0p = sw + row0 * ng;
+        const float* s1p = sw + row1 * ng;
+
+        // Per tile of the segment: this thread's activation row (slot g) and the scale rows of its two output slots.
+        unsigned int xrow[BRAIN_MGW_TILES], sarow[BRAIN_MGW_TILES], sbrow[BRAIN_MGW_TILES], first[BRAIN_MGW_TILES], cnt[BRAIN_MGW_TILES];
+#pragma unroll
+        for (int j = 0; j < BRAIN_MGW_TILES; ++j) {
+            const unsigned int tile = t + min(static_cast<unsigned int>(j), nt - 1u);  // a tile past the segment repeats its last
+            first[j] = tab[e] + (tile - tab[ne + 1u + e]) * BRAIN_MG_MR;
+            cnt[j] = (static_cast<unsigned int>(j) < nt) ? min(BRAIN_MG_MR, tab[e + 1u] - first[j]) : 0u;
+            const unsigned int c = max(cnt[j], 1u);
+            xrow[j] = perm[first[j] + (g < c ? g : 0u)] / xdiv;
+            sarow[j] = perm[first[j] + (2u * tq < c ? 2u * tq : 0u)] / xdiv;
+            sbrow[j] = perm[first[j] + (2u * tq + 1u < c ? 2u * tq + 1u : 0u)] / xdiv;
+        }
+
+        float acc[BRAIN_MGW_TILES][BRAIN_MGW_ACC][4];
+#pragma unroll
+        for (int j = 0; j < BRAIN_MGW_TILES; ++j) {
+#pragma unroll
+            for (int l = 0; l < BRAIN_MGW_ACC; ++l) {
+#pragma unroll
+                for (int i = 0; i < 4; ++i) { acc[j][l][i] = 0.0f; }
+            }
+        }
+
+        for (unsigned int sb = 0; sb < ng; sb += BRAIN_MGW_ACC) {
+#pragma unroll
+            for (int h = 0; h < BRAIN_MGW_ACC / BRAIN_MGW_UNROLL; ++h) {
+                // Every load of the step - the weight fragments and scales, then each tile's activation fragment and
+                // scales - before any product consumes one.
+                uint2 wa[BRAIN_MGW_UNROLL], wb[BRAIN_MGW_UNROLL], xb[BRAIN_MGW_TILES][BRAIN_MGW_UNROLL];
+                float sa[BRAIN_MGW_UNROLL], sbv[BRAIN_MGW_UNROLL], xa[BRAIN_MGW_TILES][BRAIN_MGW_UNROLL], xbs[BRAIN_MGW_TILES][BRAIN_MGW_UNROLL];
+#pragma unroll
+                for (int u = 0; u < BRAIN_MGW_UNROLL; ++u) {
+                    const unsigned int gi = sb + h * BRAIN_MGW_UNROLL + u;
+                    if (gi < ng) {
+                        wa[u] = brain_ld8<VEC>(w0 + gi * 8u);
+                        wb[u] = brain_ld8<VEC>(w1 + gi * 8u);
+                        sa[u] = __ldg(s0p + gi);
+                        sbv[u] = __ldg(s1p + gi);
+#pragma unroll
+                        for (int j = 0; j < BRAIN_MGW_TILES; ++j) {
+                            if (static_cast<unsigned int>(j) < nt) {  // warp-uniform
+                                xb[j][u] = brain_ld8<VEC>(xq + static_cast<unsigned long long>(xrow[j]) * kg + tq * 2u + gi * 8u);
+                                xa[j][u] = __ldg(sx + static_cast<unsigned long long>(sarow[j]) * ng + gi);
+                                xbs[j][u] = __ldg(sx + static_cast<unsigned long long>(sbrow[j]) * ng + gi);
+                            }
+                        }
+                    }
+                }
+#pragma unroll
+                for (int u = 0; u < BRAIN_MGW_UNROLL; ++u) {
+                    const unsigned int gi = sb + h * BRAIN_MGW_UNROLL + u;
+                    if (gi < ng) {
+                        const unsigned int a[4] = {wa[u].x, wb[u].x, wa[u].y, wb[u].y};
+                        const int l = h * BRAIN_MGW_UNROLL + u;  // group gi's accumulator: gi mod 4
+#pragma unroll
+                        for (int j = 0; j < BRAIN_MGW_TILES; ++j) {
+                            if (static_cast<unsigned int>(j) < nt) {
+                                unsigned int d[4];
+                                brain_mma_s8(d, a, xb[j][u].x, xb[j][u].y);
+                                acc[j][l][0] = __fadd_rn(acc[j][l][0], __fmul_rn(__fsub_rn(__uint_as_float(d[0]), FLOAT_BIAS), __fmul_rn(sa[u], xa[j][u])));
+                                acc[j][l][1] = __fadd_rn(acc[j][l][1], __fmul_rn(__fsub_rn(__uint_as_float(d[1]), FLOAT_BIAS), __fmul_rn(sa[u], xbs[j][u])));
+                                acc[j][l][2] = __fadd_rn(acc[j][l][2], __fmul_rn(__fsub_rn(__uint_as_float(d[2]), FLOAT_BIAS), __fmul_rn(sbv[u], xa[j][u])));
+                                acc[j][l][3] = __fadd_rn(acc[j][l][3], __fmul_rn(__fsub_rn(__uint_as_float(d[3]), FLOAT_BIAS), __fmul_rn(sbv[u], xbs[j][u])));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+#pragma unroll
+        for (int j = 0; j < BRAIN_MGW_TILES; ++j) {
+            float total4[4];
+#pragma unroll
+            for (int i = 0; i < 4; ++i) {
+                float s = 0.0f;
+#pragma unroll
+                for (int l = 0; l < BRAIN_MGW_ACC; ++l) { s = __fadd_rn(s, acc[j][l][i]); }
+                total4[i] = s;
+            }
+#pragma unroll
+            for (int q = 0; q < 2; ++q) {
+                const unsigned int s = 2u * tq + q;
+                if (s < cnt[j]) {
+                    float* o = out + static_cast<unsigned long long>(perm[first[j] + s]) * n;
+                    if (ok0) { o[col0] = total4[q]; }
+                    if (ok1) { o[col1] = total4[2 + q]; }
+                }
+            }
+        }
+        t = seg_end;
+    }
+}
+
+extern "C" __global__ void __launch_bounds__(BRAIN_MG_THREADS, 3)
+brain_moe_i8_grouped_mma_wide(const unsigned int* params, const unsigned int* xq, const float* sx,
+                              const unsigned int* tab, const unsigned int* perm,
+                              const unsigned int* wq, const float* sw, float* out) {
+    const bool aligned = ((reinterpret_cast<unsigned long long>(xq) | reinterpret_cast<unsigned long long>(wq)) & 7ull) == 0ull;
+    if (aligned) {
+        brain_moe_grouped_wide<true>(params, xq, sx, tab, perm, wq, sw, out);
+    } else {
+        brain_moe_grouped_wide<false>(params, xq, sx, tab, perm, wq, sw, out);
+    }
+}

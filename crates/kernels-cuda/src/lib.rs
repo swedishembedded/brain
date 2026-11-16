@@ -2679,6 +2679,26 @@ pub const ALL: &[CudaKernel] = &[
         src: include_str!("../cu/moe_i8_grouped_mma.cu"),
     },
     CudaKernel {
+        name: "moe_i8_grouped_mma_wide",
+        // `moe_i8_grouped_mma` for a round whose experts hold several tiles each, with a warp computing four tiles of
+        // one expert at once and four accumulators an output instead of the WGSL tier's sixteen: NOT bit-identical (the
+        // per-group sum is reassociated), admitted and chosen by the tuner's `moe_i8_grouped` slot.
+        op: Op::MoeExpertLinear,
+        weight: Dtype::I8,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: MMA_S8_MIN_CC,
+        entry: "brain_moe_i8_grouped_mma_wide",
+        what: "sparse-MoE int8 GEMM over a fused expert bank, a warp on 16 weight rows by four 8-slot tiles of one expert (each weight fragment feeds four MMAs), four f32 accumulators an output, int8 tensor cores (mma.sync m16n8k32); the per-group sum reassociated against moe_i8_grouped",
+        reported: "native:moe_i8_grouped_mma_wide",
+        block_dim: 128,
+        // A run of 4 tiles by 64 weight rows per block (four warps of 16), run-major.
+        tile: (4, 64),
+        shared_bytes: 0,
+        programmatic: false,
+        src: include_str!("../cu/moe_i8_grouped_mma.cu"),
+    },
+    CudaKernel {
         name: "matmul_bf16_gemv_m1",
         // The native twin of `matmul_bf16_gemv.wgsl` at one activation row, redirected to by name by
         // `gpu_core::native_upgrade`: the decode token's product of a dense bf16 weight.

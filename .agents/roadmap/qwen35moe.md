@@ -276,6 +276,7 @@ intervals between the first and the last `moe_i8_grouped_mma` of a 16K prefill (
 | 2. 4096-row rounds on tensor cores | 6242 | 6255 | 98.8 % | 5.67 / 16.62 / 40.38 |
 | 3. the dense engine's GDN segment kernels | 11087 | 11055 | ~100 % (device-timed) | 4.53 / 12.63 / 29.67 (*) |
 | 4. the expert GEMM on staged runs | 11786 | 11622 | ~100 % (device-timed) | 4.55 / 12.64 / 29.66 |
+| 5. the tuned MoE GEMM slot, the four-tile form | 12796 | 12688 | ~100 % (device-timed) | 4.57 / 12.66 / 28.77 |
 
 (*) Step 3's tree includes the shared fused GQA decode attention landed beside it (knowledge 469); none of this
 lane's changes is on the decode path. nsys stopped recording CUDA activity on the node from step 3 on ("No CUDA events
@@ -309,10 +310,20 @@ time.
   of an expert by `cp.async` once for a run of 8 of its tiles and double-buffers each warp's activations; bit-identical
   to the WGSL tier (`gpu-core` `moe_i8_grouped_native`, the real 4096-row gate/up/down among its cases). ncu on that
   binary (gpu3, the 4096-row gate / down): 2.78 / 2.81 ms -> 2.55 / 2.63 ms. A decode step keeps `moe_i8_grouped_mma`.
-- [ ] The expert GEMM is still 70 % of a 16K prefill (991 ms of 1425, gpu3) and latency-bound at 12-18 % occupancy:
-  the WGSL tier's 16 lane accumulators per output cost 64 registers a thread (kernels.md F item 30). The next form is a
-  register-light accumulation (several 8-slot tiles a warp sharing each weight fragment) under a tolerance gate
-  (kernels.md F item 10), and tuner coverage of the MoE GEMM candidates (`MOE_GROUPED_MIN_ROWS` and the runs threshold
-  are fixed choices today).
+- [x] Step 5: the grouped expert GEMM is a tuned slot (`gpu_core::native_tune`, `moe_i8_grouped`): classes by slots
+  per expert (a decode step takes none and keeps the exact one-pass kernel) and K, a synthetic round of 32768 slots
+  graded against the f64 product of fp32 activations and stored weights within `ALPHA` times the activations' int8
+  rounding (the W8A8 resolution, knowledge 456), then timed. New candidate `moe_i8_grouped_mma_wide`: a warp on four
+  tiles of an expert, four accumulators an output (the per-group sum reassociated; tolerance gate
+  `gpu-core/tests/moe_i8_grouped_candidates.rs`: 0.57-1.04x the WGSL tier's own error against f64). ncu (gpu3, the
+  4096-row gate / down): 2.29 / 2.28 ms against 2.59 / 2.66 (staged runs) and 2.78 / 2.81 (one-pass). The tuner picks
+  it for all 8 classes on gpu3; the GEMM is 877 of 1313 ms of a 16K prefill. Real checkpoint (`fast_path_parity_real`):
+  prefill hidden 4.5-4.9e-2, decode top-k logits 1.6-2.3e-2 rel-L2, 0 clear flips, the int8 cascade size.
+  A synthetic round of 8192 slots over at most 64 experts ranked the staged runs first for gate and up, which a
+  real 257-expert round runs slower: the tuner's round has to be a real round's size.
+- [ ] The expert GEMM is still 67 % of a 16K prefill and latency-bound (168 registers, 18 % occupancy, ~38-44 % of the
+  SM issue rate): staging the shared weight rows of the four-tile form in shared memory, or a wgmma form over an
+  expert's slots, is the next candidate; `MOE_GROUPED_MIN_ROWS` (the gather/grouped split at decode) is still a fixed
+  choice.
 - [ ] What else a 16K prefill spends (gpu3, step 4): `matmul_i8_dq_wgmma` ~140 ms, `moe_swiglu_quant` ~50 ms, the
   flash prefill ~34 ms, `moe_slot_combine` ~24 ms, the f32 router GEMM ~14 ms, the GDN kernels ~80 ms together.

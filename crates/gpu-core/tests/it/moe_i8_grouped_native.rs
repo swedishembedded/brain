@@ -1,109 +1,53 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! The gate for the native `moe_i8_grouped_mma` kernel (`kernels_cuda`,
-//! `cu/moe_i8_grouped_mma.cu`) that `gpu_core::native_upgrade` substitutes for
-//! the WGSL `moe_i8_grouped` on a CUDA device with int8 tensor cores.
+//! The gate of the native kernels `gpu_core::native_upgrade` substitutes for the WGSL `moe_i8_grouped` on a CUDA
+//! device with int8 tensor cores (`kernels_cuda`, `cu/moe_i8_grouped_mma.cu`), as this device selects them: the
+//! one-pass kernel, the staged runs, and the four-tile form the tuner may choose for a dense round.
 //!
 //! Swedish Embedded AB implements bit-exact tensor-core kernels for quantised
 //! sparse-MoE inference. If your team needs expertise in moving an expert GEMM
 //! onto tensor cores without changing a single output bit, you can procure our
 //! services by sending an email to info@swedishembedded.com.
 //!
-//! The substitution is invisible to every caller, so the claim it has to hold is
-//! that the RAW BITS are identical to the WGSL tier. That is achievable because
-//! a scale group's integer dot product is exact in either, and the native kernel
-//! keeps the WGSL kernel's 16 lane accumulators and its fold order. The
-//! reference is `moe_i8_grouped_ref`, the same source under a name the upgrade
-//! table does not know, so both sides run on the same device from the same
-//! inputs, differing in which kernel ran.
+//! The exact kernels keep the WGSL kernel's 16 lane accumulators and its fold order, so the claim they hold is the RAW
+//! BITS of the WGSL tier: a scale group's integer dot product is exact in either. The four-tile form reassociates the
+//! sum and is held to the tolerance gate instead (`common/moe_grouped.rs`). The reference is `moe_i8_grouped_ref`, the
+//! same source under a name the upgrade table does not know, so both sides run on the same device from the same
+//! inputs, differing in which kernel ran. `moe_i8_grouped_candidates.rs` forces every candidate in turn.
 
 use data::rng::{random_seed, Lcg};
-use gpu_core::{Dispatch, Gpu};
+use gpu_core::Gpu;
 
-const KERNELS: &[(&str, &str)] = &[
-    ("moe_i8_grouped", kernels::MOE_I8_GROUPED),
-    ("moe_i8_grouped_ref", kernels::MOE_I8_GROUPED),
-    ("moe_route_count", kernels::MOE_ROUTE_COUNT),
-    ("moe_route_scan", kernels::MOE_ROUTE_SCAN),
-    ("moe_route_emit", kernels::MOE_ROUTE_EMIT),
-];
-const K_GROUPED: usize = 0;
-const K_REF: usize = 1;
-const K_COUNT: usize = 2;
-const K_SCAN: usize = 3;
-const K_EMIT: usize = 4;
+#[path = "../common/moe_grouped.rs"]
+mod moe_grouped;
+use moe_grouped::{run, Case, KERNELS, K_GROUPED, K_REF, MR};
 
-const MR: u32 = 8;
-const WGSL_COLS: u32 = 4;
-/// Written around every output so an out-of-place write shows.
-const SENTINEL: u32 = 0x7fc0_dead;
+/// The candidate that reassociates its per-group sum: held to the tolerance gate, every other one to the WGSL bits.
+const REASSOCIATES: &str = "moe_i8_grouped_mma_wide";
 
 fn is_cuda(gpu: &Gpu) -> bool {
     gpu.kind() == "cuda"
 }
 
-fn packed(words: usize, seed: u64) -> Vec<u32> {
-    let mut r = Lcg::new(seed);
-    (0..words)
-        .map(|_| (0..4).fold(0u32, |w, lane| w | u32::from((r.next_u32() % 256) as u8) << (8 * lane)))
-        .collect()
-}
-
-fn scales(n: usize, seed: u64) -> Vec<f32> {
-    let mut r = Lcg::new(seed);
-    (0..n).map(|_| 1e-3 + (r.next_u32() % 1000) as f32 * 1e-5 - if r.next_u32().is_multiple_of(7) { 2e-3 } else { 0.0 }).collect()
-}
-
-fn upload_u32(gpu: &Gpu, v: &[u32]) -> gpu_core::DeviceBuffer {
-    let b = gpu.storage(v.len().max(1) as u64);
-    gpu.write(&b, v);
-    b
-}
-
-struct Case {
-    slots: u32,
-    k: u32,
-    n: u32,
-    xdiv: u32,
-    ne: u32,
-    /// Percentage of slots sent to expert 0 (a hot expert, many tiles; the rest thin or empty).
-    skew: u32,
-}
-
-/// `(native, reference)` output bits for the same inputs.
-fn run(gpu: &Gpu, c: &Case, seed: u64) -> (Vec<u32>, Vec<u32>) {
-    let (slots, kg, n, xdiv, ne) = (c.slots as usize, (c.k / 4) as usize, c.n as usize, c.xdiv as usize, c.ne as usize);
-    let rows = slots.div_ceil(xdiv);
-    let mut rng = Lcg::new(seed);
-    let ids: Vec<u32> = (0..slots).map(|_| if rng.next_u32() % 100 < c.skew { 0 } else { rng.next_u32() % c.ne }).collect();
-    let xq = upload_u32(gpu, &packed(rows * kg, seed + 1));
-    let sx = gpu.storage_init("sx", &scales(rows * (kg / 8), seed + 2));
-    let wq = upload_u32(gpu, &packed(ne * n * kg, seed + 3));
-    let sw = gpu.storage_init("sw", &scales(ne * n * (kg / 8), seed + 4));
-
-    let ids_b = upload_u32(gpu, &ids);
-    let counts = gpu.storage(ne as u64);
-    let tab = gpu.storage(2 * (ne as u64 + 1));
-    let perm = gpu.storage(slots.max(1) as u64);
-    gpu.submit(
-        &[],
-        &[
-            gpu.dispatch(K_COUNT, &[&ids_b, &counts], &[c.slots, c.ne], Dispatch::Workgroups(c.ne)),
-            gpu.dispatch(K_SCAN, &[&counts, &tab], &[c.ne, MR], Dispatch::Workgroups(1)),
-            gpu.dispatch(K_EMIT, &[&ids_b, &tab, &perm], &[c.slots, c.ne], Dispatch::Workgroups(c.ne)),
-        ],
-    );
-    let tiles = c.ne + c.slots.div_ceil(MR);
-    let params = [tiles, kg as u32, c.n, c.xdiv, c.ne];
-    let go = |kind: usize| -> Vec<u32> {
-        let out = gpu.storage((slots * n) as u64);
-        gpu.write(&out, &vec![SENTINEL; slots * n]);
-        gpu.submit(&[], &[gpu.dispatch(kind, &[&xq, &sx, &tab, &perm, &wq, &sw, &out], &params, Dispatch::Workgroups(tiles * c.n.div_ceil(WGSL_COLS)))]);
-        gpu.poll_wait();
-        gpu.read(&out, slots * n).iter().map(|f| f.to_bits()).collect()
-    };
-    (go(K_GROUPED), go(K_REF))
+/// The kernel this device's selection (tuned or default) runs `c` on, and whether its output matched the WGSL tier as
+/// that kernel promises: bit for bit, or within the tolerance gate for [`REASSOCIATES`].
+fn check(gpu: &Gpu, c: &Case, seed: u64) -> Result<&'static str, String> {
+    let kernel = gpu.native_kernel_for(K_GROUPED, &c.params()).unwrap_or("moe_i8_grouped (wgsl)");
+    let round = run(gpu, c, seed);
+    if kernel == REASSOCIATES {
+        round.within_tolerance(seed).map(|_| kernel)
+    } else {
+        let bad: Vec<usize> = (0..round.got.len()).filter(|&j| round.got[j] != round.want[j]).take(5).collect();
+        match bad.is_empty() {
+            true => Ok(kernel),
+            false => Err(format!(
+                "first mismatches at {bad:?}: native {:?} wgsl {:?} - both fold the same terms in the same order, so this is a defect, not rounding",
+                bad.iter().map(|&j| f32::from_bits(round.got[j])).collect::<Vec<_>>(),
+                bad.iter().map(|&j| f32::from_bits(round.want[j])).collect::<Vec<_>>()
+            )),
+        }
+    }
 }
 
 #[test]
@@ -124,18 +68,23 @@ fn the_native_kernel_is_selected_exactly_for_the_shapes_it_serves() {
     // A prefill round has many tiles of each expert: its weight rows are staged once and every tile of a run of the
     // expert reads them there. The 35B-A3B's 4096-row round is 36864 slots over 257 experts, its gate/up K 2048 and its
     // down K 512; a decode step of 64 rows (576 slots) keeps one pass of the weights per tile.
+    // Which of the round's candidates runs is the tuner's measured choice (`gpu_core::native_tune`, the `moe_i8_grouped`
+    // slot); a decode step has no class and keeps the exact one-pass kernel.
     let dense = 257 + 36864 / MR;
-    assert_eq!(gpu.native_kernel_for(K_GROUPED, &[dense, 512, 512, 9, 257]), Some("moe_i8_grouped_mma_runs"));
-    assert_eq!(gpu.native_kernel_for(K_GROUPED, &[dense, 128, 2048, 1, 257]), Some("moe_i8_grouped_mma_runs_k512"));
+    let gate_up = gpu.native_kernel_for(K_GROUPED, &[dense, 512, 512, 9, 257]);
+    assert!(matches!(gate_up, Some("moe_i8_grouped_mma_runs" | "moe_i8_grouped_mma_wide" | "moe_i8_grouped_mma")), "{gate_up:?}");
+    let down = gpu.native_kernel_for(K_GROUPED, &[dense, 128, 2048, 1, 257]);
+    assert!(matches!(down, Some("moe_i8_grouped_mma_runs_k512" | "moe_i8_grouped_mma_runs" | "moe_i8_grouped_mma_wide" | "moe_i8_grouped_mma")), "{down:?}");
     assert_eq!(gpu.native_kernel_for(K_GROUPED, &[257 + 576 / MR, 512, 512, 9, 257]), Some("moe_i8_grouped_mma"));
-    assert_eq!(gpu.native_kernel_for(K_GROUPED, &[dense, 520, 512, 9, 257]), Some("moe_i8_grouped_mma"), "K past the staged rows' room");
+    let wide_k = gpu.native_kernel_for(K_GROUPED, &[dense, 520, 512, 9, 257]);
+    assert!(matches!(wide_k, Some("moe_i8_grouped_mma_wide" | "moe_i8_grouped_mma")), "K past the staged rows' room: {wide_k:?}");
     // The reference alias is deliberately not upgraded; it is what makes the
     // comparison a comparison.
     assert_eq!(gpu.native_kernel_for(K_REF, &[40, 512, 2048, 9, 257]), None);
 }
 
-/// BYTE-identical to the WGSL tier over every shape class the kernel's
-/// arithmetic and addressing can get wrong.
+/// What the selected kernel promises - the WGSL tier's bytes, or the tolerance gate for the one that reassociates -
+/// over every shape class the kernels' arithmetic and addressing can get wrong.
 #[test]
 fn the_native_kernel_is_byte_identical_to_the_wgsl_tier() {
     let gpu = gpu_core::testgpu::dev(KERNELS);
@@ -171,19 +120,9 @@ fn the_native_kernel_is_byte_identical_to_the_wgsl_tier() {
         Case { slots: 333, k: 96, n: 33, xdiv: 1, ne: 7, skew: 10 },
     ];
     for (i, c) in cases.iter().enumerate() {
-        let (got, want) = run(&gpu, c, 9000 + i as u64);
-        let bad: Vec<usize> = (0..got.len()).filter(|&j| got[j] != want[j]).take(5).collect();
-        assert!(
-            bad.is_empty(),
-            "slots={} k={} n={} xdiv={} experts={}: first mismatches at {bad:?}: native {:?} wgsl {:?} - both fold the same terms in the same order, so this is a defect, not rounding",
-            c.slots,
-            c.k,
-            c.n,
-            c.xdiv,
-            c.ne,
-            bad.iter().map(|&j| f32::from_bits(got[j])).collect::<Vec<_>>(),
-            bad.iter().map(|&j| f32::from_bits(want[j])).collect::<Vec<_>>()
-        );
+        if let Err(why) = check(&gpu, c, 9000 + i as u64) {
+            panic!("slots={} k={} n={} xdiv={} experts={}: {why}", c.slots, c.k, c.n, c.xdiv, c.ne);
+        }
     }
 }
 
@@ -208,7 +147,8 @@ fn random_shapes_are_byte_identical() {
             ne: 1 + r.next_u32() % 40,
             skew: r.next_u32() % 90,
         };
-        let (got, want) = run(&gpu, &c, 500 + i);
-        assert_eq!(got, want, "native grouped MoE GEMM differs at slots={} k={} n={} xdiv={} experts={} skew={}", c.slots, c.k, c.n, c.xdiv, c.ne, c.skew);
+        if let Err(why) = check(&gpu, &c, 500 + i) {
+            panic!("native grouped MoE GEMM at slots={} k={} n={} xdiv={} experts={} skew={}: {why}", c.slots, c.k, c.n, c.xdiv, c.ne, c.skew);
+        }
     }
 }
