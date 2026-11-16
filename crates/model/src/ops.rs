@@ -331,6 +331,7 @@ mod kname {
         MATMUL_GEMV_F16,
         MATMUL_REG3_F16,
         EMBED,
+        EMBED_I8,
         EMBED_BF16,
         EMBED_F16,
         EMBED_TILE,
