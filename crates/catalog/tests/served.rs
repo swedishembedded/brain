@@ -150,17 +150,27 @@ fn every_model_declares_how_it_finds_its_weights() {
 }
 
 /// Every residency adapter reachable from this file advertises an id this
-/// file also lists, so a model cannot be schedulable but undiscoverable.
+/// file also lists, so a model cannot be schedulable but undiscoverable. An
+/// entry whose spec names an instance role serves each checkpoint in the store
+/// under that checkpoint's own `<vendor>/<repo>` id; such a resident belongs to
+/// the entry that offers the same actions.
 #[test]
 fn every_residency_adapter_here_is_also_listed_here() {
+    let action_names = |m: &capability::Manifest| m.actions.iter().map(|a| a.name.clone()).collect::<Vec<_>>();
     let catalog: std::collections::HashSet<String> = manifests().into_iter().map(|m| m.model).collect();
+    let per_checkpoint: Vec<Vec<String>> = catalog::models()
+        .into_iter()
+        .filter(|e| e.spec.is_some_and(|(_, spec)| spec.instance_role().is_some()))
+        .map(|e| action_names(&(e.manifest)()))
+        .collect();
     // Both claim paths, or the multi-device half is exactly as unguarded as
     // the single-device half was before this test existed.
     let store = loader::served::ServedStore::new(loader::model_dir::resolve(None));
-    let single = residents(&store).into_iter().map(|r| r.manifest().model);
-    let multi = multi_residents(&store, &[(0, 24u64 << 30)], 2u64 << 30).into_iter().map(|r| r.manifest().model);
-    for id in single.chain(multi) {
-        assert!(catalog.contains(&id), "residency adapter '{id}' is not in the catalog");
+    let single = residents(&store).into_iter().map(|r| r.manifest());
+    let multi = multi_residents(&store, &[(0, 24u64 << 30)], 2u64 << 30).into_iter().map(|r| r.manifest());
+    for m in single.chain(multi) {
+        let listed = catalog.contains(&m.model) || per_checkpoint.contains(&action_names(&m));
+        assert!(listed, "residency adapter '{}' is not in the catalog, nor a checkpoint of an entry that serves one per checkpoint", m.model);
     }
 }
 
