@@ -10,7 +10,7 @@
 
 #[test]
 fn live_bytes_follow_buffers_and_the_peak_holds_until_reset() {
-    crate::child::alone(module_path!(), "live_bytes_follow_buffers_and_the_peak_holds_until_reset_alone");
+    brain_testutil::run_alone(module_path!(), "live_bytes_follow_buffers_and_the_peak_holds_until_reset_alone");
 }
 
 /// The child of [`live_bytes_follow_buffers_and_the_peak_holds_until_reset`].

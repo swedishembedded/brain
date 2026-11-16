@@ -33,7 +33,7 @@ pub mod rounding;
 mod scratch;
 pub mod training;
 
-pub use process::output_within;
+pub use process::{output_within, run_alone};
 pub use scratch::Scratch;
 
 /// Name what a test is skipping, and let a caller demand it not be skipped.

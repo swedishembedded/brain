@@ -50,6 +50,21 @@ pub fn output_within(cmd: &mut Command, limit: Duration) -> Output {
     Output { status, stdout: stdout.join().unwrap_or_default(), stderr: stderr.join().unwrap_or_default() }
 }
 
+/// Run `test`, an `#[ignore]`d test of the module at `module_path` (pass `module_path!()`), alone in a child process
+/// of the current test binary, and require it to have run and passed. Every integration test of a crate shares one
+/// binary and runs beside the others, so a check that sets process-wide state (a global thread pool, a placement
+/// policy, the panic hook) or reads process-wide counters must not depend on which test touched that state first.
+pub fn run_alone(module_path: &str, test: &str) {
+    let name = format!("{}::{test}", module_path.split_once("::").map_or(module_path, |(_, rest)| rest));
+    let out = output_within(
+        Command::new(std::env::current_exe().expect("this test binary")).args(["--exact", &name, "--ignored", "--nocapture", "--test-threads=1"]),
+        Duration::from_secs(600),
+    );
+    let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(out.status.success(), "{name} failed:\n{text}");
+    assert!(text.contains("1 passed"), "{name} did not run:\n{text}");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

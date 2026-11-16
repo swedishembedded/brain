@@ -119,7 +119,7 @@ fn a_recording_an_unwind_passes_through_leaves_the_handle_usable() {
 /// The leak counters are process-wide, so the check runs alone in a child process.
 #[test]
 fn a_tape_returns_every_device_object_it_held() {
-    crate::child::alone(module_path!(), "a_tape_returns_every_device_object_it_held_alone");
+    brain_testutil::run_alone(module_path!(), "a_tape_returns_every_device_object_it_held_alone");
 }
 
 /// The child of [`a_tape_returns_every_device_object_it_held`].

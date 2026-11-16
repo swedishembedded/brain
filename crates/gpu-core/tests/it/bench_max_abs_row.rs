@@ -154,7 +154,7 @@ fn bench_max_abs_row() {
 /// The pin is process-wide, so the check runs in a child process of its own.
 #[test]
 fn max_abs_rows_matches_reference_exactly() {
-    crate::child::alone(module_path!(), "max_abs_rows_matches_reference_exactly_alone");
+    brain_testutil::run_alone(module_path!(), "max_abs_rows_matches_reference_exactly_alone");
 }
 
 /// The child of [`max_abs_rows_matches_reference_exactly`].

@@ -47,7 +47,7 @@ impl Placer for Refuses {
 /// in a child process of its own.
 #[test]
 fn the_host_tier_is_a_real_placement_not_a_label() {
-    crate::child::alone(module_path!(), "the_host_tier_is_a_real_placement_not_a_label_alone");
+    brain_testutil::run_alone(module_path!(), "the_host_tier_is_a_real_placement_not_a_label_alone");
 }
 
 /// The child of [`the_host_tier_is_a_real_placement_not_a_label`].

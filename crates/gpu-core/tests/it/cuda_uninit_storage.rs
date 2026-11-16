@@ -26,12 +26,12 @@ const WORDS: u64 = 1 << 20;
 
 #[test]
 fn uninitialised_storage_skips_the_clear_and_is_poisoned_in_a_debug_build() {
-    crate::child::alone(module_path!(), "uninitialised_storage_alone");
+    brain_testutil::run_alone(module_path!(), "uninitialised_storage_alone");
 }
 
 #[test]
 fn a_step_over_fresh_buffers_does_not_clear_its_uniform() {
-    crate::child::alone(module_path!(), "fresh_buffers_alone");
+    brain_testutil::run_alone(module_path!(), "fresh_buffers_alone");
 }
 
 /// The child of [`uninitialised_storage_skips_the_clear_and_is_poisoned_in_a_debug_build`].

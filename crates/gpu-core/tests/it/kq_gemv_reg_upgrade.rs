@@ -202,7 +202,7 @@ fn the_upgrade_is_active_for_both_code_bits_independently() {
 /// so the check runs in a child process of its own.
 #[test]
 fn the_register_kernel_is_byte_identical_to_the_plain_gemv() {
-    crate::child::alone(module_path!(), "the_register_kernel_is_byte_identical_to_the_plain_gemv_alone");
+    brain_testutil::run_alone(module_path!(), "the_register_kernel_is_byte_identical_to_the_plain_gemv_alone");
 }
 
 /// The child of [`the_register_kernel_is_byte_identical_to_the_plain_gemv`].

@@ -9,7 +9,6 @@
 
 mod card;
 mod card_selection;
-mod child;
 mod adaln_row_gather;
 mod add_rms_quant_native;
 mod arch_desc_real_divergence;
