@@ -1926,9 +1926,22 @@ mod native_facade {
         /// dispatch of each kernel, so a box with a driver and no toolkit gets
         /// a handle here and fails at the first `step` that needs one - named,
         /// not silently.
+        ///
+        /// On a machine with cards, it opens only a card the selection names. A selection with no card in it (`cpu`,
+        /// or a placement policy that chose the host) is refused, naming the selection: "no card selected" used to
+        /// open CUDA ordinal 0, the first card of the machine, which on a shared node is another job's.
         pub fn try_new_cuda(kernels: &[(&str, &str)]) -> Result<Gpu, String> {
+            let cards = crate::devices::gpus();
+            let names_no_card = crate::devices::ambient_compute_set().gpus.is_empty();
+            let selected = if names_no_card { None } else { crate::devices::selected_device() };
+            if !cards.is_empty() && selected.is_none() {
+                return Err(format!(
+                    "the device selection names no GPU card (this machine has {}): select one with --device gpuN instead of opening the first card",
+                    cards.len()
+                ));
+            }
             let kernels = &Self::expanded(kernels, false);
-            let (identity, mem_device) = Self::cuda_target(crate::devices::selected_device());
+            let (identity, mem_device) = Self::cuda_target(selected);
             let inner = match &identity {
                 Some(id) => backend_cuda::CudaBackend::try_new_on(kernels, id)?,
                 None => backend_cuda::CudaBackend::try_new(kernels)?,
