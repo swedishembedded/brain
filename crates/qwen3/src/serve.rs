@@ -2106,12 +2106,11 @@ impl Engine {
             blocks.push(bl);
             offsets.push(off);
         }
-        let mut bt = vec![0u32; rows as usize * mbt];
-        for i in 0..rows as usize {
-            for (lb, &phys) in table.blocks().iter().enumerate() {
-                bt[i * mbt + lb] = phys;
-            }
-        }
+        // Every row of one sequence's chunk reads the same table: one row, copied (a long chunk's table is megabytes,
+        // and writing it entry by entry per row was most of the host time in front of a prompt's first kernel).
+        let mut table_row = vec![0u32; mbt];
+        table_row[..table.blocks().len()].copy_from_slice(table.blocks());
+        let bt = table_row.repeat(rows as usize);
         BatchMeta { bsz: rows, positions, seqlens, blocks, offsets, bt, slots }
     }
 

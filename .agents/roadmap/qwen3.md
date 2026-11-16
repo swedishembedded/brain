@@ -262,6 +262,11 @@ phase their launch ran in.
 | per-part library products, SwiGLU writes the bf16 operand (#478) | 3.07 | 493 / 3626 ms | 93.0 % | 3.46 | 9.3 / 15.2 s | 95.2 % | 5.8 ns, 1.22 ms |
 | native QK norm and rotation, four heads a block (#479) | 3.07 (2.98-3.17) | 457 / 3548 ms | 96.6 % | 3.66 | 8.9 / 14.1 s | 95.9 % | 4.9 ns, 1.23 ms |
 | residual norms write the bf16 operand of the products that read them | 3.23 (3.21-3.24) | 425 / 3442 ms | 96.4 % | 3.70 | 8.8 / 13.9 s | 96.2 % | 4.4 ns, 1.11 ms |
+| query+key norm and K+V append one launch each, SwiGLU without fp32 `h`, one block-table row copied (#485) | 3.09 (3.08-3.10)* | 447 / 3595 ms | 95.3 % | 3.53* | 9.2 / 14.6 s | 96.6 % | 4.0 ns, 0.87 ms |
+
+\* Client runs taken while another lane's compiler held the cores the benchmark is pinned to; the traced c=64 run of
+the same binary served its 128 requests in 33.9 s against 34.9 s for the row above, prefill kernels 200 against 203 ms
+a prompt.
 
 - [ ] c=16 busy fell with the shorter kernels: of its 0.74 s idle, 0.35 s is the first capture of a decode tape at each
       new batch size (one instantiation of 0.19-0.21 s), ~2 ms per prompt is building the chunk's per-row block table
