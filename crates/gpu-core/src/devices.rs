@@ -1486,14 +1486,19 @@ pub fn device_flags(args: &[String]) -> Result<(Option<String>, Option<String>),
     Ok((device, backend))
 }
 
-/// The compute set a program that is not the CLI (a profiling or check binary) runs on: its `--device` and `--backend`
-/// flags in the CLI's grammar, resolved and published by [`select_compute`], or with neither flag the ambient set
-/// (`BRAIN_DEVICE`/`BRAIN_BACKEND`). A tool that took no device flags silently ran wherever the ambient set put it, a
-/// card another process owned included.
+/// The compute set a program with a command line (a profiling or check binary) runs on: its `--device` and `--backend`
+/// flags in the CLI's grammar, resolved and published by [`select_compute`], or with neither flag the machine's default
+/// as the brain CLI takes it ([`resolve_cli_default_compute_set`]). A tool with a command line is configured by its flags
+/// alone: `BRAIN_DEVICE`/`BRAIN_BACKEND` left in a shell no longer choose its hardware.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn select_compute_from_args(args: &[String]) -> Result<ComputeSet, String> {
     match device_flags(args)? {
-        (None, None) => Ok(ambient_compute_set().clone()),
+        (None, None) => {
+            let set = resolve_cli_default_compute_set();
+            set.apply_backend()?;
+            publish_compute_set(set.clone());
+            Ok(set)
+        }
         (device, backend) => select_compute(device.as_deref().unwrap_or("gpu"), backend.as_deref()),
     }
 }

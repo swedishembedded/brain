@@ -26,6 +26,7 @@ mod bench_upload_cadence;
 mod bf16_gemv_native;
 mod bf16_gemv_splitk_native;
 mod clamp_range;
+mod tool_device_flags;
 mod value_lerp;
 mod conv2d_native_bench;
 mod coopmat_provider_declines_on_this_box;
