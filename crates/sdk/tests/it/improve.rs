@@ -28,10 +28,7 @@ use brain::{Environment, Improve, ImproveOptions, Reward, Step, Task, Verifier};
 use qwen3::config::QwenConfig;
 
 fn skip() -> bool {
-    if brain_testutil::gpu_tests_skipped() {
-        return true;
-    }
-    false
+    brain_testutil::gpu_tests_skipped()
 }
 
 fn tmp(name: &str) -> PathBuf {

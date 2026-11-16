@@ -68,10 +68,7 @@ const BATCH: u32 = 4;
 const BLOCK: u32 = 64;
 
 fn skip() -> bool {
-    if brain_testutil::gpu_tests_skipped() {
-        return true;
-    }
-    false
+    brain_testutil::gpu_tests_skipped()
 }
 
 /// The study the sample drives, configured exactly as its flags would.
