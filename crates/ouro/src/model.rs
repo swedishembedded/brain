@@ -27,8 +27,10 @@
 
 use std::cell::{Cell, RefCell};
 
+use gpu_core::provider::library::GemmPrecision;
 use gpu_core::{BufUsage, DeviceBuffer, Gpu, Step};
-use model::block::{self, Gqa, KernelIds};
+use model::block::{self, FlashGqaIds, Gqa, KernelIds};
+use model::ops::{Ops, Weight};
 use model::saved::{Residuals, SavedFormat, SavedPolicy};
 use model::streamed::{RevisitingPass, StreamedStore};
 use model::segmented::SegmentedPass;
@@ -71,8 +73,17 @@ const SILU_DB: usize = 17;
 const ADD2: usize = 18;
 const BIAS_ADD: usize = 19;
 const CE_VALUE: usize = 20;
+// Its slot is held so the later ones keep their positions; the product runs through `Ops` (or, for the
+// gradient, the two-stage kernels) and only `kernel_slots_match_the_pipeline_list` names it.
+#[allow(dead_code)]
 const CE_GRAD: usize = 21;
+// Its slot is held so the later ones keep their positions; the product runs through `Ops` (or, for the
+// gradient, the two-stage kernels) and only `kernel_slots_match_the_pipeline_list` names it.
+#[allow(dead_code)]
 const MATMUL_DX: usize = 22;
+// Its slot is held so the later ones keep their positions; the product runs through `Ops` (or, for the
+// gradient, the two-stage kernels) and only `kernel_slots_match_the_pipeline_list` names it.
+#[allow(dead_code)]
 const MATMUL_DW: usize = 23;
 const EMB_BWD: usize = 24;
 const ADAMW: usize = 25;
@@ -95,6 +106,37 @@ const PAGED_DECODE_APPLY_BATCHED: usize = 41;
 const FLASH_GQA_FWD: usize = 42;
 const MATMUL_REG2: usize = 43;
 const MATMUL_GEMV: usize = 44;
+
+/// Kernels resolved by name, past the hand-numbered [`PIPELINES`]: the training attention's flash backward and the
+/// two-stage cross-entropy gradient.
+const FLASH_GQA_BWD_DQ: &str = "flash_attn_causal_gqa_bwd_dq";
+const FLASH_GQA_BWD_DKV: &str = "flash_attn_causal_gqa_bwd_dkv";
+const CE_STATS: &str = "ce_stats";
+const CE_GRAD_STATS: &str = "ce_grad_stats";
+
+/// Every kernel a training or inference build compiles: [`PIPELINES`] (whose positions the constants above name),
+/// then what the shared GEMM facade ([`model::ops::Ops`]), the device optimizer, the flash backward and the two-stage
+/// cross-entropy gradient resolve by name, each name once.
+pub fn pipelines() -> &'static [(&'static str, &'static str)] {
+    static LIST: std::sync::OnceLock<Vec<(&'static str, &'static str)>> = std::sync::OnceLock::new();
+    LIST.get_or_init(|| {
+        let mut v = optim::with_moment_kernels(PIPELINES);
+        let extra = [
+            (FLASH_GQA_BWD_DQ, kernels::FLASH_ATTN_CAUSAL_GQA_BWD_DQ),
+            (FLASH_GQA_BWD_DKV, kernels::FLASH_ATTN_CAUSAL_GQA_BWD_DKV),
+            (CE_STATS, kernels::CE_STATS),
+            (CE_GRAD_STATS, kernels::CE_GRAD_STATS),
+            ("rmsnorm_dw_part", kernels::RMSNORM_DW_PART),
+            ("rmsnorm_dw_sum", kernels::RMSNORM_DW_SUM),
+        ];
+        for (name, src) in model::ops::kernel_list().iter().copied().chain(extra) {
+            if !v.iter().any(|(have, _)| *have == name) {
+                v.push((name, src));
+            }
+        }
+        v
+    })
+}
 
 pub const PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
@@ -258,6 +300,19 @@ pub struct Ouro {
     pub gpu: Gpu,
     pub cfg: OuroConfig,
     pub ps: ParamStore,
+    /// The shared GEMM facade every linear runs through: the vendor library's tensor-core products where the device
+    /// has them and the precision allows ([`GemmPrecision`]), the WGSL kernels otherwise.
+    ops: Ops,
+    /// The flash attention trio (no `[t, t]` scores) where the device runs it, `None` for the materialized chain.
+    flash: Option<FlashGqaIds>,
+    /// Per-row log-sum-exp the flash forward leaves for its backward, `[b, n_heads, t]`, and the backward's
+    /// `rowsum(dO·O)`.
+    lse: DeviceBuffer,
+    dsum: DeviceBuffer,
+    /// Per-row softmax statistics of one pass's logits, `[rows, 2]` (the two-stage cross-entropy gradient).
+    ce_stats: DeviceBuffer,
+    ce_stats_k: usize,
+    ce_grad_stats_k: usize,
     b: u32,
     t: u32,
     train: bool,
@@ -307,27 +362,31 @@ impl Ouro {
     /// Frozen-weight model over a checkpoint source (a brain checkpoint, an HF
     /// directory source, or an in-memory init map).
     pub fn new_inference(cfg: OuroConfig, b: u32, t: u32, src: &dyn checkpoint::TensorSource) -> Ouro {
-        Ouro::new_impl(cfg, b, t, src, false)
+        Ouro::build(cfg, b, t, src, false, None, GemmPrecision::Fp32Reference).unwrap_or_else(|e| panic!("ouro: {e}"))
     }
 
     /// Trainable model: weights, gradients and AdamW moments for every
     /// parameter, plus the backward graph.
+    /// The products run in exact fp32 ([`GemmPrecision::Fp32Reference`]): what gradient checks and parity gates are
+    /// stated against. A training run takes [`Ouro::new_train_with`] and the run's own precision.
     pub fn new_train(cfg: OuroConfig, b: u32, t: u32, init: &dyn checkpoint::TensorSource) -> Ouro {
-        Ouro::new_impl(cfg, b, t, init, true)
+        Ouro::new_train_with(cfg, b, t, init, GemmPrecision::Fp32Reference)
     }
 
-    fn new_impl(cfg: OuroConfig, b: u32, t: u32, src: &dyn checkpoint::TensorSource, train: bool) -> Ouro {
-        Ouro::build(cfg, b, t, src, train, None).unwrap_or_else(|e| panic!("ouro: {e}"))
+    /// [`Ouro::new_train`] with the products at `gemm` ([`GemmPrecision::Auto`]: tensor cores where the device has
+    /// them, the flash attention's fp16 tensor-core kernels included).
+    pub fn new_train_with(cfg: OuroConfig, b: u32, t: u32, init: &dyn checkpoint::TensorSource, gemm: GemmPrecision) -> Ouro {
+        Ouro::build(cfg, b, t, init, true, None, gemm).unwrap_or_else(|e| panic!("ouro: {e}"))
     }
 
     /// A training build whose per-layer tensors stream through a device window under `resident` from the start (see
     /// [`model::streamed`]): they are read from `src` into the window's host state and never all reach the device, so
     /// a model larger than it trains. The embedding, the head, the final norm and the exit gate load as usual.
     pub fn new_resident_on(cfg: OuroConfig, b: u32, t: u32, src: &dyn checkpoint::TensorSource, resident: &model::resident_ft::ResidentFtConfig) -> Result<Ouro, String> {
-        Ouro::build(cfg, b, t, src, true, Some(resident))
+        Ouro::build(cfg, b, t, src, true, Some(resident), GemmPrecision::Fp32Reference)
     }
 
-    fn build(cfg: OuroConfig, b: u32, t: u32, src: &dyn checkpoint::TensorSource, train: bool, resident: Option<&model::resident_ft::ResidentFtConfig>) -> Result<Ouro, String> {
+    fn build(cfg: OuroConfig, b: u32, t: u32, src: &dyn checkpoint::TensorSource, train: bool, resident: Option<&model::resident_ft::ResidentFtConfig>, gemm: GemmPrecision) -> Result<Ouro, String> {
         cfg.validate().expect("ouro config");
         assert!(t <= cfg.block_size, "sequence {t} exceeds positional capacity {}", cfg.block_size);
         assert!(b > 0 && t > 0);
@@ -335,7 +394,11 @@ impl Ouro {
             return Err("ouro: only a training build streams its layers".into());
         }
 
-        let gpu = Gpu::new(&optim::with_moment_kernels(PIPELINES));
+        let gpu = Gpu::new(pipelines());
+        let mut ops = Ops::new(gpu.share())?;
+        ops.set_gemm_precision(gemm);
+        let flash = FlashGqaIds { fwd: FLASH_GQA_FWD, bwd_dq: named(&gpu, FLASH_GQA_BWD_DQ)?, bwd_dkv: named(&gpu, FLASH_GQA_BWD_DKV)?, native: !ops.tensor_gemm().is_reference_pinned() }.for_training(&gpu, cfg.head_dim, t);
+        let (ce_stats_k, ce_grad_stats_k) = (named(&gpu, CE_STATS)?, named(&gpu, CE_GRAD_STATS)?);
         let layer_of = |name: &str| model::streamed::blocks_layer(name);
         let roles = cfg
             .param_list()
@@ -380,7 +443,8 @@ impl Ouro {
             Vec::new()
         };
 
-        let bht2 = (b as u64) * cfg.n_heads as u64 * (t as u64) * (t as u64);
+        // The flash trio never materializes the `[b, h, t, t]` scores: they are allocated only for the chain.
+        let bht2 = if flash.is_some() { 1 } else { (b as u64) * cfg.n_heads as u64 * (t as u64) * (t as u64) };
         assert!(bht2 <= u32::MAX as u64, "materialized attention exceeds u32 index space");
         let scratch = Scratch {
             xn1: st(n * d),
@@ -428,10 +492,19 @@ impl Ouro {
         });
 
         let ce_grad_uniform = gpu.uniform_dynamic(4);
+        let (lse, dsum) = (st(b as u64 * cfg.n_heads as u64 * t as u64), st(b as u64 * cfg.n_heads as u64 * t as u64));
+        let ce_stats = st(2 * n);
         let mut m = Ouro {
             gpu,
             cfg: cfg.clone(),
             ps,
+            ops,
+            flash,
+            lse,
+            dsum,
+            ce_stats,
+            ce_stats_k,
+            ce_grad_stats_k,
             b,
             t,
             train,
@@ -501,6 +574,25 @@ impl Ouro {
         self.count.set(count.max(1) as f32);
     }
 
+    /// `y = x · Wᵀ` for the store's fp32 weight `w` (`[n, k]`) over `m` rows, through the shared GEMM facade.
+    #[allow(clippy::too_many_arguments)]
+    fn linear(&self, steps: &mut Vec<Step>, x: &DeviceBuffer, w: &str, y: &DeviceBuffer, m: u32, k: u32, n: u32) {
+        let weight = Weight::dense_f32(self.ps.w(w).clone(), n, k);
+        self.ops.matmul(steps, &weight, &self.ops.act_f32(x, 0, m, k), y, 0);
+    }
+
+    /// `dx (+)= dy · W` for the store's weight `w` (`[n, k]`).
+    #[allow(clippy::too_many_arguments)]
+    fn linear_dx(&self, steps: &mut Vec<Step>, dy: &DeviceBuffer, w: &str, dx: &DeviceBuffer, m: u32, k: u32, n: u32, accumulate: bool) {
+        self.ops.matmul_dx(steps, &Weight::dense_f32(self.ps.w(w).clone(), n, k), dy, m, dx, accumulate);
+    }
+
+    /// `dW += dyᵀ · x` into the store's gradient of `w` (`[n, k]`).
+    #[allow(clippy::too_many_arguments)]
+    fn linear_dw(&self, steps: &mut Vec<Step>, dy: &DeviceBuffer, x: &DeviceBuffer, w: &str, m: u32, k: u32, n: u32) {
+        self.ops.matmul_dw(steps, x, dy, m, n, k, self.ps.g(w));
+    }
+
     /// One layer of the shared stack: sandwich RMSNorm, MHA with half-split
     /// RoPE, SwiGLU, two residual adds. Writes `h_out` and fills the reusable
     /// scratch the backward pass will differentiate.
@@ -514,26 +606,29 @@ impl Ouro {
         let ga = Gqa { b: self.b, t: self.t, n_heads: nh, n_kv_heads: nkv, head_dim: hd };
 
         steps.push(block::rmsnorm_fwd(&self.gpu, &ids, h_in, self.ps.w(&format!("blocks.{l}.ln1.weight")), &s.xn1, d, n, cfg.norm_eps));
-        steps.push(self.gpu.step(MATMUL, &[&s.xn1, self.ps.w(&format!("blocks.{l}.attn.wq.weight")), &s.q], &[n, d, hq], n * hq));
-        steps.push(self.gpu.step(MATMUL, &[&s.xn1, self.ps.w(&format!("blocks.{l}.attn.wk.weight")), &s.k], &[n, d, hkv], n * hkv));
-        steps.push(self.gpu.step(MATMUL, &[&s.xn1, self.ps.w(&format!("blocks.{l}.attn.wv.weight")), &s.v], &[n, d, hkv], n * hkv));
+        self.linear(steps, &s.xn1, &format!("blocks.{l}.attn.wq.weight"), &s.q, n, d, hq);
+        self.linear(steps, &s.xn1, &format!("blocks.{l}.attn.wk.weight"), &s.k, n, d, hkv);
+        self.linear(steps, &s.xn1, &format!("blocks.{l}.attn.wv.weight"), &s.v, n, d, hkv);
         steps.push(block::rope_fwd(&self.gpu, &ids, &s.q, n, nh, hd, hq, self.t, cfg.rope_theta));
         steps.push(block::rope_fwd(&self.gpu, &ids, &s.k, n, nkv, hd, hkv, self.t, cfg.rope_theta));
         if let Some((kc, vc)) = kv {
             steps.push(block::kv_cache_fill(&self.gpu, KV_APPEND, &s.k, kc, n, nkv, hd));
             steps.push(block::kv_cache_fill(&self.gpu, KV_APPEND, &s.v, vc, n, nkv, hd));
         }
-        steps.extend(block::gqa_fwd(&self.gpu, &ids, &ga, &s.q, &s.k, &s.v, &s.scores, &s.probs, &s.ctx));
-        steps.push(self.gpu.step(MATMUL, &[&s.ctx, self.ps.w(&format!("blocks.{l}.attn.wo.weight")), &s.proj], &[n, hq, d], n * d));
+        match &self.flash {
+            Some(f) => steps.push(block::flash_gqa_causal_fwd(&self.gpu, f, &ga, &s.q, &s.k, &s.v, &s.ctx, &self.lse)),
+            None => steps.extend(block::gqa_fwd(&self.gpu, &ids, &ga, &s.q, &s.k, &s.v, &s.scores, &s.probs, &s.ctx)),
+        }
+        self.linear(steps, &s.ctx, &format!("blocks.{l}.attn.wo.weight"), &s.proj, n, hq, d);
         // Sandwich normalization: the attention output is normalized before the
         // residual add, and so is the MLP output.
         steps.push(block::rmsnorm_fwd(&self.gpu, &ids, &s.proj, self.ps.w(&format!("blocks.{l}.ln1_2.weight")), &s.xn1_2, d, n, cfg.norm_eps));
         steps.push(self.gpu.step(ADD2, &[h_in, &s.xn1_2, &s.xmid], &[n * d], n * d));
         steps.push(block::rmsnorm_fwd(&self.gpu, &ids, &s.xmid, self.ps.w(&format!("blocks.{l}.ln2.weight")), &s.xn2, d, n, cfg.norm_eps));
-        steps.push(self.gpu.step(MATMUL, &[&s.xn2, self.ps.w(&format!("blocks.{l}.mlp.gate.weight")), &s.gate_pre], &[n, d, ff], n * ff));
-        steps.push(self.gpu.step(MATMUL, &[&s.xn2, self.ps.w(&format!("blocks.{l}.mlp.up.weight")), &s.up], &[n, d, ff], n * ff));
+        self.linear(steps, &s.xn2, &format!("blocks.{l}.mlp.gate.weight"), &s.gate_pre, n, d, ff);
+        self.linear(steps, &s.xn2, &format!("blocks.{l}.mlp.up.weight"), &s.up, n, d, ff);
         steps.push(block::swiglu_fwd(&self.gpu, &ids, &s.gate_pre, &s.up, &s.mlp_h, n * ff));
-        steps.push(self.gpu.step(MATMUL, &[&s.mlp_h, self.ps.w(&format!("blocks.{l}.mlp.down.weight")), &s.mlp_out], &[n, ff, d], n * d));
+        self.linear(steps, &s.mlp_h, &format!("blocks.{l}.mlp.down.weight"), &s.mlp_out, n, ff, d);
         steps.push(block::rmsnorm_fwd(&self.gpu, &ids, &s.mlp_out, self.ps.w(&format!("blocks.{l}.ln2_2.weight")), &s.xn2_2, d, n, cfg.norm_eps));
         steps.push(self.gpu.step(ADD2, &[&s.xmid, &s.xn2_2, h_out], &[n * d], n * d));
     }
@@ -566,7 +661,7 @@ impl Ouro {
             let last = &self.res[(p + 1) * cfg.n_layers as usize];
             steps.push(block::rmsnorm_fwd(&self.gpu, &ids, last, self.ps.w("norm.weight"), &self.hs[p], d, n, cfg.norm_eps));
             // Exit gate: one linear over the model width, plus its bias.
-            steps.push(self.gpu.step(MATMUL, &[&self.hs[p], self.ps.w("gate.weight"), &self.gates[p]], &[n, d, 1], n));
+            self.linear(&mut steps, &self.hs[p], "gate.weight", &self.gates[p], n, d, 1);
             steps.push(self.gpu.step(BIAS_ADD, &[&self.gates[p], self.ps.w("gate.bias")], &[n, 1], n));
         }
         pass.segment(&mut steps, None);
@@ -577,7 +672,9 @@ impl Ouro {
         let n = self.rows();
         let (d, v) = (self.cfg.d_model, self.cfg.vocab);
         let out = &self.logits[if self.train { pass } else { 0 }];
-        vec![self.gpu.step(MATMUL, &[&self.hs[pass], self.ps.w("lm_head.weight"), out], &[n, d, v], n * v)]
+        let mut steps = Vec::new();
+        self.linear(&mut steps, &self.hs[pass], "lm_head.weight", out, n, d, v);
+        steps
     }
 
     fn training_forward_steps(&self) -> SegmentedPass {
@@ -614,10 +711,13 @@ impl Ouro {
         // count and then scaled per row by that row's exit probability for this
         // pass, so the shared head and trunk see the weighted sum.
         for p in 0..t {
-            steps.push(self.gpu.step_buf(CE_GRAD, &self.ce_grad_uniform, &[&self.logits[p], &self.targets, &g.dlogits], n * v));
+            // Two stages: each row's softmax statistics once, then the O(rows * vocab) elementwise gradient (the
+            // one-stage kernel re-reduces the row for every element of it).
+            steps.push(self.gpu.step(self.ce_stats_k, &[&self.logits[p], &self.targets, &self.ce_stats], &[n, v, IGNORE], n));
+            steps.push(self.gpu.step_buf(self.ce_grad_stats_k, &self.ce_grad_uniform, &[&self.logits[p], &self.targets, &self.ce_stats, &g.dlogits], n * v));
             steps.push(self.gpu.step(SCALE_ROW, &[&g.dlogits, &g.exit_scale[p], &g.dlogits_scaled], &[n * v, v], n * v));
-            steps.push(self.gpu.step(MATMUL_DX, &[&g.dlogits_scaled, self.ps.w("lm_head.weight"), &g.dhs[p]], &[n, d, v, 0], n * d));
-            steps.push(self.gpu.step(MATMUL_DW, &[&g.dlogits_scaled, &self.hs[p], self.ps.g("lm_head.weight")], &[n, d, v], v * d));
+            self.linear_dx(&mut steps, &g.dlogits_scaled, "lm_head.weight", &g.dhs[p], n, d, v, false);
+            self.linear_dw(&mut steps, &g.dlogits_scaled, &self.hs[p], "lm_head.weight", n, d, v);
         }
 
         // Exit-gate phase. The loss depends on every pass's gate through its
@@ -626,8 +726,8 @@ impl Ouro {
         // final pass's gate never enters the released objective: its
         // probability is the remaining mass, so its gradient stays zero.
         for p in 0..t.saturating_sub(1) {
-            steps.push(self.gpu.step(MATMUL_DX, &[&g.gate_grad[p], self.ps.w("gate.weight"), &g.dhs[p]], &[n, d, 1, 1], n * d));
-            steps.push(self.gpu.step(MATMUL_DW, &[&g.gate_grad[p], &self.hs[p], self.ps.g("gate.weight")], &[n, d, 1], d));
+            self.linear_dx(&mut steps, &g.gate_grad[p], "gate.weight", &g.dhs[p], n, d, 1, true);
+            self.linear_dw(&mut steps, &g.gate_grad[p], &self.hs[p], "gate.weight", n, d, 1);
             steps.push(self.gpu.step(BIAS_GRAD, &[&g.gate_grad[p], self.ps.g("gate.bias")], &[n, 1], 1));
         }
 
@@ -674,29 +774,32 @@ impl Ouro {
 
         // h_out = xmid + xn2_2
         steps.extend(block::rmsnorm_bwd(&self.gpu, &ids, &s.mlp_out, self.ps.w(&p("ln2_2.weight")), d_h_out, &g.d_mlp_out, &g.rms_inv, Some(self.ps.g(&p("ln2_2.weight"))), d, n, cfg.norm_eps));
-        steps.push(self.gpu.step(MATMUL_DW, &[&g.d_mlp_out, &s.mlp_h, self.ps.g(&p("mlp.down.weight"))], &[n, ff, d], d * ff));
-        steps.push(self.gpu.step(MATMUL_DX, &[&g.d_mlp_out, self.ps.w(&p("mlp.down.weight")), &g.d_mlp_h], &[n, ff, d, 0], n * ff));
+        self.linear_dw(steps, &g.d_mlp_out, &s.mlp_h, &p("mlp.down.weight"), n, ff, d);
+        self.linear_dx(steps, &g.d_mlp_out, &p("mlp.down.weight"), &g.d_mlp_h, n, ff, d, false);
         steps.extend(block::swiglu_bwd(&self.gpu, &ids, &s.gate_pre, &s.up, &g.d_mlp_h, &g.d_gate_pre, &g.d_up, n * ff));
-        steps.push(self.gpu.step(MATMUL_DW, &[&g.d_gate_pre, &s.xn2, self.ps.g(&p("mlp.gate.weight"))], &[n, d, ff], ff * d));
-        steps.push(self.gpu.step(MATMUL_DX, &[&g.d_gate_pre, self.ps.w(&p("mlp.gate.weight")), &g.d_xn2], &[n, d, ff, 0], n * d));
-        steps.push(self.gpu.step(MATMUL_DW, &[&g.d_up, &s.xn2, self.ps.g(&p("mlp.up.weight"))], &[n, d, ff], ff * d));
-        steps.push(self.gpu.step(MATMUL_DX, &[&g.d_up, self.ps.w(&p("mlp.up.weight")), &g.d_xn2], &[n, d, ff, 1], n * d));
+        self.linear_dw(steps, &g.d_gate_pre, &s.xn2, &p("mlp.gate.weight"), n, d, ff);
+        self.linear_dx(steps, &g.d_gate_pre, &p("mlp.gate.weight"), &g.d_xn2, n, d, ff, false);
+        self.linear_dw(steps, &g.d_up, &s.xn2, &p("mlp.up.weight"), n, d, ff);
+        self.linear_dx(steps, &g.d_up, &p("mlp.up.weight"), &g.d_xn2, n, d, ff, true);
         // xmid = h_in + xn1_2
         steps.extend(block::rmsnorm_bwd(&self.gpu, &ids, &s.xmid, self.ps.w(&p("ln2.weight")), &g.d_xn2, &g.d_tmp, &g.rms_inv, Some(self.ps.g(&p("ln2.weight"))), d, n, cfg.norm_eps));
         steps.push(self.gpu.step(ADD2, &[d_h_out, &g.d_tmp, &g.d_xmid], &[n * d], n * d));
         // Attention output (normalized before the residual add).
         steps.extend(block::rmsnorm_bwd(&self.gpu, &ids, &s.proj, self.ps.w(&p("ln1_2.weight")), &g.d_xmid, &g.d_proj, &g.rms_inv, Some(self.ps.g(&p("ln1_2.weight"))), d, n, cfg.norm_eps));
-        steps.push(self.gpu.step(MATMUL_DW, &[&g.d_proj, &s.ctx, self.ps.g(&p("attn.wo.weight"))], &[n, hq, d], d * hq));
-        steps.push(self.gpu.step(MATMUL_DX, &[&g.d_proj, self.ps.w(&p("attn.wo.weight")), &g.d_ctx], &[n, hq, d, 0], n * hq));
-        steps.extend(block::gqa_bwd(&self.gpu, &ids, &ga, &s.q, &s.k, &s.v, &s.probs, &g.d_ctx, &g.d_scores, &g.d_q, &g.d_k, &g.d_v));
+        self.linear_dw(steps, &g.d_proj, &s.ctx, &p("attn.wo.weight"), n, hq, d);
+        self.linear_dx(steps, &g.d_proj, &p("attn.wo.weight"), &g.d_ctx, n, hq, d, false);
+        match &self.flash {
+            Some(f) => steps.extend(block::flash_gqa_causal_bwd(&self.gpu, f, &ga, &s.q, &s.k, &s.v, &s.ctx, &self.lse, &g.d_ctx, &self.dsum, &g.d_q, &g.d_k, &g.d_v)),
+            None => steps.extend(block::gqa_bwd(&self.gpu, &ids, &ga, &s.q, &s.k, &s.v, &s.probs, &g.d_ctx, &g.d_scores, &g.d_q, &g.d_k, &g.d_v)),
+        }
         steps.push(block::rope_bwd(&self.gpu, &ids, &g.d_q, n, nh, hd, hq, self.t, cfg.rope_theta));
         steps.push(block::rope_bwd(&self.gpu, &ids, &g.d_k, n, nkv, hd, hkv, self.t, cfg.rope_theta));
-        steps.push(self.gpu.step(MATMUL_DW, &[&g.d_q, &s.xn1, self.ps.g(&p("attn.wq.weight"))], &[n, d, hq], hq * d));
-        steps.push(self.gpu.step(MATMUL_DX, &[&g.d_q, self.ps.w(&p("attn.wq.weight")), &g.d_xn1], &[n, d, hq, 0], n * d));
-        steps.push(self.gpu.step(MATMUL_DW, &[&g.d_k, &s.xn1, self.ps.g(&p("attn.wk.weight"))], &[n, d, hkv], hkv * d));
-        steps.push(self.gpu.step(MATMUL_DX, &[&g.d_k, self.ps.w(&p("attn.wk.weight")), &g.d_xn1], &[n, d, hkv, 1], n * d));
-        steps.push(self.gpu.step(MATMUL_DW, &[&g.d_v, &s.xn1, self.ps.g(&p("attn.wv.weight"))], &[n, d, hkv], hkv * d));
-        steps.push(self.gpu.step(MATMUL_DX, &[&g.d_v, self.ps.w(&p("attn.wv.weight")), &g.d_xn1], &[n, d, hkv, 1], n * d));
+        self.linear_dw(steps, &g.d_q, &s.xn1, &p("attn.wq.weight"), n, d, hq);
+        self.linear_dx(steps, &g.d_q, &p("attn.wq.weight"), &g.d_xn1, n, d, hq, false);
+        self.linear_dw(steps, &g.d_k, &s.xn1, &p("attn.wk.weight"), n, d, hkv);
+        self.linear_dx(steps, &g.d_k, &p("attn.wk.weight"), &g.d_xn1, n, d, hkv, true);
+        self.linear_dw(steps, &g.d_v, &s.xn1, &p("attn.wv.weight"), n, d, hkv);
+        self.linear_dx(steps, &g.d_v, &p("attn.wv.weight"), &g.d_xn1, n, d, hkv, true);
         steps.extend(block::rmsnorm_bwd(&self.gpu, &ids, h_in, self.ps.w(&p("ln1.weight")), &g.d_xn1, &g.d_tmp2, &g.rms_inv, Some(self.ps.g(&p("ln1.weight"))), d, n, cfg.norm_eps));
         if acc {
             steps.push(self.gpu.step(ADD2, &[&g.d_xmid, &g.d_tmp2, &g.d_in], &[n * d], n * d));
@@ -1107,6 +1210,11 @@ pub fn exit_pass(gates: &[f64], threshold: f64) -> usize {
         }
     }
     out
+}
+
+/// The index of the kernel `name` in `gpu`'s pipeline set ([`pipelines`] registers it).
+fn named(gpu: &Gpu, name: &str) -> Result<usize, String> {
+    gpu.kernel_index(name).ok_or_else(|| format!("ouro: kernel {name} is not registered"))
 }
 
 #[cfg(test)]

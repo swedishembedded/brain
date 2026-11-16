@@ -20,12 +20,14 @@ actions (`init_model`, `pretrain`, `full_train`) take by name.
 
 ```bash
 make samples/models/ouro/run ARGS="--out out/ouro"                                  # tiny: seconds on a CPU
-make samples/models/ouro/run ARGS="--out out/ouro-15m --size default --steps 100"   # hidden 256, 4 layers, 4 passes
-make samples/models/ouro/run ARGS="--out out/ouro --text my-text.txt"
+make samples/models/ouro/run ARGS="--out out/ouro-5m --size default --steps 100"    # hidden 256, 4 layers, 4 passes
+make samples/models/ouro/run ARGS="--out out/ouro-5m --size default --device gpu0 --batch 32 --text my-text.txt"
 ```
 
-`--size default` is about 15M parameters: hidden 256, 4 shared layers run for 4 passes, 4 heads, vocabulary 4096,
-rows of 1024 tokens. It needs no weights and no download; with no `--text` it trains on a short built-in text.
+`--size default` is about 5.3M parameters: hidden 256, 4 shared layers run for 4 passes, 4 heads, vocabulary 4096,
+rows of 1024 tokens; `--size small` is about 1.3M (hidden 128, vocabulary 2048, rows of 512). `--block` and
+`--batch` override a size's row length and rows per step. It needs no weights and no download; with no `--text` it
+trains on a short built-in text.
 
 ## Build
 

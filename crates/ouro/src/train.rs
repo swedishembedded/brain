@@ -89,7 +89,7 @@ pub fn train(path: &Path, corpus: &[u32], run: &TrainRun, save: Option<&Path>, o
         checkpoint_secs: 0,
         ..model::FitOpts::default()
     };
-    let mut m = Ouro::new_train(cfg, batch, seq, &*src);
+    let mut m = Ouro::new_train_with(cfg, batch, seq, &*src, opts.gemm_precision);
     if let Some(policy) = run.activations {
         model::Model::set_saved_policy(&mut m, policy)?;
     }

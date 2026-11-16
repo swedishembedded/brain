@@ -76,7 +76,7 @@ impl ChatTrainer for OuroTrainer {
         if opts.block_size > cfg.block_size {
             return Err(invalid(base, format!("training rows of {} tokens are longer than the model's {} positions", opts.block_size, cfg.block_size)));
         }
-        let m = state.scope(|| Ouro::new_train(cfg, opts.batch_size, opts.block_size, &*src));
+        let m = state.scope(|| Ouro::new_train_with(cfg, opts.batch_size, opts.block_size, &*src, opts.gemm_precision));
         fit.fit(m)
     }
 

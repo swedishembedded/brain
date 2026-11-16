@@ -11,7 +11,7 @@
 //! 3. the trained checkpoint continues a prompt greedily through the model's own decode step.
 //!
 //! ```text
-//! sample-models-ouro --out runs/ouro [--text FILE] [--size tiny|default] [--steps N] [--seed S] [--device cpu] [--eval-every N]
+//! sample-models-ouro --out runs/ouro [--text FILE] [--size tiny|small|default] [--steps N] [--seed S] [--device cpu] [--eval-every N]
 //! ```
 //!
 //! Swedish Embedded AB implements small language models trained from scratch on a client's own text. If your team
@@ -24,18 +24,21 @@ use std::time::Instant;
 use brain::{Device, ModelInit, Pretrain};
 
 const USAGE: &str = "\
-usage: sample-models-ouro --out DIR [--text FILE] [--size tiny|default] [--steps N]
+usage: sample-models-ouro --out DIR [--text FILE] [--size tiny|small|default] [--steps N]
                           [--seed S] [--device SPEC] [--tokens N]
 
   --out DIR       where the model, the run and the corpus go (one directory per run)
   --text FILE     the training text (plain UTF-8; default: a short built-in text)
-  --size NAME     tiny (about 0.3M parameters, seconds on a CPU) or default
-                   (hidden 256, 4 layers, 4 heads, 4 passes, vocab 4096, rows of 1024)
+  --size NAME     tiny (about 0.15M parameters, seconds on a CPU), small (about 1.3M:
+                   hidden 128, 4 layers, 4 passes, vocab 2048, rows of 512) or default
+                   (5.3M: hidden 256, 4 layers, 4 heads, 4 passes, vocab 4096, rows of 1024)
   --steps N       pretraining steps (default 200 tiny, 100 default)
   --seed S        the initialization and window seed (drawn and printed when not given)
   --device SPEC   cpu, gpu0, ... (default cpu)
   --tokens N      tokens to continue the prompt with (default 48)
   --eval-every N  score the held-out text every N steps (default a quarter of the run; 0: never)
+  --block N       tokens per training row (default: the size's)
+  --batch N       rows per step (default: the size's)
 ";
 
 /// The chat template the model is made with: ChatML-like turns, tool schemas in the system turn, calls as
@@ -88,6 +91,7 @@ fn size(name: &str) -> Option<Size> {
     };
     match name {
         "tiny" => Some(Size { config: config(64, 2, 2, 176, 2, 256), vocab: 384, block: 64, batch: 8, steps: 200 }),
+        "small" => Some(Size { config: config(128, 4, 4, 352, 4, 1024), vocab: 2048, block: 512, batch: 8, steps: 100 }),
         "default" => Some(Size { config: config(256, 4, 4, 704, 4, 2048), vocab: 4096, block: 1024, batch: 4, steps: 100 }),
         _ => None,
     }
@@ -149,7 +153,13 @@ fn continue_prompt(dir: &Path, prompt: &str, tokens: usize) -> Result<String, St
 fn run(mut args: Args) -> Result<(), String> {
     let out = PathBuf::from(args.take("--out").ok_or("--out is required")?);
     let size_name = args.take("--size").unwrap_or_else(|| "tiny".to_string());
-    let size = size(&size_name).ok_or_else(|| format!("--size {size_name}: tiny or default"))?;
+    let mut size = size(&size_name).ok_or_else(|| format!("--size {size_name}: tiny, small or default"))?;
+    if let Some(v) = args.take("--block") {
+        size.block = v.parse().map_err(|_| format!("--block {v}"))?;
+    }
+    if let Some(v) = args.take("--batch") {
+        size.batch = v.parse().map_err(|_| format!("--batch {v}"))?;
+    }
     let steps: u32 = args.take("--steps").map_or(Ok(size.steps), |s| s.parse().map_err(|_| format!("--steps {s}")))?;
     let eval_every: u32 = args.take("--eval-every").map_or(Ok((steps / 4).max(1)), |s| s.parse().map_err(|_| format!("--eval-every {s}")))?;
     let tokens: usize = args.take("--tokens").map_or(Ok(48), |s| s.parse().map_err(|_| format!("--tokens {s}")))?;
