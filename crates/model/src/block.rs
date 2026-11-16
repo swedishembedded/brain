@@ -733,6 +733,18 @@ pub fn native_add_rmsnorm(_g: &Gpu, _bufs: &[&DeviceBuffer; 5], _d: u32, _rows: 
     None
 }
 
+/// [`native_add_rmsnorm`] writing the normalised rows (`bufs[4]`) as the packed bf16 operand of the tensor-core product
+/// that reads them; `None` where no native backend runs it.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn native_add_rmsnorm_bf16(g: &Gpu, bufs: &[&DeviceBuffer; 5], d: u32, rows: u32, eps: f32) -> Option<Step> {
+    gpu_core::provider::cuda::add_rmsnorm_fwd_bf16_step(g, bufs, d, rows, eps)
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn native_add_rmsnorm_bf16(_g: &Gpu, _bufs: &[&DeviceBuffer; 5], _d: u32, _rows: u32, _eps: f32) -> Option<Step> {
+    None
+}
+
 /// [`gpu_core::provider::cuda::paged_decode_batched_step`] where a native backend exists at all; `None` (the
 /// portable triad) on wasm.
 #[cfg(not(target_arch = "wasm32"))]

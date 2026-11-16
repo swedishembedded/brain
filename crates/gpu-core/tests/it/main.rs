@@ -63,6 +63,7 @@ mod gemv_reg_upgrade_step_buf;
 mod glue_roof_bench;
 mod gqa_qk_prep_native;
 mod qknorm_rope_native;
+mod add_rmsnorm_bf16_native;
 mod host_tier;
 mod scoped_backend;
 mod i8_decode_batch_bench;

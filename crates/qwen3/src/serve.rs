@@ -868,6 +868,10 @@ struct Scratch {
     ctx: DeviceBuffer,
     xmid: DeviceBuffer,
     xn2: DeviceBuffer,
+    /// `xn1` / `xn2` as the packed bf16 operand (`[rows, d / 2]` words) the closing residual norm writes directly when
+    /// only bf16 library products read it ([`Engine::parts_take_bf16`]).
+    xn1_bf16: DeviceBuffer,
+    xn2_bf16: DeviceBuffer,
     /// M4.1: the fused gate/up GEMM's raw `[b, 2*ff]` output, before
     /// `concat_split` narrows it into `gate_pre`/`up` below.
     gateup_pre: DeviceBuffer,
@@ -1420,6 +1424,8 @@ impl Engine {
             ctx: st(b * hq),
             xmid: st(b * d),
             xn2: st(b * d),
+            xn1_bf16: st((b * d).div_ceil(2)),
+            xn2_bf16: st((b * d).div_ceil(2)),
             gateup_pre: st(b * 2 * ff),
             gate_pre: st(b * ff),
             up: st(b * ff),
@@ -2468,12 +2474,27 @@ impl Engine {
         exact.is_none() && rows >= self.library_min_rows && w.dtype() == Dtype::BF16 && self.gemm.is_active()
     }
 
+    /// Whether [`Self::linear_parts`] runs `w`'s `parts` (rows of the weight, in order) at `rows`, so the norm before it
+    /// may write its activation only as the bf16 operand.
+    fn parts_take_bf16(&self, w: &Weight, parts: &[u32], rows: u32, exact: Option<&exact::ExactDecode>) -> bool {
+        if !self.library_bf16(w, rows, exact) || parts.iter().sum::<u32>() != w.n() {
+            return false;
+        }
+        let mut first = 0u32;
+        parts.iter().all(|&part| {
+            let serves = w.bf16_rows(first, part).is_some_and(|(_, range)| self.gemm.forward_bf16_serves(rows, part, w.k(), range.0));
+            first += part;
+            serves
+        })
+    }
+
     /// The parts of a fused bf16 weight (`outs`, each `(buffer, rows of the weight)` in weight order) as one library
-    /// product each into the buffer its reader takes, sharing one bf16 cast of `x`. One product into a wide scratch
+    /// product each into the buffer its reader takes, sharing one bf16 cast of `x` (or `pre`, that operand already
+    /// written by the norm before). One product into a wide scratch
     /// that `concat_split` then copied apart moved the product's output three more times. `false`, with nothing
     /// pushed, where the fused weight does not run on that path; the caller runs the fused product.
     #[allow(clippy::too_many_arguments)]
-    fn linear_parts(&self, s: &mut Vec<Step>, w: &Weight, x: &DeviceBuffer, outs: &[(&DeviceBuffer, u32)], rows: u32, exact: Option<&exact::ExactDecode>) -> bool {
+    fn linear_parts(&self, s: &mut Vec<Step>, w: &Weight, x: &DeviceBuffer, pre: Option<&DeviceBuffer>, outs: &[(&DeviceBuffer, u32)], rows: u32, exact: Option<&exact::ExactDecode>) -> bool {
         if !self.library_bf16(w, rows, exact) {
             return false;
         }
@@ -2481,8 +2502,12 @@ impl Engine {
         assert_eq!(outs.iter().map(|o| o.1).sum::<u32>(), w.n(), "qwen3 serve: the parts must tile the fused weight");
         let g = &self.gpu;
         let mut steps = Vec::new();
-        let Some(xb) = self.gemm.cast_bf16(g, &mut steps, &library::Operand { buf: x, range: (0, 0) }, rows as u64 * k as u64) else {
-            return false;
+        let xb = match pre {
+            Some(xb) => xb.clone(),
+            None => match self.gemm.cast_bf16(g, &mut steps, &library::Operand { buf: x, range: (0, 0) }, rows as u64 * k as u64) {
+                Some(xb) => xb,
+                None => return false,
+            },
         };
         // Part `i` is the weight's rows from the previous parts' end.
         let mut first = 0u32;
@@ -3004,13 +3029,15 @@ impl Engine {
         // read, to the bit what the unfused chain produces) on an int8 engine. `quant` is whether the norm's reader
         // is an int8 linear (the final norm's is the fp32 head). The unfused pair otherwise.
         let native = !self.gemm.is_reference_pinned() && self.fuse_residual_norm;
-        let add_rms = |s: &mut Vec<Step>, a: &DeviceBuffer, b2: &DeviceBuffer, nw: &DeviceBuffer, sum: &DeviceBuffer, out: &DeviceBuffer, quant: bool| -> bool {
-            let step = match &self.i8_scratch {
-                None => native.then(|| block::native_add_rmsnorm(g, &[a, b2, nw, sum, out], d, b, self.cfg.rms_eps)).flatten(),
-                Some(scratch) if native && quant && self.caps.workgroup_reductions && g.has_fused(gpu_core::Fused::AddRmsQuant) && gpu_core::Fused::AddRmsQuant.serves(&[d, b, 0, 1]) => {
+        // `bf16`: write the normalised rows only as that packed bf16 operand (every reader is a bf16 library product).
+        let add_rms = |s: &mut Vec<Step>, a: &DeviceBuffer, b2: &DeviceBuffer, nw: &DeviceBuffer, sum: &DeviceBuffer, out: &DeviceBuffer, quant: bool, bf16: Option<&DeviceBuffer>| -> bool {
+            let step = match (&self.i8_scratch, bf16) {
+                (None, Some(xb)) => native.then(|| block::native_add_rmsnorm_bf16(g, &[a, b2, nw, sum, xb], d, b, self.cfg.rms_eps)).flatten(),
+                (None, None) => native.then(|| block::native_add_rmsnorm(g, &[a, b2, nw, sum, out], d, b, self.cfg.rms_eps)).flatten(),
+                (Some(scratch), _) if native && quant && self.caps.workgroup_reductions && g.has_fused(gpu_core::Fused::AddRmsQuant) && gpu_core::Fused::AddRmsQuant.serves(&[d, b, 0, 1]) => {
                     g.fused_step(gpu_core::Fused::AddRmsQuant, &[a, b2, nw, sum, out, scratch.xq_for(d), &scratch.sx], &[d, b, gpu_core::f(self.cfg.rms_eps), 1])
                 }
-                Some(_) => None,
+                (Some(_), _) => None,
             };
             match step {
                 Some(step) => {
@@ -3021,6 +3048,11 @@ impl Engine {
             }
         };
         let mut ln1_done = false;   // the previous layer's closing add already produced this layer's `xn1`
+        let mut xn1_bf16 = false;   // ... and wrote it only as `sc.xn1_bf16`
+        // Whether layer `l`'s fused QKV / gate-up products run as library parts that can read their activation as the
+        // bf16 operand the norm before them writes (adapter corrections and a bias address the fused output instead).
+        let qkv_parts = |l: usize| !lora && self.qkv_bias.get(l).is_none() && self.parts_take_bf16(&self.lin_weights[&format!("blocks.{l}.{WQKV}")], &[hq, hkv, hkv], b, exact);
+        let gateup_parts = |l: usize| !lora && self.parts_take_bf16(&self.lin_weights[&format!("blocks.{l}.{WGATEUP}")], &[ff, ff], b, exact);
         // The arena hands a layer's blocks to the next while the device may still be reading them: a backend that runs
         // submissions in order has the reuse behind the read by construction, any other drains between layers.
         // The first layer follows the last layer of the previous forward, which may not have been read back.
@@ -3054,7 +3086,10 @@ impl Engine {
             let (q_norm, k_norm) = if c.qk_norm { (Some(w(&p("attn.q_norm.weight"))), Some(w(&p("attn.k_norm.weight")))) } else { (None, None) };
             // The adapter corrections and the bias address the fused product's columns, so those keep it.
             let wqkv = &self.lin_weights[&p(WQKV)];
-            if lora || self.qkv_bias.get(l).is_some() || !self.linear_parts(&mut s, wqkv, &sc.xn1, &[(q_src, hq), (k_src, hkv), (&sc.v, hkv)], b, exact) {
+            let pre = (ln1_done && xn1_bf16).then_some(&sc.xn1_bf16);
+            let parts = !lora && self.qkv_bias.get(l).is_none() && self.linear_parts(&mut s, wqkv, &sc.xn1, pre, &[(q_src, hq), (k_src, hkv), (&sc.v, hkv)], b, exact);
+            assert!(parts || pre.is_none(), "qwen3 serve: layer {l}'s norm wrote only the bf16 operand of a product that did not run");
+            if !parts {
                 self.linear(&mut s, wqkv, &sc.xn1, &sc.qkv_pre, b, exact);
                 let qkv_width = hq + 2 * hkv;
                 if lora {
@@ -3190,7 +3225,9 @@ impl Engine {
             if lora {
                 self.lora_correct(&mut s, l, LoraSite::Wo, &sc.ctx, &sc.proj, b, d, 0);
             }
-            if !add_rms(&mut s, &sc.res[l], &sc.proj, w(&p("ln2.weight")), &sc.xmid, &sc.xn2, true) {
+            let up_bf16 = gateup_parts(l);
+            let ln2_done = add_rms(&mut s, &sc.res[l], &sc.proj, w(&p("ln2.weight")), &sc.xmid, &sc.xn2, true, up_bf16.then_some(&sc.xn2_bf16));
+            if !ln2_done {
                 s.push(g.step(ADD2, &[&sc.res[l], &sc.proj, &sc.xmid], &[b * d], b * d));
                 // M4.3: same fusion as ln1 above, for `sc.xn2` -> gate/up.
                 self.rms_quant(&mut s, &sc.xmid, w(&p("ln2.weight")), &sc.xn2, d, b, !self.reads_int8(&p(WGATEUP)) || (lora && self.lora_reads(&[LoraSite::Gate, LoraSite::Up])));
@@ -3200,7 +3237,10 @@ impl Engine {
             // output back into the compact `gate_pre`/`up` buffers
             // `swiglu_fwd` requires.
             let wgateup = &self.lin_weights[&p(WGATEUP)];
-            if lora || !self.linear_parts(&mut s, wgateup, &sc.xn2, &[(&sc.gate_pre, ff), (&sc.up, ff)], b, exact) {
+            let pre = (ln2_done && up_bf16).then_some(&sc.xn2_bf16);
+            let parts = !lora && self.linear_parts(&mut s, wgateup, &sc.xn2, pre, &[(&sc.gate_pre, ff), (&sc.up, ff)], b, exact);
+            assert!(parts || pre.is_none(), "qwen3 serve: layer {l}'s second norm wrote only the bf16 operand of a product that did not run");
+            if !parts {
                 self.linear(&mut s, wgateup, &sc.xn2, &sc.gateup_pre, b, exact);
                 if lora {
                     for (site, col0) in [(LoraSite::Gate, 0), (LoraSite::Up, ff)] {
@@ -3222,7 +3262,9 @@ impl Engine {
             // The layer's closing add and the next norm (the next layer's ln1, or the final norm after the last).
             let next_norm = if l + 1 < c.n_layers as usize { w(&format!("blocks.{}.ln1.weight", l + 1)) } else { w("norm.weight") };
             let next_out = if l + 1 < c.n_layers as usize { &sc.xn1 } else { &sc.xn_final };
-            ln1_done = add_rms(&mut s, &sc.xmid, &sc.mlp_out, next_norm, &sc.res[l + 1], next_out, l + 1 < c.n_layers as usize);
+            let next_bf16 = l + 1 < c.n_layers as usize && qkv_parts(l + 1);
+            ln1_done = add_rms(&mut s, &sc.xmid, &sc.mlp_out, next_norm, &sc.res[l + 1], next_out, l + 1 < c.n_layers as usize, next_bf16.then_some(&sc.xn1_bf16));
+            xn1_bf16 = ln1_done && next_bf16;
             if !ln1_done {
                 s.push(g.step(ADD2, &[&sc.xmid, &sc.mlp_out, &sc.res[l + 1]], &[b * d], b * d));
             }

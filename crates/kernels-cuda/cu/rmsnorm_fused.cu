@@ -17,6 +17,7 @@
 //
 // Contract (u32 params, then pointers; every tensor is [rows, d] f32 row-major, w is [d]):
 //   add_rmsnorm_fwd : params [d, rows, eps (f32 bits)] ; read a, b, w ; write sum, out
+//   add_rmsnorm_fwd_bf16 : as add_rmsnorm_fwd, out written as packed bf16
 //   rmsnorm_dx_add  : params [d, rows, eps (f32 bits)] ; read x, w, dy, res ; write dx_total
 // d must be a multiple of four (the provider checks). Every output element is overwritten.
 //
@@ -57,6 +58,41 @@ extern "C" __global__ void __launch_bounds__(THREADS) brain_add_rmsnorm_fwd(cons
     for (unsigned int c = threadIdx.x; c < d / 4; c += THREADS) {
         const float4 s = reinterpret_cast<const float4*>(sum)[base + c], g = reinterpret_cast<const float4*>(w)[c];
         reinterpret_cast<float4*>(out)[base + c] = make_float4(s.x * inv * g.x, s.y * inv * g.y, s.z * inv * g.z, s.w * inv * g.w);
+    }
+}
+
+// The bf16 rounding of `cast_f32_bf16`: round-to-nearest-even, NaN kept quiet.
+__device__ __forceinline__ unsigned int bf16_bits(float v) {
+    const unsigned int b = __float_as_uint(v);
+    if ((b & 0x7fffffffu) > 0x7f800000u) { return 0x7fc0u; }
+    return (b + 0x7fffu + ((b >> 16) & 1u)) >> 16;
+}
+
+// `add_rmsnorm_fwd` whose normalised output is only read by a bf16 tensor-core product: the same sum and the same
+// normalised values, written as the packed bf16 operand (two a word, lower index in the low half) instead of fp32 for a
+// `cast_f32_bf16` to re-read. params and inputs as `add_rmsnorm_fwd`; writes sum (f32) and out_bf16 ([rows, d / 2] u32).
+extern "C" __global__ void __launch_bounds__(THREADS) brain_add_rmsnorm_fwd_bf16(const unsigned int* params, const float* a, const float* b, const float* w, float* sum, unsigned int* out_bf16) {
+    __shared__ float red[THREADS / 32];
+    const unsigned int d = params[0], rows = params[1];
+    const float eps = __uint_as_float(params[2]);
+    const unsigned long long row = (unsigned long long)blockIdx.y * gridDim.x + blockIdx.x;
+    if (row >= rows) { return; }
+    const unsigned long long base = row * d / 4;
+    float ss = 0.0f;
+    for (unsigned int c = threadIdx.x; c < d / 4; c += THREADS) {
+        const float4 x = reinterpret_cast<const float4*>(a)[base + c], y = reinterpret_cast<const float4*>(b)[base + c];
+        const float4 s = make_float4(x.x + y.x, x.y + y.y, x.z + y.z, x.w + y.w);
+        reinterpret_cast<float4*>(sum)[base + c] = s;
+        ss += s.x * s.x + s.y * s.y + s.z * s.z + s.w * s.w;
+    }
+    const float inv = 1.0f / sqrtf(block_sum(ss, red) / (float)d + eps);
+    __syncthreads();
+    for (unsigned int c = threadIdx.x; c < d / 4; c += THREADS) {
+        const float4 s = reinterpret_cast<const float4*>(sum)[base + c], g = reinterpret_cast<const float4*>(w)[c];
+        uint2 packed;
+        packed.x = bf16_bits(s.x * inv * g.x) | (bf16_bits(s.y * inv * g.y) << 16);
+        packed.y = bf16_bits(s.z * inv * g.z) | (bf16_bits(s.w * inv * g.w) << 16);
+        reinterpret_cast<uint2*>(out_bf16)[base + c] = packed;
     }
 }
 

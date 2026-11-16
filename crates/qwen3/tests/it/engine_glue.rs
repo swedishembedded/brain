@@ -10,7 +10,7 @@
 //! was `silu_mul` followed by the down product's own bf16 cast re-reading the whole activation: at a long prefill those
 //! copies moved more bytes than the products that surround them. On the library path each part of a fused weight is
 //! its own product into the buffer its reader takes, sharing one activation cast, and the SwiGLU writes the down
-//! product's bf16 operand in the same pass. The QK norm and rotation run one block a token, not a workgroup a head.
+//! product's bf16 operand in the same pass, as does each residual norm whose only readers are bf16 products. The QK norm and rotation run one block a token, not a workgroup a head.
 
 use qwen3::serve::Engine;
 use qwen3::{Dtype, QwenConfig};
@@ -26,7 +26,10 @@ fn a_bf16_tensor_core_forward_copies_no_fused_product_apart() {
     let w = qwen3::init_weights(&cfg, 5); // seed: any weights serve, the test names kernels
     let (bs, mbt) = (16u32, 16u32);
     let e = Engine::from_map_tier_on(&gpu, cfg.clone(), &w, bs, 64, 4, mbt, 32, true, Dtype::BF16);
-    let names = |steps: &[gpu_core::Step]| -> Vec<String> { steps.iter().filter_map(|s| s.meta()).filter_map(|m| e.gpu().kernel_name(m.kernel).map(str::to_string)).collect() };
+    // Portable kernels by catalogue name, native and library steps by the name they report.
+    let names = |steps: &[gpu_core::Step]| -> Vec<String> {
+        steps.iter().filter_map(|s| s.lowering().map(|l| l.physical.to_string()).or_else(|| s.meta().and_then(|m| e.gpu().kernel_name(m.kernel).map(str::to_string)))).collect()
+    };
     let count = |names: &[String], kernel: &str| names.iter().filter(|n| *n == kernel).count();
 
     // A prefill chunk of one sequence, and a decode step of four.
@@ -45,5 +48,9 @@ fn a_bf16_tensor_core_forward_copies_no_fused_product_apart() {
         assert_eq!(count(names, "silu_mul"), 0, "{what}: the SwiGLU's bf16 operand took a pass of its own: {names:?}");
         // The native rows compute the rotation angles once for four heads of a token.
         assert_eq!(count(names, "qknorm_rope_fused"), 0, "{what}: the QK norm and rotation ran a workgroup per head: {names:?}");
+        // A residual norm read only by bf16 products writes their operand itself: what is left to cast is the first
+        // layer's input norm and each layer's attention output.
+        let casts = names.iter().filter(|n| n.contains("cast_f32_bf16")).count();
+        assert!(casts <= cfg.n_layers as usize + 1, "{what}: {casts} activation casts for {} layers: {names:?}", cfg.n_layers);
     }
 }

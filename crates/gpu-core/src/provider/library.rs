@@ -686,10 +686,15 @@ impl LibraryGemmProvider {
         self.forward_with(gpu, steps, ActSource::Bf16(x), w, y, m, n, k)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn forward_with(&self, gpu: &Gpu, steps: &mut Vec<Step>, x: ActSource, w: &Operand, y: &Operand, m: u32, n: u32, k: u32) -> bool {
-        // Row-major `y = x W^T` is column-major `y^T[n, m] = W[k, n]^T x^T[k, m]`.
-        let gemm = LibraryGemm {
+    /// Whether [`Self::forward_bf16`] takes `y[m, n] = x[m, k] @ W^T` with the weight bound from word `w_offset`
+    /// (output from word 0): what a caller asks before it writes an activation only that product can read.
+    pub fn forward_bf16_serves(&self, m: u32, n: u32, k: u32, w_offset: u64) -> bool {
+        self.is_active() && Self::eligible(&Self::forward_gemm(m, n, k), (m, k), w_offset, 0)
+    }
+
+    /// Row-major `y = x W^T` as the column-major `y^T[n, m] = W[k, n]^T x^T[k, m]`.
+    fn forward_gemm(m: u32, n: u32, k: u32) -> LibraryGemm {
+        LibraryGemm {
             trans_a: true,
             trans_b: false,
             m: n,
@@ -708,7 +713,12 @@ impl LibraryGemmProvider {
             stride_b: 0,
             stride_c: 0,
             tf32: false,
-        };
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn forward_with(&self, gpu: &Gpu, steps: &mut Vec<Step>, x: ActSource, w: &Operand, y: &Operand, m: u32, n: u32, k: u32) -> bool {
+        let gemm = Self::forward_gemm(m, n, k);
         self.product(gpu, steps, x, (m, k), w, y, gemm)
     }
 
@@ -862,6 +872,20 @@ impl LibraryGemmProvider {
         self.product(gpu, steps, ActSource::Fp32(dy), (m, n), w, dx, gemm)
     }
 
+    /// Whether [`Self::product`] takes `gemm` over an activation of `act_dims` (`(rows, cols)`) with the weight and the
+    /// output bound from the word offsets `w_offset` and `out_offset`.
+    fn eligible(gemm: &LibraryGemm, act_dims: (u32, u32), w_offset: u64, out_offset: u64) -> bool {
+        let (rows, cols) = act_dims;
+        [gemm.m, gemm.n, gemm.k].iter().all(|&d| d > 0)
+            // Only the bf16 operands need 16-byte rows; the fp32 output may have any
+            // row length (the ragged last window of a vocabulary-tiled head does).
+            && [gemm.lda, gemm.ldb].iter().all(|&d| d.is_multiple_of(ALIGN_ELEMS))
+            && cols.is_multiple_of(ALIGN_ELEMS)
+            && rows as u64 * cols as u64 * 2 <= MAX_SCRATCH_BYTES
+            // Bound sub-ranges must keep every operand 16-byte aligned (4 words).
+            && [w_offset, out_offset].iter().all(|o| o.is_multiple_of(4))
+    }
+
     /// Run `gemm` over the weight (its `A`), the activation rounded to bf16 (its
     /// `B`) and `out`.
     #[allow(clippy::too_many_arguments)]
@@ -869,19 +893,10 @@ impl LibraryGemmProvider {
         if !self.is_active() {
             return false;
         }
-        let (rows, cols) = act_dims;
-        let count = rows as u64 * cols as u64;
-        let eligible = [gemm.m, gemm.n, gemm.k].iter().all(|&d| d > 0)
-            // Only the bf16 operands need 16-byte rows; the fp32 output may have any
-            // row length (the ragged last window of a vocabulary-tiled head does).
-            && [gemm.lda, gemm.ldb].iter().all(|&d| d.is_multiple_of(ALIGN_ELEMS))
-            && cols.is_multiple_of(ALIGN_ELEMS)
-            && count * 2 <= MAX_SCRATCH_BYTES
-            // Bound sub-ranges must keep every operand 16-byte aligned (4 words).
-            && [w.range.0, out.range.0].iter().all(|o| o.is_multiple_of(4));
-        if !eligible {
+        if !Self::eligible(&gemm, act_dims, w.range.0, out.range.0) {
             return false;
         }
+        let count = act_dims.0 as u64 * act_dims.1 as u64;
         let mut prep = Vec::new();
         let scratch = match act {
             ActSource::Fp32(x) => match self.cast_bf16(gpu, &mut prep, x, count) {

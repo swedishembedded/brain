@@ -1314,6 +1314,16 @@ fn rmsnorm_fused_lowering(kernel: &kernels_cuda::CudaKernel, params: &[u32; 3], 
     backend_api::Lowering::priced(kernel.reported, portable)
 }
 
+/// [`add_rmsnorm_fwd_step`] with `out` the packed bf16 operand (`[rows, d / 2]` words) of the tensor-core product that
+/// reads it: the bits `cast_f32_bf16` gives of the fp32 output, in the same pass. `None` for the same reasons.
+pub fn add_rmsnorm_fwd_bf16_step(gpu: &crate::Gpu, bufs: &[&backend_api::DeviceBuffer; 5], d: u32, rows: u32, eps: f32) -> Option<crate::Step> {
+    let kernel = rmsnorm_fused_kernel(gpu, "add_rmsnorm_fwd_bf16", d, rows)?;
+    let id = gpu.native_kernel(kernel, &ADD_RMSNORM_BINDINGS)?;
+    let params = [d, rows, eps.to_bits()];
+    let step = gpu.step_native_sliced(id, bufs, &[(0, 0); 5], &params, rows)?;
+    Some(step.with_lowering(rmsnorm_fused_lowering(kernel, &params, [("add2", None), ("rmsnorm", Some(rows))])))
+}
+
 /// `dx = res + rmsnorm_dx(x, w, dy)` as one launch (`rmsnorm_dx_add`). `bufs` is `x, w, dy, res` (read) and
 /// `dx` (overwritten). `None` for the reasons of [`add_rmsnorm_fwd_step`].
 pub fn rmsnorm_dx_add_step(gpu: &crate::Gpu, bufs: &[&backend_api::DeviceBuffer; 5], d: u32, rows: u32, eps: f32) -> Option<crate::Step> {
