@@ -21,7 +21,8 @@
 //   params : u32 [rows, vocab]
 //   logits : [rows, vocab] f32
 //   spec   : [rows, 4] u32: temperature bits, min-p bits, key, draw flag (0 = row not drawn, left as it was)
-//   out    : [rows, 2] f32: the drawn column (as f32, exact below 2^24) and its log-probability
+//   out    : [rows, 4] f32: the drawn column (as f32, exact below 2^24), its log-probability, the row's best
+//            logit/temp and its mass sum_t exp(logit_t / temp - best) (the statistics a candidate list is answered with)
 //
 // No `__restrict__` anywhere: brain's device buffers alias by design.
 
@@ -129,17 +130,20 @@ extern "C" __global__ void __launch_bounds__(BRAIN_DRAW_THREADS) brain_draw_rows
 
     __shared__ DrawAcc shared[BRAIN_DRAW_WARPS + 1];
     DrawAcc r = brain_draw_block(brain_draw_sweep(x, vocab, temp, key, false, 0.0f, 0.0f), shared);
-    const float top = r.mx;
+    const float top = r.mx, mass = r.mass;
     if (min_p > 0.0f) {
         r = brain_draw_block(brain_draw_sweep(x, vocab, temp, key, true, top, min_p), shared);
     }
     if (threadIdx.x == 0) {
+        float* o = out + 4ull * row;
+        o[2] = top;
+        o[3] = mass;
         if (!(r.mass > 0.0f)) {
-            out[2ull * row] = 0.0f;
-            out[2ull * row + 1] = 0.0f;
+            o[0] = 0.0f;
+            o[1] = 0.0f;
         } else {
-            out[2ull * row] = static_cast<float>(r.idx);
-            out[2ull * row + 1] = (x[r.idx] / temp - top) - logf(r.mass);
+            o[0] = static_cast<float>(r.idx);
+            o[1] = (x[r.idx] / temp - top) - logf(r.mass);
         }
     }
 }

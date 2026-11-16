@@ -3629,9 +3629,11 @@ impl Engine {
         let mut steps: Vec<Step> = Vec::new();
         self.head_steps(&mut steps, meta.bsz);
         let drawer = self.drawer.as_ref().expect("checked above");
-        steps.extend(drawer.steps(&self.gpu, &self.logits_dev, draws, self.cfg.vocab));
+        let shape = drawer.shape(draws, self.cfg.vocab);
+        drawer.upload(&self.gpu, draws);
+        steps.extend(drawer.dispatch(&self.gpu, &self.logits_dev, meta.bsz, self.cfg.vocab, shape));
         self.gpu.submit(&[], &steps);
-        drawer.answer(&self.gpu, &self.logits_dev, draws, self.cfg.vocab)
+        drawer.answer(&self.gpu, &self.logits_dev, draws, self.cfg.vocab, shape)
     }
 
     /// [`Self::forward_batched_logit_rows`] for one step of all of `tables`.

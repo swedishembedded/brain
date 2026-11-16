@@ -2120,7 +2120,7 @@ impl Qwen35GgufInstance {
         match readout {
             Readout::Head(HeadKind::Argmax) => HeadOut::Ids(self.head_argmax_rows(hidden, rows)),
             Readout::Head(HeadKind::TopK(cap)) => HeadOut::TopK(self.head_topk_rows(hidden, rows, cap)),
-            Readout::Head(HeadKind::Drawn { .. }) => unreachable!("a keyed head carries its draws in Readout::Drawn"),
+            Readout::Head(HeadKind::Drawn(_)) => unreachable!("a keyed head carries its draws in Readout::Drawn"),
             Readout::Rows => {
                 let vocab = self.cfg.vocab as usize;
                 HeadOut::Rows(self.head_logits_rows(hidden, rows).chunks(vocab).map(<[f32]>::to_vec).collect())
@@ -2195,14 +2195,14 @@ impl Qwen35GgufInstance {
         if let Some(buf) = &plan.tap {
             g.write(buf, tap);
         }
-        if let PlanOut::Drawn(drawer, _) = &plan.out {
+        if let PlanOut::Drawn(drawer, ..) = &plan.out {
             drawer.upload(g, draws);
         }
         g.replay_tape(&plan.tape);
         let out = match &plan.out {
             PlanOut::Argmax(ids) => HeadOut::Ids(model::readout::read_argmax(g, ids, rows)),
             PlanOut::TopK(top) => HeadOut::TopK(top.read(g)),
-            PlanOut::Drawn(drawer, logits) => HeadOut::Drawn(drawer.answer(g, logits, draws, self.cfg.vocab)),
+            PlanOut::Drawn(drawer, logits, shape) => HeadOut::Drawn(drawer.answer(g, logits, draws, self.cfg.vocab, *shape)),
         };
         self.plans.borrow_mut().put(plan);
         Some(out)
@@ -2285,10 +2285,10 @@ impl Qwen35GgufInstance {
         match kind {
             HeadKind::Argmax => PlanOut::Argmax(crate::model::argmax_rows_issue_of(g, &logits, rows, self.cfg.vocab)),
             HeadKind::TopK(cap) => PlanOut::TopK(crate::model::topk_rows_issue_of(g, &logits, rows, self.cfg.vocab, cap)),
-            HeadKind::Drawn { floors } => {
+            HeadKind::Drawn(shape) => {
                 let drawer = model::readout::RowDrawer::new(g, rows).expect("the keyed draw's kernels are in this model's list");
-                g.submit(&[], &drawer.dispatch(g, &logits, rows, self.cfg.vocab, floors));
-                PlanOut::Drawn(drawer, logits)
+                g.submit(&[], &drawer.dispatch(g, &logits, rows, self.cfg.vocab, shape));
+                PlanOut::Drawn(drawer, logits, shape)
             }
         }
     }

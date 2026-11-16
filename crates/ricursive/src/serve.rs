@@ -997,10 +997,29 @@ impl RicursiveEngine {
 
     /// One decode step: the logits of each `(table, input)` pair, `[vocab]` per sequence.
     pub fn decode_logits(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32]) -> Vec<Vec<f32>> {
-        assert_eq!(tables.len(), inputs.len(), "ricursive serve: tables/inputs length mismatch");
         if tables.is_empty() {
             return Vec::new();
         }
+        let (x, namespaces) = self.decode_forward(tables, inputs);
+        let logits = self.head(&x, inputs.len() as u32, &namespaces).1;
+        logits.chunks(self.cfg.vocab_size).map(<[f32]>::to_vec).collect()
+    }
+
+    /// One decode step with each keyed row drawn where the logits are (`PagedDecoder::forward_batched_drawn`).
+    pub fn decode_drawn(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32], draws: &[Option<model::serve::RowDraw>]) -> Vec<model::serve::Drawn> {
+        if tables.is_empty() {
+            return Vec::new();
+        }
+        let (x, namespaces) = self.decode_forward(tables, inputs);
+        let last = self.last();
+        let (_, logits) = last.head_rows_dev(self.cfg.rms_norm_eps, &x, inputs.len() as u32, self.cfg.hidden_size as u32, &namespaces);
+        model::readout::draw_rows(last.gpu(), &logits, draws, self.cfg.vocab_size as u32)
+    }
+
+    /// The layers of one decode step over `tables` (row `i` fed `inputs[i]`): the last hidden rows, on the last
+    /// stage's card, and each row's KV namespace.
+    fn decode_forward(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32]) -> (DeviceBuffer, Vec<KvNamespace>) {
+        assert_eq!(tables.len(), inputs.len(), "ricursive serve: tables/inputs length mismatch");
         assert!(tables.len() <= self.serve.max_batch as usize, "ricursive serve: {} sequences exceed max_batch {}", tables.len(), self.serve.max_batch);
         if !self.lsa.is_empty() {
             let mut rows: Vec<(&mut BlockTable, u32, u32)> = tables
@@ -1022,10 +1041,8 @@ impl RicursiveEngine {
         }
         let rows: Vec<RowPlan<'_>> = owned.iter().map(|(token, pos, ring, blocks, namespace)| RowPlan { token: *token, pos: *pos, ring: *ring, blocks, namespace: *namespace }).collect();
         let x = self.forward_hidden(&rows).unwrap_or_else(|e| panic!("{e}"));
-        let n = rows.len();
         let namespaces: Vec<KvNamespace> = rows.iter().map(|r| r.namespace).collect();
-        let logits = self.head(&x, n as u32, &namespaces).1;
-        logits.chunks(self.cfg.vocab_size).map(<[f32]>::to_vec).collect()
+        (x, namespaces)
     }
 }
 
@@ -1293,6 +1310,9 @@ impl PagedDecoder for RicursiveEngine {
     }
     fn forward_batched_logit_rows(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32]) -> Vec<Vec<f32>> {
         self.decode_logits(tables, inputs)
+    }
+    fn forward_batched_drawn(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32], draws: &[Option<model::serve::RowDraw>]) -> Vec<model::serve::Drawn> {
+        self.decode_drawn(tables, inputs, draws)
     }
     /// Proposals per sequence a verify scores: one forward of `1 + proposals` rows, which must fit the ring slack. With
     /// a draft model that is at most the rest of its block.

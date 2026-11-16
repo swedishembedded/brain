@@ -45,7 +45,7 @@ fn rank(a: &(u32, f32), b: &(u32, f32)) -> std::cmp::Ordering {
 }
 
 /// The `width` best tokens of `entries`, best first. Reorders `entries`.
-fn best_first(entries: &mut [(u32, f32)], width: usize) -> Vec<(u32, f32)> {
+pub(super) fn best_first(entries: &mut [(u32, f32)], width: usize) -> Vec<(u32, f32)> {
     let width = width.clamp(1, entries.len());
     if width < entries.len() {
         entries.select_nth_unstable_by(width - 1, rank);
@@ -83,7 +83,7 @@ pub fn sample_logits_row(row: &mut [f32], params: SampleParams, ctx: &SampleCont
 }
 
 /// The softmax weight of a logit relative to the row's best, as the candidate-list form computes it. NaN weighs nothing.
-fn weight_of(l: f32, temp: f32, best: f32) -> f32 {
+pub(super) fn weight_of(l: f32, temp: f32, best: f32) -> f32 {
     if l.is_nan() {
         0.0
     } else {
@@ -92,7 +92,7 @@ fn weight_of(l: f32, temp: f32, best: f32) -> f32 {
 }
 
 /// The best logit of `entries`, ignoring NaN; `None` when none is finite-or-infinite (an all-NaN or all `-inf` row).
-fn best_logit(entries: &[(u32, f32)]) -> Option<f32> {
+pub(super) fn best_logit(entries: &[(u32, f32)]) -> Option<f32> {
     let best = entries.iter().map(|e| e.1).filter(|l| !l.is_nan()).fold(f32::NEG_INFINITY, f32::max);
     (best != f32::NEG_INFINITY).then_some(best)
 }
@@ -100,7 +100,7 @@ fn best_logit(entries: &[(u32, f32)]) -> Option<f32> {
 /// The best-first prefix of `entries` that holds every token a `top_p` or `min_p` request can draw, and the softmax
 /// normaliser `total` of the whole row: min-p's survivors are counted in one pass, a nucleus prefix grows until its
 /// mass reaches `top_p` of `total`. Only for a request with one of the two.
-fn survivor_prefix(entries: &mut [(u32, f32)], params: SampleParams, total: f64, weight: impl Fn(f32) -> f32) -> Vec<(u32, f32)> {
+pub(super) fn survivor_prefix(entries: &mut [(u32, f32)], params: SampleParams, total: f64, weight: impl Fn(f32) -> f32) -> Vec<(u32, f32)> {
     let nucleus = params.top_p > 0.0 && params.top_p < 1.0;
     let mut width = if nucleus { FIRST_PREFIX } else { entries.iter().filter(|e| weight(e.1) >= params.min_p).count() };
     loop {

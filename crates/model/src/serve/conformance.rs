@@ -420,7 +420,7 @@ pub fn full_rows_rank_what_the_candidate_list_ranks<D: PagedDecoder>(c: &Conform
     }
 }
 
-/// One batched decode step of three sequences read back as whole rows and answered as a keyed step, on two identical
+/// One batched decode step of four sequences (a plain draw, a row read back, a nucleus with a floor, a `top_k`) read back as whole rows and answered as a keyed step, on two identical
 /// decoders: every keyed row is the token [`super::draw_row`] draws from the row and its log-probability, wherever the
 /// decoder draws it, and the row whose draw is `None` comes back as the row. A decoder without row readback passes
 /// trivially.
@@ -431,15 +431,15 @@ pub fn keyed_draws_are_the_rows_draws<D: PagedDecoder>(c: &Conformance<D>) {
         return;
     }
     let vocab = by_row.vocab();
-    let prompts: Vec<Vec<u32>> = (0..3).map(|s| tokens(vocab, 3 + s, 9)).collect();
-    let next: Vec<u32> = (0..3).map(|s| tokens(vocab, 7 + s, 1)[0]).collect();
+    let prompts: Vec<Vec<u32>> = (0..4).map(|s| tokens(vocab, 3 + s, 9)).collect();
+    let next: Vec<u32> = (0..4).map(|s| tokens(vocab, 7 + s, 1)[0]).collect();
     let mut row_tables: Vec<crate::paged::BlockTable> = prompts.iter().map(|_| crate::paged::BlockTable::new()).collect();
     let mut draw_tables: Vec<crate::paged::BlockTable> = prompts.iter().map(|_| crate::paged::BlockTable::new()).collect();
     for (p, (a, b)) in prompts.iter().zip(row_tables.iter_mut().zip(draw_tables.iter_mut())) {
         by_row.prefill(a, p);
         by_draw.prefill(b, p);
     }
-    let draws = [Some(RowDraw { temp: 1.0, min_p: 0.0, key: draw_key(1, 9, 0) }), None, Some(RowDraw { temp: 0.7, min_p: 0.05, key: draw_key(2, 9, 0) })];
+    let draws = [Some(RowDraw { temp: 1.0, min_p: 0.0, top_p: 1.0, top_k: 0, key: draw_key(1, 9, 0) }), None, Some(RowDraw { temp: 0.7, min_p: 0.05, top_p: 0.9, top_k: 0, key: draw_key(2, 9, 0) }), Some(RowDraw { temp: 1.0, min_p: 0.0, top_p: 1.0, top_k: 5, key: draw_key(3, 9, 0) })];
     let rows = by_row.forward_batched_logit_rows(&mut row_tables.iter_mut().collect::<Vec<_>>(), &next);
     let drawn = by_draw.forward_batched_drawn(&mut draw_tables.iter_mut().collect::<Vec<_>>(), &next, &draws);
     assert_eq!(drawn.len(), draws.len(), "a keyed step answers every row");

@@ -7,3 +7,4 @@ crates/model/src/serve/conformance.rs	embedded_prompts_batch_and_never_share_a_p
 crates/model/src/serve/conformance.rs	adapters_serve_embedded_prompts_apart_from_the_base:submit_embedded_for#4=0	positional	greedy: SampleParams::greedy never consults the RNG
 crates/model/src/serve/conformance.rs	keyed_draws_are_the_rows_draws:draw_key#0=1	positional	world: a fixed probe key, the same on both decoders whose answers are compared
 crates/model/src/serve/conformance.rs	keyed_draws_are_the_rows_draws:draw_key#0=2	positional	world: a fixed probe key, the same on both decoders whose answers are compared
+crates/model/src/serve/conformance.rs	keyed_draws_are_the_rows_draws:draw_key#0=3	positional	world: a fixed probe key, the same on both decoders whose answers are compared

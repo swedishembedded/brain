@@ -78,6 +78,9 @@ pub fn pipelines(cfg: &RicursiveConfig, extra: &[(&'static str, &'static str)]) 
     // 128 is a group of 10), at every KV tier; the paged triad stays the CPU JIT's path and the reference.
     let fused = model::kv_tier::kernel_list_for(&table, &[flash_shape(cfg)]);
     add(&mut table, &fused);
+    // A sampled step's keyed draw and its candidate lists (`model::readout::draw_rows`).
+    add(&mut table, &model::readout::DRAW_KERNELS);
+    add(&mut table, &model::readout::READOUT_KERNELS);
     add(&mut table, extra);
     table
 }

@@ -878,6 +878,11 @@ impl PagedDecoder for Engine {
         let vocab = self.model.cfg.vocab as usize;
         Engine::forward_batched_logits(self, tables, inputs).chunks(vocab).map(<[f32]>::to_vec).collect()
     }
+    fn forward_batched_drawn(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32], draws: &[Option<model::serve::RowDraw>]) -> Vec<model::serve::Drawn> {
+        let hidden = self.decode_batch(tables, inputs);
+        let logits = self.model.head_logits_rows_dev(&hidden, inputs.len() as u32);
+        model::readout::draw_rows(&self.model.gpu, &logits, draws, self.model.cfg.vocab)
+    }
     fn adapter_availability(&mut self, adapter: AdapterId) -> AdapterAvailability {
         adapters::availability(std::iter::once(&self.model), adapter).0
     }

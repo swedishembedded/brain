@@ -400,4 +400,12 @@ impl PagedDecoder for RingEngine {
         let logits = self.model.head_logits_rows_dev(&hidden, rows);
         self.model.gpu.read(&logits, rows as usize * vocab).chunks(vocab).map(<[f32]>::to_vec).collect()
     }
+    fn forward_batched_drawn(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32], draws: &[Option<model::serve::RowDraw>]) -> Vec<model::serve::Drawn> {
+        if tables.is_empty() {
+            return Vec::new();
+        }
+        let hidden = self.decode_hidden(tables, inputs);
+        let logits = self.model.head_logits_rows_dev(&hidden, inputs.len() as u32);
+        model::readout::draw_rows(&self.model.gpu, &logits, draws, self.model.cfg.vocab)
+    }
 }

@@ -732,7 +732,7 @@ impl Qwen35GgufEngine {
         // A batch of base rows only replays its recording; an adapter bank correcting any row changes the dispatches.
         let planned = match readout {
             Readout::Head(kind) => Some((kind, &[][..])),
-            Readout::Drawn(draws) => Some((HeadKind::Drawn { floors: model::readout::RowDrawer::has_floor(draws) }, draws)),
+            Readout::Drawn(draws) => Some((HeadKind::Drawn(model::readout::RowDrawer::shape_for(draws, inst.cfg.vocab, true)), draws)),
             Readout::Rows => None,
         };
         if let (Some((kind, draws)), true) = (planned, adapter_slots.iter().all(|&s| s == LORA_SLOT_NONE)) {

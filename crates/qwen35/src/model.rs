@@ -473,14 +473,6 @@ pub(crate) fn topk_rows_of(g: &Gpu, logits: &DeviceBuffer, rows: u32, vocab: u32
     model::readout::topk_rows(g, READOUT, logits, rows, vocab, cap)
 }
 
-/// Each row's answer to a keyed step from `logits` (`[draws.len(), vocab]`): the drawn token where `draws[i]` is
-/// `Some` ([`model::readout::RowDrawer`], on the device), the row read back where it is `None`.
-pub(crate) fn drawn_rows_of(g: &Gpu, logits: &DeviceBuffer, draws: &[Option<model::serve::RowDraw>], vocab: u32) -> Vec<model::serve::Drawn> {
-    let drawer = model::readout::RowDrawer::new(g, draws.len() as u32).expect("the keyed draw's kernels are in this model's list");
-    let steps = drawer.steps(g, logits, draws, vocab);
-    g.submit(&[], &steps);
-    drawer.answer(g, logits, draws, vocab)
-}
 
 /// [`argmax_rows_of`] without the read: the dispatches are submitted and the indices stay in the returned buffer.
 pub(crate) fn argmax_rows_issue_of(g: &Gpu, logits: &DeviceBuffer, rows: u32, vocab: u32) -> DeviceBuffer {

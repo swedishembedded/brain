@@ -347,6 +347,8 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
         let mut v = model::moe::with_compact_train_kernels(&v);
         // Narrow boundary residuals (`model::saved::Residuals`), resolved by name.
         v.extend_from_slice(model::saved::kernels());
+        // The keyed draw of a sampled step (`model::readout::draw_rows`), resolved by name.
+        v.extend(model::readout::DRAW_KERNELS);
         // A layer-streamed full fine-tune's device side, resolved by name (those the list lacks).
         let missing: Vec<_> = model::ops::store_device_kernels().iter().filter(|(n, _)| !v.iter().any(|(m, _)| m == n)).copied().collect();
         v.extend(missing);

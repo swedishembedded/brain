@@ -62,7 +62,7 @@ claimed before its baseline exists.
 | 4 | Persistent device batch state: row diffs scattered into device buffers, double-buffered metadata, schedule N+1 prepared while N runs (G7) | `gpu-core`, `backend-cuda`, `model::serve` | no host sync inside the token loop; per-step upload bytes proportional to changes | open |
 | 5 | Graph-safe library execution: find #356's root cause, verify eager vs replay per tier and shape | `backend-cuda`, `gpu-core` | replay keeps library GEMMs with bit-level parity | open |
 | 6 | Shape-driven attention and GEMM selection over phase, batch, KV length, KV tier, page size | `kernel-performance.md` owns it | selection table covers the context x batch matrix | open |
-| 7 | Exact device sampling over the full vocabulary (G5) | `model::serve`, `kernels-cuda` | distribution tests match the host reference; no logits readback | in progress (knowledge 488): temperature and min-p drawn on the device by the keyed Gumbel-max rule (`RowDrawer`, WGSL pair + native `draw_rows_f32`) in Qwen3 and the Qwen3.8 paged engine, recorded steps included; the host row path is parallel. Open: a nucleus (`top_p`) and a `top_k` past the candidate list on the device, a keyed decode window, the other engines' `forward_batched_drawn` |
+| 7 | Exact device sampling over the full vocabulary (G5) | `model::serve`, `kernels-cuda` | distribution tests match the host reference; no logits readback | in progress (knowledge 488): every sampled request without a logit processor is keyed and drawn on the device (`RowDrawer`: WGSL pair + native `draw_rows_f32`; a `top_k` up to 1024 or a nucleus from the row's best candidates, the row only when they do not hold the survivors) in every GPU engine on the shared scheduler, recorded 27B steps included. Open: a nucleus wider than its candidates (high-entropy rows) on the device, a keyed decode window |
 | 8 | Cost- and cache-aware scheduling: order by uncached work, shared in-flight prefixes, bounded-fairness aging, calibrated step-cost model (G11) | `model::serve` | goodput and tail latency improve on mixed traffic with bounded starvation | in progress: shared in-flight prefixes and the mixed iteration with its step-cost model done (knowledge 379); uncached-work ordering and aging open |
 | 9 | One logical prefix index (radix over content, namespace, revision) over block-sharing and snapshot physical forms; retention by saved work per byte | `model::paged`, `model::snapshot_prefix` | longest-prefix match without scanning entries | in progress: hybrid branch points (a shared document is resumable) done; the radix index and retention by saved work open |
 | 10 | Grace memory as a managed warm KV tier: page-granular async promotion/demotion through the existing upload ring; direct coherent reads measured separately (G9) | `model::kv_offload`, `backend-cuda` | warm-prefix hits served from host without whole-sequence swaps | open |
@@ -908,8 +908,20 @@ The draw itself is 0.21 ms a step at 64 rows of the 27B's 248320-token vocabular
 - [x] temperature and min-p on the device, exact, seed-deterministic across batch compositions (`serve_keyed_draw.rs`,
       `readout_draw.rs`, `conformance::keyed_draws_are_the_rows_draws`, `qwen35/tests/decode_plans.rs`)
 - [x] the host row path parallel over rows (`backend_cpu::par`); `top_p` 0.95 is 3-4x faster but still host-bound
-- [ ] a nucleus on the device: the drawer already has each row's best and normaliser; device top-k plus the exact
-      nucleus on the candidates when their mass covers it (the row only when it does not) is the next step
+- [x] a nucleus and a `top_k` past the candidate list (up to 1024) on the device: the drawer writes each row's best
+      and mass beside its draw, takes the best 256 candidates (or the widest `top_k`) after it, and the host finishes
+      the exact truncation on the list (`draw_from_candidates`); a row whose candidates do not carry `top_p` of its
+      mass is read back (its masked candidates restored) and drawn whole (`draw_row`). Every keyed request takes
+      this path, the candidate-list path of the scheduler included (`draw_list`), so a seed's tokens do not depend on
+      which path its batch took. On the synthetic `perf` workload (random-token prompts, flat rows at temperature 1)
+      most nucleus rows fall back: Qwen3-4B top_p 0.95 at 64 streams 1147 -> 1521 tok/s (greedy 2414), at 16 699 ->
+      828 (greedy 1485), the 27B 513 -> 532 at 64 (A/B pairs, two each). Through `brain serve` on English prompts
+      the old parallel host path already reached 3191 tok/s at 64 streams on 7.6 cores.
+- [ ] a nucleus wider than its candidates on the device (a threshold search over the row by reductions) for
+      high-entropy rows
+- [x] `forward_batched_drawn` for the 35B-A3B engine (`qwen35moe`), DeepSeek-V2 (`deepseek2`), Ripple
+      (`ricursive`), the native and ring Qwen3.8 engines (`model::readout::draw_rows`); Ouro and Huginn compute their
+      logits on the host and draw there
 - [ ] a keyed decode window (Qwen3's greedy window feeds the argmax back on the device; a keyed one needs the keys of
       every sub-step uploaded once)
 - [ ] `--exact-decode` and adapter rows still take the eager keyed head on the 27B (not recorded)

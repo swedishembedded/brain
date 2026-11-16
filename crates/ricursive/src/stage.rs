@@ -371,6 +371,14 @@ impl Stage {
 
     /// Final norm and logits for `rows` rows of the residual stream `x`: `(normed, logits)`. Only the last stage has a head.
     pub(crate) fn head_rows(&self, eps: f32, x: &DeviceBuffer, rows: u32, hidden: u32, vocab: u32, namespaces: &[KvNamespace]) -> (Vec<f32>, Vec<f32>) {
+        let (normed, logits) = self.head_rows_dev(eps, x, rows, hidden, namespaces);
+        let gpu = self.gpu();
+        (gpu.read(&normed, (rows * hidden) as usize), gpu.read(&logits, rows as usize * vocab as usize))
+    }
+
+    /// [`Self::head_rows`] left on the device: the final-normed rows and the `[rows, vocab]` logits, submitted, not
+    /// read. Last stage only.
+    pub(crate) fn head_rows_dev(&self, eps: f32, x: &DeviceBuffer, rows: u32, hidden: u32, namespaces: &[KvNamespace]) -> (DeviceBuffer, DeviceBuffer) {
         let head = self.head.as_ref().expect("the last stage owns the head");
         let gpu = self.gpu();
         let mut steps = Vec::new();
@@ -382,7 +390,7 @@ impl Stage {
         };
         let logits = ops::linear(&self.ops, &mut steps, &normed, &head.lm_head, rows);
         gpu.submit(&[], &steps);
-        (gpu.read(&normed, (rows * hidden) as usize), gpu.read(&logits, rows as usize * vocab as usize))
+        (normed, logits)
     }
 
     /// The logits of `rows` rows of final-normed hidden state `normed` (host), `[rows, vocab]` flattened. Last stage only.

@@ -182,16 +182,39 @@ fn native_topk(_g: &Gpu, _logits: &DeviceBuffer, _vals: &DeviceBuffer, _idx: &De
 /// Slices each row is cut into by the keyed draw's partial stage (`draw_part`): the threads a row reduces over.
 pub const DRAW_SLICES: u32 = 256;
 
+/// The greedy pick's and the candidate extraction's kernels, for a model's kernel list ([`ReadoutKernels::resolve`]).
+pub const READOUT_KERNELS: [(&str, &str); 3] = [("argmax_part", kernels::ARGMAX_PART), ("argmax_final", kernels::ARGMAX_FINAL), ("topk_extract_step", kernels::TOPK_EXTRACT_STEP)];
+
 /// The keyed draw's kernels, for a model's kernel list: a decoder that registers them draws its sampled rows on the
 /// device ([`RowDrawer`]).
 pub const DRAW_KERNELS: [(&str, &str); 2] = [("draw_part", kernels::DRAW_PART), ("draw_final", kernels::DRAW_FINAL)];
 
+/// Candidates a nucleus row is answered from: its best-first list, taken on the device, holds the nucleus of every row
+/// whose top candidates carry `top_p` of its mass; a flatter row is drawn whole on the host.
+pub const NUCLEUS_CANDIDATES: u32 = 256;
+
+/// The widest best-first list a drawer takes on the device: a `top_k` above it is drawn whole on the host.
+pub const MAX_DRAW_CANDIDATES: u32 = 1024;
+
+/// What one keyed step dispatches beyond the rows' keys: the min-p pass, and the best-first candidates a `top_k` or
+/// nucleus row is answered from (`0` for none). Part of a recording's identity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DrawShape {
+    pub floors: bool,
+    pub candidates: u32,
+}
+
 /// Draws every keyed row of a `[rows, vocab]` logits block where the logits are ([`crate::serve::draw_row`]'s
-/// rule, the same tokens): two launches over all rows (one more pair when a row has a min-p floor), and only
-/// `[rows]` (token, log-probability) pairs read back. Owns its scratch, sized for `max_rows`.
+/// rule, the same tokens): two launches over all rows (one more pair when a row has a min-p floor; one native launch
+/// on CUDA), and only `[rows]` (token, log-probability, best, mass) quadruples read back. A row with a `top_k` or a
+/// nucleus is answered from its best-first candidates, taken on the device after the draw ([`topk_rows_steps`]) and
+/// finished on the host ([`crate::serve::draw_from_candidates`]); a row whose candidates do not hold its survivors
+/// is read back and drawn whole ([`crate::serve::draw_row`]). Owns its scratch, sized for `max_rows`.
 pub struct RowDrawer {
     part_kernel: usize,
     final_kernel: usize,
+    /// The argmax and extraction kernels the candidate lists are taken with, when the model registered them.
+    topk: Option<ReadoutKernels>,
     max_rows: u32,
     /// `[max_rows, 4]` u32 per row: temperature bits, min-p bits, key, draw flag.
     spec: DeviceBuffer,
@@ -199,29 +222,68 @@ pub struct RowDrawer {
     part: DeviceBuffer,
     /// `[max_rows]` best `logit / temp` of each row, for the min-p pass.
     best: DeviceBuffer,
-    /// `[max_rows, 2]` drawn token (as f32) and log-probability.
+    /// `[max_rows, 4]` drawn token (as f32), its log-probability, the row's best `logit / temp` and its mass.
     out: DeviceBuffer,
+    /// `[max_rows, candidates]` best-first candidates of a step that takes them (logits and token ids).
+    cand_vals: DeviceBuffer,
+    cand_idx: DeviceBuffer,
 }
 
 impl RowDrawer {
     /// A drawer for up to `max_rows` rows on `g`, or `None` when the model did not register [`DRAW_KERNELS`].
     pub fn new(g: &Gpu, max_rows: u32) -> Option<RowDrawer> {
         let (part_kernel, final_kernel) = (g.kernel_index("draw_part")?, g.kernel_index("draw_final")?);
+        let topk = ReadoutKernels::resolve(g).ok();
         let rows = max_rows.max(1) as u64;
-        Some(RowDrawer { part_kernel, final_kernel, max_rows: max_rows.max(1), spec: g.storage(rows * 4), part: g.storage(rows * DRAW_SLICES as u64 * 4), best: g.storage(rows), out: g.storage(rows * 2) })
+        let cands = if topk.is_some() { rows * MAX_DRAW_CANDIDATES as u64 } else { 1 };
+        Some(RowDrawer {
+            part_kernel,
+            final_kernel,
+            topk,
+            max_rows: max_rows.max(1),
+            spec: g.storage(rows * 4),
+            part: g.storage(rows * DRAW_SLICES as u64 * 4),
+            best: g.storage(rows),
+            out: g.storage(rows * 4),
+            cand_vals: g.storage(cands),
+            cand_idx: g.storage(cands),
+        })
     }
 
-    /// The steps that draw `draws[i]` from row `i` of `logits` (`[draws.len(), vocab]`), after uploading the rows'
-    /// keys ([`Self::upload`] then [`Self::dispatch`]). A row whose draw is `None` is left alone. The caller submits
-    /// them after the steps that write `logits` and then reads the answer with [`Self::answer`].
+    /// The steps that draw `draws[i]` from row `i` of `logits` (`[draws.len(), vocab]`): [`Self::upload`], then
+    /// [`Self::dispatch`] at [`Self::shape`]. A row whose draw is `None` is left alone. The caller submits them after
+    /// the steps that write `logits` and then reads the answer with [`Self::answer`] at the same shape.
     pub fn steps(&self, g: &Gpu, logits: &DeviceBuffer, draws: &[Option<crate::serve::RowDraw>], vocab: u32) -> Vec<Step> {
         self.upload(g, draws);
-        self.dispatch(g, logits, draws.len() as u32, vocab, Self::has_floor(draws))
+        self.dispatch(g, logits, draws.len() as u32, vocab, self.shape(draws, vocab))
     }
 
-    /// Whether any of `draws` has a min-p floor: the dispatch a step of them needs ([`Self::dispatch`]'s `floors`).
-    pub fn has_floor(draws: &[Option<crate::serve::RowDraw>]) -> bool {
-        draws.iter().flatten().any(|d| d.min_p > 0.0)
+    /// What a step of `draws` over a `vocab`-wide row dispatches: the min-p pass when a row has a floor, and as many
+    /// candidates as the widest `top_k` (up to [`MAX_DRAW_CANDIDATES`]) or [`NUCLEUS_CANDIDATES`] for a nucleus
+    /// asks for; none on a model without the extraction kernels (those rows are then drawn whole on the host).
+    pub fn shape(&self, draws: &[Option<crate::serve::RowDraw>], vocab: u32) -> DrawShape {
+        Self::shape_for(draws, vocab, self.topk.is_some())
+    }
+
+    /// [`Self::shape`] for a drawer that has the candidate extraction (`extracts`) or not, before one is built (a
+    /// recording is keyed on it).
+    pub fn shape_for(draws: &[Option<crate::serve::RowDraw>], vocab: u32, extracts: bool) -> DrawShape {
+        let floors = draws.iter().flatten().any(|d| d.min_p > 0.0);
+        let want = |d: &crate::serve::RowDraw| {
+            if d.keeps_top_k(vocab as usize) {
+                if d.top_k as u32 <= MAX_DRAW_CANDIDATES {
+                    d.top_k as u32
+                } else {
+                    0
+                }
+            } else if d.has_nucleus() {
+                NUCLEUS_CANDIDATES
+            } else {
+                0
+            }
+        };
+        let candidates = if extracts { draws.iter().flatten().map(want).max().unwrap_or(0).min(vocab) } else { 0 };
+        DrawShape { floors, candidates }
     }
 
     /// Write the rows' temperatures, floors and keys where the dispatch reads them: before every run of the steps,
@@ -237,11 +299,12 @@ impl RowDrawer {
         g.write(&self.spec, &spec);
     }
 
-    /// The dispatches that draw `rows` rows of `logits` under the keys last uploaded, with the min-p pass when
-    /// `floors`: the native one-launch kernel where the device offers it (priced as the WGSL pair), else the pair.
-    pub fn dispatch(&self, g: &Gpu, logits: &DeviceBuffer, rows: u32, vocab: u32, floors: bool) -> Vec<Step> {
+    /// The dispatches that draw `rows` rows of `logits` under the keys last uploaded, at `shape`: the native
+    /// one-launch kernel where the device offers it (priced as the WGSL pair), else the pair, then the candidate
+    /// extraction, which masks the taken candidates in `logits` ([`Self::answer`] restores a row it reads back).
+    pub fn dispatch(&self, g: &Gpu, logits: &DeviceBuffer, rows: u32, vocab: u32, shape: DrawShape) -> Vec<Step> {
         assert!(rows > 0 && rows <= self.max_rows, "RowDrawer: {rows} rows for a drawer of {}", self.max_rows);
-        let passes = if floors { 2 } else { 1 };
+        let passes = if shape.floors { 2 } else { 1 };
         let reference: Vec<Step> = (0..passes)
             .flat_map(|pass| {
                 [
@@ -250,28 +313,70 @@ impl RowDrawer {
                 ]
             })
             .collect();
-        match native_draw(g, logits, &self.spec, &self.out, rows, vocab) {
+        let mut steps = match native_draw(g, logits, &self.spec, &self.out, rows, vocab) {
             Some(step) => vec![g.priced_as_chain(step, &reference)],
             None => reference,
+        };
+        if let (Some(k), true) = (self.topk, shape.candidates > 0) {
+            let n = shape.candidates;
+            steps.extend(topk_rows_steps(g, k, logits, &self.cand_vals, &self.cand_idx, rows, vocab, n, n));
         }
+        steps
     }
 
-    /// Each row's answer once [`Self::steps`] ran: the drawn token where `draws[i]` is `Some`, and row `i` of
-    /// `logits` read back where it is `None` (only those rows cross to the host).
-    pub fn answer(&self, g: &Gpu, logits: &DeviceBuffer, draws: &[Option<crate::serve::RowDraw>], vocab: u32) -> Vec<crate::serve::Drawn> {
-        use crate::serve::Drawn;
-        let out = if draws.iter().any(Option::is_some) { g.read(&self.out, draws.len() * 2) } else { Vec::new() };
-        draws
+    /// Each row's answer once [`Self::dispatch`] ran at `shape`: the drawn token where `draws[i]` is `Some` (from the
+    /// device's draw, from the row's candidates, or from the row itself read back when its candidates do not hold
+    /// its survivors), and row `i` of `logits` read back where it is `None`. Only those rows cross to the host.
+    pub fn answer(&self, g: &Gpu, logits: &DeviceBuffer, draws: &[Option<crate::serve::RowDraw>], vocab: u32, shape: DrawShape) -> Vec<crate::serve::Drawn> {
+        use crate::serve::{draw_from_candidates, draw_row, Drawn};
+        let rows = draws.len();
+        let out = if draws.iter().any(Option::is_some) { g.read(&self.out, rows * 4) } else { Vec::new() };
+        let n = shape.candidates as usize;
+        let (vals, idx) = if n > 0 { (g.read(&self.cand_vals, rows * n), g.read(&self.cand_idx, rows * n)) } else { (Vec::new(), Vec::new()) };
+        let list = |i: usize| -> Vec<(u32, f32)> { (0..n).map(|c| (idx[i * n + c] as u32, vals[i * n + c])).collect() };
+        // A row read back has its candidates masked by the extraction: they are written back from the list.
+        let read_row = |i: usize| {
+            let mut row = vec![0.0f32; vocab as usize];
+            g.read_into(logits, i as u64 * vocab as u64, &mut row);
+            for (t, l) in list(i) {
+                row[t as usize] = l;
+            }
+            row
+        };
+        let mut answers: Vec<Option<Drawn>> = draws
             .iter()
             .enumerate()
             .map(|(i, d)| match d {
-                Some(_) => Drawn::Token(out[2 * i] as u32, out[2 * i + 1]),
-                None => {
-                    let mut row = vec![0.0f32; vocab as usize];
-                    g.read_into(logits, i as u64 * vocab as u64, &mut row);
-                    Drawn::Row(row)
-                }
+                None => Some(Drawn::Row(read_row(i))),
+                Some(d) if !d.truncates(vocab as usize) => Some(Drawn::Token(out[4 * i] as u32, out[4 * i + 1])),
+                Some(d) if n > 0 => draw_from_candidates(&list(i), out[4 * i + 2], out[4 * i + 3], *d, vocab as usize).map(|(t, lp)| Drawn::Token(t, lp)),
+                Some(_) => None,
             })
-            .collect()
+            .collect();
+        // The rows their candidates could not answer, drawn whole on the CPU pool.
+        let whole: Vec<(usize, Vec<f32>)> = answers.iter().enumerate().filter(|(_, a)| a.is_none()).map(|(i, _)| (i, read_row(i))).collect();
+        let drawn = backend_cpu::par::map(whole.len(), |j| draw_row(&whole[j].1, draws[whole[j].0].expect("a keyed row")));
+        for ((i, _), (t, lp)) in whole.iter().zip(drawn) {
+            answers[*i] = Some(Drawn::Token(t, lp));
+        }
+        answers.into_iter().map(|a| a.expect("every row answered")).collect()
     }
+}
+
+/// Each row's answer to a keyed step from `logits` (`[draws.len(), vocab]`, on `g`): drawn on the device by a drawer
+/// built for these rows ([`RowDrawer`]), or, on a model that did not register [`DRAW_KERNELS`], from the rows read
+/// back and drawn on the CPU pool. The one entry point an engine without a drawer of its own answers
+/// `PagedDecoder::forward_batched_drawn` with.
+pub fn draw_rows(g: &Gpu, logits: &DeviceBuffer, draws: &[Option<crate::serve::RowDraw>], vocab: u32) -> Vec<crate::serve::Drawn> {
+    if draws.is_empty() {
+        return Vec::new();
+    }
+    let Some(drawer) = RowDrawer::new(g, draws.len() as u32) else {
+        let rows = g.read(logits, draws.len() * vocab as usize).chunks(vocab as usize).map(<[f32]>::to_vec).collect();
+        return crate::serve::draw_rows_host(rows, draws);
+    };
+    let shape = drawer.shape(draws, vocab);
+    let steps = drawer.steps(g, logits, draws, vocab);
+    g.submit(&[], &steps);
+    drawer.answer(g, logits, draws, vocab, shape)
 }

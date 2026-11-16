@@ -7,9 +7,9 @@
 // can procure our services by sending an email to info@swedishembedded.com.
 
 //! The keyed whole-row draw (`model::serve::draw_row`) and the scheduler's use of it: the draw follows the
-//! distribution the row sampler defines for temperature and min-p, reports that distribution's log-probability,
-//! and a seed draws the same tokens whatever else shares the batch; a request the keyed draw does not cover (a
-//! processor, a nucleus) is still sampled from its own row on the host.
+//! distribution the row sampler defines for temperature, min-p, top-p and top-k, reports that distribution's
+//! log-probability, and a seed draws the same tokens whatever else shares the batch; a request the keyed draw does
+//! not cover (a logit processor) is still sampled from its own row on the host.
 
 use model::paged::{BlockAllocator, BlockTable};
 use model::serve::{draw_key, draw_row, Drawn, PagedDecoder, Request, RowDraw, SampleParams, Scheduler};
@@ -17,20 +17,38 @@ use model::serve::{draw_key, draw_row, Drawn, PagedDecoder, Request, RowDraw, Sa
 /// The distribution the row sampler defines for a temperature-and-min-p request: the softmax of `logit / temp`
 /// over the tokens of positive weight whose weight relative to the best is at least `min_p`.
 fn exact(row: &[f32], temp: f32, min_p: f32) -> Vec<f64> {
-    let best = row.iter().filter(|l| !l.is_nan()).fold(f32::NEG_INFINITY, |a, &l| a.max(l)) as f64;
-    let w: Vec<f64> = row
-        .iter()
-        .map(|&l| {
-            let w = if l.is_nan() { 0.0 } else { ((l as f64 - best) / temp as f64).exp() };
-            if w >= min_p as f64 && w > 0.0 {
-                w
-            } else {
-                0.0
+    exact_truncated(row, temp, min_p, 1.0, 0)
+}
+
+/// The distribution `sample_logits_row` defines, written out from its contract: rank the row best first (equal
+/// logits lowest id first, NaN never), keep the best `top_k` (all when 0), take the softmax weights of `logit / temp`,
+/// cut the nucleus at the first rank whose cumulative weight reaches `top_p` of the normaliser (the whole row's
+/// without `top_k`, the kept list's with it), then keep the ranks whose weight is at least `min_p` of the best.
+fn exact_truncated(row: &[f32], temp: f32, min_p: f32, top_p: f32, top_k: usize) -> Vec<f64> {
+    let mut order: Vec<usize> = (0..row.len()).filter(|&i| !row[i].is_nan()).collect();
+    order.sort_by(|&a, &b| row[b].partial_cmp(&row[a]).unwrap().then(a.cmp(&b)));
+    let best = row[order[0]] as f64;
+    let weight = |i: usize| ((row[i] as f64 - best) / temp as f64).exp();
+    let whole: f64 = if top_k > 0 { order.iter().take(top_k).map(|&i| weight(i)).sum() } else { order.iter().map(|&i| weight(i)).sum() };
+    let kept: Vec<usize> = if top_k > 0 { order[..top_k.min(order.len())].to_vec() } else { order.clone() };
+    let mut cut = kept.len();
+    if top_p > 0.0 && top_p < 1.0 {
+        let mut acc = 0.0;
+        for (r, &i) in kept.iter().enumerate() {
+            acc += weight(i);
+            if acc / whole >= top_p as f64 {
+                cut = r + 1;
+                break;
             }
-        })
-        .collect();
-    let z: f64 = w.iter().sum();
-    w.iter().map(|w| w / z).collect()
+        }
+    }
+    let survivors: Vec<usize> = kept[..cut].iter().copied().filter(|&i| weight(i) > 0.0 && weight(i) >= min_p as f64).collect();
+    let z: f64 = survivors.iter().map(|&i| weight(i)).sum();
+    let mut p = vec![0.0; row.len()];
+    for i in survivors {
+        p[i] = weight(i) / z;
+    }
+    p
 }
 
 /// Pearson's statistic of `counts` against `probs` over `n` draws, and whether any draw fell outside the support.
@@ -61,7 +79,7 @@ fn the_keyed_draw_follows_the_row_samplers_distribution_and_reports_its_logprob(
         let probs = exact(&row, temp, min_p);
         let mut counts = vec![0u64; row.len()];
         for pos in 0..n {
-            let (t, lp) = draw_row(&row, RowDraw { temp, min_p, key: draw_key(seed, pos, 0) });
+            let (t, lp) = draw_row(&row, RowDraw { temp, min_p, top_p: 1.0, top_k: 0, key: draw_key(seed, pos, 0) });
             counts[t as usize] += 1;
             assert!((lp as f64 - probs[t as usize].ln()).abs() < 1e-4, "temp {temp} min_p {min_p}: token {t} logprob {lp} vs {}", probs[t as usize].ln());
         }
@@ -73,19 +91,38 @@ fn the_keyed_draw_follows_the_row_samplers_distribution_and_reports_its_logprob(
     }
 }
 
-/// Which requests the keyed draw covers: real sampling with no processor, no nucleus and no `top_k` inside the
-/// vocabulary.
+/// A nucleus, a `top_k` and both together, with and without min-p, over a row whose ties straddle the cuts: the
+/// keyed draw follows the row sampler's truncated distribution and reports its log-probability.
 #[test]
-fn the_keyed_draw_covers_temperature_and_min_p_only() {
+fn the_keyed_draw_follows_the_truncated_distributions() {
+    let row = [2.0f32, 1.5, 1.5, 0.3, -1.0, f32::NAN, f32::NEG_INFINITY, -3.0, 0.0, 1.9, -0.5, 0.7, -2.0, 1.5, 0.3];
+    let n = 60_000u64;
+    let seed = 0x0bad_5eed_1234_0001; // seed: fixed fixture so a statistical failure reproduces on the same draws
+    for (temp, min_p, top_p, top_k) in [(1.0f32, 0.0f32, 0.8f32, 0usize), (0.7, 0.0, 0.5, 0), (1.3, 0.05, 0.9, 0), (1.0, 0.0, 1.0, 3), (1.0, 0.0, 1.0, 5), (1.2, 0.0, 0.7, 6), (1.0, 0.2, 0.95, 8)] {
+        let probs = exact_truncated(&row, temp, min_p, top_p, top_k);
+        let mut counts = vec![0u64; row.len()];
+        for pos in 0..n {
+            let (t, lp) = draw_row(&row, RowDraw { temp, min_p, top_p, top_k, key: draw_key(seed, pos, 0) });
+            counts[t as usize] += 1;
+            assert!((lp as f64 - probs[t as usize].ln()).abs() < 1e-4, "{temp} {min_p} {top_p} {top_k}: token {t} logprob {lp} vs {}", probs[t as usize].ln());
+        }
+        let (stat, outside) = chi_square(&counts, &probs, n);
+        assert!(!outside, "{temp} {min_p} {top_p} {top_k}: a draw left the survivors: {counts:?} {probs:?}");
+        let dof = probs.iter().filter(|&&p| p > 0.0).count().max(2) - 1;
+        assert!(stat < (3 * dof + 30) as f64, "{temp} {min_p} {top_p} {top_k}: chi-square {stat:.1} over {dof} dof, counts {counts:?} vs {probs:?}");
+    }
+}
+
+/// Which requests the keyed draw covers: real sampling with no logit processor.
+#[test]
+fn the_keyed_draw_covers_every_sampled_request_without_a_processor() {
     let t = SampleParams { temp: 1.0, ..SampleParams::greedy() };
-    assert!(t.row_drawable(100));
-    assert!(SampleParams { min_p: 0.05, ..t }.row_drawable(100));
-    assert!(SampleParams { top_k: 100, ..t }.row_drawable(100), "a top_k as wide as the vocabulary truncates nothing");
-    assert!(SampleParams { top_p: 1.0, ..t }.row_drawable(100));
-    assert!(!SampleParams::greedy().row_drawable(100));
-    assert!(!SampleParams { top_k: 40, ..t }.row_drawable(100));
-    assert!(!SampleParams { top_p: 0.9, ..t }.row_drawable(100));
-    assert!(!SampleParams { presence_penalty: 0.5, ..t }.row_drawable(100));
+    assert!(t.row_drawable());
+    assert!(SampleParams { min_p: 0.05, ..t }.row_drawable());
+    assert!(SampleParams { top_k: 40, ..t }.row_drawable());
+    assert!(SampleParams { top_p: 0.9, ..t }.row_drawable());
+    assert!(!SampleParams::greedy().row_drawable());
+    assert!(!SampleParams { presence_penalty: 0.5, ..t }.row_drawable());
 }
 
 const VOCAB: usize = 48;
@@ -224,9 +261,8 @@ fn a_seed_draws_the_same_tokens_in_any_batch_and_wherever_the_row_is_drawn() {
     }
 }
 
-/// A penalised request and a nucleus request in the same step as keyed ones: the decoder draws the keyed rows and
-/// hands the other two rows back, which the host samples (the penalised greedy request's argmax moves off the
-/// repeated token).
+/// A penalised request in the same step as keyed ones (a nucleus among them): the decoder draws the keyed rows and
+/// hands the penalised row back, which the host samples (its argmax moves off the repeated token).
 #[test]
 fn rows_the_keyed_draw_does_not_cover_are_sampled_on_the_host_beside_drawn_ones() {
     let keyed = SampleParams { temp: 1.0, ..SampleParams::greedy() };
@@ -245,5 +281,5 @@ fn rows_the_keyed_draw_does_not_cover_are_sampled_on_the_host_beside_drawn_ones(
     assert_eq!(out[&nucleus].len(), 6);
     let dec = s.decoder();
     // The first token of each request comes from its prefill row; the five after it from decode steps.
-    assert_eq!((dec.drawn, dec.returned), (3 * 5, 2 * 5), "keyed rows drawn by the decoder, the others returned");
+    assert_eq!((dec.drawn, dec.returned), (4 * 5, 5), "keyed rows drawn by the decoder, the others returned");
 }

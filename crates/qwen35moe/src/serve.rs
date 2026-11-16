@@ -1024,6 +1024,26 @@ impl Engine {
         self.model.gpu.read(&logits, rows as usize * vocab).chunks(vocab).map(<[f32]>::to_vec).collect()
     }
 
+    /// [`Engine::forward_batched_logit_rows`] with each keyed row drawn where the logits are
+    /// (`model::serve::PagedDecoder::forward_batched_drawn`): only the drawn tokens and the rows whose draw is `None`
+    /// are read back.
+    pub fn forward_batched_drawn(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32], draws: &[Option<model::serve::RowDraw>]) -> Vec<model::serve::Drawn> {
+        assert_eq!(tables.len(), inputs.len(), "forward_batched_drawn: tables/inputs length mismatch");
+        if tables.is_empty() {
+            return Vec::new();
+        }
+        let rows = inputs.len() as u32;
+        let coords = self.advance_tables(tables);
+        let seqs = self.seqs_for(&coords);
+        let caches = self.batch_caches(&seqs);
+        let _scope = self.model.gpu.scratch_scope();
+        let logits = model::ops::fp32_kernels(|| {
+            let hidden = self.model.run_decode_batch(inputs, &caches);
+            self.model.head_logits_rows_of(&hidden, rows)
+        });
+        model::readout::draw_rows(&self.model.gpu, &logits, draws, self.model.cfg.vocab)
+    }
+
     /// [`Engine::forward_batched_greedy`], repeated `k` times per sequence,
     /// feeding each step's own greedy output back as the next input - there is no
     /// real on-device window (see [`Engine::decode_window_capacity`]'s doc), so
@@ -1121,6 +1141,9 @@ impl PagedDecoder for Engine {
     }
     fn forward_batched_logit_rows(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32]) -> Vec<Vec<f32>> {
         Engine::forward_batched_logit_rows(self, tables, inputs)
+    }
+    fn forward_batched_drawn(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32], draws: &[Option<model::serve::RowDraw>]) -> Vec<model::serve::Drawn> {
+        Engine::forward_batched_drawn(self, tables, inputs, draws)
     }
 }
 

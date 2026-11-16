@@ -136,6 +136,9 @@ pub fn pipelines() -> Vec<(&'static str, &'static str)> {
             ("argmax_part", kernels::ARGMAX_PART),
             ("argmax_final", kernels::ARGMAX_FINAL),
             ("topk_extract_step", kernels::TOPK_EXTRACT_STEP),
+            // The keyed draw of a sampled step (`model::readout::draw_rows`).
+            ("draw_part", kernels::DRAW_PART),
+            ("draw_final", kernels::DRAW_FINAL),
             // The fp32 grouped experts of the reference tier.
             ("scale_add", kernels::SCALE_ADD),
             ("router_gate", kernels::ROUTER_GATE),
@@ -919,6 +922,13 @@ impl PagedDecoder for Engine {
         self.decode_batch(tables, inputs);
         let vocab = self.cfg.vocab() as usize;
         self.gpu.read(&self.sc.logits, tables.len() * vocab).chunks(vocab).map(<[f32]>::to_vec).collect()
+    }
+    fn forward_batched_drawn(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32], draws: &[Option<model::serve::RowDraw>]) -> Vec<model::serve::Drawn> {
+        if tables.is_empty() {
+            return Vec::new();
+        }
+        self.decode_batch(tables, inputs);
+        model::readout::draw_rows(&self.gpu, &self.sc.logits, draws, self.cfg.vocab())
     }
     fn prefix_stats(&self) -> (u64, u64, usize) {
         (0, 0, 0)

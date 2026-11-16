@@ -1087,7 +1087,7 @@ pub(crate) fn head_argmax_rows_on<'h>(
     head_rows_on(g, ops, cfg, final_norm_buf, head, hidden, rows, |g, logits| crate::model::argmax_rows_of(g, logits, rows, cfg.vocab))
 }
 
-/// [`head_logits_rows_on`] with each keyed row's token drawn on the device (see [`crate::model::drawn_rows_of`]):
+/// [`head_logits_rows_on`] with each keyed row's token drawn on the device (see [`model::readout::draw_rows`]):
 /// only the drawn `(token, logprob)` pairs and the rows whose draw is `None` come back.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn head_drawn_rows_on<'h>(
@@ -1100,7 +1100,7 @@ pub(crate) fn head_drawn_rows_on<'h>(
     rows: u32,
     draws: &[Option<model::serve::RowDraw>],
 ) -> Vec<model::serve::Drawn> {
-    head_rows_on(g, ops, cfg, final_norm_buf, head, hidden, rows, |g, logits| crate::model::drawn_rows_of(g, logits, draws, cfg.vocab))
+    head_rows_on(g, ops, cfg, final_norm_buf, head, hidden, rows, |g, logits| model::readout::draw_rows(g, logits, draws, cfg.vocab))
 }
 
 /// [`head_logits_rows_on`] reduced to each row's top-`cap` `(token, logit)`

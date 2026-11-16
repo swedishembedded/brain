@@ -26,7 +26,8 @@
 //   spec  : [M, 4] u32 (see draw_part)
 //   part  : [M, P, 4]
 //   best  : [M]    written by pass 0
-//   out   : [M, 2] the drawn column (as f32) and its log-probability
+//   out   : [M, 4] the drawn column (as f32), its log-probability, and (pass 0) the row's best logit/temp and
+//           its mass sum_t exp(logit_t / temp - best), the statistics a candidate list is answered with
 //
 // params: m, n, p (slices per row), stage (the pass: 0 or 1)
 
@@ -73,13 +74,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
             bi = i;
         }
     }
-    if (pr.stage == 0u) { best[row] = mx; }
+    if (pr.stage == 0u) {
+        best[row] = mx;
+        out[4u * row + 2u] = mx;
+        out[4u * row + 3u] = mass;
+    }
     if (!(mass > 0.0)) {
-        out[2u * row] = 0.0;
-        out[2u * row + 1u] = 0.0;
+        out[4u * row] = 0.0;
+        out[4u * row + 1u] = 0.0;
         return;
     }
     let s = logits[row * pr.n + bi] / temp;
-    out[2u * row] = f32(bi);
-    out[2u * row + 1u] = (s - mx) - log(mass);
+    out[4u * row] = f32(bi);
+    out[4u * row + 1u] = (s - mx) - log(mass);
 }

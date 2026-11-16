@@ -12,16 +12,13 @@
 //! logits are (`model::readout::RowDrawer`) or here on the host, and answers
 //! the same either way.
 //!
-//! For a request with no `top_p` nucleus, no `top_k` below the vocabulary and no
-//! logit processor ([`SampleParams::row_drawable`]), the distribution
-//! [`super::sample_logits_row`] defines is the softmax of `logit / temp` over the
-//! survivors (every token of finite weight, or with `min_p` the tokens whose
-//! weight relative to the best is at least `min_p`). The Gumbel-max rule draws
-//! from exactly that distribution: with `g_i` independent standard Gumbel noise,
-//! `argmax_i (logit_i / temp + g_i)` over the survivors is token `i` with
-//! probability `w_i / sum w`. One pass over the row, no sort, no prefix sum, and
-//! each row is independent of every other, so a batch of rows reduces in
-//! parallel and only `(token, logprob)` per row leaves the device.
+//! For a request with no logit processor ([`SampleParams::row_drawable`]) the distribution
+//! [`super::sample_logits_row`] defines is the softmax of `logit / temp` over the survivors: every token of finite
+//! weight, cut to the best `top_k`, to the `top_p` nucleus and to the `min_p` floor. The Gumbel-max rule draws from
+//! exactly that distribution: with `g_i` independent standard Gumbel noise, `argmax_i (logit_i / temp + g_i)` over
+//! the survivors is token `i` with probability `w_i / sum w`. Without a `top_k` or a nucleus that is one pass over
+//! the row, no sort, no prefix sum; with one it is the same rule over the best-first list that holds the survivors
+//! ([`draw_list`]), which a device answers from its top candidates whenever they hold them.
 //!
 //! The noise of token `t` is `-ln(-ln(u))` for `u = token_uniform(key, t)`, and
 //! `key = draw_key(seed, position, draw)` depends on the request alone, never
@@ -38,16 +35,38 @@ pub struct RowDraw {
     pub temp: f32,
     /// The min-p floor relative to the best token's weight, in `[0, 1]`; `0` for none.
     pub min_p: f32,
+    /// The nucleus; `1` (or `0`) for none.
+    pub top_p: f32,
+    /// The best tokens kept; `0` for every token.
+    pub top_k: usize,
     /// The row's noise key ([`draw_key`]).
     pub key: u32,
 }
 
 impl RowDraw {
     /// The keyed draw of a request sampled with `params` at `position` (the number of tokens before the one drawn)
-    /// under its `seed`, or `None` when `params` is not drawable this way over a `vocab`-wide row
-    /// ([`SampleParams::row_drawable`]).
-    pub fn of(params: &SampleParams, vocab: usize, seed: u64, position: usize) -> Option<RowDraw> {
-        params.row_drawable(vocab).then(|| RowDraw { temp: params.temp.max(1e-6), min_p: params.min_p.clamp(0.0, 1.0), key: draw_key(seed, position as u64, 0) })
+    /// under its `seed`, or `None` when `params` is not drawable this way ([`SampleParams::row_drawable`]).
+    pub fn of(params: &SampleParams, seed: u64, position: usize) -> Option<RowDraw> {
+        params.row_drawable().then(|| RowDraw { temp: params.temp.max(1e-6), min_p: params.min_p.clamp(0.0, 1.0), top_p: params.top_p, top_k: params.top_k, key: draw_key(seed, position as u64, 0) })
+    }
+
+    /// Whether the draw keeps the best `top_k` of a `vocab`-wide row.
+    pub fn keeps_top_k(&self, vocab: usize) -> bool {
+        self.top_k > 0 && self.top_k < vocab
+    }
+
+    /// Whether the draw cuts a nucleus.
+    pub fn has_nucleus(&self) -> bool {
+        self.top_p > 0.0 && self.top_p < 1.0
+    }
+
+    /// Whether the survivors of a `vocab`-wide row are a best-first list rather than a threshold over the row.
+    pub fn truncates(&self, vocab: usize) -> bool {
+        self.keeps_top_k(vocab) || self.has_nucleus()
+    }
+
+    fn params(&self) -> SampleParams {
+        SampleParams { temp: self.temp, top_k: self.top_k, top_p: self.top_p, min_p: self.min_p, ..SampleParams::greedy() }
     }
 }
 
@@ -100,6 +119,9 @@ pub fn token_gumbel(key: u32, token: u32) -> f32 {
 /// sampler does.
 pub fn draw_row(row: &[f32], d: RowDraw) -> (u32, f32) {
     assert!(!row.is_empty(), "draw_row: empty logits row");
+    if d.truncates(row.len()) {
+        return draw_truncated_row(row, d);
+    }
     let temp = d.temp.max(1e-6);
     let best = row.iter().filter(|l| !l.is_nan()).map(|&l| l / temp).fold(f32::NEG_INFINITY, f32::max);
     if best == f32::NEG_INFINITY {
@@ -121,6 +143,60 @@ pub fn draw_row(row: &[f32], d: RowDraw) -> (u32, f32) {
         }
     }
     (token, (scaled - best) - (kept as f32).ln())
+}
+
+/// [`draw_row`] for a draw whose survivors are a best-first list: the row's best `top_k`, or the shortest sorted
+/// prefix that holds the nucleus (the row sampler's own prefix search, [`super::fullrow`]).
+fn draw_truncated_row(row: &[f32], d: RowDraw) -> (u32, f32) {
+    let mut entries: Vec<(u32, f32)> = row.iter().enumerate().map(|(i, &l)| (i as u32, l)).collect();
+    let Some(best) = super::fullrow::best_logit(&entries) else {
+        return (super::argmax(row), 0.0);
+    };
+    if d.keeps_top_k(row.len()) {
+        let list = super::fullrow::best_first(&mut entries, d.top_k);
+        return draw_list(&list, d, None);
+    }
+    let temp = d.temp.max(1e-6);
+    let weight = |l: f32| super::fullrow::weight_of(l, temp, best);
+    let total: f64 = entries.iter().map(|e| weight(e.1) as f64).sum();
+    let list = super::fullrow::survivor_prefix(&mut entries, d.params(), total, weight);
+    draw_list(&list, d, Some(total as f32))
+}
+
+/// The keyed draw over a best-first `list` (`(token, logit)`, equal logits lowest id first) that holds every
+/// survivor of `d`: the row sampler's truncation of the list ([`super::truncated_weights_of`]; `full_mass` is the
+/// softmax normaliser of the whole row when the list is only its prefix and the nucleus is measured against the row),
+/// then the Gumbel-max rule over what survives, with the drawn token's log-probability.
+pub fn draw_list(list: &[(u32, f32)], d: RowDraw, full_mass: Option<f32>) -> (u32, f32) {
+    assert!(!list.is_empty(), "draw_list: empty candidate list");
+    let (weights, kept) = super::truncated_weights_of(list, d.params(), full_mass);
+    let (mut pick, mut top) = (0usize, f32::NEG_INFINITY);
+    for (i, &w) in weights.iter().enumerate() {
+        if w.is_nan() || w <= 0.0 {
+            continue;
+        }
+        let k = w.ln() + token_gumbel(d.key, list[i].0);
+        if k > top {
+            (pick, top) = (i, k);
+        }
+    }
+    (list[pick].0, weights[pick].ln() - kept.ln())
+}
+
+/// The keyed draw of a row answered from its best-first `list` of candidates and its statistics (`best`, the row's
+/// largest `logit / temp`, and `mass`, the sum of `exp(logit / temp - best)` over the row), when the list holds every
+/// survivor: the `top_k` best are in it, or its mass reaches the nucleus. `None` when it does not, and the row itself
+/// must be drawn ([`draw_row`]). Only for a draw that [`RowDraw::truncates`] a `vocab`-wide row.
+pub fn draw_from_candidates(list: &[(u32, f32)], best: f32, mass: f32, d: RowDraw, vocab: usize) -> Option<(u32, f32)> {
+    if list.is_empty() || mass.is_nan() || mass <= 0.0 {
+        return None;
+    }
+    if d.keeps_top_k(vocab) {
+        return (list.len() >= d.top_k).then(|| draw_list(&list[..d.top_k], d, None));
+    }
+    let temp = d.temp.max(1e-6);
+    let held: f64 = list.iter().map(|&(_, l)| if l.is_nan() { 0.0 } else { ((l / temp - best).exp()) as f64 }).sum();
+    (held >= d.top_p as f64 * mass as f64).then(|| draw_list(list, d, Some(mass)))
 }
 
 /// Every row's answer to a keyed step whose rows were read back: `draws[i]` drawn from `rows[i]` where it is
