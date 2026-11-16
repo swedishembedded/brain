@@ -382,7 +382,13 @@ fn backward_matches_reference() {
     for &(name, kind, tpc) in bwd_variants(&gpu).iter() {
         for &(n, c, h, w) in BWD_SHAPES {
             let total = n * c * h * w;
-            let x = Lcg::random().vec(total);
+            let mut x = Lcg::random().vec(total);
+            // Every channel's first pixel is negative, so each slope gradient sums at least one term and the
+            // vacuity guard below holds for any draw; at one pixel per channel a draw with no negative x in
+            // any channel otherwise left the whole reference zero about once in 128 runs.
+            for ci in 0..c {
+                x[ci * h * w] = -x[ci * h * w].abs() - 0.25;
+            }
             let a = Lcg::random().vec(c);
             let dy = Lcg::random().vec(total);
             let (dx, da) = prelu_bwd_k(&gpu, kind, tpc, &x, &a, &dy, (n, c, h, w), c);
