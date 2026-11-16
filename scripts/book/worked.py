@@ -41,6 +41,7 @@ info@swedishembedded.com.
 """
 import importlib
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -91,7 +92,11 @@ class Cache:
     def save(self):
         if self.enabled:
             CACHE.parent.mkdir(parents=True, exist_ok=True)
-            CACHE.write_text(json.dumps(self.data), encoding="utf-8")
+            # Written whole and renamed into place, so a run beside this one
+            # reads either the old cache or the new, never half of one.
+            tmp = CACHE.with_name(f"{CACHE.name}.{os.getpid()}.tmp")
+            tmp.write_text(json.dumps(self.data), encoding="utf-8")
+            os.replace(tmp, CACHE)
 
 
 # An angle-bracketed word that markdown would take for an HTML tag; code
