@@ -40,6 +40,7 @@ and numerical correctness. If your team needs expertise in machine learning
 engineering, you can procure our services by sending an email to
 info@swedishembedded.com.
 """
+import fcntl
 import importlib
 import json
 import os
@@ -71,6 +72,7 @@ class Cache:
             except ValueError:
                 self.data = {}
         self.keys = {}
+        self.computed = set()  # modules this run put into the cache
 
     def key(self, module: str) -> str:
         if module not in self.keys:
@@ -89,14 +91,28 @@ class Cache:
         if not entry or entry.get("key") != self.key(module):
             entry = self.data[module] = {"key": self.key(module), "outputs": {}}
         entry["outputs"][func] = value
+        self.computed.add(module)
 
     def save(self):
-        if self.enabled:
-            CACHE.parent.mkdir(parents=True, exist_ok=True)
-            # Written whole and renamed into place, so a run beside this one
-            # reads either the old cache or the new, never half of one.
+        """Merge what this run computed into the cache on disk. Runs side by
+        side (one per chapter being edited) each read the cache at start;
+        writing back the whole of what one read would drop what the others
+        computed meanwhile, so the file is re-read under a lock and only this
+        run's modules replace their entries. It is written whole and renamed
+        into place, so a reader sees the old cache or the new."""
+        if not self.enabled or not self.computed:
+            return
+        CACHE.parent.mkdir(parents=True, exist_ok=True)
+        with open(CACHE.with_name(CACHE.name + ".lock"), "w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            try:
+                current = json.loads(CACHE.read_text(encoding="utf-8")) if CACHE.is_file() else {}
+            except ValueError:
+                current = {}
+            for module in self.computed:
+                current[module] = self.data[module]
             tmp = CACHE.with_name(f"{CACHE.name}.{os.getpid()}.tmp")
-            tmp.write_text(json.dumps(self.data), encoding="utf-8")
+            tmp.write_text(json.dumps(current), encoding="utf-8")
             os.replace(tmp, CACHE)
 
 
