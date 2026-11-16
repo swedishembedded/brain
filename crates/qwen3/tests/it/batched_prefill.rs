@@ -138,16 +138,38 @@ fn prefill_submissions_do_not_grow_with_the_prompt() {
 
 /// Token prompts from one token up to several chunks long, each prefilled in
 /// one call and in three, at the fp32 and the int8 weight tier.
+///
+/// The int8 tier is held to two bars. Its products may read an activation in
+/// two forms: the packed int8 codes (an integer dot product, exact under any
+/// tiling) or, on a device whose tuned table picks a dequantize-in-register
+/// candidate for a shape class (CUDA), the activation rounded to bf16. Under
+/// `model::ops::row_count_invariant` every product reads the codes, so the
+/// batched prefill computes what the per-token decode does up to fp32
+/// summation order, the fp32 tier's bar. With the tuned choice a prompt's rows
+/// and a decode step's single row can fall in classes that read different
+/// forms, and the two then agree only to the int8 activation's own
+/// resolution: half a quantisation step, 1/254 of the row's largest value
+/// (CUDA measured 1.16e-3 of the logit scale at 37 tokens, against 3.3e-7
+/// with every product on the codes).
 #[test]
 fn batched_prefill_matches_per_token_decode() {
     if skip() {
         return;
     }
-    for (cfg, dt, rel) in [(QwenConfig::tiny(), Dtype::F32, 1e-4f32), (QwenConfig::tiny_i8(), Dtype::I8, 1e-3)] {
+    const FP32_ORDER: f32 = 1e-4;
+    const INT8_ACTIVATION_STEP: f32 = 1.0 / 254.0;
+    for (cfg, dt) in [(QwenConfig::tiny(), Dtype::F32), (QwenConfig::tiny_i8(), Dtype::I8)] {
         let m = decode_model(&cfg, &qwen3::init_weights(&cfg, 11), dt);
         let head = m.read_weight(cfg.head_weight());
         for len in [1usize, 2, 37, 300, 600] {
-            assert_matches_per_token(&m, &head, &tokens(&prompt(len, cfg.vocab)), rel, &format!("{dt:?}"));
+            let ids = prompt(len, cfg.vocab);
+            let inputs = tokens(&ids);
+            if dt == Dtype::F32 {
+                assert_matches_per_token(&m, &head, &inputs, FP32_ORDER, "F32");
+                continue;
+            }
+            model::ops::row_count_invariant(|| assert_matches_per_token(&m, &head, &inputs, FP32_ORDER, "I8 on the packed codes"));
+            assert_matches_per_token(&m, &head, &inputs, INT8_ACTIVATION_STEP, "I8 as tuned");
         }
     }
 }
@@ -271,3 +293,4 @@ fn cancellable_chunked_generation_matches_per_token_decode() {
     assert!(none.is_empty(), "a cancelled generation produces no tokens");
     assert_eq!(generate(64), want, "after a cancelled generation");
 }
+
