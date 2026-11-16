@@ -24,6 +24,7 @@
 //! * [`quota`]: the storage limits (per artifact, whole store, per job, free-disk floor) and the
 //!   reservations that hold the service to them.
 //! * [`timeline`]: `timeline_train`, a timeline model trained and published as a checkpoint.
+//! * [`create`]: `init_model`, a model from nothing: vocabulary, chat template, random initialization.
 //! * [`dryrun`]: `check_dataset`, a dataset checked against a base without training.
 //! * [`consolidate`]: the jobs that produce a checkpoint, `full_train` and `merge`.
 //! * [`job`]: one run, from staged inputs to the adapter and its report.
@@ -31,6 +32,7 @@
 //!   evicting idle serving instances for it and refusing when serving is busy.
 
 pub mod consolidate;
+pub mod create;
 pub mod dryrun;
 pub mod job;
 pub mod quota;

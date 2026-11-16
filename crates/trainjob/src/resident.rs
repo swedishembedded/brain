@@ -40,6 +40,7 @@ use capability::{ActionResult, Invocation, Manifest, Progress};
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 
 use crate::consolidate::{self, FullRequest, MergeRequest};
+use crate::create;
 use crate::dryrun;
 use crate::timeline;
 use crate::job::{self, FootprintCache, JobEnv};
@@ -91,6 +92,7 @@ impl TrainResident {
             request::ACTION => self.admit_train(inv),
             consolidate::FULL_ACTION => self.admit_full(inv),
             consolidate::MERGE_ACTION => self.admit_merge(inv),
+            create::ACTION => self.admit_init(inv),
             dryrun::ACTION => self.admit_check(inv),
             timeline::ACTION => self.admit_timeline(inv),
             other => Err(format!("{} has no action '{other}'", request::MODEL)),
@@ -148,6 +150,20 @@ impl TrainResident {
         let base_dir = job::resolve_base(self.env.models_dir.as_deref(), &request.params.base)?;
         // Folding is host work: the base is read and a merged copy written, so about twice the base's own size in memory.
         Ok(Reservation::Host(2 * job::tree_bytes(&base_dir)))
+    }
+
+    fn admit_init(&self, inv: &Invocation) -> Result<Reservation, String> {
+        let request = create::Request::from_invocation(inv)?;
+        if self.env.store.is_none() && request.params.install_as.is_none() {
+            return Err(format!("{}: this server has no artifact store (--artifact-store) to publish the checkpoint to: set install_as to keep it in the model store", create::ACTION));
+        }
+        match (&self.env.store, &request.corpus) {
+            (None, crate::request::Source::Digest(_)) => return Err(format!("{}: this server has no artifact store (--artifact-store), so a corpus cannot be named by digest", create::ACTION)),
+            (_, crate::request::Source::Digest(digest)) => self.check_digests(&[*digest])?,
+            _ => {}
+        }
+        // Learning the vocabulary and drawing the weights is host work.
+        Ok(Reservation::Host(request.host_bytes()))
     }
 
     fn admit_timeline(&self, inv: &Invocation) -> Result<Reservation, String> {
@@ -220,7 +236,7 @@ enum Reservation {
 
 impl ResidentModel for TrainResident {
     fn manifest(&self) -> Manifest {
-        Manifest::new(request::MODEL, "fine-tune a chat model on the devices serving shares: a LoRA adapter (supervised, policy gradient or preference), every weight (`full_train`), or fold an adapter into its base (`merge`); datasets and results by blob or artifact digest, scheduled with the serving residents (see the trainjob crate)", vec![request::action_spec(), consolidate::full_spec(), consolidate::merge_spec(), dryrun::spec(), timeline::spec()])
+        Manifest::new(request::MODEL, "fine-tune a chat model on the devices serving shares: a LoRA adapter (supervised, policy gradient or preference), every weight (`full_train`), or fold an adapter into its base (`merge`); create a model from nothing (`init_model`); datasets and results by blob or artifact digest, scheduled with the serving residents (see the trainjob crate)", vec![request::action_spec(), consolidate::full_spec(), consolidate::merge_spec(), create::spec(), dryrun::spec(), timeline::spec()])
     }
 
     fn instance_key(&self, action: &str, inv: &Invocation) -> InstanceKey {
@@ -280,6 +296,7 @@ impl Instance for TrainInstance {
             request::ACTION => &mut || job::run(env, inv, progress),
             consolidate::FULL_ACTION => &mut || consolidate::run_full(env, inv, progress),
             consolidate::MERGE_ACTION => &mut || consolidate::run_merge(env, inv, progress),
+            create::ACTION => &mut || create::run(env, inv, progress),
             dryrun::ACTION => &mut || dryrun::run(env, inv, progress),
             timeline::ACTION => &mut || timeline::run(env, inv, progress),
             other => return Err(format!("{} has no action '{other}'", request::MODEL)),
