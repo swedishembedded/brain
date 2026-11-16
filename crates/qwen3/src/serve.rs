@@ -882,7 +882,10 @@ impl FusedOut {
 
 /// Batched scratch (sized for `max_batch` rows), reused every iteration.
 struct Scratch {
-    res: Vec<DeviceBuffer>, // n_layers+1, each [B*d]
+    /// The residual stream, `[B*d]` each: layer `l` reads `res[l % 2]` and writes `res[(l + 1) % 2]`. Nothing reads a
+    /// layer's input residual once the layer has run, so two buffers serve every layer (one per layer plus the last
+    /// was 37 for Qwen3-4B, gigabytes at an 8K-row round).
+    res: [DeviceBuffer; 2],
     xn1: DeviceBuffer,
     /// M4.1: the fused QKV GEMM's raw `[b, hq+2*hkv]` output, before
     /// `concat_split` narrows it into `q_pre`/`k_pre`/`v` below. Made on first
@@ -1402,10 +1405,7 @@ impl Engine {
         let st = |x: u64| gpu.storage(x);
         let stage_t0 = std::time::Instant::now();
 
-        let mut res = Vec::new();
-        for _ in 0..=cfg.n_layers {
-            res.push(st(b * d));
-        }
+        let res = [st(b * d), st(b * d)];
         // int8 pools pack 4 values/u32 (÷4 words) + a scale per (token slot, kv-head).
         // The WGSL append kernels require head_dim % 4 == 0 (a packed u32 must
         // stay within one head, else its 4 lanes span two heads' scales) --
@@ -3134,7 +3134,7 @@ impl Engine {
             // q/k/v). Falls back to the unfused `rms` + `Self::quant_once`
             // pair (a no-op on an all-fp32 engine) otherwise.
             if !ln1_done {
-                self.rms_quant(&mut s, &sc.res[l], w(&p("ln1.weight")), &sc.xn1, d, b, !self.reads_int8(&p(WQKV)) || (lora && self.lora_reads(&[LoraSite::Wq, LoraSite::Wk, LoraSite::Wv])));
+                self.rms_quant(&mut s, &sc.res[l % 2], w(&p("ln1.weight")), &sc.xn1, d, b, !self.reads_int8(&p(WQKV)) || (lora && self.lora_reads(&[LoraSite::Wq, LoraSite::Wk, LoraSite::Wv])));
             }
             // M4.1: one fused GEMM (`wq;wk;wv` concatenated at weight-load
             // time - see `from_map_with_gpu`) instead of three, then
@@ -3314,9 +3314,9 @@ impl Engine {
                 self.lora_correct(&mut s, l, LoraSite::Wo, &sc.ctx, &sc.proj, b, d, 0);
             }
             let up_bf16 = gateup_parts(l);
-            let ln2_done = add_rms(&mut s, &sc.res[l], &sc.proj, w(&p("ln2.weight")), &sc.xmid, &sc.xn2, true, up_bf16.then_some(&sc.xn2_bf16));
+            let ln2_done = add_rms(&mut s, &sc.res[l % 2], &sc.proj, w(&p("ln2.weight")), &sc.xmid, &sc.xn2, true, up_bf16.then_some(&sc.xn2_bf16));
             if !ln2_done {
-                s.push(g.step(ADD2, &[&sc.res[l], &sc.proj, &sc.xmid], &[b * d], b * d));
+                s.push(g.step(ADD2, &[&sc.res[l % 2], &sc.proj, &sc.xmid], &[b * d], b * d));
                 // M4.3: same fusion as ln1 above, for `sc.xn2` -> gate/up.
                 self.rms_quant(&mut s, &sc.xmid, w(&p("ln2.weight")), &sc.xn2, d, b, !self.reads_int8(&p(WGATEUP)) || (lora && self.lora_reads(&[LoraSite::Gate, LoraSite::Up])));
             }
@@ -3352,10 +3352,10 @@ impl Engine {
             let next_norm = if l + 1 < c.n_layers as usize { w(&format!("blocks.{}.ln1.weight", l + 1)) } else { w("norm.weight") };
             let next_out = if l + 1 < c.n_layers as usize { &sc.xn1 } else { &sc.xn_final };
             let next_bf16 = l + 1 < c.n_layers as usize && qkv_parts(l + 1);
-            ln1_done = add_rms(&mut s, &sc.xmid, &sc.mlp_out, next_norm, &sc.res[l + 1], next_out, l + 1 < c.n_layers as usize, next_bf16.then_some(&sc.xn1_bf16));
+            ln1_done = add_rms(&mut s, &sc.xmid, &sc.mlp_out, next_norm, &sc.res[(l + 1) % 2], next_out, l + 1 < c.n_layers as usize, next_bf16.then_some(&sc.xn1_bf16));
             xn1_bf16 = ln1_done && next_bf16;
             if !ln1_done {
-                s.push(g.step(ADD2, &[&sc.xmid, &sc.mlp_out, &sc.res[l + 1]], &[b * d], b * d));
+                s.push(g.step(ADD2, &[&sc.xmid, &sc.mlp_out, &sc.res[(l + 1) % 2]], &[b * d], b * d));
             }
             if per_layer {
                 // Dropping the layer's steps leaves the arena the last holder of its blocks.
@@ -3365,7 +3365,7 @@ impl Engine {
         }
         let last = c.n_layers as usize;
         if !ln1_done {
-            s.push(self.rms(&sc.res[last], w("norm.weight"), &sc.xn_final, d, b));
+            s.push(self.rms(&sc.res[last % 2], w("norm.weight"), &sc.xn_final, d, b));
         }
         s
     }

@@ -281,7 +281,9 @@ ones a server instantiated on first use anyway.
   Qwen3-4B at an 8K-row round: 8192 x (6144 + 19456) words, 800 MiB, no longer held (`engine_glue`
   `a_bf16_library_engine_holds_no_fused_product_scratch`). The 32 decode tapes `prepare_decode` records and freezes
   hold ~2 MiB of driver memory each (driver free before and after each freeze, 0-6 MiB in 2 MiB steps), ~64 MiB for
-  all: kept as is.
+  all: kept as is. The residual stream is two buffers instead of one per layer plus one: Qwen3-4B at an 8K-row round
+  2800 MiB less (the engine's live bytes after build 27.78 -> 24.84 GB, driver free +2800 MiB, two A/B pairs in one
+  locked run).
 - The decode merge writes the output projection's bf16 operand itself (`paged_flash_decode_gqa_combine_bf16`, gate
   `flash_combine_bf16_native`): interleaved A/B traces at c=16 (base, new, base, new): decode glue 784 / 834 -> 738 /
   768 us a step, the context cast 62 -> 3 us a step, serving window 10.29 / 11.02 -> 9.76 / 9.99 s.
