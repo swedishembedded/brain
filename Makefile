@@ -2027,7 +2027,7 @@ docs/pdf:
 # The textbook under docs/book: published with the docs (its own part of
 # docs/manifest.yaml) and built as PDF and EPUB files, in the reading order of
 # docs/book/book.yaml, named after the book, its author and brain's version
-# (Cargo.toml). Requires pandoc, xelatex, rsvg-convert and epubcheck.
+# (Cargo.toml). Requires pandoc, xelatex, rsvg-convert, ImageMagick and epubcheck.
 ## book - default: the whole textbook and each written volume as PDF and EPUB (build/book/)
 book:
 	scripts/book/pdf.py
@@ -2041,9 +2041,13 @@ book/pdf:
 book/volumes:
 	scripts/book/pdf.py --volumes
 
-## book/epub - the whole textbook and each written volume as EPUB 3, each verified (math, tables, figures, links, epubcheck)
+## book/epub - the whole textbook and each written volume as EPUB 3 and as a Kindle EPUB (PNG figures), each verified (epubcheck)
 book/epub:
 	scripts/book/epub.py
+
+## book/epub/kindle - the Kindle EPUBs alone: SVG figures as compact PNGs sized to the page, which Amazon's conversion keeps
+book/epub/kindle:
+	scripts/book/epub.py --kindle
 
 # Research papers: one directory per paper under papers/, each with its own
 # Makefile over papers/paper.mk. Adding a directory adds its targets.
@@ -2367,7 +2371,7 @@ help:
         crates $(EXAMPLE_CRATE_TARGETS) $(EXAMPLE_GROUP_TARGETS) $(EXAMPLE_NAME_TARGETS) \
         $(EXAMPLE_BUILD_TARGETS) $(EXAMPLE_RUN_TARGETS) \
         docs docs/build docs/check docs/clean docs/pdf docs/quickstart \
-        papers papers/pdf $(PAPER_DIRS) $(PAPER_TARGETS) book book/pdf book/epub \
+        papers papers/pdf $(PAPER_DIRS) $(PAPER_TARGETS) book book/pdf book/epub book/epub/kindle \
         generate generate/kernels generate/kernels/registry generate/kernels/wgsl-table \
         generate/kernels/cuda-table generate/samples generate/samples/manifest \
         generate/knowledge generate/knowledge/index \

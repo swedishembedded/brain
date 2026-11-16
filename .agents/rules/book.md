@@ -12,7 +12,9 @@ implementation and history as the case study. It is published with the docs
 (its own part of `docs/manifest.yaml`) and built as PDF and EPUB files:
 `make book` builds the whole book (`make book/pdf` alone) and each written
 volume as a file of its own (`make book/volumes`), each in both formats
-(`make book/epub` for the EPUBs alone), all under `build/book/`. The editions
+(`make book/epub` for the EPUBs alone), all under `build/book/`. Every EPUB
+also comes as `<name>-Kindle.epub` (`make book/epub/kindle`): its figures are
+compact PNGs sized to the page, because Amazon's conversion crops an SVG. The editions
 and their pages are `scripts/book/edition.py`'s, shared by both formats; file
 names end with the author and brain's major and minor version from
 `Cargo.toml` (`-Martin-Schroder-v5.1`). Every EPUB is verified as it is

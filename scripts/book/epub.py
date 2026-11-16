@@ -24,6 +24,15 @@ pseudocode reference. Each edition becomes one EPUB under build/book/:
 - Figures are the SVG files themselves (numbered per
   chapter, as the text cites them), tables are HTML tables.
 
+A Kindle edition (`--kindle`) differs only in its figures. Amazon converts
+an EPUB to its own format, and its SVG support is partial: a figure drawn at
+its own pixel size into a smaller box comes out cropped instead of scaled.
+So each SVG figure is rasterized (KINDLE_FIGURE_PX wide, white ground, a
+small palette to keep the file small; Amazon's delivery fee is per megabyte)
+and sized to the width of the page, as Amazon's guidelines ask. Amazon
+converts every uploaded EPUB to its own format; this one uses only what
+that conversion handles reliably. Both are built by default.
+
 Each EPUB is then verified (`verify`): the container is well formed, every
 page parses as XHTML, every link and image resolves, and every formula,
 table and figure of the source is in the EPUB, rendered (a formula pandoc
@@ -35,15 +44,18 @@ the whole book in November 2026, so each pandoc runs under a heap limit
 (PANDOC_HEAP) and stops with "Heap exhausted" instead of exhausting the
 machine; -j N runs N editions at once, each under that limit.
 
-    scripts/book/epub.py               # every edition: whole book, volumes, reference
+    scripts/book/epub.py               # every edition, each as EPUB and as Kindle EPUB
     scripts/book/epub.py --whole       # -> build/book/brain-book.epub
     scripts/book/epub.py --volumes     # every written volume and the reference
     scripts/book/epub.py --volume v05  # -> build/book/volumes/FFPIM-Volume-05-<Title>.epub
     scripts/book/epub.py --reference   # notation and pseudocode alone
+    scripts/book/epub.py --kindle      # the Kindle EPUBs alone (<name>-Kindle.epub)
+    scripts/book/epub.py --standard    # the standard EPUBs alone
     scripts/book/epub.py --check FILE  # verify an EPUB that was already built
     scripts/book/epub.py -j 3          # how many EPUBs are built at once (default 2)
 
-Requires pandoc, rsvg-convert (the cover) and epubcheck.
+Requires pandoc, rsvg-convert (the cover, and the Kindle figures), ImageMagick
+(the Kindle figures' palette) and epubcheck.
 
 Swedish Embedded AB implements solutions for publishing technical material
 from a single verified source, in print and electronic formats. If your team
@@ -54,6 +66,7 @@ info@swedishembedded.com.
 import html
 import importlib.util
 import json
+import os
 import posixpath
 import re
 import shutil
@@ -79,6 +92,13 @@ FIGURES = PANDOC / "book-figures.lua"
 ACCENT, INK, MUTED = "#2B6CB0", "#1A202C", "#4A5568"
 # The most memory one pandoc may take; well above the whole book's peak.
 PANDOC_HEAP = "4g"
+# A Kindle edition's figures: 1100 px wide (sharp across a 300 ppi e-reader
+# page) in a 64-colour palette, which keeps a figure's text and lines clean
+# at about 25 KiB (38 KiB at 1400 px and 256 colours; 32 colours saves no
+# more), measured on 30 of the book's figures.
+KINDLE_FIGURE_PX = 1100
+KINDLE_COLOURS = 64
+KINDLE_CACHE = ROOT / "build" / "book" / "kindle-figures"
 # A cover the size e-book stores ask for (1.5:1, 1600 px wide).
 COVER_W, COVER_H = 1600, 2400
 
@@ -283,22 +303,54 @@ def identifier(edition: Edition) -> str:
     return f"urn:uuid:{uuid.uuid5(uuid.NAMESPACE_URL, 'https://swedishembedded.com/book/' + edition.name)}"
 
 
-def build(edition: Edition) -> list[str]:
-    """Build one EPUB, verify it, and return its problems (none when clean)."""
+SVG_FIGURE = re.compile(r"(!\[[^\]]*\]\()([^)\s]+\.svg)\)")
+
+
+def raster(svg: Path) -> Path:
+    """The Kindle PNG of an SVG figure, made once and kept under the hash of
+    the SVG's content."""
+    import hashlib
+    out = KINDLE_CACHE / (hashlib.sha256(svg.read_bytes()).hexdigest()[:20] + ".png")
+    if not out.is_file():
+        KINDLE_CACHE.mkdir(parents=True, exist_ok=True)
+        tmp = out.with_name(f"{out.stem}.{os.getpid()}.tmp.png")
+        subprocess.run(["rsvg-convert", "-w", str(KINDLE_FIGURE_PX), "-b", "white", "-f", "png", "-o", str(tmp), str(svg)],
+                       check=True)
+        # Maximum zlib compression with adaptive filtering: 7% smaller, same pixels.
+        subprocess.run(["magick", str(tmp), "-strip", "-colors", str(KINDLE_COLOURS),
+                        "-define", "png:compression-level=9", "-define", "png:compression-strategy=1",
+                        "-define", "png:compression-filter=5", f"PNG8:{tmp}"], check=True)
+        os.replace(tmp, out)
+    return out
+
+
+def kindle_figures(text: str) -> str:
+    """The markdown of an edition with every SVG figure replaced by its PNG,
+    sized to the width of the page."""
+    return SVG_FIGURE.sub(lambda m: f"{m.group(1)}{raster(ROOT / m.group(2)).relative_to(ROOT).as_posix()}){{width=100%}}",
+                          text)
+
+
+def build(edition: Edition, kindle: bool = False) -> list[str]:
+    """Build one EPUB (for Kindle when `kindle`), verify it, and return its
+    problems (none when clean)."""
     book = load()
-    md = build_markdown(book, edition, output(edition, ".epub.md"))
-    epub = output(edition, ".epub")
+    suffix = "-Kindle" if kindle else ""
+    md = build_markdown(book, edition, output(edition, f"{suffix}.epub.md"))
+    if kindle:
+        md.write_text(kindle_figures(md.read_text(encoding="utf-8")), encoding="utf-8")
+    epub = output(edition, f"{suffix}.epub")
     image = cover(book, edition, output(edition, ".cover.png"))
     meta = {
         "title": edition.title, "subtitle": edition.subtitle, "creator": [{"role": "author", "text": book.author}],
         "publisher": "Swedish Embedded AB", "lang": "en-GB", "date": source_day(),
-        "identifier": [{"scheme": "UUID", "text": identifier(edition)}],
+        "identifier": [{"scheme": "UUID", "text": identifier(edition) + ("-kindle" if kindle else "")}],
         "rights": f"Copyright © 2026 {book.author}. Licensed under CC BY 4.0.",
         "subject": "Machine learning",
     }
-    meta_file = output(edition, ".epub.yaml")
+    meta_file = output(edition, f"{suffix}.epub.yaml")
     meta_file.write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
-    tmp = output(edition, ".epub.tmp")
+    tmp = output(edition, f"{suffix}.epub.tmp")
     cmd = ["pandoc", "+RTS", f"-M{PANDOC_HEAP}", "-RTS", str(md), "-f", "markdown", "-t", "epub3", "-o", str(tmp),
            "--metadata-file", str(meta_file), "--epub-cover-image", str(image),
            "--css", str(CSS), "--lua-filter", str(MATH_LINES), "--lua-filter", str(FIGURES), "--lua-filter", str(FILTER), "--mathml",
@@ -450,12 +502,14 @@ def main() -> int:
         for p in problems:
             print(p, file=sys.stderr)
         return 1 if problems else 0
-    workers = parse(args, "epub.py")
+    workers = parse(args, "epub.py", {"--kindle", "--standard"})
     if workers is None:
         return 2
-    todo = select(args)
+    editions = select([a for a in args if a not in ("--kindle", "--standard")])
+    variants = [False] * ("--kindle" not in args) + [True] * ("--standard" not in args)
+    todo = [(e, k) for e in editions for k in variants]
     with ProcessPoolExecutor(max_workers=max(1, min(workers, len(todo)))) as pool:
-        problems = [p for found in pool.map(build, todo) for p in found]
+        problems = [p for found in pool.map(build, *zip(*todo)) for p in found]
     for p in problems:
         print(p, file=sys.stderr)
     print(f"{len(todo)} EPUB(s) built, {len(problems)} problem(s)", file=sys.stderr if problems else sys.stdout)

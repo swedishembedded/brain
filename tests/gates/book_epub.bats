@@ -238,3 +238,18 @@ PY
   [ "$(grep -c 'class="math-scaled"' <<<"$output")" -eq 1 ]
   [[ "$output" =~ font-size:\ (5[0-9]|60)% ]]
 }
+
+@test "a Kindle edition draws each SVG figure as a compact PNG sized to the page" {
+  run python3 - "$REPO/scripts/book" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+import epub
+text = "Before.\n\n![a picture](docs/book/v07-vision/img/detection-boxes.svg)\n\n![photo](docs/book/img/author.jpg){.portrait}\n"
+print(epub.kindle_figures(text))
+PY
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'](build/book/kindle-figures/'*'.png){width=100%}'* ]]
+  [[ "$output" == *'(docs/book/img/author.jpg){.portrait}'* ]]
+  png=$(grep -o 'build/book/kindle-figures/[0-9a-f]*\.png' <<<"$output")
+  [ "$(identify -format '%w' "$REPO/$png")" = "1100" ]
+}
