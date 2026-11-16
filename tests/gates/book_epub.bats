@@ -187,3 +187,10 @@ LUA
   broken '\begin{aligned} \Delta &= \frac{\mathrm{hi} - \mathrm{lo}}{255}, \qquad q_0 = \mathrm{clamp}\bigl(\mathrm{round}(-\mathrm{lo}/\Delta), 0, 255\bigr), \\ q &= x. \end{aligned}'
   [[ "$output" == *'\\ q_0 &= \mathrm{clamp}'* ]]
 }
+
+@test "a long product breaks between two factors, the next row starting with an explicit times" {
+  broken 'M_{ij} = \sum_{k=1}^{3} w_k \,\sin\!\Big(\frac{k\pi(i + \tfrac12)}{8}\Big) \cos\!\Big(\frac{k\pi(j + \tfrac12)}{8}\Big) \cos\!\Big(\frac{k\pi(j + \tfrac12)}{8}\Big)'
+  [[ "$output" == *' \\ &\quad \times \cos\!\Big('* ]]
+  # A function applied to its argument is never split from it.
+  [[ "$output" != *'\sin\! \\'* ]]
+}

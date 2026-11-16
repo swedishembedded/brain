@@ -15,9 +15,11 @@
 --      under the other;
 --   2. a chain of relations (=, \le, \approx, \Rightarrow, ...) breaks before
 --      a relation, the relations aligned under each other;
---   3. a side still too wide breaks before a binary + or -, the continuation
---      indented under the right-hand side; inside parentheses only when
---      nothing outside them is left, and after a comma as the last resort.
+--   3. a side still too wide breaks before a binary + - \cdot or \times,
+--      the continuation indented under the right-hand side; inside sized
+--      delimiters only when nothing outside them is left, then after a
+--      comma, and last between two factors of a product, the next row
+--      starting with an explicit \times.
 --
 -- A formula is never broken inside braces, a \left...\right pair or an
 -- environment. One the text already sets in rows (an aligned environment)
@@ -305,9 +307,26 @@ local function src(tex, toks, a, b)
 end
 
 -- The break points of each level, loosest binding first: implication
--- arrows, other relations, binary + and - outside parentheses, binary + and
--- - inside them, and after a comma.
-local LEVELS = 5
+-- arrows, other relations, binary + - \cdot \times outside parentheses, the
+-- same inside sized delimiters, after a comma, and last between two factors
+-- of a product (before a function such as \cos or \sum that follows a
+-- closed group), where the row that continues starts with an explicit \times.
+local LEVELS = 6
+local BINARY = { pm = true, mp = true, cdot = true, times = true }
+local FACTOR = { sin = true, cos = true, tan = true, exp = true, log = true, ln = true, sum = true,
+  prod = true }
+
+-- Is a line break before token i one between two factors of a product?
+local function product_cut(toks, nest, i, a)
+  local t = toks[i]
+  if not (nest[1][i] and nest[3][i] == 0 and t.kind == "cmd" and FACTOR[t.text]) then return false end
+  local k = i - 1
+  while k >= a and toks[k].kind == "space" do k = k - 1 end
+  if k < a then return false end
+  local p = toks[k]
+  return p.kind == "close" or (p.kind == "char" and (p.text == ")" or p.text == "]"))
+    or (p.kind == "cmd" and (p.text == "rVert" or p.text == "rvert" or p.text == "rbrace"))
+end
 
 local function cuts(toks, nest, i, a, level)
   local breakable, sizeds, plains = nest[1], nest[2], nest[3]
@@ -335,13 +354,16 @@ local function cuts(toks, nest, i, a, level)
     while c < #toks and not (plains[c] == plains[i] - 1 and (toks[c].text == ")" or toks[c].text == "]")) do c = c + 1 end
     return width_from(toks, o, c) >= LONG_GROUP_EM
   end
-  return ((t.kind == "char" and (t.text == "+" or t.text == "-")) or (t.kind == "cmd" and t.text == "pm"))
+  if level == 6 then return product_cut(toks, nest, i, a) end
+  return ((t.kind == "char" and (t.text == "+" or t.text == "-")) or (t.kind == "cmd" and BINARY[t.text] == true))
     and after_operand(toks, i, a)
 end
 
 -- Lines of token range [a, b]: unbroken when it fits, otherwise broken at
 -- the loosest level that offers a break, each piece broken further as it
 -- needs, and neighbouring pieces joined again while they fit.
+local continuation
+
 local function lines(toks, nest, a, b, level)
   if level > LEVELS or width_from(toks, a, b) <= LIMIT_EM then return { { a, b } } end
   local starts = { a }
@@ -362,6 +384,12 @@ local function lines(toks, nest, a, b, level)
     end
   end
   return out
+end
+
+-- The start of a row that continues an expression: indented under the
+-- right-hand side, and with the \times a product break leaves implicit.
+continuation = function(toks, nest, i, a)
+  return product_cut(toks, nest, i, 1) and "&\\quad \\times " or "&\\quad "
 end
 
 local function first_token(toks, a, b)
@@ -400,7 +428,7 @@ local function break_chain(tex, toks, nest, a, b)
     elseif is_relation(first_token(toks, l[1], l[2])) then
       out[n] = "&" .. src(tex, toks, l[1], l[2])
     else
-      out[n] = "&\\quad " .. src(tex, toks, l[1], l[2])
+      out[n] = continuation(toks, nest, l[1], b) .. src(tex, toks, l[1], l[2])
     end
   end
   return "\\begin{aligned}" .. table.concat(out, " \\\\ ") .. "\\end{aligned}", true
@@ -485,7 +513,8 @@ local function break_aligned(tex)
           out[#out + 1] = head .. src(inner, toks, ls[1][1], ls[1][2])
           for n = 2, #ls do
             local first = first_token(toks, ls[n][1], ls[n][2])
-            out[#out + 1] = (is_relation(first) and "&" or "&\\quad ") .. src(inner, toks, ls[n][1], ls[n][2])
+            out[#out + 1] = (is_relation(first) and "&" or continuation(toks, nest, ls[n][1], a))
+              .. src(inner, toks, ls[n][1], ls[n][2])
           end
         else
           out[#out + 1] = head
