@@ -4,7 +4,7 @@
 // @what  Per-position cross-entropy over U_BINS, with ignore_index (sentinel IGNORE)
 // @how   one thread per output element, serial inner reduction
 // @opt   2
-// @cpu   yes
+// @cpu   native
 // @gpu   yes
 // @npu   no
 // @quant none
