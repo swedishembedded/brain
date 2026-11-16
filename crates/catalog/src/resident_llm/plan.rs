@@ -71,7 +71,7 @@ impl QwenPlan {
     /// The plan a host spec carries, refusing an unknown field and a value no engine is built with.
     pub(super) fn from_spec(args: &serde_json::Value) -> Result<QwenPlan, String> {
         let plan: QwenPlan = serde_json::from_value(args.clone()).map_err(|e| format!("a Qwen3 host spec: {e}"))?;
-        if plan.ctx == 0 || plan.max_batch == 0 || !(1..=512).contains(&plan.max_prefill_cap) {
+        if plan.ctx == 0 || plan.max_batch == 0 || plan.max_prefill_cap == 0 {
             return Err(format!("a Qwen3 host spec sizes no engine (ctx {}, max_batch {}, max_prefill_cap {})", plan.ctx, plan.max_batch, plan.max_prefill_cap));
         }
         if let Some(arch) = &plan.architecture {

@@ -385,8 +385,10 @@ pub struct QwenServeConfig {
     /// default) serves the checkpoint at the floating tier it stores them in, int8 only where that does not fit
     /// the card ([`qwen3_weight_policy`]).
     pub weight_format: Option<model::ops::TierPolicy>,
-    /// `the prefill row cap N`, clamped to `1..=512`, default 512.
-    pub max_prefill_cap: u32,
+    /// Prompt rows one prefill round takes (`max-prefill`). `None` (the default) takes the engine's rule for the
+    /// card ([`qwen3::serve::prefill_round_rows_on_gpu`]), the one `brain perf` measures it with; a value given is
+    /// held under [`qwen3::serve::UNFUSED_PREFILL_ROWS`] where the prefill attention is not fused.
+    pub max_prefill_cap: Option<u32>,
     /// `the KV pool size N`: the KV pool's size in tokens, shared by every
     /// sequence and by the prompt-prefix cache. `None` (the default) sizes it
     /// for `max_batch` half-context histories (never under two contexts). An
@@ -480,7 +482,7 @@ impl QwenServeConfig {
         self.max_batch = l.max_batch.unwrap_or(self.max_batch);
         self.kv_tokens = l.kv_tokens.or(self.kv_tokens);
         self.kv_offload_gb = l.kv_offload_gb.unwrap_or(self.kv_offload_gb);
-        self.max_prefill_cap = l.max_prefill.unwrap_or(self.max_prefill_cap);
+        self.max_prefill_cap = l.max_prefill.or(self.max_prefill_cap);
         let mut notes = Vec::new();
         for (set, name) in [(l.prefix_slots, "prefix-slots"), (l.prefill_slice, "prefill-slice"), (l.prefill_batch, "prefill-batch"), (l.itl_target_ms, "itl-target-ms")] {
             if set.is_some() {
@@ -493,7 +495,7 @@ impl QwenServeConfig {
 
 impl Default for QwenServeConfig {
     fn default() -> QwenServeConfig {
-        QwenServeConfig { weights: None, tokenizer: None, ctx: None, auto_budget_bytes: None, card_budget_bytes: None, max_batch: 16, kv_int8: true, kv_fp8: false, kv_calib_opt_in: false, kv_offload_gb: 0.0, weight_format: None, max_prefill_cap: 512, kv_tokens: None, gemm_precision: gpu_core::provider::library::GemmPrecision::Auto, fuse_residual_norm: true, exact_decode: false, adapter_bank: None, adapter_targets_named: false, refused: None, sparse_attention: None, worker_hosting: None }
+        QwenServeConfig { weights: None, tokenizer: None, ctx: None, auto_budget_bytes: None, card_budget_bytes: None, max_batch: 16, kv_int8: true, kv_fp8: false, kv_calib_opt_in: false, kv_offload_gb: 0.0, weight_format: None, max_prefill_cap: None, kv_tokens: None, gemm_precision: gpu_core::provider::library::GemmPrecision::Auto, fuse_residual_norm: true, exact_decode: false, adapter_bank: None, adapter_targets_named: false, refused: None, sparse_attention: None, worker_hosting: None }
     }
 }
 
@@ -531,6 +533,17 @@ fn pretrained_window(max_position_embeddings: u32) -> u32 {
     1 << (u32::BITS - 1 - max_position_embeddings.max(1).leading_zeros())
 }
 
+/// Rows of one prefill round for `cfg` serving `checkpoint`: the operator's `max-prefill`, else the engine's rule
+/// for the GPUs ([`qwen3::serve::prefill_round_rows_on_gpu`]); held under [`qwen3::serve::UNFUSED_PREFILL_ROWS`]
+/// where the prefill attention is not fused (its score slab grows with the square of the round). Without a readable
+/// checkpoint (its own open reports the error at activation) the unfused bound.
+fn prefill_rows(cfg: &QwenServeConfig, checkpoint: Option<&qwen3::config::QwenConfig>) -> u32 {
+    let Some(checkpoint) = checkpoint else { return cfg.max_prefill_cap.unwrap_or(qwen3::serve::UNFUSED_PREFILL_ROWS).clamp(1, qwen3::serve::UNFUSED_PREFILL_ROWS) };
+    let kv_int8 = cfg.kv_int8 && qwen3::serve::kv_int8_supported(checkpoint);
+    let ceiling = if qwen3::serve::fused_attention_on_gpu(checkpoint, kv_int8).prefill { u32::MAX } else { qwen3::serve::UNFUSED_PREFILL_ROWS };
+    cfg.max_prefill_cap.unwrap_or_else(|| qwen3::serve::prefill_round_rows_on_gpu(checkpoint, kv_int8)).clamp(1, ceiling)
+}
+
 /// Upper bound, in tokens, of the default pool's room for `max_batch`
 /// half-context histories (see [`QwenResident::fleet_pool_tokens`]): 1M
 /// tokens, about 74 GB of int8 KV on the 8B, far beyond any card's budget
@@ -547,7 +560,7 @@ fn fleet_pool_tokens(checkpoint: &qwen3::config::QwenConfig, weight_bytes: u64, 
     // A GPU's budget: the attention scratch as every GPU backend runs it (see `auto_ctx_for_budget`).
     let fused = qwen3::serve::fused_attention_on_gpu(checkpoint, cfg.kv_int8 && qwen3::serve::kv_int8_supported(checkpoint));
     while fleet > ctx.saturating_mul(2) {
-        let profile = PoolProfile::at_ctx(checkpoint, ctx, max_batch, cfg.max_prefill_cap.clamp(1, 512), Some(fleet), cfg.kv_int8, cfg.kv_offload_gb > 0.0, fused);
+        let profile = PoolProfile::at_ctx(checkpoint, ctx, max_batch, prefill_rows(cfg, Some(checkpoint)), Some(fleet), cfg.kv_int8, cfg.kv_offload_gb > 0.0, fused);
         // The pool grows only the KV buffers; the scratch binding does not
         // change with it, so only the KV binding is checked beside the total.
         let kv_binding = qwen3::serve::kv_binding_bytes(checkpoint, 16, fleet.div_ceil(16) + max_batch, cfg.kv_int8);
@@ -852,6 +865,7 @@ impl QwenResident {
         let weights = qwen3_weight_policy(path, cfg.weight_format.as_ref(), cfg.auto_budget_bytes);
         let ctx = Self::resolve_ctx(path, &cfg, &weights);
         let kv_tokens = Self::resolve_kv_tokens(path, &cfg, ctx, &weights);
+        let max_prefill_cap = prefill_rows(&cfg, qwen3::checkpoint_config(path).ok().as_ref());
         let hosting = cfg.worker_hosting.filter(|h| h.hosts(FAMILY));
         let resident = Self::from_plan(QwenPlan {
             id,
@@ -867,7 +881,7 @@ impl QwenResident {
             kv_calib_opt_in: cfg.kv_calib_opt_in,
             kv_offload_bytes: (cfg.kv_offload_gb.max(0.0) * (1u64 << 30) as f64) as u64,
             weights,
-            max_prefill_cap: cfg.max_prefill_cap.clamp(1, 512),
+            max_prefill_cap,
             kv_tokens,
             card_budget_bytes: cfg.card_budget_bytes.or(cfg.auto_budget_bytes),
             gemm_precision: cfg.gemm_precision,
@@ -963,7 +977,7 @@ impl QwenResident {
         let Some(budget) = cfg.auto_budget_bytes else { return HISTORICAL_DEFAULT };
         let Ok(checkpoint_cfg) = qwen3::checkpoint_config(path) else { return HISTORICAL_DEFAULT };
         let weight_bytes = weights_bytes_for(&checkpoint_cfg, weights);
-        auto_ctx_for_budget(weight_bytes, budget, &checkpoint_cfg, cfg.max_batch.max(1), cfg.max_prefill_cap.clamp(1, 512), cfg.kv_tokens, cfg.kv_int8, cfg.kv_offload_gb > 0.0)
+        auto_ctx_for_budget(weight_bytes, budget, &checkpoint_cfg, cfg.max_batch.max(1), prefill_rows(cfg, Some(&checkpoint_cfg)), cfg.kv_tokens, cfg.kv_int8, cfg.kv_offload_gb > 0.0)
     }
 
     /// Give `cfg` a derived [`model::yarn::YarnConfig`] when `ctx` (the KV
@@ -1006,17 +1020,27 @@ impl QwenResident {
         // The paged-attention scores/probs scratch (`Scratch::{scores,probs}`) is a real, often
         // multi-GiB device allocation `activate()` makes alongside the KV pool. The fused-attention
         // answer needs the target device's own `DeviceCaps`, unknown at this pre-placement point, so
-        // `FusedAttention::default()` (nothing fused) is the larger size `paged_attn_scratch_bytes`
-        // can return: a worst-case, never-under bound.
+        // the larger of the two devices `activate()` can land on is charged: a GPU's fused attention at
+        // the planned round, or an unfused device (nothing fused, the round held under
+        // `UNFUSED_PREFILL_ROWS`): a worst-case, never-under bound.
         let cap = max_blocks_per_seq * block_size;
         // The adapter bank is allocated beside the weights at activation, sized by the same settings,
         // over the larger of the decode batch and the prefill chunk.
         let bank_bytes = self.adapters.settings().map_or(0, |bank| bank.device_bytes(cfg, max_batch.max(max_prefill)));
         // Host-RAM KV offload moves blocks through device staging buffers the engine allocates when
         // offload is enabled; they come out of the same budget as the pool.
-        let profile = PoolProfile::new(cfg, block_size, num_blocks, max_batch, max_prefill, cap, kv_int8, qwen3::serve::FusedAttention::default());
-        let profile = if self.plan.kv_offload_bytes > 0 { profile.with_swap_staging(cfg, block_size, num_blocks, kv_int8) } else { profile };
-        profile.demands(self.weight_bytes(cfg), bank_bytes)
+        let demands = |rows: u32, fused: qwen3::serve::FusedAttention| {
+            let profile = PoolProfile::new(cfg, block_size, num_blocks, max_batch, rows, cap, kv_int8, fused);
+            let profile = if self.plan.kv_offload_bytes > 0 { profile.with_swap_staging(cfg, block_size, num_blocks, kv_int8) } else { profile };
+            profile.demands(self.weight_bytes(cfg), bank_bytes)
+        };
+        let unfused = demands(max_prefill.min(qwen3::serve::UNFUSED_PREFILL_ROWS), qwen3::serve::FusedAttention::default());
+        let gpu = demands(max_prefill, qwen3::serve::fused_attention_on_gpu(cfg, kv_int8));
+        if model::memplan::device_total(&gpu) > model::memplan::device_total(&unfused) {
+            gpu
+        } else {
+            unfused
+        }
     }
 
     /// Why this resident's serving plan cannot fit the card share the server gave it, naming the context that would
@@ -1384,6 +1408,8 @@ impl ResidentModel for QwenResident {
             // `Op::PagedAttentionFused` itself checks), so this predicts the
             // real dispatch instead of assuming the never-fused worst case.
             let fused = if device == Device::Cpu { qwen3::serve::FusedAttention::default() } else { qwen3::serve::fused_attention_on_gpu(&checkpoint_cfg, kv_int8) };
+            // A plan made for a GPU's fused prefill attention takes a wider round than an unfused device's score slab holds.
+            let max_prefill = if fused.prefill { max_prefill } else { max_prefill.min(qwen3::serve::UNFUSED_PREFILL_ROWS) };
             QwenResident::check_buffers_fit_one_binding(
                 &checkpoint_cfg,
                 block_size,
@@ -1818,7 +1844,7 @@ mod tests {
         assert!(!cfg.kv_calib_opt_in, "calibration must default OFF");
         assert_eq!(cfg.kv_offload_gb, 0.0);
         assert!(cfg.weight_format.is_none(), "the weight tier defaults to the checkpoint's stored one - see qwen3_weight_policy");
-        assert_eq!(cfg.max_prefill_cap, 512);
+        assert_eq!(cfg.max_prefill_cap, None, "None takes the engine's round rule - see prefill_rows");
     }
 
     /// `ctx` at or under the checkpoint's own trained window is a pure no-op
@@ -1957,13 +1983,28 @@ mod tests {
         assert_eq!(resolve(&few), None, "two contexts already hold two half-contexts");
     }
 
+    /// Unset, a server reads prompts in the engine's own measured round for the GPUs
+    /// (`qwen3::serve::prefill_round_rows_on_gpu`), the one `brain perf` measures the engine with, not a constant.
+    #[test]
+    fn an_unset_prefill_round_takes_the_engines_rule() {
+        let path = write_tiny_checkpoint(5, "round-rule");
+        let path = path.to_str().unwrap();
+        let card = checkpoint::st::ModelCard::new("brain/qwen3", "qwen");
+        let checkpoint = qwen3::checkpoint_config(path).expect("the tiny checkpoint opens");
+        let resident = QwenResident::from_card_configured(path, &card, None, QwenServeConfig { ctx: Some(1 << 16), ..QwenServeConfig::default() });
+        let kv_int8 = qwen3::serve::kv_int8_supported(&checkpoint);
+        assert_eq!(resident.plan.max_prefill_cap, qwen3::serve::prefill_round_rows_on_gpu(&checkpoint, kv_int8));
+        let asked = QwenResident::from_card_configured(path, &card, None, QwenServeConfig { ctx: Some(1 << 16), max_prefill_cap: Some(96), ..QwenServeConfig::default() });
+        assert_eq!(asked.plan.max_prefill_cap, 96, "an operator's round is kept");
+    }
+
     #[test]
     fn max_prefill_cap_is_clamped_at_construction() {
         let card = checkpoint::st::ModelCard::new("brain/qwen3", "qwen");
-        for (requested, expected) in [(128u32, 128u32), (0, 1), (999_999, 512)] {
+        for (requested, expected) in [(Some(128u32), 128u32), (Some(0), 1), (Some(999_999), 512), (None, 512)] {
             let cfg = QwenServeConfig { max_prefill_cap: requested, ..QwenServeConfig::default() };
             let resident = QwenResident::from_card_configured("unused.safetensors", &card, Some("unused.json"), cfg);
-            assert_eq!(resident.plan.max_prefill_cap, expected, "requested {requested}");
+            assert_eq!(resident.plan.max_prefill_cap, expected, "requested {requested:?}");
         }
     }
 
@@ -2434,7 +2475,9 @@ mod tests {
         let path = write_tiny_checkpoint(11, "estimate");
         let cfg = qwen3::config::QwenConfig { vocab: 151936, ..qwen3::config::QwenConfig::tiny() };
         let card = checkpoint::st::ModelCard::new("brain/qwen3", "qwen");
-        let resident = QwenResident::from_card(path.to_str().unwrap(), &card, Some("unused.json"));
+        // A round the unfused score slab holds, so the never-under estimate is the unfused one whatever the card fuses.
+        let serve = QwenServeConfig { max_prefill_cap: Some(qwen3::serve::UNFUSED_PREFILL_ROWS / 2), ..QwenServeConfig::default() };
+        let resident = QwenResident::from_card_configured(path.to_str().unwrap(), &card, Some("unused.json"), serve);
         let key = InstanceKey::new("brain/qwen3", "default");
 
         let (block_size, max_batch, max_blocks_per_seq, num_blocks, max_prefill) = QwenResident::pool_sizing(resident.plan.ctx, resident.plan.max_batch, resident.plan.max_prefill_cap, resident.plan.kv_tokens);

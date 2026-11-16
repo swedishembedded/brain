@@ -867,6 +867,30 @@ pub fn fused_attention_on_gpu(cfg: &QwenConfig, kv_int8: bool) -> FusedAttention
     fused_attention_on(&DeviceCaps::portable_baseline(DeviceClass::DiscreteGpu), cfg, kv_int8)
 }
 
+/// The most prompt rows one prefill round takes where the causal prefill attention is NOT fused: the unfused arm
+/// materialises a `[rows, n_heads, rows]` score slab, which past this many rows overran a wgpu binding at Qwen3's
+/// shapes (see `catalog::resident_llm`'s pool sizing).
+pub const UNFUSED_PREFILL_ROWS: u32 = 512;
+
+/// Rows of one prefill round of this engine: the measured round of [`model::serve::prefill_round_rows_for`] where
+/// the prefill attention is fused (its scratch does not grow with the round), else [`UNFUSED_PREFILL_ROWS`]. A
+/// server and a benchmark of the engine size their rounds by this one rule, so they read prompts in alike.
+pub fn prefill_round_rows(fused: FusedAttention, tensor_cores: bool) -> u32 {
+    if fused.prefill {
+        model::serve::prefill_round_rows_for(tensor_cores)
+    } else {
+        UNFUSED_PREFILL_ROWS
+    }
+}
+
+/// [`prefill_round_rows`] on the GPUs this process may use, for planners that size memory before a device is
+/// chosen ([`fused_attention_on_gpu`]; tensor cores when every selected card offers them).
+pub fn prefill_round_rows_on_gpu(cfg: &QwenConfig, kv_int8: bool) -> u32 {
+    let hw = gpu_core::defaults::Hardware::detected();
+    let cards: Vec<u32> = hw.cards.iter().map(|c| c.index).collect();
+    prefill_round_rows(fused_attention_on_gpu(cfg, kv_int8), gpu_core::provider::cuda::tensor_core_kernels_offered(hw, &cards))
+}
+
 /// Whether `cfg`'s attention shape is one this engine registers the fused decode for ([`DECODE_SHAPES`]).
 fn decode_shape_registered(cfg: &QwenConfig) -> bool {
     cfg.n_kv_heads > 0 && cfg.n_heads.is_multiple_of(cfg.n_kv_heads) && DECODE_SHAPES.contains(&(cfg.head_dim, cfg.n_heads / cfg.n_kv_heads))

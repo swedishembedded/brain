@@ -38,7 +38,7 @@ fn write_checkpoint(path: &std::path::Path, cfg: &QwenConfig, weights: &std::col
 }
 
 fn resident(tokenizer: &str, id: &str, path: &std::path::Path, bank: Option<AdapterBankSettings>) -> Arc<QwenResident> {
-    let config = QwenServeConfig { ctx: Some(1024), kv_int8: false, max_batch: 4, max_prefill_cap: 64, adapter_bank: bank, ..QwenServeConfig::default() };
+    let config = QwenServeConfig { ctx: Some(1024), kv_int8: false, max_batch: 4, max_prefill_cap: Some(64), adapter_bank: bank, ..QwenServeConfig::default() };
     Arc::new(QwenResident::from_card_configured(path.to_str().unwrap(), &ModelCard::new(id, "qwen"), Some(tokenizer), config))
 }
 

@@ -2002,6 +2002,8 @@ fn build_qwen(weights: &str, workload: &str, input_override: Option<usize>, outp
     let (block_size, max_batch, num_blocks, per_seq, max_prefill) = pool_for(workload, input_override, output_override, max_batch)?;
     let (cfg, src) = qwen3::open_checkpoint(weights)?;
     let kv_int8 = resolve_kv_int8(&cfg, kv_fp32, weights);
+    // A prompt is read in rounds of the engine's rule, as `brain serve` reads it.
+    let max_prefill = max_prefill.min(qwen3::serve::prefill_round_rows_on_gpu(&cfg, kv_int8));
     // The tier `brain serve` serves this checkpoint at on the first selected card, unless --weight-format names one.
     let card = crate::perf_longctx::first_gpu_usable_bytes();
     let tiers = catalog::resident_llm::qwen3_weight_policy(weights, weight_format, card);
@@ -2027,6 +2029,7 @@ fn build_qwen(weights: &str, workload: &str, input_override: Option<usize>, outp
         .with("block_size", block_size.into())
         .with("max_batch", max_batch.into())
         .with("kv_blocks", num_blocks.into())
+        .with("max_prefill", max_prefill.into())
         .with("kv_dtype", kv_dtype.into())
         .with("weights_dtype", weights_dtype.into());
     Ok(Box::new(perf::targets::PagedLlmTarget::new(sched, info, Vec::new(), vocab)))
