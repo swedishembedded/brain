@@ -72,6 +72,7 @@ PANDOC = ROOT / "docs" / "pandoc"
 CSS = PANDOC / "epub.css"
 FILTER = PANDOC / "book-epub.lua"
 MATH_LINES = PANDOC / "book-math-lines.lua"
+FIGURES = PANDOC / "book-figures.lua"
 # The accent and ink colours of the PDF (docs/pandoc/book.tex), for the cover.
 ACCENT, INK, MUTED = "#2B6CB0", "#1A202C", "#4A5568"
 # The most memory one pandoc may take; well above the whole book's peak.
@@ -246,7 +247,7 @@ def build(edition: Edition) -> list[str]:
     tmp = output(edition, ".epub.tmp")
     cmd = ["pandoc", "+RTS", f"-M{PANDOC_HEAP}", "-RTS", str(md), "-f", "markdown", "-t", "epub3", "-o", str(tmp),
            "--metadata-file", str(meta_file), "--epub-cover-image", str(image),
-           "--css", str(CSS), "--lua-filter", str(MATH_LINES), "--lua-filter", str(FILTER), "--mathml",
+           "--css", str(CSS), "--lua-filter", str(MATH_LINES), "--lua-filter", str(FIGURES), "--lua-filter", str(FILTER), "--mathml",
            "--toc", "--toc-depth=2", "--split-level=2", "--highlight-style=tango",
            "--resource-path", str(ROOT)]
     r = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)

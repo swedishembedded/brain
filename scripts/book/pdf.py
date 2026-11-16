@@ -219,6 +219,7 @@ def typeset(edition: Edition) -> list[str]:
         extra=("--toc-depth=1", "--top-level-division=chapter", "-V", "documentclass=book",
                "-V", "classoption=openright", "-V", "mainfont=P052", "-V", "mathfont=Latin Modern Math",
                "-H", str(ROOT / "docs" / "pandoc" / "book.tex"), "-H", str(header),
+               "--lua-filter", str(ROOT / "docs" / "pandoc" / "book-figures.lua"),
                "--lua-filter", str(ROOT / "docs" / "pandoc" / "book-tables.lua")))
     log = output(edition, ".pandoc.log").read_text(encoding="utf-8", errors="replace")
     problems = []

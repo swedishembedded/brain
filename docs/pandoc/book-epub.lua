@@ -6,11 +6,10 @@
 --
 -- Figures are numbered within their chapter, "Figure 1", "Figure 2", as the
 -- text cites them; the count restarts at every chapter and every top-level
--- page. A figure's caption is its alt text, unless the paragraph under the
--- image is a caption of the chapter's own ("**Figure 3.** ..."): that
--- paragraph becomes the caption, with its number, and the alt text stays the
--- image's description. The author's portrait (class "portrait") is not a
--- figure the text cites and stays unnumbered.
+-- page (the caption itself is book-figures.lua's, which runs first). A
+-- caption whose own number differs from the count is reported. The author's
+-- portrait (class "portrait") is not a figure the text cites and stays
+-- unnumbered.
 --
 -- A table sits in a block that scrolls sideways, so a table wider than the
 -- reader's screen scrolls instead of running off the page or being shrunk
@@ -47,34 +46,6 @@ end
 -- Headers and figures must be seen in document order, so one top-down
 -- traversal handles both. A table returns `false` as well, so the traversal
 -- does not descend into the block that now holds it and wrap it again.
--- The number of a paragraph that opens with a bold "Figure N.", or nil.
-local function caption_number(block)
-  if not block or block.t ~= "Para" or #block.content == 0 or block.content[1].t ~= "Strong" then
-    return nil
-  end
-  return tonumber(pandoc.utils.stringify(block.content[1]):match("^Figure (%d+)%.$"))
-end
-
--- A figure followed by its own caption paragraph takes that paragraph as
--- its caption; the number goes on the figure as attribute "number".
-local function adopt_captions(blocks)
-  local out = pandoc.Blocks({})
-  local i = 1
-  while i <= #blocks do
-    local b, n = blocks[i], caption_number(blocks[i + 1])
-    if b.t == "Figure" and n then
-      b.caption.long = pandoc.Blocks({ pandoc.Plain(blocks[i + 1].content) })
-      b.attributes.number = tostring(n)
-      out:insert(b)
-      i = i + 2
-    else
-      out:insert(b)
-      i = i + 1
-    end
-  end
-  return out
-end
-
 local counts = { Math = 0, Table = 0, Image = 0 }
 local function count(el) counts[el.t] = counts[el.t] + 1 end
 
@@ -94,7 +65,6 @@ return {
         counts.Math, counts.Table, counts.Image))
     end,
   },
-  { Blocks = adopt_captions },
   {
     traverse = "topdown",
     Header = function(h)
@@ -110,7 +80,6 @@ return {
         end
         figure = tonumber(fig.attributes.number)
         fig.attributes.number = nil
-        return fig
       end
       local label = pandoc.Strong({ pandoc.Str("Figure"), pandoc.Space(), pandoc.Str(figure .. ".") })
       local caption = fig.caption.long

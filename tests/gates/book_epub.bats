@@ -26,11 +26,12 @@ setup() {
     >"$WORK/dot.svg"
 }
 
-# Build $WORK/book.md into $WORK/book.epub with the book's filter; the
-# filter's report goes to $WORK/stderr.
+# Build $WORK/book.md into $WORK/book.epub with the book's filters, in the
+# order scripts/book/epub.py runs them; their report goes to $WORK/stderr.
 build() {
   (cd "$WORK" && pandoc book.md -f markdown -t epub3 --mathml --split-level=2 \
-    --metadata title=Test --lua-filter "$REPO/docs/pandoc/book-epub.lua" \
+    --metadata title=Test --lua-filter "$REPO/docs/pandoc/book-math-lines.lua" \
+    --lua-filter "$REPO/docs/pandoc/book-figures.lua" --lua-filter "$REPO/docs/pandoc/book-epub.lua" \
     -o book.epub 2>stderr)
 }
 

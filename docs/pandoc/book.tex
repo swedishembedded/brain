@@ -127,6 +127,11 @@
 
 % -- Figures and tables ------------------------------------------------------
 \setkeys{Gin}{width=0.92\linewidth,height=0.42\textheight,keepaspectratio}
+% Figures are numbered within their chapter as the text cites them,
+% "Figure 3", not "Figure 6.3" (the book class still restarts the count at
+% every chapter); docs/pandoc/book-figures.lua makes a chapter's own
+% "**Figure 3.**" paragraph the caption, so the label is set once.
+\renewcommand{\thefigure}{\arabic{figure}}
 \usepackage[font={small},labelfont={bf,color=accent},labelsep=period,
             justification=centering]{caption}
 \renewcommand{\arraystretch}{1.15}
