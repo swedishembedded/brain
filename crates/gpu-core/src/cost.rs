@@ -879,6 +879,12 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             let (d, s) = (p(0)?, p(1)?);
             f(0, 8 * s * d + 4 * s)
         }
+        // embed_i8: params [d_model, seq_len]; per output one int8 code and one multiply by its group's f32 scale
+        // (one scale per 32 columns), an f32 written, plus the token ids.
+        "embed_i8" => {
+            let (d, s) = (p(0)?, p(1)?);
+            f(s * d, s * d + s * d / 8 + 4 * s * d + 4 * s)
+        }
         // params [n_rows, d_model, vocab]: per (v,c) scans tokens; adds fire
         // once per looked-up row plus the final accumulate.
         "emb_bwd" => {

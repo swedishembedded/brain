@@ -307,6 +307,8 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
     LIST.get_or_init(|| {
         let mut v = STATIC_PIPELINES.to_vec();
         v.push(("matmul_gemv", kernels::MATMUL_GEMV));
+        // `Ops::embed` gathers an int8 table's rows with `embed_i8`, so every `Ops` caller's handle carries it.
+        v.push(("embed_i8", kernels::EMBED_I8));
         // Device AdamW over bf16 or blockwise-int8 moments (`optim::Optim` resolves them by name).
         v.extend(optim::MOMENT_KERNELS);
         // The quantized-execution contract (`model::ops::tiled`): the resident FP8 full fine-tune multiplies,
