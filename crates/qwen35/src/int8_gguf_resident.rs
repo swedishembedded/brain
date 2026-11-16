@@ -893,6 +893,76 @@ impl KvLayout {
     }
 }
 
+/// Snapshot rows a host chunk holds: 8 rows of the 27B are 1.3 GB of host memory, allocated in one go off the serving
+/// thread.
+const HOST_SNAPSHOT_CHUNK_ROWS: u32 = 8;
+
+/// One chunk of host snapshot rows, `[layer]`: the state and window rows of a recurrent layer, `None` elsewhere.
+type SnapshotChunk = Vec<Option<(DeviceBuffer, DeviceBuffer)>>;
+
+/// The prefix-cache snapshot rows in host memory, backed a chunk of [`HOST_SNAPSHOT_CHUNK_ROWS`] rows at a time as the
+/// cache fills instead of all of them at load (64 rows of the 27B were 10 GB of host memory held from the start). A
+/// host allocation of that size is slow (page-locked, every page is mapped and pinned), so a chunk is allocated on a
+/// helper thread one ahead of need ([`Self::advance`]) and the serving thread never waits for one: until it lands the
+/// cache simply has fewer rows.
+struct HostSnapshots {
+    policy: gpu_core::AllocPolicy,
+    max_rows: u32,
+    state_words: u64,
+    hist_words: u64,
+    recurrent: Vec<bool>,
+    chunks: std::sync::Mutex<Vec<SnapshotChunk>>,
+    next: std::sync::Mutex<Option<std::thread::JoinHandle<Result<SnapshotChunk, String>>>>,
+}
+
+impl HostSnapshots {
+    /// The first chunk, allocated now: a cache that starts with no rows is a disabled one.
+    fn new(gpu: &Gpu, max_rows: u32, state_words: u64, hist_words: u64, recurrent: Vec<bool>) -> Result<HostSnapshots, String> {
+        // Page-locked where the device can register host memory: a snapshot is a copy from the state pool, and a copy
+        // into pageable memory holds the serving thread until it is done (16 ms a prompt at 8K x 16, the GPU idle).
+        let policy = if gpu.placement_facts().supports(gpu_core::AllocPolicy::Pinned) { gpu_core::AllocPolicy::Pinned } else { gpu_core::AllocPolicy::System };
+        let first = Self::alloc_chunk(gpu, policy, HOST_SNAPSHOT_CHUNK_ROWS.min(max_rows), state_words, hist_words, &recurrent)?;
+        Ok(HostSnapshots { policy, max_rows, state_words, hist_words, recurrent, chunks: std::sync::Mutex::new(vec![first]), next: std::sync::Mutex::new(None) })
+    }
+
+    fn alloc_chunk(gpu: &Gpu, policy: gpu_core::AllocPolicy, rows: u32, state_words: u64, hist_words: u64, recurrent: &[bool]) -> Result<SnapshotChunk, String> {
+        let host = |label: &str, words: u64| gpu.try_alloc_placed(label, words * 4, policy).map_err(|e| format!("{MODEL}: the prefix-cache snapshots in host memory: {e}"));
+        recurrent
+            .iter()
+            .map(|&lin| lin.then(|| Ok((host("qwen35.gdn_snapshot_state", rows as u64 * state_words)?, host("qwen35.gdn_snapshot_hist", rows as u64 * hist_words)?))).transpose())
+            .collect()
+    }
+
+    /// Rows backed now. Takes a chunk the helper finished, and with `ahead` (the cache is close to using every row it
+    /// has) starts the next one if none is on its way. A helper that failed to allocate leaves the cache at the rows it
+    /// has, which is reported once.
+    fn advance(&self, gpu: &Gpu, ahead: bool) -> u32 {
+        let mut chunks = self.chunks.lock().unwrap_or_else(|e| e.into_inner());
+        let mut next = self.next.lock().unwrap_or_else(|e| e.into_inner());
+        if next.as_ref().is_some_and(|h| h.is_finished()) {
+            match next.take().expect("checked above").join() {
+                Ok(Ok(chunk)) => chunks.push(chunk),
+                Ok(Err(e)) => eprintln!("{MODEL}: the prefix cache stays at {} rows: {e}", chunks.len() as u32 * HOST_SNAPSHOT_CHUNK_ROWS),
+                Err(_) => eprintln!("{MODEL}: the prefix cache's snapshot allocation panicked; it stays at its rows"),
+            }
+        }
+        let backed = (chunks.len() as u32 * HOST_SNAPSHOT_CHUNK_ROWS).min(self.max_rows);
+        if ahead && next.is_none() && backed < self.max_rows {
+            let (g, policy, rows, sw, hw, rec) = (gpu.share(), self.policy, HOST_SNAPSHOT_CHUNK_ROWS.min(self.max_rows - backed), self.state_words, self.hist_words, self.recurrent.clone());
+            *next = Some(std::thread::spawn(move || Self::alloc_chunk(&g, policy, rows, sw, hw, &rec)));
+        }
+        backed
+    }
+
+    /// Layer `l`'s state and window buffers holding snapshot row `row`, and the row's index in them.
+    fn row(&self, l: usize, row: u32) -> (DeviceBuffer, DeviceBuffer, u32) {
+        let chunks = self.chunks.lock().unwrap_or_else(|e| e.into_inner());
+        let chunk = chunks.get((row / HOST_SNAPSHOT_CHUNK_ROWS) as usize).unwrap_or_else(|| panic!("{MODEL}: snapshot row {row} is past the rows backed"));
+        let (state, hist) = chunk[l].as_ref().unwrap_or_else(|| panic!("{MODEL}: snapshot row of layer {l}, which is not recurrent"));
+        (state.clone(), hist.clone(), row % HOST_SNAPSHOT_CHUNK_ROWS)
+    }
+}
+
 /// One STAGE's decode state for up to `slots` concurrent sequences, indexed by
 /// ABSOLUTE layer index with a size-1 dummy everywhere the stage/layer-type
 /// does not apply - `crate::model::DecodeCaches`' own documented convention,
@@ -935,12 +1005,14 @@ struct ShardCaches {
     work_hist: Vec<DeviceBuffer>,
     /// `[layer]`: `[snapshot_rows, state_len]` / `[snapshot_rows, hist_len]`
     /// snapshots of the working copy taken at the end of a prefill, for prefix
-    /// reuse (dummy at non-owned / GQA layers).
+    /// reuse (dummy at non-owned / GQA layers). On the card only; host rows are
+    /// `host_snaps`.
     snap_state: Vec<DeviceBuffer>,
     snap_hist: Vec<DeviceBuffer>,
-    /// The snapshot rows are host memory ([`ServingShape::snapshots_on_host`]): they are written and read by the copy
-    /// engine (the chip-to-chip link's bandwidth), not by a kernel's stores (several times slower into pageable memory).
-    snapshots_on_host: bool,
+    /// The snapshot rows in host memory ([`ServingShape::snapshots_on_host`]), backed a chunk at a time as the cache
+    /// fills: written and read by the copy engine (the chip-to-chip link's bandwidth), not by a kernel's stores
+    /// (several times slower into pageable memory).
+    host_snaps: Option<HostSnapshots>,
     /// `[layer]`: whether this stage owns the layer and it is a Gated-DeltaNet one.
     recurrent: Vec<bool>,
     /// `[layer]`: whether this stage owns the layer and it is a full-attention one.
@@ -1026,13 +1098,9 @@ impl ShardCaches {
             pool_hist.push(gpu.storage(ph));
             work_state.push(gpu.storage(ws));
             work_hist.push(gpu.storage(wh));
-            if snapshots_on_host && lin && snapshot_rows > 0 {
-                // Page-locked where the device can register host memory: a snapshot is a copy from the state pool, and a copy
-                // into pageable memory holds the serving thread until it is done (16 ms a prompt at 8K x 16, the GPU idle).
-                let policy = if gpu.placement_facts().supports(gpu_core::AllocPolicy::Pinned) { gpu_core::AllocPolicy::Pinned } else { gpu_core::AllocPolicy::System };
-                let host = |label: &str, words: u64| gpu.try_alloc_placed(label, words * 4, policy).map_err(|e| format!("{MODEL}: the prefix-cache snapshots in host memory: {e}"));
-                snap_state.push(host("qwen35.gdn_snapshot_state", ss)?);
-                snap_hist.push(host("qwen35.gdn_snapshot_hist", sh)?);
+            if snapshots_on_host {
+                snap_state.push(gpu.storage(1));
+                snap_hist.push(gpu.storage(1));
             } else {
                 snap_state.push(gpu.storage(ss));
                 snap_hist.push(gpu.storage(sh));
@@ -1060,7 +1128,10 @@ impl ShardCaches {
             }
         };
         let (zero_state, zero_hist) = (gpu.storage(state), gpu.storage(hist));
-        let caches = ShardCaches { gqa_kv, pool_state, pool_hist, work_state, work_hist, snap_state, snap_hist, snapshots_on_host, recurrent, full: full_layers, slots, cap, block_rows, paged, slot_tables, slot_rope: vec![None; slots as usize], verify_snaps: Vec::new(), pool_bf16, sparse, scatter, gather, pool_scatter, pool_gather, copy_within, zero_state, zero_hist };
+        let host_snaps = (snapshots_on_host && snapshot_rows > 0 && recurrent.iter().any(|&r| r))
+            .then(|| HostSnapshots::new(gpu, snapshot_rows, cfg.gdn_state_len(), cfg.gdn_hist_len(), recurrent.clone()))
+            .transpose()?;
+        let caches = ShardCaches { gqa_kv, pool_state, pool_hist, work_state, work_hist, snap_state, snap_hist, host_snaps, recurrent, full: full_layers, slots, cap, block_rows, paged, slot_tables, slot_rope: vec![None; slots as usize], verify_snaps: Vec::new(), pool_bf16, sparse, scatter, gather, pool_scatter, pool_gather, copy_within, zero_state, zero_hist };
         gpu.submit(&[&caches.zero_state, &caches.zero_hist], &[]);
         caches.reset(gpu);
         Ok(caches)
@@ -1138,12 +1209,16 @@ impl ShardCaches {
     /// owned recurrent layer) - the state a later prompt that starts with this
     /// one resumes from.
     fn snapshot_work(&self, gpu: &Gpu, cfg: &Qwen35Config, row: u32) {
-        if self.snapshots_on_host {
+        if !self.recurrent.iter().any(|&r| r) {
+            return; // a stage with no recurrent layer keeps no snapshot rows
+        }
+        if let Some(host) = &self.host_snaps {
             // The work copy is one row: each layer's state and window are one contiguous copy into row `row`.
             let (sl, hl) = (cfg.gdn_state_len() * 4, cfg.gdn_hist_len() * 4);
             for l in (0..self.snap_state.len()).filter(|&l| self.recurrent[l]) {
-                gpu.copy_to(&self.work_state[l], 0, gpu, &self.snap_state[l], row as u64 * sl, sl);
-                gpu.copy_to(&self.work_hist[l], 0, gpu, &self.snap_hist[l], row as u64 * hl, hl);
+                let (state, hist, at) = host.row(l, row);
+                gpu.copy_to(&self.work_state[l], 0, gpu, &state, at as u64 * sl, sl);
+                gpu.copy_to(&self.work_hist[l], 0, gpu, &hist, at as u64 * hl, hl);
             }
             // No wait: the copies are ordered before the kernels that overwrite the work rows, and nothing on the host
             // reads a snapshot (waiting here left a visible gap in an 8K prompt's prefill).
@@ -1163,11 +1238,15 @@ impl ShardCaches {
     /// Make snapshot row `row` the working GDN state (one row gather per owned
     /// recurrent layer).
     fn restore_work(&self, gpu: &Gpu, cfg: &Qwen35Config, row: u32) {
-        if self.snapshots_on_host {
+        if !self.recurrent.iter().any(|&r| r) {
+            return; // a stage with no recurrent layer keeps no snapshot rows
+        }
+        if let Some(host) = &self.host_snaps {
             let (sl, hl) = (cfg.gdn_state_len() * 4, cfg.gdn_hist_len() * 4);
             for l in (0..self.snap_state.len()).filter(|&l| self.recurrent[l]) {
-                gpu.copy_to(&self.snap_state[l], row as u64 * sl, gpu, &self.work_state[l], 0, sl);
-                gpu.copy_to(&self.snap_hist[l], row as u64 * hl, gpu, &self.work_hist[l], 0, hl);
+                let (state, hist, at) = host.row(l, row);
+                gpu.copy_to(&state, at as u64 * sl, gpu, &self.work_state[l], 0, sl);
+                gpu.copy_to(&hist, at as u64 * hl, gpu, &self.work_hist[l], 0, hl);
             }
             // No wait: the kernels that read the work rows are ordered after the copies.
             return;
@@ -2688,6 +2767,12 @@ impl Qwen35GgufInstance {
 
     /// Snapshot the working GDN state (the state after the prefill that just
     /// ran) into snapshot row `row`.
+    /// Snapshot rows backed now on every stage (all of `prefix_slots` where they live on the card), starting the next
+    /// host chunk with `ahead`; see `HostSnapshots::advance`.
+    fn snapshot_rows_backed(&self, ahead: bool) -> u32 {
+        self.shards.iter().map(|s| s.caches.host_snaps.as_ref().map_or(self.prefix_slots, |h| h.advance(&s.qwen35.gpu, ahead))).min().unwrap_or(self.prefix_slots)
+    }
+
     fn snapshot_prefill_state(&self, row: u32) {
         for s in &self.shards {
             s.caches.snapshot_work(&s.qwen35.gpu, &self.cfg, row);

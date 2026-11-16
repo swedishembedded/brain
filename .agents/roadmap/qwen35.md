@@ -3075,3 +3075,19 @@ two-card INT8 27B, against the same instance's own 6.70 tok/s plain decode:
 Never write an intermediate full-precision whole-model file (~108 GB) - quantized
 device buffers must be built directly from the compressed FP8 checkpoint, same
 constraint as qwen35moe.
+
+## Device and host memory (2026-11-16)
+
+Qwen3.8-27B FP8 (HF), GH200 gpu3, base/new interleaved. The engine's live tally by kind (`Gpu::live_tally`) after
+build, `perf run serve --concurrency 16 --input 8192`: device 31445 MiB, system (host) 4788 MiB, sparse 42240 MiB.
+
+| step | measured |
+|---|---|
+| the model instance's single-sequence decode state made on first use | longctx 32K batch 1 device used 33.5 -> 33.3 GiB; plan 29.2 GiB and 13 admitted unchanged |
+| prefix-cache snapshot rows in host memory backed 8 rows at a time as the cache fills (`HostSnapshots`) | host held after build 4788 -> 1197 MiB; serve c=16 x 8K req/s 1.16 / 1.17 -> 1.16 / 1.16, TTFT p95 11.2 / 11.1 -> 11.2 / 11.2 s |
+
+- [ ] Device used at batch 1 (33.3 GiB) is 4.1 GiB over the plan (29.2): the CUDA context, the library workspaces and
+      what the plan does not count (`work_state`, the decode tapes' scratch, held freed blocks) - not yet broken down.
+- [ ] The speculative verify scratch (16 rows x 48 layers, 2.5 GB) is allocated and charged whenever MTP loads,
+      although the scheduler verifies only at 2 sequences or fewer; the decode, verify and MTP draft tape caches each
+      own a scratch set.

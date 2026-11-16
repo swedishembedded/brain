@@ -143,6 +143,8 @@ impl<P> Entry<P> {
 pub struct SnapshotPrefixCache<P> {
     entries: Vec<Entry<P>>,
     free_rows: Vec<u32>,
+    /// Rows `0..rows` exist (free, held by an entry or by a prefill in flight).
+    rows: u32,
     tick: u64,
     hit_tokens: u64,
     lookup_tokens: u64,
@@ -151,7 +153,29 @@ pub struct SnapshotPrefixCache<P> {
 impl<P> SnapshotPrefixCache<P> {
     /// A cache over `snapshot_rows` snapshot rows (0 disables it).
     pub fn new(snapshot_rows: u32) -> SnapshotPrefixCache<P> {
-        SnapshotPrefixCache { entries: Vec::new(), free_rows: (0..snapshot_rows).rev().collect(), tick: 0, hit_tokens: 0, lookup_tokens: 0 }
+        SnapshotPrefixCache { entries: Vec::new(), free_rows: (0..snapshot_rows).rev().collect(), rows: snapshot_rows, tick: 0, hit_tokens: 0, lookup_tokens: 0 }
+    }
+
+    /// Rows the cache draws from: `0..rows()`.
+    pub fn rows(&self) -> u32 {
+        self.rows
+    }
+
+    /// Rows no entry or prefill holds.
+    pub fn free_row_count(&self) -> usize {
+        self.free_rows.len()
+    }
+
+    /// Grow the cache to `rows` rows (a store that backs its rows as it fills them hands the new ones over); the new
+    /// rows are taken lowest first, after the free ones already there. Never shrinks.
+    pub fn grow_to(&mut self, rows: u32) {
+        if rows <= self.rows {
+            return;
+        }
+        let mut grown: Vec<u32> = (self.rows..rows).rev().collect();
+        grown.append(&mut self.free_rows);
+        self.free_rows = grown;
+        self.rows = rows;
     }
 
     pub fn enabled(&self) -> bool {
@@ -377,6 +401,26 @@ mod tests {
         assert!(row.is_some() && evicted.is_some());
         assert_eq!(c.peek(BASE_KV_NAMESPACE, &[1, 2, 3, 4, 9]).map(|i| c.entry(i).tokens.len()), Some(4), "the conversation's own entry went, not the branch");
         assert_eq!(c.insert(entry(&[1, 2, 3, 4], row.unwrap()).branch()).len(), 1, "the same branch point filed twice is kept once");
+    }
+
+    /// A cache whose rows are backed as it fills grows without disturbing what it holds: the rows it already had are
+    /// handed out first, the new ones lowest first after them, and it evicts only once every grown row is in use.
+    #[test]
+    fn a_grown_cache_hands_out_its_new_rows_before_evicting() {
+        let mut c = SnapshotPrefixCache::<u32>::new(2);
+        let r0 = c.take_row(BASE_KV_NAMESPACE, &[]).0.unwrap();
+        c.insert(entry(&[1], r0));
+        c.grow_to(4);
+        c.grow_to(3);
+        assert_eq!((c.rows(), c.free_row_count()), (4, 3), "growth never shrinks");
+        let rows: Vec<u32> = (0..3).map(|i| {
+            let r = c.take_row(BASE_KV_NAMESPACE, &[]).0.unwrap();
+            c.insert(entry(&[10 + i], r));
+            r
+        }).collect();
+        assert_eq!(rows, vec![1, 2, 3], "the old free row, then the grown ones lowest first");
+        let (row, evicted) = c.take_row(BASE_KV_NAMESPACE, &[]);
+        assert_eq!((row, evicted.is_some()), (Some(r0), true), "with every row held, the least recently used entry goes");
     }
 
     /// A conversation that grows replaces its own earlier entry, freeing the

@@ -95,6 +95,10 @@ struct Resume {
 }
 
 type PrefixCache = SnapshotPrefixCache<Resume>;
+
+/// Free snapshot rows at or below which the next host chunk is started (`HostSnapshots::advance`): half a chunk, so it
+/// is usually there before the rows run out.
+const SNAPSHOT_ROWS_AHEAD: usize = 4;
 use super::background::{PrefillDone, PrefillTask, TaskStart};
 use super::mtp::{FeedStart, FeedStep, PromptFeed};
 use super::pace::PrefillPace;
@@ -376,7 +380,7 @@ impl Qwen35GgufEngine {
             let keep_free = inst.cap.div_ceil(alloc.block_size()) + ledger.sequence_blocks();
             ledger.warm(&mut alloc, (0..inst.max_batch).rev(), keep_free).unwrap_or_else(|e| panic!("{MODEL}: the state rows cannot be backed at load: {e}"));
         }
-        let cache = PrefixCache::new(inst.prefix_slots);
+        let cache = PrefixCache::new(inst.snapshot_rows_backed(false));
         let mixed = inst.mixed_available();
         let background_on = !mixed && inst.background_prefill_available();
         if background_on {
@@ -1005,6 +1009,10 @@ impl Qwen35GgufEngine {
     /// `tokens`' rows. `state_in_pool`: the state is in the slot's pool row and not in the working copy.
     #[allow(clippy::too_many_arguments)]
     fn file_prefix(&mut self, slot: u32, table: &BlockTable, tokens: &[u32], content: &Arc<ContentKey>, hidden: &[f32], state_in_pool: bool, branch: bool) {
+        // Host snapshot rows are backed as the cache fills: take what has landed, and ask for the next chunk while a
+        // few rows are still free so it is there before they run out.
+        let ahead = self.cache.free_row_count() <= SNAPSHOT_ROWS_AHEAD;
+        self.cache.grow_to(self.inst.snapshot_rows_backed(ahead));
         let (row, evicted) = self.cache.take_row(table.kv_namespace(), Prompt::new(tokens, content));
         self.release_retired(evicted);
         let Some(row) = row else { return };
