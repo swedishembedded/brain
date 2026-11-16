@@ -262,6 +262,7 @@ fn headless(a: &Args) -> Result<(), String> {
         power_preference: wgpu::PowerPreference::HighPerformance,
         force_fallback_adapter: false,
         compatible_surface: None,
+        apply_limit_buckets: false,
     }))
     .map_err(|e| format!("no GPU adapter: {e}"))?;
     let timestamps = adapter.features() & wgpu::Features::TIMESTAMP_QUERY;

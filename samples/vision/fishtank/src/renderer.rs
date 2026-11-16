@@ -112,7 +112,7 @@ impl GpuTimer {
     fn take(&self) -> Option<[f64; 2]> {
         match self.state.load(Ordering::Acquire) {
             MAPPED => {
-                let ts: Vec<u64> = self.read.slice(..).get_mapped_range().as_chunks::<8>().0.iter().map(|b| u64::from_le_bytes(*b)).collect();
+                let ts: Vec<u64> = self.read.slice(..).get_mapped_range().expect("the timestamp buffer just mapped").as_chunks::<8>().0.iter().map(|b| u64::from_le_bytes(*b)).collect();
                 self.read.unmap();
                 self.state.store(IDLE, Ordering::Release);
                 let ms = |a: u64, b: u64| b.saturating_sub(a) as f64 * self.period_ns / 1e6;
@@ -471,7 +471,7 @@ impl Renderer {
         self.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).map_err(|e| format!("waiting for the GPU: {e}"))?;
         rx.recv().map_err(|e| format!("readback callback dropped: {e}"))?.map_err(|e| format!("mapping the readback buffer: {e}"))?;
         let bgra = matches!(self.output_format, wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb);
-        let data = slice.get_mapped_range();
+        let data = slice.get_mapped_range().map_err(|e| format!("reading the readback buffer: {e}"))?;
         let mut rgb = Vec::with_capacity((3 * w * h) as usize);
         for y in 0..h as usize {
             for p in data[y * row as usize..y * row as usize + 4 * w as usize].as_chunks::<4>().0 {

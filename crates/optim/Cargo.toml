@@ -25,6 +25,6 @@ wgpu.workspace = true
 pollster.workspace = true
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-wgpu = { version = "29", default-features = false, features = ["webgpu", "wgsl"] }
+wgpu = { version = "30", default-features = false, features = ["webgpu", "wgsl"] }
 [dev-dependencies]
 brain-testutil.workspace = true

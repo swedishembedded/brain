@@ -25,7 +25,7 @@ brain-qwen3vl.workspace = true
 brain-audio.workspace = true
 serde_json.workspace = true
 bytemuck.workspace = true
-wgpu = "29"
+wgpu.workspace = true
 pollster.workspace = true
 
 [dev-dependencies]

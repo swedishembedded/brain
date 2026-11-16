@@ -122,6 +122,7 @@ impl App {
             power_preference: wgpu::PowerPreference::HighPerformance,
             force_fallback_adapter: false,
             compatible_surface: Some(&surface),
+            apply_limit_buckets: false,
         }))
         .map_err(|e| format!("no GPU adapter can present to this window: {e}"))?;
         // timestamps, where the GPU takes them, let the scene's resolution follow its cost
@@ -228,7 +229,7 @@ impl App {
         let target = tex.texture.create_view(&wgpu::TextureViewDescriptor::default());
         g.renderer.render(&target, &v);
         g.window.pre_present_notify();
-        tex.present();
+        g.renderer.queue.present(tex);
         self.presented += 1;
         Ok(())
     }

@@ -401,10 +401,10 @@ brain-wgsl-cuda = { path = "crates/wgsl-cuda" }
 # entries ([target.'cfg(target_arch = "wasm32")'.dependencies]) stay explicit
 # in their crates: they need `default-features = false`, which a member cannot
 # apply on top of a defaulted workspace entry.
-# The published 29 carries a Vulkan staging-memory defect that costs this
+# The published 29 and 30 carry a Vulkan staging-memory defect that costs this
 # project real VRAM on every upload; the fix and how to consume it are in the
 # `[patch]` note at the very bottom of this file.
-wgpu = "29"
+wgpu = "30"
 pollster = "1"
 # Image codecs, default-features off; each consumer adds exactly the codec
 # features it needs (`features = [...]` on top of a workspace dep is additive).
@@ -479,7 +479,7 @@ ash = { version = "0.38" }
 # green - so nothing in the build path may reference a CUDA symbol. See
 # `crates/backend-cuda`.
 libloading = "0.9"
-naga = { version = "29", features = ["wgsl-in", "spv-out"] }
+naga = { version = "30", features = ["wgsl-in", "spv-out"] }
 # ONNX export (pure-Rust serializer); only `prost` runtime is needed at build.
 prost = "0.14"
 # Intel NPU runtime (OpenVINO). Default dependency of brain-npu on x86_64
@@ -641,8 +641,9 @@ debug = "line-tables-only"
 # Dependency overrides
 # ---------------------------------------------------------------------------
 #
-# wgpu 29 as published carries a Vulkan defect that costs this project real
-# VRAM. `wgpu-hal`'s `create_buffer` asks `gpu-allocator` for
+# wgpu 29 and 30 as published carry a Vulkan defect that costs this project
+# real VRAM (30.0.2's `wgpu-hal` still asks for `CpuToGpu` for every
+# `MAP_WRITE` buffer). `wgpu-hal`'s `create_buffer` asks `gpu-allocator` for
 # `MemoryLocation::CpuToGpu` for every `MAP_WRITE` buffer, whose preferred
 # memory-property bits include `DEVICE_LOCAL`. On a card whose driver exposes a
 # host-visible memory type drawn from the whole VRAM heap - NVIDIA does, over
@@ -666,9 +667,11 @@ debug = "line-tables-only"
 # alone, 4.84 GB/s with the reuse. Half the VRAM and roughly four times the
 # upload throughput, so this is no longer a trade to be weighed per workload.
 #
-# The fix lives on a fork branch cut from the v29.0.4 tag - the exact version
-# resolved by the pin above - so consuming it needs no API migration in
-# `crates/backend-wgpu`.
+# The fix lives on a fork branch cut from the v29.0.4 tag, one major behind
+# the pin above: a `paths` override or `[patch]` only substitutes a version the
+# requirement accepts, so the fork is consumed again once its two commits are
+# rebased onto the v30 tag the pin resolves (`crates/backend-wgpu` needs no
+# further migration for it).
 
 # [patch.crates-io]
 # wgpu = { git = "https://github.com/swedishembedded/wgpu", branch = "main" }

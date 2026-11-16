@@ -929,6 +929,14 @@ line compiles. This pass was explicitly asked to hold off on pushing, so the
 entry stays commented with the note next to it rewritten to say so. Push the
 branch, uncomment the one line, done; nothing else needs to change.
 
+**2026-11-16: the pin moved to wgpu 30, so the fork is one major behind.**
+30.0.2's `wgpu-hal` still asks for `CpuToGpu` for every `MAP_WRITE` buffer
+(`vulkan/device.rs`, `create_buffer`), so the defect is upstream on 30 too. A
+`paths` override or `[patch]` only substitutes a version the `wgpu = "30"`
+requirement accepts, so the v29 branch is no longer picked up: open work is
+to rebase its two commits onto the v30 tag, re-run `vram_overhead.rs` and
+`upload_flush.rs` on a P40, and push it before uncommenting the entry.
+
 Everything above was measured through `.cargo/config.toml`'s `paths` override
 (gitignored, machine-local, template in `.cargo/config.toml.example`) pointed
 at the local wgpu fork checkout ([path/to/wgpu]). **That override was left in

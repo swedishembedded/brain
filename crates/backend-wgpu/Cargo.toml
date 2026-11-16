@@ -30,7 +30,7 @@ ash.workspace = true
 
 # Browser GPU stack: wgpu's WebGPU backend only, plus async-readback glue.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-wgpu = { version = "29", default-features = false, features = ["webgpu", "wgsl"] }
+wgpu = { version = "30", default-features = false, features = ["webgpu", "wgsl"] }
 futures-channel = "0.3"
 web-sys = { version = "0.3", features = ["console"] }
 

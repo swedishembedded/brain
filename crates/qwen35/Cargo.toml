@@ -33,7 +33,7 @@ serde_json.workspace = true
 bytemuck.workspace = true
 # The streamed trainer reads which card its Gpu is on, to refuse a footprint before loading.
 brain-memauth.workspace = true
-wgpu = "29"
+wgpu.workspace = true
 pollster.workspace = true
 
 [dev-dependencies]

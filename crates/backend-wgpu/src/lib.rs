@@ -289,6 +289,9 @@ pub fn adapter_available() -> bool {
         power_preference: wgpu::PowerPreference::HighPerformance,
         compatible_surface: None,
         force_fallback_adapter: false,
+        // Limit bucketing hides an adapter's real limits from untrusted web
+        // content; a compute engine sizes its dispatches by them.
+        apply_limit_buckets: false,
     }))
     .is_ok()
 }
@@ -1541,6 +1544,7 @@ impl WgpuBackend {
                 power_preference: wgpu::PowerPreference::HighPerformance,
                 compatible_surface: None,
                 force_fallback_adapter: false,
+                apply_limit_buckets: false,
             })
             .await
             .expect("no suitable GPU adapter found");
@@ -2340,7 +2344,7 @@ impl WgpuBackend {
             // re-mapping is needed.
             {
                 let slice = b.staging.slice(..);
-                let view = slice.get_mapped_range();
+                let view = slice.get_mapped_range().expect("timestamp readback: the staging buffer just mapped");
                 // COPIED out, not cast in place. A mapped pointer's alignment
                 // is an allocator artifact, not a guarantee: it is the
                 // suballocation's offset inside a shared `vkDeviceMemory`
@@ -2460,7 +2464,7 @@ impl WgpuBackend {
             // Widen the DESTINATION rather than cast the mapped bytes - a
             // mapped pointer's alignment is an allocator artifact, see
             // `resolve_ticks`.
-            let view = slice.get_mapped_range();
+            let view = slice.get_mapped_range().expect("profile readback: the staging buffer just mapped");
             let ticks = copy_pod_from_bytes::<u64>(&view);
             drop(view);
             staging.unmap();
@@ -2857,7 +2861,7 @@ impl WgpuBackend {
         // Copied into an `&mut [f32]` viewed as bytes rather than cast from
         // `&[u8]`: see `resolve_ticks` for why a mapped pointer's alignment
         // cannot be assumed. Same bytes, same cost, no alignment precondition.
-        let out = copy_pod_from_bytes::<f32>(&slice.get_mapped_range());
+        let out = copy_pod_from_bytes::<f32>(&slice.get_mapped_range().expect("buffer read: the staging buffer just mapped"));
         staging.unmap();
         self.retain_read_staging(staging);
         out
@@ -2883,7 +2887,7 @@ impl WgpuBackend {
         rx.await.expect("map_async channel dropped").expect("buffer map failed");
         // See `read` / `resolve_ticks`: the destination is widened rather
         // than the mapped bytes cast, so no alignment is assumed.
-        let view = slice.get_mapped_range();
+        let view = slice.get_mapped_range().expect("buffer read: the staging buffer just mapped");
         let n_out = view.len() / 4;
         let mut out = vec![0f32; n_out];
         bytemuck::cast_slice_mut::<f32, u8>(&mut out).copy_from_slice(&view[..n_out * 4]);
