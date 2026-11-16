@@ -67,6 +67,11 @@ GGUF on the first `--device` card, through that model's own serving engine
 (context 8192, 16 resident sequences; int8 weights unless `--weight-format`
 names another tier, and an f32 KV cache unless the suffix names one).
 
+`ouro:<checkpoint>` measures a looped decoder (an HF Ouro directory or a brain checkpoint, a from-scratch model
+included) through the shared scheduler, sized as `brain serve` sizes it: one sequence holds at most the model's
+positions, and the KV pool and the decode batch are planned from the first `--device` card's usable bytes (the
+batch at least `--max-batch`). Every running sequence decodes in one batched step.
+
 `--smoke` shrinks a run to a few seconds, useful for a quick sanity check
 rather than a real measurement.
 

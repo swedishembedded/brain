@@ -67,6 +67,9 @@ OPTIONS
                           qwen35moe:<gguf>[:kvf32|:kvbf16|:kvint8]
                                                    the Qwen3.6-35B-A3B GGUF,
                                                    built as `brain serve` builds it
+                          ouro:<checkpoint>        a looped decoder (HF dir or brain
+                                                   checkpoint), KV pool and batch
+                                                   planned as `brain serve` plans them
                           lfm:<weights>:<tok.json> the LFM2.5 encoder behind the
                                                    residency executor (unit: sequence)
                           flux2[:<W>x<H>x<steps>[:<precision>]]
@@ -724,8 +727,11 @@ fn build_target(spec: &str, workload: &str, input_override: Option<usize>, outpu
     if let Some(weights) = spec.strip_prefix("qwen:") {
         return build_qwen(weights, workload, input_override, output_override, weight_format, max_batch);
     }
+    if let Some(path) = spec.strip_prefix("ouro:") {
+        return crate::perf_ouro::build(path, max_batch);
+    }
     if max_batch.is_some() {
-        return Err("--max-batch sizes the served engine of a qwen:, qwen35: or qwen35moe: target; this target takes no batch setting".to_string());
+        return Err("--max-batch sizes the served engine of a qwen:, qwen35:, qwen35moe: or ouro: target; this target takes no batch setting".to_string());
     }
     if let Some(shape) = spec.strip_prefix("qwen-synth:") {
         return build_qwen_synth(shape, workload, input_override, output_override, weight_format);
@@ -820,7 +826,7 @@ fn build_target(spec: &str, workload: &str, input_override: Option<usize>, outpu
     Err(format!(
         "unknown --target {spec:?} \
          (expected 'qwen-synth:<L>x<D>x<H>[xV][:kvf32]', 'qwen:<weights>[:kvf32]', \
-         'qwen35:<gguf>[:kvf32|:kvbf16|:kvint8]', 'qwen35moe:<gguf>[:kvf32|:kvbf16|:kvint8]', 'http:qwen-synth:<L>x<D>x<H>[xV]:<tokenizer.json>', 'http:qwen:<weights>:<tokenizer.json>', \
+         'qwen35:<gguf>[:kvf32|:kvbf16|:kvint8]', 'qwen35moe:<gguf>[:kvf32|:kvbf16|:kvint8]', 'ouro:<checkpoint>', 'http:qwen-synth:<L>x<D>x<H>[xV]:<tokenizer.json>', 'http:qwen:<weights>:<tokenizer.json>', \
          'lfm:<weights>:<tokenizer.json>', 'kronos:<tokenizer-dir>:<decoder-dir>', \
          'chronos2:<weights>', 'fincast:<weights>', 'timesfm3:<weights>', 'flux2[:<W>x<H>x<steps>[:<precision>]]', \
          'wan[:<frames>x<W>x<H>x<steps>]', 'ltxv[:<frames>x<W>x<H>x<steps>]', \
