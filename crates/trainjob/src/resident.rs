@@ -331,9 +331,18 @@ impl Instance for TrainInstance {
             timeline::ACTION => &mut || timeline::run(env, inv, progress),
             other => return Err(format!("{} has no action '{other}'", request::MODEL)),
         };
+        let trains = matches!(action, request::ACTION | consolidate::FULL_ACTION | pretrain::ACTION);
+        let allow_cpu = inv.params.get("allow_cpu").and_then(serde_json::Value::as_bool).unwrap_or(false);
         // The trainer reports a device failure (an allocation the card cannot hold) as a panic. One run's failure is
         // that run's error, not the server's.
-        let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| residency::on_device(self.device, work)));
+        let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            residency::on_device(self.device, || {
+                if trains {
+                    cpu_admission(action, allow_cpu, residency::build_target())?;
+                }
+                work()
+            })
+        }));
         match run {
             Ok(placed) => placed?,
             Err(panic) => {
@@ -345,6 +354,26 @@ impl Instance for TrainInstance {
     }
 }
 
+/// Whether a training run may build where `target` says it would: a device always; the CPU backend when the server
+/// was started on it (said aloud, since the run is slow) or, as a fallback (no card, none with room), only when the
+/// request allows it. A training run never lands on the CPU silently.
+fn cpu_admission(action: &str, allow_cpu: bool, target: residency::BuildTarget) -> Result<(), String> {
+    match target {
+        residency::BuildTarget::Device(_) => Ok(()),
+        residency::BuildTarget::CpuAsked => {
+            eprintln!("brain train: {action} runs on the CPU backend, as the server was started (a card trains orders of magnitude faster)");
+            Ok(())
+        }
+        residency::BuildTarget::CpuFallback(why) if allow_cpu => {
+            eprintln!("brain train: {action} runs on the CPU backend ({why}), as the request allows (allow_cpu)");
+            Ok(())
+        }
+        residency::BuildTarget::CpuFallback(why) => Err(format!(
+            "{action}: the run would execute on the CPU backend ({why}), orders of magnitude slower than on a card, so it is refused; retry when a card has room, or pass allow_cpu: true to train on the CPU"
+        )),
+    }
+}
+
 /// The service for `config`, as the executor registers it.
 pub fn resident(config: TrainConfig) -> Arc<dyn ResidentModel> {
     Arc::new(TrainResident::new(config))
@@ -353,6 +382,18 @@ pub fn resident(config: TrainConfig) -> Arc<dyn ResidentModel> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A training run builds on a card, on a CPU the server was started on, or on a fallback CPU only when the
+    /// request allows it; the refusal says why and how to opt in.
+    #[test]
+    fn a_training_run_lands_on_a_fallback_cpu_only_when_the_request_allows_it() {
+        use residency::BuildTarget;
+        assert!(cpu_admission("pretrain", false, BuildTarget::Device("cuda")).is_ok());
+        assert!(cpu_admission("pretrain", false, BuildTarget::CpuAsked).is_ok());
+        let e = cpu_admission("pretrain", false, BuildTarget::CpuFallback("no card has room for it right now")).unwrap_err();
+        assert!(e.contains("CPU backend") && e.contains("no card has room") && e.contains("allow_cpu"), "{e}");
+        assert!(cpu_admission("pretrain", true, BuildTarget::CpuFallback("no card has room for it right now")).is_ok());
+    }
 
     #[derive(Debug)]
     struct Free(u64);

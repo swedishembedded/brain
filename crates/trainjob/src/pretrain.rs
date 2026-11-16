@@ -18,7 +18,7 @@ use capability::{ActionResult, ActionSpec, Blob, BlobSpec, Invocation, Media, Pa
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::consolidate::{check_install_name, check_resume, checkpoint_every_param, checkpoint_outcome_of, open_run, resume_key_param};
+use crate::consolidate::{allow_cpu_param, check_install_name, check_resume, checkpoint_every_param, checkpoint_outcome_of, open_run, resume_key_param};
 use crate::job::{self, trainer_failure, utf8, JobEnv, Workdir};
 use crate::request::{check_attached, DataRefs};
 
@@ -55,6 +55,7 @@ pub fn spec() -> ActionSpec {
         .param(ParamSpec::new("install_as", ParamType::Str, "also install the checkpoint in the server's model store as `local/<this name>` (letters, digits, `.`, `_`, `-`; it must not exist yet)"))
         .param(resume_key_param())
         .param(checkpoint_every_param())
+        .param(allow_cpu_param())
         .input(BlobSpec::new("dataset", Media::Bytes, "the training corpus (JSONL)"))
         .input(BlobSpec::new("held_out", Media::Bytes, "the held-out corpus (JSONL)"))
         .output(BlobSpec::new("report", Media::Text, "the report (JSON) when the server has no artifact store to publish a checkpoint to"))
@@ -84,6 +85,7 @@ pub struct Params {
     pub install_as: Option<String>,
     pub resume_key: Option<String>,
     pub checkpoint_every: Option<u32>,
+    pub allow_cpu: bool,
 }
 
 /// A request that passed the spec and every check that needs no file and no device.

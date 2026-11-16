@@ -84,6 +84,7 @@ pub fn action_spec() -> ActionSpec {
         .param(optional_f("beta", "dpo: the temperature of the preference loss (default 0.1)", 0.0, 100.0))
         .param(optional_f("nll_weight", "dpo: the weight of the supervised likelihood of the chosen answer added to the loss (default 0)", 0.0, 1000.0))
         .param(ParamSpec::new("keep_reasoning", ParamType::Bool, "dpo: train on the reasoning of each candidate (the template drops a closed think block from an assistant turn otherwise)"))
+        .param(crate::consolidate::allow_cpu_param())
         .input(blob("dataset", "the training records (`generic-messages-v2` JSONL; `generic-preference-v1` pairs for dpo)"))
         .input(blob("held_out", "records scored before and after, never trained on (preference pairs for dpo)"))
         .input(blob("held_out_text", "the writer's own text, scored before and after beside the held-out records"))
@@ -295,6 +296,7 @@ pub struct Params {
     pub beta: Option<f32>,
     pub nll_weight: Option<f32>,
     pub keep_reasoning: Option<bool>,
+    pub allow_cpu: bool,
 }
 
 /// A request that passed the spec and every check that needs no file and no device.

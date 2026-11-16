@@ -286,6 +286,12 @@ and gives them back:
   holds is refused at once, with what it needs.
 - When a run ends, by completion, failure or cancel, it gives its card back at
   once, and its files are removed.
+- A `train`, `full_train` or `pretrain` run never lands on the CPU backend
+  silently. On a server started on the CPU (`--device cpu`, `--backend cpu`) it
+  trains there and says so in the server log. Where the CPU would only be the
+  fallback (the server sees no card, or the placer finds none with room), the
+  run is refused with the reason unless the request sets `allow_cpu: true`: a
+  card trains orders of magnitude faster.
 
 ## Refitting while sampling (asynchronous rollouts)
 

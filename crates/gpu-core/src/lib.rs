@@ -784,7 +784,7 @@ mod native_facade {
     /// does not name its own shares.
     const DEFAULT_ARENA: &str = "";
 
-    use super::{DeviceBuffer, Step};
+    use super::{BuildTarget, DeviceBuffer, Step};
     use backend_api::{BufUsage, StepMeta};
     use std::sync::atomic::{AtomicU8, Ordering};
     use std::sync::{Arc, Mutex};
@@ -931,6 +931,43 @@ mod native_facade {
     /// ran* (the perf suite's result fingerprint) don't have to re-derive it.
     pub fn backend_name() -> &'static str {
         resolve_backend_name()
+    }
+
+    /// Where a [`Gpu::new`] on this thread would build, and whether a CPU build was asked for: what a caller that
+    /// must not run on the CPU by accident (a training run) checks before it builds anything.
+    pub fn build_target() -> BuildTarget {
+        if crate::devices::software_adapter_selected() {
+            return BuildTarget::Device("wgpu");
+        }
+        let name = resolve_backend_name();
+        let degraded = degrades_to_host_tier(name);
+        let name = if degraded { "cpu" } else { name };
+        classify_build(name, scoped_backend() == Some(Backend::Cpu), crate::devices::ambient_compute_set(), crate::devices::on_host_tier() || degraded)
+    }
+
+    /// Whether a [`Gpu::new`] that resolved `name` builds on the CPU backend instead: no preference was expressed
+    /// and the installed placement policy says no card can hold anything right now.
+    fn degrades_to_host_tier(name: &str) -> bool {
+        name != "cpu" && crate::devices::current_gpu().is_none() && crate::devices::auto_host_tier()
+    }
+
+    /// [`build_target`] over its inputs: the backend `name` a build resolves to, whether this thread's
+    /// [`with_backend`] scope asked for the CPU, the process's compute `set`, and whether the placer moved the work
+    /// to the host tier. The CPU was asked for when a scope said so, when the set names it explicitly (`--device
+    /// cpu`, `BRAIN_DEVICE=cpu`), or when a CPU backend drives a set that has cards (`--backend cpu`); otherwise a
+    /// CPU build is a fallback, and the reason says which.
+    pub(crate) fn classify_build(name: &'static str, scoped_cpu: bool, set: &crate::devices::ComputeSet, host_tier: bool) -> BuildTarget {
+        if name != "cpu" {
+            return BuildTarget::Device(name);
+        }
+        if scoped_cpu || (set.backend == crate::devices::Backend::Cpu && (set.explicit || set.gpu_enabled())) {
+            return BuildTarget::CpuAsked;
+        }
+        if host_tier {
+            BuildTarget::CpuFallback("no card has room for it right now")
+        } else {
+            BuildTarget::CpuFallback("the process may use no GPU")
+        }
     }
 
     /// How many distinct physical discrete GPUs this machine has. `0` on a
@@ -1406,7 +1443,7 @@ mod native_facade {
             // physical card, use the backend's own default" - i.e. a GPU
             // anyway. Announced once: automatic degradation must never be
             // silent, since the whole run is about to be much slower.
-            if name != "cpu" && crate::devices::current_gpu().is_none() && crate::devices::auto_host_tier() {
+            if degrades_to_host_tier(name) {
                 static ONCE: std::sync::Once = std::sync::Once::new();
                 ONCE.call_once(|| {
                     eprintln!("brain: no GPU has room right now; building on the CPU backend (slower, and it will return to the GPU once VRAM frees)");
@@ -3418,8 +3455,19 @@ mod native_facade {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+/// Where [`Gpu::new`] would build: see [`build_target`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BuildTarget {
+    /// A device backend (`"cuda"`, `"vulkan"`, `"wgpu"`).
+    Device(&'static str),
+    /// The CPU backend, because the thread or the process asked for it.
+    CpuAsked,
+    /// The CPU backend, because nothing else can take the work; the reason, for a refusal or a warning.
+    CpuFallback(&'static str),
+}
+
 pub use native_facade::{
-    adapter_info, backend_name, backend_selected, device_caps, discrete_gpu_count,
+    adapter_info, backend_name, backend_selected, build_target, device_caps, discrete_gpu_count,
     available_gpu_backends, selected_backend, set_default_backend, visible_gpu_count, with_backend, wgpu_visible_gpus, Backend, Gpu, PassScope, ScratchMark,
     ScratchScope, TapeRecording, WeakGpu,
 };

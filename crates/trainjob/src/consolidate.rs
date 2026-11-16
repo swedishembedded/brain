@@ -55,6 +55,11 @@ pub(crate) fn resume_key_param() -> ParamSpec {
     ParamSpec::new("resume_key", ParamType::Str, "make the job resumable under this key (1 to 128 letters, digits, `.`, `_`, `-`): submitted again after the job or the server died it continues from its last saved training state, and once completed it answers with its recorded result without recomputing; needs an artifact store")
 }
 
+/// `allow_cpu`: a training run may execute on the CPU backend when the server would put it there.
+pub(crate) fn allow_cpu_param() -> ParamSpec {
+    ParamSpec::new("allow_cpu", ParamType::Bool, "train on the CPU backend when that is where the run would execute (no card on the server, or none with room): off, such a run is refused, since a card trains orders of magnitude faster; a server started on the CPU (`--device cpu`) trains there regardless").default(json!(false))
+}
+
 /// `checkpoint_every`: how often a resumable run saves its training state.
 pub(crate) fn checkpoint_every_param() -> ParamSpec {
     ParamSpec::new("checkpoint_every", ParamType::Int, "with resume_key: save the exact training state every this many steps (default 25), so a job that dies loses at most this many").min(1.0).max(capability::bounds::TRAIN_COUNT).step(1.0)
@@ -105,6 +110,7 @@ pub fn full_spec() -> ActionSpec {
         .param(install_param())
         .param(resume_key_param())
         .param(checkpoint_every_param())
+        .param(allow_cpu_param())
         .input(blob("dataset", "the training records (`generic-messages-v2` JSONL)"));
     for name in crate::request::REPLAY_BLOBS {
         spec = spec.input(blob(name, "a replay dataset"));
@@ -143,6 +149,7 @@ pub struct FullParams {
     pub install_as: Option<String>,
     pub resume_key: Option<String>,
     pub checkpoint_every: Option<u32>,
+    pub allow_cpu: bool,
 }
 
 /// A `full_train` request that passed the spec and every check that needs no file and no device.

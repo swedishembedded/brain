@@ -1755,6 +1755,24 @@ mod tests {
         assert_eq!(set.backend, Backend::Cpu);
     }
 
+    /// A CPU build is asked for only by name (`--device cpu`, `--backend cpu` over cards, a thread's scope); a CPU
+    /// build the hardware or the placer chose is a fallback with its reason, and a device build is neither.
+    #[test]
+    fn a_cpu_build_is_asked_for_by_name_and_anything_else_is_a_fallback() {
+        use crate::native_facade::classify_build;
+        use crate::BuildTarget;
+        let gpuless = resolve("", inv(0, 8, 0)).unwrap();
+        assert!(matches!(classify_build("cpu", false, &gpuless, false), BuildTarget::CpuFallback(why) if why.contains("no GPU")));
+        assert_eq!(classify_build("cpu", true, &gpuless, false), BuildTarget::CpuAsked, "a thread's with_backend(Cpu) asks");
+        assert_eq!(classify_build("cpu", false, &resolve("cpu", inv(2, 48, 1)).unwrap(), true), BuildTarget::CpuAsked, "--device cpu asks");
+        let mut cpu_over_cards = resolve("gpu", inv(2, 48, 1)).unwrap();
+        cpu_over_cards.set_backend(Backend::Cpu).unwrap();
+        assert_eq!(classify_build("cpu", false, &cpu_over_cards, false), BuildTarget::CpuAsked, "--backend cpu asks");
+        let cards = resolve("", inv(2, 48, 1)).unwrap();
+        assert!(matches!(classify_build("cpu", false, &cards, true), BuildTarget::CpuFallback(why) if why.contains("room")), "the placer's host tier is a fallback");
+        assert_eq!(classify_build("cuda", false, &cards, false), BuildTarget::Device("cuda"));
+    }
+
     #[test]
     fn gpu_means_all_gpus_and_nothing_else() {
         let set = resolve("gpu", inv(2, 48, 1)).unwrap();
