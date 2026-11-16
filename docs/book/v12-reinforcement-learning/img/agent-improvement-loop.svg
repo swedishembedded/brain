@@ -1,4 +1,4 @@
-<!-- source-sha256: 5bc3f519ea9c2a254a4a65bdd7fba5ed2b71f4854426dfb53cebd76d5f9f35b1 -->
+<!-- source-sha256: 71d90450eec88f5d8b8bcb99588c92c12adce2ea5eb70d1bfc6775a77bd9a6d4 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 907 356" width="907" height="356"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="907" height="356" fill="#ffffff"/>
 <rect x="24" y="24" width="143" height="92" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
 <text x="95.5" y="58.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">task generator:</text>

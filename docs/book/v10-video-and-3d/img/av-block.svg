@@ -1,4 +1,4 @@
-<!-- source-sha256: 3e94fbad14643b2a0ef7326755dcc7dd19d06579c4a94d5021a86c097e2b34d9 -->
+<!-- source-sha256: 3f7bd475e006efe1d87c0d5102d68ace9d8d1fbe8053a7e0f6effc9a1d6ce771 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 278" width="860" height="278"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="860" height="278" fill="#ffffff"/>
 <rect x="20" y="16" width="820" height="250" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
 <text x="34" y="38" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">One block: video tokens above, audio tokens below, both streams in every step</text>

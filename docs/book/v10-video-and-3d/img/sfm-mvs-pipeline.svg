@@ -1,4 +1,4 @@
-<!-- source-sha256: 3b1511419952cae6fc38e0f547da819a6a5c269aa669da170e1b31d86af36833 -->
+<!-- source-sha256: be3dca697ccc84da15eab55572bc6c023b222c5dd3bf9bc274e837fbe9dce147 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 922 336" width="922" height="336"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="922" height="336" fill="#ffffff"/>
 <rect x="20" y="12" width="882" height="130" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
 <text x="34" y="34" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">crates/sfm</text>

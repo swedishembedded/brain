@@ -1,4 +1,4 @@
-<!-- source-sha256: bec9de3ab942009dd46f0689420e8d83859145c8e69e888b6d5877a8bc2939ca -->
+<!-- source-sha256: e324d0dd9871974128253600c06c08e578ba7e144b5e3e13b85e97e7fe5f03c1 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1167 302" width="1167" height="302"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="1167" height="302" fill="#ffffff"/>
 <rect x="20" y="23" width="115" height="66" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
 <text x="77.5" y="44.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">candidate</text>

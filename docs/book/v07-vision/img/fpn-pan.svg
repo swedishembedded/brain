@@ -1,4 +1,4 @@
-<!-- source-sha256: 5f1bbc92cfd75487d1fb8f2c71ff7a1364402dd693158e3fac735d130bc5f985 -->
+<!-- source-sha256: a68d226fa77dd313b76b657460786994b3e8c46c3f62cfc3dc0b729c52d01ad0 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 450" width="760" height="450"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="760" height="450" fill="#ffffff"/>
 <text x="76" y="38.9" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="bold" fill="#1a202c" text-anchor="middle">backbone</text>
 <text x="282" y="38.9" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="bold" fill="#1a202c" text-anchor="middle">merged maps</text>

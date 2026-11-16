@@ -1,4 +1,4 @@
-<!-- source-sha256: d78b3300d3e2a8aee4610c9fcb243b180570a86923afb1dff8e515699afc359a -->
+<!-- source-sha256: 9bff04fa57c9fe91660313f4d82a51092c346039143346867a5a424f0cf1ba89 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 360" width="820" height="360"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="820" height="360" fill="#ffffff"/>
 <rect x="22" y="88" width="176" height="84" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
 <text x="110" y="118.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">registered protocol</text>

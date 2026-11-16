@@ -1,4 +1,4 @@
-<!-- source-sha256: ee7f60a9318668443fa687e9965effc66d82a1424e8aa9b9a367ca75e440331f -->
+<!-- source-sha256: 7c8dc5ce1f9781ccf31af5774c247a214412b35a403d9640b1b1c06c26aa3595 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 347 526" width="347" height="526"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="347" height="526" fill="#ffffff"/>
 <ellipse cx="91.68" cy="47" rx="67.68" ry="23" fill="#fefcbf" stroke="#4a5568" stroke-width="1.2"/>
 <text x="91.68" y="43.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">world point</text>

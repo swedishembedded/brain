@@ -1,4 +1,4 @@
-<!-- source-sha256: 3eb5dc97aae41d2849324bae8032e9896d642d32c33d9c4969d5b5c560e50773 -->
+<!-- source-sha256: 0dfa92c0f7ecbb49f40441ce311113e873fe6d2173b70684bdd91dc1661dce3f -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 521 262" width="521" height="262"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="521" height="262" fill="#ffffff"/>
 <rect x="24" y="86" width="140" height="90" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
 <text x="94" y="119.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">agent</text>

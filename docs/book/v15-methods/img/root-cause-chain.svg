@@ -1,4 +1,4 @@
-<!-- source-sha256: dbb30bc89d520fef8872f86cdcf1d8f44981614adc5607eed653f31a3c885794 -->
+<!-- source-sha256: 72c21ef2a945665aa5cbe5d34751bb410e3c7718bcefd3e674271cbda3fa15cf -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 400" width="1000" height="400"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker><marker id="head-4a5568" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/></marker><marker id="head-c53030" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#c53030"/></marker></defs><rect width="1000" height="400" fill="#ffffff"/>
 <rect x="20" y="35" width="210" height="70" rx="10" fill="#ebf4ff" stroke="#4a5568" stroke-width="1.2"/>
 <text x="125" y="58.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">symptom</text>

@@ -1,4 +1,4 @@
-<!-- source-sha256: 4fd73ee00a4d7fa4c2879c565ed80bd231d6d46fccc156b6de452f31d737356d -->
+<!-- source-sha256: 7c193a1ceed9cfc5efaec3c34aedf323dbb9551a5db57a8b55c823a43a9e9fde -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 893 252" width="893" height="252"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker><marker id="head-c53030" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#c53030"/></marker></defs><rect width="893" height="252" fill="#ffffff"/>
 <rect x="24" y="24" width="116" height="74" rx="10" fill="#ffffff" stroke="#4a5568" stroke-width="1.2"/>
 <text x="82" y="57.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="middle">Gaussians</text>

@@ -1,4 +1,4 @@
-<!-- source-sha256: 3ec35b1ec404808bcc35beb4c9e8503fafdc91cf2edd9a1407c2d92681198ce9 -->
+<!-- source-sha256: 997229594f74c6170362796a8217dc7818778dd8b967387a6013c795e2eeae49 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 268" width="780" height="268"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="780" height="268" fill="#ffffff"/>
 <rect x="20" y="16" width="740" height="240" rx="6" fill="#fbfcfe" stroke="#a0aec0" stroke-width="1"/>
 <text x="34" y="38" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a202c">The chain of a numerical test and where a wrong program gets through</text>

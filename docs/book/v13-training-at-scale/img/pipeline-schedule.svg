@@ -1,4 +1,4 @@
-<!-- source-sha256: 227f9df06840897be6dcb92bcbe27065baeab659edb9267bdace0a518a11bb6d -->
+<!-- source-sha256: 8ca330402ce22c8bc1472f9c9c07b80dce02e6dc2c61511880b71561afe1c3ef -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 840 364" width="840" height="364"><defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1a202c"/></marker></defs><rect width="840" height="364" fill="#ffffff"/>
 <text x="420" y="28.9" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="bold" fill="#1a202c" text-anchor="middle">Pipeline of 4 stages, 4 micro-batches: the step lasts 25 units</text>
 <text x="96" y="97.55" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#1a202c" text-anchor="end">stage 0</text>
