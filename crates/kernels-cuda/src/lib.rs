@@ -1467,6 +1467,24 @@ pub const ALL: &[CudaKernel] = &[
         src: include_str!("../cu/paged_flash_decode_gqa_combine.cu"),
     },
     CudaKernel {
+        name: "paged_flash_decode_gqa_combine_bf16",
+        op: Op::PagedAttentionFused,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_paged_flash_decode_gqa_combine_bf16",
+        what: "paged_flash_decode_gqa_combine with the context written only as the packed bf16 operand of the output projection's tensor-core product: replaces the merge plus a cast_f32_bf16 launch",
+        reported: "native:paged_flash_decode_gqa_combine_bf16",
+        block_dim: 64,
+        // One block per 64 channels of a (sequence, head).
+        tile: (1, 1),
+        // Split weights (at most 4096) + 2 warp partials + the max and the sum.
+        shared_bytes: 4 * (4096 + 2 + 2),
+        programmatic: true,
+        src: include_str!("../cu/paged_flash_decode_gqa_combine.cu"),
+    },
+    CudaKernel {
         name: "kv_append_i8_clipped",
         // Redirected to by name from the WGSL `paged_kv_append_i8_clipped_batched` (`gpu_core::native_upgrade`).
         op: Op::Elementwise,

@@ -282,7 +282,10 @@ ones a server instantiated on first use anyway.
   `a_bf16_library_engine_holds_no_fused_product_scratch`). The 32 decode tapes `prepare_decode` records and freezes
   hold ~2 MiB of driver memory each (driver free before and after each freeze, 0-6 MiB in 2 MiB steps), ~64 MiB for
   all: kept as is.
-- [ ] A decode step spends ~0.9 ms of its ~13 ms (c=64) in glue launches of a few microseconds each (two norms, the
+- The decode merge writes the output projection's bf16 operand itself (`paged_flash_decode_gqa_combine_bf16`, gate
+  `flash_combine_bf16_native`): interleaved A/B traces at c=16 (base, new, base, new): decode glue 784 / 834 -> 738 /
+  768 us a step, the context cast 62 -> 3 us a step, serving window 10.29 / 11.02 -> 9.76 / 9.99 s.
+- [ ] A decode step spends ~0.8 ms of its ~13 ms (c=64) in glue launches of a few microseconds each (two norms, the
       QK norm, the append, the attention-output cast and the SwiGLU per layer): the residual add into the down and o
       products' epilogue, or the cast into the attention merge, are the next launches to remove.
 - [ ] Prefill chunks still upload a per-row copy of the block table (17 MB at 8K rows); the attention kernels could

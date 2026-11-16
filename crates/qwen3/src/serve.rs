@@ -901,6 +901,9 @@ struct Scratch {
     /// only bf16 library products read it ([`Engine::parts_take_bf16`]).
     xn1_bf16: DeviceBuffer,
     xn2_bf16: DeviceBuffer,
+    /// The attention context as the packed bf16 operand of the output projection, written by the decode merge
+    /// directly when only that product reads it.
+    ctx_bf16: DeviceBuffer,
     /// M4.1: the fused gate/up GEMM's raw `[b, 2*ff]` output, before
     /// `concat_split` narrows it into `gate_pre`/`up` below.
     gateup_pre: FusedOut,
@@ -1460,6 +1463,7 @@ impl Engine {
             xn2: st(b * d),
             xn1_bf16: st((b * d).div_ceil(2)),
             xn2_bf16: st((b * d).div_ceil(2)),
+            ctx_bf16: st((b * hq).div_ceil(2)),
             gateup_pre: FusedOut::new(b * 2 * ff),
             gate_pre: st(b * ff),
             up: st(b * ff),
@@ -3105,6 +3109,8 @@ impl Engine {
         // Whether layer `l`'s fused QKV / gate-up products run as library parts that can read their activation as the
         // bf16 operand the norm before them writes (adapter corrections and a bias address the fused output instead).
         let qkv_parts = |l: usize| !lora && self.qkv_bias.get(l).is_none() && self.parts_take_bf16(&self.lin_weights[&format!("blocks.{l}.{WQKV}")], &[hq, hkv, hkv], b, exact);
+        // Whether layer `l`'s output projection runs on the bf16 library path, so a decode merge may write its operand.
+        let wo_bf16 = |l: usize| !lora && !causal_chunk && self.parts_take_bf16(&self.lin_weights[&format!("blocks.{l}.attn.wo.weight")], &[d], b, exact);
         let gateup_parts = |l: usize| !lora && self.parts_take_bf16(&self.lin_weights[&format!("blocks.{l}.{WGATEUP}")], &[ff, ff], b, exact);
         // The arena hands a layer's blocks to the next while the device may still be reading them: a backend that runs
         // submissions in order has the reuse behind the read by construction, any other drains between layers.
@@ -3119,6 +3125,8 @@ impl Engine {
             let _scope = per_layer.then(|| g.scratch_scope_in(PREFILL_LAYER_ARENA));
             let _pass = per_layer.then(|| g.pass_scope());
             let p = |name: &str| format!("blocks.{l}.{name}");
+            // The decode merge wrote the context only as `sc.ctx_bf16` (the output projection's operand).
+            let mut ctx_bf16 = false;
             // M4.3: RMSNorm fused with its own activation quant on an
             // all-int8-weight engine (`Self::rms_quant`) - `sc.xn1`'s fp32
             // value has no reader once `Self::linear`'s `I8` arm ignores it,
@@ -3220,7 +3228,9 @@ impl Engine {
                         // exact-decode regime every row splits its keys as a single sequence's are split.
                         let shape = decode_shape(c, b, bs, mbt, exact.is_some());
                         let scales = Some((&self.scales_k[l], &self.scales_v[l]));
-                        s.extend(flash.dispatch(g, &sc.q, &self.pool_k[l], &self.pool_v[l], scales, &sc.bt_buf, &sc.seqlen_buf, &sc.part, &sc.ctx, shape));
+                        let merged = wo_bf16(l).then(|| flash.dispatch_into(g, &sc.q, &self.pool_k[l], &self.pool_v[l], scales, &sc.bt_buf, &sc.seqlen_buf, &sc.part, model::kv_tier::DecodeContext::Bf16(&sc.ctx_bf16), shape)).flatten();
+                        ctx_bf16 = merged.is_some();
+                        s.extend(merged.unwrap_or_else(|| flash.dispatch(g, &sc.q, &self.pool_k[l], &self.pool_v[l], scales, &sc.bt_buf, &sc.seqlen_buf, &sc.part, &sc.ctx, shape)));
                     } else if let Some(step) = (!causal_chunk && exact.is_none() && !self.gemm.is_reference_pinned() && self.kv_fp8.is_none())
                         .then(|| block::native_paged_decode_batched(g, true, &[&sc.q, &self.pool_k[l], &self.pool_v[l], &self.scales_k[l], &self.scales_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.ctx], &[b, nh, nkv, hd, group, bs, mbt]))
                         .flatten()
@@ -3268,7 +3278,9 @@ impl Engine {
                     } else if let (false, Some(flash)) = (causal_chunk, &self.flash) {
                         // The fused GQA decode attention, as the packed tiers run it (see there).
                         let shape = decode_shape(c, b, bs, mbt, exact.is_some());
-                        s.extend(flash.dispatch(g, &sc.q, &self.pool_k[l], &self.pool_v[l], None, &sc.bt_buf, &sc.seqlen_buf, &sc.part, &sc.ctx, shape));
+                        let merged = wo_bf16(l).then(|| flash.dispatch_into(g, &sc.q, &self.pool_k[l], &self.pool_v[l], None, &sc.bt_buf, &sc.seqlen_buf, &sc.part, model::kv_tier::DecodeContext::Bf16(&sc.ctx_bf16), shape)).flatten();
+                        ctx_bf16 = merged.is_some();
+                        s.extend(merged.unwrap_or_else(|| flash.dispatch(g, &sc.q, &self.pool_k[l], &self.pool_v[l], None, &sc.bt_buf, &sc.seqlen_buf, &sc.part, &sc.ctx, shape)));
                     } else if let Some(step) = (!causal_chunk && exact.is_none() && !self.gemm.is_reference_pinned())
                         .then(|| block::native_paged_decode_batched(g, false, &[&sc.q, &self.pool_k[l], &self.pool_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.ctx], &[b, nh, nkv, hd, group, bs, mbt]))
                         .flatten()
@@ -3291,8 +3303,13 @@ impl Engine {
                         s.push(g.step(APPLY_B, &[&sc.probs, &self.pool_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.ctx], &[b, nh, group, hd, bs, hkv, cap, mbt], b * nh * hd));
                     }
             }
-            self.quant_once(&mut s, &sc.ctx, hq, b);
-            self.linear(&mut s, &self.lin_weights[&p("attn.wo.weight")], &sc.ctx, &sc.proj, b, exact);
+            let wo = &self.lin_weights[&p("attn.wo.weight")];
+            let pre = ctx_bf16.then_some(&sc.ctx_bf16);
+            if !self.linear_parts(&mut s, wo, &sc.ctx, pre, &[(&sc.proj, d)], b, exact) {
+                assert!(pre.is_none(), "qwen3 serve: layer {l}'s merge wrote only the bf16 operand of a product that did not run");
+                self.quant_once(&mut s, &sc.ctx, hq, b);
+                self.linear(&mut s, wo, &sc.ctx, &sc.proj, b, exact);
+            }
             if lora {
                 self.lora_correct(&mut s, l, LoraSite::Wo, &sc.ctx, &sc.proj, b, d, 0);
             }

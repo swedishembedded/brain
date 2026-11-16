@@ -36,8 +36,10 @@
 #endif
 #endif
 
-extern "C" __global__ void __launch_bounds__(THREADS) brain_paged_flash_decode_gqa_combine(const unsigned int* params, const float* part, float* ctx) {
-    BRAIN_PDL_ENTRY();
+// The merge of one (row, head)'s split records for channel `ch` of block `blk`, by the whole block; `write(index, value)`
+// stores the normalised channel.
+template <typename Write>
+__device__ __forceinline__ void combine_block(const unsigned int* params, const float* part, Write write) {
     const unsigned int batch = params[0], n_heads = params[1], hd = params[2], n_splits = params[3];
     const unsigned int quarters = (hd + THREADS - 1u) / THREADS;
     const unsigned int blk = blockIdx.y * gridDim.x + blockIdx.x;
@@ -95,6 +97,27 @@ extern "C" __global__ void __launch_bounds__(THREADS) brain_paged_flash_decode_g
         for (; s < n_splits; ++s) { o[0] = fmaf(rec[static_cast<unsigned long long>(s) * stride + ch], w[s], o[0]); }
         const float lt = total_l;
         const float sum = ((o[0] + o[1]) + (o[2] + o[3])) + ((o[4] + o[5]) + (o[6] + o[7]));
-        ctx[static_cast<unsigned long long>(bh) * hd + ch] = sum * (lt > 0.f ? 1.f / lt : 0.f);
+        write(static_cast<unsigned long long>(bh) * hd + ch, sum * (lt > 0.f ? 1.f / lt : 0.f));
     }
+}
+
+
+extern "C" __global__ void __launch_bounds__(THREADS) brain_paged_flash_decode_gqa_combine(const unsigned int* params, const float* part, float* ctx) {
+    BRAIN_PDL_ENTRY();
+    combine_block(params, part, [ctx](unsigned long long i, float v) { ctx[i] = v; });
+}
+
+// The bf16 rounding of `cast_f32_bf16`: round-to-nearest-even, NaN kept quiet.
+__device__ __forceinline__ unsigned short combine_bf16_bits(float v) {
+    const unsigned int b = __float_as_uint(v);
+    if ((b & 0x7fffffffu) > 0x7f800000u) { return 0x7fc0u; }
+    return (unsigned short)((b + 0x7fffu + ((b >> 16) & 1u)) >> 16);
+}
+
+// The same merge with the context written only as the packed bf16 operand (two a word, lower index in the low half) of
+// the output projection's tensor-core product: the bits `cast_f32_bf16` gives of the fp32 context, without its launch.
+extern "C" __global__ void __launch_bounds__(THREADS) brain_paged_flash_decode_gqa_combine_bf16(const unsigned int* params, const float* part, unsigned int* ctx_bf16) {
+    BRAIN_PDL_ENTRY();
+    unsigned short* out = reinterpret_cast<unsigned short*>(ctx_bf16);
+    combine_block(params, part, [out](unsigned long long i, float v) { out[i] = combine_bf16_bits(v); });
 }

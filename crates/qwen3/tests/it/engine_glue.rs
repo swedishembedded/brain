@@ -82,3 +82,22 @@ fn a_bf16_library_engine_holds_no_fused_product_scratch() {
     run(&mut reference);
     assert!(reference.fused_scratch_bytes() > 0, "the fused path ran without its scratch");
 }
+
+/// At a head width the fused decode serves, the decode merge writes the output projection's bf16 operand itself: a
+/// decode tape casts nothing but the first layer's input norm.
+#[test]
+fn a_bf16_decode_step_casts_only_its_first_input_norm() {
+    let Ok(gpu) = gpu_core::Gpu::try_new_cuda(qwen3::model::pipelines()) else {
+        brain_testutil::skip_unavailable("no usable CUDA backend");
+        return;
+    };
+    let cfg = QwenConfig { d_model: 64, d_ff: 128, n_heads: 4, n_kv_heads: 2, head_dim: 128, vocab: 64, block_size: 256, max_position_embeddings: 256, tie_embeddings: false, ..QwenConfig::tiny() };
+    let w = qwen3::init_weights(&cfg, 9); // seed: any weights serve, the test names kernels
+    let (bs, mbt) = (16u32, 16u32);
+    let e = Engine::from_map_tier_on(&gpu, cfg.clone(), &w, bs, 64, 4, mbt, 32, true, Dtype::BF16);
+    let bt: Vec<u32> = (4..8).flat_map(|b| std::iter::once(b).chain(std::iter::repeat_n(0, mbt as usize - 1))).collect();
+    let steps = e.steps_for_profile(4, &[1, 2, 3, 4], &[0, 1, 2, 3], &[1; 4], &[4, 5, 6, 7], &[0; 4], &bt, false);
+    let names: Vec<String> = steps.iter().filter_map(|s| s.lowering().map(|l| l.physical.to_string())).collect();
+    assert!(names.iter().any(|n| n.contains("combine_bf16")), "the decode merge did not write the bf16 operand: {names:?}");
+    assert_eq!(names.iter().filter(|n| n.contains("cast_f32_bf16")).count(), 1, "{names:?}");
+}

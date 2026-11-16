@@ -753,6 +753,25 @@ impl FlashDecode {
         ctx: &DeviceBuffer,
         s: FlashDecodeShape,
     ) -> Vec<Step> {
+        self.dispatch_into(g, q, pool_k, pool_v, scales, block_tables, seq_lens, part, DecodeContext::F32(ctx), s).expect("the fp32 merge is always registered")
+    }
+
+    /// [`Self::dispatch`] with the merge writing `ctx` as given: fp32, or only the packed bf16 operand of the output
+    /// projection's tensor-core product (`None` where the device has no such merge; nothing is built then).
+    #[allow(clippy::too_many_arguments)]
+    pub fn dispatch_into(
+        &self,
+        g: &Gpu,
+        q: &DeviceBuffer,
+        pool_k: &DeviceBuffer,
+        pool_v: &DeviceBuffer,
+        scales: Option<(&DeviceBuffer, &DeviceBuffer)>,
+        block_tables: &DeviceBuffer,
+        seq_lens: &DeviceBuffer,
+        part: &DeviceBuffer,
+        ctx: DecodeContext<'_>,
+        s: FlashDecodeShape,
+    ) -> Option<Vec<Step>> {
         assert_eq!(scales.is_some(), matches!(self.tier.element, KvElement::Int8 | KvElement::Fp8E4m3), "fused decode attention at {}: row scales are bound exactly for a scaled tier", self.tier);
         let (decode, params) = self.plan(g, s);
         let n_splits = params[7];
@@ -761,9 +780,31 @@ impl FlashDecode {
             None => g.dispatch(decode, &[q, pool_k, pool_v, block_tables, seq_lens, part], &params, grid),
             Some((ks, vs)) => g.dispatch(decode, &[q, pool_k, pool_v, block_tables, seq_lens, part, ks, vs], &params, grid),
         };
-        let combine = g.step(self.combine.expect("checked by available"), &[part, ctx], &[s.batch, s.n_heads, s.head_dim, n_splits], s.batch * s.n_heads * 256);
-        vec![split, combine]
+        let combine = match ctx {
+            DecodeContext::F32(ctx) => g.step(self.combine.expect("checked by available"), &[part, ctx], &[s.batch, s.n_heads, s.head_dim, n_splits], s.batch * s.n_heads * 256),
+            DecodeContext::Bf16(ctx) => native_combine_bf16(g, part, ctx, [s.batch, s.n_heads, s.head_dim, n_splits])?,
+        };
+        Some(vec![split, combine])
     }
+}
+
+/// Where the fused decode's merge writes the attention context.
+#[derive(Clone, Copy)]
+pub enum DecodeContext<'a> {
+    /// `[batch, n_heads * head_dim]` fp32.
+    F32(&'a DeviceBuffer),
+    /// The same values as packed bf16 (two a word), what a tensor-core output projection reads.
+    Bf16(&'a DeviceBuffer),
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn native_combine_bf16(g: &Gpu, part: &DeviceBuffer, ctx: &DeviceBuffer, params: [u32; 4]) -> Option<Step> {
+    gpu_core::provider::cuda::flash_decode_combine_bf16_step(g, part, ctx, params)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn native_combine_bf16(_g: &Gpu, _part: &DeviceBuffer, _ctx: &DeviceBuffer, _params: [u32; 4]) -> Option<Step> {
+    None
 }
 
 /// What a batched append writes: `batch` token rows (one per sequence, or one

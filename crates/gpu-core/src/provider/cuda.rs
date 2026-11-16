@@ -1341,6 +1341,26 @@ pub fn add_rmsnorm_fwd_bf16_step(gpu: &crate::Gpu, bufs: &[&backend_api::DeviceB
     Some(step.with_lowering(rmsnorm_fused_lowering(kernel, &params, [("add2", None), ("rmsnorm", Some(rows))])))
 }
 
+/// `paged_flash_decode_gqa_combine_bf16`: part (read); ctx_bf16.
+static FLASH_COMBINE_BF16_BINDINGS: [BindKind; 3] = bwd_tc_bindings(1);
+
+/// The split-key decode attention's merge (`paged_flash_decode_gqa_combine`'s `params` `[batch, n_heads, head_dim,
+/// n_splits]`) with the context written only as packed bf16 (`[batch * n_heads * head_dim / 2]` words) for the output
+/// projection's tensor-core product: the bits of the merge followed by `cast_f32_bf16`. `None` when the shape is not
+/// served (a head width over 256 or odd, more splits than the kernel holds), `cuda` is disabled, or the device declines.
+pub fn flash_decode_combine_bf16_step(gpu: &crate::Gpu, part: &backend_api::DeviceBuffer, ctx_bf16: &backend_api::DeviceBuffer, params: [u32; 4]) -> Option<crate::Step> {
+    let [batch, heads, hd, splits] = params;
+    if batch == 0 || heads == 0 || !(2..=256).contains(&hd) || !hd.is_multiple_of(2) || !(1..=4096).contains(&splits) || super::disabled_providers().iter().any(|x| x == "cuda") {
+        return None;
+    }
+    let cc = gpu.caps().arch.compute_capability?;
+    let kernel = kernels_cuda::get("paged_flash_decode_gqa_combine_bf16").filter(|k| k.min_cc <= cc)?;
+    let id = gpu.native_kernel(kernel, &FLASH_COMBINE_BF16_BINDINGS)?;
+    let step = gpu.step_native_sliced(id, &[part, ctx_bf16], &[(0, 0); 2], &params, batch * heads * hd.div_ceil(64))?;
+    let merge = backend_api::PortableDispatch { kernel: "paged_flash_decode_gqa_combine".into(), params: params.to_vec(), threads: batch * heads * 256 };
+    Some(step.with_lowering(backend_api::Lowering::priced(kernel.reported, vec![merge])))
+}
+
 /// `kv_append_i8_clipped_kv`: src_k, src_v, blocks, offsets, clip_k, clip_v (read); pool_k, pool_v, scales_k, scales_v.
 static KV_APPEND_I8_KV_BINDINGS: [BindKind; 11] = bwd_tc_bindings(6);
 
