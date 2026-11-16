@@ -3200,20 +3200,26 @@ impl Ops {
     }
 
     /// `dW[n, k] += sum_m dY[m, n] * X[m, k]` - the gradient w.r.t. the
-    /// WEIGHT of a linear, dispatched through the plain f32 `matmul_dw.wgsl`
-    /// kernel UNCONDITIONALLY. There is no `Weight`/`Dtype` parameter on this
-    /// method at all, by design: `matmul_dw.wgsl` never reads `w` (its only
-    /// inputs are `dy` and `x`, both always-f32 activations), so a weight's
-    /// storage tier has NO EFFECT on this computation - narrowing it further
-    /// would be a change to a kernel that structurally cannot express one.
-    /// This is B10's "dW's accumulation is ALWAYS f32" invariant enforced by
-    /// the type signature, not by a caller's discipline. Accumulates
-    /// (matching `matmul_dw.wgsl`'s own always-add contract) - a caller
-    /// zeroes `dw` once before a backward pass, exactly like every other `dw`
-    /// kernel in this codebase already does (e.g. via `Gpu::submit`'s
-    /// `clears` list).
+    /// WEIGHT of a linear, always in f32: the vendor library's TF32
+    /// tensor-core product where the device runs it and the precision allows
+    /// (the selection the forward and the input gradient take), else the
+    /// plain f32 `matmul_dw.wgsl` kernel. There is no `Weight`/`Dtype`
+    /// parameter on this method at all, by design: the product never reads
+    /// `w` (its only inputs are `dy` and `x`, both always-f32 activations),
+    /// so a weight's storage tier has NO EFFECT on this computation. This is
+    /// B10's "dW's accumulation is ALWAYS f32" invariant enforced by the type
+    /// signature, not by a caller's discipline. Accumulates (matching
+    /// `matmul_dw.wgsl`'s own always-add contract) - a caller zeroes `dw`
+    /// once before a backward pass, exactly like every other `dw` kernel in
+    /// this codebase already does (e.g. via `Gpu::submit`'s `clears` list).
     #[allow(clippy::too_many_arguments)]
     pub fn matmul_dw(&self, s: &mut Vec<Step>, x: &DeviceBuffer, dy: &DeviceBuffer, m: u32, n: u32, k: u32, dw: &DeviceBuffer) {
+        self.dw_f32(s, x, dy, m, n, k, dw, 0);
+    }
+
+    /// [`Self::matmul_dw`] through the portable `matmul_dw.wgsl` kernel: the decline path of the library product.
+    #[allow(clippy::too_many_arguments)]
+    fn matmul_dw_portable(&self, s: &mut Vec<Step>, x: &DeviceBuffer, dy: &DeviceBuffer, m: u32, n: u32, k: u32, dw: &DeviceBuffer) {
         let bind = |_: KernelVariant| -> (usize, &'static str) { (self.idx[kname::MATMUL_DW], kname::MATMUL_DW) };
         let operands = [
             Operand { role: Role::Act, buf: dy, range: WHOLE, dtype: Dtype::F32 },

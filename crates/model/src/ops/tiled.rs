@@ -753,7 +753,7 @@ impl Ops {
     /// `dw[row0 * k ..] += dy[m, n]^T x[m, k]` in fp32: the library TF32 product where the device has it
     /// (accumulating into `dw`), else the portable accumulating kernel.
     #[allow(clippy::too_many_arguments)]
-    fn dw_f32(&self, s: &mut Vec<Step>, x: &DeviceBuffer, dy: &DeviceBuffer, m: u32, n: u32, k: u32, dw: &DeviceBuffer, row0: u32) {
+    pub(super) fn dw_f32(&self, s: &mut Vec<Step>, x: &DeviceBuffer, dy: &DeviceBuffer, m: u32, n: u32, k: u32, dw: &DeviceBuffer, row0: u32) {
         let range = if row0 == 0 { WHOLE } else { (row0 as u64 * k as u64, n as u64 * k as u64) };
         let (dy_op, x_op) = (library::Operand { buf: dy, range: WHOLE }, library::Operand { buf: x, range: WHOLE });
         let pushed = s.len();
@@ -763,7 +763,7 @@ impl Ops {
             return;
         }
         assert_eq!(row0, 0, "Ops::dw_f32: the portable kernel writes whole gradients");
-        self.matmul_dw(s, x, dy, m, n, k, dw);
+        self.matmul_dw_portable(s, x, dy, m, n, k, dw);
     }
 
     /// The product of one gradient tile into the (zeroed) tile scratch: [`Self::dw_f32`] over the scratch.
