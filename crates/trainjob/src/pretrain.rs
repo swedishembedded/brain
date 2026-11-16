@@ -18,7 +18,7 @@ use capability::{ActionResult, ActionSpec, Blob, BlobSpec, Invocation, Media, Pa
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::consolidate::{check_install_name, checkpoint_outcome};
+use crate::consolidate::{check_install_name, check_resume, checkpoint_every_param, checkpoint_outcome_of, open_run, resume_key_param};
 use crate::job::{self, trainer_failure, utf8, JobEnv, Workdir};
 use crate::request::{check_attached, DataRefs};
 
@@ -53,6 +53,8 @@ pub fn spec() -> ActionSpec {
         .param(ParamSpec::new("seed", ParamType::Int, "seed of the window draws (random when omitted; the report carries the one used)").min(0.0).max(capability::bounds::EXACT_INTEGER))
         .param(ParamSpec::new("arch", ParamType::Str, "the base's architecture when its checkpoint does not tell it"))
         .param(ParamSpec::new("install_as", ParamType::Str, "also install the checkpoint in the server's model store as `local/<this name>` (letters, digits, `.`, `_`, `-`; it must not exist yet)"))
+        .param(resume_key_param())
+        .param(checkpoint_every_param())
         .input(BlobSpec::new("dataset", Media::Bytes, "the training corpus (JSONL)"))
         .input(BlobSpec::new("held_out", Media::Bytes, "the held-out corpus (JSONL)"))
         .output(BlobSpec::new("report", Media::Text, "the report (JSON) when the server has no artifact store to publish a checkpoint to"))
@@ -80,6 +82,8 @@ pub struct Params {
     pub seed: Option<u64>,
     pub arch: Option<String>,
     pub install_as: Option<String>,
+    pub resume_key: Option<String>,
+    pub checkpoint_every: Option<u32>,
 }
 
 /// A request that passed the spec and every check that needs no file and no device.
@@ -124,6 +128,7 @@ impl Request {
         if let Some(name) = &params.install_as {
             check_install_name(name)?;
         }
+        check_resume(ACTION, params.resume_key.as_deref(), params.checkpoint_every)?;
         check_attached(&data, inv)?;
         Ok(Request { params, data })
     }
@@ -189,13 +194,26 @@ pub fn run(env: &JobEnv, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -
     inv.cancel.check()?;
     let request = Request::from_invocation(inv)?;
     let p = &request.params;
+    let resumable = match open_run(env, ACTION, p.resume_key.as_deref(), inv, p.seed)? {
+        Some(crate::runs::Opened::Completed(mut result)) => {
+            result["resume"] = crate::runs::completed_report(p.resume_key.as_deref().unwrap_or_default());
+            let mut outcome = capability::Outcome::new();
+            outcome.outputs = result;
+            return Ok(outcome);
+        }
+        Some(crate::runs::Opened::Run(run)) => Some(run),
+        None => None,
+    };
     let base_dir = job::resolve_base(env.models_dir.as_deref(), &p.base)?;
     let work = Workdir::create(env)?;
     progress(Progress::event(0, p.steps, json!({"type": "stage", "stage": "staging the corpora"})));
     let staged = job::stage(&request.data, &inv.blobs, env.store.as_ref(), &work)?;
     inv.cancel.check()?;
     let out_dir = work.path().join("run");
-    let run = request.pretrain(&base_dir, &staged, &out_dir)?;
+    let mut run = request.pretrain(&base_dir, &staged, &out_dir)?;
+    if let Some(r) = &resumable {
+        run = run.seed(r.seed()).resume_state(r.state_path()).checkpoint_every(p.checkpoint_every.unwrap_or(crate::runs::DEFAULT_CHECKPOINT_EVERY));
+    }
     progress(Progress::event(0, p.steps, json!({"type": "stage", "stage": "encoding the corpora, loading the base and training"})));
     let began = Instant::now();
     let outcome = run.run_with(&inv.cancel, |step| progress(Progress::event(step.step, step.steps, job::step_frame(step, began.elapsed().as_secs_f64())))).map_err(trainer_failure)?;
@@ -205,7 +223,7 @@ pub fn run(env: &JobEnv, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -
     let checkpoint = outcome.checkpoint.clone().ok_or("pretrain: the run completed with no checkpoint")?;
     let report = report(&outcome);
     work.ensure_within_quota()?;
-    let mut result = checkpoint_outcome(env, &checkpoint, p.install_as.as_deref(), report)?;
+    let mut result = checkpoint_outcome_of(env, &checkpoint, p.install_as.as_deref(), report, resumable.map(|r| (r, outcome.resumed_at)))?;
     if env.store.is_none() {
         let text = result.outputs.to_string();
         result = result.blob("report", Blob::new(Media::Text, text.into_bytes()));

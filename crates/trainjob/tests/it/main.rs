@@ -20,6 +20,7 @@ mod dryrun;
 mod door;
 mod http;
 mod pretrain;
+mod resume;
 mod run;
 mod schedule;
 mod support;

@@ -18,7 +18,7 @@ use capability::{ActionResult, ActionSpec, BlobSpec, Invocation, Media, ParamSpe
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::consolidate::{check_install_name, checkpoint_outcome};
+use crate::consolidate::{check_install_name, check_resume, checkpoint_outcome_of, open_run, resume_key_param};
 use crate::job::{bring, trainer_failure, JobEnv, Workdir};
 use crate::request::Source;
 use crate::store::Digest;
@@ -45,6 +45,7 @@ pub fn spec() -> ActionSpec {
         .param(ParamSpec::new("tokenizer_bytes", ParamType::Int, "learn the vocabulary from at most this many bytes of the corpus's first documents").default(json!(brain::from_scratch::DEFAULT_TOKENIZER_BYTES)).min(1.0).max(MAX_TOKENIZER_BYTES).step(1.0))
         .param(ParamSpec::new("seed", ParamType::Int, "seed of the initialization (random when omitted; the report carries the one used)").min(0.0).max(capability::bounds::EXACT_INTEGER))
         .param(ParamSpec::new("install_as", ParamType::Str, "also install the checkpoint in the server's model store as `local/<this name>` (letters, digits, `.`, `_`, `-`; it must not exist yet)"))
+        .param(resume_key_param())
         .input(BlobSpec::new("corpus", Media::Bytes, "the text corpus, instead of `corpus_digest`"))
 }
 
@@ -71,6 +72,7 @@ pub struct Params {
     pub tokenizer_bytes: u64,
     pub seed: Option<u64>,
     pub install_as: Option<String>,
+    pub resume_key: Option<String>,
 }
 
 /// A request that passed the spec and every check that needs no file.
@@ -107,6 +109,7 @@ impl Request {
         if let Some(name) = &params.install_as {
             check_install_name(name)?;
         }
+        check_resume(ACTION, params.resume_key.as_deref(), None)?;
         let config: Value = document("config", &params.config)?;
         let tokenizer: TokenizerDoc = document("tokenizer", &params.tokenizer)?;
         let mut init = brain::ModelInit::new(params.arch.as_str())
@@ -145,6 +148,21 @@ impl Request {
 pub fn run(env: &JobEnv, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
     inv.cancel.check()?;
     let request = Request::from_invocation(inv)?;
+    // An initialization has no training state: a resumable one is idempotent, its recorded result answered again.
+    let run = match open_run(env, ACTION, request.params.resume_key.as_deref(), inv, request.params.seed)? {
+        Some(crate::runs::Opened::Completed(mut result)) => {
+            result["resume"] = crate::runs::completed_report(request.params.resume_key.as_deref().unwrap_or_default());
+            let mut outcome = capability::Outcome::new();
+            outcome.outputs = result;
+            return Ok(outcome);
+        }
+        Some(crate::runs::Opened::Run(run)) => Some(run),
+        None => None,
+    };
+    let init = match &run {
+        Some(r) => request.init.clone().seed(r.seed()),
+        None => request.init.clone(),
+    };
     let work = Workdir::create(env)?;
     progress(Progress::event(0, 1, json!({"type": "stage", "stage": "staging the corpus"})));
     let corpus = work.path().join("corpus.jsonl");
@@ -152,7 +170,7 @@ pub fn run(env: &JobEnv, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -
     inv.cancel.check()?;
     progress(Progress::event(0, 1, json!({"type": "stage", "stage": "learning the vocabulary and initialising the weights"})));
     let out = work.path().join("model");
-    let made = request.init.clone().corpus(&corpus).out_dir(&out).run().map_err(trainer_failure)?;
+    let made = init.corpus(&corpus).out_dir(&out).run().map_err(trainer_failure)?;
     let report = json!({
         "status": "completed",
         "objective": "init",
@@ -168,5 +186,5 @@ pub fn run(env: &JobEnv, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -
         "tool_calls": made.tool_calls,
     });
     work.ensure_within_quota()?;
-    checkpoint_outcome(env, &made.checkpoint, request.params.install_as.as_deref(), report)
+    checkpoint_outcome_of(env, &made.checkpoint, request.params.install_as.as_deref(), report, run.map(|r| (r, None)))
 }

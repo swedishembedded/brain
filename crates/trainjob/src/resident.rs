@@ -124,6 +124,7 @@ impl TrainResident {
     fn admit_full(&self, inv: &Invocation) -> Result<Reservation, String> {
         let request = FullRequest::from_invocation(inv)?;
         let p = &request.params;
+        self.resumable(consolidate::FULL_ACTION, p.resume_key.as_deref())?;
         if self.env.store.is_none() && p.install_as.is_none() {
             return Err("full_train: this server has no artifact store (--artifact-store) to publish the checkpoint to: set install_as to keep it in the model store".to_string());
         }
@@ -157,6 +158,7 @@ impl TrainResident {
     fn admit_pretrain(&self, inv: &Invocation) -> Result<Reservation, String> {
         let request = pretrain::Request::from_invocation(inv)?;
         let p = &request.params;
+        self.resumable(pretrain::ACTION, p.resume_key.as_deref())?;
         if self.env.store.is_none() && p.install_as.is_none() {
             return Err(format!("{}: this server has no artifact store (--artifact-store) to publish the checkpoint to: set install_as to keep it in the model store", pretrain::ACTION));
         }
@@ -172,6 +174,7 @@ impl TrainResident {
 
     fn admit_init(&self, inv: &Invocation) -> Result<Reservation, String> {
         let request = create::Request::from_invocation(inv)?;
+        self.resumable(create::ACTION, request.params.resume_key.as_deref())?;
         if self.env.store.is_none() && request.params.install_as.is_none() {
             return Err(format!("{}: this server has no artifact store (--artifact-store) to publish the checkpoint to: set install_as to keep it in the model store", create::ACTION));
         }
@@ -219,6 +222,14 @@ impl TrainResident {
             _ => 0,
         };
         Ok(Reservation::Host((256u64 << 20) + dataset_bytes))
+    }
+
+    /// A `resume_key` keeps its run record in the artifact store: refused at the door on a server without one.
+    fn resumable(&self, action: &str, key: Option<&str>) -> Result<(), String> {
+        if key.is_some() && self.env.store.is_none() {
+            return Err(format!("{action}: resume_key keeps the run's record in the artifact store, and this server has none (--artifact-store)"));
+        }
+        Ok(())
     }
 
     fn check_digests(&self, digests: &[crate::store::Digest]) -> Result<(), String> {

@@ -29,6 +29,7 @@
 //! * [`consolidate`]: the jobs that produce a checkpoint, `full_train` and `merge`.
 //! * [`pretrain`]: `pretrain`, raw-text training of every weight with held-out evaluation.
 //! * [`job`]: one run, from staged inputs to the adapter and its report.
+//! * [`runs`]: the `resume_key` contract: durable run records, exact resumption, idempotent completion.
 //! * [`resident`]: the run as a workload the residency executor places,
 //!   evicting idle serving instances for it and refusing when serving is busy.
 
@@ -40,6 +41,7 @@ pub mod pretrain;
 pub mod quota;
 pub mod request;
 pub mod resident;
+pub mod runs;
 pub mod store;
 pub mod timeline;
 

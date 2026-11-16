@@ -50,6 +50,33 @@ pub const MANIFEST_FORMAT: &str = "brain-checkpoint-manifest-v1";
 
 static INSTALLS: AtomicU64 = AtomicU64::new(0);
 
+/// `resume_key`: the run is resumable under this key (see [`crate::runs`]).
+pub(crate) fn resume_key_param() -> ParamSpec {
+    ParamSpec::new("resume_key", ParamType::Str, "make the job resumable under this key (1 to 128 letters, digits, `.`, `_`, `-`): submitted again after the job or the server died it continues from its last saved training state, and once completed it answers with its recorded result without recomputing; needs an artifact store")
+}
+
+/// `checkpoint_every`: how often a resumable run saves its training state.
+pub(crate) fn checkpoint_every_param() -> ParamSpec {
+    ParamSpec::new("checkpoint_every", ParamType::Int, "with resume_key: save the exact training state every this many steps (default 25), so a job that dies loses at most this many").min(1.0).max(capability::bounds::TRAIN_COUNT).step(1.0)
+}
+
+/// The resumption settings of a request, checked: `checkpoint_every` belongs to a `resume_key`, a key is well formed.
+pub(crate) fn check_resume(action: &str, key: Option<&str>, every: Option<u32>) -> Result<(), String> {
+    match (key, every) {
+        (None, Some(_)) => Err(format!("{action}: checkpoint_every belongs to a resumable run; name a resume_key")),
+        (Some(key), _) => crate::runs::check_key(key).map_err(|e| format!("{action}: {e}")),
+        (None, None) => Ok(()),
+    }
+}
+
+/// The run of a request's `resume_key`, opened (or `None` without a key): what `inv`'s job resumes, or the result a
+/// completed run recorded.
+pub(crate) fn open_run(env: &JobEnv, action: &str, key: Option<&str>, inv: &Invocation, seed: Option<u64>) -> Result<Option<crate::runs::Opened>, String> {
+    let Some(key) = key else { return Ok(None) };
+    let store = env.store.as_ref().ok_or_else(|| format!("{action}: resume_key keeps the run's record in the artifact store, and this server has none (--artifact-store)"))?;
+    crate::runs::open(store, action, key, &crate::runs::identity(action, inv), seed).map(Some).map_err(|e| format!("{action}: {e}"))
+}
+
 fn install_param() -> ParamSpec {
     ParamSpec::new("install_as", ParamType::Str, "also install the checkpoint in the server's model store as `local/<this name>` (letters, digits, `.`, `_`, `-`; it must not exist yet), where a later job names it as its base")
 }
@@ -76,6 +103,8 @@ pub fn full_spec() -> ActionSpec {
         .param(optional_f("replay_share", "the share of draws that come from the replay sets in all, in (0, 1)", 0.0, 1.0))
         .param(ParamSpec::new("train_precision", ParamType::Str, "what each trainable parameter, its gradient and its optimiser state are stored as, `key=value,...` (e.g. `state=int8,sr=on`); the default is fp32 everywhere. An unknown key or value is refused before anything loads"))
         .param(install_param())
+        .param(resume_key_param())
+        .param(checkpoint_every_param())
         .input(blob("dataset", "the training records (`generic-messages-v2` JSONL)"));
     for name in crate::request::REPLAY_BLOBS {
         spec = spec.input(blob(name, "a replay dataset"));
@@ -112,6 +141,8 @@ pub struct FullParams {
     pub replay_share: Option<f32>,
     pub train_precision: Option<String>,
     pub install_as: Option<String>,
+    pub resume_key: Option<String>,
+    pub checkpoint_every: Option<u32>,
 }
 
 /// A `full_train` request that passed the spec and every check that needs no file and no device.
@@ -145,6 +176,7 @@ impl FullRequest {
         if let Some(spec) = &params.train_precision {
             brain::TrainPrecision::parse(spec).map_err(|e| format!("full_train: train_precision: {e}"))?;
         }
+        check_resume(FULL_ACTION, params.resume_key.as_deref(), params.checkpoint_every)?;
         check_attached(&data, inv)?;
         Ok(FullRequest { params, data })
     }
@@ -241,11 +273,18 @@ fn publish_checkpoint(store: &ArtifactStore, dir: &Path) -> Result<(Digest, Valu
 /// Installs the checkpoint `dir` as `local/<name>` in the model store `models_dir`. The model store never gains a
 /// half-written model and never loses one: the files go to a hidden directory beside the target, which is renamed
 /// into place, and a name that is taken is refused.
-fn install(models_dir: &Path, name: &str, dir: &Path) -> Result<String, String> {
+///
+/// A resumed run (`resumed`) may find its own installation there, from a job that installed and died before it could
+/// record completing: a target holding exactly the checkpoint's files, byte for byte, is that installation and is
+/// accepted; anything else is refused as for a fresh run.
+fn install(models_dir: &Path, name: &str, dir: &Path, resumed: bool) -> Result<String, String> {
     let vendor_dir = models_dir.join("local");
     let target = vendor_dir.join(name);
     std::fs::create_dir_all(&vendor_dir).map_err(|e| format!("train: cannot make the model store's local directory: {e}"))?;
     if std::fs::symlink_metadata(&target).is_ok() {
+        if resumed && same_files(dir, &target)? {
+            return Ok(format!("local/{name}"));
+        }
         return Err(format!("train: install_as: local/{name} is already in the model store"));
     }
     let partial = vendor_dir.join(format!(".installing-{}-{}", std::process::id(), INSTALLS.fetch_add(1, Ordering::Relaxed)));
@@ -266,8 +305,33 @@ fn install(models_dir: &Path, name: &str, dir: &Path) -> Result<String, String> 
     result.map(|()| format!("local/{name}"))
 }
 
+/// Whether the checkpoint directories `a` and `b` hold the same files with the same bytes.
+fn same_files(a: &Path, b: &Path) -> Result<bool, String> {
+    let (fa, fb) = (checkpoint_files(a)?, checkpoint_files(b)?);
+    if fa.iter().map(|(n, _)| n).ne(fb.iter().map(|(n, _)| n)) {
+        return Ok(false);
+    }
+    for ((_, pa), (_, pb)) in fa.iter().zip(&fb) {
+        let read = |p: &Path| std::fs::read(p).map_err(|e| format!("train: reading the checkpoint: {e}"));
+        if crate::store::digest_of(&read(pa)?) != crate::store::digest_of(&read(pb)?) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 /// What a finished checkpoint job returns: its report, with the checkpoint's manifest digest and where it was installed.
-pub(crate) fn checkpoint_outcome(env: &JobEnv, dir: &Path, install_as: Option<&str>, mut report: Value) -> ActionResult {
+pub(crate) fn checkpoint_outcome(env: &JobEnv, dir: &Path, install_as: Option<&str>, report: Value) -> ActionResult {
+    checkpoint_outcome_of(env, dir, install_as, report, None)
+}
+
+/// [`checkpoint_outcome`] of a resumable run: its report carries the `resume` object, an installation it left before
+/// dying is accepted, and its record is marked completed with the result once everything is published.
+pub(crate) fn checkpoint_outcome_of(env: &JobEnv, dir: &Path, install_as: Option<&str>, mut report: Value, run: Option<(crate::runs::Run, Option<u32>)>) -> ActionResult {
+    let resumed = run.as_ref().is_some_and(|(r, _)| r.resumed);
+    if let Some((run, at)) = &run {
+        report["resume"] = run.report(*at);
+    }
     let mut result = Outcome::new();
     if let Some(store) = &env.store {
         let (digest, manifest) = publish_checkpoint(store, dir)?;
@@ -276,7 +340,10 @@ pub(crate) fn checkpoint_outcome(env: &JobEnv, dir: &Path, install_as: Option<&s
     }
     if let Some(name) = install_as {
         let models_dir = env.models_dir.as_deref().ok_or("train: this server has no model store to install into")?;
-        report["installed_as"] = json!(install(models_dir, name, dir)?);
+        report["installed_as"] = json!(install(models_dir, name, dir, resumed)?);
+    }
+    if let Some((run, _)) = run {
+        run.complete(&report)?;
     }
     result.outputs = report;
     Ok(result)
@@ -287,6 +354,16 @@ pub fn run_full(env: &JobEnv, inv: &Invocation, progress: &mut dyn FnMut(Progres
     inv.cancel.check()?;
     let request = FullRequest::from_invocation(inv)?;
     let p = &request.params;
+    let run = match open_run(env, FULL_ACTION, p.resume_key.as_deref(), inv, p.seed)? {
+        Some(crate::runs::Opened::Completed(mut result)) => {
+            result["resume"] = crate::runs::completed_report(p.resume_key.as_deref().unwrap_or_default());
+            let mut outcome = Outcome::new();
+            outcome.outputs = result;
+            return Ok(outcome);
+        }
+        Some(crate::runs::Opened::Run(run)) => Some(run),
+        None => None,
+    };
     let base_dir = job::resolve_base(env.models_dir.as_deref(), &p.base)?;
     let work = Workdir::create(env)?;
     progress(Progress::event(0, p.steps, json!({"type": "stage", "stage": "staging the datasets"})));
@@ -313,8 +390,13 @@ pub fn run_full(env: &JobEnv, inv: &Invocation, progress: &mut dyn FnMut(Progres
     if let Some(v) = p.weight_decay {
         ft = ft.weight_decay(v);
     }
-    if let Some(v) = p.seed {
-        ft = ft.seed(v);
+    match &run {
+        Some(run) => ft = ft.seed(run.seed()).resume_state(run.state_path()).checkpoint_every(p.checkpoint_every.unwrap_or(crate::runs::DEFAULT_CHECKPOINT_EVERY)),
+        None => {
+            if let Some(v) = p.seed {
+                ft = ft.seed(v);
+            }
+        }
     }
     if let Some(v) = p.replay_share {
         ft = ft.replay_share(v);
@@ -347,11 +429,13 @@ pub fn run_full(env: &JobEnv, inv: &Invocation, progress: &mut dyn FnMut(Progres
         "steps": outcome.steps,
         "steps_completed": outcome.steps_completed,
         "lr": outcome.lr,
+        "resumed_at": outcome.resumed_at,
         "initial_loss": outcome.initial_loss,
         "final_loss": outcome.final_loss,
     });
     work.ensure_within_quota()?;
-    let mut result = checkpoint_outcome(env, &checkpoint, p.install_as.as_deref(), report)?;
+    let resumed_at = outcome.resumed_at;
+    let mut result = checkpoint_outcome_of(env, &checkpoint, p.install_as.as_deref(), report, run.map(|r| (r, resumed_at)))?;
     // A server with no artifact store has nowhere to publish a checkpoint; it can only install one.
     if env.store.is_none() {
         let text = result.outputs.to_string();
