@@ -12,7 +12,7 @@
 # Prerequisites are installed automatically by `make requirements` (run as a
 # prerequisite of the build targets below). To install them by hand:
 #   rustup target add wasm32-unknown-unknown
-#   cargo install wasm-bindgen-cli --version 0.2.125   # match the locked crate
+#   cargo install wasm-bindgen-cli --version 0.2.130   # match the locked crate
 #   Node 18+ (npm).
 #
 # cargo/wasm-bindgen are taken from your environment/PATH. Override if needed:
@@ -23,7 +23,7 @@ APP                  := app
 WASM_TARGET          := wasm32-unknown-unknown
 WASM_ARTIFACT        := ../../target/wasm32-unknown-unknown/release/brain_web.wasm
 # wasm-bindgen-cli version — must match the locked `wasm-bindgen` crate in Cargo.lock.
-WASM_BINDGEN_VERSION ?= 0.2.125
+WASM_BINDGEN_VERSION ?= 0.2.130
 # Prefer wasm-bindgen on PATH; otherwise fall back to the standard cargo-install
 # location (~/.cargo/bin), which is often not on PATH. Override with WASM_BINDGEN=.
 WASM_BINDGEN         ?= $(shell command -v wasm-bindgen 2>/dev/null || echo $(HOME)/.cargo/bin/wasm-bindgen)
@@ -68,7 +68,7 @@ web/wasm: requirements
 	cargo build --release --target wasm32-unknown-unknown -p brain-web --features webgpu
 	@command -v "$(WASM_BINDGEN)" >/dev/null 2>&1 || { \
 		echo "ERROR: wasm-bindgen not found (looked for '$(WASM_BINDGEN)')." ; \
-		echo "  install:  cargo install wasm-bindgen-cli --version 0.2.125" ; \
+		echo "  install:  cargo install wasm-bindgen-cli --version 0.2.130" ; \
 		echo "  then ensure it is on PATH (e.g. export PATH=\"\$$HOME/.cargo/bin:\$$PATH\")" ; \
 		echo "  or pass it explicitly:  make web/dev WASM_BINDGEN=/path/to/wasm-bindgen" ; \
 		exit 1 ; }
