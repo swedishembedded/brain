@@ -357,7 +357,34 @@ decode equals decoding alone.
 - [ ] An exact-decode regime (`--exact-decode`, #457) for batches past a few rows: the int8 GEMV's tensor-core block
   from 5 rows, its tuned row buckets and the fp32 skinny GEMM from 33 rows part a sequence's logits by 1.2e-2 to
   2.7e-2 from 7 rows.
+- [ ] The plan does not charge the decode tapes' pinned scratch: at 64 rows a recorded step holds about 3 GiB
+  (`serve_peak_bytes(64)`; 0.02 GiB at 16) and up to `MAX_DECODE_TAPES` = 8 shapes are kept, beside a 4.4 GiB prefill
+  round. The c=64 run below hit a refused 288 MiB allocation (a 4096-row round's expert slots) and the scheduler
+  backed off to 14 sequences at once (knowledge #435), so nothing failed but the planned 64 did not run. Bound the
+  tapes by the bytes the plan charges, or charge them.
+- [ ] Admission gaps: in the c=16 serving window below the card idles 20 %, 4.8 s in 378 gaps over 1 ms, the largest
+  share between buffer clears (1.7 s in 93 gaps, median 6 ms): each admitted sequence allocates and zeroes a private
+  recurrent slot (30 layers of state and conv history) on the host path. A pool of slots would remove it.
 - [ ] Paged KV with blocks smaller than a sequence (the dense resident's shared pool): until then a long `--ctx` costs
   every resident sequence its whole context.
 - [ ] Parking a GGUF instance off the card (the brain-checkpoint resident's `ParkableInstance`), replicas over several
   cards, and the HF-directory resident's sizing from the card.
+
+### Measured: 8K prompts, 128 new tokens, 64 requests (gpu3, 2026-11-16, aa2ce34f7)
+
+`brain perf run serve --target <spec> --concurrency C --input 8192 --output 128 --requests 64`, every setting the
+server's default: the MoE GGUF planned int8 KV, 64 sequences, 75520 tokens each; the dense 27B FP8 directory its own
+defaults (paged int8 KV, max batch 8, MTP speculation `auto`). Busy is the union of kernel, copy and clear intervals
+over the measured serving window of a 32-request c=16 run under `nsys -t cuda,nvtx --cuda-graph-trace=node`.
+
+| target | C | req/s | TTFT p50 / p95 / p99 ms | inter-token p50 / p95 ms | busy | note |
+|---|---|---|---|---|---|---|
+| 35B-A3B Q8_0 | 16 | 1.18 | 696 / 8844 / 10865 | 14.8 / 689 | 79.5 % | valid |
+| 35B-A3B Q8_0 | 64 | 1.17 | 28188 / 47636 / 49851 | 16.1 / 713 | | valid; backed off to 14 at once after a refused allocation |
+| 27B FP8 | 16 | 1.12 | 7315 / 10756 / 12040 | 13.4 / 303 | 95.0 % | fidelity invalid (0.9722, speculation) |
+| 27B FP8 | 64 | 1.17 | 27880 / 47489 / 49337 | 12.6 / 287 | | fidelity invalid (0.9722, speculation) |
+
+Both are prefill-bound at this shape (about 9.6K prompt tokens/s each, 64 x 8K prompts against 128 new tokens
+each), so concurrency 64 adds queueing, not rate. The MoE reaches its first token sooner at the median and stalls decode
+longer behind each 8K prefill (inter-token p95 689 against 303 ms; the dense engine has mixed prefill-and-decode rounds,
+the MoE engine none). The MoE's 20 % idle is the admission path above.
