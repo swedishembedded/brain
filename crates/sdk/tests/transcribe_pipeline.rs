@@ -22,30 +22,8 @@
 //! being reached with the right directory, then a clean `Error::Backend`,
 //! never a panic.
 
-use std::path::{Path, PathBuf};
-
-struct Scratch(PathBuf);
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        std::fs::remove_dir_all(&self.0).ok();
-    }
-}
-
-impl std::ops::Deref for Scratch {
-    type Target = Path;
-    fn deref(&self) -> &Path {
-        &self.0
-    }
-}
-
-fn scratch_root(tag: &str) -> Scratch {
-    static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("brain-sdk-transcribe-pipeline-{tag}-{}-{n}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    Scratch(dir)
-}
+use std::path::Path;
+use brain_testutil::Scratch;
 
 fn with_models_dir<T>(root: &Path, f: impl FnOnce() -> T) -> T {
     let _serial = brain_testutil::env_lock();
@@ -79,7 +57,7 @@ fn write_qwen3asr_hfdir(dir: &Path) {
 
 #[test]
 fn from_pretrained_resolves_qwen3asr_from_a_real_local_fixture_with_no_network_access() {
-    let root = scratch_root("qwen3asr");
+    let root = Scratch::dir("brain-sdk-transcribe-pipeline-qwen3asr");
     write_qwen3asr_hfdir(&root.join("Qwen").join("Qwen3-ASR-1.7B"));
     mark_locally_present(&root, "local", "asr-sdk-test", "qwen3asr");
 
@@ -104,7 +82,7 @@ fn from_pretrained_rejects_an_unparseable_model_id() {
 /// `Error::Missing`, never a connection-error-flavored `Error::Download`.
 #[test]
 fn download_policy_offline_never_touches_the_network() {
-    let root = scratch_root("offline");
+    let root = Scratch::dir("brain-sdk-transcribe-pipeline-offline");
     let _serial = brain_testutil::env_lock();
     std::env::set_var("BRAIN_MODELS_DIR", &*root);
     std::env::set_var("BRAIN_HUB_ENDPOINT", "http://127.0.0.1:1");
@@ -129,7 +107,7 @@ fn write_nemotronasr_hfdir(dir: &Path) {
 /// tensors), not "no such model" and not the Qwen3-ASR loader's.
 #[test]
 fn from_pretrained_resolves_nemotronasr_from_a_real_local_fixture_with_no_network_access() {
-    let root = scratch_root("nemotronasr");
+    let root = Scratch::dir("brain-sdk-transcribe-pipeline-nemotronasr");
     write_nemotronasr_hfdir(&root.join("nvidia").join("nemotron-3.5-asr-streaming-0.6b"));
     mark_locally_present(&root, "local", "nemotron-sdk-test", "nemotronasr");
 
@@ -186,7 +164,7 @@ fn qwen3_asr_transcribes_the_whole_of_synthesized_speech() {
 /// in the store, asking for the Nemotron one must reach the Nemotron loader.
 #[test]
 fn the_requested_checkpoint_selects_the_backend_when_both_are_in_the_store() {
-    let root = scratch_root("both");
+    let root = Scratch::dir("brain-sdk-transcribe-pipeline-both");
     write_qwen3asr_hfdir(&root.join("Qwen").join("Qwen3-ASR-1.7B"));
     write_nemotronasr_hfdir(&root.join("nvidia").join("nemotron-3.5-asr-streaming-0.6b"));
 

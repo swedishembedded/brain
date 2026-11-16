@@ -20,33 +20,10 @@
 //! meaningful, but every kernel dispatch on the real path (backbone, neck,
 //! decoupled head, DFL decode, NMS) runs for real.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use yolov8::YoloConfig;
-
-struct Scratch(PathBuf);
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        std::fs::remove_dir_all(&self.0).ok();
-    }
-}
-
-impl std::ops::Deref for Scratch {
-    type Target = Path;
-    fn deref(&self) -> &Path {
-        &self.0
-    }
-}
-
-fn scratch_root(tag: &str) -> Scratch {
-    static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("brain-sdk-detection-pipeline-{tag}-{}-{n}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
-    std::fs::create_dir_all(&dir).unwrap();
-    Scratch(dir)
-}
+use brain_testutil::Scratch;
 
 fn with_models_dir<T>(root: &Path, f: impl FnOnce() -> T) -> T {
     let _serial = brain_testutil::env_lock();
@@ -85,7 +62,7 @@ fn from_pretrained_rejects_an_unparseable_model_id() {
 
 #[test]
 fn from_pretrained_names_the_missing_role_when_the_store_is_empty() {
-    let root = scratch_root("missing");
+    let root = Scratch::dir("brain-sdk-detection-pipeline-missing");
     mark_locally_present(&root, "local", "yolov8-empty-test");
 
     let err = with_models_dir(&root, || brain::DetectionPipeline::from_pretrained("local/yolov8-empty-test").unwrap_err());
@@ -113,7 +90,7 @@ fn rgb8_gradient(w: u32, h: u32) -> brain::Image {
 /// decode and NMS.
 #[test]
 fn from_pretrained_detects_over_a_real_tiny_fixture_end_to_end() {
-    let root = scratch_root("detect");
+    let root = Scratch::dir("brain-sdk-detection-pipeline-detect");
     write_complete_yolo_checkpoint(&root.join("local").join("yolov8-tiny.safetensors"), &YoloConfig::tiny(4));
     mark_locally_present(&root, "local", "yolov8-sdk-test");
 
@@ -136,7 +113,7 @@ fn from_pretrained_detects_over_a_real_tiny_fixture_end_to_end() {
 /// through, over the SAME real fixture.
 #[test]
 fn detect_with_a_confidence_above_any_real_score_returns_nothing() {
-    let root = scratch_root("high-confidence");
+    let root = Scratch::dir("brain-sdk-detection-pipeline-high-confidence");
     write_complete_yolo_checkpoint(&root.join("local").join("yolov8-tiny.safetensors"), &YoloConfig::tiny(4));
     mark_locally_present(&root, "local", "yolov8-confidence-test");
 
@@ -155,7 +132,7 @@ fn detect_with_a_confidence_above_any_real_score_returns_nothing() {
 /// `Error::Missing`, never a connection-error-flavored `Error::Download`.
 #[test]
 fn download_policy_offline_never_touches_the_network() {
-    let root = scratch_root("offline");
+    let root = Scratch::dir("brain-sdk-detection-pipeline-offline");
     let _serial = brain_testutil::env_lock();
     std::env::set_var("BRAIN_MODELS_DIR", &*root);
     std::env::set_var("BRAIN_HUB_ENDPOINT", "http://127.0.0.1:1");
@@ -195,7 +172,7 @@ fn write_tiny_yolov5_checkpoint(path: &Path, nc: u32) {
 /// YOLOv5 capability manifest.
 #[test]
 fn from_pretrained_resolves_a_yolov5_checkpoint_and_detects_over_it() {
-    let root = scratch_root("yolov5-detect");
+    let root = Scratch::dir("brain-sdk-detection-pipeline-yolov5-detect");
     write_tiny_yolov5_checkpoint(&root.join("local").join("yolov5-sdk-test").join("model.safetensors"), 3);
 
     let pipe = with_models_dir(&root, || brain::DetectionPipeline::from_pretrained("local/yolov5-sdk-test")).expect("a complete YOLOv5 checkpoint must build");
@@ -214,7 +191,7 @@ fn from_pretrained_resolves_a_yolov5_checkpoint_and_detects_over_it() {
 /// when YOLOv5 is also a candidate architecture.
 #[test]
 fn a_yolov8_checkpoint_still_resolves_to_yolov8() {
-    let root = scratch_root("yolov8-still");
+    let root = Scratch::dir("brain-sdk-detection-pipeline-yolov8-still");
     write_complete_yolo_checkpoint(&root.join("local").join("yolov8-both").join("model.safetensors"), &YoloConfig::tiny(4));
     let pipe = with_models_dir(&root, || brain::DetectionPipeline::from_pretrained("local/yolov8-both")).expect("must build");
     assert_eq!(pipe.capabilities().model, yolov8::caps::MODEL);

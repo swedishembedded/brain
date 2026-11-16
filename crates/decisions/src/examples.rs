@@ -786,7 +786,7 @@ mod tests {
 
     #[test]
     fn a_file_is_read_with_its_digest() {
-        let dir = crate::fixtures::Scratch::new("examples-file");
+        let dir = brain_testutil::Scratch::dir("examples-file");
         let path = dir.join("d.jsonl");
         std::fs::write(&path, line("t1", "f1", 1, "grep", "train") + "\n").unwrap();
         let d = Dataset::read_file(&path).unwrap();

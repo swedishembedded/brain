@@ -72,34 +72,11 @@
 //! ("cpu")` - a genuine forward pass and NOT a placeholder success, since
 //! there is only one real fixed geometry for this model to have run.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use checkpoint::torchpt_write::TensorOut;
 use codeformer::CodeFormerConfig;
-
-struct Scratch(PathBuf);
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        std::fs::remove_dir_all(&self.0).ok();
-    }
-}
-
-impl std::ops::Deref for Scratch {
-    type Target = Path;
-    fn deref(&self) -> &Path {
-        &self.0
-    }
-}
-
-fn scratch_root(tag: &str) -> Scratch {
-    static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("brain-sdk-restore-pipeline-{tag}-{}-{n}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
-    std::fs::create_dir_all(&dir).unwrap();
-    Scratch(dir)
-}
+use brain_testutil::Scratch;
 
 fn with_models_dir<T>(root: &Path, f: impl FnOnce() -> T) -> T {
     let _serial = brain_testutil::env_lock();
@@ -146,7 +123,7 @@ fn from_pretrained_rejects_an_unparseable_model_id() {
 
 #[test]
 fn from_pretrained_names_the_missing_role_when_the_store_is_empty() {
-    let root = scratch_root("missing");
+    let root = Scratch::dir("brain-sdk-restore-pipeline-missing");
     mark_locally_present(&root, "local", "codeformer-empty-test");
 
     let err = with_models_dir(&root, || brain::RestorePipeline::from_pretrained("local/codeformer-empty-test").unwrap_err());
@@ -175,7 +152,7 @@ fn rgb8_gradient(w: u32, h: u32) -> brain::Image {
 /// own doc explains the two real bugs fixing this took.
 #[test]
 fn from_pretrained_restores_a_real_complete_fixture_end_to_end() {
-    let root = scratch_root("restore");
+    let root = Scratch::dir("brain-sdk-restore-pipeline-restore");
     write_complete_codeformer_checkpoint(&root.join("sczhou").join("codeformer.pth"));
     mark_locally_present(&root, "local", "codeformer-sdk-test");
 
@@ -199,7 +176,7 @@ fn from_pretrained_restores_a_real_complete_fixture_end_to_end() {
 /// the SAME real fixture, never a panic.
 #[test]
 fn restore_with_rejects_fidelity_out_of_range() {
-    let root = scratch_root("bad-fidelity");
+    let root = Scratch::dir("brain-sdk-restore-pipeline-bad-fidelity");
     write_complete_codeformer_checkpoint(&root.join("sczhou").join("codeformer.pth"));
     mark_locally_present(&root, "local", "codeformer-fidelity-test");
 
@@ -224,7 +201,7 @@ fn restore_with_rejects_fidelity_out_of_range() {
 /// network access at any point.
 #[test]
 fn from_pretrained_resolves_a_real_fixture_at_its_own_named_path_with_no_store_local_shortcut() {
-    let root = scratch_root("no-shortcut");
+    let root = Scratch::dir("brain-sdk-restore-pipeline-no-shortcut");
     write_complete_codeformer_checkpoint(&root.join("sczhou").join("CodeFormer").join("codeformer.pth"));
 
     let pipe = with_models_dir(&root, || brain::RestorePipeline::from_pretrained("sczhou/CodeFormer"));
@@ -239,7 +216,7 @@ fn from_pretrained_resolves_a_real_fixture_at_its_own_named_path_with_no_store_l
 /// `Error::Missing`, never a connection-error-flavored `Error::Download`.
 #[test]
 fn download_policy_offline_never_touches_the_network() {
-    let root = scratch_root("offline");
+    let root = Scratch::dir("brain-sdk-restore-pipeline-offline");
     let _serial = brain_testutil::env_lock();
     std::env::set_var("BRAIN_MODELS_DIR", &*root);
     std::env::set_var("BRAIN_HUB_ENDPOINT", "http://127.0.0.1:1");

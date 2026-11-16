@@ -11,34 +11,13 @@
 //! universal one: it covers [`PROMPT_WITHIN_VOCAB`] and every id the tiny
 //! model's 23-wide LM head can sample, so the decode side round-trips too.
 
-use std::path::{Path, PathBuf};
+pub use brain_testutil::Scratch;
 
-/// A fixture file or directory that deletes itself when the test ends.
-pub struct Scratch(pub PathBuf);
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        if self.0.is_dir() {
-            std::fs::remove_dir_all(&self.0).ok();
-        } else {
-            std::fs::remove_file(&self.0).ok();
-        }
-    }
-}
-
-impl std::ops::Deref for Scratch {
-    type Target = Path;
-    fn deref(&self) -> &Path {
-        &self.0
-    }
-}
-
-/// A fresh path in the temp directory, unique per process, call and `tag`,
-/// so tests running in parallel never share a fixture file.
-pub fn scratch_path(tag: &str, ext: &str) -> PathBuf {
-    static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    std::env::temp_dir().join(format!("brain-sdk-{tag}-{}-{n}.{ext}", std::process::id()))
+/// A fresh fixture path `brain-sdk-<tag>-<pid>-<n>.<ext>` in the temp
+/// directory, removed (file or directory) when the guard drops, so tests
+/// running in parallel never share a fixture and a failing one leaks none.
+pub fn scratch(tag: &str, ext: &str) -> Scratch {
+    Scratch::file(&format!("brain-sdk-{tag}"), &format!(".{ext}"))
 }
 
 /// The fixture vocabulary: one id per letter, exactly as wide as the tiny
@@ -58,9 +37,9 @@ pub fn tiny_tokenizer(tag: &str) -> Scratch {
     let vocab: serde_json::Map<String, serde_json::Value> =
         VOCAB_LETTERS.enumerate().map(|(id, b)| (byte_encoder[b as usize].to_string(), serde_json::json!(id as u32))).collect();
     assert_eq!(vocab.len(), qwen3::QwenConfig::tiny().vocab as usize, "the vocab must exactly cover the tiny config's lm_head width");
-    let path = scratch_path(tag, "tokenizer.json");
+    let path = scratch(tag, "tokenizer.json");
     std::fs::write(&path, serde_json::to_vec(&serde_json::json!({ "model": { "vocab": vocab, "merges": [] } })).unwrap()).unwrap();
-    Scratch(path)
+    path
 }
 
 /// A real, forward-capable `QwenConfig::tiny()` checkpoint: every tensor
@@ -68,7 +47,7 @@ pub fn tiny_tokenizer(tag: &str) -> Scratch {
 /// not all-zero, so a degenerate all-equal softmax cannot mask a real
 /// indexing bug.
 pub fn tiny_qwen3_checkpoint(tag: &str) -> Scratch {
-    let path = scratch_path(tag, "safetensors");
+    let path = scratch(tag, "safetensors");
     let cfg = qwen3::QwenConfig::tiny();
     let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = cfg
         .param_list()
@@ -79,5 +58,5 @@ pub fn tiny_qwen3_checkpoint(tag: &str) -> Scratch {
         })
         .collect();
     checkpoint::st::save_safetensors(path.to_str().unwrap(), &tensors, &cfg.to_json(), None).unwrap();
-    Scratch(path)
+    path
 }

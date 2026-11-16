@@ -36,7 +36,8 @@ use axum::Router;
 use brain::decision::{Answer, Opt, Question, State};
 use decisions::resident::DecisionResident;
 use brain::decision_run::{train, TrainRun};
-use decisions::fixtures::{synthetic_jsonl, write_decide, write_laya, Scratch, SyntheticTask};
+use decisions::fixtures::{synthetic_jsonl, write_decide, write_laya, SyntheticTask};
+use brain_testutil::Scratch;
 use residency::budget::Budgets;
 use residency::{Device, Executor, Policy, ResidentModel};
 use serde_json::{json, Value};
@@ -190,14 +191,14 @@ async fn gate(id: &str, dir: &Path) {
 
 #[tokio::test]
 async fn laya_over_the_wire_agrees_with_laya_through_the_sdk() {
-    let d = Scratch::new("agree-laya");
+    let d = Scratch::dir("agree-laya");
     write_laya(&d, 48);
     gate("acme/laya", &d).await;
 }
 
 #[tokio::test]
 async fn decide_over_the_wire_agrees_with_decide_through_the_sdk() {
-    let d = Scratch::new("agree-decide");
+    let d = Scratch::dir("agree-decide");
     write_decide(&d, 11);
     gate("acme/triage", &d).await;
 }
@@ -208,7 +209,7 @@ async fn decide_over_the_wire_agrees_with_decide_through_the_sdk() {
 /// trained head.
 #[tokio::test]
 async fn a_trained_laya_head_over_the_wire_agrees_with_the_sdk() {
-    let root = Scratch::new("agree-laya-trained");
+    let root = Scratch::dir("agree-laya-trained");
     write_laya(&root.join("base"), 48);
     std::fs::write(root.join("data.jsonl"), synthetic_jsonl(&SyntheticTask::new(12, 4, 4))).unwrap();
     let mut run = TrainRun::new(root.join("data.jsonl"), root.join("base").to_str().unwrap(), root.join("tuned"));

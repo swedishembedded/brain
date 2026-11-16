@@ -26,33 +26,10 @@
 //! not" scope `TtsPipeline`'s/`TranscribePipeline`'s own tests already
 //! accepted for their own (different) ceiling.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use wan::config::WanConfig;
-
-struct Scratch(PathBuf);
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        std::fs::remove_dir_all(&self.0).ok();
-    }
-}
-
-impl std::ops::Deref for Scratch {
-    type Target = Path;
-    fn deref(&self) -> &Path {
-        &self.0
-    }
-}
-
-fn scratch_root(tag: &str) -> Scratch {
-    static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("brain-sdk-video-pipeline-{tag}-{}-{n}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
-    std::fs::create_dir_all(&dir).unwrap();
-    Scratch(dir)
-}
+use brain_testutil::Scratch;
 
 fn with_models_dir<T>(root: &Path, f: impl FnOnce() -> T) -> T {
     let _serial = brain_testutil::env_lock();
@@ -164,7 +141,7 @@ fn from_pretrained_rejects_an_unparseable_model_id() {
 /// missing role.
 #[test]
 fn from_pretrained_names_the_missing_role_when_the_store_is_empty() {
-    let root = scratch_root("missing");
+    let root = Scratch::dir("brain-sdk-video-pipeline-missing");
     let dir = root.join("local").join("wan-empty-test");
     std::fs::create_dir_all(&dir).unwrap();
     checkpoint::st::save_safetensors(dir.join("model.brain.safetensors").to_str().unwrap(), &[("w".to_string(), vec![4], vec![1.0f32, 2.0, 3.0, 4.0])], &serde_json::json!({}), None).unwrap();
@@ -195,7 +172,7 @@ fn from_pretrained_names_the_missing_role_when_the_store_is_empty() {
 /// than resolution itself failing.
 #[test]
 fn from_pretrained_resolves_wan_from_a_real_local_fixture_with_no_network_access() {
-    let root = scratch_root("resolve");
+    let root = Scratch::dir("brain-sdk-video-pipeline-resolve");
     let dir = root.join("local").join("wan-sdk-test");
     write_wan_checkpoint(&dir);
     write_unrelated_sibling(&root);
@@ -225,7 +202,7 @@ fn from_pretrained_resolves_wan_from_a_real_local_fixture_with_no_network_access
 /// `Error::Missing`, never a connection-error-flavored `Error::Download`.
 #[test]
 fn download_policy_offline_never_touches_the_network() {
-    let root = scratch_root("offline");
+    let root = Scratch::dir("brain-sdk-video-pipeline-offline");
     let _serial = brain_testutil::env_lock();
     std::env::set_var("BRAIN_MODELS_DIR", &*root);
     std::env::set_var("BRAIN_HUB_ENDPOINT", "http://127.0.0.1:1");

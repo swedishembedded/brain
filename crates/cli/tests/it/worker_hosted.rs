@@ -19,7 +19,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use capability::{ActionResult, Invocation};
-use decisions::fixtures::{write_decide, write_laya, Scratch};
+use decisions::fixtures::{write_decide, write_laya};
+use brain_testutil::Scratch;
 use decisions::resident::{serve_all, DecisionServeConfig};
 use residency::budget::Budgets;
 use residency::supervised::{Supervision, WorkerHosting};
@@ -53,7 +54,7 @@ fn the_worker_mode_is_internal_and_refused_from_a_terminal() {
 }
 
 fn store() -> Scratch {
-    let s = Scratch::new("worker-hosted");
+    let s = Scratch::dir("worker-hosted");
     write_laya(&s.join("acme/laya"), 48);
     write_decide(&s.join("acme/triage"), 3);
     s

@@ -18,8 +18,8 @@ use common::{tiny_tokenizer, PROMPT_WITHIN_VOCAB};
 
 /// `cfg` as a Llama checkpoint directory: HF tensor names, a
 /// `LlamaForCausalLM` config, no QK-norm, an untied head.
-fn tiny_llama_dir(tag: &str, cfg: qwen3::QwenConfig) -> std::path::PathBuf {
-    let dir = common::scratch_path(tag, "d");
+fn tiny_llama_dir(tag: &str, cfg: qwen3::QwenConfig) -> common::Scratch {
+    let dir = common::scratch(tag, "d");
     write_tiny_llama(&dir, tag, cfg);
     dir
 }
@@ -55,7 +55,6 @@ fn a_llama_checkpoint_directory_loads_and_generates() {
     assert_eq!(pipe.precision(), "fp32", "a tiny checkpoint defaults to fp32");
     let out = pipe.generate_with(PROMPT_WITHIN_VOCAB, brain::TextGenerationOptions::new().chat(false).max_new_tokens(3)).unwrap();
     assert_eq!((out.prompt_tokens as usize, out.completion_tokens), (PROMPT_WITHIN_VOCAB.len(), 3));
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -69,7 +68,6 @@ fn the_precision_asked_for_is_the_one_built() {
     assert_eq!(out.completion_tokens, 2);
     let err = brain::TextGenerationPipeline::builder(dir.to_str().unwrap()).precision("fp8").map(|_| ()).unwrap_err();
     assert!(err.to_string().contains("fp8"), "{err}");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A checkpoint is loaded at the floating tier it stores its linears in when no precision is asked for: a bf16
@@ -77,8 +75,7 @@ fn the_precision_asked_for_is_the_one_built() {
 #[test]
 fn a_bf16_checkpoint_is_held_bf16_by_default() {
     let cfg = qwen3::QwenConfig { qk_norm: false, tie_embeddings: false, ..qwen3::QwenConfig::tiny() };
-    let dir = common::scratch_path("text-bf16-default", "d");
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = common::scratch("text-bf16-default", "d");
     let weights = qwen3::init_weights(&cfg, 7);
     qwen3::export::export_hf(&weights, &cfg, &dir, &qwen3::export::HfExport { dtype: qwen3::export::HfDtype::Bf16, ..Default::default() }, &mut || true).unwrap();
     std::fs::copy(&*tiny_tokenizer("text-bf16-default"), dir.join("tokenizer.json")).unwrap();
@@ -88,7 +85,6 @@ fn a_bf16_checkpoint_is_held_bf16_by_default() {
     assert_eq!(out.completion_tokens, 2);
     let fp32 = brain::TextGenerationPipeline::builder(dir.to_str().unwrap()).precision("fp32").unwrap().load().expect("an fp32 build");
     assert_eq!(fp32.precision(), "fp32", "the precision asked for wins");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A hub id names one repo: with two checkpoints of the same architecture in
@@ -97,13 +93,12 @@ fn a_bf16_checkpoint_is_held_bf16_by_default() {
 #[test]
 fn a_hub_id_loads_that_repo_and_no_other() {
     let _serial = brain_testutil::env_lock();
-    let root = common::scratch_path("text-store-two", "d");
+    let root = common::scratch("text-store-two", "d");
     write_tiny_llama(&root.join("acme").join("one"), "text-store-one", qwen3::QwenConfig::tiny());
     write_tiny_llama(&root.join("acme").join("two"), "text-store-two", qwen3::QwenConfig::tiny());
-    std::env::set_var("BRAIN_MODELS_DIR", &root);
+    std::env::set_var("BRAIN_MODELS_DIR", &*root);
     let loaded = brain::TextGenerationPipeline::builder("acme/two").download_policy(brain::DownloadPolicy::Offline).load();
     std::env::remove_var("BRAIN_MODELS_DIR");
-    let _ = std::fs::remove_dir_all(&root);
     let pipe = loaded.expect("acme/two resolves on its own");
     assert!(pipe.identity().base.path.ends_with("acme/two"), "{:?}", pipe.identity());
 }

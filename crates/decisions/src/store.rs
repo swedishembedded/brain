@@ -283,18 +283,19 @@ fn scan_store(root: &Path) -> Vec<(String, PathBuf)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fixtures::{write_decide, write_laya, write_laya_head_only, Scratch};
+    use crate::fixtures::{write_decide, write_laya, write_laya_head_only};
+    use brain_testutil::Scratch;
     use crate::manifest::FILE;
 
     fn store() -> Scratch {
-        let s = Scratch::new("store");
+        let s = Scratch::dir("store");
         write_laya(&s.join("convaiinnovations/laya"), 48);
         s
     }
 
     #[test]
     fn the_weights_of_a_head_only_directory_are_its_head_plus_the_base_it_names() {
-        let s = Scratch::new("store-weights-bytes");
+        let s = Scratch::dir("store-weights-bytes");
         write_laya(&s.join("convai/laya"), 48);
         write_laya_head_only(&s.join("acme/trained"), &s.join("convai/laya"), "convai/laya", 5);
         let size = |p: &str| std::fs::metadata(s.join(p)).unwrap().len();
@@ -317,7 +318,7 @@ mod tests {
 
     #[test]
     fn a_missing_directory_is_not_installed_and_says_what_to_pull() {
-        let s = Scratch::new("store-missing");
+        let s = Scratch::dir("store-missing");
         let r = inspect("acme/gone", &s.join("acme/gone"), true);
         assert!(matches!(r.readiness, Readiness::NotInstalled { .. }));
         assert_eq!(r.to_json()["hint"], "run `brain pull acme/gone`");
@@ -335,7 +336,7 @@ mod tests {
 
     #[test]
     fn a_saved_decide_model_is_ready_but_a_bare_encoder_is_not_a_decision_model() {
-        let s = Scratch::new("store-decide");
+        let s = Scratch::dir("store-decide");
         write_decide(&s.join("acme/triage"), 1);
         assert_eq!(inspect("acme/triage", &s.join("acme/triage"), false).readiness, Readiness::Ready);
         // A published encoder's config.json carries no head mark.

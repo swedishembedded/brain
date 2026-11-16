@@ -188,7 +188,8 @@ impl Action for FamilyAction {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fixtures::{write_laya, Scratch};
+    use crate::fixtures::write_laya;
+    use brain_testutil::Scratch;
     use capability::classify;
 
     fn provider(root: &Scratch) -> DecisionProvider {
@@ -204,7 +205,7 @@ mod tests {
 
     #[test]
     fn models_and_select_load_nothing_and_work_on_an_empty_host() {
-        let s = Scratch::new("provider-empty");
+        let s = Scratch::dir("provider-empty");
         let p = provider(&s);
         let out = p.action("models").unwrap().run(&Invocation::new(), &mut |_| {}).unwrap();
         assert_eq!(out.outputs["models"], json!([]));
@@ -216,7 +217,7 @@ mod tests {
 
     #[test]
     fn models_reports_an_installed_unvalidated_model_as_ready_and_not_validated() {
-        let s = Scratch::new("provider-models");
+        let s = Scratch::dir("provider-models");
         write_laya(&s.join("a/laya"), 48);
         let out = provider(&s).action("models").unwrap().run(&Invocation::new(), &mut |_| {}).unwrap();
         let m = &out.outputs["models"][0];
@@ -225,7 +226,7 @@ mod tests {
 
     #[test]
     fn decide_on_auto_with_nothing_validated_fails_as_not_installed_with_the_reason() {
-        let s = Scratch::new("provider-auto");
+        let s = Scratch::dir("provider-auto");
         write_laya(&s.join("a/laya"), 48);
         let inv = Invocation::new().set("state", json!("s")).set("questions", json!(r#"[{"id":"q","type":"noul","instruction":"x"}]"#)).set("model", json!("auto"));
         let e = provider(&s).action("decide").unwrap().run(&inv, &mut |_| {}).expect_err("must fail");

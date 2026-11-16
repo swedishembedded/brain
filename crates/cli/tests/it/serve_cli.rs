@@ -19,6 +19,7 @@
 //! guarantees stdin reads EOF immediately either way.
 
 use std::process::{Command, Stdio};
+use brain_testutil::Scratch;
 
 fn bin() -> String {
     // Cargo names the binary it built for this test; a path derived from the test
@@ -165,10 +166,10 @@ fn status_exits_nonzero_when_no_server_is_running() {
 /// answer from the directory `--runtime-dir` names.
 #[test]
 fn status_reads_the_runtime_dir_flag_after_a_leading_global_flag() {
-    let dir = Scratch::new("status-runtime-dir");
+    let dir = Scratch::dir("brain-serve-cli-status-runtime-dir");
     let out = Command::new(bin())
         .args(["--device", "cpu", "serve", "--status", "--runtime-dir"])
-        .arg(&dir.0)
+        .arg(&*dir)
         .stdin(Stdio::null())
         .env_remove("BRAIN_DEVICE")
         .output()
@@ -176,24 +177,6 @@ fn status_reads_the_runtime_dir_flag_after_a_leading_global_flag() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert_eq!(out.status.code(), Some(3), "stdout: {stdout}; stderr: {}", String::from_utf8_lossy(&out.stderr));
     assert!(stdout.contains("not running"), "stdout: {stdout}");
-}
-
-/// A scratch directory for one test, removed when it ends.
-struct Scratch(std::path::PathBuf);
-
-impl Scratch {
-    fn new(tag: &str) -> Scratch {
-        let dir = std::env::temp_dir().join(format!("brain-serve-cli-{tag}-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
-        Scratch(dir)
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        std::fs::remove_dir_all(&self.0).ok();
-    }
 }
 
 /// The card id a trainer records: `<vendor>/<repo>:<owner>:<name>:<tag>`.
@@ -246,10 +229,10 @@ fn serve_command(dir: &std::path::Path, base: &std::path::Path, extra: &[&str]) 
 /// digest a fine-tune reports for that file.
 #[test]
 fn a_pinned_adapter_is_reported_by_digest_at_startup() {
-    let dir = Scratch::new("pin");
-    let (base, adapter) = write_base_and_adapter(&dir.0, 1.0, None);
+    let dir = Scratch::dir("brain-serve-cli-pin");
+    let (base, adapter) = write_base_and_adapter(&dir, 1.0, None);
     let digest = brain_modelstore::fetch::file_digest(&adapter).unwrap();
-    let mut child = serve_command(&dir.0, &base, &["--adapter", adapter.to_str().unwrap()]).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().expect("spawn brain serve");
+    let mut child = serve_command(&dir, &base, &["--adapter", adapter.to_str().unwrap()]).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().expect("spawn brain serve");
 
     let expected = format!("brain serve: {ADAPTER_ID} adapter={ADAPTER_ID} digest={digest}");
     let (tx, rx) = std::sync::mpsc::channel();
@@ -282,11 +265,11 @@ fn a_pinned_adapter_is_reported_by_digest_at_startup() {
 /// the environment selects nothing, so an adapter with no flag is refused.
 #[test]
 fn the_environment_names_no_checkpoint() {
-    let dir = Scratch::new("pin-env");
-    let (base, adapter) = write_base_and_adapter(&dir.0, 1.0, None);
-    let models = dir.0.join("models");
+    let dir = Scratch::dir("brain-serve-cli-pin-env");
+    let (base, adapter) = write_base_and_adapter(&dir, 1.0, None);
+    let models = dir.join("models");
     std::fs::create_dir_all(&models).unwrap();
-    let run_dir = dir.0.join("run");
+    let run_dir = dir.join("run");
     let out = Command::new(bin())
         .args(["serve", "--openai", "127.0.0.1:0", "--seed", "1", "--models-dir", models.to_str().unwrap(), "--runtime-dir", run_dir.to_str().unwrap(), "--adapter", adapter.to_str().unwrap()])
         .stdin(Stdio::null())
@@ -303,14 +286,14 @@ fn the_environment_names_no_checkpoint() {
 /// by the flag.
 #[test]
 fn an_adapter_with_no_checkpoint_names_the_flag_that_selects_one() {
-    let dir = Scratch::new("pin-no-base");
-    let (_, adapter) = write_base_and_adapter(&dir.0, 1.0, None);
-    let models = dir.0.join("models");
+    let dir = Scratch::dir("brain-serve-cli-pin-no-base");
+    let (_, adapter) = write_base_and_adapter(&dir, 1.0, None);
+    let models = dir.join("models");
     std::fs::create_dir_all(&models).unwrap();
     let out = Command::new(bin())
         .args(["serve", "--openai", "127.0.0.1:0", "--seed", "1", "--models-dir", models.to_str().unwrap(), "--adapter", adapter.to_str().unwrap()])
         .arg("--runtime-dir")
-        .arg(dir.0.join("run"))
+        .arg(dir.join("run"))
         .stdin(Stdio::null())
         .args(["--device", "cpu"])
         .env_remove("BRAIN_QWEN_WEIGHTS")
@@ -325,9 +308,9 @@ fn an_adapter_with_no_checkpoint_names_the_flag_that_selects_one() {
 /// at startup with that reason on stderr and a non-zero exit, never silently.
 #[test]
 fn a_pinned_adapter_with_an_unusable_id_is_refused_with_its_reason() {
-    let dir = Scratch::new("pin-bad-id");
-    let (base, adapter) = write_named_adapter(&dir.0, 1.0, None, "support:v3");
-    let out = serve_command(&dir.0, &base, &["--adapter", adapter.to_str().unwrap()]).output().expect("run brain serve");
+    let dir = Scratch::dir("brain-serve-cli-pin-bad-id");
+    let (base, adapter) = write_named_adapter(&dir, 1.0, None, "support:v3");
+    let out = serve_command(&dir, &base, &["--adapter", adapter.to_str().unwrap()]).output().expect("run brain serve");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success(), "an unusable adapter id must not serve; stderr:\n{stderr}");
     assert!(stderr.contains("support:v3") && stderr.contains("not a model reference"), "stderr must say why; got:\n{stderr}");
@@ -337,11 +320,11 @@ fn a_pinned_adapter_with_an_unusable_id_is_refused_with_its_reason() {
 /// binds, naming both digests.
 #[test]
 fn a_pinned_adapter_for_another_base_is_a_startup_error() {
-    let dir = Scratch::new("pin-mismatch");
-    let trained_on = dir.0.join("trained-on.safetensors");
+    let dir = Scratch::dir("brain-serve-cli-pin-mismatch");
+    let trained_on = dir.join("trained-on.safetensors");
     checkpoint::st::save_safetensors(trained_on.to_str().unwrap(), &[("embed.weight".to_string(), vec![4], vec![9.0; 4])], &serde_json::json!({}), None).unwrap();
-    let (base, adapter) = write_base_and_adapter(&dir.0, 1.0, Some(&trained_on));
-    let out = serve_command(&dir.0, &base, &["--adapter", adapter.to_str().unwrap()]).output().expect("run brain serve");
+    let (base, adapter) = write_base_and_adapter(&dir, 1.0, Some(&trained_on));
+    let out = serve_command(&dir, &base, &["--adapter", adapter.to_str().unwrap()]).output().expect("run brain serve");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success(), "a mismatched base must not serve; stderr:\n{stderr}");
     for file in [&trained_on, &base] {
@@ -355,12 +338,12 @@ fn a_pinned_adapter_for_another_base_is_a_startup_error() {
 /// loaded into a bank that cannot hold its linears.
 #[test]
 fn a_pinned_qwen35_adapter_is_refused_on_a_qwen3_base_by_family() {
-    let dir = Scratch::new("pin-qwen35");
-    let (base, _) = write_base_and_adapter(&dir.0, 1.0, None);
-    let adapter = dir.0.join("qwen35-adapter.safetensors");
+    let dir = Scratch::dir("brain-serve-cli-pin-qwen35");
+    let (base, _) = write_base_and_adapter(&dir, 1.0, None);
+    let adapter = dir.join("qwen35-adapter.safetensors");
     let linears = [brain_testutil::adapters::Linear { base: "blocks.0.linear_attn.in_proj_qkv.weight".to_string(), out: 4, inn: 2 }];
     brain_testutil::adapters::write_lora_adapter_of("qwen35", &adapter, ADAPTER_ID, "local/base", 2, &linears, 1);
-    let out = serve_command(&dir.0, &base, &["--adapter", adapter.to_str().unwrap()]).output().expect("run brain serve");
+    let out = serve_command(&dir, &base, &["--adapter", adapter.to_str().unwrap()]).output().expect("run brain serve");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success(), "a Qwen3.8 adapter must not serve on a Qwen3 base; stderr:\n{stderr}");
     assert!(stderr.contains("qwen35") && stderr.contains("qwen"), "stderr must name both families; got:\n{stderr}");
@@ -393,18 +376,18 @@ fn a_pinned_adapter_cannot_also_follow_releases() {
 /// scanned (the positive control that proves the resolvers ran at all).
 #[test]
 fn every_startup_resolver_scans_the_models_dir_flag_not_the_environment_store() {
-    let dir = Scratch::new("models-dir-flag");
-    let flag_store = dir.0.join("flag-store");
-    let env_store = dir.0.join("env-store");
-    let home = dir.0.join("home");
+    let dir = Scratch::dir("brain-serve-cli-models-dir-flag");
+    let flag_store = dir.join("flag-store");
+    let env_store = dir.join("env-store");
+    let home = dir.join("home");
     for d in [&flag_store, &env_store, &home] {
         std::fs::create_dir_all(d).unwrap();
     }
-    let ready = dir.0.join("ready");
+    let ready = dir.join("ready");
     let mut child = Command::new(bin())
         .args(["serve", "--openai", "127.0.0.1:0", "--models-dir", flag_store.to_str().unwrap(), "--ready-file", ready.to_str().unwrap()])
         .arg("--runtime-dir")
-        .arg(dir.0.join("run"))
+        .arg(dir.join("run"))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())

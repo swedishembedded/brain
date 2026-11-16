@@ -478,7 +478,8 @@ pub fn rollback(dir: &Path) -> Result<Pointer, String> {
 mod tests {
     use super::*;
     use crate::evaluation::{Baseline, FamilyReport, Regret};
-    use crate::fixtures::{write_decide, Scratch};
+    use crate::fixtures::write_decide;
+    use brain_testutil::Scratch;
         use std::collections::BTreeMap;
 
     fn policy_json(extra: &str) -> String {
@@ -566,7 +567,7 @@ mod tests {
 
     /// A store directory holding checkpoints `names`, each a complete decide model.
     fn series(names: &[&str]) -> Scratch {
-        let root = Scratch::new("promotion");
+        let root = Scratch::dir("promotion");
         for (i, name) in names.iter().enumerate() {
             write_decide(&root.join(name), 100 + i as u64);
         }
@@ -665,7 +666,7 @@ mod tests {
         use crate::select::Rule;
         use crate::store::Catalog;
 
-        let root = Scratch::new("promotion-auto");
+        let root = Scratch::dir("promotion-auto");
         write_laya(&root.join("acme/stock-laya"), 48);
         write_decide(&root.join("acme/stock-decide"), 1);
         write_decide(&root.join("acme/tuned-v1"), 2);

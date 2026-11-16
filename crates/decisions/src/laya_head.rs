@@ -202,7 +202,8 @@ pub fn identity(dir: &Path, base: &BaseRef) -> Result<String, String> {
 mod tests {
     use super::*;
     use crate::engine::{Backend, LayaWeights};
-    use crate::fixtures::{write_laya, write_laya_head_only, Scratch};
+    use crate::fixtures::{write_laya, write_laya_head_only};
+    use brain_testutil::Scratch;
     use crate::manifest::{verify_identity, weights_identity, DecisionManifest};
 
     fn base_in(root: &Path) -> PathBuf {
@@ -213,7 +214,7 @@ mod tests {
 
     #[test]
     fn the_layout_references_the_backbone_instead_of_copying_it() {
-        let s = Scratch::new("head-only-layout");
+        let s = Scratch::dir("head-only-layout");
         let base = base_in(&s);
         let out = s.join("out");
         write_laya_head_only(&out, &base, "acme/laya", 99);
@@ -228,7 +229,7 @@ mod tests {
 
     #[test]
     fn a_head_only_directory_reads_as_the_base_with_the_trained_head_in_place() {
-        let s = Scratch::new("head-only-read");
+        let s = Scratch::dir("head-only-read");
         let base = base_in(&s);
         let out = s.join("out");
         write_laya_head_only(&out, &base, "acme/laya", 99);
@@ -243,7 +244,7 @@ mod tests {
 
     #[test]
     fn the_base_is_found_in_the_store_the_directory_sits_in_without_a_recorded_path() {
-        let s = Scratch::new("head-only-store");
+        let s = Scratch::dir("head-only-store");
         write_laya(&s.join("convai/laya"), 48);
         let out = s.join("acme/trained");
         write_laya_head_only(&out, &s.join("convai/laya"), "convai/laya", 99);
@@ -259,7 +260,7 @@ mod tests {
 
     #[test]
     fn an_absent_base_is_not_installed_and_another_base_is_refused_and_neither_names_a_path() {
-        let s = Scratch::new("head-only-base");
+        let s = Scratch::dir("head-only-base");
         let base = base_in(&s);
         let out = s.join("out");
         write_laya_head_only(&out, &base, "acme/laya", 99);
@@ -282,7 +283,7 @@ mod tests {
 
     #[test]
     fn a_trained_directory_is_not_a_base_and_a_base_id_cannot_leave_the_store() {
-        let s = Scratch::new("head-only-chain");
+        let s = Scratch::dir("head-only-chain");
         let base = base_in(&s);
         let out = s.join("out");
         write_laya_head_only(&out, &base, "acme/laya", 99);
@@ -294,7 +295,7 @@ mod tests {
 
     #[test]
     fn the_weights_identity_covers_the_head_the_base_and_the_calibration() {
-        let s = Scratch::new("head-only-identity");
+        let s = Scratch::dir("head-only-identity");
         let base = base_in(&s);
         let a = s.join("a");
         let b = s.join("b");
@@ -316,7 +317,7 @@ mod tests {
 
     #[test]
     fn a_head_that_leaves_a_tensor_out_is_refused_by_name() {
-        let s = Scratch::new("head-only-incomplete");
+        let s = Scratch::dir("head-only-incomplete");
         let base = base_in(&s);
         let out = s.join("out");
         write_laya_head_only(&out, &base, "acme/laya", 99);

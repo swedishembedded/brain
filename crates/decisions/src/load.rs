@@ -101,7 +101,8 @@ pub fn load(id: &str, dir: &Path, make_gpu: impl FnOnce(Backend) -> Result<Gpu, 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fixtures::{write_decide, write_laya, write_laya_head_only, Scratch};
+    use crate::fixtures::{write_decide, write_laya, write_laya_head_only};
+    use brain_testutil::Scratch;
     use crate::laya_head::{BASE_FILE, HEAD_FILE};
     use crate::manifest::{weights_identity, FILE};
     use capability::classify;
@@ -116,7 +117,7 @@ mod tests {
 
     #[test]
     fn an_absent_model_is_not_installed_and_the_message_names_no_path() {
-        let s = Scratch::new("load-absent");
+        let s = Scratch::dir("load-absent");
         let dir = s.join("acme/gone");
         let e = load("acme/gone", &dir, dev).err().expect("must fail");
         assert_eq!(class(&e), FailureClass::NotInstalled);
@@ -126,7 +127,7 @@ mod tests {
 
     #[test]
     fn a_checkpoint_missing_a_file_is_not_installed() {
-        let s = Scratch::new("load-partial");
+        let s = Scratch::dir("load-partial");
         write_laya(&s, 48);
         std::fs::remove_file(s.join("model.safetensors")).unwrap();
         let e = load("a/b", &s, dev).err().expect("must fail");
@@ -136,7 +137,7 @@ mod tests {
 
     #[test]
     fn corrupt_weights_fail_to_load_without_leaking_the_path() {
-        let s = Scratch::new("load-corrupt");
+        let s = Scratch::dir("load-corrupt");
         write_laya(&s, 48);
         std::fs::write(s.join("model.safetensors"), b"not a safetensors file").unwrap();
         let e = load("a/b", &s, dev).err().expect("must fail");
@@ -146,7 +147,7 @@ mod tests {
 
     #[test]
     fn a_hash_that_does_not_match_the_weights_fails_to_load() {
-        let s = Scratch::new("load-hash");
+        let s = Scratch::dir("load-hash");
         write_laya(&s, 48);
         let wrong = format!("sha256:{}", "0".repeat(64));
         std::fs::write(s.join(FILE), format!(r#"{{"schema": 1, "weights_sha256": "{wrong}"}}"#)).unwrap();
@@ -157,7 +158,7 @@ mod tests {
 
     #[test]
     fn a_declared_context_the_checkpoint_does_not_hold_fails_to_load() {
-        let s = Scratch::new("load-ctx");
+        let s = Scratch::dir("load-ctx");
         write_laya(&s, 48);
         std::fs::write(s.join(FILE), r#"{"schema": 1, "max_input_tokens": 8192}"#).unwrap();
         let e = load("a/b", &s, dev).err().expect("must fail");
@@ -167,7 +168,7 @@ mod tests {
 
     #[test]
     fn a_device_that_cannot_be_built_fails_to_load() {
-        let s = Scratch::new("load-device");
+        let s = Scratch::dir("load-device");
         write_laya(&s, 48);
         let e = load("a/b", &s, |_| Err("no adapter".to_string())).err().expect("must fail");
         assert_eq!(class(&e), FailureClass::FailedToLoad);
@@ -176,13 +177,13 @@ mod tests {
 
     #[test]
     fn both_architectures_load_and_report_their_own_backend_and_context() {
-        let l = Scratch::new("load-laya");
+        let l = Scratch::dir("load-laya");
         write_laya(&l, 48);
         let loaded = load("a/laya", &l, dev).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(loaded.session.engine().backend(), Backend::Laya);
         assert_eq!(loaded.session.engine().max_input_tokens(), 48);
 
-        let d = Scratch::new("load-decide");
+        let d = Scratch::dir("load-decide");
         write_decide(&d, 2);
         let loaded = load("a/decide", &d, dev).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(loaded.session.engine().backend(), Backend::Decide);
@@ -192,7 +193,7 @@ mod tests {
     /// A base and a head-only directory over it whose manifest declares the
     /// weights identity, the way a training run writes it.
     fn head_only(tag: &str) -> Scratch {
-        let s = Scratch::new(tag);
+        let s = Scratch::dir(tag);
         write_laya(&s.join("base"), 48);
         write_laya_head_only(&s.join("out"), &s.join("base"), "acme/laya", 99);
         let identity = weights_identity(&s.join("out"), Backend::Laya).unwrap();

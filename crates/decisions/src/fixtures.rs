@@ -16,34 +16,7 @@
 //! expertise in testing model-serving stacks, you can procure our services by
 //! sending an email to info@swedishembedded.com.
 
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-
-/// A scratch directory that deletes itself when dropped.
-pub struct Scratch(PathBuf);
-
-impl Scratch {
-    pub fn new(tag: &str) -> Scratch {
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let n = NEXT.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("brain-decisions-{tag}-{}-{n}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("create scratch directory");
-        Scratch(dir)
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        std::fs::remove_dir_all(&self.0).ok();
-    }
-}
-
-impl std::ops::Deref for Scratch {
-    type Target = Path;
-    fn deref(&self) -> &Path {
-        &self.0
-    }
-}
+use std::path::Path;
 
 /// The tiny `decide` encoder shape: real tier-independent dimensions, a
 /// vocabulary just wide enough for [`write_decide`]'s tokenizer.
@@ -382,10 +355,11 @@ pub fn synthetic_jsonl(task: &SyntheticTask) -> String {
 mod tests {
     use super::*;
     use crate::engine::{Backend, DecideWeights, LayaWeights};
+    use brain_testutil::Scratch;
 
     #[test]
     fn the_decide_fixture_sniffs_and_reads_as_a_decision_model() {
-        let d = Scratch::new("fx-decide");
+        let d = Scratch::dir("fx-decide");
         write_decide(&d, 3);
         assert_eq!(Backend::sniff(&d), Some(Backend::Decide));
         DecideWeights::read(d.to_str().unwrap(), None, 0).expect("a complete decide fixture must read");
@@ -393,7 +367,7 @@ mod tests {
 
     #[test]
     fn the_laya_fixture_sniffs_and_reads_with_its_declared_context() {
-        let d = Scratch::new("fx-laya");
+        let d = Scratch::dir("fx-laya");
         write_laya(&d, 48);
         assert_eq!(Backend::sniff(&d), Some(Backend::Laya));
         let w = LayaWeights::read(d.to_str().unwrap(), None).expect("a complete laya fixture must read");

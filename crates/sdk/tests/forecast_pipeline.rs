@@ -30,31 +30,8 @@
 //! CLEANLY (a typed `brain::Error`, never a panic) on a deliberately
 //! incomplete weight-tensor set.
 
-use std::path::{Path, PathBuf};
-
-/// A fixture models directory that deletes itself when the test ends.
-struct Scratch(PathBuf);
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        std::fs::remove_dir_all(&self.0).ok();
-    }
-}
-
-impl std::ops::Deref for Scratch {
-    type Target = Path;
-    fn deref(&self) -> &Path {
-        &self.0
-    }
-}
-
-fn scratch_root(tag: &str) -> Scratch {
-    static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("brain-sdk-forecast-pipeline-{tag}-{}-{n}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    Scratch(dir)
-}
+use std::path::Path;
+use brain_testutil::Scratch;
 
 /// Run `f` with `BRAIN_MODELS_DIR` pointed at `root`, serialized against
 /// every other test in this binary that also touches process environment.
@@ -132,7 +109,7 @@ fn kronos_tokenizer_json() -> serde_json::Value {
 /// real checkpoint tensors - see this file's module doc).
 #[test]
 fn from_pretrained_resolves_timesfm3_from_a_real_local_fixture_with_no_network_access() {
-    let root = scratch_root("timesfm3");
+    let root = Scratch::dir("brain-sdk-forecast-pipeline-timesfm3");
     write_timesfm3_hfdir(&root.join("google").join("timesfm-3.0-pytorch"));
     mark_locally_present(&root, "local", "forecast-sdk-test-timesfm3", "timesfm3");
 
@@ -153,7 +130,7 @@ fn from_pretrained_resolves_timesfm3_from_a_real_local_fixture_with_no_network_a
 /// deliberately incomplete weight-tensor set.
 #[test]
 fn from_pretrained_resolves_kronos_from_a_real_local_fixture_with_no_network_access() {
-    let root = scratch_root("kronos");
+    let root = Scratch::dir("brain-sdk-forecast-pipeline-kronos");
     write_kronos_hfdir(&root.join("NeoQuasar").join("Kronos-base"), &kronos_decoder_json());
     write_kronos_hfdir(&root.join("NeoQuasar").join("Kronos-Tokenizer-base"), &kronos_tokenizer_json());
     mark_locally_present(&root, "local", "forecast-sdk-test-kronos", "kronos");
@@ -181,7 +158,7 @@ fn from_pretrained_rejects_an_unparseable_model_id() {
 /// `Error::Missing`, never a connection-error-flavored `Error::Download`.
 #[test]
 fn download_policy_offline_never_touches_the_network() {
-    let root = scratch_root("offline");
+    let root = Scratch::dir("brain-sdk-forecast-pipeline-offline");
     let _serial = brain_testutil::env_lock();
     std::env::set_var("BRAIN_MODELS_DIR", &*root);
     std::env::set_var("BRAIN_HUB_ENDPOINT", "http://127.0.0.1:1");

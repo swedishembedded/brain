@@ -19,7 +19,7 @@ use crate::common;
 
 use brain::chat::{ChatDelta, FinishReason, ToolCall, ToolChoice, ToolSchema};
 use brain::{CancelToken, ChatMessage, ChatPipeline, ChatRequest};
-use common::{scratch_path, tiny_qwen3_checkpoint, tiny_tokenizer, Scratch, PROMPT_WITHIN_VOCAB, VOCAB_LETTERS};
+use common::{scratch, tiny_qwen3_checkpoint, tiny_tokenizer, Scratch, PROMPT_WITHIN_VOCAB, VOCAB_LETTERS};
 
 fn weather_tool() -> ToolSchema {
     ToolSchema::new(
@@ -174,7 +174,7 @@ fn an_unmet_tool_demand_is_reported() {
 /// The fixture tokenizer in a directory with a chat template that joins the
 /// turns' text, the way a checkpoint's tokenizer ships beside its template.
 fn tiny_chat_tokenizer(tag: &str) -> Scratch {
-    let dir = Scratch(scratch_path(tag, "d"));
+    let dir = scratch(tag, "d");
     std::fs::create_dir_all(&*dir).unwrap();
     std::fs::copy(&*tiny_tokenizer(tag), dir.join("tokenizer.json")).unwrap();
     std::fs::write(dir.join("chat_template.jinja"), "{% for m in messages %}{{ m['content'] }}{% endfor %}").unwrap();
@@ -295,7 +295,7 @@ fn tiny_adapter(tag: &str, card_id: &str) -> Scratch {
     let b: Vec<f32> = (0..numel / d_model).map(|i| i as f32 * 0.002).collect();
     let mut card = checkpoint::st::ModelCard::new(card_id, "qwen");
     card.adapter = Some(checkpoint::st::Adapter { kind: "lora".into(), rank: Some(1), alpha: Some(1.0), ..Default::default() });
-    let path = scratch_path(&format!("chat-{tag}"), "adapter.safetensors");
+    let path = scratch(&format!("chat-{tag}"), "adapter.safetensors");
     checkpoint::st::save_safetensors(
         path.to_str().unwrap(),
         &[(format!("{target}.lora_a"), vec![1, d_model as u64], a), (format!("{target}.lora_b"), vec![(numel / d_model) as u64, 1], b)],
@@ -303,7 +303,7 @@ fn tiny_adapter(tag: &str, card_id: &str) -> Scratch {
         Some(&card),
     )
     .unwrap();
-    Scratch(path)
+    path
 }
 
 /// A rank-1 adapter over every value and output projection, large enough to
@@ -325,9 +325,9 @@ fn moving_adapter_for(tag: &str, cfg: &qwen3::QwenConfig) -> Scratch {
     }
     let mut card = checkpoint::st::ModelCard::new("acme/moving-adapter", "qwen");
     card.adapter = Some(checkpoint::st::Adapter { kind: "lora".into(), rank: Some(1), alpha: Some(1.0), ..Default::default() });
-    let path = scratch_path(&format!("chat-{tag}"), "adapter.safetensors");
+    let path = scratch(&format!("chat-{tag}"), "adapter.safetensors");
     checkpoint::st::save_safetensors(path.to_str().unwrap(), &tensors, &serde_json::json!({}), Some(&card)).unwrap();
-    Scratch(path)
+    path
 }
 
 /// The identity names what was loaded, by content: the base checkpoint's
@@ -419,12 +419,12 @@ fn an_adapter_attaches_and_detaches_on_the_resident_base() {
 /// `tiny_qwen3_checkpoint` at `QwenConfig::tiny_i8`'s widths, which int8
 /// linears can take (the same vocab, so the same tokenizer).
 fn int8_able_checkpoint(tag: &str) -> Scratch {
-    let path = scratch_path(tag, "safetensors");
+    let path = scratch(tag, "safetensors");
     let cfg = qwen3::QwenConfig::tiny_i8();
     let tensors: Vec<(String, Vec<u64>, Vec<f32>)> =
         cfg.param_list().into_iter().map(|(name, numel)| (name, vec![numel as u64], (0..numel).map(|i| ((i % 13) as f32 - 6.0) * 0.01).collect())).collect();
     checkpoint::st::save_safetensors(path.to_str().unwrap(), &tensors, &cfg.to_json(), None).unwrap();
-    Scratch(path)
+    path
 }
 
 /// On an int8 base a fold would round the adapter's delta onto the weight

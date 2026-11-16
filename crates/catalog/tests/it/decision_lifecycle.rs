@@ -18,7 +18,8 @@
 use std::sync::Arc;
 
 use capability::{CancelToken, Invocation, Manifest, Progress, Provider};
-use decisions::fixtures::{synthetic_jsonl, write_decide, Scratch, SyntheticTask};
+use decisions::fixtures::{synthetic_jsonl, write_decide, SyntheticTask};
+use brain_testutil::Scratch;
 use decisions::provider::{served_manifest, DecisionProvider};
 use decisions::store::Catalog;
 use serde_json::json;
@@ -42,7 +43,7 @@ fn call(p: &dyn Provider, action: &str, params: serde_json::Value) -> Result<cap
 }
 
 fn world(tag: &str) -> Scratch {
-    let root = Scratch::new(tag);
+    let root = Scratch::dir(tag);
     write_decide(&root.join("base"), 11);
     std::fs::write(root.join("data.jsonl"), synthetic_jsonl(&SyntheticTask::new(12, 4, 4))).unwrap();
     root

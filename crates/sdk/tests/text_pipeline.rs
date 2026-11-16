@@ -42,15 +42,15 @@
 
 mod common;
 
-use common::{scratch_path, tiny_qwen3_checkpoint, tiny_tokenizer, Scratch, PROMPT_WITHIN_VOCAB, VOCAB_LETTERS};
+use common::{scratch, tiny_qwen3_checkpoint, tiny_tokenizer, Scratch, PROMPT_WITHIN_VOCAB, VOCAB_LETTERS};
 
 /// A minimal, real, valid safetensors checkpoint: one dummy tensor (this
 /// pipeline never reaches a real weight read - see this file's module doc)
 /// and `QwenConfig::tiny()`'s config in its header.
 fn tiny_checkpoint(tag: &str) -> Scratch {
-    let path = scratch_path(&format!("text-pipeline-{tag}"), "safetensors");
+    let path = scratch(&format!("text-pipeline-{tag}"), "safetensors");
     checkpoint::st::save_safetensors(path.to_str().unwrap(), &[("w".to_string(), vec![4], vec![1.0f32, 2.0, 3.0, 4.0])], &qwen3::QwenConfig::tiny().to_json(), None).unwrap();
-    Scratch(path)
+    path
 }
 
 /// A string that is neither an existing local file NOR a valid

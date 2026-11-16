@@ -303,7 +303,7 @@ mod tests {
         if gpu_disabled() {
             return;
         }
-        let scratch = Scratch::new("batch-test");
+        let scratch = Scratch::dir("qwen3tts-batch-test");
         let (talker_path, mtp_path) = synthetic_checkpoints(scratch.path(), 3);
         let sp = tiny_specials();
         let d = talker_test_cfg().d_model as usize;
@@ -416,7 +416,7 @@ mod tests {
         if gpu_disabled() {
             return;
         }
-        let scratch = Scratch::new("batch-test2");
+        let scratch = Scratch::dir("qwen3tts-batch-test2");
         let (talker_path, mtp_path) = synthetic_checkpoints(scratch.path(), 5);
         let sp = tiny_specials();
         let d = talker_test_cfg().d_model as usize;
@@ -454,7 +454,7 @@ mod tests {
         if gpu_disabled() {
             return;
         }
-        let scratch = Scratch::new("batch-cancel");
+        let scratch = Scratch::dir("qwen3tts-batch-cancel");
         let (talker_path, mtp_path) = synthetic_checkpoints(scratch.path(), 9);
         let sp = tiny_specials();
         let d = talker_test_cfg().d_model as usize;

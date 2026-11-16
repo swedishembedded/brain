@@ -32,30 +32,7 @@
 //! access needed at all.
 
 use std::path::{Path, PathBuf};
-
-/// A fixture models directory that deletes itself when the test ends.
-struct Scratch(PathBuf);
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        std::fs::remove_dir_all(&self.0).ok();
-    }
-}
-
-impl std::ops::Deref for Scratch {
-    type Target = Path;
-    fn deref(&self) -> &Path {
-        &self.0
-    }
-}
-
-fn scratch_root(tag: &str) -> Scratch {
-    static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("brain-sdk-embedding-pipeline-{tag}-{}-{n}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    Scratch(dir)
-}
+use brain_testutil::Scratch;
 
 #[cfg(feature = "vision")]
 fn with_models_dir<T>(root: &Path, f: impl FnOnce() -> T) -> T {
@@ -94,7 +71,7 @@ fn write_sdxl_tower_root(dir: &Path) {
 #[cfg(feature = "vision")]
 #[test]
 fn from_pretrained_resolves_clip_from_a_real_local_fixture_with_no_network_access() {
-    let root = scratch_root("clip");
+    let root = Scratch::dir("brain-sdk-embedding-pipeline-clip");
     write_sdxl_tower_root(&root.join("stabilityai").join("stable-diffusion-xl-base-1.0"));
     mark_locally_present(&root, "local", "embedding-sdk-test", "clip");
 
@@ -132,7 +109,7 @@ fn from_pretrained_rejects_an_unparseable_model_id() {
 #[cfg(feature = "vision")]
 #[test]
 fn from_pretrained_resolves_a_real_fixture_at_its_own_named_path_with_no_store_local_shortcut() {
-    let root = scratch_root("no-shortcut");
+    let root = Scratch::dir("brain-sdk-embedding-pipeline-no-shortcut");
     write_sdxl_tower_root(&root.join("stabilityai").join("stable-diffusion-xl-base-1.0"));
 
     let err = with_models_dir(&root, || brain::EmbeddingPipeline::from_pretrained("stabilityai/stable-diffusion-xl-base-1.0").unwrap_err());
@@ -151,7 +128,7 @@ fn from_pretrained_resolves_a_real_fixture_at_its_own_named_path_with_no_store_l
 #[cfg(feature = "vision")]
 #[test]
 fn download_policy_offline_never_touches_the_network() {
-    let root = scratch_root("offline");
+    let root = Scratch::dir("brain-sdk-embedding-pipeline-offline");
     let _serial = brain_testutil::env_lock();
     std::env::set_var("BRAIN_MODELS_DIR", &*root);
     std::env::set_var("BRAIN_HUB_ENDPOINT", "http://127.0.0.1:1");
@@ -203,7 +180,7 @@ fn write_qwen3_embed_base(dir: &Path, block: u32) -> PathBuf {
 #[cfg(feature = "text")]
 #[test]
 fn qwen3_backend_embeds_a_real_checkpoint_and_returns_a_unit_norm_vector() {
-    let root = scratch_root("qwen3-embed");
+    let root = Scratch::dir("brain-sdk-embedding-pipeline-qwen3-embed");
     let weights = write_qwen3_embed_base(&root, 32);
 
     let pipe = brain::EmbeddingPipeline::builder(weights.to_str().unwrap()).capacity(32).tokenizer(root.join("tokenizer.json").to_str().unwrap()).load().unwrap();
@@ -217,7 +194,7 @@ fn qwen3_backend_embeds_a_real_checkpoint_and_returns_a_unit_norm_vector() {
 #[cfg(feature = "text")]
 #[test]
 fn cosine_similarity_of_a_vector_with_itself_is_one() {
-    let root = scratch_root("qwen3-embed-cosine");
+    let root = Scratch::dir("brain-sdk-embedding-pipeline-qwen3-embed-cosine");
     let weights = write_qwen3_embed_base(&root, 32);
     let pipe = brain::EmbeddingPipeline::builder(weights.to_str().unwrap()).capacity(32).tokenizer(root.join("tokenizer.json").to_str().unwrap()).load().unwrap();
 
@@ -231,7 +208,7 @@ fn cosine_similarity_of_a_vector_with_itself_is_one() {
 #[cfg(feature = "text")]
 #[test]
 fn dimensions_option_truncates_and_renormalizes() {
-    let root = scratch_root("qwen3-embed-dims");
+    let root = Scratch::dir("brain-sdk-embedding-pipeline-qwen3-embed-dims");
     let weights = write_qwen3_embed_base(&root, 32);
     let pipe = brain::EmbeddingPipeline::builder(weights.to_str().unwrap()).capacity(32).tokenizer(root.join("tokenizer.json").to_str().unwrap()).load().unwrap();
 
@@ -249,7 +226,7 @@ fn dimensions_option_truncates_and_renormalizes() {
 #[cfg(feature = "text")]
 #[test]
 fn a_request_past_the_built_capacity_is_refused() {
-    let root = scratch_root("qwen3-embed-capacity");
+    let root = Scratch::dir("brain-sdk-embedding-pipeline-qwen3-embed-capacity");
     let weights = write_qwen3_embed_base(&root, 32);
     let pipe = brain::EmbeddingPipeline::builder(weights.to_str().unwrap()).capacity(4).tokenizer(root.join("tokenizer.json").to_str().unwrap()).load().unwrap();
 
@@ -306,7 +283,7 @@ fn write_lfm2_embed_base(dir: &Path, block: u32) -> PathBuf {
 #[cfg(feature = "text")]
 #[test]
 fn lfm2_backend_embeds_a_real_checkpoint_and_returns_a_unit_norm_vector() {
-    let root = scratch_root("lfm2-embed");
+    let root = Scratch::dir("brain-sdk-embedding-pipeline-lfm2-embed");
     let weights = write_lfm2_embed_base(&root, 32);
 
     let pipe = brain::EmbeddingPipeline::builder(weights.to_str().unwrap()).capacity(32).tokenizer(root.join("tokenizer.json").to_str().unwrap()).load().unwrap();
@@ -324,7 +301,7 @@ fn lfm2_backend_embeds_a_real_checkpoint_and_returns_a_unit_norm_vector() {
 #[cfg(feature = "text")]
 #[test]
 fn lfm2_backend_rebuilds_when_the_request_length_changes() {
-    let root = scratch_root("lfm2-embed-rebuild");
+    let root = Scratch::dir("brain-sdk-embedding-pipeline-lfm2-embed-rebuild");
     let weights = write_lfm2_embed_base(&root, 64);
     let pipe = brain::EmbeddingPipeline::builder(weights.to_str().unwrap()).capacity(64).tokenizer(root.join("tokenizer.json").to_str().unwrap()).load().unwrap();
 
@@ -341,7 +318,7 @@ fn lfm2_backend_rebuilds_when_the_request_length_changes() {
 #[cfg(feature = "text")]
 #[test]
 fn lfm2_backend_refuses_the_instruction_option() {
-    let root = scratch_root("lfm2-embed-instruction");
+    let root = Scratch::dir("brain-sdk-embedding-pipeline-lfm2-embed-instruction");
     let weights = write_lfm2_embed_base(&root, 32);
     let pipe = brain::EmbeddingPipeline::builder(weights.to_str().unwrap()).capacity(32).tokenizer(root.join("tokenizer.json").to_str().unwrap()).load().unwrap();
 

@@ -19,7 +19,8 @@
 
 use brain::decision_run::{train, TrainRun};
 use decisions::engine::Backend;
-use decisions::fixtures::{synthetic_jsonl, write_decide, Scratch, SyntheticTask};
+use decisions::fixtures::{synthetic_jsonl, write_decide, SyntheticTask};
+use brain_testutil::Scratch;
 use decisions::manifest::{DecisionManifest, Validation, FILE};
 
 /// A base, a data file and an output location inside one scratch directory.
@@ -31,7 +32,7 @@ struct Setup {
 
 impl Setup {
     fn new(tag: &str, task: &SyntheticTask) -> Setup {
-        let root = Scratch::new(tag);
+        let root = Scratch::dir(tag);
         write_decide(&root.join("base"), 11);
         std::fs::write(root.join("data.jsonl"), synthetic_jsonl(task)).unwrap();
         Setup { root, seed: brain::random_seed() }

@@ -29,33 +29,10 @@
 //! segment` (the resolver-migrated CLI paths) could never actually resolve
 //! a real installed SAM2 checkpoint either, until this fix.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use sam2::Sam2Config;
-
-struct Scratch(PathBuf);
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        std::fs::remove_dir_all(&self.0).ok();
-    }
-}
-
-impl std::ops::Deref for Scratch {
-    type Target = Path;
-    fn deref(&self) -> &Path {
-        &self.0
-    }
-}
-
-fn scratch_root(tag: &str) -> Scratch {
-    static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("brain-sdk-segment-pipeline-{tag}-{}-{n}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
-    std::fs::create_dir_all(&dir).unwrap();
-    Scratch(dir)
-}
+use brain_testutil::Scratch;
 
 fn with_models_dir<T>(root: &Path, f: impl FnOnce() -> T) -> T {
     let _serial = brain_testutil::env_lock();
@@ -101,7 +78,7 @@ fn from_pretrained_rejects_an_unparseable_model_id() {
 
 #[test]
 fn from_pretrained_names_the_missing_role_when_the_store_is_empty() {
-    let root = scratch_root("missing");
+    let root = Scratch::dir("brain-sdk-segment-pipeline-missing");
     mark_locally_present(&root, "local", "sam2-empty-test");
 
     let err = with_models_dir(&root, || brain::SegmentPipeline::from_pretrained("local/sam2-empty-test").unwrap_err());
@@ -134,7 +111,7 @@ fn rgb8_gradient(w: u32, h: u32) -> brain::Image {
 /// fixture accepts for the same reason.
 #[test]
 fn from_pretrained_segments_a_real_complete_fixture_end_to_end() {
-    let root = scratch_root("segment");
+    let root = Scratch::dir("brain-sdk-segment-pipeline-segment");
     write_complete_sam2_checkpoint(&root.join("facebook").join("sam2.1_hiera_tiny.pt"), &Sam2Config::hiera_tiny());
     mark_locally_present(&root, "local", "sam2-sdk-test");
 
@@ -154,7 +131,7 @@ fn from_pretrained_segments_a_real_complete_fixture_end_to_end() {
 /// never a panic.
 #[test]
 fn segment_rejects_an_empty_prompt() {
-    let root = scratch_root("empty-prompt");
+    let root = Scratch::dir("brain-sdk-segment-pipeline-empty-prompt");
     write_complete_sam2_checkpoint(&root.join("facebook").join("sam2.1_hiera_tiny.pt"), &Sam2Config::hiera_tiny());
     mark_locally_present(&root, "local", "sam2-prompt-test");
 
@@ -173,7 +150,7 @@ fn segment_rejects_an_empty_prompt() {
 /// `Error::Missing`, never a connection-error-flavored `Error::Download`.
 #[test]
 fn download_policy_offline_never_touches_the_network() {
-    let root = scratch_root("offline");
+    let root = Scratch::dir("brain-sdk-segment-pipeline-offline");
     let _serial = brain_testutil::env_lock();
     std::env::set_var("BRAIN_MODELS_DIR", &*root);
     std::env::set_var("BRAIN_HUB_ENDPOINT", "http://127.0.0.1:1");

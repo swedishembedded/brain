@@ -62,36 +62,12 @@
 //! directly as unit tests in `crates/sdk/src/image.rs` and
 //! `crates/sdk/src/pipeline.rs` -- neither needs a real model in hand.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use checkpoint::gguf::GgufValue;
 use checkpoint::gguf_write::TensorOut;
 use flux2::Flux2Config;
-
-/// A fixture models directory that deletes itself when the test ends.
-struct Scratch(PathBuf);
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        std::fs::remove_dir_all(&self.0).ok();
-    }
-}
-
-impl std::ops::Deref for Scratch {
-    type Target = Path;
-    fn deref(&self) -> &Path {
-        &self.0
-    }
-}
-
-fn scratch_root(tag: &str) -> Scratch {
-    static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("brain-sdk-image-pipeline-{tag}-{}-{n}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
-    std::fs::create_dir_all(&dir).unwrap();
-    Scratch(dir)
-}
+use brain_testutil::Scratch;
 
 /// Run `f` with `BRAIN_MODELS_DIR` pointed at `root`, serialized against
 /// every other test in this binary that also touches process environment
@@ -203,7 +179,7 @@ fn mark_locally_present(root: &Path, vendor: &str, repo: &str, family: &str) {
 /// `--dit`/`--variant`/... flags) resolves cleanly on the first try, with no
 /// `Ambiguous` question to answer.
 fn build_unambiguous_store() -> Scratch {
-    let root = scratch_root("resolve");
+    let root = Scratch::dir("brain-sdk-image-pipeline-resolve");
 
     // The text encoder: real HF dir, Qwen3ForCausalLM, hidden=2560 (3x2560 =
     // 7680 = klein-4b's own `context_in_dim`).
@@ -243,7 +219,7 @@ fn from_pretrained_rejects_an_unparseable_model_id() {
 /// fetch attempt.
 #[test]
 fn from_pretrained_names_every_missing_role_when_the_store_is_otherwise_empty() {
-    let root = scratch_root("missing");
+    let root = Scratch::dir("brain-sdk-image-pipeline-missing");
     mark_locally_present(&root, "local", "flux2-empty-test", "flux2");
 
     let err = with_models_dir(&root, || brain::ImagePipeline::from_pretrained("local/flux2-empty-test").unwrap_err());
@@ -274,7 +250,7 @@ fn from_pretrained_names_every_missing_role_when_the_store_is_otherwise_empty() 
 /// this test exists to avoid.
 #[test]
 fn download_policy_offline_never_touches_the_network() {
-    let root = scratch_root("offline");
+    let root = Scratch::dir("brain-sdk-image-pipeline-offline");
     let _serial = brain_testutil::env_lock();
     std::env::set_var("BRAIN_MODELS_DIR", &*root);
     std::env::set_var("BRAIN_HUB_ENDPOINT", "http://127.0.0.1:1");
@@ -387,7 +363,7 @@ fn write_s3dit_vae(path: &Path) {
 /// `Ambiguous` question to answer, and nothing flux2-shaped anywhere in the
 /// store for `resolve_arch`'s flux2-first attempt to pick up instead.
 fn build_unambiguous_s3dit_store() -> Scratch {
-    let root = scratch_root("s3dit-resolve");
+    let root = Scratch::dir("brain-sdk-image-pipeline-s3dit-resolve");
     let cap_feat_dim = s3dit::ZImageConfig::turbo().cap_feat_dim as u64;
 
     let vendor = root.join("Tongyi-MAI");

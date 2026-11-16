@@ -1133,7 +1133,7 @@ mod sampling_tests {
         if gpu_disabled() {
             return;
         }
-        let scratch = Scratch::new("pipeline-residual-default");
+        let scratch = Scratch::dir("qwen3tts-pipeline-residual-default");
         let (talker_path, mtp_path) = synthetic_checkpoints(scratch.path(), 21);
         let sp = tiny_specials();
         let d = talker_test_cfg().d_model as usize;
@@ -1205,7 +1205,7 @@ mod cancel_tests {
         if gpu_disabled() {
             return;
         }
-        let scratch = Scratch::new("pipeline-cancel");
+        let scratch = Scratch::dir("qwen3tts-pipeline-cancel");
         let (talker_path, mtp_path) = synthetic_checkpoints(scratch.path(), 7);
         let sp = tiny_specials();
         let d = talker_test_cfg().d_model as usize;
@@ -1293,7 +1293,7 @@ mod cancel_tests {
         if gpu_disabled() {
             return;
         }
-        let scratch = Scratch::new("pipeline-cancel-pre");
+        let scratch = Scratch::dir("qwen3tts-pipeline-cancel-pre");
         let (talker_path, mtp_path) = synthetic_checkpoints(scratch.path(), 11);
         let sp = tiny_specials();
         let d = talker_test_cfg().d_model as usize;

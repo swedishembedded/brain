@@ -364,19 +364,17 @@ mod tests {
     /// dir; `set_cache_dir_override` is thread-local, so this is safe under
     /// parallel `cargo test` without a lock, unlike `gpu_core::roof`'s
     /// process-global override).
-    struct Scratch(PathBuf);
-    impl Scratch {
-        fn new(name: &str) -> Scratch {
-            let dir = std::env::temp_dir().join(format!("brain-modelcost-test-{name}-{}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&dir);
-            set_cache_dir_override(Some(dir.clone()));
-            Scratch(dir)
+    struct CacheDir(brain_testutil::Scratch);
+    impl CacheDir {
+        fn new(name: &str) -> CacheDir {
+            let dir = brain_testutil::Scratch::dir(&format!("brain-modelcost-test-{name}"));
+            set_cache_dir_override(Some(dir.to_path_buf()));
+            CacheDir(dir)
         }
     }
-    impl Drop for Scratch {
+    impl Drop for CacheDir {
         fn drop(&mut self) {
             set_cache_dir_override(None);
-            let _ = std::fs::remove_dir_all(&self.0);
         }
     }
 
@@ -470,7 +468,7 @@ mod tests {
         let tensors = manifest(&cfg).unwrap();
         let expect_bytes: u64 = tensors.iter().map(|(_, n)| *n as u64 * 4).sum();
 
-        let _scratch = Scratch::new("bandwidth-byte-total");
+        let _scratch = CacheDir::new("bandwidth-byte-total");
         let priced = price_and_cache_bandwidth_only("qwen35", "test/qwen35-tiny", &cfg).expect("qwen35 has a bandwidth pricer");
         assert_eq!(priced.tier, Tier::Bandwidth);
         assert_eq!(priced.summary.bytes, expect_bytes);
@@ -480,7 +478,7 @@ mod tests {
     #[test]
     fn exact_tier_reports_nonzero_flops_for_a_real_forward_pass() {
         let cfg = qwen3::QwenConfig::tiny().to_json();
-        let _scratch = Scratch::new("exact-nonzero-flops");
+        let _scratch = CacheDir::new("exact-nonzero-flops");
         let priced = price_and_cache("qwen3", "test/qwen3-tiny", &cfg).expect("qwen3 has an exact pricer");
         assert_eq!(priced.tier, Tier::Exact);
         assert!(priced.summary.flops > 0, "a real transformer forward pass must cost more than zero FLOPs");
@@ -489,7 +487,7 @@ mod tests {
 
     #[test]
     fn price_and_cache_errors_for_an_unregistered_architecture() {
-        let _scratch = Scratch::new("unregistered-arch");
+        let _scratch = CacheDir::new("unregistered-arch");
         let err = price_and_cache("totally-unknown", "test/x", &serde_json::json!({})).expect_err("no pricer is registered for this arch");
         assert!(err.contains("totally-unknown"));
     }
@@ -500,7 +498,7 @@ mod tests {
         // must not be conflated with "architecture not supported": it is
         // exactly the failure mode that let a silently-mis-keyed config get
         // priced as a different model with total reported confidence.
-        let _scratch = Scratch::new("bad-config");
+        let _scratch = CacheDir::new("bad-config");
         let bad = serde_json::json!({"vocab": 16, "block_size": 32});
         let err = price_and_cache("qwen3", "test/x", &bad).expect_err("a config missing shape keys must be refused, not silently defaulted");
         assert!(err.contains("vocab_size"), "the error must name the real missing key: {err:?}");
@@ -509,7 +507,7 @@ mod tests {
     #[test]
     fn cached_round_trips_what_price_and_cache_just_wrote() {
         let cfg = qwen3::QwenConfig::tiny().to_json();
-        let _scratch = Scratch::new("round-trip");
+        let _scratch = CacheDir::new("round-trip");
         assert_eq!(cached("qwen3", "test/qwen3-tiny", &cfg), None, "nothing primed yet");
         let priced = price_and_cache("qwen3", "test/qwen3-tiny", &cfg).unwrap();
         assert_eq!(cached("qwen3", "test/qwen3-tiny", &cfg), Some(priced));
@@ -526,7 +524,7 @@ mod tests {
         let cfg_b = cfg_b.to_json();
         assert_ne!(config_hash(&cfg_a), config_hash(&cfg_b), "the two configs must actually differ for this test to mean anything");
 
-        let _scratch = Scratch::new("hash-mismatch");
+        let _scratch = CacheDir::new("hash-mismatch");
         price_and_cache("qwen3", "test/qwen3-tiny", &cfg_a).unwrap();
         assert!(cached("qwen3", "test/qwen3-tiny", &cfg_a).is_some());
         assert_eq!(cached("qwen3", "test/qwen3-tiny", &cfg_b), None, "a changed config must not read back the old entry's numbers");
@@ -535,7 +533,7 @@ mod tests {
     #[test]
     fn a_corrupt_or_unknown_schema_cache_file_is_ignored_not_trusted() {
         let cfg = qwen3::QwenConfig::tiny().to_json();
-        let scratch = Scratch::new("corrupt-cache");
+        let scratch = CacheDir::new("corrupt-cache");
         let path = scratch.0.join("models").join("cost.json");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
 
@@ -557,7 +555,7 @@ mod tests {
         // back exactly, keyed the same way `price_and_cache` keys its own
         // writes.
         let cfg = qwen3::QwenConfig::tiny().to_json();
-        let _scratch = Scratch::new("cache-report");
+        let _scratch = CacheDir::new("cache-report");
         let report = pricers::price_qwen3(&cfg).unwrap();
         cache_report("qwen3", "Qwen/Qwen3-0.6B", &cfg, &report);
         let got = cached("qwen3", "Qwen/Qwen3-0.6B", &cfg).expect("cache_report must have written a readable entry");
@@ -571,7 +569,7 @@ mod tests {
         // ever touch tensor_manifest, never `price` (which would materialize
         // a real zero-init weight buffer at the config's shape).
         let cfg = qwen3::QwenConfig::tiny().to_json();
-        let _scratch = Scratch::new("bandwidth-only-forces-tier");
+        let _scratch = CacheDir::new("bandwidth-only-forces-tier");
         let priced = price_and_cache_bandwidth_only("qwen3", "test/qwen3-tiny", &cfg).unwrap();
         assert_eq!(priced.tier, Tier::Bandwidth);
         assert_eq!(priced.summary.flops, 0);

@@ -22,7 +22,8 @@ use axum::http::{header, Method, Request, StatusCode};
 use axum::Router;
 use decisions::resident::{serve_all, DecisionServeConfig};
 use decisions::engine::Backend;
-use decisions::fixtures::{write_decide, write_laya, write_laya_head_only, Scratch};
+use decisions::fixtures::{write_decide, write_laya, write_laya_head_only};
+use brain_testutil::Scratch;
 use decisions::manifest::{weights_identity, FILE as MANIFEST_FILE};
 use residency::budget::Budgets;
 use residency::{Device, Executor, Policy};
@@ -88,7 +89,7 @@ async fn run(app: &Router, model: &str, params: Value) -> (StatusCode, Value) {
 }
 
 fn store_with_both() -> Scratch {
-    let s = Scratch::new("served");
+    let s = Scratch::dir("served");
     write_laya(&s.join("acme/laya"), 48);
     write_decide(&s.join("acme/triage"), 3);
     s
@@ -392,7 +393,7 @@ async fn a_validation_that_no_longer_matches_the_weights_fails_to_load_rather_th
 
 #[tokio::test]
 async fn a_trained_head_whose_file_or_base_changed_fails_to_load_rather_than_answering() {
-    let s = Scratch::new("served-head-only");
+    let s = Scratch::dir("served-head-only");
     write_laya(&s.join("convai/laya"), 48);
     write_laya_head_only(&s.join("acme/tuned"), &s.join("convai/laya"), "convai/laya", 9);
     let identity = weights_identity(&s.join("acme/tuned"), Backend::Laya).unwrap();

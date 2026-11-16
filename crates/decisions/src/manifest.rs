@@ -370,7 +370,7 @@ mod tests {
 
     #[test]
     fn no_manifest_means_unvalidated_and_never_validated() {
-        let d = crate::fixtures::Scratch::new("manifest-absent");
+        let d = brain_testutil::Scratch::dir("manifest-absent");
         let m = DecisionManifest::read(&d, Backend::Laya).unwrap();
         assert_eq!(m.validation, Validation::Unvalidated);
         assert!(!m.validation.is_validated());
@@ -428,7 +428,7 @@ mod tests {
 
     #[test]
     fn a_present_but_wrong_manifest_is_an_error_not_the_default() {
-        let d = crate::fixtures::Scratch::new("manifest-wrong");
+        let d = brain_testutil::Scratch::dir("manifest-wrong");
         std::fs::write(d.join(FILE), "{").unwrap();
         assert!(DecisionManifest::read(&d, Backend::Laya).is_err());
     }
@@ -456,7 +456,7 @@ mod tests {
 
     #[test]
     fn a_written_manifest_reads_back_and_leaves_no_temporary_file() {
-        let d = crate::fixtures::Scratch::new("manifest-write");
+        let d = brain_testutil::Scratch::dir("manifest-write");
         let mut m = DecisionManifest::undeclared(Backend::Decide);
         m.lineage.seed = Some(3);
         m.write(&d).unwrap();
@@ -476,7 +476,7 @@ mod tests {
 
     #[test]
     fn a_declared_hash_must_match_the_file() {
-        let d = crate::fixtures::Scratch::new("manifest-identity");
+        let d = brain_testutil::Scratch::dir("manifest-identity");
         crate::fixtures::write_decide(&d, 1);
         let right = brain_modelstore::fetch::file_digest(&d.join("model.safetensors")).unwrap();
         let mut m = DecisionManifest::undeclared(Backend::Decide);

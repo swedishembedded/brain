@@ -26,35 +26,11 @@
 //! error (this SDK's own "every public pipeline needs an end-to-end test,
 //! and a real one" rule).
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use checkpoint::torchpt_write::TensorOut;
 use rrdbnet::RrdbConfig;
-
-/// A fixture models directory that deletes itself when the test ends.
-struct Scratch(PathBuf);
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        std::fs::remove_dir_all(&self.0).ok();
-    }
-}
-
-impl std::ops::Deref for Scratch {
-    type Target = Path;
-    fn deref(&self) -> &Path {
-        &self.0
-    }
-}
-
-fn scratch_root(tag: &str) -> Scratch {
-    static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("brain-sdk-upscale-pipeline-{tag}-{}-{n}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
-    std::fs::create_dir_all(&dir).unwrap();
-    Scratch(dir)
-}
+use brain_testutil::Scratch;
 
 /// Run `f` with `BRAIN_MODELS_DIR` pointed at `root`, serialized against
 /// every other test in this binary that also touches process environment
@@ -120,7 +96,7 @@ fn from_pretrained_rejects_an_unparseable_model_id() {
 /// `"weights"` role, never a panic and never a network fetch attempt.
 #[test]
 fn from_pretrained_names_the_missing_role_when_the_store_is_empty() {
-    let root = scratch_root("missing");
+    let root = Scratch::dir("brain-sdk-upscale-pipeline-missing");
     mark_locally_present(&root, "local", "rrdbnet-empty-test");
 
     let err = with_models_dir(&root, || brain::UpscalePipeline::from_pretrained("local/rrdbnet-empty-test").unwrap_err());
@@ -140,7 +116,7 @@ fn from_pretrained_names_the_missing_role_when_the_store_is_empty() {
 /// test pins at the spec layer; this pins it through the public facade.
 #[test]
 fn from_pretrained_reports_two_equally_real_candidates_as_ambiguous() {
-    let root = scratch_root("ambiguous");
+    let root = Scratch::dir("brain-sdk-upscale-pipeline-ambiguous");
     let cfg = tiny_cfg();
     write_complete_rrdb_checkpoint(&root.join("vendor-a").join("model.pth"), &cfg);
     write_complete_rrdb_checkpoint(&root.join("vendor-b").join("model-copy.pth"), &cfg);
@@ -164,7 +140,7 @@ fn rgb8_gradient(w: u32, h: u32) -> brain::Image {
 /// 4x4 out (this fixture's `scale: 2`), a real PNG on disk.
 #[test]
 fn from_pretrained_upscales_a_real_tiny_fixture_end_to_end() {
-    let root = scratch_root("upscale");
+    let root = Scratch::dir("brain-sdk-upscale-pipeline-upscale");
     write_complete_rrdb_checkpoint(&root.join("schwgHao").join("RealESRGAN_tiny.pth"), &tiny_cfg());
     mark_locally_present(&root, "local", "rrdbnet-sdk-test");
 
@@ -190,7 +166,7 @@ fn from_pretrained_upscales_a_real_tiny_fixture_end_to_end() {
 /// different code, over the same checkpoint.
 #[test]
 fn from_pretrained_upscales_tiled_over_the_same_real_fixture() {
-    let root = scratch_root("upscale-tiled");
+    let root = Scratch::dir("brain-sdk-upscale-pipeline-upscale-tiled");
     write_complete_rrdb_checkpoint(&root.join("schwgHao").join("RealESRGAN_tiny.pth"), &tiny_cfg());
     mark_locally_present(&root, "local", "rrdbnet-sdk-tiled-test");
 
@@ -211,7 +187,7 @@ fn from_pretrained_upscales_tiled_over_the_same_real_fixture() {
 /// `Error::Missing`, never a connection-error-flavored `Error::Download`.
 #[test]
 fn download_policy_offline_never_touches_the_network() {
-    let root = scratch_root("offline");
+    let root = Scratch::dir("brain-sdk-upscale-pipeline-offline");
     let _serial = brain_testutil::env_lock();
     std::env::set_var("BRAIN_MODELS_DIR", &*root);
     std::env::set_var("BRAIN_HUB_ENDPOINT", "http://127.0.0.1:1");

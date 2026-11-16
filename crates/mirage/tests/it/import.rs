@@ -6,46 +6,15 @@
 //! dtype, and nothing is ever filled in.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use mirage::import::{self, Checkpoint, ImportError, ImportOptions, TensorProblem};
 
 use crate::common::{released_or_skip, tiny_checkpoint};
+use brain_testutil::Scratch;
 
 /// The SHA-256 of the released `mirage.safetensors` this suite was written against.
 const RELEASED_SAFETENSORS_SHA256: &str = "6ba97c5c1bef661c9b0c80782135682b38b4312fb33e0b645c93c10604bb16cd";
-
-/// A path inside a private temporary directory that is removed when it drops.
-struct Scratch(PathBuf);
-
-impl std::ops::Deref for Scratch {
-    type Target = Path;
-    fn deref(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl AsRef<Path> for Scratch {
-    fn as_ref(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        if let Some(dir) = self.0.parent() {
-            std::fs::remove_dir_all(dir).ok();
-        }
-    }
-}
-
-fn scratch(name: &str) -> Scratch {
-    static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("brain-mirage-import-{}-{n}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    Scratch(dir.join(name))
-}
 
 fn raw_file(path: &Path, tensors: &[(&str, safetensors::Dtype, Vec<usize>, Vec<u8>)], metadata: &[(String, String)]) {
     let views: Vec<(String, safetensors::tensor::TensorView)> =
@@ -63,7 +32,7 @@ fn write_tampered(ck: &Checkpoint, tamper: impl Fn(&mut BTreeMap<String, (safete
         .collect();
     tamper(&mut raw);
     let list: Vec<(&str, safetensors::Dtype, Vec<usize>, Vec<u8>)> = raw.iter().map(|(n, (d, s, b))| (n.as_str(), *d, s.clone(), b.clone())).collect();
-    let path = scratch("tampered.safetensors");
+    let path = Scratch::file("brain-mirage-import-tampered", ".safetensors");
     raw_file(
         &path,
         &list,
@@ -87,7 +56,7 @@ fn problems(err: ImportError) -> Vec<TensorProblem> {
 #[test]
 fn an_exported_checkpoint_round_trips_exactly() {
     let ck = tiny_checkpoint();
-    let path = scratch("tiny.safetensors");
+    let path = Scratch::file("brain-mirage-import-tiny", ".safetensors");
     import::export(&ck, &path).unwrap();
     let back = import::load(&path, &ImportOptions::default()).unwrap();
     assert_eq!(back.config, ck.config);
@@ -103,7 +72,7 @@ fn an_exported_checkpoint_round_trips_exactly() {
 #[test]
 fn export_is_deterministic() {
     let ck = tiny_checkpoint();
-    let (a, b) = (scratch("a.safetensors"), scratch("b.safetensors"));
+    let (a, b) = (Scratch::file("brain-mirage-import-a", ".safetensors"), Scratch::file("brain-mirage-import-b", ".safetensors"));
     import::export(&ck, &a).unwrap();
     import::export(&ck, &b).unwrap();
     assert_eq!(std::fs::read(a).unwrap(), std::fs::read(b).unwrap());
@@ -113,12 +82,12 @@ fn export_is_deterministic() {
 fn export_refuses_a_checkpoint_that_does_not_match_its_manifest() {
     let mut ck = tiny_checkpoint();
     ck.tensors.remove("pe_gate");
-    let err = import::export(&ck, &scratch("bad.safetensors")).unwrap_err();
+    let err = import::export(&ck, &Scratch::file("brain-mirage-import-bad", ".safetensors")).unwrap_err();
     assert!(err.to_string().contains("pe_gate"), "{err}");
 
     let mut ck = tiny_checkpoint();
     ck.tensors.get_mut("registers").unwrap().data.pop();
-    let err = import::export(&ck, &scratch("bad.safetensors")).unwrap_err();
+    let err = import::export(&ck, &Scratch::file("brain-mirage-import-bad", ".safetensors")).unwrap_err();
     assert!(err.to_string().contains("registers"), "{err}");
 }
 
@@ -174,7 +143,7 @@ fn a_header_problem_is_reported_before_any_tensor_data_is_read() {
     // A header that claims more bytes than the file holds must fail on its own,
     // not by reading past the end.
     let ck = tiny_checkpoint();
-    let path = scratch("truncated.safetensors");
+    let path = Scratch::file("brain-mirage-import-truncated", ".safetensors");
     import::export(&ck, &path).unwrap();
     let bytes = std::fs::read(&path).unwrap();
     std::fs::write(&path, &bytes[..bytes.len() - 100]).unwrap();
@@ -212,7 +181,7 @@ fn metadata_is_validated() {
         (full(&[("config", "{\"dim\": 3}")], ""), "config"),
     ];
     for (meta, field) in cases {
-        let path = scratch("meta.safetensors");
+        let path = Scratch::file("brain-mirage-import-meta", ".safetensors");
         raw_file(&path, &tensors, &meta);
         let err = import::load(&path, &ImportOptions::default()).unwrap_err();
         assert!(err.to_string().contains(field), "{field}: {err}");
@@ -222,7 +191,7 @@ fn metadata_is_validated() {
 #[test]
 fn a_pinned_digest_must_match_the_file() {
     let ck = tiny_checkpoint();
-    let path = scratch("pinned.safetensors");
+    let path = Scratch::file("brain-mirage-import-pinned", ".safetensors");
     import::export(&ck, &path).unwrap();
     let digest = import::file_sha256(&path).unwrap();
     assert_eq!(digest.len(), 64);
@@ -234,8 +203,8 @@ fn a_pinned_digest_must_match_the_file() {
 #[test]
 fn a_model_directory_must_agree_with_its_config_json() {
     let ck = tiny_checkpoint();
-    let holder = scratch("dir");
-    let dir = holder.parent().unwrap().join("modeldir");
+    let holder = Scratch::dir("brain-mirage-import");
+    let dir = holder.join("modeldir");
     std::fs::create_dir_all(&dir).unwrap();
     import::export(&ck, &dir.join("mirage.safetensors")).unwrap();
     let envelope = |step: u64, sha: &str| {
@@ -280,7 +249,7 @@ fn the_released_checkpoint_matches_the_manifest_exactly() {
 fn the_released_checkpoint_exports_to_the_same_values() {
     let Some(dir) = released_or_skip("released safetensors round trip") else { return };
     let ck = import::load_dir(&dir, &ImportOptions::default()).unwrap();
-    let path = scratch("released-copy.safetensors");
+    let path = Scratch::file("brain-mirage-import-released-copy", ".safetensors");
     import::export(&ck, &path).unwrap();
     let back = import::load(&path, &ImportOptions::default()).unwrap();
     assert_eq!(back.metadata, ck.metadata);

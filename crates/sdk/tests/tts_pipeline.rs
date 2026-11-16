@@ -26,31 +26,8 @@
 //! backend's own generation entry point) succeeding or failing cleanly -
 //! never a panic.
 
-use std::path::{Path, PathBuf};
-
-struct Scratch(PathBuf);
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        std::fs::remove_dir_all(&self.0).ok();
-    }
-}
-
-impl std::ops::Deref for Scratch {
-    type Target = Path;
-    fn deref(&self) -> &Path {
-        &self.0
-    }
-}
-
-fn scratch_root(tag: &str) -> Scratch {
-    static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("brain-sdk-tts-pipeline-{tag}-{}-{n}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
-    std::fs::create_dir_all(&dir).unwrap();
-    Scratch(dir)
-}
+use std::path::Path;
+use brain_testutil::Scratch;
 
 fn with_models_dir<T>(root: &Path, f: impl FnOnce() -> T) -> T {
     let _serial = brain_testutil::env_lock();
@@ -260,7 +237,7 @@ fn from_pretrained_rejects_an_unparseable_model_id() {
 /// itself failing.
 #[test]
 fn from_pretrained_resolves_qwen3tts_from_a_real_local_fixture_with_no_network_access() {
-    let root = scratch_root("resolve");
+    let root = Scratch::dir("brain-sdk-tts-pipeline-resolve");
     write_qwen3tts_checkpoint(&root.join("Qwen").join("Qwen3-TTS-12Hz-0.6B-Base"));
     write_unrelated_sibling(&root);
 
@@ -294,7 +271,7 @@ fn from_pretrained_resolves_qwen3tts_from_a_real_local_fixture_with_no_network_a
 /// the ROLE NAMES that miss, not the family.
 #[test]
 fn from_pretrained_names_the_missing_role_when_the_store_is_empty() {
-    let root = scratch_root("missing");
+    let root = Scratch::dir("brain-sdk-tts-pipeline-missing");
     let dir = root.join("Qwen").join("Qwen3-TTS-empty-test");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("weights.stub"), b"stub").unwrap();
@@ -335,7 +312,7 @@ fn write_wav(path: &Path, seconds: f32, sample_rate: u32) {
 /// failing.
 #[test]
 fn from_pretrained_resolves_cosyvoice_from_a_real_local_fixture_with_no_network_access() {
-    let root = scratch_root("resolve-cosyvoice");
+    let root = Scratch::dir("brain-sdk-tts-pipeline-resolve-cosyvoice");
     write_cosyvoice_checkpoint(&root);
     write_unrelated_sibling(&root);
     let voice = root.join("reference.wav");
@@ -356,7 +333,7 @@ fn from_pretrained_resolves_cosyvoice_from_a_real_local_fixture_with_no_network_
 /// `Error::MissingArgument` for both, knowable before any backend call.
 #[test]
 fn speak_and_design_are_missing_argument_errors_on_a_cosyvoice_resolved_pipeline() {
-    let root = scratch_root("cosyvoice-wrong-actions");
+    let root = Scratch::dir("brain-sdk-tts-pipeline-cosyvoice-wrong-actions");
     write_cosyvoice_checkpoint(&root);
     write_unrelated_sibling(&root);
 
@@ -372,7 +349,7 @@ fn speak_and_design_are_missing_argument_errors_on_a_cosyvoice_resolved_pipeline
 /// class `speak`/`design` already return on this backend.
 #[test]
 fn clone_voice_without_ref_text_is_a_missing_argument_error_on_a_cosyvoice_resolved_pipeline() {
-    let root = scratch_root("cosyvoice-no-ref-text");
+    let root = Scratch::dir("brain-sdk-tts-pipeline-cosyvoice-no-ref-text");
     write_cosyvoice_checkpoint(&root);
     write_unrelated_sibling(&root);
     let voice = root.join("reference.wav");
@@ -399,7 +376,7 @@ fn clone_voice_without_ref_text_is_a_missing_argument_error_on_a_cosyvoice_resol
 /// CAM++/S3Tokenizer content rather than resolution itself failing.
 #[test]
 fn from_pretrained_resolves_cosyvoice3_from_a_real_local_fixture_with_no_network_access() {
-    let root = scratch_root("resolve-cosyvoice3");
+    let root = Scratch::dir("brain-sdk-tts-pipeline-resolve-cosyvoice3");
     write_cosyvoice3_checkpoint(&root);
     write_unrelated_sibling(&root);
     let voice = root.join("reference.wav");
@@ -424,7 +401,7 @@ fn from_pretrained_resolves_cosyvoice3_from_a_real_local_fixture_with_no_network
 /// `Error::Missing`, never a connection-error-flavored `Error::Download`.
 #[test]
 fn download_policy_offline_never_touches_the_network() {
-    let root = scratch_root("offline");
+    let root = Scratch::dir("brain-sdk-tts-pipeline-offline");
     let _serial = brain_testutil::env_lock();
     std::env::set_var("BRAIN_MODELS_DIR", &*root);
     std::env::set_var("BRAIN_HUB_ENDPOINT", "http://127.0.0.1:1");

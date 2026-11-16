@@ -20,6 +20,7 @@
 
 use crate::prompt::{Prompt, TtsSpecials};
 use data::rng::Rng;
+pub use brain_testutil::Scratch;
 
 /// `TalkerConfig::tiny()` with a real-scale vocab: `sample_cb0` always
 /// suppresses the top-1024 vocab entries as the reference's `suppress_tokens`
@@ -116,28 +117,6 @@ pub fn tiny_specials() -> TtsSpecials {
         codec_eos: 1050,
         lang: std::collections::HashMap::new(),
         spk_id: std::collections::HashMap::new(),
-    }
-}
-
-/// A scratch directory unique to `tag` and this process, removed by
-/// [`Scratch`]'s `Drop` so a failing assertion cannot leak megabytes of
-/// synthetic checkpoints into the temp dir.
-pub struct Scratch(pub std::path::PathBuf);
-
-impl Scratch {
-    pub fn new(tag: &str) -> Scratch {
-        let dir = std::env::temp_dir().join(format!("qwen3tts-{tag}-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        Scratch(dir)
-    }
-    pub fn path(&self) -> &std::path::Path {
-        &self.0
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        std::fs::remove_dir_all(&self.0).ok();
     }
 }
 

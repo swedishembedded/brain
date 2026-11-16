@@ -18,11 +18,12 @@
 
 use brain::decision_run::{evaluate_model, load_model, train, EvalRun, TrainRun};
 use decisions::examples::Split;
-use decisions::fixtures::{synthetic_jsonl, write_decide, Scratch, SyntheticTask};
+use decisions::fixtures::{synthetic_jsonl, write_decide, SyntheticTask};
+use brain_testutil::Scratch;
 
 /// Train on `task` and return the evaluation of the result on its test split.
 fn trained_and_measured(tag: &str, task: &SyntheticTask) -> (Scratch, brain::decision_run::Evaluation) {
-    let root = Scratch::new(tag);
+    let root = Scratch::dir(tag);
     write_decide(&root.join("base"), 11);
     std::fs::write(root.join("data.jsonl"), synthetic_jsonl(task)).unwrap();
     let mut run = TrainRun::new(root.join("data.jsonl"), root.join("base").to_str().unwrap(), root.join("out"));
@@ -53,7 +54,7 @@ fn a_model_trained_on_the_task_beats_the_majority_baseline_and_a_shuffled_one_do
 
 #[test]
 fn a_bare_encoder_and_a_missing_model_are_refused() {
-    let root = Scratch::new("eval-refusals");
+    let root = Scratch::dir("eval-refusals");
     assert!(load_model(root.join("absent").to_str().unwrap()).is_err());
     std::fs::create_dir_all(root.join("encoder")).unwrap();
     std::fs::write(root.join("encoder/config.json"), "{}").unwrap();

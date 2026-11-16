@@ -60,31 +60,8 @@
 //!   same typed request through BOTH real checkpoints - one API, two
 //!   architectures. Skip cleanly when absent.
 
-use std::path::{Path, PathBuf};
-
-/// A fixture directory that deletes itself when the test ends.
-struct Scratch(PathBuf);
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        std::fs::remove_dir_all(&self.0).ok();
-    }
-}
-
-impl std::ops::Deref for Scratch {
-    type Target = Path;
-    fn deref(&self) -> &Path {
-        &self.0
-    }
-}
-
-fn scratch_root(tag: &str) -> Scratch {
-    static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("brain-sdk-decision-pipeline-{tag}-{}-{n}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    Scratch(dir)
-}
+use std::path::Path;
+use brain_testutil::Scratch;
 
 /// A minimal root `config.json` naming `model_type: "bert"` - enough for
 /// `resolve_decision_backend`'s sniffer to route to the `Decide` arm, not
@@ -134,7 +111,7 @@ fn write_laya_shaped_markers_only(dir: &Path) {
 
 #[test]
 fn a_bert_shaped_directory_with_no_laya_marker_routes_to_the_decide_arm() {
-    let root = scratch_root("bert-routing");
+    let root = Scratch::dir("brain-sdk-decision-pipeline-bert-routing");
     write_bert_shaped_config_only(&root);
 
     let err = brain::DecisionPipeline::builder(root.to_str().unwrap()).load().unwrap_err();
@@ -152,7 +129,7 @@ fn a_bert_shaped_directory_with_no_laya_marker_routes_to_the_decide_arm() {
 
 #[test]
 fn a_laya_shaped_directory_routes_to_the_laya_arm_not_decide() {
-    let root = scratch_root("laya-routing");
+    let root = Scratch::dir("brain-sdk-decision-pipeline-laya-routing");
     write_laya_shaped_markers_only(&root);
 
     let err = brain::DecisionPipeline::builder(root.to_str().unwrap()).load().unwrap_err();
@@ -180,7 +157,7 @@ fn write_laya_fixture(dir: &Path) {
 
 #[test]
 fn laya_synthetic_fixture_choose_and_probability_produce_real_numbers() {
-    let root = scratch_root("laya-synthetic");
+    let root = Scratch::dir("brain-sdk-decision-pipeline-laya-synthetic");
     write_laya_fixture(&root);
 
     let mut pipe = brain::DecisionPipeline::builder(root.to_str().unwrap()).load().expect("a synthetic Laya-shaped directory must load through the Laya arm");
@@ -218,7 +195,7 @@ fn laya_synthetic_fixture_choose_and_probability_produce_real_numbers() {
 fn laya_backed_pipeline_trains_saves_and_reloads_a_head() {
     use brain::flow::Stages;
 
-    let root = scratch_root("laya-training");
+    let root = Scratch::dir("brain-sdk-decision-pipeline-laya-training");
     write_laya_fixture(&root);
     let mut pipe = brain::DecisionPipeline::builder(root.to_str().unwrap()).load().unwrap();
     assert!(pipe.supports_training(), "the Laya arm trains now");
@@ -277,7 +254,7 @@ fn laya_backed_pipeline_trains_saves_and_reloads_a_head() {
 /// nonsense.
 #[test]
 fn a_head_file_from_the_other_architecture_is_refused_by_name() {
-    let root = scratch_root("laya-wrong-head");
+    let root = Scratch::dir("brain-sdk-decision-pipeline-laya-wrong-head");
     write_laya_fixture(&root);
     let bogus = std::env::temp_dir().join(format!("brain-not-a-laya-head-{}.safetensors", std::process::id()));
     decisions::fixtures::write_hf_safetensors_f32(&bogus, &[("encoder.layer.0.attention.self.query.weight".to_string(), vec![2, 2], vec![0.0; 4])]);
@@ -485,7 +462,7 @@ fn real_laya_checkpoint_choose_and_probability_produce_real_numbers() {
 fn typed_questions_answer_one_per_question_on_the_synthetic_laya_fixture() {
     use brain::decision::{Answer, OrderedJson, Question, State};
 
-    let root = scratch_root("laya-typed");
+    let root = Scratch::dir("brain-sdk-decision-pipeline-laya-typed");
     write_laya_fixture(&root);
     let mut pipe = brain::DecisionPipeline::builder(root.to_str().unwrap()).load().unwrap();
 
@@ -546,7 +523,7 @@ fn typed_questions_answer_one_per_question_on_the_synthetic_laya_fixture() {
 fn a_question_outside_the_published_limits_is_refused_by_name() {
     use brain::decision::{Question, State};
 
-    let root = scratch_root("laya-limits");
+    let root = Scratch::dir("brain-sdk-decision-pipeline-laya-limits");
     write_laya_fixture(&root);
     let mut pipe = brain::DecisionPipeline::builder(root.to_str().unwrap()).load().unwrap();
 

@@ -19,6 +19,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
+use brain_testutil::Scratch;
 
 fn bin() -> String {
     // Cargo names the binary it built for this test; a path derived from the test
@@ -26,26 +27,13 @@ fn bin() -> String {
     brain_testutil::package_bin("brain").to_string_lossy().into_owned()
 }
 
-/// A scratch directory for one test, removed when it ends.
-struct Scratch(PathBuf);
-
-impl Scratch {
-    fn new(tag: &str) -> Scratch {
-        let dir = std::env::temp_dir().join(format!("brain-serve-connection-{tag}-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(dir.join("models")).unwrap();
-        std::fs::create_dir_all(dir.join("home")).unwrap();
-        Scratch(dir)
-    }
-    fn path(&self, name: &str) -> PathBuf {
-        self.0.join(name)
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        std::fs::remove_dir_all(&self.0).ok();
-    }
+/// A scratch directory for one test with the empty store and private home a
+/// server starts against, removed when it ends.
+fn scratch(tag: &str) -> Scratch {
+    let dir = Scratch::dir(&format!("brain-serve-connection-{tag}"));
+    std::fs::create_dir_all(dir.join("models")).unwrap();
+    std::fs::create_dir_all(dir.join("home")).unwrap();
+    dir
 }
 
 /// `brain --device cpu serve <args>` against an empty store, a private home
@@ -53,15 +41,15 @@ impl Drop for Scratch {
 fn serve(dir: &Scratch, args: &[&str]) -> Command {
     let mut cmd = Command::new(bin());
     cmd.args(["--device", "cpu", "serve", "--seed", "1", "--models-dir"])
-        .arg(dir.path("models"))
+        .arg(dir.join("models"))
         .arg("--runtime-dir")
-        .arg(dir.path("run"))
+        .arg(dir.join("run"))
         .args(args)
         .stdin(Stdio::null())
         // Nothing of the caller's environment reaches the server: what it
         // serves and where it publishes come from its flags alone.
         .env_clear()
-        .env("HOME", dir.path("home"));
+        .env("HOME", dir.join("home"));
     cmd
 }
 
@@ -126,9 +114,9 @@ fn stop(mut child: Child) -> String {
 /// server stops, so a client never connects to a server that has left.
 #[test]
 fn a_running_server_publishes_where_it_listens_and_its_key() {
-    let dir = Scratch::new("record");
+    let dir = scratch("record");
     let mut child = serve(&dir, &["--openai", "127.0.0.1:0"]).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().expect("spawn brain serve");
-    let (record, value) = wait_for_record(&mut child, &dir.path("run"));
+    let (record, value) = wait_for_record(&mut child, &dir.join("run"));
 
     assert_eq!(value["pid"].as_u64(), Some(u64::from(child.id())), "the record names the serving process: {value}");
     let found = surfaces(&value);
@@ -154,8 +142,8 @@ const RETIRED_KEY_VARIABLE: &str = "BRAIN_API_KEY";
 /// environment names no key any more.
 #[test]
 fn a_key_file_pins_one_key_for_every_dialect_and_the_environment_names_none() {
-    let dir = Scratch::new("key-file");
-    let key_file = dir.path("key");
+    let dir = scratch("key-file");
+    let key_file = dir.join("key");
     std::fs::write(&key_file, "sk-brain-pinned-for-the-test\n").unwrap();
     let mut child = serve(&dir, &["--openai", "127.0.0.1:0", "--anthropic", "127.0.0.1:0", "--api-key-file", key_file.to_str().unwrap()])
         .env(RETIRED_KEY_VARIABLE, "sk-brain-from-the-environment")
@@ -163,7 +151,7 @@ fn a_key_file_pins_one_key_for_every_dialect_and_the_environment_names_none() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn brain serve");
-    let (_, value) = wait_for_record(&mut child, &dir.path("run"));
+    let (_, value) = wait_for_record(&mut child, &dir.join("run"));
     let found = surfaces(&value);
     stop(child);
     assert_eq!(found.len(), 2, "two dialects were asked for: {value}");
@@ -176,8 +164,8 @@ fn a_key_file_pins_one_key_for_every_dialect_and_the_environment_names_none() {
 /// startup, naming the flag.
 #[test]
 fn an_empty_key_file_is_refused_naming_the_flag() {
-    let dir = Scratch::new("empty-key");
-    let key_file = dir.path("key");
+    let dir = scratch("empty-key");
+    let key_file = dir.join("key");
     std::fs::write(&key_file, "  \n").unwrap();
     let out = serve(&dir, &["--openai", "127.0.0.1:0", "--api-key-file", key_file.to_str().unwrap()]).output().expect("run brain serve");
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -190,16 +178,16 @@ fn an_empty_key_file_is_refused_naming_the_flag() {
 /// and `-v` lists each one with its reason.
 #[test]
 fn startup_counts_the_families_it_cannot_serve_instead_of_listing_them() {
-    let dir = Scratch::new("quiet");
+    let dir = scratch("quiet");
     let mut child = serve(&dir, &["--openai", "127.0.0.1:0"]).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().expect("spawn brain serve");
-    wait_for_record(&mut child, &dir.path("run"));
+    wait_for_record(&mut child, &dir.join("run"));
     let stderr = stop(child);
     assert!(!stderr.lines().any(|l| l.contains("not served")), "no per-family line at the default level; stderr:\n{stderr}");
     assert!(stderr.lines().any(|l| l.contains("model families") && l.contains("-v")), "one line counts them and says how to list them; stderr:\n{stderr}");
 
-    let dir = Scratch::new("verbose");
+    let dir = scratch("verbose");
     let mut child = serve(&dir, &["--openai", "127.0.0.1:0", "-v"]).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().expect("spawn brain serve -v");
-    wait_for_record(&mut child, &dir.path("run"));
+    wait_for_record(&mut child, &dir.join("run"));
     let stderr = stop(child);
     assert!(stderr.lines().any(|l| l.contains("not served")), "-v lists each family it cannot serve; stderr:\n{stderr}");
 }
@@ -208,7 +196,7 @@ fn startup_counts_the_families_it_cannot_serve_instead_of_listing_them() {
 /// weights are absent is left out, never a panic.
 #[test]
 fn the_stdio_controller_starts_with_an_empty_model_store() {
-    let dir = Scratch::new("stdio");
+    let dir = scratch("stdio");
     let out = serve(&dir, &["--stdio"]).output().expect("run brain serve --stdio");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "stdin at EOF ends the loop cleanly; stderr:\n{stderr}");

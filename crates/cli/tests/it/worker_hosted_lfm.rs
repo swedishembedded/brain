@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 use capability::{ActionResult, Invocation, Progress};
 use catalog::resident_lfm::LfmResident;
 use checkpoint::st::ModelCard;
-use decisions::fixtures::Scratch;
+use brain_testutil::Scratch;
 use residency::supervised::{Supervision, WorkerHosting};
 use residency::{Device, Executor, Instance, Job, Policy, ResidentModel};
 use serde_json::json;
@@ -43,7 +43,7 @@ struct Checkpoint {
 }
 
 fn checkpoint() -> Checkpoint {
-    let dir = Scratch::new("worker-hosted-lfm");
+    let dir = Scratch::dir("worker-hosted-lfm");
     // A byte-level vocabulary of 256 and room for prompts of a few dozen bytes.
     let cfg = lfm2::config::LfmConfig { vocab: 256, block_size: 64, d_model: 64, head_dim: 16, d_ff: 128, ..lfm2::config::LfmConfig::tiny() };
     let init = lfm2::init::init_weights(&cfg, data::rng::random_seed());

@@ -20,7 +20,8 @@
 
 use brain::decision_run::{load_model, train, TrainRun};
 use decisions::engine::Backend;
-use decisions::fixtures::{synthetic_jsonl, write_laya, Scratch, SyntheticTask};
+use decisions::fixtures::{synthetic_jsonl, write_laya, SyntheticTask};
+use brain_testutil::Scratch;
 use decisions::laya_head::{BaseRef, BASE_FILE, HEAD_FILE};
 use decisions::manifest::{weights_identity, DecisionManifest, Validation};
 
@@ -32,7 +33,7 @@ struct Setup {
 
 impl Setup {
     fn new(tag: &str) -> Setup {
-        let root = Scratch::new(tag);
+        let root = Scratch::dir(tag);
         write_laya(&root.join("base"), 48);
         std::fs::write(root.join("data.jsonl"), synthetic_jsonl(&SyntheticTask::new(12, 4, 4))).unwrap();
         Setup { root, seed: brain::random_seed() }

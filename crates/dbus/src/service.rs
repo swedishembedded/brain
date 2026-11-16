@@ -1248,9 +1248,10 @@ mod tests {
     #[tokio::test]
     async fn run_carries_a_decision_model_request_answer_and_failure_class() {
         use decisions::resident::DecisionResident;
-        use decisions::fixtures::{write_laya, Scratch};
+        use decisions::fixtures::write_laya;
+        use brain_testutil::Scratch;
 
-        let store = Scratch::new("dbus-decision");
+        let store = Scratch::dir("dbus-decision");
         write_laya(&store.join("acme/laya"), 48);
         let mut budgets = Budgets::new();
         budgets.set(Device::Gpu(0), 8 * GB, 0);

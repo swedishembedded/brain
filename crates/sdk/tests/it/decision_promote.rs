@@ -21,7 +21,8 @@ use std::path::PathBuf;
 
 use brain::decision_run::{promote_model, rollback_model, train, PromoteRun, TrainRun};
 use decisions::engine::Backend;
-use decisions::fixtures::{synthetic_jsonl, write_decide, Scratch, SyntheticTask};
+use decisions::fixtures::{synthetic_jsonl, write_decide, SyntheticTask};
+use brain_testutil::Scratch;
 use decisions::manifest::{DecisionManifest, Validation};
 use decisions::promotion::{Pointer, EVALUATION_FILE};
 
@@ -69,7 +70,7 @@ fn policy(extra: &str) -> String {
 }
 
 fn world() -> World {
-    let root = Scratch::new("promote");
+    let root = Scratch::dir("promote");
     std::fs::create_dir_all(root.join("models")).unwrap();
     write_decide(&root.join("base"), 11);
     let mut control = SyntheticTask::new(320, 0, 60);

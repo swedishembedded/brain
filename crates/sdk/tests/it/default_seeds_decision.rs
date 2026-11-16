@@ -21,11 +21,12 @@ use brain::decision_run::{EvalRun, TrainRun};
 use brain::control::EVAL_SEEDS;
 use brain::{ControlPipeline, ControlSpec, ConversionPipeline, ConversionSpec, DecisionPipeline, Device, Env, Flow, RlcdPipeline, RlcdSpec, TrainSpec};
 use decisions::examples::Split;
-use decisions::fixtures::{write_decide, Scratch};
+use decisions::fixtures::write_decide;
+use brain_testutil::Scratch;
 use std::sync::{Arc, Mutex};
 
 fn encoder(tag: &str) -> Scratch {
-    let dir = Scratch::new(tag);
+    let dir = Scratch::dir(tag);
     write_decide(&dir, 11);
     dir
 }

@@ -418,14 +418,15 @@ mod tests {
     // ---- the capability over real (tiny, random-weight) models ----
 
     use crate::engine::{DecideWeights, LayaWeights};
-    use crate::fixtures::{write_decide, write_laya, Scratch};
+    use crate::fixtures::{write_decide, write_laya};
+    use brain_testutil::Scratch;
 
     fn laya() -> (Scratch, Session) {
         laya_with_context(48)
     }
 
     fn laya_with_context(max_len: u32) -> (Scratch, Session) {
-        let d = Scratch::new("caps-laya");
+        let d = Scratch::dir("caps-laya");
         write_laya(&d, max_len);
         let gpu = gpu_core::testgpu::dev(modernbert::kern::PIPELINES);
         let engine = Engine::Laya(Box::new(LayaWeights::read(d.to_str().unwrap(), None).unwrap().build(gpu, modernbert::Training::Off)));
@@ -433,7 +434,7 @@ mod tests {
     }
 
     fn decide_model() -> (Scratch, Session) {
-        let d = Scratch::new("caps-decide");
+        let d = Scratch::dir("caps-decide");
         write_decide(&d, 5);
         let gpu = gpu_core::testgpu::dev(decide::kern::PIPELINES);
         let weights = DecideWeights::read(d.to_str().unwrap(), None, 0).unwrap();

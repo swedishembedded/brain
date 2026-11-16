@@ -10,7 +10,6 @@
 //! transactional checkpoint, crash safety of the commit, tile independence.
 
 use std::io;
-use std::path::PathBuf;
 
 use optim::checkpoint::{CheckpointDir, RunState, Stage};
 use optim::codec::Rounding;
@@ -19,31 +18,9 @@ use optim::storage::{BlockStateStorage, FileBacking, MemBacking, OptimizerStateS
 use optim::streamed::{state_layout, tensor_layout, HostParams, StreamedOptimizer, TensorSpec};
 use optim::Adam;
 use paramstore::precision::{GradDtype, MasterPolicy, ParamPrecision, StateFormat, ValueDtype};
+use brain_testutil::Scratch;
 
 const TILE: usize = 256;
-
-/// A scratch directory under the temp dir, removed when dropped.
-struct Scratch(PathBuf);
-
-impl std::ops::Deref for Scratch {
-    type Target = std::path::Path;
-    fn deref(&self) -> &std::path::Path {
-        &self.0
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-fn scratch(name: &str) -> Scratch {
-    let d = std::env::temp_dir().join(format!("brain-optim-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&d);
-    std::fs::create_dir_all(&d).unwrap();
-    Scratch(d)
-}
 
 fn prec(state: StateFormat, sr: bool) -> ParamPrecision {
     ParamPrecision { value: ValueDtype::F32, grad: GradDtype::F32, state, master: MasterPolicy::None, stochastic_rounding: sr }
@@ -233,13 +210,13 @@ fn resume_from_checkpoint_is_bit_identical_to_an_uninterrupted_run() {
     let w0: Vec<f32> = (0..n).map(|i| (i % 7) as f32 * 0.1).collect();
     let p = prec(StateFormat::Int8Block { block: 64 }, true);
 
-    let da = scratch("resume-a");
+    let da = Scratch::dir("brain-optim-resume-a");
     let (mut a, mut pa) = file_rig(&da, n, p, &w0);
     for _ in 0..10 {
         fstep(&mut a, &mut pa, &task, n);
     }
 
-    let db = scratch("resume-b");
+    let db = Scratch::dir("brain-optim-resume-b");
     let (mut b, mut pb) = file_rig(&db, n, p, &w0);
     for _ in 0..6 {
         fstep(&mut b, &mut pb, &task, n);
@@ -249,7 +226,7 @@ fn resume_from_checkpoint_is_bit_identical_to_an_uninterrupted_run() {
     ck.commit(&mut b, &mut pb, &run).unwrap();
     drop((b, pb));
 
-    let dc = scratch("resume-c");
+    let dc = Scratch::dir("brain-optim-resume-c");
     let (mut c, mut pc) = file_rig(&dc, n, p, &vec![0.0; n]);
     // a differently seeded fresh optimiser: restore must bring back the seed
     c.set_position(0, 12345);
@@ -273,7 +250,7 @@ fn a_crashed_or_corrupted_commit_never_loses_the_last_good_checkpoint() {
     let n = 500;
     let task = Task::new(n);
     let p = prec(StateFormat::Int8Block { block: 64 }, false);
-    let dir = scratch("crash");
+    let dir = Scratch::dir("brain-optim-crash");
     let (mut o, mut pp) = file_rig(&dir, n, p, &vec![0.2; n]);
     let ck = CheckpointDir::new(dir.join("ckpt")).unwrap();
     let seed: u64 = std::hash::BuildHasher::hash_one(&std::collections::hash_map::RandomState::new(), 0u8);
@@ -287,7 +264,7 @@ fn a_crashed_or_corrupted_commit_never_loses_the_last_good_checkpoint() {
 
     for stage in [Stage::DataWritten, Stage::MetaWritten] {
         ck.commit_until(&mut o, &mut pp, &rs(3), stage).unwrap();
-        let (mut r, mut pr) = file_rig(&scratch("crash-r"), n, p, &vec![0.0; n]);
+        let (mut r, mut pr) = file_rig(&Scratch::dir("brain-optim-crash-r"), n, p, &vec![0.0; n]);
         let got = ck.restore(&mut r, &mut pr).unwrap().unwrap();
         assert_eq!(got.step, 2, "a crash after {stage:?} must leave step 2 as the newest");
         assert_eq!(fweights(&mut pr, n), good);
@@ -300,7 +277,7 @@ fn a_crashed_or_corrupted_commit_never_loses_the_last_good_checkpoint() {
     let mut bytes = std::fs::read(&sp).unwrap();
     bytes[10] ^= 0xff;
     std::fs::write(&sp, bytes).unwrap();
-    let (mut r, mut pr) = file_rig(&scratch("crash-r2"), n, p, &vec![0.0; n]);
+    let (mut r, mut pr) = file_rig(&Scratch::dir("brain-optim-crash-r2"), n, p, &vec![0.0; n]);
     assert_eq!(ck.restore(&mut r, &mut pr).unwrap().unwrap().step, 2);
     assert_eq!(fweights(&mut pr, n), good);
 }
@@ -309,12 +286,12 @@ fn a_crashed_or_corrupted_commit_never_loses_the_last_good_checkpoint() {
 /// loaded into a mismatched layout.
 #[test]
 fn a_checkpoint_for_other_tensors_is_refused() {
-    let dir = scratch("mismatch");
+    let dir = Scratch::dir("brain-optim-mismatch");
     let p = prec(StateFormat::F32, false);
     let (mut o, mut pp) = file_rig(&dir, 100, p, &vec![0.0; 100]);
     let ck = CheckpointDir::new(dir.join("ckpt")).unwrap();
     ck.commit(&mut o, &mut pp, &RunState { step: 1, seed: std::hash::BuildHasher::hash_one(&std::collections::hash_map::RandomState::new(), 0u8), rng_counter: 0, schedule: vec![] }).unwrap();
-    let dir2 = scratch("mismatch2");
+    let dir2 = Scratch::dir("brain-optim-mismatch2");
     let (mut o2, mut p2) = file_rig(&dir2, 200, p, &vec![0.0; 200]);
     let err: io::Error = ck.restore(&mut o2, &mut p2).unwrap_err();
     assert!(err.to_string().contains("differs"), "{err}");

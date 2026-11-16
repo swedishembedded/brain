@@ -22,33 +22,10 @@
 //! pay a real fixed cost their model has no smaller preset for, but this one
 //! does not have to.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use zipdepth::ZipConfig;
-
-struct Scratch(PathBuf);
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        std::fs::remove_dir_all(&self.0).ok();
-    }
-}
-
-impl std::ops::Deref for Scratch {
-    type Target = Path;
-    fn deref(&self) -> &Path {
-        &self.0
-    }
-}
-
-fn scratch_root(tag: &str) -> Scratch {
-    static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("brain-sdk-depth-pipeline-{tag}-{}-{n}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
-    std::fs::create_dir_all(&dir).unwrap();
-    Scratch(dir)
-}
+use brain_testutil::Scratch;
 
 fn with_models_dir<T>(root: &Path, f: impl FnOnce() -> T) -> T {
     let _serial = brain_testutil::env_lock();
@@ -102,7 +79,7 @@ fn from_pretrained_rejects_an_unparseable_model_id() {
 
 #[test]
 fn from_pretrained_names_the_missing_role_when_the_store_is_empty() {
-    let root = scratch_root("missing");
+    let root = Scratch::dir("brain-sdk-depth-pipeline-missing");
     mark_locally_present(&root, "local", "zipdepth-empty-test");
 
     let err = with_models_dir(&root, || brain::DepthPipeline::from_pretrained("local/zipdepth-empty-test").unwrap_err());
@@ -124,7 +101,7 @@ fn from_pretrained_names_the_missing_role_when_the_store_is_empty() {
 /// `Error::Missing`, never a connection-error-flavored `Error::Download`.
 #[test]
 fn download_policy_offline_never_touches_the_network() {
-    let root = scratch_root("offline");
+    let root = Scratch::dir("brain-sdk-depth-pipeline-offline");
     let _serial = brain_testutil::env_lock();
     std::env::set_var("BRAIN_MODELS_DIR", &*root);
     std::env::set_var("BRAIN_HUB_ENDPOINT", "http://127.0.0.1:1");
@@ -153,7 +130,7 @@ fn rgb8_gradient(w: u32, h: u32) -> brain::Image {
 /// decoder, FastConvexUpsample) at a small overridden input size.
 #[test]
 fn from_pretrained_predicts_depth_over_a_real_tiny_fixture_end_to_end() {
-    let root = scratch_root("predict");
+    let root = Scratch::dir("brain-sdk-depth-pipeline-predict");
     write_complete_zipdepth_checkpoint(&root.join("local").join("zipdepth-tiny.pt"), &tiny_cfg());
     mark_locally_present(&root, "local", "zipdepth-sdk-test");
 
@@ -183,7 +160,7 @@ fn from_pretrained_predicts_depth_over_a_real_tiny_fixture_end_to_end() {
 /// network access at any point.
 #[test]
 fn from_pretrained_resolves_a_real_fixture_at_its_own_named_path_with_no_store_local_shortcut() {
-    let root = scratch_root("no-shortcut");
+    let root = Scratch::dir("brain-sdk-depth-pipeline-no-shortcut");
     write_complete_zipdepth_checkpoint(&root.join("skchen1993").join("ZipDepth").join("model.pt"), &tiny_cfg());
 
     let pipe = with_models_dir(&root, || brain::DepthPipeline::from_pretrained("skchen1993/ZipDepth"));

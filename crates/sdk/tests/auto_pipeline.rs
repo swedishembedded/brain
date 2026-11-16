@@ -11,34 +11,11 @@
 //! checkpoints) rather than reinventing them, since both already prove the
 //! SAME tiny shapes build and run for real.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use yolov8::YoloConfig;
 use zipdepth::ZipConfig;
-
-struct Scratch(PathBuf);
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        std::fs::remove_dir_all(&self.0).ok();
-    }
-}
-
-impl std::ops::Deref for Scratch {
-    type Target = Path;
-    fn deref(&self) -> &Path {
-        &self.0
-    }
-}
-
-fn scratch_root(tag: &str) -> Scratch {
-    static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("brain-sdk-auto-pipeline-{tag}-{}-{n}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
-    std::fs::create_dir_all(&dir).unwrap();
-    Scratch(dir)
-}
+use brain_testutil::Scratch;
 
 fn with_models_dir<T>(root: &Path, f: impl FnOnce() -> T) -> T {
     let _serial = brain_testutil::env_lock();
@@ -101,7 +78,7 @@ fn from_pretrained_rejects_an_unparseable_model_id() {
 /// `DepthPipeline::from_pretrained` directly.
 #[test]
 fn from_pretrained_dispatches_to_depth_for_a_real_zipdepth_fixture() {
-    let root = scratch_root("depth");
+    let root = Scratch::dir("brain-sdk-auto-pipeline-depth");
     write_complete_zipdepth_checkpoint(&root.join("skchen1993").join("ZipDepth").join("model.pt"), &tiny_zipdepth_cfg());
 
     let pipe = with_models_dir(&root, || brain::AutoPipeline::from_pretrained("skchen1993/ZipDepth")).expect("a real, complete ZipDepth fixture must dispatch and build");
@@ -123,7 +100,7 @@ fn from_pretrained_dispatches_to_depth_for_a_real_zipdepth_fixture() {
 /// to use (no extra deref ceremony past the pattern match itself).
 #[test]
 fn from_pretrained_dispatches_to_detection_for_a_real_yolov8_fixture() {
-    let root = scratch_root("detect");
+    let root = Scratch::dir("brain-sdk-auto-pipeline-detect");
     write_complete_yolo_checkpoint(&root.join("local").join("yolov8-tiny.safetensors"), &YoloConfig::tiny(4));
 
     let pipe = with_models_dir(&root, || brain::AutoPipeline::from_pretrained("local/yolov8-sdk-test")).expect("a real, complete YOLOv8 fixture must dispatch and build");
@@ -141,7 +118,7 @@ fn from_pretrained_dispatches_to_detection_for_a_real_yolov8_fixture() {
 /// is a clean, named error - never a panic, never a network attempt.
 #[test]
 fn from_pretrained_names_no_known_architecture_when_the_store_is_empty() {
-    let root = scratch_root("empty");
+    let root = Scratch::dir("brain-sdk-auto-pipeline-empty");
     std::fs::write(root.join("unrelated.txt"), b"not a checkpoint").unwrap();
 
     let err = with_models_dir(&root, || brain::AutoPipeline::from_pretrained("local/nothing-here").unwrap_err());

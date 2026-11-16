@@ -25,7 +25,8 @@ use std::path::{Path, PathBuf};
 use brain::decision_run::{evaluate_model, promote_model, rollback_model, train, EvalRun, PromoteRun, TrainRun};
 use decisions::engine::Backend;
 use decisions::examples::Split;
-use decisions::fixtures::{synthetic_jsonl, write_laya_mixing, Scratch, SyntheticTask};
+use decisions::fixtures::{synthetic_jsonl, write_laya_mixing, SyntheticTask};
+use brain_testutil::Scratch;
 use decisions::manifest::{weights_identity, DecisionManifest, Validation};
 use decisions::promotion::{Pointer, EVALUATION_FILE};
 use decisions::select::Rule;
@@ -85,7 +86,7 @@ fn copy_dir(from: &Path, to: &Path) {
 
 #[test]
 fn a_trained_laya_head_is_promoted_only_on_a_measured_lift_and_auto_follows_the_promotion() {
-    let root = Scratch::new("promote-laya");
+    let root = Scratch::dir("promote-laya");
     write_laya_mixing(&root.join("store/convai/laya"), 128);
     let mut control = SyntheticTask::new(320, 0, 120);
     control.shuffle_train_labels = true;
