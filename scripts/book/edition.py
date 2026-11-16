@@ -80,6 +80,14 @@ def source_date() -> str:
     return r.stdout.strip() or "Unreleased"
 
 
+def source_day() -> str:
+    """The day the book last changed, as an ISO 8601 date (2026-11-16), for
+    metadata a reading system parses."""
+    r = subprocess.run(["git", "log", "-1", "--format=%cd", "--date=format:%Y-%m-%d", "--", "docs/book"],
+                       cwd=ROOT, capture_output=True, text=True)
+    return r.stdout.strip() or "1970-01-01"
+
+
 def source_revision() -> str:
     """The last commit that changed what the book is built from, not HEAD."""
     r = subprocess.run(["git", "log", "-1", "--format=%h", "--abbrev=9", "--", *SOURCES],

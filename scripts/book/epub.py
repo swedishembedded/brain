@@ -65,8 +65,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bookspec import ROOT, Book, load  # noqa: E402
-from edition import (ABOUT, AUTHOR_PHOTO, Edition, output, parse, read, select,  # noqa: E402
-                     source_date, source_revision)
+from edition import (ABOUT, AUTHOR_PHOTO, ROMAN, Edition, output, parse, read, select,  # noqa: E402
+                     source_date, source_day, source_revision)
 
 PANDOC = ROOT / "docs" / "pandoc"
 CSS = PANDOC / "epub.css"
@@ -104,6 +104,58 @@ def links(rel: str, text: str, pages: set[str]) -> str:
     return LINK.sub(repl, text)
 
 
+# A reference to a chapter in the text: "Volume II, Chapter 1", or
+# "Chapter 4" for a chapter of the same volume.
+REFERENCE = re.compile(r"\b(?:Volume ([IVX]+),\s+)?[Cc]hapter (\d+)\b")
+# What a reference inside is already literal or already a link: code, math,
+# a markdown link or image.
+PROTECTED = re.compile(r"(`+).*?\1|\$\$.*?\$\$|\$[^$\n]+\$|!?\[[^\]]*\]\([^)]*\)", re.S)
+
+
+def references(rel: str, text: str, pages: set[str], book: Book) -> str:
+    """Each chapter the text refers to by number becomes a link to it when it
+    is in this edition: a reader of the whole book can follow every
+    "Volume I, Chapter 10", and a volume read on its own links the chapters
+    it holds. Headings, code and math are left as they are."""
+    here = next((v for v in book.volumes if rel.startswith(v.dir + "/")), None)
+
+    def target(m):
+        if m.group(1):
+            if m.group(1) not in ROMAN:
+                return None
+            volume = book.volumes[ROMAN.index(m.group(1))]
+        elif here is not None:
+            volume = here
+        else:
+            return None
+        n = int(m.group(2))
+        if not 1 <= n <= len(volume.chapters):
+            return None
+        ch = volume.chapters[n - 1].rel
+        return ch if ch in pages and ch != rel else None
+
+    def plain(part):
+        def repl(m):
+            t = target(m)
+            return f"[{m.group(0)}](#{anchor(t)})" if t else m.group(0)
+        return REFERENCE.sub(repl, part)
+
+    out, fence = [], None
+    for line in text.split("\n"):
+        f = FENCE.match(line)
+        if f and (fence is None or f.group(1)[0] == fence[0]):
+            fence = None if fence else f.group(1)
+        if fence or f or HEADING.match(line):
+            out.append(line)
+            continue
+        parts, last = [], 0
+        for m in PROTECTED.finditer(line):
+            parts += [plain(line[last:m.start()]), m.group(0)]
+            last = m.end()
+        out.append("".join(parts) + plain(line[last:]))
+    return "\n".join(out)
+
+
 def headings(text: str, shift: int, title: str, classes: str) -> str:
     """Every heading outside code moved `shift` levels down; the page's title
     (its first heading) replaced by `title` with `classes` attached. A page
@@ -125,7 +177,7 @@ def headings(text: str, shift: int, title: str, classes: str) -> str:
     return "\n".join(out)
 
 
-def page(rel: str, pages: set[str], level: int, label: str = "", kind: str = "") -> str:
+def page(rel: str, pages: set[str], book: Book, level: int, label: str = "", kind: str = "") -> str:
     """One page of docs/book for the EPUB: its title at `level` (1 for a
     volume, front or back page, 2 for a chapter under its volume), prefixed
     with `label` and carrying the class `kind`, links resolved within the
@@ -136,7 +188,7 @@ def page(rel: str, pages: set[str], level: int, label: str = "", kind: str = "")
         raise SystemExit(f"docs/book/{rel}: no title heading")
     title = f"{label}{m.group(1)}"
     classes = f"#{anchor(rel)}" + (f" .{kind}" if kind else "")
-    text = headings(links(rel, text, pages), level - 1, title, classes)
+    text = headings(links(rel, references(rel, text, pages, book), pages), level - 1, title, classes)
     return docs.transform(f"docs/book/{rel}", text).strip() + "\n\n"
 
 
@@ -167,14 +219,14 @@ def build_markdown(book: Book, edition: Edition, out: Path) -> Path:
     """The markdown of one EPUB; its metadata goes in through pandoc options."""
     pages = set(edition.pages())
     parts = [colophon(book, edition)]
-    parts += [page(rel, pages, 1, kind="front") for rel in edition.front]
+    parts += [page(rel, pages, book, 1, kind="front") for rel in edition.front]
     for v in edition.volumes:
-        parts.append(page(v.intro_rel, pages, 1, kind="volume"))
-        parts += [page(ch.rel, pages, 2, f"{n}. ", "chapter")
+        parts.append(page(v.intro_rel, pages, book, 1, kind="volume"))
+        parts += [page(ch.rel, pages, book, 2, f"{n}. ", "chapter")
                   for n, ch in enumerate(edition.written(v), start=1)]
-    parts += [page(rel, pages, 1, f"Appendix {chr(ord('A') + i)}. ", "appendix")
+    parts += [page(rel, pages, book, 1, f"Appendix {chr(ord('A') + i)}. ", "appendix")
               for i, rel in enumerate(edition.back)]
-    about = page(ABOUT, pages, 1, kind="back")
+    about = page(ABOUT, pages, book, 1, kind="back")
     if AUTHOR_PHOTO.is_file():
         head, sep, body = about.partition("\n\n")
         photo = f"![{book.author}]({AUTHOR_PHOTO.relative_to(ROOT).as_posix()}){{.portrait}}\n\n"
@@ -237,7 +289,7 @@ def build(edition: Edition) -> list[str]:
     image = cover(book, edition, output(edition, ".cover.png"))
     meta = {
         "title": edition.title, "subtitle": edition.subtitle, "creator": [{"role": "author", "text": book.author}],
-        "publisher": "Swedish Embedded AB", "lang": "en-GB", "date": source_date(),
+        "publisher": "Swedish Embedded AB", "lang": "en-GB", "date": source_day(),
         "identifier": [{"scheme": "UUID", "text": identifier(edition)}],
         "rights": f"Copyright © 2026 {book.author}. Licensed under CC BY 4.0.",
         "subject": "Machine learning",

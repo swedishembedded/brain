@@ -194,3 +194,26 @@ LUA
   # A function applied to its argument is never split from it.
   [[ "$output" != *'\sin\! \\'* ]]
 }
+
+# scripts/book/epub.py's linking of "Volume II, Chapter 1" references, for
+# the book's own pages, in the whole book or one volume.
+references() {
+  run python3 - "$REPO/scripts/book" "$1" "$2" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+import edition, epub
+from bookspec import load
+book = load()
+ed = edition.whole(book) if sys.argv[2] == "whole" else edition.volume(book, book.volumes[11])
+print(epub.references("v12-reinforcement-learning/01-mdps.md", sys.argv[3], set(ed.pages()), book))
+PY
+}
+
+@test "a chapter reference is a link in the whole book, and in a volume only when the chapter is in it" {
+  references whole 'See Volume II, Chapter 1 and Chapter 2; `Chapter 3` stays code.'
+  [[ "$output" == *'[Volume II, Chapter 1](#page-v02-learning-01-learning-problem)'* ]]
+  [[ "$output" == *'[Chapter 2](#page-v12-reinforcement-learning-02-value-learning)'* ]]
+  [[ "$output" == *'`Chapter 3` stays code'* ]]
+  references volume 'See Volume II, Chapter 1 and Chapter 2.'
+  [[ "$output" == *'See Volume II, Chapter 1 and [Chapter 2]'* ]]
+}
