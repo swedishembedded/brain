@@ -114,7 +114,7 @@ pub fn start_adapter_mode<R: AdapterHost>(mode: AdapterMode, resident: Option<&A
     let required = |flag: &str| resident.ok_or_else(|| format!("{flag} needs a served Qwen3, Qwen3.8 or Ripple to put the adapter on; name a Qwen3 checkpoint with --checkpoint <dir-or-file>, or serve one released Qwen3.8 GGUF from the model directory"));
     match mode {
         AdapterMode::Base => Ok((None, None)),
-        AdapterMode::Latest(dir) => Ok((Some(Follow::latest(dir)), None)),
+        AdapterMode::Latest(dir) => Ok((Some(Follow::latest(dir.to_path_buf())), None)),
         AdapterMode::Directory(dir) => {
             let resident = required("--serve-adapters")?;
             let mut bank = BankDirectory::new(dir, resident.served_base());
@@ -491,7 +491,7 @@ mod tests {
 
         assert!(spawn_adapter_watcher::<QwenResident>(None, None, &executor).is_none(), "no --watch-adapters must spawn no watcher");
         assert!(
-            spawn_adapter_watcher::<QwenResident>(Some(Follow::latest(dir)), None, &executor).is_none(),
+            spawn_adapter_watcher::<QwenResident>(Some(Follow::latest(dir.to_path_buf())), None, &executor).is_none(),
             "a watched directory with no served Qwen3 has nothing to offer an adapter on, so it must spawn no watcher either"
         );
     }
@@ -733,7 +733,7 @@ mod tests {
         let (follow, line) = start_adapter_mode(AdapterMode::Directory(bank), Some(&resident), &executor).expect("a directory of adapters for the served base starts");
         assert!(follow.is_some() && line.is_none(), "the directory is followed, nothing is announced as pinned");
         assert!(listed(&executor, ONE) && listed(&executor, TWO) && listed(&executor, "brain/qwen3"), "both adapters are models as soon as startup returns");
-        assert!(start_adapter_mode::<QwenResident>(AdapterMode::Directory(dir.clone()), None, &executor).is_err(), "no served Qwen3 to put them on is an error");
+        assert!(start_adapter_mode::<QwenResident>(AdapterMode::Directory(dir.to_path_buf()), None, &executor).is_err(), "no served Qwen3 to put them on is an error");
     }
 
     /// `--adapter-manifest`: a replaced manifest offers the new release only

@@ -72,8 +72,8 @@ fn decoded(ops: &Ops, w: &Weight) -> Vec<f32> {
 
 #[test]
 fn a_packed_tensor_uploads_as_the_requested_tier_with_one_tile_of_staging() {
-    let dir = std::env::temp_dir().join(format!("upload_from_source_{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    // Removed when the guard drops, also when the test panics.
+    let dir = brain_testutil::Scratch::dir("upload_from_source");
     write_fp8_checkpoint(&dir);
     let reader = PackedReader::open(&dir.join("m.safetensors")).unwrap();
     let src = PackedSource::new(Box::new(reader), CodecRegistry::reference(), [("blocks.0.w".to_string(), Binding::new("w")), ("blocks.0.v".to_string(), Binding::new("v")), ("blocks.0.u".to_string(), Binding::new("u"))]).unwrap();
@@ -113,7 +113,6 @@ fn a_packed_tensor_uploads_as_the_requested_tier_with_one_tile_of_staging() {
     let staging = BoundedWorkspace::new(MemoryBudget::new(300 << 10, 0));
     upload_from_source(&ops, &remap, "up", N, K, Dtype::BF16, &staging).expect("renamed tensor");
     assert!(staging.peak() > 0, "a Whole remap must forward the packed view");
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 /// Spec: a fused group of parts stored in different encodings (FP8 next to bf16) is converted part by part into
@@ -121,8 +120,8 @@ fn a_packed_tensor_uploads_as_the_requested_tier_with_one_tile_of_staging() {
 /// whole-tensor f32 copy; asked to keep the stored encodings, it is split into one weight per part instead.
 #[test]
 fn a_fused_group_of_mixed_encodings_is_converted_per_part_or_split() {
-    let dir = std::env::temp_dir().join(format!("upload_mixed_group_{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    // Removed when the guard drops, also when the test panics.
+    let dir = brain_testutil::Scratch::dir("upload_mixed_group");
     write_fp8_checkpoint(&dir);
     let reader = PackedReader::open(&dir.join("m.safetensors")).unwrap();
     let src = PackedSource::new(
@@ -169,7 +168,6 @@ fn a_fused_group_of_mixed_encodings_is_converted_per_part_or_split() {
         FusedGroup::Joined(w) => assert_eq!((w.n() as usize, w.dtype()), (N + N2, Dtype::F8E4M3)),
         FusedGroup::Split(_) => panic!("two FP8 parts join in place"),
     }
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 /// A brain checkpoint with a bf16 linear, a packed-int8 linear (`u32` words plus the `.scale` grid) and an f32 norm.
@@ -204,8 +202,8 @@ fn write_mixed_brain_checkpoint(path: &std::path::Path) {
 /// serving build never widens what is stored narrow.
 #[test]
 fn the_stored_tier_policy_keeps_each_tensor_in_its_stored_encoding() {
-    let dir = std::env::temp_dir().join(format!("stored_tier_{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    // Removed when the guard drops, also when the test panics.
+    let dir = brain_testutil::Scratch::dir("stored_tier");
     let path = dir.join("m.safetensors");
     write_mixed_brain_checkpoint(&path);
     let src = checkpoint::packed::stored_source(checkpoint::weightio::WeightReader::open(path.to_str().unwrap()).unwrap());
@@ -219,15 +217,14 @@ fn the_stored_tier_policy_keeps_each_tensor_in_its_stored_encoding() {
     let policy = model::ops::stored_tier_policy(&*src, names);
     let tiers: Vec<Dtype> = names.iter().map(|n| policy.want(n)).collect();
     assert_eq!(tiers, [Dtype::BF16, Dtype::I8, Dtype::F32, Dtype::F32]);
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 /// Spec: a linear a checkpoint stores as packed int8 comes back from `quantize_from` as the stored codes and
 /// scales, not a requantization of their decode (which moves any group whose largest code is under 127).
 #[test]
 fn a_stored_int8_linear_is_quantized_from_as_its_own_codes() {
-    let dir = std::env::temp_dir().join(format!("stored_int8_{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    // Removed when the guard drops, also when the test panics.
+    let dir = brain_testutil::Scratch::dir("stored_int8");
     let path = dir.join("m.safetensors");
     write_mixed_brain_checkpoint(&path);
     let src = checkpoint::packed::stored_source(checkpoint::weightio::WeightReader::open(path.to_str().unwrap()).unwrap());
@@ -236,5 +233,4 @@ fn a_stored_int8_linear_is_quantized_from_as_its_own_codes() {
     let want_words: Vec<u32> = (0..4 * 8).map(|w| u32::from_le_bytes([4 * w as u8, 4 * w as u8 + 1, 4 * w as u8 + 2, 4 * w as u8 + 3])).collect();
     assert_eq!(words, want_words);
     assert_eq!(scales, [0.5f32, 1.0, 1.5, 2.0]);
-    std::fs::remove_dir_all(&dir).ok();
 }

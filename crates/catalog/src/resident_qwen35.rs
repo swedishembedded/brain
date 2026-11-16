@@ -1177,11 +1177,12 @@ mod tests {
 
     const GIB: u64 = 1 << 30;
 
-    /// A complete (weights + tokenizer) synthetic Qwen3.8 GGUF.
-    fn write_servable_gguf(tag: &str) -> String {
-        let path = std::env::temp_dir().join(format!("brain-qwen35-gguf-factory-{tag}-{}.gguf", std::process::id()));
-        qwen35::gguf_import::testing::write_synthetic_servable_gguf(path.to_str().unwrap());
-        path.to_string_lossy().into_owned()
+    /// A complete (weights + tokenizer) synthetic Qwen3.8 GGUF, removed when the returned guard drops (also when the
+    /// test panics).
+    fn write_servable_gguf(tag: &str) -> brain_testutil::Scratch {
+        let path = brain_testutil::Scratch::file(&format!("brain-qwen35-gguf-factory-{tag}"), ".gguf");
+        qwen35::gguf_import::testing::write_synthetic_servable_gguf(path.as_str());
+        path
     }
 
     /// Two 24 GiB cards, 2 GiB kept free on each.
@@ -1196,11 +1197,10 @@ mod tests {
     #[test]
     fn the_resident_is_served_under_the_id_it_is_given() {
         let path = write_servable_gguf("id");
-        let r = gguf_resident(&path, "unsloth/Qwen3.8-27B-GGUF", &gpu_budget(), RESERVED, &Qwen35GgufServeConfig::default()).expect("a complete GGUF must build");
+        let r = gguf_resident(path.as_str(), "unsloth/Qwen3.8-27B-GGUF", &gpu_budget(), RESERVED, &Qwen35GgufServeConfig::default()).expect("a complete GGUF must build");
         assert_eq!(r.model_id(), "unsloth/Qwen3.8-27B-GGUF");
         assert_eq!(r.manifest().model, "unsloth/Qwen3.8-27B-GGUF");
-        assert_eq!(r.gguf_path(), path);
-        std::fs::remove_file(path).ok();
+        assert_eq!(r.gguf_path(), path.as_str());
     }
 
     /// Without a fixed context the cards decide: far more than any development
@@ -1212,11 +1212,10 @@ mod tests {
         // Speculation reserves device bytes that grow with the context; this test sizes the context
         // from the budget alone.
         let cfg = Qwen35GgufServeConfig { speculative: Some(qwen35::int8_gguf_resident::SpeculativeMode::Off), ..Qwen35GgufServeConfig::default() };
-        let r = gguf_resident(&path, "t/auto", &gpus, RESERVED, &cfg).expect("builds");
+        let r = gguf_resident(path.as_str(), "t/auto", &gpus, RESERVED, &cfg).expect("builds");
         assert!(r.cap() > 1_000_000, "a tiny model on a 2 GiB budget leaves room for a huge context: {}", r.cap());
         let placed: u64 = r.placement().iter().map(|p| p.3).sum();
         assert!(placed <= 2 * GIB, "the context must be charged into a placement that fits the usable bytes: {placed}");
-        std::fs::remove_file(path).ok();
     }
 
     /// A replica spans the fewest cards that hold the model, however much more the whole box could hold.
@@ -1239,14 +1238,13 @@ mod tests {
         let path = write_servable_gguf("replicas");
         let cfg = Qwen35GgufServeConfig { speculative: Some(qwen35::int8_gguf_resident::SpeculativeMode::Off), ..Qwen35GgufServeConfig::default() };
         let card = 4 * GIB;
-        let one = gguf_resident(&path, "t/one", &[(0, card)], RESERVED, &cfg).expect("builds");
-        let two = gguf_resident(&path, "t/two", &[(0, card), (1, card)], RESERVED, &cfg).expect("builds");
+        let one = gguf_resident(path.as_str(), "t/one", &[(0, card)], RESERVED, &cfg).expect("builds");
+        let two = gguf_resident(path.as_str(), "t/two", &[(0, card), (1, card)], RESERVED, &cfg).expect("builds");
         assert_eq!(two.replicas(), 2, "one replica per card: {:?}", two.replica_placements());
         for (replica, device, ..) in two.replica_placements() {
             assert_eq!(device, Device::Gpu(replica as u32), "replica {replica} sits on its own card, whole");
         }
         assert_eq!(two.cap(), one.cap(), "every card holds what a lone card would: the context is sized per replica");
-        std::fs::remove_file(path).ok();
     }
 
     /// The knobs travel as data into the built resident; an explicit context is
@@ -1263,7 +1261,7 @@ mod tests {
             speculative: Some(qwen35::int8_gguf_resident::SpeculativeMode::Off),
             ..Qwen35GgufServeConfig::default()
         };
-        let r = gguf_resident(&path, "t/knobs", &gpu_budget(), RESERVED, &cfg).expect("builds");
+        let r = gguf_resident(path.as_str(), "t/knobs", &gpu_budget(), RESERVED, &cfg).expect("builds");
         assert_eq!(r.cap(), 8192);
         assert_eq!(r.kv_tier(), model::kv_tier::KvTier::INT8);
         assert_eq!(r.max_batch(), 4);
@@ -1271,7 +1269,6 @@ mod tests {
         assert_eq!(r.speculation().mode, qwen35::int8_gguf_resident::SpeculativeMode::Off);
         // What `/v1/models` reports is the context the resident was built with.
         assert_eq!(r.manifest().max_context_tokens, Some(8192));
-        std::fs::remove_file(path).ok();
     }
 
     /// An all-`None` config: the context sized from the memory the placement
@@ -1281,7 +1278,7 @@ mod tests {
     #[test]
     fn config_defaults_size_the_context_and_batch_the_requests() {
         let path = write_servable_gguf("defaults");
-        let r = gguf_resident(&path, "t/defaults", &gpu_budget(), RESERVED, &Qwen35GgufServeConfig::default()).expect("builds");
+        let r = gguf_resident(path.as_str(), "t/defaults", &gpu_budget(), RESERVED, &Qwen35GgufServeConfig::default()).expect("builds");
         assert!(r.cap() > 2048, "sized by memory, not a fixed default: {}", r.cap());
         assert_eq!(r.kv_tier(), model::kv_tier::KvTier::INT8, "the most compact, fastest tier fits");
         assert_eq!(r.max_batch(), DEFAULT_MAX_BATCH);
@@ -1295,7 +1292,6 @@ mod tests {
             assert!(said.contains(knob), "every default is reported with its reason; missing {knob}:\n{said}");
         }
         assert_eq!(r.manifest().max_context_tokens, Some(r.cap() as u64));
-        std::fs::remove_file(path).ok();
     }
 
     /// The exact-decode regime is defined on the f32 recurrent state: it keeps f32 unless bf16 is asked for (which is refused),
@@ -1303,12 +1299,11 @@ mod tests {
     #[test]
     fn exact_decode_and_an_explicit_choice_keep_the_f32_state_pool() {
         let path = write_servable_gguf("gdn-state-regimes");
-        let build = |cfg: Qwen35GgufServeConfig| gguf_resident(&path, "t/gdn", &gpu_budget(), RESERVED, &cfg).expect("builds");
+        let build = |cfg: Qwen35GgufServeConfig| gguf_resident(path.as_str(), "t/gdn", &gpu_budget(), RESERVED, &cfg).expect("builds");
         let exact = build(Qwen35GgufServeConfig { exact_decode: true, ..Default::default() });
         assert_eq!(exact.gdn_state(), GdnState::F32);
         assert!(exact.chosen_defaults().join("\n").contains("--gdn-state f32"));
         assert_eq!(build(Qwen35GgufServeConfig { gdn_state: Some(GdnState::F32), ..Default::default() }).gdn_state(), GdnState::F32);
-        std::fs::remove_file(path).ok();
     }
 
     /// A default that does not fit falls back to the next-ranked one that
@@ -1319,13 +1314,13 @@ mod tests {
         let path = write_servable_gguf("give-way");
         let gpus = vec![(0, 4 * GIB)];
         // The longest fixed context that places with no prompt cache.
-        let places = |ctx: u32| gguf_resident(&path, "t/x", &gpus, RESERVED, &Qwen35GgufServeConfig { ctx: Some(ctx), prefix_slots: Some(0), ..Default::default() }).is_ok();
+        let places = |ctx: u32| gguf_resident(path.as_str(), "t/x", &gpus, RESERVED, &Qwen35GgufServeConfig { ctx: Some(ctx), prefix_slots: Some(0), ..Default::default() }).is_ok();
         let (mut longest, mut over) = (1u32, 1u32 << 30);
         while over - longest > 1 {
             let mid = longest + (over - longest) / 2;
             *(if places(mid) { &mut longest } else { &mut over }) = mid;
         }
-        let r = gguf_resident(&path, "t/x", &gpus, RESERVED, &Qwen35GgufServeConfig { ctx: Some(longest), ..Default::default() }).expect("the leaner default fits");
+        let r = gguf_resident(path.as_str(), "t/x", &gpus, RESERVED, &Qwen35GgufServeConfig { ctx: Some(longest), ..Default::default() }).expect("the leaner default fits");
         assert_eq!(r.cap(), longest);
         assert_eq!(r.kv_tier(), model::kv_tier::KvTier::INT8);
         let said = r.chosen_defaults().join("\n");
@@ -1339,9 +1334,8 @@ mod tests {
             assert!(r.prefix_slots() < DEFAULT_MAX_BATCH, "the full prompt cache does not fit beside {longest}-token sequences: {}", r.prefix_slots());
             assert!(said.contains("passed over"), "{said}");
         }
-        let wide = gguf_resident(&path, "t/x", &gpus, RESERVED, &Qwen35GgufServeConfig { max_batch: Some(16), ..Default::default() }).expect("builds");
+        let wide = gguf_resident(path.as_str(), "t/x", &gpus, RESERVED, &Qwen35GgufServeConfig { max_batch: Some(16), ..Default::default() }).expect("builds");
         assert_eq!(wide.prefix_slots(), 4 * 16, "the prompt cache follows the concurrency where it fits");
-        std::fs::remove_file(path).ok();
     }
 
     /// Everything that would make the first request fail is refused here,
@@ -1350,15 +1344,14 @@ mod tests {
     #[test]
     fn a_resident_that_could_never_load_is_refused_with_the_reason() {
         let path = write_servable_gguf("refused");
-        let no_gpu = gguf_resident(&path, "t/x", &[], RESERVED, &Qwen35GgufServeConfig::default()).err().expect("must be refused");
+        let no_gpu = gguf_resident(path.as_str(), "t/x", &[], RESERVED, &Qwen35GgufServeConfig::default()).err().expect("must be refused");
         assert!(no_gpu.contains("no GPU"), "{no_gpu}");
-        let too_small = gguf_resident(&path, "t/x", &[(0, RESERVED + 64)], RESERVED, &Qwen35GgufServeConfig::default()).err().expect("must be refused");
+        let too_small = gguf_resident(path.as_str(), "t/x", &[(0, RESERVED + 64)], RESERVED, &Qwen35GgufServeConfig::default()).err().expect("must be refused");
         assert!(too_small.contains("does not fit"), "{too_small}");
-        let fixed_ctx_too_small = gguf_resident(&path, "t/x", &[(0, RESERVED + 64)], RESERVED, &Qwen35GgufServeConfig { ctx: Some(1024), ..Default::default() }).err().expect("must be refused");
+        let fixed_ctx_too_small = gguf_resident(path.as_str(), "t/x", &[(0, RESERVED + 64)], RESERVED, &Qwen35GgufServeConfig { ctx: Some(1024), ..Default::default() }).err().expect("must be refused");
         assert!(fixed_ctx_too_small.contains("budgeted GPU(s) offer"), "{fixed_ctx_too_small}");
         let missing = gguf_resident("/nonexistent/m.gguf", "t/x", &gpu_budget(), RESERVED, &Qwen35GgufServeConfig::default()).err().expect("must be refused");
         assert!(missing.contains("/nonexistent/m.gguf"), "{missing}");
-        std::fs::remove_file(path).ok();
     }
 
 

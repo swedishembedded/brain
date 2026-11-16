@@ -9,7 +9,7 @@
 //! always-fresh-init defect verbatim; `finetune_from`'s `resume` switch
 //! fixes both the same way.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use data::binio::{self, Meta};
 use data::rng::Rng;
@@ -22,11 +22,9 @@ fn skip() -> bool {
     brain_testutil::gpu_tests_skipped()
 }
 
-fn tmp(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("brain-qwen35-lora-resume-gate-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+/// A fresh scratch directory, removed when the returned guard drops (also when the test panics).
+fn tmp(name: &str) -> brain_testutil::Scratch {
+    brain_testutil::Scratch::dir(&format!("brain-qwen35-lora-resume-gate-{name}"))
 }
 
 const PROMPT: [u32; 3] = [2, 5, 8];

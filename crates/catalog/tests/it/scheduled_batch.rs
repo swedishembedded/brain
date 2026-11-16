@@ -18,14 +18,12 @@ use serde_json::json;
 /// A byte-level tokenizer over ids `0..256`, so any ASCII prompt encodes
 /// inside the tiny model's vocabulary.
 fn byte_tokenizer() -> QwenBpe {
-    let dir = std::env::temp_dir().join(format!("scheduled-tok-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
     let vocab: serde_json::Map<String, serde_json::Value> = data::bpe::bytes_to_unicode().iter().enumerate().map(|(i, c)| (c.to_string(), json!(i))).collect();
     let tokenizer = json!({"model": {"vocab": vocab, "merges": []}, "pre_tokenizer": {"type": "ByteLevel", "add_prefix_space": false, "use_regex": true}});
-    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    let path = dir.join(format!("tokenizer-{}.json", NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst)));
-    std::fs::write(&path, tokenizer.to_string()).unwrap();
-    QwenBpe::from_file(path.to_str().unwrap()).unwrap()
+    // Read once and removed when the guard drops at the end of this function.
+    let path = brain_testutil::Scratch::file("scheduled-tok", ".json");
+    std::fs::write(&*path, tokenizer.to_string()).unwrap();
+    QwenBpe::from_file(path.as_str()).unwrap()
 }
 
 fn raw_parse(tok: &QwenBpe, inv: &Invocation) -> Result<qwen3::chat::ParsedRequest, String> {

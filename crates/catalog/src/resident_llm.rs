@@ -2538,7 +2538,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&indexers);
     }
 
-    fn write_tiny_checkpoint(seed: u64, tag: &str) -> std::path::PathBuf {
+    fn write_tiny_checkpoint(seed: u64, tag: &str) -> brain_testutil::Scratch {
         let cfg = qwen3::config::QwenConfig { vocab: 151936, ..qwen3::config::QwenConfig::tiny() };
         let init = qwen3::init_weights(&cfg, seed);
         let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = cfg
@@ -2549,10 +2549,9 @@ mod tests {
                 (name, vec![n as u64], v)
             })
             .collect();
-        let dir = std::env::temp_dir().join(format!("qwen-resident-http-{tag}-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("tiny.safetensors");
-        checkpoint::save(path.to_str().unwrap(), cfg.to_json(), &tensors);
+        // Removed when the returned guard drops (also when the test panics).
+        let path = brain_testutil::Scratch::file(&format!("qwen-resident-http-{tag}"), ".safetensors");
+        checkpoint::save(path.as_str(), cfg.to_json(), &tensors);
         path
     }
 

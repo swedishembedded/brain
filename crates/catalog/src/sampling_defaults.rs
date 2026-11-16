@@ -84,9 +84,9 @@ mod tests {
     use super::*;
     use crate::resident_mock::MockResident;
 
-    fn declared(tag: &str, json: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("brain-ckpt-sampling-{tag}-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+    /// A checkpoint directory declaring `json`, removed when the returned guard drops (also when the test panics).
+    fn declared(tag: &str, json: &str) -> brain_testutil::Scratch {
+        let dir = brain_testutil::Scratch::dir(&format!("brain-ckpt-sampling-{tag}"));
         std::fs::write(dir.join("generation_config.json"), json).unwrap();
         dir
     }

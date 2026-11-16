@@ -30,11 +30,9 @@ fn skip() -> bool {
     brain_testutil::gpu_tests_skipped()
 }
 
-fn tmp(name: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("brain-qwen35-lora-serve-fold-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+/// A fresh scratch directory, removed when the returned guard drops (also when the test panics).
+fn tmp(name: &str) -> brain_testutil::Scratch {
+    brain_testutil::Scratch::dir(&format!("brain-qwen35-lora-serve-fold-{name}"))
 }
 
 #[test]
@@ -64,7 +62,8 @@ fn folded_serve_matches_live_training_and_diverges_from_the_unadapted_base() {
         trained.poll_wait();
     }
 
-    let adapter_path = tmp("adapter").join("adapter.safetensors");
+    let scratch = tmp("adapter");
+    let adapter_path = scratch.join("adapter.safetensors");
     qwen35::lora::save_adapter(adapter_path.to_str().unwrap(), &trained, "test/adapter", "test/base", None).unwrap();
 
     // Exactly what `checkpoint::load(weights).by_role("")` returns, feeding

@@ -60,11 +60,9 @@ fn targets_of(ids: &[u32]) -> Vec<u32> {
         .collect()
 }
 
-fn scratch(tag: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("brain-vision-train-{tag}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+/// A fresh scratch directory, removed when the returned guard drops (also when the test panics).
+fn scratch(tag: &str) -> brain_testutil::Scratch {
+    brain_testutil::Scratch::dir(&format!("brain-vision-train-{tag}"))
 }
 
 fn head(head_w: &[f32], hidden: &[f32]) -> Vec<f32> {
@@ -93,13 +91,14 @@ impl Rig {
         VisionTower::from_weights(tiny_spec(), &tiny_tower_weights(3), &self.gpu, self.cfg.d_model, 1 << 20).unwrap()
     }
 
-    /// A training build of `rows` rows of `len` tokens, reading the image of example 0 of a dataset holding `image`.
-    fn trainer(&self, rows: u32, len: u32, image: &imaging::pixels::Rgb8, tag: &str) -> Qwen35 {
+    /// A training build of `rows` rows of `len` tokens, reading the image of example 0 of a dataset holding `image`,
+    /// and the dataset's directory: the feed reads it while the model trains, so the caller keeps it as long.
+    fn trainer(&self, rows: u32, len: u32, image: &imaging::pixels::Rgb8, tag: &str) -> (Qwen35, brain_testutil::Scratch) {
         let dir = scratch(tag);
         chat_media::write(&dir, "train", &[vec![ppm(image).into()], vec![]]).unwrap();
         let m = Qwen35::new_train_on(self.gpu.share(), self.cfg.clone(), rows, len, &self.init);
         m.attach_vision(VisionFeed::open(&dir, self.tower()).unwrap().expect("a dataset with images"));
-        m
+        (m, dir)
     }
 }
 
@@ -135,7 +134,7 @@ fn the_training_forward_has_the_logits_serving_produces_for_the_same_prompt() {
     let rig = Rig::new();
     let image = picture(8, 8, 5);
     let ids = prompt();
-    let m = rig.trainer(1, ids.len() as u32, &image, "parity");
+    let (m, _data) = rig.trainer(1, ids.len() as u32, &image, "parity");
 
     let trained = trained_logits(&m, &ids, Some(0));
     let served = served_logits(&rig, &ids, &image, true);
@@ -158,7 +157,7 @@ fn a_text_batch_after_an_image_batch_carries_nothing_over() {
     let text: Vec<u32> = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
     let ids = prompt();
     assert_eq!(ids.len(), text.len());
-    let m = rig.trainer(1, ids.len() as u32, &image, "carry");
+    let (m, _data) = rig.trainer(1, ids.len() as u32, &image, "carry");
 
     let alone = trained_logits(&m, &text, None);
     let with_image = trained_logits(&m, &ids, Some(0));
@@ -191,11 +190,11 @@ fn each_row_of_a_wider_batch_trains_as_it_would_alone() {
         Model::set_batch(m, Batch::LmExamples { split: Split::Train, tokens: ids, targets: y, examples: &[example] });
         (m.forward(), y.iter().filter(|&&t| t != model::IGNORE).count() as f32)
     };
-    let one = rig.trainer(1, len as u32, &image, "wide-1");
+    let (one, _data_one) = rig.trainer(1, len as u32, &image, "wide-1");
     let (l_image, c_image) = loss_alone(&one, &image_row, &y_image, Some(0));
     let (l_text, c_text) = loss_alone(&one, &text_row, &y_text, None);
 
-    let two = rig.trainer(2, len as u32, &image, "wide-2");
+    let (two, _data_two) = rig.trainer(2, len as u32, &image, "wide-2");
     let (tokens, targets) = ([image_row.clone(), text_row.clone()].concat(), [y_image, y_text].concat());
     Model::set_batch(&two, Batch::LmExamples { split: Split::Train, tokens: &tokens, targets: &targets, examples: &[Some(0), None] });
     let together = two.forward();

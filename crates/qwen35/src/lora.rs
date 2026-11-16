@@ -88,11 +88,9 @@ mod tests {
     use super::*;
     use checkpoint::st::{Adapter, ModelCard};
 
-    fn tmp(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("brain-qwen35-lora-unit-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    /// A fresh scratch directory, removed when the returned guard drops (also when the test panics).
+    fn tmp(name: &str) -> brain_testutil::Scratch {
+        brain_testutil::Scratch::dir(&format!("brain-qwen35-lora-unit-{name}"))
     }
 
     /// Hand-build an adapter safetensors file the way [`save_adapter`] would,
@@ -167,7 +165,6 @@ mod tests {
         // The untouched leaf must be BIT-IDENTICAL - never merely "close".
         assert_eq!(base.get("blocks.0.other.weight").unwrap(), &untouched_before, "fold_adapter_into modified a leaf the adapter never targeted");
 
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// `fold_adapter_into` must refuse to fold silently if the base map is

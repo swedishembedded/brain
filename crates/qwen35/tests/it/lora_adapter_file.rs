@@ -21,11 +21,9 @@ fn skip() -> bool {
     brain_testutil::gpu_tests_skipped()
 }
 
-fn tmp(name: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("brain-qwen35-lora-adapter-file-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+/// A fresh scratch directory, removed when the returned guard drops (also when the test panics).
+fn tmp(name: &str) -> brain_testutil::Scratch {
+    brain_testutil::Scratch::dir(&format!("brain-qwen35-lora-adapter-file-{name}"))
 }
 
 /// A tiny trained LoRA model (rank 5, coprime with `tiny()`'s
@@ -108,7 +106,8 @@ fn folding_the_adapter_into_the_base_reproduces_the_live_lora_forward() {
     let (trained, x) = trained_model();
     let live_logits = trained.logits_all(&x);
 
-    let adapter_path = tmp("fold").join("adapter.safetensors");
+    let scratch = tmp("fold");
+    let adapter_path = scratch.join("adapter.safetensors");
     qwen35::lora::save_adapter(adapter_path.to_str().unwrap(), &trained, "test/adapter", "test/base", None).unwrap();
 
     // The base tensors an inference load would see: every non-adapter param

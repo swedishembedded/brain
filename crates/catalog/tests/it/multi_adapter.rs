@@ -69,7 +69,8 @@ fn write_checkpoint(path: &Path, cfg: &QwenConfig, weights: &std::collections::H
 /// The files of one scenario: a base, two adapters on it, and the same base
 /// with each adapter folded in.
 struct Fixture {
-    dir: PathBuf,
+    /// Removed with everything in it when the fixture drops.
+    dir: brain_testutil::Scratch,
     tokenizer: String,
     base: PathBuf,
     adapters: [PathBuf; 2],

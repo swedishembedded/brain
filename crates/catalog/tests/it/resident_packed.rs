@@ -66,11 +66,9 @@ fn peak_live<R>(f: impl FnOnce() -> R) -> (R, usize, usize) {
     (r, PEAK.load(Ordering::Relaxed), LIVE.load(Ordering::Relaxed))
 }
 
-fn scratch(tag: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("brain-resident-packed-{tag}-{}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+/// A fresh scratch directory, removed when the returned guard drops (also when the test panics).
+fn scratch(tag: &str) -> brain_testutil::Scratch {
+    brain_testutil::Scratch::dir(&format!("brain-resident-packed-{tag}"))
 }
 
 // ---- dense Qwen3.8 ----

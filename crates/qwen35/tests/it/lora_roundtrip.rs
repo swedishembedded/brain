@@ -21,11 +21,9 @@ fn skip() -> bool {
     brain_testutil::gpu_tests_skipped()
 }
 
-fn tmp(name: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("brain-qwen35-lora-roundtrip-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+/// A fresh scratch directory, removed when the returned guard drops (also when the test panics).
+fn tmp(name: &str) -> brain_testutil::Scratch {
+    brain_testutil::Scratch::dir(&format!("brain-qwen35-lora-roundtrip-{name}"))
 }
 
 /// A LoRA-trained model's saved checkpoint must reproduce the SAME logits
@@ -67,7 +65,8 @@ fn lora_adapter_survives_save_and_reload() {
     }
     let logits_before_save = trained.logits_all(&x);
 
-    let path = tmp("adapter").join("qwen35_lora.safetensors");
+    let scratch = tmp("adapter");
+    let path = scratch.join("qwen35_lora.safetensors");
     trained.save(path.to_str().unwrap());
 
     let c = checkpoint::load(path.to_str().unwrap());
@@ -106,7 +105,8 @@ fn checkpoint_without_lora_key_loads_as_plain_model() {
     let t = cfg.block_size;
     let m = Qwen35::new_on(Gpu::new(pipelines()), cfg.clone(), 1, t, &init);
 
-    let path = tmp("no_lora").join("qwen35_base.safetensors");
+    let scratch = tmp("no_lora");
+    let path = scratch.join("qwen35_base.safetensors");
     m.save(path.to_str().unwrap());
 
     let c = checkpoint::load(path.to_str().unwrap());

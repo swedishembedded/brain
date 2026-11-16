@@ -34,17 +34,16 @@ fn config() -> RicursiveConfig {
 }
 
 /// A pulled directory: config, random weights, a byte-level tokenizer that covers any ASCII prompt.
-fn pulled_dir(tag: &str) -> std::path::PathBuf {
+fn pulled_dir(tag: &str) -> brain_testutil::Scratch {
     pulled_dir_with(tag, None)
 }
 
 /// [`pulled_dir`] whose greedy decode walks the cycle `a b c d a b c ...` whatever the prompt, when `cycle` is set: each
 /// of the four tokens has a random unit code for its embedding, and the output row of its successor is that code scaled
 /// up, so the successor wins the argmax by a wide margin while the layers (with small gains on their branches) still run.
-fn pulled_dir_with(tag: &str, cycle: Option<[u8; 4]>) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("brain-ricursive-served-{tag}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+/// The directory is removed when the returned guard drops (also when the test panics).
+fn pulled_dir_with(tag: &str, cycle: Option<[u8; 4]>) -> brain_testutil::Scratch {
+    let dir = brain_testutil::Scratch::dir(&format!("brain-ricursive-served-{tag}"));
     let cfg = config();
     let (vocab, hidden) = (cfg.vocab_size, cfg.hidden_size);
     let mut rng = Lcg::new(31);
@@ -389,10 +388,10 @@ fn an_adapter_that_does_not_fit_the_base_is_refused_by_name() {
     trained_adapter(&dir, &file, A, 9);
     let base = banked(&dir);
 
-    let other = llmserve::adapter_release::ServedBase::of_family(ricursive::resident::family(), dir.clone(), Some("someone/else".into()));
+    let other = llmserve::adapter_release::ServedBase::of_family(ricursive::resident::family(), dir.to_path_buf(), Some("someone/else".into()));
     let err = llmserve::adapter_release::verify_adapter(&file, &other).err().expect("a different base");
     assert!(err.contains("refusing to put it on a different base"), "{err}");
-    let qwen = llmserve::adapter_release::ServedBase::of_family(llmserve::adapter_release::ServedFamily::qwen3(), dir.clone(), Some(ID.into()));
+    let qwen = llmserve::adapter_release::ServedBase::of_family(llmserve::adapter_release::ServedFamily::qwen3(), dir.to_path_buf(), Some(ID.into()));
     let err = llmserve::adapter_release::verify_adapter(&file, &qwen).err().expect("a ricursive adapter on a Qwen base");
     assert!(err.contains("ricursive") && err.contains("qwen"), "{err}");
 
@@ -574,7 +573,7 @@ fn a_draft_model_is_charged_to_the_plan_and_never_changes_the_greedy_output() {
     assert!(err.contains("vocabulary 272"), "{err}");
     let err = resident(&dir, &RicursiveServeConfig { draft_model: Some("nowhere/Not-Pulled".into()), ..Default::default() }, &[]).err().expect("not there");
     assert!(err.contains("--draft-model nowhere/Not-Pulled") && err.contains("config.json"), "{err}");
-    for d in [&dir, &draft, &other] {
+    for d in [&draft, &other] {
         std::fs::remove_dir_all(d).ok();
     }
 }

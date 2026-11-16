@@ -14,9 +14,8 @@ use qwen35::model::{pipelines, Qwen35};
 
 #[test]
 fn a_resumed_bf16_base_lora_run_starts_from_the_saved_adapter() {
-    let dir = std::env::temp_dir().join(format!("brain-qwen35-resume-bf16-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    // Removed when the guard drops, also when the test panics.
+    let dir = brain_testutil::Scratch::dir("brain-qwen35-resume-bf16");
     let cfg = Qwen35Config::tiny();
     let t = cfg.block_size;
     // seed: any base weights; the gate compares cycle 2's start against cycle 1's end

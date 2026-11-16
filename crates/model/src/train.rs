@@ -3541,7 +3541,7 @@ mod tests {
         std::fs::write(dir.join("meta.json"), Meta::vocab_only(64)).unwrap();
         let opts = FitOpts { block_size: 6, batch_size: 2, eval_batches: 0, ..Default::default() };
         let model = Recorder::new(RecorderCfg, 2, 6, &HashMap::new());
-        let sets = [dir.as_path()];
+        let sets = [dir.path()];
         let mut scored = crate::score_base(&model, &sets, &opts, false).expect("score");
         assert_eq!((scored[0].records, scored[0].positions), (3, 6));
         assert!((scored[0].base_loss.expect("scored") - 12.5).abs() < 1e-5);
@@ -3709,11 +3709,9 @@ mod tests {
         data::chat::write_split(&dir, "val", &data::chat::EncodedSplit::default()).unwrap();
     }
 
-    fn tmp(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("brain-model-train-load-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    /// A fresh scratch directory, removed when the returned guard drops (also when the test panics).
+    fn tmp(name: &str) -> brain_testutil::Scratch {
+        brain_testutil::Scratch::dir(&format!("brain-model-train-load-{name}"))
     }
 
     /// The exact defect a real `brain qwen finetune --lora` run hit: a
@@ -3784,7 +3782,7 @@ mod tests {
     }
 
     /// Writes a two-split masked chat dataset (four 4-token examples per split).
-    fn masked_chat_dir(label: &str) -> std::path::PathBuf {
+    fn masked_chat_dir(label: &str) -> brain_testutil::Scratch {
         let dir = tmp(label);
         let mut split = data::chat::EncodedSplit::default();
         for e in 0..4u32 {

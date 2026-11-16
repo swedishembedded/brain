@@ -18,11 +18,9 @@ use qwen35::config::Qwen35Config;
 use qwen35::finetune::{finetune_streamed, LongSeqOverrides, Mode, StreamedRun};
 use qwen35::model::{pipelines, Qwen35};
 
-fn scratch(tag: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("brain-qwen35-vision-streamed-{tag}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+/// A fresh scratch directory, removed when the returned guard drops (also when the test panics).
+fn scratch(tag: &str) -> brain_testutil::Scratch {
+    brain_testutil::Scratch::dir(&format!("brain-qwen35-vision-streamed-{tag}"))
 }
 
 /// One example, "three tokens, a picture of four rows, three tokens", the text after the picture supervised, in both splits.

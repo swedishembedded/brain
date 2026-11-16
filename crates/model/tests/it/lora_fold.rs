@@ -138,14 +138,14 @@ fn write_st_with_metadata(path: &std::path::Path, tensors: &[(&str, Vec<usize>, 
     std::fs::write(path, out).unwrap();
 }
 
-fn tmp(name: &str) -> std::path::PathBuf {
-    let d = std::env::temp_dir().join(format!("brain-model-lora-fold-{}", std::process::id()));
-    std::fs::create_dir_all(&d).unwrap();
-    d.join(name)
+/// A scratch file path for `name`, removed when the returned guard drops (also when the test panics).
+fn tmp(name: &str) -> brain_testutil::Scratch {
+    let (stem, ext) = name.rsplit_once('.').map_or((name, String::new()), |(stem, ext)| (stem, format!(".{ext}")));
+    brain_testutil::Scratch::file(&format!("brain-model-lora-fold-{stem}"), &ext)
 }
 
 /// One rank-1 external adapter over `key`, delta `b ⊗ a`.
-fn external(tag: &str, stem: &str, a: &[f32], b: &[f32]) -> String {
+fn external(tag: &str, stem: &str, a: &[f32], b: &[f32]) -> brain_testutil::Scratch {
     let p = tmp(&format!("{tag}.safetensors"));
     write_st(
         &p,
@@ -154,7 +154,7 @@ fn external(tag: &str, stem: &str, a: &[f32], b: &[f32]) -> String {
             (&format!("diffusion_model.{stem}.lora_B.weight"), vec![b.len(), 1], b.to_vec()),
         ],
     );
-    p.to_str().unwrap().to_string()
+    p
 }
 
 /// TWO adapters over the SAME tensor, each at its own strength, folded in a
@@ -419,7 +419,7 @@ fn a_lokr_shape_mismatch_fails_before_writing() {
 fn an_unmatched_external_key_fails_loudly_naming_the_architecture() {
     let p = external("unmatched", "no_such_module", &[1.0, 1.0], &[1.0]);
     let mut ts = map(&[("img_in.weight", vec![2, 3], vec![0.0; 6])]);
-    let e = fold_external_into(&p, &mut ts, 1.0, "FLUX.2").expect_err("must reject");
+    let e = fold_external_into(p.as_str(), &mut ts, 1.0, "FLUX.2").expect_err("must reject");
     assert!(e.contains("no_such_module"), "the error must name the tensor: {e}");
     assert!(e.contains("FLUX.2"), "the error must name the architecture: {e}");
     assert_eq!(ts["img_in.weight"].1, vec![0.0; 6], "a rejected adapter writes nothing");
@@ -445,20 +445,20 @@ fn a_peft_save_with_its_adapter_name_and_a_header_alpha_scales_by_alpha_over_ran
         ts.extend(extra);
         let refs: Vec<(&str, Vec<usize>, Vec<f32>)> = ts.iter().map(|(n, s, d)| (n.as_str(), s.clone(), d.clone())).collect();
         write_st_with_metadata(&p, &refs, &[("format", "pt"), ("alpha", alpha)]);
-        p.to_str().unwrap().to_string()
+        p
     };
 
-    let pairs = model::lora::read_external_adapter(&write("peft-header-alpha", vec![], "1")).expect("a PEFT save reads");
+    let pairs = model::lora::read_external_adapter(write("peft-header-alpha", vec![], "1").as_str()).expect("a PEFT save reads");
     assert_eq!(pairs.len(), 1);
     assert_eq!(pairs[0].base_key, format!("{stem}.weight"));
     assert_eq!((pairs[0].out, pairs[0].inn, pairs[0].r), (4, 3, 2));
     assert_eq!(pairs[0].alpha_mult, 0.5, "header alpha 1 over rank 2");
 
     let own = vec![(format!("{stem}.alpha"), vec![], vec![4.0])];
-    let pairs = model::lora::read_external_adapter(&write("peft-own-alpha", own, "1")).expect("reads");
+    let pairs = model::lora::read_external_adapter(write("peft-own-alpha", own, "1").as_str()).expect("reads");
     assert_eq!(pairs[0].alpha_mult, 2.0, "a target's own alpha is more specific than the header's");
 
-    let e = model::lora::read_external_adapter(&write("peft-bad-alpha", vec![], "eight")).err().expect("refused");
+    let e = model::lora::read_external_adapter(write("peft-bad-alpha", vec![], "eight").as_str()).err().expect("refused");
     assert!(e.contains("alpha"), "{e}");
 }
 

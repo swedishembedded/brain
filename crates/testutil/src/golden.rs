@@ -231,10 +231,9 @@ mod tests {
         p
     }
 
-    fn tmp(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("brain-golden-source-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        d
+    /// A scratch path the test creates, removed when the returned guard drops (also when the test panics).
+    fn tmp(tag: &str) -> crate::Scratch {
+        crate::Scratch::file(&format!("brain-golden-source-{tag}"), "")
     }
 
     const DUMPER: &str = "tools/goldens/x_dump_reference.py";

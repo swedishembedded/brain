@@ -38,8 +38,8 @@ fn the_training_forward_reads_a_picture_as_the_reference_does() {
 
     // The record the prompt is: the golden's token ids, the picture beside them, the last position supervised.
     let ids = ints(&golden["input_ids"]);
-    let prepared = std::env::temp_dir().join(format!("brain-vision-train-real-{}", std::process::id()));
-    std::fs::create_dir_all(&prepared).unwrap();
+    // Removed when the guard drops, also when the test panics.
+    let prepared = brain_testutil::Scratch::dir("brain-vision-train-real");
     let mut split = data::chat::EncodedSplit::default();
     split.push_with_media(&ids, &vec![true; ids.len()], &[picture.into()]);
     for name in ["train", "val"] {
@@ -60,7 +60,6 @@ fn the_training_forward_reads_a_picture_as_the_reference_does() {
     let mut table = Table::new(0.999, 0.06);
     table.check("training logits at the end of the prompt", &logits[(ids.len() - 1) * vocab..], &golden["logits0"]);
     table.print();
-    std::fs::remove_dir_all(&prepared).ok();
     assert!(table.failures.is_empty(), "training forward parity failures: {:#?}", table.failures);
 }
 

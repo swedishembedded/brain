@@ -9,12 +9,9 @@ use std::path::{Path, PathBuf};
 
 use checkpoint::st::{Adapter, ModelCard, TrainingProvenance};
 
-/// A fresh, empty scratch directory unique to this process and `name`.
-pub fn scratch_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("brain-adapter-release-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+/// A fresh, empty scratch directory unique to this process and `name`, removed when the returned guard drops.
+pub fn scratch_dir(name: &str) -> crate::Scratch {
+    crate::Scratch::dir(&format!("brain-adapter-release-{name}"))
 }
 
 /// A stand-in base file: verification reads only its bytes.
