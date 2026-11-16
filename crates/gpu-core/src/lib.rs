@@ -1658,7 +1658,17 @@ mod native_facade {
         pub fn share_or_new(&self, kernels: &[(&str, &str)]) -> Gpu {
             match self.inner.share() {
                 Some(inner) => Gpu::wrap_on(inner, self.names.clone(), self.mem_device),
-                None => Gpu::new(kernels),
+                None => self.fresh_like(kernels),
+            }
+        }
+
+        /// A fresh handle for `kernels` on this handle's backend, for a backend whose device cannot be shared (the CPU
+        /// JIT compiles per kernel set). Never the ambient backend: a CPU handle's sibling built by [`Gpu::new`] landed
+        /// on CUDA under `BRAIN_BACKEND=cuda`, so a model built "on the CPU" from it ran on a card.
+        fn fresh_like(&self, kernels: &[(&str, &str)]) -> Gpu {
+            match self.kind() {
+                "cpu" => Gpu::new_cpu(kernels),
+                _ => Gpu::new(kernels),
             }
         }
 
@@ -1670,7 +1680,7 @@ mod native_facade {
             let kernels = &Self::expanded(kernels, self.kind() == "cpu");
             match self.inner.new_like(kernels) {
                 Some(inner) => Gpu::wrap_on(inner, Self::kernel_names(kernels), self.mem_device),
-                None => Gpu::new(kernels),
+                None => self.fresh_like(kernels),
             }
         }
 

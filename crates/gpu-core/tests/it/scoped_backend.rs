@@ -45,3 +45,19 @@ fn the_shared_test_device_follows_the_scoped_backend() {
         assert_eq!(gpu_core::testgpu::dev(KERNELS).kind(), held.kind(), "an unscoped test still shares the ambient device");
     }
 }
+
+/// A handle for another kernel set on the same device stays on its backend: a CPU handle's [`gpu_core::Gpu::new_like`]
+/// and [`gpu_core::Gpu::share_or_new`] build a CPU handle whatever the thread's or the process's backend is. They used
+/// to build on the ambient backend, so an engine built "on the CPU" from a CPU handle ran on CUDA under
+/// `BRAIN_BACKEND=cuda` (qwen35's adapter-bank gate compared two such engines and failed only there).
+#[test]
+fn a_cpu_handle_builds_its_siblings_on_the_cpu() {
+    let other = KERNELS;
+    for ambient in [Backend::Vulkan, Backend::Wgpu, Backend::Cuda] {
+        gpu_core::with_backend(ambient, || {
+            let cpu = gpu_core::Gpu::new_cpu(KERNELS);
+            assert_eq!(cpu.new_like(other).kind(), "cpu", "new_like under {ambient:?}");
+            assert_eq!(cpu.share_or_new(other).kind(), "cpu", "share_or_new under {ambient:?}");
+        });
+    }
+}
