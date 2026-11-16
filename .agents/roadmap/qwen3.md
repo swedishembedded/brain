@@ -276,8 +276,12 @@ ones a server instantiated on first use anyway.
 - [ ] Glue left per 8K-row prefill layer: `silu_mul_to_bf16` 0.25 ms, `add_rmsnorm_fwd_bf16` 2 x 0.09 ms, the
       attention output's `cast_f32_bf16`, `qknorm_rope_qk` 0.36 ms (a block per token was faster at prefill but starved
       decode, knowledge 479).
-- [ ] The fused `qkv_pre` / `gateup_pre` scratch is still allocated for the largest round although the bf16 library
-      path never writes it (the GEMV and adapter paths do).
+- Memory (2026-11-16): the fused `qkv_pre` / `gateup_pre` outputs are allocated only when a path that writes them
+  runs (adapter rows, a QKV bias, the exact-decode regime, the reference tier); the bf16 library path never does.
+  Qwen3-4B at an 8K-row round: 8192 x (6144 + 19456) words, 800 MiB, no longer held (`engine_glue`
+  `a_bf16_library_engine_holds_no_fused_product_scratch`). The 32 decode tapes `prepare_decode` records and freezes
+  hold ~2 MiB of driver memory each (driver free before and after each freeze, 0-6 MiB in 2 MiB steps), ~64 MiB for
+  all: kept as is.
 - [ ] A decode step spends ~0.9 ms of its ~13 ms (c=64) in glue launches of a few microseconds each (two norms, the
       QK norm, the append, the attention-output cast and the SwiGLU per layer): the residual add into the down and o
       products' epilogue, or the cast into the attention merge, are the next launches to remove.

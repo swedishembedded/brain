@@ -56,3 +56,29 @@ fn a_bf16_tensor_core_forward_copies_no_fused_product_apart() {
         assert!(casts <= cfg.n_layers as usize + 1, "{what}: {casts} activation casts for {} layers: {names:?}", cfg.n_layers);
     }
 }
+
+/// On the bf16 library path the fused products' wide outputs are never written, so the engine never allocates them;
+/// the paths that write them (here the reference GEMM tier) still get them.
+#[test]
+fn a_bf16_library_engine_holds_no_fused_product_scratch() {
+    let Ok(gpu) = gpu_core::Gpu::try_new_cuda(qwen3::model::pipelines()) else {
+        brain_testutil::skip_unavailable("no usable CUDA backend");
+        return;
+    };
+    let cfg = QwenConfig { d_model: 64, d_ff: 128, n_heads: 4, n_kv_heads: 2, head_dim: 16, vocab: 64, block_size: 256, max_position_embeddings: 256, tie_embeddings: false, ..QwenConfig::tiny() };
+    let w = qwen3::init_weights(&cfg, 7); // seed: any weights serve
+    let prompt: Vec<u32> = (0..40).map(|i| (i * 7 + 3) % cfg.vocab).collect();
+    let run = |e: &mut Engine| {
+        let mut t = model::paged::BlockTable::new();
+        e.prefill_for_perf(&mut t, &prompt);
+        let mut refs = [&mut t];
+        model::serve::PagedDecoder::forward_batched_greedy(e, &mut refs, &[1]);
+    };
+    let mut e = Engine::from_map_tier_on(&gpu, cfg.clone(), &w, 16, 64, 4, 16, 32, true, Dtype::BF16);
+    run(&mut e);
+    assert_eq!(e.fused_scratch_bytes(), 0, "the library path allocated the fused outputs it never writes");
+    let mut reference = Engine::from_map_tier_on(&gpu, cfg.clone(), &w, 16, 64, 4, 16, 32, true, Dtype::BF16);
+    reference.set_gemm_precision(gpu_core::provider::library::GemmPrecision::Fp32Reference);
+    run(&mut reference);
+    assert!(reference.fused_scratch_bytes() > 0, "the fused path ran without its scratch");
+}

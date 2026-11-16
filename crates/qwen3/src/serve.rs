@@ -853,13 +853,40 @@ struct Seq {
     done: bool,
 }
 
+/// The wide output of a fused product that `concat_split` copies apart: only the GEMV, adapter, bias and exact paths
+/// write one, so it is allocated the first time one of them runs (on the bf16 library path the two of them were most
+/// of the engine's activation scratch, never written).
+struct FusedOut {
+    words: u64,
+    buf: std::sync::OnceLock<DeviceBuffer>,
+}
+
+impl FusedOut {
+    fn new(words: u64) -> FusedOut {
+        FusedOut { words, buf: std::sync::OnceLock::new() }
+    }
+
+    /// The buffer, allocated on the first call. `try_storage` and not `storage`: a call inside a layer's replay arena
+    /// scope must not take an arena slot for a buffer the engine keeps.
+    fn get(&self, g: &Gpu) -> &DeviceBuffer {
+        self.buf.get_or_init(|| g.try_storage(self.words).unwrap_or_else(|e| panic!("qwen3 serve: the fused product's scratch of {} words: {e:?}", self.words)))
+    }
+
+    /// Bytes held: none until a path writes it.
+    fn bytes(&self) -> u64 {
+        self.buf.get().map_or(0, |_| self.words * 4)
+    }
+}
+
 /// Batched scratch (sized for `max_batch` rows), reused every iteration.
 struct Scratch {
     res: Vec<DeviceBuffer>, // n_layers+1, each [B*d]
     xn1: DeviceBuffer,
     /// M4.1: the fused QKV GEMM's raw `[b, hq+2*hkv]` output, before
-    /// `concat_split` narrows it into `q_pre`/`k_pre`/`v` below.
-    qkv_pre: DeviceBuffer,
+    /// `concat_split` narrows it into `q_pre`/`k_pre`/`v` below. Made on first
+    /// use ([`Scratch::fused`]): the bf16 library path writes the parts
+    /// directly and never touches it.
+    qkv_pre: FusedOut,
     q_pre: DeviceBuffer,
     q: DeviceBuffer,
     k_pre: DeviceBuffer,
@@ -874,7 +901,7 @@ struct Scratch {
     xn2_bf16: DeviceBuffer,
     /// M4.1: the fused gate/up GEMM's raw `[b, 2*ff]` output, before
     /// `concat_split` narrows it into `gate_pre`/`up` below.
-    gateup_pre: DeviceBuffer,
+    gateup_pre: FusedOut,
     gate_pre: DeviceBuffer,
     up: DeviceBuffer,
     h: DeviceBuffer,
@@ -1418,7 +1445,7 @@ impl Engine {
         let sc = Scratch {
             res,
             xn1: st(b * d),
-            qkv_pre: st(b * (hq + 2 * hkv)),
+            qkv_pre: FusedOut::new(b * (hq + 2 * hkv)),
             q_pre: st(b * hq),
             q: st(b * hq),
             k_pre: st(b * hkv),
@@ -1429,7 +1456,7 @@ impl Engine {
             xn2: st(b * d),
             xn1_bf16: st((b * d).div_ceil(2)),
             xn2_bf16: st((b * d).div_ceil(2)),
-            gateup_pre: st(b * 2 * ff),
+            gateup_pre: FusedOut::new(b * 2 * ff),
             gate_pre: st(b * ff),
             up: st(b * ff),
             h: st(b * ff),
@@ -3110,21 +3137,22 @@ impl Engine {
             let parts = !lora && self.qkv_bias.get(l).is_none() && self.linear_parts(&mut s, wqkv, &sc.xn1, pre, &[(q_src, hq), (k_src, hkv), (&sc.v, hkv)], b, exact);
             assert!(parts || pre.is_none(), "qwen3 serve: layer {l}'s norm wrote only the bf16 operand of a product that did not run");
             if !parts {
-                self.linear(&mut s, wqkv, &sc.xn1, &sc.qkv_pre, b, exact);
+                let qkv_pre = sc.qkv_pre.get(g);
+                self.linear(&mut s, wqkv, &sc.xn1, qkv_pre, b, exact);
                 let qkv_width = hq + 2 * hkv;
                 if lora {
                     // The corrections land in the fused output's own columns
                     // (q, then k, then v), so no gather or split changes.
                     for (site, col0) in [(LoraSite::Wq, 0), (LoraSite::Wk, hq), (LoraSite::Wv, hq + hkv)] {
-                        self.lora_correct(&mut s, l, site, &sc.xn1, &sc.qkv_pre, b, qkv_width, col0);
+                        self.lora_correct(&mut s, l, site, &sc.xn1, qkv_pre, b, qkv_width, col0);
                     }
                 }
                 if let Some(bias) = self.qkv_bias.get(l) {
-                    s.push(g.step(BIAS_ADD, &[&sc.qkv_pre, bias], &[b, qkv_width], b * qkv_width));
+                    s.push(g.step(BIAS_ADD, &[qkv_pre, bias], &[b, qkv_width], b * qkv_width));
                 }
-                s.push(concat_split_step(g, &sc.qkv_pre, q_src, b, qkv_width, hq, 0));
-                s.push(concat_split_step(g, &sc.qkv_pre, k_src, b, qkv_width, hkv, hq));
-                s.push(concat_split_step(g, &sc.qkv_pre, &sc.v, b, qkv_width, hkv, hq + hkv));
+                s.push(concat_split_step(g, qkv_pre, q_src, b, qkv_width, hq, 0));
+                s.push(concat_split_step(g, qkv_pre, k_src, b, qkv_width, hkv, hq));
+                s.push(concat_split_step(g, qkv_pre, &sc.v, b, qkv_width, hkv, hq + hkv));
             }
             // M4.2: QK-norm + RoPE fused into one dispatch each for Q and K
             // (`Self::qk_norm_rope`) instead of the four separate `self.rms`/
@@ -3278,14 +3306,15 @@ impl Engine {
             let parts = !lora && self.linear_parts(&mut s, wgateup, &sc.xn2, pre, &[(&sc.gate_pre, ff), (&sc.up, ff)], b, exact);
             assert!(parts || pre.is_none(), "qwen3 serve: layer {l}'s second norm wrote only the bf16 operand of a product that did not run");
             if !parts {
-                self.linear(&mut s, wgateup, &sc.xn2, &sc.gateup_pre, b, exact);
+                let gateup_pre = sc.gateup_pre.get(g);
+                self.linear(&mut s, wgateup, &sc.xn2, gateup_pre, b, exact);
                 if lora {
                     for (site, col0) in [(LoraSite::Gate, 0), (LoraSite::Up, ff)] {
-                        self.lora_correct(&mut s, l, site, &sc.xn2, &sc.gateup_pre, b, 2 * ff, col0);
+                        self.lora_correct(&mut s, l, site, &sc.xn2, gateup_pre, b, 2 * ff, col0);
                     }
                 }
-                s.push(concat_split_step(g, &sc.gateup_pre, &sc.gate_pre, b, 2 * ff, ff, 0));
-                s.push(concat_split_step(g, &sc.gateup_pre, &sc.up, b, 2 * ff, ff, ff));
+                s.push(concat_split_step(g, gateup_pre, &sc.gate_pre, b, 2 * ff, ff, 0));
+                s.push(concat_split_step(g, gateup_pre, &sc.up, b, 2 * ff, ff, ff));
             }
             let wdown = &self.lin_weights[&p("mlp.down.weight")];
             if !self.swiglu_into_bf16_down(&mut s, wdown, &sc.gate_pre, &sc.up, &sc.h, lora, &sc.mlp_out, b, exact) {
@@ -3408,6 +3437,12 @@ impl Engine {
         if recorded > 0 {
             eprintln!("serve: recorded and froze {recorded} decode tapes (1..={top} rows) in {} ms before the first request", started.elapsed().as_millis());
         }
+    }
+
+    /// Bytes of fused-product scratch (the wide QKV and gate/up outputs) this engine holds: none until a path that
+    /// writes one has run.
+    pub fn fused_scratch_bytes(&self) -> u64 {
+        self.sc.qkv_pre.bytes() + self.sc.gateup_pre.bytes()
     }
 
     /// `(recorded, frozen)` decode tapes of base rows: what a decode step at a new row count would have to record.
