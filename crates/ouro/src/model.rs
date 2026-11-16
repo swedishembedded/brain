@@ -48,8 +48,6 @@ pub(crate) const ADD2_ID: usize = ADD2;
 pub(crate) const BIAS_ADD_ID: usize = BIAS_ADD;
 pub(crate) const ROPE_AT_ID: usize = ROPE_AT;
 pub(crate) const FLASH_GQA_ID: usize = FLASH_GQA_FWD;
-pub(crate) const MATMUL_REG2_ID: usize = MATMUL_REG2;
-pub(crate) const MATMUL_GEMV_ID: usize = MATMUL_GEMV;
 
 // ---- kernel indices (order matches PIPELINES) ----
 const EMBED: usize = 0;
@@ -104,8 +102,6 @@ const PAGED_DECODE_SCORES_BATCHED: usize = 39;
 const DECODE_SOFTMAX_BATCHED: usize = 40;
 const PAGED_DECODE_APPLY_BATCHED: usize = 41;
 const FLASH_GQA_FWD: usize = 42;
-const MATMUL_REG2: usize = 43;
-const MATMUL_GEMV: usize = 44;
 
 /// Kernels resolved by name, past the hand-numbered [`PIPELINES`]: the training attention's flash backward and the
 /// two-stage cross-entropy gradient.
@@ -182,8 +178,6 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("decode_softmax_batched", kernels::DECODE_SOFTMAX_BATCHED),
     ("paged_decode_apply_batched", kernels::PAGED_DECODE_APPLY_BATCHED),
     ("flash_attn_causal_gqa", kernels::FLASH_ATTN_CAUSAL_GQA),
-    ("matmul_reg2", kernels::MATMUL_REG2),
-    ("matmul_gemv", kernels::MATMUL_GEMV),
     // Narrow boundary residuals (`model::saved::Residuals`), resolved by name.
     ("pack_bf16", kernels::PACK_BF16),
     ("unpack_bf16", kernels::UNPACK_BF16),

@@ -789,6 +789,16 @@ fn gguf_advice(weights: &str, architecture: &str) -> String {
 /// Construct the resident matching `card.family` (normalized via
 /// [`brain_family`]), or log + `None` for an unknown / not-yet-dispatchable
 /// family.
+/// A looped decoder sized by the server: the context and batch of its flags, and, on a server that knows its largest
+/// card, the KV pool and the batch planned from that card's usable bytes.
+fn ouro_sized(o: catalog::resident_ouro::OuroResident, sizing: &catalog::resident_qwen35::Qwen35Sizing, card_budget: Option<u64>) -> catalog::resident_ouro::OuroResident {
+    let o = o.with_sizing(sizing.ctx, catalog::resident_ouro::DEFAULT_BLOCK, sizing.max_batch);
+    match card_budget {
+        Some(bytes) => o.with_card_budget(bytes),
+        None => o,
+    }
+}
+
 fn resident_for(weights: &str, card: &ModelCard, tokenizer: Option<&str>, qwen_cfg: catalog::resident_llm::QwenServeConfig, qwen35_sizing: catalog::resident_qwen35::Qwen35Sizing, encoder_batch: Option<u32>) -> Option<Built> {
     let family = brain_family(&card.family);
     // The GGUF gate, BEFORE the family match: a GGUF card's family is its
@@ -830,7 +840,7 @@ fn resident_for(weights: &str, card: &ModelCard, tokenizer: Option<&str>, qwen_c
             }
         },
         "ouro" => match catalog::resident_ouro::OuroResident::from_card(weights, card, tokenizer) {
-            Ok(o) => Some(Arc::new(o.with_sizing(qwen35_sizing.ctx, catalog::resident_ouro::DEFAULT_BLOCK, qwen35_sizing.max_batch))),
+            Ok(o) => Some(Arc::new(ouro_sized(o, &qwen35_sizing, qwen_cfg.card_budget_bytes))),
             Err(e) => {
                 eprintln!("brain: skip {} ({e})", card.id);
                 None
@@ -974,7 +984,7 @@ fn resident_for_compound(card: &ModelCard, roles: &std::collections::BTreeMap<St
         "ouro" => {
             let dir = roles.get("weights").and_then(|p| p.to_str()).ok_or("compound manifest missing role \"weights\"")?;
             catalog::resident_ouro::OuroResident::from_card(dir, card, None)
-                .map(|o| Arc::new(o.with_sizing(qwen35_sizing.ctx, catalog::resident_ouro::DEFAULT_BLOCK, qwen35_sizing.max_batch)) as Arc<dyn ResidentModel>)
+                .map(|o| Arc::new(ouro_sized(o, &qwen35_sizing, qwen_cfg.card_budget_bytes)) as Arc<dyn ResidentModel>)
         }
         "huginn" => {
             let dir = roles.get("weights").and_then(|p| p.to_str()).ok_or("compound manifest missing role \"weights\"")?;

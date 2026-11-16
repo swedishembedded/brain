@@ -17,19 +17,24 @@
 //! allocator, so admission's block accounting (`passes × blocks_for`) matches
 //! what is actually consumed.
 //!
-//! Prefill reads the prompt one token at a time through the same paged decode
-//! step that serves generation, which keeps one code path for both and needs no
-//! variable-shape graph. A chunked prefill is a later optimization; the gate on
-//! this path is that it reproduces the full-sequence forward exactly.
+//! Prefill runs the whole prompt through every pass at once (matmuls over all its rows, the causal flash kernel)
+//! and scatters each pass's K/V into that pass's pool. A decode step carries every running sequence in one batch:
+//! each pass's linears run over all of its rows, each row's RoPE takes its own position and its attention reads its
+//! own block table, and each row's exit pass is chosen from the gates of all passes before the head runs on the
+//! chosen rows only. The step graph of each batch size is recorded once over one set of buffers sized for the
+//! largest batch.
+//!
+//! A sequence's addressable context is the model's positions (or the pool, if smaller), not the pool: the pool is
+//! shared by every running sequence, so it can be far larger than any one of them.
 //!
 //! Not enabled for the looped path yet, by design rather than omission:
 //! prefix-cache sharing, host-KV swap and runtime adapters. Each needs a
 //! pass-aware identity the shared bookkeeping does not have.
 
-use std::cell::Cell;
 use std::collections::HashMap;
 
 use gpu_core::{BufUsage, DeviceBuffer, Gpu, Step};
+use ::model::ops::{Ops, Weight};
 use ::model::paged::{BlockAllocator, BlockTable};
 use ::model::serve::PagedDecoder;
 use paramstore::ParamStore;
@@ -37,6 +42,7 @@ use paramstore::ParamStore;
 use crate::config::OuroConfig;
 use crate::model;
 
+/// Per-row activations of one layer, `rows` rows wide.
 struct Scratch {
     xn1: DeviceBuffer,
     q: DeviceBuffer,
@@ -54,145 +60,11 @@ struct Scratch {
     xn2_2: DeviceBuffer,
 }
 
-struct Row {
-    /// Block tables for passes `1..T`; pass 0 is the scheduler's table.
-    extra: Vec<BlockTable>,
-}
-
-/// Scratch for a whole-prompt prefill at `n` rows: every matmul runs with
-/// `m = n`, and each pass scatters its K/V into its own pool with one batched
-/// append over the chunk's `(block, offset)` pairs.
-struct PrefillBufs {
-    tokens: DeviceBuffer,
-    h: [DeviceBuffer; 2],
-    hs: Vec<DeviceBuffer>,
-    gates: Vec<DeviceBuffer>,
-    xn1: DeviceBuffer,
-    q: DeviceBuffer,
-    k: DeviceBuffer,
-    v: DeviceBuffer,
-    ctx: DeviceBuffer,
-    proj: DeviceBuffer,
-    xn1_2: DeviceBuffer,
-    xmid: DeviceBuffer,
-    xn2: DeviceBuffer,
-    gate_pre: DeviceBuffer,
-    up: DeviceBuffer,
-    mlp_h: DeviceBuffer,
-    mlp_out: DeviceBuffer,
-    xn2_2: DeviceBuffer,
-    scores: DeviceBuffer,
-    probs: DeviceBuffer,
-    lse: DeviceBuffer,
-    /// Per pass: this chunk's physical block and in-block offset per token.
-    blocks: Vec<DeviceBuffer>,
-    offsets: Vec<DeviceBuffer>,
-}
-
-pub struct Engine {
-    gpu: Gpu,
-    cfg: OuroConfig,
-    ps: ParamStore,
-    /// One allocator per recurrent pass: each pass has its own paged plane,
-    /// so a sequence's `T` block tables draw from `T` independent pools of
-    /// the same capacity. Sharing one allocator across passes would charge a
-    /// sequence `T x` its context against a single pool's block space.
-    allocs: Vec<BlockAllocator>,
-    block_size: u32,
-    max_bt: u32,
-    /// Per-sequence logit-addressable capacity (`max_bt * block_size`).
-    cap: u32,
-    /// `[pass][layer]` K/V planes over the shared block pool.
-    k_pool: Vec<Vec<DeviceBuffer>>,
-    v_pool: Vec<Vec<DeviceBuffer>>,
-    rows: HashMap<u32, Row>,
-    next_row: u32,
-
-    token: DeviceBuffer,
-    h: [DeviceBuffer; 2],
-    hs: Vec<DeviceBuffer>,
-    gates: Vec<DeviceBuffer>,
-    logits: DeviceBuffer,
-    hrow: DeviceBuffer,
-    s: Scratch,
-    /// Per pass: where this step's new row lives in that pass's pool, that
-    /// pass's block table, and the row's cached length. They must be per pass -
-    /// a shared set would send every pass's attention to the last pass's blocks.
-    idx_blocks: Vec<DeviceBuffer>,
-    idx_offsets: Vec<DeviceBuffer>,
-    idx_tables: Vec<DeviceBuffer>,
-    idx_lens: Vec<DeviceBuffer>,
-    scores: DeviceBuffer,
-    probs: DeviceBuffer,
-    last_pass: Cell<usize>,
-    /// One token's whole graph, recorded once: only the position (two rope
-    /// uniforms), the new K/V slot and the block table change per step.
-    decode: Vec<Step>,
-    heads: Vec<Vec<Step>>,
-    rope_q_uni: Vec<DeviceBuffer>,
-    rope_k_uni: Vec<DeviceBuffer>,
-}
-
-impl Engine {
-    /// Build an engine over a checkpoint directory (HF layout) or a brain
-    /// checkpoint file, with `max_tokens` of shared KV capacity and
-    /// `block_size` tokens per page.
-    pub fn open(path: &str, max_tokens: u32, block_size: u32) -> Result<Engine, String> {
-        let gpu = Gpu::new(model::PIPELINES);
-        let (cfg, ps) = if std::path::Path::new(path).is_dir() {
-            let (cfg, src) = crate::import::open_dir(std::path::Path::new(path))?;
-            let roles = cfg.param_list().into_iter().map(|(n, c)| (n, c, paramstore::Role::Frozen)).collect();
-            let ps = ParamStore::new_with_roles_src(&gpu, roles, &src);
-            (cfg, ps)
-        } else {
-            let reader = checkpoint::weightio::WeightReader::open(path).map_err(|e| format!("{path}: {e}"))?;
-            let cfg = OuroConfig::from_json(&reader.config())?;
-            let roles = cfg.param_list().into_iter().map(|(n, c)| (n, c, paramstore::Role::Frozen)).collect();
-            let ps = ParamStore::new_with_roles_src(&gpu, roles, &reader);
-            (cfg, ps)
-        };
-        Ok(Engine::build(gpu, cfg, ps, max_tokens, block_size))
-    }
-
-    /// Build from an in-memory weight source (tests use `init::init_weights`).
-    pub fn from_source(cfg: OuroConfig, src: &dyn checkpoint::TensorSource, max_tokens: u32, block_size: u32) -> Engine {
-        let gpu = Gpu::new(model::PIPELINES);
-        let roles = cfg.param_list().into_iter().map(|(n, c)| (n, c, paramstore::Role::Frozen)).collect();
-        let ps = ParamStore::new_with_roles_src(&gpu, roles, src);
-        Engine::build(gpu, cfg, ps, max_tokens, block_size)
-    }
-
-    fn build(gpu: Gpu, cfg: OuroConfig, ps: ParamStore, max_tokens: u32, block_size: u32) -> Engine {
-        assert!(block_size > 0 && max_tokens > 0 && max_tokens.is_multiple_of(block_size));
-        let num_blocks = max_tokens / block_size;
-        let max_bt = num_blocks;
-        let cap = num_blocks * block_size;
-        let allocs = (0..cfg.total_ut_steps).map(|_| BlockAllocator::new(num_blocks, block_size)).collect();
-        let d = cfg.d_model as u64;
-        let ff = cfg.d_ff as u64;
-        let (hq, hkv) = (cfg.q_dim() as u64, cfg.kv_dim() as u64);
-        let nh = cfg.n_heads as u64;
-        let st = |x: u64| gpu.storage(x);
-
-        let mut k_pool = Vec::new();
-        let mut v_pool = Vec::new();
-        for _ in 0..cfg.total_ut_steps {
-            let mut pk = Vec::new();
-            let mut pv = Vec::new();
-            for _ in 0..cfg.n_layers {
-                pk.push(st(max_tokens as u64 * hkv));
-                pv.push(st(max_tokens as u64 * hkv));
-            }
-            k_pool.push(pk);
-            v_pool.push(pv);
-        }
-        let token = gpu.buffer("ouro_token", 4, BufUsage::STORAGE | BufUsage::COPY_DST);
-        let h = [st(d), st(d)];
-        let hs = (0..cfg.total_ut_steps).map(|_| st(d)).collect();
-        let gates = (0..cfg.total_ut_steps).map(|_| st(1)).collect();
-        let logits = st(cfg.vocab as u64);
-        let hrow = st(d);
-        let s = Scratch {
+impl Scratch {
+    fn new(gpu: &Gpu, cfg: &OuroConfig, rows: u64) -> Scratch {
+        let st = |x: u64| gpu.storage(rows * x);
+        let (d, ff, hq, hkv) = (cfg.d_model as u64, cfg.d_ff as u64, cfg.q_dim() as u64, cfg.kv_dim() as u64);
+        Scratch {
             xn1: st(d),
             q: st(hq),
             k: st(hkv),
@@ -207,52 +79,192 @@ impl Engine {
             mlp_h: st(ff),
             mlp_out: st(d),
             xn2_2: st(d),
-        };
-        let idx_blocks = (0..cfg.total_ut_steps).map(|_| gpu.buffer("ouro_blocks", 4, BufUsage::STORAGE | BufUsage::COPY_DST)).collect();
-        let idx_offsets = (0..cfg.total_ut_steps).map(|_| gpu.buffer("ouro_offsets", 4, BufUsage::STORAGE | BufUsage::COPY_DST)).collect();
-        let idx_tables = (0..cfg.total_ut_steps)
-            .map(|_| gpu.buffer("ouro_tables", max_bt as u64 * 4, BufUsage::STORAGE | BufUsage::COPY_DST))
-            .collect();
-        let idx_lens = (0..cfg.total_ut_steps).map(|_| gpu.buffer("ouro_lens", 4, BufUsage::STORAGE | BufUsage::COPY_DST)).collect();
-        let scores = st(nh * cap as u64);
-        let probs = st(nh * cap as u64);
-        let rope_q_uni = (0..cfg.total_ut_steps).map(|_| gpu.uniform_dynamic(7)).collect();
-        let rope_k_uni = (0..cfg.total_ut_steps).map(|_| gpu.uniform_dynamic(7)).collect();
+        }
+    }
+}
 
-        let mut m = Engine {
-            gpu,
-            cfg,
-            ps,
-            allocs,
-            block_size,
-            max_bt,
-            cap,
-            k_pool,
-            v_pool,
-            rows: HashMap::new(),
-            next_row: 0,
-            token,
-            h,
-            hs,
-            gates,
-            logits,
-            hrow,
-            s,
-            idx_blocks,
-            idx_offsets,
-            idx_tables,
-            idx_lens,
-            scores,
-            probs,
-            last_pass: Cell::new(0),
-            decode: Vec::new(),
-            heads: Vec::new(),
-            rope_q_uni,
-            rope_k_uni,
+struct Row {
+    /// Block tables for passes `1..T`; pass 0 is the scheduler's table.
+    extra: Vec<BlockTable>,
+}
+
+/// One decode step's device buffers, sized for `rows` sequences. The step graph of every batch size up to `rows`
+/// reads and writes their first rows.
+struct DecodeBufs {
+    /// Capacity in sequences; `rows * d_model` is a multiple of 64 words, so each pass's slice of `hs` binds at an
+    /// aligned offset.
+    rows: u32,
+    tokens: DeviceBuffer,
+    /// Each row's absolute position (the same in every pass: each pass appends one row per token).
+    positions: DeviceBuffer,
+    h: [DeviceBuffer; 2],
+    /// `[T * rows, d]`: pass `p`'s normed output at rows `p * rows ..`, what the next pass reads and the head
+    /// gathers each sequence's exit row from.
+    hs: DeviceBuffer,
+    /// `[T * rows]` exit gates, the same row order as `hs`.
+    gates: DeviceBuffer,
+    /// `[rows]` u32: the row of `hs` each sequence's exit pass reads.
+    sel: DeviceBuffer,
+    hsel: DeviceBuffer,
+    logits: DeviceBuffer,
+    s: Scratch,
+    /// Per pass: each row's new K/V slot (block, offset), block table and cached length.
+    blocks: Vec<DeviceBuffer>,
+    offsets: Vec<DeviceBuffer>,
+    tables: Vec<DeviceBuffer>,
+    lens: Vec<DeviceBuffer>,
+    scores: DeviceBuffer,
+    probs: DeviceBuffer,
+}
+
+impl DecodeBufs {
+    fn new(gpu: &Gpu, cfg: &OuroConfig, rows: u32, max_bt: u32, cap: u32) -> DecodeBufs {
+        let t = cfg.total_ut_steps as u64;
+        let (r, d) = (rows as u64, cfg.d_model as u64);
+        let index = |name: &str, words: u64| gpu.buffer(name, words * 4, BufUsage::STORAGE | BufUsage::COPY_DST);
+        let per_pass = |name: &str, words: u64| (0..t).map(|_| index(name, words)).collect::<Vec<_>>();
+        DecodeBufs {
+            rows,
+            tokens: index("ouro_tokens", r),
+            positions: index("ouro_positions", r),
+            h: [gpu.storage(r * d), gpu.storage(r * d)],
+            hs: gpu.storage(t * r * d),
+            gates: gpu.storage(t * r),
+            sel: index("ouro_exit_rows", r),
+            hsel: gpu.storage(r * d),
+            logits: gpu.storage(r * cfg.vocab as u64),
+            s: Scratch::new(gpu, cfg, r),
+            blocks: per_pass("ouro_blocks", r),
+            offsets: per_pass("ouro_offsets", r),
+            tables: per_pass("ouro_tables", r * max_bt as u64),
+            lens: per_pass("ouro_lens", r),
+            scores: gpu.storage(r * cfg.n_heads as u64 * cap as u64),
+            probs: gpu.storage(r * cfg.n_heads as u64 * cap as u64),
+        }
+    }
+}
+
+fn gcd(a: u32, b: u32) -> u32 {
+    if b == 0 {
+        a
+    } else {
+        gcd(b, a % b)
+    }
+}
+
+/// The recorded graphs of one batch size: every pass's trunk with the gates, then the gather of the exit rows and
+/// the head over them.
+struct StepGraph {
+    trunk: Vec<Step>,
+    gather: Step,
+    head: Vec<Step>,
+}
+
+pub struct Engine {
+    gpu: Gpu,
+    ops: Ops,
+    cfg: OuroConfig,
+    ps: ParamStore,
+    /// One allocator per recurrent pass: each pass has its own paged plane,
+    /// so a sequence's `T` block tables draw from `T` independent pools of
+    /// the same capacity. Sharing one allocator across passes would charge a
+    /// sequence `T x` its context against a single pool's block space.
+    allocs: Vec<BlockAllocator>,
+    block_size: u32,
+    /// Tokens of the shared pool, per pass.
+    pool_tokens: u32,
+    /// Blocks one sequence's table may hold.
+    max_bt: u32,
+    /// Per-sequence logit-addressable capacity (`max_bt * block_size`).
+    cap: u32,
+    /// `[pass][layer]` K/V planes over the shared block pool.
+    k_pool: Vec<Vec<DeviceBuffer>>,
+    v_pool: Vec<Vec<DeviceBuffer>>,
+    rows: HashMap<u32, Row>,
+    next_row: u32,
+    rope_paged: usize,
+    flash: Option<::model::block::FlashGqaIds>,
+    /// One hidden row and its logits: the head of an admission ([`PagedDecoder::logits`]).
+    hrow: DeviceBuffer,
+    hrow_logits: DeviceBuffer,
+    dec: DecodeBufs,
+    graphs: HashMap<u32, StepGraph>,
+}
+
+/// The kernels a serving build compiles: the model's own (its GEMM facade's included) and the per-row RoPE of a
+/// batched decode step.
+fn serve_pipelines() -> &'static [(&'static str, &'static str)] {
+    static LIST: std::sync::OnceLock<Vec<(&'static str, &'static str)>> = std::sync::OnceLock::new();
+    LIST.get_or_init(|| {
+        let mut v = model::pipelines().to_vec();
+        v.push(("rope_paged", kernels::ROPE_PAGED));
+        v
+    })
+}
+
+impl Engine {
+    /// Build an engine over a checkpoint directory (HF layout) or a brain
+    /// checkpoint file, with `max_tokens` of shared KV capacity per pass,
+    /// `block_size` tokens per page and decode steps of up to `max_batch` sequences.
+    pub fn open(path: &str, max_tokens: u32, block_size: u32, max_batch: u32) -> Result<Engine, String> {
+        let gpu = Gpu::new(serve_pipelines());
+        let (cfg, ps) = if std::path::Path::new(path).is_dir() {
+            let (cfg, src) = crate::import::open_dir(std::path::Path::new(path))?;
+            let roles = cfg.param_list().into_iter().map(|(n, c)| (n, c, paramstore::Role::Frozen)).collect();
+            let ps = ParamStore::new_with_roles_src(&gpu, roles, &src);
+            (cfg, ps)
+        } else {
+            let reader = checkpoint::weightio::WeightReader::open(path).map_err(|e| format!("{path}: {e}"))?;
+            let cfg = OuroConfig::from_json(&reader.config())?;
+            let roles = cfg.param_list().into_iter().map(|(n, c)| (n, c, paramstore::Role::Frozen)).collect();
+            let ps = ParamStore::new_with_roles_src(&gpu, roles, &reader);
+            (cfg, ps)
         };
-        m.decode = m.decode_steps();
-        m.heads = (0..m.cfg.total_ut_steps as usize).map(|p| m.head_steps(p)).collect();
-        m
+        Engine::build(gpu, cfg, ps, max_tokens, block_size, max_batch)
+    }
+
+    /// Build from an in-memory weight source (tests use `init::init_weights`).
+    pub fn from_source(cfg: OuroConfig, src: &dyn checkpoint::TensorSource, max_tokens: u32, block_size: u32, max_batch: u32) -> Engine {
+        let gpu = Gpu::new(serve_pipelines());
+        let roles = cfg.param_list().into_iter().map(|(n, c)| (n, c, paramstore::Role::Frozen)).collect();
+        let ps = ParamStore::new_with_roles_src(&gpu, roles, src);
+        Engine::build(gpu, cfg, ps, max_tokens, block_size, max_batch).expect("ouro: engine build")
+    }
+
+    /// The KV pool's bytes for `tokens` of shared capacity: every pass owns a K and a V plane per layer.
+    pub fn kv_bytes_per_token(cfg: &OuroConfig) -> u64 {
+        cfg.kv_dim() as u64 * 4 * 2 * cfg.n_layers as u64 * cfg.total_ut_steps as u64
+    }
+
+    fn build(gpu: Gpu, cfg: OuroConfig, ps: ParamStore, max_tokens: u32, block_size: u32, max_batch: u32) -> Result<Engine, String> {
+        if block_size == 0 || max_tokens == 0 || !max_tokens.is_multiple_of(block_size) {
+            return Err(format!("ouro: a pool of {max_tokens} tokens in pages of {block_size}: the pool must be a positive multiple of the page"));
+        }
+        if max_batch == 0 {
+            return Err("ouro: a decode step of 0 sequences".to_string());
+        }
+        let num_blocks = max_tokens / block_size;
+        // One sequence addresses at most the model's positions (or the whole pool, when that is smaller).
+        let max_bt = cfg.block_size.div_ceil(block_size).clamp(1, num_blocks);
+        let cap = max_bt * block_size;
+        let allocs = (0..cfg.total_ut_steps).map(|_| BlockAllocator::new(num_blocks, block_size)).collect();
+        let hkv = cfg.kv_dim() as u64;
+        let planes = || (0..cfg.n_layers).map(|_| gpu.storage(max_tokens as u64 * hkv)).collect::<Vec<_>>();
+        let k_pool = (0..cfg.total_ut_steps).map(|_| planes()).collect();
+        let v_pool = (0..cfg.total_ut_steps).map(|_| planes()).collect();
+        let mut ops = Ops::new(gpu.share())?;
+        ops.set_gemm_precision(gpu_core::provider::library::GemmPrecision::Auto);
+        let rope_paged = gpu.kernel_index("rope_paged").ok_or("ouro: rope_paged is not registered")?;
+        let flash_bwd = |name: &str| gpu.kernel_index(name).ok_or_else(|| format!("ouro: {name} is not registered"));
+        let flash = ::model::block::FlashGqaIds { fwd: model::FLASH_GQA_ID, bwd_dq: flash_bwd("flash_attn_causal_gqa_bwd_dq")?, bwd_dkv: flash_bwd("flash_attn_causal_gqa_bwd_dkv")?, native: !ops.tensor_gemm().is_reference_pinned() };
+        let flash = ::model::block::FlashGqaIds::supported(&gpu, cfg.head_dim).then_some(flash);
+        // Rows rounded up so that `rows * d_model` words is a multiple of 64 (256-byte binding offsets).
+        let d = cfg.d_model;
+        let rows = max_batch.next_multiple_of(64 / gcd(d, 64));
+        let dec = DecodeBufs::new(&gpu, &cfg, rows, max_bt, cap);
+        let hrow = gpu.storage(d as u64);
+        let hrow_logits = gpu.storage(cfg.vocab as u64);
+        Ok(Engine { gpu, ops, cfg, ps, allocs, block_size, pool_tokens: max_tokens, max_bt, cap, k_pool, v_pool, rows: HashMap::new(), next_row: 0, rope_paged, flash, hrow, hrow_logits, dec, graphs: HashMap::new() })
     }
 
     fn ensure_row(&mut self, table: &mut BlockTable) -> Result<u32, String> {
@@ -267,147 +279,165 @@ impl Engine {
         Ok(id)
     }
 
-    /// A linear over `m` rows: one workgroup per output column for a decode
-    /// row (the kernel reads each weight row once for all m rows), the
-    /// register-tiled kernel for a prefill-sized slab on a device with its
-    /// 256-thread workgroup, the naive per-element kernel elsewhere.
+    /// `y = x Wᵀ` over `m` rows through the GEMM facade, which selects the kernel (the library's tensor-core
+    /// product, a GEMV for a few rows, the tiled kernels) for the shape and the device.
+    #[allow(clippy::too_many_arguments)]
     fn linear(&self, steps: &mut Vec<Step>, x: &DeviceBuffer, wname: &str, out: &DeviceBuffer, m: u32, k: u32, n: u32) {
-        let w = self.ps.w(wname);
-        if m <= 32 {
-            steps.push(self.gpu.dispatch(model::MATMUL_GEMV_ID, &[x, w, out], &[m, k, n], gpu_core::Dispatch::Workgroups(n)));
-        } else if m >= 128 && self.gpu.caps().max_workgroup_size >= 256 {
-            let (kernel, grid) = ::model::block::pick_gemm(m as usize, n as usize, model::MATMUL_ID, model::MATMUL_REG2_ID, false);
-            steps.push(self.gpu.dispatch(kernel, &[x, w, out], &[m, k, n], grid));
-        } else {
-            steps.push(self.gpu.step(model::MATMUL_ID, &[x, w, out], &[m, k, n], m * n));
-        }
+        let weight = Weight::dense_f32(self.ps.w(wname).clone(), n, k);
+        self.ops.matmul(steps, &weight, &self.ops.act_f32(x, 0, m, k), out, 0);
     }
 
-    /// The decode graph, recorded once: one new token through every pass,
-    /// appending its K/V at the absolute position. The position reaches the
-    /// two rope dispatches through a uniform buffer written per step, so the
-    /// per-token cost is buffer writes and one submit, not a graph rebuild.
-    fn decode_steps(&self) -> Vec<Step> {
+    /// The decode graph of `b` rows, recorded once: one new token per row through every pass, appending each row's
+    /// K/V at its own position, then the gates of every pass; the gather of the exit rows and the head over them.
+    fn record(&self, b: u32) -> StepGraph {
         let cfg = &self.cfg;
         let gpu = &self.gpu;
         let ids = model::kernel_ids();
-        let dec = model::decode_batched_ids();
-        let s = &self.s;
+        let dec_ids = model::decode_batched_ids();
+        let z = &self.dec;
+        let s = &z.s;
         let (d, ff) = (cfg.d_model, cfg.d_ff);
         let (hq, hkv, nh, nkv, hd) = (cfg.q_dim(), cfg.kv_dim(), cfg.n_heads, cfg.n_kv_heads, cfg.head_dim);
-        let t = cfg.total_ut_steps as usize;
-        let l_count = cfg.n_layers as usize;
+        let eps = gpu_core::f(cfg.norm_eps);
+        let theta = gpu_core::f(cfg.rope_theta);
+        let t = cfg.total_ut_steps;
+        // Pass `p`'s rows of `hs`, as a binding range.
+        let slice = |p: u32| ((p * z.rows * d) as u64, (b * d) as u64);
+        let whole = (0u64, 0u64);
+        let rms = model::kernel_ids().rmsnorm;
 
-        let mut steps = vec![gpu.step(model::EMBED_ID, &[&self.token, self.ps.w("tok.weight"), &self.h[0]], &[d, 1], d)];
+        let mut steps = vec![gpu.step(model::EMBED_ID, &[&z.tokens, self.ps.w("tok.weight"), &z.h[0]], &[d, b], b * d)];
         for p in 0..t {
-            let mut prev: &DeviceBuffer = if p == 0 { &self.h[0] } else { &self.hs[p - 1] };
-            for l in 0..l_count {
-                let out: &DeviceBuffer = if p == 0 { &self.h[(l + 1) % 2] } else { &self.h[l % 2] };
+            // What this pass reads: the embedding for the first, the previous pass's normed output after it.
+            let (mut prev, mut prev_range): (&DeviceBuffer, (u64, u64)) = if p == 0 { (&z.h[0], whole) } else { (&z.hs, slice(p - 1)) };
+            for l in 0..cfg.n_layers as usize {
+                let out: &DeviceBuffer = if p == 0 { &z.h[(l + 1) % 2] } else { &z.h[l % 2] };
                 let pfx = |name: &str| format!("blocks.{l}.{name}");
-                steps.push(::model::block::rmsnorm_fwd(gpu, &ids, prev, self.ps.w(&pfx("ln1.weight")), &s.xn1, d, 1, cfg.norm_eps));
-                self.linear(&mut steps, &s.xn1, &pfx("attn.wq.weight"), &s.q, 1, d, hq);
-                self.linear(&mut steps, &s.xn1, &pfx("attn.wk.weight"), &s.k, 1, d, hkv);
-                self.linear(&mut steps, &s.xn1, &pfx("attn.wv.weight"), &s.v, 1, d, hkv);
-                steps.push(gpu.step_buf(model::ROPE_AT_ID, &self.rope_q_uni[p], &[&s.q], nh * hd / 2));
-                steps.push(gpu.step_buf(model::ROPE_AT_ID, &self.rope_k_uni[p], &[&s.k], nkv * hd / 2));
+                steps.push(gpu.step_sliced(rms, &[prev, self.ps.w(&pfx("ln1.weight")), &s.xn1], &[prev_range, whole, whole], &[d, b, eps], b));
+                self.linear(&mut steps, &s.xn1, &pfx("attn.wq.weight"), &s.q, b, d, hq);
+                self.linear(&mut steps, &s.xn1, &pfx("attn.wk.weight"), &s.k, b, d, hkv);
+                self.linear(&mut steps, &s.xn1, &pfx("attn.wv.weight"), &s.v, b, d, hkv);
+                steps.push(gpu.step(self.rope_paged, &[&s.q, &z.positions], &[b, nh, hd, hq, theta], b * nh * hd / 2));
+                steps.push(gpu.step(self.rope_paged, &[&s.k, &z.positions], &[b, nkv, hd, hkv, theta], b * nkv * hd / 2));
+                let pu = p as usize;
                 steps.extend(::model::block::gqa_decode_batched_step(
                     gpu,
-                    &dec,
+                    &dec_ids,
                     nh,
                     nkv,
                     hd,
-                    1,
+                    b,
                     self.block_size,
                     self.max_bt,
                     self.cap,
                     &s.q,
                     &s.k,
                     &s.v,
-                    &self.k_pool[p][l],
-                    &self.v_pool[p][l],
-                    &self.idx_blocks[p],
-                    &self.idx_offsets[p],
-                    &self.idx_tables[p],
-                    &self.idx_lens[p],
-                    &self.scores,
-                    &self.probs,
+                    &self.k_pool[pu][l],
+                    &self.v_pool[pu][l],
+                    &z.blocks[pu],
+                    &z.offsets[pu],
+                    &z.tables[pu],
+                    &z.lens[pu],
+                    &z.scores,
+                    &z.probs,
                     &s.ctx,
                 ));
-                self.linear(&mut steps, &s.ctx, &pfx("attn.wo.weight"), &s.proj, 1, hq, d);
-                steps.push(::model::block::rmsnorm_fwd(gpu, &ids, &s.proj, self.ps.w(&pfx("ln1_2.weight")), &s.xn1_2, d, 1, cfg.norm_eps));
-                steps.push(gpu.step(model::ADD2_ID, &[prev, &s.xn1_2, &s.xmid], &[d], d));
-                steps.push(::model::block::rmsnorm_fwd(gpu, &ids, &s.xmid, self.ps.w(&pfx("ln2.weight")), &s.xn2, d, 1, cfg.norm_eps));
-                self.linear(&mut steps, &s.xn2, &pfx("mlp.gate.weight"), &s.gate_pre, 1, d, ff);
-                self.linear(&mut steps, &s.xn2, &pfx("mlp.up.weight"), &s.up, 1, d, ff);
-                steps.push(::model::block::swiglu_fwd(gpu, &ids, &s.gate_pre, &s.up, &s.mlp_h, ff));
-                self.linear(&mut steps, &s.mlp_h, &pfx("mlp.down.weight"), &s.mlp_out, 1, ff, d);
-                steps.push(::model::block::rmsnorm_fwd(gpu, &ids, &s.mlp_out, self.ps.w(&pfx("ln2_2.weight")), &s.xn2_2, d, 1, cfg.norm_eps));
-                steps.push(gpu.step(model::ADD2_ID, &[&s.xmid, &s.xn2_2, out], &[d], d));
-                prev = out;
+                self.linear(&mut steps, &s.ctx, &pfx("attn.wo.weight"), &s.proj, b, hq, d);
+                steps.push(::model::block::rmsnorm_fwd(gpu, &ids, &s.proj, self.ps.w(&pfx("ln1_2.weight")), &s.xn1_2, d, b, cfg.norm_eps));
+                steps.push(gpu.step_sliced(model::ADD2_ID, &[prev, &s.xn1_2, &s.xmid], &[prev_range, whole, whole], &[b * d], b * d));
+                steps.push(::model::block::rmsnorm_fwd(gpu, &ids, &s.xmid, self.ps.w(&pfx("ln2.weight")), &s.xn2, d, b, cfg.norm_eps));
+                self.linear(&mut steps, &s.xn2, &pfx("mlp.gate.weight"), &s.gate_pre, b, d, ff);
+                self.linear(&mut steps, &s.xn2, &pfx("mlp.up.weight"), &s.up, b, d, ff);
+                steps.push(::model::block::swiglu_fwd(gpu, &ids, &s.gate_pre, &s.up, &s.mlp_h, b * ff));
+                self.linear(&mut steps, &s.mlp_h, &pfx("mlp.down.weight"), &s.mlp_out, b, ff, d);
+                steps.push(::model::block::rmsnorm_fwd(gpu, &ids, &s.mlp_out, self.ps.w(&pfx("ln2_2.weight")), &s.xn2_2, d, b, cfg.norm_eps));
+                steps.push(gpu.step(model::ADD2_ID, &[&s.xmid, &s.xn2_2, out], &[b * d], b * d));
+                (prev, prev_range) = (out, whole);
             }
-            steps.push(::model::block::rmsnorm_fwd(gpu, &ids, prev, self.ps.w("norm.weight"), &self.hs[p], d, 1, cfg.norm_eps));
-            self.linear(&mut steps, &self.hs[p], "gate.weight", &self.gates[p], 1, d, 1);
-            steps.push(gpu.step(model::BIAS_ADD_ID, &[&self.gates[p], self.ps.w("gate.bias")], &[1, 1], 1));
+            steps.push(gpu.step_sliced(rms, &[prev, self.ps.w("norm.weight"), &z.hs], &[whole, whole, slice(p)], &[d, b, eps], b));
         }
-        steps
+        // Every pass's gate in one product over all of `hs` (rows past `b` are stale and never read).
+        let gate_rows = t * z.rows;
+        self.linear(&mut steps, &z.hs, "gate.weight", &z.gates, gate_rows, d, 1);
+        steps.push(gpu.step(model::BIAS_ADD_ID, &[&z.gates, self.ps.w("gate.bias")], &[gate_rows, 1], gate_rows));
+        let gather = gpu.step(model::EMBED_ID, &[&z.sel, &z.hs, &z.hsel], &[d, b], b * d);
+        let mut head = Vec::new();
+        self.linear(&mut head, &z.hsel, "lm_head.weight", &z.logits, b, d, cfg.vocab);
+        StepGraph { trunk: steps, gather, head }
     }
 
-    fn head_steps(&self, pass: usize) -> Vec<Step> {
-        let (d, v) = (self.cfg.d_model, self.cfg.vocab);
-        let mut steps = Vec::new();
-        self.linear(&mut steps, &self.hs[pass], "lm_head.weight", &self.logits, 1, d, v);
-        steps
-    }
-
-    fn set_rope_pos(&self, pass: usize, pos: u32) {
-        let c = &self.cfg;
-        let (nh, nkv, hd, theta) = (c.n_heads, c.n_kv_heads, c.head_dim, gpu_core::f(c.rope_theta));
-        self.gpu.write(&self.rope_q_uni[pass], &[1, nh, hd, c.q_dim(), 0, pos, theta]);
-        self.gpu.write(&self.rope_k_uni[pass], &[1, nkv, hd, c.kv_dim(), 0, pos, theta]);
-    }
-
-    /// One token through every pass, appending its K/V to each pass's table.
-    /// Returns the logits of the selected pass.
-    fn advance(&mut self, table: &mut BlockTable, row: u32, token: u32) -> Vec<f32> {
+    /// One token for each of `tables` (`inputs[i]` the token row `i` appends) through every pass; each row's K/V
+    /// is appended to each pass's table at its own position, and each row's exit pass is chosen from its gates.
+    /// Leaves the exit rows' hidden states in `hsel`; `head` also runs the head over them into `logits`.
+    fn step(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32], head: bool) {
+        let b = tables.len() as u32;
+        assert!(b > 0 && b <= self.dec.rows, "ouro: a decode step of {b} rows on buffers of {}", self.dec.rows);
         let t = self.cfg.total_ut_steps as usize;
-        let cfg = &self.cfg;
-        self.gpu.write(&self.token, &[token]);
-        for p in 0..t {
-            let pos = if p == 0 { table.len() } else { self.rows[&row].extra[p - 1].len() };
-            // Pass 0 appends into the scheduler's table; every other pass
-            // appends into its own table, from that pass's own allocator, so
-            // each paged plane is charged exactly the sequence's page count.
-            let appended = if p == 0 {
-                table.append(&mut self.allocs[0])
-            } else {
-                let ex = &mut self.rows.get_mut(&row).expect("row").extra[p - 1];
-                ex.append(&mut self.allocs[p])
-            };
-            let (blk, off) = appended.expect("out of KV blocks");
-            self.gpu.write(&self.idx_blocks[p], &[blk]);
-            self.gpu.write(&self.idx_offsets[p], &[off]);
-            self.gpu.write(&self.idx_lens[p], &[pos + 1]);
-            let mut bt = vec![0u32; self.max_bt as usize];
-            let blocks = if p == 0 { table.blocks() } else { self.rows[&row].extra[p - 1].blocks() };
-            for (i, b) in blocks.iter().enumerate() {
-                bt[i] = *b;
+        let max_bt = self.max_bt as usize;
+        let mut positions = Vec::with_capacity(b as usize);
+        let mut blocks = vec![vec![0u32; b as usize]; t];
+        let mut offsets = vec![vec![0u32; b as usize]; t];
+        let mut lens = vec![vec![0u32; b as usize]; t];
+        let mut bt = vec![vec![0u32; b as usize * max_bt]; t];
+        for (r, table) in tables.iter_mut().enumerate() {
+            let table: &mut BlockTable = table;
+            let row = self.ensure_row(table).expect("row");
+            let pos = table.len();
+            positions.push(pos);
+            for p in 0..t {
+                // Pass 0 appends into the scheduler's table; every other pass into its own, from that pass's own
+                // allocator, so each paged plane is charged exactly the sequence's page count.
+                let appended = if p == 0 { table.append(&mut self.allocs[0]) } else { self.rows.get_mut(&row).expect("row").extra[p - 1].append(&mut self.allocs[p]) };
+                let (blk, off) = appended.expect("out of KV blocks");
+                blocks[p][r] = blk;
+                offsets[p][r] = off;
+                lens[p][r] = pos + 1;
+                let owned = if p == 0 { table.blocks() } else { self.rows[&row].extra[p - 1].blocks() };
+                bt[p][r * max_bt..r * max_bt + owned.len()].copy_from_slice(owned);
             }
-            self.gpu.write(&self.idx_tables[p], &bt);
-            self.set_rope_pos(p, pos);
         }
-        self.gpu.submit(&[], &self.decode);
-        let pass = self.choose_exit();
-        self.gpu.submit(&[], &self.heads[pass]);
-        self.last_pass.set(pass);
-        self.gpu.read(&self.logits, cfg.vocab as usize)
+        let z = &self.dec;
+        self.gpu.write(&z.tokens, inputs);
+        self.gpu.write(&z.positions, &positions);
+        for p in 0..t {
+            self.gpu.write(&z.blocks[p], &blocks[p]);
+            self.gpu.write(&z.offsets[p], &offsets[p]);
+            self.gpu.write(&z.lens[p], &lens[p]);
+            self.gpu.write(&z.tables[p], &bt[p]);
+        }
+        if !self.graphs.contains_key(&b) {
+            let graph = self.record(b);
+            self.graphs.insert(b, graph);
+        }
+        let graph = &self.graphs[&b];
+        self.gpu.submit(&[], &graph.trunk);
+        let z = &self.dec;
+        let gates = self.gpu.read(&z.gates, t * z.rows as usize);
+        let sel: Vec<u32> = (0..b)
+            .map(|r| {
+                let row_gates: Vec<f64> = (0..t).map(|p| gates[p * z.rows as usize + r as usize] as f64).collect();
+                model::exit_pass(&row_gates, self.cfg.early_exit_threshold as f64) as u32 * z.rows + r
+            })
+            .collect();
+        self.gpu.write(&z.sel, &sel);
+        let mut tail = vec![graph.gather.clone()];
+        if head {
+            tail.extend(graph.head.iter().cloned());
+        }
+        self.gpu.submit(&[], &tail);
     }
 
-    /// Prefill the whole prompt in one pass per recurrent step: matmuls run
-    /// with `m = n`, attention is the causal full-chunk form, and each pass
-    /// scatters its K/V into its own paged pool. Returns the last token's
-    /// selected-pass hidden state (what admission samples from).
+    /// Each row's logits after [`Self::step`] with the head.
+    fn logit_rows(&self, b: usize) -> Vec<Vec<f32>> {
+        let v = self.cfg.vocab as usize;
+        let all = self.gpu.read(&self.dec.logits, b * v);
+        all.chunks(v).map(<[f32]>::to_vec).collect()
+    }
+
+    /// Prefill the whole prompt in one pass per recurrent step ([`Self::trunk`], scattering each pass's K/V into
+    /// that pass's paged pool). Returns the last token's selected-pass hidden state (what admission samples from).
     fn prefill_batch(&mut self, table: &mut BlockTable, prompt: &[u32]) -> Vec<f32> {
-        let cfg = self.cfg.clone();
         let n = prompt.len() as u32;
         assert_eq!(table.len(), 0, "prefill_batch expects a fresh sequence");
         let row = self.ensure_row(table).expect("row");
@@ -416,129 +446,138 @@ impl Engine {
         // Reserve the chunk in every pass's table, then record each token's
         // (block, offset) slot for the batched scatter.
         table.reserve(n, &mut self.allocs[0]).expect("out of KV blocks");
-        let mut pass_slots: Vec<(Vec<u32>, Vec<u32>)> = Vec::with_capacity(cfg.total_ut_steps as usize);
-        let slots = |t: &BlockTable| {
-            let mut b = vec![0u32; n as usize];
-            let mut o = vec![0u32; n as usize];
-            for i in 0..n as usize {
-                let (bb, oo) = t.locate(i as u32, bs);
-                b[i] = bb;
-                o[i] = oo;
-            }
-            (b, o)
-        };
-        pass_slots.push(slots(table));
-        for p in 1..cfg.total_ut_steps {
+        let slots = |t: &BlockTable| -> (Vec<u32>, Vec<u32>) { (0..n).map(|i| t.locate(i, bs)).unzip() };
+        let mut pass_slots: Vec<(Vec<u32>, Vec<u32>)> = vec![slots(table)];
+        for p in 1..self.cfg.total_ut_steps {
             let ex = &mut self.rows.get_mut(&row).expect("row").extra[p as usize - 1];
             ex.reserve(n, &mut self.allocs[p as usize]).expect("out of KV blocks");
             pass_slots.push(slots(ex));
         }
+        let (hs, gates) = self.trunk(prompt, Some(&pass_slots));
+        let last = n as usize - 1;
+        let pass = self.exit_of(&gates, last);
+        let d = self.cfg.d_model as usize;
+        self.gpu.read(&hs[pass], n as usize * d)[last * d..].to_vec()
+    }
 
+    /// The exit pass of row `i` of a [`Self::trunk`] by the CDF rule decode uses.
+    fn exit_of(&self, gates: &[Vec<f32>], i: usize) -> usize {
+        let row: Vec<f64> = gates.iter().map(|g| g[i] as f64).collect();
+        model::exit_pass(&row, self.cfg.early_exit_threshold as f64)
+    }
+
+    /// `tokens` as one causal sequence through every pass: matmuls over all its rows, the causal flash kernel for
+    /// attention (the materialized chain where the device runs no workgroup reductions). With `scatter`, each
+    /// pass's K/V rows go to that pass's `(block, offset)` slots of its paged pool. Returns every pass's normed
+    /// output (`[n, d]` each) and its gates, read back.
+    fn trunk(&self, prompt: &[u32], scatter: Option<&[(Vec<u32>, Vec<u32>)]>) -> (Vec<DeviceBuffer>, Vec<Vec<f32>>) {
+        let cfg = &self.cfg;
+        let n = prompt.len() as u32;
+        let bs = self.block_size;
         let gpu = &self.gpu;
-        let flash = gpu.caps().workgroup_reductions && gpu.caps().max_workgroup_size >= 256;
         let d = cfg.d_model as u64;
-        let ff = cfg.d_ff as u64;
-        let (hq, hkv) = (cfg.q_dim() as u64, cfg.kv_dim() as u64);
         let nn = n as u64;
         let st = |x: u64| gpu.storage(x);
-        let b = PrefillBufs {
-            tokens: gpu.buffer("ouro_prefill_tokens", nn * 4, BufUsage::STORAGE | BufUsage::COPY_DST),
-            h: [st(nn * d), st(nn * d)],
-            hs: (0..cfg.total_ut_steps).map(|_| st(nn * d)).collect(),
-            gates: (0..cfg.total_ut_steps).map(|_| st(nn)).collect(),
-            xn1: st(nn * d),
-            q: st(nn * hq),
-            k: st(nn * hkv),
-            v: st(nn * hkv),
-            ctx: st(nn * hq),
-            proj: st(nn * d),
-            xn1_2: st(nn * d),
-            xmid: st(nn * d),
-            xn2: st(nn * d),
-            gate_pre: st(nn * ff),
-            up: st(nn * ff),
-            mlp_h: st(nn * ff),
-            mlp_out: st(nn * d),
-            xn2_2: st(nn * d),
-            // The flash kernel needs no score slab; the materialized fallback does.
-            scores: if flash { st(1) } else { st(cfg.n_heads as u64 * nn * nn) },
-            probs: if flash { st(1) } else { st(cfg.n_heads as u64 * nn * nn) },
-            lse: st(cfg.n_heads as u64 * nn),
-            blocks: pass_slots
-                .iter()
-                .map(|(x, _)| {
-                    let buf = gpu.buffer("ouro_pf_blocks", nn * 4, BufUsage::STORAGE | BufUsage::COPY_DST);
-                    gpu.write(&buf, x);
-                    buf
-                })
-                .collect(),
-            offsets: pass_slots
-                .iter()
-                .map(|(_, y)| {
-                    let buf = gpu.buffer("ouro_pf_offsets", nn * 4, BufUsage::STORAGE | BufUsage::COPY_DST);
-                    gpu.write(&buf, y);
-                    buf
-                })
-                .collect(),
+        let index = |name: &str, values: &[u32]| {
+            let buf = gpu.buffer(name, nn * 4, BufUsage::STORAGE | BufUsage::COPY_DST);
+            gpu.write(&buf, values);
+            buf
         };
-        gpu.write(&b.tokens, prompt);
+        let tokens = index("ouro_prefill_tokens", prompt);
+        let slots: Option<Vec<(DeviceBuffer, DeviceBuffer)>> = scatter.map(|s| s.iter().map(|(x, y)| (index("ouro_pf_blocks", x), index("ouro_pf_offsets", y))).collect());
+        let h = [st(nn * d), st(nn * d)];
+        let hs: Vec<DeviceBuffer> = (0..cfg.total_ut_steps).map(|_| st(nn * d)).collect();
+        let gates: Vec<DeviceBuffer> = (0..cfg.total_ut_steps).map(|_| st(nn)).collect();
+        let sc = Scratch::new(gpu, cfg, nn);
+        // The flash kernel needs no score slab; the materialized fallback does.
+        let slab = if self.flash.is_some() { 1 } else { cfg.n_heads as u64 * nn * nn };
+        let (scores, probs, lse) = (st(slab), st(slab), st(cfg.n_heads as u64 * nn));
 
         let ids = model::kernel_ids();
         let dec = model::decode_batched_ids();
         let (nh, nkv, hd) = (cfg.n_heads, cfg.n_kv_heads, cfg.head_dim);
         let ga = ::model::block::Gqa { b: 1, t: n, n_heads: nh, n_kv_heads: nkv, head_dim: hd };
         let t = cfg.total_ut_steps as usize;
-        let l_count = cfg.n_layers as usize;
-        let mut steps = vec![gpu.step(model::EMBED_ID, &[&b.tokens, self.ps.w("tok.weight"), &b.h[0]], &[cfg.d_model, n], n * cfg.d_model)];
+        let mut steps = vec![gpu.step(model::EMBED_ID, &[&tokens, self.ps.w("tok.weight"), &h[0]], &[cfg.d_model, n], n * cfg.d_model)];
         for p in 0..t {
-            let mut prev: &DeviceBuffer = if p == 0 { &b.h[0] } else { &b.hs[p - 1] };
-            for l in 0..l_count {
-                let out: &DeviceBuffer = if p == 0 { &b.h[(l + 1) % 2] } else { &b.h[l % 2] };
+            let mut prev: &DeviceBuffer = if p == 0 { &h[0] } else { &hs[p - 1] };
+            for l in 0..cfg.n_layers as usize {
+                let out: &DeviceBuffer = if p == 0 { &h[(l + 1) % 2] } else { &h[l % 2] };
                 let pfx = |name: &str| format!("blocks.{l}.{name}");
-                steps.push(::model::block::rmsnorm_fwd(gpu, &ids, prev, self.ps.w(&pfx("ln1.weight")), &b.xn1, cfg.d_model, n, cfg.norm_eps));
-                self.linear(&mut steps, &b.xn1, &pfx("attn.wq.weight"), &b.q, n, cfg.d_model, cfg.q_dim());
-                self.linear(&mut steps, &b.xn1, &pfx("attn.wk.weight"), &b.k, n, cfg.d_model, cfg.kv_dim());
-                self.linear(&mut steps, &b.xn1, &pfx("attn.wv.weight"), &b.v, n, cfg.d_model, cfg.kv_dim());
-                steps.push(::model::block::rope_fwd(gpu, &ids, &b.q, n, nh, hd, cfg.q_dim(), n, cfg.rope_theta));
-                steps.push(::model::block::rope_fwd(gpu, &ids, &b.k, n, nkv, hd, cfg.kv_dim(), n, cfg.rope_theta));
+                steps.push(::model::block::rmsnorm_fwd(gpu, &ids, prev, self.ps.w(&pfx("ln1.weight")), &sc.xn1, cfg.d_model, n, cfg.norm_eps));
+                self.linear(&mut steps, &sc.xn1, &pfx("attn.wq.weight"), &sc.q, n, cfg.d_model, cfg.q_dim());
+                self.linear(&mut steps, &sc.xn1, &pfx("attn.wk.weight"), &sc.k, n, cfg.d_model, cfg.kv_dim());
+                self.linear(&mut steps, &sc.xn1, &pfx("attn.wv.weight"), &sc.v, n, cfg.d_model, cfg.kv_dim());
+                steps.push(::model::block::rope_fwd(gpu, &ids, &sc.q, n, nh, hd, cfg.q_dim(), n, cfg.rope_theta));
+                steps.push(::model::block::rope_fwd(gpu, &ids, &sc.k, n, nkv, hd, cfg.kv_dim(), n, cfg.rope_theta));
                 // Scatter this chunk's K/V into the pass's paged plane.
-                steps.push(gpu.step(dec.kv_append_batched, &[&b.k, &b.blocks[p], &b.offsets[p], &self.k_pool[p][l]], &[n, cfg.kv_dim(), bs], n * cfg.kv_dim()));
-                steps.push(gpu.step(dec.kv_append_batched, &[&b.v, &b.blocks[p], &b.offsets[p], &self.v_pool[p][l]], &[n, cfg.kv_dim(), bs], n * cfg.kv_dim()));
-                if flash {
-                    steps.push(::model::block::flash_gqa_causal_fwd_portable(gpu, model::FLASH_GQA_ID, &ga, &b.q, &b.k, &b.v, &b.ctx, &b.lse));
-                } else {
-                    steps.extend(::model::block::gqa_fwd(gpu, &ids, &ga, &b.q, &b.k, &b.v, &b.scores, &b.probs, &b.ctx));
+                if let Some(slots) = &slots {
+                    let (blocks, offsets) = &slots[p];
+                    steps.push(gpu.step(dec.kv_append_batched, &[&sc.k, blocks, offsets, &self.k_pool[p][l]], &[n, cfg.kv_dim(), bs], n * cfg.kv_dim()));
+                    steps.push(gpu.step(dec.kv_append_batched, &[&sc.v, blocks, offsets, &self.v_pool[p][l]], &[n, cfg.kv_dim(), bs], n * cfg.kv_dim()));
                 }
-                self.linear(&mut steps, &b.ctx, &pfx("attn.wo.weight"), &b.proj, n, cfg.q_dim(), cfg.d_model);
-                steps.push(::model::block::rmsnorm_fwd(gpu, &ids, &b.proj, self.ps.w(&pfx("ln1_2.weight")), &b.xn1_2, cfg.d_model, n, cfg.norm_eps));
-                steps.push(gpu.step(model::ADD2_ID, &[prev, &b.xn1_2, &b.xmid], &[n * cfg.d_model], n * cfg.d_model));
-                steps.push(::model::block::rmsnorm_fwd(gpu, &ids, &b.xmid, self.ps.w(&pfx("ln2.weight")), &b.xn2, cfg.d_model, n, cfg.norm_eps));
-                self.linear(&mut steps, &b.xn2, &pfx("mlp.gate.weight"), &b.gate_pre, n, cfg.d_model, cfg.d_ff);
-                self.linear(&mut steps, &b.xn2, &pfx("mlp.up.weight"), &b.up, n, cfg.d_model, cfg.d_ff);
-                steps.push(::model::block::swiglu_fwd(gpu, &ids, &b.gate_pre, &b.up, &b.mlp_h, n * cfg.d_ff));
-                self.linear(&mut steps, &b.mlp_h, &pfx("mlp.down.weight"), &b.mlp_out, n, cfg.d_ff, cfg.d_model);
-                steps.push(::model::block::rmsnorm_fwd(gpu, &ids, &b.mlp_out, self.ps.w(&pfx("ln2_2.weight")), &b.xn2_2, cfg.d_model, n, cfg.norm_eps));
-                steps.push(gpu.step(model::ADD2_ID, &[&b.xmid, &b.xn2_2, out], &[n * cfg.d_model], n * cfg.d_model));
+                match &self.flash {
+                    Some(flash) => steps.push(::model::block::flash_gqa_causal_fwd(gpu, flash, &ga, &sc.q, &sc.k, &sc.v, &sc.ctx, &lse)),
+                    None => steps.extend(::model::block::gqa_fwd(gpu, &ids, &ga, &sc.q, &sc.k, &sc.v, &scores, &probs, &sc.ctx)),
+                }
+                self.linear(&mut steps, &sc.ctx, &pfx("attn.wo.weight"), &sc.proj, n, cfg.q_dim(), cfg.d_model);
+                steps.push(::model::block::rmsnorm_fwd(gpu, &ids, &sc.proj, self.ps.w(&pfx("ln1_2.weight")), &sc.xn1_2, cfg.d_model, n, cfg.norm_eps));
+                steps.push(gpu.step(model::ADD2_ID, &[prev, &sc.xn1_2, &sc.xmid], &[n * cfg.d_model], n * cfg.d_model));
+                steps.push(::model::block::rmsnorm_fwd(gpu, &ids, &sc.xmid, self.ps.w(&pfx("ln2.weight")), &sc.xn2, cfg.d_model, n, cfg.norm_eps));
+                self.linear(&mut steps, &sc.xn2, &pfx("mlp.gate.weight"), &sc.gate_pre, n, cfg.d_model, cfg.d_ff);
+                self.linear(&mut steps, &sc.xn2, &pfx("mlp.up.weight"), &sc.up, n, cfg.d_model, cfg.d_ff);
+                steps.push(::model::block::swiglu_fwd(gpu, &ids, &sc.gate_pre, &sc.up, &sc.mlp_h, n * cfg.d_ff));
+                self.linear(&mut steps, &sc.mlp_h, &pfx("mlp.down.weight"), &sc.mlp_out, n, cfg.d_ff, cfg.d_model);
+                steps.push(::model::block::rmsnorm_fwd(gpu, &ids, &sc.mlp_out, self.ps.w(&pfx("ln2_2.weight")), &sc.xn2_2, cfg.d_model, n, cfg.norm_eps));
+                steps.push(gpu.step(model::ADD2_ID, &[&sc.xmid, &sc.xn2_2, out], &[n * cfg.d_model], n * cfg.d_model));
                 prev = out;
             }
-            steps.push(::model::block::rmsnorm_fwd(gpu, &ids, prev, self.ps.w("norm.weight"), &b.hs[p], cfg.d_model, n, cfg.norm_eps));
-            self.linear(&mut steps, &b.hs[p], "gate.weight", &b.gates[p], n, cfg.d_model, 1);
-            steps.push(gpu.step(model::BIAS_ADD_ID, &[&b.gates[p], self.ps.w("gate.bias")], &[n, 1], n));
+            steps.push(::model::block::rmsnorm_fwd(gpu, &ids, prev, self.ps.w("norm.weight"), &hs[p], cfg.d_model, n, cfg.norm_eps));
+            self.linear(&mut steps, &hs[p], "gate.weight", &gates[p], n, cfg.d_model, 1);
+            steps.push(gpu.step(model::BIAS_ADD_ID, &[&gates[p], self.ps.w("gate.bias")], &[n, 1], n));
         }
         gpu.submit(&[], &steps);
-
-        // The last token's exit pass, by the same CDF rule as decode.
-        let gates: Vec<f64> = (0..t).map(|p| gpu.read(&b.gates[p], n as usize)[n as usize - 1] as f64).collect();
-        let pass = model::exit_pass(&gates, cfg.early_exit_threshold as f64);
-        self.last_pass.set(pass);
-        let all = gpu.read(&b.hs[pass], n as usize * cfg.d_model as usize);
-        all[(n as usize - 1) * cfg.d_model as usize..].to_vec()
+        let gates = gates.iter().map(|g| gpu.read(g, n as usize)).collect();
+        (hs, gates)
     }
 
-    fn choose_exit(&self) -> usize {
-        let t = self.cfg.total_ut_steps;
-        let gates: Vec<f64> = (0..t).map(|pass| self.gpu.read(&self.gates[pass as usize], 1)[0] as f64).collect();
-        model::exit_pass(&gates, self.cfg.early_exit_threshold as f64)
+    /// [`PagedDecoder::score_continuation`]: one [`Self::trunk`] over `tokens` (no KV written), each position's
+    /// exit row gathered on the host as decode gathers it, the head over the rows that predict a scored token.
+    fn score(&self, tokens: &[u32], from: usize, temperature: f32) -> Result<Vec<f32>, String> {
+        if from == 0 || from > tokens.len() {
+            return Err(format!("ouro: scoring from {from} of {} tokens: the first scored position is 1 to the length", tokens.len()));
+        }
+        if !(temperature.is_finite() && temperature > 0.0) {
+            return Err(format!("ouro: scoring at temperature {temperature}: it must be finite and positive"));
+        }
+        if tokens.len() > self.cap as usize {
+            return Err(format!("ouro: scoring {} tokens, more than a sequence holds ({})", tokens.len(), self.cap));
+        }
+        if from == tokens.len() {
+            return Ok(Vec::new());
+        }
+        let (hs, gates) = self.trunk(&tokens[..tokens.len() - 1], None);
+        let (d, v) = (self.cfg.d_model as usize, self.cfg.vocab as usize);
+        let n = tokens.len() - 1;
+        let per_pass: Vec<Vec<f32>> = hs.iter().map(|h| self.gpu.read(h, n * d)).collect();
+        // Position `p - 1`'s exit row predicts token `p`.
+        let rows: Vec<f32> = (from - 1..n).flat_map(|i| per_pass[self.exit_of(&gates, i)][i * d..(i + 1) * d].to_vec()).collect();
+        let m = (n + 1 - from) as u32;
+        let (x, logits) = (self.gpu.storage_init("ouro_score_rows", &rows), self.gpu.storage(m as u64 * v as u64));
+        let mut steps = Vec::new();
+        self.linear(&mut steps, &x, "lm_head.weight", &logits, m, d as u32, v as u32);
+        self.gpu.submit(&[], &steps);
+        let logits = self.gpu.read(&logits, m as usize * v);
+        Ok(logits
+            .chunks(v)
+            .zip(&tokens[from..])
+            .map(|(row, &t)| {
+                let scaled: Vec<f64> = row.iter().map(|&z| z as f64 / temperature as f64).collect();
+                let max = scaled.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+                let lse = max + scaled.iter().map(|z| (z - max).exp()).sum::<f64>().ln();
+                (scaled[t as usize] - lse) as f32
+            })
+            .collect())
     }
 
     fn release_extras(&mut self, table: &mut BlockTable) {
@@ -590,37 +629,48 @@ impl PagedDecoder for Engine {
         t.release(&mut self.allocs[0]);
     }
 
+    fn max_batch(&self) -> Option<usize> {
+        Some(self.dec.rows as usize)
+    }
+
+    fn scores_continuations(&self) -> bool {
+        true
+    }
+
+    /// The looped path serves no adapters, so the base namespace is the only one.
+    fn score_continuation(&mut self, namespace: ::model::paged::KvNamespace, tokens: &[u32], from: usize, temperature: f32) -> Result<Vec<f32>, String> {
+        if namespace != ::model::paged::BASE_KV_NAMESPACE {
+            return Err(format!("ouro: scoring under adapter namespace {namespace}: the looped path serves no adapters"));
+        }
+        if let Some(&bad) = tokens.iter().find(|&&t| t >= self.cfg.vocab) {
+            return Err(format!("ouro: token {bad} is outside the model vocabulary ({})", self.cfg.vocab));
+        }
+        self.score(tokens, from, temperature)
+    }
+
     fn prefill(&mut self, table: &mut BlockTable, prompt: &[u32]) -> Vec<f32> {
-        if prompt.len() > 1 {
-            return self.prefill_batch(table, prompt);
+        match prompt.len() {
+            0 => Vec::new(),
+            1 => {
+                // One token is one decode step of one row, without the head.
+                self.step(&mut [table], prompt, false);
+                self.gpu.read(&self.dec.hsel, self.cfg.d_model as usize)
+            }
+            _ => self.prefill_batch(table, prompt),
         }
-        let row = self.ensure_row(table).expect("row");
-        let mut hidden = Vec::new();
-        for tok in prompt {
-            self.advance(table, row, *tok);
-            hidden = self.gpu.read(&self.hs[self.last_pass.get()], self.cfg.d_model as usize);
-        }
-        hidden
     }
 
     fn logits(&self, hidden: &[f32]) -> Vec<f32> {
         self.gpu.write_f32(&self.hrow, hidden);
         let (d, v) = (self.cfg.d_model, self.cfg.vocab);
         let mut steps = Vec::new();
-        self.linear(&mut steps, &self.hrow, "lm_head.weight", &self.logits, 1, d, v);
+        self.linear(&mut steps, &self.hrow, "lm_head.weight", &self.hrow_logits, 1, d, v);
         self.gpu.submit(&[], &steps);
-        self.gpu.read(&self.logits, v as usize)
+        self.gpu.read(&self.hrow_logits, v as usize)
     }
 
     fn forward_batched_greedy(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32]) -> Vec<u32> {
-        let mut out = Vec::with_capacity(tables.len());
-        for (t, input) in tables.iter_mut().zip(inputs) {
-            let t: &mut BlockTable = t;
-            let row = self.ensure_row(t).expect("row");
-            let logits = self.advance(t, row, *input);
-            out.push(argmax(&logits));
-        }
-        out
+        self.forward_batched_logit_rows(tables, inputs).iter().map(|row| argmax(row)).collect()
     }
 
     fn forward_batched_greedy_window(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32], k: usize) -> Vec<Vec<u32>> {
@@ -649,11 +699,12 @@ impl PagedDecoder for Engine {
     }
 
     fn forward_batched_logit_rows(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32]) -> Vec<Vec<f32>> {
+        // Batches past the step's buffers run as consecutive steps (the scheduler never asks: `max_batch` bounds it).
+        let rows = self.dec.rows as usize;
         let mut out = Vec::with_capacity(tables.len());
-        for (t, input) in tables.iter_mut().zip(inputs) {
-            let t: &mut BlockTable = t;
-            let row = self.ensure_row(t).expect("row");
-            out.push(self.advance(t, row, *input));
+        for (chunk, input) in tables.chunks_mut(rows).zip(inputs.chunks(rows)) {
+            self.step(chunk, input, true);
+            out.extend(self.logit_rows(chunk.len()));
         }
         out
     }
@@ -671,12 +722,11 @@ impl PagedDecoder for Engine {
     }
 
     fn kv_pool_bytes(&self) -> u64 {
-        let per_plane = self.cap as u64 * self.cfg.kv_dim() as u64 * 4;
-        per_plane * 2 * self.cfg.n_layers as u64 * self.cfg.total_ut_steps as u64
+        self.pool_tokens as u64 * Engine::kv_bytes_per_token(&self.cfg)
     }
 
     fn kv_pool_capacity_tokens(&self) -> u64 {
-        self.cap as u64
+        self.pool_tokens as u64
     }
 }
 

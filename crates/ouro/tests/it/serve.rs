@@ -43,7 +43,7 @@ fn paged_engine_reproduces_the_models_own_greedy_streams() {
     let cfg = OuroConfig::tiny();
     let w = init_weights(&cfg, 33);
     let (passes, block_size, max_tokens) = (cfg.total_ut_steps, 4u32, 64u32);
-    let mut eng = Engine::from_source(cfg.clone(), &w, max_tokens, block_size);
+    let mut eng = Engine::from_source(cfg.clone(), &w, max_tokens, block_size, 8);
 
     // Two sequences at different prompt lengths, interleaved step by step.
     let prompts: [Vec<u32>; 2] = [vec![5, 7, 11], vec![3, 9, 13, 17, 19]];
@@ -87,7 +87,7 @@ fn a_long_prompt_prefill_selects_the_tiled_linear_and_still_matches() {
     let mut cfg = OuroConfig::tiny();
     cfg.block_size = 256;
     let w = init_weights(&cfg, 41);
-    let mut eng = Engine::from_source(cfg.clone(), &w, 256, 4);
+    let mut eng = Engine::from_source(cfg.clone(), &w, 256, 4, 8);
     let prompt: Vec<u32> = (0..160u32).map(|i| (i * 7 + 3) % 29).collect();
     let mut table = BlockTable::new();
     let hidden = eng.prefill(&mut table, &prompt);
@@ -100,14 +100,45 @@ fn a_long_prompt_prefill_selects_the_tiled_linear_and_still_matches() {
 }
 
 /// A tiny engine the generic serving suite can build fresh: a pool far larger than the suite's four
-/// 48-token sequences.
+/// 48-token sequences, and positions for each (a sequence addresses at most the model's positions).
 fn conformance_engine() -> Engine {
-    let cfg = OuroConfig::tiny();
+    let mut cfg = OuroConfig::tiny();
+    cfg.block_size = 64;
     let w = init_weights(&cfg, 61);
-    Engine::from_source(cfg, &w, 2048, 4)
+    Engine::from_source(cfg, &w, 2048, 4, 8)
 }
 
 #[test]
 fn the_engine_passes_the_serving_conformance_suite() {
     conformance::run_all(&Conformance { make: conformance_engine, prefix_reuse: false, prefix_prompt_tokens: 24, load_adapter: None });
+}
+
+/// A teacher-forced score is the log-probability the model's own full-sequence forward gives each continuation
+/// token, at the temperature asked, and it leaves the pool as it found it.
+#[test]
+fn a_scored_continuation_is_the_models_own_log_probability() {
+    let cfg = OuroConfig::tiny();
+    let w = init_weights(&cfg, 47);
+    let mut eng = Engine::from_source(cfg.clone(), &w, 64, 4, 8);
+    let seq: Vec<u32> = vec![5, 7, 11, 2, 9, 13, 4, 8];
+    let (from, temperature) = (3usize, 0.7f32);
+    let free = eng.free_blocks();
+    let scored = eng.score_continuation(::model::paged::BASE_KV_NAMESPACE, &seq, from, temperature).expect("ouro scores");
+    assert_eq!(eng.free_blocks(), free, "scoring holds no KV");
+    let m = Ouro::new_inference(cfg.clone(), 1, seq.len() as u32, &w);
+    m.set_tokens(&seq);
+    m.trunk_forward();
+    m.head_forward(cfg.total_ut_steps as usize - 1);
+    let logits = m.read_logits();
+    let v = cfg.vocab as usize;
+    assert_eq!(scored.len(), seq.len() - from);
+    for (k, p) in (from..seq.len()).enumerate() {
+        let row: Vec<f64> = logits[(p - 1) * v..p * v].iter().map(|&z| z as f64 / temperature as f64).collect();
+        let max = row.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let lse = max + row.iter().map(|z| (z - max).exp()).sum::<f64>().ln();
+        let want = row[seq[p] as usize] - lse;
+        assert!((scored[k] as f64 - want).abs() < 1e-4, "position {p}: scored {} vs the model's {want}", scored[k]);
+    }
+    assert!(eng.score_continuation(::model::paged::BASE_KV_NAMESPACE, &seq, 0, 1.0).is_err(), "position 0 has no prediction");
+    assert!(eng.score_continuation(::model::paged::BASE_KV_NAMESPACE, &seq, 2, 0.0).is_err(), "a temperature must be positive");
 }

@@ -14,10 +14,11 @@
 //! manifest declares the same `generate` contract every text resident serves,
 //! so the HTTP, D-Bus and SDK fronts need no Ouro-specific code.
 //!
-//! Capacity: `ctx` is the shared KV capacity in tokens, including every pass's
-//! share (the engine charges one block per pass per page). The default keeps a
-//! 2.6B model's four-pass KV pool inside one 24 GB card; a larger context is a
-//! serving setting, not a model fact.
+//! Capacity: `ctx` caps one sequence (never past the model's positions); the KV pool is shared by every running
+//! sequence and holds `pool` tokens in every pass's planes. A server that knows its card ([`OuroResident::
+//! with_card_budget`]) plans the pool from the card's usable bytes, less the weights and the decode step's buffers,
+//! and the batch from the pool: as many sequences decode in one step as the pool holds at a quarter of `ctx` each,
+//! up to [`MAX_PLANNED_BATCH`]. Without one the pool holds `max_batch` sequences of `ctx`.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -33,10 +34,14 @@ use crate::resident_llm::est_vram;
 use llmserve::generate_spec;
 use residency::on_device;
 
-/// Default shared KV capacity (tokens) and page size.
+/// Default per-sequence context (tokens), page size and batch.
 pub const DEFAULT_CTX: u32 = 4096;
 pub const DEFAULT_BLOCK: u32 = 16;
 pub const DEFAULT_BATCH: u32 = 8;
+/// The most sequences a card-planned decode step carries.
+pub const MAX_PLANNED_BATCH: u32 = 256;
+/// The share of a card's usable bytes a planned pool may take: the rest is the prefill's transient buffers.
+const POOL_SHARE: f64 = 0.85;
 
 /// The catalog's manifest entry for the Ouro family.
 pub fn manifest() -> Manifest {
@@ -181,9 +186,12 @@ pub struct OuroResident {
     id: String,
     path: String,
     tokenizer: String,
+    /// Tokens one sequence may hold.
     ctx: u32,
     block_size: u32,
     max_batch: u32,
+    /// Tokens of the shared pool, in every pass's planes.
+    pool: u32,
 }
 
 impl OuroResident {
@@ -201,16 +209,53 @@ impl OuroResident {
             ctx: DEFAULT_CTX,
             block_size: DEFAULT_BLOCK,
             max_batch: DEFAULT_BATCH,
+            pool: DEFAULT_CTX * DEFAULT_BATCH,
         })
     }
 
-    /// Override the shared KV capacity / page / batch (serving policy).
+    /// Override the per-sequence context / page / batch (serving policy); the pool holds `max_batch` sequences of
+    /// `ctx`. A context past the model's positions is capped at them.
     pub fn with_sizing(mut self, ctx: u32, block_size: u32, max_batch: u32) -> OuroResident {
         self.block_size = block_size.max(1);
-        // The pool is a whole number of pages; round a policy cap up to one.
-        self.ctx = ctx.max(self.block_size).div_ceil(self.block_size) * self.block_size;
+        let positions = self.cfg().map_or(ctx, |c| c.block_size);
+        // Whole pages; round a policy cap up to one.
+        self.ctx = ctx.min(positions).max(self.block_size).div_ceil(self.block_size) * self.block_size;
         self.max_batch = max_batch.max(1);
+        self.pool = self.ctx.saturating_mul(self.max_batch);
         self
+    }
+
+    /// Plan the pool and the batch from `card_bytes`, the usable bytes of the card the model is placed on: the
+    /// pool takes [`POOL_SHARE`] of what the weights and the decode step's buffers leave, and the batch is as many
+    /// sequences as the pool holds at a quarter of the context each (at least the batch already set, at most
+    /// [`MAX_PLANNED_BATCH`]). A card too small for the planned pool keeps the sizing it had.
+    pub fn with_card_budget(mut self, card_bytes: u64) -> OuroResident {
+        let Ok(cfg) = self.cfg() else { return self };
+        let per_token = ouro::serve::Engine::kv_bytes_per_token(&cfg);
+        let fixed = est_vram(&self.path).vram;
+        let batch_for = |pool: u64| (pool / u64::from((self.ctx / 4).max(1))).clamp(u64::from(self.max_batch), u64::from(MAX_PLANNED_BATCH)) as u32;
+        // The decode buffers grow with the batch the pool affords, so the batch is planned on the pool left after
+        // the largest batch's buffers.
+        let room = card_bytes.saturating_sub(fixed).saturating_sub(decode_bytes(&cfg, MAX_PLANNED_BATCH, self.ctx));
+        let pool = ((room as f64 * POOL_SHARE) as u64 / per_token.max(1)).min(u64::from(u32::MAX));
+        let pool = pool / u64::from(self.block_size) * u64::from(self.block_size);
+        if pool >= u64::from(self.pool) {
+            self.pool = pool as u32;
+            self.max_batch = batch_for(pool);
+        }
+        self
+    }
+
+    /// The engine at this sizing under the continuous-batching scheduler, built on the device the calling thread is
+    /// scoped to: what [`ResidentModel::activate`] serves, and what a measurement of the served path drives.
+    pub fn scheduler(&self) -> Result<Scheduler<ouro::serve::Engine>, String> {
+        let engine = ouro::serve::Engine::open(&self.path, self.pool, self.block_size, self.max_batch)?;
+        Ok(Scheduler::new(engine, self.max_batch as usize))
+    }
+
+    /// The planned sizing: (per-sequence context, pool tokens, batch).
+    pub fn sizing(&self) -> (u32, u32, u32) {
+        (self.ctx, self.pool, self.max_batch)
     }
 
     pub fn id(&self) -> &str {
@@ -220,6 +265,15 @@ impl OuroResident {
     fn cfg(&self) -> Result<ouro::OuroConfig, String> {
         config_of(&self.path)
     }
+}
+
+/// Device bytes of one decode step's buffers for `rows` sequences of up to `ctx` tokens: the per-row activations of
+/// every pass, the attention's score and weight slabs and the logits.
+fn decode_bytes(cfg: &ouro::OuroConfig, rows: u32, ctx: u32) -> u64 {
+    let (r, t) = (u64::from(rows), u64::from(cfg.total_ut_steps));
+    let (d, ff, v) = (u64::from(cfg.d_model), u64::from(cfg.d_ff), u64::from(cfg.vocab));
+    let words = r * (d * (8 + t) + 3 * ff + 2 * u64::from(cfg.q_dim()) + 2 * u64::from(cfg.kv_dim()) + v) + 2 * r * u64::from(cfg.n_heads) * u64::from(ctx);
+    words * 4
 }
 
 fn config_of(path: &str) -> Result<ouro::OuroConfig, String> {
@@ -268,15 +322,9 @@ impl ResidentModel for OuroResident {
     fn estimate(&self, _key: &InstanceKey) -> MemCost {
         let cost = est_vram(&self.path);
         let Ok(cfg) = self.cfg() else { return cost };
-        // Every pass owns a plane per layer: the pool is
-        // `passes × layers × 2 × ctx × kv_dim` floats.
-        let kv = self.ctx as u64
-            * cfg.kv_dim() as u64
-            * 2
-            * cfg.n_layers as u64
-            * cfg.total_ut_steps as u64
-            * 4;
-        MemCost::new(cost.vram + kv, cost.ram)
+        // Every pass owns a K and a V plane per layer over the whole pool, beside one decode step's buffers.
+        let kv = u64::from(self.pool) * ouro::serve::Engine::kv_bytes_per_token(&cfg);
+        MemCost::new(cost.vram + kv + decode_bytes(&cfg, self.max_batch, self.ctx), cost.ram)
     }
 
     fn activate(&self, _key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
@@ -288,13 +336,8 @@ impl ResidentModel for OuroResident {
             return Err("ouro: the checkpoint declares no token that ends a generation (eos_token in tokenizer_config.json or generation_config.json)".to_string());
         }
         let front = Arc::new(TextFrontend::new(tok, stop, "ouro", Arc::new(move |tok: &data::qwen_tokenizer::QwenBpe, inv: &Invocation| qwen3::chat::parse_request_as(tok, &format, inv))));
-        let path = self.path.clone();
-        let (ctx, block, batch) = (self.ctx, self.block_size, self.max_batch);
-        let inst = on_device(device, move || {
-            let engine = ouro::serve::Engine::open(&path, ctx, block)?;
-            let sched = Scheduler::new(engine, batch as usize);
-            Ok::<Box<dyn Instance>, String>(Box::new(ScheduledInstance::new(front, sched, batch as usize)))
-        })??;
+        let batch = self.max_batch as usize;
+        let inst = on_device(device, move || Ok::<Box<dyn Instance>, String>(Box::new(ScheduledInstance::new(front, self.scheduler()?, batch))))??;
         Ok(inst)
     }
 }

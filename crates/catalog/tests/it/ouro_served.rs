@@ -54,7 +54,7 @@ fn model_dir(tag: &str) -> std::path::PathBuf {
     std::fs::write(dir.join("tokenizer.json"), bpe.to_hf_tokenizer_json(&SPECIALS).unwrap().to_string()).unwrap();
     std::fs::write(dir.join("tokenizer_config.json"), json!({"chat_template": TEMPLATE, "eos_token": "<|im_end|>"}).to_string()).unwrap();
     let vocab = 256 + bpe.merge_count() + SPECIALS.len();
-    let cfg = ouro::OuroConfig { vocab: vocab as u32, block_size: 256, ..ouro::OuroConfig::tiny() };
+    let cfg = ouro::OuroConfig { vocab: vocab as u32, block_size: 512, ..ouro::OuroConfig::tiny() };
     // seed: any weights serve; the test reads renderings and a served request, never the model's quality.
     ouro::finetune::OuroTrainer::init_checkpoint(&cfg.to_json(), 3, &dir).unwrap();
     dir
@@ -118,7 +118,7 @@ fn the_resident_serves_a_tool_request_through_its_own_template_within_its_positi
     let dir = model_dir("serve");
     let tok = tokenizer(&dir);
     let resident = OuroResident::from_card(dir.join("model.brain.safetensors").to_str().unwrap(), &ModelCard::new("local/scratch", "ouro"), None).unwrap().with_sizing(4096, 16, 2);
-    assert_eq!(resident.manifest().max_context_tokens, Some(256), "the context is the model's positions, not the pool's");
+    assert_eq!(resident.manifest().max_context_tokens, Some(512), "the context is the model's positions, not the pool's");
     let format = chat_format(Some(&dir), &tok);
     let messages = &conversation()[..4];
     let expected = qwen3::chat::render_prompt_as(&format, &ask(messages)).unwrap();
@@ -128,5 +128,26 @@ fn the_resident_serves_a_tool_request_through_its_own_template_within_its_positi
         let out = instance.run("generate", &inv, &mut |_| {}).expect("served").outputs;
         assert_eq!(out["prompt_tokens"].as_u64(), Some(tok.encode(&expected.text).len() as u64), "{out}");
     });
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A server that knows its card plans the shared KV pool from the card's usable bytes and decodes as many sequences
+/// in one step as that pool holds (up to the planned ceiling), and what it then reserves fits the card; a card too
+/// small for more keeps the flag sizing (a pool of `max_batch` sequences of the context).
+#[test]
+fn a_server_that_knows_its_card_plans_the_pool_and_the_batch_from_it() {
+    let dir = model_dir("plan");
+    let weights = dir.join("model.brain.safetensors");
+    let sized = || OuroResident::from_card(weights.to_str().unwrap(), &ModelCard::new("local/plan", "ouro"), None).unwrap().with_sizing(4096, 16, 4);
+    assert_eq!(sized().sizing(), (512, 2048, 4), "the context is capped at the positions; the pool holds the batch");
+    let card = 8u64 << 30;
+    let planned = sized().with_card_budget(card);
+    let (ctx, pool, batch) = planned.sizing();
+    assert_eq!(ctx, 512);
+    assert!(pool > 1000 * 2048, "the pool fills the card: {pool} tokens");
+    assert_eq!(batch, catalog::resident_ouro::MAX_PLANNED_BATCH, "the batch is what the pool holds, up to the ceiling");
+    let reserved = planned.estimate(&InstanceKey::new("local/plan", "default")).vram;
+    assert!(reserved <= card && reserved > card / 2, "the plan reserves most of the card and no more: {reserved} of {card}");
+    assert_eq!(sized().with_card_budget(1 << 20).sizing(), (512, 2048, 4), "a card too small keeps the flag sizing");
     std::fs::remove_dir_all(&dir).ok();
 }
