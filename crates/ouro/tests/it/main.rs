@@ -8,6 +8,7 @@
 //! others run beside it.
 
 mod decode;
+mod exit_entropy;
 mod exit_rule;
 mod forward;
 mod grad_accumulation;

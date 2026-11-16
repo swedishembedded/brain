@@ -100,6 +100,10 @@ impl ChatTrainer for OuroTrainer {
 
     const FROM_SCRATCH: bool = true;
 
+    /// The exit gates choose the depth; the trainers weigh their entropy into the objective
+    /// ([`model::Model::set_exit_entropy`]).
+    const EXIT_GATES: bool = true;
+
     fn init_params(config: &serde_json::Value) -> Result<u64, String> {
         let cfg = OuroConfig::from_json(config)?;
         Ok(cfg.param_list().iter().map(|(_, n)| *n as u64).sum())

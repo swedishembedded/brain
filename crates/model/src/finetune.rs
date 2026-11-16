@@ -264,6 +264,10 @@ pub trait ChatTrainer {
     /// A request for it is refused by name before the base is read where this is false.
     const NATIVE_SPARSE: bool = false;
 
+    /// Whether this family's model chooses its depth by exit gates and so takes an exit-entropy weight
+    /// ([`crate::Model::set_exit_entropy`]); the trainers' default weight applies only where this is true.
+    const EXIT_GATES: bool = false;
+
     /// The vocabulary of the checkpoint at `open`.
     fn vocab(open: &Path) -> Result<usize, String>;
 

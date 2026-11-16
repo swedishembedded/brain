@@ -9,7 +9,7 @@
 //! same forward are the only evidence that the one parameter set accumulated
 //! all of those uses.
 
-use gradcheck::{check_ouro, Report};
+use gradcheck::{check_ouro, check_ouro_exit_entropy, Report};
 
 const ATOL: f32 = 4e-3;
 const RTOL: f32 = 8.0e-2;
@@ -37,5 +37,17 @@ fn ouro_shared_stack_accumulates_every_pass() {
     }
     for seed in [3u64, 11] {
         gate(check_ouro(seed), &format!("tiny ouro, seed {seed}"));
+    }
+}
+
+/// The entropy-regularised objective (the exit distribution's entropy weighed in on the supervised rows): the gate
+/// gradient carries the entropy term's derivative, at the reference's weights and a strong one.
+#[test]
+fn ouro_exit_entropy_reaches_the_gates() {
+    if brain_testutil::gpu_tests_skipped() {
+        return;
+    }
+    for (seed, beta) in [(3u64, 0.1f32), (11, 0.05), (5, 1.0)] {
+        gate(check_ouro_exit_entropy(seed, beta), &format!("tiny ouro, seed {seed}, exit entropy {beta}"));
     }
 }

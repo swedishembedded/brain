@@ -128,6 +128,10 @@ pub struct FitOpts {
     /// pays no extra forward for it (what a long run on a slow device wants: five probe forwards of 1024-token rows
     /// were a third of a CPU step). Not part of the arithmetic of any step.
     pub initial_probe_batches: u32,
+    /// The weight of the exit-distribution entropy in the objective of a model with exit gates
+    /// ([`crate::Model::set_exit_entropy`]); `0` (the default) is the plain objective, and any other weight is refused
+    /// by a model without gates. Part of a run's arithmetic.
+    pub exit_entropy: f32,
 }
 
 impl FitOpts {
@@ -211,6 +215,7 @@ impl Default for FitOpts {
             native_sparse: None,
             strict_updates: false,
             initial_probe_batches: 5,
+            exit_entropy: 0.0,
         }
     }
 }
@@ -1894,6 +1899,7 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
     obj.check_data(&model)?;
     // The run's optimizer-state precision reaches every model here, before any step or resume.
     crate::trainprec::apply_train_precision(&mut model, &opts.precision, std::any::type_name::<M>()).map_err(std::io::Error::other)?;
+    model.set_exit_entropy(opts.exit_entropy).map_err(|why| std::io::Error::other(format!("{}: {why}", std::any::type_name::<M>())))?;
     if let Some(sparse) = opts.native_sparse {
         model.enable_native_sparse_attention(sparse).map_err(|why| std::io::Error::other(format!("{}: {why}", std::any::type_name::<M>())))?;
     }

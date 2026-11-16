@@ -446,6 +446,19 @@ pub trait Model {
         Ok(model)
     }
 
+    /// Weigh the entropy of the per-token exit distribution into the objective of a model whose depth is chosen by
+    /// exit gates (a looped decoder): `loss - beta * H(p)` over every supervised position, the regulariser toward a
+    /// uniform prior over exit steps that keeps the exit mass from collapsing onto one depth. `0` is the plain
+    /// objective. Called before the first step (the fit loop applies [`FitOpts::exit_entropy`]); a model without exit
+    /// gates takes `0` and refuses any other weight by name.
+    fn set_exit_entropy(&mut self, beta: f32) -> Result<(), String> {
+        if beta == 0.0 {
+            Ok(())
+        } else {
+            Err(format!("this model has no exit gates; an exit-entropy weight of {beta} has nothing to regularise"))
+        }
+    }
+
     /// Train the global-attention layers with native sparse attention ([`NativeSparse`]), before the first step. A
     /// model that has such layers and the kernels overrides this; the default refuses by name.
     fn enable_native_sparse_attention(&mut self, _sparse: NativeSparse) -> Result<(), String> {

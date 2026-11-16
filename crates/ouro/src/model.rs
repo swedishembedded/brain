@@ -311,6 +311,10 @@ pub struct Ouro {
     t: u32,
     train: bool,
     count: Cell<f32>,
+    /// Which rows the batch supervises (a target other than [`IGNORE`]): the rows the exit-entropy term counts.
+    supervised: RefCell<Vec<bool>>,
+    /// The weight of the exit-distribution entropy in the objective ([`model::Model::set_exit_entropy`]); 0: off.
+    exit_entropy: Cell<f32>,
 
     tokens: DeviceBuffer,
     targets: DeviceBuffer,
@@ -503,6 +507,8 @@ impl Ouro {
             t,
             train,
             count: Cell::new(1.0),
+            supervised: RefCell::new(Vec::new()),
+            exit_entropy: Cell::new(0.0),
             tokens,
             targets,
             res,
@@ -566,6 +572,7 @@ impl Ouro {
         self.gpu.write(&self.targets, bytemuck::cast_slice(targets));
         let count = targets.iter().filter(|v| **v != IGNORE).count();
         self.count.set(count.max(1) as f32);
+        *self.supervised.borrow_mut() = targets.iter().map(|v| *v != IGNORE).collect();
     }
 
     /// `y = x · Wᵀ` for the store's fp32 weight `w` (`[n, k]`) over `m` rows, through the shared GEMM facade.
@@ -967,6 +974,14 @@ impl model::Model for Ouro {
         Ok(())
     }
 
+    fn set_exit_entropy(&mut self, beta: f32) -> Result<(), String> {
+        if !(beta.is_finite() && beta >= 0.0) {
+            return Err(format!("ouro: an exit-entropy weight must be finite and non-negative, got {beta}"));
+        }
+        self.exit_entropy.set(beta);
+        Ok(())
+    }
+
     fn set_saved_policy(&mut self, policy: SavedPolicy) -> Result<(), String> {
         let current = SavedPolicy::recompute_with(self.res.format());
         if !current.narrows_to(policy) {
@@ -1015,7 +1030,10 @@ impl model::Model for Ouro {
     }
 
     /// The released training objective: every pass's CE weighted by that pass's
-    /// exit probability, summed over passes, averaged over supervised rows.
+    /// exit probability, summed over passes, averaged over supervised rows; with an exit-entropy weight `beta`
+    /// ([`model::Model::set_exit_entropy`]), minus `beta` times the entropy of each supervised row's exit
+    /// distribution (the entropy-regularised objective of arXiv:2510.25741, its masking and averaging applied to
+    /// both terms).
     fn forward(&self) -> f32 {
         assert!(self.train, "forward on an inference-only build has no objective; read pass logits instead");
         self.submit_forward(&self.fwd_steps);
@@ -1034,6 +1052,20 @@ impl model::Model for Ouro {
                 loss += (row[r] as f64) * (ce[r] as f64);
             }
             ce_rows.push(ce);
+        }
+        // The entropy term: `beta * sum_t p_t ln p_t` per supervised row. Its derivative through `p_j` is
+        // `beta * (ln p_j + 1)`, and the `+ 1` sums to zero over the exit distribution, so each pass's cost in the
+        // gate gradient below is its CE plus `beta * ln p_j`.
+        let beta = f64::from(self.exit_entropy.get());
+        if beta > 0.0 {
+            let supervised = self.supervised.borrow();
+            for r in (0..n).filter(|&r| supervised.get(r).copied().unwrap_or(false)) {
+                for (j, ce) in ce_rows.iter_mut().enumerate() {
+                    let pj = f64::from(probs[j][r]).max(f64::MIN_POSITIVE);
+                    loss += beta * pj * pj.ln();
+                    ce[r] += (beta * pj.ln()) as f32;
+                }
+            }
         }
         // dL/dλ_t for every pass but the last, then through the sigmoid. The
         // products are evaluated directly rather than by dividing out
@@ -1059,6 +1091,7 @@ impl model::Model for Ouro {
                     // p_j carries its own λ_j only for j != p; the derivative
                     // w.r.t. λ_p is the product of the other survival factors.
                     let coef = if j == p { 1.0 } else if j + 1 < t { lambda[j][r] } else { 1.0 };
+                    // The pass's cost: its CE, plus the entropy term's `beta * ln p_j` on a supervised row.
                     let term = ce_rows[j][r] as f64 * prod * coef;
                     d += if j == p { term } else { -term };
                 }

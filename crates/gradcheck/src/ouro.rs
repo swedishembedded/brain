@@ -22,16 +22,23 @@ use crate::{directional_check, Report};
 /// Build the tiny Ouro, set a fixed causal-LM batch, and gradient-check every
 /// parameter. Returns the report.
 pub fn check_ouro(seed: u64) -> Report {
+    check_ouro_exit_entropy(seed, 0.0)
+}
+
+/// [`check_ouro`] with the exit-entropy term at weight `beta` ([`model::Model::set_exit_entropy`]) and a third of
+/// the positions unsupervised, so the term counts only the rows the task loss counts.
+pub fn check_ouro_exit_entropy(seed: u64, beta: f32) -> Report {
     use ouro::model::Ouro;
     use ouro::OuroConfig;
 
     let cfg = OuroConfig::tiny();
     let init = ouro::init::init_weights(&cfg, seed);
-    let model = Ouro::new_train(cfg, 2, 4, &init);
+    let mut model = Ouro::new_train(cfg, 2, 4, &init);
+    model::Model::set_exit_entropy(&mut model, beta).expect("ouro takes an exit-entropy weight");
     // Causal-LM targets: next token in the row, last position masked. The two
     // rows use different residues so no row is a copy of the other.
     let x: Vec<u32> = (0..8).map(|i| (i * 7 + 1) % 29).collect();
-    let y: Vec<u32> = (0..8).map(|i| (i * 7 + 2) % 29).collect();
+    let y: Vec<u32> = (0..8).map(|i| if beta > 0.0 && i % 3 == 1 { ouro::model::IGNORE } else { (i * 7 + 2) % 29 }).collect();
     model::Model::set_batch(&model, model::Batch::Lm { tokens: &x, targets: &y });
     directional_check(&model, 1e-3, 8, seed ^ 0x0_0A0)
 }

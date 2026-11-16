@@ -106,7 +106,7 @@ pub mod ouro;
 
 /// `check_ricursive` / `check_ricursive_folded` (src/ricursive.rs) - the Ripple training graph.
 pub mod ricursive;
-pub use ouro::check_ouro;
+pub use ouro::{check_ouro, check_ouro_exit_entropy};
 pub mod spectrallm;
 pub use spectrallm::check_spectrallm;
 pub mod huginn;
