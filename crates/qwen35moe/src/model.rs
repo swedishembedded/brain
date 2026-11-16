@@ -353,6 +353,8 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
         let missing: Vec<_> = model::ops::store_device_kernels().iter().filter(|(n, _)| !v.iter().any(|(m, _)| m == n)).copied().collect();
         v.extend(missing);
         v.push(("matmul_gemv", kernels::MATMUL_GEMV));
+        // The int8 embedding table's gather (`embed_table_i8`).
+        v.push(("embed_i8", kernels::EMBED_I8));
         v.push(("matmul_reg2", kernels::MATMUL_REG3));
         v.push(("matmul_i8_gemv", kernels::MATMUL_I8_GEMV));
         v.push(("matmul_q4_dyn", kernels::MATMUL_Q4_DYN));
@@ -1309,6 +1311,14 @@ pub(crate) struct DecodeCaches<'a> {
     pub gdn_hist: &'a [DeviceBuffer],
 }
 
+/// Whether a build holds the embedding table as a group-wise int8 weight instead of fp32: an inference build whose
+/// policy puts the table at int8 and whose head is not the same tensor (a tied head reads the fp32 table). The gather
+/// reads the int8 values exactly (`Ops::embed`), a GGUF's stored Q8_0 table unchanged; the fp32 expansion was 4x the
+/// bytes. [`crate::serve::weight_bytes`] charges what this decides.
+pub fn embed_table_i8(cfg: &Qwen35Config, tier: &TierPolicy, train: bool) -> bool {
+    !train && cfg.head_weight() != "tok.weight" && tier.want("tok.weight") == Dtype::I8
+}
+
 /// The parameter subset a shard holds. A whole shard returns `cfg.param_list()`
 /// verbatim (so the single-device store is byte-identical). A partial shard
 /// keeps only its layers' weights, plus `tok.weight` when it embeds and/or
@@ -1536,10 +1546,13 @@ impl Qwen35 {
         // mutually exclusive (the `assert!` above), so `i8` and
         // `cfg.lora.is_some()` never both hold here.
         let layer_of = |name: &str| model::streamed::blocks_layer(name).filter(|&l| shard.owns(l as usize));
+        // An int8 inference build holds the embedding table int8 too (`embed_table_i8`), never in the fp32 store.
+        let table_i8 = i8_on && embed_table_i8(&cfg, tier, train);
         let roles: Vec<(String, usize, Role)> = shard_param_list(&cfg, &shard)
             .into_iter()
             .filter(|(n, _)| {
-                !quant(n)
+                !(table_i8 && n == "tok.weight")
+                    && !quant(n)
                     && !stored_quant(n)
                     && !(nv_on && Qwen35Nv::holds(n))
                     && !(shared_in_bank
@@ -1698,6 +1711,16 @@ impl Qwen35 {
             upload(UNTIED_HEAD.to_string(), cfg.vocab as usize, cfg.d_model as usize);
         }
 
+        if table_i8 && shard.embed {
+            // `quantize_from` repacks a stored Q8_0 table byte for byte, so the rows gathered are the stored values.
+            let (vocab, d_u) = (cfg.vocab as usize, cfg.d_model as usize);
+            let (packed, scales) = model::int8::quantize_from(src, "tok.weight", vocab, d_u).unwrap_or_else(|| panic!("qwen35moe: missing init weight tok.weight"));
+            let w = gpu.storage(packed.len() as u64);
+            gpu.write(&w, &packed);
+            let sw = gpu.storage_init("qwen35moe.tok_scales", &scales);
+            weights.insert("tok.weight".to_string(), Weight::from_packed_int8(w, sw, vocab, d_u));
+        }
+
         let n = (b * t) as u64;
         let d = cfg.d_model as u64;
         let mut res = Vec::with_capacity(cfg.n_layers as usize + 1);
@@ -1829,6 +1852,19 @@ impl Qwen35 {
 
     fn w(&self, name: &str) -> &DeviceBuffer {
         self.ps.w(name)
+    }
+
+    /// The gather of `n` token rows of the embedding into `out`: from the int8 table an int8 inference build holds
+    /// ([`embed_table_i8`]), else from the fp32 store.
+    fn embed_steps(&self, tokens: &DeviceBuffer, n: u32, out: &DeviceBuffer) -> Vec<Step> {
+        match self.weights.get("tok.weight") {
+            Some(table) => {
+                let mut s = Vec::new();
+                self.ops.embed(&mut s, table, tokens, n, out);
+                s
+            }
+            None => vec![self.gpu.step(EMBED, &[tokens, self.w("tok.weight"), out], &[self.cfg.d_model, n], n * self.cfg.d_model)],
+        }
     }
 
     /// True if `name` has a gradient buffer (i.e. is optimised). Frozen
@@ -2892,7 +2928,7 @@ impl Qwen35 {
         let mut layer_acts: Vec<LayerTrainActs> = Vec::new();
 
         if self.shard.embed {
-            g.submit(&[], &[g.step(EMBED, &[&self.tokens, self.w("tok.weight"), &self.res[0]], &[d, n], n * d)]);
+            g.submit(&[], &self.embed_steps(&self.tokens, n, &self.res[0]));
 
             // Vision-language splice: overwrite the image-placeholder rows of
             // the freshly-gathered residual stream with the projected image
@@ -3662,7 +3698,7 @@ impl Qwen35 {
         let c = &self.cfg;
         let d = c.d_model;
         let mut res = g.storage((bsz * d) as u64);
-        g.submit(&[], &[g.step(EMBED, &[&meta.tokens, self.w("tok.weight"), &res], &[d, bsz], bsz * d)]);
+        g.submit(&[], &self.embed_steps(&meta.tokens, bsz, &res));
 
         let paged = model::gqa_mixer::PagedDecodeBatch {
             blocks: &meta.blocks,
@@ -3921,7 +3957,7 @@ impl Qwen35 {
         let tok_buf = g.storage(n as u64);
         g.write(&tok_buf, tokens);
         let mut res = g.storage((n * d) as u64);
-        g.submit(&[], &[g.step(EMBED, &[&tok_buf, self.w("tok.weight"), &res], &[d, n], n * d)]);
+        g.submit(&[], &self.embed_steps(&tok_buf, n, &res));
 
         // Built ONCE per round, shared by every GQA layer in it: the round's
         // own M-RoPE table (absolute positions), its causal `seq_lens`, and the

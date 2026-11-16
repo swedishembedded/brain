@@ -389,3 +389,19 @@ Both are prefill-bound at this shape (about 9.6K prompt tokens/s each, 64 x 8K p
 each), so concurrency 64 adds queueing, not rate. The MoE reaches its first token sooner at the median and stalls decode
 longer behind each 8K prefill (inter-token p95 689 against 303 ms; the dense engine has mixed prefill-and-decode rounds,
 the MoE engine none). The MoE's 20 % idle is the admission path above.
+
+## Device memory (2026-11-16)
+
+GH200 gpu3, `perf run longctx --target qwen35moe:<Q8_0 gguf> --context 32768 --ladder 1,512 --steps 2`, fp32 KV,
+base/new interleaved; plan and used at batch 1, admitted = the largest batch the planner admits at 32K:
+
+| step | plan GiB | used GiB | admitted at 32K |
+|---|---|---|---|
+| main fb111dbaf | 42.1 | 41.0 | 39 |
+| embedding table held int8 (`embed_table_i8`, `Ops::embed` over `embed_i8`) | 40.7 | 39.6 | 40 |
+
+- [ ] Smaller holders found by the audit, left: the model's own fp32 `logits` (64 rows x vocab, 64 MB), its
+      single-sequence decode state (68 MB), the per-layer `res` (41 x 64 rows, 21 MB), the backward boundary buffers
+      (1 MB) - none read by the serving engine.
+- [ ] The KV pool reserves a whole context per sequence (`block_size == max_seq_len`); the dense engine's paged pool
+      does not.

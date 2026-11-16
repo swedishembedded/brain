@@ -249,6 +249,9 @@ mod kname {
     pub const EMBED_TILE: &str = "embed_tile";
     pub const EMBED_TILE_BF16: &str = "embed_tile#emb=bf16";
     pub const EMBED_TILE_F16: &str = "embed_tile#emb=f16";
+    /// The gather from a group-wise int8 table (`model::int8`'s layout). Not in [`ALL`]: only a model that holds an
+    /// int8 table registers it, and [`super::Ops::embed`] looks it up by name.
+    pub const EMBED_I8: &str = "embed_i8";
     pub const MOE_LINEAR_GATED: &str = "moe_linear_gated";
     pub const MOE_LINEAR_GATED_BF16: &str = "moe_linear_gated#w=bf16";
     pub const MOE_LINEAR_GATED_F16: &str = "moe_linear_gated#w=f16";
@@ -475,6 +478,7 @@ pub fn kernel_list() -> &'static [(&'static str, &'static str)] {
             bf16_embed,
             f16_embed,
             ("embed_tile", kernels::EMBED_TILE),
+            ("embed_i8", kernels::EMBED_I8),
             bf16_embed_tile,
             f16_embed_tile,
             ("moe_linear_gated", kernels::MOE_LINEAR_GATED),
@@ -2460,9 +2464,10 @@ impl Ops {
             Dtype::F32 => kname::EMBED,
             Dtype::BF16 => kname::EMBED_BF16,
             Dtype::F16 => kname::EMBED_F16,
+            Dtype::I8 => kname::EMBED_I8,
             other => panic!(
-                "Ops::embed: no embed kernel for dtype {other:?} -- only F32/BF16/F16 embedding \
-                 tables are implemented (no embed_i8/embed_q4 kernel exists in this tree)"
+                "Ops::embed: no embed kernel for dtype {other:?} -- only F32/BF16/F16 and group-wise I8 embedding \
+                 tables are implemented"
             ),
         }
     }
@@ -2486,8 +2491,8 @@ impl Ops {
     pub fn embed(&self, s: &mut Vec<Step>, table: &Weight, tokens: &DeviceBuffer, seq_len: u32, out: &DeviceBuffer) {
         let d_model = table.k();
         let dt = table.dtype();
-        // `bind_embed` already panics loudly for `I8`/`Q4` before the match
-        // below is ever reached, so those two arms there are unreachable by
+        // `bind_embed` already panics loudly for `Q4` and the other packed tiers before the match
+        // below is ever reached, so those arms there are unreachable by
         // construction, not merely by convention.
         // Resolved HERE, not inside the closure: `bind_embed` is what panics
         // by name for a dtype with no embed kernel, and the provider calls
@@ -2540,7 +2545,15 @@ impl Ops {
                 let mut ctx = LowerCtx { gpu: &self.gpu, caps: &self.caps, steps: s, capture: false };
                 self.providers.dispatch(&mut ctx, &req);
             }
-            Weight::I8 { .. } | Weight::Q4 { .. } | Weight::NF4 { .. } | Weight::KQuant { .. } | Weight::FP8 { .. } | Weight::Micro { .. } | Weight::Cq { .. } => {
+            // Each row is `model::int8::dequantize_weight`'s: `f32(q) * s` for its group scale. An int8 table is a quarter
+            // of an fp32 one and gathers the same values (bit for bit a GGUF Q8_0 table repacked by
+            // `model::int8::quantize_from`), so it takes no tiling: 2 GB of fp32 rows are 0.5 GB here.
+            Weight::I8 { w, s: scales, .. } => {
+                assert!(d_model.is_multiple_of(crate::int8::GROUP as u32), "Ops::embed: an int8 table row of {d_model} elements is not whole groups");
+                let kind = self.gpu.kernel_index(kname).unwrap_or_else(|| panic!("Ops::embed: an int8 table needs the '{kname}' kernel registered on this Gpu (`kernels::EMBED_I8`)"));
+                s.push(self.gpu.step(kind, &[tokens, w, scales, out], &[d_model, seq_len], seq_len * d_model));
+            }
+            Weight::Q4 { .. } | Weight::NF4 { .. } | Weight::KQuant { .. } | Weight::FP8 { .. } | Weight::Micro { .. } | Weight::Cq { .. } => {
                 unreachable!("Ops::embed: bind_embed already panicked for this dtype above")
             }
         }

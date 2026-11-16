@@ -476,6 +476,8 @@ pub const EMB_BWD_UNIQ: &str = include_str!("../wgsl/emb_bwd_uniq.wgsl");
 pub const EMB_BWD_UNIQ_BF16: &str = include_str!("../wgsl/emb_bwd_uniq_bf16.wgsl");
 /// `wgsl/embed.wgsl`
 pub const EMBED: &str = include_str!("../wgsl/embed.wgsl");
+/// `wgsl/embed_i8.wgsl`
+pub const EMBED_I8: &str = include_str!("../wgsl/embed_i8.wgsl");
 /// `wgsl/embed_tile.wgsl`
 pub const EMBED_TILE: &str = include_str!("../wgsl/embed_tile.wgsl");
 /// `wgsl/entropy_cols.wgsl`
@@ -1940,6 +1942,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("emb_bwd_uniq", EMB_BWD_UNIQ),
     ("emb_bwd_uniq_bf16", EMB_BWD_UNIQ_BF16),
     ("embed", EMBED),
+    ("embed_i8", EMBED_I8),
     ("embed_tile", EMBED_TILE),
     ("entropy_cols", ENTROPY_COLS),
     ("entropy_dcb", ENTROPY_DCB),

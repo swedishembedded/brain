@@ -402,6 +402,7 @@ pub fn weight_bytes(cfg: &Qwen35Config, tier: &TierPolicy) -> u64 {
         .map(|(name, count)| {
             let linear = Qwen35Q8::is_i8_linear(&name)
                 || name == "lm_head.weight"
+                || (name == "tok.weight" && crate::model::embed_table_i8(cfg, tier, false))
                 || (shared_in_banks && Qwen35Q8::is_shared_expert_linear(&name));
             let bytes_per_weight_x8 = if linear && tier.want(&name) == Dtype::I8 { 9 } else { 32 };
             count as u64 * bytes_per_weight_x8 / 8

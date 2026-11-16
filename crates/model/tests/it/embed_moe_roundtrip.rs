@@ -328,3 +328,43 @@ fn moe_linear_bf16_and_f16_match_f32_reference_on_gpu() {
         check_moe_linear(gpu, dt, 12, 20, 16, 4, 2, 0x0E0E ^ dt as u64, &format!("gpu/moe_linear/{dt:?}"));
     }
 }
+
+// ------------------------------------------------------------- embed_i8 ---
+
+/// A group-wise int8 table gathers, bit for bit, the rows `model::int8::dequantize_weight` expands it to: the values a
+/// served model's fp32 table held when it was dequantized on the host, at a quarter of the bytes.
+fn check_embed_i8(gpu: Gpu, what: &str) {
+    let (vocab, d) = (97usize, 64usize);
+    let mut r = Lcg::new(0xE3B8);
+    let table: Vec<f32> = (0..vocab * d).map(|_| 3.0 * r.signed()).collect();
+    let (packed, scales) = model::int8::quantize_weight(&table, vocab, d);
+    let want_table = model::int8::dequantize_weight(&packed, &scales, vocab, d);
+    let tokens: Vec<u32> = (0..19).map(|i| ((i * 37 + 5) % vocab) as u32).collect();
+    let ops = Ops::new(gpu.share()).expect("Ops::new");
+    let (w, s) = (gpu.storage(packed.len() as u64), gpu.storage_init("scales", &scales));
+    gpu.write(&w, &packed);
+    let weight = Weight::from_packed_int8(w, s, vocab, d);
+    let tok = gpu.storage(tokens.len() as u64);
+    gpu.write(&tok, &tokens);
+    let out = gpu.storage((tokens.len() * d) as u64);
+    let mut steps = Vec::new();
+    ops.embed(&mut steps, &weight, &tok, tokens.len() as u32, &out);
+    gpu.submit(&[], &steps);
+    let got = gpu.read(&out, tokens.len() * d);
+    let want = host_embed(&tokens, &want_table, tokens.len(), d);
+    assert_eq!(got.iter().map(|v| v.to_bits()).collect::<Vec<_>>(), want.iter().map(|v| v.to_bits()).collect::<Vec<_>>(), "{what}: int8 rows differ from their dequantized values");
+}
+
+#[test]
+fn embed_i8_gathers_the_dequantized_rows_on_cpu() {
+    check_embed_i8(Gpu::new_cpu(kernel_list()), "cpu/embed_i8");
+}
+
+#[test]
+fn embed_i8_gathers_the_dequantized_rows_on_gpu() {
+    let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    if skip_gpu() {
+        return;
+    }
+    check_embed_i8(gpu_core::testgpu::dev(kernel_list()), "gpu/embed_i8");
+}

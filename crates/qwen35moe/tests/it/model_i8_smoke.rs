@@ -359,9 +359,10 @@ fn int8_model_excludes_quantized_names_from_the_fp32_param_store() {
     let fp32_names = fp32.param_names();
     let i8_names = i8.param_names();
     // An untied `lm_head.weight` is int8 too (the decode pass reads it once per
-    // token); a tied head is the embedding table and stays fp32.
+    // token), and so is the embedding table it then does not share; a tied head
+    // is the embedding table and stays fp32.
     let untied_head = cfg.head_weight() == "lm_head.weight";
-    let quantized = |n: &str| Qwen35Q8::is_i8_linear(n) || (untied_head && n == "lm_head.weight");
+    let quantized = |n: &str| Qwen35Q8::is_i8_linear(n) || (untied_head && (n == "lm_head.weight" || n == "tok.weight"));
     let quantized_count = fp32_names.iter().filter(|n| quantized(n)).count();
     assert!(quantized_count > 0, "tiny_i8_cfg must have at least one quantized linear to make this check meaningful");
     assert_eq!(i8_names.len(), fp32_names.len() - quantized_count);
