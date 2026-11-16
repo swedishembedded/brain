@@ -28,16 +28,18 @@ fn bin() -> String {
 }
 
 fn run(args: &[&str]) -> std::process::Output {
-    Command::new(bin())
-        .args(args)
-        .stdin(Stdio::null())
-        .args(["--device", "cpu"])
-        // These tests pin the CPU device. An ambient backend choice (a CUDA
-        // lane exporting BRAIN_BACKEND) would make the binary warn that the
-        // backend needs a GPU, which is not what is under test.
-        .env_remove("BRAIN_BACKEND")
-        .output()
-        .unwrap_or_else(|e| panic!("run brain {args:?}: {e}"))
+    // Every command here answers and exits (help, a refusal, a status); the deadline turns one that starts serving
+    // instead into a failure naming what it printed, not a hung suite.
+    brain_testutil::output_within(
+        Command::new(bin())
+            .args(args)
+            .args(["--device", "cpu"])
+            // These tests pin the CPU device. An ambient backend choice (a CUDA
+            // lane exporting BRAIN_BACKEND) would make the binary warn that the
+            // backend needs a GPU, which is not what is under test.
+            .env_remove("BRAIN_BACKEND"),
+        std::time::Duration::from_secs(120),
+    )
 }
 
 #[test]
@@ -447,11 +449,17 @@ fn a_bad_serving_policy_value_names_its_flag_and_exits_2() {
 
 #[test]
 fn a_policy_no_served_family_can_honour_is_refused_naming_the_families() {
-    // The Qwen3 engine has no f16 weights and the Qwen3.8 resident has no --gemm.
-    let out = run(&["serve", "--weight-format", "f16", "--gemm", "fp32"]);
-    assert_eq!(out.status.code(), Some(2));
+    // Qwen3 keeps no GDN state; the Qwen3.5 residents, Ricursive and the OCR server take no --gemm or no GDN state.
+    // Against an empty store of its own, so what the host has pulled cannot change the answer.
+    let dir = Scratch::dir("brain-serve-cli-policy-refused");
+    let (models, runtime) = (dir.join("models"), dir.join("run"));
+    std::fs::create_dir_all(&models).unwrap();
+    let args = ["serve", "--gdn-state", "bf16", "--gemm", "fp32", "--models-dir", models.to_str().unwrap(), "--runtime-dir", runtime.to_str().unwrap()];
+    let out = run(&args);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("qwen3") && stderr.contains("qwen35") && stderr.contains("supported"), "stderr:\n{stderr}");
+    assert_eq!(out.status.code(), Some(2), "stderr:\n{stderr}");
+    assert!(stderr.contains("no served model family can honour"), "stderr:\n{stderr}");
+    assert!(stderr.contains("qwen3:") && stderr.contains("qwen35:") && stderr.contains("not supported"), "stderr:\n{stderr}");
 }
 
 #[test]
