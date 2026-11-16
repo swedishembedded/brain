@@ -6,7 +6,7 @@
 // batched, paged-KV serving stack run at memory bandwidth, then you can procure
 // our services by sending an email to info@swedishembedded.com.
 //
-// Batched paged-KV decode attention at head_dim 128: one query token per
+// Batched paged-KV decode attention at head_dim 128 (or 64: `BRAIN_HD`, fp32 pools): one query token per
 // sequence attends its whole cached context, for 2..32+ sequences at once. The
 // CUDA form of the triad `paged_decode_scores_batched` -> `decode_softmax_batched` ->
 // `paged_decode_apply_batched` (and their int8-KV twins) in ONE launch, with the
@@ -19,7 +19,7 @@
 //   block_tables : [bsz, max_bt] u32     seq_lens : [bsz] u32 (live keys of each sequence)
 //   ctx          : [bsz, n_heads * 128]                         f32
 //
-// head_dim must be 128 and group (n_heads / n_kv_heads) at most 8; the caller checks.
+// head_dim must be BRAIN_HD and group (n_heads / n_kv_heads) at most 8; the caller checks.
 //
 // Structure. A block is one (sequence, kv head): its `group` query heads share every K and V row they read, so the
 // pool is streamed once per kv head, not once per query head as the triad does. The block is 8 warps; the warps
@@ -39,7 +39,23 @@
 #define BRAIN_KV_INT8 0
 #endif
 
-#define HD 128
+// The head width, 128 unless the including source defines 64 first; a lane owns CPL = HD / 32 contiguous channels
+// of every row it reads (4 at 128, 2 at 64), so a warp reads one key row per step at either width.
+#ifndef BRAIN_HD
+#define BRAIN_HD 128
+#endif
+#define HD BRAIN_HD
+#define CPL (HD / 32)
+#if HD == 128
+#define QSCALE (0.08838834764831845f * LOG2E)   // 1/sqrt(128), into the exp2 domain
+#elif HD == 64
+#define QSCALE (0.125f * LOG2E)                 // 1/sqrt(64)
+#else
+#error "BRAIN_HD must be 64 or 128"
+#endif
+#if BRAIN_KV_INT8 && HD != 128
+#error "the int8 pool is read four bytes a lane: head_dim 128 only"
+#endif
 #define THREADS 256
 #define WARPS 8
 #define MAXG 8
@@ -52,16 +68,29 @@ typedef signed char KvT;
 typedef float KvT;
 #endif
 
-// Four channels of a key or value row for lane `lane`, as floats (an int8 plane multiplied by its row scale).
-__device__ __forceinline__ float4 brain_load4(const KvT* row, unsigned int lane, float scale) {
+// A lane's CPL channels of one row.
+struct Ch {
+    float v[CPL];
+};
+
+// Lane `lane`'s channels of a key or value row, as floats (an int8 plane multiplied by its row scale).
+__device__ __forceinline__ Ch brain_load(const KvT* row, unsigned int lane, float scale) {
+    Ch c;
 #if BRAIN_KV_INT8
     const int w = *reinterpret_cast<const int*>(row + lane * 4u);
-    return make_float4(static_cast<float>(static_cast<signed char>(w & 0xff)) * scale, static_cast<float>(static_cast<signed char>((w >> 8) & 0xff)) * scale,
-                       static_cast<float>(static_cast<signed char>((w >> 16) & 0xff)) * scale, static_cast<float>(static_cast<signed char>((w >> 24) & 0xff)) * scale);
+#pragma unroll
+    for (int i = 0; i < 4; ++i) { c.v[i] = static_cast<float>(static_cast<signed char>((w >> (8 * i)) & 0xff)) * scale; }
 #else
     (void)scale;
-    return *reinterpret_cast<const float4*>(row + lane * 4u);
+#if CPL == 4
+    const float4 x = *reinterpret_cast<const float4*>(row + lane * 4u);
+    c.v[0] = x.x; c.v[1] = x.y; c.v[2] = x.z; c.v[3] = x.w;
+#else
+    const float2 x = *reinterpret_cast<const float2*>(row + lane * 2u);
+    c.v[0] = x.x; c.v[1] = x.y;
 #endif
+#endif
+    return c;
 }
 
 #if BRAIN_KV_INT8
@@ -93,25 +122,27 @@ extern "C" __global__ void __launch_bounds__(THREADS) brain_decode_attn_batched(
     const unsigned int len = seq_lens[seq];
     const unsigned long long q_row = (unsigned long long)n_heads * HD;
     const unsigned long long kv_row = (unsigned long long)n_kv_heads * HD;
-    const float qscale = 0.08838834764831845f * LOG2E;   // 1/sqrt(128), into the exp2 domain
 
-    // This lane's 4 query channels of each head of the group.
-    float4 qv[MAXG];
+    // This lane's query channels of each head of the group, scaled into the exp2 domain.
+    Ch qv[MAXG];
 #pragma unroll
     for (int g = 0; g < MAXG; ++g) {
-        qv[g] = make_float4(0.f, 0.f, 0.f, 0.f);
+#pragma unroll
+        for (int i = 0; i < CPL; ++i) { qv[g].v[i] = 0.f; }
         if (static_cast<unsigned int>(g) < group) {
-            const float4 x = *reinterpret_cast<const float4*>(q + seq * q_row + (hkv * group + g) * HD + lane * 4u);
-            qv[g] = make_float4(x.x * qscale, x.y * qscale, x.z * qscale, x.w * qscale);
+            const float* qp = q + seq * q_row + (hkv * group + g) * HD + lane * CPL;
+#pragma unroll
+            for (int i = 0; i < CPL; ++i) { qv[g].v[i] = qp[i] * QSCALE; }
         }
     }
     float m[MAXG], l[MAXG];
-    float4 acc[MAXG];
+    Ch acc[MAXG];
 #pragma unroll
     for (int g = 0; g < MAXG; ++g) {
         m[g] = NEG_BIG;
         l[g] = 0.f;
-        acc[g] = make_float4(0.f, 0.f, 0.f, 0.f);
+#pragma unroll
+        for (int i = 0; i < CPL; ++i) { acc[g].v[i] = 0.f; }
     }
 
     const unsigned int* bt = block_tables + (unsigned long long)seq * max_bt;
@@ -124,12 +155,14 @@ extern "C" __global__ void __launch_bounds__(THREADS) brain_decode_attn_batched(
 #else
         const float sk = 1.f, sv = 1.f;
 #endif
-        const float4 kk = brain_load4(kp, lane, sk);
-        const float4 vv = brain_load4(vp, lane, sv);
+        const Ch kk = brain_load(kp, lane, sk);
+        const Ch vv = brain_load(vp, lane, sv);
 #pragma unroll
         for (int g = 0; g < MAXG; ++g) {
             if (static_cast<unsigned int>(g) >= group) { break; }
-            float s = qv[g].x * kk.x + qv[g].y * kk.y + qv[g].z * kk.z + qv[g].w * kk.w;
+            float s = 0.f;
+#pragma unroll
+            for (int i = 0; i < CPL; ++i) { s += qv[g].v[i] * kk.v[i]; }
 #pragma unroll
             for (int o = 16; o > 0; o >>= 1) { s += __shfl_xor_sync(0xffffffffu, s, o); }
             const float mn = fmaxf(m[g], s);
@@ -137,45 +170,45 @@ extern "C" __global__ void __launch_bounds__(THREADS) brain_decode_attn_batched(
             const float p = exp2f(s - mn);
             m[g] = mn;
             l[g] = l[g] * corr + p;
-            acc[g].x = acc[g].x * corr + p * vv.x;
-            acc[g].y = acc[g].y * corr + p * vv.y;
-            acc[g].z = acc[g].z * corr + p * vv.z;
-            acc[g].w = acc[g].w * corr + p * vv.w;
+#pragma unroll
+            for (int i = 0; i < CPL; ++i) { acc[g].v[i] = acc[g].v[i] * corr + p * vv.v[i]; }
         }
     }
 
     // Merge the 8 warps' states: M = max m, L = sum l 2^(m - M), O = sum acc 2^(m - M) / L.
     __shared__ float sm_m[WARPS][MAXG];
     __shared__ float sm_l[WARPS][MAXG];
-    __shared__ float4 sm_acc[WARPS][MAXG][32];
+    __shared__ float sm_acc[WARPS][MAXG][HD];
 #pragma unroll
     for (int g = 0; g < MAXG; ++g) {
         if (lane == 0u) {
             sm_m[warp][g] = m[g];
             sm_l[warp][g] = l[g];
         }
-        sm_acc[warp][g][lane] = acc[g];
+#pragma unroll
+        for (int i = 0; i < CPL; ++i) { sm_acc[warp][g][lane * CPL + i] = acc[g].v[i]; }
     }
     __syncthreads();
-    // Thread (g, c4): head g of the group, channels 4 c4 .. 4 c4 + 3.
+    // Thread (g, c): head g of the group, channels CPL c .. CPL c + CPL - 1.
     for (unsigned int t = tid; t < group * 32u; t += THREADS) {
-        const unsigned int g = t / 32u, c4 = t % 32u;
+        const unsigned int g = t / 32u, c = t % 32u;
         float big = NEG_BIG;
 #pragma unroll
         for (int w = 0; w < WARPS; ++w) { big = fmaxf(big, sm_m[w][g]); }
         float lsum = 0.f;
-        float4 o = make_float4(0.f, 0.f, 0.f, 0.f);
+        float o[CPL];
+#pragma unroll
+        for (int i = 0; i < CPL; ++i) { o[i] = 0.f; }
 #pragma unroll
         for (int w = 0; w < WARPS; ++w) {
             const float f = sm_l[w][g] > 0.f ? exp2f(sm_m[w][g] - big) : 0.f;
             lsum += sm_l[w][g] * f;
-            const float4 a = sm_acc[w][g][c4];
-            o.x += a.x * f;
-            o.y += a.y * f;
-            o.z += a.z * f;
-            o.w += a.w * f;
+#pragma unroll
+            for (int i = 0; i < CPL; ++i) { o[i] += sm_acc[w][g][c * CPL + i] * f; }
         }
         const float inv = lsum > 0.f ? 1.0f / lsum : 0.f;
-        *reinterpret_cast<float4*>(ctx + seq * q_row + (hkv * group + g) * HD + c4 * 4u) = make_float4(o.x * inv, o.y * inv, o.z * inv, o.w * inv);
+        float* out = ctx + seq * q_row + (hkv * group + g) * HD + c * CPL;
+#pragma unroll
+        for (int i = 0; i < CPL; ++i) { out[i] = o[i] * inv; }
     }
 }

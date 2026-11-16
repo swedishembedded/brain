@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! The native batched paged-KV decode attention (head_dim 128, int8 and fp32 pools) agrees with an f64 host oracle
+//! The native batched paged-KV decode attention (head_dim 128 with int8 and fp32 pools, 64 with fp32) agrees with an f64 host oracle
 //! over several sequences of ragged lengths read through scattered block tables, at Qwen3's group sizes (4 query
 //! heads per kv head, and 2 and 1), and is declined for one sequence (the split-key kernel owns that) and for other
 //! head widths.
@@ -16,7 +16,6 @@
 use gpu_core::provider::cuda::paged_decode_batched_step;
 use gpu_core::Gpu;
 
-const HD: usize = 128;
 const BS: u32 = 16;
 
 struct Rng(u64);
@@ -45,7 +44,7 @@ fn open() -> Option<Gpu> {
     }
 }
 
-fn run(gpu: &Gpu, int8: bool, n_heads: usize, n_kv: usize, lens: &[u32], seed: u64) {
+fn run(gpu: &Gpu, int8: bool, hd: usize, n_heads: usize, n_kv: usize, lens: &[u32], seed: u64) {
     let what = format!("{} heads {n_heads}/{n_kv} lens {lens:?}", if int8 { "int8" } else { "fp32" });
     let group = n_heads / n_kv;
     let bsz = lens.len();
@@ -55,8 +54,8 @@ fn run(gpu: &Gpu, int8: bool, n_heads: usize, n_kv: usize, lens: &[u32], seed: u
     let blocks = bsz * max_bt + 3;
     let mut r = Rng(seed);
     let rows = blocks * BS as usize;
-    let kv_row = n_kv * HD;
-    let q: Vec<f32> = (0..bsz * n_heads * HD).map(|_| r.gauss()).collect();
+    let kv_row = n_kv * hd;
+    let q: Vec<f32> = (0..bsz * n_heads * hd).map(|_| r.gauss()).collect();
     let kf: Vec<f32> = (0..rows * kv_row).map(|_| r.gauss()).collect();
     let vf: Vec<f32> = (0..rows * kv_row).map(|_| r.gauss()).collect();
     let tables: Vec<u32> = (0..bsz).flat_map(|b| (0..max_bt).map(move |i| (blocks - 1 - (i * bsz + b)) as u32)).collect();
@@ -65,13 +64,13 @@ fn run(gpu: &Gpu, int8: bool, n_heads: usize, n_kv: usize, lens: &[u32], seed: u
         let (mut words, mut scales, mut deq) = (Vec::new(), vec![0f32; rows * n_kv], vec![0f32; plane.len()]);
         let mut codes = vec![0i8; plane.len()];
         for rr in 0..rows * n_kv {
-            let row = &plane[rr * HD..(rr + 1) * HD];
+            let row = &plane[rr * hd..(rr + 1) * hd];
             let s = row.iter().fold(0f32, |m, x| m.max(x.abs())) / 127.0;
             scales[rr] = s;
-            for d in 0..HD {
+            for d in 0..hd {
                 let c = (row[d] / s).round().clamp(-127.0, 127.0);
-                codes[rr * HD + d] = c as i8;
-                deq[rr * HD + d] = c * s;
+                codes[rr * hd + d] = c as i8;
+                deq[rr * hd + d] = c * s;
             }
         }
         for c in codes.chunks(4) {
@@ -85,8 +84,8 @@ fn run(gpu: &Gpu, int8: bool, n_heads: usize, n_kv: usize, lens: &[u32], seed: u
         b
     };
     let (qb, bt, lb) = (gpu.storage_init("q", &q), words(&tables), words(lens));
-    let ctx = gpu.storage((bsz * n_heads * HD) as u64);
-    let params = [bsz as u32, n_heads as u32, n_kv as u32, HD as u32, group as u32, BS, max_bt as u32];
+    let ctx = gpu.storage((bsz * n_heads * hd) as u64);
+    let params = [bsz as u32, n_heads as u32, n_kv as u32, hd as u32, group as u32, BS, max_bt as u32];
     // The device buffers stay alive in `_pool` while the step runs.
     let (step, _pool, k_seen, v_seen) = if int8 {
         let ((kw, kscale, kd), (vw, vscale, vd)) = (quant(&kf), quant(&vf));
@@ -99,25 +98,25 @@ fn run(gpu: &Gpu, int8: bool, n_heads: usize, n_kv: usize, lens: &[u32], seed: u
         (step, vec![k, v], kf.clone(), vf.clone())
     };
     let step = step.expect("the native batched decode attention takes this shape");
-    gpu.write(&ctx, &vec![0x7fc0_0000u32; bsz * n_heads * HD]);
+    gpu.write(&ctx, &vec![0x7fc0_0000u32; bsz * n_heads * hd]);
     gpu.submit(&[], &[step]);
     gpu.poll_wait();
-    let got = gpu.read(&ctx, bsz * n_heads * HD);
+    let got = gpu.read(&ctx, bsz * n_heads * hd);
     let rms = (got.iter().map(|x| x * x).sum::<f32>() / got.len() as f32).sqrt();
     assert!(got.iter().all(|x| x.is_finite()), "{what}: non-finite output");
     for b in 0..bsz {
         for h in 0..n_heads {
             let hkv = h / group;
             let len = lens[b] as usize;
-            let qv = &q[(b * n_heads + h) * HD..][..HD];
+            let qv = &q[(b * n_heads + h) * hd..][..hd];
             let row_of = |j: usize| tables[b * max_bt + j / BS as usize] as usize * BS as usize + j % BS as usize;
-            let scores: Vec<f64> = (0..len).map(|j| (0..HD).map(|d| qv[d] as f64 * k_seen[row_of(j) * kv_row + hkv * HD + d] as f64).sum::<f64>() / (HD as f64).sqrt()).collect();
+            let scores: Vec<f64> = (0..len).map(|j| (0..hd).map(|d| qv[d] as f64 * k_seen[row_of(j) * kv_row + hkv * hd + d] as f64).sum::<f64>() / (hd as f64).sqrt()).collect();
             let mx = scores.iter().cloned().fold(f64::MIN, f64::max);
             let w: Vec<f64> = scores.iter().map(|s| (s - mx).exp()).collect();
             let z: f64 = w.iter().sum();
-            for d in 0..HD {
-                let truth: f64 = (0..len).map(|j| w[j] * v_seen[row_of(j) * kv_row + hkv * HD + d] as f64).sum::<f64>() / z;
-                let err = (got[(b * n_heads + h) * HD + d] as f64 - truth).abs();
+            for d in 0..hd {
+                let truth: f64 = (0..len).map(|j| w[j] * v_seen[row_of(j) * kv_row + hkv * hd + d] as f64).sum::<f64>() / z;
+                let err = (got[(b * n_heads + h) * hd + d] as f64 - truth).abs();
                 assert!(err <= 2e-4 * rms as f64 + 1e-6, "{what}: seq {b} head {h} channel {d} is {err:e} from the f64 oracle (rms {rms:e})");
             }
         }
@@ -128,18 +127,24 @@ fn run(gpu: &Gpu, int8: bool, n_heads: usize, n_kv: usize, lens: &[u32], seed: u
 fn the_batched_decode_attention_matches_the_f64_oracle() {
     let Some(gpu) = open() else { return };
     for int8 in [true, false] {
-        run(&gpu, int8, 32, 8, &[1, 17, 130, 300, 5, 64, 16, 1000], 1);
-        run(&gpu, int8, 16, 8, &[33, 70], 2);
-        run(&gpu, int8, 8, 8, &[200, 9, 2000], 3);
+        run(&gpu, int8, 128, 32, 8, &[1, 17, 130, 300, 5, 64, 16, 1000], 1);
+        run(&gpu, int8, 128, 16, 8, &[33, 70], 2);
+        run(&gpu, int8, 128, 8, 8, &[200, 9, 2000], 3);
     }
+    // A small decoder's 64-wide head over an fp32 pool: plain MHA and a group of four.
+    run(&gpu, false, 64, 4, 4, &[1, 17, 130, 700, 5, 64, 16, 1000], 4);
+    // One sequence: no split-key kernel serves this width, so the batched launch does.
+    run(&gpu, false, 64, 4, 4, &[700], 6);
+    run(&gpu, false, 64, 8, 2, &[33, 2000, 9], 5);
 }
 
 #[test]
-fn one_sequence_and_other_head_widths_are_declined() {
+fn one_sequence_at_head_dim_128_and_other_head_widths_are_declined() {
     let Some(gpu) = open() else { return };
     let b = gpu.storage(1);
     let bufs = [&b, &b, &b, &b, &b, &b];
     assert!(paged_decode_batched_step(&gpu, false, &bufs, &[1, 32, 8, 128, 4, 16, 4]).is_none());
     assert!(paged_decode_batched_step(&gpu, false, &bufs, &[4, 32, 8, 256, 4, 16, 4]).is_none());
+    assert!(paged_decode_batched_step(&gpu, true, &bufs, &[4, 32, 8, 64, 4, 16, 4]).is_none(), "an int8 pool at head_dim 64");
     assert!(paged_decode_batched_step(&gpu, false, &bufs, &[4, 64, 4, 128, 16, 16, 4]).is_none());
 }

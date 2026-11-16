@@ -1941,20 +1941,30 @@ const DECODE_ATTN_I8_BINDINGS: &[BindKind] = &[
     BindKind::StorageReadWrite,
 ];
 
-/// The native batched paged-KV decode attention (one launch for the whole triad) for `head_dim = 128`, or `None`
-/// when the caller should dispatch the portable triad (or the split-key kernel for one sequence).
+/// The native batched paged-KV decode attention (one launch for the whole triad) for `head_dim = 128` (64 over an
+/// fp32 pool), or `None` when the caller should dispatch the portable triad (or the split-key kernel for one
+/// sequence).
 ///
 /// `bufs` is queries, K pool, V pool, [K scales, V scales for an int8 pool,] block tables, sequence lengths,
 /// context; `params` the triad's `[bsz, n_heads, n_kv_heads, head_dim, group, block_size, max_bt]`. `None` means:
-/// the head width is not 128, the group is wider than 8, fewer than two sequences (the split-key kernel owns one),
-/// `cuda` is disabled ([`super::set_disabled_providers`]), the device is below the kernel's floor, or the backend declined it.
+/// the head width is not 128 (or 64 with an fp32 pool), the group is wider than 8, fewer than two sequences at
+/// head_dim 128 (the split-key kernel owns one), `cuda` is disabled ([`super::set_disabled_providers`]), the device is below the
+/// kernel's floor, or the backend declined it.
 pub fn paged_decode_batched_step(gpu: &crate::Gpu, int8: bool, bufs: &[&backend_api::DeviceBuffer], params: &[u32]) -> Option<crate::Step> {
     let &[bsz, _, n_kv, head_dim, group, _, _] = params else { return None };
-    if head_dim != 128 || !(1..=8).contains(&group) || bsz < 2 || super::cuda_disabled() || bufs.len() != if int8 { 8 } else { 6 } {
+    let name = match (head_dim, int8) {
+        (128, true) => "decode_attn_batched_i8",
+        (128, false) => "decode_attn_batched_f32",
+        (64, false) => "decode_attn_batched_f32_hd64",
+        _ => return None,
+    };
+    // At head_dim 128 the split-key kernel owns one sequence; at 64 there is none, and this launch beats the triad.
+    let min_bsz = if head_dim == 128 { 2 } else { 1 };
+    if !(1..=8).contains(&group) || bsz < min_bsz || super::cuda_disabled() || bufs.len() != if int8 { 8 } else { 6 } {
         return None;
     }
     let cc = gpu.caps().arch.compute_capability?;
-    let kernel = kernels_cuda::get(if int8 { "decode_attn_batched_i8" } else { "decode_attn_batched_f32" }).filter(|k| k.min_cc <= cc)?;
+    let kernel = kernels_cuda::get(name).filter(|k| k.min_cc <= cc)?;
     let id = gpu.native_kernel(kernel, if int8 { DECODE_ATTN_I8_BINDINGS } else { PAGED_FLASH_PREFILL_BINDINGS })?;
     let blocks = bsz.checked_mul(n_kv)?;
     gpu.step_native_sliced(id, bufs, &vec![(0, 0); bufs.len()], params, blocks)

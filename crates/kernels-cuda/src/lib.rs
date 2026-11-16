@@ -1333,6 +1333,27 @@ pub const ALL: &[CudaKernel] = &[
         ),
     },
     CudaKernel {
+        name: "decode_attn_batched_f32_hd64",
+        // Asked for by name by `gpu_core::provider::cuda::paged_decode_batched_step`.
+        op: Op::PagedAttentionFused,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_decode_attn_batched_f32_hd64",
+        what: "batched paged-KV decode attention at head_dim 64 over an fp32 pool: one launch per layer for 2 or more sequences, the query heads of a group sharing each K and V read",
+        reported: "native:decode_attn_batched_f32_hd64",
+        block_dim: 256,
+        tile: (1, 1),
+        // Shared: 8 warps x 8 heads x (max, sum) plus the merge tile of 8 x 8 x 64 floats.
+        shared_bytes: 8 * 8 * 4 * 2 + 8 * 8 * 64 * 4,
+        programmatic: false,
+        src: concat!(
+            "#define BRAIN_HD 64\n#define brain_decode_attn_batched brain_decode_attn_batched_f32_hd64\n",
+            include_str!("../cu/decode_attn_batched.cu")
+        ),
+    },
+    CudaKernel {
         name: "paged_flash_decode_gqa_hd256_kv8",
         // Redirected to by name from every group's WGSL `paged_flash_decode_gqa#GRP=g#kv=int8` (`gpu_core::native_upgrade`).
         op: Op::PagedAttentionFused,
