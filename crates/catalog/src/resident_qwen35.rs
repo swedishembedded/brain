@@ -1328,11 +1328,17 @@ mod tests {
         let r = gguf_resident(&path, "t/x", &gpus, RESERVED, &Qwen35GgufServeConfig { ctx: Some(longest), ..Default::default() }).expect("the leaner default fits");
         assert_eq!(r.cap(), longest);
         assert_eq!(r.kv_tier(), model::kv_tier::KvTier::INT8);
-        // Cached prompts live in the shared KV pool and cost only their recurrent-state snapshots, so a few can
-        // still fit beside the longest context; the full default cannot.
-        assert!(r.prefix_slots() < DEFAULT_MAX_BATCH, "the full prompt cache does not fit beside {longest}-token sequences: {}", r.prefix_slots());
         let said = r.chosen_defaults().join("\n");
-        assert!(said.contains("passed over"), "{said}");
+        if gpu_core::defaults::Hardware::detected().host_memory_on(&[0]) {
+            // A card that reads host memory directly (a Grace-Hopper card on CUDA) keeps the prompt-cache snapshots
+            // there, charged to no card: the full default costs the longest context nothing and stays.
+            assert_eq!(r.prefix_slots(), 4 * DEFAULT_MAX_BATCH, "snapshots in host memory leave the full prompt cache beside {longest}-token sequences\n{said}");
+        } else {
+            // Cached prompts live in the shared KV pool and cost only their recurrent-state snapshots, so a few can
+            // still fit beside the longest context; the full default cannot.
+            assert!(r.prefix_slots() < DEFAULT_MAX_BATCH, "the full prompt cache does not fit beside {longest}-token sequences: {}", r.prefix_slots());
+            assert!(said.contains("passed over"), "{said}");
+        }
         let wide = gguf_resident(&path, "t/x", &gpus, RESERVED, &Qwen35GgufServeConfig { max_batch: Some(16), ..Default::default() }).expect("builds");
         assert_eq!(wide.prefix_slots(), 4 * 16, "the prompt cache follows the concurrency where it fits");
         std::fs::remove_file(path).ok();
