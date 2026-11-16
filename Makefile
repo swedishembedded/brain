@@ -794,12 +794,16 @@ check/seed-literals/tests:
 	bash scripts/gates/check-seed-literals.sh --tests
 
 # Spec for the gate above, run against throwaway trees (needs only bats).
-## test/gates - default: every gate self-test (env-reads, env-writes, test-skips, seed-literals, group-kernels, crate-layers, whole-tensor-loads, format-logic, adapter-naming, placement-accounting, training-capabilities, model-flags, tier-gemm, suite-report, cancellable-actions)
-test/gates: test/gates/env-reads test/gates/env-writes test/gates/test-skips test/gates/seed-literals test/gates/group-kernels test/gates/crate-layers test/gates/whole-tensor-loads test/gates/format-logic test/gates/adapter-naming test/gates/placement-accounting test/gates/training-capabilities test/gates/model-flags test/gates/tier-gemm test/gates/suite-report test/gates/cancellable-actions test/gates/book-epub
+## test/gates - default: every gate self-test (env-reads, env-writes, test-skips, seed-literals, group-kernels, crate-layers, whole-tensor-loads, format-logic, adapter-naming, placement-accounting, training-capabilities, model-flags, tier-gemm, suite-report, cancellable-actions, book-epub, no-perf-numbers)
+test/gates: test/gates/env-reads test/gates/env-writes test/gates/test-skips test/gates/seed-literals test/gates/group-kernels test/gates/crate-layers test/gates/whole-tensor-loads test/gates/format-logic test/gates/adapter-naming test/gates/placement-accounting test/gates/training-capabilities test/gates/model-flags test/gates/tier-gemm test/gates/suite-report test/gates/cancellable-actions test/gates/book-epub test/gates/no-perf-numbers
 
 ## test/gates/book-epub - the book's EPUB numbers figures per chapter, adopts a chapter's own caption, breaks long formulas where a typesetter would, keeps equation numbers, and its verifier fails raw HTML, TeX left in a formula, a missing element and a dangling anchor
 test/gates/book-epub:
 	bats tests/gates/book_epub.bats
+
+## test/gates/no-perf-numbers - the perf-number gate counts a percentage as a performance claim beside performance vocabulary (latency), not beside a latent variable
+test/gates/no-perf-numbers:
+	bats tests/gates/no_perf_numbers.bats
 
 ## test/gates/cancellable-actions - the cancellable-actions gate fails on a production action spec without .cancellable() (also through a helper), passes when declared, ignores tests, comments and strings
 test/gates/cancellable-actions:
