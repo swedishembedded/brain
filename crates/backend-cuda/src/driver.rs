@@ -138,6 +138,9 @@ pub struct Driver {
 pub struct ExecFns {
     pub(crate) primary_ctx_retain: unsafe extern "C" fn(*mut CuContext, CuDevice) -> CuResult,
     pub(crate) primary_ctx_release: unsafe extern "C" fn(CuDevice) -> CuResult,
+    /// `cuDevicePrimaryCtxSetFlags_v2`: how a host wait on the context waits (spin, yield or block), settable
+    /// while the primary context is not active.
+    pub(crate) primary_ctx_set_flags: unsafe extern "C" fn(CuDevice, u32) -> CuResult,
     pub(crate) ctx_set_current: unsafe extern "C" fn(CuContext) -> CuResult,
     /// `cuStreamSynchronize`, never `cuCtxSynchronize`: the primary context is
     /// shared by every handle on the device, and waiting on the whole context
@@ -317,6 +320,10 @@ pub struct CuKernelNodeParams {
 /// `CU_STREAM_NON_BLOCKING`: a stream that does not synchronise implicitly with
 /// the legacy default stream (see [`ExecFns::stream_create`]).
 pub const CU_STREAM_NON_BLOCKING: u32 = 1;
+
+/// `CU_CTX_SCHED_BLOCKING_SYNC`: a host wait on the context blocks the thread until the device signals, rather than
+/// spinning on it.
+pub const CU_CTX_SCHED_BLOCKING_SYNC: u32 = 4;
 
 /// `CU_EVENT_DISABLE_TIMING`: an event used only to order streams, which is
 /// cheaper to create and record than one that carries a timestamp.
@@ -572,6 +579,7 @@ fn load() -> Result<Driver, String> {
             return Err(format!("cuInit failed: {}", d.error_text(rc)));
         }
         tracing::debug!("libcuda.so.1 loaded and cuInit succeeded");
+        d.block_host_waits();
         Ok(d)
     }
 }
@@ -586,6 +594,7 @@ unsafe fn load_exec(lib: &libloading::Library) -> Result<ExecFns, String> {
     Ok(ExecFns {
         primary_ctx_retain: sym(lib, b"cuDevicePrimaryCtxRetain\0")?,
         primary_ctx_release: sym(lib, b"cuDevicePrimaryCtxRelease_v2\0")?,
+        primary_ctx_set_flags: sym(lib, b"cuDevicePrimaryCtxSetFlags_v2\0")?,
         ctx_set_current: sym(lib, b"cuCtxSetCurrent\0")?,
         stream_synchronize: sym(lib, b"cuStreamSynchronize\0")?,
         mem_alloc: sym(lib, b"cuMemAlloc_v2\0")?,
@@ -719,6 +728,33 @@ unsafe fn sym<T: Copy>(lib: &libloading::Library, name: &[u8]) -> Result<T, Stri
 }
 
 impl Driver {
+    /// Make every device's host waits block on the driver's interrupt instead of spinning a core: a serving thread
+    /// waits on the device every step, and a spin held a whole core for the length of every step while the single
+    /// stream's step time did not change (measured). Done right after `cuInit`, before anything activates a primary
+    /// context: the scheduling is fixed when a context is first activated, and the call refuses once it is (an
+    /// already active context keeps the scheduling it has, which is said in the debug log).
+    fn block_host_waits(&self) {
+        let Ok(fns) = self.exec() else { return };
+        let mut count = 0;
+        // SAFETY: `cuDeviceGetCount` writes one int; `cuDeviceGet` and the flag call take an ordinal and a handle it
+        // returned.
+        unsafe {
+            if (self.device_get_count)(&mut count) != CUDA_SUCCESS {
+                return;
+            }
+            for ordinal in 0..count {
+                let mut dev: CuDevice = 0;
+                if (self.device_get)(&mut dev, ordinal) != CUDA_SUCCESS {
+                    continue;
+                }
+                let rc = (fns.primary_ctx_set_flags)(dev, CU_CTX_SCHED_BLOCKING_SYNC);
+                if rc != CUDA_SUCCESS {
+                    tracing::debug!(ordinal, "the primary context's host waits keep their scheduling: {}", self.error_text(rc));
+                }
+            }
+        }
+    }
+
     /// The execution entry points, or why this driver cannot run anything.
     pub fn exec(&self) -> Result<&ExecFns, &str> {
         self.exec.as_ref().map_err(|e| e.as_str())
