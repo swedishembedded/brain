@@ -89,3 +89,35 @@ fn a_decode_step_at_a_prepared_row_count_records_nothing() {
     let mut refs: Vec<&mut BlockTable> = tables.iter_mut().collect();
     assert_eq!(fresh.forward_batched_greedy(&mut refs, &[1, 2, 3]), prepared, "a prepared tape decodes as a tape recorded on first use");
 }
+
+/// A batch wider than the decode regime is recorded too: an engine of 40 sequences records and freezes a decode tape
+/// for every row count up to 40, and a 40-row step replays one (it used to launch every dispatch on its own, about 2400
+/// launches a step for Qwen3-4B at 64 rows), with the tokens a step recorded on first use gives.
+#[test]
+fn a_decode_batch_wider_than_the_decode_regime_is_recorded() {
+    let Ok(gpu) = gpu_core::Gpu::try_new_cuda(qwen3::model::pipelines()) else {
+        brain_testutil::skip_unavailable("no usable CUDA backend");
+        return;
+    };
+    let cfg = QwenConfig { d_model: 64, d_ff: 128, n_heads: 4, n_kv_heads: 2, head_dim: 16, vocab: 64, block_size: 256, max_position_embeddings: 256, tie_embeddings: false, ..QwenConfig::tiny() };
+    let w = qwen3::init_weights(&cfg, 13); // seed: any weights serve
+    let rows = 40usize;
+    let step = |e: &mut Engine| {
+        let mut tables: Vec<BlockTable> = (0..rows).map(|_| BlockTable::new()).collect();
+        for (i, t) in tables.iter_mut().enumerate() {
+            let prompt: Vec<u32> = (0..(5 + (i % 7) as u32)).map(|j| (j * 7 + i as u32) % cfg.vocab).collect();
+            e.prefill_for_perf(t, &prompt);
+        }
+        let mut refs: Vec<&mut BlockTable> = tables.iter_mut().collect();
+        let inputs: Vec<u32> = (0..rows as u32).map(|i| i % cfg.vocab).collect();
+        e.forward_batched_greedy(&mut refs, &inputs)
+    };
+    let mut e = Engine::from_map_tier_on(&gpu, cfg.clone(), &w, 16, 256, rows as u32, 16, 32, true, Dtype::BF16);
+    e.prepare_decode(rows);
+    assert_eq!(e.decode_tapes(), (rows, rows), "every row count up to the engine's batch is recorded and frozen");
+    let prepared = step(&mut e);
+    assert_eq!(e.decode_tapes(), (rows, rows), "the 40-row step replayed its prepared tape");
+    let mut fresh = Engine::from_map_tier_on(&gpu, cfg.clone(), &w, 16, 256, rows as u32, 16, 32, true, Dtype::BF16);
+    assert_eq!(step(&mut fresh), prepared, "a prepared tape decodes as a tape recorded on first use");
+    assert_eq!(fresh.decode_tapes().0, 1, "the step recorded its row count on first use");
+}

@@ -938,9 +938,19 @@ The draw itself is 0.21 ms a step at 64 rows of the 27B's 248320-token vocabular
       hashed per submission) and its allocations a few %, a quarter unresolved. The per-step text (each library
       product's descriptor formatted into the graph signature and its name formatted into the step's lowering) is
       gone (`LibraryGemm::identity`, an interned `label`); A/B pairs (base, new, base, new; greedy and temperature 1)
-      measured no change beyond the noise (4434-4574 against 4536-4538 tok/s greedy, 92 % of a core either way). What
-      would free the core is the window's sub-steps recorded and replayed as graphs instead of launched one by one,
-      and a blocking wait instead of the spin; both are open.
+      measured no change beyond the noise (4434-4574 against 4536-4538 tok/s greedy, 92 % of a core either way).
+      The cause: `Engine::run_batched_submit` recorded a decode step only up to the decode regime's 32 rows, so every
+      step of a wider batch (each sub-step of a greedy window included) built and launched its dispatches one by one.
+- [x] (2026-11-16) a decode step of every batch up to the engine's `max_batch` is recorded and frozen
+      (`Engine::tape_rows`; `prepare_decode` records them before the first request), and the host waits block on the
+      driver's interrupt (`CU_CTX_SCHED_BLOCKING_SYNC` set on every primary context right after `cuInit`). Through
+      `brain serve` (Qwen3-4B, `--max-batch 64 --kv-cache f32`, closed loop of 300-token chat completions, A/B pairs):
+      64 streams greedy 4585 -> 5046 tok/s, card 86 -> 93 % busy, serving process 93 % -> 8 % of a core; temperature 1
+      4374 -> 4903, 85 -> 87 %, 94 % -> 12 %; 16 streams greedy 2273 -> 2260 (noise), 97 % -> 5 %; one stream 189 ->
+      188 tok/s (the blocking wait adds no measurable step latency), 96 % -> 2 %. Tokens unchanged (the qwen3
+      conformance, window, exact-decode and recorded-tape tests).
+- [ ] the card at 93 % (greedy) and 87 % (temperature 1) busy at 64 streams, not 95 %: the window boundary's readback
+      and host work, and the sampled path's k = 1 steps (no keyed window yet), are the remaining gaps
 - [ ] a keyed decode window (Qwen3's greedy window feeds the argmax back on the device; a keyed one needs the keys of
       every sub-step uploaded once)
 - [ ] `--exact-decode` and adapter rows still take the eager keyed head on the 27B (not recorded)

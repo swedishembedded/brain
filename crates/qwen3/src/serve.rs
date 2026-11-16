@@ -1107,7 +1107,7 @@ pub struct Engine {
     /// replayed) - so it is recorded once per bucket and replayed as the
     /// backend's frozen program: no dispatch is rebuilt, resolved or matched
     /// against a captured graph per step. Never populated above
-    /// `DECODE_REGIME_MAX_ROWS` (prefill's row count is not bucketed) or for
+    /// `Engine::tape_rows` (prefill's row count is not bucketed) or for
     /// `Input::Embeds` (its tape has no embed step at all, a structurally
     /// different shape at the same `bsz`) - both keep rebuilding via
     /// `Self::run_batched_steps`.
@@ -3394,7 +3394,7 @@ impl Engine {
     }
 
     /// [`Self::run_batched_steps`] plus the submit - decode's hot path
-    /// (`causal_chunk = false`, `bsz <= DECODE_REGIME_MAX_ROWS`,
+    /// (`causal_chunk = false`, `bsz <= Engine::tape_rows`,
     /// `Input::Tokens`/`Input::Resident`) goes through the tape cache
     /// instead: `Self::batched_tape` is a pure function of `(bsz, causal_chunk,
     /// matches!(input, Embeds), lora)` (see its own doc), so the FIRST call at
@@ -3413,7 +3413,7 @@ impl Engine {
         let lora = meta.has_adapter_rows();
         self.write_batch_meta(input, meta);
         self.write_batch_input(input);
-        if !causal_chunk && bsz <= DECODE_REGIME_MAX_ROWS && !matches!(input, Input::Embeds(_)) {
+        if !causal_chunk && bsz <= self.tape_rows() && !matches!(input, Input::Embeds(_)) {
             if !self.tape_cache.contains_key(&(bsz, lora)) {
                 // Built inside the recording, so the temporaries the steps allocate are the shared set's.
                 let before = self.tape_scratch.replacements();
@@ -3442,7 +3442,7 @@ impl Engine {
     /// instead of in front of the first step at each batch size.
     /// The adapter variant is recorded on first use, as before.
     pub fn record_decode_tapes(&mut self, max_rows: u32) {
-        let top = max_rows.min(self.max_batch).min(DECODE_REGIME_MAX_ROWS);
+        let top = max_rows.min(self.max_batch);
         let (started, before) = (std::time::Instant::now(), self.tape_cache.len());
         // Widest first: every narrower tape then fits the shared scratch's slots, and none is dropped for a grown one.
         for bsz in (1..=top).rev() {
@@ -3460,6 +3460,13 @@ impl Engine {
         if recorded > 0 {
             eprintln!("serve: recorded and froze {recorded} decode tapes (1..={top} rows) in {} ms before the first request", started.elapsed().as_millis());
         }
+    }
+
+    /// The most rows a decode step is recorded at ([`Self::run_batched_submit`]): every batch this engine decodes (its
+    /// `max_batch`), and at least the decode regime's rows. A step above it was launched dispatch by dispatch: at 64
+    /// rows about 2400 launches an iteration held the serving thread for the whole step and the card idle beside it.
+    fn tape_rows(&self) -> u32 {
+        self.max_batch.max(DECODE_REGIME_MAX_ROWS)
     }
 
     /// Bytes of fused-product scratch (the wide QKV and gate/up outputs) this engine holds: none until a path that
