@@ -157,6 +157,11 @@ pub fn matmul_abt(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n: us
     if m == 0 || n == 0 {
         return;
     }
+    #[cfg(target_arch = "aarch64")]
+    if crate::fast_conv::neon_available() {
+        neon_gemm::abt(a, b, c, m, k, n, false);
+        return;
+    }
     // Resolved once, before `row` is defined, not re-walked per row.
     #[cfg(target_arch = "x86_64")]
     let tier = crate::fast_conv::isa_tier();
@@ -1276,6 +1281,14 @@ pub fn matmul_dx(dy: &[f32], w: &[f32], dx: &mut [f32], m: usize, k: usize, n: u
     if m == 0 || k == 0 {
         return;
     }
+    // On NEON hosts the backward is the forward's blocked GEMM over a transposed weight: `dX = dY · W` is
+    // `dY · (Wᵀ)ᵀ`, one `[n, k]` transpose (the weight, small next to the activations) per call.
+    #[cfg(target_arch = "aarch64")]
+    if crate::fast_conv::neon_available() && n > 0 {
+        let wt = transpose(w, n, k);
+        neon_gemm::abt(dy, &wt, dx, m, n, k, acc);
+        return;
+    }
     let row = |dyr: &[f32], dxr: &mut [f32]| {
         if !acc {
             dxr.iter_mut().for_each(|v| *v = 0.0);
@@ -1313,6 +1326,15 @@ pub fn matmul_dx(dy: &[f32], w: &[f32], dx: &mut [f32], m: usize, k: usize, n: u
 /// dY is [M,N] row-major, X is [M,K] row-major, dW is [N,K].
 pub fn matmul_dw(dy: &[f32], x: &[f32], dw: &mut [f32], m: usize, k: usize, n: usize) {
     if n == 0 || k == 0 {
+        return;
+    }
+    // On NEON hosts `dW += dYᵀ · X` is the blocked GEMM with the row count `m` as its reduction: both operands
+    // transposed once (the loop below streams the whole of X once per output row instead).
+    #[cfg(target_arch = "aarch64")]
+    if crate::fast_conv::neon_available() && m > 0 {
+        let dyt = transpose(dy, m, n);
+        let xt = transpose(x, m, k);
+        neon_gemm::abt(&dyt, &xt, dw, n, m, k, true);
         return;
     }
     // Parallelise over N (output rows). Each n reads column n of dY (strided) and
@@ -1512,6 +1534,11 @@ pub fn moe_linear_gated_fwd(
             unsafe { row_abt_avx2(xrow, w, orow, k, n) };
             return;
         }
+        #[cfg(target_arch = "aarch64")]
+        if crate::fast_conv::neon_available() {
+            neon_gemm::abt_unsplit(xrow, w, orow, 1, k, n);
+            return;
+        }
         row_abt_scalar(xrow, w, orow, k, n);
     };
     if m * n * k < 262_144 {
@@ -1634,6 +1661,11 @@ fn gemv_cols(a: &[f32], b: &[f32], c: &mut [f32], k: usize, n: usize) {
         #[cfg(target_arch = "x86_64")]
         if tier == crate::fast_conv::IsaTier::Avx2 {
             unsafe { row_abt_avx2(a, b, c, k, cols) };
+            return;
+        }
+        #[cfg(target_arch = "aarch64")]
+        if crate::fast_conv::neon_available() {
+            neon_gemm::abt_unsplit(a, b, c, 1, k, cols);
             return;
         }
         row_abt_scalar(a, b, c, k, cols);
@@ -1766,10 +1798,53 @@ pub fn moe_linear_gated_dw(
 // cross family, which serves a chunked/fused-buffer caller).
 // ---------------------------------------------------------------------------
 
+/// A pointer the head tasks of the GQA family write their disjoint parts of a buffer through.
+#[derive(Clone, Copy)]
+struct SharedOut(*mut f32);
+// SAFETY: every task writes a disjoint set of elements (one head's columns, or one head's `[t, t]` block).
+unsafe impl Send for SharedOut {}
+unsafe impl Sync for SharedOut {}
+
+/// The `[t, hd]` slice of head `head` of the `[bsz*t, row]` activation `x`, batch `b`, packed contiguous and scaled.
+fn head_rows(x: &[f32], b: usize, t: usize, row: usize, head: usize, hd: usize, scale: f32) -> Vec<f32> {
+    let mut out = vec![0f32; t * hd];
+    for (j, o) in out.chunks_mut(hd).enumerate() {
+        let src = &x[(b * t + j) * row + head * hd..(b * t + j) * row + head * hd + hd];
+        o.iter_mut().zip(src).for_each(|(o, v)| *o = v * scale);
+    }
+    out
+}
+
+/// [`head_rows`] transposed to `[hd, t]`: the `Bᵀ` operand [`matmul_abt`] takes for a product with a `[t, t]` matrix.
+fn head_t(x: &[f32], b: usize, t: usize, row: usize, head: usize, hd: usize, scale: f32) -> Vec<f32> {
+    let mut out = vec![0f32; hd * t];
+    for j in 0..t {
+        let src = &x[(b * t + j) * row + head * hd..(b * t + j) * row + head * hd + hd];
+        for (d, v) in src.iter().enumerate() {
+            out[d * t + j] = v * scale;
+        }
+    }
+    out
+}
+
+/// Write (or add) the `[t, hd]` result of one head into head `head` of the `[bsz*t, row]` buffer behind `dst`.
+///
+/// # Safety
+/// `dst` holds `bsz*t*row` floats and no other task touches these columns of batch `b` meanwhile.
+unsafe fn scatter_head(src: &[f32], dst: SharedOut, b: usize, t: usize, row: usize, head: usize, hd: usize, add: bool) {
+    for (i, srow) in src.chunks(hd).enumerate() {
+        let d = std::slice::from_raw_parts_mut(dst.0.add((b * t + i) * row + head * hd), hd);
+        if add {
+            d.iter_mut().zip(srow).for_each(|(o, v)| *o += v);
+        } else {
+            d.copy_from_slice(srow);
+        }
+    }
+}
+
 /// `gqa_scores`: `scores[b,h,i,j] = (q[b,i,h,:]·k[b,j,hkv,:])/√hd` for `j<=i`,
-/// else `-inf`. Sequential over `(b,h)` (matching `attn_scores_cross`'s own
-/// shape) - each head's GEMM already saturates all cores via `matmul_abt`'s
-/// internal threading once `T` is large enough to matter (prefill-scale `T`).
+/// else `-inf`. Threaded over `(b,h)`: one head's `[t, t]` product is too little work to fan out over a large pool
+/// on its own, and the heads are independent.
 #[allow(clippy::too_many_arguments)]
 pub fn gqa_scores(
     q: &[f32],
@@ -1783,33 +1858,16 @@ pub fn gqa_scores(
     group: usize,
 ) {
     let scale = 1.0 / (hd as f32).sqrt();
-    let q_row = n_heads * hd;
-    let k_row = n_kv_heads * hd;
-    let mut qh = vec![0f32; t * hd];
-    let mut kh = vec![0f32; t * hd];
-    for b in 0..bsz {
-        for h in 0..n_heads {
-            let hkv = h / group;
-            for i in 0..t {
-                let src = (b * t + i) * q_row + h * hd;
-                for d in 0..hd {
-                    qh[i * hd + d] = q[src + d] * scale;
-                }
-            }
-            for j in 0..t {
-                let src = (b * t + j) * k_row + hkv * hd;
-                kh[j * hd..j * hd + hd].copy_from_slice(&k[src..src + hd]);
-            }
-            let base = (b * n_heads + h) * t * t;
-            let out = &mut scores[base..base + t * t];
-            matmul_abt(&qh, &kh, out, t, hd, t);
-            for i in 0..t {
-                for oj in out[i * t + i + 1..i * t + t].iter_mut() {
-                    *oj = -3.4e38;
-                }
-            }
+    let (q_row, k_row) = (n_heads * hd, n_kv_heads * hd);
+    scores[..bsz * n_heads * t * t].par_chunks_mut(t * t).enumerate().for_each(|(bh, out)| {
+        let (b, h) = (bh / n_heads, bh % n_heads);
+        let qh = head_rows(q, b, t, q_row, h, hd, scale);
+        let kh = head_rows(k, b, t, k_row, h / group, hd, 1.0);
+        matmul_abt(&qh, &kh, out, t, hd, t);
+        for (i, row) in out.chunks_mut(t).enumerate() {
+            row[i + 1..].fill(-3.4e38);
         }
-    }
+    });
 }
 
 /// `attn_softmax`: row-wise causal softmax over the key axis (also serves
@@ -1837,12 +1895,8 @@ pub fn attn_softmax_causal(scores: &[f32], probs: &mut [f32], bsz: usize, n_head
     });
 }
 
-/// `gqa_apply`: `ctx[b,i,h,:] = Σ_{j<=i} probs[b,h,i,j]·v[b,j,hkv,:]`.
-/// Sequential over `(b,h)`, packing `v`'s head slice transposed and reusing
-/// `matmul_abt` - the causal zeros `attn_softmax_causal` already wrote into
-/// `probs` for `j>i` make the "sum over `j<=i`" and "sum over all `j`" the
-/// same computation, so a plain dense GEMM is exact (matching
-/// `attn_apply_cross`'s own reasoning for its unmasked case).
+/// `gqa_apply`: `ctx[b,i,h,:] = Σ_{j<=i} probs[b,h,i,j]·v[b,j,hkv,:]`, per head the product `P · V` (the causal
+/// zeros `attn_softmax_causal` wrote into `probs` for `j>i` make the dense product exact), threaded over `(b,h)`.
 #[allow(clippy::too_many_arguments)]
 pub fn gqa_apply(
     probs: &[f32],
@@ -1855,38 +1909,21 @@ pub fn gqa_apply(
     hd: usize,
     group: usize,
 ) {
-    let q_row = n_heads * hd;
-    let k_row = n_kv_heads * hd;
-    let mut vt = vec![0f32; hd * t]; // vt[d, j]
-    let mut ctxh = vec![0f32; t * hd];
-    for b in 0..bsz {
-        for h in 0..n_heads {
-            let hkv = h / group;
-            for j in 0..t {
-                let src = (b * t + j) * k_row + hkv * hd;
-                for d in 0..hd {
-                    vt[d * t + j] = v[src + d];
-                }
-            }
-            let base = (b * n_heads + h) * t * t;
-            let p = &probs[base..base + t * t];
-            matmul_abt(p, &vt, &mut ctxh, t, t, hd);
-            for i in 0..t {
-                let dst = (b * t + i) * q_row + h * hd;
-                ctx[dst..dst + hd].copy_from_slice(&ctxh[i * hd..i * hd + hd]);
-            }
-        }
-    }
+    let (q_row, k_row) = (n_heads * hd, n_kv_heads * hd);
+    let out = SharedOut(ctx.as_mut_ptr());
+    (0..bsz * n_heads).into_par_iter().for_each(|bh| {
+        let (b, h) = (bh / n_heads, bh % n_heads);
+        let vt = head_t(v, b, t, k_row, h / group, hd, 1.0);
+        let mut ctxh = vec![0f32; t * hd];
+        matmul_abt(&probs[bh * t * t..(bh + 1) * t * t], &vt, &mut ctxh, t, t, hd);
+        // SAFETY: head `h` of batch `b` is this task's alone; `ctx` is `bsz*t*q_row`.
+        unsafe { scatter_head(&ctxh, out, b, t, q_row, h, hd, false) };
+    });
 }
 
-/// `gqa_bwd_dscores`: gradient through `probs@v` and the softmax jacobian.
-/// `DProb[i,j] = Σ_d d_ctx[i,d]·v[j,d]` is exactly the same shape as
-/// `gqa_scores`'s own q·k GEMM (with `d_ctx` standing in for `q`, `v` for
-/// `k`, no scale, no mask), so it reuses `matmul_abt` the same way; the
-/// causal masking falls out for free because `probs[i,j]==0` for `j>i`
-/// already zeroes `d_scores[i,j] = probs[i,j]*(DProb[i,j]-dot[i])` there -
-/// `dot[i] = Σ_j probs[i,j]*DProb[i,j]` over ALL `j` equals the causal-only
-/// sum for the same reason.
+/// `gqa_bwd_dscores`: gradient through `probs@v` and the softmax jacobian: `DProb = d_ctx · Vᵀ` per head (the same
+/// shape as [`gqa_scores`]' product), then `d_scores[i,j] = probs[i,j]·(DProb[i,j] - Σ_j probs[i,j]·DProb[i,j])`, the
+/// causal zeros of `probs` masking it. Threaded over `(b,h)`.
 #[allow(clippy::too_many_arguments)]
 pub fn gqa_bwd_dscores(
     d_ctx: &[f32],
@@ -1900,43 +1937,45 @@ pub fn gqa_bwd_dscores(
     hd: usize,
     group: usize,
 ) {
-    let q_row = n_heads * hd;
-    let k_row = n_kv_heads * hd;
-    let mut ctxh = vec![0f32; t * hd];
-    let mut vh = vec![0f32; t * hd];
-    let mut dprob = vec![0f32; t * t];
-    for b in 0..bsz {
-        for h in 0..n_heads {
-            let hkv = h / group;
-            for i in 0..t {
-                let src = (b * t + i) * q_row + h * hd;
-                ctxh[i * hd..i * hd + hd].copy_from_slice(&d_ctx[src..src + hd]);
-            }
-            for j in 0..t {
-                let src = (b * t + j) * k_row + hkv * hd;
-                vh[j * hd..j * hd + hd].copy_from_slice(&v[src..src + hd]);
-            }
-            matmul_abt(&ctxh, &vh, &mut dprob, t, hd, t);
-            let base = (b * n_heads + h) * t * t;
-            let p = &probs[base..base + t * t];
-            let out = &mut d_scores[base..base + t * t];
-            for i in 0..t {
-                let prow = &p[i * t..i * t + t];
-                let dprow = &dprob[i * t..i * t + t];
-                let dot: f32 = prow.iter().zip(dprow).map(|(a, b)| a * b).sum();
-                let orow = &mut out[i * t..i * t + t];
-                for jj in 0..t {
-                    orow[jj] = prow[jj] * (dprow[jj] - dot);
-                }
+    let (q_row, k_row) = (n_heads * hd, n_kv_heads * hd);
+    d_scores[..bsz * n_heads * t * t].par_chunks_mut(t * t).enumerate().for_each(|(bh, out)| {
+        let (b, h) = (bh / n_heads, bh % n_heads);
+        let ctxh = head_rows(d_ctx, b, t, q_row, h, hd, 1.0);
+        let vh = head_rows(v, b, t, k_row, h / group, hd, 1.0);
+        matmul_abt(&ctxh, &vh, out, t, hd, t);
+        let p = &probs[bh * t * t..(bh + 1) * t * t];
+        for (orow, prow) in out.chunks_mut(t).zip(p.chunks(t)) {
+            let dot: f32 = prow.iter().zip(orow.iter()).map(|(a, b)| a * b).sum();
+            for (o, &pv) in orow.iter_mut().zip(prow) {
+                *o = pv * (*o - dot);
             }
         }
-    }
+    });
 }
 
-/// `gqa_bwd_dv`: `d_v[b,hkv,j,:] = Σ_{h∈group(hkv)} Σ_{i>=j} probs[b,h,i,j]·d_ctx[b,i,h,:]`.
-/// Threaded over `d_v`'s own `[B*T, n_kv_heads*head_dim]` rows (the same
-/// `par_chunks_mut`-over-output-rows shape `matmul_dx`/`matmul_dw` already
-/// use), each row accumulated via the shared `axpy` primitive.
+/// The `[t, t]` score matrix `s` with every entry above the diagonal (a key after its query) zeroed.
+fn causal_rows(s: &[f32], t: usize) -> Vec<f32> {
+    let mut out = s[..t * t].to_vec();
+    for (i, row) in out.chunks_mut(t).enumerate() {
+        row[i + 1..].fill(0.0);
+    }
+    out
+}
+
+/// `sᵀ` of the `[t, t]` score matrix `s` keeping only `i >= j` (row `j` of the result holds the queries at or after key
+/// `j`), the operand of the key- and value-side products.
+fn causal_transpose(s: &[f32], t: usize) -> Vec<f32> {
+    let mut out = vec![0f32; t * t];
+    for (i, row) in s[..t * t].chunks(t).enumerate() {
+        for (j, v) in row[..=i].iter().enumerate() {
+            out[j * t + i] = *v;
+        }
+    }
+    out
+}
+
+/// `gqa_bwd_dv`: `d_v[b,j,hkv,:] = Σ_{h∈group(hkv)} Σ_{i>=j} probs[b,h,i,j]·d_ctx[b,i,h,:]`, per head the product
+/// `Pᵀ · d_ctx`.
 #[allow(clippy::too_many_arguments)]
 pub fn gqa_bwd_dv(
     probs: &[f32],
@@ -1949,32 +1988,11 @@ pub fn gqa_bwd_dv(
     hd: usize,
     group: usize,
 ) {
-    let q_row = n_heads * hd;
-    let k_row = n_kv_heads * hd;
-    d_v.par_chunks_mut(k_row).take(bsz * t).enumerate().for_each(|(bj, row)| {
-        let b = bj / t;
-        let j = bj % t;
-        for hkv in 0..n_kv_heads {
-            let out = &mut row[hkv * hd..hkv * hd + hd];
-            out.iter_mut().for_each(|v| *v = 0.0);
-            for gi in 0..group {
-                let h = hkv * group + gi;
-                let p_base = (b * n_heads + h) * t * t;
-                for i in j..t {
-                    let scale = probs[p_base + i * t + j];
-                    if scale == 0.0 {
-                        continue;
-                    }
-                    let src = (b * t + i) * q_row + h * hd;
-                    axpy(out, scale, &d_ctx[src..src + hd]);
-                }
-            }
-        }
-    });
+    gqa_bwd_kv(probs, d_ctx, d_v, bsz, n_heads, n_kv_heads, t, hd, group, 1.0);
 }
 
-/// `gqa_bwd_dq`: `d_q[b,i,h,:] = scale·Σ_{j<=i} d_scores[b,h,i,j]·k[b,j,hkv,:]`.
-/// Threaded over `d_q`'s `[B*T, n_heads*head_dim]` rows.
+/// `gqa_bwd_dq`: `d_q[b,i,h,:] = scale·Σ_{j<=i} d_scores[b,h,i,j]·k[b,j,hkv,:]`, per head the product `dS · K`,
+/// threaded over `(b,h)`.
 #[allow(clippy::too_many_arguments)]
 pub fn gqa_bwd_dq(
     d_scores: &[f32],
@@ -1988,31 +2006,22 @@ pub fn gqa_bwd_dq(
     group: usize,
 ) {
     let scale0 = 1.0 / (hd as f32).sqrt();
-    let q_row = n_heads * hd;
-    let k_row = n_kv_heads * hd;
-    d_q.par_chunks_mut(q_row).take(bsz * t).enumerate().for_each(|(bi, row)| {
-        let b = bi / t;
-        let i = bi % t;
-        for h in 0..n_heads {
-            let hkv = h / group;
-            let out = &mut row[h * hd..h * hd + hd];
-            out.iter_mut().for_each(|v| *v = 0.0);
-            let s_base = (b * n_heads + h) * t * t + i * t;
-            for j in 0..=i {
-                let ds = d_scores[s_base + j];
-                if ds == 0.0 {
-                    continue;
-                }
-                let src = (b * t + j) * k_row + hkv * hd;
-                axpy(out, ds * scale0, &k[src..src + hd]);
-            }
-        }
+    let (q_row, k_row) = (n_heads * hd, n_kv_heads * hd);
+    let out = SharedOut(d_q.as_mut_ptr());
+    (0..bsz * n_heads).into_par_iter().for_each(|bh| {
+        let (b, h) = (bh / n_heads, bh % n_heads);
+        let kt = head_t(k, b, t, k_row, h / group, hd, scale0);
+        // The kernel sums `j <= i` only: the product runs over the causal part of the row.
+        let ds = causal_rows(&d_scores[bh * t * t..(bh + 1) * t * t], t);
+        let mut dq = vec![0f32; t * hd];
+        matmul_abt(&ds, &kt, &mut dq, t, t, hd);
+        // SAFETY: head `h` of batch `b` is this task's alone; `d_q` is `bsz*t*q_row`.
+        unsafe { scatter_head(&dq, out, b, t, q_row, h, hd, false) };
     });
 }
 
-/// `gqa_bwd_dk`: `d_k[b,j,hkv,:] = scale·Σ_{h∈group(hkv)} Σ_{i>=j} d_scores[b,h,i,j]·q[b,i,h,:]`.
-/// Threaded over `d_k`'s `[B*T, n_kv_heads*head_dim]` rows, mirroring
-/// `gqa_bwd_dv` exactly with `q` in place of `d_ctx` and the `1/√hd` scale.
+/// `gqa_bwd_dk`: `d_k[b,j,hkv,:] = scale·Σ_{h∈group(hkv)} Σ_{i>=j} d_scores[b,h,i,j]·q[b,i,h,:]`, per head the product
+/// `dSᵀ · Q`, mirroring [`gqa_bwd_dv`] with `q` in place of `d_ctx` and the `1/√hd` scale.
 #[allow(clippy::too_many_arguments)]
 pub fn gqa_bwd_dk(
     d_scores: &[f32],
@@ -2025,29 +2034,44 @@ pub fn gqa_bwd_dk(
     hd: usize,
     group: usize,
 ) {
-    let scale0 = 1.0 / (hd as f32).sqrt();
-    let q_row = n_heads * hd;
-    let k_row = n_kv_heads * hd;
-    d_k.par_chunks_mut(k_row).take(bsz * t).enumerate().for_each(|(bj, row)| {
-        let b = bj / t;
-        let j = bj % t;
-        for hkv in 0..n_kv_heads {
-            let out = &mut row[hkv * hd..hkv * hd + hd];
-            out.iter_mut().for_each(|v| *v = 0.0);
-            for gi in 0..group {
-                let h = hkv * group + gi;
-                let s_base = (b * n_heads + h) * t * t;
-                for i in j..t {
-                    let ds = d_scores[s_base + i * t + j];
-                    if ds == 0.0 {
-                        continue;
-                    }
-                    let src = (b * t + i) * q_row + h * hd;
-                    axpy(out, ds * scale0, &q[src..src + hd]);
-                }
-            }
+    gqa_bwd_kv(d_scores, q, d_k, bsz, n_heads, n_kv_heads, t, hd, group, 1.0 / (hd as f32).sqrt());
+}
+
+/// `out[b,j,hkv,:] = scale·Σ_{h∈group(hkv)} Σ_{i>=j} s[b,h,i,j]·x[b,i,h,:]` - the shared shape of the key- and value-side
+/// gradients: per query head the product `Sᵀ · X`, summed over the heads of a group; threaded over `(b, hkv)`.
+#[allow(clippy::too_many_arguments)]
+fn gqa_bwd_kv(s: &[f32], x: &[f32], out: &mut [f32], bsz: usize, n_heads: usize, n_kv_heads: usize, t: usize, hd: usize, group: usize, scale: f32) {
+    let (q_row, k_row) = (n_heads * hd, n_kv_heads * hd);
+    let dst = SharedOut(out.as_mut_ptr());
+    (0..bsz * n_kv_heads).into_par_iter().for_each(|bk| {
+        let (b, hkv) = (bk / n_kv_heads, bk % n_kv_heads);
+        let mut head = vec![0f32; t * hd];
+        for gi in 0..group {
+            let h = hkv * group + gi;
+            let base = (b * n_heads + h) * t * t;
+            let st = causal_transpose(&s[base..base + t * t], t);
+            let xt = head_t(x, b, t, q_row, h, hd, scale);
+            neon_or_plain_abt(&st, &xt, &mut head, t, t, hd, gi > 0);
         }
+        // SAFETY: kv head `hkv` of batch `b` is this task's alone; `out` is `bsz*t*k_row`.
+        unsafe { scatter_head(&head, dst, b, t, k_row, hkv, hd, false) };
     });
+}
+
+/// `C (+)= A·Bᵀ`: [`matmul_abt`] when writing, its accumulating form when `accumulate`.
+fn neon_or_plain_abt(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n: usize, accumulate: bool) {
+    #[cfg(target_arch = "aarch64")]
+    if crate::fast_conv::neon_available() {
+        neon_gemm::abt(a, b, c, m, k, n, accumulate);
+        return;
+    }
+    if !accumulate {
+        matmul_abt(a, b, c, m, k, n);
+        return;
+    }
+    let mut part = vec![0f32; m * n];
+    matmul_abt(a, b, &mut part, m, k, n);
+    c.iter_mut().zip(&part).for_each(|(o, v)| *o += v);
 }
 
 // ---------------------------------------------------------------------------
@@ -2433,6 +2457,11 @@ mod tests {
                 unsafe { row_abt_avx2(a, b, c, k, n) };
                 return;
             }
+        }
+        #[cfg(target_arch = "aarch64")]
+        if crate::fast_conv::neon_available() {
+            neon_gemm::abt_unsplit(a, b, c, 1, k, n);
+            return;
         }
         row_abt_scalar(a, b, c, k, n);
     }
@@ -3909,6 +3938,259 @@ mod tests {
             assert!(got_o[..out_off].iter().all(|&x| x == -1.0), "apply_full wrote before its out_off");
             for (i, (got, want)) in got_o[out_off..].iter().zip(&want_o).enumerate() {
                 assert!((got - want).abs() < 1e-5, "apply_full {bsz}/{heads}/{seq}/{hd} i={i}: got {got} want {want}");
+            }
+        }
+    }
+}
+
+/// `src[rows, cols]` row-major as `[cols, rows]`, blocked so both sides stay in cache, threaded over row blocks.
+pub fn transpose(src: &[f32], rows: usize, cols: usize) -> Vec<f32> {
+    const T: usize = 32;
+    let mut dst = vec![0f32; rows * cols];
+    // Disjoint column bands of the source are disjoint row bands of the destination.
+    dst.par_chunks_mut(T * rows).enumerate().for_each(|(band, out)| {
+        let c0 = band * T;
+        let cn = (cols - c0).min(T);
+        let mut r0 = 0;
+        while r0 < rows {
+            let rn = (rows - r0).min(T);
+            for r in r0..r0 + rn {
+                let srow = &src[r * cols + c0..r * cols + c0 + cn];
+                for (cc, v) in srow.iter().enumerate() {
+                    out[cc * rows + r] = *v;
+                }
+            }
+            r0 += rn;
+        }
+    });
+    dst
+}
+
+/// The NEON f32 GEMM: `C[m,n] (+)= A[m,k]·B[n,k]ᵀ`, the one routine every f32 matmul kernel (`matmul*`,
+/// `matmul_dx*`, `matmul_dw*`, the attention trio's per-head products) reaches on an AArch64 host.
+///
+/// A 4x4 output tile keeps sixteen 4-lane accumulators, four A and four B vectors in registers (24 of the 32 `v`
+/// registers), sixteen independent FMA chains per step; `k` is walked in panels of [`neon_gemm::KC`] so a thread's
+/// strip of A and the B panel it sweeps stay in L1/L2 across the panel, and the threads take strips of four output
+/// rows. Each tile sums its `k` in 4-lane partial sums, so the result matches the scalar reference to rounding, not
+/// bit for bit (gated by tolerance in this module's tests).
+#[cfg(target_arch = "aarch64")]
+pub mod neon_gemm {
+    use rayon::prelude::*;
+    use std::arch::aarch64::*;
+
+    /// Floats of `k` one panel covers.
+    pub const KC: usize = 512;
+    /// Rows of C per thread task (a multiple of the tile height).
+    const MIN_ROWS: usize = 4;
+    /// The arithmetic one task is given before the product fans out further: about a tenth of a millisecond of one
+    /// core, the cost of waking it (measured by `neon_gemm_bench`).
+    const FLOPS_PER_TASK: usize = 4_000_000;
+
+    /// `C (+)= A·Bᵀ` over every row, threaded over strips of rows. `accumulate` adds into C instead of writing it.
+    pub fn abt(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n: usize, accumulate: bool) {
+        assert!(a.len() >= m * k && b.len() >= n * k && c.len() >= m * n, "neon gemm: operand too short");
+        if k == 0 {
+            if !accumulate {
+                c[..m * n].fill(0.0);
+            }
+            return;
+        }
+        // As many tasks as the work pays for: a task is worth waking a worker (on a many-socket host a fan-out to every
+        // thread costs more than a per-head attention product's whole arithmetic), and never more than the pool.
+        let tasks = ((2 * m * n * k) / FLOPS_PER_TASK).clamp(1, rayon::current_num_threads());
+        if tasks == 1 {
+            unsafe { block(a.as_ptr(), b.as_ptr(), c.as_mut_ptr(), m, k, n, accumulate) };
+            return;
+        }
+        // No fewer than a tile's rows a task.
+        let rows_per = (m.div_ceil(tasks)).div_ceil(MIN_ROWS).max(1) * MIN_ROWS;
+        // Too few rows to feed the pool (a decode step's GEMV, a small batch): split the columns instead, in multiples
+        // of the tile width, so every element is computed exactly as the unsplit block computes it.
+        if m < 2 * MIN_ROWS && n >= 8 {
+            let cols = n.div_ceil(tasks).div_ceil(4).max(1) * 4;
+            let (ap, bp) = (a.as_ptr() as usize, b.as_ptr() as usize);
+            let parts: Vec<(usize, usize, Vec<f32>)> = (0..n.div_ceil(cols))
+                .into_par_iter()
+                .map(|t| {
+                    let (j0, w) = (t * cols, cols.min(n - t * cols));
+                    let mut part: Vec<f32> = if accumulate { (0..m).flat_map(|i| c[i * n + j0..i * n + j0 + w].iter().copied()).collect() } else { vec![0f32; m * w] };
+                    // SAFETY: columns `j0..j0+w` of B exist (asserted above); `part` is `m * w`.
+                    unsafe { block(ap as *const f32, (bp as *const f32).add(j0 * k), part.as_mut_ptr(), m, k, w, accumulate) };
+                    (j0, w, part)
+                })
+                .collect();
+            for (j0, w, part) in parts {
+                for i in 0..m {
+                    c[i * n + j0..i * n + j0 + w].copy_from_slice(&part[i * w..i * w + w]);
+                }
+            }
+            return;
+        }
+        let (ap, bp) = (a.as_ptr() as usize, b.as_ptr() as usize);
+        c[..m * n].par_chunks_mut(rows_per * n).enumerate().for_each(|(ci, cc)| {
+            let rows = cc.len() / n;
+            // SAFETY: rows `ci*rows_per ..+rows` of A exist (asserted above); B is read whole.
+            unsafe { block((ap as *const f32).add(ci * rows_per * k), bp as *const f32, cc.as_mut_ptr(), rows, k, n, accumulate) };
+        });
+    }
+
+    /// [`abt`] in one piece on the calling thread: the reference a split is held bit-identical to.
+    pub fn abt_unsplit(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n: usize) {
+        assert!(a.len() >= m * k && b.len() >= n * k && c.len() >= m * n, "neon gemm: operand too short");
+        unsafe { block(a.as_ptr(), b.as_ptr(), c.as_mut_ptr(), m, k, n, false) };
+    }
+
+    /// One thread's `rows` rows of C, `k` in panels.
+    ///
+    /// # Safety
+    /// `a` holds `rows*k`, `b` `n*k`, `c` `rows*n` floats.
+    unsafe fn block(a: *const f32, b: *const f32, c: *mut f32, rows: usize, k: usize, n: usize, accumulate: bool) {
+        let (m4, n4) = (rows - rows % 4, n - n % 4);
+        let mut k0 = 0;
+        while k0 < k {
+            let kl = (k - k0).min(KC);
+            let add = accumulate || k0 > 0;
+            let mut i = 0;
+            while i < m4 {
+                let mut j = 0;
+                while j < n4 {
+                    tile4x4(a.add(i * k + k0), b.add(j * k + k0), c.add(i * n + j), k, kl, n, add);
+                    j += 4;
+                }
+                for jj in n4..n {
+                    for ii in i..i + 4 {
+                        put(c.add(ii * n + jj), dot(a.add(ii * k + k0), b.add(jj * k + k0), kl), add);
+                    }
+                }
+                i += 4;
+            }
+            for ii in m4..rows {
+                for jj in 0..n {
+                    put(c.add(ii * n + jj), dot(a.add(ii * k + k0), b.add(jj * k + k0), kl), add);
+                }
+            }
+            k0 += kl;
+        }
+    }
+
+    #[inline(always)]
+    unsafe fn put(c: *mut f32, v: f32, add: bool) {
+        if add {
+            *c += v;
+        } else {
+            *c = v;
+        }
+    }
+
+    /// `Σ x[i]·y[i]` over `k` floats, four 4-lane accumulators.
+    #[inline(always)]
+    unsafe fn dot(x: *const f32, y: *const f32, k: usize) -> f32 {
+        let mut acc = [vdupq_n_f32(0.0); 4];
+        let mut i = 0;
+        while i + 16 <= k {
+            for (t, a) in acc.iter_mut().enumerate() {
+                *a = vfmaq_f32(*a, vld1q_f32(x.add(i + 4 * t)), vld1q_f32(y.add(i + 4 * t)));
+            }
+            i += 16;
+        }
+        while i + 4 <= k {
+            acc[0] = vfmaq_f32(acc[0], vld1q_f32(x.add(i)), vld1q_f32(y.add(i)));
+            i += 4;
+        }
+        let mut s = vaddvq_f32(vaddq_f32(vaddq_f32(acc[0], acc[1]), vaddq_f32(acc[2], acc[3])));
+        while i < k {
+            s += *x.add(i) * *y.add(i);
+            i += 1;
+        }
+        s
+    }
+
+    /// A 4x4 tile of `C (+)= A·Bᵀ` over `kl` floats of `k`: rows of A and B are `lda` floats apart.
+    #[inline(always)]
+    unsafe fn tile4x4(a: *const f32, b: *const f32, c: *mut f32, lda: usize, kl: usize, n: usize, add: bool) {
+        let mut acc = [vdupq_n_f32(0.0); 16];
+        let ar = [a, a.add(lda), a.add(2 * lda), a.add(3 * lda)];
+        let br = [b, b.add(lda), b.add(2 * lda), b.add(3 * lda)];
+        let mut kk = 0;
+        while kk + 4 <= kl {
+            let av = [vld1q_f32(ar[0].add(kk)), vld1q_f32(ar[1].add(kk)), vld1q_f32(ar[2].add(kk)), vld1q_f32(ar[3].add(kk))];
+            for (cj, bj) in br.iter().enumerate() {
+                let bv = vld1q_f32(bj.add(kk));
+                for (ri, a_) in av.iter().enumerate() {
+                    acc[ri * 4 + cj] = vfmaq_f32(acc[ri * 4 + cj], *a_, bv);
+                }
+            }
+            kk += 4;
+        }
+        let mut out = [0f32; 16];
+        for (o, v) in out.iter_mut().zip(acc) {
+            *o = vaddvq_f32(v);
+        }
+        while kk < kl {
+            for ri in 0..4 {
+                let x = *ar[ri].add(kk);
+                for cj in 0..4 {
+                    out[ri * 4 + cj] += x * *br[cj].add(kk);
+                }
+            }
+            kk += 1;
+        }
+        for ri in 0..4 {
+            for cj in 0..4 {
+                put(c.add(ri * n + cj), out[ri * 4 + cj], add);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        /// The scalar product every element of the GEMM must match, in f64.
+        fn reference(a: &[f32], b: &[f32], m: usize, k: usize, n: usize) -> Vec<f64> {
+            (0..m * n).map(|e| (0..k).map(|kk| a[(e / n) * k + kk] as f64 * b[(e % n) * k + kk] as f64).sum()).collect()
+        }
+
+        /// The GEMM's rate at a small decoder's training shapes (rows of 8 x 1024 tokens, width 256, FFN 704, vocabulary
+        /// 4096, attention heads of 64 over 1024 positions).
+        /// Run: `make test/one P=brain-backend-cpu ARGS="neon_gemm_bench --ignored --nocapture"`.
+        #[test]
+        #[ignore = "throughput measurement, not a correctness gate"]
+        fn neon_gemm_bench() {
+            let mut rng = data::rng::Lcg::random();
+            for &(label, m, k, n) in &[("qkv", 8192, 256, 768), ("ffn up", 8192, 256, 704), ("ffn down", 8192, 704, 256), ("head", 8192, 256, 4096), ("dw ffn", 704, 8192, 256), ("scores", 1024, 64, 1024), ("apply", 1024, 1024, 64), ("decode", 1, 256, 4096)] {
+                let a: Vec<f32> = (0..m * k).map(|_| rng.signed()).collect();
+                let b: Vec<f32> = (0..n * k).map(|_| rng.signed()).collect();
+                let mut c = vec![0f32; m * n];
+                super::abt(&a, &b, &mut c, m, k, n, false);
+                let mut best = f64::INFINITY;
+                for _ in 0..5 {
+                    let t = std::time::Instant::now();
+                    super::abt(&a, &b, &mut c, m, k, n, false);
+                    best = best.min(t.elapsed().as_secs_f64());
+                }
+                eprintln!("{label:<9} m={m:<5} k={k:<5} n={n:<5} {:>8.3} ms {:>8.1} GFLOP/s", best * 1e3, 2.0 * (m * k * n) as f64 / best / 1e9);
+            }
+        }
+
+        /// Every shape class (tile edges in both directions, a `k` tail, `k` past a panel, threaded and inline sizes)
+        /// matches the f64 reference to f32 rounding, writing and accumulating.
+        #[test]
+        fn the_neon_gemm_matches_the_reference_at_every_edge() {
+            let mut rng = data::rng::Lcg::random();
+            for &(m, k, n) in &[(1, 1, 1), (3, 5, 2), (4, 4, 4), (7, 13, 9), (17, 515, 6), (64, 1030, 33), (600, 64, 260), (5, 2049, 7)] {
+                let a: Vec<f32> = (0..m * k).map(|_| rng.signed()).collect();
+                let b: Vec<f32> = (0..n * k).map(|_| rng.signed()).collect();
+                let want = reference(&a, &b, m, k, n);
+                let mut c = vec![0f32; m * n];
+                super::abt(&a, &b, &mut c, m, k, n, false);
+                let tol = |w: f64| 1e-5 * (k as f64).sqrt() * (1.0 + w.abs());
+                for (got, w) in c.iter().zip(&want) {
+                    assert!((*got as f64 - w).abs() <= tol(*w), "({m},{k},{n}): {got} vs {w}");
+                }
+                super::abt(&a, &b, &mut c, m, k, n, true);
+                for (got, w) in c.iter().zip(&want) {
+                    assert!((*got as f64 - 2.0 * w).abs() <= 2.0 * tol(*w), "accumulating ({m},{k},{n}): {got} vs {}", 2.0 * w);
+                }
             }
         }
     }

@@ -288,13 +288,13 @@ impl CpuBackend {
             None
         };
         let fast_off = std::env::var("BRAIN_NO_FASTCONV").map(|v| v != "0").unwrap_or(false);
-        // Without AVX2 (aarch64, say) the JIT keeps every kernel it can compile,
-        // as before. A kernel it cannot compile - the tiled GEMMs, whose
-        // barrier-in-the-K-loop structure it has no model for - has no other
-        // way to run, so it still takes its native route: the `fast_ops`
-        // routines select their ISA tier at run time and fall back to scalar
-        // code, so they are correct on any host.
-        let all_native = fast_conv::avx2_available();
+        // With a vector tier for the f32 GEMM (AVX2 on x86-64, NEON on AArch64) every kernel with a native route
+        // takes it: the routes are the GEMM-shaped ones (every matmul, the attention trio and its backward), which
+        // the one-invocation-per-element JIT loop ran at a small fraction of the host's rate. Without one the JIT
+        // keeps every kernel it can compile; a kernel it cannot compile - the tiled GEMMs, whose
+        // barrier-in-the-K-loop structure it has no model for - still takes its native route, which falls back to
+        // scalar code, so it is correct on any host.
+        let all_native = fast_conv::avx2_available() || fast_conv::neon_available();
         let fast = if fast_off {
             FastIdx::default()
         } else {
@@ -356,7 +356,7 @@ impl CpuBackend {
             }
         };
         let wgsizes = backend_api::workgroup_sizes(kernels);
-        let fast_native_enabled = !fast_off && fast_conv::avx2_available();
+        let fast_native_enabled = !fast_off && all_native;
         CpuBackend {
             shared: std::sync::Arc::new(CpuShared {
                 jit,
