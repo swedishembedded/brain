@@ -8,7 +8,8 @@
 //! expert -- the shape that exercises the gated kernels' skip path at all).
 //!
 //! Unlike `moe_block_gradcheck.rs` (a numeric-tolerance FD comparison), this
-//! is BIT-EXACT: with the gated forward, a non-routed row's `dy` is already
+//! is BIT-EXACT (wherever both families run their WGSL kernels; see the dW check for the CPU backend's native GEMM):
+//! with the gated forward, a non-routed row's `dy` is already
 //! exactly `0.0` end to end (`scale_add_dexp.wgsl`'s own multiply-by-zero),
 //! so skipping that row's reduction changes nothing about the sum -- the two
 //! kernel families must produce identical bits, not merely close ones. A
@@ -148,13 +149,17 @@ fn gated_backward_matches_dense_bit_for_bit() {
 
     let max_abs = |a: &[f32], b: &[f32]| a.iter().zip(b).map(|(x, y)| (x - y).abs()).fold(0f32, f32::max);
 
-    // dW is bit-identical on EVERY backend, no exception -- verified by
-    // direct inspection (a standalone per-expert dump comparing d_h/dW
-    // between the two kernel families): the down-projection's dx (d_h,
-    // consumed by dW) and all three dW outputs never differed even on CPU.
+    // dW is bit-identical wherever both families run their WGSL kernels (every GPU backend, and the CPU JIT's own
+    // loops). The CPU backend serves the dense `matmul_dw` natively on a host with a vector tier for the f32 GEMM
+    // (AVX2, NEON): a tiled GEMM that sums the rows in its panels' order, against the gated kernel's row by row, so the
+    // two differ by the rounding of that reordering - a few float32 ULPs of the outputs' scale (1.5e-8 measured on
+    // NEON) - while a skip that dropped or doubled a routed row would move a dW element by a whole term.
+    let cpu = g.caps().class == gpu_core::DeviceClass::Cpu;
     for (ei, (wg, wd)) in dw_gated.iter().zip(&dw_dense).enumerate() {
         let d = max_abs(wg, wd);
-        assert_eq!(d, 0.0, "gated vs dense dW[{ei}] must be BIT-IDENTICAL, max_abs_diff={d}");
+        let scale = wd.iter().fold(0f32, |m, v| m.max(v.abs()));
+        let tol = if cpu { 8.0 * f32::EPSILON * scale } else { 0.0 };
+        assert!(d <= tol, "gated vs dense dW[{ei}]: max_abs_diff={d} (tolerance {tol}, cpu={cpu})");
     }
 
     // dX is bit-identical on the real GPU backend (Vulkan, the production
