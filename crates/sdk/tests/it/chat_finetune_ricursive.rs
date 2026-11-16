@@ -121,7 +121,7 @@ fn a_ricursive_full_fine_tune_trains_every_weight_and_writes_a_base() {
     assert!(outcome.final_loss.zip(outcome.initial_loss).is_some_and(|(last, first)| last < first), "{outcome:?}");
     let checkpoint = outcome.checkpoint.expect("a completed run writes its checkpoint directory");
     assert!(checkpoint.join("tokenizer.json").is_file());
-    let trained = checkpoint::weightio::WeightReader::open(checkpoint.join("model.safetensors").to_str().unwrap()).expect("the checkpoint opens");
+    let trained = checkpoint::weightio::WeightReader::open(checkpoint.join("model.brain.safetensors").to_str().unwrap()).expect("the checkpoint opens");
     let cfg = ricursive::TrainConfig::from_json(&trained.config()).expect("the header carries the training configuration");
     assert_eq!(trained.names().count(), cfg.param_list().len(), "every tensor of the architecture is written");
 }
@@ -405,7 +405,7 @@ fn a_resident_layer_streamed_full_fine_tune_writes_its_masters_as_a_base() {
     assert_eq!(outcome.status, FineTuneStatus::Completed);
     assert!(outcome.final_loss.zip(outcome.initial_loss).is_some_and(|(last, first)| last < first), "{outcome:?}");
     let checkpoint = outcome.checkpoint.expect("a completed run writes its checkpoint directory");
-    let trained = checkpoint::weightio::WeightReader::open(checkpoint.join("model.safetensors").to_str().unwrap()).expect("the checkpoint opens");
+    let trained = checkpoint::weightio::WeightReader::open(checkpoint.join("model.brain.safetensors").to_str().unwrap()).expect("the checkpoint opens");
     let cfg = ricursive::TrainConfig::from_json(&trained.config()).expect("the header carries the training configuration");
     assert_eq!(trained.names().count(), cfg.param_list().len(), "every tensor of the architecture is written, the resident ones from their masters");
     // The window changes where the weights live, not the arithmetic.
@@ -416,7 +416,7 @@ fn a_resident_layer_streamed_full_fine_tune_writes_its_masters_as_a_base() {
     assert!(staged.final_loss.zip(staged.initial_loss).is_some_and(|(last, first)| last < first), "{staged:?}");
     let (a, b) = (staged.final_loss.unwrap(), resident.final_loss.unwrap());
     assert!((a - b).abs() <= 1e-3 * b.max(1e-2), "two stages end where one does: {a} vs {b}");
-    let written = checkpoint::weightio::WeightReader::open(staged.checkpoint.unwrap().join("model.safetensors").to_str().unwrap()).expect("the checkpoint opens");
+    let written = checkpoint::weightio::WeightReader::open(staged.checkpoint.unwrap().join("model.brain.safetensors").to_str().unwrap()).expect("the checkpoint opens");
     assert_eq!(written.names().count(), cfg.param_list().len(), "every tensor once, the replicated embedding included");
     // A window and several stages do not compose: refused by name.
     let err = run("weights=bf16,window=1", 2, "staged-window").expect_err("refused");

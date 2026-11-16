@@ -10,8 +10,10 @@
 //! dataset, and [`merge_adapter`]: folding a LoRA adapter into the weights it
 //! targets. Both produce a checkpoint directory (for qwen3 in the
 //! `transformers` layout: one fp32 `model.safetensors`, `config.json` and the
-//! base's tokenizer files; qwen35 writes its brain-format weights as
-//! `model.safetensors` beside the tokenizer files) that is a base like any other: [`crate::ChatFineTune`]
+//! base's tokenizer files; qwen35, ouro and the other families without a
+//! `transformers` writer write their brain-format weights as
+//! `model.brain.safetensors`, the file the model store opens a base by, beside
+//! the tokenizer files) that is a base like any other: [`crate::ChatFineTune`]
 //! trains an adapter on it, `brain serve` serves it, and either can be asked
 //! to fine-tune it again.
 //!
@@ -419,7 +421,10 @@ impl ChatFullFineTune {
         }
         std::fs::remove_file(&tuned).ok();
         model::finetune::stage_time("sdk: export the trained file to the checkpoint directory", export_clock);
-        let weights = checkpoint.join(WEIGHTS_FILE);
+        // A family that exports a brain checkpoint writes the store's base file, one with a Hugging Face writer
+        // `model.safetensors`.
+        let brain_file = checkpoint.join(model::finetune::BRAIN_WEIGHTS_FILE);
+        let weights = if brain_file.exists() { brain_file } else { checkpoint.join(WEIGHTS_FILE) };
         let digest_clock = std::time::Instant::now();
         outcome.weights_digest = Some(digest(&weights)?);
         model::finetune::stage_time("sdk: digest the exported weights", digest_clock);
@@ -441,7 +446,7 @@ pub struct ChatFullFineTuneOutcome {
     pub status: FineTuneStatus,
     /// The checkpoint directory; `None` unless completed.
     pub checkpoint: Option<PathBuf>,
-    /// The directory's `model.safetensors`; `None` unless completed.
+    /// The directory's weights file (`model.safetensors` or `model.brain.safetensors`); `None` unless completed.
     pub weights: Option<PathBuf>,
     /// `sha256:<hex>` of the weights file.
     pub weights_digest: Option<String>,

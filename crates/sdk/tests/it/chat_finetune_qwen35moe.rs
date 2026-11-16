@@ -67,7 +67,7 @@ fn a_qwen35moe_full_fine_tune_trains_every_weight_and_writes_a_base() {
     assert!(outcome.final_loss.zip(outcome.initial_loss).is_some_and(|(last, first)| last < first), "{outcome:?}");
     let checkpoint = outcome.checkpoint.expect("a completed run writes its checkpoint directory");
     assert!(checkpoint.join("tokenizer.json").is_file());
-    let weights = checkpoint.join("model.safetensors");
+    let weights = checkpoint.join("model.brain.safetensors");
     let trained = checkpoint::weightio::WeightReader::open(weights.to_str().unwrap()).expect("the checkpoint opens");
     let cfg = qwen35moe::config::Qwen35Config::from_json(&trained.config());
     assert_eq!(trained.names().count(), cfg.param_list().len(), "every tensor of the architecture is written");

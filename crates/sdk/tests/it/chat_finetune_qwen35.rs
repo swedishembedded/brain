@@ -206,7 +206,7 @@ fn a_qwen35_full_fine_tune_trains_every_weight_and_writes_a_base() {
     assert!(!out.join("tuned.brain.safetensors").exists(), "the training format is not left behind");
     // The written weights are a qwen35 base: they open, and every tensor of the
     // architecture is there.
-    let base = qwen35::base_source::open_base(&checkpoint.join("model.safetensors")).expect("the checkpoint opens as a qwen35 base");
+    let base = qwen35::base_source::open_base(&checkpoint.join("model.brain.safetensors")).expect("the checkpoint opens as a qwen35 base");
     assert_eq!(base.cfg.param_list().len(), qwen35::config::Qwen35Config::tiny().param_list().len());
 }
 

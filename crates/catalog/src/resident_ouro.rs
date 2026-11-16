@@ -54,19 +54,26 @@ const MAX_ROWS: f64 = 65_536.0;
 /// Largest gradient-norm clip a run may ask for.
 const MAX_CLIP: f64 = 1_000_000.0;
 
+/// The `train` action's defaults.
+const DEFAULT_STEPS: u32 = 32;
+const DEFAULT_SEQ: u32 = 128;
+const DEFAULT_BATCH_ROWS: u32 = 2;
+const DEFAULT_LR: f32 = 1e-5;
+const DEFAULT_CLIP: f32 = 1.0;
+
 fn train_spec() -> ActionSpec {
-    let d = ouro::train::TrainRun { steps: 32, seq: 128, batch: 2, lr: 1e-5, clip: 1.0, activations: None };
-    ActionSpec::new("train", "a short causal-LM run on the checkpoint itself (the released exit-probability-weighted objective, AdamW), on text or raw token ids")
+    ActionSpec::new("train", "a short causal-LM run on the checkpoint itself (the released exit-probability-weighted objective, AdamW at a constant rate, through the shared training loop over windows of the text), on text or raw token ids")
         .training()
         .streaming()
         .cancellable()
         .param(ParamSpec::new("text", ParamType::Str, "the training text, tokenized with the checkpoint's tokenizer (default: a short passage of prose)"))
         .param(ParamSpec::new("ids", ParamType::Str, "comma-separated token ids instead of text, for a vocabulary no tokenizer produces"))
-        .param(ParamSpec::new("steps", ParamType::Int, "optimizer steps").default(json!(d.steps)).min(1.0).max(capability::bounds::TRAIN_STEPS))
-        .param(ParamSpec::new("seq", ParamType::Int, "tokens per row").default(json!(d.seq)).min(2.0).max(MAX_ROWS))
-        .param(ParamSpec::new("batch", ParamType::Int, "rows per step").default(json!(d.batch)).min(1.0).max(MAX_ROWS))
-        .param(ParamSpec::new("lr", ParamType::Float, "AdamW learning rate").default(json!(d.lr)).min(0.0).max(capability::bounds::UNIT))
-        .param(ParamSpec::new("clip", ParamType::Float, "global gradient-norm clip; 0 disables it").default(json!(d.clip)).min(0.0).max(MAX_CLIP))
+        .param(ParamSpec::new("steps", ParamType::Int, "optimizer steps").default(json!(DEFAULT_STEPS)).min(1.0).max(capability::bounds::TRAIN_STEPS))
+        .param(ParamSpec::new("seq", ParamType::Int, "tokens per row").default(json!(DEFAULT_SEQ)).min(2.0).max(MAX_ROWS))
+        .param(ParamSpec::new("batch", ParamType::Int, "rows per step").default(json!(DEFAULT_BATCH_ROWS)).min(1.0).max(MAX_ROWS))
+        .param(ParamSpec::new("lr", ParamType::Float, "AdamW learning rate").default(json!(DEFAULT_LR)).min(0.0).max(capability::bounds::UNIT))
+        .param(ParamSpec::new("clip", ParamType::Float, "global gradient-norm clip; 0 disables it").default(json!(DEFAULT_CLIP)).min(0.0).max(MAX_CLIP))
+        .param(ParamSpec::new("seed", ParamType::Int, "seed of the window draws (random when omitted; the result carries the one used)").min(0.0).max(capability::bounds::EXACT_INTEGER))
         .param(ParamSpec::new("save", ParamType::Str, "where to write the trained checkpoint (.safetensors); omit to keep nothing").host_resolved())
         .param(ParamSpec::new(
             "activations",
@@ -133,12 +140,13 @@ impl capability::Action for TrainAction {
             }
         };
         let run = ouro::train::TrainRun {
-            steps: inv.get_i64("steps").unwrap_or(32).max(1) as u32,
-            seq: inv.get_i64("seq").unwrap_or(128).max(2) as u32,
-            batch: inv.get_i64("batch").unwrap_or(2).max(1) as u32,
-            lr: inv.get_f64("lr").unwrap_or(1e-5) as f32,
-            clip: inv.get_f64("clip").unwrap_or(1.0) as f32,
+            steps: inv.get_i64("steps").map_or(DEFAULT_STEPS, |v| v.max(1) as u32),
+            seq: inv.get_i64("seq").map_or(DEFAULT_SEQ, |v| v.max(2) as u32),
+            batch: inv.get_i64("batch").map_or(DEFAULT_BATCH_ROWS, |v| v.max(1) as u32),
+            lr: inv.get_f64("lr").map_or(DEFAULT_LR, |v| v as f32),
+            clip: inv.get_f64("clip").map_or(DEFAULT_CLIP, |v| v as f32),
             activations: inv.get_str("activations").map(|a| model::saved::SavedPolicy::parse_activations(&a)).transpose()?,
+            seed: inv.seed()?.unwrap_or_else(data::rng::random_seed),
         };
         let save = inv.get_str("save");
         let t = ouro::train::train(Path::new(weights), &corpus, &run, save.as_deref().map(Path::new), &mut |step, loss| {
@@ -149,7 +157,7 @@ impl capability::Action for TrainAction {
             progress(Progress::step(t.steps, run.steps, format!("cancelled after step {}", t.steps)));
             return Err(capability::failure::CANCELLED.to_string());
         }
-        Ok(capability::Outcome::new().set("first_loss", json!(t.first_loss)).set("final_loss", json!(t.final_loss)).set("steps", json!(t.steps)).set("saved", json!(save)))
+        Ok(capability::Outcome::new().set("first_loss", json!(t.first_loss)).set("final_loss", json!(t.final_loss)).set("steps", json!(t.steps)).set("seed", json!(run.seed)).set("saved", json!(save)))
     }
 }
 

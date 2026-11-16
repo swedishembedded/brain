@@ -323,9 +323,12 @@ pub struct PreferenceMargins {
     pub skipped: usize,
 }
 
+/// The file a brain-format checkpoint directory holds its weights in: the name the model store resolves a base by.
+pub const BRAIN_WEIGHTS_FILE: &str = "model.brain.safetensors";
+
 /// The [`ChatTrainer::export_checkpoint`] of a family with no Hugging Face
 /// writer: a checkpoint directory holding the brain-format weights as
-/// `model.safetensors` and the tokenizer files of `tokenizer_dir`. An adapter
+/// [`BRAIN_WEIGHTS_FILE`] and the tokenizer files of `tokenizer_dir`. An adapter
 /// is not folded in. The weights are copied in chunks, `keep_going` asked
 /// before each; once it says no the copy is removed and the answer is
 /// `Err(CANCELLED)`.
@@ -338,7 +341,9 @@ pub fn export_brain_checkpoint(family: &str, trained: &Path, tokenizer_dir: &Pat
     }
     let created = !out.exists();
     std::fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
-    let weights = out.join("model.safetensors");
+    // The name the model store opens a brain checkpoint by: a directory holding it is a base `train`, `full_train`
+    // and `brain serve` resolve by `<vendor>/<repo>` (under any other name the store finds no weights in it).
+    let weights = out.join(BRAIN_WEIGHTS_FILE);
     let mut copy_weights = || -> Result<bool, String> {
         let io = |e: std::io::Error| format!("{}: {e}", trained.display());
         let mut from = std::fs::File::open(trained).map_err(io)?;
@@ -431,7 +436,7 @@ mod tests {
         assert_eq!(err.unwrap_err(), capability::failure::CANCELLED);
         assert_eq!(std::fs::read_dir(&out).unwrap().count(), 0, "a stopped export leaves no partial weights in a directory that was there");
         export_brain_checkpoint("toy", &trained, &dir, &out, None, &mut || true).unwrap();
-        assert_eq!(std::fs::metadata(out.join("model.safetensors")).unwrap().len(), 40 << 20);
+        assert_eq!(std::fs::metadata(out.join(super::BRAIN_WEIGHTS_FILE)).unwrap().len(), 40 << 20);
         std::fs::remove_dir_all(&dir).ok();
     }
 }

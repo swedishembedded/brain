@@ -53,3 +53,7 @@ pub const SECONDS: f64 = 600.0;
 pub const SAMPLE_RATE: f64 = 384_000.0;
 /// A probability, a confidence or a strength on a 0-1 scale.
 pub const UNIT: f64 = 1.0;
+
+/// The largest integer a JSON number read as `f64` holds exactly (2^53 - 1): the ceiling of an identifier-like count
+/// such as a seed, so the value a caller sends is the value a run uses and reports.
+pub const EXACT_INTEGER: f64 = 9_007_199_254_740_991.0;

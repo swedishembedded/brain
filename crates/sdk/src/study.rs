@@ -226,6 +226,13 @@ impl ArchEntry {
         ArchEntry { id: A::ID, family: A::FAMILY, token_objectives: A::TOKEN_OBJECTIVES, chat_fine_tune: false, chat: None, chat_lora_fine_tune: A::CHAT_LORA_FINE_TUNE, study: run_for::<A>, improve: run_improve_dyn::<A> }
     }
 
+    /// The row of an architecture that only has a [`model::finetune::ChatTrainer`]: the generic full-parameter
+    /// fine-tuner, raw-text pretraining and (where the trainer declares it) from-scratch initialization run on it,
+    /// and the document study and improve cycle, which train a LoRA adapter, refuse it by the capability it lacks.
+    pub(crate) const fn trainer_only<T: model::finetune::ChatTrainer + 'static>(id: &'static str, family: &'static str) -> ArchEntry where T::Trained: 'static {
+        ArchEntry { id, family, token_objectives: false, chat_fine_tune: true, chat: Some(ChatEntry::of::<T>()), chat_lora_fine_tune: false, study: no_study::<T>, improve: no_improve::<T> }
+    }
+
     /// This row with the generic full-parameter and preference fine-tuners
     /// running on the model family's `ChatTrainer`.
     pub(crate) const fn with_chat_trainer<T: model::finetune::ChatTrainer + 'static>(mut self) -> ArchEntry where T::Trained: 'static {
@@ -276,7 +283,18 @@ const ARCHS: &[ArchEntry] = &[
     ArchEntry::of::<Qwen35>().with_chat_trainer::<qwen35::finetune::Qwen35Trainer>(),
     ArchEntry::of::<Qwen35Moe>().with_chat_trainer::<qwen35moe::finetune::Qwen35MoeTrainer>(),
     ArchEntry::of::<Ripple>().with_chat_trainer::<ricursive::finetune::RippleTrainer>(),
+    ArchEntry::trainer_only::<ouro::finetune::OuroTrainer>("ouro", ouro::finetune::FAMILY),
 ];
+
+/// The document study of an architecture with no LoRA trainer: refused by the capability, naming the architecture.
+fn no_study<T: model::finetune::ChatTrainer>(_: &Inputs) -> std::io::Result<DocumentStudyReport> {
+    Err(std::io::Error::other(Unsupported::new(T::LORA_BASES.model, Capability::ChatLoraFineTune)))
+}
+
+/// The improve cycle of an architecture with no LoRA trainer: refused like [`no_study`].
+fn no_improve<T: model::finetune::ChatTrainer>(_: &Improve, _: DynEnv<'_>, _: DynVerifier<'_>, _: &ImproveOptions, _: &Path, _: &str, _: &Path) -> std::io::Result<rl::improve::CycleOutcome> {
+    Err(std::io::Error::other(Unsupported::new(T::LORA_BASES.model, Capability::ChatLoraFineTune)))
+}
 
 /// The row for architecture `id`, or the refusal listing the known ids.
 pub(crate) fn arch(id: &str) -> Result<&'static ArchEntry> {
@@ -303,11 +321,22 @@ type ImproveFn = for<'e> fn(&Improve, DynEnv<'e>, DynVerifier<'e>, &ImproveOptio
 /// config names nothing registered, or the registry row has no entry here.
 /// What lets a caller leave the architecture unnamed for a Hugging Face
 /// checkpoint of the 27B.
+///
+/// A directory with no `config.json` (a brain checkpoint a full fine-tune or a from-scratch initialization wrote) is
+/// told by the card of its `model.safetensors` or `model.brain.safetensors`: the row whose adapter family the card
+/// names.
 pub(crate) fn arch_of_checkpoint(dir: &Path) -> Option<&'static ArchEntry> {
-    let config: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("config.json")).ok()?).ok()?;
+    let Ok(bytes) = std::fs::read(dir.join("config.json")) else { return arch_of_card(dir) };
+    let config: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
     let class = config["architectures"].get(0).and_then(|c| c.as_str()).or_else(|| config["model_type"].as_str())?;
     let row = brain_arch::by_hf_config(class, |key| config.get(key).is_some())?;
     ARCHS.iter().find(|a| a.id == row.id)
+}
+
+/// The row whose family the card of the brain checkpoint in `dir` names.
+fn arch_of_card(dir: &Path) -> Option<&'static ArchEntry> {
+    let card = ["model.safetensors", "model.brain.safetensors"].iter().find_map(|f| checkpoint::st::read_card(dir.join(f).to_str()?).ok().flatten())?;
+    ARCHS.iter().find(|a| a.family == card.family)
 }
 
 fn arch_names() -> String {
