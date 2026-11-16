@@ -710,6 +710,16 @@ pub enum KqScale {
 /// of the `weight_scale_inv` checkpoint convention.
 pub const FP8_BLOCK: u32 = 128;
 
+/// Whether a row window of a block-scaled FP8 weight of width `k` that starts at row `first` (a whole number of scale
+/// blocks) has its scales start on a 16-byte boundary. A scale row is `k / FP8_BLOCK` words, and the native candidates
+/// bind a window's scales only from such a boundary (an odd number of blocks a row puts every other part's start off it).
+/// Only such a window is a weight of its own ([`Ops::matmul_rows`]): its product is the separate weight's bit for bit;
+/// any other is a product of its decoded rows, at another precision. Every start is aligned when `k` is a multiple of 512,
+/// as every released checkpoint's width is.
+pub fn fp8_window_scales_aligned(first: u32, k: u32) -> bool {
+    first.is_multiple_of(FP8_BLOCK) && (u64::from(first / FP8_BLOCK) * u64::from(k.div_ceil(FP8_BLOCK))).is_multiple_of(4)
+}
+
 impl Weight {
     /// A dense fp32 weight `[n, k]` over a parameter buffer the model already holds (shared, not copied): how
     /// a model hands an fp32 tensor to the shared ops (the chunked LM head, per-leaf matmuls) without naming
@@ -1782,7 +1792,7 @@ impl Ops {
         let Weight::FP8 { w: wb, s: sb, n: weight_n, k, fmt: crate::fp8::Fp8Format::E4M3, block } = w else { return false };
         let (first, count) = rows;
         let (m, k) = (act.m, *k);
-        let aligned = first.is_multiple_of(FP8_BLOCK) && (count.is_multiple_of(FP8_BLOCK) || first + count == *weight_n);
+        let aligned = fp8_window_scales_aligned(first, k) && (count.is_multiple_of(FP8_BLOCK) || first + count == *weight_n);
         if *block != FP8_BLOCK || !aligned || !k.is_multiple_of(FP8_BLOCK) || !self.rounding_natives_allowed() || !self.providers.runs("cuda") || !self.gpu.has_fp8_linear() {
             return false;
         }

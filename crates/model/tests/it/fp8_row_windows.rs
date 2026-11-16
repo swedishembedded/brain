@@ -108,6 +108,58 @@ fn a_window_of_an_fp8_weight_computes_what_the_same_rows_as_a_weight_compute() {
     }
 }
 
+/// Which windows are weights of their own is [`model::ops::fp8_window_scales_aligned`]: a part whose scales start on a
+/// 16-byte boundary computes its rows as a separate weight does, bit for bit, and one whose rows hold an odd number of
+/// scale blocks (`K` of 128 or 384) starts its second part's scales off that boundary, where the native candidates do not
+/// bind it, so its product takes the decoded rows (exact to the stored values) instead. A model holding parts as one weight
+/// asks the predicate, or its prefill and its decode step multiply the same rows at different precisions.
+#[test]
+fn a_window_is_a_weight_of_its_own_exactly_where_its_scales_are_aligned() {
+    let ops = Ops::new(Gpu::new(training_kernel_list())).expect("Ops::new");
+    if !ops.fp8_windows_native() {
+        return brain_testutil::skip_unavailable("row windows of an FP8 weight need the native FP8 candidates (CUDA, Hopper)");
+    }
+    let mut rng = Lcg::new(data::rng::random_seed());
+    let (n1, n2) = (256usize, 256usize);
+    for k in [128usize, 256, 384, 512] {
+        let aligned = model::ops::fp8_window_scales_aligned(n1 as u32, k as u32);
+        assert_eq!(aligned, (k / 128) % 2 == 0, "K={k}: two scale blocks start {} bytes into the scales", 2 * (k / 128) * 4);
+        let raw_first = rng.vec_scaled(n1 * k, 0.5);
+        let raw_second = rng.vec_scaled(n2 * k, 0.5);
+        let second = Weight::upload(&ops, &raw_second, n2, k, Dtype::F8E4M3);
+        let fused = Weight::upload(&ops, &[raw_first.as_slice(), raw_second.as_slice()].concat(), n1 + n2, k, Dtype::F8E4M3);
+        let g = ops.gpu();
+        let decoded = {
+            let out = g.storage((n2 * k) as u64);
+            let mut steps = Vec::new();
+            ops.decode_tile(&mut steps, &second, 0, n2 as u32, &out);
+            g.submit(&[], &steps);
+            g.read(&out, n2 * k)
+        };
+        for m in [1usize, 3, 100] {
+            let x = g.storage_init("x", &rng.vec_scaled(m * k, 1.0));
+            let product = |w: &Weight, rows: (u32, u32)| {
+                let y = g.storage((m * rows.1 as usize) as u64);
+                let mut steps = Vec::new();
+                let act = ops.act_f32(&x, 0, m as u32, k as u32);
+                ops.matmul_rows(&mut steps, w, rows, &act, &y, 0);
+                g.submit(&[], &steps);
+                g.read(&y, m * rows.1 as usize)
+            };
+            let window = product(&fused, (n1 as u32, n2 as u32));
+            if aligned {
+                assert_eq!(bits(window), bits(product(&second, (0, n2 as u32))), "K={k} m={m}: the window differs from its rows as a weight");
+                continue;
+            }
+            let xs = g.read(&x, m * k);
+            let host: Vec<f32> = (0..m).flat_map(|r| (0..n2).map(move |c| (r, c))).map(|(r, c)| (0..k).map(|i| f64::from(xs[r * k + i]) * f64::from(decoded[c * k + i])).sum::<f64>() as f32).collect();
+            // The decoded rows' product: f32 accumulation over a few rows, bf16 operands on the tile product above them.
+            let err = rel_l2(&window, &host);
+            assert!(err < 5e-3, "K={k} m={m}: the window is {err} (relative L2) from the product of its stored rows");
+        }
+    }
+}
+
 #[test]
 fn one_candidate_on_the_whole_weight_and_on_its_parts_gives_the_same_bits() {
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());

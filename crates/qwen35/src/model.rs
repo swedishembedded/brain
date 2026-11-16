@@ -1774,7 +1774,8 @@ impl Fusion {
 
     /// Whether layer `l` of an inference build at `tier` holds the group as one FP8 weight: every part is FP8 tier, the
     /// device runs FP8 products natively on row windows (a window must be a weight of its own for the prefill to keep its
-    /// numerics), the rows are whole scale blocks, and for `in_proj_qkv | in_proj_z` the streaming GDN kernels that read the
+    /// numerics), the rows are whole scale blocks starting where their scales may be read from
+    /// ([`model::ops::fp8_window_scales_aligned`]), and for `in_proj_qkv | in_proj_z` the streaming GDN kernels that read the
     /// fused product in place are offered.
     fn held_at(self, cfg: &Qwen35Config, tier: &TierPolicy, ops: &Ops, gpu: &Gpu, l: usize) -> bool {
         let block = model::ops::FP8_BLOCK;
@@ -1789,6 +1790,8 @@ impl Fusion {
             && self.parts().iter().all(|part| tier.want(&format!("blocks.{l}.{part}")) == Dtype::F8E4M3)
             && cfg.d_model.is_multiple_of(block)
             && self.part_rows(cfg).iter().all(|n| n % block == 0)
+            // Every part's window binds its own scales: each part must start where they may be read from.
+            && self.part_rows(cfg).iter().scan(0u32, |first, &rows| Some((std::mem::replace(first, *first + rows), rows))).all(|(first, rows)| rows == 0 || model::ops::fp8_window_scales_aligned(first, cfg.d_model))
     }
 }
 
