@@ -9,6 +9,12 @@
 //! faster tier both sides dispatch the same kernels and the check holds
 //! trivially; on one that has them it is the check that the FLOP pricer does
 //! not undercount the hardware it describes.
+//!
+//! Both activations are packed as the reference packs them. `Ops::act` on the
+//! production registry otherwise leaves out the int8 packing where every
+//! candidate of the shape class reads bf16 rows (a choice of the device's
+//! tuned table), and the totals would differ by work the production path
+//! rightly skips rather than by what its products cost.
 
 use std::sync::Arc;
 
@@ -38,7 +44,7 @@ fn priced(ops: &Ops, m: usize, widths: &[usize], k: usize, dt: Dtype, form: Form
     }
     let outs: Vec<_> = widths.iter().map(|&n| g.storage((m * n) as u64)).collect();
     let mut steps = Vec::new();
-    let act = ops.act(&mut steps, &x, 0, m as u32, k as u32);
+    let act = model::ops::row_count_invariant(|| ops.act(&mut steps, &x, 0, m as u32, k as u32));
     match form {
         Form::Each => weights.iter().zip(&outs).for_each(|(w, y)| ops.matmul(&mut steps, w, &act, y, 0)),
         Form::Group => ops.matmul_group(&mut steps, &weights.iter().zip(&outs).collect::<Vec<_>>(), &act),

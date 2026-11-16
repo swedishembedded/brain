@@ -62,12 +62,16 @@ fn check(ops: &Ops, w: &Weight, label: &str) {
         let mut steps = Vec::new();
         let act = ops.act_f32(&xb, 0, m as u32, k as u32);
         ops.matmul_rows(&mut steps, w, (first as u32, count as u32), &act, &y, 0);
+        // A device with native FP8 linears (sm_90) serves the rows its tuned table names a candidate for on that
+        // candidate, which also reads the stored bytes but against the activation rounded to bf16 (or E4M3).
+        let native_linear = g.cost_of(&steps).by_kernel.keys().any(|name| name.starts_with("native:") && !name.contains("cast"));
         g.submit(&[], &steps);
         let got = g.read(&y, m * count);
         let want = host_product(&x, m, k, &wd, first, count);
         for (i, (a, (b, scale))) in got.iter().zip(&want).enumerate() {
-            // The GEMV accumulates in f32; the tile decode above the row cap multiplies on bf16 tensor cores.
-            let tol = if m > gemv_rows { 2e-2 * scale } else { 1e-5 * scale } + 1e-6;
+            // The GEMV accumulates in f32; the tile decode above the row cap and a native linear multiply on tensor
+            // cores from bf16 (or narrower) operands.
+            let tol = if m > gemv_rows || native_linear { 2e-2 * scale } else { 1e-5 * scale } + 1e-6;
             assert!((*a as f64 - b).abs() <= tol, "{label} m={m} first={first}: element {i} is {a}, host product {b} (scale {scale})");
         }
     }
