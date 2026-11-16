@@ -8012,6 +8012,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sample-models-ouro"
+version = "5.1.0"
+dependencies = [
+ "brain",
+ "brain-checkpoint",
+ "brain-data",
+ "brain-ouro",
+ "serde_json",
+]
+
+[[package]]
 name = "sample-models-qwen3"
 version = "5.1.0"
 dependencies = [

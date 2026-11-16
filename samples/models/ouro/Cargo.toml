@@ -1,0 +1,23 @@
+[package]
+# Package names under samples/ are derived from the path:
+# `samples/models/ouro` -> `sample-models-ouro`.
+name = "sample-models-ouro"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Sample application: a tiny Ouro looped decoder from random weights - a byte-level vocabulary and chat template, raw-text pretraining with held-out evaluation and its training rate, then a greedy continuation from the trained checkpoint."
+publish = false
+
+[dependencies]
+# The from-scratch pipeline is the SDK's (samples/README.md rule 2: it names the
+# surface it uses); sampling the trained checkpoint is the model's own decode
+# step, which the SDK does not wrap (rule 1).
+brain = { workspace = true, features = ["study"] }
+brain-ouro.workspace = true
+brain-data.workspace = true
+brain-checkpoint.workspace = true
+serde_json.workspace = true
+
+[package.metadata.brain]
+# `make check/samples` fails if the real `cargo tree` closure exceeds this.
+max-brain-crates = 61

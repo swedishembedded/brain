@@ -22,4 +22,5 @@ brain = { workspace = true, features = ["text", "study"] }
 # 56 -> 61: as the text surface (brain-ricursive, brain-dflash2, brain-
 # llmserve, the leaf brain-gpu-supervisor under residency) plus brain-modelopt
 # for the ModelOptimizer surface.
-max-brain-crates = 61
+# 61 -> 62: the study surface registers Ouro's chat trainer (brain-ouro).
+max-brain-crates = 62
