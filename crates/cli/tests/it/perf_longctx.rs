@@ -79,8 +79,13 @@ fn qwen3_paged_engine_runs_longctx() {
     let a = smoke(&format!("qwen:{dir}"), "qwen", &[]);
     assert_artifact_is_honest(&a);
     assert_eq!(a["target"]["config"]["kv_precision"], "int8");
-    // The release stores bf16: measured at the tier `brain serve` serves it at, unless --weight-format names one.
-    assert_eq!(a["target"]["config"]["weight_tier"], "bf16", "the stored tier is the default");
+    // Measured at the floating tier the checkpoint stores, the one `brain serve` serves it at, unless --weight-format
+    // names one. The tier is read from the store's file: the Hub release stores bf16, a converted copy fp32.
+    let stored = match qwen3::stored_weight_tier(&dir).expect("the store's checkpoint opens") {
+        qwen3::Dtype::F32 => "fp32".to_string(),
+        other => other.name().to_string(),
+    };
+    assert_eq!(a["target"]["config"]["weight_tier"], stored.as_str(), "the stored tier is the default");
     let int8 = smoke(&format!("qwen:{dir}"), "qwen-int8", &["--weight-format", "int8"]);
     assert_eq!(int8["target"]["config"]["weight_tier"], "int8", "--weight-format wins");
 }
