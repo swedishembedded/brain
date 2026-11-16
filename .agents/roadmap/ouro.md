@@ -87,22 +87,26 @@ gate and a pass-selected or exit-weighted head.
 - Measured on the CPU backend (Cranelift WGSL JIT, 72 threads, this node, 2026-11-16, `samples/models/ouro`):
   the tiny size (150k parameters, rows of 64, batch 8) trains about 1.4k tokens/s over a whole run and its loss
   falls 5.96 -> 1.21 in 200 steps; the default size (hidden 256, 4 layers, 4 passes, 4 heads, vocabulary 4096,
-  5.3M parameters, rows of 1024, batch 4) about 61 tokens/s over a whole run. See below for what the step spends.
+  5.3M parameters, rows of 1024, batch 4) about 61 tokens/s over a whole run.
+- Training runs on the card ([489](../knowledge/489-the-looped-decoder-trained-on-the-card-through-cuda-core-gemms-and-a-quadratic-loss-gradient-so-a-tiny-model-ran-at-a-tenth-of-the-card.md),
+  [490](../knowledge/490-the-tensor-core-flash-attention-was-written-for-heads-of-128-and-256-so-a-64-wide-head-trained-on-the-portable-kernel-at-a-fifth-of-the-rate.md)):
+  the products through `Ops` (library TF32), the flash trio (native fp16 at head widths 64, 128, 256), the two-stage
+  loss gradient, the two-stage gain gradient. Default size on gpu3, step rate after the first: rows of 1024 at batch
+  8 4,680 -> 173,600 tokens/s, flattening near 250k from batch 64 (rows of 512 at batch 256: 270k). Gradient checks
+  pin the fp32 reference (`Ouro::new_train_with(.., Fp32Reference)`). A served `pretrain`, `full_train` or `train`
+  that would land on a fallback CPU is refused unless it sets `allow_cpu`.
+- Training on the CPU backend (NEON GEMM, knowledge 486): default size 71 -> 2,365 tokens/s; not the path to use.
+- Serving ([491](../knowledge/491-the-looped-decoder-served-a-batch-one-sequence-at-a-time-through-the-portable-attention-triad-so-sixty-four-agents-shared-3700-tokens-a-second.md)):
+  every running sequence decodes in one batched step (each row's own position, block tables and exit pass); the
+  native batched decode attention at head widths 64 and 128; one prompt arena for prefill and scoring; a sequence
+  addresses the model's positions while the pool and the batch are planned from the card. Teacher-forced
+  `score_continuation` is served (policy traces). Default size on gpu3, agent workload (600 in, 128 out),
+  `brain perf run sweep --target ouro:<checkpoint>`: 715 / 3,351 / 8,208 / 11,085 tokens/s at 1 / 8 / 32 / 64
+  streams; 3.7 ms to the first token at one stream.
 
 ## Left to do
 
-- CPU training rate of the from-scratch sizes (numbers above). Profiled (2026-11-16, `brain --device cpu
-  --kernel-profile ouro train` on the default size, rows of 1024, batch 4, this node's CPU backend, 288 threads): a
-  step is 55 s, 74 tokens/s; `gqa_bwd_dscores` (the materialized attention's score gradient, 32 calls of 1.6 s)
-  takes 40 % of the kernel time, `matmul_dw` 22 %, `ce_grad` 9 % (every pass's `[rows x vocab]` logits),
-  `attn_softmax` 8 %, the forward `matmul` 6 %. The training graph materializes `b x h x t x t` scores per layer and
-  pass; a flash-style training attention (the GQA trainers' `flash_gqa_train` path) and a CPU GEMM candidate for
-  `matmul_dw` are what make a 5M-parameter model train at host speed. The run's initial loss probe (five forwards,
-  16 s) is paid once per run.
-- Teacher-forced `score` for ouro (log-probabilities of a continuation, for policy gradient and served
-  `policy_trace`): not built.
 - LoRA on the looped stack: not built (`OuroTrainer::train_lora` refuses by name).
-
 - End-to-end serving has one measured turn: an agent runtime against the
   served 1.4B checkpoint at a 6144-token context completed a tool-using task -
   it called the file-read tool, the tool returned the file's content, and its
@@ -113,16 +117,6 @@ gate and a pass-selected or exit-weighted head.
   a 24 GB card; lower-precision serving weights (bf16 storage) are the step
   that puts a 6k context on one card. Prefix reuse and host offload stay off
   for the looped path until they are pass-aware.
-- Decode speed: one token's graph is recorded once; a step writes the new
-  K/V slot, two rope uniforms and the block table, then submits. A 16-token
-  greedy continuation on the 1.4B checkpoint at a 6144-token capacity,
-  including its load and a 5-token prefill, takes 10.5 s end to end.
-- Prefill speed: the whole-prompt path now uses the flash causal attention
-  kernel (no score slabs) and the register-tiled GEMM for prefill-sized linear
-  slabs (the naive kernel still serves a decode row and the CPU JIT). A
-  160-token prompt takes that path and matches the model's own greedy tokens;
-  chunked paged prefill bounds memory beyond ~6k tokens.
 - A served end-to-end check of a from-scratch model emitting a tool call over `/v1/chat/completions` (needs a model
   trained far enough to call tools).
-- Threshold-selected decode across a batch whose rows exit on different
-  passes.
+- LoRA serving (runtime adapters) on the looped path.
