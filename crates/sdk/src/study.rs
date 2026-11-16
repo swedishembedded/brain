@@ -974,9 +974,12 @@ mod tests {
     /// of each registered architecture.
     #[test]
     fn declared_capabilities_match_the_models() {
+        fn offered_by<M: Model>(cfg: M::Config) -> bool {
+            let init = M::init_weights(&cfg, 7); // seed: any weights serve, only the capability is read
+            M::new(cfg, 1, 4, &init).token_objectives().is_some()
+        }
         fn offered<A: StudyArch>(cfg: <A::M as Model>::Config) -> bool {
-            let init = <A::M as Model>::init_weights(&cfg, 7); // seed: any weights serve, only the capability is read
-            <A::M as Model>::new(cfg, 1, 4, &init).token_objectives().is_some()
+            offered_by::<A::M>(cfg)
         }
         let claims = [
             (Qwen3::ID, Qwen3::TOKEN_OBJECTIVES, offered::<Qwen3>(qwen3::config::QwenConfig::tiny())),
@@ -986,6 +989,8 @@ mod tests {
             (Qwen35::ID, Qwen35::TOKEN_OBJECTIVES, offered::<Qwen35>(qwen35::config::Qwen35Config::tiny())),
             (Qwen35Moe::ID, Qwen35Moe::TOKEN_OBJECTIVES, offered::<Qwen35Moe>(qwen35moe::config::Qwen35Config::tiny())),
             (Ripple::ID, Ripple::TOKEN_OBJECTIVES, offered::<Ripple>(ricursive::TrainConfig::tiny())),
+            // A trainer-only row: its claim is the row's own, the model is asked the same question.
+            ("ouro", arch_in(ARCHS, "ouro").unwrap().token_objectives, offered_by::<ouro::model::Ouro>(ouro::OuroConfig::tiny())),
         ];
         for (id, claimed, actual) in claims {
             assert_eq!(claimed, actual, "{id}: the registry claims token_objectives={claimed} but the model offers {actual}");
