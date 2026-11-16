@@ -5,7 +5,11 @@
 //! file: each links the whole dependency tree, so a binary per file
 //! multiplied build time and disk for nothing. A test here must not change
 //! process-wide state (the current directory, environment variables): the
-//! others run beside it; `auto_pipeline`, `depth_pipeline`, `detection_pipeline`, `embedding_pipeline`, `forecast_pipeline`, `ground_pipeline`, `image_pipeline`, `music_pipeline`, `restore_pipeline`, `segment_pipeline`, `text_pipeline`, `text_pipeline_variants`, `transcribe_pipeline`, `tts_pipeline`, `upscale_pipeline`, `video_pipeline`, `vlm_pipeline` keep binaries of their own.
+//! others run beside it. A `Device` other than the default is the exception
+//! the chat specs take: the SDK applies it to the whole process, so a spec
+//! here must hold on whichever backend the CPU specs leave behind, and one that
+//! needs the process's own device runs in a child process or in
+//! `resident_models`. `resident_models`, `auto_pipeline`, `depth_pipeline`, `detection_pipeline`, `embedding_pipeline`, `forecast_pipeline`, `ground_pipeline`, `image_pipeline`, `music_pipeline`, `restore_pipeline`, `segment_pipeline`, `text_pipeline`, `text_pipeline_variants`, `transcribe_pipeline`, `tts_pipeline`, `upscale_pipeline`, `video_pipeline`, `vlm_pipeline` keep binaries of their own.
 
 // The fixtures build a Qwen3 (and Qwen3.5) checkpoint, so each exists for the surface whose tests use it.
 #[cfg(feature = "study")]
@@ -50,8 +54,4 @@ mod model_pruner;
 mod preference_finetune;
 mod score_long_record_real;
 mod score_tokens_qwen35;
-mod speech_ingress;
 mod timeline;
-mod tts_policy;
-mod tts_profile;
-mod tts_resident;
