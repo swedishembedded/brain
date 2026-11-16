@@ -244,7 +244,11 @@ impl<'a, M: Model> ModelRollout<'a, M> {
     /// One completion, consuming `rng` exactly the way the pre-rollout
     /// `generate`'s inline loop did (no extra draws) - what makes `n == 1`
     /// byte-identical to that implementation.
-    fn sample_one(&self, prompt: &[u32], params: &RolloutParams, rng: &mut Rng) -> Completion {
+    ///
+    /// `key_seed` is the request seed of a sample the scheduler draws by its keyed rule (`serve::RowDraw`): such a
+    /// sample is drawn here by the same rule from the same seed, so the dense model and the served path draw the same
+    /// tokens; any other sample draws from `rng`.
+    fn sample_one(&self, prompt: &[u32], params: &RolloutParams, rng: &mut Rng, key_seed: Option<u64>) -> Completion {
         // An empty prompt is zero tokens, and a forward pass over zero
         // tokens reaches the device as a matmul with zero rows, which aborts
         // the process from somewhere that says nothing about the caller.
@@ -257,16 +261,20 @@ impl<'a, M: Model> ModelRollout<'a, M> {
         let mut logprobs = Vec::with_capacity(params.max_new);
         let mut stop = StopReason::MaxNew;
         let mut eos_lp = None;
-        // Drawn exactly as the scheduler draws a sequence's token from its whole row
-        // (`serve::sample_logits_row`, with the sequence's own processor state), so the same
-        // seed gives the same tokens and log-probabilities on the dense model as when served.
+        // Drawn exactly as the scheduler draws a sequence's token from its whole row (the keyed
+        // `serve::draw_row`, or `serve::sample_logits_row` with the sequence's own processor state for a
+        // request with a logit processor), so the same seed gives the same tokens and log-probabilities on
+        // the dense model as when served.
         let mut procs = serve::ProcessorState::default();
         for _ in 0..params.max_new {
             let window: &[u32] = if ctx.len() > block { &ctx[ctx.len() - block..] } else { &ctx };
             let logits = self.m.logits_all(window).expect("ModelRollout: model has no token-classification head");
             let mut row = logits[logits.len() - vocab..].to_vec();
             let sample_ctx = serve::SampleContext { context: &ctx, prompt_len: prompt.len() };
-            let (next, logprob) = serve::sample_logits_row(&mut row, params.sample, &sample_ctx, &mut procs, rng);
+            let (next, logprob) = match key_seed.and_then(|seed| serve::RowDraw::of(&params.sample, seed, ctx.len())) {
+                Some(d) => serve::draw_row(&row, d),
+                None => serve::sample_logits_row(&mut row, params.sample, &sample_ctx, &mut procs, rng),
+            };
             match accept(&mut tokens, &mut logprobs, next, logprob, params.eos, params.max_new) {
                 Some(s) => {
                     stop = s;
@@ -286,12 +294,14 @@ impl<'a, M: Model> Rollout for ModelRollout<'a, M> {
         if n == 1 {
             // No sub-stream split: `rng` is consumed directly, exactly as the
             // pre-rollout single-sample `generate` loop did.
-            return vec![self.sample_one(prompt, params, rng)];
+            // A keyed sample takes its request seed from `rng`, as the scheduler's rollout does.
+            let key_seed = params.sample.row_drawable().then(|| rng.next_u64());
+            return vec![self.sample_one(prompt, params, rng, key_seed)];
         }
         (0..n)
             .map(|_| {
-                let mut sub = Rng::new(rng.next_u64());
-                self.sample_one(prompt, params, &mut sub)
+                let seed = rng.next_u64();
+                self.sample_one(prompt, params, &mut Rng::new(seed), Some(seed))
             })
             .collect()
     }

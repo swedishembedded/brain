@@ -860,9 +860,9 @@ Open, with the measured reason:
       difference in four launches either, so the closure rests on the mechanism, not on a before/after of the symptom.
 - [ ] The window boundary still costs the card a readback, the SSE write and the metadata upload (1-2 ms a window idle, up to
       20 ms under host contention), and launching a 509-node graph costs the host about 2 ms on a P40.
-- [ ] Pre-existing failures met on the way (not caused by these changes): `serve::rollout_tests::
-      a_sampled_group_matches_the_dense_model_token_for_token` (fails at the base too, after the full-row sampling change of
-      `8c04c9540`).
+- [x] `serve::rollout_tests::a_sampled_group_matches_the_dense_model_token_for_token` (qwen3): the dense
+      `ModelRollout` draws a keyed request by the scheduler's keyed rule from the same request seed (knowledge 488), so
+      the dense model and the served path draw the same tokens again.
 - [x] `mem_pool::a_raised_retention_keeps_a_working_set_larger_than_the_default_cap_across_a_sync` allocated the working
       set rounded down to whole 64 MiB blocks and then asked the pool to keep the unrounded bytes; on a 24 GB card the
       default cap (a sixteenth) is not a whole number of blocks, so the 49 MB it "gave back" had never been allocated. The
