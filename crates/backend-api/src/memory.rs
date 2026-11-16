@@ -275,6 +275,11 @@ impl DeviceOutOfMemory {
     /// card was full; one that does not is killed with the reason in front of the user instead of a bare abort.
     pub fn raise(self) -> ! {
         eprintln!("{}", self.report_line());
+        // The unwind skips the panic hook, so this is where `RUST_BACKTRACE` names the allocation site.
+        let trace = std::backtrace::Backtrace::capture();
+        if trace.status() == std::backtrace::BacktraceStatus::Captured {
+            eprintln!("{trace}");
+        }
         std::panic::resume_unwind(Box::new(self))
     }
 }

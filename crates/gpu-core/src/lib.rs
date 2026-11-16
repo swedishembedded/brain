@@ -1265,6 +1265,8 @@ mod native_facade {
         taping: std::sync::atomic::AtomicBool,
         /// Whether the vendor library declines products (see [`Gpu::set_declines_library`]).
         declines_library_flag: std::sync::atomic::AtomicBool,
+        /// The device bytes this handle may hold ([`Gpu::set_device_cap`]); `u64::MAX` for the whole card.
+        device_cap: std::sync::atomic::AtomicU64,
     }
 
     impl Gpu {
@@ -1312,6 +1314,7 @@ mod native_facade {
                 tape: Mutex::new(None),
                 taping: std::sync::atomic::AtomicBool::new(false),
                 declines_library_flag: std::sync::atomic::AtomicBool::new(false),
+                device_cap: std::sync::atomic::AtomicU64::new(u64::MAX),
             };
             // A slot with several native candidates has its choice measured once per device (or read from the
             // store) before the handle is used; every other handle skips this at the cost of one scan.
@@ -1995,6 +1998,7 @@ mod native_facade {
         /// case for every run that does not pass the flags.
         #[inline]
         fn try_charge(&self, tag: &'static str, bytes: u64) -> Result<(), memauth::Denied> {
+            self.check_device_cap(tag, bytes);
             let Some(auth) = memauth::authority() else { return Ok(()) };
             self.hold(auth.request(self.mem_device, bytes, tag)?);
             Ok(())
@@ -2095,6 +2099,29 @@ mod native_facade {
         /// `backend_api::Backend::advise`.
         pub fn advise(&self, buf: &DeviceBuffer, advice: backend_api::MemAdvice) -> Result<(), String> {
             self.be().advise(buf, advice)
+        }
+
+        /// Hold this handle to `bytes` of device memory (`None`: the whole card). An allocation that would take the
+        /// handle's live bytes ([`Self::memory_usage`], blocks it keeps for reuse included) past the cap is refused
+        /// the way the driver refuses one on a full card: it unwinds with [`backend_api::DeviceOutOfMemory`], which a serving
+        /// scheduler answers by sending the step's sequences back. A cap on a backend that does not account for its
+        /// allocations refuses nothing. Lets a caller give a model a share of a card, and a test run a card out at
+        /// the step it chooses.
+        pub fn set_device_cap(&self, bytes: Option<u64>) {
+            self.device_cap.store(bytes.unwrap_or(u64::MAX), std::sync::atomic::Ordering::Relaxed);
+        }
+
+        /// Refuse an allocation of `bytes` past [`Self::set_device_cap`]'s cap as a full card would be refused.
+        #[inline]
+        fn check_device_cap(&self, tag: &'static str, bytes: u64) {
+            let cap = self.device_cap.load(std::sync::atomic::Ordering::Relaxed);
+            if cap == u64::MAX {
+                return;
+            }
+            let live = self.be().memory_usage().map_or(0, |m| m.live);
+            if live.saturating_add(bytes) > cap {
+                backend_api::DeviceOutOfMemory { bytes, what: tag.to_string(), detail: format!("this handle's cap of {cap} bytes is reached ({live} live)") }.raise();
+            }
         }
 
         /// [`Self::try_charge`] for the infallible facade methods. Allocation

@@ -21,6 +21,7 @@ mod default_weight_tier;
 mod dp_parity;
 mod encoder_parity;
 mod engine_adapter_bank;
+mod engine_device_oom;
 mod engine_exact_decode;
 mod engine_glue;
 mod engine_half_weights;
