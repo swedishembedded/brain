@@ -946,7 +946,8 @@ pub(crate) fn ensure(gpu: &Gpu, slots: &[(usize, &'static str)]) -> Option<Arc<T
         Some(t) if missing_classes(&t, &names).is_empty() => t,
         prior => {
             // A table the budget cut short is resumed: its measured classes are kept and only the rest are timed.
-            let t = measure(gpu, &multi, prior.as_ref());
+            // The sweep's synthetic problems are gone when it returns; so are their charges on `gpu`.
+            let t = crate::with_transient_charges(|| measure(gpu, &multi, prior.as_ref()));
             save(&key, &t);
             eprintln!("{}", summary(&t));
             let unmeasured = missing_classes(&t, &names).len();

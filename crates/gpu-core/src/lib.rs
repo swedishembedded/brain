@@ -860,6 +860,41 @@ mod native_facade {
         f()
     }
 
+    thread_local! {
+        /// The charges made on this thread inside a [`with_transient_charges`] scope; `None` outside any.
+        static TRANSIENT_GRANTS: std::cell::RefCell<Option<Vec<memauth::Grant>>> = const { std::cell::RefCell::new(None) };
+    }
+
+    /// Run `f`, whose allocations on this thread are all dropped by the time it returns, releasing their charges
+    /// against the memory ceiling when it ends or unwinds instead of when their handle dies.
+    ///
+    /// A charge normally lives as long as its handle, because a buffer has no drop hook to release it (see
+    /// `Gpu::grants`). That over-counts a handle that churns temporaries, and one churn was unbounded: measuring a
+    /// device's kernel choices builds gigabytes of synthetic problems on the handle being tuned, so a model built on a
+    /// start with no stored table carried the whole sweep as its own charge (26 GiB on a 2.6 GiB Qwen3-0.6B build) and
+    /// a ceiling refused it memory it never held. The charges still count while `f` runs, so a sweep cannot exceed
+    /// the ceiling either. Scopes nest; the outermost releases.
+    pub(crate) fn with_transient_charges<R>(f: impl FnOnce() -> R) -> R {
+        struct Release(bool);
+        impl Drop for Release {
+            fn drop(&mut self) {
+                if self.0 {
+                    drop(TRANSIENT_GRANTS.with(|t| t.borrow_mut().take()));
+                }
+            }
+        }
+        let outermost = TRANSIENT_GRANTS.with(|t| {
+            let mut t = t.borrow_mut();
+            let outermost = t.is_none();
+            if outermost {
+                *t = Some(Vec::new());
+            }
+            outermost
+        });
+        let _release = Release(outermost);
+        f()
+    }
+
     /// True iff a backend was explicitly selected, via [`set_default_backend`]
     /// (i.e. the CLI saw a `--device` flag) or a [`with_backend`] scope on this
     /// thread. Lets callers that historically defaulted to CPU (yolo) opt into
@@ -1848,6 +1883,21 @@ mod native_facade {
             self.grants.lock().unwrap_or_else(|e| e.into_inner()).iter().map(|g| g.bytes()).sum()
         }
 
+        /// Keep `grant` for as long as the memory it covers can be alive: to the end of the enclosing
+        /// [`with_transient_charges`] scope on this thread, else for this handle's lifetime.
+        fn hold(&self, grant: memauth::Grant) {
+            let grant = TRANSIENT_GRANTS.with(|t| match t.borrow_mut().as_mut() {
+                Some(scope) => {
+                    scope.push(grant);
+                    None
+                }
+                None => Some(grant),
+            });
+            if let Some(grant) = grant {
+                self.grants.lock().unwrap_or_else(|e| e.into_inner()).push(grant);
+            }
+        }
+
         /// Claim `bytes` against the ceiling, keeping the grant alive for this
         /// handle's lifetime. `Ok(())` immediately - one relaxed atomic load,
         /// no lock, no allocation - when no ceiling is published, which is the
@@ -1855,8 +1905,7 @@ mod native_facade {
         #[inline]
         fn try_charge(&self, tag: &'static str, bytes: u64) -> Result<(), memauth::Denied> {
             let Some(auth) = memauth::authority() else { return Ok(()) };
-            let grant = auth.request(self.mem_device, bytes, tag)?;
-            self.grants.lock().unwrap_or_else(|e| e.into_inner()).push(grant);
+            self.hold(auth.request(self.mem_device, bytes, tag)?);
             Ok(())
         }
 
@@ -1890,8 +1939,7 @@ mod native_facade {
                     backend_api::AllocPolicy::Managed => memauth::TierPolicy::AllowCoherentSpill,
                     _ => memauth::TierPolicy::DeviceOnly,
                 };
-                let grant = auth.request_tiered(pool, size, "placed", tier).map_err(|d| memauth::denial_message(pool, "placed", size, d))?;
-                self.grants.lock().unwrap_or_else(|e| e.into_inner()).push(grant);
+                self.hold(auth.request_tiered(pool, size, "placed", tier).map_err(|d| memauth::denial_message(pool, "placed", size, d))?);
             }
             self.be().alloc_placed(label, size, policy)
         }
@@ -3349,6 +3397,8 @@ pub use native_facade::{
     available_gpu_backends, selected_backend, set_default_backend, visible_gpu_count, with_backend, wgpu_visible_gpus, Backend, Gpu, PassScope, ScratchMark,
     ScratchScope, TapeRecording, WeakGpu,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use native_facade::with_transient_charges;
 
 /// Process-wide, monotonic CUDA host-call totals (allocations, individual
 /// launches, graph replays) - what a decode profile differences around a token

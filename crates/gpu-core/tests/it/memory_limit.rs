@@ -92,6 +92,29 @@ fn no_ceiling_set_is_a_true_no_op() {
     assert_eq!(marker(&out, "CHARGED"), "0");
 }
 
+/// Measuring a device's kernel choices leaves no charge behind. The tuner
+/// builds its synthetic problems on the handle it tunes, gigabytes of them,
+/// and drops them before the handle is returned; a charge lives as long as its
+/// handle, so the sweep's charges stayed on the model's handle for good. A
+/// Qwen3-0.6B inference build then reported 26 GiB charged on a start with no
+/// stored table and 2.6 GiB on the next, and under a real ceiling the cold
+/// start was refused memory it never held. A fresh cache directory makes this
+/// start the cold one.
+#[test]
+fn a_measured_kernel_choice_leaves_no_charge_on_its_handle() {
+    let cache = std::env::temp_dir().join(format!("brain-memory-limit-tune-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&cache);
+    std::fs::create_dir_all(&cache).expect("scratch cache directory");
+    let out = child("build_a_tuned_handle", &[("BRAIN_LIMIT_VRAM_TOTAL", "64G"), ("BRAIN_LIMIT_RAM_TOTAL", "64G"), ("XDG_CACHE_HOME", cache.to_str().expect("utf-8 path"))]);
+    let _ = std::fs::remove_dir_all(&cache);
+    if marker(&out, "MEASURED") != "true" {
+        brain_testutil::skip_unavailable("no device here offers a kernel slot with several native candidates to measure");
+        return;
+    }
+    assert_eq!(marker(&out, "CHARGED"), "0", "the tuning sweep's buffers are gone, so its charges must be too");
+    assert_eq!(marker(&out, "LEDGER"), "0", "the process-wide ledger must not keep the sweep's bytes either");
+}
+
 // ---- child helpers (run only as subprocesses of the tests above) -----------
 
 #[test]
@@ -151,4 +174,14 @@ fn report_the_unset_state() {
     println!("ENFORCING={}", memauth::enforcing());
     println!("AUTHORITY={}", if memauth::authority().is_some() { "some" } else { "none" });
     println!("CHARGED={}", gpu.charged_bytes());
+}
+
+#[test]
+#[ignore = "child process helper, driven by a_measured_kernel_choice_leaves_no_charge_on_its_handle"]
+fn build_a_tuned_handle() {
+    let gpu = gpu_core::Gpu::new(&[("matmul_i8_gemv", kernels::MATMUL_I8_GEMV)]);
+    println!("MEASURED={}", gpu_core::native_selection_report().contains("measured now"));
+    println!("CHARGED={}", gpu.charged_bytes());
+    let ledger: u64 = memauth::authority().expect("ceiling published by the parent").snapshot().iter().map(|p| p.charged).sum();
+    println!("LEDGER={ledger}");
 }
