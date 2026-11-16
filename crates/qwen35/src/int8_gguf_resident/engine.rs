@@ -1718,6 +1718,13 @@ impl PagedDecoder for Qwen35GgufEngine {
     fn topk_capacity(&self) -> usize {
         TOPK_CAPACITY
     }
+    /// The exact-decode regime decodes a row alike whatever shares its batch: no flip is accepted. Otherwise a row's
+    /// products are served by the candidate tuned for its batch's row class, which rounds the activations differently
+    /// (bf16 rows, E4M3 rows, int8 codes) from one class to the next, and the rows carry bf16 between the fused passes:
+    /// two tokens one bf16 step of the logit scale apart (2^-8) may change places.
+    fn greedy_tie_tolerance(&self) -> f32 {
+        if self.inst.exact_decode { 0.0 } else { 1.0 / 256.0 }
+    }
     fn full_row_readback(&self) -> bool {
         true
     }

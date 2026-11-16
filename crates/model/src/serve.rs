@@ -229,6 +229,16 @@ pub trait PagedDecoder {
         candidates
     }
 
+    /// The largest logit gap a batching difference may flip under this decoder's numeric contract, as a fraction of the
+    /// row's largest logit magnitude: two greedy tokens that the reference's logits put this close may come out the other
+    /// way round when the same sequence decodes beside others, and a correctness probe accepts such a flip (and records it) instead of failing on it. 0, the default,
+    /// claims that a row decodes alike whatever shares its batch, so every divergence is a failure; a decoder that
+    /// rounds a row's operands by its batch's shape (tuned candidates per row class, a different activation rounding at
+    /// prefill and decode widths) states the gap that rounding can move.
+    fn greedy_tie_tolerance(&self) -> f32 {
+        0.0
+    }
+
     /// One batched greedy decode step over every active sequence's current
     /// input, returning each sequence's next token.
     fn forward_batched_greedy(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32]) -> Vec<u32>;

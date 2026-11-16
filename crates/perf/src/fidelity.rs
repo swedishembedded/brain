@@ -33,6 +33,23 @@ pub struct Fidelity {
     pub compared: usize,
     pub passed: bool,
     pub detail: Option<String>,
+    /// The largest gap of the reference's logits a divergence may flip and still pass ([`Fidelity::greedy_tie_aware`]),
+    /// as a fraction of the reference's largest logit magnitude at that position; 0 accepts none.
+    pub tie_tolerance: f32,
+    /// The divergences accepted as near-ties; the sequence each names is not compared past it.
+    pub ties: Vec<TieDivergence>,
+}
+
+/// A divergence the tie-aware gate accepted: at `position` of `sequence` the candidate chose `token` where the reference
+/// chose `reference_token`, and the reference's logits there put the two `gap` apart, as a fraction of their largest
+/// magnitude there.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TieDivergence {
+    pub sequence: usize,
+    pub position: usize,
+    pub token: u32,
+    pub reference_token: u32,
+    pub gap: f32,
 }
 
 impl Fidelity {
@@ -41,7 +58,17 @@ impl Fidelity {
     /// Length mismatch is itself a failure: a run that stopped early produced
     /// different behaviour, and scoring only the common prefix would hide it.
     pub fn greedy(reference: &str, cand: &[Vec<u32>], refr: &[Vec<u32>], threshold: f64) -> Fidelity {
-        verdict(GREEDY_GATE, reference, cand, refr, threshold)
+        verdict(GREEDY_GATE, reference, cand, refr, threshold, 0.0, &mut |_, _, _: &u32, _: &u32| None)
+    }
+
+    /// [`Self::greedy`] for a target whose numeric contract lets a batching difference flip a near-tie: each sequence
+    /// must agree exactly up to its first divergence, and that divergence passes only when `gap(sequence, position,
+    /// token, reference_token)` - the reference's logit of its own token less its logit of the candidate's, over its
+    /// largest logit magnitude there, measured by the target - is within `tolerance`. The sequence is then not compared past it (the two continuations read
+    /// different tokens from there), and the divergence is recorded. A gap over the tolerance, one the target cannot
+    /// measure (`None`), or any divergence at a tolerance of 0 fails as in [`Self::greedy`].
+    pub fn greedy_tie_aware(reference: &str, cand: &[Vec<u32>], refr: &[Vec<u32>], threshold: f64, tolerance: f32, mut gap: impl FnMut(usize, usize, u32, u32) -> Option<f32>) -> Fidelity {
+        verdict(GREEDY_GATE, reference, cand, refr, threshold, tolerance, &mut |seq, pos, c: &u32, r: &u32| gap(seq, pos, *c, *r))
     }
 
     /// Compare two output-**byte** streams position by position.
@@ -55,7 +82,7 @@ impl Fidelity {
     /// second comparator with weaker semantics is exactly how a correctness
     /// gate starts lying.
     pub fn exact_bytes(reference: &str, cand: &[Vec<u8>], refr: &[Vec<u8>], threshold: f64) -> Fidelity {
-        verdict(BYTE_GATE, reference, cand, refr, threshold)
+        verdict(BYTE_GATE, reference, cand, refr, threshold, 0.0, &mut |_, _, _: &u8, _: &u8| None)
     }
 
     /// The verdict when the probe could not produce output to compare at all -
@@ -78,6 +105,8 @@ impl Fidelity {
             compared: 0,
             passed: false,
             detail: Some(detail),
+            tie_tolerance: 0.0,
+            ties: Vec::new(),
         }
     }
 
@@ -98,6 +127,15 @@ impl Fidelity {
             "protocol_errors": 0,
             "passed": self.passed,
             "detail": self.detail.clone().map(Value::from).unwrap_or(Value::Null),
+            "tie_tolerance": self.tie_tolerance,
+            "tie_divergences": self.ties.iter().map(|t| json!({
+                "sequence": t.sequence,
+                "position": t.position,
+                "token": t.token,
+                "reference_token": t.reference_token,
+                "gap": t.gap,
+                "note": "accepted as a near-tie of the reference's logits; the sequence is not compared past it",
+            })).collect::<Vec<_>>(),
         })
     }
 
@@ -139,30 +177,74 @@ pub const GREEDY_GATE: &str = "greedy_token_match";
 /// [`Fidelity::exact_bytes`]'s gate name: positions are output bytes.
 pub const BYTE_GATE: &str = "output_byte_match";
 
+/// What one compared position holds: a token id or an output byte, named by its id in a [`TieDivergence`].
+trait Position: PartialEq + std::fmt::Debug {
+    fn id(&self) -> u32;
+}
+
+impl Position for u32 {
+    fn id(&self) -> u32 {
+        *self
+    }
+}
+
+impl Position for u8 {
+    fn id(&self) -> u32 {
+        u32::from(*self)
+    }
+}
+
 /// The ONE comparison both public constructors are: position-by-position over
 /// `max(len)` of each pair, a length or count mismatch recorded as its own
 /// failure, and zero compared positions treated as failure rather than as a
 /// vacuous pass. Generic over the position type purely so the token and byte
 /// gates cannot drift apart.
-fn verdict<T: PartialEq + std::fmt::Debug>(
+///
+/// `tolerance` and `gap` are the tie-aware rule ([`Fidelity::greedy_tie_aware`]): at a sequence's first divergence of
+/// two present positions, a gap within a positive tolerance ends that sequence's comparison as an accepted tie.
+fn verdict<T: Position>(
     gate: &str,
     reference: &str,
     cand: &[Vec<T>],
     refr: &[Vec<T>],
     threshold: f64,
+    tolerance: f32,
+    gap: &mut dyn FnMut(usize, usize, &T, &T) -> Option<f32>,
 ) -> Fidelity {
     let mut compared = 0usize;
     let mut agree = 0usize;
     let mut detail = None;
+    let mut ties = Vec::new();
 
     if cand.len() != refr.len() {
         detail = Some(format!("sequence count differs: {} vs reference {}", cand.len(), refr.len()));
     }
     for (i, (c, r)) in cand.iter().zip(refr.iter()).enumerate() {
+        let n = c.len().max(r.len());
+        let first = (0..n).find(|&p| c.get(p) != r.get(p));
+        // A near-tie at the first divergence: the streams agree before it and are not comparable after it.
+        let tie = match first.map(|p| (p, c.get(p), r.get(p))) {
+            Some((p, Some(a), Some(b))) if tolerance > 0.0 => match gap(i, p, a, b) {
+                Some(g) if g.abs() <= tolerance => Some((p, g)),
+                measured => {
+                    if detail.is_none() {
+                        let why = measured.map_or("the target could not measure the reference's gap".to_string(), |g| format!("gap {g} over the tie tolerance {tolerance}"));
+                        detail = Some(format!("first divergence at sequence {i} position {p}: {a:?} vs reference {b:?}, {why}"));
+                    }
+                    None
+                }
+            },
+            _ => None,
+        };
+        if let Some((p, g)) = tie {
+            compared += p;
+            agree += p;
+            ties.push(TieDivergence { sequence: i, position: p, token: c[p].id(), reference_token: r[p].id(), gap: g });
+            continue;
+        }
         if c.len() != r.len() && detail.is_none() {
             detail = Some(format!("sequence {i} length {} vs reference {}", c.len(), r.len()));
         }
-        let n = c.len().max(r.len());
         for p in 0..n {
             compared += 1;
             match (c.get(p), r.get(p)) {
@@ -191,6 +273,8 @@ fn verdict<T: PartialEq + std::fmt::Debug>(
         compared,
         passed,
         detail,
+        tie_tolerance: tolerance,
+        ties,
     }
 }
 
@@ -316,6 +400,54 @@ mod tests {
         let reason = f.failure_reason();
         assert!(reason.contains("compared 0 positions"), "{reason}");
         assert!(reason.contains("OOM"), "the real cause must survive into the artifact: {reason}");
+    }
+
+    /// SPEC (tie-aware greedy): the streams must agree exactly up to the first divergence; a divergence passes only
+    /// where the reference's logits there show a genuine near-tie between the two tokens (a gap within the tolerance the
+    /// target declares), and the sequence is not compared past it. Anything else still fails, and a tolerance of 0 (an
+    /// exact-decode target) accepts no divergence at all.
+    #[test]
+    fn a_near_tie_divergence_passes_and_a_large_gap_flip_fails() {
+        let refr = vec![vec![1u32, 2, 3, 4], vec![5, 6, 7]];
+        let cand = vec![vec![1u32, 2, 9, 8], vec![5, 6, 7]];
+        let gap = |gap: f32| move |seq: usize, pos: usize, token: u32, reference: u32| {
+            assert_eq!((seq, pos, token, reference), (0, 2, 9, 3), "the gap is asked once, at the first divergence");
+            Some(gap)
+        };
+        let tie = Fidelity::greedy_tie_aware("seq", &cand, &refr, EXACT, 0.05, gap(0.01));
+        assert!(tie.passed, "{:?}", tie.detail);
+        assert_eq!(tie.ties, vec![TieDivergence { sequence: 0, position: 2, token: 9, reference_token: 3, gap: 0.01 }]);
+        assert_eq!(tie.compared, 5, "positions 0 and 1 of the first sequence and all three of the second; nothing past the tie");
+        assert_eq!(tie.token_match, 1.0);
+        let j = tie.to_json();
+        assert_eq!(j["tie_tolerance"], 0.05f32 as f64);
+        assert_eq!(j["tie_divergences"][0]["position"], 2);
+        assert_eq!(j["tie_divergences"][0]["token"], 9);
+        assert_eq!(j["tie_divergences"][0]["reference_token"], 3);
+        assert!(j["tie_divergences"][0]["note"].as_str().unwrap().contains("not compared"));
+
+        let flip = Fidelity::greedy_tie_aware("seq", &cand, &refr, EXACT, 0.05, gap(0.5));
+        assert!(!flip.passed, "a flip across a large gap is a different computation");
+        assert!(flip.ties.is_empty());
+        assert!(flip.detail.as_deref().unwrap().contains("gap 0.5"), "{:?}", flip.detail);
+
+        let exact = Fidelity::greedy_tie_aware("seq", &cand, &refr, EXACT, 0.0, |_, _, _, _| Some(0.0));
+        assert!(!exact.passed, "an exact-decode target accepts no divergence, however close the logits");
+
+        let unknown = Fidelity::greedy_tie_aware("seq", &cand, &refr, EXACT, 0.05, |_, _, _, _| None);
+        assert!(!unknown.passed, "a gap the target cannot measure is not a tie");
+    }
+
+    /// After an accepted tie the rest of that sequence is not compared, so a length difference behind it (the two
+    /// continuations stop at different places) is no failure; a length difference in a sequence that agreed is.
+    #[test]
+    fn nothing_behind_an_accepted_tie_is_compared() {
+        let refr = vec![vec![1u32, 2, 3, 4, 5]];
+        let cand = vec![vec![1u32, 7]];
+        let f = Fidelity::greedy_tie_aware("seq", &cand, &refr, EXACT, 0.1, |_, _, _, _| Some(0.02));
+        assert!(f.passed, "{:?}", f.detail);
+        let short = Fidelity::greedy_tie_aware("seq", &[vec![1u32, 2]], &refr, EXACT, 0.1, |_, _, _, _| Some(0.02));
+        assert!(!short.passed, "an early stop is no divergence of tokens and never a tie");
     }
 
     #[test]

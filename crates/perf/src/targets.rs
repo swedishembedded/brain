@@ -240,6 +240,30 @@ impl<D: PagedDecoder> PagedLlmTarget<D> {
     }
 }
 
+/// The reference's logit of `reference` less its logit of `token` at the position after `prompt` and `prefix`, over
+/// the largest logit magnitude there: the sequence replayed alone (a prefill, then one single-row step per prefix
+/// token), the arithmetic of a sequential reference run. `None` when either token is outside the decoder's top-k there
+/// (no near-tie), or the replay cannot be admitted.
+fn reference_gap<D: PagedDecoder>(dec: &mut D, prompt: &[u32], prefix: &[u32], token: u32, reference: u32) -> Option<f32> {
+    let mut table = model::paged::BlockTable::new();
+    let k = dec.topk_capacity().max(2);
+    let need = dec.blocks_for((prompt.len() + prefix.len() + 1) as u32);
+    let row = (dec.free_blocks() >= need).then(|| {
+        let hidden = dec.prefill(&mut table, prompt);
+        let mut row = dec.admit_topk(&hidden, k);
+        for &t in prefix {
+            row = dec.forward_batched_topk(&mut [&mut table], &[t], k).pop().unwrap_or_default();
+        }
+        row
+    });
+    dec.release_table(&mut table);
+    let row = row?;
+    let logit = |t: u32| row.iter().find(|(id, _)| *id == t).map(|(_, l)| *l);
+    let scale = row.iter().fold(0f32, |m, (_, l)| m.max(l.abs()));
+    (scale > 0.0).then_some(())?;
+    Some((logit(reference)? - logit(token)?) / scale)
+}
+
 /// `n` synthetic token ids below `vocab`, deterministic in the seeds: the first `shared` drawn from `prefix_seed`
 /// (identical across the requests of a class), the rest from `seed`. Content is irrelevant to cost; only length,
 /// determinism and what is shared matter.
@@ -422,11 +446,17 @@ impl<D: PagedDecoder> PerfTarget for PagedLlmTarget<D> {
         let bat_out: Vec<Vec<u32>> =
             ids.iter().map(|id| done.get(id).cloned().unwrap_or_default()).collect();
 
-        Some(crate::fidelity::Fidelity::greedy(
+        // A divergence is a failure unless the decoder's numeric contract lets a batching difference flip a tie, and
+        // the reference's own logits there show one: its sequence is replayed alone to that position.
+        let tolerance = self.sched.decoder().greedy_tie_tolerance();
+        let sched = &mut self.sched;
+        Some(crate::fidelity::Fidelity::greedy_tie_aware(
             "sequential-greedy-same-engine",
             &bat_out,
             &seq_out,
             crate::fidelity::EXACT,
+            tolerance,
+            |seq, pos, token, reference| reference_gap(sched.decoder_mut(), &prompts[seq], &seq_out[seq][..pos], token, reference),
         ))
     }
 }
@@ -1640,6 +1670,133 @@ mod paged_tests {
             }
             vec![vec![0.0; VOCAB]; inputs.len()]
         }
+    }
+
+    /// A decoder whose batched decode answers one sequence's token at one position with the runner-up of its batch-1
+    /// logits, `gap` below the winner (whose logit 1 is the row's largest magnitude): the shape of a batching difference
+    /// that flips a near-tie. `tolerance` is the gap
+    /// its numeric contract declares a batching difference may flip.
+    struct Flippy {
+        alloc: BlockAllocator,
+        gap: f32,
+        tolerance: f32,
+    }
+
+    /// The position (sequence length when the token is chosen) where the batched step answers the runner-up.
+    const FLIP_AT: u32 = crate::targets::FIDELITY_PROMPT_TOKENS + 5;
+
+    impl Flippy {
+        /// Batch-1 logits for a sequence of `len` tokens: the winner `len % VOCAB`, the runner-up next to it.
+        fn row(&self, len: u32) -> Vec<(u32, f32)> {
+            let best = len % VOCAB as u32;
+            vec![(best, 1.0), ((best + 1) % VOCAB as u32, 1.0 - self.gap), ((best + 2) % VOCAB as u32, -0.5)]
+        }
+    }
+
+    // conformance-exempt: a test double of the perf harness, never served; the engines that serve run the suite themselves
+    impl PagedDecoder for Flippy {
+        fn alloc_mut(&mut self) -> &mut BlockAllocator {
+            &mut self.alloc
+        }
+        fn max_prefill_tokens(&self) -> u32 {
+            64
+        }
+        fn free_blocks(&self) -> u32 {
+            self.alloc.free_blocks()
+        }
+        fn max_seq_len(&self) -> usize {
+            512
+        }
+        fn vocab(&self) -> usize {
+            VOCAB
+        }
+        fn blocks_for(&self, tokens: u32) -> u32 {
+            tokens.div_ceil(8)
+        }
+        fn reclaim_prefix(&mut self, _want: u32) -> u32 {
+            0
+        }
+        fn release_table(&mut self, t: &mut BlockTable) {
+            t.release(&mut self.alloc);
+        }
+        fn prefill(&mut self, table: &mut BlockTable, prompt: &[u32]) -> Vec<f32> {
+            table.reserve(prompt.len() as u32, &mut self.alloc).unwrap();
+            vec![table.len() as f32]
+        }
+        fn logits(&self, hidden: &[f32]) -> Vec<f32> {
+            let mut row = vec![-8.0; VOCAB];
+            for (t, l) in self.row(hidden[0] as u32) {
+                row[t as usize] = l;
+            }
+            row
+        }
+        fn forward_batched_greedy(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32]) -> Vec<u32> {
+            let batched = tables.len() > 1;
+            tables
+                .iter_mut()
+                .enumerate()
+                .map(|(i, t)| {
+                    t.append(&mut self.alloc).unwrap();
+                    let row = self.row(t.len());
+                    if batched && i == 0 && t.len() == FLIP_AT { row[1].0 } else { row[0].0 }
+                })
+                .take(inputs.len())
+                .collect()
+        }
+        fn forward_batched_greedy_window(&mut self, _: &mut [&mut BlockTable], _: &[u32], _: usize) -> Vec<Vec<u32>> {
+            unreachable!("window capacity is 1")
+        }
+        fn prefix_stats(&self) -> (u64, u64, usize) {
+            (0, 0, 0)
+        }
+        fn device_stats(&self) -> Option<gpu_core::DeviceStats> {
+            None
+        }
+        fn kv_pool_bytes(&self) -> u64 {
+            0
+        }
+        fn kv_pool_capacity_tokens(&self) -> u64 {
+            4096
+        }
+        fn decode_window_capacity(&self) -> usize {
+            1
+        }
+        fn forward_batched_topk(&mut self, tables: &mut [&mut BlockTable], _inputs: &[u32], k: usize) -> Vec<Vec<(u32, f32)>> {
+            tables
+                .iter_mut()
+                .map(|t| {
+                    t.append(&mut self.alloc).unwrap();
+                    self.row(t.len()).into_iter().take(k).collect()
+                })
+                .collect()
+        }
+        fn topk_capacity(&self) -> usize {
+            8
+        }
+        fn greedy_tie_tolerance(&self) -> f32 {
+            self.tolerance
+        }
+    }
+
+    fn flippy(gap: f32, tolerance: f32) -> PagedLlmTarget<Flippy> {
+        PagedLlmTarget::new(Scheduler::new(Flippy { alloc: BlockAllocator::new(512, 8), gap, tolerance }, 4), TargetInfo::new("flippy", "token"), Vec::new(), VOCAB as u32)
+    }
+
+    /// SPEC: the batched-vs-sequential probe accepts a batching difference that flips a genuine near-tie of the
+    /// reference's logits (within the tolerance the decoder declares) and records it; a flip across a large gap, or any
+    /// flip on a decoder that declares exactness, still fails the run.
+    #[test]
+    fn the_probe_accepts_a_near_tie_flip_and_fails_a_large_gap_one() {
+        let tie = flippy(0.01, 0.05).fidelity().expect("the probe runs");
+        assert!(tie.passed, "{:?}", tie.detail);
+        let found = tie.ties.first().expect("the flip is recorded");
+        assert_eq!((found.sequence, found.position), (0, (FLIP_AT - crate::targets::FIDELITY_PROMPT_TOKENS) as usize));
+        assert!((found.gap - 0.01).abs() < 1e-6, "the gap is the reference's own: {found:?}");
+
+        let flip = flippy(0.5, 0.05).fidelity().expect("the probe runs");
+        assert!(!flip.passed, "a 0.5 gap is no tie at a 0.05 tolerance");
+        let exact = flippy(0.01, 0.0).fidelity().expect("the probe runs");
+        assert!(!exact.passed, "a decoder that declares exactness accepts no divergence");
     }
 
     fn target(rows: bool) -> PagedLlmTarget<Flat> {
