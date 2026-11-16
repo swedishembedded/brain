@@ -28,13 +28,14 @@
 //   out   : [M, 4] the drawn column (as f32), its log-probability, and (pass 0) the row's best logit/temp and
 //           its mass sum_t exp(logit_t / temp - best), the statistics a candidate list and a nucleus are cut with
 //
-// params: m, n, p (slices per row), stage (the pass: 0, 1 or 2)
+// params: m, n, p (slices per row), stage (the pass: 0, 1 or 2), step (of the decode window; unused here)
 
 struct Params {
     m: u32,
     n: u32,
     p: u32,
     stage: u32,
+    step: u32,
 };
 
 @group(0) @binding(0) var<uniform> pr: Params;

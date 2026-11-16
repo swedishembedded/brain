@@ -121,3 +121,49 @@ fn a_decode_batch_wider_than_the_decode_regime_is_recorded() {
     assert_eq!(step(&mut fresh), prepared, "a prepared tape decodes as a tape recorded on first use");
     assert_eq!(fresh.decode_tapes().0, 1, "the step recorded its row count on first use");
 }
+
+/// A keyed decode window (four tokens a host round-trip) draws, for every row, the tokens and log-probabilities four
+/// single keyed steps draw: the draws are keyed by position, and the window feeds each drawn token to the next step on
+/// the device. Plain temperature, a min-p floor and a nucleus side by side.
+#[test]
+fn a_keyed_window_draws_what_single_keyed_steps_draw() {
+    use model::serve::{draw_key, Drawn, RowDraw};
+    let Ok(gpu) = gpu_core::Gpu::try_new_cuda(qwen3::model::pipelines()) else {
+        brain_testutil::skip_unavailable("no usable CUDA backend");
+        return;
+    };
+    let cfg = QwenConfig { d_model: 64, d_ff: 128, n_heads: 4, n_kv_heads: 2, head_dim: 16, vocab: 64, block_size: 256, max_position_embeddings: 256, tie_embeddings: false, ..QwenConfig::tiny() };
+    let w = qwen3::init_weights(&cfg, 13); // seed: any weights serve
+    let (rows, k) = (3usize, 4usize);
+    let params = [(1.0f32, 0.0f32, 1.0f32), (0.8, 0.1, 1.0), (1.2, 0.0, 0.7)];
+    let draw = |i: usize, pos: usize| RowDraw { temp: params[i].0, min_p: params[i].1, top_p: params[i].2, top_k: 0, key: draw_key(i as u64 + 1, pos as u64, 0) };
+    let prepare = |e: &mut Engine| -> Vec<BlockTable> {
+        let mut tables: Vec<BlockTable> = (0..rows).map(|_| BlockTable::new()).collect();
+        for (i, t) in tables.iter_mut().enumerate() {
+            let prompt: Vec<u32> = (0..(5 + i as u32)).map(|j| (j * 7 + i as u32) % cfg.vocab).collect();
+            e.prefill_for_perf(t, &prompt);
+        }
+        tables
+    };
+    let inputs: Vec<u32> = vec![1, 2, 3];
+    let mut windowed = Engine::from_map_tier_on(&gpu, cfg.clone(), &w, 16, 64, 4, 16, 32, true, Dtype::BF16);
+    assert!(windowed.drawn_window_capacity() >= k, "the engine offers a keyed window");
+    let mut tables = prepare(&mut windowed);
+    let draws: Vec<Vec<RowDraw>> = (0..rows).map(|i| (0..k).map(|s| draw(i, 10 + s)).collect()).collect();
+    let got = windowed.forward_batched_drawn_window(&mut tables.iter_mut().collect::<Vec<_>>(), &inputs, &draws, k);
+
+    let mut single = Engine::from_map_tier_on(&gpu, cfg.clone(), &w, 16, 64, 4, 16, 32, true, Dtype::BF16);
+    let mut tables = prepare(&mut single);
+    let mut cur = inputs.clone();
+    let mut want: Vec<Vec<(u32, f32)>> = vec![Vec::new(); rows];
+    for s in 0..k {
+        let step: Vec<Option<RowDraw>> = (0..rows).map(|i| Some(draw(i, 10 + s))).collect();
+        let drawn = single.forward_batched_drawn(&mut tables.iter_mut().collect::<Vec<_>>(), &cur, &step);
+        for (i, d) in drawn.into_iter().enumerate() {
+            let Drawn::Token(t, lp) = d else { panic!("a keyed row is drawn") };
+            want[i].push((t, lp));
+            cur[i] = t;
+        }
+    }
+    assert_eq!(got, want, "the window drew other tokens than single steps");
+}

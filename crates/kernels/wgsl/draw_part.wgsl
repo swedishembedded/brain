@@ -30,19 +30,21 @@
 // logit/temp that pass 0's draw_final wrote.
 //
 //   logits: [M, N]
-//   spec  : [M, 8] u32 per row: temp bits, min_p bits, key, draw flag (0 = not drawn, 1 = drawn over the row,
-//           2 = drawn over its nucleus), top_p bits, three unused
+//   spec  : [M, 8] u32 per row: temp bits, min_p bits, unused, draw flag (0 = not drawn, 1 = drawn over the row,
+//           2 = drawn over its nucleus), top_p bits, three unused; then [W, M] the rows' keys of each step of a
+//           decode window (step 0 for a single step): a window's steps differ only in their keys
 //   state : [M, 4] per row: best logit/temp (written by pass 0's draw_final), the nucleus threshold and the
 //           search's upper bound as ordered keys, the cut column (bit patterns, see nucleus_step)
 //   part  : [M, P, 4] per (row, slice): [max logit/temp, mass relative to it, best score, its column (as f32)]
 //
-// params: m, n, p (slices per row), stage (the pass: 0, 1 or 2)
+// params: m, n, p (slices per row), stage (the pass: 0, 1 or 2), step (of the decode window)
 
 struct Params {
     m: u32,
     n: u32,
     p: u32,
     stage: u32,
+    step: u32,
 };
 
 @group(0) @binding(0) var<uniform> pr: Params;
@@ -77,7 +79,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     let flag = spec[8u * row + 3u];
     let temp = max(bitcast<f32>(spec[8u * row]), 1e-6);
     let min_p = bitcast<f32>(spec[8u * row + 1u]);
-    let key = spec[8u * row + 2u];
+    let key = spec[8u * pr.m + pr.step * pr.m + row];
     if (flag == 0u || (pr.stage == 1u && (flag != 1u || !(min_p > 0.0))) || (pr.stage == 2u && flag != 2u)) { return; }
     var top = 0.0;
     var tau = 0.0;

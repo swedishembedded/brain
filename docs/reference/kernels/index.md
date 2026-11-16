@@ -257,6 +257,7 @@ load of it must already be bare-identifier-indexed.
 | [`dfl_loss_grad`](../../../crates/kernels/wgsl/dfl_loss_grad.wgsl) | Gradient of dfl_loss w.r.t | one thread per output element, 3 nested serial reductions | 1/5 | ✓ | ✓ | - | - | f32 |
 | [`dora_gain`](../../../crates/kernels/wgsl/dora_gain.wgsl) | Weight-decomposed adapter gain: g = (1+mu) * sqrt(w2 / v2) from the adapted row norms | one thread per output channel | 3/5 | ✓ | ✓ | - | - | f32 |
 | [`dora_gain_bwd`](../../../crates/kernels/wgsl/dora_gain_bwd.wgsl) | Weight-decomposed adapter gain backward:  gmu += dg*ratio,  c = -dg*g/v2 | one thread per output channel | 3/5 | ✓ | ✓ | - | - | f32 |
+| [`draw_feed`](../../../crates/kernels/wgsl/draw_feed.wgsl) | Feed a keyed draw's tokens back as the next decode step's input, on the device | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |
 | [`draw_final`](../../../crates/kernels/wgsl/draw_final.wgsl) | Keyed Gumbel-max draw over logits rows, FINAL stage | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |
 | [`draw_part`](../../../crates/kernels/wgsl/draw_part.wgsl) | Keyed Gumbel-max draw over logits rows, PARTIAL stage | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |
 | [`dw_splitk_reduce`](../../../crates/kernels/wgsl/dw_splitk_reduce.wgsl) | Fold `matmul_dw_reg_splitk`'s per-slice partials into the weight gradient | one thread per output element, serial inner reduction | 5/5 | ✓ | ✓ | - | - | f32 |

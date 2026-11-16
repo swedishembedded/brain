@@ -154,19 +154,19 @@ fn rounds_work(g: &Gpu, k: ReadoutKernels, rows: u32, vocab: u32, stride: u32, c
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn native_draw(g: &Gpu, logits: &DeviceBuffer, spec: &DeviceBuffer, out: &DeviceBuffer, rows: u32, vocab: u32) -> Option<Step> {
-    gpu_core::provider::cuda::draw_rows_step(g, &[logits, spec, out], rows, vocab)
+fn native_draw(g: &Gpu, logits: &DeviceBuffer, spec: &DeviceBuffer, out: &DeviceBuffer, rows: u32, vocab: u32, step: u32) -> Option<Step> {
+    gpu_core::provider::cuda::draw_rows_step(g, &[logits, spec, out], rows, vocab, step)
 }
 
 #[cfg(target_arch = "wasm32")]
-fn native_draw(_g: &Gpu, _logits: &DeviceBuffer, _spec: &DeviceBuffer, _out: &DeviceBuffer, _rows: u32, _vocab: u32) -> Option<Step> {
+fn native_draw(_g: &Gpu, _logits: &DeviceBuffer, _spec: &DeviceBuffer, _out: &DeviceBuffer, _rows: u32, _vocab: u32, _step: u32) -> Option<Step> {
     None
 }
 
 /// Whether [`RowDrawer::steps`] draws with the native one-launch kernel on `g` at this shape (diagnostics and tests).
 pub fn draws_natively(g: &Gpu, rows: u32, vocab: u32) -> bool {
     let probe = |n: u64| g.storage(n.max(1));
-    native_draw(g, &probe(rows as u64 * vocab as u64), &probe(rows as u64 * 8), &probe(rows as u64 * 4), rows, vocab).is_some()
+    native_draw(g, &probe(rows as u64 * vocab as u64), &probe(rows as u64 * 9), &probe(rows as u64 * 4), rows, vocab, 0).is_some()
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -187,13 +187,17 @@ pub const READOUT_KERNELS: [(&str, &str); 3] = [("argmax_part", kernels::ARGMAX_
 
 /// The keyed draw's kernels, for a model's kernel list: a decoder that registers them draws its sampled rows on the
 /// device ([`RowDrawer`]).
-pub const DRAW_KERNELS: [(&str, &str); 5] = [
+pub const DRAW_KERNELS: [(&str, &str); 6] = [
     ("draw_part", kernels::DRAW_PART),
     ("draw_final", kernels::DRAW_FINAL),
     ("nucleus_part", kernels::NUCLEUS_PART),
     ("nucleus_step", kernels::NUCLEUS_STEP),
     ("nucleus_cut", kernels::NUCLEUS_CUT),
+    ("draw_feed", kernels::DRAW_FEED),
 ];
+
+/// The most steps of a decode window a drawer holds the keys of ([`RowDrawer::upload_window_keys`]).
+pub const DRAW_WINDOW: u32 = 8;
 
 /// The widest best-first list a drawer takes on the device: a `top_k` above it is drawn whole on the host.
 pub const MAX_DRAW_CANDIDATES: u32 = 1024;
@@ -239,10 +243,12 @@ pub struct RowDrawer {
     nucleus_part: usize,
     nucleus_step: usize,
     nucleus_cut: usize,
+    feed_kernel: usize,
     /// The argmax and extraction kernels the candidate lists are taken with, when the model registered them.
     topk: Option<ReadoutKernels>,
     max_rows: u32,
-    /// `[max_rows, 8]` u32 per row: temperature bits, min-p bits, key, draw flag, top-p bits, three unused.
+    /// `[max_rows, 8]` u32 per row (temperature bits, min-p bits, unused, draw flag, top-p bits, three unused), then
+    /// `[DRAW_WINDOW, rows]` the rows' keys of each step of a decode window (laid out for the rows of the step).
     spec: DeviceBuffer,
     /// `[max_rows, DRAW_SLICES, 4]` partial reductions (the nucleus search uses the first `DRAW_SLICES` a row).
     part: DeviceBuffer,
@@ -253,6 +259,9 @@ pub struct RowDrawer {
     /// `[max_rows, candidates]` best-first candidates of a step that takes them (logits and token ids).
     cand_vals: DeviceBuffer,
     cand_idx: DeviceBuffer,
+    /// `[DRAW_WINDOW, max_rows]` a decode window's drawn tokens (as f32) and log-probabilities ([`Self::feed`]).
+    hist: DeviceBuffer,
+    lphist: DeviceBuffer,
 }
 
 impl RowDrawer {
@@ -261,6 +270,7 @@ impl RowDrawer {
         let k = |name: &str| g.kernel_index(name);
         let (part_kernel, final_kernel) = (k("draw_part")?, k("draw_final")?);
         let (nucleus_part, nucleus_step, nucleus_cut) = (k("nucleus_part")?, k("nucleus_step")?, k("nucleus_cut")?);
+        let feed_kernel = k("draw_feed")?;
         let topk = ReadoutKernels::resolve(g).ok();
         let rows = max_rows.max(1) as u64;
         let cands = if topk.is_some() { rows * MAX_DRAW_CANDIDATES as u64 } else { 1 };
@@ -270,14 +280,17 @@ impl RowDrawer {
             nucleus_part,
             nucleus_step,
             nucleus_cut,
+            feed_kernel,
             topk,
             max_rows: max_rows.max(1),
-            spec: g.storage(rows * 8),
+            spec: g.storage(rows * (8 + DRAW_WINDOW as u64)),
             part: g.storage(rows * DRAW_SLICES as u64 * 4),
             state: g.storage(rows * 4),
             out: g.storage(rows * 4),
             cand_vals: g.storage(cands),
             cand_idx: g.storage(cands),
+            hist: g.storage(rows * DRAW_WINDOW as u64),
+            lphist: g.storage(rows * DRAW_WINDOW as u64),
         })
     }
 
@@ -314,10 +327,12 @@ impl RowDrawer {
     /// the keys).
     pub fn upload(&self, g: &Gpu, draws: &[Option<crate::serve::RowDraw>], vocab: u32) {
         assert!(!draws.is_empty() && draws.len() as u32 <= self.max_rows, "RowDrawer: {} rows for a drawer of {}", draws.len(), self.max_rows);
-        let mut spec = vec![0u32; draws.len() * 8];
-        for (s, d) in spec.chunks_mut(8).zip(draws) {
+        let mut spec = vec![0u32; draws.len() * 9];
+        let (rows, keys) = spec.split_at_mut(draws.len() * 8);
+        for ((s, k), d) in rows.chunks_mut(8).zip(keys.iter_mut()).zip(draws) {
             if let Some(d) = d {
-                s[..5].copy_from_slice(&[d.temp.to_bits(), d.min_p.to_bits(), d.key, flag_of(d, vocab as usize), d.top_p.to_bits()]);
+                s[..5].copy_from_slice(&[d.temp.to_bits(), d.min_p.to_bits(), 0, flag_of(d, vocab as usize), d.top_p.to_bits()]);
+                *k = d.key;
             }
         }
         g.write(&self.spec, &spec);
@@ -327,16 +342,44 @@ impl RowDrawer {
         }
     }
 
-    /// The dispatches that draw `rows` rows of `logits` under the keys last uploaded, at `shape`: the native
+    /// The keys of steps `1..` of a decode window over the rows last uploaded: `keys[s - 1][i]` is row `i`'s at step `s`
+    /// (step 0's are [`Self::upload`]'s). A window's steps differ only in their keys.
+    pub fn upload_window_keys(&self, g: &Gpu, keys: &[Vec<u32>]) {
+        let Some(rows) = keys.first().map(Vec::len) else { return };
+        assert!(keys.len() < DRAW_WINDOW as usize, "RowDrawer: a window of {} steps for a drawer of {DRAW_WINDOW}", keys.len() + 1);
+        let flat: Vec<u32> = keys.iter().flat_map(|k| k.iter().copied()).collect();
+        g.write_at(&self.spec, (rows * 9) as u64, &flat);
+    }
+
+    /// [`Self::dispatch_at`] step 0: a single step's draw.
+    pub fn dispatch(&self, g: &Gpu, logits: &DeviceBuffer, rows: u32, vocab: u32, shape: DrawShape) -> Vec<Step> {
+        self.dispatch_at(g, logits, rows, vocab, shape, 0)
+    }
+
+    /// The step that writes step `s` of a decode window's drawn tokens into the window history and into `tok` (the
+    /// `[rows]` u32 inputs the next step reads): what a decoder chains between a window's steps on the device.
+    pub fn feed(&self, g: &Gpu, tok: &DeviceBuffer, rows: u32, s: u32) -> Step {
+        assert!(s < DRAW_WINDOW, "RowDrawer: window step {s} past {DRAW_WINDOW}");
+        g.step(self.feed_kernel, &[&self.out, tok, &self.hist, &self.lphist], &[rows, s], rows)
+    }
+
+    /// The `(token, log-probability)` of every row at each of a window's `k` steps ([`Self::feed`]), row by row.
+    pub fn read_window(&self, g: &Gpu, rows: usize, k: usize) -> Vec<Vec<(u32, f32)>> {
+        let (toks, lps) = (g.read(&self.hist, k * rows), g.read(&self.lphist, k * rows));
+        (0..rows).map(|i| (0..k).map(|s| (toks[s * rows + i] as u32, lps[s * rows + i])).collect()).collect()
+    }
+
+    /// The dispatches that draw `rows` rows of `logits` under the keys last uploaded for window step `step`, at `shape`: the native
     /// one-launch kernel where the device offers it (priced as the WGSL passes), else the passes (the draw, the
     /// min-p pass, the nucleus search, cut and draw), then the candidate extraction, which masks the taken
     /// candidates in `logits` ([`Self::answer`] restores a row it reads back).
-    pub fn dispatch(&self, g: &Gpu, logits: &DeviceBuffer, rows: u32, vocab: u32, shape: DrawShape) -> Vec<Step> {
+    pub fn dispatch_at(&self, g: &Gpu, logits: &DeviceBuffer, rows: u32, vocab: u32, shape: DrawShape, step: u32) -> Vec<Step> {
+        assert!(step < DRAW_WINDOW, "RowDrawer: window step {step} past {DRAW_WINDOW}");
         assert!(rows > 0 && rows <= self.max_rows, "RowDrawer: {rows} rows for a drawer of {}", self.max_rows);
         let draw = |stage: u32| {
             [
-                g.step(self.part_kernel, &[logits, &self.spec, &self.state, &self.part], &[rows, vocab, DRAW_SLICES, stage], rows * DRAW_SLICES),
-                g.step(self.final_kernel, &[logits, &self.spec, &self.part, &self.state, &self.out], &[rows, vocab, DRAW_SLICES, stage], rows),
+                g.step(self.part_kernel, &[logits, &self.spec, &self.state, &self.part], &[rows, vocab, DRAW_SLICES, stage, step], rows * DRAW_SLICES),
+                g.step(self.final_kernel, &[logits, &self.spec, &self.part, &self.state, &self.out], &[rows, vocab, DRAW_SLICES, stage, step], rows),
             ]
         };
         let mut reference: Vec<Step> = draw(0).to_vec();
@@ -351,7 +394,7 @@ impl RowDrawer {
             reference.push(g.step(self.nucleus_cut, &[logits, &self.spec, &self.out, &self.state], &[rows, vocab], rows));
             reference.extend(draw(2));
         }
-        let mut steps = match native_draw(g, logits, &self.spec, &self.out, rows, vocab) {
+        let mut steps = match native_draw(g, logits, &self.spec, &self.out, rows, vocab, step) {
             Some(step) => vec![g.priced_as_chain(step, &reference)],
             None => reference,
         };

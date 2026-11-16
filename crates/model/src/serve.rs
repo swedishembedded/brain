@@ -497,6 +497,23 @@ pub trait PagedDecoder {
         MixedRowsOutcome { decoded, prefilled }
     }
 
+    /// The largest `k` [`Self::forward_batched_drawn_window`] takes: `1` (the default) for a decoder without a keyed
+    /// window, which the scheduler then never asks for.
+    fn drawn_window_capacity(&self) -> usize {
+        1
+    }
+
+    /// Advance every sequence by `k` tokens with one host round-trip, each drawn by its keyed draw: `draws[i][s]` is
+    /// row `i`'s draw at window step `s` (the same parameters, the key of its position), and the token drawn at a
+    /// step feeds the next on the decoder. Returns each row's `k` `(token, log-probability)`, the ones `k` single keyed
+    /// steps would give. Every draw is one the decoder answers without its candidate list (no `top_k` inside the
+    /// vocabulary). The caller owns end-of-sequence handling and rolls back the slots a finished row did not use, as
+    /// for [`Self::forward_batched_greedy_window`].
+    fn forward_batched_drawn_window(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32], draws: &[Vec<RowDraw>], k: usize) -> Vec<Vec<(u32, f32)>> {
+        let _ = (tables, inputs, draws, k);
+        unreachable!("forward_batched_drawn_window on a decoder whose drawn_window_capacity is 1")
+    }
+
     /// [`Self::forward_mixed_logit_rows`] for a keyed step ([`Self::forward_batched_drawn`]): the same two-pass
     /// default, the decode rows drawn where the decoder draws them.
     fn forward_mixed_drawn(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32], draws: &[Option<RowDraw>], jobs: &mut [PrefillJob<'_>]) -> MixedDrawnOutcome {
@@ -2872,11 +2889,9 @@ impl<D: PagedDecoder> Scheduler<D> {
                 })
                 .min()
                 .unwrap_or(1);
-            // Real (non-greedy) sampling has no on-device window yet (W3's
-            // first cut): a batch containing ANY sampling row falls back to
-            // k=1 for everyone this iteration. Purely-greedy batches (today's
-            // only case, and the common one) take the exact path they always
-            // did, untouched.
+            // A window of several tokens a host round-trip: a purely greedy batch takes the greedy window, a batch
+            // whose every row is a keyed draw the decoder answers on its own takes the keyed window, and any other
+            // batch decodes one token.
             //
             // The no-repeat filter bans a handful of tokens known from the history before the step: a
             // step whose history bans none is plain greedy, one that bans some asks for that many extra
@@ -2885,7 +2900,20 @@ impl<D: PagedDecoder> Scheduler<D> {
             // A thinking budget is checked on the host after every token, so such a batch takes no window either;
             // neither does a filter that must see each token before the next is chosen.
             let host_checked = active.iter().any(|&i| self.running[i].think.is_some_and(|t| t.watching()) || self.running[i].sample.no_repeat.active());
-            let mut k = if self.waiting.is_empty() && self.prefilling.is_empty() && all_greedy && !host_checked { remaining_min.min(self.dec.decode_window_capacity()) } else { 1 };
+            // A batch of keyed draws the decoder answers on its own (no candidate list) takes a keyed window: its
+            // draws are keyed by position, so a window draws what single steps would.
+            let keyed = !all_greedy && {
+                let vocab = self.dec.vocab();
+                active.iter().all(|&i| RowDraw::of(&self.running[i].sample, self.running[i].seed, 0).is_some_and(|d| !d.keeps_top_k(vocab)))
+            };
+            let capacity = if all_greedy {
+                self.dec.decode_window_capacity()
+            } else if keyed {
+                self.dec.drawn_window_capacity()
+            } else {
+                1
+            };
+            let mut k = if self.waiting.is_empty() && self.prefilling.is_empty() && !host_checked { remaining_min.min(capacity) } else { 1 };
             // Every append must succeed mid-window (no host decisions there):
             // require a comfortable block reserve, else fall back to one step.
             if k > 1 && (self.dec.free_blocks() as usize) < active.len() * k {
@@ -2900,6 +2928,17 @@ impl<D: PagedDecoder> Scheduler<D> {
                     self.dec.forward_batched_greedy(&mut refs, &inputs).into_iter().map(|t| vec![t]).collect()
                 };
                 greedy.into_iter().map(|row| row.into_iter().map(|t| (t, 0.0)).collect()).collect()
+            } else if k > 1 {
+                // A keyed window: each row's draws at its next `k` positions.
+                let draws: Vec<Vec<RowDraw>> = active
+                    .iter()
+                    .map(|&i| {
+                        let r = &self.running[i];
+                        (0..k).map(|s| RowDraw::of(&r.sample, r.seed, r.context.len() + s).expect("a keyed window's rows are keyed")).collect()
+                    })
+                    .collect();
+                let mut refs = active_tables(&mut self.running, &in_batch);
+                self.dec.forward_batched_drawn_window(&mut refs, &inputs, &draws, k)
             } else {
                 if self.wants_full_rows(&active) {
                     // A request the candidate list cannot answer exactly, on a decoder that reads its rows back:

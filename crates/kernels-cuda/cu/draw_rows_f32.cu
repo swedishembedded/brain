@@ -22,10 +22,11 @@
 // (a sweep of contiguous runs and a block scan of their counts), and the row is drawn over that nucleus and its min-p
 // floor (the WGSL passes nucleus_part, nucleus_step, nucleus_cut and draw_part's pass 2 do the same).
 //
-//   params : u32 [rows, vocab]
+//   params : u32 [rows, vocab, step]: step is the decode window's step whose keys the row draws with
 //   logits : [rows, vocab] f32
-//   spec   : [rows, 8] u32: temperature bits, min-p bits, key, draw flag (0 = row not drawn, left as it was; 1 = drawn
-//            over the row; 2 = drawn over its nucleus), top-p bits, three unused
+//   spec   : [rows, 8] u32: temperature bits, min-p bits, unused, draw flag (0 = row not drawn, left as it was; 1 = drawn
+//            over the row; 2 = drawn over its nucleus), top-p bits, three unused; then [window, rows] the rows' keys of
+//            each step of a decode window
 //   out    : [rows, 4] f32: the drawn column (as f32, exact below 2^24), its log-probability, the row's best
 //            logit/temp and its mass sum_t exp(logit_t / temp - best) (the statistics a candidate list is answered with)
 //
@@ -156,7 +157,7 @@ __device__ __forceinline__ float brain_draw_unkey(unsigned int k) {
 }
 
 extern "C" __global__ void __launch_bounds__(BRAIN_DRAW_THREADS) brain_draw_rows(const unsigned int* params, const float* logits, const unsigned int* spec, float* out) {
-    const unsigned int rows = params[0], vocab = params[1];
+    const unsigned int rows = params[0], vocab = params[1], step = params[2];
     const unsigned int row = blockIdx.y * gridDim.x + blockIdx.x;
     if (row >= rows) { return; }  // block-uniform
     const unsigned int* sp = spec + 8ull * row;
@@ -164,7 +165,7 @@ extern "C" __global__ void __launch_bounds__(BRAIN_DRAW_THREADS) brain_draw_rows
     if (flag == 0u) { return; }  // block-uniform: the row is not drawn
     const float temp = fmaxf(__uint_as_float(sp[0]), 1e-6f);
     const float min_p = __uint_as_float(sp[1]);
-    const unsigned int key = sp[2];
+    const unsigned int key = spec[8ull * rows + static_cast<unsigned long long>(step) * rows + row];
     const float top_p = __uint_as_float(sp[4]);
     const float* x = logits + static_cast<unsigned long long>(row) * vocab;
 

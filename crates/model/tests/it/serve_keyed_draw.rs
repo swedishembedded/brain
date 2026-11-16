@@ -134,6 +134,10 @@ struct Echo {
     on_device: bool,
     drawn: usize,
     returned: usize,
+    /// The keyed window this decoder offers (`1`: none).
+    window: usize,
+    /// Windows of more than one step it ran.
+    windows: usize,
 }
 
 fn row_for(input: u32) -> Vec<f32> {
@@ -193,6 +197,24 @@ impl PagedDecoder for Echo {
     fn decode_window_capacity(&self) -> usize {
         1
     }
+    fn drawn_window_capacity(&self) -> usize {
+        self.window
+    }
+    fn forward_batched_drawn_window(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32], draws: &[Vec<RowDraw>], k: usize) -> Vec<Vec<(u32, f32)>> {
+        assert!(k > 1 && k <= self.window, "a window of {k} on a decoder of {}", self.window);
+        self.windows += 1;
+        let mut out = vec![Vec::with_capacity(k); inputs.len()];
+        let mut cur = inputs.to_vec();
+        for step in 0..k {
+            for ((i, t), row_draws) in tables.iter_mut().enumerate().zip(draws) {
+                t.append(&mut self.alloc).unwrap();
+                let (tok, lp) = draw_row(&row_for(cur[i]), row_draws[step]);
+                out[i].push((tok, lp));
+                cur[i] = tok;
+            }
+        }
+        out
+    }
     fn forward_batched_topk(&mut self, _: &mut [&mut BlockTable], _: &[u32], _: usize) -> Vec<Vec<(u32, f32)>> {
         unreachable!("every request here needs the whole row")
     }
@@ -235,7 +257,51 @@ impl PagedDecoder for Echo {
 }
 
 fn echo(on_device: bool) -> Scheduler<Echo> {
-    Scheduler::new(Echo { alloc: BlockAllocator::new(512, 8), on_device, drawn: 0, returned: 0 }, 8)
+    echo_windowed(on_device, 1)
+}
+
+fn echo_windowed(on_device: bool, window: usize) -> Scheduler<Echo> {
+    Scheduler::new(Echo { alloc: BlockAllocator::new(512, 8), on_device, drawn: 0, returned: 0, window, windows: 0 }, 8)
+}
+
+/// Every request's tokens and log-probabilities, by id.
+fn run_all(s: &mut Scheduler<Echo>, requests: Vec<(Request, SampleParams, u64)>) -> Vec<(Vec<u32>, Vec<f32>)> {
+    let ids: Vec<u64> = requests.into_iter().map(|(r, p, seed)| s.submit_sampled(r, p, seed)).collect();
+    let mut done: std::collections::HashMap<u64, (Vec<u32>, Vec<f32>)> = Default::default();
+    while s.pending() {
+        let report = s.step_report();
+        let lps: std::collections::HashMap<u64, Vec<f32>> = report.completed_logprobs.into_iter().collect();
+        for (id, toks) in report.completed {
+            done.insert(id, (toks, lps[&id].clone()));
+        }
+    }
+    ids.iter().map(|id| done.remove(id).expect("every request completes")).collect()
+}
+
+/// A keyed decode window draws, token for token and log-probability for log-probability, what single keyed steps draw
+/// (its draws are keyed by position), for a temperature, a floor and a nucleus, beside neighbours of other lengths;
+/// a stop token drawn inside a window ends its request there, as it does between single steps; and the window's
+/// tokens do not depend on what else shares the batch.
+#[test]
+fn a_keyed_window_draws_what_single_steps_draw_and_stops_inside_a_window() {
+    let t = SampleParams { temp: 1.0, ..SampleParams::greedy() };
+    let requests = || -> Vec<(Request, SampleParams, u64)> { vec![
+        (Request { prompt: vec![3, 4, 5], max_new: 23, stop: Vec::new() }, t, 11), // seed: test-double, compared streams
+        (Request { prompt: vec![9], max_new: 17, stop: vec![7] }, SampleParams { min_p: 0.3, ..t }, 12), // seed: test-double
+        (Request { prompt: vec![2, 6], max_new: 30, stop: vec![1, 2] }, SampleParams { top_p: 0.6, ..t }, 13), // seed: test-double
+    ] };
+    let single = run_all(&mut echo_windowed(true, 1), requests());
+    let mut windowed = echo_windowed(true, 4);
+    let got = run_all(&mut windowed, requests());
+    assert!(windowed.decoder().windows > 0, "the batch took keyed windows");
+    for (i, (a, b)) in single.iter().zip(&got).enumerate() {
+        assert_eq!(a.0, b.0, "request {i}: the window drew other tokens");
+        assert_eq!(a.1, b.1, "request {i}: the window reported other log-probabilities");
+    }
+    assert!(single[1].0.len() < 17 || single[2].0.len() < 30, "a stop token ended a request early, inside a window: {:?}", single.iter().map(|s| s.0.len()).collect::<Vec<_>>());
+    // Alone, the first request draws in windows exactly what it drew beside the others.
+    let alone = run_all(&mut echo_windowed(true, 4), requests().into_iter().take(1).collect());
+    assert_eq!(alone[0], got[0], "the window's tokens depend on its neighbours");
 }
 
 /// One request alone, then the same request beside others that arrive before and after it, on a decoder that

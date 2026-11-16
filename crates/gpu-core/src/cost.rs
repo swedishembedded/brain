@@ -1568,6 +1568,9 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
         }
         // The nucleus threshold search, params [m, n, p, _]: per element read a compare, a division and an exp; the
         // slice's mass written; the step folds them, the cut walks the row twice.
+        // Feed a draw's token back, params [bsz, s]: per row the (token, logprob) read, the input and two history
+        // words written.
+        "draw_feed" => f(0, 4 * 5 * p(0)?),
         "nucleus_part" => {
             let (m, n, parts) = (p(0)?, p(1)?, p(2)?);
             f(12 * m * n, 4 * (m * n + m * parts + 12 * m))
@@ -2400,7 +2403,7 @@ mod tests {
             "paged_decode_scores_i8_batched", "paged_decode_apply_i8_batched",
             "paged_kv_append_i8_clipped_batched",
             // the served step's greedy head and the recurrent-state pools
-            "argmax_part", "argmax_final", "topk_extract_step", "draw_part", "draw_final", "nucleus_part", "nucleus_step", "nucleus_cut", "pool_rows_gather2", "pool_rows_scatter2",
+            "argmax_part", "argmax_final", "topk_extract_step", "draw_part", "draw_final", "nucleus_part", "nucleus_step", "nucleus_cut", "draw_feed", "pool_rows_gather2", "pool_rows_scatter2",
             // the fused flash-style paged attention the serving tape selects
             "paged_flash_prefill", "paged_flash_prefill_hd256", "paged_flash_prefill_i8",
             "paged_flash_decode", "paged_flash_decode_i8", "paged_flash_decode_gqa", "paged_flash_decode_gqa_combine",

@@ -3678,6 +3678,53 @@ impl Engine {
 
     /// [`Self::forward_batched_greedy_window`] for one window of all of `tables`.
     fn greedy_window_step(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32], k: usize) -> Vec<Vec<u32>> {
+        let n = self.decode_window(tables, inputs, k, |e, bsz, s| {
+            e.submit_greedy_head(bsz);
+            e.gpu.submit(&[], &[e.gpu.step(DECODE_FEED, &[&e.argmax_dev, &e.sc.tok_buf, &e.sc.hist_buf], &[bsz, s], bsz)]);
+        });
+        let flat = self.gpu.read(&self.sc.hist_buf, k * n);
+        (0..n).map(|i| (0..k).map(|s| flat[s * n + i] as u32).collect()).collect()
+    }
+
+    /// Advance every sequence by `k` tokens with ONE host round-trip, each drawn by its keyed draw where the logits are
+    /// (`model::serve::PagedDecoder::forward_batched_drawn_window`): `draws[i][s]` is row `i`'s draw at step `s`.
+    /// The drawn tokens feed the next step on the device ([`model::readout::RowDrawer::feed`]), as the greedy window
+    /// feeds its argmax, and the window's tokens and log-probabilities are read once at the end.
+    pub(crate) fn forward_batched_drawn_window(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32], draws: &[Vec<RowDraw>], k: usize) -> Vec<Vec<(u32, f32)>> {
+        let mut at = 0usize;
+        self.grouped(tables, inputs, |e, tables, inputs| {
+            let group = &draws[at..at + inputs.len()];
+            at += inputs.len();
+            e.drawn_window_step(tables, inputs, group, k)
+        })
+    }
+
+    /// [`Self::forward_batched_drawn_window`] for one window of all of `tables`.
+    fn drawn_window_step(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32], draws: &[Vec<RowDraw>], k: usize) -> Vec<Vec<(u32, f32)>> {
+        let first: Vec<Option<RowDraw>> = draws.iter().map(|d| Some(d[0])).collect();
+        let vocab = self.cfg.vocab;
+        let drawer = self.drawer.take().expect("a keyed window runs on an engine with a drawer (drawn_window_capacity)");
+        let shape = drawer.shape(&first, vocab);
+        assert_eq!(shape.candidates, 0, "a keyed window draws no row from candidates");
+        drawer.upload(&self.gpu, &first, vocab);
+        drawer.upload_window_keys(&self.gpu, &(1..k).map(|s| draws.iter().map(|d| d[s].key).collect()).collect::<Vec<Vec<u32>>>());
+        let n = self.decode_window(tables, inputs, k, |e, bsz, s| {
+            let mut steps: Vec<Step> = Vec::new();
+            e.head_steps(&mut steps, bsz);
+            steps.extend(drawer.dispatch_at(&e.gpu, &e.logits_dev, bsz, vocab, shape, s));
+            steps.push(drawer.feed(&e.gpu, &e.sc.tok_buf, bsz, s));
+            e.gpu.submit(&[], &steps);
+        });
+        let out = drawer.read_window(&self.gpu, n, k);
+        self.drawer = Some(drawer);
+        out
+    }
+
+    /// The `k` steps of a decode window over `tables` (row `i` fed `inputs[i]` first): the window's K/V slots taken up
+    /// front and walked on the device (`decode_advance`), each step's layers replayed from its recorded tape, and
+    /// `head(engine, rows, step)` submitted after each step's layers to leave the step's tokens in `sc.tok_buf` for the
+    /// next. Requires `k <= DECODE_WINDOW` and room in the pool for every append. Returns the row count.
+    fn decode_window(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32], k: usize, mut head: impl FnMut(&Engine, u32, u32)) -> usize {
         assert!((1..=DECODE_WINDOW).contains(&k), "window {k} out of range");
         let meta = self.append_meta(tables);
         let bsz = meta.bsz;
@@ -3690,62 +3737,33 @@ impl Engine {
         for s in 1..k {
             for (i, table) in tables.iter_mut().enumerate() {
                 let before = table.blocks().len();
-                let (block, offset) =
-                    table.append(&mut self.alloc).expect("KV pool exhausted mid-window");
-                let bti = if table.blocks().len() > before {
-                    (table.blocks().len() - 1) as u32
-                } else {
-                    NO_BT
-                };
+                let (block, offset) = table.append(&mut self.alloc).expect("KV pool exhausted mid-window");
+                let bti = if table.blocks().len() > before { (table.blocks().len() - 1) as u32 } else { NO_BT };
                 let base = ((s - 1) * n + i) * 3;
                 sched[base] = block;
                 sched[base + 1] = offset;
                 sched[base + 2] = bti;
             }
         }
-        let g = &self.gpu;
         if k > 1 {
-            g.write(&self.sc.sched_buf, &sched);
+            self.gpu.write(&self.sc.sched_buf, &sched);
         }
-        // Sub-step 0: host-fed, as today - but the argmax stays on the device.
+        // Sub-step 0: host-fed; every later one reads the token the step before it left on the device.
         self.run_batched_submit(&meta, Input::Tokens(inputs), false);
-        self.submit_greedy_head(bsz);
+        head(self, bsz, 0);
         for s in 1..k {
             let g = &self.gpu;
-            let feed = g.step(
-                DECODE_FEED,
-                &[&self.argmax_dev, &self.sc.tok_buf, &self.sc.hist_buf],
-                &[bsz, (s - 1) as u32],
-                bsz,
-            );
             let adv = g.step(
                 DECODE_ADVANCE,
-                &[
-                    &self.sc.sched_buf,
-                    &self.sc.pos_buf,
-                    &self.sc.seqlen_buf,
-                    &self.sc.blk_buf,
-                    &self.sc.off_buf,
-                    &self.sc.bt_buf,
-                ],
+                &[&self.sc.sched_buf, &self.sc.pos_buf, &self.sc.seqlen_buf, &self.sc.blk_buf, &self.sc.off_buf, &self.sc.bt_buf],
                 &[bsz, (s - 1) as u32, mbt, NO_BT],
                 bsz,
             );
-            g.submit(&[], &[feed, adv]);
+            g.submit(&[], &[adv]);
             self.run_batched_submit(&meta, Input::Resident, false);
-            self.submit_greedy_head(bsz);
+            head(self, bsz, s as u32);
         }
-        // Record the final sub-step's tokens, then read the whole window once.
-        let g = &self.gpu;
-        let last = g.step(
-            DECODE_FEED,
-            &[&self.argmax_dev, &self.sc.tok_buf, &self.sc.hist_buf],
-            &[bsz, (k - 1) as u32],
-            bsz,
-        );
-        g.submit(&[], &[last]);
-        let flat = g.read(&self.sc.hist_buf, k * n);
-        (0..n).map(|i| (0..k).map(|s| flat[s * n + i] as u32).collect()).collect()
+        n
     }
 
     /// **Chunked prefill**: process the prompt in chunks of up to `max_prefill`
@@ -4624,6 +4642,16 @@ impl model::serve::PagedDecoder for Engine {
     }
     fn forward_batched_greedy_window(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32], k: usize) -> Vec<Vec<u32>> {
         Engine::forward_batched_greedy_window(self, tables, inputs, k)
+    }
+    fn drawn_window_capacity(&self) -> usize {
+        if self.drawer.is_some() {
+            DECODE_WINDOW
+        } else {
+            1
+        }
+    }
+    fn forward_batched_drawn_window(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32], draws: &[Vec<RowDraw>], k: usize) -> Vec<Vec<(u32, f32)>> {
+        Engine::forward_batched_drawn_window(self, tables, inputs, draws, k)
     }
     fn prefix_stats(&self) -> (u64, u64, usize) {
         Engine::prefix_stats(self)

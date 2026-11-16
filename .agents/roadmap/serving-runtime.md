@@ -62,7 +62,7 @@ claimed before its baseline exists.
 | 4 | Persistent device batch state: row diffs scattered into device buffers, double-buffered metadata, schedule N+1 prepared while N runs (G7) | `gpu-core`, `backend-cuda`, `model::serve` | no host sync inside the token loop; per-step upload bytes proportional to changes | open |
 | 5 | Graph-safe library execution: find #356's root cause, verify eager vs replay per tier and shape | `backend-cuda`, `gpu-core` | replay keeps library GEMMs with bit-level parity | open |
 | 6 | Shape-driven attention and GEMM selection over phase, batch, KV length, KV tier, page size | `kernel-performance.md` owns it | selection table covers the context x batch matrix | open |
-| 7 | Exact device sampling over the full vocabulary (G5) | `model::serve`, `kernels-cuda` | distribution tests match the host reference; no logits readback | in progress (knowledge 488): every sampled request without a logit processor is keyed and drawn on the device (`RowDrawer`: WGSL pair + native `draw_rows_f32`; a `top_k` up to 1024 or a nucleus from the row's best candidates, the row only when they do not hold the survivors) in every GPU engine on the shared scheduler, recorded 27B steps included. Open: a keyed decode window |
+| 7 | Exact device sampling over the full vocabulary (G5) | `model::serve`, `kernels-cuda` | distribution tests match the host reference; no logits readback | in progress (knowledge 488): every sampled request without a logit processor is keyed and drawn on the device (`RowDrawer`: WGSL pair + native `draw_rows_f32`; a `top_k` up to 1024 or a nucleus from the row's best candidates, the row only when they do not hold the survivors) in every GPU engine on the shared scheduler, recorded 27B steps included. Open: windows beside prefill |
 | 8 | Cost- and cache-aware scheduling: order by uncached work, shared in-flight prefixes, bounded-fairness aging, calibrated step-cost model (G11) | `model::serve` | goodput and tail latency improve on mixed traffic with bounded starvation | in progress: shared in-flight prefixes and the mixed iteration with its step-cost model done (knowledge 379); uncached-work ordering and aging open |
 | 9 | One logical prefix index (radix over content, namespace, revision) over block-sharing and snapshot physical forms; retention by saved work per byte | `model::paged`, `model::snapshot_prefix` | longest-prefix match without scanning entries | in progress: hybrid branch points (a shared document is resumable) done; the radix index and retention by saved work open |
 | 10 | Grace memory as a managed warm KV tier: page-granular async promotion/demotion through the existing upload ring; direct coherent reads measured separately (G9) | `model::kv_offload`, `backend-cuda` | warm-prefix hits served from host without whole-sequence swaps | open |
@@ -949,10 +949,19 @@ The draw itself is 0.21 ms a step at 64 rows of the 27B's 248320-token vocabular
       4374 -> 4903, 85 -> 87 %, 94 % -> 12 %; 16 streams greedy 2273 -> 2260 (noise), 97 % -> 5 %; one stream 189 ->
       188 tok/s (the blocking wait adds no measurable step latency), 96 % -> 2 %. Tokens unchanged (the qwen3
       conformance, window, exact-decode and recorded-tape tests).
-- [ ] the card at 93 % (greedy) and 87 % (temperature 1) busy at 64 streams, not 95 %: the window boundary's readback
-      and host work, and the sampled path's k = 1 steps (no keyed window yet), are the remaining gaps
-- [ ] a keyed decode window (Qwen3's greedy window feeds the argmax back on the device; a keyed one needs the keys of
-      every sub-step uploaded once)
+- [x] a keyed decode window (2026-11-16): a batch whose every row is a keyed draw the decoder answers on its own (no
+      `top_k` inside the vocabulary) decodes up to `DECODE_WINDOW` tokens a host round-trip
+      (`PagedDecoder::forward_batched_drawn_window`, Qwen3's `drawn_window_step`): each step's draw reads that step's
+      keys (`RowDrawer::upload_window_keys`, the step a dispatch parameter) and feeds its token to the next step on the
+      device (`draw_feed`); the greedy and keyed windows share `Engine::decode_window`. Token for token and
+      log-probability for log-probability the window draws what single keyed steps draw (`engine_prefill_census.rs`,
+      `serve_keyed_draw.rs`, a stop token inside a window included). Through `brain serve` at 64 streams (A/B pairs,
+      the second pair cut short by the background time limit on the shared card): temperature 1 4754/4879 -> 4837/4954
+      tok/s against greedy 5032-5101, card 89-90 -> 87-92 % against greedy 91-93 %; 16 streams 2170/2214 -> 2218. The
+      gain is small because a closed loop at 64 streams keeps a request waiting or prefilling most iterations, which
+      takes the window back to one step for greedy and sampled alike.
+- [ ] the card at about 92 % busy at 64 streams over HTTP, not 95 %: an iteration with a prompt waiting decodes one
+      token (no window beside prefill), and each window boundary costs a readback and the host's accept and admission
 - [ ] `--exact-decode` and adapter rows still take the eager keyed head on the 27B (not recorded)
 - [ ] pre-existing, not caused here: `qwen35/tests/hf_fp8_conformance.rs::the_hf_fp8_engine_conforms` fails its
       batched-equals-alone property at the base too (`[0, 36, 33, 45, 62, 63]` against `[5, 48, 20, 9, 50, 5]`)
