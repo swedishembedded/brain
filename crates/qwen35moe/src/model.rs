@@ -109,7 +109,7 @@
 //!   equivalently NLC with `N=B,L=T,C=C`). `nlc_nchw`/`nchw_nlc` (existing)
 //!   convert between exactly these two layouts with `hw=T`; no new kernel.
 
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::HashMap;
 
 use gpu_core::select::Dtype;
@@ -993,7 +993,12 @@ pub struct Qwen35 {
     /// [`Qwen35::read_d_img_embeds`]) instead of into `tok.weight`.
     splice: model::vlm::SpliceRuns,
 
-    logits: DeviceBuffer,
+    /// `[n, vocab]` logits of a forward that is not a chunked-head training one, made on first use
+    /// ([`Self::logits_buf`]): a serving engine never runs that forward, and held from the start it was a 64-row by
+    /// vocab buffer read by nothing.
+    logits: OnceCell<DeviceBuffer>,
+    /// Words of [`Self::logits`]: `n * vocab`, or 1 where the chunked head replaces it.
+    logits_words: u64,
     ce_buf: DeviceBuffer,
     /// The chunked LM head of a training build that owns the head: the loss and the
     /// logit gradient come from `rows_per_chunk` rows of logits at a time, so no
@@ -1032,13 +1037,10 @@ pub struct Qwen35 {
     /// `logits_all` and `step`), not a hard limitation of the per-layer decode
     /// math itself, which only needs `dec_cap` as an upper bound on `pos`.
     dec_cap: u32,
-    /// Per-layer plain (non-paged) KV cache for GQA layers, `[dec_cap,
-    /// kv_dim]`; a size-1 dummy at GDN layer indices (never dispatched into,
-    /// mirrors `qwen3::Qwen::new_impl`'s own `dummy_layer`/`hd_or_dummy`
-    /// convention for "this slot doesn't apply to this layer type" rather
-    /// than an `Option`, so every layer index still has a plain buffer to
-    /// index by `l`).
-    gqa_kv: Vec<KvLayer>,
+    /// The single-sequence decode state of [`Self::step`] (the GQA KV per full-attention layer, the recurrent state
+    /// and conv history per GDN layer; see [`OwnDecode`]), made on first use: the serving engine passes its pooled
+    /// caches and never reads it.
+    own: OnceCell<OwnDecode>,
     /// This instance's [`CHUNK_ARENA_MIN_ROWS`] - see
     /// [`Self::set_chunk_arena_min_rows`].
     chunk_arena_min_rows: Cell<u32>,
@@ -1050,16 +1052,6 @@ pub struct Qwen35 {
     moe_grouped_min_rows: Cell<u32>,
     /// The same threshold for the NVFP4 expert tier ([`NV_GROUPED_MIN_ROWS`] by default).
     nv_grouped_min_rows: Cell<u32>,
-    /// Per-layer persistent Gated DeltaNet recurrent state, `[bh, dk, dv]`
-    /// (`bh = linear_num_value_heads`, single sequence) for GDN layers; a
-    /// size-1 dummy at GQA layer indices. Threaded across `step` calls by
-    /// [`gdn_recurrent_step`]; zeroed by [`Self::reset_decode_cache`].
-    gdn_state: Vec<DeviceBuffer>,
-    /// Per-layer persistent causal-conv history ring buffer, `[1, conv_dim,
-    /// K-1]`, for GDN layers; a size-1 dummy at GQA layer indices. Threaded
-    /// across `step` calls by [`gdn_causal_conv1d_step`]; zeroed by
-    /// [`Self::reset_decode_cache`].
-    gdn_hist: Vec<DeviceBuffer>,
 
     /// The trainable adapter's execution (forward correction, backward), when
     /// `cfg.lora` is set.
@@ -1309,6 +1301,35 @@ pub(crate) struct DecodeCaches<'a> {
     /// `gdn_causal_conv1d_step`'s `hist`.
     pub gdn_state: &'a [DeviceBuffer],
     pub gdn_hist: &'a [DeviceBuffer],
+}
+
+/// A model instance's own single-sequence decode state (`Qwen35::step`): per layer, the plain (non-paged) KV of a
+/// full-attention layer (`[dec_cap, kv_dim]`), the recurrent state (`[bh, dk, dv]`) and conv history
+/// (`[1, conv_dim, K-1]`) of a GDN layer, and a size-1 placeholder where a kind does not apply, so every layer index
+/// has a buffer.
+struct OwnDecode {
+    gqa_kv: Vec<KvLayer>,
+    gdn_state: Vec<DeviceBuffer>,
+    gdn_hist: Vec<DeviceBuffer>,
+}
+
+impl OwnDecode {
+    fn new(gpu: &Gpu, cfg: &Qwen35Config, cap: u32) -> OwnDecode {
+        let kv_dim = cfg.kv_dim() as u64;
+        let gdn_state_len = cfg.linear_num_value_heads as u64 * cfg.linear_key_head_dim as u64 * cfg.linear_value_head_dim as u64;
+        let gdn_hist_len = cfg.linear_conv_dim() as u64 * cfg.linear_conv_kernel_dim.saturating_sub(1) as u64;
+        let mut own = OwnDecode { gqa_kv: Vec::new(), gdn_state: Vec::new(), gdn_hist: Vec::new() };
+        for ty in cfg.layer_types() {
+            let (kv, state, hist) = match ty {
+                LayerType::Full => (KvLayer::new(gpu, KvTier::F32, cap as u64, kv_dim, cfg.head_dim as u64), 1, 1),
+                LayerType::Linear => (KvLayer::placeholder(gpu), gdn_state_len, gdn_hist_len),
+            };
+            own.gqa_kv.push(kv);
+            own.gdn_state.push(gpu.storage(state));
+            own.gdn_hist.push(gpu.storage(hist));
+        }
+        own
+    }
 }
 
 /// Whether a build holds the embedding table as a group-wise int8 weight instead of fp32: an inference build whose
@@ -1730,8 +1751,9 @@ impl Qwen35 {
         let res = Residuals::new(res, shard.start..shard.end + 1);
         // Pipeline-parallel cross-stage boundary gradient buffers -- see the
         // struct fields' own doc.
-        let dres_boundary_in = gpu.storage(n * d);
-        let dres_boundary_out = RefCell::new(gpu.storage(n * d));
+        // Only a training build reads them.
+        let dres_boundary_in = gpu.storage(if train { n * d } else { 1 });
+        let dres_boundary_out = RefCell::new(gpu.storage(if train { n * d } else { 1 }));
 
         // The widest output across all 9 targetable leaves (GDN's in_proj_qkv/
         // in_proj_z/in_proj_b/in_proj_a/out_proj, GQA's q/k/v/o_proj): sizes the
@@ -1772,34 +1794,8 @@ impl Qwen35 {
             let kernels = HeadKernels::from_gpu(&gpu).unwrap_or_else(|e| panic!("qwen35moe: LM head: {e}"));
             HeadCe::new(&ops, cfg.d_model, cfg.vocab, head, HeadCeConfig { rows_per_chunk: rows, tile_budget_words: None }, kernels).unwrap_or_else(|e| panic!("qwen35moe: LM head: {e}"))
         });
-        let logits = gpu.storage(if head_ce.is_none() { n * cfg.vocab as u64 } else { 1 });
+        let logits_words = if head_ce.is_none() { n * cfg.vocab as u64 } else { 1 };
         let ce_buf = gpu.storage(n);
-
-        // Single-sequence incremental decode state -- see `Qwen35::step`'s
-        // doc and the struct fields' own docs for what each buffer holds.
-        // `dec_cap = t`: this pass's decode capacity is this instance's own
-        // fixed prefill length (see `dec_cap`'s own doc).
-        let kv_dim = cfg.kv_dim() as u64;
-        let mut gqa_kv = Vec::with_capacity(cfg.n_layers as usize);
-        let mut gdn_state = Vec::with_capacity(cfg.n_layers as usize);
-        let mut gdn_hist = Vec::with_capacity(cfg.n_layers as usize);
-        let gdn_bh = cfg.linear_num_value_heads as u64;
-        let gdn_state_len = gdn_bh * cfg.linear_key_head_dim as u64 * cfg.linear_value_head_dim as u64;
-        let gdn_hist_len = cfg.linear_conv_dim() as u64 * cfg.linear_conv_kernel_dim.saturating_sub(1) as u64;
-        for ty in cfg.layer_types() {
-            match ty {
-                LayerType::Full => {
-                    gqa_kv.push(KvLayer::new(&gpu, KvTier::F32, t as u64, kv_dim, cfg.head_dim as u64));
-                    gdn_state.push(gpu.storage(1));
-                    gdn_hist.push(gpu.storage(1));
-                }
-                LayerType::Linear => {
-                    gqa_kv.push(KvLayer::placeholder(&gpu));
-                    gdn_state.push(gpu.storage(gdn_state_len));
-                    gdn_hist.push(gpu.storage(gdn_hist_len));
-                }
-            }
-        }
 
         Qwen35 {
             gpu,
@@ -1830,20 +1826,19 @@ impl Qwen35 {
             cos,
             sin,
             splice: model::vlm::SpliceRuns::none(),
-            logits,
+            logits: OnceCell::new(),
+            logits_words,
             ce_buf,
             head_ce,
             train_acts: RefCell::new(None),
             objectives: Default::default(),
             dec_pos: Cell::new(0),
             dec_cap: t,
-            gqa_kv,
+            own: OnceCell::new(),
             chunk_arena_min_rows: Cell::new(CHUNK_ARENA_MIN_ROWS),
             moe_grouped_min_rows: Cell::new(MOE_GROUPED_MIN_ROWS),
             nv_grouped_min_rows: Cell::new(NV_GROUPED_MIN_ROWS),
             decode_fusion: Cell::new(true),
-            gdn_state,
-            gdn_hist,
             adapter,
             dres_boundary_in,
             dres_boundary_out,
@@ -1852,6 +1847,17 @@ impl Qwen35 {
 
     fn w(&self, name: &str) -> &DeviceBuffer {
         self.ps.w(name)
+    }
+
+    /// [`Self::logits`], made on first use. `try_storage`, which no replay arena serves: a first use inside a layer's
+    /// arena scope must not hand the arena a buffer the instance keeps.
+    fn logits_buf(&self) -> &DeviceBuffer {
+        self.logits.get_or_init(|| self.gpu.try_storage(self.logits_words).unwrap_or_else(|e| panic!("qwen35moe: the logits buffer of {} words: {e:?}", self.logits_words)))
+    }
+
+    /// [`Self::own`], made zeroed on first use at this instance's decode capacity.
+    fn own_decode(&self) -> &OwnDecode {
+        self.own.get_or_init(|| OwnDecode::new(&self.gpu, &self.cfg, self.dec_cap))
     }
 
     /// The gather of `n` token rows of the embedding into `out`: from the int8 table an int8 inference build holds
@@ -2964,7 +2970,7 @@ impl Qwen35 {
             g.submit(&[], &[rmsnorm_fwd(g, &kernel_ids(), &self.res[self.cfg.n_layers as usize], self.w("norm.weight"), &xn_final, d, n, self.cfg.rms_eps)]);
             if self.head_ce.is_none() {
                 let mut head_steps = Vec::new();
-                self.head_matmul(&mut head_steps, &xn_final, None, n, &self.logits);
+                self.head_matmul(&mut head_steps, &xn_final, None, n, self.logits_buf());
                 g.submit(&[], &head_steps);
             }
             xn_final
@@ -3479,7 +3485,7 @@ impl Qwen35 {
             self.gpu.submit(&[], &s);
             return self.objectives.loss(&self.gpu, &self.gpu.read(&self.ce_buf, n as usize), self.count.get());
         }
-        self.gpu.submit(&[], &[self.gpu.step(CE_VALUE, &[&self.logits, &self.targets, &self.ce_buf], &[n, self.cfg.vocab, model::IGNORE], n)]);
+        self.gpu.submit(&[], &[self.gpu.step(CE_VALUE, &[self.logits_buf(), &self.targets, &self.ce_buf], &[n, self.cfg.vocab, model::IGNORE], n)]);
         let vals = self.gpu.read(&self.ce_buf, n as usize);
         self.objectives.loss(&self.gpu, &vals, self.count.get())
     }
@@ -3499,7 +3505,7 @@ impl Qwen35 {
         self.run_forward();
         let real = tokens.len() * self.cfg.vocab as usize;
         let Some(head) = &self.head_ce else {
-            return self.gpu.read(&self.logits, real);
+            return self.gpu.read(self.logits_buf(), real);
         };
         // A chunked-head build has no logits buffer: read them chunk by chunk.
         let ta = self.train_acts.borrow();
@@ -3546,11 +3552,13 @@ impl Qwen35 {
     /// own `kcache`/`vcache`.
     pub fn reset_decode_cache(&self) {
         self.dec_pos.set(0);
+        // State not made yet is made zeroed.
+        let Some(own) = self.own.get() else { return };
         let mut clears: Vec<&DeviceBuffer> = Vec::new();
         for (l, ty) in self.cfg.layer_types().iter().enumerate() {
             if *ty == LayerType::Linear {
-                clears.push(&self.gdn_state[l]);
-                clears.push(&self.gdn_hist[l]);
+                clears.push(&own.gdn_state[l]);
+                clears.push(&own.gdn_hist[l]);
             }
         }
         self.gpu.submit(&clears, &[]);
@@ -3580,14 +3588,15 @@ impl Qwen35 {
         // This instance's OWN persistent decode state -- see `DecodeCaches`'s
         // own doc for why `run_decode_step` takes it as an explicit parameter
         // rather than reading `self.gqa_kcache`/`self.gdn_state` directly.
+        let own = self.own_decode();
         let caches = DecodeCaches {
-            gqa_kv: &self.gqa_kv,
+            gqa_kv: &own.gqa_kv,
             gqa_cap: self.dec_cap,
             // This instance's own caches are dedicated per-sequence buffers,
             // not a pool window -- see `DecodeCaches::gqa_base_row`.
             gqa_base_row: 0,
-            gdn_state: &self.gdn_state,
-            gdn_hist: &self.gdn_hist,
+            gdn_state: &own.gdn_state,
+            gdn_hist: &own.gdn_hist,
         };
         let hidden = self.run_decode_step(token_id, pos, &caches);
         self.dec_pos.set(pos + 1);
@@ -4084,7 +4093,8 @@ impl Qwen35 {
             pos + tokens.len() as u32,
             self.dec_cap
         );
-        let caches = DecodeCaches { gqa_kv: &self.gqa_kv, gqa_cap: self.dec_cap, gqa_base_row: 0, gdn_state: &self.gdn_state, gdn_hist: &self.gdn_hist };
+        let own = self.own_decode();
+        let caches = DecodeCaches { gqa_kv: &own.gqa_kv, gqa_cap: self.dec_cap, gqa_base_row: 0, gdn_state: &own.gdn_state, gdn_hist: &own.gdn_hist };
         let mut hidden = None;
         for round in tokens.chunks(max_chunk as usize) {
             hidden = Some(self.run_prefill_chunk(round, pos, &caches));

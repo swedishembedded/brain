@@ -399,9 +399,8 @@ base/new interleaved; plan and used at batch 1, admitted = the largest batch the
 |---|---|---|---|
 | main fb111dbaf | 42.1 | 41.0 | 39 |
 | embedding table held int8 (`embed_table_i8`, `Ops::embed` over `embed_i8`) | 40.7 | 39.6 | 40 |
+| the model's `[n, vocab]` logits and single-sequence decode state made on first use, its backward boundary buffers only in a training build | 40.7 | 39.6 / 39.6 -> 39.5 / 39.5 | 40 |
 
-- [ ] Smaller holders found by the audit, left: the model's own fp32 `logits` (64 rows x vocab, 64 MB), its
-      single-sequence decode state (68 MB), the per-layer `res` (41 x 64 rows, 21 MB), the backward boundary buffers
-      (1 MB) - none read by the serving engine.
+- The per-layer `res` (41 x 64 rows, 21 MB) stays: the model's own forward reads it.
 - [ ] The KV pool reserves a whole context per sequence (`block_size == max_seq_len`); the dense engine's paged pool
       does not.
