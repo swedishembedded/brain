@@ -42,7 +42,14 @@ thread with `gpu_core::with_backend` or `model::block::with_tile_budget_words`;
 `gpu_core::set_default_backend` is the CLI's. A test that needs one kernel
 candidate pins it for its own thread with `gpu_core::pin_candidate` (a guard);
 `gpu_core::force_candidate` and `clear_forced_candidates` are the CLI's, and a
-test's clear once took the bf16 form from the gdn test running beside it. A test that set the process
+test's clear once took the bf16 form from the gdn test running beside it.
+A test opens only the cards the selection names (`BRAIN_DEVICE` / `--device`):
+it counts and picks them with `gpu_core::testgpu::cards`, `stage_cards` (a
+multi-card test) and `card` (one by index, refused when unselected), never
+`devices::gpus()` or a card count, which name cards that belong to someone else
+on a shared node; with the CPU backend selected there are none, and the test
+skips by name. A fixture under the temporary directory is a
+`brain_testutil::Scratch`, which removes it when the test ends or panics. A test that set the process
 backend to the CPU once moved every device built after it in the binary onto
 the CPU, and tests comparing two builds failed only in the full run.
 

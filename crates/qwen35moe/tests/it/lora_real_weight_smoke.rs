@@ -82,17 +82,15 @@ fn lora_finetune_on_real_pipeline_sharded_weights_reduces_loss() {
     };
     gpu_core::hardware::set_wait_timeout(Some(std::time::Duration::from_secs(600)));
 
-    let gpus: Vec<usize> = std::env::var("BRAIN_QWEN35_SMOKE_GPUS")
+    let requested: Option<Vec<usize>> = std::env::var("BRAIN_QWEN35_SMOKE_GPUS")
         .ok()
         .map(|s| s.split(',').filter_map(|x| x.trim().parse().ok()).collect())
-        .filter(|v: &Vec<usize>| !v.is_empty())
-        .unwrap_or_else(|| vec![0, 1]);
-    let need = gpus.iter().copied().max().unwrap_or(0) + 1;
-    let have = gpu_core::discrete_gpu_count();
-    if have < need {
-        brain_testutil::skip_unavailable(&format!("needs {need} discrete GPU(s) for {gpus:?}, found {have}"));
-        return;
-    }
+        .filter(|v: &Vec<usize>| !v.is_empty());
+    // The cards the selection (BRAIN_DEVICE) names, never gpu0 and gpu1 by number.
+    let gpus = match gpu_core::testgpu::stage_cards(requested.as_deref(), 2) {
+        Ok(gpus) => gpus,
+        Err(why) => return brain_testutil::skip_unavailable(&why),
+    };
 
     // How many of the real 40 layers to load, split across `gpus.len()`
     // stages -- overridable so the same test can be re-run at a different

@@ -77,7 +77,7 @@ fn texts(n: usize) -> Vec<Invocation> {
 }
 
 fn no_gpu() -> bool {
-    if gpu_core::devices::gpus().is_empty() {
+    if gpu_core::testgpu::cards().is_empty() {
         brain_testutil::skip_unavailable("worker-hosted LFM2.5 encoders: no GPU (the encoder runs on a card)");
         return true;
     }
@@ -200,7 +200,7 @@ fn a_dead_encoder_worker_fails_its_job_and_the_next_is_built_on_the_healthy_card
     if no_gpu() {
         return;
     }
-    if gpu_core::devices::gpus().len() < 2 {
+    if gpu_core::testgpu::cards().len() < 2 {
         brain_testutil::skip_unavailable("worker-hosted LFM2.5 encoders: one GPU (moving to a healthy card needs two)");
         return;
     }

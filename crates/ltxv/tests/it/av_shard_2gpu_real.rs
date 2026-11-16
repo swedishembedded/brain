@@ -150,7 +150,7 @@ fn batch_for(inp: &TestInputs) -> AvDitBatch {
 
 #[test]
 fn two_real_gpus_agree_on_the_av_shardable_seam() {
-    let devs = gpu_core::devices::gpus();
+    let devs = gpu_core::testgpu::cards();
     if devs.len() < 2 {
         brain_testutil::skip(&format!("this test needs 2 physical GPUs, only {} available", devs.len()));
         return;

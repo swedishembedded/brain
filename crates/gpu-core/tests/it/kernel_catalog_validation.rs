@@ -191,6 +191,11 @@ fn whole_kernel_catalog_registers_on_the_active_default_backend() {
 #[test]
 fn matmul_family_is_correct_and_lands_on_gpu_when_hardware_available() {
     let gpu = gpu_core::testgpu::dev(kernels::ALL);
+    // The register-tiled members of the family synchronise their workgroups, which the CPU JIT (a selected CPU
+    // backend) does not run.
+    if !gpu.caps().workgroup_reductions {
+        return brain_testutil::skip_unavailable(&format!("the matmul family's register-tiled kernels: the {} backend runs no workgroup-barrier kernel", gpu.kind()));
+    }
 
     // Any-M shapes (matmul / matmul_reg2 / matmul_reg3 / matmul_i8_dyn /
     // matmul_q4_dyn): not multiples of the 128x128 tile, K a multiple of 32
@@ -363,7 +368,7 @@ fn matmul_family_is_correct_and_lands_on_gpu_when_hardware_available() {
     // GPU, matmul must not silently end up on the CPU backend. All eight
     // dispatches above ran on this ONE `gpu` handle, so one check covers all
     // of them.
-    let visible_gpus = gpu_core::visible_gpu_count();
+    let visible_gpus = gpu_core::testgpu::cards().len();
     eprintln!(
         "matmul_family_is_correct_and_lands_on_gpu_when_hardware_available: backend={} visible_gpus={visible_gpus}",
         gpu.kind()

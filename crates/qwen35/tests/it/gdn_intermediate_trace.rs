@@ -41,7 +41,7 @@ fn dump_gdn_layer0_position0_intermediates() {
         brain_testutil::skip("BRAIN_QWEN35_GGUF unset (set it to a downloaded Qwen3.8-27B*.gguf to run this)");
         return;
     };
-    if gpu_core::devices::gpus().is_empty() {
+    if gpu_core::testgpu::cards().is_empty() {
         brain_testutil::skip_unavailable("no discrete GPU - the fp32 side of this comparison needs VRAM");
         return;
     }

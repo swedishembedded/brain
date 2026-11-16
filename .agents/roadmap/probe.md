@@ -136,6 +136,12 @@ heating event measures the chassis.
 
 ## Left to do
 
+* **The CPU backend's compute roof is the JIT's, not the host's.** Since the CPU backend serves the f32 GEMMs on its
+  native vector GEMM (AVX2, NEON), a GEMM outruns the roof it is graded against: `roof_fma` still runs as a Cranelift JIT
+  loop, 782 GFLOP/s against `matmul_reg2` at 3040 GFLOP/s on a 288-thread GH200 host (2026-11-16). A native route for the
+  FMA probe at the backend's vector tier is the fix; until then `roofline::real_work_can_never_beat_the_roof` skips the
+  CPU backend by name, and every CPU "% of peak" reads high.
+
 * **A ceiling that survives the thermal state.** The orchestrator caches one sweep's
   result for 15 minutes; on a part whose rate swings 5x with package
   temperature, "the best of the last N sweeps" is arguably the honest reading

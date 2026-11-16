@@ -138,7 +138,7 @@ pub(super) fn serial() -> std::sync::MutexGuard<'static, ()> {
 }
 
 fn no_gpu() -> bool {
-    if gpu_core::devices::gpus().is_empty() {
+    if gpu_core::testgpu::cards().is_empty() {
         brain_testutil::skip_unavailable("worker-hosted decision models: no GPU (the decision models are GPU-only)");
         return true;
     }
@@ -174,7 +174,7 @@ fn a_dead_worker_fails_its_job_quarantines_its_card_and_the_next_job_is_built_on
     if no_gpu() {
         return;
     }
-    if gpu_core::devices::gpus().len() < 2 {
+    if gpu_core::testgpu::cards().len() < 2 {
         brain_testutil::skip_unavailable("worker-hosted decision models: one GPU (moving to a healthy card needs two)");
         return;
     }

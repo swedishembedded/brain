@@ -162,6 +162,11 @@ fn max_abs_rows_matches_reference_exactly() {
 #[ignore = "runs alone in a child process of its parent test"]
 fn max_abs_rows_matches_reference_exactly_alone() {
     let gpu = pinned_gpu();
+    // The workgroup form of the reduction synchronises its workgroup, which the CPU JIT (a selected CPU backend)
+    // does not run.
+    if !gpu.caps().workgroup_reductions {
+        return brain_testutil::skip_unavailable(&format!("max_abs_row's workgroup form: the {} backend runs no workgroup-barrier kernel", gpu.kind()));
+    }
     for &(m, k) in &[(1u32, 1u32), (3, 17), (5, 64), (7, 65), (33, 128), (64, 300), (129, 1024)] {
         let mut x = fill((m * k) as usize);
         // Row 0 all zeros -> exercises the 1e-8 floor on both kernels.

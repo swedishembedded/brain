@@ -307,8 +307,12 @@ fn measure_storage_buffer_resident_overhead() {
         brain_testutil::skip_unavailable("nvidia-smi not available");
         return;
     }
-    let Ok(Ok(gpu)) = std::panic::catch_unwind(|| Gpu::new_on_index(0, KERNELS)) else {
-        brain_testutil::skip_unavailable("could not build a GPU 0 device");
+    let Some(card) = gpu_core::testgpu::cards().first().map(|d| d.index) else {
+        brain_testutil::skip_unavailable("no card selected (BRAIN_DEVICE)");
+        return;
+    };
+    let Ok(Ok(gpu)) = std::panic::catch_unwind(|| Gpu::new_on_index(card, KERNELS)) else {
+        brain_testutil::skip_unavailable("could not build a device on the selected card");
         return;
     };
     if let Some((name, discrete)) = gpu_core::adapter_info() {

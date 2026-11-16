@@ -21,7 +21,7 @@ fn gpu_disabled() -> bool {
     if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
         return true;
     }
-    let have = gpu_core::discrete_gpu_count();
+    let have = gpu_core::testgpu::cards().len();
     if have < 2 {
         brain_testutil::skip_unavailable(&format!("needs 2 discrete GPU(s), found {have}"));
         return true;

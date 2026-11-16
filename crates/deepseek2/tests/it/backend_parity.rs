@@ -67,7 +67,7 @@ fn wgpu_or_skip() -> Option<Gpu> {
         brain_testutil::skip("MOE_SKIP_GPU_TESTS");
         return None;
     }
-    if gpu_core::discrete_gpu_count() == 0 {
+    if gpu_core::testgpu::cards().is_empty() {
         brain_testutil::skip("no discrete GPU - a software rasteriser would compare CPU against CPU");
         return None;
     }

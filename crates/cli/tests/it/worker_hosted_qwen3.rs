@@ -46,7 +46,7 @@ fn checkpoint() -> Option<(String, String)> {
         brain_testutil::skip_unavailable(&format!("worker-hosted Qwen3: {MODEL} is not in the model store (brain pull {MODEL})"));
         return None;
     }
-    if gpu_core::devices::gpus().is_empty() {
+    if gpu_core::testgpu::cards().is_empty() {
         brain_testutil::skip_unavailable("worker-hosted Qwen3: no GPU (the decoder is served on a card)");
         return None;
     }

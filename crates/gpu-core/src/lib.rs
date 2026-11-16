@@ -484,6 +484,50 @@ pub mod card_tests;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod testgpu {
     use super::{Gpu, WeakGpu};
+
+    /// The cards a test may open: the GPUs the process's selection names (`--device` / `BRAIN_DEVICE`, through the
+    /// one ambient compute set), and none at all when the selected backend is the CPU. On a shared node the other cards
+    /// belong to someone else; a test that enumerates "every GPU" opens these instead.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn cards() -> Vec<&'static crate::devices::DeviceId> {
+        if crate::backend_name() == "cpu" {
+            return Vec::new();
+        }
+        crate::devices::schedulable_gpus()
+    }
+
+    /// The canonical indices of the `n` cards a multi-card test places its stages on: `requested` (a test's
+    /// `SHARD_TEST_GPUS`) when given, else the first `n` of [`cards`]. `Err` names why the selection cannot serve it,
+    /// for the test's `skip_unavailable`; a requested card the selection does not name is refused, never opened.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn stage_cards(requested: Option<&[usize]>, n: usize) -> Result<Vec<usize>, String> {
+        let selected: Vec<u32> = cards().iter().map(|d| d.index).collect();
+        admit_cards(requested, n, &selected)
+    }
+
+    /// [`stage_cards`]'s rule over an explicit `selected` list of canonical indices.
+    pub fn admit_cards(requested: Option<&[usize]>, n: usize, selected: &[u32]) -> Result<Vec<usize>, String> {
+        if let Some(requested) = requested {
+            if let Some(card) = requested.iter().find(|&&i| !selected.iter().any(|&s| s as usize == i)) {
+                return Err(format!("gpu{card} is not among the selected cards {selected:?} (BRAIN_DEVICE / --device)"));
+            }
+            return Ok(requested.to_vec());
+        }
+        if selected.len() < n {
+            return Err(format!("needs {n} selected GPU(s); the selection names {} ({selected:?})", selected.len()));
+        }
+        Ok(selected[..n].iter().map(|&i| i as usize).collect())
+    }
+
+    /// The card behind canonical index `index`, refused (a panic naming the selection) unless the selection names it:
+    /// how a test opens one card by index.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn card(index: u32) -> &'static crate::devices::DeviceId {
+        cards().into_iter().find(|d| d.index == index).unwrap_or_else(|| {
+            let selected: Vec<u32> = cards().iter().map(|d| d.index).collect();
+            panic!("gpu{index} is not among the cards this test may open {selected:?} (BRAIN_DEVICE / --device)")
+        })
+    }
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Mutex, OnceLock};

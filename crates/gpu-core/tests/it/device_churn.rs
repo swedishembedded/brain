@@ -122,7 +122,7 @@ fn repeated_device_opens_keep_landing_on_the_physical_card() {
     if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
         return;
     }
-    let Some(dev) = gpu_core::devices::gpus().first() else {
+    let Some(dev) = gpu_core::testgpu::cards().into_iter().next() else {
         eprintln!("no physical GPU present; placement is moot");
         return;
     };
@@ -163,7 +163,7 @@ fn repeated_native_vulkan_contexts_keep_finding_the_physical_card() {
     if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
         return;
     }
-    let Some(dev) = gpu_core::devices::gpus().first() else {
+    let Some(dev) = gpu_core::testgpu::cards().into_iter().next() else {
         eprintln!("no physical GPU present; placement is moot");
         return;
     };

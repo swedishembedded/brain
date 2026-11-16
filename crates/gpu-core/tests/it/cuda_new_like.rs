@@ -22,16 +22,17 @@ const OTHER_KERNELS: &[(&str, &str)] = &[("add2", kernels::ADD2)];
 
 #[test]
 fn a_handle_for_another_kernel_set_stays_on_the_card_it_was_made_from() {
-    if devices::gpus().len() < 2 || devices::cuda_identities().map_or(true, |v| v.len() < 2) {
+    if gpu_core::testgpu::cards().len() < 2 || devices::cuda_identities().map_or(true, |v| v.len() < 2) {
         brain_testutil::skip_unavailable("needs two CUDA cards");
         return;
     }
-    let last = devices::gpus().last().expect("two cards").index;
+    let cards = gpu_core::testgpu::cards();
+    let last = cards.last().expect("two cards").index;
     let Ok(on_last) = devices::with_gpu(last, || Gpu::try_new_cuda(KERNELS)).expect("registry card") else {
         brain_testutil::skip_unavailable("no usable CUDA backend");
         return;
     };
-    let first = devices::gpus()[0].index;
+    let first = cards[0].index;
     let like = devices::with_gpu(first, || on_last.new_like(OTHER_KERNELS)).expect("registry card");
     assert_eq!(like.kind(), "cuda");
     let (want, got) = (on_last.identity().expect("CUDA identity"), like.identity().expect("CUDA identity"));

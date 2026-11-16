@@ -59,7 +59,7 @@ fn skip() -> bool {
         brain_testutil::skip_unavailable("MOE_SKIP_GPU_TESTS set");
         return true;
     }
-    if gpu_core::discrete_gpu_count() < 2 {
+    if gpu_core::testgpu::cards().len() < 2 {
         brain_testutil::skip_unavailable("fewer than two discrete GPUs visible");
         return true;
     }

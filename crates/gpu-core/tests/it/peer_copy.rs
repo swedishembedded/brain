@@ -66,7 +66,7 @@ fn a_misaligned_range_is_refused() {
 
 /// One CUDA handle per card, the first two cards of the registry.
 fn two_cuda_cards(kernels: &[(&str, &str)]) -> Option<(Gpu, Gpu)> {
-    if gpu_core::devices::gpus().len() < 2 {
+    if gpu_core::testgpu::cards().len() < 2 {
         brain_testutil::skip_unavailable("fewer than two GPUs");
         return None;
     }

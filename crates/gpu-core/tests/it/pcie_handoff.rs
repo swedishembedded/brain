@@ -101,7 +101,7 @@ fn d2h_best(gpu: &Gpu, buf: &gpu_core::DeviceBuffer, reps: usize) -> f64 {
 }
 
 fn have_two_cards() -> bool {
-    gpu_core::discrete_gpu_count() >= 2
+    gpu_core::testgpu::cards().len() >= 2
 }
 
 /// The headline: one activation's worth of each direction, and the composed
@@ -114,7 +114,7 @@ fn have_two_cards() -> bool {
 #[test]
 #[ignore = "hardware probe: needs a discrete GPU and an idle bus"]
 fn one_activation_across_the_host_bus() {
-    if gpu_core::discrete_gpu_count() == 0 {
+    if gpu_core::testgpu::cards().is_empty() {
         brain_testutil::skip_unavailable("pcie_handoff: no discrete GPU on this box");
         return;
     }

@@ -70,7 +70,7 @@ fn a_wrong_number_of_buffers_is_refused() {
 
 #[test]
 fn two_cards_reduce_and_gather_exactly_on_nccl() {
-    if gpu_core::devices::gpus().len() < 2 {
+    if gpu_core::testgpu::cards().len() < 2 {
         brain_testutil::skip_unavailable("fewer than two GPUs");
         return;
     }

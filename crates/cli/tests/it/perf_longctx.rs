@@ -68,7 +68,7 @@ fn assert_artifact_is_honest(a: &serde_json::Value) {
 
 #[test]
 fn qwen3_paged_engine_runs_longctx() {
-    if gpu_core::devices::gpus().is_empty() {
+    if gpu_core::testgpu::cards().is_empty() {
         brain_testutil::skip_unavailable("perf longctx qwen: no GPU (the scenario is GPU-only)");
         return;
     }
@@ -87,7 +87,7 @@ fn qwen3_paged_engine_runs_longctx() {
 
 #[test]
 fn qwen35_gguf_resident_runs_longctx() {
-    if gpu_core::devices::gpus().is_empty() {
+    if gpu_core::testgpu::cards().is_empty() {
         brain_testutil::skip_unavailable("perf longctx qwen35: no GPU (the scenario is GPU-only)");
         return;
     }

@@ -14,7 +14,7 @@
 //! reduce the loss - end-to-end forward+backward+optimiser across stages,
 //! with the cut placed automatically by `plan_balanced`.
 //!
-//! Two stages on GPUs 0 and 1 by default; `SHARD_TEST_GPUS=1,1` pins both to
+//! Two stages on the first two selected cards (BRAIN_DEVICE) by default; `SHARD_TEST_GPUS=1,1` pins both to
 //! one card. Skipped under `MOE_SKIP_GPU_TESTS` or on a box without enough
 //! discrete GPUs.
 
@@ -26,21 +26,22 @@ fn gpu_disabled() -> bool {
     if brain_testutil::gpu_tests_skipped() {
         return true;
     }
-    let need = stage_gpus().iter().copied().max().unwrap_or(0) + 1;
-    let have = gpu_core::discrete_gpu_count();
-    if have < need {
-        brain_testutil::skip_unavailable(&format!("needs {need} discrete GPU(s), found {have}"));
+    if let Err(why) = stage_cards() {
+        brain_testutil::skip_unavailable(&why);
         return true;
     }
     false
 }
 
 fn stage_gpus() -> Vec<usize> {
-    std::env::var("SHARD_TEST_GPUS")
-        .ok()
-        .map(|s| s.split(',').filter_map(|x| x.trim().parse().ok()).collect::<Vec<usize>>())
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| vec![0, 1])
+    stage_cards().unwrap_or_default()
+}
+
+/// The two cards the stages go on: `SHARD_TEST_GPUS` when set (each one a card the selection names), else the first two
+/// cards `BRAIN_DEVICE` selects; never cards the selection leaves to someone else.
+fn stage_cards() -> Result<Vec<usize>, String> {
+    let requested = std::env::var("SHARD_TEST_GPUS").ok().map(|s| s.split(',').filter_map(|x| x.trim().parse().ok()).collect::<Vec<usize>>()).filter(|v| !v.is_empty());
+    gpu_core::testgpu::stage_cards(requested.as_deref(), 2)
 }
 
 fn batch(cfg: &Qwen35Config, b: u32, t: u32, seed: u32) -> (Vec<u32>, Vec<u32>) {

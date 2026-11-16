@@ -42,7 +42,7 @@ use fixture::{caps_for_split, tiny_cfg, write_synthetic_checkpoint};
 
 #[test]
 fn sharded_two_gpu_forward_matches_unsharded_single_gpu_forward() {
-    if gpu_core::discrete_gpu_count() < 2 {
+    if gpu_core::testgpu::cards().len() < 2 {
         brain_testutil::skip_unavailable("fewer than two discrete GPUs visible");
         return;
     }
@@ -127,7 +127,7 @@ fn sharded_two_gpu_forward_matches_unsharded_single_gpu_forward() {
 /// changes the model's actual output, not just introduces float noise.
 #[test]
 fn sharded_generate_matches_unsharded_generate() {
-    if gpu_core::discrete_gpu_count() < 2 {
+    if gpu_core::testgpu::cards().len() < 2 {
         brain_testutil::skip_unavailable("fewer than two discrete GPUs visible");
         return;
     }
@@ -191,7 +191,7 @@ fn sharded_generate_matches_unsharded_generate() {
 /// covers), so it runs even on a one-GPU box.
 #[test]
 fn generate_first_token_matches_independently_assembled_reference() {
-    if gpu_core::discrete_gpu_count() < 1 {
+    if gpu_core::testgpu::cards().is_empty() {
         brain_testutil::skip_unavailable("no discrete GPU visible");
         return;
     }

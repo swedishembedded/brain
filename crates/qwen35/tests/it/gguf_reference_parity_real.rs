@@ -147,7 +147,7 @@ fn the_gguf_route_reproduces_an_independent_reference_forward_on_real_weights() 
         brain_testutil::skip("BRAIN_QWEN35_GGUF unset (set it to a downloaded Qwen3.8-27B*.gguf to run this)");
         return;
     };
-    if gpu_core::devices::gpus().is_empty() {
+    if gpu_core::testgpu::cards().is_empty() {
         brain_testutil::skip_unavailable("no discrete GPU - the fp32 side of this comparison needs ~6 GiB of VRAM");
         return;
     }

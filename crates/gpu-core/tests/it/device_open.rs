@@ -66,15 +66,16 @@ fn none_matches_the_ambient_constructor() {
 #[test]
 fn an_indexed_card_is_honoured_not_silently_mangled_to_ambient() {
     let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    let n = gpu_core::devices::gpus().len();
-    if n < 2 {
-        eprintln!("SKIP an_indexed_card_is_honoured_not_silently_mangled_to_ambient: needs 2 discrete GPUs, found {n}");
-        return;
-    }
+    // Two cards the selection names (BRAIN_DEVICE), never gpu0 and gpu1 by number.
+    let cards = match gpu_core::testgpu::stage_cards(None, 2) {
+        Ok(cards) => cards,
+        Err(why) => return brain_testutil::skip_unavailable(&format!("an_indexed_card_is_honoured_not_silently_mangled_to_ambient: {why}")),
+    };
     // The regression: `Some("gpu1")` used to fall through the `_` arm to
     // `Gpu::new`, landing on card 0. Both handles must report a GPU
-    // backend, and card 1 must be reachable at all.
-    for tok in ["gpu0", "gpu1"] {
+    // backend, and the second card must be reachable at all.
+    for tok in cards.iter().map(|i| format!("gpu{i}")) {
+        let tok = tok.as_str();
         let g = Gpu::open(Some(tok), KERNELS);
         assert_ne!(g.kind(), "cpu", "{tok} must not resolve to the CPU backend");
     }

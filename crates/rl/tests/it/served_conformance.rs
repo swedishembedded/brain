@@ -291,7 +291,7 @@ fn repeated_measurements_under_a_lowered_ceiling_helper() {
 /// temporaries, dropped past the device's 4 GB reclaim ceiling.
 #[test]
 fn scoring_quantized_linears_reuses_its_tiles() {
-    if gpu_core::discrete_gpu_count() == 0 {
+    if gpu_core::testgpu::cards().is_empty() {
         brain_testutil::skip_unavailable("served_conformance: needs a real device whose reclaim is deferred");
         return;
     }

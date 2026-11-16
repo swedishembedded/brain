@@ -263,7 +263,7 @@ fn random_weights(cfg: &QwenConfig) -> HashMap<String, Vec<f32>> {
 #[test]
 #[ignore = "hardware probe: needs a discrete GPU and an idle bus"]
 fn what_one_kv_swap_costs_at_qwen3_8b_geometry() {
-    if gpu_core::discrete_gpu_count() == 0 {
+    if gpu_core::testgpu::cards().is_empty() {
         brain_testutil::skip_unavailable("kv_offload_real: no discrete GPU on this box");
         return;
     }

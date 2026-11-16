@@ -155,7 +155,7 @@ impl ThinkerPlacement {
 /// no GPU comes back empty (which callers report as "cannot serve" rather than
 /// silently running somewhere else).
 pub fn discovered_devices(reserved: u64) -> Vec<(u32, u64)> {
-    gpu_core::devices::gpus().iter().map(|d| (d.index, d.identity.vram_bytes.saturating_sub(reserved))).collect()
+    gpu_core::devices::schedulable_gpus().iter().map(|d| (d.index, d.identity.vram_bytes.saturating_sub(reserved))).collect()
 }
 
 /// Headroom, in bytes, that must stay free on the device that streams: enough

@@ -91,7 +91,7 @@ fn one_device_at_a_time() -> std::sync::MutexGuard<'static, ()> {
 }
 
 fn gpu() -> Option<Gpu> {
-    if gpu_core::discrete_gpu_count() == 0 {
+    if gpu_core::testgpu::cards().is_empty() {
         brain_testutil::skip_unavailable("transient_reclaim: no discrete GPU on this box");
         return None;
     }
@@ -239,7 +239,7 @@ fn a_loop_that_never_reclaims_is_refused_at_the_ceiling() {
 #[test]
 fn the_same_loop_through_transient_stays_under_the_ceiling() {
     let _one = one_device_at_a_time();
-    if gpu_core::discrete_gpu_count() == 0 {
+    if gpu_core::testgpu::cards().is_empty() {
         brain_testutil::skip_unavailable("transient_reclaim: no discrete GPU on this box");
         return;
     }

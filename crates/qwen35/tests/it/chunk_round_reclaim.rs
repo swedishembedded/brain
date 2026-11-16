@@ -123,7 +123,7 @@ fn child(helper: &str) -> (bool, String) {
 /// "dropped without an intervening poll_wait()".
 #[test]
 fn a_chunk_round_never_outruns_the_devices_reclaim_ceiling() {
-    if gpu_core::discrete_gpu_count() == 0 {
+    if gpu_core::testgpu::cards().is_empty() {
         brain_testutil::skip_unavailable("chunk_round_reclaim: needs a real device whose reclaim is deferred");
         return;
     }
