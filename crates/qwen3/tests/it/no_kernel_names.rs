@@ -31,7 +31,7 @@
 //! 2. **Hand-picked GEMM kernel names/`KernelVariant` matches are banned
 //!    inside the migrated forward-inference FUNCTION BODIES specifically**:
 //!    `qwen3::model::Qwen::{forward_steps,decode_steps}` and
-//!    `qwen3::serve::Engine::{batched_tape,head_steps}`. These four
+//!    `qwen3::serve::Engine::{batched_steps,head_steps}`. These four
 //!    functions are where the fp32-vs-int8 fork used to live; after B7 they
 //!    call `Ops::act`/`Ops::matmul` (model.rs) or `Self::quant_once`/
 //!    `Self::linear` (serve.rs) exclusively for the 7 per-layer linears.
@@ -42,7 +42,9 @@
 //!    function that actually owns the per-layer linear dispatch;
 //!    `run_batched_steps` itself is now a thin `write_batch_meta`/
 //!    `write_batch_input`/`batched_tape` wrapper with no kernel choice of
-//!    its own.)
+//!    its own. The layer-by-layer prefill then moved the body again, into
+//!    `batched_steps`, which both the whole tape (`batched_tape`) and the
+//!    per-layer submissions build from; the check follows it there.)
 //!    Attention/RoPE/RMSNorm/paged-KV-cache/embedding kernel names
 //!    (`EMBED`, `ROPE_PAGED`, `ROPE_AT`, `KV_APPEND*`, `SCORES_*`,
 //!    `APPLY_*`, `ADD2`, `BIAS_*`, `SPLICE*`, ...) still appear directly in
@@ -226,9 +228,9 @@ fn migrated_forward_paths_never_hand_pick_a_gemm_kernel() {
     );
 
     let serve_src = read(SERVE_RS);
-    check(function_body(&serve_src, "batched_tape"), "qwen3::serve::Engine::batched_tape");
+    check(function_body(&serve_src, "batched_steps"), "qwen3::serve::Engine::batched_steps");
     check(function_body(&serve_src, "head_steps"), "qwen3::serve::Engine::head_steps");
-    for name in ["batched_tape", "head_steps"] {
+    for name in ["batched_steps", "head_steps"] {
         let body = function_body(&serve_src, name);
         assert!(body.contains("self.quant_once("), "no_kernel_names: {name} never calls `Self::quant_once` - did the migration get reverted?");
         assert!(body.contains("self.linear("), "no_kernel_names: {name} never calls `Self::linear`");
