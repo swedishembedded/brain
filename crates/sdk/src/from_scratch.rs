@@ -631,11 +631,11 @@ impl Pretrain {
         let vocab = (chat.vocab)(&open).map_err(Error::Backend)?;
         let encode = |path: &Path| -> Result<(usize, Vec<u32>)> {
             let docs = read_text_corpus(path, None)?;
-            let mut ids = Vec::new();
-            for doc in &docs {
-                ids.extend(data::tokenizer::Tokenizer::encode(&tok, doc));
-                ids.push(separator_id);
-            }
+            // The documents joined by the separator's literal are one text the tokenizer cuts at that special token
+            // again (specials match whole, and a cut ends a pre-token), so its encoding is each document's followed
+            // by the separator; one text of many pieces is encoded by all the cores, a document at a time by one.
+            let mut ids = data::tokenizer::Tokenizer::encode(&tok, &docs.join(separator.as_str()));
+            ids.push(separator_id);
             if let Some(id) = ids.iter().find(|id| **id as usize >= vocab) {
                 return Err(Error::Backend(format!("{}: encodes to token {id}, past the model's vocabulary of {vocab}", path.display())));
             }
