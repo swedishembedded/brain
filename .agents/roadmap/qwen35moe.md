@@ -389,6 +389,29 @@ each), so concurrency 64 adds queueing, not rate. The MoE reaches its first toke
 longer behind each 8K prefill (inter-token p95 689 against 303 ms; the dense engine has mixed prefill-and-decode rounds,
 the MoE engine none). The MoE's 20 % idle is the admission path above.
 
+## The serving thread under 64 streams (2026-11-16)
+
+`brain serve`, 64 streams, closed loop of 300-token chat completions, 128 requests, gpu3; interleaved A/B pairs,
+main 407765756 against the change (knowledge #502).
+
+- [x] A sampled step (keyed draws, or whole logit rows) replays its recording: the step ends in the logits, which the
+  device draws from after the replay. Before, every sampled step was built dispatch by dispatch.
+
+  | load | main tok/s | new tok/s | main core | new core |
+  |---|---|---|---|---|
+  | temperature 1 | 2066 / 2088 | 2320 / 2324 | 21 / 20 % | 9 / 9 % |
+  | greedy | 2440 / 2454 | 2424 / 2437 | 7 / 7 % | 7 / 7 % |
+
+- [x] Admission's first token comes from the device head (`admit_greedy` / `admit_topk`), not from a `[vocab]` row
+  that the host scans or sorts.
+- Greedy does not hold a core (7-9 % on main, also with the binary of the earlier whole-core reading). Its remaining
+  idle (nsys) is the host round-trip at each step boundary (decode window 1: 664 gaps, 0.50 s of 17.7 s) and admission
+  (0.58 s).
+- [ ] A device decode window for the hybrid (greedy and keyed), as Qwen3 has: the metadata advance (positions, the
+  M-RoPE rows, slots) on the device.
+- [ ] `model::readout::draw_rows` builds a `RowDrawer` (eight device buffers) each step; an engine-held drawer, as Qwen3
+  keeps, would avoid that.
+
 ## Device memory (2026-11-16)
 
 GH200 gpu3, `perf run longctx --target qwen35moe:<Q8_0 gguf> --context 32768 --ladder 1,512 --steps 2`, fp32 KV,

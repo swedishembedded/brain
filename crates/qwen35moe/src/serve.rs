@@ -111,7 +111,7 @@ use model::serve::PagedDecoder;
 
 use crate::config::{LayerType, Qwen35Config};
 use crate::q8::Qwen35Q8;
-use crate::model::{pipelines, MOE_GROUPED_MIN_ROWS, BatchDecodeCaches, BatchSeq, DecodeCaches, DecodeHead, DecodeOut, DecodeTape, GdnStore, Qwen35};
+use crate::model::{pipelines, MOE_GROUPED_MIN_ROWS, BatchDecodeCaches, BatchSeq, DecodeCaches, DecodeHead, DecodeOut, DecodeTape, GdnStore, Hidden, Qwen35};
 
 /// [`Engine::forward_batched_greedy_window`]'s window cap. No on-device
 /// multi-step schedule is built (see module doc) - 1 keeps
@@ -781,11 +781,31 @@ impl Engine {
     /// never reads a logits row).
     fn logits(&self, hidden: &[f32]) -> Vec<f32> {
         let g = &self.model.gpu;
-        let h = g.storage_init("qwen35moe.admit.hidden", hidden);
+        let h = self.admit_hidden(hidden);
         let logits = self.model.head_logits_rows_dev(&h, 1);
         g.read(&logits, self.model.cfg.vocab as usize)
     }
 
+    /// Admission's greedy pick on the device: the head and the argmax reduction a greedy decode step runs, so only
+    /// the token comes back, not a `[vocab]` row for the host to scan.
+    fn admit_greedy(&self, hidden: &[f32]) -> u32 {
+        let h = self.admit_hidden(hidden);
+        self.model.head_argmax_rows_dev(&Hidden::plain(h), 1)[0]
+    }
+
+    /// Admission's top-`k` candidates on the device ([`Engine::forward_batched_topk`]'s extraction), instead of the
+    /// host sorting the whole vocabulary.
+    fn admit_topk(&self, hidden: &[f32], k: usize) -> Vec<(u32, f32)> {
+        let h = self.admit_hidden(hidden);
+        let k = k.clamp(1, self.topk_capacity()) as u32;
+        self.model.head_topk_rows_dev(&Hidden::plain(h), 1, k).swap_remove(0)
+    }
+
+    /// One prefill's `[d_model]` hidden row on the device, for admission's head.
+    fn admit_hidden(&self, hidden: &[f32]) -> DeviceBuffer {
+        assert_eq!(hidden.len(), self.model.cfg.d_model as usize, "qwen35moe admission: the hidden state is one row of {} floats, not {}", self.model.cfg.d_model, hidden.len());
+        self.model.gpu.storage_init("qwen35moe.admit.hidden", hidden)
+    }
 
     /// Turn the fused native decode kernels on or off for the steps that follow
     /// ([`Qwen35::set_decode_fusion`]). Recorded steps keep the kernels they were
@@ -1171,6 +1191,12 @@ impl PagedDecoder for Engine {
     }
     fn logits(&self, hidden: &[f32]) -> Vec<f32> {
         Engine::logits(self, hidden)
+    }
+    fn admit_greedy(&self, hidden: &[f32]) -> u32 {
+        Engine::admit_greedy(self, hidden)
+    }
+    fn admit_topk(&self, hidden: &[f32], k: usize) -> Vec<(u32, f32)> {
+        Engine::admit_topk(self, hidden, k)
     }
     fn forward_batched_greedy(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32]) -> Vec<u32> {
         Engine::forward_batched_greedy(self, tables, inputs)

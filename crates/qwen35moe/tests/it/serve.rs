@@ -264,3 +264,23 @@ fn short_prompts_run_together_in_a_pool_of_one_context() {
         assert_eq!(out.get(id), Some(&want[i]), "request {i} decoded in the shared pool differently than alone");
     }
 }
+
+/// Admission picks its first token where the head is: the greedy pick and the top-`k` candidates are the best of the
+/// prefill's logit row, as the host would find them by scanning or sorting the row.
+#[test]
+fn admission_picks_on_the_device_what_the_logit_row_ranks_first() {
+    let cfg = Qwen35Config::tiny();
+    let init = init_weights(&cfg, 23);
+    let mut engine = Engine::from_map(cfg.clone(), &init, 16, 1);
+    let mut table = BlockTable::new();
+    let hidden = engine.prefill(&mut table, &[4, 1, 8, 2, 6]);
+    let row = engine.logits(&hidden);
+    let mut ranked: Vec<(u32, f32)> = row.iter().copied().enumerate().map(|(i, v)| (i as u32, v)).collect();
+    ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+    assert_eq!(engine.admit_greedy(&hidden), ranked[0].0, "the greedy pick is not the row's best token");
+    let k = 5;
+    let got = engine.admit_topk(&hidden, k);
+    let bits = |v: &[(u32, f32)]| v.iter().map(|&(t, l)| (t, l.to_bits())).collect::<Vec<_>>();
+    assert_eq!(bits(&got), bits(&ranked[..k]), "the candidates are not the row's best {k}");
+    engine.release_table(&mut table);
+}
