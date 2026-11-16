@@ -2277,7 +2277,9 @@ impl Ops {
                 self.providers.dispatch(&mut ctx, &req);
             }
             Weight::I8 { .. } | Weight::Q4 { .. } => {
-                if self.dequant_forward(s, w, act, y, yoff) {
+                // A two-level activation asked for its second int8 level, which the bf16 rows of the
+                // dequantize-in-register candidates would round away: it always reads the packed codes.
+                if act.fine.is_none() && self.dequant_forward(s, w, act, y, yoff) {
                     return;
                 }
                 let quant = self.packed(s, act).expect(
@@ -2803,7 +2805,8 @@ impl Ops {
     /// The one-launch form of [`Self::matmul_group`], or `None` where the group
     /// is not eligible for it.
     fn fused_group(&self, group: &[(&Weight, &DeviceBuffer)], act: &Act) -> Option<Step> {
-        if !(2..=4).contains(&group.len()) || act.xr0 != 0 {
+        // The multi GEMV reads one int8 level; a two-level activation's products each add their second.
+        if !(2..=4).contains(&group.len()) || act.xr0 != 0 || act.fine.is_some() {
             return None;
         }
         if matches!(group[0].0, Weight::BF16 { .. }) {
