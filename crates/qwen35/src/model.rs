@@ -2368,13 +2368,10 @@ impl Qwen35 {
         let mtp_logits = gpu.storage(if cfg.mtp { n * cfg.vocab as u64 } else { 1 });
         let mtp_ce_buf = gpu.storage(if cfg.mtp { n } else { 1 });
 
-        // Single-sequence incremental decode state - see `Qwen35::decode`.
-        // `dec_cap = t`: this pass's decode capacity is this instance's own
-        // fixed prefill length (see `dec_cap`'s own doc).
+        // Single-sequence incremental decode state - see `Qwen35::decode`. Made on the first single-sequence step
+        // (`Self::decode_state`, at `dec_cap = t`): a serving stage passes its own pooled caches and never reads it,
+        // and held eagerly it was every GDN layer's state and history (157 MB a stage of the 27B) for nothing.
         let decode = OnceCell::new();
-        if !train {
-            let _ = decode.set(DecodeState::new(&gpu, &cfg, &shard, t));
-        }
 
         // Backward-pass boundary scratch for gradient checkpointing across
         // shard seams - only meaningful when this instance actually trains.
