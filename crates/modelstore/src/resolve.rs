@@ -746,13 +746,18 @@ fn count_tokenizer_vocab(bytes: &[u8]) -> Option<usize> {
 pub fn checkpoint_vocab_size(path: &Path) -> Option<usize> {
     static MEMO: std::sync::OnceLock<std::sync::Mutex<FileMemo>> = std::sync::OnceLock::new();
     let is_gguf = path.extension().is_some_and(|e| e == "gguf");
-    let read = if is_gguf { path.to_path_buf() } else { path.join("config.json") };
+    // A GGUF or a brain checkpoint file declares its vocabulary itself (the GGUF's token list, the brain header's
+    // config); a directory in its `config.json`.
+    let read = if is_gguf || path.is_file() { path.to_path_buf() } else { path.join("config.json") };
     file_memo(&MEMO, &read, || declared_vocab_size(path, is_gguf))
 }
 
 fn declared_vocab_size(path: &Path, is_gguf: bool) -> Option<usize> {
     if is_gguf {
         gguf_token_count(path)
+    } else if path.is_file() {
+        let config = checkpoint::weightio::WeightReader::open(path.to_str()?).ok()?.config();
+        language_config_field(&config, "vocab_size").or_else(|| config.get("vocab")).and_then(serde_json::Value::as_u64).map(|n| n as usize)
     } else {
         let bytes = std::fs::read(path.join("config.json")).ok()?;
         let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
@@ -962,6 +967,16 @@ mod tests {
     /// Padding tolerance: a real checkpoint's declared vocab_size is
     /// slightly larger than the tokenizer's literal entry count (reserved
     /// slots) - within 5% must still match.
+    #[test]
+    fn a_brain_checkpoint_file_declares_its_vocabulary_in_its_header() {
+        let dir = std::env::temp_dir().join(format!("resolve-brain-vocab-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("model.brain.safetensors");
+        checkpoint::st::save_safetensors(file.to_str().unwrap(), &[("w".into(), vec![1u64], vec![0.0f32])], &serde_json::json!({"vocab_size": 4096}), None).unwrap();
+        assert_eq!(checkpoint_vocab_size(&file), Some(4096), "a tokenizer beside a brain checkpoint is paired by the header's vocabulary");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn vocab_is_compatible_tolerates_real_world_padding_but_not_a_different_model() {
         assert!(vocab_is_compatible(151_669, 151_936), "real Qwen3-8B numbers must be compatible");
