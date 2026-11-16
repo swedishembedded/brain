@@ -39,7 +39,7 @@ pub fn spec() -> ActionSpec {
         .cancellable()
         .param(ParamSpec::new("arch", ParamType::Str, "the architecture, a registry id whose trainer declares a from-scratch initialization (`ouro`, `qwen3`)").required())
         .param(ParamSpec::new("config", ParamType::Str, "the model's configuration, a JSON object in the architecture's config.json spelling; `vocab_size` may be left out (the tokenizer's is written)").required())
-        .param(ParamSpec::new("tokenizer", ParamType::Str, "JSON document: {\"vocab_size\": N, \"special_tokens\": [...], \"eos_token\": T, \"bos_token\"?: T, \"pad_token\"?: T}; the vocabulary is 256 bytes, the learned merges, then the special tokens in declared order").required())
+        .param(ParamSpec::new("tokenizer", ParamType::Str, "JSON document: {\"vocab_size\": N, \"special_tokens\": [...], \"eos_token\": T, \"bos_token\"?: T, \"pad_token\"?: T, \"split_digits\"?: bool}; the vocabulary is 256 bytes, the learned merges, then the special tokens in declared order; `split_digits` makes every digit its own token").required())
         .param(ParamSpec::new("chat_template", ParamType::Str, "the chat template (Jinja); without one the model is a base model that serves raw prompts"))
         .param(ParamSpec::new("corpus_digest", ParamType::Str, "the text corpus (JSONL, one {\"text\": ...} document per line), as a blake3 digest of the server's artifact store (or attach it as the input blob `corpus`; exactly one of the two)"))
         .param(ParamSpec::new("tokenizer_bytes", ParamType::Int, "learn the vocabulary from at most this many bytes of the corpus's first documents").default(json!(brain::from_scratch::DEFAULT_TOKENIZER_BYTES)).min(1.0).max(MAX_TOKENIZER_BYTES).step(1.0))
@@ -58,6 +58,9 @@ pub struct TokenizerDoc {
     pub eos_token: String,
     pub bos_token: Option<String>,
     pub pad_token: Option<String>,
+    /// Every digit its own pre-token ([`brain::ModelInit::split_digits`]).
+    #[serde(default)]
+    pub split_digits: bool,
 }
 
 /// The scalar settings, exactly the params the spec declares.
@@ -117,6 +120,7 @@ impl Request {
             .vocab_size(tokenizer.vocab_size)
             .special_tokens(tokenizer.special_tokens)
             .eos_token(tokenizer.eos_token)
+            .split_digits(tokenizer.split_digits)
             .tokenizer_bytes(params.tokenizer_bytes);
         if let Some(t) = tokenizer.bos_token {
             init = init.bos_token(t);

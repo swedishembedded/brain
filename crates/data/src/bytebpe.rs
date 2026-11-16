@@ -46,6 +46,9 @@ pub struct ByteBpe {
     ranks: HashMap<(u32, u32), u32>,
     /// Byte string of every non-special token, indexed by id.
     pieces: Vec<Vec<u8>>,
+    /// Every digit is its own pre-token (`tokenizer.json`'s `Digits` step with `individual_digits` before the
+    /// byte-level split), so a number is encoded one token per digit and no merge holds a digit.
+    split_digits: bool,
 }
 
 impl ByteBpe {
@@ -66,6 +69,12 @@ impl ByteBpe {
     /// the occurrences each merge rewrites rather than the whole table per merge. The order is the textbook one (the
     /// most frequent pair, ties to the smallest), which the tests hold it to.
     pub fn train_reserving(text: &str, merges: usize, reserved: &[&str]) -> ByteBpe {
+        ByteBpe::train_reserving_with(text, merges, reserved, false)
+    }
+
+    /// [`Self::train_reserving`], with every digit its own pre-token when `split_digits` is set: numbers are then
+    /// read one digit a token, the same digits in every number, instead of as whatever runs the corpus made frequent.
+    pub fn train_reserving_with(text: &str, merges: usize, reserved: &[&str], split_digits: bool) -> ByteBpe {
         use std::cmp::Reverse;
         use std::collections::{BinaryHeap, HashSet};
         // Pre-tokenized a line at a time, so the transient piece list stays a
@@ -73,7 +82,7 @@ impl ByteBpe {
         let mut freq: HashMap<String, u64> = HashMap::new();
         for line in text.split_inclusive('\n') {
             for part in split_on_all(line, reserved) {
-                for piece in crate::hf_pretok::gpt2_pieces(part) {
+                for piece in pre_tokens(part, split_digits) {
                     *freq.entry(piece).or_insert(0) += 1;
                 }
             }
@@ -137,7 +146,7 @@ impl ByteBpe {
             pieces.push(bytes);
             learned.push(pair);
         }
-        ByteBpe::from_merges(learned)
+        ByteBpe::from_merges(learned, split_digits)
     }
 
     /// The vocabulary as a Hugging Face `tokenizer.json` document: a byte-level BPE whose ids are this tokenizer's
@@ -175,7 +184,7 @@ impl ByteBpe {
             "padding": null,
             "added_tokens": added,
             "normalizer": null,
-            "pre_tokenizer": {"type": "ByteLevel", "add_prefix_space": false, "trim_offsets": true, "use_regex": true},
+            "pre_tokenizer": pre_tokenizer_json(self.split_digits),
             "post_processor": null,
             "decoder": {"type": "ByteLevel", "add_prefix_space": false, "trim_offsets": true, "use_regex": true},
             "model": {"type": "BPE", "dropout": null, "unk_token": null, "continuing_subword_prefix": null, "end_of_word_suffix": null, "fuse_unk": false, "byte_fallback": false, "ignore_merges": false, "vocab": vocab, "merges": merges},
@@ -187,7 +196,7 @@ impl ByteBpe {
         self.merges.len()
     }
 
-    fn from_merges(merges: Vec<(u32, u32)>) -> ByteBpe {
+    fn from_merges(merges: Vec<(u32, u32)>, split_digits: bool) -> ByteBpe {
         let ranks = merges.iter().enumerate().map(|(r, p)| (*p, r as u32)).collect();
         let mut pieces: Vec<Vec<u8>> = (0..=255u8).map(|b| vec![b]).collect();
         for (a, b) in &merges {
@@ -195,7 +204,7 @@ impl ByteBpe {
             s.extend_from_slice(&pieces[*b as usize]);
             pieces.push(s);
         }
-        ByteBpe { merges, ranks, pieces }
+        ByteBpe { merges, ranks, pieces, split_digits }
     }
 
     /// The end-of-text separator's id (the last id).
@@ -219,7 +228,11 @@ impl ByteBpe {
     }
 
     pub fn to_json(&self) -> Value {
-        json!({ "type": "byte-bpe", "merges": self.merges, "end_of_text": END_OF_TEXT })
+        let mut v = json!({ "type": "byte-bpe", "merges": self.merges, "end_of_text": END_OF_TEXT });
+        if self.split_digits {
+            v["split_digits"] = json!(true);
+        }
+        v
     }
 
     pub fn from_json(v: &Value) -> Result<ByteBpe, String> {
@@ -237,7 +250,7 @@ impl ByteBpe {
             }
             out.push((a, b));
         }
-        Ok(ByteBpe::from_merges(out))
+        Ok(ByteBpe::from_merges(out, v["split_digits"].as_bool().unwrap_or(false)))
     }
 
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
@@ -249,6 +262,27 @@ impl ByteBpe {
         let v: Value = serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
         ByteBpe::from_json(&v)
     }
+}
+
+/// The `tokenizer.json` pre-tokenizer of a vocabulary: GPT-2's byte-level split, after a split of every digit into its
+/// own piece when `split_digits` is set. [`pre_tokens`] applies exactly this declaration, so training, encoding and
+/// any loader of the written file cut text the same way.
+fn pre_tokenizer_json(split_digits: bool) -> Value {
+    let byte_level = json!({"type": "ByteLevel", "add_prefix_space": false, "trim_offsets": true, "use_regex": true});
+    if split_digits {
+        json!({"type": "Sequence", "pretokenizers": [{"type": "Digits", "individual_digits": true}, byte_level]})
+    } else {
+        byte_level
+    }
+}
+
+/// The pre-tokens `text` is cut into ([`pre_tokenizer_json`]): merges never cross one.
+fn pre_tokens(text: &str, split_digits: bool) -> Vec<String> {
+    if !split_digits {
+        return crate::hf_pretok::gpt2_pieces(text);
+    }
+    static SPLIT: std::sync::OnceLock<crate::hf_pretok::PreTokenizer> = std::sync::OnceLock::new();
+    SPLIT.get_or_init(|| crate::hf_pretok::PreTokenizer::from_json(&pre_tokenizer_json(true)).expect("the digit split is a known pre-tokenizer")).split(text)
 }
 
 /// `text` cut at every occurrence of any of `separators` (the separators dropped); `text` whole when there are none.
@@ -286,7 +320,7 @@ impl Tokenizer for ByteBpe {
             if i > 0 {
                 out.push(self.end_of_text());
             }
-            for word in crate::hf_pretok::gpt2_pieces(part) {
+            for word in pre_tokens(part, self.split_digits) {
                 if let Some(ids) = cache.get(&word) {
                     out.extend_from_slice(ids);
                     continue;
@@ -437,5 +471,34 @@ mod tests {
         let c = ByteBpe::from_json(&a.to_json()).unwrap();
         assert_eq!(c.encode(TEXT), a.encode(TEXT));
         assert!(ByteBpe::from_json(&json!({"type": "byte-bpe", "merges": [[300, 1]]})).is_err());
+    }
+
+    /// With digits split, every digit is its own pre-token: no learned piece holds a digit beside anything, a
+    /// number encodes one token per digit, and the `tokenizer.json` it writes encodes the same ids through brain's
+    /// loader (its pre-tokenizer declares the split).
+    #[test]
+    fn a_vocabulary_with_digits_split_encodes_numbers_one_digit_a_token() {
+        let text = "order 2025 shipped 1999 units, 31337 left; 2025 again and 2025.\n".repeat(40);
+        let bpe = ByteBpe::train_reserving_with(&text, 60, &[], true);
+        for id in 256..256 + bpe.merge_count() as u32 {
+            let piece = bpe.piece(id);
+            assert!(!piece.iter().any(u8::is_ascii_digit), "learned piece {:?} holds a digit", String::from_utf8_lossy(piece));
+        }
+        let ids = bpe.encode("in 2025: 31337");
+        assert_eq!(bpe.decode(&ids), "in 2025: 31337");
+        let digits = ids.iter().filter(|&&i| bpe.piece(i).len() == 1 && bpe.piece(i)[0].is_ascii_digit()).count();
+        assert_eq!(digits, 9, "one token per digit");
+        let plain = ByteBpe::train_reserving(&text, 60, &[]);
+        assert!(plain.encode("2025").len() < 4, "without the split a frequent number merges");
+        let reloaded = ByteBpe::from_json(&bpe.to_json()).unwrap();
+        assert_eq!(reloaded.encode(&text), bpe.encode(&text), "the split survives a save");
+        let json = bpe.to_hf_tokenizer_json(&[]).unwrap();
+        let dir = std::env::temp_dir().join(format!("bytebpe-digits-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tokenizer.json");
+        std::fs::write(&path, json.to_string()).unwrap();
+        let hf = crate::qwen_tokenizer::QwenBpe::from_file(path.to_str().unwrap()).unwrap();
+        assert_eq!(Tokenizer::encode(&hf, "in 2025: 31337"), ids, "the tokenizer.json encodes as the trainer does");
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

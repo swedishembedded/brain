@@ -74,6 +74,27 @@ fn a_model_from_nothing_is_published_installed_and_the_same_request_writes_the_s
     assert_reservation_returned(&rig);
 }
 
+/// A tokenizer spec with `split_digits` makes every digit its own token: the installed model's tokenizer encodes a
+/// number one token per digit, and declares the split for any loader.
+#[test]
+fn a_tokenizer_with_digits_split_reads_numbers_one_digit_a_token() {
+    let rig = rig_qwen3("init-digits", 16 << 30);
+    let digest = data_digest(&rig, &corpus(400)).hex();
+    let mut params = init_params(&digest, "digits-1");
+    let mut tok = tokenizer();
+    tok["split_digits"] = json!(true);
+    // Digits learn no merges, so this small corpus holds fewer.
+    tok["vocab_size"] = json!(256 + 5 + 80);
+    params["tokenizer"] = json!(tok.to_string());
+    run_action(&rig, ACTION, &spec(), params, &[], &Frames::default()).expect("the model is created");
+    let path = rig.dir.join("models").join("local").join("digits-1").join("tokenizer.json");
+    let written: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(written["pre_tokenizer"]["pretokenizers"][0], json!({"type": "Digits", "individual_digits": true}), "{}", written["pre_tokenizer"]);
+    let bpe = data::qwen_tokenizer::QwenBpe::from_file(path.to_str().unwrap()).unwrap();
+    assert_eq!(data::tokenizer::Tokenizer::encode(&bpe, "370").len(), 3, "one token per digit");
+    assert_reservation_returned(&rig);
+}
+
 #[test]
 fn init_model_refuses_what_it_cannot_create_before_any_work() {
     let rig = rig_qwen3("init-door", 16 << 30);

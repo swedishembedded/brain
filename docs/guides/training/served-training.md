@@ -56,7 +56,7 @@ initialised checkpoint. It is host work and takes no card.
 |---|---|
 | `arch` | the architecture, a registry id that declares the capability (required) |
 | `config` | the model's configuration, a JSON object in the architecture's `config.json` spelling, at most 64 KiB (required); `vocab_size` may be left out, and given must equal the tokenizer's |
-| `tokenizer` | `{"vocab_size": N, "special_tokens": [...], "eos_token": T, "bos_token"?: T, "pad_token"?: T}` (required): the vocabulary is the 256 bytes, the merges learned on the corpus, then the special tokens in declared order; the special tokens are matched whole and never learned as pieces, and the eos/bos/pad tokens must be among them |
+| `tokenizer` | `{"vocab_size": N, "special_tokens": [...], "eos_token": T, "bos_token"?: T, "pad_token"?: T, "split_digits"?: bool}` (required): the vocabulary is the 256 bytes, the merges learned on the corpus, then the special tokens in declared order; the special tokens are matched whole and never learned as pieces, and the eos/bos/pad tokens must be among them. `split_digits` (default off) makes every digit its own pre-token, so a number is read one token per digit and no merge holds a digit; the `tokenizer.json` declares the split (a `Digits` step before the byte-level one) |
 | `chat_template` | the Jinja chat template; without one the model is a base model. It is refused unless it holds to the contract in [Ouro](../../reference/models/ouro.md#the-chat-template-a-from-scratch-model-meets) |
 | `corpus_digest` or the blob `corpus` | the corpus, JSONL with one `{"text": ...}` document per line (exactly one of the two) |
 | `tokenizer_bytes` | the vocabulary is learned from at most this many bytes of the first documents (default 64 MiB) |

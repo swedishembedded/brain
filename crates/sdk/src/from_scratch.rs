@@ -105,6 +105,7 @@ pub struct ModelInit {
     tokenizer_bytes: u64,
     vocab_size: usize,
     special_tokens: Vec<String>,
+    split_digits: bool,
     eos_token: Option<String>,
     bos_token: Option<String>,
     pad_token: Option<String>,
@@ -150,6 +151,7 @@ impl ModelInit {
             tokenizer_bytes: DEFAULT_TOKENIZER_BYTES,
             vocab_size: 0,
             special_tokens: Vec::new(),
+            split_digits: false,
             eos_token: None,
             bos_token: None,
             pad_token: None,
@@ -188,6 +190,14 @@ impl ModelInit {
     /// tool-call tags, the document separator. They take the last ids, in this order.
     pub fn special_tokens<S: Into<String>>(mut self, tokens: impl IntoIterator<Item = S>) -> Self {
         self.special_tokens = tokens.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Make every digit its own pre-token (off by default): a number is then read one digit a token, each digit
+    /// the same token in every number, and no learned piece holds a digit. The `tokenizer.json` declares the split
+    /// (a `Digits` step before the byte-level one), so every loader cuts text the same way.
+    pub fn split_digits(mut self, on: bool) -> Self {
+        self.split_digits = on;
         self
     }
 
@@ -296,7 +306,7 @@ impl ModelInit {
         let docs = read_text_corpus(corpus, Some(self.tokenizer_bytes))?;
         let specials: Vec<&str> = self.special_tokens.iter().map(String::as_str).collect();
         let merges = self.vocab_size - 256 - specials.len();
-        let bpe = data::bytebpe::ByteBpe::train_reserving(&docs.join("\n"), merges, &specials);
+        let bpe = data::bytebpe::ByteBpe::train_reserving_with(&docs.join("\n"), merges, &specials, self.split_digits);
         if bpe.merge_count() < merges {
             return Err(Error::Backend(format!("ModelInit: the corpus yields {} merges and vocab_size {} needs {merges}: give more text or a smaller vocabulary", bpe.merge_count(), self.vocab_size)));
         }
