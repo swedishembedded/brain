@@ -48,6 +48,12 @@ weights of that shape — no checkpoint needed, good for hardware comparison)
 or `qwen:out/qwen.safetensors` (a real checkpoint). Run `brain perf --help`
 for the full list of target specs (one per served model family).
 
+A decoder target decodes greedily unless the run names the request sampling
+fields: `--temperature T` (and `--top-p`, `--top-k`, `--min-p`, which keep the
+served API's defaults when not given) draws every request's tokens under them,
+each request from its own workload seed, and the artifact records them in the
+target's config. A target that cannot sample refuses the run.
+
 `qwen35:<gguf|hf-dir>[:kvf32|:kvbf16|:kvint8]` measures the released Qwen3.8-27B GGUF (or a HuggingFace directory such as `Qwen3.8-27B-FP8`, every tensor held as the release stores it)
 end to end through the shared scheduler. The engine is built by the same code
 `brain serve` runs, so weight tier, context, KV pool, prefix slots and

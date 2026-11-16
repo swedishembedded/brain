@@ -112,12 +112,16 @@ OPTIONS
                         --weight-format` grammar: f32, bf16, f16, int8, or per-leaf like i8,out_proj=f32);
                         default: what `brain serve` serves - for qwen: the checkpoint's stored tier
                         (int8 only where it does not fit the card), for qwen35moe: int8
-  --max-batch <N>       the served engine's batch for a qwen35: or qwen35moe: target (the `brain serve
-                        --max-batch` setting); default: what `brain serve` chooses
+  --max-batch <N>       the served engine's batch for a qwen:, qwen35: or qwen35moe: target (the `brain serve
+                        --max-batch` setting); default: what `brain serve` chooses (32 for qwen:)
   --kernels             longctx: also profile each batch size's decode steps per kernel on
                         the device and roll the table up into phases (linear, experts,
                         attention, recurrent mixer, norm/epilogue, sampling) - the same
                         report for every model; each kernel is timed alone, so it ranks
+  --temperature <T>     draw every request's tokens at temperature T (default 0, greedy), each
+                        request from its own workload seed; with --top-p <P> (default 1),
+                        --top-k <K> (default 0, every token) and --min-p <M> (default 0) the
+                        served API's sampling fields. A target that cannot sample refuses.
   --requests <N>        measured requests per level (default 64)
   --input <N>           override the workload's prompt length
   --output <N>          override the workload's output length. THIS is what
@@ -396,6 +400,15 @@ fn run(args: &[String]) {
     let mut longctx = crate::perf_longctx::Args::default();
     let mut forecast = ForecastShape::default();
     let mut max_batch: Option<u32> = None;
+    // The request sampling fields; any one of them makes the run sampled, the rest keep their API defaults.
+    let mut sampling: Option<perf::target::Sampling> = None;
+    let sample_flag = |args: &[String], i: &mut usize, flag: &str| -> f32 {
+        let raw = val(args, i, flag);
+        raw.parse::<f32>().ok().filter(|v| v.is_finite() && *v >= 0.0).unwrap_or_else(|| {
+            eprintln!("perf run: {flag} needs a non-negative number, got {raw:?}");
+            std::process::exit(2);
+        })
+    };
 
     let mut i = 1;
     while i < args.len() {
@@ -421,6 +434,10 @@ fn run(args: &[String]) {
                 }));
             }
             "--max-batch" => max_batch = Some(parse_flag(args, &mut i, "--max-batch")),
+            "--temperature" => sampling.get_or_insert_with(Default::default).temperature = sample_flag(args, &mut i, "--temperature"),
+            "--top-p" => sampling.get_or_insert_with(Default::default).top_p = sample_flag(args, &mut i, "--top-p"),
+            "--min-p" => sampling.get_or_insert_with(Default::default).min_p = sample_flag(args, &mut i, "--min-p"),
+            "--top-k" => sampling.get_or_insert_with(Default::default).top_k = parse_flag(args, &mut i, "--top-k"),
             "--horizon" => forecast.horizon = parse_flag(args, &mut i, "--horizon"),
             "--samples" => forecast.samples = parse_flag(args, &mut i, "--samples"),
             "--requests" => opt.num_requests = val(args, &mut i, "--requests").parse().unwrap_or(opt.num_requests),
@@ -509,6 +526,12 @@ fn run(args: &[String]) {
         }
     };
 
+    if let Some(sampling) = sampling {
+        if !target.set_sampling(sampling) {
+            eprintln!("perf run: --target {target_spec} cannot draw its tokens under {sampling:?}; drop the sampling flags to measure greedy decoding");
+            std::process::exit(2);
+        }
+    }
     let art = match scenarios::run(&scenario, target.as_mut(), &workload, concurrency, &opt) {
         Ok(a) => a,
         Err(e) => {
@@ -599,7 +622,7 @@ impl SynthSpec {
             .copied()
             .filter(|&v| v > 0)
             .unwrap_or(if n_heads.is_multiple_of(4) { n_heads / 4 } else { n_heads });
-        let (block_size, max_batch, num_blocks, per_seq, max_prefill) = pool_for(workload, input_override, output_override)?;
+        let (block_size, max_batch, num_blocks, per_seq, max_prefill) = pool_for(workload, input_override, output_override, None)?;
         let mut spec = SynthSpec {
             n_layers,
             d_model,
@@ -698,14 +721,14 @@ fn build_target(spec: &str, workload: &str, input_override: Option<usize>, outpu
     if let Some(rest) = spec.strip_prefix("qwen35moe:") {
         return crate::perf_qwen35moe::build(rest, weight_format, max_batch);
     }
+    if let Some(weights) = spec.strip_prefix("qwen:") {
+        return build_qwen(weights, workload, input_override, output_override, weight_format, max_batch);
+    }
     if max_batch.is_some() {
-        return Err("--max-batch sizes the served engine of a qwen35: or qwen35moe: target; this target takes no batch setting".to_string());
+        return Err("--max-batch sizes the served engine of a qwen:, qwen35: or qwen35moe: target; this target takes no batch setting".to_string());
     }
     if let Some(shape) = spec.strip_prefix("qwen-synth:") {
         return build_qwen_synth(shape, workload, input_override, output_override, weight_format);
-    }
-    if let Some(weights) = spec.strip_prefix("qwen:") {
-        return build_qwen(weights, workload, input_override, output_override, weight_format);
     }
     if let Some(rest) = spec.strip_prefix("http:") {
         return build_http(rest, workload, input_override, output_override);
@@ -1933,7 +1956,7 @@ fn build_qwen_synth(shape: &str, workload: &str, input_override: Option<usize>, 
 /// workload name away from a genuine OOM). The pool must be sized from what
 /// the run will ACTUALLY request, not from a name that happens to share a
 /// preset with a much larger one.
-fn pool_for(workload: &str, input_override: Option<usize>, output_override: Option<usize>) -> Result<(u32, u32, u32, u32, u32), String> {
+fn pool_for(workload: &str, input_override: Option<usize>, output_override: Option<usize>, max_batch: Option<u32>) -> Result<(u32, u32, u32, u32, u32), String> {
     let w = perf::workload::standard(workload, perf::Arrival::Saturated, 1, 0)
         .ok_or_else(|| format!("unknown workload {workload:?}"))?;
     let r = &w.requests()[0];
@@ -1948,7 +1971,7 @@ fn pool_for(workload: &str, input_override: Option<usize>, output_override: Opti
     let max_in = input_override.map(|n| n as u32).unwrap_or(r.input_artifacts as u32).max(perf::targets::FIDELITY_PROMPT_TOKENS);
     let max_out = output_override.map(|n| n as u32).unwrap_or(r.output_artifacts as u32).max(perf::targets::FIDELITY_MAX_NEW);
     let block_size = 16u32;
-    let max_batch = 32u32;
+    let max_batch = max_batch.unwrap_or(32).max(1);
     let per_seq = (max_in + max_out + 8).div_ceil(block_size);
     let num_blocks = per_seq * max_batch + max_batch;
     Ok((block_size, max_batch, num_blocks, per_seq, max_in.max(1)))
@@ -1956,9 +1979,9 @@ fn pool_for(workload: &str, input_override: Option<usize>, output_override: Opti
 
 /// Size the KV pool for the workload so admission, not allocation failure, is
 /// what limits concurrency.
-fn build_qwen(weights: &str, workload: &str, input_override: Option<usize>, output_override: Option<usize>, weight_format: Option<&model::ops::TierPolicy>) -> Result<Box<dyn PerfTarget>, String> {
+fn build_qwen(weights: &str, workload: &str, input_override: Option<usize>, output_override: Option<usize>, weight_format: Option<&model::ops::TierPolicy>, max_batch: Option<u32>) -> Result<Box<dyn PerfTarget>, String> {
     let (weights, kv_fp32) = spec_flags(weights);
-    let (block_size, max_batch, num_blocks, per_seq, max_prefill) = pool_for(workload, input_override, output_override)?;
+    let (block_size, max_batch, num_blocks, per_seq, max_prefill) = pool_for(workload, input_override, output_override, max_batch)?;
     let (cfg, src) = qwen3::open_checkpoint(weights)?;
     let kv_int8 = resolve_kv_int8(&cfg, kv_fp32, weights);
     // The tier `brain serve` serves this checkpoint at on the first selected card, unless --weight-format names one.

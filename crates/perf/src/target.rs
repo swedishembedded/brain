@@ -78,6 +78,32 @@ pub struct PerfRequest {
     pub prefix_seed: u64,
 }
 
+/// How a decoder target draws its tokens: the request sampling fields of the served API. The default is greedy
+/// decoding, what a run that names none measures.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Sampling {
+    /// `0` is greedy.
+    pub temperature: f32,
+    /// `1` keeps the whole distribution.
+    pub top_p: f32,
+    /// `0` keeps every token.
+    pub top_k: usize,
+    /// `0` is off.
+    pub min_p: f32,
+}
+
+impl Default for Sampling {
+    fn default() -> Sampling {
+        Sampling { temperature: 0.0, top_p: 1.0, top_k: 0, min_p: 0.0 }
+    }
+}
+
+impl Sampling {
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({ "temperature": self.temperature, "top_p": self.top_p, "top_k": self.top_k, "min_p": self.min_p })
+    }
+}
+
 /// What a target is, for the result fingerprint.
 #[derive(Clone, Debug)]
 pub struct TargetInfo {
@@ -158,6 +184,14 @@ pub trait PerfTarget {
     /// that nothing could ever be rejected, rather than pretending a policy
     /// was in force.
     fn set_admission(&mut self, _policy: &str) -> bool {
+        false
+    }
+
+    /// Draw every request's tokens under `sampling`, each request from its own seed ([`PerfRequest::seed`]), and
+    /// record it in [`Self::describe`]'s config. Returns `false` when this target cannot sample (it is not a
+    /// decoder, or its engine has no such seam): the run then refuses rather than measuring greedy decoding under a
+    /// sampled label.
+    fn set_sampling(&mut self, _sampling: Sampling) -> bool {
         false
     }
 

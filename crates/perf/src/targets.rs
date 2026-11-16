@@ -230,11 +230,13 @@ pub struct PagedLlmTarget<D: PagedDecoder> {
     submitted: usize,
     /// The most sequences one scheduler iteration produced a token for: how many the engine really ran at once.
     peak_rows: usize,
+    /// How requests draw their tokens ([`PerfTarget::set_sampling`]); `None` is greedy.
+    sample: Option<model::serve::SampleParams>,
 }
 
 impl<D: PagedDecoder> PagedLlmTarget<D> {
     pub fn new(sched: Scheduler<D>, info: TargetInfo, stop: Vec<u32>, vocab: u32) -> PagedLlmTarget<D> {
-        PagedLlmTarget { sched, info, stop, vocab, submitted: 0, peak_rows: 0 }
+        PagedLlmTarget { sched, info, stop, vocab, submitted: 0, peak_rows: 0, sample: None }
     }
 }
 
@@ -259,7 +261,11 @@ impl<D: PagedDecoder> PerfTarget for PagedLlmTarget<D> {
         // `ignore_stop` is expressed by passing no stop ids: a synthetic run must
         // produce the full requested length, or the workload silently shortens
         // and the reported rate is inflated.
-        self.sched.submit(Request { prompt, max_new: req.output_artifacts, stop: self.stop.clone() })
+        let request = Request { prompt, max_new: req.output_artifacts, stop: self.stop.clone() };
+        match self.sample {
+            Some(sample) => self.sched.submit_sampled(request, sample, req.seed),
+            None => self.sched.submit(request),
+        }
     }
 
     fn step(&mut self, out: &mut Vec<Emission>) -> bool {
@@ -346,6 +352,17 @@ impl<D: PagedDecoder> PerfTarget for PagedLlmTarget<D> {
                 crate::scenarios::soak::host_mem_mb().map(|v| serde_json::json!(v)).unwrap_or(serde_json::Value::Null),
             ),
         ]
+    }
+
+    fn set_sampling(&mut self, s: crate::target::Sampling) -> bool {
+        let sample = model::serve::SampleParams { temp: s.temperature, top_p: s.top_p, top_k: s.top_k, min_p: s.min_p, ..model::serve::SampleParams::greedy() };
+        if let Some(why) = self.sched.sampling_refusal(sample) {
+            eprintln!("perf: this engine refuses {s:?}: {why}");
+            return false;
+        }
+        self.sample = Some(sample);
+        self.info = self.info.clone().with("sampling", s.to_json());
+        true
     }
 
     /// Map the harness policy names onto the engine's admission seam.
@@ -1531,5 +1548,120 @@ mod http_tests {
         assert!(!f.passed);
         assert_eq!(f.compared, 0);
         assert!(f.failure_reason().contains("compared 0 positions"), "{}", f.failure_reason());
+    }
+}
+
+#[cfg(test)]
+mod paged_tests {
+    use super::*;
+    use crate::target::Sampling;
+    use model::paged::{BlockAllocator, BlockTable};
+
+    const VOCAB: usize = 32;
+
+    /// Every step answers the same flat row: a greedy decode emits token 0 forever, a sampled one spreads out.
+    struct Flat {
+        alloc: BlockAllocator,
+        rows: bool,
+    }
+
+    // conformance-exempt: a test double of the perf harness, never served; the engines that serve run the suite themselves
+    impl PagedDecoder for Flat {
+        fn alloc_mut(&mut self) -> &mut BlockAllocator {
+            &mut self.alloc
+        }
+        fn max_prefill_tokens(&self) -> u32 {
+            64
+        }
+        fn free_blocks(&self) -> u32 {
+            self.alloc.free_blocks()
+        }
+        fn max_seq_len(&self) -> usize {
+            512
+        }
+        fn vocab(&self) -> usize {
+            VOCAB
+        }
+        fn blocks_for(&self, tokens: u32) -> u32 {
+            tokens.div_ceil(8)
+        }
+        fn reclaim_prefix(&mut self, _want: u32) -> u32 {
+            0
+        }
+        fn release_table(&mut self, t: &mut BlockTable) {
+            t.release(&mut self.alloc);
+        }
+        fn prefill(&mut self, table: &mut BlockTable, prompt: &[u32]) -> Vec<f32> {
+            table.reserve(prompt.len() as u32, &mut self.alloc).unwrap();
+            vec![0.0]
+        }
+        fn logits(&self, _hidden: &[f32]) -> Vec<f32> {
+            vec![0.0; VOCAB]
+        }
+        fn forward_batched_greedy(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32]) -> Vec<u32> {
+            for t in tables.iter_mut() {
+                t.append(&mut self.alloc).unwrap();
+            }
+            vec![0; inputs.len()]
+        }
+        fn forward_batched_greedy_window(&mut self, _: &mut [&mut BlockTable], _: &[u32], _: usize) -> Vec<Vec<u32>> {
+            unreachable!("window capacity is 1")
+        }
+        fn prefix_stats(&self) -> (u64, u64, usize) {
+            (0, 0, 0)
+        }
+        fn device_stats(&self) -> Option<gpu_core::DeviceStats> {
+            None
+        }
+        fn kv_pool_bytes(&self) -> u64 {
+            0
+        }
+        fn kv_pool_capacity_tokens(&self) -> u64 {
+            4096
+        }
+        fn decode_window_capacity(&self) -> usize {
+            1
+        }
+        fn forward_batched_topk(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32], k: usize) -> Vec<Vec<(u32, f32)>> {
+            for t in tables.iter_mut() {
+                t.append(&mut self.alloc).unwrap();
+            }
+            vec![(0..k as u32).map(|t| (t, 0.0)).collect(); inputs.len()]
+        }
+        fn topk_capacity(&self) -> usize {
+            8
+        }
+        fn full_row_readback(&self) -> bool {
+            self.rows
+        }
+        fn forward_batched_logit_rows(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32]) -> Vec<Vec<f32>> {
+            for t in tables.iter_mut() {
+                t.append(&mut self.alloc).unwrap();
+            }
+            vec![vec![0.0; VOCAB]; inputs.len()]
+        }
+    }
+
+    fn target(rows: bool) -> PagedLlmTarget<Flat> {
+        PagedLlmTarget::new(Scheduler::new(Flat { alloc: BlockAllocator::new(256, 8), rows }, 4), TargetInfo::new("flat", "token"), Vec::new(), VOCAB as u32)
+    }
+
+    fn request(seed: u64) -> PerfRequest {
+        PerfRequest { input_artifacts: 4, output_artifacts: 16, class: 0, seed, shared_prefix: 0, prefix_seed: seed }
+    }
+
+    /// A sampled run draws its tokens (a flat row is no longer token 0 every step) and says so in its config; an
+    /// engine that cannot sample a request exactly refuses the setting instead of measuring something else.
+    #[test]
+    fn a_sampled_run_draws_its_tokens_and_records_how() {
+        let temp = Sampling { temperature: 1.0, ..Sampling::default() };
+        assert!(!target(false).set_sampling(temp), "a candidate-list engine cannot draw over the whole row");
+        assert!(target(false).set_sampling(Sampling { top_k: 4, ..temp }), "a top_k within the list is exact");
+        let mut t = target(true);
+        assert!(t.set_sampling(temp));
+        assert_eq!(t.describe().config.iter().find(|(k, _)| k == "sampling").map(|(_, v)| v.clone()), Some(temp.to_json()));
+        let id = t.submit(request(3)); // seed: test-double, the request whose draws are inspected
+        let out = t.sched.run().remove(&id).unwrap();
+        assert!(out.iter().any(|&tok| tok != 0), "sixteen draws over a flat row of 32 all landed on token 0: {out:?}");
     }
 }
