@@ -231,6 +231,8 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
         // `gradnorm_sq` gives each tensor ONE thread to sum its elements, which for 118 M
         // adapter parameters is seconds of a single thread's time per step.
         v.extend(model::dispatch::LORA_BANK_PIPELINES);
+        // The keyed draw of a sampled step's rows, resolved by name (`model::readout::RowDrawer`).
+        v.extend(model::readout::DRAW_KERNELS);
         // The KV cache's encodings, applied to the training attention's keys and values on request.
         v.push(("kv_roundtrip_i8", kernels::KV_ROUNDTRIP_I8));
         v.push(("kv_roundtrip_fp8", kernels::KV_ROUNDTRIP_FP8));
@@ -469,6 +471,15 @@ pub(crate) fn argmax_rows_of(g: &Gpu, logits: &DeviceBuffer, rows: u32, vocab: u
 /// (`model::readout::topk_rows`). Destroys `logits`.
 pub(crate) fn topk_rows_of(g: &Gpu, logits: &DeviceBuffer, rows: u32, vocab: u32, cap: u32) -> Vec<Vec<(u32, f32)>> {
     model::readout::topk_rows(g, READOUT, logits, rows, vocab, cap)
+}
+
+/// Each row's answer to a keyed step from `logits` (`[draws.len(), vocab]`): the drawn token where `draws[i]` is
+/// `Some` ([`model::readout::RowDrawer`], on the device), the row read back where it is `None`.
+pub(crate) fn drawn_rows_of(g: &Gpu, logits: &DeviceBuffer, draws: &[Option<model::serve::RowDraw>], vocab: u32) -> Vec<model::serve::Drawn> {
+    let drawer = model::readout::RowDrawer::new(g, draws.len() as u32).expect("the keyed draw's kernels are in this model's list");
+    let steps = drawer.steps(g, logits, draws, vocab);
+    g.submit(&[], &steps);
+    drawer.answer(g, logits, draws, vocab)
 }
 
 /// [`argmax_rows_of`] without the read: the dispatches are submitted and the indices stay in the returned buffer.

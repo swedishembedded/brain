@@ -444,6 +444,10 @@ pub const DFL_LOSS_GRAD: &str = include_str!("../wgsl/dfl_loss_grad.wgsl");
 pub const DORA_GAIN: &str = include_str!("../wgsl/dora_gain.wgsl");
 /// `wgsl/dora_gain_bwd.wgsl`
 pub const DORA_GAIN_BWD: &str = include_str!("../wgsl/dora_gain_bwd.wgsl");
+/// `wgsl/draw_final.wgsl`
+pub const DRAW_FINAL: &str = include_str!("../wgsl/draw_final.wgsl");
+/// `wgsl/draw_part.wgsl`
+pub const DRAW_PART: &str = include_str!("../wgsl/draw_part.wgsl");
 /// `wgsl/dw_splitk_reduce.wgsl`
 pub const DW_SPLITK_REDUCE: &str = include_str!("../wgsl/dw_splitk_reduce.wgsl");
 /// `wgsl/dwconv3d.wgsl`
@@ -1916,6 +1920,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("dfl_loss_grad", DFL_LOSS_GRAD),
     ("dora_gain", DORA_GAIN),
     ("dora_gain_bwd", DORA_GAIN_BWD),
+    ("draw_final", DRAW_FINAL),
+    ("draw_part", DRAW_PART),
     ("dw_splitk_reduce", DW_SPLITK_REDUCE),
     ("dwconv3d", DWCONV3D),
     ("dwconv3d_dw", DWCONV3D_DW),

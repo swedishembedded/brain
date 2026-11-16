@@ -62,7 +62,7 @@ claimed before its baseline exists.
 | 4 | Persistent device batch state: row diffs scattered into device buffers, double-buffered metadata, schedule N+1 prepared while N runs (G7) | `gpu-core`, `backend-cuda`, `model::serve` | no host sync inside the token loop; per-step upload bytes proportional to changes | open |
 | 5 | Graph-safe library execution: find #356's root cause, verify eager vs replay per tier and shape | `backend-cuda`, `gpu-core` | replay keeps library GEMMs with bit-level parity | open |
 | 6 | Shape-driven attention and GEMM selection over phase, batch, KV length, KV tier, page size | `kernel-performance.md` owns it | selection table covers the context x batch matrix | open |
-| 7 | Exact device sampling over the full vocabulary (G5) | `model::serve`, `kernels-cuda` | distribution tests match the host reference; no logits readback | open |
+| 7 | Exact device sampling over the full vocabulary (G5) | `model::serve`, `kernels-cuda` | distribution tests match the host reference; no logits readback | in progress (knowledge 488): temperature and min-p drawn on the device by the keyed Gumbel-max rule (`RowDrawer`, WGSL pair + native `draw_rows_f32`) in Qwen3 and the Qwen3.8 paged engine, recorded steps included; the host row path is parallel. Open: a nucleus (`top_p`) and a `top_k` past the candidate list on the device, a keyed decode window, the other engines' `forward_batched_drawn` |
 | 8 | Cost- and cache-aware scheduling: order by uncached work, shared in-flight prefixes, bounded-fairness aging, calibrated step-cost model (G11) | `model::serve` | goodput and tail latency improve on mixed traffic with bounded starvation | in progress: shared in-flight prefixes and the mixed iteration with its step-cost model done (knowledge 379); uncached-work ordering and aging open |
 | 9 | One logical prefix index (radix over content, namespace, revision) over block-sharing and snapshot physical forms; retention by saved work per byte | `model::paged`, `model::snapshot_prefix` | longest-prefix match without scanning entries | in progress: hybrid branch points (a shared document is resumable) done; the radix index and retention by saved work open |
 | 10 | Grace memory as a managed warm KV tier: page-granular async promotion/demotion through the existing upload ring; direct coherent reads measured separately (G9) | `model::kv_offload`, `backend-cuda` | warm-prefix hits served from host without whole-sequence swaps | open |
@@ -869,3 +869,49 @@ Open, with the measured reason:
       working set is now a whole number of blocks.
 - [x] The `i8_gemv_native` and `q4_gemv_native` identity tests bound windows at word offsets the 256-byte binding-offset
       check refuses; their windows now start at whole binding-offset units, as the fp32 GEMV gate's do.
+
+## Sampled decode on the device (2026-11-16, knowledge #488)
+
+A sampled request without a nucleus, a `top_k` inside the vocabulary or a logit processor is drawn by the keyed
+Gumbel-max rule (`model::serve::draw_row`): `PagedDecoder::forward_batched_drawn`, the drawer
+`model::readout::RowDrawer` (WGSL `draw_part` + `draw_final`, native `draw_rows_f32`), wired in `qwen3::serve::Engine`
+and `qwen35::int8_gguf_resident` (its recorded decode steps take the keyed head, `HeadKind::Drawn`). Every other engine
+answers through the default (rows read back, drawn on the CPU pool, the same tokens). Rows the keyed draw does not
+cover are sampled on the host in parallel (`settle_drawn`).
+
+Measured on gpu3 (one GH200), `brain perf run serve --max-batch 64 --output 300 --warmup 8 --seed 11`, chat workload,
+output tokens/s (GPU busy % of the sampled run in brackets):
+
+| target | streams | greedy | temperature 1 before | temperature 1 after | top_p 0.95 before | top_p 0.95 after |
+|---|---:|---:|---:|---:|---:|---:|
+| `qwen:Qwen3-4B:kvf32` | 64 | 2548 | 688 (23 %) | 2484 (68 %) | 316 (16 %) | 1202 (36 %) |
+| `qwen:Qwen3-4B:kvf32` | 16 | 1515 | 396 (24 %) | 1502 (60 %) | 228 (15 %) | 710 (35 %) |
+| `qwen35:Qwen3.8-27B-FP8` | 64 | 1482 | 368 (28 %) | 1385 (82 %) | | |
+| `qwen35:Qwen3.8-27B-FP8` | 16 | 733 | 284 (35 %) | 710 (73 %) | | |
+
+Qwen3-4B with a rank-16 LoRA adapter (all targets) through `brain serve --max-batch 64 --kv-cache f32`, closed-loop
+chat completions of 300 tokens (`top_k` 0, `top_p` 1), output tokens/s, GPU busy %, serving process CPU:
+
+| streams | greedy | temperature 1 before | temperature 1 after |
+|---:|---:|---:|---:|
+| 64 | 2868 | 814 (26 %, 97 % of a core) | 2823 (87 %, 94 % of a core) |
+| 16 | 1290 | 609 (45 %, 98 %) | 1297 (89 %, 97 %) |
+
+The serving process holds about one core at every setting, greedy included: that core is the scheduler and the HTTP
+surface, no longer the sampler. A request that leaves `top_k` out gets the checkpoint's `generation_config.json` value
+(20 for Qwen3-4B), which the candidate list answers exactly; the slow path needed `top_k` 0.
+
+The draw itself is 0.21 ms a step at 64 rows of the 27B's 248320-token vocabulary (nsys with graph nodes traced) and
+0.39 + 0.09 ms for the WGSL pair at 64 x 151936 (the native kernel replaced it). Before the recorded-step change the
+27B's sampled steps ran eagerly and stayed about 10 % behind greedy at 64 streams.
+
+- [x] temperature and min-p on the device, exact, seed-deterministic across batch compositions (`serve_keyed_draw.rs`,
+      `readout_draw.rs`, `conformance::keyed_draws_are_the_rows_draws`, `qwen35/tests/decode_plans.rs`)
+- [x] the host row path parallel over rows (`backend_cpu::par`); `top_p` 0.95 is 3-4x faster but still host-bound
+- [ ] a nucleus on the device: the drawer already has each row's best and normaliser; device top-k plus the exact
+      nucleus on the candidates when their mass covers it (the row only when it does not) is the next step
+- [ ] a keyed decode window (Qwen3's greedy window feeds the argmax back on the device; a keyed one needs the keys of
+      every sub-step uploaded once)
+- [ ] `--exact-decode` and adapter rows still take the eager keyed head on the 27B (not recorded)
+- [ ] pre-existing, not caused here: `qwen35/tests/hf_fp8_conformance.rs::the_hf_fp8_engine_conforms` fails its
+      batched-equals-alone property at the base too (`[0, 36, 33, 45, 62, 63]` against `[5, 48, 20, 9, 50, 5]`)

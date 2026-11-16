@@ -8,14 +8,15 @@
 // hf-fixture: qwen35
 //! A decode step replayed from its recording (layers and head as one submission, [`qwen35::int8_gguf_resident`]
 //! `decode_planned`) gives bit-for-bit the candidates and tokens the same step built the ordinary way gives: across a
-//! context bucket boundary, a batch that shrinks and a head that changes between greedy and top-k.
+//! context bucket boundary, a batch that shrinks and a head that changes between greedy, top-k and keyed draws (with
+//! and without a min-p floor, a row read back beside them).
 //!
 //! Run with `-- --device gpu<i> --backend cuda`.
 
 use gpu_core::select::Dtype;
 use model::kv_tier::KvTier;
 use model::paged::BlockTable;
-use model::serve::PagedDecoder;
+use model::serve::{draw_key, Drawn, PagedDecoder, RowDraw};
 use qwen35::int8_gguf_resident::{budgeted_gpus, held_tiers_at, Qwen35GgufEngine, Qwen35GgufResident};
 
 mod common;
@@ -45,12 +46,17 @@ fn prompt_of(seed: u32, n: u32) -> Vec<u32> {
     (0..n).map(|i| 3 + (seed * 5 + i * 7 + i * i) % 50).collect()
 }
 
+/// A row's best token and its logit, the lowest id first among equal logits.
+fn best_of(row: &[f32]) -> (u32, f32) {
+    row.iter().enumerate().fold((0u32, f32::NEG_INFINITY), |b, (i, &v)| if v > b.1 { (i as u32, v) } else { b })
+}
+
 /// Everything a run observed: per step, each live row's candidates as bit patterns.
 type Trace = Vec<Vec<Vec<(u32, u32)>>>;
 
 /// Three sequences decode from short prompts until the longest passes 150 positions (the 128-key bucket boundary
-/// inside); one finishes early so the batch shrinks; ten steps in turn ask for greedy picks and for 4
-/// candidates. Each sequence continues from its own best candidate.
+/// inside); one finishes early so the batch shrinks; ten steps in turn ask for greedy picks, for 4 candidates and for
+/// keyed draws. Each sequence continues from its own best candidate or drawn token.
 fn run(plans: bool) -> (Trace, usize) {
     let mut e = engine(plans);
     let lens = [30u32, 41, 52];
@@ -69,10 +75,22 @@ fn run(plans: bool) -> (Trace, usize) {
             next.remove(0);
         }
         let mut refs: Vec<&mut BlockTable> = tables.iter_mut().collect();
-        let rows: Vec<Vec<(u32, f32)>> = if (step / 10) % 2 == 0 {
-            e.forward_batched_greedy(&mut refs, &next).into_iter().map(|t| vec![(t, 0.0)]).collect()
-        } else {
-            e.forward_batched_topk(&mut refs, &next, 4)
+        let rows: Vec<Vec<(u32, f32)>> = match (step / 10) % 3 {
+            0 => e.forward_batched_greedy(&mut refs, &next).into_iter().map(|t| vec![(t, 0.0)]).collect(),
+            1 => e.forward_batched_topk(&mut refs, &next, 4),
+            _ => {
+                // Keyed draws, the last row read back whole, every other ten steps with a min-p floor.
+                let n = refs.len();
+                let floor = if (step / 30) % 2 == 0 { 0.0 } else { 0.1 };
+                let draws: Vec<Option<RowDraw>> = (0..n).map(|i| (i + 1 < n).then(|| RowDraw { temp: 1.0, min_p: floor, key: draw_key(i as u64, step as u64, 0) })).collect();
+                e.forward_batched_drawn(&mut refs, &next, &draws)
+                    .into_iter()
+                    .map(|d| match d {
+                        Drawn::Token(t, lp) => vec![(t, lp)],
+                        Drawn::Row(row) => vec![best_of(&row)],
+                    })
+                    .collect()
+            }
         };
         next = rows.iter().map(|r| r[0].0).collect();
         trace.push(rows.iter().map(|r| r.iter().map(|&(t, v)| (t, v.to_bits())).collect()).collect());

@@ -114,6 +114,8 @@ pub(crate) enum HeadKind {
     Argmax,
     /// Each row's best `n` candidates.
     TopK(u32),
+    /// Each keyed row's drawn token (`model::readout::RowDrawer`), with the min-p pass when `floors`.
+    Drawn { floors: bool },
 }
 
 /// The identity of a recorded paged decode step: everything its dispatch list depends on. The rows' positions, slots,
@@ -135,6 +137,8 @@ pub(crate) struct PlanKey {
 pub(crate) enum PlanOut {
     Argmax(DeviceBuffer),
     TopK(model::readout::TopkOut),
+    /// The drawer and the logits it draws from (the rows a draw does not cover are read from them).
+    Drawn(model::readout::RowDrawer, DeviceBuffer),
 }
 
 /// One recorded step: layers and head as a single tape, its inputs and its outputs.

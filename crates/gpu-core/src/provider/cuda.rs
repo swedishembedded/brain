@@ -841,6 +841,23 @@ pub fn gdn_segment_kernels_served(gpu: &crate::Gpu) -> bool {
         && ["gdn_conv_silu_seg", "gdn_chunk_prep_seg_bf16", "gdn_chunk_loop_seg_bf16", "gdn_gated_norm"].iter().all(|name| kernels_cuda::get(name).is_some_and(|k| k.min_cc <= cc))
 }
 
+/// `draw_rows_f32`: logits, spec (read); out (written).
+static DRAW_ROWS_BINDINGS: [BindKind; 4] = bwd_tc_bindings(2);
+
+/// The keyed draw of every row of `logits` (`[rows, vocab]`) in one launch (`draw_rows_f32`): `bufs` is the logits,
+/// the rows' `[rows, 4]` draw specs and the `[rows, 2]` (token, log-probability) output, laid out as the WGSL pair
+/// `draw_part` + `draw_final` lays them out, with the same answer. `None` when the device does not offer the kernel or
+/// the shape is not one it serves (a vocabulary a f32 cannot index exactly).
+pub fn draw_rows_step(gpu: &crate::Gpu, bufs: &[&backend_api::DeviceBuffer; 3], rows: u32, vocab: u32) -> Option<crate::Step> {
+    if rows == 0 || vocab == 0 || vocab >= 1 << 24 {
+        return None;
+    }
+    let cc = gpu.caps().arch.compute_capability?;
+    let kernel = kernels_cuda::get("draw_rows_f32").filter(|k| k.min_cc <= cc && !super::cuda_disabled())?;
+    let id = gpu.native_kernel(kernel, &DRAW_ROWS_BINDINGS)?;
+    gpu.step_native_sliced(id, bufs, &[(0, 0); 3], &[rows, vocab], rows)
+}
+
 /// The widest vocabulary `topk_rows_f32` serves: 1024 threads, each holding 16 sub-runs of 16 columns.
 const TOPK_MAX_VOCAB: u32 = 1024 * 16 * 16;
 

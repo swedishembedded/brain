@@ -714,7 +714,7 @@ impl Qwen35GgufEngine {
     /// hidden block.
     /// One decode step's layers and then `head` over the hidden block they leave on the card, as ONE submission:
     /// nothing is read back between the last layer and the head.
-    fn decode_then(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32], readout: Readout) -> HeadOut {
+    fn decode_then(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32], readout: Readout<'_>) -> HeadOut {
         assert_eq!(tables.len(), inputs.len(), "{MODEL}: tables/inputs length mismatch");
         let adapter_slots: Vec<u32> = tables.iter().map(|t| adapters::slot_of(self.inst.stage_models(), t.kv_namespace())).collect();
         let (slots, positions) = self.next_positions(tables);
@@ -730,8 +730,13 @@ impl Qwen35GgufEngine {
         let tap = if track { inst.mtp_note_step(&slots, inputs) } else { Vec::new() };
         let inst = &mut *inst;
         // A batch of base rows only replays its recording; an adapter bank correcting any row changes the dispatches.
-        if let (Readout::Head(kind), true) = (readout, adapter_slots.iter().all(|&s| s == LORA_SLOT_NONE)) {
-            if let Some(out) = inst.decode_planned(inputs, &slots, &positions, kind, &tap) {
+        let planned = match readout {
+            Readout::Head(kind) => Some((kind, &[][..])),
+            Readout::Drawn(draws) => Some((HeadKind::Drawn { floors: model::readout::RowDrawer::has_floor(draws) }, draws)),
+            Readout::Rows => None,
+        };
+        if let (Some((kind, draws)), true) = (planned, adapter_slots.iter().all(|&s| s == LORA_SLOT_NONE)) {
+            if let Some(out) = inst.decode_planned(inputs, &slots, &positions, kind, draws, &tap) {
                 inst.mtp_step_done(&slots);
                 return out;
             }
@@ -1722,6 +1727,12 @@ impl PagedDecoder for Qwen35GgufEngine {
         }
         decode_lane(self.background_on, || self.decode_then(tables, inputs, Readout::Rows).into_rows())
     }
+    fn forward_batched_drawn(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32], draws: &[Option<model::serve::RowDraw>]) -> Vec<model::serve::Drawn> {
+        if tables.is_empty() {
+            return Vec::new();
+        }
+        decode_lane(self.background_on, || self.decode_then(tables, inputs, Readout::Drawn(draws)).into_drawn())
+    }
     fn adapter_availability(&mut self, adapter: AdapterId) -> AdapterAvailability {
         let (answer, purged) = adapters::availability(self.inst.stage_models(), adapter);
         self.purge_namespace(purged);
@@ -1806,7 +1817,7 @@ impl Verified {
 
 impl Qwen35GgufEngine {
     /// [`PagedDecoder::forward_batched_verify`]'s work.
-    fn verify_rows(&mut self, tables: &mut [&mut BlockTable], rows: &[Vec<u32>], readout: Readout) -> Verified {
+    fn verify_rows(&mut self, tables: &mut [&mut BlockTable], rows: &[Vec<u32>], readout: Readout<'_>) -> Verified {
         assert_eq!(tables.len(), rows.len(), "{MODEL}: tables/rows length mismatch");
         let t0 = std::time::Instant::now();
         let mut slots = Vec::with_capacity(tables.len());
@@ -1837,7 +1848,7 @@ impl Qwen35GgufEngine {
         let dests = self.inst.mtp_verify_destinations(&slots, &counts);
         let planned = match readout {
             Readout::Head(kind) => padded.as_ref().and_then(|_| self.inst.verify_planned(&row_refs, &slots, &positions, kind, &dests)),
-            Readout::Rows => None,
+            Readout::Rows | Readout::Drawn(_) => None,
         };
         let picked: HeadOut = match planned {
             Some(out) => out,
@@ -1860,6 +1871,7 @@ impl Qwen35GgufEngine {
             HeadOut::Ids(ids) => Verified::Lists(self.drop_padding(ids.into_iter().map(|t| vec![(t, 0.0)]).collect(), tables, rows, work)),
             HeadOut::TopK(top) => Verified::Lists(self.drop_padding(top, tables, rows, work)),
             HeadOut::Rows(whole) => Verified::Rows(self.drop_padding(whole, tables, rows, work)),
+            HeadOut::Drawn(_) => unreachable!("a verify step reads lists or rows, never keyed draws"),
         }
     }
 

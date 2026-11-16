@@ -3444,6 +3444,23 @@ pub const ALL: &[CudaKernel] = &[
         src: concat!("#define BRAIN_FD_BN 144\n#define BRAIN_FD_STAGES 8\n#define BRAIN_FD_ENTRY brain_matmul_fp8_wgmma_swap_tma_bn144c1\n", include_str!("../cu/fp8_tma_common.cuh"), include_str!("../cu/matmul_fp8_wgmma_swap_tma.cu")),
     },
     CudaKernel {
+        name: "draw_rows_f32",
+        op: Op::ArgMaxRow,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_draw_rows",
+        what: "the keyed Gumbel-max draw of every logits row in one launch, a block of 1024 threads a row folding its strided slices (a second sweep for a min-p floor): the token and its log-probability, the same answer as draw_part + draw_final (two launches a pass)",
+        reported: "native:draw_rows_f32",
+        block_dim: 1024,
+        // A block per row.
+        tile: (1, 1),
+        shared_bytes: 0,
+        programmatic: false,
+        src: include_str!("../cu/draw_rows_f32.cu"),
+    },
+    CudaKernel {
         name: "topk_rows_f32",
         op: Op::ArgMaxRow,
         weight: Dtype::F32,

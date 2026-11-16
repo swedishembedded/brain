@@ -26,6 +26,7 @@ use model::ops::{Ops, TierPolicy, Weight};
 use model::kv_offload::{HostKvPool, KvOffload, KvOffloadError, OffloadStats};
 use model::kv_tier::{FlashDecode, FlashDecodeShape, KvTier};
 use model::paged::{BlockAllocator, BlockTable, KvNamespace, PrefixCache, BASE_KV_NAMESPACE};
+use model::serve::{Drawn, RowDraw};
 use paramstore::ParamStore;
 
 use crate::config::QwenConfig;
@@ -269,6 +270,7 @@ fn pipelines() -> &'static [(&'static str, &'static str)] {
         v.extend(model::kv_tier::fp8_pool_pipelines());
         v.extend(model::kv_tier::flash_decode_pipelines(&DECODE_SHAPES, &[KvTier::F32, KvTier::INT8, KvTier::FP8]));
         v.push(("splice", kernels::SPLICE));
+        v.extend(model::readout::DRAW_KERNELS);
         v.extend(model::lsa::binding::kernel_pipelines(&LSA_SHAPES, &LSA_EXTRA_GROUPS, &[model::paged_sparse::PackedKv::Int8, model::paged_sparse::PackedKv::Fp8], true));
         v
     })
@@ -1087,6 +1089,8 @@ pub struct Engine {
     /// `submit_topk_head` iterating the argmax pair + `topk_extract_step`.
     topk_vals_dev: DeviceBuffer,
     topk_idx_dev: DeviceBuffer,
+    /// The keyed draw of a sampled step's rows from `logits_dev` (`None` on a device list without its kernels).
+    drawer: Option<model::readout::RowDrawer>,
     /// The recorded decode step (`gpu_core::tape::Tape` of what `batched_tape`
     /// builds), keyed by `(bsz, lora)` - a pure function of that key once
     /// `causal_chunk` is `false` and the input is `Tokens`/`Resident` (every
@@ -1636,6 +1640,7 @@ impl Engine {
         let argmax_part_dev = st(max_batch as u64 * ARGMAX_CHUNKS as u64 * 2);
         let topk_vals_dev = st(max_batch as u64 * TOPK_CAPACITY as u64);
         let topk_idx_dev = st(max_batch as u64 * TOPK_CAPACITY as u64);
+        let drawer = model::readout::RowDrawer::new(&gpu, max_batch);
         let gemm = LibraryGemmProvider::for_gpu(&gpu, GemmPrecision::Auto);
         // Every prefill chunk and unrecorded step allocates its temporaries (the bf16 activation scratch of each
         // library GEMM among them) and drops them when the step is done. Freed to the driver, each drop is a
@@ -1692,6 +1697,7 @@ impl Engine {
             argmax_part_dev,
             topk_vals_dev,
             topk_idx_dev,
+            drawer,
             tape_cache: HashMap::new(),
             tape_scratch: gpu_core::tape::TapeScratch::new(),
             lsa: None,
@@ -3583,6 +3589,34 @@ impl Engine {
         self.grouped(tables, inputs, Engine::logit_rows_step)
     }
 
+    /// Advance every sequence by one token and draw each keyed row's token where the logits are
+    /// (`model::serve::PagedDecoder::forward_batched_drawn`): only the drawn `(token, logprob)` pairs and the rows
+    /// whose draw is `None` are read back.
+    pub(crate) fn forward_batched_drawn(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32], draws: &[Option<RowDraw>]) -> Vec<Drawn> {
+        let mut at = 0usize;
+        self.grouped(tables, inputs, |e, tables, inputs| {
+            let group = &draws[at..at + inputs.len()];
+            at += inputs.len();
+            e.drawn_step(tables, inputs, group)
+        })
+    }
+
+    /// [`Self::forward_batched_drawn`] for one step of all of `tables`.
+    fn drawn_step(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32], draws: &[Option<RowDraw>]) -> Vec<Drawn> {
+        if self.drawer.is_none() {
+            let rows = self.logit_rows_step(tables, inputs);
+            return model::serve::draw_rows_host(rows, draws);
+        }
+        let meta = self.append_meta(tables);
+        self.run_batched_submit(&meta, Input::Tokens(inputs), false);
+        let mut steps: Vec<Step> = Vec::new();
+        self.head_steps(&mut steps, meta.bsz);
+        let drawer = self.drawer.as_ref().expect("checked above");
+        steps.extend(drawer.steps(&self.gpu, &self.logits_dev, draws, self.cfg.vocab));
+        self.gpu.submit(&[], &steps);
+        drawer.answer(&self.gpu, &self.logits_dev, draws, self.cfg.vocab)
+    }
+
     /// [`Self::forward_batched_logit_rows`] for one step of all of `tables`.
     fn logit_rows_step(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32]) -> Vec<Vec<f32>> {
         let meta = self.append_meta(tables);
@@ -4591,6 +4625,9 @@ impl model::serve::PagedDecoder for Engine {
     }
     fn forward_batched_logit_rows(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32]) -> Vec<Vec<f32>> {
         Engine::forward_batched_logit_rows(self, tables, inputs)
+    }
+    fn forward_batched_drawn(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32], draws: &[Option<RowDraw>]) -> Vec<Drawn> {
+        Engine::forward_batched_drawn(self, tables, inputs, draws)
     }
     fn spec_max_draft(&self) -> usize {
         // A verify forwards 1 + proposals rows of one sequence in one batch, a chunk the exact-decode regime does not

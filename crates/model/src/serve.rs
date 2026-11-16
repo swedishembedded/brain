@@ -24,6 +24,7 @@ use std::collections::{HashMap, VecDeque};
 use crate::paged::{BlockAllocator, BlockTable, KvNamespace, BASE_KV_NAMESPACE};
 
 mod budget;
+mod draw;
 mod embeds;
 mod fullrow;
 mod round_rows;
@@ -33,6 +34,7 @@ pub mod taps;
 pub mod rows;
 pub mod conformance;
 pub use budget::{MixedLimits, StepCost};
+pub use draw::{draw_key, draw_row, draw_rows_host, mix32, token_gumbel, token_uniform, Drawn, RowDraw};
 pub use embeds::{ContentKey, PromptEmbeds};
 pub use fullrow::{best_candidates, sample_logits_row};
 pub use round_rows::{prefill_round_rows_for, PREFILL_ROUND_ROWS, TENSOR_CORE_PREFILL_ROUND_ROWS};
@@ -288,6 +290,17 @@ pub trait PagedDecoder {
         unimplemented!("this decoder does not read its logits rows back (full_row_readback is false)")
     }
 
+    /// Advance every sequence by one token and answer each row of a keyed step: the token `draws[i]` draws from
+    /// row `i` ([`Drawn::Token`]) where it is `Some`, row `i`'s whole logits ([`Drawn::Row`]) where it is `None`.
+    /// Called only when [`full_row_readback`](Self::full_row_readback) is true. The default reads every row back
+    /// ([`Self::forward_batched_logit_rows`]) and draws on the CPU pool ([`draw_rows_host`]); a decoder whose logits
+    /// are on a device draws there ([`crate::readout::RowDrawer`]), so only `[rows]` (token, log-probability)
+    /// pairs and the `None` rows cross to the host. Either way the answer is [`draw_row`]'s.
+    fn forward_batched_drawn(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32], draws: &[Option<RowDraw>]) -> Vec<Drawn> {
+        let rows = self.forward_batched_logit_rows(tables, inputs);
+        draw_rows_host(rows, draws)
+    }
+
     /// [`forward_batched_verify`](Self::forward_batched_verify) with each row's whole `[vocab]` logits read back
     /// instead of its best candidates: `rows[i][j]` is the distribution after row `j` of sequence `i`. Called only when
     /// [`full_row_readback`](Self::full_row_readback) is true and the decoder speculates
@@ -472,6 +485,14 @@ pub trait PagedDecoder {
         let prefilled = if jobs.is_empty() { Vec::new() } else { self.prefill_chunks(jobs) };
         let decoded = if tables.is_empty() { Vec::new() } else { self.forward_batched_logit_rows(tables, inputs) };
         MixedRowsOutcome { decoded, prefilled }
+    }
+
+    /// [`Self::forward_mixed_logit_rows`] for a keyed step ([`Self::forward_batched_drawn`]): the same two-pass
+    /// default, the decode rows drawn where the decoder draws them.
+    fn forward_mixed_drawn(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32], draws: &[Option<RowDraw>], jobs: &mut [PrefillJob<'_>]) -> MixedDrawnOutcome {
+        let prefilled = if jobs.is_empty() { Vec::new() } else { self.prefill_chunks(jobs) };
+        let decoded = if tables.is_empty() { Vec::new() } else { self.forward_batched_drawn(tables, inputs, draws) };
+        MixedDrawnOutcome { decoded, prefilled }
     }
 
     /// [`Self::forward_mixed_verify`] over whole logits rows ([`Self::forward_batched_verify_logit_rows`]); the same
@@ -764,6 +785,14 @@ pub struct MixedRowsOutcome {
     pub prefilled: Vec<PrefillProgress>,
 }
 
+/// What one [`PagedDecoder::forward_mixed_drawn`] call produced.
+pub struct MixedDrawnOutcome {
+    /// Per decode row, its drawn token or its whole logits row ([`Drawn`]).
+    pub decoded: Vec<Drawn>,
+    /// One answer per job, in job order.
+    pub prefilled: Vec<PrefillProgress>,
+}
+
 /// What one [`PagedDecoder::forward_mixed_verify_logit_rows`] call produced.
 pub struct MixedVerifyRowsOutcome {
     /// Per sequence, per verify row, its whole logits row.
@@ -900,6 +929,12 @@ impl SampleParams {
     /// temperature draw makes slightly wrong too. A greedy request without a penalty is the list's first entry.
     pub fn needs_full_row(&self, capacity: usize) -> bool {
         self.has_penalties() || (!self.is_greedy() && !(self.top_k > 0 && self.top_k <= capacity))
+    }
+    /// Whether a draw over a `vocab`-wide row needs nothing but the row and a keyed noise source
+    /// ([`RowDraw`]): real sampling with no logit processor, no `top_p` nucleus and no `top_k` inside the
+    /// vocabulary, so the distribution is the softmax over every token, or over the `min_p` survivors.
+    pub fn row_drawable(&self, vocab: usize) -> bool {
+        !self.is_greedy() && !self.has_processors() && !(self.top_p > 0.0 && self.top_p < 1.0) && !(self.top_k > 0 && self.top_k < vocab)
     }
 }
 
@@ -1446,18 +1481,39 @@ fn sample_rows(running: &mut [Running], active: &[usize], candidates: &[Vec<(u32
         .collect()
 }
 
-/// [`sample_rows`] over whole logits rows (`rows[bi]` for `active[bi]`): each sequence draws from the exact
-/// distribution of its own row ([`sample_logits_row`]).
-fn sample_full_rows(running: &mut [Running], active: &[usize], rows: Vec<Vec<f32>>) -> Vec<Vec<(u32, f32)>> {
-    active
-        .iter()
-        .zip(rows)
-        .map(|(&si, mut row)| {
-            let r = &mut running[si];
+/// Each sequence's keyed draw for a step that reads or draws whole rows (`draws[bi]` for `active[bi]`): `None` for a
+/// request the keyed draw does not cover, which takes its row to the host sampler.
+fn row_draws(running: &[Running], active: &[usize], vocab: usize) -> Vec<Option<RowDraw>> {
+    active.iter().map(|&si| RowDraw::of(&running[si].sample, vocab, running[si].seed, running[si].context.len())).collect()
+}
+
+/// [`sample_rows`] over a keyed step's answers (`drawn[bi]` for `active[bi]`): a row drawn by the decoder is taken
+/// as it is, and a row read back is sampled from the exact distribution of the sequence's own parameters
+/// ([`sample_logits_row`]), every such row in parallel on the CPU pool.
+fn settle_drawn(running: &mut [Running], active: &[usize], drawn: Vec<Drawn>) -> Vec<Vec<(u32, f32)>> {
+    assert_eq!(active.len(), drawn.len(), "a keyed step answers every row");
+    debug_assert!(active.windows(2).all(|w| w[0] < w[1]), "the active sequences are in running order");
+    let mut picked: Vec<Option<(u32, f32)>> = drawn.iter().map(|d| match *d { Drawn::Token(t, lp) => Some((t, lp)), Drawn::Row(_) => None }).collect();
+    // The sequences whose rows came back, each with its row and a slot for its token, in running order.
+    let mut rows = active.iter().zip(drawn).filter_map(|(&si, d)| match d { Drawn::Row(row) => Some((si, row)), Drawn::Token(..) => None }).peekable();
+    let mut on_host: Vec<(&mut Running, Vec<f32>, (u32, f32))> = Vec::new();
+    for (si, r) in running.iter_mut().enumerate() {
+        if rows.peek().is_some_and(|&(want, _)| want == si) {
+            on_host.push((r, rows.next().expect("peeked").1, (0, 0.0)));
+        }
+    }
+    if !on_host.is_empty() {
+        backend_cpu::par::chunks_mut(&mut on_host, 1, |_, one| {
+            let (r, row, out) = &mut one[0];
             let ctx = SampleContext { context: &r.context, prompt_len: r.context.len() - r.generated.len() };
-            vec![sample_logits_row(&mut row, r.sample, &ctx, &mut r.procs, &mut r.rng)]
-        })
-        .collect()
+            *out = sample_logits_row(row, r.sample, &ctx, &mut r.procs, &mut r.rng);
+        });
+        let mut host = on_host.into_iter().map(|(_, _, out)| out);
+        for p in picked.iter_mut().filter(|p| p.is_none()) {
+            *p = host.next();
+        }
+    }
+    picked.into_iter().map(|p| vec![p.expect("every row answered")]).collect()
 }
 
 /// Accept a freshly sampled token into `r`.
@@ -2388,7 +2444,11 @@ impl<D: PagedDecoder> Scheduler<D> {
             (first_candidates.first().map_or_else(|| self.dec.admit_greedy(&hidden), |&(token, _)| token), 0.0)
         } else if self.dec.full_row_readback() && sample.needs_full_row(self.dec.topk_capacity()) {
             let mut row = self.dec.logits(&hidden);
-            sample_logits_row(&mut row, sample, &SampleContext { context: &prompt, prompt_len: prompt.len() }, &mut ProcessorState::default(), &mut rng)
+            if let Some(d) = RowDraw::of(&sample, row.len(), seed, prompt.len()) {
+                draw_row(&row, d)
+            } else {
+                sample_logits_row(&mut row, sample, &SampleContext { context: &prompt, prompt_len: prompt.len() }, &mut ProcessorState::default(), &mut rng)
+            }
         } else {
             // The iteration's head pass gave the full candidate list when it was asked for candidates (see
             // `mixed_iteration`); a shorter list is the greedy pick and the head runs again.
@@ -2825,13 +2885,15 @@ impl<D: PagedDecoder> Scheduler<D> {
             } else {
                 if self.wants_full_rows(&active) {
                     // A request the candidate list cannot answer exactly, on a decoder that reads its rows back:
-                    // the step returns whole `[vocab]` rows and every sequence samples from its own.
-                    let rows = {
+                    // the decoder draws every keyed row itself and returns the others' whole `[vocab]` rows, which
+                    // each sequence samples from on the host.
+                    let draws = row_draws(&self.running, &active, self.dec.vocab());
+                    let drawn = {
                         let mut refs = active_tables(&mut self.running, &in_batch);
-                        self.dec.forward_batched_logit_rows(&mut refs, &inputs)
+                        self.dec.forward_batched_drawn(&mut refs, &inputs, &draws)
                     };
                     let _sample = gpu_core::markers::range(c"serve.sample");
-                    sample_full_rows(&mut self.running, &active, rows)
+                    settle_drawn(&mut self.running, &active, drawn)
                 } else {
                     let wanted = self.candidates_wanted(&active, banned_max);
                     let candidates = {
@@ -2970,6 +3032,7 @@ impl<D: PagedDecoder> Scheduler<D> {
         };
         // Whole rows when a sequence's distribution is wider than a candidate list can answer.
         let full_rows = proposals.as_ref().map_or_else(|| self.wants_full_rows(active), |p| p.full_rows);
+        let draws = if full_rows && proposals.is_none() { row_draws(&self.running, active, self.dec.vocab()) } else { Vec::new() };
         let mut tables = active_tables(&mut self.running, in_batch);
         let mut jobs: Vec<PrefillJob<'_>> =
             self.prefilling.iter_mut().zip(&takes).filter(|(_, &take)| take > 0).map(|(p, &take)| PrefillJob { table: &mut p.table, prompt: &p.prompt, budget: take, embeds: p.embeds.as_deref() }).collect();
@@ -2985,7 +3048,7 @@ impl<D: PagedDecoder> Scheduler<D> {
                     (Some(Scored::Lists(o.scored)), Vec::new(), None, o.prefilled, o.first)
                 }
                 (None, true) => {
-                    let o = self.dec.forward_mixed_logit_rows(&mut tables, &inputs, &mut jobs);
+                    let o = self.dec.forward_mixed_drawn(&mut tables, &inputs, &draws, &mut jobs);
                     (None, Vec::new(), Some(o.decoded), o.prefilled, Vec::new())
                 }
                 (None, false) => {
@@ -3011,7 +3074,7 @@ impl<D: PagedDecoder> Scheduler<D> {
             None => {
                 let sampled = gpu_core::markers::range(c"serve.sample");
                 let window = match decoded_rows {
-                    Some(rows) => sample_full_rows(&mut self.running, active, rows),
+                    Some(drawn) => settle_drawn(&mut self.running, active, drawn),
                     None if all_greedy => decoded,
                     None => sample_rows(&mut self.running, active, &decoded),
                 };

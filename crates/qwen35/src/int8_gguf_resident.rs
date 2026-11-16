@@ -1480,10 +1480,12 @@ pub struct Qwen35GgufInstance {
 
 /// What a step reads back from the head: a head a recorded plan can end in, or every row's whole logits (never
 /// recorded: a request the candidate lists cannot answer exactly is sampled from them).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum Readout {
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) enum Readout<'a> {
     Head(HeadKind),
     Rows,
+    /// Each keyed row's token drawn on the device, the other rows whole (`model::serve::PagedDecoder::forward_batched_drawn`).
+    Drawn(&'a [Option<model::serve::RowDraw>]),
 }
 
 /// What a decode step's head hands the host.
@@ -1491,6 +1493,7 @@ pub(crate) enum HeadOut {
     Ids(Vec<u32>),
     TopK(Vec<Vec<(u32, f32)>>),
     Rows(Vec<Vec<f32>>),
+    Drawn(Vec<model::serve::Drawn>),
 }
 
 impl HeadOut {
@@ -1512,6 +1515,13 @@ impl HeadOut {
         match self {
             HeadOut::Rows(rows) => rows,
             _ => unreachable!("a logits head answered with something else"),
+        }
+    }
+
+    pub(crate) fn into_drawn(self) -> Vec<model::serve::Drawn> {
+        match self {
+            HeadOut::Drawn(drawn) => drawn,
+            _ => unreachable!("a keyed head answered with something else"),
         }
     }
 }
@@ -2078,6 +2088,16 @@ impl Qwen35GgufInstance {
         out
     }
 
+    /// Each row's answer to a keyed step: drawn on the device, or on the host from the grouped exact-decode head.
+    fn head_drawn_rows<'h>(&self, hidden: impl Into<HeadRows<'h>>, rows: u32, draws: &[Option<model::serve::RowDraw>]) -> Vec<model::serve::Drawn> {
+        if self.exact_head_step().is_some_and(|s| rows > s) {
+            let vocab = self.cfg.vocab as usize;
+            return model::serve::draw_rows_host(self.head_logits_rows(hidden, rows).chunks(vocab).map(<[f32]>::to_vec).collect(), draws);
+        }
+        let (g, ops, norm, w) = self.head_parts();
+        crate::stream::head_drawn_rows_on(g, ops, &self.cfg, norm, w, hidden, rows, draws)
+    }
+
     /// Each row's greedy token, picked on the device.
     fn head_argmax_rows<'h>(&self, hidden: impl Into<HeadRows<'h>>, rows: u32) -> Vec<u32> {
         let (g, ops, norm, w) = self.head_parts();
@@ -2096,14 +2116,16 @@ impl Qwen35GgufInstance {
     }
 
     /// The head `readout` names over `hidden`, read back.
-    fn head_rows<'h>(&self, hidden: impl Into<HeadRows<'h>>, rows: u32, readout: Readout) -> HeadOut {
+    fn head_rows<'h>(&self, hidden: impl Into<HeadRows<'h>>, rows: u32, readout: Readout<'_>) -> HeadOut {
         match readout {
             Readout::Head(HeadKind::Argmax) => HeadOut::Ids(self.head_argmax_rows(hidden, rows)),
             Readout::Head(HeadKind::TopK(cap)) => HeadOut::TopK(self.head_topk_rows(hidden, rows, cap)),
+            Readout::Head(HeadKind::Drawn { .. }) => unreachable!("a keyed head carries its draws in Readout::Drawn"),
             Readout::Rows => {
                 let vocab = self.cfg.vocab as usize;
                 HeadOut::Rows(self.head_logits_rows(hidden, rows).chunks(vocab).map(<[f32]>::to_vec).collect())
             }
+            Readout::Drawn(draws) => HeadOut::Drawn(self.head_drawn_rows(hidden, rows, draws)),
         }
     }
 
@@ -2138,7 +2160,7 @@ impl Qwen35GgufInstance {
     /// `None` when the step does not qualify (the caller runs it the ordinary way, bit-for-bit the same arithmetic): more
     /// than one stage (the hand-off between cards is not a dispatch a recording holds), embedding rows decoded on the
     /// host, the exact-decode regime, or a key that has not held yet.
-    fn decode_planned(&self, tokens: &[u32], slots: &[u32], positions: &[u32], kind: HeadKind, tap: &[u32]) -> Option<HeadOut> {
+    fn decode_planned(&self, tokens: &[u32], slots: &[u32], positions: &[u32], kind: HeadKind, draws: &[Option<model::serve::RowDraw>], tap: &[u32]) -> Option<HeadOut> {
         if !self.plans_on.get() || self.shards.len() != 1 || self.exact_decode || !self.embeds_on_device() {
             return None;
         }
@@ -2173,10 +2195,14 @@ impl Qwen35GgufInstance {
         if let Some(buf) = &plan.tap {
             g.write(buf, tap);
         }
+        if let PlanOut::Drawn(drawer, _) = &plan.out {
+            drawer.upload(g, draws);
+        }
         g.replay_tape(&plan.tape);
         let out = match &plan.out {
             PlanOut::Argmax(ids) => HeadOut::Ids(model::readout::read_argmax(g, ids, rows)),
             PlanOut::TopK(top) => HeadOut::TopK(top.read(g)),
+            PlanOut::Drawn(drawer, logits) => HeadOut::Drawn(drawer.answer(g, logits, draws, self.cfg.vocab)),
         };
         self.plans.borrow_mut().put(plan);
         Some(out)
@@ -2245,6 +2271,7 @@ impl Qwen35GgufInstance {
         let out = match &plan.out {
             PlanOut::Argmax(ids) => HeadOut::Ids(model::readout::read_argmax(g, ids, total)),
             PlanOut::TopK(top) => HeadOut::TopK(top.read(g)),
+            PlanOut::Drawn(..) => unreachable!("a verify round is recorded with a greedy or a top-k head"),
         };
         self.verify_plans.borrow_mut().put(plan);
         Some(out)
@@ -2258,6 +2285,11 @@ impl Qwen35GgufInstance {
         match kind {
             HeadKind::Argmax => PlanOut::Argmax(crate::model::argmax_rows_issue_of(g, &logits, rows, self.cfg.vocab)),
             HeadKind::TopK(cap) => PlanOut::TopK(crate::model::topk_rows_issue_of(g, &logits, rows, self.cfg.vocab, cap)),
+            HeadKind::Drawn { floors } => {
+                let drawer = model::readout::RowDrawer::new(g, rows).expect("the keyed draw's kernels are in this model's list");
+                g.submit(&[], &drawer.dispatch(g, &logits, rows, self.cfg.vocab, floors));
+                PlanOut::Drawn(drawer, logits)
+            }
         }
     }
 

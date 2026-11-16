@@ -154,6 +154,22 @@ fn rounds_work(g: &Gpu, k: ReadoutKernels, rows: u32, vocab: u32, stride: u32, c
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+fn native_draw(g: &Gpu, logits: &DeviceBuffer, spec: &DeviceBuffer, out: &DeviceBuffer, rows: u32, vocab: u32) -> Option<Step> {
+    gpu_core::provider::cuda::draw_rows_step(g, &[logits, spec, out], rows, vocab)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn native_draw(_g: &Gpu, _logits: &DeviceBuffer, _spec: &DeviceBuffer, _out: &DeviceBuffer, _rows: u32, _vocab: u32) -> Option<Step> {
+    None
+}
+
+/// Whether [`RowDrawer::steps`] draws with the native one-launch kernel on `g` at this shape (diagnostics and tests).
+pub fn draws_natively(g: &Gpu, rows: u32, vocab: u32) -> bool {
+    let probe = |n: u64| g.storage(n.max(1));
+    native_draw(g, &probe(rows as u64 * vocab as u64), &probe(rows as u64 * 4), &probe(rows as u64 * 2), rows, vocab).is_some()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn native_topk(g: &Gpu, logits: &DeviceBuffer, vals: &DeviceBuffer, idx: &DeviceBuffer, rows: u32, vocab: u32, cap: u32) -> Option<Step> {
     gpu_core::provider::cuda::topk_rows_step(g, &[logits, vals, idx], rows, vocab, cap)
 }
@@ -161,4 +177,101 @@ fn native_topk(g: &Gpu, logits: &DeviceBuffer, vals: &DeviceBuffer, idx: &Device
 #[cfg(target_arch = "wasm32")]
 fn native_topk(_g: &Gpu, _logits: &DeviceBuffer, _vals: &DeviceBuffer, _idx: &DeviceBuffer, _rows: u32, _vocab: u32, _cap: u32) -> Option<Step> {
     None
+}
+
+/// Slices each row is cut into by the keyed draw's partial stage (`draw_part`): the threads a row reduces over.
+pub const DRAW_SLICES: u32 = 256;
+
+/// The keyed draw's kernels, for a model's kernel list: a decoder that registers them draws its sampled rows on the
+/// device ([`RowDrawer`]).
+pub const DRAW_KERNELS: [(&str, &str); 2] = [("draw_part", kernels::DRAW_PART), ("draw_final", kernels::DRAW_FINAL)];
+
+/// Draws every keyed row of a `[rows, vocab]` logits block where the logits are ([`crate::serve::draw_row`]'s
+/// rule, the same tokens): two launches over all rows (one more pair when a row has a min-p floor), and only
+/// `[rows]` (token, log-probability) pairs read back. Owns its scratch, sized for `max_rows`.
+pub struct RowDrawer {
+    part_kernel: usize,
+    final_kernel: usize,
+    max_rows: u32,
+    /// `[max_rows, 4]` u32 per row: temperature bits, min-p bits, key, draw flag.
+    spec: DeviceBuffer,
+    /// `[max_rows, DRAW_SLICES, 4]` partial reductions.
+    part: DeviceBuffer,
+    /// `[max_rows]` best `logit / temp` of each row, for the min-p pass.
+    best: DeviceBuffer,
+    /// `[max_rows, 2]` drawn token (as f32) and log-probability.
+    out: DeviceBuffer,
+}
+
+impl RowDrawer {
+    /// A drawer for up to `max_rows` rows on `g`, or `None` when the model did not register [`DRAW_KERNELS`].
+    pub fn new(g: &Gpu, max_rows: u32) -> Option<RowDrawer> {
+        let (part_kernel, final_kernel) = (g.kernel_index("draw_part")?, g.kernel_index("draw_final")?);
+        let rows = max_rows.max(1) as u64;
+        Some(RowDrawer { part_kernel, final_kernel, max_rows: max_rows.max(1), spec: g.storage(rows * 4), part: g.storage(rows * DRAW_SLICES as u64 * 4), best: g.storage(rows), out: g.storage(rows * 2) })
+    }
+
+    /// The steps that draw `draws[i]` from row `i` of `logits` (`[draws.len(), vocab]`), after uploading the rows'
+    /// keys ([`Self::upload`] then [`Self::dispatch`]). A row whose draw is `None` is left alone. The caller submits
+    /// them after the steps that write `logits` and then reads the answer with [`Self::answer`].
+    pub fn steps(&self, g: &Gpu, logits: &DeviceBuffer, draws: &[Option<crate::serve::RowDraw>], vocab: u32) -> Vec<Step> {
+        self.upload(g, draws);
+        self.dispatch(g, logits, draws.len() as u32, vocab, Self::has_floor(draws))
+    }
+
+    /// Whether any of `draws` has a min-p floor: the dispatch a step of them needs ([`Self::dispatch`]'s `floors`).
+    pub fn has_floor(draws: &[Option<crate::serve::RowDraw>]) -> bool {
+        draws.iter().flatten().any(|d| d.min_p > 0.0)
+    }
+
+    /// Write the rows' temperatures, floors and keys where the dispatch reads them: before every run of the steps,
+    /// recorded ones included (a recording holds the dispatch, not the keys).
+    pub fn upload(&self, g: &Gpu, draws: &[Option<crate::serve::RowDraw>]) {
+        assert!(!draws.is_empty() && draws.len() as u32 <= self.max_rows, "RowDrawer: {} rows for a drawer of {}", draws.len(), self.max_rows);
+        let mut spec = vec![0u32; draws.len() * 4];
+        for (s, d) in spec.chunks_mut(4).zip(draws) {
+            if let Some(d) = d {
+                s.copy_from_slice(&[d.temp.to_bits(), d.min_p.to_bits(), d.key, 1]);
+            }
+        }
+        g.write(&self.spec, &spec);
+    }
+
+    /// The dispatches that draw `rows` rows of `logits` under the keys last uploaded, with the min-p pass when
+    /// `floors`: the native one-launch kernel where the device offers it (priced as the WGSL pair), else the pair.
+    pub fn dispatch(&self, g: &Gpu, logits: &DeviceBuffer, rows: u32, vocab: u32, floors: bool) -> Vec<Step> {
+        assert!(rows > 0 && rows <= self.max_rows, "RowDrawer: {rows} rows for a drawer of {}", self.max_rows);
+        let passes = if floors { 2 } else { 1 };
+        let reference: Vec<Step> = (0..passes)
+            .flat_map(|pass| {
+                [
+                    g.step(self.part_kernel, &[logits, &self.spec, &self.best, &self.part], &[rows, vocab, DRAW_SLICES, pass], rows * DRAW_SLICES),
+                    g.step(self.final_kernel, &[logits, &self.spec, &self.part, &self.best, &self.out], &[rows, vocab, DRAW_SLICES, pass], rows),
+                ]
+            })
+            .collect();
+        match native_draw(g, logits, &self.spec, &self.out, rows, vocab) {
+            Some(step) => vec![g.priced_as_chain(step, &reference)],
+            None => reference,
+        }
+    }
+
+    /// Each row's answer once [`Self::steps`] ran: the drawn token where `draws[i]` is `Some`, and row `i` of
+    /// `logits` read back where it is `None` (only those rows cross to the host).
+    pub fn answer(&self, g: &Gpu, logits: &DeviceBuffer, draws: &[Option<crate::serve::RowDraw>], vocab: u32) -> Vec<crate::serve::Drawn> {
+        use crate::serve::Drawn;
+        let out = if draws.iter().any(Option::is_some) { g.read(&self.out, draws.len() * 2) } else { Vec::new() };
+        draws
+            .iter()
+            .enumerate()
+            .map(|(i, d)| match d {
+                Some(_) => Drawn::Token(out[2 * i] as u32, out[2 * i + 1]),
+                None => {
+                    let mut row = vec![0.0f32; vocab as usize];
+                    g.read_into(logits, i as u64 * vocab as u64, &mut row);
+                    Drawn::Row(row)
+                }
+            })
+            .collect()
+    }
 }

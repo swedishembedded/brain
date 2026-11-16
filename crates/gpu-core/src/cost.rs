@@ -1559,6 +1559,17 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             let (m, parts) = (p(0)?, p(1)?);
             f(m * parts, 4 * (2 * m * parts + m))
         }
+        // The keyed draw in two stages, params [m, n, p, stage]: per element read a division, an exp, two hashes and
+        // two logs (about 30 operations); the (max, mass, score, column) partials written and folded, the row's key
+        // read and its (token, logprob) written.
+        "draw_part" => {
+            let (m, n, parts) = (p(0)?, p(1)?, p(2)?);
+            f(30 * m * n, 4 * (m * n + 4 * m * parts + 5 * m))
+        }
+        "draw_final" => {
+            let (m, parts) = (p(0)?, p(2)?);
+            f(4 * m * parts, 4 * (4 * m * parts + 8 * m))
+        }
         // One top-K extraction step, params [bsz, vocab, k_max, col]: per row the winner's index read, its logit
         // read and masked, its value and index written.
         "topk_extract_step" => f(0, 20 * p(0)?),
@@ -2375,7 +2386,7 @@ mod tests {
             "paged_decode_scores_i8_batched", "paged_decode_apply_i8_batched",
             "paged_kv_append_i8_clipped_batched",
             // the served step's greedy head and the recurrent-state pools
-            "argmax_part", "argmax_final", "topk_extract_step", "pool_rows_gather2", "pool_rows_scatter2",
+            "argmax_part", "argmax_final", "topk_extract_step", "draw_part", "draw_final", "pool_rows_gather2", "pool_rows_scatter2",
             // the fused flash-style paged attention the serving tape selects
             "paged_flash_prefill", "paged_flash_prefill_hd256", "paged_flash_prefill_i8",
             "paged_flash_decode", "paged_flash_decode_i8", "paged_flash_decode_gqa", "paged_flash_decode_gqa_combine",

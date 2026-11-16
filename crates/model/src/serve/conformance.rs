@@ -65,6 +65,10 @@
 //!   tiny-engine factory then builds weights with a clear top-1 margin so the
 //!   suite does not depend on a tie). Tolerance is not added here: a
 //!   tolerant comparison would hide a verify that really diverges.
+//! * [`keyed_draws_are_the_rows_draws`]: a decoder that reads its rows back
+//!   answers a keyed step ([`PagedDecoder::forward_batched_drawn`]) with the
+//!   tokens the host reference draws from those rows, so a decoder that draws
+//!   on its device draws what every other decoder draws.
 //!
 //! A server that receives SIGTERM with nothing in flight exits within a bound:
 //! that lives in the process layer (`brain_shutdown::bound_drain`), not the
@@ -150,6 +154,7 @@ pub fn run_all<D: PagedDecoder>(c: &Conformance<D>) {
     speculation_equals_plain_greedy(c);
     scoring_is_declared_exactly_when_it_works(c);
     full_rows_rank_what_the_candidate_list_ranks(c);
+    keyed_draws_are_the_rows_draws(c);
 }
 
 /// A decoder that declares [`PagedDecoder::scores_continuations`] returns one finite, non-positive log-probability for
@@ -412,6 +417,48 @@ pub fn full_rows_rank_what_the_candidate_list_ranks<D: PagedDecoder>(c: &Conform
     assert_eq!(whole.len(), rows[0].len(), "a verify step answers one row per input");
     for (row, candidates) in whole.iter().zip(&listed) {
         assert_row_ranks_list(row, candidates, vocab);
+    }
+}
+
+/// One batched decode step of three sequences read back as whole rows and answered as a keyed step, on two identical
+/// decoders: every keyed row is the token [`super::draw_row`] draws from the row and its log-probability, wherever the
+/// decoder draws it, and the row whose draw is `None` comes back as the row. A decoder without row readback passes
+/// trivially.
+pub fn keyed_draws_are_the_rows_draws<D: PagedDecoder>(c: &Conformance<D>) {
+    use super::{draw_key, draw_row, Drawn, RowDraw};
+    let (mut by_row, mut by_draw) = ((c.make)(), (c.make)());
+    if !by_row.full_row_readback() {
+        return;
+    }
+    let vocab = by_row.vocab();
+    let prompts: Vec<Vec<u32>> = (0..3).map(|s| tokens(vocab, 3 + s, 9)).collect();
+    let next: Vec<u32> = (0..3).map(|s| tokens(vocab, 7 + s, 1)[0]).collect();
+    let mut row_tables: Vec<crate::paged::BlockTable> = prompts.iter().map(|_| crate::paged::BlockTable::new()).collect();
+    let mut draw_tables: Vec<crate::paged::BlockTable> = prompts.iter().map(|_| crate::paged::BlockTable::new()).collect();
+    for (p, (a, b)) in prompts.iter().zip(row_tables.iter_mut().zip(draw_tables.iter_mut())) {
+        by_row.prefill(a, p);
+        by_draw.prefill(b, p);
+    }
+    let draws = [Some(RowDraw { temp: 1.0, min_p: 0.0, key: draw_key(1, 9, 0) }), None, Some(RowDraw { temp: 0.7, min_p: 0.05, key: draw_key(2, 9, 0) })];
+    let rows = by_row.forward_batched_logit_rows(&mut row_tables.iter_mut().collect::<Vec<_>>(), &next);
+    let drawn = by_draw.forward_batched_drawn(&mut draw_tables.iter_mut().collect::<Vec<_>>(), &next, &draws);
+    assert_eq!(drawn.len(), draws.len(), "a keyed step answers every row");
+    for (i, (d, got)) in draws.iter().zip(&drawn).enumerate() {
+        match (d, got) {
+            (Some(d), Drawn::Token(t, lp)) => {
+                let (want, want_lp) = draw_row(&rows[i], *d);
+                assert_eq!(*t, want, "row {i}: the keyed draw is not the row's draw");
+                assert!((lp - want_lp).abs() <= 1e-3 * want_lp.abs().max(1.0), "row {i}: logprob {lp} against the row's {want_lp}");
+            }
+            (None, Drawn::Row(row)) => assert_eq!(row, &rows[i], "row {i}: the row handed back is not the step's row"),
+            other => panic!("row {i}: {other:?} for draw {d:?}"),
+        }
+    }
+    for t in &mut row_tables {
+        by_row.release_table(t);
+    }
+    for t in &mut draw_tables {
+        by_draw.release_table(t);
     }
 }
 
