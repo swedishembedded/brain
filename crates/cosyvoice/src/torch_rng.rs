@@ -359,7 +359,7 @@ mod tests {
         for v in &out {
             hasher.update(v.to_le_bytes());
         }
-        let got = format!("{:x}", hasher.finalize());
+        let got = hex::encode(hasher.finalize());
         assert_eq!(
             got,
             "584a26e6eaad944407a96c5999aaa5cd0a6a359309a841eade68bf805c072322"

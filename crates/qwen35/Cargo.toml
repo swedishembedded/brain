@@ -34,7 +34,7 @@ bytemuck.workspace = true
 # The streamed trainer reads which card its Gpu is on, to refuse a footprint before loading.
 brain-memauth.workspace = true
 wgpu = "29"
-pollster = "0.4"
+pollster.workspace = true
 
 [dev-dependencies]
 brain-testutil.workspace = true

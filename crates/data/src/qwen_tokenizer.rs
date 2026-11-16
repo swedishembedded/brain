@@ -320,7 +320,7 @@ impl QwenBpe {
             template_prefix,
             digest: {
                 use sha2::{Digest as _, Sha256};
-                Some(format!("sha256:{:x}", Sha256::digest(bytes)))
+                Some(format!("sha256:{}", hex::encode(Sha256::digest(bytes))))
             },
         })
     }

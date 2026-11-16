@@ -356,7 +356,7 @@ fn file_digest(path: &Path) -> io::Result<(u64, String)> {
         hasher.update(&buffer[..n]);
         len += n as u64;
     }
-    Ok((len, format!("sha256:{:x}", hasher.finalize())))
+    Ok((len, format!("sha256:{}", hex::encode(hasher.finalize()))))
 }
 
 #[cfg(test)]

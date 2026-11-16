@@ -405,15 +405,17 @@ brain-wgsl-cuda = { path = "crates/wgsl-cuda" }
 # project real VRAM on every upload; the fix and how to consume it are in the
 # `[patch]` note at the very bottom of this file.
 wgpu = "29"
-pollster = "0.4"
+pollster = "1"
 # Image codecs, default-features off; each consumer adds exactly the codec
 # features it needs (`features = [...]` on top of a workspace dep is additive).
 image = { version = "0.25", default-features = false }
-ureq = { version = "2", default-features = false, features = ["tls"] }
+ureq = { version = "3", default-features = false, features = ["rustls"] }
 zbus = { version = "6", default-features = false, features = ["tokio", "proxy", "service", "tracing"] }
-sha2 = "0.10"
+sha2 = "0.11"
+# Lowercase hex of a digest (sha2 0.11 digests no longer format with `{:x}`); already in the tree.
+hex = "0.4"
 # URL parsing where a host decision rests on it (`modelstore::hub`'s redirect
-# allowlist); already in the tree under ureq.
+# allowlist); already in the tree under reqwest.
 url = "2"
 # The training collective's handshake and sealed frames (`model::sealedwire`):
 # HMAC-SHA256, HKDF-SHA256 and ChaCha20-Poly1305. Already in the tree under
@@ -464,7 +466,7 @@ unicode-general-category = "1"
 unicode-normalization = "0.1"
 # Lookaround-capable regexes, for the `Split` patterns a `tokenizer.json`
 # declares (`\s+(?!\S)`): `regex` alone cannot compile them.
-fancy-regex = "0.18"
+fancy-regex = "0.20"
 # Safetensors read/write (HF's official pure-Rust container) + half for
 # f16/bf16<->f32. Both are wasm-compatible.
 safetensors = "0.8"
@@ -476,7 +478,7 @@ ash = { version = "0.38" }
 # with the CUDA toolkit, and a box with neither must still build and test
 # green - so nothing in the build path may reference a CUDA symbol. See
 # `crates/backend-cuda`.
-libloading = "0.8"
+libloading = "0.9"
 naga = { version = "29", features = ["wgsl-in", "spv-out"] }
 # ONNX export (pure-Rust serializer); only `prost` runtime is needed at build.
 prost = "0.14"
@@ -488,9 +490,9 @@ openvino = { version = "0.11", default-features = false, features = ["runtime-li
 
 # HTTP provider-API surface (crates/apiserve): axum/tower/tokio stack. Confined to
 # that crate - the core compute graph never links these.
-axum = { version = "0.7", features = ["multipart"] }
+axum = { version = "0.8", features = ["multipart"] }
 tower = { version = "0.5", features = ["limit", "load-shed", "timeout", "util"] }
-tower-http = { version = "0.6", features = ["trace", "cors"] }
+tower-http = { version = "0.7", features = ["trace", "cors"] }
 # apiserve's own accept loop (header and body deadlines, a connection cap,
 # HTTP/1.1 only), in place of `axum::serve`, which sets none of them. Both are
 # axum's own transitive dependencies.
@@ -542,7 +544,7 @@ crossterm = { version = "0.29", features = ["event-stream"] }
 # crates/atif (brain's ATIF v1.7 trajectory model, validator and persistence).
 # Unrelated to crates/trace above, which is the tracing/observability crate.
 chrono = { version = "0.4", features = ["serde"] }
-thiserror = "1"
+thiserror = "2"
 tempfile = "3"
 # libc was previously only a literal per-crate dep (crates/gpu-core,
 # crates/shutdown, both pinned "0.2"); promoted to a workspace entry here so

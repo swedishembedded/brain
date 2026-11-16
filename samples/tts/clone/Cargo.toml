@@ -21,7 +21,7 @@ brain = { workspace = true, features = ["audio"] }
 # `default-features` decoders needed since `TtsPipeline`'s `Audio` is already
 # decoded f32 PCM (`rodio::buffer::SamplesBuffer` plays it directly, no WAV
 # parse round-trip).
-rodio = { version = "0.22", default-features = false, features = ["playback"] }
+rodio = { version = "0.23", default-features = false, features = ["playback"] }
 
 [package.metadata.brain]
 # `make check/samples` fails if the real `cargo tree` closure exceeds this.

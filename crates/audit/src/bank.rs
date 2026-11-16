@@ -431,7 +431,7 @@ fn tiebreak(ep: &EpisodeId, line: usize) -> String {
     let mut h = Sha256::new();
     h.update(ep.as_str().as_bytes());
     h.update(line.to_le_bytes());
-    format!("{:x}", h.finalize())
+    hex::encode(h.finalize())
 }
 
 fn probe_id(ep: &EpisodeId, family: ProbeFamily, line: usize) -> ProbeId {
@@ -439,7 +439,7 @@ fn probe_id(ep: &EpisodeId, family: ProbeFamily, line: usize) -> ProbeId {
     h.update(ep.as_str().as_bytes());
     h.update(format!("{family:?}").as_bytes());
     h.update(line.to_le_bytes());
-    ProbeId(format!("{:x}", h.finalize()))
+    ProbeId(hex::encode(h.finalize()))
 }
 
 /// Length in BYTES of the longest common prefix of `a` and `b` that ends on a

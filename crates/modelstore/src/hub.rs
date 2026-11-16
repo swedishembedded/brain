@@ -209,9 +209,18 @@ impl HfHub {
         if resp.status() == 404 {
             return Err(HubError::NotFound(format!("{vendor}/{repo}@{revision}")));
         }
-        resp.into_json().map_err(|e| HubError::BadResponse(e.to_string()))
+        resp.into_body()
+            .into_with_config()
+            .limit(REVISION_INFO_MAX_BYTES)
+            .read_json()
+            .map_err(|e| HubError::BadResponse(e.to_string()))
     }
 }
+
+/// The largest revision listing [`HfHub::revision_info_opt`] reads. A model
+/// repository's listing, blob metadata included, is kilobytes to a few
+/// megabytes; a reply past this is refused instead of buffered.
+const REVISION_INFO_MAX_BYTES: u64 = 64 << 20;
 
 impl Default for HfHub {
     fn default() -> Self {
@@ -265,7 +274,7 @@ impl Hub for HfHub {
             return Err(HubError::NotFound(format!("{vendor}/{repo}@{revision}/{file}")));
         }
         let mut buf = Vec::new();
-        resp.into_reader().read_to_end(&mut buf).map_err(|e| HubError::Network(e.to_string()))?;
+        resp.into_body().into_reader().read_to_end(&mut buf).map_err(|e| HubError::Network(e.to_string()))?;
         Ok(buf)
     }
 
@@ -284,12 +293,12 @@ impl Hub for HfHub {
         if resp.status() == 404 {
             return Err(HubError::NotFound(format!("{vendor}/{repo}@{revision}/{file}")));
         }
-        let total = resp.header("Content-Length").and_then(|s| s.parse::<u64>().ok());
+        let total = header(&resp, "Content-Length").and_then(|s| s.parse::<u64>().ok());
         // An LFS-backed file (every weight file) is checked against the digest
         // the host lists for it, so a corrupted transfer of the declared size
         // is refused like a short one; a plain file has none to check.
         let digest = lfs_sha256(&self.revision_info_opt(vendor, repo, revision, true)?, file);
-        stream_to_file(resp.into_reader(), dest, total, digest.as_deref(), stop, progress).map_err(|e| transfer_error(&e, stop))
+        stream_to_file(resp.into_body().into_reader(), dest, total, digest.as_deref(), stop, progress).map_err(|e| transfer_error(&e, stop))
     }
 }
 
@@ -309,10 +318,11 @@ fn lfs_sha256(info: &serde_json::Value, file: &str) -> Option<String> {
 /// specifically to make an off-host redirect a hard error instead of a
 /// silent follow.
 ///
-/// With `redirects(0)`, `ureq` hands back a 3xx as `Ok(resp)` (its own docs:
-/// "get a response object with the 3xx status code") -- NOT as
-/// `Err(ureq::Error::Status(..))`, which only ever fires for a genuinely
-/// unsuccessful (4xx/5xx) response. An earlier version of this function
+/// With `max_redirects(0)`, `ureq` hands back a 3xx as `Ok(resp)` (its own
+/// docs: "no redirects are followed and the response is always returned"),
+/// and with `http_status_as_error(false)` a 4xx/5xx too: this function sorts
+/// them itself, returning a 404 for the caller to report as not found and
+/// any other failure status as a network error. An earlier version of this function
 /// checked for the redirect ONLY in the `Err` arm, so it never actually
 /// triggered: every redirect fell straight through `Ok(resp) => return
 /// Ok(resp)` and handed the caller the 3xx response's OWN body (HF's
@@ -320,8 +330,8 @@ fn lfs_sha256(info: &serde_json::Value, file: &str) -> Option<String> {
 /// Redirect..." page) instead of ever fetching the real file. Caught by
 /// actually running the auto-fetch acceptance test end to end against
 /// `huggingface.co`, not by the (host-only) unit tests below.
-fn get_following_allowed_redirects(url: &str) -> Result<ureq::Response, HubError> {
-    let agent = ureq::AgentBuilder::new().redirects(0).build();
+fn get_following_allowed_redirects(url: &str) -> Result<HubResponse, HubError> {
+    let agent: ureq::Agent = ureq::Agent::config_builder().max_redirects(0).http_status_as_error(false).build().into();
     let token = hf_token();
     let mut current = url.to_string();
     for _ in 0..10 {
@@ -334,21 +344,30 @@ fn get_following_allowed_redirects(url: &str) -> Result<ureq::Response, HubError
         // across the API -> CDN redirect (needed for a gated/private repo's
         // signed CDN URL to authorize at all).
         if let Some(t) = &token {
-            req = req.set("Authorization", &format!("Bearer {t}"));
+            req = req.header("Authorization", &format!("Bearer {t}"));
         }
         match req.call() {
-            Ok(resp) if (300..400).contains(&resp.status()) => {
-                let location = resp.header("Location").ok_or_else(|| HubError::BadResponse("redirect with no Location header".into()))?.to_string();
+            Ok(resp) if resp.status().is_redirection() => {
+                let location = header(&resp, "Location").ok_or_else(|| HubError::BadResponse("redirect with no Location header".into()))?.to_string();
                 let absolute = resolve_redirect_location(&current, &location)?;
                 check_redirect_allowed(&absolute)?;
                 current = absolute;
             }
-            Ok(resp) => return Ok(resp),
-            Err(ureq::Error::Status(404, resp)) => return Ok(resp),
+            Ok(resp) if resp.status() == 404 || !(resp.status().is_client_error() || resp.status().is_server_error()) => return Ok(resp),
+            // The status alone: the URL of a later hop is a signed CDN link, not for an error message.
+            Ok(resp) => return Err(HubError::Network(format!("the hub replied http status {}", resp.status().as_u16()))),
             Err(e) => return Err(HubError::Network(e.to_string())),
         }
     }
     Err(HubError::Network(format!("too many redirects following {url}")))
+}
+
+/// A hub reply: the status and headers, and the body still to be read.
+type HubResponse = ureq::http::Response<ureq::Body>;
+
+/// `name`'s value in `resp`, when it is present and visible ASCII.
+fn header<'a>(resp: &'a HubResponse, name: &str) -> Option<&'a str> {
+    resp.headers().get(name).and_then(|v| v.to_str().ok())
 }
 
 /// Resolve a `Location` header against the URL that produced it, into an

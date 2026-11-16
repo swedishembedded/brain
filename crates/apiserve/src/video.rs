@@ -94,10 +94,10 @@ pub fn routes() -> Router<AppState> {
         .route("/v1/videos", post(create))
         .route("/videos/models", get(models))
         .route("/v1/videos/models", get(models))
-        .route("/videos/:id", get(status).delete(remove))
-        .route("/v1/videos/:id", get(status).delete(remove))
-        .route("/videos/:id/content", get(content))
-        .route("/v1/videos/:id/content", get(content))
+        .route("/videos/{id}", get(status).delete(remove))
+        .route("/v1/videos/{id}", get(status).delete(remove))
+        .route("/videos/{id}/content", get(content))
+        .route("/v1/videos/{id}/content", get(content))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
 }
 

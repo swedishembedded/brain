@@ -27,6 +27,7 @@ tracing.workspace = true
 # output (source, compute capability, NVRTC version, compile flags, entry
 # name), so a collision would serve code compiled for something else.
 sha2.workspace = true
+hex.workspace = true
 
 # The golden gate runs ONE WGSL source through two independent code
 # generators - `wgsl-cpu`'s Cranelift JIT and `wgsl-cuda` -> NVRTC -> a real

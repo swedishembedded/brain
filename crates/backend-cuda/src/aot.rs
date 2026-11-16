@@ -322,11 +322,11 @@ pub fn aot_key(src: &str, entry: &str, arch: &str, defines: &[(&str, &str)]) -> 
         h.update((field.len() as u64).to_le_bytes());
         h.update(field);
     }
-    format!("{:x}", h.finalize())
+    hex::encode(h.finalize())
 }
 
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    hex::encode(Sha256::digest(bytes))
 }
 
 /// The cubin targets that can run on a device of capability `cc`, best first.

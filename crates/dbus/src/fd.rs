@@ -17,7 +17,7 @@ use std::num::NonZeroUsize;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 
 use nix::fcntl::{fcntl, FcntlArg, SealFlag};
-use nix::sys::memfd::{memfd_create, MemFdCreateFlag};
+use nix::sys::memfd::{memfd_create, MFdFlags};
 use nix::sys::mman::{mmap, munmap, MapFlags, ProtFlags};
 use nix::sys::stat::fstat;
 
@@ -26,7 +26,7 @@ use nix::sys::stat::fstat;
 /// trust `st_size` and immutability.
 pub fn memfd_seal(name: &str, bytes: &[u8]) -> anyhow::Result<OwnedFd> {
     let cname = CString::new(name).unwrap_or_else(|_| CString::new("brain").unwrap());
-    let fd = memfd_create(&cname, MemFdCreateFlag::MFD_CLOEXEC | MemFdCreateFlag::MFD_ALLOW_SEALING)?;
+    let fd = memfd_create(cname.as_c_str(), MFdFlags::MFD_CLOEXEC | MFdFlags::MFD_ALLOW_SEALING)?;
     let mut off = 0usize;
     while off < bytes.len() {
         let n = nix::unistd::write(&fd, &bytes[off..])?;
@@ -35,7 +35,7 @@ pub fn memfd_seal(name: &str, bytes: &[u8]) -> anyhow::Result<OwnedFd> {
         }
         off += n;
     }
-    fcntl(fd.as_raw_fd(), FcntlArg::F_ADD_SEALS(SealFlag::F_SEAL_SHRINK | SealFlag::F_SEAL_GROW | SealFlag::F_SEAL_WRITE))?;
+    fcntl(&fd, FcntlArg::F_ADD_SEALS(SealFlag::F_SEAL_SHRINK | SealFlag::F_SEAL_GROW | SealFlag::F_SEAL_WRITE))?;
     Ok(fd)
 }
 
@@ -56,7 +56,7 @@ pub const MAX_FD_BLOB_BYTES: u64 = 256 << 20;
 /// is attacker-chosen, and the check is what keeps a crafted fd from becoming an
 /// allocation the whole buffer's size.
 pub fn read_fd_to_vec(fd: BorrowedFd) -> anyhow::Result<Vec<u8>> {
-    let st = fstat(fd.as_raw_fd())?;
+    let st = fstat(fd)?;
     if st.st_size as u64 > MAX_FD_BLOB_BYTES {
         anyhow::bail!("input fd is {} bytes, over the {} MiB per-blob cap", st.st_size, MAX_FD_BLOB_BYTES >> 20);
     }
@@ -141,7 +141,6 @@ fn dmabuf_from_heap(bytes: &[u8]) -> anyhow::Result<OwnedFd> {
     use nix::fcntl::{open, OFlag};
     use nix::sys::stat::Mode;
     let heap = open("/dev/dma_heap/system", OFlag::O_RDWR | OFlag::O_CLOEXEC, Mode::empty())?;
-    let heap = unsafe { OwnedFd::from_raw_fd(heap) };
     let mut req = DmaHeapAllocationData {
         len: bytes.len().max(1) as u64,
         fd: 0,
@@ -184,7 +183,7 @@ mod tests {
     /// in data or an error, every time.
     #[test]
     fn a_caller_shrinking_its_fd_mid_read_cannot_kill_the_server() {
-        let fd = memfd_create(&CString::new("unsealed").unwrap(), MemFdCreateFlag::MFD_CLOEXEC).expect("memfd");
+        let fd = memfd_create(c"unsealed", MFdFlags::MFD_CLOEXEC).expect("memfd");
         let len = 8 << 20;
         nix::unistd::ftruncate(&fd, len).expect("size it");
         let shrinker_fd = fd.try_clone().expect("a second handle");

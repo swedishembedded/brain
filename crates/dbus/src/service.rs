@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 use std::io::Read;
-use std::os::fd::{AsFd, AsRawFd, OwnedFd};
+use std::os::fd::{AsFd, OwnedFd};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -188,7 +188,7 @@ impl Manager {
         }
         let mut total = 0u64;
         for zfd in in_fds.values() {
-            let size = nix::sys::stat::fstat(zfd.as_fd().as_raw_fd()).map_err(|e| format!("input fd: {e}"))?.st_size.max(0) as u64;
+            let size = nix::sys::stat::fstat(zfd.as_fd()).map_err(|e| format!("input fd: {e}"))?.st_size.max(0) as u64;
             total = total.saturating_add(size);
         }
         if total > MAX_FD_CALL_BYTES {

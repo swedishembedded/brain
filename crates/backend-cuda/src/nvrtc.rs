@@ -432,7 +432,7 @@ pub fn cache_key_with_abi(
         h.update((field.len() as u64).to_le_bytes());
         h.update(field);
     }
-    format!("{:x}", h.finalize())
+    hex::encode(h.finalize())
 }
 
 /// Where a cubin for `key` lives, or `None` when there is nowhere to persist.

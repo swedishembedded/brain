@@ -39,7 +39,7 @@ unsafe impl Sync for Nvtx {}
 fn nvtx() -> Option<&'static Nvtx> {
     static NVTX: OnceLock<Option<Nvtx>> = OnceLock::new();
     NVTX.get_or_init(|| {
-        let lib = SONAMES.iter().find_map(|name| unsafe { libloading::Library::new(name) }.ok())?;
+        let lib = SONAMES.iter().find_map(|&name| unsafe { libloading::Library::new(name) }.ok())?;
         // SAFETY: both symbols have these C signatures in every NVTX version that exports them.
         let push = unsafe { *lib.get::<unsafe extern "C" fn(*const c_char) -> c_int>(b"nvtxRangePushA\0").ok()? };
         let pop = unsafe { *lib.get::<unsafe extern "C" fn() -> c_int>(b"nvtxRangePop\0").ok()? };

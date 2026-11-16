@@ -453,7 +453,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(format!("{:x}", hash.finalize()), "ed4c2064727052b006a99ed8a1ab3b7905850f356a09351c0890f00b4457c306");
+        assert_eq!(hex::encode(hash.finalize()), "ed4c2064727052b006a99ed8a1ab3b7905850f356a09351c0890f00b4457c306");
     }
 
     #[test]

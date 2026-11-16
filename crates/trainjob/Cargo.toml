@@ -32,7 +32,7 @@ brain-qwen35.workspace = true
 brain-checkpoint.workspace = true
 brain-data.workspace = true
 brain-dbus.workspace = true
-nix = { version = "0.29", features = ["socket", "uio"] }
+nix = { version = "0.32", features = ["socket", "uio"] }
 zbus = { workspace = true }
 tokio = { workspace = true }
 brain-testutil.workspace = true

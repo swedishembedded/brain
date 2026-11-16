@@ -29,6 +29,7 @@ serde.workspace = true
 serde_json.workspace = true
 # Episode identity is a digest of the episode's own bytes.
 sha2.workspace = true
+hex.workspace = true
 # Named, `Display`-able variants for the stream's preconditions, matching
 # `promote::document::DocumentError`'s established convention.
 thiserror.workspace = true

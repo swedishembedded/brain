@@ -29,8 +29,8 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/models", get(list))
         .route("/v1/models", get(list))
-        .route("/models/:id", get(get_one))
-        .route("/v1/models/:id", get(get_one))
+        .route("/models/{id}", get(get_one))
+        .route("/v1/models/{id}", get(get_one))
 }
 
 /// `GET /models` — the provider-shaped list of exposed models.

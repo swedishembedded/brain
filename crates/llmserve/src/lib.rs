@@ -110,7 +110,7 @@ pub trait Frontend {
         let probe = Invocation::new().set("messages", serde_json::json!(MESSAGES));
         let ids = self.parse(&probe.clone().set("tools", serde_json::json!(TOOLS))).or_else(|_| self.parse(&probe)).ok()?.ids;
         let bytes: Vec<u8> = ids.iter().flat_map(|id| id.to_le_bytes()).collect();
-        Some(format!("sha256:{:x}", Sha256::digest(&bytes)))
+        Some(format!("sha256:{}", hex::encode(Sha256::digest(&bytes))))
     }
     /// The caller-facing message for a request the scheduler refused.
     fn rejection(&self, _inv: &Invocation, reason: &RejectReason) -> String {

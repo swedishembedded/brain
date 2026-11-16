@@ -84,7 +84,7 @@ impl EpisodeId {
     pub fn of(text: &str) -> EpisodeId {
         let mut h = Sha256::new();
         h.update(text.as_bytes());
-        EpisodeId(format!("{:x}", h.finalize()))
+        EpisodeId(hex::encode(h.finalize()))
     }
 
     pub fn as_str(&self) -> &str {
@@ -382,7 +382,7 @@ fn fingerprint(cfg: &StreamConfig, docs: &[PathBuf]) -> String {
         h.update(d.to_string_lossy().as_bytes());
         h.update([0u8]);
     }
-    format!("{:x}", h.finalize())
+    hex::encode(h.finalize())
 }
 
 #[cfg(test)]

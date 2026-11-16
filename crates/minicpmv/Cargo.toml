@@ -30,3 +30,4 @@ serde_json.workspace = true
 brain-capability.workspace = true
 brain-testutil.workspace = true
 sha2.workspace = true
+hex.workspace = true

@@ -26,7 +26,7 @@ brain-audio.workspace = true
 serde_json.workspace = true
 bytemuck.workspace = true
 wgpu = "29"
-pollster = "0.4"
+pollster.workspace = true
 
 [dev-dependencies]
 brain-testutil.workspace = true

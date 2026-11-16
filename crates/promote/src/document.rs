@@ -294,7 +294,7 @@ pub fn normalize(text: &str) -> String {
 pub fn answer_digest(text: &str) -> String {
     let mut h = Sha256::new();
     h.update(normalize(text).as_bytes());
-    format!("{:x}", h.finalize())
+    hex::encode(h.finalize())
 }
 
 /// A validated document fact batch: the triples plus the DISTINCT fact

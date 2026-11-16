@@ -80,9 +80,9 @@ pub fn routes() -> Router<AppState> {
         .route("/v1/devices", get(devices))
         .route("/v1/run", post(run))
         .route("/v1/jobs", post(create_job))
-        .route("/v1/jobs/:id", get(job_status).delete(cancel_job))
-        .route("/v1/jobs/:id/result", get(job_result))
-        .route("/v1/jobs/:id/events", get(job_events))
+        .route("/v1/jobs/{id}", get(job_status).delete(cancel_job))
+        .route("/v1/jobs/{id}/result", get(job_result))
+        .route("/v1/jobs/{id}/events", get(job_events))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
 }
 

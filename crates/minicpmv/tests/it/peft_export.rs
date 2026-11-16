@@ -122,7 +122,7 @@ fn a_peft_export_computes_in_transformers_what_brain_serves() {
     assert_eq!(config["modules_to_save"], serde_json::json!(["model.merger"]));
     assert_eq!((config["r"].as_u64(), config["lora_alpha"].as_f64()), (Some(8), Some(8.0)), "mixed scales fold into B at scale 1");
 
-    let sha = format!("{:x}", sha2::Sha256::digest(std::fs::read(adapter.join("adapter_model.safetensors")).unwrap()));
+    let sha = hex::encode(sha2::Sha256::digest(std::fs::read(adapter.join("adapter_model.safetensors")).unwrap()));
     let manifest: Option<serde_json::Value> = std::fs::read(golden.join("manifest.json")).ok().and_then(|b| serde_json::from_slice(&b).ok());
     let Some(manifest) = manifest.filter(|m| m["adapter_sha256"].as_str() == Some(sha.as_str())) else {
         brain_testutil::skip(&format!("no golden for this adapter - run python {SCRIPT} --model {}", dir.display()));
