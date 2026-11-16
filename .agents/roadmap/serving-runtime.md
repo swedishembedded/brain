@@ -915,7 +915,7 @@ The draw itself is 0.21 ms a step at 64 rows of the 27B's 248320-token vocabular
       this path, the candidate-list path of the scheduler included (`draw_list`), so a seed's tokens do not depend on
       which path its batch took. On the synthetic `perf` workload (random-token prompts, flat rows at temperature 1)
       most nucleus rows fall back: Qwen3-4B top_p 0.95 at 64 streams 1147 -> 1521 tok/s (greedy 2414), at 16 699 ->
-      828 (greedy 1485), the 27B 513 -> 532 at 64 (A/B pairs, two each). Through `brain serve` on English prompts
+      828 (greedy 1485), the 27B 513 -> 532 at 64 and 266 -> 246 at 16 (greedy 732): on the 27B's 248320-token rows the 256-candidate extraction costs more than it saves when most rows fall back (A/B pairs, two each). Through `brain serve` on English prompts
       the old parallel host path already reached 3191 tok/s at 64 streams on 7.6 cores.
 - [ ] a nucleus wider than its candidates on the device (a threshold search over the row by reductions) for
       high-entropy rows
