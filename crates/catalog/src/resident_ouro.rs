@@ -10,7 +10,7 @@
 //! Resident adapter for Ouro (looped decoder).
 //!
 //! One [`ouro::serve::Engine`] behind `model::serve::Scheduler`, with the
-//! checkpoint's own byte-level BPE tokenizer and ChatML chat rendering. The
+//! checkpoint's own byte-level BPE tokenizer and its own chat template ([`chat_format`]), tool calls included. The
 //! manifest declares the same `generate` contract every text resident serves,
 //! so the HTTP, D-Bus and SDK fronts need no Ouro-specific code.
 //!
@@ -232,6 +232,17 @@ fn config_of(path: &str) -> Result<ouro::OuroConfig, String> {
     }
 }
 
+/// How the checkpoint whose tokenizer files are in `dir` renders a chat: its own chat template whenever it ships one
+/// (whatever markup it writes, ChatML included), so a request is rendered exactly as the chat fine-tune rendered the
+/// training records; with none, ChatML when the vocabulary is ChatML's, else raw prompts only. Tool calls are read back
+/// in the form the template writes them (`<tool_call>{"name", "arguments"}</tool_call>`, or `<function=...>`).
+pub fn chat_format(dir: Option<&Path>, tok: &data::qwen_tokenizer::QwenBpe) -> qwen3::chat::ChatFormat {
+    match dir.map(qwen3::chat::ChatFormat::own_template) {
+        Some(Ok(own)) => own,
+        _ => qwen3::chat::ChatFormat::for_checkpoint(dir, tok),
+    }
+}
+
 fn sibling_tokenizer(weights: &str) -> Option<String> {
     let p = PathBuf::from(weights);
     let dir = if p.is_dir() { p } else { p.parent()?.to_path_buf() };
@@ -240,8 +251,10 @@ fn sibling_tokenizer(weights: &str) -> Option<String> {
 }
 
 impl ResidentModel for OuroResident {
+    /// The context a request may use is the shared pool's capacity, and never more positions than the model has.
     fn manifest(&self) -> Manifest {
-        Self::manifest_static(&self.id, self.ctx)
+        let positions = self.cfg().map_or(self.ctx, |c| c.block_size);
+        Self::manifest_static(&self.id, self.ctx.min(positions))
     }
 
     fn instance_key(&self, _action: &str, _inv: &capability::Invocation) -> InstanceKey {
@@ -269,8 +282,12 @@ impl ResidentModel for OuroResident {
     fn activate(&self, _key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
         let tok = data::qwen_tokenizer::QwenBpe::from_file(&self.tokenizer)?;
         let dir = Path::new(&self.tokenizer).parent();
-        let stop = data::generation::stop_ids(dir, &tok, None, Some("<|im_end|>")).map_err(|e| format!("ouro: {e}"))?;
-        let front = Arc::new(TextFrontend::new(tok, stop, "ouro", Arc::new(qwen3::chat::parse_request)));
+        let format = chat_format(dir, &tok);
+        let stop = data::generation::stop_ids(dir, &tok, None, format.end_of_turn()).map_err(|e| format!("ouro: {e}"))?;
+        if stop.is_empty() {
+            return Err("ouro: the checkpoint declares no token that ends a generation (eos_token in tokenizer_config.json or generation_config.json)".to_string());
+        }
+        let front = Arc::new(TextFrontend::new(tok, stop, "ouro", Arc::new(move |tok: &data::qwen_tokenizer::QwenBpe, inv: &Invocation| qwen3::chat::parse_request_as(tok, &format, inv))));
         let path = self.path.clone();
         let (ctx, block, batch) = (self.ctx, self.block_size, self.max_batch);
         let inst = on_device(device, move || {

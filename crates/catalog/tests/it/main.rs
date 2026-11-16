@@ -20,6 +20,7 @@ mod mirage_http;
 mod mirage_served;
 mod multi_adapter;
 mod npu_model_parity;
+mod ouro_served;
 mod resident_packed;
 mod ricursive_chat;
 mod ricursive_served;

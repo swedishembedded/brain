@@ -177,6 +177,14 @@ pub fn discover(dir: &Path, settings: &ScanSettings) -> Discovered {
             scan.register(&local.weights, &card, &local.dir);
             continue;
         }
+        // A model the training service installed (`install_as`, under the reserved `local` vendor) is served under the
+        // name it was installed as: its card carries the id its family writes for every checkpoint (`brain/ouro`),
+        // which two installed models would share.
+        if local.reference.vendor() == "local" {
+            let card = local.card.clone().map(|c| ModelCard { id: local.reference.to_string(), ..c });
+            scan.register(&local.weights, &card, &local.dir);
+            continue;
+        }
         scan.register(&local.weights, &local.card, &local.dir);
     }
 
@@ -1054,6 +1062,24 @@ mod tests {
         let found = discover(&dir, &ScanSettings::default());
         assert!(found.errors.is_empty(), "{:?}", found.errors.iter().map(|e| &e.reason).collect::<Vec<_>>());
         assert!(found.residents.is_empty() && found.multi.is_empty(), "the scan built it too");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Two checkpoints the training service installed (`local/<name>`) whose cards carry the one id their family
+    /// writes are served under their installed names, not under the card's shared id.
+    #[test]
+    fn an_installed_model_is_served_under_its_installed_name() {
+        let dir = tmp_dir("installed");
+        for name in ["first", "second"] {
+            let repo = dir.join("local").join(name);
+            std::fs::create_dir_all(&repo).unwrap();
+            write_st(&repo, "model.brain.safetensors", "brain/ouro", "ouro");
+            write_tokenizer(&repo);
+        }
+        let found = discover(&dir, &ScanSettings::default());
+        let mut ids: Vec<String> = found.residents.iter().map(|r| r.manifest().model).collect();
+        ids.sort();
+        assert_eq!(ids, ["local/first", "local/second"]);
         std::fs::remove_dir_all(&dir).ok();
     }
 
