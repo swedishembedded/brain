@@ -4105,32 +4105,45 @@ pub mod neon_gemm {
 
     /// One thread's `rows` rows of C, `k` in panels.
     ///
+    /// Every element of C is reduced in the one order [`tile`] reduces it, whether it falls in a full 4x4 tile or on
+    /// an edge, so a product is bit-identical however its rows and columns are cut: a GEMV (`n == 1`) equals the
+    /// matching column of a GEMM over the same rows, and a split product equals [`abt_unsplit`].
+    ///
     /// # Safety
     /// `a` holds `rows*k`, `b` `n*k`, `c` `rows*n` floats.
     unsafe fn block(a: *const f32, b: *const f32, c: *mut f32, rows: usize, k: usize, n: usize, accumulate: bool) {
-        let (m4, n4) = (rows - rows % 4, n - n % 4);
         let mut k0 = 0;
         while k0 < k {
             let kl = (k - k0).min(KC);
             let add = accumulate || k0 > 0;
             let mut i = 0;
-            while i < m4 {
+            while i < rows {
+                let r = (rows - i).min(4);
                 let mut j = 0;
-                while j < n4 {
-                    tile4x4(a.add(i * k + k0), b.add(j * k + k0), c.add(i * n + j), k, kl, n, add);
+                while j < n {
+                    let (ap, bp, cp) = (a.add(i * k + k0), b.add(j * k + k0), c.add(i * n + j));
+                    // Each edge shape its own instance, so the loops over the tile unroll at every shape.
+                    match (r, (n - j).min(4)) {
+                        (4, 4) => tile::<4, 4>(ap, bp, cp, k, kl, n, add),
+                        (4, 3) => tile::<4, 3>(ap, bp, cp, k, kl, n, add),
+                        (4, 2) => tile::<4, 2>(ap, bp, cp, k, kl, n, add),
+                        (4, _) => tile::<4, 1>(ap, bp, cp, k, kl, n, add),
+                        (3, 4) => tile::<3, 4>(ap, bp, cp, k, kl, n, add),
+                        (3, 3) => tile::<3, 3>(ap, bp, cp, k, kl, n, add),
+                        (3, 2) => tile::<3, 2>(ap, bp, cp, k, kl, n, add),
+                        (3, _) => tile::<3, 1>(ap, bp, cp, k, kl, n, add),
+                        (2, 4) => tile::<2, 4>(ap, bp, cp, k, kl, n, add),
+                        (2, 3) => tile::<2, 3>(ap, bp, cp, k, kl, n, add),
+                        (2, 2) => tile::<2, 2>(ap, bp, cp, k, kl, n, add),
+                        (2, _) => tile::<2, 1>(ap, bp, cp, k, kl, n, add),
+                        (_, 4) => tile::<1, 4>(ap, bp, cp, k, kl, n, add),
+                        (_, 3) => tile::<1, 3>(ap, bp, cp, k, kl, n, add),
+                        (_, 2) => tile::<1, 2>(ap, bp, cp, k, kl, n, add),
+                        _ => tile::<1, 1>(ap, bp, cp, k, kl, n, add),
+                    }
                     j += 4;
                 }
-                for jj in n4..n {
-                    for ii in i..i + 4 {
-                        put(c.add(ii * n + jj), dot(a.add(ii * k + k0), b.add(jj * k + k0), kl), add);
-                    }
-                }
                 i += 4;
-            }
-            for ii in m4..rows {
-                for jj in 0..n {
-                    put(c.add(ii * n + jj), dot(a.add(ii * k + k0), b.add(jj * k + k0), kl), add);
-                }
             }
             k0 += kl;
         }
@@ -4145,41 +4158,21 @@ pub mod neon_gemm {
         }
     }
 
-    /// `Σ x[i]·y[i]` over `k` floats, four 4-lane accumulators.
+    /// An `R` x `C` tile (each at most 4) of `C (+)= A·Bᵀ` over `kl` floats of `k`: rows of A and B are `lda`
+    /// floats apart. Each element is one 4-lane FMA chain over the 4-aligned prefix, a lane sum, then the scalar tail.
     #[inline(always)]
-    unsafe fn dot(x: *const f32, y: *const f32, k: usize) -> f32 {
-        let mut acc = [vdupq_n_f32(0.0); 4];
-        let mut i = 0;
-        while i + 16 <= k {
-            for (t, a) in acc.iter_mut().enumerate() {
-                *a = vfmaq_f32(*a, vld1q_f32(x.add(i + 4 * t)), vld1q_f32(y.add(i + 4 * t)));
-            }
-            i += 16;
-        }
-        while i + 4 <= k {
-            acc[0] = vfmaq_f32(acc[0], vld1q_f32(x.add(i)), vld1q_f32(y.add(i)));
-            i += 4;
-        }
-        let mut s = vaddvq_f32(vaddq_f32(vaddq_f32(acc[0], acc[1]), vaddq_f32(acc[2], acc[3])));
-        while i < k {
-            s += *x.add(i) * *y.add(i);
-            i += 1;
-        }
-        s
-    }
-
-    /// A 4x4 tile of `C (+)= A·Bᵀ` over `kl` floats of `k`: rows of A and B are `lda` floats apart.
-    #[inline(always)]
-    unsafe fn tile4x4(a: *const f32, b: *const f32, c: *mut f32, lda: usize, kl: usize, n: usize, add: bool) {
+    unsafe fn tile<const R: usize, const C: usize>(a: *const f32, b: *const f32, c: *mut f32, lda: usize, kl: usize, n: usize, add: bool) {
+        let (r, cols) = (R, C);
         let mut acc = [vdupq_n_f32(0.0); 16];
-        let ar = [a, a.add(lda), a.add(2 * lda), a.add(3 * lda)];
-        let br = [b, b.add(lda), b.add(2 * lda), b.add(3 * lda)];
         let mut kk = 0;
         while kk + 4 <= kl {
-            let av = [vld1q_f32(ar[0].add(kk)), vld1q_f32(ar[1].add(kk)), vld1q_f32(ar[2].add(kk)), vld1q_f32(ar[3].add(kk))];
-            for (cj, bj) in br.iter().enumerate() {
-                let bv = vld1q_f32(bj.add(kk));
-                for (ri, a_) in av.iter().enumerate() {
+            let mut av = [vdupq_n_f32(0.0); 4];
+            for (ri, v) in av.iter_mut().enumerate().take(r) {
+                *v = vld1q_f32(a.add(ri * lda + kk));
+            }
+            for cj in 0..cols {
+                let bv = vld1q_f32(b.add(cj * lda + kk));
+                for (ri, a_) in av.iter().enumerate().take(r) {
                     acc[ri * 4 + cj] = vfmaq_f32(acc[ri * 4 + cj], *a_, bv);
                 }
             }
@@ -4190,16 +4183,16 @@ pub mod neon_gemm {
             *o = vaddvq_f32(v);
         }
         while kk < kl {
-            for ri in 0..4 {
-                let x = *ar[ri].add(kk);
-                for cj in 0..4 {
-                    out[ri * 4 + cj] += x * *br[cj].add(kk);
+            for ri in 0..r {
+                let x = *a.add(ri * lda + kk);
+                for cj in 0..cols {
+                    out[ri * 4 + cj] += x * *b.add(cj * lda + kk);
                 }
             }
             kk += 1;
         }
-        for ri in 0..4 {
-            for cj in 0..4 {
+        for ri in 0..r {
+            for cj in 0..cols {
                 put(c.add(ri * n + cj), out[ri * 4 + cj], add);
             }
         }
@@ -4219,7 +4212,7 @@ pub mod neon_gemm {
         #[ignore = "throughput measurement, not a correctness gate"]
         fn neon_gemm_bench() {
             let mut rng = data::rng::Lcg::random();
-            for &(label, m, k, n) in &[("qkv", 8192, 256, 768), ("ffn up", 8192, 256, 704), ("ffn down", 8192, 704, 256), ("head", 8192, 256, 4096), ("dw ffn", 704, 8192, 256), ("scores", 1024, 64, 1024), ("apply", 1024, 1024, 64), ("decode", 1, 256, 4096)] {
+            for &(label, m, k, n) in &[("qkv", 8192, 256, 768), ("ffn up", 8192, 256, 704), ("ffn down", 8192, 704, 256), ("head", 8192, 256, 4096), ("dw ffn", 704, 8192, 256), ("scores", 1024, 64, 1024), ("apply", 1024, 1024, 64), ("decode", 1, 256, 4096), ("gemv", 4096, 256, 1)] {
                 let a: Vec<f32> = (0..m * k).map(|_| rng.signed()).collect();
                 let b: Vec<f32> = (0..n * k).map(|_| rng.signed()).collect();
                 let mut c = vec![0f32; m * n];

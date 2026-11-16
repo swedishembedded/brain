@@ -30,3 +30,8 @@ product, and the GQA backward natives walked a per-row axpy over the materialize
   default size at rows of 1024, batch 8, 71 -> 2365 tokens/s; the 1.3M size at rows of 512, 147 -> 4900. The step
   losses agree with the JIT run to four decimals; the NEON GEMM is gated against an f64 reference
   (`neon_gemm::tests`), the attention natives against their scalar references.
+- Every element is reduced in one order (one 4-lane FMA chain, a lane sum, the scalar tail) whether it falls in a
+  full 4x4 tile or on an edge, each edge shape its own instance of the tile. The first version reduced edge elements
+  through a separate four-accumulator dot, so a GEMV (`n == 1`, every element an edge) differed in the last bit from
+  the same column of a GEMM, which `hostmath::linear_rows` must equal exactly
+  (`linear_rows_is_bit_identical_to_a_per_row_matvec_loop`).
