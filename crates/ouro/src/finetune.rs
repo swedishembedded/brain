@@ -28,6 +28,12 @@ use crate::OuroConfig;
 /// The card family a brain Ouro checkpoint carries.
 pub const FAMILY: &str = "ouro";
 
+/// The exit threshold of a from-scratch model whose configuration names none: the pass at which half the exit mass
+/// is reached (see [`ChatTrainer::init_checkpoint`] below). On a small model pretrained from scratch and chat
+/// fine-tuned, the fine-tune moved nearly all the exit mass to the first pass, which it trained, and the final pass
+/// it barely weighed got worse (knowledge 496 has the measurement).
+pub const FROM_SCRATCH_EXIT_THRESHOLD: f32 = 0.5;
+
 /// The generic trainers' entry for Ouro.
 pub struct OuroTrainer;
 
@@ -101,8 +107,16 @@ impl ChatTrainer for OuroTrainer {
 
     /// The tensors of [`crate::init::init_weights`] at `seed`, written as the brain checkpoint `model.safetensors`
     /// the model itself saves (same names, shapes, header and card), so training opens it like any trained one.
+    ///
+    /// A configuration that names no `early_exit_threshold` is written with [`FROM_SCRATCH_EXIT_THRESHOLD`]: the
+    /// training objective weighs each pass's loss by its exit probability, and a model trained from scratch moves
+    /// that mass to the pass it learns first, so the final pass (the released checkpoints' 1.0) is the one it trains
+    /// least; serving the median exit serves the pass it trains.
     fn init_checkpoint(config: &serde_json::Value, seed: u64, out_dir: &Path) -> Result<(), String> {
-        let cfg = OuroConfig::from_json(config)?;
+        let mut cfg = OuroConfig::from_json(config)?;
+        if config.get("early_exit_threshold").is_none() {
+            cfg.early_exit_threshold = FROM_SCRATCH_EXIT_THRESHOLD;
+        }
         let mut weights = crate::init::init_weights(&cfg, seed);
         let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = cfg
             .param_list()
@@ -137,6 +151,27 @@ mod tests {
         let e = OuroTrainer::train_lora(Path::new("/nonexistent"), &lora, &FitOpts::default(), &mut Never).err().expect("refused");
         assert_eq!(e.kind(), std::io::ErrorKind::Unsupported);
         assert!(e.to_string().contains("ouro") && e.to_string().contains("LoRA"), "{e}");
+    }
+
+    /// A from-scratch model is served at the pass its training objective weighs: the exit rule reads the median of
+    /// the exit distribution unless the configuration names a threshold, so a model whose gates put most of the exit
+    /// mass on an early pass serves that pass, not a final one the objective barely trained.
+    #[test]
+    fn a_from_scratch_model_serves_the_pass_its_objective_weighs() {
+        let dir = std::env::temp_dir().join(format!("ouro-init-exit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut cfg = OuroConfig::tiny().to_json();
+        cfg.as_object_mut().unwrap().remove("early_exit_threshold");
+        OuroTrainer::init_checkpoint(&cfg, 5, &dir).unwrap();
+        let (opened, _) = open(&dir.join(model::finetune::BRAIN_WEIGHTS_FILE)).unwrap();
+        // Gates putting 0.98 of the exit mass on the first of two passes.
+        let gates = [(0.98f64 / 0.02).ln(), 0.0];
+        assert_eq!(crate::model::exit_pass(&gates, opened.early_exit_threshold as f64), 0, "threshold {}", opened.early_exit_threshold);
+        // A threshold the configuration names is kept.
+        cfg["early_exit_threshold"] = serde_json::json!(1.0);
+        OuroTrainer::init_checkpoint(&cfg, 5, &dir).unwrap();
+        assert_eq!(open(&dir.join(model::finetune::BRAIN_WEIGHTS_FILE)).unwrap().0.early_exit_threshold, 1.0);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// A from-scratch checkpoint opens as the configuration it was asked for, and the same seed writes the same bytes.

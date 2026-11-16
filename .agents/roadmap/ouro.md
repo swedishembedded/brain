@@ -103,6 +103,10 @@ gate and a pass-selected or exit-weighted head.
   `score_continuation` is served (policy traces). Default size on gpu3, agent workload (600 in, 128 out),
   `brain perf run sweep --target ouro:<checkpoint>`: 715 / 3,351 / 8,208 / 11,085 tokens/s at 1 / 8 / 32 / 64
   streams; 3.7 ms to the first token at one stream.
+- A from-scratch Ouro is served at the median exit (`early_exit_threshold` 0.5 unless its configuration names one,
+  [496](../knowledge/496-a-chat-fine-tune-moved-a-looped-decoders-exit-mass-to-its-first-pass-and-the-server-read-the-last-one.md)):
+  a chat fine-tune moves the exit mass to the first pass, and serving the last pass (1.0) read the pass it stopped
+  training. Held-out whole-call accuracy of the served pass after the fine-tune: 0.03 at 1.0, 0.56 at the median.
 
 ## Left to do
 
