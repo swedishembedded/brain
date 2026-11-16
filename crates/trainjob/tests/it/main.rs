@@ -19,6 +19,7 @@ mod create;
 mod dryrun;
 mod door;
 mod http;
+mod pretrain;
 mod run;
 mod schedule;
 mod support;

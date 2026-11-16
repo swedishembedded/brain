@@ -27,6 +27,7 @@
 //! * [`create`]: `init_model`, a model from nothing: vocabulary, chat template, random initialization.
 //! * [`dryrun`]: `check_dataset`, a dataset checked against a base without training.
 //! * [`consolidate`]: the jobs that produce a checkpoint, `full_train` and `merge`.
+//! * [`pretrain`]: `pretrain`, raw-text training of every weight with held-out evaluation.
 //! * [`job`]: one run, from staged inputs to the adapter and its report.
 //! * [`resident`]: the run as a workload the residency executor places,
 //!   evicting idle serving instances for it and refusing when serving is busy.
@@ -35,6 +36,7 @@ pub mod consolidate;
 pub mod create;
 pub mod dryrun;
 pub mod job;
+pub mod pretrain;
 pub mod quota;
 pub mod request;
 pub mod resident;
