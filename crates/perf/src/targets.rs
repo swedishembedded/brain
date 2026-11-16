@@ -228,11 +228,13 @@ pub struct PagedLlmTarget<D: PagedDecoder> {
     /// the measurement path; the engine cost is the same for any token id).
     vocab: u32,
     submitted: usize,
+    /// The most sequences one scheduler iteration produced a token for: how many the engine really ran at once.
+    peak_rows: usize,
 }
 
 impl<D: PagedDecoder> PagedLlmTarget<D> {
     pub fn new(sched: Scheduler<D>, info: TargetInfo, stop: Vec<u32>, vocab: u32) -> PagedLlmTarget<D> {
-        PagedLlmTarget { sched, info, stop, vocab, submitted: 0 }
+        PagedLlmTarget { sched, info, stop, vocab, submitted: 0, peak_rows: 0 }
     }
 }
 
@@ -269,6 +271,7 @@ impl<D: PagedDecoder> PerfTarget for PagedLlmTarget<D> {
         for (id, reason) in report.rejected {
             out.push(Emission { id, at: now, kind: EmissionKind::Rejected, error: Some(reason.to_string()) });
         }
+        self.peak_rows = self.peak_rows.max(report.produced.len());
         for (id, n) in report.produced {
             for _ in 0..n {
                 out.push(Emission { id, at: now, kind: EmissionKind::Artifact, error: None });
@@ -290,6 +293,7 @@ impl<D: PagedDecoder> PerfTarget for PagedLlmTarget<D> {
         let rate = (looked > 0).then(|| hit as f64 / looked as f64);
         vec![
             ("kv_free_blocks".into(), serde_json::json!(self.sched.free_blocks())),
+            ("peak_running_sequences".into(), serde_json::json!(self.peak_rows)),
             (
                 "kv_prefix_hit_rate".into(),
                 rate.map(serde_json::Value::from).unwrap_or(serde_json::Value::Null),
