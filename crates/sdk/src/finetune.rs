@@ -2429,6 +2429,18 @@ pub(crate) fn utf8(path: &Path) -> Result<&str> {
 mod tests {
     use super::*;
 
+    /// Spec: an architecture whose chat trainer does not declare the policy-gradient objective refuses it by name,
+    /// before any file is read; one that declares it passes the check. Every architecture with chat LoRA declares it,
+    /// so the refusal is held here, on the check itself.
+    #[test]
+    fn a_policy_gradient_is_refused_by_an_architecture_that_does_not_declare_it() {
+        let config = rl::objective::external::PolicyGradientConfig { behaviour: rl::objective::external::BehaviourSource::StartOfRunProxy, ..Default::default() };
+        let job = ChatFineTune::from_pretrained("base").policy_gradient(config);
+        let err = job.check_policy_gradient_setup("qwen35moe").expect_err("qwen35moe's trainer does not declare it").to_string();
+        assert!(err.contains("qwen35moe") && err.contains("policy_gradient"), "{err}");
+        job.check_policy_gradient_setup("qwen3").expect("qwen3's trainer declares it");
+    }
+
     /// Spec: a Qwen3.5 LoRA run takes the base's default without a choice, keeps on request, recomputes on request
     /// over a narrow base, and refuses recompute over fp32 by name.
     #[test]

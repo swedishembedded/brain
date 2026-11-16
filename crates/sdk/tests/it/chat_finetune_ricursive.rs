@@ -334,14 +334,6 @@ fn a_ricursive_policy_gradient_run_raises_rewarded_actions_and_lowers_penalised_
     assert_eq!(card.training.expect("the card records its run").regime, "policy_gradient_lora");
 }
 
-/// Spec: an architecture whose trainer declares neither refuses a policy gradient by name, before a device is claimed.
-#[test]
-fn a_policy_gradient_is_refused_by_an_architecture_that_does_not_declare_it() {
-    let model = ripple_model_dir("ripple-pg-refused");
-    let err = ChatFineTune::from_pretrained(model.join("model.safetensors").to_str().unwrap()).arch("qwen3").dataset(write_dataset(&model)).out_dir(model.join("run")).policy_gradient(PolicyGradientConfig { behaviour: BehaviourSource::StartOfRunProxy, ..Default::default() }).device(cpu()).run().expect_err("refused");
-    assert!(err.to_string().contains("qwen3") && err.to_string().contains("policy_gradient"), "{err}");
-}
-
 /// Spec: `modules_to_save` trains the named base tensors beside the factors, the adapter file carries them and its card
 /// lists them, and a run that continues the adapter keeps training them; an architecture whose trainer does not declare
 /// it refuses by name.
