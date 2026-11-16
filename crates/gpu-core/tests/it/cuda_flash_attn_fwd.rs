@@ -4,7 +4,8 @@
 //! The fp16 tensor-core training forward of causal grouped-query flash attention agrees with the portable
 //! fp32 `flash_attn_causal_gqa` and with an f64 host oracle, context AND the row log-sum-exp the backward
 //! rebuilds its weights from, at Qwen3's head width (128, 32 query heads over 8 KV heads) and the 256-wide
-//! head of the Qwen3.8 full-attention layers, over ragged lengths and several samples.
+//! head of the Qwen3.8 full-attention layers, and a small decoder's 64-wide head, over ragged lengths and
+//! several samples.
 //!
 //! Swedish Embedded AB implements tensor-core training stacks that agree with their fp32 reference. If your
 //! team needs expertise in moving the attention of a training step onto tensor cores without losing the
@@ -143,6 +144,9 @@ fn the_tensor_core_training_forward_agrees_with_the_portable_kernel_and_the_orac
     run(&gpu, &Shape { b: 1, t: 64, n_heads: 8, n_kv: 2, hd: 128 }, 2);
     run(&gpu, &Shape { b: 1, t: 77, n_heads: 4, n_kv: 4, hd: 128 }, 3);
     run(&gpu, &Shape { b: 2, t: 200, n_heads: 24, n_kv: 4, hd: 256 }, 4);
+    // The 64-wide head of a small decoder (four heads at a 256-wide model) over a training batch, and GQA at it.
+    run(&gpu, &Shape { b: 4, t: 300, n_heads: 4, n_kv: 4, hd: 64 }, 5);
+    run(&gpu, &Shape { b: 1, t: 77, n_heads: 8, n_kv: 2, hd: 64 }, 6);
 }
 
 #[test]

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! The fp16 tensor-core backward of causal grouped-query flash attention (dQ, dK, dV at Qwen3's head width 128)
-//! agrees with the portable fp32 `flash_attn_causal_gqa_bwd_{dq,dkv}` pair on the same forward's context and
+//! The fp16 tensor-core backward of causal grouped-query flash attention (dQ, dK, dV at Qwen3's head width 128
+//! and a small decoder's 64) agrees with the portable fp32 `flash_attn_causal_gqa_bwd_{dq,dkv}` pair on the same forward's context and
 //! log-sum-exp, over ragged lengths, several samples and a gradient as small as a mean-reduced loss makes it
 //! (1e-6 of unit scale: far below fp16's normal range, which the call's power-of-two scale exists to handle).
 //!
@@ -16,7 +16,6 @@
 use gpu_core::provider::cuda::{flash_causal_gqa_bwd_steps, FlashBwdBufs};
 use gpu_core::Gpu;
 
-const HD: u32 = 128;
 const REL_TOL: f32 = 2.5e-2;
 const MIN_COSINE: f64 = 0.9995;
 
@@ -42,17 +41,18 @@ struct Shape {
     t: u32,
     n_heads: u32,
     n_kv: u32,
+    hd: u32,
 }
 
 impl Shape {
     fn params(&self) -> [u32; 6] {
-        [self.b, self.n_heads, self.n_kv, self.t, HD, self.n_heads / self.n_kv]
+        [self.b, self.n_heads, self.n_kv, self.t, self.hd, self.n_heads / self.n_kv]
     }
     fn q_len(&self) -> usize {
-        (self.b * self.t * self.n_heads * HD) as usize
+        (self.b * self.t * self.n_heads * self.hd) as usize
     }
     fn kv_len(&self) -> usize {
-        (self.b * self.t * self.n_kv * HD) as usize
+        (self.b * self.t * self.n_kv * self.hd) as usize
     }
     fn lse_len(&self) -> usize {
         (self.b * self.n_heads * self.t) as usize
@@ -87,7 +87,7 @@ fn open() -> Option<Gpu> {
 /// `last_boost` multiplies dO's final element: the largest gradient of the call then sits in the last element
 /// any share of the scale's reduction reaches, and a reduction that missed it would saturate fp16 there.
 fn run(gpu: &Gpu, s: Shape, d_scale: f32, last_boost: f32, seed: u64) {
-    let what = format!("b={} t={} heads={}/{} dO x {d_scale:e} (last element x {last_boost})", s.b, s.t, s.n_heads, s.n_kv);
+    let what = format!("b={} t={} heads={}/{} hd={} dO x {d_scale:e} (last element x {last_boost})", s.b, s.t, s.n_heads, s.n_kv, s.hd);
     let mut r = Rng(seed);
     let q: Vec<f32> = (0..s.q_len()).map(|_| r.gauss()).collect();
     let k: Vec<f32> = (0..s.kv_len()).map(|_| r.gauss()).collect();
@@ -138,14 +138,17 @@ fn run(gpu: &Gpu, s: Shape, d_scale: f32, last_boost: f32, seed: u64) {
 fn the_tensor_core_backward_agrees_with_the_portable_pair() {
     let Some(gpu) = open() else { return };
     // Qwen3-8B's attention (32 query heads over 8 KV heads) at ragged lengths and two samples; a narrow GQA head
-    // and plain MHA; each with a unit-scale gradient and one a million times smaller.
+    // and plain MHA; each with a unit-scale gradient and one a million times smaller. Then the 64-wide head of a
+    // small decoder (four heads at a 256-wide model) over a training batch.
     for (i, (shape, d_scale, last_boost)) in [
-        (Shape { b: 2, t: 300, n_heads: 32, n_kv: 8 }, 1.0, 1.0),
-        (Shape { b: 2, t: 300, n_heads: 32, n_kv: 8 }, 1e-6, 1.0),
-        (Shape { b: 1, t: 64, n_heads: 8, n_kv: 2 }, 1.0, 1.0),
-        (Shape { b: 1, t: 77, n_heads: 4, n_kv: 4 }, 1e-4, 1.0),
+        (Shape { b: 2, t: 300, n_heads: 32, n_kv: 8, hd: 128 }, 1.0, 1.0),
+        (Shape { b: 2, t: 300, n_heads: 32, n_kv: 8, hd: 128 }, 1e-6, 1.0),
+        (Shape { b: 1, t: 64, n_heads: 8, n_kv: 2, hd: 128 }, 1.0, 1.0),
+        (Shape { b: 1, t: 77, n_heads: 4, n_kv: 4, hd: 128 }, 1e-4, 1.0),
         // Larger than one block's share of the scale reduction, with the call's largest gradient in its last element.
-        (Shape { b: 1, t: 1500, n_heads: 16, n_kv: 8 }, 1.0, 64.0),
+        (Shape { b: 1, t: 1500, n_heads: 16, n_kv: 8, hd: 128 }, 1.0, 64.0),
+        (Shape { b: 4, t: 300, n_heads: 4, n_kv: 4, hd: 64 }, 1e-5, 1.0),
+        (Shape { b: 1, t: 77, n_heads: 8, n_kv: 2, hd: 64 }, 1.0, 64.0),
     ]
     .into_iter()
     .enumerate()
@@ -159,5 +162,5 @@ fn a_head_width_the_backward_was_not_written_for_is_declined() {
     let Some(gpu) = open() else { return };
     let b = gpu.storage(1);
     let bufs = FlashBwdBufs { q: &b, k: &b, v: &b, o: &b, d_o: &b, lse: &b, dsum: &b, d_q: &b, d_k: &b, d_v: &b };
-    assert!(flash_causal_gqa_bwd_steps(&gpu, &bufs, &[1, 4, 4, 64, 256, 1]).is_none());
+    assert!(flash_causal_gqa_bwd_steps(&gpu, &bufs, &[1, 4, 4, 64, 96, 1]).is_none());
 }

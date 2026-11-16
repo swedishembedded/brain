@@ -1815,15 +1815,21 @@ const FLASH_GQA_FWD_BINDINGS: &[BindKind] = &[
 ///
 /// Same buffers (`q`, `k`, `v`, `ctx`, `lse`) and uniform (`[b, n_heads, n_kv_heads, t, head_dim, group]`) as
 /// the portable kernel; the launch geometry is its own (64 query rows per block of one (sample, head)).
-/// `None` means: the head width is not 128 or 256, `cuda` is disabled ([`super::set_disabled_providers`]), the device's compute
+/// `None` means: the head width is not 64, 128 or 256, `cuda` is disabled ([`super::set_disabled_providers`]), the device's compute
 /// capability is below the kernel's floor, or the backend declined the kernel.
 pub fn flash_causal_gqa_fwd_step(gpu: &crate::Gpu, bufs: &[&backend_api::DeviceBuffer; 5], params: &[u32]) -> Option<crate::Step> {
     let &[b, n_heads, _, t, head_dim, _] = params else { return None };
-    if !matches!(head_dim, 128 | 256) || !tensor_core_kernels_enabled(gpu) {
+    let name = match head_dim {
+        64 => "flash_attn_fwd_f16_hd64",
+        128 => "flash_attn_fwd_f16_hd128",
+        256 => "flash_attn_fwd_f16_hd256",
+        _ => return None,
+    };
+    if !tensor_core_kernels_enabled(gpu) {
         return None;
     }
     let cc = gpu.caps().arch.compute_capability?;
-    let kernel = kernels_cuda::get(if head_dim == 128 { "flash_attn_fwd_f16_hd128" } else { "flash_attn_fwd_f16_hd256" }).filter(|k| k.min_cc <= cc)?;
+    let kernel = kernels_cuda::get(name).filter(|k| k.min_cc <= cc)?;
     let id = gpu.native_kernel(kernel, FLASH_GQA_FWD_BINDINGS)?;
     let blocks = u32::try_from(u64::from(b) * u64::from(n_heads) * u64::from(t.div_ceil(64))).ok()?;
     gpu.step_native_sliced(id, bufs, &[(0, 0); 5], params, blocks)
@@ -1889,19 +1895,24 @@ pub struct FlashBwdBufs<'a> {
 }
 
 /// The native tensor-core backward of causal grouped-query flash attention over dense `[B*T]` buffers at
-/// `head_dim` 128, as three steps (the call's gradient scale, dQ, dK and dV), or `None` when the caller should
+/// `head_dim` 64 or 128, as four steps (the call's gradient scale in two, dQ, dK and dV), or `None` when the caller should
 /// dispatch the portable pair. `params` is the portable kernels' uniform
 /// (`[b, n_heads, n_kv_heads, t, head_dim, group]`); every output is overwritten. `None` means: the head width is
-/// not 128, `cuda` is disabled ([`super::set_disabled_providers`]), the device's compute capability is below a kernel's floor, or
+/// not 64 or 128, `cuda` is disabled ([`super::set_disabled_providers`]), the device's compute capability is below a kernel's floor, or
 /// the backend declined one.
 pub fn flash_causal_gqa_bwd_steps(gpu: &crate::Gpu, bufs: &FlashBwdBufs<'_>, params: &[u32]) -> Option<Vec<crate::Step>> {
     let &[b, n_heads, n_kv, t, head_dim, _] = params else { return None };
-    if head_dim != 128 || !tensor_core_kernels_enabled(gpu) {
+    let (dq_name, dkv_name) = match head_dim {
+        64 => ("flash_bwd_dq_hd64", "flash_bwd_dkv_hd64"),
+        128 => ("flash_bwd_dq", "flash_bwd_dkv"),
+        _ => return None,
+    };
+    if !tensor_core_kernels_enabled(gpu) {
         return None;
     }
     let cc = gpu.caps().arch.compute_capability?;
     let get = |name: &str| kernels_cuda::get(name).filter(|k| k.min_cc <= cc);
-    let (absmax_k, scale_k, dq_k, dkv_k) = (get("flash_bwd_absmax")?, get("flash_bwd_scale")?, get("flash_bwd_dq")?, get("flash_bwd_dkv")?);
+    let (absmax_k, scale_k, dq_k, dkv_k) = (get("flash_bwd_absmax")?, get("flash_bwd_scale")?, get(dq_name)?, get(dkv_name)?);
     let (absmax_id, scale_id, dq_id, dkv_id) = (gpu.native_kernel(absmax_k, FLASH_BWD_SCALE_BINDINGS)?, gpu.native_kernel(scale_k, FLASH_BWD_SCALE_BINDINGS)?, gpu.native_kernel(dq_k, FLASH_BWD_DQ_BINDINGS)?, gpu.native_kernel(dkv_k, FLASH_BWD_DKV_BINDINGS)?);
     let tiles = u64::from(t.div_ceil(64));
     let q_blocks = u32::try_from(u64::from(b) * u64::from(n_heads) * tiles).ok()?;

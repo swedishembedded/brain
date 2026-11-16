@@ -7,7 +7,7 @@
 // then you can procure our services by sending an email to
 // info@swedishembedded.com.
 //
-// Causal grouped-query flash attention BACKWARD at head_dim 128 on fp16 tensor
+// Causal grouped-query flash attention BACKWARD at head_dim 128 (or 64: `BRAIN_HD`) on fp16 tensor
 // cores (`mma.sync.m16n8k16`, fp32 accumulate): the CUDA form of
 // `flash_attn_causal_gqa_bwd_dq.wgsl` and `flash_attn_causal_gqa_bwd_dkv.wgsl`
 // over dense `[B*T, ...]` buffers, FlashAttention-2 shaped. Four entries, run in
@@ -37,7 +37,7 @@
 // near 2^5 and fp16's 11 bits are spent on them; rows a thousand times smaller keep normal fp16 values.
 //
 // Structure (the paged prefill kernel's, `flash_prefill_f16_hd256.cu`): a block is 8 warps = 4 row groups x 2
-// column halves; both warps of a group compute the same 16 x 32 score tile and each accumulates half of the 128
+// column halves; both warps of a group compute the same 16 x 32 score tile and each accumulates half of the HD
 // output columns. `dq` owns 64 query rows of one (sample, head) and walks key tiles of 32; `dkv` owns 64 key rows
 // of one (sample, kv head) and walks the query tiles of 32 (from the first that can see them) of every query
 // head in the group, computing the transposed tiles S^T = K Q^T and dP^T = V dO^T so the key rows are the MMA's
@@ -46,7 +46,12 @@
 //
 // No `__restrict__`: brain's device buffers alias by design.
 
-#define HD 128
+// The head width, 128 unless the including source defines 64 first; every width-dependent count below derives
+// from it (the score tiles are BC wide whatever the head).
+#ifndef BRAIN_HD
+#define BRAIN_HD 128
+#endif
+#define HD BRAIN_HD
 #define BR 64              // rows (queries in dq, keys in dkv) per block
 #define BC 32              // keys (dq) or queries (dkv) per tile
 #define THREADS 256
@@ -59,7 +64,13 @@
 #define PAD_HALVES 8
 #define ROW_HALVES (HD + PAD_HALVES)
 #define LOG2E 1.4426950408889634f
+#if HD == 128
 #define SM_SCALE 0.08838834764831845f                 // 1 / sqrt(128)
+#elif HD == 64
+#define SM_SCALE 0.125f                               // 1 / sqrt(64)
+#else
+#error "BRAIN_HD must be 64 or 128"
+#endif
 #define SM_SCALE_LOG2 (LOG2E * SM_SCALE)
 #define NEG_BIG (-1.0e30f)
 
@@ -140,12 +151,13 @@ __device__ __forceinline__ void brain_stage_tile(unsigned short* dst, const floa
 // ---- the scale of the call --------------------------------------------------------------------------------
 
 // Pass 1: ABSMAX_BLOCKS blocks each take a grid-strided share of dO (float4 loads: the element count is a
-// multiple of HD) and write their largest |d_o|. A single block over the whole tensor ran at under 2 percent of
-// the memory roof (a 30 MB dO took 0.65 ms per layer, 7 percent of a small model's training step).
+// multiple of the head width, read from params[4], so one instance serves every width) and write their largest
+// |d_o|. A single block over the whole tensor ran at under 2 percent of the memory roof (a 30 MB dO took 0.65 ms
+// per layer, 7 percent of a small model's training step).
 #define ABSMAX_BLOCKS 256
 #define ABSMAX_THREADS 512
 extern "C" __global__ void __launch_bounds__(ABSMAX_THREADS) brain_flash_bwd_absmax(const unsigned int* params, const float* d_o, float* partials) {
-    const unsigned long long n4 = (unsigned long long)params[0] * params[3] * params[1] * (HD / 4);
+    const unsigned long long n4 = (unsigned long long)params[0] * params[3] * params[1] * (params[4] / 4u);
     float m = 0.f;
     const float4* src = reinterpret_cast<const float4*>(d_o);
     for (unsigned long long i = (unsigned long long)blockIdx.x * ABSMAX_THREADS + threadIdx.x; i < n4; i += (unsigned long long)ABSMAX_BLOCKS * ABSMAX_THREADS) {

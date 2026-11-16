@@ -1126,6 +1126,27 @@ pub const ALL: &[CudaKernel] = &[
         ),
     },
     CudaKernel {
+        name: "flash_attn_fwd_f16_hd64",
+        // Asked for by name by `gpu_core::provider::cuda::flash_causal_gqa_fwd_step`.
+        op: Op::PagedAttentionFused,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: MMA_S8_MIN_CC,
+        entry: "brain_flash_attn_fwd_f16_hd64",
+        what: "causal GQA flash attention forward over dense [B*T] buffers at head_dim 64 on fp16 tensor cores (fp32 accumulators), writing the row log-sum-exp the backward rebuilds its weights from",
+        reported: "native:flash_attn_fwd_f16_hd64",
+        block_dim: 256,
+        // 64 query rows per block of one (sample, head).
+        tile: (64, 1),
+        shared_bytes: 2 * 32 * (64 + 8) * 2,
+        programmatic: false,
+        src: concat!(
+            "#define BRAIN_DENSE 1\n#define BRAIN_HD 64\n#define brain_flash_prefill_f16_hd256 brain_flash_attn_fwd_f16_hd64\n",
+            include_str!("../cu/flash_prefill_f16_hd256.cu")
+        ),
+    },
+    CudaKernel {
         name: "flash_attn_fwd_f16_hd128",
         // Asked for by name by `gpu_core::provider::cuda::flash_causal_gqa_fwd_step`.
         op: Op::PagedAttentionFused,
@@ -1234,6 +1255,40 @@ pub const ALL: &[CudaKernel] = &[
         shared_bytes: 2 * 32 * (128 + 8) * 2 + 2 * 32 * 4,
         programmatic: false,
         src: include_str!("../cu/flash_attn_bwd_f16.cu"),
+    },
+    CudaKernel {
+        name: "flash_bwd_dq_hd64",
+        // Asked for by name by `gpu_core::provider::cuda::flash_causal_gqa_bwd_steps`.
+        op: Op::PagedAttentionFused,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: MMA_S8_MIN_CC,
+        entry: "brain_flash_bwd_dq_hd64",
+        what: "causal GQA flash attention backward, dQ and D, over dense [B*T] buffers at head_dim 64 on fp16 tensor cores (fp32 accumulators)",
+        reported: "native:flash_bwd_dq_hd64",
+        block_dim: 256,
+        tile: (64, 1),
+        shared_bytes: 2 * 32 * (64 + 8) * 2,
+        programmatic: false,
+        src: concat!("#define BRAIN_HD 64\n#define brain_flash_bwd_dq brain_flash_bwd_dq_hd64\n", include_str!("../cu/flash_attn_bwd_f16.cu")),
+    },
+    CudaKernel {
+        name: "flash_bwd_dkv_hd64",
+        // Asked for by name by `gpu_core::provider::cuda::flash_causal_gqa_bwd_steps`.
+        op: Op::PagedAttentionFused,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: MMA_S8_MIN_CC,
+        entry: "brain_flash_bwd_dkv_hd64",
+        what: "causal GQA flash attention backward, dK and dV (summed over the query heads of the group), over dense [B*T] buffers at head_dim 64 on fp16 tensor cores",
+        reported: "native:flash_bwd_dkv_hd64",
+        block_dim: 256,
+        tile: (64, 1),
+        shared_bytes: 2 * 32 * (64 + 8) * 2 + 2 * 32 * 4,
+        programmatic: false,
+        src: concat!("#define BRAIN_HD 64\n#define brain_flash_bwd_dkv brain_flash_bwd_dkv_hd64\n", include_str!("../cu/flash_attn_bwd_f16.cu")),
     },
     CudaKernel {
         name: "decode_attn_batched_f32",

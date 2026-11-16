@@ -7,7 +7,7 @@
 // then you can procure our services by sending an email to
 // info@swedishembedded.com.
 //
-// Fused causal paged-attention PREFILL at head_dim = 256 (or 128: `-DBRAIN_HD=128`) on fp16 tensor cores
+// Fused causal paged-attention PREFILL at head_dim = 256 (or 128 or 64: `-DBRAIN_HD=128`) on fp16 tensor cores
 // (`mma.sync.m16n8k16`, fp32 accumulate): the CUDA form of
 // `paged_flash_prefill_hd256.wgsl`, with the identical argument contract,
 // launch geometry (256 threads, `n_heads * ceil(bsz / 64)` blocks, query-tile
@@ -22,7 +22,7 @@
 //                  decreasing within a tile: causality is carried by it)
 //   ctx          : [bsz, n_heads * 256]               f32
 //
-// head_dim must be BRAIN_HD, 256 unless the including source defines 128 first (the caller checks; the
+// head_dim must be BRAIN_HD, 256 unless the including source defines 128 or 64 first (the caller checks; the
 // entry does not re-validate it). Every width-dependent count below is derived from HD: a 128-wide head
 // stages 16 chunks of 8 values per key row (two rows per warp pass), keeps 8 Q fragments and 8 output tiles
 // per warp, and folds 1/sqrt(HD) into the softmax exponent instead of into Q, so a width whose scale is not a
@@ -142,8 +142,12 @@ __device__ __forceinline__ float2 brain_kv8_pair(unsigned int word, int h) {
 #define LOG2E 1.4426950408889634f
 #if BRAIN_HD == 256
 #define SM_SCALE_LOG2 (LOG2E * 0.0625f)   // LOG2E / sqrt(256), exact in binary apart from LOG2E
-#else
+#elif BRAIN_HD == 128
 #define SM_SCALE_LOG2 (LOG2E * 0.08838834764831845f)  // LOG2E / sqrt(128)
+#elif BRAIN_HD == 64
+#define SM_SCALE_LOG2 (LOG2E * 0.125f)    // LOG2E / sqrt(64)
+#else
+#error "BRAIN_HD must be 64, 128 or 256"
 #endif
 #define NEG_BIG (-1.0e30f)
 
