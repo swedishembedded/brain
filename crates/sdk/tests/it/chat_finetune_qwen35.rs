@@ -242,7 +242,12 @@ fn a_qwen35_preference_fine_tune_exports_a_dpo_adapter() {
     assert_eq!(outcome.status, FineTuneStatus::Completed);
     let initial = outcome.initial_loss.expect("measured");
     assert!((initial - std::f32::consts::LN_2).abs() < 1e-3, "the margin starts at zero against the starting model: {initial}");
-    assert!(outcome.final_loss.is_some_and(|last| last < initial), "{outcome:?}");
+    // The last step's loss is one step of a run at a high learning rate and may sit above the first; what the run
+    // must leave is an adapter that ranks the chosen answers above the rejected ones, which is a margin above zero
+    // (a DPO loss under ln 2) when the exported adapter is scored.
+    assert!(outcome.final_loss.is_some_and(f32::is_finite), "{outcome:?}");
+    let score = outcome.train_score.as_ref().expect("the run scores its adapter on the training pairs");
+    assert!(score.mean_margin.is_some_and(|m| m > 0.0), "the adapter does not prefer the chosen answers: {outcome:?}");
     let adapter = outcome.adapter.expect("a completed run exports its adapter");
     let card = checkpoint::st::read_card(adapter.to_str().unwrap()).unwrap().expect("the adapter carries a card");
     assert_eq!(card.training.expect("its training run is recorded").regime, "dpo");
