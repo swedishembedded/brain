@@ -152,10 +152,26 @@ fn recovery_distills_an_adapter_over_the_base_held_at_the_plan() {
     assert_eq!(written["recovery"]["steps"], 6);
 }
 
+/// Uniform int8 meets both limits (its bytes are within bf16's, its time is the limit), so a plan exists on any device
+/// that holds int8 as itself, whichever format that device runs fastest at these small shapes. The search runs on the
+/// process's own device, and a test beside this one that selects the CPU selects it for the whole process (the SDK
+/// applies a device process-wide, as the CLI does), so the search runs in a process of its own: this binary again, on
+/// the ignored child.
 #[test]
 fn a_latency_limit_holds_the_plan_to_a_uniform_format_s_speed() {
-    // Uniform int8 meets both limits (its bytes are within bf16's, its time is the limit), so a plan exists on
-    // any device, whichever format that device runs fastest at these small shapes.
+    let exe = std::env::current_exe().expect("the running test executable");
+    let out = std::process::Command::new(exe)
+        .args(["model_optimizer::a_latency_limit_holds_the_plan_to_a_uniform_format_s_speed_alone", "--exact", "--ignored", "--nocapture"])
+        .output()
+        .expect("run the child test");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success() && text.contains("1 passed"), "the child failed:\n{text}\n{}", String::from_utf8_lossy(&out.stderr));
+}
+
+/// The child of [`a_latency_limit_holds_the_plan_to_a_uniform_format_s_speed`].
+#[test]
+#[ignore = "runs alone in a child process of its parent test"]
+fn a_latency_limit_holds_the_plan_to_a_uniform_format_s_speed_alone() {
     let model = chat_model_dir_of("optimize-latency", qwen3::QwenConfig::tiny_i8());
     let dataset = write_dataset(&model, 8);
     let outcome = ModelOptimizer::from_pretrained(model.join("model.safetensors").to_str().unwrap())

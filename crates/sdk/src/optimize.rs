@@ -494,8 +494,10 @@ pub(crate) fn distill_recovery(work: &Workload, req: &RecoveryRequest<'_>, on_pr
 
 /// The candidate tiers. Each must be one the family serves per linear (so an accepted plan can be served, and is
 /// measured on that serving engine) and one the device holds as itself (so its bytes and loss are what the search
-/// assumed). The caller's list is refused by the first that is not; the default is every served tier the device holds,
-/// with those it would widen returned with what it would hold.
+/// assumed). The caller's list is refused by the first name that is not a weight format the family serves, and only
+/// then by the first tier the device would widen, so a list that names an unservable format is refused for it on every
+/// device; the default is every served tier the device holds, with those it would widen returned with what it would
+/// hold.
 fn candidates(asked: Option<&str>, family: &str, served: &[Dtype], numeric: &gpu_core::NumericSupport) -> Result<(Vec<Dtype>, Vec<ExcludedTier>)> {
     let names = |tiers: &[Dtype]| tiers.iter().map(|t| t.name()).collect::<Vec<_>>().join(", ");
     if served.is_empty() {
@@ -509,11 +511,10 @@ fn candidates(asked: Option<&str>, family: &str, served: &[Dtype], numeric: &gpu
                 if !served.contains(&tier) {
                     return Err(Error::Backend(format!("ModelOptimizer: candidate {}: {family} does not serve it per linear; it serves {}", tier.name(), names(served))));
                 }
-                let held = tier.promote(numeric);
-                if held != tier {
-                    return Err(Error::Backend(format!("ModelOptimizer: candidate {}: this device holds it as {}", tier.name(), held.name())));
-                }
                 tiers.push(tier);
+            }
+            if let Some(&widened) = tiers.iter().find(|t| t.promote(numeric) != **t) {
+                return Err(Error::Backend(format!("ModelOptimizer: candidate {}: this device holds it as {}", widened.name(), widened.promote(numeric).name())));
             }
             Ok((tiers, Vec::new()))
         }
