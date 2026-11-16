@@ -24,12 +24,12 @@ The last column is worth reading twice. Above 798 tokens the second layer is the
 
 Six earlier ideas carry the rewrite of attention that follows.
 
-1. (Volume V, [Chapter 7](../v05-sequences/07-self-attention.md), scaled dot-product attention and the causal mask.) What does row $i$ of causal attention output, written with the scores $\mathbf{q}_i\cdot\mathbf{k}_j$, and why must the layer look at every earlier key before it can write the row?
-2. (Volume V, [Chapter 5](../v05-sequences/05-recurrent-networks.md), recurrent networks.) A recurrent cell carries a state $\mathbf{h}_t$ from token to token. How many sequential steps does the forward pass over $T$ tokens take, and why can a larger device not shorten that?
-3. (Volume V, [Chapter 5](../v05-sequences/05-recurrent-networks.md), gating.) A forget gate of 0.9 multiplies a stored value at every step. How much of a value written 10 steps ago remains?
-4. (Volume IV, [Chapter 7](../v04-computation/07-reductions.md), the parallel scan.) How many rounds does the doubling scan use for $n = 8$ items, and what property of the combining operation makes a scan valid?
-5. (Volume II, [Chapter 2](../v02-learning/02-linear-regression.md), gradient descent.) For one example $(\mathbf{x}, y)$ and the loss $\tfrac12(y - \mathbf{w}\cdot\mathbf{x})^2$, what is one gradient step of rate $\eta$?
-6. (Volume V, [Chapter 12](../v05-sequences/12-kv-cache.md), the KV cache.) A layer has 4 key-value heads of width 256 and stores bf16. How many bytes does a token add to the cache of one layer, and of a stack of 64 such layers?
+1. Volume V, [Chapter 7](../v05-sequences/07-self-attention.md), scaled dot-product attention and the causal mask: What does row $i$ of causal attention output, written with the scores $\mathbf{q}_i\cdot\mathbf{k}_j$, and why must the layer look at every earlier key before it can write the row?
+2. Volume V, [Chapter 5](../v05-sequences/05-recurrent-networks.md), recurrent networks: A recurrent cell carries a state $\mathbf{h}_t$ from token to token. How many sequential steps does the forward pass over $T$ tokens take, and why can a larger device not shorten that?
+3. Volume V, [Chapter 5](../v05-sequences/05-recurrent-networks.md), gating: A forget gate of 0.9 multiplies a stored value at every step. How much of a value written 10 steps ago remains?
+4. Volume IV, [Chapter 7](../v04-computation/07-reductions.md), the parallel scan: How many rounds does the doubling scan use for $n = 8$ items, and what property of the combining operation makes a scan valid?
+5. Volume II, [Chapter 2](../v02-learning/02-linear-regression.md), gradient descent: For one example $(\mathbf{x}, y)$ and the loss $\tfrac12(y - \mathbf{w}\cdot\mathbf{x})^2$, what is one gradient step of rate $\eta$?
+6. Volume V, [Chapter 12](../v05-sequences/12-kv-cache.md), the KV cache: A layer has 4 key-value heads of width 256 and stores bf16. How many bytes does a token add to the cache of one layer, and of a stack of 64 such layers?
 
 ## Attention without the softmax
 

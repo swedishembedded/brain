@@ -27,10 +27,10 @@ The cure is to replace luck with a requirement. If the codes are to be drawn fro
 
 The bound that does it rests on four earlier ideas.
 
-1. (Volume III, [Chapter 13](../v03-neural-networks/13-first-models.md), the autoencoder.) What loss is an autoencoder trained on, and why does a trained code determine the span of the decoder's columns but not a particular basis of it?
-2. (Volume I, [Chapter 13](../v01-mathematics/13-information-theory.md), the Kullback-Leibler (KL) divergence.) What does $D_{\mathrm{KL}}(p \,\Vert\, q)$ measure, when is it zero, and is it symmetric? Compute it in nats for $p = \mathrm{Bernoulli}(\tfrac12)$ and $q = \mathrm{Bernoulli}(\tfrac14)$.
-3. (Volume I, [Chapter 11](../v01-mathematics/11-distributions.md), the Gaussian distribution.) If $\xi \sim \mathcal{N}(0, 1)$, what is the distribution of $m + \sigma\xi$?
-4. ([Chapter 1](01-generative-modeling.md), latent variables.) How is a sample drawn from a latent-variable model, and what is the model's probability of an observation?
+1. Volume III, [Chapter 13](../v03-neural-networks/13-first-models.md), the autoencoder: What loss is an autoencoder trained on, and why does a trained code determine the span of the decoder's columns but not a particular basis of it?
+2. Volume I, [Chapter 13](../v01-mathematics/13-information-theory.md), the Kullback-Leibler (KL) divergence: What does $D_{\mathrm{KL}}(p \,\Vert\, q)$ measure, when is it zero, and is it symmetric? Compute it in nats for $p = \mathrm{Bernoulli}(\tfrac12)$ and $q = \mathrm{Bernoulli}(\tfrac14)$.
+3. Volume I, [Chapter 11](../v01-mathematics/11-distributions.md), the Gaussian distribution: If $\xi \sim \mathcal{N}(0, 1)$, what is the distribution of $m + \sigma\xi$?
+4. [Chapter 1](01-generative-modeling.md), latent variables: How is a sample drawn from a latent-variable model, and what is the model's probability of an observation?
 
 ## Readings with a hidden cause
 

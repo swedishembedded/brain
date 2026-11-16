@@ -62,12 +62,12 @@ and its inverse the logarithm (Chapters 1 and 2), and the number $e$
 (Chapter 1); six questions bring them back, and one that resists is worth a
 return to the chapter named before the limits begin.
 
-1. (Chapter 2, composition.) With $f(x) = x^2$ and $g(x) = 3x + 1$, compute $(f \circ g)(2)$ and $(g \circ f)(2)$.
-2. (Chapter 2, polynomials.) Evaluate $p(x) = 2x^3 - 5x + 1$ at $x = 2$.
-3. (Chapter 2, slope of a line.) What is the slope of the line through $(1, 3)$ and $(4, 9)$?
-4. (Chapter 2, exponentials.) What are $e^0$ and $e^{a}\,e^{b}$ written as one power?
-5. (Chapter 1, the number $e$.) What does $(1 + 1/n)^n$ approach as $n$ grows, and what does a computer print for it at $n = 10^{16}$ and why?
-6. (Chapter 1, square roots by repeated improvement.) The fractions $1$, $3/2$, $17/12$, $577/408$ approach $\sqrt{2}$. What happened to the number of correct digits at each step?
+1. Chapter 2, composition: With $f(x) = x^2$ and $g(x) = 3x + 1$, compute $(f \circ g)(2)$ and $(g \circ f)(2)$.
+2. Chapter 2, polynomials: Evaluate $p(x) = 2x^3 - 5x + 1$ at $x = 2$.
+3. Chapter 2, slope of a line: What is the slope of the line through $(1, 3)$ and $(4, 9)$?
+4. Chapter 2, exponentials: What are $e^0$ and $e^{a}\,e^{b}$ written as one power?
+5. Chapter 1, the number $e$: What does $(1 + 1/n)^n$ approach as $n$ grows, and what does a computer print for it at $n = 10^{16}$ and why?
+6. Chapter 1, square roots by repeated improvement: The fractions $1$, $3/2$, $17/12$, $577/408$ approach $\sqrt{2}$. What happened to the number of correct digits at each step?
 
 ## Slope: from a line to a curve
 

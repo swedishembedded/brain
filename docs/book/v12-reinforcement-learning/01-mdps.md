@@ -13,10 +13,10 @@ The two-button game of Volume II hid nothing of this kind. Its buttons never cha
 
 A decision process begins from four ideas in earlier volumes.
 
-1. (Volume II, Chapter 1, "The Learning Problem", reinforcement learning, overview.) In the two-button game, what did the agent's choice change, and what did it leave unchanged?
-2. (Volume I, Chapter 10, "Probability: Reasoning Under Uncertainty", conditional probability.) A day's demand is $0$, $1$ or $2$ with probabilities $0.3$, $0.4$ and $0.3$. Given that at least one customer came, what is the probability that two did?
-3. (Volume I, Chapter 10, expectation and its linearity.) With one unit on the shelf, the units sold are $\min(D, 1)$. What is its expectation, and what is the expectation of $4 \min(D, 1) - 2$?
-4. (Volume I, Chapter 4, "Matrices as Linear Maps", solving a linear system.) Solve $x - 0.5y = 2$ and $-0.5x + y = 1$.
+1. Volume II, Chapter 1, "The Learning Problem", reinforcement learning, overview: In the two-button game, what did the agent's choice change, and what did it leave unchanged?
+2. Volume I, Chapter 10, "Probability: Reasoning Under Uncertainty", conditional probability: A day's demand is $0$, $1$ or $2$ with probabilities $0.3$, $0.4$ and $0.3$. Given that at least one customer came, what is the probability that two did?
+3. Volume I, Chapter 10, expectation and its linearity: With one unit on the shelf, the units sold are $\min(D, 1)$. What is its expectation, and what is the expectation of $4 \min(D, 1) - 2$?
+4. Volume I, Chapter 4, "Matrices as Linear Maps", solving a linear system: Solve $x - 0.5y = 2$ and $-0.5x + y = 1$.
 
 ## A shop as a table of probabilities
 

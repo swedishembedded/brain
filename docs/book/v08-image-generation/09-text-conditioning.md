@@ -11,11 +11,11 @@ Chapter 8 took the prompt as given, a sequence of vectors that "some encoder pro
 
 Conditioning on text leans on five earlier ideas.
 
-1. (Volume V, [Chapter 14](../v05-sequences/14-encoders.md), the bidirectional encoder.) A text of 5 tokens is padded to a window of 8 and read under the full mask. How many keys does the query at position 0 read, and what does that do to the vectors of the 5 real positions?
-2. (Volume V, [Chapter 6](../v05-sequences/06-seq2seq.md), cross-attention.) Image queries at 6 positions read a prompt of 4 rows. What is the shape of the matrix of attention weights, what does each row of it sum to, and which side has its vectors rewritten by the layer?
-3. (Volume VII, [Chapter 8](../v07-vision/08-clip.md), contrastive pretraining.) In the CLIP text tower, at which position is the readout taken, after what operation, and why does the code take the first position holding the largest id?
-4. (Volume VI, [Chapter 1](../v06-language-models/01-modern-decoder.md), the modern decoder recipe.) Qwen3-4B has width 2560, 32 query heads and 8 key-value heads, each of width 128. What is the width of its attention output, and how many numbers do the keys and values of one token hold in one layer?
-5. (Volume V, [Chapter 9](../v05-sequences/09-transformer-block.md), the cost of a block.) By the rule of that chapter, how many FLOPs do the four attention projections of one block cost over $T = 77$ tokens at width $D = 768$?
+1. Volume V, [Chapter 14](../v05-sequences/14-encoders.md), the bidirectional encoder: A text of 5 tokens is padded to a window of 8 and read under the full mask. How many keys does the query at position 0 read, and what does that do to the vectors of the 5 real positions?
+2. Volume V, [Chapter 6](../v05-sequences/06-seq2seq.md), cross-attention: Image queries at 6 positions read a prompt of 4 rows. What is the shape of the matrix of attention weights, what does each row of it sum to, and which side has its vectors rewritten by the layer?
+3. Volume VII, [Chapter 8](../v07-vision/08-clip.md), contrastive pretraining: In the CLIP text tower, at which position is the readout taken, after what operation, and why does the code take the first position holding the largest id?
+4. Volume VI, [Chapter 1](../v06-language-models/01-modern-decoder.md), the modern decoder recipe: Qwen3-4B has width 2560, 32 query heads and 8 key-value heads, each of width 128. What is the width of its attention output, and how many numbers do the keys and values of one token hold in one layer?
+5. Volume V, [Chapter 9](../v05-sequences/09-transformer-block.md), the cost of a block: By the rule of that chapter, how many FLOPs do the four attention projections of one block cost over $T = 77$ tokens at width $D = 768$?
 
 ## What the denoiser is handed, counted
 

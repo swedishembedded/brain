@@ -11,11 +11,11 @@ Three-dimensional vision starts from that line and from the machine that draws i
 
 Writing the ray down exactly takes five tools from earlier volumes:
 
-1. (Volume I, [Chapter 4](../v01-mathematics/04-matrices.md), matrix-vector products.) The matrix with rows $(500, 0, 320)$, $(0, 500, 240)$ and $(0, 0, 1)$ is applied to the vector $(1, 2, 4)$. What is the result, and what are the three entries of it made of in terms of the columns of the matrix?
-2. (Volume I, [Chapter 6](../v01-mathematics/06-decompositions.md), rotation matrices.) What do $\mathbf{R}^\top \mathbf{R}$ and $\det\mathbf{R}$ equal for a rotation matrix $\mathbf{R}$ of three-dimensional space, what is $\mathbf{R}^{-1}$, and where does the quarter turn about the $z$ axis send $(1, 0, 0)$?
-3. (Volume I, [Chapter 6](../v01-mathematics/06-decompositions.md), the singular value decomposition.) A matrix $\mathbf{A}$ has more rows than columns. Which unit vector $\mathbf{v}$ makes $\lVert\mathbf{A}\mathbf{v}\rVert$ smallest, in terms of the decomposition, and what is the smallest value?
-4. (Volume I, [Chapter 8](../v01-mathematics/08-multivariable-calculus.md), the Jacobian.) What is the Jacobian of $\mathbf{f}(x, y) = (x^2,\ xy)$ at $(1, 2)$, and what does it say about $\mathbf{f}(1 + a, 2 + b)$ for small $a$ and $b$?
-5. (Volume VII, [Chapter 5](../v07-vision/05-dense-prediction.md), the scale ambiguity.) A box one metre away is imaged by a camera. Where does the same box land when the whole scene is made twice as large about the camera, and what can a network that sees only the picture still say about depth?
+1. Volume I, [Chapter 4](../v01-mathematics/04-matrices.md), matrix-vector products: The matrix with rows $(500, 0, 320)$, $(0, 500, 240)$ and $(0, 0, 1)$ is applied to the vector $(1, 2, 4)$. What is the result, and what are the three entries of it made of in terms of the columns of the matrix?
+2. Volume I, [Chapter 6](../v01-mathematics/06-decompositions.md), rotation matrices: What do $\mathbf{R}^\top \mathbf{R}$ and $\det\mathbf{R}$ equal for a rotation matrix $\mathbf{R}$ of three-dimensional space, what is $\mathbf{R}^{-1}$, and where does the quarter turn about the $z$ axis send $(1, 0, 0)$?
+3. Volume I, [Chapter 6](../v01-mathematics/06-decompositions.md), the singular value decomposition: A matrix $\mathbf{A}$ has more rows than columns. Which unit vector $\mathbf{v}$ makes $\lVert\mathbf{A}\mathbf{v}\rVert$ smallest, in terms of the decomposition, and what is the smallest value?
+4. Volume I, [Chapter 8](../v01-mathematics/08-multivariable-calculus.md), the Jacobian: What is the Jacobian of $\mathbf{f}(x, y) = (x^2,\ xy)$ at $(1, 2)$, and what does it say about $\mathbf{f}(1 + a, 2 + b)$ for small $a$ and $b$?
+5. Volume VII, [Chapter 5](../v07-vision/05-dense-prediction.md), the scale ambiguity: A box one metre away is imaged by a camera. Where does the same box land when the whole scene is made twice as large about the camera, and what can a network that sees only the picture still say about depth?
 
 ## The pinhole and its four numbers
 

@@ -38,17 +38,17 @@ shows it is called the roofline. Chapter 2 ended with a count of operations and 
 
 The method leans on six earlier ideas, so bring them back before the counting starts.
 
-1. (Volume I, Chapter 4, matrix multiplication.) How many floating-point operations does the product of an $[m, k]$
+1. Volume I, Chapter 4, matrix multiplication: How many floating-point operations does the product of an $[m, k]$
    matrix and a $[k, n]$ matrix cost, counting a multiplication and an addition as one operation each?
-2. (Volume I, Chapter 16, asymptotic complexity.) One quantity grows as $n^3$ and another as $n^2$. How does their ratio
+2. Volume I, Chapter 16, asymptotic complexity: One quantity grows as $n^3$ and another as $n^2$. How does their ratio
    grow, and in the notation of that chapter what is it?
-3. (Chapter 2, cache hierarchy.) A program reads one byte that is not in any cache. How many bytes travel
+3. Chapter 2, cache hierarchy: A program reads one byte that is not in any cache. How many bytes travel
    from main memory, and why?
-4. (Chapter 2, tiling.) What does tiling a loop change about a computation: its operation count, or the number of
+4. Chapter 2, tiling: What does tiling a loop change about a computation: its operation count, or the number of
    cache lines it fetches?
-5. (Chapter 1, number formats.) How many bytes per weight does fp16 take, and how many does int8 with one
+5. Chapter 1, number formats: How many bytes per weight does fp16 take, and how many does int8 with one
    32-bit scale for every 32 values take?
-6. (Volume III, Chapters 5 and 7.) The backward pass of a linear layer does about how many times the arithmetic of its forward
+6. Volume III, Chapters 5 and 7: The backward pass of a linear layer does about how many times the arithmetic of its forward
    pass? And an AdamW update of one parameter does 16 operations on how many bytes of traffic?
 
 ## Two rates of a machine

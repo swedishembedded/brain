@@ -13,12 +13,12 @@ Survival analysis learns from that information. The target is the time until som
 
 Six earlier ideas come before the survival machinery.
 
-1. (Volume I, Chapter 17) The exponential waiting time of rate $\lambda$ has the cumulative distribution $1 - e^{-\lambda x}$. Which draw turns a uniform number $u$ into such a time, and what is the mean?
-2. (Volume I, Chapter 9) What does the fundamental theorem say about the derivative of $\int_0^t r(s)\,ds$ with respect to $t$, and how does the trapezoid rule approximate that integral from values of $r$ on a grid?
-3. (Volume I, Chapter 10) What is the conditional probability $P(A \mid B)$, and what does it say about the probability of surviving two stretches of time in a row?
-4. (Volume II, Chapter 4) What is the likelihood of data as a function of a parameter, why do we minimize its negative logarithm, and what is the maximum-likelihood estimate of a coin's probability of heads after $d$ heads in $n$ flips?
-5. (Volume II, Chapter 3) A logistic model gives the probability $p = \sigma(z)$ of a label $y$. What loss does it minimize, and what is the gradient of that loss with respect to $z$?
-6. (Volume II, Chapter 6) The area under the ROC curve can be read as a count of pairs. Which pairs, and what credit does a tie in the score get?
+1. Volume I, Chapter 17: The exponential waiting time of rate $\lambda$ has the cumulative distribution $1 - e^{-\lambda x}$. Which draw turns a uniform number $u$ into such a time, and what is the mean?
+2. Volume I, Chapter 9: What does the fundamental theorem say about the derivative of $\int_0^t r(s)\,ds$ with respect to $t$, and how does the trapezoid rule approximate that integral from values of $r$ on a grid?
+3. Volume I, Chapter 10: What is the conditional probability $P(A \mid B)$, and what does it say about the probability of surviving two stretches of time in a row?
+4. Volume II, Chapter 4: What is the likelihood of data as a function of a parameter, why do we minimize its negative logarithm, and what is the maximum-likelihood estimate of a coin's probability of heads after $d$ heads in $n$ flips?
+5. Volume II, Chapter 3: A logistic model gives the probability $p = \sigma(z)$ of a label $y$. What loss does it minimize, and what is the gradient of that loss with respect to $z$?
+6. Volume II, Chapter 6: The area under the ROC curve can be read as a count of pairs. Which pairs, and what credit does a tie in the score get?
 
 ## A log read on a particular day
 

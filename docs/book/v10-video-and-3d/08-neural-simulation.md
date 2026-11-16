@@ -9,11 +9,11 @@ A published wiring diagram of an animal's nerve cord is two spreadsheets. One ha
 
 Neural simulation starts from five earlier ideas.
 
-1. (Volume I, [Chapter 9](../v01-mathematics/09-integrals-and-odes.md), differential equations.) A quantity obeys $dx/dt = -kx$ with $x(0) = x_0$. What is $x(t)$, and why is it the only solution?
-2. (Volume I, [Chapter 9](../v01-mathematics/09-integrals-and-odes.md), Euler's method.) One Euler step of size $h$ on that equation multiplies $x$ by what? For which $kh$ does one step cross zero, and for which does the sequence of steps grow in size?
-3. (Volume VIII, [Chapter 7](../v08-image-generation/07-samplers-and-guidance.md), Euler steps in a sampler.) The sampler follows an ordinary differential equation (ODE) in the noise level by Euler steps. If the number of steps over a fixed span is doubled, what happens to the error of the end point, and what has the method not changed about the ODE it follows?
-4. (Volume III, [Chapter 13](../v03-neural-networks/13-first-models.md), the learned controller.) A network is trained to imitate a classical controller of a tank. Which number says that it is a controller, and why is the imitation loss not that number?
-5. ([Chapter 7](07-world-models.md), a learned simulator.) A learned one-step model of a cart has a small error when it is fed the true state and a large one when it is fed its own output. By what mechanism does the error grow?
+1. Volume I, [Chapter 9](../v01-mathematics/09-integrals-and-odes.md), differential equations: A quantity obeys $dx/dt = -kx$ with $x(0) = x_0$. What is $x(t)$, and why is it the only solution?
+2. Volume I, [Chapter 9](../v01-mathematics/09-integrals-and-odes.md), Euler's method: One Euler step of size $h$ on that equation multiplies $x$ by what? For which $kh$ does one step cross zero, and for which does the sequence of steps grow in size?
+3. Volume VIII, [Chapter 7](../v08-image-generation/07-samplers-and-guidance.md), Euler steps in a sampler: The sampler follows an ordinary differential equation (ODE) in the noise level by Euler steps. If the number of steps over a fixed span is doubled, what happens to the error of the end point, and what has the method not changed about the ODE it follows?
+4. Volume III, [Chapter 13](../v03-neural-networks/13-first-models.md), the learned controller: A network is trained to imitate a classical controller of a tank. Which number says that it is a controller, and why is the imitation loss not that number?
+5. [Chapter 7](07-world-models.md), a learned simulator: A learned one-step model of a cart has a small error when it is fed the true state and a large one when it is fed its own output. By what mechanism does the error grow?
 
 ## From two files to a graph with signs
 

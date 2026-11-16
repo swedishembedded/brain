@@ -37,16 +37,16 @@ for so that memory answers all of them with few transactions.
 
 A GPU is easiest to understand with six earlier ideas fresh in mind, so bring them back first.
 
-1. (Volume I, Chapter 4, matrix multiplication.) How many floating-point operations does the product of an $[n, n]$ matrix
+1. Volume I, Chapter 4, matrix multiplication: How many floating-point operations does the product of an $[n, n]$ matrix
    with an $[n, n]$ matrix cost, counting a multiplication and an addition as one operation each?
-2. (Volume I, Chapter 5, row-major layout and stride.) In a row-major $[1024, 1024]$ matrix of 4-byte numbers, how many bytes
+2. Volume I, Chapter 5, row-major layout and stride: In a row-major $[1024, 1024]$ matrix of 4-byte numbers, how many bytes
    separate element $[i, j]$ from element $[i, j + 1]$, and how many separate it from element $[i + 1, j]$?
-3. (Chapter 2, cache line.) A program reads one byte that is in no cache. How many bytes travel from memory?
-4. (Chapter 2, SIMD.) What does one instruction do to a 256-bit register holding eight f32 numbers, and what is
+3. Chapter 2, cache line: A program reads one byte that is in no cache. How many bytes travel from memory?
+4. Chapter 2, SIMD: What does one instruction do to a 256-bit register holding eight f32 numbers, and what is
    one of its eight positions called?
-5. (Chapter 2, thread parallelism.) What does a `parallel for` promise about its iterations, and what must a
+5. Chapter 2, thread parallelism: What does a `parallel for` promise about its iterations, and what must a
    program do when the iterations have to combine a result?
-6. (Chapter 3, memory bandwidth and the roofline.) The vector addition has an arithmetic intensity of $1/12$
+6. Chapter 3, memory bandwidth and the roofline: The vector addition has an arithmetic intensity of $1/12$
    FLOP per byte. On the GPU of Chapter 3 (peak 40,000 (GFLOP/s), bandwidth 800 (GB/s)), what fraction of the peak can it reach?
 
 ## The design of a GPU

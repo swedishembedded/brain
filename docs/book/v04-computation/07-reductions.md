@@ -60,12 +60,12 @@ So the question has two halves. Why is the obvious way slow? Because its depth i
 
 Six ideas from earlier chapters carry the argument, from the tree of Volume I to the barrier rule of Chapter 5.
 
-1. (Volume I, Chapter 16, reduction algorithm.) How many layers does a tree need to add 1,000 numbers, and how many additions does it perform?
-2. (Volume I, Chapter 16, prefix sum.) Write the exclusive scan of $[2, 7, 1, 8]$. How many additions does the doubling scan of that chapter use for $n = 8$?
-3. (Volume I, Chapter 15, floating point.) In float32, what are $(1 + 2^{-24}) + 2^{-24}$ and $1 + (2^{-24} + 2^{-24})$?
-4. (Chapter 4, workgroup.) Two invocations belong to different workgroups of one dispatch. Can the first wait for something the second writes?
-5. (Chapter 4, occupancy.) A kernel has workgroups of 64 invocations, 24 registers per invocation and 512 bytes of shared memory per workgroup. How many workgroups are resident on a compute unit of the model, and what is its occupancy?
-6. (Chapter 5, the barrier rule.) A kernel begins with `if g >= N: return` and then reaches a `barrier`. When is that legal?
+1. Volume I, Chapter 16, reduction algorithm: How many layers does a tree need to add 1,000 numbers, and how many additions does it perform?
+2. Volume I, Chapter 16, prefix sum: Write the exclusive scan of $[2, 7, 1, 8]$. How many additions does the doubling scan of that chapter use for $n = 8$?
+3. Volume I, Chapter 15, floating point: In float32, what are $(1 + 2^{-24}) + 2^{-24}$ and $1 + (2^{-24} + 2^{-24})$?
+4. Chapter 4, workgroup: Two invocations belong to different workgroups of one dispatch. Can the first wait for something the second writes?
+5. Chapter 4, occupancy: A kernel has workgroups of 64 invocations, 24 registers per invocation and 512 bytes of shared memory per workgroup. How many workgroups are resident on a compute unit of the model, and what is its occupancy?
+6. Chapter 5, the barrier rule: A kernel begins with `if g >= N: return` and then reaches a `barrier`. When is that legal?
 
 ## Summing in one workgroup: the tree
 

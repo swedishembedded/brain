@@ -9,12 +9,12 @@ A model that someone else trained reaches you as a directory of files, and nothi
 
 The test subject is the tiny decoder of Chapter 1 ($V = 11$, $D = 6$, two layers, four query heads over two key-value heads of width 4, $F = 10$), published here in a layout that has the awkward habits real ones have, and every claim below is measured on it. Reading a published layout calls on six earlier ideas, from rounding to the recipe of the decoder itself:
 
-1. (Volume I, [Chapter 15](../v01-mathematics/15-floating-point.md), rounding error.) What is $u$ for 32-bit numbers, and what does that chapter bound for the error of a sum of $n$ numbers added left to right, relative to what?
-2. (Volume IV, [Chapter 1](../v04-computation/01-number-formats.md), bf16 and fp16.) How many exponent and fraction bits do bf16 and fp16 have, and how do you turn a bf16 bit pattern into the 32-bit pattern of the same number?
-3. (Volume I, [Chapter 5](../v01-mathematics/05-arrays.md), row-major layout.) A matrix of 2 rows and 3 columns is stored row by row in a flat buffer. Which position holds the entry in row 1, column 0, and what is the shape of its transpose?
-4. (Volume I, [Chapter 3](../v01-mathematics/03-vectors.md), cosine similarity.) What happens to the cosine similarity of two vectors if one of them is multiplied by 3?
-5. (Volume III, [Chapter 6](../v03-neural-networks/06-gradient-checking.md), relative error and test dimensions.) Why does a gradient check use dimensions that are all different, and what does a relative error add that an absolute one does not show?
-6. ([Chapter 1](01-modern-decoder.md), the modern decoder recipe.) What are the shapes of $\mathbf{W}_Q$ and $\mathbf{W}_K$ of the tiny decoder, and which tensors does the head have when it is tied and when it is not?
+1. Volume I, [Chapter 15](../v01-mathematics/15-floating-point.md), rounding error: What is $u$ for 32-bit numbers, and what does that chapter bound for the error of a sum of $n$ numbers added left to right, relative to what?
+2. Volume IV, [Chapter 1](../v04-computation/01-number-formats.md), bf16 and fp16: How many exponent and fraction bits do bf16 and fp16 have, and how do you turn a bf16 bit pattern into the 32-bit pattern of the same number?
+3. Volume I, [Chapter 5](../v01-mathematics/05-arrays.md), row-major layout: A matrix of 2 rows and 3 columns is stored row by row in a flat buffer. Which position holds the entry in row 1, column 0, and what is the shape of its transpose?
+4. Volume I, [Chapter 3](../v01-mathematics/03-vectors.md), cosine similarity: What happens to the cosine similarity of two vectors if one of them is multiplied by 3?
+5. Volume III, [Chapter 6](../v03-neural-networks/06-gradient-checking.md), relative error and test dimensions: Why does a gradient check use dimensions that are all different, and what does a relative error add that an absolute one does not show?
+6. [Chapter 1](01-modern-decoder.md), the modern decoder recipe: What are the shapes of $\mathbf{W}_Q$ and $\mathbf{W}_K$ of the tiny decoder, and which tensors does the head have when it is tied and when it is not?
 
 ## A file that is only a header and bytes
 

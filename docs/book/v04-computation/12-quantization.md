@@ -39,13 +39,13 @@ block, all follow from it, and so does the question of which tensors may have fe
 
 Five older ideas carry what follows: the integer code and the fp8 format of Chapter 1, rounding to a grid, the mean squared error, and the roofline account of a decode step.
 
-1. (Chapter 1, number formats.) An int8 code $q = -37$ is stored with the scale $\Delta = 0.01$. What number does it stand for, and what is the largest error that
+1. Chapter 1, number formats: An int8 code $q = -37$ is stored with the scale $\Delta = 0.01$. What number does it stand for, and what is the largest error that
    rounding to the nearest code can make?
-2. (Chapter 1, fp8 formats.) What is the largest finite E4M3 number, and why is an 8-bit floating-point format always used with a scale per block of values?
-3. (Volume I, Chapter 15, floating point.) A number is rounded to the nearest point of a grid with spacing $h$. What is the largest error, and what
+2. Chapter 1, fp8 formats: What is the largest finite E4M3 number, and why is an 8-bit floating-point format always used with a scale per block of values?
+3. Volume I, Chapter 15, floating point: A number is rounded to the nearest point of a grid with spacing $h$. What is the largest error, and what
    is it called when the grid is the numbers of a floating-point format?
-4. (Volume II, Chapter 2, linear regression.) The errors of three predictions are $0.1$, $-0.2$ and $0.3$. What is their mean squared error, and in what units is its square root?
-5. (Chapter 3, the roofline.) A model with $7 \times 10^9$ weights is stored at 2 bytes per weight. How many bytes does one token read at batch size 1, and what limits the speed of decoding?
+4. Volume II, Chapter 2, linear regression: The errors of three predictions are $0.1$, $-0.2$ and $0.3$. What is their mean squared error, and in what units is its square root?
+5. Chapter 3, the roofline: A model with $7 \times 10^9$ weights is stored at 2 bytes per weight. How many bytes does one token read at batch size 1, and what limits the speed of decoding?
 
 ## Affine quantization: a step and a zero
 

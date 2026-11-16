@@ -11,12 +11,12 @@ The first job of a vision model's input is therefore not clever: it is to be exa
 
 That path crosses six ideas from earlier volumes, from strides and rounding to the tolerance of a parity test; bring them back first.
 
-1. (Volume I, [Chapter 5](../v01-mathematics/05-arrays.md), strides.) A row-major tensor has shape $[2, 3, 4]$. What are its strides in elements, and at what offset does the element with index $(1, 2, 3)$ sit?
-2. (Volume I, [Chapter 15](../v01-mathematics/15-floating-point.md), rounding error.) For 32-bit numbers, what is the unit round-off $u$, and how large can the relative error of one rounded addition, subtraction, multiplication or division be?
-3. (Volume IV, [Chapter 1](../v04-computation/01-number-formats.md), binary representation.) How many different values can 8 bits hold, and which is the largest as a non-negative number?
-4. (Volume I, [Chapter 2](../v01-mathematics/02-functions.md), piecewise functions.) A function is defined by one rule on $x \le a$ and another on $x > a$. What must hold at $a$ for the function to have no jump there, and what more for it to have no kink?
-5. (Volume IV, [Chapter 13](../v04-computation/13-npu.md), calibration sets.) What is a calibration set for, and what goes wrong if it is not representative of the inputs the deployed model will see?
-6. (Volume VI, [Chapter 2](../v06-language-models/02-importing-models.md), parity tolerance.) How is the tolerance of a comparison between two implementations of the same function derived, and what does a difference above it mean?
+1. Volume I, [Chapter 5](../v01-mathematics/05-arrays.md), strides: A row-major tensor has shape $[2, 3, 4]$. What are its strides in elements, and at what offset does the element with index $(1, 2, 3)$ sit?
+2. Volume I, [Chapter 15](../v01-mathematics/15-floating-point.md), rounding error: For 32-bit numbers, what is the unit round-off $u$, and how large can the relative error of one rounded addition, subtraction, multiplication or division be?
+3. Volume IV, [Chapter 1](../v04-computation/01-number-formats.md), binary representation: How many different values can 8 bits hold, and which is the largest as a non-negative number?
+4. Volume I, [Chapter 2](../v01-mathematics/02-functions.md), piecewise functions: A function is defined by one rule on $x \le a$ and another on $x > a$. What must hold at $a$ for the function to have no jump there, and what more for it to have no kink?
+5. Volume IV, [Chapter 13](../v04-computation/13-npu.md), calibration sets: What is a calibration set for, and what goes wrong if it is not representative of the inputs the deployed model will see?
+6. Volume VI, [Chapter 2](../v06-language-models/02-importing-models.md), parity tolerance: How is the tolerance of a comparison between two implementations of the same function derived, and what does a difference above it mean?
 
 ## A grid of samples
 

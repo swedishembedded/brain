@@ -11,12 +11,12 @@ For writing, that mask is a requirement and not a defect. A model that will be s
 
 An encoder reuses much of the decoder stack, so these earlier ideas come first.
 
-1. ([Chapter 7](07-self-attention.md), the causal mask.) For a text of four tokens, which pairs (query $i$, key $j$) does the causal mask allow, and how many of the 16 are they?
-2. ([Chapter 10](10-training-gpt.md), loss masking.) A row has 12 positions and 5 of them are supervised. How is the loss of the row written from the 12 per-position cross-entropies, and what is the sum divided by?
-3. ([Chapter 2](02-tokenization.md), WordPiece.) A vocabulary holds `purr`, `bark` and `##ed` but not `purred`. How does greedy longest-match cut `purred`, and what does the prefix `##` say?
-4. (Volume I, [Chapter 3](../v01-mathematics/03-vectors.md), cosine similarity.) What is the cosine of $(3, 4)$ and $(4, 3)$, and what is the cosine of $(3, 4)$ and $(30, 40)$?
-5. (Volume III, [Chapter 3](../v03-neural-networks/03-softmax.md), softmax cross-entropy.) The logits are $(2, 0, 0)$ and the correct class is the first. What are the loss and the gradient of the loss with respect to the first logit?
-6. ([Chapter 11](11-decoding.md), temperature.) What does dividing the logits $(2, 0)$ by a temperature $\tau = 0.5$ do to their softmax, and what happens as $\tau$ goes to 0?
+1. [Chapter 7](07-self-attention.md), the causal mask: For a text of four tokens, which pairs (query $i$, key $j$) does the causal mask allow, and how many of the 16 are they?
+2. [Chapter 10](10-training-gpt.md), loss masking: A row has 12 positions and 5 of them are supervised. How is the loss of the row written from the 12 per-position cross-entropies, and what is the sum divided by?
+3. [Chapter 2](02-tokenization.md), WordPiece: A vocabulary holds `purr`, `bark` and `##ed` but not `purred`. How does greedy longest-match cut `purred`, and what does the prefix `##` say?
+4. Volume I, [Chapter 3](../v01-mathematics/03-vectors.md), cosine similarity: What is the cosine of $(3, 4)$ and $(4, 3)$, and what is the cosine of $(3, 4)$ and $(30, 40)$?
+5. Volume III, [Chapter 3](../v03-neural-networks/03-softmax.md), softmax cross-entropy: The logits are $(2, 0, 0)$ and the correct class is the first. What are the loss and the gradient of the loss with respect to the first logit?
+6. [Chapter 11](11-decoding.md), temperature: What does dividing the logits $(2, 0)$ by a temperature $\tau = 0.5$ do to their softmax, and what happens as $\tau$ goes to 0?
 
 ## One blank, two masks
 

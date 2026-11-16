@@ -11,12 +11,12 @@ The model of this example, Qwen3-Omni in brain's crate `crates/qwen3omnimoe`, is
 
 An omni model combines many earlier parts, and six of them are recalled here.
 
-1. ([Chapter 4](04-speech-recognition.md), the speech encoder.) A clip of 2 seconds at 16 kHz goes through a log-mel front end with a hop of 160 samples and an encoder that cuts the frames into chunks of 100 and takes each chunk through three stride-2 convolutions with padding 1. How many rows does the clip become?
-2. ([Volume VII, Chapter 9](../v07-vision/09-vlms.md), the vision projector.) A 448 by 448 picture is cut into patches of 16 by 16 pixels, and a projector merges each 2 by 2 block of patches into one row. How many rows does it hand to the decoder?
-3. ([Volume VII, Chapter 9](../v07-vision/09-vlms.md), multi-axis positions.) A block of picture rows has the grid $(t, h, w) = (1, 2, 2)$ and starts where the position counter reads $c$. Which triples do its rows get, and where does the counter stand after it?
-4. ([Chapter 6](06-speech-synthesis.md), the codec language model.) Why does the Talker advance one position for each frame of 16 codes and not one for each code, and which network writes the codes 1 to 15?
-5. ([Volume VI, Chapter 4](../v06-language-models/04-mixture-of-experts.md), the router.) A layer has 128 experts and a token is sent to 8. What share of the expert parameters does the token take part in, and how are the 8 weights of the combination formed?
-6. ([Chapter 3](03-audio-codecs.md), audio tokens.) A codec writes 12.5 columns of 16 codes a second, each code from 2048 entries. How many integers and how many bits is that in a second?
+1. [Chapter 4](04-speech-recognition.md), the speech encoder: A clip of 2 seconds at 16 kHz goes through a log-mel front end with a hop of 160 samples and an encoder that cuts the frames into chunks of 100 and takes each chunk through three stride-2 convolutions with padding 1. How many rows does the clip become?
+2. [Volume VII, Chapter 9](../v07-vision/09-vlms.md), the vision projector: A 448 by 448 picture is cut into patches of 16 by 16 pixels, and a projector merges each 2 by 2 block of patches into one row. How many rows does it hand to the decoder?
+3. [Volume VII, Chapter 9](../v07-vision/09-vlms.md), multi-axis positions: A block of picture rows has the grid $(t, h, w) = (1, 2, 2)$ and starts where the position counter reads $c$. Which triples do its rows get, and where does the counter stand after it?
+4. [Chapter 6](06-speech-synthesis.md), the codec language model: Why does the Talker advance one position for each frame of 16 codes and not one for each code, and which network writes the codes 1 to 15?
+5. [Volume VI, Chapter 4](../v06-language-models/04-mixture-of-experts.md), the router: A layer has 128 experts and a token is sent to 8. What share of the expert parameters does the token take part in, and how are the 8 weights of the combination formed?
+6. [Chapter 3](03-audio-codecs.md), audio tokens: A codec writes 12.5 columns of 16 codes a second, each code from 2048 entries. How many integers and how many bits is that in a second?
 
 ## Rows from three kinds of input
 

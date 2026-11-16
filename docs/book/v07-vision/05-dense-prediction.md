@@ -58,11 +58,11 @@ Producing the first grid is **semantic segmentation**: a class for every pixel, 
 
 Receptive fields, the transposed convolution, resampling, the IoU and least squares all return in what follows; recall each before it is put to work.
 
-1. ([Chapter 3](03-cnns.md), convolutional network and receptive field.) A $3 \times 3$ convolution, a $2 \times 2$ max pool with stride 2 and another $3 \times 3$ convolution are stacked. How many input pixels along one axis does one output value read?
-2. ([Chapter 2](02-convolution.md), transposed convolution.) A transposed convolution with $k = 2$, stride 2 and no padding is applied to a map of side 4. What is the side of its output, and does any output position receive two taps?
-3. ([Chapter 1](01-images.md), image resampling.) A row of 4 pixels is resized to 8. Under the half-pixel rule, at which source coordinate does output pixel $o = 0$ read, and output pixel $o = 3$?
-4. ([Chapter 4](04-detection.md), intersection over union.) Two boxes $(0, 0, 4, 4)$ and $(2, 2, 6, 6)$ overlap. What is their IoU?
-5. (Volume II, [Chapter 2](../v02-learning/02-linear-regression.md), least squares.) For the line $y = a x + b$ fitted to the points $(x_i, y_i)$ by least squares, what do the two conditions "the derivative of the sum of squares with respect to $a$ is zero" and "with respect to $b$ is zero" say about the residuals?
+1. [Chapter 3](03-cnns.md), convolutional network and receptive field: A $3 \times 3$ convolution, a $2 \times 2$ max pool with stride 2 and another $3 \times 3$ convolution are stacked. How many input pixels along one axis does one output value read?
+2. [Chapter 2](02-convolution.md), transposed convolution: A transposed convolution with $k = 2$, stride 2 and no padding is applied to a map of side 4. What is the side of its output, and does any output position receive two taps?
+3. [Chapter 1](01-images.md), image resampling: A row of 4 pixels is resized to 8. Under the half-pixel rule, at which source coordinate does output pixel $o = 0$ read, and output pixel $o = 3$?
+4. [Chapter 4](04-detection.md), intersection over union: Two boxes $(0, 0, 4, 4)$ and $(2, 2, 6, 6)$ overlap. What is their IoU?
+5. Volume II, [Chapter 2](../v02-learning/02-linear-regression.md), least squares: For the line $y = a x + b$ fitted to the points $(x_i, y_i)$ by least squares, what do the two conditions "the derivative of the sum of squares with respect to $a$ is zero" and "with respect to $b$ is zero" say about the residuals?
 
 ## One classifier at every pixel
 

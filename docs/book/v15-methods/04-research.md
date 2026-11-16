@@ -27,10 +27,10 @@ Read down the column of the mean rule for three runs. Where the claim is true it
 
 An idea becomes a result others can build on in three steps: it is turned into a statement that a result can contradict, the result is recorded so that someone else can recompute it, rerun it and repeat it, and the whole is written up so that every number in the write-up leads back to the run that produced it. Four ideas from earlier volumes carry the weight, and each is worth recalling before it is needed.
 
-1. (Volume VI, [Chapter 9](../v06-language-models/09-spectral-lm.md), architecture hypothesis testing.) The spectral mixer was compared with two baselines, one with its parameter count and one with its arithmetic. Why two, and what does a baseline that differs from the candidate in exactly one thing allow a reader to conclude?
-2. (Volume II, [Chapter 8](../v02-learning/08-experiments.md), ablations.) Removing component A from a full system costs 5 points and removing B costs 1, yet removing both costs 3. What does that say about the components, and how should the result be reported?
-3. (Volume II, Chapter 8, reporting uncertainty.) Name five things a result must be reported with besides its mean.
-4. (Volume I, [Chapter 12](../v01-mathematics/12-statistics.md), Student's t.) A 95 percent interval from the mean of three numbers uses the multiplier 4.303 where one from many numbers uses 1.96. Where does the larger multiplier come from, and how many degrees of freedom does it have?
+1. Volume VI, [Chapter 9](../v06-language-models/09-spectral-lm.md), architecture hypothesis testing: The spectral mixer was compared with two baselines, one with its parameter count and one with its arithmetic. Why two, and what does a baseline that differs from the candidate in exactly one thing allow a reader to conclude?
+2. Volume II, [Chapter 8](../v02-learning/08-experiments.md), ablations: Removing component A from a full system costs 5 points and removing B costs 1, yet removing both costs 3. What does that say about the components, and how should the result be reported?
+3. Volume II, Chapter 8, reporting uncertainty: Name five things a result must be reported with besides its mean.
+4. Volume I, [Chapter 12](../v01-mathematics/12-statistics.md), Student's t: A 95 percent interval from the mean of three numbers uses the multiplier 4.303 where one from many numbers uses 1.96. Where does the larger multiplier come from, and how many degrees of freedom does it have?
 
 ## A claim that names what would refute it
 

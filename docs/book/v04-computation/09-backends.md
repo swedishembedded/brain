@@ -84,12 +84,12 @@ Three programs from one text raise four questions. What does the code above the 
 
 The comparisons ahead lean on six earlier ideas, some of which the first example already uses.
 
-1. (Chapter 5, the guard.) A kernel is launched over $N = 10$ elements with workgroups of 4 invocations. How many invocations run, and what does the guard `if g >= N: return` do for them?
-2. (Chapter 5, the barrier rule.) When is a `return` before a `barrier` legal, and what happens to the others when it is not?
-3. (Chapter 2, the CPU core.) A float32 sum is taken once with one accumulator and once with eight lanes. Why can the two results differ, and which has the smaller error bound?
-4. (Chapter 8, fused multiply-add.) What does a compiler change when it contracts $x y + z$ into one instruction, and how many of 4,096 seeded triples differed?
-5. (Chapter 8, command recording.) What does `submit` hand to the device, and why is a list that is still open not part of what `read_back` waits for?
-6. (Volume I, Chapter 15, rounding.) A float32 sum of $n$ terms by a left fold has an error of at most about $(n - 1)\,u \sum_i |x_i|$. What is $u$ for float32, and what is the corresponding bound for a tree of adjacent pairs?
+1. Chapter 5, the guard: A kernel is launched over $N = 10$ elements with workgroups of 4 invocations. How many invocations run, and what does the guard `if g >= N: return` do for them?
+2. Chapter 5, the barrier rule: When is a `return` before a `barrier` legal, and what happens to the others when it is not?
+3. Chapter 2, the CPU core: A float32 sum is taken once with one accumulator and once with eight lanes. Why can the two results differ, and which has the smaller error bound?
+4. Chapter 8, fused multiply-add: What does a compiler change when it contracts $x y + z$ into one instruction, and how many of 4,096 seeded triples differed?
+5. Chapter 8, command recording: What does `submit` hand to the device, and why is a list that is still open not part of what `read_back` waits for?
+6. Volume I, Chapter 15, rounding: A float32 sum of $n$ terms by a left fold has an error of at most about $(n - 1)\,u \sum_i |x_i|$. What is $u$ for float32, and what is the corresponding bound for a tree of adjacent pairs?
 
 ## One interface, one kernel set
 

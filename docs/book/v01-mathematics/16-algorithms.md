@@ -47,12 +47,12 @@ This is the tool for a question every later volume asks: will it fit, and will i
 
 Counting cost leans on six ideas from earlier chapters: closed-form sums, logarithms as counts of halvings, what doubling does to a function, the cost of a matrix product, the bytes of an array and the rounding of a floating-point sum. If one of the six questions resists, the chapter it names is the place to rebuild it before the counting starts.
 
-1. (Chapter 1, summation notation.) Write $\sum_{i=0}^{n-1} i$ in closed form. Evaluate it for $n = 5$ by adding and by the formula.
-2. (Chapter 1, logarithms.) How many times can you halve $1024$ before you reach $1$? How does that number relate to $\log_2 1024$? What is $\log_2 10^6$, roughly?
-3. (Chapter 2, functions.) For $f(n) = n^2$ and $g(n) = 3n$, compute $f(2n)/f(n)$ and $g(2n)/g(n)$. What does each say about what doubling the input does to the output?
-4. (Chapter 4, matrices as linear maps.) How many multiply-adds does the product of an $[m, k]$ and a $[k, n]$ matrix take? How does that scale with $n$ when all three sizes equal $n$?
-5. (Chapter 5, tensors and memory.) How many bytes does an array of shape $[1000, 1000]$ of 32-bit numbers occupy?
-6. (Chapter 15, floating point.) Is $(a + b) + c = a + (b + c)$ in floating-point arithmetic? What did the chapter's pairwise summation use that fact for?
+1. Chapter 1, summation notation: Write $\sum_{i=0}^{n-1} i$ in closed form. Evaluate it for $n = 5$ by adding and by the formula.
+2. Chapter 1, logarithms: How many times can you halve $1024$ before you reach $1$? How does that number relate to $\log_2 1024$? What is $\log_2 10^6$, roughly?
+3. Chapter 2, functions: For $f(n) = n^2$ and $g(n) = 3n$, compute $f(2n)/f(n)$ and $g(2n)/g(n)$. What does each say about what doubling the input does to the output?
+4. Chapter 4, matrices as linear maps: How many multiply-adds does the product of an $[m, k]$ and a $[k, n]$ matrix take? How does that scale with $n$ when all three sizes equal $n$?
+5. Chapter 5, tensors and memory: How many bytes does an array of shape $[1000, 1000]$ of 32-bit numbers occupy?
+6. Chapter 15, floating point: Is $(a + b) + c = a + (b + c)$ in floating-point arithmetic? What did the chapter's pairwise summation use that fact for?
 
 ## What an algorithm is
 

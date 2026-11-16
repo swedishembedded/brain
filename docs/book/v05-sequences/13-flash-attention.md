@@ -11,12 +11,12 @@ One attention layer with 16 heads on a sequence of 32,768 tokens holds a score m
 
 The update rests on the stable softmax, the log-sum-exp and the backward pass of attention; the kernel rests on tiling, shared memory and the order of a reduction. Bring each back before going on.
 
-1. (Volume V, [Chapter 7](07-self-attention.md), attention backward.) In the softmax rule $dS_{ij} = p_{ij}(dp_{ij} - c_i)$ of attention, what is the row term $c_i$, and which of $d\mathbf{Q}$, $d\mathbf{K}$ and $d\mathbf{V}$ does it affect?
-2. (Volume III, [Chapter 3](../v03-neural-networks/03-softmax.md), stable softmax.) The softmax of $(1000, 1001)$ cannot be formed by exponentiating the inputs. What is done instead, and what does it cost in passes over the vector?
-3. (Volume I, [Chapter 15](../v01-mathematics/15-floating-point.md), log-sum-exp.) Compute $\mathrm{lse}(0, \ln 3)$, and say how the sum of exponentials of a long vector is kept from overflowing.
-4. (Volume IV, [Chapter 6](../v04-computation/06-matmul.md), tiled matmul.) Two $n \times n$ matrices are multiplied by workgroups that own $T \times T$ output tiles. How many numbers are loaded from global memory, and why is that fewer than $2n^3$?
-5. (Volume IV, [Chapter 4](../v04-computation/04-gpu.md), shared memory, with the barrier rule of [Chapter 5](../v04-computation/05-compute-kernels.md).) A workgroup stages a tile in shared memory, uses it, and stages the next. Why does the loop need two barriers?
-6. (Volume IV, [Chapter 7](../v04-computation/07-reductions.md), parallel reduction.) In float32, what are $(1 + 2^{-24}) + 2^{-24}$ and $1 + (2^{-24} + 2^{-24})$, and what does that say about summing the same numbers in a tree and in a loop?
+1. Volume V, [Chapter 7](07-self-attention.md), attention backward: In the softmax rule $dS_{ij} = p_{ij}(dp_{ij} - c_i)$ of attention, what is the row term $c_i$, and which of $d\mathbf{Q}$, $d\mathbf{K}$ and $d\mathbf{V}$ does it affect?
+2. Volume III, [Chapter 3](../v03-neural-networks/03-softmax.md), stable softmax: The softmax of $(1000, 1001)$ cannot be formed by exponentiating the inputs. What is done instead, and what does it cost in passes over the vector?
+3. Volume I, [Chapter 15](../v01-mathematics/15-floating-point.md), log-sum-exp: Compute $\mathrm{lse}(0, \ln 3)$, and say how the sum of exponentials of a long vector is kept from overflowing.
+4. Volume IV, [Chapter 6](../v04-computation/06-matmul.md), tiled matmul: Two $n \times n$ matrices are multiplied by workgroups that own $T \times T$ output tiles. How many numbers are loaded from global memory, and why is that fewer than $2n^3$?
+5. Volume IV, [Chapter 4](../v04-computation/04-gpu.md), shared memory, with the barrier rule of [Chapter 5](../v04-computation/05-compute-kernels.md): A workgroup stages a tile in shared memory, uses it, and stages the next. Why does the loop need two barriers?
+6. Volume IV, [Chapter 7](../v04-computation/07-reductions.md), parallel reduction: In float32, what are $(1 + 2^{-24}) + 2^{-24}$ and $1 + (2^{-24} + 2^{-24})$, and what does that say about summing the same numbers in a tree and in a loop?
 
 ## Why the row has to be finished first
 

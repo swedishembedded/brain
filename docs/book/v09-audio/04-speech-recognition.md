@@ -24,12 +24,12 @@ There are three ways out, and brain runs two of them (the engines are drawn in t
 
 Speech recognition draws on six earlier ideas.
 
-1. ([Chapter 2](02-spectrograms.md), front ends.) A clip of 16,000 samples goes through a front end with a 512-point frame at a hop of 160 samples and zero padding of 256 on each side. How many frames does it make, and how many of them does the Nemotron encoder read as valid?
-2. ([Volume VII, Chapter 2](../v07-vision/02-convolution.md), receptive field.) A convolution of kernel 3, stride 2 and padding 1 reads 100 positions. How many does it write, and what are the receptive field and the jump after three such layers on top of one another?
-3. ([Volume V, Chapter 5](../v05-sequences/05-recurrent-networks.md), the LSTM.) Which two vectors does an LSTM layer carry from one step to the next, and which gate decides how much of the old cell content survives?
-4. ([Volume V, Chapter 6](../v05-sequences/06-seq2seq.md), encoder-decoder.) A decoder writes $T_y$ tokens and attends over $T_x$ encoder rows. How many query-key pairs does one cross-attention layer score for one head?
-5. ([Volume V, Chapter 7](../v05-sequences/07-self-attention.md), multi-head attention.) At width $d$, how many weights do the four projection matrices of one layer hold when they have no biases, and how many pairs does self-attention over $T$ rows score per head?
-6. ([Volume I, Chapter 15](../v01-mathematics/15-floating-point.md), log-sum-exp.) How is $\ln(e^{-1000} + e^{-1001})$ computed without underflow, and what is it?
+1. [Chapter 2](02-spectrograms.md), front ends: A clip of 16,000 samples goes through a front end with a 512-point frame at a hop of 160 samples and zero padding of 256 on each side. How many frames does it make, and how many of them does the Nemotron encoder read as valid?
+2. [Volume VII, Chapter 2](../v07-vision/02-convolution.md), receptive field: A convolution of kernel 3, stride 2 and padding 1 reads 100 positions. How many does it write, and what are the receptive field and the jump after three such layers on top of one another?
+3. [Volume V, Chapter 5](../v05-sequences/05-recurrent-networks.md), the LSTM: Which two vectors does an LSTM layer carry from one step to the next, and which gate decides how much of the old cell content survives?
+4. [Volume V, Chapter 6](../v05-sequences/06-seq2seq.md), encoder-decoder: A decoder writes $T_y$ tokens and attends over $T_x$ encoder rows. How many query-key pairs does one cross-attention layer score for one head?
+5. [Volume V, Chapter 7](../v05-sequences/07-self-attention.md), multi-head attention: At width $d$, how many weights do the four projection matrices of one layer hold when they have no biases, and how many pairs does self-attention over $T$ rows score per head?
+6. [Volume I, Chapter 15](../v01-mathematics/15-floating-point.md), log-sum-exp: How is $\ln(e^{-1000} + e^{-1001})$ computed without underflow, and what is it?
 
 ## Summing over every alignment
 

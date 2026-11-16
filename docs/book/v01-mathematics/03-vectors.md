@@ -45,9 +45,9 @@ gradient, in Chapters 7 and 8. Sums, averages and square roots carry the first
 definitions, so recall them before reading on; the answers are with the
 others at the end.
 
-1. (Chapter 1, summation.) Evaluate $\sum_{i=1}^{3} i^2$.
-2. (Chapter 1, summation.) Write the average of $n$ numbers $x_1, \dots, x_n$ using summation notation.
-3. (Chapter 1, real numbers.) Evaluate $\sqrt{9 + 16}$. Is it equal to $\sqrt{9} + \sqrt{16}$?
+1. Chapter 1, summation: Evaluate $\sum_{i=1}^{3} i^2$.
+2. Chapter 1, summation: Write the average of $n$ numbers $x_1, \dots, x_n$ using summation notation.
+3. Chapter 1, real numbers: Evaluate $\sqrt{9 + 16}$. Is it equal to $\sqrt{9} + \sqrt{16}$?
 
 ## What a vector is
 

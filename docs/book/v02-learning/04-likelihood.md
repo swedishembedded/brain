@@ -13,12 +13,12 @@ The principle also settles two puzzles that chapters 2 and 3 left open. Chapter 
 
 Six ideas from earlier chapters do the work below, and the six questions that follow bring them back; their answers are under "Recall questions" at the end.
 
-1. (Volume I, chapter 10, Bayes' rule) A defect occurs in 1% of parts. A detector alarms on 90% of defective parts and on 10% of good parts. Given an alarm, is the probability of a defect near $0.9$? Compute it.
-2. (Volume I, chapter 1, logarithms) What is $\ln(ab)$ in terms of $\ln a$ and $\ln b$, and what is $\ln(0.5^{10})$?
-3. (Volume I, chapter 11, the Gaussian distribution) Write the density of $\mathcal{N}(\mu, \sigma^2)$ at $x$ and take its natural logarithm.
-4. (Chapter 2 and chapter 3 of this volume) Write the mean squared error of predictions $\hat{y}_n$ against labels $y_n$, and the binary cross-entropy of a prediction $\hat{p} = 0.8$ against the labels $y = 1$ and $y = 0$.
-5. (Volume I, chapter 12, estimators) Why does the sample variance divide by $n - 1$ rather than $n$?
-6. (Chapter 3 of this volume) What happened to the weights of the logistic regression on four separable parts as the number of gradient steps grew?
+1. Volume I, chapter 10, Bayes' rule: A defect occurs in 1% of parts. A detector alarms on 90% of defective parts and on 10% of good parts. Given an alarm, is the probability of a defect near $0.9$? Compute it.
+2. Volume I, chapter 1, logarithms: What is $\ln(ab)$ in terms of $\ln a$ and $\ln b$, and what is $\ln(0.5^{10})$?
+3. Volume I, chapter 11, the Gaussian distribution: Write the density of $\mathcal{N}(\mu, \sigma^2)$ at $x$ and take its natural logarithm.
+4. Chapter 2 and chapter 3 of this volume: Write the mean squared error of predictions $\hat{y}_n$ against labels $y_n$, and the binary cross-entropy of a prediction $\hat{p} = 0.8$ against the labels $y = 1$ and $y = 0$.
+5. Volume I, chapter 12, estimators: Why does the sample variance divide by $n - 1$ rather than $n$?
+6. Chapter 3 of this volume: What happened to the weights of the logistic regression on four separable parts as the number of gradient steps grew?
 
 ## Likelihood: the probability of the data, read as a function of the parameter
 

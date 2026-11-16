@@ -11,12 +11,12 @@ Each step reuses a tool already built. Showing is a loss on demonstrations, the 
 
 Six earlier ideas carry the derivations, and each is worth bringing back before it is needed; the answers are in the Answers section.
 
-1. (Volume V, Chapter 4, "Language Modeling", causal language model.) A causal model gives the three tokens of a completion the conditional probabilities $0.5$, $0.2$ and $0.1$. What probability does it give the completion, and what is its log-probability in nats?
-2. (Volume V, Chapter 10, "Training a GPT from Scratch", loss masking.) A row has ten target positions of which four are supervised, with losses $2, 1, 3, 1$; the other six add up to $12$. What is the loss, and by what is the sum divided?
-3. (Volume V, Chapter 2, "Tokenization", chat template.) In ChatML, with which ids does the prompt that asks for a reply end, and which id must the model learn to produce in order to stop?
-4. (Chapter 3, "Policy Gradients", PPO.) A sample has advantage $A = -1$ and ratio $\rho = 0.7$ under $\epsilon = 0.2$. Which term of the minimum wins, and what is the gradient factor?
-5. (Volume I, Chapter 13, "Information, Entropy and Surprise", KL divergence.) For $p = (0.5, 0.5)$ and $q = (0.75, 0.25)$ the divergence $\mathrm{KL}(p \,\|\, q)$ is $0.1438$ nats. What is $\mathrm{KL}(q \,\|\, p)$?
-6. (Volume II, Chapter 3, "Classification and Logistic Regression", softplus.) What are $\mathrm{softplus}(0)$ and $\mathrm{sigmoid}(0)$, and what is the slope of $\mathrm{softplus}(-m)$ with respect to $m$ at $m = 0$?
+1. Volume V, Chapter 4, "Language Modeling", causal language model: A causal model gives the three tokens of a completion the conditional probabilities $0.5$, $0.2$ and $0.1$. What probability does it give the completion, and what is its log-probability in nats?
+2. Volume V, Chapter 10, "Training a GPT from Scratch", loss masking: A row has ten target positions of which four are supervised, with losses $2, 1, 3, 1$; the other six add up to $12$. What is the loss, and by what is the sum divided?
+3. Volume V, Chapter 2, "Tokenization", chat template: In ChatML, with which ids does the prompt that asks for a reply end, and which id must the model learn to produce in order to stop?
+4. Chapter 3, "Policy Gradients", PPO: A sample has advantage $A = -1$ and ratio $\rho = 0.7$ under $\epsilon = 0.2$. Which term of the minimum wins, and what is the gradient factor?
+5. Volume I, Chapter 13, "Information, Entropy and Surprise", KL divergence: For $p = (0.5, 0.5)$ and $q = (0.75, 0.25)$ the divergence $\mathrm{KL}(p \,\|\, q)$ is $0.1438$ nats. What is $\mathrm{KL}(q \,\|\, p)$?
+6. Volume II, Chapter 3, "Classification and Logistic Regression", softplus: What are $\mathrm{softplus}(0)$ and $\mathrm{sigmoid}(0)$, and what is the slope of $\mathrm{softplus}(-m)$ with respect to $m$ at $m = 0$?
 
 ## A model that has never seen a turn end
 

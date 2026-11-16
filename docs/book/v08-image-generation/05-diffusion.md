@@ -11,11 +11,11 @@ There is a reason to hope. Each addition is a tiny Gaussian step, and the revers
 
 The derivation needs five earlier ideas: how Gaussians combine, what a generative model offers, what a squared error is minimized by, the decay equation and the blur of a squared-error decoder. Bring them back first.
 
-1. (Volume I, [Chapter 11](../v01-mathematics/11-distributions.md), Gaussian distribution.) If $X \sim \mathcal{N}(\mu, \sigma^2)$ and $Z \sim \mathcal{N}(0, 1)$ are independent, what is the distribution of $aX + bZ$ for two constants $a$ and $b$?
-2. ([Chapter 1](01-generative-modeling.md), generative models.) What can a generative model offer, and which of the two offers does ancestral sampling need?
-3. (Volume II, [Chapter 2](../v02-learning/02-linear-regression.md), mean squared error.) Which single number $c$ minimizes $\mathbb{E}(Y - c)^2$, and what is the minimum? What changes if the prediction may depend on a second variable $X$?
-4. (Volume I, [Chapter 9](../v01-mathematics/09-integrals-and-odes.md), ordinary differential equations.) What is the solution of $dy/dt = -k\,y$ with $y(0) = 1$?
-5. ([Chapter 3](03-vector-quantization.md), the blur.) Why does a decoder trained on a squared error output the average of the pictures its code cannot tell apart?
+1. Volume I, [Chapter 11](../v01-mathematics/11-distributions.md), Gaussian distribution: If $X \sim \mathcal{N}(\mu, \sigma^2)$ and $Z \sim \mathcal{N}(0, 1)$ are independent, what is the distribution of $aX + bZ$ for two constants $a$ and $b$?
+2. [Chapter 1](01-generative-modeling.md), generative models: What can a generative model offer, and which of the two offers does ancestral sampling need?
+3. Volume II, [Chapter 2](../v02-learning/02-linear-regression.md), mean squared error: Which single number $c$ minimizes $\mathbb{E}(Y - c)^2$, and what is the minimum? What changes if the prediction may depend on a second variable $X$?
+4. Volume I, [Chapter 9](../v01-mathematics/09-integrals-and-odes.md), ordinary differential equations: What is the solution of $dy/dt = -k\,y$ with $y(0) = 1$?
+5. [Chapter 3](03-vector-quantization.md), the blur: Why does a decoder trained on a squared error output the average of the pictures its code cannot tell apart?
 
 Everything below is written for one real number. An image is a vector of numbers, every entry is noised with a draw of its own and every squared error is averaged over the entries, so nothing changes except the bookkeeping. The data are the three clusters of the opening, which are also those of Chapter 4: centres $-3$, $0$ and $3$, each of standard deviation $0.25$ and weight $1/3$, because for them every quantity below can be computed exactly and a trained network can be checked against the exact answer.
 

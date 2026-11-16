@@ -41,12 +41,12 @@ So the question comes first. Speed is best stated as work (FLOPs and bytes) and 
 
 Those habits lean on six ideas from earlier chapters, from the dispatch to seeded randomness.
 
-1. (Chapter 5, the dispatch.) A host program calls `dispatch` for a kernel and reads the host clock the moment the call returns. What has the clock measured?
-2. (Chapter 3, the achieved fraction.) A computation moves 100 MB and does far fewer FLOPs than the machine could do in that time. The machine has $\mathrm{BW} = 800$ (GB/s) and the run takes 200 microseconds. What fraction of the roofline is that?
-3. (Chapter 8, launch overhead.) With $t_{\mathrm{sub}} = 4$ microseconds for a submission and $t_{\mathrm{dsp}} = 1$ microsecond for starting a dispatch, what do ten dispatches recorded into one submission cost the host and the device to start, and what would they cost submitted one by one?
-4. (Chapter 10, noise only lengthens a run.) In the noise model of Chapter 10, which of the mean and the minimum of repeated runs estimates the device's floor, and why does the mean not?
-5. (Volume I, Chapter 12, the standard error.) One hundred timings have a sample standard deviation of 0.2 (microseconds). What is the standard error of their mean?
-6. (Volume I, Chapter 17, seeded randomness.) Two runs of a simulation use the same generator seed and draw their numbers in the same order. What can be said about their results, and why does a worked example in this book name its generator and print its draw order?
+1. Chapter 5, the dispatch: A host program calls `dispatch` for a kernel and reads the host clock the moment the call returns. What has the clock measured?
+2. Chapter 3, the achieved fraction: A computation moves 100 MB and does far fewer FLOPs than the machine could do in that time. The machine has $\mathrm{BW} = 800$ (GB/s) and the run takes 200 microseconds. What fraction of the roofline is that?
+3. Chapter 8, launch overhead: With $t_{\mathrm{sub}} = 4$ microseconds for a submission and $t_{\mathrm{dsp}} = 1$ microsecond for starting a dispatch, what do ten dispatches recorded into one submission cost the host and the device to start, and what would they cost submitted one by one?
+4. Chapter 10, noise only lengthens a run: In the noise model of Chapter 10, which of the mean and the minimum of repeated runs estimates the device's floor, and why does the mean not?
+5. Volume I, Chapter 12, the standard error: One hundred timings have a sample standard deviation of 0.2 (microseconds). What is the standard error of their mean?
+6. Volume I, Chapter 17, seeded randomness: Two runs of a simulation use the same generator seed and draw their numbers in the same order. What can be said about their results, and why does a worked example in this book name its generator and print its draw order?
 
 ## Where the clock stops: device-synchronized timing
 

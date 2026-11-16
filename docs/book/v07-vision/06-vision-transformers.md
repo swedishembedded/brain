@@ -22,12 +22,12 @@ The score matrix of one head would have two and a half billion entries, ten giga
 
 Six earlier ideas meet in the vision transformer, and the questions below collect them.
 
-1. (Volume V, [Chapter 9](../v05-sequences/09-transformer-block.md), the transformer block.) A block of width $D$ reads $T$ tokens. How many entries does one head's score matrix have, and how many FLOPs do the score and weighted-average products of the whole block cost?
-2. ([Chapter 2](02-convolution.md), convolution.) A convolution with a $2 \times 2$ kernel, stride 2 and 4 filters is applied to a map of shape $[3, 8, 8]$. What is the output shape, how many weights does it have and how many multiply-adds does it do?
-3. (Volume V, [Chapter 8](../v05-sequences/08-positions.md), absolute positions.) Self-attention with no position information is given the rows of $\mathbf{X}$ in a different order. What happens to its output?
-4. (Volume V, [Chapter 8](../v05-sequences/08-positions.md), multi-axis rotary embedding.) In a picture cut into patches that are numbered row by row, what offset separates a patch from the one below it, and what offset does multi-axis RoPE give?
-5. ([Chapter 1](01-images.md), resampling.) A row of 4 values is resized to 6 under the half-pixel rule. At which source coordinate does output pixel 0 read?
-6. (Volume VI, [Chapter 3](../v06-language-models/03-attention-variants.md), sliding-window attention.) In a causal window of $w$ tokens, how many keys does a query read, and how many (query, key) pairs does a sequence of $T \gg w$ tokens need?
+1. Volume V, [Chapter 9](../v05-sequences/09-transformer-block.md), the transformer block: A block of width $D$ reads $T$ tokens. How many entries does one head's score matrix have, and how many FLOPs do the score and weighted-average products of the whole block cost?
+2. [Chapter 2](02-convolution.md), convolution: A convolution with a $2 \times 2$ kernel, stride 2 and 4 filters is applied to a map of shape $[3, 8, 8]$. What is the output shape, how many weights does it have and how many multiply-adds does it do?
+3. Volume V, [Chapter 8](../v05-sequences/08-positions.md), absolute positions: Self-attention with no position information is given the rows of $\mathbf{X}$ in a different order. What happens to its output?
+4. Volume V, [Chapter 8](../v05-sequences/08-positions.md), multi-axis rotary embedding: In a picture cut into patches that are numbered row by row, what offset separates a patch from the one below it, and what offset does multi-axis RoPE give?
+5. [Chapter 1](01-images.md), resampling: A row of 4 values is resized to 6 under the half-pixel rule. At which source coordinate does output pixel 0 read?
+6. Volume VI, [Chapter 3](../v06-language-models/03-attention-variants.md), sliding-window attention: In a causal window of $w$ tokens, how many keys does a query read, and how many (query, key) pairs does a sequence of $T \gg w$ tokens need?
 
 ## Cutting a picture into patches
 

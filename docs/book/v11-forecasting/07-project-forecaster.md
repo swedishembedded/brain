@@ -30,12 +30,12 @@ That is the shape of the project. You build a small end-to-end forecasting syste
 
 You build it in any language. You need double-precision arithmetic with a correctly rounded `sqrt`, `exp`, `log`, `sin` and `cos`, the standard Gaussian distribution function and its inverse from a library (any routine accurate to $10^{-12}$ gives the printed digits), the book's generator ([Volume I, Chapter 17](../v01-mathematics/17-randomness.md)), and the routines of the six chapters, each named where it is used. Six questions bring back what the milestones lean on.
 
-1. (Chapter 1, the scale of a window.) A window has the context $4, 6, 8, 10$ and $\epsilon = 10^{-5}$. What are $\mu$ and the scale $d = \sigma + \epsilon$ (divisor $c$), and the scaled context?
-2. (Chapter 1, purge and embargo.) For $n = 240$, $c = 24$, $h = 6$, $f_{\mathrm{train}} = 0.5$, $f_{\mathrm{val}} = 0.2$ and an embargo of 6, what are the gap, the two cuts, and the first and last origin of the validation band?
-3. (Chapter 2, the pinball loss.) An order costs 1 per unit left over and 9 per unit short. Which quantile level minimizes the expected cost, and what are the pinball loss at that level and the actual cost of an order of 10 when the demand turns out to be 12, and when it turns out to be 8?
-4. (Chapter 4, blocks and a control.) Adjacent origins forecast six bars each. How many forecast bars do two neighbouring origins share, why does a bootstrap that resamples single origins state an interval that is too narrow, and what skill against naive can an honest forecaster have on a driftless random walk?
-5. (Chapter 6, from a probability to an action.) A false alarm costs 1 and a miss costs 5. At what probability is an alert as cheap as no alert, and why must a probability be calibrated before that threshold is applied to it?
-6. (Volume II, [Chapter 2](../v02-learning/02-linear-regression.md), least squares.) What are the normal equations of a ridge fit with a constant, and what does the penalty do to them when two input columns are copies of each other?
+1. Chapter 1, the scale of a window: A window has the context $4, 6, 8, 10$ and $\epsilon = 10^{-5}$. What are $\mu$ and the scale $d = \sigma + \epsilon$ (divisor $c$), and the scaled context?
+2. Chapter 1, purge and embargo: For $n = 240$, $c = 24$, $h = 6$, $f_{\mathrm{train}} = 0.5$, $f_{\mathrm{val}} = 0.2$ and an embargo of 6, what are the gap, the two cuts, and the first and last origin of the validation band?
+3. Chapter 2, the pinball loss: An order costs 1 per unit left over and 9 per unit short. Which quantile level minimizes the expected cost, and what are the pinball loss at that level and the actual cost of an order of 10 when the demand turns out to be 12, and when it turns out to be 8?
+4. Chapter 4, blocks and a control: Adjacent origins forecast six bars each. How many forecast bars do two neighbouring origins share, why does a bootstrap that resamples single origins state an interval that is too narrow, and what skill against naive can an honest forecaster have on a driftless random walk?
+5. Chapter 6, from a probability to an action: A false alarm costs 1 and a miss costs 5. At what probability is an alert as cheap as no alert, and why must a probability be calibrated before that threshold is applied to it?
+6. Volume II, [Chapter 2](../v02-learning/02-linear-regression.md), least squares: What are the normal equations of a ridge fit with a constant, and what does the penalty do to them when two input columns are copies of each other?
 
 ## The rules every number follows
 

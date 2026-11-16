@@ -35,10 +35,10 @@ Dividing it out is a geometric problem with a clean solution. Once the faces are
 
 Face recognition rests on four earlier ideas.
 
-1. ([Volume I, Chapter 3](../v01-mathematics/03-vectors.md), cosine similarity.) What is the cosine similarity of $(3, 4)$ and $(4, 3)$, and what does the value tell you about the angle between them?
-2. ([Volume III, Chapter 3](../v03-neural-networks/03-softmax.md), softmax cross-entropy.) The logits are $(2, 0)$ and the correct class is the first. What is the gradient of the loss with respect to each logit?
-3. ([Chapter 4](04-detection.md), anchor-free detection.) A point at pixel $(44, 28)$ of the stride-8 level reports the distances $(l, t, r, b) = (2.0, 1.5, 3.0, 2.5)$ in cells. Where is the box?
-4. ([Chapter 5](05-dense-prediction.md), semantic segmentation.) A segmenter with 19 classes writes its scores at one eighth of a 512 by 512 input. How many scores is that, how many after the resize to the full size, and how does a pixel get its label?
+1. [Volume I, Chapter 3](../v01-mathematics/03-vectors.md), cosine similarity: What is the cosine similarity of $(3, 4)$ and $(4, 3)$, and what does the value tell you about the angle between them?
+2. [Volume III, Chapter 3](../v03-neural-networks/03-softmax.md), softmax cross-entropy: The logits are $(2, 0)$ and the correct class is the first. What is the gradient of the loss with respect to each logit?
+3. [Chapter 4](04-detection.md), anchor-free detection: A point at pixel $(44, 28)$ of the stride-8 level reports the distances $(l, t, r, b) = (2.0, 1.5, 3.0, 2.5)$ in cells. Where is the box?
+4. [Chapter 5](05-dense-prediction.md), semantic segmentation: A segmenter with 19 classes writes its scores at one eighth of a 512 by 512 input. How many scores is that, how many after the resize to the full size, and how does a pixel get its label?
 
 ## Five points and a template
 

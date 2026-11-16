@@ -41,11 +41,11 @@ Chapter 4 already contains the idea: go back to the definition of the derivative
 
 The instrument is built from the backward pass and its cost (Chapters 4 and 5), the derivative and the central difference (Volume I, Chapter 7), the multivariable chain rule, the directional derivative and the Taylor expansion (Volume I, Chapter 8), and rounding error, unit round-off and cancellation (Volume I, Chapter 15). Five questions bring back the derivative, the expansion and the rounding that the instrument is calibrated against.
 
-1. ("Derivatives: The Mathematics of Change", Volume I, Chapter 7.) Write the central difference estimate of $f'(x)$ with step $h$. How does its error shrink as $h$ shrinks?
-2. ("Gradients, Jacobians and Many Variables", Volume I, Chapter 8, Taylor expansion.) Write the Taylor expansion of $f(x + h)$ about $x$ up to the term in $h^3$.
-3. ("Floating Point and Numerical Error", Volume I, Chapter 15.) What is the unit round-off $u$ in 32-bit and in 64-bit arithmetic, and what does it bound?
+1. "Derivatives: The Mathematics of Change", Volume I, Chapter 7: Write the central difference estimate of $f'(x)$ with step $h$. How does its error shrink as $h$ shrinks?
+2. "Gradients, Jacobians and Many Variables", Volume I, Chapter 8, Taylor expansion: Write the Taylor expansion of $f(x + h)$ about $x$ up to the term in $h^3$.
+3. "Floating Point and Numerical Error", Volume I, Chapter 15: What is the unit round-off $u$ in 32-bit and in 64-bit arithmetic, and what does it bound?
 4. ("Floating Point and Numerical Error", cancellation.) Two nearby numbers are each stored with relative error at most $u$. Why can their difference have a much larger relative error?
-5. ("Backpropagation Derived from Scratch", Chapter 4.) A network has $P$ parameters. How many forward passes does a central difference gradient need, and what does the backward pass cost in comparison?
+5. "Backpropagation Derived from Scratch", Chapter 4: A network has $P$ parameters. How many forward passes does a central difference gradient need, and what does the backward pass cost in comparison?
 
 ## Finite differences from Taylor
 

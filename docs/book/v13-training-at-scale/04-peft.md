@@ -11,10 +11,10 @@ Whether a fine-tune can be written that way is a question about the change it ma
 
 The argument leans on four earlier results, each posed here as a question.
 
-1. (Volume I, Chapter 6, low-rank approximation.) A matrix of $m$ rows and $n$ columns is replaced by the best matrix of rank $r$. How many numbers does the replacement need, and what is the error of the best one in terms of the singular values?
-2. (Volume XII, Chapter 4, supervised fine-tuning.) Which positions of a conversation enter the loss of a fine-tune on demonstrations, and which do not?
-3. (Volume IV, Chapter 12, weight-only quantization.) What is stored, what is decoded and when, and how many bytes does a weight cost if a group of 32 shares one fp32 scale and each code has 4 bits?
-4. (Chapter 3, where training memory goes.) How many bytes does a weight in fp32 cost in training under Adam, and which part of the memory of a step does not depend on the number of weights at all?
+1. Volume I, Chapter 6, low-rank approximation: A matrix of $m$ rows and $n$ columns is replaced by the best matrix of rank $r$. How many numbers does the replacement need, and what is the error of the best one in terms of the singular values?
+2. Volume XII, Chapter 4, supervised fine-tuning: Which positions of a conversation enter the loss of a fine-tune on demonstrations, and which do not?
+3. Volume IV, Chapter 12, weight-only quantization: What is stored, what is decoded and when, and how many bytes does a weight cost if a group of 32 shares one fp32 scale and each code has 4 bits?
+4. Chapter 3, where training memory goes: How many bytes does a weight in fp32 cost in training under Adam, and which part of the memory of a step does not depend on the number of weights at all?
 
 ## A change that two thin matrices can hold
 

@@ -11,12 +11,12 @@ Volume III met this problem in networks too deep to train, and the cure was one 
 
 The block composes parts built earlier, and the questions below name them.
 
-1. (Volume V, [Chapter 7](07-self-attention.md), multi-head attention.) A multi-head attention layer has width $D = 512$ and $H = 8$ heads. What is the shape of its output for an input of shape $[T, 512]$, how many parameters do its four matrices hold, and what must be added to its scores to make it causal?
-2. (Volume III, [Chapter 12](../v03-neural-networks/12-training-dynamics.md), residual connections.) A layer returns $\mathbf{y} = \mathbf{x} + f(\mathbf{x})$. What is the Jacobian of $\mathbf{y}$ with respect to $\mathbf{x}$, and what does the gradient $d\mathbf{x}$ consist of, given $d\mathbf{y}$?
-3. (Volume III, [Chapter 10](../v03-neural-networks/10-normalization.md), RMS normalization.) Normalize the row $(3, 4)$ with RMS normalization, gain 1 and no epsilon. What does layer normalization do to a row that RMS normalization does not?
-4. (Volume III, [Chapter 2](../v03-neural-networks/02-mlp.md), GELU and SiLU.) What are $\mathrm{silu}(0)$ and $\mathrm{silu}(2)$, and what does each of the GELU and the SiLU multiply the input $x$ by?
-5. (Volume I, [Chapter 10](../v01-mathematics/10-probability.md), variance.) A vector has mean square 1 and receives an independent contribution of mean square 0.5. What is the mean square of the sum, and what is the root mean square?
-6. (Volume III, [Chapter 12](../v03-neural-networks/12-training-dynamics.md), vanishing and exploding gradients.) A gradient passes back through 20 layers and is multiplied by 0.8 in each. By how much is it multiplied in all, and by how much if each factor is 1.2?
+1. Volume V, [Chapter 7](07-self-attention.md), multi-head attention: A multi-head attention layer has width $D = 512$ and $H = 8$ heads. What is the shape of its output for an input of shape $[T, 512]$, how many parameters do its four matrices hold, and what must be added to its scores to make it causal?
+2. Volume III, [Chapter 12](../v03-neural-networks/12-training-dynamics.md), residual connections: A layer returns $\mathbf{y} = \mathbf{x} + f(\mathbf{x})$. What is the Jacobian of $\mathbf{y}$ with respect to $\mathbf{x}$, and what does the gradient $d\mathbf{x}$ consist of, given $d\mathbf{y}$?
+3. Volume III, [Chapter 10](../v03-neural-networks/10-normalization.md), RMS normalization: Normalize the row $(3, 4)$ with RMS normalization, gain 1 and no epsilon. What does layer normalization do to a row that RMS normalization does not?
+4. Volume III, [Chapter 2](../v03-neural-networks/02-mlp.md), GELU and SiLU: What are $\mathrm{silu}(0)$ and $\mathrm{silu}(2)$, and what does each of the GELU and the SiLU multiply the input $x$ by?
+5. Volume I, [Chapter 10](../v01-mathematics/10-probability.md), variance: A vector has mean square 1 and receives an independent contribution of mean square 0.5. What is the mean square of the sum, and what is the root mean square?
+6. Volume III, [Chapter 12](../v03-neural-networks/12-training-dynamics.md), vanishing and exploding gradients: A gradient passes back through 20 layers and is multiplied by 0.8 in each. By how much is it multiplied in all, and by how much if each factor is 1.2?
 
 ## One block on three tokens
 

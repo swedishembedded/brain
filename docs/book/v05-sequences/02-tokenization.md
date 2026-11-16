@@ -42,10 +42,10 @@ The two ends of the range fail in opposite ways. Characters keep the table tiny 
 
 Building those pieces leans on bytes, hashing and entropy, so bring back four earlier results first.
 
-1. (Volume IV, [Chapter 1](../v04-computation/01-number-formats.md), binary representation.) How many different values does an 8-bit pattern take, and what is the largest one read as an unsigned number?
-2. (Volume V, [Chapter 1](01-text.md), UTF-8.) Write U+00E9 in UTF-8. Which of its two bytes can begin a character, and which can only continue one?
-3. (Volume I, [Chapter 16](../v01-mathematics/16-algorithms.md), hashing.) A table holds $n$ keys in $m$ buckets with chaining. What is the expected number of comparisons to look up a key that is not present, and which input makes a lookup cost $n$?
-4. (Volume I, [Chapter 13](../v01-mathematics/13-information-theory.md), entropy.) A source emits four symbols with probabilities $\tfrac12, \tfrac14, \tfrac18, \tfrac18$. What is its entropy in bits, and what prefix code reaches that average length?
+1. Volume IV, [Chapter 1](../v04-computation/01-number-formats.md), binary representation: How many different values does an 8-bit pattern take, and what is the largest one read as an unsigned number?
+2. Volume V, [Chapter 1](01-text.md), UTF-8: Write U+00E9 in UTF-8. Which of its two bytes can begin a character, and which can only continue one?
+3. Volume I, [Chapter 16](../v01-mathematics/16-algorithms.md), hashing: A table holds $n$ keys in $m$ buckets with chaining. What is the expected number of comparisons to look up a key that is not present, and which input makes a lookup cost $n$?
+4. Volume I, [Chapter 13](../v01-mathematics/13-information-theory.md), entropy: A source emits four symbols with probabilities $\tfrac12, \tfrac14, \tfrac18, \tfrac18$. What is its entropy in bits, and what prefix code reaches that average length?
 
 ## Learning the pieces by merging neighbours
 

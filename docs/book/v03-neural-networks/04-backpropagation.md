@@ -12,11 +12,11 @@ The way out is not a cleverer nudge. It is to notice that the million derivative
 
 The derivation is the chain rule applied with care, so it leans on the chain rule for several variables and the Jacobian, on the shapes of matrix products, and on the squared-error loss and the layered network it differentiates. Five questions bring those back before the first weight.
 
-1. (Volume I, chapter 8, "Gradients, Jacobians and Many Variables", chain rule.) A quantity $z$ depends on $x$ through two intermediate quantities $y_1(x)$ and $y_2(x)$. Write $\frac{dz}{dx}$ in terms of partial derivatives.
-2. (Volume I, chapter 8, Jacobian.) What is the shape of the Jacobian of a function from three inputs to two outputs, and what is its entry in row $i$, column $j$?
-3. (Chapter 2, "Multilayer Networks".) A hidden layer computes $\mathbf{h} = \tanh(\mathbf{W}_1\mathbf{x} + \mathbf{b}_1)$ from an input of width 4 to a hidden width of 3. What is the shape of $\mathbf{W}_1$?
-4. (Volume II, chapter 2, "Linear Regression and the First Descent", loss and descent.) Write the squared error of a prediction $y$ for a target $t$, and the gradient-descent update of a weight $w$ with learning rate $\eta$.
-5. (Volume I, chapter 4, "Matrices as Linear Maps", and chapter 5, "Arrays, Shapes, Strides and Broadcasting".) If $\mathbf{A}$ has shape $[m, k]$ and $\mathbf{B}$ has shape $[k, n]$, what are the shapes of $\mathbf{A}\mathbf{B}$ and of $\mathbf{B}^\top\mathbf{A}^\top$?
+1. Volume I, chapter 8, "Gradients, Jacobians and Many Variables", chain rule: A quantity $z$ depends on $x$ through two intermediate quantities $y_1(x)$ and $y_2(x)$. Write $\frac{dz}{dx}$ in terms of partial derivatives.
+2. Volume I, chapter 8, Jacobian: What is the shape of the Jacobian of a function from three inputs to two outputs, and what is its entry in row $i$, column $j$?
+3. Chapter 2, "Multilayer Networks": A hidden layer computes $\mathbf{h} = \tanh(\mathbf{W}_1\mathbf{x} + \mathbf{b}_1)$ from an input of width 4 to a hidden width of 3. What is the shape of $\mathbf{W}_1$?
+4. Volume II, chapter 2, "Linear Regression and the First Descent", loss and descent: Write the squared error of a prediction $y$ for a target $t$, and the gradient-descent update of a weight $w$ with learning rate $\eta$.
+5. Volume I, chapter 4, "Matrices as Linear Maps", and chapter 5, "Arrays, Shapes, Strides and Broadcasting": If $\mathbf{A}$ has shape $[m, k]$ and $\mathbf{B}$ has shape $[k, n]$, what are the shapes of $\mathbf{A}\mathbf{B}$ and of $\mathbf{B}^\top\mathbf{A}^\top$?
 
 ## One weight
 

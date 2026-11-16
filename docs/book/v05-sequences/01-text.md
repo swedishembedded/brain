@@ -56,14 +56,14 @@ computed by a small program.
 The byte layouts are built from bit patterns, shifts and masks, so bring those
 back before the first table of bits:
 
-1. (Volume IV, Chapter 1, binary representation.) How many different patterns can
+1. Volume IV, Chapter 1, binary representation: How many different patterns can
    7, 11, 16 and 21 bits take? Which whole numbers does an unsigned pattern of
    each width cover?
-2. (Volume IV, Chapter 1, binary representation.) What is the number whose 8-bit
+2. Volume IV, Chapter 1, binary representation: What is the number whose 8-bit
    pattern is `11000011`, from the place values of its bits?
-3. (Volume IV, Chapter 1 and the pseudocode page, bit operations.) What are
+3. Volume IV, Chapter 1 and the pseudocode page, bit operations: What are
    `0xE9 >> 6` and `0xE9 and 0x3F`? Write both results in binary.
-4. (Volume I, Chapter 1, integers.) Compute $233 \mathbin{//} 64$ and $233 \bmod 64$
+4. Volume I, Chapter 1, integers: Compute $233 \mathbin{//} 64$ and $233 \bmod 64$
    (floor division and its remainder). How do they relate to your answers to
    question 3, and why?
 

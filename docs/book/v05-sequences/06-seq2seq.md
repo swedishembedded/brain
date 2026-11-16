@@ -11,11 +11,11 @@ Every model so far in this volume either reads a sequence or writes one. The rec
 
 A decoder that looks back at an encoder needs these earlier ideas in hand.
 
-1. (Volume V, [Chapter 5](05-recurrent-networks.md), the recurrent network.) A recurrent network reads a sequence of 10 tokens with a state of 16 numbers. How many numbers does it carry from one step to the next, and does that number depend on the length of the sequence?
-2. (Volume V, [Chapter 4](04-language-modeling.md), teacher forcing.) A model is trained to predict the tokens $y_1, \dots, y_n$ of a sentence one at a time. What token does it receive as input when predicting $y_j$ during training, and what does it receive when it generates text?
-3. (Volume V, [Chapter 3](03-embeddings.md), the embedding table.) A table has 6 rows and 8 columns. What does the lookup of id 3 return, and how many multiplications does it take?
-4. (Volume III, [Chapter 3](../v03-neural-networks/03-softmax.md), the softmax.) The scores $(1, 0, 0)$ go through a softmax. What are the three outputs, and what do they add up to?
-5. (Volume I, [Chapter 3](../v01-mathematics/03-vectors.md), the dot product.) What is the dot product of $(1, 2)$ and $(3, -1)$, and for which pair of vectors of the same length (norm) is a dot product largest?
+1. Volume V, [Chapter 5](05-recurrent-networks.md), the recurrent network: A recurrent network reads a sequence of 10 tokens with a state of 16 numbers. How many numbers does it carry from one step to the next, and does that number depend on the length of the sequence?
+2. Volume V, [Chapter 4](04-language-modeling.md), teacher forcing: A model is trained to predict the tokens $y_1, \dots, y_n$ of a sentence one at a time. What token does it receive as input when predicting $y_j$ during training, and what does it receive when it generates text?
+3. Volume V, [Chapter 3](03-embeddings.md), the embedding table: A table has 6 rows and 8 columns. What does the lookup of id 3 return, and how many multiplications does it take?
+4. Volume III, [Chapter 3](../v03-neural-networks/03-softmax.md), the softmax: The scores $(1, 0, 0)$ go through a softmax. What are the three outputs, and what do they add up to?
+5. Volume I, [Chapter 3](../v01-mathematics/03-vectors.md), the dot product: What is the dot product of $(1, 2)$ and $(3, -1)$, and for which pair of vectors of the same length (norm) is a dot product largest?
 
 ## Writing digits backwards
 

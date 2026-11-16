@@ -24,11 +24,11 @@ The fourth row is the honest limit of the instrument. A legitimate cut and a col
 
 **Video diffusion** is the generation procedure of Volume VIII run on the latent grid of the [previous chapter](01-video.md): draw a grid of noise with a time axis, let a transformer predict the velocity of every token given the prompt, and integrate with a sampler until the grid is a clip's latent, which the autoencoder decodes. Nothing in that sentence is new. What is new is that the grid has three axes, that its tokens are many and bound together by time, and that some of them may already be known. Each of those differences leans on an idea met earlier:
 
-1. ([Chapter 1](01-video.md), the latent grid.) How many latent frames does a clip of 121 frames have, and of 25 frames? What happens to a request for 24 frames?
-2. (Volume V, [Chapter 7](../v05-sequences/07-self-attention.md), self-attention.) How many scores does one head of self-attention compute for $N$ tokens, and how many FLOPs do the scores and the weighted sum of values take for tokens of width $d$ (a multiply-add counts as two FLOPs)?
-3. (Volume V, [Chapter 8](../v05-sequences/08-positions.md), multi-axis rotary embedding.) A head of width 128 has its channels divided among the three axes of a patch grid. How many rotation pairs does it have, and what rotates a pair?
-4. (Volume VIII, [Chapter 6](../v08-image-generation/06-flow-matching.md), the timestep shift.) With a shift of $k = 3$, what does the noise fraction $\sigma = 0.5$ become, and what is the strength $\mu$ of that shift?
-5. (Volume II, [Chapter 2](../v02-learning/02-linear-regression.md), least squares.) What does the least-squares line through $c$ noisy points estimate that a single point cannot?
+1. [Chapter 1](01-video.md), the latent grid: How many latent frames does a clip of 121 frames have, and of 25 frames? What happens to a request for 24 frames?
+2. Volume V, [Chapter 7](../v05-sequences/07-self-attention.md), self-attention: How many scores does one head of self-attention compute for $N$ tokens, and how many FLOPs do the scores and the weighted sum of values take for tokens of width $d$ (a multiply-add counts as two FLOPs)?
+3. Volume V, [Chapter 8](../v05-sequences/08-positions.md), multi-axis rotary embedding: A head of width 128 has its channels divided among the three axes of a patch grid. How many rotation pairs does it have, and what rotates a pair?
+4. Volume VIII, [Chapter 6](../v08-image-generation/06-flow-matching.md), the timestep shift: With a shift of $k = 3$, what does the noise fraction $\sigma = 0.5$ become, and what is the strength $\mu$ of that shift?
+5. Volume II, [Chapter 2](../v02-learning/02-linear-regression.md), least squares: What does the least-squares line through $c$ noisy points estimate that a single point cannot?
 
 ## Attention that reaches across time
 

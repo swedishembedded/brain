@@ -13,12 +13,12 @@ Two facts stand behind those differences. A score from a few origins is a draw f
 
 Scoring a forecast starts from six earlier ideas.
 
-1. (Volume I, Chapter 12) Why is the standard error of the difference between two models smaller when both are scored on the same questions, and when would pairing not help at all?
-2. (Volume I, Chapter 12) Twenty variants are each compared with one baseline at the $5\%$ level, and none is really different. What is the chance that at least one is declared different if the tests were independent, and what does Bonferroni's correction do about it?
-3. (Volume I, Chapter 12) A bootstrap of the accuracy on clips of sixteen frames resampled the frames and reported a standard error $0.59$ times the true one. What should it have resampled, and why?
-4. (Volume II, Chapter 8) What is a baseline for, and what happens to a claimed gain when the baseline was tuned less hard than the method?
-5. (Chapter 1) Which two rules make a split of windows leakage-safe, and what does the embargo keep apart?
-6. (Chapter 2) At which level does the pinball loss punish an under-forecast nine times as hard as an over-forecast, and how is the CRPS of a forecast given by quantiles related to the pinball loss?
+1. Volume I, Chapter 12: Why is the standard error of the difference between two models smaller when both are scored on the same questions, and when would pairing not help at all?
+2. Volume I, Chapter 12: Twenty variants are each compared with one baseline at the $5\%$ level, and none is really different. What is the chance that at least one is declared different if the tests were independent, and what does Bonferroni's correction do about it?
+3. Volume I, Chapter 12: A bootstrap of the accuracy on clips of sixteen frames resampled the frames and reported a standard error $0.59$ times the true one. What should it have resampled, and why?
+4. Volume II, Chapter 8: What is a baseline for, and what happens to a claimed gain when the baseline was tuned less hard than the method?
+5. Chapter 1: Which two rules make a split of windows leakage-safe, and what does the embargo keep apart?
+6. Chapter 2: At which level does the pinball loss punish an under-forecast nine times as hard as an over-forecast, and how is the CRPS of a forecast given by quantiles related to the pinball loss?
 
 ## Walking forward through a series
 

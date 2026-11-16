@@ -50,12 +50,12 @@ The concentration is the typical case on this toy and not the luck of one row: o
 
 Six earlier ideas set up the question of which attention entries can be skipped.
 
-1. (Volume V, [Chapter 7](../v05-sequences/07-self-attention.md), scaled dot-product attention and the causal mask.) For one query at position $i$ and keys of width $d_h$, how many multiply-adds do the scores and the weighted sum of the values need, and which keys does the causal mask leave out?
-2. (Volume V, [Chapter 12](../v05-sequences/12-kv-cache.md), the KV cache.) A layer has 8 key-value heads of width 128 and stores bf16 (2 bytes). How many bytes does one token add to the cache of one layer?
-3. (Volume V, [Chapter 13](../v05-sequences/13-flash-attention.md), flash attention.) The online softmax carries three quantities while it reads keys in tiles. Which, and why does that let a kernel read a row in pieces?
-4. (Volume VI, [Chapter 4](04-mixture-of-experts.md), top-$k$ gating.) A router scores $E$ experts and keeps $k$. What are the kept scores divided by, and why does a tie go to the lower index?
-5. (Volume VI, [Chapter 3](03-attention-variants.md), sliding windows and sinks.) Which keys does a query at position $i$ read under a window of $n_{\mathrm{win}}$ keys and $n_{\mathrm{sink}}$ sinks, and what do the sinks do?
-6. (Volume I, [Chapter 13](../v01-mathematics/13-information-theory.md), cross-entropy and KL divergence.) For two distributions $p$ and $r$ over the same keys, how is the cross-entropy of $p$ against $r$ related to the entropy of $p$ and to $\mathrm{KL}(p \,\|\, r)$?
+1. Volume V, [Chapter 7](../v05-sequences/07-self-attention.md), scaled dot-product attention and the causal mask: For one query at position $i$ and keys of width $d_h$, how many multiply-adds do the scores and the weighted sum of the values need, and which keys does the causal mask leave out?
+2. Volume V, [Chapter 12](../v05-sequences/12-kv-cache.md), the KV cache: A layer has 8 key-value heads of width 128 and stores bf16 (2 bytes). How many bytes does one token add to the cache of one layer?
+3. Volume V, [Chapter 13](../v05-sequences/13-flash-attention.md), flash attention: The online softmax carries three quantities while it reads keys in tiles. Which, and why does that let a kernel read a row in pieces?
+4. Volume VI, [Chapter 4](04-mixture-of-experts.md), top-$k$ gating: A router scores $E$ experts and keeps $k$. What are the kept scores divided by, and why does a tie go to the lower index?
+5. Volume VI, [Chapter 3](03-attention-variants.md), sliding windows and sinks: Which keys does a query at position $i$ read under a window of $n_{\mathrm{win}}$ keys and $n_{\mathrm{sink}}$ sinks, and what do the sinks do?
+6. Volume I, [Chapter 13](../v01-mathematics/13-information-theory.md), cross-entropy and KL divergence: For two distributions $p$ and $r$ over the same keys, how is the cross-entropy of $p$ against $r$ related to the entropy of $p$ and to $\mathrm{KL}(p \,\|\, r)$?
 
 ## Rules that say where to look
 

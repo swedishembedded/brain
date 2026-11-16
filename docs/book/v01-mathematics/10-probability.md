@@ -41,11 +41,11 @@ The counting needs only sets, sums, functions and areas from earlier chapters,
 and the five questions below bring each of them back; one that resists sends you
 to the chapter it names, and the answers close the chapter.
 
-1. (Chapter 1, set.) For $A = \{1, 2, 3, 4\}$ and $B = \{3, 4, 5\}$, what are $A \cap B$, $A \cup B$ and $\lvert A \cup B \rvert$?
-2. (Chapter 1, summation notation.) Evaluate $\sum_{i=1}^{4} i/10$.
-3. (Chapter 2, function.) The function $f(x) = x^2$ has domain $\{-2, -1, 0, 1, 2\}$. What is its range, and which inputs does it send to $4$?
-4. (Chapter 9, integral.) What is $\int_0^1 2\,x\,dx$, and what area is it?
-5. (Chapter 1, product of sets.) List the set $\{H, T\} \times \{1, 2\}$.
+1. Chapter 1, set: For $A = \{1, 2, 3, 4\}$ and $B = \{3, 4, 5\}$, what are $A \cap B$, $A \cup B$ and $\lvert A \cup B \rvert$?
+2. Chapter 1, summation notation: Evaluate $\sum_{i=1}^{4} i/10$.
+3. Chapter 2, function: The function $f(x) = x^2$ has domain $\{-2, -1, 0, 1, 2\}$. What is its range, and which inputs does it send to $4$?
+4. Chapter 9, integral: What is $\int_0^1 2\,x\,dx$, and what area is it?
+5. Chapter 1, product of sets: List the set $\{H, T\} \times \{1, 2\}$.
 
 ## Counting before axioms
 

@@ -38,12 +38,12 @@ The methods in this chapter are what the field used for thirty years before deep
 
 The seven methods lean on norms, eigenvectors and the singular value decomposition, entropy, conditional probability, and two ideas of this volume, the grouping loop and overfitting. The six questions below bring them back before the first method, each naming the chapter that taught it; the answers are under "Recall questions" at the end.
 
-1. (Volume I, chapter 3, "Vectors", norms.) Compute the $L^1$, $L^2$ and $L^\infty$ norms of $(3, -4)$.
-2. (Volume I, chapter 6, "Matrix Decompositions", eigenvectors.) The symmetric matrix $\begin{pmatrix}2&1\\1&2\end{pmatrix}$ has eigenvectors $(1, 1)/\sqrt{2}$ and $(1, -1)/\sqrt{2}$. What are its eigenvalues, and what is the relation of its eigenvectors to each other?
-3. (Volume I, chapter 6, singular value decomposition.) If $\mathbf{X} = \mathbf{U}\boldsymbol{\Sigma}\mathbf{V}^\top$, what are the eigenvalues and eigenvectors of $\mathbf{X}^\top\mathbf{X}$ in terms of $\mathbf{U}$, $\boldsymbol{\Sigma}$, $\mathbf{V}$?
-4. (Volume I, chapter 13, "Information, Entropy and Surprise", entropy.) A node of a decision process holds four examples of class A and four of class B. What is the entropy of its class distribution in bits? And for six of A and two of B, to three decimals?
-5. (Volume I, chapter 10, "Probability", conditional probability.) Of 10 messages, 4 are spam. Of the spam messages, 3 contain the word "free", and of the 6 others, 1 does. What is $P(\text{spam} \mid \text{free})$?
-6. (Chapter 1 of this volume, the grouping loop, and chapter 5, overfitting.) The grouping loop of chapter 1 repeated two steps. Say what they were. A model scores $100\%$ on the rows it was fitted to and $80\%$ on validation rows: what is that pattern called, and what is its usual cause?
+1. Volume I, chapter 3, "Vectors", norms: Compute the $L^1$, $L^2$ and $L^\infty$ norms of $(3, -4)$.
+2. Volume I, chapter 6, "Matrix Decompositions", eigenvectors: The symmetric matrix $\begin{pmatrix}2&1\\1&2\end{pmatrix}$ has eigenvectors $(1, 1)/\sqrt{2}$ and $(1, -1)/\sqrt{2}$. What are its eigenvalues, and what is the relation of its eigenvectors to each other?
+3. Volume I, chapter 6, singular value decomposition: If $\mathbf{X} = \mathbf{U}\boldsymbol{\Sigma}\mathbf{V}^\top$, what are the eigenvalues and eigenvectors of $\mathbf{X}^\top\mathbf{X}$ in terms of $\mathbf{U}$, $\boldsymbol{\Sigma}$, $\mathbf{V}$?
+4. Volume I, chapter 13, "Information, Entropy and Surprise", entropy: A node of a decision process holds four examples of class A and four of class B. What is the entropy of its class distribution in bits? And for six of A and two of B, to three decimals?
+5. Volume I, chapter 10, "Probability", conditional probability: Of 10 messages, 4 are spam. Of the spam messages, 3 contain the word "free", and of the 6 others, 1 does. What is $P(\text{spam} \mid \text{free})$?
+6. Chapter 1 of this volume, the grouping loop, and chapter 5, overfitting: The grouping loop of chapter 1 repeated two steps. Say what they were. A model scores $100\%$ on the rows it was fitted to and $80\%$ on validation rows: what is that pattern called, and what is its usual cause?
 
 
 ## Nearest neighbours

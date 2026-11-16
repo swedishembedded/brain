@@ -46,10 +46,10 @@ Now the two signals differ in every row. In the rising sound the power moves fro
 
 Describing the frames properly leans on four ideas, one from Chapter 1 and three from Volume I.
 
-1. ([Chapter 1](01-sound.md), waveform and sampling rate.) At 16 kHz and at 24 kHz, how many samples are there in 25 milliseconds, and how many in a step of 10 milliseconds?
-2. (Volume I, [Chapter 14](../v01-mathematics/14-fourier.md), the discrete Fourier transform.) A frame of $N$ real samples is taken at rate $f_s$. What frequency does bin $k$ stand for, and how many bins carry independent information?
-3. (Volume I, [Chapter 14](../v01-mathematics/14-fourier.md), the fast Fourier transform.) How many complex multiplications does a DFT of $N = 512$ points need by its definition, and how many does the radix-2 FFT need?
-4. (Volume I, [Chapter 1](../v01-mathematics/01-numbers.md), logarithm.) What is $\log_{10} 1000$, and what does multiplying a positive number by 100 do to its logarithm to base 10 and to its natural logarithm?
+1. [Chapter 1](01-sound.md), waveform and sampling rate: At 16 kHz and at 24 kHz, how many samples are there in 25 milliseconds, and how many in a step of 10 milliseconds?
+2. Volume I, [Chapter 14](../v01-mathematics/14-fourier.md), the discrete Fourier transform: A frame of $N$ real samples is taken at rate $f_s$. What frequency does bin $k$ stand for, and how many bins carry independent information?
+3. Volume I, [Chapter 14](../v01-mathematics/14-fourier.md), the fast Fourier transform: How many complex multiplications does a DFT of $N = 512$ points need by its definition, and how many does the radix-2 FFT need?
+4. Volume I, [Chapter 1](../v01-mathematics/01-numbers.md), logarithm: What is $\log_{10} 1000$, and what does multiplying a positive number by 100 do to its logarithm to base 10 and to its natural logarithm?
 
 ## Cutting a sound into frames
 

@@ -11,12 +11,12 @@ That failure holds the whole problem of synthesis in its smallest form. A synthe
 
 Six earlier ideas come into play as soon as the first sound is synthesised.
 
-1. ([Chapter 3](03-audio-codecs.md), audio tokens.) How many integers a second does brain's codec write, and which of the 16 codes of a column comes from a separate codebook group?
-2. ([Volume V, Chapter 4](../v05-sequences/04-language-modeling.md), the causal language model.) How does a causal language model score a sequence, and what does teacher forcing give it as input during training?
-3. ([Volume V, Chapter 11](../v05-sequences/11-decoding.md), repetition penalty and top-p.) Under a repetition penalty of 1.25, what happens to a seen token's logit of $3.0$ and to one of $-2.0$? Which tokens does a nucleus of 0.8 keep from the probabilities $(0.5, 0.3, 0.1, 0.1)$?
-4. ([Volume VIII, Chapter 6](../v08-image-generation/06-flow-matching.md), flow matching.) In the book's convention which end of the path is noise, and what is one Euler step of the velocity field?
-5. ([Volume VIII, Chapter 7](../v08-image-generation/07-samplers-and-guidance.md), classifier-free guidance.) Write the guided velocity $u_g$ in terms of $u_c$ and $u_{\mathrm{un}}$, and say what $g = 1$ and $g > 1$ give.
-6. ([Chapter 2](02-spectrograms.md), front ends.) A clip of 24,000 samples goes through a log-mel front end with a window of 1920 samples, a hop of 480 and a reflect pad of 720 on each side. How many frames does it make?
+1. [Chapter 3](03-audio-codecs.md), audio tokens: How many integers a second does brain's codec write, and which of the 16 codes of a column comes from a separate codebook group?
+2. [Volume V, Chapter 4](../v05-sequences/04-language-modeling.md), the causal language model: How does a causal language model score a sequence, and what does teacher forcing give it as input during training?
+3. [Volume V, Chapter 11](../v05-sequences/11-decoding.md), repetition penalty and top-p: Under a repetition penalty of 1.25, what happens to a seen token's logit of $3.0$ and to one of $-2.0$? Which tokens does a nucleus of 0.8 keep from the probabilities $(0.5, 0.3, 0.1, 0.1)$?
+4. [Volume VIII, Chapter 6](../v08-image-generation/06-flow-matching.md), flow matching: In the book's convention which end of the path is noise, and what is one Euler step of the velocity field?
+5. [Volume VIII, Chapter 7](../v08-image-generation/07-samplers-and-guidance.md), classifier-free guidance: Write the guided velocity $u_g$ in terms of $u_c$ and $u_{\mathrm{un}}$, and say what $g = 1$ and $g > 1$ give.
+6. [Chapter 2](02-spectrograms.md), front ends: A clip of 24,000 samples goes through a log-mel front end with a window of 1920 samples, a hop of 480 and a reflect pad of 720 on each side. How many frames does it make?
 
 ## Two places to cut the sentence
 

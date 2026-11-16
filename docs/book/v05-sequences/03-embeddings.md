@@ -11,11 +11,11 @@ Two things about the cabinet look wrong at first. The first is that it is there 
 
 The table turns out to be a one-hot layer in disguise and its gradient a sum, so five earlier results are worth recalling first.
 
-1. (Volume V, [Chapter 2](02-tokenization.md), tokens.) A byte-level tokenizer with 40 merges has a vocabulary of how many tokens, and what does the number of rows of a model's embedding table have to equal?
-2. (Volume III, [Chapter 3](../v03-neural-networks/03-softmax.md), one-hot encoding.) Write token 3 of a vocabulary of six as a one-hot vector. What is the dot product of that vector with any vector $\mathbf{u}$ of length six?
-3. (Volume I, [Chapter 4](../v01-mathematics/04-matrices.md), the matrix-vector product.) For $\mathbf{A} = \begin{pmatrix}1&2&3\\4&5&6\end{pmatrix}$ and $\mathbf{x} = (0, 1, 0)^\top$, what is $\mathbf{A}\mathbf{x}$, and which part of $\mathbf{A}$ is it?
-4. (Volume III, [Chapter 5](../v03-neural-networks/05-layer-gradients.md), the backward pass of a reduction and of a shared value.) For $r = x_1 + x_2 + x_3$ and an upstream gradient $dr = 2$, what does each $x_i$ receive? If one value feeds two different places in a network, how is its gradient formed from the two?
-5. (Volume I, [Chapter 3](../v01-mathematics/03-vectors.md), cosine similarity.) What is the cosine similarity of $(1, 0)$ and $(1, 1)$, and what happens to it if the second vector is replaced by $(5, 5)$?
+1. Volume V, [Chapter 2](02-tokenization.md), tokens: A byte-level tokenizer with 40 merges has a vocabulary of how many tokens, and what does the number of rows of a model's embedding table have to equal?
+2. Volume III, [Chapter 3](../v03-neural-networks/03-softmax.md), one-hot encoding: Write token 3 of a vocabulary of six as a one-hot vector. What is the dot product of that vector with any vector $\mathbf{u}$ of length six?
+3. Volume I, [Chapter 4](../v01-mathematics/04-matrices.md), the matrix-vector product: For $\mathbf{A} = \begin{pmatrix}1&2&3\\4&5&6\end{pmatrix}$ and $\mathbf{x} = (0, 1, 0)^\top$, what is $\mathbf{A}\mathbf{x}$, and which part of $\mathbf{A}$ is it?
+4. Volume III, [Chapter 5](../v03-neural-networks/05-layer-gradients.md), the backward pass of a reduction and of a shared value: For $r = x_1 + x_2 + x_3$ and an upstream gradient $dr = 2$, what does each $x_i$ receive? If one value feeds two different places in a network, how is its gradient formed from the two?
+5. Volume I, [Chapter 3](../v01-mathematics/03-vectors.md), cosine similarity: What is the cosine similarity of $(1, 0)$ and $(1, 1)$, and what happens to it if the second vector is replaced by $(5, 5)$?
 
 ## One row per token
 

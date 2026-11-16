@@ -30,12 +30,12 @@ Every cure also costs memory: momentum remembers one number per parameter, Adam 
 
 The chapter leans on gradient descent, the learning rate, the stability bound and the condition number (Volumes I and II), expectation and variance (Volume I), the L2 penalty (Volume II), and the backward pass and its accumulation over micro-batches (Chapters 4 and 5 of this volume). Six questions bring back the descent, the statistics and the sums that every rule below is analysed with.
 
-1. (Volume II, chapter 2, "Linear Regression and the First Descent", the stability limit.) Gradient descent on a quadratic loss whose Hessian has largest eigenvalue $\lambda_{\max}$ uses a fixed learning rate $\eta$. What is the largest $\eta$ for which the error shrinks along every eigendirection?
-2. (Volume I, chapter 8, "Gradients, Jacobians and Many Variables", conditioning.) A bowl has curvatures $9$ and $1$. What is its condition number, and by what factor does the error shrink per step at the best fixed learning rate?
-3. (Volume I, chapters 10 and 12, "Probability: Reasoning Under Uncertainty" and "Statistics: Learning Facts from Samples", expectation and variance.) The mean of $n$ independent draws of one quantity with mean $\mu$ and variance $\sigma^2$: what are its expectation and variance?
-4. (Volume II, chapter 4, "Maximum Likelihood, Priors and Regularization", the L2 penalty.) Write one gradient step on $\mathcal{L}(\mathbf{w}) + \frac{\lambda}{2}\lVert\mathbf{w}\rVert^2$ as "shrink, then step".
-5. (Volume I, chapter 14, "Complex Numbers, Frequencies and the Fourier Transform", the geometric sum.) What is $1 + r + r^2 + \dots + r^{n-1}$, and what does it tend to for $0 < r < 1$ as $n$ grows?
-6. (Chapter 5, "The Backward Pass of Every Layer", micro-batches.) A batch of 10 is split into micro-batches of 4, 3 and 3, each computing the gradient of its own mean. With what weights are the three gradients added to give the gradient of the mean over 10?
+1. Volume II, chapter 2, "Linear Regression and the First Descent", the stability limit: Gradient descent on a quadratic loss whose Hessian has largest eigenvalue $\lambda_{\max}$ uses a fixed learning rate $\eta$. What is the largest $\eta$ for which the error shrinks along every eigendirection?
+2. Volume I, chapter 8, "Gradients, Jacobians and Many Variables", conditioning: A bowl has curvatures $9$ and $1$. What is its condition number, and by what factor does the error shrink per step at the best fixed learning rate?
+3. Volume I, chapters 10 and 12, "Probability: Reasoning Under Uncertainty" and "Statistics: Learning Facts from Samples", expectation and variance: The mean of $n$ independent draws of one quantity with mean $\mu$ and variance $\sigma^2$: what are its expectation and variance?
+4. Volume II, chapter 4, "Maximum Likelihood, Priors and Regularization", the L2 penalty: Write one gradient step on $\mathcal{L}(\mathbf{w}) + \frac{\lambda}{2}\lVert\mathbf{w}\rVert^2$ as "shrink, then step".
+5. Volume I, chapter 14, "Complex Numbers, Frequencies and the Fourier Transform", the geometric sum: What is $1 + r + r^2 + \dots + r^{n-1}$, and what does it tend to for $0 < r < 1$ as $n$ grows?
+6. Chapter 5, "The Backward Pass of Every Layer", micro-batches: A batch of 10 is split into micro-batches of 4, 3 and 3, each computing the gradient of its own mean. With what weights are the three gradients added to give the gradient of the mean over 10?
 
 ## Stochastic gradient descent
 

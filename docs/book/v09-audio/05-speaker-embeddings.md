@@ -27,11 +27,11 @@ That second demand is the odd one. A log-mel spectrogram changes mostly with the
 
 Speaker embeddings draw on five earlier ideas.
 
-1. ([Chapter 2](02-spectrograms.md), front ends.) A clip of 16,000 samples goes through a filterbank with 400-sample frames at a hop of 160 and no padding. How many frames does it make? A clip of 24,000 samples goes through a log-mel front end with 1024-sample frames at a hop of 256 after a reflect pad of 384 on each side. How many?
-2. ([Volume VII, Chapter 2](../v07-vision/02-convolution.md), two-dimensional convolution.) A convolution with 32 input channels, 32 output channels and a $3 \times 3$ kernel holds how many weights, and how many multiply-adds does it make over an output of $40 \times 100$ positions?
-3. ([Volume VII, Chapter 2](../v07-vision/02-convolution.md), receptive field.) Three stride-1 layers of kernel 3 have dilations 1, 2 and 4. How many input positions does one output of the last layer depend on?
-4. ([Volume VII, Chapter 11](../v07-vision/11-faces.md), identity embedding.) Two embeddings have cosine 0.7 and the threshold $\tau_{\mathrm{id}}$ is 0.5: a pair is called the same person when its cosine is at or above $\tau_{\mathrm{id}}$. Are these called the same person? When the threshold is lowered, which of the two kinds of error, a false rejection (a pair of one person called two) or a false acceptance (a pair of two people called one), becomes more frequent? Where the two rates are equal, their common value is the equal error rate.
-5. ([Volume III, Chapter 3](../v03-neural-networks/03-softmax.md), softmax.) What does a softmax over the four scores $(0, \ln 2, \ln 2, 0)$ return?
+1. [Chapter 2](02-spectrograms.md), front ends: A clip of 16,000 samples goes through a filterbank with 400-sample frames at a hop of 160 and no padding. How many frames does it make? A clip of 24,000 samples goes through a log-mel front end with 1024-sample frames at a hop of 256 after a reflect pad of 384 on each side. How many?
+2. [Volume VII, Chapter 2](../v07-vision/02-convolution.md), two-dimensional convolution: A convolution with 32 input channels, 32 output channels and a $3 \times 3$ kernel holds how many weights, and how many multiply-adds does it make over an output of $40 \times 100$ positions?
+3. [Volume VII, Chapter 2](../v07-vision/02-convolution.md), receptive field: Three stride-1 layers of kernel 3 have dilations 1, 2 and 4. How many input positions does one output of the last layer depend on?
+4. [Volume VII, Chapter 11](../v07-vision/11-faces.md), identity embedding: Two embeddings have cosine 0.7 and the threshold $\tau_{\mathrm{id}}$ is 0.5: a pair is called the same person when its cosine is at or above $\tau_{\mathrm{id}}$. Are these called the same person? When the threshold is lowered, which of the two kinds of error, a false rejection (a pair of one person called two) or a false acceptance (a pair of two people called one), becomes more frequent? Where the two rates are equal, their common value is the equal error rate.
+5. [Volume III, Chapter 3](../v03-neural-networks/03-softmax.md), softmax: What does a softmax over the four scores $(0, \ln 2, \ln 2, 0)$ return?
 
 ## A convolution that only moves in time
 

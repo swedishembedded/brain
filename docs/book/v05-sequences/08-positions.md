@@ -11,12 +11,12 @@ There are three places to write it in. The position can be added to the vectors 
 
 Position codes lean on earlier chapters, which the questions below revisit.
 
-1. (Volume V, [Chapter 7](07-self-attention.md), scaled dot-product attention.) The rows of $\mathbf{X}$ are shuffled by a permutation matrix $\boldsymbol{\Pi}$. What happens to $\mathbf{Q}$, $\mathbf{K}$ and $\mathbf{V}$, to the score matrix $\mathbf{S}$, and to the output $\mathbf{O}$?
-2. (Volume I, [Chapter 6](../v01-mathematics/06-decompositions.md), rotation matrices.) What is the product $\mathbf{R}(\alpha)\mathbf{R}(\beta)$ of two plane rotations, and what is $\mathbf{R}(\theta)^\top$?
-3. (Volume I, [Chapter 14](../v01-mathematics/14-fourier.md), complex numbers.) Compute $(0.6 + 0.8\mathrm{i})\cdot\mathrm{i}$. What does multiplying by $\mathrm{i}$ do to a point of the plane, and what happens to its length?
-4. (Volume I, [Chapter 14](../v01-mathematics/14-fourier.md), sinusoids and Euler's formula.) The wave $\cos(0.5\,t)$ advances by 0.5 radians per step. How many steps make one full period, and what is $e^{\mathrm{i}\varphi}$ in terms of cosine and sine?
-5. (Volume V, [Chapter 3](03-embeddings.md), the embedding table.) A table has shape $[V, D]$ and a sentence has $T$ token ids. What is the shape of the embedded sentence?
-6. (Volume IV, [Chapter 3](../v04-computation/03-roofline.md), arithmetic intensity.) An operation does 3 floating-point operations for every 8 bytes it moves. What is its arithmetic intensity, and on a machine whose ridge point is 10 FLOP per byte, is it limited by arithmetic or by bandwidth?
+1. Volume V, [Chapter 7](07-self-attention.md), scaled dot-product attention: The rows of $\mathbf{X}$ are shuffled by a permutation matrix $\boldsymbol{\Pi}$. What happens to $\mathbf{Q}$, $\mathbf{K}$ and $\mathbf{V}$, to the score matrix $\mathbf{S}$, and to the output $\mathbf{O}$?
+2. Volume I, [Chapter 6](../v01-mathematics/06-decompositions.md), rotation matrices: What is the product $\mathbf{R}(\alpha)\mathbf{R}(\beta)$ of two plane rotations, and what is $\mathbf{R}(\theta)^\top$?
+3. Volume I, [Chapter 14](../v01-mathematics/14-fourier.md), complex numbers: Compute $(0.6 + 0.8\mathrm{i})\cdot\mathrm{i}$. What does multiplying by $\mathrm{i}$ do to a point of the plane, and what happens to its length?
+4. Volume I, [Chapter 14](../v01-mathematics/14-fourier.md), sinusoids and Euler's formula: The wave $\cos(0.5\,t)$ advances by 0.5 radians per step. How many steps make one full period, and what is $e^{\mathrm{i}\varphi}$ in terms of cosine and sine?
+5. Volume V, [Chapter 3](03-embeddings.md), the embedding table: A table has shape $[V, D]$ and a sentence has $T$ token ids. What is the shape of the embedded sentence?
+6. Volume IV, [Chapter 3](../v04-computation/03-roofline.md), arithmetic intensity: An operation does 3 floating-point operations for every 8 bytes it moves. What is its arithmetic intensity, and on a machine whose ridge point is 10 FLOP per byte, is it limited by arithmetic or by bandwidth?
 
 ## The same words in another order
 

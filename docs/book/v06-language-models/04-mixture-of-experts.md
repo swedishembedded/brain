@@ -28,12 +28,12 @@ The model holds 11.76 times more numbers than a token touches, and nearly all th
 
 The new layer is built from six earlier ideas; each comes back as a one-line question.
 
-1. (Volume V, [Chapter 9](../v05-sequences/09-transformer-block.md), the gated feed-forward network.) How many parameters and how many FLOPs per token does a SwiGLU network of model width $D = 2{,}048$ and hidden width $F = 512$ have?
-2. (Volume III, [Chapter 3](../v03-neural-networks/03-softmax.md), the softmax.) What are the two outputs of a softmax whose logits are $(0, \ln 3)$?
-3. (Volume II, [Chapter 3](../v02-learning/03-logistic-regression.md), the sigmoid.) What are $\sigma(0)$ and $\sigma(\ln 3)$, and which softmax output equals $\sigma(z)$?
-4. (Volume I, [Chapter 16](../v01-mathematics/16-algorithms.md), the prefix sum.) What is the exclusive scan of the counts $[3, 0, 2, 4]$?
-5. (Volume IV, [Chapter 3](../v04-computation/03-roofline.md), arithmetic intensity.) A weight matrix in bf16 multiplies the vector of one token. How many FLOPs does it do per byte of weights read, and is that product bound by bandwidth or by arithmetic?
-6. (Volume V, [Chapter 12](../v05-sequences/12-kv-cache.md), the decode phase.) What does each decode step read, and how many tokens does it produce for a sequence?
+1. Volume V, [Chapter 9](../v05-sequences/09-transformer-block.md), the gated feed-forward network: How many parameters and how many FLOPs per token does a SwiGLU network of model width $D = 2{,}048$ and hidden width $F = 512$ have?
+2. Volume III, [Chapter 3](../v03-neural-networks/03-softmax.md), the softmax: What are the two outputs of a softmax whose logits are $(0, \ln 3)$?
+3. Volume II, [Chapter 3](../v02-learning/03-logistic-regression.md), the sigmoid: What are $\sigma(0)$ and $\sigma(\ln 3)$, and which softmax output equals $\sigma(z)$?
+4. Volume I, [Chapter 16](../v01-mathematics/16-algorithms.md), the prefix sum: What is the exclusive scan of the counts $[3, 0, 2, 4]$?
+5. Volume IV, [Chapter 3](../v04-computation/03-roofline.md), arithmetic intensity: A weight matrix in bf16 multiplies the vector of one token. How many FLOPs does it do per byte of weights read, and is that product bound by bandwidth or by arithmetic?
+6. Volume V, [Chapter 12](../v05-sequences/12-kv-cache.md), the decode phase: What does each decode step read, and how many tokens does it produce for a sequence?
 
 ## Many feed-forward networks, and a token visits a few
 

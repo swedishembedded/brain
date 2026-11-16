@@ -9,11 +9,11 @@ In 1951 Claude Shannon showed people a stretch of English, hid the next letter a
 
 Before a machine can play, two things have to be made exact. A guess has to be a number a loss can score, which is a probability for every token that might come next. And a score for one token has to become a score for a whole text, so that models can be compared and trained on it. The second is an identity of probability that Volume I stated in passing, and the first is the softmax of Volume III. Bring both back, together with the measure of surprise, the tokens and the embedding table that the models below are built from.
 
-1. (Volume I, [Chapter 10](../v01-mathematics/10-probability.md), conditional probability.) A bag holds 2 red and 3 blue balls and two are drawn one after the other without putting the first back. What is the probability that both are red, written as a product of a probability and a conditional probability?
-2. (Volume III, [Chapter 3](../v03-neural-networks/03-softmax.md), softmax and cross-entropy.) Three logits are $(2, 0, 0)$ and the correct class is the first. What probability does the softmax give it, what is the loss, and what is the gradient of the loss with respect to the logits?
-3. (Volume I, [Chapter 13](../v01-mathematics/13-information-theory.md), perplexity.) A model's mean cross-entropy on a text is $\ln 3 \approx 1.0986$ nats per token. What is its perplexity, and what does that number mean in words?
-4. (Volume V, [Chapter 2](02-tokenization.md), tokens.) A sentence of 19 characters is cut into 5 tokens. How many predictions does a model that guesses one token at a time make for it, and how many if it guessed one character at a time?
-5. (Volume V, [Chapter 3](03-embeddings.md), the embedding table.) A table has 19 rows and 6 columns. How many numbers does the lookup of a window of four token ids read, and what does the lookup multiply?
+1. Volume I, [Chapter 10](../v01-mathematics/10-probability.md), conditional probability: A bag holds 2 red and 3 blue balls and two are drawn one after the other without putting the first back. What is the probability that both are red, written as a product of a probability and a conditional probability?
+2. Volume III, [Chapter 3](../v03-neural-networks/03-softmax.md), softmax and cross-entropy: Three logits are $(2, 0, 0)$ and the correct class is the first. What probability does the softmax give it, what is the loss, and what is the gradient of the loss with respect to the logits?
+3. Volume I, [Chapter 13](../v01-mathematics/13-information-theory.md), perplexity: A model's mean cross-entropy on a text is $\ln 3 \approx 1.0986$ nats per token. What is its perplexity, and what does that number mean in words?
+4. Volume V, [Chapter 2](02-tokenization.md), tokens: A sentence of 19 characters is cut into 5 tokens. How many predictions does a model that guesses one token at a time make for it, and how many if it guessed one character at a time?
+5. Volume V, [Chapter 3](03-embeddings.md), the embedding table: A table has 19 rows and 6 columns. How many numbers does the lookup of a window of four token ids read, and what does the lookup multiply?
 
 ## A language small enough to print
 

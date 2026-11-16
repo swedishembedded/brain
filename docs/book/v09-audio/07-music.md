@@ -11,11 +11,11 @@ A spoken sentence lasts a few seconds: the one synthesised in Chapter 6 lasted 3
 
 Music uses five earlier ideas straight away.
 
-1. ([Chapter 3](03-audio-codecs.md), the neural audio codec.) A codec writes 12.5 columns of 16 codes a second, each code from a codebook of 2048 entries. How many integers and how many bits is that a second?
-2. ([Chapter 6](06-speech-synthesis.md), the codec language model.) Why does the Talker run one position per frame and not one per code, and what is the price of adding the codes of a frame into one row?
-3. ([Volume VIII, Chapter 10](../v08-image-generation/10-latent-diffusion-systems.md), latent diffusion.) In a masked run, what is done after every Euler step to the region that must stay as it was?
-4. ([Volume VIII, Chapter 7](../v08-image-generation/07-samplers-and-guidance.md), classifier-free guidance.) Write the guided velocity in terms of the conditional and the unconditional one, and say how many evaluations of the network a step costs.
-5. ([Volume VIII, Chapter 6](../v08-image-generation/06-flow-matching.md), flow matching.) For a model that treats time as 0 at noise and 1 at data, what is one Euler step, and what is the velocity of a Gaussian target in closed form?
+1. [Chapter 3](03-audio-codecs.md), the neural audio codec: A codec writes 12.5 columns of 16 codes a second, each code from a codebook of 2048 entries. How many integers and how many bits is that a second?
+2. [Chapter 6](06-speech-synthesis.md), the codec language model: Why does the Talker run one position per frame and not one per code, and what is the price of adding the codes of a frame into one row?
+3. [Volume VIII, Chapter 10](../v08-image-generation/10-latent-diffusion-systems.md), latent diffusion: In a masked run, what is done after every Euler step to the region that must stay as it was?
+4. [Volume VIII, Chapter 7](../v08-image-generation/07-samplers-and-guidance.md), classifier-free guidance: Write the guided velocity in terms of the conditional and the unconditional one, and say how many evaluations of the network a step costs.
+5. [Volume VIII, Chapter 6](../v08-image-generation/06-flow-matching.md), flow matching: For a model that treats time as 0 at noise and 1 at data, what is one Euler step, and what is the velocity of a Gaussian target in closed form?
 
 ## Counting a song
 

@@ -32,11 +32,11 @@ Column 3 is the 10 kHz tone of the recording with all but every third sample thr
 
 What a list of samples keeps of a sound, and what it cannot keep, comes down to a rule about which frequencies survive, a way of rebuilding the signal between its samples when they do, the integers that carry the amplitude, the file that carries the integers, and the operation that moves a recording from one rate to another without the accident above. That operation is built from the Fourier tools of Volume I and the integer codes of Volume IV, so five of their ideas are worth bringing back first.
 
-1. (Volume I, [Chapter 14](../v01-mathematics/14-fourier.md), sinusoid.) What is the period, in milliseconds, of a tone of 440 Hz, and how many samples of a recording at 16 kHz does one period cover?
-2. (Volume I, [Chapter 14](../v01-mathematics/14-fourier.md), the discrete Fourier transform.) A real signal has $N = 32$ samples. How are $X[32 - k]$ and $X[k]$ related, and how many bins carry independent information?
-3. (Volume I, [Chapter 14](../v01-mathematics/14-fourier.md), the convolution theorem.) What does convolving a signal with a kernel do to each of its frequencies?
-4. (Volume I, [Chapter 10](../v01-mathematics/10-probability.md), variance.) What is the variance of a number drawn uniformly from $(-a, a)$?
-5. (Volume IV, [Chapter 1](../v04-computation/01-number-formats.md), integer-quantized format.) A signed 8-bit code $q$ with scale $\Delta$ stands for $\Delta\,q$. What range of codes is there, and how far can $\Delta\,q$ be from the number it was rounded from?
+1. Volume I, [Chapter 14](../v01-mathematics/14-fourier.md), sinusoid: What is the period, in milliseconds, of a tone of 440 Hz, and how many samples of a recording at 16 kHz does one period cover?
+2. Volume I, [Chapter 14](../v01-mathematics/14-fourier.md), the discrete Fourier transform: A real signal has $N = 32$ samples. How are $X[32 - k]$ and $X[k]$ related, and how many bins carry independent information?
+3. Volume I, [Chapter 14](../v01-mathematics/14-fourier.md), the convolution theorem: What does convolving a signal with a kernel do to each of its frequencies?
+4. Volume I, [Chapter 10](../v01-mathematics/10-probability.md), variance: What is the variance of a number drawn uniformly from $(-a, a)$?
+5. Volume IV, [Chapter 1](../v04-computation/01-number-formats.md), integer-quantized format: A signed 8-bit code $q$ with scale $\Delta$ stands for $\Delta\,q$. What range of codes is there, and how far can $\Delta\,q$ be from the number it was rounded from?
 
 ## Pressure becomes a list of numbers
 

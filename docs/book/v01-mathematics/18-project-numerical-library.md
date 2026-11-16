@@ -27,12 +27,12 @@ The figure shows which milestone calls which, so the order 1 to 7 is a valid bui
 
 Before the first line of code, six questions that reach across the whole volume, one for each piece that leans hardest on an earlier chapter: if one will not come back, the milestone that needs it will not either, so reread first. Their answers close the chapter.
 
-1. (Chapter 5, [Arrays, Shapes, Strides and Broadcasting](05-arrays.md)) A row-major array of shape $[3, 4]$ has strides $(4, 1)$. What are the shape and strides of its transpose, and does transposing move any number?
-2. (Chapter 4, [Matrices as Linear Maps](04-matrices.md), and Chapter 16, [Algorithms, Cost and Complexity](16-algorithms.md)) How many multiplications and additions does the product of an $[m, k]$ matrix and a $[k, n]$ matrix take, counted as multiply-adds?
-3. (Chapter 15, [Floating Point and Numerical Error](15-floating-point.md)) Why does log-sum-exp subtract the largest score before exponentiating, and what does Kahan's variable $c$ hold?
-4. (Chapter 17, [Randomness on a Deterministic Machine](17-randomness.md)) A generator yields 3 random bits and you want a die with 6 faces. Why is `raw mod 6` wrong, and what repairs it?
-5. (Chapter 7, [Derivatives: The Mathematics of Change](07-derivatives.md), and Chapter 15) A central difference has two competing errors. Name them, and say how the best step scales with the machine epsilon.
-6. (Chapter 12, [Statistics: Learning Facts from Samples](12-statistics.md)) What does a bootstrap do with a sample of $n$ values, and why must the unit it resamples be an independent one?
+1. Chapter 5, [Arrays, Shapes, Strides and Broadcasting](05-arrays.md): A row-major array of shape $[3, 4]$ has strides $(4, 1)$. What are the shape and strides of its transpose, and does transposing move any number?
+2. Chapter 4, [Matrices as Linear Maps](04-matrices.md), and Chapter 16, [Algorithms, Cost and Complexity](16-algorithms.md): How many multiplications and additions does the product of an $[m, k]$ matrix and a $[k, n]$ matrix take, counted as multiply-adds?
+3. Chapter 15, [Floating Point and Numerical Error](15-floating-point.md): Why does log-sum-exp subtract the largest score before exponentiating, and what does Kahan's variable $c$ hold?
+4. Chapter 17, [Randomness on a Deterministic Machine](17-randomness.md): A generator yields 3 random bits and you want a die with 6 faces. Why is `raw mod 6` wrong, and what repairs it?
+5. Chapter 7, [Derivatives: The Mathematics of Change](07-derivatives.md), and Chapter 15: A central difference has two competing errors. Name them, and say how the best step scales with the machine epsilon.
+6. Chapter 12, [Statistics: Learning Facts from Samples](12-statistics.md): What does a bootstrap do with a sample of $n$ values, and why must the unit it resamples be an independent one?
 
 ## Seven pieces of a numerical library
 

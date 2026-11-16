@@ -11,12 +11,12 @@ That answer had a gap in it. The encoder that produced the states was still a ch
 
 Attention is assembled from earlier pieces, and the questions below gather them.
 
-1. (Volume V, [Chapter 6](06-seq2seq.md), cross-attention.) In the attention of the last chapter, which vector played the question, which was compared with it to give a score, and which was averaged with the weights?
-2. (Volume III, [Chapter 3](../v03-neural-networks/03-softmax.md), the softmax and its loss.) The scores $(0, 0, \ln 3)$ go through a softmax. What are the three weights, and if the third is the correct class, what is the cross-entropy loss and the gradient of the loss with respect to the three scores?
-3. (Volume I, [Chapter 4](../v01-mathematics/04-matrices.md), matrix multiplication.) A matrix of shape $[4, 3]$ is multiplied by one of shape $[3, 2]$. What is the shape of the product, and how many multiplications does it take?
-4. (Volume III, [Chapter 5](../v03-neural-networks/05-layer-gradients.md), the backward pass of a matrix product.) For $\mathbf{C} = \mathbf{A}\mathbf{B}$, with the gradient $d\mathbf{C}$ of the loss with respect to $\mathbf{C}$ in hand, what are $d\mathbf{A}$ and $d\mathbf{B}$?
-5. (Volume I, [Chapter 10](../v01-mathematics/10-probability.md), variance.) Sixteen independent random numbers, each with mean 0 and variance 1, are added. What are the variance and the standard deviation of the sum?
-6. (Volume V, [Chapter 5](05-recurrent-networks.md), recurrence.) A recurrent layer reads 100 tokens. How many of its steps must run one after another, and does a device with more processors shorten that number?
+1. Volume V, [Chapter 6](06-seq2seq.md), cross-attention: In the attention of the last chapter, which vector played the question, which was compared with it to give a score, and which was averaged with the weights?
+2. Volume III, [Chapter 3](../v03-neural-networks/03-softmax.md), the softmax and its loss: The scores $(0, 0, \ln 3)$ go through a softmax. What are the three weights, and if the third is the correct class, what is the cross-entropy loss and the gradient of the loss with respect to the three scores?
+3. Volume I, [Chapter 4](../v01-mathematics/04-matrices.md), matrix multiplication: A matrix of shape $[4, 3]$ is multiplied by one of shape $[3, 2]$. What is the shape of the product, and how many multiplications does it take?
+4. Volume III, [Chapter 5](../v03-neural-networks/05-layer-gradients.md), the backward pass of a matrix product: For $\mathbf{C} = \mathbf{A}\mathbf{B}$, with the gradient $d\mathbf{C}$ of the loss with respect to $\mathbf{C}$ in hand, what are $d\mathbf{A}$ and $d\mathbf{B}$?
+5. Volume I, [Chapter 10](../v01-mathematics/10-probability.md), variance: Sixteen independent random numbers, each with mean 0 and variance 1, are added. What are the variance and the standard deviation of the sum?
+6. Volume V, [Chapter 5](05-recurrent-networks.md), recurrence: A recurrent layer reads 100 tokens. How many of its steps must run one after another, and does a device with more processors shorten that number?
 
 ## Every token asks, advertises and carries
 

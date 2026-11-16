@@ -78,11 +78,11 @@ Regularization (Volume II, chapter 4) is the name for everything that reduces th
 
 Five ideas from earlier chapters carry the rest.
 
-1. (Volume II, chapter 5, "Generalization, Overfitting and Honest Evaluation", overfitting and the validation set.) A model has training loss 0.02 and validation loss 0.44. What is this called, and why can the training loss alone never reveal it?
-2. (Volume II, chapter 4, "Maximum Likelihood, Priors and Regularization", the L2 penalty.) Which prior on the weights gives the penalty $\frac{\lambda}{2}\lVert\mathbf{w}\rVert^2$, and what does a larger $\lambda$ say about the prior?
-3. (Chapter 7, "Optimizers: From SGD to AdamW", decoupled weight decay.) With $\eta = 0.01$ and $\lambda = 0.3$, what fraction of a weight whose loss gradient is always zero is left after 100 steps of decoupled decay?
-4. (Chapter 10, "Normalization Layers", train and eval mode.) Name a layer that has two modes and say what differs between them.
-5. (Volume I, chapter 12, "Statistics", expectation and variance.) A random variable $B$ equals 1 with probability 0.8 and 0 otherwise. What are the mean and the variance of $B$, and of $5B$?
+1. Volume II, chapter 5, "Generalization, Overfitting and Honest Evaluation", overfitting and the validation set: A model has training loss 0.02 and validation loss 0.44. What is this called, and why can the training loss alone never reveal it?
+2. Volume II, chapter 4, "Maximum Likelihood, Priors and Regularization", the L2 penalty: Which prior on the weights gives the penalty $\frac{\lambda}{2}\lVert\mathbf{w}\rVert^2$, and what does a larger $\lambda$ say about the prior?
+3. Chapter 7, "Optimizers: From SGD to AdamW", decoupled weight decay: With $\eta = 0.01$ and $\lambda = 0.3$, what fraction of a weight whose loss gradient is always zero is left after 100 steps of decoupled decay?
+4. Chapter 10, "Normalization Layers", train and eval mode: Name a layer that has two modes and say what differs between them.
+5. Volume I, chapter 12, "Statistics", expectation and variance: A random variable $B$ equals 1 with probability 0.8 and 0 otherwise. What are the mean and the variance of $B$, and of $5B$?
 
 Label smoothing (chapter 3) returns near the end as the fifth member of the family.
 

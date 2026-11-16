@@ -22,12 +22,12 @@ Each difference has a reason, and the reasons can be counted: in parameters, in 
 
 Counting those differences leans on six earlier results, about heads, rotations, norms, gated networks, the cache and the gradient check:
 
-1. (Volume V, [Chapter 7](../v05-sequences/07-self-attention.md), multi-head attention.) In one layer of 12-head attention at width 768, with heads of width 64, how many key vectors does a token produce, and how many numbers do they hold in all?
-2. (Volume V, [Chapter 8](../v05-sequences/08-positions.md), rotary embeddings.) At which point of attention is the rotation applied, to which of the three of query, key and value, and what does the score of a pair of positions depend on afterwards?
-3. (Volume III, [Chapter 10](../v03-neural-networks/10-normalization.md), RMS normalization.) Write the RMS normalization of a row $\mathbf{x}$ of $D$ numbers with gain $\boldsymbol{\gamma}$ and floor $\epsilon$. How many learned numbers does it have, against LayerNorm?
-4. (Volume V, [Chapter 9](../v05-sequences/09-transformer-block.md), SwiGLU.) Write the SwiGLU network from its three matrices and their shapes, and count its parameters at $D = 768$ and $F = 2{,}048$.
-5. (Volume V, [Chapter 12](../v05-sequences/12-kv-cache.md), the KV cache.) How many bytes does one token of context cost in the cache of GPT-2 small (12 layers, 12 heads of width 64) in bf16?
-6. (Volume III, [Chapter 6](../v03-neural-networks/06-gradient-checking.md), gradient checking.) What does a gradient check compare for one entry of a weight matrix, and why is the difference central?
+1. Volume V, [Chapter 7](../v05-sequences/07-self-attention.md), multi-head attention: In one layer of 12-head attention at width 768, with heads of width 64, how many key vectors does a token produce, and how many numbers do they hold in all?
+2. Volume V, [Chapter 8](../v05-sequences/08-positions.md), rotary embeddings: At which point of attention is the rotation applied, to which of the three of query, key and value, and what does the score of a pair of positions depend on afterwards?
+3. Volume III, [Chapter 10](../v03-neural-networks/10-normalization.md), RMS normalization: Write the RMS normalization of a row $\mathbf{x}$ of $D$ numbers with gain $\boldsymbol{\gamma}$ and floor $\epsilon$. How many learned numbers does it have, against LayerNorm?
+4. Volume V, [Chapter 9](../v05-sequences/09-transformer-block.md), SwiGLU: Write the SwiGLU network from its three matrices and their shapes, and count its parameters at $D = 768$ and $F = 2{,}048$.
+5. Volume V, [Chapter 12](../v05-sequences/12-kv-cache.md), the KV cache: How many bytes does one token of context cost in the cache of GPT-2 small (12 layers, 12 heads of width 64) in bf16?
+6. Volume III, [Chapter 6](../v03-neural-networks/06-gradient-checking.md), gradient checking: What does a gradient check compare for one entry of a weight matrix, and why is the difference central?
 
 ## Two recipes, row by row
 

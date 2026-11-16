@@ -20,11 +20,11 @@ Nothing in the previous chapter can be counted like this. The latent of a variat
 
 The price is that nothing in the pipeline from image to code is differentiable any more. Paying it draws on five earlier ideas, from the nearest-neighbour search to the perceptual distance.
 
-1. (Volume II, [Chapter 7](../v02-learning/07-classical-methods.md), nearest neighbours.) How is the nearest training row to a query found, and what decides between two rows at the same distance?
-2. (Volume II, [Chapter 7](../v02-learning/07-classical-methods.md), k-means.) What are the two steps of one round of Lloyd's algorithm, and where does each centre move?
-3. (Volume I, [Chapter 13](../v01-mathematics/13-information-theory.md), perplexity.) What are the smallest and the largest perplexity of a distribution over $K$ symbols?
-4. (Volume III, [Chapter 6](../v03-neural-networks/06-gradient-checking.md), gradient checking.) What does a central difference compare with, and what does it say about a function that is flat?
-5. (Volume VII, [Chapter 8](../v07-vision/08-clip.md), perceptual distance.) In the toy of that chapter, which was further from the reference by pixel error, a picture shifted by one pixel or a blurred one, and which by feature distance?
+1. Volume II, [Chapter 7](../v02-learning/07-classical-methods.md), nearest neighbours: How is the nearest training row to a query found, and what decides between two rows at the same distance?
+2. Volume II, [Chapter 7](../v02-learning/07-classical-methods.md), k-means: What are the two steps of one round of Lloyd's algorithm, and where does each centre move?
+3. Volume I, [Chapter 13](../v01-mathematics/13-information-theory.md), perplexity: What are the smallest and the largest perplexity of a distribution over $K$ symbols?
+4. Volume III, [Chapter 6](../v03-neural-networks/06-gradient-checking.md), gradient checking: What does a central difference compare with, and what does it say about a function that is flat?
+5. Volume VII, [Chapter 8](../v07-vision/08-clip.md), perceptual distance: In the toy of that chapter, which was further from the reference by pixel error, a picture shifted by one pixel or a blurred one, and which by feature distance?
 
 ## A table of centres in place of a real number
 

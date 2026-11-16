@@ -11,12 +11,12 @@ The alternative is to let the keeper choose at random, with a probability for ev
 
 Six ideas from earlier are the tools.
 
-1. (Chapter 1, "Markov Decision Processes", return.) Three days pay $1$, $1$ and $1$ and nothing after. With $\gamma = 0.5$, what are $G_2$, $G_1$ and $G_0$?
-2. (Chapter 2, "Learning Values from Experience", temporal-difference learning.) Write the TD error $\delta$ of one day, and say what a positive $\delta$ tells the learner about the state it started from.
-3. (Volume I, Chapter 10, "Probability: Reasoning Under Uncertainty", variance.) One draw has variance $\sigma^2$. What is the variance of the mean of $N$ independent draws, and how many draws does it take to halve the standard error?
-4. (Volume I, Chapter 13, "Information, Entropy and Surprise", KL divergence.) For $p = (0.5, 0.5)$ and $q = (0.75, 0.25)$, compute $\mathrm{KL}(p \,\|\, q)$ in nats.
-5. (Volume III, Chapter 3, "Softmax, Logits and Cross-Entropy", softmax.) For $\mathbf{p} = \mathrm{softmax}(\mathbf{z})$ the cross-entropy loss of class $c$ has gradient $\mathbf{p} - \mathbf{e}_c$ with respect to $\mathbf{z}$. What is the gradient of $\ln p_c$ itself?
-6. (Volume V, Chapter 11, "Decoding: Turning Probabilities into Text", log-probabilities.) A sampled text of three tokens had the probabilities $0.5$, $0.25$ and $0.5$ at its three steps. What is its log-probability?
+1. Chapter 1, "Markov Decision Processes", return: Three days pay $1$, $1$ and $1$ and nothing after. With $\gamma = 0.5$, what are $G_2$, $G_1$ and $G_0$?
+2. Chapter 2, "Learning Values from Experience", temporal-difference learning: Write the TD error $\delta$ of one day, and say what a positive $\delta$ tells the learner about the state it started from.
+3. Volume I, Chapter 10, "Probability: Reasoning Under Uncertainty", variance: One draw has variance $\sigma^2$. What is the variance of the mean of $N$ independent draws, and how many draws does it take to halve the standard error?
+4. Volume I, Chapter 13, "Information, Entropy and Surprise", KL divergence: For $p = (0.5, 0.5)$ and $q = (0.75, 0.25)$, compute $\mathrm{KL}(p \,\|\, q)$ in nats.
+5. Volume III, Chapter 3, "Softmax, Logits and Cross-Entropy", softmax: For $\mathbf{p} = \mathrm{softmax}(\mathbf{z})$ the cross-entropy loss of class $c$ has gradient $\mathbf{p} - \mathbf{e}_c$ with respect to $\mathbf{z}$. What is the gradient of $\ln p_c$ itself?
+6. Volume V, Chapter 11, "Decoding: Turning Probabilities into Text", log-probabilities: A sampled text of three tokens had the probabilities $0.5$, $0.25$ and $0.5$ at its three steps. What is its log-probability?
 
 ## Four orders and one smooth return
 

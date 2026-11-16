@@ -32,12 +32,12 @@ Three questions follow. Which number summarizes a classifier's decisions, and wh
 
 The answers draw on six earlier ideas: the sigmoid and the threshold, conditional probability, the trapezoid rule, perplexity, the discipline of the validation set and the standard error. The questions below bring each back and name the chapter that taught it; the answers are under "Recall questions" at the end.
 
-1. (Chapter 3 of this volume, "Classification and Logistic Regression", the sigmoid and the threshold.) A model gives a part the logit $z = 2.1972$. What probability does it assign to "defective", and for which thresholds $t$ is the part called defective?
-2. (Volume I, chapter 10, "Probability: Reasoning Under Uncertainty", conditional probability.) Of 200 parts, 20 are defective. A test flags 30 parts, and 15 of the flagged parts are defective. Compute $P(\text{defective} \mid \text{flagged})$ and $P(\text{flagged} \mid \text{defective})$. Which one answers "how much should I trust an alarm"?
-3. (Volume I, chapter 9, "Integrals and Differential Equations", the trapezoid rule.) The points $(0, 0)$, $(0.5, 0.8)$, $(1, 1)$ are joined by straight segments. What is the area under them, by the trapezoid rule?
-4. (Volume I, chapter 13, "Information, Entropy and Surprise", perplexity.) A model gives the correct tokens of a four-token answer the probabilities $0.5, 0.25, 0.5, 0.25$. What is the mean cross-entropy in nats, and the perplexity?
-5. (Chapter 5 of this volume, "Generalization, Overfitting and Honest Evaluation", the validation set.) A threshold is to be chosen from held-out data. Why should it be chosen on the validation set and the score reported on the test set?
-6. (Volume I, chapter 12, "Statistics: Learning Facts from Samples", standard error.) A model answers $90$ of $100$ questions correctly. What is the standard error of its accuracy, and about how wide is a $95\%$ interval?
+1. Chapter 3 of this volume, "Classification and Logistic Regression", the sigmoid and the threshold: A model gives a part the logit $z = 2.1972$. What probability does it assign to "defective", and for which thresholds $t$ is the part called defective?
+2. Volume I, chapter 10, "Probability: Reasoning Under Uncertainty", conditional probability: Of 200 parts, 20 are defective. A test flags 30 parts, and 15 of the flagged parts are defective. Compute $P(\text{defective} \mid \text{flagged})$ and $P(\text{flagged} \mid \text{defective})$. Which one answers "how much should I trust an alarm"?
+3. Volume I, chapter 9, "Integrals and Differential Equations", the trapezoid rule: The points $(0, 0)$, $(0.5, 0.8)$, $(1, 1)$ are joined by straight segments. What is the area under them, by the trapezoid rule?
+4. Volume I, chapter 13, "Information, Entropy and Surprise", perplexity: A model gives the correct tokens of a four-token answer the probabilities $0.5, 0.25, 0.5, 0.25$. What is the mean cross-entropy in nats, and the perplexity?
+5. Chapter 5 of this volume, "Generalization, Overfitting and Honest Evaluation", the validation set: A threshold is to be chosen from held-out data. Why should it be chosen on the validation set and the score reported on the test set?
+6. Volume I, chapter 12, "Statistics: Learning Facts from Samples", standard error: A model answers $90$ of $100$ questions correctly. What is the standard error of its accuracy, and about how wide is a $95\%$ interval?
 
 
 ## Accuracy and the confusion matrix

@@ -11,11 +11,11 @@ A person looking at four photographs of a room does not vote. The floor is flat,
 
 A network that outputs geometry inherits the vocabulary of patches, alignment, rays and gauges; five questions bring it back.
 
-1. (Volume VII, [Chapter 6](../v07-vision/06-vision-transformers.md), vision transformers.) An image of 518 by 518 pixels is cut into patches of 14 by 14. How many patch tokens is that, and how many (query, key) pairs does one attention head score over them?
-2. (Volume VII, [Chapter 5](../v07-vision/05-dense-prediction.md), monocular depth.) A network predicts inverse depth $\hat\nu = 0.5\,\nu + 0.1$ at three pixels whose true inverse depths are $\nu = 0.2, 0.5, 0.8$. Which scale and shift, found by the alignment of that chapter, bring the prediction back onto the truth?
-3. ([Chapter 3](03-camera-geometry.md), camera intrinsics.) A camera has $f_x = f_y = 500$ and principal point $(320, 240)$. What is the unit ray of pixel $(400, 300)$, and which of the two pixel conventions (pixel $i$ covers $[i, i+1)$, or is centred on $i$) does the book use?
-4. ([Chapter 4](04-structure-from-motion.md), the gauge.) Photographs alone fix a reconstruction only up to how many numbers, and which?
-5. (Chapter 4, triangulation.) Why does the depth error of a triangulated point fall as the baseline grows, and what does the error of a point seen by cameras 2 centimetres apart look like along the ray?
+1. Volume VII, [Chapter 6](../v07-vision/06-vision-transformers.md), vision transformers: An image of 518 by 518 pixels is cut into patches of 14 by 14. How many patch tokens is that, and how many (query, key) pairs does one attention head score over them?
+2. Volume VII, [Chapter 5](../v07-vision/05-dense-prediction.md), monocular depth: A network predicts inverse depth $\hat\nu = 0.5\,\nu + 0.1$ at three pixels whose true inverse depths are $\nu = 0.2, 0.5, 0.8$. Which scale and shift, found by the alignment of that chapter, bring the prediction back onto the truth?
+3. [Chapter 3](03-camera-geometry.md), camera intrinsics: A camera has $f_x = f_y = 500$ and principal point $(320, 240)$. What is the unit ray of pixel $(400, 300)$, and which of the two pixel conventions (pixel $i$ covers $[i, i+1)$, or is centred on $i$) does the book use?
+4. [Chapter 4](04-structure-from-motion.md), the gauge: Photographs alone fix a reconstruction only up to how many numbers, and which?
+5. Chapter 4, triangulation: Why does the depth error of a triangulated point fall as the baseline grows, and what does the error of a point seen by cameras 2 centimetres apart look like along the ray?
 
 ## A map of points instead of a map of depths
 

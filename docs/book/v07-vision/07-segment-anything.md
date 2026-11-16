@@ -63,11 +63,11 @@ Each of the first two candidates is perfect for one reading and poor for the oth
 
 The decoder that does this is built from attention, windows, overlaps, rotations and upsampling met earlier, and five questions bring them back.
 
-1. (Volume V, [Chapter 6](../v05-sequences/06-seq2seq.md), cross-attention.) In a cross-attention layer with 7 queries and 16 keys, where do the queries, keys and values come from, and what is the shape of the weight matrix?
-2. ([Chapter 6](06-vision-transformers.md), windowed attention.) A 64 by 64 grid of tokens is cut into windows of 14 by 14 after zero-padding to a multiple of 14. How many windows are there and how many token rows does the padded grid have?
-3. ([Chapter 4](04-detection.md), intersection over union.) A mask of 4 pixels lies inside a mask of 16. What is their IoU?
-4. (Volume V, [Chapter 8](../v05-sequences/08-positions.md), rotary and sinusoidal position.) A query and a key are rotated by angles proportional to their positions $i$ and $j$. What does their dot product depend on?
-5. ([Chapter 2](02-convolution.md), transposed convolution.) A transposed convolution with a $2 \times 2$ kernel and stride 2 is applied to a $4 \times 4$ map. What is the output size, and does any output pixel receive more than one tap?
+1. Volume V, [Chapter 6](../v05-sequences/06-seq2seq.md), cross-attention: In a cross-attention layer with 7 queries and 16 keys, where do the queries, keys and values come from, and what is the shape of the weight matrix?
+2. [Chapter 6](06-vision-transformers.md), windowed attention: A 64 by 64 grid of tokens is cut into windows of 14 by 14 after zero-padding to a multiple of 14. How many windows are there and how many token rows does the padded grid have?
+3. [Chapter 4](04-detection.md), intersection over union: A mask of 4 pixels lies inside a mask of 16. What is their IoU?
+4. Volume V, [Chapter 8](../v05-sequences/08-positions.md), rotary and sinusoidal position: A query and a key are rotated by angles proportional to their positions $i$ and $j$. What does their dot product depend on?
+5. [Chapter 2](02-convolution.md), transposed convolution: A transposed convolution with a $2 \times 2$ kernel and stride 2 is applied to a $4 \times 4$ map. What is the output size, and does any output pixel receive more than one tap?
 
 ## One heavy pass per image, one light pass per click
 

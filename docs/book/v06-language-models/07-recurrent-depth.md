@@ -23,12 +23,12 @@ Read the first row against the third. The released model applies its 48 layers f
 
 A loop leans on six earlier ideas, from the residual stream to Euler's method; each comes back here as a one-line question.
 
-1. (Volume V, [Chapter 9](../v05-sequences/09-transformer-block.md), the residual stream.) A pre-norm block reads the stream $\mathbf{x}$ and writes two sublayers into it. What is the block's output in terms of $\mathbf{x}$, the attention sublayer $\mathrm{attn}$, the feed-forward network $\mathrm{ffn}$ and the norm?
-2. (Volume V, [Chapter 5](../v05-sequences/05-recurrent-networks.md), backpropagation through time.) The same matrix $\mathbf{W}$ is used at each of $n$ steps of an unrolled recurrence. How is the gradient of the loss with respect to $\mathbf{W}$ built from the steps?
-3. (Volume III, [Chapter 12](../v03-neural-networks/12-training-dynamics.md), vanishing and exploding gradients.) A gradient passes through 32 layers and each multiplies its size by 0.9, or by 1.1. What is left?
-4. ([Chapter 4](04-mixture-of-experts.md), experts.) A mixture layer holds 32 experts and a token uses 2. What share of the expert parameters does a token touch?
-5. (Volume V, [Chapter 12](../v05-sequences/12-kv-cache.md), the KV cache.) What does a decoder keep for each earlier token in each layer, and why can it be kept unchanged?
-6. (Volume I, [Chapter 9](../v01-mathematics/09-integrals-and-odes.md), Euler's method.) For $\mathrm{d}\mathbf{x}/\mathrm{d}\tau = g(\mathbf{x})$, what is one Euler step of size $h$?
+1. Volume V, [Chapter 9](../v05-sequences/09-transformer-block.md), the residual stream: A pre-norm block reads the stream $\mathbf{x}$ and writes two sublayers into it. What is the block's output in terms of $\mathbf{x}$, the attention sublayer $\mathrm{attn}$, the feed-forward network $\mathrm{ffn}$ and the norm?
+2. Volume V, [Chapter 5](../v05-sequences/05-recurrent-networks.md), backpropagation through time: The same matrix $\mathbf{W}$ is used at each of $n$ steps of an unrolled recurrence. How is the gradient of the loss with respect to $\mathbf{W}$ built from the steps?
+3. Volume III, [Chapter 12](../v03-neural-networks/12-training-dynamics.md), vanishing and exploding gradients: A gradient passes through 32 layers and each multiplies its size by 0.9, or by 1.1. What is left?
+4. [Chapter 4](04-mixture-of-experts.md), experts: A mixture layer holds 32 experts and a token uses 2. What share of the expert parameters does a token touch?
+5. Volume V, [Chapter 12](../v05-sequences/12-kv-cache.md), the KV cache: What does a decoder keep for each earlier token in each layer, and why can it be kept unchanged?
+6. Volume I, [Chapter 9](../v01-mathematics/09-integrals-and-odes.md), Euler's method: For $\mathrm{d}\mathbf{x}/\mathrm{d}\tau = g(\mathbf{x})$, what is one Euler step of size $h$?
 
 ## One block, applied again
 

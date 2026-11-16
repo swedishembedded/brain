@@ -56,12 +56,12 @@ average runs over is a categorical distribution, so six earlier ideas are in pla
 before the first formula. Each question below names the chapter to reopen if it
 resists; the answers close this one.
 
-1. (Chapter 1, logarithm.) What are $\log_2 8$, $\log_2 \tfrac{1}{4}$ and $\log_2 1$? Write $\log(u v)$ in terms of $\log u$ and $\log v$.
-2. (Chapter 1, logarithm.) A product of $400$ factors, each $0.1$, underflows to zero on a computer. What is the sum of the base-10 logarithms, and why is the sum safe?
-3. (Chapter 7, derivative.) What is the derivative of $\ln x$, and what is the equation of the tangent line to $\ln x$ at $x = 1$?
-4. (Chapter 10, expectation.) A fair die is rolled and you are paid the number shown. What is the expected payout, and how do you compute it from the table of probabilities?
-5. (Chapter 10, conditional probability.) In the spam table of Chapter 10, $180$ of the $220$ flagged emails were spam. What is $P(\text{spam} \mid \text{flagged})$?
-6. (Chapter 11, categorical distribution.) Three scores $(0, 0, 0)$ are turned into probabilities by exponentiating and dividing by the total. What distribution results, and what two conditions must any categorical distribution satisfy?
+1. Chapter 1, logarithm: What are $\log_2 8$, $\log_2 \tfrac{1}{4}$ and $\log_2 1$? Write $\log(u v)$ in terms of $\log u$ and $\log v$.
+2. Chapter 1, logarithm: A product of $400$ factors, each $0.1$, underflows to zero on a computer. What is the sum of the base-10 logarithms, and why is the sum safe?
+3. Chapter 7, derivative: What is the derivative of $\ln x$, and what is the equation of the tangent line to $\ln x$ at $x = 1$?
+4. Chapter 10, expectation: A fair die is rolled and you are paid the number shown. What is the expected payout, and how do you compute it from the table of probabilities?
+5. Chapter 10, conditional probability: In the spam table of Chapter 10, $180$ of the $220$ flagged emails were spam. What is $P(\text{spam} \mid \text{flagged})$?
+6. Chapter 11, categorical distribution: Three scores $(0, 0, 0)$ are turned into probabilities by exponentiating and dividing by the total. What distribution results, and what two conditions must any categorical distribution satisfy?
 
 ## Surprise: what one event tells us
 

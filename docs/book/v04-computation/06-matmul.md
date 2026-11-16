@@ -75,15 +75,15 @@ product itself. Each rearrangement also touches the numbers, since a sum added i
 
 Five ideas from earlier chapters carry the argument, from the cost of a product (Chapter 3) to the order of floating-point additions (Volume I, Chapter 15).
 
-1. (Chapter 3, arithmetic intensity.) How many floating-point operations does $C = AB$ take for two $[512, 512]$ fp32 matrices, how many bytes must cross
+1. Chapter 3, arithmetic intensity: How many floating-point operations does $C = AB$ take for two $[512, 512]$ fp32 matrices, how many bytes must cross
    the memory boundary at the very least (read $A$ and $B$ once, write $C$ once), and what is the intensity?
-2. (Chapter 2, cache lines.) A $[256, 256]$ fp32 matrix is stored row-major and read down one column. How many different 64-byte cache lines does the column touch, and
+2. Chapter 2, cache lines: A $[256, 256]$ fp32 matrix is stored row-major and read down one column. How many different 64-byte cache lines does the column touch, and
    how many numbers of each line are used by that column?
-3. (Chapter 4, shared memory.) Why does a workgroup that stages a tile in shared memory need a barrier between the invocations that write the tile and the
+3. Chapter 4, shared memory: Why does a workgroup that stages a tile in shared memory need a barrier between the invocations that write the tile and the
    invocations that read it?
-4. (Chapter 4, occupancy.) A kernel uses 40 registers per invocation, 256 invocations per workgroup and 2,048 bytes of shared memory per workgroup. How many
+4. Chapter 4, occupancy: A kernel uses 40 registers per invocation, 256 invocations per workgroup and 2,048 bytes of shared memory per workgroup. How many
    workgroups are resident on one compute unit of the model GPU (65,536 registers, 65,536 bytes of shared memory, 2,048 resident invocations, at most 16 workgroups)?
-5. (Volume I, Chapter 15, rounding.) In fp32, with unit roundoff $u = 2^{-24}$, is $(1 + 2^{-24}) + 2^{-24}$ equal to $1 + (2^{-24} + 2^{-24})$? Why does it matter to
+5. Volume I, Chapter 15, rounding: In fp32, with unit roundoff $u = 2^{-24}$, is $(1 + 2^{-24}) + 2^{-24}$ equal to $1 + (2^{-24} + 2^{-24})$? Why does it matter to
    a program that adds the same numbers in a different order?
 
 ## Counting the three-line loop

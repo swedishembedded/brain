@@ -13,12 +13,12 @@ Chapters 2 to 9 built the parts one at a time: the autoencoder that makes a late
 
 The assembly leans on six earlier ideas.
 
-1. ([Chapter 2](02-vae.md), the variational autoencoder.) A $1024 \times 1024$ picture goes through an autoencoder with 32 latent channels at one eighth of the side, and the latent is then packed in $2 \times 2$ patches. How many numbers does the latent hold, and how many tokens of how many numbers does the denoiser see?
-2. ([Chapter 6](06-flow-matching.md), flow matching.) A distilled sampler takes four Euler steps with noise fractions $1, 0.9674, 0.9081, 0.7672, 0$. What is the size of the last step, and what does it do to the latent?
-3. ([Chapter 7](07-samplers-and-guidance.md), classifier-free guidance.) Write the guided field from the field with the prompt and the field without it, and say how many passes of the denoiser one step needs for guidance scales $g = 1$ and $g = 3$.
-4. ([Chapter 8](08-denoiser-architectures.md), joint attention.) With 512 text rows and a $1024 \times 1024$ image at 16 pixels a token, how long is the joint sequence, and which rows does the final layer predict?
-5. ([Chapter 9](09-text-conditioning.md), text-encoder conditioning.) What does brain's FLUX.2 pipeline do with a prompt that is longer than the text window, and why?
-6. (Volume IV, Chapter 3, the roofline.) A device does $P$ operations a second and moves $B$ bytes a second. At what operations per byte does a kernel stop being limited by traffic and start being limited by arithmetic?
+1. [Chapter 2](02-vae.md), the variational autoencoder: A $1024 \times 1024$ picture goes through an autoencoder with 32 latent channels at one eighth of the side, and the latent is then packed in $2 \times 2$ patches. How many numbers does the latent hold, and how many tokens of how many numbers does the denoiser see?
+2. [Chapter 6](06-flow-matching.md), flow matching: A distilled sampler takes four Euler steps with noise fractions $1, 0.9674, 0.9081, 0.7672, 0$. What is the size of the last step, and what does it do to the latent?
+3. [Chapter 7](07-samplers-and-guidance.md), classifier-free guidance: Write the guided field from the field with the prompt and the field without it, and say how many passes of the denoiser one step needs for guidance scales $g = 1$ and $g = 3$.
+4. [Chapter 8](08-denoiser-architectures.md), joint attention: With 512 text rows and a $1024 \times 1024$ image at 16 pixels a token, how long is the joint sequence, and which rows does the final layer predict?
+5. [Chapter 9](09-text-conditioning.md), text-encoder conditioning: What does brain's FLUX.2 pipeline do with a prompt that is longer than the text window, and why?
+6. Volume IV, Chapter 3, the roofline: A device does $P$ operations a second and moves $B$ bytes a second. At what operations per byte does a kernel stop being limited by traffic and start being limited by arithmetic?
 
 ## Four stages, and where the work goes
 

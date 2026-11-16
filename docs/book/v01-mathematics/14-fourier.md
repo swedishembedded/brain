@@ -80,12 +80,12 @@ the unit circle, projection, rotation matrices and the exponential. Each
 question names where its idea was taught, and one that will not come back is a
 reason to reread that chapter before the plane starts to turn.
 
-1. (Chapter 1, summation notation.) Evaluate $\sum_{n=0}^{3} 2^n$. How many terms does $\sum_{n=0}^{N-1}$ have?
-2. (Chapter 2, exponential function and the cosine schedule.) The decay piece of the cosine learning-rate schedule is $\tfrac12(1 + \cos \pi u)$ for $u$ from $0$ to $1$. What are its values at $u = 0$, $\tfrac12$ and $1$?
-3. (Chapter 3, the unit circle.) What are $\cos 90^\circ$, $\sin 90^\circ$ and $\cos 180^\circ$, and what point of the plane does the angle $\theta$ select on the circle of radius 1?
-4. (Chapter 3, projection and orthogonality.) Project $\mathbf{v} = (3, 4)$ onto $\mathbf{u} = (2, 1)$: what coefficient $t$ gives the closest multiple $t\mathbf{u}$, and what is the dot product of the residual with $\mathbf{u}$?
-5. (Chapter 6, rotation matrices.) Write the matrix $\mathbf{R}(\theta)$ that turns the plane by $\theta$. What is $\mathbf{R}(\alpha)\mathbf{R}(\beta)$ for two turning angles $\alpha$ and $\beta$?
-6. (Chapters 2 and 7, the exponential function.) What does $e^a e^b$ equal? Which function equals its own derivative and starts at 1, and what polynomial series did Chapter 7 build for it?
+1. Chapter 1, summation notation: Evaluate $\sum_{n=0}^{3} 2^n$. How many terms does $\sum_{n=0}^{N-1}$ have?
+2. Chapter 2, exponential function and the cosine schedule: The decay piece of the cosine learning-rate schedule is $\tfrac12(1 + \cos \pi u)$ for $u$ from $0$ to $1$. What are its values at $u = 0$, $\tfrac12$ and $1$?
+3. Chapter 3, the unit circle: What are $\cos 90^\circ$, $\sin 90^\circ$ and $\cos 180^\circ$, and what point of the plane does the angle $\theta$ select on the circle of radius 1?
+4. Chapter 3, projection and orthogonality: Project $\mathbf{v} = (3, 4)$ onto $\mathbf{u} = (2, 1)$: what coefficient $t$ gives the closest multiple $t\mathbf{u}$, and what is the dot product of the residual with $\mathbf{u}$?
+5. Chapter 6, rotation matrices: Write the matrix $\mathbf{R}(\theta)$ that turns the plane by $\theta$. What is $\mathbf{R}(\alpha)\mathbf{R}(\beta)$ for two turning angles $\alpha$ and $\beta$?
+6. Chapters 2 and 7, the exponential function: What does $e^a e^b$ equal? Which function equals its own derivative and starts at 1, and what polynomial series did Chapter 7 build for it?
 
 ## Complex numbers: points in the plane that multiply
 

@@ -27,11 +27,11 @@ That experiment holds the whole subject in small. Data ordered in time cannot be
 
 Each of those tools rebuilds something from Volumes I and II, and five of those ideas are worth having to hand before they are re-examined.
 
-1. (Volume I, Chapter 11, "The Distributions Machine Learning Uses", covariance.) Two quantities have variances $4$ and $9$ and covariance $3$. What is the variance of their sum, and what is their correlation?
-2. (Volume II, Chapter 2, "Linear Regression and the First Descent", least squares.) Fit $y = a + bx$ by least squares to the points $(0, 1)$, $(1, 2)$, $(2, 4)$: write the normal equations and solve them.
-3. (Volume II, Chapter 5, "Generalization, Overfitting and Honest Evaluation", data leakage.) A daily series is cut into training and test rows by a random shuffle of its days. What goes wrong with the test score, and what rule does a chronological split follow instead?
-4. (Volume II, Chapter 8, "Experiments, Baselines and Claims", baselines.) What does a baseline protect a claim from?
-5. (Volume I, Chapter 14, "Complex Numbers, Frequencies and the Fourier Transform", the discrete Fourier transform.) A list of $n = 120$ values contains $A\cos(2\pi k t / n + \varphi)$ with $k$ a whole number. In which bin of the transform does it appear, and how does $A$ come out of the bin's value?
+1. Volume I, Chapter 11, "The Distributions Machine Learning Uses", covariance: Two quantities have variances $4$ and $9$ and covariance $3$. What is the variance of their sum, and what is their correlation?
+2. Volume II, Chapter 2, "Linear Regression and the First Descent", least squares: Fit $y = a + bx$ by least squares to the points $(0, 1)$, $(1, 2)$, $(2, 4)$: write the normal equations and solve them.
+3. Volume II, Chapter 5, "Generalization, Overfitting and Honest Evaluation", data leakage: A daily series is cut into training and test rows by a random shuffle of its days. What goes wrong with the test score, and what rule does a chronological split follow instead?
+4. Volume II, Chapter 8, "Experiments, Baselines and Claims", baselines: What does a baseline protect a claim from?
+5. Volume I, Chapter 14, "Complex Numbers, Frequencies and the Fourier Transform", the discrete Fourier transform: A list of $n = 120$ values contains $A\cos(2\pi k t / n + \varphi)$ with $k$ a whole number. In which bin of the transform does it appear, and how does $A$ come out of the bin's value?
 
 ## What the order adds
 

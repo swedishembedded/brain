@@ -11,11 +11,11 @@ Gaussian splatting keeps the point and gives it exactly what it lacks: a size, a
 
 The blob is a covariance, its image a projection, its order a sort, its fit a backward pass and an optimizer, and each of these was built in an earlier volume; five questions bring them back.
 
-1. (Volume I, [Chapter 11](../v01-mathematics/11-distributions.md), the multivariate Gaussian.) A vector is drawn as $\boldsymbol\mu + \mathbf{A}\mathbf{z}$ with $\mathbf{z}$ standard. What is its covariance, and what shape do the contours of its density have when $\mathbf{A} = \mathbf{R}\,\mathrm{diag}(s_0, s_1, s_2)$ for a rotation $\mathbf{R}$?
-2. ([Chapter 3](03-camera-geometry.md), the pinhole camera.) A camera with $f_x = f_y = 100$ and principal point $(32, 24)$ sees the camera-frame point $(0.5, -0.2, 4)$. Where does it land, and which entries of the Jacobian of the map at that point are not zero?
-3. (Volume IV, [Chapter 7](../v04-computation/07-reductions.md), radix sort.) A radix sort orders 32-bit keys in four passes of 8 bits, least significant digit first. Why must each pass be stable, and what happens to two equal keys carrying the values $a$ then $b$?
-4. (Volume III, [Chapter 4](../v03-neural-networks/04-backpropagation.md), the backward pass.) A scalar loss depends on $y = f(g(x))$. What does the backward pass multiply together to reach $\partial\mathcal{L}/\partial x$, and what must the forward pass have kept for it?
-5. (Volume III, [Chapter 7](../v03-neural-networks/07-optimizers.md), Adam.) With bias correction, how far does Adam move a parameter on its very first step, whatever the size of the gradient, and why does that make one learning rate for all parameters a poor idea when they have different units?
+1. Volume I, [Chapter 11](../v01-mathematics/11-distributions.md), the multivariate Gaussian: A vector is drawn as $\boldsymbol\mu + \mathbf{A}\mathbf{z}$ with $\mathbf{z}$ standard. What is its covariance, and what shape do the contours of its density have when $\mathbf{A} = \mathbf{R}\,\mathrm{diag}(s_0, s_1, s_2)$ for a rotation $\mathbf{R}$?
+2. [Chapter 3](03-camera-geometry.md), the pinhole camera: A camera with $f_x = f_y = 100$ and principal point $(32, 24)$ sees the camera-frame point $(0.5, -0.2, 4)$. Where does it land, and which entries of the Jacobian of the map at that point are not zero?
+3. Volume IV, [Chapter 7](../v04-computation/07-reductions.md), radix sort: A radix sort orders 32-bit keys in four passes of 8 bits, least significant digit first. Why must each pass be stable, and what happens to two equal keys carrying the values $a$ then $b$?
+4. Volume III, [Chapter 4](../v03-neural-networks/04-backpropagation.md), the backward pass: A scalar loss depends on $y = f(g(x))$. What does the backward pass multiply together to reach $\partial\mathcal{L}/\partial x$, and what must the forward pass have kept for it?
+5. Volume III, [Chapter 7](../v03-neural-networks/07-optimizers.md), Adam: With bias correction, how far does Adam move a parameter on its very first step, whatever the size of the gradient, and why does that make one learning rate for all parameters a poor idea when they have different units?
 
 ## A point with a size and a shape
 

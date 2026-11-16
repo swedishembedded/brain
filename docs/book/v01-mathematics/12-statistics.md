@@ -59,12 +59,12 @@ limit theorem, binomial counts, distances between examples and summation notatio
 the last from the first chapter. Each question names where its idea was taught, the
 place to return to if the answer will not come.
 
-1. (Chapter 10, probability.) Ten independent measurements each have variance $4$. What is the variance of their average?
-2. (Chapter 11, distributions.) $X$ and $Y$ each have variance $1$ and their covariance is $0.8$. What is $\mathrm{Var}[X - Y]$?
-3. (Chapter 11.) State the central limit theorem in one sentence. About what share of a Gaussian lies within two standard deviations of its mean?
-4. (Chapter 11.) A fair coin is flipped $4$ times. What is the probability of at least $3$ heads?
-5. (Chapter 3, vectors.) The points $(1000, 2)$ and $(1010, 5)$ describe two examples with two features. What is the Euclidean distance between them, and which feature does it mostly measure?
-6. (Chapter 1, notation.) Write the sum of the squared deviations of $x_1, \dots, x_n$ from their mean $\bar{x}$ in summation notation, and evaluate it for the data $2, 4, 9$.
+1. Chapter 10, probability: Ten independent measurements each have variance $4$. What is the variance of their average?
+2. Chapter 11, distributions: $X$ and $Y$ each have variance $1$ and their covariance is $0.8$. What is $\mathrm{Var}[X - Y]$?
+3. Chapter 11: State the central limit theorem in one sentence. About what share of a Gaussian lies within two standard deviations of its mean?
+4. Chapter 11: A fair coin is flipped $4$ times. What is the probability of at least $3$ heads?
+5. Chapter 3, vectors: The points $(1000, 2)$ and $(1010, 5)$ describe two examples with two features. What is the Euclidean distance between them, and which feature does it mostly measure?
+6. Chapter 1, notation: Write the sum of the squared deviations of $x_1, \dots, x_n$ from their mean $\bar{x}$ in summation notation, and evaluate it for the data $2, 4, 9$.
 
 ## Estimating a quantity from a sample
 

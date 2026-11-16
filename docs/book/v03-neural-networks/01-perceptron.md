@@ -11,11 +11,11 @@ That sentence is already a program. Give each sensor a **weight** that says how 
 
 A weighted vote is a dot product, and a threshold on it is the decision boundary of a linear logit; the margin of a support vector machine and the feature maps of kernel methods return when the vote fails. Five questions bring those ideas back before the pump gets its numbers.
 
-1. (Volume I, chapter 3, "Vectors: Lists of Numbers with Geometry", the dot product.) For $\mathbf{w} = (0.5, -1, 2)$ and $\mathbf{x} = (4, 1, 0.5)$, what is $\mathbf{w}\cdot\mathbf{x}$?
-2. (Volume II, chapter 3, "Classification and Logistic Regression", the decision boundary.) A model scores a point by $z = -3 + x_1 + 2x_2$ and predicts the positive class when $z \ge 0$. Which side of the boundary is the point $(2, 1)$ on, and what is the equation of the boundary?
-3. (Volume II, chapter 3, the sigmoid.) What are $\sigma(0)$ and $\sigma(4)$, and what does $\sigma(z)$ approach as $z \to -\infty$?
-4. (Volume II, chapter 7, "Machine Learning Before Deep Learning", the support vector machine.) Among the many lines that separate two classes, which one does a support vector machine choose?
-5. (Volume II, chapter 3, "When the data can be separated".) The classes of a dataset can be separated by a line. What does gradient descent on the cross-entropy do to the weights as the steps continue, and why?
+1. Volume I, chapter 3, "Vectors: Lists of Numbers with Geometry", the dot product: For $\mathbf{w} = (0.5, -1, 2)$ and $\mathbf{x} = (4, 1, 0.5)$, what is $\mathbf{w}\cdot\mathbf{x}$?
+2. Volume II, chapter 3, "Classification and Logistic Regression", the decision boundary: A model scores a point by $z = -3 + x_1 + 2x_2$ and predicts the positive class when $z \ge 0$. Which side of the boundary is the point $(2, 1)$ on, and what is the equation of the boundary?
+3. Volume II, chapter 3, the sigmoid: What are $\sigma(0)$ and $\sigma(4)$, and what does $\sigma(z)$ approach as $z \to -\infty$?
+4. Volume II, chapter 7, "Machine Learning Before Deep Learning", the support vector machine: Among the many lines that separate two classes, which one does a support vector machine choose?
+5. Volume II, chapter 3, "When the data can be separated": The classes of a dataset can be separated by a line. What does gradient descent on the cross-entropy do to the weights as the steps continue, and why?
 
 ## A neuron as a weighted vote
 

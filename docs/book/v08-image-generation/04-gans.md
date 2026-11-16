@@ -27,11 +27,11 @@ At $x = 1$, midway between the means, the judge shrugs. At $x = -2$ it is almost
 
 The classifier, its loss and the two networks that play against each other rest on five earlier ideas; bring them back before the derivation leans on them.
 
-1. (Volume II, [Chapter 3](../v02-learning/03-logistic-regression.md), binary cross-entropy.) What is the loss for a label $y \in \{0, 1\}$ and a predicted probability $p = \sigma(\ell)$, and what is its derivative with respect to the logit $\ell$?
-2. ([Chapter 1](01-generative-modeling.md), generative models.) What can a generative model give you, and which of the two things can be had without the other?
-3. ([Chapter 3](03-vector-quantization.md), the blur.) Why does a decoder trained on squared error output the mean of the pictures its code cannot tell apart?
-4. (Volume VII, [Chapter 3](../v07-vision/03-cnns.md), convolutional networks.) A convolution with kernel $3 \times 3$, stride 1 and padding 1 maps a $5 \times 5$ map to what size, and how large a patch of the input does one output see after three such layers?
-5. (Volume III, [Chapter 6](../v03-neural-networks/06-gradient-checking.md), gradient checking.) What does a central difference compare with, and what does a gate with a tolerance of $10^{-6}$ accept?
+1. Volume II, [Chapter 3](../v02-learning/03-logistic-regression.md), binary cross-entropy: What is the loss for a label $y \in \{0, 1\}$ and a predicted probability $p = \sigma(\ell)$, and what is its derivative with respect to the logit $\ell$?
+2. [Chapter 1](01-generative-modeling.md), generative models: What can a generative model give you, and which of the two things can be had without the other?
+3. [Chapter 3](03-vector-quantization.md), the blur: Why does a decoder trained on squared error output the mean of the pictures its code cannot tell apart?
+4. Volume VII, [Chapter 3](../v07-vision/03-cnns.md), convolutional networks: A convolution with kernel $3 \times 3$, stride 1 and padding 1 maps a $5 \times 5$ map to what size, and how large a patch of the input does one output see after three such layers?
+5. Volume III, [Chapter 6](../v03-neural-networks/06-gradient-checking.md), gradient checking: What does a central difference compare with, and what does a gate with a tolerance of $10^{-6}$ accept?
 
 ## Training a judge from samples
 

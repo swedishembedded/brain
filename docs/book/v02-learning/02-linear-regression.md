@@ -49,12 +49,12 @@ and the stability of Euler's method. Six questions, one per idea, show whether
 they are ready; each names the chapter that taught it, and the answers close the
 chapter.
 
-1. (Chapter 1 of this volume, "The Learning Problem".) The score of chapter 1 for the line $f(v) = 24v + 9$ was $4.29$ degrees. If we change the line to $f(v) = 20v + 18$, which things change: the ten rows, the parameters, the score?
-2. (Volume I, chapter 8, "Gradients, Jacobians and Many Variables", the gradient.) For $L(w_1, w_2) = w_1^2 + 3 w_1 w_2$, what is the gradient at $(1, 1)$, and in which direction does $L$ fall fastest?
-3. (Volume I, chapter 4, "Matrices as Linear Maps", transpose and shapes.) A matrix $\mathbf{X}$ has shape $[10, 2]$ and $\mathbf{y}$ has shape $[10]$. What are the shapes of $\mathbf{X}^\top$, $\mathbf{X}^\top\mathbf{X}$ and $\mathbf{X}^\top\mathbf{y}$?
-4. (Volume I, chapter 4, "Matrices as Linear Maps", elimination.) Solve $2 w_1 + w_2 = 4$, $w_1 + 3 w_2 = 7$ by subtracting a multiple of one equation from the other, and say what has to be true of the pivot for this to work.
-5. (Volume I, chapter 7, "Derivatives: The Mathematics of Change", convexity.) Why does a convex function make "stop where the slope is zero" a safe rule for finding the lowest point?
-6. (Volume I, chapter 9, "Integrals and Differential Equations", Euler's method.) For $dx/dt = -\lambda x$ with $\lambda > 0$, one Euler step of size $h$ is $x \leftarrow x - h\lambda x$. For which $h$ does $\lvert x\rvert$ shrink at every step?
+1. Chapter 1 of this volume, "The Learning Problem": The score of chapter 1 for the line $f(v) = 24v + 9$ was $4.29$ degrees. If we change the line to $f(v) = 20v + 18$, which things change: the ten rows, the parameters, the score?
+2. Volume I, chapter 8, "Gradients, Jacobians and Many Variables", the gradient: For $L(w_1, w_2) = w_1^2 + 3 w_1 w_2$, what is the gradient at $(1, 1)$, and in which direction does $L$ fall fastest?
+3. Volume I, chapter 4, "Matrices as Linear Maps", transpose and shapes: A matrix $\mathbf{X}$ has shape $[10, 2]$ and $\mathbf{y}$ has shape $[10]$. What are the shapes of $\mathbf{X}^\top$, $\mathbf{X}^\top\mathbf{X}$ and $\mathbf{X}^\top\mathbf{y}$?
+4. Volume I, chapter 4, "Matrices as Linear Maps", elimination: Solve $2 w_1 + w_2 = 4$, $w_1 + 3 w_2 = 7$ by subtracting a multiple of one equation from the other, and say what has to be true of the pivot for this to work.
+5. Volume I, chapter 7, "Derivatives: The Mathematics of Change", convexity: Why does a convex function make "stop where the slope is zero" a safe rule for finding the lowest point?
+6. Volume I, chapter 9, "Integrals and Differential Equations", Euler's method: For $dx/dt = -\lambda x$ with $\lambda > 0$, one Euler step of size $h$ is $x \leftarrow x - h\lambda x$. For which $h$ does $\lvert x\rvert$ shrink at every step?
 
 ## A score with a name: the loss function
 

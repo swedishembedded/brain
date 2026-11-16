@@ -37,13 +37,13 @@ The figure is the end state, the latent system of Milestone 5. The pixel system 
 
 Seven ideas from earlier chapters carry the milestones; bring each one back before the milestone that leans on it.
 
-1. (Volume VIII, [Chapter 6](06-flow-matching.md), the straight path.) For $x_0 = 1$, noise $\varepsilon = -1$ and $\sigma = 0.25$, what are $x_\sigma$ and the velocity target? Where does one Euler step with the exact field from noise fraction $\sigma$ to $0$ land?
-2. (Volume VIII, [Chapter 7](07-samplers-and-guidance.md), guidance.) Write the guided field $u_g$ in terms of the fields with and without the prompt. What are $u_0$ and $u_1$, how many passes of the network does one step cost, and if the conditional branch is off by $\delta$, by how much is $u_g$ off?
-3. (Volume VIII, [Chapter 2](02-vae.md), the bound.) For a decoder $\mathcal{N}(g(\mathbf{z}), \sigma_{\mathrm{x}}^2\mathbf{I})$ and an encoder $\mathcal{N}(\mathbf{m}, e^{\mathbf{v}})$, what is the negative bound of one picture, and how is $\mathbf{z}$ drawn so that the gradient reaches the encoder?
-4. (Volume VIII, [Chapter 10](10-latent-diffusion-systems.md) and [Chapter 2](02-vae.md), the latent's scale.) Why is the encoder's mean not handed to the denoiser as it is, and what is done to it before the decoder sees it again?
-5. (Volume VIII, [Chapter 8](08-denoiser-architectures.md), the noise level.) A layer computes $w\,x + \delta(\sigma)$ with a fixed gain $w$. What does the best denoiser of one cluster ask for that this layer cannot give, and what form of layer gives it?
-6. (Volume III, [Chapter 6](../v03-neural-networks/06-gradient-checking.md), gradient checks.) What is compared with what, with which step, and what number says that a hand-written backward pass is right?
-7. (Volume VIII, [Chapter 1](01-generative-modeling.md), what a model is for.) A model of images offers a sampler, a density, or both. What did Chapter 1 say a density is needed for, and why is a sample not enough to judge a model?
+1. Volume VIII, [Chapter 6](06-flow-matching.md), the straight path: For $x_0 = 1$, noise $\varepsilon = -1$ and $\sigma = 0.25$, what are $x_\sigma$ and the velocity target? Where does one Euler step with the exact field from noise fraction $\sigma$ to $0$ land?
+2. Volume VIII, [Chapter 7](07-samplers-and-guidance.md), guidance: Write the guided field $u_g$ in terms of the fields with and without the prompt. What are $u_0$ and $u_1$, how many passes of the network does one step cost, and if the conditional branch is off by $\delta$, by how much is $u_g$ off?
+3. Volume VIII, [Chapter 2](02-vae.md), the bound: For a decoder $\mathcal{N}(g(\mathbf{z}), \sigma_{\mathrm{x}}^2\mathbf{I})$ and an encoder $\mathcal{N}(\mathbf{m}, e^{\mathbf{v}})$, what is the negative bound of one picture, and how is $\mathbf{z}$ drawn so that the gradient reaches the encoder?
+4. Volume VIII, [Chapter 10](10-latent-diffusion-systems.md) and [Chapter 2](02-vae.md), the latent's scale: Why is the encoder's mean not handed to the denoiser as it is, and what is done to it before the decoder sees it again?
+5. Volume VIII, [Chapter 8](08-denoiser-architectures.md), the noise level: A layer computes $w\,x + \delta(\sigma)$ with a fixed gain $w$. What does the best denoiser of one cluster ask for that this layer cannot give, and what form of layer gives it?
+6. Volume III, [Chapter 6](../v03-neural-networks/06-gradient-checking.md), gradient checks: What is compared with what, with which step, and what number says that a hand-written backward pass is right?
+7. Volume VIII, [Chapter 1](01-generative-modeling.md), what a model is for: A model of images offers a sampler, a density, or both. What did Chapter 1 say a density is needed for, and why is a sample not enough to judge a model?
 
 ## Building the generator in six steps
 

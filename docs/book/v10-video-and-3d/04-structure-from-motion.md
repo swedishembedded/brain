@@ -23,11 +23,11 @@ The ruler is cruel to far things. Half a pixel of error in $d$ costs 4 centimetr
 
 One small synthetic scene is followed from end to end, because a reconstruction that is wrong can look right for a long time, and the only way to see that it is wrong is to know the answer. The pipeline leans on five earlier ideas, the camera, its pose, two kinds of fitting and the conditioning of a linear solve; bring each back before it is needed.
 
-1. ([Chapter 3](03-camera-geometry.md), the pinhole camera.) For $f_x = f_y = 500$ and principal point $(320, 240)$, where does the camera-frame point $(0.8, -0.4, 2)$ land, and which line of points lands on the pixel $(400, 300)$?
-2. ([Chapter 3](03-camera-geometry.md), camera extrinsics.) A camera has $\mathbf{R} = \mathbf{I}$ and $\mathbf{t} = (-0.6, 0, 0)$. Where is its centre in world coordinates, and which way does a program that reads the pair as camera to world put it?
-3. (Volume II, [Chapter 2](../v02-learning/02-linear-regression.md), least squares.) A system $\mathbf{A}\mathbf{x} \approx \mathbf{b}$ has more equations than unknowns. Which $\mathbf{x}$ minimizes $\lVert\mathbf{A}\mathbf{x} - \mathbf{b}\rVert^2$, and what is the residual orthogonal to?
-4. (Volume II, [Chapter 2](../v02-learning/02-linear-regression.md), gradient descent.) A loss is a bowl whose curvature is 1 in one direction and 100 in the other. What is the largest step size gradient descent can take without diverging, and by what factor does the error along the flat direction shrink per step at that size?
-5. ([Chapter 3](03-camera-geometry.md), the direct linear transform.) The homography of a plane was found from correspondences as the unit vector that makes $\lVert\mathbf{A}\mathbf{h}\rVert$ smallest. Which singular vector is it, and why was the point set normalized before the fit?
+1. [Chapter 3](03-camera-geometry.md), the pinhole camera: For $f_x = f_y = 500$ and principal point $(320, 240)$, where does the camera-frame point $(0.8, -0.4, 2)$ land, and which line of points lands on the pixel $(400, 300)$?
+2. [Chapter 3](03-camera-geometry.md), camera extrinsics: A camera has $\mathbf{R} = \mathbf{I}$ and $\mathbf{t} = (-0.6, 0, 0)$. Where is its centre in world coordinates, and which way does a program that reads the pair as camera to world put it?
+3. Volume II, [Chapter 2](../v02-learning/02-linear-regression.md), least squares: A system $\mathbf{A}\mathbf{x} \approx \mathbf{b}$ has more equations than unknowns. Which $\mathbf{x}$ minimizes $\lVert\mathbf{A}\mathbf{x} - \mathbf{b}\rVert^2$, and what is the residual orthogonal to?
+4. Volume II, [Chapter 2](../v02-learning/02-linear-regression.md), gradient descent: A loss is a bowl whose curvature is 1 in one direction and 100 in the other. What is the largest step size gradient descent can take without diverging, and by what factor does the error along the flat direction shrink per step at that size?
+5. [Chapter 3](03-camera-geometry.md), the direct linear transform: The homography of a plane was found from correspondences as the unit vector that makes $\lVert\mathbf{A}\mathbf{h}\rVert$ smallest. Which singular vector is it, and why was the point set normalized before the fit?
 
 ## A scene small enough to know
 

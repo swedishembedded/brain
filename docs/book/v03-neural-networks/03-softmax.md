@@ -28,11 +28,11 @@ The part has logits $(2.4, 0.4, -0.4, 0.5)$: the classifier leans towards a scra
 
 One function meets all three needs, and for two classes it turns out to be the sigmoid already met. Building it draws on the logit and the sigmoid, the categorical distribution, the cross-entropy, the log-sum-exp and the Jacobian; five questions bring them back first. The weights of the classifier are taken as given throughout: finding them through many layers is the business of the chapters that follow.
 
-1. (Volume II, chapter 3, "Classification and Logistic Regression", the logit and the sigmoid.) A classifier gives a part the logit $z = 1.5$ for the class "rejected". What probability does it assign, and what is the probability of "accepted"?
-2. (Volume I, chapter 11, "Distributions", the categorical distribution.) What two conditions must a list of four numbers satisfy to be the probabilities of a categorical distribution on four outcomes? If the third outcome occurred, what is the list of indicators of the outcome?
-3. (Volume I, chapter 13, "Information Theory", cross-entropy.) What is the cross-entropy of the target $(0, 1, 0)$ against the probabilities $(0.2, 0.5, 0.3)$, and what does it equal when the target is a single certain outcome?
-4. (Volume I, chapter 15, "Floating Point and Numerical Error", log-sum-exp.) What is $\mathrm{lse}(0, 0)$, and why does the stable computation of the log-sum-exp subtract the largest score before exponentiating?
-5. (Volume I, chapter 8, "Gradients, Jacobians and Many Variables", the Jacobian.) What is the shape of the Jacobian of a function from four inputs to four outputs, and what is its entry in row $i$, column $j$?
+1. Volume II, chapter 3, "Classification and Logistic Regression", the logit and the sigmoid: A classifier gives a part the logit $z = 1.5$ for the class "rejected". What probability does it assign, and what is the probability of "accepted"?
+2. Volume I, chapter 11, "Distributions", the categorical distribution: What two conditions must a list of four numbers satisfy to be the probabilities of a categorical distribution on four outcomes? If the third outcome occurred, what is the list of indicators of the outcome?
+3. Volume I, chapter 13, "Information Theory", cross-entropy: What is the cross-entropy of the target $(0, 1, 0)$ against the probabilities $(0.2, 0.5, 0.3)$, and what does it equal when the target is a single certain outcome?
+4. Volume I, chapter 15, "Floating Point and Numerical Error", log-sum-exp: What is $\mathrm{lse}(0, 0)$, and why does the stable computation of the log-sum-exp subtract the largest score before exponentiating?
+5. Volume I, chapter 8, "Gradients, Jacobians and Many Variables", the Jacobian: What is the shape of the Jacobian of a function from four inputs to four outputs, and what is its entry in row $i$, column $j$?
 
 ## From scores to a probability vector
 

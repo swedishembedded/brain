@@ -11,12 +11,12 @@ The second way is open because of a fact about the decoder that Volumes V and VI
 
 A vision-language model joins parts built earlier, and six of them are recalled first.
 
-1. ([Volume V, Chapter 12](../v05-sequences/12-kv-cache.md), the cache.) A decoder has 36 layers and 8 key-value heads of width 128 and stores bf16 numbers. How many bytes does one token occupy in its cache?
-2. ([Chapter 6](06-vision-transformers.md), patches.) A 448 by 448 picture is cut into patches of 16 pixels. How many tokens does the tower attend over, and how many does it hand on if each 2 by 2 block of patches is merged into one?
-3. ([Volume V, Chapter 8](../v05-sequences/08-positions.md), multi-axis rotary embedding.) The counter stands at $c = 5$ before a picture of one frame, 2 rows and 3 columns. What triple does the patch in row 1, column 2 get?
-4. ([Chapter 8](08-clip.md), contrastive pretraining.) On which vector does the loss of a contrastive tower act, and what does it say about the other rows the tower computes?
-5. ([Volume V, Chapter 2](../v05-sequences/02-tokenization.md), special tokens.) What makes a special token different from a string of ordinary characters that happens to spell the same thing?
-6. ([Volume V, Chapter 8](../v05-sequences/08-positions.md) and [Volume VI, Chapter 1](../v06-language-models/01-modern-decoder.md).) Does a rotary decoder add position to its embedding rows? And if it has 32 query heads over 8 key-value heads, how many query heads share one key-value head?
+1. [Volume V, Chapter 12](../v05-sequences/12-kv-cache.md), the cache: A decoder has 36 layers and 8 key-value heads of width 128 and stores bf16 numbers. How many bytes does one token occupy in its cache?
+2. [Chapter 6](06-vision-transformers.md), patches: A 448 by 448 picture is cut into patches of 16 pixels. How many tokens does the tower attend over, and how many does it hand on if each 2 by 2 block of patches is merged into one?
+3. [Volume V, Chapter 8](../v05-sequences/08-positions.md), multi-axis rotary embedding: The counter stands at $c = 5$ before a picture of one frame, 2 rows and 3 columns. What triple does the patch in row 1, column 2 get?
+4. [Chapter 8](08-clip.md), contrastive pretraining: On which vector does the loss of a contrastive tower act, and what does it say about the other rows the tower computes?
+5. [Volume V, Chapter 2](../v05-sequences/02-tokenization.md), special tokens: What makes a special token different from a string of ordinary characters that happens to spell the same thing?
+6. [Volume V, Chapter 8](../v05-sequences/08-positions.md) and [Volume VI, Chapter 1](../v06-language-models/01-modern-decoder.md): Does a rotary decoder add position to its embedding rows? And if it has 32 query heads over 8 key-value heads, how many query heads share one key-value head?
 
 ## A prompt with a hole in it
 

@@ -66,12 +66,12 @@ The number the model was built to make small, its error on the rows it was fitte
 
 The argument leans on the expected error on a new draw from the source, least squares and the penalty of ridge regression from this volume, and on bias, variance and the trouble with making many comparisons from Volume I. The six questions below check that these are at hand, each naming the chapter that taught it, with answers under "Recall questions" at the end.
 
-1. (Volume I, chapter 12, "Statistics: Learning Facts from Samples", estimators.) What does it mean for an estimator $\hat\theta$ to be biased, and why does the sample variance with divisor $n$ underestimate the true variance?
-2. (Volume I, chapter 10, "Probability: Reasoning Under Uncertainty", variance.) Two independent quantities have variances $4$ and $9$. What is the variance of their sum, and of their average?
-3. (Volume I, chapter 12, "Statistics", many comparisons.) Twenty independent tests are each run at the $5\%$ level and every null hypothesis is true. What is the probability that at least one test comes out significant?
-4. (Chapter 1 of this volume, data come from a distribution.) A model's average error on the rows it was fitted to is $0.0$. Why does that not say that its expected error on a new draw from the source is $0.0$?
-5. (Chapter 2 of this volume, the mean squared error.) Predictions $2, 5$ against labels $3, 3$: what is the mean squared error?
-6. (Chapter 4 of this volume, regularization.) When the penalty $\lambda$ of ridge regression grows, what happens to the training error and to the size of the weights?
+1. Volume I, chapter 12, "Statistics: Learning Facts from Samples", estimators: What does it mean for an estimator $\hat\theta$ to be biased, and why does the sample variance with divisor $n$ underestimate the true variance?
+2. Volume I, chapter 10, "Probability: Reasoning Under Uncertainty", variance: Two independent quantities have variances $4$ and $9$. What is the variance of their sum, and of their average?
+3. Volume I, chapter 12, "Statistics", many comparisons: Twenty independent tests are each run at the $5\%$ level and every null hypothesis is true. What is the probability that at least one test comes out significant?
+4. Chapter 1 of this volume, data come from a distribution: A model's average error on the rows it was fitted to is $0.0$. Why does that not say that its expected error on a new draw from the source is $0.0$?
+5. Chapter 2 of this volume, the mean squared error: Predictions $2, 5$ against labels $3, 3$: what is the mean squared error?
+6. Chapter 4 of this volume, regularization: When the penalty $\lambda$ of ridge regression grows, what happens to the training error and to the size of the weights?
 
 
 ## Underfitting and overfitting

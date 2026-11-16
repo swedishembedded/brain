@@ -17,12 +17,12 @@ Testing it takes two things that depend on each other. One is the architecture o
 
 Causality, the residual stream, the Fourier basis, baselines, intervals and gradient checks all meet in this experiment; each comes back first as a question.
 
-1. (Volume V, [Chapter 4](../v05-sequences/04-language-modeling.md), the causal language model.) A model predicts the token at position $t$ from the tokens before it. What makes a model causal, and what happens to the training loss if the prediction at $t$ can see the token at $t$ itself?
-2. (Volume V, [Chapter 9](../v05-sequences/09-transformer-block.md), the residual stream.) Write the output of a pre-norm block in terms of its input $\mathbf{x}$, the attention sublayer and the feed-forward network.
-3. (Volume I, [Chapter 14](../v01-mathematics/14-fourier.md), the discrete Fourier transform.) The real orthonormal Fourier basis of $\mathbb{R}^N$ is the columns of a matrix $\mathbf{S}$. What is $\mathbf{S}^\top\mathbf{S}$, what does that say about the lengths of $\mathbf{x}$ and $\mathbf{S}^\top\mathbf{x}$, and how many complex multiplications does the fast transform need for $N = 512$, against the definition?
-4. (Volume II, [Chapter 8](../v02-learning/08-experiments.md), ablations and baselines.) Why must a baseline differ from the method under test in one thing only?
-5. (Volume II, Chapter 8, uncertainty.) Eight paired differences have mean $-0.04$ and standard deviation $0.02$. Give the standard error and the 95 percent interval (multiplier $2.3646$ for 7 degrees of freedom).
-6. (Volume III, [Chapter 6](../v03-neural-networks/06-gradient-checking.md), gradient checks.) How is an analytic gradient checked against central differences, and what does the check need to be run in double precision?
+1. Volume V, [Chapter 4](../v05-sequences/04-language-modeling.md), the causal language model: A model predicts the token at position $t$ from the tokens before it. What makes a model causal, and what happens to the training loss if the prediction at $t$ can see the token at $t$ itself?
+2. Volume V, [Chapter 9](../v05-sequences/09-transformer-block.md), the residual stream: Write the output of a pre-norm block in terms of its input $\mathbf{x}$, the attention sublayer and the feed-forward network.
+3. Volume I, [Chapter 14](../v01-mathematics/14-fourier.md), the discrete Fourier transform: The real orthonormal Fourier basis of $\mathbb{R}^N$ is the columns of a matrix $\mathbf{S}$. What is $\mathbf{S}^\top\mathbf{S}$, what does that say about the lengths of $\mathbf{x}$ and $\mathbf{S}^\top\mathbf{x}$, and how many complex multiplications does the fast transform need for $N = 512$, against the definition?
+4. Volume II, [Chapter 8](../v02-learning/08-experiments.md), ablations and baselines: Why must a baseline differ from the method under test in one thing only?
+5. Volume II, Chapter 8, uncertainty: Eight paired differences have mean $-0.04$ and standard deviation $0.02$. Give the standard error and the 95 percent interval (multiplier $2.3646$ for 7 degrees of freedom).
+6. Volume III, [Chapter 6](../v03-neural-networks/06-gradient-checking.md), gradient checks: How is an analytic gradient checked against central differences, and what does the check need to be run in double precision?
 
 ## A change of coordinates that changes nothing
 

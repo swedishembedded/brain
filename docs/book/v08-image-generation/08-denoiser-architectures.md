@@ -11,12 +11,12 @@ Three questions follow from that count. The noise fraction is a single scalar am
 
 The three questions draw on six ideas from earlier volumes and chapters. Recall each before the denoiser is taken apart (the answers are under "Recall questions" at the end).
 
-1. (Volume VII, [Chapter 5](../v07-vision/05-dense-prediction.md), skip connections.) In the encoder-decoder segmenter a decoder map with 8 channels is concatenated with the encoder map of the same size, which has 4. How many channels does the next $3 \times 3$ convolution read, and how many parameters does it have if it returns 4 channels?
-2. (Volume V, [Chapter 6](../v05-sequences/06-seq2seq.md), cross-attention.) In cross-attention from 5 positions to 3, which sequence supplies the queries, which the keys and values, and what is the shape of the matrix of attention weights?
-3. (Volume V, [Chapter 9](../v05-sequences/09-transformer-block.md), the transformer block.) A pre-norm block of width $D$ has four $D \times D$ attention matrices and a SwiGLU network of hidden width $8D/3$ with three matrices. How many parameters is that, as a multiple of $D^2$?
-4. (Volume V, [Chapter 8](../v05-sequences/08-positions.md), sinusoidal encoding.) For a sinusoidal encoding of dimension 8 and base 10000, what are the four rates, and which pair of coordinates changes fastest as the position grows?
-5. (Volume III, [Chapter 10](../v03-neural-networks/10-normalization.md), group normalization.) A group norm with 32 groups is applied to a map of 320 channels and $H \times W$ positions. Over how many numbers is each mean and variance taken?
-6. ([Chapter 6](06-flow-matching.md), the velocity.) On the straight path $x_\sigma = (1 - \sigma)x_0 + \sigma\varepsilon$, what is the velocity $dx_\sigma/d\sigma$, and what does the exact network return for it?
+1. Volume VII, [Chapter 5](../v07-vision/05-dense-prediction.md), skip connections: In the encoder-decoder segmenter a decoder map with 8 channels is concatenated with the encoder map of the same size, which has 4. How many channels does the next $3 \times 3$ convolution read, and how many parameters does it have if it returns 4 channels?
+2. Volume V, [Chapter 6](../v05-sequences/06-seq2seq.md), cross-attention: In cross-attention from 5 positions to 3, which sequence supplies the queries, which the keys and values, and what is the shape of the matrix of attention weights?
+3. Volume V, [Chapter 9](../v05-sequences/09-transformer-block.md), the transformer block: A pre-norm block of width $D$ has four $D \times D$ attention matrices and a SwiGLU network of hidden width $8D/3$ with three matrices. How many parameters is that, as a multiple of $D^2$?
+4. Volume V, [Chapter 8](../v05-sequences/08-positions.md), sinusoidal encoding: For a sinusoidal encoding of dimension 8 and base 10000, what are the four rates, and which pair of coordinates changes fastest as the position grows?
+5. Volume III, [Chapter 10](../v03-neural-networks/10-normalization.md), group normalization: A group norm with 32 groups is applied to a map of 320 channels and $H \times W$ positions. Over how many numbers is each mean and variance taken?
+6. [Chapter 6](06-flow-matching.md), the velocity: On the straight path $x_\sigma = (1 - \sigma)x_0 + \sigma\varepsilon$, what is the velocity $dx_\sigma/d\sigma$, and what does the exact network return for it?
 
 ## A denoiser that is not told how noisy its input is
 

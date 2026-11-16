@@ -11,11 +11,11 @@ One case is not a catalogue. The previous chapter derived the backward pass of o
 
 The derivations lean on the backward pass, the vector-Jacobian product and the fan-out rule (Chapter 4), the softmax Jacobian (Chapter 3), matrix products and transposes (Volume I, Chapter 4), broadcasting (Volume I, Chapter 5) and the multivariable chain rule (Volume I, Chapter 8). Five questions bring back the pieces that every rule below is assembled from.
 
-1. ("Gradients, Jacobians and Many Variables", Volume I, Chapter 8, the chain rule.) A quantity $z$ depends on $x$ through three intermediate quantities $y_1(x), y_2(x), y_3(x)$. Write $\frac{dz}{dx}$ in terms of partial derivatives.
-2. ("Backpropagation Derived from Scratch", Chapter 4.) For $a_i = \tanh(z_i)$ the backward pass computes $dz_i = da_i\,(1 - a_i^2)$ without building a Jacobian. What shape does the Jacobian have, and why can the product be done with $n$ multiplications instead of $n^2$?
-3. ("Backpropagation Derived from Scratch", Chapter 4.) A linear layer maps $\mathbf{X}$ of shape $[B, D]$ with a weight $\mathbf{W}$ of shape $[O, D]$ to $\mathbf{Y} = \mathbf{X}\mathbf{W}^\top$. What are the shapes of $d\mathbf{Y}$, $d\mathbf{W}$ and $d\mathbf{X}$?
-4. ("Arrays, Shapes, Strides and Broadcasting", Volume I, Chapter 5.) What does it mean to add an array $\mathbf{b}$ of shape $[4]$ to an array of shape $[3, 4]$? Which axis is stretched, and does the stretching copy any memory?
-5. ("Matrices as Linear Maps", Volume I, Chapter 4.) If $\mathbf{A}$ is $[m, k]$ and $\mathbf{B}$ is $[k, n]$, what is $(\mathbf{A}\mathbf{B})^\top$ in terms of $\mathbf{A}^\top$ and $\mathbf{B}^\top$?
+1. "Gradients, Jacobians and Many Variables", Volume I, Chapter 8, the chain rule: A quantity $z$ depends on $x$ through three intermediate quantities $y_1(x), y_2(x), y_3(x)$. Write $\frac{dz}{dx}$ in terms of partial derivatives.
+2. "Backpropagation Derived from Scratch", Chapter 4: For $a_i = \tanh(z_i)$ the backward pass computes $dz_i = da_i\,(1 - a_i^2)$ without building a Jacobian. What shape does the Jacobian have, and why can the product be done with $n$ multiplications instead of $n^2$?
+3. "Backpropagation Derived from Scratch", Chapter 4: A linear layer maps $\mathbf{X}$ of shape $[B, D]$ with a weight $\mathbf{W}$ of shape $[O, D]$ to $\mathbf{Y} = \mathbf{X}\mathbf{W}^\top$. What are the shapes of $d\mathbf{Y}$, $d\mathbf{W}$ and $d\mathbf{X}$?
+4. "Arrays, Shapes, Strides and Broadcasting", Volume I, Chapter 5: What does it mean to add an array $\mathbf{b}$ of shape $[4]$ to an array of shape $[3, 4]$? Which axis is stretched, and does the stretching copy any memory?
+5. "Matrices as Linear Maps", Volume I, Chapter 4: If $\mathbf{A}$ is $[m, k]$ and $\mathbf{B}$ is $[k, n]$, what is $(\mathbf{A}\mathbf{B})^\top$ in terms of $\mathbf{A}^\top$ and $\mathbf{B}^\top$?
 
 ## One method for every rule
 

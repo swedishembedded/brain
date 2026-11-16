@@ -13,11 +13,11 @@ The stages are seven. Raw text is cut into tokens (Chapter 2). The tokens of man
 
 Training a GPT draws on earlier chapters, recalled before the loop is written.
 
-1. (Chapter 2, byte-pair encoding.) Two words are in the corpus, `aab` three times and `ab` twice. Which adjacent pair is merged first, and how is `aab` written afterwards?
-2. (Chapter 4, the causal language model.) A document has five tokens, $x_1, \dots, x_5$, after a start marker $x_0$. Which tokens are the inputs and which the targets, and what loss does a model that guesses uniformly over 73 tokens get?
-3. (Chapter 9, the transformer block.) What does each of the two sublayers of a pre-norm block read, and how does it hand its result on?
-4. (Volume III, Chapter 7, AdamW.) For one weight $\theta$ with bias-corrected moments $\hat m$ and $\hat v$, learning rate $\eta$, decay $\lambda$ and constant $\epsilon$, write the update. Where does the decay act?
-5. (Volume III, Chapter 8, schedules and clipping.) With a peak rate of 0.01, a warmup of 20 steps and a 0-based step index, what is the rate at the first step? A gradient has norm 2.5 and the clip threshold is 1.0: by what factor is the gradient multiplied?
+1. Chapter 2, byte-pair encoding: Two words are in the corpus, `aab` three times and `ab` twice. Which adjacent pair is merged first, and how is `aab` written afterwards?
+2. Chapter 4, the causal language model: A document has five tokens, $x_1, \dots, x_5$, after a start marker $x_0$. Which tokens are the inputs and which the targets, and what loss does a model that guesses uniformly over 73 tokens get?
+3. Chapter 9, the transformer block: What does each of the two sublayers of a pre-norm block read, and how does it hand its result on?
+4. Volume III, Chapter 7, AdamW: For one weight $\theta$ with bias-corrected moments $\hat m$ and $\hat v$, learning rate $\eta$, decay $\lambda$ and constant $\epsilon$, write the update. Where does the decay act?
+5. Volume III, Chapter 8, schedules and clipping: With a peak rate of 0.01, a warmup of 20 steps and a 0-based step index, what is the rate at the first step? A gradient has norm 2.5 and the clip threshold is 1.0: by what factor is the gradient multiplied?
 
 ## A corpus whose entropy is known
 

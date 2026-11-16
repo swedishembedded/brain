@@ -13,11 +13,11 @@ Three restorers in brain choose among the readings in three different ways, and 
 
 Restoration starts from five earlier ideas.
 
-1. (Volume VII, [Chapter 3](../v07-vision/03-cnns.md), convolutional networks.) A $3 \times 3$ convolution with bias maps 64 channels to 32. How many parameters has it, and how many operations does it take on a $128 \times 128$ map, counting a multiply-add as two?
-2. (Volume VII, [Chapter 1](../v07-vision/01-images.md), shrinking an image.) A shrink by 2 replaces each non-overlapping $2 \times 2$ block by its mean. What does the block $(10, 30; 50, 70)$ become, and what is the block $(30, 10; 70, 50)$ turned into?
-3. (Volume VIII, [Chapter 3](03-vector-quantization.md), the codebook.) A feature $(0.9, 0.2)$ is quantized against the codes $(1, 0)$, $(0, 1)$ and $(-1, 0)$. Which code is chosen, and how is a tie broken?
-4. (Volume VIII, [Chapter 4](04-gans.md), the adversarial loss.) At the optimum of the game, what does the discriminator output for any sample, and what distribution does the generator produce?
-5. (Volume VIII, [Chapter 10](10-latent-diffusion-systems.md), latent diffusion.) A 50-step generation with guidance runs the denoiser how many times, and which stage after the loop runs only once?
+1. Volume VII, [Chapter 3](../v07-vision/03-cnns.md), convolutional networks: A $3 \times 3$ convolution with bias maps 64 channels to 32. How many parameters has it, and how many operations does it take on a $128 \times 128$ map, counting a multiply-add as two?
+2. Volume VII, [Chapter 1](../v07-vision/01-images.md), shrinking an image: A shrink by 2 replaces each non-overlapping $2 \times 2$ block by its mean. What does the block $(10, 30; 50, 70)$ become, and what is the block $(30, 10; 70, 50)$ turned into?
+3. Volume VIII, [Chapter 3](03-vector-quantization.md), the codebook: A feature $(0.9, 0.2)$ is quantized against the codes $(1, 0)$, $(0, 1)$ and $(-1, 0)$. Which code is chosen, and how is a tie broken?
+4. Volume VIII, [Chapter 4](04-gans.md), the adversarial loss: At the optimum of the game, what does the discriminator output for any sample, and what distribution does the generator produce?
+5. Volume VIII, [Chapter 10](10-latent-diffusion-systems.md), latent diffusion: A 50-step generation with guidance runs the denoiser how many times, and which stage after the loop runs only once?
 
 ![Three restorers side by side: a network that returns the restored picture, a network that reads codes from a codebook with encoder features fused back through a dial, and a diffusion sampler steered by a trunk and adaptors.](img/restorer-families.svg)
 

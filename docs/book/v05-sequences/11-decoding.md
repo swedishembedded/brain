@@ -11,12 +11,12 @@ The first choice repeats itself: the model's favourite continuation of every wor
 
 Some ideas from earlier chapters are needed at once, so bring them back first.
 
-1. (Volume III, [Chapter 3](../v03-neural-networks/03-softmax.md), softmax and logits.) Three logits are $(2, 0, 0)$. What probabilities does the softmax give them, and what happens to the probabilities when every logit is increased by 5?
-2. (Volume I, [Chapter 17](../v01-mathematics/17-randomness.md), sampling from a distribution.) The probabilities of three tokens are $(0.5, 0.3, 0.2)$, listed in that order, and the uniform number drawn is $u = 0.83$. Which token does the cumulative walk return?
-3. (Volume V, [Chapter 4](04-language-modeling.md), the autoregressive factorization.) A text of three tokens has conditional probabilities $0.5$, $0.4$ and $0.1$ for its tokens in turn. What is the probability of the whole text?
-4. (Volume I, [Chapter 13](../v01-mathematics/13-information-theory.md), entropy.) What is the entropy, in nats, of the distribution $(0.5, 0.25, 0.25)$?
-5. (Volume I, [Chapter 15](../v01-mathematics/15-floating-point.md), underflow.) The smallest positive normal number of 32-bit floating point is about $1.18 \times 10^{-38}$. A text of $n$ tokens, each given probability 0.1, has probability $0.1^n$. From which $n$ on is that product below the smallest normal number?
-6. (Volume I, [Chapter 17](../v01-mathematics/17-randomness.md), reproducibility.) Two runs of a program use the same seed and print different random numbers. Name two things other than the seed that could differ.
+1. Volume III, [Chapter 3](../v03-neural-networks/03-softmax.md), softmax and logits: Three logits are $(2, 0, 0)$. What probabilities does the softmax give them, and what happens to the probabilities when every logit is increased by 5?
+2. Volume I, [Chapter 17](../v01-mathematics/17-randomness.md), sampling from a distribution: The probabilities of three tokens are $(0.5, 0.3, 0.2)$, listed in that order, and the uniform number drawn is $u = 0.83$. Which token does the cumulative walk return?
+3. Volume V, [Chapter 4](04-language-modeling.md), the autoregressive factorization: A text of three tokens has conditional probabilities $0.5$, $0.4$ and $0.1$ for its tokens in turn. What is the probability of the whole text?
+4. Volume I, [Chapter 13](../v01-mathematics/13-information-theory.md), entropy: What is the entropy, in nats, of the distribution $(0.5, 0.25, 0.25)$?
+5. Volume I, [Chapter 15](../v01-mathematics/15-floating-point.md), underflow: The smallest positive normal number of 32-bit floating point is about $1.18 \times 10^{-38}$. A text of $n$ tokens, each given probability 0.1, has probability $0.1^n$. From which $n$ on is that product below the smallest normal number?
+6. Volume I, [Chapter 17](../v01-mathematics/17-randomness.md), reproducibility: Two runs of a program use the same seed and print different random numbers. Name two things other than the seed that could differ.
 
 ## Eighteen numbers and a choice
 

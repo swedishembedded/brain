@@ -25,11 +25,11 @@ The remedy is a small layer that makes the size of what a layer receives indepen
 
 A normalization layer is a sample mean and variance computed inside the network, its backward pass is made of the reduction and broadcast rules of chapter 5, and its use is judged on the deep stack of chapter 9. Five questions bring those back.
 
-1. (Volume I, chapter 12, "Statistics", the sample mean and variance.) What are the mean and the variance, with divisor $n$, of the three numbers $1, 2, 6$?
-2. (Volume II, chapter 2, "Linear Regression and the First Descent", feature scaling.) Why did z-scoring the voltage make gradient descent so much quicker, in one sentence?
-3. (Chapter 5, "The Backward Pass of Every Layer", reductions.) $r = \frac1n\sum_i x_i$ for $n = 4$, and the gradient arriving at $r$ is $dr = 2$. What is $dx_i$?
-4. (Chapter 5, broadcasting.) A scale $\boldsymbol{\gamma}$ of shape $[D]$ multiplies every row of a $[B, D]$ array $\mathbf{A}$ to give $\mathbf{Y}$. What is the gradient of $\boldsymbol{\gamma}$ in terms of the gradient $d\mathbf{Y}$ arriving at the result and $\mathbf{A}$, and what is its shape?
-5. (Chapter 9, "Initialization: Where Training Starts", variance-preservation.) A layer has $n_{\mathrm{in}} = 64$ inputs and weights of variance $1/64$. If its inputs have second moment 2, what is the second moment of its (identity-unit) pre-activations?
+1. Volume I, chapter 12, "Statistics", the sample mean and variance: What are the mean and the variance, with divisor $n$, of the three numbers $1, 2, 6$?
+2. Volume II, chapter 2, "Linear Regression and the First Descent", feature scaling: Why did z-scoring the voltage make gradient descent so much quicker, in one sentence?
+3. Chapter 5, "The Backward Pass of Every Layer", reductions: $r = \frac1n\sum_i x_i$ for $n = 4$, and the gradient arriving at $r$ is $dr = 2$. What is $dx_i$?
+4. Chapter 5, broadcasting: A scale $\boldsymbol{\gamma}$ of shape $[D]$ multiplies every row of a $[B, D]$ array $\mathbf{A}$ to give $\mathbf{Y}$. What is the gradient of $\boldsymbol{\gamma}$ in terms of the gradient $d\mathbf{Y}$ arriving at the result and $\mathbf{A}$, and what is its shape?
+5. Chapter 9, "Initialization: Where Training Starts", variance-preservation: A layer has $n_{\mathrm{in}} = 64$ inputs and weights of variance $1/64$. If its inputs have second moment 2, what is the second moment of its (identity-unit) pre-activations?
 
 ## The idea: a z-score inside the network
 

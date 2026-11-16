@@ -27,12 +27,12 @@ The apparent contradiction resolves in three steps. First, a deterministic recip
 
 The recipes below lean on six older ideas, from remainders to prefix sums: clock arithmetic for the first generator, bit patterns for its state, a table walk and a polar integral for turning bits into distributions, and the spacing of doubles for the trap hidden in $[0, 1)$. A question that will not come back is a signal to reread the chapter it names; the answers close this one.
 
-1. (Chapter 1, division with remainder.) Write $38 = 16 q + r$ with $0 \le r < 16$. What are $q$ and $r$? With the floor convention, what is the remainder of $-7$ divided by $5$?
-2. (Chapter 1, bits.) How many different patterns can $64$ bits hold, and what is the largest unsigned integer in $64$ bits?
-3. (Chapter 10, drawing from a table.) The probabilities of three symbols are $(0.5, 0.3, 0.2)$ and the uniform number drawn is $u = 0.83$. Which symbol does the cumulative-sum walk of `sample_discrete` return?
-4. (Chapter 11, the Gaussian in polar coordinates.) What share of a two-dimensional cloud of independent standard Gaussians lies within a circle of radius $2$ around the origin? (The share within radius $\sqrt{c}$ is $1 - e^{-c/2}$.)
-5. (Chapter 15, floating point.) A $64$-bit floating-point number has $53$ significant bits. What is the spacing of the representable numbers just below $1$?
-6. (Chapter 16, prefix sums.) What is the inclusive prefix sum of $(0.5, 0.3, 0.2)$, and what does its last entry say about a probability table?
+1. Chapter 1, division with remainder: Write $38 = 16 q + r$ with $0 \le r < 16$. What are $q$ and $r$? With the floor convention, what is the remainder of $-7$ divided by $5$?
+2. Chapter 1, bits: How many different patterns can $64$ bits hold, and what is the largest unsigned integer in $64$ bits?
+3. Chapter 10, drawing from a table: The probabilities of three symbols are $(0.5, 0.3, 0.2)$ and the uniform number drawn is $u = 0.83$. Which symbol does the cumulative-sum walk of `sample_discrete` return?
+4. Chapter 11, the Gaussian in polar coordinates: What share of a two-dimensional cloud of independent standard Gaussians lies within a circle of radius $2$ around the origin? (The share within radius $\sqrt{c}$ is $1 - e^{-c/2}$.)
+5. Chapter 15, floating point: A $64$-bit floating-point number has $53$ significant bits. What is the spacing of the representable numbers just below $1$?
+6. Chapter 16, prefix sums: What is the inclusive prefix sum of $(0.5, 0.3, 0.2)$, and what does its last entry say about a probability table?
 
 ## A generator is a state machine
 

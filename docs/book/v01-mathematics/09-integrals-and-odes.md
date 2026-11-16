@@ -45,12 +45,12 @@ Chapter 8. The six questions below bring those tools back before they are
 needed; a question that resists sends you to the chapter it names, and the
 answers close the chapter.
 
-1. (Chapter 7, derivative.) What is the derivative of $x^3$, and of $e^{2x}$?
-2. (Chapter 7, limit.) What number does $(e^h - 1)/h$ approach as $h \to 0$, and why is that the reason $\tfrac{d}{dx}e^x = e^x$?
-3. (Chapter 1, summation notation.) Evaluate $\sum_{i=0}^{3} 0.5\,i^2$.
-4. (Chapter 8, gradient.) For $L(w_1, w_2) = w_1^2 + 3w_2^2$, what is the gradient at $(1, 1)$, and in which direction does stepping *against* it move the point?
-5. (Chapter 2, compounding.) A balance of 100 earns 5 % a year, added once a year. What is it after 2 years, and what number is multiplied in each year?
-6. (Chapter 8, Taylor expansion.) What is the order-2 Taylor polynomial of $e^x$ at $0$, and what size does the error have at $x = h$ for small $h$?
+1. Chapter 7, derivative: What is the derivative of $x^3$, and of $e^{2x}$?
+2. Chapter 7, limit: What number does $(e^h - 1)/h$ approach as $h \to 0$, and why is that the reason $\tfrac{d}{dx}e^x = e^x$?
+3. Chapter 1, summation notation: Evaluate $\sum_{i=0}^{3} 0.5\,i^2$.
+4. Chapter 8, gradient: For $L(w_1, w_2) = w_1^2 + 3w_2^2$, what is the gradient at $(1, 1)$, and in which direction does stepping *against* it move the point?
+5. Chapter 2, compounding: A balance of 100 earns 5 % a year, added once a year. What is it after 2 years, and what number is multiplied in each year?
+6. Chapter 8, Taylor expansion: What is the order-2 Taylor polynomial of $e^x$ at $0$, and what size does the error have at $x = h$ for small $h$?
 
 ## Adding up rectangles
 

@@ -11,12 +11,12 @@ The collections themselves are not part of a model's published weights, and what
 
 A foundation forecaster reuses six earlier ideas.
 
-1. (Chapter 2 of this volume, quantile forecast.) A forecast gives $8$, $10$ and $15$ for one bar at the levels $0.1$, $0.5$ and $0.9$, and the bar turns out to be $12$. What is the pinball loss at each level?
-2. (Volume V, Chapter 9, "The Transformer Block", with Volume V, Chapter 7, causal mask.) In a causal block over four positions, numbered from 0, which keys may position 2 attend to, and what happens to the score of a key it may not attend to before the softmax?
-3. (Volume VII, Chapter 6, "Vision Transformers", patch embedding.) A $224 \times 224$ picture with three colour channels is cut into $16 \times 16$ patches. How many tokens does it give, and what does the embedding matrix multiply?
-4. (Volume VIII, Chapter 3, "Discrete Latents and Vector Quantization", vector quantization.) A codebook has $1{,}024$ vectors. How many bits does one token carry, and which code does a latent vector receive?
-5. (Volume VI, Chapter 2, "Importing Pretrained Models and Proving Parity", parity.) An implementation returns $(1.05, 2.1, 3.15)$ where the reference returns $(1, 2, 3)$. What are the cosine similarity and the relative L2 difference of the two?
-6. (Chapter 1 of this volume, leakage.) Why does scaling a window by the mean and deviation of its own context leave the future out, while scaling it by the mean of the whole series does not?
+1. Chapter 2 of this volume, quantile forecast: A forecast gives $8$, $10$ and $15$ for one bar at the levels $0.1$, $0.5$ and $0.9$, and the bar turns out to be $12$. What is the pinball loss at each level?
+2. Volume V, Chapter 9, "The Transformer Block", with Volume V, Chapter 7, causal mask: In a causal block over four positions, numbered from 0, which keys may position 2 attend to, and what happens to the score of a key it may not attend to before the softmax?
+3. Volume VII, Chapter 6, "Vision Transformers", patch embedding: A $224 \times 224$ picture with three colour channels is cut into $16 \times 16$ patches. How many tokens does it give, and what does the embedding matrix multiply?
+4. Volume VIII, Chapter 3, "Discrete Latents and Vector Quantization", vector quantization: A codebook has $1{,}024$ vectors. How many bits does one token carry, and which code does a latent vector receive?
+5. Volume VI, Chapter 2, "Importing Pretrained Models and Proving Parity", parity: An implementation returns $(1.05, 2.1, 3.15)$ where the reference returns $(1, 2, 3)$. What are the cosine similarity and the relative L2 difference of the two?
+6. Chapter 1 of this volume, leakage: Why does scaling a window by the mean and deviation of its own context leave the future out, while scaling it by the mean of the whole series does not?
 
 ## A map fitted to other series
 

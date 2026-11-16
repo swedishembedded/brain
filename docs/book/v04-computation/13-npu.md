@@ -55,12 +55,12 @@ The figure is the map of what follows. Each arrow is a step that runs once, on a
 
 Six older ideas carry the road from here to the command words: affine quantization and its error, the narrow sum, fusion, ahead-of-time compilation and the computational graph.
 
-1. (Chapter 12, affine quantization.) A tensor takes values in $[-0.5, 1.5]$ and is stored in unsigned 8-bit codes $0 \ldots 255$. What are the scale $\Delta$ and the zero point $q_0$?
-2. (Chapter 12, quantization error.) A value is rounded to the nearest code of a grid with step $\Delta$. What is the largest error, and what happens to a value outside the range the codes cover?
-3. (Chapter 1, narrow sums.) Why are the products of 8-bit integers added in a 32-bit accumulator and not an 8-bit or 16-bit one?
-4. (Chapter 8, fusion.) A kernel writes a 1 MiB intermediate tensor and the next kernel reads it back. How many bytes cross memory for that tensor, and how many after the two kernels are fused?
-5. (Chapter 9, ahead-of-time compilation.) What is done before a program ships, and what does the program do at run time, when kernels are compiled ahead of time?
-6. (Volume III, Chapter 4, computational graph.) What are the nodes and the edges of a computational graph, and in what order does the forward pass visit the nodes?
+1. Chapter 12, affine quantization: A tensor takes values in $[-0.5, 1.5]$ and is stored in unsigned 8-bit codes $0 \ldots 255$. What are the scale $\Delta$ and the zero point $q_0$?
+2. Chapter 12, quantization error: A value is rounded to the nearest code of a grid with step $\Delta$. What is the largest error, and what happens to a value outside the range the codes cover?
+3. Chapter 1, narrow sums: Why are the products of 8-bit integers added in a 32-bit accumulator and not an 8-bit or 16-bit one?
+4. Chapter 8, fusion: A kernel writes a 1 MiB intermediate tensor and the next kernel reads it back. How many bytes cross memory for that tensor, and how many after the two kernels are fused?
+5. Chapter 9, ahead-of-time compilation: What is done before a program ships, and what does the program do at run time, when kernels are compiled ahead of time?
+6. Volume III, Chapter 4, computational graph: What are the nodes and the edges of a computational graph, and in what order does the forward pass visit the nodes?
 
 ## Graph export: the whole network as data
 

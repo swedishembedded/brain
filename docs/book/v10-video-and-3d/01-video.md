@@ -9,11 +9,11 @@ A minute of video at 24 frames per second and 1024 by 512 pixels is 1440 picture
 
 Before either, there is the matter of what a clip is as a piece of data: a **frame sequence**, an ordered list of pictures of one size, each with a time at which it is shown. The pictures are the images of Volume VII. The times are new, and so are the ways in which they go wrong. Getting the times right, and then shrinking the frames, leans on five ideas from earlier volumes:
 
-1. (Volume VII, [Chapter 1](../v07-vision/01-images.md), colour spaces.) A 640 by 480 frame is held as RGB and as planar 4:2:0 luma and chroma. How many bytes is each, and what do $Y$, $C_b$ and $C_r$ stand for?
-2. (Volume IX, [Chapter 1](../v09-audio/01-sound.md), aliasing.) A cosine of 10 kHz is sampled 16 000 times a second. At what frequency does the list of samples say it is?
-3. (Volume VII, [Chapter 2](../v07-vision/02-convolution.md), convolution and receptive field.) A $3 \times 3$ convolution with stride 1 and one pixel of zero padding runs over an $H \times W$ image. What shape does it return, and how many input pixels along one axis can one output of two stacked such layers see?
-4. (Volume VIII, [Chapter 2](../v08-image-generation/02-vae.md), variational autoencoders.) What does the encoder of a variational autoencoder return for one input, and what does the decoder receive?
-5. (Volume I, [Chapter 13](../v01-mathematics/13-information-theory.md), entropy.) What is the entropy of a distribution over a list of values, in bits, and what does it say about the shortest average code for values drawn from it?
+1. Volume VII, [Chapter 1](../v07-vision/01-images.md), colour spaces: A 640 by 480 frame is held as RGB and as planar 4:2:0 luma and chroma. How many bytes is each, and what do $Y$, $C_b$ and $C_r$ stand for?
+2. Volume IX, [Chapter 1](../v09-audio/01-sound.md), aliasing: A cosine of 10 kHz is sampled 16 000 times a second. At what frequency does the list of samples say it is?
+3. Volume VII, [Chapter 2](../v07-vision/02-convolution.md), convolution and receptive field: A $3 \times 3$ convolution with stride 1 and one pixel of zero padding runs over an $H \times W$ image. What shape does it return, and how many input pixels along one axis can one output of two stacked such layers see?
+4. Volume VIII, [Chapter 2](../v08-image-generation/02-vae.md), variational autoencoders: What does the encoder of a variational autoencoder return for one input, and what does the decoder receive?
+5. Volume I, [Chapter 13](../v01-mathematics/13-information-theory.md), entropy: What is the entropy of a distribution over a list of values, in bits, and what does it say about the shortest average code for values drawn from it?
 
 ## The time of a frame
 

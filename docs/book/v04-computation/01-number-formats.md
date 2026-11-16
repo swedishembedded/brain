@@ -59,20 +59,20 @@ The bit layouts rest on four ideas from Volume I's account of integers and
 floating point, and the byte count at the end on one number from the optimizer
 chapter of Volume III.
 
-1. (Volume I, Chapter 1, integers.) How many different patterns can 8 bits
+1. Volume I, Chapter 1, integers: How many different patterns can 8 bits
    take? What range of whole numbers do they cover if all are non-negative, and
    if half are used for negatives?
-2. (Volume I, Chapter 15, floating-point numbers.) A normal floating-point
+2. Volume I, Chapter 15, floating-point numbers: A normal floating-point
    number is $(-1)^s (1 + f/2^{p-1}) 2^{e}$. Name its three stored parts. Why does
    the gap between neighbouring numbers double from one binade to the next?
-3. (Volume I, Chapter 15, machine epsilon.) What is the machine epsilon of the 32-bit
+3. Volume I, Chapter 15, machine epsilon: What is the machine epsilon of the 32-bit
    format, and how does it relate to the unit round-off $u$ and the significand
    precision $p$?
-4. (Volume I, Chapter 15, rounding and the edges of the range.) What happens to
+4. Volume I, Chapter 15, rounding and the edges of the range: What happens to
    a result larger than the largest finite number, and what to one smaller than
    the smallest normal number? Which neighbour does a value exactly halfway
    between two numbers go to?
-5. (Volume III, Chapter 7, optimizer state.) How many bytes of training memory
+5. Volume III, Chapter 7, optimizer state: How many bytes of training memory
    per parameter does AdamW need when everything is stored in 32 bits, and how
    many gigabytes is that for a model with $7 \times 10^9$ parameters?
 

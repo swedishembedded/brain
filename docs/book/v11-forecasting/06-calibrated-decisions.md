@@ -34,12 +34,12 @@ Chapter 2 scored a distribution by the pinball loss and the continuous ranked pr
 
 The decision machinery rests on six earlier ideas.
 
-1. (Volume I, Chapter 10) A random variable takes the value $1$ with probability $p$ and $0$ otherwise. What is the expected value of $(Y - q)^2$ for a fixed number $q$, and how does it change if you write it as $E[Y^2] - 2qE[Y] + q^2$?
-2. (Volume I, Chapter 13) For distributions $p$ and $q$, how is the cross-entropy of $q$ relative to $p$ related to the entropy of $p$, and when is the difference zero?
-3. (Volume II, Chapter 3) A logistic model gives $p = \sigma(z)$. What is the derivative of the cross-entropy loss for a label $y$ with respect to the logit $z$?
-4. (Volume II, Chapter 6) Define calibration, say how a reliability diagram bins predictions, and give the threshold on a calibrated probability that minimizes expected cost when a false alarm costs $c_{\mathrm{FP}}$ and a miss costs $c_{\mathrm{FN}}$.
-5. (Chapter 2) The CRPS of a forecast distribution $F$ at an observation $y$ is an integral over $x$. Of what?
-6. (Chapter 5) What does the squared-error score of a survival probability at a horizon $t^\star$ average, and what does a forecast of $0.5$ for everyone score?
+1. Volume I, Chapter 10: A random variable takes the value $1$ with probability $p$ and $0$ otherwise. What is the expected value of $(Y - q)^2$ for a fixed number $q$, and how does it change if you write it as $E[Y^2] - 2qE[Y] + q^2$?
+2. Volume I, Chapter 13: For distributions $p$ and $q$, how is the cross-entropy of $q$ relative to $p$ related to the entropy of $p$, and when is the difference zero?
+3. Volume II, Chapter 3: A logistic model gives $p = \sigma(z)$. What is the derivative of the cross-entropy loss for a label $y$ with respect to the logit $z$?
+4. Volume II, Chapter 6: Define calibration, say how a reliability diagram bins predictions, and give the threshold on a calibrated probability that minimizes expected cost when a false alarm costs $c_{\mathrm{FP}}$ and a miss costs $c_{\mathrm{FN}}$.
+5. Chapter 2: The CRPS of a forecast distribution $F$ at an observation $y$ is an integral over $x$. Of what?
+6. Chapter 5: What does the squared-error score of a survival probability at a horizon $t^\star$ average, and what does a forecast of $0.5$ for everyone score?
 
 ## Why the minimum has to sit at the truth
 

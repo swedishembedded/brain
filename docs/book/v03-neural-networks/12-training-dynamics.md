@@ -50,12 +50,12 @@ Read the table before reading any explanation. The healthy run falls from $1.260
 
 Telling these apart without running the experiment that finds out takes six ideas from earlier chapters: backpropagation and the multilayer network, He initialization, clipping, layer normalization, and two pieces of numerical arithmetic from Volume I. Six questions bring them back.
 
-1. (Chapters 4 and 2, "Backpropagation Derived from Scratch" and "Multilayer Networks".) In one layer, the gradient arriving at the previous layer is $d\mathbf{a}_{\ell-1} = \mathbf{W}_\ell^\top\,(g'(\mathbf{z}_\ell)\odot d\mathbf{a}_\ell)$. If $g$ is tanh and every pre-activation is $z = 2$, by what factor does the slope alone scale the gradient, and what is the factor after 10 such layers?
-2. (Chapter 9, "Initialization: Where Training Starts", He initialization.) What variance does He initialization give the weights of a ReLU layer with 32 inputs, and why is the factor 2 there?
-3. (Chapter 8, "Learning-Rate Schedules and Gradient Clipping", clipping.) The global gradient norm of a step is 40 and the clip threshold is 5. What is the clip coefficient (ignore the small constant in the denominator), and what is the norm of the clipped gradient?
-4. (Chapter 10, "Normalization Layers", layer normalization.) What does layer normalization compute for the vector $(1, 3)$ if the small constant under the root is ignored, and what goes wrong with the formula for the vector $(3, 3)$ if that constant is exactly zero?
-5. (Chapter 4 and Volume II, chapter 2, "Linear Regression and the First Descent".) The one-weight model of chapter 4 has an error that is multiplied by $1 - 2\eta x^2$ at every step. For $x = 2$, for which learning rates does the descent diverge?
-6. (Volume I, chapter 15, "Floating Point and Numerical Error", and chapter 3, "Softmax, Logits and Cross-Entropy".) What does $\exp(1000)$ evaluate to in IEEE double precision, and what does the textbook softmax formula $p_i = e^{z_i}/\sum_j e^{z_j}$ then return for the logits $(1000, 0)$?
+1. Chapters 4 and 2, "Backpropagation Derived from Scratch" and "Multilayer Networks": In one layer, the gradient arriving at the previous layer is $d\mathbf{a}_{\ell-1} = \mathbf{W}_\ell^\top\,(g'(\mathbf{z}_\ell)\odot d\mathbf{a}_\ell)$. If $g$ is tanh and every pre-activation is $z = 2$, by what factor does the slope alone scale the gradient, and what is the factor after 10 such layers?
+2. Chapter 9, "Initialization: Where Training Starts", He initialization: What variance does He initialization give the weights of a ReLU layer with 32 inputs, and why is the factor 2 there?
+3. Chapter 8, "Learning-Rate Schedules and Gradient Clipping", clipping: The global gradient norm of a step is 40 and the clip threshold is 5. What is the clip coefficient (ignore the small constant in the denominator), and what is the norm of the clipped gradient?
+4. Chapter 10, "Normalization Layers", layer normalization: What does layer normalization compute for the vector $(1, 3)$ if the small constant under the root is ignored, and what goes wrong with the formula for the vector $(3, 3)$ if that constant is exactly zero?
+5. Chapter 4 and Volume II, chapter 2, "Linear Regression and the First Descent": The one-weight model of chapter 4 has an error that is multiplied by $1 - 2\eta x^2$ at every step. For $x = 2$, for which learning rates does the descent diverge?
+6. Volume I, chapter 15, "Floating Point and Numerical Error", and chapter 3, "Softmax, Logits and Cross-Entropy": What does $\exp(1000)$ evaluate to in IEEE double precision, and what does the textbook softmax formula $p_i = e^{z_i}/\sum_j e^{z_j}$ then return for the logits $(1000, 0)$?
 
 ## Reading a loss curve
 

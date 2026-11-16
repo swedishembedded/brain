@@ -13,12 +13,12 @@ That design asks for one thing that no classifier so far has had to provide: a *
 
 The loss, its temperature and the two towers that feed it are all built from parts met before, and six questions bring those parts back.
 
-1. ([Volume V, Chapter 14](../v05-sequences/14-encoders.md), the contrastive loss.) A batch of 3 pairs has every cosine equal to 0.2. At any temperature, what is the loss of one direction?
-2. ([Volume V, Chapter 11](../v05-sequences/11-decoding.md), temperature.) The logits $(2, 0)$ are divided by a temperature $\tau = 0.5$. What happens to their softmax, and what happens as $\tau$ goes to 0?
-3. ([Volume V, Chapter 14](../v05-sequences/14-encoders.md), sentence embeddings.) Name two ways to turn the token rows of an encoder into one vector for the whole text. Why must a padded position not enter a mean?
-4. ([Volume III, Chapter 3](../v03-neural-networks/03-softmax.md), softmax cross-entropy.) The logits are $(2, 0)$ and the correct class is the first. What is the gradient of the loss with respect to the first logit?
-5. ([Chapter 6](06-vision-transformers.md), vision transformers.) A 224 by 224 picture is cut into patches of 14. How many tokens enter the encoder when a class token is added, and which row is read as the summary of the picture?
-6. ([Chapter 2](02-convolution.md), output sizes.) A 224 by 224 picture meets a convolution with kernel 11, stride 4 and padding 2. What is the side of the output?
+1. [Volume V, Chapter 14](../v05-sequences/14-encoders.md), the contrastive loss: A batch of 3 pairs has every cosine equal to 0.2. At any temperature, what is the loss of one direction?
+2. [Volume V, Chapter 11](../v05-sequences/11-decoding.md), temperature: The logits $(2, 0)$ are divided by a temperature $\tau = 0.5$. What happens to their softmax, and what happens as $\tau$ goes to 0?
+3. [Volume V, Chapter 14](../v05-sequences/14-encoders.md), sentence embeddings: Name two ways to turn the token rows of an encoder into one vector for the whole text. Why must a padded position not enter a mean?
+4. [Volume III, Chapter 3](../v03-neural-networks/03-softmax.md), softmax cross-entropy: The logits are $(2, 0)$ and the correct class is the first. What is the gradient of the loss with respect to the first logit?
+5. [Chapter 6](06-vision-transformers.md), vision transformers: A 224 by 224 picture is cut into patches of 14. How many tokens enter the encoder when a class token is added, and which row is read as the summary of the picture?
+6. [Chapter 2](02-convolution.md), output sizes: A 224 by 224 picture meets a convolution with kernel 11, stride 4 and padding 2. What is the side of the output?
 
 ## Four pairs and a similarity matrix
 

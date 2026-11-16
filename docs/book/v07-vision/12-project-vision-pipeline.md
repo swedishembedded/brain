@@ -23,11 +23,11 @@ Building along the arrows is a sound order. The two preprocessing boxes come fir
 
 The milestones lean on five ideas from earlier in the volume, as far back as Chapter 1; bring each back before building on it.
 
-1. ([Chapter 1](01-images.md), the letterbox and shared preprocessing.) A frame of 96 by 61 pixels is fitted to a square of side 64 with its aspect ratio kept. What are the scale, the size of the content and the padding on each axis?
-2. ([Chapter 4](04-detection.md), suppression.) Two boxes of one class, $(0, 0, 10, 10)$ and $(0, 0, 10, 4.5)$, are candidates and the threshold is 0.45. Is the second dropped? Say why the comparison is strict.
-3. ([Chapter 4](04-detection.md), distances from a point.) A head at the anchor point $(8.5, 28.5)$ predicts the distances $(3.5, 2.5, 3.5, 2.5)$ to the left, top, right and bottom edges. Which box is that?
-4. ([Chapter 7](07-segment-anything.md), prompts.) How many prompt tokens does a box give to the mask decoder, and what labels do they carry?
-5. ([Chapter 7](07-segment-anything.md), the bank.) A clip is prompted on frame 0. Which frames' slabs does frame 9 read, in which slots, with 7 slots?
+1. [Chapter 1](01-images.md), the letterbox and shared preprocessing: A frame of 96 by 61 pixels is fitted to a square of side 64 with its aspect ratio kept. What are the scale, the size of the content and the padding on each axis?
+2. [Chapter 4](04-detection.md), suppression: Two boxes of one class, $(0, 0, 10, 10)$ and $(0, 0, 10, 4.5)$, are candidates and the threshold is 0.45. Is the second dropped? Say why the comparison is strict.
+3. [Chapter 4](04-detection.md), distances from a point: A head at the anchor point $(8.5, 28.5)$ predicts the distances $(3.5, 2.5, 3.5, 2.5)$ to the left, top, right and bottom edges. Which box is that?
+4. [Chapter 7](07-segment-anything.md), prompts: How many prompt tokens does a box give to the mask decoder, and what labels do they carry?
+5. [Chapter 7](07-segment-anything.md), the bank: A clip is prompted on frame 0. Which frames' slabs does frame 9 read, in which slots, with 7 slots?
 
 ## Building the pipeline in five stages
 

@@ -37,12 +37,12 @@ Building that model takes four steps, each forced by a question the one before l
 
 Each of those steps borrows a tool: gradient descent, the Bernoulli distribution, cross-entropy, the rules of logarithms, the dot product and the slope of the sigmoid. The six questions below bring them back, each naming the chapter that taught it; the answers are under "Recall questions" at the end.
 
-1. (Chapter 2 of this volume, "Linear Regression and the First Descent", gradient descent.) For $\mathcal{L}(w) = (w - 1)^2$, write one step of gradient descent from $w = 2$ with learning rate $\eta = 0.25$. What is the new $w$ and what is the loss before and after?
-2. (Volume I, chapter 11, "The Distributions Machine Learning Uses", the Bernoulli distribution.) A Bernoulli variable takes the value $1$ with probability $q = 0.3$. What is the probability of the value $0$, and what is the mean? Write the probability of an observed value $y \in \{0, 1\}$ as one formula in $q$ and $y$.
-3. (Volume I, chapter 13, "Information, Entropy and Surprise", cross-entropy.) For a target distribution $p = (1, 0)$ and a model $q = (0.8, 0.2)$, compute $H(p, q) = -\sum_k p_k \log q_k$ in nats. What is its value when $q = (1, 0)$, and what happens when $q = (0, 1)$?
-4. (Volume I, chapter 1, "Numbers, Quantities and Notation", the logarithm.) Use $\log(ab) = \log a + \log b$ and $\log(1/a) = -\log a$ to show that $\log 0.25 = -\log 4$. What is $\log$ of a number between $0$ and $1$: positive, zero or negative?
-5. (Volume I, chapter 3, "Vectors: Lists of Numbers with Geometry", the dot product.) For $\mathbf{w} = (2, -1, 0.5)$ and $\mathbf{x} = (1, 3, 4)$, what is $\mathbf{w} \cdot \mathbf{x}$, and what is the shape of $\mathbf{X}\mathbf{w}$ when $\mathbf{X}$ has shape $[N, 3]$?
-6. (Volume I, chapter 7, "Derivatives: The Mathematics of Change", the sigmoid.) The sigmoid is $s(x) = 1/(1 + e^{-x})$ with slope $s'(x) = s(x)(1 - s(x))$. What are $s(0)$ and $s'(0)$, and what happens to $s'(x)$ as $x$ becomes very large?
+1. Chapter 2 of this volume, "Linear Regression and the First Descent", gradient descent: For $\mathcal{L}(w) = (w - 1)^2$, write one step of gradient descent from $w = 2$ with learning rate $\eta = 0.25$. What is the new $w$ and what is the loss before and after?
+2. Volume I, chapter 11, "The Distributions Machine Learning Uses", the Bernoulli distribution: A Bernoulli variable takes the value $1$ with probability $q = 0.3$. What is the probability of the value $0$, and what is the mean? Write the probability of an observed value $y \in \{0, 1\}$ as one formula in $q$ and $y$.
+3. Volume I, chapter 13, "Information, Entropy and Surprise", cross-entropy: For a target distribution $p = (1, 0)$ and a model $q = (0.8, 0.2)$, compute $H(p, q) = -\sum_k p_k \log q_k$ in nats. What is its value when $q = (1, 0)$, and what happens when $q = (0, 1)$?
+4. Volume I, chapter 1, "Numbers, Quantities and Notation", the logarithm: Use $\log(ab) = \log a + \log b$ and $\log(1/a) = -\log a$ to show that $\log 0.25 = -\log 4$. What is $\log$ of a number between $0$ and $1$: positive, zero or negative?
+5. Volume I, chapter 3, "Vectors: Lists of Numbers with Geometry", the dot product: For $\mathbf{w} = (2, -1, 0.5)$ and $\mathbf{x} = (1, 3, 4)$, what is $\mathbf{w} \cdot \mathbf{x}$, and what is the shape of $\mathbf{X}\mathbf{w}$ when $\mathbf{X}$ has shape $[N, 3]$?
+6. Volume I, chapter 7, "Derivatives: The Mathematics of Change", the sigmoid: The sigmoid is $s(x) = 1/(1 + e^{-x})$ with slope $s'(x) = s(x)(1 - s(x))$. What are $s(0)$ and $s'(0)$, and what happens to $s'(x)$ as $x$ becomes very large?
 
 ## A first attempt: a line through the labels
 

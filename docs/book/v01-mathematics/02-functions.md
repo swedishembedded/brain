@@ -43,11 +43,11 @@ appear only as pointers forward. The first definitions lean on each of the
 four, so bring them back to mind now, from memory, and find the answers at the
 close of the chapter.
 
-1. (Chapter 1, real numbers.) Is $\sqrt{2}$ a fraction of two integers? What does a computer store instead of it?
-2. (Chapter 1, exponents.) Write $2^3 \times 2^{-5}$ as a single power of 2 and as a fraction.
-3. (Chapter 1, logarithms.) What are $\log_2 32$ and $\log_{10} 0.001$?
-4. (Chapter 1, logarithms.) Use the product rule to write $\log_2(8 \times 4)$ as a sum and evaluate it.
-5. (Chapter 1, function notation.) If $f(x; w, b) = wx + b$, evaluate $f(2; 3, -1)$ and say which of $x$, $w$, $b$ are inputs and which are parameters.
+1. Chapter 1, real numbers: Is $\sqrt{2}$ a fraction of two integers? What does a computer store instead of it?
+2. Chapter 1, exponents: Write $2^3 \times 2^{-5}$ as a single power of 2 and as a fraction.
+3. Chapter 1, logarithms: What are $\log_2 32$ and $\log_{10} 0.001$?
+4. Chapter 1, logarithms: Use the product rule to write $\log_2(8 \times 4)$ as a sum and evaluate it.
+5. Chapter 1, function notation: If $f(x; w, b) = wx + b$, evaluate $f(2; 3, -1)$ and say which of $x$, $w$, $b$ are inputs and which are parameters.
 
 ## What a function is
 

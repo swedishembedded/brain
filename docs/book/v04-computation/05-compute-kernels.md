@@ -42,15 +42,15 @@ below is run by the same simulator and checked against a direct computation.
 
 Writing a kernel leans on four ideas from the chapter just behind us and one from much further back.
 
-1. (Chapter 4, workgroup and grid.) A kernel is launched for 1000 elements with workgroups of 64 invocations. How many
+1. Chapter 4, workgroup and grid: A kernel is launched for 1000 elements with workgroups of 64 invocations. How many
    workgroups does the grid have, and how many invocations have no element?
-2. (Chapter 4, shared memory and the barrier.) Why must a barrier lie between the invocations writing a tile into
+2. Chapter 4, shared memory and the barrier: Why must a barrier lie between the invocations writing a tile into
    shared memory and the invocations reading it?
-3. (Volume I, Chapter 5, strides.) A row-major array of shape $[3, 4]$ is a view with which strides? What is the storage offset of element
+3. Volume I, Chapter 5, strides: A row-major array of shape $[3, 4]$ is a view with which strides? What is the storage offset of element
    $[2, 1]$ of the view of strides $(1, 3)$ over the same storage?
-4. (Chapter 4, memory coalescing.) The 32 lanes of a subgroup each read the 4-byte number at element $8t$ for lane $t$. How
+4. Chapter 4, memory coalescing: The 32 lanes of a subgroup each read the 4-byte number at element $8t$ for lane $t$. How
    many 32-byte transactions does the load take?
-5. (Chapter 4, host and device.) The bus between host and device carries 32 (GB/s) in the model. How many bytes cross it when the host
+5. Chapter 4, host and device: The bus between host and device carries 32 (GB/s) in the model. How many bytes cross it when the host
    uploads two vectors of $2^{24}$ fp32 numbers and downloads one?
 
 ## The kernel: the program of one invocation

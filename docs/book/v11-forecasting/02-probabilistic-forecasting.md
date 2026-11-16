@@ -27,10 +27,10 @@ That is the case for a forecast that is more than a number, and it also hands ov
 
 Probabilistic forecasts lean on four earlier ideas.
 
-1. (Volume I, Chapter 10, "Probability: Reasoning Under Uncertainty", probability distribution.) A random variable $Y$ has distribution function $F(x) = P(Y \le x)$. Write $P(a < Y \le b)$ in terms of $F$, and say in a sentence what it means that $q$ is the $0.9$-quantile of $Y$.
-2. (Volume I, Chapter 11, "The Distributions Machine Learning Uses", the Gaussian.) If $X \sim \mathcal{N}(\mu, \sigma^2)$, which interval $\mu \pm c\,\sigma$ holds $95\%$ of the probability, and what is the probability that $X$ lies more than $1.2816\,\sigma$ above $\mu$?
-3. (Volume II, Chapter 6, "Measuring Models: Metrics and Calibration", calibration.) A classifier gives probability $0.8$ to a hundred parts. How many should be defective if it is calibrated, and what does a reliability diagram plot?
-4. (Chapter 1 of this volume, time series.) A forecast made at the origin $o$ may use which bars, and why does the spread of the error of an autoregressive forecast grow with the horizon?
+1. Volume I, Chapter 10, "Probability: Reasoning Under Uncertainty", probability distribution: A random variable $Y$ has distribution function $F(x) = P(Y \le x)$. Write $P(a < Y \le b)$ in terms of $F$, and say in a sentence what it means that $q$ is the $0.9$-quantile of $Y$.
+2. Volume I, Chapter 11, "The Distributions Machine Learning Uses", the Gaussian: If $X \sim \mathcal{N}(\mu, \sigma^2)$, which interval $\mu \pm c\,\sigma$ holds $95\%$ of the probability, and what is the probability that $X$ lies more than $1.2816\,\sigma$ above $\mu$?
+3. Volume II, Chapter 6, "Measuring Models: Metrics and Calibration", calibration: A classifier gives probability $0.8$ to a hundred parts. How many should be defective if it is calibrated, and what does a reliability diagram plot?
+4. Chapter 1 of this volume, time series: A forecast made at the origin $o$ may use which bars, and why does the spread of the error of an autoregressive forecast grow with the horizon?
 
 ## Quantiles, and the loss that finds them
 

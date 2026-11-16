@@ -24,12 +24,12 @@ There are three ledgers. The first is the **parameter count**, the number of num
 
 Counting from a tensor list leans on six facts met earlier: the shapes of a block, the bytes of its cache and of its numbers, what a routed token touches, what Adam stores and how a line is fitted.
 
-1. (Volume V, [Chapter 9](../v05-sequences/09-transformer-block.md), the transformer block.) A pre-norm block with a gated network holds which weight matrices, and what are their shapes in terms of the width $D$ and the hidden width $F$?
-2. (Volume V, [Chapter 12](../v05-sequences/12-kv-cache.md), the KV cache.) How many bytes does a decoder add to its cache for each token, in terms of the layers $L$, the key-value heads $h_{\mathrm{kv}}$, the head width $d_h$ and the bytes $b$ of a stored value?
-3. (Volume IV, [Chapter 1](../v04-computation/01-number-formats.md), the bf16 format.) How many bytes does a bf16 number take, and what does it share with an f32 number that an fp16 number does not?
-4. ([Chapter 4](04-mixture-of-experts.md), the router.) A layer has $E$ experts and a token uses $k$ of them. Which of the layer's parameters does the token's arithmetic touch?
-5. (Volume III, [Chapter 7](../v03-neural-networks/07-optimizers.md), Adam.) Besides each parameter and its gradient, what does Adam keep for the parameter?
-6. (Volume II, [Chapter 2](../v02-learning/02-linear-regression.md), least squares.) What is the slope of the least-squares line through the points $(x_i, y_i)$?
+1. Volume V, [Chapter 9](../v05-sequences/09-transformer-block.md), the transformer block: A pre-norm block with a gated network holds which weight matrices, and what are their shapes in terms of the width $D$ and the hidden width $F$?
+2. Volume V, [Chapter 12](../v05-sequences/12-kv-cache.md), the KV cache: How many bytes does a decoder add to its cache for each token, in terms of the layers $L$, the key-value heads $h_{\mathrm{kv}}$, the head width $d_h$ and the bytes $b$ of a stored value?
+3. Volume IV, [Chapter 1](../v04-computation/01-number-formats.md), the bf16 format: How many bytes does a bf16 number take, and what does it share with an f32 number that an fp16 number does not?
+4. [Chapter 4](04-mixture-of-experts.md), the router: A layer has $E$ experts and a token uses $k$ of them. Which of the layer's parameters does the token's arithmetic touch?
+5. Volume III, [Chapter 7](../v03-neural-networks/07-optimizers.md), Adam: Besides each parameter and its gradient, what does Adam keep for the parameter?
+6. Volume II, [Chapter 2](../v02-learning/02-linear-regression.md), least squares: What is the slope of the least-squares line through the points $(x_i, y_i)$?
 
 ## A decoder counted tensor by tensor
 

@@ -11,11 +11,11 @@ What would remove the limit is a memory of fixed size, updated as each token is 
 
 Recurrence reuses ideas from earlier volumes, and the questions below bring them back.
 
-1. (Volume II, [Chapter 3](../v02-learning/03-logistic-regression.md), the sigmoid.) What is $\sigma(0)$, and what is the largest value the slope $\sigma(z)(1 - \sigma(z))$ can take?
-2. (Volume III, [Chapter 2](../v03-neural-networks/02-mlp.md), the tanh unit of a hidden layer.) A hidden unit's output is $h = \tanh(a) = 0.9$. What is the slope of $\tanh$ at that point, and what does the gradient passing through the unit become?
-3. (Volume III, [Chapter 4](../v03-neural-networks/04-backpropagation.md), the backward pass.) A layer computes $\mathbf{z} = \mathbf{W}\mathbf{h}$. Given $d\mathbf{z}$, what are $d\mathbf{h}$ and $d\mathbf{W}$? If one weight matrix is used at two places in a graph, how is its gradient formed?
-4. (Volume III, [Chapter 12](../v03-neural-networks/12-training-dynamics.md), vanishing and exploding gradients.) Each of 24 layers multiplies the norm of a gradient by 0.5 on average. What fraction of the gradient reaches the first layer, and which product of norms guarantees that a gradient vanishes?
-5. (Volume III, [Chapter 8](../v03-neural-networks/08-schedules-and-clipping.md), gradient clipping.) A gradient has global norm 20 and the threshold is 5. By what number is every entry multiplied?
+1. Volume II, [Chapter 3](../v02-learning/03-logistic-regression.md), the sigmoid: What is $\sigma(0)$, and what is the largest value the slope $\sigma(z)(1 - \sigma(z))$ can take?
+2. Volume III, [Chapter 2](../v03-neural-networks/02-mlp.md), the tanh unit of a hidden layer: A hidden unit's output is $h = \tanh(a) = 0.9$. What is the slope of $\tanh$ at that point, and what does the gradient passing through the unit become?
+3. Volume III, [Chapter 4](../v03-neural-networks/04-backpropagation.md), the backward pass: A layer computes $\mathbf{z} = \mathbf{W}\mathbf{h}$. Given $d\mathbf{z}$, what are $d\mathbf{h}$ and $d\mathbf{W}$? If one weight matrix is used at two places in a graph, how is its gradient formed?
+4. Volume III, [Chapter 12](../v03-neural-networks/12-training-dynamics.md), vanishing and exploding gradients: Each of 24 layers multiplies the norm of a gradient by 0.5 on average. What fraction of the gradient reaches the first layer, and which product of norms guarantees that a gradient vanishes?
+5. Volume III, [Chapter 8](../v03-neural-networks/08-schedules-and-clipping.md), gradient clipping: A gradient has global norm 20 and the threshold is 5. By what number is every entry multiplied?
 
 ## A subject that no window can reach
 

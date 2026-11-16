@@ -11,12 +11,12 @@ The answer is: almost none of it, and the reason is one fact about the mask of C
 
 The count leans on six ideas from earlier chapters; bring each one back before the arithmetic starts.
 
-1. (Volume V, [Chapter 7](07-self-attention.md), queries, keys and values.) In one attention head, position $i$ forms a query, a key and a value. Which of the three does the output at position $i$ use from the other positions $j$, and which does it use from position $i$ itself?
-2. (Volume V, [Chapter 7](07-self-attention.md), the causal mask.) A text has 5 tokens. How many of the 25 pairs (query position, key position) does the causal mask allow, counting a position with itself?
-3. (Volume V, [Chapter 8](08-positions.md), rotary embeddings.) The score of a query at position $i$ and a key at position $j$ under rotary embeddings depends on the two positions in what way, and what does the rotation applied to the key depend on?
-4. (Volume V, [Chapter 11](11-decoding.md), greedy decoding.) The logits of four tokens, numbered from 0, are $(1.2, 3.4, 3.4, 0.1)$. Which token does greedy decoding choose?
-5. (Volume I, [Chapter 16](../v01-mathematics/16-algorithms.md), memory complexity and the time-memory tradeoff.) A loop computes the same $n$-element result $n$ times over. What does storing the result once cost in memory and save in time, in the terms of that chapter?
-6. (Volume IV, [Chapter 3](../v04-computation/03-roofline.md), the roofline.) A device has a peak arithmetic rate of $4 \times 10^{13}$ FLOP per second and a memory bandwidth of $8 \times 10^{11}$ bytes per second. Is a step that does 2 FLOPs per byte moved limited by the arithmetic or by the bytes, and at what intensity does the answer change?
+1. Volume V, [Chapter 7](07-self-attention.md), queries, keys and values: In one attention head, position $i$ forms a query, a key and a value. Which of the three does the output at position $i$ use from the other positions $j$, and which does it use from position $i$ itself?
+2. Volume V, [Chapter 7](07-self-attention.md), the causal mask: A text has 5 tokens. How many of the 25 pairs (query position, key position) does the causal mask allow, counting a position with itself?
+3. Volume V, [Chapter 8](08-positions.md), rotary embeddings: The score of a query at position $i$ and a key at position $j$ under rotary embeddings depends on the two positions in what way, and what does the rotation applied to the key depend on?
+4. Volume V, [Chapter 11](11-decoding.md), greedy decoding: The logits of four tokens, numbered from 0, are $(1.2, 3.4, 3.4, 0.1)$. Which token does greedy decoding choose?
+5. Volume I, [Chapter 16](../v01-mathematics/16-algorithms.md), memory complexity and the time-memory tradeoff: A loop computes the same $n$-element result $n$ times over. What does storing the result once cost in memory and save in time, in the terms of that chapter?
+6. Volume IV, [Chapter 3](../v04-computation/03-roofline.md), the roofline: A device has a peak arithmetic rate of $4 \times 10^{13}$ FLOP per second and a memory bandwidth of $8 \times 10^{11}$ bytes per second. Is a step that does 2 FLOPs per byte moved limited by the arithmetic or by the bytes, and at what intensity does the answer change?
 
 ## Eighteen rows for four tokens
 

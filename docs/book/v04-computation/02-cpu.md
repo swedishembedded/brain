@@ -74,15 +74,15 @@ reading is never reported as a fact about your computer.
 
 The cache arguments below lean on layout and strides from Volume I and on its treatment of floating-point sums.
 
-1. (Volume I, Chapter 5, row-major layout.) A $[m, n]$ array of 4-byte numbers is stored row-major starting at
+1. Volume I, Chapter 5, row-major layout: A $[m, n]$ array of 4-byte numbers is stored row-major starting at
    address 0. At what address is element $(i, j)$? What is the stride of the first axis, in elements?
-2. (Volume I, Chapter 5, strides.) The transpose of a $[3, 4]$ row-major array is a view of shape $[4, 3]$.
+2. Volume I, Chapter 5, strides: The transpose of a $[3, 4]$ row-major array is a view of shape $[4, 3]$.
    What are its strides, and what does reading it row by row do to the storage positions it visits?
-3. (Volume I, Chapter 16, algorithms and reductions.) A sum of $n$ numbers takes $n - 1$ additions. In a
+3. Volume I, Chapter 16, algorithms and reductions: A sum of $n$ numbers takes $n - 1$ additions. In a
    tree reduction, how long is the longest chain of additions that depend on each other, for $n = 1024$?
-4. (Volume I, Chapter 15, floating point.) Is addition of 32-bit floating-point numbers associative? What
+4. Volume I, Chapter 15, floating point: Is addition of 32-bit floating-point numbers associative? What
    happens to the result of a long sum if the additions are done in a different order?
-5. (Chapter 1, the fp32 format.) How many bytes does an f32 take, and how many of them fit in a 64-byte line?
+5. Chapter 1, the fp32 format: How many bytes does an f32 take, and how many of them fit in a 64-byte line?
 
 ## What one core does
 

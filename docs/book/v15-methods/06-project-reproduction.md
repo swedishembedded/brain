@@ -11,11 +11,11 @@ That number is one of four kinds of confident wrong answer that the work of this
 
 The steps use the whole volume: the porting workflow and the golden of Chapter 1, the traps of numerical tests of Chapter 2 (a degenerate dimension, a scale-blind metric, a gate that never runs), the valid benchmark of Chapter 3, the hypothesis stated before its test of Chapter 4, and the regression gate of Chapter 5. Five questions bring back what they rest on.
 
-1. (Chapter 1, the porting workflow, and Volume VI, Chapter 2, reference goldens.) In what order does a disciplined port proceed from a published model to a trusted implementation, and why does its golden store the activations between the layers and not only the output?
-2. (Volume VI, Chapter 2, parity tolerance.) A 32-bit computation has a longest chain of $N_{\mathrm{rnd}}$ dependent roundings. What is the tolerance of its comparison with a 64-bit reference, and what kind of mistake can never fail a comparison at that tolerance?
-3. (Volume III, Chapter 6, the gradient check.) Why is the central difference preferred to the forward difference, and why is the deviation divided by $\max(1, |\text{analytic}|)$ rather than by the analytic value?
-4. (Chapter 3 and Volume IV, Chapter 11, Amdahl's law.) A part that takes the share $p$ of a whole is made $g$ times cheaper. What does the whole gain, and which measurement, of the part or of the whole, says what a user pays?
-5. (Chapter 4, falsifiable hypotheses, and Chapter 5, regression gates.) What must be written down before a measurement for its result to be able to refute a claim, and what makes a gate that skips its check worse than no gate?
+1. Chapter 1, the porting workflow, and Volume VI, Chapter 2, reference goldens: In what order does a disciplined port proceed from a published model to a trusted implementation, and why does its golden store the activations between the layers and not only the output?
+2. Volume VI, Chapter 2, parity tolerance: A 32-bit computation has a longest chain of $N_{\mathrm{rnd}}$ dependent roundings. What is the tolerance of its comparison with a 64-bit reference, and what kind of mistake can never fail a comparison at that tolerance?
+3. Volume III, Chapter 6, the gradient check: Why is the central difference preferred to the forward difference, and why is the deviation divided by $\max(1, |\text{analytic}|)$ rather than by the analytic value?
+4. Chapter 3 and Volume IV, Chapter 11, Amdahl's law: A part that takes the share $p$ of a whole is made $g$ times cheaper. What does the whole gain, and which measurement, of the part or of the whole, says what a user pays?
+5. Chapter 4, falsifiable hypotheses, and Chapter 5, regression gates: What must be written down before a measurement for its result to be able to refute a claim, and what makes a gate that skips its check worse than no gate?
 
 ## Seeds, roundings and digests
 

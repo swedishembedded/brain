@@ -47,12 +47,12 @@ What it implements is the general interface. A **world model** is a function tha
 
 Earlier chapters supply most of the parts, and six of them are worth recalling before they are put together.
 
-1. ([Chapter 1](01-video.md), the video autoencoder.) A video autoencoder with a temporal stride of 8 receives 121 frames. How many latent frames does it return, and why does the first frame stand alone?
-2. (Volume VIII, [Chapter 3](../v08-image-generation/03-vector-quantization.md), the codebook.) A frame becomes a $16 \times 16$ grid of indices into a codebook of 1024 entries. How many bits is the grid, and how is the index of one position chosen?
-3. (Volume VIII, [Chapter 5](../v08-image-generation/05-diffusion.md), the denoising objective.) A network is trained with squared error to return the clean value from a noisy one. What function of the noisy input does it learn, if it is trained to the minimum?
-4. (Volume VIII, [Chapter 7](../v08-image-generation/07-samplers-and-guidance.md), Euler steps.) A denoiser gives a guess $\hat x_0$ at noise level $\sigma_t$ in the variable $y = x_0 + \sigma_t\varepsilon$. How does one Euler step reach the lower level $\sigma_{t'}$?
-5. (Volume V, [Chapter 9](../v05-sequences/09-transformer-block.md), the transformer block.) What is added to the residual stream in each of the two halves of a pre-norm block, and what does a causal mask hide from a token?
-6. (Volume II, [Chapter 2](../v02-learning/02-linear-regression.md), least squares.) What equations does the weight vector of a least-squares fit solve, and what do they say about the residuals?
+1. [Chapter 1](01-video.md), the video autoencoder: A video autoencoder with a temporal stride of 8 receives 121 frames. How many latent frames does it return, and why does the first frame stand alone?
+2. Volume VIII, [Chapter 3](../v08-image-generation/03-vector-quantization.md), the codebook: A frame becomes a $16 \times 16$ grid of indices into a codebook of 1024 entries. How many bits is the grid, and how is the index of one position chosen?
+3. Volume VIII, [Chapter 5](../v08-image-generation/05-diffusion.md), the denoising objective: A network is trained with squared error to return the clean value from a noisy one. What function of the noisy input does it learn, if it is trained to the minimum?
+4. Volume VIII, [Chapter 7](../v08-image-generation/07-samplers-and-guidance.md), Euler steps: A denoiser gives a guess $\hat x_0$ at noise level $\sigma_t$ in the variable $y = x_0 + \sigma_t\varepsilon$. How does one Euler step reach the lower level $\sigma_{t'}$?
+5. Volume V, [Chapter 9](../v05-sequences/09-transformer-block.md), the transformer block: What is added to the residual stream in each of the two halves of a pre-norm block, and what does a causal mask hide from a token?
+6. Volume II, [Chapter 2](../v02-learning/02-linear-regression.md), least squares: What equations does the weight vector of a least-squares fit solve, and what do they say about the residuals?
 
 ## A cart, a wall, and a model that has never seen the wall
 

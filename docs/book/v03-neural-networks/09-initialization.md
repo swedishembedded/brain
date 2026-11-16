@@ -52,11 +52,11 @@ The same architecture, the same data, the same optimiser, and results that diffe
 
 Explaining each of these behaviours takes the variance of a sum of independent variables, the book's generator and its `normal()` call, the slopes of the activations that multiply along a chain, and the backward pass; five questions bring them back.
 
-1. (Volume I, chapter 10, "Probability: Reasoning Under Uncertainty", variance.) $X$ and $Y$ are independent with $\mathrm{Var}[X] = 2$ and $\mathrm{Var}[Y] = 3$. What is $\mathrm{Var}[3X - Y]$?
-2. (Volume I, chapter 10, expectation and variance.) For a variable with mean $0$, how is $\mathbb{E}[X^2]$ related to $\mathrm{Var}[X]$? What is it if the mean is $\mu$?
-3. (Chapter 2, "Multilayer Networks", ReLU.) A layer of three ReLU units has pre-activations $\mathbf{z} = (-1.5, 0.5, 2)$. What are its outputs and the slopes the backward pass uses?
-4. (Chapter 4, "Backpropagation Derived from Scratch", the backward pass of a linear layer.) For $\mathbf{Z} = \mathbf{A}\mathbf{W}^\top$ with $\mathbf{W}$ of shape $[H, D]$, what is $d\mathbf{A}$ in terms of $d\mathbf{Z}$ and $\mathbf{W}$, and what are the two shapes?
-5. (Volume I, chapter 17, "Randomness on a Deterministic Machine".) What does a seed fix in a program that draws random numbers, and what else must stay the same for two runs to give identical numbers?
+1. Volume I, chapter 10, "Probability: Reasoning Under Uncertainty", variance: $X$ and $Y$ are independent with $\mathrm{Var}[X] = 2$ and $\mathrm{Var}[Y] = 3$. What is $\mathrm{Var}[3X - Y]$?
+2. Volume I, chapter 10, expectation and variance: For a variable with mean $0$, how is $\mathbb{E}[X^2]$ related to $\mathrm{Var}[X]$? What is it if the mean is $\mu$?
+3. Chapter 2, "Multilayer Networks", ReLU: A layer of three ReLU units has pre-activations $\mathbf{z} = (-1.5, 0.5, 2)$. What are its outputs and the slopes the backward pass uses?
+4. Chapter 4, "Backpropagation Derived from Scratch", the backward pass of a linear layer: For $\mathbf{Z} = \mathbf{A}\mathbf{W}^\top$ with $\mathbf{W}$ of shape $[H, D]$, what is $d\mathbf{A}$ in terms of $d\mathbf{Z}$ and $\mathbf{W}$, and what are the two shapes?
+5. Volume I, chapter 17, "Randomness on a Deterministic Machine": What does a seed fix in a program that draws random numbers, and what else must stay the same for two runs to give identical numbers?
 
 ## Symmetry: why the weights must be random
 

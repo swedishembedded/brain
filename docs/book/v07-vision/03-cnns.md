@@ -35,12 +35,12 @@ That small calculation has the shape of every convolutional classifier. A first 
 
 A convolutional network stacks six earlier ideas, so the questions come before the architecture.
 
-1. ([Chapter 2](02-convolution.md), convolution.) A $3 \times 3$ convolution with stride 1 and padding 1 takes a $[4, 4, 4]$ map to $[6, 4, 4]$. What are the output side and the number of multiply-adds?
-2. ([Chapter 2](02-convolution.md), receptive field.) A $3 \times 3$ stride-1 layer has receptive field $r = 3$ and jump $j = 1$. What are $r$ and $j$ after a following layer with window 2 and stride 2?
-3. (Volume III, [Chapter 3](../v03-neural-networks/03-softmax.md), softmax and cross-entropy.) What is the gradient of the cross-entropy loss of one example with respect to its logits?
-4. (Volume III, [Chapter 9](../v03-neural-networks/09-initialization.md), He initialization.) What standard deviation does a ReLU layer with $n_{\mathrm{in}}$ inputs per output use, and what is $n_{\mathrm{in}}$ for a $3 \times 3$ convolution with $C_{\mathrm{in}}$ input channels?
-5. (Volume III, [Chapter 12](../v03-neural-networks/12-training-dynamics.md), residual connection.) For $\mathbf{y} = \mathbf{x} + f(\mathbf{x})$, what is $d\mathbf{x}$ in terms of $d\mathbf{y}$, and why does a deep stack of such layers pass a gradient that a plain stack loses?
-6. (Volume III, [Chapter 10](../v03-neural-networks/10-normalization.md), batch normalization.) What does a batch-norm layer use for its mean and variance in eval mode, and how does it fold into the linear layer before it?
+1. [Chapter 2](02-convolution.md), convolution: A $3 \times 3$ convolution with stride 1 and padding 1 takes a $[4, 4, 4]$ map to $[6, 4, 4]$. What are the output side and the number of multiply-adds?
+2. [Chapter 2](02-convolution.md), receptive field: A $3 \times 3$ stride-1 layer has receptive field $r = 3$ and jump $j = 1$. What are $r$ and $j$ after a following layer with window 2 and stride 2?
+3. Volume III, [Chapter 3](../v03-neural-networks/03-softmax.md), softmax and cross-entropy: What is the gradient of the cross-entropy loss of one example with respect to its logits?
+4. Volume III, [Chapter 9](../v03-neural-networks/09-initialization.md), He initialization: What standard deviation does a ReLU layer with $n_{\mathrm{in}}$ inputs per output use, and what is $n_{\mathrm{in}}$ for a $3 \times 3$ convolution with $C_{\mathrm{in}}$ input channels?
+5. Volume III, [Chapter 12](../v03-neural-networks/12-training-dynamics.md), residual connection: For $\mathbf{y} = \mathbf{x} + f(\mathbf{x})$, what is $d\mathbf{x}$ in terms of $d\mathbf{y}$, and why does a deep stack of such layers pass a gradient that a plain stack loses?
+6. Volume III, [Chapter 10](../v03-neural-networks/10-normalization.md), batch normalization: What does a batch-norm layer use for its mean and variance in eval mode, and how does it fold into the linear layer before it?
 
 ## What a pooling layer keeps
 

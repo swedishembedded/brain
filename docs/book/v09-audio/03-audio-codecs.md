@@ -23,10 +23,10 @@ The codec's stream is 174.5 times smaller in bits, and the number that matters t
 
 Two pieces of the answer come from earlier volumes, and two are new. The encoder that shrinks 1920 samples into one column is a stack of strided convolutions, and the decoder that grows it back is a stack of transposed ones, both from Volume VII. The table of centres that turns a column into integers is the vector quantizer of Volume VIII, but one table is not enough here, and what replaces it, a chain of tables each correcting the error the previous one left, is the new idea. The encoder and the quantizer rest on four earlier results, worth bringing back before they are used:
 
-1. ([Chapter 1](01-sound.md), waveform and sampling rate.) At 24 kHz, how many samples are there in 80 milliseconds?
-2. (Volume VIII, [Chapter 3](../v08-image-generation/03-vector-quantization.md), vector quantization.) What does a vector quantizer store for a vector $\mathbf{z}$, and which code wins when two are equally near?
-3. (Volume VII, [Chapter 2](../v07-vision/02-convolution.md), receptive field and stride.) A layer has kernel $k$ and stride $s$ and sits after layers whose receptive field is $r$ and whose jump is $j$. What are the receptive field and the jump after it? How long is the output of a stride-$s$ convolution with "same" padding on an input of length $L$?
-4. (Volume VII, [Chapter 2](../v07-vision/02-convolution.md), transposed convolution.) A transposed convolution with kernel $k$, stride $s$ and padding $p$ takes a length $n$ to what length, and what do overlapping stamps do?
+1. [Chapter 1](01-sound.md), waveform and sampling rate: At 24 kHz, how many samples are there in 80 milliseconds?
+2. Volume VIII, [Chapter 3](../v08-image-generation/03-vector-quantization.md), vector quantization: What does a vector quantizer store for a vector $\mathbf{z}$, and which code wins when two are equally near?
+3. Volume VII, [Chapter 2](../v07-vision/02-convolution.md), receptive field and stride: A layer has kernel $k$ and stride $s$ and sits after layers whose receptive field is $r$ and whose jump is $j$. What are the receptive field and the jump after it? How long is the output of a stride-$s$ convolution with "same" padding on an input of length $L$?
+4. Volume VII, [Chapter 2](../v07-vision/02-convolution.md), transposed convolution: A transposed convolution with kernel $k$, stride $s$ and padding $p$ takes a length $n$ to what length, and what do overlapping stamps do?
 
 ## Eighty milliseconds in one column
 

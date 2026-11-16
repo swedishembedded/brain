@@ -11,12 +11,12 @@ The situation has come up twice already in this volume without a name. The langu
 
 The remedies and the gate are built from six earlier results, and each is easier to use for having been worked once more:
 
-1. (Chapter 4, "Reinforcement and Preference Learning for Language Models", supervised fine-tuning.) Two conversations in one batch have 7 and 5 supervised targets and summed losses $27.1824$ and $26.8443$. What is the loss per supervised token of the whole batch?
-2. (Volume I, Chapter 12, "Statistics: Learning Facts from Samples", paired test.) Two models answer the same 40 questions and disagree on 10 of them, and model B is right on 9 of the 10. What is the one-sided exact sign-test p-value for "B is better"?
-3. (Volume I, Chapter 12, multiple comparisons.) Twenty independent tests are each run at the $5\%$ level and none of the differences is real. What is the chance that at least one is declared different, and what level does Bonferroni's correction give each test?
-4. (Volume II, Chapter 5, "Generalization, Overfitting and Honest Evaluation", validation set.) Why may the number that decides whether a model is kept not be computed on rows the model was trained on?
-5. (Volume II, Chapter 4, "Maximum Likelihood, Priors and Regularization", L2 regularization.) The loss $\tfrac12(\theta - 3)^2 + \tfrac{\lambda}{2}(\theta - 1)^2$ pulls $\theta$ towards 3 and towards the anchor 1. For $\lambda = 1$, where is its minimum?
-6. (Volume II, Chapter 3, "Classification and Logistic Regression", binary cross-entropy.) A logistic output with logit $z = 2$ is scored against the label $y = 1$. What are $p$, the derivative of the loss with respect to $z$, and $p(1 - p)$?
+1. Chapter 4, "Reinforcement and Preference Learning for Language Models", supervised fine-tuning: Two conversations in one batch have 7 and 5 supervised targets and summed losses $27.1824$ and $26.8443$. What is the loss per supervised token of the whole batch?
+2. Volume I, Chapter 12, "Statistics: Learning Facts from Samples", paired test: Two models answer the same 40 questions and disagree on 10 of them, and model B is right on 9 of the 10. What is the one-sided exact sign-test p-value for "B is better"?
+3. Volume I, Chapter 12, multiple comparisons: Twenty independent tests are each run at the $5\%$ level and none of the differences is real. What is the chance that at least one is declared different, and what level does Bonferroni's correction give each test?
+4. Volume II, Chapter 5, "Generalization, Overfitting and Honest Evaluation", validation set: Why may the number that decides whether a model is kept not be computed on rows the model was trained on?
+5. Volume II, Chapter 4, "Maximum Likelihood, Priors and Regularization", L2 regularization: The loss $\tfrac12(\theta - 3)^2 + \tfrac{\lambda}{2}(\theta - 1)^2$ pulls $\theta$ towards 3 and towards the anchor 1. For $\lambda = 1$, where is its minimum?
+6. Volume II, Chapter 3, "Classification and Logistic Regression", binary cross-entropy: A logistic output with logit $z = 2$ is scored against the label $y = 1$. What are $p$, the derivative of the loss with respect to $z$, and $p(1 - p)$?
 
 ## The same question with the opposite answer
 

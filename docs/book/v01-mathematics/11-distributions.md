@@ -54,12 +54,12 @@ vectors and eigenvectors, the oldest of them nine chapters back. A stumble on
 any of the six below is a reason to reopen the chapter named; the answers close
 this one.
 
-1. (Chapter 10, variance.) $\mathrm{Var}[X] = 4$ and $Y$ is independent of $X$ with $\mathrm{Var}[Y] = 5$. What are $\mathrm{Var}[2X + 1]$ and $\mathrm{Var}[X + Y]$?
-2. (Chapter 10, independence.) $X$ and $Y$ are independent with $\mathbb{E}[X] = 2$ and $\mathbb{E}[Y] = 3$. What is $\mathbb{E}[XY]$?
-3. (Chapter 2, exponential function.) What are $e^{-x^2/2}$ at $x = 0$ and at $x = 2$, and is the function larger at $x = 1$ or at $x = -1$?
-4. (Chapter 9, integral.) The area under $e^{-x^2/2}$ over the whole real line is about $2.5066$. By what number must the function be divided to become a density?
-5. (Chapter 3, cosine similarity.) What is the cosine similarity of $(1, 2)$ and $(2, 4)$, and of $(1, 0)$ and $(0, 1)$?
-6. (Chapter 6, eigenvector.) What are the eigenvalues and unit eigenvectors of the symmetric matrix $\begin{pmatrix}2&1\\1&2\end{pmatrix}$?
+1. Chapter 10, variance: $\mathrm{Var}[X] = 4$ and $Y$ is independent of $X$ with $\mathrm{Var}[Y] = 5$. What are $\mathrm{Var}[2X + 1]$ and $\mathrm{Var}[X + Y]$?
+2. Chapter 10, independence: $X$ and $Y$ are independent with $\mathbb{E}[X] = 2$ and $\mathbb{E}[Y] = 3$. What is $\mathbb{E}[XY]$?
+3. Chapter 2, exponential function: What are $e^{-x^2/2}$ at $x = 0$ and at $x = 2$, and is the function larger at $x = 1$ or at $x = -1$?
+4. Chapter 9, integral: The area under $e^{-x^2/2}$ over the whole real line is about $2.5066$. By what number must the function be divided to become a density?
+5. Chapter 3, cosine similarity: What is the cosine similarity of $(1, 2)$ and $(2, 4)$, and of $(1, 0)$ and $(0, 1)$?
+6. Chapter 6, eigenvector: What are the eigenvalues and unit eigenvectors of the symmetric matrix $\begin{pmatrix}2&1\\1&2\end{pmatrix}$?
 
 ## One yes/no: the Bernoulli distribution
 

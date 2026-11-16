@@ -25,12 +25,12 @@ A schedule is the way out of the compromise: use a rate that is small at the sta
 
 A schedule is a piecewise function built from a cosine, its purpose comes from AdamW's first steps and the stability limit of gradient descent, and a clip is a statement about the norm of a vector. Six questions bring those ideas back.
 
-1. (Chapter 7, "Optimizers: From SGD to AdamW", AdamW and bias correction.) With bias correction, how large is AdamW's first update of a weight, in units of $\eta$, when the first gradient is $g_1 = 0.02$? And when $g_1 = 200$?
-2. (Volume II, chapter 2, "Linear Regression and the First Descent", the learning rate.) Gradient descent on a quadratic whose largest curvature is $\lambda_{\max} = 40$ uses a fixed rate. What is the largest rate for which the error shrinks along every direction?
-3. (Volume I, chapter 3, "Vectors", the norm.) What are the norm of $\mathbf{v} = (3, 4)$ and the norm of $0.2\,\mathbf{v}$, and what does multiplying a vector by a positive number do to its direction?
-4. (Volume I, chapter 14, "Complex Numbers, Frequencies and the Fourier Transform", the cosine.) What are the values of $\tfrac12(1 + \cos\pi u)$ at $u = 0$, $\tfrac12$ and $1$?
-5. (Volume I, chapter 2, "Functions", piecewise functions and the schedule.) A warmup of 10 steps to the peak $0.1$ uses the rate $0.1\,(t+1)/10$ at step $t$. What is the rate at $t = 4$, and at which step is the peak first reached?
-6. (Chapter 7, the second moment.) After one step, what is Adam's corrected second moment $\hat v_1$ in terms of the first gradient, and what does that make the first update?
+1. Chapter 7, "Optimizers: From SGD to AdamW", AdamW and bias correction: With bias correction, how large is AdamW's first update of a weight, in units of $\eta$, when the first gradient is $g_1 = 0.02$? And when $g_1 = 200$?
+2. Volume II, chapter 2, "Linear Regression and the First Descent", the learning rate: Gradient descent on a quadratic whose largest curvature is $\lambda_{\max} = 40$ uses a fixed rate. What is the largest rate for which the error shrinks along every direction?
+3. Volume I, chapter 3, "Vectors", the norm: What are the norm of $\mathbf{v} = (3, 4)$ and the norm of $0.2\,\mathbf{v}$, and what does multiplying a vector by a positive number do to its direction?
+4. Volume I, chapter 14, "Complex Numbers, Frequencies and the Fourier Transform", the cosine: What are the values of $\tfrac12(1 + \cos\pi u)$ at $u = 0$, $\tfrac12$ and $1$?
+5. Volume I, chapter 2, "Functions", piecewise functions and the schedule: A warmup of 10 steps to the peak $0.1$ uses the rate $0.1\,(t+1)/10$ at step $t$. What is the rate at $t = 4$, and at which step is the peak first reached?
+6. Chapter 7, the second moment: After one step, what is Adam's corrected second moment $\hat v_1$ in terms of the first gradient, and what does that make the first update?
 
 ## Why one rate cannot be right for the whole run
 

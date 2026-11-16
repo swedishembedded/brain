@@ -11,12 +11,12 @@ The smallest model that can give them is small enough to build in full and to co
 
 Each piece of that list rests on an idea met earlier, and six of them are worth bringing back first.
 
-1. (Volume V, Chapter 14, "Bidirectional Encoders and Embedding Models", sentence embedding.) Two word vectors are $(3, 0)$ and $(0, 1)$. What is the sentence embedding by mean pooling, scaled to length 1?
-2. (Chapter 1, "Markov Decision Processes", policy.) A policy gives the preferences $(2, 0)$ to two actions through a softmax. What probabilities does it assign, and which action does the greedy policy take?
-3. (Volume II, Chapter 6, "Measuring Models: Metrics and Calibration", calibration.) Forty requests have a largest probability between $0.8$ and $0.9$ with mean $0.85$, and $30$ of the forty are routed right. By how much is the model over- or under-confident in that bin?
-4. (Volume II, Chapter 6, temperature scaling.) The logits $(2, 0)$ are divided by $T = 2$. What are the probabilities before and after?
-5. (Volume XI, Chapter 6, "Scoring Rules and Calibrated Decisions", abstention.) A wrong answer costs $1$, a right one $0$ and abstaining $0.2$. For which largest probability does answering become the cheaper action?
-6. (Volume I, Chapter 13, "Information, Entropy and Surprise", entropy.) What is the entropy in nats of the distribution $(0.5, 0.25, 0.25)$, and what fraction of $\ln 3$ is it?
+1. Volume V, Chapter 14, "Bidirectional Encoders and Embedding Models", sentence embedding: Two word vectors are $(3, 0)$ and $(0, 1)$. What is the sentence embedding by mean pooling, scaled to length 1?
+2. Chapter 1, "Markov Decision Processes", policy: A policy gives the preferences $(2, 0)$ to two actions through a softmax. What probabilities does it assign, and which action does the greedy policy take?
+3. Volume II, Chapter 6, "Measuring Models: Metrics and Calibration", calibration: Forty requests have a largest probability between $0.8$ and $0.9$ with mean $0.85$, and $30$ of the forty are routed right. By how much is the model over- or under-confident in that bin?
+4. Volume II, Chapter 6, temperature scaling: The logits $(2, 0)$ are divided by $T = 2$. What are the probabilities before and after?
+5. Volume XI, Chapter 6, "Scoring Rules and Calibrated Decisions", abstention: A wrong answer costs $1$, a right one $0$ and abstaining $0.2$. For which largest probability does answering become the cheaper action?
+6. Volume I, Chapter 13, "Information, Entropy and Surprise", entropy: What is the entropy in nats of the distribution $(0.5, 0.25, 0.25)$, and what fraction of $\ln 3$ is it?
 
 ## Ten numbers that stand for a request
 

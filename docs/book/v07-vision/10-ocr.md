@@ -22,12 +22,12 @@ A reader of documents has to square two demands that pull in opposite directions
 
 Reading text from an image reuses six earlier ideas, recalled first.
 
-1. ([Chapter 9](09-vlms.md), projector.) A tower writes rows of width 1,024 and the decoder's rows are 1,280 wide. How many parameters has the smallest map that joins them, with a bias?
-2. ([Chapter 9](09-vlms.md), splicing.) A prompt has a placeholder that was expanded to 273 ids, and the picture's tower produces 256 rows. What does the splice require, and what does that leave unexplained?
-3. ([Volume VI, Chapter 3](../v06-language-models/03-attention-variants.md), sliding windows.) In a causal window of $w$ tokens, how many keys does a query read, and how far back can information travel through $L$ such layers?
-4. ([Volume VI, Chapter 3](../v06-language-models/03-attention-variants.md), latent attention.) A decoder layer has 10 heads of width 128. How many numbers does it cache per token with ordinary multi-head attention, and how many with a latent of 512 and a rotary key of 64?
-5. ([Chapter 2](02-convolution.md), convolution.) A convolution of kernel 3, stride 2 and padding 1 reads a map that is 64 wide. How wide is its output?
-6. ([Chapter 1](01-images.md), shrinking.) A row of stems that repeat every 4 pixels is shrunk by a factor of 4 with an area average. What does the output look like, and what does shrinking by 2.3 do instead?
+1. [Chapter 9](09-vlms.md), projector: A tower writes rows of width 1,024 and the decoder's rows are 1,280 wide. How many parameters has the smallest map that joins them, with a bias?
+2. [Chapter 9](09-vlms.md), splicing: A prompt has a placeholder that was expanded to 273 ids, and the picture's tower produces 256 rows. What does the splice require, and what does that leave unexplained?
+3. [Volume VI, Chapter 3](../v06-language-models/03-attention-variants.md), sliding windows: In a causal window of $w$ tokens, how many keys does a query read, and how far back can information travel through $L$ such layers?
+4. [Volume VI, Chapter 3](../v06-language-models/03-attention-variants.md), latent attention: A decoder layer has 10 heads of width 128. How many numbers does it cache per token with ordinary multi-head attention, and how many with a latent of 512 and a rotary key of 64?
+5. [Chapter 2](02-convolution.md), convolution: A convolution of kernel 3, stride 2 and padding 1 reads a map that is 64 wide. How wide is its output?
+6. [Chapter 1](01-images.md), shrinking: A row of stems that repeat every 4 pixels is shrunk by a factor of 4 with an area average. What does the output look like, and what does shrinking by 2.3 do instead?
 
 Every worked number below is arithmetic on printed constants: no random number is drawn, so no seed is involved, and the numbers that come from trained models are quoted from commits with their setup.
 

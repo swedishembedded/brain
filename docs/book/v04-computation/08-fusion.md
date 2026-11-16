@@ -30,12 +30,12 @@ A single kernel could read $x$, $W$, $b$, $\gamma$ and $\beta$ once and write $y
 
 Six ideas from earlier chapters carry the argument, from the roofline to the layer normalization of Volume III.
 
-1. (Chapter 3, bandwidth-bound.) For $c = a + b$ on $2^{20}$ float32 numbers, count the FLOPs, the bytes and the intensity. Is it limited by arithmetic or by bandwidth on the model GPU, whose ridge point is 50 FLOP per byte?
-2. (Chapter 3, fixed costs.) Starting one dispatch costs 5 microseconds in the model, and the model GPU moves 800 (GB/s). How many bytes of memory traffic is the start worth?
-3. (Chapter 4, occupancy.) A kernel with workgroups of 256 invocations uses 128 registers per invocation. How many workgroups are resident on a compute unit of the model and what is the occupancy?
-4. (Chapter 5, kernel dispatch.) Of the host operations `upload`, `dispatch` and `read_back`, which returns before the device has finished and which waits?
-5. (Chapter 7, two-pass reduction.) Why does the sum of $2^{24}$ numbers take two dispatches rather than one dispatch with a barrier across all workgroups?
-6. (Volume III, Chapter 10, layer normalization.) How many of the $d$ numbers of a row must a layer normalization have read before it can write the first number of that row's output, and why?
+1. Chapter 3, bandwidth-bound: For $c = a + b$ on $2^{20}$ float32 numbers, count the FLOPs, the bytes and the intensity. Is it limited by arithmetic or by bandwidth on the model GPU, whose ridge point is 50 FLOP per byte?
+2. Chapter 3, fixed costs: Starting one dispatch costs 5 microseconds in the model, and the model GPU moves 800 (GB/s). How many bytes of memory traffic is the start worth?
+3. Chapter 4, occupancy: A kernel with workgroups of 256 invocations uses 128 registers per invocation. How many workgroups are resident on a compute unit of the model and what is the occupancy?
+4. Chapter 5, kernel dispatch: Of the host operations `upload`, `dispatch` and `read_back`, which returns before the device has finished and which waits?
+5. Chapter 7, two-pass reduction: Why does the sum of $2^{24}$ numbers take two dispatches rather than one dispatch with a barrier across all workgroups?
+6. Volume III, Chapter 10, layer normalization: How many of the $d$ numbers of a row must a layer normalization have read before it can write the first number of that row's output, and why?
 
 ## Counting what moves: memory-traffic accounting
 

@@ -60,12 +60,12 @@ a little from Chapters 1 and 2. Each of the six questions below is used before
 long; if one resists, the chapter it names is the place to go back to, and the
 answers close the chapter.
 
-1. (Chapter 7, derivative.) For $L(w) = (2w - 3)^2$, what is $L'(0.5)$?
-2. (Chapter 7, chain rule.) What is the derivative of $(3x + 1)^2$ at $x = 1$?
-3. (Chapter 3, dot product and Cauchy-Schwarz.) For $\mathbf{a} = (3, 4)$ and $\mathbf{b} = (2, 1)$, compute $\mathbf{a}\cdot\mathbf{b}$ and $\lVert\mathbf{a}\rVert$. What does Cauchy-Schwarz say about $\lvert\mathbf{a}\cdot\mathbf{u}\rvert$ for a unit vector $\mathbf{u}$, and when is the bound reached?
-4. (Chapter 4, matrix-vector product.) Compute $\mathbf{W}\mathbf{x}$ for $\mathbf{W} = \begin{pmatrix}1 & 2\\ 0 & 3\end{pmatrix}$ and $\mathbf{x} = (2, 1)$. If $\mathbf{W}$ has shape $[m, n]$, what shape must $\mathbf{x}$ have and what shape is the result?
-5. (Chapter 4, transpose.) If $\mathbf{A}$ has shape $[2, 3]$ and $\mathbf{B}$ has shape $[3, 4]$, what are the shapes of $\mathbf{A}\mathbf{B}$ and $\mathbf{B}^\top\mathbf{A}^\top$, and how are the two matrices related?
-6. (Chapter 2, polynomials.) Evaluate $p(x) = 1 + x + \tfrac{1}{2}x^2 + \tfrac{1}{6}x^3$ at $x = 1$. What number from Chapter 1 does it come close to?
+1. Chapter 7, derivative: For $L(w) = (2w - 3)^2$, what is $L'(0.5)$?
+2. Chapter 7, chain rule: What is the derivative of $(3x + 1)^2$ at $x = 1$?
+3. Chapter 3, dot product and Cauchy-Schwarz: For $\mathbf{a} = (3, 4)$ and $\mathbf{b} = (2, 1)$, compute $\mathbf{a}\cdot\mathbf{b}$ and $\lVert\mathbf{a}\rVert$. What does Cauchy-Schwarz say about $\lvert\mathbf{a}\cdot\mathbf{u}\rvert$ for a unit vector $\mathbf{u}$, and when is the bound reached?
+4. Chapter 4, matrix-vector product: Compute $\mathbf{W}\mathbf{x}$ for $\mathbf{W} = \begin{pmatrix}1 & 2\\ 0 & 3\end{pmatrix}$ and $\mathbf{x} = (2, 1)$. If $\mathbf{W}$ has shape $[m, n]$, what shape must $\mathbf{x}$ have and what shape is the result?
+5. Chapter 4, transpose: If $\mathbf{A}$ has shape $[2, 3]$ and $\mathbf{B}$ has shape $[3, 4]$, what are the shapes of $\mathbf{A}\mathbf{B}$ and $\mathbf{B}^\top\mathbf{A}^\top$, and how are the two matrices related?
+6. Chapter 2, polynomials: Evaluate $p(x) = 1 + x + \tfrac{1}{2}x^2 + \tfrac{1}{6}x^3$ at $x = 1$. What number from Chapter 1 does it come close to?
 
 ## Partial derivatives: one knob at a time
 

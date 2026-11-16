@@ -50,11 +50,11 @@ hides inside it (rotations, low-rank structure) is Chapter 6. The derivations
 below stand on the dot product, on composition and on sums, so test those first,
 reaching back as far as Chapter 1; the answers are with the others at the end.
 
-1. (Chapter 3, dot product.) Compute $(1, 2, 3) \cdot (4, 5, 6)$.
-2. (Chapter 3, orthogonality.) What does it mean for the dot product of two nonzero vectors to be 0?
-3. (Chapter 2, composition.) With $f(x) = x + 3$ and $g(x) = x^2$, evaluate $g(f(2))$. Which function is applied first?
-4. (Chapter 2, functions.) Can a function give two different outputs for one input? Can two different inputs give the same output?
-5. (Chapter 1, summation.) Evaluate $\sum_{l=1}^{3} l(l+1)$.
+1. Chapter 3, dot product: Compute $(1, 2, 3) \cdot (4, 5, 6)$.
+2. Chapter 3, orthogonality: What does it mean for the dot product of two nonzero vectors to be 0?
+3. Chapter 2, composition: With $f(x) = x + 3$ and $g(x) = x^2$, evaluate $g(f(2))$. Which function is applied first?
+4. Chapter 2, functions: Can a function give two different outputs for one input? Can two different inputs give the same output?
+5. Chapter 1, summation: Evaluate $\sum_{l=1}^{3} l(l+1)$.
 
 ## A matrix is a table
 

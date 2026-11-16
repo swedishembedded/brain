@@ -11,10 +11,10 @@ The remedies all come from asking where the thousand updates should have been ke
 
 The remedies lean on four results from earlier volumes. Try them before reading on, since the reasoning below uses each:
 
-1. (Volume IV, Chapter 1, the bf16 format.) What is the next bf16 number above 1, and how small must an update to a weight of 1 be for round to nearest to lose it?
-2. (Volume IV, Chapter 1, the fp8 formats.) What is the largest finite E4M3 number, and which scale $s$ puts a block whose largest magnitude is 3000 at that number?
-3. (Volume III, Chapter 7, AdamW.) On the first step the bias-corrected moments are $\hat{m} = g$ and $\hat{v} = g^2$. How far does a weight move on that step when $|g| \gg \epsilon$, and does the answer depend on the size of $g$?
-4. (Volume I, Chapter 15, rounding error.) Round to nearest gives a relative error of at most $u$. What is $u$ for a format with 8 significant bits?
+1. Volume IV, Chapter 1, the bf16 format: What is the next bf16 number above 1, and how small must an update to a weight of 1 be for round to nearest to lose it?
+2. Volume IV, Chapter 1, the fp8 formats: What is the largest finite E4M3 number, and which scale $s$ puts a block whose largest magnitude is 3000 at that number?
+3. Volume III, Chapter 7, AdamW: On the first step the bias-corrected moments are $\hat{m} = g$ and $\hat{v} = g^2$. How far does a weight move on that step when $|g| \gg \epsilon$, and does the answer depend on the size of $g$?
+4. Volume I, Chapter 15, rounding error: Round to nearest gives a relative error of at most $u$. What is $u$ for a format with 8 significant bits?
 
 ## Updates smaller than half a gap
 

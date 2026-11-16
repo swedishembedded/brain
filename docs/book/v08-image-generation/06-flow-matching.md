@@ -27,11 +27,11 @@ The last chapter reached generation by a different road: a chain of small random
 
 The straight path borrows the regression argument and the velocity target of Chapter 5, the ordinary differential equation and Euler's method of Volume I, and the sum of Gaussians; recall each before it is used.
 
-1. ([Chapter 5](05-diffusion.md), the denoising objective.) A network is trained by squared error against a target that is not a function of its input alone, such as the noise that was added. What function does it converge to, and what loss is left at the optimum?
-2. ([Chapter 5](05-diffusion.md), v-prediction.) For $x_t = a_t x_0 + b_t\varepsilon$ with $a_t^2 + b_t^2 = 1$, what is the velocity target $v$, and how do $x_0$ and $\varepsilon$ come back from $(x_t, v)$?
-3. (Volume I, [Chapter 9](../v01-mathematics/09-integrals-and-odes.md), ordinary differential equations.) What does $dx/d\sigma = f(x, \sigma)$ together with a starting value determine, and can two solutions that start at different points ever meet?
-4. (Volume I, [Chapter 9](../v01-mathematics/09-integrals-and-odes.md), the Euler method.) Give one Euler step of size $h = 0.5$ for $dx/dt = -x$ from $x = 1$, and say what happens to the final error when $h$ is halved.
-5. (Volume I, [Chapter 11](../v01-mathematics/11-distributions.md), the Gaussian distribution.) If $X \sim \mathcal{N}(0, 1)$ and $Z \sim \mathcal{N}(0, 1)$ are independent, what is the distribution of $(1 - \sigma)X + \sigma Z$, and what is its variance at $\sigma = \tfrac12$?
+1. [Chapter 5](05-diffusion.md), the denoising objective: A network is trained by squared error against a target that is not a function of its input alone, such as the noise that was added. What function does it converge to, and what loss is left at the optimum?
+2. [Chapter 5](05-diffusion.md), v-prediction: For $x_t = a_t x_0 + b_t\varepsilon$ with $a_t^2 + b_t^2 = 1$, what is the velocity target $v$, and how do $x_0$ and $\varepsilon$ come back from $(x_t, v)$?
+3. Volume I, [Chapter 9](../v01-mathematics/09-integrals-and-odes.md), ordinary differential equations: What does $dx/d\sigma = f(x, \sigma)$ together with a starting value determine, and can two solutions that start at different points ever meet?
+4. Volume I, [Chapter 9](../v01-mathematics/09-integrals-and-odes.md), the Euler method: Give one Euler step of size $h = 0.5$ for $dx/dt = -x$ from $x = 1$, and say what happens to the final error when $h$ is halved.
+5. Volume I, [Chapter 11](../v01-mathematics/11-distributions.md), the Gaussian distribution: If $X \sim \mathcal{N}(0, 1)$ and $Z \sim \mathcal{N}(0, 1)$ are independent, what is the distribution of $(1 - \sigma)X + \sigma Z$, and what is its variance at $\sigma = \tfrac12$?
 
 Everything below is written for one real number, with the data of the last two chapters: three clusters at $-3$, $0$ and $3$, each of standard deviation $0.25$, with equal weights. An image is a vector, every entry is noised by a draw of its own, and every squared error is averaged over the entries, so nothing changes except the bookkeeping. For these data every quantity below can be computed exactly, and a network trained on them can be compared with the exact answer.
 

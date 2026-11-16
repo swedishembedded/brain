@@ -23,11 +23,11 @@ Grouped-query attention is a dial with a stop. Turn it to its end, one key-value
 
 Counting both ideas draws on five earlier results, from the groups of Chapter 1 to the softmax:
 
-1. ([Chapter 1](01-modern-decoder.md), grouped-query attention.) How many numbers does one token add to the cache of one layer with 32 query heads and 8 key-value heads of width 128, and how many query heads read each key-value head?
-2. (Volume V, [Chapter 12](../v05-sequences/12-kv-cache.md), the decode phase.) For one cached key, how many FLOPs does a layer spend on it and how many bytes does it read, at those shapes in bf16? What ratio is that?
-3. (Volume I, [Chapter 6](../v01-mathematics/06-decompositions.md), low-rank approximation.) A matrix of 4,096 rows and 4,096 columns has rank at most 512. How many numbers hold it as the product of two factors, and what fraction of the 4,096 x 4,096 entries is that?
-4. (Volume V, [Chapter 8](../v05-sequences/08-positions.md), rotary embeddings.) To which of the query, the key and the value is the rotation applied, and what does the score of a pair of positions depend on afterwards?
-5. (Volume III, [Chapter 3](../v03-neural-networks/03-softmax.md), the softmax.) What happens to the output of a softmax when the same constant is added to every score, and what do the outputs always sum to?
+1. [Chapter 1](01-modern-decoder.md), grouped-query attention: How many numbers does one token add to the cache of one layer with 32 query heads and 8 key-value heads of width 128, and how many query heads read each key-value head?
+2. Volume V, [Chapter 12](../v05-sequences/12-kv-cache.md), the decode phase: For one cached key, how many FLOPs does a layer spend on it and how many bytes does it read, at those shapes in bf16? What ratio is that?
+3. Volume I, [Chapter 6](../v01-mathematics/06-decompositions.md), low-rank approximation: A matrix of 4,096 rows and 4,096 columns has rank at most 512. How many numbers hold it as the product of two factors, and what fraction of the 4,096 x 4,096 entries is that?
+4. Volume V, [Chapter 8](../v05-sequences/08-positions.md), rotary embeddings: To which of the query, the key and the value is the rotation applied, and what does the score of a pair of positions depend on afterwards?
+5. Volume III, [Chapter 3](../v03-neural-networks/03-softmax.md), the softmax: What happens to the output of a softmax when the same constant is added to every score, and what do the outputs always sum to?
 
 ## One key-value head for every query head
 

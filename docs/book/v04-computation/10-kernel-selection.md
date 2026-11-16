@@ -41,12 +41,12 @@ All the numbers below come from one seeded model of a device, and nothing in it 
 
 The stages ahead lean on six earlier ideas, from the roofline to the standard error.
 
-1. (Chapter 3, the roofline.) A computation does $2 \times 10^9$ FLOP on 100 MB. On a device with $F_{\mathrm{pk}} = 40{,}000$ GFLOP/s and $\mathrm{BW} = 800$ GB/s, what is its intensity, on which side of the ridge point is it, and what is its cost $B_{\mathrm{eq}}$ in equivalent bytes (Chapter 8)?
-2. (Chapter 6, the tile.) A $128 \times 128$ output tile is used for a product with $m = 1$ row. What share of the tile's outputs is real?
-3. (Chapter 4, the 40,000 invocations.) How many invocations, each with one 4-byte load in flight, keep the memory of the model GPU busy, and why?
-4. (Chapter 9, the capability record.) What does the record report for a capability the backend cannot establish, and why that value?
-5. (Chapter 9, the tolerance.) A left fold over $K = 8$ products with $S = 4$: what is the tolerance $k_{\mathrm{rd}} u S/(1 - k_{\mathrm{rd}} u)$ in float32, to two significant digits?
-6. (Volume I, Chapter 12, the standard error.) Five measurements have a sample standard deviation of 0.01. What is the standard error of their mean?
+1. Chapter 3, the roofline: A computation does $2 \times 10^9$ FLOP on 100 MB. On a device with $F_{\mathrm{pk}} = 40{,}000$ GFLOP/s and $\mathrm{BW} = 800$ GB/s, what is its intensity, on which side of the ridge point is it, and what is its cost $B_{\mathrm{eq}}$ in equivalent bytes (Chapter 8)?
+2. Chapter 6, the tile: A $128 \times 128$ output tile is used for a product with $m = 1$ row. What share of the tile's outputs is real?
+3. Chapter 4, the 40,000 invocations: How many invocations, each with one 4-byte load in flight, keep the memory of the model GPU busy, and why?
+4. Chapter 9, the capability record: What does the record report for a capability the backend cannot establish, and why that value?
+5. Chapter 9, the tolerance: A left fold over $K = 8$ products with $S = 4$: what is the tolerance $k_{\mathrm{rd}} u S/(1 - k_{\mathrm{rd}} u)$ in float32, to two significant digits?
+6. Volume I, Chapter 12, the standard error: Five measurements have a sample standard deviation of 0.01. What is the standard error of their mean?
 
 ## Implementation candidates: an implementation and its conditions
 

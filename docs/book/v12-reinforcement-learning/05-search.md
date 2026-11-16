@@ -11,10 +11,10 @@ The price of that repair is the part worth counting. Every imagined day branches
 
 Search leans on four earlier ideas.
 
-1. (Chapter 1, "Markov Decision Processes", the lookahead $q(s, a)$.) With every value taken as $0$, what are $q(0, a)$ for $a = 0, 1, 2, 3$ on the empty shelf of the shop? Which action does the tie rule of that chapter choose?
-2. (Chapter 1, the policy.) What is a policy, and how many deterministic policies does the shop have?
-3. (Volume I, Chapter 10, "Probability: Reasoning Under Uncertainty", random variable and variance.) A random playout is won with probability $p$. Call $X$ the random variable that is $1$ when it is won and $0$ otherwise. What are the mean and the variance of $X$, and how many playouts does it take to halve the standard error of the average of the $X$ values?
-4. (Volume III, Chapter 2, "Multilayer Networks", the multilayer perceptron.) How many parameters has a network with $2$ inputs, one hidden layer of $12$ tanh units and one linear output?
+1. Chapter 1, "Markov Decision Processes", the lookahead $q(s, a)$: With every value taken as $0$, what are $q(0, a)$ for $a = 0, 1, 2, 3$ on the empty shelf of the shop? Which action does the tie rule of that chapter choose?
+2. Chapter 1, the policy: What is a policy, and how many deterministic policies does the shop have?
+3. Volume I, Chapter 10, "Probability: Reasoning Under Uncertainty", random variable and variance: A random playout is won with probability $p$. Call $X$ the random variable that is $1$ when it is won and $0$ otherwise. What are the mean and the variance of $X$, and how many playouts does it take to halve the standard error of the average of the $X$ values?
+4. Volume III, Chapter 2, "Multilayer Networks", the multilayer perceptron: How many parameters has a network with $2$ inputs, one hidden layer of $12$ tanh units and one linear output?
 
 ## What the lookahead of the shop costs
 

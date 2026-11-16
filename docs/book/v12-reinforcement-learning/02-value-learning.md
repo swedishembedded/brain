@@ -32,10 +32,10 @@ The second thing is that the numbers are bad. After ten days $V(2)$ is $-0.355$ 
 
 Four ideas from earlier chapters are the tools of the answer.
 
-1. (Chapter 1, "Markov Decision Processes", the Bellman equation.) Write the Bellman equation for the value $V^\pi(s)$ of a policy $\pi$, and say in a sentence what it expresses.
-2. (Chapter 1, the value function.) The return of one trajectory is a random number. What is the value $V^\pi(s)$ in terms of returns, and which number is $V^\pi(0)$ for the policy $(1, 0, 0, 0)$ at $\gamma = 0.9$?
-3. (Volume III, Chapter 7, "Optimizers: From SGD to AdamW", stochastic gradient descent.) A single example $y$ gives the loss $\ell(w) = \tfrac12 (y - w)^2$. Write one SGD step with rate $\eta$ and say what fraction of the way from $w$ to $y$ it moves $w$.
-4. (Volume III, Chapter 7.) Apply that step to the examples $y_1, y_2, \dots$ one after another with the rate $\eta_n = 1/n$ for the $n$-th example, starting from any $w_0$. What is $w_n$?
+1. Chapter 1, "Markov Decision Processes", the Bellman equation: Write the Bellman equation for the value $V^\pi(s)$ of a policy $\pi$, and say in a sentence what it expresses.
+2. Chapter 1, the value function: The return of one trajectory is a random number. What is the value $V^\pi(s)$ in terms of returns, and which number is $V^\pi(0)$ for the policy $(1, 0, 0, 0)$ at $\gamma = 0.9$?
+3. Volume III, Chapter 7, "Optimizers: From SGD to AdamW", stochastic gradient descent: A single example $y$ gives the loss $\ell(w) = \tfrac12 (y - w)^2$. Write one SGD step with rate $\eta$ and say what fraction of the way from $w$ to $y$ it moves $w$.
+4. Volume III, Chapter 7: Apply that step to the examples $y_1, y_2, \dots$ one after another with the rate $\eta_n = 1/n$ for the $n$-th example, starting from any $w_0$. What is $w_n$?
 
 ## Averaging what actually happened
 

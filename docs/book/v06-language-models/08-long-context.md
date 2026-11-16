@@ -9,13 +9,13 @@ A decoder is trained on texts of at most 4,096 tokens, and nothing in its files 
 
 The count rests on seven earlier results, from rotary rates and cache sizes to entropy and the host bus; bring each back before going on.
 
-1. (Volume V, [Chapter 8](../v05-sequences/08-positions.md), rotary embeddings.) Pair $m$ of a rotated head of width $d = 64$ turns by $\omega_m = \mathrm{base}^{-2m/d}$ radians per position, with base 10,000. What is the length in positions of one full turn of pair 24, and how many turns does it make over 4,096 positions?
-2. (Volume V, [Chapter 12](../v05-sequences/12-kv-cache.md), the KV cache.) A decoder has 32 layers and 8 key-value heads of width 128 and stores its cache in bf16. How many bytes does one token of context cost, and how many GiB does a sequence of 32,768 tokens need?
-3. ([Chapter 3](03-attention-variants.md), sliding windows.) A stack of $L$ layers, each reading a window of $n_{\mathrm{win}}$ keys, can be influenced by how many positions back?
-4. (Volume I, [Chapter 13](../v01-mathematics/13-information-theory.md), entropy.) What is the entropy, in nats, of a uniform distribution over $n$ outcomes?
-5. (Volume V, [Chapter 11](../v05-sequences/11-decoding.md), temperature.) Dividing the logits of a softmax by a temperature $\tau < 1$ does what to the entropy of the distribution?
-6. (Volume IV, [Chapter 4](../v04-computation/04-gpu.md), the host bus.) On the model GPU of that chapter the memory delivers 800 (GB/s) and the host bus 32 (GB/s). How long does each take to move 8 GiB?
-7. (Volume V, [Chapter 13](../v05-sequences/13-flash-attention.md), flash attention.) Why does an attention that never writes its score matrix to memory need only a linear amount of memory in the length, where the plain one needs a quadratic amount?
+1. Volume V, [Chapter 8](../v05-sequences/08-positions.md), rotary embeddings: Pair $m$ of a rotated head of width $d = 64$ turns by $\omega_m = \mathrm{base}^{-2m/d}$ radians per position, with base 10,000. What is the length in positions of one full turn of pair 24, and how many turns does it make over 4,096 positions?
+2. Volume V, [Chapter 12](../v05-sequences/12-kv-cache.md), the KV cache: A decoder has 32 layers and 8 key-value heads of width 128 and stores its cache in bf16. How many bytes does one token of context cost, and how many GiB does a sequence of 32,768 tokens need?
+3. [Chapter 3](03-attention-variants.md), sliding windows: A stack of $L$ layers, each reading a window of $n_{\mathrm{win}}$ keys, can be influenced by how many positions back?
+4. Volume I, [Chapter 13](../v01-mathematics/13-information-theory.md), entropy: What is the entropy, in nats, of a uniform distribution over $n$ outcomes?
+5. Volume V, [Chapter 11](../v05-sequences/11-decoding.md), temperature: Dividing the logits of a softmax by a temperature $\tau < 1$ does what to the entropy of the distribution?
+6. Volume IV, [Chapter 4](../v04-computation/04-gpu.md), the host bus: On the model GPU of that chapter the memory delivers 800 (GB/s) and the host bus 32 (GB/s). How long does each take to move 8 GiB?
+7. Volume V, [Chapter 13](../v05-sequences/13-flash-attention.md), flash attention: Why does an attention that never writes its score matrix to memory need only a linear amount of memory in the length, where the plain one needs a quadratic amount?
 
 ## Three things that change with the length
 

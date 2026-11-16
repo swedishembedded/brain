@@ -13,11 +13,11 @@ The answer has three parts. A nonlinearity between the layers is essential, beca
 
 A network is a neuron applied many times and a chain of functions composed, and each layer is a matrix acting on a vector. Five questions bring back the neuron, the composition of functions and the product of linear maps that the argument leans on.
 
-1. (Chapter 1, "The Neuron and the Perceptron", the artificial neuron.) A neuron has weights $\mathbf{w} = (2, -1)$, bias $b = 0.5$ and the identity as its activation. What does it output for $\mathbf{x} = (1, 3)$?
-2. (Chapter 1, the activation function.) Which activation turns the neuron $g(\mathbf{w}\cdot\mathbf{x} + b)$ into linear regression, which into logistic regression and which into the perceptron? Why could the perceptron's activation not be used to train a hidden neuron?
-3. (Volume I, chapter 4, "Matrices as Linear Maps", the matrix-vector product.) A matrix $\mathbf{W}$ has shape $[3, 2]$ and $\mathbf{x}$ has two entries. What is the shape of $\mathbf{W}\mathbf{x}$, and what is its first entry in terms of the first row of $\mathbf{W}$?
-4. (Volume I, chapter 2, "Functions and Their Shapes", composition.) For $f(x) = 2x + 1$ and $g(x) = x - 3$, compute $g(f(x))$ and $f(g(x))$. Are they equal?
-5. (Volume I, chapter 4, composing linear maps.) The linear map $\mathbf{A}$ has shape $[3, 2]$ and $\mathbf{B}$ has shape $[4, 3]$. Which single matrix does $\mathbf{x} \mapsto \mathbf{B}(\mathbf{A}\mathbf{x})$ equal, and what is its shape?
+1. Chapter 1, "The Neuron and the Perceptron", the artificial neuron: A neuron has weights $\mathbf{w} = (2, -1)$, bias $b = 0.5$ and the identity as its activation. What does it output for $\mathbf{x} = (1, 3)$?
+2. Chapter 1, the activation function: Which activation turns the neuron $g(\mathbf{w}\cdot\mathbf{x} + b)$ into linear regression, which into logistic regression and which into the perceptron? Why could the perceptron's activation not be used to train a hidden neuron?
+3. Volume I, chapter 4, "Matrices as Linear Maps", the matrix-vector product: A matrix $\mathbf{W}$ has shape $[3, 2]$ and $\mathbf{x}$ has two entries. What is the shape of $\mathbf{W}\mathbf{x}$, and what is its first entry in terms of the first row of $\mathbf{W}$?
+4. Volume I, chapter 2, "Functions and Their Shapes", composition: For $f(x) = 2x + 1$ and $g(x) = x - 3$, compute $g(f(x))$ and $f(g(x))$. Are they equal?
+5. Volume I, chapter 4, composing linear maps: The linear map $\mathbf{A}$ has shape $[3, 2]$ and $\mathbf{B}$ has shape $[4, 3]$. Which single matrix does $\mathbf{x} \mapsto \mathbf{B}(\mathbf{A}\mathbf{x})$ equal, and what is its shape?
 
 ## The XOR network again, smooth
 

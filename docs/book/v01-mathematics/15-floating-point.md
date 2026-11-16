@@ -76,12 +76,12 @@ best step of a finite difference and the condition number of a bowl. Bring each
 back before the rounding starts; a question that stays blank sends you to the
 chapter it names.
 
-1. (Chapter 1, real numbers.) How many real numbers lie between $0.1$ and $0.2$? A computer stores a number in a fixed number of bits: what does that imply about which real numbers it can hold?
-2. (Chapter 1, exponents and scientific notation.) Write $0.00032$ and $5400$ in scientific notation. What is $2^{-3}$, and what is $2^{10}$?
-3. (Chapter 1, logarithms count digits and bits.) How many bits are needed to write each of the whole numbers from $0$ to $1023$? What does $\lfloor \log_2 x \rfloor$ tell you about the binary representation of a number $x \ge 1$?
-4. (Chapter 1, why products of probabilities become sums of logarithms.) A product of $n$ factors, each $0.1$, underflowed in 32-bit arithmetic at $n = 46$. What did the chapter do about it, and which problem did it say was left open?
-5. (Chapter 7, numerical differentiation.) Write the central difference estimate of $f'(x)$. Its error shrinks like $h^2$ as $h$ shrinks, yet the chapter reported that making $h$ very small makes the estimate worse. Why?
-6. (Chapter 8, conditioning.) What is the condition number of a bowl-shaped function, and what does a large one do to gradient descent?
+1. Chapter 1, real numbers: How many real numbers lie between $0.1$ and $0.2$? A computer stores a number in a fixed number of bits: what does that imply about which real numbers it can hold?
+2. Chapter 1, exponents and scientific notation: Write $0.00032$ and $5400$ in scientific notation. What is $2^{-3}$, and what is $2^{10}$?
+3. Chapter 1, logarithms count digits and bits: How many bits are needed to write each of the whole numbers from $0$ to $1023$? What does $\lfloor \log_2 x \rfloor$ tell you about the binary representation of a number $x \ge 1$?
+4. Chapter 1, why products of probabilities become sums of logarithms: A product of $n$ factors, each $0.1$, underflowed in 32-bit arithmetic at $n = 46$. What did the chapter do about it, and which problem did it say was left open?
+5. Chapter 7, numerical differentiation: Write the central difference estimate of $f'(x)$. Its error shrinks like $h^2$ as $h$ shrinks, yet the chapter reported that making $h$ very small makes the estimate worse. Why?
+6. Chapter 8, conditioning: What is the condition number of a bowl-shaped function, and what does a large one do to gradient descent?
 
 ## Numbers with a floating point
 

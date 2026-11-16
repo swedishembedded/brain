@@ -44,12 +44,12 @@ The arrows fix an order in which the stages can be built. The synthesiser comes 
 
 Six questions bring back what the milestones lean on; their answers close the project.
 
-1. ([Chapter 1](01-sound.md), aliasing.) A cosine of 5200 Hz is kept at one sample in 1.5 of a signal sampled at 12,000 Hz, with no filtering first. At what frequency does it appear, and why does a Kaiser-tapered sinc remove it where linear interpolation does not?
-2. ([Chapter 2](02-spectrograms.md), frames and gain.) A signal of 5280 samples is padded by $N/2$ on each side by reflection, with $N = 256$ and a hop of 160. How many frames are there? If the signal is made three times louder, what happens to a log-mel value computed as $\ln(E + 10^{-6})$, and what does subtracting the largest value of the clip do about it?
-3. ([Chapter 3](03-audio-codecs.md), the residual.) A quantizer has two stages. What does the second stage quantize, what is the reconstruction, and what does the squared error of the reconstruction do as stages are added?
-4. ([Chapter 4](04-speech-recognition.md), the loss.) For a recogniser with a blank, a softmax in every frame and a loss $-\ln P(\text{label})$ summed over all alignments, what is the gradient of the loss with respect to the logits of frame $t$, and what is the rule that turns a path of frame labels into a transcript?
-5. ([Chapter 6](06-speech-synthesis.md), conditioning.) A synthesiser is told the voice of a reference clip. Which vector does it receive, and how does the reference clip become that vector?
-6. (Volume III, [Chapter 6](../v03-neural-networks/06-gradient-checking.md), gradient checks.) What is compared with what, at which step size, and what number says that a hand-written backward pass is right?
+1. [Chapter 1](01-sound.md), aliasing: A cosine of 5200 Hz is kept at one sample in 1.5 of a signal sampled at 12,000 Hz, with no filtering first. At what frequency does it appear, and why does a Kaiser-tapered sinc remove it where linear interpolation does not?
+2. [Chapter 2](02-spectrograms.md), frames and gain: A signal of 5280 samples is padded by $N/2$ on each side by reflection, with $N = 256$ and a hop of 160. How many frames are there? If the signal is made three times louder, what happens to a log-mel value computed as $\ln(E + 10^{-6})$, and what does subtracting the largest value of the clip do about it?
+3. [Chapter 3](03-audio-codecs.md), the residual: A quantizer has two stages. What does the second stage quantize, what is the reconstruction, and what does the squared error of the reconstruction do as stages are added?
+4. [Chapter 4](04-speech-recognition.md), the loss: For a recogniser with a blank, a softmax in every frame and a loss $-\ln P(\text{label})$ summed over all alignments, what is the gradient of the loss with respect to the logits of frame $t$, and what is the rule that turns a path of frame labels into a transcript?
+5. [Chapter 6](06-speech-synthesis.md), conditioning: A synthesiser is told the voice of a reference clip. Which vector does it receive, and how does the reference clip become that vector?
+6. Volume III, [Chapter 6](../v03-neural-networks/06-gradient-checking.md), gradient checks: What is compared with what, at which step size, and what number says that a hand-written backward pass is right?
 
 ## Building the speech loop in eight steps
 

@@ -57,11 +57,11 @@ from a sample estimates a number about the whole source (chapter 12). Five
 questions test whether they are at hand; each names its chapter, and the
 answers are under "Recall questions" at the end.
 
-1. (Chapter 2, "Functions and Their Shapes", families and parameters.) The line $f(x) = w x + b$ has the numbers $w = 3$ and $b = 1$ set. What is $f(2)$, and which of $w$, $b$, $x$ is changed to move from one member of the family of lines to another?
-2. (Chapter 2, "Functions and Their Shapes", polynomials.) How many points with different $x$ values determine exactly one parabola through them, and what happens to the count for a family with $k$ parameters?
-3. (Chapter 3, "Vectors: Lists of Numbers with Geometry".) The vector $\mathbf{x} = (84, 3, 12)$ has how many entries, and what is the distance between $(0, 0)$ and $(3, 4)$?
-4. (Chapter 10, "Probability: Reasoning Under Uncertainty", a dataset is a distribution.) Five examples have errors $0, 1, 1, 4, 9$. What is their mean, and what probability does each example get when the mean is read as an expectation?
-5. (Chapter 12, "Statistics: Learning Facts from Samples", estimates.) A model's average error is measured on a sample of examples. Why is that number an estimate, and what makes it more trustworthy?
+1. Chapter 2, "Functions and Their Shapes", families and parameters: The line $f(x) = w x + b$ has the numbers $w = 3$ and $b = 1$ set. What is $f(2)$, and which of $w$, $b$, $x$ is changed to move from one member of the family of lines to another?
+2. Chapter 2, "Functions and Their Shapes", polynomials: How many points with different $x$ values determine exactly one parabola through them, and what happens to the count for a family with $k$ parameters?
+3. Chapter 3, "Vectors: Lists of Numbers with Geometry": The vector $\mathbf{x} = (84, 3, 12)$ has how many entries, and what is the distance between $(0, 0)$ and $(3, 4)$?
+4. Chapter 10, "Probability: Reasoning Under Uncertainty", a dataset is a distribution: Five examples have errors $0, 1, 1, 4, 9$. What is their mean, and what probability does each example get when the mean is read as an expectation?
+5. Chapter 12, "Statistics: Learning Facts from Samples", estimates: A model's average error is measured on a sample of examples. Why is that number an estimate, and what makes it more trustworthy?
 
 ## Examples, features and labels
 

@@ -11,12 +11,12 @@ To generate images is to put the weight where the images are. Made precise, that
 
 The arithmetic of that small world draws on six earlier ideas at once.
 
-1. (Volume I, [Chapter 10](../v01-mathematics/10-probability.md), probability tables and Bayes' rule.) A part comes from machine A with probability $0.6$ and from machine B with probability $0.4$; A's parts are defective with probability $0.01$ and B's with $0.05$. Given a defective part, what is the probability that it came from B?
-2. (Volume I, [Chapter 17](../v01-mathematics/17-randomness.md), sampling.) A distribution on four outcomes has probabilities $0.4, 0.3, 0.2, 0.1$. Which outcome does the uniform number $u = 0.75$ select, and why does the long-run frequency of each outcome equal its probability?
-3. (Volume II, [Chapter 4](../v02-learning/04-likelihood.md), maximum likelihood.) Seven heads and three tails: what bias maximizes the likelihood of the sequence, and what is its log-likelihood?
-4. (Volume II, [Chapter 4](../v02-learning/04-likelihood.md), priors as imaginary counts.) With one imaginary head and one imaginary tail added to the data, what estimate of the bias do three heads in three flips give?
-5. (Volume I, [Chapter 13](../v01-mathematics/13-information-theory.md), entropy and cross-entropy.) What is the entropy in bits of a uniform distribution on 16 outcomes? If data come from a distribution $p$ and a code is designed for a different distribution $q$, is the average code length larger or smaller than the entropy of $p$?
-6. (Volume V, [Chapter 4](../v05-sequences/04-language-modeling.md), the autoregressive factorization.) How does a language model assign a probability to a whole sentence, and how does it produce one?
+1. Volume I, [Chapter 10](../v01-mathematics/10-probability.md), probability tables and Bayes' rule: A part comes from machine A with probability $0.6$ and from machine B with probability $0.4$; A's parts are defective with probability $0.01$ and B's with $0.05$. Given a defective part, what is the probability that it came from B?
+2. Volume I, [Chapter 17](../v01-mathematics/17-randomness.md), sampling: A distribution on four outcomes has probabilities $0.4, 0.3, 0.2, 0.1$. Which outcome does the uniform number $u = 0.75$ select, and why does the long-run frequency of each outcome equal its probability?
+3. Volume II, [Chapter 4](../v02-learning/04-likelihood.md), maximum likelihood: Seven heads and three tails: what bias maximizes the likelihood of the sequence, and what is its log-likelihood?
+4. Volume II, [Chapter 4](../v02-learning/04-likelihood.md), priors as imaginary counts: With one imaginary head and one imaginary tail added to the data, what estimate of the bias do three heads in three flips give?
+5. Volume I, [Chapter 13](../v01-mathematics/13-information-theory.md), entropy and cross-entropy: What is the entropy in bits of a uniform distribution on 16 outcomes? If data come from a distribution $p$ and a code is designed for a different distribution $q$, is the average code length larger or smaller than the entropy of $p$?
+6. Volume V, [Chapter 4](../v05-sequences/04-language-modeling.md), the autoregressive factorization: How does a language model assign a probability to a whole sentence, and how does it produce one?
 
 ## Sixteen pictures and a probability for each
 

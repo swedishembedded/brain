@@ -11,12 +11,12 @@ The remedy is to build the structure of the input into the layer. Look at a smal
 
 Convolution needs six earlier ideas at the outset.
 
-1. ([Chapter 1](01-images.md), pixel.) What are the shape and strides of a $4 \times 4$ RGB image stored planar (channels first), and at what offset does the green sample of the pixel at row 1, column 2 sit?
-2. (Volume I, [Chapter 3](../v01-mathematics/03-vectors.md), dot product.) What is the dot product of $(1, 2, 3)$ and $(4, 5, 6)$, and what does a large dot product between two vectors of equal length say about them?
-3. (Volume I, [Chapter 14](../v01-mathematics/14-fourier.md), convolution theorem.) What does the convolution theorem say about the transform of a circular convolution, and how does the cost of the direct sum of a signal of length $N$ with a kernel of length $M$ compare with the route through the transform?
-4. (Volume III, [Chapter 5](../v03-neural-networks/05-layer-gradients.md), matmul backward.) For $\mathbf{C} = \mathbf{A}\mathbf{B}$, what are $d\mathbf{A}$ and $d\mathbf{B}$ in terms of $d\mathbf{C}$?
-5. (Volume III, [Chapter 6](../v03-neural-networks/06-gradient-checking.md), gradient check.) How is a gradient checked with central differences, and what gate decides that an analytic value and a numeric one agree?
-6. (Volume IV, [Chapter 3](../v04-computation/03-roofline.md), arithmetic intensity.) What is the arithmetic intensity of a computation, and what does a machine's roofline say about one whose intensity is below the machine's ridge point?
+1. [Chapter 1](01-images.md), pixel: What are the shape and strides of a $4 \times 4$ RGB image stored planar (channels first), and at what offset does the green sample of the pixel at row 1, column 2 sit?
+2. Volume I, [Chapter 3](../v01-mathematics/03-vectors.md), dot product: What is the dot product of $(1, 2, 3)$ and $(4, 5, 6)$, and what does a large dot product between two vectors of equal length say about them?
+3. Volume I, [Chapter 14](../v01-mathematics/14-fourier.md), convolution theorem: What does the convolution theorem say about the transform of a circular convolution, and how does the cost of the direct sum of a signal of length $N$ with a kernel of length $M$ compare with the route through the transform?
+4. Volume III, [Chapter 5](../v03-neural-networks/05-layer-gradients.md), matmul backward: For $\mathbf{C} = \mathbf{A}\mathbf{B}$, what are $d\mathbf{A}$ and $d\mathbf{B}$ in terms of $d\mathbf{C}$?
+5. Volume III, [Chapter 6](../v03-neural-networks/06-gradient-checking.md), gradient check: How is a gradient checked with central differences, and what gate decides that an analytic value and a numeric one agree?
+6. Volume IV, [Chapter 3](../v04-computation/03-roofline.md), arithmetic intensity: What is the arithmetic intensity of a computation, and what does a machine's roofline say about one whose intensity is below the machine's ridge point?
 
 ## Nine products at every position
 

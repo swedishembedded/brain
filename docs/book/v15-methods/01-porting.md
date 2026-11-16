@@ -31,10 +31,10 @@ In the chained columns, from layer 1 on, every state of the mistaken port is bet
 
 Four ideas from earlier chapters carry the argument, and each is worth bringing back before reading on.
 
-1. (Volume VI, Chapter 2, "Importing Pretrained Models and Proving Parity".) What does a reference golden hold besides the final output, and why is it computed from the published 16-bit weights and not from the weights before the publisher rounded them?
-2. (The same chapter.) How is the parity tolerance $\tau_{\mathrm{par}}$ of a forward pass derived, and what can be concluded about a mistake whose effect lies below it?
-3. (The same chapter.) Which mistakes of a weight-name mapping load and run without an error on a model whose matrices are all rectangular, and why do the shapes not catch them?
-4. (Volume III, Chapter 6, "Proving Gradients Correct".) What does a gradient check compare a backward pass with, and why can it not say whether the forward pass computes the right function?
+1. Volume VI, Chapter 2, "Importing Pretrained Models and Proving Parity": What does a reference golden hold besides the final output, and why is it computed from the published 16-bit weights and not from the weights before the publisher rounded them?
+2. The same chapter: How is the parity tolerance $\tau_{\mathrm{par}}$ of a forward pass derived, and what can be concluded about a mistake whose effect lies below it?
+3. The same chapter: Which mistakes of a weight-name mapping load and run without an error on a model whose matrices are all rectangular, and why do the shapes not catch them?
+4. Volume III, Chapter 6, "Proving Gradients Correct": What does a gradient check compare a backward pass with, and why can it not say whether the forward pass computes the right function?
 
 ## Feeding every stage the reference's own input
 

@@ -24,12 +24,12 @@ The default SDXL request runs the U-Net $60$ times, the default Wan request $100
 
 Both questions lean on six earlier ideas; bring each back before the first solver needs it (the answers are under "Recall questions" at the end).
 
-1. ([Chapter 6](06-flow-matching.md), the velocity field.) With the exact field, one Euler step from noise fraction $\sigma$ to $0$ lands on a quantity the network could be asked for directly. What is it?
-2. (Volume I, [Chapter 9](../v01-mathematics/09-integrals-and-odes.md), Heun's method.) How many evaluations of the slope does a step of Heun's method need, and how does its global error behave when the step is halved, against Euler's?
-3. (Volume I, [Chapter 10](../v01-mathematics/10-probability.md), conditional probability.) Two classes are equally likely. A point $x$ has density $0.9$ under class $1$ and $0.3$ under class $0$. What is $P(\text{class } 1 \mid x)$?
-4. ([Chapter 5](05-diffusion.md), the reverse step.) The sampler of Chapter 5 added a fresh normal draw at every step except the last. What set the variance of that draw?
-5. (Volume I, [Chapter 11](../v01-mathematics/11-distributions.md), the Gaussian distribution.) If $X \sim \mathcal{N}(0, \alpha^2)$ and $Z \sim \mathcal{N}(0, \beta^2)$ are independent, what is the variance of $X + Z$?
-6. ([Chapter 6](06-flow-matching.md), the timestep shift.) Where does $\sigma = 0.5$ go under a shift with $k = 3$?
+1. [Chapter 6](06-flow-matching.md), the velocity field: With the exact field, one Euler step from noise fraction $\sigma$ to $0$ lands on a quantity the network could be asked for directly. What is it?
+2. Volume I, [Chapter 9](../v01-mathematics/09-integrals-and-odes.md), Heun's method: How many evaluations of the slope does a step of Heun's method need, and how does its global error behave when the step is halved, against Euler's?
+3. Volume I, [Chapter 10](../v01-mathematics/10-probability.md), conditional probability: Two classes are equally likely. A point $x$ has density $0.9$ under class $1$ and $0.3$ under class $0$. What is $P(\text{class } 1 \mid x)$?
+4. [Chapter 5](05-diffusion.md), the reverse step: The sampler of Chapter 5 added a fresh normal draw at every step except the last. What set the variance of that draw?
+5. Volume I, [Chapter 11](../v01-mathematics/11-distributions.md), the Gaussian distribution: If $X \sim \mathcal{N}(0, \alpha^2)$ and $Z \sim \mathcal{N}(0, \beta^2)$ are independent, what is the variance of $X + Z$?
+6. [Chapter 6](06-flow-matching.md), the timestep shift: Where does $\sigma = 0.5$ go under a shift with $k = 3$?
 
 Everything below is written for one real number, with the data of the last two chapters (three clusters at $-3$, $0$ and $3$, standard deviation $0.25$, equal weights), so that each sampler can be scored against the exact transport map $T$ of Chapter 6, and the same $1000$ starting values are used throughout. A second, smaller problem with two overlapping classes is introduced where the prompt enters.
 

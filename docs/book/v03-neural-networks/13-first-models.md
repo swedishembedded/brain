@@ -17,12 +17,12 @@ Both builds use only what earlier chapters taught: layers with GELU (chapter 2),
 
 Six ideas from the earlier chapters are used at once; six questions bring them back before the first build.
 
-1. ("Multilayer Networks", chapter 2 of this volume.) Two linear layers follow each other with no activation between them, $16 \to 3 \to 16$. What single map do they compute, and what is the largest rank it can have?
-2. ("Optimizers: From SGD to AdamW", chapter 7.) What is the size of the first AdamW step of a weight whose first gradient is $g = 0.002$, with rate $\eta = 0.01$ and no weight decay?
-3. ("Proving Gradients Correct", chapter 6.) Write the central difference estimate of $\partial L/\partial\theta_i$ and the gate that compares it with the backward pass's value.
-4. ("Linear Regression and the First Descent", Volume II, chapter 2.) Predictions $0.5, 1.0, 2.0$ are scored against targets $1, 1, 1$ by the mean squared error. What is the loss, and what is its gradient with respect to the third prediction?
-5. ("Generalization, Overfitting and Honest Evaluation", Volume II, chapter 5.) A run keeps the parameters of the epoch with the lowest validation loss. Why is the validation loss of that epoch not an honest estimate of the model's error on new data, and what is?
-6. ("Eigenvalues, Rotations and Low-Rank Structure", Volume I, chapter 6, and "Classical Methods", Volume II, chapter 7.) The covariance of a cloud of rows has eigenvalues $9$, $1$ and $0.1$. If each row is replaced by its projection onto the first principal direction, what is the mean squared distance between rows and projections?
+1. "Multilayer Networks", chapter 2 of this volume: Two linear layers follow each other with no activation between them, $16 \to 3 \to 16$. What single map do they compute, and what is the largest rank it can have?
+2. "Optimizers: From SGD to AdamW", chapter 7: What is the size of the first AdamW step of a weight whose first gradient is $g = 0.002$, with rate $\eta = 0.01$ and no weight decay?
+3. "Proving Gradients Correct", chapter 6: Write the central difference estimate of $\partial L/\partial\theta_i$ and the gate that compares it with the backward pass's value.
+4. "Linear Regression and the First Descent", Volume II, chapter 2: Predictions $0.5, 1.0, 2.0$ are scored against targets $1, 1, 1$ by the mean squared error. What is the loss, and what is its gradient with respect to the third prediction?
+5. "Generalization, Overfitting and Honest Evaluation", Volume II, chapter 5: A run keeps the parameters of the epoch with the lowest validation loss. Why is the validation loss of that epoch not an honest estimate of the model's error on new data, and what is?
+6. "Eigenvalues, Rotations and Low-Rank Structure", Volume I, chapter 6, and "Classical Methods", Volume II, chapter 7: The covariance of a cloud of rows has eigenvalues $9$, $1$ and $0.1$. If each row is replaced by its projection onto the first principal direction, what is the mean squared distance between rows and projections?
 
 ## Sixteen sensors, three causes
 

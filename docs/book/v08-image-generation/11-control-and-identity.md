@@ -13,11 +13,11 @@ Four questions follow from that condition. What must a branch be, so that its fi
 
 Control signals build on five earlier ideas, recalled before the first one is added.
 
-1. (Volume III, [Chapter 4](../v03-neural-networks/04-backpropagation.md), backpropagation.) A layer $\mathbf{y} = \mathbf{W}\mathbf{x} + \mathbf{b}$ has $\mathbf{W} = \mathbf{0}$ and $\mathbf{b} = \mathbf{0}$, input $\mathbf{x} = (1, 2)$ and an upstream gradient $\mathrm{d}\mathbf{y} = (-0.5, 1)$. What are the gradients of the weights, of the bias and of the input?
-2. ([Chapter 8](08-denoiser-architectures.md), the U-Net.) How many entries does the SDXL U-Net's skip stack hold, what are their widths, and how many extra inputs does Chapter 8 say a control signal needs?
-3. (Volume V, [Chapter 6](../v05-sequences/06-seq2seq.md), cross-attention, with the scores of [Chapter 7](../v05-sequences/07-self-attention.md).) Image tokens of a $32 \times 32$ level (1,024 of them, width 1,280) read 77 text rows of width 2,048. What are the shapes of the key and value projection weights and of the matrix of attention weights, and what does each of its rows sum to?
-4. (Volume VII, [Chapter 11](../v07-vision/11-faces.md), identity embeddings.) Two photographs are compared by the cosine of their 512-number embeddings. What happens to the cosine if one embedding is doubled?
-5. ([Chapter 10](10-latent-diffusion-systems.md), latent diffusion.) A 30-step generation with guidance evaluates the denoiser how many times, and what does that say about the price of anything added to the denoiser?
+1. Volume III, [Chapter 4](../v03-neural-networks/04-backpropagation.md), backpropagation: A layer $\mathbf{y} = \mathbf{W}\mathbf{x} + \mathbf{b}$ has $\mathbf{W} = \mathbf{0}$ and $\mathbf{b} = \mathbf{0}$, input $\mathbf{x} = (1, 2)$ and an upstream gradient $\mathrm{d}\mathbf{y} = (-0.5, 1)$. What are the gradients of the weights, of the bias and of the input?
+2. [Chapter 8](08-denoiser-architectures.md), the U-Net: How many entries does the SDXL U-Net's skip stack hold, what are their widths, and how many extra inputs does Chapter 8 say a control signal needs?
+3. Volume V, [Chapter 6](../v05-sequences/06-seq2seq.md), cross-attention, with the scores of [Chapter 7](../v05-sequences/07-self-attention.md): Image tokens of a $32 \times 32$ level (1,024 of them, width 1,280) read 77 text rows of width 2,048. What are the shapes of the key and value projection weights and of the matrix of attention weights, and what does each of its rows sum to?
+4. Volume VII, [Chapter 11](../v07-vision/11-faces.md), identity embeddings: Two photographs are compared by the cosine of their 512-number embeddings. What happens to the cosine if one embedding is doubled?
+5. [Chapter 10](10-latent-diffusion-systems.md), latent diffusion: A 30-step generation with guidance evaluates the denoiser how many times, and what does that say about the price of anything added to the denoiser?
 
 ## A dead layer that can still learn
 

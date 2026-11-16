@@ -41,11 +41,11 @@ A classifier of the previous chapter is asked one question about a picture. A de
 
 The answers lean on a pyramid of feature maps, the letterbox, two cross-entropies and the precision of a list, all taught earlier; bring them back first.
 
-1. ([Chapter 3](03-cnns.md), feature pyramid.) A $640 \times 640$ input gives maps at strides 8, 16 and 32. What are their sides, and how many cells do the three have in all?
-2. ([Chapter 1](01-images.md), shared preprocessing and the letterbox.) A $7 \times 4$ image is fitted to an $8 \times 8$ square with its aspect ratio kept. What are the scale and the padding?
-3. (Volume III, [Chapter 3](../v03-neural-networks/03-softmax.md), softmax and cross-entropy.) What is the gradient of the cross-entropy of a softmax with respect to its logits?
-4. (Volume II, [Chapter 3](../v02-learning/03-logistic-regression.md), binary cross-entropy.) For a logit $z$ and a target $t \in [0, 1]$, what is the gradient of the binary cross-entropy with respect to $z$?
-5. (Volume II, [Chapter 6](../v02-learning/06-metrics.md), precision and recall.) A detector returns 4 boxes, 3 of them right, for a picture with 4 objects. What are its precision and recall?
+1. [Chapter 3](03-cnns.md), feature pyramid: A $640 \times 640$ input gives maps at strides 8, 16 and 32. What are their sides, and how many cells do the three have in all?
+2. [Chapter 1](01-images.md), shared preprocessing and the letterbox: A $7 \times 4$ image is fitted to an $8 \times 8$ square with its aspect ratio kept. What are the scale and the padding?
+3. Volume III, [Chapter 3](../v03-neural-networks/03-softmax.md), softmax and cross-entropy: What is the gradient of the cross-entropy of a softmax with respect to its logits?
+4. Volume II, [Chapter 3](../v02-learning/03-logistic-regression.md), binary cross-entropy: For a logit $z$ and a target $t \in [0, 1]$, what is the gradient of the binary cross-entropy with respect to $z$?
+5. Volume II, [Chapter 6](../v02-learning/06-metrics.md), precision and recall: A detector returns 4 boxes, 3 of them right, for a picture with 4 objects. What are its precision and recall?
 
 ## Boxes, and how much two of them agree
 

@@ -50,21 +50,21 @@ products and the transpose, the inverse, rank, norms and orthogonality, the unit
 circle, and the roots of a quadratic. An answer that will not come is a reason
 to reread the chapter named before going further.
 
-1. (Chapter 4, matrix multiplication and transpose.) For $\mathbf{A} =
+1. Chapter 4, matrix multiplication and transpose: For $\mathbf{A} =
    \begin{pmatrix}1&2\\0&1\end{pmatrix}$ and $\mathbf{B} =
    \begin{pmatrix}1&0\\1&1\end{pmatrix}$ compute $\mathbf{A}\mathbf{B}$ and
    $(\mathbf{A}\mathbf{B})^\top$, and state what $(\mathbf{A}\mathbf{B})^\top$
    equals in terms of $\mathbf{A}^\top$ and $\mathbf{B}^\top$.
-2. (Chapter 4, inverse.) For $\begin{pmatrix}4&7\\2&6\end{pmatrix}$ compute
+2. Chapter 4, inverse: For $\begin{pmatrix}4&7\\2&6\end{pmatrix}$ compute
    $ad - bc$. Does the matrix have an inverse, and what does $ad - bc = 0$
    tell you about a $2 \times 2$ matrix?
-3. (Chapter 4, rank.) What is the rank of $\begin{pmatrix}1&2\\2&4\end{pmatrix}$,
+3. Chapter 4, rank: What is the rank of $\begin{pmatrix}1&2\\2&4\end{pmatrix}$,
    and what does that matrix do to the unit square?
-4. (Chapter 3, norm and orthogonality.) Compute the length of $(1, 2, 2)$ and
+4. Chapter 3, norm and orthogonality: Compute the length of $(1, 2, 2)$ and
    decide whether $(1, 2, 2)$ and $(2, 1, -2)$ are orthogonal.
-5. (Chapter 3, unit circle.) What are the cosine and sine of $90^\circ$, and
+5. Chapter 3, unit circle: What are the cosine and sine of $90^\circ$, and
    what identity relates $\cos\theta$ and $\sin\theta$ for every $\theta$?
-6. (Chapter 2, quadratics, four chapters back.) Solve $\lambda^2 - 4\lambda + 3
+6. Chapter 2, quadratics, four chapters back: Solve $\lambda^2 - 4\lambda + 3
    = 0$.
 
 ## The determinant: how a map scales area

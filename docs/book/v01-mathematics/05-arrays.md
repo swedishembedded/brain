@@ -56,15 +56,15 @@ the transpose and the batched layer of Chapter 4 are its first customers, so
 five earlier ideas are worth bringing back before the derivation; where one
 will not come, the chapter named beside it is the place to look.
 
-1. (Chapter 1, sums.) Write $\sum_{k=0}^{2} i_k s_k$ out in full and evaluate it for
+1. Chapter 1, sums: Write $\sum_{k=0}^{2} i_k s_k$ out in full and evaluate it for
    $(i_0, i_1, i_2) = (1, 2, 3)$ and $(s_0, s_1, s_2) = (12, 4, 1)$.
-2. (Chapter 2, functions.) What does it mean for a function to have an inverse,
+2. Chapter 2, functions: What does it mean for a function to have an inverse,
    and what two properties must the function have for one to exist?
-3. (Chapter 3, vectors.) A vector has the entries $(7, 8, 9)$. How many entries
+3. Chapter 3, vectors: A vector has the entries $(7, 8, 9)$. How many entries
    has it, and which is the entry with index 1 if the first entry has index 0?
-4. (Chapter 4, matrices.) What is the transpose of
+4. Chapter 4, matrices: What is the transpose of
    $\begin{pmatrix}1&2&3\\4&5&6\end{pmatrix}$, and what is its shape?
-5. (Chapter 4, layers.) A batch $\mathbf{X}$ of $B$ inputs of width $d_{\text{in}}$
+5. Chapter 4, layers: A batch $\mathbf{X}$ of $B$ inputs of width $d_{\text{in}}$
    is the matrix with the inputs as rows, and a layer has weights
    $\mathbf{W}$ of shape $[d_{\text{out}}, d_{\text{in}}]$. What are the shapes
    of $\mathbf{X}$ and of $\mathbf{X}\mathbf{W}^\top$, and which dimension is

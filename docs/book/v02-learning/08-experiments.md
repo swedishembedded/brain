@@ -11,12 +11,12 @@ None of these needs bad faith. Each is what happens by default when the person w
 
 Those habits rest on hypothesis tests, paired comparisons, seeds, the test set, the trivial baseline and the training loop. The six questions below bring each back, naming the chapter that taught it; the answers are under "Recall questions" at the end.
 
-1. (Volume I, chapter 12, "Statistics", hypothesis tests.) Two models score $70.4\%$ and $71.2\%$ on the same $500$ questions and a test returns $p = 0.55$. What does that number say, and what does it not say about whether the models differ?
-2. (Volume I, chapter 12, paired tests.) Why is the standard error of the gap between two models scored on the same questions smaller than for two models scored on different questions, and which questions carry the information in a paired comparison?
-3. (Volume I, chapter 17, "Randomness on a Deterministic Machine", seeds and reproducibility.) Name the three things that must be the same for a run to be repeated exactly, and say what "one stream per purpose" buys you.
-4. (Chapter 5 of this volume, "Generalization", the test set.) A team tries a hundred variants, looks at the test score of each and reports the best. Why is that score too high, and what would an honest report need?
-5. (Chapter 6 of this volume, "Measuring Models", accuracy.) A screening model reaches $97\%$ accuracy on a task where $3\%$ of cases are positive. What simple predictor reaches the same accuracy?
-6. (Chapters 2 and 3 of this volume, gradient descent and logistic regression.) One example $\mathbf{x} = (1, 2)$ with label $y = 1$, weights $\mathbf{w} = (0.2, -0.1)$, bias $b = 0$, learning rate $0.1$. Compute one step of the update in the `sgd_logistic` function defined below.
+1. Volume I, chapter 12, "Statistics", hypothesis tests: Two models score $70.4\%$ and $71.2\%$ on the same $500$ questions and a test returns $p = 0.55$. What does that number say, and what does it not say about whether the models differ?
+2. Volume I, chapter 12, paired tests: Why is the standard error of the gap between two models scored on the same questions smaller than for two models scored on different questions, and which questions carry the information in a paired comparison?
+3. Volume I, chapter 17, "Randomness on a Deterministic Machine", seeds and reproducibility: Name the three things that must be the same for a run to be repeated exactly, and say what "one stream per purpose" buys you.
+4. Chapter 5 of this volume, "Generalization", the test set: A team tries a hundred variants, looks at the test score of each and reports the best. Why is that score too high, and what would an honest report need?
+5. Chapter 6 of this volume, "Measuring Models", accuracy: A screening model reaches $97\%$ accuracy on a task where $3\%$ of cases are positive. What simple predictor reaches the same accuracy?
+6. Chapters 2 and 3 of this volume, gradient descent and logistic regression: One example $\mathbf{x} = (1, 2)$ with label $y = 1$, weights $\mathbf{w} = (0.2, -0.1)$, bias $b = 0$, learning rate $0.1$. Compute one step of the update in the `sgd_logistic` function defined below.
 
 ## One small world, with the truth written down
 
