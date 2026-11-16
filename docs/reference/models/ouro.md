@@ -18,7 +18,7 @@ brain ouro import --source <hf checkpoint dir> --dest ouro.safetensors
 # one --weights names; --ctx and --block size the engine.
 brain ouro generate --prompt "The capital of France is" --max-new 32 --temp 0
 
-# Train it in place: one AdamW step per batch over the released objective.
+# Train it in place: AdamW at a constant rate over windows of the text, the released objective.
 brain ouro train --steps 32 --seq 128 --batch 2 --lr 2e-5 --save trained.safetensors
 ```
 
@@ -30,8 +30,10 @@ is refused by name before the first step.
 
 The objective is the released one: every pass's cross-entropy weighted by
 that pass's exit probability, summed over passes, averaged over supervised
-rows, through the analytic backward. `brain ouro train` runs it and reports
-the loss every step; the gradient itself is gated by finite differences over
+rows, through the analytic backward, run by brain's one training loop (the
+same loop, exact resume and evaluation every architecture's trainer runs on).
+`brain ouro train` draws windows of its text from a seed (`--seed`, random and
+reported when omitted) and reports the loss every step; the gradient itself is gated by finite differences over
 every parameter on cpu, wgpu and cuda. Measured: the tiny fixture checkpoint
 falls from 3.37 to 1.99 nats in 40 steps; the released 2.6 B checkpoint falls
 from 1.76 to 0.20 in 6 steps on a single 64-token batch (it overfits by
@@ -48,8 +50,57 @@ update are the same arithmetic on any backend.
 
 `brain serve` picks up an imported `ouro` checkpoint from the model store and
 exposes the same `generate` action as the other text models over HTTP, D-Bus
-and the SDK. The checkpoint directory must carry its `tokenizer.json`; the
-ChatML template declared by the checkpoint is used for chat requests.
+and the SDK. The checkpoint directory must carry its `tokenizer.json`; a chat
+request is rendered by the chat template the checkpoint ships
+(`tokenizer_config.json`, `chat_template.jinja` or `chat_template.json`),
+whatever markup it writes, and generation stops at the checkpoint's declared
+end-of-turn token. A checkpoint installed by the training service as
+`local/<name>` is served under that name. The advertised context is the pool's
+capacity (`--ctx`), at most the model's positions.
+
+## Chat fine-tuning and training from scratch
+
+Ouro trains through the generic full-parameter trainer (`brain::ChatFullFineTune`,
+the training service's `full_train`): every weight trains on
+`generic-messages-v2` records, each supervised turn masked by the template's own
+rendering, f32 weights and moments. There is no LoRA trainer for the looped
+stack; an adapter run is refused by name.
+
+It also declares a from-scratch initialization, so the whole sequence runs on it
+(and on every architecture `brain::from_scratch_architectures` lists, qwen3
+included):
+
+1. `brain::ModelInit` (served: `init_model`) learns a byte-level BPE vocabulary
+   on a text corpus with the special tokens you declare, checks your chat
+   template and writes a seeded random checkpoint of your configuration;
+2. `brain::Pretrain` (served: `pretrain`) trains every weight on raw text with
+   held-out evaluation;
+3. `brain::ChatFullFineTune` (served: `full_train`) teaches it the chat format
+   and tool calls.
+
+Each served step can be resumed from its exact state with a `resume_key`; see
+[Training as a served job](../../guides/training/served-training.md).
+`samples/models/ouro` runs steps 1 and 2 on a CPU in seconds.
+
+### The chat template a from-scratch model meets
+
+`init_model` refuses a template that does not hold to what training and serving
+rely on:
+
+- it compiles, and a conversation renders with its last assistant turn a
+  suffix of the prompt the model is asked from (the boundary training masks
+  by, and the prompt serving renders);
+- the text it writes after an assistant turn contains the `eos_token`, so the
+  model learns to stop and serving stops it;
+- when it has a place for tools (`tools` in its source), it writes an assistant
+  tool call in a form the serving parser reads back:
+  `<tool_call>{"name": "<function>", "arguments": {...}}</tool_call>` (the
+  arguments a JSON object; read them with `arguments | tojson`), or the
+  `<function=...>` form when the template writes it. A served reply then
+  carries OpenAI `tool_calls`.
+
+A training record and a served request with the same messages and tools render
+to the same tokens.
 
 ## Cost
 

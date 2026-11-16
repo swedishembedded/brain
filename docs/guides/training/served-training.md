@@ -25,12 +25,13 @@ The job is the model `brain/train` with one action, `train`. It trains
 Two more actions of `brain/train` produce a checkpoint instead of an adapter.
 
 - **`full_train`** trains every weight of the base (fp32, the AdamW moments and master weights in host memory, the
-  card holding the weights, their gradients and one step's activations; a Qwen3 or Qwen3.5 base). `data` takes
+  card holding the weights, their gradients and one step's activations; any architecture with a full-parameter
+  trainer: Qwen3, Qwen3.5, Qwen3.5 MoE, Ripple, Ouro). `data` takes
   `train`, `replay` and `weighted_replay` only; held-out sets, a monitor and a starting adapter are refused by name.
   Params: `base`, `data`, `steps`, `lr`, `weight_decay`, `grad_accum`, `strict_updates`, `seed`, `max_block`,
   `thinking`, `arch`, `replay_share`, `train_precision` (`key=value,...`, e.g. `state=int8,sr=on`: what each
   trainable parameter, its gradient and its optimiser state are stored as; fp32 everywhere by default, and an unknown
-  key or value is refused before anything loads), `install_as`.
+  key or value is refused before anything loads), `install_as`, `resume_key`, `checkpoint_every` (below).
 - **`merge`** folds a LoRA adapter into the weights it targets (`W + alpha/r B A`). The adapter is the input blob
   `adapter` or `adapter_digest` (exactly one); the work is host-side and takes no card.
 
@@ -41,6 +42,65 @@ published to the artifact store by digest, and the manifest, `{"format": "brain-
 digits, `.`, `_`, `-`; a name that exists is refused), where a later job names it as its `base`. A server with no
 artifact store can only install. The files of an installed checkpoint are as large as the model: the operator owns
 the model store's disk.
+
+## A model from nothing
+
+Two more checkpoint actions create a model and pretrain it, for any architecture that declares a from-scratch
+initialization (`ouro`, `qwen3`; the SDK's `brain::from_scratch_architectures` lists them). The sequence is
+`init_model`, then `pretrain`, then `full_train` on chat records, each installing its checkpoint for the next.
+
+**`init_model`** learns a byte-level BPE vocabulary on a text corpus, checks a chat template and writes a randomly
+initialised checkpoint. It is host work and takes no card.
+
+| param | meaning |
+|---|---|
+| `arch` | the architecture, a registry id that declares the capability (required) |
+| `config` | the model's configuration, a JSON object in the architecture's `config.json` spelling, at most 64 KiB (required); `vocab_size` may be left out, and given must equal the tokenizer's |
+| `tokenizer` | `{"vocab_size": N, "special_tokens": [...], "eos_token": T, "bos_token"?: T, "pad_token"?: T}` (required): the vocabulary is the 256 bytes, the merges learned on the corpus, then the special tokens in declared order; the special tokens are matched whole and never learned as pieces, and the eos/bos/pad tokens must be among them |
+| `chat_template` | the Jinja chat template; without one the model is a base model. It is refused unless it holds to the contract in [Ouro](../../reference/models/ouro.md#the-chat-template-a-from-scratch-model-meets) |
+| `corpus_digest` or the blob `corpus` | the corpus, JSONL with one `{"text": ...}` document per line (exactly one of the two) |
+| `tokenizer_bytes` | the vocabulary is learned from at most this many bytes of the first documents (default 64 MiB) |
+| `seed` | the initialization's seed (random when omitted; reported). The same request writes the same files |
+| `install_as`, `resume_key` | as for `full_train` |
+
+The checkpoint holds the weights (`model.brain.safetensors` for a brain-format family, a `transformers` directory
+for qwen3), `tokenizer.json`, `tokenizer_config.json` (the template and the special tokens) and
+`generation_config.json` (the eos id). The report adds `arch`, `seed`, `vocab_size`, `merges`, `params`, `config`,
+`tokenizer_digest` and `tool_calls` (the template serves tool calls).
+
+**`pretrain`** trains every weight of a base on raw text: each document of the corpus is encoded with the base's own
+tokenizer (special tokens matched whole, so conversations serialized in the model's template train its own tokens)
+and followed by the separator token; the documents form one stream, the run draws windows of `block + 1` tokens from
+it with every position supervised, and a held-out corpus is scored every `eval_every` steps. `data` is `{"train":
+SRC, "held_out"?: SRC}` (the blobs are `dataset` and `held_out`); params `steps`, `batch` (rows per micro-batch,
+default 8), `block` (tokens per row, default 256, at most the model's positions), `grad_accum`, `lr` (default
+1e-3), `min_lr` (default a tenth of `lr`), `warmup` (default a twentieth of the run), `weight_decay` (default 0.1),
+`grad_clip` (default 1), `eval_every` (needs `held_out`), `eval_batches` (default 8), `separator` (default
+`<|endoftext|>`), `strict_updates`, `seed`, `arch`, `install_as`, `resume_key`, `checkpoint_every`. The step frame of
+an evaluating step carries `eval_loss`; the report adds `evaluations` (`[{step, train_loss, eval_loss}]`),
+`documents`, `tokens`, `held_out_documents`, `held_out_tokens`, `separator` and `separator_id`.
+
+## Resuming a job
+
+`init_model`, `pretrain` and `full_train` take a `resume_key` (1 to 128 letters, digits, `.`, `_`, `-`, not starting
+with a dot; needs an artifact store). The key names one run:
+
+- The run's **identity** is the blake3 digest of the action, every param (defaults filled) but `resume_key` and
+  `checkpoint_every`, and the digests of the attached blobs. A key whose run has another identity is refused.
+- The run keeps a record and its exact training state in the artifact store's directory, under
+  `.runs/<blake3 of the key>/`: the record (status, seed, result) written atomically, the training state (weights,
+  AdamW moments, schedule position, data order and generator) saved every `checkpoint_every` steps (default 25) and
+  when the job is cancelled, itself written atomically. An omitted `seed` is drawn once and kept.
+- **Submitting the same request again** after the job, or the server, died or was cancelled continues it from the
+  last saved state, and it ends at the weights a run that was never stopped writes; the report's `resume` is
+  `{"key", "state": "continued", "resumed_at": <step>}` (`"fresh"` for a first run, `"restarted"` for one that died
+  before saving any state). Its step frames continue the step count.
+- Submitting the request of a **completed** run answers with the result it recorded (`resume.state: "completed"`)
+  without training, once every artifact it names is verified to be in the store. An `install_as` the run made
+  before dying is recognized as its own when its files are byte-identical.
+- A key whose job is still running is refused, as is a record or a training state that cannot be read or that
+  belongs to another run: nothing is silently restarted; submit under a new key. The training state is removed
+  when the run completes; the record stays.
 
 ## Timeline models
 
@@ -179,12 +239,12 @@ the base is loaded, then one per optimiser step:
 
 ```
 {"type": "step", "step": 7, "steps": 100, "loss": 1.82, "lr": 0.0003,
- "grad_norm": 0.41, "seconds": 93.2,
+ "grad_norm": 0.41, "seconds": 93.2, "eval_loss": 1.95,
  "pg": {"loss": ..., "clip_fraction": ..., "kl": ..., "ratio_mean": ..., "ratio_min": ...,
         "ratio_max": ..., "mean_advantage": ..., "scoring_seconds": ...}}
 ```
 
-`pg` is present for a policy-gradient run, with the teacher-advantage statistics
+`eval_loss` is present on a step that evaluated a held-out set. `pg` is present for a policy-gradient run, with the teacher-advantage statistics
 (`token_advantage_mean`, `token_advantage_max`, `token_advantage_clip_fraction`)
 when records carry a teacher context. `seconds` is the time since training
 began. Step frames over D-Bus are droppable like every progress frame: a
