@@ -27,14 +27,14 @@ A decoder with the vocabulary of eight tokens below and width D = 3. Its embeddi
 
 | id | token | row of E |
 |---:|---|---|
-| 0 | <bos> | (0.0, 0.1, 0.0) |
-| 1 | <image> | (0.5, 0.5, 0.5) |
+| 0 | \<bos> | (0.0, 0.1, 0.0) |
+| 1 | \<image> | (0.5, 0.5, 0.5) |
 | 2 | what | (1.0, 0.0, 0.5) |
 | 3 | is | (0.0, 1.0, 0.5) |
 | 4 | this | (0.5, 0.5, 1.0) |
 | 5 | ? | (0.2, 0.2, 0.2) |
 | 6 | cat | (1.0, 1.0, 0.0) |
-| 7 | <eos> | (0.0, 0.0, 0.1) |
+| 7 | \<eos> | (0.0, 0.0, 0.1) |
 
 The picture is 4 by 4 pixels, one channel, brightness 0 to 1.
 
@@ -62,11 +62,11 @@ The prompt `<image> what is this ?` is tokenized to ids (1, 2, 3, 4, 5), a `<bos
 
 | position | id | token | where the row comes from | row after the splice |
 |---:|---:|---|---|---:|
-| 0 | 0 | <bos> | table row 0 | (0.000, 0.100, 0.000) |
-| 1 | 1 | <image> | projector row 0 | (0.600, -1.100, -0.250) |
-| 2 | 1 | <image> | projector row 1 | (3.600, 0.900, 2.250) |
-| 3 | 1 | <image> | projector row 2 | (3.100, 1.900, 2.500) |
-| 4 | 1 | <image> | projector row 3 | (2.100, -2.100, 0.000) |
+| 0 | 0 | \<bos> | table row 0 | (0.000, 0.100, 0.000) |
+| 1 | 1 | \<image> | projector row 0 | (0.600, -1.100, -0.250) |
+| 2 | 1 | \<image> | projector row 1 | (3.600, 0.900, 2.250) |
+| 3 | 1 | \<image> | projector row 2 | (3.100, 1.900, 2.500) |
+| 4 | 1 | \<image> | projector row 3 | (2.100, -2.100, 0.000) |
 | 5 | 2 | what | table row 2 | (1.000, 0.000, 0.500) |
 | 6 | 3 | is | table row 3 | (0.000, 1.000, 0.500) |
 | 7 | 4 | this | table row 4 | (0.500, 0.500, 1.000) |
@@ -107,14 +107,14 @@ Gradient of E, row by row, if the picture rows were not zeroed and if they are:
 
 | id | token | without the zeroing | with it |
 |---:|---|---|---|
-| 0 | <bos> | (0.00, 0.00, 0.05) | (0.00, 0.00, 0.05) |
-| 1 | <image> | (1.00, -1.00, 0.20) | (0.00, 0.00, 0.00) |
+| 0 | \<bos> | (0.00, 0.00, 0.05) | (0.00, 0.00, 0.05) |
+| 1 | \<image> | (1.00, -1.00, 0.20) | (0.00, 0.00, 0.00) |
 | 2 | what | (0.50, -0.50, 0.05) | (0.50, -0.50, 0.05) |
 | 3 | is | (0.60, -0.60, 0.05) | (0.60, -0.60, 0.05) |
 | 4 | this | (0.70, -0.70, 0.05) | (0.70, -0.70, 0.05) |
 | 5 | ? | (0.80, -0.80, 0.05) | (0.80, -0.80, 0.05) |
 | 6 | cat | (0.00, 0.00, 0.00) | (0.00, 0.00, 0.00) |
-| 7 | <eos> | (0.00, 0.00, 0.00) | (0.00, 0.00, 0.00) |
+| 7 | \<eos> | (0.00, 0.00, 0.00) | (0.00, 0.00, 0.00) |
 
 The gradient that reaches the projector is the four rows (0.10, -0.10, 0.05), (0.20, -0.20, 0.05), (0.30, -0.30, 0.05), (0.40, -0.40, 0.05), and with the tower outputs f of the previous table it gives dW_p = [[1.225, -0.05], [-1.225, 0.05], [0.225, 0.0]] and db_p = [1.0, -1.0, 0.2] (the sums over the four picture rows of g f^T and of g).
 <!-- /worked -->
@@ -492,7 +492,7 @@ The spliced sequence of the first example: `<bos>`, four picture rows in a grid 
 
 | index | token | one-dimensional position | position triple |
 |---|---|---:|---:|
-| 0 | <bos> | 0 | (0, 0, 0) |
+| 0 | \<bos> | 0 | (0, 0, 0) |
 | 1 | image patch | 1 | (1, 1, 1) |
 | 2 | image patch | 2 | (1, 1, 2) |
 | 3 | image patch | 3 | (1, 2, 1) |
@@ -574,10 +574,10 @@ A box in a 640 x 480 picture: corners (x1, y1) = (100, 60) and (x2, y2) = (340, 
 
 | coordinate | pixels | 1000 x pixels / side | bin | token | decoded, lower edge | error | decoded, centre | error |
 |---|---:|---:|---:|---|---:|---:|---:|---:|
-| x1 | 100 | 1000 x 100 / 640 = 156.250 | 156 | <loc_156> | 99.84 | 0.16 | 100.16 | 0.16 |
-| y1 | 60 | 1000 x 60 / 480 = 125.000 | 125 | <loc_125> | 60.00 | 0.00 | 60.24 | 0.24 |
-| x2 | 340 | 1000 x 340 / 640 = 531.250 | 531 | <loc_531> | 339.84 | 0.16 | 340.16 | 0.16 |
-| y2 | 420 | 1000 x 420 / 480 = 875.000 | 875 | <loc_875> | 420.00 | 0.00 | 420.24 | 0.24 |
+| x1 | 100 | 1000 x 100 / 640 = 156.250 | 156 | \<loc_156> | 99.84 | 0.16 | 100.16 | 0.16 |
+| y1 | 60 | 1000 x 60 / 480 = 125.000 | 125 | \<loc_125> | 60.00 | 0.00 | 60.24 | 0.24 |
+| x2 | 340 | 1000 x 340 / 640 = 531.250 | 531 | \<loc_531> | 339.84 | 0.16 | 340.16 | 0.16 |
+| y2 | 420 | 1000 x 420 / 480 = 875.000 | 875 | \<loc_875> | 420.00 | 0.00 | 420.24 | 0.24 |
 
 The text the decoder writes is `cat<loc_156><loc_125><loc_531><loc_875>`.
 <!-- /worked -->

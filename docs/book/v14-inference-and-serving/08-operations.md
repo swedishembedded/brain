@@ -89,7 +89,7 @@ The families: `gpu` covers `gpu_core`, `backend_wgpu`, `backend_vulkan`, `vulkan
 | `--trace-ltxv 0` | unset | gpu=0, ltxv=0 | none: no subscriber | none |
 | `--trace-ltxv 9` | unset | refused: level '9' is not 0-5 |  |  |
 | `--trace-quen 5` | unset | refused: unknown family 'quen' |  |  |
-| `--trace ltxv` | unset | refused: --trace expects <family>=<level> |  |  |
+| `--trace ltxv` | unset | refused: --trace expects \<family>=\<level> |  |  |
 <!-- /worked -->
 
 Three rows and one event say most of it. The third row names `ltxv` twice and gets level 5, the later one. The fifth row asks for two families at two levels at once, and each event is judged by its own family's directive: E4, a debug event, is written for the video pipeline at level 4 while the GPU family at level 1 admits only its error E6. In the seventh row the variable asks for the GPU at level 5 and the flag for the video pipeline at level 3, and the GPU events are not written, because a flag that names any family replaces the variable whole. And E8 is written in no row: a component outside every family is invisible to this filter, whatever the levels, which is the property the test `a_family_is_isolated_from_the_others` states the other way round (asking for one family must not turn on another). The family is the unit of vocabulary, and something that should be traceable has to belong to one.
