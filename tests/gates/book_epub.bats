@@ -217,3 +217,11 @@ PY
   references volume 'See Volume II, Chapter 1 and Chapter 2.'
   [[ "$output" == *'See Volume II, Chapter 1 and [Chapter 2]'* ]]
 }
+
+@test "a formula with no place to break is set smaller to fit, never below 60 percent" {
+  cd "$WORK"
+  printf '%s\n' '$$\boxed{\;X[k] = E[k] + \omega^{k}O[k], \qquad X[k + N/2] = E[k] - \omega^{k}O[k], \qquad k = 0, \dots, N/2 - 1\;}$$' '' '$$a = b$$' >f.md
+  run pandoc f.md -t html5 --mathml --lua-filter "$REPO/docs/pandoc/book-math-lines.lua"
+  [ "$(grep -c 'class="math-scaled"' <<<"$output")" -eq 1 ]
+  [[ "$output" == *'font-size: 60%'* ]]
+}

@@ -28,6 +28,9 @@
 -- The rows are substrings of the source, so nothing in the formula changes
 -- but where its lines end.
 --
+-- A formula with no place left to break that is still too wide is set
+-- smaller, down to MIN_SCALE of the text size, so it fits the column.
+--
 -- An equation number, \tag{N}, is set as "(N)" at the end of the formula's
 -- last row: the MathML converter drops \tag, and the text cites equations
 -- by their numbers.
@@ -39,7 +42,7 @@
 
 -- The widest a row may be estimated to be, in ems of the text font. A
 -- phone's column holds about 20 ems, a tablet's in two-column landscape
--- about 24, and the estimate is within 11% of what a browser sets for 98%
+-- about 24, and the estimate is within 13% of what a browser sets for 98%
 -- of the book's formulas (23% at worst), measured in Chromium in November
 -- 2026.
 local LIMIT_EM = 18
@@ -109,6 +112,10 @@ local LARGE = { sum = 1.3, prod = 1.3, int = 0.9, oint = 0.9, bigcup = 1.2, bigc
 local SPACED = { mid = true, to = true, mapsto = true, cdot = true, times = true, pm = true,
   mp = true, circ = true, odot = true, otimes = true, oplus = true, cup = true, cap = true,
   setminus = true, ast = true, star = true, dots = true, cdots = true, ldots = true }
+-- Operators whose limits a display formula stacks under them, as words
+-- (their own width), and braces that carry a label under or over them.
+local STACKED = { max = 1.5, min = 1.4, lim = 1.2, sup = 1.3, inf = 1.2, argmax = 2.6, argmin = 2.5 }
+local BRACE = { underbrace = true, overbrace = true }
 local REL = {}
 for w in ([[le leq ge geq ne neq approx equiv sim simeq cong propto Rightarrow Leftarrow
   Leftrightarrow iff implies impliedby ll gg prec succ preceq succeq in notin subset subseteq
@@ -205,11 +212,64 @@ width_from = function(toks, i, j)
         local a
         a, i = item(toks, i, j)
         w = w + 0.1 + math.min(a, 0.5)
-      elseif LARGE[name] then
-        w = w + LARGE[name]
+      elseif LARGE[name] or STACKED[name] or BRACE[name] then
+        -- In a display formula the limits of a large operator (and of max,
+        -- min, lim, ...) and the label of an under- or overbrace sit above
+        -- or below it: the width is the wider of the two, not their sum.
+        local base
+        if BRACE[name] then
+          base, i = item(toks, i, j)
+        else
+          base = LARGE[name] or STACKED[name]
+        end
+        local scripts = 0
+        while true do
+          local k = i
+          while k <= j and toks[k].kind == "space" do k = k + 1 end
+          if k > j or toks[k].kind ~= "script" then break end
+          local a
+          a, i = item(toks, k + 1, j)
+          scripts = math.max(scripts, 0.7 * a)
+        end
+        w = w + math.max(base, scripts)
       elseif REL[name] or SPACED[name] then
         w = w + 1.3
-      elseif name == "begin" or name == "end" then
+      elseif name == "begin" then
+        -- An environment is as wide as its widest row, a row as wide as its
+        -- cells together with the space between columns; its delimiters
+        -- (a matrix's brackets, the brace of cases) add about an em.
+        local _
+        _, i = item(toks, i, j)
+        local depth, k = 1, i
+        local rows, cells, cell_start, widest = 0, 0, i, 0
+        local row_width = 0
+        local function close_cell(e)
+          row_width = row_width + width_from(toks, cell_start, e)
+        end
+        while k <= j and depth > 0 do
+          local t2 = toks[k]
+          if t2.kind == "cmd" and t2.text == "begin" then
+            depth = depth + 1
+          elseif t2.kind == "cmd" and t2.text == "end" then
+            depth = depth - 1
+            if depth == 0 then break end
+          elseif depth == 1 and t2.kind == "char" and t2.text == "&" then
+            close_cell(k - 1)
+            row_width = row_width + 1
+            cell_start = k + 1
+          elseif depth == 1 and t2.kind == "cmd" and t2.text == "\\" then
+            close_cell(k - 1)
+            widest = math.max(widest, row_width)
+            row_width, cell_start = 0, k + 1
+          end
+          k = k + 1
+        end
+        close_cell(k - 1)
+        widest = math.max(widest, row_width)
+        w = w + widest + 1
+        -- Past the \end and its name.
+        _, i = item(toks, k + 1, j)
+      elseif name == "end" then
         local _
         _, i = item(toks, i, j)
       elseif name:match("^[A-Za-z]+$") then
@@ -403,23 +463,32 @@ local function break_chain(tex, toks, nest, a, b)
   local breakable, sizeds, plains = nest[1], nest[2], nest[3]
   local ls = lines(toks, nest, a, b, 1)
   if #ls < 2 then return src(tex, toks, a, b), false end
-  -- Rows that start with a relation align on it; the first row aligns on
-  -- its own first relation, or ends at the alignment point when its
-  -- relation starts the second row. A row that continues an expression is
-  -- indented under the right-hand side.
+  -- Rows that start with a relation align on it, and the first row aligns
+  -- on its own first relation. A row that continues an expression is
+  -- indented under the right-hand side. When a long left side fills the
+  -- first row alone, aligning the relations after it would make every row
+  -- as wide as that side plus its own, so all rows start at the left margin
+  -- instead and the relations are indented under the left side.
   local relation_rows = false
   for n = 2, #ls do
     if is_relation(first_token(toks, ls[n][1], ls[n][2])) then relation_rows = true end
   end
   local out = {}
+  local left = false
   for n, l in ipairs(ls) do
-    if n == 1 then
+    if left then
+      local lead = is_relation(first_token(toks, l[1], l[2])) and "&\\quad " or continuation(toks, nest, l[1], b):gsub("^&\\quad", "&\\qquad")
+      out[n] = lead .. src(tex, toks, l[1], l[2])
+    elseif n == 1 then
       local cut
       for i = l[1] + 1, l[2] do
         if breakable[i] and sizeds[i] == 0 and plains[i] == 0 and is_relation(toks[i]) then cut = i break end
       end
       if cut then
         out[1] = src(tex, toks, l[1], cut - 1) .. " &" .. src(tex, toks, cut, l[2])
+      elseif relation_rows and width_from(toks, l[1], l[2]) > LIMIT_EM / 3 then
+        out[1] = "&" .. src(tex, toks, l[1], l[2])
+        left = true
       elseif relation_rows then
         out[1] = src(tex, toks, l[1], l[2]) .. " &"
       else
@@ -570,12 +639,64 @@ break_rows = function(tex, reserve)
   return "\\begin{gathered}" .. table.concat(rows, " \\\\ ") .. "\\end{gathered}"
 end
 
+-- Smallest a formula is set, as a fraction of the text size.
+local MIN_SCALE = 0.6
+-- The width a formula that cannot be broken further is scaled to: below
+-- LIMIT_EM by the estimate's error (it is within 13% of what a browser sets
+-- for 98% of the formulas), so the scaled formula also fits a phone.
+local SCALE_TARGET_EM = 15.9
+
+-- The estimated width of `tex` as set: for an aligned or gathered block,
+-- the widest left column plus the widest right column of its rows (the
+-- columns of an aligned block add up), each row's width found the same way
+-- when it is itself such a block; for anything else, its width on one line.
+local function layout_width(tex)
+  local env, inner, rest = tex:match("^%s*\\begin{(%a+)}(.*)\\end{%1}(.-)$")
+  if env ~= "aligned" and env ~= "gathered" then
+    local t = tokenize(tex)
+    return width_from(t, 1, #t)
+  end
+  local toks = tokenize(inner)
+  local breakable = nesting(toks)
+  local rows, start = {}, 1
+  for i = 1, #toks + 1 do
+    if i > #toks or (breakable[i] and toks[i].kind == "cmd" and toks[i].text == "\\") then
+      if i > start then rows[#rows + 1] = { start, i - 1 } end
+      start = i + 1
+    end
+  end
+  local left, right = 0, 0
+  for _, r in ipairs(rows) do
+    local amp
+    for i = r[1], r[2] do
+      if breakable[i] and toks[i].kind == "char" and toks[i].text == "&" then amp = i break end
+    end
+    local function part(a, b)
+      if a > b then return 0 end
+      return layout_width(inner:sub(toks[a].s, toks[b].e))
+    end
+    if amp then
+      left = math.max(left, part(r[1], amp - 1))
+      right = math.max(right, part(amp + 1, r[2]))
+    else
+      right = math.max(right, part(r[1], r[2]))
+    end
+  end
+  local t = tokenize(rest)
+  return left + right + width_from(t, 1, #t)
+end
+
 function Math(m)
   if m.mathtype ~= "DisplayMath" then return nil end
-  local broken = break_display(m.text)
-  if broken == m.text then return nil end
-  m.text = broken
-  return m
+  m.text = break_display(m.text)
+  -- A formula still too wide (one with no place to break, such as a long
+  -- product of matrices or a boxed set of equations) is set smaller, to fit
+  -- the column, rather than run past it.
+  local widest = layout_width(m.text)
+  if widest <= SCALE_TARGET_EM then return m end
+  local scale = math.max(MIN_SCALE, SCALE_TARGET_EM / widest)
+  return pandoc.Span({ m }, pandoc.Attr("", { "math-scaled" },
+    { style = string.format("font-size: %d%%", math.floor(scale * 100)) }))
 end
 
 -- The estimator and the breaker, for the spec (tests/gates/book_epub.bats)

@@ -75,6 +75,9 @@ caption { font-size: 0.9em; margin-bottom: 0.4em; }
  * running over the text beside it. */
 span.math.display { display: block; max-width: 100%; overflow-x: auto; overflow-y: hidden; }
 math[display="block"] { margin: 0.8em 0; }
+/* A formula with no place to break, set smaller to fit (its size is on the
+ * element, from book-math-lines.lua). */
+span.math-scaled { display: block; }
 
 /* The title page pandoc writes, and the copyright page after it. */
 section.titlepage, #title-block-header { text-align: left; margin-top: 4em; }
