@@ -413,10 +413,10 @@ The action `sketch` declares six params, one required input blob `image` and one
 | `--text hi --held-out 2 --in image=b.png --preview` | params `{"held_out":2,"preview":true,"text":"hi"}`, inputs image from b.png; validated as `{"held_out":2,"mode":"as-is","preview":true,"text":"hi","times":1}` | 0 |
 | `--text hi --image a.png --preview false` | params `{"preview":false,"text":"hi"}`, inputs image from a.png; validated as `{"held_out":4,"mode":"as-is","preview":false,"text":"hi","times":1}` | 0 |
 | `--text hi` | parsed; refused by the action's validation: missing required input 'image' for action 'sketch' | 2 |
-| `--image a.png` | refused while parsing: the flag --text is required | 2 |
-| `--text hi --image a.png --times 1001` | refused while parsing: --times: 1001 is above the most allowed, 1000 | 2 |
-| `--text hi --image a.png --seed -1` | refused while parsing: --seed: -1 is below the least allowed, 0 | 2 |
-| `--text hi --image a.png --out picture=o.txt` | refused while parsing: --out "picture=o.txt": the action has no output 'picture' (it has: result) | 2 |
+| `--image a.png` | refused while parsing: the flag \-\-text is required | 2 |
+| `--text hi --image a.png --times 1001` | refused while parsing: \-\-times: 1001 is above the most allowed, 1000 | 2 |
+| `--text hi --image a.png --seed -1` | refused while parsing: \-\-seed: -1 is below the least allowed, 0 | 2 |
+| `--text hi --image a.png --out picture=o.txt` | refused while parsing: \-\-out "picture=o.txt": the action has no output 'picture' (it has: result) | 2 |
 <!-- /worked -->
 
 The fourth run is the instructive one. The input blob is required, but the flag reader does not make `--image` a required flag; the line parses, and the action's validation refuses it for the missing input, with the same exit code. Requiring things in one place, the spec, and enforcing them in one place, the validation, is what keeps the command line and the HTTP route from disagreeing.
@@ -433,7 +433,7 @@ Each run gives the tokens of a command line and the calls an application makes o
 | tokens | calls in order and what each returns | left over | finish |
 |---|---|---|---|
 | `--steps 7 --device cpu --backend vulkan --window` | take `--device` -> `cpu`; take `--backend` -> `vulkan`; take `--steps` -> `7`; flag `--window` -> present | none | runs |
-| `--device cpu --warmup-episodes 16` | take `--device` -> `cpu`; take `--warmup` -> nothing | `--warmup-episodes`, `16` | exit 2: unrecognised: --warmup-episodes 16 |
+| `--device cpu --warmup-episodes 16` | take `--device` -> `cpu`; take `--warmup` -> nothing | `--warmup-episodes`, `16` | exit 2: unrecognised: \-\-warmup-episodes 16 |
 | `--seed 5 in.png` | take `--seed` -> `5`; positional -> `in.png` | none | runs |
 | `--seed 5 in.png` | positional -> `5`; take `--seed` -> `5` | `in.png` | exit 2: unrecognised: in.png |
 | `--model --device cpu` | take `--model` -> `--device`; take `--device` -> nothing | `cpu` | exit 2: unrecognised: cpu |

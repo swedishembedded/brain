@@ -24,10 +24,11 @@ language, from the chapter's own description.
 
 Any other option is refused, so a mistyped flag never starts a full run.
 
-Generated text is printed as written: an angle-bracketed placeholder such as
-`<name>` in a generator name or an error message is escaped, because
-markdown would otherwise read it as an HTML tag, and the PDF would drop it and
-the EPUB break on it (`literal_angles`).
+Generated text is printed as written (`literal_text`): an angle-bracketed
+placeholder such as `<name>` in a generator name or an error message is
+escaped, because markdown would otherwise read it as an HTML tag, and the PDF
+would drop it and the EPUB break on it; and a command-line flag such as
+`--trace` keeps its two hyphens, which typography would turn into a dash.
 
 A function's output is cached (build/book/worked-cache.json) under a hash of
 its module and every book module that module imports, so an unchanged
@@ -102,12 +103,18 @@ class Cache:
 # An angle-bracketed word that markdown would take for an HTML tag; code
 # spans, code blocks and math are left alone, where it is already literal.
 TAG = re.compile(r"<(/?[A-Za-z_][\w.-]*)>")
+FLAG = re.compile(r"(?<![-\w])--(?=[A-Za-z])")
 LITERAL = re.compile(r"(`+).*?\1|\$\$.*?\$\$|\$[^$\n]+\$", re.S)
 FENCE = re.compile(r"^\s*(`{3,}|~{3,})")
 
 
-def literal_angles(body: str) -> str:
-    """`body` with every `<word>` outside code and math written `\\<word>`."""
+def plain(text: str) -> str:
+    return FLAG.sub(r"\\-\\-", TAG.sub(r"\\<\1>", text))
+
+
+def literal_text(body: str) -> str:
+    """`body` with every `<word>` outside code and math written `\\<word>`,
+    and every `--flag` written `\\-\\-flag`."""
     out, fence = [], None
     for line in body.split("\n"):
         f = FENCE.match(line)
@@ -118,10 +125,10 @@ def literal_angles(body: str) -> str:
             continue
         parts, last = [], 0
         for m in LITERAL.finditer(line):
-            parts.append(TAG.sub(r"\\<\1>", line[last:m.start()]))
+            parts.append(plain(line[last:m.start()]))
             parts.append(m.group(0))
             last = m.end()
-        parts.append(TAG.sub(r"\\<\1>", line[last:]))
+        parts.append(plain(line[last:]))
         out.append("".join(parts))
     return "\n".join(out)
 
@@ -137,7 +144,7 @@ def regenerate(text: str, where: str, cache: Cache) -> str:
                 sys.exit(f"{where}: worked block {module}.{func}: {e}")
             body = fn().strip("\n") + "\n"
             cache.put(module, func, body)
-        return f"{m.group(1)}{literal_angles(body)}{m.group(5)}"
+        return f"{m.group(1)}{literal_text(body)}{m.group(5)}"
     return BLOCK.sub(repl, text)
 
 
