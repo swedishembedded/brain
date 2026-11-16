@@ -1,9 +1,0 @@
-# SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
-#
-# actionlint's configuration: the labels of this project's own runners, so a
-# job that targets them is not reported as asking for an unknown runner.
-self-hosted-runner:
-  labels:
-    # The accelerated tier (docs/contributing/release-gates.md): a runner with a GPU.
-    - gpu

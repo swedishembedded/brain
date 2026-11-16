@@ -4,13 +4,15 @@ A release is published from a tag only when four tiers of gates have passed on
 the tagged commit. Each tier is a Makefile target, so the gate a workflow runs
 is the one a developer runs locally; `.github/workflows/ci.yml` runs tiers 1
 and 2 on every push and pull request, and `.github/workflows/release.yml` calls
-it again for the tag and adds tiers 3 and 4.
+it again for the tag and adds the hosted parts of tier 4. Every workflow job
+runs on GitHub's hosted runners; tier 3 needs GPUs and runs on the maintainer's
+machine.
 
 | tier | what it proves | target | where it runs |
 |---|---|---|---|
 | 1. Build and static | the binary builds on every shipped system; the gate scripts and their self-tests hold; clippy is clean | `cargo check` (build matrix), `make ci/static`, `make check/clippy` | hosted runners |
 | 2. Deterministic CPU correctness | unit and integration tests of the CPU-only crates, the end-to-end suites against the mock model | `make ci/cpu` (`ci/cpu/unit`, `ci/cpu/e2e`) | hosted runners |
-| 3. Accelerated correctness | CPU == Vulkan == CUDA parity on the devices the machine has | `make ci/gpu` (`scripts/gates/parity-gate.sh`) | self-hosted runner labelled `gpu`, required by `release.yml` |
+| 3. Accelerated correctness | CPU == Vulkan == CUDA parity on the devices the machine has | `make ci/gpu` (`scripts/gates/parity-gate.sh`) | maintainer's machine, before tagging (also part of `make test/full`) |
 | 4. Release qualification | the whole suite with its fixtures (`make test/full`), a dependency audit, a CycloneDX SBOM, a provenance attestation for every binary | `make test/full` on the maintainer's machine; `audit`, `sbom` and `publish` jobs of `release.yml` | maintainer's machine and `release.yml` |
 
 `make test/full` stays the full qualification: it needs the model fixtures
@@ -46,8 +48,9 @@ reporting is a `not-run` row.
   The gradcheck suite is not in this tier: it creates a GPU device in several
   of its tests even under `BRAIN_DEVICE=cpu`, so it belongs to tier 3. Doc tests of those crates are empty, so no doc-test suite is required there;
   `make test/doc` belongs to tier 4.
-- **Release.** `release.yml` waits for a runner labelled `gpu`; with none
-  online the release is not published. The dependency audit is
+- **Release.** `release.yml` runs only on hosted runners, so it cannot run
+  tier 3: a tag is pushed only after `make test/full` (which runs the parity
+  gate) has passed on the maintainer's machine. The dependency audit is
   `cargo deny check advisories sources` (`deny.toml`); there is no crate-license
   allowlist, because licensing here is per model and per ported table
   (`.agents/rules/licensing.md`).
