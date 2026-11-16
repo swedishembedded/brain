@@ -174,6 +174,16 @@ pub fn rmsnorm_fwd(g: &Gpu, k: &KernelIds, x: &DeviceBuffer, w: &DeviceBuffer, o
     g.dispatch(kind, &[x, w, out], &[dim, rows, f(eps)], grid)
 }
 
+/// [`rmsnorm_fwd`] over bound ranges of `x` and `out` (`(word offset, words)`, `(0, 0)` for the whole buffer): the
+/// same variant choice, for rows that live inside a larger buffer (one pass's rows of a looped decoder's per-pass
+/// slab).
+#[allow(clippy::too_many_arguments)]
+pub fn rmsnorm_fwd_sliced(g: &Gpu, k: &KernelIds, x: (&DeviceBuffer, (u64, u64)), w: &DeviceBuffer, out: (&DeviceBuffer, (u64, u64)), dim: u32, rows: u32, eps: f32) -> Step {
+    let coop = (k.rmsnorm_rows != UNREGISTERED).then_some(k.rmsnorm_rows);
+    let (kind, grid) = rms_variant(g, k.rmsnorm, coop, rows, dim);
+    g.dispatch_sliced(kind, &[x.0, w, out.0], &[x.1, (0, 0), out.1], &[dim, rows, f(eps)], grid)
+}
+
 /// Rows from which the gain gradient runs in two stages ([`rmsnorm_dw_steps`]), and the rows one partial sums.
 pub const RMSNORM_DW_SPLIT_ROWS: u32 = 2048;
 const RMSNORM_DW_CHUNK: u32 = 64;
@@ -525,6 +535,11 @@ pub struct GqaDecodeBatchedIds {
 /// batch's four index buffers are shared unchanged by every attention layer in
 /// that step - rebuilding them per layer would be `n_full` identical host
 /// writes per token.
+///
+/// Where the device runs the native batched decode attention for this head width
+/// ([`native_paged_decode_batched`]: two or more sequences, a group of at most 8) the
+/// triad is that one launch, which streams each K and V row once per kv head and
+/// reads no score slab; `scores`/`probs` are then untouched.
 pub fn gqa_decode_batched_step(
     g: &Gpu,
     k: &GqaDecodeBatchedIds,
@@ -554,9 +569,14 @@ pub fn gqa_decode_batched_step(
     let group = n_heads / n_kv_heads;
     let hkv = n_kv_heads * head_dim;
     let scale = 1.0 / (head_dim as f32).sqrt();
+    let append_k = g.step(k.kv_append_batched, &[k_new, blocks, offsets, pool_k], &[batch, hkv, block_size], batch * hkv);
+    let append_v = g.step(k.kv_append_batched, &[v_new, blocks, offsets, pool_v], &[batch, hkv, block_size], batch * hkv);
+    if let Some(attend) = native_paged_decode_batched(g, false, &[q, pool_k, pool_v, block_tables, seq_lens, ctx], &[batch, n_heads, n_kv_heads, head_dim, group, block_size, max_bt]) {
+        return vec![append_k, append_v, attend];
+    }
     vec![
-        g.step(k.kv_append_batched, &[k_new, blocks, offsets, pool_k], &[batch, hkv, block_size], batch * hkv),
-        g.step(k.kv_append_batched, &[v_new, blocks, offsets, pool_v], &[batch, hkv, block_size], batch * hkv),
+        append_k,
+        append_v,
         g.step(
             k.scores_batched,
             &[q, pool_k, block_tables, seq_lens, scores],
