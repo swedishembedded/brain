@@ -23,16 +23,20 @@
 // bit for bit the same integer arithmetic), so a draw depends on the row's key
 // (the request's seed and position) and never on its batch slot.
 //
-// Pass 0 keeps every token of positive weight; pass 1 (min-p rows only) keeps
-// the tokens whose weight exp(logit/temp - best) is at least min_p, with best
-// the row's maximum of logit/temp that pass 0's draw_final wrote.
+// Pass 0 keeps every token of positive weight; pass 1 (the min-p rows of draw flag 1) keeps the tokens whose
+// weight exp(logit/temp - best) is at least min_p; pass 2 (the nucleus rows, draw flag 2) keeps the nucleus that
+// nucleus_part, nucleus_step and nucleus_cut found (every token above the threshold logit, and the tokens at it up
+// to the cut column, lowest column first) and, within it, the min-p floor. best is the row's maximum of
+// logit/temp that pass 0's draw_final wrote.
 //
 //   logits: [M, N]
-//   spec  : [M, 4] u32 per row: temp bits, min_p bits, key, draw flag (0 = row not drawn)
-//   best  : [M]    pass 1: the row's best logit/temp (pass 0 does not read it)
+//   spec  : [M, 8] u32 per row: temp bits, min_p bits, key, draw flag (0 = not drawn, 1 = drawn over the row,
+//           2 = drawn over its nucleus), top_p bits, three unused
+//   state : [M, 4] per row: best logit/temp (written by pass 0's draw_final), the nucleus threshold and the
+//           search's upper bound as ordered keys, the cut column (bit patterns, see nucleus_step)
 //   part  : [M, P, 4] per (row, slice): [max logit/temp, mass relative to it, best score, its column (as f32)]
 //
-// params: m, n, p (slices per row), stage (the pass: 0 or 1)
+// params: m, n, p (slices per row), stage (the pass: 0, 1 or 2)
 
 struct Params {
     m: u32,
@@ -44,7 +48,7 @@ struct Params {
 @group(0) @binding(0) var<uniform> pr: Params;
 @group(0) @binding(1) var<storage, read>       logits: array<f32>;
 @group(0) @binding(2) var<storage, read>       spec:   array<u32>;
-@group(0) @binding(3) var<storage, read>       best:   array<f32>;
+@group(0) @binding(3) var<storage, read>       state:  array<f32>;
 @group(0) @binding(4) var<storage, read_write> part:   array<f32>;
 
 fn mix32(x: u32) -> u32 {
@@ -57,6 +61,12 @@ fn mix32(x: u32) -> u32 {
     return h;
 }
 
+// The float an ordered key stands for (see nucleus_step).
+fn unkey(k: u32) -> f32 {
+    if ((k & 0x80000000u) != 0u) { return bitcast<f32>(k & 0x7fffffffu); }
+    return bitcast<f32>(~k);
+}
+
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>,
         @builtin(num_workgroups) nwg: vec3<u32>) {
@@ -64,13 +74,19 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     if (t >= pr.m * pr.p) { return; }
     let row = t / pr.p;
     let c = t % pr.p;
-    let flag = spec[4u * row + 3u];
-    let temp = max(bitcast<f32>(spec[4u * row]), 1e-6);
-    let min_p = bitcast<f32>(spec[4u * row + 1u]);
-    let key = spec[4u * row + 2u];
-    if (flag == 0u || (pr.stage == 1u && !(min_p > 0.0))) { return; }
+    let flag = spec[8u * row + 3u];
+    let temp = max(bitcast<f32>(spec[8u * row]), 1e-6);
+    let min_p = bitcast<f32>(spec[8u * row + 1u]);
+    let key = spec[8u * row + 2u];
+    if (flag == 0u || (pr.stage == 1u && (flag != 1u || !(min_p > 0.0))) || (pr.stage == 2u && flag != 2u)) { return; }
     var top = 0.0;
-    if (pr.stage == 1u) { top = best[row]; }
+    var tau = 0.0;
+    var cut = 0u;
+    if (pr.stage != 0u) { top = state[4u * row]; }
+    if (pr.stage == 2u) {
+        tau = unkey(bitcast<u32>(state[4u * row + 1u]));
+        cut = bitcast<u32>(state[4u * row + 3u]);
+    }
     var mx = -3.402823e38;
     var mass = 0.0;
     var bk = -3.402823e38;
@@ -80,10 +96,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
         let s = l / temp;
         // NaN and -inf weigh nothing, as in the host sampler.
         if (!(s > -3.402823e38)) { continue; }
-        if (pr.stage == 1u) {
+        if (pr.stage != 0u) {
             let w = exp(s - top);
             if (!(w > 0.0 && w >= min_p)) { continue; }
         }
+        if (pr.stage == 2u && !(l > tau || (l == tau && i <= cut))) { continue; }
         if (s > mx) {
             mass = mass * exp(mx - s) + 1.0;
             mx = s;

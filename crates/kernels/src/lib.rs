@@ -1245,6 +1245,12 @@ pub const NLC_BIAS_NCHW: &str = include_str!("../wgsl/nlc_bias_nchw.wgsl");
 pub const NLC_NCHW: &str = include_str!("../wgsl/nlc_nchw.wgsl");
 /// `wgsl/nlc_nchw_at.wgsl`
 pub const NLC_NCHW_AT: &str = include_str!("../wgsl/nlc_nchw_at.wgsl");
+/// `wgsl/nucleus_cut.wgsl`
+pub const NUCLEUS_CUT: &str = include_str!("../wgsl/nucleus_cut.wgsl");
+/// `wgsl/nucleus_part.wgsl`
+pub const NUCLEUS_PART: &str = include_str!("../wgsl/nucleus_part.wgsl");
+/// `wgsl/nucleus_step.wgsl`
+pub const NUCLEUS_STEP: &str = include_str!("../wgsl/nucleus_step.wgsl");
 /// `wgsl/pack_bf16.wgsl`
 pub const PACK_BF16: &str = include_str!("../wgsl/pack_bf16.wgsl");
 /// `wgsl/pack_bf16_at.wgsl`
@@ -2309,6 +2315,9 @@ pub const ALL: &[(&str, &str)] = &[
     ("nlc_bias_nchw", NLC_BIAS_NCHW),
     ("nlc_nchw", NLC_NCHW),
     ("nlc_nchw_at", NLC_NCHW_AT),
+    ("nucleus_cut", NUCLEUS_CUT),
+    ("nucleus_part", NUCLEUS_PART),
+    ("nucleus_step", NUCLEUS_STEP),
     ("pack_bf16", PACK_BF16),
     ("pack_bf16_at", PACK_BF16_AT),
     ("pack_fp8_rows", PACK_FP8_ROWS),

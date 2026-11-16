@@ -3630,7 +3630,7 @@ impl Engine {
         self.head_steps(&mut steps, meta.bsz);
         let drawer = self.drawer.as_ref().expect("checked above");
         let shape = drawer.shape(draws, self.cfg.vocab);
-        drawer.upload(&self.gpu, draws);
+        drawer.upload(&self.gpu, draws, self.cfg.vocab);
         steps.extend(drawer.dispatch(&self.gpu, &self.logits_dev, meta.bsz, self.cfg.vocab, shape));
         self.gpu.submit(&[], &steps);
         drawer.answer(&self.gpu, &self.logits_dev, draws, self.cfg.vocab, shape)

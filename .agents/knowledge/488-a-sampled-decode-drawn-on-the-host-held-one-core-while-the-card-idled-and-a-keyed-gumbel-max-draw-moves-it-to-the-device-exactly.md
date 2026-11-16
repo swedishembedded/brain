@@ -43,3 +43,8 @@ Qwen3.8-27B-FP8 at 64 streams 368 -> 1385 against 1482. The full table, the adap
 
 A recorded decode step must take the keyed head too: the 27B's sampled steps first ran eagerly (only greedy and top-k
 heads were recorded) and stayed about 10 % behind greedy with the draw itself at 0.2 ms a step.
+
+A nucleus answered from a fixed candidate list is not a device draw on high-entropy rows: at temperature 1 most rows'
+nuclei were wider than 256 candidates, fell back to the host, and the 27B at 16 streams got slower (266 -> 246 tok/s).
+The nucleus is a threshold over the row, found by reductions (bisection of an ordered-key interval on the mass at or
+above it, ties at the threshold by column), so it needs no list at all: 268 -> 597 there.

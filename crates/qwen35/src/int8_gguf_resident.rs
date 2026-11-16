@@ -2275,7 +2275,7 @@ impl Qwen35GgufInstance {
             g.write(buf, tap);
         }
         if let PlanOut::Drawn(drawer, ..) = &plan.out {
-            drawer.upload(g, draws);
+            drawer.upload(g, draws, self.cfg.vocab);
         }
         g.replay_tape(&plan.tape);
         let out = match &plan.out {

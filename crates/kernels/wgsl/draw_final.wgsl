@@ -17,19 +17,18 @@
 //
 //   logprob = logit_tok / temp - best - ln(sum_t exp(logit_t / temp - best)),
 //
-// with best the row's maximum of logit/temp. Pass 0 also writes best for the
-// min-p pass. A row with no survivor (all NaN or -inf) draws column 0 with
-// log-probability 0, as the host sampler's argmax does. Rows whose draw flag is
-// 0, and in pass 1 rows without min-p, are left as they were.
+// with best the row's maximum of logit/temp. Pass 0 also writes best, and the row's mass, for the later passes
+// and for a candidate list. A row with no survivor (all NaN or -inf) draws column 0 with log-probability 0, as
+// the host sampler's argmax does. Rows a pass does not draw (see draw_part) are left as they were.
 //
 //   logits: [M, N]
-//   spec  : [M, 4] u32 (see draw_part)
+//   spec  : [M, 8] u32 (see draw_part)
 //   part  : [M, P, 4]
-//   best  : [M]    written by pass 0
+//   state : [M, 4] (see draw_part); pass 0 writes its best
 //   out   : [M, 4] the drawn column (as f32), its log-probability, and (pass 0) the row's best logit/temp and
-//           its mass sum_t exp(logit_t / temp - best), the statistics a candidate list is answered with
+//           its mass sum_t exp(logit_t / temp - best), the statistics a candidate list and a nucleus are cut with
 //
-// params: m, n, p (slices per row), stage (the pass: 0 or 1)
+// params: m, n, p (slices per row), stage (the pass: 0, 1 or 2)
 
 struct Params {
     m: u32,
@@ -42,7 +41,7 @@ struct Params {
 @group(0) @binding(1) var<storage, read>       logits: array<f32>;
 @group(0) @binding(2) var<storage, read>       spec:   array<u32>;
 @group(0) @binding(3) var<storage, read>       part:   array<f32>;
-@group(0) @binding(4) var<storage, read_write> best:   array<f32>;
+@group(0) @binding(4) var<storage, read_write> state:  array<f32>;
 @group(0) @binding(5) var<storage, read_write> out:    array<f32>;
 
 @compute @workgroup_size(64)
@@ -50,10 +49,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
         @builtin(num_workgroups) nwg: vec3<u32>) {
     let row = gid.y * (nwg.x * 64u) + gid.x;
     if (row >= pr.m) { return; }
-    let flag = spec[4u * row + 3u];
-    let temp = max(bitcast<f32>(spec[4u * row]), 1e-6);
-    let min_p = bitcast<f32>(spec[4u * row + 1u]);
-    if (flag == 0u || (pr.stage == 1u && !(min_p > 0.0))) { return; }
+    let flag = spec[8u * row + 3u];
+    let temp = max(bitcast<f32>(spec[8u * row]), 1e-6);
+    let min_p = bitcast<f32>(spec[8u * row + 1u]);
+    if (flag == 0u || (pr.stage == 1u && (flag != 1u || !(min_p > 0.0))) || (pr.stage == 2u && flag != 2u)) { return; }
     var mx = -3.402823e38;
     for (var c = 0u; c < pr.p; c = c + 1u) {
         mx = max(mx, part[4u * (row * pr.p + c)]);
@@ -75,7 +74,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
         }
     }
     if (pr.stage == 0u) {
-        best[row] = mx;
+        state[4u * row] = mx;
         out[4u * row + 2u] = mx;
         out[4u * row + 3u] = mass;
     }
