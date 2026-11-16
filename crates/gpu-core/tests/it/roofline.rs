@@ -125,11 +125,6 @@ fn real_work_can_never_beat_the_roof() {
     }
     let _probe = probe_lock();
     let gpu = gpu_core::testgpu::dev(&[("axpy", kernels::AXPY)]);
-    if gpu.kind() == "cpu" {
-        // On the CPU backend the GEMM runs on the native vector GEMM while the FMA probe is a JIT loop, so the roof
-        // understates the host (782 against 3040 GFLOP/s on 288 NEON threads): an open gap of the probe, in the probe ledger.
-        return brain_testutil::skip_unavailable("the CPU backend's compute roof is measured on the JIT, not the native GEMM it grades");
-    }
     let g = gpu.new_like(&[("matmul_reg2", kernels::MATMUL_REG2)]);
 
     let (m, k, n) = (1024usize, 1024usize, 1024usize);

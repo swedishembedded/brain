@@ -111,6 +111,32 @@ So a single figure from this class of machine is only meaningful with the
 package state attached, and an A/B whose two arms sit either side of a
 heating event measures the chassis.
 
+## Fixed: the CPU backend's compute roof was the JIT's, not the host's
+
+**Symptom.** The CPU backend serves every f32 GEMM on its native vector GEMM
+(NEON, AVX2), but `roof_fma` ran as a Cranelift JIT loop, one invocation per
+element: 591 GFLOP/s against `matmul_reg2` at 3206 GFLOP/s on 72 Grace cores
+(2026-11-16), so every CPU "% of peak" read several times too high and
+`roofline::real_work_can_never_beat_the_roof` had to skip the CPU backend.
+
+**Fix.** `roof_fma` has a native route (`fast_ops::roof_fma`, matched by
+kernel source), bit-identical to the kernel on every tier
+(`fast_ops::tests::the_native_roof_probe_matches_the_kernel_to_the_bit`).
+Sixteen independent chains per vector block. The recurrence
+`a = fma(a, c, d)` has a constant addend, and NEON's `fmla` accumulates into
+its destination, so each step costs a register copy of `d` plus the `fmla`:
+a rolled loop also rotated every accumulator through a spare register (17
+cycles a step, 25.6 GFLOP/s a core), and unrolled by two it is one copy per
+FMA (55.8 GFLOP/s, half the pipes). SVE's `fmad` multiplies its destination,
+so it is the recurrence in one instruction. An SVE host takes it, on 128-bit
+lanes: 104 GFLOP/s a core, the core's full FMA rate. x86 uses `vfmadd213ps`,
+which has the same form.
+
+**Result**, `BRAIN_BACKEND=cpu cargo test -p brain-gpu-core --test it roofline`,
+72 cores of a shared GH200 host: the roof reads 3456-4345 GFLOP/s against the
+GEMM's 1383-3278 (the GEMM swings with the other tenants), and the test runs
+on the CPU backend instead of skipping.
+
 ## Not the cause, checked and ruled out
 
 * **The cooperative-matrix kernel is not in any measured or served path.**
@@ -135,12 +161,6 @@ heating event measures the chassis.
   stands.
 
 ## Left to do
-
-* **The CPU backend's compute roof is the JIT's, not the host's.** Since the CPU backend serves the f32 GEMMs on its
-  native vector GEMM (AVX2, NEON), a GEMM outruns the roof it is graded against: `roof_fma` still runs as a Cranelift JIT
-  loop, 782 GFLOP/s against `matmul_reg2` at 3040 GFLOP/s on a 288-thread GH200 host (2026-11-16). A native route for the
-  FMA probe at the backend's vector tier is the fix; until then `roofline::real_work_can_never_beat_the_roof` skips the
-  CPU backend by name, and every CPU "% of peak" reads high.
 
 * **A ceiling that survives the thermal state.** The orchestrator caches one sweep's
   result for 15 minutes; on a part whose rate swings 5x with package

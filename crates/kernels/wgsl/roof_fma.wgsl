@@ -4,7 +4,7 @@
 // @what  Peak fp32 FMA-rate probe - the COMPUTE half of the device roofline
 // @how   one thread per output element, serial inner reduction
 // @opt   2
-// @cpu   yes
+// @cpu   native
 // @gpu   yes
 // @npu   no
 // @quant none

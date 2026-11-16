@@ -2361,6 +2361,30 @@ pub fn attn_apply_cross(probs: &[f32], kv: &[f32], out: &mut [f32], a: CrossAppl
 mod tests {
     use super::*;
 
+    /// The native FMA probe computes `roof_fma.wgsl`'s arithmetic to the bit on every tier: the vector blocks, the
+    /// scalar tail (37 elements leave a partial block) and the thread split all agree with the per-element reference,
+    /// for the converging probe constants and for a chain that does not converge.
+    #[test]
+    fn the_native_roof_probe_matches_the_kernel_to_the_bit() {
+        let inp: Vec<f32> = (0..37).map(|i| i as f32 * 0.37 - 5.0).collect();
+        for (c, d, iters) in [(0.5f32, 0.5f32, 300u32), (0.93, -0.11, 77), (1.0, 0.0, 0)] {
+            let mut native = vec![0.0f32; inp.len()];
+            roof_fma(&inp, &mut native, iters, c, d);
+            let mut reference = vec![0.0f32; inp.len()];
+            roof_fma_scalar(&inp, &mut reference, iters, c, d);
+            let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+            assert_eq!(bits(&native), bits(&reference), "c={c} d={d} iters={iters}");
+            // Both AArch64 tiers, whichever one this host would pick.
+            #[cfg(target_arch = "aarch64")]
+            for sve in [false, std::arch::is_aarch64_feature_detected!("sve")] {
+                let whole = inp.len() / 8 * 8;
+                let mut tier = vec![0.0f32; whole];
+                unsafe { roof_fma_neon(&inp[..whole], &mut tier, iters, c, d, sve) };
+                assert_eq!(bits(&tier), bits(&reference[..whole]), "sve={sve} c={c} d={d} iters={iters}");
+            }
+        }
+    }
+
     fn lcg(s: &mut u32) -> f32 {
         *s = s.wrapping_mul(1664525).wrapping_add(1013904223);
         ((*s >> 8) as f32 / (1u32 << 24) as f32) * 2.0 - 1.0
@@ -4026,6 +4050,200 @@ pub fn transpose(src: &[f32], rows: usize, cols: usize) -> Vec<f32> {
         }
     });
     dst
+}
+
+/// `roof_fma.wgsl` natively: per element `s = inp[i]`, eight accumulators `s + j` each stepped `iters` times through
+/// `a = fma(a, c, d)`, and `out[i]` their pairwise sum - the kernel's arithmetic to the bit, since a fused multiply-add
+/// rounds once on every tier.
+///
+/// The probe is the compute half of the roofline, so it must reach the host's FMA rate, which its vector GEMM gets
+/// close to: the JIT runs one invocation per element through scalar code and measured a fifth of the NEON GEMM it
+/// grades. Each task walks its elements a vector block at a time with sixteen independent chains in registers
+/// (enough to cover the FMA latency on every pipe). The recurrence's addend is the constant `d`, so the NEON `fmla`
+/// (which accumulates into its destination) needs a register copy of `d` per step and caps a core at half its rate;
+/// SVE's `fmad` multiplies its destination instead and is the recurrence in one instruction, so an SVE host takes it
+/// (on 128-bit lanes, the NEON width) and reaches the full rate. x86's `vfmadd213ps` is the same form.
+pub fn roof_fma(inp: &[f32], out: &mut [f32], iters: u32, c: f32, d: f32) {
+    let n = inp.len().min(out.len());
+    if n == 0 {
+        return;
+    }
+    // One contiguous run per thread, a whole number of vector blocks (16 covers both tiers).
+    let chunk = n.div_ceil(rayon::current_num_threads()).next_multiple_of(16);
+    out[..n].par_chunks_mut(chunk).zip(inp[..n].par_chunks(chunk)).for_each(|(o, i)| roof_fma_run(i, o, iters, c, d));
+}
+
+fn roof_fma_run(inp: &[f32], out: &mut [f32], iters: u32, c: f32, d: f32) {
+    #[cfg(target_arch = "aarch64")]
+    if crate::fast_conv::neon_available() {
+        let whole = inp.len() / 8 * 8;
+        let sve = std::arch::is_aarch64_feature_detected!("sve");
+        unsafe { roof_fma_neon(&inp[..whole], &mut out[..whole], iters, c, d, sve) };
+        return roof_fma_scalar(&inp[whole..], &mut out[whole..], iters, c, d);
+    }
+    #[cfg(target_arch = "x86_64")]
+    if crate::fast_conv::isa_tier() != crate::fast_conv::IsaTier::Scalar {
+        let whole = inp.len() / 8 * 8;
+        unsafe { roof_fma_avx2(&inp[..whole], &mut out[..whole], iters, c, d) };
+        return roof_fma_scalar(&inp[whole..], &mut out[whole..], iters, c, d);
+    }
+    roof_fma_scalar(inp, out, iters, c, d)
+}
+
+/// The per-element reference, also the tail of the vector tiers.
+fn roof_fma_scalar(inp: &[f32], out: &mut [f32], iters: u32, c: f32, d: f32) {
+    for (o, &s) in out.iter_mut().zip(inp) {
+        let mut a: [f32; 8] = std::array::from_fn(|j| s + j as f32);
+        for _ in 0..iters {
+            for x in &mut a {
+                *x = x.mul_add(c, d);
+            }
+        }
+        *o = ((a[0] + a[1]) + (a[2] + a[3])) + ((a[4] + a[5]) + (a[6] + a[7]));
+    }
+}
+
+/// Eight elements (two 4-lane vectors) a block, eight accumulators each: sixteen independent chains in named
+/// registers. `sve` steps them with `fmad` (see [`roof_fma`]); otherwise with `fmla`, unrolled by two so the copy of
+/// `d` each step needs is the only one (a rolled loop also rotated every accumulator through a spare register).
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn roof_fma_neon(inp: &[f32], out: &mut [f32], iters: u32, c: f32, d: f32, sve: bool) {
+    use std::arch::aarch64::*;
+    let (cv, dv) = (vdupq_n_f32(c), vdupq_n_f32(d));
+    let k = |j: f32| vdupq_n_f32(j);
+    for (o, i) in out.as_chunks_mut::<8>().0.iter_mut().zip(inp.as_chunks::<8>().0) {
+        let (s, t) = (vld1q_f32(i.as_ptr()), vld1q_f32(i.as_ptr().add(4)));
+        let (mut a0, mut a1, mut a2, mut a3) = (s, vaddq_f32(s, k(1.0)), vaddq_f32(s, k(2.0)), vaddq_f32(s, k(3.0)));
+        let (mut a4, mut a5, mut a6, mut a7) = (vaddq_f32(s, k(4.0)), vaddq_f32(s, k(5.0)), vaddq_f32(s, k(6.0)), vaddq_f32(s, k(7.0)));
+        let (mut b0, mut b1, mut b2, mut b3) = (t, vaddq_f32(t, k(1.0)), vaddq_f32(t, k(2.0)), vaddq_f32(t, k(3.0)));
+        let (mut b4, mut b5, mut b6, mut b7) = (vaddq_f32(t, k(4.0)), vaddq_f32(t, k(5.0)), vaddq_f32(t, k(6.0)), vaddq_f32(t, k(7.0)));
+        if sve {
+            // z0-z15 alias the accumulators' v registers; only their low 128 bits are loaded, used and kept, so the
+            // result is the same at any SVE vector length.
+            std::arch::asm!(
+                ".arch_extension sve",
+                "ptrue p0.s",
+                "cbz {n:w}, 2f",
+                "1:",
+                "fmad z0.s, p0/m, z16.s, z17.s",
+                "fmad z1.s, p0/m, z16.s, z17.s",
+                "fmad z2.s, p0/m, z16.s, z17.s",
+                "fmad z3.s, p0/m, z16.s, z17.s",
+                "fmad z4.s, p0/m, z16.s, z17.s",
+                "fmad z5.s, p0/m, z16.s, z17.s",
+                "fmad z6.s, p0/m, z16.s, z17.s",
+                "fmad z7.s, p0/m, z16.s, z17.s",
+                "fmad z8.s, p0/m, z16.s, z17.s",
+                "fmad z9.s, p0/m, z16.s, z17.s",
+                "fmad z10.s, p0/m, z16.s, z17.s",
+                "fmad z11.s, p0/m, z16.s, z17.s",
+                "fmad z12.s, p0/m, z16.s, z17.s",
+                "fmad z13.s, p0/m, z16.s, z17.s",
+                "fmad z14.s, p0/m, z16.s, z17.s",
+                "fmad z15.s, p0/m, z16.s, z17.s",
+                "subs {n:w}, {n:w}, #1",
+                "b.ne 1b",
+                "2:",
+                n = inout(reg) iters => _,
+                inout("v0") a0,
+                inout("v1") a1,
+                inout("v2") a2,
+                inout("v3") a3,
+                inout("v4") a4,
+                inout("v5") a5,
+                inout("v6") a6,
+                inout("v7") a7,
+                inout("v8") b0,
+                inout("v9") b1,
+                inout("v10") b2,
+                inout("v11") b3,
+                inout("v12") b4,
+                inout("v13") b5,
+                inout("v14") b6,
+                inout("v15") b7,
+                in("v16") cv,
+                in("v17") dv,
+                out("p0") _,
+                options(nomem, nostack),
+            );
+        } else {
+            for _ in 0..iters / 2 {
+                a0 = vfmaq_f32(dv, a0, cv);
+                a1 = vfmaq_f32(dv, a1, cv);
+                a2 = vfmaq_f32(dv, a2, cv);
+                a3 = vfmaq_f32(dv, a3, cv);
+                a4 = vfmaq_f32(dv, a4, cv);
+                a5 = vfmaq_f32(dv, a5, cv);
+                a6 = vfmaq_f32(dv, a6, cv);
+                a7 = vfmaq_f32(dv, a7, cv);
+                b0 = vfmaq_f32(dv, b0, cv);
+                b1 = vfmaq_f32(dv, b1, cv);
+                b2 = vfmaq_f32(dv, b2, cv);
+                b3 = vfmaq_f32(dv, b3, cv);
+                b4 = vfmaq_f32(dv, b4, cv);
+                b5 = vfmaq_f32(dv, b5, cv);
+                b6 = vfmaq_f32(dv, b6, cv);
+                b7 = vfmaq_f32(dv, b7, cv);
+                a0 = vfmaq_f32(dv, a0, cv);
+                a1 = vfmaq_f32(dv, a1, cv);
+                a2 = vfmaq_f32(dv, a2, cv);
+                a3 = vfmaq_f32(dv, a3, cv);
+                a4 = vfmaq_f32(dv, a4, cv);
+                a5 = vfmaq_f32(dv, a5, cv);
+                a6 = vfmaq_f32(dv, a6, cv);
+                a7 = vfmaq_f32(dv, a7, cv);
+                b0 = vfmaq_f32(dv, b0, cv);
+                b1 = vfmaq_f32(dv, b1, cv);
+                b2 = vfmaq_f32(dv, b2, cv);
+                b3 = vfmaq_f32(dv, b3, cv);
+                b4 = vfmaq_f32(dv, b4, cv);
+                b5 = vfmaq_f32(dv, b5, cv);
+                b6 = vfmaq_f32(dv, b6, cv);
+                b7 = vfmaq_f32(dv, b7, cv);
+            }
+            if iters % 2 == 1 {
+                a0 = vfmaq_f32(dv, a0, cv);
+                a1 = vfmaq_f32(dv, a1, cv);
+                a2 = vfmaq_f32(dv, a2, cv);
+                a3 = vfmaq_f32(dv, a3, cv);
+                a4 = vfmaq_f32(dv, a4, cv);
+                a5 = vfmaq_f32(dv, a5, cv);
+                a6 = vfmaq_f32(dv, a6, cv);
+                a7 = vfmaq_f32(dv, a7, cv);
+                b0 = vfmaq_f32(dv, b0, cv);
+                b1 = vfmaq_f32(dv, b1, cv);
+                b2 = vfmaq_f32(dv, b2, cv);
+                b3 = vfmaq_f32(dv, b3, cv);
+                b4 = vfmaq_f32(dv, b4, cv);
+                b5 = vfmaq_f32(dv, b5, cv);
+                b6 = vfmaq_f32(dv, b6, cv);
+                b7 = vfmaq_f32(dv, b7, cv);
+            }
+        }
+        let sum = |x0, x1, x2, x3, x4, x5, x6, x7| vaddq_f32(vaddq_f32(vaddq_f32(x0, x1), vaddq_f32(x2, x3)), vaddq_f32(vaddq_f32(x4, x5), vaddq_f32(x6, x7)));
+        vst1q_f32(o.as_mut_ptr(), sum(a0, a1, a2, a3, a4, a5, a6, a7));
+        vst1q_f32(o.as_mut_ptr().add(4), sum(b0, b1, b2, b3, b4, b5, b6, b7));
+    }
+}
+
+/// Eight elements (one 8-lane vector) a block, eight accumulators: eight independent `vfmadd` chains.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn roof_fma_avx2(inp: &[f32], out: &mut [f32], iters: u32, c: f32, d: f32) {
+    use std::arch::x86_64::*;
+    let (cv, dv) = (_mm256_set1_ps(c), _mm256_set1_ps(d));
+    for (o, i) in out.as_chunks_mut::<8>().0.iter_mut().zip(inp.as_chunks::<8>().0) {
+        let s = _mm256_loadu_ps(i.as_ptr());
+        let mut a: [__m256; 8] = std::array::from_fn(|j| _mm256_add_ps(s, _mm256_set1_ps(j as f32)));
+        for _ in 0..iters {
+            for x in &mut a {
+                *x = _mm256_fmadd_ps(*x, cv, dv);
+            }
+        }
+        let sum = _mm256_add_ps(_mm256_add_ps(_mm256_add_ps(a[0], a[1]), _mm256_add_ps(a[2], a[3])), _mm256_add_ps(_mm256_add_ps(a[4], a[5]), _mm256_add_ps(a[6], a[7])));
+        _mm256_storeu_ps(o.as_mut_ptr(), sum);
+    }
 }
 
 /// The NEON f32 GEMM: `C[m,n] (+)= A[m,k]·B[n,k]ᵀ`, the one routine every f32 matmul kernel (`matmul*`,

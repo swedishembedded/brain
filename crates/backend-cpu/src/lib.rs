@@ -249,6 +249,9 @@ struct FastIdx {
     /// a name of its own (`ce_grad`, `ce_value`), which other models give to the unmasked kernels.
     ce_grad_masked: Option<usize>,
     ce_value_masked: Option<usize>,
+    /// The roofline's FMA probe, matched by source like the pair above: its rate is the compute roof every kernel on
+    /// this backend is graded against, so it runs at the backend's vector tier, as the GEMM it grades does.
+    roof_fma: Option<usize>,
 }
 
 /// Bind group for one dispatch: the uniform stream plus the storage buffers in
@@ -359,6 +362,7 @@ impl CpuBackend {
                 scale_add: find("scale_add"),
                 ce_grad_masked: kernels.iter().position(|(_, src)| *src == ::kernels::CE_GRAD_MASKED).filter(|&i| all_native || !jit.is_compiled(i)),
                 ce_value_masked: kernels.iter().position(|(_, src)| *src == ::kernels::CE_VALUE_MASKED).filter(|&i| all_native || !jit.is_compiled(i)),
+                roof_fma: kernels.iter().position(|(_, src)| *src == ::kernels::ROOF_FMA).filter(|&i| all_native || !jit.is_compiled(i)),
             }
         };
         let wgsizes = backend_api::workgroup_sizes(kernels);
@@ -1121,6 +1125,17 @@ backend_api::check_binding_offsets(&self.shared.names[kind], offsets);
                 let x = std::slice::from_raw_parts(bufs[0] as *const f32, total);
                 let out = std::slice::from_raw_parts_mut(bufs[1] as *mut f32, total);
                 fast_ops::silu(x, out);
+            }
+            return;
+        }
+        // roof_fma.wgsl: params = [n, iters, c bits, d bits]; bufs = [inp, out].
+        if Some(kind) == f.roof_fma && bufs.len() >= 2 {
+            unsafe {
+                let pu = std::slice::from_raw_parts(uniform, 4);
+                let n = pu[0] as usize;
+                let inp = std::slice::from_raw_parts(bufs[0] as *const f32, n);
+                let out = std::slice::from_raw_parts_mut(bufs[1] as *mut f32, n);
+                fast_ops::roof_fma(inp, out, pu[1], f32::from_bits(pu[2]), f32::from_bits(pu[3]));
             }
             return;
         }
