@@ -124,6 +124,9 @@ const PIPELINES: &[(&str, &str)] = &[
     // A layer-streamed full fine-tune's device side (`model::ops::store_device_kernels`; `gradnorm_part` is above).
     ("copy_cols", kernels::COPY_COLS),
     ("gradnorm_part_bf16", kernels::GRADNORM_PART_BF16),
+    // The two-stage gain gradient `model::block::rmsnorm_dw_steps` takes over a training batch's rows, by name.
+    ("rmsnorm_dw_part", kernels::RMSNORM_DW_PART),
+    ("rmsnorm_dw_sum", kernels::RMSNORM_DW_SUM),
 ];
 
 /// MoE's AdamW recipe (the values matched against the PyTorch reference).
@@ -540,9 +543,9 @@ impl Trainer {
             self.gpu.step(MATMUL_DX, &[&self.d_logits, self.w("token_emb.weight"), &self.d_xn], &[n, d, c.vocab, 0], n * d),
             // final norm backward -> dres[L]
             self.gpu.step(RMS_INV, &[&self.res[n_layers], &self.inv], &[d, n, f(crate::RMS_EPS)], n),
-            self.gpu.step(RMSNORM_DW, &[&self.d_xn, &self.res[n_layers], &self.inv, self.g("norm.weight")], &[d, n], d),
-            self.gpu.step(RMSNORM_DX, &[&self.res[n_layers], self.w("norm.weight"), &self.d_xn, &self.dres[n_layers]], &[d, n, f(crate::RMS_EPS)], n),
         ]);
+        s.extend(model::block::rmsnorm_dw_steps(&self.gpu, RMSNORM_DW, &self.res[n_layers], &self.d_xn, &self.inv, self.g("norm.weight"), d, n));
+        s.push(self.gpu.step(RMSNORM_DX, &[&self.res[n_layers], self.w("norm.weight"), &self.d_xn, &self.dres[n_layers]], &[d, n, f(crate::RMS_EPS)], n));
         pass.segment(&mut s, None);
 
         for l in (0..n_layers).rev() {
@@ -579,7 +582,7 @@ impl Trainer {
             }
             // norm2 backward -> d_tmp ; dxmid = dres[l+1] + d_tmp
             s.push(self.gpu.step(RMS_INV, &[&lb.xmid, &self.inv], &[d, n, f(crate::RMS_EPS)], n));
-            s.push(self.gpu.step(RMSNORM_DW, &[&self.d_xn, &lb.xmid, &self.inv, self.g(&pn("norm2.weight"))], &[d, n], d));
+            s.extend(model::block::rmsnorm_dw_steps(&self.gpu, RMSNORM_DW, &lb.xmid, &self.d_xn, &self.inv, self.g(&pn("norm2.weight")), d, n));
             s.push(self.gpu.step(RMSNORM_DX, &[&lb.xmid, self.w(&pn("norm2.weight")), &self.d_xn, &self.d_tmp], &[d, n, f(crate::RMS_EPS)], n));
             s.push(self.gpu.step(ADD2, &[&self.dres[l + 1], &self.d_tmp, &lb.dxmid], &[n * d], n * d));
 
@@ -598,7 +601,7 @@ impl Trainer {
             s.push(self.gpu.step(MATMUL_DX, &[&self.d_qkv, self.w(&pn("attn.qkv.weight")), &self.d_xn], &[n, d, 3 * d, 0], n * d));
             // norm1 backward -> d_tmp ; dres[l] = dxmid + d_tmp
             s.push(self.gpu.step(RMS_INV, &[&self.res[l], &self.inv], &[d, n, f(crate::RMS_EPS)], n));
-            s.push(self.gpu.step(RMSNORM_DW, &[&self.d_xn, &self.res[l], &self.inv, self.g(&pn("norm1.weight"))], &[d, n], d));
+            s.extend(model::block::rmsnorm_dw_steps(&self.gpu, RMSNORM_DW, &self.res[l], &self.d_xn, &self.inv, self.g(&pn("norm1.weight")), d, n));
             s.push(self.gpu.step(RMSNORM_DX, &[&self.res[l], self.w(&pn("norm1.weight")), &self.d_xn, &self.d_tmp], &[d, n, f(crate::RMS_EPS)], n));
             s.push(self.gpu.step(ADD2, &[&lb.dxmid, &self.d_tmp, &self.dres[l]], &[n * d], n * d));
             pass.segment(&mut s, Some(l));

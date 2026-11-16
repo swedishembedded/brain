@@ -260,6 +260,9 @@ pub const PIPELINES: &[(&str, &str)] = &[
     // A layer-streamed full fine-tune's device side (`model::ops::store_device_kernels`; `gradnorm_part` is above).
     ("copy_cols", kernels::COPY_COLS),
     ("gradnorm_part_bf16", kernels::GRADNORM_PART_BF16),
+    // The two-stage gain gradient `model::block::rmsnorm_dw_steps` takes over a training batch's rows, by name.
+    ("rmsnorm_dw_part", kernels::RMSNORM_DW_PART),
+    ("rmsnorm_dw_sum", kernels::RMSNORM_DW_SUM),
 ];
 
 /// MLP variant per layer (cached activations for backprop).
@@ -858,12 +861,12 @@ impl Glm {
         s.push(self.gpu.dispatch(kind, &[x, self.w(wname), out], &[dim, rows, f(self.cfg.rms_eps)], threads));
     }
 
-    /// RMSNorm backward: gain grad (if trainable) via `rms_inv`+`rmsnorm_dw`, then
+    /// RMSNorm backward: gain grad (if trainable) via `rms_inv`+`block::rmsnorm_dw_steps`, then
     /// input grad via `rmsnorm_dx` into `dx`.
     fn norm_bwd(&self, s: &mut Vec<Step>, x: &DeviceBuffer, wname: &str, dy: &DeviceBuffer, dx: &DeviceBuffer, dim: u32, rows: u32) {
         if self.trainable(wname) {
             s.push(self.gpu.step(RMS_INV, &[x, &self.inv], &[dim, rows, f(self.cfg.rms_eps)], rows));
-            s.push(self.gpu.step(RMSNORM_DW, &[dy, x, &self.inv, self.g(wname)], &[dim, rows], dim));
+            s.extend(model::block::rmsnorm_dw_steps(&self.gpu, RMSNORM_DW, x, dy, &self.inv, self.g(wname), dim, rows));
         }
         s.push(self.gpu.step(RMSNORM_DX, &[x, self.w(wname), dy, dx], &[dim, rows, f(self.cfg.rms_eps)], rows));
     }

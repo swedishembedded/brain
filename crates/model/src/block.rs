@@ -174,6 +174,25 @@ pub fn rmsnorm_fwd(g: &Gpu, k: &KernelIds, x: &DeviceBuffer, w: &DeviceBuffer, o
     g.dispatch(kind, &[x, w, out], &[dim, rows, f(eps)], grid)
 }
 
+/// Rows from which the gain gradient runs in two stages ([`rmsnorm_dw_steps`]), and the rows one partial sums.
+pub const RMSNORM_DW_SPLIT_ROWS: u32 = 2048;
+const RMSNORM_DW_CHUNK: u32 = 64;
+
+/// `gw[c] += Σ_n dy[n,c]·x[n,c]·inv[n]`: one thread per channel (the `rmsnorm_dw` kernel at index `rmsnorm_dw`) for a few rows; for many (a training
+/// batch) chunked partial sums and their reduction (`rmsnorm_dw_part`, `rmsnorm_dw_sum`) when the `Gpu` registered
+/// them, so the rows spread over `chunks * dim` threads instead of `dim`.
+#[allow(clippy::too_many_arguments)]
+pub fn rmsnorm_dw_steps(g: &Gpu, rmsnorm_dw: usize, x: &DeviceBuffer, dy: &DeviceBuffer, inv: &DeviceBuffer, gw: &DeviceBuffer, dim: u32, rows: u32) -> Vec<Step> {
+    match (rows >= RMSNORM_DW_SPLIT_ROWS, g.kernel_index("rmsnorm_dw_part"), g.kernel_index("rmsnorm_dw_sum")) {
+        (true, Some(part_k), Some(sum_k)) => {
+            let chunks = rows.div_ceil(RMSNORM_DW_CHUNK);
+            let part = g.storage(chunks as u64 * dim as u64);
+            vec![g.step(part_k, &[dy, x, inv, &part], &[dim, rows, RMSNORM_DW_CHUNK], chunks * dim), g.step(sum_k, &[&part, gw], &[dim, chunks], dim)]
+        }
+        _ => vec![g.step(rmsnorm_dw, &[dy, x, inv, gw], &[dim, rows], dim)],
+    }
+}
+
 /// RMSNorm backward: always the input grad (`dx`); the gain grad (`gw`, needing
 /// the per-row inverse `inv`) only when `gw` is `Some` (trainable gain).
 ///
@@ -198,7 +217,7 @@ pub fn rmsnorm_bwd(
     let mut s = Vec::new();
     if let Some(gw) = gw {
         s.push(g.step(k.rms_inv, &[x, inv], &[dim, rows, f(eps)], rows));
-        s.push(g.step(k.rmsnorm_dw, &[dy, x, inv, gw], &[dim, rows], dim));
+        s.extend(rmsnorm_dw_steps(g, k.rmsnorm_dw, x, dy, inv, gw, dim, rows));
     }
     let coop = (k.rmsnorm_dx_rows != UNREGISTERED).then_some(k.rmsnorm_dx_rows);
     let (kind, grid) = rms_variant(g, k.rmsnorm_dx, coop, rows, dim);

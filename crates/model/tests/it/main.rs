@@ -126,6 +126,7 @@ mod relpos_gather;
 mod resident_full_ft;
 mod norm_rows_default;
 mod rmsnorm_decode_cost;
+mod rmsnorm_dw_split;
 mod rmsnorm_dx_variant_agreement;
 mod rmsnorm_variant_agreement;
 mod rope2d_partial;

@@ -1385,6 +1385,10 @@ pub const RMS_INV: &str = include_str!("../wgsl/rms_inv.wgsl");
 pub const RMSNORM: &str = include_str!("../wgsl/rmsnorm.wgsl");
 /// `wgsl/rmsnorm_dw.wgsl`
 pub const RMSNORM_DW: &str = include_str!("../wgsl/rmsnorm_dw.wgsl");
+/// `wgsl/rmsnorm_dw_part.wgsl`
+pub const RMSNORM_DW_PART: &str = include_str!("../wgsl/rmsnorm_dw_part.wgsl");
+/// `wgsl/rmsnorm_dw_sum.wgsl`
+pub const RMSNORM_DW_SUM: &str = include_str!("../wgsl/rmsnorm_dw_sum.wgsl");
 /// `wgsl/rmsnorm_dx.wgsl`
 pub const RMSNORM_DX: &str = include_str!("../wgsl/rmsnorm_dx.wgsl");
 /// `wgsl/rmsnorm_dx_rows.wgsl`
@@ -2373,6 +2377,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("rms_inv", RMS_INV),
     ("rmsnorm", RMSNORM),
     ("rmsnorm_dw", RMSNORM_DW),
+    ("rmsnorm_dw_part", RMSNORM_DW_PART),
+    ("rmsnorm_dw_sum", RMSNORM_DW_SUM),
     ("rmsnorm_dx", RMSNORM_DX),
     ("rmsnorm_dx_rows", RMSNORM_DX_ROWS),
     ("rmsnorm_quant_fused", RMSNORM_QUANT_FUSED),
