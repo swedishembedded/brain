@@ -34,7 +34,7 @@ use checkpoint::gguf::MmapGguf;
 use model::paged::BlockTable;
 use model::serve::PagedDecoder;
 use perf::scenarios::longctx::{ContextKind, EngineInfo, Fit, LongContextEngine};
-use qwen35::int8_gguf_resident::{serving_cost, Qwen35GgufInstance, Qwen35GgufResident, ServingShape};
+use qwen35::int8_gguf_resident::{Qwen35GgufInstance, Qwen35GgufResident};
 use qwen35::resident_checkpoint::ResidentCheckpoint;
 use residency::multi::MultiDeviceResidentModel;
 use residency::{Device, ResidentModel};
@@ -89,8 +89,6 @@ fn elapsed_ms(started: Instant) -> f64 {
 pub struct Qwen35Engine {
     path: String,
     tier: model::ops::TierPolicy,
-    /// The tier the lm_head is held at (int8 for a GGUF, as stored for an HF release).
-    head: gpu_core::select::Dtype,
     /// How the GQA layers' K/V are stored - the target's `:kv*` suffix.
     kv_tier: model::kv_tier::KvTier,
     gpus: Vec<(u32, String, u64)>,
@@ -129,7 +127,6 @@ impl Qwen35Engine {
         Ok(Qwen35Engine {
             path: path.to_string(),
             tier: ckpt.held_tiers(&cfg)?,
-            head: ckpt.head_tier(),
             kv_tier,
             gpus,
             max_context: Some(cfg.max_position_embeddings).filter(|&n| n > 0),
@@ -183,11 +180,11 @@ impl LongContextEngine for Qwen35Engine {
     }
 
     fn plan(&mut self, batch: u32, context: u32) -> Result<Fit, String> {
-        let ckpt = ResidentCheckpoint::open(&self.path).map_err(|e| format!("open {}: {e}", self.path))?;
-        let cfg = ckpt.config(context)?;
-        let needed = serving_cost(&cfg, &ServingShape { head: self.head, ..ServingShape::new(context, self.tier.clone(), self.kv_tier, batch) }).total();
+        // The placement's own charge: a shape rebuilt here from defaults missed the resident's embedding table.
+        let resident = self.resident(batch, context);
+        let needed = resident.planned_cost()?.total();
         let usable = self.gpus.iter().map(|g| g.2).sum();
-        let fits = !self.placement(&self.resident(batch, context)).is_empty();
+        let fits = !self.placement(&resident).is_empty();
         Ok(Fit { fits, needed_bytes: needed, usable_bytes: usable })
     }
 
@@ -691,7 +688,7 @@ mod tests {
     #[test]
     fn the_qwen35_engine_reports_the_kv_tier_it_plans_and_runs_with() {
         for kv in model::kv_tier::KvTier::ALL {
-            let engine = Qwen35Engine { path: String::new(), tier: model::ops::TierPolicy::uniform(gpu_core::select::Dtype::I8), head: gpu_core::select::Dtype::I8, kv_tier: kv, gpus: Vec::new(), max_context: None, inst: None, prompt_seed: None };
+            let engine = Qwen35Engine { path: String::new(), tier: model::ops::TierPolicy::uniform(gpu_core::select::Dtype::I8), kv_tier: kv, gpus: Vec::new(), max_context: None, inst: None, prompt_seed: None };
             assert_eq!(engine.describe().kv_precision, kv_label(kv));
             assert!(model::kv_tier::KvTier::ALL.iter().map(|k| kv_label(*k)).collect::<std::collections::HashSet<_>>().len() == model::kv_tier::KvTier::ALL.len(), "every tier needs its own label");
         }

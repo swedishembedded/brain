@@ -4460,6 +4460,15 @@ impl Qwen35GgufResident {
         (table <= smallest / EMBED_RESIDENT_MAX_SHARE).then_some(tier)
     }
 
+    /// The device bytes this resident's placement charges, as configured: [`serving_cost`] over the shape it loads
+    /// with (its embedding table, prefix slots, paged pool, speculation and state tiers). The one figure a report of
+    /// "planned bytes" must quote; a shape rebuilt elsewhere from defaults misses whatever the resident adds.
+    pub fn planned_cost(&self) -> Result<LayerBytes, String> {
+        let mg = ResidentCheckpoint::open(&self.gguf_path).map_err(|e| format!("open {}: {e}", self.gguf_path))?;
+        let cfg = mg.config(self.cap)?;
+        Ok(serving_cost(&cfg, &self.serving_shape(&mg, &cfg)))
+    }
+
     /// What this resident will hold on the cards besides the weights, as
     /// configured: speculation is charged only where loading will allocate it
     /// ([`SpecServing::cost`]) - the verify kernels on every budgeted card and,

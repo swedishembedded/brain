@@ -3086,8 +3086,12 @@ build, `perf run serve --concurrency 16 --input 8192`: device 31445 MiB, system 
 | the model instance's single-sequence decode state made on first use | longctx 32K batch 1 device used 33.5 -> 33.3 GiB; plan 29.2 GiB and 13 admitted unchanged |
 | prefix-cache snapshot rows in host memory backed 8 rows at a time as the cache fills (`HostSnapshots`) | host held after build 4788 -> 1197 MiB; serve c=16 x 8K req/s 1.16 / 1.17 -> 1.16 / 1.16, TTFT p95 11.2 / 11.1 -> 11.2 / 11.2 s |
 
-- [ ] Device used at batch 1 (33.3 GiB) is 4.1 GiB over the plan (29.2): the CUDA context, the library workspaces and
-      what the plan does not count (`work_state`, the decode tapes' scratch, held freed blocks) - not yet broken down.
+- Device used at batch 1 (33.3 GiB) looked 4.1 GiB over the plan (29.2): `perf run longctx` priced a shape it rebuilt
+  from defaults, which left out the resident's device embedding table (2.4 GiB). It now quotes the placement's own
+  charge (`Qwen35GgufResident::planned_cost`): plan 31.6 GiB against 31.7 GiB of the engine's device allocations
+  (`Gpu::live_tally`, 32510 MiB in 1559 blocks, 76 MiB pool after the steps); the other 1.6 GiB the driver reports is
+  the CUDA context, 99-111 modules and the library handles, inside the placement headroom (`capacity::headroom`:
+  512 MiB plus 14 % of what is allocated). Admitted at 32K unchanged (13): the placement always used its own charge.
 - [ ] The speculative verify scratch (16 rows x 48 layers, 2.5 GB) is allocated and charged whenever MTP loads,
       although the scheduler verifies only at 2 sequences or fewer; the decode, verify and MTP draft tape caches each
       own a scratch set.
