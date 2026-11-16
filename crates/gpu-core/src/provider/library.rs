@@ -450,6 +450,49 @@ pub fn qkv_split_rows(gpu: &Gpu, steps: &mut Vec<Step>, product: &DeviceBuffer, 
     Some(parts)
 }
 
+const QK_NORM_ROPE_BINDINGS: &[BindKind] = &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageReadWrite];
+
+/// The rows of a dense attention layer's query or key heads (see [`qk_norm_rope`]).
+#[derive(Clone, Copy, Debug)]
+pub struct QkNormRopeShape {
+    /// Tokens; each has its own position.
+    pub tokens: u32,
+    /// Heads a token carries.
+    pub heads: u32,
+    pub head_dim: u32,
+    pub rms_eps: f32,
+    /// The rotary base (theta).
+    pub rope_base: f32,
+}
+
+/// `out` = every head of `x` (`[tokens * heads, head_dim]`) RMS-normed with the gain `w` and rotated half-split by its token's
+/// position (`positions[token]`): the portable `qknorm_rope_fused`'s contract and its bits, with the angles computed once
+/// for four heads of a token. Pushes the step and returns `true`; `false`, nothing pushed, when the device declines or the
+/// shape is not served (an odd head width or one past 256).
+#[allow(clippy::too_many_arguments)]
+pub fn qk_norm_rope(gpu: &Gpu, steps: &mut Vec<Step>, shape: &QkNormRopeShape, x: &DeviceBuffer, w: &DeviceBuffer, positions: &DeviceBuffer, out: &DeviceBuffer) -> bool {
+    let QkNormRopeShape { tokens, heads, head_dim, rms_eps, rope_base } = *shape;
+    let rows = u64::from(tokens) * u64::from(heads);
+    if tokens == 0 || heads == 0 || head_dim == 0 || !head_dim.is_multiple_of(2) || head_dim > 256 || rows * u64::from(head_dim) > u64::from(u32::MAX) {
+        return false;
+    }
+    let Some(kernel) = kernels_cuda::get("qknorm_rope_rows") else {
+        return false;
+    };
+    let Some(id) = gpu.native_kernel(kernel, QK_NORM_ROPE_BINDINGS) else {
+        return false;
+    };
+    let rows = rows as u32;
+    let params = vec![rows, heads, head_dim, rms_eps.to_bits(), rope_base.to_bits()];
+    // A block is four heads of one token.
+    let blocks = tokens * kernel.blocks_for(1, heads);
+    let Some(step) = gpu.step_native(id, &[x, w, positions, out], &params, blocks) else {
+        return false;
+    };
+    steps.push(priced(step, vec![portable("qknorm_rope_fused", params.clone(), rows)]));
+    true
+}
+
 /// The shape of a gated attention layer's front half over a block of rows (see [`gqa_qk_prepare`]).
 #[derive(Clone, Copy, Debug)]
 pub struct GqaQkShape {

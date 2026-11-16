@@ -2809,6 +2809,11 @@ impl Engine {
             s.push(self.rms(x, w, out, hd, rows));
             s.push(self.rope_yarn(out, inv_freq, *af, hd, heads, rows));
         } else if self.caps.workgroup_reductions {
+            // The native rows where the device offers them: the same bits, the angles computed once for four heads of a token.
+            let shape = library::QkNormRopeShape { tokens: rows / heads, heads, head_dim: hd, rms_eps: self.cfg.rms_eps, rope_base: theta };
+            if !self.gemm.is_reference_pinned() && library::qk_norm_rope(g, s, &shape, x, w, &self.sc.pos_buf, out) {
+                return;
+            }
             s.push(g.dispatch(
                 QKNORM_ROPE_FUSED,
                 &[x, w, &self.sc.pos_buf, out],

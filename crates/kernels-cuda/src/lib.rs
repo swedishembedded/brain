@@ -5345,6 +5345,24 @@ pub const ALL: &[CudaKernel] = &[
         src: include_str!("../cu/rmsnorm_fused.cu"),
     },
     CudaKernel {
+        name: "qknorm_rope_rows",
+        op: Op::Elementwise,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_qknorm_rope_rows",
+        what: "a dense attention layer's per-head QK RMS norm and half-split rotary embedding, four heads of one token a block, 64 lanes each, the block's rotation angles computed once for its four heads; bit-identical to qknorm_rope_fused",
+        reported: "native:qknorm_rope_rows",
+        block_dim: 256,
+        // Four heads of one token a block.
+        tile: (1, 4),
+        // The angle tables, the 64 partial sums of four heads and their norms.
+        shared_bytes: 2 * 128 * 4 + 4 * 64 * 4 + 4 * 4,
+        programmatic: false,
+        src: include_str!("../cu/qknorm_rope_rows.cu"),
+    },
+    CudaKernel {
         name: "silu_mul_bf16",
         op: Op::Elementwise,
         weight: Dtype::F32,

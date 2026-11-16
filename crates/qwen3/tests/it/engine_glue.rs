@@ -10,7 +10,7 @@
 //! was `silu_mul` followed by the down product's own bf16 cast re-reading the whole activation: at a long prefill those
 //! copies moved more bytes than the products that surround them. On the library path each part of a fused weight is
 //! its own product into the buffer its reader takes, sharing one activation cast, and the SwiGLU writes the down
-//! product's bf16 operand in the same pass.
+//! product's bf16 operand in the same pass. The QK norm and rotation run one block a token, not a workgroup a head.
 
 use qwen3::serve::Engine;
 use qwen3::{Dtype, QwenConfig};
@@ -43,5 +43,7 @@ fn a_bf16_tensor_core_forward_copies_no_fused_product_apart() {
         assert!(!names.is_empty(), "{what}: the tape names its kernels");
         assert_eq!(count(names, "concat_split"), 0, "{what}: a fused product was copied apart: {names:?}");
         assert_eq!(count(names, "silu_mul"), 0, "{what}: the SwiGLU's bf16 operand took a pass of its own: {names:?}");
+        // The native rows compute the rotation angles once for four heads of a token.
+        assert_eq!(count(names, "qknorm_rope_fused"), 0, "{what}: the QK norm and rotation ran a workgroup per head: {names:?}");
     }
 }
