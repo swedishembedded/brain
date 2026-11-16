@@ -79,10 +79,9 @@ fn a_decode_step_is_one_product_over_the_fused_weight_and_computes_what_the_two_
         return brain_testutil::skip_unavailable(NO_FUSED_PROJECTIONS);
     }
     // One streaming candidate for every width: a dot product is summed in the same order whatever the width of the weight.
-    gpu_core::force_candidate("matmul_fp8_native", "matmul_fp8_dq_stream_r4");
+    let _pin = gpu_core::pin_candidate("matmul_fp8_native", "matmul_fp8_dq_stream_r4");
     let (one, one_launches) = decode(&cfg(), true, "qkvz_one", 2, KvTier::F32);
     let (two, two_launches) = decode(&cfg(), false, "qkvz_two", 2, KvTier::F32);
-    gpu_core::clear_forced_candidates();
     let gdn_layers = cfg().layer_types().iter().filter(|t| matches!(t, qwen35::config::LayerType::Linear)).count() as u64;
     assert!(one_launches + gdn_layers <= two_launches, "the first step issued {one_launches} launches with the one product and {two_launches} with the two: the one product did not engage");
     assert_logits_agree(&one, &two, None);

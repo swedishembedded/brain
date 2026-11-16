@@ -84,7 +84,7 @@ fn a_decode_step_is_one_product_over_the_fused_weight_and_computes_what_the_thre
         return brain_testutil::skip_unavailable(NO_FUSED_PROJECTIONS);
     }
     // One streaming candidate for every width: a dot product is summed in the same order whatever the width of the weight.
-    gpu_core::force_candidate("matmul_fp8_native", "matmul_fp8_dq_stream_r4");
+    let _pin = gpu_core::pin_candidate("matmul_fp8_native", "matmul_fp8_dq_stream_r4");
     // Launches saved a attention layer: f32 KV is the native front half (two products out, one split in), bf16 the chain (two
     // products and two `concat_split` out, one split in).
     for (kv, tag, saved) in [(KvTier::F32, "f32", 1u64), (KvTier::BF16, "bf16", 3)] {
@@ -95,7 +95,6 @@ fn a_decode_step_is_one_product_over_the_fused_weight_and_computes_what_the_thre
             assert_logits_agree(&one, &two, None);
         }
     }
-    gpu_core::clear_forced_candidates();
 }
 
 #[test]

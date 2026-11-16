@@ -39,7 +39,10 @@ and the legacy ones in `scripts/gates/test-skips.allow` only shrink.
 A test binary runs its tests side by side, so a test changes no process-wide
 selection. One that needs a backend or a tile budget scopes it to its own
 thread with `gpu_core::with_backend` or `model::block::with_tile_budget_words`;
-`gpu_core::set_default_backend` is the CLI's. A test that set the process
+`gpu_core::set_default_backend` is the CLI's. A test that needs one kernel
+candidate pins it for its own thread with `gpu_core::pin_candidate` (a guard);
+`gpu_core::force_candidate` and `clear_forced_candidates` are the CLI's, and a
+test's clear once took the bf16 form from the gdn test running beside it. A test that set the process
 backend to the CPU once moved every device built after it in the binary onto
 the CPU, and tests comparing two builds failed only in the full run.
 

@@ -33,13 +33,8 @@ fn max_rel(a: &[f32], reference: &[f32]) -> f64 {
     a.iter().zip(reference).fold(0.0f64, |m, (x, y)| m.max((f64::from(*x) - f64::from(*y)).abs() / scale))
 }
 
-/// Both tests force the `gdn_prefill` candidate and clear it again, and the forced table is process-wide: run in
-/// parallel, one test's clear landed between the other's force and its segment round.
-static FORCED_SLOT: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 #[test]
 fn a_round_of_segments_equals_each_segment_on_its_own_state_row() {
-    let _forced = FORCED_SLOT.lock().unwrap_or_else(|e| e.into_inner());
     let kernels: &'static [(&'static str, &'static str)] = {
         let mut v = KERNELS.to_vec();
         v.push(("gdn_ut_fwd", kernels::GDN_UT_FWD));
@@ -54,7 +49,7 @@ fn a_round_of_segments_equals_each_segment_on_its_own_state_row() {
         brain_testutil::skip_unavailable("a device with bf16 tensor cores");
         return;
     }
-    gpu_core::force_candidate("gdn_prefill", "bf16");
+    let _pin = gpu_core::pin_candidate("gdn_prefill", "bf16");
 
     // Three decode rows lead the round; then segments of a short remainder only, whole chunks only, and both, in
     // pool rows that are neither adjacent nor in order.
@@ -117,7 +112,6 @@ fn a_round_of_segments_equals_each_segment_on_its_own_state_row() {
     g.poll_wait();
     let ran: Vec<String> = g.kernel_times().unwrap_or_default().into_iter().map(|r| r.0).collect();
     g.set_kernel_timing(false);
-    gpu_core::clear_forced_candidates();
     for kernel in ["gdn_conv_silu_seg", "gdn_chunk_prep_seg_bf16", "gdn_chunk_loop_seg_bf16", "gdn_gated_norm"] {
         assert_eq!(ran.iter().filter(|k| k.contains(kernel)).count(), 1, "{kernel} is one launch for the round; ran {ran:?}");
     }
@@ -168,7 +162,6 @@ fn bf16_words(v: &[f32]) -> Vec<f32> {
 /// fp32 round's product within what the bf16 intermediates cost, and the recurrent state it leaves agrees to bf16 resolution.
 #[test]
 fn a_round_in_bf16_equals_the_fp32_round_to_bf16_resolution() {
-    let _forced = FORCED_SLOT.lock().unwrap_or_else(|e| e.into_inner());
     let kernels: &'static [(&'static str, &'static str)] = {
         let mut v = KERNELS.to_vec();
         v.push(("gdn_ut_fwd", kernels::GDN_UT_FWD));
@@ -183,7 +176,7 @@ fn a_round_in_bf16_equals_the_fp32_round_to_bf16_resolution() {
         brain_testutil::skip_unavailable("a device with bf16 tensor cores");
         return;
     }
-    gpu_core::force_candidate("gdn_prefill", "bf16");
+    let _pin = gpu_core::pin_candidate("gdn_prefill", "bf16");
     let lead = 3u32;
     let segs = [(70u32, 4u32), (64, 1), (21, 6), (130, 0)];
     let mut spans = Vec::new();
@@ -231,7 +224,7 @@ fn a_round_in_bf16_equals_the_fp32_round_to_bf16_resolution() {
     assert!(truth.iter().any(|v| v.abs() > 1e-3), "degenerate fixture: forward output is ~0");
     // Both bodies of the bf16 form's recurrence (`mma.sync`, and the warpgroup one where the device has it) are held to the same bound.
     for body in ["mma", "wg"] {
-        gpu_core::force_candidate("gdn_prefill_loop", body);
+        let _pin = gpu_core::pin_candidate("gdn_prefill_loop", body);
         let (bf_out, bf_state, bf_hist) = run(true);
         let e_bf16 = rms(&dequant(&bf_out.e4m3.clone().expect("asked for")), truth);
         let e_state = max_rel(&bf_state, &f32_state);
@@ -240,7 +233,6 @@ fn a_round_in_bf16_equals_the_fp32_round_to_bf16_resolution() {
         assert!(e_state <= 3e-2, "{body}: recurrent state differs by {e_state:.3e}");
         assert_eq!(bf_hist, f32_hist, "{body}: the convolution history holds bf16 values widened and must match exactly");
     }
-    gpu_core::clear_forced_candidates();
 }
 
 /// The words of a bf16 pool read back (two elements to a word, the even element low) as f32 values.
@@ -253,7 +245,6 @@ fn bf16_unwords(w: &[f32]) -> Vec<f32> {
 /// (the only rounding is the end-of-walk store) and the history, which holds bf16 values, matches exactly.
 #[test]
 fn a_round_over_bf16_pools_equals_the_f32_pool_round_to_bf16_resolution() {
-    let _forced = FORCED_SLOT.lock().unwrap_or_else(|e| e.into_inner());
     let kernels: &'static [(&'static str, &'static str)] = {
         let mut v = KERNELS.to_vec();
         v.push(("gdn_ut_fwd", kernels::GDN_UT_FWD));
@@ -268,7 +259,7 @@ fn a_round_over_bf16_pools_equals_the_f32_pool_round_to_bf16_resolution() {
         brain_testutil::skip_unavailable("a device with bf16 tensor cores");
         return;
     }
-    gpu_core::force_candidate("gdn_prefill", "bf16");
+    let _pin = gpu_core::pin_candidate("gdn_prefill", "bf16");
     let lead = 3u32;
     let segs = [(70u32, 4u32), (64, 1), (21, 6), (130, 0)];
     let mut spans = Vec::new();
@@ -307,7 +298,6 @@ fn a_round_over_bf16_pools_equals_the_f32_pool_round_to_bf16_resolution() {
     };
     let (f32_out, f32_state, f32_hist) = run(false);
     let (bf_out, bf_state, bf_hist) = run(true);
-    gpu_core::clear_forced_candidates();
 
     let from = lead as usize * value_dim;
     let rows_of = |o: &model::gdn_segments::SegmentsOut| g.read(&o.gated, n as usize * value_dim)[from..].to_vec();

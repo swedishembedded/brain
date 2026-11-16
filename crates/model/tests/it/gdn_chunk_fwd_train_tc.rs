@@ -468,7 +468,7 @@ fn the_bf16_prefill_form_matches_the_exact_form_within_a_few_bf16_steps() {
         let (out, fin) = (g.storage(len as u64), g.storage((bh * 128 * 128) as u64));
         let scratch = GdnTokScratchBufs::new(&g, &shape);
         let run = |form: &str| {
-            gpu_core::force_candidate("gdn_prefill", form);
+            let _pin = gpu_core::pin_candidate("gdn_prefill", form);
             let (steps, token_major) = gdn_chunk_fwd_tokens(&g, &ids, &shape, &tok, &qcm, &kcm, &initial, &scratch.as_ref(), &out, &fin, true).expect("served");
             assert!(token_major, "the recurrence writes token-major rows");
             g.reset_kernel_times();
@@ -480,7 +480,6 @@ fn the_bf16_prefill_form_matches_the_exact_form_within_a_few_bf16_steps() {
         };
         let (exact_out, exact_fin, exact_ran) = run("exact");
         let (bf_out, bf_fin, bf_ran) = run("bf16");
-        gpu_core::clear_forced_candidates();
         assert!(exact_ran.iter().any(|k| k.contains("gdn_chunk_loop_tc")), "exact form ran {exact_ran:?}");
         assert!(bf_ran.iter().any(|k| k.contains("gdn_chunk_loop_bf16")) && bf_ran.iter().any(|k| k.contains("gdn_chunk_prep_tok_bf16")), "bf16 form ran {bf_ran:?}");
         let rms = |a: &[f32]| (a.iter().map(|x| f64::from(*x).powi(2)).sum::<f64>() / a.len() as f64).sqrt();
@@ -533,7 +532,7 @@ fn production_shape_prefill_forward_bench() {
     let reps = 5;
     let mut outs = Vec::new();
     for candidate in ["tc", "bf16"] {
-        gpu_core::force_candidate("gdn_prefill", candidate);
+        let _pin = gpu_core::pin_candidate("gdn_prefill", candidate);
         run();
         let start = std::time::Instant::now();
         for _ in 0..reps {
@@ -542,7 +541,6 @@ fn production_shape_prefill_forward_bench() {
         println!("gdn prefill forward ({candidate}), {t} tokens x {h} heads: {:.3} ms a layer", start.elapsed().as_secs_f64() * 1e3 / reps as f64);
         outs.push((g.read(&out, len), g.read(&fin, bh * 128 * 128)));
     }
-    gpu_core::clear_forced_candidates();
     let rms = |a: &[f32]| (a.iter().map(|x| (*x as f64).powi(2)).sum::<f64>() / a.len() as f64).sqrt();
     let err = |a: &[f32], r: &[f32]| (a.iter().zip(r).map(|(x, y)| (*x as f64 - *y as f64).powi(2)).sum::<f64>() / a.len() as f64).sqrt() / rms(r);
     println!("bf16 vs exact: out relative rms error {:.3e}, final state {:.3e}", err(&outs[1].0, &outs[0].0), err(&outs[1].1, &outs[0].1));

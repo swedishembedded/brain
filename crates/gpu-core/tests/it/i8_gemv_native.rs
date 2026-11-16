@@ -484,7 +484,7 @@ fn every_candidate_of_the_slot_agrees_with_the_wgsl_reference() {
         .collect();
     let mut served = std::collections::BTreeSet::new();
     for forced in &candidates {
-        gpu_core::force_candidate("matmul_i8_gemv", forced);
+        let _pin = gpu_core::pin_candidate("matmul_i8_gemv", forced);
         for (kg, n) in [(16u32, 17u32), (72, 9), (328, 33), (1280, 64)] {
             for m in (1..=NATIVE_ROWS).step_by(3).chain([NATIVE_ROWS]) {
                 for lead in LEADS {
@@ -497,7 +497,6 @@ fn every_candidate_of_the_slot_agrees_with_the_wgsl_reference() {
             }
         }
     }
-    gpu_core::clear_forced_candidates();
     for c in &candidates {
         assert!(served.contains(c.as_str()), "{c} was never the kernel that served a dispatch: {served:?}");
     }

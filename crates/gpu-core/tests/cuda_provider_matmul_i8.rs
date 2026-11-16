@@ -382,9 +382,8 @@ fn every_prefill_candidate_agrees_with_the_f64_oracle_on_ragged_shapes() {
         let p = Problem::new(m, n, k, 0x2000 + i as u64);
         let d = Device::upload(&gpu, &p);
         for cand in &offered {
-            gpu_core::force_candidate("matmul_i8_prefill", cand);
+            let _pin = gpu_core::pin_candidate("matmul_i8_prefill", cand);
             let (got, used) = d.run(&production, &p);
-            gpu_core::clear_forced_candidates();
             assert_eq!(used.len(), 1, "{m}x{n}x{k}: one kernel answers, got {used:?}");
             if used[0] == format!("native:{cand}") {
                 ran.push(cand);

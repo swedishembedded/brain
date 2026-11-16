@@ -130,7 +130,7 @@ fn device_time(shapes: &[(u32, u32, u32)]) {
             .collect();
         let out = gpu.storage(u64::from(m) * u64::from(n));
         for name in names {
-            gpu_core::force_candidate(if m <= backend_api::select::DECODE_REGIME_MAX_ROWS { "matmul_i8_gemv" } else { "matmul_i8_prefill" }, name);
+            let _pin = gpu_core::pin_candidate(if m <= backend_api::select::DECODE_REGIME_MAX_ROWS { "matmul_i8_gemv" } else { "matmul_i8_prefill" }, name);
             let steps: Vec<_> = (0..copies.max(6))
                 .filter_map(|i| {
                     let (w, s) = &ws[i % copies];
@@ -153,7 +153,6 @@ fn device_time(shapes: &[(u32, u32, u32)]) {
             println!("m={m:<5} K={k:<6} N={n:<6} {name:<24} {:>8.1} us  {gbs:>7.0} GB/s  {tflops:>6.1} TFLOPS", best * 1e3);
         }
     }
-    gpu_core::clear_forced_candidates();
 }
 
 #[test]

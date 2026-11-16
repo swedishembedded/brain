@@ -124,7 +124,7 @@ fn one_candidate_on_the_whole_weight_and_on_its_parts_gives_the_same_bits() {
     // Every output element is a dot product of one weight row with one activation row: a candidate that serves both
     // shapes sums it in the same order whatever the width of the weight.
     for candidate in ["matmul_fp8_dq_stream_r4", "matmul_fp8_gemv_f16_a1w4d4b5", "matmul_fp8_wgmma_swap_tma_bn144c1"] {
-        gpu_core::force_candidate(SLOT, candidate);
+        let _pin = gpu_core::pin_candidate(SLOT, candidate);
         for m in [1usize, 16, 48] {
             let case = Case { ops: &ops, x: ops.gpu().storage_init("x", &rng.vec_scaled(m * K, 1.0)), m };
             let whole = case.product(&fused, (0, (N_FIRST + N_SECOND) as u32));
@@ -133,7 +133,6 @@ fn one_candidate_on_the_whole_weight_and_on_its_parts_gives_the_same_bits() {
             assert_eq!(bits(whole), bits(stacked), "{candidate} m={m}: one product over the fused weight differs from the products of its parts");
         }
     }
-    gpu_core::clear_forced_candidates();
 }
 
 /// Back-to-back launches of the two windows and of the whole fused weight at the production shapes of a Gated DeltaNet layer

@@ -37,7 +37,7 @@ fn every_candidate_keeps_its_promise_on_the_rounds_it_serves() {
     ];
     let mut exercised = vec![0usize; CANDIDATES.len()];
     for (ci, &(name, exact)) in CANDIDATES.iter().enumerate() {
-        gpu_core::force_candidate("moe_i8_grouped", name);
+        let _pin = gpu_core::pin_candidate("moe_i8_grouped", name);
         for (i, c) in cases.iter().enumerate() {
             // A candidate that does not serve the round is not what the dispatch runs: skip it.
             if gpu.native_kernel_for(K_GROUPED, &c.params()) != Some(name) {
@@ -55,7 +55,6 @@ fn every_candidate_keeps_its_promise_on_the_rounds_it_serves() {
             }
         }
     }
-    gpu_core::clear_forced_candidates();
     for (&(name, _), &n) in CANDIDATES.iter().zip(&exercised) {
         assert!(n > 0, "{name} served none of the rounds: the gate checked nothing of it");
     }

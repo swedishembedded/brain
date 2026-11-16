@@ -113,9 +113,6 @@ fn rel_rms(a: &[f32], reference: &[f32], bf16: bool) -> f64 {
     (num / den.max(1e-30)).sqrt()
 }
 
-/// Both tests pin the `gdn_prefill_loop` candidate, a process-wide table.
-static FORCED_SLOT: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 fn round_of_three() -> Vec<GdnSegmentSpan> {
     vec![GdnSegmentSpan { row0: 0, rows: 300, slot: 0 }, GdnSegmentSpan { row0: 300, rows: 256, slot: 1 }, GdnSegmentSpan { row0: 556, rows: 144, slot: 2 }]
 }
@@ -139,26 +136,23 @@ fn rounds_of_one_and_two() -> [Vec<GdnSegmentSpan>; 3] {
 /// single-stage block a half) against the `mma.sync` one over rounds of one to twelve segments, whole and short chunks.
 #[test]
 fn the_warpgroup_recurrence_agrees_with_the_mma_one_over_a_round_of_segments() {
-    let _forced = FORCED_SLOT.lock().unwrap_or_else(|e| e.into_inner());
     for spans in [round_of_three(), round_of_twelve()].into_iter().chain(rounds_of_one_and_two()) {
-        gpu_core::force_candidate("gdn_prefill_loop", "mma");
+        let _pin = gpu_core::pin_candidate("gdn_prefill_loop", "mma");
         let mma = bench("mma", &spans);
-        gpu_core::force_candidate("gdn_prefill_loop", "wg");
+        let _pin = gpu_core::pin_candidate("gdn_prefill_loop", "wg");
         for form in ["half", "full", "lean"] {
-            gpu_core::force_candidate(cuda::GDN_LOOP_FORM_SLOT, form);
+            let _pin = gpu_core::pin_candidate(cuda::GDN_LOOP_FORM_SLOT, form);
             let wg = bench(form, &spans);
             let (Some(mma), Some(wg)) = (&mma, wg) else { return };
             let (out, state) = (rel_rms(&wg.0, &mma.0, true), rel_rms(&wg.1, &mma.1, false));
             assert!(out < 4.0 / 512.0 && state < 4.0 / 512.0, "{} segments, {form}: output {out:.2e}, state {state:.2e}", spans.len());
         }
-        gpu_core::clear_forced_candidates();
     }
 }
 
 #[test]
 #[ignore = "a bench at the production shape, run by hand"]
 fn the_serving_prefill_layer_at_8k_tokens_and_in_a_700_row_round() {
-    let _forced = FORCED_SLOT.lock().unwrap_or_else(|e| e.into_inner());
     let rounds: [(&str, Vec<GdnSegmentSpan>); 4] = [
         ("one 64-row segment", vec![GdnSegmentSpan { row0: 0, rows: 64, slot: 0 }]),
         ("one 320-row segment", vec![GdnSegmentSpan { row0: 0, rows: 320, slot: 0 }]),
@@ -168,10 +162,9 @@ fn the_serving_prefill_layer_at_8k_tokens_and_in_a_700_row_round() {
     for (label, spans) in &rounds {
         let mut results = Vec::new();
         for body in ["mma", "wg"] {
-            gpu_core::force_candidate("gdn_prefill_loop", body);
+            let _pin = gpu_core::pin_candidate("gdn_prefill_loop", body);
             results.extend(bench(&format!("{label} ({body} recurrence)"), spans));
         }
-        gpu_core::clear_forced_candidates();
         if let [mma, wg] = &results[..] {
             println!("   wg vs mma: output {:.2e}, state {:.2e}", rel_rms(&wg.0, &mma.0, true), rel_rms(&wg.1, &mma.1, false));
         }
@@ -182,8 +175,7 @@ fn the_serving_prefill_layer_at_8k_tokens_and_in_a_700_row_round() {
 #[test]
 #[ignore = "a bench at the production shape, run by hand"]
 fn the_serving_prefill_layer_in_a_4096_row_round() {
-    let _forced = FORCED_SLOT.lock().unwrap_or_else(|e| e.into_inner());
-    gpu_core::force_candidate("gdn_prefill_loop", "wg");
+    let _pin = gpu_core::pin_candidate("gdn_prefill_loop", "wg");
     for lens in [vec![3900u32, 196], vec![3500, 300, 296], vec![3000, 1096], vec![2600, 1496], vec![2048, 2048], vec![3584, 256, 128, 128], vec![1024, 1024, 1024, 1024]] {
         let mut row0 = 0;
         let spans: Vec<_> = lens.iter().enumerate().map(|(i, &rows)| { let s = GdnSegmentSpan { row0, rows, slot: i as u32 }; row0 += rows; s }).collect();
@@ -194,7 +186,6 @@ fn the_serving_prefill_layer_in_a_4096_row_round() {
         let spans: Vec<_> = (0..pieces).map(|i| GdnSegmentSpan { row0: i * rows, rows, slot: i }).collect();
         bench(&format!("4096-row round as {pieces} segment(s) (wg recurrence)"), &spans);
     }
-    gpu_core::clear_forced_candidates();
 }
 
 /// The four segment kernels of a layer (convolution, prep, recurrence, gated norm) launched back to back over a 4096-row round of two segments,
@@ -204,7 +195,6 @@ fn the_serving_prefill_layer_in_a_4096_row_round() {
 #[test]
 #[ignore = "a stress run of several minutes, by hand"]
 fn the_segment_kernels_survive_back_to_back_launches() {
-    let _forced = FORCED_SLOT.lock().unwrap_or_else(|e| e.into_inner());
     for form in ["half", "full", "lean", "alternate"] {
         stress_segment_kernels(form);
     }
@@ -216,7 +206,7 @@ fn stress_segment_kernels(form: &str) {
         brain_testutil::skip_unavailable("a Hopper device");
         return;
     }
-    gpu_core::force_candidate("gdn_prefill_loop", "wg");
+    let _pin = gpu_core::pin_candidate("gdn_prefill_loop", "wg");
     let spans = [GdnSegmentSpan { row0: 0, rows: 3000, slot: 0 }, GdnSegmentSpan { row0: 3000, rows: 1096, slot: 1 }];
     let n = 4096u32;
     let rows = u64::from(n);
@@ -245,7 +235,7 @@ fn stress_segment_kernels(form: &str) {
         let mut steps = Vec::new();
         for layer in 0..8 {
             // Alternate layers between two launch forms of the recurrence (the served rounds alternate them from round to round).
-            gpu_core::force_candidate(cuda::GDN_LOOP_FORM_SLOT, if form == "alternate" { if layer % 2 == 0 { "full" } else { "half" } } else { form });
+            let _pin = gpu_core::pin_candidate(cuda::GDN_LOOP_FORM_SLOT, if form == "alternate" { if layer % 2 == 0 { "full" } else { "half" } } else { form });
             steps.push(cuda::gdn_conv_silu_seg_step(&g, &[&mixed, &conv_w, &tbl, &hist, &query, &key, &value], conv_layout, &table, true, true, 1e-6).expect("conv"));
             steps.push(cuda::gdn_chunk_prep_seg_bf16_step(&g, &[&query, &key, &value, &bproj, &aproj, &a_log, &dt_bias, &tbl, &g_cs, &exp_g_cs, &u, &wm, &intra, &qcm, &kcm], layout, &table, true).expect("prep"));
             steps.push(cuda::gdn_chunk_loop_seg_bf16_step(&g, &[&key, &query, &wm, &u, &g_cs, &intra, &tbl, &state, &out], layout, &table, true, true).expect("loop"));
@@ -280,13 +270,11 @@ fn stress_segment_kernels(form: &str) {
         assert!(digest() == first, "batch {batches}: the results differ from the first batch's");
         batches += 1;
     }
-    gpu_core::clear_forced_candidates();
     println!("{form}: {batches} batches of 8 layers (convolution, prep, recurrence, norm), identical results");
 }
 
 #[test]
 fn the_measured_selection_runs_the_recurrence_on_warpgroups_on_a_hopper_card() {
-    let _forced = FORCED_SLOT.lock().unwrap_or_else(|e| e.into_inner());
     let g = gpu_core::testgpu::dev(&[]);
     if g.caps().arch.compute_capability.is_none_or(|cc| cc < (9, 0)) {
         brain_testutil::skip_unavailable("a Hopper device");

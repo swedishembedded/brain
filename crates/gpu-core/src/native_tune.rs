@@ -353,10 +353,39 @@ pub fn force_candidate(slot: &str, kernel: &str) {
     FORCED_ANY.store(true, Ordering::Release);
 }
 
-/// The candidate `slot` is pinned to by [`force_candidate`], if any.
+thread_local! {
+    /// The pins [`pin_candidate`] holds on this thread: `(id, slot, candidate)`, newest last.
+    static THREAD_PINS: std::cell::RefCell<Vec<(u64, String, String)>> = const { std::cell::RefCell::new(Vec::new()) };
+    static NEXT_PIN: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// A pin of one slot to one candidate on the thread that made it, released when dropped ([`pin_candidate`]).
+#[must_use = "the pin is released when this guard is dropped"]
+pub struct CandidatePin(u64);
+
+impl Drop for CandidatePin {
+    fn drop(&mut self) {
+        THREAD_PINS.with(|p| p.borrow_mut().retain(|(id, _, _)| *id != self.0));
+    }
+}
+
+/// Pin `slot` to the candidate `kernel` for the dispatches this thread builds while the returned guard lives, as
+/// [`force_candidate`] pins it for the whole process; other threads keep their choice. A test binary runs its tests
+/// side by side, so a test pins here: a process-wide pin, and the [`clear_forced`] that ended it, changed the
+/// candidates of whatever test ran beside it (a gdn segment round lost its bf16 form mid-test, and a recurrence test
+/// ran with the body another test had pinned). The newest live pin of a slot wins, and a thread's pin takes precedence
+/// over a process-wide one.
+pub fn pin_candidate(slot: &str, kernel: &str) -> CandidatePin {
+    let id = NEXT_PIN.with(|n| n.replace(n.get() + 1));
+    THREAD_PINS.with(|p| p.borrow_mut().push((id, slot.to_owned(), kernel.to_owned())));
+    CandidatePin(id)
+}
+
+/// The candidate `slot` is pinned to by a live [`pin_candidate`] of this thread, else by [`force_candidate`], if any.
 pub fn forced_candidate(slot: &str) -> Option<String> {
-    if !FORCED_ANY.load(Ordering::Acquire) {
-        return None;
+    let scoped = THREAD_PINS.with(|p| p.borrow().iter().rev().find(|(_, s, _)| s == slot).map(|(_, _, k)| k.clone()));
+    if scoped.is_some() || !FORCED_ANY.load(Ordering::Acquire) {
+        return scoped;
     }
     FORCED.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|(s, _)| s == slot).map(|(_, k)| k.clone())
 }
@@ -488,10 +517,8 @@ impl Tuned {
     /// Per dispatch this is O(1) in the table's size when `accepts` is (one hash lookup, no allocation, no lock
     /// unless a candidate is forced) plus O(candidates the class timed) when the winner is not accepted.
     pub(crate) fn choice(&self, slot: &str, params: &[u32], accepts: &dyn Fn(&str) -> bool) -> Option<Cow<'_, str>> {
-        if FORCED_ANY.load(Ordering::Acquire) {
-            if let Some((_, k)) = FORCED.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|(s, _)| s == slot) {
-                return Some(Cow::Owned(k.clone()));
-            }
+        if let Some(k) = forced_candidate(slot) {
+            return Some(Cow::Owned(k));
         }
         let e = self.entry(slot, class_of(slot, params)?)?;
         if accepts(&e.best) {
