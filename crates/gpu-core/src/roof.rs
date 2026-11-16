@@ -870,8 +870,8 @@ mod persist {
     /// The human-readable part of the slug prefers `key.identity`'s own
     /// device name where present - correct even for the SECOND device on a
     /// multi-GPU box - and falls back to `adapter_info()` (this PROCESS's
-    /// first-built wgpu adapter) only where no identity exists, unchanged
-    /// from before this existed.
+    /// first-built wgpu adapter) only where no identity exists; the CPU
+    /// backend, which has neither, is the host (`host-<n>cpus`).
     pub fn store(key: &DeviceKey) -> Option<RoofStore> {
         let dir = cache_dir()?;
         // The native int8 probe is part of what is measured, so a change to
@@ -882,6 +882,10 @@ mod persist {
         );
         let desc = match &key.identity {
             Some(id) => id.name.clone(),
+            // The CPU backend's device is the host, which reports no identity, and a process serving only on it
+            // builds no adapter to borrow a name from: naming it after the adapter left no store at all, so its roof
+            // was measured on every start and never kept. Its roof scales with the CPUs this process may run on.
+            None if key.backend == "cpu" => format!("host-{}cpus", std::thread::available_parallelism().map_or(1, |n| n.get())),
             None => crate::adapter_info()?.0,
         };
         let mut slug: String = desc
