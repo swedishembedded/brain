@@ -32,10 +32,11 @@ pub struct Emission {
     pub id: ReqId,
     pub at: Instant,
     pub kind: EmissionKind,
-    /// WHY, for [`EmissionKind::Failed`] — the engine's error string, carried
-    /// into the artifact (a run where every request failed used to record only
-    /// "N failed" with the reasons discarded at the reply boundary,
-    /// unrecoverable after the fact). `None` for every other kind.
+    /// WHY, for [`EmissionKind::Failed`] and [`EmissionKind::Rejected`] - the
+    /// engine's error string or refusal reason, carried into the artifact (a run
+    /// where every request failed or was refused used to record only a count,
+    /// the reasons discarded at the reply boundary, unrecoverable after the
+    /// fact). `None` for every other kind.
     pub error: Option<String>,
 }
 
@@ -185,6 +186,12 @@ pub(crate) mod testing {
         pub max_concurrent: usize,
         pub prefill_steps: usize,
         pending_prefill: Vec<(ReqId, usize, PerfRequest)>,
+        /// Longest `prompt + output` a request may ask for; a longer one is refused at admission, as a paged engine
+        /// refuses a sequence past its per-sequence capacity. `None` admits everything.
+        pub capacity: Option<usize>,
+        /// Refuse every `n`-th request (the first, then every `n` after it) whatever its length.
+        pub refuse_every: Option<usize>,
+        refused: Vec<ReqId>,
     }
 
     impl FakeTarget {
@@ -196,7 +203,22 @@ pub(crate) mod testing {
                 max_concurrent,
                 prefill_steps,
                 pending_prefill: Vec::new(),
+                capacity: None,
+                refuse_every: None,
+                refused: Vec::new(),
             }
+        }
+
+        /// A fake that refuses every request longer than `capacity` tokens.
+        pub fn with_capacity(mut self, capacity: usize) -> FakeTarget {
+            self.capacity = Some(capacity);
+            self
+        }
+
+        /// A fake that refuses every `n`-th request.
+        pub fn refusing_every(mut self, n: usize) -> FakeTarget {
+            self.refuse_every = Some(n.max(1));
+            self
         }
     }
 
@@ -207,10 +229,19 @@ pub(crate) mod testing {
         fn submit(&mut self, req: PerfRequest) -> ReqId {
             let id = self.next;
             self.next += 1;
-            self.queue.push_back((id, req));
+            let too_long = self.capacity.is_some_and(|cap| req.input_artifacts + req.output_artifacts > cap);
+            if too_long || self.refuse_every.is_some_and(|n| (id as usize).is_multiple_of(n)) {
+                self.refused.push(id);
+            } else {
+                self.queue.push_back((id, req));
+            }
             id
         }
         fn step(&mut self, out: &mut Vec<Emission>) -> bool {
+            let cap = self.capacity.unwrap_or(usize::MAX);
+            for id in self.refused.drain(..) {
+                out.push(Emission { id, at: Instant::now(), kind: EmissionKind::Rejected, error: Some(format!("needs more tokens than the capacity of {cap}")) });
+            }
             // Admit into prefill.
             while self.running.len() + self.pending_prefill.len() < self.max_concurrent {
                 match self.queue.pop_front() {
@@ -251,7 +282,7 @@ pub(crate) mod testing {
             self.busy()
         }
         fn busy(&self) -> bool {
-            !self.queue.is_empty() || !self.running.is_empty() || !self.pending_prefill.is_empty()
+            !self.queue.is_empty() || !self.running.is_empty() || !self.pending_prefill.is_empty() || !self.refused.is_empty()
         }
     }
 }

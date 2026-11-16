@@ -260,7 +260,20 @@ pub fn run(
     art.best_of_n = opt.best_of.max(1);
     art.spread_pct = best.spread_pct();
     apply_gate(&mut art, target, opt);
+    if let Some(why) = s.nothing_completed() {
+        invalidate_for(&mut art, &why);
+    }
     Ok(art)
+}
+
+/// Mark `art` invalid for `why`, ahead of any reason it already carries: a run that served nothing measured
+/// nothing, whatever else is wrong with it.
+fn invalidate_for(art: &mut Artifact, why: &str) {
+    let reason = match art.invalid_reason.take() {
+        Some(earlier) if !art.valid => format!("{why}; {earlier}"),
+        _ => why.to_string(),
+    };
+    art.invalidate(&reason);
 }
 
 /// Run the target's self-check and record the verdict. A failing gate marks the
@@ -289,6 +302,7 @@ fn run_sweep(
 ) -> Result<Artifact, String> {
     let mut curve = Vec::new();
     let mut best_point: Option<(usize, f64)> = None;
+    let mut empty_level: Option<String> = None;
     let mut last_workload = None;
     let gpu_before = crate::devicetel::sample();
     let wall_start = std::time::Instant::now();
@@ -306,6 +320,12 @@ fn run_sweep(
             "output_artifacts_per_s": crate::stats::r3(s.output_per_s),
             "goodput_per_s": crate::stats::r3(goodput),
             "slo_attainment": crate::stats::r3(attained),
+            "requests": s.requests,
+            "completed": s.completed,
+            "rejected": s.rejected,
+            "rejections": s.rejections,
+            "failed": s.failed,
+            "errors": s.errors,
             "ttfa_ms": s.ttfa.to_json(),
             "ial_ms": s.ial.to_json(),
             "e2e_ms": s.e2e.to_json(),
@@ -313,6 +333,9 @@ fn run_sweep(
         // "Sustainable" = the SLO actually held, not merely "it produced output".
         if attained >= 0.99 && best_point.map(|(_, g)| goodput > g).unwrap_or(true) {
             best_point = Some((c, goodput));
+        }
+        if empty_level.is_none() {
+            empty_level = s.nothing_completed().map(|why| format!("at concurrency {c}, {why}"));
         }
         last_workload = Some(w);
     }
@@ -336,6 +359,9 @@ fn run_sweep(
     let gpu_after = crate::devicetel::sample();
     art.resources = crate::devicetel::resources_json(&gpu_before, &gpu_after, wall_start.elapsed());
     apply_gate(&mut art, target, opt);
+    if let Some(why) = empty_level {
+        invalidate_for(&mut art, &why);
+    }
     Ok(art)
 }
 
@@ -461,6 +487,9 @@ fn render_sweep(art: &Artifact) -> String {
     if art.env.is_software_gpu() {
         s.push_str("  ! software rasteriser: this is NOT a hardware GPU result\n");
     }
+    if !art.valid {
+        s.push_str(&format!("  ! INVALID: {}\n", art.invalid_reason.clone().unwrap_or_default()));
+    }
     s.push_str(&format!(
         "\n{:>5} {:>12} {:>12} {:>12} {:>11} {:>11}\n",
         "conc", "req/s", "out/s", "goodput/s", "ttfa p99", "ial p99"
@@ -478,6 +507,12 @@ fn render_sweep(art: &Artifact) -> String {
             p["ttfa_ms"]["p99"].as_f64().map(|v| format!("{v:.1}")).unwrap_or_else(|| "—".into()),
             p["ial_ms"]["p99"].as_f64().map(|v| format!("{v:.1}")).unwrap_or_else(|| "—".into()),
         ));
+    }
+    for p in art.curve.iter().flatten() {
+        let c = p["concurrency"].as_u64().unwrap_or(0);
+        for line in crate::report::shortfall_lines(p).iter().flat_map(|l| l.lines()) {
+            s.push_str(&format!("  ! concurrency {c}: {line}\n"));
+        }
     }
     match art.performance["max_sustainable_concurrency"].as_u64() {
         Some(c) => s.push_str(&format!(
@@ -588,6 +623,41 @@ mod tests {
         let o = Options { num_requests: 6, warmup_requests: 3, ..Default::default() };
         let art = run("throughput", &mut t, "interactive", 4, &o).unwrap();
         assert_eq!(art.performance["requests"], 6, "warm-up must not be counted");
+    }
+
+    /// A run that served nothing measured nothing: it is invalid with the reason the engine gave, and the summary
+    /// says how many requests were refused, never a bare rate of 0.
+    #[test]
+    fn a_run_that_completes_nothing_is_invalid_and_names_why() {
+        let mut t = FakeTarget::new(8, 1).with_capacity(4);
+        let art = run("serve", &mut t, "interactive", 2, &opt()).unwrap();
+        assert!(!art.valid, "a run with no completed request must be invalid");
+        let why = art.invalid_reason.clone().unwrap_or_default();
+        assert!(why.contains("no request completed") && why.contains("8 of 8 rejected") && why.contains("capacity of 4"), "{why}");
+        assert_eq!(art.performance["rejected"], 8);
+        assert!(art.performance["rejections"][0].as_str().unwrap_or_default().contains("capacity of 4"), "{}", art.performance);
+        let shown = render(&art);
+        assert!(shown.contains("INVALID") && shown.contains("8 of 8 requests rejected"), "{shown}");
+    }
+
+    /// Some refused, some served: the numbers stand, and the refusals are printed beside them.
+    #[test]
+    fn refused_requests_are_reported_beside_a_valid_run() {
+        let mut t = FakeTarget::new(8, 1).refusing_every(2);
+        let o = Options { num_requests: 6, warmup_requests: 0, ..Default::default() };
+        let art = run("serve", &mut t, "interactive", 2, &o).unwrap();
+        assert!(art.valid, "{:?}", art.invalid_reason);
+        assert_eq!(art.performance["rejected"], 3);
+        assert!(render(&art).contains("3 of 6 requests rejected"), "{}", render(&art));
+    }
+
+    /// A sweep level that completed nothing invalidates the sweep.
+    #[test]
+    fn a_sweep_level_that_completes_nothing_invalidates_the_sweep() {
+        let mut t = FakeTarget::new(8, 1).with_capacity(4);
+        let art = run("sweep", &mut t, "interactive", 0, &opt()).unwrap();
+        assert!(!art.valid);
+        assert!(art.invalid_reason.unwrap_or_default().contains("concurrency 1"), "the level is named");
     }
 
     #[test]

@@ -227,6 +227,23 @@ pub fn compare(paths: &[String]) -> String {
     out
 }
 
+/// The requests of a summary block (`performance`, or one sweep point) that were refused or failed, one line each
+/// with the reasons the engine gave, each line ending in a newline; `None` when every request was served.
+pub fn shortfall_lines(p: &Value) -> Option<String> {
+    let n = p["requests"].as_u64()?;
+    let reasons = |k: &str| p[k].as_array().map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join("; ")).unwrap_or_default();
+    let mut out = String::new();
+    for (count, what, why) in [("rejected", "rejected", "rejections"), ("failed", "failed", "errors")] {
+        let k = p[count].as_u64().unwrap_or(0);
+        if k > 0 {
+            let reasons = reasons(why);
+            let tail = if reasons.is_empty() { String::new() } else { format!(": {reasons}") };
+            out.push_str(&format!("{k} of {n} requests {what}{tail}\n"));
+        }
+    }
+    (!out.is_empty()).then_some(out)
+}
+
 /// One-run summary table.
 pub fn render(artifact: &crate::schema::Artifact) -> String {
     let j = artifact.to_json();
@@ -251,6 +268,11 @@ pub fn render(artifact: &crate::schema::Artifact) -> String {
     if j["correctness"]["passed"].is_null() {
         s.push_str("  ! correctness gate did not run — result is unverified\n");
     }
+    if let Some(lines) = shortfall_lines(p) {
+        for line in lines.lines() {
+            s.push_str(&format!("  ! {line}\n"));
+        }
+    }
     s.push_str(&format!("  {:<26} {}\n", "workload", j["workload"]["name"].as_str().unwrap_or("-")));
     s.push_str(&format!("  {:<26} {}\n", "arrival", j["workload"]["arrival"].as_str().unwrap_or("-")));
     let show = |k: &str, label: &str, suffix: &str| -> String {
@@ -259,6 +281,15 @@ pub fn render(artifact: &crate::schema::Artifact) -> String {
             None => format!("  {label:<26} —\n"),
         }
     };
+    if let Some(n) = p["requests"].as_u64() {
+        s.push_str(&format!(
+            "  {:<26} {n} (completed {}, rejected {}, failed {})\n",
+            "requests",
+            p["completed"].as_u64().unwrap_or(0),
+            p["rejected"].as_u64().unwrap_or(0),
+            p["failed"].as_u64().unwrap_or(0)
+        ));
+    }
     s.push_str(&show("requests_per_s", "requests/s", ""));
     s.push_str(&show("output_artifacts_per_s", &format!("output {unit}s/s"), ""));
     s.push_str(&show("goodput_per_s", "goodput/s", ""));

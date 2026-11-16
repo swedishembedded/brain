@@ -266,8 +266,8 @@ impl<D: PagedDecoder> PerfTarget for PagedLlmTarget<D> {
         for id in report.admitted {
             out.push(Emission { id, at: now, kind: EmissionKind::Admitted, error: None });
         }
-        for (id, _reason) in report.rejected {
-            out.push(Emission { id, at: now, kind: EmissionKind::Rejected, error: None });
+        for (id, reason) in report.rejected {
+            out.push(Emission { id, at: now, kind: EmissionKind::Rejected, error: Some(reason.to_string()) });
         }
         for (id, n) in report.produced {
             for _ in 0..n {
@@ -1363,7 +1363,7 @@ async fn drive_one(router: axum::Router, req: axum::http::Request<axum::body::Bo
     };
     let status = resp.status();
     if status == axum::http::StatusCode::TOO_MANY_REQUESTS || status == axum::http::StatusCode::SERVICE_UNAVAILABLE {
-        let _ = tx.send(Emission { id, at: Instant::now(), kind: EmissionKind::Rejected, error: None });
+        let _ = tx.send(Emission { id, at: Instant::now(), kind: EmissionKind::Rejected, error: Some(format!("HTTP {status}")) });
         return;
     }
     if !status.is_success() {

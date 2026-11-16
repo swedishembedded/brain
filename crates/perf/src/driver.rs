@@ -119,6 +119,7 @@ pub fn drive(target: &mut dyn PerfTarget, workload: &Workload) -> Run {
                     // Terminal, but neither completed nor failed: the request
                     // never entered service. `done` stays None.
                     rec.rejected = true;
+                    rec.error = e.error.clone();
                     in_flight = in_flight.saturating_sub(1);
                     if !rec.warmup {
                         measured_end = Some(e.at);

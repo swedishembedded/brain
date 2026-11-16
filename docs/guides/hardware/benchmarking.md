@@ -176,6 +176,14 @@ to check itself, leaves `correctness.passed` as `null`, and `compare`,
 passing gate**; it means nothing tested that these numbers came from the
 right computation.
 
+A run in which no request completed measured nothing: it is written with
+`valid: false` and an `invalid_reason` that counts the rejected and failed
+requests and quotes the reasons the engine gave (for example a prompt longer
+than the engine's per-sequence context). In any run, refused and failed
+requests are counted in `performance.rejected` and `performance.failed`, their
+distinct reasons sampled in `performance.rejections` and `performance.errors`,
+and the terminal report prints them on their own lines beside the rates.
+
 ## Makefile shortcuts
 
 ```bash

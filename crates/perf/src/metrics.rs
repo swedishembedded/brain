@@ -35,7 +35,7 @@ pub struct ReqRecord {
     pub first: Option<Instant>,
     pub done: Option<Instant>,
     pub failed: bool,
-    /// The engine's error string when `failed` (see `Emission::error`).
+    /// The engine's error string when `failed`, its refusal reason when `rejected` (see `Emission::error`).
     pub error: Option<String>,
     /// Refused by the engine's admission policy — terminal, never serviced,
     /// and deliberately NOT a failure (see `EmissionKind::Rejected`).
@@ -150,6 +150,25 @@ pub struct Summary {
     /// the artifact is the deliverable, and "N failed" with the reasons
     /// discarded is unrecoverable after the fact.
     pub errors: Vec<String>,
+    /// The same sample of distinct refusal reasons, for the rejected requests.
+    pub rejections: Vec<String>,
+}
+
+/// How many distinct reasons a summary keeps of each kind.
+const MAX_REASON_SAMPLES: usize = 5;
+
+/// The first few distinct reasons of the records `pick` selects, in arrival order.
+fn distinct_reasons(records: &[&ReqRecord], pick: impl Fn(&ReqRecord) -> bool) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for e in records.iter().filter(|r| pick(r)).filter_map(|r| r.error.as_ref()) {
+        if !out.contains(e) {
+            out.push(e.clone());
+            if out.len() >= MAX_REASON_SAMPLES {
+                break;
+            }
+        }
+    }
+    out
 }
 
 impl Summary {
@@ -213,20 +232,10 @@ impl Summary {
         // SLO attainment is over ADMITTED work: a policy that sheds hopeless
         // requests must not have its refusals scored as SLO misses.
         let n_admitted = n - rejected;
-        // First few DISTINCT failure reasons, so an all-failed run's artifact
-        // says WHY instead of only how many.
-        const MAX_ERROR_SAMPLES: usize = 5;
-        let mut errors: Vec<String> = Vec::new();
-        for r in &measured {
-            if let Some(e) = r.error.as_ref().filter(|_| r.failed) {
-                if !errors.contains(e) {
-                    errors.push(e.clone());
-                    if errors.len() >= MAX_ERROR_SAMPLES {
-                        break;
-                    }
-                }
-            }
-        }
+        // First few DISTINCT failure and refusal reasons, so an all-failed or all-refused run's artifact says WHY
+        // instead of only how many.
+        let errors = distinct_reasons(&measured, |r| r.failed);
+        let rejections = distinct_reasons(&measured, |r| r.rejected);
         Summary {
             wall_s,
             requests: n,
@@ -247,7 +256,24 @@ impl Summary {
             queue,
             slo,
             errors,
+            rejections,
         }
+    }
+
+    /// Why this measurement measured nothing: no request completed. `None` when at least one did, or none was sent.
+    pub fn nothing_completed(&self) -> Option<String> {
+        if self.completed > 0 || self.requests == 0 {
+            return None;
+        }
+        let mut why = format!("no request completed: {} of {} rejected", self.rejected, self.requests);
+        if !self.rejections.is_empty() {
+            why.push_str(&format!(" ({})", self.rejections.join("; ")));
+        }
+        why.push_str(&format!(", {} failed", self.failed));
+        if !self.errors.is_empty() {
+            why.push_str(&format!(" ({})", self.errors.join("; ")));
+        }
+        Some(why)
     }
 
     pub fn to_json(&mut self) -> Value {
@@ -258,6 +284,7 @@ impl Summary {
             "failed": self.failed,
             "errors": self.errors,
             "rejected": self.rejected,
+            "rejections": self.rejections,
             "requests_per_s": r3(self.requests_per_s),
             "input_artifacts_per_s": r3(self.input_per_s),
             "output_artifacts_per_s": r3(self.output_per_s),
