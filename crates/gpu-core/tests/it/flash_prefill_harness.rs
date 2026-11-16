@@ -444,13 +444,10 @@ fn prefill_rates(kv: Kv, cases: &[(u32, u32)]) {
     gpu_core::provider::cuda::set_flash_prefill_staged_min_rows(gpu_core::provider::cuda::FLASH_PREFILL_STAGED_MIN_ROWS);
 }
 
-/// Set the row count from which a warpgroup round is staged, at head_dim 256 only: every round of a narrower head is staged
-/// whatever the setting, and leaving the process-wide switch alone there keeps those tests from moving it under the head_dim
-/// 256 tests that run beside them.
+/// Set the row count from which a warpgroup round this thread builds is staged (every round of a narrower head than 256
+/// is staged whatever the setting).
 fn set_staged_min_rows(rows: u32) {
-    if HD == 256 {
-        gpu_core::provider::cuda::set_flash_prefill_staged_min_rows(rows);
-    }
+    gpu_core::provider::cuda::set_flash_prefill_staged_min_rows(rows);
 }
 
 /// The cases a warpgroup prefill test crosses: the shapes its structure distinguishes - one 128-row block and several, a

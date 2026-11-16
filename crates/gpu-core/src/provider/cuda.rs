@@ -1585,13 +1585,20 @@ const FLASH_PREFILL_WG_SPLITS_MAX: u32 = 4;
 /// ran faster without splits at every length; `brain roofline gpu --kernels` times the two).
 const FLASH_PREFILL_WG_UNSPLIT_ROWS: u32 = 2048;
 
-static FLASH_PREFILL_WG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+thread_local! {
+    /// The A/B switches of the prefill attention for the steps this thread builds ([`set_flash_prefill_wg`],
+    /// [`set_flash_prefill_staged_min_rows`]). Per thread, not per process: a test binary runs its tests side by side, and
+    /// one test's A/B setting changed the form another test asserted (`short_rounds_are_staged_by_their_tier_and_context`
+    /// failed in full runs only).
+    static FLASH_PREFILL_WG: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+    static FLASH_PREFILL_STAGED_MIN: std::cell::Cell<u32> = const { std::cell::Cell::new(FLASH_PREFILL_STAGED_MIN_ROWS) };
+}
 
 /// Choose the warpgroup (`wgmma`) head_dim 256 prefill attention over an int8 or FP8 KV cache where the part has it (the
-/// default) or version 2, which stays as the fallback and as the baseline of an A/B. Process-wide; takes effect for steps
-/// built after.
+/// default) or version 2, which stays as the fallback and as the baseline of an A/B. For the steps the calling thread
+/// builds after.
 pub fn set_flash_prefill_wg(on: bool) {
-    FLASH_PREFILL_WG.store(on, std::sync::atomic::Ordering::Relaxed);
+    FLASH_PREFILL_WG.with(|c| c.set(on));
 }
 
 /// The staged form's attention bindings: uniform, queries, the staged fp16 records, sequence lengths, context, split scratch.
@@ -1646,14 +1653,12 @@ pub const FLASH_PREFILL_STAGED_MIN_ROWS: u32 = 256;
 /// form from 8K).
 pub const FLASH_PREFILL_STAGED_MIN_KEYS: u32 = 4096;
 
-static FLASH_PREFILL_STAGED_MIN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(FLASH_PREFILL_STAGED_MIN_ROWS);
-
 /// Set the row count from which the warpgroup prefill widens the round's keys once into a staging buffer (default
 /// [`FLASH_PREFILL_STAGED_MIN_ROWS`]; a round of [`FLASH_PREFILL_STAGED_MIN_KEYS`] keys or more is staged too); `u32::MAX`
 /// keeps the form that widens in every block for an 8-bit cache whatever the context, the baseline of an A/B, and `1` stages
-/// every round (a test). Process-wide; takes effect for steps built after.
+/// every round (a test). For the steps the calling thread builds after.
 pub fn set_flash_prefill_staged_min_rows(rows: u32) {
-    FLASH_PREFILL_STAGED_MIN.store(rows, std::sync::atomic::Ordering::Relaxed);
+    FLASH_PREFILL_STAGED_MIN.with(|c| c.set(rows));
 }
 
 /// Device bytes of the staging buffer a staged warpgroup prefill round widens its keys into, for `n_kv_heads` heads of
@@ -1718,7 +1723,7 @@ impl WgPrefillScratch {
 pub fn flash_prefill_wg_available(gpu: &crate::Gpu, head_dim: u32) -> bool {
     let wg_kernel = || gpu.caps().arch.compute_capability.is_some_and(|cc| kernels_cuda::get(&format!("flash_prefill_f16_hd{head_dim}_wgs")).is_some_and(|k| k.min_cc <= cc));
     matches!(head_dim, 128 | 256)
-        && FLASH_PREFILL_WG.load(std::sync::atomic::Ordering::Relaxed)
+        && FLASH_PREFILL_WG.with(std::cell::Cell::get)
         && !FLASH_PREFILL_PORTABLE.load(std::sync::atomic::Ordering::Relaxed)
         && tensor_core_kernels_enabled(gpu)
         && wg_kernel()
@@ -1739,13 +1744,13 @@ pub fn flash_prefill_wg_available(gpu: &crate::Gpu, head_dim: u32) -> bool {
 /// `scratch` holds the staging buffer and the split scratch ([`WgPrefillScratch`]); `None` allocates the round's own.
 pub fn paged_flash_prefill_wg_steps(gpu: &crate::Gpu, head_dim: u32, bufs: &[&backend_api::DeviceBuffer], params: &[u32], keys: u32, kv: WgKv, scratch: Option<&WgPrefillScratch>) -> Option<Vec<crate::Step>> {
     assert_eq!(bufs.len(), kv.buffers(), "{kv:?}: the round binds {} buffers", kv.buffers());
-    if !matches!(head_dim, 128 | 256) || !FLASH_PREFILL_WG.load(std::sync::atomic::Ordering::Relaxed) || !flash_prefill_offered(gpu, head_dim, params) {
+    if !matches!(head_dim, 128 | 256) || !FLASH_PREFILL_WG.with(std::cell::Cell::get) || !flash_prefill_offered(gpu, head_dim, params) {
         return None;
     }
     // The row count weighs staging against widening in every block. That form exists for an 8-bit cache at head_dim 256 alone;
     // the per-call alternative of every other cache and width is slower than a widen pass at any row count
     // (`the_compact_cache_prefill_rates_at_short_rounds`, `the_qwen3_prefill_rates`), so those always stage.
-    let min_rows = FLASH_PREFILL_STAGED_MIN.load(std::sync::atomic::Ordering::Relaxed);
+    let min_rows = FLASH_PREFILL_STAGED_MIN.with(std::cell::Cell::get);
     let in_block_form = head_dim == 256 && matches!(kv, WgKv::Scaled(_));
     let staged = !in_block_form || (min_rows != u32::MAX && (params[0] >= min_rows || keys >= FLASH_PREFILL_STAGED_MIN_KEYS));
     let cc = gpu.caps().arch.compute_capability?;
