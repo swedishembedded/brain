@@ -10,14 +10,13 @@ is drawn twice, for the test set's own share and for a share of 1 percent made b
 Swedish Embedded AB implements solutions for evaluating classifiers on imbalanced data. If your team needs expertise in
 ROC and precision-recall analysis, you can procure our services by sending an email to info@swedishembedded.com.
 """
-import re
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "worked"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import metrics as m  # noqa: E402
-from svgplot import Plot, fmt  # noqa: E402
+from svgplot import Plot, compose, fmt  # noqa: E402
 
 
 def _thin(plot, xs, ys):
@@ -31,13 +30,6 @@ def _thin(plot, xs, ys):
     if keep[-1] != (xs[-1], ys[-1]):
         keep.append((xs[-1], ys[-1]))
     return [a for a, _ in keep], [b for _, b in keep]
-
-
-def _inner(svg: str, x_offset: int, suffix: str) -> str:
-    """One Plot's SVG as a nested <svg> placed at x_offset, with its ids made unique."""
-    svg = svg.replace('id="plot"', f'id="plot{suffix}"').replace("url(#plot)", f"url(#plot{suffix})")
-    svg = svg.replace('id="arrow"', f'id="arrow{suffix}"').replace("url(#arrow)", f"url(#arrow{suffix})")
-    return re.sub(r"<svg ", f'<svg x="{x_offset}" y="0" ', svg, count=1)
 
 
 def render() -> str:
@@ -83,6 +75,4 @@ def render() -> str:
     pr.text(0.60, 0.13, "dashed: no-skill level", color="#4a5568", size=11)
 
     gap = 10
-    return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {2 * w + gap} {h}" width="{2 * w + gap}" height="{h}">\n'
-            f'<rect width="{2 * w + gap}" height="{h}" fill="#ffffff"/>\n'
-            + _inner(roc.svg(), 0, "a") + _inner(pr.svg(), w + gap, "b") + "</svg>\n")
+    return compose([(roc.svg(), 0, 0), (pr.svg(), w + gap, 0)], 2 * w + gap, h)

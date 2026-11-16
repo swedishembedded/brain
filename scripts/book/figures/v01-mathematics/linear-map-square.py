@@ -21,7 +21,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "worked"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import matrices as mx  # noqa: E402
-from svgplot import Plot  # noqa: E402
+from svgplot import Plot, compose  # noqa: E402
 
 UNIT = 76  # pixels per unit on both axes, so a unit square stays square
 XLIM, YLIM = (-0.5, 3.5), (-0.5, 2.0)
@@ -73,9 +73,5 @@ def _panel(A, title, note):
 def render() -> str:
     left, w, h = _panel(mx.SQUARE_A, "rank 2: the square becomes a parallelogram", "area 5/2")
     right, _, _ = _panel(mx.SQUASH_A, "rank 1: the square collapses to a line", "area 0")
-    inner = lambda s: s.split("\n", 1)[1].rsplit("</svg>", 1)[0]  # noqa: E731  body without the outer <svg>
     gap = 16
-    return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {2 * w + gap} {h}" width="{2 * w + gap}" height="{h}">\n'
-            f'<rect width="{2 * w + gap}" height="{h}" fill="#ffffff"/>\n'
-            f'<svg x="0" y="0" width="{w}" height="{h}" viewBox="0 0 {w} {h}">\n{inner(left)}</svg>\n'
-            f'<svg x="{w + gap}" y="0" width="{w}" height="{h}" viewBox="0 0 {w} {h}">\n{inner(right)}</svg>\n</svg>\n')
+    return compose([(left, 0, 0), (right, w + gap, 0)], 2 * w + gap, h)

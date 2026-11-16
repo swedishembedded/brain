@@ -17,7 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "worked"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import logistic_regression as lr  # noqa: E402
-from svgplot import Plot  # noqa: E402
+from svgplot import Plot, compose  # noqa: E402
 
 
 def _panel(title, ylabel, ylim, f_bce, f_se):
@@ -36,10 +36,4 @@ def render() -> str:
     bottom = _panel("Slope with respect to z", "d loss / dz", (-1.4, 0.9),
                     lambda z: lr.sigmoid(z) - 1,
                     lambda z: 2 * (lr.sigmoid(z) - 1) * lr.sigmoid(z) * (1 - lr.sigmoid(z)))
-    # stack the two SVG documents vertically
-    inner = []
-    for k, doc in enumerate((top, bottom)):
-        body = doc.split(">", 1)[1].rsplit("</svg>", 1)[0]
-        inner.append(f'<svg y="{k * 290}" width="620" height="290" viewBox="0 0 620 290">{body}</svg>')
-    return ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 620 580" width="620" height="580">'
-            + "".join(inner) + "</svg>\n")
+    return compose([(top, 0, 0), (bottom, 0, 290)], 620, 580)

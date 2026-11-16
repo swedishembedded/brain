@@ -20,7 +20,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "worked"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import statistics_ch as st  # noqa: E402
-from svgplot import Plot, fmt  # noqa: E402
+from svgplot import Plot, compose, fmt  # noqa: E402
 
 W, H = 330, 250
 LO, HI = 0.5, 0.9
@@ -51,13 +51,6 @@ def _panel(n):
 
 def render() -> str:
     panels = [_panel(n) for n in st.SAMPLE_SIZES]
-    inner = lambda s: s.split("\n", 1)[1].rsplit("</svg>", 1)[0]  # noqa: E731
     gap = 10
-    w, h = 2 * W + gap, 2 * H + gap
-    out = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}" width="{w}" height="{h}">',
-           f'<rect width="{w}" height="{h}" fill="#ffffff"/>']
-    for k, body in enumerate(panels):
-        x, y = (k % 2) * (W + gap), (k // 2) * (H + gap)
-        out.append(f'<svg x="{x}" y="{y}" width="{W}" height="{H}" viewBox="0 0 {W} {H}">\n{inner(body)}</svg>')
-    out.append("</svg>")
-    return "\n".join(out) + "\n"
+    return compose([(body, (k % 2) * (W + gap), (k // 2) * (H + gap)) for k, body in enumerate(panels)],
+                   2 * W + gap, 2 * H + gap)

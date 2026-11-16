@@ -14,7 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "worked"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import embeddings  # noqa: E402
-from svgplot import Plot, text_width  # noqa: E402
+from svgplot import PANEL_SIZE, Plot, compose, text_width  # noqa: E402
 
 PW, PH, GAP = 400, 360, 10
 COLOURS = ["#2b6cb0", "#c05621", "#2f855a", "#6b46c1"]
@@ -87,19 +87,7 @@ def _panel(stage, show_legend):
 
 def render() -> str:
     panels = [_panel("before", True), _panel("after", False)]
-    inner = lambda s: s.split("\n", 1)[1].rsplit("</svg>", 1)[0]  # noqa: E731
-    sizes = []
-    for s in panels:
-        head = s.split("\n", 1)[0]
-        vb = head.split('viewBox="')[1].split('"')[0].split()
-        sizes.append((float(vb[2]), float(vb[3])))
+    sizes = [tuple(float(v) for v in PANEL_SIZE.search(s).groups()) for s in panels]
     w = sizes[0][0] + sizes[1][0] + GAP
     h = max(s[1] for s in sizes)
-    out = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w:g} {h:g}" width="{w:g}" height="{h:g}">',
-           f'<rect width="{w:g}" height="{h:g}" fill="#ffffff"/>']
-    x = 0
-    for body, (sw, sh) in zip(panels, sizes):
-        out.append(f'<svg x="{x:g}" y="0" width="{sw:g}" height="{sh:g}" viewBox="0 0 {sw:g} {sh:g}">\n{inner(body)}</svg>')
-        x += sw + GAP
-    out.append("</svg>")
-    return "\n".join(out) + "\n"
+    return compose([(panels[0], 0, 0), (panels[1], sizes[0][0] + GAP, 0)], w, h)

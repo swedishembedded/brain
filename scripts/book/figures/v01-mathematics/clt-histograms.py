@@ -18,7 +18,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "worked"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import distributions as ds  # noqa: E402
-from svgplot import Plot, fmt  # noqa: E402
+from svgplot import Plot, compose, fmt  # noqa: E402
 
 SIZE_W, SIZE_H = 330, 250
 LO, HI, BINS = -3.0, 5.0, 20
@@ -45,13 +45,6 @@ def _panel(n):
 
 def render() -> str:
     panels = [_panel(n) for n in (1, 2, 5, 30)]
-    inner = lambda s: s.split("\n", 1)[1].rsplit("</svg>", 1)[0]  # noqa: E731
     gap = 10
-    w, h = 2 * SIZE_W + gap, 2 * SIZE_H + gap
-    out = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}" width="{w}" height="{h}">',
-           f'<rect width="{w}" height="{h}" fill="#ffffff"/>']
-    for k, body in enumerate(panels):
-        x, y = (k % 2) * (SIZE_W + gap), (k // 2) * (SIZE_H + gap)
-        out.append(f'<svg x="{x}" y="{y}" width="{SIZE_W}" height="{SIZE_H}" viewBox="0 0 {SIZE_W} {SIZE_H}">\n{inner(body)}</svg>')
-    out.append("</svg>")
-    return "\n".join(out) + "\n"
+    return compose([(body, (k % 2) * (SIZE_W + gap), (k // 2) * (SIZE_H + gap)) for k, body in enumerate(panels)],
+                   2 * SIZE_W + gap, 2 * SIZE_H + gap)

@@ -388,3 +388,30 @@ class Plot:
                     ex += widths[i] + 14
         out.append("</svg>")
         return "\n".join(out) + "\n"
+
+
+PANEL_HEAD = re.compile(r"\s*<svg\b[^>]*>")
+PANEL_SIZE = re.compile(r'viewBox="0 0 ([0-9.]+) ([0-9.]+)"')
+
+
+def compose(panels, width, height) -> str:
+    """Several figures as the panels of one, on a white ground: each
+    `(document, x, y)` is nested at (x, y) at its own size. Every panel
+    declares the same ids (the arrow marker, the plot's clip path), and one
+    document with an id twice is not valid XML, which an EPUB checker
+    rejects; so each panel's ids, and its references to them, get the
+    panel's number as a suffix."""
+    out = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width:g} {height:g}" '
+           f'width="{width:g}" height="{height:g}">',
+           f'<rect width="{width:g}" height="{height:g}" fill="#ffffff"/>']
+    for k, (doc, x, y) in enumerate(panels, start=1):
+        head = PANEL_HEAD.match(doc)
+        w, h = (float(v) for v in PANEL_SIZE.search(head.group(0)).groups())
+        body = doc[head.end():].rsplit("</svg>", 1)[0].strip("\n")
+        for name in sorted(set(re.findall(r'\bid="([^"]+)"', body))):
+            body = (body.replace(f'id="{name}"', f'id="{name}-{k}"')
+                    .replace(f"url(#{name})", f"url(#{name}-{k})")
+                    .replace(f'href="#{name}"', f'href="#{name}-{k}"'))
+        out.append(f'<svg x="{x:g}" y="{y:g}" width="{w:g}" height="{h:g}" viewBox="0 0 {w:g} {h:g}">\n{body}\n</svg>')
+    out.append("</svg>")
+    return "\n".join(out) + "\n"

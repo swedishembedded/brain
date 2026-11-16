@@ -19,7 +19,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "worked"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import likelihood as lk  # noqa: E402
-from svgplot import Plot  # noqa: E402
+from svgplot import Plot, compose  # noqa: E402
 
 SIZE = 400
 
@@ -66,10 +66,4 @@ def render() -> str:
     circle = [(r2 * math.cos(2 * math.pi * i / 120), r2 * math.sin(2 * math.pi * i / 120)) for i in range(121)]
     left = _panel("L1: |w1| + |w2| = r", prob, prob["w_l1"], diamond)
     right = _panel("L2: w1^2 + w2^2 = r^2", prob, prob["w_l2"], circle)
-    h = SIZE
-    inner = []
-    for k, doc in enumerate((left, right)):
-        body = doc.split(">", 1)[1].rsplit("</svg>", 1)[0]
-        inner.append(f'<svg x="{k * SIZE}" width="{SIZE}" height="{h}" viewBox="0 0 {SIZE} {h}">{body}</svg>')
-    return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {2 * SIZE} {h}" width="{2 * SIZE}" height="{h}">'
-            + "".join(inner) + "</svg>\n")
+    return compose([(left, 0, 0), (right, SIZE, 0)], 2 * SIZE, SIZE)

@@ -22,7 +22,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "worked"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import decompositions as dc  # noqa: E402
-from svgplot import Plot  # noqa: E402
+from svgplot import Plot, compose  # noqa: E402
 
 SIZE = 330
 ORANGE, GREEN, BLUE = "#c05621", "#2f855a", "#2b6cb0"
@@ -61,14 +61,6 @@ def render() -> str:
                [([s1 * u1[0], s1 * u1[1]], ORANGE, "sigma1 u1", -4.2, 0.1),
                 ([s2 * u2[0], s2 * u2[1]], GREEN, "sigma2 u2", 0.3, -0.5)], tr[3]),
     ]
-    inner = lambda s: s.split("\n", 1)[1].rsplit("</svg>", 1)[0]  # noqa: E731  body without the outer <svg>
     gap = 10
-    w = 2 * SIZE + gap
-    h = 2 * SIZE + gap
-    out = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}" width="{w}" height="{h}">',
-           f'<rect width="{w}" height="{h}" fill="#ffffff"/>']
-    for k, body in enumerate(panels):
-        x, y = (k % 2) * (SIZE + gap), (k // 2) * (SIZE + gap)
-        out.append(f'<svg x="{x}" y="{y}" width="{SIZE}" height="{SIZE}" viewBox="0 0 {SIZE} {SIZE}">\n{inner(body)}</svg>')
-    out.append("</svg>")
-    return "\n".join(out) + "\n"
+    return compose([(body, (k % 2) * (SIZE + gap), (k // 2) * (SIZE + gap)) for k, body in enumerate(panels)],
+                   2 * SIZE + gap, 2 * SIZE + gap)

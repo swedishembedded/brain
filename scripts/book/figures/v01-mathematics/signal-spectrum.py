@@ -19,7 +19,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "worked"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import fourier as fo  # noqa: E402
-from svgplot import Plot  # noqa: E402
+from svgplot import Plot, compose  # noqa: E402
 
 W, H = 560, 260
 
@@ -39,11 +39,5 @@ def render() -> str:
         bottom.line([k, k], [0, a], color=1, width=3)
     for k in (3, 11):
         bottom.text(k + 0.9, amp[k] + 0.03, f"k = {k}: {amp[k]:.2f}", size=12)
-    inner = lambda s: s.split("\n", 1)[1].rsplit("</svg>", 1)[0]  # noqa: E731
     gap = 8
-    out = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {2 * H + gap}" width="{W}" height="{2 * H + gap}">',
-           f'<rect width="{W}" height="{2 * H + gap}" fill="#ffffff"/>']
-    for i, panel in enumerate((top, bottom)):
-        out.append(f'<svg x="0" y="{i * (H + gap)}" width="{W}" height="{H}" viewBox="0 0 {W} {H}">\n{inner(panel.svg())}</svg>')
-    out.append("</svg>")
-    return "\n".join(out) + "\n"
+    return compose([(top.svg(), 0, 0), (bottom.svg(), 0, H + gap)], W, 2 * H + gap)

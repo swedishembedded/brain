@@ -20,7 +20,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "worked"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import decompositions as dc  # noqa: E402
-from svgplot import Plot  # noqa: E402
+from svgplot import Plot, compose  # noqa: E402
 
 
 def render() -> str:
@@ -40,10 +40,5 @@ def render() -> str:
     tail = [math.sqrt(sum(x * x for x in s[r:])) / total for r in rs]
     right.line(rs, [math.log10(e) for e in measured], color=1, label="|M - M_r| / |M|")
     right.points(rs, [math.log10(t) for t in tail], color=2, label="sqrt(dropped sigma^2) / |M|", r=5)
-    inner = lambda p: p.svg().split("\n", 1)[1].rsplit("</svg>", 1)[0]  # noqa: E731  body without the outer <svg>
     gap = 10
-    w = 2 * W + gap
-    return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {H}" width="{w}" height="{H}">\n'
-            f'<rect width="{w}" height="{H}" fill="#ffffff"/>\n'
-            f'<svg x="0" y="0" width="{W}" height="{H}" viewBox="0 0 {W} {H}">\n{inner(left)}</svg>\n'
-            f'<svg x="{W + gap}" y="0" width="{W}" height="{H}" viewBox="0 0 {W} {H}">\n{inner(right)}</svg>\n</svg>\n')
+    return compose([(left.svg(), 0, 0), (right.svg(), W + gap, 0)], 2 * W + gap, H)
