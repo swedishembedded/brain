@@ -581,7 +581,34 @@ impl LibraryGemm {
     /// The name a library product is timed and reported under: the shape and operand types, so a profile separates
     /// the large base products from the skinny LoRA ones instead of averaging them
     /// (`library_gemm 5120x8192x17408 bf16.bf16.f32 b1`).
-    pub fn label(&self) -> String {
+    pub fn label(&self) -> &'static str {
+        // A served step builds its products' steps every iteration, so the name is made once per distinct product and
+        // kept: a product's shape set is the model's linears at the batch and chunk sizes it runs, bounded by the
+        // serving geometry, and formatting it anew was host time on every product of every step.
+        static NAMES: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<[u64; 8], &'static str>>> = std::sync::OnceLock::new();
+        let key = self.identity();
+        let mut names = NAMES.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+        names.entry(key).or_insert_with(|| Box::leak(self.describe().into_boxed_str()))
+    }
+
+    /// Every field of the product as exact bits: two products are the same product exactly when their identities are
+    /// equal (a structure key, with no text made for it).
+    pub fn identity(&self) -> [u64; 8] {
+        let flags = self.trans_a as u64 | (self.trans_b as u64) << 1 | (self.tf32 as u64) << 2;
+        let dtype = |d: LibraryDtype| d as u64;
+        [
+            flags | dtype(self.a) << 8 | dtype(self.b) << 16 | dtype(self.c) << 24 | (self.batch as u64) << 32,
+            self.m as u64 | (self.n as u64) << 32,
+            self.k as u64 | (self.lda as u64) << 32,
+            self.ldb as u64 | (self.ldc as u64) << 32,
+            self.alpha.to_bits() as u64 | (self.beta.to_bits() as u64) << 32,
+            self.stride_a as u64,
+            self.stride_b as u64,
+            self.stride_c as u64,
+        ]
+    }
+
+    fn describe(&self) -> String {
         format!(
             "library_gemm {}x{}x{} {:?}.{:?}.{:?}{}{}{} b{}",
             self.m,
@@ -831,6 +858,44 @@ impl DType {
             "cq4" => Some(DType::Cq4),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod library_gemm_tests {
+    use super::*;
+
+    fn product() -> LibraryGemm {
+        LibraryGemm { trans_a: true, trans_b: false, m: 1280, n: 32, k: 1280, lda: 1280, ldb: 1280, ldc: 1280, a: LibraryDtype::Bf16, b: LibraryDtype::Bf16, c: LibraryDtype::F32, alpha: 1.0, beta: 0.0, batch: 1, stride_a: 0, stride_b: 0, stride_c: 0, tf32: false }
+    }
+
+    /// A product's identity tells every field apart (a graph keyed on it never replays another product), and its name
+    /// is the one text a profile reads, made once however often the product's step is built.
+    #[test]
+    fn a_products_identity_separates_every_field_and_its_name_is_made_once() {
+        let p = product();
+        let variants = [
+            LibraryGemm { trans_b: true, ..p },
+            LibraryGemm { tf32: true, ..p },
+            LibraryGemm { m: 1281, ..p },
+            LibraryGemm { n: 33, ..p },
+            LibraryGemm { k: 1279, ..p },
+            LibraryGemm { lda: 1, ..p },
+            LibraryGemm { ldb: 1, ..p },
+            LibraryGemm { ldc: 1, ..p },
+            LibraryGemm { c: LibraryDtype::Bf16, ..p },
+            LibraryGemm { alpha: 0.5, ..p },
+            LibraryGemm { beta: 1.0, ..p },
+            LibraryGemm { batch: 2, ..p },
+            LibraryGemm { stride_a: 7, ..p },
+            LibraryGemm { stride_b: 7, ..p },
+            LibraryGemm { stride_c: 7, ..p },
+        ];
+        for v in &variants {
+            assert_ne!(v.identity(), p.identity(), "{v:?}");
+        }
+        assert_eq!(p.label(), "library_gemm 1280x32x1280 Bf16.Bf16.F32 tA b1");
+        assert!(std::ptr::eq(p.label(), product().label()), "the name is made once");
     }
 }
 

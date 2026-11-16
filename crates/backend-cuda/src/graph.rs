@@ -94,9 +94,10 @@ pub(crate) struct NodeSig {
     /// rewrites: two submissions differing only in a slice length must not
     /// share a graph.
     pub lens: Vec<u64>,
-    /// The vendor-library product this step stands for, as its descriptor's text: a graph holds the library's
-    /// kernels with the product's dimensions baked in, so two submissions that differ in them must not share one.
-    pub library: Option<String>,
+    /// The vendor-library product this step stands for, as its descriptor's bits (`LibraryGemm::identity`): a graph
+    /// holds the library's kernels with the product's dimensions baked in, so two submissions that differ in them
+    /// must not share one.
+    pub library: Option<[u64; 8]>,
 }
 
 /// A whole submission's structure.

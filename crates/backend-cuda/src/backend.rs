@@ -1052,7 +1052,7 @@ impl CudaBackend {
         self.ctx.calls().host_launched(1);
         if let Some(start) = start {
             if let Some(end) = self.stamp() {
-                self.kernel_times.lock().unwrap_or_else(|e| e.into_inner()).pending.push((gemm.label(), start, end));
+                self.kernel_times.lock().unwrap_or_else(|e| e.into_inner()).pending.push((gemm.label().to_string(), start, end));
             }
         }
     }
@@ -1197,7 +1197,7 @@ impl CudaBackend {
                     words: r.params.len(),
                     bufs: r.bufs.iter().map(|(m, off)| (Arc::as_ptr(m) as usize, *off)).collect(),
                     lens: r.lens.clone(),
-                    library: r.library.as_ref().map(|g| format!("{g:?}")),
+                    library: r.library.as_ref().map(|g| g.identity()),
                 })
                 .collect(),
         }

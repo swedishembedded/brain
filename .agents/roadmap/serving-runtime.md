@@ -922,6 +922,18 @@ The draw itself is 0.21 ms a step at 64 rows of the 27B's 248320-token vocabular
 - [x] `forward_batched_drawn` for the 35B-A3B engine (`qwen35moe`), DeepSeek-V2 (`deepseek2`), Ripple
       (`ricursive`), the native and ring Qwen3.8 engines (`model::readout::draw_rows`); Ouro and Huginn compute their
       logits on the host and draw there
+- [ ] the serving process's one core (2026-11-16, gpu3, Qwen3-4B through `brain serve --max-batch 64 --kv-cache f32`,
+      64 closed-loop chat completions of 300 tokens, nsys `-s cpu -b dwarf` under `setarch -R`): it is the scheduler
+      thread, busy about the whole window at greedy (4338 tok/s, the card busy 70 % of the serve window by its kernel
+      timeline, 254 decode iterations in 14.5 s, 615k kernels: about 2400 launched one by one per iteration, 225 graph
+      launches in all). Of its samples, about 9 % spin in `cuStreamSynchronize`, about 6 % are `cuLaunchKernel(Ex)`
+      (with `sched_yield` inside when the launch queue is full), the submission signature (`SubmitSig`, built and
+      hashed per submission) and its allocations a few %, a quarter unresolved. The per-step text (each library
+      product's descriptor formatted into the graph signature and its name formatted into the step's lowering) is
+      gone (`LibraryGemm::identity`, an interned `label`); A/B pairs (base, new, base, new; greedy and temperature 1)
+      measured no change beyond the noise (4434-4574 against 4536-4538 tok/s greedy, 92 % of a core either way). What
+      would free the core is the window's sub-steps recorded and replayed as graphs instead of launched one by one,
+      and a blocking wait instead of the spin; both are open.
 - [ ] a keyed decode window (Qwen3's greedy window feeds the argmax back on the device; a keyed one needs the keys of
       every sub-step uploaded once)
 - [ ] `--exact-decode` and adapter rows still take the eager keyed head on the 27B (not recorded)
