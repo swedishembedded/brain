@@ -5429,6 +5429,23 @@ pub const ALL: &[CudaKernel] = &[
         programmatic: false,
         src: include_str!("../cu/silu_mul_bf16.cu"),
     },
+    CudaKernel {
+        name: "silu_mul_to_bf16",
+        op: Op::Elementwise,
+        weight: Dtype::F32,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_silu_mul_to_bf16",
+        what: "silu(gate) * up written only as the packed bf16 operand of the down projection's tensor-core GEMM, for a product no adapter reads in fp32: silu_mul_bf16 without its fp32 write",
+        reported: "native:silu_mul_to_bf16",
+        block_dim: 256,
+        // 1024 elements per block.
+        tile: (1, 1024),
+        shared_bytes: 0,
+        programmatic: false,
+        src: include_str!("../cu/silu_mul_bf16.cu"),
+    },
 ];
 
 /// The kernel `table` offers for `op` over `weight` storage on a device of

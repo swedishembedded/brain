@@ -2527,17 +2527,19 @@ impl Engine {
     }
 
     /// `h = silu(gate) * up` and the down product over it, with the bf16 operand the product reads written by the
-    /// SwiGLU's own pass instead of a cast re-reading `h` (`h` is still written, for an adapter correction). `false`,
+    /// SwiGLU's own pass instead of a cast re-reading `h` (`h` is written only when `keep_h`, for an adapter correction). `false`,
     /// with nothing pushed, where the down weight does not run on the bf16 library path.
     #[allow(clippy::too_many_arguments)]
-    fn swiglu_into_bf16_down(&self, s: &mut Vec<Step>, wdown: &Weight, gate: &DeviceBuffer, up: &DeviceBuffer, h: &DeviceBuffer, out: &DeviceBuffer, rows: u32, exact: Option<&exact::ExactDecode>) -> bool {
+    fn swiglu_into_bf16_down(&self, s: &mut Vec<Step>, wdown: &Weight, gate: &DeviceBuffer, up: &DeviceBuffer, h: &DeviceBuffer, keep_h: bool, out: &DeviceBuffer, rows: u32, exact: Option<&exact::ExactDecode>) -> bool {
         let (n, k) = (wdown.n(), wdown.k());
         let Some((w, range)) = wdown.bf16_rows(0, n).filter(|_| self.library_bf16(wdown, rows, exact)) else {
             return false;
         };
         let g = &self.gpu;
         let mut steps = Vec::new();
-        let Some(hb) = self.gemm.silu_mul_bf16(g, &mut steps, gate, up, h, rows as u64 * k as u64) else {
+        // `h` in fp32 only for the adapter correction that reads it.
+        let hb = if keep_h { self.gemm.silu_mul_bf16(g, &mut steps, gate, up, h, rows as u64 * k as u64) } else { self.gemm.silu_mul_to_bf16(g, &mut steps, gate, up, rows as u64 * k as u64) };
+        let Some(hb) = hb else {
             return false;
         };
         if !self.gemm.forward_bf16(g, &mut steps, &hb, &library::Operand { buf: w, range }, &library::Operand { buf: out, range: (0, 0) }, rows, n, k) {
@@ -3283,7 +3285,7 @@ impl Engine {
                 s.push(concat_split_step(g, &sc.gateup_pre, &sc.up, b, 2 * ff, ff, ff));
             }
             let wdown = &self.lin_weights[&p("mlp.down.weight")];
-            if !self.swiglu_into_bf16_down(&mut s, wdown, &sc.gate_pre, &sc.up, &sc.h, &sc.mlp_out, b, exact) {
+            if !self.swiglu_into_bf16_down(&mut s, wdown, &sc.gate_pre, &sc.up, &sc.h, lora, &sc.mlp_out, b, exact) {
                 s.push(block::swiglu_fwd(g, &kids, &sc.gate_pre, &sc.up, &sc.h, b * ff));
                 self.quant_once(&mut s, &sc.h, ff, b);
                 self.linear(&mut s, wdown, &sc.h, &sc.mlp_out, b, exact);

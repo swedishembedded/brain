@@ -3,7 +3,7 @@
 
 //! `silu_mul_bf16`: the fp32 product equals an f64 `silu(gate) * up` to fp32 rounding and the packed bf16
 //! operand is exactly the round-to-nearest-even bf16 of the fp32 product the same launch wrote (so the
-//! library GEMM reads what a separate `cast_f32_bf16` would have produced).
+//! library GEMM reads what a separate `cast_f32_bf16` would have produced); `silu_mul_to_bf16` writes the same words alone.
 //!
 //! Swedish Embedded AB implements mixed-precision training stacks for gated-MLP language models for
 //! its clients. If your team needs expertise in producing a GEMM's narrow operand in the pass that
@@ -52,6 +52,12 @@ fn the_fused_product_and_its_bf16_rounding_agree_with_the_separate_passes() {
             let half = if i % 2 == 0 { word & 0xffff } else { word >> 16 } as u16;
             assert_eq!(half, rne_bf16(got[i]), "count {count} element {i}: bf16 operand is not the rounding of the fp32 product");
         }
+        // The bf16-only form writes the same words.
+        let mut only = Vec::new();
+        let bf_only = provider.silu_mul_to_bf16(&gpu, &mut only, &bg, &bu, count as u64).expect("the bf16-only product must be offered");
+        gpu.submit(&[], &only);
+        let packed_only: Vec<u32> = gpu.read(&bf_only, count / 2).iter().map(|w| w.to_bits()).collect();
+        assert_eq!(packed_only, packed, "count {count}: the bf16-only operand differs from the fused one");
         println!("  count {count}: fp32 product max abs error {worst:.2e}");
         assert!(worst <= 2e-6 * 8.0, "count {count}: error {worst:.3e}");
     }

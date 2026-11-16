@@ -45,3 +45,17 @@ extern "C" __global__ void __launch_bounds__(THREADS) brain_silu_mul_bf16(const 
     packed.y = bf16_bits(o.z) | (bf16_bits(o.w) << 16);
     *reinterpret_cast<uint2*>(h_bf16 + (i >> 1)) = packed;
 }
+
+// `brain_silu_mul_bf16` for a product whose only reader is the down projection's GEMM (no adapter reads the fp32 h):
+// the same values, written only as the packed bf16 operand. Bindings: uniform, gate, up (f32), h_bf16.
+extern "C" __global__ void __launch_bounds__(THREADS) brain_silu_mul_to_bf16(const unsigned int* params, const float* gate, const float* up, unsigned int* h_bf16) {
+    const unsigned count = params[0];
+    const unsigned long long block = (unsigned long long)blockIdx.y * gridDim.x + blockIdx.x;
+    const unsigned long long i = block * PER_BLOCK + 4ull * threadIdx.x;
+    if (i >= count) { return; }
+    const float4 a = *reinterpret_cast<const float4*>(gate + i), b = *reinterpret_cast<const float4*>(up + i);
+    uint2 packed;
+    packed.x = bf16_bits(a.x / (1.0f + expf(-a.x)) * b.x) | (bf16_bits(a.y / (1.0f + expf(-a.y)) * b.y) << 16);
+    packed.y = bf16_bits(a.z / (1.0f + expf(-a.z)) * b.z) | (bf16_bits(a.w / (1.0f + expf(-a.w)) * b.w) << 16);
+    *reinterpret_cast<uint2*>(h_bf16 + (i >> 1)) = packed;
+}

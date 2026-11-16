@@ -103,6 +103,7 @@ const ALIGN_ELEMS: u32 = 8;
 const MAX_SCRATCH_BYTES: u64 = 2 << 30;
 
 const CAST_BINDINGS: &[BindKind] = &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageReadWrite];
+const SILU_MUL_TO_BF16_BINDINGS: &[BindKind] = &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageReadWrite];
 const SILU_MUL_BF16_BINDINGS: &[BindKind] = &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageReadWrite, BindKind::StorageReadWrite];
 const DEQUANT_BINDINGS: &[BindKind] = &[
     BindKind::Uniform,
@@ -881,6 +882,19 @@ impl LibraryGemmProvider {
         let bf16 = gpu.storage_uninit(count.div_ceil(2)); // the kernel writes every value, as `cast_bf16` does
         let step = gpu.step_native_sliced(id, &[gate, up, h, &bf16], &[(0, 0); 4], &[count as u32], kernel.blocks_for(1, count as u32))?;
         // The portable `silu_mul`; its bf16 rounding is a cast.
+        steps.push(priced(step, vec![portable("silu_mul", vec![count as u32], count as u32)]));
+        Some(bf16)
+    }
+
+    /// [`Self::silu_mul_bf16`] for a product whose only reader is the bf16 GEMM: writes the bf16 operand and no fp32 `h`.
+    pub fn silu_mul_to_bf16(&self, gpu: &Gpu, steps: &mut Vec<Step>, gate: &DeviceBuffer, up: &DeviceBuffer, count: u64) -> Option<DeviceBuffer> {
+        if !self.is_active() || count == 0 || !count.is_multiple_of(ALIGN_ELEMS as u64) || count * 2 > MAX_SCRATCH_BYTES {
+            return None;
+        }
+        let kernel = kernels_cuda::get("silu_mul_to_bf16")?;
+        let id = gpu.native_kernel(kernel, SILU_MUL_TO_BF16_BINDINGS)?;
+        let bf16 = gpu.storage_uninit(count.div_ceil(2)); // every value is written
+        let step = gpu.step_native_sliced(id, &[gate, up, &bf16], &[(0, 0); 3], &[count as u32], kernel.blocks_for(1, count as u32))?;
         steps.push(priced(step, vec![portable("silu_mul", vec![count as u32], count as u32)]));
         Some(bf16)
     }

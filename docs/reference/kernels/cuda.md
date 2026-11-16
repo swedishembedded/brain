@@ -285,6 +285,7 @@ Every column is stated by the kernel's own registry entry in `crates/kernels-cud
 | `qknorm_rope_rows` | Elementwise | F32 | tuned | 5.0 | `brain_qknorm_rope_rows` | a dense attention layer's per-head QK RMS norm and half-split rotary embedding, four heads of one token a block, 64 lanes each, the block's rotation angles computed once for its four heads; bit-identical to qknorm_rope_fused |
 | `qknorm_rope_qk` | Elementwise | F32 | tuned | 5.0 | `brain_qknorm_rope_qk` | qknorm_rope_rows for a layer's query and key heads of the same tokens in one launch; bit-identical to qknorm_rope_fused on each |
 | `silu_mul_bf16` | Elementwise | F32 | tuned | 5.0 | `brain_silu_mul_bf16` | silu(gate) * up written as fp32 and, in the same pass, as the packed bf16 operand of the down projection's tensor-core GEMM: replaces silu_mul plus a cast_f32_bf16 re-read of the product |
+| `silu_mul_to_bf16` | Elementwise | F32 | tuned | 5.0 | `brain_silu_mul_to_bf16` | silu(gate) * up written only as the packed bf16 operand of the down projection's tensor-core GEMM, for a product no adapter reads in fp32: silu_mul_bf16 without its fp32 write |
 
 **weights** - the weight storage tier the kernel reads (`F32`, `I8`, ...). A kernel is resolved by operator AND weights: two kernels for one operator bind different operand bundles and must never stand in for each other.
 
