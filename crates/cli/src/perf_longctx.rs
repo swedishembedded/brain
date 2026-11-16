@@ -283,9 +283,15 @@ impl Qwen35MoeEngine {
         context.saturating_add(MOE_DECODE_HEADROOM)
     }
 
+    /// The engine [`Self::load`] builds: every sequence a whole context of the shared pool, every decode step of the
+    /// scenario at one context.
+    fn options(&self, batch: u32, context: u32) -> qwen35moe::serve::EngineOptions {
+        qwen35moe::serve::EngineOptions::new(Self::capacity(context), batch).with_tier(self.tier.clone()).with_kv_tier(self.kv_tier)
+    }
+
     fn needed_bytes(&self, batch: u32, context: u32) -> u64 {
         qwen35moe::serve::weight_bytes(&self.cfg, &self.tier)
-            + qwen35moe::serve::kv_pool_bytes(&self.cfg, self.kv_tier, batch, Self::capacity(context))
+            + qwen35moe::serve::kv_pool_bytes(&self.cfg, self.kv_tier, self.options(batch, context).pool_rows(), batch)
             + MOE_SCRATCH_FIXED
             + batch as u64 * MOE_SCRATCH_PER_SEQUENCE
     }
@@ -318,7 +324,7 @@ impl LongContextEngine for Qwen35MoeEngine {
         let mg = MmapGguf::open(&self.path).map_err(|e| format!("open {}: {e}", self.path))?;
         let cfg = qwen35moe::gguf_load::resident_config(&mg, Self::capacity(context))?;
         let src = qwen35moe::gguf_load::source(&mg, &cfg)?;
-        let opts = qwen35moe::serve::EngineOptions::new(Self::capacity(context), batch).with_tier(self.tier.clone()).with_kv_tier(self.kv_tier);
+        let opts = self.options(batch, context);
         // Allocation failure on the device surfaces as a panic from the engine
         // constructor; it is the out-of-memory boundary, not a crash.
         let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| qwen35moe::serve::Engine::from_source(cfg, &src, opts))).map_err(|p| {

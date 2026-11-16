@@ -41,6 +41,7 @@ pub(crate) fn build(rest: &str, weights: Option<&model::ops::TierPolicy>, max_ba
         .with("max_batch", served.max_batch().into())
         .with("ctx", served.cap().into())
         .with("kv_dtype", served.kv_tier().as_str().into())
+        .with("kv_pool_rows", served.kv_pool_rows().into())
         .with("devices", vec![format!("{device:?}")].into())
         .with("summary", manifest.actions.first().map(|a| a.summary.clone()).unwrap_or_default().into());
     for (i, line) in served.chosen_defaults().iter().enumerate() {

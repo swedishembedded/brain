@@ -85,3 +85,33 @@ fn replaying_is_building_to_the_bit_and_fusing_changes_only_the_last_places() {
         }
     }
 }
+
+/// Rows of a KV block in [`a_sequence_paged_over_blocks_decodes_to_the_bit_what_one_block_gives`]: the decode
+/// kernels' key tile, so a block boundary falls inside the prompt and again inside the decode.
+const SMALL_BLOCK_ROWS: u32 = 64;
+
+/// The serving engine's shared pool is cut into blocks; a sequence spread over several of them, through the real
+/// model's kernels (the fused prefill and decode attention over the block tables), gives the same candidates and logits
+/// to the bit as one whole-context block: the block table is addressing, not arithmetic.
+#[test]
+fn a_sequence_paged_over_blocks_decodes_to_the_bit_what_one_block_gives() {
+    let Ok(path) = std::env::var(gguf_load::GGUF_ENV) else {
+        return brain_testutil::skip_unavailable("BRAIN_QWEN35MOE_GGUF is not set");
+    };
+    let mg = MmapGguf::open(&path).unwrap_or_else(|e| panic!("open {path}: {e}"));
+    let tok = gguf_load::tokenizer(&mg).expect("the GGUF's tokenizer");
+    let mut prompt = tok.encode(&[PROMPT; 8].join(" "));
+    // The prompt ends just short of a block, so the decode crosses into the next one.
+    prompt.truncate((prompt.len() as u32 / SMALL_BLOCK_ROWS * SMALL_BLOCK_ROWS - 2) as usize);
+    let mut cfg = gguf_load::resident_config(&mg, 256).expect("config");
+    cfg.n_layers = LAYERS;
+    let src = gguf_load::source(&mg, &cfg).expect("source");
+    let opts = EngineOptions::new(256, 2).with_tier(gguf_load::tier_from_env()).with_kv_tier(gguf_load::kv_tier_from_env().expect("kv tier"));
+    let mut whole = Engine::from_source(cfg.clone(), &src, opts.clone());
+    let one_block = decode(&mut whole, &prompt);
+    drop(whole);
+    let mut paged = Engine::from_source(cfg, &src, opts.with_kv_block_rows(SMALL_BLOCK_ROWS));
+    let (prompt_blocks, total_blocks) = (paged.blocks_for(prompt.len() as u32), paged.blocks_for((prompt.len() + STEPS) as u32));
+    assert!(prompt_blocks >= 2 && total_blocks > prompt_blocks, "the prompt spans {prompt_blocks} blocks and the decode crosses into another");
+    assert_eq!(decode(&mut paged, &prompt), one_block, "a sequence over {SMALL_BLOCK_ROWS}-row blocks decodes differently than over one block");
+}

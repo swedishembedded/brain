@@ -212,7 +212,8 @@ fn recorded_steps_of_every_batch_size_hold_one_working_set() {
     let one = e.tape_scratch_bytes();
     let before = tally.read().device_bytes;
     assert!(one > 0, "the widest step recorded its temporaries in the shared set");
-    assert!(one <= qwen35moe::serve::decode_step_bytes(&c, rows), "the plan charges {} for what the recorded steps hold ({one})", qwen35moe::serve::decode_step_bytes(&c, rows));
+    let charged = qwen35moe::serve::decode_step_bytes(&c, rows, model::kv_tier::KvTier::F32, 24);
+    assert!(one <= charged, "the plan charges {charged} for what the recorded steps hold ({one})");
     for bsz in (rows - 7..rows).rev() {
         let n = bsz as usize;
         e.forward_batched_greedy(&mut tables[..n].iter_mut().collect::<Vec<_>>(), &toks[..n]);

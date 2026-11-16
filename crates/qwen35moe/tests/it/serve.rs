@@ -23,10 +23,11 @@ use std::collections::HashMap;
 
 use data::rng::{random_seed, Rng};
 use gpu_core::Gpu;
+use model::paged::BlockTable;
 use model::serve::{PagedDecoder, Request};
 use qwen35moe::config::Qwen35Config;
 use qwen35moe::model::{Qwen35, pipelines};
-use qwen35moe::serve::{Engine, Scheduler};
+use qwen35moe::serve::{Engine, EngineOptions, Scheduler};
 
 fn init_weights(cfg: &Qwen35Config, seed: u64) -> HashMap<String, Vec<f32>> {
     qwen35moe::init::init_weights(cfg, seed)
@@ -155,4 +156,111 @@ fn batched_decode_matches_each_sequence_decoded_alone() {
         prompts.len(),
         prompts.iter().map(|p| p.len()).collect::<Vec<_>>()
     );
+}
+
+/// Rows of a KV block in the paged-pool specs below: small enough that the tiny
+/// model's short prompts span several blocks.
+const SPEC_BLOCK_ROWS: u32 = 4;
+
+/// **The paged-pool spec.** Sequences draw fixed-size KV blocks from ONE pool
+/// sized in rows, independent of `max_concurrent * max_seq_len`: two sequences
+/// of different lengths take exactly the blocks their tokens cover, take more as
+/// decode crosses block boundaries, and between them fill a pool far smaller
+/// than two whole contexts. Each sequence's greedy tokens equal what it gives
+/// served alone in an engine that reserves it one whole-context block, so the
+/// block indirection changes no number.
+#[test]
+fn sequences_of_different_lengths_draw_blocks_from_one_pool() {
+    let cfg = Qwen35Config::tiny();
+    let init = init_weights(&cfg, 31);
+    let prompts: Vec<Vec<u32>> = vec![vec![3u32, 1, 4, 1, 5], vec![2u32, 7, 1, 8, 2, 8, 1, 8, 2, 8, 4, 5, 9]];
+    let steps = 8u32;
+    let max_seq_len = 32u32;
+    // Prompt 5 + 8 appended = 13 rows (4 blocks), prompt 13 + 8 = 21 rows (6 blocks): the pool's ten blocks exactly.
+    let pool_rows = 10 * SPEC_BLOCK_ROWS;
+
+    let alone = |p: &[u32]| -> Vec<u32> {
+        let opts = EngineOptions::new(max_seq_len, 1).with_kv_block_rows(max_seq_len);
+        let mut engine = Engine::from_source(cfg.clone(), &init, opts);
+        let mut t = BlockTable::new();
+        let hidden = engine.prefill(&mut t, p);
+        let mut tok = engine.admit_greedy(&hidden);
+        let mut out = vec![tok];
+        for _ in 0..steps {
+            tok = engine.forward_batched_greedy(&mut [&mut t], &[tok]).pop().expect("one row");
+            out.push(tok);
+        }
+        engine.release_table(&mut t);
+        out
+    };
+    let want: Vec<Vec<u32>> = prompts.iter().map(|p| alone(p)).collect();
+
+    let opts = EngineOptions::new(max_seq_len, 2).with_kv_block_rows(SPEC_BLOCK_ROWS).with_kv_pool_rows(pool_rows);
+    let mut engine = Engine::from_source(cfg.clone(), &init, opts);
+    assert_eq!(engine.kv_pool_capacity_tokens(), pool_rows as u64, "the pool holds the rows it was sized for, not max_concurrent * max_seq_len");
+    assert!(pool_rows < 2 * max_seq_len, "the spec's pool is smaller than two whole contexts");
+    assert_eq!(engine.free_blocks(), 10);
+
+    let mut tables: Vec<BlockTable> = Vec::new();
+    let mut cur = Vec::new();
+    for p in &prompts {
+        let mut t = BlockTable::new();
+        let hidden = engine.prefill(&mut t, p);
+        assert_eq!(t.blocks().len() as u32, (p.len() as u32).div_ceil(SPEC_BLOCK_ROWS), "a prompt takes the blocks its tokens cover");
+        cur.push(engine.admit_greedy(&hidden));
+        tables.push(t);
+    }
+    assert_eq!(engine.free_blocks(), 10 - 2 - 4, "both prompts drew from one pool");
+    let mut got: Vec<Vec<u32>> = cur.iter().map(|&t| vec![t]).collect();
+    for _ in 0..steps {
+        let mut refs: Vec<&mut BlockTable> = tables.iter_mut().collect();
+        cur = engine.forward_batched_greedy(&mut refs, &cur);
+        for (o, &t) in got.iter_mut().zip(&cur) {
+            o.push(t);
+        }
+    }
+    assert_eq!(tables.iter().map(|t| t.blocks().len()).collect::<Vec<_>>(), vec![4, 6], "decode takes a block as a sequence crosses into it");
+    assert_eq!(engine.free_blocks(), 0);
+    let mut seen = std::collections::HashSet::new();
+    assert!(tables.iter().flat_map(|t| t.blocks()).all(|b| seen.insert(*b)), "no block backs two sequences");
+    for (b, (g, w)) in got.iter().zip(&want).enumerate() {
+        assert_eq!(g, w, "sequence {b} (prompt {} tokens) decoded from the shared pool differently than alone", prompts[b].len());
+    }
+    for t in tables.iter_mut() {
+        engine.release_table(t);
+    }
+    assert_eq!(engine.free_blocks(), 10, "a released sequence gives every block back");
+}
+
+/// Admission is on blocks free, not on whole contexts: a pool that holds ONE
+/// whole context runs four short requests at once, and each completes with the
+/// tokens it gives alone.
+#[test]
+fn short_prompts_run_together_in_a_pool_of_one_context() {
+    let cfg = Qwen35Config::tiny();
+    let init = init_weights(&cfg, 37);
+    let max_seq_len = 32u32;
+    let prompts: Vec<Vec<u32>> = vec![vec![1u32, 2, 3], vec![4u32, 5, 6, 7], vec![8u32, 9], vec![3u32, 3, 5, 1, 2]];
+    let max_new = 4usize;
+    let solo = |p: &[u32]| {
+        let engine = Engine::from_source(cfg.clone(), &init, EngineOptions::new(max_seq_len, 1));
+        let mut sched = Scheduler::new(engine, 1);
+        let id = sched.submit(Request { prompt: p.to_vec(), max_new, stop: Vec::new() });
+        sched.run().remove(&id).expect("completes")
+    };
+    let want: Vec<Vec<u32>> = prompts.iter().map(|p| solo(p)).collect();
+
+    let opts = EngineOptions::new(max_seq_len, prompts.len() as u32).with_kv_block_rows(SPEC_BLOCK_ROWS).with_kv_pool_rows(max_seq_len);
+    let engine = Engine::from_source(cfg.clone(), &init, opts);
+    let mut sched = Scheduler::new(engine, prompts.len());
+    let ids: Vec<u64> = prompts.iter().map(|p| sched.submit(Request { prompt: p.clone(), max_new, stop: Vec::new() })).collect();
+    let (mut out, mut widest) = (HashMap::new(), 0);
+    while sched.pending() {
+        out.extend(sched.step());
+        widest = widest.max(sched.running_len());
+    }
+    assert_eq!(widest, prompts.len(), "every short request ran at once in a pool of one whole context");
+    for (i, id) in ids.iter().enumerate() {
+        assert_eq!(out.get(id), Some(&want[i]), "request {i} decoded in the shared pool differently than alone");
+    }
 }

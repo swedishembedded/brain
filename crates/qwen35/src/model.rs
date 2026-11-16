@@ -5897,7 +5897,7 @@ impl Qwen35 {
     /// `tokens` would have left it in:
     /// * GQA layers: rows `pos_start..pos_start+n` of `gqa_kv`'s K and V planes
     ///   hold this round's QK-normed, RoPE'd K/V, written by
-    ///   `model::block::gqa_chunk_step_kv`'s append, and the round's queries
+    ///   `model::block::gqa_chunk_step_kv_paged`'s append, and the round's queries
     ///   attended rows `0..=pos_start+i` (everything earlier rounds cached,
     ///   plus this round's own keys up to each query - the same causal set the
     ///   per-token path sees).

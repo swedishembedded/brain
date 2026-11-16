@@ -1,97 +1,56 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Single-GPU, correctness-first `model::serve::PagedDecoder` for Qwen3.5-35B-A3B.
+//! Single-GPU `model::serve::PagedDecoder` for Qwen3.5-35B-A3B.
 //!
 //! Builds on `Qwen35::run_decode_batch` (`crates/qwen35moe/src/model.rs`) --
-//! one decode token for each of several sequences, in one set of dispatches.
+//! one decode token for each of several sequences, in one set of dispatches --
+//! and `Qwen35::run_prefill_chunk` (one sequence's prompt in rounds). Steady
+//! state decode is genuinely MULTI-SEQUENCE: one iteration's dispatch set
+//! carries one row per resident sequence, so the weight reads that dominate a
+//! decode step are paid once for the whole batch instead of once per request.
+//! See "What this engine is, and is not" at the end for the feature set.
 //!
-//! Scope: steady-state decode is genuinely MULTI-SEQUENCE - one iteration's
-//! dispatch set carries one row per resident sequence, so the weight reads
-//! that dominate a decode step are paid once for the whole batch instead of
-//! once per request. PREFILL is still one sequence, one token at a time (see
-//! below). This is still not `qwen3::serve::Engine`'s full production feature
-//! set -- see "Deliberately deferred" at the end of this doc for the exact
-//! list.
+//! # Two kinds of per-sequence state
 //!
-//! # The one real design problem: two kinds of per-sequence state, one trait slot
+//! The 10 GQA layers keep K/V rows that grow with the context; the 30 GDN
+//! layers keep a fixed-size recurrent `state` plus a causal-conv `hist` per
+//! layer (`model::gdn::gdn_recurrent_step`/`gdn_causal_conv1d_step`'s own docs)
+//! that does not. The engine holds them the way the dense 27B engine's paged
+//! layout does (`qwen35::int8_gguf_resident`'s `KvLayout::Paged`):
 //!
-//! [`model::serve::PagedDecoder`]'s methods thread a `&mut BlockTable` (paged
-//! KV bookkeeping) per sequence -- that covers the 10 GQA layers. The 30 GDN
-//! layers need a SECOND per-sequence resource, a fixed-size recurrent `state`
-//! plus a causal-conv `hist` buffer pair per GDN layer
-//! (`model::gdn::gdn_recurrent_step`/`gdn_causal_conv1d_step`'s own docs), and
-//! the trait has no parameter for it. `model::serve::PagedDecoder` and
-//! `model::paged::{BlockTable, BlockAllocator}` are NOT modified to add one:
-//! that trait/those types are shared by every `PagedDecoder` (today just
-//! `qwen3::serve::Engine`, which has no GDN layers at all), so adding a
-//! GDN-shaped parameter to a generic interface for one caller is unjustified.
+//! - **KV: one shared paged pool.** ONE `[pool_rows, kv_dim]` pool per GQA
+//!   layer ([`Engine::gqa_kv`]), cut into blocks of
+//!   [`EngineOptions::kv_block_rows`] rows handed out by a
+//!   `model::paged::BlockAllocator`. A sequence's `BlockTable` takes a block as
+//!   its context crosses into it, and every attention dispatch reaches a
+//!   sequence's history through the paged kernels' block tables
+//!   (`[batch, max_bt]` for a decode step, `[n, max_bt]` for a prefill round).
+//!   The pool's size is a row count the placement plans
+//!   ([`EngineOptions::kv_pool_rows`]), not `max_concurrent * max_seq_len`:
+//!   short sequences leave blocks for others, and the scheduler admits on the
+//!   blocks free.
+//! - **Recurrent state: one pool row per sequence.** [`GdnPool`] holds
+//!   `max_concurrent` rows of state and conv history per GDN layer; a sequence
+//!   is given a free row when its prefill starts (recorded as its
+//!   `BlockTable::state_row`) and gives it back in [`Engine::release_table`].
+//!   A decode step stages any batch with one gather and one scatter per layer
+//!   (`pool_rows_*2.wgsl`) by those rows. `max_concurrent` is therefore the
+//!   most sequences the engine runs at once (`PagedDecoder::max_batch`).
 //!
-//! Resolved like this: [`BlockTable::blocks`]'s FIRST entry
-//! (`table.blocks()[0]`) is a stable per-sequence key. Concretely, in this
-//! engine `block_size == max_seq_len` (see below) -- a sequence's ENTIRE
-//! lifetime (prompt + every generated token) fits in exactly one physical
-//! block, allocated once by the first `reserve`/`append` call in
-//! [`Engine::prefill`] and never touched again until [`Engine::release_table`]
-//! frees it (`BlockTable::append`/`reserve` only ever grow `self.blocks` when
-//! `offset == 0` on a FULL block, which at `block_size == max_seq_len` can
-//! only happen once, at the very first call -- verified against
-//! `model::paged::BlockTable`'s own source, not assumed). So
-//! `table.blocks()[0]` is exactly the stable identity this module needs, and
-//! it is the ROW of the engine's recurrent-state pools ([`GdnPool`]) that
-//! sequence owns: one `[num_blocks, state_len]` and one `[num_blocks, hist_len]`
-//! buffer per Gated-DeltaNet layer, so a decode step stages any batch with one
-//! gather and one scatter per layer (`pool_rows_*2.wgsl`) instead of a copy per
-//! sequence. A row is written when a table is first seen in [`Engine::prefill`]
-//! (or [`Engine::admit_synthetic`]) and forgotten in [`Engine::release_table`]
-//! (which still calls `BlockTable::release` for the GQA side -- the GDN pool is
-//! an ADDITION, not a replacement).
-//!
-//! # The GQA side: one shared pool per layer, block-table addressed
-//!
-//! `Qwen35::step` decodes exactly one persistent sequence, into
-//! `self.gqa_kcache`/`self.gqa_vcache` -- fields that exist once per `Qwen35`
-//! instance, not once per admitted request. A paged multi-request engine
-//! needs that same per-layer KV cache to be addressable PER SEQUENCE, so
-//! `Qwen35::run_decode_batch`/`run_decode_step` take the GQA pool + GDN
-//! state/hist as an explicit parameter (`crate::model::BatchDecodeCaches`/
-//! `DecodeCaches`, see their own docs) instead of reading
-//! `self.gqa_kcache`/`self.gdn_state` -- `Qwen35::step` itself is a thin
-//! wrapper passing its OWN fields as a `DecodeCaches`, so its behaviour (and
-//! its `decode_step.rs` test) is unchanged.
-//!
-//! With that seam in place, this `Engine` preallocates, at construction, ONE
-//! `[num_blocks*block_size, kv_dim]` pool per GQA layer
-//! ([`Engine::gqa_k`]/[`Engine::gqa_v`], indexed `[layer]`) -- real and
-//! resident from construction, not lazily grown. Physical block `p` owns rows
-//! `p*block_size .. +block_size`, so every attention dispatch reaches a
-//! sequence's history through the paged kernels' own block table rather than
-//! through which buffer it bound.
-//!
-//! That indirection is what makes cross-sequence batching possible at all: a
-//! batched decode dispatch carries every sequence's query row against ONE
-//! bound pool, and the `[batch]`/`[batch, max_bt]` index buffers are the only
-//! thing that says whose keys are whose. `block_size == max_seq_len` means a
-//! sequence's entire lifetime fits one physical block, so `max_bt == 1` and a
-//! block table is a single entry per row - the simplest non-degenerate case of
-//! `model::block::gqa_decode_batched_step`'s general contract, not a special
-//! case of it. The device byte cost is what it always was; see
-//! [`Engine::kv_pool_bytes`].
+//! `Qwen35::run_decode_batch`/`run_prefill_chunk` take the pool and the
+//! sequence's blocks and state row as explicit parameters
+//! (`crate::model::BatchDecodeCaches`/`DecodeCaches`) instead of reading the
+//! instance's own `gqa_kv`/`gdn_state`; `Qwen35::step` passes its OWN fields as
+//! a one-block `DecodeCaches`, so its behaviour (and its `decode_step.rs` test)
+//! is unchanged.
 //!
 //! # `prefill`
 //!
-//! Loops over the prompt ONE TOKEN AT A TIME, calling
-//! `Qwen35::run_decode_step` per token against this sequence's own
-//! `DecodeCaches` (the whole pool, plus the base row that selects its physical
-//! block, and its `GdnSlot`). This is NOT `qwen3::serve::Engine`'s chunked, multi-token-per-
-//! dispatch prefill -- a per-token loop is the explicitly-sanctioned
-//! correctness-first shape for this pass
-//! ("correct-then-freeze" -- the same
-//! principle already applied to this model's int8 GEMM tiling and MoE decode
-//! dispatch). The performance gap (one submit+readback per PROMPT token,
-//! instead of one batched whole-prompt forward) is real and is intentionally
-//! left for later work, exactly the way `crate::sample::generate_kv`'s own
-//! doc already names its identical per-token-prefill gap.
+//! Reserves the prompt's blocks, takes a state row, and runs the prompt in
+//! rounds of [`EngineOptions::prefill_chunk`] tokens (`Qwen35::run_prefill_chunk`,
+//! one dispatch shape per layer per round) over a private recurrent state,
+//! which then becomes the sequence's pool row.
 //!
 //! # `forward_batched_greedy`/`_window`/`forward_batched_topk`
 //!
@@ -117,7 +76,7 @@
 //!
 //! `forward_batched_greedy_window` is still host-orchestrated ACROSS window
 //! positions (one batched step per position), since this engine has no
-//! on-device multi-step schedule -- see "Deliberately deferred".
+//! on-device multi-step schedule (see "What this engine is, and is not").
 //!
 //! # What this engine is, and is not (see the sections above for the design)
 //!
@@ -125,17 +84,20 @@
 //!   int8), from any [`checkpoint::TensorSource`] - in particular straight from
 //!   the released Q8_0 GGUF through [`crate::gguf_load::source`], so the 35B
 //!   model is resident at ~38 GB with no fp32 copy anywhere.
-//! - **KV**: the GQA layers' K/V pool is stored f32, bf16, per-row int8 or per-row fp8
-//!   ([`model::kv_tier::KvTier`], chosen in [`EngineOptions`]) and decoded
-//!   through the fused split-key attention in every tier.
+//! - **KV**: one paged pool shared by every sequence, stored f32, bf16, per-row
+//!   int8 or per-row fp8 ([`model::kv_tier::KvTier`], chosen in
+//!   [`EngineOptions`]) and decoded through the fused split-key attention in
+//!   every tier.
 //! - **Prefill**: chunked - one dispatch shape per layer per round of
 //!   [`EngineOptions::prefill_chunk`] tokens (`Qwen35::run_prefill_chunk`).
 //! - **Head**: on the device. Greedy and top-k decode read back token ids, never
 //!   a `[vocab]` logits row; only admission's [`Engine::logits`] reads one.
-//! - **Not built**: prefix-cache reuse ([`Engine::reclaim_prefix`] returns 0),
-//!   speculative decode, multi-GPU layer sharding, vision/DeepStack (text only).
+//! - **Not built**: prefix-cache reuse ([`Engine::reclaim_prefix`] returns 0: a
+//!   recurrent layer resumes a prefix only from the state snapshot taken at its
+//!   end, which this engine does not keep), speculative decode, multi-GPU layer
+//!   sharding, vision/DeepStack (text only).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 
 use checkpoint::TensorSource;
 use gpu_core::select::Dtype;
@@ -178,7 +140,7 @@ const SERVING_T: u32 = 64;
 /// policy chooses ([`model::serve::TENSOR_CORE_PREFILL_ROUND_ROWS`]).
 pub fn activation_bytes(cfg: &Qwen35Config, opts: &EngineOptions) -> u64 {
     let rows = opts.prefill_chunk.unwrap_or(model::serve::TENSOR_CORE_PREFILL_ROUND_ROWS);
-    decode_step_bytes(cfg, opts.max_concurrent) + prefill_round_bytes(cfg, rows)
+    decode_step_bytes(cfg, opts.max_concurrent, opts.kv_tier, opts.max_seq_len) + prefill_round_bytes(cfg, rows)
 }
 
 /// A recorded decode step keeps every temporary of every layer (nothing inside one recording is reused), as a ratio of
@@ -191,14 +153,19 @@ const DECODE_STEP_LAYER_WORDS: (u64, u64) = (3, 2);
 /// one-row step measured above, with a margin.
 const DECODE_STEP_FIXED_BYTES: u64 = 32 << 20;
 
-/// Device bytes the working set of one decode step of `rows` rows holds: every layer's temporaries and the head's
-/// logits and candidates. The recorded steps of every batch size share one such set, the widest step's
-/// ([`gpu_core::tape::TapeScratch`]), so this at the engine's widest batch is what they hold.
-pub fn decode_step_bytes(cfg: &Qwen35Config, rows: u32) -> u64 {
+/// Device bytes the working set of one decode step of `rows` rows holds: every layer's temporaries, the head's logits
+/// and candidates, and every attention layer's split records for sequences of up to `max_seq_len` positions in a
+/// `kv_tier` pool ([`model::kv_tier::flash_part_words_bound`]). The records grow with the context the step is sized
+/// for, not with the rows' words: a step sized for a 256K context holds them for every attention layer, which the
+/// layer ratio, measured at a 74K context, does not cover. The recorded steps of every batch size share one such set,
+/// the widest step's ([`gpu_core::tape::TapeScratch`]), so this at the engine's widest batch is what they hold.
+pub fn decode_step_bytes(cfg: &Qwen35Config, rows: u32, kv_tier: KvTier, max_seq_len: u32) -> u64 {
     let (num, den) = DECODE_STEP_LAYER_WORDS;
     let layers = u64::from(cfg.n_layers) * layer_words(cfg) * 4 * num / den;
     let head = 2 * u64::from(cfg.vocab) * 4;
-    DECODE_STEP_FIXED_BYTES + u64::from(rows) * (layers + head)
+    let n_full = cfg.layer_types().iter().filter(|t| **t == LayerType::Full).count() as u64;
+    let splits = n_full * 4 * model::kv_tier::flash_part_words_bound(kv_tier, rows, cfg.n_heads, cfg.n_kv_heads, cfg.head_dim, max_seq_len);
+    DECODE_STEP_FIXED_BYTES + u64::from(rows) * (layers + head) + splits
 }
 
 /// f32 words of one layer's intermediates a row: the residual pair, the larger of the recurrent and the attention
@@ -232,14 +199,18 @@ pub fn prefill_round_bytes(cfg: &Qwen35Config, rows: u32) -> u64 {
     slot_bytes + w(rows) * layer_words * 4 * num / den
 }
 
-/// How an [`Engine`] is built: capacity, weight tier, KV tier, prefill round.
+/// How an [`Engine`] is built: capacity, KV pool, weight tier, KV tier, prefill round.
 #[derive(Clone, Debug)]
 pub struct EngineOptions {
-    /// The hard cap on `prompt + max_new` for any ONE sequence (this engine's
-    /// `block_size`, see module doc).
+    /// The hard cap on `prompt + max_new` for any ONE sequence.
     pub max_seq_len: u32,
-    /// How many sequences may be resident at once (`num_blocks`).
+    /// How many sequences may be resident at once: the recurrent-state rows ([`GdnPool`]).
     pub max_concurrent: u32,
+    /// Rows of one KV block ([`Self::block_rows`] clamps it to `max_seq_len`).
+    pub kv_block_rows: u32,
+    /// Rows of the shared KV pool, in whole blocks; `None` gives every one of `max_concurrent` sequences a whole
+    /// context ([`Self::pool_rows`]). A placement sizes it to what the card holds beside everything else.
+    pub kv_pool_rows: Option<u32>,
     pub tier: TierPolicy,
     pub kv_tier: KvTier,
     /// Prompt tokens per prefill round; `None` takes the device's ([`model::serve::prefill_round_rows_for`]: wider on
@@ -262,7 +233,40 @@ pub struct EngineOptions {
 impl EngineOptions {
     /// fp32 weights and KV - the engine's original, reference configuration.
     pub fn new(max_seq_len: u32, max_concurrent: u32) -> EngineOptions {
-        EngineOptions { max_seq_len, max_concurrent, tier: TierPolicy::uniform(Dtype::F32), kv_tier: KvTier::F32, prefill_chunk: None, decode_tapes: true, moe_grouped_min_rows: MOE_GROUPED_MIN_ROWS, decode_fusion: true, gemm_precision: GemmPrecision::Auto }
+        EngineOptions {
+            max_seq_len,
+            max_concurrent,
+            kv_block_rows: model::paged::KV_BLOCK_ROWS,
+            kv_pool_rows: None,
+            tier: TierPolicy::uniform(Dtype::F32),
+            kv_tier: KvTier::F32,
+            prefill_chunk: None,
+            decode_tapes: true,
+            moe_grouped_min_rows: MOE_GROUPED_MIN_ROWS,
+            decode_fusion: true,
+            gemm_precision: GemmPrecision::Auto,
+        }
+    }
+    /// Rows of one KV block: [`Self::kv_block_rows`], at most one whole sequence (an engine whose sequences are shorter
+    /// than a block gives each one block of its context).
+    pub fn block_rows(&self) -> u32 {
+        self.kv_block_rows.clamp(1, self.max_seq_len.max(1))
+    }
+    /// Rows of the shared KV pool: [`Self::kv_pool_rows`] in whole blocks, or room for `max_concurrent` whole contexts.
+    pub fn pool_rows(&self) -> u64 {
+        let block = self.block_rows() as u64;
+        match self.kv_pool_rows {
+            Some(rows) => rows as u64 / block * block,
+            None => self.max_concurrent as u64 * (self.max_seq_len as u64).div_ceil(block) * block,
+        }
+    }
+    pub fn with_kv_block_rows(mut self, rows: u32) -> EngineOptions {
+        self.kv_block_rows = rows.max(1);
+        self
+    }
+    pub fn with_kv_pool_rows(mut self, rows: u32) -> EngineOptions {
+        self.kv_pool_rows = Some(rows);
+        self
     }
     pub fn with_tier(mut self, tier: TierPolicy) -> EngineOptions {
         self.tier = tier;
@@ -316,16 +320,18 @@ fn gdn_slot_shape(cfg: &Qwen35Config) -> RecurrentSlotShape {
 }
 
 /// Every resident sequence's Gated-DeltaNet recurrent state: per layer one pool
-/// of `num_blocks` rows of state and one of conv history, row `p` belonging to
-/// the sequence on physical block `p`. Zeroed once at construction; a row is
-/// overwritten wholesale when its sequence is admitted.
+/// of `rows` rows of state and one of conv history, row `r` belonging to the
+/// sequence whose `BlockTable::state_row` is `r`. Zeroed once at construction; a
+/// row is overwritten wholesale when its sequence is admitted.
 struct GdnPool {
-    /// `[layer]`: `[num_blocks, state_len]`, a size-1 placeholder at GQA layers.
+    /// `[layer]`: `[rows, state_len]`, a size-1 placeholder at GQA layers.
     state: Vec<DeviceBuffer>,
     hist: Vec<DeviceBuffer>,
     shape: RecurrentSlotShape,
-    /// Physical blocks whose row holds a live sequence.
-    live: HashSet<u32>,
+    /// Rows given to no sequence, the lowest handed out first.
+    free: BTreeSet<u32>,
+    /// Rows in all: the most sequences resident at once.
+    rows: u32,
     scatter: usize,
 }
 
@@ -346,14 +352,19 @@ impl GdnPool {
         let clears: Vec<&DeviceBuffer> = state.iter().chain(hist.iter()).collect();
         gpu.submit(&clears, &[]);
         let scatter = gpu.kernel_index("pool_rows_scatter2").expect("pool_rows_scatter2 is in this model's kernel set");
-        GdnPool { state, hist, shape, live: HashSet::new(), scatter }
+        GdnPool { state, hist, shape, free: (0..rows).collect(), rows, scatter }
     }
 
-    /// Make `slot` the state of the sequence on `phys`: one scatter per
+    /// A row no sequence holds, or `None` when every row is given.
+    fn take(&mut self) -> Option<u32> {
+        self.free.pop_first()
+    }
+
+    /// Make `slot` the state of the sequence on `row`: one scatter per
     /// recurrent layer, overwriting the whole row.
-    fn store(&mut self, gpu: &Gpu, phys: u32, slot: &GdnSlot) {
+    fn store(&mut self, gpu: &Gpu, row: u32, slot: &GdnSlot) {
         let ids = gpu.storage(1);
-        gpu.write(&ids, &[phys]);
+        gpu.write(&ids, &[row]);
         let (sl, hl) = (self.shape.state_len as u32, self.shape.hist_len as u32);
         let steps: Vec<_> = (0..self.shape.is_recurrent.len())
             .filter(|&l| self.shape.is_recurrent[l])
@@ -365,27 +376,32 @@ impl GdnPool {
         if !gpu.submissions_ordered() {
             gpu.poll_wait();
         }
-        self.live.insert(phys);
     }
 
-    fn forget(&mut self, phys: u32) {
-        self.live.remove(&phys);
+    /// Give `row` back: its state is no sequence's any more.
+    fn give_back(&mut self, row: u32) {
+        assert!(self.free.insert(row), "qwen35moe::serve::Engine: recurrent-state row {row} given back twice");
     }
 
-    fn is_live(&self, phys: u32) -> bool {
-        self.live.contains(&phys)
+    /// Whether `row` is a sequence's.
+    fn is_live(&self, row: u32) -> bool {
+        row < self.rows && !self.free.contains(&row)
     }
 }
 
-/// Device bytes of the paged GQA pool for `num_blocks` blocks of `block_size`
-/// rows in `kv_tier`, plus the Gated-DeltaNet slot of every block - a
+/// Device bytes of the shared GQA pool of `pool_rows` rows in `kv_tier`, plus
+/// `state_rows` Gated-DeltaNet state rows (one per sequence that may run) - a
 /// prediction made before any device allocation, as `PagedDecoder::kv_pool_bytes`
-/// requires.
-pub fn kv_pool_bytes(cfg: &Qwen35Config, kv_tier: KvTier, num_blocks: u32, block_size: u32) -> u64 {
+/// requires, and what a placement charges ([`EngineOptions::pool_rows`],
+/// [`EngineOptions::max_concurrent`]).
+pub fn kv_pool_bytes(cfg: &Qwen35Config, kv_tier: KvTier, pool_rows: u64, state_rows: u32) -> u64 {
+    gqa_pool_bytes(cfg, kv_tier, pool_rows) + state_rows as u64 * GdnSlot::bytes(&gdn_slot_shape(cfg))
+}
+
+/// Device bytes of a shared GQA pool of `pool_rows` rows in `kv_tier`, every full-attention layer's K and V planes.
+pub fn gqa_pool_bytes(cfg: &Qwen35Config, kv_tier: KvTier, pool_rows: u64) -> u64 {
     let n_full = cfg.layer_types().iter().filter(|t| **t == LayerType::Full).count() as u64;
-    let rows = num_blocks as u64 * block_size as u64;
-    let gqa = n_full * 2 * kv_tier.plane_bytes(rows, cfg.kv_dim() as u64, cfg.head_dim as u64);
-    gqa + num_blocks as u64 * GdnSlot::bytes(&gdn_slot_shape(cfg))
+    n_full * 2 * kv_tier.plane_bytes(pool_rows, cfg.kv_dim() as u64, cfg.head_dim as u64)
 }
 
 /// Device bytes the weights occupy for `cfg` under `tier`, predicted before any
@@ -415,15 +431,20 @@ pub fn weight_bytes(cfg: &Qwen35Config, tier: &TierPolicy) -> u64 {
 /// and the least recently used shape is dropped first.
 const MAX_DECODE_TAPES: usize = 8;
 
-/// What a recorded decode step is bound to: how many rows it carries and what
-/// its head returns. Which sequences those rows are - their physical blocks,
+/// What a recorded decode step is bound to: how many rows it carries, what its
+/// head returns, and the context its attention's split count is sized for
+/// ([`Engine::decode_cap`]). Which sequences those rows are - their blocks,
 /// positions, tokens - is data the step reads from its metadata buffers, so one
-/// recording serves every batch of that size.
+/// recording serves every batch of that size whose sequences are no longer.
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct TapeKey {
     rows: u32,
     topk: Option<u32>,
+    cap: u32,
 }
+
+/// The shortest context a recorded step's attention is sized for: steps over short sequences share one recording.
+const DECODE_CAP_FLOOR: u32 = 4096;
 
 /// Where a profiled stretch of decode or prefill went: whole-pass wall time, and
 /// per-kernel DEVICE time (the table that ranks the work - a loaded host
@@ -479,7 +500,7 @@ fn thread_sched_ns() -> Option<(u64, u64)> {
 }
 
 /// Single-GPU `PagedDecoder` for Qwen3.5/3.6-35B-A3B. See this module's doc for
-/// the full design (why `block_size == max_seq_len`, the `GdnSlot` map, and
+/// the full design (the shared paged KV pool, the recurrent-state rows, and
 /// what is and is not built).
 pub struct Engine {
     /// Recorded decode steps by shape, least recently used first. Declared
@@ -497,21 +518,25 @@ pub struct Engine {
     /// `DecodeCaches`/`BatchDecodeCaches` - so it is built at the smallest `t`
     /// the weight tier allows.
     model: Qwen35,
+    /// The shared pool's blocks of [`Self::block_size`] rows.
     alloc: BlockAllocator,
-    /// `== max_seq_len` (the hard per-sequence `prompt + max_new` cap) - see
-    /// module doc for why this makes each physical block a whole sequence's
-    /// entire KV history rather than a fixed-size page of it.
+    /// Rows of one KV block ([`EngineOptions::block_rows`]).
     block_size: u32,
+    /// The hard per-sequence `prompt + max_new` cap.
+    max_seq_len: u32,
+    /// Block-table entries of a decode step's rows: the blocks of one whole sequence, so a recorded step serves
+    /// every batch of its size whatever its sequences' lengths.
+    max_bt: u32,
     /// `[layer]`: ONE real, preallocated `[num_blocks*block_size, kv_dim]` GQA KV
     /// pool per full-attention layer (K and V planes in `kv_tier`), a
     /// placeholder at GDN-layer indices. Physical block `p` owns rows
-    /// `p*block_size .. +block_size`. See module doc "The GQA side".
+    /// `p*block_size .. +block_size`. See module doc.
     gqa_kv: Vec<KvLayer>,
     kv_tier: KvTier,
     prefill_chunk: u32,
-    /// GDN recurrent state / conv history, one pool row per physical block -
-    /// see module doc. Written in [`Engine::prefill`] (or
-    /// [`Engine::admit_synthetic`]), forgotten in [`Engine::release_table`].
+    /// GDN recurrent state / conv history, one pool row per sequence - see
+    /// module doc. Given and written in [`Engine::prefill`] (or
+    /// [`Engine::admit_synthetic`]), given back in [`Engine::release_table`].
     gdn: GdnPool,
 }
 
@@ -544,12 +569,16 @@ impl Engine {
         assert!(opts.max_seq_len > 0, "max_seq_len must be > 0");
         assert!(opts.max_concurrent > 0, "max_concurrent must be > 0");
         let kv_dim = cfg.kv_dim() as u64;
-        let pool_rows = opts.max_concurrent as u64 * opts.max_seq_len as u64;
+        let (block_size, pool_rows) = (opts.block_rows(), opts.pool_rows());
+        let max_bt = opts.max_seq_len.div_ceil(block_size);
+        assert!(
+            pool_rows >= max_bt as u64 * block_size as u64,
+            "qwen35moe::serve::Engine: a KV pool of {pool_rows} rows cannot hold one sequence of {} tokens in blocks of {block_size}",
+            opts.max_seq_len
+        );
         assert!(
             KvTier::fits_addressing(pool_rows, kv_dim),
-            "qwen35moe::serve::Engine: {} sequences of {} tokens is {pool_rows} KV rows of {kv_dim} elements, past what the paged kernels' u32 element offsets address",
-            opts.max_concurrent,
-            opts.max_seq_len
+            "qwen35moe::serve::Engine: a KV pool of {pool_rows} rows of {kv_dim} elements is past what the paged kernels' u32 element offsets address"
         );
         // `t` sizes this instance's fixed scratch. A quantized build's only
         // `rows`-bound scratch is the expert sublayer's activation packing, and a
@@ -582,8 +611,10 @@ impl Engine {
             tape_scratch: gpu_core::tape::TapeScratch::new(),
             decode_tapes,
             model,
-            alloc: BlockAllocator::new(opts.max_concurrent, opts.max_seq_len),
-            block_size: opts.max_seq_len,
+            alloc: BlockAllocator::new((pool_rows / block_size as u64) as u32, block_size),
+            block_size,
+            max_seq_len: opts.max_seq_len,
+            max_bt,
             gqa_kv,
             kv_tier: opts.kv_tier,
             prefill_chunk,
@@ -591,11 +622,22 @@ impl Engine {
         }
     }
 
-    /// The `DecodeCaches` of a sequence being prefilled on physical block
-    /// `phys`: its rows of the GQA pool and the private recurrent state `slot`
+    /// The `DecodeCaches` of a sequence being prefilled into the pool blocks
+    /// `table`: those rows of the GQA pool and the private recurrent state `slot`
     /// that [`GdnPool::store`] moves into the pool once the prompt is in.
-    fn prefill_caches<'a>(&'a self, phys: u32, slot: &'a GdnSlot) -> DecodeCaches<'a> {
-        DecodeCaches { gqa_kv: &self.gqa_kv, gqa_cap: self.block_size, gqa_base_row: phys * self.block_size, gdn_state: &slot.state, gdn_hist: &slot.hist }
+    fn prefill_caches<'a>(&'a self, table: &'a [u32], slot: &'a GdnSlot) -> DecodeCaches<'a> {
+        DecodeCaches { gqa_kv: &self.gqa_kv, gqa_cap: self.max_seq_len, block_size: self.block_size, table, gdn_state: &slot.state, gdn_hist: &slot.hist }
+    }
+
+    /// The recurrent-state row of `table`, given now if it has none. The scheduler never runs more sequences than there
+    /// are rows ([`PagedDecoder::max_batch`]), so a sequence it admits always finds one.
+    fn assign_state_row(&mut self, table: &mut BlockTable) -> Result<u32, String> {
+        if let Some(row) = table.state_row() {
+            return Ok(row);
+        }
+        let row = self.gdn.take().ok_or_else(|| format!("qwen35moe::serve::Engine: every one of the {} recurrent-state rows is in use", self.gdn.rows))?;
+        table.set_state_row(row);
+        Ok(row)
     }
 
     /// A zeroed private recurrent state for a sequence about to be admitted.
@@ -603,42 +645,51 @@ impl Engine {
         GdnSlot::new(&self.model.gpu, &gdn_slot_shape(&self.model.cfg))
     }
 
-    /// Append one position to every table and return each sequence's
-    /// `(physical block, absolute position)`. Each table gets its own position
-    /// appended first (never a second physical block, see module doc -
-    /// `block_size == max_seq_len` means a sequence's total length can never
-    /// cross a block boundary). `offset == pos`: since there is exactly one block
-    /// per sequence, the position WITHIN that block already IS the absolute
-    /// decode position.
+    /// Append one position to every table - a block taken from the pool when the
+    /// sequence crosses into one; the scheduler made room for it
+    /// (`model::serve::Scheduler::ensure_decode_room`) - and return each
+    /// sequence's `(state row, absolute position)`. A table this engine never
+    /// admitted (or already released) has no recurrent state to step: a caller
+    /// bug, not a condition to degrade from.
     fn advance_tables(&mut self, tables: &mut [&mut BlockTable]) -> Vec<(u32, u32)> {
         assert!(!tables.is_empty(), "qwen35moe::serve::Engine: empty batch");
         tables
             .iter_mut()
             .map(|t| {
-                let (_block, offset) = t.append(&mut self.alloc).expect("qwen35moe::serve::Engine: KV pool exhausted mid-decode");
-                (t.blocks()[0], offset)
+                let row = t.state_row().filter(|&r| self.gdn.is_live(r));
+                let row = row.unwrap_or_else(|| panic!("qwen35moe::serve::Engine: a sequence with no recurrent state (table not prefilled by this engine, or already released)"));
+                let pos = t.len();
+                t.append(&mut self.alloc).expect("qwen35moe::serve::Engine: KV pool exhausted mid-decode");
+                (row, pos)
             })
             .collect()
     }
 
-    /// The `BatchSeq` rows of `coords`. A table this engine never admitted (or
-    /// already released) has no recurrent state to step: a caller bug, not a
-    /// condition to degrade from.
-    fn seqs_for(&self, coords: &[(u32, u32)]) -> Vec<BatchSeq> {
-        coords
-            .iter()
-            .map(|&(phys, pos)| {
-                assert!(
-                    self.gdn.is_live(phys),
-                    "qwen35moe::serve::Engine: no recurrent state for physical block {phys} (table not prefilled by this engine, or already released)"
-                );
-                BatchSeq { phys, pos }
-            })
-            .collect()
+    /// The `BatchSeq` rows of `tables` at `coords` ([`Self::advance_tables`]).
+    fn seqs_for<'a>(tables: &'a [&mut BlockTable], coords: &[(u32, u32)]) -> Vec<BatchSeq<'a>> {
+        tables.iter().zip(coords).map(|(t, &(state_row, pos))| BatchSeq { state_row, pos, table: t.blocks() }).collect()
     }
 
-    fn batch_caches<'a>(&'a self, seqs: &'a [BatchSeq]) -> BatchDecodeCaches<'a> {
-        BatchDecodeCaches { gqa_kv: &self.gqa_kv, gqa_cap: self.block_size, seqs, gdn: GdnStore::Pool { state: &self.gdn.state, hist: &self.gdn.hist } }
+    /// The context a decode step over `coords` is sized for: the longest sequence's next length rounded up to a power of
+    /// two, at least [`DECODE_CAP_FLOOR`] and at most the engine's context. A recorded step's attention splits its keys
+    /// and holds a record per split by this (`model::kv_tier::flash_part_words_bound`), so a step sized for the whole
+    /// context would pay for it in every attention layer whatever lengths it carries; rounded, a growing batch is
+    /// recorded again only when its longest sequence doubles.
+    fn decode_cap(&self, coords: &[(u32, u32)]) -> u32 {
+        let live = coords.iter().map(|&(_, pos)| pos + 1).max().unwrap_or(1);
+        live.next_power_of_two().max(DECODE_CAP_FLOOR).min(self.max_seq_len)
+    }
+
+    /// The caches of a decode step over `seqs`, sized for sequences of up to `cap` positions.
+    fn batch_caches<'a>(&'a self, seqs: &'a [BatchSeq<'a>], cap: u32) -> BatchDecodeCaches<'a> {
+        BatchDecodeCaches {
+            gqa_kv: &self.gqa_kv,
+            gqa_cap: cap,
+            block_size: self.block_size,
+            max_bt: self.max_bt,
+            seqs,
+            gdn: GdnStore::Pool { state: &self.gdn.state, hist: &self.gdn.hist },
+        }
     }
 
     /// ONE decode step for every `(sequence, input)` pair at once - the engine's
@@ -663,10 +714,11 @@ impl Engine {
         // are what a recorded step runs; a taller batch decodes unrecorded, where the tile product serves it.
         let unrecordable =
             self.model.moe_nvfp4_active() && inputs.len() as u32 > model::ops::GEMV_MAX_ROWS;
+        let tables: &[&mut BlockTable] = tables;
         if !self.decode_tapes || unrecordable {
             let rows = inputs.len() as u32;
-            let seqs = self.seqs_for(&coords);
-            let caches = self.batch_caches(&seqs);
+            let seqs = Self::seqs_for(tables, &coords);
+            let caches = self.batch_caches(&seqs, self.max_seq_len);
             // The readback that ends the step is the drain the arena's contract asks for.
             let _scope = self.model.gpu.scratch_scope();
             let hidden = self.model.run_decode_batch(inputs, &caches);
@@ -675,7 +727,8 @@ impl Engine {
                 DecodeHead::TopK(k) => DecodeOut::TopK(self.model.head_topk_rows_dev(&hidden, rows, k)),
             };
         }
-        let key = TapeKey { rows: inputs.len() as u32, topk: match head { DecodeHead::Greedy => None, DecodeHead::TopK(k) => Some(k) } };
+        let cap = self.decode_cap(&coords);
+        let key = TapeKey { rows: inputs.len() as u32, topk: match head { DecodeHead::Greedy => None, DecodeHead::TopK(k) => Some(k) }, cap };
         match self.tapes.iter().position(|(k, _, _)| *k == key) {
             // Most recently used last.
             Some(i) => {
@@ -684,8 +737,8 @@ impl Engine {
             }
             None => {
                 let tape = {
-                    let seqs = self.seqs_for(&coords);
-                    let caches = self.batch_caches(&seqs);
+                    let seqs = Self::seqs_for(tables, &coords);
+                    let caches = self.batch_caches(&seqs, cap);
                     self.model.record_decode(inputs, &caches, head, &self.tape_scratch)
                 };
                 if self.tapes.len() >= MAX_DECODE_TAPES {
@@ -699,7 +752,7 @@ impl Engine {
             }
         }
         let (_, tape, _) = self.tapes.last().expect("the tape for this shape was just found or recorded");
-        let seqs = self.seqs_for(&coords);
+        let seqs = Self::seqs_for(tables, &coords);
         self.model.replay_decode(tape, inputs, &seqs)
     }
 
@@ -737,10 +790,14 @@ impl Engine {
         self.tape_scratch.held_bytes()
     }
 
-    /// The hard `prompt + max_new` cap for one sequence - `block_size` (see
-    /// module doc).
+    /// The hard `prompt + max_new` cap for one sequence.
     pub fn max_seq_len(&self) -> usize {
-        self.block_size as usize
+        self.max_seq_len as usize
+    }
+
+    /// The most sequences resident at once: the recurrent-state rows.
+    pub fn max_batch(&self) -> usize {
+        self.gdn.rows as usize
     }
 
     pub fn vocab(&self) -> usize {
@@ -782,14 +839,14 @@ impl Engine {
         self.model.gpu.poll_wait();
     }
 
-    /// Real, combined device footprint of the per-sequence state: the GQA pool
-    /// (every physical block's dedicated `[block_size, kv_dim]` K and V planes,
-    /// in the pool's KV tier, every GQA layer) PLUS the GDN slot pool's own real
-    /// cost, reported at its worst-case ceiling (`num_blocks` slots) as
-    /// `PagedDecoder::kv_pool_bytes`'s contract asks. The same arithmetic as the
-    /// free [`kv_pool_bytes`], which a planner calls before building anything.
+    /// Real, combined device footprint of the per-sequence state: the shared GQA
+    /// pool (every block's `[block_size, kv_dim]` K and V planes, in the pool's
+    /// KV tier, every GQA layer) PLUS the GDN state pool's own real cost (every
+    /// row), as `PagedDecoder::kv_pool_bytes`'s contract asks. The same
+    /// arithmetic as the free [`kv_pool_bytes`], which a planner calls before
+    /// building anything.
     pub fn kv_pool_bytes(&self) -> u64 {
-        kv_pool_bytes(&self.model.cfg, self.kv_tier, self.alloc.num_blocks(), self.block_size)
+        kv_pool_bytes(&self.model.cfg, self.kv_tier, self.kv_pool_capacity_tokens(), self.gdn.rows)
     }
 
     /// `num_blocks * block_size` - see [`PagedDecoder::kv_pool_capacity_tokens`]'s
@@ -807,15 +864,12 @@ impl Engine {
         TOPK_CAPACITY
     }
 
-    /// Release a finished/cancelled sequence: free its GDN slot (if any - note
-    /// the key comes from `blocks()[0]` BEFORE `BlockTable::release` clears it)
-    /// THEN run the ordinary KV release. The GDN map is an ADDITION to the
-    /// trait's default block-release behaviour, not a replacement for it - both
-    /// must run, or the GQA pool's physical block (and the underlying
-    /// `BlockAllocator` accounting) would leak.
+    /// Release a finished/cancelled sequence: give its recurrent-state row back
+    /// (if it was given one) and its KV blocks to the pool. Both must run, or the
+    /// row or the blocks would leak.
     pub fn release_table(&mut self, t: &mut BlockTable) {
-        if let Some(&phys) = t.blocks().first() {
-            self.gdn.forget(phys);
+        if let Some(row) = t.take_state_row() {
+            self.gdn.give_back(row);
         }
         t.release(&mut self.alloc);
     }
@@ -835,11 +889,10 @@ impl Engine {
         if let Some(&bad) = prompt.iter().find(|&&t| t >= self.model.cfg.vocab) {
             panic!("prompt token {bad} is outside the model vocabulary ({})", self.model.cfg.vocab);
         }
-        // One `reserve` for the whole prompt: since `block_size == max_seq_len`
-        // this allocates EXACTLY the sequence's one physical block (see module
-        // doc) - every later `append` (decode) reuses it.
+        // One `reserve` for the whole prompt: the blocks its tokens cover. Decode
+        // takes the next as the sequence crosses into it.
         table.reserve(prompt.len() as u32, &mut self.alloc).expect("qwen35moe::serve::Engine: KV pool exhausted");
-        let phys = table.blocks()[0];
+        let row = self.assign_state_row(table).unwrap_or_else(|e| panic!("{e}"));
         // The prompt runs over a private state, which then becomes this
         // sequence's pool row: the prefill kernels bind one sequence's buffers.
         let slot = self.fresh_slot();
@@ -847,17 +900,17 @@ impl Engine {
         let mut hidden = None;
         let mut pos = 0u32;
         for round in prompt.chunks(self.prefill_chunk as usize) {
-            let h = self.model.run_prefill_chunk(round, pos, &self.prefill_caches(phys, &slot));
+            let h = self.model.run_prefill_chunk(round, pos, &self.prefill_caches(table.blocks(), &slot));
             pos += round.len() as u32;
             hidden = Some(h);
         }
         let hidden = self.model.gpu.read(&hidden.expect("a non-empty prompt has at least one round"), d);
-        self.gdn.store(&self.model.gpu, phys, &slot);
+        self.gdn.store(&self.model.gpu, row, &slot);
         hidden
     }
 
     /// Bring `table` to `position` cached tokens WITHOUT computing them: the
-    /// KV block is reserved and a zeroed Gated-DeltaNet slot is created, so the
+    /// KV blocks are reserved and a zeroed Gated-DeltaNet row is given, so the
     /// next decode step does the work (and moves the bytes) of a step at that
     /// position over whatever the cache rows hold. This is how a long-context
     /// decode step is priced when prefilling the context for real would take
@@ -865,14 +918,14 @@ impl Engine {
     /// produces mean nothing. A table already at `position` is left alone, one
     /// shorter is extended and one longer truncated.
     pub fn admit_synthetic(&mut self, table: &mut BlockTable, position: u32) -> Result<(), String> {
-        if position == 0 || position >= self.block_size {
-            return Err(format!("a synthetic context needs 1 <= position < {} (got {position})", self.block_size));
+        if position == 0 || position >= self.max_seq_len {
+            return Err(format!("a synthetic context needs 1 <= position < {} (got {position})", self.max_seq_len));
         }
         if table.is_empty() {
             table.reserve(position, &mut self.alloc)?;
-            let phys = table.blocks()[0];
+            let row = self.assign_state_row(table)?;
             let zero = self.fresh_slot();
-            self.gdn.store(&self.model.gpu, phys, &zero);
+            self.gdn.store(&self.model.gpu, row, &zero);
         } else if table.len() < position {
             table.reserve(position - table.len(), &mut self.alloc)?;
         } else if table.len() > position {
@@ -891,8 +944,8 @@ impl Engine {
         if batch == 0 || passes == 0 {
             return Err(format!("profile_decode_at needs a batch and a pass count (got {batch} x {passes})"));
         }
-        if position as u64 + 2 * passes as u64 + 1 >= self.block_size as u64 {
-            return Err(format!("profiling {passes} passes from position {position} runs past this engine's capacity {}", self.block_size));
+        if position as u64 + 2 * passes as u64 + 1 >= self.max_seq_len as u64 {
+            return Err(format!("profiling {passes} passes from position {position} runs past this engine's capacity {}", self.max_seq_len));
         }
         let mut tables: Vec<BlockTable> = (0..batch).map(|_| BlockTable::new()).collect();
         let outcome = (|| {
@@ -913,8 +966,7 @@ impl Engine {
             // back - not dispatch by dispatch: per-dispatch timing of eager
             // launches carries the host's launch latency, which the tape removes.
             if self.decode_tapes {
-                let key = TapeKey { rows: batch, topk: None };
-                if let Some((_, tape, _)) = self.tapes.iter().find(|(k, _, _)| *k == key) {
+                if let Some((_, tape, _)) = self.tapes.iter().rev().find(|(k, _, _)| k.rows == batch && k.topk.is_none()) {
                     if let Some(rows) = self.model.gpu.profile_tape(tape.tape(), passes) {
                         profile.rows = rows.into_iter().map(|(n, ms, calls)| (n, ms * passes as f64, calls * passes as u64)).collect();
                     }
@@ -931,8 +983,8 @@ impl Engine {
     /// The per-kernel profile of `passes` cold prefills of `tokens` tokens each
     /// (rounds of [`Engine::max_prefill_tokens`]), same two regions.
     pub fn profile_prefill(&mut self, tokens: u32, passes: u32) -> Result<KernelProfile, String> {
-        if tokens == 0 || tokens as u64 > self.block_size as u64 || passes == 0 {
-            return Err(format!("profile_prefill needs 1 <= tokens <= {} and a pass count (got {tokens} x {passes})", self.block_size));
+        if tokens == 0 || tokens > self.max_seq_len || passes == 0 {
+            return Err(format!("profile_prefill needs 1 <= tokens <= {} and a pass count (got {tokens} x {passes})", self.max_seq_len));
         }
         let vocab = self.vocab() as u64;
         let prompt: Vec<u32> = (0..tokens as u64).map(|i| ((i * 7919 + 13) % vocab) as u32).collect();
@@ -1013,8 +1065,8 @@ impl Engine {
         }
         let rows = inputs.len() as u32;
         let coords = self.advance_tables(tables);
-        let seqs = self.seqs_for(&coords);
-        let caches = self.batch_caches(&seqs);
+        let seqs = Self::seqs_for(tables, &coords);
+        let caches = self.batch_caches(&seqs, self.max_seq_len);
         let _scope = self.model.gpu.scratch_scope();
         // On the arithmetic of every other decode step ([`Engine::decode`]).
         let logits = model::ops::fp32_kernels(|| {
@@ -1035,8 +1087,8 @@ impl Engine {
         }
         let rows = inputs.len() as u32;
         let coords = self.advance_tables(tables);
-        let seqs = self.seqs_for(&coords);
-        let caches = self.batch_caches(&seqs);
+        let seqs = Self::seqs_for(tables, &coords);
+        let caches = self.batch_caches(&seqs, self.max_seq_len);
         let _scope = self.model.gpu.scratch_scope();
         let logits = model::ops::fp32_kernels(|| {
             let hidden = self.model.run_decode_batch(inputs, &caches);
@@ -1085,6 +1137,9 @@ impl PagedDecoder for Engine {
     }
     fn max_prefill_tokens(&self) -> u32 {
         Engine::max_prefill_tokens(self)
+    }
+    fn max_batch(&self) -> Option<usize> {
+        Some(Engine::max_batch(self))
     }
     fn free_blocks(&self) -> u32 {
         Engine::free_blocks(self)

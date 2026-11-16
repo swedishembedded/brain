@@ -24,6 +24,11 @@ pub trait BlockBacking: Send {
     fn back(&mut self, block: u32) -> Result<(), String>;
 }
 
+/// Rows of one KV block in the paged pools the serving engines hold by default: large enough that a million-token
+/// sequence's block table stays a few thousand entries (it is uploaded every decode step), and a multiple of the paged
+/// attention kernels' key tile.
+pub const KV_BLOCK_ROWS: u32 = 256;
+
 /// The refcount of a block lent out with [`BlockAllocator::lend`]: out of the pool, belonging to no sequence.
 const LENT: u16 = u16::MAX;
 

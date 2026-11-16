@@ -323,7 +323,7 @@ pub struct ServingShape {
     pub unified_state: bool,
     /// Pool rows one sequence's state row takes out of the shared pool; 0 unless [`Self::unified_state`].
     pub sequence_state_rows: u32,
-    /// Rows of a KV block of the paged layout; 0 for the default [`KV_BLOCK_ROWS`]. A pool is whole blocks.
+    /// Rows of a KV block of the paged layout; 0 for the default [`model::paged::KV_BLOCK_ROWS`]. A pool is whole blocks.
     pub block_rows: u32,
 }
 
@@ -659,14 +659,9 @@ fn largest_fitting(fits: impl Fn(u32) -> bool) -> Option<u32> {
     Some(fit)
 }
 
-/// Rows of one KV block in the paged layout `brain serve` uses for this model:
-/// large enough that a million-token sequence's block table stays a few thousand
-/// entries (it is uploaded every decode step), and a multiple of the decode
-/// kernel's key tile.
-pub const KV_BLOCK_ROWS: u32 = 256;
 
 /// Granularity of [`auto_pool_rows`]'s answer.
-const AUTO_POOL_GRANULE: u32 = 16 * KV_BLOCK_ROWS;
+const AUTO_POOL_GRANULE: u32 = 16 * model::paged::KV_BLOCK_ROWS;
 
 /// The largest shared KV pool, in rows, that `shape` leaves room for on `devices`
 /// once the weights, the recurrent state and the step workspace are placed
@@ -687,7 +682,7 @@ pub fn auto_pool_rows(cfg: &Qwen35Config, devices: &[(Device, u64)], shape: &Ser
     };
     let fit = largest_fitting(fits)?;
     // Whole blocks, and a round number of them: the granule is the block when the block is larger than the round figure.
-    let block = if shape.block_rows > 0 { shape.block_rows } else { KV_BLOCK_ROWS };
+    let block = if shape.block_rows > 0 { shape.block_rows } else { model::paged::KV_BLOCK_ROWS };
     let granule = AUTO_POOL_GRANULE.max(block).next_multiple_of(block);
     let rows = if fit >= granule { fit / granule * granule } else { fit / block * block };
     (rows > 0 && rows >= cap.unwrap_or(0).saturating_add(shape.sequence_state_rows)).then_some(rows)
@@ -5291,7 +5286,7 @@ mod tests {
         let windowed = auto_cap(&cfg, &card, &shape).expect("fits");
         let pool = auto_pool_rows(&cfg, &card, &shape, None).expect("fits");
         assert!(pool > 8 * windowed, "pool {pool} rows against {windowed} rows per slot");
-        assert_eq!(pool % KV_BLOCK_ROWS, 0, "whole blocks");
+        assert_eq!(pool % model::paged::KV_BLOCK_ROWS, 0, "whole blocks");
         // The pool, the placement and the workspace fit together; one granule more does not.
         let at = |rows: u32| ServingShape { kv_pool_rows: rows, cap: rows, ..shape.clone() };
         let total = |rows: u32| serving_cost(&cfg, &at(rows)).total() + at(rows).stage_workspace(&cfg);

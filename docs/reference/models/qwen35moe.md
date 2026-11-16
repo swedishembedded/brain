@@ -66,10 +66,12 @@ brain serve --openai 8788
 
 `brain serve` serves a released `qwen35moe` GGUF from the file on one card, int8 weights read straight from its Q8_0
 blocks. What `--kv-cache`, `--max-batch` and `--ctx` leave unset is planned for the card and printed at startup, one
-`default` line each: the most compact KV tier that fits, the widest batch (up to 64 sequences) that still leaves a 32K
-context, then the longest context the card holds for that batch. Every running sequence holds a whole context of KV, so
-a narrower `--max-batch` buys a longer `--ctx` and the reverse. `brain perf run --target qwen35moe:<gguf>` measures this
-same engine (`:kv<tier>` and `--max-batch` pin what they name).
+`default` line each: the most compact KV tier that fits, the widest batch (up to 64 sequences) that still leaves one
+sequence a 32K context, the longest context one sequence can take (up to the checkpoint's trained window), and a KV
+pool of the rest of the card. The running sequences share that pool in blocks of 256 tokens, each taking the blocks its
+tokens cover, so short requests leave room for more of them and one long request does not cost every sequence its
+length; a sequence that outgrows the pool while it decodes is preempted and recomputed later. `brain perf run --target
+qwen35moe:<gguf>` measures this same engine (`:kv<tier>` and `--max-batch` pin what they name).
 
 ## Running it
 

@@ -663,7 +663,7 @@ pub fn gguf_resident_banked(gguf_path: &str, id: &str, gpus: &[(u32, u64)], rese
         let spec = SpecServing { mode, scratch_rows, batch_limit, ..SpecServing::default() };
         // Paged KV: sequences hold the blocks their tokens need from one shared pool, so a long context
         // costs only the sequences that use it, and the batch is not multiplied by the context.
-        let r = Qwen35GgufResident::new(gguf_path.to_string(), devices.to_vec(), cap, tier.clone()).with_kv_tier(kv).with_max_batch(max_batch).with_prefix_slots(prefix_slots).with_speculation(spec).with_exact_decode(cfg.exact_decode).with_act_choice(cfg.act_precision.unwrap_or_default()).with_gdn_state(gdn_state).with_linear_activations(cfg.linear_activations.unwrap_or_default()).with_kv_block_rows(qwen35::int8_gguf_resident::KV_BLOCK_ROWS).with_unified_pool(true);
+        let r = Qwen35GgufResident::new(gguf_path.to_string(), devices.to_vec(), cap, tier.clone()).with_kv_tier(kv).with_max_batch(max_batch).with_prefix_slots(prefix_slots).with_speculation(spec).with_exact_decode(cfg.exact_decode).with_act_choice(cfg.act_precision.unwrap_or_default()).with_gdn_state(gdn_state).with_linear_activations(cfg.linear_activations.unwrap_or_default()).with_kv_block_rows(model::paged::KV_BLOCK_ROWS).with_unified_pool(true);
         match &bank {
             Some(bank) => r.with_adapter_bank(bank.request()),
             None => r,

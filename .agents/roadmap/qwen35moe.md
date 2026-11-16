@@ -9,7 +9,7 @@ Qwen3.5-35B-A3B: a hybrid decoder mixing Gated DeltaNet (chunked linear-attentio
 - [ ] The prefill/training tape's RMSNorm BACKWARD (`rms_inv`/`rmsnorm_dx`) is still the per-element kernel; only the forward selects the coalesced `rmsnorm_rows` (measured 16.3x on one decode token's norms).
 - [ ] Multi-GPU INT8/INT4 residency serving (the full `PagedDecoder` engine), including layer-range sharding across GPUs for the served path - the full model does not fit a single GPU's memory.
 - [ ] Prefix-cache reuse and speculative decode in the serving engine (batched decode and chunked prefill are done; see "Serving on the shared paged engine").
-- [ ] Paged KV cache for served decode (int8 and fp8 KV tiers exist, one whole block per sequence).
+- [x] Paged KV cache for served decode: one pool of 256-token blocks shared by every sequence (see "Device memory").
 - [ ] INT4 quantized inference (weight quantization) for this model specifically.
 - [ ] LoRA adapter folding into the served model, and int8 weights on the serving path (currently only reachable via a separate, non-serving entry point).
 - [ ] Incremental/KV-cache decode-time image splice for multimodal generation - only whole-sequence prefill with an image is supported today.
@@ -366,8 +366,7 @@ decode equals decoding alone.
   allocations. Busy 79.5 -> 96.8 % (nsys, the 32-request serving window), gaps over 1 ms 4.8 -> 0.26 s; req/s 1.19 ->
   1.27, TTFT p50 669 ms either way. A recurrent-state slot held for the prompt instead of allocated per admission was
   measured and changed nothing (its blocks come from the retained free blocks); not landed.
-- [ ] Paged KV with blocks smaller than a sequence (the dense resident's shared pool): until then a long `--ctx` costs
-  every resident sequence its whole context.
+- [x] Paged KV with blocks smaller than a sequence (the dense resident's shared pool): see "Device memory".
 - [ ] Parking a GGUF instance off the card (the brain-checkpoint resident's `ParkableInstance`), replicas over several
   cards, and the HF-directory resident's sizing from the card.
 
@@ -402,5 +401,27 @@ base/new interleaved; plan and used at batch 1, admitted = the largest batch the
 | the model's `[n, vocab]` logits and single-sequence decode state made on first use, its backward boundary buffers only in a training build | 40.7 | 39.6 / 39.6 -> 39.5 / 39.5 | 40 |
 
 - The per-layer `res` (41 x 64 rows, 21 MB) stays: the model's own forward reads it.
-- [ ] The KV pool reserves a whole context per sequence (`block_size == max_seq_len`); the dense engine's paged pool
-      does not.
+- [x] The KV pool is paged (knowledge #495): blocks of `model::paged::KV_BLOCK_ROWS` from one pool the plan sizes in
+      rows (`EngineOptions::kv_pool_rows`, `MoePlan::pool_rows`), a recurrent-state row per sequence from a free list
+      (`BlockTable::state_row`), the dense engine's block-table kernels for decode and prefill. The plan charges the
+      pool, `max_batch` state rows and a decode step's split records at the context it allows
+      (`model::kv_tier::flash_part_words_bound`); a recorded step's split count follows its batch's longest sequence
+      (`Engine::decode_cap`). Defaults on gpu3: 64 sequences, a 262144-token context for one sequence, a pool of
+      1164288 tokens at fp32 KV (was 32 x 40704) and 4292096 at int8 (was 64 x 76032). Serve c=64, 2K/8K/32K prompts
+      mixed, 128 out, 96 requests, base/new interleaved:
+
+      | KV | sequences at once | req/s | TTFT p50 / p95 ms | inter-token p50 ms |
+      |---|---|---|---|---|
+      | fp32 base | 32 | 0.712 / 0.713 | 44872 / 76122, 45035 / 75974 | 30.6 |
+      | fp32 paged | 64 | 0.723 / 0.724 | 23416 / 73564, 23477 / 73427 | 43.5 / 43.9 |
+      | int8 base | 64 | 0.748 | 23206 / 72492 | 26.6 |
+      | int8 paged | 64 | 0.749 | 23163 / 72394 | 26.5 |
+
+      longctx at 32K (fp32 KV): admitted 40 either way, batch-1 decode 5.35 / 5.22 -> 5.18 / 5.21 ms, prefill 4K and
+      16K 12.1-12.8K tok/s both.
+- [ ] Lend the recurrent-state rows from the KV pool as the dense engine's unified pool does: the plan reserves 64 rows
+      of 62.8 MiB (3.9 GiB) whether or not 64 sequences run.
+- [ ] Prefix-cache reuse on the paged pool: needs a recurrent-state snapshot at the prefix boundary
+      (`model::snapshot_prefix`), as the dense engine keeps.
+- [ ] `fast_path_parity_real::the_fast_path_follows_the_portable_reference_on_the_real_checkpoint` fails on main as
+      well (prompt 3's prefill hidden rel-L2 5.54e-2 against a 5e-2 bound; identical before and after the paged pool).

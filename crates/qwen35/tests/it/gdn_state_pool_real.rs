@@ -60,7 +60,7 @@ fn engine(path: &str, gdn: GdnState) -> Option<Qwen35GgufEngine> {
         return None;
     }
     let tier = held_tiers_at(path).expect("the directory is a servable checkpoint");
-    let resident = Qwen35GgufResident::new(path.to_string(), devices.clone(), CAP, tier).with_kv_tier(KvTier::INT8).with_max_batch(SEQS as u32).with_prefix_slots(0).with_kv_block_rows(qwen35::int8_gguf_resident::KV_BLOCK_ROWS).with_gdn_state(gdn);
+    let resident = Qwen35GgufResident::new(path.to_string(), devices.clone(), CAP, tier).with_kv_tier(KvTier::INT8).with_max_batch(SEQS as u32).with_prefix_slots(0).with_kv_block_rows(model::paged::KV_BLOCK_ROWS).with_gdn_state(gdn);
     let planned = crate::common::placed_devices(&resident, &devices)?;
     let (engine, _, _) = resident.activate_engine(&planned).unwrap_or_else(|e| panic!("activate {path}: {e}"));
     Some(engine)

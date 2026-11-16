@@ -952,48 +952,6 @@ pub fn gqa_chunk_step(
     steps
 }
 
-/// [`gqa_chunk_step`] over a [`KvLayer`] in any [`KvTier`].
-///
-/// The chunk's `n` K/V rows are appended through the tier's own append kernel
-/// at `(block_ids[i], offsets[i])` - `offsets[i] == start + i` and every
-/// `block_ids[i] == base_row / cap` - which is the flat window
-/// [`kv_cache_fill_at`] writes for an `f32` cache, expressed as the paged append
-/// every tier has. The queries then attend rows `0..=start+i` through the
-/// fused `head_dim = 256` prefill kernel where [`paged_attention_fused`]
-/// selects it on this device, and through the scores/softmax/apply triad (the
-/// `[n, n_heads, start+n]` score slab [`gqa_chunk_step`] documents) otherwise.
-///
-/// `block_ids`/`offsets`/`seq_lens` are `[n]` u32 and caller-owned, shared by
-/// every GQA layer of the round. `softmax` is the caller's
-/// `decode_softmax_batched` pipeline; the `[n, n_heads, start+n]` scores/probs
-/// scratch of the unfused path is allocated here.
-pub fn gqa_chunk_step_kv(
-    g: &Gpu,
-    kv: &KvKernels,
-    softmax: usize,
-    n_heads: u32,
-    n_kv_heads: u32,
-    head_dim: u32,
-    base_row: u32,
-    start: u32,
-    n: u32,
-    cap: u32,
-    q: &DeviceBuffer,
-    k_new: &DeviceBuffer,
-    v_new: &DeviceBuffer,
-    layer: &KvLayer,
-    block_ids: &DeviceBuffer,
-    offsets: &DeviceBuffer,
-    seq_lens: &DeviceBuffer,
-    ctx: &DeviceBuffer,
-) -> Vec<Step> {
-    assert!(base_row.is_multiple_of(cap), "gqa_chunk_step_kv: base_row {base_row} is not a whole number of {cap}-row blocks, so no block_ids value can address it");
-    // One physical block backs the whole sequence: a row's block table is the
-    // single entry `block_ids` holds.
-    let paging = ChunkPaging { block_size: cap, max_bt: 1, blocks: block_ids, offsets, tables: block_ids };
-    gqa_chunk_step_kv_paged(g, kv, softmax, n_heads, n_kv_heads, head_dim, start, n, q, k_new, v_new, layer, &paging, seq_lens, ctx)
-}
-
 /// Where a chunk's rows live in the paged pool: each row's physical block and
 /// its offset inside it (the append address), and each row's block table (the
 /// attention's view of the sequence, `[n, max_bt]`).
@@ -1012,10 +970,15 @@ pub struct ChunkPaging<'a> {
     pub tables: &'a DeviceBuffer,
 }
 
-/// [`gqa_chunk_step_kv`] for a sequence whose K/V may span several physical
-/// blocks: the append and the attention address rows through `paging` instead
-/// of a single block. With `max_bt = 1` and every row on the same block it is
-/// the very same dispatches.
+/// [`gqa_chunk_step`] over a [`KvLayer`] in any [`KvTier`], for a sequence whose
+/// K/V may span several physical blocks: the chunk's `n` K/V rows are appended
+/// through the tier's own append kernel at `paging`'s `(blocks[i], offsets[i])`,
+/// and the queries then attend rows `0..=start+i` through the block tables - by
+/// the fused `head_dim = 256` prefill kernel where [`paged_attention_fused`]
+/// selects it on this device, by the native tensor-core kernel at `head_dim = 128`,
+/// and through the scores/softmax/apply triad (the `[n, n_heads, start+n]` score
+/// slab [`gqa_chunk_step`] documents, allocated here) otherwise. `softmax` is the
+/// caller's `decode_softmax_batched` pipeline.
 #[allow(clippy::too_many_arguments)]
 pub fn gqa_chunk_step_kv_paged(
     g: &Gpu,
@@ -1082,7 +1045,7 @@ pub fn gqa_chunk_attend_steps_kv_paged(
     ctx: &DeviceBuffer,
 ) -> Vec<Step> {
     let t_max = start + n;
-    assert!(t_max <= block_size * max_bt, "gqa_chunk_step_kv: chunk end {t_max} exceeds the cache capacity {}", block_size * max_bt);
+    assert!(t_max <= block_size * max_bt, "gqa_chunk_attend_steps_kv_paged: chunk end {t_max} exceeds the cache capacity {}", block_size * max_bt);
     let kv_stride = n_kv_heads * head_dim;
     if head_dim == 256 && paged_attention_fused(g, true, false, head_dim, 0) {
         return kv.flash_prefill_hd256(g, q, &layer.k, &layer.v, tables, seq_lens, ctx, PrefillShape { n, n_heads, n_kv_heads, head_dim, block_size, max_bt, keys: t_max });

@@ -871,6 +871,26 @@ const FLASH_TILES_PER_SPLIT: u32 = 8;
 /// 346 us layer on a GH200, for 4 MB of keys and values).
 const FLASH_TARGET_WORKGROUPS: u32 = 128;
 
+/// (kv head, split) work items a device's term in the split choice can add, for any device: the native kernels aim
+/// for a few blocks per multiprocessor ([`FLASH_KV8_HD128_BLOCKS_PER_SM`] at most), and no card has a thousand of them.
+const FLASH_DEVICE_ITEMS_BOUND: u64 = 4096;
+
+/// The most words of partial records [`FlashDecode::part_words`] asks for when `batch` rows of `n_heads` query heads
+/// over `n_kv_heads` key heads of a `tier` pool decode with room for `cap` keys, unpinned, on any device and kernel:
+/// what a placement charges for a decode step's split records before the device is known. A split choice that cuts
+/// finer than [`FLASH_TILES_PER_SPLIT`] tiles does so only to reach the device's target; the native kernels of the
+/// compact tiers (bf16 and the 8-bit ones) cut by a cost rule that takes a finer cut only when it costs no more than
+/// twice the waves of the [`FLASH_TILES_PER_SPLIT`] cut, so their records are at most twice that cut's plus twice the
+/// device term. The records grow with `cap`: an engine that sizes
+/// its recorded steps' splits by its whole context pays for that context in every attention layer of the step.
+pub fn flash_part_words_bound(tier: KvTier, batch: u32, n_heads: u32, n_kv_heads: u32, head_dim: u32, cap: u32) -> u64 {
+    let groups = u64::from(batch) * u64::from(n_kv_heads.max(1));
+    let tiles = u64::from(cap.max(1).div_ceil(FLASH_TILE));
+    let cost_rule = if tier.element() == KvElement::F32 { 1 } else { 2 };
+    let items = cost_rule * (groups * tiles.div_ceil(u64::from(FLASH_TILES_PER_SPLIT)) + FLASH_DEVICE_ITEMS_BOUND) + groups;
+    items * u64::from(n_heads / n_kv_heads.max(1)) * (u64::from(head_dim) + 2)
+}
+
 /// `(splits, tiles per split)` for a decode of `batch` sequences over `n_kv_heads`
 /// heads with room for `cap` keys: splits of up to [`FLASH_TILES_PER_SPLIT`] tiles,
 /// cut finer - down to one tile - until the dispatch reaches
@@ -1128,6 +1148,29 @@ impl KvKernels {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The placement's bound on a decode step's split records holds every split choice the kernels make, on devices
+    /// of up to a thousand multiprocessors, at every batch and context: the portable target, the native targets and
+    /// the 8-bit kernels' cost rule.
+    #[test]
+    fn the_part_words_bound_holds_every_split_choice() {
+        let (n_heads, n_kv_heads, head_dim) = (16u32, 2u32, 256u32);
+        for batch in [1u32, 2, 7, 16, 64, 256] {
+            for cap in [1u32, 100, 1024, 4097, 33024, 262_144] {
+                let words = |splits: u32| u64::from(batch) * u64::from(n_heads) * u64::from(splits) * (u64::from(head_dim) + 2);
+                let mut wide = words(flash_splits(cap, batch, n_kv_heads).0);
+                let mut compact = 0;
+                for sms in [1u32, 16, 132, 1000] {
+                    wide = wide.max(words(flash_splits_for(sms * FLASH_BF16_HD128_BLOCKS_PER_SM, cap, batch, n_kv_heads, false).0));
+                    compact = compact.max(words(flash_splits_kv8(sms * FLASH_KV8_HD128_BLOCKS_PER_SM, cap, batch, n_kv_heads, false).0));
+                }
+                for (tier, worst) in [(KvTier::F32, wide), (KvTier::BF16, compact.max(wide)), (KvTier::INT8, compact.max(wide)), (KvTier::FP8, compact.max(wide))] {
+                    let bound = flash_part_words_bound(tier, batch, n_heads, n_kv_heads, head_dim, cap);
+                    assert!(worst <= bound, "{tier} batch {batch} cap {cap}: {worst} words against a bound of {bound}");
+                }
+            }
+        }
+    }
 
     /// Seeding one window of a plane from another copies the rows (and, in the int8
     /// tier, their scales) bit for bit, binds the plane ONCE (a buffer that is
