@@ -31,7 +31,8 @@ Two more actions of `brain/train` produce a checkpoint instead of an adapter.
   Params: `base`, `data`, `steps`, `lr`, `weight_decay`, `grad_accum`, `strict_updates`, `seed`, `max_block`,
   `thinking`, `arch`, `replay_share`, `train_precision` (`key=value,...`, e.g. `state=int8,sr=on`: what each
   trainable parameter, its gradient and its optimiser state are stored as; fp32 everywhere by default, and an unknown
-  key or value is refused before anything loads), `install_as`, `resume_key`, `checkpoint_every` (below).
+  key or value is refused before anything loads), `install_as`, `resume_key`, `checkpoint_every` (below),
+  `exit_entropy` (below).
 - **`merge`** folds a LoRA adapter into the weights it targets (`W + alpha/r B A`). The adapter is the input blob
   `adapter` or `adapter_digest` (exactly one); the work is host-side and takes no card.
 
@@ -76,7 +77,12 @@ SRC, "held_out"?: SRC}` (the blobs are `dataset` and `held_out`); params `steps`
 default 8), `block` (tokens per row, default 256, at most the model's positions), `grad_accum`, `lr` (default
 1e-3), `min_lr` (default a tenth of `lr`), `warmup` (default a twentieth of the run), `weight_decay` (default 0.1),
 `grad_clip` (default 1), `eval_every` (needs `held_out`), `eval_batches` (default 8), `separator` (default
-`<|endoftext|>`), `strict_updates`, `seed`, `arch`, `install_as`, `resume_key`, `checkpoint_every`. The step frame of
+`<|endoftext|>`), `strict_updates`, `seed`, `arch`, `install_as`, `resume_key`, `checkpoint_every`, `exit_entropy`.
+For an architecture whose depth is chosen by exit gates (Ouro), `exit_entropy` is the weight `beta` of the
+entropy-regularised objective of arXiv:2510.25741: the exit-weighted loss minus `beta` times the entropy of each
+supervised position's exit distribution, which keeps training from collapsing the exit mass onto one pass. It
+defaults to that recipe's weights, 0.1 for `pretrain` and 0.05 for `full_train`; 0 turns it off; any other weight
+is refused for an architecture without exit gates. The report carries the weight used. The step frame of
 an evaluating step carries `eval_loss`; the report adds `evaluations` (`[{step, train_loss, eval_loss}]`),
 `documents`, `tokens`, `held_out_documents`, `held_out_tokens`, `separator` and `separator_id`.
 

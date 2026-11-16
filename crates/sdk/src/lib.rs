@@ -206,7 +206,7 @@ pub use finetune::{emit_held_out_records, score_chat, score_tokens, score_tokens
 #[cfg(feature = "study")]
 mod full_finetune;
 #[cfg(feature = "study")]
-pub use full_finetune::{merge_adapter, ChatFullFineTune, ChatFullFineTuneOutcome, MergedCheckpoint};
+pub use full_finetune::{merge_adapter, ChatFullFineTune, ChatFullFineTuneOutcome, MergedCheckpoint, FINE_TUNE_EXIT_ENTROPY};
 #[cfg(feature = "study")]
 pub mod from_scratch;
 #[cfg(feature = "study")]

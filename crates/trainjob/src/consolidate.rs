@@ -60,6 +60,11 @@ pub(crate) fn allow_cpu_param() -> ParamSpec {
     ParamSpec::new("allow_cpu", ParamType::Bool, "train on the CPU backend when that is where the run would execute (no card on the server, or none with room): off, such a run is refused, since a card trains orders of magnitude faster; a server started on the CPU (`--device cpu`) trains there regardless").default(json!(false))
 }
 
+/// `exit_entropy`: the weight of the exit-distribution entropy in the objective of an architecture with exit gates.
+pub(crate) fn exit_entropy_param(default_text: &str) -> ParamSpec {
+    ParamSpec::new("exit_entropy", ParamType::Float, &format!("an architecture with exit gates (ouro): the weight beta of the exit-distribution entropy in the objective, loss - beta * H(p) over the supervised positions, which keeps the exit mass from collapsing onto one depth (default {default_text}; 0 turns it off); refused for an architecture without exit gates")).min(0.0).max(10.0)
+}
+
 /// `checkpoint_every`: how often a resumable run saves its training state.
 pub(crate) fn checkpoint_every_param() -> ParamSpec {
     ParamSpec::new("checkpoint_every", ParamType::Int, "with resume_key: save the exact training state every this many steps (default 25), so a job that dies loses at most this many").min(1.0).max(capability::bounds::TRAIN_COUNT).step(1.0)
@@ -111,6 +116,7 @@ pub fn full_spec() -> ActionSpec {
         .param(resume_key_param())
         .param(checkpoint_every_param())
         .param(allow_cpu_param())
+        .param(exit_entropy_param(&brain::FINE_TUNE_EXIT_ENTROPY.to_string()))
         .input(blob("dataset", "the training records (`generic-messages-v2` JSONL)"));
     for name in crate::request::REPLAY_BLOBS {
         spec = spec.input(blob(name, "a replay dataset"));
@@ -150,6 +156,7 @@ pub struct FullParams {
     pub resume_key: Option<String>,
     pub checkpoint_every: Option<u32>,
     pub allow_cpu: bool,
+    pub exit_entropy: Option<f32>,
 }
 
 /// A `full_train` request that passed the spec and every check that needs no file and no device.
@@ -391,6 +398,9 @@ pub fn run_full(env: &JobEnv, inv: &Invocation, progress: &mut dyn FnMut(Progres
     if let Some(arch) = &p.arch {
         ft = ft.arch(arch.as_str());
     }
+    if let Some(beta) = p.exit_entropy {
+        ft = ft.exit_entropy(beta);
+    }
     if let Some(v) = p.lr {
         ft = ft.lr(v);
     }
@@ -436,6 +446,7 @@ pub fn run_full(env: &JobEnv, inv: &Invocation, progress: &mut dyn FnMut(Progres
         "steps": outcome.steps,
         "steps_completed": outcome.steps_completed,
         "lr": outcome.lr,
+        "exit_entropy": outcome.exit_entropy,
         "resumed_at": outcome.resumed_at,
         "initial_loss": outcome.initial_loss,
         "final_loss": outcome.final_loss,

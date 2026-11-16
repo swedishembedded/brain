@@ -224,3 +224,32 @@ fn a_from_scratch_model_is_refused_by_what_it_cannot_be_before_anything_is_writt
     refused(base().chat_template(unreadable), "j", "serving parser");
     refused(base().chat_template("{% for"), "k", "chat template");
 }
+
+/// Pretraining and a chat fine-tune weigh the exit-distribution entropy into the objective of a family with exit
+/// gates at the reference recipe's weights unless the run names one; a family without gates trains the plain
+/// objective and refuses a weight by name.
+#[test]
+fn the_exit_entropy_weight_defaults_to_the_recipe_where_there_are_exit_gates() {
+    for arch in brain::from_scratch_architectures() {
+        let dir = TempDir::new(&format!("exit-entropy-{arch}"));
+        write_corpus(&dir.join("corpus.jsonl"), 200, 0);
+        write_tool_records(&dir.join("tools.jsonl"));
+        let made = init(arch, &dir.join("corpus.jsonl"), &dir.join("base"), 7).unwrap();
+        let gated = arch == "ouro";
+        let pretrain = |beta: Option<f32>, out: &str| {
+            let run = Pretrain::from_pretrained(made.checkpoint.to_str().unwrap()).corpus(dir.join("corpus.jsonl")).steps(1).batch(2).block(32).seed(3).device(crate::chat_fixture::cpu()).out_dir(dir.join(out));
+            match beta {
+                Some(b) => run.exit_entropy(b).run(),
+                None => run.run(),
+            }
+        };
+        assert_eq!(pretrain(None, "default").unwrap().exit_entropy, if gated { brain::from_scratch::PRETRAIN_EXIT_ENTROPY } else { 0.0 }, "{arch}");
+        assert_eq!(pretrain(Some(0.0), "off").unwrap().exit_entropy, 0.0);
+        match pretrain(Some(0.3), "named") {
+            Ok(o) => assert!(gated && o.exit_entropy == 0.3, "{arch}"),
+            Err(e) => assert!(!gated && e.to_string().contains("no exit gates"), "{arch}: {e}"),
+        }
+        let tuned = ChatFullFineTune::from_pretrained(made.checkpoint.to_str().unwrap()).dataset(dir.join("tools.jsonl")).steps(1).seed(3).thinking(false).device(crate::chat_fixture::cpu()).out_dir(dir.join("chat")).run().unwrap();
+        assert_eq!(tuned.exit_entropy, if gated { brain::FINE_TUNE_EXIT_ENTROPY } else { 0.0 }, "{arch}");
+    }
+}

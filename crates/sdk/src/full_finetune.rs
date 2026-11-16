@@ -84,6 +84,7 @@ pub struct ChatFullFineTune {
     weighted_replay: Vec<(PathBuf, f32)>,
     grad_accum: u32,
     strict_updates: bool,
+    exit_entropy: Option<f32>,
     stages: u32,
     native_sparse: Option<model::NativeSparse>,
     out_dir: Option<PathBuf>,
@@ -117,6 +118,7 @@ impl ChatFullFineTune {
             weighted_replay: Vec::new(),
             grad_accum: 1,
             strict_updates: false,
+            exit_entropy: None,
             stages: 0,
             native_sparse: None,
             out_dir: None,
@@ -209,6 +211,15 @@ impl ChatFullFineTune {
     /// they were either way: a non-finite value never reaches them.
     pub fn strict_updates(mut self, strict: bool) -> Self {
         self.strict_updates = strict;
+        self
+    }
+
+    /// The weight of the exit-distribution entropy in the objective of a family with exit gates (a looped decoder):
+    /// `loss - beta * H(p)` over the supervised positions, which keeps the exit mass spread over the depths. Default
+    /// [`FINE_TUNE_EXIT_ENTROPY`] for such a family, 0 for every other; `0` turns it off, and a non-zero weight is
+    /// refused by a family without exit gates.
+    pub fn exit_entropy(mut self, beta: f32) -> Self {
+        self.exit_entropy = Some(beta);
         self
     }
 
@@ -395,12 +406,13 @@ impl ChatFullFineTune {
         plan_before_load(&open, block, &set)?;
 
         let seed = resolve_seed(self.seed, self.resume_state.as_deref())?;
-        let requested = model::FitOpts { grad_accum: self.grad_accum, strict_updates: self.strict_updates, weight_decay: self.weight_decay, precision: self.precision.clone(), stages: self.stages, native_sparse: self.native_sparse, ..fit_opts(self.steps, block, self.lr, seed) };
+        let exit_entropy = exit_entropy_for(&chat, self.exit_entropy, FINE_TUNE_EXIT_ENTROPY)?;
+        let requested = model::FitOpts { grad_accum: self.grad_accum, strict_updates: self.strict_updates, weight_decay: self.weight_decay, precision: self.precision.clone(), stages: self.stages, native_sparse: self.native_sparse, exit_entropy, ..fit_opts(self.steps, block, self.lr, seed) };
         let opts = model::training_plan::ValidatedTrainingPlan::build(requested, &[]).map_err(|e| Error::Backend(format!("ChatFullFineTune: {e}")))?.into_opts();
         let digest_clock = std::time::Instant::now();
         let base_digest = base_digest(&open)?;
         model::finetune::stage_time("sdk: digest the base weights", digest_clock);
-        let identity = serde_json::json!({
+        let mut identity = serde_json::json!({
             "objective": "chat_full",
             "base": base_digest,
             "dataset": digest(dataset)?,
@@ -409,6 +421,11 @@ impl ChatFullFineTune {
             "weighted_replay": self.weighted_replay.iter().map(|(p, share)| Ok((digest(p)?, share.to_bits()))).collect::<Result<Vec<_>>>()?,
             "thinking": self.thinking,
         });
+        // Part of the arithmetic: a state trained at another weight is not this run's. Absent at 0, so the identity
+        // of a run of a family without exit gates is what it was.
+        if exit_entropy > 0.0 {
+            identity["exit_entropy"] = serde_json::json!(exit_entropy);
+        }
         let run = FullRun { chat: &chat, open: &open, tokenizer_dir: &model_dir, prepared_dir: &prepared_dir, out_dir, opts: &opts, set: &set, precision: &self.precision, resume_state: self.resume_state.as_deref(), checkpoint_every: self.checkpoint_every, identity };
         let trained = run.train_and_export(cancel, &mut on_progress)?;
         let mut outcome = ChatFullFineTuneOutcome {
@@ -428,6 +445,7 @@ impl ChatFullFineTune {
             replay_records,
             block,
             lr: self.lr,
+            exit_entropy,
         };
         if trained.status != FineTuneStatus::Completed {
             return Ok(outcome);
@@ -562,6 +580,8 @@ pub struct ChatFullFineTuneOutcome {
     pub block: u32,
     /// The peak learning rate of the run.
     pub lr: f32,
+    /// The exit-entropy weight the run trained with (0 for a family without exit gates).
+    pub exit_entropy: f32,
 }
 
 impl ChatFullFineTuneOutcome {
@@ -718,6 +738,21 @@ pub struct MergedCheckpoint {
     pub weights: PathBuf,
     /// `sha256:<hex>` of the weights file.
     pub weights_digest: String,
+}
+
+/// The exit-entropy weight of a chat fine-tune of a family with exit gates, unless the run names one: the weight the
+/// entropy-regularised looped-decoder recipe (arXiv:2510.25741) keeps after its first pretraining stage.
+pub const FINE_TUNE_EXIT_ENTROPY: f32 = 0.05;
+
+/// The exit-entropy weight of a run: `asked` when given (finite, non-negative, and zero for a family without exit
+/// gates), else `default` for a family with exit gates and 0 for any other.
+pub(crate) fn exit_entropy_for(chat: &crate::chat_trainer::ChatEntry, asked: Option<f32>, default: f32) -> Result<f32> {
+    match asked {
+        Some(beta) if !(beta.is_finite() && beta >= 0.0) => Err(Error::Backend(format!("exit_entropy {beta}: the weight must be finite and non-negative"))),
+        Some(beta) if beta > 0.0 && !chat.exit_gates => Err(Error::Backend(format!("exit_entropy {beta}: the {} architecture has no exit gates to regularise", chat.model))),
+        Some(beta) => Ok(beta),
+        None => Ok(if chat.exit_gates { default } else { 0.0 }),
+    }
 }
 
 #[cfg(test)]

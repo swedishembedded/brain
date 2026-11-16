@@ -421,6 +421,7 @@ pub struct Pretrain {
     eval_every: u32,
     eval_batches: u32,
     strict_updates: bool,
+    exit_entropy: Option<f32>,
     seed: Option<u64>,
     out_dir: Option<PathBuf>,
     device: Device,
@@ -456,6 +457,8 @@ pub struct PretrainOutcome {
     pub batch: u32,
     pub block: u32,
     pub lr: f32,
+    /// The exit-entropy weight the run trained with (0 for a family without exit gates).
+    pub exit_entropy: f32,
 }
 
 impl Pretrain {
@@ -480,6 +483,7 @@ impl Pretrain {
             eval_every: 0,
             eval_batches: 8,
             strict_updates: false,
+            exit_entropy: None,
             seed: None,
             out_dir: None,
             device: Device::default(),
@@ -570,6 +574,15 @@ impl Pretrain {
         self
     }
     /// Abort at the first step whose loss or gradient is not finite (default: skip it).
+    /// The weight of the exit-distribution entropy in the objective of a family with exit gates (a looped decoder):
+    /// `loss - beta * H(p)` over the supervised positions, which keeps pretraining from collapsing the exit mass onto
+    /// one depth. Default [`PRETRAIN_EXIT_ENTROPY`] for such a family, 0 for every other; `0` turns it off, and a
+    /// non-zero weight is refused by a family without exit gates.
+    pub fn exit_entropy(mut self, beta: f32) -> Self {
+        self.exit_entropy = Some(beta);
+        self
+    }
+
     pub fn strict_updates(mut self, strict: bool) -> Self {
         self.strict_updates = strict;
         self
@@ -670,6 +683,7 @@ impl Pretrain {
         };
         plan_before_load(&open, self.block, &set)?;
         let seed = resolve_seed(self.seed, self.resume_state.as_deref())?;
+        let exit_entropy = crate::full_finetune::exit_entropy_for(&chat, self.exit_entropy, PRETRAIN_EXIT_ENTROPY)?;
         let requested = model::FitOpts {
             batch_size: self.batch,
             min_lr: self.min_lr.unwrap_or(self.lr / 10.0),
@@ -680,6 +694,7 @@ impl Pretrain {
             eval_interval: self.eval_every,
             eval_batches: self.eval_batches,
             strict_updates: self.strict_updates,
+            exit_entropy,
             // The initial loss is the first step's: a pretraining step is long, and five probe forwards cost a
             // third of one.
             initial_probe_batches: 0,
@@ -687,13 +702,18 @@ impl Pretrain {
         };
         let opts = model::training_plan::ValidatedTrainingPlan::build(requested, &[]).map_err(|e| Error::Backend(format!("Pretrain: {e}")))?.into_opts();
         let base_digest = base_digest(&open)?;
-        let identity = serde_json::json!({
+        let mut identity = serde_json::json!({
             "objective": "pretrain",
             "base": base_digest,
             "corpus": digest(corpus)?,
             "held_out": self.held_out.as_deref().map(digest).transpose()?,
             "separator": separator,
         });
+        // Part of the arithmetic: a state trained at another weight is not this run's. Absent at 0, so the identity
+        // of a run of a family without exit gates is what it was.
+        if exit_entropy > 0.0 {
+            identity["exit_entropy"] = serde_json::json!(exit_entropy);
+        }
         let precision = model::TrainPrecision::default();
         let run = FullRun { chat: &chat, open: &open, tokenizer_dir: &model_dir, prepared_dir: &prepared, out_dir, opts: &opts, set: &set, precision: &precision, resume_state: self.resume_state.as_deref(), checkpoint_every: self.checkpoint_every, identity };
         let trained = run.train_and_export(cancel, &mut on_progress)?;
@@ -718,6 +738,7 @@ impl Pretrain {
             batch: self.batch,
             block: self.block,
             lr: self.lr,
+            exit_entropy,
         })
     }
 }
@@ -731,3 +752,7 @@ fn positions_of(open: &Path) -> Option<u64> {
     };
     config.get("max_position_embeddings").and_then(|v| v.as_u64())
 }
+
+/// The exit-entropy weight of pretraining a family with exit gates, unless the run names one: the weight of the first
+/// pretraining stage of the entropy-regularised looped-decoder recipe (arXiv:2510.25741).
+pub const PRETRAIN_EXIT_ENTROPY: f32 = 0.1;
