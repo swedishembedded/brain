@@ -50,7 +50,7 @@ use qwen35::caps::with_template_flavor_default;
 use qwen35::config::{LayerType, Qwen35Config};
 use qwen35::serve::{Engine, Scheduler};
 use gpu_core::defaults::{Hardware, Rule};
-use crate::serve_defaults::{given_or_chosen, DEFAULT_CONTEXT_FLOOR, KV_DEFAULTS};
+use crate::serve_defaults::{given_or_chosen, DEFAULT_CONTEXT_FLOOR, KV_DEFAULTS, MAX_BATCH_DEFAULTS};
 use model::policy::GdnState;
 use std::sync::Arc;
 
@@ -323,8 +323,8 @@ pub struct Qwen35GgufServeConfig {
     /// that fits.
     pub kv: Option<model::kv_tier::KvTier>,
     /// How many sequences one batched decode step carries (the resident's
-    /// decode slots, charged into the placement). `None` takes
-    /// [`DEFAULT_MAX_BATCH`].
+    /// decode slots, charged into the placement). `None` takes the widest of
+    /// [`MAX_BATCH_DEFAULTS`] that leaves one sequence the context floor.
     pub max_batch: Option<u32>,
     /// Cached prompts kept for prefix reuse (see
     /// `Qwen35GgufResident::with_prefix_slots`). `None` takes the best of
@@ -486,19 +486,7 @@ impl Qwen35GgufServeConfig {
             step_target: self.itl_target_ms.map(|ms| std::time::Duration::from_millis(ms.into())),
         }
     }
-
-    /// The batch knob with its default filled in.
-    pub fn max_batch_or_default(&self) -> u32 {
-        self.max_batch.unwrap_or(DEFAULT_MAX_BATCH).max(1)
-    }
 }
-
-/// Decode slots a GGUF resident is built with when `--max-batch` is not
-/// given: concurrent requests share every weight read, so a single slot would
-/// serve them one at a time. Small enough that the decode state (about 0.4 GiB
-/// a sequence at the default 2048 context with an f32 cache) leaves the
-/// two-24-GiB-card placement unchanged.
-pub const DEFAULT_MAX_BATCH: u32 = 8;
 
 /// Speculation a GGUF resident takes when `--speculative` is not given. Its
 /// verify kernels are CUDA's, so elsewhere the verify scratch would be memory
@@ -630,7 +618,6 @@ pub fn gguf_resident_banked(gguf_path: &str, id: &str, gpus: &[(u32, u64)], rese
         return Err(format!("{MODEL}: --gdn-state bf16 is not supported with --exact-decode: the exact regime is defined on the f32 recurrent state"));
     }
     let mut chosen = Vec::new();
-    let max_batch = cfg.max_batch_or_default();
     let hw = Hardware::detected();
     // The exact-decode regime is defined on the f32 recurrent state, so it keeps f32; every other regime takes the rule.
     let gdn_state = match (cfg.gdn_state, cfg.exact_decode) {
@@ -655,7 +642,7 @@ pub fn gguf_resident_banked(gguf_path: &str, id: &str, gpus: &[(u32, u64)], rese
     if offered.is_empty() {
         return Err("no GPU is budgeted for it (its weights are device buffers; there is no CPU path)".to_string());
     }
-    let build_on = |devices: &[(Device, u64)], kv, mode, prefix_slots, cap| {
+    let build_on = |devices: &[(Device, u64)], kv, mode, max_batch, prefix_slots, cap| {
         let hf = ResidentCheckpoint::is_hf_dir(gguf_path);
         let scratch_rows = if hf { HF_SPEC_SCRATCH_ROWS } else { SpecServing::default().scratch_rows };
         // An FP8 directory serving by default speculates up to a few running sequences; `--speculative mtp|auto` asks for no limit.
@@ -687,35 +674,37 @@ pub fn gguf_resident_banked(gguf_path: &str, id: &str, gpus: &[(u32, u64)], rese
     // sized to that group, not to everything offered; sized to everything, the longest context and the KV pool would fill
     // the whole box, and a model that fits one card would span all of them as a single instance (one set of decode slots,
     // a cross-card hop per token) with no card left for another replica.
-    let group = card_group(&offered, |cards| fits(build_on(cards, cfg.kv.unwrap_or(model::kv_tier::KvTier::INT8), SpeculativeMode::Off, 0, probe_cap)).is_ok());
+    let leanest_batch = cfg.max_batch.unwrap_or(1).max(1);
+    let group = card_group(&offered, |cards| fits(build_on(cards, cfg.kv.unwrap_or(model::kv_tier::KvTier::INT8), SpeculativeMode::Off, leanest_batch, 0, probe_cap)).is_ok());
     let devices = offered[..group].to_vec();
-    let build = |kv, mode, prefix_slots, cap| build_on(&devices, kv, mode, prefix_slots, cap);
+    let build = |kv, mode, max_batch, prefix_slots, cap| build_on(&devices, kv, mode, max_batch, prefix_slots, cap);
     // Chosen in the order they matter to throughput, each with the ones not yet
-    // chosen at their leanest: the KV tier, then speculation, then the prompt cache.
-    let kv = given_or_chosen(cfg.kv, "--kv-cache", KV_DEFAULTS, hw, &mut chosen, |kv| fits(build(kv, SpeculativeMode::Off, 0, probe_cap)));
+    // chosen at their leanest: the KV tier, then the batch, then speculation, then the prompt cache.
+    let kv = given_or_chosen(cfg.kv, "--kv-cache", KV_DEFAULTS, hw, &mut chosen, |kv| fits(build(kv, SpeculativeMode::Off, leanest_batch, 0, probe_cap)));
+    let max_batch = given_or_chosen(cfg.max_batch.map(|b| b.max(1)), "--max-batch", MAX_BATCH_DEFAULTS, hw, &mut chosen, |b| fits(build(kv, SpeculativeMode::Off, b, 0, probe_cap)));
     // The FP8 directory's own MTP head drafts when the scheduler has measured that a round of drafts beats plain decoding at the batch
     // it is serving (it times both, per batch size), so the default is `auto`.
-    let mode = given_or_chosen(cfg.speculative, "--speculative", SPECULATION_DEFAULTS, hw, &mut chosen, |mode| fits(build(kv, mode, 0, probe_cap)));
+    let mode = given_or_chosen(cfg.speculative, "--speculative", SPECULATION_DEFAULTS, hw, &mut chosen, |mode| fits(build(kv, mode, max_batch, 0, probe_cap)));
     if cfg.speculative.is_none() && mode != SpeculativeMode::Off && ResidentCheckpoint::is_hf_dir(gguf_path) {
         chosen.push(format!("--speculative {mode}: the checkpoint's MTP head drafts while at most {HF_DEFAULT_SPEC_BATCH} sequences run (--speculative mtp has no limit)"));
     }
     if cfg.exact_decode && mode != SpeculativeMode::Off {
         chosen.push("--exact-decode: speculation is off in this regime (a verify pass is not grouped)".to_string());
     }
-    let prefix_slots = given_or_chosen(cfg.prefix_slots.map(PrefixCache::Slots), "prefix slots", PREFIX_SLOT_DEFAULTS, hw, &mut chosen, |cache| fits(build(kv, mode, cache.slots(max_batch), probe_cap))).slots(max_batch);
+    let prefix_slots = given_or_chosen(cfg.prefix_slots.map(PrefixCache::Slots), "prefix slots", PREFIX_SLOT_DEFAULTS, hw, &mut chosen, |cache| fits(build(kv, mode, max_batch, cache.slots(max_batch), probe_cap))).slots(max_batch);
     let resident = match cfg.ctx {
         Some(ctx) => {
-            let resident = build(kv, mode, prefix_slots, ctx);
+            let resident = build(kv, mode, max_batch, prefix_slots, ctx);
             // The refusal that states the arithmetic is the sizing check's.
             let pool = resident.longest_pool(ctx).map_err(|e| resident.unservable_reason().unwrap_or(e))?;
             chosen.push(format!("KV pool {pool} tokens shared by all sequences: what the cards hold beside everything above"));
-            build(kv, mode, prefix_slots, ctx).with_kv_pool_rows(pool)
+            build(kv, mode, max_batch, prefix_slots, ctx).with_kv_pool_rows(pool)
         }
         None => {
-            let cap = build(kv, mode, prefix_slots, 1).longest_context()?;
-            let pool = build(kv, mode, prefix_slots, cap).pool_rows_for_context(cap)?;
+            let cap = build(kv, mode, max_batch, prefix_slots, 1).longest_context()?;
+            let pool = build(kv, mode, max_batch, prefix_slots, cap).pool_rows_for_context(cap)?;
             chosen.push(format!("--ctx {cap}: the longest context the cards hold beside everything above, with one KV pool of {pool} tokens shared by all sequences"));
-            build(kv, mode, prefix_slots, cap).with_kv_pool_rows(pool)
+            build(kv, mode, max_batch, prefix_slots, cap).with_kv_pool_rows(pool)
         }
     };
     let finish = |r: Qwen35GgufResident| r.with_prefill_policy(cfg.prefill_policy_or_default()).with_model_id(id);
@@ -737,13 +726,13 @@ pub fn gguf_resident_banked(gguf_path: &str, id: &str, gpus: &[(u32, u64)], rese
     while !remaining.is_empty() {
         // The next replica takes the next group of cards, as many as the first did.
         let next = &remaining[..group.min(remaining.len())];
-        let candidate = build_on(next, kv, mode, prefix_slots, cap);
+        let candidate = build_on(next, kv, mode, max_batch, prefix_slots, cap);
         let pool = match cfg.ctx {
             Some(ctx) => candidate.longest_pool(ctx),
             None => candidate.pool_rows_for_context(cap),
         };
         let Ok(pool) = pool else { break };
-        let replica = finish(build_on(next, kv, mode, prefix_slots, cap).with_kv_pool_rows(pool));
+        let replica = finish(build_on(next, kv, mode, max_batch, prefix_slots, cap).with_kv_pool_rows(pool));
         if replica.unservable_reason().is_some() {
             break;
         }
@@ -1209,9 +1198,9 @@ mod tests {
     fn an_unset_context_is_sized_from_the_memory_the_placement_leaves() {
         let path = write_servable_gguf("auto-ctx");
         let gpus = vec![(0, 4 * GIB)];
-        // Speculation reserves device bytes that grow with the context; this test sizes the context
-        // from the budget alone.
-        let cfg = Qwen35GgufServeConfig { speculative: Some(qwen35::int8_gguf_resident::SpeculativeMode::Off), ..Qwen35GgufServeConfig::default() };
+        // Speculation reserves device bytes that grow with the context, and every decode slot holds its own
+        // activations; this test sizes the context from the budget alone, at a fixed batch.
+        let cfg = Qwen35GgufServeConfig { speculative: Some(qwen35::int8_gguf_resident::SpeculativeMode::Off), max_batch: Some(8), ..Qwen35GgufServeConfig::default() };
         let r = gguf_resident(path.as_str(), "t/auto", &gpus, RESERVED, &cfg).expect("builds");
         assert!(r.cap() > 1_000_000, "a tiny model on a 2 GiB budget leaves room for a huge context: {}", r.cap());
         let placed: u64 = r.placement().iter().map(|p| p.3).sum();
@@ -1272,7 +1261,7 @@ mod tests {
     }
 
     /// An all-`None` config: the context sized from the memory the placement
-    /// leaves, uniform INT8 weights, [`DEFAULT_MAX_BATCH`] decode slots so
+    /// leaves, uniform INT8 weights, the widest batch of [`MAX_BATCH_DEFAULTS`] so
     /// concurrent requests share every weight read, and the best-ranked KV tier
     /// and prompt cache of the hardware's rules - each reported with its reason.
     #[test]
@@ -1281,14 +1270,15 @@ mod tests {
         let r = gguf_resident(path.as_str(), "t/defaults", &gpu_budget(), RESERVED, &Qwen35GgufServeConfig::default()).expect("builds");
         assert!(r.cap() > 2048, "sized by memory, not a fixed default: {}", r.cap());
         assert_eq!(r.kv_tier(), model::kv_tier::KvTier::INT8, "the most compact, fastest tier fits");
-        assert_eq!(r.max_batch(), DEFAULT_MAX_BATCH);
-        assert_eq!(r.prefix_slots(), 4 * DEFAULT_MAX_BATCH, "four warm prompts per concurrent sequence fit");
+        let (batches, _) = gpu_core::defaults::candidates(MAX_BATCH_DEFAULTS, gpu_core::defaults::Hardware::detected());
+        assert_eq!(r.max_batch(), batches[0], "two roomy cards take the widest batch");
+        assert_eq!(r.prefix_slots(), 4 * r.max_batch(), "four warm prompts per concurrent sequence fit");
         let (modes, _) = gpu_core::defaults::candidates(SPECULATION_DEFAULTS, gpu_core::defaults::Hardware::detected());
         assert_eq!(r.speculation().mode, modes[0], "the hardware's best-ranked speculation");
         let (states, _) = gpu_core::defaults::candidates(GDN_STATE_DEFAULTS, gpu_core::defaults::Hardware::detected());
         assert_eq!(r.gdn_state(), states[0], "the hardware's best-ranked recurrent-state precision");
         let said = r.chosen_defaults().join("\n");
-        for knob in ["--weight-format i8", "--kv-cache int8", "--gdn-state", "--speculative", "prefix slots", "--ctx"] {
+        for knob in ["--weight-format i8", "--kv-cache int8", "--max-batch", "--gdn-state", "--speculative", "prefix slots", "--ctx"] {
             assert!(said.contains(knob), "every default is reported with its reason; missing {knob}:\n{said}");
         }
         assert_eq!(r.manifest().max_context_tokens, Some(r.cap() as u64));
@@ -1313,29 +1303,59 @@ mod tests {
     fn a_default_that_does_not_fit_gives_way_to_one_that_does() {
         let path = write_servable_gguf("give-way");
         let gpus = vec![(0, 4 * GIB)];
-        // The longest fixed context that places with no prompt cache.
-        let places = |ctx: u32| gguf_resident(path.as_str(), "t/x", &gpus, RESERVED, &Qwen35GgufServeConfig { ctx: Some(ctx), prefix_slots: Some(0), ..Default::default() }).is_ok();
+        // The longest fixed context that places with no prompt cache, at a fixed batch (the batch has a default of
+        // its own, chosen before the prompt cache, which would give way first).
+        let batch = Some(8);
+        let places = |ctx: u32| gguf_resident(path.as_str(), "t/x", &gpus, RESERVED, &Qwen35GgufServeConfig { ctx: Some(ctx), prefix_slots: Some(0), max_batch: batch, ..Default::default() }).is_ok();
         let (mut longest, mut over) = (1u32, 1u32 << 30);
         while over - longest > 1 {
             let mid = longest + (over - longest) / 2;
             *(if places(mid) { &mut longest } else { &mut over }) = mid;
         }
-        let r = gguf_resident(path.as_str(), "t/x", &gpus, RESERVED, &Qwen35GgufServeConfig { ctx: Some(longest), ..Default::default() }).expect("the leaner default fits");
+        let r = gguf_resident(path.as_str(), "t/x", &gpus, RESERVED, &Qwen35GgufServeConfig { ctx: Some(longest), max_batch: batch, ..Default::default() }).expect("the leaner default fits");
         assert_eq!(r.cap(), longest);
         assert_eq!(r.kv_tier(), model::kv_tier::KvTier::INT8);
         let said = r.chosen_defaults().join("\n");
         if gpu_core::defaults::Hardware::detected().host_memory_on(&[0]) {
             // A card that reads host memory directly (a Grace-Hopper card on CUDA) keeps the prompt-cache snapshots
             // there, charged to no card: the full default costs the longest context nothing and stays.
-            assert_eq!(r.prefix_slots(), 4 * DEFAULT_MAX_BATCH, "snapshots in host memory leave the full prompt cache beside {longest}-token sequences\n{said}");
+            assert_eq!(r.prefix_slots(), 4 * r.max_batch(), "snapshots in host memory leave the full prompt cache beside {longest}-token sequences\n{said}");
         } else {
             // Cached prompts live in the shared KV pool and cost only their recurrent-state snapshots, so a few can
             // still fit beside the longest context; the full default cannot.
-            assert!(r.prefix_slots() < DEFAULT_MAX_BATCH, "the full prompt cache does not fit beside {longest}-token sequences: {}", r.prefix_slots());
+            assert!(r.prefix_slots() < 4 * r.max_batch(), "the full prompt cache does not fit beside {longest}-token sequences: {}", r.prefix_slots());
             assert!(said.contains("passed over"), "{said}");
         }
         let wide = gguf_resident(path.as_str(), "t/x", &gpus, RESERVED, &Qwen35GgufServeConfig { max_batch: Some(16), ..Default::default() }).expect("builds");
         assert_eq!(wide.prefix_slots(), 4 * 16, "the prompt cache follows the concurrency where it fits");
+    }
+
+    /// The default batch is the widest that still leaves one sequence the context floor: on a card where the widest
+    /// would squeeze the context under it, the batch gives way to a narrower one that does not, and a batch the
+    /// operator asks for is kept whatever context it leaves.
+    #[test]
+    fn the_default_batch_gives_way_to_keep_the_context_floor() {
+        let path = write_servable_gguf("batch-floor");
+        let on = |card: u64, max_batch: Option<u32>| gguf_resident(path.as_str(), "t/b", &[(0, card)], RESERVED, &Qwen35GgufServeConfig { max_batch, ..Default::default() });
+        let (batches, _) = gpu_core::defaults::candidates(MAX_BATCH_DEFAULTS, gpu_core::defaults::Hardware::detected());
+        let (widest, narrowest) = (batches[0], *batches.last().expect("a ranked list"));
+        // The smallest card (to a MiB) on which the narrowest batch still leaves one sequence the floor.
+        let holds = |card: u64| on(card, Some(narrowest)).is_ok_and(|r| r.cap() >= DEFAULT_CONTEXT_FLOOR);
+        let (mut under, mut over) = (RESERVED, 64 * GIB);
+        assert!(holds(over), "a 64 GiB card holds the synthetic model with a full context");
+        while over - under > 1 << 20 {
+            let mid = under + (over - under) / 2;
+            *(if holds(mid) { &mut over } else { &mut under }) = mid;
+        }
+        let tight = on(over, None).expect("the narrowest batch fits, so a default exists");
+        assert!(tight.cap() >= DEFAULT_CONTEXT_FLOOR, "the default keeps the floor: {}", tight.cap());
+        // Asked for, the widest batch is built as given when it places at all, and leaves less than the floor.
+        if let Ok(asked) = on(over, Some(widest)) {
+            assert_eq!(asked.max_batch(), widest);
+            assert!(asked.cap() < DEFAULT_CONTEXT_FLOOR, "the widest batch squeezes this card's context under the floor: {}", asked.cap());
+        }
+        assert!(tight.max_batch() < widest, "so the default gives way: {}", tight.max_batch());
+        assert!(tight.chosen_defaults().join("\n").contains(&format!("--max-batch {}", tight.max_batch())));
     }
 
     /// Everything that would make the first request fail is refused here,

@@ -31,7 +31,7 @@ pub const FAMILY: &str = "ouro";
 /// The exit threshold of a from-scratch model whose configuration names none: the pass at which half the exit mass
 /// is reached (see [`ChatTrainer::init_checkpoint`] below). On a small model pretrained from scratch and chat
 /// fine-tuned, the fine-tune moved nearly all the exit mass to the first pass, which it trained, and the final pass
-/// it barely weighed got worse (knowledge 496 has the measurement).
+/// it barely weighed got worse (knowledge 499 has the measurement).
 pub const FROM_SCRATCH_EXIT_THRESHOLD: f32 = 0.5;
 
 /// The generic trainers' entry for Ouro.

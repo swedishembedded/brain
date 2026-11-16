@@ -33,11 +33,11 @@ use qwen3::chat::parse_request;
 use qwen35moe::config::Qwen35Config;
 use qwen35moe::serve::{Engine, EngineOptions, Scheduler};
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel, Tier};
-use gpu_core::defaults::{Hardware, Rule};
+use gpu_core::defaults::Hardware;
 use model::kv_tier::KvTier;
 use model::ops::TierPolicy;
 
-use crate::serve_defaults::{given_or_chosen, DEFAULT_CONTEXT_FLOOR, KV_DEFAULTS};
+use crate::serve_defaults::{given_or_chosen, DEFAULT_CONTEXT_FLOOR, KV_DEFAULTS, MAX_BATCH_DEFAULTS};
 
 use crate::parkable::{Build, HostWeights, ParkableInstance};
 use crate::resident_qwen35::Qwen35Sizing;
@@ -300,17 +300,6 @@ impl Qwen35MoeGgufServeConfig {
         Ok(ignored.iter().filter(|(set, _)| *set).map(|(_, name)| format!("qwen35moe: {name} has no meaning for this engine and is ignored")).collect())
     }
 }
-
-/// Sequences a released-GGUF MoE resident decodes together when `--max-batch` is not given, most first. A decode
-/// step's cost is the expert weights it reads, which every row of the batch shares, so the widest batch serves the
-/// most. The sequences share one KV pool, so a sequence costs its recurrent-state row and its decode activations up
-/// front and its KV only as its tokens fill blocks: the widest batch that still leaves one sequence of
-/// [`DEFAULT_CONTEXT_FLOOR`] is taken.
-pub const MAX_BATCH_DEFAULTS: &[Rule<u32>] = &[Rule {
-    when: |_| true,
-    ranked: &[64, 32, 16, 8, 4, 2, 1],
-    why: "a decode step reads the routed experts once for every row it carries, and the sequences share one KV pool: the widest batch that leaves one sequence the context floor",
-}];
 
 /// What the planner settled on for one card.
 #[derive(Clone, Debug, PartialEq)]

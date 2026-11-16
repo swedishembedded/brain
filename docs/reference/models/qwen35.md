@@ -165,7 +165,9 @@ brain --device gpu0,gpu1 serve --openai
 #                            kv head, ~3.9x fewer bytes) or "fp8" (E4M3, the
 #                            same bytes and scales as int8). Default: chosen
 #                            from the hardware (see "Defaults" below)
-#   --max-batch N     concurrent decode slots (default 8)
+#   --max-batch N     concurrent decode slots (default: the widest of
+#                            64/32/16/8/4/2/1 that leaves one sequence a
+#                            32K context)
 #   --act-precision auto
 #                            element type of the activations between the FP8
 #                            products of an FP8 release: "bf16", "f32" (the A/B
@@ -318,7 +320,8 @@ What it does differently:
 - **Continuous batching.** The resident is a `model::serve::PagedDecoder`
   (`Qwen35GgufEngine`, one KV slot per sequence) driven by the generic
   `model::serve::Scheduler` through `llmserve`, like every brain LLM:
-  `--max-batch N` (default 8) requests decode in ONE batched step per
+  `--max-batch N` (default: the widest batch, up to 64, that leaves one
+  sequence a 32K context) requests decode in ONE batched step per
   iteration - the weight reads are paid once for all of them - and requests
   join and leave between steps, including ones that arrive while the group is
   running (`Instance::run_open`). Each sequence has its own sampling

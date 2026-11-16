@@ -24,6 +24,19 @@ pub const KV_DEFAULTS: &[Rule<model::kv_tier::KvTier>] = &[Rule {
 /// default that would squeeze the context below it gives way to the next-ranked one.
 pub const DEFAULT_CONTEXT_FLOOR: u32 = 32_768;
 
+/// Sequences a resident decodes together when `--max-batch` is not given, most first. A decode step's cost is the
+/// weights it reads, which every row of the batch shares, so the widest batch serves the most; the sequences share one
+/// KV pool, so a sequence costs its recurrent-state row and its decode activations up front and its KV only as its
+/// tokens fill blocks. The widest batch that still leaves one sequence of [`DEFAULT_CONTEXT_FLOOR`] is taken. A batch
+/// narrower than the clients a server has is also a queue in front of it: a request beyond it waits for a running one
+/// to finish (prefill and every output token) before its prompt is read in, which on a 16-client load of 8K prompts
+/// put half the requests seconds behind a full batch (knowledge 499).
+pub const MAX_BATCH_DEFAULTS: &[Rule<u32>] = &[Rule {
+    when: |_| true,
+    ranked: &[64, 32, 16, 8, 4, 2, 1],
+    why: "a decode step reads the weights once for every row it carries, and the sequences share one KV pool: the widest batch that leaves one sequence the context floor",
+}];
+
 /// The operator's value, else the best-ranked default of `rules` that `fits`, recorded in `chosen` as
 /// `knob value: why`.
 pub fn given_or_chosen<T: Copy + std::fmt::Display>(given: Option<T>, knob: &str, rules: &[Rule<T>], hw: &Hardware, chosen: &mut Vec<String>, fits: impl FnMut(T) -> Result<(), String>) -> T {

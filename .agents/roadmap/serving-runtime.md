@@ -965,3 +965,12 @@ The draw itself is 0.21 ms a step at 64 rows of the 27B's 248320-token vocabular
 - [ ] `--exact-decode` and adapter rows still take the eager keyed head on the 27B (not recorded)
 - [ ] pre-existing, not caused here: `qwen35/tests/hf_fp8_conformance.rs::the_hf_fp8_engine_conforms` fails its
       batched-equals-alone property at the base too (`[0, 36, 33, 45, 62, 63]` against `[5, 48, 20, 9, 50, 5]`)
+
+## Time to first token under concurrent long-context load (2026-11-16, knowledge #499)
+
+`brain perf run serve`, 8K and 32K prompts, 128 output tokens, closed loop, one GH200 (gpu3). The 27B's first token at
+16 clients was eleven times the MoE's because it admitted 8 sequences (a fixed default) where the MoE admitted 64: half
+the clients waited a whole request in the queue. The default batch of the 27B is now planned like the MoE's
+(`catalog::serve_defaults::MAX_BATCH_DEFAULTS`, the widest batch that leaves one sequence the 32K floor; 64 on a GH200).
+
+- [x] the 27B's default batch chosen for the card (`resident_qwen35::gguf_resident_banked`), one rule with the MoE's
