@@ -150,7 +150,11 @@ fn the_estimate_is_the_footprint_the_engine_allocates_and_the_context_follows_th
     let bytes = |kv: KvTier| resident(&dir, &RicursiveServeConfig { kv_cache: Some(kv), ..Default::default() }, &[(0, 80 * GIB)]).unwrap().estimate(&key).vram;
     assert!(bytes(KvTier::INT8) < bytes(KvTier::BF16) && bytes(KvTier::BF16) < bytes(KvTier::F32));
     // Cards that each hold most of the deployment but not all of it share its layers (each stage pays its fixed bytes).
-    let whole = resident(&dir, &RicursiveServeConfig::default(), &[(0, 80 * GIB)]).unwrap().estimate(&key).vram;
+    // The whole deployment: its resident bytes and the peak activation every stage also holds.
+    let whole = {
+        let cost = resident(&dir, &RicursiveServeConfig::default(), &[(0, 80 * GIB)]).unwrap().estimate(&key);
+        cost.vram + cost.activation.expect("Ripple declares its peak activation")
+    };
     let total_for = |usable: u64| (usable..).step_by(1 << 20).find(|&t| ricursive::placement::card_budget(t) >= usable).unwrap();
     let total = total_for(whole * 8 / 10);
     let split = resident(&dir, &RicursiveServeConfig::default(), &[(0, total), (1, total)]).expect("places over two cards");
@@ -419,8 +423,10 @@ fn an_adapter_that_does_not_fit_the_base_is_refused_by_name() {
 fn the_adapter_bank_is_charged_in_the_placement() {
     let dir = pulled_dir("adapter-bytes");
     let key = InstanceKey::new(ID, "default");
-    let plain = resident(&dir, &RicursiveServeConfig::default(), &[]).unwrap().estimate(&key).vram;
-    let with = banked(&dir).estimate(&key).vram;
+    // The placement charges the resident bytes and the declared peak activation, where the bank's scratch is.
+    let charged = |cost: residency::MemCost| cost.vram + cost.activation.expect("Ripple declares its peak activation");
+    let plain = charged(resident(&dir, &RicursiveServeConfig::default(), &[]).unwrap().estimate(&key));
+    let with = charged(banked(&dir).estimate(&key));
     let bank = model::adapter::bank::AdapterBankConfig::new(2, 4, &["q_proj", "k_proj", "v_proj", "o_proj", "g_proj", "gate_proj", "up_proj", "down_proj"]);
     let train = ricursive::TrainConfig::new(config(), 1);
     // The factors, and the per-slot tables of the norm gains and value gates an adapter may carry in full.
