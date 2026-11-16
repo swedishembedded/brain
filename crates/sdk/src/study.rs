@@ -286,6 +286,14 @@ const ARCHS: &[ArchEntry] = &[
     ArchEntry::trainer_only::<ouro::finetune::OuroTrainer>("ouro", ouro::finetune::FAMILY),
 ];
 
+/// The registered architectures whose trainer declares from-scratch initialization
+/// ([`model::finetune::ChatTrainer::FROM_SCRATCH`]): what [`crate::ModelInit`] creates, and so what the whole
+/// from-scratch sequence (tokenizer and initialization, pretraining, chat fine-tuning, serving) runs on. One id per
+/// trainer: a row that serves another registry id with the same trainer (a config variant) is not listed again.
+pub fn from_scratch_architectures() -> Vec<&'static str> {
+    ARCHS.iter().filter(|a| a.chat.is_some_and(|c| c.declares_init && c.model == a.id)).map(|a| a.id).collect()
+}
+
 /// The document study of an architecture with no LoRA trainer: refused by the capability, naming the architecture.
 fn no_study<T: model::finetune::ChatTrainer>(_: &Inputs) -> std::io::Result<DocumentStudyReport> {
     Err(std::io::Error::other(Unsupported::new(T::LORA_BASES.model, Capability::ChatLoraFineTune)))

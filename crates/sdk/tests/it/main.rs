@@ -26,6 +26,7 @@ mod text_ricursive;
 mod toy_training;
 mod chat_full_finetune;
 mod chat_full_finetune_ouro;
+mod from_scratch;
 mod chat_pipeline;
 mod continual_reader;
 mod creature;

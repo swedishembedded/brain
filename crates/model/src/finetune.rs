@@ -290,6 +290,26 @@ pub trait ChatTrainer {
     /// `Err(CANCELLED)` and leaves no file of its own in `out`.
     fn export_checkpoint(trained: &Path, tokenizer_dir: &Path, out: &Path, adapter: Option<&Path>, keep_going: &mut dyn FnMut() -> bool) -> Result<(), String>;
 
+    /// Whether this family starts from scratch: [`Self::init_params`] and [`Self::init_checkpoint`] are implemented. A
+    /// request to create a model of a family where this is false is refused by name before anything is written.
+    const FROM_SCRATCH: bool = false;
+
+    /// The parameter count of a model of `config` (the family's `config.json` spelling, `vocab_size` included),
+    /// after the family's own validation of it: what a from-scratch initialization is sized and bounded by before
+    /// anything is allocated. Part of the from-scratch capability with [`Self::init_checkpoint`]; a family without
+    /// it refuses by name (the default).
+    fn init_params(_config: &serde_json::Value) -> Result<u64, String> {
+        Err(format!("{}: no from-scratch initialization (the architecture does not declare one)", Self::LORA_BASES.model))
+    }
+
+    /// Write a randomly initialised checkpoint of `config` into the existing directory `out_dir`, in the format the
+    /// family's own loaders and [`Self::train_full`] open, drawn from `seed` (the same seed writes the same bytes).
+    /// Only the weights (and, for a family whose checkpoint is a Hugging Face directory, its `config.json`): the
+    /// tokenizer files are the caller's. A family without the capability refuses by name (the default).
+    fn init_checkpoint(_config: &serde_json::Value, _seed: u64, _out_dir: &Path) -> Result<(), String> {
+        Err(format!("{}: no from-scratch initialization (the architecture does not declare one)", Self::LORA_BASES.model))
+    }
+
     /// The family's serving engine over the base at `base` with each linear
     /// at the tier `tiers` names (an `adapter` folded in when given), sized for
     /// one sequence of `max_seq_len` tokens: what [`served_loss`] scores

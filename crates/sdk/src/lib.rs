@@ -208,6 +208,10 @@ mod full_finetune;
 #[cfg(feature = "study")]
 pub use full_finetune::{merge_adapter, ChatFullFineTune, ChatFullFineTuneOutcome, MergedCheckpoint};
 #[cfg(feature = "study")]
+pub mod from_scratch;
+#[cfg(feature = "study")]
+pub use from_scratch::{ModelInit, ModelInitOutcome};
+#[cfg(feature = "study")]
 mod optimize;
 #[cfg(feature = "study")]
 pub use optimize::{DeployedLoss, ExcludedTier, ModelOptimizer, ModelOptimizerOutcome, OptimizerProgress, Recovery};
@@ -242,7 +246,7 @@ pub use reader::{BatteryScore, BatteryTask, ContinualReader, ReadOutcome, MIN_EP
 pub use chat_dataset::{validate_chat_dataset, validate_chat_dataset_for, ChatDatasetSummary};
 #[cfg(feature = "study")]
 pub use study::{
-    Cause, CycleOutcome, DatasetSummary, Decision, DocumentStudy, Environment, Improve, ImproveOptions, ImproveOutcome, Reward, Step, StepOutcome, StudyOutcome, Task, Verifier,
+    from_scratch_architectures, Cause, CycleOutcome, DatasetSummary, Decision, DocumentStudy, Environment, Improve, ImproveOptions, ImproveOutcome, Reward, Step, StepOutcome, StudyOutcome, Task, Verifier,
 };
 #[cfg(feature = "decision")]
 pub mod control;

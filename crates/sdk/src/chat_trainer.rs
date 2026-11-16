@@ -131,6 +131,8 @@ pub(crate) struct DistillJob<'a> {
 /// architecture, resolved once per table row.
 #[derive(Clone, Copy)]
 pub(crate) struct ChatEntry {
+    /// The architecture the trainer names itself by in its refusals.
+    pub model: &'static str,
     pub checkpoint_path: fn(&Path, &Path) -> PathBuf,
     pub vocab: fn(&Path) -> Result<usize, String>,
     pub full: FullFn,
@@ -147,6 +149,12 @@ pub(crate) struct ChatEntry {
     pub modules_to_save: bool,
     /// A supervised or policy-gradient LoRA run, with held-out scoring around it.
     pub lora: LoraFn,
+    /// The parameter count of a validated config, for a from-scratch initialization ([`ChatTrainer::init_params`]).
+    pub init_params: fn(&serde_json::Value) -> Result<u64, String>,
+    /// A randomly initialised checkpoint of a config, written into a directory ([`ChatTrainer::init_checkpoint`]).
+    pub init_checkpoint: fn(&serde_json::Value, u64, &Path) -> Result<(), String>,
+    /// The family declares from-scratch initialization.
+    pub declares_init: bool,
     /// The weight formats the family's serving engine holds per linear.
     pub served_weights: &'static [Dtype],
     /// The family's trainer cuts its model into the stage count a run asks for (`FitOpts::stages`).
@@ -171,6 +179,7 @@ pub(crate) struct ChatEntry {
 impl ChatEntry {
     pub(crate) const fn of<T: ChatTrainer + 'static>() -> ChatEntry where T::Trained: 'static {
         ChatEntry {
+            model: T::LORA_BASES.model,
             checkpoint_path: T::checkpoint_path,
             vocab: T::vocab,
             full: full::<T>,
@@ -182,6 +191,9 @@ impl ChatEntry {
             policy_gradient: T::POLICY_GRADIENT,
             modules_to_save: T::MODULES_TO_SAVE,
             lora: lora::<T>,
+            init_params: T::init_params,
+            init_checkpoint: T::init_checkpoint,
+            declares_init: T::FROM_SCRATCH,
             served_weights: T::SERVED_WEIGHTS,
             pipelined: T::PIPELINED,
             native_sparse: T::NATIVE_SPARSE,

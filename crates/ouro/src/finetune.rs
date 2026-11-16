@@ -91,6 +91,32 @@ impl ChatTrainer for OuroTrainer {
     fn export_checkpoint(trained: &Path, tokenizer_dir: &Path, out: &Path, adapter: Option<&Path>, keep_going: &mut dyn FnMut() -> bool) -> Result<(), String> {
         model::finetune::export_brain_checkpoint(FAMILY, trained, tokenizer_dir, out, adapter, keep_going)
     }
+
+    const FROM_SCRATCH: bool = true;
+
+    fn init_params(config: &serde_json::Value) -> Result<u64, String> {
+        let cfg = OuroConfig::from_json(config)?;
+        Ok(cfg.param_list().iter().map(|(_, n)| *n as u64).sum())
+    }
+
+    /// The tensors of [`crate::init::init_weights`] at `seed`, written as the brain checkpoint `model.safetensors`
+    /// the model itself saves (same names, shapes, header and card), so training opens it like any trained one.
+    fn init_checkpoint(config: &serde_json::Value, seed: u64, out_dir: &Path) -> Result<(), String> {
+        let cfg = OuroConfig::from_json(config)?;
+        let mut weights = crate::init::init_weights(&cfg, seed);
+        let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = cfg
+            .param_list()
+            .into_iter()
+            .map(|(name, numel)| {
+                let w = weights.remove(&name).ok_or_else(|| format!("ouro init: no tensor {name}"))?;
+                Ok((name, vec![numel as u64], w))
+            })
+            .collect::<Result<_, String>>()?;
+        let path = out_dir.join(model::finetune::BRAIN_WEIGHTS_FILE);
+        let name = path.to_str().ok_or_else(|| format!("{}: not a UTF-8 path", path.display()))?;
+        let card = checkpoint::st::ModelCard::new("brain/ouro", FAMILY);
+        checkpoint::st::save_safetensors(name, &tensors, &cfg.to_json(), Some(&card)).map_err(|e| format!("{}: {e}", path.display()))
+    }
 }
 
 #[cfg(test)]
@@ -111,5 +137,25 @@ mod tests {
         let e = OuroTrainer::train_lora(Path::new("/nonexistent"), &lora, &FitOpts::default(), &mut Never).err().expect("refused");
         assert_eq!(e.kind(), std::io::ErrorKind::Unsupported);
         assert!(e.to_string().contains("ouro") && e.to_string().contains("LoRA"), "{e}");
+    }
+
+    /// A from-scratch checkpoint opens as the configuration it was asked for, and the same seed writes the same bytes.
+    #[test]
+    fn an_initialized_checkpoint_opens_as_its_config_and_is_deterministic_in_its_seed() {
+        let dir = std::env::temp_dir().join(format!("ouro-init-{}", std::process::id()));
+        let (a, b) = (dir.join("a"), dir.join("b"));
+        for d in [&a, &b] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let cfg = OuroConfig::tiny().to_json();
+        OuroTrainer::init_checkpoint(&cfg, 5, &a).unwrap();
+        OuroTrainer::init_checkpoint(&cfg, 5, &b).unwrap();
+        let read = |d: &Path| std::fs::read(d.join(model::finetune::BRAIN_WEIGHTS_FILE)).unwrap();
+        assert_eq!(read(&a), read(&b), "the same seed writes the same checkpoint");
+        let (opened, _) = open(&a.join(model::finetune::BRAIN_WEIGHTS_FILE)).unwrap();
+        assert_eq!(opened, OuroConfig::tiny());
+        assert_eq!(OuroTrainer::init_params(&cfg).unwrap(), OuroConfig::tiny().param_list().iter().map(|(_, n)| *n as u64).sum::<u64>());
+        assert!(OuroTrainer::init_params(&serde_json::json!({"vocab_size": 3})).unwrap_err().contains("missing keys"));
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

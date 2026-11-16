@@ -927,6 +927,22 @@ impl model::finetune::ChatTrainer for Qwen3Trainer {
         crate::export::export_hf(&*src, &cfg, out, &opts, keep_going).map_err(|e| if e == capability::failure::CANCELLED { e } else { format!("{}: writing the checkpoint: {e}", out.display()) })
     }
 
+    const FROM_SCRATCH: bool = true;
+
+    fn init_params(config: &serde_json::Value) -> Result<u64, String> {
+        let cfg = crate::hf::decoder_config(&config.to_string())?;
+        Ok(model::ModelConfig::param_list(&cfg).iter().map(|(_, n)| *n as u64).sum())
+    }
+
+    /// [`crate::init::init_weights`] at `seed`, written as the `transformers` directory a full fine-tune exports
+    /// (`config.json` and one f32 `model.safetensors`), which every qwen3 loader opens.
+    fn init_checkpoint(config: &serde_json::Value, seed: u64, out_dir: &Path) -> Result<(), String> {
+        let cfg = crate::hf::decoder_config(&config.to_string())?;
+        let weights = crate::init::init_weights(&cfg, seed);
+        let opts = crate::export::HfExport { dtype: crate::export::HfDtype::F32, shard_bytes: u64::MAX, tokenizer_dir: None, adapter: None };
+        crate::export::export_hf(&weights, &cfg, out_dir, &opts, &mut || true)
+    }
+
     fn preference_margins(
         weights: &Path,
         reference: Option<&Path>,
