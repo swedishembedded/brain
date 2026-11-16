@@ -184,30 +184,28 @@ pub fn file_digest(path: &Path) -> std::io::Result<String> {
 /// [`file_digest`], reusing a validated digest recorded in a sidecar next to
 /// the file (see [`base_digest_sidecar`] for the whole-base form).
 ///
-/// The sidecar (`<file>.sha256`) records the digest with the length and
-/// modification time in nanoseconds the file had when it was hashed. It is
-/// trusted only when both still match the file, so a hit returns the digest
-/// those bytes gave when they were hashed; a file whose length or marker moved
-/// is hashed again. A same-length rewrite that also restores the modification
-/// time is indistinguishable from an unchanged file - the limit of a stat
-/// marker. When the filesystem reports no modification time there is no marker
-/// to prove a hit, so every call recomputes and no sidecar is written.
+/// The sidecar (`<file>.sha256`) records the digest with the file's [`Stamp`]
+/// (device, inode, size, modification and status-change times in nanoseconds)
+/// and the time the hashing began. It is trusted only when the stamp still
+/// matches and the hashing began more than one timestamp tick after the
+/// file's last change ([`Stamp::settled_before`]): a rewrite inside the tick
+/// the file was hashed in leaves an identical stamp, so a recent record is
+/// hashed again rather than believed. A file whose stamp moved while it was
+/// read gets no record, and a platform without the stamp fields never records.
 ///
 /// A missing, unreadable, corrupt or mismatched sidecar costs one re-hash, and
 /// the sidecar is replaced. Writes go to a per-process temporary and are
 /// renamed into place, so several ranks hashing the same base at once can only
 /// leave a complete sidecar behind.
 pub fn file_digest_sidecar(path: &Path) -> std::io::Result<String> {
-    let meta = std::fs::metadata(path)?;
-    let Some((len, mtime)) = change_marker(&meta) else {
-        return file_digest(path);
-    };
     let sidecar = sidecar_path(path);
-    if let Some(recorded) = read_sidecar(&sidecar, len, mtime) {
+    if let Some(recorded) = Stamp::of(&std::fs::metadata(path)?).and_then(|stamp| read_sidecar(&sidecar, &stamp)) {
         return Ok(recorded);
     }
-    let digest = file_digest(path)?;
-    write_sidecar(&sidecar, &digest, len, mtime);
+    let (digest, record) = hash_stamped(path)?;
+    if let Some((stamp, hashed_at)) = record {
+        write_atomic(&sidecar, &format!("{digest}\t{}\t{hashed_at}\n", stamp.fields()));
+    }
     Ok(digest)
 }
 
@@ -227,51 +225,122 @@ pub fn base_digest(path: &Path) -> std::io::Result<String> {
 /// and every save of the same base, would otherwise repeat; the sidecar makes
 /// the second and later reads a stat. The digest is the same one
 /// [`base_digest`] returns - only the reading is skipped, and only while the
-/// file's length and modification time still match.
+/// file's stamp still matches and its record has settled.
 pub fn base_digest_sidecar(path: &Path) -> std::io::Result<String> {
     base_digest_with(path, &mut |p| file_digest_sidecar(p))
 }
 
 /// [`base_digest`], with each file's digest kept in the cache file `cache`
-/// under the file's identity - canonical path, size and modification time -
-/// so a base is read and hashed once, and again only when its file changes.
-/// Hashing a released checkpoint reads all of it (tens of gigabytes), which a
-/// server naming its base at every start would otherwise repeat. The cache is
-/// best effort: one that cannot be read or written costs a re-hash, never the
-/// digest.
+/// under the file's [`Stamp`], so a base is read and hashed once, and again
+/// only when its file changes. Hashing a released checkpoint reads all of it
+/// (tens of gigabytes), which a server naming its base at every start would
+/// otherwise repeat. An entry answers only once it has settled
+/// ([`Stamp::settled_before`]); a recent one is hashed again and refreshed, so
+/// a same-size rewrite inside one timestamp tick is never served the old
+/// digest. The cache is best effort: one that cannot be read or written costs
+/// a re-hash, never the digest.
 pub fn base_digest_cached(path: &Path, cache: &Path) -> std::io::Result<String> {
     let mut known = read_digest_cache(cache);
-    let before = known.len();
+    let mut changed = false;
     let digest = base_digest_with(path, &mut |p| {
-        let Some(id) = file_identity(p) else { return file_digest(p) };
-        if let Some(d) = known.get(&id) {
-            return Ok(d.clone());
+        let stamp = std::fs::metadata(p).ok().and_then(|m| Stamp::of(&m));
+        if let Some(entry) = stamp.and_then(|s| known.get(&s).filter(|e| s.settled_before(e.hashed_at))) {
+            return Ok(entry.digest.clone());
         }
-        let d = file_digest(p)?;
-        known.insert(id, d.clone());
-        Ok(d)
+        let (digest, record) = hash_stamped(p)?;
+        let canonical = std::fs::canonicalize(p).ok().and_then(|c| c.to_str().map(str::to_string)).filter(|c| !c.contains('\n'));
+        if let (Some((stamp, hashed_at)), Some(path)) = (record, canonical) {
+            known.retain(|_, e| e.path != path);
+            known.insert(stamp, CacheEntry { digest: digest.clone(), hashed_at, path });
+            changed = true;
+        }
+        Ok(digest)
     })?;
-    if known.len() != before {
+    if changed {
         write_digest_cache(cache, &known);
     }
     Ok(digest)
 }
 
-/// What a cached digest is valid for: the file's canonical path, size and
-/// modification time in nanoseconds.
-type FileIdentity = (String, u64, u128);
-
-fn file_identity(p: &Path) -> Option<FileIdentity> {
-    let (len, mtime) = change_marker(&std::fs::metadata(p).ok()?)?;
-    Some((std::fs::canonicalize(p).ok()?.to_str()?.to_string(), len, mtime))
+/// What a recorded digest is valid for: the file's device and inode (which
+/// file), its size, and its modification and status-change times in
+/// nanoseconds (which version of it). A rewrite moves the change time even
+/// when it restores the modification time, but only by the filesystem's
+/// timestamp tick, which is why a record must also have settled.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct Stamp {
+    dev: u64,
+    ino: u64,
+    len: u64,
+    mtime_ns: i128,
+    ctime_ns: i128,
 }
 
-/// A file's change marker: its length and modification time in nanoseconds.
-/// `None` when the platform reports no modification time, which callers read
-/// as "no marker, so never trust a cached digest".
-fn change_marker(meta: &std::fs::Metadata) -> Option<(u64, u128)> {
-    let mtime = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos();
-    Some((meta.len(), mtime))
+impl Stamp {
+    #[cfg(unix)]
+    fn of(meta: &std::fs::Metadata) -> Option<Stamp> {
+        use std::os::unix::fs::MetadataExt;
+        let ns = |secs: i64, nanos: i64| i128::from(secs) * 1_000_000_000 + i128::from(nanos);
+        Some(Stamp { dev: meta.dev(), ino: meta.ino(), len: meta.size(), mtime_ns: ns(meta.mtime(), meta.mtime_nsec()), ctime_ns: ns(meta.ctime(), meta.ctime_nsec()) })
+    }
+
+    /// No inode or change time to prove a hit: never trust a record.
+    #[cfg(not(unix))]
+    fn of(_meta: &std::fs::Metadata) -> Option<Stamp> {
+        None
+    }
+
+    /// The filesystem's timestamp tick, as far as the stamp shows it. Whole
+    /// seconds in both times means a coarse filesystem (Lustre and NFS without
+    /// sub-second times tick at 1 s, FAT at 2 s): two seconds. Otherwise one
+    /// second, which also covers coarse kernel clocks and modest clock skew
+    /// between the host and a network filesystem's timestamps.
+    fn tick_ns(&self) -> i128 {
+        const SECOND: i128 = 1_000_000_000;
+        if self.mtime_ns % SECOND == 0 && self.ctime_ns % SECOND == 0 { 2 * SECOND } else { SECOND }
+    }
+
+    /// Whether a digest whose hashing began at `hashed_at` (nanoseconds since
+    /// the epoch) can stand for the file: only when it began more than a tick
+    /// after the file's last change. Inside the tick a later rewrite of the
+    /// same size can leave this very stamp, so the record proves nothing.
+    fn settled_before(&self, hashed_at: i128) -> bool {
+        hashed_at > self.mtime_ns.max(self.ctime_ns) + self.tick_ns()
+    }
+
+    /// The stamp as tab-separated record fields.
+    fn fields(&self) -> String {
+        format!("{}\t{}\t{}\t{}\t{}", self.dev, self.ino, self.len, self.mtime_ns, self.ctime_ns)
+    }
+
+    /// Read the five fields [`Stamp::fields`] wrote.
+    fn parse<'a>(fields: &mut impl Iterator<Item = &'a str>) -> Option<Stamp> {
+        Some(Stamp { dev: fields.next()?.parse().ok()?, ino: fields.next()?.parse().ok()?, len: fields.next()?.parse().ok()?, mtime_ns: fields.next()?.parse().ok()?, ctime_ns: fields.next()?.parse().ok()? })
+    }
+}
+
+/// A digest cache entry: the digest, when its hashing began, and the
+/// canonical path it was taken at (one entry per path is kept).
+struct CacheEntry {
+    digest: String,
+    hashed_at: i128,
+    path: String,
+}
+
+/// Nanoseconds since the epoch on the host clock.
+fn now_ns() -> i128 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as i128)
+}
+
+/// Hash `path`, answering its digest and, when the file kept one stamp from
+/// before the read to after it, that stamp with the time the hashing began. A
+/// file that changed while it was read gets no record to keep.
+fn hash_stamped(path: &Path) -> std::io::Result<(String, Option<(Stamp, i128)>)> {
+    let hashed_at = now_ns();
+    let before = Stamp::of(&std::fs::metadata(path)?);
+    let digest = file_digest(path)?;
+    let after = std::fs::metadata(path).ok().and_then(|m| Stamp::of(&m));
+    Ok((digest, before.filter(|b| after.as_ref() == Some(b)).map(|b| (b, hashed_at))))
 }
 
 /// Where a file's digest sidecar lives: the file's own name plus `.sha256`.
@@ -281,28 +350,25 @@ fn sidecar_path(path: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
-/// The digest a sidecar records, if it is a well-formed record that still
-/// describes a file of `len` bytes modified at `mtime` (nanoseconds). Anything
-/// else - unreadable, truncated, not lowercase hex, another length or another
-/// marker - is `None`, which the caller answers by hashing the file again.
-fn read_sidecar(sidecar: &Path, len: u64, mtime: u128) -> Option<String> {
+/// The digest a sidecar records, if it is a well-formed record for exactly
+/// `stamp` that has settled. Anything else - unreadable, truncated, not
+/// lowercase hex, another stamp or a record taken inside the file's last
+/// timestamp tick - is `None`, which the caller answers by hashing again.
+fn read_sidecar(sidecar: &Path, stamp: &Stamp) -> Option<String> {
     let text = std::fs::read_to_string(sidecar).ok()?;
     let mut fields = text.trim_end().split('\t');
     let digest = fields.next()?;
-    let recorded_len: u64 = fields.next()?.parse().ok()?;
-    let recorded_mtime: u128 = fields.next()?.parse().ok()?;
-    if fields.next().is_some() || recorded_len != len || recorded_mtime != mtime {
+    let recorded = Stamp::parse(&mut fields)?;
+    let hashed_at: i128 = fields.next()?.parse().ok()?;
+    if fields.next().is_some() || recorded != *stamp || !stamp.settled_before(hashed_at) || !is_digest(digest) {
         return None;
     }
-    let hex = digest.strip_prefix("sha256:")?;
-    (hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
-        .then(|| digest.to_string())
+    Some(digest.to_string())
 }
 
-/// Record `digest` for a `len`-byte file modified at `mtime`, atomically. A
-/// failure costs the next call a re-hash, never the digest.
-fn write_sidecar(sidecar: &Path, digest: &str, len: u64, mtime: u128) {
-    write_atomic(sidecar, &format!("{digest}\t{len}\t{mtime}\n"));
+/// Whether `digest` is `sha256:` and 64 lowercase hex digits.
+fn is_digest(digest: &str) -> bool {
+    digest.strip_prefix("sha256:").is_some_and(|hex| hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
 }
 
 /// Replace `path` with `contents` through a sibling temporary that is renamed
@@ -321,22 +387,28 @@ fn write_atomic(path: &Path, contents: &str) -> bool {
     written
 }
 
-/// The cache file's entries: one `digest<TAB>size<TAB>mtime_ns<TAB>path` a line.
-fn read_digest_cache(cache: &Path) -> HashMap<FileIdentity, String> {
+/// The cache file's entries: one
+/// `digest<TAB>dev<TAB>ino<TAB>size<TAB>mtime_ns<TAB>ctime_ns<TAB>hashed_at_ns<TAB>path`
+/// a line. A line in any other shape (an older layout included) is dropped,
+/// which costs its file one re-hash.
+fn read_digest_cache(cache: &Path) -> HashMap<Stamp, CacheEntry> {
     let Ok(text) = std::fs::read_to_string(cache) else { return HashMap::new() };
     text.lines()
         .filter_map(|line| {
-            let mut f = line.splitn(4, '\t');
-            let (digest, len, mtime, path) = (f.next()?, f.next()?.parse().ok()?, f.next()?.parse().ok()?, f.next()?);
-            digest.starts_with("sha256:").then(|| ((path.to_string(), len, mtime), digest.to_string()))
+            let mut fields = line.splitn(8, '\t');
+            let digest = fields.next().filter(|d| is_digest(d))?.to_string();
+            let stamp = Stamp::parse(&mut fields)?;
+            let hashed_at = fields.next()?.parse().ok()?;
+            let path = fields.next()?.to_string();
+            Some((stamp, CacheEntry { digest, hashed_at, path }))
         })
         .collect()
 }
 
 /// Replace the cache file atomically (write a sibling, rename over it), so a
 /// concurrent reader sees the old or the new set, never half of one.
-fn write_digest_cache(cache: &Path, known: &HashMap<FileIdentity, String>) {
-    let mut lines: Vec<String> = known.iter().map(|((path, len, mtime), d)| format!("{d}\t{len}\t{mtime}\t{path}")).collect();
+fn write_digest_cache(cache: &Path, known: &HashMap<Stamp, CacheEntry>) {
+    let mut lines: Vec<String> = known.iter().map(|(stamp, e)| format!("{}\t{}\t{}\t{}", e.digest, stamp.fields(), e.hashed_at, e.path)).collect();
     lines.sort();
     let parent_ready = cache.parent().is_none_or(|d| d.as_os_str().is_empty() || std::fs::create_dir_all(d).is_ok());
     if parent_ready {
@@ -499,9 +571,9 @@ mod tests {
     }
 
     /// A base is read and hashed once: the digest is kept in the cache file
-    /// under the file's identity (path, size, modification time) and served
-    /// from there until the file changes. A cache that cannot be written
-    /// costs a re-hash, never the digest.
+    /// under the file's stamp and served from there, once settled, until the
+    /// file changes. A cache that cannot be written costs a re-hash, never the
+    /// digest.
     #[test]
     fn a_base_is_hashed_once_and_again_only_when_its_file_changes() {
         let dir = std::env::temp_dir().join(format!("modelstore-fetch-test-digest-cache-{}", std::process::id()));
@@ -512,22 +584,65 @@ mod tests {
         let real = file_digest(&file).unwrap();
         assert_eq!(base_digest_cached(&file, &cache).unwrap(), real);
 
-        // A cached entry is what answers: forge it and the forgery comes back.
-        let hex = real.trim_start_matches("sha256:");
-        let forged = "0".repeat(64);
-        std::fs::write(&cache, std::fs::read_to_string(&cache).unwrap().replace(hex, &forged)).unwrap();
-        assert_eq!(base_digest_cached(&file, &cache).unwrap(), format!("sha256:{forged}"), "the file was not read again");
+        // A fresh entry (hashed inside the file's tick) is not trusted: a
+        // forgery of it is hashed over.
+        let forged = format!("sha256:{}", "0".repeat(64));
+        std::fs::write(&cache, forge_record(&std::fs::read_to_string(&cache).unwrap(), &forged, false)).unwrap();
+        assert_eq!(base_digest_cached(&file, &cache).unwrap(), real, "an unsettled entry was believed");
 
-        // Another file at the same path is hashed again.
+        // A settled entry is what answers: forge it and the forgery comes back.
+        std::fs::write(&cache, forge_record(&std::fs::read_to_string(&cache).unwrap(), &forged, true)).unwrap();
+        assert_eq!(base_digest_cached(&file, &cache).unwrap(), forged, "the file was not read again");
+
+        // Another file at the same path is hashed again, and replaces its entry.
         std::fs::write(&file, b"abcd").unwrap();
         let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
         std::fs::File::options().write(true).open(&file).unwrap().set_modified(later).unwrap();
         assert_eq!(base_digest_cached(&file, &cache).unwrap(), file_digest(&file).unwrap());
+        assert_eq!(std::fs::read_to_string(&cache).unwrap().lines().count(), 1, "one entry per path");
 
         // A directory base caches each of its files; an unwritable cache still answers.
         std::fs::write(dir.join("config.json"), b"{}").unwrap();
         assert_eq!(base_digest_cached(&dir, &cache).unwrap(), base_digest(&dir).unwrap());
         assert_eq!(base_digest_cached(&file, &file.join("not-a-dir").join("digests.txt")).unwrap(), file_digest(&file).unwrap());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Rewrite every record line (sidecar or cache) to carry `digest`, with its
+    /// hashing time moved far after (`settled`) or onto the file's change.
+    fn forge_record(text: &str, digest: &str, settled: bool) -> String {
+        text.lines()
+            .map(|line| {
+                let mut f: Vec<String> = line.split('\t').map(str::to_string).collect();
+                f[0] = digest.to_string();
+                f[6] = if settled { (i128::from(i64::MAX)).to_string() } else { f[4].clone() };
+                f.join("\t") + "\n"
+            })
+            .collect()
+    }
+
+    /// Spec: a same-size rewrite inside one timestamp tick is detected. On a
+    /// filesystem with whole-second timestamps a rewrite within the second
+    /// keeps size and modification time, so a key of those alone serves the
+    /// old digest; the rewrite is simulated on any filesystem by restoring the
+    /// modification time. Both the cache file and the sidecar answer the new
+    /// bytes' digest.
+    #[test]
+    fn a_same_size_rewrite_within_one_second_is_detected() {
+        let dir = std::env::temp_dir().join(format!("modelstore-fetch-test-same-tick-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (file, cache) = (dir.join("model.safetensors"), dir.join("digests.txt"));
+        std::fs::write(&file, b"abc").unwrap();
+        let first = marker_of(&file);
+        assert_eq!(base_digest_cached(&file, &cache).unwrap(), file_digest(&file).unwrap());
+        assert_eq!(file_digest_sidecar(&file).unwrap(), file_digest(&file).unwrap());
+
+        std::fs::write(&file, b"abd").unwrap();
+        set_marker(&file, first);
+        let rewritten = file_digest(&file).unwrap();
+        assert_eq!(base_digest_cached(&file, &cache).unwrap(), rewritten, "the cache served the old bytes' digest");
+        assert_eq!(file_digest_sidecar(&file).unwrap(), rewritten, "the sidecar served the old bytes' digest");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -540,8 +655,13 @@ mod tests {
         std::fs::File::options().write(true).open(path).unwrap().set_modified(at).unwrap();
     }
 
-    /// The first call hashes the file and records the digest with the length
-    /// and nanosecond marker it was hashed at; the returned digest is the
+    /// The stamp record a sidecar for `file` must start with.
+    fn record_prefix(file: &Path, digest: &str) -> String {
+        format!("{digest}\t{}\t", Stamp::of(&std::fs::metadata(file).unwrap()).unwrap().fields())
+    }
+
+    /// The first call hashes the file and records the digest with the stamp
+    /// it was hashed at and when the hashing began; the returned digest is the
     /// content digest.
     #[test]
     fn a_sidecar_is_written_on_the_first_call_and_records_the_digest() {
@@ -551,51 +671,46 @@ mod tests {
         let file = dir.join("weights.bin");
         std::fs::write(&file, b"abc").unwrap();
         let real = file_digest(&file).unwrap();
+        let begun = now_ns();
         assert_eq!(file_digest_sidecar(&file).unwrap(), real);
 
-        let sidecar = sidecar_path(&file);
-        let text = std::fs::read_to_string(&sidecar).unwrap();
+        let text = std::fs::read_to_string(sidecar_path(&file)).unwrap();
+        assert!(text.starts_with(&record_prefix(&file, &real)), "{text:?}");
         let fields: Vec<&str> = text.trim_end().split('\t').collect();
-        assert_eq!(fields.len(), 3, "{text:?}");
-        assert_eq!(fields[0], real);
-        let (len, mtime) = change_marker(&std::fs::metadata(&file).unwrap()).unwrap();
-        assert_eq!(fields[1], len.to_string());
-        assert_eq!(fields[2], mtime.to_string());
+        assert_eq!(fields.len(), 7, "{text:?}");
+        assert!(fields[6].parse::<i128>().unwrap() >= begun, "{text:?}");
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// A recorded digest answers only while the file's length and marker are
-    /// still the ones it was hashed at. The reuse is proved without timing: the
-    /// bytes are replaced with content that hashes differently while the
-    /// original marker is restored, and the old digest still comes back - which
-    /// can only happen if the file was not read. Moving the marker (same
-    /// length) makes the next call hash the new bytes.
+    /// A recorded digest answers only for the stamp it was taken at, and only
+    /// once settled. The reuse is proved without timing: the record is forged
+    /// to another digest, which comes back only while it is settled - so the
+    /// file was not read. A moved stamp is hashed again.
     #[test]
-    fn a_sidecar_is_reused_only_while_length_and_marker_match() {
+    fn a_sidecar_is_reused_only_for_its_stamp_once_settled() {
         let dir = std::env::temp_dir().join(format!("modelstore-fetch-test-sidecar-reuse-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("weights.bin");
         std::fs::write(&file, b"abc").unwrap();
         let real = file_digest(&file).unwrap();
-        let original = marker_of(&file);
         assert_eq!(file_digest_sidecar(&file).unwrap(), real);
+        let sidecar = sidecar_path(&file);
+        let forged = format!("sha256:{}", "0".repeat(64));
 
-        std::fs::write(&file, b"abd").unwrap();
-        set_marker(&file, original);
-        assert_ne!(file_digest(&file).unwrap(), real, "the bytes differ");
-        assert_eq!(file_digest_sidecar(&file).unwrap(), real, "same length and marker: the recorded digest answers");
+        std::fs::write(&sidecar, forge_record(&std::fs::read_to_string(&sidecar).unwrap(), &forged, false)).unwrap();
+        assert_eq!(file_digest_sidecar(&file).unwrap(), real, "an unsettled record is hashed over");
+        std::fs::write(&sidecar, forge_record(&std::fs::read_to_string(&sidecar).unwrap(), &forged, true)).unwrap();
+        assert_eq!(file_digest_sidecar(&file).unwrap(), forged, "a settled record for this stamp answers");
 
-        let later = original + std::time::Duration::from_secs(5);
-        set_marker(&file, later);
-        assert_eq!(file_digest_sidecar(&file).unwrap(), file_digest(&file).unwrap(), "a moved marker is hashed again");
-        assert_ne!(file_digest_sidecar(&file).unwrap(), real);
+        set_marker(&file, marker_of(&file) + std::time::Duration::from_secs(5));
+        assert_eq!(file_digest_sidecar(&file).unwrap(), real, "a moved stamp is hashed again");
         std::fs::remove_dir_all(&dir).ok();
     }
 
     /// A sidecar that is not a well-formed record for this exact file is
-    /// ignored and replaced: garbage, a truncation, a stale length and a stale
-    /// marker all cost one re-hash and never a wrong digest.
+    /// ignored and replaced: garbage, a truncation, an older layout and a
+    /// stale stamp all cost one re-hash and never a wrong digest.
     #[test]
     fn a_corrupt_or_mismatched_sidecar_is_ignored_and_rewritten() {
         let dir = std::env::temp_dir().join(format!("modelstore-fetch-test-sidecar-corrupt-{}", std::process::id()));
@@ -605,18 +720,22 @@ mod tests {
         std::fs::write(&file, b"abc").unwrap();
         let real = file_digest(&file).unwrap();
         let sidecar = sidecar_path(&file);
-        let (len, mtime) = change_marker(&std::fs::metadata(&file).unwrap()).unwrap();
+        let stamp = Stamp::of(&std::fs::metadata(&file).unwrap()).unwrap();
+        let wrong = format!("sha256:{}", "0".repeat(64));
+        let far = i64::MAX;
         for corrupt in [
             "not a digest".to_string(),
-            format!("sha256:{}", "z".repeat(64)),
-            format!("sha256:{}\t{}\t{mtime}\tunexpected", "0".repeat(64), len),
-            format!("{}\t{}\t{mtime}", real, len + 1),
-            format!("{}\t{len}\t{}", real, mtime + 1),
+            format!("sha256:{}\t{}\t{far}", "z".repeat(64), stamp.fields()),
+            format!("{wrong}\t{}\t{far}\tunexpected", stamp.fields()),
+            format!("{wrong}\t{}\t{}", stamp.len, stamp.mtime_ns),
+            format!("{wrong}\t{}\t{far}", Stamp { len: stamp.len + 1, ..stamp }.fields()),
+            format!("{wrong}\t{}\t{far}", Stamp { ctime_ns: stamp.ctime_ns + 1, ..stamp }.fields()),
+            format!("{wrong}\t{}\t{far}", Stamp { ino: stamp.ino + 1, ..stamp }.fields()),
         ] {
             std::fs::write(&sidecar, &corrupt).unwrap();
             assert_eq!(file_digest_sidecar(&file).unwrap(), real, "{corrupt:?} was ignored");
             let repaired = std::fs::read_to_string(&sidecar).unwrap();
-            assert_eq!(repaired, format!("{real}\t{len}\t{mtime}\n"), "{corrupt:?} was replaced");
+            assert!(repaired.starts_with(&record_prefix(&file, &real)), "{corrupt:?} was replaced: {repaired:?}");
         }
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -632,7 +751,6 @@ mod tests {
         let file = dir.join("weights.bin");
         std::fs::write(&file, b"concurrent writers").unwrap();
         let real = file_digest(&file).unwrap();
-        let (len, mtime) = change_marker(&std::fs::metadata(&file).unwrap()).unwrap();
 
         let expected = real.as_str();
         std::thread::scope(|scope| {
@@ -647,7 +765,8 @@ mod tests {
         });
 
         let sidecar = sidecar_path(&file);
-        assert_eq!(std::fs::read_to_string(&sidecar).unwrap(), format!("{real}\t{len}\t{mtime}\n"));
+        let record = std::fs::read_to_string(&sidecar).unwrap();
+        assert!(record.starts_with(&record_prefix(&file, &real)) && record.ends_with('\n') && record.lines().count() == 1, "{record:?}");
         let temporaries: Vec<_> = std::fs::read_dir(&dir)
             .unwrap()
             .flatten()

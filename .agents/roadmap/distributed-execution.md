@@ -152,9 +152,11 @@ Scope: Running one training job as ranks across machines - the job plan every ra
       and byte count, and that the run without the flag writes none.
 
 - [x] **A base is hashed once, not once per rank and per save.**
-      `fetch::file_digest_sidecar` records `sha256:<hex>` with the file's length
-      and nanosecond modification time in a `<file>.sha256` sibling and reuses
-      it only while both still match; a missing, corrupt or stale sidecar is
+      `fetch::file_digest_sidecar` records `sha256:<hex>` with the file's stamp
+      (device, inode, size, nanosecond modification and change times) and the
+      time hashing began in a `<file>.sha256` sibling, and reuses it only while
+      the stamp matches and the record is more than a timestamp tick younger
+      than the file's last change; a missing, corrupt or stale sidecar is
       ignored and rewritten, and a cache hit answers exactly the digest the
       file's bytes give. Writes go through a per-call temporary and a rename,
       so ranks hashing the same base concurrently leave one complete sidecar.
