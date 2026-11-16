@@ -123,6 +123,11 @@ pub struct FitOpts {
     /// [`crate::stepgate::MAX_CONSECUTIVE_NONFINITE`] in a row. Does not change what a healthy run computes,
     /// so it is not part of a run's identity.
     pub strict_updates: bool,
+    /// Batches the loss estimate taken before the first step averages ([`FitReport::initial_loss`]); `0` takes the
+    /// first step's own loss instead, measured before its update by the forward the step runs anyway, so a run
+    /// pays no extra forward for it (what a long run on a slow device wants: five probe forwards of 1024-token rows
+    /// were a third of a CPU step). Not part of the arithmetic of any step.
+    pub initial_probe_batches: u32,
 }
 
 impl FitOpts {
@@ -205,6 +210,7 @@ impl Default for FitOpts {
             stages: 0,
             native_sparse: None,
             strict_updates: false,
+            initial_probe_batches: 5,
         }
     }
 }
@@ -1935,16 +1941,17 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
     obj.updates_applied(applied);
     obj.begin(opts.seed, u64::from(first_step) * u64::from(opts.grad_accum.max(1)) * opts.batch_size.max(1) as u64);
 
-    let initial = {
+    // `None` until the first step when the run takes that step's own loss (`initial_probe_batches == 0`).
+    let mut initial = (opts.initial_probe_batches > 0).then(|| {
         let probe_clock = std::time::Instant::now();
         let mut sample_rng = rng.clone();
         let mut total = 0.0;
-        for _ in 0..5 {
+        for _ in 0..opts.initial_probe_batches {
             total += obj.loss_probe(&model, &mut sample_rng);
         }
-        gpu_core::profile::stage_time("fit: initial loss probe (5 forwards)", probe_clock);
-        total / 5.0
-    };
+        gpu_core::profile::stage_time("fit: initial loss probe", probe_clock);
+        total / opts.initial_probe_batches as f32
+    });
     let mut gate = crate::stepgate::UpdateGate::new(opts.strict_updates);
     let mut last_train: Option<f32> = None;
     let mut completed = first_step;
@@ -2008,6 +2015,8 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
         gpu_core::profile::stage_time("fit: step total", step_clock);
         let grad_norm = model.last_grad_norm();
         let loss = step_loss / opts.grad_accum.max(1) as f32;
+        // The first step's loss, measured before its update, when the run takes it as its initial estimate.
+        initial.get_or_insert(loss);
         // The optimizer's share of the step: everything the objective did not
         // measure, which is zeroing gradients, reducing them, AdamW and the
         // device wait above. The evaluation a step is due is not part of it.
@@ -2202,6 +2211,8 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
         );
     }
     let kept_best = kept_best.then(|| selection.best_step.map(|step| KeptBest { step, eval_loss: selection.watch.best() })).flatten();
+    // A run that took no step (resumed at its end) has no first step to take the estimate from: one probe.
+    let initial = initial.unwrap_or_else(|| obj.loss_probe(&model, &mut rng.clone()));
     let report = FitReport { initial_loss: initial, final_loss: last_train, steps_completed: completed, resumed_at, interrupted, evaluations: selection.evaluations, kept_best, stopped_early, applied_steps: applied };
     Ok((report, model))
 }
@@ -3310,6 +3321,26 @@ mod tests {
             let opts = FitOpts { steps: 2, eval_interval: 0, ..Default::default() };
             fit_controlled(Recorder::new(RecorderCfg, 1, 1, &HashMap::new()), spy, &opts, None, FitControl::default()).expect("fit");
             assert_eq!((probes.get(), steps.get()), (want_probes, want_steps), "cheap probe: {cheap_probe}");
+        }
+    }
+
+    /// With no probe batches the initial estimate is the first step's own loss, read from the forward the step runs
+    /// anyway: no probe and no extra step, and the report's initial loss is that step's.
+    #[test]
+    fn a_run_without_probe_batches_takes_its_initial_loss_from_its_first_step() {
+        for cheap_probe in [true, false] {
+            let (probes, steps) = (std::rc::Rc::new(std::cell::Cell::new(0)), std::rc::Rc::new(std::cell::Cell::new(0)));
+            let spy = Spy { probes: probes.clone(), steps: steps.clone(), cheap_probe };
+            let opts = FitOpts { steps: 2, eval_interval: 0, initial_probe_batches: 0, ..Default::default() };
+            let mut first = None;
+            let mut on_step = |s: &StepReport| {
+                first.get_or_insert(s.loss);
+                true
+            };
+            let control = FitControl { on_step: Some(&mut on_step), ..Default::default() };
+            let (report, _) = fit_controlled(Recorder::new(RecorderCfg, 1, 1, &HashMap::new()), spy, &opts, None, control).expect("fit");
+            assert_eq!((probes.get(), steps.get()), (0, 2), "cheap probe: {cheap_probe}");
+            assert_eq!(Some(report.initial_loss), first);
         }
     }
 

@@ -670,6 +670,9 @@ impl Pretrain {
             eval_interval: self.eval_every,
             eval_batches: self.eval_batches,
             strict_updates: self.strict_updates,
+            // The initial loss is the first step's: a pretraining step is long, and five probe forwards cost a
+            // third of one.
+            initial_probe_batches: 0,
             ..fit_opts(self.steps, self.block, self.lr, seed)
         };
         let opts = model::training_plan::ValidatedTrainingPlan::build(requested, &[]).map_err(|e| Error::Backend(format!("Pretrain: {e}")))?.into_opts();
