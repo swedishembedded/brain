@@ -260,6 +260,8 @@ mod tests {
     const B: &str = "local/base:lab:beta:v1";
 
     struct Fixture {
+        /// Holds the scratch directory: the base and the bank live in it, and it is removed when the fixture drops.
+        _scratch: brain_testutil::Scratch,
         dir: PathBuf,
         bank: BankDirectory,
         live: LiveAdapters,
@@ -281,7 +283,7 @@ mod tests {
         let live = LiveAdapters::new(resident, executor.clone());
         let published = dir.join("bank");
         std::fs::create_dir_all(&published).unwrap();
-        Fixture { bank: BankDirectory::new(published.clone(), served), dir: published, live, executor, base }
+        Fixture { bank: BankDirectory::new(published.clone(), served), dir: published, live, executor, base, _scratch: dir }
     }
 
     fn listed(f: &Fixture, id: &str) -> bool {
