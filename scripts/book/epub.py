@@ -18,7 +18,9 @@ pseudocode reference. Each edition becomes one EPUB under build/book/:
   dangles.
 - Math is MathML. A display formula too wide for a phone or a tablet's
   column is set on several lines, broken where a typesetter would break it
-  (docs/pandoc/book-math-lines.lua); one that cannot be broken scrolls.
+  (docs/pandoc/book-math-lines.lua); one that cannot be broken is set
+  smaller to fit, and so is a table too wide for the line. Nothing scrolls:
+  a paging reading system cannot split a scrolling box across pages.
 - Figures are the SVG files themselves (numbered per
   chapter, as the text cites them), tables are HTML tables.
 

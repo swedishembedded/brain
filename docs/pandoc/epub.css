@@ -61,8 +61,10 @@ figcaption { font-size: 0.9em; margin-top: 0.4em; text-align: center; page-break
 figcaption strong { color: #2b6cb0; }
 img.portrait { width: 60%; }
 
-/* Tables scroll sideways when wider than the screen (book-epub.lua). */
-div.table-scroll { overflow-x: auto; margin: 1em 0; }
+/* A table too wide for the line is set smaller (book-epub.lua: the size is
+ * on its block). Nothing in the book scrolls: a paging reading system cannot
+ * split a scrolling box across pages and may leave the rest of it blank. */
+div.table-fit { margin: 1em 0; }
 table { border-collapse: collapse; font-size: 0.85em; margin: 0 auto;
         border-top: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; }
 th, td { padding: 0.25em 0.6em; vertical-align: top; }
@@ -70,10 +72,9 @@ thead th { border-bottom: 1px solid currentColor; }
 td { white-space: normal; }
 caption { font-size: 0.9em; margin-bottom: 0.4em; }
 
-/* A long display formula is set on several lines (book-math-lines.lua); one
- * still wider than the screen scrolls inside its own box rather than
- * running over the text beside it. */
-span.math.display { display: block; max-width: 100%; overflow-x: auto; overflow-y: hidden; }
+/* A long display formula is set on several lines, and one that cannot be
+ * broken is set smaller to fit (book-math-lines.lua). */
+span.math.display { display: block; max-width: 100%; }
 math[display="block"] { margin: 0.8em 0; }
 /* A formula with no place to break, set smaller to fit (its size is on the
  * element, from book-math-lines.lua). */

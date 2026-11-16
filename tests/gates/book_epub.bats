@@ -75,7 +75,20 @@ MD
   structure
   [ "$status" -eq 0 ]
   [ -z "$output" ]
-  page | grep -q '<div class="table-scroll">'
+  # A narrow table is left as it is, and nothing is put in a scrolling box.
+  ! page | grep -q 'table-fit\|table-scroll'
+}
+
+@test "a table too wide for a phone line is set smaller, never below 60 percent" {
+  {
+    printf '# One {.chapter}\n\n'
+    printf '| %s |\n' "$(printf 'aaaaaaaaaaaa | %.0s' 1 2 3 4 5 6 7 8)" | sed 's/ | |$/ |/'
+    printf '|%s\n' "$(printf -- '---|%.0s' 1 2 3 4 5 6 7 8)"
+    printf '| %s |\n' "$(printf '1 | %.0s' 1 2 3 4 5 6 7 8)" | sed 's/ | |$/ |/'
+  } >"$WORK/book.md"
+  build
+  html="$(page)"
+  [[ "$html" == *'<div class="table-fit" style="font-size: '*'%">'* ]]
 }
 
 @test "figures are numbered per chapter and a chapter's own caption replaces the alt text" {

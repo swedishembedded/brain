@@ -11,9 +11,12 @@
 -- portrait (class "portrait") is not a figure the text cites and stays
 -- unnumbered.
 --
--- A table sits in a block that scrolls sideways, so a table wider than the
--- reader's screen scrolls instead of running off the page or being shrunk
--- unreadably small by the reading system.
+-- A table is set smaller when even its narrowest layout (each column as
+-- wide as its longest word or number, which cannot wrap) is wider than a
+-- phone's or a tablet column's line, down to 60% of its size. It is never
+-- put in a box that scrolls: a reading system that pages the book cannot
+-- split a scrolling box across pages, and some draw nothing of the part
+-- that falls on the next page, leaving the page blank above what follows.
 --
 -- Raw HTML in the source is an error: the book's markdown carries none, so
 -- a `<word>` that markdown took for a tag is text the reader would lose (the
@@ -46,6 +49,49 @@ end
 -- Headers and figures must be seen in document order, so one top-down
 -- traversal handles both. A table returns `false` as well, so the traversal
 -- does not descend into the block that now holds it and wrap it again.
+-- The widest a table may be at its narrowest, in ems of the table's own
+-- (smaller) type: a 340 px phone line holds about 23 of them.
+local TABLE_LIMIT_EM = 21
+local TABLE_MIN_SCALE = 0.6
+
+-- The width of a word in ems, by character class (digits about half an em,
+-- capitals wider, lowercase about half).
+local function word_em(word)
+  local w = 0
+  for _, cp in utf8.codes(word) do
+    local c = utf8.char(cp)
+    if c:match("%d") then w = w + 0.55
+    elseif c:match("[A-Z]") then w = w + 0.7
+    else w = w + 0.52 end
+  end
+  return w
+end
+
+-- A table's narrowest width: each column as wide as the longest word in
+-- any of its cells, plus the cells' padding (0.6 em a side).
+local function table_min_width(t)
+  local cols = {}
+  local function row(r)
+    local c = 0
+    for _, cell in ipairs(r.cells) do
+      c = c + 1
+      local longest = 0
+      for word in pandoc.utils.stringify(cell.contents):gmatch("%S+") do
+        longest = math.max(longest, word_em(word))
+      end
+      cols[c] = math.max(cols[c] or 0, longest)
+    end
+  end
+  for _, r in ipairs(t.head.rows) do row(r) end
+  for _, body in ipairs(t.bodies) do
+    for _, r in ipairs(body.head) do row(r) end
+    for _, r in ipairs(body.body) do row(r) end
+  end
+  local w = 0
+  for _, c in pairs(cols) do w = w + c + 1.2 end
+  return w
+end
+
 local counts = { Math = 0, Table = 0, Image = 0 }
 local function count(el) counts[el.t] = counts[el.t] + 1 end
 
@@ -93,7 +139,11 @@ return {
       return fig
     end,
     Table = function(t)
-      return pandoc.Div({ t }, pandoc.Attr("", { "table-scroll" })), false
+      local width = table_min_width(t)
+      if width <= TABLE_LIMIT_EM then return nil end
+      local scale = math.max(TABLE_MIN_SCALE, TABLE_LIMIT_EM / width)
+      return pandoc.Div({ t }, pandoc.Attr("", { "table-fit" },
+        { style = string.format("font-size: %d%%", math.floor(scale * 100)) })), false
     end,
   },
 }
