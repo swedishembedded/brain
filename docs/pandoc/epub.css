@@ -82,7 +82,13 @@ math[display="block"] { margin: 0.8em 0; }
  * element, from book-math-lines.lua). */
 span.math-scaled { display: block; }
 
-/* The title page pandoc writes, and the copyright page after it. */
+/* The title page (epub.py writes it, with the author's links), and the
+ * copyright page after it. */
+h1.titlepage { margin-top: 3em; page-break-before: auto; break-before: auto; }
+div.titlepage { margin-top: 1.5em; }
+div.titlepage p:first-child { font-style: italic; font-size: 1.2em; }
+div.titlepage p:nth-child(2) { margin-top: 3em; font-family: "Nimbus Sans", Helvetica, Arial, sans-serif; }
+div.titlepage p:last-child { margin-top: 3em; }
 section.titlepage, #title-block-header { text-align: left; margin-top: 4em; }
 h1.title { border-bottom: 2px solid #2b6cb0; page-break-before: auto; break-before: auto; }
 p.subtitle { font-style: italic; font-size: 1.2em; }

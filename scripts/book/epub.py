@@ -80,7 +80,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bookspec import ROOT, Book, load  # noqa: E402
-from edition import (ABOUT, AUTHOR_PHOTO, ROMAN, Edition, output, parse, read, select,  # noqa: E402
+from edition import (ABOUT, AUTHOR_PHOTO, ROMAN, Edition, linkedin, output, parse, read, select,  # noqa: E402
                      source_date, source_day, source_revision)
 
 PANDOC = ROOT / "docs" / "pandoc"
@@ -214,6 +214,25 @@ def page(rel: str, pages: set[str], book: Book, level: int, label: str = "", kin
     return docs.transform(f"docs/book/{rel}", text).strip() + "\n\n"
 
 
+def title_page(book: Book, edition: Edition) -> str:
+    """The first page: title, subtitle, author, how to reach the author, and
+    the publisher, as the PDF's title page has them. Written here rather
+    than left to pandoc, whose title page shows metadata only, no links."""
+    return f"""# {edition.title} {{.titlepage .unlisted}}
+
+::: titlepage
+*{edition.subtitle}*
+
+**{book.author}**\\
+[{book.author_email}](mailto:{book.author_email})\\
+[Connect on LinkedIn]({linkedin(book, "epub")})
+
+Swedish Embedded AB
+:::
+
+"""
+
+
 def colophon(book: Book, edition: Edition) -> str:
     """The reverse of the title page, as in the PDF."""
     return f"""# Copyright {{.unnumbered .colophon}}
@@ -240,7 +259,7 @@ Published by Swedish Embedded AB, Sweden. <https://swedishembedded.com>
 def build_markdown(book: Book, edition: Edition, out: Path) -> Path:
     """The markdown of one EPUB; its metadata goes in through pandoc options."""
     pages = set(edition.pages())
-    parts = [colophon(book, edition)]
+    parts = [title_page(book, edition), colophon(book, edition)]
     parts += [page(rel, pages, book, 1, kind="front") for rel in edition.front]
     for v in edition.volumes:
         parts.append(page(v.intro_rel, pages, book, 1, kind="volume"))
@@ -352,7 +371,7 @@ def build(edition: Edition, kindle: bool = False) -> list[str]:
     meta_file.write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
     tmp = output(edition, f"{suffix}.epub.tmp")
     cmd = ["pandoc", "+RTS", f"-M{PANDOC_HEAP}", "-RTS", str(md), "-f", "markdown", "-t", "epub3", "-o", str(tmp),
-           "--metadata-file", str(meta_file), "--epub-cover-image", str(image),
+           "--metadata-file", str(meta_file), "--epub-cover-image", str(image), "--epub-title-page=false",
            "--css", str(CSS), "--lua-filter", str(MATH_LINES), "--lua-filter", str(FIGURES), "--lua-filter", str(FILTER), "--mathml",
            "--toc", "--toc-depth=2", "--split-level=2", "--highlight-style=tango",
            "--resource-path", str(ROOT)]

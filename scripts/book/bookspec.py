@@ -66,6 +66,7 @@ class Book:
     subtitle: str
     author: str
     author_email: str
+    author_linkedin: str
     front: list[str]
     back: list[str]
     volumes: list[Volume]
@@ -92,5 +93,5 @@ def load() -> Book:
             ))
         volumes.append(vol)
     return Book(title=raw["title"], subtitle=raw["subtitle"], author=raw["author"], author_email=raw["author_email"],
-                front=list(raw["front"]), back=list(raw["back"]), volumes=volumes,
+                author_linkedin=raw["author_linkedin"], front=list(raw["front"]), back=list(raw["back"]), volumes=volumes,
                 omitted=dict(raw.get("omitted") or {}))

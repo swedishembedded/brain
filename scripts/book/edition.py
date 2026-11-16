@@ -80,6 +80,12 @@ def source_date() -> str:
     return r.stdout.strip() or "Unreleased"
 
 
+def linkedin(book: Book, medium: str) -> str:
+    """The author's profile link on the title page of a `medium` ("pdf",
+    "epub") edition, tagged so that a visit shows which edition it came from."""
+    return f"{book.author_linkedin}?utm_source=ffpim-book&utm_content=front-page&utm_medium={medium}"
+
+
 def source_day() -> str:
     """The day the book last changed, as an ISO 8601 date (2026-11-16), for
     metadata a reading system parses."""

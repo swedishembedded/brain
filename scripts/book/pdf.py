@@ -38,7 +38,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bookspec import BOOK, ROOT, load  # noqa: E402
-from edition import ABOUT, AUTHOR_PHOTO, OUT, Edition, output, parse, read, select, source_date, source_revision  # noqa: E402
+from edition import (ABOUT, AUTHOR_PHOTO, OUT, Edition, linkedin, output, parse, read, select,  # noqa: E402
+                     source_date, source_revision)
 
 spec = importlib.util.spec_from_file_location("build_docs", ROOT / "docs" / "pandoc" / "build-docs.py")
 docs = importlib.util.module_from_spec(spec)
@@ -84,6 +85,9 @@ def title_header(book, out: Path, title: str, subtitle: str) -> Path:
     \vspace{{18pt}}{{\color{{accent}}\rule{{\linewidth}}{{0.6pt}}}}\par
     \vspace{{0.18\textheight}}
     {{\displayfont\Large\color{{ink}} {tex(book.author)}\par}}
+    \vspace{{8pt}}
+    {{\displayfont\small\color{{muted}} \href{{mailto:{book.author_email}}}{{{book.author_email}}}\par
+      \vspace{{3pt}}\href{{\detokenize{{{linkedin(book, "pdf")}}}}}{{Connect on LinkedIn}}\par}}
     \vfill
     {{\displayfont\small\color{{muted}} Swedish Embedded AB\par}}
   \end{{titlepage}}
