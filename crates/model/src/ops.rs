@@ -1713,7 +1713,15 @@ impl Ops {
     /// Whether the int8-weight linear of `params` (`[m, k/4, n]`) runs on a dequantize-in-register candidate that reads
     /// bf16 rows: the tuned table names one, the CUDA provider runs, and no [`row_count_invariant`] scope is open.
     fn int8_reads_bf16(&self, params: &[u32]) -> bool {
-        !row_count_invariant_active() && self.providers.runs("cuda") && self.gpu.int8_linear_bf16_input(params)
+        self.rounding_natives_allowed() && !row_count_invariant_active() && self.providers.runs("cuda") && self.gpu.int8_linear_bf16_input(params)
+    }
+
+    /// Whether a native product that rounds its operands (bf16 or E4M3 activations, a weight decoded to bf16 in
+    /// registers) may serve: not while the fp32 reference tier is pinned, whose contract is that every such kernel of
+    /// the pass is declined, so a gradient check or parity gate over a quantized weight is stated against exact fp32
+    /// arithmetic on the decoded weight.
+    pub(super) fn rounding_natives_allowed(&self) -> bool {
+        !self.gemm.is_reference_pinned()
     }
 
     fn dequant_forward(&self, s: &mut Vec<Step>, w: &Weight, act: &Act, y: &DeviceBuffer, yoff: u64) -> bool {
@@ -1750,7 +1758,7 @@ impl Ops {
         let (first, count) = rows;
         let (m, k) = (act.m, *k);
         let aligned = first.is_multiple_of(FP8_BLOCK) && (count.is_multiple_of(FP8_BLOCK) || first + count == *weight_n);
-        if *block != FP8_BLOCK || !aligned || !k.is_multiple_of(FP8_BLOCK) || !self.providers.runs("cuda") || !self.gpu.has_fp8_linear() {
+        if *block != FP8_BLOCK || !aligned || !k.is_multiple_of(FP8_BLOCK) || !self.rounding_natives_allowed() || !self.providers.runs("cuda") || !self.gpu.has_fp8_linear() {
             return false;
         }
         let params = [m, k / 4, count];

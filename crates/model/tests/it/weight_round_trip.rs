@@ -16,7 +16,10 @@
 //! activation rows (`x = I_k`) give `out[r, j] = W[j, r]`. A one-hot row is
 //! exact under every activation quantization `Ops::act` applies (its absmax
 //! is the single 1), so the only rounding left is the weight's own decode and
-//! one scale multiply.
+//! one scale multiply. The products run on the pinned fp32 reference tier: a
+//! tensor-core product rounds its operands inside the multiply (an fp32 weight
+//! to TF32, a decoded int8, NF4 or FP8 weight to bf16), which is the product's
+//! precision on that device and not the weight the tier stores.
 
 use data::rng::Lcg;
 use gpu_core::select::Dtype;
@@ -32,7 +35,8 @@ fn round_trip_is_what_the_device_decodes() {
     for r in 0..k {
         identity[r * k + r] = 1.0;
     }
-    let ops = Ops::new(gpu_core::testgpu::dev(model::ops::training_kernel_list())).expect("Ops::new");
+    let mut ops = Ops::new(gpu_core::testgpu::dev(model::ops::training_kernel_list())).expect("Ops::new");
+    ops.set_gemm_precision(gpu_core::provider::library::GemmPrecision::Fp32Reference);
     let g = ops.gpu();
     for &tier in TIERS {
         let weight = Weight::upload(&ops, &w, n, k, tier);

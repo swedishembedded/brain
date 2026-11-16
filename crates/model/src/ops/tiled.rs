@@ -403,7 +403,7 @@ impl Ops {
             17..=32 => gpu_core::Fused::MatmulNvfp4Mma32,
             _ => gpu_core::Fused::MatmulNvfp4Mma64,
         };
-        if !self.providers.runs("cuda") || !which.serves(&params) {
+        if !self.rounding_natives_allowed() || !self.providers.runs("cuda") || !which.serves(&params) {
             return false;
         }
         let mut prep = Vec::new();
@@ -428,7 +428,7 @@ impl Ops {
         let Weight::Micro { w: wb, s: sb, kind: MicroScaled::Nvfp4, global, .. } = w else { return false };
         let (first, count) = rows;
         let (m, k) = (act.m, w.k());
-        if m < 2 || !self.linear_activations.is_e4m3() || !self.providers.runs("cuda") {
+        if m < 2 || !self.linear_activations.is_e4m3() || !self.rounding_natives_allowed() || !self.providers.runs("cuda") {
             return false;
         }
         let min_wgmma_rows = if count.div_ceil(128) >= NVFP4_WGMMA_FILL_TILES { NVFP4_WGMMA_MIN_ROWS } else { NVFP4_WGMMA_MIN_ROWS_FEW_TILES };
