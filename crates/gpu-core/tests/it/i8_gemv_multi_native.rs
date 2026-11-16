@@ -59,8 +59,8 @@ fn bits(v: Vec<f32>) -> Vec<u32> {
     v.iter().map(|f| f.to_bits()).collect()
 }
 
-/// Run `ns` (one matrix each, up to four) as one multi launch and as separate native single-matrix launches
-/// (the same block function, so every output bit must match), and against the WGSL kernel (the same bits
+/// Run `ns` (one matrix each, up to four) as one multi launch and as separate launches of the native single-matrix
+/// kernel (the same block function, so every output bit must match), and against the WGSL kernel (the same bits
 /// below `kernels_cuda::I8_GEMV_MMA_MIN_ROWS` rows, f32 rounding of the running sum above).
 fn check(gpu: &Gpu, m: u32, kg: u32, ns: &[u32], seed: u64) {
     assert!(ns.len() <= 4);
@@ -86,6 +86,9 @@ fn check(gpu: &Gpu, m: u32, kg: u32, ns: &[u32], seed: u64) {
         .enumerate()
         .map(|(i, &n)| gpu.dispatch(K_REF, &[&xq, &mats[i].0, &sx, &mats[i].1, &outs_ref[i]], &[m, kg, n], Dispatch::Workgroups(n)))
         .collect();
+    // The single-matrix launch the multi kernel shares its block function with is the slot's first candidate,
+    // `matmul_i8_gemv` itself; the tuned table may name a faster one (another reduction order) for these rows.
+    let _pin = gpu_core::pin_candidate("matmul_i8_gemv", "matmul_i8_gemv");
     let singles: Vec<_> = ns
         .iter()
         .enumerate()
