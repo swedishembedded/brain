@@ -267,13 +267,16 @@ impl OuroResident {
     }
 }
 
-/// Device bytes of one decode step's buffers for `rows` sequences of up to `ctx` tokens: the per-row activations of
-/// every pass, the attention's score and weight slabs and the logits.
+/// Device bytes of the engine's step buffers for `rows` sequences of up to `ctx` tokens: a decode step's per-row
+/// activations of every pass, the attention's score and weight slabs and the logits, and the prompt buffers a
+/// prefill of `ctx` tokens runs in.
 fn decode_bytes(cfg: &ouro::OuroConfig, rows: u32, ctx: u32) -> u64 {
-    let (r, t) = (u64::from(rows), u64::from(cfg.total_ut_steps));
+    let (r, t, c) = (u64::from(rows), u64::from(cfg.total_ut_steps), u64::from(ctx));
     let (d, ff, v) = (u64::from(cfg.d_model), u64::from(cfg.d_ff), u64::from(cfg.vocab));
-    let words = r * (d * (8 + t) + 3 * ff + 2 * u64::from(cfg.q_dim()) + 2 * u64::from(cfg.kv_dim()) + v) + 2 * r * u64::from(cfg.n_heads) * u64::from(ctx);
-    words * 4
+    let layer = d * 8 + 3 * ff + 2 * u64::from(cfg.q_dim()) + 2 * u64::from(cfg.kv_dim());
+    let decode = r * (layer + d * t + v) + 2 * r * u64::from(cfg.n_heads) * c;
+    let prompt = c * (layer + d * (2 + t) + 3 * t + u64::from(cfg.n_heads));
+    (decode + prompt) * 4
 }
 
 fn config_of(path: &str) -> Result<ouro::OuroConfig, String> {
