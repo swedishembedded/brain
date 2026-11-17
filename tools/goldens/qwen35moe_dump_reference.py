@@ -58,7 +58,8 @@ hand-off is in the golden.
 
 `Int8Emulation` applies brain's W8A8 rounding (`qwen35moe::q8`, `Q8_0`'s
 block rule: one scale `max|block| / 127` per 32 elements of the contraction
-axis, weight and activation alike) at every site the tier quantizes, so the
+axis, weight and activation alike; the untied embedding table per 32 elements
+of a row) at every site the tier quantizes, so the
 tier is compared with the reference's own quantized function rather than with
 fp32. `_meta.int8[i]` records how far that function is from fp32
 (`loss_vs_fp32`) and how far its binary32 evaluation is from its binary64 one
@@ -249,10 +250,11 @@ def fake_quant(x, half_away):
 
 class Int8Emulation:
     """The reference with brain's int8 tier applied at the sites the tier quantizes (`qwen35moe::q8`): every mixer
-    projection, every routed expert's gate/up/down, the shared expert when it has their shape, and the untied head;
-    the router, the shared-expert gate and the embedding stay fp32. Weight and activation alike are rounded per
-    32-element block of the contraction axis. Installed by patching the module forwards; `restore` puts the
-    originals back."""
+    projection, every routed expert's gate/up/down, the shared expert when it has their shape, and the untied head and
+    embedding table (an int8 inference build gathers its table int8 when the head is a tensor of its own,
+    `qwen35moe::model::embed_table_i8`); the router and the shared-expert gate stay fp32. Weight and activation alike are
+    rounded per 32-element block of the contraction axis, a table row per 32 elements of its width. Installed by
+    patching the module forwards; `restore` puts the originals back."""
 
     def __init__(self, model, cfg):
         self.saved = []
@@ -270,6 +272,8 @@ class Int8Emulation:
             self.patch_experts(layer.mlp.experts)
         if not cfg.tie_word_embeddings:
             linears.append(model.lm_head)
+            table = fake_quant(model.model.embed_tokens.weight.detach(), half_away=True)
+            self.patch(model.model.embed_tokens, lambda ids, table=table: F.embedding(ids, table))
         for lin in linears:
             wq = fake_quant(lin.weight.detach(), half_away=True)
             self.patch(lin, lambda x, wq=wq: F.linear(fake_quant(x, half_away=False), wq))
