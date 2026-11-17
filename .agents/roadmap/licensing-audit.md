@@ -141,13 +141,6 @@ No dependency is added by this section: it records how the existing build and
 runtime already behave. It is a provenance note, not legal advice; a
 distribution that includes toolkit libraries needs its own review.
 
-## Housekeeping (not a third-party risk)
-
-`crates/atif` is brain's own implementation of the ATIF v1.7 trajectory
-format - same owner, same license as the rest of the workspace, confirmed.
-It follows the public ATIF RFC's wire schema; no third-party code is
-involved.
-
 ## What was not exhaustively covered
 
 This audit read each crate's primary architecture file(s) plus its docs

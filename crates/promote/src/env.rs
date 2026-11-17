@@ -3,9 +3,8 @@
 
 //! The `Environment` / `Verifier` seam: a programmatic, deterministic
 //! reward path any task family plugs into, and the one every other reward
-//! source in this workspace (starting with `rl::atif`'s trajectory
-//! ingestion) is a special case of, rather than a parallel system living
-//! next to it.
+//! source in this workspace is a special case of, rather than a parallel
+//! system living next to it.
 //!
 //! Model-agnostic by construction - a task is token ids and a reward is a
 //! scalar, so nothing here knows what a model is. That is what lets a model

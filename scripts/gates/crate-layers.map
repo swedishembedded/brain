@@ -48,7 +48,6 @@ brain-wgsl-cpu	2
 brain-wgsl-cuda	2
 
 # layer 3: training substrate and shared contracts
-brain-atif	3
 brain-audio	3
 brain-audit	3
 brain-camera	3

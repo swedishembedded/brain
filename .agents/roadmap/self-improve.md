@@ -1,6 +1,6 @@
 # self-improve - roadmap
 
-Scope: Self-improvement and training regimes over agent trajectories (`crates/rl`, `crates/atif`).
+Scope: Self-improvement and training regimes over datasets built from agent trajectories (`crates/rl`).
 
 Continuous self-improvement for brain's production models, generic over any
 `model::Model`-implementing architecture with thin per-model wiring, fed by
@@ -50,8 +50,10 @@ of this file before quoting anything above it as a continuous-learning
 result.
 
 **Standing invariant, unchanged by any of this: brain
-never depends on any agent runtime.** `crates/atif` implements the ATIF v1.7
-wire format itself (see P1) precisely so that stays true; every environment
+never depends on any agent runtime.** Trajectories reach brain only as
+datasets the caller builds (`generic-messages-v2` with rollout fields,
+`generic-preference-v1`; see P1 for the in-engine ATIF reader this replaced);
+every environment
 introduced from P11 on is self-contained inside brain with an in-process
 oracle, and anything that needs an acting agent lives with that agent
 runtime, talking to `brain serve --openai` - the one coupling this whole
@@ -97,7 +99,16 @@ job, not brain's. A trajectory without the stamp is skipped, never
 defaulted. Everything below assumes trajectories arriving at brain already
 carry this.
 
-## P1 - `atif` in brain - DONE
+## P1 - `atif` in brain - REMOVED (2026-11-17)
+
+Removed with `rl::atif` (`ingest_dir`, `AtifVerifier`, the trajectory ->
+`ChatSample` projector): no production caller, and it duplicated both the
+agent runtime's own ATIF crate and the orchestrator's dataset projection
+(and was linked into the orchestrator twice). Training data reaches brain as
+datasets the caller builds; the reward-weighted path is the `Verifier` seam
+over those datasets (`fit_weighted` stays). The history below is kept as
+history.
+
 
 brain's own ATIF v1.7 trajectory model (`Trajectory`/`TraceStep`/
 `sft_steps()`), validator and persistence helpers. Landed at

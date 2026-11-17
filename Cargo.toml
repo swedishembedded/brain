@@ -49,7 +49,6 @@ default-members = [
     "crates/rlcd",
     "crates/seed",
     "crates/search",
-    "crates/atif",
     "crates/rl",
     "crates/data",
     "crates/decide",
@@ -230,7 +229,6 @@ brain-search = { path = "crates/search" }
 brain-audit = { path = "crates/audit" }
 brain-rlcd = { path = "crates/rlcd" }
 brain-seed = { path = "crates/seed" }
-brain-atif = { path = "crates/atif" }
 brain-rl = { path = "crates/rl" }
 brain-data = { path = "crates/data" }
 brain-decide = { path = "crates/decide" }
@@ -537,14 +535,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 ratatui = "0.30"
 crossterm = { version = "0.29", features = ["event-stream"] }
 
-# crates/atif (brain's ATIF v1.7 trajectory model, validator and persistence).
-# Unrelated to crates/trace above, which is the tracing/observability crate.
+# Shared third-party versions used by several crates.
 thiserror = "2"
 tempfile = "3"
-# libc was previously only a literal per-crate dep (crates/gpu-core,
-# crates/shutdown, both pinned "0.2"); promoted to a workspace entry here so
-# crates/atif (and any future consumer) can inherit it instead of repeating
-# the literal a third time.
 libc = "0.2"
 
 # Line tables only: a panic or backtrace still names file and line, but no

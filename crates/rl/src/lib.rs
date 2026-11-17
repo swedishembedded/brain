@@ -25,12 +25,12 @@
 //! get_batch_weighted`]'s own default), so a dataset directory produced for
 //! ordinary [`model::train::fit`] also works here unchanged.
 //!
-//! [`atif::ingest_dir`] produces such a directory from real ATIF
-//! trajectories: each rewarded trajectory becomes a chat sample, every token
-//! of which carries the trajectory's verified reward as its weight (the loss
-//! mask still selects which of those tokens are trained on).
+//! The caller builds such a directory: brain consumes datasets, it does not
+//! curate them. A reward-weighted dataset is the caller's samples with each
+//! token carrying its sample's reward (scored through the
+//! [`env::Verifier`] seam) as its weight; the loss mask still selects which
+//! of those tokens are trained on.
 
-pub mod atif;
 pub mod conformance;
 pub mod continual;
 pub mod curriculum;

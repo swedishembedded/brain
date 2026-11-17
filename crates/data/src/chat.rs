@@ -1171,14 +1171,8 @@ impl EncodedSplit {
     }
 }
 
-/// Encode a set of packed samples into one split.
-pub fn encode_sample_split(samples: &[ChatSample], tok: &dyn Tokenizer, tmpl: &ChatTemplate, opts: RenderOpts) -> Result<EncodedSplit, TemplateError> {
-    // Asked never to stop, the split is always whole.
-    encode_sample_split_while(samples, tok, tmpl, opts, &mut || true).map(Option::unwrap_or_default)
-}
-
-/// [`encode_sample_split`] that asks `keep_going` before each sample: `None`
-/// when it said stop.
+/// Encode a set of packed samples into one split, asking `keep_going` before
+/// each sample: `None` when it said stop.
 pub fn encode_sample_split_while(samples: &[ChatSample], tok: &dyn Tokenizer, tmpl: &ChatTemplate, opts: RenderOpts, keep_going: &mut dyn FnMut() -> bool) -> Result<Option<EncodedSplit>, TemplateError> {
     let mut out = EncodedSplit::default();
     for s in samples {

@@ -27,6 +27,5 @@ hex.workspace = true
 # `document::DocumentError` - named, `Display`-able variants for the four
 # dataset preconditions `FactBatch::new`/`train_probe_split` enforce, so a
 # caller across a process boundary reports a malformed dataset as a clean
-# diagnostic instead of a panic. Matches `crates/atif/src/validate.rs`'s
-# established convention for a crate-local validation error enum.
+# diagnostic instead of a panic.
 thiserror.workspace = true

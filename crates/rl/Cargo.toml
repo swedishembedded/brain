@@ -35,7 +35,6 @@ brain-checkpoint.workspace = true
 # `modelstore::fetch::base_digest` - the one spelling of a base's identity an
 # adapter card records and a server recomputes to bind the adapter to its base.
 brain-modelstore.workspace = true
-brain-atif.workspace = true
 brain-qwen3 = { workspace = true, optional = true }
 # `bench::metrics::ols_slope_ci` - the plasticity trend `continual`'s study
 # reports (never asserts on). `bench` is "how this repo scores models"
@@ -45,9 +44,6 @@ brain-qwen3 = { workspace = true, optional = true }
 brain-bench.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-# `atif::to_chat_sample` hands an agent's tool definitions to the chat
-# template as the order-preserving values `data::chat::ChatSample::tools` holds.
-minijinja.workspace = true
 # `ExternalVerifier` kills its command's whole process group.
 libc.workspace = true
 # `document::CurriculumError` - named, `Display`-able variants for

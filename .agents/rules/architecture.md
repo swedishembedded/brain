@@ -53,8 +53,8 @@ layer 2 - accelerator seam: backends and the gpu-core facade
     backend-cpu, backend-cuda, backend-vulkan, backend-wgpu, cuda-aot, gpu-core, gpu-worker,
     rknpu, vulkan, wgsl-cpu, wgsl-cuda
 layer 3 - training substrate and shared contracts
-    atif, audio, audit, camera, capability, checkpoint, data, diffusion, dit, events, forecast,
-    gguf, model, modelref, modelstore, neuro, onnx, openvino-rt, optim, paramstore, promote,
+    audio, audit, camera, capability, checkpoint, data, diffusion, dit, events, forecast, gguf,
+    model, modelref, modelstore, neuro, onnx, openvino-rt, optim, paramstore, promote,
     residency, rlcd, search, shutdown, solve, stats, survival, testutil, trace, vae, videocodec,
     vision, weightset
 layer 4 - models

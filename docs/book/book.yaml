@@ -927,7 +927,7 @@ volumes:
         question: "How is a pretrained language model taught to follow instructions and prefer good answers?"
         introduces: [supervised-fine-tuning, preference-data, reward-model, direct-preference-optimization, grpo, verifiable-reward, kl-penalty]
         requires: [ppo, causal-language-model, loss-masking, chat-template]
-        brain: [rl, atif, trainjob]
+        brain: [rl, trainjob]
       - id: search
         title: "Search, Planning and Discovery"
         question: "When should an agent search instead of learn, and how do the two help each other?"

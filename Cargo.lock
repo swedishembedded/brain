@@ -728,17 +728,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "brain-atif"
-version = "6.0.0"
-dependencies = [
- "libc",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.21",
-]
-
-[[package]]
 name = "brain-audio"
 version = "6.0.0"
 dependencies = [
@@ -2909,7 +2898,6 @@ dependencies = [
 name = "brain-rl"
 version = "6.0.0"
 dependencies = [
- "brain-atif",
  "brain-audit",
  "brain-bench",
  "brain-checkpoint",
@@ -2929,7 +2917,6 @@ dependencies = [
  "brain-ricursive",
  "brain-testutil",
  "libc",
- "minijinja",
  "serde",
  "serde_json",
  "tempfile",
