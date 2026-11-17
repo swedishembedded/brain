@@ -20,13 +20,6 @@ use std::collections::HashMap;
 use qwen3::model::PrefillInput;
 use qwen3::{Dtype, LoraCfg, Qwen, QwenConfig, Shard};
 
-fn skip() -> bool {
-    if brain_testutil::gpu_tests_skipped() {
-        return true;
-    }
-    false
-}
-
 /// A context long enough that a prompt spans several prefill chunks on every
 /// backend.
 const CTX: u32 = 640;
@@ -114,7 +107,7 @@ fn tokens(ids: &[u32]) -> Vec<PrefillInput<'_>> {
 /// prompt four times longer that still fits one chunk costs the same.
 #[test]
 fn prefill_submissions_do_not_grow_with_the_prompt() {
-    if skip() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let cfg = QwenConfig::tiny();
@@ -152,7 +145,7 @@ fn prefill_submissions_do_not_grow_with_the_prompt() {
 /// with every product on the codes).
 #[test]
 fn batched_prefill_matches_per_token_decode() {
-    if skip() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     const FP32_ORDER: f32 = 1e-4;
@@ -177,7 +170,7 @@ fn batched_prefill_matches_per_token_decode() {
 /// between token runs prefill as their own batched runs.
 #[test]
 fn batched_prefill_of_mixed_tokens_and_embeddings_matches_per_token_decode() {
-    if skip() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let cfg = QwenConfig::tiny();
@@ -231,7 +224,7 @@ fn trained_adapter(tag: &str) -> (HashMap<String, Vec<f32>>, String) {
 /// and the two agree with each other.
 #[test]
 fn batched_prefill_matches_per_token_decode_with_an_attached_and_a_folded_adapter() {
-    if skip() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let cfg = QwenConfig::tiny();
@@ -264,7 +257,7 @@ fn batched_prefill_matches_per_token_decode_with_an_attached_and_a_folded_adapte
 /// the per-token reference's tokens.
 #[test]
 fn cancellable_chunked_generation_matches_per_token_decode() {
-    if skip() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let cfg = QwenConfig::tiny();

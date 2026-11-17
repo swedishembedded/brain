@@ -72,13 +72,6 @@ impl Rng {
     }
 }
 
-fn skip_gpu() -> bool {
-    if brain_testutil::gpu_tests_skipped() {
-        return true;
-    }
-    false
-}
-
 /// TR-mask - the property, asserted structurally and with no fixture at all:
 /// in training the dependency layer's row `i` may put weight only on keys
 /// `j <= i`. The reference forbids the rest (`is_causal=self.training`), and a
@@ -86,7 +79,7 @@ fn skip_gpu() -> bool {
 /// when it is asked to predict.
 #[test]
 fn dependency_layer_attention_is_causal_in_training() {
-    if skip_gpu() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let cfg = KronosConfig::tiny();
@@ -137,7 +130,7 @@ fn dependency_layer_attention_is_causal_in_training() {
 /// weights and inputs the reference itself was run on.
 #[test]
 fn training_forward_matches_the_reference() {
-    if skip_gpu() {
+    if brain_testutil::gpu_tests_skipped() {
         return;
     }
     let golden = testdata_path("golden/kronos");
