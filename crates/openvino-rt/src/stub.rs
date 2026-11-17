@@ -216,6 +216,10 @@ impl FincastSession {
     pub fn load_bytes(_bytes: &[u8], _cfg: &NpuConfig) -> Result<Self, NpuError> {
         unsupported()
     }
+    /// The real session's file loader (external-data exports), equally unsupported here.
+    pub fn load_path(_path: &str, _cfg: &NpuConfig) -> Result<Self, NpuError> {
+        unsupported()
+    }
     pub fn device(&self) -> &str {
         ""
     }
