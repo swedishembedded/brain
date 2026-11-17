@@ -237,7 +237,7 @@ pub struct PolicyGradientConfig {
     pub clip_eps_high: Option<f32>,
     /// The engine-versus-trainer correction ([`ImportanceCorrection`]).
     pub importance: ImportanceCorrection,
-    /// Skip, and log, the optimiser step of a step whose mean k3 KL to the reference exceeds this: a rare step with a
+    /// Skip, and log, the optimiser step of a step whose mean KL to the reference (the step's `kl`) exceeds this: a rare step with a
     /// few extreme log-ratios (KL 0.50 among neighbours of 0.003) must not reach the weights. Needs a reference
     /// measurement ([`Self::log_kl`] or a KL weight). `None`: no bound.
     pub max_step_kl: Option<f32>,
@@ -386,7 +386,9 @@ pub struct PolicyGradientStep {
     pub importance_masked_fraction: f32,
     /// Why the step's optimiser update was not taken (a guard bound was exceeded), when it was not.
     pub skipped: Option<String>,
-    /// Mean k3 KL to the reference over the policy tokens, when a reference was measured.
+    /// The KL to the reference, when one was measured: the mean over the policy tokens of the k3 estimator weighted by
+    /// the importance ratio, an estimate of `KL(pi || ref)` that holds however far the policy has moved from the
+    /// behaviour policy that drew the tokens (on-policy, the plain k3).
     pub kl: Option<f32>,
     /// The importance ratio over the policy tokens: mean, smallest and largest.
     pub ratio_mean: f32,

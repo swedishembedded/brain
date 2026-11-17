@@ -526,8 +526,19 @@ raises it.
   whitespace the template writes after the marker, such as the newline after Qwen's `<|im_end|>`: a policy-gradient
   record never supervises a token the sampler did not choose). Values are
   finite and at most 0. A count that does not match the answer's tokens is refused naming the file, the record and both
-  counts. The log-probabilities are those of `softmax(logits / temperature)`; give the sampling temperature as
-  `PolicyGradientConfig::temperature`.
+  counts. Value `k` is the natural log of the probability of answer token `k` given the prompt and answer tokens
+  before it, under the model's full, untruncated distribution `softmax(logits / temperature)` at the sampling
+  temperature: give that temperature as `PolicyGradientConfig::temperature`. It is not the figure a sampler reports for
+  a token drawn after top-k, top-p or min-p (renormalised over what survived, so at or above the policy's), nor the `0`
+  a greedy sampler reports; a served reply's `policy_trace` (`generation_log_probs`, the stop token included) is in
+  this convention. Figures in the convention give a first step whose importance ratio is one at every token of a
+  rollout sampled from the run's starting policy; a first-step ratio far from one names the figures (in a toy model, one draw,
+  log-probabilities shifted by one token read ratios 0.75 to 1.17, a temperature the trainer was not told 0.95 to 1.08,
+  a greedy sampler's zeros 0.03 to 0.04).
+- `"token_ids"` (supervised assistant message, optional, beside `"behavior_logprobs"`): the ids the sampler generated
+  for the answer, end-of-turn marker included. The trainer renders the answer's text through the template again and
+  refuses the record, naming the first position that differs, when its ids are not these: a text that does not
+  round-trip to the sampled ids carries log-probabilities of tokens the trainer would not train.
 - `"teacher_context"` (record, optional): `{"at": <index>, "messages": [{"role": "system"|"user", "content": "..."}]}`,
   the privileged messages of on-policy self-distillation (see below). `at` is the index of the record's message they are
   inserted before, at or before the first supervised message. Unknown fields, a missing `at`, no messages, an empty
@@ -614,7 +625,10 @@ brain-sampled GRPO run and an external-rollout run cannot drift apart.
   taken against the trainer's own start-of-run log-probability (one at step 0) and each token's policy term is scaled by
   `min(pi_trainer / pi_rollout, cap)`, the engine's gap to the trainer; `Mask { cap }` (MIS) drops tokens whose weight
   leaves `[1/cap, cap]`; it needs the recorded behaviour log-probabilities and one extra forward per record on first
-  draw. *Step guard*: a step whose mean k3 KL to the reference, or whose gradient norm (averaged over the step's
+  draw. *KL*: a step's `kl` is the mean over its policy tokens of `ratio * k3`, the k3 estimator weighted by the
+  importance ratio, because the tokens were drawn by the behaviour policy and not by the policy being trained: it
+  estimates `KL(pi || ref)` however far the policy has moved (on-policy the weight is one). The loss's KL term
+  (`kl_beta`) is the plain k3. *Step guard*: a step whose mean KL to the reference, or whose gradient norm (averaged over the step's
   micro-batches, before the optimiser's clip), is over its bound is not applied: it is logged with the values, counted
   (`steps_skipped_guard`, `skipped` on the step) and the run goes on; 8 skipped steps in a row end it. Each step also
   reports `entropy_estimate` (the mean `-log p` of the sampled tokens, an entropy estimate while the rollouts are

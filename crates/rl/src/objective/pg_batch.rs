@@ -71,7 +71,9 @@ pub struct BatchTerms {
     /// policy's entropy (`E[-log p(y)] = H`), an estimate only while the rollouts are on-policy.
     pub nll_sum: f64,
     pub imitation_tokens: usize,
-    /// The sum of the k3 KL to the reference over the policy tokens, and how many tokens it covers.
+    /// The sum of the importance-weighted k3 KL to the reference over the policy tokens (`ratio * k3`, whose mean over
+    /// tokens the behaviour policy drew estimates `KL(pi || ref)` however far the policy has moved; on-policy the weight
+    /// is one), and how many tokens it covers.
     pub kl_sum: f32,
     pub kl_tokens: usize,
     /// The importance ratio `exp(new - old)` over the policy tokens: its sum, smallest and largest value.
@@ -138,11 +140,14 @@ pub fn weigh(new_lp: &[f32], batch: &PgBatch<'_>, spec: &PgSpec) -> (Vec<f32>, B
         terms.weight_truncated += usize::from(is_weight > 0.0 && is_weight < 1.0);
         terms.weight_sum += f64::from(is_weight);
         terms.nll_sum -= f64::from(new_lp[i]);
+        let ratio = (new_lp[i] - batch.old_lp[i]).exp();
         if let Some(r) = ref_lp {
-            terms.kl_sum += k3_kl(r, new_lp[i]);
+            // The behaviour policy drew this token, so k3 is weighted by the ratio: `E_old[ratio * k3] = KL(pi || ref)`.
+            // Unweighted, a token the policy has pushed down reads `ref / pi` (1e7 for a token moved 16 nats) where
+            // its share of the divergence is at most one.
+            terms.kl_sum += ratio * k3_kl(r, new_lp[i]);
             terms.kl_tokens += 1;
         }
-        let ratio = (new_lp[i] - batch.old_lp[i]).exp();
         terms.ratio_sum += f64::from(ratio);
         terms.ratio_min = terms.ratio_min.min(ratio);
         terms.ratio_max = terms.ratio_max.max(ratio);
@@ -271,6 +276,35 @@ mod tests {
         assert_eq!(w[0], 0.0);
         assert!((w[1] + 1.5).abs() < 1e-5);
         assert!((t.ratio_max - 1.5).abs() < 1e-5 && (t.ratio_min - 1.0).abs() < 1e-6, "{t:?}");
+    }
+
+    /// The tokens of a step were drawn by the behaviour policy, not by the policy being trained, so the k3 estimator is
+    /// weighted by the importance ratio: `E_old[(pi/old) k3] = KL(pi || ref)`, whatever the policy has become. Here a
+    /// token the behaviour drew with probability 0.099 has been pushed down 17.5 nats (a ratio of 2.8e-8, the shape of
+    /// a policy-gradient run whose smallest token ratio reads 1e-8); the unweighted mean of k3 would read 3.6e6, the
+    /// divergence is 0.104.
+    #[test]
+    fn the_reported_kl_estimates_the_policys_divergence_from_its_reference_off_policy_too() {
+        // 1000 positions drawn from the behaviour policy (700, 200, 99 and 1 of the four tokens); the reference is it.
+        let old = [0.7f64, 0.2, 0.099, 0.001];
+        let mut new = [0.7f64, 0.2, 0.099 * (-17.5f64).exp(), 0.001];
+        let total: f64 = new.iter().sum();
+        new.iter_mut().for_each(|p| *p /= total);
+        let kl_exact: f64 = new.iter().zip(&old).map(|(p, r)| p * (p / r).ln()).sum();
+        let counts = [700usize, 200, 99, 1];
+        let token: Vec<usize> = counts.iter().enumerate().flat_map(|(t, &n)| std::iter::repeat_n(t, n)).collect();
+        let lp = |dist: &[f64; 4]| token.iter().map(|&t| dist[t].ln() as f32).collect::<Vec<f32>>();
+        let (old_lp, new_lp) = (lp(&old), lp(&new));
+        let targets = vec![1u32; token.len()];
+        let advantage = vec![0.0f32; token.len()];
+        let b = PgBatch { targets: &targets, old_lp: &old_lp, ref_lp: Some(&old_lp), advantage: &advantage, is_weight: None };
+        let (_, t) = weigh(&new_lp, &b, &SPEC);
+        let reported = f64::from(t.kl_sum) / t.kl_tokens as f64;
+        assert!((reported - kl_exact).abs() < 1e-3 * kl_exact, "reported {reported}, KL(pi || ref) {kl_exact}");
+        assert!(t.ratio_min < 3e-8, "the fixture moved a drawn token by 17.5 nats: {t:?}");
+        // On-policy (nothing moved) the weight is one and the estimate is the plain k3, zero against itself.
+        let (_, t) = weigh(&old_lp, &b, &SPEC);
+        assert_eq!(t.kl_sum, 0.0);
     }
 
     #[test]

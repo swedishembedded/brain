@@ -391,3 +391,37 @@ fn a_token_id_past_the_vocabulary_or_an_infinite_advantage_is_refused() {
     let err = ExternalPolicyGradient::open(dir.path(), &opts(1, 1, 1e-2), config).err().expect("an infinite advantage");
     assert!(err.to_string().contains("infinite advantage"), "{err}");
 }
+
+/// Recorded behaviour log-probabilities in the record contract's convention (natural log, one per supervised token,
+/// each the probability of that token given the tokens before it, under the full distribution at the sampling
+/// temperature) are the trainer's own: the first step's ratio is one at every token and the KL to the start of the run
+/// zero. Figures in another convention move the first step's ratios before any update, so a first-step ratio far from
+/// one names the data, not the trainer: shifted by one token, taken at a temperature the trainer was not told, or the
+/// zeros a greedy sampler reports.
+#[test]
+fn recorded_log_probs_in_the_contracts_convention_give_a_first_step_ratio_of_one() {
+    let seed = data::rng::random_seed();
+    let mut m = lora_model(seed);
+    let ids = [1, 2, 3, 4, 5, 6, 7, 8];
+    let own = answer_logprobs(&m, &Row::new(&ids, 3, Some(1.0)));
+    let first_step = |m: &mut Qwen35, behavior: Vec<f32>, temperature: f32| {
+        let row = Row { behavior: Some(behavior), ..Row::new(&ids, 3, Some(1.0)) };
+        let cfg = PolicyGradientConfig { reference: ReferencePolicy::StartOfRun, temperature, ..Default::default() };
+        let (mut obj, _dir) = started(std::slice::from_ref(&row), cfg, m);
+        one_step(&mut obj, m);
+        m.zero_grads();
+        obj.stats().steps[0].clone()
+    };
+    let exact = first_step(&mut m, own.clone(), 1.0);
+    println!("seed {seed}: exact: ratio {:.6}..{:.6} kl {:?}", exact.ratio_min, exact.ratio_max, exact.kl);
+    assert!((exact.ratio_min - 1.0).abs() < 1e-5 && (exact.ratio_max - 1.0).abs() < 1e-5, "{exact:?}");
+    assert!(exact.kl.is_some_and(|kl| kl.abs() < 1e-6), "{exact:?}");
+    assert_eq!(exact.clip_fraction, 0.0);
+
+    let shifted: Vec<f32> = own.iter().cycle().skip(1).take(own.len()).copied().collect();
+    for (what, behavior, temperature) in [("shifted by one token", shifted, 1.0), ("taken at T = 1, trained at T = 0.7", own.clone(), 0.7), ("a greedy sampler's zeros", vec![0.0; own.len()], 1.0)] {
+        let step = first_step(&mut m, behavior, temperature);
+        println!("seed {seed}: {what}: ratio {:.4}..{:.4}", step.ratio_min, step.ratio_max);
+        assert!((step.ratio_min - 1.0).abs() > 1e-3 || (step.ratio_max - 1.0).abs() > 1e-3, "{what}: {step:?}");
+    }
+}
