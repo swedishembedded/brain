@@ -1462,6 +1462,14 @@ mod tests {
     use std::path::Path;
 
 
+    /// The mel frames the golden clip was dumped from (`input_features` in its manifest): the whole clip is valid,
+    /// so this is the encoder's `mel_valid` and sets how many subsampled frames the goldens hold.
+    fn golden_mel_frames(gold: &str) -> u32 {
+        let path = format!("{gold}/manifest.json");
+        let manifest: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"))).unwrap_or_else(|e| panic!("{path}: {e}"));
+        manifest["input_features"][0].as_u64().unwrap_or_else(|| panic!("{path}: no input_features shape")) as u32
+    }
+
     fn read_f32(p: &str) -> Vec<f32> {
         let mut f = std::fs::File::open(p).unwrap_or_else(|_| panic!("missing {p}"));
         let mut b = Vec::new();
@@ -1828,7 +1836,7 @@ mod tests {
         let ref_b0 = read_f32(&format!("{GOLD}/block0.f32"));
         let t = sub.len() / cfg.hidden as usize;
         let w = crate::import::load_tensors(Path::new(&CKPT)).expect("load");
-        let valid = cfg.subsampled_len(585) as usize;
+        let valid = cfg.subsampled_len(golden_mel_frames(&GOLD)) as usize;
         let out = conformer_block(&sub, &w, 0, &cfg, t, valid);
         // compare only valid frames; the invalid tail (frames >= valid) is garbage in
         // both and is dropped by the RNN-T (encoder_valid_lengths).
@@ -1850,7 +1858,7 @@ mod tests {
         let sub = read_f32(&format!("{GOLD}/subsampling.f32"));
         let ref_pool = read_f32(&format!("{GOLD}/pooler.f32")); // [T, 640]
         let t = sub.len() / cfg.hidden as usize;
-        let valid = cfg.subsampled_len(585) as usize;
+        let valid = cfg.subsampled_len(golden_mel_frames(&GOLD)) as usize;
         let w = crate::import::load_tensors(Path::new(&CKPT)).expect("load");
         let pool = encode_pooler(&sub, &w, &cfg, t, valid, 0); // prompt_id 0 (en)
         let dh = cfg.decoder_hidden as usize;
@@ -1872,7 +1880,7 @@ mod tests {
         let pooler = read_f32(&format!("{GOLD}/pooler.f32")); // [T, 640]
         let dh = cfg.decoder_hidden as usize;
         let t = pooler.len() / dh;
-        let valid = cfg.subsampled_len(585) as usize;
+        let valid = cfg.subsampled_len(golden_mel_frames(&GOLD)) as usize;
         let w = crate::import::load_tensors(Path::new(&CKPT)).expect("load");
         let emitted = rnnt_greedy(&pooler, valid.min(t), &w, &cfg);
 
