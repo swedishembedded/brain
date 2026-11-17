@@ -63,7 +63,7 @@ fn invalid(message: impl AsRef<str>) -> String {
 /// The answers of record `index` (1-based in messages), each with its prompt rendered by `front`.
 fn answers_of<F: Frontend + ?Sized>(front: &F, index: usize, line: &str, thinking: bool, include_stop: bool) -> Result<Vec<Answer>, String> {
     let at = |e: String| invalid(format!("record {index}: {e}"));
-    let sample = ChatSample::from_json_line_with(line, &TextOnly::TRAINER).map_err(at)?;
+    let sample = ChatSample::from_json_line_with(line, &TextOnly::TRAINER).map_err(|e| at(e.into()))?;
     if !sample.tools.is_empty() || sample.messages.iter().any(|m| !m.tool_calls.is_empty() || m.tool_call_id.is_some() || m.role == "tool") {
         return Err(at("tool schemas, tool calls and tool results cannot be scored: records hold plain text turns".to_string()));
     }

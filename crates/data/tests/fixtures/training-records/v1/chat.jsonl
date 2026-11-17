@@ -1,0 +1,3 @@
+{"messages":[{"role":"user","content":"cab","train":false},{"role":"assistant","content":"bad","train":true}]}
+{"messages":[{"role":"user","content":"fed","train":false},{"role":"assistant","content":"dad","train":true},{"role":"user","content":"ace","train":false},{"role":"assistant","content":"cab","train":true}]}
+{"messages":[{"role":"user","content":"bag","train":false},{"role":"assistant","content":"egg","train":false},{"role":"user","content":"hid","train":false},{"role":"assistant","content":"hide","train":true}]}

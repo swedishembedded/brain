@@ -137,7 +137,7 @@ for `generic-preference-v1` pairs, `timeline` for `timeline-v1` subjects, each l
 | `tokens`, `supervised_tokens` | per example: `total`, `min`, `mean`, `p50`, `p90`, `p99`, `max`, in the base's tokens |
 | `examples_without_supervision` | examples that would train on nothing |
 | `over_max_block`, `over_max_block_lines` | examples longer than `max_block` (a run refuses them rather than cutting them) and the first lines holding one |
-| `invalid_total`, `invalid` | records the trainer refuses, and the first 20 as `{line, error}` |
+| `invalid_total`, `invalid` | records the trainer refuses, and the first 20 as `{line, error, rule, field}`: `rule` names the rule of the training-record contract the record broke (`behavior_logprob_count`: `behavior_logprobs` does not hold one value per token of its answer; `token_ids_mismatch`: `token_ids` are not the tokens the answer's text renders to; `missing_advantage`: a rollout field on a record with no `advantage` or `teacher_context`) and `field` the record field, as a JSON path (`messages[1].behavior_logprobs`); both are `null` for any other refusal. Example records of the contract, valid and refused, are in brain's source tree under `crates/data/tests/fixtures/training-records/v1` |
 | `per_record`, `per_record_next` | with `per_record` only: `[line, tokens]` for each valid record of the page, `tokens` being its longest example (what the training row has to hold, a teacher's rendering included); `per_record_next` is the `offset` of the next page, `null` after the last. A page holds at most `limit` records (default 50000, at most 200000); the whole file is read for every page, so the totals above are the same on each. |
 
 ## Serving it

@@ -59,8 +59,15 @@ fn a_dry_run_names_the_records_the_trainer_refuses_and_the_examples_longer_than_
     let report = run_action(&rig, ACTION, &spec(), json!({"base": BASE, "dataset_digest": digest.hex(), "max_block": 64, "per_record": true}), &[], &Frames::default()).expect("the report").outputs;
     assert_eq!((report["valid_records"].as_u64(), report["invalid_total"].as_u64()), (Some(4), Some(1)));
     assert_eq!(report["invalid"][0]["line"], 5);
+    assert_eq!((&report["invalid"][0]["rule"], &report["invalid"][0]["field"]), (&Value::Null, &Value::Null), "not JSON breaks no rollout rule");
     assert_eq!(report["per_record"].as_array().unwrap().len(), 4, "a refused record has no length");
     assert!(work_is_clean(&rig.work_root));
+
+    // A refusal of the training-record contract names its rule and field on the wire.
+    let mut short = serde_json::from_str::<Value>(&record("cab", "bad", Some(1.0))).unwrap();
+    short["messages"][1]["behavior_logprobs"] = json!([-0.5, -0.5]);
+    let report = check(&rig, json!({"base": BASE}), short.to_string().into_bytes()).expect("the report");
+    assert_eq!((&report["invalid"][0]["rule"], &report["invalid"][0]["field"]), (&json!("behavior_logprob_count"), &json!("messages[1].behavior_logprobs")), "{report}");
 }
 
 #[test]

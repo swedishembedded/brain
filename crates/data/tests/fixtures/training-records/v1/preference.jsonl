@@ -1,0 +1,2 @@
+{"prompt":[{"role":"user","content":"cab"}],"chosen":{"role":"assistant","content":"bad"},"rejected":{"role":"assistant","content":"wig"}}
+{"prompt":[{"role":"user","content":"fed"}],"chosen":{"role":"assistant","content":"dad"},"rejected":{"role":"assistant","content":"mop"}}

@@ -19,6 +19,8 @@ use std::io::BufRead;
 use std::path::Path;
 
 use data::chat::{ChatSample, RenderOpts};
+use data::chat_rollout::RecordError;
+pub use data::chat_rollout::RecordRule;
 use data::preference::PreferenceSample;
 
 use crate::finetune::Asked;
@@ -92,6 +94,11 @@ impl Distribution {
 pub struct Refusal {
     pub line: usize,
     pub error: String,
+    /// The rule of the training-record contract the record broke, when that is why it is refused (a producer acts on
+    /// it without reading `error`); `None` for every other refusal.
+    pub rule: Option<RecordRule>,
+    /// The record field that broke the rule, as a JSON path (`messages[1].behavior_logprobs`), with `rule`.
+    pub field: Option<String>,
 }
 
 /// The length of one valid record, by its 1-based line in the file.
@@ -176,18 +183,18 @@ pub fn check_dataset(model_dir: impl AsRef<Path>, path: impl AsRef<Path>, check:
         report.records += 1;
         // Each example of the record as (tokens, supervised tokens, the row it needs: a teacher's rendering is scored
         // in a row of its own, so the row has to hold it too).
-        let examples: std::result::Result<Vec<(usize, usize, usize)>, String> = match check.kind {
+        let examples: std::result::Result<Vec<(usize, usize, usize)>, RecordError> = match check.kind {
             DatasetKind::Chat => ChatSample::from_json_line_with(line, &*images).and_then(|record| {
                 let mut out = Vec::new();
                 for example in asked.examples_of(&record)? {
-                    let encoded = example.encode_rollout(&tok, &tmpl, render).map_err(|e| e.to_string())?;
+                    let encoded = example.encode_rollout(&tok, &tmpl, render)?;
                     let row = encoded.ids.len().max(encoded.teacher.as_ref().map_or(0, |(ids, _)| ids.len()));
                     out.push((encoded.ids.len(), encoded.mask.iter().filter(|m| **m).count(), row));
                 }
                 Ok(out)
             }),
-            DatasetKind::Preference => PreferenceSample::from_json_line(line).and_then(|pair| {
-                let (chosen, rejected) = pair.encode_with(&tok, &tmpl, render).map_err(|e| e.to_string())?;
+            DatasetKind::Preference => PreferenceSample::from_json_line(line).map_err(RecordError::from).and_then(|pair| {
+                let (chosen, rejected) = pair.encode_with(&tok, &tmpl, render)?;
                 Ok(vec![(chosen.ids.len(), chosen.mask.iter().filter(|m| **m).count(), chosen.ids.len()), (rejected.ids.len(), rejected.mask.iter().filter(|m| **m).count(), rejected.ids.len())])
             }),
         };
@@ -224,7 +231,8 @@ pub fn check_dataset(model_dir: impl AsRef<Path>, path: impl AsRef<Path>, check:
             Err(error) => {
                 report.invalid_total += 1;
                 if report.invalid.len() < MAX_LISTED {
-                    report.invalid.push(Refusal { line: index + 1, error });
+                    let (rule, field) = error.fault().map_or((None, None), |f| (Some(f.rule), Some(f.field.clone())));
+                    report.invalid.push(Refusal { line: index + 1, error: error.to_string(), rule, field });
                 }
             }
         }

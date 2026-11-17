@@ -1,0 +1,3 @@
+{
+ "chat_template": "{% for message in messages %}<|im_start|>{{ message.role }}{{ message.content }}<|im_end|>{% endfor %}{% if add_generation_prompt %}<|im_start|>assistant{% endif %}"
+}

@@ -40,23 +40,54 @@ pub use minijinja::Value;
 /// What kind of value a [`Value`] is (a map, a string, ...).
 pub use minijinja::value::ValueKind;
 
+/// Why a conversation could not be rendered or encoded. When the reason is a rule of the training-record contract
+/// ([`crate::chat_rollout::RecordFault`]: a log-probability count, sampled ids that do not round-trip), it is carried
+/// typed beside the message, so a dataset check reports the rule and the field and not only the text.
 #[derive(Debug)]
-pub struct TemplateError(pub(crate) String);
+pub struct TemplateError {
+    message: String,
+    fault: Option<crate::chat_rollout::RecordFault>,
+}
+
+impl TemplateError {
+    pub(crate) fn new(message: impl Into<String>) -> TemplateError {
+        TemplateError { message: message.into(), fault: None }
+    }
+
+    /// A refusal of the training-record contract.
+    pub(crate) fn of_record(fault: crate::chat_rollout::RecordFault, message: String) -> TemplateError {
+        TemplateError { message, fault: Some(fault) }
+    }
+
+    /// The contract rule the conversation broke, when that is why it was refused.
+    pub fn fault(&self) -> Option<&crate::chat_rollout::RecordFault> {
+        self.fault.as_ref()
+    }
+}
 
 impl fmt::Display for TemplateError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(&self.message)
     }
 }
 
 impl std::error::Error for TemplateError {}
+
+impl From<TemplateError> for crate::chat_rollout::RecordError {
+    fn from(e: TemplateError) -> crate::chat_rollout::RecordError {
+        match e.fault {
+            Some(fault) => crate::chat_rollout::RecordError::of(fault, e.message),
+            None => e.message.into(),
+        }
+    }
+}
 
 /// Parse raw JSON text into a `minijinja::Value`, preserving source key
 /// order (see the module doc). Use this for anything a template might
 /// `tojson` back out (tool schemas, echoed tool-call arguments) — never
 /// round-trip such data through `serde_json::Value`.
 pub fn parse_json_ordered(raw: &str) -> Result<Value, TemplateError> {
-    serde_json::from_str::<Value>(raw).map_err(|e| TemplateError(format!("invalid JSON: {e}")))
+    serde_json::from_str::<Value>(raw).map_err(|e| TemplateError::new(format!("invalid JSON: {e}")))
 }
 
 /// Write `v` the way Python's `json.dumps(v, ensure_ascii=False)` would:
@@ -228,7 +259,7 @@ impl ChatTemplate {
             write_pyjson(&v, &mut out);
             out
         });
-        env.add_template_owned("chat", without_generation_tags(jinja_src)).map_err(|e| TemplateError(format!("{e:#}")))?;
+        env.add_template_owned("chat", without_generation_tags(jinja_src)).map_err(|e| TemplateError::new(format!("{e:#}")))?;
         Ok(ChatTemplate { env, defaults: BTreeMap::new(), source: jinja_src.to_string() })
     }
 
@@ -275,7 +306,7 @@ impl ChatTemplate {
                 .and_then(|v| v.get("chat_template").and_then(|v| v.as_str()).map(str::to_string))
         };
         let src = from_jinja.or_else(from_json).or(inline).ok_or_else(|| {
-            TemplateError(format!(
+            TemplateError::new(format!(
                 "no chat template found: checked \"chat_template\" in {} and {}, and the bare file {}",
                 tcfg_path.display(),
                 json_path.display(),
@@ -317,7 +348,7 @@ impl ChatTemplate {
     /// id simply leaves that default unset rather than erroring.
     pub fn from_gguf(gt: &checkpoint::gguf::GgufTokenizer) -> Result<ChatTemplate, TemplateError> {
         let src = gt.chat_template.as_ref().ok_or_else(|| {
-            TemplateError(format!(
+            TemplateError::new(format!(
                 "no chat template found: GgufTokenizer has no \"tokenizer.chat_template\" key (model = {:?})",
                 gt.model
             ))
@@ -391,7 +422,7 @@ impl ChatTemplate {
     }
 
     pub fn render(&self, messages: Value, tools: Option<Value>, add_generation_prompt: bool, extra: &BTreeMap<String, Value>) -> Result<String, TemplateError> {
-        let tmpl = self.env.get_template("chat").map_err(|e| TemplateError(format!("{e:#}")))?;
+        let tmpl = self.env.get_template("chat").map_err(|e| TemplateError::new(format!("{e:#}")))?;
         let mut ctx: BTreeMap<String, Value> = self.defaults.clone();
         ctx.extend(extra.clone());
         ctx.insert("messages".to_string(), messages);
@@ -400,7 +431,7 @@ impl ChatTemplate {
         // branch into emitting a tool preamble for a tool-less call.
         ctx.insert("tools".to_string(), tools.unwrap_or_else(|| Value::from(())));
         ctx.insert("add_generation_prompt".to_string(), Value::from(add_generation_prompt));
-        tmpl.render(ctx).map_err(|e| TemplateError(format!("{e:#}")))
+        tmpl.render(ctx).map_err(|e| TemplateError::new(format!("{e:#}")))
     }
 
     /// The generation prompt for `messages` asking the model not to reason.
@@ -448,11 +479,11 @@ impl ChatTemplate {
     pub fn assistant_turn_end(&self) -> Result<String, TemplateError> {
         const CONTENT: &str = "probe-answer";
         let probe = parse_json_ordered(&format!(r#"[{{"role":"user","content":"probe-question"}},{{"role":"assistant","content":"{CONTENT}"}}]"#))
-            .map_err(|e| TemplateError(format!("end-of-turn probe: {e}")))?;
+            .map_err(|e| TemplateError::new(format!("end-of-turn probe: {e}")))?;
         let text = self.render(probe, None, false, &BTreeMap::new())?;
         match text.rfind(CONTENT).map(|at| &text[at + CONTENT.len()..]) {
             Some(end) if !end.is_empty() => Ok(end.to_string()),
-            _ => Err(TemplateError("the template writes nothing after an assistant turn, so turns cannot be told apart".to_string())),
+            _ => Err(TemplateError::new("the template writes nothing after an assistant turn, so turns cannot be told apart".to_string())),
         }
     }
 
@@ -479,7 +510,7 @@ impl ChatTemplate {
     /// and without the final message): no boundary is guessed.
     pub fn render_with_supervised_suffix(&self, messages: &[Value], tools: Option<Value>, thinking: bool) -> Result<(String, Range<usize>), TemplateError> {
         let Some((_, context)) = messages.split_last() else {
-            return Err(TemplateError("a supervised suffix needs at least one message".to_string()));
+            return Err(TemplateError::new("a supervised suffix needs at least one message".to_string()));
         };
         let context = Value::from(context.to_vec());
         let prompt = if thinking { self.render(context, tools.clone(), true, &BTreeMap::new())? } else { self.render_no_think(context, tools.clone(), &BTreeMap::new())? };
@@ -489,7 +520,7 @@ impl ChatTemplate {
         let switches = if thinking { BTreeMap::new() } else { no_think_switches() };
         let full = self.render(Value::from(messages.to_vec()), tools, false, &switches)?;
         if !full.as_bytes().starts_with(prompt.as_bytes()) {
-            return Err(TemplateError(format!(
+            return Err(TemplateError::new(format!(
                 "the final message does not follow the prompt the model is asked from: the template renders the conversation so far ({} bytes with the generation prompt) differently with and without it",
                 prompt.len()
             )));
@@ -555,7 +586,7 @@ impl ChatTemplate {
                 Err(e) => return Err(e),
             };
             if !full.as_bytes().starts_with(prefix.as_bytes()) {
-                return Err(TemplateError(format!(
+                return Err(TemplateError::new(format!(
                     "message {i} is not prefix-stable under this template: rendering it in isolation \
                      from the rest of the conversation produced different text than rendering it in \
                      full context (the template's output for this message depends on what comes AFTER \
@@ -566,7 +597,7 @@ impl ChatTemplate {
             prev_len = prefix.len();
         }
         if prev_len != full.len() {
-            return Err(TemplateError(format!(
+            return Err(TemplateError::new(format!(
                 "message boundaries sum to {prev_len} bytes but the full render is {} bytes",
                 full.len()
             )));

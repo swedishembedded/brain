@@ -41,7 +41,8 @@ fn record(extra: &str, teacher: &str) -> String {
 const HINT: &str = r#"{"at": 1, "messages": [{"role": "user", "content": "the hidden test wants a"}]}"#;
 
 fn read(line: &str) -> Result<Vec<ChatSample>, String> {
-    ChatSample::from_json_line_with(line, &data::chat::TextOnly::TRAINER).and_then(|r| r.answers_as_asked(&template(TEMPLATE), true).map_err(|e| e.to_string()).map(|o| o.expect("assistant answers")))
+    let record = ChatSample::from_json_line_with(line, &data::chat::TextOnly::TRAINER)?;
+    record.answers_as_asked(&template(TEMPLATE), true).map_err(|e| e.to_string()).map(|o| o.expect("assistant answers"))
 }
 
 fn prepare(samples: &[ChatSample], source: &str, dir: &std::path::Path) -> Result<(), String> {

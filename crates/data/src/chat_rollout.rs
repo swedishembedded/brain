@@ -44,6 +44,82 @@ use std::path::{Path, PathBuf};
 use crate::binio;
 use crate::chat::ChatSample;
 
+/// The rule of the training-record contract a record breaks, when that is why it is refused: what a producer acts on
+/// without reading the message.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecordRule {
+    /// `behavior_logprobs` does not hold one value per token of its answer as the template renders it.
+    BehaviorLogprobCount,
+    /// `token_ids` are not the tokens the template renders for the answer's text.
+    TokenIdsMismatch,
+    /// A rollout field (`behavior_logprobs`, `token_ids`, `truncated`) on a record with no `advantage` (and no
+    /// `teacher_context`): nothing says what its tokens earned.
+    MissingAdvantage,
+}
+
+impl RecordRule {
+    /// The rule's name on the wire (`check_dataset`'s refusals).
+    pub fn name(self) -> &'static str {
+        match self {
+            RecordRule::BehaviorLogprobCount => "behavior_logprob_count",
+            RecordRule::TokenIdsMismatch => "token_ids_mismatch",
+            RecordRule::MissingAdvantage => "missing_advantage",
+        }
+    }
+}
+
+/// A refusal of the training-record contract: the rule broken and the record field that broke it, as a JSON path
+/// (`messages[1].behavior_logprobs`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecordFault {
+    pub rule: RecordRule,
+    pub field: String,
+}
+
+impl RecordFault {
+    pub fn new(rule: RecordRule, field: &str) -> RecordFault {
+        RecordFault { rule, field: field.to_string() }
+    }
+}
+
+/// Why a record was refused: the message, and the contract rule when that is the reason.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecordError {
+    message: String,
+    fault: Option<RecordFault>,
+}
+
+impl RecordError {
+    pub(crate) fn of(fault: RecordFault, message: String) -> RecordError {
+        RecordError { message, fault: Some(fault) }
+    }
+
+    /// The contract rule the record broke, when that is why it was refused.
+    pub fn fault(&self) -> Option<&RecordFault> {
+        self.fault.as_ref()
+    }
+}
+
+impl std::fmt::Display for RecordError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for RecordError {}
+
+impl From<String> for RecordError {
+    fn from(message: String) -> RecordError {
+        RecordError { message, fault: None }
+    }
+}
+
+impl From<RecordError> for String {
+    fn from(e: RecordError) -> String {
+        e.message
+    }
+}
+
 /// A log-probability can be at most zero; this much above it is rounding of the collector's own arithmetic.
 const LOGPROB_SLACK: f32 = 1e-3;
 

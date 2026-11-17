@@ -97,7 +97,7 @@ pub fn report_json(report: &brain::dataset_report::DatasetReport, kind: &str, ma
         "over_max_block": report.over_max_block,
         "over_max_block_lines": report.over_max_block_lines,
         "invalid_total": report.invalid_total,
-        "invalid": report.invalid.iter().map(|r| json!({"line": r.line, "error": r.error})).collect::<Vec<_>>(),
+        "invalid": report.invalid.iter().map(|r| json!({"line": r.line, "error": r.error, "rule": r.rule.map(|rule| rule.name()), "field": r.field})).collect::<Vec<_>>(),
         "listed_at_most": brain::dataset_report::MAX_LISTED,
     });
     // One `[line, tokens]` pair per record of the page: compact, because a dataset has many records.

@@ -64,7 +64,7 @@ impl ExampleMeter {
     /// The line is not a record the trainer reads, or it cannot be encoded.
     pub fn tokens(&self, record: &str) -> Result<usize> {
         let invalid = |e: String| Error::Backend(format!("record cannot be measured: {e}"));
-        let sample = ChatSample::from_json_line_with(record, &*self.images).map_err(invalid)?;
+        let sample = ChatSample::from_json_line_with(record, &*self.images).map_err(|e| invalid(e.into()))?;
         let asked = Asked { tok: &*self.tok, tmpl: &self.tmpl, no_think: self.no_think.as_deref(), render: self.render, pack: self.pack, images: &*self.images };
         let mut longest = 0;
         for example in asked.examples_of(&sample).map_err(invalid)? {

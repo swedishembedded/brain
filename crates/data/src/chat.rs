@@ -28,7 +28,7 @@ use std::io;
 use std::path::Path;
 
 use crate::binio;
-use crate::chat_rollout::{self, Rollout, Teacher};
+use crate::chat_rollout::{self, RecordError, RecordFault, RecordRule, Rollout, Teacher};
 use crate::chat_template::{ChatTemplate, TemplateError};
 use crate::tokenizer::Tokenizer;
 
@@ -229,11 +229,14 @@ pub struct RenderedSegment {
     pub behavior_logprobs: Option<Vec<f32>>,
     /// The ids the sampler generated for this supervised answer, which the rendering must reproduce ([`crate::chat_rollout`]).
     pub token_ids: Option<Vec<u32>>,
+    /// The index of the record's message this supervised segment renders (0 for context), so a refusal names the
+    /// field (`messages[i].behavior_logprobs`).
+    pub message: usize,
 }
 
 impl RenderedSegment {
     fn context(text: &str) -> RenderedSegment {
-        RenderedSegment { text: text.to_string(), supervised: false, behavior_logprobs: None, token_ids: None }
+        RenderedSegment { text: text.to_string(), supervised: false, behavior_logprobs: None, token_ids: None, message: 0 }
     }
 }
 
@@ -242,11 +245,13 @@ impl RenderedSegment {
 struct Sampled {
     behavior_logprobs: Option<Vec<f32>>,
     token_ids: Option<Vec<u32>>,
+    /// The index of the message the answer is.
+    message: usize,
 }
 
 impl Rendered {
     fn answer(prompt: &str, completion: &str, sampled: Sampled) -> Self {
-        Self { segments: vec![RenderedSegment::context(prompt), RenderedSegment { text: completion.to_string(), supervised: true, behavior_logprobs: sampled.behavior_logprobs, token_ids: sampled.token_ids }] }
+        Self { segments: vec![RenderedSegment::context(prompt), RenderedSegment { text: completion.to_string(), supervised: true, behavior_logprobs: sampled.behavior_logprobs, token_ids: sampled.token_ids, message: sampled.message }] }
     }
 
     /// [`Self::answer`] for a rollout: the whitespace the template writes after the end-of-turn marker (Qwen's
@@ -353,7 +358,7 @@ impl ChatSample {
         let tools = (!self.tools.is_empty()).then(|| minijinja::Value::from(self.tools.clone()));
         let (full, answer) = tmpl.render_with_supervised_suffix(&values, tools, thinking)?;
         let (prompt, completion) = full.split_at(answer.start);
-        let sampled = Sampled { behavior_logprobs: self.rollout.as_ref().and_then(|r| r.behavior_logprobs.last().cloned().flatten()), token_ids: self.rollout.as_ref().and_then(|r| r.token_ids.last().cloned().flatten()) };
+        let sampled = Sampled { behavior_logprobs: self.rollout.as_ref().and_then(|r| r.behavior_logprobs.last().cloned().flatten()), token_ids: self.rollout.as_ref().and_then(|r| r.token_ids.last().cloned().flatten()), message: self.messages.len().saturating_sub(1) };
         let teacher = match self.rollout.as_ref().and_then(|r| r.teacher.as_ref()) {
             Some(t) => Some(Teacher { sample: Box::new(t.sample.rendered_final_turn(tmpl, thinking, is_rollout)?), inserted: t.inserted }),
             None => None,
@@ -400,7 +405,7 @@ impl ChatSample {
             let (full, answer) = tmpl.render_with_supervised_suffix(&values, tools, thinking)?;
             let (prompt, completion) = full.split_at(answer.start);
             if completion.matches(end.as_str()).count() != 1 || !completion.ends_with(end.as_str()) {
-                return Err(TemplateError(format!("message {at} is not a single answer closed by the template's end-of-turn marker {end:?}")));
+                return Err(TemplateError::new(format!("message {at} is not a single answer closed by the template's end-of-turn marker {end:?}")));
             }
             let context = if segments.is_empty() {
                 prompt
@@ -411,7 +416,7 @@ impl ChatSample {
                 let shared = (0..=shared).rev().find(|&n| prompt.is_char_boundary(n)).unwrap_or(0);
                 let after = prompt[shared..]
                     .find(end.as_str())
-                    .ok_or_else(|| TemplateError(format!("the prompt of message {at} does not render the earlier answer closed by the end-of-turn marker {end:?}")))?;
+                    .ok_or_else(|| TemplateError::new(format!("the prompt of message {at} does not render the earlier answer closed by the end-of-turn marker {end:?}")))?;
                 &prompt[shared + after + end.len()..]
             };
             segments.push(RenderedSegment::context(context));
@@ -421,18 +426,18 @@ impl ChatSample {
                 // The text after the marker is context (see `Rendered::rollout_answer`).
                 let tail = &end[end.trim_end().len()..];
                 let sampled = completion.strip_suffix(tail).unwrap_or(completion);
-                segments.push(RenderedSegment { text: sampled.to_string(), supervised: true, behavior_logprobs: behavior, token_ids });
+                segments.push(RenderedSegment { text: sampled.to_string(), supervised: true, behavior_logprobs: behavior, token_ids, message: at });
                 if !tail.is_empty() {
                     segments.push(RenderedSegment::context(tail));
                 }
             } else {
-                segments.push(RenderedSegment { text: completion.to_string(), supervised: true, behavior_logprobs: behavior, token_ids });
+                segments.push(RenderedSegment { text: completion.to_string(), supervised: true, behavior_logprobs: behavior, token_ids, message: at });
             }
             previous_prompt = prompt.to_string();
         }
         let teacher = match self.rollout.as_ref().and_then(|r| r.teacher.as_ref()) {
             Some(t) => {
-                let packed = t.sample.answers_packed(tmpl, thinking)?.ok_or_else(|| TemplateError("the teacher's conversation supervises no assistant answer".to_string()))?;
+                let packed = t.sample.answers_packed(tmpl, thinking)?.ok_or_else(|| TemplateError::new("the teacher's conversation supervises no assistant answer".to_string()))?;
                 Some(Teacher { sample: Box::new(packed), inserted: t.inserted })
             }
             None => None,
@@ -518,7 +523,7 @@ impl ChatSample {
             let student: Vec<u32> = encoded.ids.iter().zip(&encoded.mask).filter(|(_, m)| **m).map(|(i, _)| *i).collect();
             let seen: Vec<u32> = t_ids.iter().zip(&t_mask).filter(|(_, m)| **m).map(|(i, _)| *i).collect();
             if student != seen {
-                return Err(TemplateError(format!(
+                return Err(TemplateError::new(format!(
                     "\"teacher_context\": the teacher's rendering supervises {} tokens and the student's {}, and the assistant tokens differ between the two renderings (the chat template renders an answer differently once the teacher's messages are in the conversation); the teacher's log-probabilities would not be those of the student's tokens",
                     seen.len(),
                     student.len()
@@ -534,13 +539,14 @@ impl ChatSample {
         if let Some(Rendered { segments }) = &self.rendered {
             let (mut ids, mut mask, mut behavior) = (Vec::new(), Vec::new(), Vec::new());
             let mut answer = 0;
-            for RenderedSegment { text, supervised, behavior_logprobs, token_ids } in segments {
+            for RenderedSegment { text, supervised, behavior_logprobs, token_ids, message } in segments {
                 let encoded = tok.encode(text);
                 if let Some(recorded) = token_ids {
                     if let Some(at) = (0..recorded.len().max(encoded.len())).find(|&i| recorded.get(i) != encoded.get(i)) {
                         let show = |ids: &[u32]| ids.get(at).map_or("nothing (the sequence ended)".to_string(), |t| t.to_string());
-                        return Err(TemplateError(format!(
-                            "\"token_ids\" of supervised answer {answer} ({} ids) are not the tokens the chat template renders for its text ({} tokens): they first differ at position {at}, where the sampler generated {} and the text renders {}; the answer text did not round-trip to the generated ids, so its behaviour log-probabilities do not belong to the tokens a trainer would train",
+                        let field = format!("messages[{message}].token_ids");
+                        return Err(TemplateError::of_record(RecordFault::new(RecordRule::TokenIdsMismatch, &field), format!(
+                            "{field}: \"token_ids\" of supervised answer {answer} ({} ids) are not the tokens the chat template renders for its text ({} tokens): they first differ at position {at}, where the sampler generated {} and the text renders {}; the answer text did not round-trip to the generated ids, so its behaviour log-probabilities do not belong to the tokens a trainer would train",
                             recorded.len(),
                             encoded.len(),
                             show(recorded),
@@ -551,8 +557,9 @@ impl ChatSample {
                 match behavior_logprobs {
                     Some(lps) if lps.len() == encoded.len() => behavior.extend_from_slice(lps),
                     Some(lps) => {
-                        return Err(TemplateError(format!(
-                            "\"behavior_logprobs\" of supervised answer {answer} holds {} values, the answer encodes to {} tokens (the answer as the chat template renders it after its prompt, with its end-of-turn marker and not the whitespace after it)",
+                        let field = format!("messages[{message}].behavior_logprobs");
+                        return Err(TemplateError::of_record(RecordFault::new(RecordRule::BehaviorLogprobCount, &field), format!(
+                            "{field}: \"behavior_logprobs\" of supervised answer {answer} holds {} values, the answer encodes to {} tokens (the answer as the chat template renders it after its prompt, with its end-of-turn marker and not the whitespace after it)",
                             lps.len(),
                             encoded.len()
                         )))
@@ -566,9 +573,9 @@ impl ChatSample {
             return Ok(EncodedSample { ids, mask, behavior, teacher: None, truncated: self.rollout.as_ref().is_some_and(|r| r.truncated) });
         }
         if self.rollout.as_ref().is_some_and(Rollout::has_behavior) {
-            return Err(TemplateError("\"behavior_logprobs\" are placed on an answer rendered as the model is asked for it; this sample still holds whole messages (render it with answers_as_asked or answers_packed)".to_string()));
+            return Err(TemplateError::new("\"behavior_logprobs\" are placed on an answer rendered as the model is asked for it; this sample still holds whole messages (render it with answers_as_asked or answers_packed)".to_string()));
         }
-        self.validate().map_err(TemplateError)?;
+        self.validate().map_err(TemplateError::new)?;
         let messages: Vec<ChatMessage> = if opts.keep_reasoning {
             self.messages
                 .iter()
@@ -643,7 +650,8 @@ impl ChatSample {
     }
 
     /// One record of a dataset file, as [`Self::from_jsonl_with`] reads each line of it.
-    pub fn from_json_line_with(line: &str, reader: &dyn ImageReader) -> Result<ChatSample, String> {
+    /// A refusal that breaks a rule of the training-record contract carries it typed ([`RecordError::fault`]).
+    pub fn from_json_line_with(line: &str, reader: &dyn ImageReader) -> Result<ChatSample, RecordError> {
         let record: WireRecord = serde_json::from_str(line).map_err(|e| e.to_string())?;
         sample_from_wire(record, reader)
     }
@@ -773,21 +781,23 @@ pub(crate) struct WireFunction {
 /// `benchlib/datasets/formats/schema.py`'s `validate_record` (structural)
 /// plus `build.py`'s automatic tool-call-resolution check (semantic) are the
 /// bench-side half.
-fn sample_from_wire(record: WireRecord, reader: &dyn ImageReader) -> Result<ChatSample, String> {
+fn sample_from_wire(record: WireRecord, reader: &dyn ImageReader) -> Result<ChatSample, RecordError> {
     if record.messages.is_empty() {
-        return Err("\"messages\" is empty".to_string());
+        return Err("\"messages\" is empty".to_string().into());
     }
     let (messages, media, behavior_logprobs, token_ids) = messages_from_wire_with(record.messages, reader)?;
     reader.check_record(&media)?;
     let teacher = record.teacher_context.map(|context| teacher_view(&messages, &record.tools, &media, context)).transpose()?;
     let advantage = record.advantage.as_ref().map(chat_rollout::check_advantage).transpose()?;
     let truncated = record.truncated;
+    // A rollout field on a record with no outcome: the record cannot say what its tokens earned.
+    let without_outcome = |field: String, what: &str| Err(RecordError::of(RecordFault::new(RecordRule::MissingAdvantage, &field), format!("{field}: {what} to a rollout, and the record has no \"advantage\" or \"teacher_context\"")));
     let rollout = match (advantage, teacher) {
-        (None, None) if truncated => return Err("\"truncated\" belongs to a rollout, and the record has no \"advantage\" or \"teacher_context\"".to_string()),
-        (None, None) if token_ids.iter().any(Option::is_some) => return Err("\"token_ids\" belong to a rollout, and the record has no \"advantage\" or \"teacher_context\"".to_string()),
-        (None, None) => match behavior_logprobs.iter().position(Option::is_some) {
-            Some(at) => return Err(format!("messages[{at}]: \"behavior_logprobs\" belong to a rollout, and the record has no \"advantage\" or \"teacher_context\"")),
-            None => None,
+        (None, None) if truncated => return without_outcome("truncated".to_string(), "\"truncated\" belongs"),
+        (None, None) => match (token_ids.iter().position(Option::is_some), behavior_logprobs.iter().position(Option::is_some)) {
+            (Some(at), _) => return without_outcome(format!("messages[{at}].token_ids"), "\"token_ids\" belong"),
+            (None, Some(at)) => return without_outcome(format!("messages[{at}].behavior_logprobs"), "\"behavior_logprobs\" belong"),
+            (None, None) => None,
         },
         // A teacher context alone trains on its per-token advantage: the scalar part is 0.
         (advantage, teacher) => Some(Rollout { advantage: advantage.unwrap_or(0.0), truncated, behavior_logprobs, token_ids, teacher }),
