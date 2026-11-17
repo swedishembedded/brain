@@ -285,6 +285,7 @@ brain-capability-mock.workspace = true
 brain-campplus.workspace = true
 brain-s3tokenizer.workspace = true
 brain-testutil.workspace = true
+tempfile.workspace = true
 # `data::rng::Lcg`, the one deterministic test filler (the YOLOv5 fixture weights).
 brain-data.workspace = true
 serde_json.workspace = true

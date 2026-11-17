@@ -3384,6 +3384,7 @@ dependencies = [
  "brain-checkpoint",
  "brain-data",
  "brain-dbus",
+ "brain-events",
  "brain-horizon",
  "brain-modelref",
  "brain-modelstore",

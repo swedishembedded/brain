@@ -13,7 +13,7 @@ use axum::Router;
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
-use crate::support::{data_digest, rig, rollouts, work_is_clean, BASE};
+use crate::support::{data_digest, plain, rig, rig_qwen3, rollouts, work_is_clean, Frames, BASE};
 
 const KEY: &str = "sk-brain-test";
 
@@ -141,4 +141,27 @@ async fn the_job_api_is_closed_to_those_without_the_key_and_to_every_input_it_do
     p["base"] = json!("nobody/nothing");
     let (status, response) = call(&app, Method::POST, "/v1/jobs", Some(KEY), Some(job_body(p))).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{}", String::from_utf8_lossy(&response));
+}
+
+/// `check_dataset` over `POST /v1/run`: the per-record counts are the ones the executor returns for the same call (the
+/// bus and this route share the spec, the door and the action), and a page over the cap is a 400 naming `limit`.
+#[tokio::test(flavor = "multi_thread")]
+async fn check_dataset_lists_per_record_counts_over_http_and_refuses_an_unbounded_page() {
+    let rig = rig_qwen3("http-check", 16 << 30);
+    let app = router(AppState::new(rig.exec.clone(), KEY, Provider::OpenAI).with_training(true));
+    let mut dataset = plain();
+    dataset.extend_from_slice(b"\nnot json\n");
+    let params = json!({"base": BASE, "per_record": true});
+    let body = |params: &Value| json!({"model": trainjob::MODEL, "action": "check_dataset", "params": params, "blobs": {"dataset": {"media": "bytes", "data": events::base64::encode(&dataset)}}});
+
+    let (status, response) = call(&app, Method::POST, "/v1/run", Some(KEY), Some(body(&params))).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&response));
+    let over_http = json_of(&response)["outputs"].clone();
+    let direct = crate::support::run_action(&rig, "check_dataset", &trainjob::dryrun::spec(), params, &[("dataset", dataset.clone())], &Frames::default()).unwrap().outputs;
+    assert_eq!(over_http, direct);
+    assert_eq!((over_http["per_record"].as_array().map(Vec::len), over_http["per_record_refused"][0]["line"].as_u64()), (Some(4), Some(5)));
+
+    let (status, response) = call(&app, Method::POST, "/v1/run", Some(KEY), Some(body(&json!({"base": BASE, "per_record": true, "limit": u64::MAX})))).await;
+    assert!(status == StatusCode::BAD_REQUEST || status == StatusCode::UNPROCESSABLE_ENTITY, "{status}");
+    assert!(String::from_utf8_lossy(&response).contains("limit"), "{}", String::from_utf8_lossy(&response));
 }

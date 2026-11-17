@@ -41,5 +41,6 @@ tokio = { workspace = true }
 brain-testutil.workspace = true
 brain-capability-mock.workspace = true
 brain-apiserve.workspace = true
+brain-events.workspace = true
 axum.workspace = true
 tower.workspace = true

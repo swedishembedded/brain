@@ -128,7 +128,7 @@ it as `local/<name>` with a manifest of family `horizon`, and the server then se
 without training or claiming a card. Params: `base` (not for a `timeline` dataset), `kind` (`chat` for `generic-messages-v2` records, `preference`
 for `generic-preference-v1` pairs, `timeline` for `timeline-v1` subjects, each line validated and no token counted), the dataset as the input blob `dataset` or as `dataset_digest` (exactly one),
 `thinking` and `pack_answers` (rendered as a run with those settings would), `max_block`, and `per_record` (with
-`offset` and `limit`) to also list each valid record's length. The result:
+`offset` and `limit`) to also list each record's token counts, or its refusal, one page at a time. The result:
 
 | field | meaning |
 |---|---|
@@ -138,7 +138,7 @@ for `generic-preference-v1` pairs, `timeline` for `timeline-v1` subjects, each l
 | `examples_without_supervision` | examples that would train on nothing |
 | `over_max_block`, `over_max_block_lines` | examples longer than `max_block` (a run refuses them rather than cutting them) and the first lines holding one |
 | `invalid_total`, `invalid` | records the trainer refuses, and the first 20 as `{line, error, rule, field}`: `rule` names the rule of the training-record contract the record broke (`behavior_logprob_count`: `behavior_logprobs` does not hold one value per token of its answer; `token_ids_mismatch`: `token_ids` are not the tokens the answer's text renders to; `missing_advantage`: a rollout field on a record with no `advantage` or `teacher_context`) and `field` the record field, as a JSON path (`messages[1].behavior_logprobs`); both are `null` for any other refusal. Example records of the contract, valid and refused, are in brain's source tree under `crates/data/tests/fixtures/training-records/v1` |
-| `per_record`, `per_record_next` | with `per_record` only: `[line, tokens]` for each valid record of the page, `tokens` being its longest example (what the training row has to hold, a teacher's rendering included); `per_record_next` is the `offset` of the next page, `null` after the last. A page holds at most `limit` records (default 50000, at most 200000); the whole file is read for every page, so the totals above are the same on each. |
+| `per_record`, `per_record_refused`, `per_record_next` | with `per_record` only, one page of the records (non-blank lines; `offset` counts valid and refused alike). `per_record` holds `[line, tokens, prompt, trained, examples]` for each valid record of the page: `prompt` and `trained` are the unsupervised and the supervised tokens of its longest example, counted in the base's tokenizer and chat template exactly as training encodes it (so `prompt + trained` is that example's length), `tokens` is what the training row has to hold (equal to `prompt + trained` unless a teacher's rendering is longer), `examples` how many examples the record is trained as. `per_record_refused` holds the refusals of the page as `{line, error, rule, field}` (as `invalid`, but not capped at 20; `error` at most 512 characters). `per_record_next` is the `offset` of the next page, `null` after the last. A page holds at most `limit` records, counts and refusals together (default 50000, at most 200000; a larger `limit` is refused as a bad request naming it), so the response is bounded whatever the dataset size; the whole file is read for every page, so the totals above are the same on each. |
 
 ## Serving it
 

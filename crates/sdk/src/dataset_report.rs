@@ -48,20 +48,22 @@ pub struct DatasetCheck {
     pub pack_answers: bool,
     /// The training row: an example longer than this would be refused by the trainer.
     pub max_block: u32,
-    /// Which records to list the length of in [`DatasetReport::record_lengths`]; `None` lists none.
+    /// Which records to list the lengths (or refusals) of in [`DatasetReport::record_lengths`] and
+    /// [`DatasetReport::record_refusals`]; `None` lists none.
     pub list_records: Option<RecordWindow>,
 }
 
-/// A page of the per-record lengths: the valid records after the first `offset` of them, at most `limit`.
+/// A page of the per-record answers: the records (blank lines are not records) after the first `offset` of them, at
+/// most `limit`, each listed as a length or as the refusal it is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RecordWindow {
-    /// Valid records to skip.
+    /// Records to skip, valid or refused.
     pub offset: usize,
-    /// Records to list at most (the caller bounds it; see [`MAX_RECORD_WINDOW`]).
+    /// Records to list at most, lengths and refusals together (the caller bounds it; see [`MAX_RECORD_WINDOW`]).
     pub limit: usize,
 }
 
-/// The most records one page of [`DatasetReport::record_lengths`] can hold.
+/// The most records one page of [`DatasetReport::record_lengths`] and [`DatasetReport::record_refusals`] can hold.
 pub const MAX_RECORD_WINDOW: usize = 200_000;
 
 /// The distribution of one per-example count.
@@ -108,6 +110,14 @@ pub struct RecordLength {
     pub line: usize,
     /// Tokens of its longest example, as [`crate::ExampleMeter::tokens`] counts: what the training row has to hold.
     pub tokens: usize,
+    /// Of the example that sets `tokens` (the one needing the longest row): the tokens that are not supervised, the
+    /// context and the template's markup the model reads but is not trained to write.
+    pub prompt: usize,
+    /// Of that example: the supervised (loss-bearing) tokens, the answers the model is trained to write. With
+    /// `prompt` they are that example's own rendering, which is `tokens` unless a teacher's rendering is longer.
+    pub trained: usize,
+    /// Examples the record is trained as.
+    pub examples: usize,
 }
 
 /// What [`check_dataset`] found.
@@ -132,10 +142,28 @@ pub struct DatasetReport {
     /// Records the trainer refuses (the first [`MAX_LISTED`]; see `invalid_total`).
     pub invalid: Vec<Refusal>,
     pub invalid_total: usize,
-    /// The page of valid records [`DatasetCheck::list_records`] asked for, in file order.
+    /// The valid records of the page [`DatasetCheck::list_records`] asked for, in file order.
     pub record_lengths: Vec<RecordLength>,
-    /// Where the next page starts (its `offset`) when valid records remain after this one.
+    /// The refused records of that page, in file order, each with the whole of its refusal (not capped at
+    /// [`MAX_LISTED`] like `invalid`).
+    pub record_refusals: Vec<Refusal>,
+    /// Where the next page starts (its `offset`) when records remain after this one.
     pub record_lengths_next: Option<usize>,
+}
+
+impl DatasetReport {
+    /// Whether the record at `record_index` (0-based among all records) belongs on the page `window` asks for; the
+    /// first record past a full page is where the next one starts.
+    fn admit_to_page(&mut self, window: RecordWindow, record_index: usize) -> bool {
+        if record_index < window.offset {
+            return false;
+        }
+        if self.record_lengths.len() + self.record_refusals.len() < window.limit {
+            return true;
+        }
+        self.record_lengths_next.get_or_insert(record_index);
+        false
+    }
 }
 
 /// Dry-runs the dataset `path` against the checkpoint in `model_dir`. Nothing is loaded but the tokenizer and the
@@ -168,6 +196,7 @@ pub fn check_dataset(model_dir: impl AsRef<Path>, path: impl AsRef<Path>, check:
         invalid: Vec::new(),
         invalid_total: 0,
         record_lengths: Vec::new(),
+        record_refusals: Vec::new(),
         record_lengths_next: None,
     };
     let (mut lengths, mut supervised) = (Vec::new(), Vec::new());
@@ -180,6 +209,7 @@ pub fn check_dataset(model_dir: impl AsRef<Path>, path: impl AsRef<Path>, check:
         if !keep_going() {
             return Err(Error::Cancelled);
         }
+        let record_index = report.records;
         report.records += 1;
         // Each example of the record as (tokens, supervised tokens, the row it needs: a teacher's rendering is scored
         // in a row of its own, so the row has to hold it too).
@@ -200,12 +230,15 @@ pub fn check_dataset(model_dir: impl AsRef<Path>, path: impl AsRef<Path>, check:
         };
         match examples {
             Ok(examples) => {
-                let valid_index = report.valid_records;
                 report.valid_records += 1;
                 let mut over = false;
-                let mut longest = 0;
+                // The example needing the longest row: (row, tokens, supervised tokens).
+                let mut longest = (0, 0, 0);
+                let example_count = examples.len();
                 for (tokens, supervised_tokens, row) in examples {
-                    longest = longest.max(row);
+                    if row > longest.0 {
+                        longest = (row, tokens, supervised_tokens);
+                    }
                     report.examples += 1;
                     lengths.push(tokens as u64);
                     supervised.push(supervised_tokens as u64);
@@ -218,21 +251,24 @@ pub fn check_dataset(model_dir: impl AsRef<Path>, path: impl AsRef<Path>, check:
                 if over && report.over_max_block_lines.len() < MAX_LISTED {
                     report.over_max_block_lines.push(index + 1);
                 }
+                let listed = RecordLength { line: index + 1, tokens: longest.0, prompt: longest.1 - longest.2, trained: longest.2, examples: example_count };
                 if let Some(window) = check.list_records {
-                    if valid_index >= window.offset {
-                        if report.record_lengths.len() < window.limit {
-                            report.record_lengths.push(RecordLength { line: index + 1, tokens: longest });
-                        } else if report.record_lengths_next.is_none() {
-                            report.record_lengths_next = Some(valid_index);
-                        }
+                    if report.admit_to_page(window, record_index) {
+                        report.record_lengths.push(listed);
                     }
                 }
             }
             Err(error) => {
                 report.invalid_total += 1;
+                let (rule, field) = error.fault().map_or((None, None), |f| (Some(f.rule), Some(f.field.clone())));
+                let refusal = Refusal { line: index + 1, error: error.to_string(), rule, field };
+                if let Some(window) = check.list_records {
+                    if report.admit_to_page(window, record_index) {
+                        report.record_refusals.push(refusal.clone());
+                    }
+                }
                 if report.invalid.len() < MAX_LISTED {
-                    let (rule, field) = error.fault().map_or((None, None), |f| (Some(f.rule), Some(f.field.clone())));
-                    report.invalid.push(Refusal { line: index + 1, error: error.to_string(), rule, field });
+                    report.invalid.push(refusal);
                 }
             }
         }
@@ -244,7 +280,82 @@ pub fn check_dataset(model_dir: impl AsRef<Path>, path: impl AsRef<Path>, check:
 
 #[cfg(test)]
 mod tests {
-    use super::Distribution;
+    use super::*;
+
+    fn fixtures() -> std::path::PathBuf {
+        std::path::PathBuf::from(brain_testutil::repo_path("crates/data/tests/fixtures/training-records/v1"))
+    }
+
+    /// What the trainer reads the record on `line` as: its own dataset reader ([`Asked::read`], which
+    /// [`crate::ChatFineTune`] trains from) over a file of that one record, each example encoded as training encodes
+    /// it. Returns the longest example as (tokens, supervised tokens) and the number of examples.
+    fn as_the_trainer_reads(model: &Path, line: &str, scratch: &Path, check: &DatasetCheck) -> ((usize, usize), usize) {
+        let (tok, tmpl) = crate::finetune::tokenizer_and_template(model).unwrap();
+        let images = crate::finetune::image_reader("qwen3", model).unwrap();
+        let no_think = if check.thinking { None } else { tmpl.no_think_block() };
+        let render = RenderOpts { keep_reasoning: no_think.is_some() };
+        let asked = Asked { tok: &tok, tmpl: &tmpl, no_think: no_think.as_deref(), render, pack: check.pack_answers, images: &*images };
+        std::fs::write(scratch, format!("{line}\n")).unwrap();
+        let examples = asked.read(scratch).unwrap();
+        let encoded: Vec<(usize, usize)> = examples.iter().map(|e| e.encode_with(&tok, &tmpl, render).unwrap()).map(|(ids, mask)| (ids.len(), mask.iter().filter(|m| **m).count())).collect();
+        (*encoded.iter().max_by_key(|(tokens, _)| *tokens).unwrap(), encoded.len())
+    }
+
+    /// The counts listed per record are the trainer's own for every valid record of the contract's fixtures: the
+    /// prompt and the trained tokens split what the trainer encodes, and the refused records are listed with their rule.
+    #[test]
+    fn per_record_counts_are_what_the_trainer_reads_for_the_contract_fixtures() {
+        let root = fixtures();
+        let model = root.join("model");
+        let scratch = tempfile::tempdir().unwrap();
+        let check = DatasetCheck { kind: DatasetKind::Chat, thinking: true, pack_answers: false, max_block: 512, list_records: Some(RecordWindow { offset: 0, limit: 100 }) };
+        let mut listed = 0;
+        for file in ["chat.jsonl", "chat_rollout.jsonl"] {
+            let report = check_dataset(&model, root.join(file), &check, &mut || true).unwrap();
+            let text = std::fs::read_to_string(root.join(file)).unwrap();
+            assert_eq!((report.record_lengths.len(), report.record_refusals.len()), (report.records, 0), "{file}");
+            for listed_record in &report.record_lengths {
+                let line = text.lines().nth(listed_record.line - 1).unwrap();
+                let ((tokens, supervised), examples) = as_the_trainer_reads(&model, line, &scratch.path().join("record.jsonl"), &check);
+                assert_eq!((listed_record.prompt + listed_record.trained, listed_record.trained, listed_record.examples), (tokens, supervised, examples), "{file}:{}", listed_record.line);
+                assert!(listed_record.trained > 0 && listed_record.prompt > 0, "{file}:{}: {listed_record:?}", listed_record.line);
+                listed += 1;
+            }
+        }
+        assert_eq!(listed, 7);
+
+        let report = check_dataset(&model, root.join("invalid/behavior_logprob_count.jsonl"), &check, &mut || true).unwrap();
+        assert!(report.record_lengths.is_empty());
+        let refused = &report.record_refusals[0];
+        assert_eq!((refused.line, refused.rule, refused.field.as_deref()), (1, Some(RecordRule::BehaviorLogprobCount), Some("messages[1].behavior_logprobs")));
+    }
+
+    /// A page is a window over the records, valid or refused: pages tile the file and the last has no next.
+    #[test]
+    fn pages_tile_the_records_whether_valid_or_refused() {
+        let root = fixtures();
+        let scratch = tempfile::tempdir().unwrap();
+        let mixed = scratch.path().join("mixed.jsonl");
+        let valid = std::fs::read_to_string(root.join("chat.jsonl")).unwrap();
+        let refused = std::fs::read_to_string(root.join("invalid/missing_advantage.jsonl")).unwrap();
+        let lines: Vec<&str> = valid.lines().chain(["not json"]).chain(refused.lines()).collect();
+        std::fs::write(&mixed, lines.join("\n\n")).unwrap();
+        let (mut seen, mut offset) = (Vec::new(), 0);
+        loop {
+            let check = DatasetCheck { kind: DatasetKind::Chat, thinking: true, pack_answers: false, max_block: 512, list_records: Some(RecordWindow { offset, limit: 2 }) };
+            let page = check_dataset(root.join("model"), &mixed, &check, &mut || true).unwrap();
+            assert!(page.record_lengths.len() + page.record_refusals.len() <= 2);
+            seen.extend(page.record_lengths.iter().map(|r| r.line));
+            seen.extend(page.record_refusals.iter().map(|r| r.line));
+            match page.record_lengths_next {
+                Some(next) => offset = next,
+                None => break,
+            }
+        }
+        seen.sort_unstable();
+        assert_eq!(seen, (1..=lines.len()).map(|n| 2 * n - 1).collect::<Vec<_>>(), "every record once, by its line (blank lines between)");
+    }
+
 
     #[test]
     fn a_distribution_reports_nearest_rank_percentiles() {

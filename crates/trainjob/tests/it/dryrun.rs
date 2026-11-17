@@ -29,6 +29,12 @@ fn a_dry_run_reports_the_dataset_and_lists_each_records_length_a_page_at_a_time(
     let lengths: Vec<(u64, u64)> = whole["per_record"].as_array().unwrap().iter().map(|p| (p[0].as_u64().unwrap(), p[1].as_u64().unwrap())).collect();
     assert_eq!(lengths.iter().map(|(line, _)| *line).collect::<Vec<_>>(), [1, 2, 3, 4, 5]);
     assert!(lengths[4].1 > lengths[0].1, "the longer record is longer in tokens: {lengths:?}");
+    // Each entry splits its tokens into the prompt and the trained answer: `[line, tokens, prompt, trained, examples]`.
+    for entry in whole["per_record"].as_array().unwrap() {
+        let n: Vec<u64> = entry.as_array().unwrap().iter().map(|v| v.as_u64().unwrap()).collect();
+        assert_eq!((n.len(), n[2] + n[3], n[3] > 0, n[4]), (5, n[1], true, 1), "{entry}");
+    }
+    assert_eq!(whole["per_record_refused"], json!([]));
     assert_eq!(whole["per_record_next"], Value::Null);
     assert_eq!(whole["tokens"]["max"].as_u64(), lengths.iter().map(|(_, t)| *t).max(), "no teacher here: the longest example is the longest record");
 
@@ -61,6 +67,8 @@ fn a_dry_run_names_the_records_the_trainer_refuses_and_the_examples_longer_than_
     assert_eq!(report["invalid"][0]["line"], 5);
     assert_eq!((&report["invalid"][0]["rule"], &report["invalid"][0]["field"]), (&Value::Null, &Value::Null), "not JSON breaks no rollout rule");
     assert_eq!(report["per_record"].as_array().unwrap().len(), 4, "a refused record has no length");
+    let refused = &report["per_record_refused"][0];
+    assert_eq!((refused["line"].as_u64(), refused["rule"].is_null(), refused["error"].as_str().map(str::is_empty)), (Some(5), true, Some(false)), "the page lists the refusal in place of a length: {report}");
     assert!(work_is_clean(&rig.work_root));
 
     // A refusal of the training-record contract names its rule and field on the wire.
@@ -96,4 +104,19 @@ fn a_timeline_check_stops_at_the_next_line() {
         Ok(Outcome::new().set("records", report["records"].clone()))
     };
     certify("check_dataset timeline", &Invocation::new, &run, Bound::ONE_STEP);
+}
+
+/// The page is bounded by the action's spec, whatever the dataset: a window larger than the cap, or a negative one, is
+/// refused as a typed error before anything is read, and a page never holds more than its `limit` records.
+#[test]
+fn a_page_larger_than_the_cap_is_refused_and_a_page_never_exceeds_its_limit() {
+    let rig = rig_qwen3("dryrun-bound", 16 << 30);
+    for limit in [json!(brain::dataset_report::MAX_RECORD_WINDOW + 1), json!(0), json!(-1)] {
+        let refused = check(&rig, json!({"base": BASE, "per_record": true, "limit": limit}), plain()).unwrap_err();
+        assert!(refused.contains("limit"), "{limit}: {refused}");
+    }
+    let mixed = [plain(), b"\nnot json\n".to_vec(), plain()].concat();
+    let page = check(&rig, json!({"base": BASE, "per_record": true, "limit": 3}), mixed).expect("a page");
+    assert_eq!(page["per_record"].as_array().unwrap().len() + page["per_record_refused"].as_array().unwrap().len(), 3);
+    assert_eq!(page["per_record_next"], 3);
 }

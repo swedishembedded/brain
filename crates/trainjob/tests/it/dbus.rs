@@ -13,7 +13,7 @@ use nix::sys::socket::{recvmsg, ControlMessageOwned, MsgFlags};
 use serde_json::{json, Value};
 use zbus::OwnedFd as ZOwnedFd;
 
-use crate::support::{plain, rig, rollouts, work_is_clean, BASE};
+use crate::support::{plain, rig, rig_qwen3, rollouts, run_action, work_is_clean, Frames, BASE};
 
 /// One datagram of the event stream: its JSON header and the descriptor it carried, if any.
 fn next_frame(stream: &OwnedFd) -> Option<(Value, Option<OwnedFd>)> {
@@ -153,5 +153,38 @@ fn the_bus_refuses_a_job_that_names_what_only_the_host_may_choose() {
             let refused = proxy.call::<_, _, (u64, ZOwnedFd)>("Subscribe", &(trainjob::MODEL, trainjob::ACTION, params.to_string(), fds, r#"{"dataset":{"media":"bytes"}}"#)).await;
             assert!(refused.unwrap_err().to_string().contains("unknown param"), "{extra}");
         }
+    });
+}
+
+/// `check_dataset` over the bus's `Run`: the same per-record counts the executor returns, and the same typed refusal of
+/// a page over the cap as over HTTP.
+#[test]
+fn check_dataset_lists_per_record_counts_over_the_bus_and_refuses_an_unbounded_page() {
+    if !session_bus_reachable() {
+        brain_testutil::skip_unavailable("no reachable session bus (run under `dbus-run-session -- cargo test ...`)");
+        return;
+    }
+    let rig = rig_qwen3("dbus-check", 16 << 30);
+    let mut dataset = plain();
+    dataset.extend_from_slice(b"\nnot json\n");
+    let params = json!({"base": BASE, "per_record": true});
+    let direct = run_action(&rig, "check_dataset", &trainjob::dryrun::spec(), params.clone(), &[("dataset", dataset.clone())], &Frames::default()).unwrap().outputs;
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+    rt.block_on(async {
+        let manager = brain_dbus::service::Manager::new(rig.exec.clone()).with_training(true);
+        let name = format!("com.swedishembedded.Brain1.checktest{}", std::process::id());
+        let _conn = zbus::connection::Builder::session().name(name.as_str()).serve_at(brain_dbus::OBJECT_PATH, manager).build().await.unwrap();
+        let client = zbus::Connection::session().await.unwrap();
+        let proxy = zbus::Proxy::new(&client, name.as_str(), brain_dbus::OBJECT_PATH, "com.swedishembedded.Brain1.Manager").await.unwrap();
+        let run = |params: Value| {
+            let mut fds: HashMap<String, ZOwnedFd> = HashMap::new();
+            fds.insert("dataset".into(), memfd(&dataset));
+            let proxy = &proxy;
+            async move { proxy.call::<_, _, (String, HashMap<String, ZOwnedFd>, String)>("Run", &(trainjob::MODEL, "check_dataset", params.to_string(), fds, r#"{"dataset":{"media":"bytes"}}"#, "memfd")).await }
+        };
+        let (result, _, _) = run(params).await.expect("the report");
+        assert_eq!(serde_json::from_str::<Value>(&result).unwrap(), direct);
+        let refused = run(json!({"base": BASE, "per_record": true, "limit": u64::MAX})).await.unwrap_err();
+        assert!(refused.to_string().contains("limit"), "{refused}");
     });
 }

@@ -35,9 +35,9 @@ pub fn spec() -> ActionSpec {
         .param(ParamSpec::new("thinking", ParamType::Bool, "render as a run with this `thinking` setting would (chat only)").default(json!(true)))
         .param(ParamSpec::new("pack_answers", ParamType::Bool, "render as a run with this `pack_answers` setting would (chat only)").default(json!(false)))
         .param(ParamSpec::new("max_block", ParamType::Int, "the training row in tokens: examples longer than it are counted (a run refuses them)").default(json!(8192)).min(64.0).max(1_048_576.0).step(1.0))
-        .param(ParamSpec::new("per_record", ParamType::Bool, "also list the length of each valid record (its line and the tokens of its longest example: what the row has to hold), one page at a time").default(json!(false)))
-        .param(ParamSpec::new("offset", ParamType::Int, "with `per_record`: the valid records to skip, the first page is 0, then `per_record_next` of the previous page").default(json!(0)).min(0.0).max(1.0e12).step(1.0))
-        .param(ParamSpec::new("limit", ParamType::Int, "with `per_record`: the most records one page lists").default(json!(50_000)).min(1.0).max(brain::dataset_report::MAX_RECORD_WINDOW as f64).step(1.0))
+        .param(ParamSpec::new("per_record", ParamType::Bool, "also list, per record, its token counts under the base's template and tokenizer as training reads it (prompt, trained, total) or its refusal, one page at a time").default(json!(false)))
+        .param(ParamSpec::new("offset", ParamType::Int, "with `per_record`: the records (valid or refused, blank lines not counted) to skip, the first page is 0, then `per_record_next` of the previous page").default(json!(0)).min(0.0).max(1.0e12).step(1.0))
+        .param(ParamSpec::new("limit", ParamType::Int, "with `per_record`: the most records one page lists, counts and refusals together").default(json!(50_000)).min(1.0).max(brain::dataset_report::MAX_RECORD_WINDOW as f64).step(1.0))
         .input(BlobSpec::new("dataset", Media::Bytes, "the dataset (JSONL), instead of `dataset_digest`"))
 }
 
@@ -83,8 +83,17 @@ fn distribution(d: &brain::dataset_report::Distribution) -> Value {
     json!({"total": d.total, "min": d.min, "mean": d.mean, "p50": d.p50, "p90": d.p90, "p99": d.p99, "max": d.max})
 }
 
+/// The most characters of a refusal's message the report carries: a refused record can be as large as the dataset, so
+/// a message that quotes it must not make the report as large.
+const MAX_ERROR_CHARS: usize = 512;
+
+fn refusal_json(r: &brain::dataset_report::Refusal) -> Value {
+    let error: String = r.error.chars().take(MAX_ERROR_CHARS).collect();
+    json!({"line": r.line, "error": error, "rule": r.rule.map(|rule| rule.name()), "field": r.field})
+}
+
 /// The report as the action returns it.
-pub fn report_json(report: &brain::dataset_report::DatasetReport, kind: &str, max_block: u32) -> Value {
+pub fn report_json(report: &brain::dataset_report::DatasetReport, kind: &str, max_block: u32, per_record: bool) -> Value {
     let mut out = json!({
         "kind": kind,
         "records": report.records,
@@ -97,12 +106,14 @@ pub fn report_json(report: &brain::dataset_report::DatasetReport, kind: &str, ma
         "over_max_block": report.over_max_block,
         "over_max_block_lines": report.over_max_block_lines,
         "invalid_total": report.invalid_total,
-        "invalid": report.invalid.iter().map(|r| json!({"line": r.line, "error": r.error, "rule": r.rule.map(|rule| rule.name()), "field": r.field})).collect::<Vec<_>>(),
+        "invalid": report.invalid.iter().map(refusal_json).collect::<Vec<_>>(),
         "listed_at_most": brain::dataset_report::MAX_LISTED,
     });
-    // One `[line, tokens]` pair per record of the page: compact, because a dataset has many records.
-    if !report.record_lengths.is_empty() || report.record_lengths_next.is_some() {
-        out["per_record"] = report.record_lengths.iter().map(|r| json!([r.line, r.tokens])).collect();
+    // One `[line, tokens, prompt, trained, examples]` array per valid record of the page: compact, because a dataset
+    // has many records. The refused records of the page carry their whole refusal, like `invalid`.
+    if per_record {
+        out["per_record"] = report.record_lengths.iter().map(|r| json!([r.line, r.tokens, r.prompt, r.trained, r.examples])).collect();
+        out["per_record_refused"] = report.record_refusals.iter().map(refusal_json).collect();
         out["per_record_next"] = json!(report.record_lengths_next);
     }
     out
@@ -134,7 +145,7 @@ pub fn run(env: &JobEnv, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -
         e => job::trainer_failure(e),
     })?;
     let mut outcome = Outcome::new();
-    outcome.outputs = report_json(&report, &p.kind, p.max_block);
+    outcome.outputs = report_json(&report, &p.kind, p.max_block, p.per_record);
     Ok(outcome)
 }
 
