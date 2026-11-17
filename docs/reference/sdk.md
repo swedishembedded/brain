@@ -374,8 +374,10 @@ let chat = brain::ChatPipeline::from(
   (`outcome.resume_state`); running the same fine-tune again continues it
   and ends at the same adapter, bit for bit, an uninterrupted run produces -
   its monitoring curve and best adapter so far included. `.checkpoint_every(n)`
-  also saves that state every `n` steps. A state from a run with different
-  data, options or starting point is refused.
+  also saves that state every `n` steps, and `.resume_state(path)` keeps it
+  at `path` instead of the out directory (`PreferenceFineTune` takes both
+  too). A state from a run with different data, options or starting point
+  is refused.
 - The outcome's losses and scores are `Option`s: a value that was not
   measured (no held-out set, a cancelled run) is `None`.
 - The adapter card records the digest of the base it was trained against

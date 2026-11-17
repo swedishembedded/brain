@@ -9,15 +9,17 @@
 
 //! Resumable jobs: the contract of a `resume_key`.
 //!
-//! A checkpoint job (`init_model`, `pretrain`, `full_train`) that names a `resume_key` keeps a durable **run record**
-//! in the artifact store's directory, `<store>/.runs/<blake3(key)>/`:
+//! A training job (`init_model`, `pretrain`, `full_train`, and the adapter job `train` of every objective) that names
+//! a `resume_key` keeps a durable **run record** in the artifact store's directory, `<store>/.runs/<blake3(key)>/`:
 //!
 //! * `run.json`: `{"format": "brain-train-run-v1", "key", "action", "identity", "seed", "status": "running" |
 //!   "completed", "result"}`, written atomically (a temporary file in the same directory, synced, renamed, the
 //!   directory synced), so a crash leaves the previous record or the new one, never half of either;
 //! * `state.safetensors` (and `state.offdevice/` for a model with off-device state): the fit loop's exact training
 //!   state (weights, AdamW moments, schedule position, data order, generator), itself written atomically, every
-//!   `checkpoint_every` steps and when the job is cancelled; removed once the checkpoint is exported;
+//!   `checkpoint_every` steps and when the job is cancelled; removed once the checkpoint or adapter is exported;
+//! * `evaluations/`: an adapter run's adapter of each evaluation (`keep_evaluations`), kept here so a resumed run
+//!   publishes the ones written before it stopped; removed once published;
 //! * `lock`: held (`flock`) while a job of the key runs, released by the kernel however the process ends.
 //!
 //! **Identity.** The run's identity is the blake3 digest of its action, every param but `resume_key` and
@@ -181,7 +183,11 @@ pub fn open(store: &ArtifactStore, action: &str, key: &str, identity: &Digest, s
 
 /// Every artifact a recorded result names is still in the store.
 fn verify_published(store: &ArtifactStore, key: &str, result: &Value) -> Result<(), String> {
-    let digests = result["checkpoint_digest"].as_str().into_iter().chain(result["files"].as_array().into_iter().flatten().filter_map(|f| f["digest"].as_str()));
+    // A checkpoint names its manifest and files; an adapter run names the adapter, its training record and the
+    // adapters of its evaluations.
+    let single = ["checkpoint_digest", "adapter_digest", "record_digest"].into_iter().filter_map(|field| result[field].as_str());
+    let listed = ["files", "evaluations"].into_iter().flat_map(|list| result[list].as_array().into_iter().flatten().filter_map(|f| f["digest"].as_str()));
+    let digests = single.chain(listed);
     for hex in digests {
         let digest = Digest::parse(hex).map_err(|e| refuse(key, format!("its record names {hex:?}: {e}")))?;
         if !store.contains(&digest) {
@@ -197,6 +203,11 @@ impl Run {
         self.dir.join("state.safetensors")
     }
 
+    /// Where an adapter run keeps the adapter of each evaluation until it is published.
+    pub fn evaluations_dir(&self) -> PathBuf {
+        self.dir.join("evaluations")
+    }
+
     /// The seed the run trains with: the request's, or the one drawn when the run began.
     pub fn seed(&self) -> u64 {
         self.record.seed.expect("a record always carries its seed")
@@ -210,6 +221,7 @@ impl Run {
         write_atomic(&path, &serde_json::to_vec_pretty(&self.record).map_err(|e| e.to_string())?).map_err(|e| refuse(&self.record.key, format!("cannot write its run record: {e}")))?;
         std::fs::remove_file(self.state_path()).ok();
         std::fs::remove_dir_all(self.state_path().with_extension("offdevice")).ok();
+        std::fs::remove_dir_all(self.evaluations_dir()).ok();
         Ok(())
     }
 

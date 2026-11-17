@@ -27,7 +27,7 @@ use capability::{ActionResult, Blob, Invocation, Media, Outcome, Progress};
 use serde_json::{json, Value};
 
 use crate::quota::{Quotas, Staging};
-use crate::request::{DataRefs, Objective, Request, Source};
+use crate::request::{DataRefs, Objective, Request, Source, ACTION};
 use crate::store::{ArtifactStore, StoreError};
 
 /// The most bytes of one dataset or starting adapter a job takes.
@@ -295,13 +295,32 @@ fn policy_gradient_config(params: &crate::request::Params) -> Result<brain::Poli
     Ok(config)
 }
 
-/// The trainer for `request` over the files `staged`, writing into `out_dir`, on the device this thread is scoped to.
-pub fn build_fine_tune(request: &Request, base_dir: &Path, staged: &Staged, out_dir: &Path) -> Result<brain::ChatFineTune, String> {
+/// Where a run writes: the trainer's out directory in the job's own directory, and what must outlive the job, the
+/// training state of a resumable run and the adapters of its evaluations (which a resumed run publishes beside the
+/// ones it writes itself). Without a `resume_key` the evaluations live in the job's directory too.
+pub struct RunFiles {
+    pub out_dir: PathBuf,
+    /// A resumable run's training state, the seed it trains with (kept in its record) and how often it saves.
+    pub resumable: Option<(PathBuf, u64, u32)>,
+    pub evaluations: PathBuf,
+}
+
+impl RunFiles {
+    fn of(run: Option<&crate::runs::Run>, request: &Request, out_dir: PathBuf) -> RunFiles {
+        match run {
+            Some(run) => RunFiles { resumable: Some((run.state_path(), run.seed(), request.params.checkpoint_every.unwrap_or(crate::runs::DEFAULT_CHECKPOINT_EVERY))), evaluations: run.evaluations_dir(), out_dir },
+            None => RunFiles { resumable: None, evaluations: out_dir.join("evaluations"), out_dir },
+        }
+    }
+}
+
+/// The trainer for `request` over the files `staged`, writing where `files` says, on the device this thread is scoped to.
+pub fn build_fine_tune(request: &Request, base_dir: &Path, staged: &Staged, files: &RunFiles) -> Result<brain::ChatFineTune, String> {
     let p = &request.params;
     let mut ft = brain::ChatFineTune::from_pretrained(utf8(base_dir)?)
         .placed(true)
         .dataset(&staged.train)
-        .out_dir(out_dir)
+        .out_dir(&files.out_dir)
         .steps(p.steps)
         .grad_accum(p.grad_accum)
         .strict_updates(p.strict_updates)
@@ -327,8 +346,13 @@ pub fn build_fine_tune(request: &Request, base_dir: &Path, staged: &Staged, out_
     if let Some(v) = p.alpha {
         ft = ft.alpha(v);
     }
-    if let Some(v) = p.seed {
-        ft = ft.seed(v);
+    match files.resumable {
+        Some((ref state, seed, every)) => ft = ft.seed(seed).resume_state(state).checkpoint_every(every),
+        None => {
+            if let Some(v) = p.seed {
+                ft = ft.seed(v);
+            }
+        }
     }
     if let Some(v) = p.weight_decay {
         ft = ft.weight_decay(v);
@@ -361,19 +385,19 @@ pub fn build_fine_tune(request: &Request, base_dir: &Path, staged: &Staged, out_
         ft = ft.replay_at(path, *share);
     }
     if p.keep_evaluations {
-        ft = ft.keep_evaluations(out_dir.join("evaluations"));
+        ft = ft.keep_evaluations(&files.evaluations);
     }
     Ok(ft)
 }
 
-/// The preference trainer for `request` over the files `staged`, writing into `out_dir`, on the device this thread is
+/// The preference trainer for `request` over the files `staged`, writing where `files` says, on the device this thread is
 /// scoped to.
-pub fn build_preference(request: &Request, base_dir: &Path, staged: &Staged, out_dir: &Path) -> Result<brain::PreferenceFineTune, String> {
+pub fn build_preference(request: &Request, base_dir: &Path, staged: &Staged, files: &RunFiles) -> Result<brain::PreferenceFineTune, String> {
     let p = &request.params;
     let mut ft = brain::PreferenceFineTune::from_pretrained(utf8(base_dir)?)
         .placed(true)
         .dataset(&staged.train)
-        .out_dir(out_dir)
+        .out_dir(&files.out_dir)
         .steps(p.steps)
         .grad_accum(p.grad_accum)
         .strict_updates(p.strict_updates)
@@ -390,8 +414,13 @@ pub fn build_preference(request: &Request, base_dir: &Path, staged: &Staged, out
     if let Some(v) = p.alpha {
         ft = ft.alpha(v);
     }
-    if let Some(v) = p.seed {
-        ft = ft.seed(v);
+    match files.resumable {
+        Some((ref state, seed, every)) => ft = ft.seed(seed).resume_state(state).checkpoint_every(every),
+        None => {
+            if let Some(v) = p.seed {
+                ft = ft.seed(v);
+            }
+        }
     }
     if let Some(v) = p.lr {
         ft = ft.lr(v);
@@ -461,6 +490,8 @@ struct Trained {
     adapter_sha256: String,
     /// The adapter of each evaluation the run kept, by step.
     evaluations: Vec<(u32, PathBuf)>,
+    /// The step this job continued a resumable run's saved state at.
+    resumed_at: Option<u32>,
     summary: Value,
 }
 
@@ -485,6 +516,7 @@ fn chat_summary(outcome: &brain::ChatFineTuneOutcome) -> Value {
         "seed": outcome.seed,
         "steps": outcome.steps,
         "steps_completed": outcome.steps_completed,
+        "resumed_at": outcome.resumed_at,
         "rank": outcome.rank,
         "alpha": outcome.alpha,
         "lr": outcome.lr,
@@ -528,6 +560,7 @@ fn preference_summary(outcome: &brain::PreferenceFineTuneOutcome) -> Value {
         "seed": outcome.seed,
         "steps": outcome.steps,
         "steps_completed": outcome.steps_completed,
+        "resumed_at": outcome.resumed_at,
         "rank": outcome.rank,
         "alpha": outcome.alpha,
         "beta": outcome.beta,
@@ -548,44 +581,55 @@ pub(crate) fn trainer_failure(e: brain::Error) -> String {
     }
 }
 
-fn train_chat(request: &Request, base_dir: &Path, staged: &Staged, out_dir: &Path, cancel: &capability::CancelToken, began: Instant, progress: &mut dyn FnMut(Progress)) -> Result<Trained, String> {
-    let fine_tune = build_fine_tune(request, base_dir, staged, out_dir)?;
+fn train_chat(request: &Request, base_dir: &Path, staged: &Staged, files: &RunFiles, cancel: &capability::CancelToken, began: Instant, progress: &mut dyn FnMut(Progress)) -> Result<Trained, String> {
+    let fine_tune = build_fine_tune(request, base_dir, staged, files)?;
     let outcome = fine_tune.run_with(cancel, |step| progress(Progress::event(step.step, step.steps, step_frame(step, began.elapsed().as_secs_f64())))).map_err(trainer_failure)?;
     if outcome.status != brain::FineTuneStatus::Completed {
         return Err("cancelled".into());
     }
     let adapter = outcome.adapter.clone().ok_or("train: the run completed with no adapter")?;
-    let evaluations = if request.params.keep_evaluations { outcome.curve.iter().map(|p| (p.step, out_dir.join("evaluations").join(format!("step-{}.safetensors", p.step)))).collect() } else { Vec::new() };
-    Ok(Trained { adapter, record: outcome.record.clone(), adapter_sha256: outcome.adapter_digest.clone().unwrap_or_default(), evaluations, summary: chat_summary(&outcome) })
+    let evaluations = if request.params.keep_evaluations { outcome.curve.iter().map(|p| (p.step, files.evaluations.join(format!("step-{}.safetensors", p.step)))).collect() } else { Vec::new() };
+    Ok(Trained { adapter, record: outcome.record.clone(), adapter_sha256: outcome.adapter_digest.clone().unwrap_or_default(), evaluations, resumed_at: outcome.resumed_at, summary: chat_summary(&outcome) })
 }
 
-fn train_preference(request: &Request, base_dir: &Path, staged: &Staged, out_dir: &Path, cancel: &capability::CancelToken, began: Instant, progress: &mut dyn FnMut(Progress)) -> Result<Trained, String> {
-    let fine_tune = build_preference(request, base_dir, staged, out_dir)?;
+fn train_preference(request: &Request, base_dir: &Path, staged: &Staged, files: &RunFiles, cancel: &capability::CancelToken, began: Instant, progress: &mut dyn FnMut(Progress)) -> Result<Trained, String> {
+    let fine_tune = build_preference(request, base_dir, staged, files)?;
     let outcome = fine_tune.run_with(cancel, |step| progress(Progress::event(step.step, step.steps, step_frame(step, began.elapsed().as_secs_f64())))).map_err(trainer_failure)?;
     if outcome.status != brain::FineTuneStatus::Completed {
         return Err("cancelled".into());
     }
     let adapter = outcome.adapter.clone().ok_or("train: the run completed with no adapter")?;
-    Ok(Trained { adapter, record: outcome.record.clone(), adapter_sha256: outcome.adapter_digest.clone().unwrap_or_default(), evaluations: Vec::new(), summary: preference_summary(&outcome) })
+    Ok(Trained { adapter, record: outcome.record.clone(), adapter_sha256: outcome.adapter_digest.clone().unwrap_or_default(), evaluations: Vec::new(), resumed_at: outcome.resumed_at, summary: preference_summary(&outcome) })
 }
 
-/// Runs the job `inv` on the device this thread is scoped to, reporting each step as a frame.
+/// Runs the job `inv` on the device this thread is scoped to, reporting each step as a frame. With a `resume_key`
+/// the run is resumable ([`crate::runs`]): its training state and evaluation adapters live in the run's directory of
+/// the artifact store, and a completed run answers with the result it recorded.
 pub fn run(env: &JobEnv, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
     let request = Request::from_invocation(inv)?;
-    let base_dir = resolve_base(env.models_dir.as_deref(), &request.params.base)?;
-    let steps = request.params.steps;
+    let p = &request.params;
+    let run = match crate::consolidate::open_run(env, ACTION, p.resume_key.as_deref(), inv, p.seed)? {
+        Some(crate::runs::Opened::Completed(mut outputs)) => {
+            outputs["resume"] = crate::runs::completed_report(p.resume_key.as_deref().unwrap_or_default());
+            return recorded(env, &request, outputs);
+        }
+        Some(crate::runs::Opened::Run(run)) => Some(run),
+        None => None,
+    };
+    let base_dir = resolve_base(env.models_dir.as_deref(), &p.base)?;
+    let steps = p.steps;
     let work = Workdir::create(env)?;
     progress(Progress::event(0, steps, json!({"type": "stage", "stage": "staging the datasets"})));
     let staged = stage(&request.data, &inv.blobs, env.store.as_ref(), &work)?;
     if inv.cancel.is_cancelled() {
         return Err("cancelled".into());
     }
-    let out_dir = work.path().join("run");
+    let files = RunFiles::of(run.as_ref(), &request, work.path().join("run"));
     progress(Progress::event(0, steps, json!({"type": "stage", "stage": "loading the base and training"})));
     let began = Instant::now();
-    let trained = match request.params.objective {
-        Objective::Dpo => train_preference(&request, &base_dir, &staged, &out_dir, &inv.cancel, began, progress)?,
-        Objective::Sft | Objective::PolicyGradient => train_chat(&request, &base_dir, &staged, &out_dir, &inv.cancel, began, progress)?,
+    let trained = match p.objective {
+        Objective::Dpo => train_preference(&request, &base_dir, &staged, &files, &inv.cancel, began, progress)?,
+        Objective::Sft | Objective::PolicyGradient => train_chat(&request, &base_dir, &staged, &files, &inv.cancel, began, progress)?,
     };
     work.ensure_within_quota()?;
     let mut result = Outcome::new();
@@ -609,20 +653,46 @@ pub fn run(env: &JobEnv, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -
     let mut outputs = trained.summary;
     if let Some(fields) = outputs.as_object_mut() {
         fields.insert("status".into(), json!("completed"));
-        fields.insert("objective".into(), json!(request.params.objective.name()));
+        fields.insert("objective".into(), json!(p.objective.name()));
         fields.insert("adapter_digest".into(), json!(digest.map(|d| d.hex())));
         fields.insert("record_digest".into(), json!(record_digest.map(|d| d.hex())));
         fields.insert("evaluations".into(), json!(evaluations));
     }
+    if let Some(run) = run {
+        outputs["resume"] = run.report(trained.resumed_at);
+        // Everything the result names is published: the run is complete, and a resubmission answers with this.
+        run.complete(&outputs)?;
+    }
     result.outputs = outputs;
-    if request.params.return_adapter {
+    if p.return_adapter {
         let bytes = std::fs::read(&trained.adapter).map_err(|e| format!("train: reading the adapter: {e}"))?;
         result = result.blob("adapter", Blob::new(Media::Bytes, bytes).with_meta(json!({"sha256": trained.adapter_sha256, "blake3": digest.map(|d| d.hex())})));
     }
     // Taken by blob when the caller takes everything by blob (or the server has no store to publish it to).
-    if let (Some(record), true) = (&trained.record, request.params.return_adapter || record_digest.is_none()) {
+    if let (Some(record), true) = (&trained.record, p.return_adapter || record_digest.is_none()) {
         result = result.blob("record", Blob::new(Media::Text, std::fs::read(record).map_err(|e| format!("train: reading the training record: {e}"))?));
     }
+    Ok(result)
+}
+
+/// The answer to a resubmitted run that completed: its recorded result, with the adapter and the training record
+/// fetched back from the store (verified against their digests) when the request asks for them as blobs.
+fn recorded(env: &JobEnv, request: &Request, outputs: Value) -> ActionResult {
+    let mut result = Outcome::new();
+    if request.params.return_adapter {
+        let store = env.store.as_ref().ok_or("train: a completed run is answered from the artifact store, and this server has none")?;
+        let work = Workdir::create(env)?;
+        let fetch = |field: &str| -> Result<Vec<u8>, String> {
+            let digest = outputs[field].as_str().map(crate::store::Digest::parse).transpose().map_err(|e| format!("train: the recorded {field}: {e}"))?.ok_or_else(|| format!("train: the recorded result names no {field}"))?;
+            let path = work.path().join(field);
+            store.fetch(&digest, &path, MAX_INPUT_BYTES).map_err(|e| store_failure(&e))?;
+            std::fs::read(&path).map_err(|e| format!("train: reading the recorded {field}: {e}"))
+        };
+        let adapter = fetch("adapter_digest")?;
+        result = result.blob("adapter", Blob::new(Media::Bytes, adapter).with_meta(json!({"sha256": outputs["adapter_sha256"], "blake3": outputs["adapter_digest"]})));
+        result = result.blob("record", Blob::new(Media::Text, fetch("record_digest")?));
+    }
+    result.outputs = outputs;
     Ok(result)
 }
 

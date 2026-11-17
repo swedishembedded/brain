@@ -136,3 +136,51 @@ fn resumption_settings_are_refused_where_they_cannot_hold() {
     let e = bare.exec.run_blocking(trainjob::MODEL, ACTION, inv, |_| {}).unwrap_err();
     assert!(e.contains("artifact store"), "{e}");
 }
+
+/// A LoRA `train` job of every objective resumes under its key: stopped mid-run, submitted again, it continues after
+/// the last saved step and publishes the adapter, byte for byte, that an uninterrupted run publishes; submitted once
+/// more, it answers with that adapter without training.
+#[test]
+fn a_stopped_lora_job_of_every_objective_continues_to_the_uninterrupted_adapter() {
+    use crate::support::{pairs, rollouts, BASE};
+    use trainjob::request::action_spec;
+    let rig = rig_qwen3("resume-lora", 16 << 30);
+    let cases = [
+        ("sft", crate::support::plain(), json!({})),
+        ("policy_gradient", rollouts(), json!({"behaviour": "start_of_run_proxy", "kl_beta": 0.05, "reference": "start"})),
+        ("dpo", pairs(), json!({"beta": 0.1})),
+    ];
+    for (objective, records, extra) in cases {
+        let train = data_digest(&rig, &records).hex();
+        let base = with(json!({"base": BASE, "arch": "qwen3", "objective": objective, "steps": 5, "rank": 2, "lr": 5e-2, "seed": 11, "max_block": 128, "data": json!({"train": {"digest": train}}).to_string()}), extra);
+        let (straight, steps) = run_until(&rig, trainjob::ACTION, &action_spec(), base.clone(), None);
+        let straight = straight.unwrap_or_else(|e| panic!("{objective}: the straight run: {e}")).outputs;
+        assert_eq!(steps, [1, 2, 3, 4, 5], "{objective}");
+
+        let key = format!("lora-{objective}");
+        let keyed = with(base.clone(), json!({"resume_key": key, "checkpoint_every": 1, "return_adapter": true}));
+        let (stopped, steps) = run_until(&rig, trainjob::ACTION, &action_spec(), keyed.clone(), Some(2));
+        assert!(stopped.unwrap_err().contains("cancel"), "{objective}: a cancelled job is reported cancelled");
+        assert_eq!(steps, [1, 2], "{objective}");
+        assert_eq!(state_files(&rig), 1, "{objective}: the stopped run left its state in the store's run directory");
+
+        let (resumed, steps) = run_until(&rig, trainjob::ACTION, &action_spec(), keyed.clone(), None);
+        let resumed = resumed.unwrap_or_else(|e| panic!("{objective}: the resumed run: {e}"));
+        assert_eq!(steps, [3, 4, 5], "{objective}: it continues after the last saved step");
+        let report = &resumed.outputs;
+        assert_eq!(report["resume"], json!({"key": key, "state": "continued", "resumed_at": 2}), "{objective}");
+        assert_eq!(report["adapter_sha256"], straight["adapter_sha256"], "{objective}: the resumed run trains the adapter the straight run trained");
+        assert_eq!(report["adapter_digest"], straight["adapter_digest"], "{objective}");
+        assert_eq!(report["final_loss"], straight["final_loss"], "{objective}");
+        assert_eq!(state_files(&rig), 0, "{objective}: a completed run keeps no training state");
+        assert!(work_is_clean(&rig.work_root));
+
+        let (again, steps) = run_until(&rig, trainjob::ACTION, &action_spec(), keyed, None);
+        let again = again.unwrap_or_else(|e| panic!("{objective}: the recorded result: {e}"));
+        assert!(steps.is_empty(), "{objective}: nothing is trained again");
+        assert_eq!(again.outputs["resume"]["state"], "completed", "{objective}");
+        assert_eq!(again.outputs["adapter_digest"], report["adapter_digest"], "{objective}");
+        assert_eq!(again.blobs.get("adapter").map(|b| &b.bytes), resumed.blobs.get("adapter").map(|b| &b.bytes), "{objective}: the adapter asked back is the one trained");
+    }
+    assert_reservation_returned(&rig);
+}

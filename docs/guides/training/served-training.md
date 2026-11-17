@@ -89,8 +89,9 @@ an evaluating step carries `eval_loss`; the report adds `evaluations` (`[{step, 
 
 ## Resuming a job
 
-`init_model`, `pretrain` and `full_train` take a `resume_key` (1 to 128 letters, digits, `.`, `_`, `-`, not starting
-with a dot; needs an artifact store). The key names one run:
+`train` (every objective: `sft`, `policy_gradient`, `dpo`), `init_model`, `pretrain` and `full_train` take a
+`resume_key` (1 to 128 letters, digits, `.`, `_`, `-`, not starting with a dot; needs an artifact store), and every
+one but `init_model` a `checkpoint_every`. The key names one run:
 
 - The run's **identity** is the blake3 digest of the action, every param (defaults filled) but `resume_key` and
   `checkpoint_every`, and the digests of the attached blobs. A key whose run has another identity is refused.
@@ -99,11 +100,15 @@ with a dot; needs an artifact store). The key names one run:
   AdamW moments, schedule position, data order and generator) saved every `checkpoint_every` steps (default 25) and
   when the job is cancelled, itself written atomically. An omitted `seed` is drawn once and kept.
 - **Submitting the same request again** after the job, or the server, died or was cancelled continues it from the
-  last saved state, and it ends at the weights a run that was never stopped writes; the report's `resume` is
+  last saved state, and it ends at the weights a run that was never stopped writes (for `train`, the adapter file
+  byte for byte, so its `adapter_digest` is the uninterrupted run's; the policy gradient's start-of-run policy and
+  DPO's reference stay the policy the run began from, not the one the state restored); the report's `resume` is
   `{"key", "state": "continued", "resumed_at": <step>}` (`"fresh"` for a first run, `"restarted"` for one that died
   before saving any state). Its step frames continue the step count.
 - Submitting the request of a **completed** run answers with the result it recorded (`resume.state: "completed"`)
-  without training, once every artifact it names is verified to be in the store. An `install_as` the run made
+  without training, once every artifact it names is verified to be in the store (for `train`, the adapter, the
+  training record and every kept evaluation; with `return_adapter` the adapter and the record come back as blobs,
+  read from the store). An `install_as` the run made
   before dying is recognized as its own when its files are byte-identical.
 - A key whose job is still running is refused, as is a record or a training state that cannot be read or that
   belongs to another run: nothing is silently restarted; submit under a new key. The training state is removed

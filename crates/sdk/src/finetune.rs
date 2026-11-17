@@ -117,6 +117,7 @@ pub struct ChatFineTune {
     seed: Option<u64>,
     max_block: Option<u32>,
     checkpoint_every: u32,
+    resume_state: Option<PathBuf>,
     eval_every: u32,
     patience: u32,
     keep_best: bool,
@@ -588,6 +589,7 @@ impl ChatFineTune {
             seed: None,
             max_block: None,
             checkpoint_every: 0,
+            resume_state: None,
             eval_every: 0,
             patience: 0,
             keep_best: false,
@@ -905,6 +907,14 @@ impl ChatFineTune {
         self
     }
 
+    /// Exact resume through this training-state file instead of `<out_dir>/train.state`: a caller whose out
+    /// directory does not outlive the run (a job's private directory) keeps the state where it survives. A stopped
+    /// run continues from it, to the adapter an uninterrupted run exports; a state of another run is refused.
+    pub fn resume_state(mut self, path: impl Into<PathBuf>) -> Self {
+        self.resume_state = Some(path.into());
+        self
+    }
+
     /// The caller's loop iteration this run belongs to, recorded in the
     /// adapter's training provenance (default 0).
     pub fn cycle(mut self, cycle: u64) -> Self {
@@ -1197,7 +1207,7 @@ impl ChatFineTune {
         if self.grad_accum == 0 {
             return Err(Error::Backend("ChatFineTune: grad_accum must be at least 1".to_string()));
         }
-        let state_path = out_dir.join(STATE_FILE);
+        let state_path = self.resume_state.clone().unwrap_or_else(|| out_dir.join(STATE_FILE));
         let seed = resolve_seed(self.seed, Some(&state_path))?;
         let requested = model::FitOpts {
             grad_accum: self.grad_accum,

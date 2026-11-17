@@ -85,6 +85,8 @@ pub fn action_spec() -> ActionSpec {
         .param(optional_f("nll_weight", "dpo: the weight of the supervised likelihood of the chosen answer added to the loss (default 0)", 0.0, 1000.0))
         .param(ParamSpec::new("keep_reasoning", ParamType::Bool, "dpo: train on the reasoning of each candidate (the template drops a closed think block from an assistant turn otherwise)"))
         .param(crate::consolidate::allow_cpu_param())
+        .param(crate::consolidate::resume_key_param())
+        .param(crate::consolidate::checkpoint_every_param())
         .input(blob("dataset", "the training records (`generic-messages-v2` JSONL; `generic-preference-v1` pairs for dpo)"))
         .input(blob("held_out", "records scored before and after, never trained on (preference pairs for dpo)"))
         .input(blob("held_out_text", "the writer's own text, scored before and after beside the held-out records"))
@@ -297,6 +299,8 @@ pub struct Params {
     pub nll_weight: Option<f32>,
     pub keep_reasoning: Option<bool>,
     pub allow_cpu: bool,
+    pub resume_key: Option<String>,
+    pub checkpoint_every: Option<u32>,
 }
 
 /// A request that passed the spec and every check that needs no file and no device.
@@ -345,6 +349,7 @@ impl Request {
         if params.objective == Objective::Dpo {
             check_preference(&params, &data, &pg_named)?;
         }
+        crate::consolidate::check_resume(ACTION, params.resume_key.as_deref(), params.checkpoint_every)?;
         if params.keep_evaluations && params.eval_every == 0 {
             return refused("keep_evaluations needs eval_every > 0");
         }
@@ -522,6 +527,17 @@ mod tests {
         assert!(e.contains("max_step_kl") && e.contains("sft"), "the step guard belongs to the policy gradient: {e}");
         let stable = json!({"base": "a/b", "data": data, "objective": "policy_gradient", "clip_eps_high": 0.28, "importance": "truncate:2", "max_step_kl": 0.1, "max_step_grad_norm": 5.0});
         assert!(request(stable, &[]).is_ok());
+    }
+
+    #[test]
+    fn a_run_is_resumable_under_a_well_formed_key_and_checkpoint_every_needs_one() {
+        let data = json!({"train": {"digest": digest(1)}}).to_string();
+        let r = request(json!({"base": "a/b", "data": data, "resume_key": "run-1", "checkpoint_every": 5}), &[]).unwrap();
+        assert_eq!((r.params.resume_key.as_deref(), r.params.checkpoint_every), (Some("run-1"), Some(5)));
+        assert!(request(json!({"base": "a/b", "data": data, "checkpoint_every": 5}), &[]).unwrap_err().contains("name a resume_key"));
+        for bad in ["", "a/b", ".hidden", "x y"] {
+            assert!(request(json!({"base": "a/b", "data": data, "resume_key": bad}), &[]).unwrap_err().contains("resume_key"), "{bad:?}");
+        }
     }
 
     #[test]
