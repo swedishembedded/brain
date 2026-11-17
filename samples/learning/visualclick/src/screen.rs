@@ -285,10 +285,9 @@ pub const REGIONS: &[Region] = &[
 /// ambiguity.
 fn refs(ws: &[Widget]) -> Vec<Ref> {
     let mut out = Vec::new();
-    for color in 0..COLORS.len() {
-        for shape in 0..SHAPES.len() {
+    for (color, &(cname, _)) in COLORS.iter().enumerate() {
+        for (shape, &sname) in SHAPES.iter().enumerate() {
             let hits: Vec<usize> = (0..ws.len()).filter(|&i| ws[i].color == color && ws[i].shape == shape).collect();
-            let (cname, sname) = (COLORS[color].0, SHAPES[shape]);
 
             if hits.len() == 1 {
                 out.push(Ref { text: format!("click the {cname} {sname}"), target: hits[0] });

@@ -189,7 +189,7 @@ fn run(cfg: &Config) -> Result<bool, Box<dyn std::error::Error>> {
         ft
     };
     let report = |p: &brain::FineTuneProgress| {
-        if p.step == 1 || p.step % 4 == 0 || p.step == p.steps {
+        if p.step == 1 || p.step.is_multiple_of(4) || p.step == p.steps {
             println!("  step {:>3}/{}  loss {:.4}  lr {:.2e}", p.step, p.steps, p.loss, p.lr);
         }
     };

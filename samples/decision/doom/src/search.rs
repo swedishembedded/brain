@@ -1010,7 +1010,7 @@ impl Campaign {
                 break;
             }
             let here = prefix.len() + steps.len();
-            if here % WITNESS_EVERY == 0 {
+            if here.is_multiple_of(WITNESS_EVERY) {
                 if let Some(mut m) = env.mark(here as u32, &here_and_now) {
                     if m.at < EXPLAIN_FIRST {
                         m.said = here_and_now.clone();

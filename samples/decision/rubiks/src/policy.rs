@@ -642,8 +642,8 @@ mod search_tests {
     use crate::cube::scramble;
     use crate::search::Solver;
 
-    /// With a policy that knows the answer, the search finds a real solution
-    /// - which is the check that the search itself is sound, separate from
+    /// With a policy that knows the answer, the search finds a real solution,
+    /// which is the check that the search itself is sound, separate from
     /// any question about the model.
     #[test]
     fn a_perfect_policy_solves_through_the_search() {

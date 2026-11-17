@@ -247,7 +247,7 @@ fn describe(rgb: &[u8]) -> String {
     let mut seen = std::collections::HashSet::new();
     let (mut sum, mut lit) = (0u64, 0usize);
     let n = rgb.len() / 3;
-    for p in rgb.chunks_exact(3) {
+    for p in rgb.as_chunks::<3>().0 {
         if seen.len() <= 64 {
             seen.insert([p[0], p[1], p[2]]);
         }

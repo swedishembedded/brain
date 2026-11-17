@@ -294,7 +294,7 @@ fn train(pipe: &mut DecisionPipeline, solver: &Solver, s: &Settings) -> Result<(
         }
         train_rounds(pipe, s, &data, &options, per_round, round)?;
     }
-    return Ok(());
+    Ok(())
 }
 
 /// One round of optimizer steps over `data`.
@@ -1018,101 +1018,6 @@ fn models_root(flag: Option<&str>) -> Result<PathBuf, String> {
         .ok_or_else(|| "no models directory: pass --models-dir DIR, or pass --model DIR".to_string())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::search::Solver;
-
-    #[test]
-    fn the_cube_seed_is_given_or_drawn_per_run() {
-        let seed_of = |extra: &[&str]| {
-            let argv: Vec<String> = extra.iter().map(|a| a.to_string()).collect();
-            parse_from(&argv).unwrap().0.seed
-        };
-        assert_eq!(seed_of(&["--seed", "5"]), 5);
-        assert_ne!(seed_of(&[]), seed_of(&[]));
-    }
-
-    #[test]
-    fn a_short_name_maps_to_what_brain_pull_calls_it() {
-        assert_eq!(ALIASES.iter().find(|(a, _)| *a == "laya").unwrap().1, "convaiinnovations/laya");
-    }
-
-    /// The missing-checkpoint message has to carry the fix, since the caller
-    /// is looking at a terminal rather than at this code.
-    #[test]
-    fn a_missing_checkpoint_names_the_command_that_fetches_it() {
-        let err = locate("definitely-not-a-model", None).unwrap_err();
-        assert!(err.contains("brain pull definitely-not-a-model"), "{err}");
-        assert!(err.contains("--model DIR"), "{err}");
-    }
-
-    /// `--models-dir` decides where a named model is looked up, ahead of
-    /// brain's default store.
-    #[test]
-    fn models_dir_flag_names_the_store_a_model_is_looked_up_in() {
-        let store = std::env::temp_dir().join(format!("{}-models-{}", env!("CARGO_PKG_NAME"), std::process::id()));
-        let repo = store.join("vendor").join("repo");
-        std::fs::create_dir_all(&repo).unwrap();
-        std::fs::write(repo.join("config.json"), "{}").unwrap();
-        let found = locate("vendor/repo", store.to_str());
-        std::fs::remove_dir_all(&store).ok();
-        assert_eq!(found.unwrap(), repo.display().to_string());
-    }
-
-    /// THE property this sample rests on, with no model in the loop: play the
-    /// best ADMISSIBLE option every turn and every cube is solved in exactly
-    /// the optimal number of moves - even when the thing choosing is an
-    /// adversary that always names the option the planner likes least.
-    #[test]
-    fn the_shield_solves_every_cube_in_the_optimal_number_of_moves() {
-        let solver = Solver::new(4);
-        for _ in 0..15 {
-            let seed: u64 = std::hash::BuildHasher::hash_one(&std::collections::hash_map::RandomState::new(), 0u8);
-            let (mut cube, _) = cube::scramble(6, seed);
-            let d0 = solver.distance(&cube, Solver::MAX_DEPTH).unwrap();
-            let mut used = 0u8;
-            while !cube.is_solved() {
-                let d = solver.distance(&cube, Solver::MAX_DEPTH).unwrap();
-                let good = policy::admissible(&solver, &cube, d);
-                assert!(!good.is_empty(), "an unsolved cube always has a move that helps");
-                // The worst model imaginable: every admissible option gets
-                // zero, every other one gets one.
-                let probs: Vec<(String, f32)> = policy::options()
-                    .iter()
-                    .enumerate()
-                    .map(|(i, o)| (o.clone(), if good.contains(&i) { 0.0 } else { 1.0 }))
-                    .collect();
-                let flags: Vec<bool> = (0..probs.len()).map(|i| good.contains(&i)).collect();
-                let played = best_admissible(&probs, &flags);
-                cube = cube.apply(policy::move_of(played));
-                used += 1;
-                assert!(used <= d0, "seed {seed}: took more than the optimal {d0} moves");
-            }
-            assert_eq!(used, d0, "seed {seed}");
-        }
-    }
-
-    /// Every turn offers all eighteen moves and at least one of them helps,
-    /// or the shield would have nothing to fall back to.
-    #[test]
-    fn every_position_has_a_move_that_helps() {
-        let solver = Solver::new(4);
-        for _ in 0..10 {
-            let seed: u64 = std::hash::BuildHasher::hash_one(&std::collections::hash_map::RandomState::new(), 0u8);
-            let (cube, _) = cube::scramble(7, seed);
-            let d = solver.distance(&cube, Solver::MAX_DEPTH).unwrap();
-            let good = policy::admissible(&solver, &cube, d);
-            assert!(!good.is_empty(), "seed {seed}");
-            assert!(good.len() < 18, "if every move helped, choosing would not be a decision");
-            for &i in &good {
-                let after = cube.apply(policy::move_of(i));
-                assert_eq!(solver.distance(&after, Solver::MAX_DEPTH), Some(d - 1));
-            }
-        }
-    }
-}
-
 /// Train a policy on retraced walks and let it drive, with no planner and no
 /// search anywhere in the loop.
 fn net_main(argv: &[String]) -> Result<(), String> {
@@ -1695,4 +1600,99 @@ fn truncate_name(s: &str, n: usize) -> String {
         return s.to_string();
     }
     format!("{}..", &s[..n.saturating_sub(2)])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::search::Solver;
+
+    #[test]
+    fn the_cube_seed_is_given_or_drawn_per_run() {
+        let seed_of = |extra: &[&str]| {
+            let argv: Vec<String> = extra.iter().map(|a| a.to_string()).collect();
+            parse_from(&argv).unwrap().0.seed
+        };
+        assert_eq!(seed_of(&["--seed", "5"]), 5);
+        assert_ne!(seed_of(&[]), seed_of(&[]));
+    }
+
+    #[test]
+    fn a_short_name_maps_to_what_brain_pull_calls_it() {
+        assert_eq!(ALIASES.iter().find(|(a, _)| *a == "laya").unwrap().1, "convaiinnovations/laya");
+    }
+
+    /// The missing-checkpoint message has to carry the fix, since the caller
+    /// is looking at a terminal rather than at this code.
+    #[test]
+    fn a_missing_checkpoint_names_the_command_that_fetches_it() {
+        let err = locate("definitely-not-a-model", None).unwrap_err();
+        assert!(err.contains("brain pull definitely-not-a-model"), "{err}");
+        assert!(err.contains("--model DIR"), "{err}");
+    }
+
+    /// `--models-dir` decides where a named model is looked up, ahead of
+    /// brain's default store.
+    #[test]
+    fn models_dir_flag_names_the_store_a_model_is_looked_up_in() {
+        let store = std::env::temp_dir().join(format!("{}-models-{}", env!("CARGO_PKG_NAME"), std::process::id()));
+        let repo = store.join("vendor").join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(repo.join("config.json"), "{}").unwrap();
+        let found = locate("vendor/repo", store.to_str());
+        std::fs::remove_dir_all(&store).ok();
+        assert_eq!(found.unwrap(), repo.display().to_string());
+    }
+
+    /// THE property this sample rests on, with no model in the loop: play the
+    /// best ADMISSIBLE option every turn and every cube is solved in exactly
+    /// the optimal number of moves - even when the thing choosing is an
+    /// adversary that always names the option the planner likes least.
+    #[test]
+    fn the_shield_solves_every_cube_in_the_optimal_number_of_moves() {
+        let solver = Solver::new(4);
+        for _ in 0..15 {
+            let seed: u64 = std::hash::BuildHasher::hash_one(&std::collections::hash_map::RandomState::new(), 0u8);
+            let (mut cube, _) = cube::scramble(6, seed);
+            let d0 = solver.distance(&cube, Solver::MAX_DEPTH).unwrap();
+            let mut used = 0u8;
+            while !cube.is_solved() {
+                let d = solver.distance(&cube, Solver::MAX_DEPTH).unwrap();
+                let good = policy::admissible(&solver, &cube, d);
+                assert!(!good.is_empty(), "an unsolved cube always has a move that helps");
+                // The worst model imaginable: every admissible option gets
+                // zero, every other one gets one.
+                let probs: Vec<(String, f32)> = policy::options()
+                    .iter()
+                    .enumerate()
+                    .map(|(i, o)| (o.clone(), if good.contains(&i) { 0.0 } else { 1.0 }))
+                    .collect();
+                let flags: Vec<bool> = (0..probs.len()).map(|i| good.contains(&i)).collect();
+                let played = best_admissible(&probs, &flags);
+                cube = cube.apply(policy::move_of(played));
+                used += 1;
+                assert!(used <= d0, "seed {seed}: took more than the optimal {d0} moves");
+            }
+            assert_eq!(used, d0, "seed {seed}");
+        }
+    }
+
+    /// Every turn offers all eighteen moves and at least one of them helps,
+    /// or the shield would have nothing to fall back to.
+    #[test]
+    fn every_position_has_a_move_that_helps() {
+        let solver = Solver::new(4);
+        for _ in 0..10 {
+            let seed: u64 = std::hash::BuildHasher::hash_one(&std::collections::hash_map::RandomState::new(), 0u8);
+            let (cube, _) = cube::scramble(7, seed);
+            let d = solver.distance(&cube, Solver::MAX_DEPTH).unwrap();
+            let good = policy::admissible(&solver, &cube, d);
+            assert!(!good.is_empty(), "seed {seed}");
+            assert!(good.len() < 18, "if every move helped, choosing would not be a decision");
+            for &i in &good {
+                let after = cube.apply(policy::move_of(i));
+                assert_eq!(solver.distance(&after, Solver::MAX_DEPTH), Some(d - 1));
+            }
+        }
+    }
 }

@@ -341,9 +341,12 @@ fn shade(c: [u8; 3], lambert: f32) -> [u8; 3] {
 }
 
 /// Draw the cube itself into the left-hand area.
+/// One face ready to paint: its depth, corners on the canvas, shaded colour and whether it is outlined.
+type PreparedQuad = (f32, [(f32, f32); 4], [u8; 3], bool);
+
 fn draw_cube(canvas: &mut Canvas, cube: &Cube, scene: &Scene, cx: f32, cy: f32, scale: f32) {
     let light = norm([0.45, 0.8, 0.6]);
-    let mut prepared: Vec<(f32, [(f32, f32); 4], [u8; 3], bool)> = Vec::new();
+    let mut prepared: Vec<PreparedQuad> = Vec::new();
     for q in quads(cube, scene) {
         let n = norm(cross(sub(q.p[1], q.p[0]), sub(q.p[2], q.p[0])));
         // Cull on the face's own normal in camera space, not on screen

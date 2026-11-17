@@ -245,7 +245,7 @@ impl InstructionNorm {
     /// Estimated from TRAINING instructions only, so the held-out screens are
     /// scored by statistics that never saw them.
     fn fit(pipeline: &mut RlcdPipeline, screens: &[Screen], d: usize) -> InstructionNorm {
-        let n = screens.len().min(1000).max(1);
+        let n = screens.len().clamp(1, 1000);
         let rows: Vec<Vec<f32>> = screens.iter().take(n).map(|s| instruction_row_raw(pipeline, &s.instruction)).collect();
         let mut mean = vec![0.0f32; d];
         for r in &rows {
@@ -343,7 +343,7 @@ fn load_head(pipeline: &mut RlcdPipeline, path: &str) -> Result<(), String> {
         let name = String::from_utf8(take(n)?.to_vec()).map_err(|e| format!("{path}: tensor name is not UTF-8: {e}"))?;
         let len = u64_of(take(8)?) as usize;
         let raw = take(len * 4)?;
-        let values: Vec<f32> = raw.chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().expect("4 bytes"))).collect();
+        let values: Vec<f32> = raw.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)).collect();
         w.push((name, values));
     }
     if at != bytes.len() {

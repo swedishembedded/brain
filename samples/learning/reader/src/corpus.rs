@@ -545,7 +545,7 @@ impl Tool {
         // question never asked for is teaching the model to volunteer it.
         // Required flags are exempt: they are part of running the command at
         // all, and no user asks for them by name.
-        for (flag, _) in given.iter() {
+        for flag in given.keys() {
             let bare = flag.trim_start_matches('-').to_lowercase();
             let required = cmd.flags.iter().any(|f| f.name == *flag && f.required);
             if !required && !asked.contains(&bare) {

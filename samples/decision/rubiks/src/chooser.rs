@@ -75,12 +75,15 @@ pub fn episode_with(
             return None;
         }
         let roll = (rng.next_u64() >> 11) as f32 / (1u64 << 53) as f32;
-        let (index, moves) = if roll < epsilon || net.is_none() {
-            let c = cands[rng.below(cands.len())];
-            (c.index, c.moves)
-        } else {
-            let i = choose(space, book, net.expect("checked"), &cube)?;
-            (i, book.moves_of(i))
+        let (index, moves) = match net {
+            Some(net) if roll >= epsilon => {
+                let i = choose(space, book, net, &cube)?;
+                (i, book.moves_of(i))
+            }
+            _ => {
+                let c = cands[rng.below(cands.len())];
+                (c.index, c.moves)
+            }
         };
         states.push(cube);
         costs.push(moves);

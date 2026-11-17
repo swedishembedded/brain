@@ -585,8 +585,7 @@ mod tests {
 
         let eps = 1e-3f32;
         for (k, name) in names.iter().enumerate() {
-            let len = analytic[k].len();
-            for i in 0..len {
+            for (i, &a) in analytic[k].iter().enumerate() {
                 let orig = g.arrays_mut()[k][i];
 
                 g.arrays_mut()[k][i] = orig + eps;
@@ -596,7 +595,6 @@ mod tests {
                 g.arrays_mut()[k][i] = orig;
 
                 let numeric = (plus - minus) / (2.0 * eps);
-                let a = analytic[k][i];
                 assert!(
                     (a - numeric).abs() < 1e-2 * (numeric.abs() + 1.0),
                     "{name}[{i}]: analytic {a} vs numeric {numeric}"

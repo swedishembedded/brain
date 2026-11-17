@@ -40,7 +40,7 @@ fn walk_batch(space: &CubeSpace, rows: usize, depth: usize, rng: &mut Rng) -> Wa
     while states.len() < rows {
         let mut s = space.goal();
         let mut last: Option<usize> = None;
-        for step in 1..=depth {
+        for slot in filled.iter_mut().take(depth + 1).skip(1) {
             let mut m = rng.below(n_moves);
             let mut guard = 0;
             while last.is_some_and(|l| space.redundant(l, m)) && guard < 64 {
@@ -49,12 +49,12 @@ fn walk_batch(space: &CubeSpace, rows: usize, depth: usize, rng: &mut Rng) -> Wa
             }
             s = space.apply(&s, m);
             last = Some(m);
-            if filled[step] < quota && states.len() < rows {
+            if *slot < quota && states.len() < rows {
                 let r = states.len();
                 space.write_features(&s, &mut features[r * width..(r + 1) * width]);
                 labels.push(space.inverse(m) as u32);
                 states.push(s);
-                filled[step] += 1;
+                *slot += 1;
             }
         }
     }

@@ -461,7 +461,7 @@ fn distil(a: &mut Args) -> Result<ExitCode, String> {
         }
     }
     let mut ranked: Vec<(String, usize)> = reasons.into_iter().collect();
-    ranked.sort_by(|a, b| b.1.cmp(&a.1));
+    ranked.sort_by_key(|r| std::cmp::Reverse(r.1));
     for (reason, n) in ranked.iter().take(8) {
         println!("  refused {n:>3}  {reason}");
     }
@@ -597,7 +597,7 @@ fn phrase(a: &mut Args) -> Result<ExitCode, String> {
         }
     }
     let mut ranked: Vec<(String, usize)> = reasons.into_iter().collect();
-    ranked.sort_by(|a, b| b.1.cmp(&a.1));
+    ranked.sort_by_key(|r| std::cmp::Reverse(r.1));
     for (reason, n) in ranked.iter().take(6) {
         println!("  refused {n:>3}  {reason}");
     }
@@ -974,7 +974,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("sample-reader-args-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let argv = vec!["generate".to_string(), "--corpus".to_string(), dir.to_string_lossy().into_owned(), "--seed".to_string(), "2".to_string()];
-        run(argv).expect("the documented flags are accepted");
+        let code = run(argv).expect("the documented flags are accepted");
+        assert_eq!(code, std::process::ExitCode::SUCCESS, "generate with its documented flags succeeds");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

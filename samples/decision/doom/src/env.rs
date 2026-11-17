@@ -2820,14 +2820,8 @@ impl Env for DoomEnv {
             // square of floor.
             _ => {
                 let tenth = |got: u32, all: u32| {
-                    // `== 0`, not `<= 0`: these counters are unsigned, so the
-                    // second is a comparison that can only ever be true one
-                    // way, and clippy denies it.
-                    if all == 0 {
-                        0
-                    } else {
-                        (got * 10 / all).clamp(0, 10) as i32
-                    }
+                    // No total yet reads as 0 tenths.
+                    (got * 10).checked_div(all).map_or(0, |t| t.clamp(0, 10) as i32)
                 };
                 parts.push(tenth(l.kills, l.total_kills));
                 parts.push(tenth(l.items, l.total_items));

@@ -288,7 +288,7 @@ impl Clearance {
     /// six of them, so this is the nearest probe, not a measurement along the
     /// bearing itself.
     pub fn toward(&self, bearing: i32) -> i32 {
-        let b = ((bearing % 360) + 360) % 360;
+        let b = bearing.rem_euclid(360);
         match b {
             0..=22 | 338..=359 => self.ahead,
             23..=67 => self.ahead_left,
