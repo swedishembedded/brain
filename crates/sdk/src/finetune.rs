@@ -1568,7 +1568,16 @@ impl PolicyGradientOutcome {
             "mean_loss": s.mean_loss(),
             "mean_clip_fraction": s.mean_clip_fraction(),
             "mean_kl": s.mean_kl(),
-            "last_step": s.steps.last(),
+            // The card is part of the adapter's bytes, so it holds what the run computed and nothing it timed: a
+            // run resumed from its saved state scores again the examples its predecessor scored, and a step's
+            // scoring time would make the resumed adapter's digest differ from the uninterrupted one's.
+            "last_step": s.steps.last().map(|step| {
+                let mut step = serde_json::to_value(step).unwrap_or_default();
+                if let Some(fields) = step.as_object_mut() {
+                    fields.remove("scoring_seconds");
+                }
+                step
+            }),
         })
     }
 }
