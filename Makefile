@@ -424,7 +424,7 @@ test/slow:
 # "green because skipped" risk.
 ## test/full - release gate: test + test/doc + test/slow + test/e2e + test/conformance + test/rl + test/gradcheck + test/package + every check/* gate
 ##   + test/parity + test/parity/strict (needs make testdata/fetch) + test/perf
-test/full: test test/doc test/slow test/e2e test/conformance test/rl test/gradcheck test/package check/scripts check/env-reads check/env-writes check/test-skips check/seed-literals check/serve-conformance test/gates check/spdx check/copyright check/paths check/scope check/saved-policy check/agents-md check/files check/samples check/sdk-features check/make-targets check/generated check/book test/parity test/parity/strict test/perf
+test/full: test test/doc test/slow test/e2e test/conformance test/rl test/gradcheck test/package check/scripts check/env-reads check/env-writes check/test-skips check/seed-literals check/serve-conformance test/gates check/spdx check/copyright check/paths check/scope check/saved-policy check/ops-kernel-lists check/agents-md check/files check/samples check/sdk-features check/make-targets check/generated check/book test/parity test/parity/strict test/perf
 
 # Rank every test binary by wall time; --budget fails if any exceeds it. This is
 # what keeps the fast lane fast.
@@ -981,6 +981,13 @@ check/scope:
 check/saved-policy:
 	bash scripts/gates/check-saved-policy.sh
 
+# Kernel-list coverage: Ops::new resolves the model::ops façade set by name, on a handle a serving engine builds at a
+# model's first request, so every crate that builds an Ops tests each pipeline list it builds one from
+# (model::ops::assert_kernel_list_complete), or is listed in scripts/gates/ops-kernel-lists.allow with the reason.
+## check/ops-kernel-lists - every crate that builds a model::ops::Ops tests its kernel lists are complete (or states why not)
+check/ops-kernel-lists:
+	bash scripts/gates/check-ops-kernel-lists.sh
+
 # AGENTS.md is read by every agent session: a line budget keeps detail in the
 # file that owns it, and every path it names must exist.
 ## check/agents-md - AGENTS.md is within its line budget and every path it names exists
@@ -1092,7 +1099,7 @@ ci:
 
 # Tier 1, build/static: no model files, no GPU, no build beyond the gate scripts' own.
 ## ci/static - build/static tier: every static gate and every gate self-test
-ci/static: ci/static/scripts check/env-reads check/env-writes check/test-skips check/seed-literals check/serve-conformance check/spdx check/copyright check/paths check/scope check/saved-policy check/agents-md check/files check/make-targets check/generated/kernels-wgsl-table check/generated/kernels-cuda-table check/generated/samples-manifest check/generated/knowledge-index check/generated/roadmap-index ci/static/gate-specs
+ci/static: ci/static/scripts check/env-reads check/env-writes check/test-skips check/seed-literals check/serve-conformance check/spdx check/copyright check/paths check/scope check/saved-policy check/ops-kernel-lists check/agents-md check/files check/make-targets check/generated/kernels-wgsl-table check/generated/kernels-cuda-table check/generated/samples-manifest check/generated/knowledge-index check/generated/roadmap-index ci/static/gate-specs
 
 # The tier is the gates a hosted runner can run: `check/generated/book` is left out because a runner has no
 # worked-example cache and recomputing every worked example from cold takes more than half an hour; it is run
@@ -2350,7 +2357,7 @@ help:
         test/gpu test/gpu/ripple test/gpu/ripple/suites test/gpu/ripple/cargo test/gpu/ripple/e2e \
         test/e2e/claude-code test/e2e/scheduler test/e2e/quickstart test/e2e/deb \
         test/e2e/results-hygiene test/e2e/s3dit-int8 \
-        check check/workspace check/clippy check/scripts check/env-reads check/test-skips check/seed-literals check/seed-literals/tests check/serve-conformance test/gates test/gates/env-reads test/gates/test-skips test/gates/seed-literals test/gates/group-kernels test/gates/book-epub _train/need-wrapper qwen35 qwen35/train qwen35/train/probe qwen35/train/step check/spdx check/copyright check/paths check/scope check/saved-policy check/hf-fixtures \
+        check check/workspace check/clippy check/scripts check/env-reads check/test-skips check/seed-literals check/seed-literals/tests check/serve-conformance test/gates test/gates/env-reads test/gates/test-skips test/gates/seed-literals test/gates/group-kernels test/gates/book-epub _train/need-wrapper qwen35 qwen35/train qwen35/train/probe qwen35/train/step check/spdx check/copyright check/paths check/scope check/saved-policy check/ops-kernel-lists check/hf-fixtures \
         check/files check/samples check/sdk-features check/make-targets \
         ci ci/static ci/static/scripts ci/static/gate-specs ci/cpu ci/cpu/unit ci/cpu/e2e \
         ci/cpu/e2e/api-conformance ci/cpu/e2e/video-api ci/cpu/e2e/shutdown ci/cpu/e2e/ready ci/gpu ci/gpu/parity ci/matrix \

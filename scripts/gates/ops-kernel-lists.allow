@@ -1,0 +1,1 @@
+sdk	builds its one Ops (optimize.rs) on model::ops::training_kernel_list() itself, the list model tests
