@@ -163,7 +163,7 @@ impl ChatMessage {
             #[serde(skip_serializing_if = "Option::is_none")]
             reasoning_content: Option<&'a str>,
         }
-        minijinja::Value::from_serialize(TplMessage {
+        minijinja::Value::from(minijinja::value::Serde(TplMessage {
             role: &self.role,
             content: &self.content,
             tool_calls: self
@@ -173,7 +173,7 @@ impl ChatMessage {
                 .collect(),
             tool_call_id: self.tool_call_id.as_deref(),
             reasoning_content: self.reasoning_content.as_deref(),
-        })
+        }))
     }
 }
 

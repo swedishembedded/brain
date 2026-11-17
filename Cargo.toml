@@ -443,8 +443,8 @@ serde_norway = "0.9.42"
 # (workspace-wide) `preserve_order` feature -- transcode straight into
 # minijinja::Value instead of through serde_json::Value, so this stays
 # isolated and does not change key order anywhere else in the workspace.
-minijinja = { version = "2", features = ["loop_controls", "json", "preserve_order"] }
-minijinja-contrib = { version = "2", features = ["pycompat"] }
+minijinja = { version = "3", features = ["loop_controls", "json", "preserve_order", "serde"] }
+minijinja-contrib = { version = "3", features = ["pycompat"] }
 # Unicode extended grapheme clusters (UAX #29). Needed by crates/data's
 # SentencePiece `Precompiled` normalizer, which segments its input by grapheme
 # before consulting the charsmap - the same crate, and the same
@@ -522,11 +522,11 @@ async-stream = "0.3"
 uuid = { version = "1", features = ["v4"] }
 # Content digests of the artifact store `brain serve --artifact-store` resolves (`brain-trainjob`).
 blake3 = "1"
-rand = "0.8"
+rand = "0.10"
 subtle = "2"
 bytes = "1"
 anyhow = "1"
-jsonschema = "0.49"
+jsonschema = "0.61"
 
 # Structured tracing. `tracing` is the FACADE every library crate emits
 # through (zero cost with no subscriber installed); `tracing-subscriber` is

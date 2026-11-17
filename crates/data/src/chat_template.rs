@@ -204,8 +204,13 @@ impl ChatTemplate {
         let mut env = Environment::new();
         minijinja_contrib::add_to_environment(&mut env);
         env.set_unknown_method_callback(minijinja_contrib::pycompat::unknown_method_callback);
-        env.set_trim_blocks(true);
-        env.set_lstrip_blocks(true);
+        env.set_syntax(
+            minijinja::syntax::SyntaxConfig::builder()
+                .trim_blocks(true)
+                .lstrip_blocks(true)
+                .build()
+                .expect("the default delimiters with trim and lstrip are a valid syntax"),
+        );
         env.set_undefined_behavior(minijinja::UndefinedBehavior::Chainable);
         env.add_function("raise_exception", |msg: String| -> Result<String, minijinja::Error> {
             Err(minijinja::Error::new(minijinja::ErrorKind::InvalidOperation, msg))
@@ -375,7 +380,7 @@ impl ChatTemplate {
 
     /// Render `messages` (a JSON array of `{role, content, tool_calls?,
     /// tool_call_id?, ...}` objects — build via [`parse_json_ordered`] or
-    /// `Value::from_serialize`) through the template. `tools` is the JSON
+    /// `Value::from(Serde(..))`) through the template. `tools` is the JSON
     /// schema array (or `None` for no tool preamble). `extra` carries any
     /// further template kwargs a specific model's template reads
     /// (`enable_thinking`, `bos_token`, …) — passed through verbatim, so
@@ -581,7 +586,7 @@ fn is_leading_system(messages: &[Value], i: usize) -> bool {
 /// `node` as a template value, with the `arguments` of every tool call under it parsed as JSON where they are
 /// JSON text. `in_call` marks `node` as a tool call (or its `function`), whose `arguments` field is the one parsed.
 fn with_argument_objects(node: &serde_json::Value, in_call: bool) -> Value {
-    let Some(object) = node.as_object() else { return Value::from_serialize(node) };
+    let Some(object) = node.as_object() else { return Value::from(minijinja::value::Serde(node)) };
     let fields: BTreeMap<String, Value> = object
         .iter()
         .map(|(key, value)| {
@@ -589,12 +594,12 @@ fn with_argument_objects(node: &serde_json::Value, in_call: bool) -> Value {
                 ("tool_calls", serde_json::Value::Array(calls)) => Value::from(calls.iter().map(|call| with_argument_objects(call, true)).collect::<Vec<_>>()),
                 ("function", _) if in_call => with_argument_objects(value, true),
                 ("arguments", serde_json::Value::String(text)) if in_call => parse_json_ordered(text).unwrap_or_else(|_| Value::from(text.as_str())),
-                _ => Value::from_serialize(value),
+                _ => Value::from(minijinja::value::Serde(value)),
             };
             (key.clone(), converted)
         })
         .collect();
-    Value::from_serialize(&fields)
+    Value::from(minijinja::value::Serde(&fields))
 }
 
 fn no_think_switches() -> BTreeMap<String, Value> {

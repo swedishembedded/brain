@@ -118,7 +118,7 @@ impl Prompting {
     /// that a template was expected.
     pub fn question(&self, text: &str) -> String {
         let Some(t) = &self.template else { return text.to_string() };
-        let messages = Value::from_serialize(vec![BTreeMap::from([("role", "user"), ("content", text)])]);
+        let messages = Value::from(minijinja::value::Serde(vec![BTreeMap::from([("role", "user"), ("content", text)])]));
         t.render(messages, None, true, &self.extra).unwrap_or_else(|_| text.to_string())
     }
 }

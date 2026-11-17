@@ -116,7 +116,7 @@ pub fn to_chat_sample(traj: &Trajectory) -> Result<ChatSample, String> {
     // The tools the agent was offered are part of the prompt it answered. They
     // are handed over in the order serde_json holds them (sorted by key), the
     // same order the SDK's serving path renders a request's tool schemas in.
-    let tools = traj.agent.tool_definitions.iter().flatten().map(minijinja::Value::from_serialize).collect();
+    let tools = traj.agent.tool_definitions.iter().flatten().map(|tool| minijinja::Value::from(minijinja::value::Serde(tool))).collect();
     Ok(ChatSample { messages, tools, rendered: None, media: Vec::new(), rollout: None })
 }
 
@@ -330,7 +330,7 @@ mod tests {
         assert_eq!(sample.tools.len(), 1);
 
         let tmpl = ChatTemplate::compile(&std::fs::read_to_string(brain_testutil::testdata("qwen3/chat_template.jinja")).unwrap()).unwrap();
-        let messages = minijinja::Value::from(vec![minijinja::Value::from_serialize(serde_json::json!({ "role": "user", "content": "hi" }))]);
+        let messages = minijinja::Value::from(vec![minijinja::Value::from(minijinja::value::Serde(serde_json::json!({ "role": "user", "content": "hi" })))]);
         let got = tmpl.render(messages, Some(minijinja::Value::from(sample.tools.clone())), true, &BTreeMap::new()).unwrap();
         let served = data::qwen_chat::render_for_generation(&[data::qwen_chat::ChatMessage::user("hi")], &[schema.to_string()], data::qwen_chat::TemplateOpts::default()).unwrap();
         assert!(got.contains("<tools>") && got.contains("get_weather"), "{got}");
