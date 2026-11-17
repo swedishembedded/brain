@@ -262,6 +262,30 @@ pub fn zip3_mut(a: &mut [f32], b: &mut [f32], c: &mut [f32], d: &[f32], f: impl 
     });
 }
 
+/// Run `f(i)` once on each of `cores`, every call on its own OS thread pinned to that one core, and return the
+/// results in `cores` order. For work that must own a core for its whole duration and touch its own memory first so
+/// the pages land on that core's node: a probe of what the cores can do together (`crate::roofline`), never a data
+/// loop (those take the pool through the functions above).
+pub fn per_core<T: Send>(cores: &[usize], f: impl Fn(usize) -> T + Sync) -> Vec<T> {
+    std::thread::scope(|s| {
+        let handles: Vec<_> = cores
+            .iter()
+            .enumerate()
+            .map(|(i, &core)| {
+                let f = &f;
+                s.spawn(move || {
+                    #[cfg(target_os = "linux")]
+                    pin_thread(&[core]);
+                    #[cfg(not(target_os = "linux"))]
+                    let _ = core;
+                    f(i)
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().expect("a per-core thread panicked")).collect()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -406,5 +430,17 @@ mod tests {
             zip3_mut(&mut a, &mut b, &mut c, &[0.0f32; 3], |_, _, _, _| {});
         });
         assert!(r.is_err(), "length mismatch must fail loudly, not truncate");
+    }
+
+    #[test]
+    fn per_core_runs_once_on_each_core_and_keeps_its_order() {
+        let cores: Vec<usize> = allowed_cores().into_iter().take(3).collect();
+        // `allowed_cores` reads the calling thread's own affinity.
+        let out = per_core(&cores, |i| (i, allowed_cores()));
+        assert_eq!(out.iter().map(|o| o.0).collect::<Vec<_>>(), (0..cores.len()).collect::<Vec<_>>());
+        #[cfg(target_os = "linux")]
+        for (o, core) in out.iter().zip(&cores) {
+            assert_eq!(o.1, vec![*core], "call {} must run pinned to core {core}", o.0);
+        }
     }
 }

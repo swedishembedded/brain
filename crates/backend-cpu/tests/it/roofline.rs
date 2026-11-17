@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! `backend_cpu::roofline::measure` must produce a real, fast, sane fp32
-//! GFLOP/s number for `brain perf roofline`'s CPU rung.
+//! `backend_cpu::roofline::measure` must produce real, fast, sane fp32 and
+//! memory numbers for `brain perf roofline`'s CPU rung: the silicon's SIMD FMA
+//! rate and the memory bandwidth over every core the process may use, brain's
+//! own conv kernel mix beside them, and the published peak they are compared
+//! with where the CPU is known.
 //!
 //! `gpu_core::roof::ensure` skips the CPU device class by default (a
 //! known-bad interaction between its calibration loop and this crate's own
@@ -12,7 +15,21 @@
 //! wall time over a representative NCHW conv2d mix) must still land in the
 //! same physical ballpark once it is a real, fast, non-`#[ignore]`d API.
 
-use backend_cpu::roofline::measure;
+use backend_cpu::par::allowed_cores;
+use backend_cpu::roofline::{last_level_cache_bytes, measure, CpuRoofline};
+use std::sync::{Mutex, OnceLock};
+
+/// The probes own every core while they run: two at once measure each other. Every measurement here takes this.
+static CORES: Mutex<()> = Mutex::new(());
+
+/// One measurement shared by the checks that only read it.
+fn measured() -> &'static CpuRoofline {
+    static R: OnceLock<CpuRoofline> = OnceLock::new();
+    R.get_or_init(|| {
+        let _cores = CORES.lock().unwrap_or_else(|e| e.into_inner());
+        measure()
+    })
+}
 
 /// A real, measured baseline this suite is graded against: the aggregate line
 /// of the output of `cargo test -p brain-backend-cpu --release
@@ -39,9 +56,9 @@ const IGNORED_BENCH_AGGREGATE_GFLOPS: f32 = 70.7;
 /// not a tight fit to this dev host.
 #[test]
 fn measure_returns_sane_gflops() {
-    let r = measure();
-    assert!(r.gflops > 1.0, "suspiciously low CPU GFLOP/s: {}", r.gflops);
-    assert!(r.gflops < 10_000.0, "suspiciously high CPU GFLOP/s (units bug or elided work?): {}", r.gflops);
+    let r = measured();
+    assert!(r.conv_gflops > 1.0, "suspiciously low CPU GFLOP/s: {}", r.conv_gflops);
+    assert!(r.conv_gflops < 100_000.0, "suspiciously high CPU GFLOP/s (units bug or elided work?): {}", r.conv_gflops);
 }
 
 /// Requirement 2: the lift must not silently change the methodology and
@@ -52,12 +69,12 @@ fn measure_returns_sane_gflops() {
 /// timing something that isn't the compute at all).
 #[test]
 fn measure_matches_ignored_bench_order_of_magnitude() {
-    let r = measure();
-    let ratio = r.gflops / IGNORED_BENCH_AGGREGATE_GFLOPS;
+    let r = measured();
+    let ratio = r.conv_gflops / IGNORED_BENCH_AGGREGATE_GFLOPS;
     assert!(
         (0.1..10.0).contains(&ratio),
         "measure() = {} GFLOP/s is not within an order of magnitude of the ignored bench's {} GFLOP/s (ratio {ratio})",
-        r.gflops,
+        r.conv_gflops,
         IGNORED_BENCH_AGGREGATE_GFLOPS
     );
 }
@@ -73,23 +90,52 @@ fn measure_matches_ignored_bench_order_of_magnitude() {
 /// would mean it never left cache.
 #[test]
 fn measure_returns_a_real_dram_bandwidth() {
-    let r = measure();
-    let gbs = r.bandwidth_gbs.expect("the CPU rung must report a measured DRAM bandwidth, not None");
-    assert!(gbs > 1.0, "suspiciously low DRAM GB/s: {gbs}");
-    assert!(gbs < 1000.0, "suspiciously high DRAM GB/s - the working set fit in cache? {gbs}");
+    let r = measured();
+    for (what, gbs) in [("copy", r.copy_gbs), ("triad", r.triad_gbs)] {
+        assert!(gbs > 1.0, "suspiciously low {what} GB/s: {gbs}");
+    }
+    // The working set must be DRAM's, not the caches': several times every last-level cache the cores share.
+    if let Some(llc) = last_level_cache_bytes() {
+        assert!(r.working_set_bytes >= 4 * llc, "the bandwidth working set {} B is not past the {llc} B of last-level cache", r.working_set_bytes);
+    }
+    if let Some(peak) = r.peak.as_ref().and_then(|p| p.memory_gbs) {
+        assert!(f64::from(r.triad_gbs) <= 1.1 * peak, "triad {} GB/s above the published {peak} GB/s: the probe read cache", r.triad_gbs);
+    }
+}
+
+/// Requirement 5: the rung uses every core the process may run on, one thread
+/// a core, and names how many and which SIMD path it ran.
+#[test]
+fn measure_runs_one_simd_thread_on_every_allowed_core() {
+    let r = measured();
+    assert_eq!(r.threads, allowed_cores().len());
+    assert!(!r.simd.is_empty());
+}
+
+/// Requirement 6: the FMA probe is the silicon's ceiling. No real kernel beats
+/// it (brain's conv mix is held under it), and it never beats the published
+/// peak derived from the cores' issue width and clock.
+#[test]
+fn the_fma_probe_is_a_ceiling_no_kernel_exceeds_and_it_stays_under_the_published_peak() {
+    let r = measured();
+    assert!(r.fma_gflops * 1.1 >= r.conv_gflops, "the conv mix ({} GFLOP/s) beat the FMA probe ({} GFLOP/s)", r.conv_gflops, r.fma_gflops);
+    if let Some(p) = &r.peak {
+        assert!(f64::from(r.fma_gflops) <= 1.05 * p.fp32_gflops, "FMA probe {} GFLOP/s above the published {} GFLOP/s ({})", r.fma_gflops, p.fp32_gflops, p.source);
+    }
 }
 
 /// Requirement 4: fast enough to be one rung of `brain perf roofline`'s "first
 /// result within 10 seconds" budget across every accelerator class - well
-/// under a second on its own, generously bounded (see the assertion) so a loaded CI runner
+/// a few seconds on its own, generously bounded (see the assertion) so a loaded CI runner
 /// doesn't flake.
 #[test]
 fn measure_is_fast() {
+    let _cores = CORES.lock().unwrap_or_else(|e| e.into_inner());
     let t = std::time::Instant::now();
     let r = measure();
     let elapsed = t.elapsed();
-    eprintln!("measure() = {:.1} GFLOP/s (bandwidth_gbs={:?}) in {:?}", r.gflops, r.bandwidth_gbs, elapsed);
+    eprintln!("measure() = {r:?} in {elapsed:?}");
     // perf-number: the 10s budget is a threshold the assertion enforces
-    assert!(elapsed.as_secs_f64() < 2.0, "measure() took {:?}, too slow for a <10s multi-accelerator report", elapsed);
-    assert!(r.gflops > 0.0);
+    assert!(elapsed.as_secs_f64() < 4.0, "measure() took {:?}, too slow for a <10s multi-accelerator report", elapsed);
+    assert!(r.fma_gflops > 0.0);
 }

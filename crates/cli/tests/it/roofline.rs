@@ -22,9 +22,13 @@ fn bin() -> String {
     brain_testutil::package_bin("brain").to_string_lossy().into_owned()
 }
 
+/// `brain perf roofline` with `args`. Without a `--device` of its own a run
+/// selects only the CPU: an unscoped report would otherwise open every card on
+/// the machine, and on a shared node the cards belong to other jobs.
 fn run(args: &[&str]) -> (bool, String, String, Duration) {
     let t0 = Instant::now();
-    let out = Command::new(bin()).args(["perf", "roofline"]).args(args).output().expect("run brain perf roofline");
+    let device: &[&str] = if args.contains(&"--device") { &[] } else { &["--device", "cpu"] };
+    let out = Command::new(bin()).args(["perf", "roofline"]).args(args).args(device).output().expect("run brain perf roofline");
     (out.status.success(), String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned(), t0.elapsed())
 }
 
@@ -135,4 +139,28 @@ fn device_selection_without_a_gpu_opens_no_card() {
     let gpu_lines: Vec<&str> = stdout.lines().filter(|l| l.starts_with("gpu")).collect();
     assert_eq!(gpu_lines.len(), 1, "one placeholder row, no per-card rows:\n{stdout}");
     assert!(gpu_lines[0].contains("no hardware") && gpu_lines[0].contains("no GPU selected"), "{}", gpu_lines[0]);
+}
+
+/// The CPU rows measure the silicon (SIMD FMA) and the memory (STREAM copy and
+/// triad) on every allowed core, name how, and set each value beside the
+/// published peak with its percentage, in the plain line and the JSON alike.
+#[test]
+fn cpu_rows_name_their_method_and_compare_with_the_published_peak() {
+    let (ok, stdout, stderr, _) = run(&["cpu", "--json"]);
+    assert!(ok, "brain perf roofline cpu --json failed: {stderr}");
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("--json output did not parse: {e}\n{stdout}"));
+    let rows = v.as_array().expect("an array of rows");
+    for metric in ["fp32", "mem-copy", "mem-triad"] {
+        let row = rows.iter().find(|r| r["dtype"] == metric).unwrap_or_else(|| panic!("no cpu {metric} row in {stdout}"));
+        assert_eq!(row["status"], "measured", "{row}");
+        let method = row["method"].as_str().unwrap_or_default();
+        assert!(method.contains("threads"), "the {metric} row must say how many threads measured it: {row}");
+        if let (Some(rate), Some(peak)) = (row["rate"].as_f64(), row["peak"].as_f64()) {
+            let pct = row["pct_of_peak"].as_f64().expect("a row with a peak carries its percentage");
+            assert!((pct - 100.0 * rate / peak).abs() < 1e-6, "{row}");
+            assert!(row["line"].as_str().unwrap_or_default().contains('%'), "the plain line shows the percentage: {row}");
+        }
+    }
+    let mem = rows.iter().find(|r| r["dtype"] == "mem-triad").unwrap();
+    assert_eq!(mem["bandwidth_gbs"], mem["rate"], "a memory row carries its value as bandwidth too: {mem}");
 }

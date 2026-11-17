@@ -299,6 +299,9 @@ pub use backend_api::set_cache_dir;
 /// claim in this engine divides by, so that claim is about the device that ran.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod roof;
+/// The vendor's published peaks per device: the comparison column of `brain
+/// perf roofline`, never a grading denominator.
+pub mod published_peak;
 /// Collectives over several cards: device all-reduce and all-gather when the
 /// backend has them, the host otherwise, with the reason stated once.
 #[cfg(not(target_arch = "wasm32"))]
