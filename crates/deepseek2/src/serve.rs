@@ -153,11 +153,7 @@ pub fn pipelines() -> Vec<(&'static str, &'static str)> {
         SlotKernels::pipelines(),
     ]
     .concat();
-    for e in extras {
-        if !v.iter().any(|(n, _)| *n == e.0) {
-            v.push(e);
-        }
-    }
+    model::ops::extend_kernel_list(&mut v, &extras);
     let tiers = kv_tier::kernel_list(&v);
     v.extend(tiers);
     v
@@ -946,5 +942,14 @@ impl PagedDecoder for Engine {
     }
     fn decode_window_capacity(&self) -> usize {
         1
+    }
+}
+
+#[cfg(test)]
+mod kernel_list_tests {
+    /// An engine's list carries the whole `model::ops` façade set both of its `Ops` require.
+    #[test]
+    fn pipelines_have_every_kernel_ops_new_requires() {
+        model::ops::assert_kernel_list_complete(&super::pipelines());
     }
 }

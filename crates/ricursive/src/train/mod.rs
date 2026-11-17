@@ -143,22 +143,15 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
             ("scale_row", kernels::SCALE_ROW),
         ];
         let mut table: Vec<(&'static str, &'static str)> = Vec::new();
-        let add = |table: &mut Vec<(&'static str, &'static str)>, list: &[(&'static str, &'static str)]| {
-            for &entry in list {
-                if !table.iter().any(|(name, _)| *name == entry.0) {
-                    table.push(entry);
-                }
-            }
-        };
-        add(&mut table, &own);
-        add(&mut table, model::ops::training_kernel_list());
-        add(&mut table, model::saved::kernels());
-        add(&mut table, model::head_ce::kernels());
-        add(&mut table, model::ops::frozen_base_kernels());
-        add(&mut table, optim::MOMENT_KERNELS);
-        add(&mut table, &model::lsa::device::KERNELS);
-        add(&mut table, &model::lsa::native::KERNELS);
-        add(&mut table, &gpu_core::sort::KERNELS);
+        use model::ops::extend_kernel_list;
+        extend_kernel_list(&mut table, &own);
+        extend_kernel_list(&mut table, model::ops::training_kernel_list());
+        extend_kernel_list(&mut table, model::saved::kernels());
+        extend_kernel_list(&mut table, model::head_ce::kernels());
+        extend_kernel_list(&mut table, optim::MOMENT_KERNELS);
+        extend_kernel_list(&mut table, &model::lsa::device::KERNELS);
+        extend_kernel_list(&mut table, &model::lsa::native::KERNELS);
+        extend_kernel_list(&mut table, &gpu_core::sort::KERNELS);
         model::adapter::exec::add_kernels(&mut table);
         table
     })
@@ -312,5 +305,14 @@ impl Ripple {
             Some(lora) => model::adapter::device::role_of(name, &lora.hp()),
             None => Role::Trainable,
         }
+    }
+}
+
+#[cfg(test)]
+mod kernel_list_tests {
+    /// A training device's list carries the whole façade and frozen-base set its `Ops` requires.
+    #[test]
+    fn pipelines_have_every_kernel_ops_requires() {
+        model::ops::assert_training_kernel_list_complete(super::pipelines());
     }
 }

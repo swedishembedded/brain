@@ -102,11 +102,9 @@ const OWN_KERNELS: &[(&str, &str)] = &[
 fn kernel_list() -> Vec<(&'static str, &'static str)> {
     let mut list = model::ops::kernel_list().to_vec();
     // The rotated-codebook products of a model loaded from the deployment archive's packed matrices.
-    for &(name, src) in model::ops::cq_kernels().iter().chain(OWN_KERNELS).chain(train::KERNELS) {
-        if !list.iter().any(|(n, _)| *n == name) {
-            list.push((name, src));
-        }
-    }
+    model::ops::extend_kernel_list(&mut list, model::ops::cq_kernels());
+    model::ops::extend_kernel_list(&mut list, OWN_KERNELS);
+    model::ops::extend_kernel_list(&mut list, train::KERNELS);
     list
 }
 
@@ -335,5 +333,14 @@ impl Device {
     pub fn run_read(&self, steps: &[Step], buf: &DeviceBuffer, len: usize) -> Vec<f32> {
         self.gpu().submit(&[], steps);
         self.gpu().read(buf, len)
+    }
+}
+
+#[cfg(test)]
+mod kernel_list_tests {
+    /// A Mirage device's list carries the whole `model::ops` façade set its `Ops` requires.
+    #[test]
+    fn kernels_have_every_kernel_ops_new_requires() {
+        model::ops::assert_kernel_list_complete(&super::Device::kernels());
     }
 }

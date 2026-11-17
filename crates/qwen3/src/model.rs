@@ -302,22 +302,12 @@ const STATIC_PIPELINES: &[(&str, &str)] = &[
 /// only works if the ORIGINAL handle already compiled every name `Ops::new`
 /// looks up; hence this function, not a second kernel list.
 pub fn pipelines() -> &'static [(&'static str, &'static str)] {
-    use gpu_core::select::Dtype;
     static LIST: std::sync::OnceLock<Vec<(&'static str, &'static str)>> = std::sync::OnceLock::new();
     LIST.get_or_init(|| {
         let mut v = STATIC_PIPELINES.to_vec();
         v.push(("matmul_gemv", kernels::MATMUL_GEMV));
-        // `Ops::embed` gathers an int8 table's rows with `embed_i8`, so every `Ops` caller's handle carries it.
-        v.push(("embed_i8", kernels::EMBED_I8));
         // Device AdamW over bf16 or blockwise-int8 moments (`optim::Optim` resolves them by name).
         v.extend(optim::MOMENT_KERNELS);
-        // The quantized-execution contract (`model::ops::tiled`): the resident FP8 full fine-tune multiplies,
-        // back-propagates and takes weight gradients against block-scaled weights through the tile decode.
-        for (name, src) in model::ops::frozen_base_kernels() {
-            if !v.iter().any(|(have, _)| have == name) {
-                v.push((name, src));
-            }
-        }
         // `Ops::bind` resolves its `(RegisterTiled, F32)` kernel by the NAME
         // "matmul_reg2" - but `matmul_reg3` is the bit-identical, measurably
         // faster twin (identical `Params`, identical tiling, only the
@@ -326,123 +316,32 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
         // preferring `matmul_reg2` is correct) this crate's own
         // `linear_kernel` already prefers. Registering the NAME "matmul_reg2"
         // against the `matmul_reg3` SOURCE is exactly the sanctioned escape
-        // hatch `Ops::bind`'s own doc comment describes: "a model with a
-        // differently-named but bit-identical physical kernel simply
-        // registers it under that canonical name when it builds its `Gpu`."
-        // Using the real (slower) `matmul_reg2` source here would silently
-        // undo that speed-up for every RegisterTiled fp32 dispatch this
-        // façade makes.
+        // hatch `Ops::bind`'s own doc comment describes. It is registered
+        // BEFORE the façade set below, so `model::ops::extend_kernel_list`
+        // keeps it and skips the façade's plain `matmul_reg2`.
         v.push(("matmul_reg2", kernels::MATMUL_REG3));
-        v.push(("matmul_i8_dyn", kernels::MATMUL_I8_DYN));
-        v.push(("matmul_i8_gemv", kernels::MATMUL_I8_GEMV));
-        v.push(("matmul_q4_dyn", kernels::MATMUL_Q4_DYN));
-        // M5.5's register-tiled Q4 GEMM - `Ops::bind`'s `(PackedInt8, Q4)`
-        // arm now resolves to this name instead of the naive `matmul_q4_dyn`
-        // above (which stays registered for `model::dispatch`'s own bespoke
-        // selector, unaffected by this facade-only change).
-        v.push(("matmul_q4_dyn_reg", kernels::MATMUL_Q4_DYN_REG));
-        v.push(("matmul_q4_gemv", kernels::MATMUL_Q4_GEMV));
-        v.push(("max_abs_row", kernels::MAX_ABS_ROW));
-        v.push(("quant_pack", kernels::QUANT_PACK));
         // The runtime LoRA epilogue an attached adapter dispatches
         // (`Qwen::attach_adapter`, `model::dispatch::lora_rows_off`).
         v.push(("lora_delta", kernels::LORA_DELTA));
-        // `Ops::REQUIRED_KERNELS` also demands the bf16/f16 storage-tier
-        // variants (B4/B5/B8/B9/B10) even though this crate never builds a
-        // `Weight::BF16`/`Weight::F16` and has its own KV-cache mechanism
-        // (never dispatches the generic `paged_*_batched` family at all) -
-        // see `Ops::new`'s own doc comment ("every model that builds an
-        // `Ops` must register the full façade kernel set, not just the
-        // tiers it plans to use"). Compiled, never dispatched.
-        //
-        // This list deliberately does NOT delegate to the canonical
-        // `model::ops::kernel_list()` (which every other `Ops`-building call
-        // site now does), because it is not the facade set: it extends
-        // `STATIC_PIPELINES` and, crucially, registers the NAME
-        // "matmul_reg2" against the `matmul_reg3` SOURCE above - the
-        // sanctioned name/source override `Ops::bind` documents. Pulling in
-        // the canonical list would re-register "matmul_reg2" with the real
-        // (slower) `matmul_reg2` source and silently undo that speed-up. The
-        // `pipelines_has_every_kernel_ops_new_requires` test below is what
-        // keeps this superset honest against `REQUIRED_KERNELS`.
-        for dt in [Dtype::BF16, Dtype::F16] {
-            v.push(kernels::template::dtype_variant("matmul", kernels::MATMUL, "w", dt).unwrap());
-            v.push(kernels::template::dtype_variant("matmul_gemv", kernels::MATMUL_GEMV, "w", dt).unwrap());
-            v.push(kernels::template::dtype_variant("matmul_reg3", kernels::MATMUL_REG3, "w", dt).unwrap());
-            v.push(kernels::template::dtype_variant("embed", kernels::EMBED, "emb", dt).unwrap());
-            v.push(kernels::template::dtype_variant("embed_tile", kernels::EMBED_TILE, "emb", dt).unwrap());
-            v.push(kernels::template::dtype_variant("moe_linear_gated", kernels::MOE_LINEAR_GATED, "w", dt).unwrap());
-        }
-        v.push(("moe_linear_gated", kernels::MOE_LINEAR_GATED));
-        v.push(("paged_kv_append_batched", kernels::PAGED_KV_APPEND_BATCHED));
-        v.push(
-            kernels::template::dtype_variant_store(
-                "paged_kv_append_batched_word",
-                kernels::PAGED_KV_APPEND_BATCHED_WORD,
-                "pool",
-                Dtype::BF16,
-            )
-            .unwrap(),
-        );
-        // The fp32 `paged_decode_{scores,apply}_batched` are in
-        // `STATIC_PIPELINES`: the chunked prefill dispatches them by index.
-        v.push(
-            kernels::template::dtype_variant(
-                "paged_decode_scores_batched",
-                kernels::PAGED_DECODE_SCORES_BATCHED,
-                "pool_k",
-                Dtype::BF16,
-            )
-            .unwrap(),
-        );
-        v.push(
-            kernels::template::dtype_variant(
-                "paged_decode_apply_batched",
-                kernels::PAGED_DECODE_APPLY_BATCHED,
-                "pool_v",
-                Dtype::BF16,
-            )
-            .unwrap(),
-        );
         // The weight-only int8 variants a LoRA build over an int8 base reads
         // its frozen linears through (`Qwen::new_lora_dt` at `Dtype::I8`).
         for (name, src) in [("matmul", kernels::MATMUL), ("matmul_reg3", kernels::MATMUL_REG3), ("matmul_dx", kernels::MATMUL_DX), ("matmul_dx_reg", kernels::MATMUL_DX_REG)] {
             v.push(kernels::template::int8_weight_variant(name, src, "w", "ws").unwrap());
         }
-        v.push(kernels::template::dtype_variant("matmul_dx", kernels::MATMUL_DX, "w", Dtype::BF16).unwrap());
-        v.push(kernels::template::dtype_variant("matmul_dx_reg", kernels::MATMUL_DX_REG, "w", Dtype::BF16).unwrap());
-        // M12: affine K-quant (Q4_K/Q5_K) kernels plus the group=16 (Q6_K)
-        // reuse of the existing symmetric kernels via template knobs -
-        // `Ops::REQUIRED_KERNELS` demands these too (see `model::ops::
-        // kernel_list`'s own doc comment for why these are `kernels::
-        // template::interned` specialisations, not separate `.wgsl` files).
-        // This crate never builds a `Weight::KQuant` (no GGUF K-quant loader
-        // here). Compiled, never dispatched - same "REQUIRED_KERNELS demands
-        // it, this crate never uses it" precedent as the bf16/f16 storage
-        // tiers above.
-        v.push(("quant_group_sum", kernels::QUANT_GROUP_SUM));
-        v.push(kernels::template::interned("matmul_kq_dyn", kernels::MATMUL_KQ_DYN, &[("CODE_BITS", 4)]).unwrap());
-        v.push(kernels::template::interned("matmul_kq_dyn", kernels::MATMUL_KQ_DYN, &[("CODE_BITS", 8)]).unwrap());
-        v.push(kernels::template::interned("matmul_kq_gemv", kernels::MATMUL_KQ_GEMV, &[("CODE_BITS", 4)]).unwrap());
-        v.push(kernels::template::interned("matmul_kq_gemv", kernels::MATMUL_KQ_GEMV, &[("CODE_BITS", 8)]).unwrap());
-        v.push(kernels::template::interned("matmul_i8_dyn", kernels::MATMUL_I8_DYN, &[("QPG", 1)]).unwrap());
-        v.push(kernels::template::interned("matmul_i8_gemv", kernels::MATMUL_I8_GEMV, &[("WPG", 4)]).unwrap());
-        // Quantized layer-boundary residuals (`model::saved`) pack and unpack on the device; a frozen NF4 or FP8
-        // base trains through the quantized-execution contract: the tile decode of every tier and the column
-        // copies around it. Appended unless already registered above.
-        for &(name, src) in model::saved::kernels().iter().chain(model::ops::frozen_base_kernels()) {
-            if !v.iter().any(|(have, _)| *have == name) {
-                v.push((name, src));
-            }
-        }
+        // The `model::ops` façade set every `Ops` built on this handle requires
+        // (every storage tier, compiled whether or not this crate builds a
+        // weight of it), with the frozen-base training kernels the resident
+        // FP8 full fine-tune multiplies through (`model::ops::tiled`):
+        // appended whole, never re-listed by hand.
+        model::ops::extend_kernel_list(&mut v, model::ops::training_kernel_list());
+        // Quantized layer-boundary residuals (`model::saved`) pack and unpack on the device.
+        model::ops::extend_kernel_list(&mut v, model::saved::kernels());
         model::adapter::exec::add_kernels(&mut v);
         // Native latent sparse attention: the device selection and attention
         // over each query's selection.
-        for (name, src) in model::lsa::device::KERNELS.into_iter().chain(model::lsa::native::KERNELS).chain(gpu_core::sort::KERNELS) {
-            if !v.iter().any(|(have, _)| *have == name) {
-                v.push((name, src));
-            }
-        }
+        model::ops::extend_kernel_list(&mut v, &model::lsa::device::KERNELS);
+        model::ops::extend_kernel_list(&mut v, &model::lsa::native::KERNELS);
+        model::ops::extend_kernel_list(&mut v, &gpu_core::sort::KERNELS);
         v
     })
 }
@@ -5041,7 +4940,7 @@ mod tests {
     /// real request rather than here.
     #[test]
     fn pipelines_has_every_kernel_ops_new_requires() {
-        model::ops::assert_kernel_list_complete(pipelines());
+        model::ops::assert_training_kernel_list_complete(pipelines());
     }
 
     /// `step_embed` must be indistinguishable from `step`: feeding token t's

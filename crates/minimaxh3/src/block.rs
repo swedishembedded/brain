@@ -141,11 +141,7 @@ pub const FLASH_IDS: model::block::FlashIds = model::block::FlashIds {
 /// take them from the same `kernels` catalogue).
 pub fn pipelines() -> Vec<(&'static str, &'static str)> {
     let mut v = KERNELS.to_vec();
-    for &entry in model::ops::two_level_kernel_list() {
-        if !v.iter().any(|(name, _)| *name == entry.0) {
-            v.push(entry);
-        }
-    }
+    model::ops::extend_kernel_list(&mut v, model::ops::two_level_kernel_list());
     v
 }
 
@@ -1004,6 +1000,12 @@ pub fn block_forward(cx: &Ctx, w: &BlockWeights, inp: &BlockInputs, cfg: &H3Tran
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `Ctx`'s list carries the whole `model::ops` façade set its `Ops` requires.
+    #[test]
+    fn pipelines_have_every_kernel_ops_new_requires() {
+        model::ops::assert_kernel_list_complete(&pipelines());
+    }
 
     /// A score matrix too large to address in u32 must be REFUSED, not
     /// silently wrapped.

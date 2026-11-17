@@ -65,23 +65,17 @@ const OWN_KERNELS: [(&str, &str); 14] = [
 /// kernels (`model::kv_tier::kernel_list`), then `extra` (the sparse-attention kernels). A name that two of
 /// them share is registered once.
 pub fn pipelines(cfg: &RicursiveConfig, extra: &[(&'static str, &'static str)]) -> Vec<(&'static str, &'static str)> {
-    fn add(table: &mut Vec<(&'static str, &'static str)>, list: &[(&'static str, &'static str)]) {
-        for &entry in list {
-            if !table.iter().any(|(name, _)| *name == entry.0) {
-                table.push(entry);
-            }
-        }
-    }
+    use model::ops::extend_kernel_list;
     let mut table: Vec<(&'static str, &'static str)> = OWN_KERNELS.to_vec();
-    add(&mut table, model::ops::training_kernel_list());
+    extend_kernel_list(&mut table, model::ops::training_kernel_list());
     // The fused decode attention is specialised for this model's own head shape (80 query heads over 8 kv heads of
     // 128 is a group of 10), at every KV tier; the paged triad stays the CPU JIT's path and the reference.
     let fused = model::kv_tier::kernel_list_for(&table, &[flash_shape(cfg)]);
-    add(&mut table, &fused);
+    extend_kernel_list(&mut table, &fused);
     // A sampled step's keyed draw and its candidate lists (`model::readout::draw_rows`).
-    add(&mut table, &model::readout::DRAW_KERNELS);
-    add(&mut table, &model::readout::READOUT_KERNELS);
-    add(&mut table, extra);
+    extend_kernel_list(&mut table, &model::readout::DRAW_KERNELS);
+    extend_kernel_list(&mut table, &model::readout::READOUT_KERNELS);
+    extend_kernel_list(&mut table, extra);
     table
 }
 
@@ -292,5 +286,15 @@ impl FeedForward<'_> {
             None => rmsnorm(gpu, s, &mlp, self.post_ln, self.hidden, rows, self.eps),
         };
         binary(gpu, s, K_ADD2, x1, &mlp_normed, rows * self.hidden)
+    }
+}
+
+#[cfg(test)]
+mod kernel_list_tests {
+    /// A serving device's list carries the whole façade and frozen-base set its `Ops` requires.
+    #[test]
+    fn pipelines_have_every_kernel_ops_requires() {
+        let cfg = crate::train::TrainConfig::tiny().model;
+        model::ops::assert_training_kernel_list_complete(&super::pipelines(&cfg, &[]));
     }
 }

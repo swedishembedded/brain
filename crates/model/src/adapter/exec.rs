@@ -55,11 +55,7 @@ pub const EXTRA_KERNELS: &[(&str, &str)] =
 /// Append [`EXTRA_KERNELS`] a pipeline list does not already hold. Appending
 /// keeps every existing kernel's index.
 pub fn add_kernels(list: &mut Vec<(&'static str, &'static str)>) {
-    for &(name, src) in EXTRA_KERNELS {
-        if !list.iter().any(|(n, _)| *n == name) {
-            list.push((name, src));
-        }
-    }
+    crate::ops::extend_kernel_list(list, EXTRA_KERNELS);
 }
 
 /// Read access to the adapter tensors of a model: weights, and gradients where

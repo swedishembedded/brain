@@ -694,6 +694,12 @@ impl Dflash2 {
 mod tests {
     use super::*;
 
+    /// The draft device's list carries the whole `model::ops` façade set its `Ops` requires.
+    #[test]
+    fn pipelines_have_every_kernel_ops_new_requires() {
+        model::ops::assert_kernel_list_complete(&pipelines(&Dflash2Config::from_json(TINY).unwrap()));
+    }
+
     /// A small draft config: a block of five rows, one sliding and one full layer.
     const TINY: &str = r#"{
       "dflash_config": {"block_size": 5, "conv_group_size": 8, "conv_kernel_size": 4, "mask_token_id": 3,

@@ -162,7 +162,11 @@ const ADD: &str = "add";
 #[must_use]
 pub fn two_level_kernel_list() -> &'static [(&'static str, &'static str)] {
     static LIST: std::sync::OnceLock<Vec<(&'static str, &'static str)>> = std::sync::OnceLock::new();
-    LIST.get_or_init(|| kernel_list().iter().copied().chain([(QUANT_RESIDUAL_PACK, kernels::QUANT_RESIDUAL_PACK), (ADD, kernels::ADD)]).collect())
+    LIST.get_or_init(|| {
+        let mut list = kernel_list().to_vec();
+        extend_kernel_list(&mut list, &[(QUANT_RESIDUAL_PACK, kernels::QUANT_RESIDUAL_PACK), (ADD, kernels::ADD)]);
+        list
+    })
 }
 
 /// The exact kernel-name spellings this façade dispatches by. Defined ONCE so
@@ -382,9 +386,10 @@ pub const REQUIRED_KERNELS: &[&str] = kname::ALL;
 /// files). That duplication is exactly how `qwen3::serve::ops_kernel_list`
 /// silently drifted **15 kernels short** of [`REQUIRED_KERNELS`] - see
 /// [`assert_kernel_list_complete`] for the full post-mortem. One list,
-/// derived in one place, is the fix; [`assert_kernel_list_complete`] stays
-/// as the gate for any caller that still builds its own (a model that
-/// registers extra kernels of its own beside the façade set).
+/// derived in one place, is the fix: a model that registers kernels of its
+/// own beside the façade set appends this list whole through
+/// [`extend_kernel_list`], and [`assert_kernel_list_complete`] is the test
+/// every such pipeline list carries (`make check/ops-kernel-lists`).
 #[must_use]
 pub fn kernel_list() -> &'static [(&'static str, &'static str)] {
     static LIST: std::sync::OnceLock<Vec<(&'static str, &'static str)>> = std::sync::OnceLock::new();
@@ -552,16 +557,43 @@ pub fn cq_kernels() -> &'static [(&'static str, &'static str)] {
 #[must_use]
 pub fn training_kernel_list() -> &'static [(&'static str, &'static str)] {
     static LIST: std::sync::OnceLock<Vec<(&'static str, &'static str)>> = std::sync::OnceLock::new();
-    LIST.get_or_init(|| kernel_list().iter().chain(frozen_base_kernels()).copied().collect())
+    LIST.get_or_init(|| {
+        let mut list = kernel_list().to_vec();
+        extend_kernel_list(&mut list, frozen_base_kernels());
+        list
+    })
+}
+
+/// Append each of `more` to the pipeline list `list` whose name `list` does not already register: the ONE way a
+/// model composes its kernel list from shared sets ([`kernel_list`] or [`training_kernel_list`], [`cq_kernels`],
+/// `model::saved::kernels()`, ...) and its own.
+///
+/// The first registration of a name wins, because `Gpu::kernel_index` resolves a name to its first slot: a model
+/// lists its own kernels first, so their fixed slots stay where its index constants expect them and a
+/// bit-identical twin it registers under a façade name (`matmul_reg2` over the `matmul_reg3` source, the
+/// sanctioned override `Ops::bind` documents) is the one dispatched.
+///
+/// A model never re-lists a façade kernel by hand: it appends [`kernel_list`] (or [`training_kernel_list`]) here
+/// whole, so a kernel added to [`REQUIRED_KERNELS`] reaches every model the day it is added. Hand-copied façade
+/// entries are how `embed_i8` reached two of the three Qwen lists and left the 27B panicking on every request
+/// (knowledge #507).
+pub fn extend_kernel_list(list: &mut Vec<(&'static str, &'static str)>, more: &[(&'static str, &'static str)]) {
+    let mut have: std::collections::HashSet<&'static str> = list.iter().map(|(name, _)| *name).collect();
+    for &entry in more {
+        if have.insert(entry.0) {
+            list.push(entry);
+        }
+    }
 }
 
 /// Assert `list` (the `(name, wgsl_source)` pairs a caller is about to feed
 /// `Gpu::new`/`gpu_core::testgpu::dev`, or has already registered on some
 /// other `Gpu` it plans to build an [`Ops`] from) names every kernel in
-/// [`REQUIRED_KERNELS`]. A caller that registers exactly the façade set
-/// should call [`kernel_list`] rather than assembling its own list and
-/// checking it here; this stays for the callers that register extra kernels
-/// of their own alongside it. Hand-maintenance is exactly how
+/// [`REQUIRED_KERNELS`]. Every crate that builds an `Ops` calls it on each
+/// pipeline list it builds one from (`make check/ops-kernel-lists` fails a
+/// crate that does not), even when that list appends [`kernel_list`] through
+/// [`extend_kernel_list`]: the test is what keeps the next hand-made list
+/// honest. Hand-maintenance is exactly how
 /// `qwen3::serve`'s
 /// `ops_kernel_list` silently drifted 15 kernels short of `REQUIRED_KERNELS`
 /// (missing `embed`, `moe_linear_gated`, every `paged_*_batched` bf16 tier,
@@ -586,6 +618,21 @@ pub fn assert_kernel_list_complete(list: &[(&str, &str)]) {
         "kernel list is missing {} kernel(s) required by Ops::new: {missing:?} -- every model that \
          builds an `Ops` must register the full façade kernel set (REQUIRED_KERNELS), not just the \
          tiers it plans to use",
+        missing.len()
+    );
+}
+
+/// [`assert_kernel_list_complete`] for a list an `Ops` trains through: it must also carry every
+/// [`frozen_base_kernels`] entry (the tile decode of each stored tier, `copy_cols`, the embedding gradient), which the
+/// quantized-execution contract resolves by name at its first dispatch, not in [`Ops::new`].
+pub fn assert_training_kernel_list_complete(list: &[(&str, &str)]) {
+    assert_kernel_list_complete(list);
+    let have: std::collections::HashSet<&str> = list.iter().map(|(name, _)| *name).collect();
+    let missing: Vec<&str> = frozen_base_kernels().iter().map(|(name, _)| *name).filter(|name| !have.contains(name)).collect();
+    assert!(
+        missing.is_empty(),
+        "kernel list is missing {} frozen-base training kernel(s): {missing:?} -- append model::ops::training_kernel_list() \
+         through model::ops::extend_kernel_list",
         missing.len()
     );
 }
@@ -3442,6 +3489,29 @@ mod tests {
         let without_embed: Vec<(&str, &str)> =
             kernel_list().iter().filter(|(n, _)| *n != kname::EMBED).copied().collect();
         assert_kernel_list_complete(&without_embed);
+    }
+
+    /// A model's own entries keep their slots and win over a façade entry of the same name (a registered twin),
+    /// and every façade name reaches the list exactly once.
+    #[test]
+    fn extend_kernel_list_keeps_the_first_registration_of_each_name() {
+        let mut list = vec![("own_kernel", "own source"), (kname::MATMUL_REG2, kernels::MATMUL_REG3)];
+        extend_kernel_list(&mut list, training_kernel_list());
+        extend_kernel_list(&mut list, training_kernel_list());
+        assert_eq!(list[..2], [("own_kernel", "own source"), (kname::MATMUL_REG2, kernels::MATMUL_REG3)]);
+        let mut names: Vec<&str> = list.iter().map(|(n, _)| *n).collect();
+        names.sort_unstable();
+        let before = names.len();
+        names.dedup();
+        assert_eq!(names.len(), before, "a name was registered twice");
+        assert_training_kernel_list_complete(&list);
+    }
+
+    /// The training check names a missing frozen-base kernel, which `Ops::new` itself never resolves.
+    #[test]
+    #[should_panic(expected = "copy_cols")]
+    fn assert_training_kernel_list_complete_rejects_the_facade_alone() {
+        assert_training_kernel_list_complete(kernel_list());
     }
 
     /// `kname`'s bf16/f16 name literals are plain consts (see that module's

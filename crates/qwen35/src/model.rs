@@ -216,12 +216,13 @@ const STATIC_PIPELINES: &[(&str, &str)] = &[
 ];
 
 /// This model's FULL kernel set: `STATIC_PIPELINES` (every hand-numbered
-/// const above indexes into this - unchanged positions 0..83) followed by
-/// the `model::ops::Ops` façade's own required kernels, appended with NO
-/// named consts of their own - resolved by `Ops::new` purely BY NAME
+/// const above indexes into this), this model's kernels resolved by name,
+/// then `model::ops::training_kernel_list()` appended whole through
+/// `model::ops::extend_kernel_list` - the façade set every `Ops` built on
+/// this handle requires, resolved by `Ops::new` purely BY NAME
 /// (`Gpu::kernel_index`), never by position. Mirrors `qwen35moe::model::
 /// pipelines`'s own recipe (including the `matmul_reg2` -> `matmul_reg3`
-/// bit-identical-faster-twin registration) exactly.
+/// bit-identical-faster-twin registration).
 pub fn pipelines() -> &'static [(&'static str, &'static str)] {
     static LIST: std::sync::OnceLock<Vec<(&'static str, &'static str)>> = std::sync::OnceLock::new();
     LIST.get_or_init(|| {
@@ -251,109 +252,28 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
         v.extend(optim::MOMENT_KERNELS);
         v.push(("gradnorm_part", kernels::GRADNORM_PART));
         v.push(("clip_coef_wg", kernels::CLIP_COEF_WG));
-        v.push(("matmul_gemv", kernels::MATMUL_GEMV));
+        // `Ops::bind` resolves its `(RegisterTiled, F32)` kernel by the name "matmul_reg2"; `matmul_reg3` is its
+        // bit-identical, faster twin, registered under that name before the façade set so it is the one dispatched.
         v.push(("matmul_reg2", kernels::MATMUL_REG3));
-        v.push(("matmul_i8_gemv", kernels::MATMUL_I8_GEMV));
-        v.push(("matmul_q4_dyn", kernels::MATMUL_Q4_DYN));
-        // M5.5's register-tiled Q4 GEMM - `Ops::bind`'s `(PackedInt8, Q4)`
-        // arm now resolves to this name instead of the naive `matmul_q4_dyn`
-        // above (which stays registered for `model::dispatch`'s own bespoke
-        // selector, unaffected by this facade-only change).
-        v.push(("matmul_q4_dyn_reg", kernels::MATMUL_Q4_DYN_REG));
-        v.push(("matmul_q4_gemv", kernels::MATMUL_Q4_GEMV));
-        // This model has no MoE tier at all (see the module doc), so unlike
-        // `qwen35moe::model::STATIC_PIPELINES` - which already carries
-        // `moe_linear_gated` for its own routed experts - the plain (f32)
-        // `moe_linear_gated` name is never registered above; `Ops::
-        // REQUIRED_KERNELS` still demands it (see the bf16/f16 loop below,
-        // which only adds the DTYPE VARIANTS, not this base name).
-        v.push(("moe_linear_gated", kernels::MOE_LINEAR_GATED));
-        // A 248k-row vocabulary's table exceeds one storage binding; `Ops::embed` gathers it in vocab tiles.
-        v.push(("embed_tile", kernels::EMBED_TILE));
         // Copies between two ranges of one buffer (a KV prefix or a pooled state row into another slot).
         v.push(("copy_within", kernels::COPY_WITHIN));
         // The MTP drafter's row moves: a hidden block scattered into a slot's pending rows, a column range copied into a wider row.
         v.push(("row_scatter", kernels::ROW_SCATTER));
         v.push(("copy_cols", kernels::COPY_COLS));
-        // `Ops::REQUIRED_KERNELS` also demands the bf16/f16 storage-tier
-        // variants even though this crate never builds a `Weight::BF16`/
-        // `Weight::F16` and never dispatches the generic `paged_*_batched`
-        // family - see `Ops::new`'s own doc comment ("every model that
-        // builds an `Ops` must register the full façade kernel set, not just
-        // the tiers it plans to use"). Compiled, never dispatched.
-        for dt in [Dtype::BF16, Dtype::F16] {
-            v.push(kernels::template::dtype_variant("matmul", kernels::MATMUL, "w", dt).unwrap());
-            v.push(kernels::template::dtype_variant("matmul_gemv", kernels::MATMUL_GEMV, "w", dt).unwrap());
-            v.push(kernels::template::dtype_variant("matmul_reg3", kernels::MATMUL_REG3, "w", dt).unwrap());
-            v.push(kernels::template::dtype_variant("embed", kernels::EMBED, "emb", dt).unwrap());
-            v.push(kernels::template::dtype_variant("embed_tile", kernels::EMBED_TILE, "emb", dt).unwrap());
-            v.push(kernels::template::dtype_variant("moe_linear_gated", kernels::MOE_LINEAR_GATED, "w", dt).unwrap());
-        }
-        v.push(
-            kernels::template::dtype_variant_store(
-                "paged_kv_append_batched_word",
-                kernels::PAGED_KV_APPEND_BATCHED_WORD,
-                "pool",
-                Dtype::BF16,
-            )
-            .unwrap(),
-        );
-        // The f32 `paged_decode_{scores,apply}_batched` themselves are in
-        // `STATIC_PIPELINES` (this crate dispatches them from its chunked
-        // prefill); only their bf16 storage-tier variants, which nothing here
-        // ever builds a `Weight` for, are appended by name only.
-        v.push(
-            kernels::template::dtype_variant(
-                "paged_decode_scores_batched",
-                kernels::PAGED_DECODE_SCORES_BATCHED,
-                "pool_k",
-                Dtype::BF16,
-            )
-            .unwrap(),
-        );
-        v.push(
-            kernels::template::dtype_variant(
-                "paged_decode_apply_batched",
-                kernels::PAGED_DECODE_APPLY_BATCHED,
-                "pool_v",
-                Dtype::BF16,
-            )
-            .unwrap(),
-        );
-        v.push(kernels::template::dtype_variant("matmul_dx", kernels::MATMUL_DX, "w", Dtype::BF16).unwrap());
-        // M12: affine K-quant (Q4_K/Q5_K) kernels plus the group=16 (Q6_K)
-        // reuse of the existing symmetric kernels via template knobs -
-        // `Ops::REQUIRED_KERNELS` demands these too (see `model::ops::
-        // kernel_list`'s own doc comment for why these are `kernels::
-        // template::interned` specialisations, not separate `.wgsl` files).
-        // This crate never builds a `Weight::KQuant` (no GGUF K-quant loader
-        // here). Compiled, never dispatched - same "REQUIRED_KERNELS demands
-        // it, this crate never uses it" precedent as the bf16/f16 storage
-        // tiers above.
-        v.push(("quant_group_sum", kernels::QUANT_GROUP_SUM));
-        v.push(kernels::template::interned("matmul_kq_dyn", kernels::MATMUL_KQ_DYN, &[("CODE_BITS", 4)]).unwrap());
-        v.push(kernels::template::interned("matmul_kq_dyn", kernels::MATMUL_KQ_DYN, &[("CODE_BITS", 8)]).unwrap());
-        v.push(kernels::template::interned("matmul_kq_gemv", kernels::MATMUL_KQ_GEMV, &[("CODE_BITS", 4)]).unwrap());
-        v.push(kernels::template::interned("matmul_kq_gemv", kernels::MATMUL_KQ_GEMV, &[("CODE_BITS", 8)]).unwrap());
-        v.push(kernels::template::interned("matmul_i8_dyn", kernels::MATMUL_I8_DYN, &[("QPG", 1)]).unwrap());
-        v.push(kernels::template::interned("matmul_i8_gemv", kernels::MATMUL_I8_GEMV, &[("WPG", 4)]).unwrap());
-        // A frozen bf16/NF4 base trains through the tiled bf16 dX and the
-        // float-read NF4 kernels, and the chunked LM head resolves its
-        // elementwise passes by name. Appended unless already registered above.
-        // Training attention also runs the flash trio at long sequences, so
-        // its three kernels are registered too.
-        // A quantized layer-boundary residual stream packs and unpacks on the device
-        // (`model::saved::kernels`).
+        // The `model::ops` façade set every `Ops` built on this handle requires, with the frozen-base training
+        // kernels (the tile decode of every stored tier): appended whole, never re-listed by hand.
+        model::ops::extend_kernel_list(&mut v, model::ops::training_kernel_list());
+        // The chunked LM head resolves its elementwise passes by name, a quantized layer-boundary residual stream
+        // packs and unpacks on the device (`model::saved::kernels`), and training attention runs the causal GQA
+        // flash trio at long sequences.
         let flash = [
             ("flash_attn_causal_gqa", kernels::FLASH_ATTN_CAUSAL_GQA),
             ("flash_attn_causal_gqa_bwd_dq", kernels::FLASH_ATTN_CAUSAL_GQA_BWD_DQ),
             ("flash_attn_causal_gqa_bwd_dkv", kernels::FLASH_ATTN_CAUSAL_GQA_BWD_DKV),
         ];
-        for &(name, src) in model::ops::frozen_base_kernels().iter().chain(model::head_ce::kernels()).chain(model::saved::kernels()).chain(&flash) {
-            if !v.iter().any(|(have, _)| *have == name) {
-                v.push((name, src));
-            }
-        }
+        model::ops::extend_kernel_list(&mut v, model::head_ce::kernels());
+        model::ops::extend_kernel_list(&mut v, model::saved::kernels());
+        model::ops::extend_kernel_list(&mut v, &flash);
         // The compact KV tiers (`model::kv_tier`) are resolved BY NAME when a
         // cache of that tier is used, so their kernels ride along here.
         let kv = model::kv_tier::kernel_list(&v);
@@ -8111,6 +8031,14 @@ type PrefillMixer<'a> = dyn FnMut(usize, LayerType, &DeviceBuffer, &DeviceBuffer
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every handle this crate builds an `Ops` on (the model, its streamed and resident engines, the MTP head, the
+    /// DFlash2 draft beside it) carries the whole façade and frozen-base set: a pure name check, no device.
+    #[test]
+    fn every_pipeline_list_has_every_kernel_ops_requires() {
+        model::ops::assert_training_kernel_list_complete(pipelines());
+        model::ops::assert_training_kernel_list_complete(crate::dflash2::pipelines());
+    }
 
     /// Spec: a resident full fine-tune accepts the documented resident precisions. The run's `grad`/`master`/`value`
     /// govern the resident linears and tables; the tensors left in the store train f32 with no master, and the tables

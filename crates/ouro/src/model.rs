@@ -125,11 +125,8 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
             ("rmsnorm_dw_part", kernels::RMSNORM_DW_PART),
             ("rmsnorm_dw_sum", kernels::RMSNORM_DW_SUM),
         ];
-        for (name, src) in model::ops::kernel_list().iter().copied().chain(extra) {
-            if !v.iter().any(|(have, _)| *have == name) {
-                v.push((name, src));
-            }
-        }
+        model::ops::extend_kernel_list(&mut v, model::ops::kernel_list());
+        model::ops::extend_kernel_list(&mut v, &extra);
         v
     })
 }
@@ -1247,6 +1244,12 @@ fn named(gpu: &Gpu, name: &str) -> Result<usize, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The model's and the serving engine's `Ops` share this list: it carries the whole `model::ops` façade set.
+    #[test]
+    fn pipelines_have_every_kernel_ops_new_requires() {
+        model::ops::assert_kernel_list_complete(pipelines());
+    }
 
     /// The hand-numbered slots index `PIPELINES` positionally; inserting a
     /// kernel without updating them would dispatch the wrong WGSL silently on

@@ -362,11 +362,7 @@ fn pipelines_with_ops() -> &'static [(&'static str, &'static str)] {
     LIST.get_or_init(|| {
         let mut v = pipelines().to_vec();
         // The training list: the façade's kernels plus the tile decoders its quantized products need.
-        for &k in model::ops::training_kernel_list() {
-            if !v.iter().any(|(name, _)| *name == k.0) {
-                v.push(k);
-            }
-        }
+        model::ops::extend_kernel_list(&mut v, model::ops::training_kernel_list());
         v
     })
 }
@@ -386,15 +382,6 @@ fn pipelines_for(tiers: &TierPolicy) -> &'static [(&'static str, &'static str)] 
     }
 }
 
-fn ops_kernel_list() -> &'static [(&'static str, &'static str)] {
-    // The canonical facade set, from `model::ops::kernel_list`. This function
-    // used to hand-maintain its own copy and famously drifted 15 kernels
-    // short of what `Ops::new` requires -- the drift that made one shared
-    // source worth having. There is nothing engine-specific to add here: this
-    // side `Gpu` exists only so `Weight::upload` can quantize and upload, and
-    // never has a `Step` submitted through it.
-    model::ops::kernel_list()
-}
 
 /// Longest on-device decode window (tokens per host round-trip). The scheduler
 /// picks `min(this, tokens remaining)`; the window trades one readback per
@@ -1623,7 +1610,7 @@ impl Engine {
         let staging = checkpoint::packed::BoundedWorkspace::new(checkpoint::packed::MemoryBudget::new(64 << 20, 0));
         // An engine serving a tier through the ops façade runs it on its own device and table
         // (`pipelines_with_ops`); otherwise a side table that only ever uploads.
-        let ops = if needs_ops(tiers) { Ops::new(gpu.share()) } else { Ops::new(gpu.new_like(ops_kernel_list())) }.unwrap_or_else(|e| panic!("serve: Ops::new: {e} (an engine at {} needs the ops façade's kernels: build it with Engine::from_source_tiers)", tiers.describe()));
+        let ops = if needs_ops(tiers) { Ops::new(gpu.share()) } else { Ops::new(gpu.new_like(model::ops::kernel_list())) }.unwrap_or_else(|e| panic!("serve: Ops::new: {e} (an engine at {} needs the ops façade's kernels: build it with Engine::from_source_tiers)", tiers.describe()));
         let (dm, ffm) = (cfg.d_model as usize, cfg.d_ff as usize);
         let (hqm, hkvm) = (cfg.q_dim() as usize, cfg.kv_dim() as usize);
         let dims = move |leaf: &str| -> (usize, usize) {
@@ -4873,22 +4860,16 @@ mod tests {
     use crate::model::Qwen;
     use data::rng::Rng;
 
-    /// `ops_kernel_list()` (the list `Ops::new` is built from at
-    /// `Engine::from_map_with_gpu` - see that function's own call site)
-    /// against `model::ops::REQUIRED_KERNELS` - a pure name-set comparison,
-    /// no `Gpu`/GPU device required, so it runs even where every OTHER test
-    /// in this module needs a real device. This is exactly the check that
-    /// would have caught `ops_kernel_list` being 15 kernels short of
-    /// `REQUIRED_KERNELS` (missing `embed`, `moe_linear_gated`, every
-    /// `paged_*_batched` bf16 tier, and `matmul_dx`/`matmul_dw`) at `cargo
-    /// test` time - the gap instead only surfaced as `Ops::new`'s own `Err`
-    /// on a live server's first real request, because `Engine::from_map_*`
-    /// is only ever reached via the residency pool's lazy `activate()` (GPU
-    /// activation on-demand so many resident models can share one GPU), not
-    /// eagerly at `brain serve` startup.
+    /// `pipelines_with_ops()` (the handle `Ops::new` shares at an NF4/Q4
+    /// tier; every other tier builds its `Ops` on `model::ops::kernel_list()`
+    /// itself) against the façade and frozen-base sets - a pure name-set
+    /// comparison, no device required. `Engine::from_map_*` is only reached
+    /// through the residency pool's lazy `activate()`, so a short list would
+    /// otherwise surface on a live server's first request, as the 15-kernel
+    /// gap of the old hand-kept list here once did.
     #[test]
-    fn ops_kernel_list_has_every_kernel_ops_new_requires() {
-        model::ops::assert_kernel_list_complete(ops_kernel_list());
+    fn pipelines_with_ops_has_every_kernel_ops_requires() {
+        model::ops::assert_training_kernel_list_complete(pipelines_with_ops());
     }
 
     pub(super) fn tiny_weights(cfg: &QwenConfig) -> HashMap<String, Vec<f32>> {
