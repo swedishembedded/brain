@@ -5,6 +5,9 @@ name = "sample-models-toymoe"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Sample application: the toy sparse Mixture-of-Experts transformer: train it on its synthetic corpus, evaluate how well a checkpoint continues it, and sample from it, every served action with every parameter."
 publish = false
 

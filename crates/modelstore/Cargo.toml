@@ -3,6 +3,9 @@ name = "brain-modelstore"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "The on-disk model store: <vendor>/<repo> layout, local discovery, and the fetch resolution ladder (on disk -> upstream quantized artifact -> base + local quantize). No capability, no residency, no model crates -- a leaf between modelref/checkpoint and the CLI."
 
 [lib]

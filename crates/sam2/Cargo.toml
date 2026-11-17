@@ -3,6 +3,9 @@ name = "brain-sam2"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "SAM 2 promptable segmentation: Hiera trunk, FPN neck, prompt encoder and the two-way mask decoder (image path)."
 
 [lib]

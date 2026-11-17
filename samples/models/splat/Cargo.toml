@@ -5,6 +5,9 @@ name = "sample-models-splat"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Sample application: 3D Gaussian Splatting from the command line - render, fit, info, orient, merge, prune, sfm and train, every parameter - plus an interactive fly-through window."
 publish = false
 

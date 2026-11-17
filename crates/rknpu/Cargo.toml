@@ -3,6 +3,9 @@ name = "brain-rknpu"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Rockchip RV1103/RV1106 NPU: brain's own int8 compiler (register command programs) and its /dev/rknpu runtime. No vendor SDK."
 
 [lib]

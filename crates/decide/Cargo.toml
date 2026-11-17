@@ -3,6 +3,9 @@ name = "brain-decide"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Decision model: a bidirectional state encoder plus a candidate-to-state cross-attention head returning calibrated probabilities over runtime-supplied options."
 
 [lib]

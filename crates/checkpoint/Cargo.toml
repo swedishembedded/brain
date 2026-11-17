@@ -3,6 +3,9 @@ name = "brain-checkpoint"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Weight container + manifest (SHA-256) + expert-shard I/O. Portable (no fs on wasm)."
 
 [lib]

@@ -3,6 +3,9 @@ name = "brain-diffusion"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Model-agnostic diffusion core: flow-matching and discrete DDPM noise schedules and their samplers (Euler, DDIM, Euler ancestral, DPM-Solver++, UniPC, SUPIR restoration), as pure host math."
 
 [lib]

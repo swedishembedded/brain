@@ -3,6 +3,9 @@ name = "brain-llmserve"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "The one residency glue for brain's text LLMs: drives a request group through model::serve::Scheduler (continuous batching over any PagedDecoder), with per-request streaming, cancellation, stop strings and adapter routing, the Instance that wraps it, and the registry and verified releases of the LoRA adapters served over one resident base. What every LLM resident serves through."
 
 [lib]

@@ -3,6 +3,9 @@ name = "brain-backend-vulkan"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Native Vulkan (ash + naga WGSL->SPIR-V) eager Backend implementation for brain."
 
 [lib]

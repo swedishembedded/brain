@@ -7,6 +7,9 @@ name = "sample-decision-patterns"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Sample application: one pretrained decision model (Laya, or a crates/decide encoder), demonstrated across nine production decision patterns - routing, guardrails, tool-call gating, triage, reranking, evals, bulk labeling, real-time control, and a confidence gate - each generating its own data and reporting real measured accuracy."
 publish = false
 

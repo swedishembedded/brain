@@ -4,6 +4,9 @@ version.workspace = true
 edition = "2021"
 description = "DIAMOND EDM diffusion world model (Atari-100k): pre-recorded UNet graph, torch .pt import, playable WorldModel. Parity fixtures under tests/fixtures/ via `make wm/fixtures`."
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 
 [lib]
 name = "diamond"

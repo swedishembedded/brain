@@ -5,6 +5,9 @@ name = "sample-models-yolov8"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Sample application: YOLOv8 object detection from the command line - detect (with SCRFD + ArcFace identity verification), train, finetune and eval with every parameter, plus export, INT8 quantization, simulation and detection on the Intel NPU."
 publish = false
 

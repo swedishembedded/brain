@@ -3,6 +3,9 @@ name = "brain-vulkan"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Optional native-Vulkan (ash) execution path: VK_KHR_cooperative_matrix matmul with a naga-compiled WGSL scalar fallback."
 build = "build.rs"
 

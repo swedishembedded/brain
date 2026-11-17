@@ -3,6 +3,9 @@ name = "brain-gpu-worker"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "The supervised device worker: a child process that owns one card's device for a supervisor, opens it, probes it with a real dispatch, and answers the supervisor's line protocol, so a driver call that wedges takes down only this process."
 
 [[bin]]

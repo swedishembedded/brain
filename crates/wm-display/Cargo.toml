@@ -3,6 +3,9 @@ name = "brain-wm-display"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Realtime display + input for world models: SDL2 software-blit window (minimal FFI, always compiled, SDL2 loaded only when a window opens), WASD key chords, fixed-timestep pacing, and headless sinks for CI. Headless runs never touch SDL."
 
 [lib]

@@ -9,6 +9,9 @@ name = "brain"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "The public brain SDK: a small, stable, embeddable facade (ImagePipeline and friends) over brain's model backends, with no CLI binary and no capability-dispatch machinery in the loop."
 
 [lib]

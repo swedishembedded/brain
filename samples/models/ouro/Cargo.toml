@@ -5,6 +5,9 @@ name = "sample-models-ouro"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Sample application: a tiny Ouro looped decoder from random weights - a byte-level vocabulary and chat template, raw-text pretraining with held-out evaluation and its training rate, then a greedy continuation from the trained checkpoint."
 publish = false
 

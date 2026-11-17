@@ -3,6 +3,9 @@ name = "brain-fastvlm"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "FastVLM: FastViTHD conv/attention vision encoder + mlp2x_gelu projector over a spliced Qwen2 decoder."
 
 [lib]

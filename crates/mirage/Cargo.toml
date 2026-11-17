@@ -3,6 +3,9 @@ name = "brain-mirage"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Mirage: a 51M-parameter visual perception model (convolutional stem, HConvGLU body, attention top, dense detection/mask head, text reader and a lane-mixing decoder). Foundation layer: typed config, canonical tensor manifest, strict safetensors import/export, the .cact container reader with Cactus-Quant decoding, and the SentencePiece-BPE tokenizer."
 
 [lib]

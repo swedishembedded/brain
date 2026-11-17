@@ -3,6 +3,9 @@ name = "brain-paramstore"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Model-agnostic param/grad/Adam buffer storage with grad-clip plumbing."
 
 [lib]

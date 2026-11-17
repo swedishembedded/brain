@@ -5,6 +5,9 @@ name = "sample-models-timesfm3"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Sample application: the TimesFM-3 forecaster beyond its served actions - the scenario battery against the statistical baselines and the JSONL forecasting server over a Unix socket."
 publish = false
 

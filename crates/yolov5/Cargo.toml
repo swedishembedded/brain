@@ -3,6 +3,9 @@ name = "brain-yolov5"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "YOLOv5 (Ultralytics v6+ layout) anchor-based detector: layer graph, brain checkpoint loading and anchor decode on the host, fp32 reference forward through gpu_core."
 
 [lib]

@@ -7,6 +7,9 @@ name = "sample-text-embed"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Sample application: embed text with brain::EmbeddingPipeline, including a real 32k-token document."
 publish = false
 

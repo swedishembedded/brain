@@ -3,6 +3,9 @@ name = "brain-audit"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "The model-free core of a continual reader: the episode stream it reads, the probe bank it freezes, the bounded retention audit it runs against that bank, and the ledger it writes down. A LEAF crate by design - its whole closure is brain-data and below, so the model-driven loop in brain-rl can drive it without any model crate appearing in its dependencies."
 
 [lib]

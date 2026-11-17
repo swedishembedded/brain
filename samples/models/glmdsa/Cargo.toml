@@ -5,6 +5,9 @@ name = "sample-models-glmdsa"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Sample application: the GLM-5.2 decoder from the command line - train, finetune, eval, generate and import with every parameter, plus the ONNX export and greedy decoding on the Intel NPU through OpenVINO."
 publish = false
 

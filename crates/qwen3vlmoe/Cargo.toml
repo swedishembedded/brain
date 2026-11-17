@@ -3,6 +3,9 @@ name = "brain-qwen3vlmoe"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Qwen3-VL-30B-A3B (qwen3vlmoe): qwen3vl's ViT + PatchMerger + DeepStack vision tower spliced onto a Qwen3-MoE (top-k sparse, no shared expert) decoder."
 
 [lib]

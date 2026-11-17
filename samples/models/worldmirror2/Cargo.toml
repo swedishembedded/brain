@@ -5,6 +5,9 @@ name = "sample-models-worldmirror2"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Sample application: WorldMirror-2 multi-view 3D reconstruction from the command line - photographs or a video to a Gaussian-splat scene and cameras, checkpoint import, and ONNX export of the model's stages for the Intel NPU."
 publish = false
 

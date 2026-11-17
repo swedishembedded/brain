@@ -3,6 +3,9 @@ name = "brain-deepseek2"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "DeepSeek-V2-family MHA decoder (DeepSeek-OCR's language model): dense-then-MoE blocks, NEOX RoPE, fused unweighted shared experts; forward + backprop in WGSL."
 
 [lib]

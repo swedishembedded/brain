@@ -3,6 +3,9 @@ name = "brain-modernbert"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "ModernBERT: pre-LN bidirectional encoder with alternating full/local-window RoPE attention and a GeGLU MLP, plus Laya's decision head on top of it."
 
 [lib]

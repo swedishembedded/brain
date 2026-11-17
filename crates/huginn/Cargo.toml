@@ -3,6 +3,9 @@ name = "brain-huginn"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Huginn (Raven): a recurrent-depth decoder with a prelude, a shared recurrent core and a coda."
 
 [lib]

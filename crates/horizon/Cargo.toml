@@ -3,6 +3,9 @@ name = "brain-horizon"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Continuous-time subject-timeline model: irregular histories in, cause-specific cumulative incidence and value distributions at any future time out."
 
 [lib]

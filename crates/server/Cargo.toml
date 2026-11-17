@@ -3,6 +3,9 @@ name = "brain-server"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "One JSONL protocol over stdio and an owner-only Unix socket, both carrying identical events::Event frames. Thread-per-connection, bounded, panic-isolated."
 
 [lib]

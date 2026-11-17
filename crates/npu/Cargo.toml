@@ -3,6 +3,9 @@ name = "brain-npu"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "YOLO -> ONNX export + brain-native INT8 PTQ + optional OpenVINO NPU runtime."
 build = "build.rs"
 

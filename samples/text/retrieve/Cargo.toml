@@ -7,6 +7,9 @@ name = "sample-text-retrieve"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Sample application: exact brute-force top-k retrieval over a text corpus, through brain::EmbeddingPipeline."
 publish = false
 

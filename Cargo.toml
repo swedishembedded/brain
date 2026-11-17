@@ -311,7 +311,6 @@ brain = { path = "crates/sdk", default-features = false }
 brain-captioner = { path = "crates/captioner" }
 brain-memauth = { path = "crates/memauth" }
 brain-gpu-supervisor = { path = "crates/gpu-supervisor" }
-brain-gpu-worker = { path = "crates/gpu-worker" }
 brain-weightset = { path = "crates/weightset" }
 brain-residency = { path = "crates/residency" }
 brain-stats = { path = "crates/stats" }
@@ -319,7 +318,6 @@ brain-trace = { path = "crates/trace" }
 brain-dbus = { path = "crates/dbus" }
 brain-shutdown = { path = "crates/shutdown" }
 brain-apiserve = { path = "crates/apiserve" }
-braintop = { path = "crates/braintop" }
 brain-events = { path = "crates/events" }
 brain-hfsm = { path = "crates/hfsm" }
 brain-wm-core = { path = "crates/wm-core" }
@@ -330,7 +328,6 @@ brain-viewport = { path = "crates/viewport" }
 # The option grammar the CLI and the samples share.
 brain-appopts = { path = "crates/appopts" }
 brain-diamond = { path = "crates/diamond" }
-brain-genieredux = { path = "crates/genieredux" }
 brain-vision = { path = "crates/vision" }
 brain-imaging = { path = "crates/imaging" }
 brain-sam2 = { path = "crates/sam2" }
@@ -356,7 +353,6 @@ brain-controlnet = { path = "crates/controlnet" }
 brain-supir = { path = "crates/supir" }
 brain-llava = { path = "crates/llava" }
 brain-pulid = { path = "crates/pulid" }
-brain-instantid = { path = "crates/instantid" }
 brain-imgpipe = { path = "crates/imgpipe" }
 brain-wan = { path = "crates/wan" }
 brain-ltxv = { path = "crates/ltxv" }
@@ -543,7 +539,6 @@ crossterm = { version = "0.29", features = ["event-stream"] }
 
 # crates/atif (brain's ATIF v1.7 trajectory model, validator and persistence).
 # Unrelated to crates/trace above, which is the tracing/observability crate.
-chrono = { version = "0.4", features = ["serde"] }
 thiserror = "2"
 tempfile = "3"
 # libc was previously only a literal per-crate dep (crates/gpu-core,

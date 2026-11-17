@@ -3,6 +3,9 @@ name = "brain-dbus"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Optional D-Bus (zbus) control surface for brain: exposes the capability::Registry over com.swedishembedded.Brain1, passing images/streams/results as file descriptors (memfd/mmap + dmabuf). A thin front-end over the sync Registry — no model code here."
 
 [lib]

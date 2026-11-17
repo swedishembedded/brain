@@ -3,6 +3,9 @@ name = "brain-zipdepth"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Monocular depth: ZipDepth (6.1M pure-conv, RepVGG-reparameterizable) behind a dense relative inverse-depth output contract."
 
 [lib]

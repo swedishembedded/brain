@@ -3,6 +3,9 @@ name = "brain-t5encoder"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "T5-XXL encoder — the text conditioning FLUX.1 needs alongside CLIP-L."
 
 [lib]

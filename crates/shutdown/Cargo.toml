@@ -3,6 +3,9 @@ name = "brain-shutdown"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Process lifecycle signalling for every serving surface (D-Bus, HTTP): one coordinated shutdown source (a tokio-agnostic watch-based token, fired from a single dedicated signal thread that owns SIGINT/SIGTERM, awaited from any runtime) and one readiness latch (ready::Gate, a counting marker-file signal that fires once every requested surface has bound). Exists so a process serving --dbus and an HTTP surface together has exactly one place that claims the process signal disposition, and exactly one place an external script waits on to know every surface is actually up."
 
 [lib]

@@ -5,6 +5,9 @@ name = "brain-wgsl-cuda"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Translate brain's WGSL compute kernels to CUDA C++ text via naga IR - the generated (T0) implementation tier."
 
 [lib]

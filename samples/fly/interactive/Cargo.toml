@@ -3,6 +3,9 @@ name = "sample-fly-interactive"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Sample application: drive a fruit fly's connectome in a MuJoCo body and watch it in a window, through the public brain SDK."
 publish = false
 

@@ -3,6 +3,9 @@ name = "brain-memauth"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "The process-wide memory authority: a live, injectable view of how much host RAM (and, per pool, device memory) is actually free right now -- across physically-shared pools (a unified-memory box's iGPU and CPU RAM are the SAME bytes), a cgroup limit tighter than /proc/meminfo, and another process taking RAM mid-run. A leaf crate (std only), so `residency` (cross-instance placement) depends on it without pulling in GPU or model code."
 
 [lib]

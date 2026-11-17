@@ -3,6 +3,9 @@ name = "brain-fly"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "The composed animal: a connectome running as a spiking network, driving a MuJoCo body through its motor neurons, and reading that body back through its proprioceptors."
 
 [lib]
@@ -17,10 +20,10 @@ brain-mujoco.workspace = true
 brain-neuro.workspace = true
 # The sign test: 'it learned' has to be a statistic over matched pairs, and
 # `promote` is a leaf crate carrying exactly that.
-brain-promote.workspace = true
 brain-seed.workspace = true
 
 [dev-dependencies]
+brain-promote.workspace = true
 brain-testutil.workspace = true
 # The flight model is GENERATED from the published walking one; it is written
 # to a temp directory rather than next to a model that is not ours to modify.

@@ -6,6 +6,9 @@ name = "brain-openseeface"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "OpenSeeFace face detection and 66-point face landmarks (BSD-2-Clause weights): the released MobileNetV3 detector and landmark networks rebuilt on brain's shared vision blocks, imported from their ONNX graphs, with the reference tracker's detect, crop, decode and track-from-landmarks loop."
 
 [lib]

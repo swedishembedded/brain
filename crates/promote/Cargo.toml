@@ -3,6 +3,9 @@ name = "brain-promote"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "The model-agnostic promote/reject decision: the Environment/Verifier reward seam, the exact paired sign test and the four-bar promotion gate built on it. A LEAF crate by design - it depends on no model crate, so a model crate (brain-qwen3 and friends, layer 4) can gate a candidate adapter without dragging in the training stack. brain-rl and brain-bench re-export it, so every existing caller of rl::gate / bench::metrics::sign_test is unchanged."
 
 [lib]

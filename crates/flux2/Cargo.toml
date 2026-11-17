@@ -3,6 +3,9 @@ name = "brain-flux2"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "FLUX.2 Klein (4B/9B) text-to-image + image-editing: MMDiT double/single-stream diffusion transformer over the FLUX.2 128-channel VAE latent with Qwen3 multi-layer text conditioning, assembled from the shared dit/vae/diffusion crates. Forward-first; training (backward + LoRA) builds on it."
 
 [lib]

@@ -5,6 +5,9 @@ name = "sample-vision-perception"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Sample application: describe an image and extract a form from it with Mirage through the public brain SDK."
 publish = false
 

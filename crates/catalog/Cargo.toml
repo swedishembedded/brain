@@ -3,6 +3,9 @@ name = "brain-catalog"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "The served-model catalog: one entry per model (manifest + provider constructor) in one place, so `brain caps`/`brain do`, the D-Bus/HTTP surfaces and any other in-process consumer discover and construct the ~70 registered model crates from a SINGLE list instead of drifting hand-maintained copies."
 
 [lib]

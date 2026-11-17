@@ -5,6 +5,9 @@ name = "sample-models-qwen3omnimoe"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Sample application: Qwen3-Omni from the command line - generate, speak and converse with every parameter, plus the export of its audio tower, vision tower and Code2Wav vocoder as ONNX graphs for OpenVINO and the Intel NPU."
 publish = false
 

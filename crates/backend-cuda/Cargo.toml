@@ -3,6 +3,9 @@ name = "brain-backend-cuda"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Native CUDA Driver API backend for brain (runtime-loaded libcuda.so.1; no build-time CUDA dependency)."
 
 [lib]

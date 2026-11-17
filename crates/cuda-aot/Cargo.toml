@@ -5,6 +5,9 @@ name = "brain-cuda-aot"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Offline builder for brain's CUDA kernels: compiles the generated tier and the native kernels into per-architecture cubins plus a manifest the CUDA backend loads without NVRTC."
 
 [[bin]]

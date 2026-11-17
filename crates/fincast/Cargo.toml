@@ -3,6 +3,9 @@ name = "brain-fincast"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "FinCast (Vincent05R/FinCast) from scratch: TimesFM-style patched decoder with a sparse top-2 MoE and a probabilistic-quantile head. Apache-2.0 reference (research/educational use only); imported exactly, parity-gated."
 
 [lib]

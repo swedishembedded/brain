@@ -3,6 +3,9 @@ name = "brain-capability"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Generalized model-capability interface: models advertise typed actions (a Manifest of ActionSpecs); the CLI and the event API dispatch them generically. Adding a capability is implementing an Action — no new commands or event variants."
 
 [lib]
@@ -11,7 +14,6 @@ path = "src/lib.rs"
 
 [dependencies]
 # `Invocation::seed` parses the request's `seed` with the shared seed rules.
-brain-seed.workspace = true
 serde_json.workspace = true
 # `scratch::private_dir`: the effective uid a private directory must belong to.
 libc.workspace = true

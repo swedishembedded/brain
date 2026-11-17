@@ -7,6 +7,9 @@ name = "sample-decision-triage"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Sample application: train a decision model on BANKING77 and then answer questions about new messages, through the public brain SDK."
 publish = false
 

@@ -7,6 +7,9 @@ name = "sample-decision-doom"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Sample application: a decision model learning to play DOOM from the game's own structured state, with the decisions visible while it plays."
 publish = false
 

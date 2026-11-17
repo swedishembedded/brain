@@ -7,6 +7,9 @@ name = "sample-imagegen-generate"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Sample application: generate an image from a text prompt through the public brain SDK."
 publish = false
 

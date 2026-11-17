@@ -6,6 +6,9 @@ name = "brain-mvs"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Dense multi-view stereo on the GPU through any lens: PatchMatch over per-pixel range and normal hypotheses with bilaterally weighted NCC, joint view selection, red-black adaptive propagation, geometric consistency across a coarse-to-fine pyramid, consistency filtering and point fusion - and the surface-aligned gaussian scene a splat fit starts from."
 
 [lib]

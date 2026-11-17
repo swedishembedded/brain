@@ -3,6 +3,9 @@ name = "brain-modelopt"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Model optimization: measured, budget-constrained compression of any model::Model. Ranks every quantizable linear and storage tier by its estimated loss increase, solves for the assignment that fits a byte budget, and accepts a result only on a whole-model measurement on held-out data. No architecture-specific code."
 
 [lib]

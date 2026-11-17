@@ -7,6 +7,9 @@ name = "sample-study-chat"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Sample application: LoRA fine-tune a chat model on a tiny dataset, score it held-out, resume a cancelled run exactly, and chat with the adapter, through the public brain SDK."
 publish = false
 

@@ -6,6 +6,9 @@ name = "brain-deepseek2ocr"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "DeepSeek-OCR composite: the DeepEncoder (SAM ViT-B + 16x compressor -> CLIP-L with its patch embed bypassed -> concat + linear projector) spliced into the DeepSeek-V2 MHA decoder."
 
 [lib]

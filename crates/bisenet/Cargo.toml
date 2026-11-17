@@ -3,6 +3,9 @@ name = "brain-bisenet"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "BiSeNet face parsing (19-class): the facexlib/PuLID reference face-region segmentation network - ResNet18 context path + attention refinement + feature fusion."
 
 [lib]

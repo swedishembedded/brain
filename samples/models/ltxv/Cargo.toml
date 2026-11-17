@@ -5,6 +5,9 @@ name = "sample-models-ltxv"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Sample application: LTX-2.5 text-, image- and audio-to-video, masked editing, upscaling, extension and person replacement from the command line, every served action with every parameter, plus chaining stills into one clip."
 publish = false
 

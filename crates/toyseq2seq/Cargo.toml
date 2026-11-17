@@ -3,6 +3,9 @@ name = "brain-toyseq2seq"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Encoder-decoder Transformer (bidirectional encoder + causal/cross-attention decoder): forward + backprop in WGSL."
 
 [lib]

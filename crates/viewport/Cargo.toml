@@ -3,6 +3,9 @@ name = "brain-viewport"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "A window and a drawing surface for sample applications: an RGB8 canvas presented through SDL2 when a display exists, written to a PNG when one does not, with the SAME pixels either way."
 
 [lib]

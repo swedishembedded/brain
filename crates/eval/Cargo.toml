@@ -3,6 +3,9 @@ name = "brain-eval"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Unified evaluation: validation perplexity + task exact-match, for apples-to-apples model comparison."
 
 [lib]

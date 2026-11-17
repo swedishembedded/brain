@@ -3,6 +3,9 @@ name = "brain-ltxv"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "LTX-2.5 two-stream audio+video diffusion transformer. This milestone: the causal 3D video VAE (encoder + conv decoder, crates/vae's blocks3d primitives), the video-only DiT stream (tiny-config parity), and the end-to-end t2v pipeline + serving contract (real VAE + tiny random-weight DiT + a stub text context, no real 22B DiT / Gemma-4 text encoder yet), built on brain-vae / brain-dit / brain-diffusion / brain-capability / brain-data / brain-checkpoint / brain-gpu-core / brain-kernels; the audio stack, A<->V cross-attention, real text encoder and NA diffusion decoder land in later milestones."
 
 [lib]

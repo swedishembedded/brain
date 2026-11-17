@@ -3,6 +3,9 @@ name = "braintop"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "braintop: a standalone btop-like TUI (and `--cli` one-shot) that renders brain's live serving state — accelerators, model residency, executor counters, in-flight requests — by subscribing to the `StatsStream` D-Bus signal (com.swedishembedded.Brain1) with a `stats_snapshot()` poll fallback. Depends only on the shared `brain-stats` types; no engine/model code."
 
 [lib]

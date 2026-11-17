@@ -5,6 +5,9 @@ name = "sample-models-diamond"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Sample application: the DIAMOND Atari world model from the command line - import, export, finetune, rollout, replay and bench with every parameter - plus an interactive play window."
 publish = false
 

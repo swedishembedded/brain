@@ -3,6 +3,9 @@ name = "brain-januspro"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Janus-Pro: SigLIP-L understanding tower, VQ-16 image tokenizer and generation heads around a Llama decoder."
 
 [lib]

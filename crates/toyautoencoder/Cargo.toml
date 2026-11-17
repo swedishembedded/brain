@@ -3,6 +3,9 @@ name = "brain-toyautoencoder"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Bottleneck autoencoder (sequence -> single compressed representation -> MLP reconstruction): forward + backprop in WGSL, MSE Regression head."
 
 [lib]

@@ -3,6 +3,9 @@ name = "brain-recon"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Model-agnostic 3D reconstruction orchestration: mixed image/video ingest, sharpness and near-duplicate frame selection, overlapping chunk planning, Sim3 chunk registration with a residual quality gate, and the global fuse/prune/orient finish."
 
 [lib]

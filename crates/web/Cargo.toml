@@ -3,6 +3,9 @@ name = "brain-web"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Browser (wasm32 + WebGPU) inference entry point for the PID transformer demo."
 
 [lib]

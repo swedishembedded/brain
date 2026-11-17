@@ -3,6 +3,9 @@ name = "brain-sfm"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Structure from motion from photographs alone: SIFT features, pair selection by VLAD retrieval, mutual ratio-test matching, five-point LO-RANSAC essential-matrix verification on bearing vectors, global initialization (robust rotation averaging, global positioning) with incremental P3P registration as fallback, triangulation and Levenberg-Marquardt bundle adjustment that self-calibrates each physical camera under a selected lens model (pinhole, Brown-Conrady, Kannala-Brandt fisheye), and georeferencing: metres from GPS by a robust similarity, gravity from how the cameras were held."
 
 [lib]

@@ -3,6 +3,9 @@ name = "sample-npu-rockchip"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Sample application: real-time object detection on a Rockchip RV1103/RV1106 board through brain's DetectionPipeline on the NPU, streamed over RTSP."
 publish = false
 

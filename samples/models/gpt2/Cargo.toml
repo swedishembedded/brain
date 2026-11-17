@@ -5,6 +5,9 @@ name = "sample-models-gpt2"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Sample application: the dense GPT baseline: train it on a character dataset (alone or as one rank of a distributed job), generate text and evaluate a checkpoint, every served action with every parameter."
 publish = false
 

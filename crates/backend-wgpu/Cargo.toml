@@ -3,6 +3,9 @@ name = "brain-backend-wgpu"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "wgpu (Vulkan/Metal/DX12/GL/WebGPU) eager Backend implementation for brain."
 
 [lib]

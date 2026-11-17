@@ -3,6 +3,9 @@ name = "brain-videocodec"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Video without ffmpeg: AV1 encode (rav1e) and decode (rav1d) with Opus sound, in WebM/Matroska and MP4, read and written in-process."
 
 [lib]

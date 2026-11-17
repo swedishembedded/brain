@@ -3,6 +3,9 @@ name = "brain-codeformer"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "CodeFormer face restoration: the code-prediction transformer and controllable feature transformation over crates/vqgan, with the identity-fidelity dial w."
 
 [lib]

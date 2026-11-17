@@ -3,6 +3,9 @@ name = "brain-forecastops"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "The capability-facing operations every forecasting model shares: scoring a forecast against held-out data (predict), the scenario battery (compare), and the universe loading a fine-tune reads. One implementation behind brain's served actions and the per-model samples."
 
 [lib]

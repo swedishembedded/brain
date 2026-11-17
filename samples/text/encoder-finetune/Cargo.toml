@@ -7,6 +7,9 @@ name = "sample-text-encoder-finetune"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Sample application: full-encoder contrastive fine-tuning of LFM2.5-Encoder with brain::EncoderFineTuner, reporting recall@1 before and after via brain::EmbeddingPipeline."
 publish = false
 

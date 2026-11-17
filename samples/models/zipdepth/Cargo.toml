@@ -5,6 +5,9 @@ name = "sample-models-zipdepth"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Sample application: ZipDepth monocular depth from the command line - infer, train and calib with every parameter - plus image and live-camera depth windows on the engine or the NPU."
 publish = false
 

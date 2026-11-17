@@ -3,6 +3,9 @@ name = "brain-gpt2"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Dense GPT decoder Transformer (nanogpt parity): forward + backprop in WGSL."
 
 [lib]

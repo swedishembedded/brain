@@ -7,6 +7,9 @@ name = "sample-decision-arena"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Sample application: a decision model learning to play a corridor shooter by reinforcement, choosing from an action set that changes every tick."
 publish = false
 

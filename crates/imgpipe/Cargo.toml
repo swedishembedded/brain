@@ -3,6 +3,9 @@ name = "brain-imgpipe"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "The composed imaging pipeline: segment -> edit -> restore -> upscale as one capability Action over a JSON stage graph."
 
 [lib]

@@ -7,6 +7,9 @@ name = "sample-vision-fishtank"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Sample application: head-coupled perspective (fish tank VR) - a shader-rendered scene that stays fixed behind and in front of the laptop screen while the viewer moves."
 publish = false
 

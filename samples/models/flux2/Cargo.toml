@@ -5,6 +5,9 @@ name = "sample-models-flux2"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Sample application: FLUX.2 Klein text-to-image, editing, inpainting and LoRA training from the command line, every served action with every parameter."
 publish = false
 

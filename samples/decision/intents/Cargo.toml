@@ -5,6 +5,9 @@ name = "sample-decision-intents"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Sample application: does a decision model actually READ its options? Trains on some intents and scores on intents it has never seen."
 publish = false
 

@@ -3,6 +3,9 @@ name = "brain-neuro"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Sparse stateful neural runtime: a CSC connectome, leaky integrate-and-fire dynamics on the GPU or CPU, and the DynamicalSystem/Plastic seams a digital creature is built on. Knows nothing about any particular animal."
 
 [lib]

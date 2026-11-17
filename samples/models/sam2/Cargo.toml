@@ -5,6 +5,9 @@ name = "sample-models-sam2"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Sample application: SAM 2.1 segmentation and video tracking from the command line, every served action with every parameter."
 publish = false
 

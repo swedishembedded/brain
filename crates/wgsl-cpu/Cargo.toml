@@ -3,6 +3,9 @@ name = "brain-wgsl-cpu"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Compile brain's WGSL compute kernels to native CPU code via naga IR -> Cranelift JIT."
 
 [lib]

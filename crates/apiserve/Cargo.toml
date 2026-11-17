@@ -3,6 +3,9 @@ name = "brain-apiserve"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Provider-shaped HTTP surfaces (Anthropic Messages, OpenAI, OpenRouter) that let brain act as a backend for external agents. Stands on residency::Executor: auth, /models, and per-provider chat/embeddings/image endpoints. A thin front-end over the shared executor — no model code here."
 
 [lib]

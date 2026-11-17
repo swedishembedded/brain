@@ -3,6 +3,9 @@ name = "brain-bench"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Model-agnostic architecture-evaluation benchmark suite (registry + runner + reference benchmarks like MQAR)."
 
 [lib]
@@ -25,7 +28,6 @@ brain-toymoe.workspace = true
 brain-qwen3.workspace = true
 brain-glmdsa.workspace = true
 brain-toyautoencoder.workspace = true
-brain-eval.workspace = true
 brain-checkpoint.workspace = true
 # `metrics::sign_test`/`SignTest` - re-exported, not reimplemented. They were
 # defined here until a model crate needed the promote/reject gate built on
@@ -46,4 +48,5 @@ serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
+brain-eval.workspace = true
 brain-testutil.workspace = true

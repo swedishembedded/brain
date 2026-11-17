@@ -3,6 +3,9 @@ name = "brain-gguf"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "GGUF import layer: architecture-keyed hyperparameter extraction, tensor-name classification and a streaming two-way-coverage import driver on top of brain-checkpoint's low-level GGUF reader."
 
 [lib]

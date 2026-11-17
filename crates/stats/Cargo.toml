@@ -3,6 +3,9 @@ name = "brain-stats"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Self-describing, hierarchical JSON stats for brain: a data-driven StatsSnapshot tree (accelerators / models / executor / requests / connections + an open `extra` map) assembled from registered StatsSource contributors. Serde-only data + assembly plus live sources that read the residency Executor — the contract braintop renders."
 
 [lib]

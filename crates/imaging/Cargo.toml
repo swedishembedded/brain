@@ -3,6 +3,9 @@ name = "brain-imaging"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "The image substrate: decode/encode, device-dispatched resize/pad/crop/layout, colour normalisation, mask algebra and tiling - one home for what was scattered across depth, yolo, mirror, zimage, capture and cli."
 
 [lib]

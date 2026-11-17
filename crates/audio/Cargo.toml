@@ -3,6 +3,9 @@ name = "brain-audio"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Audio foundation for the TTS stack: wav I/O, resampling, STFT/mel, and 1D-conv / transposed-conv Step-builders over the shared WGSL engine."
 
 [lib]

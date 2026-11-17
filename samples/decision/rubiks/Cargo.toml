@@ -5,6 +5,9 @@ name = "sample-decision-rubiks"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Sample application: a decision model drives a Rubik's cube solver - a deterministic planner describes the legal moves, the model picks, and a shield executes the best admissible pick, so the cube is always solved and the model's contribution is measured."
 publish = false
 

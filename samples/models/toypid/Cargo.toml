@@ -5,6 +5,9 @@ name = "sample-models-toypid"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Sample application: the PID event/effect control transformer: train it on simulated plants, run a checkpoint in closed loop against each plant's oracle controller, and time one inference, every served action with every parameter."
 publish = false
 

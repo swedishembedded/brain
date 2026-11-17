@@ -3,6 +3,9 @@ name = "brain-lpips"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "LPIPS v0.1 (AlexNet) perceptual image distance on the device: torchvision's ImageNet AlexNet trunk and the five learned linear heads, composed from the shared conv-net blocks."
 
 [lib]

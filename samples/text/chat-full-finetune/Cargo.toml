@@ -7,6 +7,9 @@ name = "sample-text-chat-full-finetune"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Sample application: full-parameter fine-tuning of a chat model on a chat dataset with brain::ChatFullFineTune, reporting the run's losses, footprint and checkpoint."
 publish = false
 

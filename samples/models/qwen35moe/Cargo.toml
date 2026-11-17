@@ -5,6 +5,9 @@ name = "sample-models-qwen35moe"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Sample application: the Qwen3.5-35B-A3B decoder from the command line - generate with every parameter, plus the ONNX decoder export for OpenVINO and the NPU."
 publish = false
 

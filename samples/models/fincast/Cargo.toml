@@ -5,6 +5,9 @@ name = "sample-models-fincast"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Sample application: the FinCast forecaster beyond its served actions - the scenario battery against the statistical baselines, the transformer core on the Intel NPU through OpenVINO, and the JSONL forecasting server over a Unix socket."
 publish = false
 

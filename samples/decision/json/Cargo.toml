@@ -7,6 +7,9 @@ name = "sample-decision-json"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Sample application: a JEV-style JSON decision endpoint on stdin/stdout - typed questions (choice/score/noul) about one state, answered by a local decision model."
 publish = false
 

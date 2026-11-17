@@ -3,6 +3,9 @@ name = "brain-gpu-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Compute-device facade: selects and forwards to an eager Backend (wgpu / native CPU / native Vulkan)."
 
 [lib]

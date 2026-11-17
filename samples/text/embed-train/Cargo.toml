@@ -7,6 +7,9 @@ name = "sample-text-embed-train"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Sample application: contrastively fine-tune a projection head over frozen embeddings with brain::EmbeddingTrainer, reporting recall@1 before and after."
 publish = false
 

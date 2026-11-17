@@ -3,6 +3,9 @@ name = "brain-appopts"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "The options every application built on brain parses: a consuming flag grammar and the shared --device/--backend selection, so the CLI and the samples resolve hardware the same way from one implementation."
 
 [lib]

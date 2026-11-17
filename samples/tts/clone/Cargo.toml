@@ -7,6 +7,9 @@ name = "sample-tts-clone"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Sample application: clone a voice from a reference clip and speak new text in it, through the public brain SDK."
 publish = false
 

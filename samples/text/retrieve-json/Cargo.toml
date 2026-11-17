@@ -7,6 +7,9 @@ name = "sample-text-retrieve-json"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Sample application: retrieval-augmented JSON generation - embed, retrieve, then prompt a decoder for validated structured output, with a bounded retry on malformed JSON."
 publish = false
 

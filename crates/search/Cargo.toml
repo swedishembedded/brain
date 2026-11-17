@@ -3,6 +3,9 @@ name = "brain-search"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "The model-agnostic discovery runtime: a quality-diversity archive that keeps the FASTEST elite of every behavioural niche, a set of search operators with a bandit allocating budget between them on measured gain per second, and an evaluator cascade that runs its expensive rung only on candidates that survived the cheap ones. A LEAF crate by design - it knows nothing of models, accelerators or environments, so a sample, a model crate or the SDK can all host a search without dragging the training stack in."
 
 [lib]

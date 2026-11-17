@@ -3,6 +3,9 @@ name = "brain-qwen3omnimoe"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Qwen3-Omni-30B-A3B: Thinker (MoE, audio+vision in) + Talker (MoE, +MTP) + Code2Wav."
 
 [lib]

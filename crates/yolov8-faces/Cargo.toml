@@ -3,6 +3,9 @@ name = "brain-yolov8-faces"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "The face models (SCRFD + ArcFace) behind YOLOv8's identity verification, resolved through capability::Components."
 
 [lib]

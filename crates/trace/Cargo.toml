@@ -6,6 +6,9 @@ name = "brain-trace"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Workspace-wide structured tracing: a registry mapping short --trace-<family> names to the Rust targets they cover, the 0-5 verbosity scale, and the tracing-subscriber install (text or JSON, stdout or a file). Library crates emit through the plain `tracing` facade; this crate is the single place a subscriber is built."
 
 [lib]

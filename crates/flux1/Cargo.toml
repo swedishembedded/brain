@@ -3,6 +3,9 @@ name = "brain-flux1"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "FLUX.1 MMDiT (dev/Kontext): double-stream joint attention + single-stream parallel blocks, 3-axis RoPE, T5-XXL + CLIP-L conditioning, 16-channel VAE."
 
 [lib]

@@ -3,6 +3,9 @@ name = "brain-cosyvoice"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "CosyVoice 2 / CosyVoice 3 (FunAudioLLM): LLM-based streaming zero-shot TTS - Qwen2.5-0.5B speech-token LM, causal flow-matching mel decoder (UNet for CV2, DiT for CV3), and an ISTFT/NSF-source-filter HiFT vocoder."
 
 [lib]
@@ -15,8 +18,6 @@ brain-backend-cpu.workspace = true
 brain-kernels.workspace = true
 brain-audio.workspace = true
 brain-model.workspace = true
-brain-diffusion.workspace = true
-brain-dit.workspace = true
 brain-qwen3.workspace = true
 brain-checkpoint.workspace = true
 brain-data.workspace = true

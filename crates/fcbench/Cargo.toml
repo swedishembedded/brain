@@ -3,6 +3,9 @@ name = "brain-fcbench"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Forecasting baselines, scenario generators, and the rolling-origin backtester. Light (brain-forecast only) so the server can serve baselines without the training stack."
 
 [lib]

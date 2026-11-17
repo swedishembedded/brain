@@ -3,6 +3,9 @@ name = "brain-loader"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "The library half of what used to live only inside the `brain` CLI binary: the model-store resolver's non-exiting core, the models-directory lookup, automatic GPU/CPU placement, default-checkpoint auto-fetch (behind an explicit DownloadPolicy), and fetch/convert progress rendering -- so an embedder (an SDK, a service, a second binary) can resolve and load a model without linking crates/cli."
 
 [lib]

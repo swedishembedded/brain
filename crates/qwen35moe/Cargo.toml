@@ -3,6 +3,9 @@ name = "brain-qwen35moe"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Qwen3.5-35B-A3B hybrid Gated-DeltaNet/GQA sparse-MoE decoder Transformer: forward + backprop in WGSL."
 
 [lib]

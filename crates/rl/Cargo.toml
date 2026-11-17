@@ -3,6 +3,9 @@ name = "brain-rl"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Continuous/reward-driven training: a generic weighted-training driver over model::Model + model::Batch::LmWeighted (no architecture-specific code), plus rollout/objective/continual-study machinery (self-improve roadmap P8-P18) any Model can adopt. The model-agnostic half of that - the Environment/Verifier seam and the promote/reject gate - lives in brain-promote so a model crate can reach it, and is re-exported here unchanged as rl::env / rl::gate. The `qwen3` feature (off by default) makes brain-qwen3 available as a concrete model::Model for this crate's integration tests, so a generic consumer of this crate does not pull brain-qwen3 into its dependency graph."
 
 [lib]

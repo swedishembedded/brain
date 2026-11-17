@@ -3,6 +3,9 @@ name = "brain-connectome"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Connectome import: the Codex CSV export (BANC, MANC and every other FlyWire dataset share one schema) read into a neuro::Csc, with per-neuron neurotransmitter priors, named populations, and a coverage report that accounts for every row."
 
 [lib]

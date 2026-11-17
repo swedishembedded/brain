@@ -3,6 +3,9 @@ name = "brain-perf"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Performance benchmarking suite: how much correct work brain delivers per unit of hardware, memory, energy and time. Model-agnostic over the capability progress seam; one JSON artifact per run, comparable across models and hardware."
 
 [lib]
@@ -23,7 +26,6 @@ brain-weightset.workspace = true
 # in-process via `tower::Service::oneshot` -- not a fresh dependency direction
 # (`brain-apiserve` already stands only on `brain-residency`/`brain-capability`,
 # never on `brain-perf`), just perf's first consumer of it.
-brain-apiserve.workspace = true
 axum.workspace = true
 tower.workspace = true
 tokio.workspace = true

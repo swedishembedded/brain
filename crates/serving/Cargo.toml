@@ -3,6 +3,9 @@ name = "brain-serving"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Serving brain's models under a memory budget as a library: what the machine can schedule, the one shared residency executor built from the catalog and a models directory, and models-directory discovery. What `brain serve` stands on, linkable by any other process that wants the same scheduling and eviction."
 
 [lib]

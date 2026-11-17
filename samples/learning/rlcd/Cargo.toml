@@ -7,6 +7,9 @@ name = "sample-learning-rlcd"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Sample application: RLCD end to end - an executable Bayesian world, a model trained on its exact posteriors, and evaluation on calibration AND cost-sensitive decision regret, not accuracy alone."
 publish = false
 

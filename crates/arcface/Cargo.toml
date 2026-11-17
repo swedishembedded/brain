@@ -3,6 +3,9 @@ name = "brain-arcface"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "ArcFace IResNet-100 face identity embedding, with 5-point similarity alignment and the additive-angular-margin training head - the visual analogue of crates/ecapatdnn."
 
 [lib]

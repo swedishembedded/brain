@@ -7,6 +7,9 @@ name = "sample-study-document"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Sample application: teach a model a batch of documents and gate whether it learned them, through the public brain SDK."
 publish = false
 

@@ -3,6 +3,9 @@ name = "brain-minicpmv"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "MiniCPM-V 4.6: NaViT SigLIP vision tower with an in-tower window merger, a 2x2 MLP merger and the Qwen3.5 hybrid decoder."
 
 [lib]

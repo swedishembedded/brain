@@ -7,6 +7,9 @@ name = "sample-learning-visualclick"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "A decision model that reads a rendered screen and answers which control to click, for a plain-language instruction supplied at run time."
 publish = false
 

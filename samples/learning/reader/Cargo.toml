@@ -5,6 +5,9 @@ name = "sample-learning-reader"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Sample application: a model that reads a directory continually, refuses what is not worth learning, and can say what it gained."
 publish = false
 

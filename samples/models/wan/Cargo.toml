@@ -5,6 +5,9 @@ name = "sample-models-wan"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Sample application: Wan2.1 text-to-video and video LoRA training from the command line, every served action with every parameter."
 publish = false
 

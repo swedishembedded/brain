@@ -3,6 +3,9 @@ name = "brain-runtime"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Brain runtime: event-driven HSM controller wiring inference/detection models to the JSONL event protocol."
 
 [lib]

@@ -5,6 +5,9 @@ name = "sample-models-lfm2"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Sample application: LFM2.5-Encoder from the command line - fill-mask, long-context embeddings and masked-language fine-tuning with every parameter, plus the encoder's export and benchmark on the Intel NPU."
 publish = false
 

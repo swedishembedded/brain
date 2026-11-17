@@ -3,6 +3,9 @@ name = "brain-solve"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Learn to reach a known goal state by retracing random walks away from it: a residual MLP policy trained on free labels, rolled out greedily with no search at inference."
 
 [lib]

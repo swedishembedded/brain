@@ -5,6 +5,9 @@ name = "sample-models-qwen3tts"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Sample application: Qwen3-TTS speech from the command line - synth, clone, design, batch, import, finetune and sim with every parameter - plus the same synthesis on the Intel NPU and its resident Unix-socket server."
 publish = false
 

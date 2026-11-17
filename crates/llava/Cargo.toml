@@ -3,6 +3,9 @@ name = "brain-llava"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "LLaVA-1.5-13B: CLIP-L/14@336 vision tower + mlp2x_gelu projector over a spliced Vicuna-1.5 (LLaMA-2 13B) decoder."
 
 [lib]

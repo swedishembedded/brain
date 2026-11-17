@@ -5,6 +5,9 @@ name = "sample-models-deepseekocr2"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Sample application: DeepSeek-OCR-2 document OCR from the command line - generate with every parameter, plus the export of its resampler and decoder as ONNX graphs for OpenVINO and the Intel NPU."
 publish = false
 

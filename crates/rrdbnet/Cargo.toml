@@ -3,6 +3,9 @@ name = "brain-rrdbnet"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Real-ESRGAN RRDBNet super-resolution — the imaging pipeline's detail/upscale tail, built on crates/vae's shared conv block builder."
 
 [lib]

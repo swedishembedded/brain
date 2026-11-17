@@ -3,6 +3,9 @@ name = "brain-clip"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "CLIP-family text and image encoders: CLIP-L, OpenCLIP-bigG and EVA-CLIP behind one config-driven graph."
 
 [lib]

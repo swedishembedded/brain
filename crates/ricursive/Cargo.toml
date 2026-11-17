@@ -3,6 +3,9 @@ name = "brain-ricursive"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Ripple (RicursiveForCausalLM): hybrid sliding-window/global decoder with value residual, sigmoid-gated attention and clipped SwiGLU. Config, two-way-coverage safetensors import and an exact f32 prefill forward on any brain backend, parity-gated against the reference implementation."
 
 [lib]

@@ -3,6 +3,9 @@ name = "brain-kronos"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Kronos (NeoQuasar) from scratch: BSQ tokenizer (OHLCV bar -> hierarchical tokens) + autoregressive decoder with a dual head. MIT reference; imported exactly, parity-gated."
 
 [lib]

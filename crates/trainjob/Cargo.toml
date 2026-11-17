@@ -3,6 +3,9 @@ name = "brain-trainjob"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Training as a served workload: a chat fine-tune (supervised or policy-gradient) that runs inside the serving process as a residency-managed job, its dataset and trained adapter moved by file descriptor or by digest in a content-addressed artifact store the operator configures."
 
 [lib]

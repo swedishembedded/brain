@@ -3,6 +3,9 @@ name = "brain-gemma4"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
 description = "Gemma-4 (unified text tower) - the LTX-2.5 text encoder. Tiny-config layer-by-layer parity (5:1 sliding/full attention alternation, dual RoPE bases, attention_k_eq_v global layers, the 49-hidden-state aggregate-embed projection) against transformers.models.gemma4_unified; the real 12B/686-tensor checkpoint's config, two-way tensor-coverage import and embedded-tokenizer extraction, built on brain-gpu-core / brain-kernels / brain-checkpoint / brain-data."
 
 [lib]
