@@ -12,15 +12,27 @@
 //! its own product into the buffer its reader takes, sharing one activation cast, and the SwiGLU writes the down
 //! product's bf16 operand in the same pass, as does each residual norm whose only readers are bf16 products. The QK norm and rotation run one block a token, not a workgroup a head.
 
+use gpu_core::provider::library::{GemmPath, GemmPrecision, LibraryGemmProvider};
 use qwen3::serve::Engine;
 use qwen3::{Dtype, QwenConfig};
 
-#[test]
-fn a_bf16_tensor_core_forward_copies_no_fused_product_apart() {
+/// A CUDA device whose library GEMM runs bf16 on tensor cores: the path these specs describe. Elsewhere the products
+/// are the portable kernels, which write the fused outputs and cast apart by design, so each spec skips by name.
+fn tensor_core_gpu() -> Option<gpu_core::Gpu> {
     let Ok(gpu) = gpu_core::Gpu::try_new_cuda(qwen3::model::pipelines()) else {
         brain_testutil::skip_unavailable("no usable CUDA backend");
-        return;
+        return None;
     };
+    if !matches!(LibraryGemmProvider::for_gpu(&gpu, GemmPrecision::Auto).path(), GemmPath::Bf16TensorCore) {
+        brain_testutil::skip_unavailable("the CUDA device has no bf16 tensor-core library GEMM (compute capability below 8.0)");
+        return None;
+    }
+    Some(gpu)
+}
+
+#[test]
+fn a_bf16_tensor_core_forward_copies_no_fused_product_apart() {
+    let Some(gpu) = tensor_core_gpu() else { return };
     // Library-eligible widths (16-element rows), as the prefill census takes them.
     let cfg = QwenConfig { d_model: 64, d_ff: 128, n_heads: 4, n_kv_heads: 2, head_dim: 16, vocab: 64, block_size: 256, max_position_embeddings: 256, tie_embeddings: false, ..QwenConfig::tiny() };
     let w = qwen3::init_weights(&cfg, 5); // seed: any weights serve, the test names kernels
@@ -61,10 +73,7 @@ fn a_bf16_tensor_core_forward_copies_no_fused_product_apart() {
 /// the paths that write them (here the reference GEMM tier) still get them.
 #[test]
 fn a_bf16_library_engine_holds_no_fused_product_scratch() {
-    let Ok(gpu) = gpu_core::Gpu::try_new_cuda(qwen3::model::pipelines()) else {
-        brain_testutil::skip_unavailable("no usable CUDA backend");
-        return;
-    };
+    let Some(gpu) = tensor_core_gpu() else { return };
     let cfg = QwenConfig { d_model: 64, d_ff: 128, n_heads: 4, n_kv_heads: 2, head_dim: 16, vocab: 64, block_size: 256, max_position_embeddings: 256, tie_embeddings: false, ..QwenConfig::tiny() };
     let w = qwen3::init_weights(&cfg, 7); // seed: any weights serve
     let prompt: Vec<u32> = (0..40).map(|i| (i * 7 + 3) % cfg.vocab).collect();
@@ -87,10 +96,7 @@ fn a_bf16_library_engine_holds_no_fused_product_scratch() {
 /// decode tape casts nothing but the first layer's input norm.
 #[test]
 fn a_bf16_decode_step_casts_only_its_first_input_norm() {
-    let Ok(gpu) = gpu_core::Gpu::try_new_cuda(qwen3::model::pipelines()) else {
-        brain_testutil::skip_unavailable("no usable CUDA backend");
-        return;
-    };
+    let Some(gpu) = tensor_core_gpu() else { return };
     let cfg = QwenConfig { d_model: 64, d_ff: 128, n_heads: 4, n_kv_heads: 2, head_dim: 128, vocab: 64, block_size: 256, max_position_embeddings: 256, tie_embeddings: false, ..QwenConfig::tiny() };
     let w = qwen3::init_weights(&cfg, 9); // seed: any weights serve, the test names kernels
     let (bs, mbt) = (16u32, 16u32);
