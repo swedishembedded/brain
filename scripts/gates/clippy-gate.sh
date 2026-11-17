@@ -178,11 +178,12 @@ if [ "$rc" -ne 0 ]; then
 fi
 
 if [ "${1:-}" = "--list" ]; then
-    grep -E ': warning:' "$out"
+    bash "$(dirname "$0")/cargo-warnings.sh" "$out"
     exit 0
 fi
 
-n=$(grep -cE ': warning:' "$out")
+# Compiler, clippy and cargo manifest warnings alike (cargo-warnings.sh says which lines count).
+n=$(bash "$(dirname "$0")/cargo-warnings.sh" "$out" | wc -l)
 echo "clippy-gate: exit 0, $n warnings (baseline $BASELINE)"
 
 if [ "$n" -gt "$BASELINE" ]; then
@@ -190,7 +191,7 @@ if [ "$n" -gt "$BASELINE" ]; then
     echo "clippy-gate: FAIL - $n warnings exceeds the baseline of $BASELINE."
     echo "New code must not add clippy warnings. The additions are likely among:"
     echo
-    grep -E ': warning:' "$out" | tail -"$((n - BASELINE))"
+    bash "$(dirname "$0")/cargo-warnings.sh" "$out" | tail -"$((n - BASELINE))"
     exit 1
 fi
 

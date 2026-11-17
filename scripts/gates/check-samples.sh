@@ -304,8 +304,15 @@ else
 		# engine's default members would union this sample's declared features
 		# with the SDK's own defaults and silently ignore the declaration.
 		cargo build --release -p "$pkg" >/dev/null 2>&1 || bad "$pkg: does not build"
-		cargo clippy --release -p "$pkg" --all-targets --message-format=short \
-			>/dev/null 2>&1 || bad "$pkg: clippy failed"
+		clippy_log="$(mktemp)"
+		if ! cargo clippy --release -p "$pkg" --all-targets --message-format=short >"$clippy_log" 2>&1; then
+			bad "$pkg: clippy failed"
+		else
+			# Zero warnings for a sample too, test targets included: its clippy output used to be discarded.
+			warnings="$(bash scripts/gates/cargo-warnings.sh "$clippy_log")"
+			[ -z "$warnings" ] || bad "$pkg: clippy warnings:"$'\n'"$warnings"
+		fi
+		rm -f "$clippy_log"
 	done
 
 	# Touch the last sample's own sources so it MUST relink - proving the
