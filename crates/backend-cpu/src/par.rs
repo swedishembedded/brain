@@ -262,6 +262,18 @@ pub fn zip3_mut(a: &mut [f32], b: &mut [f32], c: &mut [f32], d: &[f32], f: impl 
     });
 }
 
+/// The cores of a kernel cpu list (`0-71,144-215`), in the list's order; `None` if it does not parse.
+pub fn parse_cpulist(list: &str) -> Option<Vec<usize>> {
+    let mut cores = Vec::new();
+    for part in list.trim().split(',').filter(|p| !p.is_empty()) {
+        match part.split_once('-') {
+            Some((a, b)) => cores.extend(a.parse::<usize>().ok()?..=b.parse::<usize>().ok()?),
+            None => cores.push(part.parse().ok()?),
+        }
+    }
+    Some(cores)
+}
+
 /// Run `f(i)` once on each of `cores`, every call on its own OS thread pinned to that one core, and return the
 /// results in `cores` order. For work that must own a core for its whole duration and touch its own memory first so
 /// the pages land on that core's node: a probe of what the cores can do together (`crate::roofline`), never a data
@@ -442,5 +454,12 @@ mod tests {
         for (o, core) in out.iter().zip(&cores) {
             assert_eq!(o.1, vec![*core], "call {} must run pinned to core {core}", o.0);
         }
+    }
+
+    #[test]
+    fn a_kernel_cpu_list_parses_to_its_cores() {
+        assert_eq!(parse_cpulist("0-3,8,10-11\n"), Some(vec![0, 1, 2, 3, 8, 10, 11]));
+        assert_eq!(parse_cpulist(""), Some(vec![]));
+        assert_eq!(parse_cpulist("0-x"), None);
     }
 }

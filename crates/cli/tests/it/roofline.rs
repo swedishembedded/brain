@@ -164,3 +164,12 @@ fn cpu_rows_name_their_method_and_compare_with_the_published_peak() {
     let mem = rows.iter().find(|r| r["dtype"] == "mem-triad").unwrap();
     assert_eq!(mem["bandwidth_gbs"], mem["rate"], "a memory row carries its value as bandwidth too: {mem}");
 }
+
+/// `--retune` re-measures the kernel table, so on its own it is a usage error
+/// rather than a flag that silently does nothing.
+#[test]
+fn retune_without_kernels_is_refused() {
+    let (ok, _, stderr, _) = run(&["--retune"]);
+    assert!(!ok, "--retune without --kernels must fail");
+    assert!(stderr.contains("--retune") && stderr.contains("--kernels"), "{stderr}");
+}

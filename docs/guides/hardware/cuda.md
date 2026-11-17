@@ -168,11 +168,19 @@ chooses by measurement, not by device name. On the first start on a device it
 times every candidate the device can run on a grid of shape classes (row count,
 `K`, weight bytes), checks each against an f64 reference and rejects a
 disagreeing one, and caches the table per device and build, so later starts read
-it. `brain perf roofline gpu --kernels` lists the choice per class with its achieved
-bandwidth and its fraction of the memory roofline measured on the same device,
+it. Every launch is timed on its own and a candidate's time is the median launch,
+so another job time-sliced onto the card cannot pick the winner; a table measured
+while the card was busy is used but not stored. `brain perf roofline gpu --kernels`
+lists the choice per class with its median, its fastest launch, the share of its
+launches that were stretched, its rate, the class's roof time and bound (memory,
+compute, or `launch` when the roof time is under the measured launch floor, which
+has its own column) and the fraction of that roof it reached. A roof is the
+largest rate measured on the device for it, so no fraction passes the whole roof.
 <!-- perf-number: the gap-list threshold `brain roofline gpu --kernels` applies, a program constant -->
-and the classes under 60 % of it. `--kernel <slot>=<candidate>` pins a slot to one
-candidate for an A/B run, and `--no-autotune` keeps every slot on its default.
+The classes under 60 % of their roof form the device's gap list, and each slot gets
+a pass or fail against its target. `--retune` discards the stored table of each
+selected card and measures it again. `--kernel <slot>=<candidate>` pins a slot to
+one candidate for an A/B run, and `--no-autotune` keeps every slot on its default.
 
 A repeated submission is also recorded into a CUDA graph and replayed, and a
 decode step is replayed whole, from recycled scratch buffers, in a few chunks so

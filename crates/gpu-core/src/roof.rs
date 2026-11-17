@@ -556,7 +556,10 @@ pub fn measure(gpu: &Gpu) -> Option<Roofs> {
     // measures the idle clock and persists it as this machine's ceiling.
     warm_up(&g);
     let gflops = measure_compute(&g)?;
-    let gbs = measure_bandwidth(&g, BW_ELEMS)?;
+    // The device memory's triad with the backend's native stream kernel where it has one, timed by device events:
+    // the portable axpy reaches that backend as one word a thread through a translated kernel and reads as a
+    // third of the device memory's bandwidth on a Hopper card (knowledge 505).
+    let gbs = crate::device_rates::native_triad_gbs(&g, BW_ELEMS * 4).or_else(|| measure_bandwidth(&g, BW_ELEMS))?;
     // The same triad over a working set chosen to stay in cache. Never report a
     // cache roof BELOW the DRAM roof: on a device whose cache is smaller than
     // the probe (or which has none worth the name) the two converge, and the
@@ -876,7 +879,7 @@ mod persist {
         let dir = cache_dir()?;
         // The native int8 probe is part of what is measured, so a change to
         // it re-measures exactly like a change to a portable one.
-        let native = kernels_cuda::get("roof_dp4a").map(|k| k.src);
+        let native = kernels_cuda::get("roof_dp4a").map(|k| k.src).into_iter().chain([crate::device_rates::STREAM_TRIAD_SOURCE]);
         let hash = crate::tune::source_fingerprint(
             &super::PROBE_KERNELS.iter().map(|(_, s)| *s).chain(native).collect::<Vec<_>>(),
         );

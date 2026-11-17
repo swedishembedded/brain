@@ -36,7 +36,7 @@ use serde_json::Value;
 use crate::args::Args;
 
 const USAGE: &str = "\
-usage: brain perf roofline [gpu|npu|cpu] [--reprofile] [--kernels] [--json]
+usage: brain perf roofline [gpu|npu|cpu] [--reprofile] [--kernels [--retune]] [--json]
 
   Prints every accelerator's MEASURED raw hardware compute capacity - what
   this machine can do, model-independent. Streamed as each accelerator's
@@ -54,12 +54,20 @@ usage: brain perf roofline [gpu|npu|cpu] [--reprofile] [--kernels] [--json]
                      npu::roofline::measure has no cache of its own to
                      bypass, it always re-measures. CPU always measures
                      fresh regardless (it is fast enough not to need one).
-  --kernels         after the GPU rows, list which native kernel candidate brain
-                     chose per op and shape class on this device, its achieved
-                     bandwidth and fraction of the measured roofline, and the
-                     classes under 60% of it (the device's gap list). The choice is
-                     measured on first use and cached per device and build;
-                     `--kernel <slot>=<candidate>` pins one for A/B runs.
+  --kernels         after the GPU rows, list per selected card which native kernel
+                     candidate brain chose per op and shape class: its median,
+                     fastest launch and share of stretched launches (each launch
+                     timed on its own), its rate, the class's roof time and bound
+                     (memory, compute, or launch when the roof time is under the
+                     launch floor, shown in its own column), the fraction of the
+                     roof reached (never above 100%: a roof is raised to any rate a
+                     kernel beats it by), the classes under 60% (the gap list), and
+                     a pass/fail per slot against its target. The choice is measured
+                     on first use and cached per device and build (not stored when
+                     the card was busy); `--kernel <slot>=<candidate>` pins one for
+                     A/B runs.
+  --retune          with --kernels: ignore the stored choice of each selected card
+                     (this device, this build) and measure it afresh
   --json            emit an array of row objects (same fields as the plain
                      rows) instead of plain text
 ";
@@ -73,6 +81,7 @@ pub fn run_roofline(args: &[String]) -> i32 {
     let reprofile = a.take_flag("--reprofile");
     let json = a.take_flag("--json");
     let kernels = a.take_flag("--kernels");
+    let retune = a.take_flag("--retune");
     let scope = a.positional();
     if let Some(s) = &scope {
         if !matches!(s.as_str(), "gpu" | "npu" | "cpu") {
@@ -81,6 +90,11 @@ pub fn run_roofline(args: &[String]) -> i32 {
         }
     }
     a.finish();
+    if retune && !kernels {
+        eprintln!("brain perf roofline: --retune re-measures the kernel table, so it needs --kernels\n{USAGE}");
+        return 2;
+    }
+    gpu_core::set_native_retune(retune);
 
     let want_gpu = matches!(scope.as_deref(), None | Some("gpu"));
     let want_npu = matches!(scope.as_deref(), None | Some("npu"));
@@ -91,8 +105,11 @@ pub fn run_roofline(args: &[String]) -> i32 {
     }
 
     let mut rows: Vec<Row> = Vec::new();
+    let mut extras = Vec::new();
     if want_gpu {
-        for r in gpu_rows(reprofile) {
+        let (gpu, measured) = gpu_rows(reprofile);
+        extras = measured;
+        for r in gpu {
             if !json {
                 println!("{}", r.plain_line());
             }
@@ -116,12 +133,23 @@ pub fn run_roofline(args: &[String]) -> i32 {
         }
     }
 
-    if kernels && want_gpu && !json {
-        println!("\n{}", gpu_core::native_selection_report_for_default_device());
+    let mut kernel_json = Vec::new();
+    if kernels && want_gpu {
+        for d in gpu_core::devices::schedulable_gpus() {
+            let accel = format!("gpu{}", d.index);
+            let extra = extras.iter().find(|(i, _)| *i == d.index).map(|(_, e)| e.clone()).unwrap_or_default();
+            for t in gpu_core::native_tune_and_grade(d, &extra) {
+                if json {
+                    kernel_json.extend(kernel_rows_json(&accel, &t));
+                } else {
+                    print!("\n{}", t.render(&accel));
+                }
+            }
+        }
     }
 
     if json {
-        let arr = Value::Array(rows.iter().map(Row::to_json).collect());
+        let arr = Value::Array(rows.iter().map(Row::to_json).chain(kernel_json).collect());
         println!("{}", serde_json::to_string_pretty(&arr).unwrap_or_default());
     }
     0
@@ -303,57 +331,142 @@ fn sig(v: f64) -> String {
     }
 }
 
+// ---------------------------------------------------------------- kernels --
+
+/// One graded kernel table as JSON objects carrying the same fields as its plain lines: the table (`kind`
+/// `kernel-table`), each class (`kernel`), each slot's verdict (`validation`), every one with its own `line`.
+fn kernel_rows_json(accel: &str, t: &gpu_core::NativeTableReport) -> Vec<Value> {
+    let roof = |r: &Option<gpu_core::NativeRoof>| r.as_ref().map(|r| serde_json::json!({ "value": r.value, "source": r.source }));
+    let mut out = vec![serde_json::json!({
+        "kind": "kernel-table",
+        "accelerator": accel,
+        "device": t.device,
+        "status": if t.from_store { "from the store" } else { "measured now" },
+        "rate": Value::Null,
+        "busy": t.busy,
+        "memory_roof_gbs": roof(&t.memory_roof),
+        "int8_roof_tops": roof(&t.int8_roof),
+        "fp8_roof_tops": roof(&t.fp8_roof),
+        "floor_us": t.floor_us,
+        "launch_bound": t.latency_bound,
+        "noisy": t.noisy,
+        "gaps": t.gaps.len(),
+        "line": t.header_lines(accel).join("\n"),
+    })];
+    for (i, r) in t.rows.iter().enumerate() {
+        out.push(serde_json::json!({
+            "kind": "kernel",
+            "accelerator": accel,
+            "device": t.device,
+            "slot": r.slot,
+            "class": r.class,
+            "chosen": r.chosen,
+            "status": if r.rate.is_some() { "measured" } else { "not measured" },
+            "rate": r.rate,
+            "rate_unit": r.rate_unit,
+            "median_us": r.us,
+            "min_us": r.min_us,
+            "stretched": r.stretched,
+            "roof_us": r.roof_us,
+            "fraction": r.fraction,
+            "bound": r.bound.map(gpu_core::NativeClassBound::as_str),
+            "floor_us": r.floor_us,
+            "noisy": r.noisy,
+            "gap": t.gaps.contains(&i),
+            "others": r.others.iter().map(|(k, v)| serde_json::json!({ "kernel": k, "result": v })).collect::<Vec<_>>(),
+            "line": t.row_line(i, accel),
+        }));
+    }
+    for v in &t.slots {
+        out.push(serde_json::json!({
+            "kind": "validation",
+            "accelerator": accel,
+            "device": t.device,
+            "slot": v.slot,
+            "bound": v.bound.as_str(),
+            "status": if v.pass { "pass" } else { "fail" },
+            "rate": Value::Null,
+            "classes": v.classes,
+            "median": v.median,
+            "min": v.min,
+            "target": v.target,
+            "pass": v.pass,
+            "slowest": v.slowest.iter().map(|(c, f, k)| serde_json::json!({ "class": c, "fraction": f, "chosen": k })).collect::<Vec<_>>(),
+            "line": gpu_core::native_verdict_line(v, accel),
+        }));
+    }
+    out
+}
+
 // -------------------------------------------------------------------- gpu --
 
-/// Every GPU `--device` selects, each dtype it supports - a multi-GPU box gets
-/// a row set per selected card, and a card outside the selection is never
-/// opened (on a shared node it belongs to someone else).
-fn gpu_rows(reprofile: bool) -> Vec<Row> {
+/// Every GPU `--device` selects, each measured quantity of it - a multi-GPU box
+/// gets a row set per selected card, and a card outside the selection is never
+/// opened (on a shared node it belongs to someone else). Also returns, per card,
+/// the rates its best kernels reached, which raise the kernel table's roofs.
+fn gpu_rows(reprofile: bool) -> (Vec<Row>, Vec<(u32, gpu_core::NativeExtraRoofs)>) {
     let devs = gpu_core::devices::schedulable_gpus();
     if devs.is_empty() {
-        return vec![Row::absent(
+        let none = Row::absent(
             "gpu",
             "-",
             None,
             Status::NoHardware,
             None,
             "no GPU selected (no physical GPUs, or --device names none; a software rasteriser may still serve --device gpu)".into(),
-        )];
+        );
+        return (vec![none], Vec::new());
     }
 
     let mut rows = Vec::new();
+    let mut extras = Vec::new();
     for d in devs {
         let accelerator = format!("gpu{}", d.index);
-        let gpu = gpu_core::Gpu::new_on(d, &[]);
-        let device = format!("{} [{}]", d.identity.name, gpu.kind());
+        let kind = gpu_core::Gpu::new_on(d, &[]).kind();
+        let device = format!("{} [{kind}]", d.identity.name);
         let published = gpu_core::published_peak::lookup(&d.identity.name);
-        let peak = |m: gpu_core::published_peak::Metric| published.and_then(|p| p.of(m));
-        let roofs = if reprofile { gpu_core::roof::reprofile(&gpu) } else { gpu_core::roof::ensure(&gpu) };
-        use gpu_core::published_peak::Metric;
-        match roofs {
-            Some(r) => {
-                rows.push(Row::measured(&accelerator, &device, "fp32", f64::from(r.gflops) / 1e3, "TFLOP/s", peak(Metric::Fp32), "FMA chain probe (roof_fma)".into()));
-                rows.push(match r.int8_gops {
-                    Some(v) => Row::measured(&accelerator, &device, "int8-dp4a", f64::from(v) / 1e3, "TOPS", None, "packed-int8 dot probe (roof_dp4a), CUDA cores".into()),
-                    None => Row::absent(&accelerator, &device, Some("int8-dp4a"), Status::Unsupported, Some("TOPS"), "this GPU has no measured packed-int8 dot-product path".into()),
-                });
-                rows.push(match r.f16_gflops {
-                    Some(v) => Row::measured(&accelerator, &device, "f16", f64::from(v) / 1e3, "TFLOP/s", None, "f16 FMA chain probe".into()),
-                    None => Row::absent(&accelerator, &device, Some("f16"), Status::Unsupported, Some("TFLOP/s"), "native f16 has not been verified fast on this device".into()),
-                });
-                rows.push(Row::measured(&accelerator, &device, "mem-triad", f64::from(r.gbs), "GB/s", peak(Metric::Memory), "portable axpy triad".into()));
-            }
-            None => rows.push(Row::absent(
-                &accelerator,
-                &device,
-                None,
-                Status::Unprobeable,
-                None,
-                "roofline unavailable on this device/backend (--roof-probe off, or an unprobeable backend)".into(),
-            )),
+        let rates = gpu_core::device_rates::measure(d, reprofile);
+        let value = |metric: &str| rates.iter().find(|r| r.metric == metric && !r.noisy).and_then(|r| r.value.map(|v| (v, format!("{metric} row: {}", r.method))));
+        let best = |a: Option<(f64, String)>, b: Option<(f64, String)>| match (a, b) {
+            (Some(x), Some(y)) => Some(if y.0 > x.0 { y } else { x }),
+            (x, y) => x.or(y),
+        };
+        extras.push((
+            d.index,
+            gpu_core::NativeExtraRoofs {
+                memory_gbs: value("hbm-read"),
+                int8_tops: best(value("int8-tc"), value("int8-mma")),
+                fp8_tops: value("fp8-tc"),
+            },
+        ));
+        let first = rows.len();
+        for r in rates {
+            let peak = r.peak.and_then(|m| published.and_then(|p| p.of(m)));
+            rows.push(match r.value {
+                Some(v) => {
+                    let mut notes: Vec<String> = Vec::new();
+                    if r.noisy {
+                        notes.push("NOISY: another context stretched its launches, re-measure on an idle card".into());
+                    }
+                    if let Some(how) = &r.verified {
+                        notes.push(format!("checked: {how}"));
+                    }
+                    let note = (!notes.is_empty()).then(|| notes.join("; "));
+                    Row::measured(&accelerator, &device, r.metric, v, r.unit, peak, r.method).with_note(note)
+                }
+                None => Row::absent(&accelerator, &device, Some(r.metric), Status::NotMeasured, Some(r.unit), r.why_not.unwrap_or_else(|| "not measured".into())),
+            });
+        }
+        // The source of every published figure, once per card.
+        if let (Some(p), Some(row)) = (published, rows.get_mut(first)) {
+            let source = format!("published peaks: {}", p.source);
+            row.note = Some(match row.note.take() {
+                Some(n) => format!("{source}; {n}"),
+                None => source,
+            });
         }
     }
-    rows
+    (rows, extras)
 }
 
 // -------------------------------------------------------------------- npu --

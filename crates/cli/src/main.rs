@@ -351,10 +351,12 @@ MODELS (the store's own view of itself: what's local, what isn't, what it costs)
       real execution, never cached.
 
 ROOFLINE (measured, cross-accelerator hardware compute capacity)
-  brain perf roofline [gpu|npu|cpu] [--reprofile] [--json]
-      What can this box actually DO - raw, model-independent GFLOP/s, GOP/s
-      and GB/s for every GPU (not just the ambient one), the NPU, and the
-      CPU, each dtype it supports. Streamed as each accelerator's
+  brain perf roofline [gpu|npu|cpu] [--reprofile] [--kernels [--retune]] [--json]
+      What can this box actually DO - raw, model-independent FLOP/s, OP/s
+      and GB/s for every selected GPU, the NPU, and the CPU, measured with
+      brain's best kernels (each checked against a reference first) and shown
+      beside the vendor's published peak; --kernels grades the kernel
+      selection per shape class against its roof, --retune re-measures it. Streamed as each accelerator's
       measurement completes - GPU first, then NPU, then CPU - so a GPU
       number lands well under 10s regardless of how long the NPU probe
       takes to conclude \"not present\". `gpu`/`npu`/`cpu` scope the report

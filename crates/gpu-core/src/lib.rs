@@ -299,6 +299,12 @@ pub use backend_api::set_cache_dir;
 /// claim in this engine divides by, so that claim is about the device that ran.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod roof;
+/// Per-launch device timings and the guard that flags them when the card is shared.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod launch_stats;
+/// What one card does, measured with brain's best kernels: the device rows of `brain perf roofline`.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod device_rates;
 /// The vendor's published peaks per device: the comparison column of `brain
 /// perf roofline`, never a grading denominator.
 pub mod published_peak;
@@ -351,7 +357,7 @@ pub enum Fp8Act {
     E4m3,
 }
 
-pub use native_tune::{check_fp8_bf16_out as native_check_fp8_bf16_out, time_fp8_bf16_out as native_time_fp8_bf16_out, check_fp8_shape as native_check_fp8_shape, check_shape as native_check_shape, clear_forced as clear_forced_candidates, force_candidate, offered as native_candidates_offered, report as native_selection_report, report_for_default_device as native_selection_report_for_default_device, set_autotune as set_native_autotune, read_roof as native_read_roof, time_fp8_candidates as native_time_fp8_candidates, time_fp8_shape as native_time_fp8_shape, unknown_forced as unknown_forced_candidates, pin_candidate, CandidatePin, Verdict as NativeVerdict};
+pub use native_tune::{check_fp8_bf16_out as native_check_fp8_bf16_out, time_fp8_bf16_out as native_time_fp8_bf16_out, check_fp8_shape as native_check_fp8_shape, check_shape as native_check_shape, clear_forced as clear_forced_candidates, force_candidate, offered as native_candidates_offered, report as native_selection_report, report_for_default_device as native_selection_report_for_default_device, set_autotune as set_native_autotune, set_retune as set_native_retune, graded as native_selection_graded, tune_and_grade as native_tune_and_grade, ClassBound as NativeClassBound, ClassRow as NativeClassRow, ExtraRoofs as NativeExtraRoofs, Roof as NativeRoof, SlotVerdict as NativeSlotVerdict, TableReport as NativeTableReport, verdict_line as native_verdict_line, read_roof as native_read_roof, time_fp8_candidates as native_time_fp8_candidates, time_fp8_shape as native_time_fp8_shape, unknown_forced as unknown_forced_candidates, pin_candidate, CandidatePin, Verdict as NativeVerdict};
 
 /// The `OperatorProvider` ABI, registry, WGSL reference provider and
 /// cross-provider parity harness (`kernel-performance.md` Phase 8, M8.3).
@@ -1345,6 +1351,11 @@ mod native_facade {
 
         fn tuned_table(&self) -> Option<&crate::native_tune::Tuned> {
             self.tuned.get().and_then(|t| t.as_deref())
+        }
+
+        /// Every tuned table this handle holds (its slots', and the FP8 linear's once prepared).
+        pub(crate) fn tuned_tables(&self) -> Vec<&crate::native_tune::Tuned> {
+            [self.tuned.get(), self.tuned_fp8.get()].into_iter().flatten().filter_map(|t| t.as_deref()).collect()
         }
 
         /// Measure (once per device and build, or read from the store) the FP8 linear's candidates before the first FP8

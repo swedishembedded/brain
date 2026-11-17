@@ -27,6 +27,7 @@ mod bf16_gemv_native;
 mod bf16_gemv_splitk_native;
 mod clamp_range;
 mod cuda_follows_selection;
+mod device_rates;
 mod tool_device_flags;
 mod value_lerp;
 mod conv2d_native_bench;

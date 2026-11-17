@@ -266,7 +266,7 @@ pub fn host_cores_near(index: u32) -> Option<Vec<usize>> {
     let pci = device(index).ok()?.identity.pci_bus.as_deref()?;
     let list = std::fs::read_to_string(format!("/sys/bus/pci/devices/{}/local_cpulist", sysfs_pci_name(pci))).ok()?;
     let allowed = backend_cpu::par::allowed_cores();
-    let near: Vec<usize> = parse_cpulist(&list)?.into_iter().filter(|c| allowed.contains(c)).collect();
+    let near: Vec<usize> = backend_cpu::par::parse_cpulist(&list)?.into_iter().filter(|c| allowed.contains(c)).collect();
     (near.len() >= 2).then_some(near)
 }
 
@@ -278,18 +278,6 @@ fn sysfs_pci_name(pci: &str) -> String {
         Some((domain, rest)) => format!("{:0>4}:{rest}", domain.trim_start_matches('0')),
         None => lower,
     }
-}
-
-/// The cores of a kernel cpu list (`0-71,144-215`), ascending; `None` if it does not parse.
-fn parse_cpulist(list: &str) -> Option<Vec<usize>> {
-    let mut cores = Vec::new();
-    for part in list.trim().split(',').filter(|p| !p.is_empty()) {
-        match part.split_once('-') {
-            Some((a, b)) => cores.extend(a.parse::<usize>().ok()?..=b.parse::<usize>().ok()?),
-            None => cores.push(part.parse().ok()?),
-        }
-    }
-    Some(cores)
 }
 
 /// The registry entry whose PCI bus id matches `pci` (case-insensitive,
@@ -1680,13 +1668,6 @@ mod tests {
         assert_eq!(single_card(&set(vec![])), Ok(None));
         let err = single_card(&set(vec![0, 1, 2, 3])).unwrap_err();
         assert!(err.contains("--device gpuN") && err.contains("0, 1, 2, 3"), "{err}");
-    }
-
-    #[test]
-    fn a_kernel_cpu_list_parses_to_its_cores() {
-        assert_eq!(parse_cpulist("0-3,8,10-11\n"), Some(vec![0, 1, 2, 3, 8, 10, 11]));
-        assert_eq!(parse_cpulist(""), Some(vec![]));
-        assert_eq!(parse_cpulist("0-x"), None);
     }
 
     #[test]

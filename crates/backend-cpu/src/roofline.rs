@@ -165,21 +165,9 @@ fn cpu_nodes_of(cores: &[usize]) -> usize {
     let nodes = dir
         .filter_map(|e| e.ok())
         .filter(|e| e.file_name().to_string_lossy().strip_prefix("node").is_some_and(|n| n.parse::<u32>().is_ok()))
-        .filter(|e| std::fs::read_to_string(e.path().join("cpulist")).is_ok_and(|l| parse_cpulist(&l).iter().any(|c| cores.contains(c))))
+        .filter(|e| std::fs::read_to_string(e.path().join("cpulist")).ok().and_then(|l| par::parse_cpulist(&l)).is_some_and(|l| l.iter().any(|c| cores.contains(c))))
         .count();
     nodes.max(1)
-}
-
-/// A kernel CPU list (`0-71,144,150-151`) as core numbers.
-fn parse_cpulist(list: &str) -> Vec<usize> {
-    list.trim()
-        .split(',')
-        .filter(|r| !r.is_empty())
-        .flat_map(|r| match r.split_once('-') {
-            Some((a, b)) => a.parse::<usize>().ok().zip(b.parse::<usize>().ok()).map_or(0..0, |(a, b)| a..b + 1),
-            None => r.parse::<usize>().map_or(0..0, |a| a..a + 1),
-        })
-        .collect()
 }
 
 /// The last-level cache bytes the allowed cores share, summed over every distinct cache: what the memory probe's
@@ -512,9 +500,4 @@ mod tests {
         assert_eq!(other_soc.memory_gbs, None, "the same core in another system has its own memory");
     }
 
-    #[test]
-    fn a_cpu_list_parses_ranges_and_singles() {
-        assert_eq!(parse_cpulist("0-3,8,10-11\n"), vec![0, 1, 2, 3, 8, 10, 11]);
-        assert_eq!(parse_cpulist(""), Vec::<usize>::new());
-    }
 }

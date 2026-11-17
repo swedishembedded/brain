@@ -25,9 +25,10 @@ USAGE
       Offline/online FLOP and int-OPS accounting for one forward/backward
       pass, or a whole generation stage by stage (`brain perf flops --help`).
 
-  brain perf roofline [--kernels]
-      Measured compute capacity of every selected device and dtype, the
-      ceiling the other numbers are graded against (`brain perf roofline --help`).
+  brain perf roofline [--kernels [--retune]]
+      Measured capacity of every selected device with brain's best kernels,
+      beside the published peak, and the graded kernel selection
+      (`brain perf roofline --help`).
 
   brain perf compare <a.json> <b.json> ...
       Leaderboard across result artifacts. Refuses to rank across artifact

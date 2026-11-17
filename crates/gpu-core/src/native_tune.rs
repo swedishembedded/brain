@@ -28,13 +28,20 @@
 //!    rounding its own inputs to their storage resolution is rejected for that
 //!    class, never chosen (see [`admit`]);
 //! 3. the surviving candidates are timed with the backend's per-launch device
-//!    events, the weights cycled past the L2 so the stream is DRAM-bound as in a
-//!    real decode step, and the fastest wins (an earlier candidate keeps a tie
-//!    inside [`TIE`], so a noisy tie does not flip the choice between runs);
-//! 4. each choice records the achieved weight bandwidth and its fraction of
-//!    the device's measured roofline ([`crate::roof`]), and the table is
-//!    persisted per device, per brain build and per candidate source so the next
-//!    start reads it instead of measuring.
+//!    events, every launch on its own ([`crate::launch_stats`]), the weights
+//!    cycled past the L2 so the stream is DRAM-bound as in a real decode step;
+//!    the median launch is the candidate's time (a launch another context
+//!    stretched cannot move it), and the fastest wins (an earlier candidate keeps
+//!    a tie inside [`TIE`], so a noisy tie does not flip the choice between runs);
+//! 4. each choice records its median, fastest launch and stretched share, and the table
+//!    is persisted per device, per brain build and per candidate source so the
+//!    next start reads it instead of measuring - unless the card was busy while it
+//!    was measured ([`BUSY_LIMIT`]), when it is used but not stored.
+//!    [`set_retune`] discards a stored table and measures afresh.
+//!
+//! [`report`] grades each choice against its class's roofline bound ([`report`]'s
+//! module): the memory roof for a weight-streaming class, the tensor-core roof
+//! for a compute-bound one, the launch floor shown beside them.
 //!
 //! A dispatch then takes the candidate its shape class names
 //! ([`Tuned::choice`]); models call the op and never see any of this.
@@ -42,6 +49,11 @@
 //! A/B measurement and [`set_autotune`]`(false)` keeps every slot on its
 //! default (first) candidate; [`report`] lists what was chosen and the ops
 //! under [`GAP_THRESHOLD`] of their roofline.
+
+mod report;
+mod square;
+pub(crate) use square::{square_gemms, SIDE as SQUARE_SIDE};
+pub use report::{verdict_line, ClassBound, ClassRow, ExtraRoofs, Roof, SlotVerdict, TableReport};
 
 use crate::native_upgrade::{ActFormat, Input, WeightRead};
 use crate::Gpu;
@@ -176,9 +188,12 @@ fn grid(slot: &str) -> &'static Grid {
     }
 }
 
-const TRIALS: usize = 3;
-/// Launches timed per candidate at least, so a class with one weight copy still has several to take the minimum of.
-const MIN_LAUNCHES: usize = 6;
+/// Launches timed per candidate at least, each on its own, so a class with one weight copy still has enough for a
+/// median a few stretched launches cannot move.
+const MIN_LAUNCHES: usize = 15;
+/// Launches timed per candidate at most: a streaming class of small weights cycles this many copies, already far
+/// past the L2.
+const MAX_LAUNCHES: usize = 64;
 /// Wall time one device's tuning may take; classes not reached keep their default candidate until a rebuild retunes. The
 /// FP8 grid's classes tune in a fraction of this budget on a Hopper card (`brain roofline gpu --kernels` reports the time): the
 /// budget leaves the table room to finish on a card that is slower or shared.
@@ -187,7 +202,7 @@ const BUDGET: std::time::Duration = std::time::Duration::from_secs(60);
 /// The read-bandwidth probe: every thread streams 16-byte vectors with the loads a decode GEMV issues (L1
 /// no-allocate) and folds them, so the number is the read roof of the access type the candidates are graded on.
 /// Params `[vectors]`; a launch over a few vectors measures the launch floor instead.
-static ROOF_READ: kernels_cuda::CudaKernel = kernels_cuda::CudaKernel {
+pub(crate) static ROOF_READ: kernels_cuda::CudaKernel = kernels_cuda::CudaKernel {
     name: "roof_read",
     op: backend_api::select::Op::MatMul,
     weight: backend_api::select::Dtype::I8,
@@ -215,32 +230,45 @@ brain_roof_read(const unsigned int* params, const uint4* data, unsigned int* out
 }
 "#,
 };
-const ROOF_BINDINGS: &[backend_api::BindKind] = &[backend_api::BindKind::Uniform, backend_api::BindKind::StorageRead, backend_api::BindKind::StorageReadWrite];
+pub(crate) const ROOF_BINDINGS: &[backend_api::BindKind] = &[backend_api::BindKind::Uniform, backend_api::BindKind::StorageRead, backend_api::BindKind::StorageReadWrite];
 /// Bytes the read probe streams: far past any cache.
 const ROOF_BYTES: u64 = 1 << 30;
-const ROOF_BLOCKS: u32 = 4096;
+pub(crate) const ROOF_BLOCKS: u32 = 4096;
 
-/// The device's read roof (GB/s) and launch floor (microseconds), measured with [`ROOF_READ`]; `None` where the
-/// backend cannot time kernels or compile the probe.
-fn measure_read_roof(gpu: &Gpu) -> Option<(f32, f32)> {
+/// The read probe and launch floor of one device ([`measure_read_roof`]).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ReadRoof {
+    /// Read bandwidth of the fastest launch, GB/s.
+    pub gbs: f32,
+    /// The fastest almost empty launch, microseconds.
+    pub floor_us: f32,
+    /// The share of almost empty launches stretched past [`STRETCHED`] times the fastest: another context on the card.
+    pub busy: f32,
+}
+
+/// A launch of the floor probe this many times slower than the fastest one was stretched by something else on the card.
+const STRETCHED: f64 = 3.0;
+
+/// Past this share of stretched floor launches the card is busy, and a table measured on it is not stored.
+pub const BUSY_LIMIT: f32 = 0.25;
+
+/// Launches the floor probe times (each on its own).
+const FLOOR_SAMPLES: usize = 48;
+
+/// The device's read roof, launch floor and busy share, measured with [`ROOF_READ`] launch by launch
+/// ([`crate::launch_stats`]); `None` where the backend cannot time kernels or compile the probe. Both roofs are the
+/// FASTEST launch, a ceiling: another context only ever stretches a launch.
+pub(crate) fn measure_read_roof(gpu: &Gpu) -> Option<ReadRoof> {
     let id = gpu.native_kernel(&ROOF_READ, ROOF_BINDINGS)?;
     let vectors = (ROOF_BYTES / 16) as u32;
     let data = gpu.storage(ROOF_BYTES / 4);
     let out = gpu.storage(u64::from(ROOF_BLOCKS) * 256);
-    let launch = |n: u32| gpu.native_step_raw(id, &[&data, &out], &[n], ROOF_BLOCKS);
-    let time = |n: u32, reps: usize| -> Option<f64> {
-        let steps: Vec<_> = (0..reps).filter_map(|_| launch(n)).collect();
-        gpu.reset_kernel_times();
-        gpu.submit(&[], &steps);
-        gpu.poll_wait();
-        let t = gpu.kernel_times()?;
-        let (ms, calls) = t.iter().filter(|r| r.0 == ROOF_READ.reported).fold((0.0, 0u64), |a, r| (a.0 + r.1, a.1 + r.2));
-        (calls > 0).then(|| ms / calls as f64)
-    };
-    time(vectors, 2)?; // warm clocks and the pipeline
-    let best = (0..6).filter_map(|_| time(vectors, 8)).fold(f64::MAX, f64::min);
-    let floor = (0..6).filter_map(|_| time(256, 64)).fold(f64::MAX, f64::min);
-    (best.is_finite() && best > 0.0 && best < f64::MAX && floor < f64::MAX).then(|| ((ROOF_BYTES as f64 / (best * 1e-3) / 1e9) as f32, (floor * 1e3) as f32))
+    let launches = |n: u32, count: usize| -> Vec<crate::Step> { (0..count).filter_map(|_| gpu.native_step_raw(id, &[&data, &out], &[n], ROOF_BLOCKS)).collect() };
+    let stream = crate::launch_stats::measure(gpu, &launches(vectors, 12))?;
+    let floor = crate::launch_stats::sample(gpu, &launches(256, FLOOR_SAMPLES))?;
+    let fastest = floor.iter().copied().fold(f64::MAX, f64::min);
+    let busy = floor.iter().filter(|&&ms| ms > STRETCHED * fastest).count() as f32 / floor.len().max(1) as f32;
+    (stream.min_ms > 0.0 && fastest < f64::MAX).then(|| ReadRoof { gbs: (ROOF_BYTES as f64 / (stream.min_ms * 1e-3) / 1e9) as f32, floor_us: (fastest * 1e3) as f32, busy })
 }
 
 /// The int8 tensor-core probe (`mma.sync m16n8k32`): every warp issues independent MMAs on operands held in registers,
@@ -291,27 +319,18 @@ const ROOF_MMA_ITERS: u32 = 512;
 /// Operations of one `m16n8k32` MMA: 16 x 8 x 32 multiply-adds.
 const MMA_OPS: f64 = 2.0 * 16.0 * 8.0 * 32.0;
 
-/// Device milliseconds of one launch of the probe `kernel` on `blocks` blocks, the best of a few runs.
+/// Device milliseconds of one launch of the probe `kernel` on `blocks` blocks: the fastest of launches timed one by one
+/// ([`crate::launch_stats`]), the ceiling a stretched launch cannot lower.
 fn time_probe(gpu: &Gpu, kernel: &'static kernels_cuda::CudaKernel, bindings: &'static [backend_api::BindKind], params: &[u32], blocks: u32, out_words: u64) -> Option<f64> {
     let id = gpu.native_kernel(kernel, bindings)?;
     let out = gpu.storage(out_words);
-    let steps: Vec<_> = (0..6).filter_map(|_| gpu.native_step_raw(id, &[&out], params, blocks)).collect();
-    let time = |steps: &[crate::Step]| -> Option<f64> {
-        gpu.reset_kernel_times();
-        gpu.submit(&[], steps);
-        gpu.poll_wait();
-        let t = gpu.kernel_times()?;
-        let (ms, calls) = t.iter().filter(|r| r.0 == kernel.reported).fold((0.0, 0u64), |a, r| (a.0 + r.1, a.1 + r.2));
-        (calls > 0).then(|| ms / calls as f64)
-    };
-    time(&steps[..2])?; // warm clocks and the pipeline
-    let best = (0..4).filter_map(|_| time(&steps)).fold(f64::MAX, f64::min);
-    (best.is_finite() && best > 0.0 && best < f64::MAX).then_some(best)
+    let steps: Vec<_> = (0..12).filter_map(|_| gpu.native_step_raw(id, &[&out], params, blocks)).collect();
+    Some(crate::launch_stats::measure(gpu, &steps)?.min_ms)
 }
 
 /// The device's int8 tensor-core roof in TOPS: the fastest of its matrix-multiply paths (`mma.sync`, and the
 /// warpgroup path where the device has it) on register operands; `None` where no probe compiles or runs.
-fn measure_int8_roof(gpu: &Gpu) -> Option<f32> {
+pub(crate) fn measure_int8_roof(gpu: &Gpu) -> Option<f32> {
     let cc = gpu.caps().arch.compute_capability?;
     if cc < kernels_cuda::MMA_S8_MIN_CC {
         return None;
@@ -328,6 +347,7 @@ fn measure_int8_roof(gpu: &Gpu) -> Option<f32> {
 const TUNABLE_SLOTS: [&str; 4] = ["matmul_i8_gemv", crate::native_upgrade::PREFILL_SLOT, crate::native_upgrade::FP8_SLOT, MOE_SLOT];
 
 static AUTOTUNE: AtomicBool = AtomicBool::new(true);
+static RETUNE: AtomicBool = AtomicBool::new(false);
 static FORCED: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
 /// Whether [`FORCED`] holds anything: a dispatch consults the list (and its lock) only then, which is almost never.
 static FORCED_ANY: AtomicBool = AtomicBool::new(false);
@@ -341,6 +361,12 @@ thread_local! {
 /// Whether handles built from now on tune their candidate slots (default) or keep every slot on its first candidate.
 pub fn set_autotune(on: bool) {
     AUTOTUNE.store(on, Ordering::Relaxed);
+}
+
+/// Whether the next tuning of each device ignores the table stored for it (this device, this build) and measures
+/// afresh, overwriting it: `brain perf roofline --kernels --retune`. Process-wide, set before the first handle.
+pub fn set_retune(on: bool) {
+    RETUNE.store(on, Ordering::Relaxed);
 }
 
 /// Pin `slot` (the kernel name a model registers, e.g. `matmul_i8_gemv`) to the candidate `kernel` wherever that
@@ -440,10 +466,26 @@ impl Class {
 /// What happened to one candidate on one class.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Verdict {
-    /// Timed: microseconds per launch, weight bandwidth in GB/s, fraction of the measured roofline bound.
-    Timed { us: f64, gbs: f64, frac: Option<f64> },
+    /// Timed over separately timed launches ([`crate::launch_stats`]): the median microseconds a launch, the weight
+    /// bandwidth at that median (GB/s), the fastest launch, and the share of launches another context stretched.
+    Timed { us: f64, gbs: f64, min_us: f64, stretched: f64 },
     /// Refused by the admission rule; never chosen.
     Rejected(String),
+}
+
+impl Verdict {
+    /// Whether the launches disagreed too much for the median to stand for the kernel
+    /// ([`crate::launch_stats::LaunchStats::contaminated`]'s rule).
+    pub fn noisy(&self) -> bool {
+        match self {
+            Verdict::Timed { us, min_us, stretched, .. } => crate::launch_stats::contaminated(*us, *min_us, *stretched),
+            Verdict::Rejected(_) => false,
+        }
+    }
+
+    fn timed(stats: &crate::launch_stats::LaunchStats, bytes: u64) -> Verdict {
+        Verdict::Timed { us: stats.median_ms * 1e3, gbs: bytes as f64 / (stats.median_ms * 1e-3) / 1e9, min_us: stats.min_ms * 1e3, stretched: stats.stretched }
+    }
 }
 
 /// One class's outcome.
@@ -461,12 +503,9 @@ impl Entry {
         self.class.label(grid(&self.slot))
     }
 
-    /// The winner's fraction of its roofline bound, when a roof was measured.
-    pub fn roof_fraction(&self) -> Option<f64> {
-        self.results.iter().find(|(k, _)| *k == self.best).and_then(|(_, v)| match v {
-            Verdict::Timed { frac, .. } => *frac,
-            Verdict::Rejected(_) => None,
-        })
+    /// The winner's verdict, when the class was measured.
+    pub fn chosen(&self) -> Option<&Verdict> {
+        self.results.iter().find(|(k, _)| *k == self.best).map(|(_, v)| v)
     }
 }
 
@@ -481,6 +520,9 @@ pub struct Tuned {
     /// The measured int8 tensor-core compute roof, TOPS: the fastest of the device's int8 matrix-multiply paths on
     /// operands held in registers. The bound of the compute-bound (prefill) classes.
     pub int8_tops: Option<f32>,
+    /// The share of the launch-floor probe's launches another context stretched while the table was measured
+    /// ([`STRETCHED`] times the fastest): how busy the card was. `None` where it was not measured.
+    pub busy: Option<f32>,
     pub entries: Vec<Entry>,
     /// Whether this table was read from the persistent store rather than measured by this process.
     pub from_store: bool,
@@ -830,7 +872,7 @@ pub fn check_shape(gpu: &Gpu, params: [u32; 3]) -> Vec<(String, Verdict)> {
     let Some(kind) = gpu.int8_linear_kind(m) else { return Vec::new() };
     let slot = if kind == crate::native_upgrade::PREFILL_KIND { crate::native_upgrade::PREFILL_SLOT } else { "matmul_i8_gemv" };
     let cands: Vec<&crate::native_upgrade::Active> = crate::native_upgrade::candidates(gpu.native_rows(), kind, &params).collect();
-    time_class(gpu, grid(slot), &cands, (m, kg, n), &Acts::new(m, kg), &Roofs { gbs: None, floor_us: None, int8_tops: None }, false)
+    time_class(gpu, grid(slot), &cands, (m, kg, n), &Acts::new(m, kg), false)
 }
 
 /// [`check_shape`] for the FP8 linear's candidates (`params` = `[m, k/4, n]`, `k` a multiple of 128). For tests.
@@ -838,7 +880,7 @@ pub fn check_shape(gpu: &Gpu, params: [u32; 3]) -> Vec<(String, Verdict)> {
 pub fn check_fp8_shape(gpu: &Gpu, params: [u32; 3]) -> Vec<(String, Verdict)> {
     let [m, kg, n] = params;
     let cands: Vec<&crate::native_upgrade::Active> = crate::native_upgrade::candidates(gpu.native_rows(), crate::native_upgrade::FP8_KIND, &params).collect();
-    time_class(gpu, &FP8, &cands, (m, kg, n), &Acts::new(m, kg), &Roofs { gbs: None, floor_us: None, int8_tops: None }, false)
+    time_class(gpu, &FP8, &cands, (m, kg, n), &Acts::new(m, kg), false)
 }
 
 /// The bf16-output twins of the FP8 candidates that serve `params` (`[m, k/4, n]`), each held to its base: the same inputs
@@ -931,7 +973,7 @@ pub fn time_fp8_bf16_out(gpu: &Gpu, params: [u32; 3]) -> Vec<(String, f64, f64)>
 /// The device read roof (GB/s) and launch floor (us) of the autotuner's probe. For benches.
 #[doc(hidden)]
 pub fn read_roof(gpu: &Gpu) -> Option<(f32, f32)> {
-    gpu.set_kernel_timing(true).then(|| measure_read_roof(gpu)).flatten()
+    gpu.set_kernel_timing(true).then(|| measure_read_roof(gpu)).flatten().map(|r| (r.gbs, r.floor_us))
 }
 
 /// [`check_fp8_shape`] with the timing on: every FP8 candidate serving `params` (`[m, k/4, n]`) timed on the weights cycled
@@ -948,7 +990,7 @@ pub fn time_fp8_candidates(gpu: &Gpu, params: [u32; 3], only: &str) -> Vec<(Stri
     let cands: Vec<&crate::native_upgrade::Active> =
         crate::native_upgrade::candidates(gpu.native_rows(), crate::native_upgrade::FP8_KIND, &params).filter(|a| a.kernel.contains(only)).collect();
     let timing = gpu.set_kernel_timing(true);
-    let verdicts = time_class(gpu, &FP8, &cands, (m, kg, n), &Acts::new(m, kg), &Roofs { gbs: Some(4000.0), floor_us: Some(2.0), int8_tops: Some(1000.0) }, timing);
+    let verdicts = time_class(gpu, &FP8, &cands, (m, kg, n), &Acts::new(m, kg), timing);
     gpu.set_kernel_timing(false);
     verdicts
 }
@@ -968,14 +1010,22 @@ pub(crate) fn ensure(gpu: &Gpu, slots: &[(usize, &'static str)]) -> Option<Arc<T
     }
     TUNING.with(|t| t.set(true));
     let names: Vec<&str> = multi.iter().map(|&(_, slot)| slot).collect();
-    let stored = load(&key);
+    let stored = if RETUNE.load(Ordering::Relaxed) { None } else { load(&key) };
     let tuned = Arc::new(match stored {
         Some(t) if missing_classes(&t, &names).is_empty() => t,
         prior => {
             // A table the budget cut short is resumed: its measured classes are kept and only the rest are timed.
             // The sweep's synthetic problems are gone when it returns; so are their charges on `gpu`.
             let t = crate::with_transient_charges(|| measure(gpu, &multi, prior.as_ref()));
-            save(&key, &t);
+            match t.busy {
+                // A table measured while another context held the card would steer every later start of this build.
+                Some(b) if b > BUSY_LIMIT => eprintln!(
+                    "brain: warning: {:.0}% of the launch-floor probe's launches on {} were stretched by another context; the kernel choices are used by this process but not stored",
+                    b * 100.0,
+                    t.device
+                ),
+                _ => save(&key, &t),
+            }
             eprintln!("{}", summary(&t));
             let unmeasured = missing_classes(&t, &names).len();
             if unmeasured > 0 {
@@ -1002,10 +1052,16 @@ fn device_key(gpu: &Gpu, slots: &[(usize, &'static str)]) -> String {
     let srcs: Vec<&str> = sources.iter().filter_map(|n| kernels_cuda::get(n).map(|k| k.src)).collect();
     // Every input of a measurement: the grids and the synthetic MoE round they are timed on.
     let moe_round = format!("moe-round-{}-{}-{}", MoeProblem::SLOTS, MoeProblem::MAX_EXPERTS, MoeProblem::XDIV);
-    let fp = fnv(&srcs) ^ fnv(&[env!("CARGO_PKG_VERSION"), &format!("admission-{ALPHA}"), &format!("{:?}", [&DECODE, &PREFILL, &FP8, &MOE].map(|g| (g.rows, g.k, g.bytes_bounds, g.n_reps, g.footprint_bytes, g.stream_max_rows, g.fp8))), &moe_round]);
+    // The store format is part of the key: a build writing another format must not overwrite (and so re-tune) the
+    // table a build of the earlier format still reads beside it.
+    let fp = fnv(&srcs) ^ fnv(&[env!("CARGO_PKG_VERSION"), STORE_TAG, &format!("admission-{ALPHA}"), &format!("{:?}", [&DECODE, &PREFILL, &FP8, &MOE].map(|g| (g.rows, g.k, g.bytes_bounds, g.n_reps, g.footprint_bytes, g.stream_max_rows, g.fp8))), &moe_round]);
     let slug: String = format!("{desc}-{}-{cc}", gpu.kind()).chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
     format!("{slug}-{fp:016x}")
 }
+
+/// The store format's tag: a table written by an earlier format (v3 kept an averaged time and a fraction folded with
+/// the launch floor) is not read, so the next start re-measures it.
+const STORE_TAG: &str = "native-tune-v4";
 
 fn store_path(key: &str) -> Option<std::path::PathBuf> {
     Some(crate::tune::cache_dir()?.join(format!("native-tune-{key}.txt")))
@@ -1020,8 +1076,8 @@ fn load(key: &str) -> Option<Tuned> {
 fn parse_store(text: &str) -> Option<Tuned> {
     let mut lines = text.lines();
     let header: Vec<&str> = lines.next()?.split('|').collect();
-    let [tag, device, roof, floor, tops] = header[..] else { return None };
-    if tag != "native-tune-v3" {
+    let [tag, device, roof, floor, tops, busy] = header[..] else { return None };
+    if tag != STORE_TAG {
         return None;
     }
     let mut entries = Vec::new();
@@ -1034,14 +1090,14 @@ fn parse_store(text: &str) -> Option<Tuned> {
             let p: Vec<&str> = r.split(':').collect();
             let verdict = match p[..] {
                 [_, "rej", why] => Verdict::Rejected(why.to_owned()),
-                [_, us, gbs, frac] => Verdict::Timed { us: us.parse().ok()?, gbs: gbs.parse().ok()?, frac: frac.parse().ok() },
+                [_, us, gbs, min_us, stretched] => Verdict::Timed { us: us.parse().ok()?, gbs: gbs.parse().ok()?, min_us: min_us.parse().ok()?, stretched: stretched.parse().ok()? },
                 _ => return None,
             };
             rs.push((p[0].to_owned(), verdict));
         }
         entries.push(Entry { slot: slot.to_owned(), class, best: best.to_owned(), results: rs });
     }
-    Some(Tuned { device: device.to_owned(), roof_gbs: roof.parse().ok(), floor_us: floor.parse().ok(), int8_tops: tops.parse().ok(), entries, from_store: true, index: OnceLock::new() })
+    Some(Tuned { device: device.to_owned(), roof_gbs: roof.parse().ok(), floor_us: floor.parse().ok(), int8_tops: tops.parse().ok(), busy: busy.parse().ok(), entries, from_store: true, index: OnceLock::new() })
 }
 
 /// The `(slot, class)` pairs of `slots` that `t` holds no measurement for: absent, or saved unmeasured because the
@@ -1081,7 +1137,7 @@ fn store_results(results: &[(String, Verdict)]) -> String {
     results
         .iter()
         .map(|(k, v)| match v {
-            Verdict::Timed { us, gbs, frac } => format!("{k}:{us:.2}:{gbs:.0}:{}", frac.map(|f| format!("{f:.3}")).unwrap_or_default()),
+            Verdict::Timed { us, gbs, min_us, stretched } => format!("{k}:{us:.2}:{gbs:.0}:{min_us:.2}:{stretched:.4}"),
             Verdict::Rejected(why) => format!("{k}:rej:{}", why.replace([':', '|', ';', '\n'], " ")),
         })
         .collect::<Vec<_>>()
@@ -1091,7 +1147,7 @@ fn store_results(results: &[(String, Verdict)]) -> String {
 fn save(key: &str, t: &Tuned) {
     let Some(path) = store_path(key) else { return };
     let opt = |v: Option<f32>| v.map(|r| r.to_string()).unwrap_or_default();
-    let mut text = format!("native-tune-v3|{}|{}|{}|{}\n", t.device, opt(t.roof_gbs), opt(t.floor_us), opt(t.int8_tops));
+    let mut text = format!("{STORE_TAG}|{}|{}|{}|{}|{}\n", t.device, opt(t.roof_gbs), opt(t.floor_us), opt(t.int8_tops), opt(t.busy));
     for e in &t.entries {
         text += &format!("{}|{}|{}|{}|{}|{}\n", e.slot, e.class.rows, e.class.k, e.class.bytes, e.best, store_results(&e.results));
     }
@@ -1108,10 +1164,7 @@ fn save(key: &str, t: &Tuned) {
 /// measurement for; the measured classes of `prior` are kept as they are.
 fn measure(gpu: &Gpu, slots: &[(usize, &'static str)], prior: Option<&Tuned>) -> Tuned {
     let timing = gpu.set_kernel_timing(true);
-    let (roof_gbs, floor_us) = match timing.then(|| measure_read_roof(gpu)).flatten() {
-        Some((r, f)) => (Some(r), Some(f)),
-        None => (None, None),
-    };
+    let read = timing.then(|| measure_read_roof(gpu)).flatten();
     let int8_tops = timing.then(|| measure_int8_roof(gpu)).flatten();
     let started = std::time::Instant::now();
     let mut entries = Vec::new();
@@ -1136,16 +1189,15 @@ fn measure(gpu: &Gpu, slots: &[(usize, &'static str)], prior: Option<&Tuned>) ->
             }
             // Past the budget a class is left unmeasured (filled from its neighbours below) rather than delaying the
             // start further; the next start measures it.
-            let roofs = Roofs { gbs: roof_gbs, floor_us, int8_tops };
             let results = if started.elapsed() > BUDGET {
                 Vec::new()
             } else if let Some(p) = &moe {
-                time_moe_class(gpu, &cands, p, &roofs, timing)
+                time_moe_class(gpu, &cands, p, timing)
             } else {
                 if !acts.as_ref().is_some_and(|a| a.m == m && a.kg == kg) {
                     acts = Some(Acts::new(m, kg));
                 }
-                time_class(gpu, g, &cands, (m, kg, n), acts.as_ref().expect("built above"), &roofs, timing)
+                time_class(gpu, g, &cands, (m, kg, n), acts.as_ref().expect("built above"), timing)
             };
             let mut best: Option<(&str, f64)> = None;
             for (name, v) in &results {
@@ -1163,34 +1215,22 @@ fn measure(gpu: &Gpu, slots: &[(usize, &'static str)], prior: Option<&Tuned>) ->
     fill_untimed(&mut entries, |slot, class, name| served.get(&(slot, class)).is_some_and(|names| names.contains(&name)));
     gpu.set_kernel_timing(false);
     let device = crate::adapter_info().map(|(d, _)| d).unwrap_or_else(|| gpu.kind().to_owned());
-    Tuned { device, roof_gbs, floor_us, int8_tops, entries, from_store: false, index: OnceLock::new() }
-}
-
-/// The device's measured roofs, the bounds a class's fraction is taken against.
-struct Roofs {
-    /// Memory read roof, GB/s.
-    gbs: Option<f32>,
-    /// Launch floor, microseconds.
-    floor_us: Option<f32>,
-    /// int8 tensor-core roof, TOPS.
-    int8_tops: Option<f32>,
-}
-
-impl Roofs {
-    /// The best time (ms) a problem of `ops` operations over `wbytes` of weights can take: the slower of the compute
-    /// and the memory bound, never under the launch floor. `None` while the roof it needs is unmeasured. A
-    /// weight-streaming (decode) class has no compute bound, it is far under the compute roof at these rows.
-    fn bound_ms(&self, compute_bound: bool, ops: f64, wbytes: u64) -> Option<f64> {
-        let mem = wbytes as f64 / (f64::from(self.gbs?) * 1e9) * 1e3;
-        let compute = if compute_bound { ops / (f64::from(self.int8_tops?) * 1e12) * 1e3 } else { 0.0 };
-        Some(mem.max(compute).max(f64::from(self.floor_us.unwrap_or(0.0)) * 1e-3))
+    Tuned {
+        device,
+        roof_gbs: read.map(|r| r.gbs),
+        floor_us: read.map(|r| r.floor_us),
+        int8_tops,
+        busy: read.map(|r| r.busy),
+        entries,
+        from_store: false,
+        index: OnceLock::new(),
     }
 }
 
 /// Run and time each candidate on one synthetic problem `(m, kg, n)` of grid `g`, over the activations `acts`
 /// (`m` rows, `kg * 4` wide). A candidate is handed the activation form it declares ([`Input`]) and judged by the
 /// admission rule ([`admit`]) before it is timed.
-fn time_class(gpu: &Gpu, g: &Grid, cands: &[&crate::native_upgrade::Active], (m, kg, n): (u32, u32, u32), acts: &Acts, roofs: &Roofs, timing: bool) -> Vec<(String, Verdict)> {
+fn time_class(gpu: &Gpu, g: &Grid, cands: &[&crate::native_upgrade::Active], (m, kg, n): (u32, u32, u32), acts: &Acts, timing: bool) -> Vec<(String, Verdict)> {
     debug_assert!(acts.m == m && acts.kg == kg);
     let k = kg * 4;
     // Scales per weight: a row of int8 codes holds `k / 32`, an FP8 weight one per 128 x 128 block.
@@ -1266,41 +1306,20 @@ fn time_class(gpu: &Gpu, g: &Grid, cands: &[&crate::native_upgrade::Active], (m,
             continue;
         }
         if !timing {
-            results.push((a.kernel.to_owned(), Verdict::Timed { us: f64::NAN, gbs: 0.0, frac: None }));
+            results.push((a.kernel.to_owned(), Verdict::Timed { us: f64::NAN, gbs: 0.0, min_us: f64::NAN, stretched: 0.0 }));
             continue;
         }
-        // A single copy of the weights is launched repeatedly: a launch is timed by the backend's own events, and the
-        // minimum over several makes a short kernel's figure the uncontended one.
-        let launches = copies.max(MIN_LAUNCHES);
+        // Every launch is timed on its own, cycling the weight copies so a streaming class reads them from memory; the
+        // median launch is the candidate's time ([`crate::launch_stats`]).
+        let launches = copies.clamp(MIN_LAUNCHES, MAX_LAUNCHES);
         let steps: Vec<_> = (0..launches).filter_map(|i| step(&weights[i % copies])).collect();
-        let Some(best) = best_launch_ms(gpu, a.reported, &steps) else {
+        let Some(stats) = crate::launch_stats::measure(gpu, &steps) else {
             results.push((a.kernel.to_owned(), Verdict::Rejected("no device timing".into())));
             continue;
         };
-        let gbs = wbytes as f64 / (best * 1e-3) / 1e9;
-        // A decode-regime int8 linear moves its weights once and does far fewer operations than the roof allows per
-        // byte, so its bound is the memory roof; a prefill-sized one is bound by the tensor cores. The fraction is the
-        // bound's time over the measured time.
-        let ops = 2.0 * f64::from(m) * f64::from(n) * f64::from(k);
-        let frac = roofs.bound_ms(!g.streams(m), ops, wbytes).map(|b| b / best);
-        results.push((a.kernel.to_owned(), Verdict::Timed { us: best * 1e3, gbs, frac }));
+        results.push((a.kernel.to_owned(), Verdict::timed(&stats, wbytes)));
     }
     results
-}
-
-/// The fastest launch (ms) of `steps`, all launches of the candidate the backend times as `reported`: best over short
-/// runs of launches, since another context time-sliced onto the card stretches whatever it interrupts and never
-/// shortens anything, so the minimum is the uncontended figure. `None` without device timing.
-fn best_launch_ms(gpu: &Gpu, reported: &str, steps: &[crate::Step]) -> Option<f64> {
-    let time = |steps: &[crate::Step]| {
-        gpu.reset_kernel_times();
-        gpu.submit(&[], steps);
-        gpu.poll_wait();
-        gpu.kernel_times().map(|t| t.iter().filter(|r| r.0 == reported).map(|r| r.1).sum::<f64>() / steps.len() as f64)
-    };
-    let _ = time(steps);
-    let best = (0..TRIALS).flat_map(|_| steps.chunks(steps.len().div_ceil(4).max(4))).filter_map(time).fold(f64::MAX, f64::min);
-    (best.is_finite() && best > 0.0 && best != f64::MAX).then_some(best)
 }
 
 /// The synthetic round of one [`MOE`] class: `ne` experts of `n` rows of `kg * 4` codes, `per` slots routed to each
@@ -1377,7 +1396,7 @@ impl MoeProblem {
 /// 40-layer stack flips, while the fp32 forwards agree to 1e-5), so an accumulation order adding errors of the order of
 /// 2^-24 times the terms' size is far inside it, and an addressing or tiling defect (a wrong slot, row or group)
 /// moves an output by the size of the output, far outside.
-fn time_moe_class(gpu: &Gpu, cands: &[&crate::native_upgrade::Active], p: &MoeProblem, roofs: &Roofs, timing: bool) -> Vec<(String, Verdict)> {
+fn time_moe_class(gpu: &Gpu, cands: &[&crate::native_upgrade::Active], p: &MoeProblem, timing: bool) -> Vec<(String, Verdict)> {
     let (kg, n, ne, slots) = (p.kg, p.n, p.ne, p.slots());
     let groups = (kg / 8) as usize;
     let acts = Acts::new(slots / p.xdiv, kg);
@@ -1424,17 +1443,15 @@ fn time_moe_class(gpu: &Gpu, cands: &[&crate::native_upgrade::Active], p: &MoePr
             continue;
         }
         if !timing {
-            results.push((a.kernel.to_owned(), Verdict::Timed { us: f64::NAN, gbs: 0.0, frac: None }));
+            results.push((a.kernel.to_owned(), Verdict::Timed { us: f64::NAN, gbs: 0.0, min_us: f64::NAN, stretched: 0.0 }));
             continue;
         }
         let steps: Vec<_> = (0..MIN_LAUNCHES).filter_map(|_| step()).collect();
-        let Some(best) = best_launch_ms(gpu, a.reported, &steps) else {
+        let Some(stats) = crate::launch_stats::measure(gpu, &steps) else {
             results.push((a.kernel.to_owned(), Verdict::Rejected("no device timing".into())));
             continue;
         };
-        let ops = 2.0 * f64::from(slots) * f64::from(n) * f64::from(kg * 4);
-        let frac = roofs.bound_ms(true, ops, wbytes).map(|b| b / best);
-        results.push((a.kernel.to_owned(), Verdict::Timed { us: best * 1e3, gbs: wbytes as f64 / (best * 1e-3) / 1e9, frac }));
+        results.push((a.kernel.to_owned(), Verdict::timed(&stats, wbytes)));
     }
     results
 }
@@ -1449,57 +1466,20 @@ fn summary(t: &Tuned) -> String {
     format!("brain: tuned native kernels on {} ({} classes): {}", t.device, t.entries.len(), parts.join(", "))
 }
 
-/// The tables built by this process, listed: per slot and shape class the chosen candidate, its time, achieved
-/// bandwidth and fraction of the measured roofline, the other candidates, and the classes under [`GAP_THRESHOLD`].
+/// The tables built by this process, each graded against its roofs raised by `extra` ([`report`]'s module): per slot
+/// and shape class the chosen candidate, its median, fastest launch and spread, its rate, the class's roof time and
+/// bound, the fraction reached, the launch floor, the other candidates, the gap list and each slot's verdict.
+pub fn graded(extra: &ExtraRoofs) -> Vec<TableReport> {
+    TABLES.lock().unwrap_or_else(|e| e.into_inner()).iter().map(|(_, t)| report::grade(t, extra)).collect()
+}
+
+/// [`graded`] with no outside roofs, as plain text.
 pub fn report() -> String {
-    let tables = TABLES.lock().unwrap_or_else(|e| e.into_inner());
+    let tables = graded(&ExtraRoofs::default());
     if tables.is_empty() {
         return "no native candidate slot was tuned (no multi-candidate kernel on this device, or autotune is off)\n".to_owned();
     }
-    let mut out = String::new();
-    for (_, t) in tables.iter() {
-        let roof = t.roof_gbs.map(|r| format!("{r:.0} GB/s")).unwrap_or_else(|| "not measured".into());
-        let tops = t.int8_tops.map(|r| format!("{r:.0} TOPS")).unwrap_or_else(|| "not measured".into());
-        out += &format!("native kernel selection on {} (memory roof {roof}, int8 tensor-core roof {tops}, {})\n", t.device, if t.from_store { "from the store" } else { "measured now" });
-        out += &format!("{:<18} {:<28} {:<22} {:>8} {:>8} {:>7}  other candidates\n", "slot", "shape class", "chosen", "us", "GB/s|TOPS", "roof");
-        for e in &t.entries {
-            let g = grid(&e.slot);
-            let (us, rate, frac) = match e.results.iter().find(|(k, _)| *k == e.best) {
-                // A compute-bound class reports the operations it ran a second, a streaming one its weight bandwidth.
-                Some((_, Verdict::Timed { us, frac, .. })) if !g.streams(e.class.problem(g).0) => {
-                    let (m, kg, n) = e.class.problem(g);
-                    (*us, 2.0 * f64::from(m) * f64::from(n) * f64::from(kg) * 4.0 / (*us * 1e-6) / 1e12, *frac)
-                }
-                Some((_, Verdict::Timed { us, gbs, frac })) => (*us, *gbs, *frac),
-                _ => (f64::NAN, 0.0, None),
-            };
-            let others: Vec<String> = e
-                .results
-                .iter()
-                .filter(|(k, _)| *k != e.best)
-                .map(|(k, v)| match v {
-                    Verdict::Timed { us, .. } => format!("{k} {us:.1}us"),
-                    Verdict::Rejected(why) => format!("{k} REJECTED ({why})"),
-                })
-                .collect();
-            out += &format!(
-                "{:<18} {:<28} {:<22} {:>8.1} {:>8.0} {:>7}  {}\n",
-                e.slot,
-                e.describe(),
-                e.best,
-                us,
-                rate,
-                frac.map(|f| format!("{:.0}%", f * 100.0)).unwrap_or_else(|| "-".into()),
-                others.join(", ")
-            );
-        }
-        let gap: Vec<&Entry> = t.entries.iter().filter(|e| e.roof_fraction().is_some_and(|f| f < GAP_THRESHOLD)).collect();
-        out += &format!("below {:.0}% of the roofline: {} of {} classes\n", GAP_THRESHOLD * 100.0, gap.len(), t.entries.len());
-        for e in gap {
-            out += &format!("  {} {} - {:.0}% with {}\n", e.slot, e.describe(), e.roof_fraction().unwrap_or(0.0) * 100.0, e.best);
-        }
-    }
-    out
+    tables.iter().map(|t| t.render("")).collect()
 }
 
 /// Every `(slot, candidate)` pair the tuned handles offer.
@@ -1511,11 +1491,24 @@ pub fn offered() -> Vec<(String, String)> {
     v
 }
 
-/// The selection table of the process's default device, built by opening a handle that registers the kernel slots
-/// the native candidate sets cover (the int8 decode linear and prefill GEMM): what `brain perf roofline --kernels` prints, with no model
-/// loaded.
+/// The kernels a handle registers to hold every slot the native candidate sets cover: the int8 decode linear, the int8
+/// prefill GEMM (through `matmul_i8_dyn`) and the FP8 linear (through `matmul_fp8_gemv`).
+const TUNED_SLOT_KERNELS: &[(&str, &str)] =
+    &[("matmul_i8_gemv", kernels::MATMUL_I8_GEMV), ("matmul_i8_dyn", kernels::MATMUL_I8_DYN), ("matmul_fp8_gemv", kernels::MATMUL_FP8_GEMV)];
+
+/// Tune `dev` (once per device and build, or read its stored tables; [`set_retune`] measures afresh) with no model
+/// loaded, and grade every table it holds against its roofs raised by `extra`: what `brain perf roofline --kernels`
+/// prints for one card.
+pub fn tune_and_grade(dev: &crate::devices::DeviceId, extra: &ExtraRoofs) -> Vec<TableReport> {
+    let gpu = Gpu::new_on(dev, TUNED_SLOT_KERNELS);
+    gpu.prepare_fp8_linear();
+    gpu.tuned_tables().into_iter().map(|t| report::grade(t, extra)).collect()
+}
+
+/// The process's default device tuned as [`tune_and_grade`] does, then [`report`].
 pub fn report_for_default_device() -> String {
-    let _gpu = Gpu::new(&[("matmul_i8_gemv", kernels::MATMUL_I8_GEMV), ("matmul_i8_dyn", kernels::MATMUL_I8_DYN)]);
+    let gpu = Gpu::new(TUNED_SLOT_KERNELS);
+    gpu.prepare_fp8_linear();
     report()
 }
 
@@ -1624,14 +1617,15 @@ mod tests {
             roof_gbs: Some(1000.0),
             floor_us: Some(5.0),
             int8_tops: Some(600.0),
-            entries: vec![Entry { slot: "slot".into(), class, best: "fast".into(), results: vec![("fast".into(), Verdict::Timed { us: 1.0, gbs: 500.0, frac: Some(0.5) })] }],
+            busy: None,
+            entries: vec![Entry { slot: "slot".into(), class, best: "fast".into(), results: vec![("fast".into(), Verdict::Timed { us: 1.0, gbs: 500.0, min_us: 1.0, stretched: 0.0 })] }],
             from_store: false,
             index: OnceLock::new(),
         };
         assert_eq!(t.choice("slot", &[12, 1280, 5120], &|_| true).as_deref(), Some("fast"));
         assert_eq!(t.choice("slot", &[12, 1280, 17], &|_| true).as_deref(), None, "an untuned class names nothing: the default stands");
         assert_eq!(t.choice("other", &[12, 1280, 5120], &|_| true), None);
-        assert_eq!(t.entries[0].roof_fraction(), Some(0.5));
+        assert_eq!(t.entries[0].chosen(), Some(&Verdict::Timed { us: 1.0, gbs: 500.0, min_us: 1.0, stretched: 0.0 }));
     }
 
     /// The per-dispatch choice through the index equals the linear scan it replaced, on random tables (several
@@ -1671,13 +1665,13 @@ mod tests {
                     let mut results = Vec::new();
                     for n in names {
                         if rng.unit() < 0.7 {
-                            results.push((n.to_string(), Verdict::Timed { us: 1.0 + rng.unit() as f64 * 5.0, gbs: 1.0, frac: None }));
+                            results.push((n.to_string(), Verdict::Timed { us: 1.0 + rng.unit() as f64 * 5.0, gbs: 1.0, min_us: 1.0, stretched: 0.0 }));
                         }
                     }
                     Entry { slot: slot.into(), class, best: names[pick(&mut rng, names.len())].into(), results }
                 })
                 .collect();
-            let t = Tuned { device: "t".into(), roof_gbs: None, floor_us: None, int8_tops: None, entries, from_store: false, index: OnceLock::new() };
+            let t = Tuned { device: "t".into(), roof_gbs: None, floor_us: None, int8_tops: None, busy: None, entries, from_store: false, index: OnceLock::new() };
             let accepted: Vec<&str> = names.iter().copied().filter(|_| rng.unit() < 0.6).collect();
             let accepts = |n: &str| accepted.contains(&n);
             for _ in 0..80 {
@@ -1694,8 +1688,8 @@ mod tests {
     #[test]
     fn a_forced_candidate_overrides_its_slot_until_cleared() {
         let class = Class::of(&DECODE, 12, 1280, 5120).unwrap();
-        let entry = |slot: &str| Entry { slot: slot.into(), class, best: "fast".into(), results: vec![("fast".into(), Verdict::Timed { us: 1.0, gbs: 1.0, frac: None })] };
-        let t = Tuned { device: "t".into(), roof_gbs: None, floor_us: None, int8_tops: None, entries: vec![entry("forced_slot"), entry("free_slot")], from_store: false, index: OnceLock::new() };
+        let entry = |slot: &str| Entry { slot: slot.into(), class, best: "fast".into(), results: vec![("fast".into(), Verdict::Timed { us: 1.0, gbs: 1.0, min_us: 1.0, stretched: 0.0 })] };
+        let t = Tuned { device: "t".into(), roof_gbs: None, floor_us: None, int8_tops: None, busy: None, entries: vec![entry("forced_slot"), entry("free_slot")], from_store: false, index: OnceLock::new() };
         let p = [12, 1280, 5120];
         force_candidate("forced_slot", "pinned");
         assert_eq!(t.choice("forced_slot", &p, &|_| true).as_deref(), Some("pinned"));
@@ -1705,7 +1699,7 @@ mod tests {
     }
 
     fn timed(slot: &str, rows: usize, best: &str) -> Entry {
-        Entry { slot: slot.into(), class: Class { rows, k: 0, bytes: 2 }, best: best.into(), results: vec![(best.into(), Verdict::Timed { us: 10.0, gbs: 1500.0, frac: Some(0.4) })] }
+        Entry { slot: slot.into(), class: Class { rows, k: 0, bytes: 2 }, best: best.into(), results: vec![(best.into(), Verdict::Timed { us: 10.0, gbs: 1500.0, min_us: 9.8, stretched: 0.0 })] }
     }
 
     fn untimed(slot: &str, rows: usize) -> Entry {
@@ -1736,7 +1730,7 @@ mod tests {
     fn a_stored_table_with_unmeasured_classes_is_incomplete() {
         let line = |e: &Entry| format!("{}|{}|{}|{}|{}|{}\n", e.slot, e.class.rows, e.class.k, e.class.bytes, e.best, store_results(&e.results));
         let all: Vec<Entry> = Class::all(&DECODE).map(|class| Entry { class, ..timed("s", 0, "gemv") }).collect();
-        let text = |entries: &[Entry]| "native-tune-v3|dev|3700|6.5|600\n".to_owned() + &entries.iter().map(line).collect::<String>();
+        let text = |entries: &[Entry]| format!("{STORE_TAG}|dev|3700|6.5|600|0.02\n") + &entries.iter().map(line).collect::<String>();
         let complete = parse_store(&text(&all)).expect("a whole table parses");
         assert!(missing_classes(&complete, &["s"]).is_empty());
         let mut cut = all.clone();
@@ -1745,6 +1739,13 @@ mod tests {
         let partial = parse_store(&text(&cut)).expect("a table cut by the budget still parses");
         assert_eq!(missing_classes(&partial, &["s"]), vec![("s".to_owned(), cut[last].class)]);
         assert_eq!(missing_classes(&parse_store(&text(&all[1..])).unwrap(), &["s"]).len(), 1, "an absent class is missing too");
+        assert_eq!(complete.busy, Some(0.02));
+        assert_eq!(complete.entries[0].results[0].1, Verdict::Timed { us: 10.0, gbs: 1500.0, min_us: 9.8, stretched: 0.0 }, "a timed verdict round-trips");
+        // A table of the earlier format (an averaged time and a fraction with the launch floor folded in) is not read:
+        // the next start measures it again.
+        // perf-number: a stored record of the earlier format, a fixture
+        let v3 = "native-tune-v3|dev|3700|6.5|600\ns|0|0|0|gemv|gemv:10.00:1500:0.400\n";
+        assert!(parse_store(v3).is_none());
     }
 
     /// The host emulation of `quant_e4m3_128`'s rounding: every finite E4M3 value encodes to its own byte, a tie between two
@@ -1823,7 +1824,7 @@ mod tests {
             slot: "slot".into(),
             class,
             best: "b".into(),
-            results: vec![("a".into(), Verdict::Rejected("bad: output".into())), ("b".into(), Verdict::Timed { us: 12.5, gbs: 1800.0, frac: Some(0.5) })],
+            results: vec![("a".into(), Verdict::Rejected("bad: output".into())), ("b".into(), Verdict::Timed { us: 12.5, gbs: 1800.0, min_us: 12.0, stretched: 0.0 })],
         };
         let line = format!("{}|{}|{}|{}|{}|", entry.slot, class.rows, class.k, class.bytes, entry.best);
         assert!(line.starts_with("slot|"));
