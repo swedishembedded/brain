@@ -31,7 +31,7 @@
 //! (via a local `write_qwen3_embed_base`) with no real checkpoint or network
 //! access needed at all.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use brain_testutil::Scratch;
 
 #[cfg(feature = "vision")]
@@ -151,7 +151,7 @@ fn download_policy_offline_never_touches_the_network() {
 /// unlike `document_study.rs`'s fixture, nothing here runs through
 /// `data::chat`, so there is no `ENDOFTEXT` floor to also cover.
 #[cfg(feature = "text")]
-fn write_qwen3_embed_base(dir: &Path, block: u32) -> PathBuf {
+fn write_qwen3_embed_base(dir: &Path, block: u32) -> std::path::PathBuf {
     std::fs::create_dir_all(dir).unwrap();
 
     let cfg = qwen3::QwenConfig { vocab: 256, block_size: block, max_position_embeddings: block, ..qwen3::QwenConfig::tiny() };
@@ -251,7 +251,7 @@ fn a_request_past_the_built_capacity_is_refused() {
 /// matches that, not the card-less convenience every other test here uses
 /// for a checkpoint nothing needs to classify.
 #[cfg(feature = "text")]
-fn write_lfm2_embed_base(dir: &Path, block: u32) -> PathBuf {
+fn write_lfm2_embed_base(dir: &Path, block: u32) -> std::path::PathBuf {
     std::fs::create_dir_all(dir).unwrap();
 
     let cfg = lfm2::LfmConfig { vocab: 256, block_size: block, ..lfm2::LfmConfig::tiny() };
