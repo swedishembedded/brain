@@ -66,10 +66,9 @@ fn encode_matches_the_qwen_chat_oracle_text_with_correct_mask_boundaries() {
     let qc_msgs = vec![QcMessage::system("You are a helpful assistant."), QcMessage::user("What is 2+2?"), QcMessage::assistant("2+2 is 4.")];
     let expected_text =
         qwen_chat::render(&qc_msgs, &[], TemplateOpts { add_generation_prompt: false, enable_thinking: true , ..Default::default() }).expect("qwen_chat render");
-    let expected_text_with_eot = format!("{expected_text}<|endoftext|>");
-
+    // The rendering alone: examples are indexed out of band, so no separator follows it.
     let decoded = tok.decode(&ids);
-    assert_eq!(decoded, expected_text_with_eot, "encode() token ids do not decode back to the oracle rendering");
+    assert_eq!(decoded, expected_text, "encode() token ids do not decode back to the oracle rendering");
 
     let trainable_text: String =
         ids.iter().zip(&mask).filter(|(_, &m)| m).map(|(&id, _)| tok.decode(&[id])).collect::<Vec<_>>().join("");
