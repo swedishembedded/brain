@@ -254,7 +254,7 @@ mod kname {
     pub const EMBED_TILE_BF16: &str = "embed_tile#emb=bf16";
     pub const EMBED_TILE_F16: &str = "embed_tile#emb=f16";
     /// The gather from a group-wise int8 table (`model::int8`'s layout). Not in [`ALL`]: only a model that holds an
-    /// int8 table registers it, and [`super::Ops::embed`] looks it up by name.
+    /// int8 table needs it, and [`super::Ops::embed`] looks it up by name; it is in [`OPTIONAL`].
     pub const EMBED_I8: &str = "embed_i8";
     pub const MOE_LINEAR_GATED: &str = "moe_linear_gated";
     pub const MOE_LINEAR_GATED_BF16: &str = "moe_linear_gated#w=bf16";
@@ -354,6 +354,10 @@ mod kname {
         MATMUL_DX_BF16,
         MATMUL_DW,
     ];
+
+    /// The kernels the canonical [`super::kernel_list`] registers beyond [`ALL`]: [`super::Ops::new`] does not
+    /// require them, and the op that dispatches one looks it up by name and names it when it is missing.
+    pub const OPTIONAL: &[&str] = &[EMBED_I8];
 }
 
 /// The kernel-name spellings [`Ops::new`] requires the `Gpu` it is built from
@@ -3457,12 +3461,12 @@ mod tests {
 
     #[test]
     fn required_kernels_matches_kname_all() {
-        // `REQUIRED_KERNELS` and the canonical [`kernel_list`] must name the
-        // exact same set -- if `Ops::new`'s check and what a real caller
-        // registers on its `Gpu` ever disagree, this is where it would first
-        // show up.
+        // The canonical [`kernel_list`] registers exactly `REQUIRED_KERNELS`
+        // plus the optional kernels -- if `Ops::new`'s check and what a real
+        // caller registers on its `Gpu` ever disagree, this is where it would
+        // first show up.
         let mut want: Vec<&str> = kernel_list().iter().map(|(n, _)| *n).collect();
-        let mut got: Vec<&str> = REQUIRED_KERNELS.to_vec();
+        let mut got: Vec<&str> = REQUIRED_KERNELS.iter().chain(kname::OPTIONAL).copied().collect();
         want.sort_unstable();
         got.sort_unstable();
         assert_eq!(want, got);
