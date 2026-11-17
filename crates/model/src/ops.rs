@@ -335,7 +335,6 @@ mod kname {
         MATMUL_GEMV_F16,
         MATMUL_REG3_F16,
         EMBED,
-        EMBED_I8,
         EMBED_BF16,
         EMBED_F16,
         EMBED_TILE,
@@ -365,6 +364,10 @@ mod kname {
 /// (or a test) has one source for the exact spellings, instead of retyping
 /// them and risking a silent mismatch against [`Ops::new`]'s own check.
 pub const REQUIRED_KERNELS: &[&str] = kname::ALL;
+
+/// The kernels the canonical [`kernel_list`] registers beyond [`REQUIRED_KERNELS`]: [`Ops::new`] does not require
+/// them, and the op that dispatches one looks it up by name and names it when it is missing.
+pub const OPTIONAL_KERNELS: &[&str] = kname::OPTIONAL;
 
 /// The canonical `(name, wgsl_source)` list [`Ops::new`] requires - the ONE
 /// ready-made kernel list an `Ops`-building caller feeds `Gpu::new` /
@@ -3466,7 +3469,7 @@ mod tests {
         // caller registers on its `Gpu` ever disagree, this is where it would
         // first show up.
         let mut want: Vec<&str> = kernel_list().iter().map(|(n, _)| *n).collect();
-        let mut got: Vec<&str> = REQUIRED_KERNELS.iter().chain(kname::OPTIONAL).copied().collect();
+        let mut got: Vec<&str> = REQUIRED_KERNELS.iter().chain(OPTIONAL_KERNELS).copied().collect();
         want.sort_unstable();
         got.sort_unstable();
         assert_eq!(want, got);
