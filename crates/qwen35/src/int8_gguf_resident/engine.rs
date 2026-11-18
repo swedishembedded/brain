@@ -567,7 +567,10 @@ impl Qwen35GgufEngine {
         self.inst.set_rope(slot, None);
         let mut hidden = Vec::with_capacity(tokens.len() * self.inst.cfg.d_model as usize);
         self.inst.prefill_adapter_slot.set(adapter_slot);
-        let prefilled = self.inst.prefill_hidden(tokens, 0, tokens.len(), slot, false, Some(&mut hidden));
+        // A score stands for what the decode computed for these tokens: the FP8 products read their activations as bf16,
+        // the form of the decode regime's GEMVs, not quantised to E4M3 for the tensor-core GEMM a prefill's row count is
+        // tuned to (on the GH200 fixture that alone halves the score/decode gap, knowledge #446).
+        let prefilled = model::ops::fp8_bf16_activations(|| self.inst.prefill_hidden(tokens, 0, tokens.len(), slot, false, Some(&mut hidden)));
         self.inst.prefill_adapter_slot.set(LORA_SLOT_NONE);
         PagedDecoder::release_table(self, &mut table);
         prefilled?;

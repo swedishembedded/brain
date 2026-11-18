@@ -932,6 +932,12 @@ impl SampleParams {
     pub fn is_greedy(&self) -> bool {
         self.temp <= 0.0
     }
+    /// Whether a token drawn with these settings is drawn from the whole distribution `softmax(logits / temp)`: real
+    /// sampling with no top-k, nucleus or min-p cut, no logit processor and no thinking budget. A sampler that draws
+    /// over the whole row then reports each token's log-probability under exactly that distribution.
+    pub fn draws_from_whole_distribution(&self) -> bool {
+        !self.is_greedy() && self.top_k == 0 && (self.top_p <= 0.0 || self.top_p >= 1.0) && self.min_p <= 0.0 && !self.has_processors() && self.thinking.is_none()
+    }
     /// Whether any logit processor (penalty or DRY) is asked for. Off by
     /// default; a request that asks for none samples exactly as it always did.
     pub fn has_processors(&self) -> bool {
@@ -2030,6 +2036,16 @@ impl<D: PagedDecoder> Scheduler<D> {
     /// Whether the decoder can return a policy trace ([`Self::score_continuation`]).
     pub fn scores_continuations(&self) -> bool {
         self.dec.scores_continuations()
+    }
+
+    /// Whether the log-probability this scheduler reports for a token drawn with `sample` is the token's under the
+    /// whole distribution `softmax(logits / temp)` of the decode step that drew it: a whole-distribution draw
+    /// ([`SampleParams::draws_from_whole_distribution`]) on a decoder that draws over its whole logits row
+    /// ([`PagedDecoder::full_row_readback`]), not over a candidate list that truncates it. Such figures are the
+    /// behaviour policy itself, from the arithmetic that drew the tokens, which a later scoring pass can only
+    /// approximate (its kernels and batch shape differ from the decode's).
+    pub fn reports_whole_distribution_logprobs(&self, sample: &SampleParams) -> bool {
+        sample.draws_from_whole_distribution() && self.dec.full_row_readback()
     }
 
     /// Whether the decoder can run a scoring pass now ([`PagedDecoder::scoring_ready`]).

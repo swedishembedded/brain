@@ -1495,6 +1495,27 @@ pub struct Act {
 thread_local! {
     static ROW_COUNT_INVARIANT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static FP32_KERNELS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static FP8_BF16_ACTIVATIONS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Run `f` with every FP8-weight product dispatched from this thread reading its activations as bf16, the form the
+/// decode regime's streaming GEMVs read, never quantised to E4M3 for the FP8 tensor-core GEMM a prefill's shape class
+/// may be tuned to. A pass that must reproduce what a decode step computed (a policy trace: the behaviour policy's
+/// log-probability of tokens the decode sampled) runs in it, so its products round their operands as the decode's did
+/// and differ from them only in summation order. Thread-scoped like [`row_count_invariant`].
+pub fn fp8_bf16_activations<R>(f: impl FnOnce() -> R) -> R {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            FP8_BF16_ACTIVATIONS.with(|c| c.set(self.0));
+        }
+    }
+    let _restore = Restore(FP8_BF16_ACTIVATIONS.with(|c| c.replace(true)));
+    f()
+}
+
+fn fp8_bf16_activations_active() -> bool {
+    FP8_BF16_ACTIVATIONS.with(std::cell::Cell::get)
 }
 
 /// Run `f` with every fp32-weight product dispatched from this thread on the fp32 kernels, never the vendor library's
@@ -1866,7 +1887,7 @@ impl Ops {
             return false;
         }
         let params = [m, k / 4, count];
-        let Some(form) = self.gpu.fp8_linear_act(&params) else { return false };
+        let Some(form) = (if fp8_bf16_activations_active() { Some(Fp8Act::Bf16) } else { self.gpu.fp8_linear_act(&params) }) else { return false };
         let out = (yoff, m as u64 * count as u64 / u64::from(4 / out_precision.bytes()));
         // The window's bytes (four to a word) and its scales (one word per 128 x 128 block, a block row of `k / 128`).
         let blocks_per_row = u64::from(k / FP8_BLOCK);
@@ -2213,7 +2234,7 @@ impl Ops {
     /// (the form its shape class is tuned to): a producer that can write them in its own pass then spares the product a
     /// separate quantisation launch.
     pub fn fp8_reads_e4m3(&self, rows: u32, k: u32, n: u32) -> bool {
-        k.is_multiple_of(FP8_BLOCK) && self.providers.runs("cuda") && self.gpu.has_fp8_linear() && self.gpu.fp8_linear_act(&[rows, k / 4, n]) == Some(Fp8Act::E4m3)
+        k.is_multiple_of(FP8_BLOCK) && !fp8_bf16_activations_active() && self.providers.runs("cuda") && self.gpu.has_fp8_linear() && self.gpu.fp8_linear_act(&[rows, k / 4, n]) == Some(Fp8Act::E4m3)
     }
 
     /// The f32 rows of an activation built by [`Self::act_f32`]: the buffer, its

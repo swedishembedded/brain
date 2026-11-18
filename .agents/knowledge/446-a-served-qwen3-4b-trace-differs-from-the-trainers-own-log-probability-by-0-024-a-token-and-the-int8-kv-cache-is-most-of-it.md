@@ -99,3 +99,10 @@ bf16 (chosen for the card).
 - Records and gate reports: `~/project/shared/tmp/learn-score13` on the node of the run (not copied to the evidence
   dataset).
 
+
+## Isolated (2026-11-18, #520)
+
+The decode-against-prefill gap is the kernel autotuner's per-row-count choice. A prefill's FP8 GEMM quantises
+activations to E4M3, while the decode GEMVs read bf16. The bf16 candidates also round the weight operand two different
+ways. A served trace of an untruncated draw is now the decode's own log-probabilities. On this protocol the gap is
+0.0, so for the rows above the trainer's own gap is everything left.

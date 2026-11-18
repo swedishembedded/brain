@@ -563,11 +563,38 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
         if self.jobs[bi].capture.trace.is_none() {
             return Some(Ok(outcome));
         }
-        // The stop token that ended the sequence is part of what a trainer trains, so it is scored with the tokens.
+        // The stop token that ended the sequence is part of what a trainer trains, so it is traced with the tokens.
         let mut generated = toks.to_vec();
         generated.extend(completion.stop_token);
+        // A whole-distribution draw already carries its trace: the decode steps' own log-probabilities are the behaviour
+        // policy, from the arithmetic that drew the tokens. A scoring pass would recompute them on other kernels and
+        // another batch shape, which round differently on a card (knowledge #446).
+        let decoded = self.jobs[bi].sample.as_ref().is_some_and(|s| self.sched.reports_whole_distribution_logprobs(s)) && logprobs.len() == toks.len() && completion.stop_token.is_some() == completion.stop_logprob.is_some();
+        if decoded {
+            let mut traced = logprobs.to_vec();
+            traced.extend(completion.stop_logprob);
+            let prompt = self.jobs[bi].capture.prompt.clone();
+            return Some(Ok(self.with_trace(bi, outcome, prompt, generated, traced, "decode")));
+        }
         self.awaiting.push(AwaitingTrace { bi, outcome, generated, since: std::time::Instant::now() });
         None
+    }
+
+    /// `outcome` with job `bi`'s policy trace: its prompt and generated ids, a log-probability per generated id at the
+    /// request temperature, where those came from (`decode`: the decode steps that drew the tokens; `score`: a
+    /// teacher-forced pass after the generation) and the identity of the tokenizer and prompt path.
+    fn with_trace(&self, bi: usize, outcome: capability::Outcome, prompt: Vec<u32>, generated: Vec<u32>, log_probs: Vec<f32>, source: &str) -> capability::Outcome {
+        let temperature = self.jobs[bi].capture.trace.expect("only a traced request has a trace");
+        let trace = serde_json::json!({
+            "prompt_token_ids": prompt,
+            "generation_token_ids": generated,
+            "generation_log_probs": log_probs,
+            "log_prob_temperature": temperature,
+            "log_prob_source": source,
+            "tokenizer_digest": self.front.tokenizer_digest(),
+            "chat_template_digest": self.front.chat_template_digest(),
+        });
+        outcome.set("policy_trace", trace)
     }
 
     /// Score the policy trace of every finished request that waits for one, as far as the decoder is ready: the full
@@ -595,17 +622,7 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
                 .sched
                 .score_continuation(self.jobs[bi].adapter, &all, prompt.len(), temperature)
                 .map_err(|e| capability::failure::tag(capability::failure::FailureClass::Unavailable, format!("{}: policy_trace: {e}", self.front.label())))
-                .map(|scored| {
-                    let trace = serde_json::json!({
-                        "prompt_token_ids": prompt,
-                        "generation_token_ids": generated,
-                        "generation_log_probs": scored,
-                        "log_prob_temperature": temperature,
-                        "tokenizer_digest": self.front.tokenizer_digest(),
-                        "chat_template_digest": self.front.chat_template_digest(),
-                    });
-                    outcome.set("policy_trace", trace)
-                });
+                .map(|scored| self.with_trace(bi, outcome, prompt, generated, scored, "score"));
             finished.push((bi, result));
         }
         self.awaiting = waiting;

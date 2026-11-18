@@ -8,7 +8,8 @@
 
 // hf-fixture: qwen35
 //! SPEC: the engine that serves a HuggingFace FP8 release (the Qwen3.8-27B-FP8 path) scores a continuation it
-//! generated - the `policy_trace` of a reply and the `score` action - under the conventions of a policy trace
+//! generated - the scoring pass of a `policy_trace` whose draw was truncated or greedy, and the `score` action (an
+//! untruncated draw's trace is the decode steps' own figures, `llmserve`) - under the conventions of a policy trace
 //! (knowledge #442): `log softmax(logits / T)` over the WHOLE vocabulary at the sampling temperature, the stop token
 //! included. Held against the decode-time figure of the same tokens: a request drawn at temperature `T` with no top-k,
 //! top-p or min-p samples from exactly that distribution, so the sampler's own log-probability of each drawn token
@@ -148,13 +149,15 @@ fn the_fp8_resident_declares_score_beside_the_policy_trace() {
 /// temperatures, so a trace taken at any temperature but the request's own would fail.
 fn a_trace_reproduces_the_decode_time_log_probabilities_of_an_untruncated_draw() {
     // The bound on |trace - decode-time| per token, largest and mean. On the CPU backend the prefill and the decode run
-    // the same arithmetic in another order: their rounding differs, never their distribution. On a card the FP8
-    // products of a prefill and of a decode step are different kernels and round differently (measured on this fixture
-    // on a GH200: mean 1.3e-2, largest 8.7e-2, whatever the activation stream or the GDN prefill form; knowledge #446);
-    // the card bound holds that gap where it was measured, so it cannot grow unnoticed, and is not a claim that it is
-    // small.
+    // the same arithmetic in another order: their rounding differs, never their distribution. On a card the products of
+    // a prefill and of a decode step are different kernels, picked per row count, and round their operands differently
+    // (knowledge #446): the scoring pass reads the FP8 products' activations as bf16 as the decode GEMVs do, which
+    // took this fixture's gap on a GH200 from mean 1.3e-2, largest 8.7e-2 to mean 3.8e-3-8.1e-3, largest 2.8e-2. The
+    // rest is the FP8 and bf16 candidates of each row count rounding the weight operand and the activations their own
+    // way. The card bound holds that gap where it was measured, so it cannot grow unnoticed; it is not a claim that it
+    // is small. A served trace of an untruncated draw does not take this pass: it is the decode's own figures.
     let on_card = gpu_core::devices::ambient_compute_set().backend != gpu_core::devices::Backend::Cpu;
-    let (largest, mean_bound) = if on_card { (0.15f32, 0.03f32) } else { (2e-3, 2e-3) };
+    let (largest, mean_bound) = if on_card { (0.05f32, 0.012f32) } else { (2e-3, 2e-3) };
     let mut sched = scheduler("parity", KvTier::F32, false);
     let (mut compared, mut stopped) = (0, 0);
     for (temp, seed) in [(1.0f32, 11u64), (0.7, 12)] {
@@ -228,7 +231,8 @@ fn measure_whether_a_decode_depends_on_its_co_batch() {
 
 /// MEASUREMENT (#442 "not covered"): which numeric choice of the engine separates the trace (a prefill) from the
 /// decode-time figure (the decode kernels) at f32 K/V: the activation stream between the FP8 products (auto, bf16 on a
-/// card with bf16 tensor cores, or f32) and the Gated DeltaNet prefill form (as measured, or pinned to the exact form).
+/// card with bf16 tensor cores, or f32), the Gated DeltaNet prefill form (as measured, or pinned to the exact form) and
+/// the prefill attention (the native fp16 kernel, or the portable fp32 one).
 fn measure_what_separates_the_trace_from_the_decode() {
     use gpu_core::{ActChoice, ActPrecision};
     let temp = 1.0;
@@ -246,12 +250,57 @@ fn measure_what_separates_the_trace_from_the_decode() {
             }
             let (mean, worst) = gaps(&a, &b);
             println!("| {act_name} | {} | {} | {mean:.2e} / {worst:.2e} |", if exact_gdn { "exact" } else { "measured" }, a.len());
+            gpu_core::provider::cuda::set_flash_prefill_portable(true);
+            let a: Vec<f32> = drawn.iter().flat_map(|d| trace(&mut sched, d, temp)).collect();
+            gpu_core::provider::cuda::set_flash_prefill_portable(false);
+            let (mean, worst) = gaps(&a, &b);
+            println!("| {act_name} | {} + fp32 attention | {} | {mean:.2e} / {worst:.2e} |", if exact_gdn { "exact" } else { "measured" }, a.len());
         }
     }
+}
+
+/// MEASUREMENT: the three figures of the same tokens side by side - the sampler's (the scheduler's batched decode),
+/// the instance's teacher-forced decode tape (the prompt prefilled, every generated token through a one-row decode
+/// step) and the trace (one prefill) - so a gap is placed on the batch, the decode kernels or the prefill kernels; then
+/// the sampler against the trace with every FP8 product of both on one candidate, which leaves the non-FP8 products.
+fn measure_the_decode_tape_between_sampler_and_trace() {
+    let temp = 1.0;
+    let requests: Vec<(Vec<u32>, u64)> = (0..8).map(|i| (prompt(20 + 4 * i, i), 40 + i as u64)).collect();
+    let mut sched = scheduler("tape", KvTier::F32, false);
+    let drawn = generate(&mut sched, &requests, untruncated(temp), 48);
+    let traces: Vec<Vec<f32>> = drawn.iter().map(|d| trace(&mut sched, d, temp)).collect();
+    let (mut sampler, mut tape, mut tr) = (Vec::new(), Vec::new(), Vec::new());
+    for (d, t) in drawn.iter().zip(&traces) {
+        // The one-slot tape's window holds 80 positions (the fixture's 16-row blocks), the last forced token included.
+        let n = d.generated.len().min(79 - d.prompt.len());
+        let rows = sched.decoder().instance().teacher_forced_logits(&d.prompt, &d.generated[..n]).expect("the decode tape");
+        tape.extend(rows.iter().zip(&d.generated).map(|(row, &id)| model::logprobs::row_logprob_at(row, id as usize, temp)));
+        sampler.extend(&d.sampler[..n]);
+        tr.extend(&t[..n]);
+    }
+    let row = |name: &str, a: &[f32], b: &[f32]| {
+        let (mean, worst) = gaps(a, b);
+        println!("| {name} | {} | {mean:.2e} / {worst:.2e} |", a.len());
+    };
+    println!("| pair | tokens | mean / largest |");
+    row("sampler vs decode tape", &sampler, &tape);
+    row("decode tape vs trace", &tape, &tr);
+    row("sampler vs trace", &sampler, &tr);
+    // Every FP8 product of decode and trace on one candidate (the wide stream serves up to 128 rows).
+    gpu_core::force_candidate("matmul_fp8_native", "matmul_fp8_dq_stream_q4");
+    let mut sched = scheduler("tape-one", KvTier::F32, false);
+    let drawn = generate(&mut sched, &requests, untruncated(temp), 48);
+    let (mut sampler, mut tr) = (Vec::new(), Vec::new());
+    for d in &drawn {
+        sampler.extend(&d.sampler);
+        tr.extend(trace(&mut sched, d, temp));
+    }
+    gpu_core::clear_forced_candidates();
+    row("sampler vs trace, one FP8 candidate", &sampler, &tr);
 }
 
 gpu_core::card_tests!(
     the_fp8_resident_declares_score_beside_the_policy_trace,
     a_trace_reproduces_the_decode_time_log_probabilities_of_an_untruncated_draw;
-    ignored: measure_the_gap_each_kv_tier_adds, measure_whether_a_decode_depends_on_its_co_batch, measure_what_separates_the_trace_from_the_decode,
+    ignored: measure_the_gap_each_kv_tier_adds, measure_whether_a_decode_depends_on_its_co_batch, measure_what_separates_the_trace_from_the_decode, measure_the_decode_tape_between_sampler_and_trace,
 );

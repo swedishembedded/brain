@@ -148,6 +148,44 @@ fn a_policy_trace_waits_for_a_decoder_that_is_not_ready_to_score() {
     assert!(results[1].clone().expect("served").outputs.get("policy_trace").is_none());
 }
 
+/// SPEC: a policy trace of a reply sampled from the whole distribution (a temperature, no top-k, top-p or min-p) on a
+/// decoder that draws over its whole logits row is the decode steps' own log-probabilities - the behaviour policy
+/// exactly, whatever the batch or the kernels of a scoring pass would compute - with the stop token's; a truncated or
+/// greedy draw reports no whole-distribution figure, so its trace is scored by the decoder.
+#[test]
+fn a_policy_trace_of_a_whole_distribution_draw_is_the_decode_time_log_probabilities() {
+    let spec = chat_spec();
+    let request = |seed: u64, top_k: i64| {
+        let inv = Invocation::new().set("prompt", json!("t1t2t3t4")).set("chat", json!(false)).set("max_new", json!(12)).set("logprobs", json!(true)).set("policy_trace", json!(true)).set("seed", json!(seed));
+        spec.validate(inv.set("temp", json!(1.0)).set("top_k", json!(top_k)).set("top_p", json!(1.0)).set("min_p", json!(0.0))).expect("a valid request")
+    };
+    let front = Parsed { tok: tokenizer() };
+    let mut sched = Scheduler::new(Toy::new(BlockAllocator::new(128, 8), 0).sampling().scoring(), 4);
+    let results = run_batch_scheduled(&mut sched, &front, &[request(3, 0), request(8, 0), request(5, 5)], &mut |_, _| {});
+    for (i, result) in results.into_iter().enumerate() {
+        let out = result.expect("served").outputs;
+        let trace = &out["policy_trace"];
+        let generated: Vec<u32> = serde_json::from_value(trace["generation_token_ids"].clone()).unwrap();
+        let traced: Vec<f32> = serde_json::from_value(trace["generation_log_probs"].clone()).unwrap();
+        let sampler: Vec<f32> = serde_json::from_value(out["completion_logprobs"].clone()).unwrap();
+        assert_eq!(traced.len(), generated.len());
+        if i < 2 {
+            assert_eq!(trace["log_prob_source"], json!("decode"), "{trace}");
+            assert_eq!(traced[..sampler.len()], sampler[..], "the decode-time figures, bit for bit");
+            // The stop token's figure is the step's that drew it: the toy's row after the last generated token.
+            if let Some(&stop) = out.get("stop_token").and_then(|t| t.as_u64()).map(|t| t as u32).as_ref() {
+                let prompt: Vec<u32> = serde_json::from_value(trace["prompt_token_ids"].clone()).unwrap();
+                let previous = *generated[..generated.len() - 1].last().or(prompt.last()).expect("a prompt");
+                let whole = SampleParams { temp: 1.0, ..SampleParams::greedy() };
+                assert!((traced[generated.len() - 1] - model::serve::candidate_logprob(&row(previous), whole, stop)).abs() < 1e-5, "{trace}");
+            }
+        } else {
+            assert_eq!(trace["log_prob_source"], json!("score"), "a top-k draw is scored: {trace}");
+            assert!(traced.iter().zip(&generated).all(|(lp, &t)| (lp + t as f32 / 100.0).abs() < 1e-6), "the toy's scores: {trace}");
+        }
+    }
+}
+
 /// The real request path's front end: a `generate` request read by the Qwen parser, with the defaults its action spec
 /// applies already in the invocation (the API validates every request against the spec before the model sees it).
 struct Parsed {
