@@ -152,6 +152,22 @@ pub fn staging_variant(budget: &MemoryBudget) -> Demand {
 /// loaded, not a measurement of any one trainer.
 const ACTIVATION_BYTES_PER_TOKEN_PER_LAYER_WIDTH: f64 = 1.4 * 1048576.0 / (64.0 * 5120.0);
 
+/// The share a training reservation adds to the bytes its step's buffers come to ([`train_reservation`]), for the
+/// allocator's rounding and the buffers an estimate does not itemise.
+pub const TRAIN_MARGIN_PERCENT: u64 = 10;
+
+/// The device context and the libraries' workspace (kernels, a GEMM library's scratch) a training run holds on a
+/// card beside its buffers ([`train_reservation`]).
+pub const TRAIN_DEVICE_CONTEXT_BYTES: u64 = 2 << 30;
+
+/// What a training run reserves for a step whose buffers come to `modelled` bytes: those plus
+/// [`TRAIN_MARGIN_PERCENT`], the device context ([`TRAIN_DEVICE_CONTEXT_BYTES`]) and, on a card of `card_bytes`, the
+/// freed blocks its backend keeps for reuse ([`gpu_core::runtime::block_cache_cap`], `--block-cache-mb`). The one
+/// rule every training footprint adds to its own buffers, and what a card's measured peak is held to.
+pub fn train_reservation(modelled: u64, card_bytes: Option<u64>) -> u64 {
+    modelled + modelled * TRAIN_MARGIN_PERCENT / 100 + TRAIN_DEVICE_CONTEXT_BYTES + card_bytes.map_or(0, gpu_core::runtime::block_cache_cap)
+}
+
 /// Estimated activation bytes of one step over `tokens` tokens of a `layers`-deep, `width`-wide decoder.
 pub fn calibrated_activation_bytes(tokens: u32, layers: u64, width: u64) -> u64 {
     (ACTIVATION_BYTES_PER_TOKEN_PER_LAYER_WIDTH * tokens as f64 * layers as f64 * width as f64) as u64

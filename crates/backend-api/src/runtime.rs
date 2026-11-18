@@ -49,3 +49,10 @@ pub fn set_block_cache_bytes(bytes: Option<u64>) {
 pub fn block_cache_bytes() -> Option<u64> {
     Some(BLOCK_CACHE_BYTES.load(Ordering::Relaxed)).filter(|&b| b != u64::MAX)
 }
+
+/// The most idle bytes of freed blocks a backend keeps on a device of `total` bytes: [`set_block_cache_bytes`]'s
+/// setting, else a sixteenth of the device, between 256 MiB and 4 GiB. The one rule the backends apply and a
+/// planner reserves for beside what a model holds.
+pub fn block_cache_cap(total: u64) -> u64 {
+    block_cache_bytes().unwrap_or((total / 16).clamp(256 << 20, 4 << 30))
+}

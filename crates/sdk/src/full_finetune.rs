@@ -322,8 +322,11 @@ impl ChatFullFineTune {
         let open = (chat.checkpoint_path)(&weights, &model_dir);
         let (footprint, numel) = full_footprint(&open, block, true)?;
         let modelled = 8 * numel + footprint.activation_bytes;
+        let device_bytes = model::memplan::train_reservation(modelled, None);
+        let gib = |b: u64| b as f64 / (1u64 << 30) as f64;
         Ok(crate::TrainFootprint {
-            device_bytes: modelled + modelled / 10 + (2 << 30),
+            device_bytes,
+            breakdown: format!("fp32 weights and gradients {:.2} GiB + activations {:.2} GiB + {}% margin + {:.2} GiB device context = {:.2} GiB", gib(8 * numel), gib(footprint.activation_bytes), model::memplan::TRAIN_MARGIN_PERCENT, gib(model::memplan::TRAIN_DEVICE_CONTEXT_BYTES), gib(device_bytes)),
             base_tier: "f32".to_string(),
             reason: "full fine-tune: fp32 weights and gradients on the card, AdamW moments and master weights in host memory".to_string(),
         })

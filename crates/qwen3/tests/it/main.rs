@@ -52,6 +52,7 @@ mod integration_qwen3;
 mod kv_offload_real;
 mod layer_streamed_full_ft;
 mod lora_adapter_file;
+mod lora_footprint;
 mod lora_bf16_base;
 mod lora_gemm_precision;
 mod lora_hf_base;

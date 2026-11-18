@@ -261,6 +261,34 @@ impl ChatFamily {
         }
     }
 
+    /// Device bytes one step of this family's trainer holds over `block`-token rows at its current tier, as the
+    /// planner's categories, with an adapter of `rank` on every projection: for `qwen3` the trainer's own buffers
+    /// (`qwen3::footprint::lora_training_demands`, held to the device's allocation accounting by that crate's
+    /// `lora_footprint` test), the base at its tier and the activation rate calibrated on the 27B otherwise.
+    /// `flash` is whether the device runs the flash attention kernels (a card does; the CPU backend does not).
+    fn step_demands(&self, open: &Path, params: u64, layers: u64, width: u64, block: u32, rank: u32, flash: bool) -> Result<Vec<model::memplan::Demand>> {
+        use model::memplan::{Category, Demand};
+        match self {
+            ChatFamily::Qwen3(dtype) => {
+                let targets = qwen3::finetune::LORA_TARGETS.iter().map(|t| t.to_string()).collect();
+                let cfg = qwen3::QwenConfig { lora: Some(qwen3::LoraCfg::new(rank, 2.0 * rank as f32, targets)), ..qwen3::checkpoint_config(utf8(open)?).map_err(Error::Backend)? };
+                // The qwen3 LoRA trainer recomputes every layer from fp32 boundaries (`qwen3::finetune::build_trainer`).
+                qwen3::footprint::lora_training_demands(&cfg, *dtype, 1, block, model::saved::SavedPolicy::Recompute, flash).map_err(Error::Backend)
+            }
+            ChatFamily::Qwen35(_) | ChatFamily::Ripple(_) => Ok(vec![
+                Demand::fixed(Category::Weights, "frozen base", self.base_bytes(params)),
+                Demand::fixed(Category::Activations, format!("{block}-token row (calibrated rate)"), activation_bytes(block, layers, width)),
+            ]),
+        }
+    }
+
+    /// [`Self::step_demands`] less the frozen base: what a step holds beside the base, which the tier choice adds
+    /// to each tier's base bytes.
+    #[allow(clippy::too_many_arguments)]
+    fn row_bytes(&self, open: &Path, params: u64, layers: u64, width: u64, block: u32, rank: u32, flash: bool) -> Result<u64> {
+        Ok(model::memplan::device_total(&self.step_demands(open, params, layers, width, block, rank, flash)?).saturating_sub(self.base_bytes(params)))
+    }
+
     /// `(parameters, layers, model width)` of the checkpoint at `open`, what the tier choice sizes a base by.
     fn base_shape(&self, open: &Path) -> Result<(u64, u64, u64)> {
         match self {
@@ -455,12 +483,14 @@ pub(crate) fn activation_bytes(block: u32, layers: u64, width: u64) -> u64 {
 ///   for the bf16 base needs; if even that cannot fit the caller is told.
 ///
 /// `cards` are the selected cards' total memory in bytes, `native` whether any has the native tier.
-pub(crate) fn choose_base_tier(single_card: bool, native: bool, params: u64, layers: u64, width: u64, block: u32, quantised_bytes: u64, cards: &[u64]) -> std::result::Result<(BaseTierChoice, String), String> {
+///
+/// `activations` is what a step holds beside the base: its rows' activations and logits and the adapter's state.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn choose_base_tier(single_card: bool, native: bool, params: u64, activations: u64, block: u32, quantised_bytes: u64, cards: &[u64]) -> std::result::Result<(BaseTierChoice, String), String> {
     use model::memplan::{plan, Authorized, Capacity, Category, Demand, Lever, Variant};
     if !native {
         return Ok((BaseTierChoice::F32, "no selected device has native bf16 tensor cores: the fp32 reference tier".to_string()));
     }
-    let activations = activation_bytes(block, layers, width);
     let room = if single_card { cards.iter().copied().max().unwrap_or(0) } else { cards.iter().sum() };
     let gib = |bytes: u64| bytes as f64 / (1u64 << 30) as f64;
     if room == 0 {
@@ -492,20 +522,18 @@ struct Located {
 /// Device memory a run is expected to need: what a workload scheduler reserves before the run is placed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TrainFootprint {
-    /// Bytes on the card: the frozen base at its tier, the activations of one row, and the adapter with its
-    /// optimiser state, with a margin for what the estimate does not model.
+    /// Bytes on the card: the frozen base at its tier, the adapter with its gradients and optimiser state, the
+    /// activations and logits of one row, the freed blocks the backend keeps, the device context, and a margin for
+    /// what the estimate does not model.
     pub device_bytes: u64,
+    /// The terms of [`Self::device_bytes`], one line, for a refusal or a log to quote.
+    pub breakdown: String,
     /// The tier the frozen base will be held at (`f32`, `bf16`, `int8`, `nf4`, `fp8`...).
     pub base_tier: String,
     /// Why that tier.
     pub reason: String,
 }
 
-/// Share added on top of the modelled bytes of a run, for the allocator's rounding and the buffers the
-/// estimate does not itemise.
-const FOOTPRINT_MARGIN_PERCENT: u64 = 10;
-/// Bytes of the LoRA adapter, its gradients and its AdamW state, and the device context, added to every run.
-const FOOTPRINT_FIXED_BYTES: u64 = 2 << 30;
 
 impl ChatFineTune {
     /// The checkpoint [`Self::from_pretrained`] named, resolved in the model store, and its architecture.
@@ -540,17 +568,29 @@ impl ChatFineTune {
         let family = ChatFamily::of(located.arch.id, self.bf16_base, self.int8_base, self.nf4_base, self.base_format.as_deref())?;
         let (params, layers, width) = family.base_shape(&located.open)?;
         let explicit = self.bf16_base || self.int8_base || self.nf4_base || self.f32_base || self.base_format.is_some();
+        let (rank, _, _) = lora_shape(None, self.rank, self.alpha, self.tuning)?;
         let (family, reason) = match (explicit, card_bytes) {
             (false, Some(card)) => {
-                let (choice, reason) = choose_base_tier(matches!(family, ChatFamily::Qwen35(_)), true, params, layers, width, block, family.quantised_base_bytes(params), &[card]).map_err(Error::Backend)?;
+                let row = family.with_tier(BaseTierChoice::Bf16).row_bytes(&located.open, params, layers, width, block, rank, true)?;
+                let (choice, reason) = choose_base_tier(matches!(family, ChatFamily::Qwen35(_)), true, params, row, block, family.quantised_base_bytes(params), &[card]).map_err(Error::Backend)?;
                 (family.with_tier(choice), reason)
             }
             (false, None) => (family.with_tier(BaseTierChoice::F32), "no accelerator: the fp32 reference tier".to_string()),
             (true, _) => (family, "asked for".to_string()),
         };
-        let base_bytes = family.base_bytes(params);
-        let modelled = base_bytes + activation_bytes(block, layers, width);
-        Ok(TrainFootprint { device_bytes: modelled + modelled * FOOTPRINT_MARGIN_PERCENT / 100 + FOOTPRINT_FIXED_BYTES, base_tier: family.tier_name().to_string(), reason })
+        let demands = family.step_demands(&located.open, params, layers, width, block, rank, card_bytes.is_some())?;
+        let device_bytes = model::memplan::train_reservation(model::memplan::device_total(&demands), card_bytes);
+        let gib = |b: u64| b as f64 / (1u64 << 30) as f64;
+        let cache = card_bytes.map_or(0, gpu_core::runtime::block_cache_cap);
+        let breakdown = format!(
+            "{} + {}% margin + {:.2} GiB device context + {:.2} GiB of freed blocks the backend keeps = {:.2} GiB",
+            model::memplan::summary(&demands),
+            model::memplan::TRAIN_MARGIN_PERCENT,
+            gib(model::memplan::TRAIN_DEVICE_CONTEXT_BYTES),
+            gib(cache),
+            gib(device_bytes)
+        );
+        Ok(TrainFootprint { device_bytes, breakdown, base_tier: family.tier_name().to_string(), reason })
     }
 }
 
@@ -1203,7 +1243,8 @@ impl ChatFineTune {
             let cards: Vec<u64> = gpu_core::devices::gpus().iter().filter(|d| selected_gpus.contains(&d.index)).map(|d| d.identity.vram_bytes).collect();
             let native = !cards.is_empty() && gpu_core::Gpu::new(&[]).caps().arch.compute_capability.is_some_and(|cc| cc >= gpu_core::select::I8_MMA_MIN_CC);
             let (params, layers, width) = family.base_shape(&open)?;
-            let (choice, reason) = choose_base_tier(matches!(family, ChatFamily::Qwen35(_)), native, params, layers, width, block, family.quantised_base_bytes(params), &cards).map_err(Error::Backend)?;
+            let row = family.with_tier(BaseTierChoice::Bf16).row_bytes(&open, params, layers, width, block, rank, !cards.is_empty())?;
+            let (choice, reason) = choose_base_tier(matches!(family, ChatFamily::Qwen35(_)), native, params, row, block, family.quantised_base_bytes(params), &cards).map_err(Error::Backend)?;
             (family.with_tier(choice), reason)
         };
         eprintln!("ChatFineTune: base tier {} ({base_tier_reason})", family.tier_name());
@@ -2835,7 +2876,7 @@ mod tier_tests {
     const NF4_27B: u64 = 27_000_000_000 / 2 + 4 * (27_000_000_000 / 32);
 
     fn pick(single: bool, native: bool, shape: (u64, u64, u64), block: u32, cards: &[u64]) -> BaseTierChoice {
-        choose_base_tier(single, native, shape.0, shape.1, shape.2, block, NF4_27B, cards).unwrap().0
+        choose_base_tier(single, native, shape.0, activation_bytes(block, shape.1, shape.2), block, NF4_27B, cards).unwrap().0
     }
 
     #[test]
@@ -2846,7 +2887,7 @@ mod tier_tests {
 
     #[test]
     fn a_base_that_does_not_fit_at_bf16_falls_back_to_the_quantised_tier_and_says_why() {
-        let (choice, why) = choose_base_tier(true, true, BIG.0, BIG.1, BIG.2, 16384, NF4_27B, &[64 * GIB]).unwrap();
+        let (choice, why) = choose_base_tier(true, true, BIG.0, activation_bytes(16384, BIG.1, BIG.2), 16384, NF4_27B, &[64 * GIB]).unwrap();
         assert_eq!(choice, BaseTierChoice::Quantised);
         assert!(why.contains("quantised"), "{why}");
         // Two cards do not help a single-card trainer, but do help a pipelining one.
@@ -2857,7 +2898,7 @@ mod tier_tests {
     /// Even the quantised base and the row do not fit: refuse before anything loads, with the arithmetic.
     #[test]
     fn a_base_that_fits_at_no_tier_is_refused_with_the_planners_arithmetic() {
-        let err = choose_base_tier(true, true, BIG.0, BIG.1, BIG.2, 16384, NF4_27B, &[16 * GIB]).unwrap_err();
+        let err = choose_base_tier(true, true, BIG.0, activation_bytes(16384, BIG.1, BIG.2), 16384, NF4_27B, &[16 * GIB]).unwrap_err();
         assert!(err.contains("refusing to load") && err.contains("Weights: quantised base") && err.contains("Activations"), "{err}");
     }
 

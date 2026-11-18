@@ -255,7 +255,7 @@ impl Context {
             blas: std::sync::OnceLock::new(),
         };
         c.make_current()?;
-        c.cache.set_cap(cache_cap_for(c.mem_info().map(|m| m.1).unwrap_or(0)));
+        c.cache.set_cap(backend_api::runtime::block_cache_cap(c.mem_info().map(|m| m.1).unwrap_or(0)));
         // SAFETY: `stream` is a valid out-parameter and the context is
         // current. Non-blocking, so handles do not synchronise through the
         // legacy default stream - see `ExecFns::stream_create`.
@@ -2484,14 +2484,6 @@ struct HeldBlock {
     fence: Vec<Fence>,
 }
 
-/// The cache cap for a card with `total` bytes of memory: a sixteenth of it,
-/// between 256 MiB and 4 GiB, unless `backend_api::runtime::set_block_cache_bytes` says otherwise.
-fn cache_cap_for(total: u64) -> u64 {
-    if let Some(bytes) = backend_api::runtime::block_cache_bytes() {
-        return bytes;
-    }
-    (total / 16).clamp(256 << 20, 4 << 30)
-}
 
 impl BlockCache {
     fn new(d: &'static Driver, fns: &'static ExecFns, ctx: CuContext, primary: Arc<PrimaryRef>, cap: u64) -> BlockCache {

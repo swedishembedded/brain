@@ -117,7 +117,7 @@ impl TrainResident {
         self.check_digests(&request.data.digests())?;
         let base_dir = job::resolve_base(self.env.models_dir.as_deref(), &request.params.base)?;
         let footprint = self.footprints.of(&base_dir, &request, self.largest_card_bytes)?;
-        self.fits_a_card("train", footprint.device_bytes, &footprint.reason, request.params.max_block)?;
+        self.fits_a_card("train", footprint.device_bytes, &format!("{}: {}", footprint.reason, footprint.breakdown), request.params.max_block)?;
         Ok(Reservation::Card(footprint.device_bytes))
     }
 
@@ -135,7 +135,7 @@ impl TrainResident {
         let ft = consolidate::full_fine_tune(&base_dir, p)?;
         ft.check().map_err(|e| format!("full_train: {e}"))?;
         let footprint = ft.footprint(p.max_block).map_err(|e| format!("full_train: {e}"))?;
-        self.fits_a_card("full_train", footprint.device_bytes, &footprint.reason, p.max_block)?;
+        self.fits_a_card("full_train", footprint.device_bytes, &format!("{}: {}", footprint.reason, footprint.breakdown), p.max_block)?;
         // A check trains nothing: it reads the base's config, host work that takes no card.
         if p.validate_only {
             return Ok(Reservation::Host(64 << 20));
