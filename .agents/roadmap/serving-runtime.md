@@ -756,13 +756,17 @@ int8 C = 16 arm measured 536 tok/s (0.59): the second pass over the weights. Ope
 - [ ] Where the remaining batched cost goes is not profiled. Candidates: the single-sequence split count gives every row
       the alone-row's workgroup count in the int8 attention (most splits idle at these lengths), and the pinned int8 GEMV
       replaces the tile the autotuner picks at 16 rows. An nsys run of each arm is the next step.
-- [ ] The prefill and the decode of the Qwen3.8 FP8 resident disagree on a card: a `policy_trace` (a prefill) differs from
-      the sampler's decode-time log-probability of the same token by 0.018 mean, p99 0.2 on the real 27B (2026-11-18,
-      #446) and 1.3e-2 on the `hf_fp8_score` fixture on a GH200, and by 1e-6 on the CPU backend. Not the activation stream
-      and not the GDN prefill form (fixture, both pinned); candidates: the FP8 prefill GEMM against the decode GEMV, the
-      bf16 recurrent state between decode steps (the 27B's default `--gdn-state`). Needed: isolate it with the fixture
-      (`hf_fp8_score` `measure_what_separates_the_trace_from_the_decode`), then a decode and prefill on one rounding.
-- Until the FP8 item lands, an exam on Qwen3.8 gets its paired same-load base replicate from the harness, and a trainer takes its serve/train gap from
+- [x] A `policy_trace` of a whole-distribution draw is the decode steps' own log-probabilities (`log_prob_source:
+      "decode"`, no scoring prefill): on Qwen3.8-27B-FP8 through `brain serve` on a GH200 `max |sampler - trace|` is 0.0
+      (was mean 0.018, p99 0.2; knowledge #520). The scoring pass of a truncated or greedy draw reads the FP8 activations
+      as bf16 (the 1-8 row decode's form): fixture gap on a GH200 1.29e-2 -> 5.9e-3 mean, gate tightened to 0.05 / 0.012.
+- [ ] The decode of the Qwen3.8 FP8 resident is not one rounding across row counts (#520, #447): the tuned FP8 table
+      takes E4M3-activation tensor-core candidates from 17 rows (two 9-16 row classes too) and mixes two bf16 weight
+      roundings (`dq_stream`/`dq_wgmma` round `code * scale` to bf16, `gemv_f16` keeps the scale out of the operand) within
+      a class; the dense bf16 products change activation rounding between 1 row (f32 GEMV) and more. Needed: each
+      candidate's operand rounding declared as its `Input`, and a row-count-invariant regime that holds one per op. The
+      remaining 2.6e-3 of the fixture's score/decode gap with every FP8 product on one candidate is not isolated.
+- Until the decode is batch-invariant, an exam on Qwen3.8 gets its paired same-load base replicate from the harness, and a trainer takes its serve/train gap from
   `brain finetune --policy-gradient --numerics-gate` (#446) and corrects for it with `--importance`.
 
 ## Refusals that name the setting (2026-11-13, knowledge #448)
@@ -783,6 +787,14 @@ int8 C = 16 arm measured 536 tok/s (0.59): the second pass over the weights. Ope
       (`Footprint::per_stage`). `--reserve-gb` no longer grows with `--max-batch`: the measured rule is charged per model only to
       a model that declares no estimate, and an explicit `--reserve-gb` is the whole headroom. Tests: `crates/residency/tests/it/activation.rs`,
       `model::memplan` (the calibration point), `catalog` `estimate_counts_the_kv_pool_and_shrinks_under_int8`, `cli` `card_reserve`.
+- [ ] A defaulted plan is sized once, to the card's free bytes at the model scan, and never again (2026-11-18,
+      Qwen3.8-27B-FP8, one GH200, 97,871 MiB). On a free card the default is max-batch 64 and ctx 886,784, and it serves. With a
+      30 GiB co-tenant already present at the scan it is max-batch 64 and ctx 186,368, and it serves. With an 8 GiB
+      co-tenant arriving after the scan, the 94,904 MiB plan meets 86,385 MiB usable and the model is `Starved` on every
+      request until a restart. This is the reported "did not fit gpu0's budget" on a card another lane was using.
+      `--max-batch 16` fitted only because the restart re-planned. Needed: a defaulted context and KV pool re-planned to
+      the usable bytes when the instance is built (the advertised context then follows), or sized with a share of the card
+      named by the operator. Which of the two is a contract decision.
 - [ ] The launch workspace is calibrated on one model and one card; a second measurement (Qwen3 at 64 rows on a 24 GB card)
       would tell whether depth times width is the right scale.
 - [ ] `policy_trace` over D-Bus is the `generate` action's `policy_trace` param, the same spec as HTTP (no separate gap); the
