@@ -207,6 +207,7 @@ async fn a_slow_reader_holds_the_generation_back_and_still_receives_every_byte()
         frames += 1;
         if frames == 3 {
             // The reader pauses: the model fills the queue and then waits.
+            eventually("the queue fills", Duration::from_secs(10), || rig.meter.emitted.load(Ordering::SeqCst) > STREAM_QUEUE_MESSAGES * PIECE_BYTES).await;
             tokio::time::sleep(Duration::from_millis(300)).await;
             let held = rig.meter.emitted.load(Ordering::SeqCst);
             tokio::time::sleep(Duration::from_millis(300)).await;

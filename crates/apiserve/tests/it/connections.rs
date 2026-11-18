@@ -106,23 +106,58 @@ fn a_body_that_trickles_in_is_cut_at_the_body_deadline() {
     assert!(response.is_empty() || response.starts_with("HTTP/1.1 4"), "a cut body is a client error, got {response:?}");
 }
 
+/// A `GET /v1/models` on a fresh connection, read through its whole response; the response, with the stream kept
+/// open, or `None` when the server ended the connection without answering (it held no slot for it).
+fn models(addr: SocketAddr) -> Option<(TcpStream, String)> {
+    let mut stream = TcpStream::connect(addr).unwrap();
+    stream.write_all(format!("GET /v1/models HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {KEY}\r\n\r\n").as_bytes()).ok()?;
+    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let mut got = Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        let text = String::from_utf8_lossy(&got);
+        if let Some(head) = text.find("\r\n\r\n") {
+            let length = text[..head].lines().find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap()));
+            if got.len() >= head + 4 + length.expect("the response states its length") {
+                return Some((stream, text.into_owned()));
+            }
+        }
+        match stream.read(&mut buf) {
+            Ok(0) | Err(_) => return None,
+            Ok(n) => got.extend_from_slice(&buf[..n]),
+        }
+    }
+}
+
+/// [`models`] retried until the server answers: a slot freed by a closed connection is released when the server
+/// sees the close, which it does on its own schedule.
+fn models_once_a_slot_is_free(addr: SocketAddr) -> (TcpStream, String) {
+    let until = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(answered) = models(addr) {
+            return answered;
+        }
+        assert!(Instant::now() < until, "no slot came free within 10 s");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 #[test]
 fn connections_over_the_cap_are_refused_and_a_freed_slot_is_reused() {
     let addr = serve(limits(Duration::from_secs(30), Duration::from_secs(30), 2));
-    // `serve`'s readiness probe holds a slot until the server sees it close.
-    std::thread::sleep(Duration::from_millis(200));
-    let held: Vec<TcpStream> = (0..2).map(|_| TcpStream::connect(addr).unwrap()).collect();
-    // The accept loop takes the held connections in order before the third.
-    std::thread::sleep(Duration::from_millis(200));
+    // Each held connection has been answered, so it holds a slot and keeps it (keep-alive). `serve`'s readiness
+    // probe may still hold one until the server sees it close, which the retry waits out.
+    let held: Vec<TcpStream> = (0..2)
+        .map(|_| {
+            let (stream, response) = models_once_a_slot_is_free(addr);
+            assert!(response.starts_with("HTTP/1.1 200"), "{response:?}");
+            stream
+        })
+        .collect();
     let mut over = TcpStream::connect(addr).unwrap();
     assert!(closed_after(&mut over, Duration::from_secs(2)).is_some(), "a connection over the cap must be refused");
 
     drop(held);
-    std::thread::sleep(Duration::from_millis(200));
-    let mut again = TcpStream::connect(addr).unwrap();
-    again.write_all(format!("GET /v1/models HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {KEY}\r\nConnection: close\r\n\r\n").as_bytes()).unwrap();
-    again.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-    let mut response = Vec::new();
-    let _ = again.read_to_end(&mut response);
-    assert!(String::from_utf8_lossy(&response).starts_with("HTTP/1.1 200"), "a freed slot serves again: {:?}", String::from_utf8_lossy(&response));
+    let (_, response) = models_once_a_slot_is_free(addr);
+    assert!(response.starts_with("HTTP/1.1 200"), "a freed slot serves again: {response:?}");
 }

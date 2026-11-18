@@ -117,11 +117,18 @@ async fn a_caller_holds_at_most_its_own_share_in_flight() {
     let app = router(state(&runs, 1));
     let (status, _) = call(&app, APP, "POST", "/v1/jobs", run_body("describe")).await;
     assert!(status.is_success());
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    // The share is taken when the job is accepted, so it is held from here until the job ends.
     assert_eq!(call(&app, APP, "POST", "/v1/run", run_body("describe")).await.0, StatusCode::TOO_MANY_REQUESTS, "over its budget while its job runs");
     assert_eq!(call(&app, TRAINER, "POST", "/v1/run", run_body("describe")).await.0, StatusCode::OK, "another caller's share is untouched");
-    tokio::time::sleep(Duration::from_millis(600)).await;
-    assert_eq!(call(&app, APP, "POST", "/v1/run", run_body("describe")).await.0, StatusCode::OK, "the share is back once the job ended");
+    // The job ends on the executor's schedule: wait for the share to come back rather than for a fixed time.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        match call(&app, APP, "POST", "/v1/run", run_body("describe")).await.0 {
+            StatusCode::OK => break,
+            StatusCode::TOO_MANY_REQUESTS if std::time::Instant::now() < deadline => tokio::time::sleep(Duration::from_millis(20)).await,
+            other => panic!("the share is back once the job ended: {other}"),
+        }
+    }
 }
 
 #[test]
