@@ -550,7 +550,12 @@ impl StreamPlan {
         if !stream_shard_enabled() {
             return StreamPlan::single(cost.n_layers);
         }
-        let gpus = schedulable_gpus(device);
+        Self::auto_over(cost, &compute_set(device))
+    }
+
+    /// [`Self::auto`] over an already resolved selection (the shard opt-out aside).
+    fn auto_over(cost: &ShardCost, set: &gpu_core::devices::ComputeSet) -> StreamPlan {
+        let gpus = schedulable_gpus(set);
         if gpus.len() < 2 {
             return StreamPlan::single(cost.n_layers);
         }
@@ -576,9 +581,14 @@ impl StreamPlan {
     /// is already off its figure). A card whose free bytes cannot be measured
     /// is budgeted at the probe's conservative assumption instead.
     pub fn cards(device: Option<&str>, reserve: u64) -> Vec<(usize, u64)> {
+        Self::cards_over(&compute_set(device), reserve)
+    }
+
+    /// [`Self::cards`] over an already resolved selection.
+    fn cards_over(set: &gpu_core::devices::ComputeSet, reserve: u64) -> Vec<(usize, u64)> {
         use gpu_core::capacity;
         let assumed = || capacity::available_gpus();
-        schedulable_gpus(device)
+        schedulable_gpus(set)
             .into_iter()
             .filter_map(|i| {
                 let free = capacity::available_for(i as u32).or_else(|| assumed().into_iter().find(|&(g, _)| g as usize == i).map(|(_, b)| b.saturating_sub(capacity::headroom(b))))?;
@@ -636,23 +646,27 @@ impl StreamPlan {
     }
 }
 
-/// The cards a streamed model may schedule on, honouring a per-call device
-/// token exactly as `--device` would, ordered so this thread's current
-/// selection comes first.
-///
-/// Reads `ambient_compute_set()` (or the token's own resolution) rather than
-/// `gpus()`: the raw registry ignores a `--device gpu0` restriction, and a
-/// plan built from it would place a stage on a card the operator excluded -
-/// the failure mode `gpu_core::devices::schedulable_gpu_count`'s own doc
-/// records.
-fn schedulable_gpus(device: Option<&str>) -> Vec<usize> {
+/// The selection a per-call device token names on this machine, exactly as
+/// `--device` would resolve it; the ambient selection when `None`.
+fn compute_set(device: Option<&str>) -> gpu_core::devices::ComputeSet {
     use gpu_core::devices;
-    let set = match device {
+    match device {
         None => devices::ambient_compute_set().clone(),
         // A token that names nothing on this machine is refused, as
         // `Gpu::open` refuses it, never read as the ambient selection.
         Some(tok) => devices::DeviceSpec::parse(tok).and_then(|s| s.resolve_here()).unwrap_or_else(|e| panic!("device {tok:?}: {e}")),
-    };
+    }
+}
+
+/// The cards a resolved selection may schedule on (none on a CPU-backend
+/// selection), ordered so this thread's current selection comes first.
+///
+/// The set is [`compute_set`]'s resolution, never `gpus()`: the raw registry ignores a `--device gpu0` restriction, and a
+/// plan built from it would place a stage on a card the operator excluded -
+/// the failure mode `gpu_core::devices::schedulable_gpu_count`'s own doc
+/// records.
+fn schedulable_gpus(set: &gpu_core::devices::ComputeSet) -> Vec<usize> {
+    use gpu_core::devices;
     if set.backend == devices::Backend::Cpu {
         return Vec::new();
     }
@@ -1681,9 +1695,11 @@ mod tests {
     #[test]
     fn cards_offer_their_available_bytes_less_the_reserve_not_their_size() {
         const GIB: u64 = 1 << 30;
-        let cards = gpu_core::capacity::with_available(Some(10 * GIB), || StreamPlan::cards(Some("gpu"), 3 * GIB));
+        let gpus = two_card_selection("gpu");
+        let cards = gpu_core::capacity::with_available(Some(10 * GIB), || StreamPlan::cards_over(&gpus, 3 * GIB));
+        assert_eq!(cards.len(), 2, "{cards:?}");
         assert!(cards.iter().all(|&(_, usable)| usable == 7 * GIB), "{cards:?}");
-        let full = gpu_core::capacity::with_available(Some(2 * GIB), || StreamPlan::cards(Some("gpu"), 3 * GIB));
+        let full = gpu_core::capacity::with_available(Some(2 * GIB), || StreamPlan::cards_over(&gpus, 3 * GIB));
         assert!(full.is_empty(), "a card with less free than the reserve offers nothing: {full:?}");
     }
 
@@ -1781,12 +1797,17 @@ mod tests {
     #[test]
     fn a_named_card_never_splits_but_a_named_backend_may() {
         let cost = ShardCost { n_layers: 8, per_layer: 1.0, embed: 1.0, head: 1.0, boundary_words: 1 };
-        assert!(!StreamPlan::auto(&cost, Some("gpu0")).is_split(), "an explicitly named card must stay one stage");
-        assert!(!StreamPlan::auto(&cost, Some("cpu")).is_split(), "a CPU-backend run has no cards to split across");
-        let set = gpu_core::devices::ambient_compute_set();
-        if stream_shard_enabled() && set.backend != gpu_core::devices::Backend::Cpu && set.gpus.len() >= 2 {
-            assert!(StreamPlan::auto(&cost, Some("gpu")).is_split(), "\"gpu\" names every card, not card 0");
-        }
+        assert!(!StreamPlan::auto_over(&cost, &two_card_selection("gpu0")).is_split(), "an explicitly named card must stay one stage");
+        assert!(!StreamPlan::auto_over(&cost, &two_card_selection("cpu")).is_split(), "a CPU-backend run has no cards to split across");
+        assert!(StreamPlan::auto_over(&cost, &two_card_selection("gpu")).is_split(), "\"gpu\" names every card, not card 0");
+    }
+
+    /// `token` resolved against a two-card machine, whatever this one has: the planner's rules are about the
+    /// selection, so a GPU-less runner (or one with its cards hidden) checks them as well as a two-card box.
+    fn two_card_selection(token: &str) -> gpu_core::devices::ComputeSet {
+        use gpu_core::devices::{Backend, DeviceSpec, Inventory};
+        let machine = Inventory { gpus: 2, cpu_cores: 4, npus: 0, gpu_backend: Backend::Wgpu };
+        DeviceSpec::parse(token).and_then(|s| s.resolve(&machine)).unwrap_or_else(|e| panic!("{token}: {e}"))
     }
 
     /// `open_stage` on an ambient (un-pinned) stage is a plain call - the
