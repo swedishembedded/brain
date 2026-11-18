@@ -48,7 +48,11 @@ it counts and picks them with `gpu_core::testgpu::cards`, `stage_cards` (a
 multi-card test) and `card` (one by index, refused when unselected), never
 `devices::gpus()` or a card count, which name cards that belong to someone else
 on a shared node; with the CPU backend selected there are none, and the test
-skips by name. A fixture under the temporary directory is a
+skips by name. A test that spawns the `brain` binary (`crates/cli/tests`) is not
+bound by that selection: the CLI ignores `BRAIN_DEVICE`/`BRAIN_BACKEND` and opens
+every card it sees unless the test passes `--device`, so on a node whose cards
+serve other work run that suite with the cards hidden (`CUDA_VISIBLE_DEVICES=""`
+and a Vulkan ICD list that names none, e.g. `VK_ICD_FILENAMES=/nonexistent.json`). A fixture under the temporary directory is a
 `brain_testutil::Scratch`, which removes it when the test ends or panics. A test that set the process
 backend to the CPU once moved every device built after it in the binary onto
 the CPU, and tests comparing two builds failed only in the full run.
