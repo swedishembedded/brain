@@ -1310,6 +1310,10 @@ impl Qwen {
         if train && cfg.lora.is_some() {
             ops.hold_int8_by_float_read();
         }
+        // Every build runs its steps in submission order on this one stream and already shares its packed
+        // activations per shape (`Self::ops_act`), so the bf16 rounding of an activation is shared the same way: a
+        // recorded forward and backward (which rebuilds every layer) otherwise hold one rounded copy per layer.
+        ops.share_product_scratch();
         if !train {
             // A decode step allocates and frees the same few hundred
             // temporaries every token; on CUDA each is a driver call (and a

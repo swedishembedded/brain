@@ -124,6 +124,9 @@ pub struct LibraryGemmProvider {
     tf32: bool,
     /// The caller pinned the exact fp32 tier (it also bars the native fp16 attention kernels).
     reference: bool,
+    /// The bf16 operand scratch of every product that rounds its own fp32 activation, one per size in words, once
+    /// [`Self::share_product_casts`] turned it on; `None` gives each recorded product a scratch of its own.
+    shared_casts: Option<std::sync::Arc<std::sync::Mutex<std::collections::HashMap<u64, DeviceBuffer>>>>,
 }
 
 /// A window of rows of a packed weight to decode ([`LibraryGemmProvider::dequant_bf16`]): the planes the
@@ -622,7 +625,35 @@ impl LibraryGemmProvider {
             report_once(&path, precision);
         }
         let tf32 = path == GemmPath::Bf16TensorCore;
-        LibraryGemmProvider { path, tf32, reference: precision == GemmPrecision::Fp32Reference }
+        LibraryGemmProvider { path, tf32, reference: precision == GemmPrecision::Fp32Reference, shared_casts: None }
+    }
+
+    /// Round the fp32 activation of every product into one bf16 scratch per size, reused by every later product of
+    /// that size, instead of a fresh scratch per recorded product (which a recorded tape keeps alive: a layer stack
+    /// then holds one rounded copy of each activation per layer, forward and backward). Sound where the steps of
+    /// everything recorded through this provider run in submission order on one stream: the scratch is written by
+    /// the step right before the product that reads it, so a later product of the same size cannot overwrite it
+    /// first. Clones made after this call share the scratch.
+    pub fn share_product_casts(&mut self) {
+        self.shared_casts.get_or_insert_with(Default::default);
+    }
+
+    /// The bf16 rounding of `x` (`count` values) a product reads right after: the shared scratch of its size when
+    /// [`Self::share_product_casts`] is on, else a new one. `None` as [`cast_bf16`]; nothing is pushed then.
+    fn product_cast(&self, gpu: &Gpu, steps: &mut Vec<Step>, x: &Operand, count: u64) -> Option<DeviceBuffer> {
+        let Some(shared) = &self.shared_casts else { return cast_bf16(gpu, steps, x, count) };
+        if !casts_bf16(count, x) {
+            return None;
+        }
+        let words = count.div_ceil(2);
+        let scratch = shared.lock().unwrap_or_else(|e| e.into_inner()).entry(words).or_insert_with(|| gpu.storage_uninit(words)).clone();
+        cast_bf16_into(gpu, steps, x, count, &scratch)?;
+        Some(scratch)
+    }
+
+    /// Whether [`Self::share_product_casts`] is on.
+    pub fn shares_product_casts(&self) -> bool {
+        self.shared_casts.is_some()
     }
 
     /// The path this provider was assigned.
@@ -955,7 +986,7 @@ impl LibraryGemmProvider {
         let count = act_dims.0 as u64 * act_dims.1 as u64;
         let mut prep = Vec::new();
         let scratch = match act {
-            ActSource::Fp32(x) => match self.cast_bf16(gpu, &mut prep, x, count) {
+            ActSource::Fp32(x) => match self.product_cast(gpu, &mut prep, x, count) {
                 Some(b) => b,
                 None => return false,
             },

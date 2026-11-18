@@ -1724,7 +1724,20 @@ impl Ops {
     /// error; `Fp32Reference` pins the fp32 kernels (what gradient checks and
     /// cross-backend parity use). See [`gpu_core::provider::library`].
     pub fn set_gemm_precision(&mut self, precision: GemmPrecision) {
+        let shared = self.gemm.shares_product_casts();
         self.gemm = LibraryGemmProvider::for_gpu(&self.gpu, precision);
+        if shared {
+            self.gemm.share_product_casts();
+        }
+    }
+
+    /// Reuse one rounded activation scratch per shape across every product of this `Ops`, on the terms of
+    /// [`Self::act_shared_scratch`] (the model's steps run in submission order on one stream): every [`Act`] is then
+    /// made as that one makes it, and every tensor-core product that rounds its own fp32 activation rounds into one
+    /// bf16 scratch per size ([`LibraryGemmProvider::share_product_casts`]). A recorded layer stack then holds one
+    /// rounded copy per activation shape, not one per layer and pass.
+    pub fn share_product_scratch(&mut self) {
+        self.gemm.share_product_casts();
     }
 
     /// Hold an int8 weight at int8 on a device without the packed int8 dot (`numeric.int8_dot`), for a caller whose
@@ -2062,6 +2075,7 @@ impl Ops {
 
     fn act_with(&self, s: &mut Vec<Step>, x: &DeviceBuffer, xr0: u32, rows: u32, k: u32, shared: bool) -> Act {
         assert!(rows > 0, "Ops::act: rows must be > 0 (got 0)");
+        let shared = shared || self.gemm.shares_product_casts();
         // A width the packed path cannot hold (not a whole number of
         // `crate::int8::GROUP`s) simply is not packed: [`Self::act_f32`] is
         // what a dense product reads, and a product that REQUIRES the packed
@@ -2076,7 +2090,7 @@ impl Ops {
         // dispatches (and the scratch) are skipped and a stray product that does need them makes them then.
         let deferred = !self.packed_int8_runs(rows, k) || (!row_count_invariant_active() && self.providers.runs("cuda") && self.gpu.int8_packed_unneeded(rows, k / 4));
         let quant = (!deferred).then(|| self.quantize_rows(s, x, xr0, rows, k, shared));
-        Act { x: x.clone(), xr0, m: rows, k, quant: std::cell::RefCell::new(quant), quant_deferred: deferred, xgs: Default::default(), bf16: Default::default(), e4m3: Default::default(), e4m3_row: Default::default(), fine: None, shared_scratch: false }
+        Act { x: x.clone(), xr0, m: rows, k, quant: std::cell::RefCell::new(quant), quant_deferred: deferred, xgs: Default::default(), bf16: Default::default(), e4m3: Default::default(), e4m3_row: Default::default(), fine: None, shared_scratch: shared }
     }
 
     /// [`Ops::act`] with the activation quantized in two int8 levels:
@@ -2115,8 +2129,7 @@ impl Ops {
     /// and every product reading an activation is submitted before the next activation of the same width is packed -
     /// the order a layer stack already imposes on the activation buffers it shares across layers.
     pub fn act_shared_scratch(&self, s: &mut Vec<Step>, x: &DeviceBuffer, xr0: u32, rows: u32, k: u32) -> Act {
-        let act = self.act_with(s, x, xr0, rows, k, true);
-        Act { shared_scratch: true, ..act }
+        self.act_with(s, x, xr0, rows, k, true)
     }
 
     /// Rows `[r0, r0 + rows)` of `act` (counted from its first row) as an activation of their own that shares its
@@ -2231,7 +2244,7 @@ impl Ops {
     /// whatever a missing buffer would have held.
     pub fn act_f32(&self, x: &DeviceBuffer, xr0: u32, rows: u32, k: u32) -> Act {
         assert!(rows > 0, "Ops::act_f32: rows must be > 0 (got 0)");
-        Act { x: x.clone(), xr0, m: rows, k, quant: Default::default(), quant_deferred: false, xgs: Default::default(), bf16: Default::default(), e4m3: Default::default(), e4m3_row: Default::default(), fine: None, shared_scratch: false }
+        Act { x: x.clone(), xr0, m: rows, k, quant: Default::default(), quant_deferred: false, xgs: Default::default(), bf16: Default::default(), e4m3: Default::default(), e4m3_row: Default::default(), fine: None, shared_scratch: self.gemm.shares_product_casts() }
     }
 
     /// [`Self::act_f32`] for all `rows` rows of `x` whose bf16 rounding a fused kernel has already produced

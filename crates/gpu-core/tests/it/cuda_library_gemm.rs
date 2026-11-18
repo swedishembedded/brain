@@ -162,6 +162,43 @@ fn the_library_forward_and_dx_agree_with_an_f64_oracle() {
     }
 }
 
+/// With the casts shared, a recorded layer stack's products of one size round their activations into one scratch:
+/// recording a product costs no new device bytes after the first of its size, and products recorded back to back
+/// over different activations each still read their own when the steps run in order.
+#[test]
+fn shared_casts_hold_one_scratch_per_size_and_each_product_reads_its_own_activation() {
+    let Some(gpu) = open() else { return };
+    let mut provider = LibraryGemmProvider::for_gpu(&gpu, GemmPrecision::Auto);
+    if let GemmPath::Fp32Kernels { reason } = provider.path() {
+        eprintln!("cuda_library_gemm: this card runs the fp32 path ({reason}) - nothing to run");
+        return;
+    }
+    provider.share_product_casts();
+    let (m, n, k) = (64u32, 1024u32, 512u32);
+    let (mu, nu, ku) = (m as usize, n as usize, k as usize);
+    let w: Vec<f32> = values(nu * ku, 0.05, 1).iter().map(|v| round_bf16(*v)).collect();
+    let wb = gpu.storage((nu * ku / 2) as u64);
+    gpu.write(&wb, &pack(&w));
+    let whole = |buf| Operand { buf, range: (0, 0) };
+    let layers = 4;
+    let xs: Vec<Vec<f32>> = (0..layers).map(|l| values(mu * ku, 1.0, 10 + l)).collect();
+    let bufs: Vec<_> = xs.iter().map(|x| (gpu.storage_init("x", x), gpu.storage((mu * nu) as u64))).collect();
+    let live = || gpu.memory_usage().expect("the CUDA device accounts for its allocations").live;
+    let mut steps = Vec::new();
+    let mut grew = Vec::new();
+    for (xb, yb) in &bufs {
+        let before = live();
+        assert!(provider.forward(&gpu, &mut steps, &whole(xb), &whole(&wb), &whole(yb), m, n, k));
+        grew.push(live() - before);
+    }
+    assert!(grew[0] >= (mu * ku * 2) as u64, "the first product of its size allocates its scratch: {grew:?}");
+    assert!(grew[1..].iter().all(|&g| g == 0), "later products of the size reuse it: {grew:?}");
+    gpu.submit(&[], &steps);
+    for (l, (x, (_, yb))) in xs.iter().zip(&bufs).enumerate() {
+        assert_close(&gpu.read(yb, mu * nu), &forward_oracle(x, &w, mu, nu, ku), &format!("layer {l}"));
+    }
+}
+
 /// `out[m, n] = x[m, k] @ w[n, k]^T` in f64 over unrounded fp32 operands (sampled, see [`Sampled`]).
 fn forward_exact(x: &[f32], w: &[f32], m: usize, n: usize, k: usize) -> Sampled {
     Sampled::of(m * n, |i| (0..k).map(|t| x[(i / n) * k + t] as f64 * w[(i % n) * k + t] as f64).sum())
