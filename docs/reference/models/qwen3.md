@@ -281,7 +281,7 @@ These apply to serving (`brain serve` flags):
   two not above the declared one, so `--ctx 131072` on Qwen3 is factor
   4.0 over 32768) - a checkpoint that already declares one is never
   second-guessed. YaRN rescales every request, short ones included.
-- `--max-batch N` - concurrent serving batch slots (default 16).
+- `--max-batch N` - concurrent serving batch slots (default: the widest of 64, 32, 16, ... that the card holds beside the weights, the adapter bank, that many rows of activations and the KV of one sequence at a 32K context, logged at startup as `default --max-batch N: why`; 16 where no card budget is known).
 - the KV pool size - KV pool size in tokens, shared by every sequence
   and by the prompt-prefix cache (default: room for `--max-batch` half-context histories when
   that fits the card beside the weights, else the largest half of it that does,
@@ -386,7 +386,7 @@ These apply to serving (`brain serve` flags):
 ## Serving more sessions than the KV pool holds
 
 The KV pool is sized for a fleet of half-length histories (see the KV pool size), while the batch
-has `--max-batch` slots (default 16), so a busy server can admit more sessions
+has `--max-batch` slots (default: planned from the card, up to 64), so a busy server can admit more sessions
 than the pool can keep cached at once. Admission only checks that a prompt
 fits, so the sequences it lets in can still outgrow the pool together while
 they decode. Whatever the offload setting, that never fails a request: the

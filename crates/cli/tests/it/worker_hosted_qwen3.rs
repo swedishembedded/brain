@@ -62,7 +62,7 @@ fn hosting(supervision: &Supervision) -> WorkerHosting {
 /// requests happened to share a step in either process.
 fn config(bank: bool, hosting: Option<WorkerHosting>) -> QwenServeConfig {
     let bank = bank.then_some(AdapterBankSettings { slots: 2, rank_cap: 8, targets: AdapterTargets::ATTENTION });
-    QwenServeConfig { ctx: Some(2048), max_batch: 8, exact_decode: bank.is_none(), adapter_bank: bank, worker_hosting: hosting, ..QwenServeConfig::default() }
+    QwenServeConfig { ctx: Some(2048), max_batch: Some(8), exact_decode: bank.is_none(), adapter_bank: bank, worker_hosting: hosting, ..QwenServeConfig::default() }
 }
 
 fn resident(c: &(String, String), cfg: QwenServeConfig) -> Arc<QwenResident> {

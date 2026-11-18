@@ -166,8 +166,7 @@ to int8 only where that does not fit the largest card
 ([Qwen3](models/qwen3.md)).
 
 The Qwen3 and Qwen3.8 serving sizes are `brain serve` flags, not variables:
-`--ctx` (default: auto-sized to the card), `--max-batch` (default
-16), the KV pool size (default: batch x half a context when it fits), `--kv-calibration`, `--kv-cache fp8`, `--ctx` (default: the longest the cards hold)
+`--ctx` (default: auto-sized to the card), `--max-batch` (default: the widest batch, up to 64, that the card holds beside the weights with one sequence at a 32K context, the startup log says which and why; 16 where no card budget is known), the KV pool size (default: batch x half a context when it fits), `--kv-calibration`, `--kv-cache fp8`, `--ctx` (default: the longest the cards hold)
 and `--max-batch` (default: the widest batch, up to 64, that leaves one sequence a 32K context); `--exact-decode` makes a decode row's tokens and
 per-token log-probabilities independent of its co-batch (default off); a
 Qwen3.8 GGUF's unset `--kv-cache`,

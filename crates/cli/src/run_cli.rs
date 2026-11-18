@@ -1338,7 +1338,7 @@ fn card_reserve(explicit_gb: Option<u64>, max_batch: u32) -> serving::Reserve {
 
 /// The widest decode batch any served family was asked for (0 when none was).
 fn widest_batch(knobs: &serving::ServeKnobs) -> u32 {
-    [knobs.qwen.max_batch, knobs.qwen35.fp32.max_batch, knobs.qwen35.gguf.max_batch.unwrap_or(0), knobs.ricursive.max_batch.unwrap_or(0), knobs.ocr.max_batch.unwrap_or(0)].into_iter().max().unwrap_or(0)
+    [knobs.qwen.max_batch.unwrap_or(0), knobs.qwen35.fp32.max_batch, knobs.qwen35.gguf.max_batch.unwrap_or(0), knobs.ricursive.max_batch.unwrap_or(0), knobs.ocr.max_batch.unwrap_or(0)].into_iter().max().unwrap_or(0)
 }
 
 /// The scheduler policy a server runs with: the `--sched-*` weights, and

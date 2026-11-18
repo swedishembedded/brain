@@ -101,7 +101,7 @@ fn fixture(tag: &str) -> Fixture {
 }
 
 fn serve_config(bank: Option<AdapterBankSettings>) -> QwenServeConfig {
-    QwenServeConfig { ctx: Some(256), kv_int8: false, max_batch: 4, max_prefill_cap: Some(64), adapter_bank: bank, ..QwenServeConfig::default() }
+    QwenServeConfig { ctx: Some(256), kv_int8: false, max_batch: Some(4), max_prefill_cap: Some(64), adapter_bank: bank, ..QwenServeConfig::default() }
 }
 
 fn bank() -> AdapterBankSettings {

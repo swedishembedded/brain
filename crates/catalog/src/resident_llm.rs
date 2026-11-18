@@ -41,6 +41,7 @@ use qwen3::chat::{parse_request_as, sampling_params, text_outcome, ChatFormat};
 
 mod plan;
 use plan::QwenPlan;
+use crate::serve_defaults::{given_or_chosen, DEFAULT_CONTEXT_FLOOR, MAX_BATCH_DEFAULTS};
 
 // ---------------------------------------------------------------- shared
 
@@ -367,8 +368,10 @@ pub struct QwenServeConfig {
     /// never sizes `ctx`: it only bounds the default KV pool
     /// ([`QwenResident::resolve_kv_tokens`]).
     pub card_budget_bytes: Option<u64>,
-    /// `--max-batch N`, default 16.
-    pub max_batch: u32,
+    /// `--max-batch N`. `None` (the default) is planned from the card when its budget is known
+    /// ([`QwenResident::resolve_max_batch`]: the widest of [`MAX_BATCH_DEFAULTS`] that fits beside the weights
+    /// with one sequence at the context floor), and [`FALLBACK_MAX_BATCH`] when no budget is.
+    pub max_batch: Option<u32>,
     /// `--kv-cache f32` (presence opts OUT), default `true` (int8 KV is the
     /// serving default - see [`QwenResident::activate`]'s own doc for the
     /// measurement that earned it).
@@ -479,7 +482,7 @@ impl QwenServeConfig {
         }
         let l = &p.limits;
         self.ctx = l.ctx.or(self.ctx);
-        self.max_batch = l.max_batch.unwrap_or(self.max_batch);
+        self.max_batch = l.max_batch.or(self.max_batch);
         self.kv_tokens = l.kv_tokens.or(self.kv_tokens);
         self.kv_offload_gb = l.kv_offload_gb.unwrap_or(self.kv_offload_gb);
         self.max_prefill_cap = l.max_prefill.or(self.max_prefill_cap);
@@ -493,9 +496,22 @@ impl QwenServeConfig {
     }
 }
 
+impl QwenServeConfig {
+    /// The batch the sizing arithmetic runs at: the operator's, else [`FALLBACK_MAX_BATCH`]. A resident resolves
+    /// it first ([`QwenResident::resolve_max_batch`]), so this is the planned value by the time the context and
+    /// the KV pool are sized.
+    fn batch(&self) -> u32 {
+        self.max_batch.unwrap_or(FALLBACK_MAX_BATCH).max(1)
+    }
+}
+
+/// The batch of a server that does not know its card's budget (a library caller, a test): what the fixed default
+/// was before it was planned.
+pub const FALLBACK_MAX_BATCH: u32 = 16;
+
 impl Default for QwenServeConfig {
     fn default() -> QwenServeConfig {
-        QwenServeConfig { weights: None, tokenizer: None, ctx: None, auto_budget_bytes: None, card_budget_bytes: None, max_batch: 16, kv_int8: true, kv_fp8: false, kv_calib_opt_in: false, kv_offload_gb: 0.0, weight_format: None, max_prefill_cap: None, kv_tokens: None, gemm_precision: gpu_core::provider::library::GemmPrecision::Auto, fuse_residual_norm: true, exact_decode: false, adapter_bank: None, adapter_targets_named: false, refused: None, sparse_attention: None, worker_hosting: None }
+        QwenServeConfig { weights: None, tokenizer: None, ctx: None, auto_budget_bytes: None, card_budget_bytes: None, max_batch: None, kv_int8: true, kv_fp8: false, kv_calib_opt_in: false, kv_offload_gb: 0.0, weight_format: None, max_prefill_cap: None, kv_tokens: None, gemm_precision: gpu_core::provider::library::GemmPrecision::Auto, fuse_residual_norm: true, exact_decode: false, adapter_bank: None, adapter_targets_named: false, refused: None, sparse_attention: None, worker_hosting: None }
     }
 }
 
@@ -555,7 +571,7 @@ const MAX_DEFAULT_POOL_TOKENS: u32 = 1 << 20;
 /// (repeatedly) whose whole footprint fits `budget` beside `weight_bytes`;
 /// `None` keeps the two-context pool when not even the smallest does.
 fn fleet_pool_tokens(checkpoint: &qwen3::config::QwenConfig, weight_bytes: u64, budget: u64, ctx: u32, cfg: &QwenServeConfig) -> Option<u32> {
-    let max_batch = cfg.max_batch.max(1);
+    let max_batch = cfg.batch();
     let mut fleet = (u64::from(ctx) * u64::from(max_batch) / 2).min(u64::from(MAX_DEFAULT_POOL_TOKENS)) as u32;
     // A GPU's budget: the attention scratch as every GPU backend runs it (see `auto_ctx_for_budget`).
     let fused = qwen3::serve::fused_attention_on_gpu(checkpoint, cfg.kv_int8 && qwen3::serve::kv_int8_supported(checkpoint));
@@ -759,6 +775,27 @@ fn auto_ctx_for_budget(weight_bytes: u64, budget_bytes: u64, cfg: &qwen3::config
     best
 }
 
+/// [`QwenResident::resolve_max_batch`]'s decision for a checkpoint on a card with `budget` bytes of room: the operator's
+/// `--max-batch`, else the widest of [`MAX_BATCH_DEFAULTS`] the planner places beside `weights`, the adapter bank and
+/// the activations of that many rows, with a KV pool for one sequence at the context floor, recorded in `chosen`.
+fn planned_max_batch(checkpoint: &qwen3::config::QwenConfig, weights: &model::ops::TierPolicy, cfg: &QwenServeConfig, budget: u64, chosen: &mut Vec<String>) -> u32 {
+    let weight_bytes = weights_bytes_for(checkpoint, weights);
+    let floor = cfg.ctx.unwrap_or_else(|| DEFAULT_CONTEXT_FLOOR.min(checkpoint.max_position_embeddings)).max(1);
+    let kv_int8 = cfg.kv_int8 && qwen3::serve::kv_int8_supported(checkpoint);
+    let fused = qwen3::serve::fused_attention_on_gpu(checkpoint, kv_int8);
+    let prefill = prefill_rows(cfg, Some(checkpoint));
+    let fits = |batch: u32| {
+        let profile = PoolProfile::at_ctx(checkpoint, floor, batch, prefill, Some(floor), kv_int8, cfg.kv_offload_gb > 0.0, fused);
+        let (_, rows, _, _, max_prefill) = QwenResident::pool_sizing(floor, batch, prefill, Some(floor));
+        let bank_bytes = cfg.adapter_bank.as_ref().map_or(0, |bank| bank.device_bytes(checkpoint, rows.max(max_prefill)));
+        if !profile.bindings_fit() {
+            return Err("a single buffer of its pool is past what a driver binds".to_string());
+        }
+        profile.plan(weight_bytes, bank_bytes, budget).map(|_| ()).map_err(|e| e.to_string())
+    };
+    given_or_chosen(cfg.max_batch.map(|b| b.max(1)), "--max-batch", MAX_BATCH_DEFAULTS, gpu_core::defaults::Hardware::detected(), chosen, fits)
+}
+
 /// The Qwen3 BPE decoder behind the scheduler ([`QwenServeConfig`] names
 /// WHICH checkpoint, `--checkpoint`, and HOW to serve it). Runs the CPU/GPU forward
 /// `generate` path (never the NPU branch).
@@ -782,6 +819,8 @@ pub struct QwenResident {
     adapters: Arc<AdapterRegistry>,
     /// The sampling defaults the checkpoint's `generation_config.json` declares, read once.
     sampling: std::sync::OnceLock<data::generation::SamplingDefaults>,
+    /// The knobs the operator left unset that the plan chose, each as `knob value: why` ([`Self::chosen_defaults`]).
+    chosen: Vec<String>,
     /// The resident as served from a supervised worker, when its family is hosted: activation and placement go
     /// through it, so this resident's adapter views ([`QwenAdapterView`], which build and place through the base)
     /// are built in the worker too. It answers everything else from a twin of this resident over the same plan and
@@ -863,6 +902,9 @@ impl QwenResident {
 
     fn build(path: &str, id: String, base_id: Option<String>, tokenizer: &str, architecture: Option<String>, cfg: QwenServeConfig) -> QwenResident {
         let weights = qwen3_weight_policy(path, cfg.weight_format.as_ref(), cfg.auto_budget_bytes);
+        let mut chosen = Vec::new();
+        let max_batch = Self::resolve_max_batch(path, &cfg, &weights, &mut chosen);
+        let cfg = QwenServeConfig { max_batch: Some(max_batch), ..cfg };
         let ctx = Self::resolve_ctx(path, &cfg, &weights);
         let kv_tokens = Self::resolve_kv_tokens(path, &cfg, ctx, &weights);
         let max_prefill_cap = prefill_rows(&cfg, qwen3::checkpoint_config(path).ok().as_ref());
@@ -874,7 +916,7 @@ impl QwenResident {
             architecture,
             base_id,
             ctx,
-            max_batch: cfg.max_batch.max(1),
+            max_batch,
             kv_int8_requested: cfg.kv_int8,
             kv_fp8_requested: cfg.kv_fp8,
             sparse_attention: cfg.sparse_attention,
@@ -890,16 +932,41 @@ impl QwenResident {
             refused: cfg.refused,
             adapter_bank: cfg.adapter_bank,
         });
+        for line in &chosen {
+            eprintln!("brain: {}: default {line}", resident.plan.id);
+        }
+        let resident = QwenResident { chosen, ..resident };
         match hosting {
             Some(hosting) => resident.hosted_by(&hosting),
             None => resident,
         }
     }
 
+    /// The knobs the operator left unset that the plan chose, each as `knob value: why`, for the startup log.
+    pub fn chosen_defaults(&self) -> &[String] {
+        &self.chosen
+    }
+
+    /// `--max-batch` as given; else, when a card budget is known, the widest of [`MAX_BATCH_DEFAULTS`] whose plan
+    /// the planner places in it: weights, the adapter bank, the activations of a batch that wide, and a KV pool
+    /// for one sequence at the context floor (the operator's `--ctx` when named, else [`DEFAULT_CONTEXT_FLOOR`]
+    /// within the checkpoint's window). The context and the fleet pool are then sized for that batch. A narrower
+    /// batch than the clients a server has is a queue in front of it, so the batch is not held at a constant.
+    /// Without a budget, or with a checkpoint that cannot be read, [`FALLBACK_MAX_BATCH`], unrecorded: the real
+    /// error is `activate`'s.
+    fn resolve_max_batch(path: &str, cfg: &QwenServeConfig, weights: &model::ops::TierPolicy, chosen: &mut Vec<String>) -> u32 {
+        let budget = cfg.card_budget_bytes.or(cfg.auto_budget_bytes);
+        let checkpoint = qwen3::checkpoint_config(path).ok();
+        match (budget, checkpoint.as_ref()) {
+            (Some(budget), Some(checkpoint)) => planned_max_batch(checkpoint, weights, cfg, budget, chosen),
+            _ => cfg.batch(),
+        }
+    }
+
     /// This resident with its instances built in `hosting`'s workers, each rebuilding it from [`Self::host_spec`]
     /// and told every change of its adapters.
     fn hosted_by(self, hosting: &residency::supervised::WorkerHosting) -> QwenResident {
-        let twin = QwenResident { plan: self.plan.clone(), architecture: self.architecture, adapters: self.adapters.clone(), sampling: std::sync::OnceLock::new(), worker: None };
+        let twin = QwenResident { plan: self.plan.clone(), architecture: self.architecture, adapters: self.adapters.clone(), sampling: std::sync::OnceLock::new(), chosen: self.chosen.clone(), worker: None };
         let worker = hosting.supervised(Arc::new(twin), self.host_spec()).with_adapters(self.adapters.clone());
         QwenResident { worker: Some(worker), ..self }
     }
@@ -908,7 +975,7 @@ impl QwenResident {
     fn from_plan(plan: QwenPlan) -> QwenResident {
         let architecture = plan.architecture.as_deref().and_then(brain_arch::by_id).map(|a| a.id);
         let adapters = AdapterRegistry::new(plan.adapter_bank.clone(), ServedBase::new(&plan.path, plan.base_id.clone()));
-        QwenResident { plan, architecture, adapters, sampling: std::sync::OnceLock::new(), worker: None }
+        QwenResident { plan, architecture, adapters, sampling: std::sync::OnceLock::new(), chosen: Vec::new(), worker: None }
     }
 
     /// What a worker rebuilds this resident from: the resolved plan, so the worker builds the engine the serving
@@ -977,7 +1044,7 @@ impl QwenResident {
         let Some(budget) = cfg.auto_budget_bytes else { return HISTORICAL_DEFAULT };
         let Ok(checkpoint_cfg) = qwen3::checkpoint_config(path) else { return HISTORICAL_DEFAULT };
         let weight_bytes = weights_bytes_for(&checkpoint_cfg, weights);
-        auto_ctx_for_budget(weight_bytes, budget, &checkpoint_cfg, cfg.max_batch.max(1), prefill_rows(cfg, Some(&checkpoint_cfg)), cfg.kv_tokens, cfg.kv_int8, cfg.kv_offload_gb > 0.0)
+        auto_ctx_for_budget(weight_bytes, budget, &checkpoint_cfg, cfg.batch(), prefill_rows(cfg, Some(&checkpoint_cfg)), cfg.kv_tokens, cfg.kv_int8, cfg.kv_offload_gb > 0.0)
     }
 
     /// Give `cfg` a derived [`model::yarn::YarnConfig`] when `ctx` (the KV
@@ -1651,7 +1718,7 @@ mod tests {
         assert!(cfg.exact_decode, "--exact-decode reaches the engine");
         assert!(cfg.weight_format.as_ref().is_some_and(|w| w.default_dtype() == gpu_core::select::Dtype::BF16) && cfg.kv_int8 && cfg.kv_fp8);
         assert_eq!(cfg.sparse_attention.as_deref(), Some("/indexers/qwen3-0.6b.safetensors"));
-        assert_eq!((cfg.ctx, cfg.max_batch, cfg.kv_offload_gb), (Some(4096), 32, 2.0));
+        assert_eq!((cfg.ctx, cfg.max_batch, cfg.kv_offload_gb), (Some(4096), Some(32), 2.0));
         assert_eq!(cfg.gemm_precision, gpu_core::provider::library::GemmPrecision::Fp32Reference);
         assert!(notes.iter().any(|n| n.contains("prefix-slots")), "{notes:?}");
 
@@ -1842,7 +1909,7 @@ mod tests {
     fn qwen_serve_config_default_matches_every_historical_default() {
         let cfg = QwenServeConfig::default();
         assert_eq!(cfg.ctx, None, "None means auto-size - see resolve_ctx");
-        assert_eq!(cfg.max_batch, 16);
+        assert_eq!(cfg.max_batch, None, "None means planned from the card, 16 without one - see resolve_max_batch");
         assert!(cfg.kv_int8, "int8 KV must be the default");
         assert!(!cfg.kv_calib_opt_in, "calibration must default OFF");
         assert_eq!(cfg.kv_offload_gb, 0.0);
@@ -1961,7 +2028,7 @@ mod tests {
     #[test]
     fn the_real_8b_on_a_big_card_gets_the_fleet_pool() {
         let cfg = qwen3::config::QwenConfig::qwen3_8b();
-        let serve = QwenServeConfig { max_batch: 32, ..QwenServeConfig::default() };
+        let serve = QwenServeConfig { max_batch: Some(32), ..QwenServeConfig::default() };
         let weights = weights_fp32_bytes(&cfg);
         assert_eq!(fleet_pool_tokens(&cfg, weights, 94 << 30, 32768, &serve), Some(32768 * 32 / 2), "32 slots x half a context");
         let tighter = fleet_pool_tokens(&cfg, weights, 60 << 30, 32768, &serve).expect("a smaller fleet fits");
@@ -1976,13 +2043,13 @@ mod tests {
     fn a_live_server_sizes_the_pool_for_a_fleet_of_histories_when_it_fits() {
         let path = write_tiny_checkpoint(5, "fleet");
         let path = path.to_str().unwrap();
-        let live = |budget: Option<u64>, kv_tokens: Option<u32>| QwenServeConfig { ctx: Some(4096), max_batch: 16, card_budget_bytes: budget, kv_tokens, ..QwenServeConfig::default() };
+        let live = |budget: Option<u64>, kv_tokens: Option<u32>| QwenServeConfig { ctx: Some(4096), max_batch: Some(16), card_budget_bytes: budget, kv_tokens, ..QwenServeConfig::default() };
         let resolve = |cfg: &QwenServeConfig| QwenResident::resolve_kv_tokens(path, cfg, 4096, &qwen3_weight_policy(path, None, cfg.auto_budget_bytes));
         assert_eq!(resolve(&live(Some(u64::MAX / 4), None)), Some(4096 * 16 / 2), "16 slots x half a context");
         assert_eq!(resolve(&live(None, None)), None, "no card budget: the two-context pool");
         assert_eq!(resolve(&live(Some(1 << 20), None)), None, "does not fit the budget");
         assert_eq!(resolve(&live(Some(u64::MAX / 4), Some(1234))), Some(1234), "the operator's number wins");
-        let few = QwenServeConfig { max_batch: 2, ..live(Some(u64::MAX / 4), None) };
+        let few = QwenServeConfig { max_batch: Some(2), ..live(Some(u64::MAX / 4), None) };
         assert_eq!(resolve(&few), None, "two contexts already hold two half-contexts");
     }
 
@@ -2271,6 +2338,48 @@ mod tests {
         }
     }
 
+    /// An unset `--max-batch` is planned from the card, not a constant: Qwen3-4B bf16 on a 94 GiB budget takes the widest
+    /// batch (a queue of 24-48 agent sequences behind 16 rows cost 504s), a card that cannot hold a wide batch's
+    /// activations beside the weights takes a narrower one, the choice is recorded with its reason, and the operator's
+    /// number is taken as given and not recorded.
+    #[test]
+    fn an_unset_max_batch_is_planned_from_the_card() {
+        let cfg = qwen3::config::QwenConfig { n_layers: 36, d_model: 2560, n_heads: 32, n_kv_heads: 8, head_dim: 128, d_ff: 9728, max_position_embeddings: 40960, ..qwen3::config::QwenConfig::qwen3_0_6b() };
+        let weights = model::ops::TierPolicy::uniform(qwen3::Dtype::BF16);
+        let plan = |budget_gib: f64, given: Option<u32>| {
+            let mut chosen = Vec::new();
+            let serve = QwenServeConfig { max_batch: given, ..QwenServeConfig::default() };
+            let batch = planned_max_batch(&cfg, &weights, &serve, (budget_gib * (1u64 << 30) as f64) as u64, &mut chosen);
+            (batch, chosen)
+        };
+        let widest = MAX_BATCH_DEFAULTS[0].ranked[0];
+        let (roomy, said) = plan(94.0, None);
+        assert_eq!(roomy, widest, "a 94 GiB card holds the widest batch beside Qwen3-4B");
+        assert_eq!(said.len(), 1);
+        assert!(said[0].starts_with(&format!("--max-batch {widest}: ")), "recorded with its reason: {said:?}");
+        let weight_gib = weights_bytes_for(&cfg, &weights) as f64 / (1u64 << 30) as f64;
+        let (tight, said) = plan(weight_gib + 2.75, None);
+        assert_eq!(tight, 16, "2.75 GiB beside the weights holds one 32K sequence and 16 rows of activations, not {widest}");
+        assert!(said[0].contains("passed over"), "the narrower choice says what was passed over: {said:?}");
+        let (asked, said) = plan(94.0, Some(8));
+        assert_eq!((asked, said.len()), (8, 0), "an explicit --max-batch is taken as given and not recorded");
+    }
+
+    /// The resident carries the planned batch into its plan, sizes its context and pool for it, and says so; with no
+    /// card budget known (a library caller) it keeps the historical 16 and says nothing.
+    #[test]
+    fn a_resident_serves_the_planned_batch_and_reports_it() {
+        let path = write_tiny_checkpoint(5, "planned-batch");
+        let path = path.to_str().unwrap();
+        let card = checkpoint::st::ModelCard::new("brain/qwen3", "qwen");
+        let live = QwenResident::from_card_configured(path, &card, None, QwenServeConfig { card_budget_bytes: Some(u64::MAX / 4), ..QwenServeConfig::default() });
+        assert_eq!(live.plan.max_batch, MAX_BATCH_DEFAULTS[0].ranked[0]);
+        assert!(live.chosen_defaults().iter().any(|l| l.starts_with(&format!("--max-batch {}", live.plan.max_batch))), "{:?}", live.chosen_defaults());
+        let blind = QwenResident::from_card_configured(path, &card, None, QwenServeConfig::default());
+        assert_eq!(blind.plan.max_batch, FALLBACK_MAX_BATCH);
+        assert!(blind.chosen_defaults().is_empty());
+    }
+
     /// A server's budget is a GPU's, and every GPU backend fuses the paged attention, so auto-sizing charges the
     /// fused scratch. Charged at the never-fused worst case, Qwen3-4B's 32-head score slab of a 32768-token context
     /// is past one binding, and a 96 GB card was handed a 24576-token context that refuses every 32K prompt.
@@ -2452,7 +2561,7 @@ mod tests {
     fn a_plan_that_cannot_fit_its_card_share_is_refused_at_startup_naming_what_to_change() {
         let path = write_tiny_checkpoint(41, "unfit");
         let card = checkpoint::st::ModelCard::new("brain/qwen3", "qwen");
-        let at = |ctx: u32, share: u64| QwenResident::from_card_configured(path.to_str().unwrap(), &card, Some("unused.json"), QwenServeConfig { ctx: Some(ctx), card_budget_bytes: Some(share), ..QwenServeConfig::default() });
+        let at = |ctx: u32, share: u64| QwenResident::from_card_configured(path.to_str().unwrap(), &card, Some("unused.json"), QwenServeConfig { ctx: Some(ctx), max_batch: Some(16), card_budget_bytes: Some(share), ..QwenServeConfig::default() });
         let key = InstanceKey::new("brain/qwen3", "default");
         let need = |r: &QwenResident| r.estimate(&key).placed(0).vram;
         let (short, long) = (need(&at(2048, u64::MAX)), need(&at(24576, u64::MAX)));
