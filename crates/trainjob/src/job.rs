@@ -290,6 +290,9 @@ pub(crate) fn policy_gradient_config(params: &crate::request::Params) -> Result<
     if let Some(v) = &params.advantage_norm {
         config.advantage_norm = brain::AdvantageNorm::parse(v).map_err(|e| format!("train: {e}"))?;
     }
+    if let Some(v) = &params.truncated {
+        config.truncated = brain::TruncatedRollouts::parse(v).map_err(|e| format!("train: {e}"))?;
+    }
     Ok(config)
 }
 

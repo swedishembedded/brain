@@ -28,7 +28,7 @@ use crate::env::{Environment, Reward, Step, Task, Verifier};
 use crate::objective::distill::{DistillConfig, DistillExample, DistillTopK, TopK};
 use crate::objective::dpo::{weigh_pair, PackedPair};
 use crate::objective::advantage::{group_advantages_with, AdvantageNorm};
-use crate::objective::external::PolicyGradientConfig;
+use crate::objective::external::{PolicyGradientConfig, TruncatedRollouts};
 use crate::objective::grpo::{token_term, Grpo, GrpoConfig, LossAgg};
 use crate::objective::grpo_term::ClipBand;
 use crate::objective::pg_batch::{backward_weighted, PgBatch, PgSpec};
@@ -131,6 +131,7 @@ pub fn policy_gradient_regimes() -> Vec<(&'static str, PolicyGradientConfig)> {
     vec![
         ("dr-grpo", PolicyGradientConfig { advantage_norm: AdvantageNorm::MeanCentered, loss_agg: LossAgg::ConstantLength(SEQ), kl_beta: 0.0, ..d }),
         ("rloo", PolicyGradientConfig { advantage_norm: AdvantageNorm::LeaveOneOut, loss_agg: LossAgg::TokenSum, ..d }),
+        ("dapo", PolicyGradientConfig { advantage_norm: AdvantageNorm::ZScore, clip_eps: 0.2, clip_eps_high: Some(0.28), loss_agg: LossAgg::TokenSum, truncated: TruncatedRollouts::Mask, kl_beta: 0.0, ..d }),
     ]
 }
 

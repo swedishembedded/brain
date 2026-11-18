@@ -293,14 +293,37 @@ fn the_rules_between_records_refuse_the_record_that_breaks_them() {
     ];
     let records: Vec<ChatSample> = lines.iter().map(|l| ChatSample::from_json_line_with(l, &data::chat::TextOnly::TRAINER).unwrap()).collect();
     let rollouts: Vec<Option<&chat_rollout::Rollout>> = records.iter().map(|r| r.rollout.as_ref()).collect();
-    let refused: Vec<(usize, chat_rollout::RecordRule, String)> = chat_rollout::check_records(&rollouts).into_iter().map(|(at, e)| {
-        let f = e.fault().cloned().unwrap();
-        (at, f.rule, f.field)
-    }).collect();
+    let refused = |truncated| -> Vec<(usize, chat_rollout::RecordRule, String)> {
+        chat_rollout::check_records(&rollouts, truncated)
+            .into_iter()
+            .map(|(at, e)| {
+                let f = e.fault().cloned().unwrap();
+                (at, f.rule, f.field)
+            })
+            .collect()
+    };
     use chat_rollout::RecordRule::*;
     assert_eq!(
-        refused,
+        refused(chat_rollout::TruncatedRollouts::Mask),
         [(2, RolloutMismatch, "reward".to_string()), (4, GroupOfOne, "group".to_string()), (5, GroupOfOne, "group".to_string()), (8, MixedTokenizerDigest, "tokenizer_digest".to_string())],
         "a repeated record of a rollout is the same outcome; c's truncated rollout does not count"
     );
+    assert_eq!(
+        refused(chat_rollout::TruncatedRollouts::Keep),
+        [(2, RolloutMismatch, "reward".to_string()), (4, GroupOfOne, "group".to_string()), (8, MixedTokenizerDigest, "tokenizer_digest".to_string())],
+        "a run that keeps truncated rollouts counts c's in its group"
+    );
+}
+
+/// The wire names of the truncated-rollout handling round-trip, and only a kept handling counts a truncated rollout.
+#[test]
+fn a_truncated_rollout_counts_only_where_the_run_keeps_it() {
+    use chat_rollout::TruncatedRollouts;
+    for t in TruncatedRollouts::ALL {
+        assert_eq!(TruncatedRollouts::parse(t.name()), Ok(t));
+    }
+    assert!(TruncatedRollouts::parse("drop").unwrap_err().contains("mask"));
+    assert_eq!(TruncatedRollouts::default(), TruncatedRollouts::Mask);
+    assert!(TruncatedRollouts::Mask.counts(false) && !TruncatedRollouts::Mask.counts(true));
+    assert!(TruncatedRollouts::Keep.counts(false) && TruncatedRollouts::Keep.counts(true));
 }

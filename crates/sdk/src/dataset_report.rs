@@ -51,6 +51,9 @@ pub struct DatasetCheck {
     /// Which records to list the lengths (or refusals) of in [`DatasetReport::record_lengths`] and
     /// [`DatasetReport::record_refusals`]; `None` lists none.
     pub list_records: Option<RecordWindow>,
+    /// [`crate::PolicyGradientConfig::truncated`]: whether a truncated rollout counts in its group when the rules
+    /// between records are checked; chat records only.
+    pub truncated: data::chat_rollout::TruncatedRollouts,
 }
 
 /// A page of the per-record answers: the records (blank lines are not records) after the first `offset` of them, at
@@ -202,7 +205,7 @@ pub fn check_dataset(model_dir: impl AsRef<Path>, path: impl AsRef<Path>, check:
             rollouts.push(rollout.map(|r| data::chat_rollout::Rollout { behavior_logprobs: Vec::new(), token_ids: Vec::new(), teacher: None, ..r }));
         }
         let refs: Vec<Option<&data::chat_rollout::Rollout>> = rollouts.iter().map(Option::as_ref).collect();
-        between.extend(data::chat_rollout::check_records(&refs));
+        between.extend(data::chat_rollout::check_records(&refs, check.truncated));
     }
 
     let mut report = DatasetReport {
@@ -332,7 +335,7 @@ mod tests {
         let root = fixtures();
         let model = root.join("model");
         let scratch = tempfile::tempdir().unwrap();
-        let check = DatasetCheck { kind: DatasetKind::Chat, thinking: true, pack_answers: false, max_block: 512, list_records: Some(RecordWindow { offset: 0, limit: 100 }) };
+        let check = DatasetCheck { kind: DatasetKind::Chat, thinking: true, pack_answers: false, max_block: 512, list_records: Some(RecordWindow { offset: 0, limit: 100 }), truncated: Default::default() };
         let mut listed = 0;
         for file in ["chat.jsonl", "chat_rollout.jsonl"] {
             let report = check_dataset(&model, root.join(file), &check, &mut || true).unwrap();
@@ -367,7 +370,7 @@ mod tests {
         std::fs::write(&mixed, lines.join("\n\n")).unwrap();
         let (mut seen, mut offset) = (Vec::new(), 0);
         loop {
-            let check = DatasetCheck { kind: DatasetKind::Chat, thinking: true, pack_answers: false, max_block: 512, list_records: Some(RecordWindow { offset, limit: 2 }) };
+            let check = DatasetCheck { kind: DatasetKind::Chat, thinking: true, pack_answers: false, max_block: 512, list_records: Some(RecordWindow { offset, limit: 2 }), truncated: Default::default() };
             let page = check_dataset(root.join("model"), &mixed, &check, &mut || true).unwrap();
             assert!(page.record_lengths.len() + page.record_refusals.len() <= 2);
             seen.extend(page.record_lengths.iter().map(|r| r.line));

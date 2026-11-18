@@ -204,6 +204,37 @@ fn a_truncated_rollout_is_never_drawn_and_a_dataset_of_only_those_is_refused() {
     assert!(err.to_string().contains("truncated"), "{err}");
 }
 
+/// DAPO's handling is the default (`truncated: mask`, above); a run that keeps truncated rollouts trains them, their
+/// rewards counted in their group: the same four rollouts give mean-centred advantages 5, 1, -1 and -5 (mean 0) and
+/// every one of them is drawn. A group whose only other rollout is truncated is a group of one under mask and a pair
+/// under keep.
+#[test]
+fn a_run_that_keeps_truncated_rollouts_trains_them_with_their_rewards_counted() {
+    use super::external_policy_gradient::{opts, write_dataset};
+    use rl::objective::external::TruncatedRollouts;
+    let mut m = lora_model(data::rng::random_seed());
+    let keep = PolicyGradientConfig { truncated: TruncatedRollouts::Keep, ..no_kl() };
+    let rows = [Row { truncated: true, ..Row::rewarded(&[7, 8, 9, 10, 11, 12], 3, 5.0, "g") }, Row::rewarded(&IDS, 3, 1.0, "g"), Row::rewarded(&[3, 4, 5, 6, 7, 8], 3, -1.0, "g"), Row { truncated: true, ..Row::rewarded(&[2, 3, 4, 5, 6, 7], 3, -5.0, "g") }];
+    let (mut obj, _dir) = started(&rows, keep, &mut m);
+    assert_eq!((obj.stats().sequences_truncated, obj.stats().sequences_with_advantage), (2, 4));
+    let mut advantages: Vec<i32> = (0..4).map(|e| obj.advantage(e).expect("every rollout trains") as i32).collect();
+    advantages.sort_unstable();
+    assert_eq!(advantages, [-5, -1, 1, 5], "the prepared split orders its examples itself");
+    let mut seen = std::collections::BTreeSet::new();
+    for _ in 0..24 {
+        one_step(&mut obj, &m);
+        seen.insert(obj.stats().steps.last().unwrap().mean_advantage as i32);
+    }
+    assert_eq!(seen.into_iter().collect::<Vec<_>>(), [-5, -1, 1, 5], "every rollout, truncated or not, is drawn");
+
+    let pair = [Row::rewarded(&IDS, 3, 1.0, "h"), Row { truncated: true, ..Row::rewarded(&[3, 4, 5, 6, 7, 8], 3, 0.0, "h") }];
+    let dir = tempfile::tempdir().unwrap();
+    write_dataset(dir.path(), &pair);
+    let masked = ExternalPolicyGradient::open(dir.path(), &opts(1, 1, 1e-2), no_kl()).err().expect("a group of one under mask");
+    assert!(masked.to_string().contains("group_of_one"), "{masked}");
+    assert!(ExternalPolicyGradient::open(dir.path(), &opts(1, 1, 1e-2), keep).is_ok(), "a pair under keep");
+}
+
 /// The numerics gate: with the recorded log-probabilities equal to the trainer's own, the gap is zero, the effective
 /// sample size one and the gate passes; recorded values a fixed shift below them give exactly that gap, a mismatch KL
 /// of the k3 definition and a broken bound that names itself. No update is ever taken.

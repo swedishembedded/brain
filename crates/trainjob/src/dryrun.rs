@@ -35,6 +35,7 @@ pub fn spec() -> ActionSpec {
         .param(ParamSpec::new("thinking", ParamType::Bool, "render as a run with this `thinking` setting would (chat only)").default(json!(true)))
         .param(ParamSpec::new("pack_answers", ParamType::Bool, "render as a run with this `pack_answers` setting would (chat only)").default(json!(false)))
         .param(ParamSpec::new("max_block", ParamType::Int, "the training row in tokens: examples longer than it are counted (a run refuses them)").default(json!(8192)).min(64.0).max(1_048_576.0).step(1.0))
+        .param(ParamSpec::new("truncated", ParamType::Enum(brain::TruncatedRollouts::ALL.iter().map(|t| t.name().to_string()).collect()), "check the rules between rollout records as a policy-gradient run with this `truncated` setting would: `mask` (a truncated rollout does not count in its group) or `keep` (chat only)").default(json!("mask")))
         .param(ParamSpec::new("per_record", ParamType::Bool, "also list, per record, its token counts under the base's template and tokenizer as training reads it (prompt, trained, total) or its refusal, one page at a time").default(json!(false)))
         .param(ParamSpec::new("offset", ParamType::Int, "with `per_record`: the records (valid or refused, blank lines not counted) to skip, the first page is 0, then `per_record_next` of the previous page").default(json!(0)).min(0.0).max(1.0e12).step(1.0))
         .param(ParamSpec::new("limit", ParamType::Int, "with `per_record`: the most records one page lists, counts and refusals together").default(json!(50_000)).min(1.0).max(brain::dataset_report::MAX_RECORD_WINDOW as f64).step(1.0))
@@ -51,6 +52,7 @@ pub struct Params {
     pub thinking: bool,
     pub pack_answers: bool,
     pub max_block: u32,
+    pub truncated: String,
     pub per_record: bool,
     pub offset: usize,
     pub limit: usize,
@@ -139,7 +141,8 @@ pub fn run(env: &JobEnv, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -
     let base = p.base.as_deref().ok_or("check_dataset: `base` is needed to read a chat or preference dataset")?;
     let base_dir = job::resolve_base(env.models_dir.as_deref(), base)?;
     let kind = if p.kind == "preference" { brain::dataset_report::DatasetKind::Preference } else { brain::dataset_report::DatasetKind::Chat };
-    let check = brain::dataset_report::DatasetCheck { kind, thinking: p.thinking, pack_answers: p.pack_answers, max_block: p.max_block, list_records: p.per_record.then_some(brain::dataset_report::RecordWindow { offset: p.offset, limit: p.limit }) };
+    let truncated = brain::TruncatedRollouts::parse(&p.truncated).map_err(|e| format!("check_dataset: {e}"))?;
+    let check = brain::dataset_report::DatasetCheck { kind, thinking: p.thinking, pack_answers: p.pack_answers, max_block: p.max_block, list_records: p.per_record.then_some(brain::dataset_report::RecordWindow { offset: p.offset, limit: p.limit }), truncated };
     let report = brain::dataset_report::check_dataset(&base_dir, &dataset, &check, &mut inv.keep_going(progress, 0, "record")).map_err(|e| match e {
         brain::Error::Cancelled => capability::failure::CANCELLED.to_string(),
         e => job::trainer_failure(e),

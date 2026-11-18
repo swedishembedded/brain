@@ -65,6 +65,7 @@ pub fn implied_defaults() -> Map<String, Value> {
         ("advantage_bound", pg.advantage_bound.map(float)),
         ("sequence_advantage_cap", pg.sequence_advantage_cap.map(float)),
         ("advantage_norm", Some(json!(pg.advantage_norm.name()))),
+        ("truncated", Some(json!(pg.truncated.name()))),
         ("beta", Some(float(brain::DEFAULT_DPO_BETA))),
         ("nll_weight", Some(float(brain::DEFAULT_DPO_NLL_WEIGHT))),
         ("keep_reasoning", Some(json!(brain::DEFAULT_DPO_KEEP_REASONING))),
@@ -127,6 +128,7 @@ fn spec_without_defaults() -> ActionSpec {
         .param(ParamSpec::new("teacher", ParamType::Enum(vec!["base".into(), "start".into()]), "policy gradient with teacher contexts: the frozen policy that scores the student's tokens in the privileged context"))
         .param(optional_f("advantage_bound", "policy gradient with teacher contexts: each token's advantage is clipped to [-bound, bound]", 0.0, 1e6))
         .param(optional_f("sequence_advantage_cap", "policy gradient with teacher contexts: the most the magnitudes of a sequence's token advantages may sum to", 0.0, 1e9))
+        .param(ParamSpec::new("truncated", ParamType::Enum(brain::TruncatedRollouts::ALL.iter().map(|t| t.name().to_string()).collect()), "policy gradient: what a rollout marked `truncated` does: `mask` (never trained, its reward takes no part in its group: DAPO's overlong filtering) or `keep` (trained, its reward counted)"))
         .param(ParamSpec::new("advantage_norm", ParamType::Enum(brain::AdvantageNorm::ALL.iter().map(|n| n.name().to_string()).collect()), "policy gradient: how each group's rewards become the advantages of its rollouts: `mean-centred` (r - mean), `z-score` ((r - mean) / (std + 1e-4)) or `leave-one-out` (r_i - the mean of the others)"))
         .param(optional_f("beta", "dpo: the temperature of the preference loss (default 0.1)", 0.0, 100.0))
         .param(optional_f("nll_weight", "dpo: the weight of the supervised likelihood of the chosen answer added to the loss (default 0)", 0.0, 1000.0))
@@ -344,6 +346,7 @@ pub struct Params {
     pub advantage_bound: Option<f32>,
     pub sequence_advantage_cap: Option<f32>,
     pub advantage_norm: Option<String>,
+    pub truncated: Option<String>,
     pub beta: Option<f32>,
     pub nll_weight: Option<f32>,
     pub keep_reasoning: Option<bool>,
@@ -383,6 +386,7 @@ impl Request {
             (params.advantage_bound.is_some(), "advantage_bound"),
             (params.sequence_advantage_cap.is_some(), "sequence_advantage_cap"),
             (params.advantage_norm.is_some(), "advantage_norm"),
+            (params.truncated.is_some(), "truncated"),
         ]
         .into_iter()
         .filter_map(|(named, name)| named.then_some(name))
@@ -647,6 +651,19 @@ mod tests {
         assert!(pg(json!({"loss_agg": "constant-length", "loss_agg_length": 0})).is_err(), "the spec bounds the constant");
         let e = request(json!({"base": "a/b", "data": data, "loss_agg_length": 512}), &[]).unwrap_err();
         assert!(e.contains("loss_agg_length") && e.contains("sft"), "{e}");
+    }
+
+    /// DAPO's truncated-rollout handling on the wire: `mask` (the trainer's default) or `keep`, a policy-gradient setting.
+    #[test]
+    fn the_truncated_rollout_handling_is_named_on_the_wire() {
+        let data = json!({"train": {"digest": digest(1)}}).to_string();
+        for t in brain::TruncatedRollouts::ALL {
+            let named = request(json!({"base": "a/b", "data": data, "objective": "policy_gradient", "truncated": t.name()}), &[]).unwrap();
+            assert_eq!(crate::job::policy_gradient_config(&named.params).unwrap().truncated, t);
+        }
+        assert!(request(json!({"base": "a/b", "data": data, "objective": "policy_gradient", "truncated": "drop"}), &[]).is_err());
+        let e = request(json!({"base": "a/b", "data": data, "truncated": "keep"}), &[]).unwrap_err();
+        assert!(e.contains("truncated") && e.contains("sft"), "{e}");
     }
 
     /// A policy-gradient setting the trainer would refuse is refused when the job is submitted, naming it.

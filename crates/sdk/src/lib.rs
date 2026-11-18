@@ -191,7 +191,7 @@ pub use model::StepWork;
 /// The settings and statistics of [`ChatFineTune::policy_gradient`]: reinforcement learning from rollouts collected
 /// outside brain.
 #[cfg(feature = "study")]
-pub use rl::objective::external::{BehaviourSource, ImportanceCorrection, PolicyGradientConfig, PolicyGradientStats, PolicyGradientStep, ReferencePolicy};
+pub use rl::objective::external::{BehaviourSource, ImportanceCorrection, PolicyGradientConfig, PolicyGradientStats, PolicyGradientStep, ReferencePolicy, TruncatedRollouts};
 /// The KV-cache encodings a trainer can round-trip its attention through ([`PolicyGradientConfig::kv_roundtrip`]); the
 /// same names the serving `--kv-cache` flag takes, via [`KvTier::parse`].
 #[cfg(feature = "study")]

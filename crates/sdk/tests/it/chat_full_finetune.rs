@@ -229,7 +229,7 @@ fn a_dataset_check_stops_at_the_next_record() {
     use capability_mock::cancellation::{certify, Bound};
     let model = chat_model_dir("check-cancel");
     let train = write_dataset(&model, "train.jsonl", &TRAIN);
-    let check = DatasetCheck { kind: DatasetKind::Chat, thinking: false, pack_answers: false, max_block: 64, list_records: None };
+    let check = DatasetCheck { kind: DatasetKind::Chat, thinking: false, pack_answers: false, max_block: 64, list_records: None, truncated: Default::default() };
     let run = |inv: &Invocation, progress: &mut dyn FnMut(capability::Progress)| {
         inv.cancel.check()?;
         check_dataset(&*model, &train, &check, &mut inv.keep_going(progress, 0, "record")).map_err(|e| match e {

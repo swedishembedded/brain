@@ -558,15 +558,17 @@ lowers the probability of its action, a positive one raises it.
   text, an `assistant`/`tool` role, an `at` past the first answer and a record that holds images are refused naming
   the field. A record may carry a teacher context instead of a reward (the scalar part is then 0) or with one.
 - `"truncated"` (record, optional, needs a `"reward"` or a `"teacher_context"`): `true` when the rollout did not
-  reach an outcome (the token budget cut it, a step timed out), so its reward says nothing about its actions. A policy
-  gradient never draws, scores or trains on such a record (`stats.sequences_truncated` counts them) and its reward takes
-  no part in its group's advantages; a dataset of nothing else is refused. Tokens of an observation (a tool's output, a user turn) are never supervised: only a message with
+  reach an outcome (the token budget cut it, a step timed out), so its reward says nothing about its actions. Under
+  `PolicyGradientConfig::truncated` `TruncatedRollouts::Mask` (the default) a policy gradient never draws, scores or
+  trains on such a record (`stats.sequences_truncated` counts them) and its reward takes no part in its group's
+  advantages; a dataset of nothing else is refused. Under `TruncatedRollouts::Keep` it trains like any rollout, the
+  reward its collector gave it (a penalty, say) counted in its group. Tokens of an observation (a tool's output, a user turn) are never supervised: only a message with
   `"train": true` is action.
 - Images and tool turns: records carry them exactly as in supervised fine-tuning (an image in a context turn, never in
   a supervised one); they train through the same vision path.
 
 ```rust
-use brain::{AdvantageNorm, BehaviourSource, ChatFineTune, ImportanceCorrection, LossAgg, PolicyGradientConfig, ReferencePolicy};
+use brain::{AdvantageNorm, BehaviourSource, ChatFineTune, ImportanceCorrection, LossAgg, PolicyGradientConfig, ReferencePolicy, TruncatedRollouts};
 
 let outcome = ChatFineTune::from_pretrained("Qwen/Qwen3.8-27B-FP8")
     .arch("qwen35")
@@ -592,6 +594,7 @@ let outcome = ChatFineTune::from_pretrained("Qwen/Qwen3.8-27B-FP8")
         advantage_bound: Some(5.0),            // clip each token's teacher advantage to [-5, 5]; None for none
         sequence_advantage_cap: Some(50.0),    // cap a sequence's summed |A_t| by scaling it down; None for none
         advantage_norm: AdvantageNorm::MeanCentered, // or ZScore, LeaveOneOut: how a group's rewards become advantages
+        truncated: TruncatedRollouts::Mask,    // or Keep: a truncated rollout trains, its reward counted in its group
     })
     .run()?;
 for step in &outcome.policy_gradient.unwrap().stats.steps {

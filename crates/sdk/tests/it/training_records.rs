@@ -36,7 +36,7 @@ fn every_fixture_is_accepted_or_refused_by_the_rule_and_field_its_manifest_names
             "preference" => DatasetKind::Preference,
             other => panic!("{path}: unknown kind {other}"),
         };
-        let check = DatasetCheck { kind, thinking: true, pack_answers: false, max_block: 512, list_records: None };
+        let check = DatasetCheck { kind, thinking: true, pack_answers: false, max_block: 512, list_records: None, truncated: Default::default() };
         let report = check_dataset(&model, root.join(path), &check, &mut || true).unwrap_or_else(|e| panic!("{path}: {e}"));
         assert_eq!((report.records as u64, report.valid_records as u64), (file["records"].as_u64().unwrap(), file["valid_records"].as_u64().unwrap()), "{path}: {:?}", report.invalid);
         let refused: Vec<serde_json::Value> = report.invalid.iter().map(|r| serde_json::json!({"line": r.line, "rule": r.rule.map(|rule| rule.name()), "field": r.field})).collect();
@@ -53,7 +53,7 @@ fn every_fixture_is_accepted_or_refused_by_the_rule_and_field_its_manifest_names
 #[test]
 fn the_rollout_fixture_supervises_the_tokens_its_records_carry() {
     let root = fixtures();
-    let check = DatasetCheck { kind: DatasetKind::Chat, thinking: true, pack_answers: false, max_block: 512, list_records: None };
+    let check = DatasetCheck { kind: DatasetKind::Chat, thinking: true, pack_answers: false, max_block: 512, list_records: None, truncated: Default::default() };
     let report = check_dataset(root.join("model"), root.join("chat_rollout.jsonl"), &check, &mut || true).unwrap();
     // Seven records; the ones with two and three answers are two and three examples.
     assert_eq!((report.valid_records, report.examples), (7, 10));

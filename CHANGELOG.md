@@ -12,6 +12,7 @@ see CONTRIBUTING or AGENTS.md for the commit-message convention.
 
 ### Added
 
+- DAPO's truncated-rollout handling as a setting: `PolicyGradientConfig::truncated` (`brain/train` and `check_dataset` `truncated`, `brain finetune --truncated`) is `mask` (the default and the behaviour so far: a truncated rollout never trains and takes no part in its group) or `keep` (it trains, its reward counted in its group). `check_records` and `group_members` take the handling.
 - Dr. GRPO's aggregation for the policy gradient: `LossAgg::ConstantLength(n)` divides every sequence's token sum by one constant and averages over the sequences, so neither a sequence's length nor its step's token count rescales a token's gradient (`brain/train` `loss_agg: constant-length` with `loss_agg_length`, default `max_block`; `brain finetune --loss-agg constant-length [--loss-agg-length N]`). A policy-gradient setting the trainer would refuse is now refused when the job is submitted.
 
 ## [6.0.0] - 2026-11-16

@@ -91,6 +91,22 @@ fn a_dry_run_names_the_records_the_trainer_refuses_and_the_examples_longer_than_
     assert_eq!((&report["invalid"][0]["rule"], &report["invalid"][0]["field"]), (&json!("behavior_logprob_count"), &json!("messages[1].behavior_logprobs")), "{report}");
 }
 
+/// The dry run reads the rules between rollout records as a run with its `truncated` setting would: a group whose
+/// other rollout is truncated is a group of one when truncated rollouts are masked (the default) and a pair when they
+/// are kept.
+#[test]
+fn a_dry_run_counts_a_truncated_rollout_in_its_group_only_where_the_run_would_keep_it() {
+    let rig = rig_qwen3("dryrun-truncated", 16 << 30);
+    let mut cut = serde_json::from_str::<Value>(&record("cab", "bad", Some(0.0))).unwrap();
+    cut["truncated"] = json!(true);
+    let dataset = [record("cab", "abc", Some(1.0)), cut.to_string()].join("\n").into_bytes();
+    let masked = check(&rig, json!({"base": BASE}), dataset.clone()).expect("the report");
+    assert_eq!((masked["invalid_total"].as_u64(), &masked["invalid"][0]["rule"]), (Some(1), &json!("group_of_one")), "{masked}");
+    let kept = check(&rig, json!({"base": BASE, "truncated": "keep"}), dataset).expect("the report");
+    assert_eq!(kept["invalid_total"].as_u64(), Some(0), "{kept}");
+    assert_reservation_returned(&rig);
+}
+
 #[test]
 fn a_timeline_dataset_is_checked_line_by_line_without_a_base() {
     let rig = rig_qwen3("dryrun-timeline", 16 << 30);

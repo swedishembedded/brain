@@ -281,6 +281,45 @@ pub(crate) fn check_behavior_logprobs(values: &serde_json::Value) -> Result<Vec<
         .collect()
 }
 
+/// What a run does with a rollout marked `"truncated": true`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TruncatedRollouts {
+    /// Never drawn, scored or trained, and its reward takes no part in its group's advantages (DAPO's overlong
+    /// filtering): the sampler's budget, not the policy, decided where it ended.
+    #[default]
+    Mask,
+    /// Trained like any rollout, its reward (the collector's verdict on a cut-off rollout, a penalty for instance)
+    /// counted in its group.
+    Keep,
+}
+
+impl TruncatedRollouts {
+    /// Both, in the order the wire lists them.
+    pub const ALL: [TruncatedRollouts; 2] = [TruncatedRollouts::Mask, TruncatedRollouts::Keep];
+
+    /// The name on the wire (`truncated`).
+    pub fn name(self) -> &'static str {
+        match self {
+            TruncatedRollouts::Mask => "mask",
+            TruncatedRollouts::Keep => "keep",
+        }
+    }
+
+    /// The handling a wire name names.
+    ///
+    /// # Errors
+    /// The name is neither `mask` nor `keep`.
+    pub fn parse(name: &str) -> Result<TruncatedRollouts, String> {
+        TruncatedRollouts::ALL.into_iter().find(|t| t.name() == name).ok_or_else(|| format!("truncated {name:?} is neither \"mask\" nor \"keep\""))
+    }
+
+    /// Whether a rollout with this `truncated` flag takes part in its group and trains.
+    pub fn counts(self, truncated: bool) -> bool {
+        !truncated || self == TruncatedRollouts::Keep
+    }
+}
+
 /// One graded call of a rollout, as the group check reads it: its group, which rollout, the reward and whether the
 /// rollout was truncated.
 #[derive(Clone, Debug, PartialEq)]
@@ -304,10 +343,11 @@ pub enum GroupFault<G> {
 /// Per group, its rollouts that reached an outcome, each once as `(rollout, reward)` in the order first seen.
 pub type GroupRewards<G, M> = BTreeMap<G, Vec<(M, f64)>>;
 
-/// The rollouts of each group that reached an outcome ([`GroupRewards`]) and what breaks the group rules: the one place
-/// the contract's groups are read, for a record file and for a prepared split alike. A group whose rollouts were all
-/// truncated trains on nothing and is not in the map.
-pub fn group_members<G: Ord + Clone, M: Ord + Clone>(entries: &[GroupEntry<G, M>]) -> (GroupRewards<G, M>, Vec<GroupFault<G>>) {
+/// The rollouts of each group that take part in it ([`GroupRewards`]: those that reached an outcome, and under
+/// [`TruncatedRollouts::Keep`] the truncated ones too) and what breaks the group rules: the one place the contract's
+/// groups are read, for a record file and for a prepared split alike. A group none of whose rollouts takes part trains
+/// on nothing and is not in the map.
+pub fn group_members<G: Ord + Clone, M: Ord + Clone>(entries: &[GroupEntry<G, M>], truncated: TruncatedRollouts) -> (GroupRewards<G, M>, Vec<GroupFault<G>>) {
     let mut seen: BTreeMap<(G, M), (f64, bool)> = BTreeMap::new();
     let mut groups: GroupRewards<G, M> = BTreeMap::new();
     let mut faults = Vec::new();
@@ -329,7 +369,7 @@ pub fn group_members<G: Ord + Clone, M: Ord + Clone>(entries: &[GroupEntry<G, M>
             }
             None => {
                 seen.insert((entry.group.clone(), entry.member.clone()), (entry.reward, entry.truncated));
-                if !entry.truncated {
+                if truncated.counts(entry.truncated) {
                     groups.entry(entry.group.clone()).or_default().push((entry.member.clone(), entry.reward));
                 }
             }
@@ -340,14 +380,14 @@ pub fn group_members<G: Ord + Clone, M: Ord + Clone>(entries: &[GroupEntry<G, M>
 }
 
 /// The rules of the contract that hold between records: the records of one rollout agree on its outcome, a group
-/// holds at least two rollouts that reached an outcome, and the records that name a tokenizer name one. `records` are
-/// the rollouts of the records read together (one file, or every set one run trains on), `None` for a record that is
-/// not a rollout. The refusals, at most one per record, by index into `records`.
-pub fn check_records(records: &[Option<&Rollout>]) -> Vec<(usize, RecordError)> {
+/// holds at least two rollouts that take part in it (under `truncated`), and the records that name a tokenizer name
+/// one. `records` are the rollouts of the records read together (one file, or every set one run trains on), `None` for
+/// a record that is not a rollout. The refusals, at most one per record, by index into `records`.
+pub fn check_records(records: &[Option<&Rollout>], truncated: TruncatedRollouts) -> Vec<(usize, RecordError)> {
     let mut refusals: BTreeMap<usize, RecordError> = BTreeMap::new();
     let graded: Vec<(usize, &Rollout, &Outcome)> = records.iter().enumerate().filter_map(|(at, r)| r.and_then(|r| r.outcome.as_ref().map(|o| (at, r, o)))).collect();
     let entries: Vec<GroupEntry<&str, &Member>> = graded.iter().map(|(_, r, o)| GroupEntry { group: o.group.as_str(), member: &o.member, reward: o.reward, truncated: r.truncated }).collect();
-    let (_, faults) = group_members(&entries);
+    let (_, faults) = group_members(&entries, truncated);
     for fault in faults {
         match fault {
             GroupFault::Mismatch { entry, field } => {
@@ -362,8 +402,8 @@ pub fn check_records(records: &[Option<&Rollout>]) -> Vec<(usize, RecordError)> 
             }
             GroupFault::OfOne { group } => {
                 for (at, rollout, outcome) in &graded {
-                    if outcome.group == group && !rollout.truncated {
-                        let message = format!("group: group {group:?} holds one rollout that reached an outcome; a group-relative advantage compares a rollout's reward with the others of its group, so a group needs at least two (sample more rollouts of the prompt, or leave the group out)");
+                    if outcome.group == group && truncated.counts(rollout.truncated) {
+                        let message = format!("group: group {group:?} holds one rollout that takes part in it; a group-relative advantage compares a rollout's reward with the others of its group, so a group needs at least two (sample more rollouts of the prompt, or leave the group out)");
                         refusals.entry(*at).or_insert_with(|| RecordError::of(RecordFault::new(RecordRule::GroupOfOne, "group"), message));
                     }
                 }

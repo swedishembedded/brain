@@ -42,7 +42,8 @@
 //!   step's token count rescales a token's gradient.
 //! * **Advantages** are computed when the run opens, per group, from the rewards of the group's rollouts that reached
 //!   an outcome, each rollout counted once however many records (calls) it made. A group of one has nothing to compare
-//!   with and is refused; a truncated rollout takes no part.
+//!   with and is refused; a truncated rollout takes no part, unless the run keeps truncated rollouts
+//!   ([`PolicyGradientConfig::truncated`]), when it trains with the reward its collector gave it.
 //! * **Records without a reward** are imitation examples: plain cross-entropy (weight 1, no KL), so a dataset may
 //!   mix rollouts with supervised records.
 //!
@@ -68,6 +69,7 @@ use std::time::Instant;
 
 use data::binio;
 use data::chat_rollout::TeacherStream;
+pub use data::chat_rollout::TruncatedRollouts;
 use data::loader::{BatchConfig, TokenDataset};
 use data::rng::Rng;
 use model::training::{self, Capability, Unsupported};
@@ -239,17 +241,17 @@ impl std::str::FromStr for BehaviourSource {
 /// The scalar advantage of every example of a split, by `norm` over the rewards of its group: NaN for an imitation
 /// example, 0 for a rollout without a reward of its own (a teacher context alone). Each rollout of a group counts
 /// once (an example is one call, or one answer, of its rollout); a truncated rollout takes no part and trains on
-/// nothing. A group that holds one rollout that reached an outcome is refused, by the contract's rule
-/// (`group_of_one`), as are two examples of one rollout that disagree (`rollout_mismatch`).
-fn advantages(split: &data::chat_rollout::SplitRollouts, norm: AdvantageNorm) -> Result<Vec<f32>, String> {
+/// nothing unless the run keeps it (`truncated`). A group that holds one rollout that takes part is refused, by the
+/// contract's rule (`group_of_one`), as are two examples of one rollout that disagree (`rollout_mismatch`).
+fn advantages(split: &data::chat_rollout::SplitRollouts, norm: AdvantageNorm, truncated: TruncatedRollouts) -> Result<Vec<f32>, String> {
     use data::chat_rollout::{group_members, GroupEntry, GroupFault, RecordRule};
     let graded: Vec<(usize, data::chat_rollout::Graded)> = split.examples.iter().enumerate().filter_map(|(e, r)| r.and_then(|r| r.graded).map(|g| (e, g))).collect();
     let entries: Vec<GroupEntry<u32, u32>> = graded.iter().map(|&(e, g)| GroupEntry { group: g.group, member: g.member, reward: g.reward, truncated: split.truncated[e] }).collect();
-    let (groups, faults) = group_members(&entries);
+    let (groups, faults) = group_members(&entries, truncated);
     if let Some(fault) = faults.first() {
         return Err(match fault {
             GroupFault::Mismatch { entry, field } => format!("{} (field {field}): example {} differs from an earlier example of its rollout", RecordRule::RolloutMismatch.name(), graded[*entry].0),
-            GroupFault::OfOne { group } => format!("{} (field group): group {:?} holds one rollout that reached an outcome; a group-relative advantage needs at least two", RecordRule::GroupOfOne.name(), split.groups[*group as usize]),
+            GroupFault::OfOne { group } => format!("{} (field group): group {:?} holds one rollout that takes part in it (truncated {}); a group-relative advantage needs at least two", RecordRule::GroupOfOne.name(), split.groups[*group as usize], truncated.name()),
         });
     }
     let mut by_member: HashMap<u32, f64> = HashMap::new();
@@ -333,11 +335,14 @@ pub struct PolicyGradientConfig {
     pub sequence_advantage_cap: Option<f32>,
     /// How each group's rewards become the advantages of its rollouts.
     pub advantage_norm: AdvantageNorm,
+    /// What a rollout marked `"truncated": true` does: [`TruncatedRollouts::Mask`] (the default) never trains and takes
+    /// no part in its group (DAPO's overlong filtering); [`TruncatedRollouts::Keep`] trains with its reward counted.
+    pub truncated: TruncatedRollouts,
 }
 
 impl Default for PolicyGradientConfig {
     fn default() -> PolicyGradientConfig {
-        PolicyGradientConfig { clip_eps: 0.2, clip_eps_high: None, importance: ImportanceCorrection::None, max_step_kl: None, max_step_grad_norm: None, numerics: None, kv_roundtrip: None, kl_beta: 0.02, reference: ReferencePolicy::Base, behaviour: BehaviourSource::Recorded, loss_agg: LossAgg::SeqMean, temperature: 1.0, log_kl: true, teacher: ReferencePolicy::Base, advantage_bound: None, sequence_advantage_cap: None, advantage_norm: AdvantageNorm::MeanCentered }
+        PolicyGradientConfig { clip_eps: 0.2, clip_eps_high: None, importance: ImportanceCorrection::None, max_step_kl: None, max_step_grad_norm: None, numerics: None, kv_roundtrip: None, kl_beta: 0.02, reference: ReferencePolicy::Base, behaviour: BehaviourSource::Recorded, loss_agg: LossAgg::SeqMean, temperature: 1.0, log_kl: true, teacher: ReferencePolicy::Base, advantage_bound: None, sequence_advantage_cap: None, advantage_norm: AdvantageNorm::MeanCentered, truncated: TruncatedRollouts::Mask }
     }
 }
 
@@ -478,7 +483,8 @@ pub struct PolicyGradientStats {
     pub steps_skipped_guard: usize,
     /// The numerics gate's measurements and verdict, for a run that was one ([`PolicyGradientConfig::numerics`]).
     pub numerics: Option<NumericsReport>,
-    /// Truncated rollouts of the dataset: never drawn, scored or trained on (`"truncated": true` on the record).
+    /// Truncated rollouts of the dataset (`"truncated": true` on the record): never drawn, scored or trained on when
+    /// the run masks them, trained like the others when it keeps them ([`PolicyGradientConfig::truncated`]).
     pub sequences_truncated: usize,
     /// Sequences of the dataset with an advantage, and without (imitation).
     pub sequences_with_advantage: usize,
@@ -687,9 +693,9 @@ impl ExternalPolicyGradient {
                 None => format!("{}: the training split carries no rollouts, so a policy gradient would train every record as imitation; use the supervised objective, or prepare the dataset from records with a \"reward\" and \"group\"", dir.display()),
             }));
         };
-        let advantage = advantages(&recorded, cfg.advantage_norm).map_err(|why| invalid(format!("{}: {why}", dir.display())))?;
+        let advantage = advantages(&recorded, cfg.advantage_norm, cfg.truncated).map_err(|why| invalid(format!("{}: {why}", dir.display())))?;
         let (behavior, truncated) = (recorded.behavior, recorded.truncated);
-        let eligible: Vec<usize> = (0..starts.len()).filter(|&e| !truncated[e]).collect();
+        let eligible: Vec<usize> = (0..starts.len()).filter(|&e| cfg.truncated.counts(truncated[e])).collect();
         if let Some(t) = behavior.iter().position(|b| b.is_infinite() || *b > 1e-3) {
             return Err(invalid(format!("{}: token {t} has behaviour log-probability {}, which is not a log-probability", dir.display(), behavior[t])));
         }
@@ -699,7 +705,7 @@ impl ExternalPolicyGradient {
         }
         let mut stats = PolicyGradientStats { sequences_truncated: truncated.iter().filter(|t| **t).count(), sequences_with_teacher: teacher.as_ref().map_or(0, |t| (0..starts.len()).filter(|&e| t.example(e).is_some()).count()), ..Default::default() };
         for (e, &a) in advantage.iter().enumerate() {
-            if truncated[e] {
+            if !cfg.truncated.counts(truncated[e]) {
                 continue;
             }
             if a.is_nan() {
@@ -719,7 +725,7 @@ impl ExternalPolicyGradient {
             }
         }
         if eligible.is_empty() {
-            return Err(invalid(format!("{}: all {} records are truncated rollouts, which a policy gradient never trains on", dir.display(), starts.len())));
+            return Err(invalid(format!("{}: all {} records are truncated rollouts, which a policy gradient that masks them (truncated \"mask\") never trains on", dir.display(), starts.len())));
         }
         if stats.sequences_with_advantage == 0 {
             return Err(invalid(format!("{}: no training record carries a reward or a teacher context, so a policy gradient would train every record as imitation; use the supervised objective", dir.display())));
