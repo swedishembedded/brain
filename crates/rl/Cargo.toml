@@ -118,6 +118,11 @@ path = "tests/dpo_gradcheck.rs"
 required-features = ["qwen3"]
 
 [[test]]
+name = "dr_grpo_gradcheck"
+path = "tests/dr_grpo_gradcheck.rs"
+required-features = ["qwen3"]
+
+[[test]]
 name = "dpo_objective"
 path = "tests/dpo_objective.rs"
 required-features = ["qwen3"]

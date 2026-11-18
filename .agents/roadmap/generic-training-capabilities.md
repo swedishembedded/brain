@@ -25,6 +25,18 @@ chat template (stops at `<|im_end|>`, 256-token context) that a LoRA run trains 
 An orchestrator's learning-method smokes build on it. Not supported on it: `merge_adapter` (it needs a
 Hugging Face directory), so on-policy methods continue an adapter instead of folding it.
 
+## Training regimes (plan `training-regimes`, lane 1)
+
+The acceptance levels are the plan's (D5): L1 an fp64 hand oracle, each token's weight minus the derivative of its loss
+in its log-probability past the clip too; L2 `gradcheck::directional_check` on a toy `qwen3` (`rl/tests/<name>_gradcheck.rs`);
+L3 one step lowers the regime's own loss on every conformance family (`rl::conformance`), or the family refuses it
+typed; L4 the `brain/train` params validated, another objective's refused by name, the dry run. L5-L7 (the caller's
+view, a served toy that learns, real weights) are other lanes' and are not claimed here.
+
+| Regime | Level | Evidence |
+|---|---|---|
+| Dr. GRPO (`LossAgg::ConstantLength`, mean-centred) | L4 | L1 `rl` `pg_batch::every_tokens_weight_is_minus_the_derivative_of_its_loss_inside_and_past_the_clip`, `grpo::each_aggregation_divides_a_step_as_its_definition_says`; L2 `rl/tests/dr_grpo_gradcheck.rs`; L3 `rl::conformance::policy_gradient_regimes`; L4 `trainjob` `the_constant_length_aggregation_takes_its_constant_or_the_runs_max_block` |
+
 ## Not yet done
 
 - [ ] Conformance tiers: register the tiers still missing as they land (an

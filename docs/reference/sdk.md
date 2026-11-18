@@ -585,7 +585,7 @@ let outcome = ChatFineTune::from_pretrained("Qwen/Qwen3.8-27B-FP8")
         kl_beta: 0.02,                         // k3 KL to the reference; 0 for none
         reference: ReferencePolicy::Base,      // the base, or StartOfRun: the adapter this run began from
         behaviour: BehaviourSource::Recorded,  // the sampler's recorded log-probs (exact), or StartOfRunProxy
-        loss_agg: LossAgg::SeqMean,            // per-sequence token mean (GRPO), or TokenSum
+        loss_agg: LossAgg::SeqMean,            // per-sequence token mean (GRPO), TokenSum, or ConstantLength(n) (Dr. GRPO)
         temperature: 1.0,                      // the temperature the collector sampled with
         log_kl: true,                          // report the KL even when kl_beta is 0
         teacher: ReferencePolicy::Base,        // self-distillation: Base, or StartOfRun, scores the privileged view

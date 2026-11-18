@@ -10,6 +10,10 @@ see CONTRIBUTING or AGENTS.md for the commit-message convention.
 
 - Training-record contract version 2: a policy-gradient rollout record carries the rollout's `reward` and its `group` (optionally `rollout` and `tokenizer_digest`) instead of a precomputed `advantage`, which is refused naming the field. The run computes each rollout's advantage from its group's rewards by `advantage_norm` (`mean-centred` default, `z-score`, `leave-one-out`; `PolicyGradientConfig::advantage_norm`, the `brain/train` param, `brain finetune --advantage-norm`). A group of one, two records of one rollout that disagree and two tokenizer digests in one run are refused by rule (`group_of_one`, `rollout_mismatch`, `mixed_tokenizer_digest`). A prepared dataset keeps `<split>.rollouts.json` in place of `<split>.adv.bin`. The contract's fixtures are `crates/data/tests/fixtures/training-records/v2`.
 
+### Added
+
+- Dr. GRPO's aggregation for the policy gradient: `LossAgg::ConstantLength(n)` divides every sequence's token sum by one constant and averages over the sequences, so neither a sequence's length nor its step's token count rescales a token's gradient (`brain/train` `loss_agg: constant-length` with `loss_agg_length`, default `max_block`; `brain finetune --loss-agg constant-length [--loss-agg-length N]`). A policy-gradient setting the trainer would refuse is now refused when the job is submitted.
+
 ## [6.0.0] - 2026-11-16
 
 ### Breaking Changes

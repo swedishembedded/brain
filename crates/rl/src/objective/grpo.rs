@@ -64,25 +64,67 @@ pub enum LossAgg {
     /// whatever the length of the row they sit in.
     #[default]
     TokenSum,
+    /// Every row's terms are summed and divided by the same constant, `n`
+    /// tokens (Dr. GRPO: the generation budget), then averaged over the step's
+    /// rows. No count of the step's own tokens enters, so neither a row's
+    /// length nor the other rows of its step rescale a token's gradient.
+    ConstantLength(u32),
 }
 
 impl LossAgg {
-    /// The name a served training request and the CLI use: `seq-mean` or `token-sum`.
+    /// The aggregation's name on the wire and the CLI: `seq-mean`, `token-sum` or `constant-length` (whose constant
+    /// is its own setting; [`std::fmt::Display`] writes it as `constant-length:N`).
     pub fn name(self) -> &'static str {
         match self {
             LossAgg::SeqMean => "seq-mean",
             LossAgg::TokenSum => "token-sum",
+            LossAgg::ConstantLength(_) => "constant-length",
+        }
+    }
+
+    /// The divisor of one micro-batch of `rows` rows holding `supervised` tokens of a step of `micro_batches`
+    /// micro-batches that hold `step_supervised` tokens in all; the loop then divides the step's accumulated gradient
+    /// by `micro_batches`. `None`: each row by its own count (`SeqMean`, a batch of one row).
+    pub fn denominator(self, rows: usize, step_supervised: usize, micro_batches: usize) -> Option<f32> {
+        match self {
+            LossAgg::SeqMean => None,
+            LossAgg::TokenSum if step_supervised > 0 => Some(step_supervised as f32 / micro_batches.max(1) as f32),
+            LossAgg::TokenSum => None,
+            LossAgg::ConstantLength(n) => Some(rows.max(1) as f32 * n as f32),
+        }
+    }
+
+    /// Refuse an aggregation that has no meaning: a constant length of zero.
+    pub fn validate(self) -> Result<(), String> {
+        match self {
+            LossAgg::ConstantLength(0) => Err("loss_agg constant-length needs a length of at least one token".to_string()),
+            _ => Ok(()),
+        }
+    }
+}
+
+impl std::fmt::Display for LossAgg {
+    /// The form [`std::str::FromStr`] reads.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LossAgg::ConstantLength(n) => write!(f, "constant-length:{n}"),
+            other => f.write_str(other.name()),
         }
     }
 }
 
 impl std::str::FromStr for LossAgg {
     type Err = String;
+    /// `seq-mean`, `token-sum` or `constant-length:N` (a positive token count).
     fn from_str(s: &str) -> Result<LossAgg, String> {
-        match s {
-            "seq-mean" => Ok(LossAgg::SeqMean),
-            "token-sum" => Ok(LossAgg::TokenSum),
-            other => Err(format!("{other:?} is not a loss aggregation (seq-mean or token-sum)")),
+        match s.split_once(':') {
+            None if s == "seq-mean" => Ok(LossAgg::SeqMean),
+            None if s == "token-sum" => Ok(LossAgg::TokenSum),
+            Some(("constant-length", n)) => match n.parse::<u32>() {
+                Ok(n) if n > 0 => Ok(LossAgg::ConstantLength(n)),
+                _ => Err(format!("constant-length:{n}: the length is a positive whole number of tokens")),
+            },
+            _ => Err(format!("{s:?} is not a loss aggregation (seq-mean, token-sum or constant-length:N)")),
         }
     }
 }
@@ -192,6 +234,9 @@ impl GrpoConfig {
         let sample = self.rollout.sample;
         if self.group_size < 1 {
             return Err(BehaviourRefusal::InvalidCount { field: "group_size", got: self.group_size, least: 1 });
+        }
+        if self.options.loss_agg == LossAgg::ConstantLength(0) {
+            return Err(BehaviourRefusal::InvalidCount { field: "loss_agg constant-length", got: 0, least: 1 });
         }
         for (field, value, allows_zero) in [("kl_beta", self.kl_beta, true), ("clip_eps", self.clip_eps, false), ("clip_eps_high", self.options.clip_eps_high, false), ("temp", sample.temp, true)] {
             if !(value.is_finite() && (value > 0.0 || (allows_zero && value == 0.0))) {
@@ -676,11 +721,9 @@ impl<E: Environment, V: Verifier> Grpo<E, V> {
             return 0.0;
         }
         let total_tokens: usize = rows.iter().map(|r| r.supervised).sum();
-        // Each micro-step's gradient is divided by this, then by the loop's k: the sum is a mean over all the step's tokens.
-        let denominator = match self.cfg.options.loss_agg {
-            LossAgg::TokenSum => Some(total_tokens as f32 / k as f32),
-            LossAgg::SeqMean => None,
-        };
+        // Each micro-step (one row) is divided by this, then by the loop's k: under TokenSum a mean over all the
+        // step's tokens, under ConstantLength a mean over the rows of each row's sum over the constant.
+        let denominator = self.cfg.options.loss_agg.denominator(1, total_tokens, k);
         let mut loss = 0.0;
         let mut finite = true;
         for row in &rows {
@@ -721,7 +764,7 @@ impl<E: Environment, V: Verifier> Grpo<E, V> {
         let ratio_dev = if row.version == self.version { terms.max_ratio_dev } else { 0.0 };
         self.stats.record_row(ratio_dev, row.has_ref.then_some((terms.kl_sum, row.supervised)));
         self.stats.record_clipping(&terms);
-        (terms.loss / denominator.unwrap_or(row.supervised as f32), terms.finite)
+        (terms.normalised_loss(denominator), terms.finite)
     }
 }
 
@@ -856,6 +899,22 @@ impl<M: Model, E: Environment, V: Verifier> Objective<M> for Grpo<E, V> {
 
 #[cfg(test)]
 mod tests {
+    /// L1 of the aggregations: a step of `k` micro-batches of `rows` rows is divided by the denominator, then by `k`.
+    /// Constant length makes it the mean over the step's sequences of each sequence's sum over `n` whatever the
+    /// sequences' lengths; token-sum the mean over the step's tokens; sequence-mean leaves each row its own count.
+    #[test]
+    fn each_aggregation_divides_a_step_as_its_definition_says() {
+        // Two micro-batches of two rows; the four sequences hold 3, 7, 1 and 9 supervised tokens.
+        let (k, rows, lengths) = (2usize, 2usize, [3usize, 7, 1, 9]);
+        let total: usize = lengths.iter().sum();
+        let per_token = |agg: LossAgg| f64::from(agg.denominator(rows, total, k).unwrap()) * k as f64;
+        assert_eq!(per_token(LossAgg::ConstantLength(16)), (k * rows * 16) as f64, "each sequence's sum over 16, averaged over the 4 sequences");
+        assert_eq!(per_token(LossAgg::TokenSum), total as f64, "the mean over the step's 20 tokens");
+        assert_eq!(LossAgg::SeqMean.denominator(1, total, k), None, "each row by its own count");
+        assert_eq!(LossAgg::TokenSum.denominator(1, 0, k), None, "a step with no token keeps the batch's own count");
+        assert!(LossAgg::ConstantLength(0).validate().is_err() && LossAgg::ConstantLength(1).validate().is_ok());
+    }
+
     use super::*;
 
     #[test]

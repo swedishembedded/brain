@@ -86,6 +86,14 @@ pub struct BatchTerms {
     pub finite: bool,
 }
 
+impl BatchTerms {
+    /// The batch's loss divided as its gradient is: by `denominator` when one was set, by the batch's own supervised
+    /// count otherwise (at least one).
+    pub fn normalised_loss(&self, denominator: Option<f32>) -> f32 {
+        self.loss / denominator.unwrap_or(self.supervised.max(1) as f32)
+    }
+}
+
 impl Default for BatchTerms {
     fn default() -> BatchTerms {
         BatchTerms {
@@ -168,6 +176,18 @@ pub fn backward_weighted<M: Model>(model: &M, batch: &PgBatch<'_>, spec: &PgSpec
 /// [`backward_weighted`], also returning the forward's per-position log-probabilities it differentiated (the numerics
 /// gate reads them against the behaviour log-probabilities without a second readback).
 pub fn backward_weighted_lp<M: Model>(model: &M, batch: &PgBatch<'_>, spec: &PgSpec, denominator: Option<f32>) -> (BatchTerms, Vec<f32>) {
+    let (terms, new_lp) = install_weights(model, batch, spec, denominator);
+    if terms.finite {
+        model.backward();
+    }
+    (terms, new_lp)
+}
+
+/// Everything [`backward_weighted_lp`] does before its backward: the denominator set, the forward's log-probabilities
+/// read, the weights computed and (when finite) installed. A finite-difference gate calls it as its loss, so the
+/// objective it checks is the one a run differentiates; [`BatchTerms::normalised_loss`] is the scalar the installed
+/// weights are the gradient of.
+pub fn install_weights<M: Model>(model: &M, batch: &PgBatch<'_>, spec: &PgSpec, denominator: Option<f32>) -> (BatchTerms, Vec<f32>) {
     let objectives = training::objectives(model);
     if let Some(d) = denominator {
         objectives.set_loss_denominator(d);
@@ -176,7 +196,6 @@ pub fn backward_weighted_lp<M: Model>(model: &M, batch: &PgBatch<'_>, spec: &PgS
     let (weights, terms) = weigh(&new_lp, batch, spec);
     if terms.finite {
         objectives.set_loss_weights(&weights);
-        model.backward();
     }
     (terms, new_lp)
 }
@@ -305,6 +324,59 @@ mod tests {
         // On-policy (nothing moved) the weight is one and the estimate is the plain k3, zero against itself.
         let (_, t) = weigh(&old_lp, &b, &SPEC);
         assert_eq!(t.kl_sum, 0.0);
+    }
+
+    /// One token's loss written from the definition in f64, independently of `token_term`: the negated clipped
+    /// surrogate scaled by the importance weight, plus `kl_beta` times k3 against the reference.
+    fn oracle(new: f64, old: f64, advantage: f64, band: ClipBand, ref_lp: Option<f64>, kl_beta: f64, is_weight: f64) -> f64 {
+        let r = (new - old).exp();
+        let mut loss = 0.0;
+        if advantage != 0.0 {
+            loss -= is_weight * (r * advantage).min(r.clamp(1.0 - f64::from(band.low), 1.0 + f64::from(band.high)) * advantage);
+        }
+        if let Some(reference) = ref_lp {
+            let u = reference - new;
+            loss += kl_beta * (u.exp() - u - 1.0);
+        }
+        loss
+    }
+
+    /// L1 of every policy-gradient regime: each token's weight is minus the derivative of its loss in its own
+    /// log-probability (the cross-entropy's sign), checked against central differences of the f64 oracle, inside the
+    /// clip band, past either edge on the side the advantage pushes toward (where it is exactly zero) and on the
+    /// other side (where it is not), with and without the KL term and an importance weight, for an asymmetric band;
+    /// and the batch's normalised loss divides by what the regime's aggregation says.
+    #[test]
+    fn every_tokens_weight_is_minus_the_derivative_of_its_loss_inside_and_past_the_clip() {
+        let band = ClipBand { low: 0.2, high: 0.28 };
+        // (log ratio, advantage, importance weight): inside, past the upper edge with A > 0 (clipped) and A < 0
+        // (not), under the lower edge with A < 0 (clipped) and A > 0 (not), and a zero advantage (KL only).
+        let tokens = [(0.05f64, 1.3f64, 1.0f64), (0.5, 0.7, 1.0), (0.5, -0.7, 0.6), (-0.6, -1.1, 1.0), (-0.6, 0.9, 1.0), (0.1, 0.0, 1.0), (-0.1, -0.4, 0.0)];
+        for kl_beta in [0.0f32, 0.3] {
+            let spec = PgSpec { band, kl_beta };
+            let new_lp: Vec<f32> = (0..tokens.len()).map(|i| -0.9 - 0.2 * i as f32).collect();
+            let old_lp: Vec<f32> = tokens.iter().zip(&new_lp).map(|(&(lr, _, _), &n)| (f64::from(n) - lr) as f32).collect();
+            let ref_lp: Vec<f32> = new_lp.iter().map(|n| n - 0.3).collect();
+            let advantage: Vec<f32> = tokens.iter().map(|&(_, a, _)| a as f32).collect();
+            let is_weight: Vec<f32> = tokens.iter().map(|&(_, _, w)| w as f32).collect();
+            let targets = vec![1u32; tokens.len()];
+            let b = PgBatch { targets: &targets, old_lp: &old_lp, ref_lp: Some(&ref_lp), advantage: &advantage, is_weight: Some(&is_weight) };
+            let (weights, terms) = weigh(&new_lp, &b, &spec);
+            let mut total = 0.0f64;
+            for i in 0..tokens.len() {
+                let at = |x: f64| oracle(x, f64::from(old_lp[i]), f64::from(advantage[i]), band, Some(f64::from(ref_lp[i])), f64::from(kl_beta), f64::from(is_weight[i]));
+                let h = 1e-6;
+                let derivative = (at(f64::from(new_lp[i]) + h) - at(f64::from(new_lp[i]) - h)) / (2.0 * h);
+                assert!((f64::from(weights[i]) + derivative).abs() <= 1e-5 * derivative.abs().max(1.0), "kl {kl_beta} token {i}: weight {} vs -dL/dlogp {}", weights[i], -derivative);
+                total += at(f64::from(new_lp[i]));
+            }
+            if kl_beta == 0.0 {
+                assert_eq!((weights[1], weights[3]), (0.0, 0.0), "past the edge an advantage pushes toward, a token carries no gradient");
+            }
+            assert!((f64::from(terms.loss) - total).abs() < 1e-5 * total.abs().max(1.0), "{} vs {total}", terms.loss);
+            assert_eq!(terms.normalised_loss(Some(24.0)), terms.loss / 24.0);
+            assert_eq!(terms.normalised_loss(None), terms.loss / tokens.len() as f32);
+        }
     }
 
     #[test]

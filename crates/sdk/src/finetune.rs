@@ -1567,7 +1567,7 @@ impl PolicyGradientOutcome {
             "kl_beta": c.kl_beta,
             "reference": c.reference.name(),
             "behaviour": s.behaviour.name(),
-            "loss_agg": format!("{:?}", c.loss_agg),
+            "loss_agg": c.loss_agg.to_string(),
             "temperature": c.temperature,
             "teacher": c.teacher.name(),
             "advantage_bound": c.advantage_bound,

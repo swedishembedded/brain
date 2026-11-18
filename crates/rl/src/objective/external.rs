@@ -37,7 +37,9 @@
 //!   reported even when `kl_beta` is zero ([`PolicyGradientConfig::log_kl`]).
 //! * **Normalisation** ([`LossAgg`]): `SeqMean` divides each sequence's token terms by its own supervised-token
 //!   count (GRPO as published: needs a batch of one sequence); `TokenSum` divides every token of an optimiser step by
-//!   the step's mean count per micro-step, so all tokens weigh the same.
+//!   the step's mean count per micro-step, so all tokens weigh the same; `ConstantLength(n)` divides each sequence's
+//!   sum by the constant `n` and averages over the sequences (Dr. GRPO), so neither a sequence's own length nor its
+//!   step's token count rescales a token's gradient.
 //! * **Advantages** are computed when the run opens, per group, from the rewards of the group's rollouts that reached
 //!   an outcome, each rollout counted once however many records (calls) it made. A group of one has nothing to compare
 //!   with and is refused; a truncated rollout takes no part.
@@ -391,6 +393,7 @@ impl PolicyGradientConfig {
         if self.max_step_kl.is_some() && !self.wants_reference() {
             return Err("max_step_kl bounds the KL to the reference, which is measured only with log_kl or a positive kl_beta".to_string());
         }
+        self.loss_agg.validate()?;
         if !(self.temperature.is_finite() && self.temperature > 0.0) {
             return Err(format!("temperature is {}; it must be finite and positive", self.temperature));
         }
@@ -407,7 +410,8 @@ impl PolicyGradientConfig {
     }
 }
 
-/// What one optimiser step measured. Losses are means per supervised token.
+/// What one optimiser step measured. Losses are divided as the gradient is ([`LossAgg`]): means per supervised token,
+/// or under [`LossAgg::ConstantLength`] each sequence's sum over the constant, averaged over the sequences.
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PolicyGradientStep {
@@ -1183,10 +1187,7 @@ impl<M: Model> Objective<M> for ExternalPolicyGradient {
         self.ensure_scored(model, &drawn.concat()).expect("Objective::prepare checked the scoring policies");
         let laid: Vec<Laid> = drawn.iter().map(|picks| self.lay_out(picks)).collect();
         let supervised: usize = laid.iter().map(|l| l.targets.iter().filter(|&&t| t != IGNORE).count()).sum();
-        let denominator = match self.cfg.loss_agg {
-            LossAgg::TokenSum if supervised > 0 => Some(supervised as f32 / laid.len() as f32),
-            _ => None,
-        };
+        let denominator = self.cfg.loss_agg.denominator(self.batch_cfg.batch_size, supervised, laid.len());
         let spec = self.spec();
         let mut loss = 0.0;
         let mut finite = true;
@@ -1199,7 +1200,7 @@ impl<M: Model> Objective<M> for ExternalPolicyGradient {
                 self.measure_numerics(l, &new_lp, spec.band);
             }
             finite &= terms.finite;
-            loss += terms.loss / denominator.unwrap_or(terms.supervised.max(1) as f32);
+            loss += terms.normalised_loss(denominator);
             for e in l.picks.iter().flatten() {
                 self.accumulating.sequences += 1;
                 if !self.rows.advantage[*e].is_nan() {
@@ -1243,7 +1244,7 @@ impl<M: Model> Objective<M> for ExternalPolicyGradient {
         let _ = model.forward();
         let batch = PgBatch { targets: &laid.targets, old_lp: &laid.old_lp, ref_lp: laid.has_ref.then_some(&laid.ref_lp[..]), advantage: &laid.advantage, is_weight: laid.is_weight.as_deref() };
         let (_, terms) = weigh(&training::objectives(model).batch_token_logprobs(), &batch, &self.spec());
-        terms.loss / terms.supervised.max(1) as f32
+        terms.normalised_loss(self.cfg.loss_agg.denominator(self.batch_cfg.batch_size, terms.supervised, 1))
     }
 
     fn step_log(&self) -> Option<String> {
@@ -1279,8 +1280,11 @@ mod tests {
         for importance in [ImportanceCorrection::None, ImportanceCorrection::Truncate { cap: 2.0 }, ImportanceCorrection::Mask { cap: 1.5 }] {
             assert_eq!(importance.to_string().parse::<ImportanceCorrection>(), Ok(importance));
         }
-        for agg in [LossAgg::SeqMean, LossAgg::TokenSum] {
-            assert_eq!(agg.name().parse::<LossAgg>(), Ok(agg));
+        for agg in [LossAgg::SeqMean, LossAgg::TokenSum, LossAgg::ConstantLength(4096)] {
+            assert_eq!(agg.to_string().parse::<LossAgg>(), Ok(agg));
+        }
+        for bad in ["constant-length", "constant-length:0", "constant-length:-3", "mean"] {
+            assert!(bad.parse::<LossAgg>().is_err(), "{bad}");
         }
         for reference in [ReferencePolicy::Base, ReferencePolicy::StartOfRun] {
             assert_eq!(reference.name().parse::<ReferencePolicy>(), Ok(reference));

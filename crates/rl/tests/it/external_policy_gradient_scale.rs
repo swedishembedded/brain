@@ -7,8 +7,9 @@
 
 //! The update scale of the external policy gradient against an FP64 reference of its documented objective.
 //!
-//! A step's gradient is the mean over its records of each record's own per-token mean ([`LossAgg::SeqMean`]) or the
-//! sum over every token divided by the step's token count ([`LossAgg::TokenSum`]). The reference here evaluates
+//! A step's gradient is the mean over its records of each record's own per-token mean ([`LossAgg::SeqMean`]), the
+//! sum over every token divided by the step's token count ([`LossAgg::TokenSum`]), or the mean over its records of
+//! each record's sum over one constant length ([`LossAgg::ConstantLength`], Dr. GRPO). The reference here evaluates
 //! those objectives in f64 from the model's own log-probabilities, independently of the objective's code, with
 //! record lengths and advantage signs varied, and the step's accumulated gradient must be its directional derivative.
 
@@ -65,6 +66,7 @@ fn reference_loss(m: &Qwen35, rows: &[Row], base: &[Vec<f32>], agg: LossAgg) -> 
     match agg {
         LossAgg::SeqMean => per_record.iter().map(|t| t.iter().sum::<f64>() / t.len() as f64).sum::<f64>() / rows.len() as f64,
         LossAgg::TokenSum => per_record.iter().flatten().sum::<f64>() / per_record.iter().map(Vec::len).sum::<usize>() as f64,
+        LossAgg::ConstantLength(n) => per_record.iter().map(|t| t.iter().sum::<f64>() / f64::from(n)).sum::<f64>() / rows.len() as f64,
     }
 }
 
@@ -89,12 +91,12 @@ fn step_gradient(m: &mut Qwen35, rows: &[Row], agg: LossAgg) -> Vec<Vec<f32>> {
     adapter_names(m).iter().map(|n| m.read_grad(n).iter().map(|g| g * scale).collect()).collect()
 }
 
-/// Both aggregations of a step over records of unequal length and mixed advantage sign are the gradient of the
-/// objective they document: no record is weighted by its length under a sequence mean, every token is weighted
-/// alike under a token sum.
+/// Every aggregation of a step over records of unequal length and mixed advantage sign is the gradient of the
+/// objective it documents: no record is weighted by its length under a sequence mean, every token is weighted
+/// alike under a token sum, and every record's sum is divided by the same constant under a constant length.
 #[test]
 fn a_steps_gradient_is_the_documented_aggregation_over_unequal_records_of_both_advantage_signs() {
-    for (agg, seed) in [(LossAgg::SeqMean, 3), (LossAgg::TokenSum, 3), (LossAgg::SeqMean, 5), (LossAgg::TokenSum, 5)] {
+    for (agg, seed) in [(LossAgg::SeqMean, 3), (LossAgg::TokenSum, 3), (LossAgg::ConstantLength(6), 3), (LossAgg::SeqMean, 5), (LossAgg::TokenSum, 5), (LossAgg::ConstantLength(6), 5)] {
         let mut m = lora_model(seed);
         let rows = records(&m);
         let base = base_logprobs(&m, &rows);

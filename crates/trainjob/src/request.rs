@@ -121,7 +121,8 @@ fn spec_without_defaults() -> ActionSpec {
         .param(optional_f("kl_beta", "policy gradient: coefficient of the KL term to the reference policy", 0.0, 1000.0))
         .param(ParamSpec::new("reference", ParamType::Enum(vec!["base".into(), "start".into()]), "policy gradient: the policy the KL term is taken against"))
         .param(ParamSpec::new("behaviour", ParamType::Enum(vec!["recorded".into(), "start_of_run_proxy".into()]), "policy gradient: where the behaviour log-probabilities of the importance ratio come from: `recorded` (default) the sampler's own, required on every supervised token; `start_of_run_proxy` the start-of-run policy's where none was recorded, exact only if the rollouts were sampled from it"))
-        .param(ParamSpec::new("loss_agg", ParamType::Enum(vec!["seq-mean".into(), "token-sum".into()]), "policy gradient: how the token terms are normalised"))
+        .param(ParamSpec::new("loss_agg", ParamType::Enum(vec!["seq-mean".into(), "token-sum".into(), "constant-length".into()]), "policy gradient: how the token terms are normalised: `seq-mean` (each sequence by its own token count), `token-sum` (every token of a step by the step's count) or `constant-length` (each sequence's sum by loss_agg_length, averaged over the sequences: Dr. GRPO)"))
+        .param(ParamSpec::new("loss_agg_length", ParamType::Int, "policy gradient with loss_agg constant-length: the constant, in tokens, every sequence's token sum is divided by (default max_block)").min(1.0).max(1_048_576.0).step(1.0))
         .param(optional_f("temperature", "policy gradient: the temperature the rollouts were sampled at", 0.0, 100.0))
         .param(ParamSpec::new("teacher", ParamType::Enum(vec!["base".into(), "start".into()]), "policy gradient with teacher contexts: the frozen policy that scores the student's tokens in the privileged context"))
         .param(optional_f("advantage_bound", "policy gradient with teacher contexts: each token's advantage is clipped to [-bound, bound]", 0.0, 1e6))
@@ -337,6 +338,7 @@ pub struct Params {
     pub reference: Option<String>,
     pub behaviour: Option<String>,
     pub loss_agg: Option<String>,
+    pub loss_agg_length: Option<u32>,
     pub temperature: Option<f32>,
     pub teacher: Option<String>,
     pub advantage_bound: Option<f32>,
@@ -375,6 +377,7 @@ impl Request {
             (params.reference.is_some(), "reference"),
             (params.behaviour.is_some(), "behaviour"),
             (params.loss_agg.is_some(), "loss_agg"),
+            (params.loss_agg_length.is_some(), "loss_agg_length"),
             (params.temperature.is_some(), "temperature"),
             (params.teacher.is_some(), "teacher"),
             (params.advantage_bound.is_some(), "advantage_bound"),
@@ -396,6 +399,10 @@ impl Request {
         }
         if params.objective == Objective::Dpo {
             check_preference(&params, &data, &pg_named)?;
+        }
+        if params.objective == Objective::PolicyGradient {
+            // Every setting the trainer would refuse is refused here, before a job exists.
+            crate::job::policy_gradient_config(&params)?.validate().map_err(|why| format!("train: {why}"))?;
         }
         crate::consolidate::check_resume(ACTION, params.resume_key.as_deref(), params.checkpoint_every)?;
         if params.keep_evaluations && params.eval_every == 0 {
@@ -514,7 +521,7 @@ mod tests {
         assert_eq!(crate::job::policy_gradient_config(&named.params).unwrap(), brain::PolicyGradientConfig::default(), "the declared defaults are the trainer's");
         let pg = brain::PolicyGradientConfig::default();
         assert_eq!((pg.clip_eps_high, pg.max_step_kl, pg.max_step_grad_norm, pg.advantage_bound, pg.sequence_advantage_cap), (None, None, None, None, None));
-        assert_eq!(off, ["clip_eps_high", "max_step_kl", "max_step_grad_norm", "advantage_bound", "sequence_advantage_cap"], "only the settings the trainer leaves off are undeclared");
+        assert_eq!(off, ["clip_eps_high", "max_step_kl", "max_step_grad_norm", "loss_agg_length", "advantage_bound", "sequence_advantage_cap"], "only the settings the trainer leaves off, or that depend on the request (the constant length is max_block's), are undeclared");
         for p in spec.params.iter().filter(|p| p.help.starts_with("dpo:")) {
             assert!(defaults.contains_key(&p.name), "{}: a preference setting declares its default", p.name);
         }
@@ -620,6 +627,34 @@ mod tests {
         assert!(request(json!({"base": "a/b", "data": data, "objective": "policy_gradient", "advantage_norm": "standardised"}), &[]).is_err(), "an unknown normalisation is refused by the spec");
         let e = request(json!({"base": "a/b", "data": data, "advantage_norm": "z-score"}), &[]).unwrap_err();
         assert!(e.contains("advantage_norm") && e.contains("sft"), "{e}");
+    }
+
+    /// Dr. GRPO's aggregation on the wire: `constant-length` divides by `loss_agg_length`, the run's `max_block` when it
+    /// is omitted; the constant belongs to that aggregation and to the policy gradient.
+    #[test]
+    fn the_constant_length_aggregation_takes_its_constant_or_the_runs_max_block() {
+        let data = json!({"train": {"digest": digest(1)}}).to_string();
+        let pg = |extra: serde_json::Value| {
+            let mut p = json!({"base": "a/b", "data": data, "objective": "policy_gradient", "max_block": 2048});
+            p.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            request(p, &[])
+        };
+        let config = |r: Request| crate::job::policy_gradient_config(&r.params).unwrap().loss_agg;
+        assert_eq!(config(pg(json!({"loss_agg": "constant-length"})).unwrap()), brain::LossAgg::ConstantLength(2048));
+        assert_eq!(config(pg(json!({"loss_agg": "constant-length", "loss_agg_length": 512})).unwrap()), brain::LossAgg::ConstantLength(512));
+        let e = pg(json!({"loss_agg": "token-sum", "loss_agg_length": 512})).unwrap_err();
+        assert!(e.contains("loss_agg_length") && e.contains("constant-length"), "{e}");
+        assert!(pg(json!({"loss_agg": "constant-length", "loss_agg_length": 0})).is_err(), "the spec bounds the constant");
+        let e = request(json!({"base": "a/b", "data": data, "loss_agg_length": 512}), &[]).unwrap_err();
+        assert!(e.contains("loss_agg_length") && e.contains("sft"), "{e}");
+    }
+
+    /// A policy-gradient setting the trainer would refuse is refused when the job is submitted, naming it.
+    #[test]
+    fn a_policy_gradient_setting_the_trainer_refuses_is_refused_at_submission() {
+        let data = json!({"train": {"digest": digest(1)}}).to_string();
+        let e = request(json!({"base": "a/b", "data": data, "objective": "policy_gradient", "clip_eps": 0.3, "clip_eps_high": 0.1}), &[]).unwrap_err();
+        assert!(e.contains("clip_eps_high"), "{e}");
     }
 
     #[test]

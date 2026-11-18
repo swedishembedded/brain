@@ -272,9 +272,13 @@ pub(crate) fn policy_gradient_config(params: &crate::request::Params) -> Result<
     if let Some(v) = &params.behaviour {
         config.behaviour = v.parse().map_err(|e| format!("train: {e}"))?;
     }
-    if let Some(v) = &params.loss_agg {
-        config.loss_agg = v.parse().map_err(|e| format!("train: loss_agg: {e}"))?;
-    }
+    config.loss_agg = match (params.loss_agg.as_deref(), params.loss_agg_length) {
+        // The constant is its own setting on the wire; omitted, it is the longest row the run trains.
+        (Some("constant-length"), length) => brain::LossAgg::ConstantLength(length.unwrap_or(params.max_block)),
+        (_, Some(_)) => return Err("train: loss_agg_length is the constant of loss_agg constant-length; name that aggregation".to_string()),
+        (Some(v), None) => v.parse().map_err(|e| format!("train: loss_agg: {e}"))?,
+        (None, None) => config.loss_agg,
+    };
     if let Some(v) = params.temperature {
         config.temperature = v;
     }

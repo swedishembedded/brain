@@ -4,8 +4,9 @@
 //! The objective-level half of the conformance suite (C7). `model::conformance`
 //! checks the capability contracts every objective stands on; this checks the
 //! objectives themselves on a registered model: one optimiser step of each of
-//! SFT, DPO, GRPO and top-K distillation is finite and lowers that objective's
-//! own loss on a two-example overfit set.
+//! SFT, DPO, GRPO, every policy-gradient regime ([`policy_gradient_regimes`])
+//! and top-K distillation is finite and lowers that objective's own loss on a
+//! two-example overfit set.
 //!
 //! A model that declares no token objectives is held to the declaration: every
 //! rl objective must refuse it from `prepare` with the typed
@@ -26,7 +27,11 @@ use model::{Adam, Batch, Model, ModelConfig, Objective, IGNORE};
 use crate::env::{Environment, Reward, Step, Task, Verifier};
 use crate::objective::distill::{DistillConfig, DistillExample, DistillTopK, TopK};
 use crate::objective::dpo::{weigh_pair, PackedPair};
-use crate::objective::grpo::{token_term, Grpo, GrpoConfig};
+use crate::objective::advantage::{group_advantages_with, AdvantageNorm};
+use crate::objective::external::PolicyGradientConfig;
+use crate::objective::grpo::{token_term, Grpo, GrpoConfig, LossAgg};
+use crate::objective::grpo_term::ClipBand;
+use crate::objective::pg_batch::{backward_weighted, PgBatch, PgSpec};
 
 /// The learning rate of the single step: large enough to move a rank-2
 /// adapter measurably, small enough to stay in the loss's linear regime.
@@ -97,6 +102,13 @@ pub fn run_objectives<M: Model>(subject: &Subject<M>, seed: u64) -> Result<(), S
         total / count.max(1) as f32
     })?;
 
+    // The policy-gradient regimes the external objective trains, each through the one batch step a run takes
+    // (`pg_batch::backward_weighted`) with its own advantages and aggregation.
+    for (regime, config) in policy_gradient_regimes() {
+        let m = fresh(BATCH)?;
+        policy_gradient_step(subject.name, regime, &config, &m, &tokens, &targets)?;
+    }
+
     // Distillation: a two-example set whose teacher puts all its mass on two ids.
     let m = fresh(1)?;
     let examples: Vec<DistillExample> = (0..2u32)
@@ -111,6 +123,34 @@ pub fn run_objectives<M: Model>(subject: &Subject<M>, seed: u64) -> Result<(), S
     let mut rng = Rng::new(seed);
     // The source cycles its two examples, so each evaluation draws both once.
     lowers(subject.name, "distill", &m, &mut || distill.micro_steps(&m, &mut rng, 2))
+}
+
+/// The policy-gradient regimes the suite holds every model to, by name, as the configuration a run takes.
+pub fn policy_gradient_regimes() -> Vec<(&'static str, PolicyGradientConfig)> {
+    let d = PolicyGradientConfig::default();
+    vec![("dr-grpo", PolicyGradientConfig { advantage_norm: AdvantageNorm::MeanCentered, loss_agg: LossAgg::ConstantLength(SEQ), kl_beta: 0.0, ..d })]
+}
+
+/// One step of a policy-gradient regime on the conformance batch: its rows are one group whose rewards are 1 and 0,
+/// turned into advantages by the regime's normalisation, the behaviour and the reference are the starting policy, and
+/// the loss is the batch's, divided as the regime's aggregation divides it.
+fn policy_gradient_step<M: Model>(name: &str, regime: &str, config: &PolicyGradientConfig, m: &M, tokens: &[u32], targets: &[u32]) -> Result<(), String> {
+    let row = SEQ as usize;
+    m.set_batch(Batch::Lm { tokens, targets });
+    m.forward();
+    let start = model::training::objectives(m).batch_token_logprobs();
+    let rewards: Vec<f64> = (0..BATCH).map(|r| if r == 0 { 1.0 } else { 0.0 }).collect();
+    let by_row = group_advantages_with(config.advantage_norm, &rewards);
+    let advantage: Vec<f32> = (0..tokens.len()).map(|i| by_row[i / row] as f32).collect();
+    let supervised = targets.iter().filter(|&&t| t != IGNORE).count();
+    let denominator = config.loss_agg.denominator(BATCH as usize, supervised, 1);
+    let spec = PgSpec { band: ClipBand { low: config.clip_eps, high: config.clip_eps_high.unwrap_or(config.clip_eps) }, kl_beta: config.kl_beta };
+    lowers(name, regime, m, &mut || {
+        m.set_batch(Batch::Lm { tokens, targets });
+        m.forward();
+        let batch = PgBatch { targets, old_lp: &start, ref_lp: Some(&start), advantage: &advantage, is_weight: None };
+        backward_weighted(m, &batch, &spec, denominator).normalised_loss(denominator)
+    })
 }
 
 /// Zero the gradients, take the loss and its gradient from `loss_of`, apply
