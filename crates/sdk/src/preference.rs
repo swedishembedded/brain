@@ -25,7 +25,8 @@
 //! # Ok(()) }
 //! ```
 //!
-//! **The objective.** Standard DPO: per pair, `-log sigmoid(beta * ((log
+//! **The objective.** By default standard DPO (`.loss` takes IPO, SimPO or ORPO instead, `rl::objective::dpo::PairLoss`;
+//! the reference-free ones score no reference): per pair, `-log sigmoid(beta * ((log
 //! pi(chosen) - log ref(chosen)) - (log pi(rejected) - log ref(rejected))))`,
 //! each log-probability summed over the candidate's own assistant-turn tokens
 //! (the positions [`crate::ChatFineTune`] would supervise). The reference is
@@ -87,6 +88,7 @@ pub struct PreferenceFineTune {
     rank: Option<u32>,
     alpha: Option<f32>,
     beta: f32,
+    loss: rl::objective::dpo::PairLoss,
     nll_weight: f32,
     grad_accum: u32,
     strict_updates: bool,
@@ -126,6 +128,7 @@ impl PreferenceFineTune {
             rank: None,
             alpha: None,
             beta: DEFAULT_DPO_BETA,
+            loss: rl::objective::dpo::PairLoss::Dpo,
             nll_weight: DEFAULT_DPO_NLL_WEIGHT,
             grad_accum: 1,
             strict_updates: false,
@@ -223,6 +226,13 @@ impl PreferenceFineTune {
     /// inside the sigmoid (default [`DEFAULT_DPO_BETA`]).
     pub fn beta(mut self, beta: f32) -> Self {
         self.beta = beta;
+        self
+    }
+
+    /// The loss of a pair (default [`rl::objective::dpo::PairLoss::Dpo`]): DPO, IPO, or the reference-free SimPO and
+    /// ORPO, which score no reference (`beta` is each loss's own scale: SimPO's `beta`, ORPO's `lambda`).
+    pub fn loss(mut self, loss: rl::objective::dpo::PairLoss) -> Self {
+        self.loss = loss;
         self
     }
 
@@ -402,7 +412,7 @@ impl PreferenceFineTune {
             return Err(Error::Backend("PreferenceFineTune: grad_accum must be at least 1".to_string()));
         }
         // The cheap numeric refusals first, before the base is read; the plan below re-checks them with the row length.
-        rl::objective::dpo::DpoConfig { beta: self.beta, seq_len: 2, nll_weight: self.nll_weight, beta_ablation: self.beta_ablation }
+        rl::objective::dpo::DpoConfig { beta: self.beta, seq_len: 2, nll_weight: self.nll_weight, beta_ablation: self.beta_ablation, loss: self.loss }
             .validate()
             .map_err(|why| Error::Backend(format!("PreferenceFineTune: invalid dpo configuration: {why}")))?;
         // Every file is checked against the base's own template before a
@@ -438,7 +448,7 @@ impl PreferenceFineTune {
         let seed = resolve_seed(self.seed, Some(&state_path))?;
         // Both rows of a pair share one forward.
         let requested = model::FitOpts { batch_size: PAIR_ROWS, grad_accum: self.grad_accum, strict_updates: self.strict_updates, stages: self.stages, native_sparse: self.native_sparse, precision: model::TrainPrecision { activations: self.activations, ..Default::default() }, ..fit_opts(self.steps, block, self.lr, seed) };
-        let dpo = rl::objective::dpo::DpoConfig { beta: self.beta, seq_len, nll_weight: self.nll_weight, beta_ablation: self.beta_ablation };
+        let dpo = rl::objective::dpo::DpoConfig { beta: self.beta, seq_len, nll_weight: self.nll_weight, beta_ablation: self.beta_ablation, loss: self.loss };
         let opts = model::training_plan::ValidatedTrainingPlan::build(requested, &[&dpo]).map_err(|e| Error::Backend(format!("PreferenceFineTune: {e}")))?.into_opts();
         let base_digest = digest(&weights)?;
         let dataset_id = digest(dataset)?;
@@ -457,6 +467,8 @@ impl PreferenceFineTune {
             "reference": { "base_digest": base_digest, "adapter_digest": parent, "base_format": self.base_format },
             "nll_weight_bits": self.nll_weight.to_bits(),
             "grad_accum": self.grad_accum,
+            // Named only when it is not DPO, so a run saved before the losses existed is the same run.
+            "loss": (self.loss != rl::objective::dpo::PairLoss::Dpo).then(|| format!("{:?}", self.loss)),
             "keep_reasoning": self.keep_reasoning,
         });
         std::fs::create_dir_all(out_dir).map_err(|e| Error::Backend(format!("{}: {e}", out_dir.display())))?;
@@ -475,6 +487,8 @@ impl PreferenceFineTune {
                 "rank": rank,
                 "alpha": alpha,
                 "beta": self.beta,
+                "loss": self.loss.name(),
+                "gamma": match self.loss { rl::objective::dpo::PairLoss::SimPo { gamma } => Some(gamma), _ => None },
                 "nll_weight": self.nll_weight,
                 "grad_accum": self.grad_accum,
                 "keep_reasoning": self.keep_reasoning,
@@ -536,6 +550,7 @@ impl PreferenceFineTune {
             rank,
             alpha,
             beta: self.beta,
+            loss: self.loss,
             nll_weight: self.nll_weight,
             trained_from: parent.clone(),
             base_digest: Some(base_digest.clone()),
@@ -604,6 +619,8 @@ pub struct PreferenceFineTuneOutcome {
     pub rank: u32,
     pub alpha: f32,
     pub beta: f32,
+    /// The pair loss the run trained with.
+    pub loss: rl::objective::dpo::PairLoss,
     pub nll_weight: f32,
     /// The digest of the adapter this run continued - also the reference's
     /// adapter - if it continued one.
@@ -646,6 +663,7 @@ impl PreferenceFineTuneOutcome {
             "rank": self.rank,
             "alpha": self.alpha,
             "beta": self.beta,
+            "loss": self.loss.name(),
             "nll_weight": self.nll_weight,
             "train_score": score(&self.train_score),
             "held_out_score": score(&self.held_out_score),

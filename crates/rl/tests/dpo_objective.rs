@@ -83,7 +83,7 @@ fn dpo_training_raises_chosen_logprob_and_lowers_rejected_logprob() {
     let before_rejected = completion_logprob_sum(&mut model, seq_len, &prompt, &rejected);
 
     let pair = DpoPair { prompt: prompt.clone(), chosen: chosen.clone(), rejected: rejected.clone() };
-    let dpo_cfg = DpoConfig { beta: 0.5, seq_len, nll_weight: 0.0, beta_ablation: false };
+    let dpo_cfg = DpoConfig { beta: 0.5, seq_len, nll_weight: 0.0, beta_ablation: false, loss: rl::objective::dpo::PairLoss::Dpo };
     let mut obj = Dpo::try_from_pairs(dpo_cfg, vec![pair], move |_pair: &DpoPair| (ref_chosen.clone(), ref_rejected.clone())).expect("a valid DPO configuration");
 
     obj.prepare(&mut model).unwrap();
@@ -147,7 +147,7 @@ fn the_logged_margin_is_the_margin_an_independent_forward_measures() {
     let chosen: (Vec<u32>, Vec<bool>) = (vec![1, 2, 3, 4, 5, 6], vec![false, false, false, true, true, true]);
     let rejected: (Vec<u32>, Vec<bool>) = (vec![1, 2, 3, 9, 8], vec![false, false, false, true, true]);
     let pair = rl::objective::dpo::PackedPair::from_masked(seq_len, (&chosen.0, &chosen.1), (&rejected.0, &rejected.1)).unwrap();
-    let dpo_cfg = DpoConfig { beta: 0.5, seq_len, nll_weight: 0.0, beta_ablation: false };
+    let dpo_cfg = DpoConfig { beta: 0.5, seq_len, nll_weight: 0.0, beta_ablation: false, loss: rl::objective::dpo::PairLoss::Dpo };
     let mut obj = Dpo::try_from_dataset(dpo_cfg, vec![pair]).expect("a valid DPO configuration");
     obj.prepare(&mut model).unwrap();
     Objective::<Qwen>::check_data(&mut obj, &model).unwrap();

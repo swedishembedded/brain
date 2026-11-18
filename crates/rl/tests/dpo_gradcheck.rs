@@ -80,7 +80,7 @@ impl CheckModel for DpoHarness {
     /// this file's own header on why `Qwen::forward()`'s own return value
     /// cannot be used here.
     fn loss(&self) -> f32 {
-        let (term, _margin) = weigh_pair(BETA, NLL_WEIGHT, &self.m, &self.pair);
+        let (term, _margin) = weigh_pair(rl::objective::dpo::PairLoss::Dpo, BETA, NLL_WEIGHT, &self.m, &self.pair);
         self.fwd_done.set(true);
         term.loss
     }

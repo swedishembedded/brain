@@ -4,7 +4,7 @@
 //! The objective-level half of the conformance suite (C7). `model::conformance`
 //! checks the capability contracts every objective stands on; this checks the
 //! objectives themselves on a registered model: one optimiser step of each of
-//! SFT, DPO, KTO, GRPO, every policy-gradient regime ([`policy_gradient_regimes`])
+//! SFT, the pair losses (DPO, IPO, SimPO, ORPO), KTO, GRPO, every policy-gradient regime ([`policy_gradient_regimes`])
 //! and top-K distillation is finite and lowers that objective's own loss on a
 //! two-example overfit set.
 //!
@@ -26,7 +26,7 @@ use model::{Adam, Batch, Model, ModelConfig, Objective, IGNORE};
 
 use crate::env::{Environment, Reward, Step, Task, Verifier};
 use crate::objective::distill::{DistillConfig, DistillExample, DistillTopK, TopK};
-use crate::objective::dpo::{weigh_pair, PackedPair};
+use crate::objective::dpo::{weigh_pair, PackedPair, PairLoss};
 use crate::objective::advantage::group_advantages_with;
 use crate::objective::external::{PolicyGradientAlgorithm, PolicyGradientConfig};
 use crate::objective::feedback::{weigh_feedback, Feedback, FeedbackConfig, PackedFeedback};
@@ -73,10 +73,19 @@ pub fn run_objectives<M: Model>(subject: &Subject<M>, seed: u64) -> Result<(), S
     let mut packed = PackedPair::from_masked(row, (&tokens[..row], &mask), (&tokens[row..2 * row], &mask))?;
     packed.score_reference(&reference);
     lowers(subject.name, "dpo", &m, &mut || {
-        let (term, _margin) = weigh_pair(BETA, 0.0, &m, &packed);
+        let (term, _margin) = weigh_pair(PairLoss::Dpo, BETA, 0.0, &m, &packed);
         m.backward();
         term.loss
     })?;
+    // The other pair losses, each on a fresh copy of the starting model.
+    for loss in [PairLoss::Ipo, PairLoss::SimPo { gamma: 0.1 }, PairLoss::Orpo] {
+        let m = fresh(2)?;
+        lowers(subject.name, loss.name(), &m, &mut || {
+            let (term, _margin) = weigh_pair(loss, BETA, 0.0, &m, &packed);
+            m.backward();
+            term.loss
+        })?;
+    }
 
     // KTO: an example (row 0) and its prompt with another completion (row 1, the reference point's), against the frozen
     // starting model, once desirable and once undesirable; the reference point is the starting policy's (zero).
@@ -227,7 +236,7 @@ fn refuses_every_objective<M: Model>(subject: &Subject<M>, seed: u64) -> Result<
     };
     let mut grpo = Grpo::try_new(OneTask, NoReward, grpo_cfg).expect("a valid GRPO configuration");
     refused("grpo", Objective::<M>::prepare(&mut grpo, &mut m))?;
-    let dpo_cfg = crate::objective::dpo::DpoConfig { beta: BETA, seq_len: SEQ as usize, nll_weight: 0.0, beta_ablation: false };
+    let dpo_cfg = crate::objective::dpo::DpoConfig { beta: BETA, seq_len: SEQ as usize, nll_weight: 0.0, beta_ablation: false, loss: PairLoss::Dpo };
     let pair = crate::objective::dpo::DpoPair { prompt: vec![0], chosen: vec![1], rejected: vec![2] };
     let mut dpo = crate::objective::dpo::Dpo::try_from_pairs(dpo_cfg, vec![pair], |_| (Vec::new(), Vec::new())).expect("a valid DPO configuration");
     refused("dpo", Objective::<M>::prepare(&mut dpo, &mut m))?;

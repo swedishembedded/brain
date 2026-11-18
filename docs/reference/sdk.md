@@ -481,6 +481,19 @@ copy is held while training, and the first step's margin is exactly zero
 (the initial loss is `ln 2`). `beta` defaults to `brain::DEFAULT_DPO_BETA`
 (0.1). Each optimizer step trains one pair, both candidates in one forward.
 
+`.loss(brain::PairLoss)` chooses the pair loss (default `Dpo`), each with `d = log pi - log ref` and `l` a candidate's
+summed log-probability, `|y|` its token count:
+
+| loss | per pair | reference |
+|---|---|---|
+| `Dpo` | `-log sigmoid(beta * (dc - dr))` | scored |
+| `Ipo` | `(dc / \|c\| - dr / \|r\| - 1 / (2 beta))^2` | scored |
+| `SimPo { gamma }` | `-log sigmoid(beta * (lc / \|c\| - lr / \|r\|) - gamma)` | none |
+| `Orpo` | `-lc / \|c\| - beta * log sigmoid(o(c) - o(r))`, `o(y) = m - log(1 - e^m)`, `m = l / \|y\|` | none |
+
+A reference-free loss scores no reference before training (the outcome's scores still measure against the starting
+policy), and refuses `beta_ablation`, a control of the DPO loss alone. `outcome.loss` and the record's `loss` name it.
+
 - `.continue_from`, `.rank`, `.alpha`, `.steps`, `.lr`, `.seed`,
   `.max_block`, `.checkpoint_every`, `.cycle`, `.device` and
   `run_with(&cancel, |progress| ..)` behave as they do on `ChatFineTune`,

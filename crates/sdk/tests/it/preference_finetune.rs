@@ -317,3 +317,22 @@ fn accumulation_and_kept_reasoning_are_recorded_and_change_the_run() {
     let card = checkpoint::st::read_card(kept.adapter.as_deref().unwrap().to_str().unwrap()).unwrap().expect("the adapter carries a card");
     assert_eq!(card.training.unwrap().hyperparams["keep_reasoning"].as_bool(), Some(true));
 }
+
+/// IPO, SimPO and ORPO train through the same fine-tune: each lowers its own loss, the outcome and the record name it,
+/// and the tuned adapter prefers the chosen answers more than the start does.
+#[test]
+fn every_pair_loss_trains_and_is_recorded() {
+    for loss in [brain::PairLoss::Ipo, brain::PairLoss::SimPo { gamma: 0.1 }, brain::PairLoss::Orpo] {
+        let model = chat_model_dir(&format!("pref-{}", loss.name()));
+        let outcome = fine_tune(&model, &model.join("run")).loss(loss).run().unwrap_or_else(|e| panic!("{}: {e}", loss.name()));
+        assert_eq!((outcome.status, outcome.loss), (FineTuneStatus::Completed, loss));
+        let (first, last) = (outcome.initial_loss.unwrap(), outcome.final_loss.unwrap());
+        assert!(last < first, "{}: {first} -> {last}", loss.name());
+        assert!(outcome.train_score.and_then(|s| s.mean_margin).is_some_and(|m| m > 0.0), "{}: {:?}", loss.name(), outcome.train_score);
+        let record: serde_json::Value = serde_json::from_slice(&std::fs::read(outcome.record.unwrap()).unwrap()).unwrap();
+        assert_eq!(record["loss"].as_str(), Some(loss.name()));
+    }
+    let model = chat_model_dir("pref-orpo-ablation");
+    let e = fine_tune(&model, &model.join("run")).loss(brain::PairLoss::Orpo).beta(0.0).beta_ablation(true).run().unwrap_err().to_string();
+    assert!(e.contains("beta_ablation"), "{e}");
+}

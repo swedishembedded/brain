@@ -12,6 +12,7 @@ see CONTRIBUTING or AGENTS.md for the commit-message convention.
 
 ### Added
 
+- The preference family: `rl::objective::dpo::PairLoss` (`Dpo`, `Ipo`, `SimPo { gamma }`, `Orpo`) on one pair-term convention (`pair_loss_term`, `weigh_pair` takes the loss), the reference-free SimPO and ORPO scoring no reference; `brain::PreferenceFineTune::loss`. `DpoConfig` has a `loss` field and `pair_term` is replaced by `pair_loss_term`.
 - A rollout record's `tokenizer_digest` is held against the trained base's own tokenizer digest (rule `tokenizer_mismatch`, naming both) by the policy gradient's dataset check and `check_dataset`; `chat_rollout::check_records` takes the base's digest. The contract fixture `invalid/mixed_tokenizer_digest.jsonl` is now `invalid/tokenizer_mismatch.jsonl`.
 - Baseline-only rollouts in training-record contract v2: a record with `"baseline_only": true` (and its `reward` and `group`, nothing supervised) counts in its group's advantages and is never trained; one that trains something is refused by rule `baseline_trains`. `<split>.rollouts.json` keeps such outcomes under `baselines`; `chat_rollout::write` takes them.
 - `advantage_floor: none | zero` for the policy gradient (`PolicyGradientConfig::advantage_floor`, `brain finetune --advantage-floor`): with `zero` each group-relative advantage is clamped at zero after it is computed against the whole group, so a positive-only run keeps the failures in its baseline without training on them.

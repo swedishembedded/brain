@@ -205,6 +205,8 @@ pub use rl::objective::grpo::LossAgg;
 #[cfg(feature = "study")]
 pub use rl::objective::advantage::{AdvantageFloor, AdvantageNorm};
 #[cfg(feature = "study")]
+pub use rl::objective::dpo::PairLoss;
+#[cfg(feature = "study")]
 pub use finetune::{DEFAULT_LORA_LR, DEFAULT_LORA_RANK, LORA_WEIGHT_DECAY, emit_held_out_records, score_chat, score_tokens, score_tokens_qwen35, HeldOutRecords, ChatFineTune, ChatFineTuneOutcome, FineTuneProgress, TrainFootprint, FineTuneStatus, HeldOutScore, MonitorPoint, PolicyGradientOutcome, RecordReadout, Selection, TokenReadout, TokenScore};
 #[cfg(feature = "study")]
 mod full_finetune;

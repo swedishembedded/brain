@@ -38,7 +38,7 @@
 //! weight `w_i` before backward reads it: so to realize `dL/d(CE_t) =
 //! +-beta * sigma(-u)` exactly, `w_i / C` must equal `+-beta * sigma(-u)`,
 //! i.e. `w_i` equals `+-beta * sigma(-u) * C`, chosen rows getting `+` and
-//! rejected rows getting `-`. [`pair_term`] computes exactly this pair
+//! rejected rows getting `-`. [`pair_loss_term`] computes exactly this pair
 //! (`weight_chosen`,
 //! `weight_rejected`) plus the scalar loss it is the analytic gradient of,
 //! from one ordinary forward's freshly read-back per-token logprobs - so
@@ -121,6 +121,60 @@ pub fn pairs_from_group(prompt: &[u32], completions: &[Completion], rewards: &[f
     }
 }
 
+/// The loss a preference pair is trained with: each is a function of the two rows' summed log-probabilities (and,
+/// for the reference-based ones, the frozen reference's), so each reduces to one weight per row ([`pair_loss_term`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum PairLoss {
+    /// DPO (Rafailov et al., 2023): `-log sigmoid(beta * (dc - dr))`, `d = log pi - log ref` summed over a candidate.
+    #[default]
+    Dpo,
+    /// IPO (Azar et al., 2023): `(dc / |c| - dr / |r| - 1 / (2 beta))^2`, the margin regressed to a target instead of
+    /// pushed to infinity; each log-ratio is a mean over its candidate's tokens, as the common implementations take it
+    /// (a summed one makes the regression target depend on the answers' lengths).
+    Ipo,
+    /// SimPO (Meng et al., 2024), reference-free: `-log sigmoid(beta * (lc / |c| - lr / |r|) - gamma)`, `l` the
+    /// candidate's summed log-probability and `|.|` its token count.
+    SimPo { gamma: f32 },
+    /// ORPO (Hong et al., 2024), reference-free: `-lc / |c| - beta * log sigmoid(o(c) - o(r))`, `o(y) = m - log(1 -
+    /// e^m)` the log-odds of the candidate's mean token log-probability `m`: the supervised likelihood of the chosen
+    /// answer and an odds-ratio preference, `beta` the paper's `lambda`.
+    Orpo,
+}
+
+impl PairLoss {
+    /// The losses' names on the wire, in order.
+    pub const NAMES: [&'static str; 4] = ["dpo", "ipo", "simpo", "orpo"];
+
+    /// The loss's name on the wire (`loss`).
+    pub fn name(self) -> &'static str {
+        match self {
+            PairLoss::Dpo => "dpo",
+            PairLoss::Ipo => "ipo",
+            PairLoss::SimPo { .. } => "simpo",
+            PairLoss::Orpo => "orpo",
+        }
+    }
+
+    /// The loss a wire name names; SimPO takes its margin `gamma`.
+    ///
+    /// # Errors
+    /// The name is none of [`Self::NAMES`].
+    pub fn parse(name: &str, gamma: f32) -> Result<PairLoss, String> {
+        match name {
+            "dpo" => Ok(PairLoss::Dpo),
+            "ipo" => Ok(PairLoss::Ipo),
+            "simpo" => Ok(PairLoss::SimPo { gamma }),
+            "orpo" => Ok(PairLoss::Orpo),
+            other => Err(format!("loss {other:?} is none of {}", PairLoss::NAMES.join(", "))),
+        }
+    }
+
+    /// Whether the loss reads no reference policy (SimPO, ORPO): the pairs are then never scored under one.
+    pub fn reference_free(self) -> bool {
+        matches!(self, PairLoss::SimPo { .. } | PairLoss::Orpo)
+    }
+}
+
 /// DPO's hyperparameters. `seq_len` is ONE row's packed length - the model
 /// this objective trains MUST be constructed with `b = 2`, `t = seq_len`
 /// (see the module doc comment on why both rows share one forward).
@@ -137,6 +191,8 @@ pub struct DpoConfig {
     /// An ablation: allow a `beta` that is zero or negative (it removes or reverses the preference, so
     /// it is only a control experiment). A non-finite `beta` is refused either way.
     pub beta_ablation: bool,
+    /// The loss of a pair ([`PairLoss::Dpo`] by default).
+    pub loss: PairLoss,
 }
 
 impl DpoConfig {
@@ -150,6 +206,14 @@ impl DpoConfig {
         }
         if !(self.nll_weight.is_finite() && self.nll_weight >= 0.0) {
             return Err(format!("nll_weight must be finite and not negative, got {}", self.nll_weight));
+        }
+        if self.beta_ablation && self.loss != PairLoss::Dpo {
+            return Err(format!("beta_ablation is a control of the dpo loss; the loss is {}", self.loss.name()));
+        }
+        if let PairLoss::SimPo { gamma } = self.loss {
+            if !(gamma.is_finite() && gamma >= 0.0) {
+                return Err(format!("gamma (simpo's margin) must be finite and not negative, got {gamma}"));
+            }
         }
         if self.seq_len < 2 {
             return Err(format!("seq_len {} leaves no position that predicts a token", self.seq_len));
@@ -212,8 +276,58 @@ pub struct PairTerm {
     pub loss: f32,
 }
 
-/// Numerically stable logistic sigmoid.
-fn sigmoid(x: f32) -> f32 {
+/// One candidate's row of a pair: its summed log-probability under the policy and the reference, and its token count.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RowSums {
+    pub new: f32,
+    pub reference: f32,
+    pub count: usize,
+}
+
+/// `log(1 - e^m)` for a mean log-probability `m < 0`, kept finite at `m` near 0 (a certainty).
+fn log1m_exp(m: f64) -> f64 {
+    let m = m.min(-1e-12);
+    if m > -std::f64::consts::LN_2 { (-m.exp_m1()).ln() } else { (-m.exp()).ln_1p() }
+}
+
+/// The pair term of `loss` for the two rows, derived (not looked up) as [`pair_loss_term`] is: each row's weight is `count`
+/// times the loss's derivative in each of the row's per-token cross-entropies, `-dL/dS` for `S` the row's summed
+/// log-probability (a length-normalised loss divides it by the row's token count). Evaluated in f64.
+pub fn pair_loss_term(loss: PairLoss, beta: f32, chosen: RowSums, rejected: RowSums, count: f32) -> PairTerm {
+    let beta = f64::from(beta);
+    let (sc, sr) = (f64::from(chosen.new), f64::from(rejected.new));
+    let (dc, dr) = (sc - f64::from(chosen.reference), sr - f64::from(rejected.reference));
+    let (nc, nr) = (chosen.count.max(1) as f64, rejected.count.max(1) as f64);
+    // (loss, dL/dS_chosen, dL/dS_rejected)
+    let (value, gc, gr) = match loss {
+        PairLoss::Dpo => {
+            let u = beta * (dc - dr);
+            let s = sigmoid64(-u);
+            (softplus64(-u), -beta * s, beta * s)
+        }
+        PairLoss::Ipo => {
+            let h = dc / nc - dr / nr - 1.0 / (2.0 * beta);
+            (h * h, 2.0 * h / nc, -2.0 * h / nr)
+        }
+        PairLoss::SimPo { gamma } => {
+            let u = beta * (sc / nc - sr / nr) - f64::from(gamma);
+            let s = sigmoid64(-u);
+            (softplus64(-u), -beta * s / nc, beta * s / nr)
+        }
+        PairLoss::Orpo => {
+            let (mc, mr) = (sc / nc, sr / nr);
+            let z = (mc - log1m_exp(mc)) - (mr - log1m_exp(mr));
+            let s = sigmoid64(-z);
+            // d o(m) / d m = 1 / (1 - e^m)
+            let (oc, or) = (1.0 / -mc.min(-1e-12).exp_m1(), 1.0 / -mr.min(-1e-12).exp_m1());
+            (-mc + beta * softplus64(-z), (-1.0 - beta * s * oc) / nc, beta * s * or / nr)
+        }
+    };
+    let count = f64::from(count);
+    PairTerm { weight_chosen: (-gc * count) as f32, weight_rejected: (-gr * count) as f32, loss: value as f32 }
+}
+
+fn sigmoid64(x: f64) -> f64 {
     if x >= 0.0 {
         1.0 / (1.0 + (-x).exp())
     } else {
@@ -222,8 +336,7 @@ fn sigmoid(x: f32) -> f32 {
     }
 }
 
-/// Numerically stable `ln(1 + e^x)`.
-fn softplus(x: f32) -> f32 {
+fn softplus64(x: f64) -> f64 {
     if x > 0.0 {
         x + (-x).exp().ln_1p()
     } else {
@@ -231,23 +344,12 @@ fn softplus(x: f32) -> f32 {
     }
 }
 
-/// The DPO weight/loss pair for one packed pair, derived (not looked up)
-/// from `L = -log sigma(u)` - see the module doc comment for the full
-/// derivation. `count` is the SAME whole-forward active-position count
-/// (both rows) the model's own weighted-CE division uses.
-pub fn pair_term(beta: f32, sum_new_chosen: f32, sum_ref_chosen: f32, sum_new_rejected: f32, sum_ref_rejected: f32, count: f32) -> PairTerm {
-    let u = beta * ((sum_new_chosen - sum_ref_chosen) - (sum_new_rejected - sum_ref_rejected));
-    let loss = softplus(-u);
-    let w = beta * sigmoid(-u) * count;
-    PairTerm { weight_chosen: w, weight_rejected: -w, loss }
-}
-
 /// `term` with the chosen answer's anchor added: `nll_weight` times the mean
 /// negative log-likelihood of the chosen tokens (`-sum_new_chosen /
 /// count_chosen`), the regulariser that keeps DPO from lowering the chosen
 /// answer's own probability. Its gradient on each chosen position's CE is
 /// `nll_weight / count_chosen`, which the weight carries scaled by `count`,
-/// as [`pair_term`]'s does. A zero weight returns `term` unchanged.
+/// as [`pair_loss_term`]'s does. A zero weight returns `term` unchanged.
 pub fn add_chosen_nll(term: PairTerm, nll_weight: f32, sum_new_chosen: f32, count_chosen: usize, count: f32) -> PairTerm {
     if nll_weight == 0.0 || count_chosen == 0 {
         return term;
@@ -431,13 +533,13 @@ fn enqueue(cfg: &DpoConfig, vocab: Option<u32>, next: &mut IndexedStream<DpoPair
 }
 
 /// One pair's DPO forward: the current policy's log-probabilities of both
-/// rows, the [`pair_term`] they give against the pair's cached reference,
+/// rows, the [`pair_loss_term`] they give against the pair's cached reference,
 /// and that term's per-position weights written to `model` - everything a
 /// micro-step does before its backward. Returns the term and the
 /// reference-normalized margin `(logpi_c - logref_c) - (logpi_r - logref_r)`
 /// (in nats, without `beta`). `model` must be built at `b = 2`, `t =
 /// seq_len`, with weighted loss enabled.
-pub fn weigh_pair<M: Model>(beta: f32, nll_weight: f32, model: &M, packed: &PackedPair) -> (PairTerm, f32) {
+pub fn weigh_pair<M: Model>(loss: PairLoss, beta: f32, nll_weight: f32, model: &M, packed: &PackedPair) -> (PairTerm, f32) {
     let seq_len = packed.seq_len();
     model.set_batch(Batch::Lm { tokens: &packed.tokens, targets: &packed.targets });
     let _ = model.forward();
@@ -447,7 +549,9 @@ pub fn weigh_pair<M: Model>(beta: f32, nll_weight: f32, model: &M, packed: &Pack
     let (sum_new_chosen, sum_ref_chosen, count_chosen) = row_sum(&new_lp, &packed.ref_lp, &packed.targets, 0, seq_len);
     let (sum_new_rejected, sum_ref_rejected, count_rejected) = row_sum(&new_lp, &packed.ref_lp, &packed.targets, 1, seq_len);
     let count = (count_chosen + count_rejected).max(1) as f32;
-    let term = add_chosen_nll(pair_term(beta, sum_new_chosen, sum_ref_chosen, sum_new_rejected, sum_ref_rejected, count), nll_weight, sum_new_chosen, count_chosen, count);
+    let chosen = RowSums { new: sum_new_chosen, reference: sum_ref_chosen, count: count_chosen };
+    let rejected = RowSums { new: sum_new_rejected, reference: sum_ref_rejected, count: count_rejected };
+    let term = add_chosen_nll(pair_loss_term(loss, beta, chosen, rejected, count), nll_weight, sum_new_chosen, count_chosen, count);
     let margin = (sum_new_chosen - sum_ref_chosen) - (sum_new_rejected - sum_ref_rejected);
 
     let mut weights = vec![0f32; 2 * seq_len];
@@ -559,12 +663,13 @@ impl<M: Model> Objective<M> for Dpo {
                 pair.check_vocab(vocab).map_err(|why| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("preference pair {index}: {why}")))?;
             }
             // The frozen reference is the model as it starts; scored once the pairs are known to be ones the model can take.
-            if !*referenced {
+            // A reference-free loss reads none, so none is scored.
+            if !*referenced && !self.cfg.loss.reference_free() {
                 for pair in pairs.iter_mut() {
                     pair.score_reference(model);
                 }
-                *referenced = true;
             }
+            *referenced = true;
         }
         Ok(())
     }
@@ -584,11 +689,11 @@ impl<M: Model> Objective<M> for Dpo {
                     }
                 }
                 let packed = pending.pop_front().expect("just ensured pending is non-empty");
-                weigh_pair(self.cfg.beta, self.cfg.nll_weight, model, &packed)
+                weigh_pair(self.cfg.loss, self.cfg.beta, self.cfg.nll_weight, model, &packed)
             }
             Source::Dataset { pairs, referenced } => {
                 assert!(*referenced, "Dpo::micro_step: a dataset objective scores its reference in check_data(), which was not called");
-                weigh_pair(self.cfg.beta, self.cfg.nll_weight, model, rng.choice(pairs))
+                weigh_pair(self.cfg.loss, self.cfg.beta, self.cfg.nll_weight, model, rng.choice(pairs))
             }
         };
         self.last_margin = margin;
@@ -612,9 +717,9 @@ impl<M: Model> Objective<M> for Dpo {
                         return 0.0;
                     }
                 }
-                weigh_pair(self.cfg.beta, self.cfg.nll_weight, model, pending.front().expect("just ensured pending is non-empty")).0.loss
+                weigh_pair(self.cfg.loss, self.cfg.beta, self.cfg.nll_weight, model, pending.front().expect("just ensured pending is non-empty")).0.loss
             }
-            Source::Dataset { pairs, .. } => weigh_pair(self.cfg.beta, self.cfg.nll_weight, model, rng.choice(pairs)).0.loss,
+            Source::Dataset { pairs, .. } => weigh_pair(self.cfg.loss, self.cfg.beta, self.cfg.nll_weight, model, rng.choice(pairs)).0.loss,
         }
     }
 
@@ -662,6 +767,11 @@ impl<M: Model> Objective<M> for Dpo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The DPO term of rows whose token counts do not enter it.
+    fn pair_term(beta: f32, new_c: f32, ref_c: f32, new_r: f32, ref_r: f32, count: f32) -> PairTerm {
+        pair_loss_term(PairLoss::Dpo, beta, RowSums { new: new_c, reference: ref_c, count: 1 }, RowSums { new: new_r, reference: ref_r, count: 1 }, count)
+    }
 
     fn completion(tokens: &[u32]) -> Completion {
         Completion { tokens: tokens.to_vec(), logprobs: vec![0.0; tokens.len()], stop: model::rollout::StopReason::MaxNew, eos_logprob: None, policy_version: 0, cached_tokens: 0 }
@@ -750,6 +860,58 @@ mod tests {
         }
     }
 
+    /// L1 of every pair loss: the loss against an f64 oracle written from each paper's definition, and each row's
+    /// weight `count` times minus the loss's derivative in the row's summed log-probability (central differences of
+    /// the oracle), at margins on either side and for rows of unequal length; reference-free losses ignore the
+    /// reference.
+    #[test]
+    fn every_pair_loss_matches_its_oracle_and_its_weights_are_its_gradient() {
+        let s = |x: f64| 1.0 / (1.0 + (-x).exp());
+        let (beta, count) = (0.5f64, 9.0f32);
+        let oracle = |loss: PairLoss, sc: f64, rc: f64, nc: f64, sr: f64, rr: f64, nr: f64| -> f64 {
+            match loss {
+                PairLoss::Dpo => -(s(beta * ((sc - rc) - (sr - rr)))).ln(),
+                PairLoss::Ipo => ((sc - rc) / nc - (sr - rr) / nr - 1.0 / (2.0 * beta)).powi(2),
+                PairLoss::SimPo { gamma } => -(s(beta * (sc / nc - sr / nr) - f64::from(gamma))).ln(),
+                PairLoss::Orpo => {
+                    let odds = |m: f64| m - (1.0 - m.exp()).ln();
+                    -sc / nc - beta * s(odds(sc / nc) - odds(sr / nr)).ln()
+                }
+            }
+        };
+        let losses = [PairLoss::Dpo, PairLoss::Ipo, PairLoss::SimPo { gamma: 0.3 }, PairLoss::Orpo];
+        for loss in losses {
+            for (sc, rc, sr, rr) in [(-6.0f32, -7.0f32, -9.0f32, -8.5f32), (-9.0, -7.0, -4.0, -6.0), (-2.5, -2.5, -3.5, -3.5), (-30.0, -20.0, -1.5, -9.0)] {
+                let (nc, nr) = (3usize, 5usize);
+                let row = |new: f32, reference: f32, n: usize| RowSums { new, reference, count: n };
+                let t = pair_loss_term(loss, beta as f32, row(sc, rc, nc), row(sr, rr, nr), count);
+                let f = |a: f64, b: f64| oracle(loss, a, f64::from(rc), nc as f64, b, f64::from(rr), nr as f64);
+                let (a, b) = (f64::from(sc), f64::from(sr));
+                let want = f(a, b);
+                assert!((f64::from(t.loss) - want).abs() <= 1e-5 * want.abs().max(1.0), "{loss:?} {sc},{rc},{sr},{rr}: loss {} vs {want}", t.loss);
+                let h = 1e-5;
+                let (gc, gr) = ((f(a + h, b) - f(a - h, b)) / (2.0 * h), (f(a, b + h) - f(a, b - h)) / (2.0 * h));
+                for (name, got, g) in [("chosen", t.weight_chosen, gc), ("rejected", t.weight_rejected, gr)] {
+                    let want = -g * f64::from(count);
+                    assert!((f64::from(got) - want).abs() <= 1e-4 * want.abs().max(1e-3), "{loss:?} {name}: weight {got} vs {want}");
+                }
+                if loss.reference_free() {
+                    let moved = pair_loss_term(loss, beta as f32, row(sc, rc + 3.0, nc), row(sr, rr - 2.0, nr), count);
+                    assert_eq!(moved, t, "{loss:?} reads no reference");
+                }
+            }
+        }
+        assert!(!PairLoss::Dpo.reference_free() && !PairLoss::Ipo.reference_free());
+        for name in PairLoss::NAMES {
+            assert_eq!(PairLoss::parse(name, 0.3).unwrap().name(), name);
+        }
+        assert!(PairLoss::parse("kto", 0.0).unwrap_err().contains("dpo, ipo, simpo, orpo"));
+        let ok = DpoConfig { beta: 2.0, seq_len: 8, nll_weight: 0.0, beta_ablation: false, loss: PairLoss::SimPo { gamma: 0.5 } };
+        assert!(ok.validate().is_ok());
+        assert!(DpoConfig { beta_ablation: true, ..ok }.validate().unwrap_err().contains("beta_ablation"));
+        assert!(DpoConfig { loss: PairLoss::SimPo { gamma: -1.0 }, ..ok }.validate().unwrap_err().contains("gamma"));
+    }
+
     /// The anchor on the chosen answer adds `nll_weight` times its mean
     /// negative log-likelihood to the loss, and exactly that term's gradient
     /// to every chosen position's weight; the rejected row is untouched.
@@ -799,7 +961,7 @@ mod tests {
 
     #[test]
     fn a_pair_that_overruns_the_row_is_refused_not_truncated() {
-        let cfg = DpoConfig { beta: 0.1, seq_len: 5, nll_weight: 0.0, beta_ablation: false };
+        let cfg = DpoConfig { beta: 0.1, seq_len: 5, nll_weight: 0.0, beta_ablation: false, loss: PairLoss::Dpo };
         let fits = DpoPair { prompt: vec![1, 2], chosen: vec![3, 4, 5], rejected: vec![6, 7, 8] };
         assert!(pack_pair(&cfg, &fits, &[0.0; 3], &[0.0; 3]).is_ok(), "exactly full is allowed");
         let long = DpoPair { prompt: vec![1, 2], chosen: vec![3, 4, 5, 6], rejected: vec![6] };
@@ -811,7 +973,7 @@ mod tests {
 
     #[test]
     fn a_dpo_configuration_that_cannot_train_is_refused() {
-        let ok = DpoConfig { beta: 0.1, seq_len: 8, nll_weight: 0.0, beta_ablation: false };
+        let ok = DpoConfig { beta: 0.1, seq_len: 8, nll_weight: 0.0, beta_ablation: false, loss: PairLoss::Dpo };
         assert!(ok.validate().is_ok());
         for (field, cfg) in [
             ("beta", DpoConfig { beta: 0.0, ..ok }),
@@ -826,7 +988,7 @@ mod tests {
 
     #[test]
     fn the_constructors_return_a_typed_error_instead_of_panicking() {
-        let ok = DpoConfig { beta: 0.1, seq_len: 8, nll_weight: 0.0, beta_ablation: false };
+        let ok = DpoConfig { beta: 0.1, seq_len: 8, nll_weight: 0.0, beta_ablation: false, loss: PairLoss::Dpo };
         let source = |_: u64| None::<DpoPair>;
         let reference = |_: &DpoPair| (Vec::new(), Vec::new());
         assert!(matches!(Dpo::try_new(DpoConfig { beta: 0.0, ..ok }, source, reference), Err(DpoConfigError::Invalid(why)) if why.contains("beta")));
@@ -840,7 +1002,7 @@ mod tests {
     fn a_non_positive_beta_is_an_ablation_that_has_to_be_asked_for() {
         use model::training_plan::ValidatedTrainingPlan;
         let opts = model::FitOpts { block_size: 8, batch_size: 2, ..Default::default() };
-        let control = DpoConfig { beta: 0.0, seq_len: 8, nll_weight: 0.0, beta_ablation: false };
+        let control = DpoConfig { beta: 0.0, seq_len: 8, nll_weight: 0.0, beta_ablation: false, loss: PairLoss::Dpo };
         assert!(ValidatedTrainingPlan::build(opts.clone(), &[&control]).unwrap_err().to_string().contains("beta"));
         assert!(ValidatedTrainingPlan::build(opts.clone(), &[&DpoConfig { beta_ablation: true, ..control }]).is_ok());
         assert!(ValidatedTrainingPlan::build(opts.clone(), &[&DpoConfig { beta: f32::NAN, beta_ablation: true, ..control }]).is_err(), "not even an ablation takes a NaN");
