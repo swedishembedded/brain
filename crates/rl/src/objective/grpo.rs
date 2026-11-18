@@ -66,6 +66,27 @@ pub enum LossAgg {
     TokenSum,
 }
 
+impl LossAgg {
+    /// The name a served training request and the CLI use: `seq-mean` or `token-sum`.
+    pub fn name(self) -> &'static str {
+        match self {
+            LossAgg::SeqMean => "seq-mean",
+            LossAgg::TokenSum => "token-sum",
+        }
+    }
+}
+
+impl std::str::FromStr for LossAgg {
+    type Err = String;
+    fn from_str(s: &str) -> Result<LossAgg, String> {
+        match s {
+            "seq-mean" => Ok(LossAgg::SeqMean),
+            "token-sum" => Ok(LossAgg::TokenSum),
+            other => Err(format!("{other:?} is not a loss aggregation (seq-mean or token-sum)")),
+        }
+    }
+}
+
 /// Which distribution the importance ratio is taken in.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum RatioBasis {

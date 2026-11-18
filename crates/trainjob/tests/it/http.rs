@@ -165,3 +165,38 @@ async fn check_dataset_lists_per_record_counts_over_http_and_refuses_an_unbounde
     assert!(status == StatusCode::BAD_REQUEST || status == StatusCode::UNPROCESSABLE_ENTITY, "{status}");
     assert!(String::from_utf8_lossy(&response).contains("limit"), "{}", String::from_utf8_lossy(&response));
 }
+
+/// A caller records the full settings of a run from `GET /v1/capabilities`: every objective setting the request may
+/// omit declares the default the trainer applies, the same map the trainer's configuration gives.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_capabilities_declare_the_defaults_the_trainer_applies() {
+    let rig = rig("http-caps", 16 << 30, true);
+    let app = router(AppState::new(rig.exec.clone(), KEY, Provider::OpenAI).with_training(true));
+    let (status, body) = call(&app, Method::GET, "/v1/capabilities", Some(KEY), None).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let caps = json_of(&body);
+    let action = caps["data"].as_array().expect("a list of actions").iter().find(|a| a["model"] == trainjob::MODEL && a["action"] == trainjob::ACTION).expect("brain/train's train action is listed");
+    let declared: serde_json::Map<String, Value> = action["params"].as_array().unwrap().iter().filter_map(|p| Some((p["name"].as_str()?.to_string(), p.get("implied_default")?.clone()))).collect();
+    assert_eq!(declared, trainjob::request::implied_defaults());
+    assert_eq!(declared["clip_eps"], json!(0.2), "a decimal, not the widened f32");
+}
+
+/// A full fine-tune whose precision its architecture does not run is a 400 at submission, not a job that fails once
+/// queued; `validate_only` answers the settings the run would train with.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_full_fine_tune_the_trainer_would_refuse_is_refused_at_submission() {
+    let rig = rig_qwen3("http-full-check", 16 << 30);
+    let app = router(AppState::new(rig.exec.clone(), KEY, Provider::OpenAI).with_training(true));
+    let train = data_digest(&rig, &plain());
+    let data = json!({"train": {"digest": train.hex()}}).to_string();
+    let body = |params: Value| json!({"model": trainjob::MODEL, "action": trainjob::consolidate::FULL_ACTION, "params": params});
+
+    let (status, refused) = call(&app, Method::POST, "/v1/run", Some(KEY), Some(body(json!({"base": BASE, "data": data, "train_precision": "weights=f32"})))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{}", String::from_utf8_lossy(&refused));
+    assert!(String::from_utf8_lossy(&refused).contains("weights=f32"));
+
+    let (status, checked) = call(&app, Method::POST, "/v1/run", Some(KEY), Some(body(json!({"base": BASE, "data": data, "max_block": 128, "validate_only": true})))).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&checked));
+    assert_eq!(json_of(&checked)["outputs"]["status"], "valid");
+    assert!(work_is_clean(&rig.work_root));
+}

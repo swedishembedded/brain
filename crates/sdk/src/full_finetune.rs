@@ -348,6 +348,51 @@ impl ChatFullFineTune {
         }
     }
 
+    /// Check these settings against the base's architecture before anything is trained: the base resolves, its
+    /// architecture has a full-parameter chat trainer that takes every option asked for, `exit_entropy` is one the
+    /// architecture can use, and the optimiser's plan (`train_precision`, `lr`, `weight_decay`, `grad_accum`, the steps
+    /// and the row length) is one the trainer accepts. Only the base's config is read: no weight and no dataset, so a
+    /// scheduler can refuse a run that would fail before it is queued. [`Self::run_with`] makes the same checks.
+    ///
+    /// # Errors
+    /// The refusal [`Self::run_with`] would give for the same settings, before it reads anything else.
+    pub fn check(&self) -> Result<ChatFullFineTunePlan> {
+        let (_, model_dir, _) = self.resolve_base()?;
+        let chat = self.chat_for(&model_dir)?;
+        let block = self.max_block.unwrap_or(crate::finetune::MIN_BLOCK);
+        let (_, exit_entropy) = self.plan(&chat, block, self.seed.unwrap_or_default())?;
+        Ok(ChatFullFineTunePlan { arch: self.arch_of(&model_dir).to_string(), exit_entropy, block, lr: self.lr, weight_decay: self.weight_decay })
+    }
+
+    /// The base this run trains, resolved in the model store: refused by name when it is not there, or when a named
+    /// architecture's trainer does not take an option asked for (before anything is read).
+    fn resolve_base(&self) -> Result<(PathBuf, PathBuf, String)> {
+        if let Some(named) = self.arch.as_deref() {
+            self.refuse_options(&chat_entry(named)?)?;
+        }
+        let store_root = loader::model_dir::resolve(self.models_dir.as_deref());
+        loader::model_dir::resolve_base(&self.base, store_root.as_deref()).map_err(Error::ModelNotFound)
+    }
+
+    /// The architecture's chat trainer for the base in `model_dir`, holding it to every option asked for.
+    fn chat_for(&self, model_dir: &Path) -> Result<crate::chat_trainer::ChatEntry> {
+        let chat = chat_entry(self.arch_of(model_dir))?;
+        self.refuse_options(&chat)?;
+        if self.grad_accum == 0 {
+            return Err(Error::Backend("ChatFullFineTune: grad_accum must be at least 1".to_string()));
+        }
+        Ok(chat)
+    }
+
+    /// The optimiser's validated options for rows of `block` tokens, and the exit-entropy weight they carry.
+    fn plan(&self, chat: &crate::chat_trainer::ChatEntry, block: u32, seed: u64) -> Result<(model::FitOpts, f32)> {
+        chat.train_precision.check(&self.precision).map_err(|why| Error::Backend(format!("ChatFullFineTune: {why}")))?;
+        let exit_entropy = exit_entropy_for(chat, self.exit_entropy, FINE_TUNE_EXIT_ENTROPY)?;
+        let requested = model::FitOpts { grad_accum: self.grad_accum, strict_updates: self.strict_updates, weight_decay: self.weight_decay, precision: self.precision.clone(), stages: self.stages, native_sparse: self.native_sparse, exit_entropy, ..fit_opts(self.steps, block, self.lr, seed) };
+        let opts = model::training_plan::ValidatedTrainingPlan::build(requested, &[]).map_err(|e| Error::Backend(format!("ChatFullFineTune: {e}")))?.into_opts();
+        Ok((opts, exit_entropy))
+    }
+
     /// Run to completion.
     pub fn run(&self) -> Result<ChatFullFineTuneOutcome> {
         self.run_with(&CancelToken::default(), |_| {})
@@ -360,18 +405,10 @@ impl ChatFullFineTune {
         let run_clock = std::time::Instant::now();
         // A named architecture, and every option it refuses, are refused before anything is read; an
         // architecture read from the checkpoint is held to the same refusals once the base is resolved.
-        if let Some(named) = self.arch.as_deref() {
-            self.refuse_options(&chat_entry(named)?)?;
-        }
-        let store_root = loader::model_dir::resolve(self.models_dir.as_deref());
-        let (weights, model_dir, base_id) = loader::model_dir::resolve_base(&self.base, store_root.as_deref()).map_err(Error::ModelNotFound)?;
-        let chat = chat_entry(self.arch_of(&model_dir))?;
-        self.refuse_options(&chat)?;
+        let (weights, model_dir, base_id) = self.resolve_base()?;
+        let chat = self.chat_for(&model_dir)?;
         let dataset = self.dataset.as_deref().ok_or_else(|| Error::MissingArgument("ChatFullFineTune: no dataset; call .dataset(path)".to_string()))?;
         let out_dir = self.out_dir.as_deref().ok_or_else(|| Error::MissingArgument("ChatFullFineTune: no out directory; call .out_dir(path)".to_string()))?;
-        if self.grad_accum == 0 {
-            return Err(Error::Backend("ChatFullFineTune: grad_accum must be at least 1".to_string()));
-        }
         let open = (chat.checkpoint_path)(&weights, &model_dir);
 
         let (tok, tmpl) = tokenizer_and_template(&model_dir)?;
@@ -406,9 +443,7 @@ impl ChatFullFineTune {
         plan_before_load(&open, block, &set)?;
 
         let seed = resolve_seed(self.seed, self.resume_state.as_deref())?;
-        let exit_entropy = exit_entropy_for(&chat, self.exit_entropy, FINE_TUNE_EXIT_ENTROPY)?;
-        let requested = model::FitOpts { grad_accum: self.grad_accum, strict_updates: self.strict_updates, weight_decay: self.weight_decay, precision: self.precision.clone(), stages: self.stages, native_sparse: self.native_sparse, exit_entropy, ..fit_opts(self.steps, block, self.lr, seed) };
-        let opts = model::training_plan::ValidatedTrainingPlan::build(requested, &[]).map_err(|e| Error::Backend(format!("ChatFullFineTune: {e}")))?.into_opts();
+        let (opts, exit_entropy) = self.plan(&chat, block, seed)?;
         let digest_clock = std::time::Instant::now();
         let base_digest = base_digest(&open)?;
         model::finetune::stage_time("sdk: digest the base weights", digest_clock);
@@ -541,6 +576,21 @@ impl FullRun<'_> {
         }
         Ok(trained)
     }
+}
+
+/// What a full fine-tune of some settings would train with, as [`ChatFullFineTune::check`] found it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChatFullFineTunePlan {
+    /// The registry id of the architecture whose trainer would run.
+    pub arch: String,
+    /// The weight of the exit-distribution entropy in the objective (0 for an architecture without exit gates).
+    pub exit_entropy: f32,
+    /// The row length the plan was checked at: the longest row allowed.
+    pub block: u32,
+    /// The peak learning rate.
+    pub lr: f32,
+    /// AdamW's weight decay.
+    pub weight_decay: f32,
 }
 
 /// What one full fine-tune did. Anything not measured is `None`.

@@ -202,11 +202,11 @@ pub use rl::objective::numerics::{NumericsBounds, NumericsReport};
 #[cfg(feature = "study")]
 pub use rl::objective::grpo::LossAgg;
 #[cfg(feature = "study")]
-pub use finetune::{emit_held_out_records, score_chat, score_tokens, score_tokens_qwen35, HeldOutRecords, ChatFineTune, ChatFineTuneOutcome, FineTuneProgress, TrainFootprint, FineTuneStatus, HeldOutScore, MonitorPoint, PolicyGradientOutcome, RecordReadout, Selection, TokenReadout, TokenScore};
+pub use finetune::{DEFAULT_LORA_LR, DEFAULT_LORA_RANK, LORA_WEIGHT_DECAY, emit_held_out_records, score_chat, score_tokens, score_tokens_qwen35, HeldOutRecords, ChatFineTune, ChatFineTuneOutcome, FineTuneProgress, TrainFootprint, FineTuneStatus, HeldOutScore, MonitorPoint, PolicyGradientOutcome, RecordReadout, Selection, TokenReadout, TokenScore};
 #[cfg(feature = "study")]
 mod full_finetune;
 #[cfg(feature = "study")]
-pub use full_finetune::{merge_adapter, ChatFullFineTune, ChatFullFineTuneOutcome, MergedCheckpoint, FINE_TUNE_EXIT_ENTROPY};
+pub use full_finetune::{merge_adapter, ChatFullFineTune, ChatFullFineTuneOutcome, ChatFullFineTunePlan, MergedCheckpoint, FINE_TUNE_EXIT_ENTROPY};
 #[cfg(feature = "study")]
 pub mod from_scratch;
 #[cfg(feature = "study")]
@@ -232,7 +232,7 @@ pub mod preference_dataset;
 #[cfg(feature = "study")]
 pub mod dataset_report;
 #[cfg(feature = "study")]
-pub use preference::{score_preference, PreferenceFineTune, PreferenceFineTuneOutcome, PreferenceScore, DEFAULT_DPO_BETA, PAIR_ROWS};
+pub use preference::{score_preference, PreferenceFineTune, PreferenceFineTuneOutcome, PreferenceScore, DEFAULT_DPO_BETA, DEFAULT_DPO_KEEP_REASONING, DEFAULT_DPO_NLL_WEIGHT, PAIR_ROWS};
 #[cfg(feature = "study")]
 pub use preference_dataset::{validate_preference_dataset, validate_preference_dataset_for, PreferenceDatasetSummary};
 

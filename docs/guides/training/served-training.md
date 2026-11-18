@@ -32,9 +32,16 @@ Two more actions of `brain/train` produce a checkpoint instead of an adapter.
   `thinking`, `arch`, `replay_share`, `train_precision` (`key=value,...`, e.g. `state=int8,sr=on`: what each
   trainable parameter, its gradient and its optimiser state are stored as; fp32 everywhere by default, and an unknown
   key or value is refused before anything loads), `install_as`, `resume_key`, `checkpoint_every` (below),
-  `exit_entropy` (below).
+  `exit_entropy` (below), `validate_only`. Every setting the trainer would refuse without reading a weight (an
+  architecture option, a `train_precision` the architecture does not run, an `exit_entropy` for a model without exit
+  gates, an optimiser plan that does not hold, a run larger than the largest card) is refused at submission, a 400
+  or a bus error. `validate_only: true` makes those checks and answers `{"status": "valid", "arch", "steps",
+  "grad_accum", "max_block", "lr", "weight_decay", "exit_entropy", "train_precision", "device_bytes", "footprint"}`
+  without training: host work that takes no card. The dataset's records are checked by `check_dataset`.
 - **`merge`** folds a LoRA adapter into the weights it targets (`W + alpha/r B A`). The adapter is the input blob
-  `adapter` or `adapter_digest` (exactly one); the work is host-side and takes no card.
+  `adapter` or `adapter_digest` (exactly one); the work is host-side and takes no card. Host-side work (a merge,
+  `init_model`, `check_dataset`, a `validate_only` check) runs in host memory whatever `--device` the server was
+  given, a server of one card included.
 
 A checkpoint is a directory and an artifact is one file, so a checkpoint leaves as a **manifest**: each file is
 published to the artifact store by digest, and the manifest, `{"format": "brain-checkpoint-manifest-v1", "files":
@@ -207,7 +214,7 @@ No dataset or adapter travels through the API as a message body.
 | `base` | the base model, `<vendor>/<repo>` in the model store (required) |
 | `data` | a JSON document naming the datasets (required), below |
 | `objective` | `sft` (default), `policy_gradient` or `dpo` |
-| `steps`, `grad_accum`, `rank`, `alpha`, `lr`, `weight_decay`, `seed` | the optimiser's settings; what is not named is the trainer's own default |
+| `steps`, `grad_accum`, `rank`, `alpha`, `lr`, `weight_decay`, `seed` | the optimiser's settings; what is not named is the trainer's own default, which `GET /v1/capabilities` lists as the param's `implied_default` |
 | `strict_updates` | abort at the first optimiser step whose loss or gradient is not finite (default off: such a step is skipped, the weights untouched, and the run aborts on the third in a row) |
 | `max_block` | the longest training row in tokens (default 8192). The memory reserved for the run is sized to it and a longer record is refused by name |
 | `thinking`, `pack_answers` | how records are rendered |
@@ -215,7 +222,7 @@ No dataset or adapter travels through the API as a message body.
 | `eval_every`, `patience`, `replay_share`, `keep_evaluations` | monitoring and early stopping |
 | `adapter_id` | the id on the adapter's card, an adapter model reference `<vendor>/<repo>:<owner>:<name>:<tag>` (any other id is refused before the run, since a server would not offer the adapter under it) |
 | `return_adapter` | also return the adapter as an output blob (D-Bus) |
-| `clip_eps`, `kl_beta`, `reference`, `behaviour`, `loss_agg`, `temperature`, `teacher`, `advantage_bound`, `sequence_advantage_cap` | the policy-gradient objective's settings (only with `objective: policy_gradient`) |
+| `clip_eps`, `kl_beta`, `reference`, `behaviour`, `loss_agg`, `temperature`, `teacher`, `advantage_bound`, `sequence_advantage_cap` | the policy-gradient objective's settings (only with `objective: policy_gradient`). Each one's `implied_default` in `GET /v1/capabilities` is what the trainer applies when it is omitted (`brain::PolicyGradientConfig::default()`); one without (`clip_eps_high`, `max_step_kl`, `max_step_grad_norm`, `advantage_bound`, `sequence_advantage_cap`) is off unless named |
 | `behaviour` | where the importance ratio's behaviour log-probabilities come from. `recorded` (default): the sampler's own `behavior_logprobs`, on every supervised token of every record with an advantage; a dataset missing any is refused. `start_of_run_proxy`: the start-of-run policy's where none was recorded, exact only if the rollouts were sampled from it; the training record states which was used |
 | `beta`, `nll_weight`, `keep_reasoning` | the preference objective's settings (only with `objective: dpo`): the loss temperature (default 0.1), the weight of the supervised likelihood of the chosen answer added to it (default 0) and whether the reasoning of each candidate is trained on |
 | `arch` | the base's architecture, only for a checkpoint directory with no `config.json` |

@@ -163,6 +163,9 @@ pub(crate) struct ChatEntry {
     pub native_sparse: bool,
     /// The family's model chooses its depth by exit gates and takes an exit-entropy weight ([`ChatTrainer::EXIT_GATES`]).
     pub exit_gates: bool,
+    /// What the family's full fine-tune runs of a train precision ([`ChatTrainer::TRAIN_PRECISION`]): checked before
+    /// a run is queued as well as when its trainer starts.
+    pub train_precision: model::TrainPrecisionSupport,
     /// The weight precision search over the trainable build of a base, on a prepared dataset.
     pub search: SearchFn,
     /// The held-out loss of a base built with its linears at a tier policy, on the deployed kernels, with an
@@ -200,6 +203,7 @@ impl ChatEntry {
             pipelined: T::PIPELINED,
             native_sparse: T::NATIVE_SPARSE,
             exit_gates: T::EXIT_GATES,
+            train_precision: T::TRAIN_PRECISION,
             search: search::<T>,
             measure: measure::<T>,
             served: model::finetune::served_loss::<T>,

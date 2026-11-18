@@ -62,6 +62,13 @@ const RECORD_FILE: &str = "training.json";
 /// the conventional DPO default.
 pub const DEFAULT_DPO_BETA: f32 = 0.1;
 
+/// The weight of the anchor on the chosen answer when [`PreferenceFineTune::nll_weight`] is not called: none, plain
+/// DPO.
+pub const DEFAULT_DPO_NLL_WEIGHT: f32 = 0.0;
+
+/// Whether each candidate's reasoning is trained on when [`PreferenceFineTune::keep_reasoning`] is not called.
+pub const DEFAULT_DPO_KEEP_REASONING: bool = false;
+
 /// The rows one step holds: the chosen and the rejected candidate of a pair share one forward.
 pub const PAIR_ROWS: u32 = 2;
 
@@ -119,15 +126,15 @@ impl PreferenceFineTune {
             rank: None,
             alpha: None,
             beta: DEFAULT_DPO_BETA,
-            nll_weight: 0.0,
+            nll_weight: DEFAULT_DPO_NLL_WEIGHT,
             grad_accum: 1,
             strict_updates: false,
             beta_ablation: false,
             stages: 0,
             native_sparse: None,
-            keep_reasoning: false,
+            keep_reasoning: DEFAULT_DPO_KEEP_REASONING,
             steps: 100,
-            lr: 3e-4,
+            lr: crate::finetune::DEFAULT_LORA_LR,
             seed: None,
             max_block: None,
             checkpoint_every: 0,

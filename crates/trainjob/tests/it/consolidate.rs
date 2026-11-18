@@ -8,7 +8,7 @@
 use serde_json::{json, Value};
 use trainjob::consolidate::{full_spec, merge_spec, FULL_ACTION, MERGE_ACTION};
 
-use crate::support::{assert_reservation_returned, data_digest, plain, rig_qwen3, run, run_action, work_is_clean, Frames, BASE};
+use crate::support::{assert_reservation_returned, data_digest, plain, rig_qwen3, rig_qwen3_on, run, run_action, work_is_clean, Frames, BASE};
 
 /// The files of a published checkpoint, each verified against the digest the manifest names.
 fn published_files(rig: &crate::support::Rig, report: &Value) -> std::collections::BTreeMap<String, Vec<u8>> {
@@ -111,6 +111,34 @@ fn checkpoint_jobs_refuse_what_is_not_a_digest_a_blob_or_a_plain_name_before_any
     assert!(frames.events().is_empty() && work_is_clean(&rig.work_root));
     assert!(!rig.dir.join("models").join("local").join("x y").exists());
     assert!(rig.exec.residency().placements.is_empty());
+}
+
+/// `validate_only` answers what a full fine-tune would train with, without training and without a card (on a server
+/// given only one); a setting the trainer would refuse (a precision the architecture does not run, an exit entropy for
+/// a model without exit gates) is refused at admission, before any work, whether the request trains or only checks.
+#[test]
+fn a_full_fine_tune_checks_its_settings_before_it_is_queued() {
+    let rig = rig_qwen3_on("full-check", 16 << 30, &[3], false);
+    let train = data_digest(&rig, &plain());
+    let data = json!({"train": {"digest": train.hex()}}).to_string();
+    let frames = Frames::default();
+    let report = run_action(&rig, FULL_ACTION, &full_spec(), json!({"base": BASE, "data": data, "validate_only": true, "max_block": 128, "train_precision": "state=int8,sr=on", "lr": 1e-4}), &[], &frames).expect("the check").outputs;
+    assert_eq!((report["status"].as_str(), report["arch"].as_str(), report["max_block"].as_u64(), report["train_precision"].as_str()), (Some("valid"), Some("qwen3"), Some(128), Some("state=int8,sr=on")), "{report}");
+    assert!((report["lr"].as_f64().unwrap() - 1e-4).abs() < 1e-9 && report["device_bytes"].as_u64().is_some_and(|b| b > 0), "{report}");
+    assert!(frames.events().is_empty(), "a check trains nothing");
+    assert!(work_is_clean(&rig.work_root));
+    assert_reservation_returned(&rig);
+
+    for (bad, named) in [(json!({"train_precision": "weights=f32"}), "weights=f32"), (json!({"exit_entropy": 0.1}), "exit gates")] {
+        for validate_only in [true, false] {
+            let mut params = json!({"base": BASE, "data": data, "max_block": 128, "validate_only": validate_only});
+            params.as_object_mut().unwrap().extend(bad.as_object().unwrap().clone());
+            let e = run_action(&rig, FULL_ACTION, &full_spec(), params, &[], &frames).unwrap_err();
+            assert!(e.contains(named), "{bad} (validate_only {validate_only}): {e}");
+        }
+    }
+    assert!(frames.events().is_empty() && work_is_clean(&rig.work_root));
+    assert!(rig.exec.residency().placements.is_empty(), "nothing refused at admission was placed");
 }
 
 /// A server with no artifact store has nowhere to publish a checkpoint: it must be told to install it, and a merge

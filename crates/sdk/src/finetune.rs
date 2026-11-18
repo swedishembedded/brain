@@ -82,7 +82,7 @@ const RECORD_FILE: &str = "training.json";
 
 /// Training rows are at least this long, so a tiny dataset does not train on
 /// a degenerate row.
-const MIN_BLOCK: u32 = 64;
+pub(crate) const MIN_BLOCK: u32 = 64;
 
 /// The learning rate a scoring pass's [`model::FitOpts`] carries. Scoring takes
 /// no step, so the value is never applied; it is the fine-tune default's
@@ -585,7 +585,7 @@ impl ChatFineTune {
             weight_decay: LORA_WEIGHT_DECAY,
             cooldown_steps: None,
             steps: 100,
-            lr: 3e-4,
+            lr: DEFAULT_LORA_LR,
             seed: None,
             max_block: None,
             checkpoint_every: 0,
@@ -2115,7 +2115,7 @@ pub(crate) fn lora_shape(continue_from: Option<&Path>, rank: Option<u32>, alpha:
     tuning.validate().map_err(Error::Backend)?;
     let (rank, default_alpha, parent) = match continue_from {
         None => {
-            let rank = rank.unwrap_or(8);
+            let rank = rank.unwrap_or(DEFAULT_LORA_RANK);
             (rank, 2.0 * rank as f32, None)
         }
         Some(path) => {
@@ -2361,7 +2361,16 @@ fn mix_repeats(groups: &[(usize, f32)]) -> Result<Vec<usize>> {
 
 /// AdamW weight decay of a LoRA fine-tune unless named: none. The adapter
 /// starts at zero, so decay only pulls what it has learned back towards it.
-pub(crate) const LORA_WEIGHT_DECAY: f32 = 0.0;
+pub const LORA_WEIGHT_DECAY: f32 = 0.0;
+
+/// The LoRA rank of a fresh adapter unless named ([`ChatFineTune::rank`],
+/// [`crate::PreferenceFineTune::rank`]); a continued adapter keeps its own.
+pub const DEFAULT_LORA_RANK: u32 = 8;
+
+/// The peak learning rate of a LoRA fine-tune unless named, supervised, by
+/// policy gradient or by preference ([`ChatFineTune::lr`],
+/// [`crate::PreferenceFineTune::lr`]).
+pub const DEFAULT_LORA_LR: f32 = 3e-4;
 
 /// The warmup is this share of the steps, as the divisor: a twentieth.
 const WARMUP_DIVISOR: u32 = 20;

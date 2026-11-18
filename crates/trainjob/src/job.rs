@@ -252,12 +252,7 @@ fn fine_tune_for_footprint(base_dir: &Path, request: &Request) -> Result<brain::
     Ok(ft)
 }
 
-fn policy_gradient_config(params: &crate::request::Params) -> Result<brain::PolicyGradientConfig, String> {
-    let reference = |name: &str| match name {
-        "base" => Ok(brain::ReferencePolicy::Base),
-        "start" => Ok(brain::ReferencePolicy::StartOfRun),
-        other => Err(format!("train: {other:?} is not a reference policy (base or start)")),
-    };
+pub(crate) fn policy_gradient_config(params: &crate::request::Params) -> Result<brain::PolicyGradientConfig, String> {
     let mut config = brain::PolicyGradientConfig::default();
     if let Some(v) = params.clip_eps {
         config.clip_eps = v;
@@ -272,23 +267,19 @@ fn policy_gradient_config(params: &crate::request::Params) -> Result<brain::Poli
         config.kl_beta = v;
     }
     if let Some(v) = &params.reference {
-        config.reference = reference(v)?;
+        config.reference = v.parse().map_err(|e| format!("train: reference: {e}"))?;
     }
     if let Some(v) = &params.behaviour {
         config.behaviour = v.parse().map_err(|e| format!("train: {e}"))?;
     }
-    if let Some(v) = params.loss_agg.as_deref() {
-        config.loss_agg = match v {
-            "seq-mean" => brain::LossAgg::SeqMean,
-            "token-sum" => brain::LossAgg::TokenSum,
-            other => return Err(format!("train: {other:?} is not a loss aggregation (seq-mean or token-sum)")),
-        };
+    if let Some(v) = &params.loss_agg {
+        config.loss_agg = v.parse().map_err(|e| format!("train: loss_agg: {e}"))?;
     }
     if let Some(v) = params.temperature {
         config.temperature = v;
     }
     if let Some(v) = &params.teacher {
-        config.teacher = reference(v)?;
+        config.teacher = v.parse().map_err(|e| format!("train: teacher: {e}"))?;
     }
     config.advantage_bound = params.advantage_bound.or(config.advantage_bound);
     config.sequence_advantage_cap = params.sequence_advantage_cap.or(config.sequence_advantage_cap);

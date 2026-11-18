@@ -130,12 +130,16 @@ impl TrainResident {
         }
         self.check_digests(&request.data.digests())?;
         let base_dir = job::resolve_base(self.env.models_dir.as_deref(), &p.base)?;
-        let mut ft = brain::ChatFullFineTune::from_pretrained(job::utf8(&base_dir)?);
-        if let Some(arch) = &p.arch {
-            ft = ft.arch(arch.as_str());
-        }
+        // Every setting the trainer would refuse is refused here, before the run is queued: the architecture and its
+        // options, the precision, the optimiser's plan (knowledge #513).
+        let ft = consolidate::full_fine_tune(&base_dir, p)?;
+        ft.check().map_err(|e| format!("full_train: {e}"))?;
         let footprint = ft.footprint(p.max_block).map_err(|e| format!("full_train: {e}"))?;
         self.fits_a_card("full_train", footprint.device_bytes, &footprint.reason, p.max_block)?;
+        // A check trains nothing: it reads the base's config, host work that takes no card.
+        if p.validate_only {
+            return Ok(Reservation::Host(64 << 20));
+        }
         Ok(Reservation::Card(footprint.device_bytes))
     }
 
@@ -332,7 +336,9 @@ impl Instance for TrainInstance {
             timeline::ACTION => &mut || timeline::run(env, inv, progress),
             other => return Err(format!("{} has no action '{other}'", request::MODEL)),
         };
-        let trains = matches!(action, request::ACTION | consolidate::FULL_ACTION | pretrain::ACTION);
+        // A `full_train` that only checks its settings trains nothing: host work, never refused for a CPU placement.
+        let checks_only = inv.params.get("validate_only").and_then(serde_json::Value::as_bool).unwrap_or(false);
+        let trains = matches!(action, request::ACTION | consolidate::FULL_ACTION | pretrain::ACTION) && !checks_only;
         let allow_cpu = inv.params.get("allow_cpu").and_then(serde_json::Value::as_bool).unwrap_or(false);
         // The trainer reports a device failure (an allocation the card cannot hold) as a panic. One run's failure is
         // that run's error, not the server's.

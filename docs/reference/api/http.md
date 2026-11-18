@@ -313,13 +313,18 @@ present on every surface and behind the same key, hooks and admission:
 - `GET /v1/capabilities` lists every model's every action with its contract: params
   (type, default, range, allowed values), blob inputs and blob outputs, whether it
   streams progress (`streaming`) and whether it stops when cancelled (`cancellable`).
-  Clients are generated from it.
+  A param whose absence itself means something (a setting of one training objective,
+  a LoRA rank a continued adapter brings) has no `default`, which the server would
+  fill in, but may carry `implied_default`: the value the action applies when the
+  param is omitted, so a caller can record a run's full settings. Clients are
+  generated from it.
 - `GET /v1/devices` lists the devices the server schedules work on, as `{"object": "list", "host": {...}, "data":
   [...]}`. Each entry has `id` (`cpu`, `gpu<i>`, `npu<i>`: the names `--device` takes), `kind` and `memory`
   (`total_bytes`, `reserved_bytes` held back by the operator, `used_bytes` held by resident models and runs,
   `free_bytes`), and, for a card, `name`, `vendor_id`, `class` (`discrete`, `integrated`) and `backends` (which of
   `cuda`, `vulkan`, `wgpu` can drive it). `host` has the backend in use, the core count and the card and NPU counts.
-  It names no path, bus address or UUID of the machine. Per-card compute capability is not reported: it is known
+  It names no path, bus address or UUID of the machine. The `cpu` entry is the host's RAM, budgeted for host-side
+  work even when `--device` names only accelerators. Per-card compute capability is not reported: it is known
   only by opening the card, which the serving process does once, for the cards it serves on.
 - `POST /v1/run` runs one action and answers with its outputs and blobs.
 - `POST /v1/jobs` starts one in the background, for work too long to hold a request

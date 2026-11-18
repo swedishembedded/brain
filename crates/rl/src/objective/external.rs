@@ -169,6 +169,17 @@ impl ImportanceCorrection {
     }
 }
 
+impl std::fmt::Display for ImportanceCorrection {
+    /// The form [`std::str::FromStr`] reads: `none`, `truncate:<cap>` or `mask:<cap>`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ImportanceCorrection::None => f.write_str("none"),
+            ImportanceCorrection::Truncate { cap } => write!(f, "truncate:{cap}"),
+            ImportanceCorrection::Mask { cap } => write!(f, "mask:{cap}"),
+        }
+    }
+}
+
 impl std::str::FromStr for ImportanceCorrection {
     type Err = String;
     /// `none`, `truncate:<cap>` or `mask:<cap>`.
@@ -1214,6 +1225,21 @@ impl<M: Model> Objective<M> for ExternalPolicyGradient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Each setting's written form reads back as the same setting: what a served contract declares as a default is
+    /// a value the request accepts.
+    #[test]
+    fn the_written_settings_read_back() {
+        for importance in [ImportanceCorrection::None, ImportanceCorrection::Truncate { cap: 2.0 }, ImportanceCorrection::Mask { cap: 1.5 }] {
+            assert_eq!(importance.to_string().parse::<ImportanceCorrection>(), Ok(importance));
+        }
+        for agg in [LossAgg::SeqMean, LossAgg::TokenSum] {
+            assert_eq!(agg.name().parse::<LossAgg>(), Ok(agg));
+        }
+        for reference in [ReferencePolicy::Base, ReferencePolicy::StartOfRun] {
+            assert_eq!(reference.name().parse::<ReferencePolicy>(), Ok(reference));
+        }
+    }
 
     /// A run that draws fewer records than the dataset holds says how many it leaves unread; one that covers the
     /// dataset says nothing.

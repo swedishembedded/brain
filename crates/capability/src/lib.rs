@@ -130,11 +130,24 @@ pub struct ParamSpec {
     /// all: only a caller standing on this machine (`brain do`) may set it,
     /// and every off-machine surface refuses it ([`ActionSpec::validate_served`]).
     pub host_resolved: bool,
+    /// The value the action applies when a caller omits the param, declared so
+    /// a caller can record the full settings of a run, for a param whose
+    /// presence itself means something (it belongs to one objective, or it
+    /// conflicts with what a continued adapter brings): unlike
+    /// [`Self::default`], [`ActionSpec::validate`] never fills it in. Taken
+    /// from the structure the action itself defaults from, never restated.
+    pub implied_default: Option<Value>,
 }
 
 impl ParamSpec {
     pub fn new(name: &str, ty: ParamType, help: &str) -> ParamSpec {
-        ParamSpec { name: name.into(), ty, required: false, default: None, help: help.into(), min: None, max: None, step: None, host_env: None, host_resolved: false }
+        ParamSpec { name: name.into(), ty, required: false, default: None, help: help.into(), min: None, max: None, step: None, host_env: None, host_resolved: false, implied_default: None }
+    }
+    /// Declare what the action applies when the param is omitted, without
+    /// filling it in (see [`Self::implied_default`]).
+    pub fn implied_default(mut self, v: Value) -> ParamSpec {
+        self.implied_default = Some(v);
+        self
     }
     pub fn required(mut self) -> ParamSpec {
         self.required = true;
@@ -177,6 +190,7 @@ impl ParamSpec {
             "min": self.min, "max": self.max, "step": self.step,
             "host_env": self.host_env,
             "host_resolved": self.host_resolved,
+            "implied_default": self.implied_default,
         })
     }
 }
@@ -1345,6 +1359,16 @@ mod tests {
         assert!(spec.validate(Invocation::new().set("text", json!("x")).set("mode", json!("weird"))).is_err());
         // wrong type
         assert!(spec.validate(Invocation::new().set("text", json!(5))).is_err());
+    }
+
+    /// An implied default is declared to every caller and never filled in: the param's absence keeps its meaning.
+    #[test]
+    fn an_implied_default_is_declared_and_never_filled_in() {
+        let spec = ActionSpec::new("fit", "train").param(ParamSpec::new("kl_beta", ParamType::Float, "kl").implied_default(json!(0.02)));
+        assert_eq!(spec.to_json()["params"][0]["implied_default"], json!(0.02));
+        assert_eq!(spec.to_json()["params"][0]["default"], Value::Null);
+        let inv = spec.validate(Invocation::new()).unwrap();
+        assert!(inv.params.get("kl_beta").is_none(), "validate leaves an implied default out");
     }
 
     /// A declared range is a contract, not a UI hint: a value outside it is

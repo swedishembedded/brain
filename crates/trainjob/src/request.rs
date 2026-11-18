@@ -18,7 +18,7 @@
 
 use capability::{ActionSpec, BlobSpec, Invocation, Media, ParamSpec, ParamType};
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{json, Map, Value};
 
 use crate::store::Digest;
 
@@ -38,8 +38,52 @@ pub const MAX_EVALUATIONS: u32 = 1024;
 /// The longest adapter id accepted.
 pub const MAX_ADAPTER_ID_LEN: usize = 200;
 
+/// What the trainer applies to each LoRA and objective setting a request omits, by param name, read from the trainer's
+/// own defaults: [`brain::PolicyGradientConfig::default`] for the policy gradient, the preference trainer's and the
+/// LoRA fine-tunes' constants for the rest. `GET /v1/capabilities` declares each as the param's `implied_default`
+/// (never filled in: naming a setting of another objective is refused). A setting whose default is off (an unset
+/// `clip_eps_high`, `max_step_kl`, ...) has none.
+pub fn implied_defaults() -> Map<String, Value> {
+    // An f32 as the decimal it was written as, not its widened binary value (0.2, not 0.20000000298023224).
+    let float = |v: f32| v.to_string().parse::<f64>().map(Value::from).unwrap_or(Value::Null);
+    let pg = brain::PolicyGradientConfig::default();
+    let declared = [
+        ("rank", Some(json!(brain::DEFAULT_LORA_RANK))),
+        ("lr", Some(float(brain::DEFAULT_LORA_LR))),
+        ("weight_decay", Some(float(brain::LORA_WEIGHT_DECAY))),
+        ("clip_eps", Some(float(pg.clip_eps))),
+        ("clip_eps_high", pg.clip_eps_high.map(float)),
+        ("importance", Some(json!(pg.importance.to_string()))),
+        ("max_step_kl", pg.max_step_kl.map(float)),
+        ("max_step_grad_norm", pg.max_step_grad_norm.map(float)),
+        ("kl_beta", Some(float(pg.kl_beta))),
+        ("reference", Some(json!(pg.reference.name()))),
+        ("behaviour", Some(json!(pg.behaviour.name()))),
+        ("loss_agg", Some(json!(pg.loss_agg.name()))),
+        ("temperature", Some(float(pg.temperature))),
+        ("teacher", Some(json!(pg.teacher.name()))),
+        ("advantage_bound", pg.advantage_bound.map(float)),
+        ("sequence_advantage_cap", pg.sequence_advantage_cap.map(float)),
+        ("beta", Some(float(brain::DEFAULT_DPO_BETA))),
+        ("nll_weight", Some(float(brain::DEFAULT_DPO_NLL_WEIGHT))),
+        ("keep_reasoning", Some(json!(brain::DEFAULT_DPO_KEEP_REASONING))),
+    ];
+    declared.into_iter().filter_map(|(name, v)| Some((name.to_string(), v?))).collect()
+}
+
 /// What the training action is.
 pub fn action_spec() -> ActionSpec {
+    let mut spec = spec_without_defaults();
+    let defaults = implied_defaults();
+    for p in &mut spec.params {
+        if let Some(v) = defaults.get(&p.name) {
+            p.implied_default = Some(v.clone());
+        }
+    }
+    spec
+}
+
+fn spec_without_defaults() -> ActionSpec {
     let optional_f = |name: &str, help: &str, min: f64, max: f64| ParamSpec::new(name, ParamType::Float, help).min(min).max(max);
     let blob = |name: &str, help: &str| BlobSpec::new(name, Media::Bytes, help);
     let mut spec = ActionSpec::new(ACTION, "fine-tune a chat model's LoRA adapter on a chat dataset, by supervised imitation, by the clipped policy gradient on rollouts, or by direct preference optimization on chosen/rejected pairs (datasets in by blob or artifact digest, the adapter out by digest or blob)")
@@ -440,6 +484,37 @@ mod tests {
         assert!(!r.params.strict_updates, "a non-finite step is skipped by default");
         let strict = request(json!({"base": "Qwen/Qwen3.8-27B-FP8", "data": json!({"train": {"digest": digest(1)}}).to_string(), "strict_updates": true}), &[]).unwrap();
         assert!(strict.params.strict_updates);
+    }
+
+    /// What `GET /v1/capabilities` declares for an omitted setting is what the trainer applies: each declared default
+    /// is carried by its param and never filled in, a policy-gradient request naming every declared default builds
+    /// exactly the trainer's default configuration, and a setting left undeclared is one the trainer leaves off.
+    #[test]
+    fn the_declared_defaults_are_the_trainers_own() {
+        let spec = action_spec();
+        let defaults = implied_defaults();
+        for (name, value) in &defaults {
+            let p = spec.params.iter().find(|p| &p.name == name).unwrap_or_else(|| panic!("{name} is declared but no param of the action"));
+            assert_eq!((p.implied_default.as_ref(), p.default.as_ref()), (Some(value), None), "{name}: declared, never filled in");
+        }
+        let data = json!({"train": {"digest": digest(1)}}).to_string();
+        let mut params = json!({"base": "a/b", "data": data, "objective": "policy_gradient"});
+        let mut off = Vec::new();
+        for p in spec.params.iter().filter(|p| p.help.starts_with("policy gradient")) {
+            match defaults.get(&p.name) {
+                Some(v) => params[&p.name] = v.clone(),
+                None => off.push(p.name.as_str()),
+            }
+        }
+        let named = request(params, &[]).expect("every declared default is a value the action accepts");
+        assert_eq!(crate::job::policy_gradient_config(&named.params).unwrap(), brain::PolicyGradientConfig::default(), "the declared defaults are the trainer's");
+        let pg = brain::PolicyGradientConfig::default();
+        assert_eq!((pg.clip_eps_high, pg.max_step_kl, pg.max_step_grad_norm, pg.advantage_bound, pg.sequence_advantage_cap), (None, None, None, None, None));
+        assert_eq!(off, ["clip_eps_high", "max_step_kl", "max_step_grad_norm", "advantage_bound", "sequence_advantage_cap"], "only the settings the trainer leaves off are undeclared");
+        for p in spec.params.iter().filter(|p| p.help.starts_with("dpo:")) {
+            assert!(defaults.contains_key(&p.name), "{}: a preference setting declares its default", p.name);
+        }
+        assert_eq!(defaults["loss_agg"], json!(pg.loss_agg.name()), "read from the configuration, not the aggregation's own default");
     }
 
     #[test]

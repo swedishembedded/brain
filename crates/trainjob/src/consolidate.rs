@@ -117,6 +117,7 @@ pub fn full_spec() -> ActionSpec {
         .param(checkpoint_every_param())
         .param(allow_cpu_param())
         .param(exit_entropy_param(&brain::FINE_TUNE_EXIT_ENTROPY.to_string()))
+        .param(ParamSpec::new("validate_only", ParamType::Bool, "check the request against the base and its architecture's trainer (train_precision, lr, weight_decay, grad_accum, exit_entropy, arch, the memory the run needs) and answer with what the run would train with, without training: host work that takes no card. A setting the run would refuse is refused the same way, at submission").default(json!(false)))
         .input(blob("dataset", "the training records (`generic-messages-v2` JSONL)"));
     for name in crate::request::REPLAY_BLOBS {
         spec = spec.input(blob(name, "a replay dataset"));
@@ -157,6 +158,7 @@ pub struct FullParams {
     pub checkpoint_every: Option<u32>,
     pub allow_cpu: bool,
     pub exit_entropy: Option<f32>,
+    pub validate_only: bool,
 }
 
 /// A `full_train` request that passed the spec and every check that needs no file and no device.
@@ -363,11 +365,65 @@ pub(crate) fn checkpoint_outcome_of(env: &JobEnv, dir: &Path, install_as: Option
     Ok(result)
 }
 
+/// The full-parameter trainer of `p` over the base in `base_dir`, with every setting the request names that does not
+/// depend on a staged file: what admission checks ([`brain::ChatFullFineTune::check`]) and what the run trains with.
+pub(crate) fn full_fine_tune(base_dir: &Path, p: &FullParams) -> Result<brain::ChatFullFineTune, String> {
+    let mut ft = brain::ChatFullFineTune::from_pretrained(utf8(base_dir)?).steps(p.steps).grad_accum(p.grad_accum).strict_updates(p.strict_updates).thinking(p.thinking).max_block(p.max_block);
+    if let Some(arch) = &p.arch {
+        ft = ft.arch(arch.as_str());
+    }
+    if let Some(beta) = p.exit_entropy {
+        ft = ft.exit_entropy(beta);
+    }
+    if let Some(v) = p.lr {
+        ft = ft.lr(v);
+    }
+    if let Some(v) = p.weight_decay {
+        ft = ft.weight_decay(v);
+    }
+    if let Some(v) = p.replay_share {
+        ft = ft.replay_share(v);
+    }
+    if let Some(spec) = &p.train_precision {
+        ft = ft.train_precision(brain::TrainPrecision::parse(spec).map_err(|e| format!("full_train: train_precision: {e}"))?);
+    }
+    Ok(ft)
+}
+
+/// What `validate_only` answers: the settings the run would train with, as the trainer resolved them, and the memory
+/// it would reserve on a card.
+fn validation_report(p: &FullParams, plan: &brain::ChatFullFineTunePlan, footprint: &brain::TrainFootprint) -> Value {
+    json!({
+        "status": "valid",
+        "objective": "full_sft",
+        "base": p.base,
+        "arch": plan.arch,
+        "steps": p.steps,
+        "grad_accum": p.grad_accum,
+        "max_block": plan.block,
+        "lr": plan.lr,
+        "weight_decay": plan.weight_decay,
+        "exit_entropy": plan.exit_entropy,
+        "train_precision": p.train_precision.clone().unwrap_or_else(|| "fp32".to_string()),
+        "device_bytes": footprint.device_bytes,
+        "footprint": footprint.reason,
+    })
+}
+
 /// Runs the `full_train` job `inv` on the device this thread is scoped to.
 pub fn run_full(env: &JobEnv, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
     inv.cancel.check()?;
     let request = FullRequest::from_invocation(inv)?;
     let p = &request.params;
+    if p.validate_only {
+        let base_dir = job::resolve_base(env.models_dir.as_deref(), &p.base)?;
+        let ft = full_fine_tune(&base_dir, p)?;
+        let plan = ft.check().map_err(|e| format!("full_train: {e}"))?;
+        let footprint = ft.footprint(p.max_block).map_err(|e| format!("full_train: {e}"))?;
+        let mut outcome = Outcome::new();
+        outcome.outputs = validation_report(p, &plan, &footprint);
+        return Ok(outcome);
+    }
     let run = match open_run(env, FULL_ACTION, p.resume_key.as_deref(), inv, p.seed)? {
         Some(crate::runs::Opened::Completed(mut result)) => {
             result["resume"] = crate::runs::completed_report(p.resume_key.as_deref().unwrap_or_default());
@@ -386,27 +442,7 @@ pub fn run_full(env: &JobEnv, inv: &Invocation, progress: &mut dyn FnMut(Progres
         return Err("cancelled".into());
     }
     let out_dir = work.path().join("run");
-    let mut ft = brain::ChatFullFineTune::from_pretrained(utf8(&base_dir)?)
-        .placed(true)
-        .dataset(&staged.train)
-        .out_dir(&out_dir)
-        .steps(p.steps)
-        .grad_accum(p.grad_accum)
-        .strict_updates(p.strict_updates)
-        .thinking(p.thinking)
-        .max_block(p.max_block);
-    if let Some(arch) = &p.arch {
-        ft = ft.arch(arch.as_str());
-    }
-    if let Some(beta) = p.exit_entropy {
-        ft = ft.exit_entropy(beta);
-    }
-    if let Some(v) = p.lr {
-        ft = ft.lr(v);
-    }
-    if let Some(v) = p.weight_decay {
-        ft = ft.weight_decay(v);
-    }
+    let mut ft = full_fine_tune(&base_dir, p)?.placed(true).dataset(&staged.train).out_dir(&out_dir);
     match &run {
         Some(run) => ft = ft.seed(run.seed()).resume_state(run.state_path()).checkpoint_every(p.checkpoint_every.unwrap_or(crate::runs::DEFAULT_CHECKPOINT_EVERY)),
         None => {
@@ -414,12 +450,6 @@ pub fn run_full(env: &JobEnv, inv: &Invocation, progress: &mut dyn FnMut(Progres
                 ft = ft.seed(v);
             }
         }
-    }
-    if let Some(v) = p.replay_share {
-        ft = ft.replay_share(v);
-    }
-    if let Some(spec) = &p.train_precision {
-        ft = ft.train_precision(brain::TrainPrecision::parse(spec).map_err(|e| format!("full_train: train_precision: {e}"))?);
     }
     for path in &staged.replay {
         ft = ft.replay(path);
