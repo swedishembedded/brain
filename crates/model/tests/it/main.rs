@@ -104,6 +104,7 @@ mod ops_lowered_cost;
 mod ops_matmul_group;
 mod ops_matmul_step_identity;
 mod ops_nf4_weight;
+mod ops_act_rows;
 mod ops_int8_without_packed_dot;
 mod ops_two_level_act;
 mod ops_upload_from;

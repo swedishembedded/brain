@@ -2078,6 +2078,33 @@ impl Ops {
         Act { shared_scratch: true, ..act }
     }
 
+    /// Rows `[r0, r0 + rows)` of `act` (counted from its first row) as an activation of their own that shares its
+    /// packed form: a slab quantized once feeds linears that each read a row window of it (one stream of a joint
+    /// text/image slab, one sample of a batch) without a second quantization. The packed rows are addressed by
+    /// absolute row, so the window's first row `act`'s first row + `r0` keeps the 64-row binding alignment they need.
+    /// Forms a product derives from the f32 rows (bf16, E4M3, K-quant group sums, a two-level activation's second
+    /// level) are the window's own; one [`Ops::act`] deferred is made for the window's rows when a product needs it.
+    pub fn act_rows(&self, act: &Act, r0: u32, rows: u32) -> Act {
+        assert!(rows > 0 && r0 + rows <= act.m, "Ops::act_rows: rows [{r0}, {}) outside the activation's {} rows", r0 + rows, act.m);
+        let quant = act.quant.borrow().clone();
+        let xr0 = act.xr0 + r0;
+        assert!(quant.is_none() || xr0.is_multiple_of(64), "Ops::act_rows: a packed window must start on a 64-row boundary (row {xr0})");
+        Act {
+            x: act.x.clone(),
+            xr0,
+            m: rows,
+            k: act.k,
+            quant: std::cell::RefCell::new(quant),
+            quant_deferred: act.quant_deferred,
+            xgs: Default::default(),
+            bf16: Default::default(),
+            e4m3: Default::default(),
+            e4m3_row: Default::default(),
+            fine: act.fine.as_ref().map(|_| Default::default()),
+            shared_scratch: act.shared_scratch,
+        }
+    }
+
     /// Whether this device executes any packed-int8 product kernel for `rows` rows of width `k`. The selector never
     /// answers empty: a device without the packed dot (`caps.numeric.int8_dot`) is offered `Reference` alone, which no
     /// int8 tier has a kernel for.
