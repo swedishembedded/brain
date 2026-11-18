@@ -632,7 +632,7 @@ lowers the probability of its action, a positive one raises it.
   a supervised one); they train through the same vision path.
 
 ```rust
-use brain::{AdvantageNorm, BehaviourSource, ChatFineTune, ImportanceCorrection, LossAgg, PolicyGradientConfig, ReferencePolicy, TruncatedRollouts};
+use brain::{AdvantageFloor, AdvantageNorm, BehaviourSource, ChatFineTune, ImportanceCorrection, LossAgg, PolicyGradientConfig, ReferencePolicy, TruncatedRollouts};
 
 let outcome = ChatFineTune::from_pretrained("Qwen/Qwen3.8-27B-FP8")
     .arch("qwen35")
@@ -658,6 +658,7 @@ let outcome = ChatFineTune::from_pretrained("Qwen/Qwen3.8-27B-FP8")
         advantage_bound: Some(5.0),            // clip each token's teacher advantage to [-5, 5]; None for none
         sequence_advantage_cap: Some(50.0),    // cap a sequence's summed |A_t| by scaling it down; None for none
         advantage_norm: AdvantageNorm::MeanCentered, // or ZScore, LeaveOneOut: how a group's rewards become advantages
+        advantage_floor: AdvantageFloor::None, // or Zero: clamp at 0 after the group's baseline (successes alone train)
         truncated: TruncatedRollouts::Mask,    // or Keep: a truncated rollout trains, its reward counted in its group
     })
     .run()?;

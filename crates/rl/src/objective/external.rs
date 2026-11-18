@@ -75,7 +75,7 @@ use data::rng::Rng;
 use model::training::{self, Capability, Unsupported};
 use model::{Batch, FitOpts, Model, ModelConfig, Objective, Split, StepVerdict, IGNORE};
 
-use super::advantage::{group_advantages_with, AdvantageNorm};
+use super::advantage::{group_advantages_with, AdvantageFloor, AdvantageNorm};
 use super::grpo::LossAgg;
 use super::grpo_stats::{NonFiniteSteps, MAX_CONSECUTIVE_NONFINITE};
 use super::grpo_term::ClipBand;
@@ -243,7 +243,7 @@ impl std::str::FromStr for BehaviourSource {
 /// once (an example is one call, or one answer, of its rollout); a truncated rollout takes no part and trains on
 /// nothing unless the run keeps it (`truncated`). A group that holds one rollout that takes part is refused, by the
 /// contract's rule (`group_of_one`), as are two examples of one rollout that disagree (`rollout_mismatch`).
-fn advantages(split: &data::chat_rollout::SplitRollouts, norm: AdvantageNorm, truncated: TruncatedRollouts) -> Result<Vec<f32>, String> {
+fn advantages(split: &data::chat_rollout::SplitRollouts, norm: AdvantageNorm, floor: AdvantageFloor, truncated: TruncatedRollouts) -> Result<Vec<f32>, String> {
     use data::chat_rollout::{group_members, GroupEntry, GroupFault, RecordRule};
     let graded: Vec<(usize, data::chat_rollout::Graded)> = split.examples.iter().enumerate().filter_map(|(e, r)| r.and_then(|r| r.graded).map(|g| (e, g))).collect();
     let entries: Vec<GroupEntry<u32, u32>> = graded.iter().map(|&(e, g)| GroupEntry { group: g.group, member: g.member, reward: g.reward, truncated: split.truncated[e] }).collect();
@@ -257,7 +257,7 @@ fn advantages(split: &data::chat_rollout::SplitRollouts, norm: AdvantageNorm, tr
     let mut by_member: HashMap<u32, f64> = HashMap::new();
     for members in groups.values() {
         let rewards: Vec<f64> = members.iter().map(|&(_, r)| r).collect();
-        by_member.extend(members.iter().map(|&(m, _)| m).zip(group_advantages_with(norm, &rewards)));
+        by_member.extend(members.iter().map(|&(m, _)| m).zip(floor.apply(group_advantages_with(norm, &rewards))));
     }
     if let Some(a) = by_member.values().find(|a| !(**a as f32).is_finite()) {
         return Err(format!("a group's rewards give the advantage {a}, which is not a finite f32; rescale the rewards"));
@@ -335,6 +335,9 @@ pub struct PolicyGradientConfig {
     pub sequence_advantage_cap: Option<f32>,
     /// How each group's rewards become the advantages of its rollouts.
     pub advantage_norm: AdvantageNorm,
+    /// What is done with those advantages once computed against the whole group ([`AdvantageFloor::Zero`]: a rollout
+    /// under the baseline sets it but carries no policy gradient; the KL term, when on, still reaches its tokens).
+    pub advantage_floor: AdvantageFloor,
     /// What a rollout marked `"truncated": true` does: [`TruncatedRollouts::Mask`] (the default) never trains and takes
     /// no part in its group (DAPO's overlong filtering); [`TruncatedRollouts::Keep`] trains with its reward counted.
     pub truncated: TruncatedRollouts,
@@ -342,7 +345,7 @@ pub struct PolicyGradientConfig {
 
 impl Default for PolicyGradientConfig {
     fn default() -> PolicyGradientConfig {
-        PolicyGradientConfig { clip_eps: 0.2, clip_eps_high: None, importance: ImportanceCorrection::None, max_step_kl: None, max_step_grad_norm: None, numerics: None, kv_roundtrip: None, kl_beta: 0.02, reference: ReferencePolicy::Base, behaviour: BehaviourSource::Recorded, loss_agg: LossAgg::SeqMean, temperature: 1.0, log_kl: true, teacher: ReferencePolicy::Base, advantage_bound: None, sequence_advantage_cap: None, advantage_norm: AdvantageNorm::MeanCentered, truncated: TruncatedRollouts::Mask }
+        PolicyGradientConfig { clip_eps: 0.2, clip_eps_high: None, importance: ImportanceCorrection::None, max_step_kl: None, max_step_grad_norm: None, numerics: None, kv_roundtrip: None, kl_beta: 0.02, reference: ReferencePolicy::Base, behaviour: BehaviourSource::Recorded, loss_agg: LossAgg::SeqMean, temperature: 1.0, log_kl: true, teacher: ReferencePolicy::Base, advantage_bound: None, sequence_advantage_cap: None, advantage_norm: AdvantageNorm::MeanCentered, advantage_floor: AdvantageFloor::None, truncated: TruncatedRollouts::Mask }
     }
 }
 
@@ -744,7 +747,7 @@ impl ExternalPolicyGradient {
                 None => format!("{}: the training split carries no rollouts, so a policy gradient would train every record as imitation; use the supervised objective, or prepare the dataset from records with a \"reward\" and \"group\"", dir.display()),
             }));
         };
-        let advantage = advantages(&recorded, cfg.advantage_norm, cfg.truncated).map_err(|why| invalid(format!("{}: {why}", dir.display())))?;
+        let advantage = advantages(&recorded, cfg.advantage_norm, cfg.advantage_floor, cfg.truncated).map_err(|why| invalid(format!("{}: {why}", dir.display())))?;
         let (behavior, truncated) = (recorded.behavior, recorded.truncated);
         let eligible: Vec<usize> = (0..starts.len()).filter(|&e| cfg.truncated.counts(truncated[e])).collect();
         if let Some(t) = behavior.iter().position(|b| b.is_infinite() || *b > 1e-3) {

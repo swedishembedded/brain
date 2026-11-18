@@ -66,6 +66,7 @@ pub fn implied_defaults() -> Map<String, Value> {
         ("sequence_advantage_cap", pg.sequence_advantage_cap.map(float)),
         ("advantage_norm", Some(json!(pg.advantage_norm.name()))),
         ("truncated", Some(json!(pg.truncated.name()))),
+        ("advantage_floor", Some(json!(pg.advantage_floor.name()))),
         ("beta", Some(float(brain::DEFAULT_DPO_BETA))),
         ("nll_weight", Some(float(brain::DEFAULT_DPO_NLL_WEIGHT))),
         ("keep_reasoning", Some(json!(brain::DEFAULT_DPO_KEEP_REASONING))),
@@ -133,6 +134,7 @@ fn spec_without_defaults() -> ActionSpec {
         .param(ParamSpec::new("top_k", ParamType::Int, "distill: the teacher's most likely tokens kept per position (default 16)").min(1.0).max(256.0).step(1.0))
         .param(optional_f("advantage_bound", "policy gradient with teacher contexts: each token's advantage is clipped to [-bound, bound]", 0.0, 1e6))
         .param(optional_f("sequence_advantage_cap", "policy gradient with teacher contexts: the most the magnitudes of a sequence's token advantages may sum to", 0.0, 1e9))
+        .param(ParamSpec::new("advantage_floor", ParamType::Enum(brain::AdvantageFloor::ALL.iter().map(|f| f.name().to_string()).collect()), "policy gradient: `none` (default) or `zero`: each advantage clamped at zero after it is computed against its whole group, so a rollout under the baseline sets it but carries no policy gradient (a positive-only run)"))
         .param(ParamSpec::new("truncated", ParamType::Enum(brain::TruncatedRollouts::ALL.iter().map(|t| t.name().to_string()).collect()), "policy gradient: what a rollout marked `truncated` does: `mask` (never trained, its reward takes no part in its group: DAPO's overlong filtering) or `keep` (trained, its reward counted)"))
         .param(ParamSpec::new("advantage_norm", ParamType::Enum(brain::AdvantageNorm::ALL.iter().map(|n| n.name().to_string()).collect()), "policy gradient: how each group's rewards become the advantages of its rollouts: `mean-centred` (r - mean), `z-score` ((r - mean) / (std + 1e-4)) or `leave-one-out` (r_i - the mean of the others)"))
         .param(optional_f("beta", "dpo, feedback: the temperature of the preference loss (default 0.1)", 0.0, 100.0))
@@ -361,6 +363,7 @@ pub struct Params {
     pub sequence_advantage_cap: Option<f32>,
     pub advantage_norm: Option<String>,
     pub truncated: Option<String>,
+    pub advantage_floor: Option<String>,
     pub beta: Option<f32>,
     pub nll_weight: Option<f32>,
     pub keep_reasoning: Option<bool>,
@@ -404,6 +407,7 @@ impl Request {
             (params.sequence_advantage_cap.is_some(), "sequence_advantage_cap"),
             (params.advantage_norm.is_some(), "advantage_norm"),
             (params.truncated.is_some(), "truncated"),
+            (params.advantage_floor.is_some(), "advantage_floor"),
         ]
         .into_iter()
         .filter_map(|(named, name)| named.then_some(name))
@@ -744,6 +748,19 @@ mod tests {
         assert!(pg(json!({"loss_agg": "constant-length", "loss_agg_length": 0})).is_err(), "the spec bounds the constant");
         let e = request(json!({"base": "a/b", "data": data, "loss_agg_length": 512}), &[]).unwrap_err();
         assert!(e.contains("loss_agg_length") && e.contains("sft"), "{e}");
+    }
+
+    /// The advantage floor on the wire: `none` (the trainer's default) or `zero`, a policy-gradient setting.
+    #[test]
+    fn the_advantage_floor_is_named_on_the_wire() {
+        let data = json!({"train": {"digest": digest(1)}}).to_string();
+        for f in brain::AdvantageFloor::ALL {
+            let named = request(json!({"base": "a/b", "data": data, "objective": "policy_gradient", "advantage_floor": f.name()}), &[]).unwrap();
+            assert_eq!(crate::job::policy_gradient_config(&named.params).unwrap().advantage_floor, f);
+        }
+        assert!(request(json!({"base": "a/b", "data": data, "objective": "policy_gradient", "advantage_floor": "clip"}), &[]).is_err());
+        let e = request(json!({"base": "a/b", "data": data, "advantage_floor": "zero"}), &[]).unwrap_err();
+        assert!(e.contains("advantage_floor") && e.contains("sft"), "{e}");
     }
 
     /// DAPO's truncated-rollout handling on the wire: `mask` (the trainer's default) or `keep`, a policy-gradient setting.

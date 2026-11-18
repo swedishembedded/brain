@@ -1276,6 +1276,7 @@ impl ChatFineTune {
                 "advantage_bound_bits": c.advantage_bound.map(f32::to_bits),
                 "sequence_advantage_cap_bits": c.sequence_advantage_cap.map(f32::to_bits),
                 "advantage_norm": c.advantage_norm.name(),
+                "advantage_floor": c.advantage_floor.name(),
                 "truncated": c.truncated.name(),
             })),
         });
@@ -1610,6 +1611,7 @@ impl PolicyGradientOutcome {
             "advantage_bound": c.advantage_bound,
             "sequence_advantage_cap": c.sequence_advantage_cap,
             "advantage_norm": c.advantage_norm.name(),
+            "advantage_floor": c.advantage_floor.name(),
             "truncated": c.truncated.name(),
             "kv_roundtrip": c.kv_roundtrip.map(|e| format!("{e:?}")),
         })

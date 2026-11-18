@@ -525,6 +525,12 @@ fn the_advantages_are_each_groups_rewards_under_the_runs_normalisation() {
         }
         assert_eq!(obj.stats().sequences_truncated, 1);
         by_norm.push((0..7).map(|e| f64::from(obj.advantage(e).unwrap())).collect::<Vec<_>>());
+        // The zero floor clamps what the whole group gave: the failures still set the baseline.
+        let floored = ExternalPolicyGradient::open(dir.path(), &opts(1, 1, 1e-2), PolicyGradientConfig { advantage_floor: rl::objective::advantage::AdvantageFloor::Zero, ..cfg }).unwrap();
+        for (e, w) in want.iter().enumerate() {
+            let got = f64::from(floored.advantage(e).unwrap());
+            assert!((got - w.max(0.0)).abs() <= 1e-6 * w.abs().max(1.0), "{norm:?} floored example {e}: {got} against {}", w.max(0.0));
+        }
     }
     let (centred, loo) = (&by_norm[0], &by_norm[2]);
     let (factor_a, factor_b) = (loo[0] / centred[0], loo[3] / centred[3]);

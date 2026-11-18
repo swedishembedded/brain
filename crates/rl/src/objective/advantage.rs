@@ -65,6 +65,46 @@ impl AdvantageNorm {
     }
 }
 
+/// What is done with a group-relative advantage once it is computed against the whole group.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AdvantageFloor {
+    /// Kept as computed: a rollout below its group's baseline is pushed down.
+    #[default]
+    None,
+    /// Clamped at zero: a rollout below the baseline still sets it (it took part in the group's statistics) but carries
+    /// no policy gradient of its own, so a positive-only run learns from successes alone.
+    Zero,
+}
+
+impl AdvantageFloor {
+    /// Both, in the order the wire lists them.
+    pub const ALL: [AdvantageFloor; 2] = [AdvantageFloor::None, AdvantageFloor::Zero];
+
+    /// The name on the wire (`advantage_floor`).
+    pub fn name(self) -> &'static str {
+        match self {
+            AdvantageFloor::None => "none",
+            AdvantageFloor::Zero => "zero",
+        }
+    }
+
+    /// The floor a wire name names.
+    ///
+    /// # Errors
+    /// The name is neither `none` nor `zero`.
+    pub fn parse(name: &str) -> Result<AdvantageFloor, String> {
+        AdvantageFloor::ALL.into_iter().find(|f| f.name() == name).ok_or_else(|| format!("advantage_floor {name:?} is neither \"none\" nor \"zero\""))
+    }
+
+    /// `advantages` (one group's, already computed against all of it) under this floor.
+    pub fn apply(self, advantages: Vec<f64>) -> Vec<f64> {
+        match self {
+            AdvantageFloor::None => advantages,
+            AdvantageFloor::Zero => advantages.into_iter().map(|a| a.max(0.0)).collect(),
+        }
+    }
+}
+
 /// Advantages of one group's `rewards` under `norm`.
 ///
 /// A group of one is the rejection-sampling/STaR degenerate case: there is
@@ -168,6 +208,27 @@ mod tests {
             assert_eq!(group_advantages_with(norm, &[1.0]), vec![1.0], "a group of one is the STaR case");
             assert!(group_advantages_with(norm, &[]).is_empty());
         }
+    }
+
+    /// L1: the floor clamps after the group's statistics are taken, so a failure still sets the baseline: rewards
+    /// [1, 0, 0, 0] centre to [0.75, -0.25, -0.25, -0.25], floored [0.75, 0, 0, 0] (not the [0, 0, 0, 0] a group of the
+    /// successes alone would give, nor the 1.0 of dropping the failures first).
+    #[test]
+    fn the_zero_floor_clamps_after_the_whole_group_set_the_baseline() {
+        let rewards = [1.0, 0.0, 0.0, 0.0];
+        for norm in AdvantageNorm::ALL {
+            let full = group_advantages_with(norm, &rewards);
+            let floored = AdvantageFloor::Zero.apply(full.clone());
+            assert_eq!(floored, full.iter().map(|a| a.max(0.0)).collect::<Vec<_>>(), "{norm:?}");
+            assert!(floored[0] > 0.0 && floored[1..].iter().all(|a| *a == 0.0), "{norm:?}: {floored:?}");
+            assert_eq!(AdvantageFloor::None.apply(full.clone()), full);
+        }
+        close(&AdvantageFloor::Zero.apply(group_advantages_with(AdvantageNorm::MeanCentered, &rewards)), &[0.75, 0.0, 0.0, 0.0], 1e-12);
+        for f in AdvantageFloor::ALL {
+            assert_eq!(AdvantageFloor::parse(f.name()), Ok(f));
+        }
+        assert!(AdvantageFloor::parse("clip").is_err());
+        assert_eq!(AdvantageFloor::default(), AdvantageFloor::None);
     }
 
     #[test]
