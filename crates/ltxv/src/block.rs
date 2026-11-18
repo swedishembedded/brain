@@ -77,6 +77,7 @@
 use gpu_core::{f, DeviceBuffer, Gpu, Step, Transient};
 use model::dispatch::LoraW;
 use model::lora::RuntimeLora;
+use model::ops::{Ops, Weight};
 use vae::blocks::Tensors;
 
 use crate::config::{LtxAudioDitConfig, LtxDitConfig, Stream};
@@ -96,7 +97,7 @@ use crate::rope::{apply_rope_step, ltx_rope_tables};
 // streams run the identical sequence, only dims/weights differ).
 // ---------------------------------------------------------------------------
 
-// Kernel-table indices (order matches KERNELS below).
+// Kernel-table indices (order matches INDEXED_KERNELS below; slots 11-14, 29 and 30 hold the quantized linears' kernels, which `model::ops::Ops` resolves by name).
 const K_MATMUL: usize = 0;
 const K_BIAS_ADD: usize = 1;
 const K_RMSNORM: usize = 2;
@@ -124,15 +125,6 @@ const K_ROPE2D: usize = 9;
 /// gated attention needs, so it composes from `matmul`+`sigmoid`+`mul`
 /// instead - see [`attention`]'s doc).
 const K_SIGMOID: usize = 10;
-/// The quantized-compute tier (int8/int4 - see [`QTier`]): dynamic group-wise
-/// activation quantization (`max_abs_row` -> `quant_pack`, the same recipe
-/// `crates/wan/src/block.rs`'s `QTier` path and `crates/model/src/int8.rs`'s
-/// `QuantRows` use) plus the two DP4A-family GEMMs. Appended so every index
-/// above is unchanged; unused (and therefore free) on a plain-f32 [`LtxBlock`].
-const K_MAX_ABS_ROW: usize = 11;
-const K_QUANT_PACK: usize = 12;
-const K_MATMUL_I8_DYN: usize = 13;
-const K_MATMUL_Q4_DYN: usize = 14;
 /// The fp32 fast-tier GEMM pair `linear()` now selects between via
 /// `model::block::gemm_variant` (Phase 8 finding: `linear()` used to
 /// hardcode `K_MATMUL`, the one-thread-per-output reference kernel,
@@ -229,21 +221,16 @@ const K_RMSNORM_ROWS: usize = 27;
 /// `lora_delta`: the accumulate half of a runtime LoRA correction
 /// (`model::dispatch::lora_rows_off`), `out += (x·Aᵀ)·Bᵀ`.
 const K_LORA_DELTA: usize = 28;
-/// `quant_residual_pack`: an int8 activation's second level - what the first
-/// drops, quantized and packed for [`qquant_linear`]'s second pass.
-const K_QUANT_RESIDUAL_PACK: usize = 29;
-/// `add`: `dst += src`, [`qquant_linear`]'s fold of the second level's product.
-const K_ADD: usize = 30;
 /// `attn_bias_groups`: an IC-LoRA reference's attention strength on the
 /// materialized scores ([`SelfAttnBias`]).
 const K_ATTN_BIAS_GROUPS: usize = 31;
 /// `flash_attn_bidir_bias`: the fused self-attention under the same bias.
 const K_FLASH_BIDIR_BIAS: usize = 32;
 
-/// Every kernel this block dispatches - all pre-existing except
+/// The kernels this crate dispatches by index - all pre-existing except
 /// [`K_ADALN_ROW`] and [`K_FLASH_CROSS_REG2`], all at their documented general
-/// contract.
-pub const KERNELS: [(&str, &str); 33] = [
+/// contract. [`KERNELS`] is this table followed by the shared façade's set.
+const INDEXED_KERNELS: [(&str, &str); 33] = [
     ("matmul", kernels::MATMUL),
     ("bias_add", kernels::BIAS_ADD),
     ("rmsnorm", kernels::RMSNORM),
@@ -281,6 +268,18 @@ pub const KERNELS: [(&str, &str); 33] = [
     ("attn_bias_groups", kernels::ATTN_BIAS_GROUPS),
     ("flash_attn_bidir_bias", kernels::FLASH_ATTN_BIDIR_BIAS),
 ];
+
+/// Every kernel a `Gpu` running this crate's blocks registers: [`INDEXED_KERNELS`] (whose positions the `K_*`
+/// constants name), then what [`model::ops::Ops`] resolves by name - the quantized linears dispatch through it, so
+/// the selector, not this crate, decides which packed-int8 kernel (or float-read decode) serves each product on the
+/// device. Each name once, [`INDEXED_KERNELS`]' spelling first.
+pub static KERNELS: std::sync::LazyLock<Vec<(&'static str, &'static str)>> = std::sync::LazyLock::new(|| {
+    let mut list = INDEXED_KERNELS.to_vec();
+    model::ops::extend_kernel_list(&mut list, model::ops::two_level_kernel_list());
+    // The float-read tile decode a device without a packed-int8 kernel reads its int8/int4 weights through.
+    model::ops::extend_kernel_list(&mut list, model::ops::frozen_base_kernels());
+    list
+});
 
 fn tget<'a>(w: &'a Tensors, name: &str) -> &'a [f32] {
     &w.get(name).unwrap_or_else(|| panic!("ltxv dit: missing weight {name}")).1
@@ -1700,6 +1699,16 @@ pub enum QTier {
     Int4,
 }
 
+impl QTier {
+    /// The weight storage tier this one's packed codes are, as `model::ops` names it.
+    fn dtype(self) -> gpu_core::select::Dtype {
+        match self {
+            QTier::Int8 => gpu_core::select::Dtype::I8,
+            QTier::Int4 => gpu_core::select::Dtype::Q4,
+        }
+    }
+}
+
 /// One quantized linear: packed weight + its per-output-row fp32 scale, plus
 /// the (never-quantized) fp32 bias - `None` for a bias-free linear (the main
 /// video FFN at `ff_bias=false`, `FfWeights`'s own convention).
@@ -2073,75 +2082,29 @@ impl QBlockWeights {
     }
 }
 
-/// Quantize `x` (`[rows, k]`) into `(xq, sx)` with fresh dynamic group
-/// scales - the shared activation-quant step every quantized linear below
-/// reads. `k` must be a multiple of 32 (`model::int8::GROUP`), the scale
-/// group of both sides.
-fn qquant(gpu: &Gpu, s: &mut Vec<Step>, x: &DeviceBuffer, xq: &DeviceBuffer, sx: &DeviceBuffer, rows: u32, k: u32) {
-    s.push(gpu.step(K_MAX_ABS_ROW, &[x, sx], &[rows, k], rows));
-    s.push(gpu.step(K_QUANT_PACK, &[x, sx, xq], &[rows, k], rows * k / 4));
+/// The shared quantized-product façade for one block forward, on its own handle of `gpu`'s device: it allocates the
+/// activation's packed rows and records the product the selector chose for the device.
+fn block_ops(gpu: &Gpu) -> Ops {
+    Ops::new(gpu.share()).unwrap_or_else(|e| panic!("ltxv: the quantized block's Gpu lacks the shared kernel set: {e}"))
 }
 
-/// `out = dequant(xq @ Wᵀ)`: one quantized GEMM, tier-dispatched, no bias -
-/// `xq`/`sx` must already hold an activation's quantization at this `(rows,
-/// k)` shape (from [`qquant`]).
-#[allow(clippy::too_many_arguments)]
-fn qgemm(gpu: &Gpu, s: &mut Vec<Step>, tier: QTier, xq: &DeviceBuffer, sx: &DeviceBuffer, w: &QLinear, out: &DeviceBuffer, rows: u32, k: u32, n: u32) {
-    match tier {
-        QTier::Int8 => s.push(gpu.dispatch(
-            K_MATMUL_I8_DYN,
-            &[xq, &w.w, sx, &w.sw, out],
-            &[rows, k / 4, n],
-            gpu_core::Dispatch::Workgroups(rows.div_ceil(128) * n.div_ceil(128)),
-        )),
-        // `k` here is the LOGICAL (undivided) K - see `matmul_q4_dyn.wgsl`'s
-        // own doc, `crates/wan/src/block.rs::qlinear`'s int4 branch.
-        QTier::Int4 => s.push(gpu.step(K_MATMUL_Q4_DYN, &[xq, &w.w, sx, &w.sw, out], &[rows, k, n], rows * n)),
-    }
-}
-
-/// Rows of [`qquant_linear`]'s second level per pass: bounds its two
-/// temporaries (packed residual and its product) to `ROWS·(k + 4n)` bytes,
-/// 80 MiB at LTX-2.5's widest FF shape, whatever the token count. A multiple
-/// of 64 rows keeps every sliced binding offset 256-byte aligned for any `k`
-/// that is a multiple of 32.
-pub const FINE_ROWS: u32 = 1024;
-
-/// [`qquant`] + [`qgemm`] in one call, with the activation quantized in two
-/// int8 levels: `x ≈ s₁·q₁ + s₂·q₂`, the second level quantizing what the
-/// first rounds away (`quant_residual_pack`), each multiplied by the same
-/// packed weight and summed. One level alone leaves each group's rounding
-/// error at up to half its step - enough to hold one real LTX-2.5 block at
-/// cosine 0.996 against fp32 - and that error compounds through 48 blocks and
-/// every step. Two levels bring it to ~1/(127·254) of the group scale, so the
-/// quantized linear computes what the checkpoint's own weights do. The bias
-/// and any runtime adapter are added once.
+/// One quantized linear: `out = x @ Wᵀ (+ bias) (+ adapter)`, the product chosen by the shared
+/// [`model::ops::Ops`] selector for the device and shape.
 ///
-/// Memory is the single-level linear's plus a bounded slab: the first level's
-/// product goes straight into `out`, and the second level is quantized,
-/// multiplied and folded in [`FINE_ROWS`]-row passes, so no `[rows, k]` f32
-/// residual or extra `[rows, n]` product ever exists - at 1280×704 those
-/// would be 770 MiB each, more than a two-stage forward has to spare.
+/// The activation is quantized in two int8 levels: `x ≈ s₁·q₁ + s₂·q₂`, the second level quantizing what the
+/// first rounds away, each multiplied by the same packed weight and summed ([`Ops::act_two_level`], whose
+/// second-level product runs in [`model::ops::TWO_LEVEL_PASS_ROWS`]-row passes so no `[rows, k]` f32 residual or
+/// extra `[rows, n]` product ever exists - at 1280×704 those would be 770 MiB each, more than a two-stage forward
+/// has to spare). One level alone leaves each group's rounding error at up to half its step - enough to hold one
+/// real LTX-2.5 block at cosine 0.996 against fp32 - and that error compounds through 48 blocks and every step.
+/// Two levels bring it to ~1/(127·254) of the group scale, so the quantized linear computes what the checkpoint's
+/// own weights do. A device with no packed-int8 kernel reads the same weights through the float-read tile decode
+/// instead (see `Ops::matmul`). The bias and any runtime adapter are added once.
 #[allow(clippy::too_many_arguments)]
-fn qquant_linear(gpu: &Gpu, s: &mut Vec<Step>, tier: QTier, x: &DeviceBuffer, w: &QLinear, out: &DeviceBuffer, rows: u32, k: u32, n: u32) {
-    let xq = gpu.storage((rows * k / 4) as u64);
-    let sx = gpu.storage(model::int8::act_scale_len(rows as usize, k as usize) as u64);
-    qquant(gpu, s, x, &xq, &sx, rows, k);
-    qgemm(gpu, s, tier, &xq, &sx, w, out, rows, k, n);
-    let slab = rows.min(FINE_ROWS);
-    let rq = gpu.storage((slab * k / 4) as u64);
-    let rs = gpu.storage(model::int8::act_scale_len(slab as usize, k as usize) as u64);
-    let fine = gpu.storage((slab * n) as u64);
-    for r0 in (0..rows).step_by(FINE_ROWS as usize) {
-        let m = (rows - r0).min(FINE_ROWS);
-        let (r0, m64) = (r0 as u64, m as u64);
-        let xo = (r0 * k as u64, m64 * k as u64);
-        let so = model::int8::act_scale_range(r0 as u32, m, k);
-        s.push(gpu.step_sliced(K_QUANT_RESIDUAL_PACK, &[x, &sx, &rq, &rs], &[xo, so, (0, m64 * k as u64 / 4), (0, so.1)], &[m, k], m * k / 32));
-        qgemm(gpu, s, tier, &rq, &rs, w, &fine, m, k, n);
-        let oo = (r0 * n as u64, m64 * n as u64);
-        s.push(gpu.step_sliced(K_ADD, &[&fine, out], &[(0, m64 * n as u64), oo], &[m * n], m * n));
-    }
+fn qquant_linear(ops: &Ops, gpu: &Gpu, s: &mut Vec<Step>, tier: QTier, x: &DeviceBuffer, w: &QLinear, out: &DeviceBuffer, rows: u32, k: u32, n: u32) {
+    let weight = Weight::from_packed(tier.dtype(), w.w.clone(), w.sw.clone(), n, k);
+    let act = ops.act_two_level(s, x, 0, rows, k);
+    ops.matmul(s, &weight, &act, out, 0);
     if let Some(b) = &w.b {
         s.push(gpu.step(K_BIAS_ADD, &[out, b], &[rows, n], rows * n));
     }
@@ -2156,6 +2119,7 @@ fn qquant_linear(gpu: &Gpu, s: &mut Vec<Step>, tier: QTier, x: &DeviceBuffer, w:
 /// `to_v`/`to_out.0`) run through [`qquant_linear`] instead of [`linear`].
 #[allow(clippy::too_many_arguments)]
 fn attention_q(
+    ops: &Ops,
     gpu: &Gpu,
     s: &mut Vec<Step>,
     tier: QTier,
@@ -2176,11 +2140,11 @@ fn attention_q(
     attend: Attend,
 ) -> DeviceBuffer {
     let q_pre = gpu.storage((nq * inner_dim) as u64);
-    qquant_linear(gpu, s, tier, q_in, &w.wq, &q_pre, nq, q_dim, inner_dim);
+    qquant_linear(ops, gpu, s, tier, q_in, &w.wq, &q_pre, nq, q_dim, inner_dim);
     let k_pre = gpu.storage((nk * inner_dim) as u64);
-    qquant_linear(gpu, s, tier, kv_in, &w.wk, &k_pre, nk, kv_dim, inner_dim);
+    qquant_linear(ops, gpu, s, tier, kv_in, &w.wk, &k_pre, nk, kv_dim, inner_dim);
     let v = gpu.storage((nk * inner_dim) as u64);
-    qquant_linear(gpu, s, tier, kv_in, &w.wv, &v, nk, kv_dim, inner_dim);
+    qquant_linear(ops, gpu, s, tier, kv_in, &w.wv, &v, nk, kv_dim, inner_dim);
 
     let q = gpu.storage((nq * inner_dim) as u64);
     let k = gpu.storage((nk * inner_dim) as u64);
@@ -2222,7 +2186,7 @@ fn attention_q(
     };
 
     let out = gpu.storage((nq * q_dim) as u64);
-    qquant_linear(gpu, s, tier, &ctx_gated, &w.wo, &out, nq, inner_dim, q_dim);
+    qquant_linear(ops, gpu, s, tier, &ctx_gated, &w.wo, &out, nq, inner_dim, q_dim);
     out
 }
 
@@ -2230,6 +2194,7 @@ fn attention_q(
 /// [`attention_q`] instead of [`attention`].
 #[allow(clippy::too_many_arguments)]
 fn self_attn_and_text_ca_q(
+    ops: &Ops,
     gpu: &Gpu,
     s: &mut Vec<Step>,
     tier: QTier,
@@ -2287,12 +2252,12 @@ fn self_attn_and_text_ca_q(
     ada_zero(gpu, s, ones, x_buf, one_plus_scale_msa, shift_msa, &tmp1, &tmp2, &norm_x, dim, t, eps);
     let attn1_out = if bypass_self_attn {
         let v = gpu.storage(td as u64);
-        qquant_linear(gpu, s, tier, &norm_x, &w.attn1.wv, &v, t, dim, dim);
+        qquant_linear(ops, gpu, s, tier, &norm_x, &w.attn1.wv, &v, t, dim, dim);
         let out = gpu.storage(td as u64);
-        qquant_linear(gpu, s, tier, &v, &w.attn1.wo, &out, t, dim, dim);
+        qquant_linear(ops, gpu, s, tier, &v, &w.attn1.wo, &out, t, dim, dim);
         out
     } else {
-        attention_q(gpu, s, tier, &w.attn1, dim, dim, dim, heads, head_dim, &norm_x, &norm_x, t, t, Some((rope.cos, rope.sin)), Some((rope.cos, rope.sin)), K_ROPE2D, eps, Attend::SelfAttn(rope.bias))
+        attention_q(ops, gpu, s, tier, &w.attn1, dim, dim, dim, heads, head_dim, &norm_x, &norm_x, t, t, Some((rope.cos, rope.sin)), Some((rope.cos, rope.sin)), K_ROPE2D, eps, Attend::SelfAttn(rope.bias))
     };
     let x_fma = gpu.storage(td as u64);
     gate_row(gpu, s, x_buf, gate_msa, &attn1_out, &x_fma, t, dim, 1);
@@ -2311,7 +2276,7 @@ fn self_attn_and_text_ca_q(
     mul(gpu, s, ctx_buf, &one_plus_scale_kv_buf, &enc_tmp1, ctxd);
     add2(gpu, s, &enc_tmp1, &shift_kv_buf, &enc_hidden, ctxd);
 
-    let ca_raw = attention_q(gpu, s, tier, &w.attn2, dim, dim, dim, heads, head_dim, &attn_input, &enc_hidden, t, ctx_len, None, None, K_ROPE2D, eps, Attend::Cross);
+    let ca_raw = attention_q(ops, gpu, s, tier, &w.attn2, dim, dim, dim, heads, head_dim, &attn_input, &enc_hidden, t, ctx_len, None, None, K_ROPE2D, eps, Attend::Cross);
     let ca_gated = gpu.storage(td as u64);
     mul(gpu, s, &ca_raw, gate_q, &ca_gated, td);
     let x2 = gpu.storage(td as u64);
@@ -2323,7 +2288,7 @@ fn self_attn_and_text_ca_q(
 /// [`mlp_sublayer`]'s quantized-compute twin - identical structure,
 /// [`qquant_linear`] instead of [`linear`] for both FFN projections.
 #[allow(clippy::too_many_arguments)]
-fn mlp_sublayer_q(gpu: &Gpu, s: &mut Vec<Step>, w: &QFfWeights, tier: QTier, ones: &DeviceBuffer, x2: &DeviceBuffer, shift_mlp_buf: &DeviceBuffer, one_plus_scale_mlp_buf: &DeviceBuffer, gate_mlp_buf: &DeviceBuffer, dim: u32, t: u32, eps: f32) -> (DeviceBuffer, DeviceBuffer) {
+fn mlp_sublayer_q(ops: &Ops, gpu: &Gpu, s: &mut Vec<Step>, w: &QFfWeights, tier: QTier, ones: &DeviceBuffer, x2: &DeviceBuffer, shift_mlp_buf: &DeviceBuffer, one_plus_scale_mlp_buf: &DeviceBuffer, gate_mlp_buf: &DeviceBuffer, dim: u32, t: u32, eps: f32) -> (DeviceBuffer, DeviceBuffer) {
     let td = t * dim;
     let mlp_tmp1 = gpu.storage(td as u64);
     let mlp_tmp2 = gpu.storage(td as u64);
@@ -2331,11 +2296,11 @@ fn mlp_sublayer_q(gpu: &Gpu, s: &mut Vec<Step>, w: &QFfWeights, tier: QTier, one
     ada_zero(gpu, s, ones, x2, one_plus_scale_mlp_buf, shift_mlp_buf, &mlp_tmp1, &mlp_tmp2, &x_scaled, dim, t, eps);
     let ff_dim = dim * 4;
     let h_pre = gpu.storage((t * ff_dim) as u64);
-    qquant_linear(gpu, s, tier, &x_scaled, &w.w1, &h_pre, t, dim, ff_dim);
+    qquant_linear(ops, gpu, s, tier, &x_scaled, &w.w1, &h_pre, t, dim, ff_dim);
     let h_act = gpu.storage((t * ff_dim) as u64);
     s.push(gpu.step(K_GELU, &[&h_pre, &h_act], &[t * ff_dim], t * ff_dim));
     let ff_out = gpu.storage(td as u64);
-    qquant_linear(gpu, s, tier, &h_act, &w.w2, &ff_out, t, ff_dim, dim);
+    qquant_linear(ops, gpu, s, tier, &h_act, &w.w2, &ff_out, t, ff_dim, dim);
     let x3 = gpu.storage(td as u64);
     gate_row(gpu, s, x2, gate_mlp_buf, &ff_out, &x3, t, dim, 1);
     (x3, ff_out)
@@ -2619,11 +2584,12 @@ impl LtxBlockQ {
         wf(gpu, &ctx_buf, context);
         let mb = ModBufs::upload(gpu, &m);
 
+        let ops = block_ops(gpu);
         let mut s: Vec<Step> = Vec::new();
         let td = t * dim;
 
-        let (x2, attn1_out, ca_raw) = self_attn_and_text_ca_q(gpu, &mut s, self.tier, &self.w, &self.ones_t, &x_buf, &mb, &ctx_buf, ctx_len, prompt_kv, SelfAttnTables::rope(cos_bufs, sin_bufs), dim, heads, head_dim, t, eps, false);
-        let (x3, ff_out) = mlp_sublayer_q(gpu, &mut s, &self.w.ff, self.tier, &self.ones_t, &x2, &mb.shift_mlp, &mb.one_plus_scale_mlp, &mb.gate_mlp, dim, t, eps);
+        let (x2, attn1_out, ca_raw) = self_attn_and_text_ca_q(&ops, gpu, &mut s, self.tier, &self.w, &self.ones_t, &x_buf, &mb, &ctx_buf, ctx_len, prompt_kv, SelfAttnTables::rope(cos_bufs, sin_bufs), dim, heads, head_dim, t, eps, false);
+        let (x3, ff_out) = mlp_sublayer_q(&ops, gpu, &mut s, &self.w.ff, self.tier, &self.ones_t, &x2, &mb.shift_mlp, &mb.one_plus_scale_mlp, &mb.gate_mlp, dim, t, eps);
         // Every `wf` above is a synchronous `queue.write_buffer` and NOTHING
         // computes until `submit`, so the span this closes is exactly the
         // host->device upload + graph recording cost, cleanly separated from
@@ -2757,10 +2723,11 @@ impl LtxBlockQ {
         // its slot rather than aliasing it.
         let _scope = exec.scratch_pool.then(|| scratch.scratch_scope());
         let s_rec = std::time::Instant::now();
+        let ops = block_ops(scratch);
         let mut s: Vec<Step> = Vec::new();
         let mb = ModBufs::derive(scratch, &mut s, adaln_buf, adaln_map_buf, &self.sst_buf, t, dim);
-        let (x2, _attn1_out, _ca_raw) = self_attn_and_text_ca_q(scratch, &mut s, self.tier, &self.w, &self.ones_t, x_buf, &mb, ctx_buf, ctx_len, prompt_kv, rope, dim, heads, head_dim, t, eps, ptb.video_self_attn);
-        let (x3, _ff_out) = mlp_sublayer_q(scratch, &mut s, &self.w.ff, self.tier, &self.ones_t, &x2, &mb.shift_mlp, &mb.one_plus_scale_mlp, &mb.gate_mlp, dim, t, eps);
+        let (x2, _attn1_out, _ca_raw) = self_attn_and_text_ca_q(&ops, scratch, &mut s, self.tier, &self.w, &self.ones_t, x_buf, &mb, ctx_buf, ctx_len, prompt_kv, rope, dim, heads, head_dim, t, eps, ptb.video_self_attn);
+        let (x3, _ff_out) = mlp_sublayer_q(&ops, scratch, &mut s, &self.w.ff, self.tier, &self.ones_t, &x2, &mb.shift_mlp, &mb.one_plus_scale_mlp, &mb.gate_mlp, dim, t, eps);
         timings.record_upload += s_rec.elapsed();
         let s_sub = std::time::Instant::now();
         if exec.pipelined {
@@ -3130,6 +3097,7 @@ pub struct AvRope<'a> {
 /// [`LtxAvBlock`]'s doc exactly.
 #[allow(clippy::too_many_arguments)]
 fn av_block_body_q(
+    ops: &Ops,
     gpu: &Gpu,
     s: &mut Vec<Step>,
     tier: QTier,
@@ -3164,9 +3132,9 @@ fn av_block_body_q(
     // ---- 1-2: each stream's self-attention + text cross-attention, run to
     // completion before the AV step touches either.
     #[rustfmt::skip]
-    let (vx1, v_attn1, v_ca) = self_attn_and_text_ca_q(gpu, s, tier, &w.vw, ones_v, vx_buf, vm, v_ctx, v_ctx_len, v_prompt_kv, SelfAttnTables { cos: rope.v_cos, sin: rope.v_sin, bias: rope.v_bias }, vdim, vheads, vhd, tv, eps, ptb.video_self_attn);
+    let (vx1, v_attn1, v_ca) = self_attn_and_text_ca_q(ops, gpu, s, tier, &w.vw, ones_v, vx_buf, vm, v_ctx, v_ctx_len, v_prompt_kv, SelfAttnTables { cos: rope.v_cos, sin: rope.v_sin, bias: rope.v_bias }, vdim, vheads, vhd, tv, eps, ptb.video_self_attn);
     #[rustfmt::skip]
-    let (ax1, a_attn1, a_ca) = self_attn_and_text_ca_q(gpu, s, tier, &w.aw, ones_a, ax_buf, am, a_ctx, a_ctx_len, a_prompt_kv, SelfAttnTables::rope(rope.a_cos, rope.a_sin), adim, aheads, ahd, ta, eps, ptb.audio_self_attn);
+    let (ax1, a_attn1, a_ca) = self_attn_and_text_ca_q(ops, gpu, s, tier, &w.aw, ones_a, ax_buf, am, a_ctx, a_ctx_len, a_prompt_kv, SelfAttnTables::rope(rope.a_cos, rope.a_sin), adim, aheads, ahd, ta, eps, ptb.audio_self_attn);
 
     // ---- 3: audio<->video cross-attention. `vx1`/`ax1` are the pre-AV
     // snapshot BOTH directions read. A cut direction (the isolated-modality
@@ -3187,7 +3155,7 @@ fn av_block_body_q(
     let a2v_ax_scaled = gpu.storage(atd as u64);
     ada_zero(gpu, s, ones_a, &ax1, &avm.scale_a2v_a, &avm.shift_a2v_a, &a_tmp1, &a_tmp2, &a2v_ax_scaled, adim, ta, eps);
     #[rustfmt::skip]
-    let a2v = attention_q(gpu, s, tier, &w.avw.a2v, vdim, adim, adim, aheads, ahd, &a2v_vx_scaled, &a2v_ax_scaled, tv, ta, Some((rope.v_cross_cos, rope.v_cross_sin)), Some((rope.a_cross_cos, rope.a_cross_sin)), K_ROPE2D, eps, Attend::Cross);
+    let a2v = attention_q(ops, gpu, s, tier, &w.avw.a2v, vdim, adim, adim, aheads, ahd, &a2v_vx_scaled, &a2v_ax_scaled, tv, ta, Some((rope.v_cross_cos, rope.v_cross_sin)), Some((rope.a_cross_cos, rope.a_cross_sin)), K_ROPE2D, eps, Attend::Cross);
     let vx2 = gpu.storage(vtd as u64);
     // `rows_per_cond = rows`: ONE gate row, broadcast across every token.
     gate_row(gpu, s, &vx1, cut_a2v.as_ref().unwrap_or(&avm.gate_a2v), &a2v, &vx2, tv, vdim, tv);
@@ -3201,13 +3169,13 @@ fn av_block_body_q(
     let v2a_ax_scaled = gpu.storage(atd as u64);
     ada_zero(gpu, s, ones_a, &ax1, &avm.scale_v2a_a, &avm.shift_v2a_a, &a_tmp3, &a_tmp4, &v2a_ax_scaled, adim, ta, eps);
     #[rustfmt::skip]
-    let v2a = attention_q(gpu, s, tier, &w.avw.v2a, adim, vdim, adim, aheads, ahd, &v2a_ax_scaled, &v2a_vx_scaled, ta, tv, Some((rope.a_cross_cos, rope.a_cross_sin)), Some((rope.v_cross_cos, rope.v_cross_sin)), K_ROPE2D, eps, Attend::Cross);
+    let v2a = attention_q(ops, gpu, s, tier, &w.avw.v2a, adim, vdim, adim, aheads, ahd, &v2a_ax_scaled, &v2a_vx_scaled, ta, tv, Some((rope.a_cross_cos, rope.a_cross_sin)), Some((rope.v_cross_cos, rope.v_cross_sin)), K_ROPE2D, eps, Attend::Cross);
     let ax2 = gpu.storage(atd as u64);
     gate_row(gpu, s, &ax1, cut_v2a.as_ref().unwrap_or(&avm.gate_v2a), &v2a, &ax2, ta, adim, ta);
 
     // ---- 4: video MLP (on the post-A2V state), then audio MLP.
-    let (vx3, v_ff) = mlp_sublayer_q(gpu, s, &w.vw.ff, tier, ones_v, &vx2, &vm.shift_mlp, &vm.one_plus_scale_mlp, &vm.gate_mlp, vdim, tv, eps);
-    let (ax3, a_ff) = mlp_sublayer_q(gpu, s, &w.aw.ff, tier, ones_a, &ax2, &am.shift_mlp, &am.one_plus_scale_mlp, &am.gate_mlp, adim, ta, eps);
+    let (vx3, v_ff) = mlp_sublayer_q(ops, gpu, s, &w.vw.ff, tier, ones_v, &vx2, &vm.shift_mlp, &vm.one_plus_scale_mlp, &vm.gate_mlp, vdim, tv, eps);
+    let (ax3, a_ff) = mlp_sublayer_q(ops, gpu, s, &w.aw.ff, tier, ones_a, &ax2, &am.shift_mlp, &am.one_plus_scale_mlp, &am.gate_mlp, adim, ta, eps);
     AvQBody { vx3, ax3, v_attn1, v_ca, v_ff, a_attn1, a_ca, a_ff, a2v, v2a }
 }
 
@@ -3324,9 +3292,10 @@ impl LtxAvBlockQ {
         let (vx_buf, ax_buf) = (up(vx), up(ax));
         let (v_ctx, a_ctx) = (up(v_context), up(a_context));
 
+        let ops = block_ops(gpu);
         let mut s: Vec<Step> = Vec::new();
         #[rustfmt::skip]
-        let b = av_block_body_q(gpu, &mut s, self.tier, &self.w, &self.ones_v, &self.ones_a, &vx_buf, &ax_buf, &vm, &am, &avm,
+        let b = av_block_body_q(&ops, gpu, &mut s, self.tier, &self.w, &self.ones_v, &self.ones_a, &vx_buf, &ax_buf, &vm, &am, &avm,
             &v_ctx, self.v_ctx_len, &a_ctx, self.a_ctx_len, (v_prompt_kv, a_prompt_kv), rope, &self.vcfg, &self.acfg, tv, ta, ptb);
         gpu.submit(&[], &s);
         let (vtd, atd) = ((tv * vdim) as usize, (ta * adim) as usize);
@@ -3430,12 +3399,13 @@ impl LtxAvBlockQ {
         // instead of aliasing them. See `gpu_core::scratch`.
         let _scope = exec.scratch_pool.then(|| scratch.scratch_scope());
         let s_rec = std::time::Instant::now();
+        let ops = block_ops(scratch);
         let mut s: Vec<Step> = Vec::new();
         let vm = ModBufs::derive(scratch, &mut s, v_adaln_buf, v_adaln_map, &self.v_sst_buf, tv, vdim);
         let am = ModBufs::derive(scratch, &mut s, a_adaln_buf, a_adaln_map, &self.a_sst_buf, ta, adim);
         let avm = AvModBufs::derive(scratch, &mut s, av, &self.av, tv, vdim, ta, adim);
         #[rustfmt::skip]
-        let b = av_block_body_q(scratch, &mut s, self.tier, &self.w, &self.ones_v, &self.ones_a, vx_buf, ax_buf, &vm, &am, &avm,
+        let b = av_block_body_q(&ops, scratch, &mut s, self.tier, &self.w, &self.ones_v, &self.ones_a, vx_buf, ax_buf, &vm, &am, &avm,
             v_ctx, self.v_ctx_len, a_ctx, self.a_ctx_len, (av.v_prompt_kv, av.a_prompt_kv), rope, &self.vcfg, &self.acfg, tv, ta, ptb);
         timings.record_upload += s_rec.elapsed();
         let s_sub = std::time::Instant::now();
@@ -3721,6 +3691,12 @@ impl EmbeddingsConnector {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The quantized linears build a `model::ops::Ops` on this crate's `Gpu`, which needs the whole facade set.
+    #[test]
+    fn the_kernel_list_registers_the_whole_ops_facade_set() {
+        model::ops::assert_kernel_list_complete(&KERNELS);
+    }
 
     /// Softmax attention on the host in f64, from the SAME `[nq, inner_dim]`
     /// q and `[nk, inner_dim]` k/v the device sees - the third opinion neither

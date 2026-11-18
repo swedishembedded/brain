@@ -108,7 +108,7 @@ fn dit_forward_stays_close_with_int8_compute_dispatch() {
     }
 }
 
-/// The second activation level runs in [`ltxv::block::FINE_ROWS`]-row passes
+/// The second activation level runs in [`model::ops::TWO_LEVEL_PASS_ROWS`]-row passes
 /// to bound its memory, so at a token count spanning several - the last one
 /// partial - every pass's tokens must be as close to fp32 as the first
 /// pass's. Weight rounding dominates the error on this config, so the gate is
@@ -118,14 +118,14 @@ fn dit_forward_stays_close_with_int8_compute_dispatch() {
 fn int8_compute_holds_across_second_level_passes() {
     let cfg = LtxDitConfig::tiny();
     let w = random_tiny_weights(&cfg, 0xC0117E);
-    let inputs = synthetic_inputs(&cfg, ltxv::block::FINE_ROWS as usize * 2 + 77, 5);
+    let inputs = synthetic_inputs(&cfg, model::ops::TWO_LEVEL_PASS_ROWS as usize * 2 + 77, 5);
     let context_valid = vec![1.0f32; inputs.context_len];
 
     let model = LtxDit::new(cfg, w, None);
     let f32_out = model.forward(&inputs.latent, &inputs.timesteps, &inputs.positions, &inputs.keyframes_mask, &inputs.context, inputs.context_len, inputs.t, &context_valid).out;
     let i8_out = model.forward_q(&inputs.latent, &inputs.timesteps, &inputs.positions, &inputs.keyframes_mask, &inputs.context, inputs.context_len, inputs.t, &context_valid, QTier::Int8).out;
     let row = f32_out.len() / inputs.t;
-    let pass = ltxv::block::FINE_ROWS as usize * row;
+    let pass = model::ops::TWO_LEVEL_PASS_ROWS as usize * row;
     let rel = |r: std::ops::Range<usize>| {
         let (e, n) = f32_out[r.clone()].iter().zip(&i8_out[r]).fold((0f64, 0f64), |(e, n), (&a, &b)| (e + ((a - b) as f64).powi(2), n + (a as f64).powi(2)));
         (e / n).sqrt()

@@ -808,6 +808,16 @@ impl Weight {
         Weight::I8 { w, s, n: n as u32, k: k as u32 }
     }
 
+    /// An `[n, k]` weight of the packed tier `tier` (`I8` or `Q4`) from its already packed words and group scales on the
+    /// device (the pair [`crate::int8::upload_quantized`] / [`crate::int4::quantize_weight_q4`] produce).
+    pub fn from_packed(tier: Dtype, w: DeviceBuffer, s: DeviceBuffer, n: u32, k: u32) -> Weight {
+        match tier {
+            Dtype::I8 => Weight::I8 { w, s, n, k },
+            Dtype::Q4 => Weight::Q4 { w, s, n, k },
+            other => panic!("Weight::from_packed: {other:?} is not a packed int8/int4 tier"),
+        }
+    }
+
     /// Whether this is a dense f32 weight (one f32 buffer, no scales).
     pub fn is_dense_f32(&self) -> bool {
         matches!(self, Weight::F32 { .. })
@@ -2023,7 +2033,7 @@ impl Ops {
         // The packed form is made only where some linear of this width reads it: when this device's tuned table has
         // every int8 linear of these rows and this width on a candidate that reads bf16 rows, the two quantisation
         // dispatches (and the scratch) are skipped and a stray product that does need them makes them then.
-        let deferred = !row_count_invariant_active() && self.providers.runs("cuda") && self.gpu.int8_packed_unneeded(rows, k / 4);
+        let deferred = !self.packed_int8_runs(rows, k) || (!row_count_invariant_active() && self.providers.runs("cuda") && self.gpu.int8_packed_unneeded(rows, k / 4));
         let quant = (!deferred).then(|| self.quantize_rows(s, x, xr0, rows, k, shared));
         Act { x: x.clone(), xr0, m: rows, k, quant: std::cell::RefCell::new(quant), quant_deferred: deferred, xgs: Default::default(), bf16: Default::default(), e4m3: Default::default(), e4m3_row: Default::default(), fine: None, shared_scratch: false }
     }
@@ -2066,6 +2076,13 @@ impl Ops {
     pub fn act_shared_scratch(&self, s: &mut Vec<Step>, x: &DeviceBuffer, xr0: u32, rows: u32, k: u32) -> Act {
         let act = self.act_with(s, x, xr0, rows, k, true);
         Act { shared_scratch: true, ..act }
+    }
+
+    /// Whether this device executes any packed-int8 product kernel for `rows` rows of width `k`. The selector never
+    /// answers empty: a device without the packed dot (`caps.numeric.int8_dot`) is offered `Reference` alone, which no
+    /// int8 tier has a kernel for.
+    fn packed_int8_runs(&self, rows: u32, k: u32) -> bool {
+        select::candidates(Op::MatMul, OpShape { m: rows, n: k, k, dtype: Dtype::I8 }, &self.caps).iter().any(|v| *v != KernelVariant::Reference)
     }
 
     /// The packed int8 form of `act` for a product that reads it, made now when [`Ops::act`] deferred it. `None`
@@ -2371,6 +2388,13 @@ impl Ops {
                 self.providers.dispatch(&mut ctx, &req);
             }
             Weight::I8 { .. } | Weight::Q4 { .. } => {
+                // A device that executes no packed-int8 kernel (`select::candidates` offers `Reference` alone for the
+                // tier: no `int8_dot`) has no candidate to select. The weights are then read through the float-read tile
+                // decode every non-dense tier has, against the f32 activation rows - which carry no quantisation
+                // error, so a two-level activation has nothing left to add.
+                if !self.packed_int8_runs(m, k) {
+                    return self.matmul_rows(s, w, (0, n), act, y, yoff);
+                }
                 // A two-level activation asked for its second int8 level, which the bf16 rows of the
                 // dequantize-in-register candidates would round away: it always reads the packed codes.
                 if act.fine.is_none() && self.dequant_forward(s, w, act, y, yoff) {
