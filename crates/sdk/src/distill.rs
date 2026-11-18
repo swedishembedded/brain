@@ -32,7 +32,7 @@ use model::training::Capability;
 use rl::objective::distill::DistillConfig;
 
 use crate::chat_trainer::DistillJob;
-use crate::finetune::{block_for, digest, fit_opts, lora_shape, resolve_seed, tokenizer_and_template, Asked};
+use crate::finetune::{base_digest, block_for, digest, fit_opts, lora_shape, resolve_seed, tokenizer_and_template, Asked};
 use crate::{CancelToken, Device, Error, FineTuneProgress, FineTuneStatus, Result};
 
 const STATE_FILE: &str = "train.state";
@@ -326,7 +326,7 @@ impl DistillFineTune {
                 ((chat.adapter_teacher)(&open, &prepared_dir, &opts, self.top_k, (path, t_rank, t_alpha), &fp32).map_err(|e| Error::Backend(format!("the teacher: {e}")))?, t_digest)
             }
         };
-        let base_digest = digest(&weights)?;
+        let base_digest = base_digest(&weights)?;
         let dataset_id = digest(dataset)?;
         let identity = serde_json::json!({
             "regime": "distill",

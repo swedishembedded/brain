@@ -42,7 +42,7 @@ use model::training::Capability;
 use rl::objective::feedback::{FeedbackConfig, PackedFeedback};
 
 use crate::chat_trainer::FeedbackJob;
-use crate::finetune::{block_for, digest, fit_opts, lora_shape, resolve_seed, tokenizer_and_template};
+use crate::finetune::{base_digest, block_for, digest, fit_opts, lora_shape, resolve_seed, tokenizer_and_template};
 use crate::{CancelToken, Device, Error, FineTuneProgress, FineTuneStatus, Result, PAIR_ROWS};
 
 pub use rl::objective::feedback::{DEFAULT_KTO_BETA, DEFAULT_KTO_DESIRABLE_WEIGHT, DEFAULT_KTO_UNDESIRABLE_WEIGHT};
@@ -314,7 +314,7 @@ impl FeedbackFineTune {
         let requested = model::FitOpts { batch_size: PAIR_ROWS, grad_accum: self.grad_accum, strict_updates: self.strict_updates, ..fit_opts(self.steps, block, self.lr, seed) };
         let cfg = config(seq_len);
         let opts = model::training_plan::ValidatedTrainingPlan::build(requested, &[&cfg]).map_err(|e| Error::Backend(format!("FeedbackFineTune: {e}")))?.into_opts();
-        let base_digest = digest(&weights)?;
+        let base_digest = base_digest(&weights)?;
         let dataset_id = digest(dataset)?;
         let identity = serde_json::json!({
             "regime": "feedback",

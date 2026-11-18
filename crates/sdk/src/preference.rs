@@ -50,7 +50,7 @@ use data::preference::EncodedTurn;
 use data::qwen_tokenizer::QwenBpe;
 
 use crate::chat_trainer::{ChatEntry, PreferenceJob};
-use crate::finetune::{block_for, digest, fit_opts, lora_shape, resolve_seed, tokenizer_and_template, utf8};
+use crate::finetune::{base_digest, block_for, digest, fit_opts, lora_shape, resolve_seed, tokenizer_and_template, utf8};
 use model::training::Capability;
 
 use crate::{CancelToken, Device, Error, FineTuneProgress, FineTuneStatus, Result};
@@ -450,7 +450,7 @@ impl PreferenceFineTune {
         let requested = model::FitOpts { batch_size: PAIR_ROWS, grad_accum: self.grad_accum, strict_updates: self.strict_updates, stages: self.stages, native_sparse: self.native_sparse, precision: model::TrainPrecision { activations: self.activations, ..Default::default() }, ..fit_opts(self.steps, block, self.lr, seed) };
         let dpo = rl::objective::dpo::DpoConfig { beta: self.beta, seq_len, nll_weight: self.nll_weight, beta_ablation: self.beta_ablation, loss: self.loss };
         let opts = model::training_plan::ValidatedTrainingPlan::build(requested, &[&dpo]).map_err(|e| Error::Backend(format!("PreferenceFineTune: {e}")))?.into_opts();
-        let base_digest = digest(&weights)?;
+        let base_digest = base_digest(&weights)?;
         let dataset_id = digest(dataset)?;
         let identity = serde_json::json!({
             "regime": "dpo",

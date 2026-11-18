@@ -336,3 +336,19 @@ fn every_pair_loss_trains_and_is_recorded() {
     let e = fine_tune(&model, &model.join("run")).loss(brain::PairLoss::Orpo).beta(0.0).beta_ablation(true).run().unwrap_err().to_string();
     assert!(e.contains("beta_ablation"), "{e}");
 }
+
+/// A base whose weights are a repo directory (a pulled `transformers` checkout, which is how a served trainer names its
+/// base) is named by the directory's content digest, not read as one file ("Is a directory": the served preference and
+/// feedback jobs failed on it before training a step).
+#[test]
+fn a_base_whose_weights_are_a_directory_is_named_by_digest_not_read_as_a_file() {
+    let model = chat_model_dir("pref-base-dir");
+    let train = write_pairs(&model, "train.jsonl", TRAIN);
+    let (store, base) = chat_fixture::chat_model_as_repo_dir(&model);
+    let run = PreferenceFineTune::from_pretrained(base).models_dir(store.to_str().unwrap()).dataset(train).out_dir(model.join("by-dir")).rank(2).steps(2).lr(1e-1).seed(7).device(cpu()).run();
+    // The fixture is not a loadable `transformers` checkout, so the run ends where the trainer opens the weights; what
+    // is gated here is the step before it, which named the base by reading the directory as a file.
+    if let Err(e) = run {
+        assert!(!e.to_string().contains("Is a directory"), "the base directory was read as a file: {e}");
+    }
+}

@@ -67,3 +67,18 @@ fn a_feedback_dataset_it_cannot_train_is_refused_by_record() {
     let e = FeedbackFineTune::from_pretrained(base.to_str().unwrap()).dataset(write(&model, "ok.jsonl", &TRAIN.iter().map(|(u, a, d)| example(u, a, *d)).collect::<Vec<_>>())).out_dir(model.join("run")).beta(0.0).device(cpu()).run().unwrap_err().to_string();
     assert!(e.contains("beta"), "{e}");
 }
+
+/// A base whose weights are a repo directory is named by the directory's content digest, not read as one file ("Is a
+/// directory": the served feedback jobs failed on it before training a step).
+#[test]
+fn a_base_whose_weights_are_a_directory_is_named_by_digest_not_read_as_a_file() {
+    let model = chat_model_dir("kto-base-dir");
+    let train = write(&model, "train.jsonl", &TRAIN.iter().map(|(u, a, d)| example(u, a, *d)).collect::<Vec<_>>());
+    let (store, base) = crate::chat_fixture::chat_model_as_repo_dir(&model);
+    let run = FeedbackFineTune::from_pretrained(base).models_dir(store.to_str().unwrap()).dataset(train).out_dir(model.join("by-dir")).rank(2).steps(2).lr(5e-2).seed(7).device(cpu()).run();
+    // The fixture is not a loadable `transformers` checkout, so the run ends where the trainer opens the weights; what
+    // is gated here is the step before it, which named the base by reading the directory as a file.
+    if let Err(e) = run {
+        assert!(!e.to_string().contains("Is a directory"), "the base directory was read as a file: {e}");
+    }
+}
