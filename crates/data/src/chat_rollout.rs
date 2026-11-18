@@ -86,6 +86,8 @@ pub enum RecordRule {
     /// (`behavior_logprobs`, `token_ids`), a `teacher_context`, or is `truncated`: a baseline only sets its group's
     /// baseline.
     BaselineTrains,
+    /// The record's `tokenizer_digest` is not the digest of the tokenizer of the base the run trains.
+    TokenizerMismatch,
 }
 
 impl RecordRule {
@@ -101,6 +103,7 @@ impl RecordRule {
             RecordRule::GroupOfOne => "group_of_one",
             RecordRule::MixedTokenizerDigest => "mixed_tokenizer_digest",
             RecordRule::BaselineTrains => "baseline_trains",
+            RecordRule::TokenizerMismatch => "tokenizer_mismatch",
         }
     }
 }
@@ -393,9 +396,10 @@ pub fn group_members<G: Ord + Clone, M: Ord + Clone>(entries: &[GroupEntry<G, M>
 
 /// The rules of the contract that hold between records: the records of one rollout agree on its outcome, a group
 /// holds at least two rollouts that take part in it (under `truncated`), and the records that name a tokenizer name
-/// one. `records` are the rollouts of the records read together (one file, or every set one run trains on), `None` for
-/// a record that is not a rollout. The refusals, at most one per record, by index into `records`.
-pub fn check_records(records: &[Option<&Rollout>], truncated: TruncatedRollouts) -> Vec<(usize, RecordError)> {
+/// one, which is `base_tokenizer` (the digest of the trained base's own tokenizer, when it is known) where it is given.
+/// `records` are the rollouts of the records read together (one file, or every set one run trains on), `None` for a
+/// record that is not a rollout. The refusals, at most one per record, by index into `records`.
+pub fn check_records(records: &[Option<&Rollout>], truncated: TruncatedRollouts, base_tokenizer: Option<&str>) -> Vec<(usize, RecordError)> {
     let mut refusals: BTreeMap<usize, RecordError> = BTreeMap::new();
     let graded: Vec<(usize, &Rollout, &Outcome)> = records.iter().enumerate().filter_map(|(at, r)| r.and_then(|r| r.outcome.as_ref().map(|o| (at, r, o)))).collect();
     let entries: Vec<GroupEntry<&str, &Member>> = graded.iter().map(|(_, r, o)| GroupEntry { group: o.group.as_str(), member: &o.member, reward: o.reward, truncated: r.truncated }).collect();
@@ -425,6 +429,11 @@ pub fn check_records(records: &[Option<&Rollout>], truncated: TruncatedRollouts)
     let mut first: Option<&str> = None;
     for (at, rollout) in records.iter().enumerate() {
         let Some(digest) = rollout.and_then(|r| r.tokenizer_digest.as_deref()) else { continue };
+        if let Some(base) = base_tokenizer.filter(|base| *base != digest) {
+            let message = format!("tokenizer_digest: the rollout was encoded by the tokenizer {digest}, and the base this run trains reads {base}; its token ids and log-probabilities belong to another vocabulary");
+            refusals.entry(at).or_insert_with(|| RecordError::of(RecordFault::new(RecordRule::TokenizerMismatch, "tokenizer_digest"), message));
+            continue;
+        }
         match first {
             None => first = Some(digest),
             Some(expected) if expected != digest => {

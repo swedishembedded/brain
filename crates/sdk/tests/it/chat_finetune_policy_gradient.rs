@@ -163,7 +163,7 @@ fn records_and_settings_a_policy_gradient_run_cannot_honour_are_refused_before_t
     let why = refused(policy_gradient(&model, &bad, &out, Default::default()));
     assert!(why.contains("bad.jsonl") && why.contains("record 2") && why.contains("behavior_logprobs") && why.contains('3') && why.contains('4'), "{why}");
 
-    // The contract's rules between records hold over the run's records: a group of one, two tokenizers.
+    // The contract's rules between records hold over the run's records: a group of one, a tokenizer not the base's.
     let lonely = write_lines(&model.join("lonely.jsonl"), &[record("cab", "bad", Some(1.0), None)]);
     let why = refused(policy_gradient(&model, &lonely, &out, Default::default()));
     assert!(why.contains("group_of_one") && why.contains("\"toy\""), "{why}");
@@ -174,7 +174,8 @@ fn records_and_settings_a_policy_gradient_run_cannot_honour_are_refused_before_t
     };
     let mixed = write_lines(&model.join("mixed.jsonl"), &[digest(record("cab", "bad", Some(1.0), None), 'a'), digest(record("fed", "dad", Some(-1.0), None), 'b')]);
     let why = refused(policy_gradient(&model, &mixed, &out, Default::default()));
-    assert!(why.contains("mixed_tokenizer_digest") && why.contains("example 2 of the dataset"), "{why}");
+    // Held against the base's own tokenizer: the first record naming another is refused, naming both digests.
+    assert!(why.contains("tokenizer_mismatch") && why.contains("example 1 of the dataset") && why.contains(&"a".repeat(64)), "{why}");
     assert!(!out.join("adapter.safetensors").exists(), "nothing was trained");
 }
 

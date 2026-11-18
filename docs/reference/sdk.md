@@ -600,7 +600,8 @@ lowers the probability of its action, a positive one raises it.
   `behavior_logprobs`, `token_ids`, `teacher_context` or `truncated` (rule `baseline_trains`). A prepared split keeps
   its outcome in `<split>.rollouts.json` (`baselines`), not as an example.
 - `"tokenizer_digest"` (record, optional): `sha256:<hex>`, the tokenizer the sampler encoded the rollout with, as a
-  `policy_trace` names it; the records of one run that name one name the same.
+  `policy_trace` names it; it must be the trained base's own `tokenizer.json` digest (refused by rule
+  `tokenizer_mismatch`, naming both, before a device is claimed).
 - Version 1's precomputed `"advantage"` is refused, naming the field and its replacement (`reward` and `group`).
 - `"behavior_logprobs"` (supervised assistant message, optional, needs a `"reward"`): the log-probability the sampler
   gave each token of the answer, one per token of the answer as the chat template renders it after its prompt: the

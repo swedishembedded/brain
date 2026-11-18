@@ -36,7 +36,7 @@ rollouts) and in its guide to training as a served job.
 | `invalid/rollout_mismatch.jsonl` | line 2 refused | a second record of rollout `cab-0` with another reward |
 | `invalid/group_of_one.jsonl` | lines 1 and 4 refused | group `cab` holds one rollout; group `ace` holds one that reached an outcome beside a truncated one |
 | `invalid/baseline_trains.jsonl` | line 3 refused | lines 1 and 2: a trained rollout and a `baseline_only` record of its group (a pair: the baseline counts); line 3 marks a supervised answer `baseline_only` |
-| `invalid/mixed_tokenizer_digest.jsonl` | line 2 refused | a record naming another tokenizer than line 1 |
+| `invalid/tokenizer_mismatch.jsonl` | line 2 refused | a record naming another tokenizer than the base's own (line 1 names it) |
 | `manifest.json` | expected verdicts | per file: the format, the record count, the valid count and each refusal as `{line, rule, field}` |
 
 ## The rules of version 2
@@ -57,15 +57,20 @@ rollouts) and in its guide to training as a served job.
   temperature (`temperature`).
 - `token_ids`, when present, are the ids the sampler generated for the answer, end-of-turn marker included. The trainer
   renders the answer's text again and refuses the record when the ids differ: the text must round-trip to them.
-- `tokenizer_digest` (`sha256:` and 64 lowercase hex digits, as a `policy_trace` names it), when present, is the same
-  on every record of one run that names one.
+- `tokenizer_digest` (`sha256:` and 64 lowercase hex digits, as a `policy_trace` names it), when present, is the
+  digest of the trained base's own `tokenizer.json` (`tokenizer_mismatch`, naming both), and where the base's is not
+  known, the same on every record of one run that names one (`mixed_tokenizer_digest`).
+- `baseline_only: true` (with `reward` and `group`) marks a rollout that sets its group's baseline and is never
+  trained: no message `"train": true`, no `behavior_logprobs`, `token_ids`, `teacher_context` or `truncated`
+  (`baseline_trains`).
 - `behavior_logprobs`, `token_ids`, `truncated`, `rollout` and `tokenizer_digest` belong to a rollout: a record
   carrying any of them carries a `reward` and `group` (or a `teacher_context`).
 - Every other field and message rule (roles, tool calls, `deny_unknown_fields`) is that of `generic-messages-v2`.
 
 A refusal of one of these rules is reported typed: `rule` and `field` (a JSON path into the record, such as
 `messages[1].behavior_logprobs`), beside the message. The rules: `behavior_logprob_count`, `token_ids_mismatch`,
-`missing_reward`, `missing_group`, `advantage_removed`, `rollout_mismatch`, `group_of_one`, `mixed_tokenizer_digest`.
-A record that breaks a rule of its own is refused for that; the last three hold between records, over the whole file
+`missing_reward`, `missing_group`, `advantage_removed`, `baseline_trains`, `rollout_mismatch`, `group_of_one`,
+`mixed_tokenizer_digest`, `tokenizer_mismatch`. A record that breaks a rule of its own is refused for that; the last
+four hold between records, over the whole file
 (`check_dataset`) or every set a run trains on together (the dataset and its replay sets). Other refusals carry the
 message alone.

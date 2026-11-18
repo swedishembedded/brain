@@ -208,7 +208,7 @@ pub fn check_dataset(model_dir: impl AsRef<Path>, path: impl AsRef<Path>, check:
             rollouts.push(rollout.map(|r| data::chat_rollout::Rollout { behavior_logprobs: Vec::new(), token_ids: Vec::new(), teacher: None, ..r }));
         }
         let refs: Vec<Option<&data::chat_rollout::Rollout>> = rollouts.iter().map(Option::as_ref).collect();
-        between.extend(data::chat_rollout::check_records(&refs, check.truncated));
+        between.extend(data::chat_rollout::check_records(&refs, check.truncated, tok.digest()));
     }
 
     let mut report = DatasetReport {

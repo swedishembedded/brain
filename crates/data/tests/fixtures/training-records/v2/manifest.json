@@ -120,14 +120,14 @@
    ]
   },
   {
-   "path": "invalid/mixed_tokenizer_digest.jsonl",
+   "path": "invalid/tokenizer_mismatch.jsonl",
    "kind": "chat",
    "records": 2,
    "valid_records": 1,
    "refusals": [
     {
      "line": 2,
-     "rule": "mixed_tokenizer_digest",
+     "rule": "tokenizer_mismatch",
      "field": "tokenizer_digest"
     }
    ]

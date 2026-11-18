@@ -1147,7 +1147,7 @@ impl ChatFineTune {
             ("monitoring", carries(monitor.as_deref())),
         ])?;
         if let Some(config) = &self.policy_gradient {
-            check_rollouts_together(&train_samples, &replay_samples, &weighted_samples, config.truncated)?;
+            check_rollouts_together(&train_samples, &replay_samples, &weighted_samples, config.truncated, tok.digest())?;
         }
         if self.eval_every == 0 && self.evaluations_dir.is_some() {
             return Err(Error::Backend("ChatFineTune: keeping the evaluations needs eval_every > 0".to_string()));
@@ -2488,11 +2488,11 @@ pub(crate) fn utf8(path: &Path) -> Result<&str> {
 
 /// The rules of the training-record contract that hold between records, over every record a policy-gradient run
 /// trains on (the dataset and its replay sets, read together): the first refusal, naming its rule and field.
-fn check_rollouts_together(dataset: &[ChatSample], replay: &[ChatSample], weighted: &[(Vec<ChatSample>, f32)], truncated: data::chat_rollout::TruncatedRollouts) -> Result<()> {
+fn check_rollouts_together(dataset: &[ChatSample], replay: &[ChatSample], weighted: &[(Vec<ChatSample>, f32)], truncated: data::chat_rollout::TruncatedRollouts, base_tokenizer: Option<&str>) -> Result<()> {
     let sets = std::iter::once(("dataset", dataset)).chain(std::iter::once(("replay", replay))).chain(weighted.iter().map(|(records, _)| ("weighted replay", &records[..])));
     let records: Vec<(&str, usize, Option<&data::chat_rollout::Rollout>)> = sets.flat_map(|(name, records)| records.iter().enumerate().map(move |(at, r)| (name, at, r.rollout.as_ref()))).collect();
     let rollouts: Vec<Option<&data::chat_rollout::Rollout>> = records.iter().map(|(_, _, r)| *r).collect();
-    match data::chat_rollout::check_records(&rollouts, truncated).into_iter().next() {
+    match data::chat_rollout::check_records(&rollouts, truncated, base_tokenizer).into_iter().next() {
         None => Ok(()),
         Some((at, refusal)) => {
             let (name, index, _) = records[at];

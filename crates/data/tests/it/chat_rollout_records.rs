@@ -294,7 +294,7 @@ fn the_rules_between_records_refuse_the_record_that_breaks_them() {
     let records: Vec<ChatSample> = lines.iter().map(|l| ChatSample::from_json_line_with(l, &data::chat::TextOnly::TRAINER).unwrap()).collect();
     let rollouts: Vec<Option<&chat_rollout::Rollout>> = records.iter().map(|r| r.rollout.as_ref()).collect();
     let refused = |truncated| -> Vec<(usize, chat_rollout::RecordRule, String)> {
-        chat_rollout::check_records(&rollouts, truncated)
+        chat_rollout::check_records(&rollouts, truncated, None)
             .into_iter()
             .map(|(at, e)| {
                 let f = e.fault().cloned().unwrap();
@@ -313,6 +313,12 @@ fn the_rules_between_records_refuse_the_record_that_breaks_them() {
         [(2, RolloutMismatch, "reward".to_string()), (4, GroupOfOne, "group".to_string()), (8, MixedTokenizerDigest, "tokenizer_digest".to_string())],
         "a run that keeps truncated rollouts counts c's in its group"
     );
+    // Against the trained base's own tokenizer: the record naming another is refused by its own rule, not as a mix.
+    let base = digest('a');
+    let against_base: Vec<(usize, chat_rollout::RecordRule)> = chat_rollout::check_records(&rollouts, chat_rollout::TruncatedRollouts::Mask, Some(&base)).into_iter().map(|(at, e)| (at, e.fault().unwrap().rule)).collect();
+    assert!(against_base.contains(&(8, TokenizerMismatch)) && !against_base.iter().any(|(at, _)| *at == 7), "{against_base:?}");
+    let message = chat_rollout::check_records(&rollouts, chat_rollout::TruncatedRollouts::Mask, Some(&base)).into_iter().find(|(at, _)| *at == 8).unwrap().1.to_string();
+    assert!(message.contains(&digest('a')) && message.contains(&digest('b')), "both digests are named: {message}");
 }
 
 /// The wire names of the truncated-rollout handling round-trip, and only a kept handling counts a truncated rollout.
@@ -356,9 +362,9 @@ fn a_baseline_only_rollout_counts_in_its_group_and_is_never_an_example() {
     let trained = record(Some("1"), None);
     let records: Vec<ChatSample> = [trained.clone(), baseline("", quiet)].iter().map(|l| ChatSample::from_json_line_with(l, &data::chat::TextOnly::TRAINER).unwrap()).collect();
     let rollouts: Vec<Option<&chat_rollout::Rollout>> = records.iter().map(|r| r.rollout.as_ref()).collect();
-    assert!(chat_rollout::check_records(&rollouts, chat_rollout::TruncatedRollouts::Mask).is_empty());
+    assert!(chat_rollout::check_records(&rollouts, chat_rollout::TruncatedRollouts::Mask, None).is_empty());
     let alone = ChatSample::from_json_line_with(&trained, &data::chat::TextOnly::TRAINER).unwrap();
-    assert_eq!(chat_rollout::check_records(&[alone.rollout.as_ref()], chat_rollout::TruncatedRollouts::Mask).len(), 1, "without the baseline the group holds one");
+    assert_eq!(chat_rollout::check_records(&[alone.rollout.as_ref()], chat_rollout::TruncatedRollouts::Mask, None).len(), 1, "without the baseline the group holds one");
 
     let dir = tempfile::tempdir().unwrap();
     let mut samples = alone.answers_as_asked(&template(), true).unwrap().unwrap();
