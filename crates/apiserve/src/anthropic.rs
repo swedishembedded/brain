@@ -142,13 +142,18 @@ fn message_response(model: &str, outcome: &capability::Outcome) -> Response {
 /// names none. A tool needs a `name` and an `input_schema` object; a server
 /// tool (one with a `type` other than `custom`, such as Anthropic's hosted web
 /// search) runs on Anthropic's side and has no counterpart here, so it is
-/// refused by name. The result is held to the same bounds as the OpenAI
-/// surface's `tools`.
+/// refused by name. A tool marked `defer_loading` is left out: its definition
+/// is to reach the model only once a server-side tool search finds it, which
+/// brain has none of, so the model is never shown it. The result is held to the
+/// same bounds as the OpenAI surface's `tools`.
 fn tools(body: &Value) -> Result<Option<Value>, ApiError> {
     let Some(tools) = body.get("tools").filter(|v| !v.is_null()) else { return Ok(None) };
     let list = tools.as_array().ok_or_else(|| ApiError::invalid_request(PROVIDER, "'tools' must be an array"))?;
     let mut functions = Vec::with_capacity(list.len());
     for (i, tool) in list.iter().enumerate() {
+        if deferred(tool.get("defer_loading")) {
+            continue;
+        }
         if let Some(kind) = tool.get("type").and_then(Value::as_str).filter(|k| *k != "custom") {
             return Err(ApiError::invalid_request(PROVIDER, format!("'tools[{i}]': the server tool '{kind}' is not served here; give client tools (name, description, input_schema)")));
         }
@@ -159,9 +164,17 @@ fn tools(body: &Value) -> Result<Option<Value>, ApiError> {
         }
         functions.push(json!({ "type": "function", "function": function }));
     }
+    if functions.is_empty() {
+        return Ok(None);
+    }
     let functions = Value::Array(functions);
     crate::openai::validate_tools(PROVIDER, &functions)?;
     Ok(Some(functions))
+}
+
+/// Whether a tool's `defer_loading` marks it deferred (`true`; absent, `null` or `false` load it).
+fn deferred(flag: Option<&Value>) -> bool {
+    flag.and_then(Value::as_bool) == Some(true)
 }
 
 /// `inv` with its `tools` built from the text the client wrote: a chat template
@@ -179,6 +192,8 @@ fn with_tools_as_written(raw: &[u8], inv: Invocation) -> Invocation {
         description: Option<&'a RawValue>,
         #[serde(borrow)]
         input_schema: &'a RawValue,
+        #[serde(default)]
+        defer_loading: Option<Value>,
     }
     #[derive(serde::Deserialize)]
     struct Written<'a> {
@@ -191,6 +206,7 @@ fn with_tools_as_written(raw: &[u8], inv: Invocation) -> Invocation {
     }
     let functions: Vec<String> = tools
         .iter()
+        .filter(|t| !deferred(t.defer_loading.as_ref()))
         .map(|t| {
             let description = t.description.map(|d| format!(",\"description\":{}", d.get())).unwrap_or_default();
             format!("{{\"type\":\"function\",\"function\":{{\"name\":{}{description},\"parameters\":{}}}}}", t.name.get(), t.input_schema.get())
@@ -244,6 +260,51 @@ fn thinking(body: &Value, max_tokens: i64) -> Result<Option<bool>, ApiError> {
     }
 }
 
+/// Anthropic's `context_management`: server-side edits of the conversation before it is rendered. The one edit
+/// brain answers is the one that changes nothing, `clear_thinking_20251015` with `keep: "all"` (keep every earlier
+/// turn's thinking, which a model that renders them sees as it would without the edit). Any other edit asks brain to
+/// drop parts of the prompt, which it does not do, and is refused by name.
+fn context_management(body: &Value) -> Result<(), ApiError> {
+    let Some(cfg) = body.get("context_management").filter(|v| !v.is_null()) else { return Ok(()) };
+    let model = body.get("model").and_then(Value::as_str).unwrap_or_default();
+    let refuse = |field: String| ApiError::unsupported_parameter(PROVIDER, model, &field, "brain edits no context; it accepts only {\"type\": \"clear_thinking_20251015\", \"keep\": \"all\"}, which keeps everything");
+    let Some(members) = cfg.as_object() else { return Err(refuse("context_management".to_string())) };
+    if let Some(other) = members.keys().find(|k| k.as_str() != "edits" && !members[k.as_str()].is_null()) {
+        return Err(refuse(format!("context_management.{other}")));
+    }
+    let edits = match members.get("edits") {
+        None | Some(Value::Null) => return Ok(()),
+        Some(Value::Array(edits)) => edits,
+        Some(_) => return Err(refuse("context_management.edits".to_string())),
+    };
+    for (i, edit) in edits.iter().enumerate() {
+        let keeps_all = edit.get("type").and_then(Value::as_str) == Some("clear_thinking_20251015") && edit.get("keep").and_then(Value::as_str) == Some("all") && edit.as_object().is_some_and(|e| e.len() == 2);
+        if !keeps_all {
+            return Err(refuse(format!("context_management.edits[{i}]")));
+        }
+    }
+    Ok(())
+}
+
+/// Anthropic's `output_config` as the contract's `reasoning_effort`. Only `effort` is read: `high` (Anthropic's
+/// default) and `max` leave the model's own default, which on a model with a reasoning-effort setting is already its
+/// most thorough; `medium` and `low` ask the model for less, which it takes only where its action declares
+/// `reasoning_effort` (admission refuses the param by name elsewhere). Any other member (`format`, structured output)
+/// asks for something brain does not do and is refused by name.
+fn output_effort(body: &Value) -> Result<Option<&'static str>, ApiError> {
+    let Some(cfg) = body.get("output_config").filter(|v| !v.is_null()) else { return Ok(None) };
+    let Some(members) = cfg.as_object() else { return Err(ApiError::invalid_request(PROVIDER, "'output_config' must be an object")) };
+    if let Some(other) = members.keys().find(|k| k.as_str() != "effort" && !members[k.as_str()].is_null()) {
+        return Err(ApiError::unsupported_parameter(PROVIDER, body.get("model").and_then(Value::as_str).unwrap_or_default(), &format!("output_config.{other}"), "brain reads only output_config.effort"));
+    }
+    match members.get("effort").filter(|v| !v.is_null()).map(|v| v.as_str()) {
+        None | Some(Some("high" | "max")) => Ok(None),
+        Some(Some("medium")) => Ok(Some("medium")),
+        Some(Some("low")) => Ok(Some("low")),
+        _ => Err(ApiError::invalid_request(PROVIDER, "'output_config.effort' must be \"low\", \"medium\", \"high\" or \"max\"")),
+    }
+}
+
 /// Parse + validate an Anthropic Messages request into `(model, invocation, stream)`.
 /// Enforces `model`/`messages`/`max_tokens` present; builds the contract
 /// `generate` invocation (Anthropic's top-level `system` maps to the `system`
@@ -267,6 +328,10 @@ pub fn to_invocation(body: &Value) -> Result<(String, Invocation, bool), ApiErro
         if let Some(n) = body.get("thinking").and_then(|t| t.get("budget_tokens")).and_then(Value::as_i64).filter(|_| on) {
             inv = inv.set("thinking_budget", json!(n));
         }
+    }
+    context_management(body)?;
+    if let Some(effort) = output_effort(body)? {
+        inv = inv.set("reasoning_effort", json!(effort));
     }
     let system = system_text(body.get("system"));
     if !system.is_empty() {

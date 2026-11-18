@@ -76,6 +76,11 @@ impl MockResident {
             .param(ParamSpec::new("tools", ParamType::Str, "JSON array of tool definitions (accepted, only inspected for the mock tool-call trigger)"))
             .param(ParamSpec::new("tool_choice", ParamType::Str, "tool_choice directive (accepted, ignored by the mock)"))
             .param(ParamSpec::new("enable_thinking", ParamType::Bool, "accepted, ignored by the mock").default(json!(true)))
+            // The chat contract's other settings a chat route sends (a raw `/v1/completions` prompt is `chat: false`, an
+            // Anthropic `thinking.budget_tokens` is the think budget): declared, so the routes' admission takes them as it
+            // does for a real chat model, and ignored by the mock.
+            .param(ParamSpec::new("chat", ParamType::Bool, "apply the chat template (accepted, ignored by the mock)").default(json!(true)))
+            .param(ParamSpec::new("thinking_budget", ParamType::Int, "think-block token budget (accepted, ignored by the mock)").min(0.0).max(capability::bounds::TOKENS))
             // Optional multimodal inputs, declared exactly as a real multimodal
             // model does (`crates/omni/src/caps.rs`) - NOT required, so a
             // text-only invocation still validates. The mock doesn't look at

@@ -74,7 +74,7 @@ const OPENAI_COMPLETION_READS: [&str; 14] =
     ["model", "prompt", "suffix", "stream", "stream_options", "n", "best_of", "echo", "max_tokens", "max_completion_tokens", "stop", "logit_bias", "logprobs", "top_logprobs"];
 
 /// The fields Anthropic's Messages grammar reads.
-const ANTHROPIC_READS: [&str; 9] = ["model", "messages", "max_tokens", "stream", "system", "stop_sequences", "tools", "tool_choice", "thinking"];
+const ANTHROPIC_READS: [&str; 11] = ["model", "messages", "max_tokens", "stream", "system", "stop_sequences", "tools", "tool_choice", "thinking", "output_config", "context_management"];
 
 impl Dialect {
     /// The dialect of a chat request to `provider`'s chat route.
@@ -125,7 +125,7 @@ const OPENROUTER: &[Dialect] = &[Dialect::OpenRouterChat];
 const ANTHROPIC: &[Dialect] = &[Dialect::AnthropicMessages];
 
 /// Every field a chat route accepts and ignores; the HTTP API reference carries the same table.
-pub const IGNORED: [Ignored; 13] = [
+pub const IGNORED: [Ignored; 14] = [
     Ignored {
         name: "user",
         dialects: OPENAI_ALL,
@@ -197,6 +197,12 @@ pub const IGNORED: [Ignored; 13] = [
         dialects: OPENROUTER,
         accepts: Accepts::Any,
         reason: "OpenRouter's switch for usage accounting in the reply; brain always reports usage",
+    },
+    Ignored {
+        name: "cache_control",
+        dialects: ANTHROPIC,
+        accepts: Accepts::Any,
+        reason: "a prompt-caching breakpoint for the whole request (as on a block, where it is ignored too); brain's prefix cache reuses any prompt prefix it holds, matched by its tokens, so no marker changes what is cached or the reply",
     },
     Ignored {
         name: "service_tier",

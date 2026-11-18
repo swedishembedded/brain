@@ -111,12 +111,12 @@ pub fn card(provider: Provider, info: &ModelInfo, adapter: Option<&AdapterIdenti
                 "display_name": name,
                 "created_at": CREATED_RFC3339,
             });
-            add_sampling(&mut card, info);
+            add_sampling(&mut card, provider, info);
             return card;
         }
         Provider::OpenRouter => openrouter_card(info),
     };
-    add_discovery(&mut card, info, adapter);
+    add_discovery(&mut card, provider, info, adapter);
     card
 }
 
@@ -125,8 +125,8 @@ pub fn card(provider: Provider, info: &ModelInfo, adapter: Option<&AdapterIdenti
 /// an unmeasured limit is never `0`, and an adapter is named only by the
 /// identity (`id`, `digest`, `version`) its release was verified under, never by where its
 /// file lives.
-fn add_discovery(card: &mut Value, info: &ModelInfo, adapter: Option<&AdapterIdentity>) {
-    add_sampling(card, info);
+fn add_discovery(card: &mut Value, provider: Provider, info: &ModelInfo, adapter: Option<&AdapterIdentity>) {
+    add_sampling(card, provider, info);
     let capabilities = info.caps.names();
     if !capabilities.is_empty() {
         card["capabilities"] = json!(capabilities);
@@ -161,11 +161,24 @@ fn add_discovery(card: &mut Value, info: &ModelInfo, adapter: Option<&AdapterIde
 /// sampling parameter such as `seed` or `top_k`): the request fields the model's `generate` honours, derived from the
 /// tables the request is read with ([`crate::sampling::honoured`]). Absent on a model that generates no text (empty
 /// on OpenRouter, whose card always carries the field).
-fn add_sampling(card: &mut Value, info: &ModelInfo) {
+fn add_sampling(card: &mut Value, provider: Provider, info: &ModelInfo) {
     if !info.sampling_parameters.is_empty() {
-        card["supported_parameters"] = json!(info.sampling_parameters);
+        card["supported_parameters"] = json!(supported_parameters(provider, info));
     }
 }
+
+/// The model's honoured request fields as `provider`'s card may list them: all of them, except on OpenRouter, whose
+/// schema enumerates the values the field may hold ([`OPENROUTER_PARAMETERS`]).
+fn supported_parameters(provider: Provider, info: &ModelInfo) -> Vec<&'static str> {
+    info.sampling_parameters.iter().copied().filter(|p| provider != Provider::OpenRouter || OPENROUTER_PARAMETERS.contains(p)).collect()
+}
+
+/// The values OpenRouter's `supported_parameters` may hold (its `ModelsListResponse` schema enumerates them): an
+/// OpenRouter card names only these of the fields the model honours; brain's own extensions (`thinking_budget`,
+/// `policy_trace`, `return_token_ids`, ...) are listed on the other dialects' cards.
+const OPENROUTER_PARAMETERS: [&str; 26] = [
+    "temperature", "top_p", "top_k", "min_p", "top_a", "frequency_penalty", "presence_penalty", "repetition_penalty", "max_tokens", "max_completion_tokens", "logit_bias", "logprobs", "top_logprobs", "prediction", "seed", "response_format", "structured_outputs", "stop", "tools", "tool_choice", "parallel_tool_calls", "include_reasoning", "reasoning", "reasoning_effort", "web_search_options", "verbosity",
+];
 
 /// What a model takes in and gives out, in OpenRouter's modality names: text
 /// for chat and embeddings, audio in for a transcription model and audio out for a speech one, and image output
@@ -227,7 +240,7 @@ fn openrouter_card(info: &ModelInfo) -> Value {
         "pricing": { "prompt": "0", "completion": "0", "request": "0", "image": "0" },
         "top_provider": { "context_length": ctx, "max_completion_tokens": info.max_output_tokens, "is_moderated": false },
         "per_request_limits": Value::Null,
-        "supported_parameters": info.sampling_parameters,
+        "supported_parameters": supported_parameters(Provider::OpenRouter, info),
         "default_parameters": Value::Null,
         "supported_voices": Value::Null,
         "links": { "details": format!("/api/v1/models/{name}/endpoints") },

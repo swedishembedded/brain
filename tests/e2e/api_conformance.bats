@@ -671,9 +671,10 @@ get_url() {
       grep -q "unknown param" "$RESP"
     done
   done
-  # A chat body carrying it is answered by the model the caller named, as if it were absent.
+  # A chat body carrying it is refused by name like any field the dialect does not define: it never selects an adapter.
   post_json openai /v1/chat/completions '{"model":"brain/mock","__adapter":"Qwen/Qwen3-0.6B:lab:canary:v1","messages":[{"role":"user","content":"hi"}]}'
-  [ "$STATUS" -eq 200 ]
+  [ "$STATUS" -eq 400 ]
+  [ "$(jq -r '.error.param' "$RESP")" = "__adapter" ]
 }
 
 # ----------------------------------------------------------- training jobs

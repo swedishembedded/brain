@@ -11,6 +11,7 @@
 mod common;
 
 mod cancellation;
+mod client_shapes;
 mod decision_agreement;
 mod decision_lifecycle;
 mod decision_served;

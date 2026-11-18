@@ -141,9 +141,17 @@ launches a local qwen3 Anthropic surface and points Claude Code at it.
   target, as Anthropic defines it: reasoning counts against `max_tokens`, and
   that is what bounds it.
   `{"type": "adaptive"}` leaves the choice to the model's own default.
+  `output_config.effort` maps to the model's `reasoning_effort`: `high` (Anthropic's
+  default) and `max` leave the model's default, `medium` and `low` ask for less
+  reasoning and are refused, naming `reasoning_effort`, by a model without that
+  setting; any other `output_config` member (`format`) is refused by name.
+  `context_management` is accepted when it edits nothing (`{"type":
+  "clear_thinking_20251015", "keep": "all"}`); an edit that would drop part of the
+  prompt is refused by name, since brain edits no context.
 - **Tool calling.** A model whose card lists `tools` takes them on every
   surface. On the Anthropic surface a client tool (`name`, `description`,
-  `input_schema`) reaches the model as a function tool, an assistant turn's
+  `input_schema`) reaches the model as a function tool (one marked
+  `defer_loading: true` does not: it waits for a server-side tool search brain does not run), an assistant turn's
   `tool_use` blocks as its calls, and a user turn's `tool_result` blocks as the
   results answering them (an `is_error` result is marked as an error). The
   model's calls come back as `tool_use` blocks whose `input` is the JSON object
@@ -206,6 +214,7 @@ launches a local qwen3 Anthropic surface and points Claude Code at it.
   | `store` | OpenAI chat, OpenRouter | `false` | brain keeps no copy; `true` asks it to, and is refused |
   | `service_tier` | OpenAI chat, OpenRouter | `auto`, `default` | brain has one processing tier; `flex` or `priority` is refused |
   | `service_tier` | Anthropic | `auto`, `standard_only` | brain has one capacity tier |
+  | `cache_control` | Anthropic | any | a request-wide prompt-caching breakpoint (block-level ones are ignored too); brain's prefix cache reuses any prefix it holds, matched by its tokens |
   | `parallel_tool_calls` | OpenAI chat, OpenRouter | `true` | the default: the model may call several tools in a turn; `false` is not enforced, so it is refused |
   | `modalities` | OpenAI chat, OpenRouter | `["text"]` | a chat reply is text; audio output is refused |
   | `provider` | OpenRouter | any | upstream-provider preferences; brain is the provider |
@@ -276,7 +285,7 @@ launches a local qwen3 Anthropic surface and points Claude Code at it.
   `log softmax(logits / log_prob_temperature)` over the WHOLE vocabulary, with no
   top-k, top-p or min-p, however the token was drawn. `log_prob_temperature` is the
   request's temperature (1.0 for a greedy request). The log-probabilities are
-  scored after the generation by the serving model itself, as one
+  the serving model's own: from the decode steps that drew the tokens, or scored after the generation as one
   teacher-forced pass under the adapter the request ran with (the same weights,
   quantisation and KV precision that served it), so they are what a trainer's
   teacher-forced forward computes for those tokens, up to the serve/train numeric
@@ -288,10 +297,16 @@ launches a local qwen3 Anthropic surface and points Claude Code at it.
   The request is refused (400, `invalid-request`) when it sets penalties, DRY,
   no-repeat bans or a thinking budget, which reshape the distribution the tokens
   are drawn from, and fails with `unsupported-capability` on a model that cannot
-  score its own generation. The cost is one extra prefill of prompt plus
-  generation on the serving thread. Train rollouts at temperature 1.0 without
-  top-k or top-p so the sampler's distribution and the trace's coincide; `logprobs`
-  (above) is the sampler's own, truncated figure and is a different quantity.
+  score its own generation. A reply sampled from the whole distribution (a
+  temperature above 0, no top-k, top-p or min-p) on a model that draws over its
+  whole logits row carries the decode steps' own log-probabilities: the exact
+  behaviour policy, at no extra cost (`log_prob_source: "decode"`). Any other
+  reply is scored as above, at the cost of one extra prefill of prompt plus
+  generation on the serving thread (`log_prob_source: "score"`); on a GPU that
+  pass runs other kernels than the decode did and differs from the decode-time
+  distribution by a few thousandths of a nat per token. Train rollouts at
+  temperature 1.0 without top-k or top-p; `logprobs` (above) is the sampler's own,
+  truncated figure and is a different quantity.
 - **Scoring given text (`score`).** A served Qwen3 or Qwen3.8 chat model (the Qwen3.8-27B served from a released FP8
   or GGUF checkpoint included), and each adapter id riding on it, has a
   `score` action, called through `POST /v1/run` with `model` the base or adapter id and `blobs.records` a
