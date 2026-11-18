@@ -128,19 +128,19 @@ struct WirePreference {
 /// A `generic-messages-v2` message without `train`.
 #[derive(Clone, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct WireTurn {
-    role: WireRole,
+pub(crate) struct WireTurn {
+    pub(crate) role: WireRole,
     content: String,
     #[serde(default)]
     tool_calls: Vec<WireToolCall>,
     #[serde(default)]
-    tool_call_id: Option<String>,
+    pub(crate) tool_call_id: Option<String>,
     #[serde(default)]
     reasoning_content: Option<String>,
 }
 
 impl WireTurn {
-    fn into_message(self, train: bool) -> WireMessage {
+    pub(crate) fn into_message(self, train: bool) -> WireMessage {
         WireMessage { role: self.role, content: self.content.into(), tool_calls: self.tool_calls, tool_call_id: self.tool_call_id, reasoning_content: self.reasoning_content, train, behavior_logprobs: None, token_ids: None }
     }
 }

@@ -21,6 +21,7 @@ use std::path::Path;
 use data::chat::{ChatSample, RenderOpts};
 use data::chat_rollout::RecordError;
 pub use data::chat_rollout::RecordRule;
+use data::feedback::FeedbackSample;
 use data::preference::PreferenceSample;
 
 use crate::finetune::Asked;
@@ -36,6 +37,8 @@ pub enum DatasetKind {
     Chat,
     /// `generic-preference-v1` pairs (preference optimization); each candidate of a pair is an example.
     Preference,
+    /// `generic-feedback-v1` judged completions (KTO); each is one example.
+    Feedback,
 }
 
 /// How the trainer that will read the dataset is set up.
@@ -246,6 +249,10 @@ pub fn check_dataset(model_dir: impl AsRef<Path>, path: impl AsRef<Path>, check:
                     out.push((encoded.ids.len(), encoded.mask.iter().filter(|m| **m).count(), row));
                 }
                 Ok(out)
+            }),
+            DatasetKind::Feedback => FeedbackSample::from_json_line(line).map_err(RecordError::from).and_then(|example| {
+                let e = example.encode_with(&tok, &tmpl, render)?;
+                Ok(vec![(e.ids.len(), e.mask.iter().filter(|m| **m).count(), e.ids.len())])
             }),
             DatasetKind::Preference => PreferenceSample::from_json_line(line).map_err(RecordError::from).and_then(|pair| {
                 let (chosen, rejected) = pair.encode_with(&tok, &tmpl, render)?;

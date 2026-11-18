@@ -456,6 +456,55 @@ pub fn build_preference(request: &Request, base_dir: &Path, staged: &Staged, fil
     Ok(ft)
 }
 
+/// The feedback (KTO) trainer for `request` over the files `staged`, writing where `files` says, on the device this
+/// thread is scoped to.
+pub fn build_feedback(request: &Request, base_dir: &Path, staged: &Staged, files: &RunFiles) -> Result<brain::FeedbackFineTune, String> {
+    let p = &request.params;
+    let mut ft = brain::FeedbackFineTune::from_pretrained(utf8(base_dir)?).placed(true).dataset(&staged.train).out_dir(&files.out_dir).steps(p.steps).grad_accum(p.grad_accum).strict_updates(p.strict_updates).max_block(p.max_block);
+    if let Some(arch) = &p.arch {
+        ft = ft.arch(arch.as_str());
+    }
+    if let Some(id) = &p.adapter_id {
+        ft = ft.adapter_id(id.as_str());
+    }
+    if let Some(v) = p.rank {
+        ft = ft.rank(v);
+    }
+    if let Some(v) = p.alpha {
+        ft = ft.alpha(v);
+    }
+    match files.resumable {
+        Some((ref state, seed, every)) => ft = ft.seed(seed).resume_state(state).checkpoint_every(every),
+        None => {
+            if let Some(v) = p.seed {
+                ft = ft.seed(v);
+            }
+        }
+    }
+    if let Some(v) = p.lr {
+        ft = ft.lr(v);
+    }
+    if let Some(v) = &p.base_format {
+        ft = ft.base_format(v.as_str());
+    }
+    if let Some(v) = p.beta {
+        ft = ft.beta(v);
+    }
+    if let Some(v) = p.desirable_weight {
+        ft = ft.desirable_weight(v);
+    }
+    if let Some(v) = p.undesirable_weight {
+        ft = ft.undesirable_weight(v);
+    }
+    if let Some(v) = p.keep_reasoning {
+        ft = ft.keep_reasoning(v);
+    }
+    if let Some(path) = &staged.start_adapter {
+        ft = ft.continue_from(path);
+    }
+    Ok(ft)
+}
+
 fn finite(v: f32) -> Value {
     json!(v)
 }
@@ -585,6 +634,33 @@ fn preference_summary(outcome: &brain::PreferenceFineTuneOutcome) -> Value {
     })
 }
 
+/// A feedback run's totals: the examples by judgement and, after the run, the mean log-ratio of each against the
+/// starting policy.
+fn feedback_summary(outcome: &brain::FeedbackFineTuneOutcome) -> Value {
+    json!({
+        "adapter_sha256": outcome.adapter_digest,
+        "base_digest": outcome.base_digest,
+        "trained_from": outcome.trained_from,
+        "records": outcome.desirable_examples + outcome.undesirable_examples,
+        "desirable_examples": outcome.desirable_examples,
+        "undesirable_examples": outcome.undesirable_examples,
+        "block": outcome.block,
+        "seed": outcome.seed,
+        "steps": outcome.steps,
+        "steps_completed": outcome.steps_completed,
+        "resumed_at": outcome.resumed_at,
+        "rank": outcome.rank,
+        "alpha": outcome.alpha,
+        "beta": outcome.beta,
+        "desirable_weight": outcome.desirable_weight,
+        "undesirable_weight": outcome.undesirable_weight,
+        "initial_loss": outcome.initial_loss,
+        "final_loss": outcome.final_loss,
+        "desirable_logratio": outcome.desirable_logratio,
+        "undesirable_logratio": outcome.undesirable_logratio,
+    })
+}
+
 /// Maps the SDK's error to the job's: a full card is a condition the caller can act on, with nothing wrong in the request.
 pub(crate) fn trainer_failure(e: brain::Error) -> String {
     match e {
@@ -614,6 +690,16 @@ fn train_preference(request: &Request, base_dir: &Path, staged: &Staged, files: 
     Ok(Trained { adapter, record: outcome.record.clone(), adapter_sha256: outcome.adapter_digest.clone().unwrap_or_default(), evaluations: Vec::new(), resumed_at: outcome.resumed_at, summary: preference_summary(&outcome) })
 }
 
+fn train_feedback(request: &Request, base_dir: &Path, staged: &Staged, files: &RunFiles, cancel: &capability::CancelToken, began: Instant, progress: &mut dyn FnMut(Progress)) -> Result<Trained, String> {
+    let fine_tune = build_feedback(request, base_dir, staged, files)?;
+    let outcome = fine_tune.run_with(cancel, |step| progress(Progress::event(step.step, step.steps, step_frame(step, began.elapsed().as_secs_f64())))).map_err(trainer_failure)?;
+    if outcome.status != brain::FineTuneStatus::Completed {
+        return Err("cancelled".into());
+    }
+    let adapter = outcome.adapter.clone().ok_or("train: the run completed with no adapter")?;
+    Ok(Trained { adapter, record: outcome.record.clone(), adapter_sha256: outcome.adapter_digest.clone().unwrap_or_default(), evaluations: Vec::new(), resumed_at: outcome.resumed_at, summary: feedback_summary(&outcome) })
+}
+
 /// Runs the job `inv` on the device this thread is scoped to, reporting each step as a frame. With a `resume_key`
 /// the run is resumable ([`crate::runs`]): its training state and evaluation adapters live in the run's directory of
 /// the artifact store, and a completed run answers with the result it recorded.
@@ -641,6 +727,7 @@ pub fn run(env: &JobEnv, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -
     let began = Instant::now();
     let trained = match p.objective {
         Objective::Dpo => train_preference(&request, &base_dir, &staged, &files, &inv.cancel, began, progress)?,
+        Objective::Feedback => train_feedback(&request, &base_dir, &staged, &files, &inv.cancel, began, progress)?,
         Objective::Sft | Objective::PolicyGradient => train_chat(&request, &base_dir, &staged, &files, &inv.cancel, began, progress)?,
     };
     work.ensure_within_quota()?;

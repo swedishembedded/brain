@@ -107,6 +107,18 @@ fn a_dry_run_counts_a_truncated_rollout_in_its_group_only_where_the_run_would_ke
     assert_reservation_returned(&rig);
 }
 
+/// A feedback dataset is read as the feedback trainer reads it: each judged completion is one example, and a record
+/// that is not one is refused by line.
+#[test]
+fn a_feedback_dataset_is_checked_as_the_trainer_reads_it() {
+    let rig = rig_qwen3("dryrun-feedback", 16 << 30);
+    let dataset = [crate::support::feedback(), b"\n{\"prompt\": [], \"completion\": {\"role\": \"assistant\", \"content\": \"x\"}, \"desirable\": true}".to_vec()].concat();
+    let report = check(&rig, json!({"base": BASE, "kind": "feedback"}), dataset).expect("the report");
+    assert_eq!((report["records"].as_u64(), report["valid_records"].as_u64(), report["examples"].as_u64(), report["invalid_total"].as_u64()), (Some(5), Some(4), Some(4), Some(1)), "{report}");
+    assert_eq!(report["invalid"][0]["line"], 5);
+    assert_reservation_returned(&rig);
+}
+
 #[test]
 fn a_timeline_dataset_is_checked_line_by_line_without_a_base() {
     let rig = rig_qwen3("dryrun-timeline", 16 << 30);

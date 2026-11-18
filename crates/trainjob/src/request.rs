@@ -69,6 +69,8 @@ pub fn implied_defaults() -> Map<String, Value> {
         ("beta", Some(float(brain::DEFAULT_DPO_BETA))),
         ("nll_weight", Some(float(brain::DEFAULT_DPO_NLL_WEIGHT))),
         ("keep_reasoning", Some(json!(brain::DEFAULT_DPO_KEEP_REASONING))),
+        ("desirable_weight", Some(float(brain::DEFAULT_KTO_DESIRABLE_WEIGHT))),
+        ("undesirable_weight", Some(float(brain::DEFAULT_KTO_UNDESIRABLE_WEIGHT))),
     ];
     declared.into_iter().filter_map(|(name, v)| Some((name.to_string(), v?))).collect()
 }
@@ -94,7 +96,7 @@ fn spec_without_defaults() -> ActionSpec {
         .cancellable()
         .param(ParamSpec::new("base", ParamType::Str, "the base model, `<vendor>/<repo>` in the server's model store").required())
         .param(ParamSpec::new("data", ParamType::Str, "JSON document naming the datasets: {\"train\": SRC, \"held_out\"?, \"held_out_text\"?, \"monitor\"?, \"start_adapter\"?, \"replay\"?: [SRC], \"weighted_replay\"?: [{SRC fields, \"share\"}]} where SRC is {\"digest\": \"<blake3 hex>\"} (an artifact of the server's store) or {\"blob\": \"<input name>\"} (an input blob of this call)").required())
-        .param(ParamSpec::new("objective", ParamType::Enum(vec!["sft".into(), "policy_gradient".into(), "dpo".into()]), "supervised imitation; the clipped policy gradient on rollout records that carry a reward and group (training-record contract v2) or a teacher context; or direct preference optimization on `generic-preference-v1` pairs (`dataset` and `held_out` hold pairs)").default(json!("sft")))
+        .param(ParamSpec::new("objective", ParamType::Enum(vec!["sft".into(), "policy_gradient".into(), "dpo".into(), "feedback".into()]), "supervised imitation; the clipped policy gradient on rollout records that carry a reward and group (training-record contract v2) or a teacher context; direct preference optimization on `generic-preference-v1` pairs (`dataset` and `held_out` hold pairs); or KTO on `generic-feedback-v1` desirable and undesirable completions").default(json!("sft")))
         .param(ParamSpec::new("steps", ParamType::Int, "optimiser steps").default(json!(100)).min(1.0).max(1_000_000.0).step(1.0))
         .param(ParamSpec::new("rank", ParamType::Int, "LoRA rank of a fresh adapter; a continued adapter keeps its own (default 8)").min(1.0).max(256.0).step(1.0))
         .param(optional_f("alpha", "LoRA alpha (default 2 x rank)", 0.0, 1024.0))
@@ -131,13 +133,15 @@ fn spec_without_defaults() -> ActionSpec {
         .param(optional_f("sequence_advantage_cap", "policy gradient with teacher contexts: the most the magnitudes of a sequence's token advantages may sum to", 0.0, 1e9))
         .param(ParamSpec::new("truncated", ParamType::Enum(brain::TruncatedRollouts::ALL.iter().map(|t| t.name().to_string()).collect()), "policy gradient: what a rollout marked `truncated` does: `mask` (never trained, its reward takes no part in its group: DAPO's overlong filtering) or `keep` (trained, its reward counted)"))
         .param(ParamSpec::new("advantage_norm", ParamType::Enum(brain::AdvantageNorm::ALL.iter().map(|n| n.name().to_string()).collect()), "policy gradient: how each group's rewards become the advantages of its rollouts: `mean-centred` (r - mean), `z-score` ((r - mean) / (std + 1e-4)) or `leave-one-out` (r_i - the mean of the others)"))
-        .param(optional_f("beta", "dpo: the temperature of the preference loss (default 0.1)", 0.0, 100.0))
+        .param(optional_f("beta", "dpo, feedback: the temperature of the preference loss (default 0.1)", 0.0, 100.0))
         .param(optional_f("nll_weight", "dpo: the weight of the supervised likelihood of the chosen answer added to the loss (default 0)", 0.0, 1000.0))
-        .param(ParamSpec::new("keep_reasoning", ParamType::Bool, "dpo: train on the reasoning of each candidate (the template drops a closed think block from an assistant turn otherwise)"))
+        .param(ParamSpec::new("keep_reasoning", ParamType::Bool, "dpo, feedback: train on the reasoning of each candidate (the template drops a closed think block from an assistant turn otherwise)"))
+        .param(optional_f("desirable_weight", "feedback: the weight of a desirable example's term (default 1)", 0.0, 1000.0))
+        .param(optional_f("undesirable_weight", "feedback: the weight of an undesirable example's term (default 1)", 0.0, 1000.0))
         .param(crate::consolidate::allow_cpu_param())
         .param(crate::consolidate::resume_key_param())
         .param(crate::consolidate::checkpoint_every_param())
-        .input(blob("dataset", "the training records (`generic-messages-v2` JSONL; `generic-preference-v1` pairs for dpo)"))
+        .input(blob("dataset", "the training records (`generic-messages-v2` JSONL; `generic-preference-v1` pairs for dpo; `generic-feedback-v1` judged completions for feedback)"))
         .input(blob("held_out", "records scored before and after, never trained on (preference pairs for dpo)"))
         .input(blob("held_out_text", "the writer's own text, scored before and after beside the held-out records"))
         .input(blob("monitor", "records scored every eval_every steps"))
@@ -285,6 +289,7 @@ pub enum Objective {
     Sft,
     PolicyGradient,
     Dpo,
+    Feedback,
 }
 
 impl Objective {
@@ -294,13 +299,15 @@ impl Objective {
             Objective::Sft => "sft",
             Objective::PolicyGradient => "policy_gradient",
             Objective::Dpo => "dpo",
+            Objective::Feedback => "feedback",
         }
     }
 
-    /// The training rows one optimiser step holds at once: a preference step holds both candidates of a pair.
+    /// The training rows one optimiser step holds at once: a preference step holds both candidates of a pair, a
+    /// feedback step an example and its mismatched pair.
     pub fn rows_per_step(self) -> u32 {
         match self {
-            Objective::Dpo => brain::PAIR_ROWS,
+            Objective::Dpo | Objective::Feedback => brain::PAIR_ROWS,
             Objective::Sft | Objective::PolicyGradient => 1,
         }
     }
@@ -352,6 +359,8 @@ pub struct Params {
     pub beta: Option<f32>,
     pub nll_weight: Option<f32>,
     pub keep_reasoning: Option<bool>,
+    pub desirable_weight: Option<f32>,
+    pub undesirable_weight: Option<f32>,
     pub allow_cpu: bool,
     pub resume_key: Option<String>,
     pub checkpoint_every: Option<u32>,
@@ -397,14 +406,28 @@ impl Request {
         if params.objective == Objective::Sft && !pg_named.is_empty() {
             return refused(&format!("{} configure the policy gradient; the objective is sft", pg_named.join(", ")));
         }
-        let dpo_named: Vec<&str> = [(params.beta.is_some(), "beta"), (params.nll_weight.is_some(), "nll_weight"), (params.keep_reasoning.is_some(), "keep_reasoning")]
-            .into_iter()
-            .filter_map(|(named, name)| named.then_some(name))
-            .collect();
-        if params.objective != Objective::Dpo && !dpo_named.is_empty() {
-            return refused(&format!("{} configure direct preference optimization; the objective is {}", dpo_named.join(", "), params.objective.name()));
+        // Each preference setting, and the objectives it belongs to.
+        let preference_named: Vec<(&str, &[Objective])> = [
+            (params.beta.is_some(), "beta", &[Objective::Dpo, Objective::Feedback][..]),
+            (params.nll_weight.is_some(), "nll_weight", &[Objective::Dpo][..]),
+            (params.keep_reasoning.is_some(), "keep_reasoning", &[Objective::Dpo, Objective::Feedback][..]),
+            (params.desirable_weight.is_some(), "desirable_weight", &[Objective::Feedback][..]),
+            (params.undesirable_weight.is_some(), "undesirable_weight", &[Objective::Feedback][..]),
+        ]
+        .into_iter()
+        .filter_map(|(named, name, of)| named.then_some((name, of)))
+        .collect();
+        let foreign: Vec<&str> = preference_named.iter().filter(|(_, of)| !of.contains(&params.objective)).map(|(name, _)| *name).collect();
+        if !foreign.is_empty() {
+            let owners: Vec<&str> = preference_named.iter().filter(|(_, of)| !of.contains(&params.objective)).flat_map(|(_, of)| of.iter().map(|o| o.name())).fold(Vec::new(), |mut all, o| {
+                if !all.contains(&o) {
+                    all.push(o);
+                }
+                all
+            });
+            return refused(&format!("{} configure the {} objective; the objective is {}", foreign.join(", "), owners.join(" or "), params.objective.name()));
         }
-        if params.objective == Objective::Dpo {
+        if matches!(params.objective, Objective::Dpo | Objective::Feedback) {
             check_preference(&params, &data, &pg_named)?;
         }
         if params.objective == Objective::PolicyGradient {
@@ -452,6 +475,7 @@ pub(crate) fn check_attached(data: &DataRefs, inv: &Invocation) -> Result<(), St
 fn check_preference(params: &Params, data: &DataRefs, pg_named: &[&str]) -> Result<(), String> {
     let mut unsupported: Vec<&str> = pg_named.to_vec();
     let sets = [
+        (params.objective == Objective::Feedback && data.held_out.is_some(), "held_out"),
         (data.held_out_text.is_some(), "held_out_text"),
         (data.monitor.is_some(), "monitor"),
         (!data.replay.is_empty(), "replay"),
@@ -468,7 +492,11 @@ fn check_preference(params: &Params, data: &DataRefs, pg_named: &[&str]) -> Resu
     if unsupported.is_empty() {
         return Ok(());
     }
-    Err(format!("train: {} are not settings of the dpo objective (it takes dataset, held_out and start_adapter pairs, beta, nll_weight, keep_reasoning and the optimiser settings)", unsupported.join(", ")))
+    let takes = match params.objective {
+        Objective::Feedback => "dataset and start_adapter, beta, desirable_weight, undesirable_weight, keep_reasoning and the optimiser settings",
+        _ => "dataset, held_out and start_adapter pairs, beta, nll_weight, keep_reasoning and the optimiser settings",
+    };
+    Err(format!("train: {} are not settings of the {} objective (it takes {takes})", unsupported.join(", "), params.objective.name()))
 }
 
 #[cfg(test)]
@@ -529,7 +557,7 @@ mod tests {
         let pg = brain::PolicyGradientConfig::default();
         assert_eq!((pg.clip_eps_high, pg.max_step_kl, pg.max_step_grad_norm, pg.advantage_bound, pg.sequence_advantage_cap), (None, None, None, None, None));
         assert_eq!(off, ["algorithm", "clip_eps_high", "max_step_kl", "max_step_grad_norm", "loss_agg_length", "advantage_bound", "sequence_advantage_cap"], "only the settings the trainer leaves off, or that depend on the request (the constant length is max_block's), are undeclared");
-        for p in spec.params.iter().filter(|p| p.help.starts_with("dpo:")) {
+        for p in spec.params.iter().filter(|p| p.help.starts_with("dpo") || p.help.starts_with("feedback:")) {
             assert!(defaults.contains_key(&p.name), "{}: a preference setting declares its default", p.name);
         }
         assert_eq!(defaults["loss_agg"], json!(pg.loss_agg.name()), "read from the configuration, not the aggregation's own default");
@@ -689,6 +717,26 @@ mod tests {
         assert!(pg(json!({"algorithm": "ppo"})).is_err());
         let e = request(json!({"base": "a/b", "data": data, "algorithm": "rloo"}), &[]).unwrap_err();
         assert!(e.contains("algorithm") && e.contains("sft"), "{e}");
+    }
+
+    /// KTO takes judged completions and its own settings (beta and keep_reasoning shared with dpo), refuses another
+    /// objective's by name, has no held-out set, and a step holds an example and its mismatched pair.
+    #[test]
+    fn a_feedback_request_takes_its_own_settings_and_refuses_the_rest_by_name() {
+        let data = json!({"train": {"digest": digest(1)}, "start_adapter": {"digest": digest(3)}}).to_string();
+        let ok = request(json!({"base": "a/b", "data": data, "objective": "feedback", "beta": 0.2, "desirable_weight": 1.0, "undesirable_weight": 1.33, "keep_reasoning": true, "grad_accum": 8}), &[]).unwrap();
+        assert_eq!((ok.params.objective, ok.params.beta, ok.params.undesirable_weight), (Objective::Feedback, Some(0.2), Some(1.33)));
+        assert_eq!(Objective::Feedback.rows_per_step(), 2);
+        for (extra, named) in [(json!({"nll_weight": 0.5}), "nll_weight"), (json!({"clip_eps": 0.2}), "clip_eps"), (json!({"algorithm": "dapo"}), "algorithm"), (json!({"eval_every": 5}), "eval_every")] {
+            let mut p = json!({"base": "a/b", "data": data, "objective": "feedback"});
+            p.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            let e = request(p, &[]).unwrap_err();
+            assert!(e.contains(named) && e.contains("feedback"), "{named}: {e}");
+        }
+        let held = json!({"train": {"digest": digest(1)}, "held_out": {"digest": digest(2)}}).to_string();
+        assert!(request(json!({"base": "a/b", "data": held, "objective": "feedback"}), &[]).unwrap_err().contains("held_out"));
+        let e = request(json!({"base": "a/b", "data": data, "objective": "dpo", "desirable_weight": 2.0}), &[]).unwrap_err();
+        assert!(e.contains("desirable_weight") && e.contains("feedback") && e.contains("dpo"), "{e}");
     }
 
     /// A policy-gradient setting the trainer would refuse is refused when the job is submitted, naming it.

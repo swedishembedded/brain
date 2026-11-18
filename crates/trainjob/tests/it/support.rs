@@ -110,6 +110,16 @@ pub fn pairs() -> Vec<u8> {
     [("cab", "bad", "wig"), ("fed", "dad", "vow"), ("ace", "cab", "jug"), ("bag", "egg", "mop")].iter().map(|(u, c, r)| pair(u, c, r)).collect::<Vec<_>>().join("\n").into_bytes()
 }
 
+/// `generic-feedback-v1` judged completions of the toy task: what the pairs prefer is desirable, what they reject is not.
+pub fn feedback() -> Vec<u8> {
+    [("cab", "bad", true), ("cab", "wig", false), ("fed", "dad", true), ("fed", "vow", false)]
+        .iter()
+        .map(|(u, a, d)| json!({"prompt": [{"role": "user", "content": u}], "completion": {"role": "assistant", "content": a}, "desirable": d}).to_string())
+        .collect::<Vec<_>>()
+        .join("\n")
+        .into_bytes()
+}
+
 /// The same records as plain supervised ones.
 pub fn plain() -> Vec<u8> {
     ROLLOUTS.iter().map(|(p, a, _)| record(p, a, None)).collect::<Vec<_>>().join("\n").into_bytes()

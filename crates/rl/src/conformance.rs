@@ -4,7 +4,7 @@
 //! The objective-level half of the conformance suite (C7). `model::conformance`
 //! checks the capability contracts every objective stands on; this checks the
 //! objectives themselves on a registered model: one optimiser step of each of
-//! SFT, DPO, GRPO, every policy-gradient regime ([`policy_gradient_regimes`])
+//! SFT, DPO, KTO, GRPO, every policy-gradient regime ([`policy_gradient_regimes`])
 //! and top-K distillation is finite and lowers that objective's own loss on a
 //! two-example overfit set.
 //!
@@ -29,6 +29,7 @@ use crate::objective::distill::{DistillConfig, DistillExample, DistillTopK, TopK
 use crate::objective::dpo::{weigh_pair, PackedPair};
 use crate::objective::advantage::group_advantages_with;
 use crate::objective::external::{PolicyGradientAlgorithm, PolicyGradientConfig};
+use crate::objective::feedback::{weigh_feedback, Feedback, FeedbackConfig, PackedFeedback};
 use crate::objective::grpo::{token_term, Grpo, GrpoConfig};
 use crate::objective::grpo_term::ClipBand;
 use crate::objective::pg_batch::{backward_weighted, PgBatch, PgSpec};
@@ -76,6 +77,20 @@ pub fn run_objectives<M: Model>(subject: &Subject<M>, seed: u64) -> Result<(), S
         m.backward();
         term.loss
     })?;
+
+    // KTO: an example (row 0) and its prompt with another completion (row 1, the reference point's), against the frozen
+    // starting model, once desirable and once undesirable; the reference point is the starting policy's (zero).
+    for desirable in [true, false] {
+        let m = fresh(2)?;
+        let mut example = PackedFeedback::from_masked(row, (&tokens[..row], &mask), (&tokens[row..2 * row], &mask), desirable)?;
+        example.score_reference(&reference);
+        let kto = FeedbackConfig { beta: BETA, desirable_weight: 1.0, undesirable_weight: 1.0, seq_len: row };
+        lowers(subject.name, if desirable { "kto (desirable)" } else { "kto (undesirable)" }, &m, &mut || {
+            let (term, _) = weigh_feedback(&kto, &m, &example, 0.0);
+            m.backward();
+            term.loss
+        })?;
+    }
 
     // GRPO: the clipped surrogate on fixed rows with one positive and one
     // negative advantage, old log-probabilities from the starting policy.
@@ -216,5 +231,8 @@ fn refuses_every_objective<M: Model>(subject: &Subject<M>, seed: u64) -> Result<
     let pair = crate::objective::dpo::DpoPair { prompt: vec![0], chosen: vec![1], rejected: vec![2] };
     let mut dpo = crate::objective::dpo::Dpo::try_from_pairs(dpo_cfg, vec![pair], |_| (Vec::new(), Vec::new())).expect("a valid DPO configuration");
     refused("dpo", Objective::<M>::prepare(&mut dpo, &mut m))?;
+    let example = |desirable| PackedFeedback::from_masked(SEQ as usize, (&[0, 1], &[false, true]), (&[0, 2], &[false, true]), desirable).expect("a two-token example fits");
+    let mut kto = Feedback::try_from_dataset(FeedbackConfig { beta: BETA, desirable_weight: 1.0, undesirable_weight: 1.0, seq_len: SEQ as usize }, vec![example(true), example(false)]).expect("a valid KTO configuration");
+    refused("kto", Objective::<M>::prepare(&mut kto, &mut m))?;
     Ok(())
 }

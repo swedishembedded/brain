@@ -19,6 +19,7 @@ pub mod chat;
 pub mod chat_media;
 pub mod chat_rollout;
 pub mod chat_template;
+pub mod feedback;
 pub mod preference;
 pub mod prompting;
 pub mod toolcall;

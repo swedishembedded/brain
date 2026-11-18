@@ -27,7 +27,8 @@ use rl::fit::{DistillFit, TeacherFit};
 use rl::objective::distill::{DistillConfig, DistillExample};
 use model::finetune::{AdapterLineage, CausalLmFit, ChatTrainer, LoraRequest, ModelFit, OptimizerState, PreferenceMargins, ScoredFit};
 use model::{FitControl, FitOpts, FitReport};
-use rl::fit::{DpoFit, PolicyGradientFit};
+use rl::fit::{DpoFit, FeedbackFit, PolicyGradientFit};
+use rl::objective::feedback::{FeedbackConfig, PackedFeedback};
 use rl::objective::dpo::{DpoConfig, PackedPair};
 use rl::objective::external::{PolicyGradientConfig, PolicyGradientStats};
 
@@ -45,6 +46,18 @@ pub(crate) struct PreferenceJob<'a> {
     /// reference is the starting policy) and after the last; empty when the
     /// family scores the exported adapter instead.
     pub score_sets: Vec<Vec<PackedPair>>,
+}
+
+/// One feedback (KTO) fine-tune of a LoRA adapter, as the generic trainer takes it.
+pub(crate) struct FeedbackJob<'a> {
+    pub base: &'a Path,
+    pub lora: LoraRequest<'a>,
+    pub opts: &'a FitOpts,
+    pub cfg: FeedbackConfig,
+    pub examples: Vec<PackedFeedback>,
+    /// Where the trained adapter is written (unless the run is interrupted).
+    pub adapter: &'a Path,
+    pub lineage: AdapterLineage<'a>,
 }
 
 /// What a preference run measured on the resident model: one margin list per
@@ -82,6 +95,8 @@ type LoraFn = for<'j, 'c> fn(LoraJob<'j>, FitControl<'c>) -> std::io::Result<Lor
 type ExportFn = fn(&Path, &Path, &Path, Option<&Path>, &mut dyn FnMut() -> bool) -> Result<(), String>;
 type FullFn = for<'c> fn(&Path, &Path, &FitOpts, &Path, OptimizerState, FitControl<'c>) -> std::io::Result<FitReport>;
 type PreferenceFn = for<'j, 'c> fn(PreferenceJob<'j>, FitControl<'c>) -> std::io::Result<(FitReport, ResidentMargins)>;
+/// The run's report and, after a completed run, each training example's log-ratio against the starting policy.
+type FeedbackFn = for<'j, 'c> fn(FeedbackJob<'j>, FitControl<'c>) -> std::io::Result<(FitReport, Vec<f32>)>;
 type MarginsFn = fn(&Path, Option<&Path>, &Path, &[(EncodedTurn, EncodedTurn)], u32) -> Option<PreferenceMargins>;
 type SearchFn = for<'j> fn(SearchJob<'j>, &mut dyn FnMut(Progress)) -> std::io::Result<Report>;
 
@@ -138,6 +153,7 @@ pub(crate) struct ChatEntry {
     pub full: FullFn,
     pub export: ExportFn,
     pub preference: PreferenceFn,
+    pub feedback: FeedbackFn,
     pub margins: MarginsFn,
     /// The frozen-base formats the family's LoRA trainer holds.
     pub lora_bases: model::policy::TrainBases,
@@ -190,6 +206,7 @@ impl ChatEntry {
             full: full::<T>,
             export: T::export_checkpoint,
             preference: preference::<T>,
+            feedback: feedback::<T>,
             margins: T::preference_margins,
             lora_bases: T::LORA_BASES,
             scores_exported_pairs: T::SCORES_EXPORTED_PAIRS,
@@ -261,6 +278,15 @@ fn preference<T: ChatTrainer>(job: PreferenceJob<'_>, control: FitControl<'_>) -
         T::save_adapter(&trained, job.adapter, &job.lineage).map_err(|e| std::io::Error::new(e.kind(), format!("{}: saving the adapter: {e}", job.adapter.display())))?;
     }
     Ok((report, fit.into_margins()))
+}
+
+fn feedback<T: ChatTrainer>(job: FeedbackJob<'_>, control: FitControl<'_>) -> std::io::Result<(FitReport, Vec<f32>)> {
+    let mut fit = FeedbackFit::new(job.cfg, job.examples, job.opts, control);
+    let (report, trained) = T::train_lora(job.base, &job.lora, job.opts, &mut fit)?;
+    if !report.interrupted {
+        T::save_adapter(&trained, job.adapter, &job.lineage).map_err(|e| std::io::Error::new(e.kind(), format!("{}: saving the adapter: {e}", job.adapter.display())))?;
+    }
+    Ok((report, fit.into_logratios()))
 }
 
 /// The search runs on the full-parameter build (the estimate needs every

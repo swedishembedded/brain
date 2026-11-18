@@ -502,6 +502,48 @@ copy is held while training, and the first step's margin is exactly zero
   `outcome.held_out_repeats` (and `held_out_repeats` in the record) counts
   the held-out pairs that are also training pairs, both answers alike.
 
+### Feedback (KTO) fine-tuning a chat model
+
+`brain::FeedbackFineTune` (also `study`) trains a LoRA adapter on completions judged one at a time, desirable or not,
+with no second completion to compare each with (KTO).
+
+```rust
+let outcome = brain::FeedbackFineTune::from_pretrained("Qwen/Qwen3-4B")
+    .dataset("feedback.jsonl")
+    .out_dir("runs/feedback-1")
+    .beta(0.1)
+    .grad_accum(8)
+    .steps(200)
+    .run()?;
+println!("{:?} {:?}", outcome.desirable_logratio, outcome.undesirable_logratio);
+```
+
+The dataset is **`generic-feedback-v1`** JSONL, one judged completion per line:
+
+```json
+{"prompt": [{"role": "user", "content": "What is the capital of France?"}],
+ "completion": {"role": "assistant", "content": "Paris."},
+ "desirable": true,
+ "tools": [],
+ "metadata": {"source": "thumbs"}}
+```
+
+`prompt`, `tools` and `metadata` are as in `generic-preference-v1`; `completion` is one assistant message and
+`desirable` a boolean. Refused by line and field: an unknown or mistyped field, a missing or non-boolean `desirable`,
+an empty prompt or one that ends in an assistant turn, a completion that is not an assistant turn, and a dataset of
+fewer than two examples.
+
+The objective: with `r = log pi(completion | prompt) - log ref(completion | prompt)` (summed over the completion's
+tokens, the reference the model the run starts from, frozen and scored once) and `z` the step's estimate of
+`KL(pi || ref)` (the mean log-ratio over the step's examples of each one's prompt followed by the next example's
+completion, at least 0, held fixed), a desirable example costs `desirable_weight * (1 - sigmoid(beta * (r - z)))` and an
+undesirable one `undesirable_weight * (1 - sigmoid(beta * (z - r)))`. Defaults: `beta` 0.1, both weights 1
+(`brain::DEFAULT_KTO_*`). The reference point is estimated over the `grad_accum` examples of a step, so a step should
+hold several. The first loss is half the weight of each example (`1 - sigmoid(0)`). `desirable_logratio` and
+`undesirable_logratio` are the mean `r` of each kind after the run; KTO pushes the first above the reference point and
+the second below it. Resume, provenance (regime `"feedback"`), `continue_from`, `base_format` and `placed` are as for
+`PreferenceFineTune`. `dataset_report::check_dataset` takes `DatasetKind::Feedback`.
+
 ### Policy-gradient fine-tuning on collected rollouts
 
 `ChatFineTune::policy_gradient(config)` (the `study` feature; every architecture whose trainer declares `ChatTrainer::POLICY_GRADIENT`: `qwen3`, `qwen35`, `ricursive`) trains the LoRA adapter with the clipped

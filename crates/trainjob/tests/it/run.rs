@@ -164,6 +164,28 @@ fn a_dpo_job_trains_a_qwen3_base_on_pairs_and_reports_how_much_more_it_prefers_t
     assert_reservation_returned(&rig);
 }
 
+/// A feedback (KTO) job reads judged completions, trains against the frozen start, and reports the examples by
+/// judgement and where each kind ended against the start: the desirable completions above the undesirable ones.
+#[test]
+fn a_feedback_job_trains_a_qwen3_base_on_judged_completions() {
+    let rig = rig_qwen3("run-feedback", 16 << 30);
+    let train = data_digest(&rig, &crate::support::feedback());
+    let params = json!({"base": BASE, "objective": "feedback", "beta": 0.1, "steps": 12, "grad_accum": 2, "rank": 2, "lr": 5e-2, "seed": 7, "max_block": 128, "data": json!({"train": {"digest": train.hex()}}).to_string()});
+    let frames = Frames::default();
+    let outcome = run(&rig, params, &[], &frames).expect("the run");
+    assert_eq!(frames.steps().len(), 12);
+    let report = &outcome.outputs;
+    assert_eq!((report["status"].as_str(), report["objective"].as_str()), (Some("completed"), Some("feedback")));
+    assert_eq!((report["desirable_examples"].as_u64(), report["undesirable_examples"].as_u64()), (Some(2), Some(2)));
+    let initial = report["initial_loss"].as_f64().unwrap();
+    assert!((initial - 0.5).abs() < 1e-3, "at the start every term is 1 - sigmoid(0): {initial}");
+    assert!(report["final_loss"].as_f64().unwrap() < initial, "{report}");
+    assert!(report["desirable_logratio"].as_f64().unwrap() > report["undesirable_logratio"].as_f64().unwrap(), "{report}");
+    assert!(hex64(&report["adapter_digest"]), "{report}");
+    assert!(work_is_clean(&rig.work_root));
+    assert_reservation_returned(&rig);
+}
+
 /// A preference dataset is checked against the base's own tokenizer and template before a card is claimed, and a
 /// record that does not parse is refused by line.
 #[test]

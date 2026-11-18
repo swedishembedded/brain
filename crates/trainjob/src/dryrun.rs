@@ -30,7 +30,7 @@ pub fn spec() -> ActionSpec {
         .cancellable()
         .training()
         .param(ParamSpec::new("base", ParamType::Str, "the base model whose tokenizer and chat template read the dataset, `<vendor>/<repo>` in the server's model store (needed for `chat` and `preference`; a `timeline` dataset has no base)"))
-        .param(ParamSpec::new("kind", ParamType::Enum(vec!["chat".into(), "preference".into(), "timeline".into()]), "`chat` (`generic-messages-v2` records, for sft, policy_gradient and full_train), `preference` (`generic-preference-v1` pairs, for dpo) or `timeline` (`timeline-v1` subjects, for timeline_train: each line validated, no tokens counted)").default(json!("chat")))
+        .param(ParamSpec::new("kind", ParamType::Enum(vec!["chat".into(), "preference".into(), "feedback".into(), "timeline".into()]), "`chat` (`generic-messages-v2` records, for sft, policy_gradient and full_train), `preference` (`generic-preference-v1` pairs, for dpo), `feedback` (`generic-feedback-v1` judged completions, for feedback) or `timeline` (`timeline-v1` subjects, for timeline_train: each line validated, no tokens counted)").default(json!("chat")))
         .param(ParamSpec::new("dataset_digest", ParamType::Str, "the dataset, as a blake3 digest of the server's artifact store (or attach it as the input blob `dataset`; exactly one of the two)"))
         .param(ParamSpec::new("thinking", ParamType::Bool, "render as a run with this `thinking` setting would (chat only)").default(json!(true)))
         .param(ParamSpec::new("pack_answers", ParamType::Bool, "render as a run with this `pack_answers` setting would (chat only)").default(json!(false)))
@@ -138,9 +138,13 @@ pub fn run(env: &JobEnv, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -
         outcome.outputs = timeline_report(&text, p.max_block, &mut inv.keep_going(progress, 0, "record"))?;
         return Ok(outcome);
     }
-    let base = p.base.as_deref().ok_or("check_dataset: `base` is needed to read a chat or preference dataset")?;
+    let base = p.base.as_deref().ok_or("check_dataset: `base` is needed to read a chat, preference or feedback dataset")?;
     let base_dir = job::resolve_base(env.models_dir.as_deref(), base)?;
-    let kind = if p.kind == "preference" { brain::dataset_report::DatasetKind::Preference } else { brain::dataset_report::DatasetKind::Chat };
+    let kind = match p.kind.as_str() {
+        "preference" => brain::dataset_report::DatasetKind::Preference,
+        "feedback" => brain::dataset_report::DatasetKind::Feedback,
+        _ => brain::dataset_report::DatasetKind::Chat,
+    };
     let truncated = brain::TruncatedRollouts::parse(&p.truncated).map_err(|e| format!("check_dataset: {e}"))?;
     let check = brain::dataset_report::DatasetCheck { kind, thinking: p.thinking, pack_answers: p.pack_answers, max_block: p.max_block, list_records: p.per_record.then_some(brain::dataset_report::RecordWindow { offset: p.offset, limit: p.limit }), truncated };
     let report = brain::dataset_report::check_dataset(&base_dir, &dataset, &check, &mut inv.keep_going(progress, 0, "record")).map_err(|e| match e {

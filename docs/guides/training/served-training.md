@@ -19,7 +19,11 @@ The job is the model `brain/train` with one action, `train`. It trains
   `held_out` hold `generic-preference-v1` pairs (a prompt and the `chosen` and
   `rejected` assistant turns), as `brain::PreferenceFineTune` trains them. The
   reference is the policy the run starts from (the base, or the `start_adapter`
-  continued), frozen, so no second model is held.
+  continued), frozen, so no second model is held;
+- **by feedback** (`objective: feedback`, KTO): `dataset` holds `generic-feedback-v1` judged completions (a prompt, one
+  `completion` and `desirable`), as `brain::FeedbackFineTune` trains them, against the same frozen reference; a step's
+  `grad_accum` examples estimate the reference point, and the result reports `desirable_examples`,
+  `undesirable_examples` and each kind's mean log-ratio to the start (`desirable_logratio`, `undesirable_logratio`).
 
 ## Full-parameter tuning and merging
 
@@ -134,7 +138,7 @@ it as `local/<name>` with a manifest of family `horizon`, and the server then se
 
 `check_dataset` reads a dataset with the base's own tokenizer and chat template, as the trainer would, and reports
 without training or claiming a card. Params: `base` (not for a `timeline` dataset), `kind` (`chat` for `generic-messages-v2` records, `preference`
-for `generic-preference-v1` pairs, `timeline` for `timeline-v1` subjects, each line validated and no token counted), the dataset as the input blob `dataset` or as `dataset_digest` (exactly one),
+for `generic-preference-v1` pairs, `feedback` for `generic-feedback-v1` judged completions, `timeline` for `timeline-v1` subjects, each line validated and no token counted), the dataset as the input blob `dataset` or as `dataset_digest` (exactly one),
 `thinking` and `pack_answers` (rendered as a run with those settings would), `truncated` (`mask` default or `keep`: the
 rules between rollout records read as a policy-gradient run with that setting would, a kept truncated rollout counting
 in its group), `max_block`, and `per_record` (with
@@ -216,7 +220,7 @@ No dataset or adapter travels through the API as a message body.
 |---|---|
 | `base` | the base model, `<vendor>/<repo>` in the model store (required) |
 | `data` | a JSON document naming the datasets (required), below |
-| `objective` | `sft` (default), `policy_gradient` or `dpo` |
+| `objective` | `sft` (default), `policy_gradient`, `dpo` or `feedback` |
 | `steps`, `grad_accum`, `rank`, `alpha`, `lr`, `weight_decay`, `seed` | the optimiser's settings; what is not named is the trainer's own default, which `GET /v1/capabilities` lists as the param's `implied_default` |
 | `strict_updates` | abort at the first optimiser step whose loss or gradient is not finite (default off: such a step is skipped, the weights untouched, and the run aborts on the third in a row) |
 | `max_block` | the longest training row in tokens (default 8192). The memory reserved for the run is sized to it and a longer record is refused by name |
@@ -231,7 +235,8 @@ No dataset or adapter travels through the API as a message body.
 | `loss_agg`, `loss_agg_length` | how a step's token terms are divided: `seq-mean` (default; each sequence by its own token count, a batch of one sequence), `token-sum` (every token of a step by the step's token count) or `constant-length` (each sequence's sum by `loss_agg_length` tokens, default `max_block`, averaged over the sequences: Dr. GRPO, whose gradient is not rescaled by a sequence's length). `loss_agg_length` with another aggregation is refused |
 | `advantage_norm` | how each group's rewards become the advantages of its rollouts: `mean-centred` (default, `r - mean`), `z-score` (`(r - mean) / (std + 1e-4)`) or `leave-one-out` (`r_i` less the mean of the others). The records the run trains on (the dataset and its replay sets together) are held to the contract's rules between records: a group of one, two records of one rollout that disagree, or two tokenizer digests fail the job naming the rule and the example |
 | `behaviour` | where the importance ratio's behaviour log-probabilities come from. `recorded` (default): the sampler's own `behavior_logprobs`, on every supervised token of every record with a reward; a dataset missing any is refused. `start_of_run_proxy`: the start-of-run policy's where none was recorded, exact only if the rollouts were sampled from it; the training record states which was used |
-| `beta`, `nll_weight`, `keep_reasoning` | the preference objective's settings (only with `objective: dpo`): the loss temperature (default 0.1), the weight of the supervised likelihood of the chosen answer added to it (default 0) and whether the reasoning of each candidate is trained on |
+| `beta`, `nll_weight`, `keep_reasoning` | the preference objective's settings (only with `objective: dpo`; `beta` and `keep_reasoning` with `feedback` too): the loss temperature (default 0.1), the weight of the supervised likelihood of the chosen answer added to it (default 0) and whether the reasoning of each candidate is trained on |
+| `desirable_weight`, `undesirable_weight` | the feedback objective's weights of a desirable and of an undesirable example's term (default 1 each; only with `objective: feedback`) |
 | `arch` | the base's architecture, only for a checkpoint directory with no `config.json` |
 
 `data` is `{"train": SRC, "held_out"?: SRC, "held_out_text"?: SRC, "monitor"?:
@@ -240,7 +245,7 @@ SRC, "start_adapter"?: SRC, "replay"?: [SRC], "weighted_replay"?: [{SRC fields,
 name>"}`. Unknown fields anywhere are refused, as is a blob that is named but
 not attached or attached but not used.
 
-A preference run takes only what it uses: `held_out_text`, `monitor`, replay sets, `replay_share`,
+A preference or feedback run takes only what it uses (a feedback run takes no `held_out` either): `held_out_text`, `monitor`, replay sets, `replay_share`,
 `weight_decay`, `eval_every`, `patience`, `keep_evaluations`, `pack_answers`, `thinking: false` and the
 policy-gradient settings are refused by name, never ignored. Each step holds both candidates of a pair,
 so the memory reserved is sized to two `max_block` rows.

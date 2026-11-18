@@ -52,6 +52,7 @@ mod ensemble;
 mod improve;
 mod model_optimizer;
 mod model_pruner;
+mod feedback_finetune;
 mod preference_finetune;
 mod score_long_record_real;
 mod score_tokens_qwen35;

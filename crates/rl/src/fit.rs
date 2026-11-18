@@ -18,6 +18,7 @@
 //! trainer offers. None of them names an architecture.
 //!
 //! * [`DpoFit`] - preference pairs against the starting policy as reference.
+//! * [`FeedbackFit`] - unpaired desirable and undesirable completions (KTO) against the starting policy.
 //! * [`GrpoFit`] - group-relative policy optimisation against an environment.
 //! * [`PolicyGradientFit`] - the same clipped objective on rollouts collected outside brain.
 //! * [`TeacherFit`] - the top-K distributions a teacher gives a prepared dataset, for [`DistillFit`].
@@ -33,6 +34,7 @@ use crate::env::{Environment, Verifier};
 use crate::objective::distill::{DistillConfig, DistillExample, DistillTopK, TopK};
 use crate::objective::dpo::{Dpo, DpoConfig, PackedPair};
 use crate::objective::external::{ExternalPolicyGradient, PolicyGradientConfig, PolicyGradientStats};
+use crate::objective::feedback::{Feedback, FeedbackConfig, PackedFeedback};
 use crate::objective::grpo::Grpo;
 
 /// The control a visitor consumes: a visitor trains one model.
@@ -82,6 +84,41 @@ impl ModelFit for DpoFit<'_, '_> {
         let (report, model) = fit_controlled(model, Dpo::try_from_dataset(self.dpo, pairs)?, self.opts, None, control)?;
         if !report.interrupted {
             self.margins = self.score_sets.iter().map(|set| set.iter().map(|pair| pair.margin(&model)).collect()).collect();
+        }
+        Ok((report, model))
+    }
+}
+
+/// KTO over whichever model the trainer builds: the objective is made per concrete type from the packed examples the
+/// visitor holds, and their log-ratios against the starting policy are measured after an uninterrupted run.
+pub struct FeedbackFit<'a, 'c> {
+    cfg: FeedbackConfig,
+    examples: Option<Vec<PackedFeedback>>,
+    logratios: Vec<f32>,
+    opts: &'a FitOpts,
+    control: Option<FitControl<'c>>,
+}
+
+impl<'a, 'c> FeedbackFit<'a, 'c> {
+    pub fn new(cfg: FeedbackConfig, examples: Vec<PackedFeedback>, opts: &'a FitOpts, control: FitControl<'c>) -> FeedbackFit<'a, 'c> {
+        FeedbackFit { cfg, examples: Some(examples), logratios: Vec::new(), opts, control: Some(control) }
+    }
+
+    /// Per training example, in order, `log pi(y | x) - log ref(y | x)` of the trained policy against the policy the
+    /// run started from (empty unless the run completed).
+    pub fn into_logratios(self) -> Vec<f32> {
+        self.logratios
+    }
+}
+
+impl ModelFit for FeedbackFit<'_, '_> {
+    fn fit<M: Model>(&mut self, model: M) -> std::io::Result<(FitReport, M)> {
+        let examples = self.examples.take().ok_or_else(|| std::io::Error::other("a feedback fit trains one model"))?;
+        let control = take_control(&mut self.control, "feedback")?;
+        let mut objective = Feedback::try_from_dataset(self.cfg, examples)?;
+        let (report, model) = fit_controlled(model, &mut objective, self.opts, None, control)?;
+        if !report.interrupted {
+            self.logratios = objective.logratios(&model);
         }
         Ok((report, model))
     }

@@ -2,13 +2,14 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Sampling-based training objectives built on P10's [`model::rollout`] and
-//! P11's [`crate::env`] seam - GRPO, DPO and top-K distillation as siblings
+//! P11's [`crate::env`] seam - GRPO, DPO, KTO and top-K distillation as siblings
 //! of this module, all reducing to [`model::Batch::LmWeighted`].
 
 pub mod advantage;
 pub mod distill;
 pub mod dpo;
 pub mod external;
+pub mod feedback;
 pub mod grpo;
 pub mod grpo_stats;
 pub mod grpo_term;
