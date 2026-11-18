@@ -183,12 +183,15 @@ struct Job {
     base_digest: Option<String>,
     /// The adapter the request runs under, which a policy trace is scored in.
     adapter: Option<model::serve::AdapterId>,
+    /// The sampler settings the scheduler was handed for the request, which it draws with unchanged; the reply echoes
+    /// them ([`sampler_settings`]). `None` until the request is submitted.
+    sample: Option<model::serve::SampleParams>,
 }
 
 impl Job {
     /// A job slot that holds nothing: numbering filler, and the stand-in while a job's request is being submitted.
     fn placeholder() -> Job {
-        Job { invocation: Invocation::new(), seq: None, id: None, identity: None, capture: Capture::default(), base_digest: None, adapter: None }
+        Job { invocation: Invocation::new(), seq: None, id: None, identity: None, capture: Capture::default(), base_digest: None, adapter: None, sample: None }
     }
 }
 
@@ -235,8 +238,6 @@ pub fn with_sampling_defaults(mut spec: ActionSpec, label: &str, declared: &data
     let has = |name: &str| spec.params.iter().any(|p| p.name == name);
     let chat = ["messages", "temp", "top_k", "top_p"].iter().all(|n| has(n));
     let defaults = &if chat { declared.or(data::generation::SamplingDefaults::CHAT_FALLBACK) } else { *declared };
-    // The shortest decimal of the f32, so 0.95 reads as 0.95 and not as the f64 nearest the f32.
-    let decimal = |v: f32| serde_json::json!(v.to_string().parse::<f64>().unwrap_or(f64::from(v)));
     let declared: [(&str, Option<serde_json::Value>); 5] = [
         ("temp", defaults.temp.map(decimal)),
         ("top_k", defaults.top_k.map(|v| serde_json::json!(v))),
@@ -252,6 +253,20 @@ pub fn with_sampling_defaults(mut spec: ActionSpec, label: &str, declared: &data
         }
     }
     spec
+}
+
+/// The shortest decimal of an f32 as a JSON number, so 0.95 reads as 0.95 and not as the f64 nearest the f32; it
+/// parses back to the same f32.
+fn decimal(v: f32) -> serde_json::Value {
+    serde_json::json!(v.to_string().parse::<f64>().unwrap_or(f64::from(v)))
+}
+
+/// The settings a request's tokens were drawn with, keyed by the `generate` params that set them: `temp` (`<= 0` is
+/// greedy), `top_k` (`0` keeps every token), `top_p` (`>= 1` keeps every token) and `min_p` (`0` keeps every token),
+/// exactly as the scheduler applies them, after the action's defaults (the checkpoint's declared ones included) and
+/// the parse. The seed is the outcome's own `seed`. A surface renames the keys to its request fields.
+pub fn sampler_settings(sample: &model::serve::SampleParams) -> serde_json::Value {
+    serde_json::json!({ "temp": decimal(sample.temp), "top_k": sample.top_k, "top_p": decimal(sample.top_p), "min_p": decimal(sample.min_p) })
 }
 
 impl Capture {
@@ -365,7 +380,7 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
         let bi = self.jobs.len();
         // The job remembers the request's parameters and cancellation, not its payload: a page's pixels are tens of
         // megabytes, copied here on the thread that is decoding other requests.
-        let mut job = Job { invocation: inv.without_blobs(), seq: None, id: None, identity: None, capture: Capture::default(), base_digest: self.front.base_digest(), adapter: None };
+        let mut job = Job { invocation: inv.without_blobs(), seq: None, id: None, identity: None, capture: Capture::default(), base_digest: self.front.base_digest(), adapter: None, sample: None };
         // A request cancelled before admission is answered before it is parsed, encoded or queued.
         if let Err(e) = inv.cancel.check() {
             self.jobs.push(job);
@@ -417,6 +432,7 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
                 }
                 job.capture.trace = inv.get_bool("policy_trace").unwrap_or(false).then_some(if sample.temp > 0.0 { sample.temp } else { 1.0 });
                 job.adapter = adapter;
+                job.sample = Some(sample);
                 let seq = SeqState::new(&req, inv.cancel.clone());
                 // `ignore_eos` generates to the token budget: the end-of-sequence ids are not stop tokens for this request.
                 let stop = if inv.get_bool("ignore_eos").unwrap_or(false) { Vec::new() } else { self.front.stop().to_vec() };
@@ -508,10 +524,13 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
         self.open.len() + self.encoding.len() + self.awaiting.len()
     }
 
-    /// What served the reply: the adapter that answered and, when known, the
-    /// base checkpoint's digest, the backend it ran on and the engine version.
+    /// What served the reply: the adapter that answered, the sampler settings it was drawn with ([`sampler_settings`])
+    /// and, when known, the base checkpoint's digest, the backend it ran on and the engine version.
     fn named(outcome: capability::Outcome, job: &Job) -> capability::Outcome {
         let mut outcome = outcome.set("backend", serde_json::json!(gpu_core::backend_name())).set("engine", serde_json::json!(concat!("brain ", env!("CARGO_PKG_VERSION"))));
+        if let Some(sample) = &job.sample {
+            outcome = outcome.set("sampler", sampler_settings(sample));
+        }
         if let Some(digest) = &job.base_digest {
             outcome = outcome.set("base_digest", serde_json::json!(digest));
         }

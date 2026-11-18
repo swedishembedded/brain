@@ -21,7 +21,7 @@ use qwen3::chat::ToolChoice;
 use serde_json::json;
 
 use crate::common;
-use common::{tokenizer, Toy, VOCAB};
+use common::{row, tokenizer, Toy, VOCAB};
 
 /// Ends on token 7; the toy decoder counts up from the prompt's last token.
 struct Front {
@@ -146,4 +146,69 @@ fn a_policy_trace_waits_for_a_decoder_that_is_not_ready_to_score() {
     let traced = results[0].clone().expect("served after the wait").outputs;
     assert_eq!(traced["policy_trace"]["generation_token_ids"], json!([5, 6, 7]));
     assert!(results[1].clone().expect("served").outputs.get("policy_trace").is_none());
+}
+
+/// The real request path's front end: a `generate` request read by the Qwen parser, with the defaults its action spec
+/// applies already in the invocation (the API validates every request against the spec before the model sees it).
+struct Parsed {
+    tok: QwenBpe,
+}
+
+impl Frontend for Parsed {
+    fn tok(&self) -> &QwenBpe {
+        &self.tok
+    }
+    fn stop(&self) -> &[u32] {
+        &[7]
+    }
+    fn label(&self) -> &str {
+        "toy"
+    }
+    fn parse(&self, inv: &Invocation) -> Result<ParsedRequest, String> {
+        qwen3::chat::parse_request(&self.tok, inv)
+    }
+}
+
+/// A chat action whose checkpoint declares its own sampling defaults, the shape of every served chat model's.
+fn chat_spec() -> capability::ActionSpec {
+    let declared = data::generation::SamplingDefaults { temp: Some(0.6), top_k: Some(20), top_p: Some(0.95), ..Default::default() };
+    llmserve::with_sampling_defaults(llmserve::with_token_capture(llmserve::generate_spec("toy", true)), "toy", &declared)
+}
+
+/// SPEC: a reply names the sampler settings its tokens were drawn with (`sampler`: `temp`, `top_k`, `top_p`, `min_p`),
+/// after the checkpoint's declared defaults and the parse, and they are the ones the sampler used: the log-probability
+/// the sampler reported for every drawn token is that token's under the distribution those settings cut from the row.
+#[test]
+fn a_reply_names_the_sampler_settings_its_tokens_were_drawn_with() {
+    let spec = chat_spec();
+    let request = |extra: &[(&str, serde_json::Value)]| {
+        let inv = extra.iter().fold(Invocation::new().set("prompt", json!("t1t2t3t4")).set("chat", json!(false)).set("max_new", json!(12)).set("ignore_eos", json!(true)).set("logprobs", json!(true)).set("return_token_ids", json!(true)), |inv, (k, v)| inv.set(k, v.clone()));
+        spec.validate(inv).expect("a valid request")
+    };
+    let cases = [
+        (request(&[("seed", json!(3))]), json!({"temp": 0.6, "top_k": 20, "top_p": 0.95, "min_p": 0.0})),
+        (request(&[("seed", json!(4)), ("temp", json!(1.3)), ("top_k", json!(0)), ("top_p", json!(1.0)), ("min_p", json!(0.05))]), json!({"temp": 1.3, "top_k": 0, "top_p": 1.0, "min_p": 0.05})),
+        (request(&[("seed", json!(5)), ("temp", json!(0.9)), ("top_k", json!(5)), ("top_p", json!(0.5))]), json!({"temp": 0.9, "top_k": 5, "top_p": 0.5, "min_p": 0.0})),
+        (request(&[("temp", json!(0.0))]), json!({"temp": 0.0, "top_k": 20, "top_p": 0.95, "min_p": 0.0})),
+    ];
+    let front = Parsed { tok: tokenizer() };
+    let mut sched = Scheduler::new(Toy::new(BlockAllocator::new(128, 8), 0).sampling(), 4);
+    let invs: Vec<Invocation> = cases.iter().map(|(inv, _)| inv.clone()).collect();
+    let results = run_batch_scheduled(&mut sched, &front, &invs, &mut |_, _| {});
+    for ((inv, want), result) in cases.iter().zip(results) {
+        let out = result.expect("served").outputs;
+        assert_eq!(out["sampler"], *want, "{inv:?}");
+        let echoed = |key: &str| out["sampler"][key].as_f64().expect("a number") as f32;
+        let params = SampleParams { temp: echoed("temp"), top_k: echoed("top_k") as usize, top_p: echoed("top_p"), min_p: echoed("min_p"), ..SampleParams::greedy() };
+        let prompt: Vec<u32> = serde_json::from_value(out["prompt_token_ids"].clone()).expect("prompt ids");
+        let tokens: Vec<u32> = serde_json::from_value(out["completion_token_ids"].clone()).expect("ids");
+        let logprobs: Vec<f32> = serde_json::from_value(out["completion_logprobs"].clone()).expect("logprobs");
+        assert_eq!(tokens.len(), 12);
+        let mut previous = *prompt.last().expect("a prompt");
+        for (i, (&token, &reported)) in tokens.iter().zip(&logprobs).enumerate() {
+            let recomputed = model::serve::candidate_logprob(&row(previous), params, token);
+            assert!((recomputed - reported).abs() < 1e-5, "{want}: token {i} ({token}) was drawn at {reported}, the echoed settings give {recomputed}");
+            previous = token;
+        }
+    }
 }

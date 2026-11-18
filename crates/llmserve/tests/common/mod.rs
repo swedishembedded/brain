@@ -25,11 +25,20 @@ pub struct Toy {
     scoring: bool,
     /// Scoring answers "not ready" this many times before it answers "ready" (a prompt being read in).
     busy_polls: std::cell::Cell<u32>,
+    /// Offer every token as a candidate ([`Toy::sampling`]); greedy only otherwise.
+    sampling: bool,
 }
 
 impl Toy {
     pub fn new(alloc: BlockAllocator, cached: u32) -> Toy {
-        Toy { alloc, cached, scoring: false, busy_polls: std::cell::Cell::new(0) }
+        Toy { alloc, cached, scoring: false, busy_polls: std::cell::Cell::new(0), sampling: false }
+    }
+
+    /// The same decoder, able to sample: after token `p` its row ranks every token, `p + 1` first, then `p + 2`, ...,
+    /// with logits falling by [`ROW_STEP`] a rank ([`row`]), and its candidate list holds the whole row, which it also reads back whole.
+    pub fn sampling(mut self) -> Toy {
+        self.sampling = true;
+        self
     }
 
     /// The same decoder, able to score a continuation: the log-probability of token `t` is `-t / 100`, whatever
@@ -91,6 +100,13 @@ impl PagedDecoder for Toy {
         vec![*prompt.last().unwrap() as f32]
     }
     fn logits(&self, hidden: &[f32]) -> Vec<f32> {
+        if self.sampling {
+            let mut l = vec![0.0; VOCAB];
+            for (token, logit) in row(hidden[0] as u32) {
+                l[token as usize] = logit;
+            }
+            return l;
+        }
         let mut l = vec![0.0; VOCAB];
         l[(hidden[0] as usize + 1) % VOCAB] = 1.0;
         l
@@ -130,12 +146,37 @@ impl PagedDecoder for Toy {
     fn decode_window_capacity(&self) -> usize {
         1
     }
-    fn forward_batched_topk(&mut self, _: &mut [&mut BlockTable], _: &[u32], _: usize) -> Vec<Vec<(u32, f32)>> {
-        unreachable!("greedy only")
+    fn forward_batched_topk(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32], k: usize) -> Vec<Vec<(u32, f32)>> {
+        assert!(self.sampling, "greedy only");
+        for t in tables.iter_mut() {
+            t.append(&mut self.alloc).unwrap();
+        }
+        inputs.iter().map(|&i| row(i).into_iter().take(k).collect()).collect()
+    }
+    fn full_row_readback(&self) -> bool {
+        self.sampling
+    }
+    fn forward_batched_logit_rows(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32]) -> Vec<Vec<f32>> {
+        for t in tables.iter_mut() {
+            t.append(&mut self.alloc).unwrap();
+        }
+        inputs.iter().map(|&i| self.logits(&[i as f32])).collect()
     }
     fn topk_capacity(&self) -> usize {
-        1
+        if self.sampling {
+            VOCAB
+        } else {
+            1
+        }
     }
+}
+
+/// How far a [`Toy::sampling`] row's logits fall from one rank to the next.
+pub const ROW_STEP: f32 = 0.25;
+
+/// The sampling toy's row after token `previous`, best first: `previous + 1`, `previous + 2`, ... (mod the vocabulary).
+pub fn row(previous: u32) -> Vec<(u32, f32)> {
+    (0..VOCAB as u32).map(|rank| ((previous + 1 + rank) % VOCAB as u32, -(rank as f32) * ROW_STEP)).collect()
 }
 
 pub fn tokenizer() -> QwenBpe {

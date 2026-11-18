@@ -4425,6 +4425,103 @@ async fn a_reply_names_the_adapter_that_answered_by_digest() {
     assert_eq!(with_brain[0]["choices"][0]["finish_reason"], json!("stop"));
 }
 
+/// A chat model whose `generate` declares the sampler with the defaults its checkpoint declares, and whose answer
+/// reports the settings it drew with (`sampler`, keyed by param) as the scheduler-backed models do: the values the
+/// executor handed it, the spec's defaults filled in.
+struct SamplerChat;
+
+struct SamplerChatInst;
+
+const SAMPLER_CHAT: &str = "brain-sampler-chat";
+
+impl ResidentModel for SamplerChat {
+    fn manifest(&self) -> Manifest {
+        Manifest::new(
+            SAMPLER_CHAT,
+            "a chat model with a declared sampler",
+            vec![ActionSpec::new("generate", "generate text")
+                .streaming()
+                .param(ParamSpec::new("prompt", ParamType::Str, "the prompt"))
+                .param(ParamSpec::new("messages", ParamType::Str, "chat turns"))
+                .param(ParamSpec::new("max_new", ParamType::Int, "token budget"))
+                .param(ParamSpec::new("temp", ParamType::Float, "temperature").default(json!(0.6)))
+                .param(ParamSpec::new("top_k", ParamType::Int, "top-k").default(json!(20)))
+                .param(ParamSpec::new("top_p", ParamType::Float, "top-p").default(json!(0.95)))
+                .param(ParamSpec::new("min_p", ParamType::Float, "min-p"))
+                .param(ParamSpec::new("seed", ParamType::Int, "sampling seed"))
+                .output(BlobSpec::new("text", Media::Text, "generated text"))],
+        )
+    }
+    fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+        InstanceKey::new(SAMPLER_CHAT, "default")
+    }
+    fn estimate(&self, _k: &InstanceKey) -> MemCost {
+        MemCost::default()
+    }
+    fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn Instance>, String> {
+        Ok(Box::new(SamplerChatInst))
+    }
+}
+
+impl Instance for SamplerChatInst {
+    fn run(&mut self, _a: &str, inv: &Invocation, _p: &mut dyn FnMut(Progress)) -> ActionResult {
+        let sampler = json!({ "temp": inv.get_f64("temp"), "top_k": inv.get_i64("top_k"), "top_p": inv.get_f64("top_p"), "min_p": inv.get_f64("min_p").unwrap_or(0.0) });
+        let out = Outcome::new().set("prompt_tokens", json!(5)).set("completion_tokens", json!(2)).set("finish_reason", json!("stop")).set("seed", json!(9)).set("sampler", sampler);
+        Ok(out.blob("text", Blob::new(Media::Text, b"ok".to_vec())))
+    }
+}
+
+/// The `brain` object of every reply shape `provider` serves for one request `body` to `path`: the reply's own and
+/// the streamed reply's (on the terminal chunk: OpenAI's chunk with `finish_reason`, Anthropic's `message_delta`).
+async fn served_objects(provider: Provider, path: &str, body: &Value) -> Vec<Value> {
+    let models: Vec<Arc<dyn ResidentModel>> = vec![Arc::new(SamplerChat)];
+    let mut budgets = Budgets::new();
+    budgets.set(Device::Cpu, 8 << 30, 0);
+    let key = "sk-brain-test-key".to_string();
+    let app = router(AppState::new(Executor::start(models, budgets, Policy::default()), key.clone(), provider));
+    let (st, reply) = post_json(&app, provider, &key, path, body).await;
+    assert_eq!(st, StatusCode::OK, "{provider} {path}: {reply}");
+    let mut streamed = body.clone();
+    streamed["stream"] = json!(true);
+    let (st, sse) = post_text(&app, provider, &key, path, &streamed).await;
+    assert_eq!(st, StatusCode::OK, "{provider} {path}: {sse}");
+    let frames: Vec<Value> = sse_data(&sse).iter().filter(|d| *d != "[DONE]").map(|d| serde_json::from_str(d).unwrap()).collect();
+    let with_brain: Vec<&Value> = frames.iter().filter(|f| f.get("brain").is_some()).collect();
+    assert_eq!(with_brain.len(), 1, "{provider} {path}: exactly the terminal event carries the extension: {sse}");
+    let terminal = with_brain[0];
+    assert!(terminal["type"] == json!("message_delta") || terminal["choices"][0]["finish_reason"].is_string(), "{provider} {path}: {terminal}");
+    vec![reply["brain"].clone(), terminal["brain"].clone()]
+}
+
+/// Every chat dialect names, in its `brain` object (the streamed reply: on its terminal event), the sampler settings
+/// the reply was drawn with under the request fields that set them: those the request sent, and the model's own
+/// defaults for those it left out.
+#[tokio::test]
+async fn every_dialect_echoes_the_sampler_settings_the_reply_was_drawn_with() {
+    let messages = json!([{"role": "user", "content": "hi"}]);
+    let defaults = json!({"temperature": 0.6, "top_k": 20, "top_p": 0.95, "min_p": 0.0});
+    let asked = json!({"temperature": 1.0, "top_k": 0, "top_p": 1.0, "min_p": 0.05});
+    let routes = [
+        (Provider::OpenAI, "/v1/chat/completions", json!({"model": SAMPLER_CHAT, "messages": messages})),
+        (Provider::OpenAI, "/v1/completions", json!({"model": SAMPLER_CHAT, "prompt": "hi"})),
+        (Provider::OpenRouter, "/v1/chat/completions", json!({"model": SAMPLER_CHAT, "messages": messages})),
+        (Provider::Anthropic, "/v1/messages", json!({"model": SAMPLER_CHAT, "max_tokens": 8, "messages": messages})),
+    ];
+    for (provider, path, body) in routes {
+        for brain in served_objects(provider, path, &body).await {
+            assert_eq!(brain["sampler"], defaults, "{provider} {path}: the model's defaults: {brain}");
+            assert_eq!(brain["seed"], json!(9), "{provider} {path}: {brain}");
+        }
+        let mut sent = body.clone();
+        for (k, v) in asked.as_object().unwrap() {
+            sent[k] = v.clone();
+        }
+        for brain in served_objects(provider, path, &sent).await {
+            assert_eq!(brain["sampler"], asked, "{provider} {path}: the request's own settings: {brain}");
+        }
+    }
+}
+
 /// `policy_trace: true` returns the training-grade trace in the reply (streamed: on the terminal chunk): the prompt
 /// ids, the generated ids with their full-distribution log-probabilities, and the policy that served them (base
 /// digest, adapter id and digest); a request that does not ask gets none of it, and a non-boolean is refused by name.

@@ -53,6 +53,15 @@ fn refuse_training(state: &AppState, model: &str, action: &str) -> Result<(), Ap
     Ok(())
 }
 
+/// `inv` as `model` runs `action`: its sampling settings settled against the action the model serves
+/// ([`crate::sampling::settle`]), so an omitted one is the default the manifest advertises. Every queued job passes
+/// here ([`submit`], [`StreamedJob::build`]), so each surface's requests are sampled alike.
+fn settled(exec: &residency::Executor, model: &str, action: &str, inv: Invocation) -> Invocation {
+    let manifests = exec.manifests();
+    let spec = manifests.iter().find(|m| m.model == model).and_then(|m| m.actions.iter().find(|a| a.name == action));
+    crate::sampling::settle(spec, inv)
+}
+
 /// A call that has begun (the embedder's [`RequestHooks`](crate::RequestHooks) let
 /// it run) and not yet been settled.
 ///
@@ -209,6 +218,9 @@ pub struct ChatOutcome {
     pub tool_calls: Vec<serde_json::Value>,
     /// The sampling seed the model decoded with, when it reports one.
     pub seed: Option<u64>,
+    /// The sampler settings the model drew the reply with, under the request fields that set them
+    /// ([`crate::sampling::echo`]), when it reports them.
+    pub sampler: Option<serde_json::Value>,
     /// The `(id, digest, version)` of the adapter that answered, when one did. The version is the policy version
     /// of that release under its id.
     pub adapter: Option<(String, String, u64)>,
@@ -262,7 +274,9 @@ impl ChatOutcome {
     }
 
     /// The reply's `brain` extension object: the seed that reproduces the
-    /// decode, the adapter that answered, the `policy_version` and, when the
+    /// decode, the `sampler` settings it was drawn with (`temperature`, `top_k`,
+    /// `top_p`, `min_p` as the sampler applied them, defaults included), the
+    /// adapter that answered, the `policy_version` and, when the
     /// request asked for log-probabilities, their `logprob_kind` (`policy`: the
     /// full distribution of a policy trace; `sampler`: the sampler's truncated
     /// figure) and, for a policy trace, the `tokenizer_digest` and
@@ -273,6 +287,9 @@ impl ChatOutcome {
         let mut served = serde_json::Map::new();
         if let Some(seed) = self.seed {
             served.insert("seed".into(), serde_json::json!(seed));
+        }
+        if let Some(sampler) = &self.sampler {
+            served.insert("sampler".into(), sampler.clone());
         }
         if let Some((id, digest, version)) = &self.adapter {
             served.insert("adapter".into(), serde_json::json!({ "id": id, "digest": digest, "version": version }));
@@ -313,7 +330,7 @@ pub fn read_chat_outcome(o: &Outcome) -> ChatOutcome {
     let numbers = |key: &str| o.outputs.get(key).and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|n| n.as_i64()).collect::<Vec<_>>());
     let logprobs = o.outputs.get("completion_logprobs").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|n| n.as_f64()).collect::<Vec<_>>());
     let text_of = |key: &str| o.outputs.get(key).and_then(|v| v.as_str()).map(str::to_string);
-    ChatOutcome { text, prompt_tokens, completion_tokens, reasoning_tokens: o.outputs.get("reasoning_tokens").and_then(|v| v.as_i64()).unwrap_or_default(), cached_tokens: o.outputs.get("cached_tokens").and_then(|v| v.as_i64()), finish, reasoning, tool_calls, seed, adapter, base_digest: text_of("base_digest"), backend: text_of("backend"), engine: text_of("engine"), prompt_token_ids: numbers("prompt_token_ids"), completion_token_ids: numbers("completion_token_ids"), logprobs, trace: o.outputs.get("policy_trace").cloned() }
+    ChatOutcome { text, prompt_tokens, completion_tokens, reasoning_tokens: o.outputs.get("reasoning_tokens").and_then(|v| v.as_i64()).unwrap_or_default(), cached_tokens: o.outputs.get("cached_tokens").and_then(|v| v.as_i64()), finish, reasoning, tool_calls, seed, sampler: o.outputs.get("sampler").and_then(crate::sampling::echo), adapter, base_digest: text_of("base_digest"), backend: text_of("backend"), engine: text_of("engine"), prompt_token_ids: numbers("prompt_token_ids"), completion_token_ids: numbers("completion_token_ids"), logprobs, trace: o.outputs.get("policy_trace").cloned() }
 }
 
 /// Map an executor reply error string to a provider-shaped [`ApiError`], through
@@ -404,6 +421,7 @@ pub async fn submit(state: &AppState, model: &str, action: &str, mut inv: Invoca
     residency::log::info(&format!("{provider:?} request: {action} {model}"));
     let (id, token) = state.register();
     inv.cancel = token.clone();
+    let inv = settled(&state.exec, model, action, inv);
     // A one-shot request is one handler future, dropped when the client hangs up: the guard then cancels the generation instead of
     // leaving it to run to its token limit for nobody (a streamed request has the same guard in its `EventStream`).
     let _guard = CancelGuard { token: token.clone(), jobs: state.jobs.clone(), id };
@@ -646,6 +664,7 @@ impl StreamedJob<'_> {
         let tx_progress = tx.clone();
         let exec_for_log = self.exec.clone();
         let (provider, forward_steps, model) = (self.provider, self.forward_steps, self.model.to_string());
+        let inv = settled(self.exec, self.model, self.action, inv);
         let job = Job::new(self.model.to_string(), self.action.to_string(), inv)
             .on_progress(move |p| {
                 // A refused message means the stream is over (the reader went or stalled, or the request was

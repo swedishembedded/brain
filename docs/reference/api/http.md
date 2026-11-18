@@ -182,10 +182,14 @@ launches a local qwen3 Anthropic surface and points Claude Code at it.
   numbers.
 - **Sampling parameters.** `temperature`, `top_p`, `top_k` (an integer in
   0..=1000) and `seed` are passed on only when the request sets them; otherwise
-  the model applies its own defaults - for a checkpoint that declares them
-  (`generation_config.json`, or `general.sampling.*` in a GGUF) the declared
-  `temperature`, `top_k` and `top_p`, shown as the `generate` action's param
-  defaults - and an unseeded request is sampled with a fresh random seed. OpenAI parameters brain
+  the request is sampled with the model's own defaults, the `generate` action's
+  param defaults - for a checkpoint that declares them (`generation_config.json`,
+  or `general.sampling.*` in a GGUF) the declared `temperature`, `top_k`, `top_p`,
+  `min_p` and `repetition_penalty` - and an unseeded request is sampled with a
+  fresh random seed. A neutral value a client sends (`min_p: 0`,
+  `repetition_penalty: 1`, a zero penalty) overrides a default the model declares
+  and is dropped for a model without that sampler. The reply's `brain.sampler`
+  says what was applied (below). OpenAI parameters brain
   cannot honour are refused with 400 `invalid_request_error` naming the
   parameter rather than ignored: `n` > 1, a non-empty `logit_bias`, a non-zero
   `top_logprobs`, and a `response_format` other than `text`; on the legacy
@@ -267,11 +271,19 @@ launches a local qwen3 Anthropic surface and points Claude Code at it.
   before any pass (400). A model that cannot score a continuation does not declare the action. Scoring is one
   prefill per answer on the serving instance, between its decode steps; it does not read or write the prefix cache.
 - **Seed and served identity.** An OpenAI or OpenRouter chat or completions
-  reply (and the terminal chunk of a stream) carries a non-standard
-  `brain: {"seed": <int>, "adapter": {"id", "digest", "version"}, "base_digest", "backend",
+  reply (and the terminal chunk of a stream) and an Anthropic `Message` (and a
+  stream's closing `message_delta`) carry a non-standard
+  `brain: {"seed": <int>, "sampler": {...}, "adapter": {"id", "digest", "version"}, "base_digest", "backend",
   "engine"}` object. `seed` is the
   seed the decode used, drawn fresh for an unseeded request, so any reply can
-  be reproduced by sending it back; `adapter` appears only when an adapter
+  be reproduced by sending it back. `sampler` holds the settings the tokens were
+  drawn with, exactly as the sampler applied them after the model's defaults:
+  `temperature` (0 is greedy), `top_k` (0 keeps every token), `top_p` (1 keeps
+  every token) and `min_p` (0 keeps every token), named as a request sets them;
+  a trainer that reads the sampler's `logprobs` or checks that rollouts were
+  drawn untruncated (`policy_trace`) reads them here. Over D-Bus the result's
+  `sampler` key holds the same values under the `generate` params' names
+  (`temp`, `top_k`, `top_p`, `min_p`). `adapter` appears only when an adapter
   answered and names the release that did, the same triple its model card carries. `version` is the policy version of that release under its id: 1 for the first release the server offered, +1 each time a release with different weights replaces it, never repeated while the process runs. A sequence runs on the release it started on and never spans a refit, so every token of a reply carries the one version; a trainer that records it with the tokens can mask a sample whose version is too far behind the weights it trains.
   `base_digest` is the `sha256:<hex>` of the base checkpoint (hashed in the
   background after load, so absent on the first replies of a large model),

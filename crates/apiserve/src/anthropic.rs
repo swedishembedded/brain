@@ -502,7 +502,7 @@ pub fn from_outcome(model: &str, co: &bridge::ChatOutcome) -> Result<Value, ApiE
     for call in &co.tool_calls {
         content.push(tool_use_block(call)?);
     }
-    Ok(json!({
+    let mut message = json!({
         "id": format!("msg_{}", Uuid::new_v4().simple()),
         "type": "message",
         "role": "assistant",
@@ -511,7 +511,18 @@ pub fn from_outcome(model: &str, co: &bridge::ChatOutcome) -> Result<Value, ApiE
         "stop_reason": stop_reason(&co.finish),
         "stop_sequence": Value::Null,
         "usage": usage(co.prompt_tokens, co.completion_tokens, co.cached_tokens),
-    }))
+    });
+    attach_served(&mut message, co);
+    Ok(message)
+}
+
+/// Add the non-standard `brain` object (seed and sampler settings used, adapter that answered;
+/// [`bridge::ChatOutcome::served`]) to a `Message` or to a stream's closing `message_delta`. Clients ignore an
+/// unknown property; a reproducing or training caller reads it.
+fn attach_served(event: &mut Value, co: &bridge::ChatOutcome) {
+    if let Some(served) = co.served() {
+        event["brain"] = served;
+    }
 }
 
 /// The SSE Messages event stream in Anthropic's fixed order. `est_input` is the
@@ -567,6 +578,8 @@ fn render_messages_stream(mut src: bridge::EventStream, model: String, est_input
         let mut completion = 0i64;
         let mut prompt = est_input;
         let mut cached = None;
+        // The `brain` object of the finished reply, carried on the closing `message_delta`.
+        let mut served: Option<Value> = None;
         // Whether any real token delta was streamed. A resident that only
         // reports coarse `Progress::step` ticks (no `delta`) - `brain/qwen3omnimoe` is
         // one - carries its whole answer in the terminal `Outcome`, and would
@@ -606,6 +619,7 @@ fn render_messages_stream(mut src: bridge::EventStream, model: String, est_input
                 }
                 StreamMsg::Done(outcome) => {
                     let co = bridge::read_chat_outcome(&outcome);
+                    served = co.served();
                     completion = co.completion_tokens;
                     prompt = co.prompt_tokens;
                     cached = co.cached_tokens;
@@ -646,11 +660,15 @@ fn render_messages_stream(mut src: bridge::EventStream, model: String, est_input
 
         // message_delta (stop_reason + cumulative usage, the real prompt count
         // included: message_start could only estimate it) → message_stop.
-        yield Ok(Event::default().event("message_delta").data(json!({
+        let mut delta = json!({
             "type": "message_delta",
             "delta": { "stop_reason": stop_reason(&finish), "stop_sequence": Value::Null },
             "usage": usage(prompt, completion, cached),
-        }).to_string()));
+        });
+        if let Some(served) = served.take() {
+            delta["brain"] = served;
+        }
+        yield Ok(Event::default().event("message_delta").data(delta.to_string()));
         yield Ok(Event::default().event("message_stop").data(json!({ "type": "message_stop" }).to_string()));
     };
     Sse::new(events.boxed()).keep_alive(KeepAlive::default()).into_response()
