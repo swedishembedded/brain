@@ -85,6 +85,12 @@ Pass `--device` to any command that runs a model:
 Device selectors can be combined as a comma-separated union, e.g.
 `--device gpu1,cpu0-3` to use one GPU alongside a slice of CPU cores.
 
+A selection that names only accelerators (`--device gpu3`) keeps model compute
+off the CPU. Host-side work still runs on the host, since it has nowhere else to
+run: `brain serve` places `brain/train`'s dataset checks, adapter merges, model
+initialisation and settings checks in host memory whatever `--device` names, and
+budgets the host's RAM for them (`GET /v1/devices` lists it under `cpu`).
+
 The `brain` CLI is configured by its flags alone: `BRAIN_DEVICE`
 and `BRAIN_BACKEND` in the environment do not change what it
 runs on (it says so when one is set). They are read only by programs with no

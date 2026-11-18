@@ -214,6 +214,8 @@ pub(crate) fn supported_devices(cost: &MemCost, budgets: &Budgets) -> Vec<Device
             continue;
         };
         let need = match device {
+            // A CPU excluded from compute takes host-side work only.
+            Device::Cpu if !budgets.hosts(cost) => continue,
             Device::Cpu => cost.ram,
             Device::Gpu(_) => cost.vram,
             // Zero NPU bytes is precisely how a model says it has no NPU

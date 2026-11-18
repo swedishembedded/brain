@@ -22,12 +22,13 @@ pub struct Machine {
     /// The GPU indices among [`Self::gpus`] whose bytes ARE host RAM (an
     /// integrated GPU, or the no-discrete-GPU fallback).
     pub unified_gpus: Vec<u32>,
-    /// What `Device::Cpu` may be budgeted for compute: the host RAM available,
-    /// or `0` when the CPU was excluded from compute. Host RAM stays a spill
-    /// tier either way, which is why [`Self::pool_ram`] is separate.
-    pub cpu_compute_ram: u64,
+    /// Whether the CPU may run a model's compute; `false` when `--device` named
+    /// only accelerators. The host's memory is budgeted either way
+    /// ([`Self::pool_ram`]): host-side work runs there whatever `--device` says.
+    pub cpu_compute: bool,
     /// The physical host RAM that the CPU, every unified GPU and every NPU draw
-    /// from together. Never zeroed by excluding the CPU from compute.
+    /// from together, and the budget of `Device::Cpu`. Never zeroed by excluding
+    /// the CPU from compute.
     pub pool_ram: u64,
     /// The `--device` text the set came from, or `"all"`.
     pub compute: String,
@@ -123,7 +124,7 @@ impl Machine {
         // `gpus` - a prior version of this message said "scheduling on CPU only"
         // purely from `gpus.is_empty()`, which was wrong on two counts whenever an
         // NPU was involved: `--device npu` schedules on the NPU (never CPU - CPU
-        // compute is excluded, see `cpu_compute_ram` below), and `--device npu,cpu`
+        // compute is excluded, see `cpu_compute` below), and `--device npu,cpu`
         // schedules on both, not "CPU only".
         if gpus.is_empty() && npus.is_empty() {
             if all_gpus.is_empty() {
@@ -138,12 +139,11 @@ impl Machine {
                 eprintln!("brain serve: --device restricted to NPU; scheduling on NPU only (CPU and GPU excluded)");
             }
         }
-        let cpu_compute_ram = if cpu_schedulable { ram } else { 0 };
     Machine {
         gpus,
         npus,
         unified_gpus,
-        cpu_compute_ram,
+        cpu_compute: cpu_schedulable,
         pool_ram: ram,
         compute: set.map(|s| s.to_string()).unwrap_or_else(|| "all".into()),
     }

@@ -435,7 +435,7 @@ pub fn plan(parts: &[Part], budgets: &Budgets) -> Result<Placement, Box<Unplacea
             let host = |exclude: &HashSet<Device>| allow_host.then(|| crate::place::spill_to_host(&probe, &b, exclude)).flatten();
             if g.unsized_ {
                 return pick_gpu_unsized(&b, exclude).or_else(|| {
-                    (allow_host && b.get(Device::Cpu).is_some() && !exclude.contains(&Device::Cpu)).then_some(Device::Cpu)
+                    (allow_host && b.hosts(&probe) && !exclude.contains(&Device::Cpu)).then_some(Device::Cpu)
                 });
             }
             if !host_ok(&b, g.cost.ram) {

@@ -103,11 +103,35 @@ pub struct Budgets {
     /// Activation bytes the placement charges a model that declares no
     /// estimate of its own ([`crate::MemCost::activation`]); `0` by default.
     activation_fallback: u64,
+    /// The CPU computes no model (`--device` named only accelerators).
+    /// [`Device::Cpu`]'s budget is still the host's memory, so host-side work
+    /// ([`crate::MemCost::host_work`]), the bytes a worker process or a Warm copy
+    /// holds and a multi-device model's staging are placed and charged there as
+    /// always; only a model's compute is kept off it ([`Self::hosts`]).
+    cpu_compute_excluded: bool,
 }
 
 impl Budgets {
     pub fn new() -> Budgets {
-        Budgets { devices: HashMap::new(), pools: HashMap::new(), pool_of: HashMap::new(), coherent: HashMap::new(), activation_fallback: 0 }
+        Budgets { devices: HashMap::new(), pools: HashMap::new(), pool_of: HashMap::new(), coherent: HashMap::new(), activation_fallback: 0, cpu_compute_excluded: false }
+    }
+    /// Keep model compute off [`Device::Cpu`] while its budget stays the host's
+    /// memory (see [`Self::hosts`]).
+    pub fn exclude_cpu_compute(&mut self, excluded: bool) -> &mut Self {
+        self.cpu_compute_excluded = excluded;
+        self
+    }
+    /// Whether the CPU may run a model's compute.
+    pub fn cpu_computes(&self) -> bool {
+        !self.cpu_compute_excluded
+    }
+    /// Whether an instance of `cost` may be placed on [`Device::Cpu`]: always when
+    /// the CPU computes, else only host-side work and instances that hold nothing
+    /// ([`crate::MemCost::runs_on_host_regardless`]). The one answer every
+    /// placement path asks, so none of them can refuse host work because only
+    /// accelerators were named, or put a model's compute on an excluded CPU.
+    pub fn hosts(&self, cost: &crate::MemCost) -> bool {
+        self.get(Device::Cpu).is_some() && (self.cpu_computes() || cost.runs_on_host_regardless())
     }
     /// Charge `bytes` of activations to every placed instance whose model
     /// declares no estimate of its own ([`crate::MemCost::placed`]): the

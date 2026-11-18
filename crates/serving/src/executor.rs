@@ -164,33 +164,47 @@ impl Reserve {
     }
 }
 
-/// Build the shared executor with every model registered, sized to the given per-GPU
-/// budgets. `gpus` is `(index, total_bytes)` per card; `reserve.card` bytes are kept free
-/// on each, and a model whose resident declares no activation estimate is charged
-/// `reserve.activation_fallback` beside its own bytes (and sizes itself against both).
-/// `unified_gpus` names the indices among `gpus` that physically share RAM
-/// with the CPU (an integrated GPU, or the no-discrete-GPU fallback) - every NPU
-/// always shares RAM too (`docs/reference/models/*`'s Meteor-Lake NPU note) - so those,
-/// plus `Device::Cpu`, are declared into ONE `memauth` pool sized to `pool_ram` (the
-/// real, physical host RAM - see that parameter's own doc for why this must NEVER be
-/// `cpu_ram`); a discrete GPU keeps its own independent budget, unaffected. Falls back
-/// gracefully if a heavy model's weights are not configured (it is simply not
-/// registered).
+/// The memory budgets of `machine`: one per schedulable card and NPU, `reserve.card` kept free on each card, and
+/// `Device::Cpu` budgeted at the host's real RAM (`pool_ram`) whether or not `--device` lets the CPU compute.
 ///
-/// `cpu_ram`/`pool_ram` are deliberately two separate parameters, not one reused
-/// value: `cpu_ram` is `Device::Cpu`'s OWN per-device budget (legitimately `0` when
-/// `--device` excludes CPU from compute - that alone is what stops the CPU device
-/// itself being chosen as a placement target), while `pool_ram` is the physical
-/// capacity of the shared pool `Device::Cpu` and every unified GPU/NPU draw from
-/// together. Passing the same (possibly zeroed) value for both used to starve the
-/// POOL to zero bytes too whenever `--device` excluded CPU - correctly stopping CPU
-/// placements, but ALSO clamping every unified GPU/NPU's `usable_on`/`free_on` to
-/// `min(real_budget, 0) == 0` (`residency::budget::Budgets::usable_on`'s `pool.min`),
-/// making an otherwise-perfectly-placeable model (e.g. a small model on an
-/// integrated GPU with `--device gpu`) silently unplaceable forever - no error, just
-/// a 10s admission timeout and a generic 429, since a claim failure never fires
-/// `on_admit`. The physical RAM does not disappear just because CPU-side compute is
-/// disabled, so `pool_ram` must always be the real, ungated host RAM figure.
+/// Excluding the CPU from compute is [`residency::budget::Budgets::exclude_cpu_compute`], not a zero budget: a zero
+/// budget once stood for "no CPU compute" and so also refused host-side work (`brain/train`'s `check_dataset`,
+/// token counting) on a server given only GPUs, and left a worker's or a Warm copy's host bytes uncounted.
+/// `unified_gpus` (an integrated GPU, or the no-discrete-GPU fallback) and every NPU share the host's RAM, so they
+/// and `Device::Cpu` are declared into ONE `memauth` pool of the same `pool_ram`; a discrete GPU keeps its own
+/// independent budget.
+///
+/// The process-wide ceiling (`--limit-vram-total`/`--limit-ram-total`) is applied to EVERY budget, so the advisory
+/// placement layer and the hard enforcement in `gpu_core::Gpu`'s allocation path cannot disagree: a placement is
+/// never planned against capacity the ceiling would refuse at the first `storage()` call. `Limits::clamp` is the
+/// identity function when no ceiling is set, which is the default.
+pub fn budgets_for(machine: &Machine, reserve: Reserve) -> residency::budget::Budgets {
+    let limits = memauth::limits();
+    let mut budgets = residency::budget::Budgets::new();
+    for &(i, total) in &machine.gpus {
+        budgets.set(Device::Gpu(i), limits.clamp(Device::Gpu(i), total), reserve.card);
+    }
+    budgets.set_activation_fallback(reserve.activation_fallback);
+    // NPUs get their own budget + lane; a model advertising an NPU path (MemCost.npu > 0) is then auto-placed there
+    // in preference to CPU/GPU (see place::pick_device). An NPU's bytes ARE host RAM, so `--limit-ram-total` bounds it.
+    for &(i, total) in &machine.npus {
+        budgets.set(Device::Npu(i), limits.clamp(Device::Npu(i), total), 0);
+    }
+    budgets.set(Device::Cpu, limits.clamp(Device::Cpu, machine.pool_ram), 0);
+    budgets.exclude_cpu_compute(!machine.cpu_compute);
+    let mut shared: Vec<Device> = vec![Device::Cpu];
+    shared.extend(machine.unified_gpus.iter().map(|&i| Device::Gpu(i)));
+    shared.extend(machine.npus.iter().map(|&(i, _)| Device::Npu(i)));
+    if shared.len() > 1 {
+        budgets.set_pool(memauth::HOST_POOL, &shared, limits.clamp(Device::Cpu, machine.pool_ram), 0);
+    }
+    budgets
+}
+
+/// Build the shared executor with every model registered, sized to [`budgets_for`]'s budgets of `machine`. A model
+/// whose resident declares no activation estimate is charged `reserve.activation_fallback` beside its own bytes (and
+/// sizes itself against both). Falls back gracefully if a heavy model's weights are not configured (it is simply not
+/// registered).
 ///
 /// `knobs` carries each model's serving knobs as parsed data (the CLI parses
 /// flags, this code never reads env): `knobs.qwen` for the Qwen3 paged engine,
@@ -204,40 +218,8 @@ pub fn build_executor(machine: &Machine, reserve: Reserve, store: &catalog::Serv
     let ServeKnobs { qwen: qwen_cfg, qwen35, ricursive, decision, ocr, max_batch, train, mock_delay_ms, supervision, worker_hosting } = knobs;
     // Process-wide, before any OCR model is built: the models read it when they load.
     ocrserve::configure(ocr);
-    let (gpus, npus, unified_gpus) = (&machine.gpus, &machine.npus, &machine.unified_gpus);
-    let (cpu_ram, pool_ram) = (machine.cpu_compute_ram, machine.pool_ram);
-    let mut budgets = residency::budget::Budgets::new();
-    // The process-wide ceiling (`--limit-vram-total`/`--limit-ram-total`) is
-    // applied to EVERY budget below, so the advisory placement layer and the
-    // hard enforcement in `gpu_core::Gpu`'s allocation path cannot disagree: a
-    // placement is never planned against capacity the ceiling would refuse at
-    // the first `storage()` call. `Limits::clamp` is the identity function
-    // when no ceiling is set, which is the default.
-    let limits = memauth::limits();
-    for &(i, total) in gpus {
-        budgets.set(Device::Gpu(i), limits.clamp(Device::Gpu(i), total), reserved);
-    }
-    budgets.set_activation_fallback(reserve.activation_fallback);
-    // NPUs get their own budget + lane; a model advertising an NPU path (MemCost.npu
-    // > 0) is then auto-placed there in preference to CPU/GPU (see place::pick_device).
-    // An NPU's bytes ARE host RAM, so `--limit-ram-total` is what bounds it.
-    for &(i, total) in npus {
-        budgets.set(Device::Npu(i), limits.clamp(Device::Npu(i), total), 0);
-    }
-    budgets.set(Device::Cpu, limits.clamp(Device::Cpu, cpu_ram), 0);
-    // The unified-memory fix (see memauth's module doc): declare every device
-    // that physically shares this RAM into ONE pool, so a charge on any of
-    // them correctly reduces what all the others have free - instead of two
-    // (or more) independent budgets that together claim more bytes than the
-    // machine has. Sized to `pool_ram`, NEVER `cpu_ram` - see this function's
-    // own doc on why those must stay two separate parameters.
-    let mut shared: Vec<Device> = vec![Device::Cpu];
-    shared.extend(unified_gpus.iter().map(|&i| Device::Gpu(i)));
-    shared.extend(npus.iter().map(|&(i, _)| Device::Npu(i)));
-    if shared.len() > 1 {
-        budgets.set_pool(memauth::HOST_POOL, &shared, limits.clamp(Device::Cpu, pool_ram), 0);
-    }
-
+    let gpus = &machine.gpus;
+    let budgets = budgets_for(machine, reserve);
     let mut models: Vec<Arc<dyn ResidentModel>> = Vec::new();
     // z-image: whatever the model store resolves (or `--pin s3dit.ROLE=PATH`
     // names) through `s3dit::spec::S3ditSpec` - see `ZImageResident::
@@ -617,5 +599,27 @@ mod tests {
         let unrelated = ServedBase::new(root.join("elsewhere"), Some("v/none".into()));
         assert_eq!(checkpoint_base(&unrelated, &scanned), None, "a checkpoint the scan does not serve selects nothing");
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// `brain serve --training --device gpu3` refused `check_dataset` ("brain/train[host] (256 MiB) exceeds every
+    /// device's budget"): naming only cards zeroed the CPU's budget, and host-side work had nowhere to go. The
+    /// budgets a server builds place host work on the host for one GPU, several GPUs or the CPU alone, and still keep
+    /// a model's compute off a CPU `--device` excluded.
+    #[test]
+    fn host_work_fits_the_budgets_of_every_device_list() {
+        use residency::place::{could_ever_fit, no_exclude, pick_device};
+        use residency::MemCost;
+        const GB: u64 = 1 << 30;
+        let reserve = Reserve { card: 2 * GB, activation_fallback: 0 };
+        let cases: [(&str, &[u32], bool); 3] = [("gpu3", &[3], false), ("gpu0,gpu1,gpu2", &[0, 1, 2], false), ("cpu", &[], true)];
+        for (devices, gpus, cpu_compute) in cases {
+            let machine = Machine { gpus: gpus.iter().map(|&i| (i, 96 * GB)).collect(), cpu_compute, pool_ram: 64 * GB, compute: devices.into(), ..Machine::default() };
+            let budgets = budgets_for(&machine, reserve);
+            let check = MemCost::host_work(256 << 20);
+            assert!(could_ever_fit(&check, &budgets), "--device {devices}: host work must fit the host");
+            assert_eq!(pick_device(&check, &budgets, &no_exclude()), Some(Device::Cpu), "--device {devices}: host work is placed on the host");
+            let cpu_model = MemCost::new(0, GB);
+            assert_eq!(pick_device(&cpu_model, &budgets, &no_exclude()).is_some(), cpu_compute, "--device {devices}: a model computes on the CPU only when it is named");
+        }
     }
 }

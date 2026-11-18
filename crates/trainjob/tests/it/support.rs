@@ -43,11 +43,29 @@ pub fn rig_with_store_flag(tag: &str, store: bool) -> Rig {
 
 /// [`rig`] holding a toy `qwen3` base as `local/toy`.
 pub fn rig_qwen3(tag: &str, memory: u64) -> Rig {
-    rig_over(tag, memory, true, None, Vec::new(), qwen3_model_dir_of(&format!("{tag}-base"), qwen3::QwenConfig::tiny()))
+    rig_qwen3_on(tag, memory, &[], true)
+}
+
+/// [`rig_qwen3`] on a server given the cards `gpus` (24 GiB each) and, when `cpu_compute`, the CPU for model compute:
+/// what `brain serve --device` names. The host's `memory` is budgeted either way.
+pub fn rig_qwen3_on(tag: &str, memory: u64, gpus: &[u32], cpu_compute: bool) -> Rig {
+    let mut budgets = Budgets::new();
+    for &i in gpus {
+        budgets.set(Device::Gpu(i), 24 << 30, 0);
+    }
+    budgets.set(Device::Cpu, memory, 0).exclude_cpu_compute(!cpu_compute);
+    rig_budgeted(tag, budgets, true, None, Vec::new(), qwen3_model_dir_of(&format!("{tag}-base"), qwen3::QwenConfig::tiny()))
 }
 
 /// A server whose store holds `made` (a model directory) as `local/toy`.
 fn rig_over(tag: &str, memory: u64, store: bool, card: Option<u64>, extra: Vec<Arc<dyn residency::ResidentModel>>, made: TempDir) -> Rig {
+    let mut budgets = Budgets::new();
+    budgets.set(Device::Cpu, memory, 0);
+    rig_budgeted(tag, budgets, store, card, extra, made)
+}
+
+/// [`rig_over`] with the server's device budgets given.
+fn rig_budgeted(tag: &str, budgets: Budgets, store: bool, card: Option<u64>, extra: Vec<Arc<dyn residency::ResidentModel>>, made: TempDir) -> Rig {
     let dir = TempDir::new(tag);
     let models = dir.join("models");
     let base = models.join("local").join("toy");
@@ -61,8 +79,6 @@ fn rig_over(tag: &str, memory: u64, store: bool, card: Option<u64>, extra: Vec<A
     let store_handle = ArtifactStore::open(&artifacts).unwrap();
     let work_root = dir.join("work");
     let config = TrainConfig { models_dir: Some(models.clone()), store: store.then(|| store_handle.clone()), work_root: work_root.clone(), largest_card_bytes: card, devices: 1, quotas: trainjob::Quotas::default(), free_space: Arc::new(trainjob::DiskFree) };
-    let mut budgets = Budgets::new();
-    budgets.set(Device::Cpu, memory, 0);
     let mut served = vec![trainjob::resident(config)];
     served.extend(extra);
     let exec = Executor::start(served, budgets, Policy::default());

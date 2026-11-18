@@ -195,7 +195,8 @@ fn synth_cost_for(d: Device, need: u64) -> MemCost {
     match d {
         Device::Gpu(_) => MemCost::new(need, 0),
         Device::Npu(_) => MemCost::new(0, 0).with_npu(need),
-        Device::Cpu => MemCost::new(0, need),
+        // Freeing host memory for a part a placement already put there is not a choice of where compute runs.
+        Device::Cpu => MemCost::host_work(need),
     }
 }
 
@@ -506,7 +507,7 @@ impl ResidencyManager {
             }
         }
         let host = crate::place::host_need(&cost);
-        if out.is_empty() && host > 0 && !exclude.contains(&Device::Cpu) && self.budgets.get(Device::Cpu).is_some() && self.budgets.usable_on(Device::Cpu) >= host {
+        if out.is_empty() && host > 0 && !exclude.contains(&Device::Cpu) && self.budgets.hosts(&cost) && self.budgets.usable_on(Device::Cpu) >= host {
             out.push(Device::Cpu);
         }
         out
@@ -1677,9 +1678,9 @@ impl ResidencyManager {
     /// Whether a multi-device model's host bytes are accounted against
     /// `Device::Cpu` at all: only when it declares some and the host has a
     /// budget (`total > 0`) to account them in. A CPU excluded from compute
-    /// (`--device gpu0,gpu1`) is budgeted at zero, which means "not a
-    /// placement target", not "no RAM": staging bytes are not a CPU placement,
-    /// so checking them there would leave the model permanently unplaceable.
+    /// (`--device gpu0,gpu1`) keeps its budget of host memory
+    /// ([`crate::budget::Budgets::exclude_cpu_compute`]), so staging bytes are
+    /// checked and charged there like any other host bytes (knowledge #511).
     fn charges_multi_host(&self, cost: &crate::multi::MultiDeviceCost, devices: &[Device]) -> bool {
         cost.ram() > 0 && !devices.contains(&Device::Cpu) && self.budgets.get(Device::Cpu).is_some_and(|b| b.total > 0)
     }
@@ -2685,25 +2686,81 @@ mod tests {
     }
 
     /// **A CPU excluded from compute does not strand a multi-device model.**
-    /// `--device gpu0,gpu1` gives `Device::Cpu` a zero budget (it is not a
-    /// placement target), and the model's host staging bytes were checked
-    /// against that budget: the claim answered "does not fit right now" for
-    /// ever, so the model was listed, never loaded, and every request timed out
-    /// waiting for admission. Staging bytes are not a CPU placement; with no
-    /// host budget declared for compute they are neither checked nor charged.
+    /// `--device gpu0,gpu1` once gave `Device::Cpu` a zero budget to mean "not a
+    /// placement target", and the model's host staging bytes were checked
+    /// against it: the claim answered "does not fit right now" for ever. The
+    /// host keeps its budget of RAM now ([`Budgets::exclude_cpu_compute`]), so
+    /// staging bytes are checked and charged there like any host bytes.
     #[test]
     fn a_multi_device_model_loads_when_the_cpu_is_excluded_from_compute() {
         let live = Arc::new(AtomicU32::new(0));
         let mut budgets = Budgets::new();
         budgets.set(Device::Gpu(0), 24 * GB, 0).set(Device::Gpu(1), 24 * GB, 0);
-        budgets.set(Device::Cpu, 0, 0);
+        budgets.set(Device::Cpu, 64 * GB, 0).exclude_cpu_compute(true);
         let mut mgr = ResidencyManager::new(budgets);
         mgr.register_multi(Arc::new(MultiFakeHost { live: live.clone() }));
-        let (_, key) = claim_multi_built(&mut mgr, "hosty").expect("the GPUs hold it; the excluded CPU is not asked");
-        assert_eq!(mgr.budgets.get(Device::Cpu).unwrap().used, 0, "nothing is charged to a budget that is not there");
+        let (_, key) = claim_multi_built(&mut mgr, "hosty").expect("the GPUs hold it; the host holds its staging");
+        assert_eq!(mgr.budgets.get(Device::Cpu).unwrap().used, 10 * GB, "staging is host memory, charged though the CPU computes nothing");
         mgr.release_multi(&key);
         assert!(mgr.evict_multi(&key));
         assert_eq!(mgr.budgets.get(Device::Cpu).unwrap().used, 0);
+    }
+
+    /// A resident whose every instance costs `cost`.
+    struct CostFake {
+        name: &'static str,
+        cost: MemCost,
+        live: Arc<AtomicU32>,
+    }
+    impl ResidentModel for CostFake {
+        fn manifest(&self) -> Manifest {
+            Manifest::new(self.name, "fake", vec![ActionSpec::new("run", "run")])
+        }
+        fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+            InstanceKey::new(self.name, "default")
+        }
+        fn estimate(&self, _k: &InstanceKey) -> MemCost {
+            self.cost
+        }
+        fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn crate::Instance>, String> {
+            self.live.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::new(FakeInst { live: self.live.clone() }))
+        }
+    }
+
+    /// **Host-side work runs on the host whatever devices the server was given.**
+    /// `brain serve --device gpu3` refused `brain/train`'s `check_dataset` ("exceeds
+    /// every device's budget") because the CPU excluded from compute was budgeted at
+    /// zero bytes. Host work is placed on the host's memory with one GPU, several
+    /// GPUs or the CPU alone named; a model computing on the CPU still is not placed
+    /// on a CPU excluded from compute, and is refused by name.
+    #[test]
+    fn host_work_is_placed_on_the_host_whatever_devices_are_named() {
+        let cases: [(&str, &[u32], bool); 3] = [("one GPU", &[3], false), ("several GPUs", &[0, 1, 2], false), ("the CPU only", &[], true)];
+        for (devices, gpus, cpu_computes) in cases {
+            let live = Arc::new(AtomicU32::new(0));
+            let mut budgets = Budgets::new();
+            for &i in gpus {
+                budgets.set(Device::Gpu(i), 96 * GB, 2 * GB);
+            }
+            budgets.set(Device::Cpu, 64 * GB, 0).exclude_cpu_compute(!cpu_computes);
+            let mut mgr = ResidencyManager::new(budgets);
+            mgr.register(Arc::new(CostFake { name: "check", cost: MemCost::host_work(256 << 20), live: live.clone() }));
+            mgr.register(Arc::new(CostFake { name: "cpu-model", cost: MemCost::new(0, GB), live: live.clone() }));
+
+            let plan = mgr.plan("check", "run", &Invocation::new()).expect("known model");
+            assert_eq!((plan.device, plan.refusal.as_deref()), (Some(Device::Cpu), None), "{devices}: the plan places host work on the host");
+            assert!(plan.supported_devices.contains(&Device::Cpu), "{devices}: the host is a supported device for host work");
+            mgr.run("check", "run", &Invocation::new(), &mut |_| {}).unwrap_or_else(|e| panic!("{devices}: host work refused: {e}"));
+            assert_eq!(mgr.residents.get(&InstanceKey::new("check", "default")).map(|e| e.device), Some(Device::Cpu), "{devices}");
+
+            let compute = mgr.run("cpu-model", "run", &Invocation::new(), &mut |_| {});
+            match (cpu_computes, compute) {
+                (true, Ok(_)) => {}
+                (false, Err(e)) => assert!(e.contains("cpu-model"), "{devices}: the refusal names the model: {e}"),
+                (_, other) => panic!("{devices}: a model computing on the CPU must run iff the CPU computes, got {other:?}"),
+            }
+        }
     }
 
     /// gpu0's share needs an eviction to fit; gpu1's can never fit at all.

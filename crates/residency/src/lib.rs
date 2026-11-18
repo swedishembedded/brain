@@ -110,11 +110,30 @@ pub struct MemCost {
     /// lives ([`Self::with_kept_context`]). Its demotion then frees `vram` less these, and a Warm or Cold instance
     /// stays charged them on its card. Zero for an instance whose demotion frees its card.
     pub context: u64,
+    /// The instance is host-side work ([`Self::host_work`]): bookkeeping a
+    /// serving process does in its own memory (checking a dataset, counting
+    /// tokens, folding files), not a model computing on the CPU. It is placed on
+    /// the host whatever accelerators `--device` names, because the host is
+    /// where it runs and no accelerator could take it instead.
+    pub host_side: bool,
 }
 
 impl MemCost {
     pub fn new(vram: u64, ram: u64) -> MemCost {
-        MemCost { vram, ram, npu: 0, mapped: 0, activation: None, process_host: 0, context: 0 }
+        MemCost { vram, ram, npu: 0, mapped: 0, activation: None, process_host: 0, context: 0, host_side: false }
+    }
+    /// `ram` bytes of host-side work (see [`Self::host_side`]): placed on the
+    /// host's memory even when the CPU is excluded from model compute
+    /// ([`crate::budget::Budgets::exclude_cpu_compute`]), never refused because
+    /// only accelerators were named.
+    pub fn host_work(ram: u64) -> MemCost {
+        MemCost { host_side: true, ..MemCost::new(0, ram) }
+    }
+    /// Whether the instance may go to the host's memory when the CPU computes no
+    /// model: host-side work, or an instance that holds no memory anywhere (host
+    /// glue, which every budget can take).
+    pub fn runs_on_host_regardless(&self) -> bool {
+        self.host_side || (self.vram == 0 && self.ram == 0 && self.npu == 0)
     }
     /// Declare the instance's peak activation bytes, beyond [`Self::vram`]
     /// (see [`Self::activation`]). `0` declares that `vram` already covers

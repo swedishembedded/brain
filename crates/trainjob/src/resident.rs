@@ -283,7 +283,8 @@ impl ResidentModel for TrainResident {
         let config = &key.base().config;
         let bytes = |prefix: &str| config.strip_prefix(prefix).and_then(|b| b.parse().ok());
         match (bytes(CARD_PREFIX), bytes(HOST_PREFIX)) {
-            (_, Some(host)) => MemCost::new(0, host),
+            // Host-side work: placed on the host whatever accelerators `--device` names.
+            (_, Some(host)) => MemCost::host_work(host),
             // The footprint is the whole run's, its activations included: no fallback is charged beside it.
             (Some(card), None) => MemCost::new(card, 0).with_activation(0),
             (None, None) => MemCost::new(0, 0),

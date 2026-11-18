@@ -12,7 +12,7 @@
 use serde_json::{json, Value};
 use trainjob::dryrun::{spec, ACTION};
 
-use crate::support::{assert_reservation_returned, data_digest, plain, record, rig_qwen3, run_action, work_is_clean, Frames, BASE};
+use crate::support::{assert_reservation_returned, data_digest, plain, record, rig_qwen3, rig_qwen3_on, run_action, work_is_clean, Frames, BASE};
 
 fn check(rig: &crate::support::Rig, params: Value, dataset: Vec<u8>) -> Result<Value, String> {
     run_action(rig, ACTION, &spec(), params, &[("dataset", dataset)], &Frames::default()).map(|o| o.outputs)
@@ -56,6 +56,19 @@ fn a_dry_run_reports_the_dataset_and_lists_each_records_length_a_page_at_a_time(
     assert!(plain_report.get("per_record").is_none());
     assert!(work_is_clean(&rig.work_root));
     assert_reservation_returned(&rig);
+}
+
+/// `brain serve --training --device gpu3` refused `check_dataset` with "brain/train[host] (256 MiB) exceeds every
+/// device's budget": the check is host work, and naming only cards left it nowhere to go. It runs on the host
+/// whatever the server was given: one card, several, or the CPU alone.
+#[test]
+fn a_dry_run_runs_on_the_host_whatever_devices_the_server_was_given() {
+    for (devices, gpus, cpu_compute) in [("gpu3", &[3][..], false), ("gpu0,gpu1", &[0, 1][..], false), ("cpu", &[][..], true)] {
+        let rig = rig_qwen3_on(&format!("dryrun-devices-{}", gpus.len()), 16 << 30, gpus, cpu_compute);
+        let report = check(&rig, json!({"base": BASE}), plain()).unwrap_or_else(|e| panic!("--device {devices}: {e}"));
+        assert_eq!(report["valid_records"].as_u64(), Some(4), "--device {devices}: {report}");
+        assert_reservation_returned(&rig);
+    }
 }
 
 #[test]

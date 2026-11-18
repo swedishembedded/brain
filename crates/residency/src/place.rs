@@ -101,10 +101,7 @@ pub fn host_need(cost: &MemCost) -> u64 {
 /// available but it should never fail".
 pub fn spill_to_host(cost: &MemCost, budgets: &Budgets, exclude: &HashSet<Device>) -> Option<Device> {
     let need = host_need(cost);
-    let ok = need > 0
-        && !exclude.contains(&Device::Cpu)
-        && budgets.get(Device::Cpu).is_some()
-        && budgets.fits_on(Device::Cpu, need);
+    let ok = need > 0 && !exclude.contains(&Device::Cpu) && budgets.hosts(cost) && budgets.fits_on(Device::Cpu, need);
     ok.then_some(Device::Cpu)
 }
 
@@ -119,7 +116,7 @@ pub fn pick_device(cost: &MemCost, budgets: &Budgets, exclude: &HashSet<Device>)
     // on any budgeted device — the CPU by preference (stateless providers are host
     // glue), else whatever is free — so `demo`/`imageops` run under any budget.
     if cost.vram == 0 && cost.ram == 0 && cost.npu == 0 {
-        if !exclude.contains(&Device::Cpu) && budgets.get(Device::Cpu).is_some() {
+        if !exclude.contains(&Device::Cpu) && budgets.hosts(cost) {
             return Some(Device::Cpu);
         }
         return budgets.gpus().into_iter().chain(budgets.npus()).find(|d| !exclude.contains(d));
@@ -153,11 +150,12 @@ pub fn pick_device(cost: &MemCost, budgets: &Budgets, exclude: &HashSet<Device>)
     // host RAM footprint is the same bytes it would take on an accelerator, so spill it
     // to the CPU. (On a host that HAS the accelerator but it's full, we return None so
     // the caller's eviction path frees the accelerator instead of spilling to slow CPU.)
+    // Host-side work goes here whatever accelerators exist: it has no other place to run.
     let cpu_need = cost
         .ram
         .max(if budgets.gpus().is_empty() { cost.vram } else { 0 })
         .max(if budgets.npus().is_empty() { cost.npu } else { 0 });
-    if cpu_need > 0 && !exclude.contains(&Device::Cpu) && budgets.get(Device::Cpu).is_some() && budgets.fits_on(Device::Cpu, cpu_need) {
+    if cpu_need > 0 && !exclude.contains(&Device::Cpu) && budgets.hosts(cost) && budgets.fits_on(Device::Cpu, cpu_need) {
         return Some(Device::Cpu);
     }
     // Zero-cost (stateless) instance: fits anywhere by definition. Prefer the
@@ -166,7 +164,7 @@ pub fn pick_device(cost: &MemCost, budgets: &Budgets, exclude: &HashSet<Device>)
     // UNPLACEABLE: every class loop skips on need == 0 and the CPU branch
     // requires ram > 0, so its jobs sat in the queue forever, silently.)
     if cost.npu == 0 && cost.vram == 0 && cost.ram == 0 {
-        if !exclude.contains(&Device::Cpu) && budgets.get(Device::Cpu).is_some() {
+        if !exclude.contains(&Device::Cpu) && budgets.hosts(cost) {
             return Some(Device::Cpu);
         }
         for d in budgets.devices() {
@@ -204,6 +202,7 @@ pub fn fits_when_empty(cost: &MemCost, budgets: &Budgets) -> bool {
 /// say) once that device were empty.
 pub fn fits_when_empty_outside(cost: &MemCost, budgets: &Budgets, exclude: &HashSet<Device>) -> bool {
     let mut outside = Budgets::new();
+    outside.exclude_cpu_compute(!budgets.cpu_computes());
     for d in budgets.devices().filter(|d| !exclude.contains(d)) {
         outside.set(d, budgets.usable_on(d), 0);
     }
@@ -231,9 +230,9 @@ fn fits_within(cost: &MemCost, budgets: &Budgets, capacity: fn(&Budgets, Device)
     // - which the executor treats as PERMANENT and uses to fail every queued
     // job for that model, forever, on a machine with 45 GiB of idle RAM.
     // `pick_device` still refuses (eviction stays preferred); what changes is
-    // that "no card will ever hold it" is no longer reported as "it can never
-    // run".
-    host_need(cost) > 0 && capacity(budgets, Device::Cpu) >= host_need(cost)
+    // run". A CPU excluded from compute is no tier for a model's compute, but
+    // host-side work still runs there ([`Budgets::hosts`]).
+    host_need(cost) > 0 && budgets.hosts(cost) && capacity(budgets, Device::Cpu) >= host_need(cost)
 }
 
 /// The victims to evict from a device to fit `needed` bytes, and where to place the
@@ -275,7 +274,7 @@ pub fn plan_eviction_with(policy: &dyn EvictionPolicy, cost: &MemCost, budgets: 
     // every warm-demotion copy `evict_entry` parks on `Device::Cpu` was
     // unreclaimable for the daemon's whole life, so the CPU `used` counter only
     // ever went up and the demoted `Instance`s leaked.
-    let host: Vec<Device> = budgets.get(Device::Cpu).map(|_| vec![Device::Cpu]).unwrap_or_default();
+    let host: Vec<Device> = if budgets.hosts(cost) { vec![Device::Cpu] } else { Vec::new() };
     for (devices, need) in [(budgets.npus(), cost.npu), (budgets.gpus(), cost.vram), (host, host_need(cost))] {
         if need == 0 {
             continue;
