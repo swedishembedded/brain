@@ -18,7 +18,9 @@
 
 use std::collections::HashMap;
 
+use gpu_core::select::Dtype;
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
+use model::ops::{Act, Ops, Weight};
 
 /// Z-Image RMSNorm epsilon (diffusers `norm_eps` / attention `eps`).
 pub(crate) const EPS: f32 = 1e-5;
@@ -34,16 +36,15 @@ pub(crate) const K_APPLY: usize = 6;
 pub(crate) const K_SILU_MUL: usize = 7;
 pub(crate) const K_ADD2: usize = 8;
 pub(crate) const K_MATMUL_REG3: usize = 9;
-pub(crate) const K_QUANT_PACK: usize = 10;
-pub(crate) const K_MATMUL_I8: usize = 11;
-pub(crate) const K_MAX_ABS_ROW: usize = 12;
-pub(crate) const K_FLASH: usize = 13;
-pub(crate) const K_FLASH_SPLIT: usize = 14;
+pub(crate) const K_FLASH: usize = 10;
+pub(crate) const K_FLASH_SPLIT: usize = 11;
 /// The register-tiled flash pair, appended so every index above is unchanged.
-pub(crate) const K_FLASH_REG: usize = 15;
-pub(crate) const K_FLASH_REG2: usize = 16;
+pub(crate) const K_FLASH_REG: usize = 12;
+pub(crate) const K_FLASH_REG2: usize = 13;
 
-pub(crate) const KERNELS: [(&str, &str); 17] = [
+/// The kernels this crate dispatches by index (the `K_*` constants name their positions). [`KERNELS`] is this
+/// table followed by the shared façade's set.
+const INDEXED_KERNELS: [(&str, &str); 14] = [
     ("rmsnorm", kernels::RMSNORM),
     ("matmul", kernels::MATMUL),
     ("rope_interleave_table", kernels::ROPE_INTERLEAVE_TABLE),
@@ -56,10 +57,6 @@ pub(crate) const KERNELS: [(&str, &str); 17] = [
     // GPU-only fast GEMM (software-pipelined register tiling). The CPU JIT can't
     // compile its barrier, so CPU uses the naive `matmul` (native AVX2 path).
     ("matmul_reg3", kernels::MATMUL_REG3),
-    // int8 DP4A path (GPU only): group-wise activation quant (max_abs_row) + DP4A GEMM.
-    ("quant_pack", kernels::QUANT_PACK),
-    ("matmul_i8_dyn", kernels::MATMUL_I8_DYN),
-    ("max_abs_row", kernels::MAX_ABS_ROW),
     // Flash attention: fused scores/softmax/apply with online softmax, O(T·hd)
     // memory (no materialised [nh·T·T]). Enables high-resolution latents.
     ("flash_attn_bidir", kernels::FLASH_ATTN_BIDIR),
@@ -67,6 +64,18 @@ pub(crate) const KERNELS: [(&str, &str); 17] = [
     ("flash_attn_bidir_reg", kernels::FLASH_ATTN_BIDIR_REG),
     ("flash_attn_bidir_reg2", kernels::FLASH_ATTN_BIDIR_REG2),
 ];
+
+/// Every kernel a `Gpu` running this crate's blocks registers: [`INDEXED_KERNELS`], then what
+/// [`model::ops::Ops`] resolves by name. The int8 path's linears dispatch through it, so the selector, not this
+/// crate, decides which packed-int8 kernel (or the float-read tile decode of a device without the packed dot)
+/// serves each product. Each name once, [`INDEXED_KERNELS`]' spelling first.
+pub(crate) static KERNELS: std::sync::LazyLock<Vec<(&'static str, &'static str)>> = std::sync::LazyLock::new(|| {
+    let mut list = INDEXED_KERNELS.to_vec();
+    model::ops::extend_kernel_list(&mut list, model::ops::kernel_list());
+    // The float-read tile decode a device without a packed-int8 kernel reads its int8 weights through.
+    model::ops::extend_kernel_list(&mut list, model::ops::frozen_base_kernels());
+    list
+});
 
 /// Host tensors by name → `(shape, row-major f32 data)`. Implements
 /// `checkpoint::TensorSource` (the impl lives in `checkpoint` itself — the
@@ -686,10 +695,10 @@ pub(crate) fn build_block_steps(
     s.push(gpu.step(K_ADD2, &[&scr.x1, &scr.f2, out], &[t * dim], t * dim));
 }
 
-// ---------------- int8 (DP4A) block path ----------------
+// ---------------- int8 block path ----------------
 
 /// Resident int8-quantized weights for one block: each linear as packed int8
-/// (`u32`, 4-per-word) + its per-tensor scale. Norms stay f32 (not matmuls).
+/// (`u32`, 4-per-word) + its group scales. Norms stay f32 (not matmuls).
 pub(crate) struct Int8Weights {
     // (packed int8 weight, per-channel scale buffer [N]).
     wq: (DeviceBuffer, DeviceBuffer),
@@ -807,35 +816,13 @@ impl HostInt8Block {
     }
 }
 
-/// Per-stage int8 activation-quantization scratch (reused across blocks): the
-/// max-abs partials, the dynamic scale, and packed-activation buffers for the
-/// dim-width (q/k/v/out, w1/w3) and hidden-width (w2) inputs.
-///
-/// `Clone` aliases the same allocations, exactly as [`Scratch`]'s does, and for
-/// the same reason: one slab sized for the largest stage serves every stage.
-#[derive(Clone)]
-pub(crate) struct Int8Scratch {
-    sx: DeviceBuffer, // [t, hidden/32] activation scales of the widest activation
-    xq_dim: DeviceBuffer,
-    xq_hid: DeviceBuffer,
-}
-
-impl Int8Scratch {
-    pub fn new(gpu: &Gpu, d: BlockDims, t: u32) -> Int8Scratch {
-        Int8Scratch {
-            sx: gpu.storage(model::int8::act_scale_len(t as usize, d.dim.max(d.hidden) as usize) as u64),
-            xq_dim: gpu.storage((t * d.dim / 4) as u64),
-            xq_hid: gpu.storage((t * d.hidden / 4) as u64),
-        }
-    }
-}
-
-/// Append one int8 DP4A block. Same math/graph as [`build_block_steps`] but the
-/// 7 linears run in int8: each activation is quantized once (shared by the
-/// linears reading it — n1→q/k/v, f1→w1/w3), then `matmul_i8_dyn` dequantizes.
-/// Norm/RoPE/attention/SwiGLU stay f32. GPU only (DP4A + barriers).
+/// Append one int8 block. Same math/graph as [`build_block_steps`] but the 7 linears are int8 products the shared
+/// façade selects for the device ([`Ops::matmul`]): each activation is quantized once and shared by the linears
+/// reading it (n1→q/k/v, f1→w1/w3), into `ops`' per-width scratch ([`Ops::act_shared_scratch`]), reused across every
+/// block. Norm/RoPE/attention/SwiGLU stay f32. `ops` is built on `gpu`'s device and outlives the recorded steps.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_block_steps_i8(
+    ops: &Ops,
     gpu: &Gpu,
     s: &mut Vec<Step>,
     w: &Int8Weights,
@@ -843,7 +830,6 @@ pub(crate) fn build_block_steps_i8(
     x_in: &DeviceBuffer,
     out: &DeviceBuffer,
     scr: &Scratch,
-    i8: &Int8Scratch,
     cos: &DeviceBuffer,
     sin: &DeviceBuffer,
     d: BlockDims,
@@ -851,40 +837,35 @@ pub(crate) fn build_block_steps_i8(
 ) {
     let (dim, nh, hd, hidden) = (d.dim, d.n_heads, d.head_dim, d.hidden);
     let half = hd / 2;
-    // Quantize activation `x` [t·k] → `xq` with fresh group scales i8.sx[t, k/32].
-    let quant = |s: &mut Vec<Step>, x: &DeviceBuffer, xq: &DeviceBuffer, k: u32| {
-        s.push(gpu.step(K_MAX_ABS_ROW, &[x, &i8.sx], &[t, k], t));
-        s.push(gpu.step(K_QUANT_PACK, &[x, &i8.sx, xq], &[t, k], t * k / 4));
-    };
-    // out = dequant(xq @ wᵀ): group activation scales i8.sx × group weight scales wp.1.
-    let mm8 = |s: &mut Vec<Step>, xq: &DeviceBuffer, wp: &(DeviceBuffer, DeviceBuffer), o: &DeviceBuffer, k: u32, n: u32| {
-        s.push(gpu.dispatch(K_MATMUL_I8, &[xq, &wp.0, &i8.sx, &wp.1, o], &[t, k / 4, n], gpu_core::Dispatch::Workgroups(t.div_ceil(128) * n.div_ceil(128))));
+    // out = x @ wᵀ over the packed `[n, k]` weight `wp` (codes, group scales).
+    let mm8 = |s: &mut Vec<Step>, act: &Act, wp: &(DeviceBuffer, DeviceBuffer), o: &DeviceBuffer, k: u32, n: u32| {
+        ops.matmul(s, &Weight::from_packed(Dtype::I8, wp.0.clone(), wp.1.clone(), n, k), act, o, 0);
     };
 
     // attention
     s.push(gpu.step(K_RMSNORM, &[x_in, &nb.an1, &scr.n1], &[dim, t, f(EPS)], t));
-    quant(s, &scr.n1, &i8.xq_dim, dim);
-    mm8(s, &i8.xq_dim, &w.wq, &scr.q, dim, dim);
-    mm8(s, &i8.xq_dim, &w.wk, &scr.k, dim, dim);
-    mm8(s, &i8.xq_dim, &w.wv, &scr.v, dim, dim);
+    let a = ops.act_shared_scratch(s, &scr.n1, 0, t, dim);
+    mm8(s, &a, &w.wq, &scr.q, dim, dim);
+    mm8(s, &a, &w.wk, &scr.k, dim, dim);
+    mm8(s, &a, &w.wv, &scr.v, dim, dim);
     s.push(gpu.step(K_RMSNORM, &[&scr.q, &w.nq, &scr.qn], &[hd, t * nh, f(EPS)], t * nh));
     s.push(gpu.step(K_RMSNORM, &[&scr.k, &w.nk, &scr.kn], &[hd, t * nh, f(EPS)], t * nh));
     s.push(gpu.step(K_ROPE, &[&scr.qn, cos, sin, &scr.qr], &[t, nh, hd, half], t * nh * half));
     s.push(gpu.step(K_ROPE, &[&scr.kn, cos, sin, &scr.kr], &[t, nh, hd, half], t * nh * half));
     s.push(gpu.step(K_PACK, &[&scr.qr, &scr.kr, &scr.v, &scr.qkv], &[t, dim], t * 3 * dim));
-    push_attention(gpu, s, scr, nh, t, hd, dim, use_flash(gpu, d, t)); // int8 path is GPU-only
-    quant(s, &scr.ctx, &i8.xq_dim, dim);
-    mm8(s, &i8.xq_dim, &w.wo, &scr.attn_out, dim, dim);
+    push_attention(gpu, s, scr, nh, t, hd, dim, use_flash(gpu, d, t));
+    let a = ops.act_shared_scratch(s, &scr.ctx, 0, t, dim);
+    mm8(s, &a, &w.wo, &scr.attn_out, dim, dim);
     s.push(gpu.step(K_RMSNORM, &[&scr.attn_out, &nb.an2, &scr.n2], &[dim, t, f(EPS)], t));
     s.push(gpu.step(K_ADD2, &[x_in, &scr.n2, &scr.x1], &[t * dim], t * dim));
     // MLP
     s.push(gpu.step(K_RMSNORM, &[&scr.x1, &nb.fn1, &scr.f1], &[dim, t, f(EPS)], t));
-    quant(s, &scr.f1, &i8.xq_dim, dim);
-    mm8(s, &i8.xq_dim, &w.w1, &scr.g, dim, hidden);
-    mm8(s, &i8.xq_dim, &w.w3, &scr.u, dim, hidden);
+    let a = ops.act_shared_scratch(s, &scr.f1, 0, t, dim);
+    mm8(s, &a, &w.w1, &scr.g, dim, hidden);
+    mm8(s, &a, &w.w3, &scr.u, dim, hidden);
     s.push(gpu.step(K_SILU_MUL, &[&scr.g, &scr.u, &scr.hsw], &[t * hidden], t * hidden));
-    quant(s, &scr.hsw, &i8.xq_hid, hidden);
-    mm8(s, &i8.xq_hid, &w.w2, &scr.ff, hidden, dim);
+    let a = ops.act_shared_scratch(s, &scr.hsw, 0, t, hidden);
+    mm8(s, &a, &w.w2, &scr.ff, hidden, dim);
     s.push(gpu.step(K_RMSNORM, &[&scr.ff, &nb.fn2, &scr.f2], &[dim, t, f(EPS)], t));
     s.push(gpu.step(K_ADD2, &[&scr.x1, &scr.f2, out], &[t * dim], t * dim));
 }
@@ -936,6 +917,12 @@ impl ZImageBlock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The int8 DiT builds a `model::ops::Ops` on this crate's `Gpu`, which needs the whole façade set.
+    #[test]
+    fn the_kernel_list_registers_the_whole_ops_facade_set() {
+        model::ops::assert_kernel_list_complete(&KERNELS);
+    }
 
     /// The materialised attention dispatch covers `[nh·t·t]` score elements,
     /// one thread each. Computed in `u32` that product WRAPS at Z-Image-Turbo's

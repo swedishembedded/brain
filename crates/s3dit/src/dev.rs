@@ -12,10 +12,11 @@
 //! (profiling / multi-step sampling).
 
 use gpu_core::{DeviceBuffer, Gpu, Step};
+use model::ops::Ops;
 
 use crate::block::{
     build_block_steps, build_block_steps_i8, read_named, shared_scratch, wf, BlockDims, BlockWeights, HostInt8Block,
-    Int8Scratch, Int8Weights, NormBufs, NormHostCache, Scratch, Tensors, KERNELS,
+    Int8Weights, NormBufs, NormHostCache, Scratch, Tensors, KERNELS,
 };
 use crate::model::{postprocess, preprocess, timestep_cond, HostLookup};
 use crate::ZImageConfig;
@@ -329,19 +330,20 @@ struct Int8Phase {
     t: u32,
 }
 
-/// The scratch every int8 stage of one DiT shares: the f32 block slab plus the
-/// activation-quantization slab, each sized for the largest stage. See
-/// [`Scratch::shared`] for why one is enough.
+/// What every int8 stage of one DiT shares: the f32 block slab, sized for the
+/// largest stage (see [`Scratch::shared`] for why one is enough), and the
+/// shared façade whose per-width activation scratch every stage's linears
+/// record against.
 struct Int8Stage {
     scr: Scratch,
-    i8: Int8Scratch,
+    ops: Ops,
 }
 
 impl Int8Stage {
-    /// `ts`: every stage's token count. The int8 path is GPU-only, so `flash`
-    /// follows the plain heuristic (`reg_gemm` is always true here).
+    /// `ts`: every stage's token count. `flash` follows the plain heuristic.
     fn shared(gpu: &Gpu, bd: BlockDims, ts: &[u32]) -> Int8Stage {
-        Int8Stage { scr: shared_scratch(gpu, bd, ts, true), i8: Int8Scratch::new(gpu, bd, ts.iter().copied().max().unwrap_or(1)) }
+        let ops = Ops::new(gpu.share()).unwrap_or_else(|e| panic!("zimage: the int8 DiT's Gpu lacks the shared kernel set: {e}"));
+        Int8Stage { scr: shared_scratch(gpu, bd, ts, true), ops }
     }
 }
 
@@ -357,7 +359,7 @@ fn build_phase_i8(gpu: &Gpu, tensors: &dyn checkpoint::TensorSource, prefixes: &
     for p in prefixes {
         let w = Int8Weights::upload(gpu, tensors, p, bd);
         let nb = NormBufs::new(gpu, tensors, p, bd.dim, modulation);
-        build_block_steps_i8(gpu, &mut steps, &w, &nb, &cur_in, &cur_out, &sh.scr, &sh.i8, &cos, &sin, bd, t);
+        build_block_steps_i8(&sh.ops, gpu, &mut steps, &w, &nb, &cur_in, &cur_out, &sh.scr, &cos, &sin, bd, t);
         weights.push(w);
         norms.push(nb);
         std::mem::swap(&mut cur_in, &mut cur_out);
@@ -396,7 +398,7 @@ fn build_phase_i8_with_cache(
         let (w, host_w) = Int8Weights::upload_with_cache(gpu, tensors, p, bd);
         let nb = NormBufs::new(gpu, tensors, p, bd.dim, modulation);
         let host_n = nb.host_cache();
-        build_block_steps_i8(gpu, &mut steps, &w, &nb, &cur_in, &cur_out, &sh.scr, &sh.i8, &cos, &sin, bd, t);
+        build_block_steps_i8(&sh.ops, gpu, &mut steps, &w, &nb, &cur_in, &cur_out, &sh.scr, &cos, &sin, bd, t);
         weights.push(w);
         norms.push(nb);
         cache.push((host_w, host_n));
@@ -420,7 +422,7 @@ fn rebuild_phase_i8_from_cache(gpu: &Gpu, cache: &[(HostInt8Block, NormHostCache
     for (host_w, host_n) in cache {
         let w = Int8Weights::upload_from_cache(gpu, host_w);
         let nb = NormBufs::from_cache(gpu, bd.dim, host_n.clone());
-        build_block_steps_i8(gpu, &mut steps, &w, &nb, &cur_in, &cur_out, &sh.scr, &sh.i8, &cos, &sin, bd, t);
+        build_block_steps_i8(&sh.ops, gpu, &mut steps, &w, &nb, &cur_in, &cur_out, &sh.scr, &cos, &sin, bd, t);
         weights.push(w);
         norms.push(nb);
         std::mem::swap(&mut cur_in, &mut cur_out);
@@ -442,8 +444,10 @@ impl Int8Phase {
     }
 }
 
-/// Z-Image DiT with int8 (DP4A) linears — the 6B fits ONE 24 GB P40 (~6 GB of
-/// weights), no sharding. Build once, forward many times.
+/// Z-Image DiT with int8 linears: the 6B fits ONE 24 GB P40 (~6 GB of
+/// weights), no sharding. Built on the ambient device (the card a caller's
+/// `with_gpu` selects); each product's kernel is the selector's. Build once,
+/// forward many times.
 pub struct ZImageDitI8 {
     gpu: Gpu,
     cfg: ZImageConfig,
@@ -470,7 +474,7 @@ impl ZImageDitI8 {
 
     /// [`Self::build`] over a streaming `checkpoint::TensorSource`.
     pub fn build_from_source(cfg: ZImageConfig, src: &dyn checkpoint::TensorSource, f: u32, h: u32, wd: u32, cap_len: u32) -> ZImageDitI8 {
-        let gpu = Gpu::new_gpu(&KERNELS);
+        let gpu = Gpu::new(&KERNELS);
         let bd = cfg.block_dims();
         let (ps, pf) = (cfg.patch_size, cfg.f_patch_size);
         let n_img = (f / pf) * (h / ps) * (wd / ps);
@@ -513,7 +517,7 @@ impl ZImageDitI8 {
     /// explicit choice by whoever calls this, never the default
     /// [`Self::build_from_source`] path.
     pub fn build_from_source_with_cache(cfg: ZImageConfig, src: &dyn checkpoint::TensorSource, f: u32, h: u32, wd: u32, cap_len: u32) -> (ZImageDitI8, DitI8Cache) {
-        let gpu = Gpu::new_gpu(&KERNELS);
+        let gpu = Gpu::new(&KERNELS);
         let bd = cfg.block_dims();
         let (ps, pf) = (cfg.patch_size, cfg.f_patch_size);
         let n_img = (f / pf) * (h / ps) * (wd / ps);
@@ -537,7 +541,7 @@ impl ZImageDitI8 {
     /// not consumed, so it stays ready for the NEXT demote/promote cycle
     /// too.
     pub fn rebuild_from_cache(cache: &DitI8Cache, f: u32, h: u32, wd: u32, cap_len: u32) -> ZImageDitI8 {
-        let gpu = Gpu::new_gpu(&KERNELS);
+        let gpu = Gpu::new(&KERNELS);
         let cfg = cache.cfg.clone();
         let bd = cfg.block_dims();
         let (ps, pf) = (cfg.patch_size, cfg.f_patch_size);
