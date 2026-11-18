@@ -681,7 +681,7 @@ impl Engine {
                 let row = t.state_row().filter(|&r| self.gdn.is_live(r));
                 let row = row.unwrap_or_else(|| panic!("qwen35moe::serve::Engine: a sequence with no recurrent state (table not prefilled by this engine, or already released)"));
                 let pos = t.len();
-                t.append(&mut self.alloc).expect("qwen35moe::serve::Engine: KV pool exhausted mid-decode");
+                t.append_or_raise(&mut self.alloc);
                 (row, pos)
             })
             .collect()
@@ -935,7 +935,7 @@ impl Engine {
         }
         // One `reserve` for the whole prompt: the blocks its tokens cover. Decode
         // takes the next as the sequence crosses into it.
-        table.reserve(prompt.len() as u32, &mut self.alloc).expect("qwen35moe::serve::Engine: KV pool exhausted");
+        table.reserve_or_raise(prompt.len() as u32, &mut self.alloc);
         let row = self.assign_state_row(table).unwrap_or_else(|e| panic!("{e}"));
         // The prompt runs over a private state, which then becomes this
         // sequence's pool row: the prefill kernels bind one sequence's buffers.

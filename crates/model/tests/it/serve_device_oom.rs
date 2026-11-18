@@ -34,11 +34,14 @@ struct Toy {
     /// Failures raised so far.
     failures: usize,
     prefix_reclaims: usize,
+    /// Blocks the scheduler is told are free beyond the pool's own: the pool accounting it admitted against was
+    /// wrong (a cached prefix it counted on was evicted before the prefill adopted it).
+    phantom_free: u32,
 }
 
 impl Toy {
     fn new(blocks: u32, slots: usize) -> Toy {
-        Toy { alloc: BlockAllocator::new(blocks, BLOCK), abandoned: 0, slots, live: 0, too_long: usize::MAX, failures: 0, prefix_reclaims: 0 }
+        Toy { alloc: BlockAllocator::new(blocks, BLOCK), abandoned: 0, slots, live: 0, too_long: usize::MAX, failures: 0, prefix_reclaims: 0, phantom_free: 0 }
     }
 
     fn run_out(&mut self, bytes: u64) -> ! {
@@ -55,7 +58,7 @@ impl PagedDecoder for Toy {
         256
     }
     fn free_blocks(&self) -> u32 {
-        self.alloc.free_blocks()
+        self.alloc.free_blocks() + self.phantom_free
     }
     fn max_seq_len(&self) -> usize {
         1024
@@ -80,8 +83,9 @@ impl PagedDecoder for Toy {
         if prompt.len() >= self.too_long || self.live + 1 > self.slots {
             self.run_out(48 << 20);
         }
-        table.reserve(prompt.len() as u32, &mut self.alloc).unwrap();
+        // Counted before the blocks are taken: a pool that runs dry leaves the blocks it did take in the table, which release gives back.
         self.live += 1;
+        table.reserve_or_raise(prompt.len() as u32, &mut self.alloc);
         vec![*prompt.last().unwrap() as f32]
     }
     fn abandon_prefill(&mut self) {
@@ -97,7 +101,7 @@ impl PagedDecoder for Toy {
             self.run_out(252 << 20);
         }
         for t in tables.iter_mut() {
-            t.append(&mut self.alloc).unwrap();
+            t.append_or_raise(&mut self.alloc);
         }
         inputs.iter().map(|&i| (i + 1) % VOCAB as u32).collect()
     }
@@ -263,4 +267,23 @@ fn a_hundred_long_conversations_on_a_small_pool_and_a_small_card_all_complete() 
     let failures = sched.decoder_mut().failures;
     assert!(failures <= 40, "the scheduler learns the card's limit instead of retrying into it: {failures} failures for 100 requests");
     assert_eq!(sched.free_blocks(), free);
+}
+
+/// A pool that cannot back a prefill the scheduler admitted (its accounting was off: a prefix it counted on was
+/// evicted before the prefill adopted it) is a full device like any other: the sequences go back to the queue and
+/// complete once the pool has room, with the tokens a roomy pool gives. It never unwinds the lane (a panic here took
+/// every request in flight with it).
+#[test]
+fn a_kv_pool_that_cannot_back_an_admitted_prefill_queues_the_request_instead_of_panicking() {
+    let mut toy = Toy::new(8, 8);
+    toy.phantom_free = 100;
+    let mut sched = Scheduler::new(toy, 4);
+    let ids: Vec<(u64, usize)> = (0..4).map(|i| (sched.submit(Request { prompt: prompt(40 + i), max_new: 6, stop: Vec::new() }), 40 + i)).collect();
+    let (done, rejected) = drain(&mut sched);
+    assert!(rejected.is_empty(), "a request that fits the pool alone is never refused: {rejected:?}");
+    for (id, len) in ids {
+        assert_eq!(done[&id], expected(len, 6), "request {id} gets the tokens a roomy pool gives it");
+    }
+    assert!(sched.decoder_mut().abandoned >= 1, "the exhausted pool sent the prefilling sequences back");
+    assert_eq!(sched.decoder_mut().alloc.free_blocks(), 8, "every block is back in the pool");
 }

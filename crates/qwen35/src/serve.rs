@@ -432,7 +432,7 @@ impl Engine {
         let row_slots = self.row_slots(tables);
         let mut coords: Vec<(u32, u32)> = Vec::with_capacity(tables.len());
         for t in tables.iter_mut() {
-            let (_block, offset) = t.append(&mut self.alloc).expect("qwen35::serve::Engine: KV pool exhausted mid-decode");
+            let (_block, offset) = t.append_or_raise(&mut self.alloc);
             coords.push((t.blocks()[0], offset));
         }
         let slots: Vec<&GdnSlot> = coords.iter().map(|&(phys, _)| self.gdn_slot(phys)).collect();
@@ -691,7 +691,7 @@ impl Engine {
         // max_seq_len` this allocates EXACTLY the sequence's one physical
         // block (see module doc) - every later `append` (decode) call
         // reuses it.
-        table.reserve(prompt.len() as u32, &mut self.alloc).expect("qwen35::serve::Engine: KV pool exhausted");
+        table.reserve_or_raise(prompt.len() as u32, &mut self.alloc);
         let phys = table.blocks()[0];
         let adapter_slot = adapters::slot_of(std::iter::once(&self.model), table.kv_namespace());
         self.gdn_slots.entry(phys).or_insert_with(|| GdnSlot::new(&self.model.gpu, &gdn_slot_shape(&self.model.cfg)));

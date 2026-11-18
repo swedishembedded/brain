@@ -683,7 +683,7 @@ impl Qwen35GgufEngine {
         let mut slots = Vec::with_capacity(tables.len());
         let mut positions = Vec::with_capacity(tables.len());
         for t in tables.iter_mut() {
-            t.append(&mut self.alloc).unwrap_or_else(|e| panic!("{MODEL}: KV pool exhausted mid-decode: {e}"));
+            t.append_or_raise(&mut self.alloc);
             slots.push(self.slot(t));
             // The token's absolute position (the append's offset is within its block).
             positions.push(t.len() - 1);
@@ -790,7 +790,7 @@ impl Qwen35GgufEngine {
             self.adopt_cached_blocks(table, i, block_rows);
         }
         let rest = prompt.len() as u32 - table.len();
-        table.reserve(rest, &mut self.alloc).unwrap_or_else(|e| panic!("{MODEL}: KV pool exhausted: {e}"));
+        table.reserve_or_raise(rest, &mut self.alloc);
         let slot = self.assign_state_row(table);
         self.inst.set_blocks(slot, table.blocks());
         // Every sequence starts here, so a slot's rotary positions never outlive its sequence.
@@ -1595,7 +1595,7 @@ impl PagedDecoder for Qwen35GgufEngine {
             assert!(!r.is_empty(), "{MODEL}: a verify row set is never empty");
             positions.push(t.len());
             for _ in 0..r.len() {
-                t.append(&mut self.alloc).unwrap_or_else(|e| panic!("{MODEL}: KV pool exhausted mid-verify: {e}"));
+                t.append_or_raise(&mut self.alloc);
             }
             slots.push(self.slot(t));
         }
@@ -1811,7 +1811,7 @@ impl Qwen35GgufEngine {
             assert!(!r.is_empty(), "{MODEL}: a verify row set is never empty");
             let first = t.len();
             for _ in 0..r.len() {
-                t.append(&mut self.alloc).unwrap_or_else(|e| panic!("{MODEL}: KV pool exhausted mid-verify: {e}"));
+                t.append_or_raise(&mut self.alloc);
             }
             slots.push(self.slot(t));
             positions.push(first);

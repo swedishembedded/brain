@@ -200,6 +200,12 @@ pub struct BlockTable {
     node_pages: Vec<Vec<u32>>,
 }
 
+/// Unwind with the typed out-of-memory payload for a KV pool that could not back a request's blocks (`why` is the
+/// allocator's own account, [`BlockAllocator::exhausted`]).
+fn raise_pool_exhausted(why: &str) -> ! {
+    gpu_core::DeviceOutOfMemory { bytes: 0, what: "the paged KV pool".to_string(), detail: why.to_string() }.raise()
+}
+
 impl BlockTable {
     /// An empty table in the base namespace.
     pub fn new() -> BlockTable {
@@ -337,6 +343,19 @@ impl BlockTable {
         let block = *self.blocks.last().unwrap();
         self.len += 1;
         Ok((block, offset))
+    }
+
+    /// [`Self::append`] for a decode step inside a scheduler's iteration: a pool that cannot back the token is a
+    /// full device, not a bug, so it unwinds with the typed [`gpu_core::DeviceOutOfMemory`] payload the scheduler
+    /// catches (`Scheduler::step_report`): the sequences the step carried go back to the queue and fewer run at
+    /// once until the pool has room, instead of the panic taking the lane and every request in flight with it.
+    pub fn append_or_raise(&mut self, alloc: &mut BlockAllocator) -> (u32, u32) {
+        self.append(alloc).unwrap_or_else(|e| raise_pool_exhausted(&e))
+    }
+
+    /// [`Self::reserve`] with [`Self::append_or_raise`]'s answer to a pool that cannot back `n` more tokens.
+    pub fn reserve_or_raise(&mut self, n: u32, alloc: &mut BlockAllocator) -> u32 {
+        self.reserve(n, alloc).unwrap_or_else(|e| raise_pool_exhausted(&e))
     }
 
     /// Ensure capacity for `n` more tokens by pre-allocating blocks (used by

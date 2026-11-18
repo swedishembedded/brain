@@ -2263,7 +2263,7 @@ impl Engine {
         let mut bt = vec![0u32; bsz as usize * mbt];
         for (i, table) in tables.iter_mut().enumerate() {
             let pos = table.len();
-            let (block, offset) = table.append(&mut self.alloc).expect("KV pool exhausted");
+            let (block, offset) = table.append_or_raise(&mut self.alloc);
             positions.push(pos);
             seqlens.push(pos + 1);
             blocks.push(block);
@@ -3826,7 +3826,7 @@ impl Engine {
         for s in 1..k {
             for (i, table) in tables.iter_mut().enumerate() {
                 let before = table.blocks().len();
-                let (block, offset) = table.append(&mut self.alloc).expect("KV pool exhausted mid-window");
+                let (block, offset) = table.append_or_raise(&mut self.alloc);
                 let bti = if table.blocks().len() > before { (table.blocks().len() - 1) as u32 } else { NO_BT };
                 let base = ((s - 1) * n + i) * 3;
                 sched[base] = block;
@@ -3944,7 +3944,7 @@ impl Engine {
             let run = inputs[start as usize..].iter().take(limit).take_while(|i| matches!(i, PrefillInput::Embed(_)) == embeds).count();
             let cc = run as u32;
             self.lsa_prepare_chunk(table, start, cc);
-            table.reserve(cc, &mut self.alloc).expect("KV pool exhausted");
+            table.reserve_or_raise(cc, &mut self.alloc);
             let meta = self.chunk_meta(table, start, cc);
             let part = &inputs[start as usize..start as usize + run];
             let (mut tokens, mut rows) = (Vec::new(), Vec::new());
@@ -4009,7 +4009,7 @@ impl Engine {
         while start < n {
             let cc = (n - start).min(chunk).min(self.lsa_chunk_limit(start));
             self.lsa_prepare_chunk(table, start, cc);
-            table.reserve(cc, &mut self.alloc).expect("KV pool exhausted");
+            table.reserve_or_raise(cc, &mut self.alloc);
             let meta = self.chunk_meta(table, start, cc);
             let hidden = self.run_batched(&meta, Input::Tokens(&prompt[start as usize..(start + cc) as usize]), true);
             if let Some(lsa) = &self.lsa {
@@ -4469,7 +4469,7 @@ impl Engine {
             let inputs: Vec<u32> = std::iter::once(pending).chain(props.iter().copied()).collect();
             let rows = kk + 1;
             self.lsa_prepare_chunk(&mut table, base, rows);
-            table.reserve(rows, &mut self.alloc).expect("KV pool exhausted");
+            table.reserve_or_raise(rows, &mut self.alloc);
             let meta = self.chunk_meta(&table, base, rows);
             // `causal_chunk = false`: this verify-forward structurally
             // matches the fused kernel's contract too (one sequence, one
@@ -4597,7 +4597,7 @@ impl Engine {
         assert!(n >= 1 && n <= self.max_batch, "forward_rows: {n} rows for a decoder sized for {} rows per step", self.max_batch);
         let base = table.len();
         self.lsa_prepare_chunk(table, base, n);
-        table.reserve(n, &mut self.alloc).expect("KV pool exhausted");
+        table.reserve_or_raise(n, &mut self.alloc);
         let meta = self.chunk_meta(table, base, n);
         self.run_batched_submit(&meta, Input::Tokens(inputs), false);
         n
