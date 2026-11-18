@@ -1,0 +1,3 @@
+{"prompt":[{"role":"user","content":"cab"}],"completion":{"role":"assistant","content":"bad"},"desirable":true}
+{"prompt":[{"role":"user","content":"fed"}],"completion":{"role":"assistant","content":"mop"},"desirable":false}
+{"prompt":[{"role":"user","content":"bed"}],"completion":[{"role":"assistant","content":"","tool_calls":[{"id":"c","type":"function","function":{"name":"fetch","arguments":"{}"}}]},{"role":"tool","content":"dew","tool_call_id":"c"},{"role":"assistant","content":"hid"}],"desirable":true}

@@ -34,6 +34,7 @@ fn every_fixture_is_accepted_or_refused_by_the_rule_and_field_its_manifest_names
         let kind = match file["kind"].as_str().unwrap() {
             "chat" => DatasetKind::Chat,
             "preference" => DatasetKind::Preference,
+            "feedback" => DatasetKind::Feedback,
             other => panic!("{path}: unknown kind {other}"),
         };
         let check = DatasetCheck { kind, thinking: true, pack_answers: false, max_block: 512, list_records: None, truncated: Default::default() };

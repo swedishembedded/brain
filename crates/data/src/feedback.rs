@@ -5,8 +5,8 @@
 // team needs expertise in turning a product's thumbs-up and thumbs-down into training data, you can procure our
 // services by sending an email to info@swedishembedded.com.
 
-//! `generic-feedback-v1`: one judged completion per JSONL line - a prompt conversation, one assistant turn and
-//! whether that turn is one to learn from (`desirable`) or to unlearn. No second completion is needed: the trainer
+//! `generic-feedback-v1`: one judged completion per JSONL line - a prompt conversation, the completion that follows
+//! it and whether that completion is one to learn from (`desirable`) or to unlearn. No second completion is needed: the trainer
 //! (KTO) weighs each completion against the policy's divergence from its reference.
 //!
 //! ```json
@@ -17,38 +17,37 @@
 //!  "metadata": {"source": "thumbs"}}
 //! ```
 //!
-//! Messages take the `generic-preference-v1` shape ([`crate::preference`]): `generic-messages-v2` without `train`,
-//! the prompt never supervised and the completion always. `tools` and `metadata` are optional as there. Parsing is
-//! strict: an unknown or mistyped field, a missing `desirable`, an empty prompt or one that ends in an assistant turn,
-//! and a completion that is not an assistant turn are refused by line and field.
+//! `completion` is a `generic-preference-v1` candidate ([`crate::preference`]): one assistant turn, or a continuation
+//! (a non-empty array of turns that starts and ends with an assistant turn, such as a tool call, its result and the
+//! answer). Messages are `generic-messages-v2` without `train`: the prompt is never supervised, the completion's
+//! assistant turns always are and its other turns are context. `tools` and `metadata` are optional as there. Parsing
+//! is strict: an unknown or mistyped field, a missing `desirable`, an empty prompt or one that ends in an assistant
+//! turn, and a completion that is not an assistant turn or a continuation of one are refused by line and field.
 
 use std::io;
 use std::path::Path;
 
-use crate::chat::{messages_from_wire, ChatSample, RenderOpts, WireMessage, WireRole};
+use crate::chat::{ChatSample, RenderOpts, WireRole};
 use crate::chat_template::{ChatTemplate, TemplateError};
-use crate::preference::{EncodedTurn, WireTurn};
+use crate::preference::{Candidate, EncodedTurn, WireTurn};
 use crate::qwen_tokenizer::QwenBpe;
 
-/// One judged completion: the prompt followed by the completion, as a [`ChatSample`] whose only supervised message
-/// is that final turn, and the judgement.
+/// One judged completion: the prompt followed by the completion, as a [`ChatSample`] whose supervised messages are
+/// the completion's assistant turns, and the judgement.
 #[derive(Clone, Debug)]
 pub struct FeedbackSample {
     pub sample: ChatSample,
     pub desirable: bool,
+    /// Messages before the completion.
+    pub prompt_len: usize,
 }
 
 impl FeedbackSample {
-    /// Messages before the completion.
-    pub fn prompt_len(&self) -> usize {
-        self.sample.messages.len() - 1
-    }
-
-    /// This example's prompt followed by `other`'s completion: the mismatched pair the trainer estimates the policy's
-    /// divergence from its reference on (never trained, only scored).
+    /// This example's prompt followed by `other`'s whole completion: the mismatched pair the trainer estimates the
+    /// policy's divergence from its reference on (never trained, only scored).
     pub fn with_completion_of(&self, other: &FeedbackSample) -> ChatSample {
-        let mut messages = self.sample.messages[..self.prompt_len()].to_vec();
-        messages.extend(other.sample.messages.last().cloned());
+        let mut messages = self.sample.messages[..self.prompt_len].to_vec();
+        messages.extend_from_slice(&other.sample.messages[other.prompt_len..]);
         ChatSample { messages, tools: self.sample.tools.clone(), rendered: None, media: Vec::new(), rollout: None }
     }
 
@@ -81,19 +80,11 @@ impl FeedbackSample {
             return Err("\"prompt\" is empty".to_string());
         };
         if matches!(last.role, WireRole::Assistant) {
-            return Err("\"prompt\" ends in an assistant turn; the judged assistant turn is \"completion\"".to_string());
+            return Err("\"prompt\" ends in an assistant turn; the judged completion is \"completion\"".to_string());
         }
-        if !matches!(record.completion.role, WireRole::Assistant) {
-            return Err("\"completion\" must be an assistant turn (\"role\": \"assistant\")".to_string());
-        }
-        if record.completion.tool_call_id.is_some() {
-            return Err("\"completion\": \"tool_call_id\" belongs on a tool result, not on an assistant turn".to_string());
-        }
+        let messages = Candidate::from_wire("completion", record.completion)?.complete("completion", &record.prompt)?;
         let prompt_len = record.prompt.len();
-        let mut wire: Vec<WireMessage> = record.prompt.into_iter().map(|t| t.into_message(false)).collect();
-        wire.push(record.completion.into_message(true));
-        let messages = messages_from_wire(wire).map_err(|e| format!("\"prompt\" + \"completion\" (messages[{prompt_len}] is \"completion\"): {e}"))?;
-        Ok(FeedbackSample { sample: ChatSample { messages, tools: record.tools, rendered: None, media: Vec::new(), rollout: None }, desirable })
+        Ok(FeedbackSample { sample: ChatSample { messages, tools: record.tools, rendered: None, media: Vec::new(), rollout: None }, desirable, prompt_len })
     }
 }
 
@@ -101,7 +92,8 @@ impl FeedbackSample {
 #[serde(deny_unknown_fields)]
 struct WireFeedback {
     prompt: Vec<WireTurn>,
-    completion: WireTurn,
+    /// A [`Candidate`]: read as any JSON value so a refusal names the field.
+    completion: serde_json::Value,
     /// Read as any JSON value so a mistyped one is refused naming the field (serde's own message does not).
     desirable: serde_json::Value,
     /// `minijinja::Value` for the reason [`ChatSample::from_jsonl`] gives: the schema's key order must survive.
@@ -123,13 +115,39 @@ mod tests {
     fn an_example_is_one_conversation_supervised_only_on_its_completion() {
         let e = FeedbackSample::from_json_line(GOOD).expect("parses");
         assert!(e.desirable);
-        assert_eq!(e.prompt_len(), 2);
+        assert_eq!(e.prompt_len, 2);
         assert_eq!(e.sample.messages.iter().map(|m| m.train).collect::<Vec<_>>(), [false, false, true]);
         let other = FeedbackSample::from_json_line(&GOOD.replace("hello", "go away").replace("true", "false")).unwrap();
         let mismatched = e.with_completion_of(&other);
         assert_eq!(mismatched.messages.len(), 3);
         assert_eq!((mismatched.messages[1].content.as_str(), mismatched.messages[2].content.as_str()), ("hi", "go away"), "this prompt, the other's completion");
         assert!(mismatched.messages[2].train);
+    }
+
+    /// A continuation completion is supervised on its assistant turns, and a mismatched pair carries the other
+    /// example's whole continuation after this one's prompt.
+    #[test]
+    fn a_continuation_completion_is_carried_whole_into_a_mismatched_pair() {
+        let call = r#"{"id":"c1","type":"function","function":{"name":"weather","arguments":"{}"}}"#;
+        let line = format!(
+            r#"{{"prompt":[{{"role":"user","content":"weather?"}}],"completion":[{{"role":"assistant","content":"","tool_calls":[{call}]}},{{"role":"tool","content":"18C","tool_call_id":"c1"}},{{"role":"assistant","content":"18C"}}],"desirable":true}}"#
+        );
+        let tooled = FeedbackSample::from_json_line(&line).expect("parses");
+        assert_eq!(tooled.prompt_len, 1);
+        assert_eq!(tooled.sample.messages.iter().map(|m| m.train).collect::<Vec<_>>(), [false, true, false, true]);
+
+        let plain = FeedbackSample::from_json_line(GOOD).unwrap();
+        let mismatched = plain.with_completion_of(&tooled);
+        assert_eq!(mismatched.messages.iter().map(|m| (m.role.as_str(), m.train)).collect::<Vec<_>>(), [("system", false), ("user", false), ("assistant", true), ("tool", false), ("assistant", true)]);
+        assert_eq!((mismatched.messages[1].content.as_str(), mismatched.messages[4].content.as_str()), ("hi", "18C"));
+        let back = tooled.with_completion_of(&plain);
+        assert_eq!(back.messages.iter().map(|m| m.content.as_str()).collect::<Vec<_>>(), ["weather?", "hello"]);
+
+        let open = line.replace(r#",{"role":"assistant","content":"18C"}]"#, "]");
+        let err = FeedbackSample::from_json_line(&open).unwrap_err();
+        assert!(err.contains("\"completion\"") && err.contains("ends in a non-assistant turn"), "{err}");
+        let err = FeedbackSample::from_json_line(r#"{"prompt":[{"role":"user","content":"x"}],"completion":[],"desirable":true}"#).unwrap_err();
+        assert!(err.contains("\"completion\" is an empty continuation"), "{err}");
     }
 
     #[test]

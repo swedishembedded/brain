@@ -1,2 +1,3 @@
 {"prompt":[{"role":"user","content":"cab"}],"chosen":{"role":"assistant","content":"bad"},"rejected":{"role":"assistant","content":"wig"}}
 {"prompt":[{"role":"user","content":"fed"}],"chosen":{"role":"assistant","content":"dad"},"rejected":{"role":"assistant","content":"mop"}}
+{"prompt":[{"role":"user","content":"bed"}],"chosen":[{"role":"assistant","content":"","tool_calls":[{"id":"c","type":"function","function":{"name":"fetch","arguments":"{}"}}]},{"role":"tool","content":"dew","tool_call_id":"c"},{"role":"assistant","content":"hid"}],"rejected":{"role":"assistant","content":"big"}}

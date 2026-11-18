@@ -120,7 +120,7 @@ fn a_preference_pair_keeps_the_think_block_its_candidates_open_with_when_asked()
         media: Vec::new(),
         rollout: None,
     };
-    let pair = data::preference::PreferenceSample { chosen: turn("Do not wait."), rejected: turn("Wait.") };
+    let pair = data::preference::PreferenceSample { chosen: turn("Do not wait."), rejected: turn("Wait."), prompt_len: 1 };
     let supervised = |opts: RenderOpts| {
         let (chosen, rejected) = pair.encode_with(&tok, &tmpl, opts).unwrap();
         (tok.decode(&chosen.supervised()), tok.decode(&rejected.supervised()))

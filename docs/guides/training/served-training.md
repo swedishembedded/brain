@@ -17,13 +17,14 @@ The job is the model `brain/train` with one action, `train`. It trains
   for the record format and the objective's settings);
 - **by preference optimization** (`objective: preference`): `dataset` and
   `held_out` hold `generic-preference-v1` pairs (a prompt and the `chosen` and
-  `rejected` assistant turns), as `brain::PreferenceFineTune` trains them, by the pair
+  `rejected` candidates, each one assistant turn or a continuation of turns that
+  starts and ends with one, such as a tool call, its result and the answer), as `brain::PreferenceFineTune` trains them, by the pair
   loss `loss`: `dpo` (default), `ipo`, `simpo` (with `gamma`) or `orpo`. The
   reference of `dpo` and `ipo` is the policy the run starts from (the base, or the
   `start_adapter` continued), frozen, so no second model is held; `simpo` and `orpo`
   read none;
 - **by feedback** (`objective: feedback`, KTO): `dataset` holds `generic-feedback-v1` judged completions (a prompt, one
-  `completion` and `desirable`), as `brain::FeedbackFineTune` trains them, against the same frozen reference; a step's
+  `completion`, a candidate as in a preference pair, and `desirable`), as `brain::FeedbackFineTune` trains them, against the same frozen reference; a step's
   `grad_accum` examples estimate the reference point, and the result reports `desirable_examples`,
   `undesirable_examples` and each kind's mean log-ratio to the start (`desirable_logratio`, `undesirable_logratio`);
 - **by distillation** (`objective: distill`): the adapter is trained toward a teacher's `top_k` (default 16) most likely

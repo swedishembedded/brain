@@ -93,7 +93,7 @@ pub(crate) fn check_pairs(path: &Path, tok: &QwenBpe, tmpl: &ChatTemplate, max_b
 fn summarize(pairs: &[PreferenceSample], longest_tokens: Option<usize>) -> PreferenceDatasetSummary {
     PreferenceDatasetSummary {
         pairs: pairs.len(),
-        prompt_messages: pairs.iter().map(PreferenceSample::prompt_len).sum(),
+        prompt_messages: pairs.iter().map(|p| p.prompt_len).sum(),
         pairs_with_tools: pairs.iter().filter(|p| !p.chosen.tools.is_empty()).count(),
         longest_tokens,
     }

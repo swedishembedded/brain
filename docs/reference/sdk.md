@@ -451,16 +451,31 @@ The dataset is **`generic-preference-v1`** JSONL, one pair per line:
 - `prompt` (required, non-empty) is a conversation in the
   `generic-messages-v2` message shape - `role`, `content`, optional
   `tool_calls`, `tool_call_id` and, on an assistant turn, `reasoning_content` (rendered as the turn's think block) - **without `train`**: supervision follows
-  from position, so the prompt is never supervised and the candidates always
-  are. It must not end in an assistant turn.
-- `chosen` and `rejected` (required) are single assistant messages of the
-  same shape, and may carry `tool_calls` exactly as `generic-messages-v2`
-  writes them (`function.arguments` a JSON-encoded string).
+  from position, so the prompt is never supervised and a candidate's
+  assistant turns always are. It must not end in an assistant turn.
+- `chosen` and `rejected` (required) are each one assistant message of the
+  same shape, or a continuation: a non-empty array of such messages that
+  starts and ends with an assistant turn (a tool call, its `tool` result, the
+  answer that reads it). A continuation's assistant turns are supervised and
+  its other turns are context. Assistant turns may carry `tool_calls` exactly
+  as `generic-messages-v2` writes them (`function.arguments` a JSON-encoded
+  string).
+
+```json
+{"prompt": [{"role": "user", "content": "Weather in Paris?"}],
+ "chosen": [{"role": "assistant", "content": "", "tool_calls": [{"id": "c1", "type": "function",
+             "function": {"name": "weather", "arguments": "{\"city\": \"Paris\"}"}}]},
+            {"role": "tool", "content": "18C, sunny", "tool_call_id": "c1"},
+            {"role": "assistant", "content": "18C and sunny."}],
+ "rejected": {"role": "assistant", "content": "I cannot check the weather."}}
+```
 - `tools` (optional) is the tool schema array the chat template's preamble
   renders; `metadata` (optional) is an object carried for the producer and
   never read.
 - Refused, by line and field: an unknown or mistyped field, a candidate that
-  is not an assistant turn, `chosen` identical to `rejected`, a tool call id
+  is not an assistant turn, an empty continuation or one that starts or ends
+  with another turn, `chosen` identical to `rejected` (the same turns in
+  order), a tool call id
   used twice in the conversation (a candidate must not reuse the prompt's id),
   a tool result answering no earlier unanswered call, and arguments that are
   not valid JSON.
@@ -474,7 +489,7 @@ The dataset is **`generic-preference-v1`** JSONL, one pair per line:
 The objective is standard DPO: per pair, `-log sigmoid(beta * ((log
 pi(chosen) - log ref(chosen)) - (log pi(rejected) - log ref(rejected))))`,
 each log-probability summed over that candidate's assistant-turn tokens
-only. The reference is the model the run starts from - the base, or the base
+only (every assistant turn of a continuation). The reference is the model the run starts from - the base, or the base
 plus the `.continue_from(adapter)` adapter - frozen: its log-probabilities are
 computed once per pair before the first step and cached, so no second model
 copy is held while training, and the first step's margin is exactly zero
@@ -541,10 +556,12 @@ The dataset is **`generic-feedback-v1`** JSONL, one judged completion per line:
  "metadata": {"source": "thumbs"}}
 ```
 
-`prompt`, `tools` and `metadata` are as in `generic-preference-v1`; `completion` is one assistant message and
-`desirable` a boolean. Refused by line and field: an unknown or mistyped field, a missing or non-boolean `desirable`,
-an empty prompt or one that ends in an assistant turn, a completion that is not an assistant turn, and a dataset of
-fewer than two examples.
+`prompt`, `tools` and `metadata` are as in `generic-preference-v1`; `completion` is a candidate as there (one assistant
+message, or a continuation whose assistant turns are supervised and whose other turns are context) and `desirable` a
+boolean. Refused by line and field: an unknown or mistyped field, a missing or non-boolean `desirable`, an empty prompt
+or one that ends in an assistant turn, a completion that is not an assistant turn or a continuation of one, and a
+dataset of fewer than two examples. A mismatched pair (below) is an example's prompt followed by the next example's
+whole completion.
 
 The objective: with `r = log pi(completion | prompt) - log ref(completion | prompt)` (summed over the completion's
 tokens, the reference the model the run starts from, frozen and scored once) and `z` the step's estimate of

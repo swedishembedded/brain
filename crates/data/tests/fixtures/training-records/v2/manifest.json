@@ -19,8 +19,15 @@
   {
    "path": "preference.jsonl",
    "kind": "preference",
-   "records": 2,
-   "valid_records": 2,
+   "records": 3,
+   "valid_records": 3,
+   "refusals": []
+  },
+  {
+   "path": "feedback.jsonl",
+   "kind": "feedback",
+   "records": 3,
+   "valid_records": 3,
    "refusals": []
   },
   {
