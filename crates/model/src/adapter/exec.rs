@@ -248,6 +248,9 @@ pub struct AdapterRuntime {
     /// The fp32 reference GEMM provider, for a model that has no [`crate::ops::Ops`]
     /// of its own to take one from.
     reference: LibraryGemmProvider,
+    /// The most rows and outputs the scratch above holds.
+    rows: u32,
+    max_out: u32,
 }
 
 const SCRATCH_SLOTS: usize = 24;
@@ -268,7 +271,20 @@ impl AdapterRuntime {
             scratch: RefCell::new((0..SCRATCH_SLOTS).map(|_| None).collect()),
             saved: RefCell::new(HashMap::new()),
             reference: LibraryGemmProvider::for_gpu(gpu, GemmPrecision::Fp32Reference),
+            rows,
+            max_out,
         }
+    }
+
+    /// Refuse a product the scratch was not sized for: a card drops the writes past a buffer's end and a CPU
+    /// backend makes them into the heap, so either way the correction would be wrong without a word.
+    fn check_fits(&self, base: &str, m: u32, nout: u32) {
+        assert!(
+            m <= self.rows && nout <= self.max_out,
+            "adapter on {base}: a product of {m} rows into {nout} outputs, but the runtime was sized for {} rows and {} outputs",
+            self.rows,
+            self.max_out
+        );
     }
 
     /// The fp32 reference provider (never tensor cores) for a model without an
@@ -316,6 +332,7 @@ impl AdapterRuntime {
     /// is `[m, nout]`).
     #[allow(clippy::too_many_arguments)]
     pub fn forward(&self, gemm: &LibraryGemmProvider, s: &mut Vec<Step>, p: &dyn ParamAccess, base: &str, x: &DeviceBuffer, y: &DeviceBuffer, m: u32, k: u32, nout: u32) {
+        self.check_fits(base, m, nout);
         match self.cfg.kind {
             DeviceKind::Lora => self.lora_forward(gemm, s, p, base, lora_names(base), x, y, m, k, nout),
             DeviceKind::Ia3 => self.ia3_forward(s, p, base, y, m, nout),
@@ -344,6 +361,7 @@ impl AdapterRuntime {
         nout: u32,
         base_dx: &dyn Fn(&mut Vec<Step>, &DeviceBuffer),
     ) {
+        self.check_fits(base, m, nout);
         match self.cfg.kind {
             DeviceKind::Lora => {
                 base_dx(s, d_out);

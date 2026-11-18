@@ -407,7 +407,8 @@ impl Decoder {
     /// for `lora_cfg`/`lora_max_nout`.
     pub fn new_train(gpu: &Gpu, heads: u32, d_model: u32, ffn_dim: u32, layers: u32, max_t: u32, t_enc: u32, eps: f32, lora_cfg: Option<super::lora::LoraCfg>, lora_max_nout: u32) -> Decoder {
         let mut m = Decoder::new(gpu, heads, d_model, ffn_dim, layers, max_t, t_enc, eps);
-        let lora_scratch = lora_cfg.as_ref().map(|c| super::lora::LoraScratch::new(gpu, c, max_t, lora_max_nout));
+        // The cross-attention's k/v projections run over the encoder's `t_enc` rows, which may outnumber the decoder's.
+        let lora_scratch = lora_cfg.as_ref().map(|c| super::lora::LoraScratch::new(gpu, c, max_t.max(t_enc), lora_max_nout));
         m.train = Some(DecoderTrain {
             lora_cfg,
             lora_scratch,
