@@ -71,6 +71,33 @@ struct NativeEntry {
 
 struct BufInner {
     data: UnsafeCell<Vec<u32>>,
+    /// The handle family's allocation tally, which counts this buffer's bytes in at creation and growth and out at
+    /// drop.
+    tally: Arc<AllocTally>,
+}
+
+impl Drop for BufInner {
+    fn drop(&mut self) {
+        self.tally.sub(self.data.get_mut().len());
+    }
+}
+
+/// The bytes a handle family's buffers hold now and the most they have held since the peak was last reset: the
+/// [`backend_api::MemoryUsage`] of the CPU backend, whose "device memory" is the host memory its buffers own.
+#[derive(Default)]
+struct AllocTally {
+    live: AtomicU64,
+    peak_live: AtomicU64,
+}
+
+impl AllocTally {
+    fn add(&self, words: usize) {
+        let live = self.live.fetch_add(4 * words as u64, Ordering::Relaxed) + 4 * words as u64;
+        self.peak_live.fetch_max(live, Ordering::Relaxed);
+    }
+    fn sub(&self, words: usize) {
+        self.live.fetch_sub(4 * words as u64, Ordering::Relaxed);
+    }
 }
 // A buffer's bytes are mutated single-threaded outside `submit`; inside `submit`
 // the dispatcher hands disjoint sub-ranges to workers (upheld invariant).
@@ -84,11 +111,20 @@ pub struct CpuBuffer {
 }
 
 impl CpuBuffer {
-    fn with_words(words: Vec<u32>) -> CpuBuffer {
-        CpuBuffer { inner: Arc::new(BufInner { data: UnsafeCell::new(words) }) }
+    fn with_words(words: Vec<u32>, tally: &Arc<AllocTally>) -> CpuBuffer {
+        tally.add(words.len());
+        CpuBuffer { inner: Arc::new(BufInner { data: UnsafeCell::new(words), tally: tally.clone() }) }
     }
-    fn zeros(n: usize) -> CpuBuffer {
-        CpuBuffer::with_words(vec![0u32; n.max(1)])
+    fn zeros(n: usize, tally: &Arc<AllocTally>) -> CpuBuffer {
+        CpuBuffer::with_words(vec![0u32; n.max(1)], tally)
+    }
+    /// Grow the buffer to at least `words` words (zero-filled), counting the growth in.
+    fn grow_to(&self, words: usize) {
+        let w = self.words_mut();
+        if w.len() < words {
+            self.inner.tally.add(words - w.len());
+            w.resize(words, 0);
+        }
     }
     #[allow(clippy::mut_from_ref)]
     fn words_mut(&self) -> &mut Vec<u32> {
@@ -134,6 +170,8 @@ struct CpuShared {
     /// performance.md` M8.10/M8.11. Append-only; a [`backend_api::NativeId`]
     /// is this `Vec`'s index at registration time.
     natives: Mutex<Vec<NativeEntry>>,
+    /// Bytes held by every buffer of this handle family (a handle and its shares).
+    tally: Arc<AllocTally>,
 }
 
 /// Relaxed device-op counters. `submits`/`readbacks` are per call;
@@ -378,32 +416,31 @@ impl CpuBackend {
                 wgsizes,
                 fast_native_enabled,
                 natives: Mutex::new(Vec::new()),
+                tally: Arc::default(),
             }),
             stats: OpCounters::default(),
         }
     }
 
     pub fn storage(&self, n: u64) -> CpuBuffer {
-        CpuBuffer::zeros(n as usize)
+        CpuBuffer::zeros(n as usize, &self.shared.tally)
     }
 
     pub fn storage_init(&self, _name: &str, data: &[f32]) -> CpuBuffer {
-        CpuBuffer::with_words(data.iter().map(|x| x.to_bits()).collect())
+        CpuBuffer::with_words(data.iter().map(|x| x.to_bits()).collect(), &self.shared.tally)
     }
 
     pub fn buffer(&self, _label: &str, size: u64, _usage: BufUsage) -> CpuBuffer {
-        CpuBuffer::zeros((size / 4) as usize)
+        CpuBuffer::zeros((size / 4) as usize, &self.shared.tally)
     }
 
     pub fn uniform_dynamic(&self, len: usize) -> CpuBuffer {
-        CpuBuffer::zeros(len.max(4))
+        CpuBuffer::zeros(len.max(4), &self.shared.tally)
     }
 
     pub fn write(&self, buf: &CpuBuffer, data: &[u32]) {
+        buf.grow_to(data.len());
         let w = buf.words_mut();
-        if w.len() < data.len() {
-            w.resize(data.len(), 0);
-        }
         w[..data.len()].copy_from_slice(data);
         self.stats.writes.fetch_add(1, Ordering::Relaxed);
     }
@@ -413,10 +450,8 @@ impl CpuBackend {
     /// callers streaming a large upload in chunks stay backend-portable.
     pub fn write_at(&self, buf: &CpuBuffer, offset_words: u64, data: &[u32]) {
         let off = offset_words as usize;
+        buf.grow_to(off + data.len());
         let w = buf.words_mut();
-        if w.len() < off + data.len() {
-            w.resize(off + data.len(), 0);
-        }
         w[off..off + data.len()].copy_from_slice(data);
         self.stats.writes.fetch_add(1, Ordering::Relaxed);
     }
@@ -454,7 +489,7 @@ impl CpuBackend {
 
     pub fn step(&self, kind: usize, bufs: &[&CpuBuffer], params: &[u32], threads: u32) -> CpuStep {
         self.stats.uniform_allocs.fetch_add(1, Ordering::Relaxed);
-        let ubuf = CpuBuffer::with_words(Self::pad_uniform(params));
+        let ubuf = CpuBuffer::with_words(Self::pad_uniform(params), &self.shared.tally);
         self.step_buf(kind, &ubuf, bufs, threads)
     }
 
@@ -465,7 +500,7 @@ impl CpuBackend {
 backend_api::check_binding_offsets(&self.shared.names[kind], offsets);
         self.stats.uniform_allocs.fetch_add(1, Ordering::Relaxed);
         self.stats.bind_groups.fetch_add(1, Ordering::Relaxed);
-        let ubuf = CpuBuffer::with_words(Self::pad_uniform(params));
+        let ubuf = CpuBuffer::with_words(Self::pad_uniform(params), &self.shared.tally);
         let bg = BindGroup {
             uniform: ubuf,
             bufs: bufs.iter().enumerate().map(|(i, b)| ((*b).clone(), offsets[i].0 as usize)).collect(),
@@ -533,7 +568,7 @@ backend_api::check_binding_offsets(&self.shared.names[kind], offsets);
     pub fn step_native(&self, id: backend_api::NativeId, bufs: &[&CpuBuffer], params: &[u32], threads: u32) -> CpuStep {
         let kind = NATIVE_BASE + id.0 as usize;
         self.stats.uniform_allocs.fetch_add(1, Ordering::Relaxed);
-        let ubuf = CpuBuffer::with_words(Self::pad_uniform(params));
+        let ubuf = CpuBuffer::with_words(Self::pad_uniform(params), &self.shared.tally);
         self.step_buf(kind, &ubuf, bufs, threads)
     }
 
@@ -1494,6 +1529,16 @@ impl Backend for CpuBackend {
     }
     fn downgrade(&self) -> Option<Box<dyn backend_api::WeakBackend>> {
         Some(Box::new(WeakCpu(std::sync::Arc::downgrade(&self.shared))))
+    }
+    /// The bytes this handle family's buffers hold; a dropped buffer is freed at once, so `reserved` is `live`.
+    fn memory_usage(&self) -> Option<backend_api::MemoryUsage> {
+        let tally = &self.shared.tally;
+        let live = tally.live.load(Ordering::Relaxed);
+        Some(backend_api::MemoryUsage { live, reserved: live, peak_live: tally.peak_live.load(Ordering::Relaxed).max(live) })
+    }
+    fn reset_memory_peak(&self) {
+        let tally = &self.shared.tally;
+        tally.peak_live.store(tally.live.load(Ordering::Relaxed), Ordering::Relaxed);
     }
 
     fn storage(&self, n: u64) -> DeviceBuffer {
