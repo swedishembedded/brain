@@ -15,8 +15,9 @@ ltxv's quantized blocks (`qgemm`) dispatched `matmul_i8_dyn` (and `matmul_q4_dyn
 `max_abs_row` / `quant_pack` / two-level residual steps. On the CPU backend (`int8_dot` false, so the packed
 kernel is not JIT-compilable) 22 ltxv tests aborted with `wgsl-cpu: kernel "matmul_i8_dyn" was not JIT-compiled`:
 `device_residency`, `av_dit_parity`, `block_weight_cache`, `lora_runtime` and `int8_compute`. Production would have
-hit the same on any device lacking the packed dot. `wan` and `s3dit` dispatch the same kernel the same way and fail
-the same way (`wan` `lora_runtime_dev` x2, `s3dit` `dit_i8_rebuilt_from_cache`); they are not yet migrated.
+hit the same on any device lacking the packed dot. `wan` and `s3dit` dispatched the same kernel the same way and
+failed the same way (`wan` `lora_runtime_dev` x2, `s3dit` `dit_i8_rebuilt_from_cache`); `gemma4`, `flux1` and `flux2`
+did too, behind a model-side "int8 needs a GPU" refusal that hid it from their CPU tests.
 
 ## Why
 
@@ -34,5 +35,11 @@ the tuned native candidates and the decode-regime GEMV all live behind `Ops::mat
   nothing then reads. The tile scratch is bounded by `DEFAULT_TILE_BUDGET_BYTES` (256 MiB), inside ltxv's
   `activation_reserve_bytes` base, so residency planning is unchanged: the resident bytes stay the packed codes.
 * `crates/model/tests/it/ops_int8_without_packed_dot.rs` pins the route against the decoded weights.
-* Any other model that dispatches a packed kernel by slot has the same defect; migrate it to `Ops` rather than add a
-  capability check to the model.
+* wan, s3dit, gemma4, flux1 and flux2 (DiT and the device trainer's int8 frozen base) take the same route. A model
+  whose linears read row ranges of one activation (a joint text/image slab, a batch) quantizes the slab once and
+  reads each range through `Ops::act_rows`; one whose stack is recorded once uses `Ops::act_shared_scratch`, one
+  packed copy per width and row count, reused across blocks.
+* `make check/packed-dispatch` (`scripts/gates/check-packed-dispatch.sh`) fails a model crate that registers, looks
+  up or records a packed kernel by name; `scripts/gates/packed-dispatch.allow` lists, with reasons, the int8 MoE
+  expert paths (no `Ops` int8 expert product yet), `qwen3::serve`'s own tuned selector and two benches, and only
+  shrinks. Migrate a listed path to `Ops` rather than add a capability check to the model.

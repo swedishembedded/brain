@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+#
+# Model-crate files that still name a packed int8/int4 kernel (see check-packed-dispatch.sh).
+# path<TAB>count<TAB>reason. Shrink-only: lower or delete the line in the commit that routes the product through
+# model::ops::Ops. A new match is a design defect, not an allowlist addition.
+crates/flux2/src/bin/flux2_bench.rs	3	profiling bin that times the text encoder's raw int8 GEMM at its shapes; never a served path
+crates/moondream3/src/decoder.rs	5	int8 MoE experts (moe_linear_gated_i8 + their activation quantization): model::ops has no int8 expert product yet
+crates/qwen3/src/bin/qwen_bench.rs	2	kernel bench that A/Bs matmul_i8_dyn itself at one shape; never a served path
+crates/qwen3/src/serve.rs	8	the serving engine's int8 GEMM runs on its own measured AutoTuner selector (tuned_i8), not yet handed to Ops::with_selector
+crates/qwen35/src/model.rs	3	slots 81-83 hand-list façade kernels Ops resolves by name; nothing dispatches them by slot, dropping them renumbers ten slot constants of the shared qwen35/qwen35moe table
+crates/qwen35moe/src/model.rs	6	int8 MoE experts (moe_i8_gemv_gather, Qwen35Q8's activation quantization): model::ops has no int8 expert product yet
+crates/qwen3omnimoe/src/talker.rs	5	int8 shared expert and MoE experts (model::moe::SharedExpertIds8/MoeIds8 slots): model::ops has no int8 expert product yet
+crates/qwen3omnimoe/src/thinker.rs	6	int8 MoE experts plus lm_head_fwd_i8 on the same slots: model::ops has no int8 expert product yet

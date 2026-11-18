@@ -401,7 +401,7 @@ before relying on one.
 | concept | layer / crate | rule |
 |---|---|---|
 | codec decode/encode, quantized GEMM tiles, fused optimizer-update kernels | 1 `kernels`, `kernels-cuda` | kernel text lives only here; portable WGSL reference first |
-| kernel choice from operand descriptors + device caps | 2 `gpu-core` provider | the one selection seam (`check-kernel-selection.sh`); no model crate picks a kernel by format |
+| kernel choice from operand descriptors + device caps | 2 `gpu-core` provider | the one selection seam (`check-kernel-selection.sh`); no model crate picks a kernel by format, nor names a packed int8/int4 kernel (`check-packed-dispatch.sh`: its products are `Ops::act*` + `Ops::matmul`) |
 | tensor descriptor, quantization encoding, codec registry, packed tensor reader/sink, memory budget, load plan executor, declarative name/layout mapping (`remap.rs`) | 3 `checkpoint` | the lowest layer that needs a shared type owns it; no wgpu dependency |
 | trainable parameter with independent storage/gradient/optimizer-state dtype, optimizer state formats and storage, transactional state | 3 `paramstore`, `optim` | one AdamW definition; state formats are data, not new optimizers per format |
 | `Weight` variants and generic quantized forward/input-grad/weight-grad ops, adapter runtime (definition, execution, optimization), KV storage descriptor, saved-activation policy, generic trainers and objectives, parameter manifest and capability traits | 3 `model` | extend `model::ops`, `adapter::sites`, `model::training`, `model::conformance` rather than adding parallel seams |
