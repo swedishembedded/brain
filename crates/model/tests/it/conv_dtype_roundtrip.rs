@@ -33,8 +33,9 @@ use gpu_core::Gpu;
 /// exist to prevent. Same fix here.
 static DEVICE_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+#[track_caller]
 fn skip_gpu() -> bool {
-    brain_testutil::gpu_tests_skipped()
+    brain_testutil::gpu_unavailable(gpu_core::testgpu::missing_gpu())
 }
 
 fn bits_of(dt: Dtype) -> i32 {

@@ -1152,7 +1152,12 @@ mod tests {
         );
 
         if gpu.kind() != "wgpu" {
-            return; // native f16 compute exists only on this backend
+            brain_testutil::skip_unavailable(&format!(
+                "f16_roof_runs_through_the_production_gate_and_is_never_slower_than_fp32_where_hardware_supports_it: \
+                 native f16 compute exists only on the wgpu backend, and this device is {}",
+                gpu.kind()
+            ));
+            return;
         }
         let probe = backend_wgpu::WgpuBackend::new(&[("axpy", kernels::AXPY)]);
         if !probe.supports_shader_f16() {

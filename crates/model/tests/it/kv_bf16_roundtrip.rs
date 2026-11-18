@@ -421,7 +421,7 @@ fn kv_bf16_chunked_batch_append_lands_every_element_on_cpu() {
 #[test]
 fn kv_bf16_chunked_batch_append_lands_every_element_on_gpu() {
     let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    if brain_testutil::gpu_tests_skipped() {
+    if brain_testutil::gpu_unavailable(gpu_core::testgpu::missing_gpu()) {
         return;
     }
     run_chunked_batch_append(Gpu::new_gpu(kernel_list()), "gpu");
@@ -435,7 +435,7 @@ fn kv_bf16_long_context_parity_on_cpu() {
 #[test]
 fn kv_bf16_long_context_parity_on_gpu() {
     let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    if brain_testutil::gpu_tests_skipped() {
+    if brain_testutil::gpu_unavailable(gpu_core::testgpu::missing_gpu()) {
         return;
     }
     eprintln!("kv_bf16_long_context_parity_on_gpu: running on a real wgpu device");
@@ -450,7 +450,7 @@ fn kv_bf16_append_rmw_shared_word_preserves_both_adjacent_slots_on_cpu() {
 #[test]
 fn kv_bf16_append_rmw_shared_word_preserves_both_adjacent_slots_on_gpu() {
     let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    if brain_testutil::gpu_tests_skipped() {
+    if brain_testutil::gpu_unavailable(gpu_core::testgpu::missing_gpu()) {
         return;
     }
     eprintln!("kv_bf16_append_rmw_shared_word_preserves_both_adjacent_slots_on_gpu: running on a real wgpu device");

@@ -48,6 +48,9 @@ fn int8_gemm_matches_fp32() {
         brain_testutil::skip_unavailable("set BRAIN_INT8_TEST=1 (needs a GPU) for the int8 DP4A parity test");
         return;
     }
+    if brain_testutil::gpu_unavailable(gpu_core::testgpu::missing_gpu()) {
+        return;
+    }
     let (m, k, n) = (320usize, 3840usize, 3840usize);
     let x = fill(m * k, 1);
     let w = fill(n * k, 2);

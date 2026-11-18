@@ -47,11 +47,8 @@ pub fn cpu() -> Gpu {
 /// discrete card - on a software rasteriser a "GPU" run would compare the host
 /// against itself and prove nothing.
 pub fn wgpu() -> Option<Gpu> {
-    if brain_testutil::gpu_tests_skipped() {
-        return None;
-    }
-    if gpu_core::testgpu::cards().is_empty() {
-        brain_testutil::skip("no discrete GPU - a software rasteriser would compare the host against itself");
+    // `missing_gpu` counts the cards the selection names: a software rasteriser is not one.
+    if brain_testutil::gpu_unavailable(gpu_core::testgpu::missing_gpu()) {
         return None;
     }
     Some(Gpu::new_gpu(deepseek2::PIPELINES))

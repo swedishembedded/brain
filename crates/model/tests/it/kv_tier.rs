@@ -432,7 +432,7 @@ fn every_finite_e4m3_value_round_trips_through_append_and_the_read_kernel(g: &Gp
 fn every_finite_e4m3_value_round_trips_on_cpu_and_gpu() {
     every_finite_e4m3_value_round_trips_through_append_and_the_read_kernel(&Gpu::new_cpu(kernels()), "cpu");
     let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    if brain_testutil::gpu_tests_skipped() {
+    if brain_testutil::gpu_unavailable(gpu_core::testgpu::missing_gpu()) {
         return;
     }
     every_finite_e4m3_value_round_trips_through_append_and_the_read_kernel(&Gpu::new_gpu(kernels()), "gpu");
@@ -457,7 +457,7 @@ fn on_gpu_with_f32(f: impl Fn(&Gpu, KvTier, &str)) {
 
 fn on_gpu_in(tiers: &[KvTier], f: impl Fn(&Gpu, KvTier, &str)) {
     let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    if brain_testutil::gpu_tests_skipped() {
+    if brain_testutil::gpu_unavailable(gpu_core::testgpu::missing_gpu()) {
         return;
     }
     let g = Gpu::new_gpu(kernels());

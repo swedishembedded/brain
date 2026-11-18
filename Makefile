@@ -765,7 +765,7 @@ check/env-writes:
 # A test that returns green without running its check certifies nothing:
 # every skip goes through brain_testutil (or #[ignore]), and the legacy ones on
 # scripts/gates/test-skips.allow only shrink. See scripts/gates/check-test-skips.sh.
-## check/test-skips - no new silent test skips under crates/ (MOE_SKIP_GPU_TESTS early return, bare "skipping" + return); allowlist entries must still exist
+## check/test-skips - no new silent test skips under crates/ (MOE_SKIP_GPU_TESTS early return, bare "skipping" + return, a GPU opened with no device guard); allowlist entries must still exist
 check/test-skips:
 	bash scripts/gates/check-test-skips.sh
 

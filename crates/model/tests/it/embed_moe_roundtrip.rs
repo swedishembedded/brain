@@ -48,8 +48,9 @@ fn kernel_list() -> &'static [(&'static str, &'static str)] {
     model::ops::kernel_list()
 }
 
+#[track_caller]
 fn skip_gpu() -> bool {
-    brain_testutil::gpu_tests_skipped()
+    brain_testutil::gpu_unavailable(gpu_core::testgpu::missing_gpu())
 }
 
 // ---------------------------------------------------------------- embed ---

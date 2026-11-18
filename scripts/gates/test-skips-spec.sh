@@ -13,7 +13,10 @@
 #   - the same file with a matching allowlist entry passes;
 #   - an allowlist entry larger than the real count fails (the list only
 #     shrinks);
-#   - a test that skips through brain_testutil, or carries #[ignore], passes.
+#   - a test that skips through brain_testutil, or carries #[ignore], passes;
+#   - a test that opens a real GPU with no device guard before it fails, and
+#     one guarded directly or through a helper, an #[ignore]d one and a
+#     card_tests! binary pass.
 set -u
 here="$(cd "$(dirname "$0")" && pwd)"
 gate="$here/check-test-skips.sh"
@@ -115,6 +118,54 @@ mkdir -p "$tree/crates/testutil/src"
 printf 'pub fn g() { std::env::var("MOE_SKIP_GPU_TESTS"); }\n' >"$tree/crates/testutil/src/lib.rs"
 printf 'crates/a/tests/t.rs\t1\n' >"$allow"
 expect pass "the testutil crate, which owns the read, is exempt"
+
+fresh
+cat >"$src" <<'EOF'
+#[test]
+fn t() {
+    if brain_testutil::gpu_tests_skipped() {
+        return;
+    }
+    let g = Gpu::new_gpu(KERNELS);
+}
+EOF
+expect fail "a test that opens a GPU without a device guard fails" "NEW SKIP"
+
+fresh
+cat >"$src" <<'EOF'
+fn skip_gpu() -> bool {
+    brain_testutil::gpu_unavailable(gpu_core::testgpu::missing_gpu())
+}
+#[test]
+fn t() {
+    if brain_testutil::gpu_unavailable(gpu_core::testgpu::missing_gpu()) {
+        return;
+    }
+    let g = Gpu::new_gpu(KERNELS);
+}
+#[test]
+fn u() {
+    if skip_gpu() {
+        return;
+    }
+    let g = Gpu::new_wgpu(KERNELS);
+}
+#[test]
+#[ignore = "a benchmark"]
+fn bench() {
+    let g = WgpuBackend::new(KERNELS);
+}
+EOF
+expect pass "a GPU open behind gpu_unavailable, a helper that calls it, or #[ignore] passes"
+
+fresh
+cat >"$src" <<'EOF'
+fn t() {
+    let g = Gpu::new_gpu(KERNELS);
+}
+gpu_core::card_tests!(t);
+EOF
+expect pass "a card_tests! binary, whose card is an argument, passes"
 
 if [ "$failures" -ne 0 ]; then
   echo "test-skips-spec: $failures case(s) failed"

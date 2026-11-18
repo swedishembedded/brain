@@ -505,6 +505,22 @@ pub mod testgpu {
         crate::devices::schedulable_gpus()
     }
 
+    /// The device capability a test that opens a real GPU (`Gpu::new_gpu`, `Gpu::new_wgpu`) needs and this process
+    /// lacks, or `None` when it has a card it may open ([`cards`]): the reason a test hands
+    /// `brain_testutil::gpu_unavailable` so it skips by name instead of panicking inside the adapter request. The
+    /// selection decides, as for every device test: with the CPU backend selected (`--device cpu`,
+    /// `BRAIN_BACKEND=cpu`) or no card visible (no Vulkan ICD or wgpu adapter, no CUDA device), there is none.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn missing_gpu() -> Option<String> {
+        if !cards().is_empty() {
+            return None;
+        }
+        Some(format!(
+            "a GPU adapter: this process may open none (backend '{}': the CPU selected with --device / BRAIN_BACKEND, or no Vulkan ICD, wgpu adapter or CUDA device visible)",
+            crate::backend_name()
+        ))
+    }
+
     /// The canonical indices of the `n` cards a multi-card test places its stages on: `requested` (a test's
     /// `SHARD_TEST_GPUS`) when given, else the first `n` of [`cards`]. `Err` names why the selection cannot serve it,
     /// for the test's `skip_unavailable`; a requested card the selection does not name is refused, never opened.

@@ -174,7 +174,7 @@ fn fused_eval_matches_unfused_reference() {
 #[test]
 fn fused_eval_gpu_matches_cpu() {
     let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    if brain_testutil::gpu_tests_skipped() {
+    if brain_testutil::gpu_unavailable(gpu_core::testgpu::missing_gpu()) {
         return;
     }
     let gpu = Gpu::new_gpu(zipdepth::net::PIPELINES);
@@ -269,7 +269,7 @@ fn qarep_fused_eval_matches_unfused() {
 #[test]
 fn grouped_reg_conv_gpu_matches_cpu() {
     let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    if brain_testutil::gpu_tests_skipped() {
+    if brain_testutil::gpu_unavailable(gpu_core::testgpu::missing_gpu()) {
         return;
     }
     let gpu = Gpu::new_gpu(zipdepth::net::PIPELINES);

@@ -10,7 +10,9 @@
 # Silent-skip ratchet (`make check/test-skips`).
 #
 # A test that returns early when a GPU or fixture is missing is reported by
-# cargo as a PASS, so a green run can certify nothing. A skip must instead go
+# cargo as a PASS, so a green run can certify nothing; one that opens a GPU
+# with no device guard panics on a host without an adapter instead of skipping
+# by name (test-skips.py counts both). A skip must instead go
 # through `brain_testutil` (`gpu_tests_skipped`, `skip`, `skip_unavailable`),
 # which names the reason and can be made fatal, or carry `#[ignore = "..."]`.
 # Remaining legacy skips are listed in scripts/gates/test-skips.allow, one
@@ -56,7 +58,8 @@ if [ -n "$new" ]; then
   fail=1
   echo "check-test-skips: silent skips that are not on the allowlist:"
   printf '%s\n' "$new"
-  echo "  Use brain_testutil::gpu_tests_skipped / skip / skip_unavailable, or #[ignore = \"needs a GPU\"]."
+  echo "  Use brain_testutil::gpu_unavailable(gpu_core::testgpu::missing_gpu()) before opening a GPU,"
+  echo "  brain_testutil::gpu_tests_skipped / skip / skip_unavailable, or #[ignore = \"needs a GPU\"]."
 fi
 if [ -n "$stale" ]; then
   fail=1

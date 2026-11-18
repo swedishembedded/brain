@@ -82,9 +82,15 @@ fn an_indexed_card_is_honoured_not_silently_mangled_to_ambient() {
 }
 
 #[test]
-#[should_panic(expected = "gpu9")]
 fn an_out_of_range_card_is_an_error_never_a_silent_clamp() {
     let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    // A box with no card falls back to the CPU or software path by design (`Gpu::new_on_index`): there is no range
+    // to be out of.
+    if brain_testutil::gpu_unavailable(gpu_core::testgpu::missing_gpu()) {
+        return;
+    }
     // AGENTS.md: "Out-of-range indices are errors, never silent clamps."
-    let _ = Gpu::open(Some("gpu9"), KERNELS);
+    let refused = std::panic::catch_unwind(|| drop(Gpu::open(Some("gpu9"), KERNELS))).expect_err("gpu9 on a box with fewer cards must be refused");
+    let message = refused.downcast_ref::<String>().cloned().or_else(|| refused.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_default();
+    assert!(message.contains("gpu9"), "the refusal names the token: {message}");
 }

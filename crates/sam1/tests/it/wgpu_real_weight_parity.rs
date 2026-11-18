@@ -43,7 +43,7 @@ fn mmproj_path() -> Option<std::path::PathBuf> {
 
 #[test]
 fn real_mmproj_sam_tower_agrees_cpu_vs_wgpu_at_full_depth() {
-    if brain_testutil::gpu_tests_skipped() {
+    if brain_testutil::gpu_unavailable(gpu_core::testgpu::missing_gpu()) {
         return;
     }
     let Some(mmproj) = mmproj_path() else {

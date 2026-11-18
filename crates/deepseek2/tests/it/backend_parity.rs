@@ -63,11 +63,8 @@ fn maxabs(a: &[f32], b: &[f32]) -> f32 {
 
 /// `Some(gpu)` when a real wgpu device is worth comparing against.
 fn wgpu_or_skip() -> Option<Gpu> {
-    if brain_testutil::gpu_tests_skipped() {
-        return None;
-    }
-    if gpu_core::testgpu::cards().is_empty() {
-        brain_testutil::skip("no discrete GPU - a software rasteriser would compare CPU against CPU");
+    // `missing_gpu` counts the cards the selection names: a software rasteriser is not one.
+    if brain_testutil::gpu_unavailable(gpu_core::testgpu::missing_gpu()) {
         return None;
     }
     Some(Gpu::new_gpu(PIPELINES))

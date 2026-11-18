@@ -137,8 +137,13 @@ impl LoraArch for Flux2 {
     fn encodings() -> Vec<Dtype> {
         let mut encodings = vec![Dtype::F32];
         // The int8 base needs a device with the native int8-weight input gradient.
+        if brain_testutil::gpu_unavailable(gpu_core::testgpu::missing_gpu()) {
+            return encodings;
+        }
         if Gpu::new_gpu(flux2::devgrad::KERNELS).has_fused(gpu_core::Fused::I8wDx) {
             encodings.push(Dtype::I8);
+        } else {
+            brain_testutil::skip_unavailable("flux2 LoRA over an int8 base: this device does not offer the native int8-weight input gradient");
         }
         encodings
     }

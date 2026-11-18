@@ -87,6 +87,30 @@ pub fn gpu_tests_skipped() -> bool {
     true
 }
 
+/// Whether a test that opens a real GPU must skip: `MOE_SKIP_GPU_TESTS` is set
+/// ([`gpu_tests_skipped`]), or this process lacks the device capability
+/// `missing` names (`gpu_core::testgpu::missing_gpu()`), which is then named
+/// through [`skip_unavailable`] with the test's location. A test that opens
+/// `Gpu::new_gpu` on a host with no adapter would otherwise panic inside the
+/// adapter request, which reads as a broken kernel rather than an absent card;
+/// `make check/test-skips` counts such an unguarded open.
+///
+/// ```no_run
+/// # fn missing_gpu() -> Option<String> { None }
+/// if brain_testutil::gpu_unavailable(missing_gpu()) {
+///     return;
+/// }
+/// ```
+#[track_caller]
+pub fn gpu_unavailable(missing: Option<String>) -> bool {
+    if gpu_tests_skipped() {
+        return true;
+    }
+    let Some(capability) = missing else { return false };
+    skip_unavailable(&format!("needs {capability} ({})", std::panic::Location::caller()));
+    true
+}
+
 /// Serialize the tests of one test binary that mutate the process
 /// environment.
 ///

@@ -783,6 +783,10 @@ fn every_device_placement_matches_all_cpu() {
         brain_testutil::skip("fixtures absent");
         return;
     }
+    // Every placement but the all-CPU reference puts a stage on a real GPU.
+    if brain_testutil::gpu_unavailable(gpu_core::testgpu::missing_gpu()) {
+        return;
+    }
     let ck = load(&ckpt);
     let g = load(&golden_path);
     let cfg = DeepseekOcrConfig::tiny();

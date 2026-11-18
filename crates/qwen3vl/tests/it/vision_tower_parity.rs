@@ -182,7 +182,7 @@ fn mutate(w: &HashMap<String, Vec<f32>>, key: &str) -> HashMap<String, Vec<f32>>
 /// ever stops being true this is where it shows.
 #[test]
 fn the_register_tiled_gemm_is_bit_identical_on_the_gpu() {
-    if brain_testutil::gpu_tests_skipped() {
+    if brain_testutil::gpu_unavailable(gpu_core::testgpu::missing_gpu()) {
         return;
     }
     let v = cfg();
@@ -227,7 +227,7 @@ fn the_register_tiled_gemm_agrees_with_the_reference_on_the_cpu_jit() {
 /// and on BOTH cosine and rel_l2.
 #[test]
 fn the_tower_agrees_between_the_cpu_jit_and_the_gpu() {
-    if brain_testutil::gpu_tests_skipped() {
+    if brain_testutil::gpu_unavailable(gpu_core::testgpu::missing_gpu()) {
         return;
     }
     let v = cfg();
@@ -259,7 +259,7 @@ fn the_tower_agrees_between_the_cpu_jit_and_the_gpu() {
 /// skip one.
 #[test]
 fn the_fused_flash_attention_matches_the_chunked_trio() {
-    if brain_testutil::gpu_tests_skipped() {
+    if brain_testutil::gpu_unavailable(gpu_core::testgpu::missing_gpu()) {
         return;
     }
     let v = cfg();

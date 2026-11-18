@@ -33,8 +33,16 @@ and is a hard failure under `BRAIN_REQUIRE_FIXTURES`. A test never reads that
 variable itself, and never returns early on a bare `eprintln!("skipping")`: a
 skip that cargo reports as a pass certifies nothing. Use `brain_testutil::skip`
 (absent fixture), `skip_unavailable` (absent hardware) or
-`#[ignore = "needs a GPU"]`. `make check/test-skips` fails on a new silent skip
-and the legacy ones in `scripts/gates/test-skips.allow` only shrink.
+`#[ignore = "needs a GPU"]`. A test that opens a real GPU itself
+(`Gpu::new_gpu`, `Gpu::new_wgpu`, `WgpuBackend::new`) first calls
+`brain_testutil::gpu_unavailable(gpu_core::testgpu::missing_gpu())`, which skips
+by name when the selection names no card (the CPU backend selected, or no
+adapter visible) and under `MOE_SKIP_GPU_TESTS`: without it the test panics
+inside the adapter request on a host with no GPU, which reads as a broken kernel.
+`make check/test-skips` fails on a new silent skip and on a test-file function
+that opens a GPU with no guard before the open (an `#[ignore]`d benchmark and a
+`card_tests!` binary are exempt), and the legacy skips in
+`scripts/gates/test-skips.allow` only shrink.
 
 A test binary runs its tests side by side, so a test changes no process-wide
 selection. One that needs a backend or a tile budget scopes it to its own

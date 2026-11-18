@@ -8,7 +8,7 @@
 //! `Weight::upload(.., Dtype::BF16)`, its one construction path), runs
 //! `Ops::matmul` against it, and checks the result against an f32 host
 //! reference - on BOTH the CPU JIT backend and a real wgpu GPU backend
-//! (`Gpu::new_cpu`/`Gpu::new_wgpu`, `MOE_SKIP_GPU_TESTS` gates the GPU half
+//! (`Gpu::new_cpu`/`Gpu::new_wgpu`; `brain_testutil::gpu_unavailable` gates the GPU half
 //! exactly like this tree's other dual-backend tests, e.g.
 //! `crates/zipdepth/tests/it/p3_fused_eval.rs`'s `fused_eval_gpu_matches_cpu`).
 //! This is what proves the templated `#w=bf16` kernel sources
@@ -178,13 +178,14 @@ fn bf16_matmul_matches_f32_reference_on_cpu() {
     }
 }
 
-/// Real GPU execution - gated by `MOE_SKIP_GPU_TESTS` like every other
+/// Real GPU execution - skipped by name without a GPU adapter or under
+/// `MOE_SKIP_GPU_TESTS` (`brain_testutil::gpu_unavailable`), like every other
 /// dual-backend test in this tree. Prints which branch actually ran (real
 /// wgpu execution vs a clean skip) so a report can state which happened
 /// rather than assume.
 #[test]
 fn bf16_matmul_matches_f32_reference_on_gpu() {
-    if brain_testutil::gpu_tests_skipped() {
+    if brain_testutil::gpu_unavailable(gpu_core::testgpu::missing_gpu()) {
         return;
     }
     eprintln!("bf16_matmul_matches_f32_reference_on_gpu: running on a real wgpu device");

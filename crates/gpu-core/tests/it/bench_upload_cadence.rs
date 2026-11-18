@@ -53,7 +53,7 @@ fn block_tensors() -> Vec<(&'static str, usize)> {
 }
 
 fn gpu() -> Option<Gpu> {
-    if brain_testutil::gpu_tests_skipped() {
+    if brain_testutil::gpu_unavailable(gpu_core::testgpu::missing_gpu()) {
         return None;
     }
     Some(Gpu::new_gpu(KERNELS))
