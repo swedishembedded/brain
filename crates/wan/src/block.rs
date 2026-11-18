@@ -43,6 +43,7 @@
 use gpu_core::{f, DeviceBuffer, Gpu, Step, Transient};
 use model::block::{chunked_bidir_fwd, flash_bidir_fwd, flash_gate, CrossIds, FlashIds, GemmVariants, LayerNormIds};
 use model::dispatch::LoraW;
+use model::ops::{Act, Ops, Weight};
 use model::lora::RuntimeLora;
 
 // Kernel-table indices (order matches KERNELS).
@@ -74,26 +75,17 @@ pub(crate) const K_XSCORES_KT: usize = 20;
 /// between all four from the device's queried caps.
 pub(crate) const K_FLASH_REG: usize = 21;
 pub(crate) const K_FLASH_REG2: usize = 22;
-/// The quantized-storage tier (int8/int4, see [`QTier`]): dynamic group-wise
-/// activation quantization (`max_abs_row` -> `quant_pack`, unchanged from
-/// every other model's int8 path) plus the two DP4A-family GEMMs. Appended so
-/// every index above is unchanged; unused (and therefore free) on an
-/// [`crate::dev::WanDtype::F32`]/[`crate::dev::WanDtype::F16`] build.
-pub(crate) const K_MAX_ABS_ROW: usize = 23;
-pub(crate) const K_QUANT_PACK: usize = 24;
-pub(crate) const K_MATMUL_I8_DYN: usize = 25;
-pub(crate) const K_MATMUL_Q4_DYN: usize = 26;
 /// The epilogue of a runtime LoRA correction, `out += (A·x)·Bt`. The first
 /// half (`A·x`) is the ordinary fp32 GEMM already in this table, so this is
 /// the only kernel the adapter path adds - and it is `model::dispatch`'s, the
-/// same one flux2 dispatches. Appended, like every tier above it, so no
-/// existing index moves; unused (and free) on an unadapted build and on the
-/// dense tiers, which fold instead - see [`QBlockLora`].
-pub(crate) const K_LORA_DELTA: usize = 27;
+/// same one flux2 dispatches. Appended, so no existing index moves; unused
+/// (and free) on an unadapted build and on the dense tiers, which fold
+/// instead - see [`QBlockLora`].
+pub(crate) const K_LORA_DELTA: usize = 23;
 
-/// Every kernel the DiT dispatches. Nothing here is new: the whole model is
-/// existing kernels at Wan's shapes.
-pub const KERNELS: [(&str, &str); 28] = [
+/// The kernels this crate dispatches by index (the `K_*` constants name their positions). Nothing here is new: the
+/// whole model is existing kernels at Wan's shapes. [`KERNELS`] is this table followed by the shared façade's set.
+const INDEXED_KERNELS: [(&str, &str); 24] = [
     ("layernorm", kernels::LAYERNORM),
     ("rmsnorm", kernels::RMSNORM),
     ("matmul", kernels::MATMUL),
@@ -129,12 +121,20 @@ pub const KERNELS: [(&str, &str); 28] = [
     ("attn_scores_cross_kt", kernels::ATTN_SCORES_CROSS_KT),
     ("flash_attn_bidir_reg", kernels::FLASH_ATTN_BIDIR_REG),
     ("flash_attn_bidir_reg2", kernels::FLASH_ATTN_BIDIR_REG2),
-    ("max_abs_row", kernels::MAX_ABS_ROW),
-    ("quant_pack", kernels::QUANT_PACK),
-    ("matmul_i8_dyn", kernels::MATMUL_I8_DYN),
-    ("matmul_q4_dyn", kernels::MATMUL_Q4_DYN),
     ("lora_delta", kernels::LORA_DELTA),
 ];
+
+/// Every kernel a `Gpu` running this crate's blocks registers: [`INDEXED_KERNELS`], then what
+/// [`model::ops::Ops`] resolves by name. The quantized tier's linears dispatch through it, so the selector, not
+/// this crate, decides which packed-int8/int4 kernel (or the float-read tile decode of a device without the packed
+/// dot) serves each product. Each name once, [`INDEXED_KERNELS`]' spelling first.
+pub static KERNELS: std::sync::LazyLock<Vec<(&'static str, &'static str)>> = std::sync::LazyLock::new(|| {
+    let mut list = INDEXED_KERNELS.to_vec();
+    model::ops::extend_kernel_list(&mut list, model::ops::kernel_list());
+    // The float-read tile decode a device without a packed-int8 kernel reads its int8/int4 weights through.
+    model::ops::extend_kernel_list(&mut list, model::ops::frozen_base_kernels());
+    list
+});
 
 /// Shape parameters of one Wan block.
 #[derive(Clone, Copy, Debug)]
@@ -653,9 +653,9 @@ pub(crate) fn build_block_steps(
 // them would only add error for no memory win.
 //
 // W4A8 for int4 (activations stay int8-quantized, only weights drop to 4
-// bits): the SAME activation-quantization steps (`max_abs_row` ->
-// `quant_pack`) serve both tiers, only the weight-side GEMM kernel and its
-// packed word stride differ (`matmul_i8_dyn`'s k/4 vs `matmul_q4_dyn`'s k/8).
+// bits): one quantized activation (`model::ops::Ops::act_shared_scratch`)
+// serves both tiers; which product kernel reads it is the selector's choice
+// (`model::ops::Ops::matmul`), per device and shape.
 
 /// Which packed-weight tier a quantized block uses. int4 is W4A8 (weights
 /// only), not W4A4 - see the module doc above and `model::int4`'s own doc for
@@ -666,11 +666,20 @@ pub(crate) enum QTier {
     Int4,
 }
 
+impl QTier {
+    /// The weight storage tier this one's packed codes are, as `model::ops` names it.
+    fn dtype(self) -> gpu_core::select::Dtype {
+        match self {
+            QTier::Int8 => gpu_core::select::Dtype::I8,
+            QTier::Int4 => gpu_core::select::Dtype::Q4,
+        }
+    }
+}
+
 /// One quantized linear: packed weight + its per-output-row fp32 scale, plus
 /// the (never-quantized) fp32 bias.
 pub(crate) struct QLinear {
-    w: DeviceBuffer,
-    sw: DeviceBuffer,
+    w: Weight,
     b: DeviceBuffer,
 }
 
@@ -702,7 +711,7 @@ impl QLinear {
                 (wb, swb)
             }
         };
-        QLinear { w: wb, sw: swb, b: upload_named(gpu, t, &format!("{prefix}.bias")) }
+        QLinear { w: Weight::from_packed(tier.dtype(), wb, swb, out_dim as u32, in_dim as u32), b: upload_named(gpu, t, &format!("{prefix}.bias")) }
     }
 }
 
@@ -850,32 +859,12 @@ impl QBlockWeights {
 
 }
 
-/// Reused dynamic-activation-quantization scratch for the quantized block
-/// path - one (packed-int8, group-scale) pair per DISTINCT `(rows, width)`
-/// shape a block quantizes, reused sequentially across every linear that
-/// shape feeds (mirrors [`Scratch`]'s "allocate once, reuse across the whole
-/// stack" discipline).
+/// The runtime-LoRA intermediate `h = x·Aᵀ` of the quantized block path, one per ROW COUNT (`t` video tokens,
+/// `text_len` text rows), allocated once and reused across every linear of the stack. Both are sized for the
+/// WIDEST rank any target uses and allocate (almost) nothing on an unadapted build. Reused sequentially: `h` is
+/// dead the moment its `lora_delta` has read it. The quantized activations themselves are `model::ops::Ops`'s
+/// ([`Ops::act_shared_scratch`]: one packed copy per distinct width and row count, reused the same way).
 pub(crate) struct QScratch {
-    /// `[t, ffn_dim/32]` / `[t·dim/4]` - every `dim`-wide, `t`-row activation: `n1` (feeds
-    /// q/k/v), the self-attention context (feeds `o`), `n3` (feeds cq), the
-    /// cross-attention context (feeds `co`), `n2` (feeds `ff1`).
-    sx_t: DeviceBuffer,
-    xq_t_dim: DeviceBuffer,
-    /// `[te, dim/32]` / `[te·dim/4]` - the shared text context `ctx` (feeds ck/cv).
-    /// Separate from `sx_t`/`xq_t_dim`: `te` (`text_len`) and `t` (the video
-    /// token count) are different row counts.
-    sx_te: DeviceBuffer,
-    xq_te_dim: DeviceBuffer,
-    /// `[t·ffn_dim/4]` - the post-GELU FFN hidden activation (feeds `ff2`).
-    /// `sx_t` is reused for its group scales (same `t` rows; it is sized for
-    /// this, the widest activation).
-    xq_t_ffn: DeviceBuffer,
-    /// `[t·rank]` / `[text_len·rank]` - the LoRA intermediate `h = x·Aᵀ`, one
-    /// per ROW COUNT for the same reason `sx_t`/`sx_te` are two buffers. Both
-    /// are `[_, 0]` (and allocate nothing) on an unadapted build, and are
-    /// sized for the WIDEST rank any target uses, so one pair serves every
-    /// linear in the stack. Reused sequentially, exactly like the quantization
-    /// scratch above: `h` is dead the moment its `matmul_acc_t` has read it.
     h_t: DeviceBuffer,
     h_te: DeviceBuffer,
 }
@@ -885,11 +874,6 @@ impl QScratch {
     /// unadapted build, which then allocates no `h` at all.
     pub fn new(gpu: &Gpu, d: BlockDims, t: u32, rank: u32) -> QScratch {
         QScratch {
-            sx_t: gpu.storage(model::int8::act_scale_len(t as usize, d.dim.max(d.ffn_dim) as usize) as u64),
-            xq_t_dim: gpu.storage((t * d.dim / 4) as u64),
-            sx_te: gpu.storage(model::int8::act_scale_len(d.text_len as usize, d.dim as usize) as u64),
-            xq_te_dim: gpu.storage((d.text_len * d.dim / 4) as u64),
-            xq_t_ffn: gpu.storage((t * d.ffn_dim / 4) as u64),
             // `.max(1)`: a zero-length storage buffer is not a thing every
             // backend will hand out, and an unadapted build never binds these.
             h_t: gpu.storage((t * rank).max(1) as u64),
@@ -898,39 +882,17 @@ impl QScratch {
     }
 }
 
-/// Quantize `x` (`[rows, k]`) into `(xq, sx)` with fresh dynamic group
-/// scales - the shared activation-quant step both int8 and int4 (W4A8) read.
-fn qquant(gpu: &Gpu, s: &mut Vec<Step>, x: &DeviceBuffer, xq: &DeviceBuffer, sx: &DeviceBuffer, rows: u32, k: u32) {
-    s.push(gpu.step(K_MAX_ABS_ROW, &[x, sx], &[rows, k], rows));
-    s.push(gpu.step(K_QUANT_PACK, &[x, sx, xq], &[rows, k], rows * k / 4));
-}
-
-/// `out = dequant(xq @ Wᵀ) + b + h·Bt`, `h = x·Aᵀ`: one quantized linear plus
-/// its runtime LoRA correction, if it has one. `xq`/`sx` must already hold
-/// `x`'s quantization at this `(rows, k)` shape (from [`qquant`]); `x` itself
-/// is the **fp32** activation, which is what the correction reads.
+/// `out = x·Wᵀ + b + h·Bt`, `h = x·Aᵀ`: one quantized linear plus its runtime LoRA correction, if it has one. The
+/// product is the one [`Ops::matmul`] selects for the device and shape, reading `act` (an [`Ops::act_shared_scratch`]
+/// of `x`, shared by every linear that reads `x`); the correction reads the **fp32** activation `x` itself.
 ///
 /// The correction is appended after the bias rather than folded into the
-/// weight for the reason [`QLoraLinear`] spells out: folding it would put the
+/// weight for the reason [`QBlockLora`] spells out: folding it would put the
 /// delta on the weight's int8 grid, where most of it rounds away.
 #[allow(clippy::too_many_arguments)]
-fn qlinear(
-    gpu: &Gpu,
-    s: &mut Vec<Step>,
-    sel: &Sel,
-    tier: QTier,
-    x: &DeviceBuffer,
-    xq: &DeviceBuffer,
-    sx: &DeviceBuffer,
-    w: &QLinear,
-    lora: Option<&LoraW>,
-    h: &DeviceBuffer,
-    out: &DeviceBuffer,
-    rows: u32,
-    k: u32,
-    n: u32,
-) {
-    qlinear_base(gpu, s, tier, xq, sx, w, out, rows, k, n);
+fn qlinear(ops: &Ops, gpu: &Gpu, s: &mut Vec<Step>, sel: &Sel, act: &Act, x: &DeviceBuffer, w: &QLinear, lora: Option<&LoraW>, h: &DeviceBuffer, out: &DeviceBuffer, rows: u32, k: u32, n: u32) {
+    ops.matmul(s, &w.w, act, out, 0);
+    s.push(gpu.step(K_BIAS_ADD, &[out, &w.b], &[rows, n], rows * n));
     if let Some(l) = lora {
         // Whole tensors at offset 0 in both operands - wan fuses nothing this
         // adapter targets - so the row/offset arguments are all zero and the
@@ -939,35 +901,16 @@ fn qlinear(
     }
 }
 
-/// The quantized linear on its own - [`qlinear`] without the adapter tail.
-#[allow(clippy::too_many_arguments)]
-fn qlinear_base(gpu: &Gpu, s: &mut Vec<Step>, tier: QTier, xq: &DeviceBuffer, sx: &DeviceBuffer, w: &QLinear, out: &DeviceBuffer, rows: u32, k: u32, n: u32) {
-    match tier {
-        QTier::Int8 => s.push(gpu.dispatch(
-            K_MATMUL_I8_DYN,
-            &[xq, &w.w, sx, &w.sw, out],
-            &[rows, k / 4, n],
-            gpu_core::Dispatch::Workgroups(rows.div_ceil(128) * n.div_ceil(128)),
-        )),
-        // Naive one-thread-per-output kernel (see matmul_q4_dyn.wgsl's doc):
-        // `k` here is the LOGICAL (undivided) K, unlike the int8 branch's
-        // `k/4` - the two operands have different packing densities (4 vs 8
-        // values/u32), so the kernel divides internally per operand.
-        QTier::Int4 => s.push(gpu.step(K_MATMUL_Q4_DYN, &[xq, &w.w, sx, &w.sw, out], &[rows, k, n], rows * n)),
-    }
-    s.push(gpu.step(K_BIAS_ADD, &[out, &w.b], &[rows, n], rows * n));
-}
-
 /// [`build_block_steps`]'s quantized-storage twin: identical graph shape and
 /// identical fp32 attention/norm/RoPE math - only the ten linears run through
-/// [`qlinear`] instead of [`linear`], each preceded by [`qquant`] on whichever
-/// scratch buffer matches its input's `(rows, width)`.
+/// [`qlinear`] instead of [`linear`], each group reading one quantized activation of its input. `ops` is built on
+/// `gpu`'s device ([`Ops::new`] over a shared handle) and outlives the recorded steps.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_block_steps_q(
+    ops: &Ops,
     gpu: &Gpu,
     s: &mut Vec<Step>,
     sel: &Sel,
-    tier: QTier,
     w: &QBlockWeights,
     m: &ModBufs,
     x_in: &DeviceBuffer,
@@ -985,10 +928,10 @@ pub(crate) fn build_block_steps_q(
 
     // --- self-attention -------------------------------------------------
     s.push(model::block::layernorm_fwd(gpu, &sel.ln, x_in, &m.ln1_g, &m.ln1_b, &scr.n1, dim, t, d.eps));
-    qquant(gpu, s, &scr.n1, &q.xq_t_dim, &q.sx_t, t, dim);
-    qlinear(gpu, s, sel, tier, &scr.n1, &q.xq_t_dim, &q.sx_t, &w.sq, w.lora.sq.as_ref(), &q.h_t, &scr.q, t, dim, dim);
-    qlinear(gpu, s, sel, tier, &scr.n1, &q.xq_t_dim, &q.sx_t, &w.sk, w.lora.sk.as_ref(), &q.h_t, &scr.k, t, dim, dim);
-    qlinear(gpu, s, sel, tier, &scr.n1, &q.xq_t_dim, &q.sx_t, &w.sv, w.lora.sv.as_ref(), &q.h_t, &scr.v, t, dim, dim);
+    let a = ops.act_shared_scratch(s, &scr.n1, 0, t, dim);
+    qlinear(ops, gpu, s, sel, &a, &scr.n1, &w.sq, w.lora.sq.as_ref(), &q.h_t, &scr.q, t, dim, dim);
+    qlinear(ops, gpu, s, sel, &a, &scr.n1, &w.sk, w.lora.sk.as_ref(), &q.h_t, &scr.k, t, dim, dim);
+    qlinear(ops, gpu, s, sel, &a, &scr.n1, &w.sv, w.lora.sv.as_ref(), &q.h_t, &scr.v, t, dim, dim);
     qk_norm(gpu, s, sel, &scr.q, &w.snq, &scr.qn, t, dim, d.eps);
     qk_norm(gpu, s, sel, &scr.k, &w.snk, &scr.kn, t, dim, d.eps);
     s.push(gpu.step(K_ROPE, &[&scr.qn, cos, sin, &scr.qr], &[t, nh, hd, half], t * nh * half));
@@ -1019,35 +962,35 @@ pub(crate) fn build_block_steps_q(
             s,
         ),
     }
-    qquant(gpu, s, &scr.ctx, &q.xq_t_dim, &q.sx_t, t, dim);
-    qlinear(gpu, s, sel, tier, &scr.ctx, &q.xq_t_dim, &q.sx_t, &w.so, w.lora.so.as_ref(), &q.h_t, &scr.ao, t, dim, dim);
+    let a = ops.act_shared_scratch(s, &scr.ctx, 0, t, dim);
+    qlinear(ops, gpu, s, sel, &a, &scr.ctx, &w.so, w.lora.so.as_ref(), &q.h_t, &scr.ao, t, dim, dim);
     s.push(gpu.step(K_GATE_ROW, &[x_in, &m.gate1, &scr.ao, &scr.x1], &[t, dim, t], t * dim));
 
     // --- cross-attention into the text encoding --------------------------
     s.push(model::block::layernorm_fwd(gpu, &sel.ln, &scr.x1, &w.xnorm_w, &w.xnorm_b, &scr.n3, dim, t, d.eps));
-    qquant(gpu, s, &scr.n3, &q.xq_t_dim, &q.sx_t, t, dim);
-    qlinear(gpu, s, sel, tier, &scr.n3, &q.xq_t_dim, &q.sx_t, &w.cq, w.lora.cq.as_ref(), &q.h_t, &scr.xq, t, dim, dim);
+    let a = ops.act_shared_scratch(s, &scr.n3, 0, t, dim);
+    qlinear(ops, gpu, s, sel, &a, &scr.n3, &w.cq, w.lora.cq.as_ref(), &q.h_t, &scr.xq, t, dim, dim);
     // `ctx` is shared by every block (the embedded text encoding does not
     // change), so this re-quantizes it once per block - wasteful next to
     // hoisting it out of the stack, but correct, and int8 here is a memory
     // play, not a speed one (see the module doc).
-    qquant(gpu, s, ctx, &q.xq_te_dim, &q.sx_te, te, dim);
-    qlinear(gpu, s, sel, tier, ctx, &q.xq_te_dim, &q.sx_te, &w.ck, w.lora.ck.as_ref(), &q.h_te, &scr.xk, te, dim, dim);
-    qlinear(gpu, s, sel, tier, ctx, &q.xq_te_dim, &q.sx_te, &w.cv, w.lora.cv.as_ref(), &q.h_te, &scr.xv, te, dim, dim);
+    let a = ops.act_shared_scratch(s, ctx, 0, te, dim);
+    qlinear(ops, gpu, s, sel, &a, ctx, &w.ck, w.lora.ck.as_ref(), &q.h_te, &scr.xk, te, dim, dim);
+    qlinear(ops, gpu, s, sel, &a, ctx, &w.cv, w.lora.cv.as_ref(), &q.h_te, &scr.xv, te, dim, dim);
     qk_norm(gpu, s, sel, &scr.xq, &w.cnq, &scr.xqn, t, dim, d.eps);
     qk_norm(gpu, s, sel, &scr.xk, &w.cnk, &scr.xkn, te, dim, d.eps);
     push_cross(gpu, s, sel, scr, d, t, &scr.xqn, &scr.xkn, &scr.xv, &scr.xctx);
-    qquant(gpu, s, &scr.xctx, &q.xq_t_dim, &q.sx_t, t, dim);
-    qlinear(gpu, s, sel, tier, &scr.xctx, &q.xq_t_dim, &q.sx_t, &w.co, w.lora.co.as_ref(), &q.h_t, &scr.xo, t, dim, dim);
+    let a = ops.act_shared_scratch(s, &scr.xctx, 0, t, dim);
+    qlinear(ops, gpu, s, sel, &a, &scr.xctx, &w.co, w.lora.co.as_ref(), &q.h_t, &scr.xo, t, dim, dim);
     s.push(gpu.step(K_ADD2, &[&scr.x1, &scr.xo, &scr.x2], &[t * dim], t * dim));
 
     // --- FFN -------------------------------------------------------------
     s.push(model::block::layernorm_fwd(gpu, &sel.ln, &scr.x2, &m.ln2_g, &m.ln2_b, &scr.n2, dim, t, d.eps));
-    qquant(gpu, s, &scr.n2, &q.xq_t_dim, &q.sx_t, t, dim);
-    qlinear(gpu, s, sel, tier, &scr.n2, &q.xq_t_dim, &q.sx_t, &w.ff1, w.lora.ff1.as_ref(), &q.h_t, &scr.h1, t, dim, ff);
+    let a = ops.act_shared_scratch(s, &scr.n2, 0, t, dim);
+    qlinear(ops, gpu, s, sel, &a, &scr.n2, &w.ff1, w.lora.ff1.as_ref(), &q.h_t, &scr.h1, t, dim, ff);
     s.push(gpu.step(K_GELU, &[&scr.h1, &scr.hg], &[t * ff], t * ff));
-    qquant(gpu, s, &scr.hg, &q.xq_t_ffn, &q.sx_t, t, ff);
-    qlinear(gpu, s, sel, tier, &scr.hg, &q.xq_t_ffn, &q.sx_t, &w.ff2, w.lora.ff2.as_ref(), &q.h_t, &scr.ff, t, ff, dim);
+    let a = ops.act_shared_scratch(s, &scr.hg, 0, t, ff);
+    qlinear(ops, gpu, s, sel, &a, &scr.hg, &w.ff2, w.lora.ff2.as_ref(), &q.h_t, &scr.ff, t, ff, dim);
     s.push(gpu.step(K_GATE_ROW, &[&scr.x2, &m.gate2, &scr.ff, out], &[t, dim, t], t * dim));
 }
 
@@ -1123,6 +1066,12 @@ impl WanBlock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The quantized stack builds a `model::ops::Ops` on this crate's `Gpu`, which needs the whole façade set.
+    #[test]
+    fn the_kernel_list_registers_the_whole_ops_facade_set() {
+        model::ops::assert_kernel_list_complete(&KERNELS);
+    }
 
     #[test]
     fn score_chunk_is_bounded_and_never_zero() {

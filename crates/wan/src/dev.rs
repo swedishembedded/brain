@@ -37,6 +37,7 @@ use crate::rope::tables;
 // engine's adapter seam has to be reached under its own name.
 use ::model::adapter::BaseStorage;
 use ::model::lora::RuntimeLora;
+use ::model::ops::Ops;
 
 /// Storage dtype for the DiT's linear weights. Compute stays fp32 throughout
 /// (this repo's core-compute-only invariant) - what varies is how each weight
@@ -59,15 +60,12 @@ pub enum WanDtype {
     /// `F32` for a [`checkpoint::TensorSource`], since every source here
     /// already decodes to fp32 before this crate sees it.
     F16,
-    /// Packed int8 (4 lanes/`u32`) with a per-output-row fp32 scale, DP4A
-    /// GEMM. GPU-only: `matmul_i8_dyn.wgsl` is a multi-barrier workgroup
-    /// kernel with no CPU-JIT lowering (see its own `@cpu no`).
+    /// Packed int8 (4 lanes/`u32`) with a per-group fp32 scale. The product
+    /// kernel is the selector's (`model::ops::Ops::matmul`): a packed-dot GEMM
+    /// where the device has one, the float-read tile decode where it has not.
     Int8,
     /// Packed int4 (8 lanes/`u32`, W4A8: activations stay int8) with a
-    /// per-output-row fp32 scale. Correctness-only - no GEMM tuning attempted
-    /// here (see `crates/model/src/int4.rs`'s own doc on the naive kernel).
-    /// Unlike `Int8`, `matmul_q4_dyn.wgsl` is one-thread-per-output with no
-    /// workgroup barrier, so it runs on the CPU JIT too.
+    /// per-group fp32 scale, product chosen the same way as `Int8`'s.
     Int4,
 }
 
@@ -91,13 +89,6 @@ impl WanDtype {
             WanDtype::Int8 => "int8",
             WanDtype::Int4 => "int4",
         }
-    }
-
-    /// Whether this tier's GEMM has no CPU-JIT lowering (DP4A's multi-barrier
-    /// workgroup), so a `device == Some("cpu")` build must be refused early
-    /// with a clear error rather than failing deep inside kernel dispatch.
-    pub fn gpu_only(self) -> bool {
-        matches!(self, WanDtype::Int8)
     }
 
     /// Whether a LoRA delta may be folded into the weights this tier stores.
@@ -152,10 +143,11 @@ fn host_tensor_names() -> Vec<String> {
 #[allow(dead_code)] // held only to keep the resident buffers alive for `steps`, same as `_scr`
 enum Blocks {
     Dense(Vec<BlockWeights>),
-    /// Quantized-storage tier (int8/int4): the packed blocks plus the
-    /// dynamic-activation-quant scratch [`build_block_steps_q`] needs, kept
-    /// alive for the same reason `_scr` is - referenced by the recorded steps.
-    Quant(Vec<QBlockWeights>, QScratch),
+    /// Quantized-storage tier (int8/int4): the packed blocks, the LoRA scratch
+    /// and the `Ops` whose quantized activations [`build_block_steps_q`]
+    /// records, kept alive for the same reason `_scr` is - referenced by the
+    /// recorded steps.
+    Quant(Vec<QBlockWeights>, QScratch, Ops),
 }
 
 /// A Wan DiT with the block stack resident on one device.
@@ -285,21 +277,6 @@ impl WanDitDev {
         lora: Option<&RuntimeLora>,
     ) -> WanDitDev {
         let gpu = Gpu::open(device, &KERNELS);
-        // Against what was OPENED, not against what was spelled. The old check
-        // was `device == Some("cpu")`, which a caller that named no device at
-        // all walked straight past - and `None` resolves to the CPU JIT on any
-        // box with no usable card. The DP4A GEMM would then be dispatched to a
-        // backend that cannot run it, which is the silent-fallback shape this
-        // whole file's adapter work exists to remove. `workgroup_reductions`
-        // is the same capability `Sel` gates the fast tier on, and the CPU JIT
-        // reports it false.
-        if dtype.gpu_only() && !gpu.caps().workgroup_reductions {
-            panic!(
-                "wan: --dit-dtype {} needs DP4A and workgroup barriers, which {} does not have - name a GPU device explicitly",
-                dtype.key(),
-                gpu.kind()
-            );
-        }
         let d = BlockDims::new(cfg);
         let sel = Sel::new(&gpu);
         let grid = model::patch_grid(cfg, f, h, w);
@@ -365,12 +342,16 @@ impl WanDitDev {
                 // per-block one and a real cost to 40 of them.
                 let rank = lora.map_or(0, RuntimeLora::max_rank) as u32;
                 let qscr = QScratch::new(&gpu, d, tokens, rank);
+                // The quantized products go through the shared façade, which selects each one's kernel for this
+                // device. Built once: the stack is recorded once and replayed, and the façade's shared activation
+                // scratch is reused across every block.
+                let ops = Ops::new(gpu.share()).unwrap_or_else(|e| panic!("wan: the quantized stack's Gpu lacks the shared kernel set: {e}"));
                 for l in 0..cfg.num_layers {
                     let out = Self::next_out(&mut pool, &mut tap_idx, taps, l, cur, td, &gpu);
-                    build_block_steps_q(&gpu, &mut steps, &sel, tier, &blocks[l], &mods[l], &pool[cur], &pool[out], &scr, &qscr, &cos, &sin, &ctx, d, tokens);
+                    build_block_steps_q(&ops, &gpu, &mut steps, &sel, &blocks[l], &mods[l], &pool[cur], &pool[out], &scr, &qscr, &cos, &sin, &ctx, d, tokens);
                     cur = out;
                 }
-                Blocks::Quant(blocks, qscr)
+                Blocks::Quant(blocks, qscr, ops)
             }
         };
 
