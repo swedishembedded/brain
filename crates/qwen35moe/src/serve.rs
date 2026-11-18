@@ -605,9 +605,12 @@ impl Engine {
         // serves; an fp32 build's grouped-GEMM expert scratch is
         // asserted against `rows * top_k` at dispatch, and the widest row count
         // this engine submits is a prefill round or one decode token per resident
-        // sequence.
+        // sequence. An int8 request is an fp32 build where the device has no
+        // packed int8 dot (`Qwen35::new_on_tier_src` holds it at fp32), so the
+        // build that is sized is the one the device runs, not the one asked for.
         let prefill_chunk = opts.prefill_chunk.unwrap_or_else(|| model::serve::prefill_round_rows_for(gpu_core::provider::cuda::tensor_core_kernels_enabled(&gpu)));
-        let t = if opts.tier.quantizes_anything() { SERVING_T } else { opts.max_concurrent.max(prefill_chunk) };
+        let quantized = opts.tier.quantizes_anything() && gpu.caps().numeric.int8_dot;
+        let t = if quantized { SERVING_T } else { opts.max_concurrent.max(prefill_chunk) };
         let mut model = Qwen35::new_on_tier_src(gpu, cfg.clone(), 1, t, src, &opts.tier);
         model.set_gemm_precision(opts.gemm_precision);
         model.set_moe_grouped_min_rows(opts.moe_grouped_min_rows);

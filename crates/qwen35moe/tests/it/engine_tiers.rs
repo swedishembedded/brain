@@ -161,13 +161,12 @@ fn an_int8_engine_built_from_a_source_tracks_the_fp32_engine() {
 
 /// A quantized engine sizes its shared activation packing for a decode step (64 rows) while a prefill round is
 /// wider: the round must pack into room of its own, not past the end of that buffer (a 256-row round wrote three
-/// buffers' worth beyond it on the 35B). Wide and narrow rounds give one prompt the same hidden state.
+/// buffers' worth beyond it on the 35B). On a device without a packed int8 dot the request is held at fp32, whose
+/// grouped expert scratch must hold the whole round instead (it was sized for the decode step, and the round was
+/// refused). Wide and narrow rounds give one prompt the same hidden state either way.
 #[test]
 fn a_prefill_round_wider_than_the_decode_packing_is_packed_in_room_of_its_own() {
     let gpu = gpu_core::testgpu::dev(pipelines());
-    if !gpu.caps().numeric.int8_dot {
-        return brain_testutil::skip_unavailable("no packed int8 dot on this device");
-    }
     let c = cfg();
     let w = weights(&c);
     let p = prompt(&c, 4, 150);

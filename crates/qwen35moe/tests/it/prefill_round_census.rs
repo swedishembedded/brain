@@ -97,6 +97,10 @@ fn the_activations_of_a_prefill_round_of_the_real_checkpoint_fit_their_charge() 
     if !std::path::Path::new(&path).is_file() {
         return brain_testutil::skip_unavailable("unsloth/Qwen3.6-35B-A3B-GGUF (Q8_0) is not in the model store");
     }
+    // The charge is the int8 engine's; a device without a packed int8 dot holds the request at fp32, a different build.
+    if !gpu_core::testgpu::dev(pipelines()).caps().numeric.int8_dot {
+        return brain_testutil::skip_unavailable("the int8 engine's prefill charge needs the int8_dot capability, absent on this device");
+    }
     let mg = MmapGguf::open(&path).unwrap_or_else(|e| panic!("open {path}: {e}"));
     const ROWS: u32 = 4096;
     let cfg = gguf_load::resident_config(&mg, 2 * ROWS).expect("the release's config");
