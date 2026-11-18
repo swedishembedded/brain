@@ -756,6 +756,12 @@ int8 C = 16 arm measured 536 tok/s (0.59): the second pass over the weights. Ope
 - [ ] Where the remaining batched cost goes is not profiled. Candidates: the single-sequence split count gives every row
       the alone-row's workgroup count in the int8 attention (most splits idle at these lengths), and the pinned int8 GEMV
       replaces the tile the autotuner picks at 16 rows. An nsys run of each arm is the next step.
+- [ ] The prefill and the decode of the Qwen3.8 FP8 resident disagree on a card: a `policy_trace` (a prefill) differs from
+      the sampler's decode-time log-probability of the same token by 0.018 mean, p99 0.2 on the real 27B (2026-11-18,
+      #446) and 1.3e-2 on the `hf_fp8_score` fixture on a GH200, and by 1e-6 on the CPU backend. Not the activation stream
+      and not the GDN prefill form (fixture, both pinned); candidates: the FP8 prefill GEMM against the decode GEMV, the
+      bf16 recurrent state between decode steps (the 27B's default `--gdn-state`). Needed: isolate it with the fixture
+      (`hf_fp8_score` `measure_what_separates_the_trace_from_the_decode`), then a decode and prefill on one rounding.
 - Until the FP8 item lands, an exam on Qwen3.8 gets its paired same-load base replicate from the harness, and a trainer takes its serve/train gap from
   `brain finetune --policy-gradient --numerics-gate` (#446) and corrects for it with `--importance`.
 

@@ -45,6 +45,20 @@ code) and is open in `.agents/roadmap/serving-runtime.md`.
 temperature 1.0, each alone and then beside three others, default and `--exact-decode`, on the CPU backend (21-64 tokens
 each). No request diverged in either mode and every sampler log-probability before the end was bit-identical: the CPU
 backend's kernels take no row-count-dependent choice on this fixture, so the co-batch dependence measured above belongs
-to the card's kernel selection (row-class tuned FP8 candidates), and a CPU run cannot reproduce or rule it out. Open,
-needs a card: the same sweep on the fixture with `--device gpu<i> --backend cuda` (the kernel selection the 27B gets),
-then the real 27B.
+to the card's kernel selection (row-class tuned FP8 candidates), and a CPU run cannot reproduce or rule it out. On a GH200
+(CUDA, the same fixture) no request diverged in either mode either, but the log-probabilities of the same tokens
+differed by up to 1.5-2.5e-2 (default) and 0.8-1.3e-2 (exact) beside the co-batch: on a card the fixture's rows are
+not bit-identical across batch shapes, and the random fixture's decisive logits keep the tokens.
+
+## Qwen3.8-27B-FP8 again (2026-11-18, brain 98e3a8024, one GH200, `--max-batch 16`)
+
+The table's protocol through `brain serve` on chat completions (160 tokens, `ignore_eos`, seed 4242, thinking off; the
+first alone request is cold, the rest hit its cached prompt):
+
+| mode | 5 alone: distinct, diverge at | beside 7 others: token, largest delta | 8 identical at once: diverge at, distinct | 8-request aggregate |
+|---|---|---|---|---|
+| default (MTP speculation at <= 2 running) | 5; tokens 1-70 | 1, 0 | 82 (delta 0.087) and 1, 2 | 591 tok/s |
+| `--exact-decode` | 1; never | 82, 0.023 | 82-142 (delta 0.023-0.051), 2 | 201 tok/s |
+
+Unchanged from the 2026-11-13 table: exact decode makes a request alone repeatable and leaves the co-batch dependence, at
+0.34 of the throughput.

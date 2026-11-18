@@ -80,8 +80,9 @@ its definition, the on-policy first step and the supervised parity of a record w
       broken bound named) in `policy_gradient_stability.rs`. On real weights: Qwen3-4B on a GH200, records from the served
       engine's `policy_trace` at temperature 1.0: mean |gap| 0.023-0.025, mismatch KL 0.004, 3% of tokens outside the 0.2 band,
       sequence ESS 0.52-0.58 at the default serving (int8 KV), 0.0099, 0.27% and 0.96 with an f32 KV cache; table and method in
-      knowledge #446. Qwen3.8-27B-FP8 is not gated yet: its resident engine scores `policy_trace` (and declares `score` since
-      2026-11-18), the run on its real weights needs a card.
+      knowledge #446. Qwen3.8-27B-FP8 (2026-11-18, GH200, bf16 trainer base): mean |gap| 0.019 at the default int8 K/V and
+      0.018 at f32 (the K/V tier is not the gap there), mismatch KL 0.001, 1% outside the band, sequence ESS 0.4-0.6;
+      the served trace differs from the decode-time log-probabilities by as much (#446), which is open as a kernel task.
 - [ ] A real-weight check on Qwen3.8-27B-FP8 (the Qwen3-4B part of it ran, #446), which has not run: as a bf16 base with a rank-16 adapter, the
       records of a few rollout groups with and without images and with the sampler's log-probabilities. It should
       (1) confirm that the first step's ratios are 1 within bf16 noise when no log-probabilities were recorded and that

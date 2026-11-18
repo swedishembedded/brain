@@ -43,3 +43,9 @@ Other params with spec defaults (`enable_thinking`, `reasoning_effort`, `templat
 only as the parser's fallbacks, which match the declared defaults today by hand; a param the instance does not
 declare is not refused on the chat routes either. Validating the chat invocation against the served spec would close
 both and is a larger change (every chat spec would have to declare every field a surface forwards).
+
+## Checked on real weights (2026-11-18)
+
+Qwen3.8-27B-FP8 through `brain serve` (98e3a8024, one GH200): a chat request with no sampling field echoed
+`brain.sampler: {"temperature": 1.0, "top_k": 20, "top_p": 0.95, "min_p": 0.0}`, the checkpoint's
+`generation_config.json`; one that sent temperature 0.5, top_k 0, top_p 1, min_p 0 echoed those.

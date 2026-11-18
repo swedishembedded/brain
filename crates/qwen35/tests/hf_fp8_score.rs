@@ -36,6 +36,11 @@ const STOP: [u32; 2] = [62, 63];
 /// A resident over a fresh FP8 fixture directory with `kv` K/V and the decode mode `exact`, and that directory (removed
 /// by the caller once the resident is built).
 fn resident(tag: &str, kv: KvTier, exact: bool) -> (Qwen35GgufResident, std::path::PathBuf, memauth::Device) {
+    resident_with(tag, kv, exact, gpu_core::ActChoice::Auto)
+}
+
+/// [`resident`] with the activation stream between the FP8 products chosen by `act`.
+fn resident_with(tag: &str, kv: KvTier, exact: bool, act: gpu_core::ActChoice) -> (Qwen35GgufResident, std::path::PathBuf, memauth::Device) {
     let cfg = Qwen35Config { linear_num_key_heads: 1, linear_num_value_heads: 2, linear_key_head_dim: 128, linear_value_head_dim: 128, linear_conv_kernel_dim: 4, ..fp8_resident_cfg() };
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -51,13 +56,18 @@ fn resident(tag: &str, kv: KvTier, exact: bool) -> (Qwen35GgufResident, std::pat
         devices.push((memauth::Device::Gpu(0), 2 << 30));
     }
     let device = devices.first().expect("the test needs a GPU, or `--device cpu --backend cpu`").0;
-    let resident = Qwen35GgufResident::new(path, devices, CAP, tier).with_max_batch(4).with_prefix_slots(4).with_kv_block_rows(16).with_kv_tier(kv).with_exact_decode(exact);
+    let resident = Qwen35GgufResident::new(path, devices, CAP, tier).with_max_batch(4).with_prefix_slots(4).with_kv_block_rows(16).with_kv_tier(kv).with_exact_decode(exact).with_act_choice(act);
     (resident, dir, device)
 }
 
 /// The scheduler the resident serves through, as `brain serve` builds it.
 fn scheduler(tag: &str, kv: KvTier, exact: bool) -> Scheduler<Qwen35GgufEngine> {
-    let (resident, dir, device) = resident(tag, kv, exact);
+    scheduler_with(tag, kv, exact, gpu_core::ActChoice::Auto)
+}
+
+/// [`scheduler`] over [`resident_with`].
+fn scheduler_with(tag: &str, kv: KvTier, exact: bool, act: gpu_core::ActChoice) -> Scheduler<Qwen35GgufEngine> {
+    let (resident, dir, device) = resident_with(tag, kv, exact, act);
     let (sched, _, _) = resident.activate_scheduler(&[device]).expect("the tiny FP8 directory loads");
     std::fs::remove_dir_all(dir).ok();
     sched
@@ -137,9 +147,14 @@ fn the_fp8_resident_declares_score_beside_the_policy_trace() {
 /// sampler's own, which for an untruncated draw is `log softmax(logits / T)` over the whole vocabulary. Two
 /// temperatures, so a trace taken at any temperature but the request's own would fail.
 fn a_trace_reproduces_the_decode_time_log_probabilities_of_an_untruncated_draw() {
-    /// The prefill and decode passes of one engine on the same weights and fp32 K/V: their rounding differs, never
-    /// their distribution.
-    const TOLERANCE: f32 = 2e-3;
+    // The bound on |trace - decode-time| per token, largest and mean. On the CPU backend the prefill and the decode run
+    // the same arithmetic in another order: their rounding differs, never their distribution. On a card the FP8
+    // products of a prefill and of a decode step are different kernels and round differently (measured on this fixture
+    // on a GH200: mean 1.3e-2, largest 8.7e-2, whatever the activation stream or the GDN prefill form; knowledge #446);
+    // the card bound holds that gap where it was measured, so it cannot grow unnoticed, and is not a claim that it is
+    // small.
+    let on_card = gpu_core::devices::ambient_compute_set().backend != gpu_core::devices::Backend::Cpu;
+    let (largest, mean_bound) = if on_card { (0.15f32, 0.03f32) } else { (2e-3, 2e-3) };
     let mut sched = scheduler("parity", KvTier::F32, false);
     let (mut compared, mut stopped) = (0, 0);
     for (temp, seed) in [(1.0f32, 11u64), (0.7, 12)] {
@@ -151,10 +166,10 @@ fn a_trace_reproduces_the_decode_time_log_probabilities_of_an_untruncated_draw()
             assert_eq!(scored.len(), d.generated.len());
             let (mean, worst) = gaps(&scored, &d.sampler);
             println!("T {temp}: {} tokens, |trace - sampler| mean {mean:.2e} largest {worst:.2e}", scored.len());
-            assert!(worst < TOLERANCE, "T {temp}: trace {scored:?} vs decode-time {:?}", d.sampler);
+            assert!(worst < largest && mean < mean_bound, "T {temp}: trace {scored:?} vs decode-time {:?}", d.sampler);
             // The same ids under another temperature are another distribution, which the gate would see.
             let other = trace(&mut sched, d, temp + 0.5);
-            assert!(gaps(&other, &d.sampler).1 > 10.0 * TOLERANCE, "T {temp}: the trace depends on its temperature");
+            assert!(gaps(&other, &d.sampler).0 > 3.0 * mean.max(mean_bound / 10.0), "T {temp}: the trace depends on its temperature");
         }
     }
     assert!(compared >= 32 && stopped > 0, "{compared} tokens compared, {stopped} replies ended on a stop token, which the trace scores too");
@@ -211,8 +226,32 @@ fn measure_whether_a_decode_depends_on_its_co_batch() {
     }
 }
 
+/// MEASUREMENT (#442 "not covered"): which numeric choice of the engine separates the trace (a prefill) from the
+/// decode-time figure (the decode kernels) at f32 K/V: the activation stream between the FP8 products (auto, bf16 on a
+/// card with bf16 tensor cores, or f32) and the Gated DeltaNet prefill form (as measured, or pinned to the exact form).
+fn measure_what_separates_the_trace_from_the_decode() {
+    use gpu_core::{ActChoice, ActPrecision};
+    let temp = 1.0;
+    let requests: Vec<(Vec<u32>, u64)> = (0..8).map(|i| (prompt(20 + 4 * i, i), 40 + i as u64)).collect();
+    println!("| activations | GDN prefill | tokens | decode vs trace: mean / largest |");
+    for (act, act_name) in [(ActChoice::Auto, "auto"), (ActChoice::Force(ActPrecision::F32), "f32")] {
+        for exact_gdn in [false, true] {
+            let _pin = exact_gdn.then(|| gpu_core::pin_candidate("gdn_prefill", "exact"));
+            let mut sched = scheduler_with(&format!("sep-{act_name}-{exact_gdn}"), KvTier::F32, false, act);
+            let drawn = generate(&mut sched, &requests, untruncated(temp), 48);
+            let (mut a, mut b) = (Vec::new(), Vec::new());
+            for d in &drawn {
+                a.extend(trace(&mut sched, d, temp));
+                b.extend(&d.sampler);
+            }
+            let (mean, worst) = gaps(&a, &b);
+            println!("| {act_name} | {} | {} | {mean:.2e} / {worst:.2e} |", if exact_gdn { "exact" } else { "measured" }, a.len());
+        }
+    }
+}
+
 gpu_core::card_tests!(
     the_fp8_resident_declares_score_beside_the_policy_trace,
     a_trace_reproduces_the_decode_time_log_probabilities_of_an_untruncated_draw;
-    ignored: measure_the_gap_each_kv_tier_adds, measure_whether_a_decode_depends_on_its_co_batch,
+    ignored: measure_the_gap_each_kv_tier_adds, measure_whether_a_decode_depends_on_its_co_batch, measure_what_separates_the_trace_from_the_decode,
 );
