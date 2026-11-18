@@ -83,7 +83,8 @@ const FALLBACK_CONTEXT_LENGTH: u64 = 4096;
 ///
 /// OpenAI and OpenRouter cards also carry the additive fields `capabilities`,
 /// `max_output_tokens`, `adapter`, `support` and `zero_data_retention` (see
-/// [`add_discovery`]); the Anthropic card is unchanged.
+/// [`add_discovery`]); every dialect's card names the sampling parameters the
+/// model honours (`supported_parameters`, see [`add_sampling`]).
 pub fn card(provider: Provider, info: &ModelInfo, adapter: Option<&AdapterIdentity>) -> Value {
     let name = info.name.as_str();
     let mut card = match provider {
@@ -104,12 +105,14 @@ pub fn card(provider: Provider, info: &ModelInfo, adapter: Option<&AdapterIdenti
             v
         }
         Provider::Anthropic => {
-            return json!({
+            let mut card = json!({
                 "type": "model",
                 "id": name,
                 "display_name": name,
                 "created_at": CREATED_RFC3339,
-            })
+            });
+            add_sampling(&mut card, info);
+            return card;
         }
         Provider::OpenRouter => openrouter_card(info),
     };
@@ -123,6 +126,7 @@ pub fn card(provider: Provider, info: &ModelInfo, adapter: Option<&AdapterIdenti
 /// identity (`id`, `digest`, `version`) its release was verified under, never by where its
 /// file lives.
 fn add_discovery(card: &mut Value, info: &ModelInfo, adapter: Option<&AdapterIdentity>) {
+    add_sampling(card, info);
     let capabilities = info.caps.names();
     if !capabilities.is_empty() {
         card["capabilities"] = json!(capabilities);
@@ -151,6 +155,16 @@ fn add_discovery(card: &mut Value, info: &ModelInfo, adapter: Option<&AdapterIde
     // written anywhere or logged. Said on every card, so a client that routes
     // by data retention can tell it from a server that does not say.
     card["zero_data_retention"] = json!(true);
+}
+
+/// `supported_parameters` (OpenRouter's field, which agent runtimes read for every dialect before they send a
+/// sampling parameter such as `seed` or `top_k`): the request fields the model's `generate` honours, derived from the
+/// tables the request is read with ([`crate::sampling::honoured`]). Absent on a model that generates no text (empty
+/// on OpenRouter, whose card always carries the field).
+fn add_sampling(card: &mut Value, info: &ModelInfo) {
+    if !info.sampling_parameters.is_empty() {
+        card["supported_parameters"] = json!(info.sampling_parameters);
+    }
 }
 
 /// What a model takes in and gives out, in OpenRouter's modality names: text
@@ -213,7 +227,7 @@ fn openrouter_card(info: &ModelInfo) -> Value {
         "pricing": { "prompt": "0", "completion": "0", "request": "0", "image": "0" },
         "top_provider": { "context_length": ctx, "max_completion_tokens": info.max_output_tokens, "is_moderated": false },
         "per_request_limits": Value::Null,
-        "supported_parameters": ["temperature", "top_p", "max_tokens"],
+        "supported_parameters": info.sampling_parameters,
         "default_parameters": Value::Null,
         "supported_voices": Value::Null,
         "links": { "details": format!("/api/v1/models/{name}/endpoints") },

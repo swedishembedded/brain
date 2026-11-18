@@ -496,7 +496,7 @@ pub fn to_invocation(provider: Provider, body: &Value) -> Result<(String, Invoca
     let msgs: Vec<Value> = messages.iter().map(flatten_message).collect();
     let mut inv = Invocation::new().set("messages", json!(serde_json::to_string(&msgs).unwrap_or_else(|_| "[]".into())));
     if let Some(n) = max_new(provider, body)? {
-        inv = inv.set("max_new", json!(n));
+        inv = inv.set(crate::sampling::MAX_TOKENS_PARAM, json!(n));
     }
     let inv = crate::sampling::apply_token_capture(provider, body, crate::sampling::apply(provider, body, inv)?)?;
     let mut inv = inv;
@@ -625,7 +625,7 @@ fn to_completion_invocation(provider: Provider, body: &Value) -> Result<(String,
     crate::sampling::refuse_unsupported_openai(provider, body, false)?;
     let stream = body.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
 
-    let inv = Invocation::new().set("prompt", json!(prompt)).set("chat", json!(false)).set("max_new", json!(max_new(provider, body)?.unwrap_or(COMPLETIONS_DEFAULT_MAX_TOKENS)));
+    let inv = Invocation::new().set("prompt", json!(prompt)).set("chat", json!(false)).set(crate::sampling::MAX_TOKENS_PARAM, json!(max_new(provider, body)?.unwrap_or(COMPLETIONS_DEFAULT_MAX_TOKENS)));
     let mut inv = crate::sampling::apply(provider, body, inv)?;
     if let Some(stop) = normalize_stop(body.get("stop")) {
         inv = inv.set("stop", json!(stop));

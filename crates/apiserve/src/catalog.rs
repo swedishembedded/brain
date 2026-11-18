@@ -125,20 +125,22 @@ pub struct ModelInfo {
     /// (`brain_arch::support`): [`Support::Preview`] for a model whose
     /// manifest declares no architecture, never production by default.
     pub support: Support,
+    /// The request fields the model's `generate` action honours ([`crate::sampling::honoured`]): the sampling
+    /// parameters a client may send it. Empty for a model without one.
+    pub sampling_parameters: Vec<&'static str>,
 }
 
 impl ModelInfo {
     fn of(m: &Manifest) -> ModelInfo {
-        let max_output_tokens = m
-            .actions
-            .iter()
-            .find(|a| a.name == "generate")
-            .and_then(|a| a.params.iter().find(|p| p.name == "max_new"))
+        let generate = m.actions.iter().find(|a| a.name == "generate");
+        let sampling_parameters = generate.map(|a| crate::sampling::honoured(|name| a.params.iter().any(|p| p.name == name))).unwrap_or_default();
+        let max_output_tokens = generate
+            .and_then(|a| a.params.iter().find(|p| p.name == crate::sampling::MAX_TOKENS_PARAM))
             .and_then(|p| p.max)
             .filter(|max| max.is_finite() && *max >= 1.0)
             .map(|max| max as u64);
         let support = m.architecture.as_deref().map_or(Support::Preview, serving_support);
-        ModelInfo { name: m.model.clone(), caps: api_caps(m), max_context_tokens: m.max_context_tokens, max_output_tokens, support }
+        ModelInfo { name: m.model.clone(), caps: api_caps(m), max_context_tokens: m.max_context_tokens, max_output_tokens, support, sampling_parameters }
     }
 }
 

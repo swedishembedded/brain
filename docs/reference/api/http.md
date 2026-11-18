@@ -405,13 +405,14 @@ Import a HuggingFace checkpoint into brain's format:
 On the OpenAI and OpenRouter dialects every entry of `GET /models` and
 `GET /models/{id}` may carry these optional fields, in addition to the dialect's own.
 A field is absent when its value is unknown; it is never `null` or `0` as a stand-in.
-The Anthropic entry is unchanged.
+The Anthropic entry carries only `supported_parameters` of them.
 
 | Field | Meaning |
 |---|---|
 | `capabilities` | Names derived from the model's manifest: `chat`, `tools` (chat whose `generate` accepts `tools`), `vision` (chat whose `generate` reads `image` inputs; image parts sent to any other model are refused with 400), `embeddings`, `images`, `transcription` (a `transcribe` action taking `audio`), `speech` (a `speak` action taking `text` and returning `audio`). On OpenRouter the card's `architecture` modalities follow from the same set, e.g. `audio->text` for a speech model. |
 | `max_images_per_request`, `max_image_pixels_per_request` | On a `vision` model: the most images (the `image`, `image1`, ... inputs its `generate` action declares), and pixels over all of them, one request may carry; a request past either is refused with 400. |
 | `architecture.input_modalities` | On a chat model: `"text"`, then `"image"` for a `vision` model and `"audio"` for one whose `generate` takes an `audio` clip (the field an agent runtime reads to decide what it may attach). |
+| `supported_parameters` | On a model that generates text, on every dialect: the request fields its `generate` action honours - `max_tokens`, then the sampling parameters among `temperature`, `top_p`, `top_k`, `seed`, `presence_penalty`, `frequency_penalty`, `min_p`, `repetition_penalty`, the DRY fields, the thinking-budget names and `ignore_eos`, then the token-capture fields (`logprobs`, `return_token_ids`, `policy_trace`). A field not listed is refused with 400 naming it. |
 | `max_output_tokens` | The most new tokens one request may ask for, when the model's `generate` action declares an upper bound. On OpenRouter it is also `top_provider.max_completion_tokens`. |
 | `adapter` | Present on an entry that IS a LoRA adapter: `{ "id": "<adapter card id>", "digest": "sha256:<hex>", "version": <int> }`. The id is the adapter's name and the digest is that of its file; no file path is ever included. A release that replaces an adapter under the same id changes the digest and raises the policy version on the next read. |
 | `support` | Always present: `"production"` when the model's architecture is certified for serving (forward parity, serving, cancellation and batching each backed by tests in the [serving certification](../training-capabilities.md#serving-certification) table), `"preview"` otherwise. A model whose architecture the server does not know, or that the table does not list, is `"preview"`. An adapter reports its base's architecture. |

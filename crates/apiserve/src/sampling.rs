@@ -14,6 +14,56 @@ use serde_json::{json, Value};
 use crate::error::ApiError;
 use crate::surface::Provider;
 
+/// How a sampling field's value is read and forwarded.
+#[derive(Clone, Copy, Debug)]
+enum Kind {
+    /// A number in `lo..=hi`. A `neutral` value, which clients send by default, is not forwarded: a request that asks
+    /// for nothing is the request it always was, also to a model without that sampler.
+    Number { lo: f64, hi: f64, neutral: Option<f64> },
+    /// An integer in `lo..=hi`.
+    Integer { lo: i64, hi: i64 },
+    /// Any 64-bit unsigned integer: a seed the model drew itself spans all of u64 and is echoed back as such, and
+    /// sending it back must reproduce the decode.
+    Seed,
+    /// A boolean, forwarded only when on.
+    Switch,
+    /// An array of strings, forwarded as its JSON text.
+    Strings,
+}
+
+/// One request field the sampler reads, and the `generate` param it sets.
+struct Field {
+    name: &'static str,
+    param: &'static str,
+    kind: Kind,
+}
+
+impl Field {
+    const fn new(name: &'static str, param: &'static str, kind: Kind) -> Field {
+        Field { name, param, kind }
+    }
+
+    /// The param value `v` asks for (`None`: nothing to forward), or what the field must be.
+    fn read(&self, v: &Value) -> Result<Option<Value>, String> {
+        match self.kind {
+            Kind::Number { lo, hi, neutral } => {
+                let x = v.as_f64().filter(|x| (lo..=hi).contains(x)).ok_or_else(|| format!("a number in {lo}..={hi}"))?;
+                Ok((neutral != Some(x)).then(|| json!(x)))
+            }
+            Kind::Integer { lo, hi } => {
+                let what = if (lo, hi) == (0, i64::MAX) { "a non-negative integer".to_string() } else { format!("an integer in {lo}..={hi}") };
+                v.as_i64().filter(|n| (lo..=hi).contains(n)).map(|n| Some(json!(n))).ok_or(what)
+            }
+            Kind::Seed => v.as_u64().map(|n| Some(json!(n))).ok_or_else(|| "a non-negative integer".to_string()),
+            Kind::Switch => v.as_bool().map(|on| on.then_some(json!(true))).ok_or_else(|| "a boolean".to_string()),
+            Kind::Strings => {
+                let strings = v.as_array().filter(|a| a.iter().all(Value::is_string)).ok_or_else(|| "an array of strings".to_string())?;
+                Ok(Some(json!(serde_json::to_string(strings).unwrap_or_default())))
+            }
+        }
+    }
+}
+
 /// Upper bound on `top_k`, the range the `generate` actions declare.
 const MAX_TOP_K: i64 = 1000;
 
@@ -21,88 +71,67 @@ const MAX_TOP_K: i64 = 1000;
 /// (and OpenAI's).
 const MAX_TEMPERATURE: f64 = 2.0;
 
-/// Set `temp`, `top_p`, `top_k` and `seed` on `inv` from `body`, each only when
-/// the client sent it: the action's default stands otherwise, which for a model
-/// that declares its own sampling defaults (its `generation_config.json` or GGUF
-/// metadata) is the setting its authors recommend, else the chat fallback.
+/// Every sampling field a chat surface forwards, in the order [`honoured`] lists them: the OpenAI `temperature`,
+/// `top_p`, `seed`, `presence_penalty` and `frequency_penalty`, `top_k`, vLLM's `min_p`, `repetition_penalty` and
+/// `ignore_eos` (generate to the token budget past the end-of-sequence tokens, a throughput benchmark's protocol),
+/// llama.cpp's DRY (`dry_multiplier`, `dry_base`, `dry_allowed_length`, `dry_sequence_breakers`), and the thinking
+/// budget under each name servers use for it (the first one sent counts). The one table [`apply`] forwards from and
+/// [`honoured`] reads.
+const FIELDS: [Field; 16] = [
+    Field::new("temperature", "temp", Kind::Number { lo: 0.0, hi: MAX_TEMPERATURE, neutral: None }),
+    Field::new("top_p", "top_p", Kind::Number { lo: 0.0, hi: 1.0, neutral: None }),
+    Field::new("top_k", "top_k", Kind::Integer { lo: 0, hi: MAX_TOP_K }),
+    Field::new("seed", "seed", Kind::Seed),
+    Field::new("presence_penalty", "presence_penalty", Kind::Number { lo: -2.0, hi: 2.0, neutral: Some(0.0) }),
+    Field::new("frequency_penalty", "frequency_penalty", Kind::Number { lo: -2.0, hi: 2.0, neutral: Some(0.0) }),
+    Field::new("min_p", "min_p", Kind::Number { lo: 0.0, hi: 1.0, neutral: Some(0.0) }),
+    Field::new("repetition_penalty", "repetition_penalty", Kind::Number { lo: 0.01, hi: 4.0, neutral: Some(1.0) }),
+    Field::new("dry_multiplier", "dry_multiplier", Kind::Number { lo: 0.0, hi: 100.0, neutral: Some(0.0) }),
+    Field::new("dry_base", "dry_base", Kind::Number { lo: 1.0, hi: 16.0, neutral: None }),
+    Field::new("dry_allowed_length", "dry_allowed_length", Kind::Integer { lo: 0, hi: 4096 }),
+    Field::new("dry_sequence_breakers", "dry_sequence_breakers", Kind::Strings),
+    Field::new("thinking_budget", "thinking_budget", Kind::Integer { lo: 0, hi: i64::MAX }),
+    Field::new("thinking_token_budget", "thinking_budget", Kind::Integer { lo: 0, hi: i64::MAX }),
+    Field::new("max_thinking_tokens", "thinking_budget", Kind::Integer { lo: 0, hi: i64::MAX }),
+    Field::new("ignore_eos", "ignore_eos", Kind::Switch),
+];
+
+/// The `generate` param a request's completion budget (`max_tokens`, or OpenAI's `max_completion_tokens`) sets.
+pub const MAX_TOKENS_PARAM: &str = "max_new";
+
+/// The token-capture fields [`apply_token_capture`] forwards, each to the param of its own name.
+const TOKEN_CAPTURE: [&str; 3] = ["logprobs", "return_token_ids", "policy_trace"];
+
+/// Set the sampling params of `inv` from `body` ([`FIELDS`]), each only when the client sent it: the action's default
+/// stands otherwise, which for a model that declares its own sampling defaults (its `generation_config.json` or GGUF
+/// metadata) is the setting its authors recommend, else the chat fallback. A field outside its range is refused by
+/// name; a model that has no such sampler refuses the param by name, as it does any parameter it does not declare.
 pub fn apply(provider: Provider, body: &Value, mut inv: Invocation) -> Result<Invocation, ApiError> {
-    let in_range = |name: &str, max: f64| -> Result<Option<f64>, ApiError> {
-        present(body, name)
-            .map(|v| v.as_f64().filter(|x| (0.0..=max).contains(x)).ok_or_else(|| ApiError::invalid_request(provider, format!("'{name}' must be a number in 0..={max}"))))
-            .transpose()
-    };
-    if let Some(t) = in_range("temperature", MAX_TEMPERATURE)? {
-        inv = inv.set("temp", json!(t));
-    }
-    if let Some(p) = in_range("top_p", 1.0)? {
-        inv = inv.set("top_p", json!(p));
-    }
-    if let Some(v) = present(body, "top_k") {
-        let k = v.as_i64().filter(|k| (0..=MAX_TOP_K).contains(k));
-        let k = k.ok_or_else(|| ApiError::invalid_request(provider, format!("'top_k' must be an integer in 0..={MAX_TOP_K}")))?;
-        inv = inv.set("top_k", json!(k));
-    }
-    inv = apply_extended(provider, body, inv)?;
-    // vLLM's `ignore_eos`: generate to the token budget past the model's end-of-sequence tokens (a throughput
-    // benchmark's protocol). Forwarded only when on, so a model that does not honour it refuses it by name.
-    if let Some(v) = present(body, "ignore_eos") {
-        let on = v.as_bool().ok_or_else(|| ApiError::invalid_request(provider, "'ignore_eos' must be a boolean"))?;
-        if on {
-            inv = inv.set("ignore_eos", json!(true));
+    let mut sent: Vec<&str> = Vec::new();
+    for field in &FIELDS {
+        let Some(v) = present(body, field.name) else { continue };
+        // A setting with several names (the thinking budget) is read from the first one sent.
+        if sent.contains(&field.param) {
+            continue;
         }
-    }
-    if let Some(v) = present(body, "seed") {
-        // A seed the model drew itself spans all of u64 and is echoed back as
-        // such; sending it back must reproduce the decode.
-        let seed = v.as_u64().ok_or_else(|| ApiError::invalid_request(provider, "'seed' must be a non-negative integer"))?;
-        inv = inv.set("seed", json!(seed));
+        sent.push(field.param);
+        let value = field.read(v).map_err(|what| ApiError::invalid_request(provider, format!("'{}' must be {what}", field.name)))?;
+        if let Some(value) = value {
+            inv = inv.set(field.param, value);
+        }
     }
     Ok(inv)
 }
 
-/// The sampler fields beyond temperature, top-k and top-p, forwarded only when
-/// the client sent them (and, for the penalties, only when not neutral): the
-/// OpenAI `presence_penalty` and `frequency_penalty`, vLLM's `min_p` and
-/// `repetition_penalty`, llama.cpp's DRY (`dry_multiplier`, `dry_base`,
-/// `dry_allowed_length`, `dry_sequence_breakers`), and the thinking budget under
-/// the names servers use for it (`thinking_budget`, `thinking_token_budget`,
-/// `max_thinking_tokens`). A model that has no such sampler refuses the field by
-/// name, as it does any parameter it does not declare.
-fn apply_extended(provider: Provider, body: &Value, mut inv: Invocation) -> Result<Invocation, ApiError> {
-    let bad = |name: &str, what: &str| ApiError::invalid_request(provider, format!("'{name}' must be {what}"));
-    let number = |name: &str, lo: f64, hi: f64| -> Result<Option<f64>, ApiError> {
-        match present(body, name) {
-            None => Ok(None),
-            Some(v) => v.as_f64().filter(|x| (lo..=hi).contains(x)).map(Some).ok_or_else(|| bad(name, &format!("a number in {lo}..={hi}"))),
-        }
-    };
-    for (name, lo, hi, neutral) in [("presence_penalty", -2.0, 2.0, 0.0), ("frequency_penalty", -2.0, 2.0, 0.0), ("min_p", 0.0, 1.0, 0.0), ("repetition_penalty", 0.01, 4.0, 1.0), ("dry_multiplier", 0.0, 100.0, 0.0)] {
-        if let Some(x) = number(name, lo, hi)? {
-            if x != neutral {
-                inv = inv.set(name, json!(x));
-            }
-        }
-    }
-    if let Some(x) = number("dry_base", 1.0, 16.0)? {
-        inv = inv.set("dry_base", json!(x));
-    }
-    if let Some(v) = present(body, "dry_allowed_length") {
-        let n = v.as_i64().filter(|n| (0..=4096).contains(n)).ok_or_else(|| bad("dry_allowed_length", "an integer in 0..=4096"))?;
-        inv = inv.set("dry_allowed_length", json!(n));
-    }
-    if let Some(v) = present(body, "dry_sequence_breakers") {
-        let ok = v.as_array().filter(|a| a.iter().all(Value::is_string));
-        let breakers = ok.ok_or_else(|| bad("dry_sequence_breakers", "an array of strings"))?;
-        inv = inv.set("dry_sequence_breakers", json!(serde_json::to_string(breakers).unwrap_or_default()));
-    }
-    for name in ["thinking_budget", "thinking_token_budget", "max_thinking_tokens"] {
-        if let Some(v) = present(body, name) {
-            let n = v.as_i64().filter(|n| *n >= 0).ok_or_else(|| bad(name, "a non-negative integer"))?;
-            inv = inv.set("thinking_budget", json!(n));
-            break;
-        }
-    }
-    Ok(inv)
+/// The request fields a model whose `generate` action declares the params `declares` answers yes for honours: those
+/// [`apply`] and [`apply_token_capture`] forward to a declared param, and `max_tokens` when the budget is one. Derived
+/// from the tables the requests are read with, so a model card states exactly what a request may send it (a field
+/// whose param the model does not declare is refused by name).
+pub fn honoured(declares: impl Fn(&str) -> bool) -> Vec<&'static str> {
+    let budget = declares(MAX_TOKENS_PARAM).then_some("max_tokens");
+    let sampling = FIELDS.iter().filter(|f| declares(f.param)).map(|f| f.name);
+    let capture = TOKEN_CAPTURE.into_iter().filter(|&name| declares(name));
+    budget.into_iter().chain(sampling).chain(capture).collect()
 }
 
 /// Ask the model for the sampled tokens' ids and log-probabilities when the
@@ -115,7 +144,7 @@ fn apply_extended(provider: Provider, body: &Value, mut inv: Invocation) -> Resu
 /// the policy that served them). None is forwarded unless sent, so a request
 /// that does not read them pays nothing.
 pub fn apply_token_capture(provider: Provider, body: &Value, mut inv: Invocation) -> Result<Invocation, ApiError> {
-    for name in ["logprobs", "return_token_ids", "policy_trace"] {
+    for name in TOKEN_CAPTURE {
         match present(body, name) {
             None => {}
             Some(v) => {
@@ -285,6 +314,60 @@ mod tests {
             let e = apply(P, &body, Invocation::new()).unwrap_err();
             assert!(format!("{e:?}").contains(name), "{body}: {e:?}");
         }
+    }
+
+    /// A value of `field` a client may send that asks for something (not the neutral one).
+    fn asking(field: &Field) -> Value {
+        match field.kind {
+            Kind::Number { hi, .. } => json!(hi),
+            Kind::Integer { lo, .. } => json!(lo + 1),
+            Kind::Seed => json!(7),
+            Kind::Switch => json!(true),
+            Kind::Strings => json!(["\n"]),
+        }
+    }
+
+    /// A `generate` action declaring `params` (and the prompt it always takes).
+    fn generate(params: &[&str]) -> capability::ActionSpec {
+        params.iter().fold(capability::ActionSpec::new("generate", "test").param(capability::ParamSpec::new("prompt", capability::ParamType::Str, "")), |spec, &name| {
+            let ty = match name {
+                "seed" | "top_k" | "max_new" | "dry_allowed_length" | "thinking_budget" => capability::ParamType::Int,
+                "ignore_eos" | "logprobs" | "return_token_ids" | "policy_trace" => capability::ParamType::Bool,
+                "dry_sequence_breakers" => capability::ParamType::Str,
+                _ => capability::ParamType::Float,
+            };
+            spec.param(capability::ParamSpec::new(name, ty, ""))
+        })
+    }
+
+    /// The listing is what the sampler accepts: for every field a client may send, a model lists it exactly when a
+    /// request carrying it passes the model's own `generate` validation, whatever subset of params the model declares.
+    #[test]
+    fn a_model_lists_exactly_the_sampling_fields_a_request_may_send_it() {
+        let every: Vec<&str> = FIELDS.iter().map(|f| f.param).chain(TOKEN_CAPTURE).chain([MAX_TOKENS_PARAM]).collect();
+        let models = [
+            vec!["temp", "top_p", "max_new"],
+            vec!["temp", "top_k", "top_p", "seed", "max_new", "logprobs"],
+            vec!["temp", "top_k", "top_p", "seed", "min_p", "repetition_penalty", "thinking_budget", "ignore_eos"],
+            every,
+        ];
+        for declared in models {
+            let spec = generate(&declared);
+            let listed = honoured(|p| spec.params.iter().any(|q| q.name == p));
+            for field in &FIELDS {
+                let body = json!({ field.name: asking(field) });
+                let accepted = spec.validate(apply(P, &body, Invocation::new().set("prompt", json!("x"))).unwrap()).is_ok();
+                assert_eq!(listed.contains(&field.name), accepted, "{} for a model declaring {declared:?}", field.name);
+            }
+            for name in TOKEN_CAPTURE {
+                let inv = apply_token_capture(P, &json!({ name: true }), Invocation::new().set("prompt", json!("x"))).unwrap();
+                assert_eq!(listed.contains(&name), spec.validate(inv).is_ok(), "{name} for a model declaring {declared:?}");
+            }
+            let budget = spec.validate(Invocation::new().set("prompt", json!("x")).set(MAX_TOKENS_PARAM, json!(8))).is_ok();
+            assert_eq!(listed.contains(&"max_tokens"), budget, "max_tokens for a model declaring {declared:?}");
+        }
+        let listed = honoured(|p| ["temp", "top_k", "top_p", "seed", "max_new"].contains(&p));
+        assert_eq!(listed, ["max_tokens", "temperature", "top_p", "top_k", "seed"], "a chat model's own sampler, seed and top_k included");
     }
 
     #[test]

@@ -647,6 +647,46 @@ async fn model_card_derives_capabilities_and_output_limit_from_the_manifest() {
     }
 }
 
+/// Every dialect's card names the sampling parameters the model's `generate` honours, so an agent runtime that
+/// sends `seed` or `top_k` only to a provider declaring them sends them to brain: derived from the params the action
+/// declares, never a fixed list; a model that generates no text names none.
+#[tokio::test]
+async fn model_card_names_the_sampling_parameters_the_model_honours_on_every_dialect() {
+    let sampled = Manifest::new(
+        "brain-sampled",
+        "a chat model with the usual sampler",
+        vec![ActionSpec::new("generate", "generate text")
+            .streaming()
+            .param(ParamSpec::new("prompt", ParamType::Str, "the prompt").required())
+            .param(ParamSpec::new("max_new", ParamType::Int, "new tokens"))
+            .param(ParamSpec::new("temp", ParamType::Float, "temperature"))
+            .param(ParamSpec::new("top_k", ParamType::Int, "top-k"))
+            .param(ParamSpec::new("top_p", ParamType::Float, "top-p"))
+            .param(ParamSpec::new("seed", ParamType::Int, "sampling seed"))
+            .output(BlobSpec::new("text", Media::Text, "generated text"))],
+    );
+    for (provider, uri_prefix, schema) in [
+        (Provider::OpenAI, "/v1/models", Some(("openai.json", "Model"))),
+        (Provider::OpenRouter, "/models", Some(("openrouter.json", "Model"))),
+        (Provider::Anthropic, "/v1/models", None),
+    ] {
+        let (app, _exec, key) = app_over(vec![sampled.clone(), chat_manifest(), embed_manifest()], provider);
+        let card = get_json(&app, provider, &format!("{uri_prefix}/brain-sampled"), &key).await;
+        if let Some((file, name)) = schema {
+            assert_valid(file, name, &card);
+        }
+        assert_eq!(card["supported_parameters"], json!(["max_tokens", "temperature", "top_p", "top_k", "seed"]), "{provider}: {card}");
+        let seeded = get_json(&app, provider, &format!("{uri_prefix}/brain-chat"), &key).await;
+        assert_eq!(seeded["supported_parameters"], json!(["seed"]), "{provider}: only what it declares: {seeded}");
+        // The Anthropic surface lists chat models only.
+        if provider != Provider::Anthropic {
+            let embed = get_json(&app, provider, &format!("{uri_prefix}/brain-embed"), &key).await;
+            let none = embed.get("supported_parameters").is_none_or(|p| p == &json!([]));
+            assert!(none, "{provider}: a model that generates no text has no sampler: {embed}");
+        }
+    }
+}
+
 /// brain keeps nothing of a request: no prompt, answer or upload is written
 /// anywhere or logged. Every card says so, so a client that routes by data
 /// retention can tell this server apart from one that does not say.

@@ -251,7 +251,7 @@ pub fn to_invocation(body: &Value) -> Result<(String, Invocation, bool), ApiErro
     let msgs = flatten_messages(messages)?;
     let inv = Invocation::new()
         .set("messages", json!(serde_json::to_string(&msgs).unwrap_or_else(|_| "[]".into())))
-        .set("max_new", json!(max_tokens));
+        .set(crate::sampling::MAX_TOKENS_PARAM, json!(max_tokens));
     let mut inv = crate::sampling::apply(PROVIDER, body, inv)?;
     if let Some(on) = thinking(body, max_tokens)? {
         inv = inv.set("enable_thinking", json!(on));
