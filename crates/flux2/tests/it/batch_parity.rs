@@ -98,7 +98,7 @@ fn batched_forward_is_bit_identical_to_single_forwards() {
 
     // reference: one sample at a time, on a B=1 model (the latency path)
     let single = Flux2Model::new(&cfg, &ts, gpu.share(), n_max);
-    let want: Vec<Vec<f32>> = data.iter().map(|(img, ctx, t)| single.forward(img, ctx, *t, &ids, n_pred)).collect();
+    let want: Vec<Vec<f32>> = model::ops::row_count_invariant(|| data.iter().map(|(img, ctx, t)| single.forward(img, ctx, *t, &ids, n_pred)).collect());
     drop(single);
 
     let batched = Flux2Model::new_batched(&cfg, &ts, gpu, n_max, bsz as u32, Precision::F32);
@@ -170,9 +170,13 @@ fn shared_timestep_batch_is_bit_identical() {
     }
 }
 
-/// The int8 (DP4A) tier batches too: the per-token activation scales and the
+/// The int8 tier batches too: the per-token activation scales and the
 /// packed-activation scratch are row-indexed, so a batched forward quantizes
-/// exactly the rows a single forward would, on any device.
+/// exactly the rows a single forward would, on any device. Checked under
+/// `model::ops::row_count_invariant`, where every int8 product reads those
+/// packed rows: outside it the selector may serve a row count with a
+/// dequantize-in-register candidate whose float accumulation is tuned per row
+/// count (CUDA), which moves the bits with the batch size by design.
 #[test]
 fn int8_batched_forward_is_bit_identical() {
     let gpu = gpu_core::testgpu::dev(&flux2::KERNELS);
@@ -189,11 +193,11 @@ fn int8_batched_forward_is_bit_identical() {
     let data: Vec<(Vec<f32>, Vec<f32>, f32)> = (0..bsz).map(|b| sample_data(&cfg, n_img, b)).collect();
 
     let single = Flux2Model::new_with(&cfg, &ts, gpu.share(), n_max, Precision::Int8);
-    let want: Vec<Vec<f32>> = data.iter().map(|(img, ctx, t)| single.forward(img, ctx, *t, &ids, n_pred)).collect();
+    let want: Vec<Vec<f32>> = model::ops::row_count_invariant(|| data.iter().map(|(img, ctx, t)| single.forward(img, ctx, *t, &ids, n_pred)).collect());
     drop(single);
     let batched = Flux2Model::new_batched(&cfg, &ts, gpu, n_max, bsz as u32, Precision::Int8);
     let samples: Vec<Sample<'_>> = data.iter().map(|(img, ctx, t)| Sample { img_tokens: img, ctx, t: *t }).collect();
-    let got = batched.forward_batch(&samples, &ids, n_pred);
+    let got = model::ops::row_count_invariant(|| batched.forward_batch(&samples, &ids, n_pred));
     for (b, (g, w)) in got.iter().zip(&want).enumerate() {
         let m = max_abs(g, w);
         eprintln!("int8 sample {b}: max_abs={m:e}");
