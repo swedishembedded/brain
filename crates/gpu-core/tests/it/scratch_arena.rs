@@ -246,3 +246,23 @@ fn scopes_still_do_not_nest_across_names() {
     let _a = gpu.scratch_scope_in("a");
     let _b = gpu.scratch_scope_in("b");
 }
+
+/// A handle from `share_scratch` records into its parent's pass: inside the parent's scope its allocations take
+/// their place in the replayed sequence, so the next scope hands both handles back the same buffers, and a buffer of
+/// the helper's is never handed to a live request of the parent's within one scope.
+#[test]
+fn a_share_scratch_handle_replays_inside_its_parents_scope() {
+    let Some(gpu) = dev() else { return };
+    let helper = gpu.share_scratch();
+    let pass = || {
+        let _s = gpu.scratch_scope();
+        let bufs = [gpu.storage(256), helper.storage(512), gpu.storage(512), helper.storage(128)];
+        bufs.map(|b| b.alloc_id())
+    };
+    let first = pass();
+    let mut distinct = first.to_vec();
+    distinct.sort_unstable();
+    distinct.dedup();
+    assert_eq!(distinct.len(), first.len(), "one scope handed one allocation to two live requests across the handles");
+    assert_eq!(first, pass(), "the parent's and the helper's allocations are one replayed sequence");
+}

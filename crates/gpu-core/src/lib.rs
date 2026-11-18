@@ -1261,8 +1261,9 @@ mod native_facade {
         /// allocate exactly as it always did. See [`crate::scratch`] for the
         /// aliasing argument; the lane is part of the key because the two
         /// streams run concurrently, and a slot one is still using must never
-        /// be handed to the other.
-        arena: Mutex<Vec<(crate::lane::Lane, &'static str, crate::scratch::Arena)>>,
+        /// be handed to the other. Shared with the handle it was taken from by
+        /// [`Gpu::share_scratch`], private otherwise.
+        arena: Arc<ScratchArenas>,
         /// This handle's second, high-priority handle on the same device, opened
         /// the first time work is issued in the urgent lane (see [`crate::lane`]);
         /// `None` inside when the backend cannot prioritise.
@@ -1330,7 +1331,7 @@ mod native_facade {
                 mem_device,
                 grants: Mutex::new(Vec::new()),
                 uploaded: std::sync::atomic::AtomicU64::new(0),
-                arena: Mutex::new(Vec::new()),
+                arena: Arc::new(Mutex::new(Vec::new())),
                 urgent: std::sync::OnceLock::new(),
                 natives: Mutex::new(Default::default()),
                 native_names: Mutex::new(Default::default()),
@@ -1727,6 +1728,20 @@ mod native_facade {
                     "this backend cannot share a device; build a new Gpu instead"
                 ),
             }
+        }
+
+        /// [`Gpu::share`], drawing its [`Self::storage`] from THIS handle's scratch arenas: while a
+        /// [`Self::scratch_scope`] is open on this handle, on this thread's lane, the shared handle's allocations
+        /// take their place in the scope's replayed sequence instead of reaching the driver.
+        ///
+        /// For a helper that records into a pass of this handle - an op façade (`model::ops::Ops`) whose
+        /// quantised activations and product temporaries are part of a block forward run inside the block's
+        /// scope - on the same thread. A handle another thread runs its own scopes on takes [`Self::share`]: a
+        /// lane holds one open scope at a time.
+        pub fn share_scratch(&self) -> Gpu {
+            let mut gpu = self.share();
+            gpu.arena = self.arena.clone();
+            gpu
         }
 
         /// [`Gpu::share`] when the backend supports it, else a fresh build of
@@ -3487,6 +3502,9 @@ mod native_facade {
             self.kernel_index(crate::upgrade::twin_name(self.names.get(kind)?)?)
         }
     }
+
+    /// A handle's scratch replay arenas, by lane and name (see [`Gpu::scratch_scope`]).
+    type ScratchArenas = Mutex<Vec<(crate::lane::Lane, &'static str, crate::scratch::Arena)>>;
 
     /// The open scratch scope returned by [`Gpu::scratch_scope`]. While it is
     /// alive, this handle's `storage` calls replay the arena; dropping it ends

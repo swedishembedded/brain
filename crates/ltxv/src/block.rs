@@ -2077,9 +2077,12 @@ impl QBlockWeights {
 }
 
 /// The shared quantized-product façade for one block forward, on its own handle of `gpu`'s device: it allocates the
-/// activation's packed rows and records the product the selector chose for the device.
+/// activation's packed rows and records the product the selector chose for the device. Its allocations are drawn from
+/// `gpu`'s scratch scope when the block forward runs in one ([`Gpu::share_scratch`]), so a pooled forward's packed
+/// activations and product temporaries are replayed with the block's other temporaries instead of reaching the
+/// driver every block.
 fn block_ops(gpu: &Gpu) -> Ops {
-    Ops::new(gpu.share()).unwrap_or_else(|e| panic!("ltxv: the quantized block's Gpu lacks the shared kernel set: {e}"))
+    Ops::new(gpu.share_scratch()).unwrap_or_else(|e| panic!("ltxv: the quantized block's Gpu lacks the shared kernel set: {e}"))
 }
 
 /// One quantized linear: `out = x @ Wᵀ (+ bias) (+ adapter)`, the product chosen by the shared
