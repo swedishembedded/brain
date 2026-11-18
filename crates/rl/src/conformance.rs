@@ -128,7 +128,10 @@ pub fn run_objectives<M: Model>(subject: &Subject<M>, seed: u64) -> Result<(), S
 /// The policy-gradient regimes the suite holds every model to, by name, as the configuration a run takes.
 pub fn policy_gradient_regimes() -> Vec<(&'static str, PolicyGradientConfig)> {
     let d = PolicyGradientConfig::default();
-    vec![("dr-grpo", PolicyGradientConfig { advantage_norm: AdvantageNorm::MeanCentered, loss_agg: LossAgg::ConstantLength(SEQ), kl_beta: 0.0, ..d })]
+    vec![
+        ("dr-grpo", PolicyGradientConfig { advantage_norm: AdvantageNorm::MeanCentered, loss_agg: LossAgg::ConstantLength(SEQ), kl_beta: 0.0, ..d }),
+        ("rloo", PolicyGradientConfig { advantage_norm: AdvantageNorm::LeaveOneOut, loss_agg: LossAgg::TokenSum, ..d }),
+    ]
 }
 
 /// One step of a policy-gradient regime on the conformance batch: its rows are one group whose rewards are 1 and 0,

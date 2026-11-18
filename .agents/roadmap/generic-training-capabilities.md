@@ -35,6 +35,7 @@ view, a served toy that learns, real weights) are other lanes' and are not claim
 
 | Regime | Level | Evidence |
 |---|---|---|
+| RLOO (`AdvantageNorm::LeaveOneOut`, contract v2) | L4 | L1 `rl` `advantage::every_normalisation_matches_its_fp64_oracle`, `a_pair_by_hand`, `leave_one_out_is_scaled_mean_centring_at_a_fixed_size_and_not_across_sizes`, `external_policy_gradient::the_advantages_are_each_groups_rewards_under_the_runs_normalisation`, the token weight as for every regime (`pg_batch`); L2 `rl/tests/rloo_gradcheck.rs`; L3 `rl::conformance::policy_gradient_regimes`; L4 `trainjob` `the_advantage_normalisation_is_named_on_the_wire` |
 | Dr. GRPO (`LossAgg::ConstantLength`, mean-centred) | L4 | L1 `rl` `pg_batch::every_tokens_weight_is_minus_the_derivative_of_its_loss_inside_and_past_the_clip`, `grpo::each_aggregation_divides_a_step_as_its_definition_says`; L2 `rl/tests/dr_grpo_gradcheck.rs`; L3 `rl::conformance::policy_gradient_regimes`; L4 `trainjob` `the_constant_length_aggregation_takes_its_constant_or_the_runs_max_block` |
 
 ## Not yet done
