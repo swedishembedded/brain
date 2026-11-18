@@ -147,7 +147,7 @@ enum Blocks {
     /// and the `Ops` whose quantized activations [`build_block_steps_q`]
     /// records, kept alive for the same reason `_scr` is - referenced by the
     /// recorded steps.
-    Quant(Vec<QBlockWeights>, QScratch, Ops),
+    Quant(Vec<QBlockWeights>, QScratch, Box<Ops>),
 }
 
 /// A Wan DiT with the block stack resident on one device.
@@ -351,7 +351,7 @@ impl WanDitDev {
                     build_block_steps_q(&ops, &gpu, &mut steps, &sel, &blocks[l], &mods[l], &pool[cur], &pool[out], &scr, &qscr, &cos, &sin, &ctx, d, tokens);
                     cur = out;
                 }
-                Blocks::Quant(blocks, qscr, ops)
+                Blocks::Quant(blocks, qscr, Box::new(ops))
             }
         };
 
