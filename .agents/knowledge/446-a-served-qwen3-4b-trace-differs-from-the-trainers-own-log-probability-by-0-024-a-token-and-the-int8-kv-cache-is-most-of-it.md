@@ -42,8 +42,33 @@ Gap = trainer log-probability minus recorded one, per sampled token; ratio = exp
 - The template's text after the end-of-turn marker (Qwen's newline after `<|im_end|>`) is context in a rollout record: the
   sampler never chose it, and supervising it needs a log-probability nobody sampled. Before that change the gate read a
   recorded 0.0 there against the trainer's own value and reported a largest gap of 15.5 and a mean of 0.060.
-- Qwen3.8-27B-FP8 was not gated: its served engine (the released-checkpoint resident) does not implement
-  `score_continuation`, so `policy_trace` is refused for it by name.
+- Qwen3.8-27B-FP8 was not gated here. Its served engine (the released-checkpoint resident, `Qwen35GgufEngine`) scores
+  continuations since 63de9c881, an hour after this measurement, so `policy_trace` is served for it; it did not declare
+  the `score` action until 2026-11-18. The 27B row of this table has not been measured.
 
 Evidence: the gate reports and the rollout records (one JSONL per run) are in the private Hugging Face dataset
 `swedishembedded/brain-numerics-rollouts`, with a card naming each file (2026-11-13).
+
+## The FP8 resident's fixture on the CPU (2026-11-18)
+
+`crates/qwen35/tests/hf_fp8_score.rs` (`-- --device cpu --backend cpu --ignored measure`): the engine that serves an FP8
+release, on a random 4-layer FP8 directory (d_model 128, vocabulary 64), 8 requests at temperature 1.0 untruncated, 181
+generated tokens per row. "Decode" is the sampler's log-probability at the step that drew the token; "trace" is the
+engine's `policy_trace` scoring of the same ids at the same K/V tier; the f32-K/V trace stands for a trainer that rounds
+no K/V.
+
+| K/V | decode vs own trace: mean / largest | trace vs f32-K/V trace: mean / largest |
+|---|---|---|
+| f32 | 5.0e-7 / 2.4e-6 | 0 / 0 |
+| bf16 | 7.3e-7 / 8.7e-6 | 2.4e-4 / 1.6e-3 |
+| int8 | 5.6e-7 / 3.7e-6 | 7.8e-4 / 3.3e-3 |
+| fp8 | 4.8e-7 / 2.4e-6 | 3.7e-3 / 2.7e-2 |
+
+- The trace reads the K/V at the tier the decode wrote, so it reproduces the decode-time distribution to 1e-5 at every
+  tier: `old` from a trace is the behaviour policy, and the whole serve/train gap is the trainer's own K/V (none)
+  against the served tier. The parity is gated (`a_trace_reproduces_the_decode_time_log_probabilities_of_an_untruncated_draw`,
+  tolerance 2e-3, at temperatures 1.0 and 0.7).
+- The tier ordering of the 4B table holds on this fixture (f32 < bf16 < int8 < fp8), at a much smaller size: a 128-wide
+  random model has little to lose. The numbers are the method's floor on the CPU, not an estimate for the 27B.
+- Open, needs a card: the same sweep and the numerics gate on the real Qwen3.8-27B-FP8 at its default K/V tier.
+

@@ -256,7 +256,8 @@ launches a local qwen3 Anthropic surface and points Claude Code at it.
   generation on the serving thread. Train rollouts at temperature 1.0 without
   top-k or top-p so the sampler's distribution and the trace's coincide; `logprobs`
   (above) is the sampler's own, truncated figure and is a different quantity.
-- **Scoring given text (`score`).** A served Qwen3 or Qwen3.8 chat model (and each adapter id riding on it) has a
+- **Scoring given text (`score`).** A served Qwen3 or Qwen3.8 chat model (the Qwen3.8-27B served from a released FP8
+  or GGUF checkpoint included), and each adapter id riding on it, has a
   `score` action, called through `POST /v1/run` with `model` the base or adapter id and `blobs.records` a
   `generic-messages-v2` JSONL text blob. Each message marked `"train": true` is an answer, scored teacher-forced
   under the model's full distribution at temperature 1, as the model is asked for it: the prompt is what a `generate`

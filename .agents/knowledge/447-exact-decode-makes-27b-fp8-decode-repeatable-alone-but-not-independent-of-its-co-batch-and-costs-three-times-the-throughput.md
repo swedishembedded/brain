@@ -38,3 +38,13 @@ flag. A trainer that wants zero serve/train mismatch cannot get it from decode-m
 (`--importance truncate:CAP`) and the numerics gate (#446) are the instruments that exist. Making the FP8 projections and the
 Qwen3 decode batch-invariant is a kernel task (`kernels.md`: selection of a fixed-reduction candidate by capability, not per-model
 code) and is open in `.agents/roadmap/serving-runtime.md`.
+
+## The FP8 resident's fixture on the CPU (2026-11-18)
+
+`crates/qwen35/tests/hf_fp8_score.rs` (`-- --device cpu --backend cpu --ignored measure`): four seeded requests at
+temperature 1.0, each alone and then beside three others, default and `--exact-decode`, on the CPU backend (21-64 tokens
+each). No request diverged in either mode and every sampler log-probability before the end was bit-identical: the CPU
+backend's kernels take no row-count-dependent choice on this fixture, so the co-batch dependence measured above belongs
+to the card's kernel selection (row-class tuned FP8 candidates), and a CPU run cannot reproduce or rule it out. Open,
+needs a card: the same sweep on the fixture with `--device gpu<i> --backend cuda` (the kernel selection the 27B gets),
+then the real 27B.

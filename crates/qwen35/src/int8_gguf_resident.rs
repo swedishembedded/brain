@@ -4563,7 +4563,9 @@ impl ResidentModel for Qwen35GgufResident {
         Manifest::new(
             &self.model_id,
             &format!("Qwen3.8-27B dense hybrid Gated-DeltaNet/GQA decoder, served GPU-resident directly from a released checkpoint (no fp32 intermediate on disk), layer-sharded across as many cards as its real per-layer bytes need. {modality} Continuous batching of up to max_batch sequences per dispatch."),
-            vec![generate],
+            // The engine scores a continuation teacher-forced (`Qwen35GgufEngine::score_continuation`), which both a
+            // reply's `policy_trace` and the `score` action are; the instance answers `score` through the scheduler.
+            vec![generate, llmserve::score_spec()],
         )
         .with_max_context_tokens(self.cap as u64)
     }
@@ -5191,8 +5193,7 @@ mod tests {
     fn manifest_declares_reasoning_effort() {
         let r = Qwen35GgufResident::new("whatever.gguf".to_string(), vec![], 2048, TierPolicy::uniform(Dtype::I8));
         let m = r.manifest();
-        assert_eq!(m.actions.len(), 1);
-        let g = &m.actions[0];
+        let g = m.actions.iter().find(|a| a.name == "generate").expect("the resident generates");
         assert!(
             g.params.iter().any(|p| p.name == "reasoning_effort" && !p.required),
             "reasoning_effort must be declared (and optional, defaulting to xhigh) so a caller passing it is not rejected"

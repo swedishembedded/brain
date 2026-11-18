@@ -5,7 +5,7 @@
 //! file: each links the whole dependency tree, so a binary per file
 //! multiplied build time and disk for nothing. A test here must not change
 //! process-wide state (the current directory, environment variables): the
-//! others run beside it; `decode_plans`, `gguf_conformance`, `gguf_mixed_step`, `gguf_score`, `hf_fp8_conformance`, `hf_fp8_embedded_prompt`, `hf_fp8_speculative`, `hf_fp8_vision_real`, `vision_train_real` keep binaries of their own.
+//! others run beside it; `decode_plans`, `gguf_conformance`, `gguf_mixed_step`, `gguf_score`, `hf_fp8_conformance`, `hf_fp8_embedded_prompt`, `hf_fp8_score`, `hf_fp8_speculative`, `hf_fp8_vision_real`, `vision_train_real` keep binaries of their own.
 
 #[path = "../common/mod.rs"]
 mod common;
