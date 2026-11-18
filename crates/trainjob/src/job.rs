@@ -407,6 +407,15 @@ pub fn build_fine_tune(request: &Request, base_dir: &Path, staged: &Staged, file
     Ok(ft)
 }
 
+/// The pair loss a preference request names: `dpo` when it names none; `gamma` is SimPO's alone.
+pub(crate) fn pair_loss(params: &crate::request::Params) -> Result<brain::PairLoss, String> {
+    let name = params.loss.as_deref().unwrap_or("dpo");
+    if params.gamma.is_some() && name != "simpo" {
+        return Err(format!("train: gamma is simpo's target margin; the loss is {name}"));
+    }
+    brain::PairLoss::parse(name, params.gamma.unwrap_or(brain::DEFAULT_SIMPO_GAMMA)).map_err(|e| format!("train: {e}"))
+}
+
 /// The preference trainer for `request` over the files `staged`, writing where `files` says, on the device this thread is
 /// scoped to.
 pub fn build_preference(request: &Request, base_dir: &Path, staged: &Staged, files: &RunFiles) -> Result<brain::PreferenceFineTune, String> {
@@ -445,6 +454,7 @@ pub fn build_preference(request: &Request, base_dir: &Path, staged: &Staged, fil
     if let Some(v) = &p.base_format {
         ft = ft.base_format(v.as_str());
     }
+    ft = ft.loss(pair_loss(p)?);
     if let Some(v) = p.beta {
         ft = ft.beta(v);
     }
@@ -678,6 +688,8 @@ fn preference_summary(outcome: &brain::PreferenceFineTuneOutcome) -> Value {
         "rank": outcome.rank,
         "alpha": outcome.alpha,
         "beta": outcome.beta,
+        "loss": outcome.loss.name(),
+        "gamma": match outcome.loss { brain::PairLoss::SimPo { gamma } => Some(gamma), _ => None },
         "nll_weight": outcome.nll_weight,
         "initial_loss": outcome.initial_loss,
         "final_loss": outcome.final_loss,
@@ -812,7 +824,7 @@ pub fn run(env: &JobEnv, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -
     progress(Progress::event(0, steps, json!({"type": "stage", "stage": "loading the base and training"})));
     let began = Instant::now();
     let trained = match p.objective {
-        Objective::Dpo => train_preference(&request, &base_dir, &staged, &files, &inv.cancel, began, progress)?,
+        Objective::Preference => train_preference(&request, &base_dir, &staged, &files, &inv.cancel, began, progress)?,
         Objective::Feedback => train_feedback(&request, &base_dir, &staged, &files, &inv.cancel, began, progress)?,
         Objective::Distill => {
             // The teacher's adapter, when the request names one by digest, is fetched into the job's directory like a dataset.

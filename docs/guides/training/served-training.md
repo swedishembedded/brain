@@ -15,11 +15,13 @@ The job is the model `brain/train` with one action, `train`. It trains
   within (training-record contract version 2; the job computes each rollout's
   advantage by `advantage_norm`), or a `teacher_context` for self-distillation (a Qwen3.8 base; see `brain::ChatFineTune::policy_gradient`
   for the record format and the objective's settings);
-- **by direct preference optimization** (`objective: dpo`): `dataset` and
+- **by preference optimization** (`objective: preference`): `dataset` and
   `held_out` hold `generic-preference-v1` pairs (a prompt and the `chosen` and
-  `rejected` assistant turns), as `brain::PreferenceFineTune` trains them. The
-  reference is the policy the run starts from (the base, or the `start_adapter`
-  continued), frozen, so no second model is held;
+  `rejected` assistant turns), as `brain::PreferenceFineTune` trains them, by the pair
+  loss `loss`: `dpo` (default), `ipo`, `simpo` (with `gamma`) or `orpo`. The
+  reference of `dpo` and `ipo` is the policy the run starts from (the base, or the
+  `start_adapter` continued), frozen, so no second model is held; `simpo` and `orpo`
+  read none;
 - **by feedback** (`objective: feedback`, KTO): `dataset` holds `generic-feedback-v1` judged completions (a prompt, one
   `completion` and `desirable`), as `brain::FeedbackFineTune` trains them, against the same frozen reference; a step's
   `grad_accum` examples estimate the reference point, and the result reports `desirable_examples`,
@@ -109,7 +111,7 @@ an evaluating step carries `eval_loss`; the report adds `evaluations` (`[{step, 
 
 ## Resuming a job
 
-`train` (every objective: `sft`, `policy_gradient`, `dpo`), `init_model`, `pretrain` and `full_train` take a
+`train` (every objective: `sft`, `policy_gradient`, `preference`, `feedback`, `distill`), `init_model`, `pretrain` and `full_train` take a
 `resume_key` (1 to 128 letters, digits, `.`, `_`, `-`, not starting with a dot; needs an artifact store), and every
 one but `init_model` a `checkpoint_every`. The key names one run:
 
@@ -228,7 +230,7 @@ No dataset or adapter travels through the API as a message body.
 |---|---|
 | `base` | the base model, `<vendor>/<repo>` in the model store (required) |
 | `data` | a JSON document naming the datasets (required), below |
-| `objective` | `sft` (default), `policy_gradient`, `dpo`, `feedback` or `distill` |
+| `objective` | `sft` (default), `policy_gradient`, `preference`, `feedback` or `distill` |
 | `steps`, `grad_accum`, `rank`, `alpha`, `lr`, `weight_decay`, `seed` | the optimiser's settings; what is not named is the trainer's own default, which `GET /v1/capabilities` lists as the param's `implied_default` |
 | `strict_updates` | abort at the first optimiser step whose loss or gradient is not finite (default off: such a step is skipped, the weights untouched, and the run aborts on the third in a row) |
 | `max_block` | the longest training row in tokens (default 8192). The memory reserved for the run is sized to it and a longer record is refused by name |
@@ -245,8 +247,9 @@ No dataset or adapter travels through the API as a message body.
 | `loss_agg`, `loss_agg_length` | how a step's token terms are divided: `seq-mean` (default; each sequence by its own token count, a batch of one sequence), `token-sum` (every token of a step by the step's token count) or `constant-length` (each sequence's sum by `loss_agg_length` tokens, default `max_block`, averaged over the sequences: Dr. GRPO, whose gradient is not rescaled by a sequence's length). `loss_agg_length` with another aggregation is refused |
 | `advantage_norm` | how each group's rewards become the advantages of its rollouts: `mean-centred` (default, `r - mean`), `z-score` (`(r - mean) / (std + 1e-4)`) or `leave-one-out` (`r_i` less the mean of the others). The records the run trains on (the dataset and its replay sets together) are held to the contract's rules between records: a group of one, two records of one rollout that disagree, or two tokenizer digests fail the job naming the rule and the example |
 | `behaviour` | where the importance ratio's behaviour log-probabilities come from. `recorded` (default): the sampler's own `behavior_logprobs`, on every supervised token of every record with a reward; a dataset missing any is refused. `start_of_run_proxy`: the start-of-run policy's where none was recorded, exact only if the rollouts were sampled from it; the training record states which was used |
-| `beta`, `nll_weight`, `keep_reasoning` | the preference objective's settings (only with `objective: dpo`; `beta` and `keep_reasoning` with `feedback` too): the loss temperature (default 0.1), the weight of the supervised likelihood of the chosen answer added to it (default 0) and whether the reasoning of each candidate is trained on |
+| `beta`, `nll_weight`, `keep_reasoning` | the preference objective's settings (only with `objective: preference`; `beta` and `keep_reasoning` with `feedback` too): the loss temperature (default 0.1), the weight of the supervised likelihood of the chosen answer added to it (default 0) and whether the reasoning of each candidate is trained on |
 | `teacher`, `top_k` | with `objective: distill`, the teacher (`base`, `start` or `adapter:<blake3 digest>`) and the tokens it keeps per position (1 to 256, default 16); `teacher` is also the policy gradient's (`base` or `start`). A distillation refuses the policy-gradient and preference settings, a held-out, monitoring or replay set, and the monitoring settings by name |
+| `loss`, `gamma` | the preference objective's pair loss (only with `objective: preference`): `dpo` (default), `ipo` (the per-token mean log-ratio margin regressed to `1 / (2 beta)`), `simpo` (length-normalised, reference-free, target margin `gamma`, default 0.5) or `orpo` (the chosen answer's likelihood plus `beta` times its odds ratio over the rejected one, reference-free); `gamma` with another loss is refused |
 | `desirable_weight`, `undesirable_weight` | the feedback objective's weights of a desirable and of an undesirable example's term (default 1 each; only with `objective: feedback`) |
 | `arch` | the base's architecture, only for a checkpoint directory with no `config.json` |
 
@@ -300,7 +303,7 @@ subscriber that does not read them loses frames, never the result.
 
 The result is `outputs` (the report: `objective`, `adapter_digest`, the scores before and
 after, `held_out_repeats` and `held_out_text_repeats` (held-out examples that are also trained on), the monitoring curve, `selected_step`, the policy-gradient totals,
-`base_tier` and why; for `dpo`, `held_out_repeats` (held-out pairs that are also training pairs), `beta`, `nll_weight` and `train_score` and `held_out_score`, each
+`base_tier` and why; for `preference`, `loss` (and `gamma`), `held_out_repeats` (held-out pairs that are also training pairs), `beta`, `nll_weight` and `train_score` and `held_out_score`, each
 `{accuracy, mean_margin, pairs, skipped}`: the share of pairs the tuned policy prefers the chosen
 answer on more than its reference does, and the mean margin in nats). The trainer's own training record, which holds every
 step's statistics, is published to the artifact store beside the adapter

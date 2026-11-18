@@ -121,6 +121,9 @@ pub fn pairs_from_group(prompt: &[u32], completions: &[Completion], rewards: &[f
     }
 }
 
+/// SimPO's target margin when none is named.
+pub const DEFAULT_SIMPO_GAMMA: f32 = 0.5;
+
 /// The loss a preference pair is trained with: each is a function of the two rows' summed log-probabilities (and,
 /// for the reference-based ones, the frozen reference's), so each reduces to one weight per row ([`pair_loss_term`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]

@@ -8,6 +8,7 @@ see CONTRIBUTING or AGENTS.md for the commit-message convention.
 
 ### Breaking Changes
 
+- `brain/train`'s `objective: dpo` is now `objective: preference`, with no alias (`dpo` is refused by the spec), and takes the pair loss as `loss: dpo | ipo | simpo | orpo` (default `dpo`, which trains exactly what `objective: dpo` did) and SimPO's margin as `gamma`; the result reports `objective: "preference"`, `loss` and `gamma`.
 - Training-record contract version 2: a policy-gradient rollout record carries the rollout's `reward` and its `group` (optionally `rollout` and `tokenizer_digest`) instead of a precomputed `advantage`, which is refused naming the field. The run computes each rollout's advantage from its group's rewards by `advantage_norm` (`mean-centred` default, `z-score`, `leave-one-out`; `PolicyGradientConfig::advantage_norm`, the `brain/train` param, `brain finetune --advantage-norm`). A group of one, two records of one rollout that disagree and two tokenizer digests in one run are refused by rule (`group_of_one`, `rollout_mismatch`, `mixed_tokenizer_digest`). A prepared dataset keeps `<split>.rollouts.json` in place of `<split>.adv.bin`. The contract's fixtures are `crates/data/tests/fixtures/training-records/v2`.
 
 ### Added

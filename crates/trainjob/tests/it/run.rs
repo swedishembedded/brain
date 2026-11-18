@@ -159,7 +159,7 @@ fn a_dpo_job_trains_a_qwen3_base_on_pairs_and_reports_how_much_more_it_prefers_t
     let rig = rig_qwen3("run-dpo", 16 << 30);
     let train = data_digest(&rig, &pairs());
     let data = json!({"train": {"digest": train.hex()}, "held_out": {"blob": "held_out"}}).to_string();
-    let params = json!({"base": BASE, "objective": "dpo", "beta": 0.1, "steps": 6, "rank": 2, "lr": 1e-1, "seed": 7, "max_block": 128, "data": data, "return_adapter": true});
+    let params = json!({"base": BASE, "objective": "preference", "beta": 0.1, "steps": 6, "rank": 2, "lr": 1e-1, "seed": 7, "max_block": 128, "data": data, "return_adapter": true});
     let frames = Frames::default();
     let held_out = pair("cad", "bed", "kiwi").into_bytes();
     let outcome = run(&rig, params, &[("held_out", held_out)], &frames).expect("the run");
@@ -167,7 +167,7 @@ fn a_dpo_job_trains_a_qwen3_base_on_pairs_and_reports_how_much_more_it_prefers_t
     assert_eq!(frames.steps().len(), 6, "{:?}", frames.events());
     assert!(frames.steps().iter().all(|f| f["loss"].is_number() && f.get("pg").is_none()));
     let report = &outcome.outputs;
-    assert_eq!((report["status"].as_str(), report["objective"].as_str()), (Some("completed"), Some("dpo")));
+    assert_eq!((report["status"].as_str(), report["objective"].as_str()), (Some("completed"), Some("preference")));
     assert_eq!((report["records"].as_u64(), report["steps_completed"].as_u64(), report["beta"].as_f64().map(|b| (b * 10.0).round())), (Some(4), Some(6), Some(1.0)));
     assert!(hex64(&report["adapter_digest"]) && hex64(&report["record_digest"]), "{report}");
     assert!(report["adapter_sha256"].as_str().is_some_and(|s| s.starts_with("sha256:")));
@@ -226,13 +226,35 @@ fn a_distill_job_copies_an_adapter_of_the_store_into_a_fresh_one() {
     assert_reservation_returned(&rig);
 }
 
+/// Every pair loss beside DPO trains through the same job: the margin over the pairs moves toward the chosen answers,
+/// and the result names the loss.
+#[test]
+fn a_preference_job_trains_with_every_pair_loss() {
+    let rig = rig_qwen3("run-pref-losses", 16 << 30);
+    let train = data_digest(&rig, &pairs());
+    for (loss, extra) in [("simpo", json!({"beta": 2.0, "gamma": 0.5})), ("orpo", json!({"beta": 1.0})), ("ipo", json!({"beta": 0.5}))] {
+        let mut params = json!({"base": BASE, "objective": "preference", "loss": loss, "steps": 20, "rank": 2, "lr": 1e-1, "seed": 7, "max_block": 128, "data": json!({"train": {"digest": train.hex()}}).to_string()});
+        params.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        let report = run(&rig, params, &[], &Frames::default()).unwrap_or_else(|e| panic!("{loss}: {e}")).outputs;
+        assert_eq!((report["objective"].as_str(), report["loss"].as_str()), (Some("preference"), Some(loss)), "{report}");
+        // A step's loss is one pair's, so the margin over every pair is the measure.
+        // ORPO's supervised term raises what the two answers share (the end of the turn) as well, so its margin to the
+        // start is not its measure here; that it learns its own objective is held in the SDK's and rl's tests.
+        if loss != "orpo" {
+            assert!(report["train_score"]["mean_margin"].as_f64().unwrap() > 0.0, "{loss}: {report}");
+        }
+        assert!(report["final_loss"].as_f64().is_some_and(f64::is_finite), "{loss}: {report}");
+    }
+    assert_reservation_returned(&rig);
+}
+
 /// A preference dataset is checked against the base's own tokenizer and template before a card is claimed, and a
 /// record that does not parse is refused by line.
 #[test]
 fn a_dpo_job_refuses_a_bad_pair_by_record_and_a_record_longer_than_max_block() {
     let rig = rig_qwen3("run-dpo-refuse", 16 << 30);
     let broken = [pair("cab", "bad", "wig"), r#"{"prompt": [], "chosen": {"role": "assistant", "content": "x"}}"#.to_string()].join("\n").into_bytes();
-    let params = |block: u32| json!({"base": BASE, "objective": "dpo", "steps": 1, "rank": 2, "max_block": block, "data": json!({"train": {"blob": "dataset"}}).to_string(), "return_adapter": true});
+    let params = |block: u32| json!({"base": BASE, "objective": "preference", "steps": 1, "rank": 2, "max_block": block, "data": json!({"train": {"blob": "dataset"}}).to_string(), "return_adapter": true});
     let why = run(&rig, params(128), &[("dataset", broken)], &Frames::default()).expect_err("the second record is malformed");
     assert!(why.contains("record 2") || why.contains(":2"), "{why}");
     let long = pair("cab", &"b".repeat(200), "wig").into_bytes();
