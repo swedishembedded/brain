@@ -2339,7 +2339,7 @@ mod tests {
     }
 
     /// An unset `--max-batch` is planned from the card, not a constant: Qwen3-4B bf16 on a 94 GiB budget takes the widest
-    /// batch (a queue of 24-48 agent sequences behind 16 rows cost 504s), a card that cannot hold a wide batch's
+    /// batch (a queue of 24-48 agent sequences behind 16 rows ended in gateway timeouts, HTTP 504), a card that cannot hold a wide batch's
     /// activations beside the weights takes a narrower one, the choice is recorded with its reason, and the operator's
     /// number is taken as given and not recorded.
     #[test]
