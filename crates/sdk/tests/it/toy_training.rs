@@ -66,7 +66,10 @@ fn the_toy_model_learns_a_cipher_it_is_tested_on_with_prompts_it_never_saw() {
     assert!(before < 0.05, "a random model does not know the cipher: {before}");
 
     let weights = dir.join("model.safetensors");
-    let outcome = ChatFineTune::from_pretrained(weights.to_str().unwrap()).dataset(&data).out_dir(dir.join("run")).rank(16).alpha(64.0).steps(500).lr(5e-3).grad_accum(4).seed(1).device(cpu()).run().unwrap();
+    // A recipe that learns the cipher from any seed, not one that happened to at seed 1: at lr 5e-3 and 500 steps the
+    // held-out accuracy ranged from 0 to 1 across training seeds on either CPU GEMM route, and a change of rounding
+    // order alone (the NEON GEMM) moved seed 1 from 0.94 to 0.69. At 2e-3 and 800 steps seeds 1-8 all reach 0.96.
+    let outcome = ChatFineTune::from_pretrained(weights.to_str().unwrap()).dataset(&data).out_dir(dir.join("run")).rank(16).alpha(64.0).steps(800).lr(2e-3).grad_accum(4).seed(1).device(cpu()).run().unwrap();
     let adapter = outcome.adapter.expect("a completed run exports its adapter");
     pipe.attach_adapter(adapter.to_str().unwrap()).unwrap();
     let after = accuracy(&pipe, held_out);
