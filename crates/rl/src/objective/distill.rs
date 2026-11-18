@@ -39,7 +39,7 @@
 //! [`model::Batch::LmWeighted`] passes over the SAME tokens, pass `k` using
 //! target `v_k` and weight `w_k = q_k·count_k / active` (`count_k` is the
 //! model's own `/count` weighted-CE divisor for that pass, cancelled exactly
-//! the way `rl::objective::dpo::pair_term`'s `w = β·σ(−u)·count` does, and
+//! the way `rl::objective::dpo::pair_loss_term`'s `w = β·σ(−u)·count` does, and
 //! `active` the number of teacher-scored positions, which makes the loss a
 //! mean), and let [`model::Model::backward`]'s documented
 //! ACCUMULATE-not-overwrite contract sum the `K` passes' gradients: `Σ_k
@@ -192,7 +192,7 @@ impl model::training_plan::PlanCheck for DistillConfig {
 /// Pass `k`'s weight for one position, scaled by `count` (the model's own `/count` weighted-CE
 /// divisor of that pass, cancelled exactly - see the module doc comment's derivation) and divided
 /// by `active`, the number of teacher-scored positions, so the loss is their mean. `prob` is pure
-/// teacher data, no current-policy readback needed (unlike `rl::objective::dpo::pair_term`/
+/// teacher data, no current-policy readback needed (unlike `rl::objective::dpo::pair_loss_term`/
 /// `rl::objective::grpo::token_term`, both of which DO need it).
 pub fn topk_weight(prob: f32, count: f32, active: f32) -> f32 {
     prob * count / active
