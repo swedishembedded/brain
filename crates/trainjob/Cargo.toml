@@ -23,7 +23,6 @@ blake3.workspace = true
 libc.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true
-uuid.workspace = true
 
 [dev-dependencies]
 # The served timeline model a consolidated job hands over to.
