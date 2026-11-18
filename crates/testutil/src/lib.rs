@@ -446,8 +446,9 @@ mod tests {
 
     #[test]
     fn defaults_to_repo_root_testdata() {
-        // SAFETY: single-threaded within this test; no other test in this crate
-        // touches BRAIN_TESTDATA.
+        // The variable is process-wide and the tests of this binary run in parallel: hold the order lock.
+        let _env = env_lock();
+        // SAFETY: every test of this binary that touches BRAIN_TESTDATA holds `env_lock`.
         unsafe {
             std::env::remove_var("BRAIN_TESTDATA");
         }
@@ -478,6 +479,8 @@ mod tests {
 
     #[test]
     fn honors_brain_testdata_override() {
+        // The variable is process-wide and the tests of this binary run in parallel: hold the order lock.
+        let _env = env_lock();
         // SAFETY: see above.
         unsafe {
             std::env::set_var("BRAIN_TESTDATA", "/scratch/td");
@@ -490,6 +493,8 @@ mod tests {
 
     #[test]
     fn empty_override_falls_back_to_default() {
+        // The variable is process-wide and the tests of this binary run in parallel: hold the order lock.
+        let _env = env_lock();
         // SAFETY: see above.
         unsafe {
             std::env::set_var("BRAIN_TESTDATA", "");
@@ -503,8 +508,10 @@ mod tests {
 
     #[test]
     fn model_dir_joins_the_models_root_with_vendor_and_repo() {
-        // SAFETY: single-threaded within this test; capture and restore the
-        // real value so no other test in this binary is left disturbed.
+        // The variable is process-wide and the tests of this binary run in parallel: hold the order lock.
+        let _env = env_lock();
+        // SAFETY: every test of this binary that touches BRAIN_MODELS_DIR holds `env_lock`; the real value is
+        // restored so no later test is left disturbed.
         let orig = std::env::var_os("BRAIN_MODELS_DIR");
         unsafe {
             std::env::set_var("BRAIN_MODELS_DIR", "/scratch/models");
@@ -523,6 +530,8 @@ mod tests {
 
     #[test]
     fn model_dir_rejects_a_reference_with_no_vendor() {
+        // The variable is process-wide and the tests of this binary run in parallel: hold the order lock.
+        let _env = env_lock();
         let orig = std::env::var_os("BRAIN_MODELS_DIR");
         unsafe {
             std::env::set_var("BRAIN_MODELS_DIR", "/scratch/models");
