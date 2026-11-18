@@ -54,7 +54,7 @@ pub mod memory;
 /// Process-wide runtime options a backend honours when it opens a device (graph capture, the stream-ordered pool,
 /// the freed-block retention cap), set by the application from its flags.
 pub mod runtime;
-pub use memory::{AllocPolicy, DeviceOutOfMemory, MemAdvice, MemoryLimits, MemoryUsage, PlacementFacts, PrefetchTarget};
+pub use memory::{AllocPolicy, DeviceOutOfMemory, MemAdvice, MemoryLimits, MemoryTally, MemoryUsage, PlacementFacts, PrefetchTarget};
 
 // The neutral handles and the `Backend` trait are `Send + Sync` on native (the
 // CPU backend hands disjoint buffer sub-ranges to rayon workers, and models cross

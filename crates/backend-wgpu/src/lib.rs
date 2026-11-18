@@ -524,8 +524,7 @@ struct AllocTally {
     last: std::sync::Mutex<(String, u64)>,
     /// Bytes in buffers a handle still owns ([`TrackedBuffer`] counts itself in and out), and the most they have been
     /// since the peak was last reset: the device memory telemetry of [`backend_api::MemoryUsage`].
-    live: std::sync::atomic::AtomicU64,
-    peak_live: std::sync::atomic::AtomicU64,
+    memory: backend_api::MemoryTally,
 }
 
 impl AllocTally {
@@ -538,12 +537,6 @@ impl AllocTally {
             last.0.push_str(label);
             last.1 = bytes;
         }
-    }
-
-    fn add_live(&self, bytes: u64) {
-        use std::sync::atomic::Ordering::Relaxed;
-        let live = self.live.fetch_add(bytes, Relaxed) + bytes;
-        self.peak_live.fetch_max(live, Relaxed);
     }
 
     fn describe(&self) -> String {
@@ -1132,7 +1125,7 @@ pub struct TrackedBuffer {
 impl Drop for TrackedBuffer {
     fn drop(&mut self) {
         self.pending.fetch_add(self.buf.size(), std::sync::atomic::Ordering::Relaxed);
-        self.tally.live.fetch_sub(self.buf.size(), std::sync::atomic::Ordering::Relaxed);
+        self.tally.memory.sub(self.buf.size());
     }
 }
 
@@ -2522,7 +2515,7 @@ impl WgpuBackend {
              Build the object through `gpu_core::Transient` (or wrap the body in \
              `gpu_core::reclaiming`), which drops first and polls after."
         );
-        self.shared.alloc.add_live(buf.size());
+        self.shared.alloc.memory.add(buf.size());
         TrackedBuffer { buf, pending: self.shared.pending_reclaim_bytes.clone(), tally: self.shared.alloc.clone() }
     }
 
@@ -3158,15 +3151,10 @@ impl Backend for WgpuBackend {
     }
     /// The device's live buffers, plus those dropped and awaiting reclaim (still allocated until the next poll).
     fn memory_usage(&self) -> Option<backend_api::MemoryUsage> {
-        use std::sync::atomic::Ordering::Relaxed;
-        let tally = &self.shared.alloc;
-        let live = tally.live.load(Relaxed);
-        Some(backend_api::MemoryUsage { live, reserved: live + self.shared.pending_reclaim_bytes.load(Relaxed), peak_live: tally.peak_live.load(Relaxed).max(live) })
+        Some(self.shared.alloc.memory.usage(self.shared.pending_reclaim_bytes.load(std::sync::atomic::Ordering::Relaxed)))
     }
     fn reset_memory_peak(&self) {
-        use std::sync::atomic::Ordering::Relaxed;
-        let tally = &self.shared.alloc;
-        tally.peak_live.store(tally.live.load(Relaxed), Relaxed);
+        self.shared.alloc.memory.reset_peak();
     }
 }
 

@@ -73,32 +73,15 @@ struct BufInner {
     data: UnsafeCell<Vec<u32>>,
     /// The handle family's allocation tally, which counts this buffer's bytes in at creation and growth and out at
     /// drop.
-    tally: Arc<AllocTally>,
+    tally: Arc<backend_api::MemoryTally>,
 }
 
 impl Drop for BufInner {
     fn drop(&mut self) {
-        self.tally.sub(self.data.get_mut().len());
+        self.tally.sub(4 * self.data.get_mut().len() as u64);
     }
 }
 
-/// The bytes a handle family's buffers hold now and the most they have held since the peak was last reset: the
-/// [`backend_api::MemoryUsage`] of the CPU backend, whose "device memory" is the host memory its buffers own.
-#[derive(Default)]
-struct AllocTally {
-    live: AtomicU64,
-    peak_live: AtomicU64,
-}
-
-impl AllocTally {
-    fn add(&self, words: usize) {
-        let live = self.live.fetch_add(4 * words as u64, Ordering::Relaxed) + 4 * words as u64;
-        self.peak_live.fetch_max(live, Ordering::Relaxed);
-    }
-    fn sub(&self, words: usize) {
-        self.live.fetch_sub(4 * words as u64, Ordering::Relaxed);
-    }
-}
 // A buffer's bytes are mutated single-threaded outside `submit`; inside `submit`
 // the dispatcher hands disjoint sub-ranges to workers (upheld invariant).
 unsafe impl Send for BufInner {}
@@ -111,18 +94,18 @@ pub struct CpuBuffer {
 }
 
 impl CpuBuffer {
-    fn with_words(words: Vec<u32>, tally: &Arc<AllocTally>) -> CpuBuffer {
-        tally.add(words.len());
+    fn with_words(words: Vec<u32>, tally: &Arc<backend_api::MemoryTally>) -> CpuBuffer {
+        tally.add(4 * words.len() as u64);
         CpuBuffer { inner: Arc::new(BufInner { data: UnsafeCell::new(words), tally: tally.clone() }) }
     }
-    fn zeros(n: usize, tally: &Arc<AllocTally>) -> CpuBuffer {
+    fn zeros(n: usize, tally: &Arc<backend_api::MemoryTally>) -> CpuBuffer {
         CpuBuffer::with_words(vec![0u32; n.max(1)], tally)
     }
     /// Grow the buffer to at least `words` words (zero-filled), counting the growth in.
     fn grow_to(&self, words: usize) {
         let w = self.words_mut();
         if w.len() < words {
-            self.inner.tally.add(words - w.len());
+            self.inner.tally.add(4 * (words - w.len()) as u64);
             w.resize(words, 0);
         }
     }
@@ -171,7 +154,7 @@ struct CpuShared {
     /// is this `Vec`'s index at registration time.
     natives: Mutex<Vec<NativeEntry>>,
     /// Bytes held by every buffer of this handle family (a handle and its shares).
-    tally: Arc<AllocTally>,
+    tally: Arc<backend_api::MemoryTally>,
 }
 
 /// Relaxed device-op counters. `submits`/`readbacks` are per call;
@@ -1532,13 +1515,10 @@ impl Backend for CpuBackend {
     }
     /// The bytes this handle family's buffers hold; a dropped buffer is freed at once, so `reserved` is `live`.
     fn memory_usage(&self) -> Option<backend_api::MemoryUsage> {
-        let tally = &self.shared.tally;
-        let live = tally.live.load(Ordering::Relaxed);
-        Some(backend_api::MemoryUsage { live, reserved: live, peak_live: tally.peak_live.load(Ordering::Relaxed).max(live) })
+        Some(self.shared.tally.usage(0))
     }
     fn reset_memory_peak(&self) {
-        let tally = &self.shared.tally;
-        tally.peak_live.store(tally.live.load(Ordering::Relaxed), Ordering::Relaxed);
+        self.shared.tally.reset_peak();
     }
 
     fn storage(&self, n: u64) -> DeviceBuffer {

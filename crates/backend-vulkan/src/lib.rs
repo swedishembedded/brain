@@ -203,6 +203,9 @@ struct CmdSlot {
 /// code holds its buffers for the whole run.
 pub struct VkOwnedBuffer {
     inner: VkBuffer,
+    /// The handle family's allocation tally this buffer's bytes are counted into at creation and out of at drop
+    /// ([`backend_api::MemoryUsage`]).
+    tally: Arc<backend_api::MemoryTally>,
     /// The device this buffer belongs to, so dropping it can hand the handles
     /// back (`VkContext::bury`). Keeping the `Arc` alive also makes the
     /// buffer-outlives-device ordering impossible to get wrong.
@@ -241,6 +244,7 @@ impl Drop for VkOwnedBuffer {
         // them, and a `Copy` `VkBuffer` would make an accidental double-free a
         // silent one-character mistake.
         let VkBuffer { buffer, memory, size, host_visible } = self.inner;
+        self.tally.sub(size);
         self.ctx.bury(VkBuffer { buffer, memory, size, host_visible });
     }
 }
@@ -551,6 +555,9 @@ pub struct VulkanBackend {
     /// on another, which matches every other piece of handle-local command-
     /// stream state this struct already keeps separate per `from_shared` call.
     native: Mutex<Vec<coopmat::NativeEntry>>,
+    /// The bytes this handle's buffers hold ([`Backend::memory_usage`]). A `share()` sibling counts into its parent's;
+    /// a handle built on its own, `new_like` included, starts its own.
+    tally: Arc<backend_api::MemoryTally>,
 }
 
 // ash handles are Send+Sync; all interior mutation goes through the Mutexes above.
@@ -789,7 +796,7 @@ impl VulkanBackend {
         }
         .limits
         .max_storage_buffer_range as u64;
-        Self::from_shared(ctx, Arc::new(pipelines), caps, max_storage_binding)
+        Self::from_shared(ctx, Arc::new(pipelines), caps, max_storage_binding, Arc::default())
     }
 
     /// Compile `kernels` into a [`VkPipelineSet`] against an already-built
@@ -861,6 +868,7 @@ impl VulkanBackend {
         pipelines: Arc<VkPipelineSet>,
         caps: backend_api::DeviceCaps,
         max_storage_binding: u64,
+        tally: Arc<backend_api::MemoryTally>,
     ) -> Result<VulkanBackend, String> {
         let pool = unsafe { new_pool(&ctx.device)? };
         let profile = VkProfile::new(pipelines.pipelines.len());
@@ -904,6 +912,7 @@ impl VulkanBackend {
             ring: Mutex::new(ring),
             ring_cursor: AtomicU64::new(0),
             native: Mutex::new(Vec::new()),
+            tally,
         })
     }
 
@@ -1122,10 +1131,16 @@ impl VulkanBackend {
 
     // ---- buffers ----
 
+    /// Hand a fresh device buffer to its owner, counting its bytes into this handle family's tally.
+    fn own(&self, inner: VkBuffer) -> VkOwnedBuffer {
+        self.tally.add(inner.size);
+        VkOwnedBuffer { inner, tally: self.tally.clone(), ctx: self.ctx.clone() }
+    }
+
     pub fn storage(&self, n: u64) -> VkOwnedBuffer {
         let b = self.ctx.storage(n * 4, vk::BufferUsageFlags::empty());
         self.ctx.zero(&b); // zero-init like wgpu/CPU storage
-        VkOwnedBuffer { inner: b, ctx: self.ctx.clone() }
+        self.own(b)
     }
 
     pub fn storage_init(&self, _name: &str, data: &[f32]) -> VkOwnedBuffer {
@@ -1135,7 +1150,7 @@ impl VulkanBackend {
         } else {
             self.ctx.upload(&b, bytemuck::cast_slice(data)); // fully covers the buffer
         }
-        VkOwnedBuffer { inner: b, ctx: self.ctx.clone() }
+        self.own(b)
     }
 
     pub fn buffer(&self, _label: &str, size: u64, usage: BufUsage) -> VkOwnedBuffer {
@@ -1146,7 +1161,7 @@ impl VulkanBackend {
         };
         let b = self.ctx.storage(size.max(4), extra);
         self.ctx.zero(&b);
-        VkOwnedBuffer { inner: b, ctx: self.ctx.clone() }
+        self.own(b)
     }
 
     pub fn uniform_dynamic(&self, len: usize) -> VkOwnedBuffer {
@@ -1156,7 +1171,7 @@ impl VulkanBackend {
         let size = ((len * 4).div_ceil(16) * 16).max(16) as u64;
         let b = self.ctx.storage_host(size, vk::BufferUsageFlags::UNIFORM_BUFFER);
         self.ctx.zero(&b);
-        VkOwnedBuffer { inner: b, ctx: self.ctx.clone() }
+        self.own(b)
     }
 
     pub fn write(&self, buf: &VkOwnedBuffer, data: &[u32]) {
@@ -2023,7 +2038,7 @@ impl backend_api::WeakBackend for WeakVulkan {
     fn upgrade(&self) -> Option<Box<dyn Backend>> {
         let pipelines = self.pipelines.upgrade()?;
         let ctx = pipelines.ctx.clone();
-        let backend = VulkanBackend::from_shared(ctx, pipelines, self.caps.clone(), self.max_storage_binding)
+        let backend = VulkanBackend::from_shared(ctx, pipelines, self.caps.clone(), self.max_storage_binding, Arc::default())
             .unwrap_or_else(|e| panic!("vulkan: upgrading a shared device handle: {e}"));
         Some(Box::new(backend))
     }
@@ -2043,7 +2058,7 @@ impl Backend for VulkanBackend {
     /// built a whole new device instead of truly sharing one (see
     /// [`VkPipelineSet`]'s doc comment).
     fn share(&self) -> Option<Box<dyn Backend>> {
-        let backend = Self::from_shared(self.ctx.clone(), self.pipelines.clone(), self.caps.clone(), self.max_storage_binding)
+        let backend = Self::from_shared(self.ctx.clone(), self.pipelines.clone(), self.caps.clone(), self.max_storage_binding, self.tally.clone())
             .unwrap_or_else(|e| panic!("vulkan share: {e}"));
         Some(Box::new(backend))
     }
@@ -2058,7 +2073,7 @@ impl Backend for VulkanBackend {
     fn new_like(&self, kernels: &[(&str, &str)]) -> Option<Box<dyn Backend>> {
         let pipelines = Self::compile_pipeline_set(self.ctx.clone(), kernels)
             .unwrap_or_else(|e| panic!("vulkan new_like: {e}"));
-        let backend = Self::from_shared(self.ctx.clone(), Arc::new(pipelines), self.caps.clone(), self.max_storage_binding)
+        let backend = Self::from_shared(self.ctx.clone(), Arc::new(pipelines), self.caps.clone(), self.max_storage_binding, Arc::default())
             .unwrap_or_else(|e| panic!("vulkan new_like: {e}"));
         Some(Box::new(backend))
     }
@@ -2138,6 +2153,14 @@ impl Backend for VulkanBackend {
         }
     }
 
+    /// The bytes this handle family's buffers hold; a dropped buffer's device memory is only destroyed once the device
+    /// is done with it ([`VkContext::bury`]), and those bytes are `reserved` beyond `live` until then.
+    fn memory_usage(&self) -> Option<backend_api::MemoryUsage> {
+        Some(self.tally.usage(self.ctx.buried_bytes()))
+    }
+    fn reset_memory_peak(&self) {
+        self.tally.reset_peak();
+    }
     fn caps(&self) -> backend_api::DeviceCaps {
         self.caps.clone()
     }

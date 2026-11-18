@@ -9,4 +9,5 @@
 
 mod async_submit;
 mod deferred_reclaim;
+mod memory_usage;
 mod perf_contract;

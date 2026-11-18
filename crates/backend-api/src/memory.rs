@@ -245,6 +245,45 @@ pub struct MemoryUsage {
     pub peak_live: u64,
 }
 
+/// The allocation accounting every backend that counts its buffers keeps ([`MemoryUsage`]'s source): bytes in buffers
+/// some handle still owns, and the most they have been since the peak was last reset.
+///
+/// One tally is shared (`Arc`) by a handle and every handle it `share`s; a buffer counts itself in at creation (and
+/// growth) and out at drop, whichever handle drops it, so the figure is the family's own and not the card's.
+#[derive(Debug, Default)]
+pub struct MemoryTally {
+    live: std::sync::atomic::AtomicU64,
+    peak_live: std::sync::atomic::AtomicU64,
+}
+
+impl MemoryTally {
+    /// Count `bytes` of a new or grown buffer in.
+    pub fn add(&self, bytes: u64) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let live = self.live.fetch_add(bytes, Relaxed) + bytes;
+        self.peak_live.fetch_max(live, Relaxed);
+    }
+
+    /// Count `bytes` of a dropped buffer out.
+    pub fn sub(&self, bytes: u64) {
+        self.live.fetch_sub(bytes, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// The tally as a [`MemoryUsage`]. `held_back` is what the backend still holds from allocations already released
+    /// (a block cache, buffers awaiting reclaim): it is `reserved` beyond `live`, zero where a drop frees at once.
+    pub fn usage(&self, held_back: u64) -> MemoryUsage {
+        use std::sync::atomic::Ordering::Relaxed;
+        let live = self.live.load(Relaxed);
+        MemoryUsage { live, reserved: live + held_back, peak_live: self.peak_live.load(Relaxed).max(live) }
+    }
+
+    /// Start a new peak from the current live bytes.
+    pub fn reset_peak(&self) {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.peak_live.store(self.live.load(Relaxed), Relaxed);
+    }
+}
+
 /// A device allocation the driver refused for lack of memory.
 ///
 /// The payload a backend unwinds with (`std::panic::resume_unwind`) when an
@@ -290,5 +329,32 @@ impl std::fmt::Display for DeviceOutOfMemory {
             return write!(f, "device out of memory for {}: {}", self.what, self.detail);
         }
         write!(f, "device out of memory allocating {} bytes for {}: {}", self.bytes, self.what, self.detail)
+    }
+}
+
+#[cfg(test)]
+mod tally_tests {
+    use super::*;
+
+    #[test]
+    fn live_follows_adds_and_subs_and_the_peak_keeps_the_high_water_mark() {
+        let t = MemoryTally::default();
+        t.add(100);
+        t.add(50);
+        t.sub(120);
+        let u = t.usage(0);
+        assert_eq!((u.live, u.reserved, u.peak_live), (30, 30, 150));
+    }
+
+    #[test]
+    fn reset_peak_restarts_from_the_live_bytes_and_reserved_counts_what_is_held_back() {
+        let t = MemoryTally::default();
+        t.add(200);
+        t.sub(150);
+        t.reset_peak();
+        assert_eq!(t.usage(0).peak_live, 50);
+        t.add(10);
+        let u = t.usage(64);
+        assert_eq!((u.live, u.reserved, u.peak_live), (60, 124, 60));
     }
 }
