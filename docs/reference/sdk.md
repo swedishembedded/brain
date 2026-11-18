@@ -544,6 +544,28 @@ hold several. The first loss is half the weight of each example (`1 - sigmoid(0)
 the second below it. Resume, provenance (regime `"feedback"`), `continue_from`, `base_format` and `placed` are as for
 `PreferenceFineTune`. `dataset_report::check_dataset` takes `DatasetKind::Feedback`.
 
+### Distilling a policy into an adapter
+
+`brain::DistillFineTune` (also `study`) trains a LoRA adapter toward a teacher's top-K next-token distributions at the
+supervised positions of `generic-messages-v2` records (`rl::objective::distill::DistillTopK`, forward KL to the
+renormalised top-K). The teacher is a policy of the same base: `DistillTeacher::Base`, `Start` (the base with the
+`.continue_from` adapter) or `Adapter(path)`; it scores every record once before the first step, at fp32.
+
+```rust
+let outcome = brain::DistillFineTune::from_pretrained("Qwen/Qwen3-4B")
+    .dataset("prompts.jsonl")
+    .teacher(brain::DistillTeacher::Adapter("adapters/specialist.safetensors".into()))
+    .top_k(16)
+    .out_dir("runs/distill-1")
+    .steps(200)
+    .run()?;
+```
+
+`initial_loss` and `final_loss` are the student's mean cross-entropy against the teacher's top-K per scored position
+(the KL plus the teacher's entropy, a constant of the run); `teacher_adapter` is the teacher adapter's digest. Resume,
+`base_format`, `placed` and provenance (regime `"distill"`, the teacher in its hyperparameters) are as for
+`PreferenceFineTune`. A student continued from an adapter and taught by the base moves back toward the base.
+
 ### Policy-gradient fine-tuning on collected rollouts
 
 `ChatFineTune::policy_gradient(config)` (the `study` feature; every architecture whose trainer declares `ChatTrainer::POLICY_GRADIENT`: `qwen3`, `qwen35`, `ricursive`) trains the LoRA adapter with the clipped

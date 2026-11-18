@@ -71,6 +71,7 @@ pub fn implied_defaults() -> Map<String, Value> {
         ("keep_reasoning", Some(json!(brain::DEFAULT_DPO_KEEP_REASONING))),
         ("desirable_weight", Some(float(brain::DEFAULT_KTO_DESIRABLE_WEIGHT))),
         ("undesirable_weight", Some(float(brain::DEFAULT_KTO_UNDESIRABLE_WEIGHT))),
+        ("top_k", Some(json!(brain::DEFAULT_DISTILL_TOP_K))),
     ];
     declared.into_iter().filter_map(|(name, v)| Some((name.to_string(), v?))).collect()
 }
@@ -96,7 +97,7 @@ fn spec_without_defaults() -> ActionSpec {
         .cancellable()
         .param(ParamSpec::new("base", ParamType::Str, "the base model, `<vendor>/<repo>` in the server's model store").required())
         .param(ParamSpec::new("data", ParamType::Str, "JSON document naming the datasets: {\"train\": SRC, \"held_out\"?, \"held_out_text\"?, \"monitor\"?, \"start_adapter\"?, \"replay\"?: [SRC], \"weighted_replay\"?: [{SRC fields, \"share\"}]} where SRC is {\"digest\": \"<blake3 hex>\"} (an artifact of the server's store) or {\"blob\": \"<input name>\"} (an input blob of this call)").required())
-        .param(ParamSpec::new("objective", ParamType::Enum(vec!["sft".into(), "policy_gradient".into(), "dpo".into(), "feedback".into()]), "supervised imitation; the clipped policy gradient on rollout records that carry a reward and group (training-record contract v2) or a teacher context; direct preference optimization on `generic-preference-v1` pairs (`dataset` and `held_out` hold pairs); or KTO on `generic-feedback-v1` desirable and undesirable completions").default(json!("sft")))
+        .param(ParamSpec::new("objective", ParamType::Enum(vec!["sft".into(), "policy_gradient".into(), "dpo".into(), "feedback".into(), "distill".into()]), "supervised imitation; the clipped policy gradient on rollout records that carry a reward and group (training-record contract v2) or a teacher context; direct preference optimization on `generic-preference-v1` pairs (`dataset` and `held_out` hold pairs); KTO on `generic-feedback-v1` desirable and undesirable completions; or top-K distillation from a teacher policy of the same base on the supervised turns of chat records").default(json!("sft")))
         .param(ParamSpec::new("steps", ParamType::Int, "optimiser steps").default(json!(100)).min(1.0).max(1_000_000.0).step(1.0))
         .param(ParamSpec::new("rank", ParamType::Int, "LoRA rank of a fresh adapter; a continued adapter keeps its own (default 8)").min(1.0).max(256.0).step(1.0))
         .param(optional_f("alpha", "LoRA alpha (default 2 x rank)", 0.0, 1024.0))
@@ -128,7 +129,8 @@ fn spec_without_defaults() -> ActionSpec {
         .param(ParamSpec::new("loss_agg", ParamType::Enum(vec!["seq-mean".into(), "token-sum".into(), "constant-length".into()]), "policy gradient: how the token terms are normalised: `seq-mean` (each sequence by its own token count), `token-sum` (every token of a step by the step's count) or `constant-length` (each sequence's sum by loss_agg_length, averaged over the sequences: Dr. GRPO)"))
         .param(ParamSpec::new("loss_agg_length", ParamType::Int, "policy gradient with loss_agg constant-length: the constant, in tokens, every sequence's token sum is divided by (default max_block)").min(1.0).max(1_048_576.0).step(1.0))
         .param(optional_f("temperature", "policy gradient: the temperature the rollouts were sampled at", 0.0, 100.0))
-        .param(ParamSpec::new("teacher", ParamType::Enum(vec!["base".into(), "start".into()]), "policy gradient with teacher contexts: the frozen policy that scores the student's tokens in the privileged context"))
+        .param(ParamSpec::new("teacher", ParamType::Str, "policy gradient with teacher contexts: the frozen policy that scores the student's tokens in the privileged context, `base` or `start`; distill: the policy of the same base that teaches, `base`, `start` (the start_adapter) or `adapter:<blake3 digest>` (an adapter in the artifact store)"))
+        .param(ParamSpec::new("top_k", ParamType::Int, "distill: the teacher's most likely tokens kept per position (default 16)").min(1.0).max(256.0).step(1.0))
         .param(optional_f("advantage_bound", "policy gradient with teacher contexts: each token's advantage is clipped to [-bound, bound]", 0.0, 1e6))
         .param(optional_f("sequence_advantage_cap", "policy gradient with teacher contexts: the most the magnitudes of a sequence's token advantages may sum to", 0.0, 1e9))
         .param(ParamSpec::new("truncated", ParamType::Enum(brain::TruncatedRollouts::ALL.iter().map(|t| t.name().to_string()).collect()), "policy gradient: what a rollout marked `truncated` does: `mask` (never trained, its reward takes no part in its group: DAPO's overlong filtering) or `keep` (trained, its reward counted)"))
@@ -290,6 +292,7 @@ pub enum Objective {
     PolicyGradient,
     Dpo,
     Feedback,
+    Distill,
 }
 
 impl Objective {
@@ -300,6 +303,7 @@ impl Objective {
             Objective::PolicyGradient => "policy_gradient",
             Objective::Dpo => "dpo",
             Objective::Feedback => "feedback",
+            Objective::Distill => "distill",
         }
     }
 
@@ -308,7 +312,7 @@ impl Objective {
     pub fn rows_per_step(self) -> u32 {
         match self {
             Objective::Dpo | Objective::Feedback => brain::PAIR_ROWS,
-            Objective::Sft | Objective::PolicyGradient => 1,
+            Objective::Sft | Objective::PolicyGradient | Objective::Distill => 1,
         }
     }
 }
@@ -352,6 +356,7 @@ pub struct Params {
     pub loss_agg_length: Option<u32>,
     pub temperature: Option<f32>,
     pub teacher: Option<String>,
+    pub top_k: Option<u32>,
     pub advantage_bound: Option<f32>,
     pub sequence_advantage_cap: Option<f32>,
     pub advantage_norm: Option<String>,
@@ -403,6 +408,12 @@ impl Request {
         .into_iter()
         .filter_map(|(named, name)| named.then_some(name))
         .collect();
+        if params.objective != Objective::Distill && params.top_k.is_some() {
+            return refused(&format!("top_k configures distillation; the objective is {}", params.objective.name()));
+        }
+        if params.objective == Objective::Distill {
+            check_distill(&params, &data, &pg_named)?;
+        }
         if params.objective == Objective::Sft && !pg_named.is_empty() {
             return refused(&format!("{} configure the policy gradient; the objective is sft", pg_named.join(", ")));
         }
@@ -466,6 +477,57 @@ pub(crate) fn check_attached(data: &DataRefs, inv: &Invocation) -> Result<(), St
     }
     if let Some(extra) = inv.blobs.keys().find(|k| !named.contains(&k.as_str())) {
         return Err(format!("data: the input blob \"{extra}\" is attached but the document does not use it"));
+    }
+    Ok(())
+}
+
+/// The teacher of a distillation, as a request names it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DistillTeacherRef {
+    Base,
+    /// The start_adapter, which the request must carry.
+    Start,
+    /// An adapter of the artifact store.
+    Adapter(Digest),
+}
+
+impl DistillTeacherRef {
+    /// `base`, `start` or `adapter:<blake3 digest>`; omitted, the base.
+    pub fn parse(teacher: Option<&str>) -> Result<DistillTeacherRef, String> {
+        match teacher {
+            None | Some("base") => Ok(DistillTeacherRef::Base),
+            Some("start") => Ok(DistillTeacherRef::Start),
+            Some(other) => match other.strip_prefix("adapter:") {
+                Some(digest) => Digest::parse(digest).map(DistillTeacherRef::Adapter).map_err(|e| format!("train: teacher: {e}")),
+                None => Err(format!("train: teacher {other:?} is none of base, start, adapter:<blake3 digest>")),
+            },
+        }
+    }
+}
+
+/// What a distillation does not take, refused by name: every policy-gradient setting but `teacher`, the held-out,
+/// monitoring and replay sets, and the monitoring settings; a `start` teacher needs the start_adapter it names.
+fn check_distill(params: &Params, data: &DataRefs, pg_named: &[&str]) -> Result<(), String> {
+    let mut unsupported: Vec<&str> = pg_named.iter().copied().filter(|n| *n != "teacher").collect();
+    let sets = [
+        (data.held_out.is_some(), "held_out"),
+        (data.held_out_text.is_some(), "held_out_text"),
+        (data.monitor.is_some(), "monitor"),
+        (!data.replay.is_empty(), "replay"),
+        (!data.weighted_replay.is_empty(), "weighted_replay"),
+        (params.replay_share.is_some(), "replay_share"),
+        (params.weight_decay.is_some(), "weight_decay"),
+        (params.eval_every > 0, "eval_every"),
+        (params.patience > 0, "patience"),
+        (params.keep_evaluations, "keep_evaluations"),
+        (params.pack_answers, "pack_answers"),
+    ];
+    unsupported.extend(sets.into_iter().filter_map(|(named, name)| named.then_some(name)));
+    if !unsupported.is_empty() {
+        return Err(format!("train: {} are not settings of the distill objective (it takes dataset and start_adapter, teacher, top_k, thinking and the optimiser settings)", unsupported.join(", ")));
+    }
+    if DistillTeacherRef::parse(params.teacher.as_deref())? == DistillTeacherRef::Start && data.start_adapter.is_none() {
+        return Err("train: teacher start is the adapter the run starts from; name data.start_adapter".to_string());
     }
     Ok(())
 }
@@ -737,6 +799,36 @@ mod tests {
         assert!(request(json!({"base": "a/b", "data": held, "objective": "feedback"}), &[]).unwrap_err().contains("held_out"));
         let e = request(json!({"base": "a/b", "data": data, "objective": "dpo", "desirable_weight": 2.0}), &[]).unwrap_err();
         assert!(e.contains("desirable_weight") && e.contains("feedback") && e.contains("dpo"), "{e}");
+    }
+
+    /// A distillation names its teacher (the base by default, the start_adapter, or an adapter of the store by digest)
+    /// and its top-K, and refuses another objective's settings by name.
+    #[test]
+    fn a_distill_request_names_its_teacher_and_refuses_the_rest_by_name() {
+        let plain = json!({"train": {"digest": digest(1)}}).to_string();
+        let started = json!({"train": {"digest": digest(1)}, "start_adapter": {"digest": digest(3)}}).to_string();
+        let ask = |data: &str, extra: serde_json::Value| {
+            let mut p = json!({"base": "a/b", "data": data, "objective": "distill"});
+            p.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            request(p, &[])
+        };
+        let teacher = |r: Request| DistillTeacherRef::parse(r.params.teacher.as_deref()).unwrap();
+        assert_eq!(teacher(ask(&plain, json!({})).unwrap()), DistillTeacherRef::Base);
+        assert_eq!(teacher(ask(&started, json!({"teacher": "start", "top_k": 8})).unwrap()), DistillTeacherRef::Start);
+        assert_eq!(teacher(ask(&plain, json!({"teacher": format!("adapter:{}", digest(9))})).unwrap()), DistillTeacherRef::Adapter(Digest::parse(&digest(9)).unwrap()));
+        assert!(ask(&plain, json!({"teacher": "start"})).unwrap_err().contains("start_adapter"));
+        for bad in ["adapter:/etc/passwd", "adapter:", "teacher", "adapter:../x"] {
+            assert!(ask(&plain, json!({"teacher": bad})).is_err(), "{bad}");
+        }
+        for (extra, named) in [(json!({"kl_beta": 0.1}), "kl_beta"), (json!({"beta": 0.1}), "beta"), (json!({"eval_every": 2}), "eval_every"), (json!({"top_k": 0}), "top_k")] {
+            assert!(ask(&plain, extra).is_err(), "{named}");
+        }
+        let held = json!({"train": {"digest": digest(1)}, "held_out": {"digest": digest(2)}}).to_string();
+        assert!(ask(&held, json!({})).unwrap_err().contains("held_out"));
+        let e = request(json!({"base": "a/b", "data": plain, "top_k": 8}), &[]).unwrap_err();
+        assert!(e.contains("top_k") && e.contains("sft"), "{e}");
+        let e = request(json!({"base": "a/b", "data": plain, "objective": "policy_gradient", "teacher": "adapter:00"}), &[]).unwrap_err();
+        assert!(e.contains("teacher"), "the policy gradient's teacher is base or start: {e}");
     }
 
     /// A policy-gradient setting the trainer would refuse is refused when the job is submitted, naming it.

@@ -186,6 +186,28 @@ fn a_feedback_job_trains_a_qwen3_base_on_judged_completions() {
     assert_reservation_returned(&rig);
 }
 
+/// A distillation job takes its teacher from the artifact store by digest: an adapter an sft job published teaches a
+/// fresh adapter of the same base, whose cross-entropy to it falls; the result names the teacher by its digest.
+#[test]
+fn a_distill_job_copies_an_adapter_of_the_store_into_a_fresh_one() {
+    let rig = rig_qwen3("run-distill", 16 << 30);
+    let train = data_digest(&rig, &crate::support::plain());
+    let data = json!({"train": {"digest": train.hex()}}).to_string();
+    let sft = run(&rig, json!({"base": BASE, "steps": 20, "rank": 4, "lr": 2e-2, "seed": 3, "max_block": 128, "data": data}), &[], &Frames::default()).expect("the teacher's run");
+    let teacher = sft.outputs["adapter_digest"].as_str().expect("published").to_string();
+    let params = json!({"base": BASE, "objective": "distill", "teacher": format!("adapter:{teacher}"), "top_k": 4, "steps": 20, "rank": 4, "lr": 2e-2, "seed": 7, "max_block": 128, "data": data});
+    let outcome = run(&rig, params, &[], &Frames::default()).expect("the distillation");
+    let report = &outcome.outputs;
+    assert_eq!((report["status"].as_str(), report["objective"].as_str(), report["teacher"].as_str(), report["top_k"].as_u64()), (Some("completed"), Some("distill"), Some("adapter"), Some(4)), "{report}");
+    assert_eq!(report["teacher_adapter_sha256"], sft.outputs["adapter_sha256"], "the teacher is the published adapter");
+    assert!(report["final_loss"].as_f64().unwrap() < report["initial_loss"].as_f64().unwrap(), "{report}");
+    assert!(hex64(&report["adapter_digest"]), "{report}");
+    let missing = json!({"base": BASE, "objective": "distill", "teacher": format!("adapter:{}", "ab".repeat(32)), "steps": 1, "max_block": 128, "data": data});
+    assert!(run(&rig, missing, &[], &Frames::default()).is_err(), "a teacher the store does not hold is refused");
+    assert!(work_is_clean(&rig.work_root));
+    assert_reservation_returned(&rig);
+}
+
 /// A preference dataset is checked against the base's own tokenizer and template before a card is claimed, and a
 /// record that does not parse is refused by line.
 #[test]

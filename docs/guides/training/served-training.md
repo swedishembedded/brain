@@ -23,7 +23,15 @@ The job is the model `brain/train` with one action, `train`. It trains
 - **by feedback** (`objective: feedback`, KTO): `dataset` holds `generic-feedback-v1` judged completions (a prompt, one
   `completion` and `desirable`), as `brain::FeedbackFineTune` trains them, against the same frozen reference; a step's
   `grad_accum` examples estimate the reference point, and the result reports `desirable_examples`,
-  `undesirable_examples` and each kind's mean log-ratio to the start (`desirable_logratio`, `undesirable_logratio`).
+  `undesirable_examples` and each kind's mean log-ratio to the start (`desirable_logratio`, `undesirable_logratio`);
+- **by distillation** (`objective: distill`): the adapter is trained toward a teacher's `top_k` (default 16) most likely
+  next tokens at every supervised position of `generic-messages-v2` records, as `brain::DistillFineTune` does. The
+  teacher is a policy of the same base: `teacher: base` (default), `start` (the base with the `start_adapter`, which
+  the student continues too) or `adapter:<blake3 digest>` (an adapter in the artifact store, verified like a dataset).
+  It scores every record once before the first step. The result names the teacher (`teacher`,
+  `teacher_adapter_sha256`) and the student's cross-entropy to it before and after (`initial_loss`, `final_loss`). A
+  teacher served elsewhere (another base) is not offered: its top-K log-probabilities would have to ride a recorded
+  trace, which `policy_trace` does not carry.
 
 ## Full-parameter tuning and merging
 
@@ -220,7 +228,7 @@ No dataset or adapter travels through the API as a message body.
 |---|---|
 | `base` | the base model, `<vendor>/<repo>` in the model store (required) |
 | `data` | a JSON document naming the datasets (required), below |
-| `objective` | `sft` (default), `policy_gradient`, `dpo` or `feedback` |
+| `objective` | `sft` (default), `policy_gradient`, `dpo`, `feedback` or `distill` |
 | `steps`, `grad_accum`, `rank`, `alpha`, `lr`, `weight_decay`, `seed` | the optimiser's settings; what is not named is the trainer's own default, which `GET /v1/capabilities` lists as the param's `implied_default` |
 | `strict_updates` | abort at the first optimiser step whose loss or gradient is not finite (default off: such a step is skipped, the weights untouched, and the run aborts on the third in a row) |
 | `max_block` | the longest training row in tokens (default 8192). The memory reserved for the run is sized to it and a longer record is refused by name |
@@ -236,6 +244,7 @@ No dataset or adapter travels through the API as a message body.
 | `advantage_norm` | how each group's rewards become the advantages of its rollouts: `mean-centred` (default, `r - mean`), `z-score` (`(r - mean) / (std + 1e-4)`) or `leave-one-out` (`r_i` less the mean of the others). The records the run trains on (the dataset and its replay sets together) are held to the contract's rules between records: a group of one, two records of one rollout that disagree, or two tokenizer digests fail the job naming the rule and the example |
 | `behaviour` | where the importance ratio's behaviour log-probabilities come from. `recorded` (default): the sampler's own `behavior_logprobs`, on every supervised token of every record with a reward; a dataset missing any is refused. `start_of_run_proxy`: the start-of-run policy's where none was recorded, exact only if the rollouts were sampled from it; the training record states which was used |
 | `beta`, `nll_weight`, `keep_reasoning` | the preference objective's settings (only with `objective: dpo`; `beta` and `keep_reasoning` with `feedback` too): the loss temperature (default 0.1), the weight of the supervised likelihood of the chosen answer added to it (default 0) and whether the reasoning of each candidate is trained on |
+| `teacher`, `top_k` | with `objective: distill`, the teacher (`base`, `start` or `adapter:<blake3 digest>`) and the tokens it keeps per position (1 to 256, default 16); `teacher` is also the policy gradient's (`base` or `start`). A distillation refuses the policy-gradient and preference settings, a held-out, monitoring or replay set, and the monitoring settings by name |
 | `desirable_weight`, `undesirable_weight` | the feedback objective's weights of a desirable and of an undesirable example's term (default 1 each; only with `objective: feedback`) |
 | `arch` | the base's architecture, only for a checkpoint directory with no `config.json` |
 

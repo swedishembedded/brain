@@ -150,6 +150,7 @@ fn a_stopped_lora_job_of_every_objective_continues_to_the_uninterrupted_adapter(
         ("policy_gradient", rollouts(), json!({"behaviour": "start_of_run_proxy", "kl_beta": 0.05, "reference": "start"})),
         ("dpo", pairs(), json!({"beta": 0.1})),
         ("feedback", crate::support::feedback(), json!({"beta": 0.1, "undesirable_weight": 1.5})),
+        ("distill", crate::support::plain(), json!({"teacher": "base", "top_k": 4})),
     ];
     for (objective, records, extra) in cases {
         let train = data_digest(&rig, &records).hex();

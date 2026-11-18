@@ -128,6 +128,9 @@ pub(crate) struct PruneJob<'a> {
 }
 
 type TeacherFn = fn(&Path, &Path, &FitOpts, usize) -> std::io::Result<Vec<DistillExample>>;
+/// The top-K distributions the base with an adapter applied (its file, rank and alpha) gives a prepared dataset's
+/// train split, over a frozen base at a tier policy.
+type AdapterTeacherFn = fn(&Path, &Path, &FitOpts, usize, (&Path, u32, f32), &TierPolicy) -> std::io::Result<Vec<DistillExample>>;
 type DistillFn = for<'j, 'c> fn(DistillJob<'j>, FitControl<'c>) -> std::io::Result<FitReport>;
 
 /// One distillation of a LoRA adapter over a frozen base held at `lora.base`.
@@ -193,6 +196,8 @@ pub(crate) struct ChatEntry {
     pub prune: PruneFn,
     /// The top-K distributions the base (fp32, trainable build) gives a prepared dataset's train split.
     pub teacher: TeacherFn,
+    /// The same, with an adapter applied to the base: the teacher of a distillation from a trained policy.
+    pub adapter_teacher: AdapterTeacherFn,
     /// A LoRA adapter distilled from teacher examples over a frozen base at a tier policy.
     pub distill: DistillFn,
 }
@@ -226,6 +231,7 @@ impl ChatEntry {
             served: model::finetune::served_loss::<T>,
             prune: prune::<T>,
             teacher: teacher::<T>,
+            adapter_teacher: adapter_teacher::<T>,
             distill: distill::<T>,
         }
     }
@@ -324,6 +330,14 @@ fn prune<T: ChatTrainer>(job: PruneJob<'_>, on_progress: &mut dyn FnMut(Progress
 fn teacher<T: ChatTrainer>(base: &Path, dir: &Path, opts: &FitOpts, k: usize) -> std::io::Result<Vec<DistillExample>> {
     let mut fit = TeacherFit { dir, opts, k, examples: Vec::new() };
     T::train_full(base, opts, OptimizerState::HostOffload, &mut fit)?;
+    Ok(fit.examples)
+}
+
+/// The teacher is the base with the adapter applied, the LoRA build over a frozen base at `tiers`; no step is taken.
+fn adapter_teacher<T: ChatTrainer>(base: &Path, dir: &Path, opts: &FitOpts, k: usize, adapter: (&Path, u32, f32), tiers: &TierPolicy) -> std::io::Result<Vec<DistillExample>> {
+    let mut fit = TeacherFit { dir, opts, k, examples: Vec::new() };
+    let (path, rank, alpha) = adapter;
+    T::train_lora(base, &LoraRequest { rank, alpha, continue_from: Some(path), base: tiers, modules_to_save: &[] }, opts, &mut fit)?;
     Ok(fit.examples)
 }
 

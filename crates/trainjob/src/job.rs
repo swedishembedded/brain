@@ -505,6 +505,52 @@ pub fn build_feedback(request: &Request, base_dir: &Path, staged: &Staged, files
     Ok(ft)
 }
 
+/// The distillation for `request` over the files `staged` (and the teacher's adapter, staged when it names one),
+/// writing where `files` says, on the device this thread is scoped to.
+pub fn build_distill(request: &Request, base_dir: &Path, staged: &Staged, teacher_adapter: Option<&Path>, files: &RunFiles) -> Result<brain::DistillFineTune, String> {
+    let p = &request.params;
+    let teacher = match (crate::request::DistillTeacherRef::parse(p.teacher.as_deref())?, teacher_adapter) {
+        (crate::request::DistillTeacherRef::Base, _) => brain::DistillTeacher::Base,
+        (crate::request::DistillTeacherRef::Start, _) => brain::DistillTeacher::Start,
+        (crate::request::DistillTeacherRef::Adapter(_), Some(path)) => brain::DistillTeacher::Adapter(path.to_path_buf()),
+        (crate::request::DistillTeacherRef::Adapter(_), None) => return Err("train: the teacher's adapter was not staged".to_string()),
+    };
+    let mut ft = brain::DistillFineTune::from_pretrained(utf8(base_dir)?).placed(true).dataset(&staged.train).teacher(teacher).out_dir(&files.out_dir).steps(p.steps).grad_accum(p.grad_accum).strict_updates(p.strict_updates).thinking(p.thinking).max_block(p.max_block);
+    if let Some(k) = p.top_k {
+        ft = ft.top_k(k as usize);
+    }
+    if let Some(arch) = &p.arch {
+        ft = ft.arch(arch.as_str());
+    }
+    if let Some(id) = &p.adapter_id {
+        ft = ft.adapter_id(id.as_str());
+    }
+    if let Some(v) = p.rank {
+        ft = ft.rank(v);
+    }
+    if let Some(v) = p.alpha {
+        ft = ft.alpha(v);
+    }
+    match files.resumable {
+        Some((ref state, seed, every)) => ft = ft.seed(seed).resume_state(state).checkpoint_every(every),
+        None => {
+            if let Some(v) = p.seed {
+                ft = ft.seed(v);
+            }
+        }
+    }
+    if let Some(v) = p.lr {
+        ft = ft.lr(v);
+    }
+    if let Some(v) = &p.base_format {
+        ft = ft.base_format(v.as_str());
+    }
+    if let Some(path) = &staged.start_adapter {
+        ft = ft.continue_from(path);
+    }
+    Ok(ft)
+}
+
 fn finite(v: f32) -> Value {
     json!(v)
 }
@@ -661,6 +707,28 @@ fn feedback_summary(outcome: &brain::FeedbackFineTuneOutcome) -> Value {
     })
 }
 
+/// A distillation's totals: the teacher, the records it scored, and the student's cross-entropy to it before and after.
+fn distill_summary(outcome: &brain::DistillFineTuneOutcome) -> Value {
+    json!({
+        "adapter_sha256": outcome.adapter_digest,
+        "base_digest": outcome.base_digest,
+        "trained_from": outcome.trained_from,
+        "teacher": outcome.teacher,
+        "teacher_adapter_sha256": outcome.teacher_adapter,
+        "top_k": outcome.top_k,
+        "records": outcome.examples,
+        "block": outcome.block,
+        "seed": outcome.seed,
+        "steps": outcome.steps,
+        "steps_completed": outcome.steps_completed,
+        "resumed_at": outcome.resumed_at,
+        "rank": outcome.rank,
+        "alpha": outcome.alpha,
+        "initial_loss": outcome.initial_loss,
+        "final_loss": outcome.final_loss,
+    })
+}
+
 /// Maps the SDK's error to the job's: a full card is a condition the caller can act on, with nothing wrong in the request.
 pub(crate) fn trainer_failure(e: brain::Error) -> String {
     match e {
@@ -700,6 +768,17 @@ fn train_feedback(request: &Request, base_dir: &Path, staged: &Staged, files: &R
     Ok(Trained { adapter, record: outcome.record.clone(), adapter_sha256: outcome.adapter_digest.clone().unwrap_or_default(), evaluations: Vec::new(), resumed_at: outcome.resumed_at, summary: feedback_summary(&outcome) })
 }
 
+#[allow(clippy::too_many_arguments)]
+fn train_distill(request: &Request, base_dir: &Path, staged: &Staged, teacher_adapter: Option<&Path>, files: &RunFiles, cancel: &capability::CancelToken, began: Instant, progress: &mut dyn FnMut(Progress)) -> Result<Trained, String> {
+    let fine_tune = build_distill(request, base_dir, staged, teacher_adapter, files)?;
+    let outcome = fine_tune.run_with(cancel, |step| progress(Progress::event(step.step, step.steps, step_frame(step, began.elapsed().as_secs_f64())))).map_err(trainer_failure)?;
+    if outcome.status != brain::FineTuneStatus::Completed {
+        return Err("cancelled".into());
+    }
+    let adapter = outcome.adapter.clone().ok_or("train: the run completed with no adapter")?;
+    Ok(Trained { adapter, record: outcome.record.clone(), adapter_sha256: outcome.adapter_digest.clone().unwrap_or_default(), evaluations: Vec::new(), resumed_at: outcome.resumed_at, summary: distill_summary(&outcome) })
+}
+
 /// Runs the job `inv` on the device this thread is scoped to, reporting each step as a frame. With a `resume_key`
 /// the run is resumable ([`crate::runs`]): its training state and evaluation adapters live in the run's directory of
 /// the artifact store, and a completed run answers with the result it recorded.
@@ -728,6 +807,18 @@ pub fn run(env: &JobEnv, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -
     let trained = match p.objective {
         Objective::Dpo => train_preference(&request, &base_dir, &staged, &files, &inv.cancel, began, progress)?,
         Objective::Feedback => train_feedback(&request, &base_dir, &staged, &files, &inv.cancel, began, progress)?,
+        Objective::Distill => {
+            // The teacher's adapter, when the request names one by digest, is fetched into the job's directory like a dataset.
+            let teacher = match crate::request::DistillTeacherRef::parse(p.teacher.as_deref())? {
+                crate::request::DistillTeacherRef::Adapter(digest) => {
+                    let path = work.path().join("teacher.safetensors");
+                    bring(&Source::Digest(digest), &inv.blobs, env.store.as_ref(), work.staging(), &path)?;
+                    Some(path)
+                }
+                _ => None,
+            };
+            train_distill(&request, &base_dir, &staged, teacher.as_deref(), &files, &inv.cancel, began, progress)?
+        }
         Objective::Sft | Objective::PolicyGradient => train_chat(&request, &base_dir, &staged, &files, &inv.cancel, began, progress)?,
     };
     work.ensure_within_quota()?;
