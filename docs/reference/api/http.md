@@ -48,7 +48,12 @@ launches a local qwen3 Anthropic surface and points Claude Code at it.
   other type, an external URL, a part without its payload, a second audio
   clip, more images than the model's card states in `max_images_per_request`,
   or a medium the model's `generate` action does not take is a 400 naming it,
-  never a reply from the rest of the request.
+  never a reply from the rest of the request. An image may stand in any turn the
+  model's chat template places one, a tool result included (an OpenAI `tool`
+  message's `image_url` parts, an Anthropic `tool_result`'s `image` blocks), and
+  is read where it stands; one in a turn the template has no place for (a system
+  message, or a tool result for a model without tool turns) is a 400 naming the
+  message (`messages[i]`).
 - **Transcription** (`POST /v1/audio/transcriptions`, also without `/v1`): an
   OpenAI multipart form (`file`, `model`, optional `language` as an ISO-639-1
   code; `response_format` may only be `json`) or OpenRouter's JSON

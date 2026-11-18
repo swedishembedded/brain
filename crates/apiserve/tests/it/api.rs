@@ -3634,6 +3634,51 @@ async fn anthropic_image_block_keeps_its_place_among_the_text_of_its_turn() {
     assert_eq!(messages[1]["content"], "ok", "a turn without an image is a string, as before");
 }
 
+/// An image an agent attaches to a tool result reaches the model where the client put it, in the `tool` turn's typed
+/// content, on both dialects: an OpenAI `tool` message with `image_url` parts (the recorded request shape of an agent
+/// runtime that returns a screenshot from a tool), and an Anthropic `tool_result` block holding an `image` block.
+/// The model's chat template places the image's placeholder there (knowledge #510).
+#[tokio::test]
+async fn an_image_in_a_tool_result_keeps_its_place_in_the_tool_turn_on_both_dialects() {
+    let (app, key) = messages_echo_app(Provider::OpenAI);
+    let body = json!({
+        "model": "brain-messagesecho",
+        "messages": [
+            {"role": "user", "content": "What does the login page look like?"},
+            {"role": "assistant", "content": null, "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "screenshot", "arguments": "{\"url\":\"/login\"}"}}]},
+            {"role": "tool", "tool_call_id": "call_1", "content": [
+                {"type": "text", "text": "Screenshot of /login:"},
+                {"type": "image_url", "image_url": {"url": format!("data:image/x-ppm;base64,{TINY_PPM_B64}")}},
+            ]},
+        ],
+    });
+    let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &body).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let messages: Value = serde_json::from_str(v["choices"][0]["message"]["content"].as_str().unwrap()).unwrap();
+    assert_eq!(messages[2]["role"], "tool");
+    assert_eq!(messages[2]["tool_call_id"], "call_1");
+    let parts = messages[2]["content"].as_array().expect("the tool result keeps its typed parts");
+    assert_eq!(parts.iter().map(|p| p["type"].as_str().unwrap()).collect::<Vec<_>>(), ["text", "image_url"]);
+
+    let (app, key) = messages_echo_app(Provider::Anthropic);
+    let body = json!({
+        "model": "brain-messagesecho", "max_tokens": 16,
+        "messages": [
+            {"role": "user", "content": "Read b.png"},
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_1", "name": "Read", "input": {"file_path": "b.png"}}]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": [
+                {"type": "image", "source": {"type": "base64", "media_type": "image/x-ppm", "data": TINY_PPM_B64}},
+            ]}]},
+        ],
+    });
+    let (st, v) = post_json(&app, Provider::Anthropic, &key, "/v1/messages", &body).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let messages: Value = serde_json::from_str(v["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(messages[2]["role"], "tool");
+    assert_eq!(messages[2]["tool_call_id"], "toolu_1");
+    assert_eq!(messages[2]["content"], json!([{"type": "image_url", "image_url": {}}]), "the image block, payload-free, in the tool turn");
+}
+
 /// Minimal-blast-radius guarantee: a message whose content is an array of
 /// ONLY "text" parts (no image/audio) keeps flattening to a plain string,
 /// byte-identical to this session's pre-fix behavior -- every OTHER model's

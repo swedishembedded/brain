@@ -4519,6 +4519,12 @@ pub fn parse_request(tok: &QwenBpe, inv: &Invocation) -> Result<qwen3::chat::Par
     qwen3::chat::parse_request(tok, &crate::caps::with_template_flavor_default(inv))
 }
 
+/// [`parse_request`] for a request whose client text is already escaped: the image front end's, whose messages hold
+/// the placeholder runs it wrote itself (`crate::vision_frontend`).
+pub fn parse_escaped_request(tok: &QwenBpe, inv: &Invocation) -> Result<qwen3::chat::ParsedRequest, String> {
+    qwen3::chat::parse_escaped_request(tok, &crate::caps::with_template_flavor_default(inv))
+}
+
 impl ResidentModel for Qwen35GgufResident {
     fn manifest(&self) -> Manifest {
         let generate = ActionSpec::new(
@@ -4634,7 +4640,7 @@ impl Qwen35GgufResident {
         let tower = crate::vision_tower::VisionTower::open(std::path::Path::new(&self.gguf_path), spec, &gpu, d_model, crate::vision_tower::SERVING_MAX_IMAGE_PIXELS)?;
         let (tok, _) = self.checkpoint()?.tokenizer()?;
         eprintln!("brain: {}: reads images: vision tower loaded on the decoder's card (images up to {} pixels)", self.model_id, tower.spec().geometry.max_pixels);
-        crate::vision_frontend::VisionFrontend::new(text, tok, tower, context, parse_request).map(Ok)
+        crate::vision_frontend::VisionFrontend::new(text, tok, tower, context, parse_escaped_request).map(Ok)
     }
 
     /// The scheduler every consumer of this resident serves through: the

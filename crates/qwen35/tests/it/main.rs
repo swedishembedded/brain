@@ -109,6 +109,7 @@ mod train_memory;
 mod train_tier_trajectory;
 mod unified_pool_real;
 mod vision_parity;
+mod vision_request;
 mod vision_train;
 mod vision_train_streamed;
 mod vl;

@@ -88,10 +88,12 @@ pub fn placeholder_run(rows: u32) -> String {
 
 /// The request's `messages` with every `image_url` part replaced by its placeholder run (`rows[i]` image tokens for the
 /// `i`th image part in message order), each message's parts joined to one string as the checkpoint's chat template
-/// joins them. A message whose content is a string is left as it is.
+/// joins them (its `render_content`, which every role's turn goes through: an image in a tool result is placed exactly
+/// as one in a user turn). A message whose content is a string is left as it is.
 ///
 /// `messages` is the contract's JSON array; `rows` has one entry per image of the request. Refuses a request whose
-/// image parts and images do not match, a content part this model does not read, and reserved placeholder text.
+/// image parts and images do not match, a content part this model does not read, an image in a system message (the
+/// template raises on one), and reserved placeholder text; a refusal names the message (`messages[i]`).
 pub fn expand_images(messages: &Value, rows: &[u32]) -> Result<Value, String> {
     let list = messages.as_array().ok_or_else(|| invalid("'messages' must be an array"))?;
     if holds_reserved(messages) {
@@ -99,19 +101,23 @@ pub fn expand_images(messages: &Value, rows: &[u32]) -> Result<Value, String> {
     }
     let mut next = 0usize;
     let mut out = Vec::with_capacity(list.len());
-    for message in list {
+    for (i, message) in list.iter().enumerate() {
         let mut message = message.clone();
         if let Some(parts) = message.get("content").and_then(Value::as_array).cloned() {
+            let system = message.get("role").and_then(Value::as_str) == Some("system");
             let mut text = String::new();
-            for part in &parts {
+            for (j, part) in parts.iter().enumerate() {
                 match part.get("type").and_then(Value::as_str) {
                     Some("text") | None => text.push_str(part.get("text").and_then(Value::as_str).unwrap_or_default()),
+                    Some("image_url") | Some("image") if system => {
+                        return Err(invalid(format!("messages[{i}].content[{j}]: a system message cannot hold an image; send it in a user turn or a tool result")))
+                    }
                     Some("image_url") | Some("image") => {
                         let n = *rows.get(next).ok_or_else(|| invalid(format!("the request has more image parts than images ({})", rows.len())))?;
                         next += 1;
                         text.push_str(&placeholder_run(n));
                     }
-                    Some(other) => return Err(invalid(format!("content part '{other}' is not read by this model (text and images only)"))),
+                    Some(other) => return Err(invalid(format!("messages[{i}].content[{j}]: content part '{other}' is not read by this model (text and images only)"))),
                 }
             }
             message["content"] = json!(text);
@@ -238,6 +244,7 @@ struct ImageBuild {
     seen: EncodedImages,
     /// The most prompt tokens the scheduler can hold for one sequence.
     context: usize,
+    /// Parses a request whose client text is already escaped (`Invocation::escape_client_text` with `tok`).
     parse: fn(&QwenBpe, &Invocation) -> Result<ParsedRequest, String>,
 }
 
@@ -254,12 +261,15 @@ impl ImageBuild {
         if image_tokens >= self.context {
             return Err(invalid(format!("the images need {image_tokens} tokens, more than the context of {} tokens holds; send fewer or smaller images", self.context)));
         }
-        let messages = match inv.get_str("messages").filter(|m| !m.is_empty()) {
+        // The client's text is escaped first, then the image parts become their placeholder runs: escaped after them,
+        // the runs would be text, and the prompt would hold no image (knowledge #510). `parse` escapes nothing again.
+        let escaped = inv.escape_client_text(&|text| data::tokenizer::Tokenizer::escape_untrusted(&self.tok, text));
+        let messages = match escaped.get_str("messages").filter(|m| !m.is_empty()) {
             Some(raw) => serde_json::from_str::<Value>(&raw).map_err(|e| invalid(format!("messages JSON: {e}")))?,
             // A bare prompt with images: one user turn, the images first.
             None => {
                 let mut parts: Vec<Value> = images.iter().map(|_| json!({"type": "image_url", "image_url": {}})).collect();
-                parts.push(json!({"type": "text", "text": inv.get_str("prompt").unwrap_or_default()}));
+                parts.push(json!({"type": "text", "text": escaped.get_str("prompt").unwrap_or_default()}));
                 json!([{"role": "user", "content": parts}])
             }
         };
@@ -273,7 +283,7 @@ impl ImageBuild {
         }
         let rows: Vec<u32> = sizes.iter().map(|&(n, _)| n).collect();
         let expanded = expand_images(&messages, &rows)?;
-        let rendered = inv.without_blobs().set("messages", json!(expanded.to_string()));
+        let rendered = escaped.without_blobs().set("messages", json!(expanded.to_string()));
         let req = (self.parse)(&self.tok, &rendered)?;
 
         let prepared = started.elapsed();
@@ -301,7 +311,9 @@ pub struct VisionFrontend {
 
 impl VisionFrontend {
     /// `text` serves requests without images; `tok` (a second instance of the same tokenizer) builds those with.
-    /// `context` is the longest prompt the scheduler holds.
+    /// `context` is the longest prompt the scheduler holds. `parse` builds the scheduler request from one whose client
+    /// text this front end has already escaped and whose image parts it has replaced by their placeholder runs, so it
+    /// must not escape again.
     pub fn new(text: TextFrontend, tok: QwenBpe, tower: VisionTower, context: usize, parse: fn(&QwenBpe, &Invocation) -> Result<ParsedRequest, String>) -> Result<VisionFrontend, String> {
         let tokens = tower.spec().tokens;
         for (literal, id) in [(IMAGE_START, tokens.start), (IMAGE_PAD, tokens.image), (IMAGE_END, tokens.end)] {

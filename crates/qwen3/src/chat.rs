@@ -668,7 +668,14 @@ fn template_kwargs(inv: &Invocation) -> Result<std::collections::BTreeMap<String
 /// [`parse_request`] in `format` (see [`render_prompt_as`]).
 pub fn parse_request_as(tok: &QwenBpe, format: &ChatFormat, inv: &Invocation) -> Result<ParsedRequest, String> {
     // Client text cannot spell a control token: see `Invocation::escape_client_text`.
-    let inv = &inv.escape_client_text(&|text| tok.escape_untrusted(text));
+    parse_escaped_request_as(tok, format, &inv.escape_client_text(&|text| tok.escape_untrusted(text)))
+}
+
+/// [`parse_request_as`] for a request whose client text is already escaped (`Invocation::escape_client_text`
+/// with `tok`): for a front end that writes markup of its own into the messages after escaping the client's text,
+/// such as an image's run of placeholder tokens. Escaping again would turn that markup into text, so the prompt
+/// would hold no placeholder for the image.
+pub fn parse_escaped_request_as(tok: &QwenBpe, format: &ChatFormat, inv: &Invocation) -> Result<ParsedRequest, String> {
     let (max_new, temp, top_k, seed) = sampling_params(inv)?;
     let top_p = inv.get_f64("top_p").unwrap_or(1.0) as f32;
     let RenderedPrompt { mut text, tool_choice, flavor, thinking_open, raw } = render_prompt_as(format, inv)?;
@@ -697,6 +704,11 @@ pub const NO_FIM_TOKENS: &str = "qwen: 'suffix' needs fill-in-the-middle, and th
 /// render, tokenized, plus the sampling params and stop strings.
 pub fn parse_request(tok: &QwenBpe, inv: &Invocation) -> Result<ParsedRequest, String> {
     parse_request_as(tok, &ChatFormat::Qwen, inv)
+}
+
+/// [`parse_request`] for a request whose client text is already escaped (see [`parse_escaped_request_as`]).
+pub fn parse_escaped_request(tok: &QwenBpe, inv: &Invocation) -> Result<ParsedRequest, String> {
+    parse_escaped_request_as(tok, &ChatFormat::Qwen, inv)
 }
 
 /// Parse a completion that was NOT decoded here - a recorded reply, a
