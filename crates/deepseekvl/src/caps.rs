@@ -185,7 +185,7 @@ pub fn conversation(inv: &Invocation, images: usize, image_sep: &str) -> Result<
     let messages = inv.get_str("messages").filter(|s| !s.trim().is_empty());
     if let Some(raw) = messages {
         let arr: Vec<Value> = serde_json::from_str(&raw).map_err(|e| format!("messages: {e}"))?;
-        for m in &arr {
+        for (i, m) in arr.iter().enumerate() {
             let (text, n) = content_with_tags(m.get("content"), image_sep);
             tagged += n;
             let role = match m.get("role").and_then(Value::as_str) {
@@ -195,7 +195,14 @@ pub fn conversation(inv: &Invocation, images: usize, image_sep: &str) -> Result<
                 }
                 Some("user") => Role::User,
                 Some("assistant") => Role::Assistant,
-                other => return Err(format!("messages: role {other:?} is not system, user or assistant")),
+                // The model's conversation format has no tool turn: a tool result (with or without an image) has
+                // no place in its prompt, which is the client's to know, not a fault of the server.
+                other => {
+                    return Err(capability::failure::tag(
+                        capability::FailureClass::InvalidRequest,
+                        format!("messages[{i}]: role {other:?} is not system, user or assistant (this model's conversation format has no tool turn)"),
+                    ))
+                }
             };
             // Consecutive turns of one role are one turn to the model.
             match turns.last_mut() {
@@ -610,7 +617,8 @@ mod tests {
 
     #[test]
     fn a_foreign_role_or_an_empty_request_is_refused() {
-        assert!(conversation(&inv_with(json!([{"role": "tool", "content": "x"}])), 0, "").unwrap_err().contains("tool"));
+        let foreign = conversation(&inv_with(json!([{"role": "user", "content": "x"}, {"role": "tool", "content": "x"}])), 0, "").unwrap_err();
+        assert!(foreign.starts_with("[invalid-request]") && foreign.contains("messages[1]") && foreign.contains("tool"), "{foreign}");
         assert!(conversation(&Invocation::new(), 0, "").unwrap_err().contains("empty"));
     }
 }
