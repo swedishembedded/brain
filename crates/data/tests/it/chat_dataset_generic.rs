@@ -131,3 +131,39 @@ fn a_preference_pair_keeps_the_think_block_its_candidates_open_with_when_asked()
     let (dropped, _) = supervised(RenderOpts::default());
     assert!(!dropped.contains("</think>"), "R1's template strips it: {dropped:?}");
 }
+
+/// An agent continuation, as a preference candidate or a feedback completion, trains on each answer the way the
+/// model was asked for it, exactly as packed SFT trains a dialogue. Qwen3's template drops the reasoning of every
+/// assistant turn before the last user turn, and an agent run carries user turns mid-run (a time-left notice). A
+/// candidate rendered whole is therefore not prefix-stable, and it was refused for most real rollouts.
+#[test]
+fn an_agent_continuation_with_reasoning_trains_each_answer_as_asked_in_preference_and_feedback() {
+    let Some((tok, tmpl)) = checkpoint("Qwen/Qwen3-4B") else {
+        brain_testutil::skip("Qwen3-4B not downloaded");
+        return;
+    };
+    let run = |last: &str| {
+        format!(
+            r#"[{{"role":"assistant","content":"<think>\nList first.\n</think>\n\nI will list the files."}},{{"role":"user","content":"Time left: 5 minutes."}},{{"role":"assistant","content":"<think>\nWrite it.\n</think>\n\n{last}"}}]"#
+        )
+    };
+    let prompt = r#"[{"role":"system","content":"You are an agent."},{"role":"user","content":"Fix the report."}]"#;
+    let line = format!(r#"{{"prompt":{prompt},"chosen":{},"rejected":{}}}"#, run("Done: answer.txt written."), run("I give up."));
+    let pair = data::preference::PreferenceSample::from_json_line(&line).expect("parses");
+    let (chosen, rejected) = pair.encode_with(&tok, &tmpl, RenderOpts::default()).expect("a continuation with reasoning renders as packed SFT renders it");
+    let packed = |sample: &ChatSample| {
+        let packed = sample.answers_packed(&tmpl, true).unwrap().expect("supervises assistant turns");
+        let (ids, mask) = packed.encode_with(&tok, &tmpl, RenderOpts::default()).unwrap();
+        tok.decode(&ids.iter().zip(&mask).filter(|(_, m)| **m).map(|(i, _)| *i).collect::<Vec<_>>())
+    };
+    for (side, encoded, sample) in [("chosen", &chosen, &pair.chosen), ("rejected", &rejected, &pair.rejected)] {
+        let supervised = tok.decode(&encoded.supervised());
+        assert_eq!(supervised, packed(sample), "{side}: the supervised tokens are packed SFT's");
+        assert!(supervised.contains("Write it.") && supervised.contains("List first."), "{side}: each answer keeps the reasoning it was asked with: {supervised:?}");
+    }
+
+    let feedback = format!(r#"{{"prompt":{prompt},"completion":{},"desirable":true}}"#, run("Done: answer.txt written."));
+    let example = data::feedback::FeedbackSample::from_json_line(&feedback).expect("parses");
+    let encoded = example.encode_with(&tok, &tmpl, RenderOpts::default()).expect("a feedback continuation renders packed");
+    assert_eq!(tok.decode(&encoded.supervised()), packed(&example.sample));
+}

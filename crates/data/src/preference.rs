@@ -88,13 +88,14 @@ impl PreferenceSample {
     }
 
     /// [`Self::encode`] with `opts`, as [`ChatSample::encode_with`] renders a
-    /// training record: with `keep_reasoning`, a candidate's closed think
-    /// block stays in its rendered turn instead of being dropped by a
-    /// template that strips reasoning from history.
+    /// training record: with `keep_reasoning`, a single-answer candidate's
+    /// closed think block stays in its rendered turn instead of being dropped
+    /// by a template that strips reasoning from history. A continuation trains
+    /// each answer as asked ([`ChatSample::encode_candidate`]).
     pub fn encode_with(&self, tok: &QwenBpe, tmpl: &ChatTemplate, opts: RenderOpts) -> Result<(EncodedTurn, EncodedTurn), TemplateError> {
-        let (ids, mask) = self.chosen.encode_with(tok, tmpl, opts)?;
+        let (ids, mask) = self.chosen.encode_candidate(tok, tmpl, opts)?;
         let chosen = EncodedTurn { ids, mask };
-        let (ids, mask) = self.rejected.encode_with(tok, tmpl, opts)?;
+        let (ids, mask) = self.rejected.encode_candidate(tok, tmpl, opts)?;
         Ok((chosen, EncodedTurn { ids, mask }))
     }
 

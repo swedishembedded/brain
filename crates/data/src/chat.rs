@@ -501,6 +501,24 @@ impl ChatSample {
     /// training path can encode corrupt tool pairing. Fails (does not silently mismask) if the template's rendering of some
     /// message is not prefix-stable -- see `render_with_message_boundaries`'s
     /// doc for exactly when that happens.
+    /// How a preference candidate or a feedback completion is trained. A continuation (more than one supervised turn,
+    /// or assistant turns in its context) is trained the way packed SFT trains a dialogue: each answer as the model was
+    /// asked for it ([`Self::answers_packed`], thinking mode), so the reasoning a template strips from history is never
+    /// asked to be prefix-stable. A single answer after a plain prompt keeps [`Self::encode_with`]'s whole-record
+    /// rendering, and with it [`RenderOpts::keep_reasoning`].
+    ///
+    /// # Errors
+    /// As [`Self::answers_packed`] and [`Self::encode_with`].
+    pub fn encode_candidate(&self, tok: &dyn Tokenizer, tmpl: &ChatTemplate, opts: RenderOpts) -> Result<(Vec<u32>, Vec<bool>), TemplateError> {
+        let continuation = self.messages.iter().filter(|m| m.train).count() > 1 || self.messages.iter().any(|m| !m.train && m.role == "assistant");
+        if continuation {
+            if let Some(packed) = self.answers_packed(tmpl, true)? {
+                return packed.encode_with(tok, tmpl, opts);
+            }
+        }
+        self.encode_with(tok, tmpl, opts)
+    }
+
     pub fn encode_with(&self, tok: &dyn Tokenizer, tmpl: &ChatTemplate, opts: RenderOpts) -> Result<(Vec<u32>, Vec<bool>), TemplateError> {
         self.encode_rollout(tok, tmpl, opts).map(|e| (e.ids, e.mask))
     }

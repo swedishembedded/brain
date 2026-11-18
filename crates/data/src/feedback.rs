@@ -51,10 +51,10 @@ impl FeedbackSample {
         ChatSample { messages, tools: self.sample.tools.clone(), rendered: None, media: Vec::new(), rollout: None }
     }
 
-    /// Render the example through the checkpoint's own chat template, exactly as [`ChatSample::encode_with`] renders a
-    /// training record.
+    /// Render the example through the checkpoint's own chat template as a preference candidate is rendered
+    /// ([`ChatSample::encode_candidate`]): a continuation trains each answer as asked.
     pub fn encode_with(&self, tok: &QwenBpe, tmpl: &ChatTemplate, opts: RenderOpts) -> Result<EncodedTurn, TemplateError> {
-        let (ids, mask) = self.sample.encode_with(tok, tmpl, opts)?;
+        let (ids, mask) = self.sample.encode_candidate(tok, tmpl, opts)?;
         Ok(EncodedTurn { ids, mask })
     }
 

@@ -502,7 +502,7 @@ fn check_feedback(path: &Path, tok: &QwenBpe, tmpl: &ChatTemplate, max_block: Op
         let record = || format!("{}: record {}", path.display(), index + 1);
         let own = example.encode_with(tok, tmpl, render).map_err(|e| format!("{} cannot be rendered for training: {e}", record()))?;
         let next = &examples[(index + 1) % examples.len()];
-        let (ids, mask) = example.with_completion_of(next).encode_with(tok, tmpl, render).map_err(|e| format!("{}: its prompt with record {}'s completion cannot be rendered: {e}", record(), (index + 1) % examples.len() + 1))?;
+        let (ids, mask) = example.with_completion_of(next).encode_candidate(tok, tmpl, render).map_err(|e| format!("{}: its prompt with record {}'s completion cannot be rendered: {e}", record(), (index + 1) % examples.len() + 1))?;
         let mismatched = EncodedTurn { ids, mask };
         for (name, turn) in [("completion", &own), ("mismatched completion", &mismatched)] {
             if !turn.mask.iter().any(|m| *m) {
