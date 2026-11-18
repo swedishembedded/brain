@@ -301,13 +301,13 @@ impl Scan {
                 *bank = widen_to_hold(bank.clone(), card, widen);
             }
         }
-        // A Ripple adapter is trained on all eight linears of a layer by default: a bank nobody sized takes all of them,
-        // grown to the highest rank the store's adapters hold.
+        // A Ripple adapter is trained on all eight linears of a layer by default: a bank nobody sized takes all of them
+        // (the default targets), grown to the highest rank the store's adapters hold.
         let mut ricursive_banks: BTreeMap<String, AdapterBankSettings> = BTreeMap::new();
         for local in adapters {
             let Some((base, card)) = local.card.as_ref().filter(|c| brain_family(&c.family) == "ricursive").and_then(|c| Some((base_id_of(&c.id)?, c))) else { continue };
             let operator = settings.ricursive.adapter_bank.clone();
-            let bank = ricursive_banks.entry(base).or_insert_with(|| operator.clone().unwrap_or(AdapterBankSettings { targets: AdapterTargets::ALL, ..Default::default() }));
+            let bank = ricursive_banks.entry(base).or_insert_with(|| operator.clone().unwrap_or_default());
             if operator.is_none() {
                 *bank = widen_to_hold(bank.clone(), card, Widen { rank: true, targets: false });
             }
@@ -1672,7 +1672,7 @@ mod tests {
         assert!(ids(&residents).contains(&"Qwen/Qwen3-Toy:lab:wide:v1".to_string()), "rank 32 on down is above the defaults, so the bank grew: {:?}", ids(&residents));
 
         // `--adapter-targets` makes the bank the operator's: not widened.
-        let named = catalog::resident_llm::QwenServeConfig { adapter_bank: Some(AdapterBankSettings::default()), adapter_targets_named: true, ..defaults.clone() };
+        let named = catalog::resident_llm::QwenServeConfig { adapter_bank: Some(AdapterBankSettings { targets: AdapterTargets::ATTENTION, ..AdapterBankSettings::default() }), adapter_targets_named: true, ..defaults.clone() };
         let residents = discover(&dir, &ScanSettings { qwen: named, ..Default::default() }).residents;
         assert_eq!(ids(&residents), vec!["Qwen/Qwen3-Toy".to_string()], "an operator-named bank is not widened for the store");
 

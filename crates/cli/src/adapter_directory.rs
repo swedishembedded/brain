@@ -487,4 +487,17 @@ mod tests {
         assert!(listed(&f, B) && !listed(&f, A));
         f.executor.shutdown();
     }
+
+    /// A served training run adapts all seven projections by default, and the bank a server builds with no
+    /// `--adapter-targets` (the fixture's: `--serve-adapters` alone) must serve what it publishes without a restart.
+    #[test]
+    fn a_default_bank_serves_an_adapter_trained_on_every_projection() {
+        let mut f = fixture("bank-all-targets");
+        let file = f.dir.join("trained.safetensors");
+        let sites = ["attn.wq", "attn.wk", "attn.wv", "attn.wo", "mlp.gate", "mlp.up", "mlp.down"];
+        brain_testutil::adapters::write_adapter_over(&file, A, BASE_ID, Some(digest(&f.base)), 0.5, &sites);
+        assert_eq!(f.bank.poll(), Pass { offered: 1, retired: 0, refused: 0 }, "an adapter of every projection is served by the default bank");
+        assert!(listed(&f, A));
+        f.executor.shutdown();
+    }
 }

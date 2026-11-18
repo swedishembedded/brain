@@ -23,8 +23,15 @@ pub fn write_base(path: &Path, fill: f32) {
 /// writes it: a card naming `base_id` and, when given, the base digest
 /// it was trained against.
 pub fn write_adapter(path: &Path, id: &str, base_id: &str, base_digest: Option<String>, fill: f32) {
+    write_adapter_over(path, id, base_id, base_digest, fill, &["attn.wq"]);
+}
+
+/// [`write_adapter`] correcting each of `sites` (`attn.wq`, `mlp.down`, ... of block 0), listed on the card as its
+/// targets the way a trainer records them.
+pub fn write_adapter_over(path: &Path, id: &str, base_id: &str, base_digest: Option<String>, fill: f32, sites: &[&str]) {
     let mut card = ModelCard::new(id, "qwen");
-    card.adapter = Some(Adapter { kind: "lora".to_string(), rank: Some(2), base: Some(base_id.to_string()), alpha: Some(4.0), ..Default::default() });
+    let targets = sites.iter().map(|s| s.rsplit('.').next().unwrap_or(s).to_string()).collect();
+    card.adapter = Some(Adapter { kind: "lora".to_string(), rank: Some(2), base: Some(base_id.to_string()), alpha: Some(4.0), targets: Some(targets), ..Default::default() });
     card.training = Some(TrainingProvenance {
         code_revision: "test".to_string(),
         regime: "sft_lora".to_string(),
@@ -36,10 +43,10 @@ pub fn write_adapter(path: &Path, id: &str, base_id: &str, base_digest: Option<S
         base_digest,
         cycle: 0,
     });
-    let tensors = vec![
-        ("blocks.0.attn.wq.weight.lora_a".to_string(), vec![2, 4], vec![fill; 8]),
-        ("blocks.0.attn.wq.weight.lora_b".to_string(), vec![4, 2], vec![fill; 8]),
-    ];
+    let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = sites
+        .iter()
+        .flat_map(|site| [(format!("blocks.0.{site}.weight.lora_a"), vec![2, 4], vec![fill; 8]), (format!("blocks.0.{site}.weight.lora_b"), vec![4, 2], vec![fill; 8])])
+        .collect();
     checkpoint::st::save_safetensors(path.to_str().unwrap(), &tensors, &serde_json::json!({"rank": 2, "alpha": 4.0}), Some(&card)).unwrap();
 }
 

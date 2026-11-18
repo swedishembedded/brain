@@ -97,10 +97,13 @@ pub const DEFAULT_ADAPTER_SLOTS: u32 = 4;
 pub const DEFAULT_ADAPTER_RANK_CAP: u32 = 32;
 
 /// The linears the bank corrects unless `--adapter-targets` says otherwise:
-/// the four attention projections, which is what an adapter trained with the
-/// default LoRA configuration targets. An adapter that corrects any other
-/// linear is refused when it is loaded, with the flag that widens the bank.
-pub const DEFAULT_ADAPTER_TARGETS: AdapterTargets = AdapterTargets::ATTENTION;
+/// every adapter site of the model, which is what brain's trainers adapt by
+/// default (all seven projections of a Qwen3 block). The bank's buffers are
+/// fixed when the engine is built, so a narrower default would refuse an
+/// adapter trained after the server started (hot-loaded through
+/// `--serve-adapters`) until a restart; an operator who wants the smaller bank
+/// names its targets.
+pub const DEFAULT_ADAPTER_TARGETS: AdapterTargets = AdapterTargets::ALL;
 
 /// The most adapters one resident can offer (served ids, resident in a slot or
 /// not). The engine's registration table is this size.
@@ -867,9 +870,14 @@ mod tests {
         assert_eq!(DEFAULT_ADAPTER_RANK_CAP, 32);
     }
 
+    /// A brain trainer adapts every projection by default, and a bank is fixed when the server starts: the
+    /// default bank must hold an adapter trained afterwards.
     #[test]
-    fn the_default_targets_are_the_attention_group() {
-        assert_eq!(DEFAULT_ADAPTER_TARGETS, AdapterTargets::ATTENTION);
+    fn the_default_targets_are_every_site_the_trainers_adapt() {
+        assert_eq!(DEFAULT_ADAPTER_TARGETS, AdapterTargets::ALL);
+        let model = qwen3::config::QwenConfig::tiny();
+        let sites = AdapterBankSettings::default().bank_config(&model).unwrap().targets;
+        assert_eq!(sites, qwen3::finetune::LORA_TARGETS, "the default bank corrects exactly what served training adapts by default");
     }
 
     #[test]
@@ -885,7 +893,7 @@ mod tests {
         let model = qwen3::config::QwenConfig::tiny();
         let cfg = AdapterBankSettings { slots: 3, rank_cap: 8, targets: AdapterTargets::ALL }.bank_config(&model).unwrap();
         assert_eq!((cfg.slots, cfg.r_max, cfg.targets.len(), cfg.max_registered), (3, 8, 7, MAX_SERVED_ADAPTERS), "`all` is every site the model has");
-        let attention = AdapterBankSettings::default().bank_config(&model).unwrap();
+        let attention = AdapterBankSettings { targets: AdapterTargets::ATTENTION, ..Default::default() }.bank_config(&model).unwrap();
         assert_eq!(attention.targets, ["wq", "wk", "wv", "wo"]);
         let refused = AdapterBankSettings { targets: AdapterTargets::parse("wq,lm_head").unwrap(), ..Default::default() };
         assert!(refused.bank_config(&model).unwrap_err().contains("lm_head"), "a leaf the model lacks is refused when the bank is sized");

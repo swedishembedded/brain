@@ -313,11 +313,12 @@ ADAPTERS  (one resident copy of the Qwen3 weights serves the base and every
                          starts, so an adapter of a higher rank, loaded now
                          or hot-loaded later, is refused with the value to
                          restart with.
-  --adapter-targets LIST linears the bank corrects: attention (wq,wk,wv,wo
-                         on Qwen3, the default), all (every adapter site of
-                         the model), or a comma-separated list of the model's
-                         site names (Qwen3: wq, wk, wv, wo, gate, up, down).
-                         An adapter that corrects any other linear is refused. The bank takes
+  --adapter-targets LIST linears the bank corrects: all (every adapter site of
+                         the model, what brain's trainers adapt; the default),
+                         attention (wq,wk,wv,wo on Qwen3), or a comma-separated
+                         list of the model's site names (Qwen3: wq, wk, wv, wo,
+                         gate, up, down). An adapter that corrects any other
+                         linear is refused. The bank takes
                          slots x rank-cap x (k + n) x 4 bytes per targeted
                          linear per layer, counted in the model's footprint.
   --ready-file PATH      create PATH (empty) once EVERY surface requested above
@@ -1111,13 +1112,7 @@ pub fn run_serve(args: &[String]) {
             eprintln!("brain serve: {e}");
             std::process::exit(2);
         }
-        // Ripple's trainer adapts all eight linears of a layer by default: without `--adapter-targets` its bank
-        // corrects them all rather than the attention four.
-        let mut ripple_bank = adapter_bank.clone();
-        if !qwen_cfg.adapter_targets_named {
-            ripple_bank.targets = llmserve::adapter_registry::AdapterTargets::ALL;
-        }
-        ricursive_cfg.adapter_bank = Some(ripple_bank);
+        ricursive_cfg.adapter_bank = Some(adapter_bank.clone());
         qwen_cfg.adapter_bank = Some(adapter_bank);
     }
     apply_policy(&policy, &mut qwen_cfg, &mut qwen35_cfg, &mut ricursive_cfg, &mut ocr_cfg);

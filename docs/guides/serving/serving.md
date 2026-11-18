@@ -239,11 +239,12 @@ above, or by one of these flags - and costs nothing otherwise:
 - `--adapter-rank-cap R` - the highest LoRA rank a slot holds (default 32). The bank's
   buffers are sized by it when the server starts, so an adapter above it - loaded at
   startup or hot-loaded later - is refused, naming the value to restart with.
-- `--adapter-targets LIST` - the linears the bank corrects: `attention`
-  (the default; `wq,wk,wv,wo` on Qwen3, what the default LoRA training targets;
-  the Gated-DeltaNet and attention projections on Qwen3.8 - an adapter that also
-  trains the MLP needs `all`),
-  `all` (every adapter site the model has), or a comma-separated list of the
+- `--adapter-targets LIST` - the linears the bank corrects: `all` (the default:
+  every adapter site the model has, which is what brain's trainers adapt by
+  default, so an adapter trained after the server started - hot-loaded through
+  `--serve-adapters` - is served without a restart), `attention` (`wq,wk,wv,wo`
+  on Qwen3; the Gated-DeltaNet and attention projections on Qwen3.8: a smaller
+  bank for adapters that train only those), or a comma-separated list of the
   model's site names (`wq wk wv wo gate up down` on Qwen3). A name the model
   has no site for is refused when the bank is built, listing the ones it has.
 

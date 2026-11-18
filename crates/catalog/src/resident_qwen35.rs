@@ -1414,7 +1414,7 @@ mod tests {
         let mlp = qwen35_adapter(&dir, &["mlp.gate"]);
         assert_eq!(mixer.family, "qwen35");
 
-        let attention = qwen35_registry(Some(AdapterBankSettings::default()));
+        let attention = qwen35_registry(Some(AdapterBankSettings { targets: AdapterTargets::ATTENTION, ..Default::default() }));
         assert!(attention.attach(mixer.clone()).is_ok(), "the default group of a Qwen3.8 is its mixers (in_proj_*, out_proj, q/k/v/o_proj)");
         let why = attention.attach(mlp.clone()).err().unwrap();
         assert!(why.contains("gate") && why.contains("--adapter-targets"), "{why}");
