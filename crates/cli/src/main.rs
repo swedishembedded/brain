@@ -727,7 +727,8 @@ fn select_backend(argv: Vec<String>) -> Vec<String> {
                     std::process::exit(2);
                 }
             };
-            match spec.resolve(&gpu_core::Inventory::probe()) {
+            // A spec that names no GPU opens no GPU API to resolve.
+            match spec.resolve_here() {
                 Ok(s) => s,
                 Err(e) => {
                     eprintln!("brain: --device: {e}");

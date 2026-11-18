@@ -476,7 +476,8 @@ fn gpu_rows(reprofile: bool) -> (Vec<Row>, Vec<(u32, gpu_core::NativeExtraRoofs)
 /// caller needs to be able to tell "no NPU on this machine" apart from
 /// "there is one but it cannot be reached right now".
 fn npu_rows() -> Vec<Row> {
-    let npu_nodes = gpu_core::Inventory::probe().npus;
+    // Counted by device node alone: the NPU scope enumerates no GPU (an adapter probe can take seconds on a busy host).
+    let npu_nodes = gpu_core::devices::npu_count();
     if npu_nodes == 0 {
         return vec![Row::absent("npu0", "-", None, Status::NoHardware, None, "no NPU device node found (expected /dev/accel/accel* or /dev/rknpu)".into())];
     }

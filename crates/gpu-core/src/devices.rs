@@ -813,6 +813,19 @@ impl DeviceSpec {
         self.requests.is_empty()
     }
 
+    /// Whether resolving this spec reads the machine's GPUs: everything, a card, or a backend that drives cards. A
+    /// spec of CPU cores, NPUs or the software adapter resolves alike against [`Inventory::probe_host`], which opens
+    /// no GPU API (whose enumeration can take seconds, or tens of them, while other processes hold the driver).
+    pub fn reads_gpus(&self) -> bool {
+        self.is_all() || self.requests.iter().any(|r| matches!(r, Request::AllGpus | Request::Gpu(_) | Request::VulkanBackend | Request::WgpuBackend))
+    }
+
+    /// [`Self::resolve`] against this machine, probing its GPUs only when the spec [`Self::reads_gpus`].
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn resolve_here(&self) -> Result<ComputeSet, String> {
+        self.resolve(&if self.reads_gpus() { Inventory::probe() } else { Inventory::probe_host() })
+    }
+
     /// Resolve against the machine. `probe` supplies the hardware inventory so
     /// this is testable without a GPU.
     pub fn resolve(&self, probe: &Inventory) -> Result<ComputeSet, String> {
@@ -1026,6 +1039,13 @@ pub struct Inventory {
 }
 
 impl Inventory {
+    /// The machine's cores and NPUs, with no GPU enumerated: what a [`DeviceSpec`] that does not
+    /// [`DeviceSpec::reads_gpus`] resolves against.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn probe_host() -> Inventory {
+        Inventory { gpus: 0, cpu_cores: std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1), npus: npu_count(), gpu_backend: Backend::Cpu }
+    }
+
     /// Probe the current machine.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn probe() -> Inventory {
@@ -1079,8 +1099,9 @@ fn intel_npu_nodes() -> u32 {
     n
 }
 
+/// The NPUs on this machine, by device node: no GPU is enumerated to count them.
 #[cfg(not(target_arch = "wasm32"))]
-fn npu_count() -> u32 {
+pub fn npu_count() -> u32 {
     match npu_kind() {
         Some(NpuKind::Intel) => intel_npu_nodes(),
         // The vendor driver exposes one node for the whole NPU.
@@ -1402,7 +1423,7 @@ pub fn open_target(token: &str, probe: &Inventory, ambient: &ComputeSet, current
 #[cfg(not(target_arch = "wasm32"))]
 fn resolve_ambient_compute_set() -> Result<ComputeSet, String> {
     let text = std::env::var("BRAIN_DEVICE").unwrap_or_default();
-    let mut set = DeviceSpec::parse(&text).and_then(|spec| spec.resolve(&Inventory::probe())).map_err(|e| format!("BRAIN_DEVICE={text:?}: {e}"))?;
+    let mut set = DeviceSpec::parse(&text).and_then(|spec| spec.resolve_here()).map_err(|e| format!("BRAIN_DEVICE={text:?}: {e}"))?;
     // `BRAIN_BACKEND` is `--backend` for processes with no CLI in the loop (a
     // test binary, an embedding application): how the selected hardware is
     // driven. The CLI layers its own flag on top of this, so a flag wins.
@@ -1434,7 +1455,7 @@ pub fn resolve_cli_default_compute_set() -> ComputeSet {
 #[cfg(not(target_arch = "wasm32"))]
 pub fn select_compute(device: &str, backend: Option<&str>) -> Result<ComputeSet, String> {
     let spec = DeviceSpec::parse(device).map_err(|e| format!("--device {device:?}: {e}"))?;
-    let mut set = spec.resolve(&Inventory::probe()).map_err(|e| format!("--device {device:?}: {e}"))?;
+    let mut set = spec.resolve_here().map_err(|e| format!("--device {device:?}: {e}"))?;
     if let Some(b) = backend {
         let b = Backend::parse(b).map_err(|e| format!("--backend {b:?}: {e}"))?;
         set.set_backend(b)?;
@@ -1691,6 +1712,21 @@ mod tests {
 
     fn resolve(s: &str, i: Inventory) -> Result<ComputeSet, String> {
         DeviceSpec::parse(s)?.resolve(&i)
+    }
+
+    /// A spec that names no GPU resolves the same on a machine with cards as on one without, so resolving it need
+    /// not open a GPU API; every spec that can name a card says it reads them.
+    #[test]
+    fn only_a_spec_that_can_name_a_card_reads_the_gpus() {
+        for spec in ["cpu", "cpu0-7", "npu", "npu0", "cpu,npu", "software"] {
+            let parsed = DeviceSpec::parse(spec).unwrap();
+            assert!(!parsed.reads_gpus(), "{spec}");
+            let host = Inventory { gpus: 0, gpu_backend: Backend::Cpu, ..inv(0, 8, 1) };
+            assert_eq!(resolve(spec, inv(4, 8, 1)), resolve(spec, host), "{spec}");
+        }
+        for spec in ["", "gpu", "gpu0", "vulkan", "wgpu", "gpu1,cpu"] {
+            assert!(DeviceSpec::parse(spec).unwrap().reads_gpus(), "{spec:?}");
+        }
     }
 
     /// On a machine where only CUDA sees the GPU (a driver-only box: no Vulkan
