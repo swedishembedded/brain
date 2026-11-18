@@ -21,7 +21,7 @@ set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 
 PROFILE=${PROFILE:-release}
-DEPS="target/$PROFILE/deps"
+PROFILE_DIR="${CARGO_TARGET_DIR:-target}/$PROFILE"
 TOP=0
 BUDGET=0
 TIMEOUT=${TIMEOUT:-300}
@@ -36,12 +36,14 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-[ -d "$DEPS" ] || { echo "no $DEPS - run 'make build/release' first"; exit 2; }
+[ -d "$PROFILE_DIR" ] || { echo "no $PROFILE_DIR - run 'make build/release' first"; exit 2; }
 
 tmp=$(mktemp)
 trap 'rm -f "$tmp"' EXIT
 
-for path in "$DEPS"/*; do
+# Test executables sit in <profile>/deps/ in cargo's classic layout and in
+# <profile>/build/<package>/<hash>/out/ in its build-dir layout; take both.
+for path in "$PROFILE_DIR"/deps/* "$PROFILE_DIR"/build/*/*/out/*; do
   b=$(basename "$path")
   # Test binaries are `<name>-<16 hex>`; skip .d/.rlib/.rmeta/.so artifacts.
   [[ "$b" =~ ^[a-z_0-9]+-[0-9a-f]{16}$ ]] || continue

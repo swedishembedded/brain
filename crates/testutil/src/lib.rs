@@ -246,34 +246,37 @@ pub fn crate_path(rel: &str) -> String {
 }
 
 /// The binary `name` of the package under test, as cargo built it for this
-/// integration test: an integration test's executable lives in
-/// `<target>/<profile>/deps/`, and cargo builds the package's binaries into
-/// `<target>/<profile>/` before it runs the test. Found from the running
-/// executable's own path, so nothing is read from the environment.
+/// integration test: cargo builds the package's binaries into
+/// `<target>/<profile>/` before it runs the test, and the test's own executable
+/// lives somewhere below that directory (`<profile>/deps/` in the classic
+/// layout, `<profile>/build/<package>/<hash>/out/` in the build-dir layout).
+/// Found from the running executable's own path, so nothing is read from the
+/// environment and no one layout is assumed.
 ///
-/// Panics with what to fix when the layout is not that one: a cargo whose
-/// build directory is configured apart from its target directory keeps test
-/// executables away from the binaries they spawn, and the test cannot know
-/// where to look. Point cargo's `build-dir` at the target directory (or leave it
-/// unset) and run the test through cargo.
+/// Panics with what to fix when no directory above the executable, below the
+/// target root, holds the binary: a cargo whose build directory is configured
+/// apart from its target directory keeps test executables away from the
+/// binaries they spawn, and the test cannot know where to look. Point cargo's
+/// `build-dir` at the target directory (or leave it unset) and run the test
+/// through cargo.
 pub fn package_bin(name: &str) -> std::path::PathBuf {
     let exe = std::env::current_exe().expect("the running test executable's path");
-    let deps = exe.parent().filter(|d| d.file_name().is_some_and(|n| n == "deps"));
-    let Some(profile_dir) = deps.and_then(std::path::Path::parent) else {
+    find_package_bin(&exe, name).unwrap_or_else(|| {
         panic!(
-            "{} is not in a <target>/<profile>/deps directory, so the `{name}` binary cannot be found beside it: \
-             configure cargo so its build-dir is the target directory (or unset), then run the test through cargo",
+            "no directory above {} holds the package binary `{name}`: run the test through cargo, which builds it \
+             before the package's tests (a cargo whose build-dir is apart from the target directory puts it elsewhere; \
+             configure build-dir to the target directory)",
             exe.display()
-        );
-    };
-    let bin = profile_dir.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
-    assert!(
-        bin.is_file(),
-        "{} does not exist: run the test through cargo, which builds the package's binary `{name}` before its tests \
-         (a cargo whose build-dir is apart from the target directory puts it elsewhere; configure build-dir to the target directory)",
-        bin.display()
-    );
-    bin
+        )
+    })
+}
+
+/// The nearest directory above `exe` that holds the file `name`, searched up to
+/// but not including cargo's target root (the directory cargo marks with
+/// `CACHEDIR.TAG`), so the walk never leaves the build tree.
+fn find_package_bin(exe: &std::path::Path, name: &str) -> Option<std::path::PathBuf> {
+    let file = format!("{name}{}", std::env::consts::EXE_SUFFIX);
+    exe.ancestors().skip(1).take_while(|dir| !dir.join("CACHEDIR.TAG").is_file()).map(|dir| dir.join(&file)).find(|bin| bin.is_file())
 }
 
 /// The path to a testdata fixture, `<testdata-root>/<rel>`. The root is
@@ -442,6 +445,24 @@ pub fn read_i32(path: impl AsRef<std::path::Path>) -> Option<Vec<u32>> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_package_binary_is_found_from_a_test_executable_in_either_cargo_layout() {
+        let target = crate::Scratch::dir("brain-testutil-layout");
+        std::fs::write(target.join("CACHEDIR.TAG"), b"").unwrap();
+        let profile = target.join("fast");
+        let bin = profile.join(format!("brain{}", std::env::consts::EXE_SUFFIX));
+        for exe_dir in [profile.join("deps"), profile.join("build/brain-cli/0123456789abcdef/out")] {
+            std::fs::create_dir_all(&exe_dir).unwrap();
+            assert_eq!(super::find_package_bin(&exe_dir.join("it-0123456789abcdef"), "brain"), None, "nothing is found before cargo builds it");
+        }
+        std::fs::write(&bin, b"").unwrap();
+        for exe_dir in [profile.join("deps"), profile.join("build/brain-cli/0123456789abcdef/out")] {
+            assert_eq!(super::find_package_bin(&exe_dir.join("it-0123456789abcdef"), "brain"), Some(bin.clone()), "{}", exe_dir.display());
+        }
+        std::fs::write(target.join(format!("brain-gpu-worker{}", std::env::consts::EXE_SUFFIX)), b"").unwrap();
+        assert_eq!(super::find_package_bin(&profile.join("deps/it-0123456789abcdef"), "brain-gpu-worker"), None, "the walk stops below the target root");
+    }
+
     use super::*;
 
     #[test]
