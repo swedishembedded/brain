@@ -17,10 +17,26 @@ use std::sync::{Arc, Mutex};
 
 use capability::CancelToken;
 
+/// What a job a client can address is, for the client that owns it: its owner (the transport's caller identity),
+/// what it runs and when it was submitted. A job registered with it is listed to its owner and cancelled only by
+/// its owner.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JobInfo {
+    pub owner: String,
+    pub model: String,
+    pub action: String,
+    pub submitted: std::time::SystemTime,
+}
+
+struct Registered {
+    token: CancelToken,
+    info: Option<JobInfo>,
+}
+
 /// Armed cancel tokens for in-flight jobs, keyed by `K`. An entry lives from
 /// submission until the reply fires (or an admission timeout sheds it first).
 /// Cloning is cheap — an `Arc` around the shared map.
-pub struct JobRegistry<K>(Arc<Mutex<HashMap<K, CancelToken>>>);
+pub struct JobRegistry<K>(Arc<Mutex<HashMap<K, Registered>>>);
 
 impl<K> Clone for JobRegistry<K> {
     fn clone(&self) -> JobRegistry<K> {
@@ -43,7 +59,15 @@ impl<K: Eq + Hash> JobRegistry<K> {
     /// before calling this.
     pub fn insert(&self, id: K, token: CancelToken) {
         if let Ok(mut m) = self.0.lock() {
-            m.insert(id, token);
+            m.insert(id, Registered { token, info: None });
+        }
+    }
+
+    /// [`Self::insert`] for a job a client addresses by its id: listed to `info.owner` by [`Self::owned_by`] and
+    /// cancelled only through [`Self::get_owned`] by that owner.
+    pub fn insert_described(&self, id: K, token: CancelToken, info: JobInfo) {
+        if let Ok(mut m) = self.0.lock() {
+            m.insert(id, Registered { token, info: Some(info) });
         }
     }
 
@@ -57,7 +81,24 @@ impl<K: Eq + Hash> JobRegistry<K> {
     /// A clone of the token registered under `id`, if it's still in flight —
     /// e.g. to cancel a job by id (`token.cancel()` on the result).
     pub fn get(&self, id: &K) -> Option<CancelToken> {
-        self.0.lock().ok().and_then(|m| m.get(id).cloned())
+        self.0.lock().ok().and_then(|m| m.get(id).map(|r| r.token.clone()))
+    }
+
+    /// The token of the described job `id` when `owner` owns it; `None` for an id that is unknown, finished,
+    /// undescribed or another owner's (which a caller cannot tell apart).
+    pub fn get_owned(&self, id: &K, owner: &str) -> Option<CancelToken> {
+        self.0.lock().ok().and_then(|m| m.get(id).filter(|r| r.info.as_ref().is_some_and(|i| i.owner == owner)).map(|r| r.token.clone()))
+    }
+
+    /// Every in-flight described job of `owner`, oldest first.
+    pub fn owned_by(&self, owner: &str) -> Vec<(K, JobInfo)>
+    where
+        K: Clone,
+    {
+        let Ok(m) = self.0.lock() else { return Vec::new() };
+        let mut mine: Vec<(K, JobInfo)> = m.iter().filter_map(|(id, r)| r.info.as_ref().filter(|i| i.owner == owner).map(|i| (id.clone(), i.clone()))).collect();
+        mine.sort_by_key(|(_, i)| i.submitted);
+        mine
     }
 
     /// Cancel every registered job: what a stopping server does so that
@@ -65,7 +106,7 @@ impl<K: Eq + Hash> JobRegistry<K> {
     /// Entries stay until their owners [`remove`](Self::remove) them.
     pub fn cancel_all(&self) {
         if let Ok(m) = self.0.lock() {
-            m.values().for_each(CancelToken::cancel);
+            m.values().for_each(|r| r.token.cancel());
         }
     }
 
@@ -104,6 +145,23 @@ mod tests {
         reg.remove(&1);
         assert_eq!(reg.len(), 0);
         assert!(reg.get(&1).is_none(), "removed id must miss");
+    }
+
+    #[test]
+    fn a_described_job_is_listed_to_and_cancelled_by_its_owner_alone() {
+        let reg: JobRegistry<u64> = JobRegistry::new();
+        let info = |owner: &str| JobInfo { owner: owner.to_string(), model: "m".into(), action: "a".into(), submitted: std::time::SystemTime::now() };
+        let (mine, theirs) = (CancelToken::armed(), CancelToken::armed());
+        reg.insert_described(1, mine.clone(), info("uid:1000"));
+        reg.insert_described(2, theirs.clone(), info("uid:1001"));
+        reg.insert(3, CancelToken::armed());
+        assert_eq!(reg.owned_by("uid:1000").into_iter().map(|(id, _)| id).collect::<Vec<_>>(), vec![1]);
+        assert!(reg.get_owned(&2, "uid:1000").is_none(), "another owner's job cannot be reached");
+        assert!(reg.get_owned(&3, "uid:1000").is_none(), "nor can an undescribed one");
+        reg.get_owned(&1, "uid:1000").expect("the owner reaches its job").cancel();
+        assert!(mine.is_cancelled() && !theirs.is_cancelled());
+        reg.remove(&1);
+        assert!(reg.owned_by("uid:1000").is_empty(), "a finished job is no longer listed");
     }
 
     #[test]

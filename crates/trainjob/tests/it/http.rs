@@ -54,6 +54,12 @@ async fn a_training_job_over_http_is_created_followed_and_collected_by_digest() 
     assert_eq!(status, StatusCode::ACCEPTED, "{}", String::from_utf8_lossy(&created));
     let id = json_of(&created)["id"].as_str().unwrap().to_string();
 
+    // The caller's listing names the run, so a client that loses the id can find it again.
+    let (status, listing) = call(&app, Method::GET, "/v1/jobs", Some(KEY), None).await;
+    assert_eq!(status, StatusCode::OK);
+    let listing = json_of(&listing);
+    assert!(listing["data"].as_array().unwrap().iter().any(|j| j["id"] == id.as_str() && j["model"] == trainjob::MODEL && j["action"] == trainjob::ACTION), "{listing}");
+
     // The stream carries each step and ends with the status.
     let (status, stream) = call(&app, Method::GET, &format!("/v1/jobs/{id}/events"), Some(KEY), None).await;
     assert_eq!(status, StatusCode::OK);
@@ -87,7 +93,7 @@ async fn the_job_api_is_closed_to_those_without_the_key_and_to_every_input_it_do
     let good = json!({"base": BASE, "arch": "qwen35", "data": json!({"train": {"digest": train.hex()}}).to_string()});
 
     // Authentication: nothing is reachable, nothing is enumerable.
-    for (method, uri) in [(Method::POST, "/v1/jobs"), (Method::GET, "/v1/jobs/00000000-0000-0000-0000-000000000000"), (Method::GET, "/v1/jobs/00000000-0000-0000-0000-000000000000/events"), (Method::DELETE, "/v1/jobs/00000000-0000-0000-0000-000000000000"), (Method::GET, "/v1/jobs/nope/events")] {
+    for (method, uri) in [(Method::POST, "/v1/jobs"), (Method::GET, "/v1/jobs"), (Method::GET, "/v1/jobs/00000000-0000-0000-0000-000000000000"), (Method::GET, "/v1/jobs/00000000-0000-0000-0000-000000000000/events"), (Method::DELETE, "/v1/jobs/00000000-0000-0000-0000-000000000000"), (Method::GET, "/v1/jobs/nope/events")] {
         for key in [None, Some("wrong"), Some("")] {
             let (status, body) = call(&app, method.clone(), uri, key, Some(job_body(good.clone()))).await;
             assert_eq!(status, StatusCode::UNAUTHORIZED, "{method} {uri} with {key:?}");

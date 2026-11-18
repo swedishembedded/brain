@@ -241,6 +241,12 @@ Training is a model of the same server, so every item above applies to it; these
       wrong objective, a run larger than the largest card) is refused at the door (`ResidentModel::check_job`, a 400
       or a bus error) before a job exists or a card is claimed; a run never evicts a serving instance to make room
       for something that then fails.
+- [ ] A job is listed only to the caller that owns it: `GET /v1/jobs` by the caller's `Authenticator::scope`, D-Bus
+      `Jobs()` by the Unix user the bus daemon reports for the calling connection, and D-Bus `Cancel` reaches only
+      that user's jobs (`residency::jobs::JobRegistry::{owned_by, get_owned}`). A job is detached from its client by
+      design, so this listing is how a client that lost its id ends it. Tests `apiserve` `capabilities`
+      `a_job_whose_client_hung_up_is_listed_to_its_owner_alone_and_cancelled_by_its_listed_id`, `dbus` `roundtrip`
+      `a_subscribed_job_outlives_its_client_and_is_listed_and_cancelled_from_a_new_connection`, `residency` `jobs`.
 - [ ] The event stream is a per-caller view of the job like its status and result (another caller gets 404), is
       bounded (4096 frames kept, 8 followers a job) and carries the run's statistics and refusals, not data.
 - [ ] Anyone holding the key can occupy a card with a run: training is off unless the operator passes

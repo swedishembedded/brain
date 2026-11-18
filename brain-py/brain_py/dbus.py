@@ -310,9 +310,19 @@ class BrainDBus(BrainBase):
 
         Flips the job's cancel token; the action aborts at its next poll and the
         stream ends with an `error` frame (`"cancelled"`). Returns True if the job
-        was found still in flight, False for an unknown or finished id.
+        was found still in flight, False for an unknown or finished id, or one
+        another Unix user subscribed.
         """
         return bool(self._call("Cancel", "t", (job,))[0])
+
+    def jobs(self) -> list[dict[str, Any]]:
+        """The calling user's in-flight ``Subscribe`` jobs, oldest first.
+
+        A job outlives the stream that subscribed it, so a client that lost its
+        stream (it exited, or was interrupted) finds the id here to
+        :meth:`cancel`. Each entry is ``{"job", "model", "action", "submitted"}``.
+        """
+        return json.loads(self._call("Jobs")[0])
 
     def stream_transcribe(
         self,

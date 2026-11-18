@@ -720,7 +720,7 @@ train_body() { # train_body <extra params json fragment, with a leading comma or
 
 @test "security: the job event stream needs the key, and another id is a 404 not a hint" {
   local id=00000000-0000-0000-0000-000000000000 st
-  for path in "/v1/jobs/$id/events" "/v1/jobs/nope/events" "/v1/jobs/$id"; do
+  for path in "/v1/jobs/$id/events" "/v1/jobs/nope/events" "/v1/jobs/$id" "/v1/jobs"; do
     st=$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' "$(base openai)$path")
     [ "$st" -eq 401 ]
     st=$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' -H "Authorization: Bearer wrong" "$(base openai)$path")
@@ -730,6 +730,10 @@ train_body() { # train_body <extra params json fragment, with a leading comma or
   [ "$STATUS" -eq 404 ]
   get_url openai "/v1/jobs/nope/events"
   [ "$STATUS" -eq 404 ]
+  # The caller's own listing, behind the same key.
+  get_url openai "/v1/jobs"
+  [ "$STATUS" -eq 200 ]
+  jq -e '.object == "list" and (.data | type == "array")' "$RESP"
 }
 
 @test "security: a training job is refused, before it starts, for a field, a path or a digest the API does not define" {

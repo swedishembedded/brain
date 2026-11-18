@@ -175,6 +175,105 @@ impl Manager {
         (job, token)
     }
 
+    /// [`Self::register_job`] for a job its caller addresses by id (`Subscribe`): listed by `Jobs` to `owner` and
+    /// cancelled by `Cancel` only for `owner`.
+    fn register_owned_job(&self, inv: &mut Invocation, owner: String, model: &str, action: &str) -> (u64, CancelToken) {
+        let token = CancelToken::armed();
+        inv.cancel = token.clone();
+        let job = self.next_job.fetch_add(1, Ordering::Relaxed) + 1;
+        let info = residency::jobs::JobInfo { owner, model: model.to_string(), action: action.to_string(), submitted: std::time::SystemTime::now() };
+        self.jobs.insert_described(job, token.clone(), info);
+        (job, token)
+    }
+
+    /// `Subscribe` for a caller already resolved to `owner` ([`caller_owner`]).
+    pub(crate) async fn subscribe_as(&self, owner: String, model: String, action: String, params: String, in_fds: HashMap<String, ZOwnedFd>, in_meta: String) -> fdo::Result<(u64, ZOwnedFd)> {
+        // Edge concurrency ceiling -- see `run`'s comment. Held for the whole
+        // subscription (not just this method call), so it's threaded into
+        // `submit_subscribed_job` and dropped only when the job's reply fires.
+        let permit = self.edge_permits.clone().try_acquire_owned().map_err(|_| fdo::Error::Failed("server saturated: request rejected at the edge".into()))?;
+        let model = resolve_model_alias(model);
+        let mut inv = self.build_inv(&params, in_fds, &in_meta).map_err(fdo::Error::Failed)?;
+        // A resident model's call is checked here, so a refusal is this
+        // method's own error; a model still to be fetched is checked once it
+        // is resident, in `submit_subscribed_job`.
+        if self.executor.manifests().iter().any(|m| m.model == model) {
+            inv = served_invocation(&self.executor, self.training, &model, &action, inv).map_err(fdo::Error::Failed)?;
+        }
+        // Arm a cancel token under the returned job id: `Cancel(job)` from its owner flips it and
+        // the running action aborts at its next poll.
+        let (job, token) = self.register_owned_job(&mut inv, owner, &model, &action);
+        let jobs = self.jobs.clone();
+        let (stream, client) = crate::stream::pair().map_err(|e| fdo::Error::Failed(e.to_string()))?;
+        let stream = Arc::new(Mutex::new(stream));
+        let admit_deadline = self.admit_deadline;
+        let cold_build_admit_deadline = self.cold_build_admit_deadline;
+
+        if self.executor.manifests().iter().any(|m| m.model == model) {
+            submit_subscribed_job(self.executor.clone(), self.training, jobs, stream, job, model, action, inv, admit_deadline, cold_build_admit_deadline, token, permit);
+            return Ok((job, client.into()));
+        }
+
+        let Some(supplier) = self.supplier.clone() else {
+            finish_job(&jobs, job);
+            return Err(fdo::Error::Failed(format!("no model '{model}'")));
+        };
+        match supplier.classify(&model) {
+            Supply::Fetchable => {}
+            Supply::Resident | Supply::Unknown(_) => {
+                finish_job(&jobs, job);
+                return Err(fdo::Error::Failed(format!("no model '{model}'")));
+            }
+        }
+
+        let exec = self.executor.clone();
+        let training = self.training;
+        let model_owned = model.clone();
+        let stream_bg = stream.clone();
+        tokio::spawn(async move {
+            let fetch_stream = stream_bg.clone();
+            let fetch_model = model_owned.clone();
+            let fetch_exec = exec.clone();
+            // The job's own token: cancelling the job stops this caller's wait, and the fetch once no caller waits.
+            let fetch_cancel = token.clone();
+            let outcome = tokio::task::spawn_blocking(move || {
+                fetch_exec.ensure_model(
+                    &fetch_model,
+                    &supplier,
+                    &mut |name, got, total| {
+                        if let Ok(mut s) = fetch_stream.lock() {
+                            s.progress(got, total, &format!("fetching {fetch_model}: {name}"), Some("fetching"), None, None);
+                        }
+                    },
+                    &fetch_cancel,
+                )
+            })
+            .await;
+            match outcome {
+                Ok(Ok(())) => {}
+                Ok(Err(reason)) => {
+                    eprintln!("brain dbus: auto-fetch {model_owned}: {reason}");
+                    if let Ok(mut s) = stream_bg.lock() {
+                        s.error(&format!("no model '{model_owned}'"));
+                    }
+                    finish_job(&jobs, job);
+                    return;
+                }
+                Err(join_err) => {
+                    eprintln!("brain dbus: auto-fetch {model_owned}: blocking task failed: {join_err}");
+                    if let Ok(mut s) = stream_bg.lock() {
+                        s.error(&format!("no model '{model_owned}'"));
+                    }
+                    finish_job(&jobs, job);
+                    return;
+                }
+            }
+            submit_subscribed_job(exec, training, jobs, stream_bg, job, model_owned, action, inv, admit_deadline, cold_build_admit_deadline, token, permit);
+        });
+
+        Ok((job, client.into()))
+    }
+
     /// Assemble an [`Invocation`] from params JSON, input fds, and per-fd metadata.
     fn build_inv(&self, params: &str, in_fds: HashMap<String, ZOwnedFd>, in_meta: &str) -> Result<Invocation, String> {
         let params: Value = if params.trim().is_empty() { json!({}) } else { serde_json::from_str(params).map_err(|e| format!("params JSON: {e}"))? };
@@ -598,99 +697,23 @@ impl Manager {
     /// model is ready -- mirroring `crate::bridge::stream_with_autofetch` on the
     /// HTTP side. An `Unknown`/no-supplier model is still the plain `"no model
     /// '…'"` error with zero I/O, no stream opened at all.
+    ///
+    /// The job is detached from the stream: a subscriber that closes it, or exits, does not end the job (a
+    /// training run continues, and its `resume_key` picks it up after a restart). `Jobs` lists the caller's jobs
+    /// and `Cancel` ends one.
     #[zbus(out_args("job", "event_fd"))]
     async fn subscribe(
         &self,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
         model: String,
         action: String,
         params: String,
         in_fds: HashMap<String, ZOwnedFd>,
         in_meta: String,
     ) -> fdo::Result<(u64, ZOwnedFd)> {
-        // Edge concurrency ceiling -- see `run`'s comment. Held for the whole
-        // subscription (not just this method call), so it's threaded into
-        // `submit_subscribed_job` and dropped only when the job's reply fires.
-        let permit = self.edge_permits.clone().try_acquire_owned().map_err(|_| fdo::Error::Failed("server saturated: request rejected at the edge".into()))?;
-        let model = resolve_model_alias(model);
-        let mut inv = self.build_inv(&params, in_fds, &in_meta).map_err(fdo::Error::Failed)?;
-        // A resident model's call is checked here, so a refusal is this
-        // method's own error; a model still to be fetched is checked once it
-        // is resident, in `submit_subscribed_job`.
-        if self.executor.manifests().iter().any(|m| m.model == model) {
-            inv = served_invocation(&self.executor, self.training, &model, &action, inv).map_err(fdo::Error::Failed)?;
-        }
-        // Arm a cancel token under the returned job id: `Cancel(job)` flips it and
-        // the running action aborts at its next poll.
-        let (job, token) = self.register_job(&mut inv);
-        let jobs = self.jobs.clone();
-        let (stream, client) = crate::stream::pair().map_err(|e| fdo::Error::Failed(e.to_string()))?;
-        let stream = Arc::new(Mutex::new(stream));
-        let admit_deadline = self.admit_deadline;
-        let cold_build_admit_deadline = self.cold_build_admit_deadline;
-
-        if self.executor.manifests().iter().any(|m| m.model == model) {
-            submit_subscribed_job(self.executor.clone(), self.training, jobs, stream, job, model, action, inv, admit_deadline, cold_build_admit_deadline, token, permit);
-            return Ok((job, client.into()));
-        }
-
-        let Some(supplier) = self.supplier.clone() else {
-            finish_job(&jobs, job);
-            return Err(fdo::Error::Failed(format!("no model '{model}'")));
-        };
-        match supplier.classify(&model) {
-            Supply::Fetchable => {}
-            Supply::Resident | Supply::Unknown(_) => {
-                finish_job(&jobs, job);
-                return Err(fdo::Error::Failed(format!("no model '{model}'")));
-            }
-        }
-
-        let exec = self.executor.clone();
-        let training = self.training;
-        let model_owned = model.clone();
-        let stream_bg = stream.clone();
-        tokio::spawn(async move {
-            let fetch_stream = stream_bg.clone();
-            let fetch_model = model_owned.clone();
-            let fetch_exec = exec.clone();
-            // The job's own token: cancelling the job stops this caller's wait, and the fetch once no caller waits.
-            let fetch_cancel = token.clone();
-            let outcome = tokio::task::spawn_blocking(move || {
-                fetch_exec.ensure_model(
-                    &fetch_model,
-                    &supplier,
-                    &mut |name, got, total| {
-                        if let Ok(mut s) = fetch_stream.lock() {
-                            s.progress(got, total, &format!("fetching {fetch_model}: {name}"), Some("fetching"), None, None);
-                        }
-                    },
-                    &fetch_cancel,
-                )
-            })
-            .await;
-            match outcome {
-                Ok(Ok(())) => {}
-                Ok(Err(reason)) => {
-                    eprintln!("brain dbus: auto-fetch {model_owned}: {reason}");
-                    if let Ok(mut s) = stream_bg.lock() {
-                        s.error(&format!("no model '{model_owned}'"));
-                    }
-                    finish_job(&jobs, job);
-                    return;
-                }
-                Err(join_err) => {
-                    eprintln!("brain dbus: auto-fetch {model_owned}: blocking task failed: {join_err}");
-                    if let Ok(mut s) = stream_bg.lock() {
-                        s.error(&format!("no model '{model_owned}'"));
-                    }
-                    finish_job(&jobs, job);
-                    return;
-                }
-            }
-            submit_subscribed_job(exec, training, jobs, stream_bg, job, model_owned, action, inv, admit_deadline, cold_build_admit_deadline, token, permit);
-        });
-
-        Ok((job, client.into()))
+        let owner = caller_owner(&header, connection).await;
+        self.subscribe_as(owner, model, action, params, in_fds, in_meta).await
     }
 
     /// **Live streaming transcription.** The client writes raw mono f32 LE PCM at
@@ -847,10 +870,27 @@ impl Manager {
 
     /// Cooperatively cancel a job (from `Subscribe`) by id: flips its token so the
     /// running action aborts at its next poll (`Err("cancelled")` arrives as an
-    /// `error` frame). Returns `true` if the job was found still in flight,
-    /// `false` for an unknown or already-finished id.
-    async fn cancel(&self, job: u64) -> bool {
-        self.jobs.get(&job).map(|t| t.cancel()).is_some()
+    /// `error` frame). Returns `true` if the job was found still in flight and the
+    /// caller owns it (the same Unix user that subscribed it), `false` for an
+    /// unknown, already-finished or another user's id.
+    async fn cancel(&self, #[zbus(header)] header: zbus::message::Header<'_>, #[zbus(connection)] connection: &zbus::Connection, job: u64) -> bool {
+        let owner = caller_owner(&header, connection).await;
+        self.jobs.get_owned(&job, &owner).map(|t| t.cancel()).is_some()
+    }
+
+    /// The caller's in-flight `Subscribe` jobs as a JSON array, oldest first: `[{"job", "model", "action",
+    /// "submitted"}]` (`submitted` in seconds since the Unix epoch). A job belongs to the Unix user that subscribed
+    /// it, so a client that lost its stream (it exited, or its connection dropped) finds its jobs again from a new
+    /// connection and can `Cancel` them; another user's jobs are never listed.
+    async fn jobs(&self, #[zbus(header)] header: zbus::message::Header<'_>, #[zbus(connection)] connection: &zbus::Connection) -> String {
+        let owner = caller_owner(&header, connection).await;
+        let listed: Vec<Value> = self
+            .jobs
+            .owned_by(&owner)
+            .into_iter()
+            .map(|(job, info)| json!({"job": job, "model": info.model, "action": info.action, "submitted": info.submitted.duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())}))
+            .collect();
+        Value::Array(listed).to_string()
     }
 
     #[zbus(property)]
@@ -868,6 +908,19 @@ impl Manager {
     async fn models(&self) -> Vec<String> {
         self.list_models().await
     }
+}
+
+/// Who owns a job a call submits or addresses: the Unix user of the calling connection, as the bus daemon vouches
+/// for it (`GetConnectionUnixUser`), so the same user on a new connection reaches its jobs and another user does
+/// not. A peer-to-peer connection has no bus to ask and no sender; its owner is the one peer.
+async fn caller_owner(header: &zbus::message::Header<'_>, connection: &zbus::Connection) -> String {
+    let Some(sender) = header.sender() else { return "peer".to_string() };
+    let uid = match fdo::DBusProxy::new(connection).await {
+        Ok(proxy) => proxy.get_connection_unix_user(sender.clone().into()).await.ok(),
+        Err(_) => None,
+    };
+    // An unanswerable query leaves the job to the connection that made it, never to everyone.
+    uid.map_or_else(|| format!("connection:{sender}"), |uid| format!("uid:{uid}"))
 }
 
 /// Runs a read-only executor query off the async runtime's worker threads.
@@ -1196,7 +1249,7 @@ mod tests {
         let params = r#"{"data": "/etc"}"#.to_string();
         let err = mgr.run(HOST_PATH_MODEL.into(), "ingest".into(), params.clone(), Default::default(), String::new(), String::new()).await.expect_err("Run must refuse 'data'");
         assert!(err.to_string().contains("unknown param 'data'"), "{err}");
-        let err = mgr.subscribe(HOST_PATH_MODEL.into(), "ingest".into(), params.clone(), Default::default(), String::new()).await.expect_err("Subscribe must refuse 'data'");
+        let err = mgr.subscribe_as("peer".into(), HOST_PATH_MODEL.into(), "ingest".into(), params.clone(), Default::default(), String::new()).await.expect_err("Subscribe must refuse 'data'");
         assert!(err.to_string().contains("unknown param 'data'"), "{err}");
         let err = mgr.plan(HOST_PATH_MODEL.into(), "ingest".into(), params).await.expect_err("Plan must refuse 'data'");
         assert!(err.to_string().contains("unknown param 'data'"), "{err}");
@@ -1215,7 +1268,7 @@ mod tests {
         let params = r#"{"prompt": "hi", "temperature": 0.5}"#.to_string();
         let err = mgr.run(HOST_PATH_MODEL.into(), "ingest".into(), params.clone(), Default::default(), String::new(), String::new()).await.expect_err("Run must refuse it");
         assert!(err.to_string().contains(&format!("model '{HOST_PATH_MODEL}': unknown param 'temperature'")), "{err}");
-        let err = mgr.subscribe(HOST_PATH_MODEL.into(), "ingest".into(), params, Default::default(), String::new()).await.expect_err("Subscribe must refuse it");
+        let err = mgr.subscribe_as("peer".into(), HOST_PATH_MODEL.into(), "ingest".into(), params, Default::default(), String::new()).await.expect_err("Subscribe must refuse it");
         assert!(err.to_string().contains("unknown param 'temperature'"), "{err}");
         assert_eq!(reached.load(Ordering::SeqCst), 0, "a refused call never reaches the model");
         let inv = crate::service::served_invocation(&mgr.executor, false, HOST_PATH_MODEL, "ingest", capability::Invocation::new()).expect("an empty call is valid");

@@ -10,9 +10,16 @@
 //!   in use, free) and, where the host can say, what it is.
 //! - `POST /v1/run` runs one action and answers with its outputs and blobs.
 //! - `POST /v1/jobs` starts one in the background, for work too long to hold a
-//!   request open (video, music, 3D); `GET /v1/jobs/{id}` reports its progress,
+//!   request open (video, music, 3D, training); `GET /v1/jobs` lists the caller's
+//!   jobs, `GET /v1/jobs/{id}` reports one's progress,
 //!   `GET /v1/jobs/{id}/result` returns it when it is done and
 //!   `DELETE /v1/jobs/{id}` cancels it.
+//!
+//! A job is detached from the request that started it: a client that hangs up,
+//! or stops following its events, does not end it (a long run survives a
+//! dropped connection, and a training run's `resume_key` picks it up again
+//! after a restart). Ending one is explicit: `DELETE /v1/jobs/{id}`, with the id
+//! from the `POST` or from `GET /v1/jobs`.
 //! - `GET /v1/jobs/{id}/events` follows one as a server-sent event stream: each step
 //!   tick (`progress`) and each structured frame the action emits (`frame`, such as a
 //!   training step's loss and statistics) as it happens, then one terminal `done`
@@ -79,7 +86,7 @@ pub fn routes() -> Router<AppState> {
         .route("/v1/capabilities", get(list))
         .route("/v1/devices", get(devices))
         .route("/v1/run", post(run))
-        .route("/v1/jobs", post(create_job))
+        .route("/v1/jobs", post(create_job).get(list_jobs))
         .route("/v1/jobs/{id}", get(job_status).delete(cancel_job))
         .route("/v1/jobs/{id}/result", get(job_result))
         .route("/v1/jobs/{id}/events", get(job_events))
@@ -112,7 +119,7 @@ struct BlobWire {
 
 /// Reads and validates a call against the action's own spec, so nothing invalid
 /// reaches the hooks or the executor.
-fn parse_call(state: &AppState, body: &Bytes) -> Result<bridge::Admitted, ApiError> {
+fn parse_call(state: &AppState, body: &Bytes) -> Result<Parsed, ApiError> {
     let provider = state.provider;
     let call: CallBody = serde_json::from_slice(body).map_err(|e| ApiError::invalid_request(provider, format!("invalid JSON body: {e}")))?;
 
@@ -138,7 +145,15 @@ fn parse_call(state: &AppState, body: &Bytes) -> Result<bridge::Admitted, ApiErr
     }
     // A param the host resolves (a weights path, a dataset folder) is refused
     // as unknown, so a remote caller can never name a file on this machine.
-    bridge::admit(state, &call.model, &spec.name, inv, bridge::Naming::Params)
+    let admitted = bridge::admit(state, &call.model, &spec.name, inv, bridge::Naming::Params)?;
+    Ok(Parsed { admitted, model: call.model, action: spec.name.clone() })
+}
+
+/// A validated call, with the model and action it names (what a job listing shows of it).
+struct Parsed {
+    admitted: bridge::Admitted,
+    model: String,
+    action: String,
 }
 
 fn blob_json(blob: &Blob) -> Value {
@@ -222,7 +237,7 @@ async fn devices(State(state): State<AppState>) -> Json<Value> {
 async fn run(State(state): State<AppState>, caller: CallerExt, body: Bytes) -> Response {
     let state = state.scoped(caller);
     let call = match parse_call(&state, &body) {
-        Ok(call) => call,
+        Ok(call) => call.admitted,
         Err(e) => return e.into_response(),
     };
     match bridge::submit(&state, call).await {
@@ -242,6 +257,11 @@ enum Phase {
 
 struct Entry {
     scope: String,
+    /// What the job runs, for the caller's listing.
+    model: String,
+    action: String,
+    /// When it was started, as the listing reports it (seconds since the Unix epoch).
+    created: std::time::SystemTime,
     finished: Option<Instant>,
     phase: Phase,
     cancel: Option<oneshot::Sender<()>>,
@@ -318,7 +338,7 @@ impl AsyncJobs {
     }
 
     /// Makes room for one more job of `scope`, or says why there is none.
-    fn open(&self, scope: &str, cancel: oneshot::Sender<()>) -> Result<Uuid, &'static str> {
+    fn open(&self, scope: &str, model: &str, action: &str, cancel: oneshot::Sender<()>) -> Result<Uuid, &'static str> {
         let mut entries = self.lock();
         Self::reap(&mut entries, Instant::now());
         if entries.len() >= MAX_JOBS {
@@ -332,6 +352,9 @@ impl AsyncJobs {
             id,
             Entry {
                 scope: scope.to_string(),
+                model: model.to_string(),
+                action: action.to_string(),
+                created: std::time::SystemTime::now(),
                 finished: None,
                 phase: Phase::Running { step: 0, total: 0 },
                 cancel: Some(cancel),
@@ -412,20 +435,44 @@ impl AsyncJobs {
         self.lock().get(&id).filter(|e| e.scope == scope).map(|e| (e.log.after(seq), !matches!(e.phase, Phase::Running { .. })))
     }
 
+    /// Every job `scope` holds, running or finished and not yet forgotten, oldest first: what the caller needs to
+    /// find a job again (to follow, fetch or cancel it) after the connection that started it is gone.
+    fn list(&self, scope: &str) -> Vec<Value> {
+        let mut entries = self.lock();
+        Self::reap(&mut entries, Instant::now());
+        let mut mine: Vec<(std::time::SystemTime, Value)> = entries
+            .iter()
+            .filter(|(_, e)| e.scope == scope)
+            .map(|(id, e)| {
+                let created = e.created.duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+                let mut item = status_json(*id, &e.view());
+                item["model"] = json!(e.model);
+                item["action"] = json!(e.action);
+                item["created"] = json!(created);
+                (e.created, item)
+            })
+            .collect();
+        mine.sort_by_key(|(created, _)| *created);
+        mine.into_iter().map(|(_, item)| item).collect()
+    }
+
     /// What `scope` is allowed to see of job `id`.
     fn view(&self, scope: &str, id: Uuid) -> Option<View> {
         let entries = self.lock();
-        let entry = entries.get(&id).filter(|e| e.scope == scope)?;
-        Some(match &entry.phase {
-            Phase::Running { step, total } => View::Running { step: *step, total: *total },
-            Phase::Succeeded { outcome, .. } => View::Succeeded(Arc::clone(outcome)),
-            Phase::Failed(error) => View::Failed(error.clone()),
-            Phase::Cancelled => View::Cancelled,
-        })
+        entries.get(&id).filter(|e| e.scope == scope).map(Entry::view)
     }
 }
 
 impl Entry {
+    fn view(&self) -> View {
+        match &self.phase {
+            Phase::Running { step, total } => View::Running { step: *step, total: *total },
+            Phase::Succeeded { outcome, .. } => View::Succeeded(Arc::clone(outcome)),
+            Phase::Failed(error) => View::Failed(error.clone()),
+            Phase::Cancelled => View::Cancelled,
+        }
+    }
+
     fn record(&mut self, kind: &'static str, data: Value) {
         let seq = self.log.push(kind, data);
         self.wake.send_replace(seq);
@@ -467,13 +514,13 @@ fn parse_id(raw: &str) -> Option<Uuid> {
 
 async fn create_job(State(state): State<AppState>, caller: CallerExt, body: Bytes) -> Response {
     let state = state.scoped(caller);
-    let call = match parse_call(&state, &body) {
+    let Parsed { admitted: call, model, action } = match parse_call(&state, &body) {
         Ok(call) => call,
         Err(e) => return e.into_response(),
     };
     let scope = state.scope();
     let (cancel_tx, cancel_rx) = oneshot::channel();
-    let id = match state.async_jobs.open(&scope, cancel_tx) {
+    let id = match state.async_jobs.open(&scope, &model, &action, cancel_tx) {
         Ok(id) => id,
         Err(why) => return ApiError::rate_limited(state.provider, why).into_response(),
     };
@@ -528,15 +575,29 @@ async fn drive(jobs: Arc<AsyncJobs>, provider: crate::Provider, id: Uuid, mut st
     }
 }
 
+/// A job's status document: what `GET /v1/jobs/{id}` answers and each entry of `GET /v1/jobs` starts from.
+fn status_json(id: Uuid, view: &View) -> Value {
+    match view {
+        View::Running { step, total } => json!({"id": id.to_string(), "status": "running", "progress": {"step": step, "total": total}}),
+        View::Succeeded(_) => json!({"id": id.to_string(), "status": "succeeded"}),
+        View::Failed(error) => json!({"id": id.to_string(), "status": "failed", "error": {"message": error.message, "code": error.kind.status().as_u16()}}),
+        View::Cancelled => json!({"id": id.to_string(), "status": "cancelled"}),
+    }
+}
+
+/// `GET /v1/jobs`: the caller's own jobs (another caller's are never listed), each with its status, model, action
+/// and start time, oldest first.
+async fn list_jobs(State(state): State<AppState>, caller: CallerExt) -> Response {
+    let state = state.scoped(caller);
+    Json(json!({"object": "list", "data": state.async_jobs.list(&state.scope())})).into_response()
+}
+
 async fn job_status(State(state): State<AppState>, caller: CallerExt, Path(raw): Path<String>) -> Response {
     let state = state.scoped(caller);
     let Some(id) = parse_id(&raw) else { return no_such_job(&state) };
     match state.async_jobs.view(&state.scope(), id) {
         None => no_such_job(&state),
-        Some(View::Running { step, total }) => Json(json!({"id": id.to_string(), "status": "running", "progress": {"step": step, "total": total}})).into_response(),
-        Some(View::Succeeded(_)) => Json(json!({"id": id.to_string(), "status": "succeeded"})).into_response(),
-        Some(View::Failed(error)) => Json(json!({"id": id.to_string(), "status": "failed", "error": {"message": error.message, "code": error.kind.status().as_u16()}})).into_response(),
-        Some(View::Cancelled) => Json(json!({"id": id.to_string(), "status": "cancelled"})).into_response(),
+        Some(view) => Json(status_json(id, &view)).into_response(),
     }
 }
 

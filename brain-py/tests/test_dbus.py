@@ -222,3 +222,17 @@ def test_devices_is_the_json_the_server_answers():
     document = {"object": "list", "host": {"backend": "cpu"}, "data": [{"id": "cpu", "kind": "cpu", "memory": {"total_bytes": 8}}]}
     brain._call = lambda method, *a, **k: (json.dumps(document),) if method == "Devices" else pytest.fail(method)
     assert brain.devices() == document
+
+
+def test_jobs_lists_the_callers_subscribed_jobs():
+    """`jobs()` reads the server's `Jobs()` JSON: what a client that lost its stream cancels from."""
+    b = BrainDBus.__new__(BrainDBus)
+    calls = []
+
+    def fake_call(method, signature=None, body=()):
+        calls.append(method)
+        return ('[{"job": 7, "model": "brain/train", "action": "train", "submitted": 1}]',)
+
+    b._call = fake_call
+    assert b.jobs() == [{"job": 7, "model": "brain/train", "action": "train", "submitted": 1}]
+    assert calls == ["Jobs"]

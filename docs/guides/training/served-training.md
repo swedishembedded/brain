@@ -276,6 +276,12 @@ what it missed. `GET /v1/jobs/{id}` and `.../result` work as for every job, and
 Over D-Bus the frames are `progress` frames whose `event` is the same object,
 and `Cancel(job)` cancels.
 
+A run is detached from the client that started it: closing the event stream,
+or the client exiting, does not stop it (it keeps its card and publishes its
+adapter when it ends). A client that is interrupted and wants the run stopped
+cancels it explicitly; one that lost the id finds it in `GET /v1/jobs` (HTTP)
+or `Jobs()` (D-Bus), which list the caller's own jobs.
+
 A frame is `{"type": "stage", "stage": ...}` while the datasets are staged and
 the base is loaded, then one per optimiser step:
 

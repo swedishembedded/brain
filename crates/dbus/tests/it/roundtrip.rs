@@ -229,6 +229,59 @@ fn run_roundtrips_a_result_over_an_fd() {
     });
 }
 
+/// A `Subscribe` job is detached from its stream: a client that closes the stream and its connection leaves the job
+/// running, finds it again from a new connection with `Jobs` (its own jobs only: the same Unix user) and ends it with
+/// `Cancel`.
+#[test]
+fn a_subscribed_job_outlives_its_client_and_is_listed_and_cancelled_from_a_new_connection() {
+    if !session_bus_reachable() {
+        brain_testutil::skip_unavailable("no reachable session bus (run under `dbus-run-session -- cargo test ...`)");
+        return;
+    }
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+    rt.block_on(async {
+        let rev: Arc<dyn residency::ResidentModel> = Arc::new(residency::bridge::ProviderResident::stateless(Arc::new(RevProvider)));
+        let mut budgets = residency::budget::Budgets::new();
+        budgets.set(residency::Device::Gpu(0), 24 << 30, 0);
+        let executor = residency::Executor::start(vec![rev], budgets, residency::Policy::default());
+        let manager = brain_dbus::service::Manager::new(executor);
+        let name = format!("com.swedishembedded.Brain1.detached{}", std::process::id());
+        let _conn = zbus::connection::Builder::session().name(name.as_str()).serve_at(brain_dbus::OBJECT_PATH, manager).build().await.unwrap();
+        let proxy_on = |conn: zbus::Connection| {
+            let name = name.clone();
+            async move { zbus::Proxy::new_owned(conn, name, brain_dbus::OBJECT_PATH, "com.swedishembedded.Brain1.Manager").await.unwrap() }
+        };
+
+        // The first client subscribes, then drops its stream and its connection.
+        let first = zbus::Connection::session().await.unwrap();
+        let empty: HashMap<String, ZOwnedFd> = HashMap::new();
+        let (job, stream): (u64, ZOwnedFd) = proxy_on(first.clone()).await.call("Subscribe", &("rev", "slow", "{}", empty, "")).await.unwrap();
+        drop(stream);
+        drop(first);
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // A new connection of the same user lists it, still running.
+        let second = proxy_on(zbus::Connection::session().await.unwrap()).await;
+        let listed: String = second.call("Jobs", &()).await.unwrap();
+        let listed: serde_json::Value = serde_json::from_str(&listed).unwrap();
+        let entry = listed.as_array().unwrap().iter().find(|j| j["job"] == job).cloned().unwrap_or_else(|| panic!("the job outlives its client and is listed: {listed}"));
+        assert_eq!((entry["model"].as_str(), entry["action"].as_str()), (Some("rev"), Some("slow")), "{entry}");
+        assert!(entry["submitted"].as_u64().is_some_and(|t| t > 0), "{entry}");
+
+        let hit: bool = second.call("Cancel", &(job,)).await.unwrap();
+        assert!(hit, "the owner cancels its job from a new connection");
+        let t0 = std::time::Instant::now();
+        loop {
+            let listed: String = second.call("Jobs", &()).await.unwrap();
+            if !listed.contains(&format!("\"job\":{job}")) {
+                break;
+            }
+            assert!(t0.elapsed() < std::time::Duration::from_secs(5), "the cancelled job did not end: {listed}");
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    });
+}
+
 /// Regression test for the shutdown deadlock: before the fix, `run_stats_stream`
 /// held its own `zbus::Connection` clone for its whole life and only released it
 /// when a signal emit *failed* — which cannot happen while the connection is

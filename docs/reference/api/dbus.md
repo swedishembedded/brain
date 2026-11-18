@@ -39,7 +39,8 @@ Bus `com.swedishembedded.Brain1`, object `/com/swedishembedded/Brain1`, interfac
 | `Devices()` | JSON of the devices the server schedules on: each one's `id` (`cpu`, `gpu<i>`, `npu<i>`), `kind`, `memory` (`total_bytes`, `reserved_bytes`, `used_bytes`, `free_bytes`) and, where the host can say, a card's `name`, `vendor_id`, `class` and `backends`, plus `host` (backend, core and card counts); the same document as HTTP `GET /v1/devices`, with no path, bus address or UUID |
 | `Run(model, action, params, in_fds, in_meta, transport)` | one-shot request → result + output data |
 | `Subscribe(model, action, params, in_fds, in_meta)` | a job that streams progress/result frames back — for long-running generation |
-| `Cancel(job)` | cooperative cancel of an in-flight `Subscribe` job |
+| `Cancel(job)` | cooperative cancel of an in-flight `Subscribe` job of the calling user |
+| `Jobs()` | the calling user's in-flight `Subscribe` jobs, as JSON |
 | `StreamTranscribe(model, params, pcm_fd)` | continuous-input method for live audio, e.g. streaming ASR |
 | props | `Version`, `ActiveJobs` (in-flight `Run`/`Subscribe`/stream jobs), `Models` |
 
@@ -98,7 +99,16 @@ checks for it on entry and between steps (decode tokens, denoising steps, traini
 steps) and aborts, which arrives as the stream's terminal `error` frame
 (`"cancelled"`). A text generation that has already streamed text ends instead with
 its partial text and `finish_reason` `"cancelled"`. Returns `true` if the job was still in flight, `false`
-for an unknown or already-finished id.
+for an unknown or already-finished id, or one another Unix user subscribed: a job belongs to the user of the
+connection that subscribed it (as the bus daemon reports it), so the same user can cancel it from any connection.
+
+### `Jobs` - finding a job again
+
+A `Subscribe` job is detached from its stream: a subscriber that closes the stream, or exits, does not end it (a
+training run keeps training; one given a `resume_key` also continues after a server restart). `Jobs()` returns the
+calling user's in-flight jobs, oldest first, as a JSON array `[{"job", "model", "action", "submitted"}]`
+(`submitted` in seconds since the Unix epoch), so a client that lost its stream finds the id to `Cancel`. Another
+user's jobs are never listed.
 
 ### `StreamTranscribe` — continuous input
 

@@ -563,6 +563,47 @@ async fn a_job_belongs_to_the_caller_that_made_it() {
     assert_eq!(status, StatusCode::OK, "its owner still can");
 }
 
+/// A job is detached from the connection that started it: a client whose event stream hung up finds it again in
+/// its own listing, still running, and ends it by the listed id. Another caller's listing never shows it.
+#[tokio::test]
+async fn a_job_whose_client_hung_up_is_listed_to_its_owner_alone_and_cancelled_by_its_listed_id() {
+    let rig = rig();
+    let (_, created) = call(&rig.app, Method::POST, "/v1/jobs", "alice", Some(run_body("brain-slow", "render", json!({"steps": 500}), json!({})))).await;
+    let id = created["id"].as_str().unwrap().to_string();
+
+    // The client follows the job and hangs up: the response is dropped after its head.
+    let req = Request::builder().method(Method::GET).uri(format!("/v1/jobs/{id}/events")).header(header::AUTHORIZATION, "Bearer alice").body(Body::empty()).unwrap();
+    drop(rig.app.clone().oneshot(req).await.unwrap());
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let listed = loop {
+        let (status, listing) = call(&rig.app, Method::GET, "/v1/jobs", "alice", None).await;
+        assert_eq!(status, StatusCode::OK, "{listing}");
+        let job = listing["data"].as_array().unwrap().iter().find(|j| j["id"] == id.as_str()).cloned().expect("the owner's job is listed");
+        if job["progress"]["step"].as_u64().is_some_and(|s| s > 0) {
+            break job;
+        }
+        assert!(Instant::now() < deadline, "the job never started: {job}");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    };
+    assert_eq!((listed["status"].as_str(), listed["model"].as_str(), listed["action"].as_str()), (Some("running"), Some("brain-slow"), Some("render")), "a hung-up client does not end the job: {listed}");
+    assert!(listed["created"].as_u64().is_some_and(|t| t > 0), "{listed}");
+
+    let (_, others) = call(&rig.app, Method::GET, "/v1/jobs", "mallory", None).await;
+    assert_eq!(others["data"], json!([]), "another caller lists none of it");
+
+    let (status, _) = call(&rig.app, Method::DELETE, &format!("/v1/jobs/{}", listed["id"].as_str().unwrap()), "alice", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(settled_job(&rig.app, &id, "alice").await["status"], "cancelled");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !rig.saw_cancel.load(Ordering::SeqCst) {
+        assert!(Instant::now() < deadline, "the model never saw the cancellation");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let (_, listing) = call(&rig.app, Method::GET, "/v1/jobs", "alice", None).await;
+    assert_eq!(listing["data"][0]["status"], "cancelled", "a finished job stays listed until it is forgotten: {listing}");
+}
+
 #[tokio::test]
 async fn a_caller_who_cannot_pay_is_refused_when_the_job_is_created_not_after() {
     let rig = rig();

@@ -392,7 +392,10 @@ present on every surface and behind the same key, hooks and admission:
   only by opening the card, which the serving process does once, for the cards it serves on.
 - `POST /v1/run` runs one action and answers with its outputs and blobs.
 - `POST /v1/jobs` starts one in the background, for work too long to hold a request
-  open. `GET /v1/jobs/{id}` reports `running` (with `progress.step` / `progress.total`),
+  open. `GET /v1/jobs` lists the caller's own jobs, running or finished and not yet
+  forgotten, oldest first, as `{"object": "list", "data": [{"id", "status", "model",
+  "action", "created", "progress"?, "error"?}]}` (`created` in seconds since the Unix
+  epoch). `GET /v1/jobs/{id}` reports `running` (with `progress.step` / `progress.total`),
   `succeeded`, `failed` or `cancelled`; `GET /v1/jobs/{id}/result` returns the result
   once it exists (409 while it is running); `DELETE /v1/jobs/{id}` cancels it, and a
   `cancellable` action stops at its next step. `GET /v1/jobs/{id}/events` follows it as
@@ -400,6 +403,12 @@ present on every surface and behind the same key, hooks and admission:
   frame the action reports (a training step's loss and statistics), and one `done`
   event with the final status. The last 4096 frames are kept, and `Last-Event-ID`
   resumes after the last event received; at most 8 streams follow one job.
+
+  A job is detached from the request that started it and from its event streams: a
+  client that hangs up does not end it. Ending one is a `DELETE /v1/jobs/{id}`, with the
+  id from the `POST` or from `GET /v1/jobs` (a client that lost it, after a restart or
+  an interrupt, finds it there). A training run given a `resume_key` continues from its
+  last checkpoint when it is submitted again after the server itself stopped.
 
 A call is `{"model", "action", "params", "blobs": {name: {"media", "data", "meta"}}}`
 (no other field is accepted) with `data` base64 and `media` one of `image`, `mask`, `audio`, `video`, `text`,
