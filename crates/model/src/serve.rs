@@ -3149,10 +3149,14 @@ impl<D: PagedDecoder> Scheduler<D> {
     }
 
     /// Whether this decode step reads whole logits rows back instead of candidate lists: the decoder can, and some
-    /// sequence of `active` samples a distribution its list cannot answer exactly ([`SampleParams::needs_full_row`]).
+    /// sequence of `active` either samples a distribution its list cannot answer exactly
+    /// ([`SampleParams::needs_full_row`]) or is a keyed draw ([`SampleParams::row_drawable`]). A keyed draw is answered by
+    /// the decoder with the token's log-probability under the whole row ([`Drawn::Token`]), which a candidate list,
+    /// holding the best few logits and not the row's mass, cannot give: a policy trace of a top-k draw needs it, and the
+    /// token is the same either way.
     fn wants_full_rows(&self, active: &[usize]) -> bool {
         let capacity = self.dec.topk_capacity();
-        self.dec.full_row_readback() && active.iter().any(|&i| self.running[i].sample.needs_full_row(capacity))
+        self.dec.full_row_readback() && active.iter().any(|&i| self.running[i].sample.needs_full_row(capacity) || self.running[i].sample.row_drawable())
     }
 
     /// Candidates per row a non-greedy step asks for. Real sampling and the penalties read the whole candidate

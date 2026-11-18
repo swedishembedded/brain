@@ -34,4 +34,9 @@ Gated by `llmserve` `a_policy_trace_of_a_sampled_draw_is_the_whole_row_log_proba
 top-p and min-p draws against the toy row's log-softmax, zero scoring passes run), and by the figure assertions in
 `readout_draw` (the device draw against the host row, per cut) and the conformance suite's keyed-draw check.
 
+A first GPU check found every top-k 20 reply still scored. A step reads whole rows (and so gets the figure) only when
+some sequence needs them, and a top-k inside the candidate list does not, so a pure top-k batch took the candidate-list
+path, which holds the best logits but not the row's mass. A mixed test batch had hidden it. Every keyed draw on a decoder
+that reads rows back now takes the drawn path (`Scheduler::wants_full_rows`); the test runs each cut alone.
+
 Not measured on a card: the GPU gain (the 28% utilisation and 90 s figures above are the reporter's).

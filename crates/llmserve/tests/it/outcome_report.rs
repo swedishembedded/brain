@@ -162,11 +162,14 @@ fn a_policy_trace_of_a_sampled_draw_is_the_whole_row_log_probability_of_the_deco
     };
     let front = Parsed { tok: tokenizer() };
     // The toy's scores are `-token / 100` whatever precedes: a trace that came from a scoring pass would read so.
-    let mut sched = Scheduler::new(Toy::new(BlockAllocator::new(128, 8), 0).sampling().scoring(), 4);
-    let cuts = [(0, 1.0, 0.0), (0, 1.0, 0.0), (5, 1.0, 0.0), (0, 0.9, 0.0), (0, 1.0, 0.2)];
-    let requests: Vec<_> = cuts.iter().enumerate().map(|(i, &(k, p, m))| request(3 + i as u64, k, p, m)).collect();
-    let results = run_batch_scheduled(&mut sched, &front, &requests, &mut |_, _| {});
-    assert_eq!(sched.decoder_mut().scores_run, 0, "no reply is re-read by a scoring prefill: the decode already reported its figures");
+    // Each cut runs alone: a step that reads whole rows for one sequence would hide a cut whose step does not.
+    let cuts = [(0, 1.0, 0.0), (5, 1.0, 0.0), (0, 0.9, 0.0), (0, 1.0, 0.2)];
+    let mut results = Vec::new();
+    for (i, &(k, p, m)) in cuts.iter().enumerate() {
+        let mut sched = Scheduler::new(Toy::new(BlockAllocator::new(128, 8), 0).sampling().scoring(), 4);
+        results.extend(run_batch_scheduled(&mut sched, &front, &[request(3 + i as u64, k, p, m)], &mut |_, _| {}));
+        assert_eq!(sched.decoder_mut().scores_run, 0, "{:?}: no reply is re-read by a scoring prefill, the decode already reported its figures", cuts[i]);
+    }
     for (i, result) in results.into_iter().enumerate() {
         let out = result.unwrap_or_else(|e| panic!("request {i} {:?}: {e:?}", cuts[i])).outputs;
         let trace = &out["policy_trace"];
