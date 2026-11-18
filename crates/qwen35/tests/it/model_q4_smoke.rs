@@ -114,7 +114,14 @@ fn a_mixed_policy_is_placed_per_leaf_not_collapsed_to_uniform() {
     let init = init_weights(&cfg, 7);
     let policy = TierPolicy::uniform(Dtype::Q4).with(&["in_proj_a.weight", "in_proj_b.weight"], Dtype::F32);
 
-    let mixed = Qwen35::new_on_dt(Gpu::new(pipelines()), cfg.clone(), b, t, &init, &policy);
+    // A Q4 leaf is placed at Q4 only where the device declares `int8_dot`: elsewhere every leaf promotes to F32
+    // (the CPU-demotion test above), so the default and the exception cannot be told apart.
+    let gpu = Gpu::new(pipelines());
+    if !gpu.caps().numeric.int8_dot {
+        brain_testutil::skip_unavailable(&format!("per-leaf Q4 placement needs the int8_dot capability, absent on the {} backend", gpu.kind()));
+        return;
+    }
+    let mixed = Qwen35::new_on_dt(gpu, cfg.clone(), b, t, &init, &policy);
 
     let types = cfg.layer_types();
     let gdn_layer = types.iter().position(|t| *t == LayerType::Linear).expect("tiny_i8 must have a GDN layer");

@@ -51,6 +51,12 @@ fn the_register_tiled_input_gradient_matches_the_naive_one() {
         return;
     }
     let gpu = Gpu::new(qwen3::model::pipelines());
+    if !gpu.caps().workgroup_reductions {
+        // The register-tiled kernels synchronise their work-group several times; the CPU JIT runs at most one
+        // top-level barrier, and production selects them only where the device declares the capability.
+        brain_testutil::skip_unavailable(&format!("matmul_dx_reg needs workgroup_reductions, absent on the {} backend", gpu.kind()));
+        return;
+    }
     let mut rng = Lcg::random();
     for (m, k, n) in [(200u32, 384u32, 320u32), (130, 130, 70), (1, 256, 256), (257, 64, 513)] {
         let w: Vec<f32> = (0..n * k).map(|_| rng.signed()).collect();

@@ -83,8 +83,12 @@ fn a_quantized_stream_holds_fewer_device_bytes_than_the_fp32_one() {
     // Many layers and rows so the boundary stream dominates the fixed buffers.
     let cfg = QwenConfig { n_layers: 12, block_size: 96, max_position_embeddings: 96, ..config() };
     let init = qwen3::init_weights(&cfg, 5);
-    let bytes = |saved| Qwen::new_lora_dt_saved(cfg.clone(), 1, 96, &init, Dtype::F32, GemmPrecision::Fp32Reference, saved).gpu.memory_usage().expect("the test device accounts for its allocations").live;
-    let (fp32, bf16, fp8) = (bytes(SavedPolicy::Recompute), bytes(SavedPolicy::Quantized(SavedFormat::Bf16)), bytes(SavedPolicy::Quantized(SavedFormat::Fp8)));
+    let bytes = |saved| Qwen::new_lora_dt_saved(cfg.clone(), 1, 96, &init, Dtype::F32, GemmPrecision::Fp32Reference, saved).gpu.memory_usage().map(|u| u.live);
+    let Some(fp32) = bytes(SavedPolicy::Recompute) else {
+        brain_testutil::skip_unavailable("memory_usage: this backend does not account for its allocations");
+        return;
+    };
+    let (bf16, fp8) = (bytes(SavedPolicy::Quantized(SavedFormat::Bf16)).unwrap(), bytes(SavedPolicy::Quantized(SavedFormat::Fp8)).unwrap());
     assert!(fp8 < bf16 && bf16 < fp32, "fp32 {fp32} B, bf16 {bf16} B, fp8 {fp8} B");
 }
 
