@@ -604,6 +604,11 @@ impl Flux1Model {
         self.ops.as_ref().map(|ops| ops.act_shared_scratch(s, x, r0, r1 - r0, k))
     }
 
+    /// Rows `r0..r1` (absolute) of `act`, which starts at row 0: the window one stream reads.
+    fn rows_of(&self, act: Option<&Act>, r0: u32, r1: u32) -> Option<Act> {
+        Some(self.ops.as_ref()?.act_rows(act?, r0, r1 - r0))
+    }
+
     /// One linear over rows `r0..r1` at the model's tier, bias included. `act` is [`Self::quant_rows`]' quantization
     /// of exactly those rows of `x`, which an int8 linear reads.
     #[allow(clippy::too_many_arguments)]
@@ -880,13 +885,15 @@ impl Flux1Model {
         };
 
         for (bi, b) in self.dbl.iter().enumerate() {
-            for (w, moff, r0, r1) in [
-                (&b.txt, b.off_txt, 0, nt),
-                (&b.img, b.off_img, nt, n),
-            ] {
+            // Both streams' modulated norms land in their own rows of n2, then ONE quantization of the slab feeds
+            // every stream's q/k/v over its row window.
+            for (moff, r0, r1) in [(b.off_txt, 0, nt), (b.off_img, nt, n)] {
                 s.push(self.ln_rows(xa, &scr.n1, r0, r1));
                 s.push(self.film_rows(&scr.n1, moff, &scr.n2, r0, r1));
-                let a = if w.wq.is_i8() { self.quant_rows(&mut s, &scr.n2, r0, r1, d) } else { None };
+            }
+            let a = if b.txt.wq.is_i8() || b.img.wq.is_i8() { self.quant_rows(&mut s, &scr.n2, 0, n, d) } else { None };
+            for (w, r0, r1) in [(&b.txt, 0, nt), (&b.img, nt, n)] {
+                let a = self.rows_of(a.as_ref(), r0, r1);
                 self.lin_rows(&mut s, &scr.n2, a.as_ref(), &w.wq, &scr.q, r0, r1, d, d);
                 self.lin_rows(&mut s, &scr.n2, a.as_ref(), &w.wk, &scr.k, r0, r1, d, d);
                 self.lin_rows(&mut s, &scr.n2, a.as_ref(), &w.wv, &scr.v, r0, r1, d, d);
@@ -894,24 +901,25 @@ impl Flux1Model {
                 s.push(self.qknorm_rows(&scr.k, &w.nk, &scr.kn, r0, r1));
             }
             self.push_attn_core(&mut s, n);
+            let a = if b.txt.wo.is_i8() || b.img.wo.is_i8() { self.quant_rows(&mut s, &scr.ctx, 0, n, d) } else { None };
             for (w, moff, r0, r1) in [(&b.txt, b.off_txt, 0, nt), (&b.img, b.off_img, nt, n)] {
-                let a = if w.wo.is_i8() { self.quant_rows(&mut s, &scr.ctx, r0, r1, d) } else { None };
-                self.lin_rows(&mut s, &scr.ctx, a.as_ref(), &w.wo, &scr.proj, r0, r1, d, d);
+                self.lin_rows(&mut s, &scr.ctx, self.rows_of(a.as_ref(), r0, r1).as_ref(), &w.wo, &scr.proj, r0, r1, d, d);
                 s.push(self.gate_rows(xa, moff + 2 * d as u64, &scr.proj, xb, r0, r1));
             }
             std::mem::swap(&mut xa, &mut xb);
             // MLP halves (second modulation triple, at +3D within the site)
-            for (w, moff, r0, r1) in [(&b.txt, b.off_txt, 0, nt), (&b.img, b.off_img, nt, n)] {
-                let m2 = moff + 3 * d as u64;
+            for (moff, r0, r1) in [(b.off_txt, 0, nt), (b.off_img, nt, n)] {
                 s.push(self.ln_rows(xa, &scr.n1, r0, r1));
-                s.push(self.film_rows(&scr.n1, m2, &scr.n2, r0, r1));
-                let a = if w.w1.is_i8() { self.quant_rows(&mut s, &scr.n2, r0, r1, d) } else { None };
-                self.lin_rows(&mut s, &scr.n2, a.as_ref(), &w.w1, &scr.h1, r0, r1, d, mlp);
+                s.push(self.film_rows(&scr.n1, moff + 3 * d as u64, &scr.n2, r0, r1));
+            }
+            let a = if b.txt.w1.is_i8() || b.img.w1.is_i8() { self.quant_rows(&mut s, &scr.n2, 0, n, d) } else { None };
+            for (w, r0, r1) in [(&b.txt, 0, nt), (&b.img, nt, n)] {
+                self.lin_rows(&mut s, &scr.n2, self.rows_of(a.as_ref(), r0, r1).as_ref(), &w.w1, &scr.h1, r0, r1, d, mlp);
             }
             s.push(self.gpu.step(K_GELU, &[&scr.h1, &scr.hs], &[n * mlp], n * mlp));
+            let a = if b.txt.w2.is_i8() || b.img.w2.is_i8() { self.quant_rows(&mut s, &scr.hs, 0, n, mlp) } else { None };
             for (w, moff, r0, r1) in [(&b.txt, b.off_txt, 0, nt), (&b.img, b.off_img, nt, n)] {
-                let a = if w.w2.is_i8() { self.quant_rows(&mut s, &scr.hs, r0, r1, mlp) } else { None };
-                self.lin_rows(&mut s, &scr.hs, a.as_ref(), &w.w2, &scr.mlpo, r0, r1, mlp, d);
+                self.lin_rows(&mut s, &scr.hs, self.rows_of(a.as_ref(), r0, r1).as_ref(), &w.w2, &scr.mlpo, r0, r1, mlp, d);
                 s.push(self.gate_rows(xa, moff + 5 * d as u64, &scr.mlpo, xb, r0, r1));
             }
             std::mem::swap(&mut xa, &mut xb);
