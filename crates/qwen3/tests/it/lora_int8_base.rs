@@ -80,13 +80,16 @@ fn the_adapters_train_alike(block: u32, d_model: u32, d_ff: u32) {
     let (tokens, targets) = batch(block as usize);
     let (want_loss, want) = loss_and_grads(&Qwen::new(cfg.clone(), 1, block, &init), &tokens, &targets);
     let int8 = Qwen::new_lora_dt(cfg, 1, block, &init, Dtype::I8);
-    if int8.linear_dtype() != Some(Dtype::I8) {
-        return; // no int8 storage path on this device
-    }
+    assert_eq!(int8.linear_dtype(), Some(Dtype::I8), "every device holds the frozen base as int8: the weight-only kernels or the tile decode read it");
     let (loss, got) = loss_and_grads(&int8, &tokens, &targets);
-    let used = |r: &gpu_core::cost::CostReport, k: &str| r.by_kernel.keys().chain(r.uncovered.keys()).any(|n| n.starts_with(k) && n.ends_with("#w=w8"));
-    assert!(used(&int8.cost_fwd(), "matmul"), "the forward reads the int8 weights through the weight-only kernels");
-    assert!(used(&int8.cost_bwd(), "matmul_dx"), "so does the input-gradient pass");
+    // The weight-only kernels belong to a device with the native int8 dot; any other reads the codes through `Ops`' tile decode.
+    if gpu_core::testgpu::dev(&[]).caps().numeric.int8_dot {
+        let used = |r: &gpu_core::cost::CostReport, k: &str| r.by_kernel.keys().chain(r.uncovered.keys()).any(|n| n.starts_with(k) && n.ends_with("#w=w8"));
+        assert!(used(&int8.cost_fwd(), "matmul"), "the forward reads the int8 weights through the weight-only kernels");
+        assert!(used(&int8.cost_bwd(), "matmul_dx"), "so does the input-gradient pass");
+    } else {
+        brain_testutil::skip_unvalidated_capability("int8-dot", "the weight-only #w=w8 kernels run only on a device with the native int8 dot; this one trains through the tile decode");
+    }
     assert!((loss - want_loss).abs() < 1e-4 * want_loss.abs().max(1.0), "loss {loss} vs {want_loss}");
     assert_eq!(got.len(), want.len());
     let mut nonzero = 0;
@@ -127,9 +130,7 @@ fn a_fresh_adapter_leaves_the_int8_base_loss_unchanged() {
     let (tokens, targets) = batch(12);
     let init = weights(&cfg, 0.0);
     let int8 = Qwen::new_lora_dt(cfg.clone(), 1, 12, &init, Dtype::I8);
-    if int8.linear_dtype() != Some(Dtype::I8) {
-        return;
-    }
+    assert_eq!(int8.linear_dtype(), Some(Dtype::I8));
     int8.set_batch(&tokens, &targets);
     let with_adapter = int8.forward();
     let base_cfg = QwenConfig { lora: None, ..cfg };

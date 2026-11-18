@@ -645,7 +645,7 @@ pub fn assert_training_kernel_list_complete(list: &[(&str, &str)]) {
 }
 
 /// One linear layer's resident weight, at whichever tier
-/// [`Weight::upload`]'s `want.promote(caps)` landed on.
+/// [`Weight::upload`]'s [`Ops::lands`] landed on.
 #[derive(Clone)]
 pub enum Weight {
     F32 { w: DeviceBuffer, n: u32, k: u32 },
@@ -1043,7 +1043,7 @@ impl Weight {
             ops.gpu.prepare_fp8_linear();
             return Weight::FP8 { w, s, n: n as u32, k: k as u32, fmt, block: FP8_BLOCK };
         }
-        match want.promote(&ops.caps.numeric) {
+        match ops.lands(want) {
             Dtype::F32 => {
                 let w = ops.gpu.storage_init("weight_f32", raw);
                 Weight::F32 { w, n: n as u32, k: k as u32 }
@@ -1133,7 +1133,7 @@ impl Weight {
     /// device buffer. The result equals `Weight::upload` of the whole tensor, element for element.
     pub fn upload_from(ops: &Ops, source: &dyn checkpoint::TensorSource, name: &str, n: usize, k: usize, want: Dtype) -> Result<Weight, String> {
         let numel = n * k;
-        let tier = want.promote(&ops.caps.numeric);
+        let tier = ops.lands(want);
         // A half tier packs two values to a word, so a chunk is cut on an even element count and lands on a word boundary.
         let chunk = paramstore::UPLOAD_CHUNK_WORDS & !1;
         let gpu = ops.upload_gpu();
@@ -1588,6 +1588,8 @@ pub struct Ops {
     gemm: LibraryGemmProvider,
     /// The precision of the activation operand quantized-weight products feed ([`Ops::set_linear_activations`]).
     linear_activations: crate::policy::LinearActivations,
+    /// Whether an int8 weight is held on a device without the packed int8 dot ([`Ops::hold_int8_by_float_read`]).
+    float_read_int8: bool,
     /// How rotated-codebook products read their activations ([`Ops::set_cq_activations`]).
     cq_activations: crate::cq::CqActivations,
     /// Bytes of decoded f32 scratch one tile of a quantized product may use (see [`tiled`]).
@@ -1713,7 +1715,7 @@ impl Ops {
             idx.insert(name, i);
         }
         let gemm = LibraryGemmProvider::for_gpu(&gpu, GemmPrecision::Auto);
-        Ok(Ops { gpu, caps, idx, selector, providers, gemm, linear_activations: Default::default(), cq_activations: Default::default(), tile_budget_bytes: DEFAULT_TILE_BUDGET_BYTES, decode_dummy: std::sync::OnceLock::new(), uploads: std::sync::OnceLock::new(), decoded: Default::default(), scratch: Default::default(), shared_quant: Default::default(), shared_bf16: Default::default() })
+        Ok(Ops { gpu, caps, idx, selector, providers, gemm, linear_activations: Default::default(), float_read_int8: false, cq_activations: Default::default(), tile_budget_bytes: DEFAULT_TILE_BUDGET_BYTES, decode_dummy: std::sync::OnceLock::new(), uploads: std::sync::OnceLock::new(), decoded: Default::default(), scratch: Default::default(), shared_quant: Default::default(), shared_bf16: Default::default() })
     }
 
     /// Choose the arithmetic of the GEMMs against bf16 weights: `Auto` takes
@@ -1723,6 +1725,24 @@ impl Ops {
     /// cross-backend parity use). See [`gpu_core::provider::library`].
     pub fn set_gemm_precision(&mut self, precision: GemmPrecision) {
         self.gemm = LibraryGemmProvider::for_gpu(&self.gpu, precision);
+    }
+
+    /// Hold an int8 weight at int8 on a device without the packed int8 dot (`numeric.int8_dot`), for a caller whose
+    /// every product reads the codes against f32 activations (the weight-only `#w=w8` kernels, or [`Ops::matmul`]'s
+    /// tile decode, both plain float arithmetic): a frozen LoRA base. Without it [`Ops::lands`] widens int8 to f32
+    /// there, as a caller that dispatches the packed kernel needs.
+    pub fn hold_int8_by_float_read(&mut self) {
+        self.float_read_int8 = true;
+    }
+
+    /// The tier a weight asked for as `want` is held at on this device: [`Dtype::promote`] on the device's numeric
+    /// support, except that int8 stays int8 under [`Ops::hold_int8_by_float_read`]. [`Weight::upload`] and the loaders
+    /// land on it; a build that decides on a tier before uploading asks it too.
+    pub fn lands(&self, want: Dtype) -> Dtype {
+        if want == Dtype::I8 && self.float_read_int8 {
+            return Dtype::I8;
+        }
+        want.promote(&self.caps.numeric)
     }
 
     /// Choose the precision of the activation operand quantized-weight products feed (`--linear-activations`): an NVFP4 weight

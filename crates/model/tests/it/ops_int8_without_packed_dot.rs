@@ -70,3 +70,20 @@ fn packed_weights_multiply_through_the_tile_decode_where_no_packed_kernel_runs()
         }
     }
 }
+
+/// A device without the packed dot widens an int8 request to f32 for a caller that dispatches the packed kernel
+/// itself, and holds it at int8 for one that reads the codes against f32 activations (a frozen LoRA base): the
+/// uploaded weight is the one the codes decode to either way.
+#[test]
+fn an_int8_request_is_held_as_int8_only_where_the_caller_reads_the_codes_by_float_arithmetic() {
+    let (n, k) = (4usize, 64usize);
+    let mut ops = ops();
+    let raw: Vec<f32> = (0..n * k).map(|i| (i % 17) as f32 / 8.0 - 1.0).collect();
+    assert_eq!(ops.lands(gpu_core::select::Dtype::I8), gpu_core::select::Dtype::F32, "by default this device widens int8");
+    assert_eq!(Weight::upload(&ops, &raw, n, k, gpu_core::select::Dtype::I8).dtype(), gpu_core::select::Dtype::F32);
+
+    ops.hold_int8_by_float_read();
+    assert_eq!(ops.lands(gpu_core::select::Dtype::I8), gpu_core::select::Dtype::I8);
+    assert_eq!(Weight::upload(&ops, &raw, n, k, gpu_core::select::Dtype::I8).dtype(), gpu_core::select::Dtype::I8);
+    assert_eq!(ops.lands(gpu_core::select::Dtype::Q4), gpu_core::select::Dtype::F32, "only int8 is read by float arithmetic here");
+}

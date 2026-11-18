@@ -36,7 +36,7 @@ pub fn encoding_for(want: Dtype) -> Option<QuantEncoding> {
 
 /// The destination encoding of `want`, when a tiled load can produce that tier exactly on this device.
 fn encoding_of(ops: &Ops, want: Dtype) -> Option<QuantEncoding> {
-    if want.promote(&ops.caps.numeric) != want {
+    if ops.lands(want) != want {
         // The device would widen this tier: only the f32 path knows how to promote.
         return None;
     }

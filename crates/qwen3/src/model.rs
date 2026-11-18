@@ -821,7 +821,7 @@ pub struct Qwen {
     tables: HashMap<String, DeviceBuffer>,
     half_tables: bool,
     /// The frozen linears are int8 weights read by weight-only kernels (a
-    /// LoRA build at `Dtype::I8`): activations stay fp32.
+    /// LoRA build at `Dtype::I8` on a device with the native int8 dot): activations stay fp32.
     int8_base: bool,
     /// True for a [`Self::from_reader_decode`] build: activations are sized for
     /// one prefill chunk and `scores`/`probs` for `n_heads·ctx` (KV-cache
@@ -1306,6 +1306,10 @@ impl Qwen {
         // (B7).
         let mut ops = Ops::new(gpu.share()).unwrap_or_else(|e| panic!("qwen: Ops::new: {e}"));
         ops.set_gemm_precision(gemm);
+        // A frozen int8 base is read by the weight-only `#w=w8` kernels and the tile decode, float arithmetic on any device.
+        if train && cfg.lora.is_some() {
+            ops.hold_int8_by_float_read();
+        }
         if !train {
             // A decode step allocates and frees the same few hundred
             // temporaries every token; on CUDA each is a driver call (and a
@@ -1326,10 +1330,13 @@ impl Qwen {
         let quantized = tiers.quantizes_anything() || resident.is_some();
         // A LoRA build freezes the embedding and the head, so a bf16 base
         // holds them in bf16 as well (on a device that runs the tier).
-        let lora_base_tier = train && cfg.lora.is_some() && tiers.dtypes().any(|dt| FROZEN_LORA_TIERS.contains(&dt) && dt.promote(&ops.caps().numeric) == dt);
+        let lora_base_tier = train && cfg.lora.is_some() && tiers.dtypes().any(|dt| FROZEN_LORA_TIERS.contains(&dt) && ops.lands(dt) == dt);
         // An int8 base reads fp32 activations (its kernels decode the weight): the frozen int8 base of a LoRA build
         // and the resident int8 weights of a quantization-aware full fine-tune.
-        let int8_base = lora_base_tier && tiers.dtypes().any(|dt| dt == Dtype::I8) || resident.is_some_and(|r| r.cfg.value == model::resident_ft::ResidentValue::Int8);
+        // The weight-only `#w=w8` kernels run where the device does the int8 work natively; elsewhere (the CPU JIT cannot
+        // compile their register-tiled form) the int8 weights are read through `Ops`' tile decode like every other
+        // packed tier.
+        let int8_base = lora_base_tier && ops.caps().numeric.int8_dot && tiers.dtypes().any(|dt| dt == Dtype::I8) || resident.is_some_and(|r| r.cfg.value == model::resident_ft::ResidentValue::Int8);
         // The tables of a half-precision or int8 base are held in bf16, and so are the trained tables of a resident
         // full fine-tune (its own state holds them).
         let half_tables = (lora_base_tier || resident.is_some()) && Dtype::BF16.promote(&ops.caps().numeric) == Dtype::BF16;
